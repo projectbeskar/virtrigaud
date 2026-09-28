@@ -67,6 +67,11 @@ const (
 	// the call fails — never success for a change it did not apply. A manager
 	// holds resizes on a clustered Provider that does not advertise it.
 	CapabilityHonestReconfigure Capability = "honest_reconfigure"
+	// CapabilityRoutedAdoption marks a clustered provider whose ListVMs lists
+	// every host (VMInfo.host_id, ListVMsResponse.unreachable_host_ids) and
+	// which implements TransferOwner (ADR-0007 Addendum A, slice 4); reported
+	// as GetCapabilitiesResponse.supports_routed_adoption.
+	CapabilityRoutedAdoption Capability = "routed_adoption"
 
 	// Provider-specific capabilities
 	CapabilityVSphere     Capability = "vsphere"
@@ -202,6 +207,8 @@ func (m *Manager) GetCapabilities(ctx context.Context, req *providerv1.GetCapabi
 		SupportsImageArtifactIdentity: m.HasCapability(CapabilityImageArtifactIdentity),
 		// Honest Reconfigure result (restart_required).
 		SupportsHonestReconfigure: m.HasCapability(CapabilityHonestReconfigure),
+		// ADR-0007 Addendum A slice 4: cross-host ListVMs + TransferOwner.
+		SupportsRoutedAdoption: m.HasCapability(CapabilityRoutedAdoption),
 	}, nil
 }
 

@@ -37,7 +37,7 @@ const (
 	Provider_ImportDisk_FullMethodName      = "/provider.v1.Provider/ImportDisk"
 	Provider_GetDiskInfo_FullMethodName     = "/provider.v1.Provider/GetDiskInfo"
 	Provider_ListVMs_FullMethodName         = "/provider.v1.Provider/ListVMs"
-	Provider_AdoptVM_FullMethodName         = "/provider.v1.Provider/AdoptVM"
+	Provider_TransferOwner_FullMethodName   = "/provider.v1.Provider/TransferOwner"
 	Provider_ListHosts_FullMethodName       = "/provider.v1.Provider/ListHosts"
 	Provider_GetHostInfo_FullMethodName     = "/provider.v1.Provider/GetHostInfo"
 )
@@ -86,11 +86,11 @@ type ProviderClient interface {
 	// host it fronts, tags each VM with its host_id and names the hosts it could
 	// not list in unreachable_host_ids (ADR-0007 Addendum A, A3).
 	ListVMs(ctx context.Context, in *ListVMsRequest, opts ...grpc.CallOption) (*ListVMsResponse, error)
-	// Stamp a VM a clustered provider listed with its adopting VirtualMachine's
-	// identity (ADR-0007 Addendum A, slice 4). Single-host and thin-client
-	// providers return Unimplemented and advertise supports_routed_adoption =
-	// false.
-	AdoptVM(ctx context.Context, in *AdoptVMRequest, opts ...grpc.CallOption) (*AdoptVMResponse, error)
+	// Hand a VM on a clustered provider's host to a VirtualMachine by
+	// re-stamping its owner, compare-and-swap (ADR-0007 Addendum A, slice 4).
+	// Single-host and thin-client providers return Unimplemented and advertise
+	// supports_routed_adoption = false.
+	TransferOwner(ctx context.Context, in *TransferOwnerRequest, opts ...grpc.CallOption) (*TransferOwnerResponse, error)
 	// Host inventory (ADR-0007 P1). Clustered providers report the hosts they
 	// front so the operator can schedule across them; single-host and thin-client
 	// providers return codes.Unimplemented and advertise supports_clustering =
@@ -287,10 +287,10 @@ func (c *providerClient) ListVMs(ctx context.Context, in *ListVMsRequest, opts .
 	return out, nil
 }
 
-func (c *providerClient) AdoptVM(ctx context.Context, in *AdoptVMRequest, opts ...grpc.CallOption) (*AdoptVMResponse, error) {
+func (c *providerClient) TransferOwner(ctx context.Context, in *TransferOwnerRequest, opts ...grpc.CallOption) (*TransferOwnerResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(AdoptVMResponse)
-	err := c.cc.Invoke(ctx, Provider_AdoptVM_FullMethodName, in, out, cOpts...)
+	out := new(TransferOwnerResponse)
+	err := c.cc.Invoke(ctx, Provider_TransferOwner_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -361,11 +361,11 @@ type ProviderServer interface {
 	// host it fronts, tags each VM with its host_id and names the hosts it could
 	// not list in unreachable_host_ids (ADR-0007 Addendum A, A3).
 	ListVMs(context.Context, *ListVMsRequest) (*ListVMsResponse, error)
-	// Stamp a VM a clustered provider listed with its adopting VirtualMachine's
-	// identity (ADR-0007 Addendum A, slice 4). Single-host and thin-client
-	// providers return Unimplemented and advertise supports_routed_adoption =
-	// false.
-	AdoptVM(context.Context, *AdoptVMRequest) (*AdoptVMResponse, error)
+	// Hand a VM on a clustered provider's host to a VirtualMachine by
+	// re-stamping its owner, compare-and-swap (ADR-0007 Addendum A, slice 4).
+	// Single-host and thin-client providers return Unimplemented and advertise
+	// supports_routed_adoption = false.
+	TransferOwner(context.Context, *TransferOwnerRequest) (*TransferOwnerResponse, error)
 	// Host inventory (ADR-0007 P1). Clustered providers report the hosts they
 	// front so the operator can schedule across them; single-host and thin-client
 	// providers return codes.Unimplemented and advertise supports_clustering =
@@ -436,8 +436,8 @@ func (UnimplementedProviderServer) GetDiskInfo(context.Context, *GetDiskInfoRequ
 func (UnimplementedProviderServer) ListVMs(context.Context, *ListVMsRequest) (*ListVMsResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method ListVMs not implemented")
 }
-func (UnimplementedProviderServer) AdoptVM(context.Context, *AdoptVMRequest) (*AdoptVMResponse, error) {
-	return nil, status.Errorf(codes.Unimplemented, "method AdoptVM not implemented")
+func (UnimplementedProviderServer) TransferOwner(context.Context, *TransferOwnerRequest) (*TransferOwnerResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method TransferOwner not implemented")
 }
 func (UnimplementedProviderServer) ListHosts(context.Context, *ListHostsRequest) (*ListHostsResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method ListHosts not implemented")
@@ -790,20 +790,20 @@ func _Provider_ListVMs_Handler(srv interface{}, ctx context.Context, dec func(in
 	return interceptor(ctx, in, info, handler)
 }
 
-func _Provider_AdoptVM_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(AdoptVMRequest)
+func _Provider_TransferOwner_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(TransferOwnerRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(ProviderServer).AdoptVM(ctx, in)
+		return srv.(ProviderServer).TransferOwner(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: Provider_AdoptVM_FullMethodName,
+		FullMethod: Provider_TransferOwner_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(ProviderServer).AdoptVM(ctx, req.(*AdoptVMRequest))
+		return srv.(ProviderServer).TransferOwner(ctx, req.(*TransferOwnerRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -924,8 +924,8 @@ var Provider_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _Provider_ListVMs_Handler,
 		},
 		{
-			MethodName: "AdoptVM",
-			Handler:    _Provider_AdoptVM_Handler,
+			MethodName: "TransferOwner",
+			Handler:    _Provider_TransferOwner_Handler,
 		},
 		{
 			MethodName: "ListHosts",

@@ -63,8 +63,8 @@ func NewServer(provider providerBackend) *Server {
 // clusteredProvider reports whether the backend runs in CLUSTERED topology
 // (ADR-0007 D3). Per-VM RPCs then need a routed host (ADR-0007 Addendum A):
 // Describe, Delete, Power, Reconfigure, the snapshot family, Clone,
-// GetDiskInfo, ExportDisk and TaskStatus are routed; ImportDisk and ListVMs are
-// refused until their slice lands.
+// GetDiskInfo, ExportDisk, TaskStatus and TransferOwner are routed, and ListVMs runs
+// across every host (slice 4); ImportDisk is refused until its phase lands.
 func (s *Server) clusteredProvider() bool {
 	return s.provider != nil && s.provider.clustered()
 }
@@ -1018,6 +1018,9 @@ func (s *Server) GetCapabilities(ctx context.Context, req *providerv1.GetCapabil
 // is refused), relay mode only, qcow2 only (both transports flatten to a
 // standalone qcow2), and no compression (neither transport compresses).
 //
+// Slice 4 lists VMs across every host and implements TransferOwner, so the manager
+// may adopt from a clustered provider (supports_routed_adoption).
+//
 // Still hidden: linked clones (refused on a clustered provider for v0.4.0),
 // disk import (no target host until P3) and image import (host-scoped, no
 // target_host_id yet), with their format and backend lists empty.
@@ -1039,6 +1042,9 @@ func clusteredCapabilities() *providerv1.GetCapabilitiesResponse {
 		SupportsRoutedClone:     true, // Clone routed to the source's host since Addendum A slice 3
 		// The routed Reconfigure runs the same honest core (reconfigure.go).
 		SupportsHonestReconfigure: true,
+		// ListVMs across every host (host_id, unreachable_host_ids) and TransferOwner
+		// since Addendum A slice 4.
+		SupportsRoutedAdoption: true,
 	}
 }
 
@@ -1331,24 +1337,31 @@ func (s *Server) ImportDisk(ctx context.Context, req *providerv1.ImportDiskReque
 	}, nil
 }
 
-// ListVMs returns all VMs managed by this provider
+// ListVMs returns all VMs managed by this provider.
+//
+// On a clustered provider it runs across every routable host (ADR-0007
+// Addendum A, A3; Provider.listVMsClustered): each VMInfo carries its host_id,
+// and every host that could not be listed is named in unreachable_host_ids —
+// the call does not fail for it, so a dead host never trips the manager's
+// circuit breaker. Only a provider-level failure fails the call, as a
+// sanitized routed error. The single-host response and errors are unchanged
+// (no host_id, never an unreachable host).
 func (s *Server) ListVMs(ctx context.Context, req *providerv1.ListVMsRequest) (*providerv1.ListVMsResponse, error) {
 	if s.provider == nil {
 		return nil, fmt.Errorf("provider not initialized")
 	}
-	if s.clusteredProvider() {
-		// Not per-VM: a clustered ListVMs runs across every host (A3).
-		return nil, notRoutedYet("ListVMs", sliceRoutedListVMs)
-	}
 
-	vmInfos, err := s.provider.ListVMs(ctx)
+	list, err := s.provider.ListVMs(ctx)
 	if err != nil {
+		if s.clusteredProvider() {
+			return nil, routedRPCError("list VMs", err)
+		}
 		return nil, fmt.Errorf("failed to list VMs: %w", err)
 	}
 
 	// Convert contracts.VMInfo to providerv1.VMInfo
 	var protoVMInfos []*providerv1.VMInfo
-	for _, vmInfo := range vmInfos {
+	for _, vmInfo := range list.VMs {
 		// Convert disks
 		var protoDisks []*providerv1.DiskInfo
 		for _, disk := range vmInfo.Disks {
@@ -1380,12 +1393,44 @@ func (s *Server) ListVMs(ctx context.Context, req *providerv1.ListVMsRequest) (*
 			Disks:       protoDisks,
 			Networks:    protoNetworks,
 			ProviderRaw: vmInfo.ProviderRaw,
+			HostId:      vmInfo.HostID,
 		})
 	}
 
 	return &providerv1.ListVMsResponse{
-		Vms: protoVMInfos,
+		Vms:                protoVMInfos,
+		UnreachableHostIds: list.UnreachableHostIDs,
 	}, nil
+}
+
+// TransferOwner re-stamps a VM on a clustered provider's host with the
+// VirtualMachine that takes it over, compare-and-swap (ADR-0007 Addendum A,
+// slice 4; Provider.TransferOwner). Single-host providers answer Unimplemented
+// and advertise supports_routed_adoption = false: their adoption does not
+// stamp, and is unchanged. Errors are the sanitized routed errors:
+// InvalidArgument (missing host, owner, id or expected uuid), NotFound (the VM
+// is not on the host any more, or was replaced), AlreadyExists (the VM is
+// stamped for another VirtualMachine, or its stamp cannot be read; nothing was
+// changed), HOST_UNAVAILABLE and VM_OPERATION_FAILED — none of which counts
+// toward the manager's circuit breaker.
+func (s *Server) TransferOwner(ctx context.Context, req *providerv1.TransferOwnerRequest) (*providerv1.TransferOwnerResponse, error) {
+	if !s.clusteredProvider() {
+		return nil, status.Error(codes.Unimplemented,
+			"TransferOwner is implemented by a clustered libvirt provider only; single-host adoption does not stamp domains")
+	}
+	err := s.provider.TransferOwner(ctx, contracts.TransferOwnerRequest{
+		VM: contracts.VMRef{
+			ID:     req.GetId(),
+			HostID: req.GetTargetHostId(),
+			Owner:  ownerFromProto(req.GetOwner()),
+		},
+		ReplaceableOwnerUIDs: req.GetReplaceableOwnerUids(),
+		ExpectedUUID:         req.GetExpectedUuid(),
+	})
+	if err != nil {
+		return nil, routedRPCError("transfer owner", err)
+	}
+	return &providerv1.TransferOwnerResponse{}, nil
 }
 
 // Helper functions for generating IDs and timestamps (shared with vSphere)

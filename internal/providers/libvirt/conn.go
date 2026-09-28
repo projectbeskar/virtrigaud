@@ -80,6 +80,12 @@ type providerBackend interface {
 	// of an owner-checked domain's disk, run on its bound host (ADR-0007
 	// Addendum A, slice 3; routed_export.go). It returns wire errors.
 	exportDiskRouted(ctx context.Context, req *providerv1.ExportDiskRequest) (*providerv1.ExportDiskResponse, error)
+
+	// TransferOwner re-stamps a VM on a CLUSTERED provider's host with the
+	// VirtualMachine that takes it over, compare-and-swap (ADR-0007 Addendum A,
+	// slice 4; routed_transfer_owner.go). It is defined on *Provider, not on
+	// contracts.Provider (the manager reaches it as contracts.OwnerTransferer).
+	TransferOwner(ctx context.Context, req contracts.TransferOwnerRequest) error
 }
 
 // libvirtConn is the libvirt-specific view of one host's connection that the

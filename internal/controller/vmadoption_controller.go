@@ -283,7 +283,8 @@ func (r *VMAdoptionReconciler) discoverUnmanagedVMs(ctx context.Context, provide
 	}
 
 	// List all VMs from provider
-	allVMs, err := providerInstance.ListVMs(ctx)
+	listed, err := providerInstance.ListVMs(ctx)
+	allVMs := listed.VMs
 	if err != nil {
 		return nil, fmt.Errorf("failed to list VMs: %w", err)
 	}

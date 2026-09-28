@@ -47,20 +47,18 @@ import (
 // Slice 1 routes Describe and Delete; slice 2 routes Power and Reconfigure;
 // slice 3 routes the snapshot family, Clone, GetDiskInfo and ExportDisk (s3 and
 // nfs), and host-encodes task references so TaskStatus is routed too
-// (routed_tasks.go). Every routed call except Create checks the domain's owner
-// stamp before it reads or changes anything (withOwnedDomain). ImportDisk and
-// ListVMs are refused with an honest Unimplemented until their slice lands
-// (see notRoutedYet), and the clustered GetCapabilities hides them.
+// (routed_tasks.go); slice 4 runs ListVMs across every host (routed_list.go)
+// and routes TransferOwner (routed_transfer_owner.go). Every routed call except Create checks
+// the domain's owner stamp before it reads or changes anything
+// (withOwnedDomain; TransferOwner checks it before it stamps). ImportDisk is refused
+// with an honest Unimplemented until its phase lands (see notRoutedYet), and
+// the clustered GetCapabilities hides it.
 
-// The ADR-0007 delivery step (Addendum A, A5 slice, or main-ADR phase) that
-// routes each RPC a clustered provider refuses today. They only appear in the
-// refusal message.
-const (
-	sliceRoutedListVMs = "Addendum A slice 4"
-	// sliceRoutedImport: import is not per-VM; routing it into a clustered
-	// provider needs a target-host design (phase P3).
-	sliceRoutedImport = "phase P3"
-)
+// sliceRoutedImport is the ADR-0007 delivery step that routes the one RPC a
+// clustered provider still refuses: import is not per-VM, and routing it into
+// a clustered provider needs a target-host design (phase P3). It only appears
+// in the refusal message.
+const sliceRoutedImport = "phase P3"
 
 // emptyTargetHostMessage is the InvalidArgument message for a routed call on a
 // clustered provider that names no host. It never defaults to one (D9).

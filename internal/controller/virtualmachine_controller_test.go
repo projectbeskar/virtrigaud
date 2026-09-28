@@ -94,7 +94,9 @@ func (s *stubProvider) ImportDisk(_ context.Context, _ contracts.ImportDiskReque
 func (s *stubProvider) GetDiskInfo(_ context.Context, _ contracts.GetDiskInfoRequest) (contracts.GetDiskInfoResponse, error) {
 	return contracts.GetDiskInfoResponse{}, nil
 }
-func (s *stubProvider) ListVMs(_ context.Context) ([]contracts.VMInfo, error) { return nil, nil }
+func (s *stubProvider) ListVMs(_ context.Context) (contracts.VMList, error) {
+	return contracts.VMList{}, nil
+}
 func (s *stubProvider) ListHosts(_ context.Context) ([]contracts.HostInfo, error) {
 	return nil, nil
 }

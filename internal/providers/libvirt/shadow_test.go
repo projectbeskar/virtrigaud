@@ -443,7 +443,7 @@ func TestCompareList(t *testing.T) {
 
 // newShadowListTestProvider builds a Provider wired for shadow-compare of the list
 // family with a scripted native-list function — no live libvirtd, no registry.
-func newShadowListTestProvider(fn func(ctx context.Context) ([]contracts.VMInfo, error)) *Provider {
+func newShadowListTestProvider(fn func(ctx context.Context, c libvirtConn) ([]contracts.VMInfo, error)) *Provider {
 	cfg, _ := parseNativeConfig("shadow:list")
 	return &Provider{
 		nativeCfg:     cfg,
@@ -458,10 +458,10 @@ func TestRunShadowListMeters(t *testing.T) {
 	t.Run("equal meters result=equal, no divergence", func(t *testing.T) {
 		virsh := []contracts.VMInfo{listVM("vm1", "On", "abc", 2, 4096)}
 		native := []contracts.VMInfo{listVM("vm1", "On", "abc", 2, 4096)}
-		p := newShadowListTestProvider(func(context.Context) ([]contracts.VMInfo, error) { return native, nil })
+		p := newShadowListTestProvider(func(context.Context, libvirtConn) ([]contracts.VMInfo, error) { return native, nil })
 
 		before := shadowCounter(t, "virtrigaud_libvirt_shadow_compare_total", map[string]string{"family": "list", "result": obsmetrics.ShadowResultEqual})
-		p.runShadowList(context.Background(), virsh)
+		p.runShadowList(context.Background(), nil, virsh)
 		after := shadowCounter(t, "virtrigaud_libvirt_shadow_compare_total", map[string]string{"family": "list", "result": obsmetrics.ShadowResultEqual})
 		assert.Equal(t, before+1, after)
 	})
@@ -469,13 +469,13 @@ func TestRunShadowListMeters(t *testing.T) {
 	t.Run("divergent meters result=divergent + per-field divergence", func(t *testing.T) {
 		virsh := []contracts.VMInfo{listVM("vm1", "On", "abc", 2, 4096)}
 		native := []contracts.VMInfo{listVM("vm1", "Off", "abc", 4, 4096)}
-		p := newShadowListTestProvider(func(context.Context) ([]contracts.VMInfo, error) { return native, nil })
+		p := newShadowListTestProvider(func(context.Context, libvirtConn) ([]contracts.VMInfo, error) { return native, nil })
 
 		divBefore := shadowCounter(t, "virtrigaud_libvirt_shadow_compare_total", map[string]string{"family": "list", "result": obsmetrics.ShadowResultDivergent})
 		psBefore := shadowCounter(t, "virtrigaud_libvirt_shadow_divergence_total", map[string]string{"family": "list", "field": "power_state"})
 		vcpuBefore := shadowCounter(t, "virtrigaud_libvirt_shadow_divergence_total", map[string]string{"family": "list", "field": "vcpu"})
 
-		p.runShadowList(context.Background(), virsh)
+		p.runShadowList(context.Background(), nil, virsh)
 
 		assert.Equal(t, divBefore+1, shadowCounter(t, "virtrigaud_libvirt_shadow_compare_total", map[string]string{"family": "list", "result": obsmetrics.ShadowResultDivergent}))
 		assert.Equal(t, psBefore+1, shadowCounter(t, "virtrigaud_libvirt_shadow_divergence_total", map[string]string{"family": "list", "field": "power_state"}))
@@ -485,23 +485,23 @@ func TestRunShadowListMeters(t *testing.T) {
 	t.Run("membership divergence meters the membership field", func(t *testing.T) {
 		virsh := []contracts.VMInfo{listVM("vm1", "On", "abc", 2, 4096), listVM("vm2", "On", "def", 1, 2048)}
 		native := []contracts.VMInfo{listVM("vm1", "On", "abc", 2, 4096)} // native missed vm2
-		p := newShadowListTestProvider(func(context.Context) ([]contracts.VMInfo, error) { return native, nil })
+		p := newShadowListTestProvider(func(context.Context, libvirtConn) ([]contracts.VMInfo, error) { return native, nil })
 
 		memBefore := shadowCounter(t, "virtrigaud_libvirt_shadow_divergence_total", map[string]string{"family": "list", "field": membershipField})
-		p.runShadowList(context.Background(), virsh)
+		p.runShadowList(context.Background(), nil, virsh)
 		memAfter := shadowCounter(t, "virtrigaud_libvirt_shadow_divergence_total", map[string]string{"family": "list", "field": membershipField})
 		assert.Equal(t, memBefore+1, memAfter)
 	})
 
 	t.Run("native error meters result=error, is not propagated", func(t *testing.T) {
 		virsh := []contracts.VMInfo{listVM("vm1", "On", "abc", 2, 4096)}
-		p := newShadowListTestProvider(func(context.Context) ([]contracts.VMInfo, error) {
+		p := newShadowListTestProvider(func(context.Context, libvirtConn) ([]contracts.VMInfo, error) {
 			return nil, errors.New("go-libvirt list boom")
 		})
 
 		before := shadowCounter(t, "virtrigaud_libvirt_shadow_compare_total", map[string]string{"family": "list", "result": obsmetrics.ShadowResultError})
 		// Must not panic or block; returns nothing.
-		p.runShadowList(context.Background(), virsh)
+		p.runShadowList(context.Background(), nil, virsh)
 		after := shadowCounter(t, "virtrigaud_libvirt_shadow_compare_total", map[string]string{"family": "list", "result": obsmetrics.ShadowResultError})
 		assert.Equal(t, before+1, after)
 	})
@@ -512,14 +512,14 @@ func TestRunShadowListMeters(t *testing.T) {
 // propagated — the caller of ListVMs is entirely unaffected. It exercises the shared
 // runDetachedShadow wrapper for family=list.
 func TestMaybeShadowListPanicIsolation(t *testing.T) {
-	p := newShadowListTestProvider(func(context.Context) ([]contracts.VMInfo, error) {
+	p := newShadowListTestProvider(func(context.Context, libvirtConn) ([]contracts.VMInfo, error) {
 		panic("go-libvirt list exploded")
 	})
 
 	before := shadowCounter(t, "virtrigaud_libvirt_shadow_compare_total", map[string]string{"family": "list", "result": obsmetrics.ShadowResultPanic})
 
 	assert.NotPanics(t, func() {
-		p.maybeShadowList(context.Background(), []contracts.VMInfo{listVM("vm1", "On", "abc", 2, 4096)})
+		p.maybeShadowList(context.Background(), nil, []contracts.VMInfo{listVM("vm1", "On", "abc", 2, 4096)})
 		p.shadowWG.Wait()
 	})
 
@@ -535,13 +535,13 @@ func TestMaybeShadowListOffIsNoOp(t *testing.T) {
 	p := &Provider{
 		nativeCfg:     cfg,
 		shadowSampler: &sampler{n: 1},
-		listNativeFn: func(context.Context) ([]contracts.VMInfo, error) {
+		listNativeFn: func(context.Context, libvirtConn) ([]contracts.VMInfo, error) {
 			called = true
 			return nil, nil
 		},
 	}
 
-	p.maybeShadowList(context.Background(), []contracts.VMInfo{listVM("vm1", "On", "abc", 2, 4096)})
+	p.maybeShadowList(context.Background(), nil, []contracts.VMInfo{listVM("vm1", "On", "abc", 2, 4096)})
 	p.shadowWG.Wait()
 	assert.False(t, called, "shadow must not run when the list family is off")
 }
@@ -554,14 +554,14 @@ func TestMaybeShadowListSamplingSkips(t *testing.T) {
 	p := &Provider{
 		nativeCfg:     cfg,
 		shadowSampler: &sampler{n: 2},
-		listNativeFn: func(context.Context) ([]contracts.VMInfo, error) {
+		listNativeFn: func(context.Context, libvirtConn) ([]contracts.VMInfo, error) {
 			calls.Add(1)
 			return []contracts.VMInfo{listVM("vm1", "On", "abc", 2, 4096)}, nil
 		},
 	}
 
 	for i := 0; i < 4; i++ {
-		p.maybeShadowList(context.Background(), []contracts.VMInfo{listVM("vm1", "On", "abc", 2, 4096)})
+		p.maybeShadowList(context.Background(), nil, []contracts.VMInfo{listVM("vm1", "On", "abc", 2, 4096)})
 	}
 	p.shadowWG.Wait()
 	assert.Equal(t, int64(2), calls.Load(), "n=2 shadows 2 of 4 calls")

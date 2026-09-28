@@ -479,8 +479,9 @@ func TestListVMs_ReportsOwnerStamp(t *testing.T) {
 	}
 
 	before := strings.Count(c.log("virsh"), "\n")
-	vms, err := c.p.ListVMs(context.Background())
+	list, err := c.p.ListVMs(context.Background())
 	require.NoError(t, err)
+	vms := list.VMs
 	byID := map[string]contracts.VMInfo{}
 	for _, v := range vms {
 		byID[v.ID] = v
@@ -520,8 +521,9 @@ func TestListVMs_OwnerStampParityVirshVsNative(t *testing.T) {
 		require.NoError(t, f.Close())
 	}
 
-	virsh, err := c.p.ListVMs(context.Background())
+	list, err := c.p.ListVMs(context.Background())
 	require.NoError(t, err)
+	virsh := list.VMs
 	require.Len(t, virsh, len(defs))
 
 	native := make([]contracts.VMInfo, 0, len(virsh))

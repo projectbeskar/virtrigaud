@@ -2846,16 +2846,66 @@ func (p *Provider) ImportDisk(ctx context.Context, req contracts.ImportDiskReque
 	return response, nil
 }
 
-// ListVMs returns all VMs managed by this provider
-func (p *Provider) ListVMs(ctx context.Context) ([]contracts.VMInfo, error) {
+// ListVMs returns all VMs managed by this provider.
+//
+// Topology dispatch (ADR-0007 Addendum A, A3):
+//
+//   - single-host: the domains of p.virshProvider's one host, exactly as
+//     before (listVMsSingleHost); no host id, never an unreachable host;
+//   - clustered: every routable host of the registry, each listed on its own
+//     lease with its own deadline (listVMsClustered, routed_list.go); every
+//     VMInfo carries its host id, and a host that could not be listed is
+//     reported in VMList.UnreachableHostIDs, never dropped.
+func (p *Provider) ListVMs(ctx context.Context) (contracts.VMList, error) {
+	if p.clustered() {
+		return p.listVMsClustered(ctx)
+	}
+	vms, err := p.listVMsSingleHost(ctx)
+	if err != nil {
+		return contracts.VMList{}, err
+	}
+	return contracts.VMList{VMs: vms}, nil
+}
+
+// listVMsSingleHost is the single-host ListVMs: the shared listing core on
+// p.virshProvider, then the ADR-0008 list shadow on the single-host
+// connection. Its command sequence, result and errors are pinned by
+// testdata/single_host_listvms.golden.json.
+func (p *Provider) listVMsSingleHost(ctx context.Context) ([]contracts.VMInfo, error) {
 	log.Printf("INFO Listing all virtual machines")
 
 	if p.virshProvider == nil {
 		return nil, contracts.NewRetryableError("virsh provider not initialized", nil)
 	}
 
+	vmInfos, err := p.listVMsOn(ctx, p.virshProvider, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	// ADR-0008 PR 4c: when the list family is in shadow mode, also run the go-libvirt
+	// ListVMs and meter any semantic divergence against this authoritative virsh
+	// answer. This returns immediately (the shadow runs on a detached, time-bounded,
+	// panic-isolated goroutine) and NEVER alters what is returned here — reads do not
+	// flip to native until PR 5. No-op when shadow is off (the default), so pure virsh
+	// is unchanged. A nil connection is the single-host one (listNative resolves it).
+	p.maybeShadowList(ctx, nil, vmInfos)
+
+	return vmInfos, nil
+}
+
+// listVMsOn is the ListVMs core shared by the single-host and the clustered
+// (per-host) listing: every domain of vp's host, one `virsh list --all` plus
+// one `virsh dumpxml` per domain. A domain whose definition cannot be read or
+// parsed is skipped (logged), as it always was (#285); only a failed `virsh
+// list` fails the call. onReadFailure, when not nil, is also told about every
+// `virsh dumpxml` that failed (the clustered listing uses it to report a host
+// whose connection dropped mid-list as unreachable instead of as a host with
+// fewer VMs); single-host passes nil. The VMInfos carry no host id; a
+// clustered caller tags them.
+func (p *Provider) listVMsOn(ctx context.Context, vp *VirshProvider, onReadFailure func(domain string, err error)) ([]contracts.VMInfo, error) {
 	// List all domains
-	domains, err := p.virshProvider.listDomains(ctx)
+	domains, err := vp.listDomains(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list domains: %w", err)
 	}
@@ -2871,9 +2921,12 @@ func (p *Provider) ListVMs(ctx context.Context) ([]contracts.VMInfo, error) {
 		// that blocked on agent timeouts and blew the gRPC deadline. Power state
 		// comes from `virsh list` (already fetched in listDomains). IPs are not
 		// needed here — the normal VM reconcile discovers them after adoption.
-		raw, err := p.virshProvider.runVirshCommand(ctx, "dumpxml", domain.Name)
+		raw, err := vp.runVirshCommand(ctx, "dumpxml", domain.Name)
 		if err != nil {
 			log.Printf("WARN Failed to dump XML for %s: %v", domain.Name, err)
+			if onReadFailure != nil {
+				onReadFailure(domain.Name, err)
+			}
 			continue
 		}
 		dx, err := parseDomainXML(raw.Stdout)
@@ -2921,14 +2974,6 @@ func (p *Provider) ListVMs(ctx context.Context) ([]contracts.VMInfo, error) {
 			ProviderRaw: providerRaw,
 		})
 	}
-
-	// ADR-0008 PR 4c: when the list family is in shadow mode, also run the go-libvirt
-	// ListVMs and meter any semantic divergence against this authoritative virsh
-	// answer. This returns immediately (the shadow runs on a detached, time-bounded,
-	// panic-isolated goroutine) and NEVER alters what is returned here — reads do not
-	// flip to native until PR 5. No-op when shadow is off (the default), so pure virsh
-	// is unchanged.
-	p.maybeShadowList(ctx, vmInfos)
 
 	return vmInfos, nil
 }
