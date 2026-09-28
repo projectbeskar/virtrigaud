@@ -374,6 +374,57 @@ func TestDelete_SingleHost_RemovesOwnSnapshotChain(t *testing.T) {
 	}
 }
 
+// TestDelete_SingleHost_KeepsAnotherVMsDiskNamedLikeItsOwn: team-a.web is a
+// legacy linked clone of a VM named "team-a.web-disk.x", whose disk
+// (team-a.web-disk.x-disk.qcow2) starts with team-a.web's own "<domain>-disk."
+// — and whose domain is gone, so no other domain protects the file. It lies
+// below team-a.web's own disk in the chain, so it is not team-a.web's own and
+// is kept.
+func TestDelete_SingleHost_KeepsAnotherVMsDiskNamedLikeItsOwn(t *testing.T) {
+	c := newCreateHost(t)
+	top := c.file(c.images, "team-a.web-disk.snap1")
+	own := c.file(c.images, "team-a.web-disk.qcow2")
+	lookalike := c.file(c.images, "team-a.web-disk.x-disk.qcow2")
+	c.chainSidecar(top, own, lookalike)
+	c.define("h1", "team-a.web", uuidSource, depDomainXML("team-a.web", uuidSource, top, ""))
+	require.NoError(t, os.WriteFile(filepath.Join(c.root, "h1", "names"), []byte("team-a.web\n"), 0o600))
+
+	_, err := c.p.Delete(context.Background(), contracts.VMRef{ID: "team-a.web"})
+	require.NoError(t, err)
+	assert.Equal(t, []string{top, own}, c.removals())
+	assert.FileExists(t, lookalike)
+}
+
+func TestOwnChainMembers(t *testing.T) {
+	levels := func(names ...string) []backingLevel {
+		var out []backingLevel
+		for _, n := range names {
+			out = append(out, backingLevel{path: "/p/" + n})
+		}
+		return out
+	}
+	for _, tc := range []struct {
+		name   string
+		levels []backingLevel
+		want   []string
+	}{
+		{"no snapshots", levels("vm-disk.qcow2", "golden.qcow2"), nil},
+		{"one snapshot", levels("vm-disk.s1", "vm-disk.qcow2", "golden.qcow2"), []string{"/p/vm-disk.qcow2"}},
+		{"two snapshots", levels("vm-disk.s2", "vm-disk.s1", "vm-disk.qcow2"), []string{"/p/vm-disk.s1", "/p/vm-disk.qcow2"}},
+		{"a blank volume", levels("vm-disk.s1", "vm-disk"), []string{"/p/vm-disk"}},
+		{"a look-alike below its own disk", levels("vm-disk.qcow2", "vm-disk.x-disk.qcow2"), nil},
+		{"a look-alike below a snapshot", levels("vm-disk.s1", "vm-disk.qcow2", "vm-disk.x-disk.qcow2"), []string{"/p/vm-disk.qcow2"}},
+		{"never reaches its own disk", levels("vm-disk.s1", "vm-disk.s0"), nil},
+		{"another name above its own disk", levels("vm-disk.s1", "other-disk.qcow2", "vm-disk.qcow2"), nil},
+		{"not a snapshot name", levels("vm-disk.s1", "vm-disk.-x", "vm-disk.qcow2"), nil},
+		{"another domain's prefix", levels("vm2-disk.s1", "vm2-disk.qcow2"), nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, ownChainMembers("vm", tc.levels))
+		})
+	}
+}
+
 // TestPowerOn_WarnsWhenLinkedClonesDependOnTheDisk: starting the source of an
 // existing linked clone is not refused, but the provider counts the domains
 // depending on its disk right after the start and Describe reports the count

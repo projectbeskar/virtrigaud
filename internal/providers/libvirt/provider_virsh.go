@@ -751,33 +751,30 @@ func (p *Provider) planDomainDeletion(ctx context.Context, vp *VirshProvider, id
 }
 
 // ownChainFiles returns the canonical paths of the files BELOW disks in their
-// backing chains (backingChainFiles) that are the domain's own and
-// may go with it: named after its own disk (<domain>-disk.<anything> — the
-// disk it was created with, under the overlays its external snapshots added)
-// and cleared by deletableDiskFiles (a regular file directly inside the
-// storage directories), that no other domain references. Any other chain
-// member — a base image, another VM's disk a linked clone was made from — is
-// never removed, and neither is one another domain still uses (e.g. a linked
-// clone backed by the domain's pre-snapshot disk). A chain that cannot be read
-// is left in place and logged; it never fails the delete.
+// backing chains (walkBackingChain) that are the domain's own and may go with
+// it (ownChainMembers: the overlays its external snapshots added, down to the
+// disk it was created with), cleared by deletableDiskFiles (a regular file
+// directly inside the storage directories), that no other domain references.
+// Any other chain member — a base image, another VM's disk a linked clone was
+// made from — is never removed, and neither is one another domain still uses
+// (e.g. a linked clone backed by the domain's pre-snapshot disk). A chain that
+// cannot be read is left in place and logged; it never fails the delete.
 func (p *Provider) ownChainFiles(ctx context.Context, vp *VirshProvider, domain string, disks []string, others otherDomains) []string {
-	ownPrefix := vmDiskVolumeName(domain) + "."
 	top := map[string]bool{}
 	for _, d := range disks {
 		top[d] = true
 	}
 	var members []string
 	for _, d := range disks {
-		chain, err := backingChainFiles(ctx, vp, d)
+		levels, err := walkBackingChain(ctx, vp, d)
 		if err != nil {
 			log.Printf("WARN Keeping the backing chain of disk %s of domain %s: it could not be read: %v", d, domain, err)
 			continue
 		}
-		for _, f := range chain {
-			if top[f] || !strings.HasPrefix(filepath.Base(f), ownPrefix) {
-				continue
+		for _, f := range ownChainMembers(domain, levels) {
+			if !top[f] {
+				members = append(members, f)
 			}
-			members = append(members, f)
 		}
 	}
 	if len(members) == 0 {
@@ -844,6 +841,39 @@ func storagePoolDir(ctx context.Context, vp *VirshProvider, pool string) string 
 		return ""
 	}
 	return dir
+}
+
+// snapshotOverlaySuffixRE matches what follows "<domain>-disk." in the name of
+// an external-snapshot overlay: libvirt names a disk-only snapshot's overlay
+// after the disk it covers with its suffix replaced by the snapshot's name
+// (sanitizeSnapshotName: letters, digits, '_', '.', '-'; at most 64).
+var snapshotOverlaySuffixRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$`)
+
+// ownChainMembers returns the images below the top of a disk's chain (levels,
+// top first) that are the domain's own: the external-snapshot overlays its
+// snapshots added (<domain>-disk.<snapshot>), down to and including the disk it
+// was created with (<domain>-disk.qcow2, or <domain>-disk for a blank volume).
+// The chain is the domain's own only down to that disk: what lies below it —
+// a base image, the source VM's disk of a linked clone, even one named like
+// <domain>-disk.<x> (another VM called "<domain>-disk.<x>") — is not, and a
+// chain that never reaches that disk, or holds any other name above it, gives
+// nothing.
+func ownChainMembers(domain string, levels []backingLevel) []string {
+	stem := vmDiskVolumeName(domain)
+	var mine []string
+	for i := 1; i < len(levels); i++ {
+		p := levels[i].path
+		name := filepath.Base(p)
+		switch {
+		case name == stem+qcow2Ext || name == stem:
+			return append(mine, p)
+		case strings.HasPrefix(name, stem+".") && snapshotOverlaySuffixRE.MatchString(strings.TrimPrefix(name, stem+".")):
+			mine = append(mine, p)
+		default:
+			return nil
+		}
+	}
+	return nil
 }
 
 // deletableDiskFiles returns, deduplicated and in order, the canonical host

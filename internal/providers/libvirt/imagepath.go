@@ -822,7 +822,30 @@ const backingKindScript = `if [ -f "$1" ]; then echo ` + backingKindFile + `; el
 // as does any unreadable image. A file that no longer exists ends the chain: a
 // missing disk contributes nothing.
 func backingChainFiles(ctx context.Context, h hostCommandRunner, disk string) ([]string, error) {
+	levels, err := walkBackingChain(ctx, h, disk)
+	if err != nil {
+		return nil, err
+	}
 	var refs []string
+	for _, l := range levels {
+		refs = append(refs, l.path)
+		refs = append(refs, l.refs...)
+	}
+	return refs, nil
+}
+
+// backingLevel is one image of a backing chain (walkBackingChain): its path
+// as named (disk, then each full-backing-filename) and every host file it
+// consists of or points at (qemuImgInfo.referencedFiles).
+type backingLevel struct {
+	path string
+	refs []string
+}
+
+// walkBackingChain reads disk's image chain one image at a time, top first,
+// under the rules backingChainFiles documents.
+func walkBackingChain(ctx context.Context, h hostCommandRunner, disk string) ([]backingLevel, error) {
+	var levels []backingLevel
 	cur, format := disk, ""
 	for depth := 0; ; depth++ {
 		if depth > maxBackingChainDepth {
@@ -840,7 +863,7 @@ func backingChainFiles(ctx context.Context, h hostCommandRunner, disk string) ([
 		res, err := qemuImgInfoOnHost(ctx, h, append(args, "--output=json", "--", cur)...)
 		if err != nil {
 			if res != nil && res.ExitCode == qemuImgFailureExitCode && strings.Contains(res.Stderr, qemuImgMissingFile) {
-				return refs, nil // the chain ends at a file that no longer exists
+				return levels, nil // the chain ends at a file that no longer exists
 			}
 			return nil, hostCheckFailed("read backing chain", err)
 		}
@@ -848,10 +871,9 @@ func backingChainFiles(ctx context.Context, h hostCommandRunner, disk string) ([
 		if jerr := json.Unmarshal([]byte(res.Stdout), &info); jerr != nil {
 			return nil, hostCheckFailed("parse backing chain", jerr)
 		}
-		refs = append(refs, cur)
-		refs = append(refs, info.referencedFiles()...)
+		levels = append(levels, backingLevel{path: cur, refs: info.referencedFiles()})
 		if info.BackingFilename == "" && info.FullBackingFilename == "" {
-			return refs, nil
+			return levels, nil
 		}
 		next := info.FullBackingFilename
 		if !strings.HasPrefix(next, "/") {
