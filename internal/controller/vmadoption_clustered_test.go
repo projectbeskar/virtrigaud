@@ -435,7 +435,7 @@ func TestClusteredAdoption_RespectsTheConsumerGrant(t *testing.T) {
 		bound bool
 	}{
 		"class not shared: not bound, owner not transferred": {nil, false},
-		"class shared: bound":                                 {&metav1.LabelSelector{}, true},
+		"class shared: bound":                                {&metav1.LabelSelector{}, true},
 	} {
 		t.Run(name, func(t *testing.T) {
 			waiting := awaitingAdoptedVM("host-a", "web", "uid-waiting")
