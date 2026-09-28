@@ -83,7 +83,7 @@ func TestCreateVM_Clustered_PreviousIncarnationHoldsOnThePendingHost(t *testing.
 
 	for i := 0; i < 3; i++ {
 		res := createClustered(t, r, prov, "web")
-		assert.Equal(t, ctrlResult{after: restorePendingRetryInterval.String()}, res, "attempt %d: re-checked slowly", i)
+		assert.Equal(t, ctrlResult{after: blockedRetryMin.String()}, res, "attempt %d: the first retries of the backoff", i)
 	}
 	require.Len(t, prov.createReqs, 3)
 	for i, req := range prov.createReqs {

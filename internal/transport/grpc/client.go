@@ -1591,6 +1591,12 @@ func (c *Client) mapGRPCError(operation string, err error) error {
 		if isHostUnavailableStatus(st) {
 			return contracts.NewHostUnavailableError(fmt.Sprintf("%s: %s", operation, st.Message()), err)
 		}
+		if isVMDiskCheckFailedStatus(st) {
+			// Marked (contracts.IsVMDiskCheckFailed), so a controller can back
+			// off and say why instead of retrying on the transient cadence.
+			return contracts.NewRetryableError(fmt.Sprintf("%s: %s", operation, st.Message()),
+				fmt.Errorf("%w: %w", contracts.ErrVMDiskCheckFailed, err))
+		}
 		return contracts.NewRetryableError(fmt.Sprintf("%s: %s", operation, st.Message()), err)
 	case codes.Unimplemented:
 		// A provider that does not implement this RPC (e.g. a non-clustered

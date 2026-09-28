@@ -260,6 +260,23 @@ func (r *VirtualMachineReconciler) handleClusteredCreateError(
 		return ctrl.Result{RequeueAfter: pendingHostUnavailableRetryInterval}, nil
 	}
 
+	// The cluster-wide disk guard could not check every host (a host answered
+	// but could not be scanned, or the provider was busy with other checks):
+	// nothing was written, and retrying on the 5 s transient cadence would scan
+	// every host again each time, so the create backs off (ADR-0007 A6.1).
+	if contracts.IsVMDiskCheckFailed(err) {
+		logger.Info("Create not performed: the provider could not verify the VM's disk file on every host; backing off",
+			"host", host, "error", err.Error())
+		setPlacedCondition(vm, metav1.ConditionFalse, k8s.ReasonCreatePending, fmt.Sprintf(
+			"the create on pending host %s waits: the provider could not verify on every host of the Provider that no "+
+				"other VM uses this VM's disk file; it is retried on the same host with a backoff of up to %s: %s",
+			host, blockedRetryMax, msg))
+		k8s.SetProvisioningCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonProviderError,
+			fmt.Sprintf("Failed to create VM: %s", msg))
+		r.updateStatus(ctx, vm)
+		return ctrl.Result{RequeueAfter: blockedRetryBackoff(conditionSince(vm.Status.Conditions, k8s.ConditionPlaced))}, nil
+	}
+
 	setPlacedCondition(vm, metav1.ConditionFalse, k8s.ReasonCreatePending,
 		fmt.Sprintf("create on host %s is not confirmed: %s", host, msg))
 	if res, handled := r.handleRejectedCreate(ctx, vm, err); handled {
@@ -273,9 +290,37 @@ func (r *VirtualMachineReconciler) handleClusteredCreateError(
 	return ctrl.Result{RequeueAfter: requeueAfter}, nil
 }
 
-// restorePendingRetryInterval re-checks a clustered VM held as RestorePending
-// (ADR-0007 A6): only an administrator resolves it, so the retry is slow.
-const restorePendingRetryInterval = 2 * time.Minute
+// Retry pacing of a clustered VM held because the provider cannot act on it
+// safely yet (ADR-0007 A6.1): a delete answered HOST_UNAVAILABLE or
+// VM_DISK_CHECK_FAILED, and a create held as RestorePending. Each is retried
+// with an exponential backoff per VM, from blockedRetryMin up to
+// blockedRetryMax (blockedRetryBackoff), so a dead host or a held VM does not
+// turn every VM into a scan of every host every few seconds.
+const (
+	blockedRetryMin = 15 * time.Second
+	blockedRetryMax = 5 * time.Minute
+)
+
+// blockedRetryBackoff is the next retry of a hold that began at since (a
+// condition's LastTransitionTime, which survives manager restarts): the time
+// already spent held, bounded to [blockedRetryMin, blockedRetryMax]. The
+// checks therefore come at about 15 s, 30 s, 1 min, 2 min, 4 min, then every
+// 5 min — each delay doubling the elapsed time. A zero since (no record) is
+// the first retry.
+func blockedRetryBackoff(since time.Time) time.Duration {
+	if since.IsZero() {
+		return blockedRetryMin
+	}
+	return min(max(time.Since(since), blockedRetryMin), blockedRetryMax)
+}
+
+// conditionSince returns when condition condType last changed status, or zero.
+func conditionSince(conds []metav1.Condition, condType string) time.Time {
+	if c := meta.FindStatusCondition(conds, condType); c != nil {
+		return c.LastTransitionTime.Time
+	}
+	return time.Time{}
+}
 
 // errReasonRestorePending counts the reconciles that hold a clustered VM (or
 // a clone's target) as RestorePending because its Provider holds a previous
@@ -295,7 +340,7 @@ var restorePendingMessage = fmt.Sprintf(
 		"incarnation, left by orphan-on-delete, a force-delete or a backup restore — exists on a host of its Provider, "+
 		"and a clustered Provider holds at most one per namespace and name (ADR-0007 A6). Nothing is created and the "+
 		"VM stays on its pending host. An administrator must re-attach that domain to this VirtualMachine or remove it; "+
-		"see %s. Re-checked every %s", restorePendingRunbook, restorePendingRetryInterval)
+		"see %s. Re-checked with a backoff of up to %s", restorePendingRunbook, blockedRetryMax)
 
 // holdForPreviousIncarnation is ADR-0007 A6, R2 on the manager side: the
 // provider refused the Create on the pending host with
@@ -307,8 +352,10 @@ var restorePendingMessage = fmt.Sprintf(
 // namespace and name would be made. The VM keeps its pendingHost (and so its
 // committed capacity and the providerRef lock), gets Placed=False and
 // Provisioning=False with RestorePending plus one Warning event, and the
-// Create is retried on the same host every restorePendingRetryInterval until
-// an administrator re-attaches or removes the previous incarnation. Nothing
+// Create is retried on the same host with the blocked-VM backoff
+// (blockedRetryBackoff, from when the Placed condition went False: 15 s
+// doubling to 5 min) until an administrator re-attaches or removes the
+// previous incarnation. Nothing
 // about the placement is written, so the plain (error-tolerant) status update
 // suffices.
 func (r *VirtualMachineReconciler) holdForPreviousIncarnation(
@@ -336,7 +383,81 @@ func (r *VirtualMachineReconciler) holdForPreviousIncarnation(
 		r.recordEvent(vm, corev1.EventTypeWarning, k8s.ReasonRestorePending, restorePendingMessage)
 	}
 	r.updateStatus(ctx, vm)
-	return ctrl.Result{RequeueAfter: restorePendingRetryInterval}, nil
+	return ctrl.Result{RequeueAfter: blockedRetryBackoff(conditionSince(vm.Status.Conditions, k8s.ConditionPlaced))}, nil
+}
+
+// deleteBlockedEscape is the part of every DeleteBlocked message that says how
+// to release the VirtualMachine without the provider's delete.
+var deleteBlockedEscape = fmt.Sprintf("to release the VirtualMachine without deleting its domain, set %s=true (or %s=true); "+
+	"the domain and its disks are then left for manual removal",
+	infravirtrigaudiov1beta1.VirtualMachineOrphanOnDeleteAnnotation, forceDeleteAnnotation)
+
+// deleteBlockedMessages are the DeleteBlocked messages, by reason. They are
+// constant (a changing message would make every status write an update event,
+// and a deleting VM is reconciled on each one) and name no host.
+var deleteBlockedMessages = map[string]string{
+	k8s.ReasonHostUnreachable: fmt.Sprintf("Delete blocked: a host of this VirtualMachine's Provider could not be reached "+
+		"(its own host, or another host that must be checked before its disk is removed), so nothing was deleted; "+
+		"it is retried with a backoff of up to %s. %s", blockedRetryMax, deleteBlockedEscape),
+	k8s.ReasonDiskCheckFailed: fmt.Sprintf("Delete blocked: the provider could not verify that no VM on another host of "+
+		"this VirtualMachine's Provider uses its disk, so nothing was deleted; it is retried with a backoff of up to %s. %s",
+		blockedRetryMax, deleteBlockedEscape),
+}
+
+// retainForUncheckedDelete keeps the finalizer of a clustered VirtualMachine
+// whose provider Delete was not performed because a host it needs could not
+// be reached (HOST_UNAVAILABLE) or checked (VM_DISK_CHECK_FAILED) — the
+// cluster-wide disk guard fails closed (ADR-0007 A6.1). It sets
+// DeleteBlocked=True with the reason (HostUnreachable, DiskCheckFailed) and
+// Ready=False/DeleteBlocked, with a constant message that names no host, emits
+// one Warning event per transition (a new reason included), and retries with
+// the blocked-VM backoff from when the hold began (15 s doubling to 5 min). A
+// force-delete or orphan-on-delete set meanwhile is acted on at once: a VM
+// being deleted is reconciled on every update.
+func (r *VirtualMachineReconciler) retainForUncheckedDelete(
+	ctx context.Context,
+	vm *infravirtrigaudiov1beta1.VirtualMachine,
+	err error,
+) ctrl.Result {
+	reason := k8s.ReasonDiskCheckFailed
+	if contracts.IsHostUnavailable(err) {
+		reason = k8s.ReasonHostUnreachable
+	}
+	return r.holdDelete(ctx, vm, reason, deleteBlockedMessages[reason], err)
+}
+
+// holdDelete records a held delete of vm (see retainForUncheckedDelete) with
+// reason and msg and returns the backoff retry.
+func (r *VirtualMachineReconciler) holdDelete(
+	ctx context.Context,
+	vm *infravirtrigaudiov1beta1.VirtualMachine,
+	reason, msg string,
+	err error,
+) ctrl.Result {
+	prev := meta.FindStatusCondition(vm.Status.Conditions, k8s.ConditionDeleteBlocked)
+	transition := prev == nil || prev.Status != metav1.ConditionTrue || prev.Reason != reason
+	meta.SetStatusCondition(&vm.Status.Conditions, metav1.Condition{
+		Type:               k8s.ConditionDeleteBlocked,
+		Status:             metav1.ConditionTrue,
+		Reason:             reason,
+		Message:            msg,
+		ObservedGeneration: vm.Generation,
+	})
+	meta.SetStatusCondition(&vm.Status.Conditions, metav1.Condition{
+		Type:               k8s.ConditionReady,
+		Status:             metav1.ConditionFalse,
+		Reason:             k8s.ReasonDeleteBlocked,
+		Message:            msg,
+		ObservedGeneration: vm.Generation,
+	})
+	metrics.RecordError(errReasonProviderDelete, metrics.ComponentManager)
+	retry := blockedRetryBackoff(conditionSince(vm.Status.Conditions, k8s.ConditionDeleteBlocked))
+	log.FromContext(ctx).Info("Delete held; retaining the finalizer", "reason", reason, "retryAfter", retry.String(), "error", err.Error())
+	r.updateStatus(ctx, vm)
+	if transition {
+		r.recordEvent(vm, corev1.EventTypeWarning, k8s.ReasonDeleteBlocked, msg)
+	}
+	return ctrl.Result{RequeueAfter: retry}
 }
 
 // maxExcludedHosts caps status.placement.excludedHosts. It must equal the

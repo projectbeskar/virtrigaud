@@ -100,6 +100,10 @@ func TestClusterDiskGuardFailures_NeverCounted(t *testing.T) {
 	}
 	assert.True(t, contracts.IsHostUnavailable((&Client{}).mapGRPCError("create", unreachable.Err())))
 	assert.False(t, contracts.IsHostUnavailable((&Client{}).mapGRPCError("create", checkFailed.Err())))
+	assert.True(t, contracts.IsVMDiskCheckFailed((&Client{}).mapGRPCError("delete", checkFailed.Err())),
+		"marked, so a controller can back off and say why")
+	assert.False(t, contracts.IsVMDiskCheckFailed((&Client{}).mapGRPCError("delete", unreachable.Err())))
+	assert.False(t, contracts.IsVMDiskCheckFailed((&Client{}).mapGRPCError("delete", status.Error(codes.Unavailable, "down"))))
 }
 
 // guardErrServer answers every Create, Clone and Delete with err and counts

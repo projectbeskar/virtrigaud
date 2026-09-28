@@ -477,9 +477,10 @@ func (r *VMCloneReconciler) handleClusteredCloneError(
 // another UID exists on a host of the Provider. The target keeps its
 // pendingHost (so it keeps counting on its host and nothing is excluded) and
 // shows Placed=False/RestorePending; the clone stays Pending with the same
-// reason and one Warning event, and is re-checked every
-// cloneHostBlockedRetryInterval — it is never failed for this (a failed clone
-// would remove the target, and the next attempt would meet the same domain).
+// reason and one Warning event, and is re-checked with the blocked-VM backoff
+// (blockedRetryBackoff: 15 s doubling to 5 min) — it is never failed for this
+// (a failed clone would remove the target, and the next attempt would meet the
+// same domain).
 func (r *VMCloneReconciler) holdCloneForPreviousIncarnation(
 	ctx context.Context,
 	clone *infrav1beta1.VMClone,
@@ -501,7 +502,8 @@ func (r *VMCloneReconciler) holdCloneForPreviousIncarnation(
 	if c := meta.FindStatusCondition(clone.Status.Conditions, infrav1beta1.VMCloneConditionReady); c == nil || c.Reason != k8s.ReasonRestorePending {
 		r.Recorder.Event(clone, "Warning", k8s.ReasonRestorePending, msg)
 	}
-	return r.waitForCloneHost(ctx, clone, k8s.ReasonRestorePending, msg, cloneHostBlockedRetryInterval), nil
+	return r.waitForCloneHost(ctx, clone, k8s.ReasonRestorePending, msg,
+		blockedRetryBackoff(conditionSince(target.Status.Conditions, k8s.ConditionPlaced))), nil
 }
 
 const (

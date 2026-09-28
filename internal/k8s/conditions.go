@@ -202,6 +202,31 @@ const (
 	ReasonRestorePending = "RestorePending"
 )
 
+// ConditionDeleteBlocked is True while the deletion of a clustered
+// VirtualMachine is held because the provider could not delete it safely yet
+// (ADR-0007 A6.1). Its reason says why (ReasonHostUnreachable,
+// ReasonDiskCheckFailed, ReasonOwnDomainOnAnotherHost); Ready is False with
+// ReasonDeleteBlocked meanwhile. Its LastTransitionTime is when the hold
+// began, which paces the retries (15 s doubling to 5 min). Its message never
+// names a host.
+const ConditionDeleteBlocked = "DeleteBlocked"
+
+// DeleteBlocked condition reasons (ADR-0007 A6.1).
+const (
+	// ReasonHostUnreachable: a host the delete needs — the VM's own, or
+	// another host of the Provider that must be checked before the VM's disk
+	// is removed — could not be reached. Nothing was deleted.
+	ReasonHostUnreachable = "HostUnreachable"
+	// ReasonDiskCheckFailed: the provider could not verify that no VM on
+	// another host of the Provider uses the VM's disk. Nothing was deleted.
+	ReasonDiskCheckFailed = "DiskCheckFailed"
+	// ReasonOwnDomainOnAnotherHost: the VM's last create was answered with its
+	// OWN domain on another host of the Provider (its placement record was
+	// lost), so deleting it on its pending host would leave that domain
+	// running. The finalizer is kept until the pending host points at it.
+	ReasonOwnDomainOnAnotherHost = "OwnDomainOnAnotherHost"
+)
+
 // ReasonPlacementTopologyMismatch indicates that a VirtualMachine records a
 // clustered placement (status.placement.host / .pendingHost) but its Provider
 // is not topology: cluster (ADR-0007 Addendum A). No provider call is made for

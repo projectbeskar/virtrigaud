@@ -221,6 +221,19 @@ func IsVMDiskInUse(err error) bool {
 	return IsConflict(err) && errors.Is(err, ErrVMDiskInUse)
 }
 
+// ErrVMDiskCheckFailed marks (in an error's chain) a provider's answer
+// carrying VMDiskCheckFailedReason: the operation was not performed because
+// the provider could not verify that no other VM uses this VM's disk (on a
+// clustered provider: on every host of the Provider). The transport client
+// wraps it into the retryable error it maps that answer to.
+var ErrVMDiskCheckFailed = errors.New("the provider could not verify that no other VM uses this VM's disk")
+
+// IsVMDiskCheckFailed reports whether err is a provider's
+// VMDiskCheckFailedReason answer (a retryable error that says so).
+func IsVMDiskCheckFailed(err error) bool {
+	return IsRetryable(err) && errors.Is(err, ErrVMDiskCheckFailed)
+}
+
 // ErrVMPreviousIncarnation marks (in an error's chain) a provider's refusal
 // carrying VMPreviousIncarnationReason: a previous incarnation of the
 // requesting VirtualMachine exists on a host of the clustered Provider. The

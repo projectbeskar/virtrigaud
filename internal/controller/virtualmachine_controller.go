@@ -885,6 +885,12 @@ func (r *VirtualMachineReconciler) handleDeletion(ctx context.Context, vm *infra
 					// clone backed by its disk), and deleting it would destroy
 					// their data. Keep the finalizer, say why, and re-check.
 					return r.retainForBlockedDelete(ctx, vm, ref.ID, err), nil
+				case ref.Routed() && (contracts.IsHostUnavailable(err) || contracts.IsVMDiskCheckFailed(err)):
+					// A clustered delete the provider did not perform because a
+					// host it needs could not be reached or checked (ADR-0007
+					// A6.1: it fails closed). Keep the finalizer, say why without
+					// naming a host, and back off.
+					return r.retainForUncheckedDelete(ctx, vm, err), nil
 				default:
 					// Real failure (e.g. PVE "VM is running - destroy failed"). Do
 					// NOT remove the finalizer — that would orphan the hypervisor VM.
@@ -2451,6 +2457,16 @@ func (r *VirtualMachineReconciler) vmsForGrantChange(ctx context.Context, indexV
 	return requestsForGrantChange(ctx, r.Client, &infravirtrigaudiov1beta1.VirtualMachineList{}, indexValue, nil)
 }
 
+// vmUpdateNeedsReconcile is the VirtualMachine update filter: a spec change
+// (a new generation) is reconciled, a status-only update is not (it would
+// loop on the controller's own writes) — except for a VM being deleted, whose
+// every update is reconciled. That is what makes a force-delete or
+// orphan-on-delete annotation set on a VM whose delete is held (a backoff of
+// up to 5 minutes, ADR-0007 A6.1) take effect at once.
+func vmUpdateNeedsReconcile(oldVM, newVM *infravirtrigaudiov1beta1.VirtualMachine) bool {
+	return oldVM.Generation != newVM.Generation || !newVM.DeletionTimestamp.IsZero()
+}
+
 // SetupWithManager sets up the controller with the Manager. Besides its own
 // VirtualMachines it watches Namespace label changes and the
 // spec.consumerNamespaceSelector of Providers, VMClasses and VMImages, so a
@@ -2468,13 +2484,10 @@ func (r *VirtualMachineReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return withConsumerGrantWatches(b, r.vmsForGrantChange).
 		WithEventFilter(predicate.Funcs{
 			UpdateFunc: func(e event.UpdateEvent) bool {
-				// Only reconcile if spec changed (ignore status-only updates)
-				// This prevents tight reconcile loops from status updates
 				oldVM, ok1 := e.ObjectOld.(*infravirtrigaudiov1beta1.VirtualMachine)
 				newVM, ok2 := e.ObjectNew.(*infravirtrigaudiov1beta1.VirtualMachine)
 				if ok1 && ok2 {
-					// Reconcile if generation changed (spec changed) or if being deleted
-					return oldVM.Generation != newVM.Generation || !newVM.DeletionTimestamp.IsZero()
+					return vmUpdateNeedsReconcile(oldVM, newVM)
 				}
 				return true
 			},
