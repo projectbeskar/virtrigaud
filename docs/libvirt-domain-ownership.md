@@ -232,6 +232,18 @@ points at the same host. A domain stamped only by a `VirtualMachine` that was
 deleted (its domain left behind) is adoptable; the adopted `VirtualMachine` is a
 new object with a new UID.
 
+On a **single-host** provider the adopted domain keeps whatever stamp it had:
+a single-host provider does not check owners on per-VM calls. On a
+**clustered** provider every routed call is owner-checked, so the domain is
+handed to the adopted `VirtualMachine` first: `TransferOwner` rewrites its owner
+stamp (UID, namespace and name) with `virsh metadata`, compare-and-swap — only
+when the domain still has the UUID that was listed and every stamp on it
+belongs to a `VirtualMachine` that no longer exists (or it has none) — and
+reads it back. A domain stamped for a live `VirtualMachine` is never touched. On
+a clustered provider domains are identified by (host, domain) — the same name on
+two hosts is two adoptions. See
+[`clustered-provider-inventory.md`](clustered-provider-inventory.md#listing-and-adoption-slice-4).
+
 ## What operators see
 
 A refused create leaves `status.id` empty. The `VirtualMachine` is therefore

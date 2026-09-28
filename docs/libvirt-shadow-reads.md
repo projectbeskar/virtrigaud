@@ -38,7 +38,10 @@ The shadowed read families are:
   native path and are not compared.
 - **`list`** (PR 4c) — the `ListVMs` discovery/adoption family. It enumerates all
   domains (active + inactive) with go-libvirt and compares the **same config-identity
-  projection** per domain, keyed by domain name: `power_state` (On / Off / Suspended / Unknown), `uuid`,
+  projection** per domain, keyed by (host id, domain name) — a single-host provider
+  has no host id, so its key is the domain name; a clustered provider (ADR-0007
+  Addendum A slice 4) shadows each host's list on the same host connection its
+  virsh list used: `power_state` (On / Off / Suspended / Unknown), `uuid`,
   `vcpu`, and `memory_mib`. Disks, Networks, and IPs are excluded (they carry
   qemu-img-derived or guest-agent data, not config identity). One extra field,
   `membership`, is metered when virsh returns a domain the go-libvirt list is

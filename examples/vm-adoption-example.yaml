@@ -74,6 +74,14 @@ spec:
 # "<namespace>.<name>" (e.g. "team-a.app-web"); the filter below matches domain
 # names, so it does not match those. Adoption also never adopts a domain whose
 # VirtRigaud owner stamp names a VirtualMachine that still exists.
+#
+# The same annotations work on a CLUSTERED libvirt Provider (spec.topology:
+# cluster, experimental; ADR-0007 Addendum A slice 4). There a domain is
+# identified by (host, domain name), the adopted VirtualMachine is named
+# "<domain>-<10 hex digits>" and bound to its host, the domain's owner stamp is
+# rewritten to the new VirtualMachine (compare-and-swap), and a host that could
+# not be listed is named in status.adoption.message. See
+# docs/clustered-provider-inventory.md#listing-and-adoption-slice-4.
 apiVersion: infra.virtrigaud.io/v1beta1
 kind: Provider
 metadata:

@@ -6,16 +6,16 @@
 The five cross-ADR blocking decisions are settled (see `0007-0008-blocking-decisions.md`
 and the folded D-sections below).
 
-**Implementation status (2026-09-25):** P1's inventory, placement and admission
+**Implementation status (2026-09-28):** P1's inventory, placement and admission
 halves are merged (#312–#325; security-hardened by #330, #331, #333 and #334): `Host`/`HostPool`,
 `ListHosts`/`GetHostInfo` + inventory sync, the filter+score scheduler, and
 `target_host_id` + `status.placement.host` binding **at create**. Post-create
 routing (**Addendum A** below) is in progress: slice 1 (#337: `Describe`,
-`Delete`, `pendingHost`) and slice 2 (#338: `Power`, `Reconfigure`, excluded
-hosts) are merged, and slice 3 routes the snapshot family, `Clone`,
-`GetDiskInfo`, `ExportDisk` (s3 / nfs) and host-encoded task references (see
-the slice 3 amendment under A5). **Not yet done:**
-- `ListVMs` across hosts and adoption (slice 4);
+`Delete`, `pendingHost`), slice 2 (#338: `Power`, `Reconfigure`, excluded
+hosts) and slice 3 (#359: the snapshot family, `Clone`, `GetDiskInfo`,
+`ExportDisk` (s3 / nfs) and host-encoded task references) are merged, and
+slice 4 lists VMs across every host and adopts keyed on (host id, VM id) (see
+the slice 4 amendment under A5). **Not yet done:**
 - the A6 restore guards and docs (A6.1–A6.3). A6 covers backup and restore of
   clustered VMs and was accepted on 2026-09-28. These slices land after slice 4
   and before slice 5;
@@ -926,8 +926,8 @@ It is the security fix for the released domain-name takeover.
 | 5 | End-to-end lab validation: schedule, create, power, describe, snapshot and delete a real VM on a clustered provider. This is the first real clustered VM. It also runs A6's six restore checks. |
 | A6.4 | After v0.4.0: the automated restore re-attach (`VMRestoreBinding`). |
 
-**Status (2026-09-25):** slices 0, 1 (#337) and 2 (#338) are merged; slice 3 is
-implemented (see the amendment below); slices 4 and 5 are open.
+**Status (2026-09-28):** slices 0, 1 (#337), 2 (#338) and 3 (#359) are merged;
+slice 4 is implemented (see the slice 4 amendment below); slice 5 is open.
 
 > **Amendment (2026-09-25, slice 3): what slice 3 adds to the wire and the flows.**
 >
@@ -986,6 +986,71 @@ implemented (see the amendment below); slices 4 and 5 are open.
 >   be read gets no linked clone), and a libvirt linked clone into another
 >   namespace is refused: a cross-namespace grant (#340) covers a copy, not
 >   ongoing access to the source's disk.
+
+> **Amendment (2026-09-28, slice 4): cross-host `ListVMs` and adoption.**
+> Implements A3 and adoption keyed on `(host_id, id)`. What it adds beyond A3:
+>
+> - **Wire (additive).** `VMInfo.host_id` is field 10 and
+>   `ListVMsResponse.unreachable_host_ids` field 2. A host is listed as
+>   unreachable for **any** reason its VMs are unknown — not in the registry
+>   or draining, unreachable, past its per-host deadline, a failed `virsh
+>   list`, or a connection that dropped while its domains were read — and the
+>   call never fails for it, so it never reaches the manager's circuit breaker
+>   (the cause is logged with the routed calls' classification). Only a
+>   provider-level failure fails the call.
+> - **Fan-out.** At most 8 hosts at a time (a bounded errgroup), each on its
+>   own lease with a 30 s deadline, inside the caller's deadline less 5 s so
+>   the answer, with the late hosts reported, always reaches the caller. The
+>   call waits for every per-host goroutine before it returns; only the
+>   detached, time-bounded list shadow outlives it, holding its own lease
+>   reference. Draining hosts are not listed.
+> - **A new RPC: `TransferOwner`** (deviation). Every routed per-VM call is
+>   owner-checked, so a domain adopted as it is — unstamped, or stamped by a
+>   deleted VirtualMachine — would be invisible to the VirtualMachine that
+>   adopts it. Single-host adoption never stamped (a single-host provider does
+>   not check owners), so there was nothing to reuse. `TransferOwner(id,
+>   target_host_id, owner, replaceable_owner_uids, expected_uuid)` re-stamps
+>   one domain with a new owner, compare-and-swap: the domain must still carry
+>   `expected_uuid`, and every stamp on it (in both definitions of a running
+>   domain) must be the new owner's (an idempotent success) or listed as
+>   replaceable — the manager lists only UIDs of VirtualMachines that no
+>   longer exist. Anything else is `AlreadyExists` and untouched. The stamp is
+>   written with `virsh metadata --config [--live]` to the domain addressed by
+>   UUID and read back. It is named for owner transfer, not adoption, because
+>   **A6 reuses it**: a VirtualMachine restored with a new UID finds its
+>   domain stamped with a UID that no longer exists. Single-host, vSphere,
+>   Proxmox and mock return `Unimplemented`.
+> - **Capability.** `supports_routed_adoption` (field 21) reports the
+>   cross-host `ListVMs` and `TransferOwner`; the adoption controller adopts
+>   from a clustered provider only when it is true (D7). Single-host
+>   capabilities are unchanged.
+> - **Adoption flow.** A listed VM is managed when a VirtualMachine of the
+>   Provider is bound to its `(host_id, id)`, or when it is stamped with the UID
+>   of any existing VirtualMachine (the single-host rule). The adopting
+>   VirtualMachine is named `<sanitized domain name>-<10 hex digits of
+>   sha256(host/id)>` in the Provider's namespace, annotated
+>   `virtrigaud.io/adopted-host` / `-id`, and created with an empty status. The
+>   domain's owner is transferred to it, a routed owner-checked `Describe` must
+>   find the domain, and one checked status write binds it: `status.id`,
+>   `boundProvider`, `placement.host` / `.pool`, `currentResources` (its
+>   effective size, the CPU raised to `Describe`'s online vCPUs) and
+>   `placement.memoryCeilingMiB` (`Describe`'s `max_memory_mib` when above the
+>   memory, else 0), so committed capacity counts it at once. A lost binding
+>   write is completed on the next discovery from the stamp (it names a
+>   VirtualMachine still waiting for that very `(host, id)`), never adopted
+>   again. The consumer grant is enforced as single-host, before any transfer.
+>   A host id that is not a `Host` of the Provider, or one being deleted, is
+>   never adopted from.
+> - **Unknown is not empty.** Adoption only adds; nothing is concluded about
+>   VMs on an unreachable host. The unreachable hosts are named (by `Host` name)
+>   in `Provider.status.adoption.message` and discovery is retried after 5
+>   minutes. A3's "reported on its Host's condition" is met by the existing
+>   Host controller heartbeat (`GetHostInfo` reports a host whose connection
+>   cannot be leased `NotReady`); `ListVMs` does not write `Host` status.
+> - **ADR-0008 shadow.** Each host's list is shadowed on the same lease and
+>   joined on `(host_id, id)`; single-host has no host id, so its join is the
+>   domain name as before. Single-host `ListVMs` is pinned byte for byte by
+>   `testdata/single_host_listvms.golden.json`.
 
 **Capability honesty (D7).** A clustered provider's `GetCapabilities` hides each
 per-VM capability until the slice that routes it has landed.
