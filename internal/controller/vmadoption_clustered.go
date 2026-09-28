@@ -1,0 +1,592 @@
+/*
+Copyright 2026.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package controller
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"sort"
+	"strings"
+	"time"
+
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
+	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/log"
+
+	infravirtrigaudiov1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
+	"github.com/projectbeskar/virtrigaud/internal/k8s"
+	"github.com/projectbeskar/virtrigaud/internal/obs/metrics"
+	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
+)
+
+// Adoption on a CLUSTERED provider (ADR-0007 Addendum A, A3 / slice 4).
+//
+// A clustered provider lists every host it fronts (VMInfo.HostID) and names
+// the hosts it could not list (VMList.UnreachableHostIDs). Adoption differs
+// from single-host in four ways, and follows the single-host rules otherwise
+// (the VirtualMachine and its VMClass are created in the Provider's own
+// namespace, so no consumer grant is needed; an existing adopted-labelled
+// VirtualMachine is bound only when it references this Provider and every
+// cross-namespace reference it has is granted; a domain stamped with the UID
+// of a VirtualMachine that still exists is never adopted; an unstamped
+// domain, or one stamped only by VirtualMachines that no longer exist, may be):
+//
+//  1. A listed VM is identified by (host id, VM id), never by its id or name
+//     alone: two hosts may each have a domain named "web". A VM is managed
+//     when a VirtualMachine of this Provider is bound to that pair
+//     (status.placement.host, status.id). The adopted VirtualMachine's name is
+//     derived from the pair (clusteredAdoptedVMName) and recorded in its
+//     annotations, so the same name on two hosts gives two VirtualMachines.
+//  2. The domain's owner is transferred to the adopted VirtualMachine
+//     (TransferOwner, compare-and-swap on the domain UUID and its stamp)
+//     BEFORE the binding is written: every routed per-VM call is owner
+//     checked, so a VirtualMachine bound to a domain it does not own could
+//     never describe or manage it. Only the stamps the manager verified belong
+//     to no existing VirtualMachine may be replaced.
+//  3. The binding (status.id, status.boundProvider, status.placement.host and
+//     .pool) is written only after a routed, owner-checked Describe of the
+//     adopted VirtualMachine confirms the domain, and it records the domain's
+//     size from provider truth — status.currentResources (never below the
+//     vCPUs Describe reports online) and status.placement.memoryCeilingMiB
+//     (Describe's memory maximum) — so the committed-capacity accounting
+//     counts the VM from the moment it is bound.
+//  4. A host listed as unreachable is UNKNOWN, not empty. Nothing about the
+//     VMs on it is concluded: adoption only ever adds, and it acts only on
+//     VMs it positively listed. The unreachable hosts are named in
+//     Provider.status.adoption.message and discovery is retried sooner. The
+//     Host itself reports its reachability on its Ready condition, from the
+//     Host controller's own inventory probe.
+//
+// A domain whose owner was transferred but whose binding write was lost is
+// found again by its stamp — it names a VirtualMachine that is still waiting
+// for its binding — and the binding is completed (completeClusteredAdoption),
+// never adopted twice.
+
+const (
+	// AdoptedHostAnnotation records, on a VirtualMachine adopted from a
+	// clustered provider, the host (Host name) its domain was listed on.
+	AdoptedHostAnnotation = "virtrigaud.io/adopted-host"
+	// AdoptedIDAnnotation records, on a VirtualMachine adopted from a
+	// clustered provider, the provider id of its domain on AdoptedHostAnnotation.
+	AdoptedIDAnnotation = "virtrigaud.io/adopted-id"
+
+	// adoptedVMNameHashLen is the number of hex digits of the (host, id) digest
+	// a clustered adopted VirtualMachine's name ends with.
+	adoptedVMNameHashLen = 10
+	// adoptedVMNameMaxLen is the maximum length of an adopted VirtualMachine's
+	// name (a DNS label, as single-host adoption).
+	adoptedVMNameMaxLen = 63
+
+	// clusteredAdoptionRetryInterval is how soon a clustered discovery is
+	// repeated when a host could not be listed or an adoption failed.
+	clusteredAdoptionRetryInterval = 5 * time.Minute
+	// clusteredAdoptionInterval is the steady-state rediscovery interval (the
+	// same as single-host).
+	clusteredAdoptionInterval = time.Hour
+
+	// errReasonAdoptionCapabilities labels a failed capability query.
+	errReasonAdoptionCapabilities = "adoption-capabilities"
+)
+
+// clusteredAdoptionNotSupportedMessage is recorded on Provider.status.adoption
+// for a clustered provider that does not report supports_routed_adoption (it
+// predates ADR-0007 Addendum A slice 4, or does not report capabilities).
+const clusteredAdoptionNotSupportedMessage = "Adoption from this clustered (topology: cluster) provider is not possible: " +
+	"it does not list VMs across its hosts or transfer a domain's owner (supportsRoutedAdoption=false; " +
+	"a clustered provider older than ADR-0007 Addendum A slice 4). Upgrade the provider"
+
+// errAdoptionSkipped marks a listed VM that is deliberately not adopted this
+// time (neither adopted nor a failure): a VirtualMachine of the adopted name
+// that is not waiting for it, or one whose cross-namespace references are not
+// granted.
+var errAdoptionSkipped = errors.New("adoption skipped")
+
+// clusteredAdoptionPlan is what one clustered discovery found to do.
+type clusteredAdoptionPlan struct {
+	// adopt are listed VMs no VirtualMachine manages.
+	adopt []contracts.VMInfo
+	// complete are listed VMs whose owner was already transferred to an
+	// adopted VirtualMachine that is still waiting for its binding.
+	complete []pendingAdoption
+	// skipped counts listed VMs that cannot be adopted (no host id, no UUID).
+	skipped int
+}
+
+// pendingAdoption is an adopted VirtualMachine whose domain already carries
+// its stamp but whose binding is not written yet.
+type pendingAdoption struct {
+	info contracts.VMInfo
+	vm   *infravirtrigaudiov1beta1.VirtualMachine
+}
+
+// vmHostKey is the (host id, VM id) identity of a VM on a clustered provider.
+type vmHostKey struct{ host, id string }
+
+// reconcileClusteredAdoption is Reconcile's adoption pass for a clustered
+// Provider (see the file comment).
+func (r *VMAdoptionReconciler) reconcileClusteredAdoption(ctx context.Context, provider *infravirtrigaudiov1beta1.Provider,
+	filter *VMAdoptionFilter) (ctrl.Result, error) {
+	logger := log.FromContext(ctx)
+
+	if last := provider.Status.Adoption.LastDiscoveryTime; last != nil && time.Since(last.Time) < clusteredAdoptionRetryInterval {
+		logger.Info("Skipping discovery, last discovery was recent", "timeSince", time.Since(last.Time))
+		return ctrl.Result{RequeueAfter: clusteredAdoptionRetryInterval}, nil
+	}
+
+	providerInstance, err := r.getProviderInstance(ctx, provider)
+	if err != nil {
+		return r.clusteredAdoptionFailed(ctx, provider, fmt.Sprintf("Discovery failed: %v", err), errReasonDiscoverVMs)
+	}
+	transferer, ok := r.routedAdopter(ctx, provider, providerInstance)
+	if !ok {
+		return ctrl.Result{RequeueAfter: clusteredAdoptionRetryInterval}, nil
+	}
+
+	// ListVMs BEFORE the VirtualMachines are read from the cache: a domain a
+	// VirtualMachine created (and stamped) is listed only after that
+	// VirtualMachine was in the shared cache, so its UID is seen as live.
+	listed, err := providerInstance.ListVMs(ctx)
+	if err != nil {
+		return r.clusteredAdoptionFailed(ctx, provider, fmt.Sprintf("Discovery failed: %v", err), errReasonDiscoverVMs)
+	}
+	vmList := &infravirtrigaudiov1beta1.VirtualMachineList{}
+	if err := r.List(ctx, vmList); err != nil {
+		return r.clusteredAdoptionFailed(ctx, provider, fmt.Sprintf("Discovery failed: list VirtualMachines: %v", err), errReasonDiscoverVMs)
+	}
+
+	plan := planClusteredAdoption(provider, listed, vmList.Items)
+	var unmanaged []contracts.VMInfo
+	for _, info := range plan.adopt {
+		if filter != nil && !r.matchesFilter(info, filter) {
+			logger.V(1).Info("VM filtered out by adoption filter", "host", info.HostID, "vm_id", info.ID)
+			continue
+		}
+		unmanaged = append(unmanaged, info)
+	}
+	logger.Info("Clustered discovery", "listed", len(listed.VMs), "unmanaged", len(unmanaged),
+		"pendingBindings", len(plan.complete), "unreachableHosts", listed.UnreachableHostIDs)
+
+	adopted, failed := int32(0), int32(plan.skipped)
+	count := func(err error, msg string, info contracts.VMInfo) {
+		switch {
+		case err == nil:
+			adopted++
+		case errors.Is(err, errAdoptionSkipped):
+			logger.Info("Not adopting a listed VM", "host", info.HostID, "vm_id", info.ID, "reason", err.Error())
+		default:
+			logger.Error(err, msg, "host", info.HostID, "vm_id", info.ID)
+			failed++
+		}
+	}
+	for _, p := range plan.complete {
+		count(r.completeClusteredAdoption(ctx, provider, transferer, providerInstance, p.vm, p.info),
+			"Failed to complete the adoption of a VM", p.info)
+	}
+	for _, info := range unmanaged {
+		count(r.adoptClusteredVM(ctx, provider, transferer, providerInstance, info), "Failed to adopt VM", info)
+	}
+
+	now := metav1.Now()
+	provider.Status.Adoption.LastDiscoveryTime = &now
+	// #nosec G115 -- a VM count never approaches 2^31.
+	provider.Status.Adoption.DiscoveredVMs = int32(len(unmanaged))
+	provider.Status.Adoption.AdoptedVMs = adopted
+	provider.Status.Adoption.FailedAdoptions = failed
+	provider.Status.Adoption.Message = clusteredAdoptionMessage(adopted, failed, listed.UnreachableHostIDs)
+	if err := r.Status().Update(ctx, provider); err != nil {
+		logger.Error(err, "Failed to update adoption status")
+		metrics.RecordError(errReasonAdoptionStatus, metrics.ComponentManager)
+		return ctrl.Result{}, err
+	}
+	if failed > 0 || len(listed.UnreachableHostIDs) > 0 {
+		return ctrl.Result{RequeueAfter: clusteredAdoptionRetryInterval}, nil
+	}
+	return ctrl.Result{RequeueAfter: clusteredAdoptionInterval}, nil
+}
+
+// clusteredAdoptionMessage summarizes one clustered discovery. It names the
+// hosts that could not be listed (Host names, never an endpoint): their VMs
+// are unknown, not absent.
+func clusteredAdoptionMessage(adopted, failed int32, unreachable []string) string {
+	msg := fmt.Sprintf("Successfully adopted %d VMs", adopted)
+	if failed > 0 {
+		msg = fmt.Sprintf("Adopted %d VMs, %d failed", adopted, failed)
+	}
+	if len(unreachable) > 0 {
+		hosts := append([]string(nil), unreachable...)
+		sort.Strings(hosts)
+		msg += fmt.Sprintf("; %d host(s) could not be listed, their VMs are unknown (not absent) and discovery is retried: %s",
+			len(hosts), strings.Join(hosts, ", "))
+	}
+	return msg
+}
+
+// clusteredAdoptionFailed records a discovery failure on the Provider and
+// requeues.
+func (r *VMAdoptionReconciler) clusteredAdoptionFailed(ctx context.Context, provider *infravirtrigaudiov1beta1.Provider,
+	msg, reason string) (ctrl.Result, error) {
+	provider.Status.Adoption.Message = msg
+	if err := r.Status().Update(ctx, provider); err != nil {
+		log.FromContext(ctx).Error(err, "Failed to update adoption status")
+	}
+	metrics.RecordError(reason, metrics.ComponentManager)
+	return ctrl.Result{RequeueAfter: clusteredAdoptionRetryInterval}, nil
+}
+
+// routedAdopter returns providerInstance's TransferOwner when the provider
+// reports supports_routed_adoption (D7, fail closed). Otherwise it records why
+// on the Provider and returns false; nothing is listed or created.
+func (r *VMAdoptionReconciler) routedAdopter(ctx context.Context, provider *infravirtrigaudiov1beta1.Provider,
+	providerInstance contracts.Provider) (contracts.OwnerTransferer, bool) {
+	logger := log.FromContext(ctx)
+	reporter, okCaps := providerInstance.(contracts.CapabilityReporter)
+	transferer, okTransfer := providerInstance.(contracts.OwnerTransferer)
+	msg := clusteredAdoptionNotSupportedMessage
+	if okCaps && okTransfer {
+		caps, err := reporter.GetCapabilities(ctx)
+		switch {
+		case err != nil:
+			msg = fmt.Sprintf("Waiting for the provider's capabilities before a clustered discovery: %v", err)
+			metrics.RecordError(errReasonAdoptionCapabilities, metrics.ComponentManager)
+		case caps.SupportsRoutedAdoption:
+			return transferer, true
+		}
+	}
+	logger.Info("Not adopting from a clustered provider", "provider", provider.Name, "reason", msg)
+	provider.Status.Adoption.Message = msg
+	if err := r.Status().Update(ctx, provider); err != nil {
+		logger.Error(err, "Failed to update adoption status")
+	}
+	return nil, false
+}
+
+// planClusteredAdoption decides, keyed on (host id, VM id), what one clustered
+// discovery does with each listed VM:
+//
+//   - managed — a VirtualMachine of this Provider is bound to (host, id), or
+//     the VM is stamped with the UID of a VirtualMachine that still exists (in
+//     any namespace, through any Provider object): left alone, except
+//   - a VM stamped with exactly the UID of an adopted VirtualMachine of this
+//     Provider that is still waiting for its binding and was created for this
+//     very (host, id) (isAwaitingAdoptionOf): its binding is completed;
+//   - a VM without a host id or UUID cannot be adopted (counted as skipped);
+//   - anything else is unmanaged and may be adopted.
+//
+// VMs on unreachable hosts are not in the list, and nothing is concluded
+// about them.
+func planClusteredAdoption(provider *infravirtrigaudiov1beta1.Provider, listed contracts.VMList,
+	vms []infravirtrigaudiov1beta1.VirtualMachine) clusteredAdoptionPlan {
+	managed := map[vmHostKey]bool{}
+	liveUIDs := make(map[string]bool, len(vms))
+	awaiting := map[string]*infravirtrigaudiov1beta1.VirtualMachine{}
+	providerKey := client.ObjectKeyFromObject(provider)
+	for i := range vms {
+		vm := &vms[i]
+		if vm.UID != "" {
+			liveUIDs[string(vm.UID)] = true
+		}
+		if placementProviderKey(vm) != providerKey && vmProviderKey(vm) != providerKey {
+			continue
+		}
+		if host := boundHost(vm); host != "" && vm.Status.ID != "" {
+			managed[vmHostKey{host: host, id: vm.Status.ID}] = true
+		}
+		if vm.UID != "" && awaitingClusteredAdoption(vm) {
+			awaiting[string(vm.UID)] = vm
+		}
+	}
+
+	var plan clusteredAdoptionPlan
+	for _, info := range listed.VMs {
+		if strings.TrimSpace(info.HostID) == "" || strings.TrimSpace(info.ProviderRaw[contracts.VMInfoUUIDKey]) == "" {
+			plan.skipped++
+			continue
+		}
+		if managed[vmHostKey{host: info.HostID, id: info.ID}] {
+			continue
+		}
+		uids := ownerUIDs(info)
+		if len(uids) == 1 {
+			if vm := awaiting[uids[0]]; vm != nil && isAwaitingAdoptionOf(vm, provider, info) {
+				plan.complete = append(plan.complete, pendingAdoption{info: info, vm: vm})
+				continue
+			}
+		}
+		if ownedByLiveVM(info, liveUIDs) {
+			continue
+		}
+		plan.adopt = append(plan.adopt, info)
+	}
+	return plan
+}
+
+// ownerUIDs returns the non-empty owner UIDs a listed VM is stamped with.
+func ownerUIDs(info contracts.VMInfo) []string {
+	var out []string
+	for _, uid := range strings.Split(info.ProviderRaw[contracts.VMInfoOwnerUIDKey], ",") {
+		if uid = strings.TrimSpace(uid); uid != "" {
+			out = append(out, uid)
+		}
+	}
+	return out
+}
+
+// awaitingClusteredAdoption reports whether vm is an adopted VirtualMachine
+// that is not bound yet: labelled adopted, no status.id, no create pending,
+// not being deleted.
+func awaitingClusteredAdoption(vm *infravirtrigaudiov1beta1.VirtualMachine) bool {
+	return vmIsAdopted(vm) && vm.Status.ID == "" && pendingHost(vm) == "" && vm.DeletionTimestamp.IsZero()
+}
+
+// isAwaitingAdoptionOf reports whether vm — an adopted VirtualMachine not
+// bound yet — was created to adopt info from provider: it is in the
+// Provider's namespace, references the Provider, and carries the name and the
+// annotations clustered adoption derives from (info.HostID, info.ID).
+func isAwaitingAdoptionOf(vm *infravirtrigaudiov1beta1.VirtualMachine, provider *infravirtrigaudiov1beta1.Provider, info contracts.VMInfo) bool {
+	return awaitingClusteredAdoption(vm) &&
+		vm.Namespace == provider.Namespace &&
+		vmProviderKey(vm) == client.ObjectKeyFromObject(provider) &&
+		vm.Name == clusteredAdoptedVMName(info.HostID, info.ID) &&
+		vm.Annotations[AdoptedHostAnnotation] == info.HostID &&
+		vm.Annotations[AdoptedIDAnnotation] == info.ID
+}
+
+// clusteredAdoptedVMName is the name of the VirtualMachine that adopts VM id
+// on host: the sanitized VM name (as single-host adoption) followed by a
+// digest of (host, id), so the same domain name on two hosts gives two
+// VirtualMachines and a retry finds the same one. It is a DNS label.
+func clusteredAdoptedVMName(host, id string) string {
+	sum := sha256.Sum256([]byte(host + "/" + id))
+	suffix := hex.EncodeToString(sum[:])[:adoptedVMNameHashLen]
+	base := sanitizeVMName(id)
+	if base == "" {
+		base = "vm"
+	}
+	if limit := adoptedVMNameMaxLen - adoptedVMNameHashLen - 1; len(base) > limit {
+		base = strings.Trim(base[:limit], "-")
+	}
+	return base + "-" + suffix
+}
+
+// adoptClusteredVM adopts one unmanaged VM a clustered provider listed:
+// resolves its Host, creates (or re-finds) the adopting VirtualMachine and
+// hands it the domain (completeClusteredAdoption).
+func (r *VMAdoptionReconciler) adoptClusteredVM(ctx context.Context, provider *infravirtrigaudiov1beta1.Provider,
+	transferer contracts.OwnerTransferer, providerInstance contracts.Provider, info contracts.VMInfo) error {
+	logger := log.FromContext(ctx).WithValues("host", info.HostID, "vm_id", info.ID)
+	if _, err := r.adoptionHost(ctx, provider, info.HostID); err != nil {
+		return err
+	}
+
+	name := clusteredAdoptedVMName(info.HostID, info.ID)
+	vm := &infravirtrigaudiov1beta1.VirtualMachine{}
+	err := r.Get(ctx, types.NamespacedName{Namespace: provider.Namespace, Name: name}, vm)
+	switch {
+	case apierrors.IsNotFound(err):
+		vm, err = r.createClusteredAdoptedVM(ctx, provider, info, name)
+		if err != nil {
+			return err
+		}
+	case err != nil:
+		return fmt.Errorf("get VirtualMachine %s/%s: %w", provider.Namespace, name, err)
+	default:
+		// A retry after an earlier attempt created the VirtualMachine but did
+		// not finish, or a VirtualMachine someone created under that name.
+		if !isAwaitingAdoptionOf(vm, provider, info) {
+			logger.V(1).Info("A VirtualMachine of the adopted name exists and is not waiting for this adoption", "vm_name", name)
+			return fmt.Errorf("VirtualMachine %s/%s exists and is not waiting for this adoption: %w", vm.Namespace, name, errAdoptionSkipped)
+		}
+	}
+	return r.completeClusteredAdoption(ctx, provider, transferer, providerInstance, vm, info)
+}
+
+// createClusteredAdoptedVM creates the VirtualMachine (and its VMClass) that
+// adopts info, in the Provider's namespace — the single-host adoption spec,
+// named and annotated from (host, id). Its status is written only once the
+// domain is its own.
+func (r *VMAdoptionReconciler) createClusteredAdoptedVM(ctx context.Context, provider *infravirtrigaudiov1beta1.Provider,
+	info contracts.VMInfo, name string) (*infravirtrigaudiov1beta1.VirtualMachine, error) {
+	vmClass, err := r.ensureVMClass(ctx, info, provider.Namespace)
+	if err != nil {
+		return nil, fmt.Errorf("failed to ensure VMClass: %w", err)
+	}
+	vm := adoptedVMObject(provider, info, name, vmClass)
+	vm.Annotations = map[string]string{AdoptedHostAnnotation: info.HostID, AdoptedIDAnnotation: info.ID}
+	// No status until the domain is this VirtualMachine's: the API server
+	// drops it on create anyway, and nothing may ever read a status.id for a
+	// domain whose owner has not been transferred yet.
+	vm.Status = infravirtrigaudiov1beta1.VirtualMachineStatus{}
+	if err := r.Create(ctx, vm); err != nil {
+		return nil, fmt.Errorf("create VirtualMachine %s/%s: %w", provider.Namespace, name, err)
+	}
+	log.FromContext(ctx).Info("Created the VirtualMachine that adopts a clustered VM", "vm_name", name,
+		"host", info.HostID, "vm_id", info.ID)
+	return vm, nil
+}
+
+// adoptionHost returns the Host host names when it is a Host of provider that
+// is not being deleted; anything else is an error and nothing is adopted onto
+// it (a binding to a Host that is not the Provider's would route every call
+// to nowhere, and one being deleted is about to go).
+func (r *VMAdoptionReconciler) adoptionHost(ctx context.Context, provider *infravirtrigaudiov1beta1.Provider, host string) (*infravirtrigaudiov1beta1.Host, error) {
+	h := &infravirtrigaudiov1beta1.Host{}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: provider.Namespace, Name: host}, h); err != nil {
+		return nil, fmt.Errorf("get Host %s/%s of the listed VM: %w", provider.Namespace, host, err)
+	}
+	switch {
+	case h.Spec.ProviderRef.Name != provider.Name:
+		return nil, fmt.Errorf("host %s is not a Host of provider %s; not adopting from it", host, provider.Name)
+	case !h.DeletionTimestamp.IsZero():
+		return nil, fmt.Errorf("host %s is being deleted; not adopting from it", host)
+	}
+	return h, nil
+}
+
+// completeClusteredAdoption hands the domain info names to vm and binds vm to
+// it: TransferOwner (compare-and-swap: only the stamps of VirtualMachines that
+// no longer exist are replaced), a routed owner-checked Describe that must
+// find the domain, then one checked status write with the binding and the
+// domain's size. Nothing is bound when any step fails; a retry repeats it.
+//
+// It is the building block ADR-0007 Addendum A's A6 (restore re-binding) can
+// reuse: a restored VirtualMachine (new UID, binding lost) whose domain is
+// known from a restored hint would go through the same transfer, Describe and
+// binding write.
+func (r *VMAdoptionReconciler) completeClusteredAdoption(ctx context.Context, provider *infravirtrigaudiov1beta1.Provider,
+	transferer contracts.OwnerTransferer, providerInstance contracts.Provider,
+	vm *infravirtrigaudiov1beta1.VirtualMachine, info contracts.VMInfo) error {
+	logger := log.FromContext(ctx).WithValues("host", info.HostID, "vm_id", info.ID, "vm_name", vm.Name)
+	host, err := r.adoptionHost(ctx, provider, info.HostID)
+	if err != nil {
+		return err
+	}
+	// As single-host: never bind — nor hand a domain to — a VirtualMachine
+	// whose VMClass or VMImage is in another namespace that does not select
+	// the Provider's (the VirtualMachine controller would refuse to manage it,
+	// and its deletion would still destroy the adopted domain). A newly
+	// created one references only the Provider's own namespace.
+	if err := checkVMConsumerRefs(ctx, r.Client, vm); err != nil {
+		if isConsumerNotAllowed(err) {
+			return fmt.Errorf("VirtualMachine %s/%s references an ungranted cross-namespace object (%s): %w",
+				vm.Namespace, vm.Name, err.Error(), errAdoptionSkipped)
+		}
+		return fmt.Errorf("check consumer grants of adopted VirtualMachine %s/%s: %w", vm.Namespace, vm.Name, err)
+	}
+	ref := contracts.VMRef{ID: info.ID, HostID: info.HostID, Owner: vmOwnerIdentity(vm)}
+	if ref.Owner.IsZero() {
+		return fmt.Errorf("VirtualMachine %s/%s has no UID yet", vm.Namespace, vm.Name)
+	}
+
+	// The listed stamps all belong to VirtualMachines that no longer exist
+	// (planClusteredAdoption); the adopting VirtualMachine's own is an
+	// idempotent retry.
+	var replaceable []string
+	for _, uid := range ownerUIDs(info) {
+		if uid != ref.Owner.UID {
+			replaceable = append(replaceable, uid)
+		}
+	}
+	if err := transferer.TransferOwner(ctx, contracts.TransferOwnerRequest{
+		VM:                   ref,
+		ReplaceableOwnerUIDs: replaceable,
+		ExpectedUUID:         info.ProviderRaw[contracts.VMInfoUUIDKey],
+	}); err != nil {
+		return fmt.Errorf("transfer the owner of VM %s on host %s: %w", info.ID, info.HostID, err)
+	}
+
+	desc, err := providerInstance.Describe(ctx, ref)
+	if err != nil {
+		return fmt.Errorf("describe adopted VM %s on host %s: %w", info.ID, info.HostID, err)
+	}
+	if !desc.Exists {
+		return fmt.Errorf("adopted VM %s on host %s is not visible to its VirtualMachine after the owner transfer", info.ID, info.HostID)
+	}
+
+	class := r.adoptedClass(ctx, vm)
+	cpu, mem, ceiling := adoptedSize(vm, class, info, desc)
+	now := metav1.Now()
+	vm.Status.ID = info.ID
+	recordBoundProvider(vm, provider)
+	vm.Status.Placement = &infravirtrigaudiov1beta1.PlacementStatus{
+		Host:              info.HostID,
+		Pool:              host.Spec.PoolRef.Name,
+		MemoryCeilingMiB:  &ceiling,
+		LastScheduledTime: &now,
+		Reason:            "adopted: the VM was found on this host (ADR-0007 Addendum A, slice 4)",
+	}
+	vm.Status.CurrentResources = &infravirtrigaudiov1beta1.VirtualMachineResources{CPU: &cpu, MemoryMiB: &mem}
+	vm.Status.PowerState = observedPowerState(desc.PowerState)
+	vm.Status.IPs = desc.IPs
+	vm.Status.Provider = info.ProviderRaw
+	setPlacedCondition(vm, metav1.ConditionTrue, k8s.ReasonBound, fmt.Sprintf("VM is bound to host %s", info.HostID))
+	// A checked write: a conflict (the object changed since it was read) is
+	// retried by the next discovery, which finds the stamp and completes the
+	// binding.
+	if err := r.Status().Update(ctx, vm); err != nil {
+		return fmt.Errorf("write the binding of adopted VirtualMachine %s/%s: %w", vm.Namespace, vm.Name, err)
+	}
+	logger.Info("Adopted clustered VM", "cpu", cpu, "memoryMiB", mem, "memoryCeilingMiB", ceiling)
+	return nil
+}
+
+// adoptedClass returns vm's VMClass, or nil when it cannot be read (the size
+// then comes from the listing).
+func (r *VMAdoptionReconciler) adoptedClass(ctx context.Context, vm *infravirtrigaudiov1beta1.VirtualMachine) *infravirtrigaudiov1beta1.VMClass {
+	key, ok := vmClassKey(vm)
+	if !ok {
+		return nil
+	}
+	class := &infravirtrigaudiov1beta1.VMClass{}
+	if err := getForConsumer(ctx, r.Client, key, class, vm.Namespace); err != nil {
+		log.FromContext(ctx).V(1).Info("VMClass of an adopted VM not readable; sizing it from the listing", "class", key.String(), "error", err.Error())
+		return nil
+	}
+	return class
+}
+
+// adoptedSize is the size an adopted clustered VM is recorded at:
+//
+//   - CPU and memory are its effective resources (its adopted VMClass and
+//     spec.resources — what the VirtualMachine controller compares the spec
+//     with, so the adoption triggers no Reconfigure), or the listed size when
+//     the class cannot be read; the CPU is raised to the vCPUs Describe
+//     reports online, never lowered;
+//   - the memory ceiling is Describe's memory maximum when it exceeds that
+//     memory, else 0 (none), exactly as syncMemoryCeiling records it.
+//
+// Every provider figure is bounded as for a created VM (clampReported*).
+func adoptedSize(vm *infravirtrigaudiov1beta1.VirtualMachine, class *infravirtrigaudiov1beta1.VMClass,
+	info contracts.VMInfo, desc contracts.DescribeResponse) (cpu int32, mem, ceiling int64) {
+	cpu, mem = clampReportedVCPUs(info.CPU), clampReportedMemoryMiB(info.MemoryMiB)
+	if class != nil {
+		if c, m, err := effectiveResources(vm, class); err == nil {
+			cpu, mem = c, int64(m)
+		}
+	}
+	cpu = max(cpu, clampReportedVCPUs(desc.VCPUs), minFootprintCPU)
+	mem = max(mem, minFootprintMemoryMiB)
+	if reported := clampReportedMemoryMiB(desc.MaxMemoryMiB); reported > mem {
+		ceiling = reported
+	}
+	return cpu, mem, ceiling
+}
