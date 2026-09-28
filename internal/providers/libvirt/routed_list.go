@@ -107,8 +107,6 @@ func (p *Provider) listVMsClustered(ctx context.Context) (contracts.VMList, erro
 	defer cancel()
 
 	results := make([]hostListResult, len(hosts))
-	var g errgroup.Group
-	g.SetLimit(p.effectiveListHostConcurrency())
 	// Start from a different host on every call, so a budget spent on slow
 	// hosts does not always leave the same tail unlisted. Results stay in
 	// host order.
@@ -116,20 +114,17 @@ func (p *Provider) listVMsClustered(ctx context.Context) (contracts.VMList, erro
 	if n := len(hosts); n > 0 {
 		start = int(p.listRotation.Add(1) % uint64(n)) // #nosec G115 -- n > 0, the remainder fits an int
 	}
-	for k := range hosts {
-		i := (start + k) % len(hosts)
-		id := hosts[i]
-		if err := budget.Err(); err != nil {
-			// The budget is spent: this host is not dialed at all.
+	errs := p.fanOutHosts(budget, len(hosts), start, func(i int) error {
+		results[i] = p.listOneHost(budget, hosts[i])
+		return results[i].err
+	})
+	for i, err := range errs {
+		if err != nil && results[i].err == nil {
+			// The budget was spent before this host's turn: it was not
+			// dialed at all.
 			results[i] = hostListResult{err: err}
-			continue
 		}
-		g.Go(func() error {
-			results[i] = p.listOneHost(budget, id)
-			return nil // a host's failure is its own result, never the group's
-		})
 	}
-	_ = g.Wait() // every goroutine returns nil; Wait only joins them
 
 	// The caller gave up: nothing it could use is left to return.
 	if err := ctx.Err(); err != nil {
@@ -155,26 +150,29 @@ func (p *Provider) listVMsClustered(ctx context.Context) (contracts.VMList, erro
 // (or by half of what is left, when less than twice the margin is left). A
 // caller without a deadline gets no budget beyond the per-host deadlines.
 func listBudget(ctx context.Context) (context.Context, context.CancelFunc) {
+	return budgetWithMargin(ctx, clusteredListResponseMargin)
+}
+
+// budgetWithMargin returns ctx with its deadline brought forward by margin
+// (or by half of what is left, when less than twice the margin is left), so
+// the work done under it leaves the caller time to use the answer. A caller
+// without a deadline gets a plain cancellable copy.
+func budgetWithMargin(ctx context.Context, margin time.Duration) (context.Context, context.CancelFunc) {
 	deadline, ok := ctx.Deadline()
 	if !ok {
 		return context.WithCancel(ctx)
 	}
-	margin := clusteredListResponseMargin
 	if left := time.Until(deadline); left < 2*margin {
 		margin = left / 2
 	}
 	return context.WithDeadline(ctx, deadline.Add(-margin))
 }
 
-// listOneHost lists host id's VMs on its own lease with its own deadline.
+// listOneHost lists host id's VMs on its own lease with its own deadline
+// (onHostWithin).
 func (p *Provider) listOneHost(ctx context.Context, id hostconn.HostID) hostListResult {
-	hctx, cancel := context.WithTimeout(ctx, p.effectiveListHostTimeout())
-	defer cancel()
-	if err := hctx.Err(); err != nil {
-		return hostListResult{err: err}
-	}
 	var vms []contracts.VMInfo
-	err := p.withHostConn(hctx, string(id), func(c libvirtConn) error {
+	err := p.onHostWithin(ctx, id, func(hctx context.Context, c libvirtConn) error {
 		list := p.listHostVMsFn
 		if list == nil {
 			list = p.listHostVMs
@@ -186,12 +184,50 @@ func (p *Provider) listOneHost(ctx context.Context, id hostconn.HostID) hostList
 	if err != nil {
 		return hostListResult{err: err}
 	}
-	// The per-host deadline passing during the listing leaves a partial or
-	// failed answer; it is never reported as the host's complete list.
-	if err := hctx.Err(); err != nil {
-		return hostListResult{err: err}
-	}
 	return hostListResult{vms: vms}
+}
+
+// fanOutHosts runs one(i) for each of n hosts, at most
+// effectiveListHostConcurrency at a time, starting at index start and
+// wrapping around, inside budget — the fan-out every cross-host call of a
+// clustered provider shares (ListVMs, and the cluster-wide disk guard of
+// cluster_disk_guard.go). A host whose turn comes after budget is spent is not
+// run at all: its outcome is budget.Err(). It waits for every goroutine it
+// started before it returns, so none outlives the call. errs[i] is host i's
+// outcome; a host's failure never stops the others.
+func (p *Provider) fanOutHosts(budget context.Context, n, start int, one func(i int) error) []error {
+	errs := make([]error, n)
+	var g errgroup.Group
+	g.SetLimit(p.effectiveListHostConcurrency())
+	for k := 0; k < n; k++ {
+		i := (start + k) % n
+		if err := budget.Err(); err != nil {
+			errs[i] = err
+			continue
+		}
+		g.Go(func() error {
+			errs[i] = one(i)
+			return nil // a host's failure is its own result, never the group's
+		})
+	}
+	_ = g.Wait() // every goroutine returns nil; Wait only joins them
+	return errs
+}
+
+// onHostWithin runs fn on host id's leased connection (withHostConn) under
+// the host's own deadline (effectiveListHostTimeout), derived from ctx. A
+// deadline that passes while fn runs fails the host even when fn returned
+// nil: a partial or failed answer is never taken for the host's complete one.
+func (p *Provider) onHostWithin(ctx context.Context, id hostconn.HostID, fn func(ctx context.Context, c libvirtConn) error) error {
+	hctx, cancel := context.WithTimeout(ctx, p.effectiveListHostTimeout())
+	defer cancel()
+	if err := hctx.Err(); err != nil {
+		return err
+	}
+	if err := p.withHostConn(hctx, string(id), func(c libvirtConn) error { return fn(hctx, c) }); err != nil {
+		return err
+	}
+	return hctx.Err()
 }
 
 // listHostVMs is the default per-host listing of a clustered ListVMs, on the

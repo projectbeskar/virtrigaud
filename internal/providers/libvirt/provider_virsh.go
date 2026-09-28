@@ -67,7 +67,7 @@ func (p *Provider) Create(ctx context.Context, req contracts.CreateRequest) (con
 	if p.virshProvider == nil {
 		return contracts.CreateResponse{}, contracts.NewRetryableError("virsh provider not initialized", nil)
 	}
-	return p.createVM(ctx, p.virshProvider, req)
+	return p.createVM(ctx, p.virshProvider, req, nil)
 }
 
 // createVM runs the create pipeline against a single host's VirshProvider vp. It
@@ -86,7 +86,7 @@ func (p *Provider) Create(ctx context.Context, req contracts.CreateRequest) (con
 // provider), so a clustered create is byte-for-byte the single-host create —
 // only the host the commands run against differs (ADR-0007 D9) — and the naming
 // and ownership rules apply to both.
-func (p *Provider) createVM(ctx context.Context, vp *VirshProvider, req contracts.CreateRequest) (contracts.CreateResponse, error) {
+func (p *Provider) createVM(ctx context.Context, vp *VirshProvider, req contracts.CreateRequest, g *clusterDiskGuard) (contracts.CreateResponse, error) {
 	if vp == nil {
 		return contracts.CreateResponse{}, contracts.NewRetryableError("virsh provider not initialized", nil)
 	}
@@ -105,7 +105,7 @@ func (p *Provider) createVM(ctx context.Context, vp *VirshProvider, req contract
 	legacyState, legacyFound := "", false
 	for _, domain := range domains {
 		if domain.Name == domainName {
-			return bindExistingDomain(ctx, vp, req, domainName, domain.State)
+			return bindExistingDomain(ctx, vp, req, domainName, domain.State, g != nil)
 		}
 		if tryLegacy && domain.Name == legacyName {
 			legacyState, legacyFound = domain.State, true
@@ -125,7 +125,7 @@ func (p *Provider) createVM(ctx context.Context, vp *VirshProvider, req contract
 	}
 
 	// Create VM with cloud-init support
-	vmID, err := p.createVMWithCloudInit(ctx, vp, req, domainName)
+	vmID, err := p.createVMWithCloudInit(ctx, vp, req, domainName, g)
 	if err != nil {
 		if isInvalidArgument(err) || contracts.IsConflict(err) {
 			// A rejected request (e.g. a confined image path) or a name
@@ -194,8 +194,13 @@ func (p *Provider) createClustered(ctx context.Context, req contracts.CreateRequ
 // createOnLeasedHost runs the create pipeline over an already-leased host
 // connection — the production createOnHostFn. It narrows the lease to the
 // host's *virshConn to reach that host's VirshProvider, then runs the same
-// createVM core the single-host path uses, so a clustered create is byte-for-
-// byte the single-host create aimed at the chosen libvirtd (ADR-0007 D9).
+// createVM core the single-host path uses, so a clustered create is the
+// single-host create aimed at the chosen libvirtd (ADR-0007 D9) — with the two
+// guards of ADR-0007 A6 (slice A6.1) a single host does not need: a same-named
+// domain on the host that is a previous incarnation of the VM is answered
+// VM_PREVIOUS_INCARNATION (R2), and a disk file that already exists is written
+// only when no domain on ANY host of the Provider uses it (R3,
+// clusterDiskGuard).
 //
 // It is reached through the p.createOnHostFn seam so clustered-routing tests can
 // inject a recorder (asserting host selection and lease release) without a live
@@ -205,7 +210,12 @@ func (p *Provider) createOnLeasedHost(ctx context.Context, lease hostconn.Conn, 
 	if err != nil {
 		return contracts.CreateResponse{}, contracts.NewRetryableError("resolve target host connection", err)
 	}
-	return p.createVM(ctx, vc.virsh, req)
+	domainName, err := createDomainName(req)
+	if err != nil {
+		return contracts.CreateResponse{}, err
+	}
+	g := p.newClusterDiskGuard(lease.HostID(), vc.virsh, req.Owner, domainName, guardOpCreate)
+	return p.createVM(ctx, vc.virsh, req, g)
 }
 
 // virshConnFrom narrows a hostconn.Conn — possibly a registry lease wrapping the
@@ -243,7 +253,7 @@ func virshConnFrom(c hostconn.Conn) (*virshConn, error) {
 // disk it may attach in place, the cloud-init seed, the staged domain XML and
 // the domain's <name> — comes from domainName; req.Name only supplies the
 // guest's default hostname.
-func (p *Provider) createVMWithCloudInit(ctx context.Context, vp *VirshProvider, req contracts.CreateRequest, domainName string) (string, error) {
+func (p *Provider) createVMWithCloudInit(ctx context.Context, vp *VirshProvider, req contracts.CreateRequest, domainName string, g *clusterDiskGuard) (string, error) {
 	log.Printf("INFO Creating VM with enhanced cloud-init configuration and storage: %s (libvirt domain %s)", req.Name, domainName)
 
 	// Initialize providers
@@ -276,7 +286,7 @@ func (p *Provider) createVMWithCloudInit(ctx context.Context, vp *VirshProvider,
 		if req.Image.Path == "" && (strings.HasPrefix(imageSpec, "http://") || strings.HasPrefix(imageSpec, "https://")) {
 			// Handle URL - download the image
 			log.Printf("INFO Downloading cloud image from URL: %s", imageSpec)
-			if err = ensureDiskVolumeFree(ctx, vp, storageProvider, domainName, diskVolumeName); err == nil {
+			if err = ensureDiskVolumeFree(ctx, vp, storageProvider, domainName, diskVolumeName, g); err == nil {
 				volume, err = storageProvider.DownloadCloudImage(ctx, imageSpec, diskVolumeName, defaultStoragePool, diskSizeGB)
 			}
 		} else if req.Image.Path != "" || strings.HasPrefix(imageSpec, "/") {
@@ -284,11 +294,11 @@ func (p *Provider) createVMWithCloudInit(ctx context.Context, vp *VirshProvider,
 			// image, spec.importedDisk.path, or anything else shaped like a
 			// path. It is user-controlled, so it is confined on THIS host (vp:
 			// the leased target host in clustered mode) before any use.
-			volume, err = p.createDiskFromHostImage(ctx, vp, storageProvider, req, domainName, imageSpec, diskVolumeName, diskSizeGB)
+			volume, err = p.createDiskFromHostImage(ctx, vp, storageProvider, req, domainName, imageSpec, diskVolumeName, diskSizeGB, g)
 		} else {
 			// Handle template name - look up in predefined templates
 			log.Printf("INFO Creating disk from predefined template: %s", imageSpec)
-			if err = ensureDiskVolumeFree(ctx, vp, storageProvider, domainName, diskVolumeName); err == nil {
+			if err = ensureDiskVolumeFree(ctx, vp, storageProvider, domainName, diskVolumeName, g); err == nil {
 				volume, err = storageProvider.CreateVolumeFromTemplate(ctx, imageSpec, diskVolumeName, defaultStoragePool, diskSizeGB)
 			}
 		}
@@ -299,7 +309,16 @@ func (p *Provider) createVMWithCloudInit(ctx context.Context, vp *VirshProvider,
 		diskPath = volume.Path
 	} else {
 		// Create empty disk volume. vol-create-as refuses an existing volume
-		// name, so this never replaces a file.
+		// name, so this never replaces a file. On a clustered provider an
+		// existing file is still checked first, across every host (ADR-0007
+		// A6): a previous incarnation of this VM on another host that uses it
+		// is answered VM_PREVIOUS_INCARNATION instead of a failed vol-create
+		// retried forever.
+		if g != nil {
+			if err := ensureDiskVolumeFree(ctx, vp, storageProvider, domainName, diskVolumeName, g); err != nil {
+				return "", fmt.Errorf("failed to create disk volume: %w", err)
+			}
+		}
 		log.Printf("INFO Creating empty disk volume: %s", diskVolumeName)
 		volume, err := storageProvider.CreateVolume(ctx, defaultStoragePool, diskVolumeName, "qcow2", diskSizeGB)
 		if err != nil {
@@ -391,9 +410,11 @@ func (p *Provider) createVMWithCloudInit(ctx context.Context, vp *VirshProvider,
 
 // ensureDiskVolumeFree applies ensureDiskTargetFree to the VM's own disk file,
 // <default pool directory>/<volumeName>.qcow2, on vp's host, before a
-// qemu-img convert writes it. A pool without a path is left to the copy
-// itself, which refuses it.
-func ensureDiskVolumeFree(ctx context.Context, vp *VirshProvider, sp *StorageProvider, domainName, volumeName string) error {
+// qemu-img convert writes it — or, on a clustered provider (g non-nil), the
+// cluster-wide guard (clusterDiskGuard.ensureTargetFree), which checks every
+// host of the Provider when the file exists. A pool without a path is left to
+// the copy itself, which refuses it.
+func ensureDiskVolumeFree(ctx context.Context, vp *VirshProvider, sp *StorageProvider, domainName, volumeName string, g *clusterDiskGuard) error {
 	pool, err := sp.GetPoolInfo(ctx, defaultStoragePool)
 	if err != nil {
 		return fmt.Errorf("get storage pool %q info: %w", defaultStoragePool, err)
@@ -401,7 +422,7 @@ func ensureDiskVolumeFree(ctx context.Context, vp *VirshProvider, sp *StoragePro
 	if pool.Path == "" {
 		return nil
 	}
-	return ensureDiskTargetFree(ctx, vp, domainDiskSubject(domainName), filepath.Join(pool.Path, volumeName+qcow2Ext))
+	return g.ensureTargetFree(ctx, vp, domainDiskSubject(domainName), filepath.Join(pool.Path, volumeName+qcow2Ext))
 }
 
 // createDiskFromHostImage builds the primary disk of the domain domainName
@@ -420,9 +441,13 @@ func ensureDiskVolumeFree(ctx context.Context, vp *VirshProvider, sp *StoragePro
 //     is domainName — the same naming rule the migration import used to name
 //     the file it landed for this VM (importedDiskVolumeName).
 //
-// A rejected path returns an InvalidArgument error (non-retryable).
+// A rejected path returns an InvalidArgument error (non-retryable). On a
+// clustered provider (g non-nil) the disk file — the copy's target, or the
+// imported disk attached in place — is checked across every host of the
+// Provider (clusterDiskGuard): the host-local confinement sees only vp's
+// host's domains.
 func (p *Provider) createDiskFromHostImage(ctx context.Context, vp *VirshProvider, sp *StorageProvider,
-	req contracts.CreateRequest, domainName, imagePath, volumeName string, sizeGB int) (*StorageVolume, error) {
+	req contracts.CreateRequest, domainName, imagePath, volumeName string, sizeGB int, g *clusterDiskGuard) (*StorageVolume, error) {
 	policy, err := p.imagePolicy()
 	if err != nil {
 		return nil, err
@@ -442,10 +467,15 @@ func (p *Provider) createDiskFromHostImage(ctx context.Context, vp *VirshProvide
 		return nil, err
 	}
 	if img.AdoptInPlace {
+		if g != nil {
+			if err := g.refuseIfUsed(ctx, vp, importedDiskSubject(importedVolumeFileName(domainName)), img.Path); err != nil {
+				return nil, err
+			}
+		}
 		log.Printf("INFO Attaching imported disk %q in place for VM %s (libvirt domain %s)", img.Path, req.Name, domainName)
 		return sp.adoptVolumeInPlace(ctx, img.Path, defaultStoragePool)
 	}
-	if err := ensureDiskVolumeFree(ctx, vp, sp, domainName, volumeName); err != nil {
+	if err := ensureDiskVolumeFree(ctx, vp, sp, domainName, volumeName, g); err != nil {
 		return nil, err
 	}
 	log.Printf("INFO Copying base image %q (%s) into the disk of VM %s (libvirt domain %s)", img.Path, img.Format, req.Name, domainName)
@@ -527,6 +557,12 @@ func (p *Provider) deleteOn(ctx context.Context, c libvirtConn, id string) (stri
 // domain by its UUID (ownedDomainTarget), so a domain replaced between the
 // ownership check and the destroy/undefine is never torn down; an owned domain
 // without a canonical UUID is a retryable error and is left alone.
+//
+// Before the teardown, every OTHER host of the Provider is scanned for a
+// domain that uses one of the files the delete would remove (the cluster-wide
+// disk guard, ADR-0007 A6 R3: checkDeletionAcrossHosts). A use refuses the
+// delete (VM_DISK_IN_USE), and a host that cannot be checked fails it closed
+// (HOST_UNAVAILABLE or VM_DISK_CHECK_FAILED); either way nothing is changed.
 func (p *Provider) deleteClustered(ctx context.Context, c libvirtConn, id string, owner contracts.ObjectIdentity) error {
 	vp, err := virshOf(c)
 	if err != nil {
@@ -553,7 +589,12 @@ func (p *Provider) deleteClustered(ctx context.Context, c libvirtConn, id string
 		return err
 	}
 
-	_, err = p.deleteExistingDomain(ctx, vp, d.handle)
+	// The host-local plan sees only this host's domains; on a shared pool a
+	// domain on another host of the Provider may use the same files, so every
+	// other host is checked before anything is changed (ADR-0007 A6, R3).
+	_, err = p.deleteExistingDomainChecked(ctx, vp, d.handle, func(plan domainDeletionPlan) (domainDeletionPlan, error) {
+		return p.checkDeletionAcrossHosts(ctx, host, plan)
+	})
 	return err
 }
 
@@ -567,6 +608,11 @@ type domainOwnership struct {
 	// uuid is the owned domain's libvirt UUID, read from the same document as
 	// the stamp, so a later read can prove it still addresses THAT domain.
 	uuid string
+	// namesOwner reports, for a present domain the requester does NOT own,
+	// that a stamp on it names the requester's namespace and name
+	// (stampsNameOwner): a previous incarnation of the requester (ADR-0007
+	// A6). Informational; only a clustered clone's target check reads it.
+	namesOwner bool
 }
 
 // checkDomainOwner is the ownership gate of every routed per-VM call on a
@@ -618,7 +664,7 @@ func checkDomainOwner(ctx context.Context, vp *VirshProvider, host hostconn.Host
 		log.Printf("WARN Refusing %s of domain %s on host %s for %s/%s (uid %s): it is owned by %v",
 			op, id, host, owner.Namespace, owner.Name, owner.UID, recorded)
 	}
-	return domainOwnership{present: true}, nil
+	return domainOwnership{present: true, namesOwner: perr == nil && stampsNameOwner(recorded, owner)}, nil
 }
 
 // deleteExistingDomain tears down an existing domain on vp's host. Shared by
@@ -637,9 +683,24 @@ func checkDomainOwner(ctx context.Context, vp *VirshProvider, host hostconn.Host
 // clone of this VM; diskDependentsError). Only then does it force-stop and
 // undefine the domain and remove the planned files.
 func (p *Provider) deleteExistingDomain(ctx context.Context, vp *VirshProvider, id string) (string, error) {
+	return p.deleteExistingDomainChecked(ctx, vp, id, nil)
+}
+
+// deleteExistingDomainChecked is deleteExistingDomain with one more check of
+// the plan before anything is changed: check (nil: none — the single-host
+// path) may refuse the delete or trim the plan. A clustered delete passes the
+// cluster-wide disk guard (checkDeletionAcrossHosts), so a file a domain on
+// another host of the Provider uses is never removed.
+func (p *Provider) deleteExistingDomainChecked(ctx context.Context, vp *VirshProvider, id string,
+	check func(domainDeletionPlan) (domainDeletionPlan, error)) (string, error) {
 	plan, err := p.planDomainDeletion(ctx, vp, id)
 	if err != nil {
 		return "", err
+	}
+	if check != nil {
+		if plan, err = check(plan); err != nil {
+			return "", err
+		}
 	}
 
 	// Stop the domain if running
@@ -685,12 +746,28 @@ type domainDeletionPlan struct {
 	// uuid is the domain's UUID (its linked-clone dependents count is dropped
 	// once it is undefined).
 	uuid string
+	// name is the domain's name, for the refusals.
+	name string
 	// disks are the canonical host paths of the domain's own disk files that
 	// may be removed (deletableDiskFiles) and that no other domain uses: its
 	// top-level disks, then its own backing-chain files (ownChainFiles).
 	disks []string
+	// aliases are the paths the definition names the removable top-level
+	// disks by, where they differ from the canonical paths in disks. Only the
+	// cluster-wide disk guard reads them: another host resolves both.
+	aliases []string
 	// seedDir is the domain's VirtRigaud cloud-init seed directory, or "".
 	seedDir string
+}
+
+// guardedFiles are the files a delete of plan removes, as the cluster-wide
+// disk guard checks them on the other hosts: the canonical paths, then the
+// definition's own names for them.
+func (plan domainDeletionPlan) guardedFiles() []string {
+	if len(plan.disks) == 0 {
+		return nil
+	}
+	return append(append([]string(nil), plan.disks...), plan.aliases...)
 }
 
 // planDomainDeletion reads the definition of domain id (a name, or the UUID of
@@ -720,11 +797,11 @@ func (p *Provider) planDomainDeletion(ctx context.Context, vp *VirshProvider, id
 	if doc.Name == "" {
 		doc.Name = id
 	}
-	plan := domainDeletionPlan{uuid: doc.UUID, seedDir: doc.cloudInitSeedDir(p.stagingDir())}
+	plan := domainDeletionPlan{uuid: doc.UUID, name: doc.Name, seedDir: doc.cloudInitSeedDir(p.stagingDir())}
 
 	var deletable []string
 	if disks := doc.diskFiles(); len(disks) > 0 {
-		if deletable, err = p.deletableDiskFiles(ctx, vp, doc.Name, disks); err != nil {
+		if deletable, plan.aliases, err = p.deletableDiskFilesWithAliases(ctx, vp, doc.Name, disks); err != nil {
 			return domainDeletionPlan{}, guardCheckFailed(guardOpDelete, doc.Name, err)
 		}
 	}
@@ -890,10 +967,20 @@ func ownChainMembers(domain string, levels []backingLevel) []string {
 // outside the VM storage directories, whatever a domain definition points at,
 // and never the target of a symlink.
 func (p *Provider) deletableDiskFiles(ctx context.Context, vp *VirshProvider, domain string, disks []string) ([]string, error) {
+	out, _, err := p.deletableDiskFilesWithAliases(ctx, vp, domain, disks)
+	return out, err
+}
+
+// deletableDiskFilesWithAliases is deletableDiskFiles that also returns the
+// paths of disks that name a returned file other than by its canonical path
+// (the definition's own names for it, e.g. through a symlinked pool
+// directory), for the cluster-wide disk guard. It runs exactly the commands
+// deletableDiskFiles runs.
+func (p *Provider) deletableDiskFilesWithAliases(ctx context.Context, vp *VirshProvider, domain string, disks []string) (out, aliases []string, err error) {
 	dirs := p.deletionDirs(ctx, vp)
 	canon, err := canonicalizeOnHost(ctx, vp, append(append([]string(nil), disks...), dirs...))
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	allowed := map[string]bool{}
 	for _, d := range canon[len(disks):] {
@@ -901,8 +988,12 @@ func (p *Provider) deletableDiskFiles(ctx context.Context, vp *VirshProvider, do
 			allowed[d] = true
 		}
 	}
-	var out []string
 	seen := map[string]bool{}
+	alias := func(disk, c string) {
+		if disk != c && !slices.Contains(aliases, disk) {
+			aliases = append(aliases, disk)
+		}
+	}
 	for i, disk := range disks {
 		c := canon[i]
 		if !allowed[filepath.Dir(c)] {
@@ -911,6 +1002,7 @@ func (p *Provider) deletableDiskFiles(ctx context.Context, vp *VirshProvider, do
 			continue
 		}
 		if seen[c] {
+			alias(disk, c)
 			continue
 		}
 		// What the definition names must itself be a regular file: the target
@@ -918,12 +1010,13 @@ func (p *Provider) deletableDiskFiles(ctx context.Context, vp *VirshProvider, do
 		// link would strand the target), so neither is touched.
 		kind, err := hostDiskKind(ctx, vp, disk)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		switch kind {
 		case diskKindFile:
 			seen[c] = true
 			out = append(out, c)
+			alias(disk, c)
 		case diskKindSymlink:
 			log.Printf("WARN Not deleting disk %s of domain %s: it is a symbolic link; neither it nor its target is removed", disk, domain)
 		case diskKindAbsent:
@@ -932,7 +1025,7 @@ func (p *Provider) deletableDiskFiles(ctx context.Context, vp *VirshProvider, do
 			log.Printf("WARN Not deleting disk %s of domain %s: it is not a regular file; it is left in place", disk, domain)
 		}
 	}
-	return out, nil
+	return out, aliases, nil
 }
 
 // What hostDiskKind reports about a path (diskKindScript).

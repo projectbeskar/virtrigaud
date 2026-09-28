@@ -124,7 +124,7 @@ func TestMigrationImport_LegacyRequestKeepsBareName(t *testing.T) {
 	// ... and an older manager's Create (no owner) adopts it.
 	vol, err := c.p.createDiskFromHostImage(context.Background(), c.vp, NewStorageProvider(c.vp),
 		contracts.CreateRequest{Name: "web", Image: contracts.VMImage{Path: resp.Path, ImportedDisk: true}},
-		"web", resp.Path, vmDiskVolumeName("web"), 10)
+		"web", resp.Path, vmDiskVolumeName("web"), 10, nil)
 	require.NoError(t, err)
 	assert.Equal(t, resp.Path, vol.Path)
 }

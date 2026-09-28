@@ -199,10 +199,14 @@ func removeClonedDisk(ctx context.Context, vp *VirshProvider, lock hostLock, tar
 // copied for the clone (cloneSeedISO). It keeps every protection of the
 // single-host Clone (disk_dependents.go, call-site checklist): linked clones
 // are refused before any host is touched (cloneClustered); the definition is
-// built and the UEFI varstore path checked (ensureNVRAMTargetFree) before any
-// file is written; the disk is written on #358's path (createFullCopyGuarded:
-// withUmask, private directory, `mv -T`, finalizeClonedDisk) and the
-// varstore by copyClonedNVRAM.
+// built and the disk and UEFI varstore paths checked before any file is
+// written — across every host of the Provider when a file is already there
+// (clusterDiskGuard, ADR-0007 A6 R3; the host-local ensureNVRAMTargetFree's
+// symlink and in-use refusals included); the disk is written on #358's path
+// (createFullCopyGuarded: withUmask, private directory, `mv -T`,
+// finalizeClonedDisk) and the varstore by copyClonedNVRAM. A target name held
+// by a previous incarnation of the target VirtualMachine is answered
+// VM_PREVIOUS_INCARNATION (R2).
 func (p *Provider) cloneOnHost(ctx context.Context, vp *VirshProvider, c libvirtConn, d domainTarget, req contracts.CloneRequest, domainName string) (contracts.CloneResponse, error) {
 	host := c.HostID()
 
@@ -219,6 +223,11 @@ func (p *Provider) cloneOnHost(ctx context.Context, vp *VirshProvider, c libvirt
 		log.Printf("INFO Clone target domain %s on host %s is already owned by VirtualMachine %s/%s (uid %s); treating the clone as done",
 			domainName, host, req.TargetVM.Namespace, req.TargetVM.Name, req.TargetVM.UID)
 		return contracts.CloneResponse{TargetVmID: domainName}, nil
+	case target.present && target.namesOwner:
+		// A previous incarnation of the target VirtualMachine (stamped for its
+		// namespace and name under another UID, ADR-0007 A6 R2): the manager
+		// holds the clone instead of excluding the host.
+		return contracts.CloneResponse{}, &previousIncarnationError{op: guardOpClone, domain: domainName}
 	case target.present:
 		return contracts.CloneResponse{}, contracts.NewConflictError(fmt.Sprintf(
 			"libvirt domain %q already exists on host %s and is not owned by the clone's target VirtualMachine; nothing was cloned",
@@ -260,9 +269,11 @@ func (p *Provider) cloneOnHost(ctx context.Context, vp *VirshProvider, c libvirt
 	}
 	vp.warnIfDiskDirUnsafe(ctx, poolInfo.Path)
 	targetDiskPath := filepath.Join(poolInfo.Path, fmt.Sprintf("%s.qcow2", vmDiskVolumeName(domainName)))
-	// Never let the copy replace a disk another domain uses, or write through
-	// a symbolic link.
-	if err := ensureDiskTargetFree(ctx, vp, domainDiskSubject(domainName), targetDiskPath); err != nil {
+	// Never let the copy replace a disk a domain on ANY host of the Provider
+	// uses (the pool may be shared, ADR-0007 A6 R3), or write through a
+	// symbolic link.
+	guard := p.newClusterDiskGuard(host, vp, req.TargetVM, domainName, guardOpClone)
+	if err := guard.ensureTargetFree(ctx, vp, domainDiskSubject(domainName), targetDiskPath); err != nil {
 		return contracts.CloneResponse{}, err
 	}
 
@@ -280,10 +291,10 @@ func (p *Provider) cloneOnHost(ctx context.Context, vp *VirshProvider, c libvirt
 		return contracts.CloneResponse{}, contracts.NewInvalidSpecError("stamp the clone with its target VirtualMachine", err)
 	}
 	uefi := srcNvramPath != "" && targetNvramPath != ""
-	// Never write the clone's varstore through a symbolic link or over another
-	// domain's varstore.
+	// Never write the clone's varstore through a symbolic link or over the
+	// varstore (or any file) of a domain on any host of the Provider.
 	if uefi {
-		if err := ensureNVRAMTargetFree(ctx, vp, domainName, targetNvramPath); err != nil {
+		if err := guard.ensureTargetFree(ctx, vp, nvramSubject(domainName), targetNvramPath); err != nil {
 			return contracts.CloneResponse{}, err
 		}
 	}

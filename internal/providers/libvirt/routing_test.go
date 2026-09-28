@@ -317,8 +317,14 @@ func TestClustered_EveryPerVMRPC_NeverReachesPlaceholder(t *testing.T) {
 	}
 
 	assert.Zero(t, p.virshProvider.unroutableHits.Load(), "no RPC may reach the single-host placeholder")
-	assert.Equal(t, map[string]bool{"host-a": true, "local": true}, hostsOf(fx.calls()),
-		"only the routed host (and its host-shell cleanup) was touched; host-b never was")
+	calls := fx.calls()
+	assert.Equal(t, map[string]bool{"host-a": true, "host-b": true, "local": true}, hostsOf(calls),
+		"the routed host (and its host-shell cleanup), plus the Delete's read-only cluster-wide disk guard on host-b")
+	for _, c := range calls {
+		if strings.HasPrefix(c, "host-b ") {
+			assert.Equal(t, "host-b list --all --uuid", c, "host-b is only read (ADR-0007 A6, R3), never acted on")
+		}
+	}
 }
 
 // ─── routed Describe / Delete ─────────────────────────────────────────────────
@@ -415,13 +421,16 @@ func TestClustered_Delete_OwnerChecked(t *testing.T) {
 				require.NoError(t, err)
 				// Slice 2: the teardown addresses the checked domain by UUID.
 				// The disk dependency guard (storage pool, other domains) runs
-				// on the leased host before destroy/undefine.
+				// on the leased host before destroy/undefine, then the
+				// cluster-wide guard (ADR-0007 A6, R3) reads every OTHER host's
+				// domains — read-only — before anything is changed.
 				assert.Equal(t, []string{
 					"host-a list --all",
 					"host-a dumpxml web",
 					"host-a dumpxml " + routingDomainUUID,
 					"host-a pool-dumpxml default",
 					"host-a list --all --uuid",
+					"host-b list --all --uuid",
 					"host-a destroy " + routingDomainUUID,
 					"host-a undefine " + routingDomainUUID,
 					"local sudo rm -f -- " + routingDiskPath,

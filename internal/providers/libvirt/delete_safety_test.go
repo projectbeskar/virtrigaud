@@ -676,7 +676,8 @@ func TestDelete_Clustered_LinkedClone(t *testing.T) {
 			_, err = p.Delete(ctx, contracts.VMRef{ID: "team-a.web", HostID: "host-a", Owner: ownerTeamA})
 			require.NoError(t, err)
 			assert.Equal(t, []string{src}, c.removals())
-			assert.Empty(t, c.virshCalls("host-b"), "only the leased host is touched")
+			assert.Equal(t, []string{"list --all --uuid"}, c.virshCalls("host-b"),
+				"the other host is only read by the cluster-wide disk guard (ADR-0007 A6, R3), never acted on")
 		})
 	}
 }

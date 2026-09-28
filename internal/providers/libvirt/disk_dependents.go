@@ -26,6 +26,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
+	v1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
 )
 
@@ -68,7 +69,13 @@ import (
 //
 //   - Delete: deleteExistingDomain → planDomainDeletion (dependents, pool
 //     confinement, own-chain and seed-directory checks) BEFORE destroy/undefine;
-//     reached by deleteOn (single-host) and deleteClustered (routed).
+//     reached by deleteOn (single-host) and deleteClustered (routed), which
+//     also runs the cluster-wide check on every other host
+//     (checkDeletionAcrossHosts, cluster_disk_guard.go) before the teardown.
+//   - Create and Clone on a clustered provider: an existing file where the
+//     VM's disk, a clone's varstore or an imported disk attached in place is
+//     written goes through clusterDiskGuard (every host of the Provider,
+//     cluster_disk_guard.go), never through the host-local check alone.
 //   - SnapshotCreate / SnapshotDelete / SnapshotRevert:
 //     refuseIfDiskHasDependents(ctx, host, domain, guardOp*) right before the
 //     snapshot command — Server.SnapshotCreate/Delete/Revert and the
@@ -99,13 +106,27 @@ type diskDependentsError struct {
 	op string
 	// dependents is how many other domains use the disk.
 	dependents int
+	// onOtherHosts reports that the dependents are on OTHER hosts of a
+	// clustered Provider (the cluster-wide disk guard, ADR-0007 A6 R3), which
+	// reach the VM's disk through shared storage.
+	onOtherHosts bool
 }
 
 // Error is the refusal, safe for the requesting VM's status.
 func (e *diskDependentsError) Error() string {
+	if e.onOtherHosts {
+		return fmt.Sprintf("%s of libvirt domain %q refused: its disk is a disk (or backing file) of %d domain(s) on other "+
+			"hosts of this Provider, which share its storage (for example a definition of this VM left on another host); "+
+			"nothing was deleted. Remove those domains first, or detach this VM with %s", e.op, e.domain, e.dependents,
+			orphanOnDeleteHint)
+	}
 	return fmt.Sprintf("%s of libvirt domain %q refused: its disk is the backing file (or a disk) of %d other domain(s) "+
 		"on this host, such as a linked clone of this VM; delete the linked clones first", e.op, e.domain, e.dependents)
 }
+
+// orphanOnDeleteHint names the annotation that detaches a VirtualMachine from
+// its domain without deleting it.
+const orphanOnDeleteHint = v1beta1.VirtualMachineOrphanOnDeleteAnnotation + "=true"
 
 // GRPCStatus renders the refusal as codes.FailedPrecondition carrying a
 // google.rpc.ErrorInfo{Reason: VM_DISK_IN_USE}. status.FromError finds it

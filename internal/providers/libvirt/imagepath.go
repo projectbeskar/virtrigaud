@@ -1032,6 +1032,12 @@ type hostDomainRefs struct {
 	uuid string
 	// refs are the domain's references (see inUseSet).
 	refs inUseSet
+	// owners are the VirtRigaud owner stamps of the definition that was read
+	// (domainOwners), nil when it carries none or they cannot be parsed. They
+	// are informational — only the cluster-wide disk guard reads them, to tell
+	// a previous incarnation of a VM from a foreign domain (ADR-0007 A6) — and
+	// never authorize anything.
+	owners []contracts.ObjectIdentity
 }
 
 // domainRefsOnHost reads, on the host behind h, the references of every defined
@@ -1044,13 +1050,28 @@ type hostDomainRefs struct {
 // however many domains reference it, and every path is canonicalized in one
 // call.
 func domainRefsOnHost(ctx context.Context, h hostCommandRunner, skipUUID string) ([]hostDomainRefs, error) {
+	return domainRefsOnHostBounded(ctx, h, skipUUID, 0)
+}
+
+// domainRefsOnHostBounded is domainRefsOnHost reading at most maxDomains
+// domains (0: no bound). A host with more fails the check closed (a generic
+// retryable error) before any definition is read, rather than being read
+// partially or past its caller's deadline — the cluster-wide disk guard
+// bounds each host as a clustered ListVMs does
+// (clusteredListMaxDomainsPerHost). The bound runs no extra command.
+func domainRefsOnHostBounded(ctx context.Context, h hostCommandRunner, skipUUID string, maxDomains int) ([]hostDomainRefs, error) {
 	uuids, err := listDomainUUIDs(ctx, h)
 	if err != nil {
 		return nil, err
 	}
+	if maxDomains > 0 && len(uuids) > maxDomains {
+		return nil, hostCheckFailed("list domains",
+			fmt.Errorf("%d domains on the host exceed the scan bound of %d", len(uuids), maxDomains))
+	}
 	type rawRefs struct {
 		uuid               string
 		files, dirs, disks []string
+		owners             []contracts.ObjectIdentity
 	}
 	var doms []rawRefs
 	for _, uuid := range uuids {
@@ -1074,6 +1095,9 @@ func domainRefsOnHost(ctx context.Context, h hostCommandRunner, skipUUID string)
 			return nil, hostCheckFailed(fmt.Sprintf("parse definition of domain %s", uuid), err)
 		}
 		d := rawRefs{uuid: uuid, files: refs.files, dirs: refs.dirs, disks: refs.disks}
+		if owners, oerr := domainOwners(xmlRes.Stdout); oerr == nil {
+			d.owners = owners
+		}
 		for _, pv := range refs.volumes {
 			volRes, verr := h.runVirshCommand(ctx, "vol-path", "--pool", pv[0], "--vol", pv[1])
 			if verr != nil {
@@ -1141,7 +1165,7 @@ func domainRefsOnHost(ctx context.Context, h hostCommandRunner, skipUUID string)
 			set.files[canon[j]] = true
 		}
 		set.dirs = append(set.dirs, canon[spans[i].dirs[0]:spans[i].dirs[1]]...)
-		out[i] = hostDomainRefs{uuid: d.uuid, refs: set}
+		out[i] = hostDomainRefs{uuid: d.uuid, refs: set, owners: d.owners}
 	}
 	return out, nil
 }
