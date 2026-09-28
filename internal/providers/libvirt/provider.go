@@ -171,6 +171,11 @@ type Provider struct {
 	// guardSemaphore.
 	guardSemOnce sync.Once
 	guardSem     *semaphore.Weighted
+
+	// domainLocks serializes, per domain name, the clustered Create, Clone
+	// and Delete of that domain in this provider process, from the
+	// cluster-wide disk check to the act it guards (lockDomain).
+	domainLocks hostLocks
 }
 
 // imagePolicy returns the provider's image-path confinement policy (see

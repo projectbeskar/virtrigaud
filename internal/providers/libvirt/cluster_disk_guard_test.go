@@ -761,6 +761,55 @@ func TestClusterScan_BusyProviderFailsClosed(t *testing.T) {
 	s.requireNothingWrittenOnB(disk, "original-disk")
 }
 
+// TestClustered_DomainLockSerializesCheckAndAct (security review of A6.1,
+// item 5): a clustered Create or Delete of a domain whose lock another
+// operation holds (an earlier attempt still running in the provider) waits
+// for it — within its budget — instead of checking and acting next to it; one
+// that gets no lock in time is not performed (Unavailable +
+// VM_OPERATION_FAILED: retried, never counted by the breaker).
+func TestClustered_DomainLockSerializesCheckAndAct(t *testing.T) {
+	t.Run("create", func(t *testing.T) {
+		s := newSharedPool(t)
+		unlock, err := s.p.lockDomain(context.Background(), "team-a.web", "test")
+		require.NoError(t, err)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		req := s.createReq(ownerTeamA, s.file(s.images, "ubuntu.qcow2"))
+		req.TargetHostID = "host-b"
+		_, err = s.p.Create(ctx, req)
+		var be *domainBusyError
+		require.ErrorAs(t, err, &be)
+		st, _ := status.FromError(createRPCError(err))
+		assert.Equal(t, codes.Unavailable, st.Code())
+		assert.Equal(t, contracts.VMOperationFailedReason, errorInfoReason(st))
+		assert.Empty(t, s.virshCalls("host-b"), "nothing was checked or written while the lock was held")
+
+		unlock()
+		_, err = s.p.Create(context.Background(), req)
+		require.NoError(t, err, "once released, the create runs")
+	})
+	t.Run("delete", func(t *testing.T) {
+		s := newSharedPool(t)
+		disk := s.disk("team-a.web-disk.qcow2", "live-disk")
+		s.defineOn("host-b", "team-a.web", uuidVMOnB, guardDomainXML("team-a.web", uuidVMOnB, disk, ownerTeamA, false))
+		unlock, err := s.p.lockDomain(context.Background(), "team-a.web", "test")
+		require.NoError(t, err)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_, err = s.p.Delete(ctx, contracts.VMRef{ID: "team-a.web", HostID: "host-b", Owner: ownerTeamA})
+		var be *domainBusyError
+		require.ErrorAs(t, err, &be)
+		s.requireUntouched("host-b", "team-a.web")
+
+		unlock()
+		_, err = s.p.Delete(context.Background(), contracts.VMRef{ID: "team-a.web", HostID: "host-b", Owner: ownerTeamA})
+		require.NoError(t, err)
+		assert.Equal(t, []string{disk}, s.removals())
+	})
+}
+
 // ─── the clustered Clone (routed SCD fixture) ────────────────────────────────
 
 // cloneDiskInPool points host-b's pool at a directory of the fixture and puts

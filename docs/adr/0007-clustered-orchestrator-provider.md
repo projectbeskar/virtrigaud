@@ -1792,6 +1792,13 @@ runbook or remove it. There is no opt-in in v0.4.0. A6.2 must also set the
 >   a missing file, a reserved name, a non-regular file and a file in use with
 >   the same "not allowed" message, and the rejection stays InvalidArgument on
 >   the wire (it used to reach the manager as VM_OPERATION_FAILED).
+> - **Check-then-act** *(security review of A6.1)*: the provider holds an
+>   in-process lock on the domain name from the scan until the write, define
+>   or teardown completes (Create, Clone, Delete), so a retry never checks and
+>   acts next to an earlier attempt still running; a lock not obtained within
+>   the call's budget answers `Unavailable` + `VM_OPERATION_FAILED`.
+>   Remaining gap: actors outside the provider process (an administrator's
+>   `virsh`, other tools, a second provider process) are not serialized.
 > - **Hosts the operator could not render** *(security review of A6.1)*: a
 >   `Host` the Provider fronts whose credentials are missing or refused, whose
 >   endpoint is invalid or whose id is duplicated is still passed to the

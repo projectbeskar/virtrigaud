@@ -210,6 +210,15 @@ func removeClonedDisk(ctx context.Context, vp *VirshProvider, lock hostLock, tar
 func (p *Provider) cloneOnHost(ctx context.Context, vp *VirshProvider, c libvirtConn, d domainTarget, req contracts.CloneRequest, domainName string) (contracts.CloneResponse, error) {
 	host := c.HostID()
 
+	// The target name's lock, held from the checks to the define (ADR-0007
+	// A6.1): a retried clone never checks and copies next to an earlier
+	// attempt still running.
+	unlock, err := p.lockDomain(ctx, domainName, guardOpClone)
+	if err != nil {
+		return contracts.CloneResponse{}, err
+	}
+	defer unlock()
+
 	// The target name: never bound to, or redefined over, a domain the target
 	// VirtualMachine does not own. One it owns was defined by an earlier
 	// attempt whose answer was lost (the stamp is written by the define, the

@@ -800,6 +800,54 @@ func (e *clusterGuardIncompleteError) GRPCStatus() *status.Status {
 	return diskCheckFailedStatus(e.Error(), true)
 }
 
+// lockDomain takes this provider process's lock on domain for op, held from
+// the cluster-wide check until the write, define or teardown it guards
+// completes (ADR-0007 A6.1 security review: the check and the act are not
+// atomic). Every clustered Create, Clone and Delete of one domain name —
+// "<namespace>.<name>" — is serialized, so a retry that arrives while an
+// earlier attempt still runs (the manager gave up waiting, the provider did
+// not) waits for it instead of checking and writing next to it. The wait is
+// bounded by the call's budget (its deadline less clusterDiskGuardMargin); an
+// operation that gets no lock in time is not performed (domainBusyError,
+// retried). The lock is in-process only: actors outside VirtRigaud (an
+// administrator's virsh, another tool, a second provider process fronting the
+// same hosts) are not serialized by it.
+func (p *Provider) lockDomain(ctx context.Context, domain, op string) (func(), error) {
+	budget, cancel := budgetWithMargin(ctx, clusterDiskGuardMargin)
+	defer cancel()
+	unlock, err := p.domainLocks.lock(budget, domain)
+	if err != nil {
+		if cerr := ctx.Err(); cerr != nil {
+			return nil, cerr
+		}
+		log.Printf("WARN %s of libvirt domain %s waited its whole budget for another operation on the same domain", op, domain)
+		return nil, &domainBusyError{op: op, domain: domain}
+	}
+	return unlock, nil
+}
+
+// domainBusyError reports that op of domain was not performed because another
+// operation on the same domain was still running in this provider process for
+// the call's whole budget. Nothing was changed; it is retryable.
+type domainBusyError struct {
+	op, domain string
+}
+
+// Error is the refusal, safe for the requesting VM's status.
+func (e *domainBusyError) Error() string {
+	return fmt.Sprintf("%s of libvirt domain %q not performed: another operation on the same domain is still running "+
+		"in the provider; it is retried", e.op, e.domain)
+}
+
+// Unwrap exposes the equivalent retryable contracts error.
+func (e *domainBusyError) Unwrap() error { return contracts.NewRetryableError(e.Error(), nil) }
+
+// GRPCStatus renders the refusal as codes.Unavailable + VM_OPERATION_FAILED:
+// retried, and never counted by the manager's circuit breaker.
+func (e *domainBusyError) GRPCStatus() *status.Status {
+	return statusWithReasons(codes.Unavailable, e.Error(), contracts.VMOperationFailedReason)
+}
+
 // clusterGuardStatus returns the wire form of a cluster-wide guard's answer in
 // err's chain (previousIncarnationError, clusterGuardIncompleteError), or nil
 // when there is none.
@@ -812,6 +860,10 @@ func clusterGuardStatus(err error) *status.Status {
 	if stderrors.As(err, &ie) {
 		log.Printf("WARN %v", err)
 		return ie.GRPCStatus()
+	}
+	var be *domainBusyError
+	if stderrors.As(err, &be) {
+		return be.GRPCStatus()
 	}
 	return nil
 }

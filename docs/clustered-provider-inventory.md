@@ -1699,6 +1699,18 @@ domain of the Provider. *Follow-ups:* batch the per-domain reads (ADR-0008's
 native list), and scope the scan to the hosts that share the pool once a pool
 ownership marker exists.
 
+**Check and act are serialized per domain, in the provider.** The scan and
+the write, define or teardown it guards are not one atomic step. The
+provider therefore holds a lock on the domain name (`<namespace>.<name>`) from
+the check until the act completes, for every clustered Create, Clone and
+Delete: a retry that arrives while an earlier attempt still runs (the manager
+stopped waiting, the provider did not) waits for it, within its own budget,
+instead of checking and writing next to it; one that gets no lock in time is
+not performed (`Unavailable` + `VM_OPERATION_FAILED`, retried). *Remaining
+gap:* the lock is in-process, so an actor outside VirtRigaud — an
+administrator's `virsh`, another tool, a second provider process fronting the
+same hosts — can still change a disk between the check and the act.
+
 **Paths are compared per host, canonically.** The candidate file — the path
 the landing host uses and the path it resolves to there — is resolved again
 with `realpath` on each scanned host and compared with that host's own

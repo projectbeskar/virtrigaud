@@ -216,6 +216,11 @@ func (p *Provider) createOnLeasedHost(ctx context.Context, lease hostconn.Conn, 
 	}
 	legacy, _ := legacyNameOf(req.Owner, req.Name, domainName)
 	g := p.newClusterDiskGuard(lease.HostID(), req.Owner, domainName, legacy, guardOpCreate)
+	unlock, err := p.lockDomain(ctx, domainName, guardOpCreate)
+	if err != nil {
+		return contracts.CreateResponse{}, err
+	}
+	defer unlock()
 	return p.createVM(ctx, vc.virsh, req, g)
 }
 
@@ -630,7 +635,13 @@ func (p *Provider) deleteClustered(ctx context.Context, c libvirtConn, id string
 
 	// The host-local plan sees only this host's domains; on a shared pool a
 	// domain on another host of the Provider may use the same files, so every
-	// other host is checked before anything is changed (ADR-0007 A6, R3).
+	// other host is checked before anything is changed (ADR-0007 A6, R3) —
+	// under the domain's lock, held until the teardown completes.
+	unlock, err := p.lockDomain(ctx, d.name, guardOpDelete)
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	_, err = p.deleteExistingDomainChecked(ctx, vp, d.handle, func(plan domainDeletionPlan) (domainDeletionPlan, error) {
 		return p.checkDeletionAcrossHosts(ctx, host, plan)
 	})
