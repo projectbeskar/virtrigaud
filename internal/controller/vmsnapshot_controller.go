@@ -306,9 +306,12 @@ func (r *VMSnapshotReconciler) createSnapshot(ctx context.Context, snapshot *inf
 		// writing the snapshot, or another job on the VM still running — is
 		// retried, never failed: a failed VMSnapshot would leave a snapshot
 		// that completes afterwards untracked on the host. The provider's
-		// routed create is idempotent by name, so the retry finds that
-		// snapshot instead of making a second one. Single-host failures are
-		// unchanged.
+		// routed create is idempotent per request (request_token, the
+		// VMSnapshot's uid), so the retry finds that snapshot instead of making
+		// a second one. A disk-dependents check that could not run
+		// (VM_DISK_CHECK_FAILED, #358) is retried here too; a refusal because
+		// another VM depends on the disk (VM_DISK_IN_USE, a Conflict) fails the
+		// create, as on a single host. Single-host failures are unchanged.
 		logger.Info("Snapshot creation did not reach a definite outcome; retrying", "error", err.Error())
 		return r.retrySnapshotCreate(ctx, snapshot, fmt.Sprintf("Snapshot creation will be retried: %v", err)), nil
 	}

@@ -59,9 +59,11 @@ func (p *snapshotRecorder) SnapshotCreate(_ context.Context, req contracts.Snaps
 // TestVMSnapshot_Clustered_OutcomeUnknownIsRetriedNotFailed: a routed create
 // that did not reach a definite outcome (retryable: its budget ran out while
 // libvirtd may still write the snapshot, another job still runs, its host is
-// unavailable) leaves the snapshot in its initial phase to be retried — the
-// provider's routed create is idempotent by name — instead of failing it and
-// leaving a snapshot that completes later untracked. A definite failure still
+// unavailable, or #358's disk-dependents check could not run) leaves the
+// snapshot in its initial phase to be retried — the provider's routed create
+// is idempotent per request (request_token) — instead of failing it and
+// leaving a snapshot that completes later untracked. A definite failure —
+// among them #358's refusal because another VM depends on the disk — still
 // fails it.
 func TestVMSnapshot_Clustered_OutcomeUnknownIsRetriedNotFailed(t *testing.T) {
 	for name, tc := range map[string]struct {
@@ -71,6 +73,14 @@ func TestVMSnapshot_Clustered_OutcomeUnknownIsRetriedNotFailed(t *testing.T) {
 		"outcome unknown":  {contracts.NewRetryableError("create snapshot: its outcome is unknown", nil), ""},
 		"host unavailable": {contracts.NewHostUnavailableError("create snapshot: host unavailable", nil), ""},
 		"definite failure": {contracts.NewInvalidSpecError("create snapshot: bad name", nil), infrav1beta1.SnapshotPhaseFailed},
+		// The transport's forms of #358's answers (VM_DISK_CHECK_FAILED is
+		// Unavailable -> Retryable; VM_DISK_IN_USE is FailedPrecondition ->
+		// Conflict wrapping ErrVMDiskInUse).
+		"disk check failed": {contracts.NewRetryableError(
+			`create snapshot: snapshot create of libvirt domain "web" not performed: could not verify that no other domain uses its disks`, nil), ""},
+		"disk in use": {contracts.NewConflictError(
+			`create snapshot: snapshot create of libvirt domain "web" refused: its disk is the backing file (or a disk) of 1 other domain(s)`,
+			contracts.ErrVMDiskInUse), infrav1beta1.SnapshotPhaseFailed},
 	} {
 		t.Run(name, func(t *testing.T) {
 			r, rec, snap := clusteredSnapshotFixture(t, boundSource(), infrav1beta1.VMSnapshotStatus{})
