@@ -5,6 +5,34 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-09-28 12:05] - ADR-0007 A6: backup and restore of clustered VMs (Accepted)
+**Author:** @wrkode (William Rizzo)
+
+### Added
+- `docs/adr/0007-clustered-orchestrator-provider.md`: A6 is accepted. It replaces the open question on backup and restore of clustered VMs.
+  - **The problem.** A restore re-creates a VirtualMachine with a new UID and, by default, no status. Before A6, a restored clustered VM was re-scheduled as new. The host holding its domain refused the create, because the owner stamp names the old UID. The slice 2 rule then excluded that host, and another host created a second domain. On a pool shared across hosts, that create overwrote the original's disk, because the disk-target guard scanned only the create host's domains.
+  - **Decided for v0.4.0 (option (c)).** A restored clustered VM fails closed and waits (`RestorePending`), and an administrator re-attaches it with a manual re-stamp runbook. Four guards ship:
+    - R1: a restore marker, `infra.virtrigaud.io/placement-uid`, clustered only, which can only hold a VM;
+    - R2: a previous incarnation (`VM_PREVIOUS_INCARNATION`) pins the VM to its host instead of excluding the host;
+    - R3: a cluster-wide guard against disk overwrites;
+    - R4: a pre-schedule uniqueness check over slice 4's cross-host `ListVMs`, not strict when a host is unreachable.
+  - **Decided rule.** At most one domain per `<namespace>.<name>` per clustered Provider. After `orphan-on-delete`, re-creating the same name waits until an administrator re-attaches or removes the old domain.
+  - **Slices.** A6.1 (R3, R2) and A6.2 (R1, R4) land after slice 4 and before slice 5; A6.3 is the docs. Slice 5 runs six restore checks. After v0.4.0, A6.4 automates the re-attach through an admin-created `VMRestoreBinding`.
+  - **Slice 4 coordination.** Adoption on a clustered Provider re-stamps the adopted domain's owner through a compare-and-swap step, and A6.4 reuses that step.
+  - **Recorded separately.** The Proxmox restore duplicate is tracked with the parked Proxmox work. Single-host Providers are unchanged.
+
+### Changed
+- `docs/adr/0007-clustered-orchestrator-provider.md`: the status paragraph, the A5 rollout table (A6.1–A6.4 around slice 5) and the follow-ups list now include A6.
+
+### Why
+Restoring a clustered VM from a backup created a second domain instead of recovering the VM, and could destroy the VM's disk on shared storage. The fail-closed guards and the runbook had to be settled before slice 5 validates the first real clustered VM.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [ ] Config change only
+- [x] Documentation only
+
 ## [2026-09-28 09:27] - ADR-0007 Addendum A slice 3: clustered libvirt routes snapshots, Clone, GetDiskInfo, ExportDisk and task references to the VM's host
 **Author:** @wrkode (William Rizzo)
 
