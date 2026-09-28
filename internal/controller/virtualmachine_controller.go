@@ -669,22 +669,30 @@ func (r *VirtualMachineReconciler) reconcileVM(ctx context.Context, vm *infravir
 	r.syncMemoryCeiling(ctx, vm, ref, desc)
 	r.syncRecordedCPU(ctx, vm, ref, desc)
 
-	// A VM the provider reports Suspended (paused, suspended to RAM) or Unknown
-	// is neither powered on or off nor reconfigured (review R1): it is left as
-	// it is until it runs or is powered off.
-	if powerStateUnmanaged(desc.PowerState) {
-		logger.Info("VM is suspended or in an unknown state; not adjusting its power state or size", "powerState", desc.PowerState)
-		k8s.SetReadyCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonPowerStateUnmanaged,
-			fmt.Sprintf("the provider reports the VM %s: its power state is not adjusted and it is not reconfigured until it is running or powered off",
-				vm.Status.PowerState))
-		r.updateStatus(ctx, vm)
-		return ctrl.Result{RequeueAfter: r.getRequeueInterval(vm, desc)}, nil
-	}
-
 	// Check desired power state
 	desiredPowerState := vm.Spec.PowerState
 	if desiredPowerState == "" {
 		desiredPowerState = infravirtrigaudiov1beta1.PowerStateOn
+	}
+
+	// A VM the provider reports Suspended (paused, suspended to RAM) or Unknown
+	// is not reconfigured and not powered on (review R1): it is left as it is
+	// until it runs or is powered off. The one exception is a Suspended VM whose
+	// spec asks for Off: it is powered off (destroyed — a suspended guest cannot
+	// shut down gracefully), as asked (review H4). An Unknown VM is left alone
+	// entirely: acting on a state nobody can classify is a guess.
+	if powerStateUnmanaged(desc.PowerState) {
+		if vm.Status.PowerState == infravirtrigaudiov1beta1.ObservedPowerStateSuspended &&
+			(desiredPowerState == infravirtrigaudiov1beta1.PowerStateOff || desiredPowerState == infravirtrigaudiov1beta1.PowerStateOffGraceful) {
+			logger.Info("VM is suspended and its spec asks for Off; powering it off", "desired", desiredPowerState)
+			return r.adjustPowerState(ctx, vm, providerInstance, ref, string(infravirtrigaudiov1beta1.PowerStateOff))
+		}
+		logger.Info("VM is suspended or in an unknown state; not adjusting its power state or size", "powerState", desc.PowerState)
+		k8s.SetReadyCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonPowerStateUnmanaged,
+			fmt.Sprintf("the provider reports the VM %s: it is not reconfigured, and not powered on, until it is running or powered off "+
+				"(a suspended VM is powered off if its spec asks for Off)", vm.Status.PowerState))
+		r.updateStatus(ctx, vm)
+		return ctrl.Result{RequeueAfter: r.getRequeueInterval(vm, desc)}, nil
 	}
 
 	// A clustered VM observed powered off with a shrink pending gets it applied

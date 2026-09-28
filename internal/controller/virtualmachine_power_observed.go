@@ -47,7 +47,8 @@ func observedPowerState(reported string) infravirtrigaudiov1beta1.ObservedPowerS
 // such a VM to its desired state safely — starting an active domain fails,
 // and powering off a VM in an unknown state is a guess — and a reconfigure of
 // an active domain that is not running is refused by the provider anyway. The
-// VM is left as it is until it runs or is powered off.
+// VM is left as it is until it runs or is powered off — except a Suspended VM
+// whose spec asks for Off, which reconcileVM powers off (review H4).
 func powerStateUnmanaged(reported string) bool {
 	switch observedPowerState(reported) {
 	case infravirtrigaudiov1beta1.ObservedPowerStateSuspended, infravirtrigaudiov1beta1.ObservedPowerStateUnknown:

@@ -70,11 +70,16 @@ func TestObservedPowerState(t *testing.T) {
 
 // TestReconcileVM_SuspendedOrUnknown_NeitherPoweredNorReconfigured (review
 // R1): a VM the provider reports Suspended or Unknown is recorded as such,
-// marked Ready=False/PowerStateUnmanaged, and neither started, stopped nor
-// reconfigured — even when its spec asks for Off or a different size.
+// marked Ready=False/PowerStateUnmanaged, and neither powered on nor
+// reconfigured — even when its spec asks for a different size. An Unknown VM
+// is not powered off either (the Suspended + spec Off case is
+// TestReconcileVM_SuspendedWithSpecOff_IsPoweredOff).
 func TestReconcileVM_SuspendedOrUnknown_NeitherPoweredNorReconfigured(t *testing.T) {
 	for _, reported := range []string{"Suspended", "Unknown"} {
 		for _, desired := range []infravirtrigaudiov1beta1.PowerState{infravirtrigaudiov1beta1.PowerStateOn, infravirtrigaudiov1beta1.PowerStateOff} {
+			if reported == "Suspended" && desired == infravirtrigaudiov1beta1.PowerStateOff {
+				continue
+			}
 			t.Run(reported+"/desired-"+string(desired), func(t *testing.T) {
 				prov := &powerRecordingProvider{fakeDescribeProvider: fakeDescribeProvider{
 					DescribeFn: func(context.Context, string) (contracts.DescribeResponse, error) {
@@ -103,5 +108,32 @@ func TestReconcileVM_SuspendedOrUnknown_NeitherPoweredNorReconfigured(t *testing
 				assert.Equal(t, int32(2), *vm.Status.CurrentResources.CPU, "the recorded size is untouched")
 			})
 		}
+	}
+}
+
+// TestReconcileVM_SuspendedWithSpecOff_IsPoweredOff (review H4): a Suspended
+// VM whose spec asks for Off (or OffGraceful — a suspended guest cannot shut
+// down gracefully) is powered off (destroy); it is still not reconfigured.
+func TestReconcileVM_SuspendedWithSpecOff_IsPoweredOff(t *testing.T) {
+	for _, desired := range []infravirtrigaudiov1beta1.PowerState{infravirtrigaudiov1beta1.PowerStateOff, infravirtrigaudiov1beta1.PowerStateOffGraceful} {
+		t.Run(string(desired), func(t *testing.T) {
+			prov := &powerRecordingProvider{fakeDescribeProvider: fakeDescribeProvider{
+				DescribeFn: func(context.Context, string) (contracts.DescribeResponse, error) {
+					return contracts.DescribeResponse{Exists: true, PowerState: "Suspended"}, nil
+				},
+			}}
+			k8sProv, class := providerAndClass("default")
+			r := newTestReconciler(coverageTestScheme(t), &stubResolver{provider: prov}, k8sProv, class)
+			vm := baseVM("default")
+			vm.Spec.PowerState = desired
+			vm.Status.ID = "vm-1"
+			cpu, mem := int32(2), int64(4096)
+			vm.Status.CurrentResources = &infravirtrigaudiov1beta1.VirtualMachineResources{CPU: &cpu, MemoryMiB: &mem}
+
+			_, err := r.reconcileVM(context.Background(), vm)
+			require.NoError(t, err)
+			assert.Equal(t, []contracts.PowerOp{contracts.PowerOpOff}, prov.powerOps, "powered off (destroy), as the spec asks")
+			assert.Zero(t, prov.reconfigures)
+		})
 	}
 }
