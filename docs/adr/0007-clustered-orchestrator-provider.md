@@ -991,7 +991,15 @@ slice 4 is implemented (see the slice 4 amendment below); slice 5 is open.
 > Implements A3 and adoption keyed on `(host_id, id)`. What it adds beyond A3:
 >
 > - **Wire (additive).** `VMInfo.host_id` is field 10 and
->   `ListVMsResponse.unreachable_host_ids` field 2. A host is listed as
+>   `ListVMsResponse.unreachable_host_ids` field 2. For A6's R4, a clustered
+>   `VMInfo` also reports its owner stamp's namespace and name
+>   (`owner_namespace` 11, `owner_name` 12; empty when unstamped or when more
+>   than one stamp is recorded; the UID stays in `provider_raw["owner_uid"]`),
+>   so A6.2 needs no second proto change. Single-host leaves them empty. The
+>   `ListVMsRequest` owner filter R4 also wants is **left to A6.2**: honouring
+>   it honestly needs every provider to filter or a capability to say it
+>   does — a single-host, vSphere, Proxmox or mock provider would otherwise
+>   return an unfiltered list to a caller that asked for a filtered one. A host is listed as
 >   unreachable for **any** reason its VMs are unknown — not in the registry
 >   or draining, unreachable, past its per-host deadline, a failed `virsh
 >   list`, or a connection that dropped while its domains were read — and the
@@ -1016,10 +1024,15 @@ slice 4 is implemented (see the slice 4 amendment below); slice 5 is open.
 >   replaceable — the manager lists only UIDs of VirtualMachines that no
 >   longer exist. Anything else is `AlreadyExists` and untouched. The stamp is
 >   written with `virsh metadata --config [--live]` to the domain addressed by
->   UUID and read back. It is named for owner transfer, not adoption, because
->   **A6 reuses it**: a VirtualMachine restored with a new UID finds its
->   domain stamped with a UID that no longer exists. Single-host, vSphere,
->   Proxmox and mock return `Unimplemented`.
+>   UUID and read back. It is the compare-and-swap owner re-stamp of A6's
+>   *Slice 4 coordination*, and it is named for owner transfer, not
+>   adoption, because **A6.4 reuses it**: a VirtualMachine restored with a
+>   new UID finds its domain stamped with a UID that no longer exists (A6.4
+>   restricts it to an identical namespace and name; adoption does not, as
+>   the adopted VirtualMachine is new). The manager's building block for the
+>   whole transfer, owner-checked `Describe` and binding write is
+>   `completeClusteredAdoption`. Single-host, vSphere, Proxmox and mock
+>   return `Unimplemented`.
 > - **Capability.** `supports_routed_adoption` (field 21) reports the
 >   cross-host `ListVMs` and `TransferOwner`; the adoption controller adopts
 >   from a clustered provider only when it is true (D7). Single-host

@@ -1406,6 +1406,12 @@ for a clustered provider.
 - every `VMInfo` carries `host_id` (the `Host` name). On a clustered provider a
   VM is identified by **(`host_id`, `id`)**, never by its name: two hosts may
   each have a domain named `web`, and they are two entries;
+- every `VMInfo` also carries the namespace and name recorded in the domain's
+  owner stamp (`owner_namespace`, `owner_name`; the UID stays in
+  `provider_raw["owner_uid"]`), empty for an unstamped domain or one with more
+  than one stamp. They are informational — only the UID identifies an owner —
+  and A6's pre-schedule uniqueness check (R4) looks a VM's previous
+  incarnations up by them;
 - every host whose VMs could not be listed — unknown or draining in the
   registry, unreachable, past its deadline, a failed `virsh list`, or a
   connection that dropped while its domains were read — is named in
