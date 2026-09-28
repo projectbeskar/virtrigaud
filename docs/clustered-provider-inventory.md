@@ -1412,8 +1412,12 @@ for a clustered provider.
   stderr never fails it: the first 64 KiB and the last 960 KiB are kept (the
   error text comes last) and the middle is dropped and marked, so a large
   download's progress output does not fail a create that succeeded. Each domain's definition is still read with its own
-  `virsh dumpxml`: a host near the bound may need a batched read to fit its
-  deadline (follow-up, with ADR-0008's native list);
+  `virsh dumpxml`, and a running domain's persistent definition with a second
+  one (`dumpxml --inactive`, to see a stamp that is only there), so a host of
+  running domains takes about two SSH calls per domain. A host with more than
+  roughly 600–1000 running domains may not finish within its 60 s deadline
+  and is then reported unreachable (unknown). *Follow-up:* a batched or
+  native (ADR-0008 go-libvirt) read;
 - every `VMInfo` carries `host_id` (the `Host` name). On a clustered provider a
   VM is identified by **(`host_id`, `id`)**, never by its name: two hosts may
   each have a domain named `web`, and they are two entries;
@@ -1521,6 +1525,10 @@ slice 4 is refused with a message and nothing is listed. For each listed VM:
    the provider controller runs a clustered Provider with **one replica and
    the `Recreate` strategy** (`spec.runtime.replicas` above 1 is ignored and
    logged), and each host endpoint must belong to **one clustered Provider**.
+   `Recreate` stops the old provider pod before the new one starts, so a
+   clustered provider's rollout (an image upgrade, a changed spec) is a short
+   outage: its gRPC endpoint is down until the new pod is ready, and VM
+   reconciles against it fail and are retried meanwhile.
    The provider refuses (`InvalidArgument`) an owner whose UID is not a
    canonical UUID or whose namespace/name are not DNS-1123, and a domain name
    virsh would read as a domain id or UUID (adoption skips those names); every

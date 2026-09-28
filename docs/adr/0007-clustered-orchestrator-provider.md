@@ -1024,7 +1024,11 @@ slice 4 is implemented (see the slice 4 amendment below); slice 5 is open.
 >   64 KiB and last 960 KiB are kept (the error text is at the end) and the
 >   middle is dropped and marked, so wget's progress output on a large image
 >   download cannot fail a create that succeeded.
->   Follow-up: the per-domain `dumpxml` reads are sequential.
+>   Follow-up: the per-domain `dumpxml` reads are sequential, and a running
+>   domain gets a second one (`--inactive`), so a host with more than roughly
+>   600–1000 running domains may be reported unreachable for its deadline — a
+>   batched or native (ADR-0008) read is the follow-up. The one-replica
+>   `Recreate` rule makes each clustered provider rollout a short outage.
 > - **A new RPC: `TransferOwner`** (deviation). Every routed per-VM call is
 >   owner-checked, so a domain adopted as it is — unstamped, or stamped by a
 >   deleted VirtualMachine — would be invisible to the VirtualMachine that
