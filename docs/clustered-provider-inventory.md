@@ -1480,11 +1480,14 @@ slice 4 is refused with a message and nothing is listed. For each listed VM:
    not compared. *Follow-up:* a clustered `Delete` checks only its own host
    for other domains using the disk; it should scan every host, as ADR-0007
    A6.1's R3 does for `Create`.
-   **A Host whose endpoint another Host object names** (same scheme, host and
-   port, whatever the SSH user; any Provider, any namespace) is not adopted
-   from, and the manager logs a warning: two Providers fronting one hypervisor
-   could each adopt the same unstamped domain. Keep one clustered Provider per
-   host endpoint.
+   **A Host whose endpoint another Host object, or a single-host Provider's
+   `spec.endpoint`, names** (same scheme, host and port, whatever the SSH user;
+   any Provider, any namespace) is not adopted from, and the manager logs a
+   warning: two Providers fronting one hypervisor could each adopt the same
+   unstamped domain. When the Hosts or Providers cannot be listed, the
+   discovery adopts nothing. Keep one clustered Provider per host endpoint.
+   *Residual risk:* one hypervisor reached under two names (a DNS alias, a
+   host name and its IP address) is not recognized.
    **Do not front one hypervisor with both a single-host and a clustered
    Provider.** A single-host provider does not stamp the domains it manages,
    so a clustered adoption could take one of them. As a guard, an unstamped

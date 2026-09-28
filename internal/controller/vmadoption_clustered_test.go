@@ -990,3 +990,47 @@ func TestClusteredAdoption_HeldWhileAHostIsUnknownButBindingsComplete(t *testing
 	assert.Empty(t, prov.transfersTo("host-a", "app-old"), "the stale copy is not adopted")
 	assert.Contains(t, adoptionStatus(t, r).Message, "app-old on host-a")
 }
+
+// TestClusteredAdoption_SharedEndpointGuardFailsClosed: a Host whose endpoint
+// a single-host Provider names is not adopted from; and when the Hosts cannot
+// be listed, nothing is adopted in that pass.
+func TestClusteredAdoption_SharedEndpointGuardFailsClosed(t *testing.T) {
+	t.Run("a single-host Provider names the endpoint", func(t *testing.T) {
+		single := readyProvider(clusterNS, "prov-single")
+		single.Spec.Type = infravirtrigaudiov1beta1.ProviderTypeLibvirt
+		single.Spec.Endpoint = "qemu+ssh://root@host-a/system"
+		prov := &fakeClusteredAdopter{caps: routedAdoptionCaps, domains: []*fakeDomain{
+			{host: "host-a", id: "web", uuid: "uuid-a-web", power: "On"},
+			{host: "host-b", id: "web", uuid: "uuid-b-web", power: "On"},
+		}}
+		r := clusteredAdoptionReconciler(t, prov, clusteredAdoptionProvider(), single,
+			clusterHost("host-a", "prov-c"), clusterHost("host-b", "prov-c"))
+		reconcileAdoption(t, r)
+		require.Len(t, prov.transfers, 1)
+		assert.Equal(t, "host-b", prov.transfers[0].VM.HostID)
+	})
+
+	t.Run("the Hosts cannot be listed: nothing is adopted", func(t *testing.T) {
+		prov := &fakeClusteredAdopter{caps: routedAdoptionCaps, domains: []*fakeDomain{
+			{host: "host-a", id: "web", uuid: "uuid-a-web", power: "On"},
+		}}
+		r := clusteredAdoptionReconciler(t, prov, clusteredAdoptionProvider(), clusterHost("host-a", "prov-c"))
+		ww, ok := r.Client.(client.WithWatch)
+		require.True(t, ok)
+		r.Client = interceptor.NewClient(ww, interceptor.Funcs{
+			List: func(ctx context.Context, cl client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+				if _, isHosts := list.(*infravirtrigaudiov1beta1.HostList); isHosts {
+					return fmt.Errorf("hosts unavailable")
+				}
+				return cl.List(ctx, list, opts...)
+			},
+		})
+		res := reconcileAdoption(t, r)
+		assert.Equal(t, clusteredAdoptionRetryInterval, res.RequeueAfter)
+		assert.Empty(t, prov.transfers)
+		var vms infravirtrigaudiov1beta1.VirtualMachineList
+		require.NoError(t, r.List(context.Background(), &vms))
+		assert.Empty(t, vms.Items)
+		assert.Contains(t, adoptionStatus(t, r).Message, "list Hosts")
+	})
+}

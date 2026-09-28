@@ -275,9 +275,20 @@ func (r *VMAdoptionReconciler) reconcileClusteredAdoption(ctx context.Context, p
 		return r.clusteredAdoptionFailed(ctx, provider, fmt.Sprintf("Discovery failed: list VirtualMachines: %v", err), errReasonDiscoverVMs)
 	}
 
+	// The guards read every Host and Provider. They fail closed: without them
+	// this discovery adopts nothing (a shared endpoint or a single-host
+	// binding could not be ruled out).
+	hosts := &infravirtrigaudiov1beta1.HostList{}
+	if err := r.List(ctx, hosts); err != nil {
+		return r.clusteredAdoptionFailed(ctx, provider, fmt.Sprintf("Discovery failed: list Hosts: %v", err), errReasonDiscoverVMs)
+	}
+	providers := &infravirtrigaudiov1beta1.ProviderList{}
+	if err := r.List(ctx, providers); err != nil {
+		return r.clusteredAdoptionFailed(ctx, provider, fmt.Sprintf("Discovery failed: list Providers: %v", err), errReasonDiscoverVMs)
+	}
 	guards := adoptionGuards{
-		sharedEndpointHosts: r.hostsWithSharedEndpoints(ctx, provider),
-		singleHostIDs:       r.singleHostBoundIDs(ctx, vmList.Items),
+		sharedEndpointHosts: hostsWithSharedEndpoints(ctx, provider, hosts.Items, providers.Items),
+		singleHostIDs:       singleHostBoundIDs(vmList.Items, providers.Items),
 	}
 	plan := planClusteredAdoption(provider, listed, vmList.Items, guards)
 	var unmanaged []contracts.VMInfo
@@ -1039,40 +1050,41 @@ func (r *VMAdoptionReconciler) confirmOwnersGone(ctx context.Context, owners []c
 
 // hostsWithSharedEndpoints returns the names of provider's Hosts whose
 // endpoint (scheme, host and port; the user is ignored) another Host object —
-// of any Provider, in any namespace — also names, and logs a warning for each.
-// Adoption from such a host is skipped: two Providers fronting one hypervisor
-// could each adopt the same unstamped domain. A Host list that cannot be read
-// is logged and treated as no sharing (each Provider's adoption still stamps
-// with a check-and-set).
-func (r *VMAdoptionReconciler) hostsWithSharedEndpoints(ctx context.Context, provider *infravirtrigaudiov1beta1.Provider) map[string]bool {
+// of any Provider, in any namespace — or a single-host (not clustered)
+// Provider's spec.endpoint also names, and logs a warning for each. Adoption
+// from such a host is skipped: two Providers fronting one hypervisor could
+// each adopt the same unstamped domain, and a single-host provider does not
+// stamp the domains it manages. Residual risk: the same hypervisor reached
+// under two names (a DNS alias, a hostname and its IP) is not recognized.
+func hostsWithSharedEndpoints(ctx context.Context, provider *infravirtrigaudiov1beta1.Provider,
+	hosts []infravirtrigaudiov1beta1.Host, providers []infravirtrigaudiov1beta1.Provider) map[string]bool {
 	logger := log.FromContext(ctx)
-	hosts := &infravirtrigaudiov1beta1.HostList{}
-	if err := r.List(ctx, hosts); err != nil {
-		logger.Error(err, "List Hosts to detect shared endpoints")
-		return nil
-	}
-	byEndpoint := map[string][]*infravirtrigaudiov1beta1.Host{}
-	for i := range hosts.Items {
-		h := &hosts.Items[i]
+	byEndpoint := map[string][]string{}
+	for i := range hosts {
+		h := &hosts[i]
 		if key := endpointKey(h.Spec.Endpoint); key != "" {
-			byEndpoint[key] = append(byEndpoint[key], h)
+			byEndpoint[key] = append(byEndpoint[key], "Host "+h.Namespace+"/"+h.Name)
+		}
+	}
+	for i := range providers {
+		p := &providers[i]
+		if isClusterTopology(p) {
+			continue
+		}
+		if key := endpointKey(p.Spec.Endpoint); key != "" {
+			byEndpoint[key] = append(byEndpoint[key], "Provider "+p.Namespace+"/"+p.Name)
 		}
 	}
 	shared := map[string]bool{}
-	for _, group := range byEndpoint {
-		if len(group) < 2 {
+	for i := range hosts {
+		h := &hosts[i]
+		if h.Namespace != provider.Namespace || h.Spec.ProviderRef.Name != provider.Name {
 			continue
 		}
-		var names []string
-		for _, h := range group {
-			names = append(names, h.Namespace+"/"+h.Name)
-		}
-		for _, h := range group {
-			if h.Namespace == provider.Namespace && h.Spec.ProviderRef.Name == provider.Name {
-				shared[h.Name] = true
-				logger.Info("WARNING: Host objects share one hypervisor endpoint; not adopting from it "+
-					"(one clustered Provider per host endpoint)", "host", h.Name, "hosts", names)
-			}
+		if users := byEndpoint[endpointKey(h.Spec.Endpoint)]; len(users) > 1 {
+			shared[h.Name] = true
+			logger.Info("WARNING: a Host shares its hypervisor endpoint with another Host or a single-host Provider; "+
+				"not adopting from it (one clustered Provider per host endpoint)", "host", h.Name, "users", users)
 		}
 	}
 	return shared
@@ -1080,19 +1092,15 @@ func (r *VMAdoptionReconciler) hostsWithSharedEndpoints(ctx context.Context, pro
 
 // singleHostBoundIDs returns the status.id of every VirtualMachine in vms that
 // is bound through a Provider that is not clustered — including one whose
-// Provider cannot be read (conservative). A single-host provider never stamps
-// the domains it manages, so on a hypervisor fronted by both a single-host and
-// a clustered Provider the id is the only sign an unstamped domain is managed.
-func (r *VMAdoptionReconciler) singleHostBoundIDs(ctx context.Context, vms []infravirtrigaudiov1beta1.VirtualMachine) map[string]bool {
-	providers := &infravirtrigaudiov1beta1.ProviderList{}
+// Provider is not in providers (conservative). A single-host provider never
+// stamps the domains it manages, so on a hypervisor fronted by both a
+// single-host and a clustered Provider the id is the only sign an unstamped
+// domain is managed.
+func singleHostBoundIDs(vms []infravirtrigaudiov1beta1.VirtualMachine, providers []infravirtrigaudiov1beta1.Provider) map[string]bool {
 	clustered := map[types.NamespacedName]bool{}
-	if err := r.List(ctx, providers); err != nil {
-		log.FromContext(ctx).Error(err, "List Providers to find single-host bindings; treating every bound VM as single-host")
-	} else {
-		for i := range providers.Items {
-			if isClusterTopology(&providers.Items[i]) {
-				clustered[client.ObjectKeyFromObject(&providers.Items[i])] = true
-			}
+	for i := range providers {
+		if isClusterTopology(&providers[i]) {
+			clustered[client.ObjectKeyFromObject(&providers[i])] = true
 		}
 	}
 	ids := map[string]bool{}
