@@ -201,9 +201,11 @@ func (s *Server) importDiskFromS3(ctx context.Context, req *providerv1.ImportDis
 	// target qcow2. On failure, surface qemu-img's stderr directly so the real
 	// cause is visible (no io.Pipe "closed pipe" masking).
 	// Raw values: RunHost shell-quotes every argv element itself (this also
-	// covers stagedFormat, which was previously interpolated unquoted).
-	if res, err := conn.RunHost(ctx, "qemu-img", "convert", "-f", stagedFormat, "-O", "qcow2",
-		stagePath, targetPath); err != nil {
+	// covers stagedFormat, which was previously interpolated unquoted). The
+	// target is created with vmDiskMode (withUmask: Create adopts it without a
+	// chmod).
+	if res, err := conn.RunHost(ctx, withUmask(vmDiskUmask, "qemu-img", "convert", "-f", stagedFormat, "-O", "qcow2",
+		stagePath, targetPath)...); err != nil {
 		return nil, fmt.Errorf("host-side qemu-img convert (%s→qcow2) failed: %w%s", stagedFormat, err, qemuImgStderr(res))
 	}
 

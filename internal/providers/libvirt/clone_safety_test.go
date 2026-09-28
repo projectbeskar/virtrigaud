@@ -89,6 +89,21 @@ func TestClone_FullCloneIsUnchanged(t *testing.T) {
 	assert.Contains(t, c.domainXML("team-b.copy"), "<source file='"+disk+"'/>")
 }
 
+// requireCreatedWithVMDiskMode asserts disk was created with vmDiskMode (the
+// fake qemu-img writes it through the umask the provider set) and chowned
+// without following a symbolic link — never chmod'ed.
+func requireCreatedWithVMDiskMode(t *testing.T, sudoLog []string, disk string) {
+	t.Helper()
+	fi, err := os.Lstat(disk)
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0o640), fi.Mode().Perm(), "created owner rw, group r, nothing for others")
+	assert.Contains(t, sudoLog, "chown -h libvirt-qemu:kvm -- "+disk)
+	for _, l := range sudoLog {
+		assert.False(t, strings.HasPrefix(l, "chmod "), "no chmod by root, which follows a symlink: %q", l)
+		assert.False(t, strings.HasPrefix(l, "chown ") && !strings.HasPrefix(l, "chown -h "), "chown never follows a symlink: %q", l)
+	}
+}
+
 func TestClone_DiskIsNotWorldWritable(t *testing.T) {
 	c := newCreateHost(t)
 	_, err := c.p.Create(context.Background(), c.createReq(ownerTeamA, c.file(c.images, "ubuntu.qcow2")))
@@ -97,18 +112,13 @@ func TestClone_DiskIsNotWorldWritable(t *testing.T) {
 
 	_, err = c.p.Clone(context.Background(), cloneReq())
 	require.NoError(t, err)
-	disk := filepath.Join(c.images, "team-b.copy-disk.qcow2")
-	sudo := splitLines(c.log("sudo"))
-	assert.Contains(t, sudo, "chown libvirt-qemu:kvm "+disk)
-	assert.Contains(t, sudo, "chmod 0660 "+disk, "owner and group only")
-	for _, l := range sudo {
-		assert.NotContains(t, l, "chmod 777", "no world-writable guest disk on a shared host")
-	}
+	requireCreatedWithVMDiskMode(t, splitLines(c.log("sudo")), filepath.Join(c.images, "team-b.copy-disk.qcow2"))
 }
 
 // TestVMDisks_AreNotWorldWritable pins vmDiskMode on the other VM-disk paths:
-// a Create that copies a base image into the VM's disk, and a migration's
-// imported disk attached in place — 0660 libvirt-qemu:kvm, never 0777.
+// a Create that copies a base image into the VM's disk, a migration's
+// imported disk attached in place, and a blank disk libvirt creates — created
+// 0640 and chowned libvirt-qemu:kvm with -h, never chmod'ed.
 func TestVMDisks_AreNotWorldWritable(t *testing.T) {
 	c := newCreateHost(t)
 	ctx := context.Background()
@@ -126,12 +136,24 @@ func TestVMDisks_AreNotWorldWritable(t *testing.T) {
 
 	sudo := splitLines(c.log("sudo"))
 	for _, disk := range []string{copied, landed.Path} {
-		assert.Contains(t, sudo, "chown libvirt-qemu:kvm "+disk)
-		assert.Contains(t, sudo, "chmod 0660 "+disk)
+		requireCreatedWithVMDiskMode(t, sudo, disk)
 	}
-	for _, l := range sudo {
-		assert.NotContains(t, l, "chmod 777")
-	}
+
+	// A blank disk: libvirt creates it (vol-create, the definition on stdin)
+	// with the mode, and it is only chowned.
+	c.resetLogs()
+	blank := filepath.Join(c.images, "blank.qcow2")
+	require.NoError(t, os.WriteFile(filepath.Join(c.root, "h1", "vol-default-blank"), []byte(blank+"\n"), 0o600))
+	vol, err := NewStorageProvider(c.vp).CreateVolume(ctx, "default", "blank", "qcow2", 3)
+	require.NoError(t, err)
+	assert.Equal(t, blank, vol.Path)
+	assert.Contains(t, c.virshCalls("h1"), "vol-create default /dev/stdin")
+	def, err := os.ReadFile(filepath.Join(c.root, "h1", "vol-create.xml")) //nolint:gosec // test reads its own fixture
+	require.NoError(t, err)
+	assert.Equal(t, "<volume><name>blank</name><capacity unit=\"G\">3</capacity>"+
+		"<target><format type=\"qcow2\"></format><permissions><mode>0640</mode></permissions></target></volume>", string(def))
+	sudo = splitLines(c.log("sudo"))
+	assert.Equal(t, []string{"chown -h libvirt-qemu:kvm -- " + blank, "restorecon " + blank}, sudo)
 }
 
 // uefiSource creates team-a/web and gives it a per-VM UEFI varstore in a
@@ -169,9 +191,10 @@ func TestClone_NVRAMCopyNeverFollowsSymlinks(t *testing.T) {
 	j := indexOf(sudo, "dd if="+src+" of="+target+" iflag=nofollow oflag=nofollow conv=excl status=none")
 	require.GreaterOrEqual(t, i, 0, "any stale target is unlinked first: %v", sudo)
 	require.Greater(t, j, i, "then copied with O_NOFOLLOW on both ends and an exclusive create, never `cp` as root: %v", sudo)
-	assert.Contains(t, sudo, "chmod 0600 "+target)
+	assert.Contains(t, sudo, "chown -h libvirt-qemu:kvm -- "+target, "chowned without following a symlink")
 	for _, l := range sudo {
 		assert.False(t, strings.HasPrefix(l, "cp "), "no cp of the varstore: %q", l)
+		assert.False(t, strings.HasPrefix(l, "chmod "), "the mode is set at creation (umask), never by a root chmod: %q", l)
 	}
 	assert.Contains(t, c.domainXML("team-b.copy"), "<nvram>"+target+"</nvram>")
 }
@@ -260,6 +283,9 @@ func TestCopyClonedNVRAM_RealCommands(t *testing.T) {
 		got, err := os.ReadFile(target) //nolint:gosec // test reads its own scratch file
 		require.NoError(t, err)
 		assert.Equal(t, "source vars", string(got))
+		fi, err := os.Lstat(target)
+		require.NoError(t, err)
+		assert.Equal(t, os.FileMode(0o600), fi.Mode().Perm(), "created private to its owner (umask), not chmod'ed afterwards")
 		kept, err := os.ReadFile(victim) //nolint:gosec // test reads its own scratch file
 		require.NoError(t, err)
 		assert.Equal(t, "another domain's vars", string(kept), "the other hard link is never truncated")

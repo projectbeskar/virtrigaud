@@ -197,11 +197,21 @@ func (s *StorageProvider) CreateVolume(ctx context.Context, poolName, volumeName
 		return nil, fmt.Errorf("failed to ensure pool is active: %w", err)
 	}
 
-	// Create volume using vol-create-as
-	sizeBytes := fmt.Sprintf("%dG", sizeGB)
-	result, err := s.virshProvider.runVirshCommand(ctx, "vol-create-as", poolName, volumeName, sizeBytes, "--format", format)
+	// Create the volume with vol-create (what vol-create-as does, plus the
+	// mode): libvirt creates it with vmDiskMode, so it is never chmod'ed
+	// afterwards (disk_mode.go). The definition is read from stdin. Like
+	// vol-create-as, it refuses an existing volume name.
+	volXML, err := blankVolumeXML(volumeName, format, sizeGB)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create volume: %w, output: %s", err, result.Stderr)
+		return nil, err
+	}
+	result, err := s.virshProvider.runVirshStdin(ctx, volXML, "vol-create", poolName, "/dev/stdin")
+	if err != nil {
+		stderr := ""
+		if result != nil {
+			stderr = result.Stderr
+		}
+		return nil, fmt.Errorf("failed to create volume: %w, output: %s", err, stderr)
 	}
 
 	// Get volume information
@@ -210,13 +220,11 @@ func (s *StorageProvider) CreateVolume(ctx context.Context, poolName, volumeName
 		return nil, fmt.Errorf("failed to get created volume info: %w", err)
 	}
 
-	// Fix ownership and permissions for libvirt access
-	log.Printf("INFO Setting proper ownership and permissions for %s", volume.Path)
-	if _, err := s.virshProvider.runVirshCommand(ctx, "!", "sudo", "chown", "libvirt-qemu:kvm", volume.Path); err != nil {
+	// Give it to the qemu user without following a symbolic link (its mode
+	// was set when libvirt created it).
+	log.Printf("INFO Setting proper ownership for %s", volume.Path)
+	if err := chownToQemu(ctx, s.virshProvider, volume.Path); err != nil {
 		log.Printf("WARN Failed to set ownership: %v", err)
-	}
-	if _, err := s.virshProvider.runVirshCommand(ctx, "!", "sudo", "chmod", vmDiskMode, volume.Path); err != nil {
-		log.Printf("WARN Failed to set permissions: %v", err)
 	}
 
 	// Fix SELinux context if SELinux is enabled (will fail gracefully if not)
@@ -311,8 +319,9 @@ func (s *StorageProvider) DownloadCloudImage(ctx context.Context, imageURL, volu
 	if sizeGB > 0 {
 		log.Printf("INFO Converting and resizing image to %dGB", sizeGB)
 
-		// First convert the image
-		result, err = s.virshProvider.runVirshCommand(ctx, "!", "qemu-img", "convert", "-f", srcFormat, "-O", "qcow2", tempImage, targetPath)
+		// First convert the image (created with vmDiskMode)
+		result, err = runHost(ctx, s.virshProvider, withUmask(vmDiskUmask,
+			"qemu-img", "convert", "-f", srcFormat, "-O", "qcow2", tempImage, targetPath)...)
 		if err != nil {
 			return nil, fmt.Errorf("failed to convert image: %w, output: %s", err, result.Stderr)
 		}
@@ -324,21 +333,20 @@ func (s *StorageProvider) DownloadCloudImage(ctx context.Context, imageURL, volu
 			return nil, fmt.Errorf("failed to resize image: %w, output: %s", err, result.Stderr)
 		}
 	} else {
-		// Just convert to target location
+		// Just convert to target location (created with vmDiskMode)
 		log.Printf("INFO Converting image to qcow2 format")
-		result, err = s.virshProvider.runVirshCommand(ctx, "!", "qemu-img", "convert", "-f", srcFormat, "-O", "qcow2", tempImage, targetPath)
+		result, err = runHost(ctx, s.virshProvider, withUmask(vmDiskUmask,
+			"qemu-img", "convert", "-f", srcFormat, "-O", "qcow2", tempImage, targetPath)...)
 		if err != nil {
 			return nil, fmt.Errorf("failed to convert image: %w, output: %s", err, result.Stderr)
 		}
 	}
 
-	// Fix ownership and permissions for libvirt access
-	log.Printf("INFO Setting proper ownership and permissions for %s", targetPath)
-	if _, err := s.virshProvider.runVirshCommand(ctx, "!", "sudo", "chown", "libvirt-qemu:kvm", targetPath); err != nil {
+	// Give it to the qemu user without following a symbolic link (its mode
+	// was set when it was created).
+	log.Printf("INFO Setting proper ownership for %s", targetPath)
+	if err := chownToQemu(ctx, s.virshProvider, targetPath); err != nil {
 		log.Printf("WARN Failed to set ownership: %v", err)
-	}
-	if _, err := s.virshProvider.runVirshCommand(ctx, "!", "sudo", "chmod", vmDiskMode, targetPath); err != nil {
-		log.Printf("WARN Failed to set permissions: %v", err)
 	}
 
 	// Fix SELinux context if SELinux is enabled (will fail gracefully if not)
@@ -635,17 +643,17 @@ func (s *StorageProvider) CopyImageToVolume(ctx context.Context, srcPath, srcFor
 
 // adoptVolumeInPlace uses an existing qcow2 file in the pool directory as a VM
 // disk without copying it (a migration's imported disk). The caller is
-// responsible for having established that path is that VM's own disk.
+// responsible for having established that path is that VM's own disk. The
+// import created it with vmDiskMode (writeVMDiskArgv, withUmask); it is given
+// to the qemu user without following a symbolic link and never chmod'ed, so
+// a disk imported by an earlier release keeps its mode.
 func (s *StorageProvider) adoptVolumeInPlace(ctx context.Context, path, poolName string) (*StorageVolume, error) {
 	log.Printf("INFO Source image is already in pool directory with correct format: %s", path)
 	log.Printf("INFO Using existing disk directly without copying (typical for imported/migrated disks)")
 
-	// Ensure proper ownership and permissions
-	if _, err := s.virshProvider.runVirshCommand(ctx, "!", "sudo", "chown", "libvirt-qemu:kvm", path); err != nil {
+	// Ensure proper ownership (the mode was set when it was imported)
+	if err := chownToQemu(ctx, s.virshProvider, path); err != nil {
 		log.Printf("WARN Failed to set ownership on existing disk: %v", err)
-	}
-	if _, err := s.virshProvider.runVirshCommand(ctx, "!", "sudo", "chmod", vmDiskMode, path); err != nil {
-		log.Printf("WARN Failed to set permissions on existing disk: %v", err)
 	}
 
 	// Refresh pool to recognize the volume
@@ -655,7 +663,7 @@ func (s *StorageProvider) adoptVolumeInPlace(ctx context.Context, path, poolName
 
 	// Get volume size
 	var capacityStr string
-	infoResult, err := qemuImgInfoOnHost(ctx, s.virshProvider, "--output=json", "--", path) // 0660 libvirt-qemu:kvm now
+	infoResult, err := qemuImgInfoOnHost(ctx, s.virshProvider, "--output=json", "--", path) // libvirt-qemu:kvm now
 	if err == nil {
 		var diskInfo map[string]interface{}
 		if err := json.Unmarshal([]byte(infoResult.Stdout), &diskInfo); err == nil {
@@ -682,9 +690,10 @@ func (s *StorageProvider) adoptVolumeInPlace(ctx context.Context, path, poolName
 func (s *StorageProvider) convertImageToVolume(ctx context.Context, srcPath, srcFormat, targetPath, volumeName, poolName string, sizeGB int) (*StorageVolume, error) {
 	log.Printf("INFO Source is external or wrong format - copying and converting: %s -> %s", srcPath, targetPath)
 
-	// Convert the source image to the target location
-	result, err := s.virshProvider.runVirshCommand(ctx, "!", "qemu-img", "convert",
-		"-f", srcFormat, "-O", "qcow2", srcPath, targetPath)
+	// Convert the source image to the target location, created with
+	// vmDiskMode
+	result, err := runHost(ctx, s.virshProvider, withUmask(vmDiskUmask, "qemu-img", "convert",
+		"-f", srcFormat, "-O", "qcow2", srcPath, targetPath)...)
 	if err != nil {
 		stderr := ""
 		if result != nil {
@@ -705,13 +714,11 @@ func (s *StorageProvider) convertImageToVolume(ctx context.Context, srcPath, src
 		}
 	}
 
-	// Fix ownership and permissions for libvirt access
-	log.Printf("INFO Setting proper ownership and permissions for %s", targetPath)
-	if _, err := s.virshProvider.runVirshCommand(ctx, "!", "sudo", "chown", "libvirt-qemu:kvm", targetPath); err != nil {
+	// Give it to the qemu user without following a symbolic link (its mode
+	// was set when it was created).
+	log.Printf("INFO Setting proper ownership for %s", targetPath)
+	if err := chownToQemu(ctx, s.virshProvider, targetPath); err != nil {
 		log.Printf("WARN Failed to set ownership: %v", err)
-	}
-	if _, err := s.virshProvider.runVirshCommand(ctx, "!", "sudo", "chmod", vmDiskMode, targetPath); err != nil {
-		log.Printf("WARN Failed to set permissions: %v", err)
 	}
 
 	// Fix SELinux context if SELinux is enabled (will fail gracefully if not)

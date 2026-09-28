@@ -272,21 +272,21 @@ func (p *Provider) resolvePrimaryDisk(ctx context.Context, sourceVMID string, sp
 }
 
 // createLinkedOverlay creates a copy-on-write qcow2 overlay backed by the
-// source disk on vp's host. The overlay is created remotely (the disk lives on the libvirt
-// host), then ownership/permissions are fixed so QEMU can open it — mirroring
-// CreateVolume's handling. The source disk is opened read-only as a backing
-// file and is never modified here.
+// source disk on vp's host. The overlay is created remotely (the disk lives on
+// the libvirt host) with vmDiskMode (withUmask), then given to the qemu user so
+// QEMU can open it — mirroring CreateVolume's handling. The source disk is
+// opened read-only as a backing file and is never modified here.
 func createLinkedOverlay(ctx context.Context, vp *VirshProvider, srcDiskPath, srcDiskFormat, targetDiskPath string) error {
 	log.Printf("INFO Creating linked-clone overlay %s backed by %s (%s)", targetDiskPath, srcDiskPath, srcDiskFormat)
 
 	// qemu-img create -f qcow2 -b <src> -F <srcFormat> <overlay>
-	res, err := vp.runVirshCommand(ctx, "!",
+	res, err := runHost(ctx, vp, withUmask(vmDiskUmask,
 		"qemu-img", "create",
 		"-f", "qcow2",
 		"-b", srcDiskPath,
 		"-F", srcDiskFormat,
 		targetDiskPath,
-	)
+	)...)
 	if err != nil {
 		return fmt.Errorf("create linked-clone overlay: %w, output: %s", err, res.Stderr)
 	}
@@ -314,13 +314,14 @@ func createFullCopy(ctx context.Context, vp *VirshProvider, srcDiskPath, targetD
 
 	// qemu-img convert -O qcow2 <src> <target>. The source format is
 	// auto-probed by qemu-img (do not force -f, which would break if the
-	// resolved format is wrong); convert flattens any backing chain.
-	res, err := vp.runVirshCommand(ctx, "!",
+	// resolved format is wrong); convert flattens any backing chain. The copy
+	// is created with vmDiskMode (withUmask).
+	res, err := runHost(ctx, vp, withUmask(vmDiskUmask,
 		"qemu-img", "convert",
 		"-O", "qcow2",
 		srcDiskPath,
 		targetDiskPath,
-	)
+	)...)
 	if err != nil {
 		return fmt.Errorf("create full-clone copy: %w, output: %s", err, res.Stderr)
 	}
@@ -329,29 +330,16 @@ func createFullCopy(ctx context.Context, vp *VirshProvider, srcDiskPath, targetD
 	return nil
 }
 
-// vmDiskMode is the mode of every VM disk VirtRigaud creates or adopts
-// (Create, image copy/download, an imported disk adopted in place, Clone),
-// chowned libvirt-qemu:kvm: read-write for the qemu user and its group, never
-// for anyone else on a shared host (it used to be world-writable 0777). The
-// provider's SSH user reads VM disks as a member of kvm, or as root: the disk
-// in-use checks (through `sudo -n` when allowed, qemuImgInfoOnHost),
-// GetDiskInfo, s3/nfs exports and a full clone's copy. Disks created by an
-// earlier release keep their mode. Least privilege (0600 libvirt-qemu with
-// every read through `sudo -n`) is a tracked follow-up.
-const vmDiskMode = "0660"
-
-// finalizeClonedDisk fixes ownership/permissions/SELinux on a freshly created
-// clone disk on vp's host so libvirt-qemu can open it, and refreshes the pool so the new
+// finalizeClonedDisk fixes ownership/SELinux on a freshly created clone disk
+// on vp's host so libvirt-qemu can open it, and refreshes the pool so the new
 // volume is visible to subsequent lookups. It mirrors StorageProvider.Create-
-// Volume's handling, except that the disk is not world-writable
-// (vmDiskMode). Every step is best-effort: the host may not use these
-// mechanisms (e.g. no SELinux), so failures are logged, not fatal.
+// Volume's handling. The disk already has its mode (vmDiskMode, set when it
+// was created): it is never chmod'ed, and it is chowned without following a
+// symbolic link (chownToQemu). Every step is best-effort: the host may not use
+// these mechanisms (e.g. no SELinux), so failures are logged, not fatal.
 func finalizeClonedDisk(ctx context.Context, vp *VirshProvider, targetDiskPath string) {
-	if _, e := vp.runVirshCommand(ctx, "!", "sudo", "chown", "libvirt-qemu:kvm", targetDiskPath); e != nil {
+	if e := chownToQemu(ctx, vp, targetDiskPath); e != nil {
 		log.Printf("WARN Failed to set clone disk ownership: %v", e)
-	}
-	if _, e := vp.runVirshCommand(ctx, "!", "sudo", "chmod", vmDiskMode, targetDiskPath); e != nil {
-		log.Printf("WARN Failed to set clone disk permissions: %v", e)
 	}
 	if _, e := vp.runVirshCommand(ctx, "!", "sudo", "restorecon", targetDiskPath); e != nil {
 		log.Printf("WARN Failed to restore clone disk SELinux context: %v", e)
@@ -377,8 +365,10 @@ func finalizeClonedDisk(ctx context.Context, vp *VirshProvider, targetDiskPath s
 // file among them) is never truncated (ensureNVRAMTargetFree has refused a
 // symlinked or in-use target before any file of the clone was written; this
 // closes the race after that check). The target stays in the source
-// varstore's directory (rewriteNVRAMPath). The copy is then made private to
-// the qemu user (0600). Failure is non-fatal but
+// varstore's directory (rewriteNVRAMPath). dd creates it under
+// clonedNVRAMUmask — private to its owner (0600) from the start, never
+// chmod'ed — and it is then given to the qemu user without following a
+// symbolic link (chownToQemu). Failure is non-fatal but
 // logged loudly: the clone may fail to boot UEFI correctly because its <nvram>
 // now points at a path that was never populated.
 func copyClonedNVRAM(ctx context.Context, vp *VirshProvider, srcNvramPath, targetNvramPath string) {
@@ -391,8 +381,8 @@ func copyClonedNVRAM(ctx context.Context, vp *VirshProvider, srcNvramPath, targe
 	if _, err := runHost(ctx, vp, "sudo", "rm", "-f", "--", targetNvramPath); err != nil {
 		log.Printf("WARN Failed to remove the stale UEFI varstore %s for clone: %v", targetNvramPath, err)
 	}
-	if res, err := runHost(ctx, vp, "sudo", "dd", "if="+srcNvramPath, "of="+targetNvramPath,
-		"iflag=nofollow", "oflag=nofollow", "conv=excl", "status=none"); err != nil {
+	if res, err := runHost(ctx, vp, withUmask(clonedNVRAMUmask, "sudo", "dd", "if="+srcNvramPath, "of="+targetNvramPath,
+		"iflag=nofollow", "oflag=nofollow", "conv=excl", "status=none")...); err != nil {
 		stderr := ""
 		if res != nil {
 			stderr = res.Stderr
@@ -402,23 +392,16 @@ func copyClonedNVRAM(ctx context.Context, vp *VirshProvider, srcNvramPath, targe
 			srcNvramPath, targetNvramPath, err, stderr)
 		return
 	}
-	// Fix ownership/mode/SELinux so libvirt-qemu (only) can open the varstore,
+	// Fix ownership/SELinux so libvirt-qemu (only) can open the varstore,
 	// mirroring the clone-disk finalization. Best-effort: hosts vary in their
 	// mechanisms.
-	if _, e := vp.runVirshCommand(ctx, "!", "sudo", "chown", "libvirt-qemu:kvm", targetNvramPath); e != nil {
+	if e := chownToQemu(ctx, vp, targetNvramPath); e != nil {
 		log.Printf("WARN Failed to set clone varstore ownership: %v", e)
-	}
-	if _, e := vp.runVirshCommand(ctx, "!", "sudo", "chmod", clonedNVRAMMode, targetNvramPath); e != nil {
-		log.Printf("WARN Failed to set clone varstore permissions: %v", e)
 	}
 	if _, e := vp.runVirshCommand(ctx, "!", "sudo", "restorecon", targetNvramPath); e != nil {
 		log.Printf("WARN Failed to restore clone varstore SELinux context: %v", e)
 	}
 }
-
-// clonedNVRAMMode is the mode of a clone's UEFI varstore: private to its
-// owner, the qemu user — the mode libvirt gives the varstores it creates.
-const clonedNVRAMMode = "0600"
 
 // nvramTargetScript is the fixed `sh -c` script behind ensureNVRAMTargetFree.
 // The path is ALWAYS the positional parameter "$1", never interpolated into

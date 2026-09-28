@@ -338,9 +338,10 @@ func (v *VirshProvider) copyDiskToRemote(ctx context.Context, localPath, volumeN
 
 	// remotePath is caller-derived (volumeName), so it is never interpolated
 	// into shell text: the redirect lives in a fixed `sh -c` script and the
-	// path is passed as its positional parameter "$1" (writeStdinToFileArgv),
-	// with the whole argv shell-quoted by shellJoin.
-	remoteCmd, err := shellJoin(writeStdinToFileArgv(remotePath))
+	// path is passed as its positional parameter "$1" (writeVMDiskArgv), with
+	// the whole argv shell-quoted by shellJoin. The disk is created with
+	// vmDiskMode, so Create adopts it without a chmod.
+	remoteCmd, err := shellJoin(writeVMDiskArgv(remotePath))
 	if err != nil {
 		return "", fmt.Errorf("build remote copy command: %w", err)
 	}

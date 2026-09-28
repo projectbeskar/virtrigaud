@@ -150,10 +150,11 @@ func (s *Server) importDiskFromNFS(ctx context.Context, req *providerv1.ImportDi
 		return nil, fmt.Errorf("inspect staged nfs object: %w", err)
 	}
 
-	// Read the staged qcow2 straight from NFS and write the pool volume.
+	// Read the staged qcow2 straight from NFS and write the pool volume,
+	// created with vmDiskMode (withUmask: Create adopts it without a chmod).
 	// Raw values: RunHost shell-quotes every argv element itself.
-	if res, err := conn.RunHost(ctx, "qemu-img", "convert", "-f", "qcow2", "-O", "qcow2",
-		nfsURL, targetPath); err != nil {
+	if res, err := conn.RunHost(ctx, withUmask(vmDiskUmask, "qemu-img", "convert", "-f", "qcow2", "-O", "qcow2",
+		nfsURL, targetPath)...); err != nil {
 		return nil, fmt.Errorf("host-side qemu-img convert from nfs failed: %w%s", err, qemuImgStderr(res))
 	}
 

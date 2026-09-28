@@ -41,7 +41,9 @@ import (
 // `list --all` reports the defined domains, `define <file>` records the
 // domain (by name and by UUID) the way libvirt would, refusing a name that is
 // already defined, and `undefine` forgets it again. A file named fail-define
-// in the host directory makes define fail. With no -c URI
+// in the host directory makes define fail. `vol-create <pool> <file>` records
+// the volume definition it reads in vol-create.xml, and `vol-path <name>
+// --pool <pool>` answers from vol-<pool>-<name>. With no -c URI
 // (runRemoteVirshCommand on a non-system URI) the host is $FAKE_DEFAULT_HOST.
 const createHostVirshScript = `#!/bin/sh
 uri=""
@@ -93,7 +95,10 @@ case "$1" in
   pool-list) printf ' Name      State    Autostart\n-------------------------------\n default   active   yes\n\n' ;;
   pool-info) printf 'Name:           default\nState:          running\n' ;;
   pool-dumpxml) printf "<pool type='dir'><name>default</name><target><path>%s</path></target></pool>\n<!-- /var/lib/libvirt/images -->\n" "$(cat "$d/pooldir")" ;;
-  vol-path) exec cat "$d/vol-$3-$5" ;;
+  vol-create) cat "$3" > "$d/vol-create.xml" ;;
+  vol-path)
+    if [ "$3" = "--pool" ]; then exec cat "$d/vol-$4-$2"; fi
+    exec cat "$d/vol-$3-$5" ;;
   *) exit 0 ;;
 esac
 `

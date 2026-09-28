@@ -76,8 +76,9 @@ import (
 //     (snapshotCreateOn/snapshotDeleteOn/snapshotRevertOn) must call it on the
 //     leased host with the owner-checked handle.
 //   - Clone: ensureNVRAMTargetFree before any file is written,
-//     copyClonedNVRAM (O_NOFOLLOW) and finalizeClonedDisk (vmDiskMode) —
-//     all free functions over the host's *VirshProvider — and the Linked=true
+//     copyClonedNVRAM (O_NOFOLLOW, created 0600) and finalizeClonedDisk
+//     (chown -h; the disk is created with vmDiskMode under withUmask) — all
+//     free functions over the host's *VirshProvider — and the Linked=true
 //     refusal (linkedClonesDisabledMessage) before any host command; a routed
 //     clone core must keep all four.
 

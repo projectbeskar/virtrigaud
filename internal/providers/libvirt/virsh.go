@@ -128,6 +128,11 @@ type VirshProvider struct {
 	// unroutableHits counts refused calls on an unroutable handle. A non-zero
 	// value is a routing bug; tests assert it stays zero.
 	unroutableHits atomic.Int64
+
+	// checkedDiskDirs records the directories on this host whose permissions
+	// warnIfDiskDirUnsafe has already checked (key: directory path), so each
+	// is checked — and warned about — once per provider process.
+	checkedDiskDirs sync.Map
 }
 
 // errUnroutableCall is the error an unroutable VirshProvider returns for every
