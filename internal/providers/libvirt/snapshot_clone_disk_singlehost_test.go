@@ -66,8 +66,11 @@ const (
 // "local" otherwise. Per host, fail-<subcommand or tool> makes it fail, "state"
 // holds the domstate answer (default "shut off"), snaps-<domain> the snapshot
 // list, and dom-<name>.xml marks a domain as present. mktemp is deterministic
-// (the X run becomes 0000000000) and creates what it names; sh answers "no
-// such path" for every host existence check; every other host tool only logs.
+// (the X run becomes 0000000000) and creates what it names only inside the
+// test's own directories (FAKE_SCD_DIR, FAKE_SCD_STAGING) — never in a real
+// host directory such as /var/lib/libvirt/images; sh answers "no such path"
+// for every host existence check; every other host tool (mv included: it
+// never moves a real file) only logs.
 const scdFakeTool = `#!/bin/sh
 tool=$(basename "$0")
 host=local
@@ -110,7 +113,10 @@ mktemp)
     esac
   done
   p="${t%XXXXXXXXXX}0000000000$suf"
-  if [ "$isdir" = 1 ]; then mkdir -p "$p"; else : > "$p"; fi
+  mk=0
+  case "$p" in "$FAKE_SCD_DIR"/*) mk=1 ;; esac
+  if [ -n "$FAKE_SCD_STAGING" ]; then case "$p" in "$FAKE_SCD_STAGING"/*) mk=1 ;; esac; fi
+  if [ "$mk" = 1 ]; then if [ "$isdir" = 1 ]; then mkdir -p "$p"; else : > "$p"; fi; fi
   echo "$p" ;;
 qemu-img)
   fail qemu-img
@@ -120,7 +126,7 @@ esac
 `
 
 // scdTools are the names scdFakeTool is installed under.
-var scdTools = []string{"virsh", "mktemp", "qemu-img", "sh", "sudo", "cp", "chmod", "chown", "rm", "restorecon", "stat", "sha256sum"}
+var scdTools = []string{"virsh", "mktemp", "qemu-img", "sh", "sudo", "cp", "mv", "chmod", "chown", "rm", "restorecon", "stat", "sha256sum"}
 
 // scdFixture is one scenario's fake host: a single-host Provider (with the
 // registry seam the Server's snapshot RPCs use) on qemu:///single.
@@ -193,10 +199,11 @@ func newSCDFixture(t *testing.T, domains map[string]string) *scdFixture {
 	for _, tool := range scdTools {
 		require.NoError(t, os.WriteFile(filepath.Join(bin, tool), []byte(scdFakeTool), 0o755)) //nolint:gosec // test shim must be executable
 	}
+	staging := t.TempDir()
 	t.Setenv("FAKE_SCD_DIR", dir)
+	t.Setenv("FAKE_SCD_STAGING", staging)
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 
-	staging := t.TempDir()
 	vp := localHostVP("single")
 	reg, err := hostconn.NewRegistry(newVirshConn("single", vp))
 	require.NoError(t, err)
