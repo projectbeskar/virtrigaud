@@ -361,9 +361,9 @@ var restorePendingMessage = fmt.Sprintf(
 
 // restorePendingOwnMessage is the Placed / Provisioning message of a VM held
 // because its OWN domain (stamped with its UID) exists on another host of its
-// Provider — its placement record was lost (contracts.IsVMOwnDomainElsewhere).
-// Nothing needs re-stamping; the pending host must point at that host. It
-// names no host. heldForOwnDomainElsewhere recognizes the hold by it.
+// Provider — its placement record was lost (contracts.IsVMOwnDomainElsewhere) —
+// with reason ReasonOwnDomainOnAnotherHost. Nothing needs re-stamping; the
+// pending host must point at that host. It names no host.
 var restorePendingOwnMessage = fmt.Sprintf(
 	"held: a domain of this VirtualMachine — stamped with its own UID — already exists on another host of its "+
 		"Provider (its placement record was lost), so nothing is created on its pending host. An administrator must "+
@@ -371,16 +371,31 @@ var restorePendingOwnMessage = fmt.Sprintf(
 		"VirtualMachine is held too, so that its domain is not left running. See %s. Re-checked with a backoff of up to %s",
 	restorePendingRunbook, blockedRetryMax)
 
-// heldForOwnDomainElsewhere reports whether vm's last create was answered with
-// its own domain on another host (holdForPreviousIncarnation recorded that
-// hold) and vm is still unbound: its delete on the pending host would find
-// nothing there and leave that domain running.
+// heldForOwnDomainElsewhere reports whether vm's last create — or, for a
+// clone's target, its clone — was answered with its own domain on another
+// host (holdForPreviousIncarnation or holdCloneForPreviousIncarnation
+// recorded Placed=False/OwnDomainOnAnotherHost) and vm is still unbound: its
+// delete on the pending host would find nothing there and leave that domain
+// running.
 func heldForOwnDomainElsewhere(vm *infravirtrigaudiov1beta1.VirtualMachine) bool {
 	if vm.Status.ID != "" {
 		return false
 	}
 	c := meta.FindStatusCondition(vm.Status.Conditions, k8s.ConditionPlaced)
-	return c != nil && c.Reason == k8s.ReasonRestorePending && c.Message == restorePendingOwnMessage
+	return c != nil && c.Status == metav1.ConditionFalse && c.Reason == k8s.ReasonOwnDomainOnAnotherHost
+}
+
+// incarnationHold returns the Placed (and, for a VM, Provisioning) reason and
+// message of a create or clone the provider refused with
+// VM_PREVIOUS_INCARNATION: RestorePending for a previous incarnation under
+// another UID, OwnDomainOnAnotherHost for the VM's own domain on another host
+// (contracts.IsVMOwnDomainElsewhere) — the dedicated reason
+// heldForOwnDomainElsewhere reads.
+func incarnationHold(err error) (reason, msg string) {
+	if contracts.IsVMOwnDomainElsewhere(err) {
+		return k8s.ReasonOwnDomainOnAnotherHost, restorePendingOwnMessage
+	}
+	return k8s.ReasonRestorePending, restorePendingMessage
 }
 
 // ownDomainDeleteMessage is the DeleteBlocked message of a VM held by
@@ -399,8 +414,9 @@ var ownDomainDeleteMessage = fmt.Sprintf("Delete blocked: this VirtualMachine's 
 // VM is NOT re-scheduled: that is exactly how a second domain for the same
 // namespace and name would be made. The VM keeps its pendingHost (and so its
 // committed capacity and the providerRef lock), gets Placed=False and
-// Provisioning=False with RestorePending plus one Warning event, and the
-// Create is retried on the same host with the blocked-VM backoff
+// Provisioning=False with RestorePending (OwnDomainOnAnotherHost when the
+// domain is its own, stamped with its UID: incarnationHold) plus one Warning
+// event, and the Create is retried on the same host with the blocked-VM backoff
 // (blockedRetryBackoff, from when the hold began — createHoldSince: 15 s
 // doubling to 5 min) until an administrator re-attaches or removes the
 // previous incarnation. Nothing
@@ -415,26 +431,24 @@ func (r *VirtualMachineReconciler) holdForPreviousIncarnation(
 	log.FromContext(ctx).Info("Create refused: a previous incarnation of this VM exists on a host of the Provider; "+
 		"holding the VM on its pending host (not excluded, not re-scheduled)", "host", host, "error", err.Error())
 	// The VM's own domain elsewhere (item 8 of the A6.1 security review) is
-	// held the same way, with its own message and runbook hint.
-	msg := restorePendingMessage
-	if contracts.IsVMOwnDomainElsewhere(err) {
-		msg = restorePendingOwnMessage
-	}
+	// held the same way, with its own reason (OwnDomainOnAnotherHost),
+	// message and runbook hint.
+	reason, msg := incarnationHold(err)
 	// Read before the conditions are set: FindStatusCondition returns a
 	// pointer into the slice that setPlacedCondition updates in place.
 	prev := meta.FindStatusCondition(vm.Status.Conditions, k8s.ConditionPlaced)
-	alreadyHeld := prev != nil && prev.Reason == k8s.ReasonRestorePending && prev.Message == msg
-	setPlacedCondition(vm, metav1.ConditionFalse, k8s.ReasonRestorePending, msg)
+	alreadyHeld := prev != nil && prev.Status == metav1.ConditionFalse && prev.Reason == reason
+	setPlacedCondition(vm, metav1.ConditionFalse, reason, msg)
 	meta.SetStatusCondition(&vm.Status.Conditions, metav1.Condition{
 		Type:               k8s.ConditionProvisioning,
 		Status:             metav1.ConditionFalse,
-		Reason:             k8s.ReasonRestorePending,
+		Reason:             reason,
 		Message:            msg,
 		ObservedGeneration: vm.Generation,
 	})
 	metrics.RecordError(errReasonRestorePending, metrics.ComponentManager)
 	if !alreadyHeld {
-		r.recordEvent(vm, corev1.EventTypeWarning, k8s.ReasonRestorePending, msg)
+		r.recordEvent(vm, corev1.EventTypeWarning, reason, msg)
 	}
 	r.updateStatus(ctx, vm)
 	return ctrl.Result{RequeueAfter: blockedRetryBackoff(createHoldSince(vm))}, nil

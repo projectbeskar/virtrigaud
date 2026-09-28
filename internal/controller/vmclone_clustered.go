@@ -476,8 +476,10 @@ func (r *VMCloneReconciler) handleClusteredCloneError(
 // domain stamped with the TARGET VirtualMachine's namespace and name under
 // another UID exists on a host of the Provider. The target keeps its
 // pendingHost (so it keeps counting on its host and nothing is excluded) and
-// shows Placed=False/RestorePending; the clone stays Pending with the same
-// reason and one Warning event, and is re-checked with the blocked-VM backoff
+// shows Placed=False/RestorePending — or Placed=False/OwnDomainOnAnotherHost
+// when the domain is the target's own (stamped with its UID), which also holds
+// the target's delete; the clone stays Pending with the same reason and one
+// Warning event, and is re-checked with the blocked-VM backoff
 // (blockedRetryBackoff: 15 s doubling to 5 min) — it is never failed for this
 // (a failed clone would remove the target, and the next attempt would meet the
 // same domain).
@@ -488,21 +490,26 @@ func (r *VMCloneReconciler) holdCloneForPreviousIncarnation(
 	host string,
 	err error,
 ) (ctrl.Result, error) {
-	logging.FromContext(ctx).Info("Clone refused: a previous incarnation of the target VM exists on a host of the Provider; "+
-		"holding it (the host is not excluded)", "host", host, "target", target.Name, "error", err.Error())
-	setPlacedCondition(target, metav1.ConditionFalse, k8s.ReasonRestorePending, restorePendingMessage)
+	logging.FromContext(ctx).Info("Clone refused: a previous incarnation of the target VM (or its own domain) exists on a host "+
+		"of the Provider; holding it (the host is not excluded)", "host", host, "target", target.Name, "error", err.Error())
+	// The target's own domain elsewhere is held with its own reason, which
+	// also keeps the target's finalizer if it is deleted meanwhile
+	// (heldForOwnDomainElsewhere): its delete on the pending host would find
+	// nothing and leave that domain running.
+	reason, holdMsg := incarnationHold(err)
+	setPlacedCondition(target, metav1.ConditionFalse, reason, holdMsg)
 	if uerr := r.Status().Update(ctx, target); uerr != nil {
 		if apierrors.IsConflict(uerr) {
 			return ctrl.Result{Requeue: true}, nil
 		}
-		return ctrl.Result{}, fmt.Errorf("record RestorePending for clone target %s/%s: %w", target.Namespace, target.Name, uerr)
+		return ctrl.Result{}, fmt.Errorf("record %s for clone target %s/%s: %w", reason, target.Namespace, target.Name, uerr)
 	}
 	metrics.RecordError(errReasonRestorePending, metrics.ComponentManager)
-	msg := fmt.Sprintf("the clone's target VirtualMachine %s/%s is %s", target.Namespace, target.Name, restorePendingMessage)
-	if c := meta.FindStatusCondition(clone.Status.Conditions, infrav1beta1.VMCloneConditionReady); c == nil || c.Reason != k8s.ReasonRestorePending {
-		r.Recorder.Event(clone, "Warning", k8s.ReasonRestorePending, msg)
+	msg := fmt.Sprintf("the clone's target VirtualMachine %s/%s is %s", target.Namespace, target.Name, holdMsg)
+	if c := meta.FindStatusCondition(clone.Status.Conditions, infrav1beta1.VMCloneConditionReady); c == nil || c.Reason != reason {
+		r.Recorder.Event(clone, "Warning", reason, msg)
 	}
-	return r.waitForCloneHost(ctx, clone, k8s.ReasonRestorePending, msg,
+	return r.waitForCloneHost(ctx, clone, reason, msg,
 		blockedRetryBackoff(createHoldSince(target))), nil
 }
 

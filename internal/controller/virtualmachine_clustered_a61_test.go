@@ -206,7 +206,8 @@ func TestClustered_OwnDomainElsewhere(t *testing.T) {
 	held := getVM(t, r, "web")
 	placed := placedCondition(held)
 	require.NotNil(t, placed)
-	assert.Equal(t, k8s.ReasonRestorePending, placed.Reason)
+	assert.Equal(t, k8s.ReasonOwnDomainOnAnotherHost, placed.Reason, "a dedicated reason, not RestorePending (fix verification N7)")
+	assert.Equal(t, k8s.ReasonOwnDomainOnAnotherHost, provisioningReason(held))
 	assert.Contains(t, placed.Message, "stamped with its own UID")
 	assert.Contains(t, placed.Message, "no re-stamp is needed")
 	assert.NotContains(t, placed.Message, "host-alpha")
@@ -270,4 +271,43 @@ func TestVMClone_Clustered_PreviousIncarnationOfTheTargetHolds(t *testing.T) {
 		}
 	}
 	assert.Equal(t, 1, warnings, "one Warning event for the hold")
+}
+
+// TestVMClone_Clustered_OwnDomainOfTheTargetHolds (A6.1 fix verification,
+// N7): a Clone answered with the TARGET's own domain on another host holds
+// the target with the dedicated reason OwnDomainOnAnotherHost (not
+// RestorePending), so deleting that target keeps its finalizer
+// (DeleteBlocked=True/OwnDomainOnAnotherHost) instead of releasing it on the
+// pending host's NotFound and leaving its domain running.
+func TestVMClone_Clustered_OwnDomainOfTheTargetHolds(t *testing.T) {
+	cp := &clonerProvider{cloneErr: ownDomainElsewhereErr("default.clone-c-target")}
+	r, clone := clusteredCloneFixture(t, boundSource(), cp)
+	reconcileTwice(t, r, client.ObjectKeyFromObject(clone))
+
+	target := getTarget(t, r)
+	assert.Empty(t, target.Status.ID)
+	require.NotNil(t, target.Status.Placement)
+	assert.Equal(t, "host-alpha", target.Status.Placement.PendingHost, "the target keeps its pending host")
+	placed := meta.FindStatusCondition(target.Status.Conditions, k8s.ConditionPlaced)
+	require.NotNil(t, placed)
+	assert.Equal(t, k8s.ReasonOwnDomainOnAnotherHost, placed.Reason)
+	assert.Contains(t, placed.Message, "stamped with its own UID")
+	assert.True(t, heldForOwnDomainElsewhere(target), "a delete of the target is held")
+
+	got := getClone(t, r, clone)
+	assert.Equal(t, infrav1beta1.ClonePhasePending, got.Status.Phase, "held, never failed")
+	assert.Equal(t, k8s.ReasonOwnDomainOnAnotherHost, cloneReadyCondition(t, got).Reason)
+}
+
+// TestHeldForOwnDomainElsewhere: the hold is recognized by its dedicated
+// reason alone — never by message text — on an unbound VM only.
+func TestHeldForOwnDomainElsewhere(t *testing.T) {
+	vm := clusterVM("web", clusteredNS, "prov-cluster")
+	assert.False(t, heldForOwnDomainElsewhere(vm), "no Placed condition")
+	setPlacedCondition(vm, metav1.ConditionFalse, k8s.ReasonRestorePending, restorePendingOwnMessage)
+	assert.False(t, heldForOwnDomainElsewhere(vm), "the message alone does not make the hold")
+	setPlacedCondition(vm, metav1.ConditionFalse, k8s.ReasonOwnDomainOnAnotherHost, "any wording")
+	assert.True(t, heldForOwnDomainElsewhere(vm))
+	vm.Status.ID = "default.web"
+	assert.False(t, heldForOwnDomainElsewhere(vm), "a bound VM is deleted by its id")
 }

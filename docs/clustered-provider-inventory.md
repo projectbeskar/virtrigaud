@@ -1795,8 +1795,11 @@ nothing. The manager then **holds** the VM:
 namespace, name **and its own UID** on another host is not a previous
 incarnation: it is this VM's own domain, and only its placement record was
 lost. The provider counts it apart and says so (`VM_PREVIOUS_INCARNATION` with
-ErrorInfo metadata `incarnation: own`): the VM is held the same way, but its
-message asks for the pending host to be moved — **no re-stamp is needed**:
+ErrorInfo metadata `incarnation: own`): the VM — or a clone's target, whose
+`VMClone` then stays `Pending` with the same reason — is held the same way
+but with its own reason, `Placed=False/OwnDomainOnAnotherHost` (and
+`Provisioning`), and its message asks for the pending host to be moved —
+**no re-stamp is needed**:
 `kubectl patch virtualmachines.infra.virtrigaud.io <name> -n <namespace> --subresource=status --type=merge -p '{"status":{"placement":{"pendingHost":"<host>"}}}'`;
 the next create retry binds the domain. Deleting such a VM is **held** too
 (`DeleteBlocked=True/OwnDomainOnAnotherHost`): its `Delete` on the pending host

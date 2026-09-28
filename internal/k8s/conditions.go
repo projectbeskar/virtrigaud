@@ -160,7 +160,9 @@ const ConditionPlaced = "Placed"
 // the ADR: these four, plus the two the A2 amendment (slice 2) adds for a Create
 // refused with a name conflict (ReasonHostExcluded, ReasonAllHostsExcluded),
 // plus ReasonUnschedulable (declared with the scheduling reasons above) from the
-// scheduler-accuracy amendment in A5, plus ReasonRestorePending from A6.
+// scheduler-accuracy amendment in A5, plus ReasonRestorePending from A6 and
+// ReasonOwnDomainOnAnotherHost (declared with the DeleteBlocked reasons below)
+// from A6.1.
 const (
 	// ReasonBound is Placed=True: the provider confirmed the VM on the host named
 	// by status.placement.host, and every per-VM call is routed there.
@@ -198,7 +200,9 @@ const (
 	// administrator re-attaches or removes that domain (the A6 runbook). In
 	// A6.1 it is set when the provider answers a Create or Clone with
 	// VM_PREVIOUS_INCARNATION (R2): the VM keeps its pendingHost, the host is
-	// NOT excluded, and it is re-checked every 2 minutes.
+	// NOT excluded, and it is re-checked with a backoff (15 s doubling to
+	// 5 min). When the domain found is the VM's OWN (stamped with its UID),
+	// the reason is ReasonOwnDomainOnAnotherHost instead.
 	ReasonRestorePending = "RestorePending"
 )
 
@@ -220,10 +224,13 @@ const (
 	// ReasonDiskCheckFailed: the provider could not verify that no VM on
 	// another host of the Provider uses the VM's disk. Nothing was deleted.
 	ReasonDiskCheckFailed = "DiskCheckFailed"
-	// ReasonOwnDomainOnAnotherHost: the VM's last create was answered with its
-	// OWN domain on another host of the Provider (its placement record was
-	// lost), so deleting it on its pending host would leave that domain
-	// running. The finalizer is kept until the pending host points at it.
+	// ReasonOwnDomainOnAnotherHost: the VM's last create (or its clone) was
+	// answered with its OWN domain on another host of the Provider (its
+	// placement record was lost). It is the Placed (and Provisioning) reason
+	// of that hold — Placed=False, pendingHost kept, as for ReasonRestorePending
+	// — and, once the VM is deleted, the DeleteBlocked reason: deleting it on
+	// its pending host would leave that domain running, so the finalizer is
+	// kept until the pending host points at it.
 	ReasonOwnDomainOnAnotherHost = "OwnDomainOnAnotherHost"
 )
 

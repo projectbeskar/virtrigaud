@@ -1815,8 +1815,11 @@ runbook or remove it. There is no opt-in in v0.4.0. A6.2 must also set the
 > - **The VM's own domain elsewhere** *(security review of A6.1)*: a domain
 >   stamped with the requester's namespace, name and OWN UID found by the scan
 >   is counted apart from previous incarnations (ErrorInfo metadata
->   `incarnation: own`): the VM is held the same way, with its own message —
->   move `pendingHost` to that host, no re-stamp — and, because its Delete on
+>   `incarnation: own`): the VM (or a clone's target) is held the same way,
+>   with its own reason `OwnDomainOnAnotherHost` on `Placed`/`Provisioning`
+>   *(fix verification, N7: the delete gate reads that reason, never message
+>   text)* and its own message — move `pendingHost` to that host, no
+>   re-stamp — and, because its Delete on
 >   the pending host finds nothing while its own domain runs elsewhere, deleting
 >   it keeps the finalizer (`DeleteBlocked=True/OwnDomainOnAnotherHost`) until
 >   the pending host points there or `force-delete` / `orphan-on-delete` is
