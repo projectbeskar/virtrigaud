@@ -174,8 +174,18 @@ See [`docs/clustered-provider-inventory.md`](clustered-provider-inventory.md) an
   `virtrigaud ALL=(root) NOPASSWD: /usr/bin/qemu-img info -U *` (adjust the user and the path of `qemu-img`) — never
   `qemu-img *`, which would let the account convert or write any file as root.
   Keep the pool directory writable only by `root` and the SSH user (or sticky);
-  the provider logs a `WARN` otherwise. Follow-up (tracked): least privilege —
-  VM disks `0600 libvirt-qemu`, every read through `sudo -n`.
+  the provider logs a `WARN` otherwise, and **a `root` SSH user is not supported
+  on a pool directory other accounts can write**. Disks are written in a private
+  `.virtrigaud-write-*` directory next to their final name and renamed into
+  place; a symbolic link at a disk's name is refused (`Conflict`). The s3
+  export's flattened copy is a private (`0600`), per-export
+  `.virtrigaud-export-<vm>.<random>.qcow2` next to the source disk, removed
+  even when the export fails or is cancelled — remove any
+  `.virtrigaud-export-*` or `.virtrigaud-import-*` file an earlier release left
+  in a pool directory by hand. Run a QEMU with the CVE-2024-4467 fix (its
+  `qemu-img info` does not open an image's external data file). Follow-up
+  (tracked): least privilege — VM disks `0600 libvirt-qemu`, every read through
+  `sudo -n`.
 - **libvirt image download limit:** `VIRTRIGAUD_LIBVIRT_IMAGE_MAX_DOWNLOAD_GIB` (provider
   pod env via `Provider.spec.runtime.env`), the largest image `ImagePrepare` downloads, in
   GiB. Default `256`; an invalid value falls back to the default (logged). A larger source

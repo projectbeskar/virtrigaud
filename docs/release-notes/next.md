@@ -89,8 +89,10 @@ providers), and rollback caveats in
   provider call can be made for its VM. VM disks are created
   `0640 libvirt-qemu:kvm` (never `chmod`'ed as root; `chown -h`), no longer
   world-writable — the provider's SSH user needs the `kvm` group, `root`, or
-  passwordless `sudo qemu-img info -U` — and a UEFI clone's varstore is never
-  copied through a symlink
+  passwordless `sudo qemu-img info -U` — disks are written in a private
+  directory and renamed into place (a symbolic link at a disk's name is
+  refused), the s3 export's temporary copy is private and always removed, and a
+  UEFI clone's varstore is never copied through a symlink
   (→ [`docs/libvirt-clones.md`](docs/libvirt-clones.md)).
 - The manager's webhook and metrics servers pin an explicit TLS 1.2 floor.
 - Optional, opt-in `NetworkPolicy` templates for the manager and provider pods

@@ -133,17 +133,21 @@ chain. A running domain's definition lists its chain in `<backingStore>`, which
 is used as is. A shut-off domain's chain is read one image at a time with
 `qemu-img info -U` — through passwordless `sudo -n` when the host allows it (so
 a disk the SSH user cannot read — a `0600 libvirt-qemu` image, a root-squashed
-NFS pool — does not fail the check), and as the SSH user otherwise. A backing
-file is followed only when its header names an absolute local path to a
-regular file (opened in the format the header names); `qemu-img` is never
-asked to follow a whole chain itself, so it never opens an `nbd:`, `http:` or
-`json:` backing, a device or a FIFO as root. A VM "has dependents" when any
-other domain references one of its disk files as a disk, a backing file, or
-any other file. Delete only runs the check when it has files to remove.
+NFS pool — does not fail the check), and as the SSH user otherwise. Every
+image — the disk itself too — must be a regular file before `qemu-img` opens
+it, and a backing file is followed only when its header names an absolute
+local path (opened in the format the header names); `qemu-img` is never asked
+to follow a whole chain itself, so it never opens an `nbd:`, `http:` or
+`json:` backing, a device or a FIFO as root. A qcow2 external data file is
+recorded as part of its image (never opened by the check itself; run a QEMU
+with the CVE-2024-4467 fix, whose `qemu-img info` does not open it either). A
+VM "has dependents" when any other domain references one of its disk files as
+a disk, a backing file, a data file, or any other file. Delete only runs the
+check when it has files to remove.
 
 The check fails closed: if a definition or a disk's image chain cannot be read
-— including a chain that names a non-local backing (a protocol, `json:` or
-relative name), a non-regular file, or is deeper than 32 images — the operation
+— including a chain that names a non-local backing or data file (a protocol,
+`json:` or relative name), a non-regular file, or is deeper than 32 images — the operation
 is not performed and returns a retryable error (`Unavailable` with
 `google.rpc.ErrorInfo` reason `VM_DISK_CHECK_FAILED`, which the manager retries
 and never counts toward the Provider's circuit breaker), with the details in
@@ -210,13 +214,24 @@ clone of the vanished VM keeps its backing file. Nothing else is looked for.
   `sudo chown -h libvirt-qemu:kvm -- <disk>` and `sudo chmod 0640 -- <disk>`.
   Least privilege (`0600 libvirt-qemu`, with every read through `sudo -n`) is
   a tracked follow-up.
+- **How a disk is written.** A disk (and, for an s3 import, the staged object)
+  is written inside a private directory made next to its final name
+  (`mktemp -d`: an unpredictable `.virtrigaud-write-*` name, mode `0700`,
+  owned by the SSH user), then renamed onto the name (`mv -T`, rename(2)),
+  which replaces whatever is there — a stale file, or a symbolic link planted
+  at the name — and never follows it; the directory is removed whatever
+  happens. Before that, a symbolic link at the disk's name — dangling or not —
+  refuses the operation (`Conflict`, "is a symbolic link"), like the UEFI
+  varstore below. A blank disk is created by libvirt itself (`vol-create`,
+  which refuses an existing name).
 - **Pool directory.** Keep the directories VM files are created in writable
   only by `root` and the provider's SSH user (for example `root:root 0755`, or
   owned by the SSH user `0755`), or sticky (`chmod +t`). Anyone else who can
-  write there can plant a symbolic link at a VM file's name before it is
-  created. The provider logs a `WARN` once per directory when a non-root
-  account other than its SSH user can write one that is not sticky; it never
-  refuses.
+  write there can still replace a finished disk, or a file libvirt later
+  opens. The provider logs a `WARN` once per directory when a non-root account
+  other than its SSH user can write one that is not sticky; it never refuses.
+  **A `root` SSH user is not supported on a pool directory other accounts can
+  write.**
 - **UEFI varstore.** For a UEFI source, the clone gets its own copy of the
   source's `<nvram>` varstore, `<nvram directory>/<clone domain>_VARS.fd`. The
   clone is refused (`Conflict`) before any of its files is written when that
