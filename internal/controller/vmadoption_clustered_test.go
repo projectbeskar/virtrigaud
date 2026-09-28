@@ -935,6 +935,34 @@ func TestClusteredAdoption_SharedHostEndpointIsNotAdoptedFrom(t *testing.T) {
 	assert.NotEqual(t, endpointKey("qemu+ssh://virt@host-a/system"), endpointKey("qemu+ssh://virt@host-a:2222/system"))
 }
 
+// TestEndpointKey_DefaultPortNormalized (slice 4 review nit): an endpoint
+// without a port names the scheme's default, so "h1" and "h1:22" are the same
+// hypervisor; another port, scheme or host stays different.
+func TestEndpointKey_DefaultPortNormalized(t *testing.T) {
+	same := [][2]string{
+		{"qemu+ssh://virt@h1/system", "qemu+ssh://root@h1:22/system"},
+		{"QEMU+SSH://h1/system", "qemu+ssh://H1:22/session"},
+		{"ssh://h1", "ssh://h1:22"},
+		{"qemu+tcp://h1/system", "qemu+tcp://h1:16509/system"},
+		{"qemu+tls://h1/system", "qemu+tls://h1:16514/system"},
+		{"qemu+ssh://[fd00::1]/system", "qemu+ssh://[fd00::1]:22/system"},
+	}
+	for _, p := range same {
+		assert.Equal(t, endpointKey(p[0]), endpointKey(p[1]), "%s vs %s", p[0], p[1])
+	}
+	different := [][2]string{
+		{"qemu+ssh://h1/system", "qemu+ssh://h1:2222/system"},
+		{"qemu+ssh://h1/system", "qemu+tcp://h1/system"},
+		{"qemu+ssh://h1/system", "qemu+ssh://h2/system"},
+		{"grpc://h1:9443", "grpc://h1:9444"},
+	}
+	for _, p := range different {
+		assert.NotEqual(t, endpointKey(p[0]), endpointKey(p[1]), "%s vs %s", p[0], p[1])
+	}
+	assert.Equal(t, "grpc://h1:", endpointKey("grpc://h1"), "a scheme without a known default keeps an empty port")
+	assert.Equal(t, "not a url", endpointKey(" not a url "), "an endpoint that does not parse is compared as written")
+}
+
 // TestClusteredAdoption_DomainManagedThroughASingleHostProviderIsSkipped: an
 // unstamped domain whose name is the status.id of a VM bound through a
 // single-host Provider (the same hypervisor fronted by both kinds) is not
