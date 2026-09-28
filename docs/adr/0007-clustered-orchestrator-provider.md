@@ -1031,10 +1031,12 @@ slice 4 is implemented (see the slice 4 amendment below); slice 5 is open.
 >   not an atomic compare-and-swap: the domain must still carry
 >   `expected_uuid`, and every stamp on it (in both definitions of a running
 >   domain) must be the new owner's (an idempotent success) or listed as
->   replaceable — the manager lists only UIDs of VirtualMachines that no
->   longer exist. Anything else is `AlreadyExists` and untouched. The stamp is
->   written with `virsh metadata --config [--live]` to the domain addressed by
->   UUID and read back. Transfers are serialized per host (a context-aware
+>   replaceable — adoption lists none (unstamped domains only, until A6.4);
+>   A6.4 will list only UIDs of VirtualMachines proven gone by an uncached
+>   read. Anything else is `AlreadyExists` and untouched. The owner must have
+>   a canonical-UUID UID and a DNS-1123 namespace/name, and a domain name virsh
+>   would read as an id or UUID is refused. The stamp is written with
+>   `virsh metadata --domain <uuid> ... --config [--live]` and read back. Transfers are serialized per host (a context-aware
 >   lock) inside the provider process, which is only enough while one process
 >   fronts a host: the provider controller runs a clustered Provider with one
 >   replica and the `Recreate` strategy, and a host endpoint must belong to
