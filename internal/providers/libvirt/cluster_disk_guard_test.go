@@ -1069,7 +1069,73 @@ func TestClusteredClone_DiskUsedOnAnotherHostIsRefused(t *testing.T) {
 	assertNothingWritten(t, fx.calls())
 }
 
+// TestClusteredClone_SharedVarstoreIsCheckedOnEveryHost (A6.1 fix
+// verification, N3): the clone's varstore goes next to the SOURCE's
+// (rewriteNVRAMPath). When that directory is not the host-local NVRAM
+// directory it may be shared storage, so an existing file there is written
+// only when no domain on any host uses it: here a domain on host-a boots from
+// it, and the clone is refused before anything is written.
+func TestClusteredClone_SharedVarstoreIsCheckedOnEveryHost(t *testing.T) {
+	fx := uefiWebOnB(t)
+	shared := filepath.Join(fx.dir, "shared-nvram")
+	require.NoError(t, os.Mkdir(shared, 0o700))
+	src := filepath.Join(shared, "web_VARS.fd")
+	web := strings.Replace(scdDomainXML("web", scdDomainOpts{owner: ownerTeamA, uefi: true}), scdNVRAM, src, 1)
+	seedSCDHost(t, filepath.Join(fx.dir, "host-b"), map[string]string{"web": web})
+	target := filepath.Join(shared, cloneTargetDomain+"_VARS.fd")
+	require.NoError(t, os.WriteFile(target, []byte("other-vars"), 0o600))
+	other := fmt.Sprintf("<domain type='kvm' id='4'><name>foreign-uefi</name><uuid>%s</uuid>%s"+
+		"<os><loader readonly='yes' type='pflash'>/usr/share/OVMF/OVMF_CODE.fd</loader><nvram>%s</nvram></os>"+
+		"<devices></devices></domain>", uuidForeign, renderOwnerMetadataXML(ownerForeign), target)
+	seedSCDHost(t, filepath.Join(fx.dir, "host-a"), map[string]string{"foreign-uefi": other})
+
+	_, err := NewServer(fx.p).Clone(context.Background(), routedCloneReq())
+	st, _ := status.FromError(err)
+	assert.Equal(t, codes.AlreadyExists, st.Code(), "got %v", err)
+	assert.Contains(t, st.Message(), "UEFI varstore path")
+	assert.Contains(t, st.Message(), "in use by another domain on a host of this Provider")
+	requireWireSafe(t, st.Message(), fx.dir, "foreign-uefi", ownerForeign.UID)
+	assertNothingWritten(t, fx.calls())
+	assert.Contains(t, fx.calls(), "host-a virsh list --all --uuid", "host-a was scanned")
+	b, rerr := os.ReadFile(target) //nolint:gosec // test reads its own fixture
+	require.NoError(t, rerr)
+	assert.Equal(t, "other-vars", string(b), "the other domain's varstore is untouched")
+}
+
 // ─── units ───────────────────────────────────────────────────────────────────
+
+// TestEnsureVarstoreFree_WhereItResolvesDecides (A6.1 fix verification, N3):
+// an existing varstore that resolves into the host-local NVRAM directory is
+// checked on its own host only (no scan: this guard's provider has no
+// registry, so a scan would fail); one that resolves elsewhere — here the
+// NVRAM path is a link into shared storage — goes to the cluster-wide scan.
+// Every host command is scripted; nothing on the machine is read.
+func TestEnsureVarstoreFree_WhereItResolvesDecides(t *testing.T) {
+	const nvram = "/var/lib/libvirt/qemu/nvram/team-a.copy_VARS.fd"
+	kind := "! sh -c " + targetKindScript + " sh " + nvram
+	realpath := "! realpath -m -z -- " + nvram
+	g := (&Provider{}).newClusterDiskGuard("host-b", cloneTarget, cloneTargetDomain, "", guardOpClone)
+
+	local := &scriptedHost{answers: map[string]*VirshResult{
+		kind:                {Stdout: pathExistsMarker + "\n"},
+		realpath:            {Stdout: nvram + "\x00"},
+		"list --all --uuid": {Stdout: ""},
+	}}
+	require.NoError(t, g.ensureVarstoreFree(context.Background(), local, nvram), "unused, host-local: replaced")
+	assert.Contains(t, local.calls, "list --all --uuid", "the host-local in-use check ran")
+
+	shared := &scriptedHost{answers: map[string]*VirshResult{
+		kind:     {Stdout: pathExistsMarker + "\n"},
+		realpath: {Stdout: "/srv/shared/nvram/team-a.copy_VARS.fd\x00"},
+	}}
+	err := g.ensureVarstoreFree(context.Background(), shared, nvram)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "registry not initialized", "the cluster-wide scan was asked for")
+
+	absent := &scriptedHost{answers: map[string]*VirshResult{kind: {Stdout: ""}}}
+	require.NoError(t, g.ensureVarstoreFree(context.Background(), absent, nvram))
+	assert.Equal(t, []string{kind}, absent.calls, "a free path needs nothing more")
+}
 
 // TestScanHostDiskUse_HostLocalDirsAndSeedDir (security review of A6.1, item
 // 7): a candidate in the host-local NVRAM directory is compared on the

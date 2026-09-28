@@ -1728,8 +1728,10 @@ runbook or remove it. There is no opt-in in v0.4.0. A6.2 must also set the
 >   image copy, a clone, an imported disk attached in place) is written only
 >   when no domain uses it; a foreign use of another name refuses nothing. With
 >   none there, nothing is scanned (two host commands on the landing host). A
->   clone's UEFI varstore is in the host-local NVRAM directory and keeps the
->   host-local check.
+>   clone's UEFI varstore goes next to its source's (`rewriteNVRAMPath`): an
+>   existing one that resolves into the host-local NVRAM directory keeps the
+>   host-local check, one anywhere else is scanned on every host like a disk
+>   *(fix verification, N3)*.
 > - **What "uses" means** is the host-local check's definition, per host: any
 >   domain, running or not, that references the file as a disk, anywhere in a
 >   disk's backing chain (`qemu-img info` for shut-off domains), or as another
@@ -1781,7 +1783,7 @@ runbook or remove it. There is no opt-in in v0.4.0. A6.2 must also set the
 >   directory is resolved on each host too, and a candidate in the host-local
 >   NVRAM directory (`/var/lib/libvirt/qemu/nvram`) is compared on the
 >   operation's own host only (the same path elsewhere is another file; a
->   clone's varstore keeps the host-local check). Each host is scanned through
+>   clone's varstore that resolves there keeps the host-local check). Each host is scanned through
 >   its `Host` endpoint's libvirt instance (`/system` or `/session`); another
 >   instance's domains on that host are not seen. *Residuals:* a host that
 >   mounts the shared export under a different path, or reaches a file through

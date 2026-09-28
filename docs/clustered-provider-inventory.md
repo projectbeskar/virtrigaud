@@ -1605,8 +1605,11 @@ now checks every host of the Provider:
   clone writes is written only when no domain on any host uses it. (A foreign
   use of one of the *other* names refuses nothing: that file is not written.)
   The common case, with none of them there, costs two host commands on the
-  landing host and contacts no other host. A clone's UEFI varstore lives in
-  the host-local NVRAM directory and keeps the host-local check.
+  landing host and contacts no other host. A clone's UEFI varstore is
+  written next to its source's varstore: an existing one that resolves into
+  the host-local NVRAM directory keeps the host-local check, and one that
+  resolves anywhere else (a source whose varstore lives on shared storage) is
+  checked on every host, like a disk.
 - **The base image, too.** A clustered create from a host-path image
   (`VMImage.spec.source.libvirt.path`) copies that file into the VM's disk.
   The image confinement used to check only the landing host for a domain
@@ -1728,8 +1731,9 @@ references, raw and resolved; a delete's cloud-init seed directory is resolved
 on each host as well. So symbolic links on either side are followed. Files in
 the libvirt NVRAM directory (`/var/lib/libvirt/qemu/nvram`) are host-local —
 the same path on another host is another file — and are compared on the
-operation's own host only; a clone's UEFI varstore therefore keeps the
-host-local check. Each host is scanned through its `Host` endpoint's libvirt
+operation's own host only; a clone's UEFI varstore that resolves there
+therefore keeps the host-local check (one elsewhere is scanned on every
+host). Each host is scanned through its `Host` endpoint's libvirt
 instance (`qemu+ssh://…/system` or `…/session`): domains that another libvirt
 instance on the same host runs (another user's session) are not seen.
 **Mount a shared pool at the same path on every host of a Provider** (libvirt's

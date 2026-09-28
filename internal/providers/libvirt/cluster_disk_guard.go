@@ -63,8 +63,9 @@ import (
 //     volume, an image copy, a clone, or an imported disk attached in place) is
 //     written only when no domain on any host uses it. The common case, with
 //     nothing there, costs two host commands on the landing host and scans
-//     nothing. A clone's UEFI varstore lives in the host-local NVRAM directory
-//     and keeps the host-local check (ensureNVRAMTargetFree).
+//     nothing. A clone's UEFI varstore that already exists keeps the
+//     host-local check when it resolves into the host-local NVRAM directory,
+//     and is scanned on every host otherwise (ensureVarstoreFree).
 //   - Delete: after the host-local plan (planDomainDeletion) and before
 //     anything is destroyed, undefined or removed, every OTHER host is scanned
 //     for a domain using one of the files the delete would remove.
@@ -289,6 +290,38 @@ func (g *clusterDiskGuard) refuseIfUsed(ctx context.Context, h hostCommandRunner
 			"(left by an earlier failed attempt); overwriting it", subject, targets[0], g.host)
 	}
 	return nil
+}
+
+// varstoreSubject names a clone's UEFI varstore in the guard's answers (the
+// wording of ensureNVRAMTargetFree's).
+func varstoreSubject(domainName string) string {
+	return fmt.Sprintf("the UEFI varstore path of libvirt domain %q", domainName)
+}
+
+// ensureVarstoreFree refuses to let the clustered clone this guard protects
+// write its UEFI varstore at target on host h (the landing host). A symbolic
+// link there is refused and a free path needs nothing more, as on a single
+// host. For an existing file, where it RESOLVES decides the check: in a
+// host-local directory (hostLocalDirs: the NVRAM directory, never shared) the
+// host-local check is the whole check (ensureNVRAMTargetFree's); anywhere
+// else the file may be on shared storage — rewriteNVRAMPath keeps the
+// SOURCE's varstore directory, which need not be the NVRAM directory — so
+// every host of the Provider is scanned for a domain that uses it, as for a
+// disk (refuseIfUsed; A6.1 fix verification, N3).
+func (g *clusterDiskGuard) ensureVarstoreFree(ctx context.Context, h hostCommandRunner, target string) error {
+	subject := varstoreSubject(g.domain)
+	exists, err := checkWriteTarget(ctx, h, subject, target)
+	if err != nil || !exists {
+		return err
+	}
+	canon, err := canonicalizeOnHost(ctx, h, []string{target})
+	if err != nil {
+		return err
+	}
+	if inHostLocalDir(canon[0]) {
+		return refuseNVRAMInUseOnHost(ctx, h, g.domain, target)
+	}
+	return g.refuseIfUsed(ctx, h, subject, []string{target}, nil)
 }
 
 // imageUsedElsewhere reports whether a domain on another host of the Provider

@@ -479,18 +479,27 @@ func ensureNVRAMTargetFree(ctx context.Context, h hostCommandRunner, domainName,
 		return contracts.NewConflictError(fmt.Sprintf(
 			"the UEFI varstore path of libvirt domain %q is a symbolic link on the host; refusing to write through it", domainName), nil)
 	case pathExistsMarker:
-		inUse, err := pathInUseOnHost(ctx, h, target)
-		if err != nil {
-			return err
-		}
-		if inUse {
-			log.Printf("WARN Refusing to write the UEFI varstore of clone %s: %s is in use by another domain", domainName, target)
-			return contracts.NewConflictError(fmt.Sprintf(
-				"the UEFI varstore path of libvirt domain %q is in use by another domain on the host; refusing to overwrite it", domainName), nil)
-		}
-		log.Printf("INFO UEFI varstore %s of clone %s exists but no domain uses it (left by an earlier failed clone); overwriting it",
-			target, domainName)
+		return refuseNVRAMInUseOnHost(ctx, h, domainName, target)
 	}
+	return nil
+}
+
+// refuseNVRAMInUseOnHost is the in-use half of ensureNVRAMTargetFree, for an
+// existing file at target: a Conflict when a domain defined on the host
+// behind h uses it, nil (it is a leftover of an earlier failed clone to the
+// same name, and is replaced) otherwise.
+func refuseNVRAMInUseOnHost(ctx context.Context, h hostCommandRunner, domainName, target string) error {
+	inUse, err := pathInUseOnHost(ctx, h, target)
+	if err != nil {
+		return err
+	}
+	if inUse {
+		log.Printf("WARN Refusing to write the UEFI varstore of clone %s: %s is in use by another domain", domainName, target)
+		return contracts.NewConflictError(fmt.Sprintf(
+			"the UEFI varstore path of libvirt domain %q is in use by another domain on the host; refusing to overwrite it", domainName), nil)
+	}
+	log.Printf("INFO UEFI varstore %s of clone %s exists but no domain uses it (left by an earlier failed clone); overwriting it",
+		target, domainName)
 	return nil
 }
 

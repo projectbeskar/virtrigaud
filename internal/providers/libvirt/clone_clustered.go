@@ -201,8 +201,9 @@ func removeClonedDisk(ctx context.Context, vp *VirshProvider, lock hostLock, tar
 // are refused before any host is touched (cloneClustered); the definition is
 // built and the disk and UEFI varstore paths checked before any file is
 // written — across every host of the Provider when a file is already there
-// (clusterDiskGuard, ADR-0007 A6 R3; the host-local ensureNVRAMTargetFree's
-// symlink and in-use refusals included); the disk is written on #358's path
+// (clusterDiskGuard, ADR-0007 A6 R3; a varstore in the host-local NVRAM
+// directory keeps the host-local ensureNVRAMTargetFree check, symlink and
+// in-use refusals included: ensureVarstoreFree); the disk is written on #358's path
 // (createFullCopyGuarded: withUmask, private directory, `mv -T`,
 // finalizeClonedDisk) and the varstore by copyClonedNVRAM. A target name held
 // by a previous incarnation of the target VirtualMachine is answered
@@ -302,11 +303,12 @@ func (p *Provider) cloneOnHost(ctx context.Context, vp *VirshProvider, c libvirt
 	}
 	uefi := srcNvramPath != "" && targetNvramPath != ""
 	// Never write the clone's varstore through a symbolic link or over another
-	// domain's varstore. The NVRAM directory is host-local (never a shared
-	// pool), so the same path on another host is another file: the host-local
-	// check is the whole check (ADR-0007 A6.1).
+	// domain's varstore. In the host-local NVRAM directory the same path on
+	// another host is another file, so the host-local check is the whole
+	// check; a varstore that resolves anywhere else (the source's directory
+	// may be shared storage) is checked on every host (ADR-0007 A6.1).
 	if uefi {
-		if err := ensureNVRAMTargetFree(ctx, vp, domainName, targetNvramPath); err != nil {
+		if err := guard.ensureVarstoreFree(ctx, vp, targetNvramPath); err != nil {
 			return contracts.CloneResponse{}, err
 		}
 	}
