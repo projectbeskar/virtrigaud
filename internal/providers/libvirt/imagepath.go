@@ -564,7 +564,10 @@ type qemuImgInfo struct {
 	Format              string `json:"format"`
 	BackingFilename     string `json:"backing-filename"`
 	FullBackingFilename string `json:"full-backing-filename"`
-	FormatSpecific      *struct {
+	// BackingFilenameFormat is the backing file's format as the header
+	// names it (empty: probed).
+	BackingFilenameFormat string `json:"backing-filename-format"`
+	FormatSpecific        *struct {
 		Data struct {
 			DataFile string `json:"data-file"`
 			Extents  []struct {
@@ -776,11 +779,30 @@ func listDomainUUIDs(ctx context.Context, h hostCommandRunner) ([]string, error)
 	return uuids, nil
 }
 
-// maxBackingChainDepth bounds the one-level-at-a-time backing-chain walk.
-const maxBackingChainDepth = 16
+// maxBackingChainDepth bounds the backing-chain walk: a longer chain (or a
+// loop) fails the check closed.
+const maxBackingChainDepth = 32
 
 // qemuImgMissingFile is the qemu-img error text for a file that does not exist.
 const qemuImgMissingFile = "No such file or directory"
+
+// backingFormatRE matches a qemu block-driver name as a header's
+// backing-filename-format, passed to qemu-img as -f.
+var backingFormatRE = regexp.MustCompile(`^[a-z0-9]+$`)
+
+// What backingKindScript reports about a backing file path.
+const (
+	backingKindFile  = "file"
+	backingKindOther = "other"
+)
+
+// backingKindScript is the fixed `sh -c` script behind checkBackingFileKind.
+// The path is "$1", never interpolated into the text. It prints
+// backingKindFile for a regular file (a symbolic link is followed),
+// backingKindOther for anything else that exists (a device, FIFO, socket,
+// directory), and nothing when the SSH user cannot see it.
+const backingKindScript = `if [ -f "$1" ]; then echo ` + backingKindFile + `; elif [ -e "$1" ]; then echo ` +
+	backingKindOther + `; fi`
 
 // backingChainFiles returns every host file in disk's image chain: the disk,
 // each backing file, qcow2 data files and VMDK extents. It is needed because
@@ -790,50 +812,74 @@ const qemuImgMissingFile = "No such file or directory"
 // conversions never use -U), through passwordless sudo when the host allows it
 // (qemuImgInfoOnHost).
 //
-// It asks for the whole chain at once (--backing-chain). If some link cannot
-// be opened — typically a deleted file — it walks the chain one level at a
-// time instead, so every image that still exists is recorded. A disk that does
-// not exist contributes nothing; any other failure fails the check (closed).
+// The chain is walked one image at a time — never `--backing-chain`, which
+// would have qemu-img open, as root, whatever backing name each header holds.
+// A backing file is followed only when it is an absolute local path
+// (full-backing-filename) to a regular file, opened with the format its
+// parent's header names; a protocol (nbd:, http:, ...), json: or relative
+// backing name, a device, FIFO or other non-regular file, an unknown backing
+// format and a chain deeper than maxBackingChainDepth fail the check (closed),
+// as does any unreadable image. A file that no longer exists ends the chain: a
+// missing disk contributes nothing.
 func backingChainFiles(ctx context.Context, h hostCommandRunner, disk string) ([]string, error) {
-	res, err := qemuImgInfoOnHost(ctx, h, "-U", "--backing-chain", "--output=json", "--", disk)
-	if err == nil {
-		var chain []qemuImgInfo
-		if jerr := json.Unmarshal([]byte(res.Stdout), &chain); jerr != nil {
-			return nil, hostCheckFailed("parse backing chain", jerr)
-		}
-		var refs []string
-		for _, link := range chain {
-			refs = append(refs, link.referencedFiles()...)
-		}
-		return refs, nil
-	}
-	if res == nil || res.ExitCode != qemuImgFailureExitCode {
-		return nil, hostCheckFailed("read backing chain", err)
-	}
-
 	var refs []string
-	cur := disk
-	for depth := 0; depth < maxBackingChainDepth && cur != ""; depth++ {
-		lres, lerr := qemuImgInfoOnHost(ctx, h, "-U", "--output=json", "--", cur)
-		if lerr != nil {
-			if lres != nil && lres.ExitCode == qemuImgFailureExitCode && strings.Contains(lres.Stderr, qemuImgMissingFile) {
+	cur, format := disk, ""
+	for depth := 0; ; depth++ {
+		if depth > maxBackingChainDepth {
+			return nil, hostCheckFailed("read backing chain", fmt.Errorf("%s: backing chain longer than %d images", disk, maxBackingChainDepth))
+		}
+		if depth > 0 {
+			if err := checkBackingFileKind(ctx, h, cur); err != nil {
+				return nil, err
+			}
+		}
+		args := []string{"-U"}
+		if format != "" {
+			args = append(args, "-f", format)
+		}
+		res, err := qemuImgInfoOnHost(ctx, h, append(args, "--output=json", "--", cur)...)
+		if err != nil {
+			if res != nil && res.ExitCode == qemuImgFailureExitCode && strings.Contains(res.Stderr, qemuImgMissingFile) {
 				return refs, nil // the chain ends at a file that no longer exists
 			}
-			return nil, hostCheckFailed("read backing chain", lerr)
+			return nil, hostCheckFailed("read backing chain", err)
 		}
 		var info qemuImgInfo
-		if jerr := json.Unmarshal([]byte(lres.Stdout), &info); jerr != nil {
+		if jerr := json.Unmarshal([]byte(res.Stdout), &info); jerr != nil {
 			return nil, hostCheckFailed("parse backing chain", jerr)
 		}
 		refs = append(refs, cur)
 		refs = append(refs, info.referencedFiles()...)
+		if info.BackingFilename == "" && info.FullBackingFilename == "" {
+			return refs, nil
+		}
 		next := info.FullBackingFilename
 		if !strings.HasPrefix(next, "/") {
-			break // no backing file, or a protocol/json: backing (recorded, not walkable)
+			return nil, hostCheckFailed("read backing chain",
+				fmt.Errorf("%s: backing file %q is not a local file path; not followed", cur, next))
+		}
+		format = info.BackingFilenameFormat
+		if format != "" && !backingFormatRE.MatchString(format) {
+			return nil, hostCheckFailed("read backing chain",
+				fmt.Errorf("%s: backing file format %q is not a qemu format name; not followed", cur, format))
 		}
 		cur = next
 	}
-	return refs, nil
+}
+
+// checkBackingFileKind refuses to follow a backing file path that exists and
+// is not a regular file (backingKindScript): qemu-img would open a device, or
+// block forever on a FIFO. A path the SSH user cannot see is left to
+// qemu-img (through sudo) to open or report missing.
+func checkBackingFileKind(ctx context.Context, h hostCommandRunner, path string) error {
+	res, err := runHost(ctx, h, "sh", "-c", backingKindScript, "sh", path)
+	if err != nil {
+		return hostCheckFailed("check backing file", err)
+	}
+	if strings.TrimSpace(res.Stdout) == backingKindOther {
+		return hostCheckFailed("read backing chain", fmt.Errorf("backing file %s is not a regular file; not followed", path))
+	}
+	return nil
 }
 
 // liveDomainDoc is what liveChainListed reads of a domain definition.
@@ -885,8 +931,11 @@ func liveChainListed(domainXML string) bool {
 // and one unreadable file used to fail every Delete, snapshot and create on
 // the host. When sudo itself refuses (no passwordless sudo for qemu-img, or
 // no sudo at all), it runs as the host account, as before. It only ever reads
-// the headers of disks named by domain definitions — never a caller-supplied
-// image path, which inspectHostImage reads unprivileged.
+// the headers of disks named by domain definitions and of the local, regular
+// backing files their headers name (backingChainFiles) — never a
+// caller-supplied image path, which inspectHostImage reads unprivileged. Every
+// call starts `qemu-img info -U`, so sudo can be limited to exactly that
+// (`qemu-img info -U *`, see docs/upgrading.md).
 func qemuImgInfoOnHost(ctx context.Context, h hostCommandRunner, args ...string) (*VirshResult, error) {
 	res, err := runHost(ctx, h, append([]string{"sudo", "-n", "qemu-img", "info"}, args...)...)
 	if err != nil && sudoRefused(res) {

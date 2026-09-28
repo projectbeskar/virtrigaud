@@ -85,7 +85,7 @@ func TestClone_FullCloneIsUnchanged(t *testing.T) {
 	assert.Contains(t, c.log("qemu-img"), "convert -O qcow2 "+filepath.Join(c.images, "team-a.web-disk.qcow2")+" "+disk,
 		"an independent, flattened copy")
 	assert.NotContains(t, c.log("qemu-img"), "create", "no overlay")
-	assert.NoFileExists(t, disk+".chain.json", "no backing file")
+	assert.NoFileExists(t, disk+".info.json", "no backing file")
 	assert.Contains(t, c.domainXML("team-b.copy"), "<source file='"+disk+"'/>")
 }
 

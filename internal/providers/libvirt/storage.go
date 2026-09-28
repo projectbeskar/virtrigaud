@@ -663,7 +663,7 @@ func (s *StorageProvider) adoptVolumeInPlace(ctx context.Context, path, poolName
 
 	// Get volume size
 	var capacityStr string
-	infoResult, err := qemuImgInfoOnHost(ctx, s.virshProvider, "--output=json", "--", path) // libvirt-qemu:kvm now
+	infoResult, err := qemuImgInfoOnHost(ctx, s.virshProvider, "-U", "--output=json", "--", path) // libvirt-qemu:kvm now
 	if err == nil {
 		var diskInfo map[string]interface{}
 		if err := json.Unmarshal([]byte(infoResult.Stdout), &diskInfo); err == nil {

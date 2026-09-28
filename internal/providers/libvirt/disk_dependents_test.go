@@ -62,13 +62,12 @@ func (h *fakeHost) define(host, name, uuid, domXML string) {
 	require.NoError(h.t, os.WriteFile(filepath.Join(h.root, host, "dom-"+name+".xml"), []byte(domXML), 0o600))
 }
 
-// overlay makes disk a qcow2 overlay of base for qemu-img's --backing-chain
-// query — the only way a SHUT-OFF linked clone's dependency is visible.
+// overlay makes disk a qcow2 overlay of base for qemu-img info — the only way
+// a SHUT-OFF linked clone's dependency is visible.
 func (h *fakeHost) overlay(disk, base string) {
 	h.t.Helper()
-	chain := fmt.Sprintf(`[{"filename":%q,"format":"qcow2","backing-filename":%q,"full-backing-filename":%q},{"filename":%q,"format":"qcow2"}]`,
-		disk, base, base, base)
-	require.NoError(h.t, os.WriteFile(disk+".chain.json", []byte(chain), 0o600))
+	info := fmt.Sprintf(`{"filename":%q,"format":"qcow2","backing-filename":%q,"full-backing-filename":%q}`, disk, base, base)
+	require.NoError(h.t, os.WriteFile(disk+".info.json", []byte(info), 0o600))
 }
 
 // undefine removes a domain from fake host `host`.
@@ -181,7 +180,6 @@ func TestDiskDependents_SymlinkedPathIsCanonicalized(t *testing.T) {
 
 func TestDiskDependents_FailsClosed(t *testing.T) {
 	_, vp, src, clone := linkedCloneHost(t, false)
-	require.NoError(t, os.WriteFile(clone+".chainfail", nil, 0o600))
 	require.NoError(t, os.WriteFile(clone+".info.json", []byte(`{"format":"qcow2"`), 0o600)) // unparsable
 	_, err := diskDependents(context.Background(), vp, uuidSource, []string{src})
 	require.Error(t, err, "an unreadable backing chain of another domain is never read as 'no dependents'")

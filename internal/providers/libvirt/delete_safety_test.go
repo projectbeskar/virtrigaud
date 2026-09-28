@@ -40,20 +40,15 @@ import (
 // realpath/stat/rm, fake virsh/qemu-img, sudo only logs), single-host and
 // clustered.
 
-// fixtureQemuImgShim is a qemu-img for the routing/ops fixtures: `info
-// --backing-chain` answers $FAKE_VIRSH_DIR/chain-<file name>.json when present
-// and the file alone otherwise. Calls go to their own log, so the virsh call
-// sequences the fixtures pin are unchanged.
+// fixtureQemuImgShim is a qemu-img for the routing/ops fixtures: `info`
+// answers a plain qcow2 image without a backing file. Calls go to their own
+// log, so the virsh call sequences the fixtures pin are unchanged.
 const fixtureQemuImgShim = `#!/bin/sh
 printf '%s\n' "$*" >> "$FAKE_VIRSH_DIR/qemu-img.log"
-last=""; chain=""
-for a in "$@"; do last="$a"; if [ "$a" = "--backing-chain" ]; then chain=1; fi; done
-c="$FAKE_VIRSH_DIR/chain-$(basename "$last").json"
+last=""
+for a in "$@"; do last="$a"; done
 case "$1" in
-  info)
-    if [ -n "$chain" ] && [ -f "$c" ]; then cat "$c"; exit 0; fi
-    if [ -n "$chain" ]; then printf '[{"format":"qcow2","filename":"%s"}]\n' "$last"; exit 0; fi
-    printf '{"format":"qcow2","filename":"%s"}\n' "$last" ;;
+  info) printf '{"format":"qcow2","filename":"%s"}\n' "$last" ;;
   *) exit 0 ;;
 esac
 `
@@ -335,20 +330,15 @@ func TestDelete_SingleHost_SymlinkedDiskIsNotFollowed(t *testing.T) {
 	assert.FileExists(t, target)
 }
 
-// chainSidecar writes the qemu-img --backing-chain answer for files[0]: each
-// file backed by the next.
+// chainSidecar writes the qemu-img info answers of a backing chain: each file
+// backed by the next.
 func (c *createHost) chainSidecar(files ...string) {
 	c.t.Helper()
-	var links []string
-	for i, f := range files {
-		if i+1 < len(files) {
-			links = append(links, fmt.Sprintf(`{"filename":%q,"format":"qcow2","backing-filename":%q,"full-backing-filename":%q}`,
-				f, files[i+1], files[i+1]))
-		} else {
-			links = append(links, fmt.Sprintf(`{"filename":%q,"format":"qcow2"}`, f))
-		}
+	for i, f := range files[:len(files)-1] {
+		info := fmt.Sprintf(`{"filename":%q,"format":"qcow2","backing-filename":%q,"full-backing-filename":%q}`,
+			f, files[i+1], files[i+1])
+		require.NoError(c.t, os.WriteFile(f+".info.json", []byte(info), 0o600))
 	}
-	require.NoError(c.t, os.WriteFile(files[0]+".chain.json", []byte("["+strings.Join(links, ",")+"]"), 0o600))
 }
 
 // TestDelete_SingleHost_RemovesOwnSnapshotChain: a VM whose disk is an
@@ -441,7 +431,6 @@ func TestDelete_SingleHost_UnverifiableDependentsFailClosed(t *testing.T) {
 	_, clone := c.linkedPair(true)
 	// The clone's chain can no longer be read: the source must not be deleted
 	// on a guess.
-	require.NoError(t, os.WriteFile(clone+".chainfail", nil, 0o600))
 	require.NoError(t, os.WriteFile(clone+".info.json", []byte("{"), 0o600))
 
 	_, err := c.p.Delete(context.Background(), contracts.VMRef{ID: "team-a.web"})

@@ -751,7 +751,7 @@ func (p *Provider) planDomainDeletion(ctx context.Context, vp *VirshProvider, id
 }
 
 // ownChainFiles returns the canonical paths of the files BELOW disks in their
-// backing chains (qemu-img info --backing-chain) that are the domain's own and
+// backing chains (backingChainFiles) that are the domain's own and
 // may go with it: named after its own disk (<domain>-disk.<anything> — the
 // disk it was created with, under the overlays its external snapshots added)
 // and cleared by deletableDiskFiles (a regular file directly inside the
