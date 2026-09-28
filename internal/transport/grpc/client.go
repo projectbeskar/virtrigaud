@@ -1078,6 +1078,12 @@ func (c *Client) GetDiskInfo(ctx context.Context, req contracts.GetDiskInfoReque
 // A3) and reports the hosts it could not list in time as unreachable.
 const listVMsCallTimeout = 2 * time.Minute
 
+// listVMsMaxRecvBytes bounds a ListVMs answer the manager accepts. A clustered
+// provider's answer covers every host (up to clusteredListMaxDomainsPerHost
+// domains each), well past gRPC's 4 MiB default; the bound is explicit so an
+// answer is never unbounded either.
+const listVMsMaxRecvBytes = 64 << 20
+
 // ListVMs implements contracts.Provider. A clustered provider's per-VM host
 // (VMInfo.host_id) and the hosts it could not list (unreachable_host_ids,
 // which the caller must treat as unknown) are carried through unchanged.
@@ -1085,7 +1091,7 @@ func (c *Client) ListVMs(ctx context.Context) (contracts.VMList, error) {
 	ctx, cancel := context.WithTimeout(ctx, listVMsCallTimeout)
 	defer cancel()
 
-	resp, err := c.client.ListVMs(ctx, &providerv1.ListVMsRequest{})
+	resp, err := c.client.ListVMs(ctx, &providerv1.ListVMsRequest{}, grpc.MaxCallRecvMsgSize(listVMsMaxRecvBytes))
 	if err != nil {
 		return contracts.VMList{}, c.mapGRPCError("listVMs", err)
 	}

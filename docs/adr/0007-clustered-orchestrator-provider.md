@@ -1011,7 +1011,12 @@ slice 4 is implemented (see the slice 4 amendment below); slice 5 is open.
 >   the answer, with the late hosts reported, always reaches the caller. The
 >   call waits for every per-host goroutine before it returns; only the
 >   detached, time-bounded list shadow outlives it, holding its own lease
->   reference. Draining hosts are not listed.
+>   reference. Draining hosts are not listed. Each call starts at another
+>   host (rotation). Size bounds: a host with more than 2000 domains is
+>   reported unreachable; the manager accepts a `ListVMs` answer of up to 64
+>   MiB; one SSH command keeps at most 64 MiB of output (1 MiB stderr) and
+>   fails beyond it (single-host too — no realistic output comes near it).
+>   Follow-up: the per-domain `dumpxml` reads are sequential.
 > - **A new RPC: `TransferOwner`** (deviation). Every routed per-VM call is
 >   owner-checked, so a domain adopted as it is — unstamped, or stamped by a
 >   deleted VirtualMachine — would be invisible to the VirtualMachine that

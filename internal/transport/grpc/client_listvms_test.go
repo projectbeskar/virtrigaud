@@ -18,6 +18,8 @@ package grpc
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"sync"
 	"testing"
 
@@ -141,4 +143,21 @@ func TestClient_TransferOwner_ThreadsTheRequestAndMapsErrors(t *testing.T) {
 	err = c.TransferOwner(context.Background(), req)
 	require.Error(t, err)
 	assert.True(t, contracts.IsNotSupported(err), "%v", err)
+}
+
+// TestClient_ListVMs_AcceptsAnAnswerAboveTheDefaultLimit: a clustered answer
+// larger than gRPC's 4 MiB default is accepted (listVMsMaxRecvBytes).
+func TestClient_ListVMs_AcceptsAnAnswerAboveTheDefaultLimit(t *testing.T) {
+	big := strings.Repeat("x", 1<<20)
+	resp := &providerv1.ListVMsResponse{}
+	for i := 0; i < 6; i++ {
+		resp.Vms = append(resp.Vms, &providerv1.VMInfo{Id: fmt.Sprintf("vm-%d", i), HostId: "host-a",
+			ProviderRaw: map[string]string{"blob": big}})
+	}
+	dialer, cleanup := startBufconnServer(t, &slice4Server{list: resp})
+	defer cleanup()
+
+	list, err := newTestClient(t, dialer, "libvirt").ListVMs(context.Background())
+	require.NoError(t, err)
+	assert.Len(t, list.VMs, 6)
 }

@@ -240,7 +240,8 @@ func (v *VirshProvider) runOverSSHStdin(ctx context.Context, remoteCmd string, s
 	defer release()
 
 	start := time.Now()
-	var stdout, stderr bytes.Buffer
+	stdout := cappedBuffer{max: sshMaxStdoutBytes}
+	stderr := cappedBuffer{max: sshMaxStderrBytes}
 	log.Printf("DEBUG Executing over ssh: %s", remoteCmd)
 
 	runErr := v.withSession(ctx, func(sess *ssh.Session) error {
@@ -266,10 +267,22 @@ func (v *VirshProvider) runOverSSHStdin(ctx context.Context, remoteCmd string, s
 		}
 	})
 	duration := time.Since(start)
+	overflow := runErr == nil && (stdout.exceeded || stderr.exceeded)
+	if overflow {
+		// The output was cut at its bound: the command's answer is incomplete,
+		// so it is not a success (a parser would read a truncated document).
+		runErr = fmt.Errorf("remote command output exceeded its bound (stdout %d, stderr %d bytes)",
+			sshMaxStdoutBytes, sshMaxStderrBytes)
+	}
 
 	exitCode := 0
 	if runErr != nil {
 		exitCode = sshExitCode(runErr)
+		if overflow {
+			// The command completed on the host (not a transport failure,
+			// which a negative exit code means): report it as failed.
+			exitCode = sshOutputOverflowExitCode
+		}
 		if stderr.Len() == 0 {
 			// The failure happened before any remote I/O (dial, handshake, or
 			// session-open never reached the remote command), so the usual
@@ -295,6 +308,40 @@ func (v *VirshProvider) runOverSSHStdin(ctx context.Context, remoteCmd string, s
 	}
 	log.Printf("DEBUG Command successful: %s (duration: %v)", remoteCmd, duration)
 	return result, nil
+}
+
+// sshMaxStdoutBytes and sshMaxStderrBytes bound what one command run over the
+// persistent SSH client keeps in memory. Bulk data (disk export/import) never
+// goes through here — it is streamed (runSSHStdout) — so the largest outputs
+// are `virsh list --all` of a busy host and a domain's XML, far below the
+// bounds.
+const (
+	sshMaxStdoutBytes = 64 << 20
+	sshMaxStderrBytes = 1 << 20
+	// sshOutputOverflowExitCode is the exit code reported for a command whose
+	// output exceeded its bound: positive, because the command ran on the host.
+	sshOutputOverflowExitCode = 1
+)
+
+// cappedBuffer is a bytes.Buffer that keeps at most max bytes: the rest of a
+// write is discarded (and still reported written, so the remote command is
+// drained, never blocked), and exceeded is set.
+type cappedBuffer struct {
+	bytes.Buffer
+	max      int
+	exceeded bool
+}
+
+// Write keeps what fits under the bound and discards the rest.
+func (b *cappedBuffer) Write(p []byte) (int, error) {
+	if room := b.max - b.Len(); room < len(p) {
+		b.exceeded = true
+		if room > 0 {
+			_, _ = b.Buffer.Write(p[:room])
+		}
+		return len(p), nil
+	}
+	return b.Buffer.Write(p)
 }
 
 // sshExitCode extracts a process exit code from an ssh.Session error, mirroring

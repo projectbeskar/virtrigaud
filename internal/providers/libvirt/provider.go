@@ -24,6 +24,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -116,6 +117,9 @@ type Provider struct {
 	// listHostConcurrency bounds how many hosts one clustered ListVMs lists at
 	// once; zero means clusteredListHostConcurrency.
 	listHostConcurrency int
+
+	// listRotation rotates the host a clustered ListVMs starts with.
+	listRotation atomic.Uint64
 
 	// transferLocks serializes TransferOwner per host in this provider
 	// process (ADR-0007 Addendum A, slice 4; hostLocks), so two owner

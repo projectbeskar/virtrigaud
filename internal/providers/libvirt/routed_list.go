@@ -76,6 +76,13 @@ const (
 	// clustered ListVMs answers — reporting the hosts it could not finish as
 	// unreachable — before the caller's deadline expires.
 	clusteredListResponseMargin = 5 * time.Second
+	// clusteredListMaxDomainsPerHost bounds how many domains one host's
+	// listing reads (one `virsh dumpxml` each). A host with more is reported
+	// unreachable (unknown), with a log line, rather than read partially or
+	// past its deadline. Follow-up: the per-domain reads are sequential; a
+	// host near this bound needs a batched read (ADR-0008's native list) to
+	// fit its per-host deadline.
+	clusteredListMaxDomainsPerHost = 2000
 )
 
 // hostListResult is one host's outcome in a clustered ListVMs.
@@ -102,7 +109,16 @@ func (p *Provider) listVMsClustered(ctx context.Context) (contracts.VMList, erro
 	results := make([]hostListResult, len(hosts))
 	var g errgroup.Group
 	g.SetLimit(p.effectiveListHostConcurrency())
-	for i, id := range hosts {
+	// Start from a different host on every call, so a budget spent on slow
+	// hosts does not always leave the same tail unlisted. Results stay in
+	// host order.
+	start := 0
+	if n := len(hosts); n > 0 {
+		start = int(p.listRotation.Add(1) % uint64(n)) // #nosec G115 -- n > 0, the remainder fits an int
+	}
+	for k := range hosts {
+		i := (start + k) % len(hosts)
+		id := hosts[i]
 		if err := budget.Err(); err != nil {
 			// The budget is spent: this host is not dialed at all.
 			results[i] = hostListResult{err: err}
@@ -202,6 +218,7 @@ func (p *Provider) listHostVMs(ctx context.Context, c libvirtConn) ([]contracts.
 			}
 		},
 		ownerIdentity: true,
+		maxDomains:    clusteredListMaxDomainsPerHost,
 	})
 	if err != nil {
 		return nil, err

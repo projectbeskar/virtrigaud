@@ -1402,7 +1402,16 @@ for a clustered provider.
   **60-second deadline**, so one dead or hung host cannot starve the others;
 - inside the caller's deadline: the manager gives `ListVMs` 2 minutes, and the
   provider keeps 5 seconds of it back, so it always answers in time. A host not
-  finished (or not yet started) by then is reported, not waited for;
+  finished (or not yet started) by then is reported, not waited for. Each call
+  starts the fan-out at another host, so a spent budget does not always leave
+  the same hosts unlisted;
+- bounded in size: a host with more than 2000 domains is reported unreachable
+  (logged) instead of read; the manager accepts an answer of up to 64 MiB; and
+  a command run over a host's SSH connection keeps at most 64 MiB of output
+  (1 MiB of errors) — a larger output fails the command instead of being
+  parsed truncated. Each domain's definition is still read with its own
+  `virsh dumpxml`: a host near the bound may need a batched read to fit its
+  deadline (follow-up, with ADR-0008's native list);
 - every `VMInfo` carries `host_id` (the `Host` name). On a clustered provider a
   VM is identified by **(`host_id`, `id`)**, never by its name: two hosts may
   each have a domain named `web`, and they are two entries;

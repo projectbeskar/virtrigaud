@@ -2907,6 +2907,10 @@ func (p *Provider) listVMsOn(ctx context.Context, vp *VirshProvider, opts listOp
 	if err != nil {
 		return nil, fmt.Errorf("failed to list domains: %w", err)
 	}
+	if opts.maxDomains > 0 && len(domains) > opts.maxDomains {
+		log.Printf("WARN Host has %d domains, more than the %d one listing reads; not listing it", len(domains), opts.maxDomains)
+		return nil, fmt.Errorf("the host has %d domains, more than the %d a listing reads", len(domains), opts.maxDomains)
+	}
 
 	log.Printf("INFO Found %d domains", len(domains))
 
@@ -2992,6 +2996,9 @@ type listOptions struct {
 	// ownerIdentity reports each VM's owner stamp namespace and name
 	// (VMInfo.OwnerNamespace/OwnerName; ADR-0007 Addendum A, slice 4).
 	ownerIdentity bool
+	// maxDomains, when positive, fails a listing of a host with more domains
+	// than that before any definition is read.
+	maxDomains int
 }
 
 // soleOwner returns the owner stamped on a domain document when it carries

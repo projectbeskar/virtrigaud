@@ -371,8 +371,9 @@ func TestClustered_ListVMs_BudgetFitsTheCallerDeadline(t *testing.T) {
 	list, err := p.ListVMs(ctx)
 	require.NoError(t, err, "the answer is sent before the caller's deadline")
 	assert.NoError(t, ctx.Err())
-	assert.Contains(t, list.UnreachableHostIDs, "host-a")
-	assert.Len(t, list.UnreachableHostIDs, 3, "host-a used the whole budget, so the others were never listed: unknown, not empty")
+	assert.Contains(t, list.UnreachableHostIDs, "host-a", "the hung host used the rest of the budget")
+	assert.Len(t, list.VMs, 3-len(list.UnreachableHostIDs),
+		"every host is accounted for: listed before host-a started, or never started and reported unknown, not empty")
 }
 
 // TestClustered_ListVMs_CallerGoneFailsTheCall: when the caller's context
@@ -518,4 +519,74 @@ func TestSoleOwner(t *testing.T) {
 		"<metadata>"+renderOwnerElementXML(ownerTeamA)+renderOwnerElementXML(ownerTeamB)+"</metadata>\n  <memory", 1)
 	assert.Equal(t, contracts.ObjectIdentity{}, soleOwner(two), "two stamps are ambiguous")
 	assert.Equal(t, contracts.ObjectIdentity{}, soleOwner("<domain"), "unreadable")
+}
+
+// TestClustered_ListVMs_HostOverTheDomainCapIsUnreachable: a host with more
+// domains than one listing reads is reported unreachable (unknown) before any
+// definition is read; single-host has no cap.
+func TestClustered_ListVMs_HostOverTheDomainCapIsUnreachable(t *testing.T) {
+	fx := newListFixture(t, map[string][]listDomain{
+		"host-a": {{name: "web", uuid: uuidWebA}},
+		"host-b": {{name: "web", uuid: uuidWebB}},
+	})
+	var list strings.Builder
+	list.WriteString(" Id   Name                  State\n-------------------------------------\n")
+	for i := 0; i <= clusteredListMaxDomainsPerHost; i++ {
+		fmt.Fprintf(&list, " -    d%-20d shut off\n", i)
+	}
+	fx.write("host-b", "list.txt", list.String())
+	p := clusterOf(t, []string{"host-a", "host-b"})
+
+	got, err := p.ListVMs(context.Background())
+	require.NoError(t, err)
+	require.Len(t, got.VMs, 1)
+	assert.Equal(t, "host-a", got.VMs[0].HostID)
+	assert.Equal(t, []string{"host-b"}, got.UnreachableHostIDs)
+	for _, c := range fx.calls() {
+		assert.False(t, strings.HasPrefix(c, "host-b dumpxml"), "no definition of the over-cap host is read: %s", c)
+	}
+}
+
+// TestClustered_ListVMs_RotatesTheStartingHost: successive calls start the
+// fan-out at different hosts (so a spent budget does not always starve the
+// same tail), while the answer stays in host order.
+func TestClustered_ListVMs_RotatesTheStartingHost(t *testing.T) {
+	hosts := []string{"host-a", "host-b", "host-c"}
+	p := clusterOf(t, hosts)
+	p.listHostConcurrency = 1
+	var mu sync.Mutex
+	var firsts []string
+	var seen int
+	p.listHostVMsFn = func(_ context.Context, c libvirtConn) ([]contracts.VMInfo, error) {
+		mu.Lock()
+		if seen%len(hosts) == 0 {
+			firsts = append(firsts, string(c.HostID()))
+		}
+		seen++
+		mu.Unlock()
+		return []contracts.VMInfo{{ID: "vm", HostID: string(c.HostID())}}, nil
+	}
+	for i := 0; i < 3; i++ {
+		got, err := p.ListVMs(context.Background())
+		require.NoError(t, err)
+		require.Len(t, got.VMs, 3)
+		assert.Equal(t, []string{"host-a", "host-b", "host-c"},
+			[]string{got.VMs[0].HostID, got.VMs[1].HostID, got.VMs[2].HostID}, "the answer stays in host order")
+	}
+	assert.ElementsMatch(t, hosts, firsts, "each call started at another host")
+}
+
+// TestCappedBuffer: output past the bound is discarded (still drained) and
+// flagged.
+func TestCappedBuffer(t *testing.T) {
+	b := cappedBuffer{max: 5}
+	n, err := b.Write([]byte("abc"))
+	require.NoError(t, err)
+	assert.Equal(t, 3, n)
+	assert.False(t, b.exceeded)
+	n, err = b.Write([]byte("defgh"))
+	require.NoError(t, err)
+	assert.Equal(t, 5, n, "reported written so the remote side is drained")
+	assert.True(t, b.exceeded)
+	assert.Equal(t, "abcde", b.String())
 }
