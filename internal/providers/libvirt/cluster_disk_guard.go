@@ -116,13 +116,13 @@ const clusterDiskGuardMargin = 30 * time.Second
 
 // clusterDiskGuard is the cluster-wide disk guard of one clustered Create or
 // Clone: the VirtualMachine the disk is written for (owner), its domain name,
-// and the host it lands on with the call's own connection to that host. A nil
-// guard is the single-host behaviour: the host-local ensureDiskTargetFree.
+// and the host it lands on (whose connection — the call's own — each check is
+// handed). A nil guard is the single-host behaviour: the host-local
+// ensureDiskTargetFree.
 type clusterDiskGuard struct {
 	p *Provider
-	// host is the landing host, and conn the call's own connection to it.
+	// host is the landing host.
 	host hostconn.HostID
-	conn hostCommandRunner
 	// owner is the VirtualMachine the disk is written for (a Create's owner, a
 	// Clone's target VM).
 	owner contracts.ObjectIdentity
@@ -133,10 +133,9 @@ type clusterDiskGuard struct {
 }
 
 // newClusterDiskGuard returns the guard of a clustered op of domain for owner,
-// landing on host over conn.
-func (p *Provider) newClusterDiskGuard(host hostconn.HostID, conn hostCommandRunner, owner contracts.ObjectIdentity,
-	domain, op string) *clusterDiskGuard {
-	return &clusterDiskGuard{p: p, host: host, conn: conn, owner: owner, domain: domain, op: op}
+// landing on host.
+func (p *Provider) newClusterDiskGuard(host hostconn.HostID, owner contracts.ObjectIdentity, domain, op string) *clusterDiskGuard {
+	return &clusterDiskGuard{p: p, host: host, owner: owner, domain: domain, op: op}
 }
 
 // ensureTargetFree refuses to let the create or clone write a file (subject,

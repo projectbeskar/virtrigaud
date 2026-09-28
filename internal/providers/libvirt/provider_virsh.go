@@ -214,7 +214,7 @@ func (p *Provider) createOnLeasedHost(ctx context.Context, lease hostconn.Conn, 
 	if err != nil {
 		return contracts.CreateResponse{}, err
 	}
-	g := p.newClusterDiskGuard(lease.HostID(), vc.virsh, req.Owner, domainName, guardOpCreate)
+	g := p.newClusterDiskGuard(lease.HostID(), req.Owner, domainName, guardOpCreate)
 	return p.createVM(ctx, vc.virsh, req, g)
 }
 

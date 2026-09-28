@@ -272,7 +272,7 @@ func (p *Provider) cloneOnHost(ctx context.Context, vp *VirshProvider, c libvirt
 	// Never let the copy replace a disk a domain on ANY host of the Provider
 	// uses (the pool may be shared, ADR-0007 A6 R3), or write through a
 	// symbolic link.
-	guard := p.newClusterDiskGuard(host, vp, req.TargetVM, domainName, guardOpClone)
+	guard := p.newClusterDiskGuard(host, req.TargetVM, domainName, guardOpClone)
 	if err := guard.ensureTargetFree(ctx, vp, domainDiskSubject(domainName), targetDiskPath); err != nil {
 		return contracts.CloneResponse{}, err
 	}
