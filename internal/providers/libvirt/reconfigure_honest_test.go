@@ -329,6 +329,7 @@ func TestReconfigure_Server_ReportsRestartRequired(t *testing.T) {
 	resp, err := s.Reconfigure(context.Background(), &providerv1.ReconfigureRequest{Id: opsDomainName, DesiredJson: string(desired)})
 	require.NoError(t, err)
 	assert.True(t, resp.GetRestartRequired())
+	assert.True(t, resp.GetHonestResult(), "every answer carries the honest-result marker (review L1)")
 }
 
 // ─── clustered (routed) ───────────────────────────────────────────────────────
@@ -440,6 +441,7 @@ func TestClustered_Reconfigure_HonestResult(t *testing.T) {
 			} else {
 				require.NoError(t, err)
 				assert.Equal(t, tc.restart, resp.GetRestartRequired())
+				assert.True(t, resp.GetHonestResult(), "the routed answer is marked honest too")
 			}
 			assert.Equal(t, tc.changes, sizeChanges(fx.calls()))
 			assert.Equal(t, map[string]bool{"host-b": true}, hostsOf(fx.calls()), "every call ran on the bound host")

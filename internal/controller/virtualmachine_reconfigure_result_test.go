@@ -525,6 +525,65 @@ func TestClustered_ResizeHeldWithoutHonestReconfigure(t *testing.T) {
 	assert.Equal(t, 1, single.calls, "single-host keeps today's behaviour")
 }
 
+// TestClustered_UnmarkedAnswerIsNotTrusted (review L1): a clustered Provider
+// whose capability snapshot says honest but whose answer lacks the
+// honest-result marker (a rolled-back provider image) is not trusted: the VM is
+// counted at the larger size, the capability hold's condition is set, and the
+// resize is re-checked every restartPendingRecheckInterval until a marked
+// answer records what was applied.
+func TestClustered_UnmarkedAnswerIsNotTrusted(t *testing.T) {
+	t.Run("grow", func(t *testing.T) {
+		prov := runningRoutingProvider()
+		prov.reconfigureUnmarked = true
+		r := resizeFixture(t, prov, wantsCPU(sized("app", 2), 4))
+		res, err := r.reconcileVM(context.Background(), getVM(t, r, "app"))
+		require.NoError(t, err)
+		require.Len(t, prov.reconfigureRefs, 1)
+		assert.Equal(t, restartPendingRecheckInterval, res.RequeueAfter)
+		got := getVM(t, r, "app")
+		assert.Equal(t, int32(4), *got.Status.CurrentResources.CPU, "counted at the larger size")
+		c := reconfiguringCondition(got)
+		require.NotNil(t, c)
+		assert.Equal(t, k8s.ReasonProviderLacksHonestReconfigure, c.Reason)
+		assert.Contains(t, c.Message, "honest-result marker")
+	})
+
+	t.Run("shrink while off, then a marked answer", func(t *testing.T) {
+		prov := &routingProvider{describeResp: contracts.DescribeResponse{Exists: true, PowerState: string(contracts.PowerStateOff)}}
+		prov.reconfigureUnmarked = true
+		r := overcommittedShrinkFixture(t, prov, infravirtrigaudiov1beta1.PowerStateOff)
+		clock := &fakeClock{t: time.Date(2026, 9, 28, 12, 0, 0, 0, time.UTC)}
+		r.clock = clock.now
+		_, err := r.reconcileVM(context.Background(), getVM(t, r, "app"))
+		require.NoError(t, err)
+		require.Len(t, prov.reconfigureRefs, 1)
+		assert.Equal(t, int32(4), *getVM(t, r, "app").Status.CurrentResources.CPU, "an unmarked shrink never lowers the count")
+
+		clock.t = clock.t.Add(time.Minute)
+		_, err = r.reconcileVM(context.Background(), getVM(t, r, "app"))
+		require.NoError(t, err)
+		assert.Len(t, prov.reconfigureRefs, 1, "not re-sent within the re-check interval")
+
+		prov.reconfigureUnmarked = false // the provider is rolled forward
+		clock.t = clock.t.Add(restartPendingRecheckInterval)
+		_, err = r.reconcileVM(context.Background(), getVM(t, r, "app"))
+		require.NoError(t, err)
+		require.Len(t, prov.reconfigureRefs, 2)
+		got := getVM(t, r, "app")
+		assert.Equal(t, int32(1), *got.Status.CurrentResources.CPU, "a marked answer records what was applied")
+		assert.Equal(t, k8s.ReasonReconcileSuccess, reconfiguringCondition(got).Reason)
+	})
+
+	t.Run("single-host ignores the marker", func(t *testing.T) {
+		single := newResultProvider() // answers without the marker
+		rs, _ := singleHostReconciler(t, single)
+		vm := sizedSingleHostVM(4, 8192, 2, 8192)
+		_, err := rs.reconcileVM(context.Background(), vm)
+		require.NoError(t, err)
+		assert.Equal(t, int32(2), *vm.Status.CurrentResources.CPU, "single-host records the answer as before")
+	})
+}
+
 // sizedWithMem asks vm for memMiB of memory at its recorded CPU.
 func sizedWithMem(vm *infravirtrigaudiov1beta1.VirtualMachine, memMiB int64) *infravirtrigaudiov1beta1.VirtualMachine {
 	vm.Spec.Resources = &infravirtrigaudiov1beta1.VirtualMachineResources{CPU: vm.Status.CurrentResources.CPU, MemoryMiB: i64p(memMiB)}

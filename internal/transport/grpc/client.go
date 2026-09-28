@@ -760,6 +760,8 @@ func (c *Client) Reconfigure(ctx context.Context, vm contracts.VMRef, desired co
 	}
 
 	result.RestartRequired = resp.GetRestartRequired()
+	// False from a provider that predates the honest result contract.
+	result.Honest = resp.GetHonestResult()
 	if resp.Task != nil {
 		c.trackTaskStart(resp.Task.Id) // G7.3 (#129)
 		result.TaskRef = resp.Task.Id

@@ -58,14 +58,19 @@ type routingProvider struct {
 	powerRefs []contracts.VMRef
 	powerErr  error
 
-	reconfigureRefs   []contracts.VMRef
-	reconfigureResult contracts.ReconfigureResult
-	reconfigureErr    error
+	reconfigureRefs     []contracts.VMRef
+	reconfigureResult   contracts.ReconfigureResult
+	reconfigureUnmarked bool
+	reconfigureErr      error
 }
 
 func (p *routingProvider) Reconfigure(_ context.Context, vm contracts.VMRef, _ contracts.CreateRequest) (contracts.ReconfigureResult, error) {
 	p.reconfigureRefs = append(p.reconfigureRefs, vm)
-	return p.reconfigureResult, p.reconfigureErr
+	res := p.reconfigureResult
+	// A current provider marks every answer honest; reconfigureUnmarked plays
+	// an older provider image (review L1).
+	res.Honest = !p.reconfigureUnmarked
+	return res, p.reconfigureErr
 }
 
 func (p *routingProvider) Create(_ context.Context, req contracts.CreateRequest) (contracts.CreateResponse, error) {

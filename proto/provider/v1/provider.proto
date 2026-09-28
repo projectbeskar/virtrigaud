@@ -184,6 +184,22 @@ message TaskResponse {
   // task's outcome decides. The manager records a restart-pending change as
   // Reconfiguring=True with reason RestartRequired.
   bool restart_required = 2;
+
+  // honest_result is set by a provider on EVERY Reconfigure response it gives
+  // under the honest result contract (the contract GetCapabilitiesResponse.
+  // supports_honest_reconfigure advertises): each requested change was applied
+  // to the running VM and its persistent definition, or applied to the
+  // definition only and reported with restart_required — a success is never
+  // returned for a change it did not apply. It is the per-response proof of
+  // that contract: the capability is a snapshot the manager may hold after a
+  // provider was rolled back, the marker is not. Additive and
+  // backward-compatible: false (unset) from a provider that predates or does
+  // not implement the contract. The manager treats a successful Reconfigure
+  // of a VM on a clustered Provider without it as not honest: it counts the
+  // VM at the larger of its recorded and requested size and holds further
+  // resizes (Reconfiguring=False/ProviderLacksHonestReconfigure). Set only on
+  // Reconfigure responses.
+  bool honest_result = 3;
 }
 
 // Describe virtual machine current state

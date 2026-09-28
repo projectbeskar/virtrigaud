@@ -54,9 +54,11 @@ func TestClient_Reconfigure_MapsRestartRequired(t *testing.T) {
 		resp *providerv1.TaskResponse
 		want contracts.ReconfigureResult
 	}{
-		{"applied live (older provider, field unset)", &providerv1.TaskResponse{}, contracts.ReconfigureResult{}},
+		{"applied live (older provider, fields unset)", &providerv1.TaskResponse{}, contracts.ReconfigureResult{}},
 		{"applied, restart required", &providerv1.TaskResponse{RestartRequired: true}, contracts.ReconfigureResult{RestartRequired: true}},
 		{"asynchronous", &providerv1.TaskResponse{Task: &providerv1.TaskRef{Id: "task-1"}}, contracts.ReconfigureResult{TaskRef: "task-1"}},
+		{"marked honest (review L1)", &providerv1.TaskResponse{HonestResult: true, RestartRequired: true},
+			contracts.ReconfigureResult{RestartRequired: true, Honest: true}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

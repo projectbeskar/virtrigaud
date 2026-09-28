@@ -2281,6 +2281,14 @@ func (r *VirtualMachineReconciler) reconfigureVM(
 	vm.Status.LastReconfigureTime = &now
 
 	switch {
+	case ref.Routed() && !result.Honest:
+		// A clustered VM's accounting trusts only an answer marked honest
+		// (review L1): an unmarked one — an older provider image behind a stale
+		// capability snapshot — is not trusted. See recordUnmarkedResult.
+		logger.Info("Reconfigure answered without the honest-result marker; not trusting it")
+		r.recordUnmarkedResult(vm, vmClass)
+		r.updateStatus(ctx, vm)
+		return ctrl.Result{RequeueAfter: restartPendingRecheckInterval}, nil
 	case taskRef != "":
 		vm.Status.ReconfigureTaskRef = taskRef
 		k8s.SetReconfiguringCondition(&vm.Status.Conditions, metav1.ConditionTrue, k8s.ReasonUpdating, "VM reconfiguration in progress")

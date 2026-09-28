@@ -152,6 +152,25 @@ func (r *VirtualMachineReconciler) holdResizeWithoutHonestReconfigure(
 	return ctrl.Result{RequeueAfter: placementConfigRetryInterval}, true
 }
 
+// recordUnmarkedResult records a Reconfigure of a clustered VM that the
+// provider answered without the honest-result marker (TaskResponse.
+// honest_result, review L1): a provider image that predates the contract —
+// rolled back, or not yet rolled out — while the manager still holds a
+// capability snapshot saying otherwise. Its "success" may cover a change it
+// did not apply, so it is recorded like a failure or a restart-pending change,
+// at max(recorded, desired) per resource, with the capability hold's
+// condition (Reconfiguring=False/ProviderLacksHonestReconfigure). The
+// provider is asked again every restartPendingRecheckInterval (at once after a
+// spec change); a marked answer then records what was applied.
+func (r *VirtualMachineReconciler) recordUnmarkedResult(vm *infravirtrigaudiov1beta1.VirtualMachine, vmClass *infravirtrigaudiov1beta1.VMClass) {
+	r.recordAtLeastDesired(vm, vmClass)
+	setResizeRefused(vm, k8s.ReasonProviderLacksHonestReconfigure,
+		"the VM's Provider answered the resize without the honest-result marker (an older provider image), so the answer is not "+
+			"trusted: the VM is counted at the larger of its previous and its requested size, and the resize is re-checked every "+
+			"2 minutes. Upgrade the provider image")
+	vm.Status.Phase = infravirtrigaudiov1beta1.VirtualMachinePhaseRunning
+}
+
 // recordAtLeastDesired raises status.currentResources, per resource, to the
 // VM's desired size (effectiveResources) where that is larger, and keeps it
 // where it is not: max(recorded, desired). It returns the desired size, and
@@ -212,7 +231,9 @@ func (r *VirtualMachineReconciler) recordReconfigureSuccess(vm *infravirtrigaudi
 // wait before asking the provider again (wait > 0 means: do not send one now,
 // whatever the spec says).
 //
-//   - Reconfiguring=True/RestartRequired: due once restartPendingRecheckInterval
+//   - Reconfiguring=True/RestartRequired, or Reconfiguring=False/
+//     ProviderLacksHonestReconfigure (an answer without the honest-result
+//     marker, or the capability hold): due once restartPendingRecheckInterval
 //     has passed since the last Reconfigure, or at once when the spec changed
 //     since (the condition's observedGeneration); otherwise wait.
 //   - Reconfiguring=False/ProviderError (the last Reconfigure failed, possibly
@@ -234,7 +255,11 @@ func (r *VirtualMachineReconciler) pendingReconfigureRecheck(vm *infravirtrigaud
 			return false, w
 		}
 		return true, 0
-	case cond.Status == metav1.ConditionTrue && cond.Reason == k8s.ReasonRestartRequired:
+	case cond.Status == metav1.ConditionTrue && cond.Reason == k8s.ReasonRestartRequired,
+		cond.Status == metav1.ConditionFalse && cond.Reason == k8s.ReasonProviderLacksHonestReconfigure:
+		// A change pending a restart, or an answer without the honest-result
+		// marker (recordUnmarkedResult; the capability hold, which sends
+		// nothing, re-checks the capability first on every pass).
 		if cond.ObservedGeneration != vm.Generation || vm.Status.LastReconfigureTime == nil {
 			return true, 0
 		}

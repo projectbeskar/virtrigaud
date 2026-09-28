@@ -139,6 +139,14 @@ type ReconfigureResult struct {
 	// cycle (power off, then on); until then the running VM keeps its previous
 	// size. Every other requested change was applied to the running VM too.
 	RestartRequired bool
+	// Honest is the per-response marker of the honest result contract
+	// (TaskResponse.honest_result): the provider vouches that this result
+	// reports every requested change truthfully — applied, or applied to the
+	// persistent definition only with RestartRequired. A provider that
+	// implements the contract sets it on every Reconfigure result; false from
+	// one that predates or does not implement it. The manager treats a
+	// successful clustered Reconfigure without it as not honest.
+	Honest bool
 }
 
 // Provider defines the interface that all providers must implement

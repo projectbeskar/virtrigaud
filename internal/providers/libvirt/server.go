@@ -261,7 +261,7 @@ func (s *Server) Reconfigure(ctx context.Context, req *providerv1.ReconfigureReq
 		return nil, singleHostReconfigureRPCError(err)
 	}
 
-	result := &providerv1.TaskResponse{RestartRequired: res.RestartRequired}
+	result := &providerv1.TaskResponse{RestartRequired: res.RestartRequired, HonestResult: res.Honest}
 	if res.TaskRef != "" {
 		result.Task = &providerv1.TaskRef{Id: res.TaskRef}
 	}

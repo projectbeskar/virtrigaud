@@ -321,10 +321,25 @@ func (b *Builder) ImageArtifactIdentity() *Builder {
 
 // HonestReconfigure adds CapabilityHonestReconfigure: Reconfigure applies
 // every requested change, reports one applied to the persistent definition
-// only with restart_required, or fails.
+// only with restart_required, or fails. A provider that advertises it must
+// also mark every Reconfigure response (HonestReconfigureResponse).
 func (b *Builder) HonestReconfigure() *Builder {
 	b.manager.AddCapability(CapabilityHonestReconfigure)
 	return b
+}
+
+// HonestReconfigureResponse builds the Reconfigure response of a provider that
+// implements the honest result contract: honest_result is set (the
+// per-response marker the manager requires on a clustered Provider),
+// restart_required reports a change applied to the persistent definition only,
+// and taskID, when not empty, references an asynchronous task (whose outcome
+// then decides; restartRequired should be false with a task).
+func HonestReconfigureResponse(taskID string, restartRequired bool) *providerv1.TaskResponse {
+	resp := &providerv1.TaskResponse{HonestResult: true, RestartRequired: restartRequired}
+	if taskID != "" {
+		resp.Task = &providerv1.TaskRef{Id: taskID}
+	}
+	return resp
 }
 
 // Reconfigure adds reconfiguration capabilities.

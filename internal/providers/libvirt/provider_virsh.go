@@ -1349,7 +1349,10 @@ func (p *Provider) Reconfigure(ctx context.Context, vm contracts.VMRef, desired 
 			restart, rerr = p.reconfigureClustered(ctx, c, id, vm.Owner, desired)
 			return rerr
 		})
-		return contracts.ReconfigureResult{RestartRequired: restart && err == nil}, err
+		if err != nil {
+			return contracts.ReconfigureResult{}, err
+		}
+		return contracts.ReconfigureResult{RestartRequired: restart, Honest: true}, nil
 	}
 
 	if p.virshProvider == nil {
@@ -1363,7 +1366,8 @@ func (p *Provider) Reconfigure(ctx context.Context, vm contracts.VMRef, desired 
 		// hostOpError is transparent: the error text is unchanged.
 		return contracts.ReconfigureResult{}, &hostOpError{host: p.hostID, err: err}
 	}
-	return contracts.ReconfigureResult{RestartRequired: restart}, nil
+	// The core implements the honest result contract (reconfigure.go).
+	return contracts.ReconfigureResult{RestartRequired: restart, Honest: true}, nil
 }
 
 // reconfigureClustered is the routed, OWNER-CHECKED Reconfigure of a clustered
