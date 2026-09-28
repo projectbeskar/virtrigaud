@@ -20,11 +20,11 @@ import (
 	"context"
 	"log"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
-	"github.com/projectbeskar/virtrigaud/internal/providers/libvirt/hostconn"
 )
 
 // Warning for the source of an existing linked clone.
@@ -35,52 +35,63 @@ import (
 // their unwritten blocks from. William chose not to refuse the start. Instead,
 // after every start (Power On, Reboot) the provider counts the domains on the
 // host that depend on the started domain's disks (diskDependents — the same
-// check the delete guard runs) and remembers the count; Describe reports it in
+// check the delete guard runs) and remembers the count by the domain's UUID
+// (a later domain reusing the name never inherits it); Describe reports it in
 // ProviderRaw (contracts.ProviderRawLinkedCloneDependentsKey), from which the
-// manager sets the LinkedClonesDependOnDisk condition and a Warning event. The
-// count is only as fresh as the last start, and is lost when the provider
-// restarts (Describe then reports nothing, and the manager keeps what it had).
+// manager sets the LinkedClonesDependOnDisk condition and a Warning event.
+// Deleting the domain drops its count. The count is only as fresh as the last
+// start, and is lost when the provider restarts (Describe then reports
+// nothing, and the manager keeps what it had).
 
 // linkedCloneCheckTimeout bounds the dependents count after a start, which
 // never fails or holds up the power operation for long.
 const linkedCloneCheckTimeout = 30 * time.Second
 
 // linkedCloneDependents is the provider's record of the dependents count per
-// host and domain name, taken at the domain's last start. The zero value is
-// ready to use.
+// domain UUID, taken at the domain's last start. The zero value is ready to
+// use.
 type linkedCloneDependents struct {
-	mu       sync.Mutex
-	byDomain map[string]int
+	mu     sync.Mutex
+	byUUID map[string]int
 }
 
-// key names a domain on a host.
-func (l *linkedCloneDependents) key(host hostconn.HostID, domain string) string {
-	return string(host) + "\x00" + domain
+// uuidKey normalizes a domain UUID (virsh prints it lower-case; compare
+// case-insensitively).
+func uuidKey(uuid string) string {
+	return strings.ToLower(strings.TrimSpace(uuid))
 }
 
-// set records n dependents for domain on host.
-func (l *linkedCloneDependents) set(host hostconn.HostID, domain string, n int) {
+// set records n dependents for the domain with this UUID.
+func (l *linkedCloneDependents) set(uuid string, n int) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if l.byDomain == nil {
-		l.byDomain = map[string]int{}
+	if l.byUUID == nil {
+		l.byUUID = map[string]int{}
 	}
-	l.byDomain[l.key(host, domain)] = n
+	l.byUUID[uuidKey(uuid)] = n
 }
 
-// get returns the recorded count for domain on host, if any.
-func (l *linkedCloneDependents) get(host hostconn.HostID, domain string) (int, bool) {
+// get returns the recorded count for the domain with this UUID, if any.
+func (l *linkedCloneDependents) get(uuid string) (int, bool) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	n, ok := l.byDomain[l.key(host, domain)]
+	n, ok := l.byUUID[uuidKey(uuid)]
 	return n, ok
+}
+
+// drop forgets the domain with this UUID (it was deleted).
+func (l *linkedCloneDependents) drop(uuid string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	delete(l.byUUID, uuidKey(uuid))
 }
 
 // recordLinkedCloneDependents counts, right after domain d was started on vp's
 // host, the other domains that use one of its disks as a disk or backing file,
-// and records the count for Describe. It only warns — the start has happened —
-// and a count that cannot be taken is logged and leaves the record as it was.
-func (p *Provider) recordLinkedCloneDependents(ctx context.Context, vp *VirshProvider, host hostconn.HostID, d domainTarget) {
+// and records the count by the domain's UUID for Describe. It only warns — the
+// start has happened — and a count that cannot be taken (in at most
+// linkedCloneCheckTimeout) is logged and leaves the record as it was.
+func (p *Provider) recordLinkedCloneDependents(ctx context.Context, vp *VirshProvider, d domainTarget) {
 	cctx, cancel := context.WithTimeout(ctx, linkedCloneCheckTimeout)
 	defer cancel()
 	res, err := vp.runVirshCommand(cctx, "dumpxml", d.handle)
@@ -93,25 +104,29 @@ func (p *Provider) recordLinkedCloneDependents(ctx context.Context, vp *VirshPro
 		log.Printf("WARN Could not check domain %s for linked clones after its start: %v", d.name, err)
 		return
 	}
+	if strings.TrimSpace(doc.UUID) == "" {
+		log.Printf("WARN Could not check domain %s for linked clones after its start: its definition has no UUID", d.name)
+		return
+	}
 	n, err := diskDependents(cctx, vp, doc.UUID, doc.diskFiles())
 	if err != nil {
 		log.Printf("WARN Could not check domain %s for linked clones after its start: %v", d.name, err)
 		return
 	}
-	p.linkedDeps.set(host, d.name, n)
+	p.linkedDeps.set(doc.UUID, n)
 	if n > 0 {
 		log.Printf("WARN Domain %s was started while %d other domain(s) use its disk as their backing file (linked clones): "+
 			"powering it on while they are shut off corrupts them", d.name, n)
 	}
 }
 
-// reportLinkedCloneDependents adds the recorded dependents count of domain on
-// host, if any, to a Describe response's ProviderRaw.
-func (p *Provider) reportLinkedCloneDependents(host hostconn.HostID, domain string, raw map[string]string) {
-	if raw == nil {
+// reportLinkedCloneDependents adds the recorded dependents count of the domain
+// with this UUID, if any, to a Describe response's ProviderRaw.
+func (p *Provider) reportLinkedCloneDependents(uuid string, raw map[string]string) {
+	if raw == nil || strings.TrimSpace(uuid) == "" {
 		return
 	}
-	if n, ok := p.linkedDeps.get(host, domain); ok {
+	if n, ok := p.linkedDeps.get(uuid); ok {
 		raw[contracts.ProviderRawLinkedCloneDependentsKey] = strconv.Itoa(n)
 	}
 }

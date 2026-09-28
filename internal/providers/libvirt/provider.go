@@ -125,7 +125,7 @@ type Provider struct {
 	// tests point it at a scratch directory (see staging.go).
 	hostStagingDir string
 
-	// linkedDeps records, per host and domain, how many other domains
+	// linkedDeps records, per domain UUID, how many other domains
 	// depended on the domain's disk at its last start, for Describe
 	// (linked_clone_warning.go).
 	linkedDeps linkedCloneDependents

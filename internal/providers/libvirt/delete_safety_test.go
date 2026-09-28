@@ -429,7 +429,9 @@ func TestOwnChainMembers(t *testing.T) {
 // existing linked clone is not refused, but the provider counts the domains
 // depending on its disk right after the start and Describe reports the count
 // (contracts.ProviderRawLinkedCloneDependentsKey) for the manager's warning; a
-// VM nothing depends on reports 0; a VM never started reports nothing.
+// VM nothing depends on reports 0; a VM never started reports nothing. The
+// count is kept by domain UUID and dropped when the domain is deleted, so a
+// later domain with the same name never inherits it.
 func TestPowerOn_WarnsWhenLinkedClonesDependOnTheDisk(t *testing.T) {
 	// A local connection's Power syncs the persistent XML through
 	// /tmp/<domain>-sync.xml (syncPersistentXML), which a failed define leaves.
@@ -443,26 +445,46 @@ func TestPowerOn_WarnsWhenLinkedClonesDependOnTheDisk(t *testing.T) {
 	c.linkedPair(true)
 	ctx := context.Background()
 
+	uuidOf := func(name string) string {
+		d, err := parseDomainDisks(c.domainXML(name))
+		require.NoError(t, err)
+		require.NotEmpty(t, d.UUID)
+		return d.UUID
+	}
+	srcUUID, cloneUUID := uuidOf("team-a.web"), uuidOf("team-b.copy")
+
 	_, err := c.p.Power(ctx, contracts.VMRef{ID: "team-a.web"}, contracts.PowerOpOn)
 	require.NoError(t, err, "the start is never refused")
 	assert.Contains(t, c.virshCalls("h1"), "start team-a.web")
-	n, ok := c.p.linkedDeps.get(c.p.hostID, "team-a.web")
+	n, ok := c.p.linkedDeps.get(srcUUID)
 	require.True(t, ok)
 	assert.Equal(t, 1, n)
+	_, byName := c.p.linkedDeps.get("team-a.web")
+	assert.False(t, byName, "kept by UUID, never by name")
 
 	raw := map[string]string{}
-	c.p.reportLinkedCloneDependents(c.p.hostID, "team-a.web", raw)
+	c.p.reportLinkedCloneDependents(strings.ToUpper(srcUUID), raw)
 	assert.Equal(t, "1", raw[contracts.ProviderRawLinkedCloneDependentsKey])
 
 	_, err = c.p.Power(ctx, contracts.VMRef{ID: "team-b.copy"}, contracts.PowerOpReboot)
 	require.NoError(t, err)
 	raw = map[string]string{}
-	c.p.reportLinkedCloneDependents(c.p.hostID, "team-b.copy", raw)
+	c.p.reportLinkedCloneDependents(cloneUUID, raw)
 	assert.Equal(t, "0", raw[contracts.ProviderRawLinkedCloneDependentsKey], "nothing depends on the clone")
 
-	raw = map[string]string{}
-	c.p.reportLinkedCloneDependents(c.p.hostID, "never-started", raw)
-	assert.NotContains(t, raw, contracts.ProviderRawLinkedCloneDependentsKey)
+	for _, uuid := range []string{"", "aaaaaaaa-0000-4000-8000-00000000ffff"} {
+		raw = map[string]string{}
+		c.p.reportLinkedCloneDependents(uuid, raw)
+		assert.NotContains(t, raw, contracts.ProviderRawLinkedCloneDependentsKey, "never started: nothing to report")
+	}
+
+	// Deleting the clone drops its count.
+	_, err = c.p.Delete(ctx, contracts.VMRef{ID: "team-b.copy"})
+	require.NoError(t, err)
+	_, ok = c.p.linkedDeps.get(cloneUUID)
+	assert.False(t, ok, "dropped with the domain")
+	_, ok = c.p.linkedDeps.get(srcUUID)
+	assert.True(t, ok, "another domain's count is kept")
 }
 
 // TestDeleteDiskFile_RechecksRightBeforeRemoving: a path that stopped being a

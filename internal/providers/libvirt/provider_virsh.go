@@ -651,6 +651,7 @@ func (p *Provider) deleteExistingDomain(ctx context.Context, vp *VirshProvider, 
 	if err := vp.undefineDomain(ctx, id); err != nil {
 		return "", contracts.NewRetryableError("failed to undefine domain", err)
 	}
+	p.linkedDeps.drop(plan.uuid)
 
 	if len(plan.disks) > 0 {
 		log.Printf("INFO Deleting %d disk(s) for VM %s", len(plan.disks), id)
@@ -680,6 +681,9 @@ func (p *Provider) deleteExistingDomain(ctx context.Context, vp *VirshProvider, 
 // domainDeletionPlan is what deleteExistingDomain removes once the domain is
 // undefined.
 type domainDeletionPlan struct {
+	// uuid is the domain's UUID (its linked-clone dependents count is dropped
+	// once it is undefined).
+	uuid string
 	// disks are the canonical host paths of the domain's own disk files that
 	// may be removed (deletableDiskFiles) and that no other domain uses: its
 	// top-level disks, then its own backing-chain files (ownChainFiles).
@@ -715,7 +719,7 @@ func (p *Provider) planDomainDeletion(ctx context.Context, vp *VirshProvider, id
 	if doc.Name == "" {
 		doc.Name = id
 	}
-	plan := domainDeletionPlan{seedDir: doc.cloudInitSeedDir(p.stagingDir())}
+	plan := domainDeletionPlan{uuid: doc.UUID, seedDir: doc.cloudInitSeedDir(p.stagingDir())}
 
 	var deletable []string
 	if disks := doc.diskFiles(); len(disks) > 0 {
@@ -1281,7 +1285,7 @@ func (p *Provider) runPowerOp(ctx context.Context, c libvirtConn, d domainTarget
 	if op == contracts.PowerOpOn || op == contracts.PowerOpReboot {
 		// The domain is running: warn (never refuse) when linked clones of it
 		// exist, since its writes now reach their backing file.
-		p.recordLinkedCloneDependents(ctx, vp, c.HostID(), d)
+		p.recordLinkedCloneDependents(ctx, vp, d)
 	}
 	return nil
 }
@@ -1873,7 +1877,7 @@ func (p *Provider) describeOn(ctx context.Context, c libvirtConn, id string) (co
 		ConsoleURL:  consoleURL,
 		ProviderRaw: domainInfo, // Pass the enhanced domain info as provider-specific data
 	}
-	p.reportLinkedCloneDependents(c.HostID(), id, response.ProviderRaw)
+	p.reportLinkedCloneDependents(domainInfo["UUID"], response.ProviderRaw)
 
 	log.Printf("INFO Domain %s comprehensive state: power=%s, ips=%v, monitoring_data=collected", id, response.PowerState, ips)
 
