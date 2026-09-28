@@ -426,13 +426,48 @@ func (r *ClusterRegistry) removeFromDrainingLocked(e *clusterEntry) {
 // A6.1). They are never dialed, and Hosts never includes them.
 func (r *ClusterRegistry) UnroutableHosts() []HostID {
 	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.unroutableHostsLocked()
+}
+
+// unroutableHostsLocked is UnroutableHosts; the caller holds mu.
+func (r *ClusterRegistry) unroutableHostsLocked() []HostID {
 	ids := make([]HostID, 0, len(r.unroutable))
 	for id := range r.unroutable {
 		ids = append(ids, id)
 	}
-	r.mu.Unlock()
 	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
 	return ids
+}
+
+// HostSnapshot is one consistent view of the hosts a ClusterRegistry knows,
+// read under a single lock (ClusterRegistry.Snapshot), so a caller that must
+// cover every host of the Provider never sees a host move between the
+// routable and unroutable sets halfway through its listing.
+type HostSnapshot struct {
+	// Routable are the ids Hosts returns: every routable, non-draining host.
+	Routable []HostID
+	// Unroutable are the ids UnroutableHosts returns: hosts the inventory
+	// names that cannot be routed to.
+	Unroutable []HostID
+	// RecentlyUnreachable are those of Routable that RecentlyUnreachable
+	// reported, for the snapshot's window, when the snapshot was taken.
+	RecentlyUnreachable []HostID
+}
+
+// Snapshot returns Hosts, UnroutableHosts and the routable hosts found
+// unreachable less than unreachableWithin ago (RecentlyUnreachable), all read
+// under one lock. Each list is sorted.
+func (r *ClusterRegistry) Snapshot(unreachableWithin time.Duration) HostSnapshot {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	s := HostSnapshot{Routable: r.hostsLocked(), Unroutable: r.unroutableHostsLocked()}
+	for _, id := range s.Routable {
+		if e := r.live[id]; e != nil && !e.draining && !e.unreachableAt.IsZero() && time.Since(e.unreachableAt) < unreachableWithin {
+			s.RecentlyUnreachable = append(s.RecentlyUnreachable, id)
+		}
+	}
+	return s
 }
 
 // RecentlyUnreachable reports whether routable host id was found unreachable
@@ -467,11 +502,16 @@ func (r *ClusterRegistry) MarkUnreachable(id HostID) {
 // excluded — they are being removed and take no new work.
 func (r *ClusterRegistry) Hosts() []HostID {
 	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.hostsLocked()
+}
+
+// hostsLocked is Hosts; the caller holds mu.
+func (r *ClusterRegistry) hostsLocked() []HostID {
 	ids := make([]HostID, 0, len(r.live))
 	for id := range r.live {
 		ids = append(ids, id)
 	}
-	r.mu.Unlock()
 	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
 	return ids
 }

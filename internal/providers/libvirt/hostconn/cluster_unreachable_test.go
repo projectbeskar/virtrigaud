@@ -104,3 +104,29 @@ func TestClusterRegistry_RecentlyUnreachable(t *testing.T) {
 		t.Fatal("an unknown host is never reported")
 	}
 }
+
+// TestClusterRegistry_Snapshot (A6.1 fix verification, N6): Snapshot reads
+// the routable hosts, the unroutable ones and the recently unreachable ones
+// under one lock, and agrees with Hosts, UnroutableHosts and
+// RecentlyUnreachable.
+func TestClusterRegistry_Snapshot(t *testing.T) {
+	d := newMockDialer()
+	i := inv(host("h1", "ep-1", nil, nil), host("h2", "ep-2", nil, nil), host("bad", "not a url", nil, nil))
+	i.UnroutableHostIDs = []string{"tomb"}
+	r := mustCluster(t, d, i)
+	r.MarkUnreachable("h2")
+
+	s := r.Snapshot(time.Minute)
+	if !hostsEqual(s.Routable, "h1", "h2") || !hostsEqual(s.Routable, r.Hosts()...) {
+		t.Fatalf("Routable = %v, Hosts = %v", s.Routable, r.Hosts())
+	}
+	if !hostsEqual(s.Unroutable, "bad", "tomb") || !hostsEqual(s.Unroutable, r.UnroutableHosts()...) {
+		t.Fatalf("Unroutable = %v, UnroutableHosts = %v", s.Unroutable, r.UnroutableHosts())
+	}
+	if !hostsEqual(s.RecentlyUnreachable, "h2") {
+		t.Fatalf("RecentlyUnreachable = %v", s.RecentlyUnreachable)
+	}
+	if got := r.Snapshot(0).RecentlyUnreachable; len(got) != 0 {
+		t.Fatalf("outside the window nothing is recent; got %v", got)
+	}
+}

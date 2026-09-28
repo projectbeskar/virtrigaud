@@ -473,12 +473,15 @@ func (p *Provider) scanClusterDiskUse(ctx context.Context, s clusterScan) (clust
 	}
 	// The hosts the inventory names but that cannot be routed to (the
 	// operator's tombstones, rejected entries) are scanned too — and fail
-	// closed at once: they exist, and may use the file.
+	// closed at once: they exist, and may use the file. Both sets come from
+	// one registry snapshot, so a host moving between them mid-listing is
+	// never missed.
+	snap := p.clusterReg.Snapshot(clusterGuardUnreachableMemo)
 	unroutable := map[hostconn.HostID]bool{}
-	for _, id := range p.clusterReg.UnroutableHosts() {
+	for _, id := range snap.Unroutable {
 		unroutable[id] = true
 	}
-	hosts := guardHosts(append(p.clusterReg.Hosts(), p.clusterReg.UnroutableHosts()...), s)
+	hosts := guardHosts(append(slices.Clone(snap.Routable), snap.Unroutable...), s)
 	if len(hosts) == 0 {
 		return clusterScanResult{}, nil
 	}
