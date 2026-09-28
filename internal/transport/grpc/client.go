@@ -1374,6 +1374,25 @@ func isVMDiskInUseStatus(st *status.Status) bool {
 	return false
 }
 
+// isVMPreviousIncarnationStatus reports whether a gRPC status is a clustered
+// provider's refusal of a Create or Clone because a previous incarnation of
+// the requesting VirtualMachine exists on a host of the Provider (ADR-0007
+// A6, R2): codes.AlreadyExists carrying a google.rpc.ErrorInfo with
+// contracts.VMPreviousIncarnationReason in VirtRigaud's domain.
+func isVMPreviousIncarnationStatus(st *status.Status) bool {
+	if st == nil || st.Code() != codes.AlreadyExists {
+		return false
+	}
+	for _, d := range st.Details() {
+		if info, ok := d.(*errdetails.ErrorInfo); ok &&
+			info.GetReason() == contracts.VMPreviousIncarnationReason &&
+			info.GetDomain() == contracts.ErrorInfoDomain {
+			return true
+		}
+	}
+	return false
+}
+
 // isVMDiskCheckFailedStatus reports whether a gRPC status is a provider's
 // "not performed: could not verify that no other VM depends on this VM's disk"
 // (codes.Unavailable carrying a google.rpc.ErrorInfo with
@@ -1548,7 +1567,14 @@ func (c *Client) mapGRPCError(operation string, err error) error {
 		// ours to bind — e.g. a libvirt Create whose domain name is taken by a
 		// domain not owned by the requesting VirtualMachine. Typed Conflict
 		// (non-retryable) so the controller surfaces a condition and backs off
-		// instead of retrying on a tight loop (contracts.IsConflict).
+		// instead of retrying on a tight loop (contracts.IsConflict). A
+		// clustered provider's VM_PREVIOUS_INCARNATION (ADR-0007 A6, R2) is
+		// marked in the chain (contracts.IsVMPreviousIncarnation), so the
+		// controller holds the VM on its pending host instead of excluding it.
+		if isVMPreviousIncarnationStatus(st) {
+			return contracts.NewConflictError(fmt.Sprintf("%s: %s", operation, st.Message()),
+				fmt.Errorf("%w: %w", contracts.ErrVMPreviousIncarnation, err))
+		}
 		return contracts.NewConflictError(fmt.Sprintf("%s: %s", operation, st.Message()), err)
 	case codes.FailedPrecondition:
 		// The provider refused because another VM on the host depends on this
