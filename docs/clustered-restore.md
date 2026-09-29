@@ -274,9 +274,15 @@ placement record was lost. No re-stamp is needed:
   This happens when the provider lacks the owner filter, the host is not a
   `Host` of the Provider, or another domain for the namespace and name exists.
   Resolve the cause: upgrade the provider, restore the `Host` object, or
-  remove the extra domain. As a last resort, set the pending host by hand:
+  remove the extra domain. As a last resort, set the pending host by hand.
+  **Before you do, verify on that host that the domain is stamped with this
+  VM's own UID** (run [runbook step 1](#re-attach-runbook) on every host: it
+  must find exactly one domain for the namespace and name, on `<host>`, and
+  its stamp's `uid` must equal the VM's `metadata.uid`). A pending host that
+  points anywhere else makes the create run there:
 
   ```sh
+  virsh metadata --domain <domain uuid> --uri https://virtrigaud.io/xmlns/libvirt/owner/v1   # on <host>: uid = the VM's UID
   kubectl patch virtualmachines.infra.virtrigaud.io <name> -n <namespace> --subresource=status \
     --type=merge -p '{"status":{"placement":{"pendingHost":"<host>"}}}'
   ```
@@ -319,8 +325,9 @@ on the hosts, and read access to VirtualMachines in all namespaces.
 
 ```sh
 NEW_UID=$(kubectl get virtualmachines.infra.virtrigaud.io <name> -n <namespace> -o jsonpath='{.metadata.uid}')
-kubectl get virtualmachines.infra.virtrigaud.io <name> -n <namespace> \
-  -o jsonpath='{.metadata.annotations.infra\.virtrigaud\.io/placement-uid}{"\n"}'
+MARKER=$(kubectl get virtualmachines.infra.virtrigaud.io <name> -n <namespace> \
+  -o jsonpath='{.metadata.annotations.infra\.virtrigaud\.io/placement-uid}')
+echo "uid=$NEW_UID marker=$MARKER"
 ```
 
 **1. Find the previous domain by its stamp, not by its name.** A domain may
@@ -349,6 +356,11 @@ definition of an active domain. Step 2 rewrites both definitions. Then:
   and name,** or if a host could not be checked. At most one may be
   re-attached. Discard the others first.
 - Check that the namespace and name in the stamp are the held VM's own.
+- **For a VM held by R1** (its marker names another UID): the stamp's UID
+  must **equal the marker's value** (`$MARKER`). The marker says which
+  incarnation this VirtualMachine was backed up as. A domain stamped with any
+  other UID is not that incarnation (another VM of the same name, or a marker
+  someone edited): stop, and do not re-attach it.
 - Check that **no VirtualMachine with the stamp's UID exists**, in any
   namespace, terminating ones included:
 
@@ -397,20 +409,44 @@ are set, the marker equals the VM's UID, and
 
 ### Discarding the previous domain
 
-To give the held VM a fresh start instead, remove the old domain and its files
-on its host:
+To give the held VM a fresh start instead, remove the old domain and its files.
+
+**Run step 1's checks first.** Find the domain by stamp on every host, stop on
+more than one, and confirm that no VirtualMachine with its stamp's UID exists.
+Discarding a domain a live VirtualMachine owns destroys that VM. Then, on the
+domain's host, address it by its **UUID** (a name may be reused), and note its
+disk files before you undefine it:
 
 ```sh
-virsh destroy <namespace>.<name>          # if it is running
-virsh undefine <namespace>.<name> --nvram # --nvram for UEFI domains
+D=<domain uuid>
+virsh domblklist --domain "$D" --details    # Type Device Target Source: note the Source of each 'file disk'
+virsh destroy --domain "$D"                  # only if it is running
+virsh undefine --domain "$D" --nvram         # --nvram for UEFI domains
 ```
 
-Then remove its disk from the pool: `<pool>/<namespace>.<name>-disk.qcow2`, or
-`-disk` for a blank volume, or `-migrated.qcow2` for an imported disk. Also
-remove its cloud-init seed. **On a shared pool, first check that no domain on
-any host uses the disk.** Finally, release the marker (runbook step 3) if the
-VM carries one. At its next re-check, R4 finds nothing and the VM is created
-as new.
+**Before you remove a disk file, check that no domain on any host of the
+Provider uses it.** A shared pool is visible from every host, and a linked
+clone may use the file as its backing file. On **every** host, for each file
+`F` noted above:
+
+```sh
+F=<disk file>
+for d in $(virsh list --all --uuid); do
+  if virsh domblklist --domain "$d" --details | awk '$1 == "file" {print $4}' | grep -qxF -- "$F"; then
+    echo "IN USE by $d $(virsh domname "$d")"
+  fi
+done
+# and no disk on the host uses it in its backing chain:
+for img in $(virsh list --all --uuid | xargs -r -n1 sh -c 'virsh domblklist --domain "$0" --details' | awk '$1 == "file" && $2 == "disk" {print $4}'); do
+  sudo qemu-img info -U --backing-chain "$img" 2>/dev/null | grep -qF -- "$F" && echo "BACKING of $img"
+done
+```
+
+Remove the file only when neither loop prints anything on any host. The disk is
+`<pool>/<namespace>.<name>-disk.qcow2`, or `-disk` for a blank volume, or
+`-migrated.qcow2` for an imported disk. Also remove its cloud-init seed.
+Finally, release the marker (runbook step 3) if the VM carries one. At its
+next re-check, R4 finds nothing and the VM is created as new.
 
 ## Other Providers
 
