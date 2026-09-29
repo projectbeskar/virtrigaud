@@ -1061,6 +1061,10 @@ func clusteredCapabilities() *providerv1.GetCapabilitiesResponse {
 		// ListVMs across every host (host_id, unreachable_host_ids) and TransferOwner
 		// since Addendum A slice 4.
 		SupportsRoutedAdoption: true,
+		// ListVMs honours the owner filter and marks its answer
+		// owner_filter_applied since A6.2 (the manager's pre-schedule
+		// uniqueness check, R4; routed_list_owner.go).
+		SupportsListOwnerFilter: true,
 	}
 }
 
@@ -1362,12 +1366,29 @@ func (s *Server) ImportDisk(ctx context.Context, req *providerv1.ImportDiskReque
 // circuit breaker. Only a provider-level failure fails the call, as a
 // sanitized routed error. The single-host response and errors are unchanged
 // (no host_id, never an unreachable host).
+//
+// An owner filter (owner_namespace / owner_name, ADR-0007 A6.2, R4) is
+// honoured by a clustered provider only (Provider.ListVMsForOwner): the
+// answer holds that VirtualMachine's candidate domains and is marked
+// owner_filter_applied; an incomplete or invalid filter is INVALID_ARGUMENT.
+// A single-host provider ignores the filter and answers its unfiltered,
+// unmarked listing, as before (it does not advertise
+// supports_list_owner_filter).
 func (s *Server) ListVMs(ctx context.Context, req *providerv1.ListVMsRequest) (*providerv1.ListVMsResponse, error) {
 	if s.provider == nil {
 		return nil, fmt.Errorf("provider not initialized")
 	}
 
-	list, err := s.provider.ListVMs(ctx)
+	var (
+		list contracts.VMList
+		err  error
+	)
+	filter := contracts.OwnerFilter{Namespace: req.GetOwnerNamespace(), Name: req.GetOwnerName()}
+	if s.clusteredProvider() && !filter.IsZero() {
+		list, err = s.provider.ListVMsForOwner(ctx, filter)
+	} else {
+		list, err = s.provider.ListVMs(ctx)
+	}
 	if err != nil {
 		if s.clusteredProvider() {
 			return nil, routedRPCError("list VMs", err)
@@ -1418,6 +1439,7 @@ func (s *Server) ListVMs(ctx context.Context, req *providerv1.ListVMsRequest) (*
 	return &providerv1.ListVMsResponse{
 		Vms:                protoVMInfos,
 		UnreachableHostIds: list.UnreachableHostIDs,
+		OwnerFilterApplied: list.OwnerFilterApplied,
 	}, nil
 }
 
