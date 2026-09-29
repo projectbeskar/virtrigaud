@@ -5,6 +5,51 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-09-29 15:40] - ADR-0007 A6.2/A6.3: restore marker, pre-schedule uniqueness check, clustered backup and restore runbook
+**Author:** @wrkode (William Rizzo)
+
+> **Operator note.** Only `Provider.spec.topology: cluster` (experimental) changes. **Roll the clustered libvirt provider right after the manager**: until it reports `supportsListOwnerFilter`, every new clustered VM waits (`Placed=False/ProviderLacksListOwnerFilter`). A clustered VM re-created under a new UID (a restore, an exported manifest) or next to a previous incarnation (after `orphan-on-delete`) now waits as `RestorePending` before it is scheduled. Re-attach it with [`docs/clustered-restore.md`](docs/clustered-restore.md). Single-host behaviour and the three single-host goldens are unchanged.
+
+### Added
+- `proto/provider/v1/provider.proto`: `ListVMsRequest.owner_namespace` (1) / `owner_name` (2), `ListVMsResponse.owner_filter_applied` (3) and `GetCapabilitiesResponse.supports_list_owner_filter` (22). Additive; regenerated bindings.
+- `internal/providers/contracts/owner_filter.go`: `OwnerFilter`, `OwnerFilteredLister`, `OwnerUIDs`. Also `VMList.OwnerFilterApplied` and `Capabilities.SupportsListOwnerFilter`.
+- `internal/transport/grpc/client.go`: `ListVMsForOwner` (45 s deadline; an incomplete filter is never sent), and the mapping of the capability and the mark. `sdk/provider/capabilities`: `CapabilityListOwnerFilter`.
+- `internal/providers/libvirt/routed_list_owner.go`: the clustered owner-filtered `ListVMs`. Across every host (slice 4's fan-out, now `listAcrossHosts`) it runs one `virsh list --all` and reads only `<namespace>.<name>` (any stamp) and the legacy bare name (only when stamped for the namespace and name). An unreadable candidate is reported (`owner_stamp_state=unreadable`), and a host that stops answering is unreachable. The answer is marked `owner_filter_applied`, and the clustered provider advertises `supports_list_owner_filter`.
+- `api/infra.virtrigaud.io/v1beta1/virtualmachine_types.go`: `VirtualMachinePlacementUIDAnnotation` (`infra.virtrigaud.io/placement-uid`), a constant only (no CRD change).
+- `internal/k8s/conditions.go`: Placed reasons `ProviderLacksListOwnerFilter` and `UniquenessCheckFailed`.
+- `internal/controller/virtualmachine_clustered_restore.go`: R1 and R4. The guards run before a clustered VM's first placement (and before its image prepare):
+  - R1: a marker naming another UID holds the VM (`Placed`/`Provisioning=False/RestorePending`, one `Warning` event, backoff 15 s to 5 min).
+  - R4: one owner-filtered `ListVMs`. A previous incarnation, more than one domain, or an unreadable stamp holds the VM. The VM's own domain has its host recorded as `pendingHost`, without scheduling or admission, and the create binds it. Unreachable hosts do not hold (decision 4).
+  - A pending create answered with the VM's own domain elsewhere moves `pendingHost` there when the lookup finds exactly that domain.
+- `docs/clustered-restore.md`: the backup and restore guide, scenarios and re-attach runbook (A6.3), linked from `docs/README.md` and `docs/clustered-provider-inventory.md`.
+- Tests:
+  - `internal/providers/libvirt/routed_list_owner_test.go`: the candidates, one lookup per host, the unreadable candidate, the host down mid-read, the invalid filter, over gRPC with the breaker closed, the capability, and single-host ignoring the filter byte for byte against the golden.
+  - `internal/transport/grpc/client_listvms_owner_test.go` and `sdk/provider/capabilities/list_owner_filter_test.go`.
+  - `internal/controller/virtualmachine_clustered_restore_test.go`: the R1 marker order for create and clone target, the hold, release, forged marker, single-host and restored binding; R4's previous incarnation, backoff, own domain, unreachable host, what counts, a Provider without the filter, bound/pending VMs never checked, the own-domain move; deleting a held VM; the clone backoff.
+
+### Changed
+- `internal/controller/virtualmachine_controller.go`: the marker (the VM's own UID, an optimistic-lock metadata patch) is written before a clustered VM's first `pendingHost`, and after an owner-checked `Describe` on its bound host succeeds. `createVM` gains `createVMOn(…, discoveredHost)`.
+- `internal/controller/virtualmachine_clustered.go`: a bound VM whose marker names another UID and whose domain is missing on its host is `Ready=False/RestorePending` instead of `VMMissingOnHost`. `RestorePending` messages point at `docs/clustered-restore.md`. The own-domain hold message says the pending host moves automatically.
+- `internal/controller/vmclone_clustered.go`: a clone's target gets the marker before its `pendingHost`. A clone answered `HOST_UNAVAILABLE` or `VM_DISK_CHECK_FAILED` backs off (15 s to 5 min) instead of retrying every 30 s.
+- `internal/controller/vmadoption_clustered.go`: `writeAdoptionBinding` sets the marker right before the binding write.
+- `internal/providers/{vsphere,proxmox,mock}`: `ListVMs` documents that the filter is ignored and unmarked. None of them advertises the capability.
+- Docs: ADR-0007 status, slices tables and the A6.2 amendment; `docs/clustered-provider-inventory.md`; `docs/upgrading.md` (behaviour row, provider-after-manager, rollback); `docs/release-notes/next.md`.
+
+### Security
+- The marker is untrusted tenant input. It only holds the VM that carries it: it is compared with the VM's own UID and nothing else, never sent to the provider or the scheduler, and never used to select a host or authorize a bind. A forged marker holds only the forger's VM.
+- R4 records only a host where the provider found a domain stamped with the VM's own UID, and the create retry proves it again.
+- Conditions and events name no host, no endpoint, no domain and no other UID.
+- Host-scoped failures never reach the circuit breaker.
+
+### Why
+Before this change, a clustered VirtualMachine restored with a new UID, or re-created next to a domain left by `orphan-on-delete`, could be scheduled onto another host and make a second domain. On a host-local pool the disk guard could not see it. A6.2 holds such VMs before they are scheduled, and A6.3 gives administrators a runbook that needs no status edit. They are the last guards before slice 5.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-09-29 14:41] - SDK client: RPC methods return a nil error on success (typed-nil *ProviderError)
 **Author:** @wrkode (William Rizzo)
 
@@ -2256,6 +2301,7 @@ Nine newly-disclosed, reachable vulnerabilities were failing the blocking `govul
 ### Impact
 - [ ] Breaking change
 - [x] Requires cluster rollout — only to ship rebuilt manager/provider images carrying the patched grpc transport and standard library; running clusters are unaffected until upgraded
+
 ## [2026-09-21 12:06] - Drop Vestigial CGO from libvirt Provider; Add libvirt to the vet/test Gate (ADR-0008 PR 0)
 **Author:** @wrkode (William Rizzo)
 
@@ -2357,6 +2403,7 @@ Three newly-disclosed, reachable vulnerabilities were failing the blocking `govu
 ### Impact
 - [ ] Breaking change
 - [x] Requires cluster rollout (libvirt provider image)
+
 ## [2026-08-10 14:30] - provider pods: dedicated least-privilege ServiceAccount
 **Author:** @wrkode (William Rizzo)
 
@@ -2782,6 +2829,7 @@ The `observability` values block (and its `serviceMonitorLabels`/`prometheusRule
 - [ ] Requires cluster rollout
 - [x] Config change only
 - [ ] Documentation only
+
 ## [2026-06-17 13:03] - libvirt: drop hard-coded qemu emulator path
 **Author:** @jing2uo (Komh)
 
@@ -3343,6 +3391,7 @@ Rebuild/redeploy the libvirt provider image. This **changes the domain XML for V
 - Headroom only exists for VMs created with the hot-add flags **after** this change — existing VMs (and VMs created without the flags) have no headroom and still need a power-cycle to grow CPU/memory.
 - Memory live grow inflates the balloon up to `<memory>`; it is balloon-based (`currentMemory`), not DIMM hotplug. The guest sees the new memory as the balloon deflates.
 - Follow-up: the clone path (`clone.go` `applyClassOverrides`) rewrites `<vcpu>`/`<memory>`/`<currentMemory>` and would drop the `current<max` headroom on a clone; preserving headroom across clone is a separate change and out of scope here.
+
 ## [2026-06-09 07:48] - libvirt memory-inclusive snapshots: advertise SupportsMemorySnapshots (#202)
 **Author:** @wrkode (William Rizzo)
 
@@ -3676,6 +3725,43 @@ Observed on the lab: the `vsphere-prod` provider ran ~8 days idle (no managed vS
 - [ ] Config change only
 - [ ] Documentation only
 
+## [2026-06-07 12:05] - vSphere: advertise disk export/import capabilities accurately (#178)
+**Author:** @wrkode (William Rizzo)
+
+### Fixed
+- `internal/providers/vsphere/server.go`: `GetCapabilities` now reports `SupportsDiskExport=true`, `SupportsDiskImport=true`, `SupportedExportFormats=[vmdk, qcow2, raw]`, `SupportedImportFormats=[vmdk, qcow2, raw]`, and `SupportsExportCompression=true`. These were previously left at the zero value (`false`/empty), understating capabilities that vSphere actually implements (`ExportDisk` clones to a compressed streamOptimized VMDK and converts to the target format; `ImportDisk` accepts and converts those formats).
+
+### Added
+- `internal/providers/vsphere/capabilities_test.go`: asserts the corrected disk-migration flags + formats, and that existing flags are unchanged.
+
+### Why
+The understated flags are harmless today (the manager surfaces but does not yet enforce capabilities) but become load-bearing once `--enforce-provider-capabilities` (#176) is enabled: gating on `SupportsDiskExport`/`SupportsDiskImport=false` would wrongly refuse vSphere migrations it can actually perform. Confirmed live on the lab during #176 validation — vSphere's `status.reportedCapabilities` showed disk export/import absent (false). This unblocks safely enabling capability gating. Fixes #178.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout — only to ship the rebuilt vSphere provider image; no behavior change (capabilities are advisory until gating is enabled)
+- [ ] Config change only
+- [ ] Documentation only
+
+## [2026-06-07 12:00] - Capability negotiation: surface provider capabilities + opt-in gating (#176)
+**Author:** @wrkode (William Rizzo)
+
+### Added
+- `internal/controller/provider_controller.go`: the Provider reconciler now best-effort queries the running provider's `GetCapabilities` RPC (once `ProviderAvailable` and runtime `Running`) and surfaces the result on `Provider.Status.ReportedCapabilities`, plus a `CapabilitiesReported` Condition (True `CapabilitiesFetched` / False `CapabilitiesUnavailable`). Consumed via the narrow `contracts.CapabilityReporter` extension interface (type-asserted from the resolved provider), so the core `contracts.Provider` interface is unchanged. Strictly best-effort: a nil resolver, resolve failure, non-reporter provider, or failing RPC logs at V(1) and never fails the reconcile or flips `Healthy`.
+- `cmd/manager/main.go`: new `--enforce-provider-capabilities` bool flag (**default false**). When off, snapshot/migration behavior is byte-for-byte unchanged. Threaded as `EnforceCapabilities` into the VMSnapshot and VMMigration reconcilers.
+- `internal/controller/vmsnapshot_controller.go`: when enforcement is on, the snapshot CREATE path gates on the provider's reported capabilities before calling `SnapshotCreate` — refusing with a Warning event + Failed/`UnsupportedByProvider` condition when `!SupportsSnapshots`, or when a memory-inclusive snapshot is requested and `!SupportsMemorySnapshots`. Fails open if the provider is not a `CapabilityReporter` or the query fails.
+- `internal/controller/vmmigration_controller.go`: when enforcement is on, the exporting phase gates on source `SupportsDiskExport` before `ExportDisk`, and the importing phase gates on target `SupportsDiskImport` before `ImportDisk`, failing the migration with a clear reason. Fails open if the provider is not a `CapabilityReporter` or the query fails.
+- `internal/controller/capability_gating_test.go`, `internal/controller/provider_controller_capabilities_test.go`: table-style unit tests with a fake `contracts.CapabilityReporter` provider asserting gating blocks when the flag is on and the capability is false, does not block when the flag is off or the capability is true, and fails open when the provider is not a `CapabilityReporter` or the RPC errors; plus the capabilities→status mapping and the provider-controller best-effort condition behavior.
+
+### Why
+Builds on the #176 foundation (capabilities contract, gRPC client method, CRD status field). Surfacing capabilities makes provider feature support observable to operators; gating prevents issuing operations a provider declares it cannot perform. Gating is opt-in because a provider that under-reports a capability (e.g. vSphere currently understates disk export/import) would otherwise block operations it can actually perform — operators must confirm capability flags are accurate before enabling.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout — manager image must be updated
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-06-07 10:00] - Fix VMClone target-VM bind race (Status.ID seed) (#179 follow-up)
 **Author:** @wrkode (William Rizzo)
 
@@ -3740,43 +3826,6 @@ spec:
 ```
 
 ---
-
-## [2026-06-07 12:05] - vSphere: advertise disk export/import capabilities accurately (#178)
-**Author:** @wrkode (William Rizzo)
-
-### Fixed
-- `internal/providers/vsphere/server.go`: `GetCapabilities` now reports `SupportsDiskExport=true`, `SupportsDiskImport=true`, `SupportedExportFormats=[vmdk, qcow2, raw]`, `SupportedImportFormats=[vmdk, qcow2, raw]`, and `SupportsExportCompression=true`. These were previously left at the zero value (`false`/empty), understating capabilities that vSphere actually implements (`ExportDisk` clones to a compressed streamOptimized VMDK and converts to the target format; `ImportDisk` accepts and converts those formats).
-
-### Added
-- `internal/providers/vsphere/capabilities_test.go`: asserts the corrected disk-migration flags + formats, and that existing flags are unchanged.
-
-### Why
-The understated flags are harmless today (the manager surfaces but does not yet enforce capabilities) but become load-bearing once `--enforce-provider-capabilities` (#176) is enabled: gating on `SupportsDiskExport`/`SupportsDiskImport=false` would wrongly refuse vSphere migrations it can actually perform. Confirmed live on the lab during #176 validation — vSphere's `status.reportedCapabilities` showed disk export/import absent (false). This unblocks safely enabling capability gating. Fixes #178.
-
-### Impact
-- [ ] Breaking change
-- [ ] Requires cluster rollout — only to ship the rebuilt vSphere provider image; no behavior change (capabilities are advisory until gating is enabled)
-- [ ] Config change only
-- [ ] Documentation only
-
-## [2026-06-07 12:00] - Capability negotiation: surface provider capabilities + opt-in gating (#176)
-**Author:** @wrkode (William Rizzo)
-
-### Added
-- `internal/controller/provider_controller.go`: the Provider reconciler now best-effort queries the running provider's `GetCapabilities` RPC (once `ProviderAvailable` and runtime `Running`) and surfaces the result on `Provider.Status.ReportedCapabilities`, plus a `CapabilitiesReported` Condition (True `CapabilitiesFetched` / False `CapabilitiesUnavailable`). Consumed via the narrow `contracts.CapabilityReporter` extension interface (type-asserted from the resolved provider), so the core `contracts.Provider` interface is unchanged. Strictly best-effort: a nil resolver, resolve failure, non-reporter provider, or failing RPC logs at V(1) and never fails the reconcile or flips `Healthy`.
-- `cmd/manager/main.go`: new `--enforce-provider-capabilities` bool flag (**default false**). When off, snapshot/migration behavior is byte-for-byte unchanged. Threaded as `EnforceCapabilities` into the VMSnapshot and VMMigration reconcilers.
-- `internal/controller/vmsnapshot_controller.go`: when enforcement is on, the snapshot CREATE path gates on the provider's reported capabilities before calling `SnapshotCreate` — refusing with a Warning event + Failed/`UnsupportedByProvider` condition when `!SupportsSnapshots`, or when a memory-inclusive snapshot is requested and `!SupportsMemorySnapshots`. Fails open if the provider is not a `CapabilityReporter` or the query fails.
-- `internal/controller/vmmigration_controller.go`: when enforcement is on, the exporting phase gates on source `SupportsDiskExport` before `ExportDisk`, and the importing phase gates on target `SupportsDiskImport` before `ImportDisk`, failing the migration with a clear reason. Fails open if the provider is not a `CapabilityReporter` or the query fails.
-- `internal/controller/capability_gating_test.go`, `internal/controller/provider_controller_capabilities_test.go`: table-style unit tests with a fake `contracts.CapabilityReporter` provider asserting gating blocks when the flag is on and the capability is false, does not block when the flag is off or the capability is true, and fails open when the provider is not a `CapabilityReporter` or the RPC errors; plus the capabilities→status mapping and the provider-controller best-effort condition behavior.
-
-### Why
-Builds on the #176 foundation (capabilities contract, gRPC client method, CRD status field). Surfacing capabilities makes provider feature support observable to operators; gating prevents issuing operations a provider declares it cannot perform. Gating is opt-in because a provider that under-reports a capability (e.g. vSphere currently understates disk export/import) would otherwise block operations it can actually perform — operators must confirm capability flags are accurate before enabling.
-
-### Impact
-- [ ] Breaking change
-- [x] Requires cluster rollout — manager image must be updated
-- [ ] Config change only
-- [ ] Documentation only
 
 ## [2026-06-06 13:57] - Fix: migration PVCs being deleted no longer wedge the provider rollout (#184)
 **Author:** @wrkode (William Rizzo)
@@ -4249,31 +4298,6 @@ go test -tags=e2e ./test/e2e/...
 
 ---
 
-## [2026-05-25 12:08] - chore(ci): make Dependabot policy explicit + group non-major actions bumps (#135 / closes #134 in part)
-**Author:** @wrkode (William Rizzo)
-
-### Audit finding
-The May 22 Dependabot batch (#74–#82) cleared 5 of the 9 then-outdated GitHub Actions in our workflows. 4 remained on Node 20 with newer Node 24 majors available (`actions/setup-go`, `docker/login-action`, `docker/metadata-action`, `docker/setup-buildx-action`). Dependabot had not surfaced PRs for them, likely because of SHA-pinning + `# vX` version-comment hints making it conservative about major bumps. Hard deadline 2026-09-16.
-
-### Changed
-- `.github/dependabot.yml`: added top-of-file comment block (~25 lines) documenting the policy, the Node 20 deadline, the 4 outstanding actions, and the SHA-pinning caveat.
-- `.github/dependabot.yml`: explicit `allow: dependency-type: all` block (functionally equivalent to omitting the block; loud-and-clear intent for future maintainers).
-- `.github/dependabot.yml`: `groups: ci-actions-non-major` (`update-types: [minor, patch]`) so minor/patch bumps batch into one weekly PR per ecosystem while major bumps stay individual (matches the Tier A/B/C convention).
-
-### Why
-Make the major-bump-permitted policy loud; improve the per-week review experience by batching minor/patch noise; surface the Node 20 plan to anyone reading the config.
-
-### Impact
-- [ ] Breaking change
-- [ ] Requires cluster rollout
-- [x] Config change only
-- [ ] Documentation only
-
-### Notes
-- Worked exactly as intended: the next Monday Dependabot run surfaced the 4 outstanding Node 20 actions plus 3 others. Tracking issue #134 documents the rollout. The 4 backlog clears merged the same day (#138/#139/#141/#142); #137 (actions/checkout 4→6) intentionally deferred to preserve the K4 mitigation pin from PR #104; #140 (codecov-action 5→6) deferred to v0.3.7 (not Node 20 backlog).
-
----
-
 ## [2026-05-25 15:28] - security: bump go.opentelemetry.io/otel + sdk to v1.43.0 (closes #143; unblocks v0.3.6-rc1)
 **Author:** @wrkode (William Rizzo)
 
@@ -4308,6 +4332,31 @@ First attempt to cut `v0.3.6-rc1` from main (commit `d1e08d0`, tag `f537176`, de
 - Verified locally pre-PR: `go vet ./...` clean; `go build ./...` clean; `make test` 12/12 packages with 0 FAIL; `docker build -f build/Dockerfile.manager` clean; `docker run virtrigaud-manager:otelfix --version` returns the expected banner.
 - The v0.3.6-rc1 attempt that surfaced this is run [26406778809](https://github.com/projectbeskar/virtrigaud/actions/runs/26406778809). After this PR merges, `v0.3.6-rc1` will be re-cut from the new HEAD.
 - The release workflow's Trivy scan is now the second post-Go-bump security-net catching real issues — this is the safety mechanism working as intended.
+
+---
+
+## [2026-05-25 12:08] - chore(ci): make Dependabot policy explicit + group non-major actions bumps (#135 / closes #134 in part)
+**Author:** @wrkode (William Rizzo)
+
+### Audit finding
+The May 22 Dependabot batch (#74–#82) cleared 5 of the 9 then-outdated GitHub Actions in our workflows. 4 remained on Node 20 with newer Node 24 majors available (`actions/setup-go`, `docker/login-action`, `docker/metadata-action`, `docker/setup-buildx-action`). Dependabot had not surfaced PRs for them, likely because of SHA-pinning + `# vX` version-comment hints making it conservative about major bumps. Hard deadline 2026-09-16.
+
+### Changed
+- `.github/dependabot.yml`: added top-of-file comment block (~25 lines) documenting the policy, the Node 20 deadline, the 4 outstanding actions, and the SHA-pinning caveat.
+- `.github/dependabot.yml`: explicit `allow: dependency-type: all` block (functionally equivalent to omitting the block; loud-and-clear intent for future maintainers).
+- `.github/dependabot.yml`: `groups: ci-actions-non-major` (`update-types: [minor, patch]`) so minor/patch bumps batch into one weekly PR per ecosystem while major bumps stay individual (matches the Tier A/B/C convention).
+
+### Why
+Make the major-bump-permitted policy loud; improve the per-week review experience by batching minor/patch noise; surface the Node 20 plan to anyone reading the config.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [x] Config change only
+- [ ] Documentation only
+
+### Notes
+- Worked exactly as intended: the next Monday Dependabot run surfaced the 4 outstanding Node 20 actions plus 3 others. Tracking issue #134 documents the rollout. The 4 backlog clears merged the same day (#138/#139/#141/#142); #137 (actions/checkout 4→6) intentionally deferred to preserve the K4 mitigation pin from PR #104; #140 (codecov-action 5→6) deferred to v0.3.7 (not Node 20 backlog).
 
 ---
 
