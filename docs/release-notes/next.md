@@ -178,6 +178,24 @@ providers), and rollback caveats in
   (power it off or revoke its access to the export); mount a shared pool only
   on the hosts of one clustered Provider, at the same path, with NFS locking
   enabled (→ [`docs/clustered-provider-inventory.md`](docs/clustered-provider-inventory.md#shared-storage-the-cluster-wide-disk-guard-a61)).
+- A restored or re-created clustered VirtualMachine is held **before** it is
+  scheduled (ADR-0007 A6.2). The manager writes the restore marker
+  `infra.virtrigaud.io/placement-uid` (the VM's own UID) on every clustered
+  VM; a VM restored under a new UID, whose marker names another UID, waits as
+  `Placed=False/RestorePending` and nothing is created. Before a clustered VM
+  is first scheduled, the manager asks every host for a domain stamped with
+  its namespace and name (a new owner filter on `ListVMs`, advertised as
+  `supportsListOwnerFilter`): a previous incarnation holds it, and its own
+  domain is re-bound where it runs. The marker only ever holds the VM that
+  carries it; single-host Providers ignore it. **A clustered Provider holds at
+  most one domain per namespace and name, so re-creating a VM after
+  `orphan-on-delete` waits until the old domain is re-attached or removed.**
+  **Roll the clustered libvirt provider right after the manager**: with an
+  older one, new clustered VMs wait (`ProviderLacksListOwnerFilter`). Include
+  VirtualMachine status in backups (Velero `restoreStatus`); the re-attach
+  runbook needs only a `virsh metadata` re-stamp and, for a VM restored
+  without status, the marker set to its new UID — no status edit
+  (→ [`docs/clustered-restore.md`](docs/clustered-restore.md)).
 - On a clustered Provider, shrinking a **running** VM waits until the VM is
   powered off (`Reconfiguring=False/ShrinkPendingPowerOff`): a live shrink
   only deflates the balloon, which the guest can take back. VirtRigaud never
