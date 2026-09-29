@@ -1113,8 +1113,21 @@ func singleHostBoundIDs(vms []infravirtrigaudiov1beta1.VirtualMachine, providers
 	return ids
 }
 
+// endpointDefaultPorts are the ports an endpoint without one connects to, by
+// scheme: libvirt's SSH transport (and plain ssh) use SSH's 22, its TCP and
+// TLS transports libvirtd's 16509 and 16514. A scheme not listed keeps an
+// empty port.
+var endpointDefaultPorts = map[string]string{
+	"qemu+ssh": "22",
+	"ssh":      "22",
+	"qemu+tcp": "16509",
+	"qemu+tls": "16514",
+}
+
 // endpointKey reduces a Host endpoint to what identifies the hypervisor: the
 // URL scheme, host name (lower-cased) and port, without the user or path. An
+// omitted port is the scheme's default (endpointDefaultPorts), so
+// "qemu+ssh://h1/system" and "qemu+ssh://h1:22/system" are the same host. An
 // endpoint that does not parse is compared as written.
 func endpointKey(endpoint string) string {
 	endpoint = strings.TrimSpace(endpoint)
@@ -1122,7 +1135,12 @@ func endpointKey(endpoint string) string {
 	if err != nil || u.Hostname() == "" {
 		return endpoint
 	}
-	return strings.ToLower(u.Scheme) + "://" + strings.ToLower(u.Hostname()) + ":" + u.Port()
+	scheme := strings.ToLower(u.Scheme)
+	port := u.Port()
+	if port == "" {
+		port = endpointDefaultPorts[scheme]
+	}
+	return scheme + "://" + strings.ToLower(u.Hostname()) + ":" + port
 }
 
 // adoptedProviderRaw is the listing's provider data recorded in an adopted

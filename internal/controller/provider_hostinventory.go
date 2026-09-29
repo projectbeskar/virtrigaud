@@ -181,7 +181,9 @@ func hostBelongsToProvider(host *infravirtrigaudiov1beta1.Host, provider *infrav
 // hostsecret.ValidateEndpoint, or whose id is duplicated is SKIPPED from the
 // render — never rendered half-usable and never failing the whole reconcile —
 // and surfaced via a non-secret condition/event so siblings still render
-// (fail-safe, never fail-open).
+// (fail-safe, never fail-open). Its id alone is rendered as a tombstone
+// (Inventory.UnroutableHostIDs), so the provider knows the host exists and a
+// check that must cover every host fails closed on it (ADR-0007 A6.1).
 func (r *ProviderReconciler) reconcileHostInventorySecret(ctx context.Context, provider *infravirtrigaudiov1beta1.Provider) error {
 	if !isClusterTopology(provider) {
 		return nil
@@ -248,6 +250,14 @@ func (r *ProviderReconciler) reconcileHostInventorySecret(ctx context.Context, p
 			Labels:      h.Spec.Labels,
 			Credentials: creds,
 		})
+	}
+
+	// Every skipped host is still one the Provider fronts: it is rendered as an
+	// id-only tombstone (no endpoint, no credentials), so the provider's
+	// cluster-wide disk guard fails closed on it instead of never looking at
+	// it (ADR-0007 A6.1).
+	for _, s := range skipped {
+		inv.UnroutableHostIDs = append(inv.UnroutableHostIDs, s.id)
 	}
 
 	data, err := hostsecret.Marshal(inv)

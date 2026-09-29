@@ -161,8 +161,9 @@ exec "$FAKE_SCD_TOOLS/sudo" "$@"
 // directory checks are real, against the test's staging directory. withUmask's
 // script (umaskExecScript) is logged as "local umask <mask> <command>" and run
 // by the real /bin/sh too, so the command it wraps (qemu-img, sudo dd) reaches
-// its fake. The disk/varstore target check (targetKindScript) is logged as
-// scdFakeTool logs it, and runs for real only on a path inside the test's own
+// its fake. The disk/varstore target check (targetKindScript) and the
+// cluster-wide guard's disk-name probe (existingPathsScript) are logged as
+// scdFakeTool logs them, and run for real only on paths inside the test's own
 // directory (FAKE_SCD_DIR): a real host path is never inspected. Every other
 // sh call is scdFakeTool's.
 const routedGuardShell = `#!/bin/sh
@@ -174,7 +175,7 @@ case "$2" in
   shift 3
   printf 'local umask %s\n' "$*" >> "$FAKE_SCD_DIR/calls.log"
   exec /bin/sh -c '` + umaskExecScript + `' sh "$@" ;;
-'` + targetKindScript + `')
+'` + targetKindScript + `'|'` + existingPathsScript + `')
   case "$4" in "$FAKE_SCD_DIR"/*)
     printf 'local sh %s\n' "$*" >> "$FAKE_SCD_DIR/calls.log"
     exec /bin/sh "$@" ;;

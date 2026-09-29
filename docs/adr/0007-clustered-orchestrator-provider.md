@@ -12,13 +12,15 @@ halves are merged (#312–#325; security-hardened by #330, #331, #333 and #334):
 `target_host_id` + `status.placement.host` binding **at create**. Post-create
 routing (**Addendum A** below) is in progress: slice 1 (#337: `Describe`,
 `Delete`, `pendingHost`), slice 2 (#338: `Power`, `Reconfigure`, excluded
-hosts) and slice 3 (#359: the snapshot family, `Clone`, `GetDiskInfo`,
-`ExportDisk` (s3 / nfs) and host-encoded task references) are merged, and
-slice 4 lists VMs across every host and adopts keyed on (host id, VM id) (see
-the slice 4 amendment under A5). **Not yet done:**
-- the A6 restore guards and docs (A6.1–A6.3). A6 covers backup and restore of
-  clustered VMs and was accepted on 2026-09-28. These slices land after slice 4
-  and before slice 5;
+hosts), slice 3 (#359: the snapshot family, `Clone`, `GetDiskInfo`,
+`ExportDisk` (s3 / nfs) and host-encoded task references) and slice 4 (#364:
+VMs listed across every host, adoption keyed on (host id, VM id); see the
+slice 4 amendment under A5) are merged. A6.1 (the cluster-wide disk guard R3,
+also on `Delete`, and the previous-incarnation pin R2; see the A6.1 amendment
+under A6) is implemented. **Not yet done:**
+- the rest of the A6 restore guards and docs (A6.2, A6.3). A6 covers backup
+  and restore of clustered VMs and was accepted on 2026-09-28. These slices
+  land after slice 4 and before slice 5;
 - the end-to-end lab validation (slice 5), which also runs A6's six restore
   checks.
 
@@ -920,14 +922,15 @@ It is the security fix for the released domain-name takeover.
 | 2 | Routed `Power` and `Reconfigure`. `HardwareUpgrade` gets the proto field only. |
 | 3 | The snapshot family, `Clone` (`source_host_id` equal to the landing host), `ExportDisk` / `GetDiskInfo`, and host-encoded task refs. |
 | 4 | `ListVMs` across all hosts (A3); adoption keyed on `(host_id, id)`. Adoption re-stamps the adopted domain's owner through a check-and-set step, serialized and read back (A6, *Slice 4 coordination*). |
-| A6.1 | A6 guards R3 and R2: the cluster-wide disk-overwrite guard, and a previous incarnation pins the VM. After slice 4. |
+| A6.1 | A6 guards R3 and R2: the cluster-wide disk-overwrite guard (also on `Delete`), and a previous incarnation pins the VM. After slice 4. **Implemented.** |
 | A6.2 | A6 guards R1 and R4: the restore marker and hold, and the pre-schedule uniqueness check. After slice 4. |
 | A6.3 | A6 docs: backup and restore, and the re-attach runbook. |
 | 5 | End-to-end lab validation: schedule, create, power, describe, snapshot and delete a real VM on a clustered provider. This is the first real clustered VM. It also runs A6's six restore checks. |
 | A6.4 | After v0.4.0: the automated restore re-attach (`VMRestoreBinding`). |
 
-**Status (2026-09-28):** slices 0, 1 (#337), 2 (#338) and 3 (#359) are merged;
-slice 4 is implemented (see the slice 4 amendment below); slice 5 is open.
+**Status (2026-09-28):** slices 0, 1 (#337), 2 (#338), 3 (#359) and 4 (#364)
+are merged; A6.1 is implemented (see the A6.1 amendment under A6); A6.2, A6.3
+and slice 5 are open.
 
 > **Amendment (2026-09-25, slice 3): what slice 3 adds to the wire and the flows.**
 >
@@ -1076,8 +1079,8 @@ slice 4 is implemented (see the slice 4 amendment below); slice 5 is open.
 >   any unreachable host starts no new adoption (in-progress bindings are
 >   still completed). Residual gaps: disk paths are compared as raw strings,
 >   and `VMInfo.Disks` lists file-backed disks only (no block or network
->   disks). A clustered `Delete`'s in-use scan is still host-local — it should
->   fan out across hosts as A6.1's R3 does for `Create` (follow-up). A Host whose endpoint another Host
+>   disks). A clustered `Delete`'s in-use scan was host-local; A6.1 fans it
+>   out across every other host (see the A6.1 amendment). A Host whose endpoint another Host
 >   object or a single-host Provider's `spec.endpoint` names is not adopted
 >   from (logged; a failed Host or Provider list adopts nothing that pass;
 >   one host under two names — an alias, an IP — is not recognized), and an unstamped domain whose
@@ -1685,10 +1688,191 @@ runbook or remove it. There is no opt-in in v0.4.0. A6.2 must also set the
 
 | Slice | Scope | Order |
 |---|---|---|
-| A6.1 | R3 and R2 (the provider reason and the manager pin), for clustered `Create` and `Clone`. A standalone fix. | v0.4.0: after slice 4 (it reuses slice 4's per-host fan-out), before slice 5 |
+| A6.1 | R3 and R2 (the provider reason and the manager pin), for clustered `Create` and `Clone`; R3 also guards the clustered `Delete` (slice 4 review). A standalone fix. **Implemented** (see the A6.1 amendment below). | v0.4.0: after slice 4 (it reuses slice 4's per-host fan-out), before slice 5 |
 | A6.2 | R1 (the marker, the hold, the `RestorePending` reason, the event and the metric reason) and R4 (the pre-schedule check over slice 4's `ListVMs`, with the additive owner filter and the stamp's namespace and name in `VMInfo`). | v0.4.0: after slice 4, before slice 5 |
 | A6.3 | Docs: a backup and restore section in `docs/clustered-provider-inventory.md`, the runbook (clustered, plus the single-host libvirt and vSphere re-stamp), the invariant and its `orphan-on-delete` side effect, `docs/upgrading.md`, the release notes. | v0.4.0, with A6.1 and A6.2 |
 | A6.4 | The `VMRestoreBinding` CRD and controller, over slice 4's compare-and-swap re-stamp and R4's lookup. It gets its own amendment, which also confirms the gate (decision 5). | after v0.4.0 |
+
+> **Amendment (2026-09-28, A6.1 implementation).** R3 and R2 as built. What
+> the code decided beyond the text above:
+>
+> - **R3 also guards the clustered `Delete`** (the slice 4 review). After the
+>   host-local plan (`planDomainDeletion`) and before anything is destroyed,
+>   undefined or removed, every **other** host of the registry is scanned for a
+>   domain that uses one of the files the delete would remove. A use refuses the
+>   delete (`FailedPrecondition`, `VM_DISK_IN_USE` + `VM_OPERATION_FAILED`: the
+>   manager keeps the finalizer), and a host that cannot be checked fails it
+>   closed. A delete always has files to remove, so **a clustered delete is held
+>   while any host of the Provider cannot be checked**. *(William's decision
+>   after the security review: fail closed, with backoff and a clear
+>   condition.)* The VM keeps its finalizer with `DeleteBlocked=True` (reason
+>   `HostUnreachable` or `DiskCheckFailed`) and `Ready=False/DeleteBlocked`, a
+>   constant message naming no host, one `Warning` event per transition, and a
+>   per-VM exponential backoff from when the hold began (15 s doubling to
+>   5 min; the same backoff paces `RestorePending` and a clustered create
+>   answered `HOST_UNAVAILABLE` or `VM_DISK_CHECK_FAILED`). `orphan-on-delete` or `force-delete` are
+>   acted on at once — a VM being deleted is reconciled on every update — and
+>   release the VirtualMachine, leaving the domain. `DeleteBlocked` always
+>   says why the delete waits now *(fix verification, N8)*: a `VM_DISK_IN_USE`
+>   refusal sets it to `DiskInUse` (re-checked every minute), and an ordinary
+>   failure removes it. The cloud-init seed
+>   directory is host-local staging: when it alone would be removed, a failed
+>   scan keeps it and the delete proceeds.
+> - **What R3 covers on `Create` and `Clone`.** The landing host probes every
+>   name the VM's disk may have had in the pool, in any incarnation and of any
+>   kind: `<domain>-disk` (a blank volume: a dir pool names the file after the
+>   volume, without an extension), `<domain>-disk.qcow2` (from an image, or a
+>   clone), `<domain>-migrated.qcow2` (an imported disk attached in place), and
+>   the same for the legacy bare name. *(Corrected by the A6.1 security review:
+>   the first cut probed only the file being written, so a blank previous
+>   incarnation was invisible to a create from an image, and the reverse.)*
+>   When any exists, all of them go into ONE scan: a previous incarnation found
+>   under any name holds the VM, and the file being written (a blank volume, an
+>   image copy, a clone, an imported disk attached in place) is written only
+>   when no domain uses it; a foreign use of another name refuses nothing. With
+>   none there, nothing is scanned (two host commands on the landing host). A
+>   clone's UEFI varstore goes next to its source's (`rewriteNVRAMPath`): an
+>   existing one that resolves into the host-local NVRAM directory keeps the
+>   host-local check, one anywhere else is scanned on every host like a disk
+>   *(fix verification, N3)*.
+> - **What "uses" means** is the host-local check's definition, per host: any
+>   domain, running or not, that references the file as a disk, anywhere in a
+>   disk's backing chain (`qemu-img info` for shut-off domains), or as another
+>   file or shared directory.
+> - **Fail-closed classes.** A host not leased (unknown, draining, dial
+>   failure), dropped mid-scan or past its deadline answers `Unavailable` +
+>   `HOST_UNAVAILABLE`; a host that answered but could not be scanned (an
+>   unreadable definition or chain, more than 2000 domains) answers
+>   `Unavailable` + `VM_DISK_CHECK_FAILED` + `VM_OPERATION_FAILED`. Neither names
+>   the host, neither counts toward the breaker, and nothing is written or
+>   removed. A use or an incarnation found on a reachable host is definitive
+>   even when another host failed. A scan that any failure decides (Delete,
+>   the base-image check) fails closed before it starts — no scan slot, no
+>   dial, no other host read — when a tombstoned host, or one found
+>   unreachable less than 30 s ago, is among its hosts *(fix verification,
+>   N2)*; a Create's disk scan still runs (an incarnation is the more
+>   specific answer), those hosts first. The manager backs off every clustered
+>   create answered `HOST_UNAVAILABLE` or `VM_DISK_CHECK_FAILED` like the
+>   other holds (15 s doubling to 5 min, from the later of `Placed` going
+>   False and the pending host's `lastScheduledTime`).
+> - **R2 through the fan-out.** While it scans, R3 counts every domain whose
+>   owner stamp names the request's namespace and name — on any host, whether or
+>   not it uses the file, and **whatever its UID**: a domain stamped with the
+>   requester's own UID on another host is its own domain elsewhere, and a
+>   second one must not be made either (decision 2). Any such domain answers
+>   `VM_PREVIOUS_INCARNATION` (the own-UID kind with ErrorInfo metadata
+>   `incarnation: own`, see below); a use by anything else is plain
+>   `AlreadyExists`.
+>   On the landing host the name check answers first (`bindExistingDomain`,
+>   the clone's target check): a domain of the requested name stamped for the
+>   request's namespace and name under another UID is `VM_PREVIOUS_INCARNATION`;
+>   a foreign or unstamped one stays plain `AlreadyExists`, which keeps the
+>   slice 2 exclusion. R2 is therefore checked cluster-wide only when R3 runs
+>   (a file where the disk goes); R4 (A6.2) is the check before scheduling.
+> - **The manager's hold** uses the reason `RestorePending` (which A6.2's R1
+>   reuses): `Placed=False` and `Provisioning=False`, one `Warning` event, the
+>   metric reason `restore-pending`, a re-check with the backoff above, `pendingHost`
+>   (and `pendingResources`) kept, nothing excluded. A clone's target is held
+>   the same way and the `VMClone` stays `Pending` — never `Failed`, which would
+>   remove its target. The message points at the runbook in
+>   `docs/clustered-provider-inventory.md` and names no host and no domain.
+> - **Path comparison.** Canonical, per host: the candidate — as the landing
+>   host names it and as it resolves there — is resolved again with `realpath`
+>   on each scanned host and compared with that host's raw and resolved
+>   references. Comparing `(st_dev, st_ino)` was considered and not adopted:
+>   `st_dev` is assigned by each NFS client, so it differs between hosts for the
+>   same file, and `st_ino` alone is not unique across filesystems; it would add
+>   a command per host and still not close the cross-host gap. A delete's seed
+>   directory is resolved on each host too, and a candidate in the host-local
+>   NVRAM directory (`/var/lib/libvirt/qemu/nvram`) is compared on the
+>   operation's own host only (the same path elsewhere is another file; a
+>   clone's varstore that resolves there keeps the host-local check). Each host is scanned through
+>   its `Host` endpoint's libvirt instance (`/system` or `/session`); another
+>   instance's domains on that host are not seen. *Residuals:* a host that
+>   mounts the shared export under a different path, or reaches a file through
+>   a second mount, a bind mount or a hard link, is not matched, and neither is
+>   a protocol disk (NBD, RBD, iSCSI: no host path); shared pools must be
+>   mounted at the same path on every host of a Provider, with NFS locking
+>   enabled (QEMU's image locks depend on it). Conversely, on host-local pools
+>   the same path on two hosts is two files, so a domain elsewhere with the same
+>   disk path is a false "in use" (fail-safe) until the pool ownership marker
+>   (follow-up) says which hosts share a pool.
+> - **Bounds.** Slice 4's fan-out (`fanOutHosts`, `onHostWithin`, now shared
+>   with `ListVMs`): 8 hosts at a time, 60 s per host, inside the caller's
+>   deadline less 30 s so the operation's own work and its answer still fit.
+>   The landing host of a `Create` or `Clone` is scanned over the call's own
+>   connection (a landing host that left the registry mid-call is still
+>   scanned); the other hosts are leased.
+> - **The base image is checked on every host** *(security review of A6.1;
+>   a pre-existing gap)*: the image confinement checked only the landing host
+>   for a domain using a host-path image, so a tenant's VMImage could name
+>   another host's live disk and have it copied into their VM. On a clustered
+>   Provider the image is now scanned on every other host too (the first use
+>   refuses, a host that cannot be checked fails closed), after the VM's own
+>   disk names are checked, so a previous incarnation still answers first.
+>   Every clustered create from a host-path image therefore scans every host
+>   and waits while any host is unreachable. The clustered confinement answers
+>   a missing file, a reserved name, a non-regular file, a file in use and a
+>   refused image header (fix verification, N4) with the same "not allowed"
+>   message, and the rejection stays InvalidArgument on the wire (it used to
+>   reach the manager as VM_OPERATION_FAILED). This narrows what a refused
+>   path discloses; it does not hide the pool: an accepted path shows a
+>   usable image is there and copies it. So a clustered Provider with a shared
+>   pool should set `VIRTRIGAUD_LIBVIRT_IMAGE_DIRS` to a catalog directory
+>   apart from the pool (the default image directory is the default pool's):
+>   otherwise any unused, non-reserved file in the pool is copyable by any
+>   tenant of the Provider.
+> - **The VM's own domain elsewhere** *(security review of A6.1)*: a domain
+>   stamped with the requester's namespace, name and OWN UID found by the scan
+>   is counted apart from previous incarnations (ErrorInfo metadata
+>   `incarnation: own`): the VM (or a clone's target) is held the same way,
+>   with its own reason `OwnDomainOnAnotherHost` on `Placed`/`Provisioning`
+>   *(fix verification, N7: the delete gate reads that reason, never message
+>   text)* and its own message — move `pendingHost` to that host, no
+>   re-stamp — and, because its Delete on
+>   the pending host finds nothing while its own domain runs elsewhere, deleting
+>   it keeps the finalizer (`DeleteBlocked=True/OwnDomainOnAnotherHost`) until
+>   the pending host points there or `force-delete` / `orphan-on-delete` is
+>   set. A previous incarnation under another UID still releases on delete.
+> - **Check-then-act** *(security review of A6.1)*: the provider holds an
+>   in-process lock on the domain name from the scan until the write, define
+>   or teardown completes (Create, Clone, Delete), so a retry never checks and
+>   acts next to an earlier attempt still running; a lock not obtained within
+>   the call's budget answers `Unavailable` + `VM_OPERATION_FAILED`. A Delete
+>   takes it before its owner check (keyed on the namespaced name, also when
+>   the finalizer addresses an in-flight create by the bare name), so it never
+>   answers `NotFound` while the VM's Create is still defining the domain.
+>   Remaining gap: actors outside the provider process (an administrator's
+>   `virsh`, other tools, a second provider process) are not serialized.
+> - **Hosts the operator could not render** *(security review of A6.1)*: a
+>   `Host` the Provider fronts whose credentials are missing or refused, whose
+>   endpoint is invalid or whose id is duplicated is still passed to the
+>   provider as an id-only tombstone (`Inventory.unroutableHostIds`: no
+>   endpoint, no credentials); the provider's own rejects join them. The guard
+>   fails closed on them (`HOST_UNAVAILABLE`, never dialed).
+> - **Operator duties** *(security review of A6.1)*: the guard sees the hosts
+>   of ONE Provider, so a shared pool must be mounted only by hosts of one
+>   clustered Provider; and before deleting the `Host` of a dead host (which
+>   removes it from the scan, and so releases held deletes), the administrator
+>   MUST fence it — power it off or revoke its access to the export.
+> - **Other residuals.** A host removed from the inventory (or draining) is not
+>   scanned. Disks without a host path (network disks) are not compared. On a
+>   host-local pool a previous incarnation on another host leaves no file where
+>   the new disk goes, so R3 does not see it — R4 does, and on an unreachable
+>   host that is decision 4's accepted residual. A VM pinned by an incarnation
+>   found on **another** host keeps that other host as its pending host; until
+>   R4 records the right host, the runbook moves `pendingHost` to the domain's
+>   host after the re-stamp (see the inventory doc). A stamped legacy
+>   (bare-named) domain that is not the VM's own does not stop a namespaced
+>   create unless R3 runs. Each retry of a held delete rescans every host.
+>   The legacy bare names are probed too, and they are not namespaced: while a
+>   pre-namespacing VM of the same name in another namespace keeps its
+>   `<name>-disk…` file, every create or clone of this name runs the full scan
+>   (a cost, not a refusal) *(fix verification, N9)*. An unused leftover where
+>   a blank volume goes is removed (`vol-delete`) after the scan, since
+>   `vol-create` refuses an existing file.
+> - **Single-host** is unchanged: the three single-host goldens are byte for
+>   byte identical, and the host-local guard runs the same commands.
 
 **What slice 5 must validate.** These six restore checks run in addition to
 slice 5's lifecycle run. Use a pool with at least two hosts and, if one is
@@ -2154,6 +2338,18 @@ honest.
   - After v0.4.0, A6.4: `VMRestoreBinding`, over slice 4's compare-and-swap
     owner re-stamp.
   - The Proxmox restore duplicate is tracked with the parked Proxmox work.
+  - A6.1 follow-ups (security review):
+    - **A pool ownership marker**: `<pool>/.virtrigaud-pool`, created with
+      `O_EXCL` and holding the owning Provider's UID. It lets a provider refuse
+      a pool another Provider (or nothing) claims, tells it which hosts share
+      a pool, and so scopes the cluster-wide scan to them (ending the false
+      "in use" on host-local pools that share a path).
+    - **Batch the scan**: one read per host instead of a `dumpxml` per domain
+      (ADR-0008's native list).
+    - **Run the cross-host check before `SnapshotRevert`, `SnapshotDelete`,
+      `SnapshotCreate` and the offline disk grow** of a clustered VM: each
+      rewrites a disk file another host's domain could use through a shared
+      pool; today they check the VM's own host only.
 - **New ADR: per-consumer quota on a shared clustered Provider.** The
   scheduler-accuracy amendment (A5) counts every consumer's VMs against a
   host's capacity, but nothing limits how much of a shared Provider one

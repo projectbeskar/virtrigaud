@@ -204,13 +204,25 @@ func createDomainName(req contracts.CreateRequest) (string, error) {
 // whose status.id write the manager lost: the retry must bind that domain,
 // not create "<namespace>.<name>" next to it (createVM, bindOwnedLegacyDomain).
 func legacyCreateDomainName(req contracts.CreateRequest, domainName string) (string, bool) {
-	if !hasNamingIdentity(req.Owner) || req.Owner.IsZero() || req.Name == domainName {
+	if req.Owner.IsZero() {
 		return "", false
 	}
-	if validLegacyName(req.Name) != nil || ambiguousDomainNameError(req.Name) != nil {
+	return legacyNameOf(req.Owner, req.Name, domainName)
+}
+
+// legacyNameOf returns the bare name bare that a VirtualMachine identified by
+// owner would have had as its domain name before domains were namespaced,
+// when it differs from its namespaced domainName and is a usable legacy name
+// (validLegacyName, not a virsh ID/UUID). ok is false otherwise, and always
+// for an owner without a naming identity (its domain name IS the bare name).
+func legacyNameOf(owner contracts.ObjectIdentity, bare, domainName string) (string, bool) {
+	if !hasNamingIdentity(owner) || bare == domainName {
 		return "", false
 	}
-	return req.Name, true
+	if validLegacyName(bare) != nil || ambiguousDomainNameError(bare) != nil {
+		return "", false
+	}
+	return bare, true
 }
 
 // cloneDomainName is the domain name a Clone request makes for its target:

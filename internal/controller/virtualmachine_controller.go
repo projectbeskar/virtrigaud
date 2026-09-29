@@ -138,9 +138,6 @@ const (
 	// id but no confirmed host binding (Placed=False/Unbound). No per-VM call is
 	// sent while it waits.
 	placementUnboundRetryInterval = 30 * time.Second
-	// pendingHostUnavailableRetryInterval re-tries a Create whose pending host is
-	// unreachable (Placed=False/HostUnavailable). The VM is never re-scheduled.
-	pendingHostUnavailableRetryInterval = 30 * time.Second
 	// vmMissingOnHostRetryInterval re-describes a clustered VM whose bound host
 	// reports it missing (A4). It is never re-created; the re-check only notices
 	// an administrator restoring the domain.
@@ -867,6 +864,13 @@ func (r *VirtualMachineReconciler) handleDeletion(ctx context.Context, vm *infra
 						logger.Info("VM deletion initiated", "taskRef", taskRef)
 						// TODO: Wait for task completion in future iterations
 					}
+				case contracts.IsNotFound(err) && ref.Routed() && heldForOwnDomainElsewhere(vm) && !hasForceDeleteAnnotation(vm):
+					// The VM's last create found its OWN domain on another host
+					// (ADR-0007 A6.1): nothing is on its pending host, but
+					// releasing the finalizer would leave that domain running.
+					// Keep it until pendingHost points at that host (the next
+					// Delete then removes it), or force-delete / orphan-on-delete.
+					return r.holdDelete(ctx, vm, k8s.ReasonOwnDomainOnAnotherHost, ownDomainDeleteMessage, err), nil
 				case contracts.IsNotFound(err):
 					// The hypervisor VM is already gone — nothing to orphan, so
 					// proceed to finalizer removal (idempotent delete). A clustered
@@ -884,7 +888,13 @@ func (r *VirtualMachineReconciler) handleDeletion(ctx context.Context, vm *infra
 					// the hypervisor depend on this one (e.g. a libvirt linked
 					// clone backed by its disk), and deleting it would destroy
 					// their data. Keep the finalizer, say why, and re-check.
-					return r.retainForBlockedDelete(ctx, vm, ref.ID, err), nil
+					return r.retainForBlockedDelete(ctx, vm, ref.ID, err, ref.Routed()), nil
+				case ref.Routed() && (contracts.IsHostUnavailable(err) || contracts.IsVMDiskCheckFailed(err)):
+					// A clustered delete the provider did not perform because a
+					// host it needs could not be reached or checked (ADR-0007
+					// A6.1: it fails closed). Keep the finalizer, say why without
+					// naming a host, and back off.
+					return r.retainForUncheckedDelete(ctx, vm, err), nil
 				default:
 					// Real failure (e.g. PVE "VM is running - destroy failed"). Do
 					// NOT remove the finalizer — that would orphan the hypervisor VM.
@@ -893,6 +903,11 @@ func (r *VirtualMachineReconciler) handleDeletion(ctx context.Context, vm *infra
 					logger.Error(err, "Failed to delete VM from provider; retaining finalizer and retrying",
 						"id", ref.ID)
 					metrics.RecordError(errReasonProviderDelete, metrics.ComponentManager)
+					// A DeleteBlocked left by an earlier hold no longer says
+					// why the delete waits (A6.1 fix verification, N8).
+					if meta.RemoveStatusCondition(&vm.Status.Conditions, k8s.ConditionDeleteBlocked) {
+						r.updateStatus(ctx, vm)
+					}
 					return ctrl.Result{RequeueAfter: vmDeleteRetryInterval}, nil
 				}
 			}
@@ -946,11 +961,17 @@ func (r *VirtualMachineReconciler) noteLinkedCloneDependents(vm *infravirtrigaud
 // Ready condition and in a Warning event. The provider changed nothing, so the
 // VM stays intact; the delete is re-checked every vmDeleteBlockedRetryInterval
 // and completes once the dependent VMs are gone.
+//
+// For a clustered (routed) VM the DeleteBlocked condition says so too —
+// True/DiskInUse, with a constant message — so a condition left by an earlier
+// hold (HostUnreachable, DiskCheckFailed) never outlives its cause (A6.1 fix
+// verification, N8). A single-host VM never carries DeleteBlocked.
 func (r *VirtualMachineReconciler) retainForBlockedDelete(
 	ctx context.Context,
 	vm *infravirtrigaudiov1beta1.VirtualMachine,
 	id string,
 	err error,
+	routed bool,
 ) ctrl.Result {
 	log.FromContext(ctx).Info("Provider refused to delete the VM because other VMs depend on it; retaining finalizer",
 		"id", id, "retryAfter", vmDeleteBlockedRetryInterval.String(), "error", err.Error())
@@ -965,6 +986,17 @@ func (r *VirtualMachineReconciler) retainForBlockedDelete(
 		Message:            msg,
 		ObservedGeneration: vm.Generation,
 	})
+	if routed {
+		meta.SetStatusCondition(&vm.Status.Conditions, metav1.Condition{
+			Type:               k8s.ConditionDeleteBlocked,
+			Status:             metav1.ConditionTrue,
+			Reason:             k8s.ReasonDiskInUse,
+			Message:            deleteBlockedMessages[k8s.ReasonDiskInUse],
+			ObservedGeneration: vm.Generation,
+		})
+	} else {
+		meta.RemoveStatusCondition(&vm.Status.Conditions, k8s.ConditionDeleteBlocked)
+	}
 	r.updateStatus(ctx, vm)
 	r.recordEvent(vm, corev1.EventTypeWarning, eventReasonDeleteBlocked, msg)
 	return ctrl.Result{RequeueAfter: vmDeleteBlockedRetryInterval}
@@ -2451,6 +2483,16 @@ func (r *VirtualMachineReconciler) vmsForGrantChange(ctx context.Context, indexV
 	return requestsForGrantChange(ctx, r.Client, &infravirtrigaudiov1beta1.VirtualMachineList{}, indexValue, nil)
 }
 
+// vmUpdateNeedsReconcile is the VirtualMachine update filter: a spec change
+// (a new generation) is reconciled, a status-only update is not (it would
+// loop on the controller's own writes) — except for a VM being deleted, whose
+// every update is reconciled. That is what makes a force-delete or
+// orphan-on-delete annotation set on a VM whose delete is held (a backoff of
+// up to 5 minutes, ADR-0007 A6.1) take effect at once.
+func vmUpdateNeedsReconcile(oldVM, newVM *infravirtrigaudiov1beta1.VirtualMachine) bool {
+	return oldVM.Generation != newVM.Generation || !newVM.DeletionTimestamp.IsZero()
+}
+
 // SetupWithManager sets up the controller with the Manager. Besides its own
 // VirtualMachines it watches Namespace label changes and the
 // spec.consumerNamespaceSelector of Providers, VMClasses and VMImages, so a
@@ -2468,13 +2510,10 @@ func (r *VirtualMachineReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return withConsumerGrantWatches(b, r.vmsForGrantChange).
 		WithEventFilter(predicate.Funcs{
 			UpdateFunc: func(e event.UpdateEvent) bool {
-				// Only reconcile if spec changed (ignore status-only updates)
-				// This prevents tight reconcile loops from status updates
 				oldVM, ok1 := e.ObjectOld.(*infravirtrigaudiov1beta1.VirtualMachine)
 				newVM, ok2 := e.ObjectNew.(*infravirtrigaudiov1beta1.VirtualMachine)
 				if ok1 && ok2 {
-					// Reconcile if generation changed (spec changed) or if being deleted
-					return oldVM.Generation != newVM.Generation || !newVM.DeletionTimestamp.IsZero()
+					return vmUpdateNeedsReconcile(oldVM, newVM)
 				}
 				return true
 			},

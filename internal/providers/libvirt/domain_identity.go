@@ -388,7 +388,15 @@ func requesterOwnsDomain(requester contracts.ObjectIdentity, recorded []contract
 //
 // domainName has already passed ambiguousDomainNameError (domainNameFor), so
 // `virsh dumpxml <name>` cannot resolve to a different domain by ID or UUID.
-func bindExistingDomain(ctx context.Context, vp *VirshProvider, req contracts.CreateRequest, domainName, state string) (contracts.CreateResponse, error) {
+//
+// On a clustered provider (clustered), a domain the requester does not own
+// but whose stamp names the requester's namespace and name is a previous
+// incarnation of it (ADR-0007 A6, R2): the answer is a previousIncarnationError
+// (AlreadyExists + VM_PREVIOUS_INCARNATION), so the manager holds the VM on
+// this host instead of excluding it and creating a second domain for the same
+// namespace and name elsewhere. A single-host provider keeps the plain
+// Conflict.
+func bindExistingDomain(ctx context.Context, vp *VirshProvider, req contracts.CreateRequest, domainName, state string, clustered bool) (contracts.CreateResponse, error) {
 	res, err := vp.runVirshCommand(ctx, "dumpxml", domainName)
 	if err != nil {
 		// Transient (connection) or the domain vanished since the list — both
@@ -418,6 +426,11 @@ func bindExistingDomain(ctx context.Context, vp *VirshProvider, req contracts.Cr
 	default:
 		log.Printf("WARN Refusing to bind VirtualMachine %s/%s (uid %s) to existing domain %s: it is owned by %v",
 			req.Owner.Namespace, req.Owner.Name, req.Owner.UID, domainName, recorded)
+		if clustered && stampsNameOwner(recorded, req.Owner) {
+			log.Printf("WARN Domain %s is a previous incarnation of VirtualMachine %s/%s (stamped for its namespace and name "+
+				"under another UID); holding the create (ADR-0007 A6)", domainName, req.Owner.Namespace, req.Owner.Name)
+			return contracts.CreateResponse{}, &previousIncarnationError{op: guardOpCreate, domain: domainName}
+		}
 	}
 	return contracts.CreateResponse{}, contracts.NewConflictError(fmt.Sprintf(
 		"libvirt domain %q already exists on the host and is not owned by this VirtualMachine; "+

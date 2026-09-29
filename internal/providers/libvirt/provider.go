@@ -27,6 +27,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"golang.org/x/sync/semaphore"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	v1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
@@ -164,6 +165,17 @@ type Provider struct {
 	// depended on the domain's disk at its last start, for Describe
 	// (linked_clone_warning.go).
 	linkedDeps linkedCloneDependents
+
+	// guardSem bounds the cluster-wide disk scans this provider process runs
+	// at once (ADR-0007 A6.1; cluster_disk_guard.go), made on first use by
+	// guardSemaphore.
+	guardSemOnce sync.Once
+	guardSem     *semaphore.Weighted
+
+	// domainLocks serializes, per domain name, the clustered Create, Clone
+	// and Delete of that domain in this provider process, from the
+	// cluster-wide disk check to the act it guards (lockDomain).
+	domainLocks hostLocks
 }
 
 // imagePolicy returns the provider's image-path confinement policy (see

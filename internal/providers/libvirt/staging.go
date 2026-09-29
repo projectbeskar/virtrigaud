@@ -278,19 +278,9 @@ func verifyDefined(ctx context.Context, vp *VirshProvider, domainName, domainXML
 // exactly the file about to be written. The common case — nothing there —
 // costs one `test`; the full in-use scan runs only when a file exists.
 func ensureDiskTargetFree(ctx context.Context, h hostCommandRunner, subject, target string) error {
-	res, err := runHost(ctx, h, "sh", "-c", targetKindScript, "sh", target)
-	if err != nil {
-		log.Printf("ERROR Could not check %s at %s on the host: %v", subject, target, err)
-		return contracts.NewRetryableError(fmt.Sprintf("could not check %s on the host (details are in the provider log)", subject), nil)
-	}
-	switch strings.TrimSpace(res.Stdout) {
-	case targetKindSymlink:
-		log.Printf("WARN Refusing to write %s: %s is a symbolic link", subject, target)
-		return contracts.NewConflictError(fmt.Sprintf(
-			"%s is a symbolic link on the host; refusing to write through it", subject), nil)
-	case pathExistsMarker:
-	default:
-		return nil
+	exists, err := checkWriteTarget(ctx, h, subject, target)
+	if err != nil || !exists {
+		return err
 	}
 	inUse, err := pathInUseOnHost(ctx, h, target)
 	if err != nil {
@@ -303,6 +293,31 @@ func ensureDiskTargetFree(ctx context.Context, h hostCommandRunner, subject, tar
 	}
 	log.Printf("INFO %s exists at %s but no domain uses it (left by an earlier failed attempt); overwriting it", subject, target)
 	return nil
+}
+
+// checkWriteTarget runs targetKindScript on target, on the host behind h,
+// before a file is written there: a symbolic link (dangling or not) is a
+// Conflict — the file would be written through it — and a failed check a
+// generic retryable error; otherwise it reports whether anything exists at
+// target. subject names the file for the answers, which reach the
+// requester's status. It is the first step of ensureDiskTargetFree and of the
+// clustered clusterDiskGuard.ensureDiskFree.
+func checkWriteTarget(ctx context.Context, h hostCommandRunner, subject, target string) (bool, error) {
+	res, err := runHost(ctx, h, "sh", "-c", targetKindScript, "sh", target)
+	if err != nil {
+		log.Printf("ERROR Could not check %s at %s on the host: %v", subject, target, err)
+		return false, contracts.NewRetryableError(fmt.Sprintf("could not check %s on the host (details are in the provider log)", subject), nil)
+	}
+	switch strings.TrimSpace(res.Stdout) {
+	case targetKindSymlink:
+		log.Printf("WARN Refusing to write %s: %s is a symbolic link", subject, target)
+		return false, contracts.NewConflictError(fmt.Sprintf(
+			"%s is a symbolic link on the host; refusing to write through it", subject), nil)
+	case pathExistsMarker:
+		return true, nil
+	default:
+		return false, nil
+	}
 }
 
 // targetKindScript is the fixed `sh -c` script behind ensureDiskTargetFree and

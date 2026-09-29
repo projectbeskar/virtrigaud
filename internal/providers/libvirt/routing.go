@@ -418,9 +418,21 @@ func requesterFacingMessage(err error) string {
 // counted. A guard that could not reach the host (guardHostUnreachableError)
 // is a host failure like any other: HOST_UNAVAILABLE (hostOpRPCError).
 //
+// The cluster-wide guards of ADR-0007 A6 (slice A6.1) answer first
+// (clusterGuardStatus): a Clone that finds a previous incarnation of its
+// target VirtualMachine is AlreadyExists + VM_PREVIOUS_INCARNATION, and a
+// Clone or Delete whose disk guard could not check every host of the Provider
+// is Unavailable + HOST_UNAVAILABLE (a host could not be reached) or +
+// VM_DISK_CHECK_FAILED and VM_OPERATION_FAILED (a host could not be scanned);
+// none of them names another host. A Delete refused because a domain on
+// another host uses its disk is the disk-dependents refusal below.
+//
 // Only the categorized message crosses the wire; causes are logged. It is
 // never used on the single-host path, whose wire errors are unchanged.
 func routedRPCError(op string, err error) error {
+	if st := clusterGuardStatus(err); st != nil {
+		return st.Err()
+	}
 	var de *diskDependentsError
 	if stderrors.As(err, &de) {
 		return diskInUseStatus(fmt.Sprintf("failed to %s: %v", op, de), true).Err()

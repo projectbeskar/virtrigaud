@@ -440,8 +440,17 @@ func TestProvider_HostInventory_MissingCredentialSecret_SkipsHost(t *testing.T) 
 	require.NoError(t, r.reconcileHostInventorySecret(context.Background(), prov),
 		"one host's missing credentials must NOT fail the whole reconcile")
 
-	// Only host-a rendered; host-b was dropped.
+	// Only host-a rendered; host-b was dropped — but kept as an id-only
+	// tombstone, so the provider's cluster-wide disk guard fails closed on it
+	// (ADR-0007 A6.1) instead of never looking at it.
 	assert.Equal(t, []string{"host-a"}, renderedHostIDs(t, cli))
+	inv := renderedInventory(t, cli)
+	assert.Equal(t, []string{"host-b"}, inv.UnroutableHostIDs)
+	secret := &corev1.Secret{}
+	require.NoError(t, cli.Get(context.Background(),
+		types.NamespacedName{Name: "libvirt-cluster-hosts", Namespace: "default"}, secret))
+	assertNoCredentialLeak(t, string(secret.Data[hostsecret.SecretDataKey][strings.Index(
+		string(secret.Data[hostsecret.SecretDataKey]), `"unroutableHostIds"`):]))
 
 	// Condition surfaces the skip, names host-b, and leaks no key material.
 	cond := getConditionByType(t, prov.Status.Conditions, conditionHostCredentialsReady)

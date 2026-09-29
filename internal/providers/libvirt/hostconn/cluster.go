@@ -26,6 +26,7 @@ import (
 	"sort"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	golibvirt "github.com/digitalocean/go-libvirt"
 
@@ -81,6 +82,11 @@ type ClusterRegistry struct {
 	// and never land here.
 	draining []*clusterEntry
 
+	// unroutable holds the ids of hosts the inventory names but that cannot be
+	// routed to (desiredHosts' rejects and the operator's tombstones): never
+	// dialed, reported by UnroutableHosts. Replaced by every Reconcile.
+	unroutable map[HostID]bool
+
 	// closed is set by Close; it rejects further ConnFor/Reconcile and is the
 	// terminal state.
 	closed bool
@@ -114,6 +120,11 @@ type clusterEntry struct {
 	draining bool
 	// closed guards against a double Close of conn. Guarded by ClusterRegistry.mu.
 	closed bool
+	// unreachableAt is when the host was last found unreachable — a failed
+	// lazy dial, or a caller's MarkUnreachable — and zero when the last dial
+	// succeeded since. Guarded by ClusterRegistry.mu. It only answers
+	// RecentlyUnreachable; ConnFor never refuses on it.
+	unreachableAt time.Time
 }
 
 // Dialer opens a Conn to one host from its inventory entry (endpoint + inlined
@@ -209,10 +220,16 @@ func (r *ClusterRegistry) ConnFor(ctx context.Context, id HostID) (Conn, error) 
 		dialed, err := r.dial(ctx, spec)
 		if err != nil {
 			e.dialMu.Unlock()
+			if ctx.Err() == nil {
+				r.mu.Lock()
+				e.unreachableAt = time.Now()
+				r.mu.Unlock()
+			}
 			r.release(e) // undo the reservation; drains if the host was removed meanwhile
 			return nil, fmt.Errorf("hostconn: dial host %q: %w", id, err)
 		}
 		r.mu.Lock()
+		e.unreachableAt = time.Time{}
 		if r.closed {
 			// Registry was closed while we dialed; don't stash a connection Close
 			// will never see. Drop it here.
@@ -264,7 +281,7 @@ func (r *ClusterRegistry) release(e *clusterEntry) {
 // It never dials and never severs an in-flight operation. It is safe to call
 // concurrently with ConnFor. After Close it errors.
 func (r *ClusterRegistry) Reconcile(inv hostsecret.Inventory) error {
-	desired := desiredHosts(inv, r.logger)
+	desired, unroutable := desiredHosts(inv, r.logger)
 
 	var toClose []Conn
 	r.mu.Lock()
@@ -272,6 +289,7 @@ func (r *ClusterRegistry) Reconcile(inv hostsecret.Inventory) error {
 		r.mu.Unlock()
 		return errRegistryClosed
 	}
+	r.unroutable = unroutable
 
 	// Existing entries: keep / change / remove.
 	for id, e := range r.live {
@@ -326,13 +344,19 @@ func (r *ClusterRegistry) Reconcile(inv hostsecret.Inventory) error {
 // None of these is fatal — a malformed inventory yields a smaller registry,
 // never a panic (ADR-0007 D9 fail-safe). Log lines carry the host id and a
 // coarse reason only, never the endpoint or credential material.
-func desiredHosts(inv hostsecret.Inventory, logger *slog.Logger) map[HostID]hostsecret.Host {
+//
+// It also returns the ids of the hosts that exist but are not routable: the
+// entries it rejected (a duplicated id, an invalid endpoint — never an empty
+// id) and the operator's tombstones (inv.UnroutableHostIDs: hosts it could not
+// render). They are never dialed; UnroutableHosts reports them.
+func desiredHosts(inv hostsecret.Inventory, logger *slog.Logger) (map[HostID]hostsecret.Host, map[HostID]bool) {
 	counts := make(map[HostID]int, len(inv.Hosts))
 	for _, h := range inv.Hosts {
 		counts[HostID(h.ID)]++
 	}
 
 	desired := make(map[HostID]hostsecret.Host, len(inv.Hosts))
+	rejected := make(map[HostID]bool)
 	for _, h := range inv.Hosts {
 		id := HostID(h.ID)
 		switch {
@@ -342,16 +366,27 @@ func desiredHosts(inv hostsecret.Inventory, logger *slog.Logger) map[HostID]host
 		case counts[id] > 1:
 			logger.Warn("hostconn: skipping duplicated inventory host id (ambiguous; no entry is routable)",
 				"host", string(id), "occurrences", counts[id])
+			rejected[id] = true
 			continue
 		}
 		if err := hostsecret.ValidateEndpoint(h.Endpoint); err != nil {
 			logger.Warn("hostconn: skipping inventory host with invalid endpoint",
 				"host", string(id), "error", err.Error())
+			rejected[id] = true
 			continue
 		}
 		desired[id] = h
 	}
-	return desired
+	// The operator's own tombstones: hosts it could not render (A6.1).
+	for _, id := range inv.UnroutableHostIDs {
+		if id != "" {
+			rejected[HostID(id)] = true
+		}
+	}
+	for id := range desired {
+		delete(rejected, id)
+	}
+	return desired, rejected
 }
 
 // startDrainLocked begins draining e (must hold mu). An idle entry is closed
@@ -383,15 +418,100 @@ func (r *ClusterRegistry) removeFromDrainingLocked(e *clusterEntry) {
 	}
 }
 
+// UnroutableHosts returns, sorted, the ids of the hosts the inventory names
+// that cannot be routed to: entries the registry rejected (a duplicated id, an
+// invalid endpoint) and the operator's id-only tombstones (hosts it could not
+// render, e.g. for missing credentials). They are known to exist, so a check
+// that must cover every host of the Provider fails closed on them (ADR-0007
+// A6.1). They are never dialed, and Hosts never includes them.
+func (r *ClusterRegistry) UnroutableHosts() []HostID {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.unroutableHostsLocked()
+}
+
+// unroutableHostsLocked is UnroutableHosts; the caller holds mu.
+func (r *ClusterRegistry) unroutableHostsLocked() []HostID {
+	ids := make([]HostID, 0, len(r.unroutable))
+	for id := range r.unroutable {
+		ids = append(ids, id)
+	}
+	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+	return ids
+}
+
+// HostSnapshot is one consistent view of the hosts a ClusterRegistry knows,
+// read under a single lock (ClusterRegistry.Snapshot), so a caller that must
+// cover every host of the Provider never sees a host move between the
+// routable and unroutable sets halfway through its listing.
+type HostSnapshot struct {
+	// Routable are the ids Hosts returns: every routable, non-draining host.
+	Routable []HostID
+	// Unroutable are the ids UnroutableHosts returns: hosts the inventory
+	// names that cannot be routed to.
+	Unroutable []HostID
+	// RecentlyUnreachable are those of Routable that RecentlyUnreachable
+	// reported, for the snapshot's window, when the snapshot was taken.
+	RecentlyUnreachable []HostID
+}
+
+// Snapshot returns Hosts, UnroutableHosts and the routable hosts found
+// unreachable less than unreachableWithin ago (RecentlyUnreachable), all read
+// under one lock. Each list is sorted.
+func (r *ClusterRegistry) Snapshot(unreachableWithin time.Duration) HostSnapshot {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	s := HostSnapshot{Routable: r.hostsLocked(), Unroutable: r.unroutableHostsLocked()}
+	for _, id := range s.Routable {
+		if e := r.live[id]; e != nil && !e.draining && !e.unreachableAt.IsZero() && time.Since(e.unreachableAt) < unreachableWithin {
+			s.RecentlyUnreachable = append(s.RecentlyUnreachable, id)
+		}
+	}
+	return s
+}
+
+// RecentlyUnreachable reports whether routable host id was found unreachable
+// — its lazy dial failed, or a caller reported it (MarkUnreachable) — less
+// than within ago, with no successful dial since. A caller that must fail
+// closed on an unreachable host (the cluster-wide disk guard) uses it to fail
+// fast without dialing again; ConnFor itself never refuses on it. An unknown
+// or draining host reports false (ConnFor already refuses it).
+func (r *ClusterRegistry) RecentlyUnreachable(id HostID, within time.Duration) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	e := r.live[id]
+	if e == nil || e.draining || e.unreachableAt.IsZero() {
+		return false
+	}
+	return time.Since(e.unreachableAt) < within
+}
+
+// MarkUnreachable records that a caller found routable host id unreachable on
+// an already-dialed connection (the registry reuses a dialed connection
+// without probing it), for RecentlyUnreachable. The next successful dial
+// clears it. An unknown or draining host is ignored.
+func (r *ClusterRegistry) MarkUnreachable(id HostID) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if e := r.live[id]; e != nil && !e.draining {
+		e.unreachableAt = time.Now()
+	}
+}
+
 // Hosts returns the ids of every routable host, sorted. Draining hosts are
 // excluded — they are being removed and take no new work.
 func (r *ClusterRegistry) Hosts() []HostID {
 	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.hostsLocked()
+}
+
+// hostsLocked is Hosts; the caller holds mu.
+func (r *ClusterRegistry) hostsLocked() []HostID {
 	ids := make([]HostID, 0, len(r.live))
 	for id := range r.live {
 		ids = append(ids, id)
 	}
-	r.mu.Unlock()
 	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
 	return ids
 }

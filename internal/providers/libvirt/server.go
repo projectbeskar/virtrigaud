@@ -144,10 +144,26 @@ func (s *Server) Create(ctx context.Context, req *providerv1.CreateRequest) (*pr
 // VM_OPERATION_FAILED ErrorInfo, so neither counts toward the manager's
 // per-Provider circuit breaker (ADR-0007 Addendum A, slice 2; hostOpRPCError).
 //
+// The clustered create's A6 guards (ADR-0007 A6, slice A6.1) answer first: a
+// previous incarnation of the VM on a host of the Provider is AlreadyExists +
+// VM_PREVIOUS_INCARNATION, and a disk guard that could not check every host is
+// Unavailable + HOST_UNAVAILABLE or + VM_DISK_CHECK_FAILED (clusterGuardStatus).
+//
 // Only the categorized message crosses the wire (it is written to be safe for
 // the requesting VirtualMachine's status). Every other error — every
 // single-host error among them — keeps the historical wrapped form.
 func createRPCError(err error) error {
+	if st := clusterGuardStatus(err); st != nil {
+		return st.Err()
+	}
+	// A clustered create's request rejection (an image path refused by the
+	// confinement — whose clustered answers do not tell whether a file exists)
+	// stays InvalidArgument: non-retryable, and never mistaken for a failure
+	// on the host. The message carries only the tenant's own path.
+	var onHost *hostOpError
+	if stderrors.As(err, &onHost) && isInvalidArgument(err) {
+		return status.Error(codes.InvalidArgument, err.Error())
+	}
 	var pe *contracts.ProviderError
 	if stderrors.As(err, &pe) {
 		switch pe.Type {

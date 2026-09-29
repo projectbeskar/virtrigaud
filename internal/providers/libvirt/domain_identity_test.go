@@ -28,6 +28,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	"github.com/projectbeskar/virtrigaud/internal/clustered/hostsecret"
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
@@ -653,9 +655,40 @@ func TestCreate_Clustered_OwnershipAppliesOnTargetHost(t *testing.T) {
 		return p, logPath
 	}
 
-	p, logPath := newHost(map[string]string{"team-a.web": stampedDomainXML("team-a.web", staleTeamAWeb)})
+	// A foreign stamp (another VM's namespace/name) or none at all: the plain
+	// Conflict, which the manager answers with the slice 2 exclusion.
+	foreign := contracts.ObjectIdentity{UID: "99999999-0000-4000-8000-000000000009", Namespace: "team-z", Name: "other"}
+	p, logPath := newHost(map[string]string{"team-a.web": stampedDomainXML("team-a.web", foreign)})
 	resp, err := p.Create(context.Background(), contracts.CreateRequest{Name: "web", TargetHostID: "host-a", Owner: ownerTeamA})
-	requireConflictNoBind(t, resp, err, logPath, "team-a.web", staleTeamAWeb)
+	requireConflictNoBind(t, resp, err, logPath, "team-a.web", foreign)
+	assert.False(t, contracts.IsVMPreviousIncarnation(err))
+	st, _ := status.FromError(createRPCError(err))
+	assert.Equal(t, codes.AlreadyExists, st.Code())
+	assert.Empty(t, st.Details(), "a foreign domain is a plain AlreadyExists (slice 2 exclusion)")
+
+	p, logPath = newHost(map[string]string{"team-a.web": stampedDomainXML("team-a.web", contracts.ObjectIdentity{})})
+	resp, err = p.Create(context.Background(), contracts.CreateRequest{Name: "web", TargetHostID: "host-a", Owner: ownerTeamA})
+	requireConflictNoBind(t, resp, err, logPath, "team-a.web", contracts.ObjectIdentity{})
+
+	// A previous incarnation of team-a/web (same namespace and name, another
+	// UID): AlreadyExists + VM_PREVIOUS_INCARNATION (ADR-0007 A6, R2), still
+	// refused before anything but the read-only lookup ran.
+	p, logPath = newHost(map[string]string{"team-a.web": stampedDomainXML("team-a.web", staleTeamAWeb)})
+	resp, err = p.Create(context.Background(), contracts.CreateRequest{Name: "web", TargetHostID: "host-a", Owner: ownerTeamA})
+	require.Error(t, err)
+	assert.Empty(t, resp.ID)
+	assert.True(t, contracts.IsConflict(err), "a previous incarnation is never bound: %v", err)
+	var pi *previousIncarnationError
+	require.ErrorAs(t, err, &pi)
+	st, _ = status.FromError(createRPCError(err))
+	assert.Equal(t, codes.AlreadyExists, st.Code())
+	assert.True(t, errorInfoReasons(st)[contracts.VMPreviousIncarnationReason], "got %v", st)
+	assert.Contains(t, st.Message(), `libvirt domain "team-a.web"`)
+	assert.Contains(t, st.Message(), "A6 runbook")
+	assert.NotContains(t, st.Message(), staleTeamAWeb.UID, "the previous incarnation's UID is never disclosed")
+	assert.NotContains(t, st.Message(), "host-a", "no host is named")
+	assert.Equal(t, []string{"list --all", "dumpxml team-a.web"}, virshLog(t, logPath),
+		"only read-only queries may run before refusing")
 
 	p, _ = newHost(map[string]string{"team-a.web": stampedDomainXML("team-a.web", ownerTeamA)})
 	resp, err = p.Create(context.Background(), contracts.CreateRequest{Name: "web", TargetHostID: "host-a", Owner: ownerTeamA})

@@ -130,6 +130,23 @@ const VMDiskInUseReason = "VM_DISK_IN_USE"
 // circuit breaker.
 const VMDiskCheckFailedReason = "VM_DISK_CHECK_FAILED"
 
+// VMPreviousIncarnationReason is the google.rpc.ErrorInfo reason (in
+// ErrorInfoDomain) a clustered provider attaches to the codes.AlreadyExists
+// status of a Create or Clone it refused because a domain VirtRigaud created
+// for the SAME namespace and name — a previous incarnation of the requesting
+// VirtualMachine, stamped with another UID (orphaned with orphan-on-delete,
+// left by a force-delete, or restored from a backup with a new UID) — exists
+// on a host of the Provider (ADR-0007 A6, R2 and R3). Nothing was created.
+//
+// Unlike a plain AlreadyExists (a foreign or unstamped same-named domain),
+// it must NOT make the manager exclude the host and re-schedule: moving on to
+// another host is exactly how a second domain for the same namespace and name
+// is made (A6 decision 2). The manager keeps the pending host and holds the VM
+// (RestorePending) until an administrator re-attaches or removes the previous
+// incarnation. It maps to ErrorTypeConflict, which never counts toward the
+// per-Provider circuit breaker.
+const VMPreviousIncarnationReason = "VM_PREVIOUS_INCARNATION"
+
 // ProviderError represents a categorized error from a provider
 type ProviderError struct {
 	// Type categorizes the error
@@ -202,6 +219,57 @@ var ErrVMDiskInUse = errors.New("another VM depends on this VM's disk")
 // (a Conflict that says so), as opposed to any other Conflict.
 func IsVMDiskInUse(err error) bool {
 	return IsConflict(err) && errors.Is(err, ErrVMDiskInUse)
+}
+
+// ErrVMDiskCheckFailed marks (in an error's chain) a provider's answer
+// carrying VMDiskCheckFailedReason: the operation was not performed because
+// the provider could not verify that no other VM uses this VM's disk (on a
+// clustered provider: on every host of the Provider). The transport client
+// wraps it into the retryable error it maps that answer to.
+var ErrVMDiskCheckFailed = errors.New("the provider could not verify that no other VM uses this VM's disk")
+
+// IsVMDiskCheckFailed reports whether err is a provider's
+// VMDiskCheckFailedReason answer (a retryable error that says so).
+func IsVMDiskCheckFailed(err error) bool {
+	return IsRetryable(err) && errors.Is(err, ErrVMDiskCheckFailed)
+}
+
+// ErrVMPreviousIncarnation marks (in an error's chain) a provider's refusal
+// carrying VMPreviousIncarnationReason: a previous incarnation of the
+// requesting VirtualMachine exists on a host of the clustered Provider. The
+// transport client wraps it into the Conflict it maps that refusal to.
+var ErrVMPreviousIncarnation = errors.New("a previous incarnation of this VirtualMachine exists on a host of the Provider")
+
+// VMPreviousIncarnationKindKey is the google.rpc.ErrorInfo metadata key of a
+// VMPreviousIncarnationReason status that says which kind of domain was
+// found; its only value today is VMPreviousIncarnationKindOwn. Absent means a
+// previous incarnation under another UID.
+const VMPreviousIncarnationKindKey = "incarnation"
+
+// VMPreviousIncarnationKindOwn marks a VMPreviousIncarnationReason status
+// whose domain is stamped with the requester's OWN UID, on another host of the
+// Provider: the VirtualMachine's own domain, whose placement record was lost.
+// Nothing has to be re-stamped; the VM's pending host must point at that host,
+// and deleting the VM must not release it while the domain runs elsewhere.
+const VMPreviousIncarnationKindOwn = "own"
+
+// ErrVMOwnDomainElsewhere marks (in an error's chain, next to
+// ErrVMPreviousIncarnation) a VMPreviousIncarnationReason refusal of kind
+// VMPreviousIncarnationKindOwn.
+var ErrVMOwnDomainElsewhere = errors.New("this VirtualMachine's own domain exists on another host of the Provider")
+
+// IsVMOwnDomainElsewhere reports whether err is a provider's previous
+// incarnation refusal of kind VMPreviousIncarnationKindOwn.
+func IsVMOwnDomainElsewhere(err error) bool {
+	return IsVMPreviousIncarnation(err) && errors.Is(err, ErrVMOwnDomainElsewhere)
+}
+
+// IsVMPreviousIncarnation reports whether err is a provider's
+// VMPreviousIncarnationReason refusal (a Conflict that says so), as opposed
+// to any other Conflict (ADR-0007 A6, R2): the caller must hold the VM on its
+// pending host, never exclude the host.
+func IsVMPreviousIncarnation(err error) bool {
+	return IsConflict(err) && errors.Is(err, ErrVMPreviousIncarnation)
 }
 
 // IsInvalidSpec reports whether err is, or wraps, a provider InvalidSpec error.

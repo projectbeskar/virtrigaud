@@ -79,32 +79,73 @@ import (
 // domainStateShutOff is the `virsh list --all` state of an inactive domain.
 const domainStateShutOff = "shut off"
 
-// hostLocks is a set of per-host mutexes whose lock waits honour a context.
-// The zero value is ready to use.
+// hostLocks is a set of mutexes keyed by name (a host id, or a domain name:
+// Provider.domainLocks) whose lock waits honour a context. An entry lives only
+// while someone holds or waits for it: it is reference-counted and removed on
+// its last release, so the set does not grow with every name ever locked. The
+// zero value is ready to use.
 type hostLocks struct {
 	mu    sync.Mutex
-	locks map[string]chan struct{}
+	locks map[string]*keyedLock
 }
 
-// lock takes host's lock, waiting at most until ctx is done, and returns its
-// release.
-func (h *hostLocks) lock(ctx context.Context, host string) (func(), error) {
+// keyedLock is one entry of hostLocks: the mutex (a one-slot channel, so a
+// wait can honour a context) and the number of callers holding or waiting for
+// it.
+type keyedLock struct {
+	ch   chan struct{}
+	refs int
+}
+
+// lock takes key's lock, waiting at most until ctx is done, and returns its
+// release (safe to call more than once).
+func (h *hostLocks) lock(ctx context.Context, key string) (func(), error) {
 	h.mu.Lock()
 	if h.locks == nil {
-		h.locks = map[string]chan struct{}{}
+		h.locks = map[string]*keyedLock{}
 	}
-	ch, ok := h.locks[host]
+	l, ok := h.locks[key]
 	if !ok {
-		ch = make(chan struct{}, 1)
-		h.locks[host] = ch
+		l = &keyedLock{ch: make(chan struct{}, 1)}
+		h.locks[key] = l
 	}
+	l.refs++
 	h.mu.Unlock()
 	select {
-	case ch <- struct{}{}:
-		return func() { <-ch }, nil
+	case l.ch <- struct{}{}:
+		var once sync.Once
+		return func() {
+			once.Do(func() {
+				<-l.ch
+				h.release(key, l)
+			})
+		}, nil
 	case <-ctx.Done():
+		h.release(key, l)
 		return nil, ctx.Err()
 	}
+}
+
+// release drops one reference to key's entry l, removing it from the set when
+// nobody holds or waits for it any more.
+func (h *hostLocks) release(key string, l *keyedLock) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	l.refs--
+	if l.refs == 0 && h.locks[key] == l {
+		delete(h.locks, key)
+	}
+}
+
+// refs reports how many callers hold or wait for key's lock (0 when it has no
+// entry).
+func (h *hostLocks) refs(key string) int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if l := h.locks[key]; l != nil {
+		return l.refs
+	}
+	return 0
 }
 
 // transferRefusedMessage is the uniform refusal of a domain whose owner may not

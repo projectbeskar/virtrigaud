@@ -160,7 +160,9 @@ const ConditionPlaced = "Placed"
 // the ADR: these four, plus the two the A2 amendment (slice 2) adds for a Create
 // refused with a name conflict (ReasonHostExcluded, ReasonAllHostsExcluded),
 // plus ReasonUnschedulable (declared with the scheduling reasons above) from the
-// scheduler-accuracy amendment in A5.
+// scheduler-accuracy amendment in A5, plus ReasonRestorePending from A6 and
+// ReasonOwnDomainOnAnotherHost (declared with the DeleteBlocked reasons below)
+// from A6.1.
 const (
 	// ReasonBound is Placed=True: the provider confirmed the VM on the host named
 	// by status.placement.host, and every per-VM call is routed there.
@@ -190,6 +192,51 @@ const (
 	// re-checked slowly until an administrator resolves the name conflicts (or
 	// renames the VM) and clears the list.
 	ReasonAllHostsExcluded = "AllHostsExcluded"
+	// ReasonRestorePending is Placed=False (and Provisioning=False): the VM is
+	// held because a previous incarnation of it — a domain VirtRigaud created
+	// for the same namespace and name under another UID, left by
+	// orphan-on-delete, a force-delete or a backup restore — exists on a host
+	// of its clustered Provider (ADR-0007 A6). Nothing is created until an
+	// administrator re-attaches or removes that domain (the A6 runbook). In
+	// A6.1 it is set when the provider answers a Create or Clone with
+	// VM_PREVIOUS_INCARNATION (R2): the VM keeps its pendingHost, the host is
+	// NOT excluded, and it is re-checked with a backoff (15 s doubling to
+	// 5 min). When the domain found is the VM's OWN (stamped with its UID),
+	// the reason is ReasonOwnDomainOnAnotherHost instead.
+	ReasonRestorePending = "RestorePending"
+)
+
+// ConditionDeleteBlocked is True while the deletion of a clustered
+// VirtualMachine is held because the provider could not delete it safely yet
+// (ADR-0007 A6.1). Its reason says why (ReasonHostUnreachable,
+// ReasonDiskCheckFailed, ReasonOwnDomainOnAnotherHost, ReasonDiskInUse); it
+// is removed when a later delete attempt fails for another reason. Ready is False with
+// ReasonDeleteBlocked meanwhile. Its LastTransitionTime is when the hold
+// began, which paces the retries (15 s doubling to 5 min). Its message never
+// names a host.
+const ConditionDeleteBlocked = "DeleteBlocked"
+
+// DeleteBlocked condition reasons (ADR-0007 A6.1).
+const (
+	// ReasonHostUnreachable: a host the delete needs — the VM's own, or
+	// another host of the Provider that must be checked before the VM's disk
+	// is removed — could not be reached. Nothing was deleted.
+	ReasonHostUnreachable = "HostUnreachable"
+	// ReasonDiskCheckFailed: the provider could not verify that no VM on
+	// another host of the Provider uses the VM's disk. Nothing was deleted.
+	ReasonDiskCheckFailed = "DiskCheckFailed"
+	// ReasonOwnDomainOnAnotherHost: the VM's last create (or its clone) was
+	// answered with its OWN domain on another host of the Provider (its
+	// placement record was lost). It is the Placed (and Provisioning) reason
+	// of that hold — Placed=False, pendingHost kept, as for ReasonRestorePending
+	// — and, once the VM is deleted, the DeleteBlocked reason: deleting it on
+	// its pending host would leave that domain running, so the finalizer is
+	// kept until the pending host points at it.
+	ReasonOwnDomainOnAnotherHost = "OwnDomainOnAnotherHost"
+	// ReasonDiskInUse: the provider refused the delete because another VM —
+	// on the VM's own host (e.g. a linked clone of it) or on another host of
+	// the Provider — uses its disk (VM_DISK_IN_USE). Nothing was deleted.
+	ReasonDiskInUse = "DiskInUse"
 )
 
 // ReasonPlacementTopologyMismatch indicates that a VirtualMachine records a

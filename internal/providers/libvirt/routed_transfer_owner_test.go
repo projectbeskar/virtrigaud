@@ -337,3 +337,50 @@ func TestHostLocks_PerHostAndContextAware(t *testing.T) {
 	require.NoError(t, err, "released: the next transfer on the host proceeds")
 	unlockA2()
 }
+
+// TestHostLocks_EntriesAreReferenceCounted (A6.1 fix verification, N5): an
+// entry lives only while someone holds or waits for its lock — a wait that
+// gives up drops its reference, the last release removes the entry — so the
+// set does not grow with every host or domain name ever locked. A release
+// called twice releases once.
+func TestHostLocks_EntriesAreReferenceCounted(t *testing.T) {
+	var locks hostLocks
+	unlock, err := locks.lock(context.Background(), "team-a.web")
+	require.NoError(t, err)
+	assert.Equal(t, 1, locks.refs("team-a.web"))
+
+	waited := make(chan func(), 1)
+	go func() {
+		u, werr := locks.lock(context.Background(), "team-a.web")
+		if werr != nil {
+			waited <- nil
+			return
+		}
+		waited <- u
+	}()
+	require.Eventually(t, func() bool { return locks.refs("team-a.web") == 2 }, 5*time.Second, time.Millisecond,
+		"a waiter holds a reference")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	_, err = locks.lock(ctx, "team-a.web")
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	assert.Equal(t, 2, locks.refs("team-a.web"), "a wait that gave up dropped its reference")
+
+	unlock()
+	unlock() // idempotent: must not release the waiter's hold
+	second := <-waited
+	require.NotNil(t, second, "the waiter got the lock")
+	assert.Equal(t, 1, locks.refs("team-a.web"))
+
+	busy, cancelBusy := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancelBusy()
+	_, err = locks.lock(busy, "team-a.web")
+	require.ErrorIs(t, err, context.DeadlineExceeded, "the second release of the first holder did not free the lock")
+
+	second()
+	assert.Equal(t, 0, locks.refs("team-a.web"))
+	locks.mu.Lock()
+	assert.Empty(t, locks.locks, "the last release removed the entry")
+	locks.mu.Unlock()
+}

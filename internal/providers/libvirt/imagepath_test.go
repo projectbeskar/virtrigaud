@@ -932,7 +932,7 @@ func TestCreateVM_RejectsHostileImagePathBeforeDiskWork(t *testing.T) {
 		{Path: "/etc/shadow", ImportedDisk: true},
 		{TemplateName: "/etc/shadow"}, // any path-shaped image spec is confined
 	} {
-		_, err := p.createVM(context.Background(), vp, contracts.CreateRequest{Name: "web", Image: img})
+		_, err := p.createVM(context.Background(), vp, contracts.CreateRequest{Name: "web", Image: img}, nil)
 		requireRejected(t, err, "allowed image directory")
 		var pe *contracts.ProviderError
 		if errors.As(err, &pe) {
@@ -959,7 +959,7 @@ func TestCreateDiskFromHostImage_CopiesBaseImage(t *testing.T) {
 
 	vol, err := p.createDiskFromHostImage(context.Background(), vp, NewStorageProvider(vp),
 		contracts.CreateRequest{Name: "web", Owner: ownerTeamA, Image: contracts.VMImage{Path: img}},
-		"team-a.web", img, vmDiskVolumeName("team-a.web"), 10)
+		"team-a.web", img, vmDiskVolumeName("team-a.web"), 10, nil)
 	require.NoError(t, err)
 	assert.Equal(t, filepath.Join(h.images, "team-a.web-disk.qcow2"), vol.Path, "the VM gets its own disk, named after its domain")
 	assert.NotEqual(t, img, vol.Path)
@@ -989,7 +989,7 @@ func TestCreateDiskFromHostImage_AdoptsOwnImportedDisk(t *testing.T) {
 
 			vol, err := p.createDiskFromHostImage(context.Background(), vp, NewStorageProvider(vp),
 				contracts.CreateRequest{Name: "web", Owner: tc.owner, Image: contracts.VMImage{Path: own, ImportedDisk: true}},
-				tc.domain, own, vmDiskVolumeName(tc.domain), 10)
+				tc.domain, own, vmDiskVolumeName(tc.domain), 10, nil)
 			require.NoError(t, err)
 			assert.Equal(t, own, vol.Path)
 			assert.NotContains(t, h.log("qemu-img"), "convert")
@@ -1020,7 +1020,10 @@ func TestCreate_Clustered_ConfinesOnTargetHost(t *testing.T) {
 	_, err := p.Create(context.Background(), contracts.CreateRequest{
 		Name: "web", TargetHostID: "host-b", Image: contracts.VMImage{Path: img},
 	})
-	requireRejected(t, err, "existing VM")
+	// A clustered provider answers every existence-dependent refusal the same
+	// way (ADR-0007 A6.1 security review), in use included.
+	requireRejected(t, err, "does not resolve to a file directly inside an allowed image directory")
+	assert.NotContains(t, err.Error(), "existing VM", "no in-use disclosure on a clustered provider")
 
 	virshLog := h.log("virsh")
 	assert.Contains(t, virshLog, "host-b\tlist --all --uuid", "the in-use check must run on the target host")
