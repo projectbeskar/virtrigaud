@@ -345,8 +345,9 @@ func conditionSince(conds []metav1.Condition, condType string) time.Time {
 const errReasonRestorePending = "restore-pending"
 
 // restorePendingRunbook is where the tenant-visible RestorePending messages
-// point: the A6 runbook in the clustered-provider documentation.
-const restorePendingRunbook = "docs/clustered-provider-inventory.md, \"Previous incarnations and the A6 runbook\""
+// point: the A6 re-attach runbook in the clustered backup and restore guide
+// (ADR-0007 A6.3).
+const restorePendingRunbook = "docs/clustered-restore.md, \"Re-attach runbook\""
 
 // restorePendingMessage is the Placed / Provisioning message of a VM held as
 // RestorePending by R2 (ADR-0007 A6). It names no host, no domain and no

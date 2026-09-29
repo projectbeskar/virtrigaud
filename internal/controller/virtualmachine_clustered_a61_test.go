@@ -103,7 +103,7 @@ func TestCreateVM_Clustered_PreviousIncarnationHoldsOnThePendingHost(t *testing.
 	assert.Equal(t, metav1.ConditionFalse, placed.Status)
 	assert.Equal(t, k8s.ReasonRestorePending, placed.Reason)
 	assert.Equal(t, held.Generation, placed.ObservedGeneration)
-	assert.Contains(t, placed.Message, "Previous incarnations and the A6 runbook", "the message points at the runbook")
+	assert.Contains(t, placed.Message, "docs/clustered-restore.md", "the message points at the runbook")
 	assert.NotContains(t, placed.Message, "host-bravo", "no host is named")
 	assert.NotContains(t, placed.Message, "default.web", "no domain is named")
 	assert.Equal(t, k8s.ReasonRestorePending, provisioningReason(held))
@@ -261,7 +261,7 @@ func TestVMClone_Clustered_PreviousIncarnationOfTheTargetHolds(t *testing.T) {
 	assert.Equal(t, infrav1beta1.ClonePhasePending, got.Status.Phase, "held, never failed")
 	cond := cloneReadyCondition(t, got)
 	assert.Equal(t, k8s.ReasonRestorePending, cond.Reason)
-	assert.Contains(t, cond.Message, "Previous incarnations and the A6 runbook")
+	assert.Contains(t, cond.Message, "docs/clustered-restore.md")
 	assert.NotContains(t, cond.Message, "host-alpha")
 
 	var warnings int
