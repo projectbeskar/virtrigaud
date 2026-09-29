@@ -830,6 +830,16 @@ func (r *VirtualMachineReconciler) handleDeletion(ctx context.Context, vm *infra
 		return r.orphanOnDelete(ctx, vm)
 	}
 
+	// A VM that was never placed but whose OWN domain the pre-schedule check
+	// found on a host it cannot be placed on (ADR-0007 A6.2, R4:
+	// OwnDomainOnAnotherHost with no pendingHost) has nothing to route a
+	// Delete to — and releasing it would leave that domain running. Its delete
+	// is held like a placed one's (A6.1), until a pendingHost points at the
+	// domain or force-delete / orphan-on-delete (above) releases it.
+	if !vmIsBound(vm) && heldForOwnDomainElsewhere(vm) && !hasForceDeleteAnnotation(vm) {
+		return r.holdDelete(ctx, vm, k8s.ReasonOwnDomainOnAnotherHost, ownDomainUnplacedDeleteMessage, errOwnDomainUnplaced), nil
+	}
+
 	// Get provider if we have a provider ref and either a VM ID or a clustered
 	// create in flight (status.placement.pendingHost, ADR-0007 Addendum A, A2).
 	if vmIsBound(vm) && vm.Spec.ProviderRef.Name != "" {

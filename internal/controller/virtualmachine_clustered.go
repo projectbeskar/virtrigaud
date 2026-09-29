@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -407,6 +408,19 @@ var ownDomainDeleteMessage = fmt.Sprintf("Delete blocked: this VirtualMachine's 
 	"Provider, and deleting it on its pending host would leave that domain running; set "+
 	"status.placement.pendingHost to that host (see %s) so the delete removes it. %s",
 	restorePendingRunbook, deleteBlockedEscape)
+
+// ownDomainUnplacedDeleteMessage is the DeleteBlocked message of a VM that
+// was never placed but whose own domain the pre-schedule check found on a
+// host of the hypervisors that is not a Host of its Provider (ADR-0007 A6.2).
+// It names no host.
+var ownDomainUnplacedDeleteMessage = fmt.Sprintf("Delete blocked: this VirtualMachine was never placed, but its own "+
+	"domain exists on a host its Provider does not front, and releasing the VirtualMachine would leave that domain "+
+	"running; restore that Host object and set status.placement.pendingHost to it (see %s) so the delete removes the "+
+	"domain. %s", restorePendingRunbook, deleteBlockedEscape)
+
+// errOwnDomainUnplaced is the (logged) cause of that held delete: no
+// provider call was made.
+var errOwnDomainUnplaced = errors.New("the VM's own domain is on a host it was never placed on; no delete can be routed")
 
 // holdForPreviousIncarnation is ADR-0007 A6, R2 on the manager side: the
 // provider refused the Create on the pending host with

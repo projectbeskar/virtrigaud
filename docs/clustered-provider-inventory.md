@@ -1815,7 +1815,10 @@ keep a restored or re-created VM from making a second domain:
 - **R3, the disk guard** (A6.1): see the previous section.
 
 Deleting a held VM never touches the previous incarnation: a VM held by R1 or
-R4 has no `status.id` and no `pendingHost`, so no provider call is made; a VM
+R4 has no `status.id` and no `pendingHost`, so no provider call is made
+(except that a never-placed VM held because its OWN domain is on a host the
+Provider does not front keeps its finalizer, `DeleteBlocked=True/OwnDomainOnAnotherHost`,
+until `force-delete` or `orphan-on-delete`); a VM
 pinned by R2 sends an owner-checked `Delete` with its own UID, which gets
 `NotFound`.
 

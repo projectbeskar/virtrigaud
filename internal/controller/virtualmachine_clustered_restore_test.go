@@ -879,6 +879,56 @@ func TestR4_OwnDomainElsewhereKeepsTheHoldWhenTheLookupCannotTell(t *testing.T) 
 	}
 }
 
+// TestR4_UnplacedOwnDomainHoldsTheDelete: a VM that was never placed but
+// whose own domain R4 found on a host its Provider does not front
+// (OwnDomainOnAnotherHost, no pendingHost) is not released on delete — no
+// provider call can reach that domain, and releasing the VM would leave it
+// running: DeleteBlocked=True/OwnDomainOnAnotherHost, finalizer kept. Force-
+// delete and orphan-on-delete still release it at once.
+func TestR4_UnplacedOwnDomainHoldsTheDelete(t *testing.T) {
+	for name, escape := range map[string]string{
+		"held":             "",
+		"force-delete":     forceDeleteAnnotation,
+		"orphan-on-delete": infrav1beta1.VirtualMachineOrphanOnDeleteAnnotation,
+	} {
+		t.Run(name, func(t *testing.T) {
+			vm := clusterVM("web", clusteredNS, "prov-cluster")
+			vm.UID = "uid-web"
+			vm.Finalizers = []string{infrav1beta1.VirtualMachineFinalizer}
+			prov := newR4Provider(contracts.VMList{VMs: []contracts.VMInfo{
+				stampedInfo("host-gone", "default.web", clusteredNS, "web", "uid-web"),
+			}})
+			r := clusteredFixture(t, prov, vm)
+			reconcileClustered(t, r, "web")
+			held := getVM(t, r, "web")
+			require.Equal(t, k8s.ReasonOwnDomainOnAnotherHost, placedCondition(held).Reason)
+			require.Empty(t, pendingHost(held), "never placed")
+
+			if escape != "" {
+				held.Annotations = map[string]string{escape: "true"}
+				require.NoError(t, r.Update(context.Background(), held))
+			}
+			res, err := r.handleDeletion(context.Background(), deletingClusterVM(t, r, "web"))
+			require.NoError(t, err)
+			assert.Empty(t, prov.deleteRefs, "no provider call either way")
+			getErr := r.Get(context.Background(), client.ObjectKey{Namespace: clusteredNS, Name: "web"}, &infrav1beta1.VirtualMachine{})
+			if escape != "" {
+				assert.True(t, apierrors.IsNotFound(getErr), "%s releases the finalizer", escape)
+				return
+			}
+			require.NoError(t, getErr, "the finalizer is kept")
+			assert.Equal(t, blockedRetryMin, res.RequeueAfter)
+			got := getVM(t, r, "web")
+			blocked := meta.FindStatusCondition(got.Status.Conditions, k8s.ConditionDeleteBlocked)
+			require.NotNil(t, blocked)
+			assert.Equal(t, metav1.ConditionTrue, blocked.Status)
+			assert.Equal(t, k8s.ReasonOwnDomainOnAnotherHost, blocked.Reason)
+			assert.NotContains(t, blocked.Message, "host-gone")
+			assert.Contains(t, got.Finalizers, infrav1beta1.VirtualMachineFinalizer)
+		})
+	}
+}
+
 // ─── VMClone: HOST_UNAVAILABLE backs off ──────────────────────────────────────
 
 // TestVMClone_Clustered_HostUnavailableBacksOff: a clone answered

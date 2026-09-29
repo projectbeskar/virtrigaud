@@ -1955,7 +1955,11 @@ the A6.2 amendment)*.
 >     There is no capacity admission and no assumption, because the domain
 >     already runs there;
 >   - an own domain on a host that is not a `Host` of the Provider is never
->     recorded. The VM is held `OwnDomainOnAnotherHost`.
+>     recorded. The VM is held `OwnDomainOnAnotherHost`, and deleting it is
+>     held too (`DeleteBlocked=True/OwnDomainOnAnotherHost`, before any
+>     provider call; the security review of A6.2: a never-placed VM used to be
+>     released, leaving its own domain running) until `force-delete` or
+>     `orphan-on-delete`.
 >
 >   R4 runs before every scheduling attempt of a never-placed VM. So an
 >   `Unschedulable` VM repeats it at its own backoff (30 s to 2 min). It

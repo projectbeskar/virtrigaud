@@ -159,7 +159,7 @@ retry binds the domain. Otherwise the VM stays held with
 | `Placed=False/RestorePending` (and `Provisioning`) | a never-placed VM | R1: the marker names another UID. Or R4: a previous incarnation, more than one domain, or an unreadable stamp exists | [Re-attach](#re-attach-runbook) the previous domain, [discard it](#discarding-the-previous-domain), or release the marker |
 | `Placed=False/RestorePending` (and `Provisioning`) | a VM with `pendingHost` | R2: the create on the pending host met a previous incarnation | [Re-attach](#re-attach-runbook) or [discard](#discarding-the-previous-domain). The marker needs no change |
 | `Ready=False/RestorePending` | a bound VM whose marker names another UID | its status was restored, but the domain on its host is still stamped with the old UID | [Re-stamp](#re-attach-runbook) the domain. The marker is rewritten automatically |
-| `Placed=False/OwnDomainOnAnotherHost` | a VM with `pendingHost` | the VM's own domain is on another host, and the lookup could not move `pendingHost` there | See [Own domain found on another host](#own-domain-found-on-another-host) |
+| `Placed=False/OwnDomainOnAnotherHost` | a VM with `pendingHost`, or a never-placed VM | the VM's own domain is on another host, and the lookup could not move `pendingHost` there (or, for a never-placed VM, the domain is on a host that is not a `Host` of the Provider). Deleting the VM is held too (`DeleteBlocked=True/OwnDomainOnAnotherHost`) | See [Own domain found on another host](#own-domain-found-on-another-host) |
 | `Placed=False/ProviderLacksListOwnerFilter` | a never-placed VM | the provider image predates A6.2 | Upgrade the clustered provider |
 | `Placed=False/UniquenessCheckFailed` | a never-placed VM | R4's query failed | Check the provider (manager log); the check is retried |
 
@@ -267,9 +267,12 @@ placement record was lost. No re-stamp is needed:
     --type=merge -p '{"status":{"placement":{"pendingHost":"<host>"}}}'
   ```
 
-  Deleting such a VM is held (`DeleteBlocked=True/OwnDomainOnAnotherHost`)
-  until its pending host points at the domain, or until you set
-  `virtrigaud.io/force-delete` or `virtrigaud.io/orphan-on-delete`.
+  Deleting such a VM is held (`DeleteBlocked=True/OwnDomainOnAnotherHost`),
+  whether or not it was ever placed: releasing it would leave its own domain
+  running. The hold lasts until its pending host points at the domain (the
+  delete then removes it), or until you set `virtrigaud.io/force-delete` or
+  `virtrigaud.io/orphan-on-delete` (the domain is then left for manual
+  removal).
 
 ### Restore into a new namespace while the original runs
 
