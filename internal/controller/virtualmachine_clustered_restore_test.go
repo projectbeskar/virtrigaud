@@ -316,6 +316,40 @@ func TestR1_ForeignMarkerHoldsAndNeverSchedules(t *testing.T) {
 	assert.True(t, strings.HasPrefix(events[0], "Warning "+k8s.ReasonRestorePending), events[0])
 }
 
+// TestR1_DeletingAHeldVMTouchesNothing: a VM held by R1 or R4 has no
+// status.id and no pendingHost, so deleting it sends no provider call — the
+// previous incarnation is never touched — and releases the finalizer.
+func TestR1_DeletingAHeldVMTouchesNothing(t *testing.T) {
+	for name, tc := range map[string]struct {
+		marker string
+		list   contracts.VMList
+	}{
+		"held by R1": {marker: "uid-original"},
+		"held by R4": {list: contracts.VMList{VMs: []contracts.VMInfo{
+			stampedInfo("host-alpha", "default.web", clusteredNS, "web", "uid-original")}}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			vm := clusterVM("web", clusteredNS, "prov-cluster")
+			vm.UID = "uid-restored"
+			vm.Finalizers = []string{infrav1beta1.VirtualMachineFinalizer}
+			if tc.marker != "" {
+				vm.Annotations = map[string]string{markerKey: tc.marker}
+			}
+			prov := newR4Provider(tc.list)
+			r := clusteredFixture(t, prov, vm)
+			reconcileClustered(t, r, "web")
+			require.Equal(t, k8s.ReasonRestorePending, placedCondition(getVM(t, r, "web")).Reason)
+
+			_, err := r.handleDeletion(context.Background(), deletingClusterVM(t, r, "web"))
+			require.NoError(t, err)
+			assert.Empty(t, prov.deleteRefs, "no provider call for a VM that was never placed")
+			assert.Empty(t, prov.createReqs)
+			err = r.Get(context.Background(), client.ObjectKey{Namespace: clusteredNS, Name: "web"}, &infrav1beta1.VirtualMachine{})
+			assert.True(t, apierrors.IsNotFound(err), "finalizer released")
+		})
+	}
+}
+
 // TestR1_ReleasedMarkerLetsR4Decide: removing the marker, or setting it to
 // the VM's own UID, releases the hold; R4 then runs, and the scheduler — not
 // the marker — places the VM.
