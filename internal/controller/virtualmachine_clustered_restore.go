@@ -172,7 +172,6 @@ var ownDomainUnknownHostMessage = fmt.Sprintf(
 func (r *VirtualMachineReconciler) guardFirstPlacement(
 	ctx context.Context,
 	vm *infravirtrigaudiov1beta1.VirtualMachine,
-	providerCR *infravirtrigaudiov1beta1.Provider,
 	providerInstance contracts.Provider,
 ) (host string, done bool, res ctrl.Result, err error) {
 	// R1: a marker naming another UID holds the VM, whatever the hosts say

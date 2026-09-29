@@ -598,7 +598,7 @@ func (r *VirtualMachineReconciler) reconcileVM(ctx context.Context, vm *infravir
 			// A held VM sends nothing else to the provider: no image prepare,
 			// no scheduling, no Create.
 			if isClusterTopology(provider) {
-				host, held, res, err := r.guardFirstPlacement(ctx, vm, provider, providerInstance)
+				host, held, res, err := r.guardFirstPlacement(ctx, vm, providerInstance)
 				if held {
 					return res, err
 				}
