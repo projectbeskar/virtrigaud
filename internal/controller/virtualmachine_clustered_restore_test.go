@@ -248,7 +248,9 @@ func TestR1_CloneTarget_MarkerWrittenBeforeItsPendingHost(t *testing.T) {
 func TestR1_CloneTarget_NoPendingHostWithoutTheMarker(t *testing.T) {
 	cp := &clonerProvider{cloneResp: contracts.CloneResponse{TargetVmID: "default.clone-c-target"}}
 	r, clone := clusteredCloneFixture(t, boundSource(), cp)
-	r.Client = interceptor.NewClient(r.Client.(client.WithWatch), interceptor.Funcs{
+	base, ok := r.Client.(client.WithWatch)
+	require.True(t, ok, "the fixture's client is a fake client.WithWatch")
+	r.Client = interceptor.NewClient(base, interceptor.Funcs{
 		Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
 			if _, ok := obj.(*infrav1beta1.VirtualMachine); ok {
 				return apierrors.NewConflict(schema.GroupResource{Resource: "virtualmachines"}, obj.GetName(), errors.New("changed"))
