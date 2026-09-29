@@ -33,7 +33,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `internal/controller/virtualmachine_controller.go`: deleting a never-placed VM held `OwnDomainOnAnotherHost` (its own domain on a host the Provider does not front) released the finalizer with no provider call and left the domain running. It is now held with `DeleteBlocked=True/OwnDomainOnAnotherHost` until `force-delete` or `orphan-on-delete`.
 
 ### Why
-The security review of A6.2/A6.3 approved it with nits: four Low items to fix before merge or soon after (1, 3, 4, 5, 7), and docs items (2, 6, 8). These changes address all of them.
+The security review of A6.2/A6.3 approved it with nits: Low items (1, 3, 4, 5, 7), of which 1 and 3 were required before merge, and documentation items (2, 6, 8). These changes address all of them.
 
 ### Impact
 - [ ] Breaking change
