@@ -5,6 +5,42 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-09-29 15:50] - ADR-0007 A6.2 security-review follow-ups: re-attach sizing and assumption, held deletes, clone-target check, bounded R4, runbook hardening
+**Author:** @wrkode (William Rizzo)
+
+> **Operator note.** Only `Provider.spec.topology: cluster` (experimental) changes, on top of the A6.2 entry below. A re-attached VM is now recorded at its domain's own size and then resized to its spec through the resize gate. A clone's target is checked for previous incarnations before the clone is admitted. The pre-schedule check does **not** see adopted domains; before re-creating an adopted VM after `orphan-on-delete`, find its old domain by stamp (the runbook's step 1). Keep `infra.virtrigaud.io/placement-uid` out of manifests you commit.
+
+### Added
+- `internal/providers/contracts/owner_filter.go`, `internal/providers/libvirt/routed_list_owner.go`: the owner-filtered listing reports each candidate's current size (`provider_raw` `current_vcpus` / `current_memory_mib`, from `<vcpu current>` and `<currentMemory>`) beside its maxima. It is parsed on its own, so the shared listing core is unchanged.
+- `internal/providers/libvirt/routed_list_owner.go`, `server.go`, `provider.go`: at most 2 owner-filtered listings run at once per provider process. One that gets no slot within 5 s contacts no host and fails closed as `RESOURCE_EXHAUSTED`, which the circuit breaker never counts.
+- `internal/controller/virtualmachine_clustered_restore.go`, `virtualmachine_controller.go`: a clean R4 answer (every host checked, nothing found) is reused for 3 minutes per VM UID and generation.
+- `internal/controller/vmclone_clustered.go`: a clustered clone's target meets R4 before the clone is admitted. `RestorePending`, `OwnDomainOnAnotherHost` (its own domain on another host than the source's), `ProviderLacksListOwnerFilter` and `UniquenessCheckFailed` hold the clone `Pending`, never `Failed`.
+- Tests: `TestR4_UnplacedOwnDomainHoldsTheDelete`, `TestR4_ReattachUsesTheDomainsSizeAndIsAssumed`, `TestR4_ReattachOfAHotAddDomainCountsItsCeiling`, `TestR4_ReattachWaitsForTheAssumeLock`, `TestR4_OwnDomainMoveTakesTheDomainsSize`, `TestR4_CleanAnswerIsReusedWhileTheVMIsUnschedulable`, `TestR4_AnswerWithAnUnreachableHostIsNotReused`, `TestR4_CleanAnswerIsKeyedOnTheGeneration`, `TestR4_CloneTarget_IsCheckedBeforeItIsPlaced`, `TestR4_CloneTarget_ProviderWithoutTheFilterHolds`, `TestClustered_ListVMsOwnerFilter_ReportsTheCurrentSize`, `TestClustered_ListVMsOwnerFilter_BusyFailsClosed`.
+
+### Changed
+- `internal/controller/virtualmachine_clustered_restore.go`, `virtualmachine_controller.go`: a re-attach placement (R4's discovered placement, and a move to the VM's own domain) records the domain's current size as `pendingResources`, with its balloon maximum as the ceiling. It is assumed under the Provider's assume lock like a scheduled placement (a busy lock requeues). The create retry is sent at that size, and the bind records it as `status.currentResources`, so a Reconfigure through the resize gate converges it to the spec. Before, the placement took the class size, the move kept the old admitted size, and no assumption was made.
+- `proto/provider/v1/provider.proto`: the owner filter's comment says the provider looks at candidate names only. A domain named otherwise, such as an adopted one, is not looked at (comment only).
+- Docs: `docs/clustered-restore.md`:
+  - runbook step 1 finds domains by stamp on every host;
+  - an R1-held VM's stamp UID must equal its marker;
+  - the last-resort `pendingHost` patch first verifies the own-UID stamp;
+  - discarding a domain runs step 1 first, works by UUID, and checks every host for users of each disk (`virsh domblklist --details`, `qemu-img info -U --backing-chain`);
+  - releasing a marker is safe only once every host is reachable;
+  - GitOps: keep the marker out of committed manifests, with Argo CD `ignoreDifferences` and a Flux note.
+- Docs: ADR-0007 (the adopted-domain residual, the follow-up "match by stamp with a per-host cache", and the as-built items), `docs/clustered-provider-inventory.md`, `docs/upgrading.md`, `docs/release-notes/next.md`.
+
+### Fixed
+- `internal/controller/virtualmachine_controller.go`: deleting a never-placed VM held `OwnDomainOnAnotherHost` (its own domain on a host the Provider does not front) released the finalizer with no provider call and left the domain running. It is now held with `DeleteBlocked=True/OwnDomainOnAnotherHost` until `force-delete` or `orphan-on-delete`.
+
+### Why
+The security review of A6.2/A6.3 approved it with nits: four Low items to fix before merge or soon after (1, 3, 4, 5, 7), and docs items (2, 6, 8). These changes address all of them.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-09-29 15:40] - ADR-0007 A6.2/A6.3: restore marker, pre-schedule uniqueness check, clustered backup and restore runbook
 **Author:** @wrkode (William Rizzo)
 

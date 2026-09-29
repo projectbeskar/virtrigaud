@@ -185,8 +185,10 @@ providers), and rollback caveats in
   `Placed=False/RestorePending` and nothing is created. Before a clustered VM
   is first scheduled, the manager asks every host for a domain stamped with
   its namespace and name (a new owner filter on `ListVMs`, advertised as
-  `supportsListOwnerFilter`): a previous incarnation holds it, and its own
-  domain is re-bound where it runs. The marker only ever holds the VM that
+  `supportsListOwnerFilter`; the VM's candidate domain names only, so an
+  adopted domain is not seen): a previous incarnation holds it, and its own
+  domain is re-bound where it runs, at the domain's own size. A clone's
+  target is checked the same way. The marker only ever holds the VM that
   carries it; single-host Providers ignore it. **A clustered Provider holds at
   most one domain per namespace and name, so re-creating a VM after
   `orphan-on-delete` waits until the old domain is re-attached or removed.**
@@ -194,7 +196,8 @@ providers), and rollback caveats in
   older one, new clustered VMs wait (`ProviderLacksListOwnerFilter`). Include
   VirtualMachine status in backups (Velero `restoreStatus`); the re-attach
   runbook needs only a `virsh metadata` re-stamp and, for a VM restored
-  without status, the marker set to its new UID — no status edit
+  without status, the marker set to its new UID — no status edit. Keep the
+  marker out of manifests you commit
   (→ [`docs/clustered-restore.md`](docs/clustered-restore.md)).
 - On a clustered Provider, shrinking a **running** VM waits until the VM is
   powered off (`Reconfiguring=False/ShrinkPendingPowerOff`): a live shrink
