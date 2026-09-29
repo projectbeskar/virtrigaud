@@ -72,8 +72,13 @@ UID therefore finds that the marker names another UID. If such a VM has no
 can only *hold* the VirtualMachine that carries it. It never names a host,
 never selects one, never authorizes a bind and never skips the scheduler or
 R4. So a forged marker only makes the forger's own VM wait. Releasing a marker
-(removing it, or setting it to the VM's own UID) is also safe for a tenant to
-do, because R2, R3 and R4 still run after it.
+(removing it, or setting it to the VM's own UID) is safe **once every host of
+the Provider is reachable**, because R2, R3 and R4 still run after it. While a
+host cannot be checked, a released VM is scheduled on the evidence of the
+reachable hosts only. On a host-local pool, a second domain can then be created
+next to a previous incarnation on the unreachable host; see
+[The host with the domain is unreachable](#the-host-with-the-domain-is-unreachable).
+Release a marker only when every `Host` of the Provider is `Ready`.
 
 The key is in the operator's reserved `virtrigaud.io` domain. A `VMClone` or
 `VMMigration` target is built without reserved keys, so it never inherits the
