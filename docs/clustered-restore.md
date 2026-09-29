@@ -143,7 +143,16 @@ persistent definition of a running candidate, whatever the number of domains
 on the host. The fan-out is the cross-host listing's: at most 8 hosts at a time
 and 60 seconds per host, inside a 45-second deadline from the manager. A host
 that is not finished by then is reported unreachable. Host-scoped failures are
-never counted toward the Provider's circuit breaker.
+never counted toward the Provider's circuit breaker. Two bounds keep it cheap:
+
+- A **clean** answer (every host checked, nothing found) is reused for 3
+  minutes per VM, until its spec changes. A VM that cannot be placed yet
+  (`Unschedulable`) therefore does not ask every host on each retry. An answer
+  with a host that could not be checked is never reused.
+- The provider runs at most 2 owner-filtered listings at once. One that gets
+  no slot within 5 seconds fails closed as busy, and the VM is held
+  `UniquenessCheckFailed` and retried with the backoff. This never counts
+  toward the circuit breaker.
 
 **The VM's own domain on another host.** A pending create can still meet the
 VM's own domain elsewhere. The disk guard then answers

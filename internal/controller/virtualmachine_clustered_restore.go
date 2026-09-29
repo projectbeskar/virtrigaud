@@ -23,6 +23,8 @@ import (
 	"math"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -213,6 +215,12 @@ func (r *VirtualMachineReconciler) preScheduleUniquenessCheck(
 	providerInstance contracts.Provider,
 ) (*contracts.VMInfo, bool, ctrl.Result, error) {
 	logger := log.FromContext(ctx)
+	key := cleanCheckKey(vm)
+	if r.preScheduleClean.fresh(key, r.now()) {
+		logger.V(1).Info("Pre-schedule uniqueness check: reusing a recent clean answer")
+		return nil, false, ctrl.Result{}, nil
+	}
+	r.preScheduleClean.forget(key)
 	v, list, lookupErr := lookupIncarnations(ctx, vm, providerInstance)
 	if lookupErr != nil {
 		logger.Info("Pre-schedule uniqueness check could not run; holding the VM", "reason", lookupErr.reason, "error", lookupErr.Error())
@@ -236,7 +244,66 @@ func (r *VirtualMachineReconciler) preScheduleUniquenessCheck(
 			"host", v.own[0].HostID)
 		return &v.own[0], false, ctrl.Result{}, nil
 	}
+	// A clean answer from every host is reused for preScheduleCleanTTL; one
+	// with a host that could not be checked is asked again next time.
+	if len(list.UnreachableHostIDs) == 0 {
+		r.preScheduleClean.remember(key, r.now())
+	}
 	return nil, false, ctrl.Result{}, nil
+}
+
+// preScheduleCleanTTL is how long a clean R4 answer for a VM — every host
+// checked, nothing stamped with its namespace and name — is reused (security
+// review of A6.2, item 5), keyed on the VM's UID and generation. A VM that
+// cannot be placed yet (Unschedulable, a busy lock) is re-scheduled on its own
+// backoff; without the cache each attempt would ask every host again. A spec
+// change (a new generation) asks again. The cost is a window of at most this
+// long in which a previous incarnation that appeared on a host (only an
+// administrator can make one appear for a VM that already exists) is not
+// seen before the create; R2 and R3 still stand at the create.
+const preScheduleCleanTTL = 3 * time.Minute
+
+// cleanCheckCache remembers the VMs whose R4 answer was clean, until
+// preScheduleCleanTTL passes. Its zero value is ready to use.
+type cleanCheckCache struct {
+	mu      sync.Mutex
+	expires map[string]time.Time
+}
+
+// cleanCheckKey is vm's cache key: its UID and generation.
+func cleanCheckKey(vm *infravirtrigaudiov1beta1.VirtualMachine) string {
+	return vmSchedulingUID(vm) + "/" + strconv.FormatInt(vm.Generation, 10)
+}
+
+// fresh reports whether key's clean answer is still fresh at now.
+func (c *cleanCheckCache) fresh(key string, now time.Time) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	exp, ok := c.expires[key]
+	return ok && now.Before(exp)
+}
+
+// remember records a clean answer for key at now, and drops expired entries
+// so the cache stays bounded by the VMs checked within one TTL.
+func (c *cleanCheckCache) remember(key string, now time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.expires == nil {
+		c.expires = map[string]time.Time{}
+	}
+	for k, exp := range c.expires {
+		if !now.Before(exp) {
+			delete(c.expires, k)
+		}
+	}
+	c.expires[key] = now.Add(preScheduleCleanTTL)
+}
+
+// forget drops key's clean answer.
+func (c *cleanCheckCache) forget(key string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	delete(c.expires, key)
 }
 
 // lookupError is why R4's lookup could not run: reason is the Placed reason

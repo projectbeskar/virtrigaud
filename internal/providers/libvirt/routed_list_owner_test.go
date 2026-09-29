@@ -268,6 +268,38 @@ func TestClustered_ListVMsOwnerFilter_OverGRPCKeepsTheBreakerClosed(t *testing.T
 	assert.True(t, caps.SupportsListOwnerFilter)
 }
 
+// TestClustered_ListVMsOwnerFilter_BusyFailsClosed (security review of A6.2,
+// item 5): at most ownerListConcurrency owner-filtered listings run at once
+// per provider process; one that gets no slot in time contacts no host and
+// fails closed as RESOURCE_EXHAUSTED, which the manager's circuit breaker
+// never counts. Once a slot frees, the listing runs.
+func TestClustered_ListVMsOwnerFilter_BusyFailsClosed(t *testing.T) {
+	fx := newListFixture(t, map[string][]listDomain{"host-a": {{name: "team-a.web", uuid: uuidWebA, owner: ownerPrev}}})
+	p := clusterOf(t, []string{"host-a"})
+	p.ownerListSlotWait = 50 * time.Millisecond
+	require.NoError(t, p.ownerListSemaphore().Acquire(context.Background(), ownerListConcurrency))
+
+	_, err := NewServer(p).ListVMs(context.Background(), ownerFilterTeamAWeb)
+	assert.Equal(t, codes.ResourceExhausted, status.Code(err), "%v", err)
+	assert.Empty(t, fx.calls(), "a listing without a slot contacts no host")
+
+	cb := resilience.NewCircuitBreaker("a62-busy", "libvirt", "clustered", &resilience.Config{
+		FailureThreshold: 1, ResetTimeout: time.Hour, HalfOpenMaxCalls: 1,
+	})
+	c := startBreakerGRPC(t, p, cb)
+	for i := 0; i < 3; i++ {
+		_, err := c.ListVMsForOwner(context.Background(), contracts.OwnerFilter{Namespace: "team-a", Name: "web"})
+		require.Error(t, err)
+	}
+	assert.Equal(t, resilience.StateClosed, cb.GetState(), "a busy provider never trips the breaker")
+
+	p.ownerListSemaphore().Release(ownerListConcurrency)
+	list, err := c.ListVMsForOwner(context.Background(), contracts.OwnerFilter{Namespace: "team-a", Name: "web"})
+	require.NoError(t, err)
+	assert.True(t, list.OwnerFilterApplied)
+	require.Len(t, list.VMs, 1)
+}
+
 // TestCapabilities_ListOwnerFilterIsClusteredOnly: a clustered provider
 // advertises supports_list_owner_filter; a single-host provider does not.
 func TestCapabilities_ListOwnerFilterIsClusteredOnly(t *testing.T) {

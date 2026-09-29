@@ -172,6 +172,15 @@ type Provider struct {
 	guardSemOnce sync.Once
 	guardSem     *semaphore.Weighted
 
+	// ownerListSem bounds the owner-filtered ListVMs (ADR-0007 A6.2, R4)
+	// this provider process runs at once (routed_list_owner.go), made on
+	// first use by ownerListSemaphore; ownerListSlotWait (zero:
+	// ownerListSlotWaitDefault) bounds how long one waits for a slot before
+	// it fails closed as busy. Tests shorten it.
+	ownerListSemOnce  sync.Once
+	ownerListSem      *semaphore.Weighted
+	ownerListSlotWait time.Duration
+
 	// domainLocks serializes, per domain name, the clustered Create, Clone
 	// and Delete of that domain in this provider process, from the
 	// cluster-wide disk check to the act it guards (lockDomain).

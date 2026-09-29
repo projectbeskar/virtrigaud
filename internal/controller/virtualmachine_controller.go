@@ -265,6 +265,10 @@ type VirtualMachineReconciler struct {
 	// providerErrorRetryInterval doubling to reconfigureRetryMaxInterval
 	// (review H2). A Reconfigure that succeeds resets it.
 	reconfigureRetry unschedulableBackoff
+	// preScheduleClean remembers, per VM UID and generation, a recent clean
+	// answer of the pre-schedule uniqueness check (ADR-0007 A6.2, R4), so a
+	// VM re-scheduled on its own backoff does not ask every host each time.
+	preScheduleClean cleanCheckCache
 	// clock returns the current time for the image-prepare backoff and stall
 	// bounds; nil uses time.Now. Tests set it.
 	clock func() time.Time

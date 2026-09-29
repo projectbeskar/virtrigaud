@@ -1072,6 +1072,77 @@ func TestR4_OwnDomainMoveTakesTheDomainsSize(t *testing.T) {
 	assert.EqualValues(t, 8192, *bound.Status.CurrentResources.MemoryMiB)
 }
 
+// cordonAlpha makes the clustered fixture's only host take no new VM, so a VM
+// stays Unschedulable.
+func cordonAlpha(t *testing.T, r *VirtualMachineReconciler) {
+	t.Helper()
+	h := &infrav1beta1.Host{}
+	require.NoError(t, r.Get(context.Background(), client.ObjectKey{Namespace: clusteredNS, Name: "host-alpha"}, h))
+	h.Spec.Schedulable = false
+	require.NoError(t, r.Update(context.Background(), h))
+}
+
+// TestR4_CleanAnswerIsReusedWhileTheVMIsUnschedulable (security review of
+// A6.2, item 5): a VM no host can take is re-scheduled on its own backoff; a
+// clean R4 answer from every host is reused for preScheduleCleanTTL instead
+// of asking every host on each attempt, and asked again once it expires.
+func TestR4_CleanAnswerIsReusedWhileTheVMIsUnschedulable(t *testing.T) {
+	vm := clusterVM("web", clusteredNS, "prov-cluster")
+	vm.UID = "uid-web"
+	prov := newR4Provider(contracts.VMList{})
+	r := clusteredFixture(t, prov, vm)
+	cordonAlpha(t, r)
+	now := time.Now()
+	r.clock = func() time.Time { return now }
+
+	for i := 0; i < 3; i++ {
+		reconcileClustered(t, r, "web")
+	}
+	assert.Equal(t, k8s.ReasonUnschedulable, placedCondition(getVM(t, r, "web")).Reason)
+	assert.Equal(t, 1, prov.listCalls(), "one R4 query for three scheduling attempts")
+
+	now = now.Add(preScheduleCleanTTL + time.Second)
+	reconcileClustered(t, r, "web")
+	assert.Equal(t, 2, prov.listCalls(), "asked again once the clean answer expired")
+}
+
+// TestR4_AnswerWithAnUnreachableHostIsNotReused: an answer that could not
+// check every host is not cached — the host may come back with a previous
+// incarnation.
+func TestR4_AnswerWithAnUnreachableHostIsNotReused(t *testing.T) {
+	vm := clusterVM("web", clusteredNS, "prov-cluster")
+	vm.UID = "uid-web"
+	prov := newR4Provider(contracts.VMList{UnreachableHostIDs: []string{"host-bravo"}})
+	r := clusteredFixture(t, prov, vm)
+	cordonAlpha(t, r)
+	reconcileClustered(t, r, "web")
+	reconcileClustered(t, r, "web")
+	assert.Equal(t, 2, prov.listCalls())
+}
+
+// TestR4_CleanAnswerIsKeyedOnTheGeneration: a spec change (a new
+// generation) asks the hosts again.
+func TestR4_CleanAnswerIsKeyedOnTheGeneration(t *testing.T) {
+	vm := clusterVM("web", clusteredNS, "prov-cluster")
+	vm.UID = "uid-web"
+	vm.Generation = 1
+	prov := newR4Provider(contracts.VMList{})
+	r := clusteredFixture(t, prov, vm)
+
+	check := func(gen int64) {
+		v := getVM(t, r, "web")
+		v.Generation = gen
+		_, held, _, err := r.preScheduleUniquenessCheck(context.Background(), v, prov)
+		require.NoError(t, err)
+		require.False(t, held)
+	}
+	check(1)
+	check(1)
+	assert.Equal(t, 1, prov.listCalls())
+	check(2)
+	assert.Equal(t, 2, prov.listCalls(), "a new generation is checked again")
+}
+
 // ─── VMClone: HOST_UNAVAILABLE backs off ──────────────────────────────────────
 
 // TestVMClone_Clustered_HostUnavailableBacksOff: a clone answered

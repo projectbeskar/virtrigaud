@@ -1973,9 +1973,16 @@ the A6.2 amendment)*.
 >     released, leaving its own domain running) until `force-delete` or
 >     `orphan-on-delete`.
 >
->   R4 runs before every scheduling attempt of a never-placed VM. So an
->   `Unschedulable` VM repeats it at its own backoff (30 s to 2 min). It
->   never runs for a bound VM or a pending create.
+>   R4 runs before every scheduling attempt of a never-placed VM, but *(security
+>   review of A6.2, item 5)* a **clean** answer — every host checked, nothing
+>   stamped with the namespace and name — is reused for 3 minutes per VM UID
+>   and generation, so an `Unschedulable` VM retried at its own backoff (30 s
+>   to 2 min) does not ask every host each time; an answer with a host that
+>   could not be checked, and every hold, is asked again on the next retry. It
+>   never runs for a bound VM or a pending create. The provider runs at most 2
+>   owner-filtered listings at once; one that gets no slot within 5 s fails
+>   closed as `RESOURCE_EXHAUSTED` (never counted by the circuit breaker) and
+>   the VM is held `UniquenessCheckFailed` with the backoff.
 > - **The own domain after placement** *(extension)*. A pending create
 >   answered `VM_PREVIOUS_INCARNATION` of kind `own` runs R4's lookup. If the
 >   lookup finds exactly that one own domain, on a `Host` of the Provider, and

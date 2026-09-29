@@ -1391,6 +1391,12 @@ func (s *Server) ListVMs(ctx context.Context, req *providerv1.ListVMsRequest) (*
 	}
 	if err != nil {
 		if s.clusteredProvider() {
+			// Too many owner-filtered listings at once (ADR-0007 A6.2): the
+			// provider answered and is healthy, so this is a back-off signal
+			// (RESOURCE_EXHAUSTED), never a circuit-breaker failure.
+			if stderrors.Is(err, errOwnerListBusy) {
+				return nil, status.Error(codes.ResourceExhausted, "list VMs: "+errOwnerListBusy.Error()+"; retry later")
+			}
 			return nil, routedRPCError("list VMs", err)
 		}
 		return nil, fmt.Errorf("failed to list VMs: %w", err)

@@ -19,10 +19,14 @@ package libvirt
 import (
 	"context"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"log"
 	"strconv"
 	"strings"
+	"time"
+
+	"golang.org/x/sync/semaphore"
 
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
 	"github.com/projectbeskar/virtrigaud/internal/providers/libvirt/hostconn"
@@ -105,12 +109,50 @@ func (p *Provider) ListVMsForOwner(ctx context.Context, owner contracts.OwnerFil
 	return p.listVMsClusteredForOwner(ctx, owner)
 }
 
+// Owner-filtered listings are bounded per provider process (security review
+// of A6.2, item 5): at most ownerListConcurrency run at once, so a burst of
+// new clustered VMs (or a tenant creating and deleting them) cannot multiply
+// the per-host reads. One that gets no slot within ownerListSlotWaitDefault
+// fails closed as busy (errOwnerListBusy, answered RESOURCE_EXHAUSTED — never
+// counted by the manager's circuit breaker); the manager holds the VM
+// (UniquenessCheckFailed) and retries with its backoff.
+const (
+	ownerListConcurrency     = 2
+	ownerListSlotWaitDefault = 5 * time.Second
+)
+
+// errOwnerListBusy is an owner-filtered listing that got no slot in time.
+var errOwnerListBusy = errors.New("the provider is busy with other owner-filtered listings")
+
+// ownerListSemaphore returns the provider's owner-filtered listing semaphore
+// (ownerListConcurrency slots), made on first use.
+func (p *Provider) ownerListSemaphore() *semaphore.Weighted {
+	p.ownerListSemOnce.Do(func() { p.ownerListSem = semaphore.NewWeighted(ownerListConcurrency) })
+	return p.ownerListSem
+}
+
 // listVMsClusteredForOwner is the clustered owner-filtered listing.
 func (p *Provider) listVMsClusteredForOwner(ctx context.Context, owner contracts.OwnerFilter) (contracts.VMList, error) {
 	cand, err := ownerCandidatesFor(owner)
 	if err != nil {
 		return contracts.VMList{}, err
 	}
+	wait := p.ownerListSlotWait
+	if wait <= 0 {
+		wait = ownerListSlotWaitDefault
+	}
+	slotCtx, cancel := context.WithTimeout(ctx, wait)
+	err = p.ownerListSemaphore().Acquire(slotCtx, 1)
+	cancel()
+	if err != nil {
+		if cerr := ctx.Err(); cerr != nil {
+			return contracts.VMList{}, cerr
+		}
+		log.Printf("WARN ListVMs (owner filter): no slot within %s (%d listings at a time); failing closed as busy",
+			wait, ownerListConcurrency)
+		return contracts.VMList{}, errOwnerListBusy
+	}
+	defer p.ownerListSemaphore().Release(1)
 	list, err := p.listAcrossHosts(ctx, "ListVMs (owner filter)", func(budget context.Context, id hostconn.HostID) hostListResult {
 		return p.listOneHostForOwner(budget, id, cand)
 	})
