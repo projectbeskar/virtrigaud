@@ -55,6 +55,11 @@ type clonerProvider struct {
 	// onClone, when set, runs inside Clone (e.g. to observe the API state the
 	// clone is sent in).
 	onClone func()
+
+	// ownerVMs is the owner-filtered listing's answer (ADR-0007 A6.2, R4);
+	// ownerFilters records the filters asked for.
+	ownerVMs     []contracts.VMInfo
+	ownerFilters []contracts.OwnerFilter
 }
 
 func (p *clonerProvider) Clone(_ context.Context, req contracts.CloneRequest) (contracts.CloneResponse, error) {
@@ -72,6 +77,13 @@ func (p *clonerProvider) GetCapabilities(_ context.Context) (contracts.Capabilit
 		return contracts.Capabilities{}, p.capsErr
 	}
 	return p.caps, nil
+}
+
+// ListVMsForOwner answers the pre-schedule uniqueness check of a clustered
+// clone's target (ADR-0007 A6.2, R4) with ownerVMs, an applied filter.
+func (p *clonerProvider) ListVMsForOwner(_ context.Context, f contracts.OwnerFilter) (contracts.VMList, error) {
+	p.ownerFilters = append(p.ownerFilters, f)
+	return contracts.VMList{VMs: p.ownerVMs, OwnerFilterApplied: true}, nil
 }
 
 // clonerProviderNoCaps is a Cloner that does NOT implement CapabilityReporter

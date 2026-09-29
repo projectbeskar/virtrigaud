@@ -1999,7 +1999,16 @@ the A6.2 amendment)*.
 > - **Clones.** A clustered clone answered `HOST_UNAVAILABLE` or
 >   `VM_DISK_CHECK_FAILED` backs off from when the target's placement was
 >   recorded (15 s doubling to 5 min), like a create. It used to retry every
->   30 s (A6.1 review follow-up).
+>   30 s (A6.1 review follow-up). *(Security review of A6.2, item 7.)* A
+>   clone's target meets R4 too, before the clone is admitted or its
+>   `pendingHost` written: a previous incarnation of the target (or more than
+>   one domain, or an unreadable stamp) holds the clone `RestorePending`; the
+>   target's own domain on another host than the source's — the only host a
+>   clone can land on — holds it `OwnDomainOnAnotherHost`; a provider without
+>   the filter, or a failed check, holds it `ProviderLacksListOwnerFilter` /
+>   `UniquenessCheckFailed`. The `VMClone` stays `Pending` (never `Failed`,
+>   which would remove its target) with the blocked-VM backoff. The target's
+>   own domain on the source's host is not held: the Clone binds it.
 > - **Trust.** The marker is only ever compared with the VM's own UID and
 >   only holds that VM. It is never passed to the provider, the scheduler or
 >   another object. A forged marker, including one naming a host, holds only

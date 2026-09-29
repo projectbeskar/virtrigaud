@@ -66,6 +66,8 @@ func clusteredCloneFixtureWithClass(t *testing.T, src *infrav1beta1.VirtualMachi
 	// A slice 3 clustered provider routes clones (a test can clear it on cp).
 	cp.caps.SupportsClustering = true
 	cp.caps.SupportsRoutedClone = true
+	// ...and answers the pre-schedule check of a clone's target (A6.2, R4).
+	cp.caps.SupportsListOwnerFilter = true
 	return newClusteredCloneReconciler(t, cp, objs...), clone
 }
 

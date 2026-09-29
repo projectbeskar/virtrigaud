@@ -1143,6 +1143,66 @@ func TestR4_CleanAnswerIsKeyedOnTheGeneration(t *testing.T) {
 	assert.Equal(t, 2, prov.listCalls(), "a new generation is checked again")
 }
 
+// ─── VMClone: the target meets R4 ─────────────────────────────────────────────
+
+// TestR4_CloneTarget_IsCheckedBeforeItIsPlaced (security review of A6.2,
+// item 7): a clustered clone's target meets the pre-schedule check before it
+// is admitted or its pendingHost written. A previous incarnation of the
+// target, or its own domain on another host than the source's, holds the
+// clone (Pending, never Failed) with nothing written or sent; its own domain
+// on the source's host lets the Clone bind it; nothing found proceeds.
+func TestR4_CloneTarget_IsCheckedBeforeItIsPlaced(t *testing.T) {
+	for name, tc := range map[string]struct {
+		vms    []contracts.VMInfo
+		reason string // "" = the clone proceeds
+	}{
+		"nothing found": {},
+		"previous incarnation of the target": {vms: []contracts.VMInfo{
+			stampedInfo("host-beta", "default.clone-c-target", "default", "clone-c-target", "uid-previous")},
+			reason: k8s.ReasonRestorePending},
+		"own domain on another host": {vms: []contracts.VMInfo{
+			stampedInfo("host-beta", "default.clone-c-target", "default", "clone-c-target", "uid-default-clone-c-target")},
+			reason: k8s.ReasonOwnDomainOnAnotherHost},
+		"own domain on the source's host": {vms: []contracts.VMInfo{
+			stampedInfo("host-alpha", "default.clone-c-target", "default", "clone-c-target", "uid-default-clone-c-target")}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			cp := &clonerProvider{cloneResp: contracts.CloneResponse{TargetVmID: "default.clone-c-target"}, ownerVMs: tc.vms}
+			r, clone := clusteredCloneFixture(t, boundSource(), cp)
+			reconcileTwice(t, r, client.ObjectKeyFromObject(clone))
+
+			require.NotEmpty(t, cp.ownerFilters, "the target's namespace and name were checked")
+			assert.Equal(t, contracts.OwnerFilter{Namespace: "default", Name: "clone-c-target"}, cp.ownerFilters[0])
+			target := getTarget(t, r)
+			if tc.reason == "" {
+				assert.Equal(t, 1, cp.cloneCnt)
+				assert.Equal(t, "default.clone-c-target", target.Status.ID)
+				assert.Len(t, cp.ownerFilters, 1, "not asked again once the target has a pending host")
+				return
+			}
+			assert.Zero(t, cp.cloneCnt, "no clone is sent")
+			assert.Empty(t, pendingHostOf(target), "nothing is admitted or recorded")
+			assert.Equal(t, tc.reason, placedCondition(target).Reason)
+			assert.NotContains(t, placedCondition(target).Message, "host-beta")
+			got := getClone(t, r, clone)
+			assert.Equal(t, infrav1beta1.ClonePhasePending, got.Status.Phase, "held, never failed")
+			assert.Equal(t, tc.reason, cloneReadyCondition(t, got).Reason)
+		})
+	}
+}
+
+// TestR4_CloneTarget_ProviderWithoutTheFilterHolds: a clustered provider that
+// does not report the owner filter holds the clone (ProviderLacksListOwnerFilter).
+func TestR4_CloneTarget_ProviderWithoutTheFilterHolds(t *testing.T) {
+	cp := &clonerProvider{cloneResp: contracts.CloneResponse{TargetVmID: "default.clone-c-target"}}
+	r, clone := clusteredCloneFixture(t, boundSource(), cp)
+	cp.caps.SupportsListOwnerFilter = false
+	reconcileTwice(t, r, client.ObjectKeyFromObject(clone))
+	assert.Zero(t, cp.cloneCnt)
+	assert.Equal(t, k8s.ReasonProviderLacksListOwnerFilter, cloneReadyCondition(t, getClone(t, r, clone)).Reason)
+	assert.Equal(t, infrav1beta1.ClonePhasePending, getClone(t, r, clone).Status.Phase)
+}
+
 // ─── VMClone: HOST_UNAVAILABLE backs off ──────────────────────────────────────
 
 // TestVMClone_Clustered_HostUnavailableBacksOff: a clone answered

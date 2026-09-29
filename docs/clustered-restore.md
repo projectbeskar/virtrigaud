@@ -95,7 +95,10 @@ neither read nor write it.
 R4 runs for a clustered VM that has never been placed: no `status.id` and no
 `pendingHost`. It runs once before the VM's first scheduling, and again on each
 retry while the VM is held or unschedulable. It **never** runs for a bound VM
-or for a VM whose create is already pending.
+or for a VM whose create is already pending. A **clone's target** meets it too,
+before the clone is admitted. Its previous incarnation, or its own domain on
+another host than the clone source's, holds the `VMClone` as `Pending` (never
+`Failed`) with the same reasons.
 
 The manager sends one `ListVMs` with an owner filter (the VM's namespace and
 name). On each host the provider looks up only this VM's candidates:

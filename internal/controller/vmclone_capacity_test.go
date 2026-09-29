@@ -243,6 +243,8 @@ func createAndCloneFixture(t *testing.T) (*VirtualMachineReconciler, *VMCloneRec
 	cp := &clonerProvider{cloneResp: contracts.CloneResponse{TargetVmID: "default.copy"}}
 	cp.caps.SupportsClustering = true
 	cp.caps.SupportsRoutedClone = true
+	// ...and answers the pre-schedule check of a clone's target (A6.2, R4).
+	cp.caps.SupportsListOwnerFilter = true
 	cr := &VMCloneReconciler{Client: lc, Scheme: s, RemoteResolver: &stubResolver{provider: cp},
 		Recorder: record.NewFakeRecorder(50), Placements: vmr.PlacementAssumptions()}
 	return vmr, cr, cp, clone, lc
