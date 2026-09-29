@@ -247,6 +247,41 @@ reachable host, the VM is held (`RestorePending`). Re-attach it with the
 runbook (without the marker step), or remove the old domain. If R4 finds
 nothing, the VM is created as new.
 
+**Keep the marker out of git.** The manager writes
+`infra.virtrigaud.io/placement-uid` on the live object. Never commit it. A
+manifest exported from the cluster (`kubectl get -o yaml`) carries it, and
+once it is in git, every re-apply to a new object (a re-created namespace, a
+new cluster, a deleted-and-re-synced VM) is held by R1 as a restore. Strip it
+when you export, for example:
+
+```sh
+kubectl get virtualmachines.infra.virtrigaud.io <name> -n <namespace> -o yaml \
+  | yq 'del(.metadata.annotations."infra.virtrigaud.io/placement-uid") | del(.status)
+        | del(.metadata.uid, .metadata.resourceVersion, .metadata.generation, .metadata.creationTimestamp, .metadata.managedFields)'
+```
+
+Also make the GitOps tool ignore the annotation, so that it neither reports
+drift nor removes it on every sync. Removing it is harmless for a bound VM
+(the manager writes it back after the next successful call), but it churns.
+
+- **Argo CD** (`Application.spec.ignoreDifferences`):
+
+  ```yaml
+  ignoreDifferences:
+    - group: infra.virtrigaud.io
+      kind: VirtualMachine
+      jsonPointers:
+        - /metadata/annotations/infra.virtrigaud.io~1placement-uid
+  ```
+
+  With server-side diff or `RespectIgnoreDifferences=true` in `syncOptions`,
+  a sync also leaves the field alone.
+- **Flux**: Flux uses server-side apply and does not remove annotations it
+  does not manage. Keep the annotation out of the committed manifest, and
+  Flux leaves the manager's value in place. Do not set
+  `kustomize.toolkit.fluxcd.io/force: enabled` on VirtualMachines: it
+  re-creates the object with a new UID.
+
 ### `orphan-on-delete`, then a re-create of the same name
 
 `orphan-on-delete` leaves the domain running, stamped with the deleted VM's
