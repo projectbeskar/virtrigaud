@@ -40,6 +40,7 @@ import (
 	infrav1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
 	"github.com/projectbeskar/virtrigaud/internal/k8s"
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
+	"github.com/projectbeskar/virtrigaud/internal/scheduler/assume"
 )
 
 // These tests pin the manager side of ADR-0007 A6.2: R1 (the restore marker
@@ -927,6 +928,148 @@ func TestR4_UnplacedOwnDomainHoldsTheDelete(t *testing.T) {
 			assert.Contains(t, got.Finalizers, infrav1beta1.VirtualMachineFinalizer)
 		})
 	}
+}
+
+// sizedInfo is stampedInfo with the size the owner-filtered listing reports:
+// maxima in CPU/MemoryMiB, the current size in ProviderRaw.
+func sizedInfo(host, ns, name, uid string, maxCPU, curCPU int32, maxMem, curMem int64) contracts.VMInfo {
+	info := stampedInfo(host, ns+"."+name, ns, name, uid)
+	info.CPU, info.MemoryMiB = maxCPU, maxMem
+	info.ProviderRaw[contracts.VMInfoCurrentVCPUsKey] = fmt.Sprint(curCPU)
+	info.ProviderRaw[contracts.VMInfoCurrentMemoryMiBKey] = fmt.Sprint(curMem)
+	return info
+}
+
+// assumedOn returns vm's live placement assumptions on the clustered fixture's
+// Provider.
+func assumedOn(r *VirtualMachineReconciler) map[string][2]int64 {
+	out := map[string][2]int64{}
+	for _, a := range r.placementAssumptions().List(clusteredNS+"/prov-cluster", func(assume.Assumption) bool { return false }) {
+		out[a.Name+"@"+a.HostID] = [2]int64{int64(a.Resources.CPU), a.Resources.MemoryMiB}
+	}
+	return out
+}
+
+// TestR4_ReattachUsesTheDomainsSizeAndIsAssumed (security review of A6.2,
+// item 4): the VM's own domain — smaller than the spec (1 vCPU / 1024 MiB
+// against 2 / 4096) — is recorded at ITS size as pendingResources, assumed
+// on its host under the Provider's assume lock before the pendingHost write,
+// created (bound) at that size, and recorded as status.currentResources, so
+// the next reconcile sees the spec differ and converges it through the
+// resize gate.
+func TestR4_ReattachUsesTheDomainsSizeAndIsAssumed(t *testing.T) {
+	vm := clusterVM("web", clusteredNS, "prov-cluster")
+	vm.UID = "uid-web"
+	prov := newR4Provider(contracts.VMList{VMs: []contracts.VMInfo{
+		sizedInfo("host-bravo", clusteredNS, "web", "uid-web", 1, 1, 1024, 1024),
+	}})
+	r := clusteredFixture(t, prov, vm, readyHost("host-bravo", clusteredNS, "pool-a", "prov-cluster"))
+	var atCreate *infrav1beta1.VirtualMachine
+	var assumed map[string][2]int64
+	prov.onCreate = func(req contracts.CreateRequest) (contracts.CreateResponse, error) {
+		atCreate = getVM(t, r, "web")
+		assumed = assumedOn(r)
+		return contracts.CreateResponse{ID: "default.web"}, nil
+	}
+
+	reconcileClustered(t, r, "web")
+
+	require.Len(t, prov.createReqs, 1)
+	assert.Equal(t, "host-bravo", prov.createReqs[0].TargetHostID)
+	assert.EqualValues(t, 1, prov.createReqs[0].Class.CPU, "the re-attach create is sent at the domain's size")
+	assert.EqualValues(t, 1024, prov.createReqs[0].Class.MemoryMiB)
+	require.NotNil(t, atCreate)
+	assert.Equal(t, &infrav1beta1.PlacementResources{CPU: 1, MemoryMiB: 1024}, atCreate.Status.Placement.PendingResources)
+	assert.Equal(t, [2]int64{1, 1024}, assumed["web@host-bravo"], "assumed on its host before the create")
+
+	bound := getVM(t, r, "web")
+	require.NotNil(t, bound.Status.CurrentResources)
+	assert.EqualValues(t, 1, *bound.Status.CurrentResources.CPU, "the domain's size, not the spec's")
+	assert.EqualValues(t, 1024, *bound.Status.CurrentResources.MemoryMiB)
+	needs, err := r.needsReconfigure(bound, smallVMClass(clusteredNS))
+	require.NoError(t, err)
+	assert.True(t, needs, "the spec (2 vCPU / 4096 MiB) differs: a Reconfigure converges the domain")
+}
+
+// TestR4_ReattachOfAHotAddDomainCountsItsCeiling: a domain with memory
+// hot-add headroom (current 2048 MiB, maximum 8192) is recorded at its
+// current memory with its maximum as the ceiling — never at its maximum as
+// its memory, which would read as a shrink to the spec.
+func TestR4_ReattachOfAHotAddDomainCountsItsCeiling(t *testing.T) {
+	vm := clusterVM("web", clusteredNS, "prov-cluster")
+	vm.UID = "uid-web"
+	prov := newR4Provider(contracts.VMList{VMs: []contracts.VMInfo{
+		sizedInfo("host-alpha", clusteredNS, "web", "uid-web", 8, 2, 8192, 2048),
+	}})
+	var atCreate *infrav1beta1.VirtualMachine
+	r := clusteredFixture(t, prov, vm)
+	prov.onCreate = func(contracts.CreateRequest) (contracts.CreateResponse, error) {
+		atCreate = getVM(t, r, "web")
+		return contracts.CreateResponse{ID: "default.web"}, nil
+	}
+	reconcileClustered(t, r, "web")
+
+	require.NotNil(t, atCreate)
+	pl := atCreate.Status.Placement
+	assert.Equal(t, &infrav1beta1.PlacementResources{CPU: 2, MemoryMiB: 2048}, pl.PendingResources, "current, not maximum")
+	require.NotNil(t, pl.MemoryCeilingMiB)
+	assert.EqualValues(t, 8192, *pl.MemoryCeilingMiB, "counted at its balloon maximum")
+	bound := getVM(t, r, "web")
+	assert.EqualValues(t, 2048, *bound.Status.CurrentResources.MemoryMiB)
+	require.NotNil(t, bound.Status.Placement.MemoryCeilingMiB)
+	assert.EqualValues(t, 8192, *bound.Status.Placement.MemoryCeilingMiB)
+}
+
+// TestR4_ReattachWaitsForTheAssumeLock: while the Provider's assume lock is
+// held, the re-attach records nothing and requeues shortly.
+func TestR4_ReattachWaitsForTheAssumeLock(t *testing.T) {
+	vm := clusterVM("web", clusteredNS, "prov-cluster")
+	vm.UID = "uid-web"
+	prov := newR4Provider(contracts.VMList{VMs: []contracts.VMInfo{
+		stampedInfo("host-alpha", "default.web", clusteredNS, "web", "uid-web"),
+	}})
+	r := clusteredFixture(t, prov, vm)
+	unlock := r.placementAssumptions().Lock(clusteredNS + "/prov-cluster")
+	res := reconcileClustered(t, r, "web")
+	unlock()
+
+	assert.Positive(t, res.RequeueAfter)
+	assert.LessOrEqual(t, res.RequeueAfter, 2*time.Second)
+	assert.Empty(t, pendingHost(getVM(t, r, "web")))
+	assert.Empty(t, prov.createReqs)
+}
+
+// TestR4_OwnDomainMoveTakesTheDomainsSize: moving the pending host to the
+// VM's own domain records that domain's size (not the size admitted on the
+// old pending host) and moves the assumption with it.
+func TestR4_OwnDomainMoveTakesTheDomainsSize(t *testing.T) {
+	vm := clusterVM("web", clusteredNS, "prov-cluster")
+	vm.UID = "uid-web"
+	vm.Status.Placement = &infrav1beta1.PlacementStatus{PendingHost: "host-alpha", Pool: "pool-a",
+		PendingResources: &infrav1beta1.PlacementResources{CPU: 2, MemoryMiB: 4096}}
+	prov := newR4Provider(contracts.VMList{VMs: []contracts.VMInfo{
+		sizedInfo("host-bravo", clusteredNS, "web", "uid-web", 4, 4, 8192, 8192),
+	}})
+	prov.onCreate = func(req contracts.CreateRequest) (contracts.CreateResponse, error) {
+		if req.TargetHostID == "host-bravo" {
+			return contracts.CreateResponse{ID: "default.web"}, nil
+		}
+		return contracts.CreateResponse{}, ownDomainElsewhereErr("default.web")
+	}
+	r := clusteredFixture(t, prov, vm, readyHost("host-bravo", clusteredNS, "pool-a", "prov-cluster"))
+
+	reconcileClustered(t, r, "web")
+	moved := getVM(t, r, "web")
+	assert.Equal(t, "host-bravo", moved.Status.Placement.PendingHost)
+	assert.Equal(t, &infrav1beta1.PlacementResources{CPU: 4, MemoryMiB: 8192}, moved.Status.Placement.PendingResources)
+	assert.Equal(t, map[string][2]int64{"web@host-bravo": {4, 8192}}, assumedOn(r), "the assumption moved with it")
+
+	reconcileClustered(t, r, "web")
+	require.Len(t, prov.createReqs, 2)
+	assert.EqualValues(t, 4, prov.createReqs[1].Class.CPU)
+	bound := getVM(t, r, "web")
+	assert.EqualValues(t, 4, *bound.Status.CurrentResources.CPU)
+	assert.EqualValues(t, 8192, *bound.Status.CurrentResources.MemoryMiB)
 }
 
 // ─── VMClone: HOST_UNAVAILABLE backs off ──────────────────────────────────────

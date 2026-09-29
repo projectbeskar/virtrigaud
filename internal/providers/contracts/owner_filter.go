@@ -52,6 +52,18 @@ func (f OwnerFilter) Matches(info VMInfo) bool {
 	return f.Complete() && info.OwnerNamespace == f.Namespace && info.OwnerName == f.Name
 }
 
+// VMInfoCurrentVCPUsKey and VMInfoCurrentMemoryMiBKey are the VMInfo.ProviderRaw
+// keys under which an owner-filtered listing (OwnerFilteredLister) reports a
+// candidate's CURRENT size: the vCPUs it runs (or boots) with and the memory
+// allocated to it, in MiB (decimal). VMInfo.CPU and VMInfo.MemoryMiB are its
+// maxima (libvirt's <vcpu> and <memory>), which exceed the current size when
+// the VM has CPU or memory hot-add headroom. The manager sizes a re-attached
+// VM from them (ADR-0007 A6.2, R4). Absent when the provider cannot tell.
+const (
+	VMInfoCurrentVCPUsKey     = "current_vcpus"
+	VMInfoCurrentMemoryMiBKey = "current_memory_mib"
+)
+
 // OwnerUIDs returns the owner UIDs a provider reported on info
 // (ProviderRaw[VMInfoOwnerUIDKey], comma-separated), without empties.
 func OwnerUIDs(info VMInfo) []string {

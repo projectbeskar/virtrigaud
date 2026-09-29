@@ -20,6 +20,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
+	"strconv"
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
@@ -36,6 +38,7 @@ import (
 	"github.com/projectbeskar/virtrigaud/internal/obs/metrics"
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
 	"github.com/projectbeskar/virtrigaud/internal/scheduler"
+	"github.com/projectbeskar/virtrigaud/internal/scheduler/assume"
 )
 
 // The restore guards a clustered VirtualMachine meets before it is first
@@ -173,13 +176,13 @@ func (r *VirtualMachineReconciler) guardFirstPlacement(
 	ctx context.Context,
 	vm *infravirtrigaudiov1beta1.VirtualMachine,
 	providerInstance contracts.Provider,
-) (host string, done bool, res ctrl.Result, err error) {
+) (found *contracts.VMInfo, done bool, res ctrl.Result, err error) {
 	// R1: a marker naming another UID holds the VM, whatever the hosts say
 	// (so a host that cannot be reached never lets it through, decision 4).
 	if markerNamesAnotherUID(vm) {
 		log.FromContext(ctx).Info("Holding a clustered VM before placement: its restore marker names another UID (ADR-0007 A6, R1)",
 			"marker", placementUIDMarker(vm))
-		return "", true, r.holdBeforePlacement(ctx, vm, k8s.ReasonRestorePending, restoreMarkerMessage, errReasonRestorePending), nil
+		return nil, true, r.holdBeforePlacement(ctx, vm, k8s.ReasonRestorePending, restoreMarkerMessage, errReasonRestorePending), nil
 	}
 	return r.preScheduleUniquenessCheck(ctx, vm, providerInstance)
 }
@@ -208,7 +211,7 @@ func (r *VirtualMachineReconciler) preScheduleUniquenessCheck(
 	ctx context.Context,
 	vm *infravirtrigaudiov1beta1.VirtualMachine,
 	providerInstance contracts.Provider,
-) (string, bool, ctrl.Result, error) {
+) (*contracts.VMInfo, bool, ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 	v, list, lookupErr := lookupIncarnations(ctx, vm, providerInstance)
 	if lookupErr != nil {
@@ -217,23 +220,23 @@ func (r *VirtualMachineReconciler) preScheduleUniquenessCheck(
 		if lookupErr.reason == k8s.ReasonProviderLacksListOwnerFilter {
 			msg = lacksListOwnerFilterMessage
 		}
-		return "", true, r.holdBeforePlacement(ctx, vm, lookupErr.reason, msg, errReasonPreScheduleCheck), nil
+		return nil, true, r.holdBeforePlacement(ctx, vm, lookupErr.reason, msg, errReasonPreScheduleCheck), nil
 	}
 	if len(list.UnreachableHostIDs) > 0 {
 		logger.Info("Pre-schedule uniqueness check: some hosts could not be checked; proceeding on the reachable hosts' evidence (ADR-0007 A6, decision 4)",
 			"unreachableHosts", list.UnreachableHostIDs)
 	}
 	switch {
-	case v.foreign > 0 || v.ambiguous > 0 || len(v.ownHosts) > 1:
+	case v.foreign > 0 || v.ambiguous > 0 || len(v.own) > 1:
 		logger.Info("Holding a clustered VM before placement: its Provider holds another domain for its namespace and name (ADR-0007 A6, R4)",
-			"previousIncarnations", v.foreign, "unreadable", v.ambiguous, "ownDomains", len(v.ownHosts))
-		return "", true, r.holdBeforePlacement(ctx, vm, k8s.ReasonRestorePending, preScheduleIncarnationMessage, errReasonRestorePending), nil
-	case len(v.ownHosts) == 1:
+			"previousIncarnations", v.foreign, "unreadable", v.ambiguous, "ownDomains", len(v.own))
+		return nil, true, r.holdBeforePlacement(ctx, vm, k8s.ReasonRestorePending, preScheduleIncarnationMessage, errReasonRestorePending), nil
+	case len(v.own) == 1:
 		logger.Info("Pre-schedule uniqueness check found this VM's own domain; recording its host as the pending host (not scheduled)",
-			"host", v.ownHosts[0])
-		return v.ownHosts[0], false, ctrl.Result{}, nil
+			"host", v.own[0].HostID)
+		return &v.own[0], false, ctrl.Result{}, nil
 	}
-	return "", false, ctrl.Result{}, nil
+	return nil, false, ctrl.Result{}, nil
 }
 
 // lookupError is why R4's lookup could not run: reason is the Placed reason
@@ -296,19 +299,26 @@ func lookupIncarnations(ctx context.Context, vm *infravirtrigaudiov1beta1.Virtua
 // previous incarnation the guard had found on another host. When the lookup
 // finds exactly that one own domain, on a Host of the Provider, and nothing
 // else stamped with the VM's namespace and name, the pending host is moved
-// there (a checked status write; the admitted size is kept, not re-admitted:
-// the domain already runs there) and the create retry binds it — no
+// there (a checked status write) and the create retry binds it — no
 // administrator edits status. Moving is as safe as the slice 2 release: the
 // provider answered before writing anything on the pending host.
 //
+// The move records the domain's own size (reattachPlacement: its current
+// vCPUs and memory, its balloon maximum as the ceiling) as pendingResources,
+// not the size admitted on the old pending host, and moves the placement
+// assumption to the new host under the Provider's assume lock (no capacity
+// admission: the domain already runs there).
+//
 // moved == false (and a nil error) leaves the caller's own-domain hold in
-// place: the lookup could not run, found anything else, or found the domain
-// on the pending host itself.
+// place: the lookup could not run, found anything else, found the domain on
+// the pending host itself, or the assume lock was busy (the next retry tries
+// again).
 func (r *VirtualMachineReconciler) moveToOwnDomain(
 	ctx context.Context,
 	vm *infravirtrigaudiov1beta1.VirtualMachine,
 	providerCR *infravirtrigaudiov1beta1.Provider,
 	providerInstance contracts.Provider,
+	req contracts.CreateRequest,
 	pending string,
 ) (ctrl.Result, bool, error) {
 	logger := log.FromContext(ctx)
@@ -317,54 +327,59 @@ func (r *VirtualMachineReconciler) moveToOwnDomain(
 		logger.Info("Could not look the VM's own domain up; keeping the hold", "reason", lookupErr.reason, "error", lookupErr.Error())
 		return ctrl.Result{}, false, nil
 	}
-	if v.foreign > 0 || v.ambiguous > 0 || len(v.ownHosts) != 1 || v.ownHosts[0] == pending {
+	if v.foreign > 0 || v.ambiguous > 0 || len(v.own) != 1 || v.own[0].HostID == pending {
 		logger.Info("The VM's own domain is not on exactly one other host; keeping the hold",
-			"ownDomains", len(v.ownHosts), "previousIncarnations", v.foreign, "unreadable", v.ambiguous)
+			"ownDomains", len(v.own), "previousIncarnations", v.foreign, "unreadable", v.ambiguous)
 		return ctrl.Result{}, false, nil
 	}
-	host := v.ownHosts[0]
-	h := &infravirtrigaudiov1beta1.Host{}
-	if err := r.Get(ctx, types.NamespacedName{Namespace: providerCR.Namespace, Name: host}, h); err != nil {
-		if apierrors.IsNotFound(err) {
-			return ctrl.Result{}, false, nil
-		}
-		return ctrl.Result{}, false, fmt.Errorf("get Host %s/%s: %w", providerCR.Namespace, host, err)
+	found := v.own[0]
+	h, err := r.providerHost(ctx, providerCR, found.HostID)
+	if err != nil || h == nil {
+		return ctrl.Result{}, false, err
 	}
-	if h.Spec.ProviderRef.Name != providerCR.Name {
+	p := reattachPlacement(found, h, req,
+		"re-attach: this VirtualMachine's own domain was found on this host (ADR-0007 A6, R4); the pending host moved here")
+	if !r.assumeReattach(ctx, providerCR, vm, p) {
+		logger.V(1).Info("Provider's placement lock is busy; keeping the hold until the next retry")
 		return ctrl.Result{}, false, nil
 	}
+
 	pl := vm.Status.Placement
 	if pl == nil {
 		pl = &infravirtrigaudiov1beta1.PlacementStatus{}
 		vm.Status.Placement = pl
 	}
 	now := metav1.Now()
-	pl.PendingHost = host
-	pl.Pool = h.Spec.PoolRef.Name
+	pl.PendingHost = p.hostID
+	pl.Pool = p.poolName
+	pl.PendingResources = &infravirtrigaudiov1beta1.PlacementResources{CPU: p.resources.CPU, MemoryMiB: p.resources.MemoryMiB}
+	ceiling := min(p.memoryCeilingMiB, maxRecordedMemoryMiB)
+	pl.MemoryCeilingMiB = &ceiling
 	pl.LastScheduledTime = &now
-	pl.Reason = "re-attach: this VirtualMachine's own domain was found on this host (ADR-0007 A6, R4); the pending host moved here"
+	pl.Reason = p.reason
 	setPlacedCondition(vm, metav1.ConditionFalse, k8s.ReasonCreatePending,
 		"create pending on the host where this VirtualMachine's own domain was found (ADR-0007 A6, R4); the create retry binds it")
 	writeCtx, cancel := context.WithTimeout(ctx, pendingHostWriteTimeout)
 	defer cancel()
 	if err := r.Status().Update(writeCtx, vm); err != nil {
+		if pendingHostWriteRejected(err) {
+			r.placementAssumptions().Forget(vmSchedulingUID(vm))
+		}
 		if apierrors.IsConflict(err) {
 			return ctrl.Result{Requeue: true}, true, nil
 		}
 		return ctrl.Result{}, false, fmt.Errorf("move the pending host of VirtualMachine %s/%s to its own domain's host: %w",
 			vm.Namespace, vm.Name, err)
 	}
-	// Nothing of this VM is on the old pending host any more (the provider
-	// answered before writing there); a leftover assumption must not count.
-	r.forgetPlacement(vm)
-	logger.Info("Moved the pending host to the host of the VM's own domain (ADR-0007 A6, R4)", "from", pending, "to", host)
+	logger.Info("Moved the pending host to the host of the VM's own domain (ADR-0007 A6, R4)", "from", pending, "to", p.hostID,
+		"cpu", p.resources.CPU, "memoryMiB", p.resources.MemoryMiB)
 	return ctrl.Result{Requeue: true}, true, nil
 }
 
 // incarnationVerdict is what R4 found for one VM.
 type incarnationVerdict struct {
-	// ownHosts are the hosts of the domains stamped with the VM's own UID.
-	ownHosts []string
+	// own are the domains stamped with the VM's own UID (each with its host).
+	own []contracts.VMInfo
 	// foreign counts the domains stamped with the VM's namespace and name
 	// under another UID.
 	foreign int
@@ -389,7 +404,8 @@ func classifyIncarnations(vm *infravirtrigaudiov1beta1.VirtualMachine, filter co
 		}
 		uids := contracts.OwnerUIDs(info)
 		if len(uids) == 1 && uids[0] == string(vm.UID) && strings.TrimSpace(info.HostID) != "" {
-			v.ownHosts = append(v.ownHosts, strings.TrimSpace(info.HostID))
+			info.HostID = strings.TrimSpace(info.HostID)
+			v.own = append(v.own, info)
 			continue
 		}
 		v.foreign++
@@ -426,36 +442,155 @@ func (r *VirtualMachineReconciler) holdBeforePlacement(
 	return ctrl.Result{RequeueAfter: blockedRetryBackoff(createHoldSince(vm))}
 }
 
+// reattachReasonPrefix starts status.placement.reason of a pending placement
+// R4 recorded for the VM's OWN domain (discoveredPlacement, moveToOwnDomain):
+// the create retry there binds an existing domain, so it is sent at the
+// domain's recorded size and the bind records that size as
+// status.currentResources (isReattachPlacement). The reason is operator-written
+// status, which tenants cannot write.
+const reattachReasonPrefix = "re-attach:"
+
+// isReattachPlacement reports whether pl is a pending re-attach placement
+// with a recorded size.
+func isReattachPlacement(pl *infravirtrigaudiov1beta1.PlacementStatus) bool {
+	return pl != nil && pl.PendingHost != "" && pl.PendingResources != nil && strings.HasPrefix(pl.Reason, reattachReasonPrefix)
+}
+
+// reattachRequest sizes the create of a pending re-attach (isReattachPlacement)
+// at the size recorded with its pending host — the size of the domain it
+// binds — instead of the spec's. The provider binds the existing domain
+// whatever the request's size (an idempotent success); had the domain vanished
+// meanwhile, a fresh one is created at exactly the recorded and counted size,
+// so the recorded status stays true. Any other request is returned unchanged.
+func reattachRequest(vm *infravirtrigaudiov1beta1.VirtualMachine, req contracts.CreateRequest) contracts.CreateRequest {
+	pl := vm.Status.Placement
+	if !isReattachPlacement(pl) {
+		return req
+	}
+	req.Class.CPU = pl.PendingResources.CPU
+	req.Class.MemoryMiB = int32(min(pl.PendingResources.MemoryMiB, int64(math.MaxInt32))) // #nosec G115 -- bounded above
+	return req
+}
+
+// recordReattachedSize records, on the bind of a re-attach, the size recorded
+// with its pending host as status.currentResources: the domain's own size,
+// which the next reconcile compares with the spec (a grow through the resize
+// gate, a shrink when powered off). The memory ceiling recorded with the
+// pending host is kept by promotePendingHost.
+func recordReattachedSize(vm *infravirtrigaudiov1beta1.VirtualMachine) {
+	pr := vm.Status.Placement.PendingResources
+	cpu, mem := pr.CPU, pr.MemoryMiB
+	vm.Status.CurrentResources = &infravirtrigaudiov1beta1.VirtualMachineResources{CPU: &cpu, MemoryMiB: &mem}
+}
+
+// reattachSize is the size of the VM's own domain R4 found (found): its
+// current vCPUs and memory (contracts.VMInfoCurrentVCPUsKey /
+// VMInfoCurrentMemoryMiBKey, else its maxima), clamped and at least the
+// minimum footprint, and the balloon ceiling to count it at: its memory
+// maximum (found.MemoryMiB, libvirt's <memory>) when above its current
+// memory, and never less than what a create of that size provisions (req's
+// memory hot-add), so the create retry is never refused as grown. A size the
+// provider did not report falls back to req's.
+func reattachSize(found contracts.VMInfo, req contracts.CreateRequest) (scheduler.ResourceRequest, int64) {
+	cpu, mem := found.CPU, found.MemoryMiB
+	if n, err := strconv.ParseInt(found.ProviderRaw[contracts.VMInfoCurrentVCPUsKey], 10, 32); err == nil && n > 0 {
+		cpu = int32(n)
+	}
+	if n, err := strconv.ParseInt(found.ProviderRaw[contracts.VMInfoCurrentMemoryMiBKey], 10, 64); err == nil && n > 0 {
+		mem = n
+	}
+	if cpu <= 0 {
+		cpu = req.Class.CPU
+	}
+	if mem <= 0 {
+		mem = int64(req.Class.MemoryMiB)
+	}
+	res := withMinimum(scheduler.ResourceRequest{CPU: clampReportedVCPUs(cpu), MemoryMiB: clampReportedMemoryMiB(mem)})
+	ceiling := memoryCeilingFor(requestsMemoryHotAdd(req), res.MemoryMiB)
+	if maxMem := clampReportedMemoryMiB(found.MemoryMiB); maxMem > res.MemoryMiB && maxMem > ceiling {
+		ceiling = maxMem
+	}
+	return res, ceiling
+}
+
+// reattachPlacement is the placement R4 records for the VM's own domain found
+// on host h: that host and its pool, at the domain's own size (reattachSize).
+func reattachPlacement(found contracts.VMInfo, h *infravirtrigaudiov1beta1.Host, req contracts.CreateRequest, reason string) *clusterPlacement {
+	res, ceiling := reattachSize(found, req)
+	return &clusterPlacement{hostID: h.Name, poolName: h.Spec.PoolRef.Name, reason: reason, resources: res, memoryCeilingMiB: ceiling}
+}
+
+// providerHost returns the Host named host when it is a Host of providerCR,
+// nil (and no error) when it is not — never recorded as a placement.
+func (r *VirtualMachineReconciler) providerHost(ctx context.Context, providerCR *infravirtrigaudiov1beta1.Provider,
+	host string) (*infravirtrigaudiov1beta1.Host, error) {
+	h := &infravirtrigaudiov1beta1.Host{}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: providerCR.Namespace, Name: host}, h); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("get Host %s/%s: %w", providerCR.Namespace, host, err)
+	}
+	if h.Spec.ProviderRef.Name != providerCR.Name {
+		return nil, nil
+	}
+	return h, nil
+}
+
+// assumeReattach records p — a re-attach placement, not admitted — as vm's
+// placement assumption under the Provider's assume lock, as a scheduled
+// placement is (scheduleUnderLock): concurrent schedules of the Provider count
+// the domain on its host from now on, before the pendingHost write lands. It
+// reports false, assuming nothing, when the lock is busy.
+func (r *VirtualMachineReconciler) assumeReattach(ctx context.Context, providerCR *infravirtrigaudiov1beta1.Provider,
+	vm *infravirtrigaudiov1beta1.VirtualMachine, p *clusterPlacement) bool {
+	assumptions := r.placementAssumptions()
+	providerKey := types.NamespacedName{Namespace: providerCR.Namespace, Name: providerCR.Name}.String()
+	unlock, locked := assumptions.LockWithin(ctx, providerKey, placementLockWait)
+	if !locked {
+		return false
+	}
+	defer unlock()
+	assumptions.Assume(providerKey, assume.Assumption{
+		UID:       vmSchedulingUID(vm),
+		Namespace: vm.Namespace,
+		Name:      vm.Name,
+		HostID:    p.hostID,
+		Labels:    vm.Labels, // Assume keeps its own copy
+		Resources: withMemoryCeiling(p.resources, p.memoryCeilingMiB),
+	})
+	return true
+}
+
 // discoveredPlacement is the placement R4 records for a VM whose own domain
-// it found on host: that host and its pool, at the size the create sends
-// (req; no capacity admission — the domain already runs there, A6 R4) and
-// with the balloon ceiling that size provisions. A host that is not a Host of
-// providerCR is never recorded: the VM is held (OwnDomainOnAnotherHost) and
-// p is nil.
+// (found) it found before the VM's first placement: that host and its pool,
+// at the domain's own size (reattachSize; no capacity admission — the domain
+// already runs there, A6 R4), assumed under the Provider's assume lock like a
+// scheduled placement. A host that is not a Host of providerCR is never
+// recorded: the VM is held (OwnDomainOnAnotherHost) and p is nil. A busy lock
+// requeues shortly, recording nothing.
 func (r *VirtualMachineReconciler) discoveredPlacement(
 	ctx context.Context,
 	vm *infravirtrigaudiov1beta1.VirtualMachine,
 	providerCR *infravirtrigaudiov1beta1.Provider,
 	req contracts.CreateRequest,
-	host string,
+	found contracts.VMInfo,
 ) (*clusterPlacement, ctrl.Result, error) {
-	h := &infravirtrigaudiov1beta1.Host{}
-	err := r.Get(ctx, types.NamespacedName{Namespace: providerCR.Namespace, Name: host}, h)
-	switch {
-	case apierrors.IsNotFound(err) || (err == nil && h.Spec.ProviderRef.Name != providerCR.Name):
-		log.FromContext(ctx).Info("The VM's own domain was found on a host that is not a Host of its Provider; holding it", "host", host)
-		return nil, r.holdBeforePlacement(ctx, vm, k8s.ReasonOwnDomainOnAnotherHost, ownDomainUnknownHostMessage, errReasonRestorePending), nil
-	case err != nil:
-		return nil, ctrl.Result{}, fmt.Errorf("get Host %s/%s: %w", providerCR.Namespace, host, err)
+	h, err := r.providerHost(ctx, providerCR, found.HostID)
+	if err != nil {
+		return nil, ctrl.Result{}, err
 	}
-	effective := withMinimum(scheduler.ResourceRequest{CPU: req.Class.CPU, MemoryMiB: int64(req.Class.MemoryMiB)})
-	return &clusterPlacement{
-		hostID:           host,
-		poolName:         h.Spec.PoolRef.Name,
-		reason:           "re-attach: the pre-schedule check found this VirtualMachine's own domain on this host (ADR-0007 A6, R4); not scheduled",
-		resources:        effective,
-		memoryCeilingMiB: memoryCeilingFor(requestsMemoryHotAdd(req), effective.MemoryMiB),
-	}, ctrl.Result{}, nil
+	if h == nil {
+		log.FromContext(ctx).Info("The VM's own domain was found on a host that is not a Host of its Provider; holding it", "host", found.HostID)
+		return nil, r.holdBeforePlacement(ctx, vm, k8s.ReasonOwnDomainOnAnotherHost, ownDomainUnknownHostMessage, errReasonRestorePending), nil
+	}
+	p := reattachPlacement(found, h, req,
+		"re-attach: the pre-schedule check found this VirtualMachine's own domain on this host (ADR-0007 A6, R4); not scheduled")
+	if !r.assumeReattach(ctx, providerCR, vm, p) {
+		log.FromContext(ctx).V(1).Info("Provider's placement lock is busy; requeueing")
+		return nil, ctrl.Result{RequeueAfter: placementLockBusyRetry()}, nil
+	}
+	return p, ctrl.Result{}, nil
 }
 
 // restoredBindingMessage is the Ready message of a BOUND clustered VM whose

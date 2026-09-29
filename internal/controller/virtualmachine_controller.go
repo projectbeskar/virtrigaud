@@ -588,7 +588,7 @@ func (r *VirtualMachineReconciler) reconcileVM(ctx context.Context, vm *infravir
 		// Prepare the image first — unless a clustered create is already in
 		// flight (status.placement.pendingHost): that create is re-sent as it
 		// was, and its image was prepared before the first attempt.
-		discoveredHost := ""
+		var discovered *contracts.VMInfo
 		if pendingHost(vm) == "" {
 			// A clustered VM that was never placed meets the restore guards
 			// first (ADR-0007 A6.2): R1 holds a VM whose restore marker names
@@ -598,18 +598,18 @@ func (r *VirtualMachineReconciler) reconcileVM(ctx context.Context, vm *infravir
 			// A held VM sends nothing else to the provider: no image prepare,
 			// no scheduling, no Create.
 			if isClusterTopology(provider) {
-				host, held, res, err := r.guardFirstPlacement(ctx, vm, providerInstance)
+				found, held, res, err := r.guardFirstPlacement(ctx, vm, providerInstance)
 				if held {
 					return res, err
 				}
-				discoveredHost = host
+				discovered = found
 			}
 			if done, res, err := r.prepareImageForCreate(ctx, vm, persisted, vmImage, provider, providerInstance); done {
 				return res, err
 			}
 		}
 		logger.Info("Creating VM")
-		return r.createVMOn(ctx, vm, providerInstance, provider, vmClass, vmImage, networks, discoveredHost)
+		return r.createVMOn(ctx, vm, providerInstance, provider, vmClass, vmImage, networks, discovered)
 	}
 
 	// Address the VM for every per-VM call below (ADR-0007 Addendum A, A1). A
@@ -1207,13 +1207,13 @@ func (r *VirtualMachineReconciler) createVM(
 	vmImage *infravirtrigaudiov1beta1.VMImage,
 	networks []*infravirtrigaudiov1beta1.VMNetworkAttachment,
 ) (ctrl.Result, error) {
-	return r.createVMOn(ctx, vm, provider, providerCR, vmClass, vmImage, networks, "")
+	return r.createVMOn(ctx, vm, provider, providerCR, vmClass, vmImage, networks, nil)
 }
 
 // createVMOn is createVM with, for a clustered VM placed for the first time,
-// the host where the pre-schedule check found the VM's own domain
-// (discoveredHost, ADR-0007 A6, R4): that host is recorded as the pending host
-// instead of scheduling one. Empty schedules as usual; single-host providers
+// the VM's own domain the pre-schedule check found (discovered, ADR-0007 A6,
+// R4): its host is recorded as the pending host, at the domain's own size,
+// instead of scheduling one. nil schedules as usual; single-host providers
 // never get one.
 func (r *VirtualMachineReconciler) createVMOn(
 	ctx context.Context,
@@ -1223,7 +1223,7 @@ func (r *VirtualMachineReconciler) createVMOn(
 	vmClass *infravirtrigaudiov1beta1.VMClass,
 	vmImage *infravirtrigaudiov1beta1.VMImage,
 	networks []*infravirtrigaudiov1beta1.VMNetworkAttachment,
-	discoveredHost string,
+	discovered *contracts.VMInfo,
 ) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
@@ -1283,11 +1283,11 @@ func (r *VirtualMachineReconciler) createVMOn(
 				res  ctrl.Result
 				perr error
 			)
-			if discoveredHost != "" {
+			if discovered != nil {
 				// R4 found this VM's own domain there: record that host, never
 				// a host the scheduler chose (no capacity admission; the
 				// domain already runs there). The create retry binds it.
-				p, res, perr = r.discoveredPlacement(ctx, vm, providerCR, req, discoveredHost)
+				p, res, perr = r.discoveredPlacement(ctx, vm, providerCR, req, *discovered)
 			} else {
 				p, res, perr = r.resolveClusterPlacement(ctx, vm, providerCR, req, networks)
 			}
@@ -1313,7 +1313,11 @@ func (r *VirtualMachineReconciler) createVMOn(
 				return res, rerr
 			}
 			host = p.hostID
+			req = reattachRequest(vm, req)
 		} else {
+			// A re-attach (ADR-0007 A6, R4) is sent at the size of the domain
+			// it binds, which is the size recorded with its pending host.
+			req = reattachRequest(vm, req)
 			// A create is already in flight on host: reuse it as-is. The
 			// scheduler is NOT re-run for such a VM (A2). The CRD freezes the
 			// VM's classRef and resources while it is pending, but not the
@@ -1335,7 +1339,7 @@ func (r *VirtualMachineReconciler) createVMOn(
 		// finds exactly that domain, so no administrator edits status;
 		// otherwise the own-domain hold below applies.
 		if contracts.IsVMOwnDomainElsewhere(err) {
-			if res, moved, merr := r.moveToOwnDomain(ctx, vm, providerCR, provider, req.TargetHostID); moved || merr != nil {
+			if res, moved, merr := r.moveToOwnDomain(ctx, vm, providerCR, provider, req, req.TargetHostID); moved || merr != nil {
 				return res, merr
 			}
 		}
@@ -1363,8 +1367,16 @@ func (r *VirtualMachineReconciler) createVMOn(
 	// same status write as its id.
 	vm.Status.ID = resp.ID
 	recordBoundProvider(vm, providerCR)
-	// Initialize current resources to track for future resize detection
-	r.updateCurrentResources(vm, vmClass)
+	// Initialize current resources to track for future resize detection. A
+	// re-attach (ADR-0007 A6, R4) bound an existing domain at its own size —
+	// or, had it vanished meanwhile, created one at that size — so that size
+	// is recorded, and a Reconfigure through the resize gate converges it to
+	// the spec.
+	if clustered && isReattachPlacement(vm.Status.Placement) {
+		recordReattachedSize(vm)
+	} else {
+		r.updateCurrentResources(vm, vmClass)
+	}
 
 	// Record the placement binding now that the provider has confirmed the VM is
 	// on the chosen host (ADR-0007 D3, honesty-first): promote pendingHost into

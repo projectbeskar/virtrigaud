@@ -18,8 +18,11 @@ package libvirt
 
 import (
 	"context"
+	"encoding/xml"
 	"fmt"
 	"log"
+	"strconv"
+	"strings"
 
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
 	"github.com/projectbeskar/virtrigaud/internal/providers/libvirt/hostconn"
@@ -209,6 +212,7 @@ func (p *Provider) ownerCandidateInfo(ctx context.Context, vp *VirshProvider, d 
 		info.MemoryMiB = mem
 	}
 	info.Disks = dx.Disks(d.Name)
+	reportCurrentSize(info, raw.Stdout)
 
 	var transportErr error
 	sr := clusteredStampReport(ctx, vp, d, raw.Stdout, dx.UUID, func(_ string, rerr error) {
@@ -227,4 +231,42 @@ func (p *Provider) ownerCandidateInfo(ctx context.Context, vp *VirshProvider, d 
 	}
 	info.OwnerNamespace, info.OwnerName = sr.owner.Namespace, sr.owner.Name
 	return info, nil
+}
+
+// candidateSizeXML is the part of a domain definition that gives its CURRENT
+// size, beyond domainXML's maxima: <vcpu current='N'>MAX</vcpu> and
+// <currentMemory>. It is parsed on its own so that the shared listing core
+// (domainXML, pinned by the single-host goldens) is unchanged.
+type candidateSizeXML struct {
+	VCPU struct {
+		Current string `xml:"current,attr"`
+		Count   string `xml:",chardata"`
+	} `xml:"vcpu"`
+	CurrentMemory memValue `xml:"currentMemory"`
+}
+
+// reportCurrentSize adds a candidate's current vCPUs and memory to its
+// ProviderRaw (contracts.VMInfoCurrentVCPUsKey / VMInfoCurrentMemoryMiBKey):
+// the vcpu element's current attribute (else its count) and <currentMemory>
+// (else <memory>, already in info.MemoryMiB). The manager sizes a re-attached
+// VM from them (ADR-0007 A6.2, R4). A value that cannot be read is left out.
+func reportCurrentSize(info contracts.VMInfo, domainXMLDoc string) {
+	var sz candidateSizeXML
+	if err := xml.Unmarshal([]byte(domainXMLDoc), &sz); err != nil {
+		return
+	}
+	vcpus := strings.TrimSpace(sz.VCPU.Current)
+	if vcpus == "" {
+		vcpus = strings.TrimSpace(sz.VCPU.Count)
+	}
+	if n, err := strconv.ParseInt(vcpus, 10, 32); err == nil && n > 0 {
+		info.ProviderRaw[contracts.VMInfoCurrentVCPUsKey] = strconv.FormatInt(n, 10)
+	}
+	memMiB := info.MemoryMiB
+	if u := sz.CurrentMemory.Unit; sz.CurrentMemory.KiB > 0 && (u == "" || u == "KiB") {
+		memMiB = sz.CurrentMemory.KiB / 1024
+	}
+	if memMiB > 0 {
+		info.ProviderRaw[contracts.VMInfoCurrentMemoryMiBKey] = strconv.FormatInt(memMiB, 10)
+	}
 }

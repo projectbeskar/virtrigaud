@@ -112,7 +112,7 @@ A follow-up (ADR-0007, A6.2 follow-ups) makes R4 match by stamp.
 | The hosts report | Result |
 |---|---|
 | no domain stamped with the VM's namespace and name | the VM is scheduled as usual |
-| exactly one, stamped with the VM's **own** UID | its host is recorded as `pendingHost`, without scheduling and without capacity admission, because the domain already runs there. The create retry there binds it as an idempotent success |
+| exactly one, stamped with the VM's **own** UID | its host is recorded as `pendingHost`, without scheduling and without capacity admission, because the domain already runs there. It is recorded, and counted, at the **domain's own size** (its current vCPUs and memory, its balloon maximum as the ceiling). The create retry there binds it as an idempotent success and records that size in `status.currentResources`. If it differs from the spec, a resize through the usual gate converges it (a grow must fit the host, and a shrink waits for power-off) |
 | one stamped under **another** UID, more than one, or a candidate whose stamp cannot be read | held: `Placed=False/RestorePending`. Nothing is scheduled or created |
 | only an unstamped domain, or one stamped for another VirtualMachine, that has the name | not counted. The slice 2 rule applies: that host is excluded when the create reaches it |
 

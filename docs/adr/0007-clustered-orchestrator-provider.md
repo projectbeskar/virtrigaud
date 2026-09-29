@@ -1950,10 +1950,22 @@ the A6.2 amendment)*.
 >     the check fails closed on what it cannot classify;
 >   - a stamp with the VM's namespace and name under another UID holds;
 >   - more than one own domain holds;
->   - exactly one own domain records its host as `pendingHost`, with the
->     create's effective size as `pendingResources` and its balloon ceiling.
->     There is no capacity admission and no assumption, because the domain
->     already runs there;
+>   - exactly one own domain records its host as `pendingHost` at the
+>     **domain's own size** *(security review of A6.2, item 4; it first took
+>     the class size)*: its current vCPUs and memory as `pendingResources`
+>     (the owner-filtered listing reports them as `provider_raw`
+>     `current_vcpus` / `current_memory_mib`, beside its maxima) and its
+>     balloon maximum as the ceiling. There is no capacity admission (the
+>     domain already runs there), but the placement is **assumed** under the
+>     Provider's assume lock like a scheduled one, so concurrent schedules
+>     count it before the `pendingHost` write lands. The create retry is sent
+>     at that recorded size — it binds the existing domain, or, had the
+>     domain vanished meanwhile, creates one at exactly the size recorded —
+>     and the bind records it as `status.currentResources` (not the spec's,
+>     as the text above had it). The next reconcile then sees the spec differ
+>     and converges the domain through the resize gate (a grow is admitted, a
+>     shrink waits for power-off). A move to the own domain's host (below)
+>     does the same;
 >   - an own domain on a host that is not a `Host` of the Provider is never
 >     recorded. The VM is held `OwnDomainOnAnotherHost`, and deleting it is
 >     held too (`DeleteBlocked=True/OwnDomainOnAnotherHost`, before any

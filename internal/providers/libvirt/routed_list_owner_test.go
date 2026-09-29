@@ -135,6 +135,40 @@ func TestClustered_ListVMsOwnerFilter_CostsOneLookupPerHost(t *testing.T) {
 	assert.Equal(t, []string{"list --all"}, perHost["host-b"], "a host without a candidate reads no definition")
 }
 
+// TestClustered_ListVMsOwnerFilter_ReportsTheCurrentSize (security review of
+// A6.2, item 4): a candidate's current vCPUs and memory are reported beside
+// its maxima — from <vcpu current=…> and <currentMemory> when the domain has
+// hot-add headroom, and equal to the maxima when it has none — so the manager
+// can size a re-attach from the domain itself.
+func TestClustered_ListVMsOwnerFilter_ReportsTheCurrentSize(t *testing.T) {
+	fx := newListFixture(t, map[string][]listDomain{
+		"host-a": {{name: "team-a.web", uuid: uuidWebA, owner: ownerPrev}},
+		"host-b": {{name: "team-a.web", uuid: uuidWebB, owner: ownerPrev}},
+	})
+	hotAdd := strings.Replace(strings.Replace(fx.read("host-a", "dom-team-a.web.xml"),
+		"<memory unit='KiB'>2097152</memory>", "<memory unit='KiB'>8388608</memory>\n  <currentMemory unit='KiB'>2097152</currentMemory>", 1),
+		"<vcpu placement='static'>2</vcpu>", "<vcpu placement='static' current='2'>8</vcpu>", 1)
+	require.Contains(t, hotAdd, "currentMemory")
+	fx.write("host-a", "dom-team-a.web.xml", hotAdd)
+	p := clusterOf(t, []string{"host-a", "host-b"})
+
+	list, err := p.ListVMsForOwner(context.Background(), contracts.OwnerFilter{Namespace: "team-a", Name: "web"})
+	require.NoError(t, err)
+	got := map[string]contracts.VMInfo{}
+	for _, v := range list.VMs {
+		got[v.HostID] = v
+	}
+	require.Len(t, got, 2)
+	a := got["host-a"]
+	assert.EqualValues(t, 8, a.CPU, "maxima as in an unfiltered listing")
+	assert.EqualValues(t, 8192, a.MemoryMiB)
+	assert.Equal(t, "2", a.ProviderRaw[contracts.VMInfoCurrentVCPUsKey])
+	assert.Equal(t, "2048", a.ProviderRaw[contracts.VMInfoCurrentMemoryMiBKey])
+	b := got["host-b"]
+	assert.Equal(t, "2", b.ProviderRaw[contracts.VMInfoCurrentVCPUsKey], "no current attribute: the count")
+	assert.Equal(t, "2048", b.ProviderRaw[contracts.VMInfoCurrentMemoryMiBKey], "no <currentMemory>: <memory>")
+}
+
 // TestClustered_ListVMsOwnerFilter_UnreadableCandidateIsReported: a candidate
 // the host lists but whose definition cannot be read is returned with
 // owner_stamp_state "unreadable" — never skipped, so the manager holds on it —

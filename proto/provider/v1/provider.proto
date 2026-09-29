@@ -665,8 +665,10 @@ message ListVMsRequest {
   // owner stamp records that namespace and name: an adopted VM keeps the name
   // it had and is not found by the filter. Each VM found is reported as in an
   // unfiltered listing (host_id, owner_namespace/owner_name, provider_raw
-  // "owner_uid" / "owner_stamp_state"), and the answer sets
-  // ListVMsResponse.owner_filter_applied. Hosts that could not be checked are
+  // "owner_uid" / "owner_stamp_state"; a clustered libvirt provider also
+  // reports each VM's current size as provider_raw "current_vcpus" and
+  // "current_memory_mib", cpu and memory_mib being its maxima), and the
+  // answer sets ListVMsResponse.owner_filter_applied. Hosts that could not be checked are
   // in unreachable_host_ids, exactly as for an unfiltered listing.
   //
   // Setting only one of the two is invalid (INVALID_ARGUMENT from a provider
