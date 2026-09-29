@@ -1795,11 +1795,13 @@ keep a restored or re-created VM from making a second domain:
   held before scheduling (`Placed=False/RestorePending`). The marker only
   holds; single-host Providers ignore it.
 - **R4, the pre-schedule uniqueness check** (A6.2): before a VM is first
-  scheduled, an owner-filtered `ListVMs` asks every host for the domains
-  stamped with its namespace and name. A previous incarnation holds it
+  scheduled, an owner-filtered `ListVMs` asks every host about the VM's
+  candidate names (`<namespace>.<name>`, and the legacy bare name when it
+  is stamped for the VM). A previous incarnation holds it
   (`RestorePending`); its own domain has its host recorded as `pendingHost`
   and the create binds it. Hosts that cannot be checked do not hold it
-  (decision 4).
+  (decision 4). A domain named otherwise, such as an **adopted** domain, is
+  not looked at (see [Candidate names only](clustered-restore.md#the-pre-schedule-uniqueness-check-r4)).
 - **R2, the pin** (A6.1): a create or clone that meets a previous
   incarnation — on its landing host by name, or on any host during
   [the cluster-wide disk guard](#shared-storage-the-cluster-wide-disk-guard-a61)
@@ -1832,10 +1834,11 @@ A foreign or unstamped domain that merely has the name keeps the slice 2
 behaviour (the host is excluded and the VM placed elsewhere).
 
 **The runbook** ([details](clustered-restore.md#re-attach-runbook)). As an
-administrator: find the previous domain on the Provider's hosts with
-`virsh metadata <namespace>.<name> --uri https://virtrigaud.io/xmlns/libvirt/owner/v1`
-(stop if more than one host has one, and check that no VirtualMachine with the
-stamp's UID exists); re-stamp its `uid` to the held VM's UID with
+administrator: find the previous domain on every host of the Provider **by
+its owner stamp** (`virsh metadata --uri https://virtrigaud.io/xmlns/libvirt/owner/v1`
+for every domain of `virsh list --all --uuid`, whatever its name); stop if
+more than one domain is stamped for the namespace and name, and check that no
+VirtualMachine with the stamp's UID exists; re-stamp its `uid` to the held VM's UID with
 `virsh metadata --domain <uuid> ... --set "<owner .../>" --config [--live]`,
 keeping the namespace and name; then, for a VM held by R1, set the marker to
 the VM's UID or remove it. R4 then records the host and the create retry binds

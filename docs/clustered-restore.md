@@ -99,6 +99,16 @@ name). On each host the provider looks up only this VM's candidates:
 - the legacy bare name `<name>`, but only when its stamp records this
   namespace and name.
 
+**Candidate names only.** A domain named otherwise is **not** looked at, even
+when its owner stamp records the VM's namespace and name. That includes every
+**adopted** domain: adoption stamps a domain for the adopting VirtualMachine
+under the name the domain already had. So if an adopted VM is detached with
+`orphan-on-delete` and a VM with its namespace and name is created again (or
+restored without its marker), R4 does not see the old domain, and neither
+does R2. Only R3 protects a shared pool. Before re-creating an adopted VM,
+find its old domain **by stamp** (runbook step 1) and re-attach or remove it.
+A follow-up (ADR-0007, A6.2 follow-ups) makes R4 match by stamp.
+
 | The hosts report | Result |
 |---|---|
 | no domain stamped with the VM's namespace and name | the VM is scheduled as usual |
@@ -296,19 +306,31 @@ kubectl get virtualmachines.infra.virtrigaud.io <name> -n <namespace> \
   -o jsonpath='{.metadata.annotations.infra\.virtrigaud\.io/placement-uid}{"\n"}'
 ```
 
-**1. Find the previous domain.** On **each** host of the Provider:
+**1. Find the previous domain by its stamp, not by its name.** A domain may
+be called anything: `<namespace>.<name>`, the legacy bare `<name>`, or the
+name it had before it was adopted. So on **each** host of the Provider (every
+`Host` in the Provider's namespace, whatever its state), list every domain
+whose owner stamp records the held VM's namespace and name:
 
 ```sh
-virsh metadata <namespace>.<name> --uri https://virtrigaud.io/xmlns/libvirt/owner/v1
-# a VM created before domains were namespaced may use its bare name:
-virsh metadata <name> --uri https://virtrigaud.io/xmlns/libvirt/owner/v1
+NS=<namespace>; NAME=<name>
+URI=https://virtrigaud.io/xmlns/libvirt/owner/v1
+for d in $(virsh list --all --uuid); do
+  s=$(virsh metadata --domain "$d" --uri "$URI" 2>/dev/null) || continue
+  if printf '%s\n' "$s" | grep -qF -e "namespace='$NS' name='$NAME'" -e "namespace=\"$NS\" name=\"$NAME\""; then
+    echo "$d $(virsh domname "$d") $s"
+  fi
+done
 ```
 
-The output is the owner stamp, for example
-`<owner uid='…' namespace='<namespace>' name='<name>'/>`. Then:
+Each line is a domain's UUID, its name and its owner stamp, for example
+`<owner uid='…' namespace='<namespace>' name='<name>'/>` (libvirt may print
+the attributes with double quotes). `virsh metadata` reads the running
+definition of an active domain. Step 2 rewrites both definitions. Then:
 
-- **Stop if more than one host has a domain for this namespace and name.** At
-  most one may be re-attached. Discard the others first.
+- **Stop if more than one domain, on any host, is stamped for this namespace
+  and name,** or if a host could not be checked. At most one may be
+  re-attached. Discard the others first.
 - Check that the namespace and name in the stamp are the held VM's own.
 - Check that **no VirtualMachine with the stamp's UID exists**, in any
   namespace, terminating ones included:

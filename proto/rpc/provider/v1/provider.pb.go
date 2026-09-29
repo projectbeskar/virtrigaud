@@ -2756,11 +2756,15 @@ type ListVMsRequest struct {
 	// owner_namespace and owner_name, when both are set, ask for the VMs of ONE
 	// VirtualMachine only (ADR-0007 A6, R4: the pre-schedule uniqueness check).
 	// A provider that honours the filter advertises
-	// GetCapabilitiesResponse.supports_list_owner_filter and returns only the
-	// VMs it would name for that VirtualMachine, or whose owner stamp records
-	// that namespace and name (under any uid), each reported as in an
+	// GetCapabilitiesResponse.supports_list_owner_filter and looks up the
+	// CANDIDATE NAMES of that VirtualMachine only — the names it would give it
+	// (libvirt: "<namespace>.<name>", returned whatever its owner stamp, and the
+	// legacy bare "<name>", returned only when its owner stamp records that
+	// namespace and name). A VM named otherwise is NOT looked at, even when its
+	// owner stamp records that namespace and name: an adopted VM keeps the name
+	// it had and is not found by the filter. Each VM found is reported as in an
 	// unfiltered listing (host_id, owner_namespace/owner_name, provider_raw
-	// "owner_uid" / "owner_stamp_state"), and sets
+	// "owner_uid" / "owner_stamp_state"), and the answer sets
 	// ListVMsResponse.owner_filter_applied. Hosts that could not be checked are
 	// in unreachable_host_ids, exactly as for an unfiltered listing.
 	//

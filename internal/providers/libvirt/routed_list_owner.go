@@ -48,9 +48,12 @@ import (
 //     namespaced, so another namespace's pre-namespacing VM of the same name
 //     is not this VirtualMachine's and is left out.
 //
-// A domain named otherwise is not looked at (the residual the docs name: only
-// an administrator renames domains, and adoption never re-stamps a stamped
-// domain until A6.4).
+// Only these candidate names are looked at. A domain named otherwise is not,
+// even when its owner stamp records the namespace and name — notably an
+// ADOPTED domain, which keeps the name it had when adoption stamped it for the
+// adopting VirtualMachine (and a domain an administrator renamed). That is a
+// documented residual of R4 (ADR-0007, the A6.2 amendment); matching by stamp
+// on each host, with a per-host cache, is the follow-up.
 //
 // A candidate whose definition cannot be read because the host stopped
 // answering fails that host (unreachable: unknown, not empty). The answer is

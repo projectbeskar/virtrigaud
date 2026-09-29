@@ -1902,9 +1902,17 @@ the A6.2 amendment)*.
 >   A candidate whose definition the host returned but that cannot be read or
 >   parsed is reported with `owner_stamp_state=unreadable`, never skipped. A
 >   host that stops answering is unreachable. The fan-out, bounds and rotation
->   are slice 4's (`listAcrossHosts`), with no list shadow. *Residual:* a
->   domain named otherwise and stamped for the namespace and name (only an
->   administrator renames domains) is not looked at.
+>   are slice 4's (`listAcrossHosts`), with no list shadow. *Residual
+>   (corrected by the A6.2 security review):* R4 looks at candidate names
+>   only (`<namespace>.<name>` and the stamped legacy bare name), so a
+>   domain named otherwise is **not** looked at even when its stamp names the
+>   namespace and name. That includes every **adopted** domain: adoption
+>   stamps a domain for the adopting VirtualMachine under the name it already
+>   had. A VirtualMachine re-created (or restored) with an adopted VM's
+>   namespace and name after that VM was orphaned is therefore not held by
+>   R4; R2 does not see it either (the names differ), and only R3 stands in
+>   the way, on a shared pool. The runbook finds domains by stamp, not by
+>   name. Follow-up: match by stamp on each host.
 > - **The marker is a metadata patch** with an optimistic lock on the VM's
 >   resourceVersion, so a VM changed since it was read is not written. It is
 >   written:
@@ -2460,6 +2468,14 @@ honest.
       `SnapshotCreate` and the offline disk grow** of a clustered VM: each
       rewrites a disk file another host's domain could use through a shared
       pool; today they check the VM's own host only.
+  - A6.2 follow-ups (security review):
+    - **R4 matches by stamp, not by candidate name.** Each host reports the
+      domains whose owner stamp records the requested namespace and name,
+      whatever the domain is called, so adopted and renamed domains are seen.
+      Reading every domain's stamp per check is too costly, so the provider
+      keeps a per-host cache of (domain UUID → stamp), refreshed from
+      `virsh list --all --uuid` and re-read only for domains that are new or
+      changed; a host whose cache cannot be refreshed is unreachable.
 - **New ADR: per-consumer quota on a shared clustered Provider.** The
   scheduler-accuracy amendment (A5) counts every consumer's VMs against a
   host's capacity, but nothing limits how much of a shared Provider one
