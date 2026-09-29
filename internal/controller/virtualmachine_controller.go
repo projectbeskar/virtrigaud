@@ -588,13 +588,28 @@ func (r *VirtualMachineReconciler) reconcileVM(ctx context.Context, vm *infravir
 		// Prepare the image first — unless a clustered create is already in
 		// flight (status.placement.pendingHost): that create is re-sent as it
 		// was, and its image was prepared before the first attempt.
+		discoveredHost := ""
 		if pendingHost(vm) == "" {
+			// A clustered VM that was never placed meets the restore guards
+			// first (ADR-0007 A6.2): R1 holds a VM whose restore marker names
+			// another UID, and R4 asks the Provider's hosts whether a domain
+			// for its namespace and name already exists — holding it for a
+			// previous incarnation, or returning the host of its own domain.
+			// A held VM sends nothing else to the provider: no image prepare,
+			// no scheduling, no Create.
+			if isClusterTopology(provider) {
+				host, held, res, err := r.guardFirstPlacement(ctx, vm, provider, providerInstance)
+				if held {
+					return res, err
+				}
+				discoveredHost = host
+			}
 			if done, res, err := r.prepareImageForCreate(ctx, vm, persisted, vmImage, provider, providerInstance); done {
 				return res, err
 			}
 		}
 		logger.Info("Creating VM")
-		return r.createVM(ctx, vm, providerInstance, provider, vmClass, vmImage, networks)
+		return r.createVMOn(ctx, vm, providerInstance, provider, vmClass, vmImage, networks, discoveredHost)
 	}
 
 	// Address the VM for every per-VM call below (ADR-0007 Addendum A, A1). A
@@ -643,6 +658,17 @@ func (r *VirtualMachineReconciler) reconcileVM(ctx context.Context, vm *infravir
 			return res, err
 		}
 		return r.createVM(ctx, vm, providerInstance, provider, vmClass, vmImage, networks)
+	}
+
+	// ADR-0007 A6, R1: an owner-checked call on the bound host succeeded, so
+	// the domain is this VM's; the restore marker is (re)written to its own
+	// UID — a restored VM re-attached by the runbook, or one placed before
+	// the marker existed. A marker naming the VM's own UID never holds
+	// anything, so a failed write only waits for the next reconcile.
+	if ref.Routed() {
+		if err := ensurePlacementUIDMarker(ctx, r.Client, vm); err != nil {
+			logger.Info("Could not rewrite the placement-uid marker; retried on the next reconcile", "error", err.Error())
+		}
 	}
 
 	// G7.2 (#127): record virtrigaud_ip_discovery_duration_seconds on
@@ -1171,6 +1197,24 @@ func (r *VirtualMachineReconciler) createVM(
 	vmImage *infravirtrigaudiov1beta1.VMImage,
 	networks []*infravirtrigaudiov1beta1.VMNetworkAttachment,
 ) (ctrl.Result, error) {
+	return r.createVMOn(ctx, vm, provider, providerCR, vmClass, vmImage, networks, "")
+}
+
+// createVMOn is createVM with, for a clustered VM placed for the first time,
+// the host where the pre-schedule check found the VM's own domain
+// (discoveredHost, ADR-0007 A6, R4): that host is recorded as the pending host
+// instead of scheduling one. Empty schedules as usual; single-host providers
+// never get one.
+func (r *VirtualMachineReconciler) createVMOn(
+	ctx context.Context,
+	vm *infravirtrigaudiov1beta1.VirtualMachine,
+	provider contracts.Provider,
+	providerCR *infravirtrigaudiov1beta1.Provider,
+	vmClass *infravirtrigaudiov1beta1.VMClass,
+	vmImage *infravirtrigaudiov1beta1.VMImage,
+	networks []*infravirtrigaudiov1beta1.VMNetworkAttachment,
+	discoveredHost string,
+) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
 	// Validate that either ImageRef or ImportedDisk is specified
@@ -1218,7 +1262,25 @@ func (r *VirtualMachineReconciler) createVM(
 	if clustered {
 		host := pendingHost(vm)
 		if host == "" {
-			p, res, perr := r.resolveClusterPlacement(ctx, vm, providerCR, req, networks)
+			// ADR-0007 A6, R1: the restore marker names this VM's own UID
+			// before its first pendingHost write, so a backup or an exported
+			// manifest of it carries the UID it entered placement under.
+			if res, ok, merr := r.markPlacementUID(ctx, vm); !ok {
+				return res, merr
+			}
+			var (
+				p    *clusterPlacement
+				res  ctrl.Result
+				perr error
+			)
+			if discoveredHost != "" {
+				// R4 found this VM's own domain there: record that host, never
+				// a host the scheduler chose (no capacity admission; the
+				// domain already runs there). The create retry binds it.
+				p, res, perr = r.discoveredPlacement(ctx, vm, providerCR, req, discoveredHost)
+			} else {
+				p, res, perr = r.resolveClusterPlacement(ctx, vm, providerCR, req, networks)
+			}
 			if perr != nil {
 				// An unexpected infrastructure error (e.g. a List failed). Bubble it
 				// so the reconcile records an error outcome and backs off; do NOT

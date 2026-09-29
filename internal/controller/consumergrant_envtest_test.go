@@ -53,6 +53,17 @@ func (p *envtestVMProvider) Describe(_ context.Context, _ contracts.VMRef) (cont
 	return contracts.DescribeResponse{Exists: true, PowerState: string(contracts.PowerStateOn)}, nil
 }
 
+// GetCapabilities reports the owner-filtered ListVMs, so a clustered VM's
+// pre-schedule uniqueness check (ADR-0007 A6.2, R4) can run.
+func (p *envtestVMProvider) GetCapabilities(context.Context) (contracts.Capabilities, error) {
+	return contracts.Capabilities{SupportsClustering: true, SupportsListOwnerFilter: true}, nil
+}
+
+// ListVMsForOwner answers R4: no host holds a domain for any VM.
+func (p *envtestVMProvider) ListVMsForOwner(context.Context, contracts.OwnerFilter) (contracts.VMList, error) {
+	return contracts.VMList{OwnerFilterApplied: true}, nil
+}
+
 // atomicResolver counts resolutions; safe for a running controller.
 type atomicResolver struct {
 	provider contracts.Provider

@@ -652,6 +652,13 @@ func (r *VirtualMachineReconciler) handleMissingOnBoundHost(
 	ref contracts.VMRef,
 	errReason string,
 ) (ctrl.Result, error) {
+	// A VM restored WITH its binding but under a new UID (its restore marker
+	// names another UID, ADR-0007 A6, R1): its owner-checked calls fail closed
+	// because the domain is still stamped with the old UID. That is reported
+	// as RestorePending, pointing at the re-stamp, not as a missing domain.
+	if markerNamesAnotherUID(vm) {
+		return r.holdRestoredBinding(ctx, vm, ref), nil
+	}
 	msg := fmt.Sprintf("hypervisor VM %q is not present on its bound host %s; it is not re-created automatically "+
 		"(no failover without fencing). Restore it on that host, or delete and re-create the VirtualMachine",
 		ref.ID, ref.HostID)
