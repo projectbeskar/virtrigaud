@@ -1320,6 +1320,15 @@ func (r *VirtualMachineReconciler) createVMOn(
 	// Create VM
 	resp, err := provider.Create(ctx, req)
 	if err != nil && clustered {
+		// The VM's own domain is on another host than its pending host
+		// (ADR-0007 A6.2): R4's lookup moves the pending host there when it
+		// finds exactly that domain, so no administrator edits status;
+		// otherwise the own-domain hold below applies.
+		if contracts.IsVMOwnDomainElsewhere(err) {
+			if res, moved, merr := r.moveToOwnDomain(ctx, vm, providerCR, provider, req.TargetHostID); moved || merr != nil {
+				return res, merr
+			}
+		}
 		return r.handleClusteredCreateError(ctx, vm, req.TargetHostID, err)
 	}
 	if err != nil {

@@ -802,6 +802,81 @@ func TestR4_OwnDomainOnAHostTheProviderDoesNotFrontHolds(t *testing.T) {
 	assert.NotContains(t, placed.Message, "host-gone")
 }
 
+// TestR4_OwnDomainElsewhereMovesThePendingHost: a create on the pending host
+// answered with the VM's OWN domain on another host (an administrator
+// re-stamped a previous incarnation the disk guard had found elsewhere) moves
+// the pending host to where R4's lookup finds that domain — a checked status
+// write keeping the admitted size, no administrator status edit — and the
+// create retry there binds it.
+func TestR4_OwnDomainElsewhereMovesThePendingHost(t *testing.T) {
+	vm := clusterVM("web", clusteredNS, "prov-cluster")
+	vm.UID = "uid-web"
+	vm.Annotations = map[string]string{markerKey: "uid-web"}
+	vm.Status.Placement = &infrav1beta1.PlacementStatus{PendingHost: "host-alpha", Pool: "pool-a",
+		PendingResources: &infrav1beta1.PlacementResources{CPU: 2, MemoryMiB: 4096}}
+	prov := newR4Provider(contracts.VMList{VMs: []contracts.VMInfo{
+		stampedInfo("host-bravo", "default.web", clusteredNS, "web", "uid-web"),
+	}})
+	prov.onCreate = func(req contracts.CreateRequest) (contracts.CreateResponse, error) {
+		if req.TargetHostID == "host-bravo" {
+			return contracts.CreateResponse{ID: "default.web"}, nil
+		}
+		return contracts.CreateResponse{}, ownDomainElsewhereErr("default.web")
+	}
+	r := clusteredFixture(t, prov, vm, readyHost("host-bravo", clusteredNS, "pool-b", "prov-cluster"))
+
+	res := reconcileClustered(t, r, "web")
+	assert.True(t, res.Requeue)
+	moved := getVM(t, r, "web")
+	assert.Equal(t, "host-bravo", moved.Status.Placement.PendingHost)
+	assert.Equal(t, "pool-b", moved.Status.Placement.Pool)
+	require.NotNil(t, moved.Status.Placement.PendingResources, "the admitted size is kept")
+	assert.EqualValues(t, 2, moved.Status.Placement.PendingResources.CPU)
+	assert.Equal(t, k8s.ReasonCreatePending, placedCondition(moved).Reason)
+	assert.NotContains(t, placedCondition(moved).Message, "host-bravo")
+
+	reconcileClustered(t, r, "web")
+	require.Len(t, prov.createReqs, 2)
+	assert.Equal(t, "host-bravo", prov.createReqs[1].TargetHostID)
+	bound := getVM(t, r, "web")
+	assert.Equal(t, "default.web", bound.Status.ID)
+	assert.Equal(t, "host-bravo", bound.Status.Placement.Host)
+}
+
+// TestR4_OwnDomainElsewhereKeepsTheHoldWhenTheLookupCannotTell: without a
+// single own domain on another Host of the Provider — nothing found, a
+// previous incarnation too, or a provider without the filter — the pending
+// host is not moved and the own-domain hold of A6.1 stands.
+func TestR4_OwnDomainElsewhereKeepsTheHoldWhenTheLookupCannotTell(t *testing.T) {
+	for name, prov := range map[string]*r4Provider{
+		"nothing found": newR4Provider(contracts.VMList{}),
+		"own and a previous incarnation": newR4Provider(contracts.VMList{VMs: []contracts.VMInfo{
+			stampedInfo("host-bravo", "default.web", clusteredNS, "web", "uid-web"),
+			stampedInfo("host-alpha", "web", clusteredNS, "web", "uid-previous")}}),
+		"not a Host of the Provider": newR4Provider(contracts.VMList{VMs: []contracts.VMInfo{
+			stampedInfo("host-gone", "default.web", clusteredNS, "web", "uid-web")}}),
+		"no owner filter": func() *r4Provider {
+			p := newR4Provider(contracts.VMList{})
+			p.caps.SupportsListOwnerFilter = false
+			return p
+		}(),
+	} {
+		t.Run(name, func(t *testing.T) {
+			vm := clusterVM("web", clusteredNS, "prov-cluster")
+			vm.UID = "uid-web"
+			vm.Status.Placement = &infrav1beta1.PlacementStatus{PendingHost: "host-alpha", Pool: "pool-a"}
+			prov.onCreate = func(contracts.CreateRequest) (contracts.CreateResponse, error) {
+				return contracts.CreateResponse{}, ownDomainElsewhereErr("default.web")
+			}
+			r := clusteredFixture(t, prov, vm, readyHost("host-bravo", clusteredNS, "pool-a", "prov-cluster"))
+			reconcileClustered(t, r, "web")
+			held := getVM(t, r, "web")
+			assert.Equal(t, "host-alpha", held.Status.Placement.PendingHost, "not moved")
+			assert.Equal(t, k8s.ReasonOwnDomainOnAnotherHost, placedCondition(held).Reason)
+		})
+	}
+}
+
 // ─── VMClone: HOST_UNAVAILABLE backs off ──────────────────────────────────────
 
 // TestVMClone_Clustered_HostUnavailableBacksOff: a clone answered

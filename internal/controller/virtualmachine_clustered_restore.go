@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -210,40 +211,15 @@ func (r *VirtualMachineReconciler) preScheduleUniquenessCheck(
 	providerInstance contracts.Provider,
 ) (string, bool, ctrl.Result, error) {
 	logger := log.FromContext(ctx)
-	lacks := func() (string, bool, ctrl.Result, error) {
-		return "", true, r.holdBeforePlacement(ctx, vm, k8s.ReasonProviderLacksListOwnerFilter, lacksListOwnerFilterMessage,
-			errReasonPreScheduleCheck), nil
+	v, list, lookupErr := lookupIncarnations(ctx, vm, providerInstance)
+	if lookupErr != nil {
+		logger.Info("Pre-schedule uniqueness check could not run; holding the VM", "reason", lookupErr.reason, "error", lookupErr.Error())
+		msg := uniquenessCheckFailedMessage
+		if lookupErr.reason == k8s.ReasonProviderLacksListOwnerFilter {
+			msg = lacksListOwnerFilterMessage
+		}
+		return "", true, r.holdBeforePlacement(ctx, vm, lookupErr.reason, msg, errReasonPreScheduleCheck), nil
 	}
-	failed := func(what string, err error) (string, bool, ctrl.Result, error) {
-		logger.Info("Pre-schedule uniqueness check could not run; holding the VM", "step", what, "error", err.Error())
-		return "", true, r.holdBeforePlacement(ctx, vm, k8s.ReasonUniquenessCheckFailed, uniquenessCheckFailedMessage,
-			errReasonPreScheduleCheck), nil
-	}
-
-	reporter, okCaps := providerInstance.(contracts.CapabilityReporter)
-	lister, okList := providerInstance.(contracts.OwnerFilteredLister)
-	if !okCaps || !okList {
-		return lacks()
-	}
-	caps, err := reporter.GetCapabilities(ctx)
-	if err != nil {
-		return failed("capabilities", err)
-	}
-	if !caps.SupportsListOwnerFilter {
-		return lacks()
-	}
-	filter := contracts.OwnerFilter{Namespace: vm.Namespace, Name: vm.Name}
-	list, err := lister.ListVMsForOwner(ctx, filter)
-	if err != nil {
-		return failed("owner-filtered listing", err)
-	}
-	if !list.OwnerFilterApplied {
-		// Version skew: the capability said yes, the answer is unfiltered.
-		logger.Info("The Provider answered the owner-filtered ListVMs without applying the filter; holding the VM")
-		return lacks()
-	}
-
-	v := classifyIncarnations(vm, filter, list)
 	if len(list.UnreachableHostIDs) > 0 {
 		logger.Info("Pre-schedule uniqueness check: some hosts could not be checked; proceeding on the reachable hosts' evidence (ADR-0007 A6, decision 4)",
 			"unreachableHosts", list.UnreachableHostIDs)
@@ -259,6 +235,131 @@ func (r *VirtualMachineReconciler) preScheduleUniquenessCheck(
 		return v.ownHosts[0], false, ctrl.Result{}, nil
 	}
 	return "", false, ctrl.Result{}, nil
+}
+
+// lookupError is why R4's lookup could not run: reason is the Placed reason
+// of the hold (ProviderLacksListOwnerFilter or UniquenessCheckFailed); the
+// wrapped error is for the manager log only (it may name the provider's
+// endpoint).
+type lookupError struct {
+	reason string
+	err    error
+}
+
+func (e *lookupError) Error() string { return e.err.Error() }
+func (e *lookupError) Unwrap() error { return e.err }
+
+// errNoOwnerFilter is the lookupError cause of a provider that cannot filter.
+var errNoOwnerFilter = errors.New("the provider does not report the owner-filtered ListVMs")
+
+// lookupIncarnations is R4's lookup: one owner-filtered ListVMs of vm's
+// namespace and name through providerInstance, classified. It needs the
+// provider to report supportsListOwnerFilter AND to mark its answer
+// owner_filter_applied (an unmarked answer is an unfiltered listing from a
+// provider that ignored the filter — version skew — and is never classified).
+func lookupIncarnations(ctx context.Context, vm *infravirtrigaudiov1beta1.VirtualMachine,
+	providerInstance contracts.Provider) (incarnationVerdict, contracts.VMList, *lookupError) {
+	lacks := func(err error) (incarnationVerdict, contracts.VMList, *lookupError) {
+		return incarnationVerdict{}, contracts.VMList{}, &lookupError{reason: k8s.ReasonProviderLacksListOwnerFilter, err: err}
+	}
+	failed := func(step string, err error) (incarnationVerdict, contracts.VMList, *lookupError) {
+		return incarnationVerdict{}, contracts.VMList{}, &lookupError{reason: k8s.ReasonUniquenessCheckFailed,
+			err: fmt.Errorf("%s: %w", step, err)}
+	}
+	reporter, okCaps := providerInstance.(contracts.CapabilityReporter)
+	lister, okList := providerInstance.(contracts.OwnerFilteredLister)
+	if !okCaps || !okList {
+		return lacks(errNoOwnerFilter)
+	}
+	caps, err := reporter.GetCapabilities(ctx)
+	if err != nil {
+		return failed("capabilities", err)
+	}
+	if !caps.SupportsListOwnerFilter {
+		return lacks(fmt.Errorf("%w (supportsListOwnerFilter=false)", errNoOwnerFilter))
+	}
+	filter := contracts.OwnerFilter{Namespace: vm.Namespace, Name: vm.Name}
+	list, err := lister.ListVMsForOwner(ctx, filter)
+	if err != nil {
+		return failed("owner-filtered listing", err)
+	}
+	if !list.OwnerFilterApplied {
+		return lacks(fmt.Errorf("%w (the answer does not carry owner_filter_applied)", errNoOwnerFilter))
+	}
+	return classifyIncarnations(vm, filter, list), list, nil
+}
+
+// moveToOwnDomain is R4's lookup for a clustered create answered with the
+// VM's OWN domain on another host (contracts.IsVMOwnDomainElsewhere, from the
+// cluster-wide disk guard): the pending host is not where the domain is — the
+// domain's host was unreachable at the first placement, the status was
+// restored with another pending host, or an administrator re-stamped a
+// previous incarnation the guard had found on another host. When the lookup
+// finds exactly that one own domain, on a Host of the Provider, and nothing
+// else stamped with the VM's namespace and name, the pending host is moved
+// there (a checked status write; the admitted size is kept, not re-admitted:
+// the domain already runs there) and the create retry binds it — no
+// administrator edits status. Moving is as safe as the slice 2 release: the
+// provider answered before writing anything on the pending host.
+//
+// moved == false (and a nil error) leaves the caller's own-domain hold in
+// place: the lookup could not run, found anything else, or found the domain
+// on the pending host itself.
+func (r *VirtualMachineReconciler) moveToOwnDomain(
+	ctx context.Context,
+	vm *infravirtrigaudiov1beta1.VirtualMachine,
+	providerCR *infravirtrigaudiov1beta1.Provider,
+	providerInstance contracts.Provider,
+	pending string,
+) (ctrl.Result, bool, error) {
+	logger := log.FromContext(ctx)
+	v, _, lookupErr := lookupIncarnations(ctx, vm, providerInstance)
+	if lookupErr != nil {
+		logger.Info("Could not look the VM's own domain up; keeping the hold", "reason", lookupErr.reason, "error", lookupErr.Error())
+		return ctrl.Result{}, false, nil
+	}
+	if v.foreign > 0 || v.ambiguous > 0 || len(v.ownHosts) != 1 || v.ownHosts[0] == pending {
+		logger.Info("The VM's own domain is not on exactly one other host; keeping the hold",
+			"ownDomains", len(v.ownHosts), "previousIncarnations", v.foreign, "unreadable", v.ambiguous)
+		return ctrl.Result{}, false, nil
+	}
+	host := v.ownHosts[0]
+	h := &infravirtrigaudiov1beta1.Host{}
+	if err := r.Get(ctx, types.NamespacedName{Namespace: providerCR.Namespace, Name: host}, h); err != nil {
+		if apierrors.IsNotFound(err) {
+			return ctrl.Result{}, false, nil
+		}
+		return ctrl.Result{}, false, fmt.Errorf("get Host %s/%s: %w", providerCR.Namespace, host, err)
+	}
+	if h.Spec.ProviderRef.Name != providerCR.Name {
+		return ctrl.Result{}, false, nil
+	}
+	pl := vm.Status.Placement
+	if pl == nil {
+		pl = &infravirtrigaudiov1beta1.PlacementStatus{}
+		vm.Status.Placement = pl
+	}
+	now := metav1.Now()
+	pl.PendingHost = host
+	pl.Pool = h.Spec.PoolRef.Name
+	pl.LastScheduledTime = &now
+	pl.Reason = "re-attach: this VirtualMachine's own domain was found on this host (ADR-0007 A6, R4); the pending host moved here"
+	setPlacedCondition(vm, metav1.ConditionFalse, k8s.ReasonCreatePending,
+		"create pending on the host where this VirtualMachine's own domain was found (ADR-0007 A6, R4); the create retry binds it")
+	writeCtx, cancel := context.WithTimeout(ctx, pendingHostWriteTimeout)
+	defer cancel()
+	if err := r.Status().Update(writeCtx, vm); err != nil {
+		if apierrors.IsConflict(err) {
+			return ctrl.Result{Requeue: true}, true, nil
+		}
+		return ctrl.Result{}, false, fmt.Errorf("move the pending host of VirtualMachine %s/%s to its own domain's host: %w",
+			vm.Namespace, vm.Name, err)
+	}
+	// Nothing of this VM is on the old pending host any more (the provider
+	// answered before writing there); a leftover assumption must not count.
+	r.forgetPlacement(vm)
+	logger.Info("Moved the pending host to the host of the VM's own domain (ADR-0007 A6, R4)", "from", pending, "to", host)
+	return ctrl.Result{Requeue: true}, true, nil
 }
 
 // incarnationVerdict is what R4 found for one VM.
