@@ -5,6 +5,21 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-09-29 07:40] - Fix: the mock provider image did not build (missing api/ in its Dockerfile)
+**Author:** @wrkode (William Rizzo)
+
+### Fixed
+- `cmd/provider-mock/Dockerfile`: copy `api/` into the build stage. Since ADR-0009 Slice 1 (#346), `internal/imageartifact` imports the `api/infra.virtrigaud.io/v1beta1` package, which the mock provider image did not copy, so `docker build -f cmd/provider-mock/Dockerfile .` failed ("no required module provides package …/api/infra.virtrigaud.io/v1beta1"). The other provider Dockerfiles and the manager already copy `api/`.
+
+### Why
+The runtime-chart workflow's Kind integration test builds this image but only runs when the runtime chart or its workflow changes, so the breakage went unnoticed until a Dependabot bump of `actions/setup-go` touched that workflow (#363).
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-09-28 22:07] - ADR-0007 A6.1 fix-verification nits: delete lock order, fail-fast scans, varstore scope, own-domain reason
 **Author:** @wrkode (William Rizzo)
 

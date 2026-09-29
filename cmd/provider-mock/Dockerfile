@@ -14,6 +14,7 @@ RUN go mod download
 
 # Copy source code
 COPY cmd/provider-mock/ cmd/provider-mock/
+COPY api/ api/
 COPY internal/ internal/
 
 # Build the provider binary
