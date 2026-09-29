@@ -428,7 +428,12 @@ func (p *Provider) Describe(ctx context.Context, req *providerv1.DescribeRequest
 	}, nil
 }
 
-// ListVMs returns all VMs managed by this provider
+// ListVMs returns all VMs managed by this provider. The owner filter
+// (req.owner_namespace / owner_name, ADR-0007 A6.2) is not implemented: the
+// mock provider is not clustered, does not advertise
+// supports_list_owner_filter, ignores the filter and never sets
+// owner_filter_applied, so a caller never mistakes its answer for a filtered
+// one (D7, honesty-first).
 func (p *Provider) ListVMs(ctx context.Context, req *providerv1.ListVMsRequest) (*providerv1.ListVMsResponse, error) {
 	p.simulateDelay()
 

@@ -72,6 +72,14 @@ const (
 	// which implements TransferOwner (ADR-0007 Addendum A, slice 4); reported
 	// as GetCapabilitiesResponse.supports_routed_adoption.
 	CapabilityRoutedAdoption Capability = "routed_adoption"
+	// CapabilityListOwnerFilter marks a clustered provider whose ListVMs
+	// honours the owner filter (ListVMsRequest.owner_namespace / owner_name):
+	// it returns only that VirtualMachine's candidate VMs and sets
+	// ListVMsResponse.owner_filter_applied (ADR-0007 A6.2, R4); reported as
+	// GetCapabilitiesResponse.supports_list_owner_filter. A provider that
+	// does not implement the filter must not advertise it: it ignores the
+	// filter and leaves owner_filter_applied false.
+	CapabilityListOwnerFilter Capability = "list_owner_filter"
 
 	// Provider-specific capabilities
 	CapabilityVSphere     Capability = "vsphere"
@@ -209,6 +217,8 @@ func (m *Manager) GetCapabilities(ctx context.Context, req *providerv1.GetCapabi
 		SupportsHonestReconfigure: m.HasCapability(CapabilityHonestReconfigure),
 		// ADR-0007 Addendum A slice 4: cross-host ListVMs + TransferOwner.
 		SupportsRoutedAdoption: m.HasCapability(CapabilityRoutedAdoption),
+		// ADR-0007 A6.2: ListVMs honours the owner filter.
+		SupportsListOwnerFilter: m.HasCapability(CapabilityListOwnerFilter),
 	}, nil
 }
 

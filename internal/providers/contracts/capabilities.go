@@ -94,6 +94,14 @@ type Capabilities struct {
 	// from a clustered provider only when it reports it. False for single-host
 	// and thin-client providers (their adoption does not depend on it).
 	SupportsRoutedAdoption bool
+	// SupportsListOwnerFilter reports that ListVMs honours an owner filter
+	// (OwnerFilteredLister): only one VirtualMachine's candidates are returned,
+	// and the answer is marked VMList.OwnerFilterApplied (ADR-0007 A6.2, R4).
+	// The VirtualMachine controller runs its pre-schedule uniqueness check
+	// only through a clustered provider that reports it, and holds a clustered
+	// VM's first placement otherwise. False for single-host and thin-client
+	// providers (they never schedule).
+	SupportsListOwnerFilter bool
 }
 
 // CapabilityReporter is an optional capability of a Provider: it reports the

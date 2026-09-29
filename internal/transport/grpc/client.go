@@ -49,6 +49,8 @@ var (
 	_ contracts.Cloner             = (*Client)(nil)
 	_ contracts.ImagePreparer      = (*Client)(nil)
 	_ contracts.OwnerTransferrer   = (*Client)(nil)
+	// ADR-0007 A6.2: the owner-filtered ListVMs of the pre-schedule check.
+	_ contracts.OwnerFilteredLister = (*Client)(nil)
 )
 
 // Client wraps a gRPC provider client and implements the contracts.Provider interface
@@ -534,6 +536,8 @@ func (c *Client) GetCapabilities(ctx context.Context) (contracts.Capabilities, e
 		SupportsRoutedClone: resp.GetSupportsRoutedClone(),
 		// ADR-0007 Addendum A slice 4: false from a provider that predates it.
 		SupportsRoutedAdoption: resp.GetSupportsRoutedAdoption(),
+		// ADR-0007 A6.2: false from a provider that predates it.
+		SupportsListOwnerFilter: resp.GetSupportsListOwnerFilter(),
 	}, nil
 }
 
@@ -1084,14 +1088,42 @@ const listVMsCallTimeout = 2 * time.Minute
 // answer is never unbounded either.
 const listVMsMaxRecvBytes = 64 << 20
 
+// listVMsOwnerCallTimeout is the deadline the manager gives one owner-filtered
+// ListVMs (ADR-0007 A6.2, R4: the pre-schedule uniqueness check, run inside a
+// VirtualMachine reconcile). Each host is asked about one VirtualMachine's
+// candidates only — a few commands — so it is shorter than the full listing's:
+// a hung host is reported unreachable within it rather than parking the
+// reconcile for two minutes.
+const listVMsOwnerCallTimeout = 45 * time.Second
+
 // ListVMs implements contracts.Provider. A clustered provider's per-VM host
 // (VMInfo.host_id) and the hosts it could not list (unreachable_host_ids,
 // which the caller must treat as unknown) are carried through unchanged.
 func (c *Client) ListVMs(ctx context.Context) (contracts.VMList, error) {
 	ctx, cancel := context.WithTimeout(ctx, listVMsCallTimeout)
 	defer cancel()
+	return c.listVMs(ctx, &providerv1.ListVMsRequest{})
+}
 
-	resp, err := c.client.ListVMs(ctx, &providerv1.ListVMsRequest{}, grpc.MaxCallRecvMsgSize(listVMsMaxRecvBytes))
+// ListVMsForOwner implements contracts.OwnerFilteredLister (ADR-0007 A6.2,
+// R4): a ListVMs restricted to the VirtualMachine owner names. The answer's
+// OwnerFilterApplied is the provider's own mark; a provider that ignored the
+// filter (older, or not clustered) answers without it, and the caller must
+// then treat the filter as unsupported. An incomplete filter is refused before
+// any call is made.
+func (c *Client) ListVMsForOwner(ctx context.Context, owner contracts.OwnerFilter) (contracts.VMList, error) {
+	if !owner.Complete() {
+		return contracts.VMList{}, contracts.NewInvalidSpecError(
+			"listVMs: an owner filter needs both a namespace and a name", nil)
+	}
+	ctx, cancel := context.WithTimeout(ctx, listVMsOwnerCallTimeout)
+	defer cancel()
+	return c.listVMs(ctx, &providerv1.ListVMsRequest{OwnerNamespace: owner.Namespace, OwnerName: owner.Name})
+}
+
+// listVMs sends one ListVMs request and maps its answer.
+func (c *Client) listVMs(ctx context.Context, req *providerv1.ListVMsRequest) (contracts.VMList, error) {
+	resp, err := c.client.ListVMs(ctx, req, grpc.MaxCallRecvMsgSize(listVMsMaxRecvBytes))
 	if err != nil {
 		return contracts.VMList{}, c.mapGRPCError("listVMs", err)
 	}
@@ -1140,7 +1172,13 @@ func (c *Client) ListVMs(ctx context.Context) (contracts.VMList, error) {
 		vmInfos = append(vmInfos, vmInfo)
 	}
 
-	return contracts.VMList{VMs: vmInfos, UnreachableHostIDs: resp.GetUnreachableHostIds()}, nil
+	return contracts.VMList{
+		VMs:                vmInfos,
+		UnreachableHostIDs: resp.GetUnreachableHostIds(),
+		// ADR-0007 A6.2: false from a provider that ignored (or predates) the
+		// owner filter, and on every unfiltered listing.
+		OwnerFilterApplied: resp.GetOwnerFilterApplied(),
+	}, nil
 }
 
 // transferOwnerCallTimeout bounds one TransferOwner call: a few reads and one metadata

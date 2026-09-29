@@ -653,7 +653,28 @@ message GetDiskInfoResponse {
 }
 
 // List all VMs managed by this provider
-message ListVMsRequest {}
+message ListVMsRequest {
+  // owner_namespace and owner_name, when both are set, ask for the VMs of ONE
+  // VirtualMachine only (ADR-0007 A6, R4: the pre-schedule uniqueness check).
+  // A provider that honours the filter advertises
+  // GetCapabilitiesResponse.supports_list_owner_filter and returns only the
+  // VMs it would name for that VirtualMachine, or whose owner stamp records
+  // that namespace and name (under any uid), each reported as in an
+  // unfiltered listing (host_id, owner_namespace/owner_name, provider_raw
+  // "owner_uid" / "owner_stamp_state"), and sets
+  // ListVMsResponse.owner_filter_applied. Hosts that could not be checked are
+  // in unreachable_host_ids, exactly as for an unfiltered listing.
+  //
+  // Setting only one of the two is invalid (INVALID_ARGUMENT from a provider
+  // that honours the filter). A provider that does not honour it (single-host
+  // and thin-client providers, and a clustered provider older than ADR-0007
+  // A6.2) ignores both fields and answers the unfiltered listing WITHOUT
+  // owner_filter_applied, so a caller never mistakes an unfiltered answer for
+  // a filtered one. AGNOSTIC. Informational identity only: the filter selects,
+  // it never authorizes anything.
+  string owner_namespace = 1;
+  string owner_name = 2;
+}
 
 message ListVMsResponse {
   repeated VMInfo vms = 1;
@@ -666,6 +687,13 @@ message ListVMsResponse {
   // Always empty from single-host and thin-client providers, whose ListVMs
   // either answers for their one endpoint or fails as a whole.
   repeated string unreachable_host_ids = 2;
+  // owner_filter_applied is true when the provider applied the request's
+  // owner filter (ListVMsRequest.owner_namespace / owner_name): vms holds only
+  // that VirtualMachine's candidates. False on every unfiltered listing, and
+  // from any provider that ignored the filter — which a caller that asked for
+  // it must treat as "the filter is not supported" (ADR-0007 A6.2), never as
+  // a filtered answer. AGNOSTIC.
+  bool owner_filter_applied = 3;
 }
 
 message VMInfo {
@@ -814,6 +842,16 @@ message GetCapabilitiesResponse {
   // (their ListVMs and adoption do not depend on it) and on a clustered
   // provider older than slice 4.
   bool supports_routed_adoption = 21;
+  // supports_list_owner_filter reports that ListVMs honours the owner filter
+  // (ListVMsRequest.owner_namespace / owner_name): it returns only the VMs of
+  // that VirtualMachine — the ones the provider would name for it, or whose
+  // owner stamp records its namespace and name — and marks the answer with
+  // ListVMsResponse.owner_filter_applied (ADR-0007 A6.2, R4). The manager runs
+  // its pre-schedule uniqueness check only through a clustered provider that
+  // reports it, and holds a clustered VM's first placement otherwise. False on
+  // single-host and thin-client providers (they never schedule, and ignore the
+  // filter) and on a clustered provider older than A6.2.
+  bool supports_list_owner_filter = 22;
 }
 
 // TransferOwner hands one VM on a clustered ("brain-in-operator") provider's
