@@ -76,8 +76,11 @@ const (
 	// cloneHostBlockedRetryInterval re-checks a clone whose landing host
 	// cannot take it. Nothing the controller does changes that, so it is slow.
 	cloneHostBlockedRetryInterval = 2 * time.Minute
-	// cloneHostUnavailableRetryInterval retries a clone whose landing host
-	// could not be reached, on the same host.
+	// cloneHostUnavailableRetryInterval retries, on the same host, a clone the
+	// provider answered with another retryable error (e.g. an earlier
+	// attempt's copy still runs there). A clone answered HOST_UNAVAILABLE or
+	// VM_DISK_CHECK_FAILED backs off instead (blockedRetryBackoff, ADR-0007
+	// A6.1/A6.2).
 	cloneHostUnavailableRetryInterval = 30 * time.Second
 )
 
@@ -122,6 +125,17 @@ func (r *VMCloneReconciler) startClusteredClone(
 	target, res, done, err := r.ensureClusteredCloneTarget(ctx, clone, sourceVM, provider, targetNamespace)
 	if done {
 		return res, err
+	}
+	// The target's restore marker names its own UID before its pendingHost
+	// is first written (ADR-0007 A6, R1), so a backup or an exported manifest
+	// of the target carries the UID it entered placement under. The target
+	// never inherits the source's marker: the key is in the reserved
+	// annotation domain (userTargetAnnotations drops it).
+	if err := ensurePlacementUIDMarker(ctx, r.Client, target); err != nil {
+		if apierrors.IsConflict(err) {
+			return ctrl.Result{Requeue: true}, nil
+		}
+		return ctrl.Result{}, err
 	}
 	if pl := target.Status.Placement; pl != nil && containsHost(pl.ExcludedHosts, host) {
 		return r.waitForCloneHost(ctx, clone, cloneReasonSourceHostExcluded, fmt.Sprintf(
@@ -409,7 +423,11 @@ func (r *VMCloneReconciler) recordClonePendingHost(
 //   - the host unreachable, or the provider unavailable: the pendingHost is
 //     kept and the clone is retried on the SAME host — a clone the provider
 //     already made there is stamped with the target's uid and is an
-//     idempotent success.
+//     idempotent success. A host that could not be reached
+//     (HOST_UNAVAILABLE) or checked (VM_DISK_CHECK_FAILED) is retried with
+//     the blocked-VM backoff from when the target's placement was recorded
+//     (15 s doubling to 5 min), as a clustered create is; other retryable
+//     answers every cloneHostUnavailableRetryInterval.
 //   - anything else fails the clone. The target keeps its pendingHost, and the
 //     failed clone removes it (removeFailedClusteredTarget): its finalizer runs
 //     the owner-checked cleanup on the host.
@@ -452,9 +470,28 @@ func (r *VMCloneReconciler) handleClusteredCloneError(
 		return r.waitForCloneHost(ctx, clone, cloneReasonSourceHostExcluded, fmt.Sprintf(
 			"clone refused on the source VM's host %s: %v", host, err), cloneHostBlockedRetryInterval), nil
 	case contracts.IsHostUnavailable(err):
-		logger.Info("Clone could not reach its landing host; retrying on the same host", "host", host, "error", err.Error())
+		// Backed off like a clustered create answered HOST_UNAVAILABLE
+		// (ADR-0007 A6.1): the clone may have had to check every host of the
+		// Provider, and a host that is down stays down for longer than a
+		// fixed short cadence.
+		retry := blockedRetryBackoff(createHoldSince(target))
+		logger.Info("Clone could not reach a host it needs; retrying on the same host with a backoff", "host", host,
+			"retryAfter", retry.String(), "error", err.Error())
 		return r.waitForCloneHost(ctx, clone, k8s.ReasonHostUnavailable, fmt.Sprintf(
-			"clone on host %s could not complete (%v); it is retried on the same host", host, err), cloneHostUnavailableRetryInterval), nil
+			"clone on host %s could not reach a host (the landing host, or another host of the Provider the clone must "+
+				"check); it is retried on the same host with a backoff of up to %s: %s",
+			host, blockedRetryMax, providerErrorMessage(err)), retry), nil
+	case contracts.IsVMDiskCheckFailed(err):
+		// The cluster-wide disk guard could not check every host: nothing was
+		// written, and a fixed short cadence would scan every host again each
+		// time, so the clone backs off like a create (ADR-0007 A6.1).
+		retry := blockedRetryBackoff(createHoldSince(target))
+		logger.Info("Clone not performed: the provider could not verify the clone's disk file on every host; backing off",
+			"host", host, "retryAfter", retry.String(), "error", err.Error())
+		return r.waitForCloneHost(ctx, clone, cloneReasonRetrying, fmt.Sprintf(
+			"the clone on host %s waits: the provider could not verify on every host of the Provider that no other VM uses "+
+				"the clone's disk file; it is retried on the same host with a backoff of up to %s: %s",
+			host, blockedRetryMax, providerErrorMessage(err)), retry), nil
 	case contracts.IsRetryable(err):
 		// E.g. the provider answered that an earlier attempt's copy is still
 		// running on the host (slice 3 review), or the provider is briefly

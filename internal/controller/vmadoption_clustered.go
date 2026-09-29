@@ -942,8 +942,10 @@ type adoptionBinding struct {
 // writeAdoptionBinding writes the binding of vm — adopted for info from
 // provider — in one status write: status.id, boundProvider, placement (host,
 // pool, memory ceiling), currentResources, the observed power state and IPs,
-// and Placed=True/Bound. (ADR-0007 A6.2 must also set the placement-uid
-// marker, R1, in this write, so an adopted VM is never held as restored.)
+// and Placed=True/Bound. Right before that status write it sets the
+// VirtualMachine's restore marker (infra.virtrigaud.io/placement-uid, ADR-0007
+// A6.2, R1) to its own UID — a metadata patch, as the status subresource
+// cannot carry an annotation — so an adopted VM is never held as restored.
 //
 // The VirtualMachine controller adds its finalizer and writes the VM's status
 // right after the VM is created, so the object read before the owner transfer
@@ -975,6 +977,14 @@ func (r *VMAdoptionReconciler) writeAdoptionBinding(ctx context.Context, provide
 			return nil
 		case !isAwaitingAdoptionOf(latest, provider, info):
 			return fmt.Errorf("VirtualMachine %s is no longer waiting for this adoption: %w", key, errAdoptionDeferred)
+		}
+		// ADR-0007 A6, R1: the restore marker names the adopting
+		// VirtualMachine's own UID, written right before (and with the same
+		// resourceVersion lock as) its binding, so an adopted VM is never
+		// held as restored and a backup of it carries the UID it was bound
+		// under. A conflict re-reads the VM and retries both.
+		if err := ensurePlacementUIDMarker(ctx, r.Client, latest); err != nil {
+			return err
 		}
 		now := metav1.Now()
 		ceiling := b.ceilingMiB

@@ -293,7 +293,10 @@ func TestClusteredAdoption_AdoptsByHostAndIDAndRecordsTheBinding(t *testing.T) {
 	assert.Equal(t, "pool-1", vmA.Status.Placement.Pool)
 	assert.Empty(t, vmA.Status.Placement.PendingHost)
 	assert.Equal(t, &infravirtrigaudiov1beta1.BoundProviderRef{Namespace: clusterNS, Name: "prov-c", UID: "prov-c-uid"}, vmA.Status.BoundProvider)
-	assert.Equal(t, map[string]string{AdoptedHostAnnotation: "host-a", AdoptedIDAnnotation: "web"}, vmA.Annotations)
+	// The binding also sets the restore marker to the VM's own UID (ADR-0007
+	// A6.2, R1), so an adopted VM is never held as restored.
+	assert.Equal(t, map[string]string{AdoptedHostAnnotation: "host-a", AdoptedIDAnnotation: "web",
+		infravirtrigaudiov1beta1.VirtualMachinePlacementUIDAnnotation: string(vmA.UID)}, vmA.Annotations)
 	// Size from provider truth: effective size 2 vCPU / 2048 MiB, the CPU
 	// raised to the 4 vCPUs Describe reports online, the ceiling Describe's
 	// memory maximum.
@@ -305,6 +308,7 @@ func TestClusteredAdoption_AdoptsByHostAndIDAndRecordsTheBinding(t *testing.T) {
 
 	vmB := adoptedVMGet(t, r, nameB)
 	assert.Equal(t, "web", vmB.Status.ID)
+	assert.Equal(t, string(vmB.UID), vmB.Annotations[infravirtrigaudiov1beta1.VirtualMachinePlacementUIDAnnotation])
 	assert.Equal(t, "host-b", vmB.Status.Placement.Host)
 	require.NotNil(t, vmB.Status.Placement.MemoryCeilingMiB)
 	assert.EqualValues(t, 0, *vmB.Status.Placement.MemoryCeilingMiB, "no memory beyond its own size: ceiling 0")
