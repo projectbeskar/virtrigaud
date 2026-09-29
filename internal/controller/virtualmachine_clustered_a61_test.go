@@ -209,7 +209,7 @@ func TestClustered_OwnDomainElsewhere(t *testing.T) {
 	assert.Equal(t, k8s.ReasonOwnDomainOnAnotherHost, placed.Reason, "a dedicated reason, not RestorePending (fix verification N7)")
 	assert.Equal(t, k8s.ReasonOwnDomainOnAnotherHost, provisioningReason(held))
 	assert.Contains(t, placed.Message, "stamped with its own UID")
-	assert.Contains(t, placed.Message, "no re-stamp is needed")
+	assert.Contains(t, placed.Message, "No re-stamp is needed")
 	assert.NotContains(t, placed.Message, "host-alpha")
 	assert.Equal(t, "host-alpha", held.Status.Placement.PendingHost)
 	assert.Empty(t, held.Status.Placement.ExcludedHosts)

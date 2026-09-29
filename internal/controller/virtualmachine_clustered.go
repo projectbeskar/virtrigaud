@@ -367,9 +367,11 @@ var restorePendingMessage = fmt.Sprintf(
 // pending host must point at that host. It names no host.
 var restorePendingOwnMessage = fmt.Sprintf(
 	"held: a domain of this VirtualMachine — stamped with its own UID — already exists on another host of its "+
-		"Provider (its placement record was lost), so nothing is created on its pending host. An administrator must "+
-		"set status.placement.pendingHost to that domain's host (no re-stamp is needed); until then deleting this "+
-		"VirtualMachine is held too, so that its domain is not left running. See %s. Re-checked with a backoff of up to %s",
+		"Provider (its placement record was lost), so nothing is created on its pending host. No re-stamp is needed: "+
+		"the pending host is moved to that domain's host as soon as the Provider's owner-filtered lookup finds exactly "+
+		"that one domain there (ADR-0007 A6.2); if it cannot, an administrator sets status.placement.pendingHost to it. "+
+		"Until then deleting this VirtualMachine is held too, so that its domain is not left running. See %s. "+
+		"Re-checked with a backoff of up to %s",
 	restorePendingRunbook, blockedRetryMax)
 
 // heldForOwnDomainElsewhere reports whether vm's last create — or, for a
