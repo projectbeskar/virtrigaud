@@ -1412,6 +1412,26 @@ func isVMDiskInUseStatus(st *status.Status) bool {
 	return false
 }
 
+// isVMSourceRunningStatus reports whether a gRPC status is a provider's
+// refusal of a Clone because the source VM is not powered off (a libvirt full
+// clone requires a shut-off source): codes.FailedPrecondition carrying a
+// google.rpc.ErrorInfo with contracts.VMSourceRunningReason in VirtRigaud's
+// domain. The provider answered and copied nothing, so it is healthy
+// (FailedPrecondition never counts toward the circuit breaker).
+func isVMSourceRunningStatus(st *status.Status) bool {
+	if st == nil || st.Code() != codes.FailedPrecondition {
+		return false
+	}
+	for _, d := range st.Details() {
+		if info, ok := d.(*errdetails.ErrorInfo); ok &&
+			info.GetReason() == contracts.VMSourceRunningReason &&
+			info.GetDomain() == contracts.ErrorInfoDomain {
+			return true
+		}
+	}
+	return false
+}
+
 // isVMPreviousIncarnationStatus reports whether a gRPC status is a clustered
 // provider's refusal of a Create or Clone because a previous incarnation of
 // the requesting VirtualMachine exists on a host of the Provider (ADR-0007
@@ -1640,6 +1660,13 @@ func (c *Client) mapGRPCError(operation string, err error) error {
 		if isVMDiskInUseStatus(st) {
 			return contracts.NewConflictError(fmt.Sprintf("%s: %s", operation, st.Message()),
 				fmt.Errorf("%w: %w", contracts.ErrVMDiskInUse, err))
+		}
+		// A clone refused because its source VM is not powered off (libvirt):
+		// retryable and marked, so the VMClone controller keeps the clone
+		// Pending until the source is off instead of failing it.
+		if isVMSourceRunningStatus(st) {
+			return contracts.NewRetryableError(fmt.Sprintf("%s: %s", operation, st.Message()),
+				fmt.Errorf("%w: %w", contracts.ErrVMSourceRunning, err))
 		}
 		return fmt.Errorf("%s failed: %s", operation, st.Message())
 	case codes.Unavailable, codes.DeadlineExceeded:
