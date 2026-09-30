@@ -874,8 +874,14 @@ const backingKindScript = `if [ -f "$1" ]; then echo ` + backingKindFile + `; el
 // image. A qcow2 external data file is recorded, never opened by the walk; one
 // named by anything but an absolute local path fails the check too. A file
 // that no longer exists ends the chain: a missing disk contributes nothing.
-func backingChainFiles(ctx context.Context, h hostCommandRunner, disk string) ([]string, error) {
-	levels, err := walkBackingChain(ctx, h, disk)
+//
+// The disk itself is opened in format, the one its domain definition names
+// (walkBackingChainFrom): never probed, so a guest cannot make its raw disk
+// read as a qcow2 image naming another file as its backing file — and a raw
+// disk's chain is not walked at all. An empty format (a source the
+// definition gives none for, such as a nested backing store) is probed.
+func backingChainFiles(ctx context.Context, h hostCommandRunner, disk, format string) ([]string, error) {
+	levels, err := walkBackingChainFrom(ctx, h, disk, format)
 	if err != nil {
 		return nil, err
 	}
@@ -905,9 +911,21 @@ func walkBackingChain(ctx context.Context, h hostCommandRunner, disk string) ([]
 	return walkBackingChainFrom(ctx, h, disk, "")
 }
 
+// rawDiskFormat is qemu's raw format: no header, so no backing chain.
+const rawDiskFormat = "raw"
+
 // walkBackingChainFrom is walkBackingChain with the disk itself opened as
-// format ("" probes it), as a copy that pins the disk's format reads it.
+// format ("" probes it), as a copy that pins the disk's format reads it. A
+// raw disk has no backing chain: it is only checked to be a regular file,
+// and never opened — its bytes are the guest's, and a header a guest wrote
+// there is never read.
 func walkBackingChainFrom(ctx context.Context, h hostCommandRunner, disk, format string) ([]backingLevel, error) {
+	if format == rawDiskFormat {
+		if err := checkChainFileKind(ctx, h, disk); err != nil {
+			return nil, err
+		}
+		return []backingLevel{{path: disk, refs: []string{disk}, format: format}}, nil
+	}
 	var levels []backingLevel
 	cur := disk
 	for depth := 0; ; depth++ {
@@ -1171,7 +1189,9 @@ func domainRefsOnHostBounded(ctx context.Context, h hostCommandRunner, skipUUID 
 	type rawRefs struct {
 		uuid               string
 		files, dirs, disks []string
-		owners             []contracts.ObjectIdentity
+		// formats are the disks' level-0 formats, from the definition.
+		formats map[string]string
+		owners  []contracts.ObjectIdentity
 	}
 	var doms []rawRefs
 	for _, uuid := range uuids {
@@ -1194,9 +1214,13 @@ func domainRefsOnHostBounded(ctx context.Context, h hostCommandRunner, skipUUID 
 		if err != nil {
 			return nil, hostCheckFailed(fmt.Sprintf("parse definition of domain %s", uuid), err)
 		}
-		d := rawRefs{uuid: uuid, files: refs.files, dirs: refs.dirs, disks: refs.disks}
+		d := rawRefs{uuid: uuid, files: refs.files, dirs: refs.dirs, disks: refs.disks, formats: map[string]string{}}
 		if owners, oerr := domainOwners(xmlRes.Stdout); oerr == nil {
 			d.owners = owners
+		}
+		var byVolume map[[2]string]string
+		if doc, perr := parseDomainDisks(xmlRes.Stdout); perr == nil {
+			d.formats, byVolume = doc.diskSourceFormats()
 		}
 		for _, pv := range refs.volumes {
 			volRes, verr := h.runVirshCommand(ctx, "vol-path", "--pool", pv[0], "--vol", pv[1])
@@ -1211,6 +1235,9 @@ func domainRefsOnHostBounded(ctx context.Context, h hostCommandRunner, skipUUID 
 			}
 			d.files = append(d.files, p)
 			d.disks = append(d.disks, p)
+			if f, ok := byVolume[pv]; ok {
+				d.formats[p] = f
+			}
 		}
 		if liveChainListed(xmlRes.Stdout) {
 			// A running domain's definition lists every disk's chain in
@@ -1220,17 +1247,21 @@ func domainRefsOnHostBounded(ctx context.Context, h hostCommandRunner, skipUUID 
 		doms = append(doms, d)
 	}
 
-	chains := map[string][]string{}
+	// Each disk's chain is walked from the format its definition names (a raw
+	// disk not at all): the scan never probes a guest-written image.
+	type chainKey struct{ disk, format string }
+	chains := map[chainKey][]string{}
 	for _, d := range doms {
 		for _, disk := range d.disks {
-			if _, walked := chains[disk]; walked {
+			key := chainKey{disk, d.formats[disk]}
+			if _, walked := chains[key]; walked {
 				continue
 			}
-			chain, err := backingChainFiles(ctx, h, disk)
+			chain, err := backingChainFiles(ctx, h, disk, key.format)
 			if err != nil {
 				return nil, err
 			}
-			chains[disk] = chain
+			chains[key] = chain
 		}
 	}
 
@@ -1243,7 +1274,7 @@ func domainRefsOnHostBounded(ctx context.Context, h hostCommandRunner, skipUUID 
 		start := len(all)
 		all = append(all, d.files...)
 		for _, disk := range d.disks {
-			all = append(all, chains[disk]...)
+			all = append(all, chains[chainKey{disk, d.formats[disk]}]...)
 		}
 		spans[i].files = [2]int{start, len(all)}
 	}

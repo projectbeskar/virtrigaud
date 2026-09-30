@@ -51,7 +51,7 @@ func TestSingleHost_GetDiskInfo_SnapshotOverlaySizesAreReadAsRoot(t *testing.T) 
 	assert.EqualValues(t, scdActualSize, resp.ActualSizeBytes)
 	calls := fx.calls()
 	assert.Contains(t, calls, "local sh -c "+backingKindScript+" sh "+scdOverlayPath, "a device or FIFO is never opened as root")
-	assert.Contains(t, calls, "local sudo -n qemu-img info -U --output=json "+scdOverlayPath, "the documented qemu-img info -U rule")
+	assert.Contains(t, calls, "local sudo -n qemu-img info -U -f qcow2 --output=json -- "+scdOverlayPath, "the documented qemu-img info -U rule")
 	for _, c := range calls {
 		assert.NotContains(t, c, "Permission denied")
 	}
@@ -65,7 +65,7 @@ func TestSingleHost_GetDiskInfo_SudoRefusedReadsAsBefore(t *testing.T) {
 	resp, err := NewServer(fx.p).GetDiskInfo(context.Background(), &providerv1.GetDiskInfoRequest{VmId: scdDomain})
 	require.NoError(t, err, "sizes are best-effort")
 	assert.Zero(t, resp.VirtualSizeBytes, "the SSH user cannot read the overlay: 0, as before")
-	assert.Contains(t, fx.calls(), "local qemu-img info -U --output=json "+scdOverlayPath, "the historical read as the SSH user")
+	assert.Contains(t, fx.calls(), "local qemu-img info -U -f qcow2 --output=json -- "+scdOverlayPath, "the historical read as the SSH user")
 }
 
 func TestSingleHost_GetDiskInfo_CallerPathIsNeverReadAsRoot(t *testing.T) {
@@ -90,5 +90,5 @@ func TestClustered_GetDiskInfo_SnapshotOverlaySizesAreReadAsRoot(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, scdOverlayPath, resp.Path)
 	assert.EqualValues(t, scdVirtualSize, resp.VirtualSizeBytes)
-	assert.Contains(t, fx.calls(), "local sudo -n qemu-img info -U --output=json "+scdOverlayPath)
+	assert.Contains(t, fx.calls(), "local sudo -n qemu-img info -U -f qcow2 --output=json -- "+scdOverlayPath)
 }

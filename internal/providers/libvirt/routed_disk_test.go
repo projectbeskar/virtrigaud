@@ -58,7 +58,7 @@ func TestClustered_GetDiskInfo_RoutedOwnerChecked(t *testing.T) {
 		"host-b virsh dumpxml web",
 		"host-b virsh dumpxml " + uuid,
 		"local sh -c " + backingKindScript + " sh " + scdDiskPath,
-		"local sudo -n qemu-img info -U --output=json " + scdDiskPath,
+		"local sudo -n qemu-img info -U -f qcow2 --output=json -- " + scdDiskPath,
 		"host-b virsh snapshot-list " + uuid + " --name",
 	}, fx.calls(), "the disk is read from the checked domain's definition (as root when sudo allows it: a snapshot "+
 		"overlay is 0600); nothing is looked up by volume name")

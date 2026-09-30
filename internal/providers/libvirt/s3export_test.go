@@ -161,7 +161,7 @@ func TestFlattenForExport(t *testing.T) {
 			}
 
 			ctx, cancel := context.WithCancel(context.Background())
-			tmp, cleanup, err := flattenForExport(ctx, vp, src, "vm-1", nil)
+			tmp, cleanup, err := flattenForExport(ctx, vp, src, "qcow2", "vm-1", nil)
 			require.NoError(t, err)
 			stageDir := filepath.Dir(tmp)
 			assert.Equal(t, dir, filepath.Dir(stageDir), "the private directory is next to the source disk")
@@ -183,7 +183,7 @@ func TestFlattenForExport(t *testing.T) {
 			b, _ := os.ReadFile(sudoLog) //nolint:gosec // test reads its own log
 			assert.Contains(t, splitLines(string(b)), "-n qemu-img convert -U -f qcow2 -O qcow2 "+src+" "+tmp)
 
-			tmp2, cleanup2, err := flattenForExport(ctx, vp, src, "vm-1", nil)
+			tmp2, cleanup2, err := flattenForExport(ctx, vp, src, "qcow2", "vm-1", nil)
 			require.NoError(t, err)
 			assert.NotEqual(t, tmp, tmp2, "one staging file per export")
 			cleanup2()
@@ -192,7 +192,7 @@ func TestFlattenForExport(t *testing.T) {
 			cleanup()
 			assert.Empty(t, staged(), "removed")
 
-			_, _, err = flattenForExport(context.Background(), vp, filepath.Join(dir, "missing.qcow2"), "vm-1", nil)
+			_, _, err = flattenForExport(context.Background(), vp, filepath.Join(dir, "missing.qcow2"), "qcow2", "vm-1", nil)
 			require.Error(t, err)
 			assert.Empty(t, staged(), "a failed flatten leaves nothing behind")
 		})

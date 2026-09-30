@@ -27,7 +27,6 @@ import (
 
 	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
 
-	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
 	"github.com/projectbeskar/virtrigaud/internal/storage"
 	"github.com/projectbeskar/virtrigaud/internal/storage/migration"
 )
@@ -79,21 +78,17 @@ func (s *Server) exportDiskToS3(ctx context.Context, req *providerv1.ExportDiskR
 		return nil, fmt.Errorf("s3 export requires an ssh:// libvirt transport (host-side qemu-img flatten + stream); got %q", conn.uri())
 	}
 
-	// Resolve the source disk path on the host via GetDiskInfo (e.g. for
-	// demo-ubuntu-libvirt vda=/var/lib/libvirt/images/ubuntu-libvirt-demo.qcow2).
-	diskInfo, err := s.provider.GetDiskInfo(ctx, contracts.GetDiskInfoRequest{
-		VM:         contracts.VMRef{ID: req.VmId, HostID: req.TargetHostId},
-		DiskId:     req.DiskId,
-		SnapshotId: req.SnapshotId,
-	})
+	// The source is one of the domain's own disks, read in the format its
+	// definition names (exportSourceOn).
+	vp, err := virshOf(conn)
 	if err != nil {
-		return nil, fmt.Errorf("failed to resolve source disk info: %w", err)
+		return nil, err
 	}
-	srcPath := diskInfo.Path
-	if srcPath == "" {
-		return nil, fmt.Errorf("source disk %q has no resolvable host path", req.DiskId)
+	srcPath, srcFormat, err := exportSourceOn(ctx, vp, byName(req.VmId), req.DiskId)
+	if err != nil {
+		return nil, fmt.Errorf("failed to resolve the source disk: %w", err)
 	}
-	return exportFlattenToS3(ctx, conn, req, req.VmId, srcPath, nil)
+	return exportFlattenToS3(ctx, conn, req, req.VmId, srcPath, srcFormat, nil)
 }
 
 // exportFlattenToS3 is the S3 export core, run on conn — the single host's
@@ -103,7 +98,8 @@ func (s *Server) exportDiskToS3(ctx context.Context, req *providerv1.ExportDiskR
 // guard wraps the flatten (flock + timeout on a clustered host,
 // routed_budget.go); a nil guard — the single-host path — runs the historical
 // command sequence, unchanged.
-func exportFlattenToS3(ctx context.Context, conn libvirtConn, req *providerv1.ExportDiskRequest, vmID, srcPath string, guard *hostCmdGuard) (*providerv1.ExportDiskResponse, error) {
+func exportFlattenToS3(ctx context.Context, conn libvirtConn, req *providerv1.ExportDiskRequest, vmID, srcPath, srcFormat string,
+	guard *hostCmdGuard) (*providerv1.ExportDiskResponse, error) {
 	// Build the S3 client (pod is the S3 client). Options come from
 	// storage_options_json; credentials from the credentials map. Never logged.
 	storageConfig, err := migration.S3StorageConfigFromRequest(req.StorageOptionsJson, req.Credentials)
@@ -122,7 +118,7 @@ func exportFlattenToS3(ctx context.Context, conn libvirtConn, req *providerv1.Ex
 		vmID, srcPath, req.DestinationUrl)
 
 	// --- FLATTEN (ADR D4) ---
-	hostTmp, cleanup, err := flattenForExport(ctx, hostConnRunner{conn: conn}, srcPath, vmID, guard)
+	hostTmp, cleanup, err := flattenForExport(ctx, hostConnRunner{conn: conn}, srcPath, srcFormat, vmID, guard)
 	if err != nil {
 		return nil, err
 	}
@@ -200,13 +196,15 @@ const hostExportStageSuffix = ".qcow2"
 // user's, so the stream can read it. Otherwise the historical flatten runs as
 // the SSH user.
 //
-// -f qcow2 forces the source driver (no format probing of the overlay); -O
-// qcow2 keeps the native format the target expects. -U skips the shared-disk
+// -f <srcFormat> — the format the domain's definition opens the disk in,
+// qcow2 or raw (checkCopySource refuses any other) — forces the source driver
+// (never a probe of a guest-written image); -O qcow2 keeps the native format
+// the target expects. -U skips the shared-disk
 // lock so a still-running source (e.g. powerOffBeforeMigration not yet
 // honored, or createSnapshot=false) can be read — this is a crash-consistent
 // copy; a consistent copy still requires the source to be powered off or
 // snapshotted first.
-func flattenForExport(ctx context.Context, h hostCommandRunner, srcPath, vmID string, guard *hostCmdGuard) (string, func(), error) {
+func flattenForExport(ctx context.Context, h hostCommandRunner, srcPath, srcFormat, vmID string, guard *hostCmdGuard) (string, func(), error) {
 	wd, err := newDiskWriteDir(ctx, h, filepath.Dir(srcPath))
 	if err != nil {
 		return "", nil, fmt.Errorf("create the export staging directory on the host: %w", err)
@@ -217,14 +215,15 @@ func flattenForExport(ctx context.Context, h hostCommandRunner, srcPath, vmID st
 	}
 	cleanup := func() { wd.cleanupWithin(ctx, cleanupWithin) }
 	hostTmp := wd.file(hostExportStageName(vmID))
+	args := []string{"convert", "-U", "-f", srcFormat, "-O", "qcow2", srcPath, hostTmp}
 	flatten := diskCopy{
 		src:       srcPath,
-		srcFormat: "qcow2",
+		srcFormat: srcFormat,
 		target:    hostTmp,
 		output:    hostTmp,
 		umask:     exportStageUmask,
-		args:      []string{"convert", "-U", "-f", "qcow2", "-O", "qcow2", srcPath, hostTmp},
-		privArgs:  []string{"convert", "-U", "-f", "qcow2", "-O", "qcow2", srcPath, hostTmp},
+		args:      args,
+		privArgs:  args,
 	}
 	if res, err := flatten.run(ctx, h, guard); err != nil {
 		cleanup()

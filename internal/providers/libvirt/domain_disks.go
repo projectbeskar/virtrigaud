@@ -74,9 +74,63 @@ type domainDisksDoc struct {
 type domainDiskElem struct {
 	Type   string `xml:"type,attr"`
 	Device string `xml:"device,attr"`
+	Driver *struct {
+		Type string `xml:"type,attr"`
+	} `xml:"driver"`
 	Source *struct {
-		File string `xml:"file,attr"`
+		File   string `xml:"file,attr"`
+		Dev    string `xml:"dev,attr"`
+		Pool   string `xml:"pool,attr"`
+		Volume string `xml:"volume,attr"`
 	} `xml:"source"`
+}
+
+// diskSourceFormats returns the format (domainDiskElem.format) of every
+// top-level <disk>, keyed by its own <source file=...> or <source dev=...>
+// path, and by {pool, volume} for a volume disk: the level-0 format of each
+// disk's image chain, from the definition, for the chain walks.
+func (d *domainDisksDoc) diskSourceFormats() (byPath map[string]string, byVolume map[[2]string]string) {
+	byPath, byVolume = map[string]string{}, map[[2]string]string{}
+	for _, e := range d.Devices.Disks {
+		if e.Source == nil {
+			continue
+		}
+		for _, p := range []string{e.Source.File, e.Source.Dev} {
+			if p != "" {
+				byPath[p] = e.format()
+			}
+		}
+		if e.Source.Pool != "" && e.Source.Volume != "" {
+			byVolume[[2]string{e.Source.Pool, e.Source.Volume}] = e.format()
+		}
+	}
+	return byPath, byVolume
+}
+
+// format returns the format the element's own <driver type=...> names, or
+// libvirt's raw when it names none (libvirt's QEMU driver never probes a
+// disk's format).
+func (e domainDiskElem) format() string {
+	if e.Driver != nil {
+		if t := strings.TrimSpace(e.Driver.Type); t != "" {
+			return t
+		}
+	}
+	return libvirtDefaultDiskFormat
+}
+
+// diskFormat returns the format the domain opens its file-backed disk path
+// in (domainDiskElem.format), or "" when path is not the own <source> of one
+// of its file-backed <disk> elements. It is the format every root read of the
+// disk pins (-f): a copy, GetDiskInfo, and the image chain walks — never a
+// format probed from the file, which a guest writes.
+func (d *domainDisksDoc) diskFormat(path string) string {
+	for _, e := range d.Devices.Disks {
+		if f := e.file(); f != "" && f == path {
+			return e.format()
+		}
+	}
+	return ""
 }
 
 // parseDomainDisks decodes a `virsh dumpxml` document. A document whose root is

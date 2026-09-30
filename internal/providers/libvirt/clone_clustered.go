@@ -398,7 +398,7 @@ func (p *Provider) cloneOnHost(ctx context.Context, vp *VirshProvider, c libvirt
 	// (createFullCopyGuarded). A failure from here on is not retried as a
 	// transient read (cloneBeforeCopyFailure).
 	*copyStarted = true
-	if err := createFullCopyGuarded(ctx, vp, lock, srcDiskPath, cloneSourceFormat(srcXML.Stdout, srcDiskPath), targetDiskPath); err != nil {
+	if err := createFullCopyGuarded(ctx, vp, lock, srcDiskPath, definitionDiskFormat(srcXML.Stdout, srcDiskPath), targetDiskPath); err != nil {
 		return contracts.CloneResponse{}, err
 	}
 	// From here the disk is a complete copy of the source's: any failure

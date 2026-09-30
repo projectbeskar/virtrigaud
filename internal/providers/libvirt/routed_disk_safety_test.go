@@ -109,7 +109,7 @@ func TestClustered_Snapshots_RefusedWhileADiskHasDependents(t *testing.T) {
 			assert.NotContains(t, st.Message(), dependentDomain, "another domain (maybe another tenant's) is never named")
 			assert.NotContains(t, st.Message(), "/var/lib", "no host path on the wire")
 			calls := fx.calls()
-			assert.Contains(t, calls, "local sudo -n qemu-img info -U --output=json -- "+dependentDisk,
+			assert.Contains(t, calls, "local sudo -n qemu-img info -U -f qcow2 --output=json -- "+dependentDisk,
 				"the other domain's disk chain was read on the leased host")
 			for _, c := range calls {
 				for _, verb := range scdMutatingSnapshotVerbs {

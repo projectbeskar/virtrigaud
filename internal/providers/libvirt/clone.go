@@ -224,7 +224,7 @@ func (p *Provider) Clone(ctx context.Context, req contracts.CloneRequest) (contr
 	} else {
 		// The copy opens the source in the format its definition names when
 		// it runs as root (privileged_copy.go).
-		srcFormat := cloneSourceFormat(srcXML.Stdout, srcDiskPath)
+		srcFormat := definitionDiskFormat(srcXML.Stdout, srcDiskPath)
 		if err := createFullCopy(ctx, p.virshProvider, srcDiskPath, srcFormat, targetDiskPath); err != nil {
 			return contracts.CloneResponse{}, err
 		}
@@ -300,13 +300,23 @@ const defaultDiskFormat = "qcow2"
 // standard format is used; the name-based lookup never yields another answer
 // anyway, as GetVolumeInfo does not report a format.
 func resolveDomainDisksOn(ctx context.Context, vp *VirshProvider, d domainTarget, sp *StorageProvider) ([]string, string, error) {
-	diskPaths, derr := domainDiskPaths(ctx, vp, d.handle)
+	_, diskPaths, format, err := resolveDomainDisksDocOn(ctx, vp, d, sp)
+	return diskPaths, format, err
+}
+
+// resolveDomainDisksDocOn is resolveDomainDisksOn that also returns the
+// definition it read the disks from, for the format each disk is opened in
+// (domainDisksDoc.diskFormat). It runs exactly the commands
+// resolveDomainDisksOn runs.
+func resolveDomainDisksDocOn(ctx context.Context, vp *VirshProvider, d domainTarget, sp *StorageProvider) (*domainDisksDoc, []string, string, error) {
+	doc, derr := domainDisksOf(ctx, vp, d.handle)
 	if derr != nil {
-		return nil, "", contracts.NewRetryableError(
+		return nil, nil, "", contracts.NewRetryableError(
 			fmt.Sprintf("failed to read disks for source VM %q", d.name), derr)
 	}
+	diskPaths := doc.diskFiles()
 	if len(diskPaths) == 0 {
-		return nil, "", contracts.NewInvalidSpecError(
+		return nil, nil, "", contracts.NewInvalidSpecError(
 			fmt.Sprintf("source VM %q has no usable disk to clone", d.name), nil)
 	}
 
@@ -314,12 +324,12 @@ func resolveDomainDisksOn(ctx context.Context, vp *VirshProvider, d domainTarget
 	// qcow2 (the provider's standard) when unavailable.
 	format := defaultDiskFormat
 	if d.diskByPath {
-		return diskPaths, format, nil
+		return doc, diskPaths, format, nil
 	}
 	if vol, verr := sp.GetVolumeInfo(ctx, clonePoolName, vmDiskVolumeName(d.name)); verr == nil && vol.Format != "" {
 		format = vol.Format
 	}
-	return diskPaths, format, nil
+	return doc, diskPaths, format, nil
 }
 
 // createLinkedOverlay creates a copy-on-write qcow2 overlay backed by the

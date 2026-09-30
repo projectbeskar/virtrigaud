@@ -18,15 +18,17 @@ package libvirt
 
 import (
 	"context"
-	"encoding/xml"
 	"fmt"
 	"log"
 	"net/url"
 	"regexp"
+	"slices"
 	"strings"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+
+	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
 )
 
 // Privileged disk copies (ADR-0007 Slice 5 lab, B1).
@@ -172,26 +174,33 @@ func (c diskCopy) run(ctx context.Context, h hostCommandRunner, guard *hostCmdGu
 	return c.runAsSSHUser(ctx, h, guard)
 }
 
-// readDiskInfoOnHost runs `qemu-img info -U --output=json <path>` on the host
-// behind h for GetDiskInfo (ADR-0007 Slice 5 lab follow-up). A disk named by
-// the domain's own definition (ownDisk) is read the way the disk in-use check
-// reads it: once it is confirmed not to be a device, FIFO or other
-// non-regular file (checkChainFileKind), through passwordless sudo, falling
-// back to the SSH user when sudo refuses (qemuImgInfoOnHost; the documented
-// `qemu-img info -U *` rule). So the sizes of a snapshotted VM's 0600
+// readDiskInfoOnHost runs `qemu-img info -U ... <path>` on the host behind h
+// for GetDiskInfo (ADR-0007 Slice 5 lab follow-up). A disk named by the
+// domain's own definition (ownFormat: its definition format, "" for any other
+// path) is read in that format (-f; never probed, so a guest's raw disk is
+// never read as a qcow2 header it wrote) and, for qcow2 and raw, the way the
+// disk in-use check reads it: once it is confirmed not to be a device, FIFO or
+// other non-regular file (checkChainFileKind), through passwordless sudo,
+// falling back to the SSH user when sudo refuses (qemuImgInfoOnHost; the
+// documented `qemu-img info` rule). So the sizes of a snapshotted VM's 0600
 // libvirt-qemu overlay are read during an export instead of reported as 0.
-// qemu-img info opens no backing file. Any other path — an explicit disk path
-// a single-host caller passed — is read as the SSH user, as before: root
+// qemu-img info opens no backing file. A disk of another format is read as
+// the SSH user, its format still pinned. Any other path — an explicit disk
+// path a single-host caller passed — is read as the SSH user, as before: root
 // never opens a caller-supplied path.
-func readDiskInfoOnHost(ctx context.Context, h hostCommandRunner, path string, ownDisk bool) (*VirshResult, error) {
-	if ownDisk {
+func readDiskInfoOnHost(ctx context.Context, h hostCommandRunner, path, ownFormat string) (*VirshResult, error) {
+	if ownFormat == "" {
+		return runHost(ctx, h, "qemu-img", "info", "-U", "--output=json", path)
+	}
+	args := []string{"-U", "-f", ownFormat, "--output=json", "--", path}
+	if privilegedSourceFormats[ownFormat] {
 		if err := checkChainFileKind(ctx, h, path); err != nil {
 			log.Printf("WARN Reading disk info of %s as the provider's SSH user, not as root: %v", path, err)
 		} else {
-			return qemuImgInfoOnHost(ctx, h, "-U", "--output=json", path)
+			return qemuImgInfoOnHost(ctx, h, args...)
 		}
 	}
-	return runHost(ctx, h, "qemu-img", "info", "-U", "--output=json", path)
+	return runHost(ctx, h, append([]string{"qemu-img", "info"}, args...)...)
 }
 
 // copyStderr formats a failed copy's stderr for the provider's log (" (qemu-img
@@ -254,39 +263,41 @@ func checkCopySource(ctx context.Context, h hostCommandRunner, src, format strin
 	return nil
 }
 
-// cloneSourceDiskDoc is the part of a domain definition cloneSourceFormat
-// reads: each top-level disk's type, source file and driver format.
-type cloneSourceDiskDoc struct {
-	XMLName xml.Name `xml:"domain"`
-	Disks   []struct {
-		Type   string `xml:"type,attr"`
-		Driver *struct {
-			Type string `xml:"type,attr"`
-		} `xml:"driver"`
-		Source *struct {
-			File string `xml:"file,attr"`
-		} `xml:"source"`
-	} `xml:"devices>disk"`
-}
-
-// cloneSourceFormat returns the format domainXML opens the file-backed disk
-// diskPath in — its <driver type=...>, libvirt's raw when it names none — or ""
-// when the definition cannot be read or has no such disk.
-func cloneSourceFormat(domainXML, diskPath string) string {
-	var doc cloneSourceDiskDoc
-	if err := xml.Unmarshal([]byte(domainXML), &doc); err != nil {
+// definitionDiskFormat returns the format domainXML opens the file-backed
+// disk diskPath in — its <driver type=...>, libvirt's raw when it names none
+// (domainDisksDoc.diskFormat) — or "" when the definition cannot be read or
+// has no such disk.
+func definitionDiskFormat(domainXML, diskPath string) string {
+	doc, err := parseDomainDisks(domainXML)
+	if err != nil {
 		return ""
 	}
-	for _, d := range doc.Disks {
-		if d.Type != diskTypeFile || d.Source == nil || d.Source.File != diskPath {
-			continue
-		}
-		if d.Driver != nil && strings.TrimSpace(d.Driver.Type) != "" {
-			return strings.TrimSpace(d.Driver.Type)
-		}
-		return libvirtDefaultDiskFormat
+	return doc.diskFormat(diskPath)
+}
+
+// exportSourceOn resolves the disk an s3/nfs export of domain d on vp's host
+// reads, and the format its definition opens it in: the primary disk, or —
+// when diskID names a path — that path, which must be one of the domain's
+// own disks (any other file on the host is never read, as root or not). The
+// export pins that format (-f) and is refused for a format other than qcow2
+// or raw (checkCopySource).
+func exportSourceOn(ctx context.Context, vp *VirshProvider, d domainTarget, diskID string) (string, string, error) {
+	doc, err := domainDisksOf(ctx, vp, d.handle)
+	if err != nil {
+		return "", "", contracts.NewRetryableError(fmt.Sprintf("failed to read disks for source VM %q", d.name), err)
 	}
-	return ""
+	disks := doc.diskFiles()
+	if len(disks) == 0 {
+		return "", "", contracts.NewInvalidSpecError(fmt.Sprintf("source VM %q has no usable disk to export", d.name), nil)
+	}
+	path := disks[0]
+	if strings.Contains(diskID, "/") {
+		if !slices.Contains(disks, diskID) {
+			return "", "", contracts.NewInvalidSpecError(fmt.Sprintf("disk %q is not a disk of VM %q", diskID, d.name), nil)
+		}
+		path = diskID
+	}
+	return path, doc.diskFormat(path), nil
 }
 
 // fullCloneCopy is a full clone's copy of srcDiskPath (opened as srcFormat by

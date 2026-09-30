@@ -511,11 +511,19 @@ func (h *fakeHost) log(tool string) string {
 	return string(b)
 }
 
+// diskDomainXML is a domain definition whose file-backed disks are sources,
+// each opened as qcow2 (libvirt records the driver type of every disk it
+// defines).
 func diskDomainXML(sources ...string) string {
+	return typedDiskDomainXML("qcow2", sources...)
+}
+
+// typedDiskDomainXML is diskDomainXML with every disk opened in format.
+func typedDiskDomainXML(format string, sources ...string) string {
 	var b strings.Builder
 	b.WriteString("<domain type='kvm'><name>d</name><devices>")
 	for _, s := range sources {
-		b.WriteString("<disk type='file' device='disk'><source file='" + s + "'/></disk>")
+		b.WriteString("<disk type='file' device='disk'><driver name='qemu' type='" + format + "'/><source file='" + s + "'/></disk>")
 	}
 	b.WriteString("</devices></domain>")
 	return b.String()
@@ -823,7 +831,7 @@ func TestConfine_ShutOffDomainBackingChainIsInUse(t *testing.T) {
 		requireRejected(t, err, "existing VM")
 	}
 	qlog := h.log("qemu-img")
-	assert.Contains(t, qlog, "info -U --output=json -- "+overlay, "one image at a time")
+	assert.Contains(t, qlog, "info -U -f qcow2 --output=json -- "+overlay, "one image at a time, in the format its definition names")
 	assert.Contains(t, qlog, "info -U -f qcow2 --output=json -- "+base, "in the format its parent's header names")
 	assert.NotContains(t, qlog, "--backing-chain")
 

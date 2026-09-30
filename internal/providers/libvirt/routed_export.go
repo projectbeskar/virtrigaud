@@ -98,12 +98,11 @@ func (p *Provider) exportDiskRouted(ctx context.Context, req *providerv1.ExportD
 		if err != nil {
 			return err
 		}
-		info, err := diskInfoOn(bctx, vp, d, contracts.GetDiskInfoRequest{VM: vm, DiskId: req.DiskId, SnapshotId: req.SnapshotId})
+		// The domain's own disk and the format its definition opens it in:
+		// the export pins it (-f), as root or as the SSH user.
+		srcPath, srcFormat, err := exportSourceOn(bctx, vp, d, req.DiskId)
 		if err != nil {
-			return fmt.Errorf("failed to resolve source disk info: %w", err)
-		}
-		if info.Path == "" {
-			return fmt.Errorf("source disk %q has no resolvable host path", req.DiskId)
+			return fmt.Errorf("failed to resolve the source disk: %w", err)
 		}
 		// One export of a domain at a time, under a lock in the provider's
 		// own lock directory (never next to the source disk).
@@ -114,12 +113,12 @@ func (p *Provider) exportDiskRouted(ctx context.Context, req *providerv1.ExportD
 		guard := guardFor(bctx, lock)
 		var r *providerv1.ExportDiskResponse
 		if req.BackendType == migration.BackendNFS {
-			r, err = exportConvertToNFS(bctx, c, req, info.Path, guard)
+			r, err = exportConvertToNFS(bctx, c, req, srcPath, srcFormat, guard)
 		} else {
 			// The s3 export stages its flattened copy next to the source disk:
 			// warn once when others can write that directory (#358's check).
-			vp.warnIfDiskDirUnsafe(bctx, filepath.Dir(info.Path))
-			r, err = exportFlattenToS3(bctx, c, req, d.name, info.Path, guard)
+			vp.warnIfDiskDirUnsafe(bctx, filepath.Dir(srcPath))
+			r, err = exportFlattenToS3(bctx, c, req, d.name, srcPath, srcFormat, guard)
 		}
 		if r != nil && r.Task != nil {
 			r.Task.Id = encodeHostTaskRef(c.HostID(), r.Task.Id)

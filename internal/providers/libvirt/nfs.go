@@ -25,7 +25,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
 	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
 )
 
@@ -52,20 +51,17 @@ func (s *Server) exportDiskToNFS(ctx context.Context, req *providerv1.ExportDisk
 		return nil, fmt.Errorf("nfs export destination must be an nfs:// URL, got %q", nfsURL)
 	}
 
-	// Resolve the source disk path on the host.
-	diskInfo, err := s.provider.GetDiskInfo(ctx, contracts.GetDiskInfoRequest{
-		VM:         contracts.VMRef{ID: req.VmId, HostID: req.TargetHostId},
-		DiskId:     req.DiskId,
-		SnapshotId: req.SnapshotId,
-	})
+	// The source is one of the domain's own disks, read in the format its
+	// definition names (exportSourceOn).
+	vp, err := virshOf(conn)
 	if err != nil {
-		return nil, fmt.Errorf("failed to resolve source disk info: %w", err)
+		return nil, err
 	}
-	srcPath := diskInfo.Path
-	if srcPath == "" {
-		return nil, fmt.Errorf("source disk %q has no resolvable host path", req.DiskId)
+	srcPath, srcFormat, err := exportSourceOn(ctx, vp, byName(req.VmId), req.DiskId)
+	if err != nil {
+		return nil, fmt.Errorf("failed to resolve the source disk: %w", err)
 	}
-	return exportConvertToNFS(ctx, conn, req, srcPath, nil)
+	return exportConvertToNFS(ctx, conn, req, srcPath, srcFormat, nil)
 }
 
 // exportConvertToNFS is the NFS export core, run on conn — the single host's
@@ -81,7 +77,8 @@ func (s *Server) exportDiskToNFS(ctx context.Context, req *providerv1.ExportDisk
 // (nfsURLWithHostIdentity) — the identity the export has always used, which a
 // root_squash export would otherwise replace with its anonymous user.
 // Otherwise the historical convert runs as the SSH user, unchanged.
-func exportConvertToNFS(ctx context.Context, conn libvirtConn, req *providerv1.ExportDiskRequest, srcPath string, guard *hostCmdGuard) (*providerv1.ExportDiskResponse, error) {
+func exportConvertToNFS(ctx context.Context, conn libvirtConn, req *providerv1.ExportDiskRequest, srcPath, srcFormat string,
+	guard *hostCmdGuard) (*providerv1.ExportDiskResponse, error) {
 	nfsURL := strings.TrimSpace(req.DestinationUrl)
 
 	log.Printf("INFO Exporting disk from libvirt host to NFS: backend=nfs vm=%s src=%s dest=%s",
@@ -97,13 +94,13 @@ func exportConvertToNFS(ctx context.Context, conn libvirtConn, req *providerv1.E
 	h := hostConnRunner{conn: conn}
 	convert := diskCopy{
 		src:       srcPath,
-		srcFormat: "qcow2",
-		args:      []string{"convert", "-U", "-f", "qcow2", "-O", "qcow2", srcPath, nfsURL},
+		srcFormat: srcFormat,
+		args:      []string{"convert", "-U", "-f", srcFormat, "-O", "qcow2", srcPath, nfsURL},
 	}
 	if rootURL, err := nfsURLWithHostIdentity(ctx, h, nfsURL); err != nil {
 		log.Printf("WARN Exporting %s to NFS as the provider's SSH user, not as root: %v", srcPath, err)
 	} else {
-		convert.privArgs = []string{"convert", "-U", "-f", "qcow2", "-O", "qcow2", srcPath, rootURL}
+		convert.privArgs = []string{"convert", "-U", "-f", srcFormat, "-O", "qcow2", srcPath, rootURL}
 	}
 	if res, err := convert.run(ctx, h, guard); err != nil {
 		var roe *routedOpError

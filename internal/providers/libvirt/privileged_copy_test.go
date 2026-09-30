@@ -314,14 +314,14 @@ func TestClustered_Export_SnapshotOverlaySourceIsReadAsRoot(t *testing.T) {
 	})
 }
 
-func TestCloneSourceFormat(t *testing.T) {
+func TestDefinitionDiskFormat(t *testing.T) {
 	xml := scdDomainXML(scdDomain, scdDomainOpts{})
-	assert.Equal(t, "qcow2", cloneSourceFormat(xml, scdDiskPath))
-	assert.Equal(t, "raw", cloneSourceFormat(strings.Replace(xml, "<driver name='qemu' type='qcow2'/>", "<driver name='qemu'/>", 1), scdDiskPath),
+	assert.Equal(t, "qcow2", definitionDiskFormat(xml, scdDiskPath))
+	assert.Equal(t, "raw", definitionDiskFormat(strings.Replace(xml, "<driver name='qemu' type='qcow2'/>", "<driver name='qemu'/>", 1), scdDiskPath),
 		"libvirt opens a file disk without a format as raw; so does the copy")
-	assert.Equal(t, "raw", cloneSourceFormat(xml, scdSeedISO), "the CD-ROM's own driver")
-	assert.Empty(t, cloneSourceFormat(xml, "/var/lib/libvirt/images/other.qcow2"), "not a disk of the domain")
-	assert.Empty(t, cloneSourceFormat("<not-xml", scdDiskPath))
+	assert.Equal(t, "raw", definitionDiskFormat(xml, scdSeedISO), "the CD-ROM's own driver")
+	assert.Empty(t, definitionDiskFormat(xml, "/var/lib/libvirt/images/other.qcow2"), "not a disk of the domain")
+	assert.Empty(t, definitionDiskFormat("<not-xml", scdDiskPath))
 }
 
 // refusedCopy asserts err is a copyRefusedError whose reason contains want.
