@@ -375,6 +375,8 @@
       "single virsh dumpxml vrgold-web",
       "single virsh vol-info vrgold-web-disk --pool default",
       "single virsh vol-path vrgold-web-disk --pool default",
+      "local sh -c if [ -f \"$1\" ]; then echo file; elif [ -e \"$1\" ]; then echo other; fi sh /var/lib/libvirt/images/vrgold-web-disk.qcow2",
+      "local sudo -n qemu-img info -U --output=json /var/lib/libvirt/images/vrgold-web-disk.qcow2",
       "local qemu-img info -U --output=json /var/lib/libvirt/images/vrgold-web-disk.qcow2",
       "single virsh snapshot-list vrgold-web --name"
     ],
@@ -393,6 +395,8 @@
       "single virsh dumpxml vrgold-web",
       "single virsh vol-info vrgold-web-disk --pool default",
       "single virsh vol-path vrgold-web-disk --pool default",
+      "local sh -c if [ -f \"$1\" ]; then echo file; elif [ -e \"$1\" ]; then echo other; fi sh /var/lib/libvirt/images/vrgold-web-disk.qcow2",
+      "local sudo -n qemu-img info -U --output=json /var/lib/libvirt/images/vrgold-web-disk.qcow2",
       "local qemu-img info -U --output=json /var/lib/libvirt/images/vrgold-web-disk.qcow2",
       "single virsh snapshot-list vrgold-web --name"
     ],
@@ -404,6 +408,8 @@
       "single virsh dumpxml vrgold-web",
       "single virsh vol-info vrgold-web-disk --pool default",
       "single virsh vol-path vrgold-web-disk --pool default",
+      "local sh -c if [ -f \"$1\" ]; then echo file; elif [ -e \"$1\" ]; then echo other; fi sh /var/lib/libvirt/images/vrgold-web-disk.qcow2",
+      "local sudo -n qemu-img info -U --output=json /var/lib/libvirt/images/vrgold-web-disk.qcow2",
       "local qemu-img info -U --output=json /var/lib/libvirt/images/vrgold-web-disk.qcow2",
       "single virsh snapshot-list vrgold-web --name"
     ],
@@ -415,6 +421,8 @@
       "single virsh dumpxml vrgold-web",
       "single virsh vol-info vrgold-web-disk --pool default",
       "single virsh vol-path vrgold-web-disk --pool default",
+      "local sh -c if [ -f \"$1\" ]; then echo file; elif [ -e \"$1\" ]; then echo other; fi sh /var/lib/libvirt/images/vrgold-web-disk.qcow2",
+      "local sudo -n qemu-img info -U --output=json /var/lib/libvirt/images/vrgold-web-disk.qcow2",
       "local qemu-img info -U --output=json /var/lib/libvirt/images/vrgold-web-disk.qcow2",
       "single virsh snapshot-list vrgold-web --name"
     ],
@@ -426,6 +434,8 @@
       "single virsh dumpxml vrgold-web",
       "single virsh vol-info vrgold-web-disk --pool default",
       "single virsh vol-path vrgold-web-disk --pool default",
+      "local sh -c if [ -f \"$1\" ]; then echo file; elif [ -e \"$1\" ]; then echo other; fi sh /var/lib/libvirt/images/vrgold-web-disk.qcow2",
+      "local sudo -n qemu-img info -U --output=json /var/lib/libvirt/images/vrgold-web-disk.qcow2",
       "local qemu-img info -U --output=json /var/lib/libvirt/images/vrgold-web-disk.qcow2",
       "single virsh snapshot-list vrgold-web --name"
     ],
@@ -442,6 +452,8 @@
       "single virsh dumpxml vrgold-web",
       "single virsh vol-info vrgold-web-disk --pool default",
       "single virsh vol-path vrgold-web-disk --pool default",
+      "local sh -c if [ -f \"$1\" ]; then echo file; elif [ -e \"$1\" ]; then echo other; fi sh /var/lib/libvirt/images/vrgold-web-disk.qcow2",
+      "local sudo -n qemu-img info -U --output=json /var/lib/libvirt/images/vrgold-web-disk.qcow2",
       "local qemu-img info -U --output=json /var/lib/libvirt/images/vrgold-web-disk.qcow2",
       "single virsh snapshot-list vrgold-web --name",
       "local qemu-img convert -p -f qcow2 -O qcow2 -c /var/lib/libvirt/images/vrgold-web-disk.qcow2 /tmp/export-vrgold-web-\u003cunix\u003e.qcow2"
@@ -454,6 +466,8 @@
       "single virsh dumpxml vrgold-web",
       "single virsh vol-info vrgold-web-disk --pool default",
       "single virsh vol-path vrgold-web-disk --pool default",
+      "local sh -c if [ -f \"$1\" ]; then echo file; elif [ -e \"$1\" ]; then echo other; fi sh /var/lib/libvirt/images/vrgold-web-disk.qcow2",
+      "local sudo -n qemu-img info -U --output=json /var/lib/libvirt/images/vrgold-web-disk.qcow2",
       "local qemu-img info -U --output=json /var/lib/libvirt/images/vrgold-web-disk.qcow2",
       "single virsh snapshot-list vrgold-web --name"
     ],
@@ -465,6 +479,8 @@
       "single virsh dumpxml vrgold-web",
       "single virsh vol-info vrgold-web-disk --pool default",
       "single virsh vol-path vrgold-web-disk --pool default",
+      "local sh -c if [ -f \"$1\" ]; then echo file; elif [ -e \"$1\" ]; then echo other; fi sh /var/lib/libvirt/images/vrgold-web-disk.qcow2",
+      "local sudo -n qemu-img info -U --output=json /var/lib/libvirt/images/vrgold-web-disk.qcow2",
       "local qemu-img info -U --output=json /var/lib/libvirt/images/vrgold-web-disk.qcow2",
       "single virsh snapshot-list vrgold-web --name"
     ],
@@ -476,6 +492,8 @@
       "single virsh dumpxml vrgold-web",
       "single virsh vol-info vrgold-web-disk --pool default",
       "single virsh vol-path vrgold-web-disk --pool default",
+      "local sh -c if [ -f \"$1\" ]; then echo file; elif [ -e \"$1\" ]; then echo other; fi sh /var/lib/libvirt/images/vrgold-web-disk.qcow2",
+      "local sudo -n qemu-img info -U --output=json /var/lib/libvirt/images/vrgold-web-disk.qcow2",
       "local qemu-img info -U --output=json /var/lib/libvirt/images/vrgold-web-disk.qcow2",
       "single virsh snapshot-list vrgold-web --name"
     ],
