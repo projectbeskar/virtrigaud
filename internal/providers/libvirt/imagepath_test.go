@@ -877,6 +877,27 @@ func TestCreateVolumeFromImageFile_RejectsCraftedImport(t *testing.T) {
 	assert.Contains(t, h.log("qemu-img"), "info --output=json -f qcow2 -- "+inPool)
 }
 
+// TestCreateVolumeFromImageFile_AdoptInPlaceReadsAsQcow2: an imported disk
+// attached in place has its size read (through sudo, as root when allowed) in
+// the qcow2 format the import verified — its format is never probed.
+func TestCreateVolumeFromImageFile_AdoptInPlaceReadsAsQcow2(t *testing.T) {
+	h := newFakeHost(t)
+	vp := h.host("h1")
+	inPool := h.file(h.images, "web-migrated.qcow2")
+	h.info(inPool, `{"format":"qcow2","virtual-size":1073741824}`)
+
+	vol, err := NewStorageProvider(vp).CreateVolumeFromImageFile(context.Background(), inPool, "web-migrated", "default", 0)
+	require.NoError(t, err)
+	assert.Equal(t, "1.00 GiB", vol.Capacity)
+	qlog := splitLines(h.log("qemu-img"))
+	assert.Contains(t, qlog, "info -U -f qcow2 --output=json -- "+inPool)
+	for _, l := range qlog {
+		if strings.HasPrefix(l, "info -U") {
+			assert.Contains(t, l, " -f qcow2 ", "never a format probe: %q", l)
+		}
+	}
+}
+
 // TestImagePrepare_ExistingTargetInUseIsRejected covers the upgrade story: an
 // earlier release attached a prepared image in place as the first VM's disk,
 // so the "already prepared" short-circuit must not hand it out again.
