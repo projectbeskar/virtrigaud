@@ -70,13 +70,15 @@ func (s *Server) exportDiskToNFS(ctx context.Context, req *providerv1.ExportDisk
 // nfs:// destination. guard wraps the convert (flock + timeout on a clustered
 // host, routed_budget.go); a nil guard is the single-host path.
 //
-// The source is read as root when its chain is safe for root to read and
-// passwordless sudo allows it (privileged_copy.go): a snapshotted VM's active
-// disk is libvirt's 0600 overlay, which the SSH user cannot read. The root
-// qemu-img reaches the NFS server with the SSH user's uid and gid
-// (nfsURLWithHostIdentity) — the identity the export has always used, which a
-// root_squash export would otherwise replace with its anonymous user.
-// Otherwise the historical convert runs as the SSH user, unchanged.
+// The source is read as root when passwordless sudo allows it
+// (privileged_copy.go; a chain that is not safe to copy is refused): a
+// snapshotted VM's active disk is libvirt's 0600 overlay, which the SSH user
+// cannot read. The root qemu-img writes to the destination's server and path
+// with exactly the SSH user's uid and gid and no other libnfs option
+// (nfsURLForRoot) — the identity the export has always used. A destination
+// that names another uid or gid (a VMMigration's spec.storage.nfs.uid/gid) is
+// never written as root: the convert runs as the SSH user, which presents
+// that identity as it always has, with the source format still pinned.
 func exportConvertToNFS(ctx context.Context, conn libvirtConn, req *providerv1.ExportDiskRequest, srcPath, srcFormat string,
 	guard *hostCmdGuard) (*providerv1.ExportDiskResponse, error) {
 	nfsURL := strings.TrimSpace(req.DestinationUrl)
@@ -97,7 +99,7 @@ func exportConvertToNFS(ctx context.Context, conn libvirtConn, req *providerv1.E
 		srcFormat: srcFormat,
 		args:      []string{"convert", "-U", "-f", srcFormat, "-O", "qcow2", srcPath, nfsURL},
 	}
-	if rootURL, err := nfsURLWithHostIdentity(ctx, h, nfsURL); err != nil {
+	if rootURL, err := nfsURLForRoot(ctx, h, nfsURL); err != nil {
 		log.Printf("WARN Exporting %s to NFS as the provider's SSH user, not as root: %v", srcPath, err)
 	} else {
 		convert.privArgs = []string{"convert", "-U", "-f", srcFormat, "-O", "qcow2", srcPath, rootURL}

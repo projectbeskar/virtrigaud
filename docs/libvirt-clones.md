@@ -312,10 +312,24 @@ disk export — therefore run `qemu-img convert` through passwordless
   `flock` on the clone's (or export's) lock file **outside** `sudo`, and
   `timeout(1)` runs **inside** `sudo`, so it can stop — and after 10 s kill —
   the root `qemu-img` when the call's time budget runs out.
-- An nfs export reaches the NFS server with the SSH user's uid and gid (added
-  to the `nfs://` URL as libnfs `uid=`/`gid=` unless the URL names them), the
-  identity it has always used — never uid 0, which a `root_squash` export
-  would map to its anonymous user.
+- An nfs export that runs as root writes to the destination's server and
+  path with **exactly** the SSH user's uid and gid as its libnfs query,
+  `?uid=<uid>&gid=<gid>`. Every other libnfs option in the URL is dropped.
+  This is the identity the export has always used. libnfs presents the
+  process's own uid and gid by default: for root that is uid 0, which a
+  `root_squash` export maps to its anonymous user and a `no_root_squash`
+  export does not.
+  - When the `VMMigration` names another identity
+    (`spec.storage.nfs.uid`/`gid`, for example the export owner's that a
+    cross-provider migration sets), the export **never runs as root**. The SSH
+    user's own `qemu-img` presents that identity, as it always has, with the
+    source format still pinned. A VM with an external snapshot therefore cannot
+    be exported to NFS with such an identity. To export one, leave `uid`/`gid`
+    unset or set them to the SSH user's.
+  - `uid: 0` and `gid: 0` are refused at `Validating` when the source or target
+    is a libvirt Provider (`NFSRootIdentityNotAllowed`). AUTH_SYS identities
+    are whatever the client claims, so on an export without `root_squash` they
+    would be root, able to read or overwrite every file there.
 - **When `sudo` refuses** (no passwordless rule for the command, or no `sudo`
   at all), the copy runs as the SSH user, exactly as before: a disk the SSH
   user can read is copied as it always was; the overlay of a snapshotted VM
@@ -333,7 +347,7 @@ random part `mktemp` picks):
 | Full clone, single-host | `qemu-img convert -f <qcow2\|raw> -O qcow2 <source disk> <pool dir>/.virtrigaud-write-XXXXXXXXXX/<clone domain>-disk.qcow2` |
 | Full clone, clustered | `timeout --kill-after=10s <N>s qemu-img convert -f <qcow2\|raw> -O qcow2 <source disk> <pool dir>/.virtrigaud-write-XXXXXXXXXX/<clone domain>-disk.qcow2` |
 | s3 export | `[timeout --kill-after=10s <N>s] qemu-img convert -U -f qcow2 -O qcow2 <source disk> <source dir>/.virtrigaud-write-XXXXXXXXXX/.virtrigaud-export-<vm>.qcow2` |
-| nfs export | `[timeout --kill-after=10s <N>s] qemu-img convert -U -f qcow2 -O qcow2 <source disk> nfs://<server>/<path>?uid=<uid>&gid=<gid>` |
+| nfs export | `[timeout --kill-after=10s <N>s] qemu-img convert -U -f <qcow2\|raw> -O qcow2 <source disk> nfs://<server>/<path>?uid=<SSH user's uid>&gid=<SSH user's gid>` |
 
 (`timeout` appears on a clustered Provider only.)
 
@@ -353,13 +367,17 @@ of `qemu-img` and `timeout`):
 Cmnd_Alias VR_DISK_READ = /usr/bin/qemu-img info -U *
 Cmnd_Alias VR_CLONE_COPY = /usr/bin/qemu-img ^convert -f (qcow2|raw) -O qcow2 /var/lib/libvirt/images/[^/ ]+ /var/lib/libvirt/images/\.virtrigaud-write-[A-Za-z0-9]{10}/[^/ ]+\.qcow2$, \
     /usr/bin/timeout ^--kill-after=10s [0-9]+s qemu-img convert -f (qcow2|raw) -O qcow2 /var/lib/libvirt/images/[^/ ]+ /var/lib/libvirt/images/\.virtrigaud-write-[A-Za-z0-9]{10}/[^/ ]+\.qcow2$
-Cmnd_Alias VR_EXPORT_COPY = /usr/bin/qemu-img ^convert -U -f qcow2 -O qcow2 /var/lib/libvirt/images/[^/ ]+ (/var/lib/libvirt/images/\.virtrigaud-write-[A-Za-z0-9]{10}/\.virtrigaud-export-[^/ ]+\.qcow2|nfs://nfs\.example\.com/exports/virtrigaud/[^ ]+)$, \
-    /usr/bin/timeout ^--kill-after=10s [0-9]+s qemu-img convert -U -f qcow2 -O qcow2 /var/lib/libvirt/images/[^/ ]+ (/var/lib/libvirt/images/\.virtrigaud-write-[A-Za-z0-9]{10}/\.virtrigaud-export-[^/ ]+\.qcow2|nfs://nfs\.example\.com/exports/virtrigaud/[^ ]+)$
+Cmnd_Alias VR_EXPORT_COPY = /usr/bin/qemu-img ^convert -U -f (qcow2|raw) -O qcow2 /var/lib/libvirt/images/[^/ ]+ (/var/lib/libvirt/images/\.virtrigaud-write-[A-Za-z0-9]{10}/\.virtrigaud-export-[^/ ]+\.qcow2|nfs://nfs\.example\.com/exports/virtrigaud/[^?& ]+\?uid=1001&gid=1001)$, \
+    /usr/bin/timeout ^--kill-after=10s [0-9]+s qemu-img convert -U -f (qcow2|raw) -O qcow2 /var/lib/libvirt/images/[^/ ]+ (/var/lib/libvirt/images/\.virtrigaud-write-[A-Za-z0-9]{10}/\.virtrigaud-export-[^/ ]+\.qcow2|nfs://nfs\.example\.com/exports/virtrigaud/[^?& ]+\?uid=1001&gid=1001)$
 virtrigaud ALL=(root) NOPASSWD: VR_DISK_READ, VR_CLONE_COPY, VR_EXPORT_COPY
 ```
 
-Leave out `VR_EXPORT_COPY` if the host never exports disks (no `VMMigration`
-from it), and the `timeout` lines on a single-host Provider. Check the rule
+Replace `uid=1001&gid=1001` with the SSH user's own `id -u` and `id -g`: the
+nfs part then matches only the URL the provider builds for a root export.
+That URL is the server and path with exactly those two parameters, so no other
+identity and no other libnfs option ever reaches a root `qemu-img`. Leave out
+`VR_EXPORT_COPY` if the host never exports disks (no `VMMigration` from it),
+and leave out the `timeout` lines on a single-host Provider. Check the rule
 with `visudo -c`, then as root with `sudo -l -U virtrigaud <the full command>`
 for a real clone path — `sudo -l` prints the command when the rule allows it.
 A VM disk outside the pool directory (another allowed image directory, a

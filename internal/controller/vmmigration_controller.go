@@ -448,6 +448,13 @@ func (r *VMMigrationReconciler) handleValidatingPhase(ctx context.Context, migra
 	if msg := r.gateMigrationStorageBackend(migration, sourceProvider, targetProvider); msg != "" {
 		return r.transitionToFailed(ctx, migration, msg)
 	}
+	// An nfs identity of uid or gid 0 is root on an export without
+	// root_squash: refused when a libvirt host would present it.
+	if msg := nfsRootIdentityRefusal(migration, sourceProvider, targetProvider); msg != "" {
+		k8s.SetCondition(&migration.Status.Conditions, infrav1beta1.VMMigrationConditionValidating,
+			metav1.ConditionFalse, ReasonNFSRootIdentityNotAllowed, msg)
+		return r.transitionToFailed(ctx, migration, msg)
+	}
 
 	// Validate storage configuration
 	if migration.Spec.Storage != nil {

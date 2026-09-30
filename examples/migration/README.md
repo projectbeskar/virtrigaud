@@ -113,7 +113,11 @@ requirements below):**
   that **owns the export's files** so every leg can read *and* write the same
   staged object. (Proxmox presents them via `setpriv`; libvirt/vSphere via the
   libnfs URL.) Omitting them works only when every leg already presents a trusted
-  uid.
+  uid. `uid: 0` and `gid: 0` are refused when either side is a libvirt Provider
+  (`NFSRootIdentityNotAllowed`): on an export without `root_squash` they are root.
+  A libvirt export runs its `qemu-img` as root, which a VM with an external
+  snapshot needs, only when `uid`/`gid` are unset or equal to the provider's SSH
+  user ([`docs/libvirt-clones.md`](../../docs/libvirt-clones.md#what-the-copies-run-as-root)).
 - **Reachability + ACL.** The server must be reachable from each provider's data
   plane — the hypervisor host/node for libvirt/Proxmox, the provider **pod** for
   vSphere (its egress is a cluster node IP) — and the export ACL must allow those

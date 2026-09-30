@@ -442,23 +442,37 @@ func fullCloneCopy(srcDiskPath, srcFormat, out, targetDiskPath string) diskCopy 
 // posixIDRE is the shape of a uid or gid `id` prints.
 var posixIDRE = regexp.MustCompile(`^[0-9]{1,10}$`)
 
-// nfsURLWithHostIdentity returns nfsURL with the SSH user's uid and gid on the
-// host behind h (`id -u`, `id -g`) as its libnfs uid and gid, unless the URL
-// already names them. qemu-img run as root would otherwise reach the NFS
-// server as uid 0 (squashed to the anonymous user by a root_squash export),
-// not as the identity the export has always used: libnfs sends the uid and
-// gid of the process by default.
-func nfsURLWithHostIdentity(ctx context.Context, h hostCommandRunner, nfsURL string) (string, error) {
-	u, err := url.Parse(nfsURL)
-	if err != nil {
-		return "", fmt.Errorf("parse the nfs destination: %w", err)
+// nfsRootBaseRE is the shape of the server-and-path part of an nfs:// URL a
+// root export writes to: one host and an absolute path, none of the URL
+// delimiters or whitespace the manager's NFS URL builder rejects
+// (migration.NFSURL).
+var nfsRootBaseRE = regexp.MustCompile(`^nfs://[^/?#&\s]+/[^?#&\s]+$`)
+
+// nfsURLForRoot returns the nfs:// URL an nfs export writes to when it runs
+// as root: nfsURL's server and path with EXACTLY the SSH user's uid and gid
+// on the host behind h (`id -u`, `id -g`) as its libnfs query —
+// `?uid=<uid>&gid=<gid>`, the shape the sudoers rule pins — and every other
+// query parameter of nfsURL dropped, so no libnfs option (a port, a debug
+// level, ...) reaches a root qemu-img. libnfs presents the uid and gid of
+// the process by default: root would reach the NFS server as uid 0 (squashed
+// to the anonymous user by a root_squash export, NOT squashed by a
+// no_root_squash one), not as the identity the export has always used.
+//
+// An error means the export must not run as root: nfsURL cannot be read, or
+// names a uid or gid other than the SSH user's (a VMMigration's
+// spec.storage.nfs.uid/gid, which the SSH user's own qemu-img presents, as
+// it always has), or the SSH user's ids cannot be read.
+func nfsURLForRoot(ctx context.Context, h hostCommandRunner, nfsURL string) (string, error) {
+	base, rawQuery, _ := strings.Cut(nfsURL, "?")
+	if !nfsRootBaseRE.MatchString(base) || strings.Contains(rawQuery, "#") {
+		return "", fmt.Errorf("the nfs destination is not a plain nfs://<server>/<path> URL")
 	}
-	q := u.Query()
-	var add []string
+	q, err := url.ParseQuery(rawQuery)
+	if err != nil {
+		return "", fmt.Errorf("parse the nfs destination's query: %w", err)
+	}
+	ids := make(map[string]string, 2)
 	for _, id := range []struct{ key, flag string }{{"uid", "-u"}, {"gid", "-g"}} {
-		if q.Has(id.key) {
-			continue
-		}
 		res, err := runHost(ctx, h, "id", id.flag)
 		if err != nil {
 			return "", fmt.Errorf("read the SSH user's %s on the host: %w", id.key, err)
@@ -467,14 +481,12 @@ func nfsURLWithHostIdentity(ctx context.Context, h hostCommandRunner, nfsURL str
 		if !posixIDRE.MatchString(v) {
 			return "", fmt.Errorf("read the SSH user's %s on the host: unexpected output %q", id.key, v)
 		}
-		add = append(add, id.key+"="+v)
+		for _, named := range q[id.key] {
+			if named != v {
+				return "", fmt.Errorf("the nfs destination names %s %q, not the SSH user's %s", id.key, named, v)
+			}
+		}
+		ids[id.key] = v
 	}
-	if len(add) == 0 {
-		return nfsURL, nil
-	}
-	sep := "?"
-	if strings.Contains(nfsURL, "?") {
-		sep = "&"
-	}
-	return nfsURL + sep + strings.Join(add, "&"), nil
+	return base + "?uid=" + ids["uid"] + "&gid=" + ids["gid"], nil
 }

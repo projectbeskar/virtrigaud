@@ -365,22 +365,45 @@ fi
 	refusedCopy(t, checkCopySource(context.Background(), localHostVP("host-b"), scdOverlayPath, "qcow2"), "without its format")
 }
 
-func TestNFSURLWithHostIdentity(t *testing.T) {
+func TestNFSURLForRoot(t *testing.T) {
 	_ = newRoutedSCD(t, nil) // the fake id: uid scdSSHUID, gid scdSSHGID
 	h := localHostVP("host-b")
 	ctx := context.Background()
+	const dest = "nfs://nas/e/web.qcow2"
+	want := dest + "?uid=" + scdSSHUID + "&gid=" + scdSSHGID
 
-	got, err := nfsURLWithHostIdentity(ctx, h, "nfs://nas/e/web.qcow2")
-	require.NoError(t, err)
-	assert.Equal(t, "nfs://nas/e/web.qcow2?uid="+scdSSHUID+"&gid="+scdSSHGID, got)
+	for _, in := range []string{
+		dest,
+		dest + "?uid=" + scdSSHUID + "&gid=" + scdSSHGID,
+		dest + "?gid=" + scdSSHGID + "&uid=" + scdSSHUID,
+		dest + "?uid=" + scdSSHUID,
+		dest + "?nfsport=2050&mountport=2050&debug=9",
+		dest + "?uid=" + scdSSHUID + "&gid=" + scdSSHGID + "&readahead=131072",
+		dest + "?uid=" + scdSSHUID + "&uid=" + scdSSHUID,
+	} {
+		got, err := nfsURLForRoot(ctx, h, in)
+		require.NoError(t, err, in)
+		assert.Equal(t, want, got, "exactly the SSH user's identity and nothing else: %s", in)
+	}
 
-	got, err = nfsURLWithHostIdentity(ctx, h, "nfs://nas/e/web.qcow2?uid=7")
-	require.NoError(t, err)
-	assert.Equal(t, "nfs://nas/e/web.qcow2?uid=7&gid="+scdSSHGID, got, "an identity the URL names is kept")
-
-	got, err = nfsURLWithHostIdentity(ctx, h, "nfs://nas/e/web.qcow2?gid=8&uid=7")
-	require.NoError(t, err)
-	assert.Equal(t, "nfs://nas/e/web.qcow2?gid=8&uid=7", got, "nothing to add")
+	for _, in := range []string{
+		dest + "?uid=0",
+		dest + "?gid=0",
+		dest + "?uid=0&gid=0",
+		dest + "?uid=7",
+		dest + "?uid=" + scdSSHUID + "&gid=8",
+		dest + "?uid=" + scdSSHUID + "&uid=0",
+		dest + "?uid=" + scdSSHUID + "#frag",
+		dest + "#frag",
+		"nfs://nas",
+		"nfs:///e/web.qcow2",
+		"file:///etc/shadow",
+		"nfs://nas/e/web qcow2",
+		dest + "?uid=%zz",
+	} {
+		_, err := nfsURLForRoot(ctx, h, in)
+		assert.Error(t, err, "never written as root: %s", in)
+	}
 
 	bad := `#!/bin/sh
 echo "uid=1000(x)"
@@ -388,8 +411,58 @@ echo "uid=1000(x)"
 	bin := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(bin, "id"), []byte(bad), 0o755)) //nolint:gosec // test shim must be executable
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
-	_, err = nfsURLWithHostIdentity(ctx, h, "nfs://nas/e/web.qcow2")
+	_, err := nfsURLForRoot(ctx, h, dest)
 	assert.Error(t, err, "an unexpected id output is never put in the URL")
+}
+
+// TestClustered_Export_NFSIdentity: an nfs export runs as root only with
+// exactly the SSH user's uid and gid; a destination naming another identity
+// (a VMMigration's spec.storage.nfs.uid/gid, uid 0 included) is written by
+// the SSH user's own qemu-img, with the source format pinned, as before.
+func TestClustered_Export_NFSIdentity(t *testing.T) {
+	for name, tc := range map[string]struct {
+		dest, rootURL, sshURL string
+	}{
+		"no identity named": {
+			dest:    "nfs://nas/e/web.qcow2",
+			rootURL: "nfs://nas/e/web.qcow2?uid=" + scdSSHUID + "&gid=" + scdSSHGID,
+		},
+		"other libnfs options dropped": {
+			dest:    "nfs://nas/e/web.qcow2?nfsport=2050&debug=9",
+			rootURL: "nfs://nas/e/web.qcow2?uid=" + scdSSHUID + "&gid=" + scdSSHGID,
+		},
+		"the SSH user's identity": {
+			dest:    "nfs://nas/e/web.qcow2?gid=" + scdSSHGID + "&uid=" + scdSSHUID,
+			rootURL: "nfs://nas/e/web.qcow2?uid=" + scdSSHUID + "&gid=" + scdSSHGID,
+		},
+		"uid 0": {
+			dest:   "nfs://nas/e/web.qcow2?uid=0&gid=0",
+			sshURL: "nfs://nas/e/web.qcow2?uid=0&gid=0",
+		},
+		"another identity": {
+			dest:   "nfs://nas/e/web.qcow2?gid=2000&uid=2000",
+			sshURL: "nfs://nas/e/web.qcow2?gid=2000&uid=2000",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			fx := ownedWebOnB(t, scdDomainXML("web", scdDomainOpts{owner: ownerTeamA}))
+			fx.p.hostDiskTransportFn = anyTransport
+			_, err := NewServer(fx.p).ExportDisk(context.Background(), &providerv1.ExportDiskRequest{
+				VmId: "web", TargetHostId: "host-b", Owner: teamAOwner, BackendType: "nfs", DestinationUrl: tc.dest,
+			})
+			require.NoError(t, err)
+			calls := fx.calls()
+			const convert = "qemu-img convert -U -f qcow2 -O qcow2 " + scdDiskPath + " "
+			if tc.rootURL != "" {
+				guardedCall(t, calls, exportLock, nfsExportAsRoot, convert+tc.rootURL)
+				return
+			}
+			assert.Contains(t, calls, "local "+convert+tc.sshURL, "the SSH user's own qemu-img presents the named identity")
+			for _, c := range calls {
+				assert.False(t, strings.Contains(c, "sudo -n") && strings.Contains(c, "convert"), "never a root convert: %q", c)
+			}
+		})
+	}
 }
 
 func TestApplyPrivileged(t *testing.T) {
