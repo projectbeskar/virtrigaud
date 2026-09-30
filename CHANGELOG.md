@@ -31,7 +31,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   A raw disk's chain is never walked. A copy of a disk in any other format is refused. The QEMU CVE-2024-4467 fix is a documented prerequisite.
 - Item 3 (Medium), `privileged_copy.go`, `imagepath.go`, `routing.go`, `clone_clustered.go`: a copy falls back to the SSH user (with `-f <definition format>` pinned) only when sudo itself refuses.
   - `sudoRefused` requires sudo's exit status (1, or 127 for a missing sudo) and every stderr line to be one of sudo's exact messages.
-  - A chain-safety refusal is never followed by the fallback. It is a `copyRefusedError`: `FailedPrecondition`, and `VM_OPERATION_FAILED` with a path-free message on routed calls.
+  - A chain-safety refusal is never followed by the fallback. It is a `copyRefusedError`: `FailedPrecondition`, plus `VM_OPERATION_FAILED` on routed calls.
+  - The refusal message names no host path, file or other VM, on a single host too. It gives a category such as "an image of its chain is a symbolic link"; the provider log has the full reason.
 - Item 4 (Medium), `privileged_copy.go`, `imagepath.go`, `s3export.go`: before a copy opens any image of the source chain, the image must pass all of these, or the copy is refused and nothing is copied, by root or by the SSH user:
   - it is not a symbolic link;
   - it is named with a qcow2 or raw format;
@@ -44,11 +45,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Tests that run real commands use scratch directories (`chmod 0700`).
 
 ### Changed
-- `internal/providers/libvirt/testdata/single_host_snapshot_clone_disk.golden.json`: regenerated in four separate commits. Calls only; no response, error or defined XML changed.
+- `internal/providers/libvirt/testdata/single_host_snapshot_clone_disk.golden.json`: regenerated in five separate commits. Only calls changed, except the one error text noted below; no response or defined XML changed.
   - Item 3: `clone-copy-fails` (refused before any copy) and `clone-copy-sudo-refused` (the fallback pins `-f qcow2`).
   - Item 2: the `diskinfo-*` and `export-pvc-*` scenarios read with `-f qcow2 --`.
   - Item 4: the clone scenarios gain the chain-image and output-directory checks, and the `diskinfo-*`/`export-pvc-*` scenarios gain the disk's chain-image check.
   - Item 4 follow-up: the chain-image check moves before the read.
+  - Path-free refusal: only `clone-copy-fails`' error text changed.
   - `single_host_power_reconfigure` and `single_host_listvms` are byte-identical.
 - Tests:
   - `definition_format_test.go` (forged qcow2 header on a raw disk: clone, exports, GetDiskInfo, in-use scan, Delete; other formats refused);
