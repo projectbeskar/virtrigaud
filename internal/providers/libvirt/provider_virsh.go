@@ -2710,9 +2710,11 @@ func diskInfoOn(ctx context.Context, vp *VirshProvider, d domainTarget, req cont
 
 	// Read virtual + actual size (and confirm format) from the disk file itself
 	// via qemu-img — read-only with -U so a still-running source's write lock is
-	// ignored. Best-effort: sizes default to 0 (status-only) if it fails.
+	// ignored — through passwordless sudo when it is one of the domain's own
+	// disks (readDiskInfoOnHost): a snapshotted VM's active disk is libvirt's
+	// 0600 overlay. Best-effort: sizes default to 0 (status-only) if it fails.
 	var virtualSize, actualSize int64
-	if res, qerr := vp.runVirshCommand(ctx, "!", "qemu-img", "info", "-U", "--output=json", diskPath); qerr == nil {
+	if res, qerr := readDiskInfoOnHost(ctx, vp, diskPath, slices.Contains(diskPaths, diskPath)); qerr == nil {
 		var qi struct {
 			VirtualSize int64  `json:"virtual-size"`
 			ActualSize  int64  `json:"actual-size"`

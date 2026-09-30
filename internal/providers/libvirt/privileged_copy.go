@@ -135,6 +135,28 @@ func (c diskCopy) run(ctx context.Context, h hostCommandRunner, guard *hostCmdGu
 	return res, err
 }
 
+// readDiskInfoOnHost runs `qemu-img info -U --output=json <path>` on the host
+// behind h for GetDiskInfo (ADR-0007 Slice 5 lab follow-up). A disk named by
+// the domain's own definition (ownDisk) is read the way the disk in-use check
+// reads it: once it is confirmed not to be a device, FIFO or other
+// non-regular file (checkChainFileKind), through passwordless sudo, falling
+// back to the SSH user when sudo refuses (qemuImgInfoOnHost; the documented
+// `qemu-img info -U *` rule). So the sizes of a snapshotted VM's 0600
+// libvirt-qemu overlay are read during an export instead of reported as 0.
+// qemu-img info opens no backing file. Any other path — an explicit disk path
+// a single-host caller passed — is read as the SSH user, as before: root
+// never opens a caller-supplied path.
+func readDiskInfoOnHost(ctx context.Context, h hostCommandRunner, path string, ownDisk bool) (*VirshResult, error) {
+	if ownDisk {
+		if err := checkChainFileKind(ctx, h, path); err != nil {
+			log.Printf("WARN Reading disk info of %s as the provider's SSH user, not as root: %v", path, err)
+		} else {
+			return qemuImgInfoOnHost(ctx, h, "-U", "--output=json", path)
+		}
+	}
+	return runHost(ctx, h, "qemu-img", "info", "-U", "--output=json", path)
+}
+
 // copyStderr formats a failed copy's stderr for the provider's log (" (qemu-img
 // stderr: ...)"), or "" when there is none.
 func copyStderr(res *VirshResult) string {

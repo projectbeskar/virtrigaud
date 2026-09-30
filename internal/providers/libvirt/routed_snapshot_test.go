@@ -137,8 +137,9 @@ exec "$FAKE_SCD_TOOLS/qemu-img" "$@"
 // qemu-img info ... -- <image>` (the in-use check and the disk-dependents guard read
 // each disk's chain one image at a time, #358): a standalone qcow2 image,
 // unless local/backing-<image base name> names its backing file (a linked
-// clone's overlay), or local/fail-qemu-img-info makes the read fail. It reads
-// nothing on the machine running the test.
+// clone's overlay), or local/fail-qemu-img-info makes the read fail; it reports
+// the sizes scdFakeTool's qemu-img does (GetDiskInfo reads them the same way).
+// It reads nothing on the machine running the test.
 const routedFakeSudo = `#!/bin/sh
 case "$*" in "-n qemu-img info "*)
   printf 'local sudo %s\n' "$*" >> "$FAKE_SCD_DIR/calls.log"
@@ -147,9 +148,9 @@ case "$*" in "-n qemu-img info "*)
   b="$FAKE_SCD_DIR/local/backing-${img##*/}"
   if [ -f "$b" ]; then
     bf=$(cat "$b")
-    printf '{"filename": "%s", "format": "qcow2", "backing-filename": "%s", "full-backing-filename": "%s", "backing-filename-format": "qcow2"}\n' "$img" "$bf" "$bf"
+    printf '{"filename": "%s", "format": "qcow2", "virtual-size": 10737418240, "actual-size": 1073741824, "backing-filename": "%s", "full-backing-filename": "%s", "backing-filename-format": "qcow2"}\n' "$img" "$bf" "$bf"
   else
-    printf '{"filename": "%s", "format": "qcow2"}\n' "$img"
+    printf '{"filename": "%s", "format": "qcow2", "virtual-size": 10737418240, "actual-size": 1073741824}\n' "$img"
   fi
   exit 0 ;;
 esac
