@@ -895,7 +895,7 @@ func backingChainFiles(ctx context.Context, h hostCommandRunner, disk, format st
 	return refs, nil
 }
 
-// backingLevel is one image of a backing chain (walkBackingChain): its path
+// backingLevel is one image of a backing chain (walkBackingChainFrom): its path
 // as named (disk, then each full-backing-filename), every host file it
 // consists of or points at (qemuImgInfo.referencedFiles), and the format it
 // was opened as — the one its parent's header names (the caller's for the
@@ -908,18 +908,12 @@ type backingLevel struct {
 	dataFile string
 }
 
-// walkBackingChain reads disk's image chain one image at a time, top first,
-// under the rules backingChainFiles documents. The disk's own format is
-// probed.
-func walkBackingChain(ctx context.Context, h hostCommandRunner, disk string) ([]backingLevel, error) {
-	return walkBackingChainFrom(ctx, h, disk, "")
-}
-
 // rawDiskFormat is qemu's raw format: no header, so no backing chain.
 const rawDiskFormat = "raw"
 
-// walkBackingChainFrom is walkBackingChain with the disk itself opened as
-// format ("" probes it), as a copy that pins the disk's format reads it. A
+// walkBackingChainFrom reads disk's image chain one image at a time, top
+// first, under the rules backingChainFiles documents, with the disk itself
+// opened as format ("" probes it, as the SSH user only). A
 // raw disk has no backing chain: it is only checked to be a regular file,
 // and never opened — its bytes are the guest's, and a header a guest wrote
 // there is never read.
