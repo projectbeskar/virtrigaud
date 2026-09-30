@@ -159,9 +159,10 @@ func isCategorizedRoutedAnswer(err error) bool {
 		dc  *diskCheckFailedError
 		gh  *guardHostUnreachableError
 		sr  *sourceRunningError
+		cr  *copyRefusedError
 	)
 	return errors.As(err, &roe) || errors.As(err, &pi) || errors.As(err, &gi) || errors.As(err, &db) ||
-		errors.As(err, &dd) || errors.As(err, &dc) || errors.As(err, &gh) || errors.As(err, &sr)
+		errors.As(err, &dd) || errors.As(err, &dc) || errors.As(err, &gh) || errors.As(err, &sr) || errors.As(err, &cr)
 }
 
 // createFullCopyGuarded is createFullCopy for a clustered clone, on the same

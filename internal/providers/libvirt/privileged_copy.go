@@ -24,6 +24,9 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 // Privileged disk copies (ADR-0007 Slice 5 lab, B1).
@@ -37,15 +40,18 @@ import (
 // — therefore run qemu-img as root through passwordless sudo (`sudo -n`: never
 // a prompt; a refusal is immediate):
 //
-//   - root opens the source in the format its domain definition names (-f;
-//     the exports' historical -f qcow2): root never probes a disk's format, so
-//     a guest cannot make a raw disk it wrote read as a qcow2 image that names
-//     a host file as its backing file;
-//   - before root opens it, the source's image chain is read one image at a
+//   - the source is opened in the format its domain definition names (-f;
+//     the exports' historical -f qcow2), by root and by the SSH user alike:
+//     qemu-img never probes a disk's format, so a guest cannot make a raw
+//     disk it wrote read as a qcow2 image that names another file as its
+//     backing file;
+//   - before either reads it, the source's image chain is read one image at a
 //     time, as the disk in-use check reads it (walkBackingChainFrom: local
 //     regular files only, never a protocol or json: name), and every backing
-//     file must be named with its format; otherwise the copy is not run as
-//     root (privilegedCopyRefusal);
+//     file must be named with its format; otherwise the copy is refused
+//     (checkCopySource, copyRefusedError: FailedPrecondition, and
+//     VM_OPERATION_FAILED on a routed call) — never retried as the SSH user,
+//     who reads every VM disk on the host through the kvm group;
 //   - a local output is created by the SSH user, under the copy's umask,
 //     inside the copy's private directory BEFORE root writes into it
 //     (createCopyOutputScript): root never creates the file, so its mode does
@@ -56,10 +62,11 @@ import (
 //     outside sudo, and timeout(1) runs INSIDE sudo, so it can stop — and
 //     kill — the root qemu-img when the call's budget runs out
 //     (hostCmdGuard.applyPrivileged);
-//   - when the chain cannot be verified, or sudo refuses (no passwordless rule
-//     for the command, or no sudo at all), the historical command runs as the
-//     SSH user, unchanged: a disk it can read is copied exactly as before, and
-//     a 0600 overlay fails as before.
+//   - only when sudo itself refuses (no passwordless rule for the command, or
+//     no sudo at all; sudoRefused matches sudo's exit status and exact
+//     messages) does the copy run as the SSH user, with the same pinned
+//     format: a disk it can read is copied as before, and a 0600 overlay
+//     fails as before.
 //
 // The sudoers entries this needs are documented in docs/libvirt-clones.md.
 
@@ -67,9 +74,9 @@ import (
 // passwordless rule allows the command.
 const sudoNonInteractive = "-n"
 
-// privilegedSourceFormats are the source formats a copy opens as root: the
-// formats of the VM disks VirtRigaud and libvirt create. Any other format is
-// copied as the SSH user, as before.
+// privilegedSourceFormats are the source formats a copy opens, as root or as
+// the SSH user: the formats of the VM disks VirtRigaud and libvirt create. A
+// disk of any other format is not copied (checkCopySource).
 var privilegedSourceFormats = map[string]bool{"qcow2": true, "raw": true}
 
 // libvirtDefaultDiskFormat is the format libvirt's QEMU driver gives a
@@ -84,9 +91,10 @@ const createCopyOutputScript = `umask "$1" && set -C && : > "$2"`
 // diskCopy is one qemu-img copy that reads a VM's whole disk chain: a full
 // clone's copy, or an s3/nfs export's flatten.
 type diskCopy struct {
-	// src is the VM disk the copy reads, and srcFormat the format the
-	// privileged copy opens it as ("" when it is not known: the copy then
-	// runs as the SSH user).
+	// src is the VM disk the copy reads, and srcFormat the format its domain
+	// definition opens it in — the format both the root and the SSH-user
+	// copy pin with -f (a copy of a disk of any other format, or of unknown
+	// format, is refused).
 	src, srcFormat string
 	// target is the host file the copy writes, for the clustered guard's
 	// symbolic-link check ("" when it writes none).
@@ -97,42 +105,71 @@ type diskCopy struct {
 	output string
 	// umask is the umask the copy runs under ("" for none).
 	umask string
-	// args is the historical qemu-img argv (after "qemu-img"), run as the SSH
-	// user when the copy does not run as root.
+	// args is the qemu-img argv (after "qemu-img") the SSH user runs when
+	// sudo is not available; its source format is pinned too.
 	args []string
 	// privArgs is the qemu-img argv the privileged copy runs; nil means the
 	// copy never runs as root.
 	privArgs []string
 }
 
-// run runs the copy on the host behind h, under guard (nil on a single host):
-// as root through passwordless sudo when privilegedCopyRefusal allows it and
-// sudo does, as the SSH user (the historical command) otherwise.
+// copyRefusedError refuses a copy whose source is not safe to copy: its
+// format is not one a copy opens, or its image chain could not be verified
+// (checkCopySource). Nothing was copied, and the copy is not retried as the
+// SSH user: a chain that is unsafe for root is unsafe for the SSH user too
+// (it reads every VM disk on the host through the kvm group).
+type copyRefusedError struct {
+	// src is the refused source disk (provider log only).
+	src string
+	// reason says why (provider log only; it may name host paths).
+	reason string
+}
+
+// Error is the refusal, for the provider's log and the single-host caller.
+func (e *copyRefusedError) Error() string {
+	return fmt.Sprintf("the source disk %s cannot be copied safely: %s", e.src, e.reason)
+}
+
+// copyRefusedWire is the requester-facing account of a copyRefusedError on a
+// routed call: it names no host path.
+const copyRefusedWire = "the source VM's disk image chain cannot be copied safely (details are in the provider log)"
+
+// GRPCStatus renders the refusal as codes.FailedPrecondition: the copy is not
+// retried until the source changes, and the manager never counts it toward
+// its circuit breaker. status.FromError finds it through the single-host
+// handlers' "failed to ..." wrapping.
+func (e *copyRefusedError) GRPCStatus() *status.Status {
+	return status.New(codes.FailedPrecondition, e.Error())
+}
+
+// run runs the copy on the host behind h, under guard (nil on a single host).
+// The source's chain is checked first (checkCopySource): a refusal ends the
+// copy, whoever would have run it. Then it runs as root through passwordless
+// sudo, and as the SSH user — with the same pinned source format — ONLY when
+// sudo itself refused (sudoRefused: not installed, or no passwordless rule).
 func (c diskCopy) run(ctx context.Context, h hostCommandRunner, guard *hostCmdGuard) (*VirshResult, error) {
-	if c.privArgs == nil {
-		return c.runAsSSHUser(ctx, h, guard)
-	}
-	if reason := privilegedCopyRefusal(ctx, h, c.src, c.srcFormat); reason != "" {
-		log.Printf("WARN Copying %s as the provider's SSH user, not as root: %s", c.src, reason)
-		return c.runAsSSHUser(ctx, h, guard)
-	}
-	argv, err := guard.applyPrivileged(c.target, c.umask, append([]string{"qemu-img"}, c.privArgs...)...)
-	if err != nil {
+	if err := checkCopySource(ctx, h, c.src, c.srcFormat); err != nil {
 		return nil, err
 	}
-	if c.output != "" {
-		if _, err := runHost(ctx, h, "sh", "-c", createCopyOutputScript, "sh", c.umask, c.output); err != nil {
-			return nil, fmt.Errorf("create the copy's output file: %w", err)
+	if c.privArgs != nil {
+		argv, err := guard.applyPrivileged(c.target, c.umask, append([]string{"qemu-img"}, c.privArgs...)...)
+		if err != nil {
+			return nil, err
 		}
-	}
-	res, err := runHost(ctx, h, argv...)
-	if err != nil && sudoRefused(res) {
+		if c.output != "" {
+			if _, err := runHost(ctx, h, "sh", "-c", createCopyOutputScript, "sh", c.umask, c.output); err != nil {
+				return nil, fmt.Errorf("create the copy's output file: %w", err)
+			}
+		}
+		res, err := runHost(ctx, h, argv...)
+		if err == nil || !sudoRefused(res) {
+			return res, err
+		}
 		log.Printf("INFO Passwordless sudo is not allowed for the copy of %s (%s); copying it as the provider's SSH user, "+
 			"which fails for a disk it cannot read, such as the 0600 overlay of a VM with an external snapshot "+
 			"(see docs/libvirt-clones.md)", c.src, strings.TrimSpace(res.Stderr))
-		return c.runAsSSHUser(ctx, h, guard)
 	}
-	return res, err
+	return c.runAsSSHUser(ctx, h, guard)
 }
 
 // readDiskInfoOnHost runs `qemu-img info -U --output=json <path>` on the host
@@ -169,7 +206,7 @@ func copyStderr(res *VirshResult) string {
 	return ""
 }
 
-// runAsSSHUser runs the historical copy as the SSH user, under guard.
+// runAsSSHUser runs the copy as the SSH user, under guard.
 func (c diskCopy) runAsSSHUser(ctx context.Context, h hostCommandRunner, guard *hostCmdGuard) (*VirshResult, error) {
 	cmd := append([]string{"qemu-img"}, c.args...)
 	if c.umask != "" {
@@ -182,30 +219,39 @@ func (c diskCopy) runAsSSHUser(ctx context.Context, h hostCommandRunner, guard *
 	return runHost(ctx, h, argv...)
 }
 
-// privilegedCopyRefusal says why src must not be read by qemu-img as root in
-// format, or "" when it may: the format is one root opens
-// (privilegedSourceFormats), and its image chain, read one image at a time
+// checkCopySource verifies, before qemu-img reads src in format — as root or
+// as the SSH user — that the copy may run: the format is one a copy opens
+// (privilegedSourceFormats), and src's image chain, read one image at a time
 // with the disk pinned to format, is local regular files each opened in the
-// format its parent names — qemu-img, following the same chain as root, then
-// never probes an image, and never opens a protocol, json: or relative
-// backing name, a device or a FIFO.
-func privilegedCopyRefusal(ctx context.Context, h hostCommandRunner, src, format string) string {
+// format its parent names — qemu-img, following the same chain, then never
+// probes an image, and never opens a protocol, json: or relative backing
+// name, a device or a FIFO. Anything else is a copyRefusedError; a host that
+// could not be reached while the chain was read is that host failure.
+func checkCopySource(ctx context.Context, h hostCommandRunner, src, format string) error {
+	refuse := func(reason string) error {
+		log.Printf("WARN Refusing to copy %s: %s", src, reason)
+		return &copyRefusedError{src: src, reason: reason}
+	}
 	if !privilegedSourceFormats[format] {
-		return fmt.Sprintf("its format %q is not one a copy opens as root", format)
+		return refuse(fmt.Sprintf("its format %q (from its domain definition) is not one a copy opens (qcow2, raw)", format))
 	}
 	levels, err := walkBackingChainFrom(ctx, h, src, format)
 	if err != nil {
-		return fmt.Sprintf("its image chain could not be verified: %v", err)
+		if isHostTransportFailure(err) {
+			return err
+		}
+		return refuse(fmt.Sprintf("its image chain could not be read and verified (for a disk the SSH user cannot read, "+
+			"allow passwordless sudo for qemu-img info; see docs/libvirt-clones.md): %v", err))
 	}
 	if len(levels) == 0 {
-		return "it does not exist"
+		return refuse("it does not exist")
 	}
 	for _, l := range levels {
 		if l.format == "" {
-			return fmt.Sprintf("the image chain names %s without its format", l.path)
+			return refuse(fmt.Sprintf("the image chain names %s without its format", l.path))
 		}
 	}
-	return ""
+	return nil
 }
 
 // cloneSourceDiskDoc is the part of a domain definition cloneSourceFormat
@@ -248,20 +294,19 @@ func cloneSourceFormat(domainXML, diskPath string) string {
 // directory, for the disk targetDiskPath: a standalone qcow2 that flattens the
 // source's backing chain, created with vmDiskMode.
 func fullCloneCopy(srcDiskPath, srcFormat, out, targetDiskPath string) diskCopy {
-	// The historical command lets qemu-img probe the source's format (a
-	// guessed format would break the copy); the privileged one pins it.
-	c := diskCopy{
+	// Both the root and the SSH-user copy open the source in the format its
+	// definition names: qemu-img never probes it (checkCopySource refuses a
+	// format that is not qcow2 or raw, or unknown).
+	args := []string{"convert", "-f", srcFormat, "-O", "qcow2", srcDiskPath, out}
+	return diskCopy{
 		src:       srcDiskPath,
 		srcFormat: srcFormat,
 		target:    targetDiskPath,
 		output:    out,
 		umask:     vmDiskUmask,
-		args:      []string{"convert", "-O", "qcow2", srcDiskPath, out},
+		args:      args,
+		privArgs:  args,
 	}
-	if srcFormat != "" {
-		c.privArgs = []string{"convert", "-f", srcFormat, "-O", "qcow2", srcDiskPath, out}
-	}
-	return c
 }
 
 // posixIDRE is the shape of a uid or gid `id` prints.

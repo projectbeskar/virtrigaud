@@ -1034,23 +1034,63 @@ func qemuImgInfoOnHost(ctx context.Context, h hostCommandRunner, args ...string)
 	return res, err
 }
 
-// sudoRefusedRE matches sudo's own diagnostics ("sudo: a password is
-// required", "sudo: a terminal is required", ...); qemu-img's start with
-// "qemu-img:".
-var sudoRefusedRE = regexp.MustCompile(`(?m)^sudo: |is not allowed to execute|may not run sudo`)
+// sudoRefusalLineRE matches, as a WHOLE line, what sudo itself prints when it
+// refuses to run a command without a password (-n): a password or a terminal
+// is required, the user may not run the command (or sudo at all), or is not
+// in the sudoers file.
+var sudoRefusalLineRE = regexp.MustCompile(`^(?:` +
+	`sudo: a password is required` +
+	`|sudo: a terminal is required to read the password; either use the -S option to read from standard input or configure an askpass helper` +
+	`|sudo: sorry, you must have a tty to run sudo` +
+	`|sudo: no tty present and no askpass program specified` +
+	`|Sorry, user \S+ is not allowed to execute '[^'\n]*' as \S+ on \S+\.` +
+	`|Sorry, user \S+ may not run sudo on \S+\.` +
+	`|\S+ is not in the sudoers file\.(?:  This incident (?:will be|has been) reported(?: to the administrator)?\.)?` +
+	`)$`)
 
-// sudoExitNotFound is the shell's exit status for a command that is not
-// installed (sudo missing).
-const sudoExitNotFound = 127
+// sudoNotFoundLineRE matches, as a whole line, a shell's report that sudo is
+// not installed (sh, dash, bash, zsh; direct or through exec).
+var sudoNotFoundLineRE = regexp.MustCompile(`^(?:(?:\S+: )?(?:line \d+: |\d+: )?(?:exec: )?sudo: (?:command )?not found|zsh:\d+: command not found: sudo)$`)
+
+// Exit statuses of a refused `sudo -n ...`: sudo's own refusal, and a shell's
+// for a command that is not installed (sudo missing).
+const (
+	sudoExitRefused  = 1
+	sudoExitNotFound = 127
+)
 
 // sudoRefused reports whether a failed `sudo -n ...` failed in sudo itself —
 // not permitted, a password required, or sudo not installed — rather than in
-// the command it ran.
+// the command it ran. It takes sudo's exit status AND its whole stderr: every
+// non-empty line must be one of sudo's (or the shell's) exact messages, so a
+// qemu-img error — whose lines start "qemu-img:", and which may quote a file
+// name holding a newline and a sudo-like line — is never taken for a refusal.
+// Only a genuine refusal lets a caller fall back to the SSH user.
 func sudoRefused(res *VirshResult) bool {
 	if res == nil {
 		return false
 	}
-	return res.ExitCode == sudoExitNotFound || sudoRefusedRE.MatchString(res.Stderr)
+	var lineRE *regexp.Regexp
+	switch res.ExitCode {
+	case sudoExitRefused:
+		lineRE = sudoRefusalLineRE
+	case sudoExitNotFound:
+		lineRE = sudoNotFoundLineRE
+	default:
+		return false
+	}
+	lines := 0
+	for _, line := range strings.Split(res.Stderr, "\n") {
+		line = strings.TrimRight(line, "\r")
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		if !lineRE.MatchString(line) {
+			return false
+		}
+		lines++
+	}
+	return lines > 0
 }
 
 // domainGone reports whether uuid is no longer defined on the host — i.e. it

@@ -65,10 +65,10 @@ const (
 	cloneCopyAsRoot = "sh -c " + umaskExecScript + " sh " + vmDiskUmask + " sudo -n "
 )
 
-// cloneCopyAsSSHUserCmd is the historical clone copy the guard runs as the
-// SSH user (when sudo refuses): timeout(1), then qemu-img convert under the
-// VM-disk umask, the source's format probed.
-const cloneCopyAsSSHUserCmd = "sh -c " + umaskExecScript + " sh " + vmDiskUmask + " qemu-img convert -O qcow2 " + scdDiskPath + " " + cloneWriteFile
+// cloneCopyAsSSHUserCmd is the clone copy the guard runs as the SSH user
+// (only when sudo refuses): timeout(1), then qemu-img convert under the
+// VM-disk umask, the source's format pinned as for root.
+const cloneCopyAsSSHUserCmd = "sh -c " + umaskExecScript + " sh " + vmDiskUmask + " qemu-img convert -f qcow2 -O qcow2 " + scdDiskPath + " " + cloneWriteFile
 
 // nfsExportAsRoot is what runs between an nfs export's flock and timeout(1)
 // when it runs as root.

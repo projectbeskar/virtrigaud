@@ -40,8 +40,9 @@ import (
 //   - B1: a VM with an external (disk-only) snapshot runs on libvirt's overlay,
 //     0600 libvirt-qemu, which the SSH user cannot read. A full clone (single
 //     host and clustered) and an s3/nfs export read it as root through
-//     `sudo -n` — timeout(1) inside sudo, the flock outside it — and fall back
-//     to the historical SSH-user command when sudo refuses;
+//     `sudo -n` — timeout(1) inside sudo, the flock outside it — and run as
+//     the SSH user, with the source format still pinned, only when sudo
+//     itself refuses; a source whose chain is not safe is not copied at all;
 //   - B2: a full clone of a source that is not shut off is refused before
 //     anything is copied (FailedPrecondition + VM_SOURCE_RUNNING).
 //
@@ -139,21 +140,32 @@ func TestSingleHost_Clone_SnapshotOverlaySourceIsCopiedAsRoot(t *testing.T) {
 	assert.NotContains(t, defined, scdOverlayPath, "the clone never references the source's overlay")
 }
 
-func TestSingleHost_Clone_SudoRefusedRunsTheHistoricalCopy(t *testing.T) {
-	t.Run("readable source: copied as the SSH user, as before", func(t *testing.T) {
+func TestSingleHost_Clone_SudoRefusedCopiesAsTheSSHUserWithTheFormatPinned(t *testing.T) {
+	t.Run("readable source: copied as the SSH user", func(t *testing.T) {
 		fx := newSCDFixture(t, map[string]string{scdDomain: scdDomainXML(scdDomain, scdDomainOpts{})})
 		fx.script("local", "fail-sudo", "")
 		_, err := NewServer(fx.p).Clone(context.Background(), scdFullClone)
 		require.NoError(t, err)
-		assert.Contains(t, fx.calls(), "local qemu-img convert -O qcow2 "+scdDiskPath+" "+scdCloneWriteFile)
+		calls := fx.calls()
+		assert.Contains(t, calls, "local sudo -n qemu-img convert -f qcow2 -O qcow2 "+scdDiskPath+" "+scdCloneWriteFile, "sudo is asked first")
+		assert.Contains(t, calls, "local qemu-img convert -f qcow2 -O qcow2 "+scdDiskPath+" "+scdCloneWriteFile,
+			"then the SSH user copies, the source format still pinned: nothing is probed")
+		for _, c := range calls {
+			assert.NotContains(t, c, "convert -O qcow2", "no copy probes the source's format: %q", c)
+		}
 	})
-	t.Run("0600 overlay: fails as before", func(t *testing.T) {
+	t.Run("0600 overlay: its chain cannot be read, so it is refused, never copied", func(t *testing.T) {
 		fx := newSCDFixture(t, map[string]string{scdDomain: overlayDomainXML(scdDomain, scdDomainOpts{})})
 		installRootOnlyImage(t, scdOverlayPath)
 		fx.script("local", "fail-sudo", "")
 		_, err := NewServer(fx.p).Clone(context.Background(), scdFullClone)
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "Permission denied")
+		st, ok := status.FromError(err)
+		require.True(t, ok, "got %v", err)
+		assert.Equal(t, codes.FailedPrecondition, st.Code(), "a refusal, never counted by the breaker")
+		assert.Contains(t, st.Message(), "cannot be copied safely")
+		for _, c := range fx.calls() {
+			assert.NotContains(t, c, "qemu-img convert", "nothing is copied: %q", c)
+		}
 		assert.Empty(t, fx.definedXML("team-a.copy"), "nothing is defined")
 	})
 }
@@ -209,6 +221,9 @@ func TestClustered_Clone_SnapshotOverlaySourceIsCopiedAsRoot(t *testing.T) {
 	assert.NotContains(t, defined, scdOverlayPath)
 }
 
+// TestClustered_Clone_SudoRefusedFailsTheOverlayCopyOutsideTheBreaker: sudo
+// allows the chain read but refuses the copy; the SSH user's copy (format
+// pinned) cannot open the 0600 overlay and fails, outside the breaker.
 func TestClustered_Clone_SudoRefusedFailsTheOverlayCopyOutsideTheBreaker(t *testing.T) {
 	fx := newRoutedSCD(t, map[string]map[string]string{"host-b": {"web": overlayDomainXML("web", scdDomainOpts{owner: ownerTeamA})}})
 	installRootOnlyImage(t, scdOverlayPath)
@@ -309,20 +324,28 @@ func TestCloneSourceFormat(t *testing.T) {
 	assert.Empty(t, cloneSourceFormat("<not-xml", scdDiskPath))
 }
 
-func TestPrivilegedCopyRefusal(t *testing.T) {
+// refusedCopy asserts err is a copyRefusedError whose reason contains want.
+func refusedCopy(t *testing.T, err error, want string) {
+	t.Helper()
+	var cr *copyRefusedError
+	require.ErrorAs(t, err, &cr)
+	assert.Contains(t, cr.reason, want)
+}
+
+func TestCheckCopySource(t *testing.T) {
 	fx := newRoutedSCD(t, nil)
 	h := localHostVP("host-b")
 	ctx := context.Background()
 
-	assert.Empty(t, privilegedCopyRefusal(ctx, h, scdDiskPath, "qcow2"), "a standalone qcow2 in its named format")
-	assert.Contains(t, privilegedCopyRefusal(ctx, h, scdDiskPath, "vmdk"), "not one a copy opens as root")
-	assert.Contains(t, privilegedCopyRefusal(ctx, h, scdDiskPath, ""), "not one a copy opens as root")
+	assert.NoError(t, checkCopySource(ctx, h, scdDiskPath, "qcow2"), "a standalone qcow2 in its named format")
+	refusedCopy(t, checkCopySource(ctx, h, scdDiskPath, "vmdk"), "is not one a copy opens")
+	refusedCopy(t, checkCopySource(ctx, h, scdDiskPath, ""), "is not one a copy opens")
 
 	fx.script("local", "fail-qemu-img-info", "")
-	assert.Contains(t, privilegedCopyRefusal(ctx, h, scdDiskPath, "qcow2"), "could not be verified")
+	refusedCopy(t, checkCopySource(ctx, h, scdDiskPath, "qcow2"), "could not be read and verified")
 }
 
-func TestPrivilegedCopyRefusal_UnnamedBackingFormat(t *testing.T) {
+func TestCheckCopySource_UnnamedBackingFormat(t *testing.T) {
 	// A header that names its backing file without its format would make
 	// qemu-img probe the backing file as root: refused.
 	info := `#!/bin/sh
@@ -339,8 +362,7 @@ fi
 	require.NoError(t, os.WriteFile(filepath.Join(bin, "sudo"), []byte(info), 0o755)) //nolint:gosec // test shim must be executable
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 
-	reason := privilegedCopyRefusal(context.Background(), localHostVP("host-b"), scdOverlayPath, "qcow2")
-	assert.Contains(t, reason, "without its format")
+	refusedCopy(t, checkCopySource(context.Background(), localHostVP("host-b"), scdOverlayPath, "qcow2"), "without its format")
 }
 
 func TestNFSURLWithHostIdentity(t *testing.T) {
@@ -397,6 +419,77 @@ func TestApplyPrivileged(t *testing.T) {
 	_, err = guardFor(short, lock).applyPrivileged("", "", "true")
 	var roe *routedOpError
 	require.ErrorAs(t, err, &roe, "a budget too short to run anything is a budget failure")
+}
+
+// TestSudoRefused_OnlySudosOwnAnswer: a copy falls back to the SSH user only
+// when sudo itself refused — its exit status and every stderr line are
+// sudo's (or the shell's "sudo: not found"). A qemu-img failure — even one
+// whose quoted file name carries a newline and a forged sudo line — is not.
+func TestSudoRefused_OnlySudosOwnAnswer(t *testing.T) {
+	refused := map[string]*VirshResult{
+		"password required": {ExitCode: 1, Stderr: "sudo: a password is required\n"},
+		"not allowed": {ExitCode: 1, Stderr: "Sorry, user virtrigaud is not allowed to execute " +
+			"'/usr/bin/qemu-img convert -f qcow2 -O qcow2 /p/a /p/b' as root on dome.\n"},
+		"may not run sudo":        {ExitCode: 1, Stderr: "Sorry, user virtrigaud may not run sudo on dome.\n"},
+		"not in sudoers":          {ExitCode: 1, Stderr: "virtrigaud is not in the sudoers file.\n"},
+		"not in sudoers reported": {ExitCode: 1, Stderr: "virtrigaud is not in the sudoers file.  This incident will be reported.\n"},
+		"tty required":            {ExitCode: 1, Stderr: "sudo: sorry, you must have a tty to run sudo\n"},
+		"not installed (dash)":    {ExitCode: 127, Stderr: "sh: 1: exec: sudo: not found\n"},
+		"not installed (bash)":    {ExitCode: 127, Stderr: "bash: line 1: sudo: command not found\n"},
+		"not installed (sh)":      {ExitCode: 127, Stderr: "sh: sudo: not found\n"},
+	}
+	for name, res := range refused {
+		assert.True(t, sudoRefused(res), name)
+	}
+	notRefused := map[string]*VirshResult{
+		"nil":             nil,
+		"success":         {ExitCode: 0},
+		"qemu-img failed": {ExitCode: 1, Stderr: "qemu-img: Could not open '/p/a': Permission denied\n"},
+		"forged sudo line in a file name": {ExitCode: 1, Stderr: "qemu-img: Could not open '/p/a\n" +
+			"sudo: a password is required\n': No such file or directory\n"},
+		"sudo line after qemu-img output": {ExitCode: 1, Stderr: "qemu-img: error while writing\nsudo: a password is required\n"},
+		"sudo line with trailing text":    {ExitCode: 1, Stderr: "sudo: a password is required'\n"},
+		"not allowed, file name newline": {ExitCode: 1, Stderr: "Sorry, user u is not allowed to execute '/usr/bin/qemu-img info /p/a\n" +
+			"b' as root on h.\n"},
+		"sudo line, another status":   {ExitCode: 2, Stderr: "sudo: a password is required\n"},
+		"no stderr":                   {ExitCode: 1},
+		"command not found, not sudo": {ExitCode: 127, Stderr: "sh: 1: flock: not found\n"},
+		"timeout missing under sudo":  {ExitCode: 1, Stderr: "sudo: timeout: command not found\n"},
+	}
+	for name, res := range notRefused {
+		assert.False(t, sudoRefused(res), name)
+	}
+}
+
+// TestSingleHost_Clone_UnsafeChainIsRefusedNotCopiedAsTheSSHUser: a chain the
+// check refuses (a backing file named without its format) is never copied —
+// not as root, and not as the SSH user either.
+func TestSingleHost_Clone_UnsafeChainIsRefusedNotCopiedAsTheSSHUser(t *testing.T) {
+	fx := newSCDFixture(t, map[string]string{scdDomain: scdDomainXML(scdDomain, scdDomainOpts{})})
+	info := `#!/bin/sh
+printf 'local qemu-img %s\n' "$*" >> "$FAKE_SCD_DIR/calls.log"
+for a in "$@"; do img="$a"; done
+case "$1" in info)
+  if [ "$img" = "` + scdDiskPath + `" ]; then
+    printf '{"filename": "%s", "format": "qcow2", "backing-filename": "/p/base", "full-backing-filename": "/p/base"}\n' "$img"
+  else
+    printf '{"filename": "%s", "format": "raw"}\n' "$img"
+  fi ;;
+esac
+`
+	bin := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(bin, "qemu-img"), []byte(info), 0o755)) //nolint:gosec // test shim must be executable
+	t.Setenv("FAKE_SCD_BIN", bin)
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	_, err := NewServer(fx.p).Clone(context.Background(), scdFullClone)
+	st, ok := status.FromError(err)
+	require.True(t, ok, "got %v", err)
+	assert.Equal(t, codes.FailedPrecondition, st.Code())
+	assert.Contains(t, st.Message(), "without its format")
+	for _, c := range fx.calls() {
+		assert.NotContains(t, c, "qemu-img convert", "nothing is copied, by anyone: %q", c)
+	}
 }
 
 // errorInfoReasonList returns the ErrorInfo reasons st carries, sorted.

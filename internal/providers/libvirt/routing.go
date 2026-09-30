@@ -420,7 +420,9 @@ func requesterFacingMessage(err error) string {
 // refused because its source is not shut off (sourceRunningError) is
 // FailedPrecondition with the VM_SOURCE_RUNNING and VM_OPERATION_FAILED
 // ErrorInfos: the manager keeps the clone pending, never counts it toward its
-// breaker.
+// breaker. A copy whose source chain is not safe to copy (copyRefusedError)
+// is FailedPrecondition with VM_OPERATION_FAILED and a message that names no
+// host path: terminal, never counted.
 //
 // The cluster-wide guards of ADR-0007 A6 (slice A6.1) answer first
 // (clusterGuardStatus): a Clone that finds a previous incarnation of its
@@ -448,6 +450,11 @@ func routedRPCError(op string, err error) error {
 	var sr *sourceRunningError
 	if stderrors.As(err, &sr) {
 		return sourceRunningStatus(fmt.Sprintf("failed to %s: %v", op, sr), true).Err()
+	}
+	var cr *copyRefusedError
+	if stderrors.As(err, &cr) {
+		log.Printf("WARN %s refused: %v", op, cr)
+		return vmOperationStatus(codes.FailedPrecondition, fmt.Sprintf("failed to %s: %s", op, copyRefusedWire))
 	}
 	var roe *routedOpError
 	if stderrors.As(err, &roe) {
