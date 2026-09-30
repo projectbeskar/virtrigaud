@@ -195,9 +195,14 @@ See [`docs/clustered-provider-inventory.md`](clustered-provider-inventory.md) an
   **`sudo -n qemu-img info -U`** when passwordless sudo allows it, and as the SSH
   user otherwise; a disk neither can read fails the check closed (retried, not
   counted toward the circuit breaker) ([`docs/libvirt-clones.md`](libvirt-clones.md)).
-  Allow that for the in-use check:
-  `virtrigaud ALL=(root) NOPASSWD: /usr/bin/qemu-img info -U *` (adjust the user and the path of `qemu-img`) — never
-  `qemu-img *`, which would let the account convert or write any file as root.
+  Allow that for the in-use check with the exact regular-expression rule
+  `VR_DISK_READ` from [`docs/libvirt-clones.md`](libvirt-clones.md#what-the-copies-run-as-root)
+  (`/usr/bin/qemu-img ^info -U -f (qcow2|raw) --output=json -- /var/lib/libvirt/images/[^/ ]+$`, sudo 1.9.10
+  or later; adjust the user, the pool directory and the path of `qemu-img`).
+  **Replace the `qemu-img info -U *` wildcard an earlier release documented:**
+  it let the account add options and read any file's header as root. Never
+  allow `qemu-img *`, which would let the account convert or write any file
+  as root.
   **To clone or export a VM that has an external snapshot** (its active disk is
   libvirt's `0600 libvirt-qemu` overlay, which even a `kvm` member cannot read),
   the full clone's copy and the s3/nfs export's flatten also need passwordless

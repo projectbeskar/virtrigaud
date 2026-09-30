@@ -188,10 +188,16 @@ the provider log. A host that cannot be reached at all during the check (the
 SSH connection or its libvirtd fails) is a host failure instead: `Unavailable`
 with `HOST_UNAVAILABLE` on a clustered Provider, and a plain `Unavailable` —
 which the circuit breaker counts — on a single-host one. Give the provider's
-SSH user passwordless `sudo` for `qemu-img info -U`
-(`virtrigaud ALL=(root) NOPASSWD: /usr/bin/qemu-img info -U *` — never `qemu-img *`), or membership of the group the
-disks belong to (`kvm` for the disks VirtRigaud creates on Debian/Ubuntu
-hosts), or run it as `root`. The clone and export copies have their own,
+SSH user passwordless `sudo` for the exact `qemu-img info` reads the check
+makes (`VR_DISK_READ` in [the sudoers rule](#what-the-copies-run-as-root):
+`/usr/bin/qemu-img ^info -U -f (qcow2|raw) --output=json -- /var/lib/libvirt/images/[^/ ]+$`, sudo 1.9.10
+or later — never `qemu-img *`, nor the wildcard `qemu-img info -U *` earlier
+releases documented), or membership of the group the disks belong to (`kvm`
+for the disks VirtRigaud creates on Debian/Ubuntu hosts), or run it as
+`root`. Root only ever reads an image in a named format: an image whose
+format nothing names (a backing file its parent's header gives no format for),
+every image below it, and an image of another format than qcow2 or raw are
+read as the SSH user. The clone and export copies have their own,
 exact rules: see [What the copies run as root](#what-the-copies-run-as-root).
 
 ## What Delete removes
@@ -343,7 +349,7 @@ random part `mktemp` picks):
 
 | Copy | Command `sudo -n` runs |
 |---|---|
-| Chain read (all copies) and `GetDiskInfo`'s size read of a VM's own disk (unchanged rule) | `qemu-img info -U [-f <format>] --output=json [--] <image>` |
+| Chain read (in-use check and all copies), `GetDiskInfo`'s size read of a VM's own disk, an adopted imported disk's size | `qemu-img info -U -f <qcow2\|raw> --output=json -- <image>` |
 | Full clone, single-host | `qemu-img convert -f <qcow2\|raw> -O qcow2 <source disk> <pool dir>/.virtrigaud-write-XXXXXXXXXX/<clone domain>-disk.qcow2` |
 | Full clone, clustered | `timeout --kill-after=10s <N>s qemu-img convert -f <qcow2\|raw> -O qcow2 <source disk> <pool dir>/.virtrigaud-write-XXXXXXXXXX/<clone domain>-disk.qcow2` |
 | s3 export | `[timeout --kill-after=10s <N>s] qemu-img convert -U -f qcow2 -O qcow2 <source disk> <source dir>/.virtrigaud-write-XXXXXXXXXX/.virtrigaud-export-<vm>.qcow2` |
@@ -364,7 +370,7 @@ of `qemu-img` and `timeout`):
 
 ```
 # /etc/sudoers.d/virtrigaud — edit with: visudo -f /etc/sudoers.d/virtrigaud
-Cmnd_Alias VR_DISK_READ = /usr/bin/qemu-img info -U *
+Cmnd_Alias VR_DISK_READ = /usr/bin/qemu-img ^info -U -f (qcow2|raw) --output=json -- /var/lib/libvirt/images/[^/ ]+$
 Cmnd_Alias VR_CLONE_COPY = /usr/bin/qemu-img ^convert -f (qcow2|raw) -O qcow2 /var/lib/libvirt/images/[^/ ]+ /var/lib/libvirt/images/\.virtrigaud-write-[A-Za-z0-9]{10}/[^/ ]+\.qcow2$, \
     /usr/bin/timeout ^--kill-after=10s [0-9]+s qemu-img convert -f (qcow2|raw) -O qcow2 /var/lib/libvirt/images/[^/ ]+ /var/lib/libvirt/images/\.virtrigaud-write-[A-Za-z0-9]{10}/[^/ ]+\.qcow2$
 Cmnd_Alias VR_EXPORT_COPY = /usr/bin/qemu-img ^convert -U -f (qcow2|raw) -O qcow2 /var/lib/libvirt/images/[^/ ]+ (/var/lib/libvirt/images/\.virtrigaud-write-[A-Za-z0-9]{10}/\.virtrigaud-export-[^/ ]+\.qcow2|nfs://nfs\.example\.com/exports/virtrigaud/[^?& ]+\?uid=1001&gid=1001)$, \
@@ -389,12 +395,42 @@ recommend a wildcard rule. Without a rule, everything works as before except
 cloning or exporting a VM whose active disk is such an overlay (a VM with an
 external snapshot), which fails as it did before this release.
 
-A note on what these rules protect: an account that manages VMs on
-`qemu:///system` — which the provider's SSH user does — can already obtain
-root on the host through libvirt (libvirt documents its system connection as
-root-equivalent). The rules above do not change that; they keep what
-VirtRigaud itself runs as root narrow, exact and auditable, so a tenant's
-input can never widen it.
+`VR_DISK_READ` replaces the `qemu-img info -U *` wildcard earlier releases
+documented. That wildcard let the account add options and read any file's
+header as root; replace it when you upgrade. With the rule above, a read of an
+image outside the pool directory (another allowed image directory, a backing
+file elsewhere) is refused by sudo and made as the SSH user. Add that
+directory to the expression if the SSH user cannot read the images there.
+
+What these rules protect, and what they do not. With them, root runs only
+the commands in the table:
+
+- `qemu-img info` and `qemu-img convert` of images in the pool directory;
+- each image opened in the format its domain definition names, or the header
+  of a parent that was itself read in a named format — qcow2 or raw, never
+  probed;
+- output written into VirtRigaud's private `.virtrigaud-write-*` directories,
+  or to the NFS export with the SSH user's own uid and gid and no other libnfs
+  option.
+
+A copy of a chain another account could swap (a symbolic link, a
+group-writable pool directory) is refused before root copies anything.
+
+A tenant's input chooses which of its own VMs is read and, for nfs, the name
+of the staged object on the export. It does not choose the options, the
+formats, the NFS identity root presents, or any other file.
+
+These rules do not change two things:
+
+- An account that manages VMs on `qemu:///system`, as the provider's SSH user
+  does, can already obtain root on the host through libvirt (libvirt
+  documents its system connection as root-equivalent). The rules keep what
+  VirtRigaud itself runs as root narrow, exact and auditable. They do not
+  contain an attacker who controls that account.
+- The regular expressions confine the command line, not the files behind it.
+  Anyone who can write the pool directory or the NFS export can still change
+  what is copied: keep them writable only by root and the SSH user (see
+  [Pool directory](#clone-files-on-the-host)).
 
 ## Known limitations
 
@@ -429,9 +465,11 @@ After upgrading:
   on the host; use `virtrigaud.io/force-delete: "true"` to remove one anyway;
 - new VM disks are `0640 libvirt-qemu:kvm` — make sure the provider's SSH
   user is `root`, in the `kvm` group, or allowed passwordless
-  `sudo qemu-img info -U` (`virtrigaud ALL=(root) NOPASSWD: /usr/bin/qemu-img info -U *`) before upgrading, or the
-  dependency check fails (retryably) and Delete and snapshot operations do not
-  proceed;
+  `sudo qemu-img info` for the exact reads the check makes (`VR_DISK_READ` in
+  [the sudoers rule](#what-the-copies-run-as-root); a host that allowed
+  `qemu-img info -U *` for an earlier release should replace that wildcard)
+  before upgrading, or the dependency check fails (retryably) and Delete and
+  snapshot operations do not proceed;
 - Delete removes fewer files: nothing outside the pool / allowed image
   directories, no symbolic links or their targets, and no backing files other
   than the VM's own external-snapshot chain. A deleted VM whose domain is

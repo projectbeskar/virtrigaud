@@ -879,7 +879,9 @@ const backingKindScript = `if [ -f "$1" ]; then echo ` + backingKindFile + `; el
 // (walkBackingChainFrom): never probed, so a guest cannot make its raw disk
 // read as a qcow2 image naming another file as its backing file — and a raw
 // disk's chain is not walked at all. An empty format (a source the
-// definition gives none for, such as a nested backing store) is probed.
+// definition gives none for, such as a nested backing store) is probed — by
+// the SSH user only (walkBackingChainFrom: root opens only a qcow2 or raw
+// image in a format a trusted header or the definition names).
 func backingChainFiles(ctx context.Context, h hostCommandRunner, disk, format string) ([]string, error) {
 	levels, err := walkBackingChainFrom(ctx, h, disk, format)
 	if err != nil {
@@ -921,6 +923,16 @@ const rawDiskFormat = "raw"
 // raw disk has no backing chain: it is only checked to be a regular file,
 // and never opened — its bytes are the guest's, and a header a guest wrote
 // there is never read.
+//
+// An image is read through sudo (qemuImgInfoOnHost, as root when the host
+// allows it) only when it is opened as qcow2 or raw, in a format named by the
+// definition or by the header of a parent itself read in a named format (not
+// probed): every root read is
+// `qemu-img info -U -f <qcow2|raw> --output=json -- <image>`, the one shape
+// the documented sudoers rule allows. An image whose format nothing names is
+// probed by the SSH user alone, and so is every image below it — a probed
+// header may be a guest's forgery, so nothing it names is opened as root —
+// and an image of another format too.
 func walkBackingChainFrom(ctx context.Context, h hostCommandRunner, disk, format string) ([]backingLevel, error) {
 	if format == rawDiskFormat {
 		if err := checkChainFileKind(ctx, h, disk); err != nil {
@@ -930,6 +942,9 @@ func walkBackingChainFrom(ctx context.Context, h hostCommandRunner, disk, format
 	}
 	var levels []backingLevel
 	cur := disk
+	// probed is set once an image of the chain was opened without a named
+	// format: from there on, nothing is read as root.
+	probed := false
 	for depth := 0; ; depth++ {
 		if depth > maxBackingChainDepth {
 			return nil, hostCheckFailed("read backing chain", fmt.Errorf("%s: backing chain longer than %d images", disk, maxBackingChainDepth))
@@ -941,7 +956,17 @@ func walkBackingChainFrom(ctx context.Context, h hostCommandRunner, disk, format
 		if format != "" {
 			args = append(args, "-f", format)
 		}
-		res, err := qemuImgInfoOnHost(ctx, h, append(args, "--output=json", "--", cur)...)
+		args = append(args, "--output=json", "--", cur)
+		if format == "" {
+			probed = true
+		}
+		var res *VirshResult
+		var err error
+		if !probed && privilegedSourceFormats[format] {
+			res, err = qemuImgInfoOnHost(ctx, h, args...)
+		} else {
+			res, err = runHost(ctx, h, append([]string{"qemu-img", "info"}, args...)...)
+		}
 		if err != nil {
 			if res != nil && res.ExitCode == qemuImgFailureExitCode && strings.Contains(res.Stderr, qemuImgMissingFile) {
 				return levels, nil // the chain ends at a file that no longer exists
@@ -1044,10 +1069,12 @@ func liveChainListed(domainXML string) bool {
 // the host. When sudo itself refuses (no passwordless sudo for qemu-img, or
 // no sudo at all), it runs as the host account, as before. It only ever reads
 // the headers of disks named by domain definitions and of the local, regular
-// backing files their headers name (backingChainFiles) — never a
-// caller-supplied image path, which inspectHostImage reads unprivileged. Every
-// call starts `qemu-img info -U`, so sudo can be limited to exactly that
-// (`qemu-img info -U *`, see docs/upgrading.md).
+// backing files their headers name (backingChainFiles), an adopted imported
+// disk's and GetDiskInfo's own disk — never a caller-supplied image path,
+// which inspectHostImage reads unprivileged. Every call is
+// `qemu-img info -U -f <qcow2|raw> --output=json -- <image>`, so sudo can be
+// limited to exactly that shape with a regular-expression rule (see
+// docs/libvirt-clones.md).
 func qemuImgInfoOnHost(ctx context.Context, h hostCommandRunner, args ...string) (*VirshResult, error) {
 	res, err := runHost(ctx, h, append([]string{"sudo", "-n", "qemu-img", "info"}, args...)...)
 	if err != nil && sudoRefused(res) {
