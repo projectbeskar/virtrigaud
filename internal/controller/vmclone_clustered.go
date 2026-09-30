@@ -75,13 +75,9 @@ const (
 
 	// cloneHostBlockedRetryInterval re-checks a clone whose landing host
 	// cannot take it. Nothing the controller does changes that, so it is slow.
+	// A clone the provider answered with a retryable error backs off instead
+	// (blockedRetryBackoff, ADR-0007 A6.1/A6.2, Slice 5 lab).
 	cloneHostBlockedRetryInterval = 2 * time.Minute
-	// cloneHostUnavailableRetryInterval retries, on the same host, a clone the
-	// provider answered with another retryable error (e.g. an earlier
-	// attempt's copy still runs there). A clone answered HOST_UNAVAILABLE or
-	// VM_DISK_CHECK_FAILED backs off instead (blockedRetryBackoff, ADR-0007
-	// A6.1/A6.2).
-	cloneHostUnavailableRetryInterval = 30 * time.Second
 )
 
 // startClusteredClone issues the Clone RPC of a clone whose source is bound to
@@ -438,10 +434,11 @@ func (r *VMCloneReconciler) recordClonePendingHost(
 //     kept and the clone is retried on the SAME host — a clone the provider
 //     already made there is stamped with the target's uid and is an
 //     idempotent success. A host that could not be reached
-//     (HOST_UNAVAILABLE) or checked (VM_DISK_CHECK_FAILED) is retried with
-//     the blocked-VM backoff from when the target's placement was recorded
-//     (15 s doubling to 5 min), as a clustered create is; other retryable
-//     answers every cloneHostUnavailableRetryInterval.
+//     (HOST_UNAVAILABLE) or checked (VM_DISK_CHECK_FAILED), and any other
+//     retryable answer (a copy still running, a read on the host that failed
+//     before anything was copied), is retried with the blocked-VM backoff
+//     from when the target's placement was recorded (15 s doubling to 5 min),
+//     as a clustered create is.
 //   - anything else fails the clone. The target keeps its pendingHost, and the
 //     failed clone removes it (removeFailedClusteredTarget): its finalizer runs
 //     the owner-checked cleanup on the host.
@@ -514,11 +511,17 @@ func (r *VMCloneReconciler) handleClusteredCloneError(
 			host, blockedRetryMax, providerErrorMessage(err)), retry), nil
 	case contracts.IsRetryable(err):
 		// E.g. the provider answered that an earlier attempt's copy is still
-		// running on the host (slice 3 review), or the provider is briefly
-		// unavailable: retry on the same host, never start elsewhere.
-		logger.Info("Clone not done yet; retrying on the same host", "host", host, "error", err.Error())
+		// running on the host (slice 3 review), that a read on the host failed
+		// before anything was copied (Slice 5 lab), or the provider is briefly
+		// unavailable: retry on the same host, never start elsewhere, with the
+		// blocked-VM backoff — a transient host error can outlast a fixed
+		// short cadence.
+		retry := blockedRetryBackoff(createHoldSince(target))
+		logger.Info("Clone not done yet; retrying on the same host with a backoff", "host", host,
+			"retryAfter", retry.String(), "error", err.Error())
 		return r.waitForCloneHost(ctx, clone, cloneReasonRetrying, fmt.Sprintf(
-			"clone on host %s is not done yet (%v); it is retried on the same host", host, err), cloneHostUnavailableRetryInterval), nil
+			"clone on host %s is not done yet (%s); it is retried on the same host with a backoff of up to %s",
+			host, providerErrorMessage(err), blockedRetryMax), retry), nil
 	default:
 		logger.Error(err, "Clone RPC failed", "host", host)
 		r.Recorder.Event(clone, "Warning", infrav1beta1.VMCloneReasonProviderError, fmt.Sprintf("Clone failed: %v", err))

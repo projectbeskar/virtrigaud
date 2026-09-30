@@ -26,6 +26,8 @@ import (
 	"path/filepath"
 	"strings"
 
+	"google.golang.org/grpc/codes"
+
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
 )
 
@@ -96,12 +98,13 @@ func (p *Provider) cloneClustered(ctx context.Context, req contracts.CloneReques
 	bctx, cancel := withRoutedBudget(ctx)
 	defer cancel()
 	var resp contracts.CloneResponse
+	copyStarted := false
 	err = p.withOwnedDomain(bctx, req.Source, "clone", func(c libvirtConn, d domainTarget) error {
 		vp, err := virshOf(c)
 		if err != nil {
 			return err
 		}
-		r, err := p.cloneOnHost(bctx, vp, c, d, req, domainName)
+		r, err := p.cloneOnHost(bctx, vp, c, d, req, domainName, &copyStarted)
 		if err != nil {
 			return err
 		}
@@ -109,7 +112,56 @@ func (p *Provider) cloneClustered(ctx context.Context, req contracts.CloneReques
 		resp = r
 		return nil
 	})
-	return resp, classifyRoutedFailure("clone VM", source, ctx, bctx, err)
+	err = classifyRoutedFailure("clone VM", source, ctx, bctx, err)
+	if !copyStarted {
+		err = cloneBeforeCopyFailure(source, err)
+	}
+	return resp, err
+}
+
+// cloneBeforeCopyFailure classifies the failure of a clustered clone that
+// ended BEFORE its copy started (ADR-0007 Slice 5 lab follow-up). Nothing was
+// written, so only a real refusal ends the clone: an invalid request, a
+// source this VM does not own, a name conflict, a previous incarnation, a
+// source that is not powered off, a disk another domain uses — each already a
+// categorized answer, returned unchanged, as are a host that could not be
+// reached (HOST_UNAVAILABLE) and the answers routed_budget.go categorizes. Any
+// other failure is a transient read on the host — the owner check, the
+// source's state or definition, the pool, a disk check the host answered with
+// an error — and is answered codes.Unavailable with VM_OPERATION_FAILED: the
+// manager keeps the VMClone Pending and retries it with a backoff, and never
+// counts it toward its circuit breaker. It used to be codes.Unknown, which
+// failed the VMClone for good. Only the operation and host cross the wire;
+// the cause is logged.
+func cloneBeforeCopyFailure(host string, err error) error {
+	if err == nil || isHostTransportFailure(err) || isCategorizedRoutedAnswer(err) {
+		return err
+	}
+	var pe *contracts.ProviderError
+	if errors.As(err, &pe) && (!pe.IsRetryable() || pe.Type == contracts.ErrorTypeHostUnavailable) {
+		return err
+	}
+	return &routedOpError{code: codes.Unavailable, cause: err, wire: fmt.Sprintf(
+		"clone VM on host %q: a read on the host failed before anything was copied; the clone is retried", host)}
+}
+
+// isCategorizedRoutedAnswer reports whether err already carries its own routed
+// wire answer (routedRPCError, clusterGuardStatus): a routed-operation error,
+// a cluster-wide guard answer, a disk-dependents refusal or failed check, a
+// host the guard could not reach, or a source that is not powered off.
+func isCategorizedRoutedAnswer(err error) bool {
+	var (
+		roe *routedOpError
+		pi  *previousIncarnationError
+		gi  *clusterGuardIncompleteError
+		db  *domainBusyError
+		dd  *diskDependentsError
+		dc  *diskCheckFailedError
+		gh  *guardHostUnreachableError
+		sr  *sourceRunningError
+	)
+	return errors.As(err, &roe) || errors.As(err, &pi) || errors.As(err, &gi) || errors.As(err, &db) ||
+		errors.As(err, &dd) || errors.As(err, &dc) || errors.As(err, &gh) || errors.As(err, &sr)
 }
 
 // createFullCopyGuarded is createFullCopy for a clustered clone, on the same
@@ -219,7 +271,8 @@ func removeClonedDisk(ctx context.Context, vp *VirshProvider, lock hostLock, tar
 // before anything is read for the copy (VM_SOURCE_RUNNING,
 // clone_source_state.go), and the copy reads the source as root when it may
 // (privileged_copy.go).
-func (p *Provider) cloneOnHost(ctx context.Context, vp *VirshProvider, c libvirtConn, d domainTarget, req contracts.CloneRequest, domainName string) (contracts.CloneResponse, error) {
+func (p *Provider) cloneOnHost(ctx context.Context, vp *VirshProvider, c libvirtConn, d domainTarget, req contracts.CloneRequest,
+	domainName string, copyStarted *bool) (contracts.CloneResponse, error) {
 	host := c.HostID()
 
 	// The target name's lock, held from the checks to the define (ADR-0007
@@ -334,12 +387,16 @@ func (p *Provider) cloneOnHost(ctx context.Context, vp *VirshProvider, c libvirt
 
 	lock, err := p.hostLockFor(cloneLockKind, domainName)
 	if err != nil {
-		return contracts.CloneResponse{}, err
+		// A name this provider does not make: a refusal, never retried.
+		return contracts.CloneResponse{}, contracts.NewInvalidSpecError(
+			fmt.Sprintf("the clone's domain name %q cannot name a host lock", domainName), nil)
 	}
 	// Full clones only on a clustered provider (cloneClustered refuses
 	// linked). A copy that fails or is stopped never reaches the disk's name:
 	// it is written in a private directory, removed with it
-	// (createFullCopyGuarded).
+	// (createFullCopyGuarded). A failure from here on is not retried as a
+	// transient read (cloneBeforeCopyFailure).
+	*copyStarted = true
 	if err := createFullCopyGuarded(ctx, vp, lock, srcDiskPath, cloneSourceFormat(srcXML.Stdout, srcDiskPath), targetDiskPath); err != nil {
 		return contracts.CloneResponse{}, err
 	}
