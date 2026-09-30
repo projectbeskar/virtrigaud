@@ -53,7 +53,7 @@
       "local rm -rf -- /var/lib/libvirt/images/.virtrigaud-write-0000000000"
     ],
     "resp": "null",
-    "err": "failed to clone VM: create full-clone copy: the source disk /var/lib/libvirt/images/vrgold-web-disk.qcow2 cannot be copied safely: its image chain could not be read and verified (for a disk the SSH user cannot read, allow passwordless sudo for qemu-img info; see docs/libvirt-clones.md): Retryable: could not verify the image on the libvirt host (transient host error; details are in the provider log), output: "
+    "err": "failed to clone VM: create full-clone copy: the source VM's disk cannot be copied safely: its image chain could not be read and verified (for a disk the SSH user cannot read, allow passwordless sudo for qemu-img info; see docs/libvirt-clones.md) (details are in the provider log), output: "
   },
   "clone-copy-sudo-refused": {
     "calls": [
