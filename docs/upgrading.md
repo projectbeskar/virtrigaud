@@ -195,19 +195,31 @@ See [`docs/clustered-provider-inventory.md`](clustered-provider-inventory.md) an
   **`sudo -n qemu-img info -U`** when passwordless sudo allows it, and as the SSH
   user otherwise; a disk neither can read fails the check closed (retried, not
   counted toward the circuit breaker) ([`docs/libvirt-clones.md`](libvirt-clones.md)).
-  Allow exactly that and nothing more of `qemu-img`:
+  Allow that for the in-use check:
   `virtrigaud ALL=(root) NOPASSWD: /usr/bin/qemu-img info -U *` (adjust the user and the path of `qemu-img`) — never
   `qemu-img *`, which would let the account convert or write any file as root.
+  **To clone or export a VM that has an external snapshot** (its active disk is
+  libvirt's `0600 libvirt-qemu` overlay, which even a `kvm` member cannot read),
+  the full clone's copy and the s3/nfs export's flatten also need passwordless
+  `sudo -n` for the exact `qemu-img convert` (and, on a clustered Provider,
+  `timeout ... qemu-img convert`) commands they run. Those can only be
+  confined with sudo's regular-expression rules (sudo 1.9.10 or later): the
+  command table and a ready-to-adapt `/etc/sudoers.d` snippet are in
+  [`docs/libvirt-clones.md`](libvirt-clones.md#what-the-copies-run-as-root) — never
+  `qemu-img convert *` or `timeout *`. Without them, those copies run as the
+  SSH user as before, and a VM with an external snapshot cannot be cloned or
+  exported.
   Keep the pool directory writable only by `root` and the SSH user (or sticky);
   the provider logs a `WARN` otherwise, and **a `root` SSH user is not supported
   on a pool directory other accounts can write**. Disks are written in a private
   `.virtrigaud-write-*` directory next to their final name and renamed into
   place; a symbolic link at a disk's name is refused (`Conflict`). The s3
   export's flattened copy is a private (`0600`), per-export
-  `.virtrigaud-export-<vm>.<random>.qcow2` next to the source disk, removed
-  even when the export fails or is cancelled — remove any
-  `.virtrigaud-export-*` or `.virtrigaud-import-*` file an earlier release left
-  in a pool directory by hand. Run a QEMU with the CVE-2024-4467 fix (its
+  `.virtrigaud-export-<vm>.qcow2` inside a private `.virtrigaud-write-*`
+  directory next to the source disk, removed with it even when the export
+  fails or is cancelled — remove any `.virtrigaud-export-*` or
+  `.virtrigaud-import-*` file an earlier release left in a pool directory by
+  hand. Run a QEMU with the CVE-2024-4467 fix (its
   `qemu-img info` does not open an image's external data file). Follow-up
   (tracked): least privilege — VM disks `0600 libvirt-qemu`, every read through
   `sudo -n`.
@@ -241,6 +253,22 @@ See [`docs/clustered-provider-inventory.md`](clustered-provider-inventory.md) an
   re-create** (#335) — it now retries instead of clearing `status.id`. This is a
   fix, but it means a VM that used to "self-heal" through a spurious re-create during
   vCenter blips now just waits and retries.
+- **A libvirt full clone needs a powered-off source** (ADR-0007 Slice 5 lab,
+  [`docs/libvirt-clones.md`](libvirt-clones.md#a-full-clone-needs-a-powered-off-source)).
+  A `VMClone` of a running (or paused) libvirt VM used to fail on qemu's image
+  lock. It now **waits** instead: `Pending`, `Ready=False` reason
+  `SourceMustBePoweredOff`, re-checked with a backoff and whenever the source's
+  power state changes, and it proceeds once the source is off. The provider's
+  refusal (`FailedPrecondition` + `VM_SOURCE_RUNNING`) never counts toward the
+  circuit breaker. vSphere clones of running VMs are unchanged. Roll the
+  manager with the libvirt provider: an older manager fails such a clone.
+- **libvirt clone and export copies read the source through `sudo -n` when
+  allowed** ([`docs/libvirt-clones.md`](libvirt-clones.md#what-the-copies-run-as-root)).
+  A full clone, or an s3/nfs disk export, of a VM with an external snapshot
+  (whose active disk is libvirt's `0600 libvirt-qemu` overlay) now works when
+  the host allows those copies in sudoers; otherwise it fails as before. The
+  s3 export's staging file moved into a private `.virtrigaud-write-*`
+  directory next to the source disk.
 
 ## Post-upgrade verification checklist
 
