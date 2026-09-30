@@ -232,6 +232,14 @@ func ToGRPCError(err error) error {
 }
 
 // FromGRPCError converts a gRPC status error to a ProviderError.
+//
+// It returns a nil *ProviderError when err is nil. Do not return that result
+// directly as an error: a nil *ProviderError stored in an error interface is
+// a typed nil, so `err != nil` is true. Convert only a non-nil err:
+//
+//	if err != nil {
+//		return nil, errors.FromGRPCError(err)
+//	}
 func FromGRPCError(err error) *ProviderError {
 	if err == nil {
 		return nil

@@ -221,7 +221,10 @@ func (c *Client) Validate(ctx context.Context, req *providerv1.ValidateRequest) 
 	ctx, cancel := c.withTimeout(ctx, "/provider.v1.Provider/Validate")
 	defer cancel()
 	resp, err := c.client.Validate(ctx, req)
-	return resp, errors.FromGRPCError(err)
+	if err != nil {
+		return nil, errors.FromGRPCError(err)
+	}
+	return resp, nil
 }
 
 // Create creates a new virtual machine.
@@ -229,7 +232,10 @@ func (c *Client) Create(ctx context.Context, req *providerv1.CreateRequest) (*pr
 	ctx, cancel := c.withTimeout(ctx, "/provider.v1.Provider/Create")
 	defer cancel()
 	resp, err := c.client.Create(ctx, req)
-	return resp, errors.FromGRPCError(err)
+	if err != nil {
+		return nil, errors.FromGRPCError(err)
+	}
+	return resp, nil
 }
 
 // Delete deletes a virtual machine.
@@ -237,7 +243,10 @@ func (c *Client) Delete(ctx context.Context, req *providerv1.DeleteRequest) (*pr
 	ctx, cancel := c.withTimeout(ctx, "/provider.v1.Provider/Delete")
 	defer cancel()
 	resp, err := c.client.Delete(ctx, req)
-	return resp, errors.FromGRPCError(err)
+	if err != nil {
+		return nil, errors.FromGRPCError(err)
+	}
+	return resp, nil
 }
 
 // Power performs power operations on a virtual machine.
@@ -245,7 +254,10 @@ func (c *Client) Power(ctx context.Context, req *providerv1.PowerRequest) (*prov
 	ctx, cancel := c.withTimeout(ctx, "/provider.v1.Provider/Power")
 	defer cancel()
 	resp, err := c.client.Power(ctx, req)
-	return resp, errors.FromGRPCError(err)
+	if err != nil {
+		return nil, errors.FromGRPCError(err)
+	}
+	return resp, nil
 }
 
 // Reconfigure reconfigures a virtual machine.
@@ -253,7 +265,10 @@ func (c *Client) Reconfigure(ctx context.Context, req *providerv1.ReconfigureReq
 	ctx, cancel := c.withTimeout(ctx, "/provider.v1.Provider/Reconfigure")
 	defer cancel()
 	resp, err := c.client.Reconfigure(ctx, req)
-	return resp, errors.FromGRPCError(err)
+	if err != nil {
+		return nil, errors.FromGRPCError(err)
+	}
+	return resp, nil
 }
 
 // Describe describes a virtual machine's current state.
@@ -261,7 +276,10 @@ func (c *Client) Describe(ctx context.Context, req *providerv1.DescribeRequest) 
 	ctx, cancel := c.withTimeout(ctx, "/provider.v1.Provider/Describe")
 	defer cancel()
 	resp, err := c.client.Describe(ctx, req)
-	return resp, errors.FromGRPCError(err)
+	if err != nil {
+		return nil, errors.FromGRPCError(err)
+	}
+	return resp, nil
 }
 
 // ListVMs lists all VMs managed by the provider. Each VMInfo from a clustered
@@ -325,7 +343,10 @@ func (c *Client) GetHostInfo(ctx context.Context, hostID string) (*providerv1.Ho
 	ctx, cancel := c.withTimeout(ctx, "/provider.v1.Provider/GetHostInfo")
 	defer cancel()
 	resp, err := c.client.GetHostInfo(ctx, &providerv1.GetHostInfoRequest{HostId: hostID})
-	return resp, errors.FromGRPCError(err)
+	if err != nil {
+		return nil, errors.FromGRPCError(err)
+	}
+	return resp, nil
 }
 
 // TaskStatus checks the status of an async task.
@@ -333,7 +354,10 @@ func (c *Client) TaskStatus(ctx context.Context, req *providerv1.TaskStatusReque
 	ctx, cancel := c.withTimeout(ctx, "/provider.v1.Provider/TaskStatus")
 	defer cancel()
 	resp, err := c.client.TaskStatus(ctx, req)
-	return resp, errors.FromGRPCError(err)
+	if err != nil {
+		return nil, errors.FromGRPCError(err)
+	}
+	return resp, nil
 }
 
 // SnapshotCreate creates a VM snapshot.
@@ -341,7 +365,10 @@ func (c *Client) SnapshotCreate(ctx context.Context, req *providerv1.SnapshotCre
 	ctx, cancel := c.withTimeout(ctx, "/provider.v1.Provider/SnapshotCreate")
 	defer cancel()
 	resp, err := c.client.SnapshotCreate(ctx, req)
-	return resp, errors.FromGRPCError(err)
+	if err != nil {
+		return nil, errors.FromGRPCError(err)
+	}
+	return resp, nil
 }
 
 // SnapshotDelete deletes a VM snapshot.
@@ -349,7 +376,10 @@ func (c *Client) SnapshotDelete(ctx context.Context, req *providerv1.SnapshotDel
 	ctx, cancel := c.withTimeout(ctx, "/provider.v1.Provider/SnapshotDelete")
 	defer cancel()
 	resp, err := c.client.SnapshotDelete(ctx, req)
-	return resp, errors.FromGRPCError(err)
+	if err != nil {
+		return nil, errors.FromGRPCError(err)
+	}
+	return resp, nil
 }
 
 // SnapshotRevert reverts a VM to a snapshot.
@@ -357,7 +387,10 @@ func (c *Client) SnapshotRevert(ctx context.Context, req *providerv1.SnapshotRev
 	ctx, cancel := c.withTimeout(ctx, "/provider.v1.Provider/SnapshotRevert")
 	defer cancel()
 	resp, err := c.client.SnapshotRevert(ctx, req)
-	return resp, errors.FromGRPCError(err)
+	if err != nil {
+		return nil, errors.FromGRPCError(err)
+	}
+	return resp, nil
 }
 
 // Clone clones a virtual machine.
@@ -365,7 +398,10 @@ func (c *Client) Clone(ctx context.Context, req *providerv1.CloneRequest) (*prov
 	ctx, cancel := c.withTimeout(ctx, "/provider.v1.Provider/Clone")
 	defer cancel()
 	resp, err := c.client.Clone(ctx, req)
-	return resp, errors.FromGRPCError(err)
+	if err != nil {
+		return nil, errors.FromGRPCError(err)
+	}
+	return resp, nil
 }
 
 // ImagePrepare prepares an image for use. The response reports the prepared
@@ -376,7 +412,10 @@ func (c *Client) ImagePrepare(ctx context.Context, req *providerv1.ImagePrepareR
 	ctx, cancel := c.withTimeout(ctx, "/provider.v1.Provider/ImagePrepare")
 	defer cancel()
 	resp, err := c.client.ImagePrepare(ctx, req)
-	return resp, errors.FromGRPCError(err)
+	if err != nil {
+		return nil, errors.FromGRPCError(err)
+	}
+	return resp, nil
 }
 
 // GetCapabilities gets the provider's capabilities.
@@ -384,7 +423,10 @@ func (c *Client) GetCapabilities(ctx context.Context, req *providerv1.GetCapabil
 	ctx, cancel := c.withTimeout(ctx, "/provider.v1.Provider/GetCapabilities")
 	defer cancel()
 	resp, err := c.client.GetCapabilities(ctx, req)
-	return resp, errors.FromGRPCError(err)
+	if err != nil {
+		return nil, errors.FromGRPCError(err)
+	}
+	return resp, nil
 }
 
 // withTimeout returns a context bound to the timeout configured for method,
