@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"log"
 	"net/url"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"strings"
@@ -49,11 +50,18 @@ import (
 //     backing file;
 //   - before either reads it, the source's image chain is read one image at a
 //     time, as the disk in-use check reads it (walkBackingChainFrom: local
-//     regular files only, never a protocol or json: name), and every backing
-//     file must be named with its format; otherwise the copy is refused
-//     (checkCopySource, copyRefusedError: FailedPrecondition, and
-//     VM_OPERATION_FAILED on a routed call) — never retried as the SSH user,
-//     who reads every VM disk on the host through the kvm group;
+//     regular files only, never a protocol or json: name; a raw disk has no
+//     chain). Every image must be qcow2 or raw, named with its format, without
+//     an external data file, not a symbolic link, and in a directory no
+//     account other than root and the SSH user can write (or a sticky one:
+//     unsafeChainMemberReason) — so no other account can swap an image the
+//     copy reads. Otherwise the copy is refused (checkCopySource,
+//     copyRefusedError: FailedPrecondition, and VM_OPERATION_FAILED on a
+//     routed call) — never retried as the SSH user, who reads every VM disk on
+//     the host through the kvm group;
+//   - the directory a root copy writes its local output in must be just as
+//     safe (unsafeHostDirReason), or the copy is refused: root never writes
+//     where another account could swap the copy's private directory;
 //   - a local output is created by the SSH user, under the copy's umask,
 //     inside the copy's private directory BEFORE root writes into it
 //     (createCopyOutputScript): root never creates the file, so its mode does
@@ -105,6 +113,10 @@ type diskCopy struct {
 	// user under umask before root writes into it ("" for none: the output
 	// already exists, or is not a local file).
 	output string
+	// outDir is the directory the copy's private output directory lies in,
+	// which root writes below: a root copy is refused unless it is safe
+	// (unsafeHostDirReason). "" when the copy writes no local file.
+	outDir string
 	// umask is the umask the copy runs under ("" for none).
 	umask string
 	// args is the qemu-img argv (after "qemu-img") the SSH user runs when
@@ -153,6 +165,16 @@ func (c diskCopy) run(ctx context.Context, h hostCommandRunner, guard *hostCmdGu
 	if err := checkCopySource(ctx, h, c.src, c.srcFormat); err != nil {
 		return nil, err
 	}
+	if c.privArgs != nil && c.outDir != "" {
+		reason, err := unsafeHostDirReason(ctx, h, c.outDir)
+		if err != nil {
+			return nil, err
+		}
+		if reason != "" {
+			log.Printf("WARN Refusing to copy %s: %s", c.src, reason)
+			return nil, &copyRefusedError{src: c.src, reason: reason + "; root does not write there"}
+		}
+	}
 	if c.privArgs != nil {
 		argv, err := guard.applyPrivileged(c.target, c.umask, append([]string{"qemu-img"}, c.privArgs...)...)
 		if err != nil {
@@ -194,13 +216,29 @@ func readDiskInfoOnHost(ctx context.Context, h hostCommandRunner, path, ownForma
 	}
 	args := []string{"-U", "-f", ownFormat, "--output=json", "--", path}
 	if privilegedSourceFormats[ownFormat] {
-		if err := checkChainFileKind(ctx, h, path); err != nil {
-			log.Printf("WARN Reading disk info of %s as the provider's SSH user, not as root: %v", path, err)
+		if reason, err := rootReadableDiskReason(ctx, h, path); err != nil {
+			return nil, err
+		} else if reason != "" {
+			log.Printf("WARN Reading disk info of %s as the provider's SSH user, not as root: %s", path, reason)
 		} else {
 			return qemuImgInfoOnHost(ctx, h, args...)
 		}
 	}
 	return runHost(ctx, h, append([]string{"qemu-img", "info"}, args...)...)
+}
+
+// rootReadableDiskReason says why GetDiskInfo does not read path as root, or
+// "" when it may: path must be a regular file (checkChainFileKind) that no
+// account other than root and the SSH user could swap
+// (unsafeChainMemberReason). A host that could not be reached is the error.
+func rootReadableDiskReason(ctx context.Context, h hostCommandRunner, path string) (string, error) {
+	if err := checkChainFileKind(ctx, h, path); err != nil {
+		if isHostTransportFailure(err) || ctx.Err() != nil {
+			return "", err
+		}
+		return err.Error(), nil
+	}
+	return unsafeChainMemberReason(ctx, h, path)
 }
 
 // copyStderr formats a failed copy's stderr for the provider's log (" (qemu-img
@@ -231,10 +269,15 @@ func (c diskCopy) runAsSSHUser(ctx context.Context, h hostCommandRunner, guard *
 // checkCopySource verifies, before qemu-img reads src in format — as root or
 // as the SSH user — that the copy may run: the format is one a copy opens
 // (privilegedSourceFormats), and src's image chain, read one image at a time
-// with the disk pinned to format, is local regular files each opened in the
-// format its parent names — qemu-img, following the same chain, then never
-// probes an image, and never opens a protocol, json: or relative backing
-// name, a device or a FIFO. Anything else is a copyRefusedError; a host that
+// with the disk pinned to format (a raw disk has no chain), is local regular
+// files each opened in the format its parent names — qemu-img, following the
+// same chain, then never probes an image, and never opens a protocol, json:
+// or relative backing name, a device or a FIFO — each qcow2 or raw, without
+// an external data file, and none of them one another account could swap: a
+// symbolic link, or an image in a directory an account other than root and
+// the SSH user can write and that is not sticky (unsafeChainMemberReason).
+// Anything else is a copyRefusedError: the copy is refused, not retried as
+// the SSH user, who reads every VM disk through the kvm group. A host that
 // could not be reached while the chain was read is that host failure.
 func checkCopySource(ctx context.Context, h hostCommandRunner, src, format string) error {
 	refuse := func(reason string) error {
@@ -246,7 +289,7 @@ func checkCopySource(ctx context.Context, h hostCommandRunner, src, format strin
 	}
 	levels, err := walkBackingChainFrom(ctx, h, src, format)
 	if err != nil {
-		if isHostTransportFailure(err) {
+		if isHostTransportFailure(err) || ctx.Err() != nil {
 			return err
 		}
 		return refuse(fmt.Sprintf("its image chain could not be read and verified (for a disk the SSH user cannot read, "+
@@ -256,11 +299,86 @@ func checkCopySource(ctx context.Context, h hostCommandRunner, src, format strin
 		return refuse("it does not exist")
 	}
 	for _, l := range levels {
-		if l.format == "" {
+		switch {
+		case l.format == "":
 			return refuse(fmt.Sprintf("the image chain names %s without its format", l.path))
+		case !privilegedSourceFormats[l.format]:
+			return refuse(fmt.Sprintf("the image chain opens %s as %q, not qcow2 or raw", l.path, l.format))
+		case l.dataFile != "":
+			return refuse(fmt.Sprintf("%s has an external data file", l.path))
+		}
+		reason, err := unsafeChainMemberReason(ctx, h, l.path)
+		if err != nil {
+			return err
+		}
+		if reason != "" {
+			return refuse(reason + ": another account could swap the image the copy reads")
 		}
 	}
 	return nil
+}
+
+// What chainMemberScript prints for a symbolic link.
+const chainMemberSymlink = "symlink"
+
+// chainMemberScript is the fixed `sh -c` script behind
+// unsafeChainMemberReason: "$1" is an image of a disk's chain, "$2" its
+// directory. It prints chainMemberSymlink when the image is a symbolic link,
+// and otherwise what diskDirModeScript prints for the directory.
+const chainMemberScript = `if [ -L "$1" ]; then echo ` + chainMemberSymlink + `; else stat -L -c '%a %u' -- "$2" && id -u; fi`
+
+// dirModeOutputRE is the shape of diskDirModeScript's output: the octal mode
+// and owner uid of the directory, then the SSH user's uid.
+var dirModeOutputRE = regexp.MustCompile(`^[0-7]{3,4} [0-9]{1,10}\s+[0-9]{1,10}$`)
+
+// unsafeChainMemberReason says why root must not open path, an image of a
+// disk's chain on the host behind h, or "" when it may: path is a symbolic
+// link, or its directory is not safe (dirModeReason). Either would let an
+// account other than root and the SSH user swap the image root opens. A check
+// that fails or cannot be read is a reason too (fail closed); a host that
+// could not be reached is the error.
+func unsafeChainMemberReason(ctx context.Context, h hostCommandRunner, path string) (string, error) {
+	dir := filepath.Dir(path)
+	res, err := runHost(ctx, h, "sh", "-c", chainMemberScript, "sh", path, dir)
+	if err != nil {
+		if isHostTransportFailure(err) || ctx.Err() != nil {
+			return "", err
+		}
+		return fmt.Sprintf("%s and its directory could not be checked: %v", path, err), nil
+	}
+	out := strings.TrimSpace(res.Stdout)
+	if out == chainMemberSymlink {
+		return fmt.Sprintf("%s is a symbolic link", path), nil
+	}
+	return dirModeReason(dir, out), nil
+}
+
+// unsafeHostDirReason says why root must not write below dir on the host
+// behind h (diskDirModeScript, dirModeReason), or "" when it may. A check
+// that fails is a reason too (fail closed); a host that could not be reached
+// is the error.
+func unsafeHostDirReason(ctx context.Context, h hostCommandRunner, dir string) (string, error) {
+	res, err := runHost(ctx, h, "sh", "-c", diskDirModeScript, "sh", dir)
+	if err != nil {
+		if isHostTransportFailure(err) || ctx.Err() != nil {
+			return "", err
+		}
+		return fmt.Sprintf("the permissions of %s could not be checked: %v", dir, err), nil
+	}
+	return dirModeReason(dir, strings.TrimSpace(res.Stdout)), nil
+}
+
+// dirModeReason reads diskDirModeScript's output for dir: "" when only root
+// and the SSH user can write dir, or it is sticky; otherwise why not
+// (unsafeDiskDirReason) — including output it cannot read.
+func dirModeReason(dir, out string) string {
+	if !dirModeOutputRE.MatchString(out) {
+		return fmt.Sprintf("the permissions of %s could not be read", dir)
+	}
+	if reason := unsafeDiskDirReason(out); reason != "" {
+		return fmt.Sprintf("the directory %s %s and is not sticky", dir, reason)
+	}
+	return ""
 }
 
 // definitionDiskFormat returns the format domainXML opens the file-backed
@@ -314,6 +432,7 @@ func fullCloneCopy(srcDiskPath, srcFormat, out, targetDiskPath string) diskCopy 
 		srcFormat: srcFormat,
 		target:    targetDiskPath,
 		output:    out,
+		outDir:    filepath.Dir(targetDiskPath),
 		umask:     vmDiskUmask,
 		args:      args,
 		privArgs:  args,

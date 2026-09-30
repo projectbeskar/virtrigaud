@@ -221,6 +221,7 @@ func flattenForExport(ctx context.Context, h hostCommandRunner, srcPath, srcForm
 		srcFormat: srcFormat,
 		target:    hostTmp,
 		output:    hostTmp,
+		outDir:    filepath.Dir(srcPath),
 		umask:     exportStageUmask,
 		args:      args,
 		privArgs:  args,

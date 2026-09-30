@@ -897,11 +897,13 @@ func backingChainFiles(ctx context.Context, h hostCommandRunner, disk, format st
 // as named (disk, then each full-backing-filename), every host file it
 // consists of or points at (qemuImgInfo.referencedFiles), and the format it
 // was opened as — the one its parent's header names (the caller's for the
-// disk itself), or "" when qemu-img had to probe it.
+// disk itself), or "" when qemu-img had to probe it — and the external data
+// file its header names, if any.
 type backingLevel struct {
-	path   string
-	refs   []string
-	format string
+	path     string
+	refs     []string
+	format   string
+	dataFile string
 }
 
 // walkBackingChain reads disk's image chain one image at a time, top first,
@@ -950,13 +952,15 @@ func walkBackingChainFrom(ctx context.Context, h hostCommandRunner, disk, format
 		if jerr := json.Unmarshal([]byte(res.Stdout), &info); jerr != nil {
 			return nil, hostCheckFailed("parse backing chain", jerr)
 		}
+		dataFile := ""
 		if info.FormatSpecific != nil {
-			if df := info.FormatSpecific.Data.DataFile; df != "" && !strings.HasPrefix(df, "/") {
+			dataFile = info.FormatSpecific.Data.DataFile
+			if dataFile != "" && !strings.HasPrefix(dataFile, "/") {
 				return nil, hostCheckFailed("read backing chain",
-					fmt.Errorf("%s: external data file %q is not a local file path", cur, df))
+					fmt.Errorf("%s: external data file %q is not a local file path", cur, dataFile))
 			}
 		}
-		levels = append(levels, backingLevel{path: cur, refs: info.referencedFiles(), format: format})
+		levels = append(levels, backingLevel{path: cur, refs: info.referencedFiles(), format: format, dataFile: dataFile})
 		if info.BackingFilename == "" && info.FullBackingFilename == "" {
 			return levels, nil
 		}

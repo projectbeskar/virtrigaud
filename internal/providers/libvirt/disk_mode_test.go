@@ -76,6 +76,9 @@ func newSwapHost(t *testing.T) *swapHost {
 	require.NoError(t, os.WriteFile(filepath.Join(bin, "virsh"), []byte("#!/bin/sh\nexit 0\n"), 0o700)) //nolint:gosec // test shim must be executable
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	dir := t.TempDir()
+	// Writable by the test user (the SSH user) alone, whatever the umask: a
+	// root copy refuses a group-writable directory (unsafeChainMemberReason).
+	require.NoError(t, os.Chmod(dir, 0o700))
 	t.Setenv("SWAP_DIR", dir)
 	victim := filepath.Join(dir, "victim")
 	require.NoError(t, os.WriteFile(victim, []byte("root's file"), 0o600))

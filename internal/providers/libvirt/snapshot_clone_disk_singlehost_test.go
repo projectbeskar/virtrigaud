@@ -83,8 +83,13 @@ const (
 // read, privileged_copy.go) runs <cmd>'s fake as the test user — or, when
 // local/fail-sudo exists, refuses as sudo does without a passwordless rule —
 // while any other sudo only logs; every other host tool (mv included: it
-// never moves a real file) only logs.
-const scdFakeTool = `#!/bin/sh
+// never moves a real file) only logs. sh answers the chain-image and
+// directory checks root copies make (chainMemberScript, diskDirModeScript) as
+// for a regular file in a root-owned 0755 directory — unless local/symlink-<image
+// base name> makes the image a symbolic link, or local/unsafe-dir-<directory
+// base name> makes its directory group-writable (0775) — without looking at
+// the path.
+var scdFakeTool = `#!/bin/sh
 tool=$(basename "$0")
 host=local
 if [ "$tool" = virsh ] && [ "$1" = "-c" ]; then host="${2##*/}"; shift 2; fi
@@ -140,7 +145,15 @@ qemu-img)
   fail qemu-img
   if [ "$1" = info ]; then printf '{"virtual-size": 10737418240, "actual-size": 1073741824, "format": "qcow2"}\n'; fi ;;
 sh)
-  case "$2" in '` + umaskExecScript + `') exec /bin/sh "$@" ;; esac ;;
+  case "$2" in
+  '` + umaskExecScript + `') exec /bin/sh "$@" ;;
+  ` + scdChainMemberPattern + `)
+    if [ -f "$d/symlink-${4##*/}" ]; then echo ` + chainMemberSymlink + `
+    elif [ -f "$d/unsafe-dir-${5##*/}" ]; then printf '775 0\n` + scdSSHUID + `\n'
+    else printf '755 0\n` + scdSSHUID + `\n'; fi ;;
+  ` + scdDirModePattern + `)
+    if [ -f "$d/unsafe-dir-${4##*/}" ]; then printf '775 0\n` + scdSSHUID + `\n'; else printf '755 0\n` + scdSSHUID + `\n'; fi ;;
+  esac ;;
 sudo)
   if [ "$1" = "-n" ]; then
     if [ -f "$d/fail-sudo" ]; then echo "sudo: a password is required" >&2; exit 1; fi
@@ -158,6 +171,13 @@ id)
 *) exit 0 ;;
 esac
 `
+
+// scdChainMemberPattern and scdDirModePattern are the scdFakeTool sh case
+// patterns that match chainMemberScript and diskDirModeScript.
+var (
+	scdChainMemberPattern = shellQuote(chainMemberScript)
+	scdDirModePattern     = shellQuote(diskDirModeScript)
+)
 
 // scdSSHUID and scdSSHGID are the SSH user's uid and gid the fake id prints.
 const (

@@ -151,6 +151,9 @@ func TestFlattenForExport(t *testing.T) {
 			vp := NewVirshProvider(&ProviderConfig{})
 			vp.uri = "test:///export"
 			dir := t.TempDir()
+			// Writable by the test user (the SSH user) alone, whatever the
+			// umask: a root copy refuses a group-writable directory.
+			require.NoError(t, os.Chmod(dir, 0o700))
 			src := filepath.Join(dir, "disk0.qcow2")
 			out, err := exec.Command("qemu-img", "create", "-q", "-f", "qcow2", src, "1M").CombinedOutput() //nolint:gosec // test-controlled paths
 			require.NoError(t, err, "%s", out)
