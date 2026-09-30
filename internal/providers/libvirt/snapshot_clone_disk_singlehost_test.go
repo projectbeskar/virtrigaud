@@ -45,10 +45,13 @@ import (
 // testdata/single_host_snapshot_clone_disk.golden.json, captured by running
 // this test file against origin/main — first at 392d79a, then again at df4ec4f
 // for #358's single-host changes (disk-dependents guard, linked clones
-// refused, the private-directory write path, the varstore dd) — with
-// VIRTRIGAUD_UPDATE_CALLSEQ_GOLDEN=1; the slice 3 branch reproduces it byte
-// for byte. A change to any of them — which would restart the ADR-0008 D5
-// soak window — fails here.
+// refused, the private-directory write path, the varstore dd), and again for
+// the ADR-0007 Slice 5 lab fixes to the clone copy (B1: the copy reads the
+// source as root through `sudo -n` after verifying its chain, the SSH user's
+// historical copy when sudo refuses; B2: a source that is not shut off is
+// refused) — with VIRTRIGAUD_UPDATE_CALLSEQ_GOLDEN=1; the slice 3 branch
+// reproduces it byte for byte. A change to any of them — which would restart
+// the ADR-0008 D5 soak window — fails here.
 
 // scdGoldenFile is the golden single-host snapshot / clone / disk results.
 const scdGoldenFile = "testdata/single_host_snapshot_clone_disk.golden.json"
@@ -413,6 +416,11 @@ func singleHostSCDScenarios() []scdScenario {
 		{name: "clone-mismatched-target-name", run: cloneCall(&providerv1.CloneRequest{SourceVmId: scdDomain, TargetName: "other", TargetVm: scdTargetVM}), defined: "team-a.copy"},
 		{name: "clone-copy-fails", setup: failing("local", "qemu-img"), run: cloneCall(fullClone), defined: "team-a.copy"},
 		{name: "clone-define-fails", setup: failing("local", "define"), run: cloneCall(fullClone), defined: "team-a.copy"},
+		// A full clone requires a powered-off source (B2): refused before any
+		// copy; and a host whose sudo refuses the privileged copy (B1) runs
+		// the historical copy as the SSH user.
+		{name: "clone-source-running", setup: running, run: cloneCall(fullClone), defined: "team-a.copy"},
+		{name: "clone-copy-sudo-refused", setup: failing("local", "sudo"), run: cloneCall(fullClone), defined: "team-a.copy"},
 		// GetDiskInfo
 		{name: "diskinfo-primary", setup: withSnap, run: diskInfoCall(&providerv1.GetDiskInfoRequest{VmId: scdDomain})},
 		{name: "diskinfo-explicit-path", run: diskInfoCall(&providerv1.GetDiskInfoRequest{VmId: scdDomain, DiskId: "/var/lib/libvirt/images/other.qcow2"})},
