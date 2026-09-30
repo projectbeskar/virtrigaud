@@ -5,6 +5,72 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-09-30 17:26] - ADR-0007 Slice 5 security review: libvirt root copies confined (NFS identity, definition formats, swappable chains, exact sudoers), host-safe tests
+**Author:** @wrkode (William Rizzo)
+
+> **Operator note.** libvirt only, single-host and clustered.
+> - **Before upgrading every libvirt host:**
+>   - run a QEMU with the **CVE-2024-4467** fix;
+>   - make sure the pool directory is not group- or world-writable (unless it is sticky): `stat -c '%a %U:%G' /var/lib/libvirt/images`. Otherwise full clones and disk exports are refused (`FailedPrecondition`);
+>   - replace the `qemu-img info -U *` sudoers wildcard with the regex rule `VR_DISK_READ` from [`docs/libvirt-clones.md`](docs/libvirt-clones.md#what-the-copies-run-as-root).
+> - An nfs `VMMigration` to or from libvirt with `nfs.uid: 0` or `nfs.gid: 0` now fails at Validating (`NFSRootIdentityNotAllowed`).
+> - A libvirt nfs export whose migration names another uid/gid runs as the SSH user, so a VM with an external snapshot cannot be exported to NFS that way.
+
+### Security
+- Item 1 (High), `internal/providers/libvirt/privileged_copy.go`, `nfs.go`, `internal/controller/vmmigration_nfs_identity.go`, `vmmigration_controller.go`:
+  - A root nfs export writes to the destination's server and path with exactly `?uid=<SSH uid>&gid=<SSH gid>`. Every other libnfs option is dropped (`nfsURLForRoot`, which replaces `nfsURLWithHostIdentity`).
+  - A destination naming another uid or gid is never written as root. The SSH user's own `qemu-img` presents that identity, with the format pinned.
+  - The manager refuses `spec.storage.nfs.uid`/`gid` = 0 when the source or target Provider is libvirt, at Validating, before any side effect: `Validating=False`, reason `NFSRootIdentityNotAllowed`.
+  - This is a typed check, not a CRD minimum: it depends on the provider, and tightening v1beta1 would reject stored objects on update.
+- Item 2 (High), `domain_disks.go`, `imagepath.go`, `provider_virsh.go`, `clone.go`, `clone_clustered.go`, `routed_export.go`, `s3export.go`, `nfs.go`, `storage.go`: every disk root reads is opened in its domain definition's format, never probed. The definition's format is `<driver type>`, or raw when there is none. This covers:
+  - the s3/nfs exports (`exportSourceOn`; an explicit disk path must be one of the VM's disks);
+  - `GetDiskInfo`, which pins `-f` and reports the definition's format;
+  - the disk in-use scan (level 0 from the definition, volume disks included);
+  - Delete's own-chain walk (`ownChainFiles`);
+  - an adopted imported disk (`-f qcow2`).
+  A raw disk's chain is never walked. A copy of a disk in any other format is refused. The QEMU CVE-2024-4467 fix is a documented prerequisite.
+- Item 3 (Medium), `privileged_copy.go`, `imagepath.go`, `routing.go`, `clone_clustered.go`: a copy falls back to the SSH user (with `-f <definition format>` pinned) only when sudo itself refuses.
+  - `sudoRefused` requires sudo's exit status (1, or 127 for a missing sudo) and every stderr line to be one of sudo's exact messages.
+  - A chain-safety refusal is never followed by the fallback. It is a `copyRefusedError`: `FailedPrecondition`, and `VM_OPERATION_FAILED` with a path-free message on routed calls.
+- Item 4 (Medium), `privileged_copy.go`, `imagepath.go`, `s3export.go`: before a copy opens any image of the source chain, the image must pass all of these, or the copy is refused and nothing is copied, by root or by the SSH user:
+  - it is not a symbolic link;
+  - it is named with a qcow2 or raw format;
+  - its directory is not writable by another account (or is sticky), as checked by `unsafeChainMemberReason`, which reuses `unsafeDiskDirReason` (fail closed).
+  A chain image with an external data file refuses the copy too. A root copy is also refused when the directory it writes below is unsafe (`unsafeHostDirReason`): the old `WARN` is now a refusal. `GetDiskInfo` reads such a disk as the SSH user.
+- Item 5 (Low), `imagepath.go`: root reads only `qemu-img info -U -f <qcow2|raw> --output=json -- <image>`. An image whose format nothing names, anything below it, and other formats are read by the SSH user. The documented `VR_DISK_READ` wildcard is replaced by the regex `^info -U -f (qcow2|raw) --output=json -- /var/lib/libvirt/images/[^/ ]+$`, and the "a tenant's input can never widen it" claim is replaced by an exact account.
+- Item 6, `internal/providers/libvirt/main_test.go`, `host_guard_test.go`, and the libvirt fixtures: a `TestMain` host guard puts shims for the host tools first on `PATH`.
+  - The shims refuse any argument under the real `/var/lib/libvirt`. The guard fails the run if a test reaches the real `sudo`, `ssh`, `scp` or `sshpass`, or runs `virsh` against a real URI.
+  - Fixture sudo shims run only the fixture's own fakes, and `realpath` of a `/var/lib/libvirt` path is answered lexically.
+  - Tests that run real commands use scratch directories (`chmod 0700`).
+
+### Changed
+- `internal/providers/libvirt/testdata/single_host_snapshot_clone_disk.golden.json`: regenerated in four separate commits. Calls only; no response, error or defined XML changed.
+  - Item 3: `clone-copy-fails` (refused before any copy) and `clone-copy-sudo-refused` (the fallback pins `-f qcow2`).
+  - Item 2: the `diskinfo-*` and `export-pvc-*` scenarios read with `-f qcow2 --`.
+  - Item 4: the clone scenarios gain the chain-image and output-directory checks, and the `diskinfo-*`/`export-pvc-*` scenarios gain the disk's chain-image check.
+  - Item 4 follow-up: the chain-image check moves before the read.
+  - `single_host_power_reconfigure` and `single_host_listvms` are byte-identical.
+- Tests:
+  - `definition_format_test.go` (forged qcow2 header on a raw disk: clone, exports, GetDiskInfo, in-use scan, Delete; other formats refused);
+  - `chain_swap_test.go` (real-shell checks, refusals, and never opening a refused image);
+  - `sudoers_rule_test.go` (the documented rule, parsed from `docs/libvirt-clones.md`, against every `sudo -n` command the provider runs and 20 forbidden shapes; root never probes);
+  - `TestNFSURLForRoot`, `TestClustered_Export_NFSIdentity`, `TestNFSRootIdentityRefusal`, `TestVMMigration_NFSRootIdentityFailsAtValidating`, `TestSudoRefused_OnlySudosOwnAnswer`, `TestCheckCopySource*`, `TestCreateVolumeFromImageFile_AdoptInPlaceReadsAsQcow2`, `TestHostGuard_RefusesTheRealHost`.
+- Docs:
+  - `docs/libvirt-clones.md`: the definition format, the CVE prerequisite, the swappable-chain refusals, the fallback rule, NFS identity, the exact sudoers regexes, and what the rules protect;
+  - `docs/upgrading.md`;
+  - `docs/release-notes/next.md`;
+  - the ADR-0007 Slice 5 amendment;
+  - `examples/vmmigration-nfs.yaml`, `examples/migration/README.md`.
+
+### Why
+The security review of the Slice 5 fix returned REQUEST CHANGES. Running `qemu-img` as root widened what a tenant's disk bytes, a tenant's `VMMigration` and a third account with write access to the pool could reach. This machine is the shared lab host, so the tests must be provably unable to touch it.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout
+- [x] Config change only
+- [ ] Documentation only
+
 ## [2026-09-30 16:06] - ADR-0007 Slice 5 follow-ups: qcow2 clone definition for raw sources, routed clone read failures retried, GetDiskInfo overlay sizes
 **Author:** @wrkode (William Rizzo)
 

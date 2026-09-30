@@ -224,10 +224,30 @@ See [`docs/clustered-provider-inventory.md`](clustered-provider-inventory.md) an
   directory next to the source disk, removed with it even when the export
   fails or is cancelled — remove any `.virtrigaud-export-*` or
   `.virtrigaud-import-*` file an earlier release left in a pool directory by
-  hand. Run a QEMU with the CVE-2024-4467 fix (its
-  `qemu-img info` does not open an image's external data file). Follow-up
-  (tracked): least privilege — VM disks `0600 libvirt-qemu`, every read through
-  `sudo -n`.
+  hand. Follow-up (tracked): least privilege — VM disks `0600 libvirt-qemu`,
+  every read through `sudo -n`.
+- **libvirt host prerequisite: QEMU with the CVE-2024-4467 fix.** The provider
+  runs `qemu-img info` and `qemu-img convert` as root on VM disks. Upgrade
+  every libvirt host to a QEMU that fixes CVE-2024-4467 (QEMU 9.0.2, 8.2.6 or
+  7.2.13 and later, or your distribution's backport) **before** you allow
+  those commands in sudoers. Unfixed versions can be made to open a file named
+  in an image's external data file entry, including a `json:` pseudo-protocol
+  name. Check with `qemu-img --version` and your distribution's advisory.
+  VirtRigaud also refuses a copy whose chain has a data file, and opens every
+  disk in the format its domain definition names (never probed). Those checks
+  are defence in depth; they do not replace the fix.
+- **libvirt pool directory must not be writable by other accounts** (unless
+  sticky). A full clone, or an s3/nfs disk export, is now **refused**
+  (`FailedPrecondition`; on a clustered Provider, `VM_OPERATION_FAILED`,
+  outside the circuit breaker) when:
+  - the source's image chain has a symbolic link;
+  - an image of the chain lies in a directory that an account other than
+    root and the SSH user can write and that is not sticky;
+  - the copy would write below such a directory.
+  Before, the provider only logged a `WARN`. Check with
+  `stat -c '%a %U:%G' /var/lib/libvirt/images` and fix a group- or
+  world-writable one with `chmod g-w,o-w`, or set the sticky bit
+  ([`docs/libvirt-clones.md`](libvirt-clones.md#clone-files-on-the-host)).
 - **libvirt image download limit:** `VIRTRIGAUD_LIBVIRT_IMAGE_MAX_DOWNLOAD_GIB` (provider
   pod env via `Provider.spec.runtime.env`), the largest image `ImagePrepare` downloads, in
   GiB. Default `256`; an invalid value falls back to the default (logged). A larger source
@@ -267,6 +287,19 @@ See [`docs/clustered-provider-inventory.md`](clustered-provider-inventory.md) an
   refusal (`FailedPrecondition` + `VM_SOURCE_RUNNING`) never counts toward the
   circuit breaker. vSphere clones of running VMs are unchanged. Roll the
   manager with the libvirt provider: an older manager fails such a clone.
+- **libvirt disks are opened in the format their domain definition names.**
+  A libvirt disk export now pins that format (`-f raw` for a raw disk) instead
+  of reading every disk as qcow2. The same applies to `GetDiskInfo`, the disk
+  in-use check and Delete. An export or full clone of a disk defined in
+  another format (`vmdk`, ...) is refused (`FailedPrecondition`), and so is
+  one whose chain names a backing file without its format. `GetDiskInfo`
+  reports the definition's format.
+- **An nfs VMMigration to or from libvirt with `nfs.uid: 0` or `nfs.gid: 0`
+  fails at Validating** (`NFSRootIdentityNotAllowed`). A libvirt nfs export
+  runs as root only with the SSH user's own identity. One that names another
+  uid or gid is written by the SSH user's `qemu-img`, so a VM with an external
+  snapshot cannot be exported to NFS that way
+  ([`docs/libvirt-clones.md`](libvirt-clones.md#what-the-copies-run-as-root)).
 - **libvirt clone and export copies read the source through `sudo -n` when
   allowed** ([`docs/libvirt-clones.md`](libvirt-clones.md#what-the-copies-run-as-root)).
   A full clone, or an s3/nfs disk export, of a VM with an external snapshot

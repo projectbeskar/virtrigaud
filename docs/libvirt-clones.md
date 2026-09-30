@@ -172,8 +172,13 @@ it, and a backing file is followed only when its header names an absolute
 local path (opened in the format the header names); `qemu-img` is never asked
 to follow a whole chain itself, so it never opens an `nbd:`, `http:` or
 `json:` backing, a device or a FIFO as root. A qcow2 external data file is
-recorded as part of its image (never opened by the check itself; run a QEMU
-with the CVE-2024-4467 fix, whose `qemu-img info` does not open it either). A
+recorded as part of its image (never opened by the check itself; a QEMU
+with the CVE-2024-4467 fix is a prerequisite, see
+[What the copies run as root](#what-the-copies-run-as-root)). Each disk is
+opened in the format its domain definition names (a raw disk, whose bytes are
+the guest's, is never opened at all), and a backing file in the format its
+parent's header names. A backing file whose format nothing names is probed by
+the SSH user only, and so is everything below it. A
 VM "has dependents" when any other domain references one of its disk files as
 a disk, a backing file, a data file, or any other file. Delete only runs the
 check when it has files to remove.
@@ -273,9 +278,16 @@ clone of the vanished VM keeps its backing file. Nothing else is looked for.
   owned by the SSH user `0755`), or sticky (`chmod +t`). Anyone else who can
   write there can still replace a finished disk, or a file libvirt later
   opens. The provider logs a `WARN` once per directory when a non-root account
-  other than its SSH user can write one that is not sticky; it never refuses.
-  **A `root` SSH user is not supported on a pool directory other accounts can
-  write.**
+  other than its SSH user can write one that is not sticky. It also
+  **refuses a clone or export copy** in that case, when the source chain has
+  an image in such a directory or the copy would write below one (see
+  [What the copies run as root](#what-the-copies-run-as-root)).
+  **Check your pool directory before upgrading:**
+  `stat -c '%a %U:%G' /var/lib/libvirt/images`. A group-writable directory
+  (for example `0775`) without the sticky bit makes every full clone and
+  every disk export from it fail with `FailedPrecondition` until it is fixed
+  (`chmod g-w`, or `chmod +t`). **A `root` SSH user is not supported on a
+  pool directory other accounts can write.**
 - **UEFI varstore.** For a UEFI source, the clone gets its own copy of the
   source's `<nvram>` varstore, `<nvram directory>/<clone domain>_VARS.fd`. The
   clone is refused (`Conflict`) before any of its files is written when that
@@ -298,15 +310,41 @@ clone's copy (single-host and clustered), and the flatten of an s3 or nfs
 disk export — therefore run `qemu-img convert` through passwordless
 `sudo -n`:
 
-- The source is opened in the format its domain definition names (`-f qcow2`
-  or `-f raw`; the exports keep their `-f qcow2`), so root never probes a
-  disk's format — a guest cannot make a raw disk it wrote read as a qcow2
-  image that names a host file as its backing file.
-- Before root opens it, the source's image chain is read one image at a time
-  with `qemu-img info -U` (through `sudo -n` too, the rule the in-use check
-  already uses): every image must be a local regular file and every backing
-  file must be named with its format. A chain that fails this is copied as
-  the SSH user, as before.
+- **Prerequisite: a QEMU with the fix for CVE-2024-4467** (QEMU 9.0.2,
+  8.2.6 or 7.2.13 and later, or your distribution's backport). Before that
+  fix, `qemu-img info` and `convert` could be made to open a file named in
+  an image's external data file entry. That includes a `json:` pseudo-protocol
+  name, which lets it reach any file root can read.
+- **Every disk root reads is opened in the format its domain definition
+  names**: the `<driver type=...>` of the disk, or raw when there is none, as
+  libvirt itself opens it. This applies to the clone and export copies,
+  `GetDiskInfo`, the disk in-use check and Delete's own-chain walk. The format
+  is never probed. A guest owns every byte of a raw disk, so it can make the
+  disk look like a qcow2 image that names another tenant's disk as its backing
+  file. Because the format is never probed, that header is never read.
+  - A raw disk has no chain and is never walked. It is only checked to be a
+    regular file.
+  - A copy (clone or export) of a disk in any other format (`vmdk`, `qed`,
+    `luks`, ...) is refused before anything reads it.
+  - An export of an explicit disk path must name one of the VM's own disks.
+- **Before a copy opens any image of the source chain** (the disk, then each
+  backing file, one image at a time), that image must pass all of these
+  checks. Any other image is not read at all:
+  - it is a local regular file, not a device or a FIFO;
+  - it is named with its format, qcow2 or raw;
+  - it is **not a symbolic link**;
+  - its directory is writable only by root and the SSH user, or is sticky.
+  A chain image that has an **external data file** is refused as well, once
+  its header has been read. A copy writes its output below a directory,
+  either the clone's pool directory or, for an s3 export, the source's
+  directory. That directory must be just as safe, or root does not write
+  there. **Every such refusal ends the copy.** It is not retried as the SSH
+  user, who reads every VM disk on the host through the `kvm` group: a chain
+  another account could swap is no safer for that user than for root. A
+  refused clone or export fails with `FailedPrecondition`. A routed
+  (clustered) one also gets the `VM_OPERATION_FAILED` reason, with no host
+  path in the message (the details are in the provider log). The manager
+  never counts either toward its circuit breaker.
 - The copy's local output is created by the SSH user, under the copy's umask
   (`0137`: `0640` for a clone's disk; `0177`: `0600` for an export's staging
   file), inside a private `mktemp -d` directory (`.virtrigaud-write-*`, `0700`)
@@ -336,12 +374,17 @@ disk export — therefore run `qemu-img convert` through passwordless
     is a libvirt Provider (`NFSRootIdentityNotAllowed`). AUTH_SYS identities
     are whatever the client claims, so on an export without `root_squash` they
     would be root, able to read or overwrite every file there.
-- **When `sudo` refuses** (no passwordless rule for the command, or no `sudo`
-  at all), the copy runs as the SSH user, exactly as before: a disk the SSH
-  user can read is copied as it always was; the overlay of a snapshotted VM
-  fails with "Permission denied" (logged by the provider with a pointer to
-  this page; a clustered clone reports `VM_OPERATION_FAILED`, which the
-  manager never counts toward its circuit breaker).
+- **Only when `sudo` itself refuses** does the copy run as the SSH user. That
+  means `sudo` answers with its own refusal (no passwordless rule for the
+  command, a password or terminal required, or not in sudoers), or `sudo` is
+  not installed. The provider recognises only `sudo`'s exit status and exact
+  messages, never a line `qemu-img` printed. The fallback pins the same
+  source format (`-f <qcow2|raw>`). A disk the SSH user can read is copied as
+  it always was. The overlay of a snapshotted VM fails with
+  "Permission denied", which the provider logs with a pointer to this page. A
+  clustered clone reports this as `VM_OPERATION_FAILED`, which the manager
+  never counts toward its circuit breaker. A refusal of the chain (above) is
+  never followed by this fallback.
 
 `sudo` sees these commands (the umask shell before `sudo` runs as the SSH
 user; `<N>` is the call's remaining budget in seconds, `XXXXXXXXXX` the

@@ -101,7 +101,7 @@ providers), and rollback caveats in
   provider call can be made for its VM. VM disks are created
   `0640 libvirt-qemu:kvm` (never `chmod`'ed as root; `chown -h`), no longer
   world-writable — the provider's SSH user needs the `kvm` group, `root`, or
-  passwordless `sudo qemu-img info -U` — disks are written in a private
+  passwordless `sudo` for the exact `qemu-img info` reads (a regex rule) — disks are written in a private
   directory and renamed into place (a symbolic link at a disk's name is
   refused), the s3 export's temporary copy is private and always removed, and a
   UEFI clone's varstore is never copied through a symlink
@@ -249,9 +249,20 @@ providers), and rollback caveats in
   never counted by the circuit breaker) and proceeds once the source is off.
   A full clone, or an s3/nfs export, of a VM with an external snapshot (whose
   active disk is libvirt's `0600` overlay) used to fail with "Permission
-  denied"; the copy now reads the source through `sudo -n` when the host
+  denied". The copy now reads the source through `sudo -n` when the host
   allows it, with a regex-confined sudoers rule
   (→ [`docs/libvirt-clones.md`](docs/libvirt-clones.md#what-the-copies-run-as-root)).
+  Root opens every disk in the format its domain definition names, never
+  probed; a raw disk's chain is never walked. A copy is refused, not retried
+  as the SSH user, when:
+  - its chain has a symbolic link, an image with an external data file, or
+    an image in a directory other accounts can write (unless sticky);
+  - its disk is neither qcow2 nor raw.
+  An nfs export runs as root only with the SSH user's own NFS identity.
+  `nfs.uid`/`gid` 0 are refused for libvirt migrations
+  (`NFSRootIdentityNotAllowed`). Prerequisites: a QEMU with the
+  CVE-2024-4467 fix, and a pool directory that is not group-writable. Replace
+  any `qemu-img info -U *` sudoers wildcard with the documented regex rule.
   A clustered VM is placed only on a `Host` labelled
   `net.virtrigaud.io/<network>: "true"` for each libvirt network it uses
   (→ [`docs/clustered-provider-inventory.md`](docs/clustered-provider-inventory.md#first-vm-checklist)).

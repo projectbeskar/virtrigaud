@@ -1449,7 +1449,8 @@ follows; A2's `pendingHost` is its prerequisite.
 >   keeps the SSH user's NFS identity (libnfs `uid`/`gid`). When `sudo`
 >   refuses, the copy falls back to running as the SSH user, as before. The
 >   exact `sudoers` entries are in
->   [`docs/libvirt-clones.md`](../libvirt-clones.md).
+>   [`docs/libvirt-clones.md`](../libvirt-clones.md). *(Tightened by the
+>   security review of this PR; see below.)*
 > - **B2 — a full clone of a RUNNING source failed** with qemu's `Failed to
 >   get shared "write" lock`. Decision: a libvirt full clone requires the
 >   source to be powered off. The provider now refuses before any copy with
@@ -1474,6 +1475,62 @@ follows; A2's `pendingHost` is its prerequisite.
 >   `GetDiskInfo` reported 0 sizes for a 0600 snapshot overlay — it now reads
 >   a VM's own disk through the same `sudo -n qemu-img info -U` rule as the
 >   in-use check.
+>
+> **Security review of the B1 fix (2026-09-30): REQUEST CHANGES, addressed in
+> the same PR.** Running `qemu-img` as root widened what a tenant's disk and a
+> tenant's `VMMigration` could reach. The review asked for six changes, all
+> made:
+>
+> 1. **NFS identity.** A root nfs export writes to the destination's server
+>    and path with *exactly* the SSH user's `?uid=&gid=`, and drops every
+>    other libnfs option. A destination that names another uid or gid is
+>    never written as root: the SSH user's own `qemu-img` presents it. The
+>    manager refuses `nfs.uid: 0` / `nfs.gid: 0` when either side is libvirt,
+>    at Validating (`NFSRootIdentityNotAllowed`). This is a typed check, not a
+>    CRD minimum: the rule is libvirt's, and tightening v1beta1 would reject
+>    stored objects on update. The sudoers rule pins the nfs URL to
+>    `[^?& ]+\?uid=<ssh uid>&gid=<ssh gid>$`.
+> 2. **The domain definition's format, everywhere root reads a disk.** The
+>    exports, `GetDiskInfo`, the in-use scan, Delete's own-chain walk and an
+>    adopted imported disk now open each disk in its `<driver type>` (raw by
+>    default), never probed. A raw disk's chain is never walked. A copy of a
+>    disk in any format other than qcow2 or raw is refused. The fix for
+>    **CVE-2024-4467** in the host's QEMU is a documented prerequisite.
+> 3. **Fallback rules.** The copy falls back to the SSH user (with the format
+>    still pinned) *only* when sudo itself refuses. That is detected from
+>    sudo's exit status and exact messages, and every stderr line must be
+>    sudo's. It never falls back after a chain-safety refusal. A refusal is
+>    `FailedPrecondition`, and on a routed call it also carries
+>    `VM_OPERATION_FAILED`, with no host path on the wire.
+> 4. **Swappable chains.** Before a copy opens any image of the chain, the
+>    image must pass three checks: it is not a symbolic link, it is named
+>    with a qcow2 or raw format, and its directory can be written only by
+>    root and the SSH user (or is sticky). A chain image with an external
+>    data file is refused too. The directory a root copy writes below must
+>    be just as safe. For root copies, the old `WARN` is now a refusal.
+>    Refusing was chosen over falling back to the SSH user: the SSH user
+>    reads every VM disk through `kvm`, so a chain another account can
+>    redirect is no safer for it.
+> 5. **Sudoers.** The `qemu-img info -U *` wildcard is replaced by
+>    `^info -U -f (qcow2|raw) --output=json -- <pool>/[^/ ]+$`. Root now only
+>    reads an image in a named qcow2/raw format. An unnamed format, anything
+>    below it, and other formats are read by the SSH user. A test parses the
+>    documented rule and checks it against every `sudo -n` command the
+>    provider runs, and against twenty shapes it must refuse. The earlier
+>    claim that "a tenant's input can never widen it" is replaced by an
+>    account of what the rules do and do not confine.
+> 6. **Test hygiene on the shared lab host.** Every libvirt test runs under a
+>    `TestMain` guard. It shadows the host tools, refuses any argument under
+>    the real `/var/lib/libvirt`, and fails the run if a test calls the real
+>    `sudo`, `ssh` or `virsh` against a real connection. Fixture sudo shims
+>    run only the fixture's own fakes.
+>
+> **Operational consequences** (in [`docs/upgrading.md`](../upgrading.md)):
+> - A pool directory that is group- or world-writable and not sticky now
+>   refuses full clones and exports.
+> - An nfs export with a VMMigration-named identity runs as the SSH user, so
+>   a VM with an external snapshot cannot be exported to NFS that way.
+> - A host that kept the old wildcard should replace it.
 >
 > **Recommendation, not a decision.** This lab run covers the full
 > single-host lifecycle and the A6 restore scenarios one host can run, and closes B1–B3. It
