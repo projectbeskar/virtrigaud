@@ -76,8 +76,11 @@ const (
 // host directory such as /var/lib/libvirt/images; sh answers "no such path"
 // for every host existence check and runs withUmask's fixed script
 // (umaskExecScript) for real, so the command it wraps (qemu-img, sudo dd)
-// reaches its fake; every other host tool (mv included: it never moves a real
-// file) only logs.
+// reaches its fake; `sudo -n <cmd>` (the privileged disk copy and its chain
+// read, privileged_copy.go) runs <cmd>'s fake as the test user — or, when
+// local/fail-sudo exists, refuses as sudo does without a passwordless rule —
+// while any other sudo only logs; every other host tool (mv included: it
+// never moves a real file) only logs.
 const scdFakeTool = `#!/bin/sh
 tool=$(basename "$0")
 host=local
@@ -135,12 +138,26 @@ qemu-img)
   if [ "$1" = info ]; then printf '{"virtual-size": 10737418240, "actual-size": 1073741824, "format": "qcow2"}\n'; fi ;;
 sh)
   case "$2" in '` + umaskExecScript + `') exec /bin/sh "$@" ;; esac ;;
+sudo)
+  if [ "$1" = "-n" ]; then
+    if [ -f "$d/fail-sudo" ]; then echo "sudo: a password is required" >&2; exit 1; fi
+    shift
+    exec "$@"
+  fi ;;
+id)
+  case "$1" in -u) echo ` + scdSSHUID + ` ;; -g) echo ` + scdSSHGID + ` ;; esac ;;
 *) exit 0 ;;
 esac
 `
 
+// scdSSHUID and scdSSHGID are the SSH user's uid and gid the fake id prints.
+const (
+	scdSSHUID = "1001"
+	scdSSHGID = "1002"
+)
+
 // scdTools are the names scdFakeTool is installed under.
-var scdTools = []string{"virsh", "mktemp", "qemu-img", "sh", "sudo", "cp", "mv", "chmod", "chown", "rm", "restorecon", "stat", "sha256sum"}
+var scdTools = []string{"virsh", "mktemp", "qemu-img", "sh", "sudo", "cp", "mv", "chmod", "chown", "rm", "restorecon", "stat", "sha256sum", "id"}
 
 // scdFixture is one scenario's fake host: a single-host Provider (with the
 // registry seam the Server's snapshot RPCs use) on qemu:///single.

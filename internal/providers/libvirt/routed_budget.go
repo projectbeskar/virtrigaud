@@ -68,7 +68,12 @@ import (
 // The commands keep the argv-safe transport (every element shell-quoted). A
 // host without flock(1) or timeout(1) (util-linux, coreutils) makes the call
 // fail with a clear message — it never runs the copy unguarded. The
-// single-host path is unchanged: it has no budget and no guard.
+// single-host path has no budget and no guard.
+//
+// A disk copy that reads the source as root (privileged_copy.go) keeps the
+// guard as it is: the guard script and flock(1) run as the SSH user, which
+// holds the lock outside sudo, and timeout(1) runs inside sudo
+// (hostCmdGuard.applyPrivileged), so it can stop and kill the root qemu-img.
 //
 // virsh snapshot-create-as is bounded by the budget but not wrapped: killing
 // the virsh client would not stop libvirtd's snapshot job, and libvirt's
@@ -221,6 +226,18 @@ func guardArgv(lock hostLock, target string, flockArgs []string, argv []string) 
 // hostCommandSlack before ctx's deadline. A budget already too short to run
 // anything is a budget failure.
 func guardedHostCommand(ctx context.Context, lock hostLock, target string, argv ...string) ([]string, error) {
+	timeout, err := hostCommandTimeout(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return guardArgv(lock, target, []string{"-n"}, append(timeout, argv...)), nil
+}
+
+// hostCommandTimeout returns the timeout(1) argv prefix of a guarded host
+// command: stopped hostCommandSlack before ctx's deadline (defaultRoutedBudget
+// when it has none), killed hostCommandKillAfter later. A budget already too
+// short to run anything is a budget failure.
+func hostCommandTimeout(ctx context.Context) ([]string, error) {
 	secs := int64(defaultRoutedBudget / time.Second)
 	if deadline, ok := ctx.Deadline(); ok {
 		secs = int64((time.Until(deadline) - hostCommandSlack) / time.Second)
@@ -229,30 +246,70 @@ func guardedHostCommand(ctx context.Context, lock hostLock, target string, argv 
 		return nil, &routedOpError{code: codes.Unknown, wire: "the operation's time budget ran out before it could start",
 			cause: context.DeadlineExceeded}
 	}
-	timed := append([]string{"timeout", "--kill-after=" + hostCommandKillAfter, strconv.FormatInt(secs, 10) + "s"}, argv...)
-	return guardArgv(lock, target, []string{"-n"}, timed), nil
+	return []string{"timeout", "--kill-after=" + hostCommandKillAfter, strconv.FormatInt(secs, 10) + "s"}, nil
 }
 
-// hostCmdGuard wraps a long host command's argv (guardedHostCommand bound to a
-// lock and a budget); target is the host file it writes ("" for none). A nil
-// guard leaves argv unchanged: the single-host path passes none and runs its
-// historical commands.
-type hostCmdGuard func(target string, argv []string) ([]string, error)
-
-// apply returns argv wrapped by g, or argv itself when g is nil.
-func (g hostCmdGuard) apply(target string, argv ...string) ([]string, error) {
-	if g == nil {
-		return argv, nil
-	}
-	return g(target, argv)
+// hostCmdGuard is the guard of a long host command on a clustered host:
+// flock(1) on lock and timeout(1) within ctx's budget (guardedHostCommand). A
+// nil guard is the single-host path: apply leaves argv unchanged (its
+// historical commands), and applyPrivileged adds sudo but no guard and no
+// timeout.
+type hostCmdGuard struct {
+	// ctx bounds the command (its deadline sets timeout(1)).
+	ctx context.Context
+	// lock is the flock(1) lock the command runs under.
+	lock hostLock
 }
 
 // guardFor returns the hostCmdGuard that runs a command under flock(1) on lock
 // and timeout(1) within ctx's budget.
-func guardFor(ctx context.Context, lock hostLock) hostCmdGuard {
-	return func(target string, argv []string) ([]string, error) {
-		return guardedHostCommand(ctx, lock, target, argv...)
+func guardFor(ctx context.Context, lock hostLock) *hostCmdGuard {
+	return &hostCmdGuard{ctx: ctx, lock: lock}
+}
+
+// apply returns argv wrapped by g — the guard script, flock(1), timeout(1),
+// then argv — or argv itself when g is nil. target is the host file the
+// command writes ("" for none).
+func (g *hostCmdGuard) apply(target string, argv ...string) ([]string, error) {
+	if g == nil {
+		return argv, nil
 	}
+	return guardedHostCommand(g.ctx, g.lock, target, argv...)
+}
+
+// applyPrivileged returns argv run as root through passwordless sudo under
+// umask ("" for none), wrapped by g:
+//
+//	sh -c <hostGuardScript> … flock -n -E 75 <lock> sh -c <umaskExecScript> sh <umask> sudo -n timeout --kill-after=10s <N>s <argv>
+//
+// The guard script and flock(1) run as the SSH user, which holds the lock
+// outside sudo; timeout(1) runs INSIDE sudo, so it can stop (and kill) the
+// root command when the budget runs out. A nil g — the single-host path — is
+// `sh -c <umaskExecScript> sh <umask> sudo -n <argv>`: no guard, no timeout.
+func (g *hostCmdGuard) applyPrivileged(target, umask string, argv ...string) ([]string, error) {
+	if g == nil {
+		return privilegedArgv(umask, nil, argv), nil
+	}
+	timeout, err := hostCommandTimeout(g.ctx)
+	if err != nil {
+		return nil, err
+	}
+	return guardArgv(g.lock, target, []string{"-n"}, privilegedArgv(umask, timeout, argv)), nil
+}
+
+// privilegedArgv returns `sudo -n <timeout...> <argv...>`, run under umask
+// (withUmask) unless umask is "". sudo keeps the caller's umask (it applies
+// the union of it and its own), and -n makes it refuse at once, never prompt,
+// when no passwordless rule allows the command.
+func privilegedArgv(umask string, timeout, argv []string) []string {
+	cmd := make([]string, 0, 2+len(timeout)+len(argv))
+	cmd = append(cmd, "sudo", sudoNonInteractive)
+	cmd = append(cmd, timeout...)
+	cmd = append(cmd, argv...)
+	if umask == "" {
+		return cmd
+	}
+	return withUmask(umask, cmd...)
 }
 
 // classifyRoutedFailure turns the failure of a budgeted, guarded routed call

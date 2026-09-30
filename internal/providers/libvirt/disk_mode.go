@@ -57,7 +57,10 @@ import (
 // owner (the qemu user, after chownToQemu), read-only for its group (kvm), and
 // nothing for anyone else. The provider's SSH user reads VM disks (the disk
 // in-use checks, GetDiskInfo, s3/nfs exports, a full clone's copy) as a member
-// of kvm, or as root; nothing writes a VM disk through the group. qemu-img
+// of kvm, or as root; the disk in-use checks and the copies (a full clone's,
+// the s3/nfs exports' flatten) read through passwordless `sudo -n` where the
+// host allows it, which reaches libvirt's 0600 snapshot overlays too
+// (privileged_copy.go); nothing writes a VM disk through the group. qemu-img
 // creates files 0644 at most, so this is the most a create-time mode can give.
 // Disks created by an earlier release keep their mode. Least privilege (0600,
 // every read through `sudo -n`) is a tracked follow-up.

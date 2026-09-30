@@ -55,9 +55,24 @@ const (
 	cloneWriteFile = cloneWriteDir + "/" + cloneTargetDomain + "-disk.qcow2"
 )
 
-// cloneCopyCmd is the clone's copy as the guard runs it: qemu-img convert
-// under the VM-disk umask (withUmask), into the private directory.
-const cloneCopyCmd = "sh -c " + umaskExecScript + " sh " + vmDiskUmask + " qemu-img convert -O qcow2 " + scdDiskPath + " " + cloneWriteFile
+// cloneCopyCmd is the clone's copy as the guard runs it as root: qemu-img
+// convert with the source's format pinned (-f, from its definition), into the
+// private directory (privileged_copy.go). cloneCopyAsRoot is what runs
+// between the flock and timeout(1): the VM-disk umask (withUmask, as the SSH
+// user), then `sudo -n` — timeout(1) runs inside sudo.
+const (
+	cloneCopyCmd    = "qemu-img convert -f qcow2 -O qcow2 " + scdDiskPath + " " + cloneWriteFile
+	cloneCopyAsRoot = "sh -c " + umaskExecScript + " sh " + vmDiskUmask + " sudo -n "
+)
+
+// cloneCopyAsSSHUserCmd is the historical clone copy the guard runs as the
+// SSH user (when sudo refuses): timeout(1), then qemu-img convert under the
+// VM-disk umask, the source's format probed.
+const cloneCopyAsSSHUserCmd = "sh -c " + umaskExecScript + " sh " + vmDiskUmask + " qemu-img convert -O qcow2 " + scdDiskPath + " " + cloneWriteFile
+
+// nfsExportAsRoot is what runs between an nfs export's flock and timeout(1)
+// when it runs as root.
+const nfsExportAsRoot = "sudo -n "
 
 // Locks live in the provider's lock directory under the staging directory
 // (normalized to <staging> in the call log), never next to a disk.
@@ -67,11 +82,14 @@ const (
 	exportLock = lockDir + "/export-web.lock"
 )
 
-// guardedCall returns the logged `flock ... timeout ... <cmd>` line whose
-// command starts with cmd, and the timeout(1) duration it was given.
-func guardedCall(t *testing.T, calls []string, lock, cmd string) (string, int) {
+// guardedCall returns the logged `flock ... <pre>timeout ... <cmd>` line whose
+// command starts with cmd, and the timeout(1) duration it was given. pre is
+// what runs between the flock and timeout(1): "" for a command run as the SSH
+// user, the umask shell and `sudo -n` for one run as root (cloneCopyAsRoot,
+// nfsExportAsRoot).
+func guardedCall(t *testing.T, calls []string, lock, pre, cmd string) (string, int) {
 	t.Helper()
-	prefix := "local flock -n -E 75 " + lock + " timeout --kill-after=10s "
+	prefix := "local flock -n -E 75 " + lock + " " + pre + "timeout --kill-after=10s "
 	for _, c := range calls {
 		if !strings.HasPrefix(c, prefix) {
 			continue
@@ -99,7 +117,7 @@ func TestClustered_Clone_CopyIsGuardedAndBudgeted(t *testing.T) {
 	require.NoError(t, err)
 
 	calls := fx.calls()
-	_, secs := guardedCall(t, calls, cloneLock, cloneCopyCmd)
+	_, secs := guardedCall(t, calls, cloneLock, cloneCopyAsRoot, cloneCopyCmd)
 	budget := 5*time.Minute - routedBudgetMargin - hostCommandSlack
 	assert.LessOrEqual(t, secs, int(budget/time.Second), "the copy is stopped before the call's budget ends")
 	assert.Greater(t, secs, int(budget/time.Second)-10)
@@ -119,7 +137,7 @@ func TestClustered_Export_CopyIsGuardedUnderTheExportLock(t *testing.T) {
 	})
 	require.NoError(t, err)
 	calls := fx.calls()
-	guardedCall(t, calls, exportLock, "qemu-img convert -U -f qcow2 -O qcow2 "+scdDiskPath+" nfs://nas/e/web.qcow2")
+	guardedCall(t, calls, exportLock, nfsExportAsRoot, "qemu-img convert -U -f qcow2 -O qcow2 "+scdDiskPath+" nfs://nas/e/web.qcow2?uid="+scdSSHUID+"&gid="+scdSSHGID)
 	assert.Contains(t, calls, "local guard "+lockDir+" "+exportLock+" ", "an nfs export writes no host file: no target to check")
 	for _, c := range calls {
 		assert.NotContains(t, c, "/var/lib/libvirt/images/.virtrigaud-export-web.lock",
@@ -323,7 +341,7 @@ func TestGuardedHostCommand(t *testing.T) {
 	var roe *routedOpError
 	require.ErrorAs(t, err, &roe, "a budget too short to run anything is a budget failure")
 
-	var none hostCmdGuard
+	var none *hostCmdGuard
 	same, err := none.apply("/pool/t", "qemu-img", "info")
 	require.NoError(t, err)
 	assert.Equal(t, []string{"qemu-img", "info"}, same, "a nil guard (single-host) leaves the command unchanged")

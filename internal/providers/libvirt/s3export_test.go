@@ -21,6 +21,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -73,89 +74,128 @@ func TestExportDiskToS3_RequiresSSHTransport(t *testing.T) {
 		"a local transport must be rejected: host-side flatten+stream needs SSH")
 }
 
-// TestHostExportStageTemplate verifies the transient flattened qcow2 is
-// co-located with the source disk (same dir → same filesystem, so the flatten
-// convert stays intra-device), is dot-prefixed (hidden from a casual directory
-// listing), carries the VM id, and ends in the mktemp template (the random
-// part and the .qcow2 suffix are added by mktemp).
-func TestHostExportStageTemplate(t *testing.T) {
-	const src = "/var/lib/libvirt/images/ubuntu-libvirt-demo.qcow2"
+// TestHostExportStageName verifies the transient flattened qcow2's name inside
+// its private staging directory: dot-prefixed (hidden from a casual directory
+// listing), carrying the VM id, ending in the staged object's format.
+func TestHostExportStageName(t *testing.T) {
 	const vm = "demo-ubuntu-libvirt"
 
-	got := hostExportStageTemplate(src, vm)
+	base := hostExportStageName(vm)
 
-	const dir = "/var/lib/libvirt/images"
-	assert.Equal(t, dir, got[:strings.LastIndex(got, "/")],
-		"stage file must be directly in the source dir, not a subdir; got %q", got)
-	base := got[strings.LastIndex(got, "/")+1:]
 	assert.True(t, strings.HasPrefix(base, ".virtrigaud-export-"),
 		"stage file must be dot-prefixed and namespaced; got base %q", base)
 	assert.Contains(t, base, vm, "stage file name must carry the VM id; got base %q", base)
-	assert.True(t, strings.HasSuffix(base, "."+mktempTemplateSuffix), "a mktemp template; got base %q", base)
+	assert.True(t, strings.HasSuffix(base, hostExportStageSuffix), "the staged object's format; got base %q", base)
 	assert.Equal(t, ".qcow2", hostExportStageSuffix, "the staged-object suffix")
 }
 
-// TestHostExportStageTemplate_SanitizedNameStaysContained verifies that a
-// hostile VM id cannot escape the source directory: sanitizeVolumeName
-// neutralizes path separators and "..", so the stage path stays directly
-// inside the source dir.
-func TestHostExportStageTemplate_SanitizedNameStaysContained(t *testing.T) {
-	const src = "/var/lib/libvirt/images/disk0.qcow2"
-
-	stage := hostExportStageTemplate(src, "../../etc/evil")
+// TestHostExportStageName_SanitizedNameStaysContained verifies that a hostile
+// VM id cannot escape the private staging directory: sanitizeVolumeName
+// neutralizes path separators and "..", so the name is one path component.
+func TestHostExportStageName_SanitizedNameStaysContained(t *testing.T) {
+	stage := hostExportStageName("../../etc/evil")
 
 	assert.False(t, strings.Contains(stage, ".."),
-		"sanitized stage path must not contain a parent-dir traversal; got %q", stage)
-	assert.Equal(t, "/var/lib/libvirt/images", stage[:strings.LastIndex(stage, "/")],
-		"stage file must stay directly inside the source dir; got %q", stage)
+		"sanitized stage name must not contain a parent-dir traversal; got %q", stage)
+	assert.NotContains(t, stage, "/", "the stage name is one path component; got %q", stage)
+}
+
+// fakeSudoAllow stands in for sudo in the real-command export tests: it logs
+// its argv to $FAKE_SUDO_LOG and runs the command as the calling user (the
+// tests are never root and never run the real sudo). fakeSudoRefuse answers
+// as sudo does when no passwordless rule allows the command.
+const (
+	fakeSudoAllow = `#!/bin/sh
+printf '%s\n' "$*" >> "$FAKE_SUDO_LOG"
+if [ "$1" = "-n" ]; then shift; fi
+exec "$@"
+`
+	fakeSudoRefuse = `#!/bin/sh
+printf '%s\n' "$*" >> "$FAKE_SUDO_LOG"
+echo "sudo: a password is required" >&2
+exit 1
+`
+)
+
+// installFakeSudo puts script first on PATH as sudo and returns the path of
+// its log.
+func installFakeSudo(t *testing.T, script string) string {
+	t.Helper()
+	bin := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(bin, "sudo"), []byte(script), 0o700)) //nolint:gosec // test shim must be executable
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	logPath := filepath.Join(t.TempDir(), "sudo.log")
+	t.Setenv("FAKE_SUDO_LOG", logPath)
+	return logPath
 }
 
 // TestFlattenForExport runs the export's flatten with the real commands
-// (mktemp, qemu-img, rm): the staging file is made for this export alone
-// (unpredictable name next to the source, distinct from it), private (0600),
-// holds the flattened disk, and is removed by its cleanup — even when the
-// request was cancelled; a failed flatten leaves nothing behind.
+// (mktemp, qemu-img, rm; sudo is a fake that runs the command as the test
+// user, or refuses): the staging file is made for this export alone, inside a
+// private (0700) directory next to the source, is private (0600), holds the
+// flattened disk, and is removed with its directory by its cleanup — even
+// when the request was cancelled; a failed flatten leaves nothing behind. The
+// flatten runs through `sudo -n` with the source format pinned when sudo
+// allows it, and as the SSH user (the historical command) when it refuses.
 func TestFlattenForExport(t *testing.T) {
 	if _, err := exec.LookPath("qemu-img"); err != nil {
 		t.Skip("qemu-img not available")
 	}
-	vp := NewVirshProvider(&ProviderConfig{})
-	vp.uri = "test:///export"
-	dir := t.TempDir()
-	src := filepath.Join(dir, "disk0.qcow2")
-	out, err := exec.Command("qemu-img", "create", "-q", "-f", "qcow2", src, "1M").CombinedOutput() //nolint:gosec // test-controlled paths
-	require.NoError(t, err, "%s", out)
-	staged := func() []string {
-		m, err := filepath.Glob(filepath.Join(dir, ".virtrigaud-export-*"))
-		require.NoError(t, err)
-		return m
+	for name, sudo := range map[string]string{
+		"sudo allows the flatten": fakeSudoAllow,
+		"sudo refuses":            fakeSudoRefuse,
+	} {
+		t.Run(name, func(t *testing.T) {
+			sudoLog := installFakeSudo(t, sudo)
+			vp := NewVirshProvider(&ProviderConfig{})
+			vp.uri = "test:///export"
+			dir := t.TempDir()
+			src := filepath.Join(dir, "disk0.qcow2")
+			out, err := exec.Command("qemu-img", "create", "-q", "-f", "qcow2", src, "1M").CombinedOutput() //nolint:gosec // test-controlled paths
+			require.NoError(t, err, "%s", out)
+			staged := func() []string {
+				m, err := filepath.Glob(filepath.Join(dir, vmDiskWriteDirPrefix+"*"))
+				require.NoError(t, err)
+				return m
+			}
+
+			ctx, cancel := context.WithCancel(context.Background())
+			tmp, cleanup, err := flattenForExport(ctx, vp, src, "vm-1", nil)
+			require.NoError(t, err)
+			stageDir := filepath.Dir(tmp)
+			assert.Equal(t, dir, filepath.Dir(stageDir), "the private directory is next to the source disk")
+			assert.Regexp(t, `^`+regexp.QuoteMeta(vmDiskWriteDirPrefix)+`[A-Za-z0-9]{10}$`, filepath.Base(stageDir))
+			di, err := os.Stat(stageDir)
+			require.NoError(t, err)
+			assert.Equal(t, os.FileMode(0o700), di.Mode().Perm(), "the staging directory is private to the SSH user")
+			assert.Equal(t, ".virtrigaud-export-vm-1.qcow2", filepath.Base(tmp))
+			fi, err := os.Stat(tmp)
+			require.NoError(t, err)
+			assert.Equal(t, os.FileMode(0o600), fi.Mode().Perm(), "a full copy of a VM's disk is private")
+			info, err := exec.Command("qemu-img", "info", "--output=json", tmp).Output() //nolint:gosec // test-controlled path
+			require.NoError(t, err)
+			assert.Contains(t, string(info), `"format": "qcow2"`)
+
+			// The flatten is always asked of sudo first (the chain was
+			// verified); when sudo refuses, the historical flatten ran as
+			// the SSH user and produced the same private, flattened file.
+			b, _ := os.ReadFile(sudoLog) //nolint:gosec // test reads its own log
+			assert.Contains(t, splitLines(string(b)), "-n qemu-img convert -U -f qcow2 -O qcow2 "+src+" "+tmp)
+
+			tmp2, cleanup2, err := flattenForExport(ctx, vp, src, "vm-1", nil)
+			require.NoError(t, err)
+			assert.NotEqual(t, tmp, tmp2, "one staging file per export")
+			cleanup2()
+
+			cancel() // the request is gone: the cleanup still runs
+			cleanup()
+			assert.Empty(t, staged(), "removed")
+
+			_, _, err = flattenForExport(context.Background(), vp, filepath.Join(dir, "missing.qcow2"), "vm-1", nil)
+			require.Error(t, err)
+			assert.Empty(t, staged(), "a failed flatten leaves nothing behind")
+		})
 	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	tmp, cleanup, err := flattenForExport(ctx, vp, src, "vm-1", nil)
-	require.NoError(t, err)
-	assert.Equal(t, dir, filepath.Dir(tmp))
-	assert.NotEqual(t, src, tmp)
-	assert.Regexp(t, `^\.virtrigaud-export-vm-1\.[A-Za-z0-9]{10}\.qcow2$`, filepath.Base(tmp))
-	fi, err := os.Stat(tmp)
-	require.NoError(t, err)
-	assert.Equal(t, os.FileMode(0o600), fi.Mode().Perm(), "a full copy of a VM's disk is private")
-	info, err := exec.Command("qemu-img", "info", "--output=json", tmp).Output() //nolint:gosec // test-controlled path
-	require.NoError(t, err)
-	assert.Contains(t, string(info), `"format": "qcow2"`)
-
-	tmp2, cleanup2, err := flattenForExport(ctx, vp, src, "vm-1", nil)
-	require.NoError(t, err)
-	assert.NotEqual(t, tmp, tmp2, "one staging file per export")
-	cleanup2()
-
-	cancel() // the request is gone: the cleanup still runs
-	cleanup()
-	assert.Empty(t, staged(), "removed")
-
-	_, _, err = flattenForExport(context.Background(), vp, filepath.Join(dir, "missing.qcow2"), "vm-1", nil)
-	require.Error(t, err)
-	assert.Empty(t, staged(), "a failed flatten leaves nothing behind")
 }
 
 // TestStreamCmdQuotesPath verifies the export stream (conn.Stream(ctx, "cat",

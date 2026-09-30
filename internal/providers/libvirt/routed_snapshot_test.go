@@ -132,8 +132,9 @@ esac
 exec "$FAKE_SCD_TOOLS/qemu-img" "$@"
 `
 
-// routedFakeSudo is scdFakeTool's sudo (it only logs), plus `sudo -n qemu-img
-// info ... -- <image>` (the in-use check and the disk-dependents guard read
+// routedFakeSudo is scdFakeTool's sudo (any other `sudo -n <cmd>` runs <cmd>'s
+// fake, as the privileged disk copy does; plain sudo only logs), plus `sudo -n
+// qemu-img info ... -- <image>` (the in-use check and the disk-dependents guard read
 // each disk's chain one image at a time, #358): a standalone qcow2 image,
 // unless local/backing-<image base name> names its backing file (a linked
 // clone's overlay), or local/fail-qemu-img-info makes the read fail. It reads

@@ -888,18 +888,28 @@ func backingChainFiles(ctx context.Context, h hostCommandRunner, disk string) ([
 }
 
 // backingLevel is one image of a backing chain (walkBackingChain): its path
-// as named (disk, then each full-backing-filename) and every host file it
-// consists of or points at (qemuImgInfo.referencedFiles).
+// as named (disk, then each full-backing-filename), every host file it
+// consists of or points at (qemuImgInfo.referencedFiles), and the format it
+// was opened as — the one its parent's header names (the caller's for the
+// disk itself), or "" when qemu-img had to probe it.
 type backingLevel struct {
-	path string
-	refs []string
+	path   string
+	refs   []string
+	format string
 }
 
 // walkBackingChain reads disk's image chain one image at a time, top first,
-// under the rules backingChainFiles documents.
+// under the rules backingChainFiles documents. The disk's own format is
+// probed.
 func walkBackingChain(ctx context.Context, h hostCommandRunner, disk string) ([]backingLevel, error) {
+	return walkBackingChainFrom(ctx, h, disk, "")
+}
+
+// walkBackingChainFrom is walkBackingChain with the disk itself opened as
+// format ("" probes it), as a copy that pins the disk's format reads it.
+func walkBackingChainFrom(ctx context.Context, h hostCommandRunner, disk, format string) ([]backingLevel, error) {
 	var levels []backingLevel
-	cur, format := disk, ""
+	cur := disk
 	for depth := 0; ; depth++ {
 		if depth > maxBackingChainDepth {
 			return nil, hostCheckFailed("read backing chain", fmt.Errorf("%s: backing chain longer than %d images", disk, maxBackingChainDepth))
@@ -928,7 +938,7 @@ func walkBackingChain(ctx context.Context, h hostCommandRunner, disk string) ([]
 					fmt.Errorf("%s: external data file %q is not a local file path", cur, df))
 			}
 		}
-		levels = append(levels, backingLevel{path: cur, refs: info.referencedFiles()})
+		levels = append(levels, backingLevel{path: cur, refs: info.referencedFiles(), format: format})
 		if info.BackingFilename == "" && info.FullBackingFilename == "" {
 			return levels, nil
 		}

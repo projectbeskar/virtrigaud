@@ -18,8 +18,10 @@ package libvirt
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -101,7 +103,7 @@ func (s *Server) exportDiskToS3(ctx context.Context, req *providerv1.ExportDiskR
 // guard wraps the flatten (flock + timeout on a clustered host,
 // routed_budget.go); a nil guard — the single-host path — runs the historical
 // command sequence, unchanged.
-func exportFlattenToS3(ctx context.Context, conn libvirtConn, req *providerv1.ExportDiskRequest, vmID, srcPath string, guard hostCmdGuard) (*providerv1.ExportDiskResponse, error) {
+func exportFlattenToS3(ctx context.Context, conn libvirtConn, req *providerv1.ExportDiskRequest, vmID, srcPath string, guard *hostCmdGuard) (*providerv1.ExportDiskResponse, error) {
 	// Build the S3 client (pod is the S3 client). Options come from
 	// storage_options_json; credentials from the credentials map. Never logged.
 	storageConfig, err := migration.S3StorageConfigFromRequest(req.StorageOptionsJson, req.Credentials)
@@ -163,9 +165,8 @@ func exportFlattenToS3(ctx context.Context, conn libvirtConn, req *providerv1.Ex
 	}, nil
 }
 
-// exportStageUmask is the umask the flatten writes the export's staging file
-// under: it stays 0600 (mktemp creates it so), private to the SSH user — it is
-// a full copy of a VM's disk.
+// exportStageUmask is the umask the export's staging file is created under:
+// 0600, private to the SSH user — it is a full copy of a VM's disk.
 const exportStageUmask = "0177"
 
 // hostExportStageSuffix ends the export's staging file name: the staged (and
@@ -180,15 +181,24 @@ const hostExportStageSuffix = ".qcow2"
 // routed call's budget (routed_budget.go), and refuses a symlinked staging
 // file.
 //
-// The file is made for this export alone before the flatten runs (mktemp:
-// created exclusively, unpredictable name, mode 0600 — kept by the
-// exportStageUmask the flatten runs under), in the source disk's directory,
-// so the convert stays within one filesystem. Its removal is armed as soon as
-// it exists — the flatten failing or being stopped, or the request being
-// cancelled, still removes it (detached from the request's cancellation,
-// bounded; on a clustered host within routedCleanupTimeout, so the answer
-// still reaches the manager before its deadline): a failed export used to
-// leave a world-readable multi-GB copy behind under a predictable name.
+// The file is written for this export alone inside a private directory made
+// next to the source disk (diskWriteDir: `mktemp -d`, an unpredictable
+// `.virtrigaud-write-*` name, mode 0700, owned by the SSH user), so the
+// convert stays within one filesystem and no other account can plant a link
+// at the file's name or read it; the file itself is private (0600,
+// exportStageUmask). The directory's removal is armed as soon as it exists —
+// the flatten failing or being stopped, or the request being cancelled, still
+// removes it (detached from the request's cancellation, bounded; on a
+// clustered host within routedCleanupTimeout, so the answer still reaches the
+// manager before its deadline): a failed export used to leave a
+// world-readable multi-GB copy behind under a predictable name.
+//
+// The source is read as root when its chain is safe for root to read and
+// passwordless sudo allows it (privileged_copy.go): a snapshotted VM's active
+// disk is libvirt's 0600 overlay, which the SSH user cannot read. Root then
+// writes into the staging file the SSH user created, which stays the SSH
+// user's, so the stream can read it. Otherwise the historical flatten runs as
+// the SSH user.
 //
 // -f qcow2 forces the source driver (no format probing of the overlay); -O
 // qcow2 keeps the native format the target expects. -U skips the shared-disk
@@ -196,24 +206,32 @@ const hostExportStageSuffix = ".qcow2"
 // honored, or createSnapshot=false) can be read — this is a crash-consistent
 // copy; a consistent copy still requires the source to be powered off or
 // snapshotted first.
-func flattenForExport(ctx context.Context, h hostCommandRunner, srcPath, vmID string, guard hostCmdGuard) (string, func(), error) {
-	hostTmp, err := makeHostTempSuffix(ctx, h, hostExportStageTemplate(srcPath, vmID), hostExportStageSuffix, false)
+func flattenForExport(ctx context.Context, h hostCommandRunner, srcPath, vmID string, guard *hostCmdGuard) (string, func(), error) {
+	wd, err := newDiskWriteDir(ctx, h, filepath.Dir(srcPath))
 	if err != nil {
-		return "", nil, fmt.Errorf("create the export staging file on the host: %w", err)
+		return "", nil, fmt.Errorf("create the export staging directory on the host: %w", err)
 	}
 	cleanupWithin := stagingCleanupTimeout
 	if guard != nil {
 		cleanupWithin = routedCleanupTimeout
 	}
-	cleanup := func() { removeHostPathWithin(ctx, h, hostTmp, false, cleanupWithin) }
-	flatten, err := guard.apply(hostTmp, withUmask(exportStageUmask, "qemu-img", "convert", "-U", "-f", "qcow2", "-O", "qcow2",
-		srcPath, hostTmp)...)
-	if err != nil {
-		cleanup()
-		return "", nil, err
+	cleanup := func() { wd.cleanupWithin(ctx, cleanupWithin) }
+	hostTmp := wd.file(hostExportStageName(vmID))
+	flatten := diskCopy{
+		src:       srcPath,
+		srcFormat: "qcow2",
+		target:    hostTmp,
+		output:    hostTmp,
+		umask:     exportStageUmask,
+		args:      []string{"convert", "-U", "-f", "qcow2", "-O", "qcow2", srcPath, hostTmp},
+		privArgs:  []string{"convert", "-U", "-f", "qcow2", "-O", "qcow2", srcPath, hostTmp},
 	}
-	if res, err := runHost(ctx, h, flatten...); err != nil {
+	if res, err := flatten.run(ctx, h, guard); err != nil {
 		cleanup()
+		var roe *routedOpError
+		if errors.As(err, &roe) {
+			return "", nil, err
+		}
 		stderr := ""
 		if res != nil && strings.TrimSpace(res.Stderr) != "" {
 			stderr = fmt.Sprintf(" (qemu-img stderr: %s)", strings.TrimSpace(res.Stderr))
@@ -223,18 +241,10 @@ func flattenForExport(ctx context.Context, h hostCommandRunner, srcPath, vmID st
 	return hostTmp, cleanup, nil
 }
 
-// hostExportStageTemplate returns the mktemp template of the transient
-// host-side flattened qcow2 for an S3 export: in the SAME directory as the
-// source disk (so the flatten convert reads/writes within one filesystem, no
-// cross-device copy), under a dot-prefixed name carrying the (sanitized) VM
-// id, so it is distinguishable and hidden from a casual directory listing;
-// mktemp replaces the trailing mktempTemplateSuffix with random characters
-// and appends hostExportStageSuffix.
-func hostExportStageTemplate(srcPath, vmID string) string {
-	dir := srcPath
-	if idx := strings.LastIndex(srcPath, "/"); idx >= 0 {
-		dir = srcPath[:idx]
-	}
-	dir = strings.TrimRight(dir, "/")
-	return fmt.Sprintf("%s/.virtrigaud-export-%s.%s", dir, sanitizeVolumeName(vmID), mktempTemplateSuffix)
+// hostExportStageName returns the name of the transient host-side flattened
+// qcow2 of an S3 export inside its private staging directory: a dot-prefixed
+// name carrying the (sanitized) VM id, so it is distinguishable and hidden
+// from a casual directory listing. It never contains a '/'.
+func hostExportStageName(vmID string) string {
+	return ".virtrigaud-export-" + sanitizeVolumeName(vmID) + hostExportStageSuffix
 }

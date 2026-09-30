@@ -129,7 +129,7 @@ func TestCreatedVMFiles_SwappedSymlinkIsNeverFollowed(t *testing.T) {
 		require.NoError(t, err, "%s", out)
 		dst := filepath.Join(s.dir, "team-b.copy-disk.qcow2")
 
-		require.NoError(t, createFullCopy(ctx, s.vp, src, dst))
+		require.NoError(t, createFullCopy(ctx, s.vp, src, "qcow2", dst))
 		s.requireVictimUntouched(t)
 		fi, err := os.Lstat(dst)
 		require.NoError(t, err)
@@ -282,7 +282,7 @@ func TestDiskWriteDir_ReplacesALinkPlantedAtTheFinalName(t *testing.T) {
 	// The whole full-clone path: the same, through createFullCopy.
 	dst2 := filepath.Join(pool, "team-c.copy-disk.qcow2")
 	require.NoError(t, os.Symlink(s.victim, dst2))
-	require.NoError(t, createFullCopy(ctx, s.vp, src, dst2))
+	require.NoError(t, createFullCopy(ctx, s.vp, src, "qcow2", dst2))
 	s.requireVictimUntouched(t)
 	entries, err := os.ReadDir(pool)
 	require.NoError(t, err)

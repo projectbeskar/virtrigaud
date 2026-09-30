@@ -122,7 +122,16 @@ func (p *Provider) cloneClustered(ctx context.Context, req contracts.CloneReques
 // lock (a retry while an earlier copy still runs is "in progress", never a
 // second copy) and timeout(1) (it is stopped on the host when the call's
 // budget runs out); the guard refuses a lock, or a disk name, that is a
-// symbolic link:
+// symbolic link.
+//
+// The source is read as root (privileged_copy.go) when its chain is safe for
+// root to read and passwordless sudo allows it — the SSH user holds the lock
+// outside sudo, and timeout(1) runs inside sudo so it can stop the root
+// qemu-img, which writes into a file the SSH user created under vmDiskUmask:
+//
+//	sh -c <hostGuardScript> … flock -n -E 75 <lock> sh -c <umask> 0137 sudo -n timeout … qemu-img convert -f <fmt> … <private dir>/<name>
+//
+// and otherwise as the SSH user, exactly as before:
 //
 //	sh -c <hostGuardScript> … flock -n -E 75 <lock> timeout … sh -c <umask> 0137 qemu-img convert … <private dir>/<name>
 //
@@ -131,7 +140,7 @@ func (p *Provider) cloneClustered(ctx context.Context, req contracts.CloneReques
 // routedCleanupTimeout. When the rename itself fails, the name may already
 // hold the copy (the answer was lost), so it is removed again under the lock
 // (removeClonedDisk).
-func createFullCopyGuarded(ctx context.Context, vp *VirshProvider, lock hostLock, srcDiskPath, targetDiskPath string) error {
+func createFullCopyGuarded(ctx context.Context, vp *VirshProvider, lock hostLock, srcDiskPath, srcFormat, targetDiskPath string) error {
 	log.Printf("INFO Creating full-clone copy %s from %s (guarded)", targetDiskPath, srcDiskPath)
 	wd, err := newDiskWriteDir(ctx, vp, filepath.Dir(targetDiskPath))
 	if err != nil {
@@ -139,12 +148,11 @@ func createFullCopyGuarded(ctx context.Context, vp *VirshProvider, lock hostLock
 	}
 	defer wd.cleanupWithin(ctx, routedCleanupTimeout)
 	name := filepath.Base(targetDiskPath)
-	argv, err := guardedHostCommand(ctx, lock, targetDiskPath,
-		withUmask(vmDiskUmask, "qemu-img", "convert", "-O", "qcow2", srcDiskPath, wd.file(name))...)
-	if err != nil {
-		return err
-	}
-	if res, err := runHost(ctx, vp, argv...); err != nil {
+	if res, err := fullCloneCopy(srcDiskPath, srcFormat, wd.file(name), targetDiskPath).run(ctx, vp, guardFor(ctx, lock)); err != nil {
+		var roe *routedOpError
+		if errors.As(err, &roe) {
+			return err
+		}
 		stderr := ""
 		if res != nil {
 			stderr = res.Stderr
@@ -207,7 +215,10 @@ func removeClonedDisk(ctx context.Context, vp *VirshProvider, lock hostLock, tar
 // (createFullCopyGuarded: withUmask, private directory, `mv -T`,
 // finalizeClonedDisk) and the varstore by copyClonedNVRAM. A target name held
 // by a previous incarnation of the target VirtualMachine is answered
-// VM_PREVIOUS_INCARNATION (R2).
+// VM_PREVIOUS_INCARNATION (R2). A source that is not shut off is refused
+// before anything is read for the copy (VM_SOURCE_RUNNING,
+// clone_source_state.go), and the copy reads the source as root when it may
+// (privileged_copy.go).
 func (p *Provider) cloneOnHost(ctx context.Context, vp *VirshProvider, c libvirtConn, d domainTarget, req contracts.CloneRequest, domainName string) (contracts.CloneResponse, error) {
 	host := c.HostID()
 
@@ -242,6 +253,14 @@ func (p *Provider) cloneOnHost(ctx context.Context, vp *VirshProvider, c libvirt
 		return contracts.CloneResponse{}, contracts.NewConflictError(fmt.Sprintf(
 			"libvirt domain %q already exists on host %s and is not owned by the clone's target VirtualMachine; nothing was cloned",
 			domainName, host), nil)
+	}
+
+	// A full clone requires a powered-off source (clone_source_state.go):
+	// checked after the target name (a clone an earlier attempt already made
+	// is reported whatever the source's state now) and before anything is
+	// read for the copy or written.
+	if err := refuseRunningCloneSource(ctx, vp, d.handle, d.name); err != nil {
+		return contracts.CloneResponse{}, err
 	}
 
 	// The clone is defined from the source's PERSISTENT definition
@@ -321,7 +340,7 @@ func (p *Provider) cloneOnHost(ctx context.Context, vp *VirshProvider, c libvirt
 	// linked). A copy that fails or is stopped never reaches the disk's name:
 	// it is written in a private directory, removed with it
 	// (createFullCopyGuarded).
-	if err := createFullCopyGuarded(ctx, vp, lock, srcDiskPath, targetDiskPath); err != nil {
+	if err := createFullCopyGuarded(ctx, vp, lock, srcDiskPath, cloneSourceFormat(srcXML.Stdout, srcDiskPath), targetDiskPath); err != nil {
 		return contracts.CloneResponse{}, err
 	}
 	// From here the disk is a complete copy of the source's: any failure
