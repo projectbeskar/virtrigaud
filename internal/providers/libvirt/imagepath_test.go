@@ -370,14 +370,15 @@ esac
 `
 
 // fakeSudoScript stands in for sudo: `sudo -n qemu-img ...` (the disk in-use
-// check's chain read) runs the fake qemu-img "as root" (SUDO_USER set, so a
-// <file>.rootonly image opens), which logs itself; anything else is only
+// check's chain read) runs the fake qemu-img next to it — by path, never
+// another qemu-img — "as root" (SUDO_USER set, so a <file>.rootonly image
+// opens), which logs itself; it never runs the real sudo; anything else is only
 // logged to sudo.log (nothing privileged ever runs in tests). With
 // $FAKE_HOST_DIR/sudo-refuses present it fails like sudo without a
 // passwordless rule.
 const fakeSudoScript = `#!/bin/sh
 if [ -f "$FAKE_HOST_DIR/sudo-refuses" ]; then echo "sudo: a password is required" >&2; exit 1; fi
-if [ "$1" = "-n" ] && [ "$2" = "qemu-img" ]; then shift 2; SUDO_USER=test exec qemu-img "$@"; fi
+if [ "$1" = "-n" ] && [ "$2" = "qemu-img" ]; then shift 2; SUDO_USER=test exec "$(dirname "$0")/qemu-img" "$@"; fi
 printf '%s\n' "$*" >> "$FAKE_HOST_DIR/sudo.log"
 exit 0
 `

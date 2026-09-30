@@ -39,6 +39,7 @@ import (
 // $SWAP_DIR/sudo.log.
 const swapSudo = `#!/bin/sh
 if [ "$1" = "-n" ]; then shift; fi
+case "$1" in sudo|*/sudo) echo "swap sudo: never runs sudo" >&2; exit 1 ;; esac
 printf '%s\n' "$*" >> "$SWAP_DIR/sudo.log"
 for last in "$@"; do :; done
 case "$1" in

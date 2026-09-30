@@ -93,6 +93,7 @@ func installRootOnlyImage(t *testing.T, image string) {
 		p, err := exec.LookPath(tool)
 		require.NoError(t, err)
 		require.Contains(t, p, os.TempDir(), "the fixture's fake %s must come first on PATH, never the real one", tool)
+		require.NotContains(t, p, "virtrigaud-host-guard-", "a fixture's fake %s, not the host guard's shim", tool)
 		next[tool] = p
 	}
 	bin := t.TempDir()

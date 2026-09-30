@@ -145,7 +145,13 @@ sudo)
   if [ "$1" = "-n" ]; then
     if [ -f "$d/fail-sudo" ]; then echo "sudo: a password is required" >&2; exit 1; fi
     shift
-    exec "$@"
+    t="$1"; shift
+    case "$t" in qemu-img|timeout)
+      f="${FAKE_SCD_BIN:-$(dirname "$0")}/$t"
+      if [ -x "$f" ]; then exec "$f" "$@"; fi ;;
+    esac
+    echo "fake sudo: $t is not a fixture fake; nothing is run" >&2
+    exit 1
   fi ;;
 id)
   case "$1" in -u) echo ` + scdSSHUID + ` ;; -g) echo ` + scdSSHGID + ` ;; esac ;;
@@ -233,6 +239,7 @@ func newSCDFixture(t *testing.T, domains map[string]string) *scdFixture {
 	for _, tool := range scdTools {
 		require.NoError(t, os.WriteFile(filepath.Join(bin, tool), []byte(scdFakeTool), 0o755)) //nolint:gosec // test shim must be executable
 	}
+	installFakeRealpath(t, bin)
 	staging := t.TempDir()
 	t.Setenv("FAKE_SCD_DIR", dir)
 	t.Setenv("FAKE_SCD_STAGING", staging)

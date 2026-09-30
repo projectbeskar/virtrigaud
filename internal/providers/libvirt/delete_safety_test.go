@@ -54,11 +54,12 @@ esac
 `
 
 // fixtureSudoShim is a sudo for the routing/ops fixtures: `sudo -n qemu-img`
-// (the disk in-use check's chain read) runs the qemu-img shim without being
-// logged, so the pinned call sequences are unchanged; anything else is logged
-// as "local sudo <args>" and not run.
+// (the disk in-use check's chain read) runs the qemu-img shim next to it —
+// by path, never a qemu-img found elsewhere — without being logged, so the
+// pinned call sequences are unchanged; anything else is logged as
+// "local sudo <args>" and not run. It never runs the real sudo.
 const fixtureSudoShim = "#!/bin/sh\n" +
-	"if [ \"$1\" = \"-n\" ] && [ \"$2\" = \"qemu-img\" ]; then shift 2; exec qemu-img \"$@\"; fi\n" +
+	"if [ \"$1\" = \"-n\" ] && [ \"$2\" = \"qemu-img\" ]; then shift 2; exec \"$(dirname \"$0\")/qemu-img\" \"$@\"; fi\n" +
 	"printf 'local %s %s\\n' \"$(basename \"$0\")\" \"$*\" >> \"$FAKE_VIRSH_DIR/calls.log\"\n"
 
 // installQemuImgShim puts fixtureQemuImgShim and fixtureSudoShim on PATH (in

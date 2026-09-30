@@ -108,6 +108,7 @@ const (
 	fakeSudoAllow = `#!/bin/sh
 printf '%s\n' "$*" >> "$FAKE_SUDO_LOG"
 if [ "$1" = "-n" ]; then shift; fi
+case "$1" in qemu-img|timeout) ;; *) echo "fake sudo: only qemu-img and timeout are run" >&2; exit 1 ;; esac
 exec "$@"
 `
 	fakeSudoRefuse = `#!/bin/sh
