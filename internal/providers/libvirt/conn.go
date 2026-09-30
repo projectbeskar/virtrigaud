@@ -86,6 +86,12 @@ type providerBackend interface {
 	// slice 4; routed_transfer_owner.go). It is defined on *Provider, not on
 	// contracts.Provider (the manager reaches it as contracts.OwnerTransferrer).
 	TransferOwner(ctx context.Context, req contracts.TransferOwnerRequest) error
+
+	// ListVMsForOwner is a CLUSTERED provider's owner-filtered ListVMs: one
+	// VirtualMachine's candidate domains across every host, marked
+	// OwnerFilterApplied (ADR-0007 A6.2, R4; routed_list_owner.go). The Server
+	// calls it only on a clustered provider; single-host ignores the filter.
+	ListVMsForOwner(ctx context.Context, owner contracts.OwnerFilter) (contracts.VMList, error)
 }
 
 // libvirtConn is the libvirt-specific view of one host's connection that the

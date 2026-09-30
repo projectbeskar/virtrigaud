@@ -103,7 +103,7 @@ func TestCreateVM_Clustered_PreviousIncarnationHoldsOnThePendingHost(t *testing.
 	assert.Equal(t, metav1.ConditionFalse, placed.Status)
 	assert.Equal(t, k8s.ReasonRestorePending, placed.Reason)
 	assert.Equal(t, held.Generation, placed.ObservedGeneration)
-	assert.Contains(t, placed.Message, "Previous incarnations and the A6 runbook", "the message points at the runbook")
+	assert.Contains(t, placed.Message, "docs/clustered-restore.md", "the message points at the runbook")
 	assert.NotContains(t, placed.Message, "host-bravo", "no host is named")
 	assert.NotContains(t, placed.Message, "default.web", "no domain is named")
 	assert.Equal(t, k8s.ReasonRestorePending, provisioningReason(held))
@@ -209,7 +209,7 @@ func TestClustered_OwnDomainElsewhere(t *testing.T) {
 	assert.Equal(t, k8s.ReasonOwnDomainOnAnotherHost, placed.Reason, "a dedicated reason, not RestorePending (fix verification N7)")
 	assert.Equal(t, k8s.ReasonOwnDomainOnAnotherHost, provisioningReason(held))
 	assert.Contains(t, placed.Message, "stamped with its own UID")
-	assert.Contains(t, placed.Message, "no re-stamp is needed")
+	assert.Contains(t, placed.Message, "No re-stamp is needed")
 	assert.NotContains(t, placed.Message, "host-alpha")
 	assert.Equal(t, "host-alpha", held.Status.Placement.PendingHost)
 	assert.Empty(t, held.Status.Placement.ExcludedHosts)
@@ -261,7 +261,7 @@ func TestVMClone_Clustered_PreviousIncarnationOfTheTargetHolds(t *testing.T) {
 	assert.Equal(t, infrav1beta1.ClonePhasePending, got.Status.Phase, "held, never failed")
 	cond := cloneReadyCondition(t, got)
 	assert.Equal(t, k8s.ReasonRestorePending, cond.Reason)
-	assert.Contains(t, cond.Message, "Previous incarnations and the A6 runbook")
+	assert.Contains(t, cond.Message, "docs/clustered-restore.md")
 	assert.NotContains(t, cond.Message, "host-alpha")
 
 	var warnings int

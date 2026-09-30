@@ -4073,6 +4073,11 @@ func (p *Provider) ImportDisk(ctx context.Context, req *providerv1.ImportDiskReq
 //
 // VMs for which property retrieval fails are skipped with a warning log rather than
 // aborting the entire list operation.
+//
+// The owner filter (req.owner_namespace / owner_name, ADR-0007 A6.2) is not
+// implemented: vSphere is a thin client of vCenter and never schedules, so it
+// does not advertise supports_list_owner_filter, ignores the filter and never
+// sets owner_filter_applied (D7, honesty-first).
 func (p *Provider) ListVMs(ctx context.Context, req *providerv1.ListVMsRequest) (*providerv1.ListVMsResponse, error) {
 	if p.client == nil {
 		return nil, fmt.Errorf("vSphere client not configured")

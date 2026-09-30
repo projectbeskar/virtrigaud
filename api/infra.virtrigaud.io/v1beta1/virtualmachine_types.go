@@ -31,6 +31,23 @@ const (
 	// (spec.providerRef is immutable once the VM is bound, so re-pointing it at
 	// a missing Provider no longer works).
 	VirtualMachineOrphanOnDeleteAnnotation = "virtrigaud.io/orphan-on-delete"
+
+	// VirtualMachinePlacementUIDAnnotation is the restore marker of a
+	// VirtualMachine on a clustered Provider (ADR-0007 A6, R1). The manager
+	// sets it to the VirtualMachine's own UID before the VM's first placement
+	// record (status.placement.pendingHost) and when adoption binds it, and
+	// rewrites it to the VM's own UID after an owner-checked call on its bound
+	// host succeeds. Backups and exported manifests carry it, so a
+	// VirtualMachine re-created under a NEW UID finds it naming another UID:
+	// with no status.id and no pendingHost, such a VM is held
+	// (Placed=False/RestorePending) and never scheduled or created until an
+	// administrator re-attaches its previous domain or releases the marker
+	// (removes it, or sets it to the VM's own UID). The marker can only hold
+	// the VM that carries it: it never names a host, never authorizes a bind
+	// and never steers the scheduler. It is in the operator's reserved
+	// annotation domain, so a VMClone or VMMigration target never inherits it.
+	// Single-host and thin-client Providers ignore it.
+	VirtualMachinePlacementUIDAnnotation = "infra.virtrigaud.io/placement-uid"
 )
 
 // VirtualMachineSpec defines the desired state of VirtualMachine.

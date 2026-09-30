@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -345,8 +346,9 @@ func conditionSince(conds []metav1.Condition, condType string) time.Time {
 const errReasonRestorePending = "restore-pending"
 
 // restorePendingRunbook is where the tenant-visible RestorePending messages
-// point: the A6 runbook in the clustered-provider documentation.
-const restorePendingRunbook = "docs/clustered-provider-inventory.md, \"Previous incarnations and the A6 runbook\""
+// point: the A6 re-attach runbook in the clustered backup and restore guide
+// (ADR-0007 A6.3).
+const restorePendingRunbook = "docs/clustered-restore.md, \"Re-attach runbook\""
 
 // restorePendingMessage is the Placed / Provisioning message of a VM held as
 // RestorePending by R2 (ADR-0007 A6). It names no host, no domain and no
@@ -366,9 +368,11 @@ var restorePendingMessage = fmt.Sprintf(
 // pending host must point at that host. It names no host.
 var restorePendingOwnMessage = fmt.Sprintf(
 	"held: a domain of this VirtualMachine — stamped with its own UID — already exists on another host of its "+
-		"Provider (its placement record was lost), so nothing is created on its pending host. An administrator must "+
-		"set status.placement.pendingHost to that domain's host (no re-stamp is needed); until then deleting this "+
-		"VirtualMachine is held too, so that its domain is not left running. See %s. Re-checked with a backoff of up to %s",
+		"Provider (its placement record was lost), so nothing is created on its pending host. No re-stamp is needed: "+
+		"the pending host is moved to that domain's host as soon as the Provider's owner-filtered lookup finds exactly "+
+		"that one domain there (ADR-0007 A6.2); if it cannot, an administrator sets status.placement.pendingHost to it. "+
+		"Until then deleting this VirtualMachine is held too, so that its domain is not left running. See %s. "+
+		"Re-checked with a backoff of up to %s",
 	restorePendingRunbook, blockedRetryMax)
 
 // heldForOwnDomainElsewhere reports whether vm's last create — or, for a
@@ -404,6 +408,19 @@ var ownDomainDeleteMessage = fmt.Sprintf("Delete blocked: this VirtualMachine's 
 	"Provider, and deleting it on its pending host would leave that domain running; set "+
 	"status.placement.pendingHost to that host (see %s) so the delete removes it. %s",
 	restorePendingRunbook, deleteBlockedEscape)
+
+// ownDomainUnplacedDeleteMessage is the DeleteBlocked message of a VM that
+// was never placed but whose own domain the pre-schedule check found on a
+// host of the hypervisors that is not a Host of its Provider (ADR-0007 A6.2).
+// It names no host.
+var ownDomainUnplacedDeleteMessage = fmt.Sprintf("Delete blocked: this VirtualMachine was never placed, but its own "+
+	"domain exists on a host its Provider does not front, and releasing the VirtualMachine would leave that domain "+
+	"running; restore that Host object and set status.placement.pendingHost to it (see %s) so the delete removes the "+
+	"domain. %s", restorePendingRunbook, deleteBlockedEscape)
+
+// errOwnDomainUnplaced is the (logged) cause of that held delete: no
+// provider call was made.
+var errOwnDomainUnplaced = errors.New("the VM's own domain is on a host it was never placed on; no delete can be routed")
 
 // holdForPreviousIncarnation is ADR-0007 A6, R2 on the manager side: the
 // provider refused the Create on the pending host with
@@ -652,6 +669,13 @@ func (r *VirtualMachineReconciler) handleMissingOnBoundHost(
 	ref contracts.VMRef,
 	errReason string,
 ) (ctrl.Result, error) {
+	// A VM restored WITH its binding but under a new UID (its restore marker
+	// names another UID, ADR-0007 A6, R1): its owner-checked calls fail closed
+	// because the domain is still stamped with the old UID. That is reported
+	// as RestorePending, pointing at the re-stamp, not as a missing domain.
+	if markerNamesAnotherUID(vm) {
+		return r.holdRestoredBinding(ctx, vm, ref), nil
+	}
 	msg := fmt.Sprintf("hypervisor VM %q is not present on its bound host %s; it is not re-created automatically "+
 		"(no failover without fencing). Restore it on that host, or delete and re-create the VirtualMachine",
 		ref.ID, ref.HostID)

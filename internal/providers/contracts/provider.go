@@ -282,6 +282,11 @@ type VMList struct {
 	// a VM the caller knows on one of these hosts must never be treated as
 	// gone. Always empty for single-host and thin-client providers.
 	UnreachableHostIDs []string
+	// OwnerFilterApplied is true when the provider applied an owner filter
+	// (OwnerFilteredLister, ADR-0007 A6.2): VMs holds only that
+	// VirtualMachine's candidates. Always false on an unfiltered listing, and
+	// from a provider that ignored the filter.
+	OwnerFilterApplied bool
 }
 
 // Unreachable reports whether hostID is one of the hosts l could not list.

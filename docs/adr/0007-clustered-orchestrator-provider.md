@@ -6,7 +6,7 @@
 The five cross-ADR blocking decisions are settled (see `0007-0008-blocking-decisions.md`
 and the folded D-sections below).
 
-**Implementation status (2026-09-28):** P1's inventory, placement and admission
+**Implementation status (2026-09-29):** P1's inventory, placement and admission
 halves are merged (#312–#325; security-hardened by #330, #331, #333 and #334): `Host`/`HostPool`,
 `ListHosts`/`GetHostInfo` + inventory sync, the filter+score scheduler, and
 `target_host_id` + `status.placement.host` binding **at create**. Post-create
@@ -17,12 +17,11 @@ hosts), slice 3 (#359: the snapshot family, `Clone`, `GetDiskInfo`,
 VMs listed across every host, adoption keyed on (host id, VM id); see the
 slice 4 amendment under A5) are merged. A6.1 (the cluster-wide disk guard R3,
 also on `Delete`, and the previous-incarnation pin R2; see the A6.1 amendment
-under A6) is implemented. **Not yet done:**
-- the rest of the A6 restore guards and docs (A6.2, A6.3). A6 covers backup
-  and restore of clustered VMs and was accepted on 2026-09-28. These slices
-  land after slice 4 and before slice 5;
-- the end-to-end lab validation (slice 5), which also runs A6's six restore
-  checks.
+under A6) is merged (#365). A6.2 (the restore marker R1 and the pre-schedule
+uniqueness check R4) and A6.3 (the backup and restore guide and the re-attach
+runbook, [`docs/clustered-restore.md`](../clustered-restore.md)) are
+implemented; see the A6.2 amendment under A6. **Not yet done:** the
+end-to-end lab validation (slice 5), which also runs A6's six restore checks.
 
 Until slice 5 passes, `topology: cluster` must be treated as experimental.
 
@@ -923,14 +922,14 @@ It is the security fix for the released domain-name takeover.
 | 3 | The snapshot family, `Clone` (`source_host_id` equal to the landing host), `ExportDisk` / `GetDiskInfo`, and host-encoded task refs. |
 | 4 | `ListVMs` across all hosts (A3); adoption keyed on `(host_id, id)`. Adoption re-stamps the adopted domain's owner through a check-and-set step, serialized and read back (A6, *Slice 4 coordination*). |
 | A6.1 | A6 guards R3 and R2: the cluster-wide disk-overwrite guard (also on `Delete`), and a previous incarnation pins the VM. After slice 4. **Implemented.** |
-| A6.2 | A6 guards R1 and R4: the restore marker and hold, and the pre-schedule uniqueness check. After slice 4. |
-| A6.3 | A6 docs: backup and restore, and the re-attach runbook. |
+| A6.2 | A6 guards R1 and R4: the restore marker and hold, and the pre-schedule uniqueness check. After slice 4. **Implemented.** |
+| A6.3 | A6 docs: backup and restore, and the re-attach runbook. **Implemented** (`docs/clustered-restore.md`). |
 | 5 | End-to-end lab validation: schedule, create, power, describe, snapshot and delete a real VM on a clustered provider. This is the first real clustered VM. It also runs A6's six restore checks. |
 | A6.4 | After v0.4.0: the automated restore re-attach (`VMRestoreBinding`). |
 
-**Status (2026-09-28):** slices 0, 1 (#337), 2 (#338), 3 (#359) and 4 (#364)
-are merged; A6.1 is implemented (see the A6.1 amendment under A6); A6.2, A6.3
-and slice 5 are open.
+**Status (2026-09-29):** slices 0, 1 (#337), 2 (#338), 3 (#359) and 4 (#364)
+and A6.1 (#365) are merged; A6.2 and A6.3 are implemented (see the A6.2
+amendment under A6); slice 5 is open.
 
 > **Amendment (2026-09-25, slice 3): what slice 3 adds to the wire and the flows.**
 >
@@ -1003,7 +1002,9 @@ and slice 5 are open.
 >   reports `provider_raw["owner_stamp_state"]` (`unreadable` / `multiple`)
 >   when they cannot be relied on; adoption skips such a VM, and removes a
 >   VirtualMachine it created when the provider refuses the transfer for good. The
->   `ListVMsRequest` owner filter R4 also wants is **left to A6.2**: honouring
+>   `ListVMsRequest` owner filter R4 also wants is **left to A6.2** *(done:
+fields 1 and 2, with `owner_filter_applied` and `supports_list_owner_filter`;
+see the A6.2 amendment under A6)*: honouring
 >   it honestly needs every provider to filter or a capability to say it
 >   does — a single-host, vSphere, Proxmox or mock provider would otherwise
 >   return an unfiltered list to a caller that asked for a filtered one. A host is listed as
@@ -1682,15 +1683,17 @@ never lists a stamp as replaceable, and names it in
 `Provider.status.adoption.message` with the hint to re-attach it per the
 runbook or remove it. There is no opt-in in v0.4.0. A6.2 must also set the
 `placement-uid` marker (R1) in the adoption's binding write
-(`completeClusteredAdoption`), so an adopted VM is never held as restored.
+(`completeClusteredAdoption`), so an adopted VM is never held as restored
+*(done: `writeAdoptionBinding` sets it right before the binding write; see
+the A6.2 amendment)*.
 
 **Implementation slices.** Rows A6.1 to A6.3 are also in A5's rollout table.
 
 | Slice | Scope | Order |
 |---|---|---|
 | A6.1 | R3 and R2 (the provider reason and the manager pin), for clustered `Create` and `Clone`; R3 also guards the clustered `Delete` (slice 4 review). A standalone fix. **Implemented** (see the A6.1 amendment below). | v0.4.0: after slice 4 (it reuses slice 4's per-host fan-out), before slice 5 |
-| A6.2 | R1 (the marker, the hold, the `RestorePending` reason, the event and the metric reason) and R4 (the pre-schedule check over slice 4's `ListVMs`, with the additive owner filter and the stamp's namespace and name in `VMInfo`). | v0.4.0: after slice 4, before slice 5 |
-| A6.3 | Docs: a backup and restore section in `docs/clustered-provider-inventory.md`, the runbook (clustered, plus the single-host libvirt and vSphere re-stamp), the invariant and its `orphan-on-delete` side effect, `docs/upgrading.md`, the release notes. | v0.4.0, with A6.1 and A6.2 |
+| A6.2 | R1 (the marker, the hold, the `RestorePending` reason, the event and the metric reason) and R4 (the pre-schedule check over slice 4's `ListVMs`, with the additive owner filter and the stamp's namespace and name in `VMInfo`). **Implemented** (see the A6.2 amendment below). | v0.4.0: after slice 4, before slice 5 |
+| A6.3 | Docs: a backup and restore guide (`docs/clustered-restore.md`, linked from `docs/clustered-provider-inventory.md` and the docs index), the runbook (clustered, plus the single-host libvirt and vSphere re-stamp), the invariant and its `orphan-on-delete` side effect, `docs/upgrading.md`, the release notes. **Implemented.** | v0.4.0, with A6.1 and A6.2 |
 | A6.4 | The `VMRestoreBinding` CRD and controller, over slice 4's compare-and-swap re-stamp and R4's lookup. It gets its own amendment, which also confirms the gate (decision 5). | after v0.4.0 |
 
 > **Amendment (2026-09-28, A6.1 implementation).** R3 and R2 as built. What
@@ -1873,6 +1876,153 @@ runbook or remove it. There is no opt-in in v0.4.0. A6.2 must also set the
 >   `vol-create` refuses an existing file.
 > - **Single-host** is unchanged: the three single-host goldens are byte for
 >   byte identical, and the host-local guard runs the same commands.
+
+> **Amendment (2026-09-29, A6.2 and A6.3 implementation).** R1 and R4 as
+> built, and the docs. What the code decided beyond the text above:
+>
+> - **Wire (additive, no proto major bump).** `ListVMsRequest.owner_namespace`
+>   (1) and `owner_name` (2) are the owner filter; setting only one is
+>   `INVALID_ARGUMENT`. `GetCapabilitiesResponse.supports_list_owner_filter`
+>   (22) advertises it. *(Deviation.)* `ListVMsResponse.owner_filter_applied`
+>   (3) marks an answer the provider actually filtered. Single-host libvirt,
+>   vSphere, Proxmox and mock ignore the filter, never set the mark and do not
+>   advertise the capability. So the manager treats an unmarked answer as
+>   "not supported", never as a filtered one. This covers a provider rolled
+>   back behind a stale capability, as `TaskResponse.honest_result` does for
+>   Reconfigure. The transport's filtered call has a 45 s deadline (the full
+>   listing keeps 2 min).
+> - **What the provider returns.** On each host, one `virsh list --all`,
+>   then only the candidates are read:
+>   - the domain it would name for the VirtualMachine (`<namespace>.<name>`),
+>     whatever its stamp;
+>   - the legacy bare name, only when its one stamp records that namespace
+>     and name. A bare name is not namespaced, so another namespace's
+>     pre-namespacing VM is left out.
+>
+>   A candidate whose definition the host returned but that cannot be read or
+>   parsed is reported with `owner_stamp_state=unreadable`, never skipped. A
+>   host that stops answering is unreachable. The fan-out, bounds and rotation
+>   are slice 4's (`listAcrossHosts`), with no list shadow. *Residual
+>   (corrected by the A6.2 security review):* R4 looks at candidate names
+>   only (`<namespace>.<name>` and the stamped legacy bare name), so a
+>   domain named otherwise is **not** looked at even when its stamp names the
+>   namespace and name. That includes every **adopted** domain: adoption
+>   stamps a domain for the adopting VirtualMachine under the name it already
+>   had. A VirtualMachine re-created (or restored) with an adopted VM's
+>   namespace and name after that VM was orphaned is therefore not held by
+>   R4; R2 does not see it either (the names differ), and only R3 stands in
+>   the way, on a shared pool. The runbook finds domains by stamp, not by
+>   name. Follow-up: match by stamp on each host.
+> - **The marker is a metadata patch** with an optimistic lock on the VM's
+>   resourceVersion, so a VM changed since it was read is not written. It is
+>   written:
+>   - on a create: after R1 and R4 pass and before scheduling, so before the
+>     first `pendingHost` write. A failed write records no `pendingHost` and
+>     sends nothing;
+>   - on a clone's target: before its admission and `pendingHost`;
+>   - on adoption: in `writeAdoptionBinding`, right before the binding status
+>     write, inside the same conflict-retry loop (the status subresource
+>     cannot carry an annotation);
+>   - on a bound clustered VM: after an owner-checked `Describe` on its host
+>     succeeds, when it is missing or names anything else.
+>
+>   A marker change does not trigger a reconcile (the VM controller reacts to
+>   generation changes only). A released VM is noticed at its next re-check,
+>   within 5 minutes, and single-host reconciles are unchanged.
+> - **The R1 hold** comes before anything about the create: no image prepare,
+>   no R4 query, no scheduling. It sets `Placed=False` and
+>   `Provisioning=False/RestorePending`, emits one `Warning` event, records the
+>   metric reason `restore-pending`, and retries with A6.1's backoff (15 s
+>   doubling to 5 min; the text above said every 2 minutes). A bound VM whose
+>   marker names another UID and whose owner-checked call finds nothing is
+>   `Ready=False/RestorePending` instead of `VMMissingOnHost`, never
+>   re-created. The marker is rewritten after its first successful call.
+> - **R4's gate and holds.** R4 runs only when the provider type-asserts to the
+>   owner-filtered lister, reports `supportsListOwnerFilter` (a runtime
+>   `GetCapabilities`, as the clone and adoption gates do; no CRD field) and
+>   marks its answer. Otherwise the VM is held with
+>   `Placed=False/ProviderLacksListOwnerFilter`. A failed capability query or
+>   listing holds it with `UniquenessCheckFailed`. Both use the same backoff,
+>   the metric reason `preschedule-check`, and a message that names no host or
+>   endpoint (the error goes to the manager log).
+> - **What R4 counts:**
+>   - a candidate with an `owner_stamp_state` (unreadable, multiple) holds, so
+>     the check fails closed on what it cannot classify;
+>   - a stamp with the VM's namespace and name under another UID holds;
+>   - more than one own domain holds;
+>   - exactly one own domain records its host as `pendingHost` at the
+>     **domain's own size** *(security review of A6.2, item 4; it first took
+>     the class size)*: its current vCPUs and memory as `pendingResources`
+>     (the owner-filtered listing reports them as `provider_raw`
+>     `current_vcpus` / `current_memory_mib`, beside its maxima) and its
+>     balloon maximum as the ceiling. There is no capacity admission (the
+>     domain already runs there), but the placement is **assumed** under the
+>     Provider's assume lock like a scheduled one, so concurrent schedules
+>     count it before the `pendingHost` write lands. The create retry is sent
+>     at that recorded size — it binds the existing domain, or, had the
+>     domain vanished meanwhile, creates one at exactly the size recorded —
+>     and the bind records it as `status.currentResources` (not the spec's,
+>     as the text above had it). The next reconcile then sees the spec differ
+>     and converges the domain through the resize gate (a grow is admitted, a
+>     shrink waits for power-off). A move to the own domain's host (below)
+>     does the same;
+>   - an own domain on a host that is not a `Host` of the Provider is never
+>     recorded. The VM is held `OwnDomainOnAnotherHost`, and deleting it is
+>     held too (`DeleteBlocked=True/OwnDomainOnAnotherHost`, before any
+>     provider call; the security review of A6.2: a never-placed VM used to be
+>     released, leaving its own domain running) until `force-delete` or
+>     `orphan-on-delete`.
+>
+>   R4 runs before every scheduling attempt of a never-placed VM, but *(security
+>   review of A6.2, item 5)* a **clean** answer — every host checked, nothing
+>   stamped with the namespace and name — is reused for 3 minutes per VM UID
+>   and generation, so an `Unschedulable` VM retried at its own backoff (30 s
+>   to 2 min) does not ask every host each time; an answer with a host that
+>   could not be checked, and every hold, is asked again on the next retry. It
+>   never runs for a bound VM or a pending create. The provider runs at most 2
+>   owner-filtered listings at once; one that gets no slot within 5 s fails
+>   closed as `RESOURCE_EXHAUSTED` (never counted by the circuit breaker) and
+>   the VM is held `UniquenessCheckFailed` with the backoff.
+> - **The own domain after placement** *(extension)*. A pending create
+>   answered `VM_PREVIOUS_INCARNATION` of kind `own` runs R4's lookup. If the
+>   lookup finds exactly that one own domain, on a `Host` of the Provider, and
+>   nothing else for the namespace and name, the manager moves `pendingHost`
+>   there in a checked status write. The admitted size is kept, the old
+>   host's assumption is forgotten, and the create retry binds the domain.
+>   This is as safe as the slice 2 release: the provider answered before
+>   writing anything on the old pending host. It closes the A6.1 residual
+>   "until R4 records the right host, the runbook moves `pendingHost`".
+>   Otherwise A6.1's `OwnDomainOnAnotherHost` hold stands.
+> - **The runbook** needs no status edit: re-stamp with `virsh metadata`,
+>   then set or remove the marker for a VM held by R1. A VM pinned by R2, or
+>   restored with its status, needs the re-stamp only.
+> - **Clones.** A clustered clone answered `HOST_UNAVAILABLE` or
+>   `VM_DISK_CHECK_FAILED` backs off from when the target's placement was
+>   recorded (15 s doubling to 5 min), like a create. It used to retry every
+>   30 s (A6.1 review follow-up). *(Security review of A6.2, item 7.)* A
+>   clone's target meets R4 too, before the clone is admitted or its
+>   `pendingHost` written: a previous incarnation of the target (or more than
+>   one domain, or an unreadable stamp) holds the clone `RestorePending`; the
+>   target's own domain on another host than the source's — the only host a
+>   clone can land on — holds it `OwnDomainOnAnotherHost`; a provider without
+>   the filter, or a failed check, holds it `ProviderLacksListOwnerFilter` /
+>   `UniquenessCheckFailed`. The `VMClone` stays `Pending` (never `Failed`,
+>   which would remove its target) with the blocked-VM backoff. The target's
+>   own domain on the source's host is not held: the Clone binds it.
+> - **Trust.** The marker is only ever compared with the VM's own UID and
+>   only holds that VM. It is never passed to the provider, the scheduler or
+>   another object. A forged marker, including one naming a host, holds only
+>   its own VM. R4 records only a host where the provider found a domain
+>   stamped with the VM's own UID, and the create retry proves it again
+>   (`bindExistingDomain`).
+> - **Single-host** is unchanged. It never reads or writes the marker and
+>   never runs R4. Its server ignores the filter: every golden `ListVMs`
+>   scenario re-run with a filter reproduces
+>   `testdata/single_host_listvms.golden.json` byte for byte, and the three
+>   single-host goldens are unchanged.
+> - **Docs (A6.3).** [`docs/clustered-restore.md`](../clustered-restore.md)
+>   holds the guide, the scenarios and the runbook; the `RestorePending`
+>   messages point at it.
 
 **What slice 5 must validate.** These six restore checks run in addition to
 slice 5's lifecycle run. Use a pool with at least two hosts and, if one is
@@ -2350,6 +2500,14 @@ honest.
       `SnapshotCreate` and the offline disk grow** of a clustered VM: each
       rewrites a disk file another host's domain could use through a shared
       pool; today they check the VM's own host only.
+  - A6.2 follow-ups (security review):
+    - **R4 matches by stamp, not by candidate name.** Each host reports the
+      domains whose owner stamp records the requested namespace and name,
+      whatever the domain is called, so adopted and renamed domains are seen.
+      Reading every domain's stamp per check is too costly, so the provider
+      keeps a per-host cache of (domain UUID → stamp), refreshed from
+      `virsh list --all --uuid` and re-read only for domains that are new or
+      changed; a host whose cache cannot be refreshed is unreachable.
 - **New ADR: per-consumer quota on a shared clustered Provider.** The
   scheduler-accuracy amendment (A5) counts every consumer's VMs against a
   host's capacity, but nothing limits how much of a shared Provider one

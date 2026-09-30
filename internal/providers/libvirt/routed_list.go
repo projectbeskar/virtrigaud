@@ -97,11 +97,22 @@ type hostListResult struct {
 // context ended; every host-scoped failure is reported in
 // VMList.UnreachableHostIDs instead.
 func (p *Provider) listVMsClustered(ctx context.Context) (contracts.VMList, error) {
+	return p.listAcrossHosts(ctx, "ListVMs", p.listOneHost)
+}
+
+// listAcrossHosts runs one per-host listing (listHost) on every routable host
+// of the registry, with the fan-out design above, and joins the answers: the
+// VMs of every host that answered, and every other host in
+// VMList.UnreachableHostIDs. op names the listing in the provider log. It is
+// shared by the full listing (listVMsClustered) and the owner-filtered one
+// (listVMsClusteredForOwner, ADR-0007 A6.2).
+func (p *Provider) listAcrossHosts(ctx context.Context, op string,
+	listHost func(ctx context.Context, id hostconn.HostID) hostListResult) (contracts.VMList, error) {
 	if p.clusterReg == nil {
 		return contracts.VMList{}, contracts.NewUnavailableError("clustered libvirt provider registry not initialized", nil)
 	}
 	hosts := p.clusterReg.Hosts()
-	log.Printf("INFO Listing virtual machines across %d hosts", len(hosts))
+	log.Printf("INFO %s: listing virtual machines across %d hosts", op, len(hosts))
 
 	budget, cancel := listBudget(ctx)
 	defer cancel()
@@ -115,7 +126,7 @@ func (p *Provider) listVMsClustered(ctx context.Context) (contracts.VMList, erro
 		start = int(p.listRotation.Add(1) % uint64(n)) // #nosec G115 -- n > 0, the remainder fits an int
 	}
 	errs := p.fanOutHosts(budget, len(hosts), start, func(i int) error {
-		results[i] = p.listOneHost(budget, hosts[i])
+		results[i] = listHost(budget, hosts[i])
 		return results[i].err
 	})
 	for i, err := range errs {
@@ -135,8 +146,8 @@ func (p *Provider) listVMsClustered(ctx context.Context) (contracts.VMList, erro
 	for i, id := range hosts {
 		r := results[i]
 		if r.err != nil {
-			log.Printf("WARN ListVMs: host %s could not be listed (%s); reporting it unreachable, its VMs unknown: %v",
-				id, listFailureClass(r.err), r.err)
+			log.Printf("WARN %s: host %s could not be listed (%s); reporting it unreachable, its VMs unknown: %v",
+				op, id, listFailureClass(r.err), r.err)
 			out.UnreachableHostIDs = append(out.UnreachableHostIDs, string(id))
 			continue
 		}

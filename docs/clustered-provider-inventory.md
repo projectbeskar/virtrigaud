@@ -1092,7 +1092,7 @@ slice 4 runs `ListVMs` on every host and adds `TransferOwner` for adoption.
 | `GetDiskInfo` | **Routed** and **owner-checked** (slice 3): the disks are read from the checked domain's own definition, nothing is looked up by volume name, and an explicit disk path must be one of that domain's disks |
 | `ExportDisk` | **Routed** and **owner-checked** (slice 3) for the host-side backends only: `s3` (the host flattens the disk, the pod streams it to S3) and `nfs` (the host writes it to the export). The `pvc` export (and the empty legacy backend, which means `pvc`) reads the disk from the provider pod and is refused (`Unimplemented`), as on Proxmox. The export runs on the owner-checked domain's own disk; a host that is not reached over `ssh://` is refused naming the host id only, never its endpoint |
 | `TaskStatus` | **Routed** to the host encoded in the task reference (slice 3; see above) |
-| `ListVMs` | Runs on **every routable host** (slice 4; see [Listing and adoption](#listing-and-adoption-slice-4)): each `VMInfo` carries its `host_id`, and every host that could not be listed is named in `unreachable_host_ids` — never dropped, never a failed call |
+| `ListVMs` | Runs on **every routable host** (slice 4; see [Listing and adoption](#listing-and-adoption-slice-4)): each `VMInfo` carries its `host_id`, and every host that could not be listed is named in `unreachable_host_ids` — never dropped, never a failed call. With an owner filter (`owner_namespace` / `owner_name`, A6.2) each host reports only that VirtualMachine's candidate domains and the answer is marked `owner_filter_applied` (the pre-schedule check, [R4](clustered-restore.md#the-pre-schedule-uniqueness-check-r4)); the provider advertises `supports_list_owner_filter` |
 | `TransferOwner` | **Routed** to `target_host_id` (slice 4): the owner re-stamp adoption uses — a serialized check-and-set with read-back (see below) |
 | `ImagePrepare`, `ImportDisk` | `Unimplemented` (host-scoped, no target host yet) |
 
@@ -1783,70 +1783,75 @@ with a VM's namespace and name under **another UID** is a *previous
 incarnation* of that VM — left by `orphan-on-delete`, a force-delete, or a
 backup restore that re-created the VirtualMachine with a new UID.
 
-**Since A6.1 (R2).** A create or clone that meets a previous incarnation — on
-its landing host by name, or on any host during
-[the cluster-wide disk guard](#shared-storage-the-cluster-wide-disk-guard-a61)
-— is refused with `AlreadyExists` + `VM_PREVIOUS_INCARNATION` and creates
-nothing. The manager then **holds** the VM:
+**The full backup and restore guide, with the re-attach runbook, is
+[`docs/clustered-restore.md`](clustered-restore.md).** In short, four guards
+keep a restored or re-created VM from making a second domain:
 
-- it keeps `status.placement.pendingHost`: the host is **not** excluded and the
-  VM is **not** re-scheduled (moving on is exactly how a second domain would be
-  made). The VM keeps counting on that host at its pending size, and its
-  `spec.providerRef` stays locked;
-- `Placed=False` and `Provisioning=False` with reason `RestorePending`, one
-  `Warning` event, and the create is retried on the same host with a backoff
-  per VM (15 seconds, doubling up to 5 minutes, counted from when the hold
-  began), so a held VM does not scan every host every few seconds;
-- a clone's target VM is held the same way, and the `VMClone` stays `Pending`
-  (`RestorePending`), never `Failed`;
-- deleting a held VM never touches the previous incarnation: its owner-checked
-  `Delete` carries the held VM's own UID and gets `NotFound`, and the
-  VirtualMachine goes.
+- **R1, the restore marker** (A6.2): the manager sets
+  `infra.virtrigaud.io/placement-uid` to a VM's own UID before its first
+  `pendingHost` write (create, clone target), when adoption binds it, and
+  after an owner-checked call on its bound host succeeds. A VM whose marker
+  names another UID and that has neither `status.id` nor `pendingHost` is
+  held before scheduling (`Placed=False/RestorePending`). The marker only
+  holds; single-host Providers ignore it.
+- **R4, the pre-schedule uniqueness check** (A6.2): before a VM is first
+  scheduled, an owner-filtered `ListVMs` asks every host about the VM's
+  candidate names (`<namespace>.<name>`, and the legacy bare name when it
+  is stamped for the VM). A previous incarnation holds it
+  (`RestorePending`); its own domain has its host recorded as `pendingHost`
+  and the create binds it. Hosts that cannot be checked do not hold it
+  (decision 4). A domain named otherwise, such as an **adopted** domain, is
+  not looked at (see [Candidate names only](clustered-restore.md#the-pre-schedule-uniqueness-check-r4)).
+- **R2, the pin** (A6.1): a create or clone that meets a previous
+  incarnation — on its landing host by name, or on any host during
+  [the cluster-wide disk guard](#shared-storage-the-cluster-wide-disk-guard-a61)
+  — is refused with `AlreadyExists` + `VM_PREVIOUS_INCARNATION` and creates
+  nothing. The manager keeps `pendingHost` (no exclusion, no re-schedule; the
+  VM keeps counting there and its `spec.providerRef` stays locked), sets
+  `Placed=False`/`Provisioning=False` with `RestorePending`, emits one
+  `Warning` event and retries on the same host with a backoff (15 s doubling
+  to 5 min). A clone's target is held the same way and its `VMClone` stays
+  `Pending`, never `Failed`.
+- **R3, the disk guard** (A6.1): see the previous section.
+
+Deleting a held VM never touches the previous incarnation: a VM held by R1 or
+R4 has no `status.id` and no `pendingHost`, so no provider call is made
+(except that a never-placed VM held because its OWN domain is on a host the
+Provider does not front keeps its finalizer, `DeleteBlocked=True/OwnDomainOnAnotherHost`,
+until `force-delete` or `orphan-on-delete`); a VM
+pinned by R2 sends an owner-checked `Delete` with its own UID, which gets
+`NotFound`.
 
 **The VM's own domain on another host.** A domain stamped with the VM's
-namespace, name **and its own UID** on another host is not a previous
-incarnation: it is this VM's own domain, and only its placement record was
-lost. The provider counts it apart and says so (`VM_PREVIOUS_INCARNATION` with
-ErrorInfo metadata `incarnation: own`): the VM — or a clone's target, whose
-`VMClone` then stays `Pending` with the same reason — is held the same way
-but with its own reason, `Placed=False/OwnDomainOnAnotherHost` (and
-`Provisioning`), and its message asks for the pending host to be moved —
-**no re-stamp is needed**:
-`kubectl patch virtualmachines.infra.virtrigaud.io <name> -n <namespace> --subresource=status --type=merge -p '{"status":{"placement":{"pendingHost":"<host>"}}}'`;
-the next create retry binds the domain. Deleting such a VM is **held** too
-(`DeleteBlocked=True/OwnDomainOnAnotherHost`): its `Delete` on the pending host
-finds nothing, and releasing it would leave its own domain running. Move the
-pending host (the delete then removes the domain), or set `force-delete` /
-`orphan-on-delete` to release it and leave the domain for manual removal.
+namespace, name **and its own UID** is the VM's own domain; only its placement
+record was lost. No re-stamp is needed. Before the first placement, R4 records
+its host as `pendingHost`. A pending create answered with it (ErrorInfo
+metadata `incarnation: own`) makes the manager run R4's lookup and move
+`pendingHost` to that host when it finds exactly that one domain there. When
+the lookup cannot tell, the VM (or a clone's target) is held as
+`Placed=False/OwnDomainOnAnotherHost`, and deleting it is held too
+(`DeleteBlocked=True/OwnDomainOnAnotherHost`) until the pending host points at
+the domain or `force-delete` / `orphan-on-delete` is set.
 
 A foreign or unstamped domain that merely has the name keeps the slice 2
-behaviour (the host is excluded and the VM placed elsewhere). The restore
-marker and the pre-schedule check (A6.2) hold such VMs before they are ever
-scheduled; until then R2 is the guard.
+behaviour (the host is excluded and the VM placed elsewhere).
 
-**The runbook.** Re-attaching is not automated in v0.4.0. As an administrator:
-
-1. Find the previous incarnation. On each host of the Provider, run
-   `virsh metadata <namespace>.<name> --uri https://virtrigaud.io/xmlns/libvirt/owner/v1`
-   (and, for a domain named otherwise, check `virsh dumpxml`). Stop if more
-   than one host has one, and check that no VirtualMachine with the stamp's
-   UID still exists (`kubectl get virtualmachines -A -o jsonpath='{range .items[*]}{.metadata.uid}{"\n"}{end}'`).
-2. Either **re-attach** it: rewrite the stamp's `uid` to the held VM's UID,
-   keeping the namespace and name —
-   `virsh metadata --domain <uuid> --uri https://virtrigaud.io/xmlns/libvirt/owner/v1 --key virtrigaud --set "<owner uid='<new uid>' namespace='<namespace>' name='<name>'/>" --config`
-   (add `--live` if the domain is running). If the held VM's
-   `status.placement.pendingHost` is that domain's host, the next create retry
-   binds it as an idempotent success. If it names another host (the domain was
-   found there by the disk guard), set it to the domain's host first:
-   `kubectl patch virtualmachines.infra.virtrigaud.io <name> -n <namespace> --subresource=status --type=merge -p '{"status":{"placement":{"pendingHost":"<host>"}}}'`.
-3. Or **discard** it: remove the domain and its disk
-   (`<pool>/<namespace>.<name>-disk.qcow2`) and cloud-init seed on its host;
-   the next create retry creates the VM as new on its pending host.
+**The runbook** ([details](clustered-restore.md#re-attach-runbook)). As an
+administrator: find the previous domain on every host of the Provider **by
+its owner stamp** (`virsh metadata --uri https://virtrigaud.io/xmlns/libvirt/owner/v1`
+for every domain of `virsh list --all --uuid`, whatever its name); stop if
+more than one domain is stamped for the namespace and name, and check that no
+VirtualMachine with the stamp's UID exists; re-stamp its `uid` to the held VM's UID with
+`virsh metadata --domain <uuid> ... --set "<owner .../>" --config [--live]`,
+keeping the namespace and name; then, for a VM held by R1, set the marker to
+the VM's UID or remove it. R4 then records the host and the create retry binds
+the VM. **No status edit is needed.** To discard the previous incarnation
+instead, remove the domain and its disk, then release the marker.
 
 Never run `kubectl replace --force` on a VirtualMachine (its delete half
 destroys the domain), and prefer backups that include VirtualMachine status
-(Velero `restoreStatus`). The full backup and restore guide (A6.3) and the
-automated re-attach (`VMRestoreBinding`, A6.4) follow.
+(Velero `restoreStatus`). The automated re-attach (`VMRestoreBinding`, A6.4)
+comes after v0.4.0.
 
 ## What "clustered" does not mean (yet)
 
@@ -1859,8 +1864,10 @@ automated re-attach (`VMRestoreBinding`, A6.4) follow.
   (s3 / nfs) and deleted on its host (ADR-0007 Addendum A slices 1–3), and
   VMs can be listed across hosts and adopted (slice 4). Disks on a shared
   pool are protected across hosts, and a previous incarnation holds its
-  VirtualMachine (A6.1); the restore marker and pre-schedule check (A6.2) are
-  not in yet. Nothing can be migrated **into** a clustered provider (P3).
+  VirtualMachine (A6.1); a restored or re-created VM is held before it is
+  scheduled by the restore marker and the pre-schedule check (A6.2, see
+  [Backup and restore](clustered-restore.md)). Nothing can be migrated **into**
+  a clustered provider (P3).
   The `vprovider.kb.io` validating webhook enforces the topology×type rule at
   admission (ADR-0007 D2). Until Addendum A slice 5 validates a real clustered VM
   end to end, do not run workloads on `topology: cluster`.

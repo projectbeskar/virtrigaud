@@ -160,9 +160,10 @@ const ConditionPlaced = "Placed"
 // the ADR: these four, plus the two the A2 amendment (slice 2) adds for a Create
 // refused with a name conflict (ReasonHostExcluded, ReasonAllHostsExcluded),
 // plus ReasonUnschedulable (declared with the scheduling reasons above) from the
-// scheduler-accuracy amendment in A5, plus ReasonRestorePending from A6 and
+// scheduler-accuracy amendment in A5, plus ReasonRestorePending from A6,
 // ReasonOwnDomainOnAnotherHost (declared with the DeleteBlocked reasons below)
-// from A6.1.
+// from A6.1, and ReasonProviderLacksListOwnerFilter and
+// ReasonUniquenessCheckFailed from A6.2 (the pre-schedule uniqueness check).
 const (
 	// ReasonBound is Placed=True: the provider confirmed the VM on the host named
 	// by status.placement.host, and every per-VM call is routed there.
@@ -202,8 +203,30 @@ const (
 	// VM_PREVIOUS_INCARNATION (R2): the VM keeps its pendingHost, the host is
 	// NOT excluded, and it is re-checked with a backoff (15 s doubling to
 	// 5 min). When the domain found is the VM's OWN (stamped with its UID),
-	// the reason is ReasonOwnDomainOnAnotherHost instead.
+	// the reason is ReasonOwnDomainOnAnotherHost instead. Since A6.2 it is
+	// also set BEFORE a VM is first scheduled (no status.id, no pendingHost):
+	// by R1, when the VM's restore marker (infra.virtrigaud.io/placement-uid)
+	// names another UID, and by R4, when the pre-schedule check finds a domain
+	// stamped with the VM's namespace and name under another UID (or more than
+	// one, or one whose stamp cannot be read). Nothing is scheduled or
+	// created, with the same backoff. On a bound VM whose marker names another
+	// UID (its status was restored) it replaces VMMissingOnHost on Ready.
 	ReasonRestorePending = "RestorePending"
+	// ReasonProviderLacksListOwnerFilter is Placed=False (and
+	// Provisioning=False) on a clustered VM that has never been placed: its
+	// Provider does not report supportsListOwnerFilter (an older provider
+	// image), or answered the owner-filtered ListVMs without applying the
+	// filter, so the pre-schedule uniqueness check (ADR-0007 A6.2, R4) cannot
+	// run. The VM is not scheduled or created until the provider is upgraded.
+	ReasonProviderLacksListOwnerFilter = "ProviderLacksListOwnerFilter"
+	// ReasonUniquenessCheckFailed is Placed=False (and Provisioning=False) on
+	// a clustered VM that has never been placed: the pre-schedule uniqueness
+	// check (ADR-0007 A6.2, R4) could not ask the Provider's hosts (its
+	// capabilities or its owner-filtered ListVMs failed). Nothing is scheduled
+	// or created; the check is retried with a backoff (15 s doubling to
+	// 5 min). A host that could not be reached does not cause it: the check
+	// proceeds on what the reachable hosts report (A6 decision 4).
+	ReasonUniquenessCheckFailed = "UniquenessCheckFailed"
 )
 
 // ConditionDeleteBlocked is True while the deletion of a clustered

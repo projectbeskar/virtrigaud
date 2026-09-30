@@ -76,8 +76,11 @@ const (
 	// cloneHostBlockedRetryInterval re-checks a clone whose landing host
 	// cannot take it. Nothing the controller does changes that, so it is slow.
 	cloneHostBlockedRetryInterval = 2 * time.Minute
-	// cloneHostUnavailableRetryInterval retries a clone whose landing host
-	// could not be reached, on the same host.
+	// cloneHostUnavailableRetryInterval retries, on the same host, a clone the
+	// provider answered with another retryable error (e.g. an earlier
+	// attempt's copy still runs there). A clone answered HOST_UNAVAILABLE or
+	// VM_DISK_CHECK_FAILED backs off instead (blockedRetryBackoff, ADR-0007
+	// A6.1/A6.2).
 	cloneHostUnavailableRetryInterval = 30 * time.Second
 )
 
@@ -122,6 +125,27 @@ func (r *VMCloneReconciler) startClusteredClone(
 	target, res, done, err := r.ensureClusteredCloneTarget(ctx, clone, sourceVM, provider, targetNamespace)
 	if done {
 		return res, err
+	}
+	// The target meets the pre-schedule uniqueness check before its first
+	// placement, as a VirtualMachine does (ADR-0007 A6.2, R4): a domain
+	// stamped with the target's namespace and name — a previous incarnation,
+	// or its own domain on another host — holds the clone before it is
+	// admitted or anything is written.
+	if target.Status.ID == "" && pendingHostOf(target) == "" {
+		if res, held, err := r.checkCloneTargetIncarnations(ctx, clone, target, host, providerInstance); held {
+			return res, err
+		}
+	}
+	// The target's restore marker names its own UID before its pendingHost
+	// is first written (ADR-0007 A6, R1), so a backup or an exported manifest
+	// of the target carries the UID it entered placement under. The target
+	// never inherits the source's marker: the key is in the reserved
+	// annotation domain (userTargetAnnotations drops it).
+	if err := ensurePlacementUIDMarker(ctx, r.Client, target); err != nil {
+		if apierrors.IsConflict(err) {
+			return ctrl.Result{Requeue: true}, nil
+		}
+		return ctrl.Result{}, err
 	}
 	if pl := target.Status.Placement; pl != nil && containsHost(pl.ExcludedHosts, host) {
 		return r.waitForCloneHost(ctx, clone, cloneReasonSourceHostExcluded, fmt.Sprintf(
@@ -409,7 +433,11 @@ func (r *VMCloneReconciler) recordClonePendingHost(
 //   - the host unreachable, or the provider unavailable: the pendingHost is
 //     kept and the clone is retried on the SAME host — a clone the provider
 //     already made there is stamped with the target's uid and is an
-//     idempotent success.
+//     idempotent success. A host that could not be reached
+//     (HOST_UNAVAILABLE) or checked (VM_DISK_CHECK_FAILED) is retried with
+//     the blocked-VM backoff from when the target's placement was recorded
+//     (15 s doubling to 5 min), as a clustered create is; other retryable
+//     answers every cloneHostUnavailableRetryInterval.
 //   - anything else fails the clone. The target keeps its pendingHost, and the
 //     failed clone removes it (removeFailedClusteredTarget): its finalizer runs
 //     the owner-checked cleanup on the host.
@@ -452,9 +480,28 @@ func (r *VMCloneReconciler) handleClusteredCloneError(
 		return r.waitForCloneHost(ctx, clone, cloneReasonSourceHostExcluded, fmt.Sprintf(
 			"clone refused on the source VM's host %s: %v", host, err), cloneHostBlockedRetryInterval), nil
 	case contracts.IsHostUnavailable(err):
-		logger.Info("Clone could not reach its landing host; retrying on the same host", "host", host, "error", err.Error())
+		// Backed off like a clustered create answered HOST_UNAVAILABLE
+		// (ADR-0007 A6.1): the clone may have had to check every host of the
+		// Provider, and a host that is down stays down for longer than a
+		// fixed short cadence.
+		retry := blockedRetryBackoff(createHoldSince(target))
+		logger.Info("Clone could not reach a host it needs; retrying on the same host with a backoff", "host", host,
+			"retryAfter", retry.String(), "error", err.Error())
 		return r.waitForCloneHost(ctx, clone, k8s.ReasonHostUnavailable, fmt.Sprintf(
-			"clone on host %s could not complete (%v); it is retried on the same host", host, err), cloneHostUnavailableRetryInterval), nil
+			"clone on host %s could not reach a host (the landing host, or another host of the Provider the clone must "+
+				"check); it is retried on the same host with a backoff of up to %s: %s",
+			host, blockedRetryMax, providerErrorMessage(err)), retry), nil
+	case contracts.IsVMDiskCheckFailed(err):
+		// The cluster-wide disk guard could not check every host: nothing was
+		// written, and a fixed short cadence would scan every host again each
+		// time, so the clone backs off like a create (ADR-0007 A6.1).
+		retry := blockedRetryBackoff(createHoldSince(target))
+		logger.Info("Clone not performed: the provider could not verify the clone's disk file on every host; backing off",
+			"host", host, "retryAfter", retry.String(), "error", err.Error())
+		return r.waitForCloneHost(ctx, clone, cloneReasonRetrying, fmt.Sprintf(
+			"the clone on host %s waits: the provider could not verify on every host of the Provider that no other VM uses "+
+				"the clone's disk file; it is retried on the same host with a backoff of up to %s: %s",
+			host, blockedRetryMax, providerErrorMessage(err)), retry), nil
 	case contracts.IsRetryable(err):
 		// E.g. the provider answered that an earlier attempt's copy is still
 		// running on the host (slice 3 review), or the provider is briefly
@@ -511,6 +558,82 @@ func (r *VMCloneReconciler) holdCloneForPreviousIncarnation(
 	}
 	return r.waitForCloneHost(ctx, clone, reason, msg,
 		blockedRetryBackoff(createHoldSince(target))), nil
+}
+
+// cloneTargetOwnDomainElsewhereMessage is the Placed message of a clone's
+// target whose own domain (stamped with its UID) the pre-schedule check found
+// on another host than the source's — the only host the clone can land on.
+// It names no host.
+var cloneTargetOwnDomainElsewhereMessage = fmt.Sprintf(
+	"held: a domain of this VirtualMachine — stamped with its own UID — exists on another host than its clone source's, "+
+		"and a clone lands only on its source's host, so nothing is cloned. An administrator removes that domain (or "+
+		"deletes the VMClone and this VirtualMachine with orphan-on-delete to keep it); see %s. Re-checked with a backoff "+
+		"of up to %s", restorePendingRunbook, blockedRetryMax)
+
+// checkCloneTargetIncarnations is R4 (ADR-0007 A6.2) for a clustered clone's
+// target VirtualMachine before its first placement: one owner-filtered
+// ListVMs of the target's namespace and name (lookupIncarnations), before the
+// clone is admitted or its pendingHost written. held == true means the clone
+// waits (Pending, with the reason on its Ready condition and on the target's
+// Placed condition, one Warning event, the blocked-VM backoff); nothing is
+// created and the clone is never failed for it:
+//
+//   - the lookup cannot run: ProviderLacksListOwnerFilter or
+//     UniquenessCheckFailed;
+//   - a previous incarnation (another UID), more than one such domain, or an
+//     unreadable stamp: RestorePending;
+//   - the target's own domain on another host than host (the source's, the
+//     only one the clone can land on): OwnDomainOnAnotherHost.
+//
+// The target's own domain on host itself is not held: the Clone there binds it
+// (an idempotent success). Nothing found — or only hosts that could not be
+// checked (decision 4) — lets the clone proceed.
+func (r *VMCloneReconciler) checkCloneTargetIncarnations(
+	ctx context.Context,
+	clone *infrav1beta1.VMClone,
+	target *infrav1beta1.VirtualMachine,
+	host string,
+	providerInstance contracts.Provider,
+) (ctrl.Result, bool, error) {
+	logger := logging.FromContext(ctx)
+	v, _, lookupErr := lookupIncarnations(ctx, target, providerInstance)
+	var reason, msg string
+	switch {
+	case lookupErr != nil:
+		logger.Info("Pre-schedule uniqueness check of the clone's target could not run; holding the clone",
+			"reason", lookupErr.reason, "error", lookupErr.Error())
+		reason, msg = lookupErr.reason, uniquenessCheckFailedMessage
+		if lookupErr.reason == k8s.ReasonProviderLacksListOwnerFilter {
+			msg = lacksListOwnerFilterMessage
+		}
+	case v.foreign > 0 || v.ambiguous > 0 || len(v.own) > 1:
+		reason, msg = k8s.ReasonRestorePending, preScheduleIncarnationMessage
+	case len(v.own) == 1 && v.own[0].HostID != host:
+		reason, msg = k8s.ReasonOwnDomainOnAnotherHost, cloneTargetOwnDomainElsewhereMessage
+	default:
+		return ctrl.Result{}, false, nil
+	}
+	logger.Info("Holding a clustered clone before its target is placed (ADR-0007 A6, R4)", "reason", reason, "target", target.Name)
+
+	prev := meta.FindStatusCondition(target.Status.Conditions, k8s.ConditionPlaced)
+	transition := prev == nil || prev.Status != metav1.ConditionFalse || prev.Reason != reason
+	setPlacedCondition(target, metav1.ConditionFalse, reason, msg)
+	if uerr := r.Status().Update(ctx, target); uerr != nil {
+		if apierrors.IsConflict(uerr) {
+			return ctrl.Result{Requeue: true}, true, nil
+		}
+		return ctrl.Result{}, true, fmt.Errorf("record %s for clone target %s/%s: %w", reason, target.Namespace, target.Name, uerr)
+	}
+	if reason == k8s.ReasonRestorePending || reason == k8s.ReasonOwnDomainOnAnotherHost {
+		metrics.RecordError(errReasonRestorePending, metrics.ComponentManager)
+	} else {
+		metrics.RecordError(errReasonPreScheduleCheck, metrics.ComponentManager)
+	}
+	cloneMsg := fmt.Sprintf("the clone's target VirtualMachine %s/%s is %s", target.Namespace, target.Name, msg)
+	if transition {
+		r.Recorder.Event(clone, "Warning", reason, cloneMsg)
+	}
+	return r.waitForCloneHost(ctx, clone, reason, cloneMsg, blockedRetryBackoff(createHoldSince(target))), true, nil
 }
 
 const (
