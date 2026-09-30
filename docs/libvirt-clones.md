@@ -414,7 +414,7 @@ the commands in the table:
   option.
 
 A copy of a chain another account could swap (a symbolic link, a
-group-writable pool directory) is refused before root copies anything.
+group-writable pool directory) is refused before any image of it is opened.
 
 A tenant's input chooses which of its own VMs is read and, for nfs, the name
 of the staged object on the export. It does not choose the options, the

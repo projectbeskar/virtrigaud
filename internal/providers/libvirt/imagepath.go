@@ -934,9 +934,24 @@ const rawDiskFormat = "raw"
 // header may be a guest's forgery, so nothing it names is opened as root —
 // and an image of another format too.
 func walkBackingChainFrom(ctx context.Context, h hostCommandRunner, disk, format string) ([]backingLevel, error) {
+	return walkChainChecked(ctx, h, disk, format, nil)
+}
+
+// walkChainChecked is walkBackingChainFrom that calls before (when not nil)
+// with each image of the chain and the format it is about to be opened in —
+// after its file-kind check, BEFORE qemu-img opens it. An error from before
+// ends the walk and is returned as is: a copy refuses an image it must not
+// read before anyone reads it (checkCopySource).
+func walkChainChecked(ctx context.Context, h hostCommandRunner, disk, format string,
+	before func(path, format string) error) ([]backingLevel, error) {
 	if format == rawDiskFormat {
 		if err := checkChainFileKind(ctx, h, disk); err != nil {
 			return nil, err
+		}
+		if before != nil {
+			if err := before(disk, format); err != nil {
+				return nil, err
+			}
 		}
 		return []backingLevel{{path: disk, refs: []string{disk}, format: format}}, nil
 	}
@@ -951,6 +966,11 @@ func walkBackingChainFrom(ctx context.Context, h hostCommandRunner, disk, format
 		}
 		if err := checkChainFileKind(ctx, h, cur); err != nil {
 			return nil, err
+		}
+		if before != nil {
+			if err := before(cur, format); err != nil {
+				return nil, err
+			}
 		}
 		args := []string{"-U"}
 		if format != "" {

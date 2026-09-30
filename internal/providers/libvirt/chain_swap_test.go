@@ -161,6 +161,9 @@ func TestCheckCopySource_RefusesASwappableChain(t *testing.T) {
 		fx := newRoutedSCD(t, nil)
 		fx.script("local", "symlink-"+filepath.Base(scdDiskPath), "")
 		refusedCopy(t, checkCopySource(ctx, h, scdDiskPath, "qcow2"), scdDiskPath+" is a symbolic link")
+		for _, c := range fx.calls() {
+			assert.NotContains(t, c, "qemu-img", "a refused image is never opened, not even for its header: %q", c)
+		}
 	})
 	t.Run("a raw disk is a symbolic link", func(t *testing.T) {
 		fx := newRoutedSCD(t, nil)
@@ -172,6 +175,12 @@ func TestCheckCopySource_RefusesASwappableChain(t *testing.T) {
 		fx.script("local", "backing-"+overlayBase, scdDiskPath)
 		fx.script("local", "symlink-"+filepath.Base(scdDiskPath), "")
 		refusedCopy(t, checkCopySource(ctx, h, scdOverlayPath, "qcow2"), scdDiskPath+" is a symbolic link")
+		calls := fx.calls()
+		assert.Contains(t, calls, "local sudo -n qemu-img info -U -f qcow2 --output=json -- "+scdOverlayPath)
+		for _, c := range calls {
+			assert.False(t, strings.Contains(c, "qemu-img info") && strings.HasSuffix(c, " "+scdDiskPath),
+				"the symbolic-link backing file is never opened: %q", c)
+		}
 	})
 	t.Run("the chain's directory is group-writable", func(t *testing.T) {
 		fx := newRoutedSCD(t, nil)

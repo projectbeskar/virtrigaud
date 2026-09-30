@@ -18,6 +18,7 @@ package libvirt
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"net/url"
@@ -276,9 +277,12 @@ func (c diskCopy) runAsSSHUser(ctx context.Context, h hostCommandRunner, guard *
 // an external data file, and none of them one another account could swap: a
 // symbolic link, or an image in a directory an account other than root and
 // the SSH user can write and that is not sticky (unsafeChainMemberReason).
-// Anything else is a copyRefusedError: the copy is refused, not retried as
-// the SSH user, who reads every VM disk through the kvm group. A host that
-// could not be reached while the chain was read is that host failure.
+// The format and swap checks run on each image BEFORE it is read at all
+// (walkChainChecked): a refused image is never opened, not even for its
+// header. Anything else is a copyRefusedError: the copy is refused, not
+// retried as the SSH user, who reads every VM disk through the kvm group. A
+// host that could not be reached while the chain was read is that host
+// failure.
 func checkCopySource(ctx context.Context, h hostCommandRunner, src, format string) error {
 	refuse := func(reason string) error {
 		log.Printf("WARN Refusing to copy %s: %s", src, reason)
@@ -287,9 +291,25 @@ func checkCopySource(ctx context.Context, h hostCommandRunner, src, format strin
 	if !privilegedSourceFormats[format] {
 		return refuse(fmt.Sprintf("its format %q (from its domain definition) is not one a copy opens (qcow2, raw)", format))
 	}
-	levels, err := walkBackingChainFrom(ctx, h, src, format)
+	levels, err := walkChainChecked(ctx, h, src, format, func(path, imageFormat string) error {
+		switch {
+		case imageFormat == "":
+			return refuse(fmt.Sprintf("the image chain names %s without its format", path))
+		case !privilegedSourceFormats[imageFormat]:
+			return refuse(fmt.Sprintf("the image chain opens %s as %q, not qcow2 or raw", path, imageFormat))
+		}
+		reason, err := unsafeChainMemberReason(ctx, h, path)
+		if err != nil {
+			return err
+		}
+		if reason != "" {
+			return refuse(reason + ": another account could swap the image the copy reads")
+		}
+		return nil
+	})
 	if err != nil {
-		if isHostTransportFailure(err) || ctx.Err() != nil {
+		var refused *copyRefusedError
+		if errors.As(err, &refused) || isHostTransportFailure(err) || ctx.Err() != nil {
 			return err
 		}
 		return refuse(fmt.Sprintf("its image chain could not be read and verified (for a disk the SSH user cannot read, "+
@@ -299,20 +319,8 @@ func checkCopySource(ctx context.Context, h hostCommandRunner, src, format strin
 		return refuse("it does not exist")
 	}
 	for _, l := range levels {
-		switch {
-		case l.format == "":
-			return refuse(fmt.Sprintf("the image chain names %s without its format", l.path))
-		case !privilegedSourceFormats[l.format]:
-			return refuse(fmt.Sprintf("the image chain opens %s as %q, not qcow2 or raw", l.path, l.format))
-		case l.dataFile != "":
+		if l.dataFile != "" {
 			return refuse(fmt.Sprintf("%s has an external data file", l.path))
-		}
-		reason, err := unsafeChainMemberReason(ctx, h, l.path)
-		if err != nil {
-			return err
-		}
-		if reason != "" {
-			return refuse(reason + ": another account could swap the image the copy reads")
 		}
 	}
 	return nil
