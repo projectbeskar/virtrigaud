@@ -47,12 +47,10 @@
       "local sh -c if [ -f \"$1\" ]; then echo file; elif [ -e \"$1\" ]; then echo other; fi sh /var/lib/libvirt/images/vrgold-web-disk.qcow2",
       "local sudo -n qemu-img info -U -f qcow2 --output=json -- /var/lib/libvirt/images/vrgold-web-disk.qcow2",
       "local qemu-img info -U -f qcow2 --output=json -- /var/lib/libvirt/images/vrgold-web-disk.qcow2",
-      "local sh -c umask \"$1\" \u0026\u0026 shift \u0026\u0026 exec \"$@\" sh 0137 qemu-img convert -O qcow2 /var/lib/libvirt/images/vrgold-web-disk.qcow2 /var/lib/libvirt/images/.virtrigaud-write-0000000000/team-a.copy-disk.qcow2",
-      "local qemu-img convert -O qcow2 /var/lib/libvirt/images/vrgold-web-disk.qcow2 /var/lib/libvirt/images/.virtrigaud-write-0000000000/team-a.copy-disk.qcow2",
       "local rm -rf -- /var/lib/libvirt/images/.virtrigaud-write-0000000000"
     ],
     "resp": "null",
-    "err": "failed to clone VM: create full-clone copy: virsh command 'sh -c umask \"$1\" \u0026\u0026 shift \u0026\u0026 exec \"$@\" sh 0137 qemu-img convert -O qcow2 /var/lib/libvirt/images/vrgold-web-disk.qcow2 /var/lib/libvirt/images/.virtrigaud-write-0000000000/team-a.copy-disk.qcow2' failed (exit code 1): stderr=error: scripted failure of qemu-img\n, stdout=, output: error: scripted failure of qemu-img\n"
+    "err": "failed to clone VM: create full-clone copy: the source disk /var/lib/libvirt/images/vrgold-web-disk.qcow2 cannot be copied safely: its image chain could not be read and verified (for a disk the SSH user cannot read, allow passwordless sudo for qemu-img info; see docs/libvirt-clones.md): Retryable: could not verify the image on the libvirt host (transient host error; details are in the provider log), output: "
   },
   "clone-copy-sudo-refused": {
     "calls": [
@@ -72,8 +70,8 @@
       "local sh -c umask \"$1\" \u0026\u0026 set -C \u0026\u0026 : \u003e \"$2\" sh 0137 /var/lib/libvirt/images/.virtrigaud-write-0000000000/team-a.copy-disk.qcow2",
       "local sh -c umask \"$1\" \u0026\u0026 shift \u0026\u0026 exec \"$@\" sh 0137 sudo -n qemu-img convert -f qcow2 -O qcow2 /var/lib/libvirt/images/vrgold-web-disk.qcow2 /var/lib/libvirt/images/.virtrigaud-write-0000000000/team-a.copy-disk.qcow2",
       "local sudo -n qemu-img convert -f qcow2 -O qcow2 /var/lib/libvirt/images/vrgold-web-disk.qcow2 /var/lib/libvirt/images/.virtrigaud-write-0000000000/team-a.copy-disk.qcow2",
-      "local sh -c umask \"$1\" \u0026\u0026 shift \u0026\u0026 exec \"$@\" sh 0137 qemu-img convert -O qcow2 /var/lib/libvirt/images/vrgold-web-disk.qcow2 /var/lib/libvirt/images/.virtrigaud-write-0000000000/team-a.copy-disk.qcow2",
-      "local qemu-img convert -O qcow2 /var/lib/libvirt/images/vrgold-web-disk.qcow2 /var/lib/libvirt/images/.virtrigaud-write-0000000000/team-a.copy-disk.qcow2",
+      "local sh -c umask \"$1\" \u0026\u0026 shift \u0026\u0026 exec \"$@\" sh 0137 qemu-img convert -f qcow2 -O qcow2 /var/lib/libvirt/images/vrgold-web-disk.qcow2 /var/lib/libvirt/images/.virtrigaud-write-0000000000/team-a.copy-disk.qcow2",
+      "local qemu-img convert -f qcow2 -O qcow2 /var/lib/libvirt/images/vrgold-web-disk.qcow2 /var/lib/libvirt/images/.virtrigaud-write-0000000000/team-a.copy-disk.qcow2",
       "local mv -f -T -- /var/lib/libvirt/images/.virtrigaud-write-0000000000/team-a.copy-disk.qcow2 /var/lib/libvirt/images/team-a.copy-disk.qcow2",
       "local sh -c stat -L -c '%a %u' -- \"$1\" \u0026\u0026 id -u sh /var/lib/libvirt/images",
       "local sudo chown -h libvirt-qemu:kvm -- /var/lib/libvirt/images/team-a.copy-disk.qcow2",
