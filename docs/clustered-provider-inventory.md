@@ -153,12 +153,87 @@ a VM is only placed or migrated onto a host that can **see its storage pool** an
 `storagePools` / `networks`. Reserving that constraint surface early is cheap;
 retrofitting it after VMs are stranded is not.
 
+> **The network label is enforced today, not just modeled — this is the most
+> common reason a first clustered VM never schedules.** The placement
+> scheduler's D6 filter (`internal/scheduler/filter.go`) rejects any `Host`
+> that does not carry `net.virtrigaud.io/<network>: "true"` for every network
+> a VM's attachments resolve to; a `Host` with none of these labels set is
+> never a placement candidate, however much free CPU/memory it has. `<network>`
+> is the VM's **libvirt network identity**: each `VMNetworkAttachment`'s
+> `spec.network.libvirt.networkName`, or, when that is empty,
+> `spec.network.libvirt.bridge.name` — never a Kubernetes node label, and not
+> set by `kubectl label`. This was hit on a real single-`Host` lab run: the
+> `Host` carried no `net.virtrigaud.io/*` label, so its one candidate failed
+> the filter and the VM stayed `Placed=False/Unschedulable` with the reason
+> `host does not have a required network`. See the
+> [First VM checklist](#first-vm-checklist) below and
+> [Troubleshooting](#troubleshooting) at the end of this page.
+>
+> **Storage-pool labels (`storage.virtrigaud.io/pool-<name>`) are accepted on
+> `Host.spec.labels` and safe to set, but are not yet a scheduling
+> requirement.** The VirtualMachine controller does not currently resolve a
+> VM's disks to a required storage-pool name (`RequiredStoragePools` is left
+> empty — see the TODO in
+> [`internal/controller/virtualmachine_controller.go`](../internal/controller/virtualmachine_controller.go)),
+> so a missing storage-pool label never blocks placement in this slice. Set it
+> anyway to match `HostPool.spec.storagePools` for when the constraint is
+> wired.
+
 ## Example
 
 See [`examples/hostpool-clustered.yaml`](../examples/hostpool-clustered.yaml):
 one `HostPool` (Spread strategy) with two `Host`s that both see storage pool
 `nfs01` and bridge `br-vlan100`, making shared-storage live migration between
-them possible once the migration slice ships.
+them possible once the migration slice ships. Both `Host`s also carry
+`net.virtrigaud.io/br-vlan100: "true"` — this is not only for migration: it is
+what lets the scheduler place a VM whose `VMNetworkAttachment` names that
+bridge in the first place (see [Placement labels are load-bearing](#placement-labels-are-load-bearing)
+above and the [First VM checklist](#first-vm-checklist) below).
+[`examples/host-libvirt-clustered-first-vm.yaml`](../examples/host-libvirt-clustered-first-vm.yaml)
+is the smallest version: one `Host` labelled `net.virtrigaud.io/default: "true"`
+and the `VMNetworkAttachment` of libvirt's `default` network that needs it.
+
+## First VM checklist
+
+Before creating the first `VirtualMachine` on a `topology: cluster` Provider,
+confirm every item the scheduler actually checks
+(`internal/scheduler/filter.go`, `filterHost`). Skipping one leaves the VM
+`Placed=False/Unschedulable` with no obvious cause, because the hard filters
+run before the score and no candidate gets a foothold to explain why:
+
+1. **The `Host` is registered under the right `Provider` / `HostPool`.**
+   `Host.spec.providerRef` names the clustered `Provider`, `Host.spec.poolRef`
+   names the `HostPool` the VM's Provider schedules into, and both are in the
+   Provider's namespace (the [same-namespace model](#same-namespace-model-security),
+   above).
+2. **`Host.status.health == Ready` and `Host.spec.schedulable == true`** (the
+   default). A `NotReady` or cordoned `Host` is filtered out before any label
+   or capacity check runs — `kubectl get hosts` shows the `HEALTH` and
+   `SCHEDULABLE` columns.
+3. **A `net.virtrigaud.io/<network>: "true"` label on `Host.spec.labels` for
+   every network the VM uses.** `<network>` is each `VMNetworkAttachment`'s
+   `spec.network.libvirt.networkName`, or, when that is empty,
+   `spec.network.libvirt.bridge.name`. This is a **hard filter** — a `Host`
+   missing even one required label is never a candidate. See
+   [Placement labels are load-bearing](#placement-labels-are-load-bearing),
+   and [`examples/host-libvirt-clustered-first-vm.yaml`](../examples/host-libvirt-clustered-first-vm.yaml)
+   for a `Host` labelled `net.virtrigaud.io/default: "true"` next to the
+   `VMNetworkAttachment` of libvirt's `default` network.
+4. **Free capacity for the VM's `VMClass`.** At least one candidate `Host`
+   must have enough unreserved CPU/memory after the `HostPool`'s overcommit
+   ratio and every already-placed VM's footprint — see
+   [Committed capacity](#committed-capacity).
+5. **If the VM references a `VMPlacementPolicy`**, its hard constraints
+   (`Hard.Hosts`, `Hard.ExcludedHosts`, `Hard.NodeSelector`, required
+   affinity/anti-affinity) must also be satisfiable by at least one candidate.
+
+**Storage-pool labels are deliberately not on this list.** `storage.virtrigaud.io/pool-<name>`
+is accepted on `Host.spec.labels` and worth setting to match
+`HostPool.spec.storagePools`, but the scheduler does not yet check it for an
+ordinary VM create — see the callout under
+[Placement labels are load-bearing](#placement-labels-are-load-bearing). Only
+list what the code actually enforces; do not add a storage-pool checklist item
+that would give a false sense of a guarantee that is not there yet.
 
 ## Provider gRPC contract for inventory
 
@@ -1874,3 +1949,67 @@ comes after v0.4.0.
 - **No rescheduling or migration yet.** Moving an *already-created* VM is not wired:
   neither rescheduling a bound VM to a different host, nor host→host `Migrate` /
   `VMHostMigration`. These land in later ADR-0007 phases.
+
+## Troubleshooting
+
+### VM stuck `Unschedulable`: "host does not have a required network"
+
+**Symptom.** `kubectl describe virtualmachine.infra.virtrigaud.io <name> -n <namespace>`
+shows `Placed=False` and `Provisioning=False`, both with reason `Unschedulable`,
+and the message includes `host does not have a required network`, for example:
+
+```
+no feasible host in pool "pool-a": no feasible host: 0 of 1 candidate host(s) passed the filters
+[host does not have a required network: 1]
+```
+
+(The message names only the rejection category and how many hosts it
+eliminated — never the specific network or host name; see the "When nothing
+fits" note under [Committed capacity](#committed-capacity).)
+
+**Cause.** No candidate `Host` in the VM's `HostPool` carries the label
+`net.virtrigaud.io/<network>: "true"` for at least one network the VM uses.
+`<network>` is that `VMNetworkAttachment`'s `spec.network.libvirt.networkName`,
+or its `spec.network.libvirt.bridge.name` when no network name is set. This is
+a hard filter (`internal/scheduler/filter.go`, rejection category "host does
+not have a required network") — every `Host` missing the label is rejected
+before capacity is even considered. This is exactly what happened on a real
+single-`Host` lab: the lab's only `Host` had no `net.virtrigaud.io/*` label at
+all, so 0 of 1 candidate passed the filter and the VM never scheduled.
+
+**Fix.** Add the label to `Host.spec.labels`. This is a field on the `Host`
+object's spec — **not** a Kubernetes node label or annotation — so
+`kubectl label host ...` does not set it; a `kubectl label` targets
+`metadata.labels`, which the scheduler never reads. Patch the `Host` directly:
+
+```sh
+kubectl patch hosts.infra.virtrigaud.io <host-name> -n <provider-namespace> \
+  --type merge -p '{"spec":{"labels":{"net.virtrigaud.io/default":"true"}}}'
+```
+
+or edit it:
+
+```sh
+kubectl edit hosts.infra.virtrigaud.io <host-name> -n <provider-namespace>
+```
+
+```yaml
+spec:
+  labels:
+    net.virtrigaud.io/default: "true"   # quote the value — it must be the literal string "true"
+```
+
+Use the network identity the VM actually needs (see the
+[First VM checklist](#first-vm-checklist)) — `default` for the libvirt default
+NAT network, `br-vlan100` for a bridge named `br-vlan100`, and so on. A VM
+with several `VMNetworkAttachment`s needs the label for each distinct
+identity, and a `Host` with none of the VM's required networks is never a
+candidate regardless of how many it does carry.
+
+No restart or resync is needed: the scheduler reads `Host.spec.labels`
+directly (not through `Host.status`), so the VM is picked up on its normal
+unschedulable backoff (30 s, then 1 min, then every 2 min) once the label is
+saved.
+
+See also [Placement labels are load-bearing](#placement-labels-are-load-bearing)
+and ADR-0007 D6 in [`adr/0007-clustered-orchestrator-provider.md`](adr/0007-clustered-orchestrator-provider.md).

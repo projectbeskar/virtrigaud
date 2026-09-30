@@ -320,7 +320,7 @@ placement record was lost. No re-stamp is needed:
   points anywhere else makes the create run there:
 
   ```sh
-  virsh metadata --domain <domain uuid> --uri https://virtrigaud.io/xmlns/libvirt/owner/v1   # on <host>: uid = the VM's UID
+  virsh -c "$CONN" metadata --domain <domain uuid> --uri https://virtrigaud.io/xmlns/libvirt/owner/v1   # on <host>, with CONN set to that host's connection URI: uid = the VM's UID
   kubectl patch virtualmachines.infra.virtrigaud.io <name> -n <namespace> --subresource=status \
     --type=merge -p '{"status":{"placement":{"pendingHost":"<host>"}}}'
   ```
@@ -359,6 +359,28 @@ Re-attaching is not automated in v0.4.0; the `VMRestoreBinding` kind (A6.4)
 will automate it later. The steps below need root (or the provider's SSH user)
 on the hosts, and read access to VirtualMachines in all namespaces.
 
+**Always name the connection explicitly: `virsh -c "$CONN" ...`, never a bare
+`virsh`.** libvirt's default connection URI depends on who runs it and how
+they are logged in — for many admin accounts that default is
+`qemu:///session`, a **different**, per-user libvirt instance from the
+`qemu:///system` one VirtRigaud's clustered domains run under. A bare `virsh
+list --all` under `qemu:///session` shows **no** domains at all, not an
+error — it looks exactly like "the domain is gone", and an administrator who
+trusts that empty list can wrongly conclude the domain was already removed
+and go on to discard it or re-create the VM, right on top of a domain that is
+still running under `qemu:///system`. Set `CONN` once per host before running
+any command below:
+
+```sh
+export CONN=qemu:///system   # when you are already logged into the host itself
+# or, from elsewhere (e.g. a jump host), use the Host's own connection URI:
+export CONN=$(kubectl get hosts.infra.virtrigaud.io <host-name> -n <provider-namespace> -o jsonpath='{.spec.endpoint}')
+# e.g. qemu+ssh://virtrigaud@host-a.example.com/system
+```
+
+(`CONN` is exported because a couple of steps below spawn it through `sh -c`
+via `xargs`, which only sees exported variables.)
+
 **0. Read the held VM's UID.**
 
 ```sh
@@ -377,10 +399,11 @@ whose owner stamp records the held VM's namespace and name:
 ```sh
 NS=<namespace>; NAME=<name>
 URI=https://virtrigaud.io/xmlns/libvirt/owner/v1
-for d in $(virsh list --all --uuid); do
-  s=$(virsh metadata --domain "$d" --uri "$URI" 2>/dev/null) || continue
+# CONN is set above — the connection for THIS host, not virsh's own default.
+for d in $(virsh -c "$CONN" list --all --uuid); do
+  s=$(virsh -c "$CONN" metadata --domain "$d" --uri "$URI" 2>/dev/null) || continue
   if printf '%s\n' "$s" | grep -qF -e "namespace='$NS' name='$NAME'" -e "namespace=\"$NS\" name=\"$NAME\""; then
-    echo "$d $(virsh domname "$d") $s"
+    echo "$d $(virsh -c "$CONN" domname "$d") $s"
   fi
 done
 ```
@@ -410,18 +433,19 @@ definition of an active domain. Step 2 rewrites both definitions. Then:
   If it prints the UID, that VirtualMachine still owns the domain. Stop.
 
 **2. Re-stamp the domain with the held VM's UID**, keeping the namespace and
-name. Address the domain by its UUID (`virsh domuuid <domain>`):
+name. Address the domain by its UUID (`virsh -c "$CONN" domuuid <domain>`), on
+the same `CONN` you used to find it in step 1:
 
 ```sh
-virsh metadata --domain <domain uuid> --uri https://virtrigaud.io/xmlns/libvirt/owner/v1 --key virtrigaud \
+virsh -c "$CONN" metadata --domain <domain uuid> --uri https://virtrigaud.io/xmlns/libvirt/owner/v1 --key virtrigaud \
   --set "<owner uid='${NEW_UID}' namespace='<namespace>' name='<name>'/>" --config --live
 # drop --live if the domain is shut off
 ```
 
 This is the same write the provider's `TransferOwner` makes. Read the stamp
 back with the command from step 1, and for a running domain also with
-`virsh dumpxml --inactive <domain>`. libvirt keeps one element per namespace
-URI, so the old stamp is replaced, not duplicated.
+`virsh -c "$CONN" dumpxml --inactive <domain>`. libvirt keeps one element per
+namespace URI, so the old stamp is replaced, not duplicated.
 
 **3. Only for a VM held by R1 (never placed): release the marker.** Set it to
 the held VM's UID, or remove it:
@@ -457,25 +481,26 @@ disk files before you undefine it:
 
 ```sh
 D=<domain uuid>
-virsh domblklist --domain "$D" --details    # Type Device Target Source: note the Source of each 'file disk'
-virsh destroy --domain "$D"                  # only if it is running
-virsh undefine --domain "$D" --nvram         # --nvram for UEFI domains
+# CONN is that domain's host's connection URI (see the top of this runbook).
+virsh -c "$CONN" domblklist --domain "$D" --details    # Type Device Target Source: note the Source of each 'file disk'
+virsh -c "$CONN" destroy --domain "$D"                  # only if it is running
+virsh -c "$CONN" undefine --domain "$D" --nvram         # --nvram for UEFI domains
 ```
 
 **Before you remove a disk file, check that no domain on any host of the
 Provider uses it.** A shared pool is visible from every host, and a linked
-clone may use the file as its backing file. On **every** host, for each file
-`F` noted above:
+clone may use the file as its backing file. On **every** host, with `CONN`
+set to that host's connection URI, for each file `F` noted above:
 
 ```sh
 F=<disk file>
-for d in $(virsh list --all --uuid); do
-  if virsh domblklist --domain "$d" --details | awk '$1 == "file" {print $4}' | grep -qxF -- "$F"; then
-    echo "IN USE by $d $(virsh domname "$d")"
+for d in $(virsh -c "$CONN" list --all --uuid); do
+  if virsh -c "$CONN" domblklist --domain "$d" --details | awk '$1 == "file" {print $4}' | grep -qxF -- "$F"; then
+    echo "IN USE by $d $(virsh -c "$CONN" domname "$d")"
   fi
 done
 # and no disk on the host uses it in its backing chain:
-for img in $(virsh list --all --uuid | xargs -r -n1 sh -c 'virsh domblklist --domain "$0" --details' | awk '$1 == "file" && $2 == "disk" {print $4}'); do
+for img in $(virsh -c "$CONN" list --all --uuid | xargs -r -n1 sh -c 'virsh -c "$CONN" domblklist --domain "$0" --details' | awk '$1 == "file" && $2 == "disk" {print $4}'); do
   sudo qemu-img info -U --backing-chain "$img" 2>/dev/null | grep -qF -- "$F" && echo "BACKING of $img"
 done
 ```

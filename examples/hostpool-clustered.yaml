@@ -16,6 +16,19 @@
 # see its storage pool AND has its network. Here both hosts see pool "nfs01" and
 # bridge "br-vlan100", so shared-storage live migration between them is possible.
 #
+# THE net.virtrigaud.io/<network> LABEL IS REQUIRED FOR PLACEMENT, NOT JUST
+# MIGRATION: a Host with no net.virtrigaud.io/<network>="true" label for a
+# network a VM uses is never a placement candidate for that VM, even with free
+# CPU/memory (internal/scheduler/filter.go). <network> is the VM's libvirt
+# network identity: VMNetworkAttachment.spec.network.libvirt.networkName, or
+# its bridge.name when no network name is set — "br-vlan100" below matches a
+# VMNetworkAttachment whose bridge.name is "br-vlan100". Forgetting this label
+# leaves a VM Placed=False/Unschedulable with reason "host does not have a
+# required network"; see docs/clustered-provider-inventory.md (the "First VM
+# checklist" and "Troubleshooting" sections). Storage-pool labels
+# (storage.virtrigaud.io/pool-<name>) are shown below too, but are NOT yet
+# enforced as a scheduling filter for an ordinary VM create — see the same doc.
+#
 # SAME-NAMESPACE RULE (security): the HostPool, every Host, every per-host
 # credential Secret, and the clustered Provider MUST all live in ONE namespace
 # (here: virtrigaud-system). providerRef / poolRef / credentialSecretRef are
