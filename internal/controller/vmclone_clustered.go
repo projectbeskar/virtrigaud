@@ -424,6 +424,10 @@ func (r *VMCloneReconciler) recordClonePendingHost(
 //     ADR-0007 A6 R2): the target keeps its pendingHost, the host is NOT
 //     excluded, and the clone waits (RestorePending) until an administrator
 //     re-attaches or removes that domain (holdCloneForPreviousIncarnation).
+//   - a source that is not powered off (VM_SOURCE_RUNNING: a libvirt full
+//     clone requires a shut-off source): nothing was copied; the target keeps
+//     its pendingHost and the clone waits (SourceMustBePoweredOff) until the
+//     source is off (holdCloneForRunningSource).
 //   - a name conflict (Conflict / ALREADY_EXISTS): a domain of the clone's name
 //     that the target VM does not own is on the host. The provider checks that
 //     before copying anything, so nothing was created: as for a Create (A2
@@ -456,6 +460,12 @@ func (r *VMCloneReconciler) handleClusteredCloneError(
 		// (the host is not excluded) and the clone waits; nothing is created
 		// until an administrator re-attaches or removes it.
 		return r.holdCloneForPreviousIncarnation(ctx, clone, target, host, err)
+	case contracts.IsVMSourceRunning(err):
+		// A libvirt full clone requires a powered-off source (Slice 5 lab,
+		// B2): nothing was copied. The target keeps its pendingHost (it keeps
+		// counting on its host) and the clone waits; it proceeds once the
+		// source is off, and is never failed for it.
+		return r.holdCloneForRunningSource(ctx, clone, err), nil
 	case contracts.IsConflict(err):
 		pl := target.Status.Placement
 		if pl == nil {

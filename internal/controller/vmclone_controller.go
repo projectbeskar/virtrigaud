@@ -415,6 +415,11 @@ func (r *VMCloneReconciler) startClone(
 
 	resp, err := cloner.Clone(ctx, req)
 	if err != nil {
+		// A libvirt full clone requires a powered-off source: the clone waits
+		// (Pending) until it is off, and is never failed for it.
+		if contracts.IsVMSourceRunning(err) {
+			return r.holdCloneForRunningSource(ctx, clone, err), nil
+		}
 		logger.Error(err, "Clone RPC failed")
 		r.Recorder.Event(clone, "Warning", infrav1beta1.VMCloneReasonProviderError,
 			fmt.Sprintf("Clone failed: %v", err))
@@ -1204,9 +1209,11 @@ func (r *VMCloneReconciler) clonesForGrantChange(ctx context.Context, indexValue
 // SetupWithManager sets up the controller with the Manager. Besides its own
 // VMClones it watches Namespaces, but only for changes to the cross-namespace
 // grant annotation, to re-drive clones whose target namespace just granted or
-// revoked access; and consumer-grant changes (Namespace labels, the
+// revoked access; consumer-grant changes (Namespace labels, the
 // spec.consumerNamespaceSelector of Providers, VMClasses and VMImages) to
-// re-drive clones refused with ConsumerNotAllowed.
+// re-drive clones refused with ConsumerNotAllowed; and VirtualMachines, but
+// only for changes of their observed power state, to re-drive clones waiting
+// for their source to be powered off (SourceMustBePoweredOff).
 func (r *VMCloneReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	if err := indexConsumerGrants(mgr, &infrav1beta1.VMClone{}, cloneConsumerGrantIndexValues); err != nil {
 		return err
@@ -1221,7 +1228,12 @@ func (r *VMCloneReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		For(&infrav1beta1.VMClone{}).
 		Watches(&corev1.Namespace{},
 			handler.EnqueueRequestsFromMapFunc(r.clonesTargetingNamespace),
-			builder.WithPredicates(allowedSourceNamespacesChanged()))
+			builder.WithPredicates(allowedSourceNamespacesChanged())).
+		// A clone waiting for its source VM to be powered off proceeds as
+		// soon as the source's observed power state changes.
+		Watches(&infrav1beta1.VirtualMachine{},
+			handler.EnqueueRequestsFromMapFunc(r.clonesWaitingOnSource),
+			builder.WithPredicates(sourcePowerStateChanged()))
 	return withConsumerGrantWatches(b, r.clonesForGrantChange).
 		Complete(r)
 }
