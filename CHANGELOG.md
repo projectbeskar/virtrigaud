@@ -5,6 +5,30 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-09-29 14:41] - SDK client: RPC methods return a nil error on success (typed-nil *ProviderError)
+**Author:** @wrkode (William Rizzo)
+
+> **Operator note.** SDK only (`github.com/projectbeskar/virtrigaud/sdk/provider/client`). The manager and the providers do not use this client, so a cluster needs no change. Out-of-tree callers of the SDK client get `err == nil` on a successful RPC again.
+
+### Added
+- `sdk/provider/client/client_errors_test.go`: a fake `providerv1.ProviderClient` covering every RPC method of `Client`. Tests: `TestClientRPCs_CoversEveryMethod` (fails when a new method is not in the table), `TestClientRPCs_NilErrorOnSuccess`, `TestClientRPCs_ProviderErrorOnFailure`, `TestWaitForTask_CompletedTask`, `TestWaitForTask_StatusError`.
+
+### Changed
+- `sdk/provider/errors/errors.go`: the `FromGRPCError` godoc warns that its nil result must not be returned as an `error`, and shows the guard to use instead. The signature is unchanged.
+
+### Fixed
+- `sdk/provider/client/client.go`: `Validate`, `Create`, `Delete`, `Power`, `Reconfigure`, `Describe`, `GetHostInfo`, `TaskStatus`, `SnapshotCreate`, `SnapshotDelete`, `SnapshotRevert`, `Clone`, `ImagePrepare` and `GetCapabilities` returned `errors.FromGRPCError(err)` directly. For a nil `err` that is a nil `*ProviderError`, and a nil pointer stored in an `error` interface is not a nil interface, so `err != nil` was true on every successful call. Each method now converts only a real error and returns `resp, nil` on success, like `ListVMsResponse`, `ListHosts` and `TransferOwner` already did.
+- `sdk/provider/client/client.go`: `WaitForTask` failed on its first successful poll with `failed to check task status: <nil>` because of the same bug in `TaskStatus`. It now waits for the task.
+
+### Why
+With the bug, any caller that checked `if err != nil` after one of these methods treated every success as a failure. The error it got printed as `<nil>`.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-09-29 07:40] - Fix: the mock provider image did not build (missing api/ in its Dockerfile)
 **Author:** @wrkode (William Rizzo)
 

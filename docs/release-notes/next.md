@@ -222,6 +222,10 @@ providers), and rollback caveats in
   with no `status.creationTime`; the
   [upgrade guide](docs/upgrading.md#post-upgrade-verification-checklist) has a
   query to list them.
+- Provider SDK: the `sdk/provider/client` RPC methods (`Create`, `Describe`,
+  `TaskStatus` and the others) return a nil error on success again. Before, a
+  successful call returned a non-nil error that printed as `<nil>`, and
+  `WaitForTask` failed on its first poll.
 
 ## Upgrade
 
