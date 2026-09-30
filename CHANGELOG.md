@@ -2337,7 +2337,6 @@ Nine newly-disclosed, reachable vulnerabilities were failing the blocking `govul
 ### Impact
 - [ ] Breaking change
 - [x] Requires cluster rollout — only to ship rebuilt manager/provider images carrying the patched grpc transport and standard library; running clusters are unaffected until upgraded
-
 ## [2026-09-21 12:06] - Drop Vestigial CGO from libvirt Provider; Add libvirt to the vet/test Gate (ADR-0008 PR 0)
 **Author:** @wrkode (William Rizzo)
 
@@ -2439,7 +2438,6 @@ Three newly-disclosed, reachable vulnerabilities were failing the blocking `govu
 ### Impact
 - [ ] Breaking change
 - [x] Requires cluster rollout (libvirt provider image)
-
 ## [2026-08-10 14:30] - provider pods: dedicated least-privilege ServiceAccount
 **Author:** @wrkode (William Rizzo)
 
@@ -2865,7 +2863,6 @@ The `observability` values block (and its `serviceMonitorLabels`/`prometheusRule
 - [ ] Requires cluster rollout
 - [x] Config change only
 - [ ] Documentation only
-
 ## [2026-06-17 13:03] - libvirt: drop hard-coded qemu emulator path
 **Author:** @jing2uo (Komh)
 
@@ -3427,7 +3424,6 @@ Rebuild/redeploy the libvirt provider image. This **changes the domain XML for V
 - Headroom only exists for VMs created with the hot-add flags **after** this change — existing VMs (and VMs created without the flags) have no headroom and still need a power-cycle to grow CPU/memory.
 - Memory live grow inflates the balloon up to `<memory>`; it is balloon-based (`currentMemory`), not DIMM hotplug. The guest sees the new memory as the balloon deflates.
 - Follow-up: the clone path (`clone.go` `applyClassOverrides`) rewrites `<vcpu>`/`<memory>`/`<currentMemory>` and would drop the `current<max` headroom on a clone; preserving headroom across clone is a separate change and out of scope here.
-
 ## [2026-06-09 07:48] - libvirt memory-inclusive snapshots: advertise SupportsMemorySnapshots (#202)
 **Author:** @wrkode (William Rizzo)
 
@@ -3761,43 +3757,6 @@ Observed on the lab: the `vsphere-prod` provider ran ~8 days idle (no managed vS
 - [ ] Config change only
 - [ ] Documentation only
 
-## [2026-06-07 12:05] - vSphere: advertise disk export/import capabilities accurately (#178)
-**Author:** @wrkode (William Rizzo)
-
-### Fixed
-- `internal/providers/vsphere/server.go`: `GetCapabilities` now reports `SupportsDiskExport=true`, `SupportsDiskImport=true`, `SupportedExportFormats=[vmdk, qcow2, raw]`, `SupportedImportFormats=[vmdk, qcow2, raw]`, and `SupportsExportCompression=true`. These were previously left at the zero value (`false`/empty), understating capabilities that vSphere actually implements (`ExportDisk` clones to a compressed streamOptimized VMDK and converts to the target format; `ImportDisk` accepts and converts those formats).
-
-### Added
-- `internal/providers/vsphere/capabilities_test.go`: asserts the corrected disk-migration flags + formats, and that existing flags are unchanged.
-
-### Why
-The understated flags are harmless today (the manager surfaces but does not yet enforce capabilities) but become load-bearing once `--enforce-provider-capabilities` (#176) is enabled: gating on `SupportsDiskExport`/`SupportsDiskImport=false` would wrongly refuse vSphere migrations it can actually perform. Confirmed live on the lab during #176 validation — vSphere's `status.reportedCapabilities` showed disk export/import absent (false). This unblocks safely enabling capability gating. Fixes #178.
-
-### Impact
-- [ ] Breaking change
-- [ ] Requires cluster rollout — only to ship the rebuilt vSphere provider image; no behavior change (capabilities are advisory until gating is enabled)
-- [ ] Config change only
-- [ ] Documentation only
-
-## [2026-06-07 12:00] - Capability negotiation: surface provider capabilities + opt-in gating (#176)
-**Author:** @wrkode (William Rizzo)
-
-### Added
-- `internal/controller/provider_controller.go`: the Provider reconciler now best-effort queries the running provider's `GetCapabilities` RPC (once `ProviderAvailable` and runtime `Running`) and surfaces the result on `Provider.Status.ReportedCapabilities`, plus a `CapabilitiesReported` Condition (True `CapabilitiesFetched` / False `CapabilitiesUnavailable`). Consumed via the narrow `contracts.CapabilityReporter` extension interface (type-asserted from the resolved provider), so the core `contracts.Provider` interface is unchanged. Strictly best-effort: a nil resolver, resolve failure, non-reporter provider, or failing RPC logs at V(1) and never fails the reconcile or flips `Healthy`.
-- `cmd/manager/main.go`: new `--enforce-provider-capabilities` bool flag (**default false**). When off, snapshot/migration behavior is byte-for-byte unchanged. Threaded as `EnforceCapabilities` into the VMSnapshot and VMMigration reconcilers.
-- `internal/controller/vmsnapshot_controller.go`: when enforcement is on, the snapshot CREATE path gates on the provider's reported capabilities before calling `SnapshotCreate` — refusing with a Warning event + Failed/`UnsupportedByProvider` condition when `!SupportsSnapshots`, or when a memory-inclusive snapshot is requested and `!SupportsMemorySnapshots`. Fails open if the provider is not a `CapabilityReporter` or the query fails.
-- `internal/controller/vmmigration_controller.go`: when enforcement is on, the exporting phase gates on source `SupportsDiskExport` before `ExportDisk`, and the importing phase gates on target `SupportsDiskImport` before `ImportDisk`, failing the migration with a clear reason. Fails open if the provider is not a `CapabilityReporter` or the query fails.
-- `internal/controller/capability_gating_test.go`, `internal/controller/provider_controller_capabilities_test.go`: table-style unit tests with a fake `contracts.CapabilityReporter` provider asserting gating blocks when the flag is on and the capability is false, does not block when the flag is off or the capability is true, and fails open when the provider is not a `CapabilityReporter` or the RPC errors; plus the capabilities→status mapping and the provider-controller best-effort condition behavior.
-
-### Why
-Builds on the #176 foundation (capabilities contract, gRPC client method, CRD status field). Surfacing capabilities makes provider feature support observable to operators; gating prevents issuing operations a provider declares it cannot perform. Gating is opt-in because a provider that under-reports a capability (e.g. vSphere currently understates disk export/import) would otherwise block operations it can actually perform — operators must confirm capability flags are accurate before enabling.
-
-### Impact
-- [ ] Breaking change
-- [x] Requires cluster rollout — manager image must be updated
-- [ ] Config change only
-- [ ] Documentation only
-
 ## [2026-06-07 10:00] - Fix VMClone target-VM bind race (Status.ID seed) (#179 follow-up)
 **Author:** @wrkode (William Rizzo)
 
@@ -3862,6 +3821,43 @@ spec:
 ```
 
 ---
+
+## [2026-06-07 12:05] - vSphere: advertise disk export/import capabilities accurately (#178)
+**Author:** @wrkode (William Rizzo)
+
+### Fixed
+- `internal/providers/vsphere/server.go`: `GetCapabilities` now reports `SupportsDiskExport=true`, `SupportsDiskImport=true`, `SupportedExportFormats=[vmdk, qcow2, raw]`, `SupportedImportFormats=[vmdk, qcow2, raw]`, and `SupportsExportCompression=true`. These were previously left at the zero value (`false`/empty), understating capabilities that vSphere actually implements (`ExportDisk` clones to a compressed streamOptimized VMDK and converts to the target format; `ImportDisk` accepts and converts those formats).
+
+### Added
+- `internal/providers/vsphere/capabilities_test.go`: asserts the corrected disk-migration flags + formats, and that existing flags are unchanged.
+
+### Why
+The understated flags are harmless today (the manager surfaces but does not yet enforce capabilities) but become load-bearing once `--enforce-provider-capabilities` (#176) is enabled: gating on `SupportsDiskExport`/`SupportsDiskImport=false` would wrongly refuse vSphere migrations it can actually perform. Confirmed live on the lab during #176 validation — vSphere's `status.reportedCapabilities` showed disk export/import absent (false). This unblocks safely enabling capability gating. Fixes #178.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout — only to ship the rebuilt vSphere provider image; no behavior change (capabilities are advisory until gating is enabled)
+- [ ] Config change only
+- [ ] Documentation only
+
+## [2026-06-07 12:00] - Capability negotiation: surface provider capabilities + opt-in gating (#176)
+**Author:** @wrkode (William Rizzo)
+
+### Added
+- `internal/controller/provider_controller.go`: the Provider reconciler now best-effort queries the running provider's `GetCapabilities` RPC (once `ProviderAvailable` and runtime `Running`) and surfaces the result on `Provider.Status.ReportedCapabilities`, plus a `CapabilitiesReported` Condition (True `CapabilitiesFetched` / False `CapabilitiesUnavailable`). Consumed via the narrow `contracts.CapabilityReporter` extension interface (type-asserted from the resolved provider), so the core `contracts.Provider` interface is unchanged. Strictly best-effort: a nil resolver, resolve failure, non-reporter provider, or failing RPC logs at V(1) and never fails the reconcile or flips `Healthy`.
+- `cmd/manager/main.go`: new `--enforce-provider-capabilities` bool flag (**default false**). When off, snapshot/migration behavior is byte-for-byte unchanged. Threaded as `EnforceCapabilities` into the VMSnapshot and VMMigration reconcilers.
+- `internal/controller/vmsnapshot_controller.go`: when enforcement is on, the snapshot CREATE path gates on the provider's reported capabilities before calling `SnapshotCreate` — refusing with a Warning event + Failed/`UnsupportedByProvider` condition when `!SupportsSnapshots`, or when a memory-inclusive snapshot is requested and `!SupportsMemorySnapshots`. Fails open if the provider is not a `CapabilityReporter` or the query fails.
+- `internal/controller/vmmigration_controller.go`: when enforcement is on, the exporting phase gates on source `SupportsDiskExport` before `ExportDisk`, and the importing phase gates on target `SupportsDiskImport` before `ImportDisk`, failing the migration with a clear reason. Fails open if the provider is not a `CapabilityReporter` or the query fails.
+- `internal/controller/capability_gating_test.go`, `internal/controller/provider_controller_capabilities_test.go`: table-style unit tests with a fake `contracts.CapabilityReporter` provider asserting gating blocks when the flag is on and the capability is false, does not block when the flag is off or the capability is true, and fails open when the provider is not a `CapabilityReporter` or the RPC errors; plus the capabilities→status mapping and the provider-controller best-effort condition behavior.
+
+### Why
+Builds on the #176 foundation (capabilities contract, gRPC client method, CRD status field). Surfacing capabilities makes provider feature support observable to operators; gating prevents issuing operations a provider declares it cannot perform. Gating is opt-in because a provider that under-reports a capability (e.g. vSphere currently understates disk export/import) would otherwise block operations it can actually perform — operators must confirm capability flags are accurate before enabling.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout — manager image must be updated
+- [ ] Config change only
+- [ ] Documentation only
 
 ## [2026-06-06 13:57] - Fix: migration PVCs being deleted no longer wedge the provider rollout (#184)
 **Author:** @wrkode (William Rizzo)
@@ -4334,6 +4330,31 @@ go test -tags=e2e ./test/e2e/...
 
 ---
 
+## [2026-05-25 12:08] - chore(ci): make Dependabot policy explicit + group non-major actions bumps (#135 / closes #134 in part)
+**Author:** @wrkode (William Rizzo)
+
+### Audit finding
+The May 22 Dependabot batch (#74–#82) cleared 5 of the 9 then-outdated GitHub Actions in our workflows. 4 remained on Node 20 with newer Node 24 majors available (`actions/setup-go`, `docker/login-action`, `docker/metadata-action`, `docker/setup-buildx-action`). Dependabot had not surfaced PRs for them, likely because of SHA-pinning + `# vX` version-comment hints making it conservative about major bumps. Hard deadline 2026-09-16.
+
+### Changed
+- `.github/dependabot.yml`: added top-of-file comment block (~25 lines) documenting the policy, the Node 20 deadline, the 4 outstanding actions, and the SHA-pinning caveat.
+- `.github/dependabot.yml`: explicit `allow: dependency-type: all` block (functionally equivalent to omitting the block; loud-and-clear intent for future maintainers).
+- `.github/dependabot.yml`: `groups: ci-actions-non-major` (`update-types: [minor, patch]`) so minor/patch bumps batch into one weekly PR per ecosystem while major bumps stay individual (matches the Tier A/B/C convention).
+
+### Why
+Make the major-bump-permitted policy loud; improve the per-week review experience by batching minor/patch noise; surface the Node 20 plan to anyone reading the config.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [x] Config change only
+- [ ] Documentation only
+
+### Notes
+- Worked exactly as intended: the next Monday Dependabot run surfaced the 4 outstanding Node 20 actions plus 3 others. Tracking issue #134 documents the rollout. The 4 backlog clears merged the same day (#138/#139/#141/#142); #137 (actions/checkout 4→6) intentionally deferred to preserve the K4 mitigation pin from PR #104; #140 (codecov-action 5→6) deferred to v0.3.7 (not Node 20 backlog).
+
+---
+
 ## [2026-05-25 15:28] - security: bump go.opentelemetry.io/otel + sdk to v1.43.0 (closes #143; unblocks v0.3.6-rc1)
 **Author:** @wrkode (William Rizzo)
 
@@ -4368,31 +4389,6 @@ First attempt to cut `v0.3.6-rc1` from main (commit `d1e08d0`, tag `f537176`, de
 - Verified locally pre-PR: `go vet ./...` clean; `go build ./...` clean; `make test` 12/12 packages with 0 FAIL; `docker build -f build/Dockerfile.manager` clean; `docker run virtrigaud-manager:otelfix --version` returns the expected banner.
 - The v0.3.6-rc1 attempt that surfaced this is run [26406778809](https://github.com/projectbeskar/virtrigaud/actions/runs/26406778809). After this PR merges, `v0.3.6-rc1` will be re-cut from the new HEAD.
 - The release workflow's Trivy scan is now the second post-Go-bump security-net catching real issues — this is the safety mechanism working as intended.
-
----
-
-## [2026-05-25 12:08] - chore(ci): make Dependabot policy explicit + group non-major actions bumps (#135 / closes #134 in part)
-**Author:** @wrkode (William Rizzo)
-
-### Audit finding
-The May 22 Dependabot batch (#74–#82) cleared 5 of the 9 then-outdated GitHub Actions in our workflows. 4 remained on Node 20 with newer Node 24 majors available (`actions/setup-go`, `docker/login-action`, `docker/metadata-action`, `docker/setup-buildx-action`). Dependabot had not surfaced PRs for them, likely because of SHA-pinning + `# vX` version-comment hints making it conservative about major bumps. Hard deadline 2026-09-16.
-
-### Changed
-- `.github/dependabot.yml`: added top-of-file comment block (~25 lines) documenting the policy, the Node 20 deadline, the 4 outstanding actions, and the SHA-pinning caveat.
-- `.github/dependabot.yml`: explicit `allow: dependency-type: all` block (functionally equivalent to omitting the block; loud-and-clear intent for future maintainers).
-- `.github/dependabot.yml`: `groups: ci-actions-non-major` (`update-types: [minor, patch]`) so minor/patch bumps batch into one weekly PR per ecosystem while major bumps stay individual (matches the Tier A/B/C convention).
-
-### Why
-Make the major-bump-permitted policy loud; improve the per-week review experience by batching minor/patch noise; surface the Node 20 plan to anyone reading the config.
-
-### Impact
-- [ ] Breaking change
-- [ ] Requires cluster rollout
-- [x] Config change only
-- [ ] Documentation only
-
-### Notes
-- Worked exactly as intended: the next Monday Dependabot run surfaced the 4 outstanding Node 20 actions plus 3 others. Tracking issue #134 documents the rollout. The 4 backlog clears merged the same day (#138/#139/#141/#142); #137 (actions/checkout 4→6) intentionally deferred to preserve the K4 mitigation pin from PR #104; #140 (codecov-action 5→6) deferred to v0.3.7 (not Node 20 backlog).
 
 ---
 
