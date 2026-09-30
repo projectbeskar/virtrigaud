@@ -136,18 +136,30 @@ type diskCopy struct {
 type copyRefusedError struct {
 	// src is the refused source disk (provider log only).
 	src string
-	// reason says why (provider log only; it may name host paths).
+	// reason says why in full (provider log only; it may name host paths,
+	// and other domains' files).
 	reason string
+	// wire says why without naming any host path or file: what the requester
+	// is told (Error).
+	wire string
 }
 
-// Error is the refusal, for the provider's log and the single-host caller.
+// copyRefusedWire begins every refusal a requester sees.
+const copyRefusedWire = "the source VM's disk cannot be copied safely"
+
+// Error is the refusal the requester sees — single-host and routed alike —
+// naming no host path, file or other domain: the provider logged the full
+// reason when it refused (newCopyRefused).
 func (e *copyRefusedError) Error() string {
-	return fmt.Sprintf("the source disk %s cannot be copied safely: %s", e.src, e.reason)
+	return fmt.Sprintf("%s: %s (details are in the provider log)", copyRefusedWire, e.wire)
 }
 
-// copyRefusedWire is the requester-facing account of a copyRefusedError on a
-// routed call: it names no host path.
-const copyRefusedWire = "the source VM's disk image chain cannot be copied safely (details are in the provider log)"
+// newCopyRefused logs the full reason a copy of src is refused and returns
+// the refusal, which tells the requester only wire.
+func newCopyRefused(src, reason, wire string) *copyRefusedError {
+	log.Printf("WARN Refusing to copy %s: %s", src, reason)
+	return &copyRefusedError{src: src, reason: reason, wire: wire}
+}
 
 // GRPCStatus renders the refusal as codes.FailedPrecondition: the copy is not
 // retried until the source changes, and the manager never counts it toward
@@ -167,13 +179,12 @@ func (c diskCopy) run(ctx context.Context, h hostCommandRunner, guard *hostCmdGu
 		return nil, err
 	}
 	if c.privArgs != nil && c.outDir != "" {
-		reason, err := unsafeHostDirReason(ctx, h, c.outDir)
+		reason, wire, err := unsafeHostDirReason(ctx, h, c.outDir)
 		if err != nil {
 			return nil, err
 		}
 		if reason != "" {
-			log.Printf("WARN Refusing to copy %s: %s", c.src, reason)
-			return nil, &copyRefusedError{src: c.src, reason: reason + "; root does not write there"}
+			return nil, newCopyRefused(c.src, reason+"; root does not write there", wire)
 		}
 	}
 	if c.privArgs != nil {
@@ -239,7 +250,8 @@ func rootReadableDiskReason(ctx context.Context, h hostCommandRunner, path strin
 		}
 		return err.Error(), nil
 	}
-	return unsafeChainMemberReason(ctx, h, path)
+	reason, _, err := unsafeChainMemberReason(ctx, h, path)
+	return reason, err
 }
 
 // copyStderr formats a failed copy's stderr for the provider's log (" (qemu-img
@@ -284,26 +296,26 @@ func (c diskCopy) runAsSSHUser(ctx context.Context, h hostCommandRunner, guard *
 // host that could not be reached while the chain was read is that host
 // failure.
 func checkCopySource(ctx context.Context, h hostCommandRunner, src, format string) error {
-	refuse := func(reason string) error {
-		log.Printf("WARN Refusing to copy %s: %s", src, reason)
-		return &copyRefusedError{src: src, reason: reason}
-	}
+	refuse := func(reason, wire string) error { return newCopyRefused(src, reason, wire) }
 	if !privilegedSourceFormats[format] {
-		return refuse(fmt.Sprintf("its format %q (from its domain definition) is not one a copy opens (qcow2, raw)", format))
+		return refuse(fmt.Sprintf("its format %q (from its domain definition) is not one a copy opens (qcow2, raw)", format),
+			fmt.Sprintf("its disk format %q is not qcow2 or raw", format))
 	}
 	levels, err := walkChainChecked(ctx, h, src, format, func(path, imageFormat string) error {
 		switch {
 		case imageFormat == "":
-			return refuse(fmt.Sprintf("the image chain names %s without its format", path))
+			return refuse(fmt.Sprintf("the image chain names %s without its format", path),
+				"its image chain names a backing file without its format")
 		case !privilegedSourceFormats[imageFormat]:
-			return refuse(fmt.Sprintf("the image chain opens %s as %q, not qcow2 or raw", path, imageFormat))
+			return refuse(fmt.Sprintf("the image chain opens %s as %q, not qcow2 or raw", path, imageFormat),
+				"its image chain has a backing file in a format other than qcow2 or raw")
 		}
-		reason, err := unsafeChainMemberReason(ctx, h, path)
+		reason, wire, err := unsafeChainMemberReason(ctx, h, path)
 		if err != nil {
 			return err
 		}
 		if reason != "" {
-			return refuse(reason + ": another account could swap the image the copy reads")
+			return refuse(reason+": another account could swap the image the copy reads", wire)
 		}
 		return nil
 	})
@@ -312,15 +324,16 @@ func checkCopySource(ctx context.Context, h hostCommandRunner, src, format strin
 		if errors.As(err, &refused) || isHostTransportFailure(err) || ctx.Err() != nil {
 			return err
 		}
-		return refuse(fmt.Sprintf("its image chain could not be read and verified (for a disk the SSH user cannot read, "+
-			"allow passwordless sudo for qemu-img info; see docs/libvirt-clones.md): %v", err))
+		return refuse(fmt.Sprintf("its image chain could not be read and verified: %v", err),
+			"its image chain could not be read and verified (for a disk the SSH user cannot read, allow passwordless "+
+				"sudo for qemu-img info; see docs/libvirt-clones.md)")
 	}
 	if len(levels) == 0 {
-		return refuse("it does not exist")
+		return refuse("it does not exist", "its disk does not exist")
 	}
 	for _, l := range levels {
 		if l.dataFile != "" {
-			return refuse(fmt.Sprintf("%s has an external data file", l.path))
+			return refuse(fmt.Sprintf("%s has an external data file", l.path), "an image of its chain has an external data file")
 		}
 	}
 	return nil
@@ -339,54 +352,82 @@ const chainMemberScript = `if [ -L "$1" ]; then echo ` + chainMemberSymlink + `;
 // and owner uid of the directory, then the SSH user's uid.
 var dirModeOutputRE = regexp.MustCompile(`^[0-7]{3,4} [0-9]{1,10}\s+[0-9]{1,10}$`)
 
+// What a requester is told about an image or directory another account
+// could swap (copyRefusedError.wire): no host path.
+const (
+	wireChainImageUnchecked    = "an image of its chain could not be checked"
+	wireChainImageSymlink      = "an image of its chain is a symbolic link"
+	wireChainImageUnsafeDir    = "an image of its chain is in a directory other accounts can write"
+	wireOutputDirUnchecked     = "the directory it would be written to could not be checked"
+	wireOutputDirUnsafeForRoot = "the directory it would be written to can be written by other accounts"
+)
+
 // unsafeChainMemberReason says why root must not open path, an image of a
-// disk's chain on the host behind h, or "" when it may: path is a symbolic
-// link, or its directory is not safe (dirModeReason). Either would let an
-// account other than root and the SSH user swap the image root opens. A check
-// that fails or cannot be read is a reason too (fail closed); a host that
-// could not be reached is the error.
-func unsafeChainMemberReason(ctx context.Context, h hostCommandRunner, path string) (string, error) {
+// disk's chain on the host behind h — in full (reason, for the provider log)
+// and without naming a host path (wire) — or "" when it may: path is a
+// symbolic link, or its directory is not safe (dirModeReason). Either would
+// let an account other than root and the SSH user swap the image root opens.
+// A check that fails or cannot be read is a reason too (fail closed); a host
+// that could not be reached is the error.
+func unsafeChainMemberReason(ctx context.Context, h hostCommandRunner, path string) (reason, wire string, err error) {
 	dir := filepath.Dir(path)
 	res, err := runHost(ctx, h, "sh", "-c", chainMemberScript, "sh", path, dir)
 	if err != nil {
 		if isHostTransportFailure(err) || ctx.Err() != nil {
-			return "", err
+			return "", "", err
 		}
-		return fmt.Sprintf("%s and its directory could not be checked: %v", path, err), nil
+		return fmt.Sprintf("%s and its directory could not be checked: %v", path, err), wireChainImageUnchecked, nil
 	}
 	out := strings.TrimSpace(res.Stdout)
 	if out == chainMemberSymlink {
-		return fmt.Sprintf("%s is a symbolic link", path), nil
+		return fmt.Sprintf("%s is a symbolic link", path), wireChainImageSymlink, nil
 	}
-	return dirModeReason(dir, out), nil
+	reason, readable := dirModeReason(dir, out)
+	switch {
+	case reason == "":
+		return "", "", nil
+	case !readable:
+		return reason, wireChainImageUnchecked, nil
+	default:
+		return reason, wireChainImageUnsafeDir, nil
+	}
 }
 
 // unsafeHostDirReason says why root must not write below dir on the host
-// behind h (diskDirModeScript, dirModeReason), or "" when it may. A check
-// that fails is a reason too (fail closed); a host that could not be reached
-// is the error.
-func unsafeHostDirReason(ctx context.Context, h hostCommandRunner, dir string) (string, error) {
+// behind h (diskDirModeScript, dirModeReason) — in full and without a host
+// path — or "" when it may. A check that fails is a reason too (fail
+// closed); a host that could not be reached is the error.
+func unsafeHostDirReason(ctx context.Context, h hostCommandRunner, dir string) (reason, wire string, err error) {
 	res, err := runHost(ctx, h, "sh", "-c", diskDirModeScript, "sh", dir)
 	if err != nil {
 		if isHostTransportFailure(err) || ctx.Err() != nil {
-			return "", err
+			return "", "", err
 		}
-		return fmt.Sprintf("the permissions of %s could not be checked: %v", dir, err), nil
+		return fmt.Sprintf("the permissions of %s could not be checked: %v", dir, err), wireOutputDirUnchecked, nil
 	}
-	return dirModeReason(dir, strings.TrimSpace(res.Stdout)), nil
+	reason, readable := dirModeReason(dir, strings.TrimSpace(res.Stdout))
+	switch {
+	case reason == "":
+		return "", "", nil
+	case !readable:
+		return reason, wireOutputDirUnchecked, nil
+	default:
+		return reason, wireOutputDirUnsafeForRoot, nil
+	}
 }
 
 // dirModeReason reads diskDirModeScript's output for dir: "" when only root
 // and the SSH user can write dir, or it is sticky; otherwise why not
-// (unsafeDiskDirReason) — including output it cannot read.
-func dirModeReason(dir, out string) string {
+// (unsafeDiskDirReason). readable is false when the output could not be read
+// (which is a reason too).
+func dirModeReason(dir, out string) (reason string, readable bool) {
 	if !dirModeOutputRE.MatchString(out) {
-		return fmt.Sprintf("the permissions of %s could not be read", dir)
+		return fmt.Sprintf("the permissions of %s could not be read", dir), false
 	}
-	if reason := unsafeDiskDirReason(out); reason != "" {
-		return fmt.Sprintf("the directory %s %s and is not sticky", dir, reason)
+	if why := unsafeDiskDirReason(out); why != "" {
+		return fmt.Sprintf("the directory %s %s and is not sticky", dir, why), true
 	}
-	return ""
+	return "", true
 }
 
 // definitionDiskFormat returns the format domainXML opens the file-backed

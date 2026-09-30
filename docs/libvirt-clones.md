@@ -341,9 +341,11 @@ disk export — therefore run `qemu-img convert` through passwordless
   there. **Every such refusal ends the copy.** It is not retried as the SSH
   user, who reads every VM disk on the host through the `kvm` group: a chain
   another account could swap is no safer for that user than for root. A
-  refused clone or export fails with `FailedPrecondition`. A routed
-  (clustered) one also gets the `VM_OPERATION_FAILED` reason, with no host
-  path in the message (the details are in the provider log). The manager
+  refused clone or export fails with `FailedPrecondition`, and a routed
+  (clustered) one also gets the `VM_OPERATION_FAILED` reason. On either
+  kind of Provider the message says what kind of problem it is (for example
+  "an image of its chain is a symbolic link") but names no host path, file
+  or other VM; the provider log has the details. The manager
   never counts either toward its circuit breaker.
 - The copy's local output is created by the SSH user, under the copy's umask
   (`0137`: `0640` for a clone's disk; `0177`: `0600` for an export's staging

@@ -174,7 +174,8 @@ func TestSingleHost_Clone_OtherFormatIsRefusedBeforeAnyCopy(t *testing.T) {
 			st, ok := status.FromError(err)
 			require.True(t, ok, "got %v", err)
 			assert.Equal(t, codes.FailedPrecondition, st.Code())
-			assert.Contains(t, st.Message(), fmt.Sprintf("its format %q (from its domain definition) is not one a copy opens", format))
+			assert.Contains(t, st.Message(), fmt.Sprintf("its disk format %q is not qcow2 or raw", format))
+			assert.NotContains(t, st.Message(), "/var/lib", "no host path")
 			for _, c := range fx.calls() {
 				assert.NotContains(t, c, "qemu-img", "the disk is never opened, by anyone: %q", c)
 			}

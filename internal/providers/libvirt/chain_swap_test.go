@@ -64,52 +64,61 @@ func TestUnsafeChainMemberReason_RealShell(t *testing.T) {
 
 	private := mkdir(0o700)
 	disk := file(private)
-	reason, err := unsafeChainMemberReason(ctx, h, disk)
+	reason, wire, err := unsafeChainMemberReason(ctx, h, disk)
 	require.NoError(t, err)
 	assert.Empty(t, reason, "a regular file in a directory only the SSH user writes")
+	assert.Empty(t, wire)
 
 	link := filepath.Join(private, "link.qcow2")
 	require.NoError(t, os.Symlink(disk, link))
-	reason, err = unsafeChainMemberReason(ctx, h, link)
+	reason, wire, err = unsafeChainMemberReason(ctx, h, link)
 	require.NoError(t, err)
-	assert.Contains(t, reason, "is a symbolic link")
+	assert.Contains(t, reason, link+" is a symbolic link", "the provider log names the file")
+	assert.Equal(t, wireChainImageSymlink, wire, "the requester is told no path")
 
 	groupWritable := mkdir(0o770)
-	reason, err = unsafeChainMemberReason(ctx, h, file(groupWritable))
+	reason, wire, err = unsafeChainMemberReason(ctx, h, file(groupWritable))
 	require.NoError(t, err)
 	assert.Contains(t, reason, "is writable by its group and is not sticky")
-	reason, err = unsafeHostDirReason(ctx, h, groupWritable)
+	assert.Equal(t, wireChainImageUnsafeDir, wire)
+	reason, wire, err = unsafeHostDirReason(ctx, h, groupWritable)
 	require.NoError(t, err)
 	assert.Contains(t, reason, "is writable by its group and is not sticky")
+	assert.Equal(t, wireOutputDirUnsafeForRoot, wire)
 
 	sticky := mkdir(0o770 | os.ModeSticky)
-	reason, err = unsafeChainMemberReason(ctx, h, file(sticky))
+	reason, _, err = unsafeChainMemberReason(ctx, h, file(sticky))
 	require.NoError(t, err)
 	assert.Empty(t, reason, "a sticky directory: no one can swap another's file")
 
-	reason, err = unsafeHostDirReason(ctx, h, filepath.Join(private, "missing"))
+	reason, wire, err = unsafeHostDirReason(ctx, h, filepath.Join(private, "missing"))
 	require.NoError(t, err)
 	assert.Contains(t, reason, "could not be checked", "a check that fails refuses")
+	assert.Equal(t, wireOutputDirUnchecked, wire)
 }
 
 func TestDirModeReason(t *testing.T) {
-	for out, want := range map[string]string{
-		"755 0\n1001":     "",
-		"1777 0\n1001":    "",
-		"755 1001\n1001":  "",
-		"775 0\n1001":     "is writable by its group and is not sticky",
-		"757 0\n1001":     "is writable by every user and is not sticky",
-		"755 1002\n1001":  "is writable by its owner (uid 1002) and is not sticky",
-		"":                "could not be read",
-		"garbage":         "could not be read",
-		"755 0\n1001\nx":  "could not be read",
-		"755 0 1001 1002": "could not be read",
+	for out, want := range map[string]struct {
+		reason   string
+		readable bool
+	}{
+		"755 0\n1001":     {"", true},
+		"1777 0\n1001":    {"", true},
+		"755 1001\n1001":  {"", true},
+		"775 0\n1001":     {"is writable by its group and is not sticky", true},
+		"757 0\n1001":     {"is writable by every user and is not sticky", true},
+		"755 1002\n1001":  {"is writable by its owner (uid 1002) and is not sticky", true},
+		"":                {"could not be read", false},
+		"garbage":         {"could not be read", false},
+		"755 0\n1001\nx":  {"could not be read", false},
+		"755 0 1001 1002": {"could not be read", false},
 	} {
-		got := dirModeReason("/d", out)
-		if want == "" {
+		got, readable := dirModeReason("/d", out)
+		assert.Equal(t, want.readable, readable, "%q", out)
+		if want.reason == "" {
 			assert.Empty(t, got, "%q", out)
 		} else {
-			assert.Contains(t, got, want, "%q", out)
+			assert.Contains(t, got, want.reason, "%q", out)
 		}
 	}
 }
@@ -212,17 +221,17 @@ func TestSingleHost_Clone_SwappableSourceIsRefusedNotCopied(t *testing.T) {
 		"symbolic-link source": {
 			xml:    scdDomainXML(scdDomain, scdDomainOpts{}),
 			script: "symlink-" + filepath.Base(scdDiskPath),
-			want:   "is a symbolic link",
+			want:   wireChainImageSymlink,
 		},
 		"group-writable source directory": {
 			xml:    scdDomainXML(scdDomain, scdDomainOpts{}),
 			script: "unsafe-dir-images",
-			want:   "is writable by its group and is not sticky",
+			want:   wireChainImageUnsafeDir,
 		},
 		"group-writable output directory": {
 			xml:    strings.Replace(scdDomainXML(scdDomain, scdDomainOpts{}), scdDiskPath, scdAltDiskPath, 1),
 			script: "unsafe-dir-images",
-			want:   "the directory /var/lib/libvirt/images is writable by its group and is not sticky; root does not write there",
+			want:   wireOutputDirUnsafeForRoot,
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -232,7 +241,9 @@ func TestSingleHost_Clone_SwappableSourceIsRefusedNotCopied(t *testing.T) {
 			st, ok := status.FromError(err)
 			require.True(t, ok, "got %v", err)
 			assert.Equal(t, codes.FailedPrecondition, st.Code(), "got %v", err)
-			assert.Contains(t, st.Message(), tc.want)
+			assert.Contains(t, st.Message(), copyRefusedWire+": "+tc.want)
+			assert.NotContains(t, st.Message(), "/var/lib", "no host path, even on a single host")
+			assert.NotContains(t, st.Message(), "/srv", "no host path, even on a single host")
 			for _, c := range fx.calls() {
 				assert.NotContains(t, c, "qemu-img convert", "nothing is copied, by root or the SSH user: %q", c)
 			}

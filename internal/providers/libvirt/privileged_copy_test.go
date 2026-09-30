@@ -559,7 +559,8 @@ esac
 	st, ok := status.FromError(err)
 	require.True(t, ok, "got %v", err)
 	assert.Equal(t, codes.FailedPrecondition, st.Code())
-	assert.Contains(t, st.Message(), "without its format")
+	assert.Contains(t, st.Message(), "its image chain names a backing file without its format")
+	assert.NotContains(t, st.Message(), "/p/base", "the backing file is named in the provider log only")
 	for _, c := range fx.calls() {
 		assert.NotContains(t, c, "qemu-img convert", "nothing is copied, by anyone: %q", c)
 	}

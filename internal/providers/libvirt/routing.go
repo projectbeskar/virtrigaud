@@ -454,7 +454,7 @@ func routedRPCError(op string, err error) error {
 	var cr *copyRefusedError
 	if stderrors.As(err, &cr) {
 		log.Printf("WARN %s refused: %v", op, cr)
-		return vmOperationStatus(codes.FailedPrecondition, fmt.Sprintf("failed to %s: %s", op, copyRefusedWire))
+		return vmOperationStatus(codes.FailedPrecondition, fmt.Sprintf("failed to %s: %s", op, cr.Error()))
 	}
 	var roe *routedOpError
 	if stderrors.As(err, &roe) {
