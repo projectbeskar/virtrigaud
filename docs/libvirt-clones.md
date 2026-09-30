@@ -20,7 +20,11 @@ host and serve full clones only (see
 A clone is named `<target namespace>.<target name>` on the host, with the disk
 `<pool directory>/<domain>-disk.qcow2`, and is left powered off. The copy
 flattens the source's whole image chain, so the clone of a VM with external
-snapshots is one standalone disk, with none of the source's snapshots.
+snapshots is one standalone disk, with none of the source's snapshots. The
+clone's disk is always **qcow2**, whatever the source's format, and the
+clone's definition declares it so (`<driver type='qcow2'>`): a raw source's
+clone is a qcow2 disk (its clone used to keep `type='raw'` over the qcow2
+copy and did not boot).
 
 ## A full clone needs a powered-off source
 
@@ -237,7 +241,7 @@ clone of the vanished VM keeps its backing file. Nothing else is looked for.
   never its target's. It used to be world-writable (`0777`). The provider's SSH
   user reads VM disks (disk in-use checks, `GetDiskInfo`, s3/nfs disk export, a
   full clone's copy) as a member of the `kvm` group, or as `root`; the in-use
-  check also uses passwordless `sudo -n qemu-img info -U` where the host
+  check and `GetDiskInfo` (for the VM's own disk) also use passwordless `sudo -n qemu-img info -U` where the host
   allows it, and a full clone's copy and the s3/nfs export's flatten run
   `qemu-img convert` through passwordless `sudo -n` where the host allows it
   (see [What the copies run as root](#what-the-copies-run-as-root)) — which
@@ -325,7 +329,7 @@ random part `mktemp` picks):
 
 | Copy | Command `sudo -n` runs |
 |---|---|
-| Chain read (all copies; unchanged rule) | `qemu-img info -U [-f <format>] --output=json -- <image>` |
+| Chain read (all copies) and `GetDiskInfo`'s size read of a VM's own disk (unchanged rule) | `qemu-img info -U [-f <format>] --output=json [--] <image>` |
 | Full clone, single-host | `qemu-img convert -f <qcow2\|raw> -O qcow2 <source disk> <pool dir>/.virtrigaud-write-XXXXXXXXXX/<clone domain>-disk.qcow2` |
 | Full clone, clustered | `timeout --kill-after=10s <N>s qemu-img convert -f <qcow2\|raw> -O qcow2 <source disk> <pool dir>/.virtrigaud-write-XXXXXXXXXX/<clone domain>-disk.qcow2` |
 | s3 export | `[timeout --kill-after=10s <N>s] qemu-img convert -U -f qcow2 -O qcow2 <source disk> <source dir>/.virtrigaud-write-XXXXXXXXXX/.virtrigaud-export-<vm>.qcow2` |

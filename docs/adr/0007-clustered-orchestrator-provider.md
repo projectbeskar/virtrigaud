@@ -1464,6 +1464,16 @@ follows; A2's `pendingHost` is its prerequisite.
 >   excludes, and added a regression test over a real gRPC hop to pin it. No
 >   mapping change was needed — the failure mode was already handled
 >   correctly; only the coverage was missing.
+> - **Follow-ups found while fixing B1–B3, fixed in the same PR:** a clone of
+>   a raw-typed source kept `<driver type='raw'>` over its qcow2 copy (the
+>   clone's disk is now always declared qcow2); a routed clone whose host
+>   failed a read **before** the copy (owner check, `domstate`, `dumpxml`,
+>   pool) was answered `Unknown` and failed the `VMClone` — it is now
+>   `Unavailable` + `VM_OPERATION_FAILED` and retried with a backoff, while
+>   real refusals and failures after the copy started stay terminal; and
+>   `GetDiskInfo` reported 0 sizes for a 0600 snapshot overlay — it now reads
+>   a VM's own disk through the same `sudo -n qemu-img info -U` rule as the
+>   in-use check.
 >
 > **Recommendation, not a decision.** This lab run covers the full
 > single-host lifecycle and the A6 restore scenarios one host can run, and closes B1–B3. It

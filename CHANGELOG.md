@@ -5,6 +5,31 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-09-30 16:06] - ADR-0007 Slice 5 follow-ups: qcow2 clone definition for raw sources, routed clone read failures retried, GetDiskInfo overlay sizes
+**Author:** @wrkode (William Rizzo)
+
+> **Operator note.** libvirt only. Clones of raw-typed sources now boot (existing broken ones: set the disk's `<driver type='qcow2'/>` with `virsh edit`). A clustered clone whose host fails a read before copying waits and retries instead of failing. An export of a snapshotted VM reports its disk sizes when the documented `sudo -n qemu-img info -U` rule is in place.
+
+### Fixed
+- `internal/providers/libvirt/clone_disk_format.go`, `clone.go`: a clone's primary disk is declared `<driver type='qcow2'>`, the format every clone disk is written in (`convert -O qcow2`; the disabled linked overlay is qcow2 too), single-host and clustered. A raw-typed source's clone used to keep `type='raw'` over the qcow2 copy and did not boot. `setDiskDriverType` splices only that one tag (added when absent; a driver already qcow2 is byte-identical). qcow2 for every source, not raw output for a raw source: the SSH-user fallback copy probes the source format and cannot know it, the disk is named `.qcow2`, and every other VM disk VirtRigaud creates is qcow2.
+- `internal/providers/libvirt/clone_clustered.go`: a routed clone that failed a read on its host before the copy started was `Unknown` + `VM_OPERATION_FAILED`, which failed the VMClone and removed its target. Examples: the owner check, `domstate`, `dumpxml`, the pool. `cloneBeforeCopyFailure` now answers such a failure `Unavailable` + `VM_OPERATION_FAILED`: retried, never counted toward the breaker, with only the operation and host on the wire. Real refusals, categorized answers (source running, previous incarnation, disk in use or check failed, domain busy, budget), `HOST_UNAVAILABLE`, and any failure after the copy started are unchanged. The host-lock name refusal is now `InvalidSpec`.
+- `internal/controller/vmclone_clustered.go`: a retryable clustered clone answer is retried with the blocked-VM backoff (15 s doubling to 5 min, from when the target's placement was recorded) instead of every 30 s; the target and its pending host are kept.
+- `internal/providers/libvirt/privileged_copy.go`, `provider_virsh.go`: `GetDiskInfo` reads a disk named by the domain's own definition through the in-use check's path: `checkChainFileKind`, then `sudo -n qemu-img info -U`, falling back to the SSH user when sudo refuses. A snapshotted VM's 0600 overlay no longer reports 0 sizes during an export. A path the caller names that is not one of the domain's disks is still read as the SSH user only.
+
+### Changed
+- `internal/providers/libvirt/testdata/single_host_snapshot_clone_disk.golden.json`: regenerated in its own commit, calls only. Changed: diskinfo-primary, diskinfo-non-path-disk-id, diskinfo-qemu-img-fails, diskinfo-snapshot-list-fails, diskinfo-ignores-target-host, export-pvc-compressed, export-pvc-no-conversion, export-pvc-unsupported-format, export-pvc-ignores-target-host. The raw-source fix did not change the golden (its source is qcow2).
+- Tests: `TestSetDiskDriverType`, `TestRewriteDomainXMLForClone_RawSourceBecomesQcow2`, `TestSingleHost_Clone_RawSourceIsDefinedAsQcow2`, `TestClustered_Clone_RawSourceIsDefinedAsQcow2`, `TestClustered_Clone_TransientReadBeforeTheCopyIsRetryable`, `TestClustered_Clone_RefusalsBeforeTheCopyStayTerminal`, `TestCloneBeforeCopyFailure`, `TestClustered_CloneTransientReadOverGRPC_IsRetryableAndNeverCounts`, `TestVMClone_Clustered_TransientReadBeforeTheCopyWaitsWithBackoff`, `TestSingleHost_GetDiskInfo_SnapshotOverlaySizesAreReadAsRoot`, `TestSingleHost_GetDiskInfo_SudoRefusedReadsAsBefore`, `TestSingleHost_GetDiskInfo_CallerPathIsNeverReadAsRoot`, `TestClustered_GetDiskInfo_SnapshotOverlaySizesAreReadAsRoot`.
+- Docs: `docs/libvirt-clones.md`, `docs/upgrading.md`, `docs/clustered-provider-inventory.md`, and the ADR-0007 Slice 5 amendment.
+
+### Why
+Three items the Slice 5 fix report listed as found but not changed; fixed before security review.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-09-30 13:44] - ADR-0007 Slice 5 lab fixes: libvirt clone/export of a snapshotted VM, clone of a running source, routed clone errors; clustered docs
 **Author:** @wrkode (William Rizzo)
 

@@ -268,7 +268,19 @@ See [`docs/clustered-provider-inventory.md`](clustered-provider-inventory.md) an
   (whose active disk is libvirt's `0600 libvirt-qemu` overlay) now works when
   the host allows those copies in sudoers; otherwise it fails as before. The
   s3 export's staging file moved into a private `.virtrigaud-write-*`
-  directory next to the source disk.
+  directory next to the source disk. `GetDiskInfo` reads the sizes of a VM's
+  own disk through the same `sudo -n qemu-img info -U` rule as the in-use
+  check, so an export of a snapshotted VM no longer reports 0 sizes.
+- **A libvirt clone's disk is declared qcow2** (`<driver type='qcow2'>`), the
+  format it is always written in: the clone of a raw-typed source used to
+  keep `type='raw'` and did not boot. Clones made earlier from raw sources
+  keep their definition; fix one with `virsh edit` (set the disk's
+  `<driver type='qcow2'/>`).
+- **A clustered clone whose host fails a read before copying anything is
+  retried** (`Pending`, `CloneRetrying`, backoff 15 s to 5 min, never counted
+  toward the circuit breaker) instead of failing and removing its target; a
+  retryable clustered clone answer now backs off instead of retrying every
+  30 s.
 
 ## Post-upgrade verification checklist
 

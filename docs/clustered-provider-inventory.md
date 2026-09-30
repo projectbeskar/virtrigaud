@@ -1422,8 +1422,16 @@ for a clustered provider.
     5 minutes, never failed) until an
     administrator re-attaches or removes that domain. An
     unreachable host keeps the pending host, and the clone is retried on the
-    same host (`HostUnavailable`, every 30 s). Any other failure fails the
-    clone (terminal `Failed`).
+    same host (`HostUnavailable`). So is a clone whose host answered a read
+    with an error **before** anything was copied — the owner check, the
+    source's state or definition, the pool (`Unavailable` +
+    `VM_OPERATION_FAILED`, reason `CloneRetrying`) — and a clone whose earlier
+    attempt's copy still runs; all of these are re-checked with a backoff from
+    15 s doubling to 5 minutes, and never counted toward the circuit breaker.
+    A source that is not powered off waits (`SourceMustBePoweredOff`, see
+    [`docs/libvirt-clones.md`](libvirt-clones.md#a-full-clone-needs-a-powered-off-source)).
+    A real refusal (an invalid request, a source the VM does not own) and a
+    failure once the copy has started fail the clone (terminal `Failed`).
   - **A clone that fails for good removes the target VirtualMachine it
     created** (event `TargetRemoved` on the VMClone). The target's finalizer
     then runs the owner-checked Delete on its pending host, which removes a
