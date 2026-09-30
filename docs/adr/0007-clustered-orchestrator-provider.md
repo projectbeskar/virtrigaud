@@ -26,8 +26,9 @@ implemented; see the A6.2 amendment under A6.
 open.** A real single-`Host` lab run exercised the upgrade path, schedule and
 bind, the owner stamp, every disk mode, `<pm>`, an honest resize, power, a
 routed snapshot create and delete, a linked-clone refusal, a full clone of a
-stopped source, a failed clone's cleanup, and all six of A6's restore
-scenarios — and found three bugs, addressed in the same PR (B1: a clone or
+stopped source, a failed clone's cleanup, A6's restore scenarios that one
+host can run (not the unreachable-host check), and the base-image guard —
+and found three bugs, addressed in the same PR (B1: a clone or
 export of a snapshotted VM could not read libvirt's 0600 overlay; B2: a clone
 of a running source failed on qemu's image lock; B3: a routed clone failure
 surfaced as gRPC `Unknown`, verified to stay out of the circuit breaker and
@@ -1418,11 +1419,11 @@ follows; A2's `pendingHost` is its prerequisite.
 > `ShrinkPendingPowerOff`; power; a routed snapshot create and delete with a
 > request token; a linked-clone refusal; a full clone of a stopped source
 > (the target stamped with its own UID, its own cloud-init seed, and counted
-> against its own host); removal of a failed clone's target; and A6's six
-> restore scenarios — a re-applied manifest held, the re-attach runbook, an
-> orphan-then-same-name re-create held, discard-then-fresh-create,
-> restore-with-status held then re-attached, and the base-image guard
-> refusing to let another VM read a live disk it does not own.
+> against its own host); removal of a failed clone's target; A6's restore
+> scenarios — a re-applied manifest held, the re-attach runbook, an
+> orphan-then-same-name re-create held, discard-then-fresh-create, and
+> restore-with-status held then re-attached; and the base-image guard
+> refusing another VM's live disk as a base image.
 >
 > **Not validated — a single-`Host` lab cannot exercise it:** multi-host
 > paths (placement across more than one candidate, host (anti-)affinity,
@@ -1465,7 +1466,7 @@ follows; A2's `pendingHost` is its prerequisite.
 >   correctly; only the coverage was missing.
 >
 > **Recommendation, not a decision.** This lab run covers the full
-> single-host lifecycle and every A6 restore scenario, and closes B1–B3. It
+> single-host lifecycle and the A6 restore scenarios one host can run, and closes B1–B3. It
 > does not touch multi-host placement, the unreachable-host path, or
 > snapshot revert. This amendment **recommends** — it does not decide — that
 > `topology: cluster` stay experimental until a multi-host lab run covers
