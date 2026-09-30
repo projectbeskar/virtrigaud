@@ -5,6 +5,42 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-09-30 13:44] - ADR-0007 Slice 5 lab fixes: libvirt clone/export of a snapshotted VM, clone of a running source, routed clone errors; clustered docs
+**Author:** @wrkode (William Rizzo)
+
+> **Operator note.** libvirt only, single-host and clustered. A `VMClone` of a running libvirt VM now **waits** (`Pending`, `Ready=False/SourceMustBePoweredOff`) until the source is powered off, instead of failing; roll the manager with the libvirt provider. To clone or export a VM that has an external snapshot, allow the exact `qemu-img convert` copies in sudoers ([`docs/libvirt-clones.md`](docs/libvirt-clones.md#what-the-copies-run-as-root), sudo 1.9.10+ regex rules; never `qemu-img *`); without that rule nothing changes. A clustered VM is placed only on a `Host` labelled `net.virtrigaud.io/<network>: "true"` for each libvirt network it uses (`Host.spec.labels`).
+
+### Added
+- `internal/providers/contracts/errors.go`: ErrorInfo reason `VM_SOURCE_RUNNING`, `ErrVMSourceRunning`, `IsVMSourceRunning`.
+- `internal/transport/grpc/client.go`: `FailedPrecondition` + `VM_SOURCE_RUNNING` maps to a retryable error marked `ErrVMSourceRunning`; `FailedPrecondition` never counts toward the circuit breaker.
+- `internal/providers/libvirt/clone_source_state.go`: a full clone (single-host and clustered) reads the source's state before anything is copied and refuses any state but shut off with `FailedPrecondition` + `VM_SOURCE_RUNNING` (+ `VM_OPERATION_FAILED` when routed). A clustered clone already done for its target is still reported as done.
+- `internal/providers/libvirt/privileged_copy.go`: the full clone's copy and the s3/nfs export's flatten run `qemu-img convert` through `sudo -n`. The source format is pinned from its definition (`-f`), and its chain is verified one image at a time first (local regular files, every backing format named). The SSH user creates the output under the copy's umask in the private write directory before root writes into it. On a clustered host the flock stays outside sudo and `timeout(1)` runs inside it. The nfs export keeps the SSH user's libnfs `uid`/`gid`. When sudo refuses, the historical SSH-user command runs.
+- `internal/controller/vmclone_source_power.go`: a clone refused with `VM_SOURCE_RUNNING` stays `Pending` (`Ready`/`Cloning=False`, reason `SourceMustBePoweredOff`, one `Warning` event) with the blocked-VM backoff (15 s doubling to 5 min). It is re-driven when the source VM's `status.powerState` changes. A clustered clone keeps its target and pending host.
+- `examples/host-libvirt-clustered-first-vm.yaml`: a `Host` labelled for libvirt's `default` network, next to its `VMNetworkAttachment`.
+- Tests: `TestSingleHost_Clone_SnapshotOverlaySourceIsCopiedAsRoot`, `TestSingleHost_Clone_SudoRefusedRunsTheHistoricalCopy`, `TestSingleHost_Clone_RunningSourceIsRefusedBeforeAnyCopy`, `TestClustered_Clone_SnapshotOverlaySourceIsCopiedAsRoot`, `TestClustered_Clone_SudoRefusedFailsTheOverlayCopyOutsideTheBreaker`, `TestClustered_Clone_RunningSourceIsRefusedBeforeAnyCopy`, `TestClustered_Clone_DoneCloneIsReportedWhateverTheSourceState`, `TestClustered_Export_SnapshotOverlaySourceIsReadAsRoot`, `TestClustered_CloneFailureOverGRPC_NeverCountsTowardTheBreaker`, `TestClustered_CloneOfRunningSourceOverGRPC_IsMarkedAndNeverCounts`, `TestVMClone_SingleHost_SourceRunningWaitsThenProceeds`, `TestVMClone_Clustered_SourceRunningKeepsTheTargetAndProceeds`, `TestHoldCloneForRunningSource_Backoff`, `TestClonesWaitingOnSource`, `TestMapGRPCError_SourceRunningIsRetryableAndMarked`, `TestCircuitBreaker_RepeatedSourceRunningRefusalsDoNotTrip`, and unit tests for the chain check, the format, the NFS identity and the privileged argv.
+
+### Changed
+- `internal/providers/libvirt/s3export.go`: the s3 export's staging file is `.virtrigaud-export-<vm>.qcow2` inside a private `.virtrigaud-write-*` directory next to the source disk (was a `mktemp` file directly in it), removed with the directory.
+- `internal/providers/libvirt/routed_budget.go`: `hostCmdGuard` is a struct with `apply` and `applyPrivileged`. `hostCommandTimeout` is split out of `guardedHostCommand`, unchanged.
+- `internal/providers/libvirt/imagepath.go`: the chain walk can pin the disk's own format (`walkBackingChainFrom`) and records each image's opened format.
+- `internal/controller/vmclone_controller.go`: the VMClone controller watches VirtualMachines, filtered to observed power-state changes.
+- `internal/providers/libvirt/testdata/single_host_snapshot_clone_disk.golden.json`: regenerated in its own commit. Only the clone copy's command sequence changed (clone-full, clone-class-override, clone-customize-json-not-applied, clone-define-fails, clone-ignores-source-host, clone-legacy-target-name, clone-strips-source-owner-stamp, clone-uefi-nvram, clone-copy-fails). `clone-source-running` and `clone-copy-sudo-refused` were added. `single_host_power_reconfigure` and `single_host_listvms` are byte-identical.
+- Docs: `docs/libvirt-clones.md` (powered-off source; what the copies run as root, the sudo command table and a regex-confined sudoers snippet), `docs/upgrading.md`, `docs/clustered-provider-inventory.md` (network labels in setup, a First VM checklist, Troubleshooting), `docs/clustered-restore.md` (every `virsh` names `-c "$CONN"`), ADR-0007 (header, A5 status, the dated *Slice 5 (lab, 2026-09-30)* amendment, D6 labels), `examples/hostpool-clustered.yaml`, `examples/README.md`.
+
+### Fixed
+- B1 — `internal/providers/libvirt/clone.go`, `clone_clustered.go`, `s3export.go`, `nfs.go`: a full clone and an s3/nfs export of a VM with an external (disk-only) snapshot failed with "Permission denied". The VM's active disk is libvirt's `0600 libvirt-qemu` overlay, which the SSH user cannot read. The copy is now read as root (above) when sudo allows it.
+- B2 — `internal/providers/libvirt/clone.go`, `clone_clustered.go`, `internal/controller/vmclone_controller.go`, `vmclone_clustered.go`: a full clone of a running source failed with qemu's `Failed to get shared "write" lock` and failed the VMClone. It is now refused before any copy, and the VMClone waits for the source to be powered off.
+- B3 — no code change: a routed clone failure (`code = Unknown`, "failed to clone VM on host ...") carries `VM_OPERATION_FAILED`, which the breaker excludes. This is now pinned over a real gRPC hop.
+
+### Why
+The Slice 5 end-to-end run of ADR-0007 on the real lab host found B1–B3 and the undocumented network-label requirement. Maintainer decision (William Rizzo): a libvirt full clone requires a powered-off source, never `qemu-img -U`.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout
+- [x] Config change only
+- [ ] Documentation only
+
 ## [2026-09-29 15:50] - ADR-0007 A6.2 security-review follow-ups: re-attach sizing and assumption, held deletes, clone-target check, bounded R4, runbook hardening
 **Author:** @wrkode (William Rizzo)
 

@@ -243,6 +243,18 @@ providers), and rollback caveats in
   with no `status.creationTime`; the
   [upgrade guide](docs/upgrading.md#post-upgrade-verification-checklist) has a
   query to list them.
+- libvirt clones (single-host and clustered): a full clone needs a
+  **powered-off source**. A `VMClone` of a running libvirt VM used to fail on
+  qemu's image lock; it now waits (`Pending`, `Ready=False/SourceMustBePoweredOff`,
+  never counted by the circuit breaker) and proceeds once the source is off.
+  A full clone, or an s3/nfs export, of a VM with an external snapshot (whose
+  active disk is libvirt's `0600` overlay) used to fail with "Permission
+  denied"; the copy now reads the source through `sudo -n` when the host
+  allows it, with a regex-confined sudoers rule
+  (→ [`docs/libvirt-clones.md`](docs/libvirt-clones.md#what-the-copies-run-as-root)).
+  A clustered VM is placed only on a `Host` labelled
+  `net.virtrigaud.io/<network>: "true"` for each libvirt network it uses
+  (→ [`docs/clustered-provider-inventory.md`](docs/clustered-provider-inventory.md#first-vm-checklist)).
 - Provider SDK: the `sdk/provider/client` RPC methods (`Create`, `Describe`,
   `TaskStatus` and the others) return a nil error on success again. Before, a
   successful call returned a non-nil error that printed as `<nil>`, and
