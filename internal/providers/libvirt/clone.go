@@ -534,7 +534,9 @@ func refuseNVRAMInUseOnHost(ctx context.Context, h hostCommandRunner, domainName
 //     unicast address (so the clone gets new NICs on the same L2 segment).
 //   - the primary disk <source file='<srcDiskPath>'/> is re-pointed at
 //     targetDiskPath (the cloned/overlay volume). Only the matching source path
-//     is rewritten, so a cloud-init CD-ROM source is left untouched.
+//     is rewritten, so a cloud-init CD-ROM source is left untouched. That
+//     disk's <driver type> is set to qcow2, the format every clone disk is
+//     written in (setDiskDriverType): a raw source's clone is not raw.
 //   - for a UEFI source, the per-VM <nvram>...</nvram> varstore path is
 //     re-pointed to a fresh per-clone path derived from the SOURCE varstore's
 //     directory and the target name (issue #208). The returned srcNvramPath /
@@ -594,6 +596,11 @@ func rewriteDomainXMLForClone(sourceXML, targetName, srcDiskPath, targetDiskPath
 			return "", "", "", fmt.Errorf("primary disk source %q not found in source domain XML", srcDiskPath)
 		}
 		out = replaced
+		// The clone's disk is always written as qcow2 (clone_disk_format.go):
+		// declare it so, whatever the source's format was.
+		if out, err = setDiskDriverType(out, targetDiskPath, cloneDiskFormat); err != nil {
+			return "", "", "", fmt.Errorf("declare the clone disk's format: %w", err)
+		}
 	}
 
 	// Re-point the per-VM UEFI <nvram> varstore (issue #208). On a UEFI source
