@@ -953,8 +953,9 @@ func (r *VirtualMachineReconciler) handleDeletion(ctx context.Context, vm *infra
 					metrics.RecordError(errReasonProviderDelete, metrics.ComponentManager)
 					// A hold recorded earlier no longer says why the delete
 					// waits: neither a DeleteBlocked (A6.1 fix verification,
-					// N8) nor a single-host VM's Ready=False/
-					// ProviderUnavailable — the provider has answered.
+					// N8) nor the Ready=False/DeleteBlocked or
+					// ProviderUnavailable that went with it — the provider
+					// has answered. Ready says ProviderError instead.
 					if clearStaleDeleteHold(vm) {
 						r.updateStatus(ctx, vm)
 					}
@@ -1128,11 +1129,13 @@ func (r *VirtualMachineReconciler) retainForUnavailableProvider(
 	return ctrl.Result{RequeueAfter: retry}, true
 }
 
-// providerDeleteFailedMessage is the Ready message that replaces a single-host
-// VM's Ready=False/ProviderUnavailable once its Provider answers but the
-// Delete fails (clearStaleDeleteHold). It is constant: the delete is retried
-// every vmDeleteRetryInterval, and a VM being deleted is reconciled on every
-// update of it. The provider's answer is in the manager log.
+// providerDeleteFailedMessage is the Ready message that replaces an earlier
+// delete hold's Ready (a single-host Ready=False/ProviderUnavailable or
+// DeleteBlocked, a clustered Ready=False/DeleteBlocked) once the Provider
+// answers but its Delete fails for an ordinary reason (clearStaleDeleteHold).
+// It is constant: the delete is retried every vmDeleteRetryInterval, and a VM
+// being deleted is reconciled on every update of it. The provider's answer is
+// in the manager log.
 var providerDeleteFailedMessage = fmt.Sprintf("Delete in progress: the provider did not delete the hypervisor VM, so the "+
 	"finalizer is kept and the delete is retried every %s (the manager log has the provider's answer). To release the "+
 	"VirtualMachine without deleting the hypervisor VM, set %s=true (or %s=true); the hypervisor VM and its disks are "+
@@ -1141,23 +1144,28 @@ var providerDeleteFailedMessage = fmt.Sprintf("Delete in progress: the provider 
 
 // clearStaleDeleteHold removes, from a VM whose provider Delete has just failed
 // for an ordinary reason, a hold that no longer says why the delete waits: a
-// DeleteBlocked condition (A6.1 fix verification, N8), and a single-host VM's
-// Ready=False/ProviderUnavailable, which becomes Ready=False/ProviderError
-// with providerDeleteFailedMessage. It reports whether the status changed; a
-// repeated failure changes nothing.
+// clustered VM's DeleteBlocked condition (A6.1 fix verification, N8), and the
+// Ready=False that went with any earlier hold — reason DeleteBlocked (every
+// clustered hold, and a single-host DiskInUse refusal) or ProviderUnavailable
+// (a single-host VM whose Provider could not be reached). Ready then becomes
+// Ready=False/ProviderError with the constant providerDeleteFailedMessage. It
+// reports whether the status changed; a repeated failure changes nothing, so
+// it is never rewritten (and never re-triggers the deleting VM) per retry.
 func clearStaleDeleteHold(vm *infravirtrigaudiov1beta1.VirtualMachine) bool {
 	changed := meta.RemoveStatusCondition(&vm.Status.Conditions, k8s.ConditionDeleteBlocked)
-	if c := meta.FindStatusCondition(vm.Status.Conditions, k8s.ConditionReady); c != nil && c.Reason == k8s.ReasonProviderUnavailable {
-		meta.SetStatusCondition(&vm.Status.Conditions, metav1.Condition{
-			Type:               k8s.ConditionReady,
-			Status:             metav1.ConditionFalse,
-			Reason:             k8s.ReasonProviderError,
-			Message:            providerDeleteFailedMessage,
-			ObservedGeneration: vm.Generation,
-		})
-		changed = true
+	c := meta.FindStatusCondition(vm.Status.Conditions, k8s.ConditionReady)
+	staleReady := c != nil && (c.Reason == k8s.ReasonDeleteBlocked || c.Reason == k8s.ReasonProviderUnavailable)
+	if !changed && !staleReady {
+		return false
 	}
-	return changed
+	meta.SetStatusCondition(&vm.Status.Conditions, metav1.Condition{
+		Type:               k8s.ConditionReady,
+		Status:             metav1.ConditionFalse,
+		Reason:             k8s.ReasonProviderError,
+		Message:            providerDeleteFailedMessage,
+		ObservedGeneration: vm.Generation,
+	})
+	return true
 }
 
 // removeFinalizer removes the VirtualMachine finalizer, completing deletion.

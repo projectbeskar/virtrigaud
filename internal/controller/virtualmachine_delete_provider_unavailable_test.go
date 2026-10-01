@@ -347,3 +347,45 @@ func TestHandleDeletion_ProviderUnavailable_ThenDeleteFails(t *testing.T) {
 	require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(vm), &again))
 	assert.Equal(t, failed.ResourceVersion, again.ResourceVersion, "a repeated ordinary failure writes nothing")
 }
+
+// TestHandleDeletion_Clustered_ProviderUnavailableThenDeleteFails: a clustered
+// VM held as ProviderUnavailable whose Provider then answers but fails the
+// Delete for an ordinary reason loses the stale hold entirely — DeleteBlocked
+// is removed and Ready=False/DeleteBlocked becomes Ready=False/ProviderError
+// with the constant message — and a repeated failure writes nothing.
+func TestHandleDeletion_Clustered_ProviderUnavailableThenDeleteFails(t *testing.T) {
+	ctx := context.Background()
+	prov := &routingProvider{deleteErr: stderrors.New("delete: the hypervisor said no")}
+	r := clusteredFixture(t, prov, boundClusterVMForDelete())
+	resolver := &switchableResolver{provider: prov, err: errValidateFailed}
+	r.RemoteResolver = resolver
+
+	_, err := r.handleDeletion(ctx, deletingClusterVM(t, r, "web"))
+	require.NoError(t, err)
+	held := getVM(t, r, "web")
+	require.NotNil(t, meta.FindStatusCondition(held.Status.Conditions, k8s.ConditionDeleteBlocked))
+	require.Equal(t, k8s.ReasonDeleteBlocked, meta.FindStatusCondition(held.Status.Conditions, k8s.ConditionReady).Reason)
+
+	resolver.err = nil
+	res, err := r.handleDeletion(ctx, held)
+	require.NoError(t, err)
+	assert.Equal(t, vmDeleteRetryInterval, res.RequeueAfter)
+	require.Len(t, prov.deleteRefs, 1, "the Delete was sent once the Provider answered")
+
+	failed := getVM(t, r, "web")
+	assert.Contains(t, failed.Finalizers, infravirtrigaudiov1beta1.VirtualMachineFinalizer)
+	assert.Nil(t, meta.FindStatusCondition(failed.Status.Conditions, k8s.ConditionDeleteBlocked),
+		"DeleteBlocked no longer applies")
+	ready := meta.FindStatusCondition(failed.Status.Conditions, k8s.ConditionReady)
+	require.NotNil(t, ready)
+	assert.Equal(t, metav1.ConditionFalse, ready.Status)
+	assert.Equal(t, k8s.ReasonProviderError, ready.Reason, "Ready no longer carries the old hold")
+	assert.Equal(t, providerDeleteFailedMessage, ready.Message)
+	assert.Equal(t, failed.Generation, ready.ObservedGeneration)
+
+	_, err = r.handleDeletion(ctx, failed.DeepCopy())
+	require.NoError(t, err)
+	assert.Len(t, prov.deleteRefs, 2)
+	again := getVM(t, r, "web")
+	assert.Equal(t, failed.ResourceVersion, again.ResourceVersion, "a repeated ordinary failure writes nothing")
+}

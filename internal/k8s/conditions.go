@@ -234,10 +234,10 @@ const (
 // (ADR-0007 A6.1), or because the manager could not reach its Provider at all.
 // Its reason says why (ReasonHostUnreachable, ReasonDiskCheckFailed,
 // ReasonOwnDomainOnAnotherHost, ReasonDiskInUse, ReasonProviderUnavailable);
-// it is removed when a later delete attempt fails for another reason. Ready is
-// False with ReasonDeleteBlocked meanwhile. Its LastTransitionTime is when the
-// hold began, which paces the retries (15 s doubling to 5 min). Its message
-// never names a host.
+// it is removed when a later delete attempt fails for another reason (Ready
+// then says ReasonProviderError). Ready is False with ReasonDeleteBlocked
+// meanwhile. Its LastTransitionTime is when the hold began, which paces the
+// retries (15 s doubling to 5 min). Its message never names a host.
 const ConditionDeleteBlocked = "DeleteBlocked"
 
 // DeleteBlocked condition reasons (ADR-0007 A6.1).
