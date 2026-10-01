@@ -24,7 +24,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     - VMSnapshot after a create ends: Ready re-checks after `snapshotRetentionCheckInterval` (1 h, the retention check), and a failed create task after `snapshotFailedRecheckInterval` (5 min).
   - **Never a provider create from a stale read:**
     - right before `SnapshotCreate`, `confirmSnapshotNotCreated` re-reads the VMSnapshot through the uncached APIReader (now wired in `cmd/manager`);
-    - right before the Clone RPC, `confirmCloneNotStarted` does the same for the VMClone, single-host and clustered.
+    - right before the Clone RPC, `confirmCloneNotStarted` does the same for the VMClone, single-host and clustered; on a clustered Provider also before the target VirtualMachine is created.
 
     Nothing is sent unless the live object has the same UID and resourceVersion and records no create (a VMClone: phase empty or Pending, no target VM ID or task). A stale read retries after 2 s. Without this, a requeue that read the cache before it showed a synchronous create's result could send a second create: an untracked second snapshot on a single-host provider (no request token), or a second Clone of a clone already Failed.
   - **Unchanged:** the namespace-grant, consumer-grant and source power-state watches.
@@ -59,7 +59,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `internal/controller/vmclone_controller.go`, `vmclone_clustered.go` (`persistCloneStatus`): an accepted clone is no longer lost to a concurrent edit of its `VMClone`. Medium; integrity; already on `main`.
   - **Cause:** a libvirt single-host Clone is a synchronous disk copy. The post-RPC status update carried the `resourceVersion` read before it, so a VMClone edit during the copy made the update fail with a Conflict. `TargetVMID`/`TaskRef` were lost, the clone was sent again and refused ("already exists"), and it failed with the copy left untracked on a shared host.
   - The record is now a JSON Patch of the status without a `resourceVersion` precondition. It starts with `test` operations on `metadata.uid` and, when set, `status.phase`, so it lands only on the object the reconcile read.
-  - A VMClone deleted and re-created under the same name during the copy, or one stored `Failed` meanwhile, fails the test (422 Invalid). The record is then neither written nor bound, and what the clone made is logged.
+  - A VMClone deleted and re-created under the same name during the copy, or one stored `Failed` meanwhile, fails the test (422 Invalid). The record is then neither written nor bound, and what the clone made is logged. The reconcile requeues after 2 s rather than ending: a retry after a lost answer can fail its own test because the first attempt landed, and the next pass then binds through the recorded target VM ID.
   - Retries are bounded (`cloneRecordBackoff`, 6 attempts over about 6 s). They cover:
     - transient API errors (server timeout, too many requests, timeout, internal error, service unavailable, conflict);
     - transport failures (connection refused or reset, EOF, network timeouts);
@@ -102,13 +102,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `internal/controller/vmclone_status_conflict_test.go`:
     - `TestVMClone_AcceptedCloneSurvivesAConcurrentEdit` (single-host and clustered, sync and async);
     - `TestVMClone_Clustered_TargetUIDSurvivesAConcurrentEdit`;
-    - `TestVMClone_NoCloneFromAStaleCache` (a stored Failed, or a recorded clone).
+    - `TestVMClone_NoCloneFromAStaleCache` (a stored Failed, or a recorded clone);
+    - `TestVMClone_Clustered_NoTargetFromAStaleCache`.
 
     The first two fail on the previous code.
   - `internal/controller/vmclone_record_envtest_test.go` (envtest, real API-server patch semantics):
     - the record of a clone is never written onto a VMClone re-created under the same name during the copy, and nothing is bound;
     - it never overwrites a stored Failed;
-    - it still lands despite a metadata edit.
+    - it still lands despite a metadata edit;
+    - a record that is applied but answered with a connection reset still ends Ready and bound, without a second Clone.
   - `internal/controller/vmclone_record_retry_test.go`:
     - `TestVMClone_RecordSurvivesATransportError`: connection refused or reset, unexpected EOF, request deadline, service unavailable. The record lands after a retry and no second Clone is sent.
     - `TestVMClone_RecordNotSavedIsAnnounced`.
