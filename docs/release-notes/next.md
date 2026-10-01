@@ -58,6 +58,14 @@ Read the upgrade guide before upgrading:
   manager.
   → [Upgrade guide](docs/upgrading.md#breaking-changes),
   [`docs/reconfigure-results.md`](docs/reconfigure-results.md)
+- **`powerOn` is honored: a clone or migrated VM stays powered off unless
+  `powerOn: true`.** `VMClone` `spec.options.powerOn` and `VMMigration`
+  `spec.target.powerOn` (default `false`) were never read, so every clone and
+  migrated VM came up running. The produced VirtualMachine's `spec.powerState`
+  is now `On` only for `powerOn: true`. A vSphere migration target with
+  `powerOn: false` is still booted briefly by the vSphere provider's Create
+  before it is powered off.
+  → [Upgrade guide](docs/upgrading.md#breaking-changes)
 
 See the full breaking-change table, required upgrade order (CRDs → manager →
 providers), and rollback caveats in
@@ -284,6 +292,15 @@ providers), and rollback caveats in
   A clustered VM is placed only on a `Host` labelled
   `net.virtrigaud.io/<network>: "true"` for each libvirt network it uses
   (→ [`docs/clustered-provider-inventory.md`](docs/clustered-provider-inventory.md#first-vm-checklist)).
+- A `VMClone` that waits — for its source to be powered off, an unreachable
+  host, a previous incarnation of its target, capacity, and every other hold —
+  no longer calls the provider in a tight loop. Each wait rewrote the clone's
+  status, which re-triggered the clone at once: a clone of a running libvirt
+  VM called `Clone` about ten times a second instead of following its backoff
+  (15 s doubling to 5 min). A repeated wait now writes nothing, and a waiting
+  clone never shows `Phase=Cloning` or `Cloning=True`. A `VMSnapshot` whose
+  provider delete fails no longer re-tries it in a tight loop for its first
+  five minutes either.
 - Provider SDK: the `sdk/provider/client` RPC methods (`Create`, `Describe`,
   `TaskStatus` and the others) return a nil error on success again. Before, a
   successful call returned a non-nil error that printed as `<nil>`, and

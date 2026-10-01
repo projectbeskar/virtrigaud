@@ -17,6 +17,11 @@
 # its Status.ID with the provider's cloned VM ID, and labels it
 # virtrigaud.io/adopted=true so the VirtualMachine controller does not try to
 # create a second VM. Deleting this VMClone does NOT delete the produced VM.
+#
+# Power: the produced VM's spec.powerState comes from spec.options.powerOn —
+# On when it is true, Off when it is false or omitted (the default). Every
+# provider leaves a clone powered off, so a clone without powerOn: true stays
+# off until you set spec.powerState: On on the produced VirtualMachine.
 
 apiVersion: infra.virtrigaud.io/v1beta1
 kind: VMClone
@@ -51,6 +56,9 @@ spec:
     labels:
       app: cloned-app
 
-  # Optional: clone behavior. Defaults to FullClone.
+  # Optional: clone behavior. Defaults to FullClone, left powered off.
   options:
     type: FullClone # or LinkedClone (requires provider support)
+    # true: the produced VM is powered on after the clone; false/omitted: it
+    # stays off.
+    powerOn: false

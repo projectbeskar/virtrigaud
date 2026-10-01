@@ -18,7 +18,10 @@ host and serve full clones only (see
 | Dependency | None: deleting either VM never touches the other's disk | The clone reads every block it has not written from the source's disk, for as long as it exists |
 
 A clone is named `<target namespace>.<target name>` on the host, with the disk
-`<pool directory>/<domain>-disk.qcow2`, and is left powered off. The copy
+`<pool directory>/<domain>-disk.qcow2`, and is left powered off: the produced
+`VirtualMachine` gets `spec.powerState: Off` unless the `VMClone` sets
+`spec.options.powerOn: true`, in which case it is `On` and the VirtualMachine
+controller powers the clone on once it is bound. The copy
 flattens the source's whole image chain, so the clone of a VM with external
 snapshots is one standalone disk, with none of the source's snapshots. The
 clone's disk is always **qcow2**, whatever the source's format, and the
@@ -46,8 +49,11 @@ domstate` "shut off"). vSphere is different: it clones running VMs.
   when it starts waiting. It is re-checked with a backoff (15 s, doubling to 5
   minutes) and at once whenever the source VM's observed power state
   (`status.powerState`) changes, so it proceeds as soon as the source is off.
-  On a clustered Provider the target `VirtualMachine` the clone created, and
-  its pending host, are kept while it waits.
+  A re-check that is refused again writes nothing to the `VMClone`, and a
+  waiting clone shows no `startTime` and never `Phase=Cloning`; those are set
+  when the provider accepts the clone. On a clustered Provider the target
+  `VirtualMachine` the clone created, and its pending host, are kept while it
+  waits.
 - To clone a running VM, set the source's `spec.powerState: Off`, wait for the
   clone to become `Ready`, then power the source back on.
 
@@ -466,6 +472,28 @@ header as root; replace it when you upgrade. With the rule above, a read of an
 image outside the pool directory (another allowed image directory, a backing
 file elsewhere) is refused by sudo and made as the SSH user. Add that
 directory to the expression if the SSH user cannot read the images there.
+
+**Other allowed image directories.** The disk in-use check (clone, export,
+Delete) reads the image chain of *every* domain on the host, not only of the
+VM it acts on, so it also reads backing files that live in your other allowed
+image directories (`VIRTRIGAUD_LIBVIRT_IMAGE_DIRS`) — for example a cloud
+image another domain is layered on:
+`sudo -n qemu-img info -U -f qcow2 --output=json -- /vm-pool01/noble-server-cloudimg-amd64.img`.
+With the `VR_DISK_READ` rule above, sudo refuses that read and it is made as
+the SSH user instead, which works only if that user can read the file; if it
+cannot, the check fails closed (`VM_DISK_CHECK_FAILED`) and the clone, export
+or delete waits. To let root read them, list every allowed image directory in
+the rule, each with the same `[^/ ]+` confinement (one file directly inside
+the directory, no subdirectory, no space), and escape any `.` in a path as
+`\.`. For `VIRTRIGAUD_LIBVIRT_IMAGE_DIRS=/var/lib/libvirt/images,/vm-pool01`:
+
+```
+Cmnd_Alias VR_DISK_READ = /usr/bin/qemu-img ^info -U -f (qcow2|raw) --output=json -- (/var/lib/libvirt/images|/vm-pool01)/[^/ ]+$
+```
+
+Never widen it to a parent directory (`/`), a subdirectory wildcard or `.*`.
+The copy rules (`VR_CLONE_COPY`, `VR_EXPORT_COPY`) need a directory added only
+when a VM's own disk lives there, as described above.
 
 What these rules protect, and what they do not. With them, root runs only
 the commands in the table:
