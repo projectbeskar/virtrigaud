@@ -17,6 +17,7 @@ limitations under the License.
 package controller
 
 import (
+	"bytes"
 	"context"
 	stderrors "errors"
 	"strings"
@@ -24,6 +25,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-logr/logr"
+	"github.com/go-logr/logr/funcr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/api/equality"
@@ -32,6 +35,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	ctrllog "sigs.k8s.io/controller-runtime/pkg/log"
 
 	infravirtrigaudiov1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
 	"github.com/projectbeskar/virtrigaud/internal/k8s"
@@ -346,6 +350,51 @@ func TestHandleDeletion_ProviderUnavailable_ThenDeleteFails(t *testing.T) {
 	var again infravirtrigaudiov1beta1.VirtualMachine
 	require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(vm), &again))
 	assert.Equal(t, failed.ResourceVersion, again.ResourceVersion, "a repeated ordinary failure writes nothing")
+}
+
+// logCapture returns a context whose controller-runtime logger writes every
+// line into the returned buffer.
+func logCapture() (context.Context, *bytes.Buffer) {
+	var buf bytes.Buffer
+	sink := funcr.New(func(prefix, args string) {
+		buf.WriteString(prefix)
+		buf.WriteString(args)
+		buf.WriteByte('\n')
+	}, funcr.Options{Verbosity: 10})
+	return ctrllog.IntoContext(context.Background(), logr.New(sink.GetSink())), &buf
+}
+
+// TestHandleDeletion_ProviderUnavailable_OneSearchableLogLine: single-host and
+// clustered holds both log providerUnavailableDeleteLogMessage — the line the
+// docs tell operators to search for — with the resolver's error (and, for a
+// clustered VM, its host), which appear in no condition or event.
+func TestHandleDeletion_ProviderUnavailable_OneSearchableLogLine(t *testing.T) {
+	t.Run("single-host", func(t *testing.T) {
+		ctx, logs := logCapture()
+		vm := deletionVM("vm-logged")
+		r := newTestReconciler(coverageTestScheme(t), &switchableResolver{err: errRuntimeNotReady}, vm, deletionProviderCR())
+		_, err := r.handleDeletion(ctx, markForDeletion(t, r, vm))
+		require.NoError(t, err)
+		assert.Contains(t, logs.String(), providerUnavailableDeleteLogMessage)
+		assert.Contains(t, logs.String(), "phase=Pending", "the cause is logged")
+	})
+	t.Run("clustered", func(t *testing.T) {
+		ctx, logs := logCapture()
+		prov := &routingProvider{}
+		r := clusteredFixture(t, prov, boundClusterVMForDelete())
+		r.RemoteResolver = &switchableResolver{err: errValidateFailed}
+		rec := record.NewFakeRecorder(16)
+		r.Recorder = rec
+		_, err := r.handleDeletion(ctx, deletingClusterVM(t, r, "web"))
+		require.NoError(t, err)
+		assert.Contains(t, logs.String(), providerUnavailableDeleteLogMessage, "the same line as a single-host hold")
+		assert.Contains(t, logs.String(), "10.96.12.7", "the cause is logged")
+		assert.Contains(t, logs.String(), "host-alpha", "the host is logged")
+		for _, e := range drainEvents(rec) {
+			assert.NotContains(t, e, "host-alpha")
+			assert.NotContains(t, e, "10.96.12.7")
+		}
+	})
 }
 
 // TestHandleDeletion_Clustered_ProviderUnavailableThenDeleteFails: a clustered

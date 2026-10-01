@@ -1080,7 +1080,9 @@ func (r *VirtualMachineReconciler) retainForBlockedDelete(
 // a repeated hold writes nothing: a VM being deleted is reconciled on every
 // update of it, so a status write per retry would retry at once. A force-delete
 // or orphan-on-delete set while held is acted on at once for the same reason.
-// The hold counts under the provider-resolve error reason.
+// The hold counts under the provider-resolve error reason, and both paths log
+// providerUnavailableDeleteLogMessage with the cause, so one search of the
+// manager log finds every such hold.
 func (r *VirtualMachineReconciler) retainForUnavailableProvider(
 	ctx context.Context,
 	vm *infravirtrigaudiov1beta1.VirtualMachine,
@@ -1097,7 +1099,7 @@ func (r *VirtualMachineReconciler) retainForUnavailableProvider(
 
 	msg := deleteBlockedMessages[k8s.ReasonProviderUnavailable]
 	if routed {
-		return r.recordDeleteHold(ctx, vm, k8s.ReasonProviderUnavailable, msg, err), true
+		return r.recordDeleteHold(ctx, vm, k8s.ReasonProviderUnavailable, msg, providerUnavailableDeleteLogMessage, err), true
 	}
 
 	persisted := vm.Status.DeepCopy()
@@ -1118,7 +1120,7 @@ func (r *VirtualMachineReconciler) retainForUnavailableProvider(
 		since = vm.DeletionTimestamp.Time
 	}
 	retry := blockedRetryBackoff(since)
-	logger.Info("Cannot reach the provider to delete the VM; retaining the finalizer",
+	logger.Info(providerUnavailableDeleteLogMessage,
 		"id", vm.Status.ID, "reason", k8s.ReasonProviderUnavailable, "retryAfter", retry.String(), "error", err.Error())
 	if !equality.Semantic.DeepEqual(persisted, &vm.Status) {
 		r.updateStatus(ctx, vm)
@@ -1127,6 +1129,22 @@ func (r *VirtualMachineReconciler) retainForUnavailableProvider(
 		r.recordEvent(vm, corev1.EventTypeWarning, eventReasonDeleteBlocked, msg)
 	}
 	return ctrl.Result{RequeueAfter: retry}, true
+}
+
+// providerUnavailableDeleteLogMessage is the manager log line of a delete held
+// because the VM's Provider could not be reached (retainForUnavailableProvider),
+// single-host and clustered alike; docs/upgrading.md and
+// docs/vm-provider-binding.md tell operators to search for it.
+const providerUnavailableDeleteLogMessage = "Cannot reach the provider to delete the VM; retaining the finalizer"
+
+// placementHostForLog is the host a clustered VM is bound or pending on, for
+// the manager log only: no condition or event names a host (ADR-0007 A6,
+// threat 5).
+func placementHostForLog(vm *infravirtrigaudiov1beta1.VirtualMachine) string {
+	if host := boundHost(vm); host != "" {
+		return host
+	}
+	return pendingHost(vm)
 }
 
 // providerDeleteFailedMessage is the Ready message that replaces an earlier

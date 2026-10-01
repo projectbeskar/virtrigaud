@@ -532,8 +532,12 @@ func (r *VirtualMachineReconciler) holdDelete(
 	err error,
 ) ctrl.Result {
 	metrics.RecordError(errReasonProviderDelete, metrics.ComponentManager)
-	return r.recordDeleteHold(ctx, vm, reason, msg, err)
+	return r.recordDeleteHold(ctx, vm, reason, msg, deleteHeldLogMessage, err)
 }
+
+// deleteHeldLogMessage is the manager log line of a clustered delete held for
+// what the provider answered (holdDelete).
+const deleteHeldLogMessage = "Delete held; retaining the finalizer"
 
 // recordDeleteHold sets DeleteBlocked=True with reason and Ready=False/
 // DeleteBlocked, both with msg, on a clustered vm whose delete is held, and
@@ -542,11 +546,11 @@ func (r *VirtualMachineReconciler) holdDelete(
 // new hold or a new reason): a VM being deleted is reconciled on every update
 // of it, so a write per retry would retry at once instead of on the backoff.
 // msg must therefore be the same on every retry of the same hold. The cause
-// (err) goes to the log only.
+// (err) goes to the log only, as logMsg, with the VM's id and host.
 func (r *VirtualMachineReconciler) recordDeleteHold(
 	ctx context.Context,
 	vm *infravirtrigaudiov1beta1.VirtualMachine,
-	reason, msg string,
+	reason, msg, logMsg string,
 	err error,
 ) ctrl.Result {
 	persisted := vm.Status.DeepCopy()
@@ -567,7 +571,8 @@ func (r *VirtualMachineReconciler) recordDeleteHold(
 		ObservedGeneration: vm.Generation,
 	})
 	retry := blockedRetryBackoff(conditionSince(vm.Status.Conditions, k8s.ConditionDeleteBlocked))
-	log.FromContext(ctx).Info("Delete held; retaining the finalizer", "reason", reason, "retryAfter", retry.String(), "error", err.Error())
+	log.FromContext(ctx).Info(logMsg, "id", vm.Status.ID, "host", placementHostForLog(vm), "reason", reason,
+		"retryAfter", retry.String(), "error", err.Error())
 	if !equality.Semantic.DeepEqual(persisted, &vm.Status) {
 		r.updateStatus(ctx, vm)
 	}

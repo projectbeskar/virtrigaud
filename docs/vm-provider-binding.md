@@ -255,9 +255,15 @@ a cross-namespace `Provider` the VM's namespace may not use
 (`ProviderUnavailable`, below).
 It is an escape hatch; to detach a VM on purpose, use `orphan-on-delete`.
 On a clustered `Provider`, a force-delete that releases a VM whose `Delete`
-failed can leave its domain running on the host outside the committed-capacity
-accounting; check the host (and cordon it or lower its overcommit ratio) until
-the leftover domain is removed. A tenant cannot trigger this on purpose.
+failed or was held (`HostUnreachable`, `DiskCheckFailed`, `DiskInUse`,
+`OwnDomainOnAnotherHost`, `ProviderUnavailable`) leaves its domain running on
+the host outside the committed-capacity accounting; check the host (and cordon
+it or lower its overcommit ratio) until the leftover domain is removed. This is
+not limited to administrators: whoever can annotate and delete a
+`VirtualMachine` — a tenant included, on its own VM while its delete is held —
+can force-delete it. Restricting that for VMs in another namespace than their
+clustered `Provider` is a tracked follow-up; until then, use a policy engine
+(Kyverno, Gatekeeper) if tenants must not force-delete their VMs.
 
 ### Deleting a VM while its `Provider` cannot be reached
 
@@ -278,11 +284,22 @@ releases released it, leaving the hypervisor VM running unmanaged):
   counted from the deletion request (single-host) or from when `DeleteBlocked`
   became `True` (clustered) — and completes on the first retry after the
   `Provider` answers again.
-- The cause is in the manager log (`Cannot reach the provider to delete the
-  VM`), and each retry counts under
+- The cause is in the manager log: search for `Cannot reach the provider to
+  delete the VM` — the same line for single-host and clustered VMs, with the
+  error and, for a clustered VM, its host. Each retry counts under
   `virtrigaud_errors_total{reason="provider-resolve"}`.
+- If the `Provider` answers but its `Delete` then fails for another reason,
+  `DeleteBlocked` is removed and `Ready` becomes `False/ProviderError` (a
+  constant message; the provider's answer is in the manager log).
 - `orphan-on-delete` (no `Provider` is resolved) and `force-delete` release it
-  at once; the hypervisor VM is then left for manual removal.
+  at once; the hypervisor VM is then left for manual removal. On a clustered
+  `Provider` in **another namespace**, `orphan-on-delete` needs the Provider's
+  permission (above) but `force-delete` does not: it releases the held VM
+  without any provider `Delete`, so its domain keeps running on its host, no
+  longer counted toward that host's committed capacity, and re-creating a VM
+  with the same namespace and name is then held at `Placed=False/RestorePending`
+  until that domain is re-attached or removed
+  ([`clustered-restore.md`](clustered-restore.md)).
 
 A `Provider` that no longer exists in the VM's own namespace is different:
 there is nothing to delete through, and the finalizer is released as before.
