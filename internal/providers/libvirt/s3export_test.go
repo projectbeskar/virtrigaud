@@ -139,9 +139,7 @@ func installFakeSudo(t *testing.T, script string) string {
 // flatten runs through `sudo -n` with the source format pinned when sudo
 // allows it, and as the SSH user (the historical command) when it refuses.
 func TestFlattenForExport(t *testing.T) {
-	if _, err := exec.LookPath("qemu-img"); err != nil {
-		t.Skip("qemu-img not available")
-	}
+	requireRealHostTool(t, "qemu-img")
 	for name, sudo := range map[string]string{
 		"sudo allows the flatten": fakeSudoAllow,
 		"sudo refuses":            fakeSudoRefuse,

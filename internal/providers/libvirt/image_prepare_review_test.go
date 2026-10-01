@@ -64,9 +64,11 @@ func useRealCurl(t *testing.T, realCurl string) {
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 }
 
-// lookPathCurl returns the real curl, or skips.
+// lookPathCurl returns curl (the host guard's shim of the real one), or
+// skips when this machine has no curl.
 func lookPathCurl(t *testing.T) string {
 	t.Helper()
+	requireRealHostTool(t, "curl")
 	realCurl, err := exec.LookPath("curl")
 	if err != nil {
 		t.Skip("curl is not installed")

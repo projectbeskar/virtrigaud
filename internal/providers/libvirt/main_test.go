@@ -72,7 +72,9 @@ const realHostPath = "/var/lib/libvirt"
 // guardedHostTools are the host tools the provider (or a fixture) may run by
 // name: each gets a shim first on PATH, behind every fixture's own fakes
 // (fixtures prepend theirs), so a command a fixture does not fake reaches the
-// shim instead of the real tool.
+// shim instead of the real tool. A tool this machine does not have gets a
+// shim too (hostGuardMissingShim): the guard is the same whatever is
+// installed, and a test that needs the real tool asks requireRealHostTool.
 var guardedHostTools = []string{
 	"sh", "bash", "dash", "qemu-img", "mktemp", "mv", "rm", "cp", "chmod", "chown", "cat", "stat", "realpath",
 	"readlink", "ls", "mkdir", "rmdir", "touch", "ln", "dd", "test", "flock", "timeout", "id", "sha256sum",
@@ -108,6 +110,39 @@ done
 exec -a '%[1]s' '%[2]s' "$@"
 `
 
+// hostGuardMissingShim is the shim of a guarded tool (%[1]s) this machine
+// does not have: it refuses a real-host path like hostGuardShim, and
+// otherwise fails as a shell does for a missing command (exit 127).
+const hostGuardMissingShim = `#!/bin/sh
+for a in "$@"; do
+  case "$a" in *"` + realHostPath + `"*)
+    ` + hostGuardRecord + `
+    echo "virtrigaud test guard: %[1]s on the real ` + realHostPath + ` refused" >&2
+    exit 1 ;;
+  esac
+done
+echo "virtrigaud test guard: %[1]s is not installed on this machine" >&2
+exit 127
+`
+
+// hostGuardMissingExit is the exit status of hostGuardMissingShim for a call
+// it does not refuse: a shell's for a command it cannot find.
+const hostGuardMissingExit = 127
+
+// hostGuardRealTools maps each guarded tool to the real tool its shim runs,
+// or "" when this machine does not have it (set by installHostGuard).
+var hostGuardRealTools = map[string]string{}
+
+// requireRealHostTool skips the test when this machine does not have tool:
+// the guard's shim stands in for it on PATH and only fails (exit 127), so a
+// test that runs the real tool must not mistake the shim for it.
+func requireRealHostTool(t *testing.T, tool string) {
+	t.Helper()
+	if hostGuardRealTools[tool] == "" {
+		t.Skipf("%s is not installed on this machine", tool)
+	}
+}
+
 // hostGuardRefuseShim is the shim of a tool that never runs (%[1]s).
 const hostGuardRefuseShim = `#!/bin/sh
 ` + hostGuardRecord + `
@@ -138,6 +173,25 @@ func installHostGuard() (string, string, error) {
 		return "", "", err
 	}
 	logPath := filepath.Join(dir, "refused.log")
+	real, err := writeHostGuardShims(bin, exec.LookPath)
+	if err != nil {
+		return "", "", err
+	}
+	hostGuardRealTools = real
+	if err := os.Setenv(hostGuardEnvLog, logPath); err != nil {
+		return "", "", err
+	}
+	if err := os.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH")); err != nil {
+		return "", "", err
+	}
+	return dir, logPath, nil
+}
+
+// writeHostGuardShims writes into bin a shim for every guarded tool — the
+// real one's (hostGuardShim) when lookPath finds it, hostGuardMissingShim
+// when it does not — plus the never-run tools' and virsh's. It returns each
+// guarded tool's real path ("" when missing).
+func writeHostGuardShims(bin string, lookPath func(string) (string, error)) (map[string]string, error) {
 	_, bashErr := os.Stat("/bin/bash")
 	write := func(name, script string) error {
 		if bashErr != nil {
@@ -147,34 +201,31 @@ func installHostGuard() (string, string, error) {
 		}
 		return os.WriteFile(filepath.Join(bin, name), []byte(script), 0o700) //nolint:gosec // test shim must be executable
 	}
+	real := make(map[string]string, len(guardedHostTools))
 	for _, tool := range guardedHostTools {
-		real, err := exec.LookPath(tool)
+		path, err := lookPath(tool)
+		script := fmt.Sprintf(hostGuardShim, tool, path)
 		if err != nil {
-			continue // not installed: nothing to guard
+			path, script = "", fmt.Sprintf(hostGuardMissingShim, tool)
 		}
-		if err := write(tool, fmt.Sprintf(hostGuardShim, tool, real)); err != nil {
-			return "", "", err
+		real[tool] = path
+		if err := write(tool, script); err != nil {
+			return nil, err
 		}
 	}
 	for _, tool := range neverRunHostTools {
 		if err := write(tool, fmt.Sprintf(hostGuardRefuseShim, tool)); err != nil {
-			return "", "", err
+			return nil, err
 		}
 	}
 	virsh := "/nonexistent/virsh"
-	if real, err := exec.LookPath("virsh"); err == nil {
-		virsh = real
+	if path, err := lookPath("virsh"); err == nil {
+		virsh = path
 	}
 	if err := write("virsh", fmt.Sprintf(hostGuardVirshShim, "virsh", virsh)); err != nil {
-		return "", "", err
+		return nil, err
 	}
-	if err := os.Setenv(hostGuardEnvLog, logPath); err != nil {
-		return "", "", err
-	}
-	if err := os.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH")); err != nil {
-		return "", "", err
-	}
-	return dir, logPath, nil
+	return real, nil
 }
 
 // newFixtureImagesDir makes a canonical scratch directory under the package

@@ -202,9 +202,7 @@ func TestCheckImageHeader(t *testing.T) {
 // qemu-img (when installed) so the JSON shape the parser relies on is pinned to
 // what qemu-img actually prints, not to hand-written fixtures.
 func TestInspectHostImage_RealQemuImg(t *testing.T) {
-	if _, err := exec.LookPath("qemu-img"); err != nil {
-		t.Skip("qemu-img not installed")
-	}
+	requireRealHostTool(t, "qemu-img")
 	dir := t.TempDir()
 	mk := func(args ...string) {
 		t.Helper()

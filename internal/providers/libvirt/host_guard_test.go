@@ -100,6 +100,11 @@ func TestHostGuard_RefusesTheRealHost(t *testing.T) {
 		require.NoError(t, err)
 		assert.Contains(t, p, "virtrigaud-host-guard-", "%s resolves to the guard's shim first", tool)
 	}
+	for _, tool := range guardedHostTools {
+		p, err := exec.LookPath(tool)
+		require.NoError(t, err, "every guarded tool has a shim, installed on this machine or not")
+		assert.Contains(t, p, "virtrigaud-host-guard-", "%s resolves to the guard's shim first", tool)
+	}
 	scratch := t.TempDir()
 	out, err := exec.Command("realpath", "-m", "--", scratch).CombinedOutput()
 	require.NoError(t, err, "%s", out)
@@ -107,4 +112,37 @@ func TestHostGuard_RefusesTheRealHost(t *testing.T) {
 	out, err = exec.Command("sh", "-c", "echo ok").CombinedOutput()
 	require.NoError(t, err, "%s", out)
 	assert.Equal(t, "ok", strings.TrimSpace(string(out)))
+}
+
+// TestHostGuard_MissingToolIsGuardedToo writes the guard's shims as for a
+// machine that has none of the guarded tools (the CI runner has no qemu-img,
+// for one): each tool still gets a shim that refuses the real host, and that
+// otherwise fails as a missing command does (exit 127) — never a silent
+// success, and never a real tool found further down PATH.
+func TestHostGuard_MissingToolIsGuardedToo(t *testing.T) {
+	t.Setenv(hostGuardEnvSelfTest, "1")
+	bin := t.TempDir()
+	missing := func(string) (string, error) { return "", exec.ErrNotFound }
+	real, err := writeHostGuardShims(bin, missing)
+	require.NoError(t, err)
+	for _, tool := range guardedHostTools {
+		assert.Empty(t, real[tool], "%s is reported missing", tool)
+	}
+	for _, tool := range []string{"qemu-img", "genisoimage", "flock", "curl"} {
+		shim := filepath.Join(bin, tool)
+		out, err := exec.Command(shim, "info", "--", realHostPath+"/images/x.qcow2").CombinedOutput() //nolint:gosec // the guard's own shim
+		require.Error(t, err, "%s on the real host is refused: %s", tool, out)
+		assert.Contains(t, string(out), "virtrigaud test guard: "+tool+" on the real "+realHostPath+" refused")
+
+		out, err = exec.Command(shim, "--version").CombinedOutput() //nolint:gosec // the guard's own shim
+		var exitErr *exec.ExitError
+		require.ErrorAs(t, err, &exitErr, "%s: %s", tool, out)
+		assert.Equal(t, hostGuardMissingExit, exitErr.ExitCode(), "a missing command's status")
+		assert.Contains(t, string(out), "virtrigaud test guard: "+tool+" is not installed on this machine")
+	}
+	for _, tool := range neverRunHostTools {
+		out, err := exec.Command(filepath.Join(bin, tool), "-n", "true").CombinedOutput() //nolint:gosec // the guard's own shim
+		require.Error(t, err)
+		assert.Contains(t, string(out), "virtrigaud test guard: "+tool+" must not run in tests")
+	}
 }

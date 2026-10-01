@@ -68,9 +68,7 @@ type swapHost struct {
 func newSwapHost(t *testing.T) *swapHost {
 	t.Helper()
 	requireGNURealpath(t)
-	if _, err := exec.LookPath("qemu-img"); err != nil {
-		t.Skip("qemu-img not available")
-	}
+	requireRealHostTool(t, "qemu-img")
 	bin := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(bin, "sudo"), []byte(swapSudo), 0o700))               //nolint:gosec // test shim must be executable
 	require.NoError(t, os.WriteFile(filepath.Join(bin, "virsh"), []byte("#!/bin/sh\nexit 0\n"), 0o700)) //nolint:gosec // test shim must be executable
@@ -166,9 +164,7 @@ func TestCreatedVMFiles_SwappedSymlinkIsNeverFollowed(t *testing.T) {
 // vmDiskMode, dd under clonedNVRAMUmask gives 0600 — whatever the caller's
 // umask.
 func TestVMFiles_CreatedWithTheirFinalMode(t *testing.T) {
-	if _, err := exec.LookPath("qemu-img"); err != nil {
-		t.Skip("qemu-img not available")
-	}
+	requireRealHostTool(t, "qemu-img")
 	ctx := context.Background()
 	vp := NewVirshProvider(&ProviderConfig{})
 	vp.uri = "test:///modes"
