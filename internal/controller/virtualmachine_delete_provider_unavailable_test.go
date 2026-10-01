@@ -352,6 +352,104 @@ func TestHandleDeletion_ProviderUnavailable_ThenDeleteFails(t *testing.T) {
 	assert.Equal(t, failed.ResourceVersion, again.ResourceVersion, "a repeated ordinary failure writes nothing")
 }
 
+// pendingClusterVMForDelete is a clustered VM whose create is in flight
+// (status.id empty, pendingHost host-alpha), with the finalizer.
+func pendingClusterVMForDelete() *infravirtrigaudiov1beta1.VirtualMachine {
+	vm := clusterVM("web", clusteredNS, "prov-cluster")
+	vm.UID = "uid-web"
+	vm.Finalizers = []string{infravirtrigaudiov1beta1.VirtualMachineFinalizer}
+	vm.Status.Placement = &infravirtrigaudiov1beta1.PlacementStatus{PendingHost: "host-alpha", Pool: "pool-a"}
+	return vm
+}
+
+// TestHandleDeletion_Clustered_PendingCreate_ProviderUnavailableIsHeld: a
+// clustered VM deleted while its create is in flight (no status.id, a
+// pendingHost) may already have a domain on that host, so a resolve failure
+// holds it like a bound VM — it is not released — and the owner-checked
+// Delete goes to the pending host once the Provider answers.
+func TestHandleDeletion_Clustered_PendingCreate_ProviderUnavailableIsHeld(t *testing.T) {
+	ctx := context.Background()
+	prov := &routingProvider{}
+	r := clusteredFixture(t, prov, pendingClusterVMForDelete())
+	resolver := &switchableResolver{provider: prov, err: errRuntimeNotReady}
+	r.RemoteResolver = resolver
+	rec := record.NewFakeRecorder(16)
+	r.Recorder = rec
+
+	res, err := r.handleDeletion(ctx, deletingClusterVM(t, r, "web"))
+	require.NoError(t, err)
+	assert.Equal(t, blockedRetryMin, res.RequeueAfter)
+	assert.EqualValues(t, 1, resolver.calls.Load(), "the pending create's Provider was resolved")
+	assert.Empty(t, prov.deleteRefs)
+
+	held := getVM(t, r, "web")
+	assert.Contains(t, held.Finalizers, infravirtrigaudiov1beta1.VirtualMachineFinalizer,
+		"a domain the create made on the pending host must not be orphaned")
+	blocked := meta.FindStatusCondition(held.Status.Conditions, k8s.ConditionDeleteBlocked)
+	require.NotNil(t, blocked)
+	assert.Equal(t, k8s.ReasonProviderUnavailable, blocked.Reason)
+	assert.Equal(t, k8s.ReasonDeleteBlocked, meta.FindStatusCondition(held.Status.Conditions, k8s.ConditionReady).Reason)
+	assert.Equal(t, 1, warningDeleteBlockedEvents(rec))
+
+	resolver.err = nil
+	_, err = r.handleDeletion(ctx, getVM(t, r, "web"))
+	require.NoError(t, err)
+	require.Len(t, prov.deleteRefs, 1)
+	assert.Equal(t, contracts.VMRef{ID: "web", HostID: "host-alpha", Owner: contracts.ObjectIdentity{UID: "uid-web", Namespace: clusteredNS, Name: "web"}},
+		prov.deleteRefs[0], "an owner-checked delete on the pending host")
+	assert.True(t, apierrors.IsNotFound(r.Get(ctx, client.ObjectKeyFromObject(held), &infravirtrigaudiov1beta1.VirtualMachine{})))
+}
+
+// TestHandleDeletion_Clustered_OwnDomainHoldThenProviderUnavailable: a held
+// delete whose reason changes from OwnDomainOnAnotherHost to
+// ProviderUnavailable updates DeleteBlocked (reason and constant message) and
+// Ready, records one more Warning event for the transition, and keeps the
+// backoff counting from when the hold began.
+func TestHandleDeletion_Clustered_OwnDomainHoldThenProviderUnavailable(t *testing.T) {
+	ctx := context.Background()
+	vm := pendingClusterVMForDelete()
+	vm.Status.Conditions = []metav1.Condition{{Type: k8s.ConditionPlaced, Status: metav1.ConditionFalse,
+		Reason: k8s.ReasonOwnDomainOnAnotherHost, Message: restorePendingOwnMessage, LastTransitionTime: metav1.Now()}}
+	prov := &routingProvider{deleteErr: contracts.NewNotFoundError("delete: no domain of this VirtualMachine on the host", nil)}
+	r := clusteredFixture(t, prov, vm)
+	resolver := &switchableResolver{provider: prov}
+	r.RemoteResolver = resolver
+	rec := record.NewFakeRecorder(16)
+	r.Recorder = rec
+
+	_, err := r.handleDeletion(ctx, deletingClusterVM(t, r, "web"))
+	require.NoError(t, err)
+	require.Len(t, prov.deleteRefs, 1)
+	require.Equal(t, k8s.ReasonOwnDomainOnAnotherHost,
+		meta.FindStatusCondition(getVM(t, r, "web").Status.Conditions, k8s.ConditionDeleteBlocked).Reason)
+	require.Equal(t, 1, warningDeleteBlockedEvents(rec))
+	holdStartedAgo(t, r, 2*time.Minute)
+
+	resolver.err = errValidateFailed
+	res, err := r.handleDeletion(ctx, getVM(t, r, "web"))
+	require.NoError(t, err)
+	assert.Len(t, prov.deleteRefs, 1, "no Delete without a provider client")
+	assert.GreaterOrEqual(t, res.RequeueAfter, 2*time.Minute, "the hold did not restart")
+
+	held := getVM(t, r, "web")
+	assert.Contains(t, held.Finalizers, infravirtrigaudiov1beta1.VirtualMachineFinalizer)
+	blocked := meta.FindStatusCondition(held.Status.Conditions, k8s.ConditionDeleteBlocked)
+	require.NotNil(t, blocked)
+	assert.Equal(t, k8s.ReasonProviderUnavailable, blocked.Reason)
+	assert.Equal(t, deleteBlockedMessages[k8s.ReasonProviderUnavailable], blocked.Message)
+	ready := meta.FindStatusCondition(held.Status.Conditions, k8s.ConditionReady)
+	require.NotNil(t, ready)
+	assert.Equal(t, k8s.ReasonDeleteBlocked, ready.Reason)
+	assert.Equal(t, deleteBlockedMessages[k8s.ReasonProviderUnavailable], ready.Message)
+	assert.Equal(t, 1, warningDeleteBlockedEvents(rec), "one event for the reason change")
+
+	// Repeated: unchanged, no event.
+	_, err = r.handleDeletion(ctx, held.DeepCopy())
+	require.NoError(t, err)
+	assert.Equal(t, held.ResourceVersion, getVM(t, r, "web").ResourceVersion)
+	assert.Zero(t, warningDeleteBlockedEvents(rec))
+}
+
 // leftOnHypervisorEvents returns the VMLeftOnHypervisor Warning events
 // buffered in rec (draining it).
 func leftOnHypervisorEvents(rec *record.FakeRecorder) []string {
