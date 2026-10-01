@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -191,6 +192,11 @@ func (r *VMCloneReconciler) startClusteredClone(
 		CustomizeJSON: r.customizeJSON(ctx, clone),
 	}
 
+	// Never clone from a stale read (see startClone).
+	if fresh, res, err := r.confirmCloneNotStarted(ctx, clone); !fresh {
+		return res, err
+	}
+
 	// Recorded as started only once the provider accepted the clone
 	// (markCloneStarted): every refusal below is a wait that must leave the
 	// clone's stored status as it was, so a repeated wait writes nothing.
@@ -207,6 +213,9 @@ func (r *VMCloneReconciler) startClusteredClone(
 	// Persist the target VM ID before binding, with no resourceVersion
 	// precondition (see startClone and persistCloneStatus).
 	if err := r.persistCloneStatus(ctx, clone, before); err != nil {
+		if errors.Is(err, errCloneChanged) {
+			return ctrl.Result{}, nil
+		}
 		return ctrl.Result{}, err
 	}
 	if resp.TaskRef == "" {
@@ -336,6 +345,13 @@ func (r *VMCloneReconciler) ensureClusteredCloneTarget(
 		before := clone.DeepCopy()
 		clone.Status.TargetUID = string(target.UID)
 		if err := r.persistCloneStatus(ctx, clone, before); err != nil {
+			if errors.Is(err, errCloneChanged) {
+				// The VMClone this target was made for is gone or replaced:
+				// leave the (unplaced, empty) target to the VirtualMachine's
+				// owner; a re-created VMClone refuses it (no matching
+				// clone-uid marker).
+				return nil, ctrl.Result{}, true, nil
+			}
 			return nil, ctrl.Result{}, true, fmt.Errorf("record the created target VM %s/%s on VMClone %s/%s: %w",
 				target.Namespace, target.Name, clone.Namespace, clone.Name, err)
 		}

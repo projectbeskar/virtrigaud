@@ -176,3 +176,67 @@ func (w *editingStatusWriter) Patch(ctx context.Context, obj client.Object, patc
 	w.edit(ctx, obj)
 	return w.SubResourceWriter.Patch(ctx, obj, patch, opts...)
 }
+
+// staleCloneClient answers a Get of one VMClone with a fixed copy (an
+// informer cache that has not caught up) and passes everything else through.
+type staleCloneClient struct {
+	client.Client
+	stale *infrav1beta1.VMClone
+}
+
+// Get returns the stale copy for the VMClone.
+func (c *staleCloneClient) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+	if clone, ok := obj.(*infrav1beta1.VMClone); ok && key == client.ObjectKeyFromObject(c.stale) {
+		c.stale.DeepCopyInto(clone)
+		return nil
+	}
+	return c.Client.Get(ctx, key, obj, opts...)
+}
+
+// TestVMClone_NoCloneFromAStaleCache: a reconcile that reads the clone from a
+// cache that does not show yet that it Failed (or that its clone was recorded)
+// re-reads it live and sends no Clone; the stored state is untouched.
+func TestVMClone_NoCloneFromAStaleCache(t *testing.T) {
+	ctx := context.Background()
+	for name, settle := range map[string]func(c *infrav1beta1.VMClone){
+		"stored Failed": func(c *infrav1beta1.VMClone) {
+			c.Status.Phase = infrav1beta1.ClonePhaseFailed
+			c.Status.Message = "clone failed: boom"
+		},
+		"stored clone recorded": func(c *infrav1beta1.VMClone) {
+			c.Status.Phase = infrav1beta1.ClonePhaseCloning
+			c.Status.TargetVMID = "default.clone-target"
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			clone := &infrav1beta1.VMClone{
+				ObjectMeta: metav1.ObjectMeta{Name: "clone-1", Namespace: "default", Finalizers: []string{vmCloneFinalizer}},
+				Spec: infrav1beta1.VMCloneSpec{
+					Source: infrav1beta1.CloneSource{VMRef: &infrav1beta1.LocalObjectReference{Name: "src-vm"}},
+					Target: infrav1beta1.VMCloneTarget{Name: "clone-target"},
+				},
+				Status: infrav1beta1.VMCloneStatus{Phase: infrav1beta1.ClonePhasePending},
+			}
+			cp := &clonerProvider{cloneResp: contracts.CloneResponse{TargetVmID: "default.clone-target"}}
+			r := newCloneReconciler(cloneTestScheme(t), &stubResolver{provider: cp}, runningProvider("default", "prov-1"),
+				sourceVMWithID("default", "src-vm", "prov-1", "default.src-vm"), clone)
+			stale := getClone(t, r, clone)
+			stored := stale.DeepCopy()
+			settle(stored)
+			require.NoError(t, r.Status().Update(ctx, stored))
+			want := getClone(t, r, clone)
+
+			live := r.Client
+			r.APIReader = live
+			r.Client = &staleCloneClient{Client: live, stale: stale}
+			res := reconcileClone(t, r, clone, 1)
+
+			assert.Zero(t, cp.cloneCnt, "no Clone is sent from a stale read")
+			assert.Equal(t, cloneStaleReadRetryInterval, res.RequeueAfter, "retried shortly, from a fresh read")
+			got := &infrav1beta1.VMClone{}
+			require.NoError(t, live.Get(ctx, client.ObjectKeyFromObject(clone), got))
+			assert.Equal(t, want.ResourceVersion, got.ResourceVersion, "the stored clone is not written")
+			assert.Equal(t, want.Status, got.Status)
+		})
+	}
+}

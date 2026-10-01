@@ -95,7 +95,8 @@ func TestVMClone_FailureRequeuesForTheTargetCleanup(t *testing.T) {
 		require.NoError(t, err)
 	}
 	require.Equal(t, infrav1beta1.ClonePhaseFailed, getClone(t, r, clone).Status.Phase)
-	assert.True(t, res.Requeue, "the failing reconcile asks for the one that removes the target")
+	assert.Equal(t, ctrl.Result{RequeueAfter: cloneFailedFollowUpDelay}, res,
+		"the failing reconcile asks for the one that removes the target — not at once, after the cache shows Failed")
 	assert.False(t, targetGone(t, r), "not removed in the failing reconcile itself")
 
 	res, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: key})

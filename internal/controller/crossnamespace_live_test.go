@@ -48,6 +48,10 @@ import (
 type liveNamespaceReader struct {
 	client.Client
 	reads int
+	// vmClones, when set, answers VMClone reads (the API server's copy of the
+	// clone the reconciler works on, which it re-reads live before the Clone
+	// RPC).
+	vmClones client.Reader
 }
 
 func newLiveReader(t *testing.T, ns *corev1.Namespace, err error, extra ...client.Object) *liveNamespaceReader {
@@ -64,6 +68,9 @@ func newLiveReader(t *testing.T, ns *corev1.Namespace, err error, extra ...clien
 			}
 			if err != nil {
 				return err
+			}
+			if _, isClone := obj.(*infrav1beta1.VMClone); isClone && lr.vmClones != nil {
+				return lr.vmClones.Get(ctx, key, obj, opts...)
 			}
 			return c.Get(ctx, key, obj, opts...)
 		},
@@ -125,6 +132,7 @@ func TestLiveGrant_CloneProceedsWhenBothAgree(t *testing.T) {
 	r, _ := newXNSCloneReconciler(t, cp, clone, grantNamespace(xnsTarget, strPtr(xnsSource)))
 	live := newLiveReader(t, grantNamespace(xnsTarget, strPtr(xnsSource)), nil, xnsSharedProvider(), xnsSharedClass())
 	r.APIReader = live
+	live.vmClones = r.Client
 
 	reconcileClone(t, r, clone, 4)
 
@@ -141,6 +149,7 @@ func TestLiveGrant_SameNamespaceNeverReadsLive(t *testing.T) {
 	r, _ := newXNSCloneReconciler(t, cp, clone)
 	live := newLiveReader(t, nil, nil)
 	r.APIReader = live
+	live.vmClones = r.Client
 
 	reconcileClone(t, r, clone, 4)
 
