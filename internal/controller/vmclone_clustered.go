@@ -200,11 +200,13 @@ func (r *VMCloneReconciler) startClusteredClone(
 		return r.handleClusteredCloneError(ctx, clone, target, host, err)
 	}
 
+	before := clone.DeepCopy()
 	markCloneStarted(clone, linked, started, fmt.Sprintf("Clone operation initiated on host %s", host))
 	clone.Status.TargetVMID = resp.TargetVmID
 	clone.Status.TaskRef = resp.TaskRef
-	// Persist the target VM ID before binding (see startClone).
-	if err := r.updateStatus(ctx, clone); err != nil {
+	// Persist the target VM ID before binding, with no resourceVersion
+	// precondition (see startClone and persistCloneStatus).
+	if err := r.persistCloneStatus(ctx, clone, before); err != nil {
 		return ctrl.Result{}, err
 	}
 	if resp.TaskRef == "" {
@@ -328,8 +330,12 @@ func (r *VMCloneReconciler) ensureClusteredCloneTarget(
 			fmt.Sprintf("Created target VM %q before cloning onto its source's host", key.Name))
 		// Record WHICH object this clone created, before anything else: only
 		// it is ever used as the target or removed when the clone fails.
+		// A plain update could lose this record to a concurrent edit of the
+		// VMClone (persistCloneStatus), leaving a target the failed clone could
+		// never identify as its own.
+		before := clone.DeepCopy()
 		clone.Status.TargetUID = string(target.UID)
-		if err := r.updateStatus(ctx, clone); err != nil {
+		if err := r.persistCloneStatus(ctx, clone, before); err != nil {
 			return nil, ctrl.Result{}, true, fmt.Errorf("record the created target VM %s/%s on VMClone %s/%s: %w",
 				target.Namespace, target.Name, clone.Namespace, clone.Name, err)
 		}

@@ -421,6 +421,7 @@ func (r *VMCloneReconciler) startClone(
 			fmt.Sprintf("clone failed: %v", err)), nil
 	}
 
+	before := clone.DeepCopy()
 	markCloneStarted(clone, linked, started, cloneStartedMessage)
 	clone.Status.TargetVMID = resp.TargetVmID
 	clone.Status.TaskRef = resp.TaskRef
@@ -430,8 +431,10 @@ func (r *VMCloneReconciler) startClone(
 	// controller, which reconciles the freshly-created adopted target VM
 	// immediately. If that happens and we requeue, this persisted TargetVMID is
 	// what lets the next reconcile resume binding (via the idempotency check)
-	// instead of issuing a second clone.
-	if err := r.updateStatus(ctx, clone); err != nil {
+	// instead of issuing a second clone. It is written without a
+	// resourceVersion precondition (persistCloneStatus): a VMClone edited
+	// while the provider copied must not lose the clone it made.
+	if err := r.persistCloneStatus(ctx, clone, before); err != nil {
 		return ctrl.Result{}, err
 	}
 
@@ -1171,6 +1174,33 @@ func (r *VMCloneReconciler) updateStatus(ctx context.Context, clone *infrav1beta
 	if err := r.Status().Update(ctx, clone); err != nil {
 		logging.FromContext(ctx).Error(err, "Failed to update VMClone status")
 		return err
+	}
+	return nil
+}
+
+// persistCloneStatus writes the status changes made to clone since before —
+// the record of something the clone just made on the provider or in the
+// cluster (the accepted Clone's target VM ID and task, the target
+// VirtualMachine it created) — as a JSON merge patch of the status
+// subresource WITHOUT a resourceVersion precondition, retried on transient
+// API errors. A plain update carries the resourceVersion read at the start of
+// the reconcile, so any edit of the VMClone made meanwhile (a tenant
+// annotating it during a synchronous libvirt copy of several minutes) made it
+// fail with a Conflict: the record was lost, the next reconcile sent the Clone
+// again, the provider refused it ("already exists"), and the clone failed with
+// a full disk copy left untracked on the host. Only this controller writes a
+// VMClone's status, and a VMClone is never reconciled concurrently, so the
+// patch overwrites nothing another writer set. A VMClone that no longer exists
+// is not retried.
+func (r *VMCloneReconciler) persistCloneStatus(ctx context.Context, clone, before *infrav1beta1.VMClone) error {
+	patch := client.MergeFrom(before)
+	err := retry.OnError(retry.DefaultBackoff, func(err error) bool { return !errors.IsNotFound(err) }, func() error {
+		return r.Status().Patch(ctx, clone, patch)
+	})
+	if err != nil {
+		logging.FromContext(ctx).Error(err, "Failed to record the clone on the VMClone status",
+			"target_vm_id", clone.Status.TargetVMID, "task_ref", clone.Status.TaskRef, "target_uid", clone.Status.TargetUID)
+		return fmt.Errorf("record the clone on VMClone %s/%s: %w", clone.Namespace, clone.Name, err)
 	}
 	return nil
 }
