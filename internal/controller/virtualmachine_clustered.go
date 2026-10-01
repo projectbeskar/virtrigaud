@@ -894,10 +894,9 @@ func (r *VirtualMachineReconciler) handleRoutedOpError(
 }
 
 // deletionTarget decides which hypervisor VM the finalizer must delete for vm
-// on provider (ADR-0007 Addendum A, A1/A2). It returns ok == false with the
-// result to return when the finalizer must be retained without calling the
-// provider; otherwise ok == true and ref is the VM to delete (an empty ref.ID
-// means "nothing to delete on the provider").
+// on provider (ADR-0007 Addendum A, A1/A2). It returns the VM to delete, or the
+// reason no delete can be routed (routeErr), which the caller hands to
+// retainForUnroutableDelete.
 //
 //   - Status.ID set: the ref comes from vmRefFor — the bare id for a single-host
 //     provider (unchanged), the bound host and the VM's owner for a clustered
@@ -916,33 +915,20 @@ func (r *VirtualMachineReconciler) deletionTarget(
 	ctx context.Context,
 	vm *infravirtrigaudiov1beta1.VirtualMachine,
 	provider *infravirtrigaudiov1beta1.Provider,
-) (contracts.VMRef, bool, ctrl.Result) {
-	logger := log.FromContext(ctx)
-
-	var (
-		ref contracts.VMRef
-		err error
-	)
-	if vm.Status.ID == "" {
-		if err = checkVMProvider(vm, provider); err == nil {
-			err = placementTopologyError(vm, provider)
-		}
-		if err == nil {
-			ref, _ = pendingCreateRef(vm)
-			logger.Info("VM has a create in flight; sending an owner-checked delete to its pending host",
-				"id", ref.ID, "host", ref.HostID)
-		}
-	} else {
-		ref, err = vmRefFor(vm, provider)
+) (ref contracts.VMRef, routeErr error) {
+	if vm.Status.ID != "" {
+		return vmRefFor(vm, provider)
 	}
-	if err == nil {
-		return ref, true, ctrl.Result{}
+	if err := checkVMProvider(vm, provider); err != nil {
+		return contracts.VMRef{}, err
 	}
-
-	if res, retain := r.retainForUnroutableDelete(ctx, vm, err); retain {
-		return contracts.VMRef{}, false, res
+	if err := placementTopologyError(vm, provider); err != nil {
+		return contracts.VMRef{}, err
 	}
-	return contracts.VMRef{}, true, ctrl.Result{}
+	ref, _ = pendingCreateRef(vm)
+	log.FromContext(ctx).Info("VM has a create in flight; sending an owner-checked delete to its pending host",
+		"id", ref.ID, "host", ref.HostID)
+	return ref, nil
 }
 
 // retainForUnroutableDelete decides the finalizer of a VM being deleted whose

@@ -841,8 +841,11 @@ func (r *VirtualMachineReconciler) handleDeletion(ctx context.Context, vm *infra
 	// Delete to — and releasing it would leave that domain running. Its delete
 	// is held like a placed one's (A6.1), until a pendingHost points at the
 	// domain or force-delete / orphan-on-delete (above) releases it.
-	if !vmIsBound(vm) && heldForOwnDomainElsewhere(vm) && !hasForceDeleteAnnotation(vm) {
-		return r.holdDelete(ctx, vm, k8s.ReasonOwnDomainOnAnotherHost, ownDomainUnplacedDeleteMessage, errOwnDomainUnplaced), nil
+	if !vmIsBound(vm) && heldForOwnDomainElsewhere(vm) {
+		if !hasForceDeleteAnnotation(vm) {
+			return r.holdDelete(ctx, vm, k8s.ReasonOwnDomainOnAnotherHost, ownDomainUnplacedDeleteMessage, errOwnDomainUnplaced), nil
+		}
+		return r.releaseLeavingHypervisorVM(ctx, vm, vmLeftOwnDomainElsewhere)
 	}
 
 	// Get provider if we have a provider ref and either a VM ID or a clustered
@@ -858,7 +861,7 @@ func (r *VirtualMachineReconciler) handleDeletion(ctx context.Context, vm *infra
 			if res, retain := r.retainForUnroutableDelete(ctx, vm, err); retain {
 				return res, nil
 			}
-			return r.removeFinalizer(ctx, vm)
+			return r.releaseLeavingHypervisorVM(ctx, vm, vmLeftNotRoutable)
 		}
 
 		// A Provider in another namespace that does not select this one — or
@@ -874,7 +877,8 @@ func (r *VirtualMachineReconciler) handleDeletion(ctx context.Context, vm *infra
 				if res, retain := r.retainForUnroutableDelete(ctx, vm, err); retain {
 					return res, nil
 				}
-				// force-delete: the finalizer is removed below without any provider call.
+				// force-delete: released without any provider call.
+				return r.releaseLeavingHypervisorVM(ctx, vm, vmLeftNotRoutable)
 			case errors.IsNotFound(err):
 				// Provider not found, continue with cleanup
 			default:
@@ -882,24 +886,29 @@ func (r *VirtualMachineReconciler) handleDeletion(ctx context.Context, vm *infra
 				metrics.RecordError(errReasonDepsError, metrics.ComponentManager)
 				return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 			}
-		} else if ref, ok, res := r.deletionTarget(ctx, vm, provider); !ok {
-			// deletionTarget decided (an unbound clustered VM, or one bound
-			// through another Provider object, without the force-delete escape
-			// hatch): retain the finalizer.
-			return res, nil
+		} else if ref, routeErr := r.deletionTarget(ctx, vm, provider); routeErr != nil {
+			// No delete can be routed (an unbound clustered VM, a topology
+			// mismatch, or one bound through another Provider object): the
+			// finalizer is retained, unless force-delete releases it without
+			// any provider call.
+			if res, retain := r.retainForUnroutableDelete(ctx, vm, routeErr); retain {
+				return res, nil
+			}
+			return r.releaseLeavingHypervisorVM(ctx, vm, vmLeftNotRoutable)
 		} else if ref.ID != "" {
 			// Delete VM from provider. A Provider that exists but has no
 			// usable client (its runtime is not Running, e.g. during every
 			// provider rollout; TLS, dial or Validate failing) was sent
 			// nothing, so the hypervisor VM may still exist: releasing the
 			// finalizer here would leave it running unmanaged. The delete is
-			// held and retried instead; only force-delete releases it (the
-			// finalizer is then removed below without any provider call).
+			// held and retried instead; only force-delete releases it,
+			// without any provider call.
 			providerInstance, err := r.getProviderInstance(ctx, provider)
 			if err != nil {
 				if res, retain := r.retainForUnavailableProvider(ctx, vm, ref.Routed(), err); retain {
 					return res, nil
 				}
+				return r.releaseLeavingHypervisorVM(ctx, vm, vmLeftProviderUnavailable)
 			} else {
 				logger.Info("Deleting VM from provider", "id", ref.ID, "host", ref.HostID)
 				// A routed (clustered) ref carries the VM's owner: the provider
@@ -912,13 +921,16 @@ func (r *VirtualMachineReconciler) handleDeletion(ctx context.Context, vm *infra
 						logger.Info("VM deletion initiated", "taskRef", taskRef)
 						// TODO: Wait for task completion in future iterations
 					}
-				case contracts.IsNotFound(err) && ref.Routed() && heldForOwnDomainElsewhere(vm) && !hasForceDeleteAnnotation(vm):
+				case contracts.IsNotFound(err) && ref.Routed() && heldForOwnDomainElsewhere(vm):
 					// The VM's last create found its OWN domain on another host
 					// (ADR-0007 A6.1): nothing is on its pending host, but
 					// releasing the finalizer would leave that domain running.
 					// Keep it until pendingHost points at that host (the next
 					// Delete then removes it), or force-delete / orphan-on-delete.
-					return r.holdDelete(ctx, vm, k8s.ReasonOwnDomainOnAnotherHost, ownDomainDeleteMessage, err), nil
+					if !hasForceDeleteAnnotation(vm) {
+						return r.holdDelete(ctx, vm, k8s.ReasonOwnDomainOnAnotherHost, ownDomainDeleteMessage, err), nil
+					}
+					return r.releaseLeavingHypervisorVM(ctx, vm, vmLeftOwnDomainElsewhere)
 				case contracts.IsNotFound(err):
 					// The hypervisor VM is already gone — nothing to orphan, so
 					// proceed to finalizer removal (idempotent delete). A clustered
@@ -931,6 +943,7 @@ func (r *VirtualMachineReconciler) handleDeletion(ctx context.Context, vm *infra
 					logger.Error(err, "Provider VM delete failed but force-delete annotation is set; removing finalizer (the provider VM may be orphaned)",
 						"id", ref.ID, "annotation", forceDeleteAnnotation)
 					metrics.RecordError(errReasonProviderDelete, metrics.ComponentManager)
+					return r.releaseLeavingHypervisorVM(ctx, vm, vmLeftDeleteFailed)
 				case contracts.IsVMDiskInUse(err):
 					// The provider refused BEFORE changing anything: other VMs on
 					// the hypervisor depend on this one (e.g. a libvirt linked
@@ -1212,6 +1225,49 @@ func (r *VirtualMachineReconciler) orphanOnDelete(ctx context.Context, vm *infra
 		"id", vm.Status.ID, "provider", provider.String(), "annotation", infravirtrigaudiov1beta1.VirtualMachineOrphanOnDeleteAnnotation)
 	r.recordEvent(vm, corev1.EventTypeNormal, eventReasonOrphaned, msg)
 	return r.removeFinalizer(ctx, vm)
+}
+
+// eventReasonVMLeftOnHypervisor is the Warning event reason recorded when the
+// force-delete annotation releases a VirtualMachine whose hypervisor VM was not
+// (confirmed) deleted — the audit trail of every such release, like a
+// VMSnapshot's SnapshotLeftOnHypervisor.
+const eventReasonVMLeftOnHypervisor = "VMLeftOnHypervisor"
+
+// Why a force-delete release left the hypervisor VM in place, as the
+// VMLeftOnHypervisor event says it. Each is constant: no resolver, endpoint or
+// host text ever goes into the event (ADR-0007 A6, threat 5); those are in the
+// manager log.
+const (
+	vmLeftProviderUnavailable = "the manager could not reach its Provider, so no delete was sent"
+	vmLeftDeleteFailed        = "the provider's Delete failed"
+	vmLeftNotRoutable         = "no provider delete could be routed for it"
+	vmLeftOwnDomainElsewhere  = "its own domain is on another host of its Provider, where no delete was sent"
+)
+
+// releaseLeavingHypervisorVM removes the finalizer of a VirtualMachine that
+// carries the force-delete annotation although its hypervisor VM was not
+// (confirmed) deleted — why is one of the vmLeft* constants — and, once the
+// finalizer is gone, records a VMLeftOnHypervisor Warning event naming the VM,
+// its provider id and Provider, and that the hypervisor VM may remain. The
+// host is logged, never put in the event.
+func (r *VirtualMachineReconciler) releaseLeavingHypervisorVM(
+	ctx context.Context,
+	vm *infravirtrigaudiov1beta1.VirtualMachine,
+	why string,
+) (ctrl.Result, error) {
+	provider := placementProviderKey(vm)
+	log.FromContext(ctx).Info("force-delete: removing the finalizer without a confirmed provider delete; the hypervisor VM may remain",
+		"id", vm.Status.ID, "host", placementHostForLog(vm), "provider", provider.String(), "cause", why,
+		"annotation", forceDeleteAnnotation)
+	res, err := r.removeFinalizer(ctx, vm)
+	if err != nil {
+		return res, err
+	}
+	r.recordEvent(vm, corev1.EventTypeWarning, eventReasonVMLeftOnHypervisor, fmt.Sprintf(
+		"%s=true: VirtualMachine %s/%s was removed without a confirmed provider delete (%s); its hypervisor VM "+
+			"(id %q, Provider %s) may remain, unmanaged — check for it and remove it by hand",
+		forceDeleteAnnotation, vm.Namespace, vm.Name, why, vm.Status.ID, provider))
+	return res, nil
 }
 
 // vmDependencies are the objects a VirtualMachine references, resolved for

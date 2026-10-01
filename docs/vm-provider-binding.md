@@ -254,6 +254,13 @@ a cross-namespace `Provider` the VM's namespace may not use
 (`ConsumerNotAllowed`)), or when the manager cannot reach the `Provider`
 (`ProviderUnavailable`, below).
 It is an escape hatch; to detach a VM on purpose, use `orphan-on-delete`.
+Every force-delete release that did not (confirmably) delete the hypervisor VM
+records a `Warning` event **`VMLeftOnHypervisor`** on the `VirtualMachine`,
+naming it, its provider id, its `Provider` and why nothing was deleted (the
+Provider could not be reached, its `Delete` failed, no delete could be routed,
+or its own domain is on another host) — never a host or a provider error; the
+manager log has those (`force-delete: removing the finalizer without a confirmed
+provider delete`). Use it to find hypervisor VMs left behind.
 On a clustered `Provider`, a force-delete that releases a VM whose `Delete`
 failed or was held (`HostUnreachable`, `DiskCheckFailed`, `DiskInUse`,
 `OwnDomainOnAnotherHost`, `ProviderUnavailable`) leaves its domain running on

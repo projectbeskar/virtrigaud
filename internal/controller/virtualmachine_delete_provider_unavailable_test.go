@@ -352,6 +352,107 @@ func TestHandleDeletion_ProviderUnavailable_ThenDeleteFails(t *testing.T) {
 	assert.Equal(t, failed.ResourceVersion, again.ResourceVersion, "a repeated ordinary failure writes nothing")
 }
 
+// leftOnHypervisorEvents returns the VMLeftOnHypervisor Warning events
+// buffered in rec (draining it).
+func leftOnHypervisorEvents(rec *record.FakeRecorder) []string {
+	var out []string
+	for _, e := range drainEvents(rec) {
+		if strings.HasPrefix(e, "Warning "+eventReasonVMLeftOnHypervisor) {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+// TestHandleDeletion_ForceDeleteRecordsVMLeftOnHypervisor: every force-delete
+// release that removes the finalizer without a successful provider Delete
+// records exactly one VMLeftOnHypervisor Warning event naming the VM, its id
+// and the constant cause — never the resolver's error, an endpoint, the host or
+// the provider's answer. A completed or already-done delete records none.
+func TestHandleDeletion_ForceDeleteRecordsVMLeftOnHypervisor(t *testing.T) {
+	ctx := context.Background()
+	forced := map[string]string{forceDeleteAnnotation: "true"}
+	leaks := []string{"phase=Pending", "10.96.12.7", "host-alpha", "destroy failed", "unreachable host", "rpc error"}
+
+	singleHost := func(t *testing.T, resolver *switchableResolver, annotations map[string]string) (*VirtualMachineReconciler, *record.FakeRecorder, *infravirtrigaudiov1beta1.VirtualMachine) {
+		t.Helper()
+		vm := deletionVM("vm-left")
+		vm.Annotations = annotations
+		r := newTestReconciler(coverageTestScheme(t), resolver, vm, deletionProviderCR())
+		rec := record.NewFakeRecorder(16)
+		r.Recorder = rec
+		return r, rec, markForDeletion(t, r, vm)
+	}
+	clustered := func(t *testing.T, prov *routingProvider, resolverErr error, vm *infravirtrigaudiov1beta1.VirtualMachine) (*VirtualMachineReconciler, *record.FakeRecorder, *infravirtrigaudiov1beta1.VirtualMachine) {
+		t.Helper()
+		vm.Annotations = forced
+		r := clusteredFixture(t, prov, vm)
+		r.RemoteResolver = &switchableResolver{provider: prov, err: resolverErr}
+		rec := record.NewFakeRecorder(16)
+		r.Recorder = rec
+		return r, rec, deletingClusterVM(t, r, vm.Name)
+	}
+
+	for name, tc := range map[string]struct {
+		run   func(t *testing.T) (*VirtualMachineReconciler, *record.FakeRecorder, *infravirtrigaudiov1beta1.VirtualMachine)
+		cause string
+	}{
+		"single-host, Provider unreachable": {func(t *testing.T) (*VirtualMachineReconciler, *record.FakeRecorder, *infravirtrigaudiov1beta1.VirtualMachine) {
+			return singleHost(t, &switchableResolver{err: errRuntimeNotReady}, forced)
+		}, vmLeftProviderUnavailable},
+		"single-host, Delete failed": {func(t *testing.T) (*VirtualMachineReconciler, *record.FakeRecorder, *infravirtrigaudiov1beta1.VirtualMachine) {
+			return singleHost(t, &switchableResolver{provider: &deleteStubProvider{err: stderrors.New("VM 100 is running - destroy failed")}}, forced)
+		}, vmLeftDeleteFailed},
+		"clustered, Provider unreachable": {func(t *testing.T) (*VirtualMachineReconciler, *record.FakeRecorder, *infravirtrigaudiov1beta1.VirtualMachine) {
+			return clustered(t, &routingProvider{}, errValidateFailed, boundClusterVMForDelete())
+		}, vmLeftProviderUnavailable},
+		"clustered, host unreachable": {func(t *testing.T) (*VirtualMachineReconciler, *record.FakeRecorder, *infravirtrigaudiov1beta1.VirtualMachine) {
+			prov := &routingProvider{deleteErr: contracts.NewHostUnavailableError(`delete VM: host "host-alpha" is an unreachable host`, nil)}
+			return clustered(t, prov, nil, boundClusterVMForDelete())
+		}, vmLeftDeleteFailed},
+		"clustered, unbound (not routable)": {func(t *testing.T) (*VirtualMachineReconciler, *record.FakeRecorder, *infravirtrigaudiov1beta1.VirtualMachine) {
+			vm := boundClusterVMForDelete()
+			vm.Status.Placement = nil
+			return clustered(t, &routingProvider{}, nil, vm)
+		}, vmLeftNotRoutable},
+	} {
+		t.Run(name, func(t *testing.T) {
+			r, rec, deleting := tc.run(t)
+			_, err := r.handleDeletion(ctx, deleting)
+			require.NoError(t, err)
+			assert.True(t, apierrors.IsNotFound(r.Get(ctx, client.ObjectKeyFromObject(deleting), &infravirtrigaudiov1beta1.VirtualMachine{})),
+				"force-delete releases the finalizer")
+			events := leftOnHypervisorEvents(rec)
+			require.Len(t, events, 1, "one audit event per force-delete release")
+			assert.Contains(t, events[0], deleting.Namespace+"/"+deleting.Name)
+			assert.Contains(t, events[0], `"`+deleting.Status.ID+`"`)
+			assert.Contains(t, events[0], tc.cause)
+			assert.Contains(t, events[0], "may remain")
+			for _, leak := range leaks {
+				assert.NotContains(t, events[0], leak)
+			}
+		})
+	}
+
+	for name, deleteErr := range map[string]error{
+		"deleted":       nil,
+		"already gone":  contracts.NewNotFoundError("delete: VM not found", nil),
+		"not forced ok": nil,
+	} {
+		t.Run("no event when the provider confirmed: "+name, func(t *testing.T) {
+			annotations := forced
+			if name == "not forced ok" {
+				annotations = nil
+			}
+			r, rec, deleting := singleHost(t, &switchableResolver{provider: &deleteStubProvider{err: deleteErr}}, annotations)
+			_, err := r.handleDeletion(ctx, deleting)
+			require.NoError(t, err)
+			assert.True(t, apierrors.IsNotFound(r.Get(ctx, client.ObjectKeyFromObject(deleting), &infravirtrigaudiov1beta1.VirtualMachine{})))
+			assert.Empty(t, leftOnHypervisorEvents(rec))
+		})
+	}
+}
+
 // logCapture returns a context whose controller-runtime logger writes every
 // line into the returned buffer.
 func logCapture() (context.Context, *bytes.Buffer) {
