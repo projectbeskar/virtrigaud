@@ -5,6 +5,46 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-10-01 08:28] - Slice 5 security review nits: NFS uid/gid 0 refused for every provider, single-host GetDiskInfo path parity, startup WARN for unsafe pool directories
+**Author:** @wrkode (William Rizzo)
+
+> **Operator note.**
+> - An nfs `VMMigration` with `spec.storage.nfs.uid: 0` or `gid: 0` now fails at Validating for **every** provider type (`NFSRootIdentityNotAllowed`). Use a dedicated non-zero uid/gid that owns the export.
+> - Grant the libvirt sudoers nfs rule only for the export meant for VirtRigaud: a root `qemu-img` connects from a reserved port, so a `secure` export now accepts the host as the SSH user's uid.
+> - A single-host libvirt Provider now names, at startup, any VM storage directory where clones and exports are refused.
+
+### Changed
+- `internal/controller/vmmigration_nfs_identity.go`, `vmmigration_controller.go`: `nfsRootIdentityRefusal` no longer depends on the provider types (maintainer decision). It is the first check in `handleValidatingPhase`, from the spec alone, before the source VM or any Provider is read and before any side effect.
+  - Result: `Validating=False`, reason `NFSRootIdentityNotAllowed`, and the message "… set to 0 (root) is not allowed: … Use a dedicated non-zero uid/gid that owns the export, or leave them unset".
+  - It is still a typed check, not a CRD minimum: tightening v1beta1 is a breaking API change, and the condition says why.
+- `internal/providers/libvirt/provider_virsh.go`, `privileged_copy.go`: a single-host `GetDiskInfo` now refuses (`InvalidArgument`) an explicit `DiskId` path that is not one of the domain's disks. This matches the clustered path and covers the pvc export that copies what `GetDiskInfo` resolves.
+  - Before, the SSH user ran a format-probing `qemu-img info` on that file.
+  - `readDiskInfoOnHost` always pins the definition's format and reads nothing without one.
+- `internal/providers/libvirt/disk_mode.go`, `provider.go`: the WARN for a group- or world-writable, non-sticky VM storage directory now says that clones and exports there are REFUSED, and points to the docs.
+  - A single-host Provider runs the check at startup for every VM storage directory (`warnUnsafeVMStorageDirs`; best-effort, 30 s bound).
+  - A clustered Provider checks each host's pool directory on first use.
+- `internal/providers/libvirt/testdata/single_host_snapshot_clone_disk.golden.json`: regenerated in its own commit. Only `diskinfo-explicit-path` changed: it is now refused, and the probing read and the snapshot listing are gone. `single_host_power_reconfigure` and `single_host_listvms` are byte-identical.
+- Tests:
+  - `TestNFSRootIdentityRefusal`;
+  - `TestVMMigration_NFSRootIdentityFailsAtValidating` (all 9 source/target type pairs);
+  - `TestVMMigration_NFSRootIdentityIsCheckedFromTheSpecAlone`;
+  - `TestSingleHost_GetDiskInfo_CallerPathMustBeTheDomainsDisk`;
+  - `TestWarnUnsafeVMStorageDirs_NamesTheDirectoryAtStartup`.
+- Docs:
+  - `docs/upgrading.md`: a breaking-change row for uid/gid 0, and behaviour bullets;
+  - `docs/libvirt-clones.md`: the reserved source port and `secure` exports next to the sudoers nfs rule, a single-host `GetDiskInfo` path, and a new Troubleshooting section;
+  - `docs/release-notes/next.md` and the ADR-0007 Slice 5 amendment;
+  - `examples/vmmigration-nfs.yaml` and `examples/migration/README.md`.
+
+### Why
+The round-3 security review approved with nits. William Rizzo decided that uid/gid 0 is refused for every provider: every provider presents the identity as AUTH_SYS, which is root on an export without `root_squash`. Not done (optional nit 2): caching the chain-image check in the disk in-use scan. The symlink check is per file, so it would cost one more host round trip per image on every scan, or a change to the kind-check script that the copy path and the golden share. The scan's root reads stay format-pinned `qemu-img info` only.
+
+### Impact
+- [x] Breaking change
+- [x] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-09-30 17:26] - ADR-0007 Slice 5 security review: libvirt root copies confined (NFS identity, definition formats, swappable chains, exact sudoers), host-safe tests
 **Author:** @wrkode (William Rizzo)
 
