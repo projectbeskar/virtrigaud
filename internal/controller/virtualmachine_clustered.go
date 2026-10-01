@@ -490,6 +490,14 @@ var deleteBlockedMessages = map[string]string{
 	k8s.ReasonDiskInUse: fmt.Sprintf("Delete blocked: another VM — on this VirtualMachine's host (e.g. a linked clone of "+
 		"it) or on another host of its Provider — uses its disk, so nothing was deleted; delete that VM first. It is "+
 		"re-checked every %s. %s", vmDeleteBlockedRetryInterval, deleteBlockedEscape),
+	// Also the Ready message of a single-host VM held for the same reason
+	// (retainForUnavailableProvider), so it names neither a domain nor a host.
+	k8s.ReasonProviderUnavailable: fmt.Sprintf("Delete blocked: the manager cannot reach this VirtualMachine's Provider "+
+		"(its provider runtime is not running or not ready, or a connection to it cannot be set up), so no delete was "+
+		"sent and the hypervisor VM may still exist. The finalizer is kept so that VM is not left running unmanaged; "+
+		"the delete is retried with a backoff of up to %s. To release the VirtualMachine without deleting the "+
+		"hypervisor VM, set %s=true (or %s=true); the hypervisor VM and its disks are then left for manual removal",
+		blockedRetryMax, infravirtrigaudiov1beta1.VirtualMachineOrphanOnDeleteAnnotation, forceDeleteAnnotation),
 }
 
 // retainForUncheckedDelete keeps the finalizer of a clustered VirtualMachine
@@ -515,13 +523,33 @@ func (r *VirtualMachineReconciler) retainForUncheckedDelete(
 }
 
 // holdDelete records a held delete of vm (see retainForUncheckedDelete) with
-// reason and msg and returns the backoff retry.
+// reason and msg, counted as a provider-delete error, and returns the backoff
+// retry.
 func (r *VirtualMachineReconciler) holdDelete(
 	ctx context.Context,
 	vm *infravirtrigaudiov1beta1.VirtualMachine,
 	reason, msg string,
 	err error,
 ) ctrl.Result {
+	metrics.RecordError(errReasonProviderDelete, metrics.ComponentManager)
+	return r.recordDeleteHold(ctx, vm, reason, msg, err)
+}
+
+// recordDeleteHold sets DeleteBlocked=True with reason and Ready=False/
+// DeleteBlocked, both with msg, on a clustered vm whose delete is held, and
+// returns the backoff retry counted from when the hold began. The status is
+// written, and a Warning event recorded, only when that changes something (a
+// new hold or a new reason): a VM being deleted is reconciled on every update
+// of it, so a write per retry would retry at once instead of on the backoff.
+// msg must therefore be the same on every retry of the same hold. The cause
+// (err) goes to the log only.
+func (r *VirtualMachineReconciler) recordDeleteHold(
+	ctx context.Context,
+	vm *infravirtrigaudiov1beta1.VirtualMachine,
+	reason, msg string,
+	err error,
+) ctrl.Result {
+	persisted := vm.Status.DeepCopy()
 	prev := meta.FindStatusCondition(vm.Status.Conditions, k8s.ConditionDeleteBlocked)
 	transition := prev == nil || prev.Status != metav1.ConditionTrue || prev.Reason != reason
 	meta.SetStatusCondition(&vm.Status.Conditions, metav1.Condition{
@@ -538,10 +566,11 @@ func (r *VirtualMachineReconciler) holdDelete(
 		Message:            msg,
 		ObservedGeneration: vm.Generation,
 	})
-	metrics.RecordError(errReasonProviderDelete, metrics.ComponentManager)
 	retry := blockedRetryBackoff(conditionSince(vm.Status.Conditions, k8s.ConditionDeleteBlocked))
 	log.FromContext(ctx).Info("Delete held; retaining the finalizer", "reason", reason, "retryAfter", retry.String(), "error", err.Error())
-	r.updateStatus(ctx, vm)
+	if !equality.Semantic.DeepEqual(persisted, &vm.Status) {
+		r.updateStatus(ctx, vm)
+	}
 	if transition {
 		r.recordEvent(vm, corev1.EventTypeWarning, k8s.ReasonDeleteBlocked, msg)
 	}
