@@ -5,6 +5,73 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-10-01 10:07] - VMClone/VMSnapshot holds no longer hot-loop the provider; VMClone and VMMigration honor powerOn
+**Author:** @wrkode (William Rizzo)
+
+> **Operator note.**
+> - **Behavior change:** a `VMClone` without `spec.options.powerOn: true`, and a `VMMigration` without `spec.target.powerOn: true`, now leaves the VM it produces **powered off** (`spec.powerState: Off`) — the documented default. Before, the field was never read and every clone or migrated VM came up running. Set `powerOn: true` where the VM must run.
+> - A vSphere migration target with `powerOn: false` is still booted briefly by the vSphere provider's Create before the VirtualMachine controller powers it off (hard); see `docs/upgrading.md`.
+> - libvirt hosts with more than one allowed image directory: extend the `VR_DISK_READ` sudoers rule to every directory in `VIRTRIGAUD_LIBVIRT_IMAGE_DIRS` (`docs/libvirt-clones.md`).
+
+### Fixed
+- `internal/controller/vmclone_controller.go`, `vmclone_clustered.go`: a held `VMClone` no longer calls the provider in a tight loop. Before the Clone RPC the controller marked the clone `Phase=Cloning`, `startTime=now` and `Cloning=True` in memory. A refused clone (e.g. `SourceMustBePoweredOff`) flipped `Cloning` back to `False`. `internal/util/k8s.SetCondition` then gave the condition a new `lastTransitionTime` (and `observedGeneration`), so every held reconcile wrote a changed status. The VMClone's own watch fired at once and the next reconcile re-sent the Clone RPC. On a clustered libvirt Provider this was 325 Clone calls in 33 s, each three SSH `virsh` round trips; the 15 s → 5 min backoff never governed.
+  - The "clone started" status (`markCloneStarted`: Phase, start time, clone type, `Cloning=True`, `Ready=False/Cloning`) is now applied only after the provider accepted the Clone, single-host and clustered.
+  - `updateStatus` skips a write whose status equals the stored one at the same `resourceVersion` (`statusUnchanged`).
+  - Every hold is now idempotent: a repeated identical hold writes nothing. Covered holds:
+    - `SourceMustBePoweredOff` (both flows);
+    - `RestorePending` / `OwnDomainOnAnotherHost`;
+    - `SourceHostExcluded`, which now uses the same message for the name conflict and the excluded-host check that follows it;
+    - `HostUnavailable`, `CloneRetrying` (disk check, copy in progress, provider unavailable);
+    - landing host gone, cordoned or not Ready;
+    - the pre-schedule check (`ProviderLacksListOwnerFilter`, `RestorePending`);
+    - `Unschedulable`, `PlacementError`;
+    - the capability waits;
+    - single-host source-not-provisioned.
+  - A held clone never shows `Phase=Cloning`, `Cloning=True` or a `startTime`.
+  - `markFailed` clears a `True` Cloning condition (a failed clone task is not cloning).
+- `internal/controller/vmclone_capacity.go`: the `Unschedulable` clone message no longer embeds the next retry delay. That delay changed on every check, so a self-triggered burst ratcheted the backoff straight to its 2 min cap. The message now names the cap.
+- `internal/controller/vmsnapshot_controller.go`: a held `VMSnapshot` delete no longer loops. `retainForFailedSnapshotDelete` and `retainForUnaddressableSnapshotDelete` wrote "retried (next in <time since first failure>)" into the status. Between 15 s and 5 min after the first failure, every retry therefore rewrote the status and re-ran at once: a Validate + SnapshotDelete RPC per reconcile for up to five minutes per stuck delete. Both now name the backoff's cap and go through `holdSnapshotDelete`, which writes, and emits the `SnapshotDeleteFailed` Warning, only when the hold changed.
+- `internal/controller/vmclone_controller.go` (`buildTargetVM`, `cloneTargetPowerState`): `VMClone` `spec.options.powerOn` is honored. The produced VirtualMachine's `spec.powerState` is `On` for `powerOn: true` and `Off` otherwise, on the single-host and clustered flows; the clustered target carries it from its pre-RPC creation.
+  - Every provider's Clone leaves the clone powered off: vSphere `PowerOn: false`, libvirt define only, Proxmox clone, mock `Off`. So there is no power flap either way.
+- `internal/controller/vmmigration_controller.go` (`migrationTargetPowerState`): `VMMigration` `spec.target.powerOn` is honored the same way. A target that stays off still becomes `Ready`, so the migration completes.
+
+### Added
+- Tests:
+  - `internal/controller/vmclone_hold_idempotency_test.go`:
+    - `TestVMClone_SingleHost_SourceRunningHoldIsIdempotent`;
+    - `TestVMClone_Clustered_SourceRunningHoldIsIdempotent`;
+    - `TestVMClone_Clustered_EveryHoldIsIdempotent` (16 holds);
+    - `TestVMClone_SingleHost_PendingWaitsAreIdempotent`;
+    - `TestVMClone_AsyncCloneAfterAHoldShowsItIsCloning`;
+    - `TestVMClone_FailedTaskIsNotCloning`.
+
+    These drive the reconciler the way the watch does (re-reconcile while the stored object changes) and assert that a repeated hold leaves `resourceVersion` and status unchanged and requeues at its backoff. They fail on the previous code with "hot loop".
+  - `internal/controller/vmsnapshot_delete_hold_idempotency_test.go`: `TestVMSnapshot_FailedDeleteHoldIsIdempotent`.
+  - `internal/controller/vmclone_power_on_test.go`:
+    - `TestVMClone_SingleHost_PowerOnSetsTheTargetsPowerState`;
+    - `TestVMClone_Clustered_PowerOnSetsTheTargetsPowerState`;
+    - `TestVMClone_TargetPowerStateIsHonouredWithoutAFlap`;
+    - `TestCreatingPhase_PowerOnSetsTheTargetsPowerState`.
+
+### Changed
+- Docs:
+  - `docs/upgrading.md`: a breaking-change row for `powerOn`, including the vSphere migration-target caveat.
+  - `docs/release-notes/next.md`.
+  - `docs/libvirt-clones.md`:
+    - clone power state;
+    - a waiting clone writes nothing on a repeated refusal;
+    - a note that the disk in-use check also reads other domains' backing files in other allowed image directories, and how to extend `VR_DISK_READ` to each directory in `VIRTRIGAUD_LIBVIRT_IMAGE_DIRS` with the same `[^/ ]+` confinement.
+  - `examples/vmclone-basic.yaml`, `examples/vmmigration-*.yaml`, `examples/migration/*.yaml`: `powerOn` comments.
+
+### Why
+A lab run on a clustered libvirt Provider (2026-10-01) showed a `VMClone` of a running source calling Clone about 10 times a second while it waited for `SourceMustBePoweredOff`, a regression from the powered-off-source work in #369. An audit of the other controllers found the same self-trigger in the VMSnapshot delete retry. Separately, `powerOn` was a dead field: a `powerOn: false` clone came up running in the lab.
+
+### Impact
+- [x] Breaking change
+- [x] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-10-01 10:30] - Fix VirtualMachine delete orphaning the hypervisor VM while its Provider cannot be reached
 **Author:** @wrkode (William Rizzo)
 
