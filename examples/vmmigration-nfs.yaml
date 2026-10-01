@@ -16,9 +16,10 @@
 #      the identity that OWNS the export's files so every provider can read AND
 #      write the same staged object. Omitting them works only when every leg
 #      happens to present a uid the export already trusts.
-#      uid 0 / gid 0 are refused when either side is a libvirt Provider
+#      uid 0 / gid 0 are refused for every provider type at Validating
 #      (NFSRootIdentityNotAllowed): on an export without root_squash they are
-#      root. A libvirt export runs its qemu-img as root (needed for a VM with an
+#      root. Use a dedicated non-zero uid/gid that owns the export.
+#      A libvirt export runs its qemu-img as root (needed for a VM with an
 #      external snapshot) only when uid/gid are unset or equal to the provider's
 #      SSH user; any other identity is presented by the SSH user's own qemu-img.
 #   2. The NFS server must be reachable from the data plane of BOTH providers

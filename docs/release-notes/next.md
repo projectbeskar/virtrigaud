@@ -259,8 +259,9 @@ providers), and rollback caveats in
     an image in a directory other accounts can write (unless sticky);
   - its disk is neither qcow2 nor raw.
   An nfs export runs as root only with the SSH user's own NFS identity.
-  `nfs.uid`/`gid` 0 are refused for libvirt migrations
-  (`NFSRootIdentityNotAllowed`). Prerequisites: a QEMU with the
+  `nfs.uid`/`gid` 0 are refused for every nfs migration, whatever its
+  providers (`NFSRootIdentityNotAllowed`): use a dedicated non-zero uid/gid
+  that owns the export. Prerequisites: a QEMU with the
   CVE-2024-4467 fix, and a pool directory that is not group-writable. Replace
   any `qemu-img info -U *` sudoers wildcard with the documented regex rule.
   A clustered VM is placed only on a `Host` labelled

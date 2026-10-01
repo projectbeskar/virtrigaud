@@ -1485,10 +1485,11 @@ follows; A2's `pendingHost` is its prerequisite.
 >    and path with *exactly* the SSH user's `?uid=&gid=`, and drops every
 >    other libnfs option. A destination that names another uid or gid is
 >    never written as root: the SSH user's own `qemu-img` presents it. The
->    manager refuses `nfs.uid: 0` / `nfs.gid: 0` when either side is libvirt,
->    at Validating (`NFSRootIdentityNotAllowed`). This is a typed check, not a
->    CRD minimum: the rule is libvirt's, and tightening v1beta1 would reject
->    stored objects on update. The sudoers rule pins the nfs URL to
+>    manager refuses `nfs.uid: 0` / `nfs.gid: 0` at Validating
+>    (`NFSRootIdentityNotAllowed`) — for every provider type, by the
+>    maintainer's decision after the review: every provider presents the
+>    identity as AUTH_SYS. This is a typed check, not a CRD minimum:
+>    tightening v1beta1 is a breaking API change, and the condition says why. The sudoers rule pins the nfs URL to
 >    `[^?& ]+\?uid=<ssh uid>&gid=<ssh gid>$`.
 > 2. **The domain definition's format, everywhere root reads a disk.** The
 >    exports, `GetDiskInfo`, the in-use scan, Delete's own-chain walk and an

@@ -25,40 +25,31 @@ import (
 )
 
 // ReasonNFSRootIdentityNotAllowed is the VMMigration Validating condition
-// reason when spec.storage.nfs sets uid or gid to 0 and a libvirt Provider is
-// the migration's source or target. The migration fails at Validating, before
-// any side effect.
+// reason when spec.storage.nfs sets uid or gid to 0. The migration fails at
+// Validating, before any read of its source or providers and before any side
+// effect, whatever its source and target provider types.
 const ReasonNFSRootIdentityNotAllowed = "NFSRootIdentityNotAllowed"
 
 // nfsRootIdentityRefusal returns why an nfs migration must not run, or "" when
-// it may. A libvirt host's qemu-img presents spec.storage.nfs.uid and gid to
-// the NFS server as its AUTH_SYS identity, both when it writes the export and
-// when it reads the import. AUTH_SYS identities are whatever the client
+// it may: spec.storage.nfs.uid or gid is 0. Every provider's NFS client
+// presents that identity to the server as its AUTH_SYS credential — libvirt's
+// host qemu-img and vSphere's pod qemu-img through the libnfs URL, Proxmox's
+// node through setpriv — and AUTH_SYS identities are whatever the client
 // asserts, so uid or gid 0 is root on an export that does not squash root
 // (no_root_squash): enough to read or overwrite every file on the export,
-// other migrations' staged disks included. Leaving them unset presents the
-// provider's SSH user, as it always has.
+// other migrations' staged disks included. A dedicated non-zero uid/gid that
+// owns the export does what the field is for.
 //
-// This is a typed check rather than a CRD minimum of 1 because it depends on
-// the providers: the vSphere (pod-side) and Proxmox transports keep accepting
-// the values they accept today, and tightening the v1beta1 schema would also
-// reject updates to stored objects that carry uid 0.
-func nfsRootIdentityRefusal(migration *infrav1beta1.VMMigration, sourceProvider, targetProvider *infrav1beta1.Provider) string {
+// This is a typed check rather than a CRD minimum of 1: tightening the
+// v1beta1 schema is a breaking API change (an ADR under the project's rules),
+// and the API server's "should be greater than or equal to 1" would not tell
+// the requester why. The condition does.
+func nfsRootIdentityRefusal(migration *infrav1beta1.VMMigration) string {
 	if migrationBackendType(migration) != storagemigration.BackendNFS {
 		return ""
 	}
 	storage := migration.Spec.Storage
 	if storage == nil || storage.NFS == nil {
-		return ""
-	}
-	var sides []string
-	if sourceProvider != nil && sourceProvider.Spec.Type == infrav1beta1.ProviderTypeLibvirt {
-		sides = append(sides, "source")
-	}
-	if targetProvider != nil && targetProvider.Spec.Type == infrav1beta1.ProviderTypeLibvirt {
-		sides = append(sides, "target")
-	}
-	if len(sides) == 0 {
 		return ""
 	}
 	var fields []string
@@ -71,8 +62,7 @@ func nfsRootIdentityRefusal(migration *infrav1beta1.VMMigration, sourceProvider,
 	if len(fields) == 0 {
 		return ""
 	}
-	return fmt.Sprintf("%s set to 0 (root) is not allowed when the migration's %s is a libvirt Provider: the libvirt "+
-		"host presents this identity to the NFS server, where it is root on an export without root_squash. Leave "+
-		"uid and gid unset (the provider's SSH user) or set a non-root identity the export allows",
-		strings.Join(fields, " and "), strings.Join(sides, " and "))
+	return fmt.Sprintf("%s set to 0 (root) is not allowed: the provider presents this identity to the NFS server, "+
+		"where it is root on an export without root_squash. Use a dedicated non-zero uid/gid that owns the export, "+
+		"or leave them unset", strings.Join(fields, " and "))
 }

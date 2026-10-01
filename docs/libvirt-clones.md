@@ -372,10 +372,11 @@ disk export — therefore run `qemu-img convert` through passwordless
     source format still pinned. A VM with an external snapshot therefore cannot
     be exported to NFS with such an identity. To export one, leave `uid`/`gid`
     unset or set them to the SSH user's.
-  - `uid: 0` and `gid: 0` are refused at `Validating` when the source or target
-    is a libvirt Provider (`NFSRootIdentityNotAllowed`). AUTH_SYS identities
+  - `uid: 0` and `gid: 0` are refused at `Validating` for every `VMMigration`,
+    whatever its providers (`NFSRootIdentityNotAllowed`). AUTH_SYS identities
     are whatever the client claims, so on an export without `root_squash` they
-    would be root, able to read or overwrite every file there.
+    would be root, able to read or overwrite every file there. Use a dedicated
+    non-zero uid/gid that owns the export.
 - **Only when `sudo` itself refuses** does the copy run as the SSH user. That
   means `sudo` answers with its own refusal (no passwordless rule for the
   command, a password or terminal required, or not in sudoers), or `sudo` is
