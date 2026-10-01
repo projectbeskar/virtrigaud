@@ -763,21 +763,30 @@ func (r *VMSnapshotReconciler) retainForFailedSnapshotDelete(ctx context.Context
 		"snapshot_id", snapshot.Status.SnapshotID, "retryAfter", retryAfter.String())
 	metrics.RecordError(errReasonProviderDelete, metrics.ComponentManager)
 
-	msg := fmt.Sprintf("Provider could not delete the snapshot; the VMSnapshot is kept (the snapshot may still be on the hypervisor) "+
-		"and the delete is retried with a backoff of up to %s. Set %s=true to remove it anyway. Provider detail: %s",
-		snapshotDeleteRetryMax, forceDeleteAnnotation, sanitizeProviderDetail(err))
-	r.holdSnapshotDelete(ctx, snapshot, infrav1beta1.VMSnapshotReasonProviderError, msg)
+	// The provider's answer goes to the Warning event and the log, never into
+	// the status: its text can differ on every attempt (a single-host error
+	// can carry a connection's ephemeral port), and a status that changed on
+	// every retry would make each retry write it.
+	r.holdSnapshotDelete(ctx, snapshot, infrav1beta1.VMSnapshotReasonProviderError, snapshotDeleteFailedMessage,
+		fmt.Sprintf("%s Provider detail: %s", snapshotDeleteFailedMessage, sanitizeProviderDetail(err)))
 	return ctrl.Result{RequeueAfter: retryAfter}
 }
 
+// snapshotDeleteFailedMessage is the status message (and Ready / Deleting
+// condition message) of a VMSnapshot whose provider SnapshotDelete failed.
+// It is constant; the provider's answer is in the Warning event and the log.
+var snapshotDeleteFailedMessage = fmt.Sprintf("Provider could not delete the snapshot; the VMSnapshot is kept (the snapshot may "+
+	"still be on the hypervisor) and the delete is retried with a backoff of up to %s. Set %s=true to remove it anyway; the "+
+	"provider's answer is in the SnapshotDeleteFailed event.", snapshotDeleteRetryMax, forceDeleteAnnotation)
+
 // holdSnapshotDelete records a held delete of snapshot — Ready=False and
 // Deleting=False with reason and msg — and, only when that changes the stored
-// status, a SnapshotDeleteFailed Warning event and the status write. A
-// deleting VMSnapshot is reconciled on every update of it, so a retry that
-// rewrote its status would re-trigger itself at once (a SnapshotDelete RPC per
-// reconcile) instead of waiting for its backoff: msg must therefore be the
-// same on every retry of the same failure (no retry delay or timestamp in it).
-func (r *VMSnapshotReconciler) holdSnapshotDelete(ctx context.Context, snapshot *infrav1beta1.VMSnapshot, reason, msg string) {
+// status, a SnapshotDeleteFailed Warning event with eventMsg and the status
+// write. A retry of the same hold therefore writes nothing: msg must be the
+// same on every retry of the same failure (no retry delay, timestamp or
+// provider text in it), so the hold's backoff, not its own writes, paces the
+// retries.
+func (r *VMSnapshotReconciler) holdSnapshotDelete(ctx context.Context, snapshot *infrav1beta1.VMSnapshot, reason, msg, eventMsg string) {
 	before := snapshot.Status.DeepCopy()
 	snapshot.Status.Message = msg
 	for _, condType := range []string{infrav1beta1.VMSnapshotConditionReady, infrav1beta1.VMSnapshotConditionDeleting} {
@@ -792,7 +801,7 @@ func (r *VMSnapshotReconciler) holdSnapshotDelete(ctx context.Context, snapshot 
 	if equality.Semantic.DeepEqual(before, &snapshot.Status) {
 		return
 	}
-	r.Recorder.Event(snapshot, corev1.EventTypeWarning, "SnapshotDeleteFailed", msg)
+	r.Recorder.Event(snapshot, corev1.EventTypeWarning, "SnapshotDeleteFailed", eventMsg)
 	// Status update errors are intentionally ignored to avoid blocking reconciliation.
 	_ = r.updateStatus(ctx, snapshot)
 }
@@ -814,10 +823,14 @@ func (r *VMSnapshotReconciler) retainForUnaddressableSnapshotDelete(ctx context.
 	logging.FromContext(ctx).Info("No provider call can be made for the VM; retaining the VMSnapshot finalizer and retrying",
 		"snapshot_id", snapshot.Status.SnapshotID, "reason", reason, "retryAfter", retryAfter.String(), "error", err.Error())
 
+	// err is the operator's own refusal (vmRefFor): no provider text, only
+	// object names, a host and a reason, which change only when the objects
+	// do. It is kept in the status, so a retry of the same refusal writes
+	// nothing.
 	msg := fmt.Sprintf("%s. The VMSnapshot is kept (the snapshot may still be on the hypervisor) and its delete is retried "+
 		"with a backoff of up to %s. Set %s=true to remove it anyway, leaving the snapshot on the hypervisor. Detail: %v",
 		vmRefWaitMessage(err), snapshotDeleteRetryMax, forceDeleteAnnotation, err)
-	r.holdSnapshotDelete(ctx, snapshot, reason, msg)
+	r.holdSnapshotDelete(ctx, snapshot, reason, msg, msg)
 	return ctrl.Result{RequeueAfter: retryAfter}
 }
 
