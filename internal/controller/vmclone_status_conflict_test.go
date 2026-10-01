@@ -240,3 +240,35 @@ func TestVMClone_NoCloneFromAStaleCache(t *testing.T) {
 		})
 	}
 }
+
+// TestVMClone_Clustered_NoTargetFromAStaleCache: a clustered clone read from a
+// cache that does not show yet that it Failed creates no target VirtualMachine
+// and records nothing: its live status is untouched.
+func TestVMClone_Clustered_NoTargetFromAStaleCache(t *testing.T) {
+	ctx := context.Background()
+	cp := &clonerProvider{cloneResp: contracts.CloneResponse{TargetVmID: "default.clone-c-target"}}
+	r, clone := clusteredCloneFixture(t, boundSource(), cp)
+	stored := getClone(t, r, clone)
+	stored.Finalizers = []string{vmCloneFinalizer}
+	require.NoError(t, r.Update(ctx, stored))
+	stale := getClone(t, r, clone) // Pending/empty, as the cache still shows it
+	failed := stale.DeepCopy()
+	failed.Status.Phase = infrav1beta1.ClonePhaseFailed
+	failed.Status.Message = "clone failed: boom"
+	require.NoError(t, r.Status().Update(ctx, failed))
+	want := getClone(t, r, clone)
+
+	live := r.Client
+	r.APIReader = live
+	r.Client = &staleCloneClient{Client: live, stale: stale}
+	res := reconcileClone(t, r, clone, 1)
+
+	assert.Equal(t, cloneStaleReadRetryInterval, res.RequeueAfter, "retried shortly, from a fresh read")
+	err := live.Get(ctx, targetKey, &infrav1beta1.VirtualMachine{})
+	assert.True(t, client.IgnoreNotFound(err) == nil && err != nil, "no target VirtualMachine is created from a stale read")
+	got := &infrav1beta1.VMClone{}
+	require.NoError(t, live.Get(ctx, client.ObjectKeyFromObject(clone), got))
+	assert.Equal(t, want.ResourceVersion, got.ResourceVersion, "the live Failed is not written over")
+	assert.Equal(t, want.Status, got.Status)
+	assert.Zero(t, cp.cloneCnt)
+}

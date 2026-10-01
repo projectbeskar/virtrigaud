@@ -446,10 +446,11 @@ func (r *VMCloneReconciler) startClone(
 	// instead of issuing a second clone. It is written without a
 	// resourceVersion precondition (persistCloneStatus): a VMClone edited
 	// while the provider copied must not lose the clone it made. A VMClone
-	// deleted, re-created or moved on meanwhile is never written or bound.
+	// deleted, re-created or moved on meanwhile is never written or bound here
+	// (errCloneChanged); the next pass re-reads it (requeueOnCloneChanged).
 	if err := r.persistCloneStatus(ctx, clone, before); err != nil {
 		if stderrors.Is(err, errCloneChanged) {
-			return ctrl.Result{}, nil
+			return requeueOnCloneChanged(), nil
 		}
 		return ctrl.Result{}, err
 	}
@@ -1346,6 +1347,17 @@ func cloneStatusPatch(before *infrav1beta1.VMClone, status *infrav1beta1.VMClone
 func isTransientWriteError(err error) bool {
 	return errors.IsServerTimeout(err) || errors.IsTooManyRequests(err) || errors.IsTimeout(err) ||
 		errors.IsInternalError(err) || errors.IsServiceUnavailable(err) || errors.IsConflict(err)
+}
+
+// requeueOnCloneChanged is the result of a reconcile whose clone record was
+// refused (errCloneChanged). It is never an empty result: the VMClone watch
+// ignores status writes, and a refusal does not prove the record is missing —
+// a retry after a transport error can fail its own phase test because the
+// first attempt was applied. The next pass, from a fresh read, ends on a
+// VMClone that is gone, leaves a re-created one to its own reconcile, and
+// binds one whose record landed (the TargetVMID idempotency path).
+func requeueOnCloneChanged() ctrl.Result {
+	return ctrl.Result{RequeueAfter: cloneStaleReadRetryInterval}
 }
 
 // cloneStaleReadRetryInterval is the retry of a Clone not sent because the

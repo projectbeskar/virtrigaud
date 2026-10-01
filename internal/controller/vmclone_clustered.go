@@ -214,7 +214,7 @@ func (r *VMCloneReconciler) startClusteredClone(
 	// precondition (see startClone and persistCloneStatus).
 	if err := r.persistCloneStatus(ctx, clone, before); err != nil {
 		if errors.Is(err, errCloneChanged) {
-			return ctrl.Result{}, nil
+			return requeueOnCloneChanged(), nil
 		}
 		return ctrl.Result{}, err
 	}
@@ -325,6 +325,13 @@ func (r *VMCloneReconciler) ensureClusteredCloneTarget(
 		if allowed, res, liveErr := r.gateConsumers(ctx, r.liveReader(), clone, sourceVM, targetNamespace); !allowed {
 			return nil, res, true, liveErr
 		}
+		// The target is created, and its UID recorded on the VMClone, only
+		// for the live VMClone this reconcile read: a stale cache (e.g. a
+		// clone already Failed) creates nothing, and the record that follows
+		// cannot overwrite a live Failed.
+		if fresh, res, liveErr := r.confirmCloneNotStarted(ctx, clone); !fresh {
+			return nil, res, true, liveErr
+		}
 		target = r.buildTargetVM(clone, sourceVM, targetNamespace)
 		if createErr := r.Create(ctx, target); createErr != nil {
 			if apierrors.IsAlreadyExists(createErr) {
@@ -346,11 +353,11 @@ func (r *VMCloneReconciler) ensureClusteredCloneTarget(
 		clone.Status.TargetUID = string(target.UID)
 		if err := r.persistCloneStatus(ctx, clone, before); err != nil {
 			if errors.Is(err, errCloneChanged) {
-				// The VMClone this target was made for is gone or replaced:
-				// leave the (unplaced, empty) target to the VirtualMachine's
-				// owner; a re-created VMClone refuses it (no matching
-				// clone-uid marker).
-				return nil, ctrl.Result{}, true, nil
+				// The VMClone this target was made for is gone or replaced,
+				// or the record already landed: the next pass decides from a
+				// fresh read. A re-created VMClone refuses this (unplaced,
+				// empty) target — no matching clone-uid marker.
+				return nil, requeueOnCloneChanged(), true, nil
 			}
 			return nil, ctrl.Result{}, true, fmt.Errorf("record the created target VM %s/%s on VMClone %s/%s: %w",
 				target.Namespace, target.Name, clone.Namespace, clone.Name, err)

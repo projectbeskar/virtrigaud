@@ -17,7 +17,11 @@ limitations under the License.
 package controller
 
 import (
+	"context"
 	stderrors "errors"
+	"net"
+	"os"
+	"syscall"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -124,6 +128,44 @@ var _ = Describe("The record of an accepted clone (envtest)", func() {
 		Expect(got.Status.TargetVMID).To(BeEmpty())
 	})
 
+	It("binds a clone whose first record was applied but answered with a connection reset, without a second Clone", func() {
+		clone := newRecordTestClone(ns.Name)
+		Expect(k8sClient.Create(ctx, clone)).To(Succeed())
+		clone.Status.Phase = infravirtrigaudiov1beta1.ClonePhasePending
+		Expect(k8sClient.Status().Update(ctx, clone)).To(Succeed())
+		key := client.ObjectKeyFromObject(clone)
+
+		cp := &clonerProvider{cloneResp: contracts.CloneResponse{TargetVmID: ns.Name + ".web"}}
+		rec := record.NewFakeRecorder(100)
+		r := &VMCloneReconciler{Client: &applyThenResetOnce{Client: k8sClient}, APIReader: k8sClient, Scheme: k8sClient.Scheme(),
+			RemoteResolver: &stubResolver{provider: cp}, Recorder: rec}
+
+		// Finalizer, then the Clone: its record is applied, the answer lost,
+		// and the retry's own phase test fails (422) — errCloneChanged.
+		var res ctrl.Result
+		for i := 0; i < 3 && cp.cloneCnt == 0; i++ {
+			var err error
+			res, err = r.Reconcile(ctx, ctrl.Request{NamespacedName: key})
+			Expect(err).NotTo(HaveOccurred())
+		}
+		Expect(cp.cloneCnt).To(Equal(1))
+		Expect(res.RequeueAfter).To(Equal(cloneStaleReadRetryInterval), "never an empty result: the next pass re-reads the clone")
+
+		// The requeue binds the clone through its recorded target VM ID.
+		_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: key})
+		Expect(err).NotTo(HaveOccurred())
+		got := &infravirtrigaudiov1beta1.VMClone{}
+		Expect(k8sClient.Get(ctx, key, got)).To(Succeed())
+		Expect(got.Status.Phase).To(Equal(infravirtrigaudiov1beta1.ClonePhaseReady))
+		Expect(cp.cloneCnt).To(Equal(1), "no second Clone")
+		vm := &infravirtrigaudiov1beta1.VirtualMachine{}
+		Expect(k8sClient.Get(ctx, client.ObjectKey{Namespace: ns.Name, Name: "web"}, vm)).To(Succeed())
+		Expect(vm.Status.ID).To(Equal(ns.Name+".web"), "bound to the clone that was made")
+		for len(rec.Events) > 0 {
+			Expect(<-rec.Events).NotTo(ContainSubstring(cloneReasonRecordNotSaved))
+		}
+	})
+
 	It("lands on the VMClone it was made for despite a metadata edit", func() {
 		clone := newRecordTestClone(ns.Name)
 		Expect(k8sClient.Create(ctx, clone)).To(Succeed())
@@ -147,3 +189,32 @@ var _ = Describe("The record of an accepted clone (envtest)", func() {
 		Expect(got.Annotations).To(HaveKeyWithValue("example.com/poke", "1"), "the concurrent edit is kept")
 	})
 })
+
+// applyThenResetOnce applies the first VMClone status patch and then answers
+// it with a connection reset (the API server applied it; the answer was lost),
+// as a dropped connection does.
+type applyThenResetOnce struct {
+	client.Client
+	done bool
+}
+
+// Status returns the status writer that loses the first answer.
+func (c *applyThenResetOnce) Status() client.SubResourceWriter {
+	return &applyThenResetWriter{SubResourceWriter: c.Client.Status(), c: c}
+}
+
+// applyThenResetWriter is applyThenResetOnce's status writer.
+type applyThenResetWriter struct {
+	client.SubResourceWriter
+	c *applyThenResetOnce
+}
+
+// Patch applies the patch; the first VMClone patch's answer is a reset.
+func (w *applyThenResetWriter) Patch(ctx context.Context, obj client.Object, patch client.Patch, opts ...client.SubResourcePatchOption) error {
+	err := w.SubResourceWriter.Patch(ctx, obj, patch, opts...)
+	if _, isClone := obj.(*infravirtrigaudiov1beta1.VMClone); isClone && !w.c.done && err == nil {
+		w.c.done = true
+		return &net.OpError{Op: "read", Net: "tcp", Err: os.NewSyscallError("read", syscall.ECONNRESET)}
+	}
+	return err
+}
