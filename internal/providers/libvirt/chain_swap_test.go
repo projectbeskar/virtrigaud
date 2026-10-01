@@ -292,3 +292,27 @@ func TestSingleHost_GetDiskInfo_SwappableDiskIsReadAsTheSSHUser(t *testing.T) {
 		assert.False(t, strings.HasPrefix(c, "local sudo"), "never as root: %q", c)
 	}
 }
+
+// TestWarnUnsafeVMStorageDirs_NamesTheDirectoryAtStartup: a single-host
+// Provider checks every VM storage directory at startup and logs a WARN that
+// names a directory others can write — and says copies from it are refused —
+// and nothing for a safe one.
+func TestWarnUnsafeVMStorageDirs_NamesTheDirectoryAtStartup(t *testing.T) {
+	fx := newSCDFixture(t, map[string]string{scdDomain: scdDomainXML(scdDomain, scdDomainOpts{})})
+	fx.p.imageDirs = []string{"/srv/golden"}
+	fx.script("local", "unsafe-dir-images", "")
+	logs := captureLog(t)
+
+	fx.p.warnUnsafeVMStorageDirs(context.Background())
+
+	out := logs.String()
+	assert.Contains(t, out, "WARN /var/lib/libvirt/images, where VM disks are created, is writable by its group and is not sticky")
+	assert.Contains(t, out, "Full clones and disk exports of VMs whose disks are there, and copies written below it, are REFUSED")
+	assert.Contains(t, out, unsafeDiskDirDoc)
+	assert.NotContains(t, out, "WARN /srv/golden", "a safe directory is not reported")
+	calls := fx.calls()
+	assert.Contains(t, calls, "single virsh pool-dumpxml default")
+	for _, dir := range []string{"/srv/golden", "/var/lib/libvirt/images"} {
+		assert.Contains(t, calls, "local sh -c "+diskDirModeScript+" sh "+dir, "every VM storage directory is checked")
+	}
+}

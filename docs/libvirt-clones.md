@@ -497,6 +497,49 @@ These rules do not change two things:
   what is copied: keep them writable only by root and the SSH user (see
   [Pool directory](#clone-files-on-the-host)).
 
+## Troubleshooting
+
+### A clone or export fails: "the source VM's disk cannot be copied safely"
+
+**Symptom.** A `VMClone` or a `VMMigration` from a libvirt Provider fails with
+`FailedPrecondition`, or `VM_OPERATION_FAILED` on a clustered Provider, and a
+message such as:
+
+```
+the source VM's disk cannot be copied safely: an image of its chain is in a directory other accounts can write (details are in the provider log)
+```
+
+The message never names a host path. The provider log has the full reason,
+on a line that starts with `WARN Refusing to copy <disk>:`.
+
+| The message says | Cause | Fix |
+|---|---|---|
+| an image of its chain is in a directory other accounts can write | The pool directory, or the directory of a backing file, is group- or world-writable and not sticky | `chmod g-w,o-w <dir>`, or `chmod +t <dir>` |
+| the directory it would be written to can be written by other accounts | The same, for the directory the copy writes below: the clone's pool directory, or the source's directory for an s3 export | As above |
+| an image of its chain could not be checked / the directory it would be written to could not be checked | The SSH user could not `stat` the directory | Let the SSH user search the directory (`x`) |
+| an image of its chain is a symbolic link | The disk or a backing file is a symbolic link | Replace the link with the file it points to, with the VM off |
+| an image of its chain has an external data file | A qcow2 in the chain stores its data in a separate file | Flatten the image (`qemu-img convert`) with the VM off |
+| its disk format "…" is not qcow2 or raw | The domain's `<driver type>` is another format | Convert the disk to qcow2 and update the definition |
+| its image chain names a backing file without its format | A header names its backing file with no format | `qemu-img rebase -u -F <format> -b <backing> <image>`, with the VM off |
+| its image chain could not be read and verified | The chain could not be read, for example a `0600` overlay without the sudo rule | Add `VR_DISK_READ` ([The sudoers rule](#what-the-copies-run-as-root)) |
+
+**A directory others can write is named at startup.** Every refusal is
+logged, and the directory is also named before any copy is attempted:
+
+- A **single-host** Provider checks every directory VM disks live in (the
+  allowed image directories and the default pool's directory) when it starts.
+- A **clustered** Provider checks each host's pool directory on first use.
+
+For each one that another account can write and that is not sticky, the
+provider logs, once per directory:
+
+```
+WARN /var/lib/libvirt/images, where VM disks are created, is writable by its group and is not sticky: ... Full clones and disk exports of VMs whose disks are there, and copies written below it, are REFUSED (FailedPrecondition). ...
+```
+
+Check with `stat -c '%a %U:%G' <dir>`. A sticky directory (for example mode
+`1777` or `3777`) is accepted.
+
 ## Known limitations
 
 - Powering on the **source** VM of an existing linked clone lets its guest
