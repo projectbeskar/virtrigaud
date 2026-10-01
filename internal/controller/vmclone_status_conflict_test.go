@@ -157,12 +157,12 @@ func (w *editingStatusWriter) edit(ctx context.Context, obj client.Object) {
 		return
 	}
 	cur := &infrav1beta1.VMClone{}
-	require.NoError(w.c.t, w.c.Client.Get(ctx, w.c.key, cur))
+	require.NoError(w.c.t, w.c.Get(ctx, w.c.key, cur))
 	if cur.Annotations == nil {
 		cur.Annotations = map[string]string{}
 	}
 	cur.Annotations["example.com/poke"] = cur.ResourceVersion
-	require.NoError(w.c.t, w.c.Client.Update(ctx, cur))
+	require.NoError(w.c.t, w.c.Update(ctx, cur))
 }
 
 // Update edits the VMClone, then writes.
