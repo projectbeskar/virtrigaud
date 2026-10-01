@@ -1616,6 +1616,7 @@ func (r *VMMigrationReconciler) handleCreatingPhase(ctx context.Context, migrati
 		},
 		Spec: infrav1beta1.VirtualMachineSpec{
 			ProviderRef: migration.Spec.Target.ProviderRef,
+			PowerState:  migrationTargetPowerState(migration),
 		},
 	}
 	if targetNamespace != migration.Namespace && targetVM.Spec.ProviderRef.Namespace == "" {
@@ -1693,6 +1694,19 @@ func (r *VMMigrationReconciler) handleCreatingPhase(ctx context.Context, migrati
 
 	// Requeue to check VM status
 	return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+}
+
+// migrationTargetPowerState is the desired power state (spec.powerState) of the
+// VirtualMachine a migration creates: On when the migration asks for it
+// (spec.target.powerOn: true), Off otherwise — powerOn defaults to false. It
+// is always set explicitly, because the VirtualMachine controller treats an
+// empty spec.powerState as On. A target that stays Off still becomes Ready
+// (its observed power state matches its spec), so the migration completes.
+func migrationTargetPowerState(migration *infrav1beta1.VMMigration) infrav1beta1.PowerState {
+	if migration.Spec.Target.PowerOn {
+		return infrav1beta1.PowerStateOn
+	}
+	return infrav1beta1.PowerStateOff
 }
 
 // handleValidatingTargetPhase validates the migrated VM

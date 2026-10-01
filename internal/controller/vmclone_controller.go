@@ -693,8 +693,10 @@ func applyClonedBinding(vm *infrav1beta1.VirtualMachine, landing *infrav1beta1.P
 
 // buildTargetVM constructs the target VirtualMachine CR for a clone: it carries
 // the adopted label and clone provenance annotations, inherits the source VM's
-// provider and class (unless the clone overrides the class), and copies the
-// requested networks/placement. Status.ID is seeded separately by bindTargetVM.
+// provider and class (unless the clone overrides the class), copies the
+// requested networks/placement, and sets the desired power state from
+// spec.options.powerOn (cloneTargetPowerState). Status.ID is seeded separately
+// by bindTargetVM.
 func (r *VMCloneReconciler) buildTargetVM(
 	clone *infrav1beta1.VMClone,
 	sourceVM *infrav1beta1.VirtualMachine,
@@ -745,6 +747,7 @@ func (r *VMCloneReconciler) buildTargetVM(
 		Spec: infrav1beta1.VirtualMachineSpec{
 			ProviderRef: providerRef,
 			ClassRef:    classRef,
+			PowerState:  cloneTargetPowerState(clone),
 		},
 	}
 	if len(clone.Spec.Target.Networks) > 0 {
@@ -791,6 +794,21 @@ func markCloneStarted(clone *infrav1beta1.VMClone, linked bool, started metav1.T
 		metav1.ConditionTrue, infrav1beta1.VMCloneReasonCloning, msg)
 	k8s.SetCondition(&clone.Status.Conditions, infrav1beta1.VMCloneConditionReady,
 		metav1.ConditionFalse, infrav1beta1.VMCloneReasonCloning, cloneInProgressMessage)
+}
+
+// cloneTargetPowerState is the desired power state (spec.powerState) of the
+// VirtualMachine a clone produces: On when the clone asks for it
+// (spec.options.powerOn: true), Off otherwise — powerOn defaults to false. It
+// is always set explicitly, because the VirtualMachine controller treats an
+// empty spec.powerState as On. Every provider leaves a clone powered off
+// (vSphere, libvirt, Proxmox, mock), so an Off target is never powered on and
+// an On target is powered on once, by the VirtualMachine controller, after the
+// bind: no power flap either way.
+func cloneTargetPowerState(clone *infrav1beta1.VMClone) infrav1beta1.PowerState {
+	if clone.Spec.Options != nil && clone.Spec.Options.PowerOn {
+		return infrav1beta1.PowerStateOn
+	}
+	return infrav1beta1.PowerStateOff
 }
 
 // finalizeReady marks the VMClone Ready and records the target reference.
