@@ -38,6 +38,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	infrav1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
@@ -900,11 +901,17 @@ func (r *VMCloneReconciler) handleDeletion(ctx context.Context, clone *infrav1be
 }
 
 // markFailed sets the VMClone to the Failed phase with a Ready=False / Failed
-// condition and persists status. It does not requeue, and Failed is terminal:
-// the Reconcile entry short-circuits on a Failed phase, so a failed clone is
-// not retried in place — recreate the VMClone to retry. This is deliberate:
-// a clone is a one-shot job and a partial provider-side clone makes blind
-// auto-retry unsafe (it could leave or create a duplicate provider VM).
+// condition and persists status. Failed is terminal: the Reconcile entry
+// short-circuits on a Failed phase, so a failed clone is not retried in place
+// — recreate the VMClone to retry. This is deliberate: a clone is a one-shot
+// job and a partial provider-side clone makes blind auto-retry unsafe (it
+// could leave or create a duplicate provider VM).
+//
+// It requeues once, explicitly: the next reconcile of the Failed clone makes
+// its one-time target decision (removeFailedClusteredTarget — a clustered
+// clone removes the target VirtualMachine it created), and retries a status
+// write that failed. The VMClone watch ignores the clone's own status writes
+// (GenerationChangedPredicate), so nothing else would bring that reconcile.
 func (r *VMCloneReconciler) markFailed(ctx context.Context, clone *infrav1beta1.VMClone, reason, message string) ctrl.Result {
 	logger := logging.FromContext(ctx)
 	logger.Info("VMClone failed", "reason", reason, "message", message)
@@ -924,7 +931,7 @@ func (r *VMCloneReconciler) markFailed(ctx context.Context, clone *infrav1beta1.
 	r.Recorder.Event(clone, "Warning", reason, message)
 
 	_ = r.updateStatus(ctx, clone) //nolint:errcheck // status errors retried next reconcile
-	return ctrl.Result{}
+	return ctrl.Result{Requeue: true}
 }
 
 // markPending sets the VMClone to the Pending phase (still waiting on a
@@ -1288,7 +1295,14 @@ func (r *VMCloneReconciler) clonesForGrantChange(ctx context.Context, indexValue
 	})
 }
 
-// SetupWithManager sets up the controller with the Manager. Besides its own
+// SetupWithManager sets up the controller with the Manager. Its own VMClones
+// are reconciled on create, delete and spec changes only (a generation change;
+// setting deletionTimestamp bumps it too): a status or metadata-only update —
+// the controller's own status writes, or a tenant re-annotating a waiting
+// clone in a loop — never re-runs a held clone ahead of its backoff, so it
+// never drives a provider call. The controller reads nothing from a VMClone's
+// labels or annotations, and every step that must follow one of its own writes
+// asks for it with an explicit requeue. Besides its own
 // VMClones it watches Namespaces, but only for changes to the cross-namespace
 // grant annotation, to re-drive clones whose target namespace just granted or
 // revoked access; consumer-grant changes (Namespace labels, the
@@ -1307,7 +1321,7 @@ func (r *VMCloneReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		return err
 	}
 	b := ctrl.NewControllerManagedBy(mgr).
-		For(&infrav1beta1.VMClone{}).
+		For(&infrav1beta1.VMClone{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		Watches(&corev1.Namespace{},
 			handler.EnqueueRequestsFromMapFunc(r.clonesTargetingNamespace),
 			builder.WithPredicates(allowedSourceNamespacesChanged())).

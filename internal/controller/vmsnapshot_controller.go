@@ -28,8 +28,11 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/event"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	infrav1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
@@ -365,8 +368,9 @@ func (r *VMSnapshotReconciler) createSnapshot(ctx context.Context, snapshot *inf
 		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 	}
 
-	// Snapshot is ready
-	return ctrl.Result{}, nil
+	// Snapshot is ready: requeue so the next reconcile schedules its
+	// retention check (the watch ignores this status write).
+	return ctrl.Result{Requeue: true}, nil
 }
 
 // checkSnapshotCreation checks if snapshot creation is complete
@@ -410,7 +414,9 @@ func (r *VMSnapshotReconciler) checkSnapshotCreation(ctx context.Context, snapsh
 			return ctrl.Result{}, err
 		}
 
-		return ctrl.Result{}, nil
+		// Ready: the next reconcile schedules the retention check (the watch
+		// ignores this status write).
+		return ctrl.Result{Requeue: true}, nil
 	}
 
 	// Get the provider to check task status (it must still be usable from
@@ -485,7 +491,10 @@ func (r *VMSnapshotReconciler) checkSnapshotCreation(ctx context.Context, snapsh
 			return ctrl.Result{}, err
 		}
 
-		return ctrl.Result{}, nil
+		// Ready or Failed: the next reconcile takes it from its new phase (the
+		// retention check, or the failed-snapshot recheck); the watch ignores
+		// this status write.
+		return ctrl.Result{Requeue: true}, nil
 	}
 
 	// Task still in progress
@@ -535,9 +544,13 @@ func (r *VMSnapshotReconciler) handleRetention(ctx context.Context, snapshot *in
 		}
 	}
 
-	// Check again in an hour
-	return ctrl.Result{RequeueAfter: time.Hour}, nil
+	// Check again later
+	return ctrl.Result{RequeueAfter: snapshotRetentionCheckInterval}, nil
 }
+
+// snapshotRetentionCheckInterval is how often a Ready snapshot's retention
+// policy is re-checked.
+const snapshotRetentionCheckInterval = time.Hour
 
 // handleDeletion handles snapshot deletion
 func (r *VMSnapshotReconciler) handleDeletion(ctx context.Context, snapshot *infrav1beta1.VMSnapshot) (ctrl.Result, error) {
@@ -1053,15 +1066,50 @@ func (r *VMSnapshotReconciler) snapshotsForGrantChange(ctx context.Context, inde
 	return requestsForGrantChange(ctx, r.Client, &infrav1beta1.VMSnapshotList{}, indexValue, nil)
 }
 
-// SetupWithManager sets up the controller with the Manager. Besides its own
-// VMSnapshots it watches consumer-grant changes (Namespace labels, Provider
-// selectors) to re-drive snapshots refused with ConsumerNotAllowed.
+// snapshotUpdateNeedsReconcile reports whether an update of a VMSnapshot is
+// reconciled: a spec change or the start of its deletion (both change its
+// generation), or a change of the force-delete annotation — the only metadata
+// the controller reads, which releases a held delete at once. Any other
+// status- or metadata-only update is not: the controller's own status writes,
+// or a tenant re-annotating a snapshot whose delete is held, would otherwise
+// re-run the provider's SnapshotDelete ahead of its backoff. Every step that
+// must follow one of the controller's own writes asks for it with an explicit
+// requeue.
+func snapshotUpdateNeedsReconcile(oldSnap, newSnap *infrav1beta1.VMSnapshot) bool {
+	return oldSnap.Generation != newSnap.Generation ||
+		oldSnap.Annotations[forceDeleteAnnotation] != newSnap.Annotations[forceDeleteAnnotation]
+}
+
+// snapshotUpdatePredicate applies snapshotUpdateNeedsReconcile to update
+// events; create, delete and generic events always pass.
+func snapshotUpdatePredicate() predicate.Predicate {
+	return predicate.Funcs{
+		UpdateFunc: func(e event.UpdateEvent) bool {
+			oldSnap, ok := e.ObjectOld.(*infrav1beta1.VMSnapshot)
+			if !ok {
+				return true
+			}
+			newSnap, ok := e.ObjectNew.(*infrav1beta1.VMSnapshot)
+			if !ok {
+				return true
+			}
+			return snapshotUpdateNeedsReconcile(oldSnap, newSnap)
+		},
+	}
+}
+
+// SetupWithManager sets up the controller with the Manager. Its own
+// VMSnapshots are reconciled on create, delete, spec changes, the start of
+// their deletion and changes of the force-delete annotation
+// (snapshotUpdatePredicate). Besides them it watches consumer-grant changes
+// (Namespace labels, Provider selectors) to re-drive snapshots refused with
+// ConsumerNotAllowed.
 func (r *VMSnapshotReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	if err := indexConsumerGrants(mgr, &infrav1beta1.VMSnapshot{}, snapshotConsumerGrantIndexValues); err != nil {
 		return err
 	}
 	b := ctrl.NewControllerManagedBy(mgr).
-		For(&infrav1beta1.VMSnapshot{})
+		For(&infrav1beta1.VMSnapshot{}, builder.WithPredicates(snapshotUpdatePredicate()))
 	return withConsumerGrantWatches(b, r.snapshotsForGrantChange).
 		Complete(r)
 }
