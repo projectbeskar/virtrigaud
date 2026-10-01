@@ -198,6 +198,36 @@ var _ = Describe("Held clones and snapshot deletes ignore metadata-only updates 
 		Expect(cp.calls.Load()).To(Equal(int32(2)))
 	})
 
+	It("sends exactly one SnapshotCreate for a synchronous create", func() {
+		ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{GenerateName: "snap-once-"}}
+		Expect(k8sClient.Create(ctx, ns)).To(Succeed())
+		Expect(k8sClient.Create(ctx, holdTestProvider(ns.Name))).To(Succeed())
+		holdTestVM(ns.Name, "web", infravirtrigaudiov1beta1.ObservedPowerStateOn)
+
+		spy := &snapshotCreateSpy{}
+		startHoldTestManager(func(mgr ctrl.Manager) {
+			r := NewVMSnapshotReconciler(mgr.GetClient(), mgr.GetScheme(), nil, record.NewFakeRecorder(100), false)
+			r.APIReader = mgr.GetAPIReader()
+			r.providerInstanceFn = func(context.Context, *infravirtrigaudiov1beta1.Provider) (contracts.Provider, error) {
+				return spy, nil
+			}
+			Expect(r.SetupWithManager(mgr)).To(Succeed())
+		})
+
+		snap := &infravirtrigaudiov1beta1.VMSnapshot{
+			ObjectMeta: metav1.ObjectMeta{Name: "snap-once", Namespace: ns.Name},
+			Spec:       infravirtrigaudiov1beta1.VMSnapshotSpec{VMRef: infravirtrigaudiov1beta1.LocalObjectReference{Name: "web"}},
+		}
+		Expect(k8sClient.Create(ctx, snap)).To(Succeed())
+		Eventually(func(g Gomega) {
+			got := &infravirtrigaudiov1beta1.VMSnapshot{}
+			g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(snap), got)).To(Succeed())
+			g.Expect(got.Status.Phase).To(Equal(infravirtrigaudiov1beta1.SnapshotPhaseReady))
+		}, "20s", "100ms").Should(Succeed())
+		Consistently(spy.creates.Load, "2s", "100ms").Should(Equal(int32(1)),
+			"the write that ends the create is never followed by a second create")
+	})
+
 	It("never re-runs a held snapshot delete on a metadata-only update; the force-delete annotation still releases it", func() {
 		ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{GenerateName: "hold-snap-"}}
 		Expect(k8sClient.Create(ctx, ns)).To(Succeed())

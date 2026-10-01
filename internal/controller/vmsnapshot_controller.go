@@ -23,6 +23,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -73,6 +74,13 @@ type VMSnapshotReconciler struct {
 	RemoteResolver *remote.Resolver
 	Recorder       record.EventRecorder
 	metrics        *metrics.ReconcileMetrics
+
+	// APIReader reads straight from the API server, bypassing the informer
+	// cache (the manager's GetAPIReader). The VMSnapshot is re-read through it
+	// right before its SnapshotCreate (confirmSnapshotNotCreated), so a create
+	// is never sent from a cache that does not show an earlier create's result
+	// yet. Nil falls back to Client, which only unit tests rely on.
+	APIReader client.Reader
 
 	// EnforceCapabilities, when true, gates the snapshot CREATE path on the
 	// provider's self-reported capabilities (issue #176). When false (the
@@ -230,7 +238,7 @@ func (r *VMSnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	case infrav1beta1.SnapshotPhaseFailed:
 		// Handle failed snapshots
 		logger.Info("Snapshot is in failed state", "message", snapshot.Status.Message)
-		return ctrl.Result{RequeueAfter: 5 * time.Minute}, nil
+		return ctrl.Result{RequeueAfter: snapshotFailedRecheckInterval}, nil
 	default:
 		// Unknown phase
 		logger.Info("Unknown snapshot phase", "phase", snapshot.Status.Phase)
@@ -292,6 +300,13 @@ func (r *VMSnapshotReconciler) createSnapshot(ctx context.Context, snapshot *inf
 		return res, nil
 	}
 
+	// A SnapshotCreate is never sent from a stale read: a single-host provider
+	// honors no request token, so a second create made from a cache that does
+	// not show the first one's result yet would leave an untracked snapshot.
+	if fresh, res, err := r.confirmSnapshotNotCreated(ctx, snapshot); !fresh {
+		return res, err
+	}
+
 	// The create is issued now: only from here on is the snapshot Creating.
 	// The phase is persisted below together with the RPC's outcome (a task to
 	// poll, Ready, or Failed), never on its own.
@@ -331,7 +346,7 @@ func (r *VMSnapshotReconciler) createSnapshot(ctx context.Context, snapshot *inf
 		r.Recorder.Event(snapshot, "Warning", "SnapshotFailed", fmt.Sprintf("Failed to create snapshot: %v", err))
 		// Status update errors are intentionally ignored to avoid blocking reconciliation
 		_ = r.updateStatus(ctx, snapshot)
-		return ctrl.Result{RequeueAfter: 5 * time.Minute}, nil
+		return ctrl.Result{RequeueAfter: snapshotFailedRecheckInterval}, nil
 	}
 
 	// Update status with snapshot information
@@ -368,9 +383,51 @@ func (r *VMSnapshotReconciler) createSnapshot(ctx context.Context, snapshot *inf
 		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 	}
 
-	// Snapshot is ready: requeue so the next reconcile schedules its
-	// retention check (the watch ignores this status write).
-	return ctrl.Result{Requeue: true}, nil
+	// Snapshot is ready: its retention is checked next after the retention
+	// interval. Never requeue at once after the write that ends a create: the
+	// informer cache may not show it yet, and a reconcile that read the
+	// snapshot as not created would create it again.
+	return ctrl.Result{RequeueAfter: snapshotRetentionCheckInterval}, nil
+}
+
+// snapshotFailedRecheckInterval is how often a Failed snapshot is re-checked.
+const snapshotFailedRecheckInterval = 5 * time.Minute
+
+// snapshotStaleReadRetryInterval is the retry of a create skipped because the
+// cached VMSnapshot was older than the API server's (confirmSnapshotNotCreated).
+const snapshotStaleReadRetryInterval = 2 * time.Second
+
+// confirmSnapshotNotCreated re-reads the VMSnapshot from the API server (the
+// uncached APIReader) right before its SnapshotCreate, and allows the create
+// only if the live object is the one this reconcile read — same UID and
+// resourceVersion — and still records no create (initial phase, no snapshot id
+// or task). Otherwise nothing is sent: a VMSnapshot that is gone ends the
+// reconcile, and a cache that is behind is retried shortly, from a fresh read.
+// A read error is returned (retried with backoff, nothing sent).
+func (r *VMSnapshotReconciler) confirmSnapshotNotCreated(ctx context.Context, snapshot *infrav1beta1.VMSnapshot) (bool, ctrl.Result, error) {
+	live := &infrav1beta1.VMSnapshot{}
+	if err := r.liveReader().Get(ctx, client.ObjectKeyFromObject(snapshot), live); err != nil {
+		if apierrors.IsNotFound(err) {
+			return false, ctrl.Result{}, nil
+		}
+		return false, ctrl.Result{}, fmt.Errorf("re-read VMSnapshot %s/%s before its create: %w", snapshot.Namespace, snapshot.Name, err)
+	}
+	if live.UID != snapshot.UID || live.ResourceVersion != snapshot.ResourceVersion ||
+		live.Status.Phase != "" || live.Status.SnapshotID != "" || live.Status.TaskRef != "" {
+		logging.FromContext(ctx).Info("The cached VMSnapshot is not the live one; not creating the snapshot from it",
+			"cachedResourceVersion", snapshot.ResourceVersion, "liveResourceVersion", live.ResourceVersion, "livePhase", live.Status.Phase)
+		return false, ctrl.Result{RequeueAfter: snapshotStaleReadRetryInterval}, nil
+	}
+	return true, ctrl.Result{}, nil
+}
+
+// liveReader is the uncached reader for the pre-create re-read: APIReader, or
+// Client when none was set (unit tests built as struct literals).
+func (r *VMSnapshotReconciler) liveReader() client.Reader {
+	if r.APIReader != nil {
+		return r.APIReader
+	}
+	return r.Client
 }
 
 // checkSnapshotCreation checks if snapshot creation is complete
@@ -414,9 +471,9 @@ func (r *VMSnapshotReconciler) checkSnapshotCreation(ctx context.Context, snapsh
 			return ctrl.Result{}, err
 		}
 
-		// Ready: the next reconcile schedules the retention check (the watch
-		// ignores this status write).
-		return ctrl.Result{Requeue: true}, nil
+		// Ready: the retention is checked next after the retention interval
+		// (never an immediate requeue after the write that ends a create).
+		return ctrl.Result{RequeueAfter: snapshotRetentionCheckInterval}, nil
 	}
 
 	// Get the provider to check task status (it must still be usable from
@@ -491,10 +548,13 @@ func (r *VMSnapshotReconciler) checkSnapshotCreation(ctx context.Context, snapsh
 			return ctrl.Result{}, err
 		}
 
-		// Ready or Failed: the next reconcile takes it from its new phase (the
-		// retention check, or the failed-snapshot recheck); the watch ignores
-		// this status write.
-		return ctrl.Result{Requeue: true}, nil
+		// Ready or Failed: taken up again from the new phase after that
+		// phase's own interval (the retention check, or the failed-snapshot
+		// recheck) — never at once after the write that ends a create.
+		if snapshot.Status.Phase == infrav1beta1.SnapshotPhaseFailed {
+			return ctrl.Result{RequeueAfter: snapshotFailedRecheckInterval}, nil
+		}
+		return ctrl.Result{RequeueAfter: snapshotRetentionCheckInterval}, nil
 	}
 
 	// Task still in progress

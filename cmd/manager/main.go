@@ -393,6 +393,9 @@ func main() {
 		mgr.GetEventRecorderFor("vmsnapshot-controller"),
 		enforceProviderCapabilities,
 	)
+	// Re-reads the VMSnapshot uncached right before a SnapshotCreate, so a
+	// create is never sent from a stale cache.
+	vmsnapshotReconciler.APIReader = mgr.GetAPIReader()
 	if err = vmsnapshotReconciler.SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "VMSnapshot")
 		os.Exit(1)

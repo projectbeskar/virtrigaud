@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -104,9 +105,10 @@ func TestVMClone_FailureRequeuesForTheTargetCleanup(t *testing.T) {
 }
 
 // TestVMSnapshot_ReadyRequeuesForItsRetentionCheck: a snapshot created
-// synchronously, or whose create task completes, is requeued once, so the
-// next reconcile schedules its retention check (handleRetention) without an
-// event.
+// synchronously, or whose create task completes, is re-checked after the
+// retention interval (a failed one after the failed-snapshot interval) —
+// never requeued at once after the write that ends its create, which a stale
+// informer cache could turn into a second create.
 func TestVMSnapshot_ReadyRequeuesForItsRetentionCheck(t *testing.T) {
 	ctx := context.Background()
 	key := types.NamespacedName{Namespace: snapPhaseNS, Name: snapPhaseName}
@@ -121,30 +123,83 @@ func TestVMSnapshot_ReadyRequeuesForItsRetentionCheck(t *testing.T) {
 		snap := &infrav1beta1.VMSnapshot{}
 		require.NoError(t, r.Get(ctx, key, snap))
 		require.Equal(t, infrav1beta1.SnapshotPhaseReady, snap.Status.Phase)
-		assert.True(t, res.Requeue)
-
-		res, err = r.Reconcile(ctx, ctrl.Request{NamespacedName: key})
-		require.NoError(t, err)
-		assert.Equal(t, ctrl.Result{RequeueAfter: snapshotRetentionCheckInterval}, res, "the retention check is scheduled")
+		assert.Equal(t, ctrl.Result{RequeueAfter: snapshotRetentionCheckInterval}, res, "no immediate requeue")
 		assert.EqualValues(t, 1, spy.creates.Load())
 	})
 
-	t.Run("create task completes", func(t *testing.T) {
-		snap := pendingSnapshot()
-		snap.Status.Phase = infrav1beta1.SnapshotPhaseCreating
-		snap.Status.TaskRef = "task-1"
-		snap.Status.SnapshotID = "snap-1"
-		r, _ := newSnapPhaseReconciler(t, sourceVMWithID(snapPhaseNS, "web", "prov", "vm-100"), runningProvider(snapPhaseNS, "prov"), snap)
-		r.providerInstanceFn = func(context.Context, *infrav1beta1.Provider) (contracts.Provider, error) {
-			return &taskStatusProvider{status: contracts.TaskStatus{IsCompleted: true}}, nil
-		}
-		res, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: key})
-		require.NoError(t, err)
-		got := &infrav1beta1.VMSnapshot{}
-		require.NoError(t, r.Get(ctx, key, got))
-		require.Equal(t, infrav1beta1.SnapshotPhaseReady, got.Status.Phase)
-		assert.True(t, res.Requeue)
-	})
+	for name, tc := range map[string]struct {
+		status contracts.TaskStatus
+		phase  infrav1beta1.SnapshotPhase
+		after  time.Duration
+	}{
+		"create task completes": {contracts.TaskStatus{IsCompleted: true}, infrav1beta1.SnapshotPhaseReady, snapshotRetentionCheckInterval},
+		"create task fails":     {contracts.TaskStatus{IsCompleted: true, Error: "boom"}, infrav1beta1.SnapshotPhaseFailed, snapshotFailedRecheckInterval},
+	} {
+		t.Run(name, func(t *testing.T) {
+			snap := pendingSnapshot()
+			snap.Status.Phase = infrav1beta1.SnapshotPhaseCreating
+			snap.Status.TaskRef = "task-1"
+			snap.Status.SnapshotID = "snap-1"
+			r, _ := newSnapPhaseReconciler(t, sourceVMWithID(snapPhaseNS, "web", "prov", "vm-100"), runningProvider(snapPhaseNS, "prov"), snap)
+			r.providerInstanceFn = func(context.Context, *infrav1beta1.Provider) (contracts.Provider, error) {
+				return &taskStatusProvider{status: tc.status}, nil
+			}
+			res, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: key})
+			require.NoError(t, err)
+			got := &infrav1beta1.VMSnapshot{}
+			require.NoError(t, r.Get(ctx, key, got))
+			require.Equal(t, tc.phase, got.Status.Phase)
+			assert.Equal(t, ctrl.Result{RequeueAfter: tc.after}, res, "no immediate requeue")
+		})
+	}
+}
+
+// staleSnapshotReader answers a Get of the VMSnapshot with a fixed copy (an
+// informer cache that has not caught up) and passes everything else through.
+type staleSnapshotReader struct {
+	client.Client
+	stale *infrav1beta1.VMSnapshot
+}
+
+// Get returns the stale copy for the VMSnapshot.
+func (c *staleSnapshotReader) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+	if snap, ok := obj.(*infrav1beta1.VMSnapshot); ok && key == client.ObjectKeyFromObject(c.stale) {
+		c.stale.DeepCopyInto(snap)
+		return nil
+	}
+	return c.Client.Get(ctx, key, obj, opts...)
+}
+
+// TestVMSnapshot_NoCreateFromAStaleCache: a reconcile that reads the snapshot
+// from a cache that does not show its earlier create yet (initial phase, an
+// older resourceVersion) re-reads it live and sends no second SnapshotCreate.
+func TestVMSnapshot_NoCreateFromAStaleCache(t *testing.T) {
+	ctx := context.Background()
+	key := types.NamespacedName{Namespace: snapPhaseNS, Name: snapPhaseName}
+	r, _ := newSnapPhaseReconciler(t, sourceVMWithID(snapPhaseNS, "web", "prov", "vm-100"), runningProvider(snapPhaseNS, "prov"),
+		pendingSnapshot())
+	spy := &snapshotCreateSpy{}
+	r.providerInstanceFn = func(context.Context, *infrav1beta1.Provider) (contracts.Provider, error) { return spy, nil }
+
+	stale := &infrav1beta1.VMSnapshot{}
+	require.NoError(t, r.Get(ctx, key, stale))
+	_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: key})
+	require.NoError(t, err)
+	require.EqualValues(t, 1, spy.creates.Load())
+
+	// The cache still shows the snapshot before its create; the API server
+	// (APIReader) shows it Ready.
+	live := r.Client
+	r.APIReader = live
+	r.Client = &staleSnapshotReader{Client: live, stale: stale}
+	res, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: key})
+	require.NoError(t, err)
+	assert.EqualValues(t, 1, spy.creates.Load(), "no second SnapshotCreate from the stale read")
+	assert.Equal(t, ctrl.Result{RequeueAfter: snapshotStaleReadRetryInterval}, res, "retried shortly, from a fresh read")
+	got := &infrav1beta1.VMSnapshot{}
+	require.NoError(t, live.Get(ctx, key, got))
+	assert.Equal(t, infrav1beta1.SnapshotPhaseReady, got.Status.Phase)
+	assert.Equal(t, "snap-1", got.Status.SnapshotID, "the first create's record is untouched")
 }
 
 // taskStatusProvider answers TaskStatus with status.
