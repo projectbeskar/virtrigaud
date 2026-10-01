@@ -21,6 +21,8 @@ import (
 	"encoding/json"
 	stderrors "errors"
 	"fmt"
+	"io"
+	"net"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -32,6 +34,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	utilnet "k8s.io/apimachinery/pkg/util/net"
+	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -1228,15 +1232,18 @@ type jsonPatchOp struct {
 // the old clone's record) and, when before had one, the same status.phase (a
 // stored Failed or Ready is never overwritten). A failed test (the API server
 // answers 422 Invalid) or a VMClone that is gone returns errCloneChanged: the
-// caller logs nothing more, binds nothing and returns. Only transient API
-// errors are retried (isTransientWriteError); anything else is returned.
+// caller logs nothing more, binds nothing and returns. Transient API and
+// transport errors are retried within cloneRecordBackoff
+// (isRetriableRecordError); anything else is returned. A record of a clone the
+// provider made that still cannot be written is announced with a
+// CloneRecordNotSaved Warning event, so its copy is never silently untracked.
 func (r *VMCloneReconciler) persistCloneStatus(ctx context.Context, clone, before *infrav1beta1.VMClone) error {
 	logger := logging.FromContext(ctx)
 	patch, err := cloneStatusPatch(before, &clone.Status)
 	if err != nil {
 		return err
 	}
-	err = retry.OnError(retry.DefaultBackoff, isTransientWriteError, func() error {
+	err = retry.OnError(cloneRecordBackoff, func(err error) bool { return isRetriableRecordError(ctx, err) }, func() error {
 		return r.Status().Patch(ctx, clone, patch)
 	})
 	switch {
@@ -1250,8 +1257,51 @@ func (r *VMCloneReconciler) persistCloneStatus(ctx context.Context, clone, befor
 	default:
 		logger.Error(err, "Failed to record the clone on the VMClone status",
 			"target_vm_id", clone.Status.TargetVMID, "task_ref", clone.Status.TaskRef, "target_uid", clone.Status.TargetUID)
+		if clone.Status.TargetVMID != "" {
+			// The provider made the clone, and nothing records it: say so on
+			// the VMClone, so the copy is never silently untracked. Only the
+			// target VM ID is named, no provider or host text.
+			r.Recorder.Event(clone, corev1.EventTypeWarning, cloneReasonRecordNotSaved, fmt.Sprintf(
+				"The provider made the clone %q, but it could not be recorded on this VMClone; a copy may exist on the host "+
+					"untracked. If this clone is retried and refused as already existing, adopt or remove that VM.",
+				clone.Status.TargetVMID))
+		}
 		return fmt.Errorf("record the clone on VMClone %s/%s: %w", clone.Namespace, clone.Name, err)
 	}
+}
+
+// cloneReasonRecordNotSaved is the Warning event reason of a clone the
+// provider made whose record could not be written to the VMClone.
+const cloneReasonRecordNotSaved = "CloneRecordNotSaved"
+
+// cloneRecordBackoff bounds the retries of a clone's record
+// (persistCloneStatus): six attempts over about six seconds, enough to ride
+// out an API server restart or a dropped connection, never an unbounded wait.
+var cloneRecordBackoff = wait.Backoff{Steps: 6, Duration: 100 * time.Millisecond, Factor: 2, Jitter: 0.1}
+
+// isRetriableRecordError reports whether a failed write of a clone's record is
+// retried: a transient API error (isTransientWriteError); a transport failure
+// (connection refused or reset, an unexpected EOF, a network timeout); or a
+// deadline of the request itself — never once the reconcile's own context is
+// done. A precondition failure (Invalid: the VMClone was re-created or changed
+// phase), NotFound, Forbidden or Unauthorized is never retried.
+func isRetriableRecordError(ctx context.Context, err error) bool {
+	if ctx.Err() != nil {
+		return false
+	}
+	switch {
+	case errors.IsInvalid(err), errors.IsNotFound(err), errors.IsForbidden(err), errors.IsUnauthorized(err):
+		return false
+	case isTransientWriteError(err):
+		return true
+	case utilnet.IsConnectionRefused(err), utilnet.IsConnectionReset(err), utilnet.IsProbableEOF(err),
+		stderrors.Is(err, io.EOF), stderrors.Is(err, io.ErrUnexpectedEOF):
+		return true
+	case stderrors.Is(err, context.DeadlineExceeded):
+		return true
+	}
+	var netErr net.Error
+	return stderrors.As(err, &netErr) && netErr.Timeout()
 }
 
 // cloneStatusPatch is the JSON Patch persistCloneStatus sends: tests of the
