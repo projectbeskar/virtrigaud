@@ -469,6 +469,10 @@ func (r *VMCloneReconciler) handleClusteredCloneError(
 		// source is off, and is never failed for it.
 		return r.holdCloneForRunningSource(ctx, clone, err), nil
 	case contracts.IsConflict(err):
+		// The provider's answer is in no condition (the clone's message is the
+		// stable excluded-host one): keep it in the manager log for audit.
+		logger.Info("Clone refused on host: name conflict", "host", host, "target", target.Name,
+			"error", sanitizeProviderDetail(err))
 		pl := target.Status.Placement
 		if pl == nil {
 			pl = &infrav1beta1.PlacementStatus{}
