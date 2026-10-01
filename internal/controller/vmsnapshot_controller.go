@@ -23,13 +23,17 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/event"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	infrav1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
@@ -70,6 +74,13 @@ type VMSnapshotReconciler struct {
 	RemoteResolver *remote.Resolver
 	Recorder       record.EventRecorder
 	metrics        *metrics.ReconcileMetrics
+
+	// APIReader reads straight from the API server, bypassing the informer
+	// cache (the manager's GetAPIReader). The VMSnapshot is re-read through it
+	// right before its SnapshotCreate (confirmSnapshotNotCreated), so a create
+	// is never sent from a cache that does not show an earlier create's result
+	// yet. Nil falls back to Client, which only unit tests rely on.
+	APIReader client.Reader
 
 	// EnforceCapabilities, when true, gates the snapshot CREATE path on the
 	// provider's self-reported capabilities (issue #176). When false (the
@@ -227,7 +238,7 @@ func (r *VMSnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	case infrav1beta1.SnapshotPhaseFailed:
 		// Handle failed snapshots
 		logger.Info("Snapshot is in failed state", "message", snapshot.Status.Message)
-		return ctrl.Result{RequeueAfter: 5 * time.Minute}, nil
+		return ctrl.Result{RequeueAfter: snapshotFailedRecheckInterval}, nil
 	default:
 		// Unknown phase
 		logger.Info("Unknown snapshot phase", "phase", snapshot.Status.Phase)
@@ -289,6 +300,13 @@ func (r *VMSnapshotReconciler) createSnapshot(ctx context.Context, snapshot *inf
 		return res, nil
 	}
 
+	// A SnapshotCreate is never sent from a stale read: a single-host provider
+	// honors no request token, so a second create made from a cache that does
+	// not show the first one's result yet would leave an untracked snapshot.
+	if fresh, res, err := r.confirmSnapshotNotCreated(ctx, snapshot); !fresh {
+		return res, err
+	}
+
 	// The create is issued now: only from here on is the snapshot Creating.
 	// The phase is persisted below together with the RPC's outcome (a task to
 	// poll, Ready, or Failed), never on its own.
@@ -328,7 +346,7 @@ func (r *VMSnapshotReconciler) createSnapshot(ctx context.Context, snapshot *inf
 		r.Recorder.Event(snapshot, "Warning", "SnapshotFailed", fmt.Sprintf("Failed to create snapshot: %v", err))
 		// Status update errors are intentionally ignored to avoid blocking reconciliation
 		_ = r.updateStatus(ctx, snapshot)
-		return ctrl.Result{RequeueAfter: 5 * time.Minute}, nil
+		return ctrl.Result{RequeueAfter: snapshotFailedRecheckInterval}, nil
 	}
 
 	// Update status with snapshot information
@@ -365,8 +383,51 @@ func (r *VMSnapshotReconciler) createSnapshot(ctx context.Context, snapshot *inf
 		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 	}
 
-	// Snapshot is ready
-	return ctrl.Result{}, nil
+	// Snapshot is ready: its retention is checked next after the retention
+	// interval. Never requeue at once after the write that ends a create: the
+	// informer cache may not show it yet, and a reconcile that read the
+	// snapshot as not created would create it again.
+	return ctrl.Result{RequeueAfter: snapshotRetentionCheckInterval}, nil
+}
+
+// snapshotFailedRecheckInterval is how often a Failed snapshot is re-checked.
+const snapshotFailedRecheckInterval = 5 * time.Minute
+
+// snapshotStaleReadRetryInterval is the retry of a create skipped because the
+// cached VMSnapshot was older than the API server's (confirmSnapshotNotCreated).
+const snapshotStaleReadRetryInterval = 2 * time.Second
+
+// confirmSnapshotNotCreated re-reads the VMSnapshot from the API server (the
+// uncached APIReader) right before its SnapshotCreate, and allows the create
+// only if the live object is the one this reconcile read — same UID and
+// resourceVersion — and still records no create (initial phase, no snapshot id
+// or task). Otherwise nothing is sent: a VMSnapshot that is gone ends the
+// reconcile, and a cache that is behind is retried shortly, from a fresh read.
+// A read error is returned (retried with backoff, nothing sent).
+func (r *VMSnapshotReconciler) confirmSnapshotNotCreated(ctx context.Context, snapshot *infrav1beta1.VMSnapshot) (bool, ctrl.Result, error) {
+	live := &infrav1beta1.VMSnapshot{}
+	if err := r.liveReader().Get(ctx, client.ObjectKeyFromObject(snapshot), live); err != nil {
+		if apierrors.IsNotFound(err) {
+			return false, ctrl.Result{}, nil
+		}
+		return false, ctrl.Result{}, fmt.Errorf("re-read VMSnapshot %s/%s before its create: %w", snapshot.Namespace, snapshot.Name, err)
+	}
+	if live.UID != snapshot.UID || live.ResourceVersion != snapshot.ResourceVersion ||
+		live.Status.Phase != "" || live.Status.SnapshotID != "" || live.Status.TaskRef != "" {
+		logging.FromContext(ctx).Info("The cached VMSnapshot is not the live one; not creating the snapshot from it",
+			"cachedResourceVersion", snapshot.ResourceVersion, "liveResourceVersion", live.ResourceVersion, "livePhase", live.Status.Phase)
+		return false, ctrl.Result{RequeueAfter: snapshotStaleReadRetryInterval}, nil
+	}
+	return true, ctrl.Result{}, nil
+}
+
+// liveReader is the uncached reader for the pre-create re-read: APIReader, or
+// Client when none was set (unit tests built as struct literals).
+func (r *VMSnapshotReconciler) liveReader() client.Reader {
+	if r.APIReader != nil {
+		return r.APIReader
+	}
+	return r.Client
 }
 
 // checkSnapshotCreation checks if snapshot creation is complete
@@ -410,7 +471,9 @@ func (r *VMSnapshotReconciler) checkSnapshotCreation(ctx context.Context, snapsh
 			return ctrl.Result{}, err
 		}
 
-		return ctrl.Result{}, nil
+		// Ready: the retention is checked next after the retention interval
+		// (never an immediate requeue after the write that ends a create).
+		return ctrl.Result{RequeueAfter: snapshotRetentionCheckInterval}, nil
 	}
 
 	// Get the provider to check task status (it must still be usable from
@@ -485,7 +548,13 @@ func (r *VMSnapshotReconciler) checkSnapshotCreation(ctx context.Context, snapsh
 			return ctrl.Result{}, err
 		}
 
-		return ctrl.Result{}, nil
+		// Ready or Failed: taken up again from the new phase after that
+		// phase's own interval (the retention check, or the failed-snapshot
+		// recheck) — never at once after the write that ends a create.
+		if snapshot.Status.Phase == infrav1beta1.SnapshotPhaseFailed {
+			return ctrl.Result{RequeueAfter: snapshotFailedRecheckInterval}, nil
+		}
+		return ctrl.Result{RequeueAfter: snapshotRetentionCheckInterval}, nil
 	}
 
 	// Task still in progress
@@ -535,9 +604,13 @@ func (r *VMSnapshotReconciler) handleRetention(ctx context.Context, snapshot *in
 		}
 	}
 
-	// Check again in an hour
-	return ctrl.Result{RequeueAfter: time.Hour}, nil
+	// Check again later
+	return ctrl.Result{RequeueAfter: snapshotRetentionCheckInterval}, nil
 }
+
+// snapshotRetentionCheckInterval is how often a Ready snapshot's retention
+// policy is re-checked.
+const snapshotRetentionCheckInterval = time.Hour
 
 // handleDeletion handles snapshot deletion
 func (r *VMSnapshotReconciler) handleDeletion(ctx context.Context, snapshot *infrav1beta1.VMSnapshot) (ctrl.Result, error) {
@@ -740,34 +813,57 @@ func snapshotDeleteRetryAfter(snapshot *infrav1beta1.VMSnapshot, now time.Time) 
 // disk check that could not run: the snapshot may still be on the hypervisor
 // (with the guest's RAM, for a memory snapshot), and a VM whose snapshot
 // metadata remains cannot be undefined. It records Ready=False and
-// Deleting=False with reason ProviderError and the way out, a Warning event,
-// and retries with backoff (snapshotDeleteRetryAfter) until the delete
-// succeeds or the force-delete annotation is set.
+// Deleting=False with reason ProviderError and the way out, a Warning event
+// when the failure is new or different, and retries with backoff
+// (snapshotDeleteRetryAfter) until the delete succeeds or the force-delete
+// annotation is set (holdSnapshotDelete).
 func (r *VMSnapshotReconciler) retainForFailedSnapshotDelete(ctx context.Context, snapshot *infrav1beta1.VMSnapshot, err error) ctrl.Result {
-	now := time.Now()
-	retryAfter := snapshotDeleteRetryAfter(snapshot, now)
+	retryAfter := snapshotDeleteRetryAfter(snapshot, time.Now())
 	logging.FromContext(ctx).Error(err, "Provider snapshot delete failed; retaining finalizer and retrying",
 		"snapshot_id", snapshot.Status.SnapshotID, "retryAfter", retryAfter.String())
 	metrics.RecordError(errReasonProviderDelete, metrics.ComponentManager)
 
-	msg := fmt.Sprintf("Provider could not delete the snapshot; the VMSnapshot is kept (the snapshot may still be on the hypervisor) "+
-		"and the delete is retried (next in %s). Set %s=true to remove it anyway. Provider detail: %s",
-		retryAfter, forceDeleteAnnotation, sanitizeProviderDetail(err))
-	r.Recorder.Event(snapshot, corev1.EventTypeWarning, "SnapshotDeleteFailed", msg)
+	// The provider's answer goes to the Warning event and the log, never into
+	// the status: its text can differ on every attempt (a single-host error
+	// can carry a connection's ephemeral port), and a status that changed on
+	// every retry would make each retry write it.
+	r.holdSnapshotDelete(ctx, snapshot, infrav1beta1.VMSnapshotReasonProviderError, snapshotDeleteFailedMessage,
+		fmt.Sprintf("%s Provider detail: %s", snapshotDeleteFailedMessage, sanitizeProviderDetail(err)))
+	return ctrl.Result{RequeueAfter: retryAfter}
+}
+
+// snapshotDeleteFailedMessage is the status message (and Ready / Deleting
+// condition message) of a VMSnapshot whose provider SnapshotDelete failed.
+// It is constant; the provider's answer is in the Warning event and the log.
+var snapshotDeleteFailedMessage = fmt.Sprintf("Provider could not delete the snapshot; the VMSnapshot is kept (the snapshot may "+
+	"still be on the hypervisor) and the delete is retried with a backoff of up to %s. Set %s=true to remove it anyway; the "+
+	"provider's answer is in the SnapshotDeleteFailed event.", snapshotDeleteRetryMax, forceDeleteAnnotation)
+
+// holdSnapshotDelete records a held delete of snapshot — Ready=False and
+// Deleting=False with reason and msg — and, only when that changes the stored
+// status, a SnapshotDeleteFailed Warning event with eventMsg and the status
+// write. A retry of the same hold therefore writes nothing: msg must be the
+// same on every retry of the same failure (no retry delay, timestamp or
+// provider text in it), so the hold's backoff, not its own writes, paces the
+// retries.
+func (r *VMSnapshotReconciler) holdSnapshotDelete(ctx context.Context, snapshot *infrav1beta1.VMSnapshot, reason, msg, eventMsg string) {
+	before := snapshot.Status.DeepCopy()
 	snapshot.Status.Message = msg
 	for _, condType := range []string{infrav1beta1.VMSnapshotConditionReady, infrav1beta1.VMSnapshotConditionDeleting} {
 		meta.SetStatusCondition(&snapshot.Status.Conditions, metav1.Condition{
 			Type:               condType,
 			Status:             metav1.ConditionFalse,
-			Reason:             infrav1beta1.VMSnapshotReasonProviderError,
+			Reason:             reason,
 			Message:            msg,
 			ObservedGeneration: snapshot.Generation,
-			LastTransitionTime: metav1.NewTime(now),
 		})
 	}
+	if equality.Semantic.DeepEqual(before, &snapshot.Status) {
+		return
+	}
+	r.Recorder.Event(snapshot, corev1.EventTypeWarning, "SnapshotDeleteFailed", eventMsg)
 	// Status update errors are intentionally ignored to avoid blocking reconciliation.
 	_ = r.updateStatus(ctx, snapshot)
-	return ctrl.Result{RequeueAfter: retryAfter}
 }
 
 // retainForUnaddressableSnapshotDelete keeps the finalizer of a VMSnapshot
@@ -782,29 +878,19 @@ func (r *VMSnapshotReconciler) retainForFailedSnapshotDelete(ctx context.Context
 // backoff (snapshotDeleteRetryAfter) until a call can be made, the VM is gone,
 // or the force-delete annotation is set.
 func (r *VMSnapshotReconciler) retainForUnaddressableSnapshotDelete(ctx context.Context, snapshot *infrav1beta1.VMSnapshot, err error) ctrl.Result {
-	now := time.Now()
-	retryAfter := snapshotDeleteRetryAfter(snapshot, now)
+	retryAfter := snapshotDeleteRetryAfter(snapshot, time.Now())
 	reason := vmRefErrorReason(err)
 	logging.FromContext(ctx).Info("No provider call can be made for the VM; retaining the VMSnapshot finalizer and retrying",
 		"snapshot_id", snapshot.Status.SnapshotID, "reason", reason, "retryAfter", retryAfter.String(), "error", err.Error())
 
+	// err is the operator's own refusal (vmRefFor): no provider text, only
+	// object names, a host and a reason, which change only when the objects
+	// do. It is kept in the status, so a retry of the same refusal writes
+	// nothing.
 	msg := fmt.Sprintf("%s. The VMSnapshot is kept (the snapshot may still be on the hypervisor) and its delete is retried "+
-		"(next in %s). Set %s=true to remove it anyway, leaving the snapshot on the hypervisor. Detail: %v",
-		vmRefWaitMessage(err), retryAfter, forceDeleteAnnotation, err)
-	r.Recorder.Event(snapshot, corev1.EventTypeWarning, "SnapshotDeleteFailed", msg)
-	snapshot.Status.Message = msg
-	for _, condType := range []string{infrav1beta1.VMSnapshotConditionReady, infrav1beta1.VMSnapshotConditionDeleting} {
-		meta.SetStatusCondition(&snapshot.Status.Conditions, metav1.Condition{
-			Type:               condType,
-			Status:             metav1.ConditionFalse,
-			Reason:             reason,
-			Message:            msg,
-			ObservedGeneration: snapshot.Generation,
-			LastTransitionTime: metav1.NewTime(now),
-		})
-	}
-	// Status update errors are intentionally ignored to avoid blocking reconciliation.
-	_ = r.updateStatus(ctx, snapshot)
+		"with a backoff of up to %s. Set %s=true to remove it anyway, leaving the snapshot on the hypervisor. Detail: %v",
+		vmRefWaitMessage(err), snapshotDeleteRetryMax, forceDeleteAnnotation, err)
+	r.holdSnapshotDelete(ctx, snapshot, reason, msg, msg)
 	return ctrl.Result{RequeueAfter: retryAfter}
 }
 
@@ -1053,15 +1139,50 @@ func (r *VMSnapshotReconciler) snapshotsForGrantChange(ctx context.Context, inde
 	return requestsForGrantChange(ctx, r.Client, &infrav1beta1.VMSnapshotList{}, indexValue, nil)
 }
 
-// SetupWithManager sets up the controller with the Manager. Besides its own
-// VMSnapshots it watches consumer-grant changes (Namespace labels, Provider
-// selectors) to re-drive snapshots refused with ConsumerNotAllowed.
+// snapshotUpdateNeedsReconcile reports whether an update of a VMSnapshot is
+// reconciled: a spec change or the start of its deletion (both change its
+// generation), or a change of the force-delete annotation — the only metadata
+// the controller reads, which releases a held delete at once. Any other
+// status- or metadata-only update is not: the controller's own status writes,
+// or a tenant re-annotating a snapshot whose delete is held, would otherwise
+// re-run the provider's SnapshotDelete ahead of its backoff. Every step that
+// must follow one of the controller's own writes asks for it with an explicit
+// requeue.
+func snapshotUpdateNeedsReconcile(oldSnap, newSnap *infrav1beta1.VMSnapshot) bool {
+	return oldSnap.Generation != newSnap.Generation ||
+		oldSnap.Annotations[forceDeleteAnnotation] != newSnap.Annotations[forceDeleteAnnotation]
+}
+
+// snapshotUpdatePredicate applies snapshotUpdateNeedsReconcile to update
+// events; create, delete and generic events always pass.
+func snapshotUpdatePredicate() predicate.Predicate {
+	return predicate.Funcs{
+		UpdateFunc: func(e event.UpdateEvent) bool {
+			oldSnap, ok := e.ObjectOld.(*infrav1beta1.VMSnapshot)
+			if !ok {
+				return true
+			}
+			newSnap, ok := e.ObjectNew.(*infrav1beta1.VMSnapshot)
+			if !ok {
+				return true
+			}
+			return snapshotUpdateNeedsReconcile(oldSnap, newSnap)
+		},
+	}
+}
+
+// SetupWithManager sets up the controller with the Manager. Its own
+// VMSnapshots are reconciled on create, delete, spec changes, the start of
+// their deletion and changes of the force-delete annotation
+// (snapshotUpdatePredicate). Besides them it watches consumer-grant changes
+// (Namespace labels, Provider selectors) to re-drive snapshots refused with
+// ConsumerNotAllowed.
 func (r *VMSnapshotReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	if err := indexConsumerGrants(mgr, &infrav1beta1.VMSnapshot{}, snapshotConsumerGrantIndexValues); err != nil {
 		return err
 	}
 	b := ctrl.NewControllerManagedBy(mgr).
-		For(&infrav1beta1.VMSnapshot{})
+		For(&infrav1beta1.VMSnapshot{}, builder.WithPredicates(snapshotUpdatePredicate()))
 	return withConsumerGrantWatches(b, r.snapshotsForGrantChange).
 		Complete(r)
 }

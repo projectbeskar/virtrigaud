@@ -58,6 +58,7 @@ spec:
       namespace: default
     classRef:
       name: database-8cpu-32gb
+    # false (the default) leaves the migrated VM off; true powers it on.
     powerOn: false
   # S3-compatible object storage staging. Swap rustfs for AWS S3 / MinIO / Ceph
   # RGW as needed; both provider pods must reach this endpoint.

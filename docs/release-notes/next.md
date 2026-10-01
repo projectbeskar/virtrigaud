@@ -58,6 +58,14 @@ Read the upgrade guide before upgrading:
   manager.
   → [Upgrade guide](docs/upgrading.md#breaking-changes),
   [`docs/reconfigure-results.md`](docs/reconfigure-results.md)
+- **`powerOn` is honored: a clone or migrated VM stays powered off unless
+  `powerOn: true`.** `VMClone` `spec.options.powerOn` and `VMMigration`
+  `spec.target.powerOn` (default `false`) were never read, so every clone and
+  migrated VM came up running. The produced VirtualMachine's `spec.powerState`
+  is now `On` only for `powerOn: true`. A vSphere migration target with
+  `powerOn: false` is still booted briefly by the vSphere provider's Create
+  before it is powered off.
+  → [Upgrade guide](docs/upgrading.md#breaking-changes)
 
 See the full breaking-change table, required upgrade order (CRDs → manager →
 providers), and rollback caveats in
@@ -67,6 +75,11 @@ providers), and rollback caveats in
 
 ### Security
 
+- Editing a waiting `VMClone`'s metadata (labels, annotations), or a
+  `VMSnapshot` whose delete is held, no longer re-runs it at once. A tenant
+  re-annotating one in a loop drove one provider call per edit (`Clone`, a
+  multi-host scan, or `SnapshotDelete`) and bypassed the wait's backoff. The
+  `VMSnapshot` force-delete annotation still releases a held delete at once.
 - vSphere and libvirt `Create` no longer silently bind to (and libvirt/vSphere
   `Clone` no longer silently clones) a pre-existing VM/domain/template they
   don't own — both now stamp and check ownership, and fail closed
@@ -284,6 +297,30 @@ providers), and rollback caveats in
   A clustered VM is placed only on a `Host` labelled
   `net.virtrigaud.io/<network>: "true"` for each libvirt network it uses
   (→ [`docs/clustered-provider-inventory.md`](docs/clustered-provider-inventory.md#first-vm-checklist)).
+- A `VMClone` refused by its provider while it waits — for its source to be
+  powered off, an unreachable host, a previous incarnation of its target — no
+  longer calls the provider in a tight loop. Each refusal rewrote the clone's
+  status, which re-triggered the clone at once: a clone of a running libvirt
+  VM called `Clone` about ten times a second instead of following its backoff
+  (15 s doubling to 5 min). A repeated wait now writes nothing, and a waiting
+  clone never shows `Phase=Cloning` or `Cloning=True`. A clone that does not
+  fit on its host no longer jumps straight to its longest re-check interval,
+  and a `VMSnapshot` whose provider delete fails no longer retries it in a
+  tight loop for its first five minutes.
+- A `VMClone` edited while its provider copied the disk (a libvirt clone is a
+  synchronous copy of several minutes) no longer loses the clone it made: the
+  edit used to make the controller's status write fail, the clone was sent
+  again, refused as "already exists", and failed, leaving the copy untracked
+  on the host. The record lands only on the `VMClone` it was made for: never on
+  one deleted and re-created under the same name meanwhile, and never over a
+  stored `Failed`.
+- A `Clone` or `SnapshotCreate` is never sent from a stale read: the object is
+  re-read from the API server right before the call, so a second, untracked
+  snapshot or clone cannot be made from a cache that does not show the first
+  one's result yet.
+- A `VMMigration` with `deleteAfterMigration: true` whose target stays off
+  (`powerOn: false`) records a `SourceDeletedTargetNotStarted` Warning when it
+  deletes the source.
 - Provider SDK: the `sdk/provider/client` RPC methods (`Create`, `Describe`,
   `TaskStatus` and the others) return a nil error on success again. Before, a
   successful call returned a non-nil error that printed as `<nil>`, and

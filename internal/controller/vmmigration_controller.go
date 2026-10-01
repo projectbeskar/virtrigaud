@@ -1616,6 +1616,7 @@ func (r *VMMigrationReconciler) handleCreatingPhase(ctx context.Context, migrati
 		},
 		Spec: infrav1beta1.VirtualMachineSpec{
 			ProviderRef: migration.Spec.Target.ProviderRef,
+			PowerState:  migrationTargetPowerState(migration),
 		},
 	}
 	if targetNamespace != migration.Namespace && targetVM.Spec.ProviderRef.Namespace == "" {
@@ -1693,6 +1694,19 @@ func (r *VMMigrationReconciler) handleCreatingPhase(ctx context.Context, migrati
 
 	// Requeue to check VM status
 	return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+}
+
+// migrationTargetPowerState is the desired power state (spec.powerState) of the
+// VirtualMachine a migration creates: On when the migration asks for it
+// (spec.target.powerOn: true), Off otherwise — powerOn defaults to false. It
+// is always set explicitly, because the VirtualMachine controller treats an
+// empty spec.powerState as On. A target that stays Off still becomes Ready
+// (its observed power state matches its spec), so the migration completes.
+func migrationTargetPowerState(migration *infrav1beta1.VMMigration) infrav1beta1.PowerState {
+	if migration.Spec.Target.PowerOn {
+		return infrav1beta1.PowerStateOn
+	}
+	return infrav1beta1.PowerStateOff
 }
 
 // handleValidatingTargetPhase validates the migrated VM
@@ -1819,6 +1833,7 @@ func (r *VMMigrationReconciler) handleReadyPhase(ctx context.Context, migration 
 		}
 		cleanupPerformed = true
 		logger.Info("Source VM deleted")
+		r.warnIfMigratedWorkloadIsNotRunning(ctx, migration)
 	}
 
 	// Mark cleanup as complete
@@ -3490,6 +3505,29 @@ func (r *VMMigrationReconciler) deleteSourceSnapshot(ctx context.Context, migrat
 	migration.Status.SnapshotID = ""
 
 	return nil
+}
+
+// migrationReasonSourceDeletedTargetNotStarted is the Warning event reason of
+// a completed migration that deleted its source VM
+// (spec.source.deleteAfterMigration) while its target was never powered on
+// (spec.target.powerOn false, the default).
+const migrationReasonSourceDeletedTargetNotStarted = "SourceDeletedTargetNotStarted"
+
+// warnIfMigratedWorkloadIsNotRunning records a Warning event when the
+// migration just deleted its source VM and its target VM was created powered
+// off (migrationTargetPowerState): the workload then runs nowhere until
+// someone powers the target on. Nothing is refused or changed — the
+// combination is valid (e.g. a cold archive move) — but it is never silent.
+func (r *VMMigrationReconciler) warnIfMigratedWorkloadIsNotRunning(ctx context.Context, migration *infrav1beta1.VMMigration) {
+	if migrationTargetPowerState(migration) == infrav1beta1.PowerStateOn {
+		return
+	}
+	target := migrationTargetVMKey(migration)
+	msg := fmt.Sprintf("The source VM %s/%s was deleted (spec.source.deleteAfterMigration: true) and the target VM %s was never "+
+		"started (spec.target.powerOn is false): the workload is not running anywhere until the target is powered on "+
+		"(set its spec.powerState: On)", migration.Namespace, migration.Spec.Source.VMRef.Name, target)
+	logging.FromContext(ctx).Info("Migration deleted its source and left its target powered off", "target", target.String())
+	r.Recorder.Event(migration, corev1.EventTypeWarning, migrationReasonSourceDeletedTargetNotStarted, msg)
 }
 
 // deleteSourceVM deletes the source VM after successful migration

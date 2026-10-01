@@ -62,6 +62,7 @@ spec:
       namespace: default
     classRef:
       name: high-performance
+    # false (the default) leaves the migrated VM off; true powers it on.
     powerOn: false
     # A raw-disk migration carries the disk, not the NIC — re-specify the target
     # network so the migrated VM boots with an adapter (map to a PVE bridge).

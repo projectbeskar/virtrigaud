@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -144,10 +145,8 @@ func (r *VMCloneReconciler) startClusteredClone(
 		return ctrl.Result{}, err
 	}
 	if pl := target.Status.Placement; pl != nil && containsHost(pl.ExcludedHosts, host) {
-		return r.waitForCloneHost(ctx, clone, cloneReasonSourceHostExcluded, fmt.Sprintf(
-			"the source VM's host %s is excluded for the target VM %s/%s: a domain of the clone's name that the target does not own "+
-				"exists there, and the clone can land on no other host. Resolve the name conflict and clear the target's "+
-				"status.placement.excludedHosts", host, target.Namespace, target.Name), cloneHostBlockedRetryInterval), nil
+		return r.waitForCloneHost(ctx, clone, cloneReasonSourceHostExcluded, cloneHostExcludedMessage(host, target),
+			cloneHostBlockedRetryInterval), nil
 	}
 
 	// 3. The clone must fit in the free capacity of its host — the only host
@@ -193,28 +192,30 @@ func (r *VMCloneReconciler) startClusteredClone(
 		CustomizeJSON: r.customizeJSON(ctx, clone),
 	}
 
-	now := metav1.Now()
-	clone.Status.Phase = infrav1beta1.ClonePhaseCloning
-	if clone.Status.StartTime == nil {
-		clone.Status.StartTime = &now
+	// Never clone from a stale read (see startClone).
+	if fresh, res, err := r.confirmCloneNotStarted(ctx, clone); !fresh {
+		return res, err
 	}
-	if linked {
-		clone.Status.ActualCloneType = infrav1beta1.CloneTypeLinkedClone
-	} else {
-		clone.Status.ActualCloneType = infrav1beta1.CloneTypeFullClone
-	}
-	utilk8s.SetCondition(&clone.Status.Conditions, infrav1beta1.VMCloneConditionCloning,
-		metav1.ConditionTrue, infrav1beta1.VMCloneReasonCloning, fmt.Sprintf("Clone operation initiated on host %s", host))
 
+	// Recorded as started only once the provider accepted the clone
+	// (markCloneStarted): every refusal below is a wait that must leave the
+	// clone's stored status as it was, so a repeated wait writes nothing.
+	started := metav1.Now()
 	resp, err := cloner.Clone(ctx, req)
 	if err != nil {
 		return r.handleClusteredCloneError(ctx, clone, target, host, err)
 	}
 
+	before := clone.DeepCopy()
+	markCloneStarted(clone, linked, started, fmt.Sprintf("Clone operation initiated on host %s", host))
 	clone.Status.TargetVMID = resp.TargetVmID
 	clone.Status.TaskRef = resp.TaskRef
-	// Persist the target VM ID before binding (see startClone).
-	if err := r.updateStatus(ctx, clone); err != nil {
+	// Persist the target VM ID before binding, with no resourceVersion
+	// precondition (see startClone and persistCloneStatus).
+	if err := r.persistCloneStatus(ctx, clone, before); err != nil {
+		if errors.Is(err, errCloneChanged) {
+			return requeueOnCloneChanged(), nil
+		}
 		return ctrl.Result{}, err
 	}
 	if resp.TaskRef == "" {
@@ -281,9 +282,18 @@ func (r *VMCloneReconciler) cloneLandingHostProblem(ctx context.Context, provide
 	return "", "", nil
 }
 
+// cloneHostExcludedMessage is the Ready message of a clone whose landing host
+// (the source VM's) is excluded for its target VM.
+func cloneHostExcludedMessage(host string, target *infrav1beta1.VirtualMachine) string {
+	return fmt.Sprintf("the source VM's host %s is excluded for the target VM %s/%s: a domain of the clone's name that the target "+
+		"does not own exists there, and the clone can land on no other host. Resolve the name conflict and clear the target's "+
+		"status.placement.excludedHosts", host, target.Namespace, target.Name)
+}
+
 // waitForCloneHost records that the clone waits for its landing host (reason,
 // msg on the Ready condition, Pending phase) and requeues after after. No
-// provider call is made and no other host is tried.
+// provider call is made and no other host is tried. msg must be stable across
+// retries of the same wait (markPending): a repeated wait then writes nothing.
 func (r *VMCloneReconciler) waitForCloneHost(ctx context.Context, clone *infrav1beta1.VMClone, reason, msg string, after time.Duration) ctrl.Result {
 	logging.FromContext(ctx).Info("Clone cannot land on its source VM's host yet; waiting", "reason", reason, "message", msg)
 	res := r.markPending(ctx, clone, reason, msg)
@@ -315,6 +325,13 @@ func (r *VMCloneReconciler) ensureClusteredCloneTarget(
 		if allowed, res, liveErr := r.gateConsumers(ctx, r.liveReader(), clone, sourceVM, targetNamespace); !allowed {
 			return nil, res, true, liveErr
 		}
+		// The target is created, and its UID recorded on the VMClone, only
+		// for the live VMClone this reconcile read: a stale cache (e.g. a
+		// clone already Failed) creates nothing, and the record that follows
+		// cannot overwrite a live Failed.
+		if fresh, res, liveErr := r.confirmCloneNotStarted(ctx, clone); !fresh {
+			return nil, res, true, liveErr
+		}
 		target = r.buildTargetVM(clone, sourceVM, targetNamespace)
 		if createErr := r.Create(ctx, target); createErr != nil {
 			if apierrors.IsAlreadyExists(createErr) {
@@ -329,8 +346,19 @@ func (r *VMCloneReconciler) ensureClusteredCloneTarget(
 			fmt.Sprintf("Created target VM %q before cloning onto its source's host", key.Name))
 		// Record WHICH object this clone created, before anything else: only
 		// it is ever used as the target or removed when the clone fails.
+		// A plain update could lose this record to a concurrent edit of the
+		// VMClone (persistCloneStatus), leaving a target the failed clone could
+		// never identify as its own.
+		before := clone.DeepCopy()
 		clone.Status.TargetUID = string(target.UID)
-		if err := r.updateStatus(ctx, clone); err != nil {
+		if err := r.persistCloneStatus(ctx, clone, before); err != nil {
+			if errors.Is(err, errCloneChanged) {
+				// The VMClone this target was made for is gone or replaced,
+				// or the record already landed: the next pass decides from a
+				// fresh read. A re-created VMClone refuses this (unplaced,
+				// empty) target — no matching clone-uid marker.
+				return nil, requeueOnCloneChanged(), true, nil
+			}
 			return nil, ctrl.Result{}, true, fmt.Errorf("record the created target VM %s/%s on VMClone %s/%s: %w",
 				target.Namespace, target.Name, clone.Namespace, clone.Name, err)
 		}
@@ -464,6 +492,10 @@ func (r *VMCloneReconciler) handleClusteredCloneError(
 		// source is off, and is never failed for it.
 		return r.holdCloneForRunningSource(ctx, clone, err), nil
 	case contracts.IsConflict(err):
+		// The provider's answer is in no condition (the clone's message is the
+		// stable excluded-host one): keep it in the manager log for audit.
+		logger.Info("Clone refused on host: name conflict", "host", host, "target", target.Name,
+			"error", sanitizeProviderDetail(err))
 		pl := target.Status.Placement
 		if pl == nil {
 			pl = &infrav1beta1.PlacementStatus{}
@@ -483,9 +515,12 @@ func (r *VMCloneReconciler) handleClusteredCloneError(
 			}
 			return ctrl.Result{}, fmt.Errorf("record excluded host %s for clone target %s/%s: %w", host, target.Namespace, target.Name, uerr)
 		}
+		// The provider's answer is in the event; the condition says what the
+		// next reconcile — which finds the host excluded — says too, so the
+		// refusal is written once.
 		r.Recorder.Event(clone, "Warning", cloneReasonSourceHostExcluded, fmt.Sprintf("Clone refused on host %s: %v", host, err))
-		return r.waitForCloneHost(ctx, clone, cloneReasonSourceHostExcluded, fmt.Sprintf(
-			"clone refused on the source VM's host %s: %v", host, err), cloneHostBlockedRetryInterval), nil
+		return r.waitForCloneHost(ctx, clone, cloneReasonSourceHostExcluded, cloneHostExcludedMessage(host, target),
+			cloneHostBlockedRetryInterval), nil
 	case contracts.IsHostUnavailable(err):
 		// Backed off like a clustered create answered HOST_UNAVAILABLE
 		// (ADR-0007 A6.1): the clone may have had to check every host of the

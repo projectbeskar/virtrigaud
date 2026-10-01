@@ -56,6 +56,9 @@ spec:
       - name: primary
         networkRef:
           name: vm-network
+    # false (the default) leaves the migrated VM off; true powers it on. On a
+    # vSphere target the provider's Create still boots the VM briefly before it
+    # is powered off (docs/upgrading.md).
     powerOn: false
   storage:
     type: nfs

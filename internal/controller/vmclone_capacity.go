@@ -337,9 +337,13 @@ func (r *VMCloneReconciler) admitClusteredClone(
 		retryAfter := r.unschedulable.next(uid, time.Now())
 		logger.V(1).Info("Committed-capacity arithmetic of a refused clone (administrator detail)",
 			"host", host, "detail", tooBig.Detail())
-		// Only the clone's own size and host (review M3).
+		// Only the clone's own size and host (review M3). The message names no
+		// retry delay: it must be the same on every re-check of the same
+		// refusal, or each re-check would rewrite the clone's status and its
+		// own watch would re-run the check at once, ratcheting the backoff up.
 		msg := fmt.Sprintf("the clone (%d vCPU, %d MiB) does not fit in the free capacity of its source VM's host %s, "+
-			"the only host it can land on; it is re-checked (next check in %s)", want.CPU, want.MemoryMiB, host, retryAfter)
+			"the only host it can land on; it is re-checked with a backoff of up to %s",
+			want.CPU, want.MemoryMiB, host, placementUnschedulableMaxRetryInterval)
 		return clonePlacementAdmission{}, r.refuseClonePlacement(ctx, clone, target, k8s.ReasonUnschedulable, msg, retryAfter), false, nil
 	default:
 		msg := fmt.Sprintf("the clone cannot be checked against its source VM's host %s: %v", host, checkErr)

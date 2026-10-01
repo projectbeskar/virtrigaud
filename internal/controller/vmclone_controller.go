@@ -21,6 +21,8 @@ import (
 	"encoding/json"
 	stderrors "errors"
 	"fmt"
+	"io"
+	"net"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -31,6 +33,9 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
+	utilnet "k8s.io/apimachinery/pkg/util/net"
+	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -38,6 +43,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	infrav1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
@@ -402,17 +408,17 @@ func (r *VMCloneReconciler) startClone(
 		return res, err
 	}
 
-	now := metav1.Now()
-	clone.Status.Phase = infrav1beta1.ClonePhaseCloning
-	clone.Status.StartTime = &now
-	if linked {
-		clone.Status.ActualCloneType = infrav1beta1.CloneTypeLinkedClone
-	} else {
-		clone.Status.ActualCloneType = infrav1beta1.CloneTypeFullClone
+	// Never clone from a stale read (confirmCloneNotStarted): a cache that does
+	// not show this clone's earlier outcome (Failed, or a recorded target)
+	// would send the Clone a second time.
+	if fresh, res, err := r.confirmCloneNotStarted(ctx, clone); !fresh {
+		return res, err
 	}
-	k8s.SetCondition(&clone.Status.Conditions, infrav1beta1.VMCloneConditionCloning,
-		metav1.ConditionTrue, infrav1beta1.VMCloneReasonCloning, "Clone operation initiated")
 
+	// The clone is recorded as started only once the provider accepted it
+	// (markCloneStarted): a refused clone that waits keeps exactly the status
+	// it had, so a repeated wait writes nothing (see markCloneStarted).
+	started := metav1.Now()
 	resp, err := cloner.Clone(ctx, req)
 	if err != nil {
 		// A libvirt full clone requires a powered-off source: the clone waits
@@ -427,6 +433,8 @@ func (r *VMCloneReconciler) startClone(
 			fmt.Sprintf("clone failed: %v", err)), nil
 	}
 
+	before := clone.DeepCopy()
+	markCloneStarted(clone, linked, started, cloneStartedMessage)
 	clone.Status.TargetVMID = resp.TargetVmID
 	clone.Status.TaskRef = resp.TaskRef
 
@@ -435,8 +443,15 @@ func (r *VMCloneReconciler) startClone(
 	// controller, which reconciles the freshly-created adopted target VM
 	// immediately. If that happens and we requeue, this persisted TargetVMID is
 	// what lets the next reconcile resume binding (via the idempotency check)
-	// instead of issuing a second clone.
-	if err := r.updateStatus(ctx, clone); err != nil {
+	// instead of issuing a second clone. It is written without a
+	// resourceVersion precondition (persistCloneStatus): a VMClone edited
+	// while the provider copied must not lose the clone it made. A VMClone
+	// deleted, re-created or moved on meanwhile is never written or bound here
+	// (errCloneChanged); the next pass re-reads it (requeueOnCloneChanged).
+	if err := r.persistCloneStatus(ctx, clone, before); err != nil {
+		if stderrors.Is(err, errCloneChanged) {
+			return requeueOnCloneChanged(), nil
+		}
 		return ctrl.Result{}, err
 	}
 
@@ -699,8 +714,10 @@ func applyClonedBinding(vm *infrav1beta1.VirtualMachine, landing *infrav1beta1.P
 
 // buildTargetVM constructs the target VirtualMachine CR for a clone: it carries
 // the adopted label and clone provenance annotations, inherits the source VM's
-// provider and class (unless the clone overrides the class), and copies the
-// requested networks/placement. Status.ID is seeded separately by bindTargetVM.
+// provider and class (unless the clone overrides the class), copies the
+// requested networks/placement, and sets the desired power state from
+// spec.options.powerOn (cloneTargetPowerState). Status.ID is seeded separately
+// by bindTargetVM.
 func (r *VMCloneReconciler) buildTargetVM(
 	clone *infrav1beta1.VMClone,
 	sourceVM *infrav1beta1.VirtualMachine,
@@ -751,6 +768,7 @@ func (r *VMCloneReconciler) buildTargetVM(
 		Spec: infrav1beta1.VirtualMachineSpec{
 			ProviderRef: providerRef,
 			ClassRef:    classRef,
+			PowerState:  cloneTargetPowerState(clone),
 		},
 	}
 	if len(clone.Spec.Target.Networks) > 0 {
@@ -760,6 +778,58 @@ func (r *VMCloneReconciler) buildTargetVM(
 		targetVM.Spec.PlacementRef = &infrav1beta1.LocalObjectReference{Name: clone.Spec.Target.PlacementRef.Name}
 	}
 	return targetVM
+}
+
+// cloneStartedMessage is the Cloning condition message of a single-host clone
+// the provider accepted (a clustered clone's names its host).
+const cloneStartedMessage = "Clone operation initiated"
+
+// cloneInProgressMessage is the Ready condition message (and status.message)
+// of a clone the provider accepted that is not bound yet.
+const cloneInProgressMessage = "Clone in progress"
+
+// markCloneStarted records, in memory, that the provider accepted the clone's
+// Clone RPC issued at started: Phase=Cloning, the start time, the clone type,
+// Cloning=True with msg, and Ready=False/Cloning — replacing whatever wait the
+// clone showed before (e.g. SourceMustBePoweredOff), so a clone in flight never
+// reports a stale hold. The caller persists it with the target ID / task.
+//
+// It is applied ONLY after the RPC succeeded. A Clone the provider refuses
+// with a wait (a running source, an unreachable host, a previous incarnation,
+// ...) must leave the clone's status exactly as it was stored: marking it
+// Cloning before the RPC and flipping it back to Pending/Cloning=False on the
+// refusal made every held reconcile write a changed status (a new
+// LastTransitionTime on the Cloning condition, a new start time), and that
+// write re-triggered the clone's own watch at once — a Clone RPC every ~100 ms
+// that the hold's backoff never governed.
+func markCloneStarted(clone *infrav1beta1.VMClone, linked bool, started metav1.Time, msg string) {
+	clone.Status.Phase = infrav1beta1.ClonePhaseCloning
+	clone.Status.StartTime = &started
+	clone.Status.Message = cloneInProgressMessage
+	if linked {
+		clone.Status.ActualCloneType = infrav1beta1.CloneTypeLinkedClone
+	} else {
+		clone.Status.ActualCloneType = infrav1beta1.CloneTypeFullClone
+	}
+	k8s.SetCondition(&clone.Status.Conditions, infrav1beta1.VMCloneConditionCloning,
+		metav1.ConditionTrue, infrav1beta1.VMCloneReasonCloning, msg)
+	k8s.SetCondition(&clone.Status.Conditions, infrav1beta1.VMCloneConditionReady,
+		metav1.ConditionFalse, infrav1beta1.VMCloneReasonCloning, cloneInProgressMessage)
+}
+
+// cloneTargetPowerState is the desired power state (spec.powerState) of the
+// VirtualMachine a clone produces: On when the clone asks for it
+// (spec.options.powerOn: true), Off otherwise — powerOn defaults to false. It
+// is always set explicitly, because the VirtualMachine controller treats an
+// empty spec.powerState as On. Every provider leaves a clone powered off
+// (vSphere, libvirt, Proxmox, mock), so an Off target is never powered on and
+// an On target is powered on once, by the VirtualMachine controller, after the
+// bind: no power flap either way.
+func cloneTargetPowerState(clone *infrav1beta1.VMClone) infrav1beta1.PowerState {
+	if clone.Spec.Options != nil && clone.Spec.Options.PowerOn {
+		return infrav1beta1.PowerStateOn
+	}
+	return infrav1beta1.PowerStateOff
 }
 
 // finalizeReady marks the VMClone Ready and records the target reference.
@@ -851,11 +921,18 @@ func (r *VMCloneReconciler) handleDeletion(ctx context.Context, clone *infrav1be
 }
 
 // markFailed sets the VMClone to the Failed phase with a Ready=False / Failed
-// condition and persists status. It does not requeue, and Failed is terminal:
-// the Reconcile entry short-circuits on a Failed phase, so a failed clone is
-// not retried in place — recreate the VMClone to retry. This is deliberate:
-// a clone is a one-shot job and a partial provider-side clone makes blind
-// auto-retry unsafe (it could leave or create a duplicate provider VM).
+// condition and persists status. Failed is terminal: the Reconcile entry
+// short-circuits on a Failed phase, so a failed clone is not retried in place
+// — recreate the VMClone to retry. This is deliberate: a clone is a one-shot
+// job and a partial provider-side clone makes blind auto-retry unsafe (it
+// could leave or create a duplicate provider VM).
+//
+// It requeues once, explicitly, after cloneFailedFollowUpDelay (never at once:
+// the cache must show the Failed write first): the next reconcile of the Failed clone makes
+// its one-time target decision (removeFailedClusteredTarget — a clustered
+// clone removes the target VirtualMachine it created), and retries a status
+// write that failed. The VMClone watch ignores the clone's own status writes
+// (GenerationChangedPredicate), so nothing else would bring that reconcile.
 func (r *VMCloneReconciler) markFailed(ctx context.Context, clone *infrav1beta1.VMClone, reason, message string) ctrl.Result {
 	logger := logging.FromContext(ctx)
 	logger.Info("VMClone failed", "reason", reason, "message", message)
@@ -867,14 +944,29 @@ func (r *VMCloneReconciler) markFailed(ctx context.Context, clone *infrav1beta1.
 		metav1.ConditionFalse, reason, message)
 	k8s.SetCondition(&clone.Status.Conditions, infrav1beta1.VMCloneConditionFailed,
 		metav1.ConditionTrue, reason, message)
+	// A failed clone is not cloning any more (e.g. its clone task failed).
+	if k8s.IsConditionTrue(clone.Status.Conditions, infrav1beta1.VMCloneConditionCloning) {
+		k8s.SetCondition(&clone.Status.Conditions, infrav1beta1.VMCloneConditionCloning,
+			metav1.ConditionFalse, reason, message)
+	}
 	r.Recorder.Event(clone, "Warning", reason, message)
 
 	_ = r.updateStatus(ctx, clone) //nolint:errcheck // status errors retried next reconcile
-	return ctrl.Result{}
+	return ctrl.Result{RequeueAfter: cloneFailedFollowUpDelay}
 }
 
+// cloneFailedFollowUpDelay is when a clone that just failed is reconciled
+// again (markFailed). It is not immediate: the informer cache must show the
+// Failed write first, or that reconcile would read the clone as it was before
+// and could act on it again (confirmCloneNotStarted guards the Clone itself).
+const cloneFailedFollowUpDelay = 5 * time.Second
+
 // markPending sets the VMClone to the Pending phase (still waiting on a
-// prerequisite) and requeues.
+// prerequisite) and requeues. It is idempotent: a wait repeated with the same
+// reason and message leaves the stored status unchanged and writes nothing
+// (updateStatus), so only the requeue — or a real external event — re-drives
+// the clone. Callers must therefore pass a message that is stable across
+// retries of the same wait (no durations, counters or timestamps).
 func (r *VMCloneReconciler) markPending(ctx context.Context, clone *infrav1beta1.VMClone, reason, message string) ctrl.Result {
 	clone.Status.Phase = infrav1beta1.ClonePhasePending
 	clone.Status.Message = message
@@ -1094,13 +1186,225 @@ func (r *VMCloneReconciler) getProviderInstance(ctx context.Context, provider *i
 	return r.RemoteResolver.GetProvider(ctx, provider)
 }
 
-// updateStatus persists the VMClone status subresource.
+// updateStatus persists the VMClone status subresource. A write that would
+// change nothing is not sent (statusUnchanged): the VMClone's own watch
+// reconciles on every status update, so a wait that rewrote its status on
+// each retry would re-trigger itself at once instead of waiting for its
+// requeue.
 func (r *VMCloneReconciler) updateStatus(ctx context.Context, clone *infrav1beta1.VMClone) error {
+	if r.statusUnchanged(ctx, clone) {
+		return nil
+	}
 	if err := r.Status().Update(ctx, clone); err != nil {
 		logging.FromContext(ctx).Error(err, "Failed to update VMClone status")
 		return err
 	}
 	return nil
+}
+
+// errCloneChanged reports that the VMClone a reconcile acted for is gone,
+// was replaced by another object of the same name, or has moved on to another
+// phase since it was read: nothing is recorded on it and nothing is bound.
+var errCloneChanged = stderrors.New("the VMClone was deleted, re-created or changed phase meanwhile")
+
+// jsonPatchOp is one RFC 6902 JSON Patch operation.
+type jsonPatchOp struct {
+	Op    string          `json:"op"`
+	Path  string          `json:"path"`
+	Value json.RawMessage `json:"value"`
+}
+
+// persistCloneStatus writes clone's status — the record of something the
+// clone just made on the provider or in the cluster (the accepted Clone's
+// target VM ID and task, the target VirtualMachine it created) — as a JSON
+// Patch of the status subresource WITHOUT a resourceVersion precondition. A
+// plain update carries the resourceVersion read at the start of the reconcile,
+// so any edit of the VMClone made meanwhile (a tenant annotating it during a
+// synchronous libvirt copy of several minutes) made it fail with a Conflict:
+// the record was lost, the next reconcile sent the Clone again, the provider
+// refused it ("already exists"), and the clone failed with a full disk copy
+// left untracked on the host. Only this controller writes a VMClone's status,
+// and a VMClone is never reconciled concurrently, so replacing the status
+// overwrites nothing another writer set.
+//
+// The patch starts with "test" operations, so it lands only on the object the
+// reconcile read: the same metadata.uid (a VMClone deleted and re-created
+// under the same name during the copy is a different object and never gets
+// the old clone's record) and, when before had one, the same status.phase (a
+// stored Failed or Ready is never overwritten). A failed test (the API server
+// answers 422 Invalid) or a VMClone that is gone returns errCloneChanged: the
+// caller logs nothing more, binds nothing and returns. Transient API and
+// transport errors are retried within cloneRecordBackoff
+// (isRetriableRecordError); anything else is returned. A record of a clone the
+// provider made that still cannot be written is announced with a
+// CloneRecordNotSaved Warning event, so its copy is never silently untracked.
+func (r *VMCloneReconciler) persistCloneStatus(ctx context.Context, clone, before *infrav1beta1.VMClone) error {
+	logger := logging.FromContext(ctx)
+	patch, err := cloneStatusPatch(before, &clone.Status)
+	if err != nil {
+		return err
+	}
+	err = retry.OnError(cloneRecordBackoff, func(err error) bool { return isRetriableRecordError(ctx, err) }, func() error {
+		return r.Status().Patch(ctx, clone, patch)
+	})
+	switch {
+	case err == nil:
+		return nil
+	case errors.IsNotFound(err) || errors.IsInvalid(err):
+		logger.Error(err, "Not recording the clone: the VMClone was deleted, re-created or changed phase while the clone ran; "+
+			"what the clone made is left as is", "uid", before.UID, "phase", before.Status.Phase,
+			"target_vm_id", clone.Status.TargetVMID, "task_ref", clone.Status.TaskRef, "target_uid", clone.Status.TargetUID)
+		return fmt.Errorf("record the clone on VMClone %s/%s: %w: %w", clone.Namespace, clone.Name, errCloneChanged, err)
+	default:
+		logger.Error(err, "Failed to record the clone on the VMClone status",
+			"target_vm_id", clone.Status.TargetVMID, "task_ref", clone.Status.TaskRef, "target_uid", clone.Status.TargetUID)
+		if clone.Status.TargetVMID != "" {
+			// The provider made the clone, and nothing records it: say so on
+			// the VMClone, so the copy is never silently untracked. Only the
+			// target VM ID is named, no provider or host text.
+			r.Recorder.Event(clone, corev1.EventTypeWarning, cloneReasonRecordNotSaved, fmt.Sprintf(
+				"The provider made the clone %q, but it could not be recorded on this VMClone; a copy may exist on the host "+
+					"untracked. If this clone is retried and refused as already existing, adopt or remove that VM.",
+				clone.Status.TargetVMID))
+		}
+		return fmt.Errorf("record the clone on VMClone %s/%s: %w", clone.Namespace, clone.Name, err)
+	}
+}
+
+// cloneReasonRecordNotSaved is the Warning event reason of a clone the
+// provider made whose record could not be written to the VMClone.
+const cloneReasonRecordNotSaved = "CloneRecordNotSaved"
+
+// cloneRecordBackoff bounds the retries of a clone's record
+// (persistCloneStatus): six attempts over about six seconds, enough to ride
+// out an API server restart or a dropped connection, never an unbounded wait.
+var cloneRecordBackoff = wait.Backoff{Steps: 6, Duration: 100 * time.Millisecond, Factor: 2, Jitter: 0.1}
+
+// isRetriableRecordError reports whether a failed write of a clone's record is
+// retried: a transient API error (isTransientWriteError); a transport failure
+// (connection refused or reset, an unexpected EOF, a network timeout); or a
+// deadline of the request itself — never once the reconcile's own context is
+// done. A precondition failure (Invalid: the VMClone was re-created or changed
+// phase), NotFound, Forbidden or Unauthorized is never retried.
+func isRetriableRecordError(ctx context.Context, err error) bool {
+	if ctx.Err() != nil {
+		return false
+	}
+	switch {
+	case errors.IsInvalid(err), errors.IsNotFound(err), errors.IsForbidden(err), errors.IsUnauthorized(err):
+		return false
+	case isTransientWriteError(err):
+		return true
+	case utilnet.IsConnectionRefused(err), utilnet.IsConnectionReset(err), utilnet.IsProbableEOF(err),
+		stderrors.Is(err, io.EOF), stderrors.Is(err, io.ErrUnexpectedEOF):
+		return true
+	case stderrors.Is(err, context.DeadlineExceeded):
+		return true
+	}
+	var netErr net.Error
+	return stderrors.As(err, &netErr) && netErr.Timeout()
+}
+
+// cloneStatusPatch is the JSON Patch persistCloneStatus sends: tests of the
+// read object's metadata.uid and (when set) status.phase, then status
+// replaced as a whole ("add" replaces an existing member and creates an
+// absent one).
+func cloneStatusPatch(before *infrav1beta1.VMClone, status *infrav1beta1.VMCloneStatus) (client.Patch, error) {
+	var ops []jsonPatchOp
+	test := func(path, value string) error {
+		v, err := json.Marshal(value)
+		if err != nil {
+			return err
+		}
+		ops = append(ops, jsonPatchOp{Op: "test", Path: path, Value: v})
+		return nil
+	}
+	if before.UID != "" {
+		if err := test("/metadata/uid", string(before.UID)); err != nil {
+			return nil, fmt.Errorf("encode the VMClone uid test: %w", err)
+		}
+	}
+	if before.Status.Phase != "" {
+		if err := test("/status/phase", string(before.Status.Phase)); err != nil {
+			return nil, fmt.Errorf("encode the VMClone phase test: %w", err)
+		}
+	}
+	s, err := json.Marshal(status)
+	if err != nil {
+		return nil, fmt.Errorf("encode the VMClone status: %w", err)
+	}
+	ops = append(ops, jsonPatchOp{Op: "add", Path: "/status", Value: s})
+	data, err := json.Marshal(ops)
+	if err != nil {
+		return nil, fmt.Errorf("encode the VMClone status patch: %w", err)
+	}
+	return client.RawPatch(types.JSONPatchType, data), nil
+}
+
+// isTransientWriteError reports whether a failed status write is worth
+// retrying at once: the API server timed out, throttled, failed internally or
+// was unavailable, or another write raced it (Conflict).
+func isTransientWriteError(err error) bool {
+	return errors.IsServerTimeout(err) || errors.IsTooManyRequests(err) || errors.IsTimeout(err) ||
+		errors.IsInternalError(err) || errors.IsServiceUnavailable(err) || errors.IsConflict(err)
+}
+
+// requeueOnCloneChanged is the result of a reconcile whose clone record was
+// refused (errCloneChanged). It is never an empty result: the VMClone watch
+// ignores status writes, and a refusal does not prove the record is missing —
+// a retry after a transport error can fail its own phase test because the
+// first attempt was applied. The next pass, from a fresh read, ends on a
+// VMClone that is gone, leaves a re-created one to its own reconcile, and
+// binds one whose record landed (the TargetVMID idempotency path).
+func requeueOnCloneChanged() ctrl.Result {
+	return ctrl.Result{RequeueAfter: cloneStaleReadRetryInterval}
+}
+
+// cloneStaleReadRetryInterval is the retry of a Clone not sent because the
+// cached VMClone was not the live one (confirmCloneNotStarted).
+const cloneStaleReadRetryInterval = 2 * time.Second
+
+// confirmCloneNotStarted re-reads the VMClone from the API server (the
+// uncached APIReader) right before its Clone RPC, and allows the RPC only if
+// the live object is the one this reconcile read — same UID and
+// resourceVersion — and it has not been started or ended: phase empty or
+// Pending, no target VM ID or task recorded. A cache that is behind (e.g. it
+// does not show yet that the clone Failed) would otherwise send the Clone a
+// second time. A VMClone that is gone ends the reconcile; a stale read is
+// retried shortly; a read error is returned (backoff), and nothing is sent.
+func (r *VMCloneReconciler) confirmCloneNotStarted(ctx context.Context, clone *infrav1beta1.VMClone) (bool, ctrl.Result, error) {
+	live := &infrav1beta1.VMClone{}
+	if err := r.liveReader().Get(ctx, client.ObjectKeyFromObject(clone), live); err != nil {
+		if errors.IsNotFound(err) {
+			return false, ctrl.Result{}, nil
+		}
+		return false, ctrl.Result{}, fmt.Errorf("re-read VMClone %s/%s before its Clone: %w", clone.Namespace, clone.Name, err)
+	}
+	notStarted := live.Status.Phase == "" || live.Status.Phase == infrav1beta1.ClonePhasePending
+	if live.UID != clone.UID || live.ResourceVersion != clone.ResourceVersion || live.Status.Phase != clone.Status.Phase ||
+		!notStarted || live.Status.TargetVMID != "" || live.Status.TaskRef != "" {
+		logging.FromContext(ctx).Info("The cached VMClone is not the live one; not sending the Clone from it",
+			"cachedResourceVersion", clone.ResourceVersion, "liveResourceVersion", live.ResourceVersion, "livePhase", live.Status.Phase)
+		return false, ctrl.Result{RequeueAfter: cloneStaleReadRetryInterval}, nil
+	}
+	return true, ctrl.Result{}, nil
+}
+
+// statusUnchanged reports whether writing clone's status would change nothing:
+// the stored VMClone (read through the reconciler's client, the informer
+// cache in the manager) is at clone's resourceVersion — nothing was written
+// since clone was read or last written — and its status is semantically equal
+// to clone's. Any doubt (a read error, a cache that has not caught up with an
+// earlier write) answers false, and the write is sent.
+func (r *VMCloneReconciler) statusUnchanged(ctx context.Context, clone *infrav1beta1.VMClone) bool {
+	if clone.ResourceVersion == "" {
+		return false
+	}
+	stored := &infrav1beta1.VMClone{}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(clone), stored); err != nil {
+		return false
+	}
+	return stored.ResourceVersion == clone.ResourceVersion && equality.Semantic.DeepEqual(stored.Status, clone.Status)
 }
 
 // gateConsumers enforces spec.consumerNamespaceSelector for everything the
@@ -1206,7 +1510,14 @@ func (r *VMCloneReconciler) clonesForGrantChange(ctx context.Context, indexValue
 	})
 }
 
-// SetupWithManager sets up the controller with the Manager. Besides its own
+// SetupWithManager sets up the controller with the Manager. Its own VMClones
+// are reconciled on create, delete and spec changes only (a generation change;
+// setting deletionTimestamp bumps it too): a status or metadata-only update —
+// the controller's own status writes, or a tenant re-annotating a waiting
+// clone in a loop — never re-runs a held clone ahead of its backoff, so it
+// never drives a provider call. The controller reads nothing from a VMClone's
+// labels or annotations, and every step that must follow one of its own writes
+// asks for it with an explicit requeue. Besides its own
 // VMClones it watches Namespaces, but only for changes to the cross-namespace
 // grant annotation, to re-drive clones whose target namespace just granted or
 // revoked access; consumer-grant changes (Namespace labels, the
@@ -1225,7 +1536,7 @@ func (r *VMCloneReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		return err
 	}
 	b := ctrl.NewControllerManagedBy(mgr).
-		For(&infrav1beta1.VMClone{}).
+		For(&infrav1beta1.VMClone{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		Watches(&corev1.Namespace{},
 			handler.EnqueueRequestsFromMapFunc(r.clonesTargetingNamespace),
 			builder.WithPredicates(allowedSourceNamespacesChanged())).

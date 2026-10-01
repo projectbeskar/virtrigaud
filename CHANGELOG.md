@@ -5,6 +5,143 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-10-01 11:27] - VMClone/VMSnapshot holds no longer hot-loop the provider or follow metadata edits; accepted clones survive concurrent edits; VMClone and VMMigration honor powerOn
+**Author:** @wrkode (William Rizzo)
+
+> **Operator note.**
+> - **Behavior change:** a `VMClone` without `spec.options.powerOn: true`, and a `VMMigration` without `spec.target.powerOn: true`, now leaves the VM it produces **powered off** (`spec.powerState: Off`) — the documented default. Before, the field was never read and every clone or migrated VM came up running. Set `powerOn: true` where the VM must run.
+> - A `VMMigration` with `spec.source.deleteAfterMigration: true` and `powerOn` false (or omitted) now completes with its source deleted and its target **off**: the workload runs nowhere until the target is powered on. It emits a `SourceDeletedTargetNotStarted` Warning. Set `spec.target.powerOn: true` on such migrations.
+> - A vSphere migration target with `powerOn: false` is still booted briefly by the vSphere provider's Create before the VirtualMachine controller powers it off (hard); see `docs/upgrading.md`.
+> - libvirt hosts with more than one allowed image directory: extend the `VR_DISK_READ` sudoers rule to every directory in `VIRTRIGAUD_LIBVIRT_IMAGE_DIRS`, escaping every regex metacharacter (`docs/libvirt-clones.md`).
+
+### Security
+- `internal/controller/vmclone_controller.go`, `vmsnapshot_controller.go` (`SetupWithManager`): a metadata-only edit no longer re-runs a held `VMClone` or a held `VMSnapshot` delete. Medium; denial of service; already on `main`.
+  - **Before:** both `For()` watches had no predicate, so every update re-ran the object at once, ahead of its hold's backoff. A tenant looping `kubectl annotate --overwrite` on a waiting clone drove one Clone RPC per write, or a ListVMs / multi-host scan on a clustered hold. On a held snapshot delete it drove one SnapshotDelete per write.
+  - **VMClone:** `For()` now takes `predicate.GenerationChangedPredicate`, which passes create, delete, spec changes and the start of deletion (that bumps the generation). The controller reads no VMClone labels or annotations.
+  - **VMSnapshot:** `For()` now takes `snapshotUpdatePredicate`, which passes generation changes and changes of the `virtrigaud.io/force-delete` annotation, the only metadata the controller reads. Force-delete still releases a held delete at once.
+  - **Steps that relied on the controller's own write to re-trigger it now requeue explicitly, never at once** (an immediate requeue can run before the informer cache shows the write, and act on the object as it was before):
+    - VMClone `markFailed`: re-checked after `cloneFailedFollowUpDelay` (5 s), so the failed clustered clone still removes the target it created, and a failed status write is retried;
+    - VMSnapshot after a create ends: Ready re-checks after `snapshotRetentionCheckInterval` (1 h, the retention check), and a failed create task after `snapshotFailedRecheckInterval` (5 min).
+  - **Never a provider create from a stale read:**
+    - right before `SnapshotCreate`, `confirmSnapshotNotCreated` re-reads the VMSnapshot through the uncached APIReader (now wired in `cmd/manager`);
+    - right before the Clone RPC, `confirmCloneNotStarted` does the same for the VMClone, single-host and clustered; on a clustered Provider also before the target VirtualMachine is created.
+
+    Nothing is sent unless the live object has the same UID and resourceVersion and records no create (a VMClone: phase empty or Pending, no target VM ID or task). A stale read retries after 2 s. Without this, a requeue that read the cache before it showed a synchronous create's result could send a second create: an untracked second snapshot on a single-host provider (no request token), or a second Clone of a clone already Failed.
+  - **Unchanged:** the namespace-grant, consumer-grant and source power-state watches.
+
+### Fixed
+- `internal/controller/vmclone_controller.go`, `vmclone_clustered.go`: a `VMClone` that the provider refuses while it waits no longer calls the provider in a tight loop.
+  - **Cause:** before the Clone RPC the controller marked the clone `Phase=Cloning`, `startTime=now` and `Cloning=True` in memory. A refusal (e.g. `SourceMustBePoweredOff`) flipped `Cloning` back to `False`. `internal/util/k8s.SetCondition` then gave the condition a new `lastTransitionTime` (and `observedGeneration`), so every refused reconcile wrote a changed status. The VMClone's own watch fired at once and the next reconcile re-sent the Clone RPC.
+  - **Lab impact:** on a clustered libvirt Provider this was 325 Clone calls in 33 s, each three SSH `virsh` round trips. The 15 s → 5 min backoff never governed.
+  - The "clone started" status (`markCloneStarted`: Phase, start time, clone type, `Cloning=True`, `Ready=False/Cloning`) is now applied only after the provider accepted the Clone, single-host and clustered. A held clone never shows `Phase=Cloning`, `Cloning=True` or a `startTime`.
+  - **Holds that looped this way** (every hold after the Clone RPC):
+    - `SourceMustBePoweredOff` (both flows);
+    - `RestorePending` / `OwnDomainOnAnotherHost`;
+    - `HostUnavailable`;
+    - `CloneRetrying` (disk check, copy in progress, provider unavailable).
+  - **Hardening, not a loop fix:** the holds before the RPC re-wrote an identical status, which a real API server treats as a no-op. They are:
+    - landing host gone, cordoned or not Ready;
+    - excluded host;
+    - the pre-schedule check;
+    - `PlacementError`;
+    - the capability waits;
+    - source not provisioned.
+
+    `updateStatus` now skips a write whose status equals the stored one at the same `resourceVersion` (`statusUnchanged`), so they make no API call.
+  - The clustered name-conflict hold uses the same message as the excluded-host check that follows it, so it is written once. The provider's answer is kept in the event and now in the manager log ("Clone refused on host: name conflict").
+  - `markFailed` clears a `True` Cloning condition (a failed clone task is not cloning).
+- `internal/controller/vmclone_capacity.go`: the `Unschedulable` clone message embedded the next retry delay, which grew on every check. Each re-check therefore rewrote the status and re-ran itself, ratcheting the backoff straight to its 2 min cap. The message now names the cap.
+- `internal/controller/vmsnapshot_controller.go`: a held `VMSnapshot` delete no longer loops.
+  - **Cause:** `retainForFailedSnapshotDelete` and `retainForUnaddressableSnapshotDelete` wrote "retried (next in <time since first failure>)" into the status. Between 15 s and 5 min after the first failure, every retry rewrote the status and re-ran at once: a Validate + SnapshotDelete RPC per reconcile, for up to five minutes per stuck delete.
+  - Both now name the backoff's cap and go through `holdSnapshotDelete`. It writes, and emits the `SnapshotDeleteFailed` Warning, only when the hold changed.
+  - The failed-delete condition no longer carries the provider's answer, which can differ on every attempt (an ephemeral port in "connection reset"). It is the constant `snapshotDeleteFailedMessage`, and the answer is in the event and the log.
+  - The unaddressable hold keeps its detail, which is the operator's own refusal built from object names, never provider text.
+- `internal/controller/vmclone_controller.go`, `vmclone_clustered.go` (`persistCloneStatus`): an accepted clone is no longer lost to a concurrent edit of its `VMClone`. Medium; integrity; already on `main`.
+  - **Cause:** a libvirt single-host Clone is a synchronous disk copy. The post-RPC status update carried the `resourceVersion` read before it, so a VMClone edit during the copy made the update fail with a Conflict. `TargetVMID`/`TaskRef` were lost, the clone was sent again and refused ("already exists"), and it failed with the copy left untracked on a shared host.
+  - The record is now a JSON Patch of the status without a `resourceVersion` precondition. It starts with `test` operations on `metadata.uid` and, when set, `status.phase`, so it lands only on the object the reconcile read.
+  - A VMClone deleted and re-created under the same name during the copy, or one stored `Failed` meanwhile, fails the test (422 Invalid). The record is then neither written nor bound, and what the clone made is logged. The reconcile requeues after 2 s rather than ending: a retry after a lost answer can fail its own test because the first attempt landed, and the next pass then binds through the recorded target VM ID.
+  - Retries are bounded (`cloneRecordBackoff`, 6 attempts over about 6 s). They cover:
+    - transient API errors (server timeout, too many requests, timeout, internal error, service unavailable, conflict);
+    - transport failures (connection refused or reset, EOF, network timeouts);
+    - a deadline of the request itself, but never once the reconcile's own context is done.
+
+    Invalid, NotFound, Forbidden and Unauthorized are never retried.
+  - A record that still cannot be written emits a `CloneRecordNotSaved` Warning on the VMClone, plus a log line. The event names only the target VM ID and says a copy may exist on the host, so the copy is never silently untracked.
+  - The clustered target's `TargetUID` record is written the same way.
+- `internal/controller/vmclone_controller.go` (`buildTargetVM`, `cloneTargetPowerState`): `VMClone` `spec.options.powerOn` is honored. The produced VirtualMachine's `spec.powerState` is `On` for `powerOn: true` and `Off` otherwise, on the single-host and clustered flows; the clustered target carries it from its pre-RPC creation.
+  - Every provider's Clone leaves the clone powered off: vSphere `PowerOn: false`, libvirt define only, Proxmox clone, mock `Off`. So there is no power flap either way.
+- `internal/controller/vmmigration_controller.go` (`migrationTargetPowerState`): `VMMigration` `spec.target.powerOn` is honored the same way. A target that stays off still becomes `Ready`, so the migration completes.
+- `internal/controller/vmmigration_controller.go` (`warnIfMigratedWorkloadIsNotRunning`): a migration that deletes its source (`deleteAfterMigration: true`) while its target was never started (`powerOn` false) records a `SourceDeletedTargetNotStarted` Warning event. The combination stays allowed; no validation was added.
+
+### Added
+- Tests:
+  - `internal/controller/vmclone_hold_idempotency_test.go`:
+    - `TestVMClone_SingleHost_SourceRunningHoldIsIdempotent`;
+    - `TestVMClone_Clustered_SourceRunningHoldIsIdempotent`;
+    - `TestVMClone_Clustered_EveryHoldIsIdempotent` (16 holds);
+    - `TestVMClone_SingleHost_PendingWaitsAreIdempotent`;
+    - `TestVMClone_AsyncCloneAfterAHoldShowsItIsCloning`;
+    - `TestVMClone_FailedTaskIsNotCloning`.
+
+    These drive the reconciler the way the watch does (re-reconcile while the stored object changes) and assert that a repeated hold leaves `resourceVersion` and status unchanged and requeues at its backoff. They fail on the previous code with "hot loop".
+  - `internal/controller/vmsnapshot_delete_hold_idempotency_test.go`:
+    - `TestVMSnapshot_FailedDeleteHoldIsIdempotent`;
+    - `TestVMSnapshot_FailedDeleteHoldIgnoresVaryingProviderText`;
+    - `TestVMSnapshot_UnaddressableDeleteHoldIsIdempotent`.
+  - `internal/controller/hold_watch_envtest_test.go` (envtest, a real manager):
+    - a clone held for `SourceMustBePoweredOff` makes no Clone call on 10 metadata-only updates, and the source's power-off still re-drives it;
+    - a held snapshot delete makes no SnapshotDelete call on 10 metadata-only updates, and the force-delete annotation still releases it;
+    - a synchronous snapshot create sends exactly one SnapshotCreate.
+
+    The first two fail without the predicates.
+  - `internal/controller/watch_predicates_test.go`:
+    - `TestSnapshotUpdateNeedsReconcile`;
+    - `TestVMClone_FailureRequeuesForTheTargetCleanup`;
+    - `TestVMSnapshot_ReadyRequeuesForItsRetentionCheck`;
+    - `TestVMSnapshot_NoCreateFromAStaleCache`.
+  - `internal/controller/vmclone_status_conflict_test.go`:
+    - `TestVMClone_AcceptedCloneSurvivesAConcurrentEdit` (single-host and clustered, sync and async);
+    - `TestVMClone_Clustered_TargetUIDSurvivesAConcurrentEdit`;
+    - `TestVMClone_NoCloneFromAStaleCache` (a stored Failed, or a recorded clone);
+    - `TestVMClone_Clustered_NoTargetFromAStaleCache`.
+
+    The first two fail on the previous code.
+  - `internal/controller/vmclone_record_envtest_test.go` (envtest, real API-server patch semantics):
+    - the record of a clone is never written onto a VMClone re-created under the same name during the copy, and nothing is bound;
+    - it never overwrites a stored Failed;
+    - it still lands despite a metadata edit;
+    - a record that is applied but answered with a connection reset still ends Ready and bound, without a second Clone.
+  - `internal/controller/vmclone_record_retry_test.go`:
+    - `TestVMClone_RecordSurvivesATransportError`: connection refused or reset, unexpected EOF, request deadline, service unavailable. The record lands after a retry and no second Clone is sent.
+    - `TestVMClone_RecordNotSavedIsAnnounced`.
+    - `TestIsRetriableRecordError`.
+  - `internal/controller/vmclone_power_on_test.go`:
+    - `TestVMClone_SingleHost_PowerOnSetsTheTargetsPowerState`;
+    - `TestVMClone_Clustered_PowerOnSetsTheTargetsPowerState`;
+    - `TestVMClone_TargetPowerStateIsHonouredWithoutAFlap`;
+    - `TestCreatingPhase_PowerOnSetsTheTargetsPowerState`.
+  - `internal/controller/vmmigration_poweron_delete_test.go`: `TestHandleReadyPhase_DeleteAfterMigrationWithTargetOffWarns`.
+
+### Changed
+- Docs:
+  - `docs/upgrading.md`: a breaking-change row for `powerOn`, with the `deleteAfterMigration` + `powerOn: false` combination and the vSphere migration-target caveat.
+  - `docs/release-notes/next.md`.
+  - `docs/libvirt-clones.md`:
+    - clone power state;
+    - a waiting clone writes nothing on a repeated refusal;
+    - a note that the disk in-use check also reads other domains' backing files in other allowed image directories, and how to extend `VR_DISK_READ` to each directory in `VIRTRIGAUD_LIBVIRT_IMAGE_DIRS` with the same `[^/ ]+` confinement, escaping every regex metacharacter;
+    - that a symbolic link in an allowed directory is followed by the read, which then reveals only the target's image metadata.
+  - `examples/vmclone-basic.yaml`, `examples/vmmigration-*.yaml`, `examples/migration/*.yaml`: `powerOn` comments.
+
+### Why
+A lab run on a clustered libvirt Provider (2026-10-01) showed a `VMClone` of a running source calling Clone about 10 times a second while it waited for `SourceMustBePoweredOff`, a regression from the powered-off-source work in #369. An audit of the other controllers found the same self-trigger in messages that embedded a duration (the clone `Unschedulable` hold, the VMSnapshot delete retry). The security review of that fix found that metadata-only edits bypassed every hold's backoff, and that a concurrent edit could orphan an accepted single-host clone. Separately, `powerOn` was a dead field: a `powerOn: false` clone came up running in the lab.
+
+### Impact
+- [x] Breaking change
+- [x] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-10-01 10:30] - Fix VirtualMachine delete orphaning the hypervisor VM while its Provider cannot be reached
 **Author:** @wrkode (William Rizzo)
 
