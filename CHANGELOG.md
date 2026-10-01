@@ -5,6 +5,175 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-10-01 08:28] - Slice 5 security review nits: NFS uid/gid 0 refused for every provider, single-host GetDiskInfo path parity, startup WARN for unsafe pool directories
+**Author:** @wrkode (William Rizzo)
+
+> **Operator note.**
+> - An nfs `VMMigration` with `spec.storage.nfs.uid: 0` or `gid: 0` now fails at Validating for **every** provider type (`NFSRootIdentityNotAllowed`). Use a dedicated non-zero uid/gid that owns the export.
+> - Grant the libvirt sudoers nfs rule only for the export meant for VirtRigaud: a root `qemu-img` connects from a reserved port, so a `secure` export now accepts the host as the SSH user's uid.
+> - A single-host libvirt Provider now names, at startup, any VM storage directory where clones and exports are refused.
+
+### Changed
+- `internal/controller/vmmigration_nfs_identity.go`, `vmmigration_controller.go`: `nfsRootIdentityRefusal` no longer depends on the provider types (maintainer decision). It is the first check in `handleValidatingPhase`, from the spec alone, before the source VM or any Provider is read and before any side effect.
+  - Result: `Validating=False`, reason `NFSRootIdentityNotAllowed`, and the message "… set to 0 (root) is not allowed: … Use a dedicated non-zero uid/gid that owns the export, or leave them unset".
+  - It is still a typed check, not a CRD minimum: tightening v1beta1 is a breaking API change, and the condition says why.
+- `internal/providers/libvirt/provider_virsh.go`, `privileged_copy.go`: a single-host `GetDiskInfo` now refuses (`InvalidArgument`) an explicit `DiskId` path that is not one of the domain's disks. This matches the clustered path and covers the pvc export that copies what `GetDiskInfo` resolves.
+  - Before, the SSH user ran a format-probing `qemu-img info` on that file.
+  - `readDiskInfoOnHost` always pins the definition's format and reads nothing without one.
+- `internal/providers/libvirt/disk_mode.go`, `provider.go`: the WARN for a group- or world-writable, non-sticky VM storage directory now says that clones and exports there are REFUSED, and points to the docs.
+  - A single-host Provider runs the check at startup for every VM storage directory (`warnUnsafeVMStorageDirs`; best-effort, 30 s bound).
+  - A clustered Provider checks each host's pool directory on first use.
+- `internal/providers/libvirt/testdata/single_host_snapshot_clone_disk.golden.json`: regenerated in its own commit. Only `diskinfo-explicit-path` changed: it is now refused, and the probing read and the snapshot listing are gone. `single_host_power_reconfigure` and `single_host_listvms` are byte-identical.
+- Tests:
+  - `TestNFSRootIdentityRefusal`;
+  - `TestVMMigration_NFSRootIdentityFailsAtValidating` (all 9 source/target type pairs);
+  - `TestVMMigration_NFSRootIdentityIsCheckedFromTheSpecAlone`;
+  - `TestSingleHost_GetDiskInfo_CallerPathMustBeTheDomainsDisk`;
+  - `TestWarnUnsafeVMStorageDirs_NamesTheDirectoryAtStartup`.
+- Docs:
+  - `docs/upgrading.md`: a breaking-change row for uid/gid 0, and behaviour bullets;
+  - `docs/libvirt-clones.md`: the reserved source port and `secure` exports next to the sudoers nfs rule, a single-host `GetDiskInfo` path, and a new Troubleshooting section;
+  - `docs/release-notes/next.md` and the ADR-0007 Slice 5 amendment;
+  - `examples/vmmigration-nfs.yaml` and `examples/migration/README.md`.
+
+### Why
+The round-3 security review approved with nits. William Rizzo decided that uid/gid 0 is refused for every provider: every provider presents the identity as AUTH_SYS, which is root on an export without `root_squash`. Not done (optional nit 2): caching the chain-image check in the disk in-use scan. The symlink check is per file, so it would cost one more host round trip per image on every scan, or a change to the kind-check script that the copy path and the golden share. The scan's root reads stay format-pinned `qemu-img info` only.
+
+### Impact
+- [x] Breaking change
+- [x] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
+## [2026-09-30 17:26] - ADR-0007 Slice 5 security review: libvirt root copies confined (NFS identity, definition formats, swappable chains, exact sudoers), host-safe tests
+**Author:** @wrkode (William Rizzo)
+
+> **Operator note.** libvirt only, single-host and clustered.
+> - **Before upgrading every libvirt host:**
+>   - run a QEMU with the **CVE-2024-4467** fix;
+>   - make sure the pool directory is not group- or world-writable (unless it is sticky): `stat -c '%a %U:%G' /var/lib/libvirt/images`. Otherwise full clones and disk exports are refused (`FailedPrecondition`);
+>   - replace the `qemu-img info -U *` sudoers wildcard with the regex rule `VR_DISK_READ` from [`docs/libvirt-clones.md`](docs/libvirt-clones.md#what-the-copies-run-as-root).
+> - An nfs `VMMigration` to or from libvirt with `nfs.uid: 0` or `nfs.gid: 0` now fails at Validating (`NFSRootIdentityNotAllowed`).
+> - A libvirt nfs export whose migration names another uid/gid runs as the SSH user, so a VM with an external snapshot cannot be exported to NFS that way.
+
+### Security
+- Item 1 (High), `internal/providers/libvirt/privileged_copy.go`, `nfs.go`, `internal/controller/vmmigration_nfs_identity.go`, `vmmigration_controller.go`:
+  - A root nfs export writes to the destination's server and path with exactly `?uid=<SSH uid>&gid=<SSH gid>`. Every other libnfs option is dropped (`nfsURLForRoot`, which replaces `nfsURLWithHostIdentity`).
+  - A destination naming another uid or gid is never written as root. The SSH user's own `qemu-img` presents that identity, with the format pinned.
+  - The manager refuses `spec.storage.nfs.uid`/`gid` = 0 when the source or target Provider is libvirt, at Validating, before any side effect: `Validating=False`, reason `NFSRootIdentityNotAllowed`.
+  - This is a typed check, not a CRD minimum: it depends on the provider, and tightening v1beta1 would reject stored objects on update.
+- Item 2 (High), `domain_disks.go`, `imagepath.go`, `provider_virsh.go`, `clone.go`, `clone_clustered.go`, `routed_export.go`, `s3export.go`, `nfs.go`, `storage.go`: every disk root reads is opened in its domain definition's format, never probed. The definition's format is `<driver type>`, or raw when there is none. This covers:
+  - the s3/nfs exports (`exportSourceOn`; an explicit disk path must be one of the VM's disks);
+  - `GetDiskInfo`, which pins `-f` and reports the definition's format;
+  - the disk in-use scan (level 0 from the definition, volume disks included);
+  - Delete's own-chain walk (`ownChainFiles`);
+  - an adopted imported disk (`-f qcow2`).
+  A raw disk's chain is never walked. A copy of a disk in any other format is refused. The QEMU CVE-2024-4467 fix is a documented prerequisite.
+- Item 3 (Medium), `privileged_copy.go`, `imagepath.go`, `routing.go`, `clone_clustered.go`: a copy falls back to the SSH user (with `-f <definition format>` pinned) only when sudo itself refuses.
+  - `sudoRefused` requires sudo's exit status (1, or 127 for a missing sudo) and every stderr line to be one of sudo's exact messages.
+  - A chain-safety refusal is never followed by the fallback. It is a `copyRefusedError`: `FailedPrecondition`, plus `VM_OPERATION_FAILED` on routed calls.
+  - The refusal message names no host path, file or other VM, on a single host too. It gives a category such as "an image of its chain is a symbolic link"; the provider log has the full reason.
+- Item 4 (Medium), `privileged_copy.go`, `imagepath.go`, `s3export.go`: before a copy opens any image of the source chain, the image must pass all of these, or the copy is refused and nothing is copied, by root or by the SSH user:
+  - it is not a symbolic link;
+  - it is named with a qcow2 or raw format;
+  - its directory is not writable by another account (or is sticky), as checked by `unsafeChainMemberReason`, which reuses `unsafeDiskDirReason` (fail closed).
+  A chain image with an external data file refuses the copy too. A root copy is also refused when the directory it writes below is unsafe (`unsafeHostDirReason`): the old `WARN` is now a refusal. `GetDiskInfo` reads such a disk as the SSH user.
+- Item 5 (Low), `imagepath.go`: root reads only `qemu-img info -U -f <qcow2|raw> --output=json -- <image>`. An image whose format nothing names, anything below it, and other formats are read by the SSH user. The documented `VR_DISK_READ` wildcard is replaced by the regex `^info -U -f (qcow2|raw) --output=json -- /var/lib/libvirt/images/[^/ ]+$`, and the "a tenant's input can never widen it" claim is replaced by an exact account.
+- Item 6, `internal/providers/libvirt/main_test.go`, `host_guard_test.go`, and the libvirt fixtures: a `TestMain` host guard puts shims for the host tools first on `PATH`.
+  - The shims refuse any argument under the real `/var/lib/libvirt`. The guard fails the run if a test reaches the real `sudo`, `ssh`, `scp` or `sshpass`, or runs `virsh` against a real URI.
+  - Fixture sudo shims run only the fixture's own fakes, and `realpath` of a `/var/lib/libvirt` path is answered lexically.
+  - Tests that run real commands use scratch directories (`chmod 0700`).
+
+### Changed
+- `internal/providers/libvirt/testdata/single_host_snapshot_clone_disk.golden.json`: regenerated in five separate commits. Only calls changed, except the one error text noted below; no response or defined XML changed.
+  - Item 3: `clone-copy-fails` (refused before any copy) and `clone-copy-sudo-refused` (the fallback pins `-f qcow2`).
+  - Item 2: the `diskinfo-*` and `export-pvc-*` scenarios read with `-f qcow2 --`.
+  - Item 4: the clone scenarios gain the chain-image and output-directory checks, and the `diskinfo-*`/`export-pvc-*` scenarios gain the disk's chain-image check.
+  - Item 4 follow-up: the chain-image check moves before the read.
+  - Path-free refusal: only `clone-copy-fails`' error text changed.
+  - `single_host_power_reconfigure` and `single_host_listvms` are byte-identical.
+- Tests:
+  - `definition_format_test.go` (forged qcow2 header on a raw disk: clone, exports, GetDiskInfo, in-use scan, Delete; other formats refused);
+  - `chain_swap_test.go` (real-shell checks, refusals, and never opening a refused image);
+  - `sudoers_rule_test.go` (the documented rule, parsed from `docs/libvirt-clones.md`, against every `sudo -n` command the provider runs and 20 forbidden shapes; root never probes);
+  - `TestNFSURLForRoot`, `TestClustered_Export_NFSIdentity`, `TestNFSRootIdentityRefusal`, `TestVMMigration_NFSRootIdentityFailsAtValidating`, `TestSudoRefused_OnlySudosOwnAnswer`, `TestCheckCopySource*`, `TestCreateVolumeFromImageFile_AdoptInPlaceReadsAsQcow2`, `TestHostGuard_RefusesTheRealHost`.
+- Docs:
+  - `docs/libvirt-clones.md`: the definition format, the CVE prerequisite, the swappable-chain refusals, the fallback rule, NFS identity, the exact sudoers regexes, and what the rules protect;
+  - `docs/upgrading.md`;
+  - `docs/release-notes/next.md`;
+  - the ADR-0007 Slice 5 amendment;
+  - `examples/vmmigration-nfs.yaml`, `examples/migration/README.md`.
+
+### Why
+The security review of the Slice 5 fix returned REQUEST CHANGES. Running `qemu-img` as root widened what a tenant's disk bytes, a tenant's `VMMigration` and a third account with write access to the pool could reach. This machine is the shared lab host, so the tests must be provably unable to touch it.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout
+- [x] Config change only
+- [ ] Documentation only
+
+## [2026-09-30 16:06] - ADR-0007 Slice 5 follow-ups: qcow2 clone definition for raw sources, routed clone read failures retried, GetDiskInfo overlay sizes
+**Author:** @wrkode (William Rizzo)
+
+> **Operator note.** libvirt only. Clones of raw-typed sources now boot (existing broken ones: set the disk's `<driver type='qcow2'/>` with `virsh edit`). A clustered clone whose host fails a read before copying waits and retries instead of failing. An export of a snapshotted VM reports its disk sizes when the documented `sudo -n qemu-img info -U` rule is in place.
+
+### Fixed
+- `internal/providers/libvirt/clone_disk_format.go`, `clone.go`: a clone's primary disk is declared `<driver type='qcow2'>`, the format every clone disk is written in (`convert -O qcow2`; the disabled linked overlay is qcow2 too), single-host and clustered. A raw-typed source's clone used to keep `type='raw'` over the qcow2 copy and did not boot. `setDiskDriverType` splices only that one tag (added when absent; a driver already qcow2 is byte-identical). qcow2 for every source, not raw output for a raw source: the SSH-user fallback copy probes the source format and cannot know it, the disk is named `.qcow2`, and every other VM disk VirtRigaud creates is qcow2.
+- `internal/providers/libvirt/clone_clustered.go`: a routed clone that failed a read on its host before the copy started was `Unknown` + `VM_OPERATION_FAILED`, which failed the VMClone and removed its target. Examples: the owner check, `domstate`, `dumpxml`, the pool. `cloneBeforeCopyFailure` now answers such a failure `Unavailable` + `VM_OPERATION_FAILED`: retried, never counted toward the breaker, with only the operation and host on the wire. Real refusals, categorized answers (source running, previous incarnation, disk in use or check failed, domain busy, budget), `HOST_UNAVAILABLE`, and any failure after the copy started are unchanged. The host-lock name refusal is now `InvalidSpec`.
+- `internal/controller/vmclone_clustered.go`: a retryable clustered clone answer is retried with the blocked-VM backoff (15 s doubling to 5 min, from when the target's placement was recorded) instead of every 30 s; the target and its pending host are kept.
+- `internal/providers/libvirt/privileged_copy.go`, `provider_virsh.go`: `GetDiskInfo` reads a disk named by the domain's own definition through the in-use check's path: `checkChainFileKind`, then `sudo -n qemu-img info -U`, falling back to the SSH user when sudo refuses. A snapshotted VM's 0600 overlay no longer reports 0 sizes during an export. A path the caller names that is not one of the domain's disks is still read as the SSH user only.
+
+### Changed
+- `internal/providers/libvirt/testdata/single_host_snapshot_clone_disk.golden.json`: regenerated in its own commit, calls only. Changed: diskinfo-primary, diskinfo-non-path-disk-id, diskinfo-qemu-img-fails, diskinfo-snapshot-list-fails, diskinfo-ignores-target-host, export-pvc-compressed, export-pvc-no-conversion, export-pvc-unsupported-format, export-pvc-ignores-target-host. The raw-source fix did not change the golden (its source is qcow2).
+- Tests: `TestSetDiskDriverType`, `TestRewriteDomainXMLForClone_RawSourceBecomesQcow2`, `TestSingleHost_Clone_RawSourceIsDefinedAsQcow2`, `TestClustered_Clone_RawSourceIsDefinedAsQcow2`, `TestClustered_Clone_TransientReadBeforeTheCopyIsRetryable`, `TestClustered_Clone_RefusalsBeforeTheCopyStayTerminal`, `TestCloneBeforeCopyFailure`, `TestClustered_CloneTransientReadOverGRPC_IsRetryableAndNeverCounts`, `TestVMClone_Clustered_TransientReadBeforeTheCopyWaitsWithBackoff`, `TestSingleHost_GetDiskInfo_SnapshotOverlaySizesAreReadAsRoot`, `TestSingleHost_GetDiskInfo_SudoRefusedReadsAsBefore`, `TestSingleHost_GetDiskInfo_CallerPathIsNeverReadAsRoot`, `TestClustered_GetDiskInfo_SnapshotOverlaySizesAreReadAsRoot`.
+- Docs: `docs/libvirt-clones.md`, `docs/upgrading.md`, `docs/clustered-provider-inventory.md`, and the ADR-0007 Slice 5 amendment.
+
+### Why
+Three items the Slice 5 fix report listed as found but not changed; fixed before security review.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
+## [2026-09-30 13:44] - ADR-0007 Slice 5 lab fixes: libvirt clone/export of a snapshotted VM, clone of a running source, routed clone errors; clustered docs
+**Author:** @wrkode (William Rizzo)
+
+> **Operator note.** libvirt only, single-host and clustered. A `VMClone` of a running libvirt VM now **waits** (`Pending`, `Ready=False/SourceMustBePoweredOff`) until the source is powered off, instead of failing; roll the manager with the libvirt provider. To clone or export a VM that has an external snapshot, allow the exact `qemu-img convert` copies in sudoers ([`docs/libvirt-clones.md`](docs/libvirt-clones.md#what-the-copies-run-as-root), sudo 1.9.10+ regex rules; never `qemu-img *`); without that rule nothing changes. A clustered VM is placed only on a `Host` labelled `net.virtrigaud.io/<network>: "true"` for each libvirt network it uses (`Host.spec.labels`).
+
+### Added
+- `internal/providers/contracts/errors.go`: ErrorInfo reason `VM_SOURCE_RUNNING`, `ErrVMSourceRunning`, `IsVMSourceRunning`.
+- `internal/transport/grpc/client.go`: `FailedPrecondition` + `VM_SOURCE_RUNNING` maps to a retryable error marked `ErrVMSourceRunning`; `FailedPrecondition` never counts toward the circuit breaker.
+- `internal/providers/libvirt/clone_source_state.go`: a full clone (single-host and clustered) reads the source's state before anything is copied and refuses any state but shut off with `FailedPrecondition` + `VM_SOURCE_RUNNING` (+ `VM_OPERATION_FAILED` when routed). A clustered clone already done for its target is still reported as done.
+- `internal/providers/libvirt/privileged_copy.go`: the full clone's copy and the s3/nfs export's flatten run `qemu-img convert` through `sudo -n`. The source format is pinned from its definition (`-f`), and its chain is verified one image at a time first (local regular files, every backing format named). The SSH user creates the output under the copy's umask in the private write directory before root writes into it. On a clustered host the flock stays outside sudo and `timeout(1)` runs inside it. The nfs export keeps the SSH user's libnfs `uid`/`gid`. When sudo refuses, the historical SSH-user command runs.
+- `internal/controller/vmclone_source_power.go`: a clone refused with `VM_SOURCE_RUNNING` stays `Pending` (`Ready`/`Cloning=False`, reason `SourceMustBePoweredOff`, one `Warning` event) with the blocked-VM backoff (15 s doubling to 5 min). It is re-driven when the source VM's `status.powerState` changes. A clustered clone keeps its target and pending host.
+- `examples/host-libvirt-clustered-first-vm.yaml`: a `Host` labelled for libvirt's `default` network, next to its `VMNetworkAttachment`.
+- Tests: `TestSingleHost_Clone_SnapshotOverlaySourceIsCopiedAsRoot`, `TestSingleHost_Clone_SudoRefusedRunsTheHistoricalCopy`, `TestSingleHost_Clone_RunningSourceIsRefusedBeforeAnyCopy`, `TestClustered_Clone_SnapshotOverlaySourceIsCopiedAsRoot`, `TestClustered_Clone_SudoRefusedFailsTheOverlayCopyOutsideTheBreaker`, `TestClustered_Clone_RunningSourceIsRefusedBeforeAnyCopy`, `TestClustered_Clone_DoneCloneIsReportedWhateverTheSourceState`, `TestClustered_Export_SnapshotOverlaySourceIsReadAsRoot`, `TestClustered_CloneFailureOverGRPC_NeverCountsTowardTheBreaker`, `TestClustered_CloneOfRunningSourceOverGRPC_IsMarkedAndNeverCounts`, `TestVMClone_SingleHost_SourceRunningWaitsThenProceeds`, `TestVMClone_Clustered_SourceRunningKeepsTheTargetAndProceeds`, `TestHoldCloneForRunningSource_Backoff`, `TestClonesWaitingOnSource`, `TestMapGRPCError_SourceRunningIsRetryableAndMarked`, `TestCircuitBreaker_RepeatedSourceRunningRefusalsDoNotTrip`, and unit tests for the chain check, the format, the NFS identity and the privileged argv.
+
+### Changed
+- `internal/providers/libvirt/s3export.go`: the s3 export's staging file is `.virtrigaud-export-<vm>.qcow2` inside a private `.virtrigaud-write-*` directory next to the source disk (was a `mktemp` file directly in it), removed with the directory.
+- `internal/providers/libvirt/routed_budget.go`: `hostCmdGuard` is a struct with `apply` and `applyPrivileged`. `hostCommandTimeout` is split out of `guardedHostCommand`, unchanged.
+- `internal/providers/libvirt/imagepath.go`: the chain walk can pin the disk's own format (`walkBackingChainFrom`) and records each image's opened format.
+- `internal/controller/vmclone_controller.go`: the VMClone controller watches VirtualMachines, filtered to observed power-state changes.
+- `internal/providers/libvirt/testdata/single_host_snapshot_clone_disk.golden.json`: regenerated in its own commit. Only the clone copy's command sequence changed (clone-full, clone-class-override, clone-customize-json-not-applied, clone-define-fails, clone-ignores-source-host, clone-legacy-target-name, clone-strips-source-owner-stamp, clone-uefi-nvram, clone-copy-fails). `clone-source-running` and `clone-copy-sudo-refused` were added. `single_host_power_reconfigure` and `single_host_listvms` are byte-identical.
+- Docs: `docs/libvirt-clones.md` (powered-off source; what the copies run as root, the sudo command table and a regex-confined sudoers snippet), `docs/upgrading.md`, `docs/clustered-provider-inventory.md` (network labels in setup, a First VM checklist, Troubleshooting), `docs/clustered-restore.md` (every `virsh` names `-c "$CONN"`), ADR-0007 (header, A5 status, the dated *Slice 5 (lab, 2026-09-30)* amendment, D6 labels), `examples/hostpool-clustered.yaml`, `examples/README.md`.
+
+### Fixed
+- B1 — `internal/providers/libvirt/clone.go`, `clone_clustered.go`, `s3export.go`, `nfs.go`: a full clone and an s3/nfs export of a VM with an external (disk-only) snapshot failed with "Permission denied". The VM's active disk is libvirt's `0600 libvirt-qemu` overlay, which the SSH user cannot read. The copy is now read as root (above) when sudo allows it.
+- B2 — `internal/providers/libvirt/clone.go`, `clone_clustered.go`, `internal/controller/vmclone_controller.go`, `vmclone_clustered.go`: a full clone of a running source failed with qemu's `Failed to get shared "write" lock` and failed the VMClone. It is now refused before any copy, and the VMClone waits for the source to be powered off.
+- B3 — no code change: a routed clone failure (`code = Unknown`, "failed to clone VM on host ...") carries `VM_OPERATION_FAILED`, which the breaker excludes. This is now pinned over a real gRPC hop.
+
+### Why
+The Slice 5 end-to-end run of ADR-0007 on the real lab host found B1–B3 and the undocumented network-label requirement. Maintainer decision (William Rizzo): a libvirt full clone requires a powered-off source, never `qemu-img -U`.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout
+- [x] Config change only
+- [ ] Documentation only
+
 ## [2026-09-29 15:50] - ADR-0007 A6.2 security-review follow-ups: re-attach sizing and assumption, held deletes, clone-target check, bounded R4, runbook hardening
 **Author:** @wrkode (William Rizzo)
 

@@ -360,6 +360,15 @@ func (r *VMMigrationReconciler) handleValidatingPhase(ctx context.Context, migra
 	logger := logging.FromContext(ctx)
 	logger.Info("Validating migration requirements")
 
+	// An nfs identity of uid or gid 0 is root on an export without
+	// root_squash, whichever provider presents it: refused from the spec
+	// alone, before anything is read or done.
+	if msg := nfsRootIdentityRefusal(migration); msg != "" {
+		k8s.SetCondition(&migration.Status.Conditions, infrav1beta1.VMMigrationConditionValidating,
+			metav1.ConditionFalse, ReasonNFSRootIdentityNotAllowed, msg)
+		return r.transitionToFailed(ctx, migration, msg)
+	}
+
 	// A target in another namespace must be granted before any side effect
 	// (source power-off, snapshot, staging PVC, export).
 	if allowed, res, err := r.gateTargetNamespace(ctx, migration); !allowed {

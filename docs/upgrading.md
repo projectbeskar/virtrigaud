@@ -29,6 +29,7 @@ is the index and the sequencing, not a duplicate of that detail.
 | **libvirt: base images are confined and always copied, not attached in place** ([#334](https://github.com/projectbeskar/virtrigaud/pull/334), [`docs/image-preparation.md`](image-preparation.md#libvirt-image-paths-sourcelibvirtpath)) | libvirt users with images outside `/var/lib/libvirt/images`, in a non-default pool, or attached in place by an earlier release | Set `VIRTRIGAUD_LIBVIRT_IMAGE_DIRS` (via `Provider.spec.runtime.env`) if images live elsewhere. Images an earlier release attached in place are now refused as a base — create a `VMImage` under a **new name** to get a fresh copy. **Before deleting any pre-upgrade libvirt VM**, run `virsh domblklist --details <domain>` on every domain on the host and check for a shared disk file — deleting one VM can delete a disk that other VMs still use (with the libvirt delete-safety fix below, the provider refuses such a delete with `DeleteBlocked` instead). Expect more disk usage and slower creates from the copy. |
 | **`spec.resources` overrides are now actually sent to the provider — a running VM with one set may resize on upgrade** (`internal/controller/virtualmachine_controller.go`) | Any VirtualMachine with `spec.resources.cpu` and/or `spec.resources.memoryMiB` set. A bug meant the override was only ever compared against and recorded in `status.currentResources` — never sent in the Create/Reconfigure request the VMClass's own CPU/memory went out in — so a VM could report a size (`status.currentResources`) it never actually had. Fixed: both the request and `status.currentResources` now use the same effective (VMClass ⊕ override) values. On the **first reconcile after upgrade**, a VM whose override was never applied now differs from its (corrected) desired size and goes through the normal reconfigure path — exactly as any other legitimate VMClass resize does today. | Before upgrading, find affected VMs: `kubectl get virtualmachine -A -o json \| jq -r '.items[] \| select(.spec.resources != null) \| "\(.metadata.namespace)/\(.metadata.name): \(.spec.resources)"'`. Confirm the override is the size you actually want — the VM **will be resized to it**. Reconfigure follows the existing online/offline rules unchanged by this fix: it applies live only when the VMClass has CPU/memory hot-add enabled and enough headroom was provisioned at create; otherwise the new size is written to the VM's offline config and takes effect only after a restart (the provider logs a WARN that a restart is required — the operator does not restart the VM for you, and `status.currentResources` is still updated to the requested size once the config write succeeds, ahead of the guest actually seeing it). To keep a VM at its current size, remove `spec.resources` before upgrading — an override removed is treated the same as one changed, and the VM reconciles back to its plain VMClass size. An out-of-range override (outside the VMClass's own CPU/memory bounds) is refused with `Reconfiguring=False/ValidationError` instead of being sent to the provider. |
 | **libvirt `LinkedClone` is refused; use `FullClone`** ([`docs/libvirt-clones.md`](libvirt-clones.md#linked-clones-are-disabled)) | Anyone creating `VMClone`s with `spec.options.type: LinkedClone` through a libvirt Provider. A libvirt linked clone reads the source VM's live, unfrozen disk: powering the source on while a linked clone of it exists corrupts the clone, and no provider check can catch that. The libvirt provider now reports `supportsLinkedClones: false`, so such a `VMClone` fails before any provider call (`Phase=Failed`, reason `LinkedCloneUnsupported`); a linked `Clone` that still reaches the provider is refused with `InvalidArgument` before any host command. Full clones and vSphere linked clones are unchanged. | Use `spec.options.type: FullClone` (the default) for libvirt, and recreate any failed `VMClone` as a full clone. Existing libvirt linked clones keep working and are not touched, but their source VM cannot be deleted, reverted or snapshotted while the clones exist (see the linked-clone row below) — keep those sources powered off. Linked clones return once the base is frozen at clone time. |
+| **NFS migrations refuse `nfs.uid: 0` / `nfs.gid: 0`, for every provider type** ([`examples/migration/README.md`](../examples/migration/README.md)) | Anyone whose nfs `VMMigration` sets `spec.storage.nfs.uid` or `gid` to `0`, whatever its source and target Providers (libvirt, vSphere, Proxmox). The provider presents that identity to the NFS server as its AUTH_SYS credential, which the client chooses: on an export without `root_squash` uid 0 is root, able to read or overwrite every staged disk there. Such a migration now fails at `Validating` before anything is read or done (`Phase=Failed`, `Validating=False`, reason `NFSRootIdentityNotAllowed`). | Use a dedicated non-zero uid/gid that owns the export (and set the export's files to it), or leave `uid`/`gid` unset. Re-create the failed migration. |
 
 The following are **not** flagged `Breaking change` in the CHANGELOG (no API/CRD
 schema break, and existing bound VMs are unaffected), but change what a *new*
@@ -195,22 +196,59 @@ See [`docs/clustered-provider-inventory.md`](clustered-provider-inventory.md) an
   **`sudo -n qemu-img info -U`** when passwordless sudo allows it, and as the SSH
   user otherwise; a disk neither can read fails the check closed (retried, not
   counted toward the circuit breaker) ([`docs/libvirt-clones.md`](libvirt-clones.md)).
-  Allow exactly that and nothing more of `qemu-img`:
-  `virtrigaud ALL=(root) NOPASSWD: /usr/bin/qemu-img info -U *` (adjust the user and the path of `qemu-img`) — never
-  `qemu-img *`, which would let the account convert or write any file as root.
+  Allow that for the in-use check with the exact regular-expression rule
+  `VR_DISK_READ` from [`docs/libvirt-clones.md`](libvirt-clones.md#what-the-copies-run-as-root)
+  (`/usr/bin/qemu-img ^info -U -f (qcow2|raw) --output=json -- /var/lib/libvirt/images/[^/ ]+$`, sudo 1.9.10
+  or later; adjust the user, the pool directory and the path of `qemu-img`).
+  **Replace the `qemu-img info -U *` wildcard an earlier release documented:**
+  it let the account add options and read any file's header as root. Never
+  allow `qemu-img *`, which would let the account convert or write any file
+  as root.
+  **To clone or export a VM that has an external snapshot** (its active disk is
+  libvirt's `0600 libvirt-qemu` overlay, which even a `kvm` member cannot read),
+  the full clone's copy and the s3/nfs export's flatten also need passwordless
+  `sudo -n` for the exact `qemu-img convert` (and, on a clustered Provider,
+  `timeout ... qemu-img convert`) commands they run. Those can only be
+  confined with sudo's regular-expression rules (sudo 1.9.10 or later): the
+  command table and a ready-to-adapt `/etc/sudoers.d` snippet are in
+  [`docs/libvirt-clones.md`](libvirt-clones.md#what-the-copies-run-as-root) — never
+  `qemu-img convert *` or `timeout *`. Without them, those copies run as the
+  SSH user as before, and a VM with an external snapshot cannot be cloned or
+  exported.
   Keep the pool directory writable only by `root` and the SSH user (or sticky);
   the provider logs a `WARN` otherwise, and **a `root` SSH user is not supported
   on a pool directory other accounts can write**. Disks are written in a private
   `.virtrigaud-write-*` directory next to their final name and renamed into
   place; a symbolic link at a disk's name is refused (`Conflict`). The s3
   export's flattened copy is a private (`0600`), per-export
-  `.virtrigaud-export-<vm>.<random>.qcow2` next to the source disk, removed
-  even when the export fails or is cancelled — remove any
-  `.virtrigaud-export-*` or `.virtrigaud-import-*` file an earlier release left
-  in a pool directory by hand. Run a QEMU with the CVE-2024-4467 fix (its
-  `qemu-img info` does not open an image's external data file). Follow-up
-  (tracked): least privilege — VM disks `0600 libvirt-qemu`, every read through
-  `sudo -n`.
+  `.virtrigaud-export-<vm>.qcow2` inside a private `.virtrigaud-write-*`
+  directory next to the source disk, removed with it even when the export
+  fails or is cancelled — remove any `.virtrigaud-export-*` or
+  `.virtrigaud-import-*` file an earlier release left in a pool directory by
+  hand. Follow-up (tracked): least privilege — VM disks `0600 libvirt-qemu`,
+  every read through `sudo -n`.
+- **libvirt host prerequisite: QEMU with the CVE-2024-4467 fix.** The provider
+  runs `qemu-img info` and `qemu-img convert` as root on VM disks. Upgrade
+  every libvirt host to a QEMU that fixes CVE-2024-4467 (QEMU 9.0.2, 8.2.6 or
+  7.2.13 and later, or your distribution's backport) **before** you allow
+  those commands in sudoers. Unfixed versions can be made to open a file named
+  in an image's external data file entry, including a `json:` pseudo-protocol
+  name. Check with `qemu-img --version` and your distribution's advisory.
+  VirtRigaud also refuses a copy whose chain has a data file, and opens every
+  disk in the format its domain definition names (never probed). Those checks
+  are defence in depth; they do not replace the fix.
+- **libvirt pool directory must not be writable by other accounts** (unless
+  sticky). A full clone, or an s3/nfs disk export, is now **refused**
+  (`FailedPrecondition`; on a clustered Provider, `VM_OPERATION_FAILED`,
+  outside the circuit breaker) when:
+  - the source's image chain has a symbolic link;
+  - an image of the chain lies in a directory that an account other than
+    root and the SSH user can write and that is not sticky;
+  - the copy would write below such a directory.
+  Before, the provider only logged a `WARN`. Check with
+  `stat -c '%a %U:%G' /var/lib/libvirt/images` and fix a group- or
+  world-writable one with `chmod g-w,o-w`, or set the sticky bit
+  ([`docs/libvirt-clones.md`](libvirt-clones.md#clone-files-on-the-host)).
 - **libvirt image download limit:** `VIRTRIGAUD_LIBVIRT_IMAGE_MAX_DOWNLOAD_GIB` (provider
   pod env via `Provider.spec.runtime.env`), the largest image `ImagePrepare` downloads, in
   GiB. Default `256`; an invalid value falls back to the default (logged). A larger source
@@ -241,6 +279,50 @@ See [`docs/clustered-provider-inventory.md`](clustered-provider-inventory.md) an
   re-create** (#335) — it now retries instead of clearing `status.id`. This is a
   fix, but it means a VM that used to "self-heal" through a spurious re-create during
   vCenter blips now just waits and retries.
+- **A libvirt full clone needs a powered-off source** (ADR-0007 Slice 5 lab,
+  [`docs/libvirt-clones.md`](libvirt-clones.md#a-full-clone-needs-a-powered-off-source)).
+  A `VMClone` of a running (or paused) libvirt VM used to fail on qemu's image
+  lock. It now **waits** instead: `Pending`, `Ready=False` reason
+  `SourceMustBePoweredOff`, re-checked with a backoff and whenever the source's
+  power state changes, and it proceeds once the source is off. The provider's
+  refusal (`FailedPrecondition` + `VM_SOURCE_RUNNING`) never counts toward the
+  circuit breaker. vSphere clones of running VMs are unchanged. Roll the
+  manager with the libvirt provider: an older manager fails such a clone.
+- **libvirt disks are opened in the format their domain definition names.**
+  A libvirt disk export now pins that format (`-f raw` for a raw disk) instead
+  of reading every disk as qcow2. The same applies to `GetDiskInfo`, the disk
+  in-use check and Delete. An export or full clone of a disk defined in
+  another format (`vmdk`, ...) is refused (`FailedPrecondition`), and so is
+  one whose chain names a backing file without its format. `GetDiskInfo`
+  reports the definition's format, and refuses an explicit disk path that is
+  not one of the VM's own disks on a single-host Provider too (as a clustered
+  one already did), instead of reading that file as the SSH user.
+- **An nfs VMMigration with `nfs.uid: 0` or `nfs.gid: 0` fails at
+  Validating**, whatever its providers (`NFSRootIdentityNotAllowed`; see the
+  breaking-change table). A libvirt nfs export runs as root only with the SSH
+  user's own identity. One that names another uid or gid is written by the
+  SSH user's `qemu-img`, so a VM with an external snapshot cannot be exported
+  to NFS that way
+  ([`docs/libvirt-clones.md`](libvirt-clones.md#what-the-copies-run-as-root)).
+- **libvirt clone and export copies read the source through `sudo -n` when
+  allowed** ([`docs/libvirt-clones.md`](libvirt-clones.md#what-the-copies-run-as-root)).
+  A full clone, or an s3/nfs disk export, of a VM with an external snapshot
+  (whose active disk is libvirt's `0600 libvirt-qemu` overlay) now works when
+  the host allows those copies in sudoers; otherwise it fails as before. The
+  s3 export's staging file moved into a private `.virtrigaud-write-*`
+  directory next to the source disk. `GetDiskInfo` reads the sizes of a VM's
+  own disk through the same `sudo -n qemu-img info -U` rule as the in-use
+  check, so an export of a snapshotted VM no longer reports 0 sizes.
+- **A libvirt clone's disk is declared qcow2** (`<driver type='qcow2'>`), the
+  format it is always written in: the clone of a raw-typed source used to
+  keep `type='raw'` and did not boot. Clones made earlier from raw sources
+  keep their definition; fix one with `virsh edit` (set the disk's
+  `<driver type='qcow2'/>`).
+- **A clustered clone whose host fails a read before copying anything is
+  retried** (`Pending`, `CloneRetrying`, backoff 15 s to 5 min, never counted
+  toward the circuit breaker) instead of failing and removing its target; a
+  retryable clustered clone answer now backs off instead of retrying every
+  30 s.
 
 ## Post-upgrade verification checklist
 

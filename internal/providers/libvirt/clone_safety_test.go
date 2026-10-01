@@ -83,7 +83,9 @@ func TestClone_FullCloneIsUnchanged(t *testing.T) {
 	assert.Equal(t, "team-b.copy", resp.TargetVmID)
 	disk := filepath.Join(c.images, "team-b.copy-disk.qcow2")
 	assert.FileExists(t, disk)
-	assert.Regexp(t, `convert -O qcow2 `+regexp.QuoteMeta(filepath.Join(c.images, "team-a.web-disk.qcow2"))+" "+
+	// The copy reads the source as root (sudo -n) in the format its
+	// definition names (privileged_copy.go).
+	assert.Regexp(t, `convert -f qcow2 -O qcow2 `+regexp.QuoteMeta(filepath.Join(c.images, "team-a.web-disk.qcow2"))+" "+
 		regexp.QuoteMeta(c.images+"/"+vmDiskWriteDirPrefix)+`[A-Za-z0-9]{10}/team-b\.copy-disk\.qcow2\n`, c.log("qemu-img"),
 		"an independent, flattened copy, written in a private directory and renamed into place")
 	requireNoWriteDirsLeft(t, c.images)

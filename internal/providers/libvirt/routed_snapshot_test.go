@@ -88,6 +88,7 @@ func newRoutedSCD(t *testing.T, hosts map[string]map[string]string) *routedSCD {
 	} {
 		require.NoError(t, os.WriteFile(filepath.Join(bin, tool), []byte(script), 0o755)) //nolint:gosec // test shim must be executable
 	}
+	installFakeRealpath(t, bin)
 	t.Setenv("FAKE_SCD_DIR", dir)
 	t.Setenv("FAKE_SCD_TOOLS", scd)
 	t.Setenv("FAKE_SCD_BIN", bin)
@@ -132,12 +133,14 @@ esac
 exec "$FAKE_SCD_TOOLS/qemu-img" "$@"
 `
 
-// routedFakeSudo is scdFakeTool's sudo (it only logs), plus `sudo -n qemu-img
-// info ... -- <image>` (the in-use check and the disk-dependents guard read
+// routedFakeSudo is scdFakeTool's sudo (any other `sudo -n <cmd>` runs <cmd>'s
+// fake, as the privileged disk copy does; plain sudo only logs), plus `sudo -n
+// qemu-img info ... -- <image>` (the in-use check and the disk-dependents guard read
 // each disk's chain one image at a time, #358): a standalone qcow2 image,
 // unless local/backing-<image base name> names its backing file (a linked
-// clone's overlay), or local/fail-qemu-img-info makes the read fail. It reads
-// nothing on the machine running the test.
+// clone's overlay), or local/fail-qemu-img-info makes the read fail; it reports
+// the sizes scdFakeTool's qemu-img does (GetDiskInfo reads them the same way).
+// It reads nothing on the machine running the test.
 const routedFakeSudo = `#!/bin/sh
 case "$*" in "-n qemu-img info "*)
   printf 'local sudo %s\n' "$*" >> "$FAKE_SCD_DIR/calls.log"
@@ -146,9 +149,9 @@ case "$*" in "-n qemu-img info "*)
   b="$FAKE_SCD_DIR/local/backing-${img##*/}"
   if [ -f "$b" ]; then
     bf=$(cat "$b")
-    printf '{"filename": "%s", "format": "qcow2", "backing-filename": "%s", "full-backing-filename": "%s", "backing-filename-format": "qcow2"}\n' "$img" "$bf" "$bf"
+    printf '{"filename": "%s", "format": "qcow2", "virtual-size": 10737418240, "actual-size": 1073741824, "backing-filename": "%s", "full-backing-filename": "%s", "backing-filename-format": "qcow2"}\n' "$img" "$bf" "$bf"
   else
-    printf '{"filename": "%s", "format": "qcow2"}\n' "$img"
+    printf '{"filename": "%s", "format": "qcow2", "virtual-size": 10737418240, "actual-size": 1073741824}\n' "$img"
   fi
   exit 0 ;;
 esac
@@ -158,7 +161,9 @@ exec "$FAKE_SCD_TOOLS/sudo" "$@"
 // routedGuardShell is sh for the routed fixture. The host guard script
 // (hostGuardScript, recognized by hostGuardMarker) is logged as
 // "local guard <lock dir> <lock> <target>" and run by the real /bin/sh — its
-// directory checks are real, against the test's staging directory. withUmask's
+// directory checks are real, against the test's staging directory; a target
+// under the real /var/lib/libvirt is passed as "" (never probed on the
+// machine running the test), a scratch target as is. withUmask's
 // script (umaskExecScript) is logged as "local umask <mask> <command>" and run
 // by the real /bin/sh too, so the command it wraps (qemu-img, sudo dd) reaches
 // its fake. The disk/varstore target check (targetKindScript) and the
@@ -170,7 +175,10 @@ const routedGuardShell = `#!/bin/sh
 case "$2" in
 "` + hostGuardMarker + `"*)
   printf 'local guard %s %s %s\n' "$4" "$5" "$6" >> "$FAKE_SCD_DIR/calls.log"
-  exec /bin/sh "$@" ;;
+  s="$2" d="$4" l="$5" t="$6"
+  case "$t" in ` + realHostPath + `|` + realHostPath + `/*) t="" ;; esac
+  shift 6
+  exec /bin/sh -c "$s" sh "$d" "$l" "$t" "$@" ;;
 '` + umaskExecScript + `')
   shift 3
   printf 'local umask %s\n' "$*" >> "$FAKE_SCD_DIR/calls.log"

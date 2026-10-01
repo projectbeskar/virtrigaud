@@ -673,7 +673,9 @@ func (s *StorageProvider) adoptVolumeInPlace(ctx context.Context, path, poolName
 
 	// Get volume size
 	var capacityStr string
-	infoResult, err := qemuImgInfoOnHost(ctx, s.virshProvider, "-U", "--output=json", "--", path) // libvirt-qemu:kvm now
+	// Read as the qcow2 the import verified it to be (inspectHostImageAs):
+	// root never probes the format of a disk whose bytes came from elsewhere.
+	infoResult, err := qemuImgInfoOnHost(ctx, s.virshProvider, "-U", "-f", "qcow2", "--output=json", "--", path) // libvirt-qemu:kvm now
 	if err == nil {
 		var diskInfo map[string]interface{}
 		if err := json.Unmarshal([]byte(infoResult.Stdout), &diskInfo); err == nil {

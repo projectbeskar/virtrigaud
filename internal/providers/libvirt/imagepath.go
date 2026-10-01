@@ -874,8 +874,16 @@ const backingKindScript = `if [ -f "$1" ]; then echo ` + backingKindFile + `; el
 // image. A qcow2 external data file is recorded, never opened by the walk; one
 // named by anything but an absolute local path fails the check too. A file
 // that no longer exists ends the chain: a missing disk contributes nothing.
-func backingChainFiles(ctx context.Context, h hostCommandRunner, disk string) ([]string, error) {
-	levels, err := walkBackingChain(ctx, h, disk)
+//
+// The disk itself is opened in format, the one its domain definition names
+// (walkBackingChainFrom): never probed, so a guest cannot make its raw disk
+// read as a qcow2 image naming another file as its backing file — and a raw
+// disk's chain is not walked at all. An empty format (a source the
+// definition gives none for, such as a nested backing store) is probed — by
+// the SSH user only (walkBackingChainFrom: root opens only a qcow2 or raw
+// image in a format a trusted header or the definition names).
+func backingChainFiles(ctx context.Context, h hostCommandRunner, disk, format string) ([]string, error) {
+	levels, err := walkBackingChainFrom(ctx, h, disk, format)
 	if err != nil {
 		return nil, err
 	}
@@ -887,19 +895,65 @@ func backingChainFiles(ctx context.Context, h hostCommandRunner, disk string) ([
 	return refs, nil
 }
 
-// backingLevel is one image of a backing chain (walkBackingChain): its path
-// as named (disk, then each full-backing-filename) and every host file it
-// consists of or points at (qemuImgInfo.referencedFiles).
+// backingLevel is one image of a backing chain (walkBackingChainFrom): its path
+// as named (disk, then each full-backing-filename), every host file it
+// consists of or points at (qemuImgInfo.referencedFiles), and the format it
+// was opened as — the one its parent's header names (the caller's for the
+// disk itself), or "" when qemu-img had to probe it — and the external data
+// file its header names, if any.
 type backingLevel struct {
-	path string
-	refs []string
+	path     string
+	refs     []string
+	format   string
+	dataFile string
 }
 
-// walkBackingChain reads disk's image chain one image at a time, top first,
-// under the rules backingChainFiles documents.
-func walkBackingChain(ctx context.Context, h hostCommandRunner, disk string) ([]backingLevel, error) {
+// rawDiskFormat is qemu's raw format: no header, so no backing chain.
+const rawDiskFormat = "raw"
+
+// walkBackingChainFrom reads disk's image chain one image at a time, top
+// first, under the rules backingChainFiles documents, with the disk itself
+// opened as format ("" probes it, as the SSH user only). A
+// raw disk has no backing chain: it is only checked to be a regular file,
+// and never opened — its bytes are the guest's, and a header a guest wrote
+// there is never read.
+//
+// An image is read through sudo (qemuImgInfoOnHost, as root when the host
+// allows it) only when it is opened as qcow2 or raw, in a format named by the
+// definition or by the header of a parent itself read in a named format (not
+// probed): every root read is
+// `qemu-img info -U -f <qcow2|raw> --output=json -- <image>`, the one shape
+// the documented sudoers rule allows. An image whose format nothing names is
+// probed by the SSH user alone, and so is every image below it — a probed
+// header may be a guest's forgery, so nothing it names is opened as root —
+// and an image of another format too.
+func walkBackingChainFrom(ctx context.Context, h hostCommandRunner, disk, format string) ([]backingLevel, error) {
+	return walkChainChecked(ctx, h, disk, format, nil)
+}
+
+// walkChainChecked is walkBackingChainFrom that calls before (when not nil)
+// with each image of the chain and the format it is about to be opened in —
+// after its file-kind check, BEFORE qemu-img opens it. An error from before
+// ends the walk and is returned as is: a copy refuses an image it must not
+// read before anyone reads it (checkCopySource).
+func walkChainChecked(ctx context.Context, h hostCommandRunner, disk, format string,
+	before func(path, format string) error) ([]backingLevel, error) {
+	if format == rawDiskFormat {
+		if err := checkChainFileKind(ctx, h, disk); err != nil {
+			return nil, err
+		}
+		if before != nil {
+			if err := before(disk, format); err != nil {
+				return nil, err
+			}
+		}
+		return []backingLevel{{path: disk, refs: []string{disk}, format: format}}, nil
+	}
 	var levels []backingLevel
-	cur, format := disk, ""
+	cur := disk
+	// probed is set once an image of the chain was opened without a named
+	// format: from there on, nothing is read as root.
+	probed := false
 	for depth := 0; ; depth++ {
 		if depth > maxBackingChainDepth {
 			return nil, hostCheckFailed("read backing chain", fmt.Errorf("%s: backing chain longer than %d images", disk, maxBackingChainDepth))
@@ -907,11 +961,26 @@ func walkBackingChain(ctx context.Context, h hostCommandRunner, disk string) ([]
 		if err := checkChainFileKind(ctx, h, cur); err != nil {
 			return nil, err
 		}
+		if before != nil {
+			if err := before(cur, format); err != nil {
+				return nil, err
+			}
+		}
 		args := []string{"-U"}
 		if format != "" {
 			args = append(args, "-f", format)
 		}
-		res, err := qemuImgInfoOnHost(ctx, h, append(args, "--output=json", "--", cur)...)
+		args = append(args, "--output=json", "--", cur)
+		if format == "" {
+			probed = true
+		}
+		var res *VirshResult
+		var err error
+		if !probed && privilegedSourceFormats[format] {
+			res, err = qemuImgInfoOnHost(ctx, h, args...)
+		} else {
+			res, err = runHost(ctx, h, append([]string{"qemu-img", "info"}, args...)...)
+		}
 		if err != nil {
 			if res != nil && res.ExitCode == qemuImgFailureExitCode && strings.Contains(res.Stderr, qemuImgMissingFile) {
 				return levels, nil // the chain ends at a file that no longer exists
@@ -922,13 +991,15 @@ func walkBackingChain(ctx context.Context, h hostCommandRunner, disk string) ([]
 		if jerr := json.Unmarshal([]byte(res.Stdout), &info); jerr != nil {
 			return nil, hostCheckFailed("parse backing chain", jerr)
 		}
+		dataFile := ""
 		if info.FormatSpecific != nil {
-			if df := info.FormatSpecific.Data.DataFile; df != "" && !strings.HasPrefix(df, "/") {
+			dataFile = info.FormatSpecific.Data.DataFile
+			if dataFile != "" && !strings.HasPrefix(dataFile, "/") {
 				return nil, hostCheckFailed("read backing chain",
-					fmt.Errorf("%s: external data file %q is not a local file path", cur, df))
+					fmt.Errorf("%s: external data file %q is not a local file path", cur, dataFile))
 			}
 		}
-		levels = append(levels, backingLevel{path: cur, refs: info.referencedFiles()})
+		levels = append(levels, backingLevel{path: cur, refs: info.referencedFiles(), format: format, dataFile: dataFile})
 		if info.BackingFilename == "" && info.FullBackingFilename == "" {
 			return levels, nil
 		}
@@ -1012,10 +1083,12 @@ func liveChainListed(domainXML string) bool {
 // the host. When sudo itself refuses (no passwordless sudo for qemu-img, or
 // no sudo at all), it runs as the host account, as before. It only ever reads
 // the headers of disks named by domain definitions and of the local, regular
-// backing files their headers name (backingChainFiles) — never a
-// caller-supplied image path, which inspectHostImage reads unprivileged. Every
-// call starts `qemu-img info -U`, so sudo can be limited to exactly that
-// (`qemu-img info -U *`, see docs/upgrading.md).
+// backing files their headers name (backingChainFiles), an adopted imported
+// disk's and GetDiskInfo's own disk — never a caller-supplied image path,
+// which inspectHostImage reads unprivileged. Every call is
+// `qemu-img info -U -f <qcow2|raw> --output=json -- <image>`, so sudo can be
+// limited to exactly that shape with a regular-expression rule (see
+// docs/libvirt-clones.md).
 func qemuImgInfoOnHost(ctx context.Context, h hostCommandRunner, args ...string) (*VirshResult, error) {
 	res, err := runHost(ctx, h, append([]string{"sudo", "-n", "qemu-img", "info"}, args...)...)
 	if err != nil && sudoRefused(res) {
@@ -1024,23 +1097,63 @@ func qemuImgInfoOnHost(ctx context.Context, h hostCommandRunner, args ...string)
 	return res, err
 }
 
-// sudoRefusedRE matches sudo's own diagnostics ("sudo: a password is
-// required", "sudo: a terminal is required", ...); qemu-img's start with
-// "qemu-img:".
-var sudoRefusedRE = regexp.MustCompile(`(?m)^sudo: |is not allowed to execute|may not run sudo`)
+// sudoRefusalLineRE matches, as a WHOLE line, what sudo itself prints when it
+// refuses to run a command without a password (-n): a password or a terminal
+// is required, the user may not run the command (or sudo at all), or is not
+// in the sudoers file.
+var sudoRefusalLineRE = regexp.MustCompile(`^(?:` +
+	`sudo: a password is required` +
+	`|sudo: a terminal is required to read the password; either use the -S option to read from standard input or configure an askpass helper` +
+	`|sudo: sorry, you must have a tty to run sudo` +
+	`|sudo: no tty present and no askpass program specified` +
+	`|Sorry, user \S+ is not allowed to execute '[^'\n]*' as \S+ on \S+\.` +
+	`|Sorry, user \S+ may not run sudo on \S+\.` +
+	`|\S+ is not in the sudoers file\.(?:  This incident (?:will be|has been) reported(?: to the administrator)?\.)?` +
+	`)$`)
 
-// sudoExitNotFound is the shell's exit status for a command that is not
-// installed (sudo missing).
-const sudoExitNotFound = 127
+// sudoNotFoundLineRE matches, as a whole line, a shell's report that sudo is
+// not installed (sh, dash, bash, zsh; direct or through exec).
+var sudoNotFoundLineRE = regexp.MustCompile(`^(?:(?:\S+: )?(?:line \d+: |\d+: )?(?:exec: )?sudo: (?:command )?not found|zsh:\d+: command not found: sudo)$`)
+
+// Exit statuses of a refused `sudo -n ...`: sudo's own refusal, and a shell's
+// for a command that is not installed (sudo missing).
+const (
+	sudoExitRefused  = 1
+	sudoExitNotFound = 127
+)
 
 // sudoRefused reports whether a failed `sudo -n ...` failed in sudo itself —
 // not permitted, a password required, or sudo not installed — rather than in
-// the command it ran.
+// the command it ran. It takes sudo's exit status AND its whole stderr: every
+// non-empty line must be one of sudo's (or the shell's) exact messages, so a
+// qemu-img error — whose lines start "qemu-img:", and which may quote a file
+// name holding a newline and a sudo-like line — is never taken for a refusal.
+// Only a genuine refusal lets a caller fall back to the SSH user.
 func sudoRefused(res *VirshResult) bool {
 	if res == nil {
 		return false
 	}
-	return res.ExitCode == sudoExitNotFound || sudoRefusedRE.MatchString(res.Stderr)
+	var lineRE *regexp.Regexp
+	switch res.ExitCode {
+	case sudoExitRefused:
+		lineRE = sudoRefusalLineRE
+	case sudoExitNotFound:
+		lineRE = sudoNotFoundLineRE
+	default:
+		return false
+	}
+	lines := 0
+	for _, line := range strings.Split(res.Stderr, "\n") {
+		line = strings.TrimRight(line, "\r")
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		if !lineRE.MatchString(line) {
+			return false
+		}
+		lines++
+	}
+	return lines > 0
 }
 
 // domainGone reports whether uuid is no longer defined on the host — i.e. it
@@ -1121,7 +1234,9 @@ func domainRefsOnHostBounded(ctx context.Context, h hostCommandRunner, skipUUID 
 	type rawRefs struct {
 		uuid               string
 		files, dirs, disks []string
-		owners             []contracts.ObjectIdentity
+		// formats are the disks' level-0 formats, from the definition.
+		formats map[string]string
+		owners  []contracts.ObjectIdentity
 	}
 	var doms []rawRefs
 	for _, uuid := range uuids {
@@ -1144,9 +1259,13 @@ func domainRefsOnHostBounded(ctx context.Context, h hostCommandRunner, skipUUID 
 		if err != nil {
 			return nil, hostCheckFailed(fmt.Sprintf("parse definition of domain %s", uuid), err)
 		}
-		d := rawRefs{uuid: uuid, files: refs.files, dirs: refs.dirs, disks: refs.disks}
+		d := rawRefs{uuid: uuid, files: refs.files, dirs: refs.dirs, disks: refs.disks, formats: map[string]string{}}
 		if owners, oerr := domainOwners(xmlRes.Stdout); oerr == nil {
 			d.owners = owners
+		}
+		var byVolume map[[2]string]string
+		if doc, perr := parseDomainDisks(xmlRes.Stdout); perr == nil {
+			d.formats, byVolume = doc.diskSourceFormats()
 		}
 		for _, pv := range refs.volumes {
 			volRes, verr := h.runVirshCommand(ctx, "vol-path", "--pool", pv[0], "--vol", pv[1])
@@ -1161,6 +1280,9 @@ func domainRefsOnHostBounded(ctx context.Context, h hostCommandRunner, skipUUID 
 			}
 			d.files = append(d.files, p)
 			d.disks = append(d.disks, p)
+			if f, ok := byVolume[pv]; ok {
+				d.formats[p] = f
+			}
 		}
 		if liveChainListed(xmlRes.Stdout) {
 			// A running domain's definition lists every disk's chain in
@@ -1170,17 +1292,21 @@ func domainRefsOnHostBounded(ctx context.Context, h hostCommandRunner, skipUUID 
 		doms = append(doms, d)
 	}
 
-	chains := map[string][]string{}
+	// Each disk's chain is walked from the format its definition names (a raw
+	// disk not at all): the scan never probes a guest-written image.
+	type chainKey struct{ disk, format string }
+	chains := map[chainKey][]string{}
 	for _, d := range doms {
 		for _, disk := range d.disks {
-			if _, walked := chains[disk]; walked {
+			key := chainKey{disk, d.formats[disk]}
+			if _, walked := chains[key]; walked {
 				continue
 			}
-			chain, err := backingChainFiles(ctx, h, disk)
+			chain, err := backingChainFiles(ctx, h, disk, key.format)
 			if err != nil {
 				return nil, err
 			}
-			chains[disk] = chain
+			chains[key] = chain
 		}
 	}
 
@@ -1193,7 +1319,7 @@ func domainRefsOnHostBounded(ctx context.Context, h hostCommandRunner, skipUUID 
 		start := len(all)
 		all = append(all, d.files...)
 		for _, disk := range d.disks {
-			all = append(all, chains[disk]...)
+			all = append(all, chains[chainKey{disk, d.formats[disk]}]...)
 		}
 		spans[i].files = [2]int{start, len(all)}
 	}

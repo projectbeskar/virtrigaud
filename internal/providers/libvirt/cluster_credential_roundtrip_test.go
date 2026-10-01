@@ -152,6 +152,12 @@ func TestClusteredCredentialRoundTrip(t *testing.T) {
 // it does not.
 func TestClusteredProvider_SSHKeyAuthenticatesEndToEnd(t *testing.T) {
 	t.Setenv(EnvInsecureSkipHostKeyVerification, "") // real host-key verification, from the inlined known_hosts
+	// The test SSH server runs the command through the local shell: give it a
+	// fake virsh, so the machine running the test (possibly a real libvirt
+	// host) never has its qemu:///system queried.
+	fakeBin := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(fakeBin, "virsh"), []byte("#!/bin/sh\nexit 0\n"), 0o700)) //nolint:gosec // test shim must be executable
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	hostKey := generateTestHostKey(t)
 	clientKeyPEM, clientPub := generateTestClientKeyPEM(t)

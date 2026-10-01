@@ -47,7 +47,8 @@ import (
 // extension; it refuses a name whose file already exists. `vol-path <name>
 // --pool <pool>` answers from vol-<pool>-<name>. `vol-delete <name> --pool
 // <pool>` removes <pool directory>/<name> (fail-vol-delete makes it fail).
-// With no -c URI
+// `domstate <domain>` answers "shut off" for a defined domain (none is ever
+// started here) unless state-<domain> holds another state. With no -c URI
 // (runRemoteVirshCommand on a non-system URI) the host is $FAKE_DEFAULT_HOST.
 const createHostVirshScript = `#!/bin/sh
 uri=""
@@ -92,6 +93,10 @@ case "$1" in
     done
     echo "Domain '$2' has been undefined" ;;
   snapshot-list) if [ -f "$d/snapshots" ]; then cat "$d/snapshots"; fi ;;
+  domstate)
+    if [ -f "$d/state-$2" ]; then exec cat "$d/state-$2"; fi
+    if [ -f "$d/dom-$2.xml" ]; then echo "shut off"; exit 0; fi
+    echo "error: failed to get domain '$2'" >&2; exit 1 ;;
   domuuid)
     if [ -f "$d/fail-domuuid" ]; then echo "error: failed to connect to the hypervisor" >&2; exit 1; fi
     if [ -f "$d/dom-$2.xml" ]; then sed -n 's:.*<uuid>\(.*\)</uuid>.*:\1:p' "$d/dom-$2.xml" | head -n 1; exit 0; fi

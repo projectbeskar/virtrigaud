@@ -104,6 +104,13 @@ var (
 // rewriting the source domain's XML, so the two domains never collide. The
 // clone is left powered off; the manager controls power separately, matching
 // Create's behavior.
+//
+// The source must be powered off: a source in any other state is refused
+// before anything is copied (FailedPrecondition + VM_SOURCE_RUNNING,
+// clone_source_state.go). The copy reads the source's disk chain as root
+// through passwordless sudo when it may, so a VM with an external snapshot —
+// whose active disk is libvirt's 0600 overlay — can be cloned
+// (privileged_copy.go).
 func (p *Provider) Clone(ctx context.Context, req contracts.CloneRequest) (contracts.CloneResponse, error) {
 	sourceID := req.Source.ID
 	log.Printf("INFO Cloning VM %s -> %s (linked=%t)", sourceID, req.TargetName, req.Linked)
@@ -139,10 +146,17 @@ func (p *Provider) Clone(ctx context.Context, req contracts.CloneRequest) (contr
 
 	// 1. Resolve the source domain and reject if it does not exist. domstate
 	//    accepts either a domain name or a UUID, matching how libvirt identifies
-	//    a VM (Status.ID is the domain name for this provider).
-	if _, err := p.virshProvider.getDomainState(ctx, sourceID); err != nil {
+	//    a VM (Status.ID is the domain name for this provider). A full clone
+	//    requires a powered-off source (clone_source_state.go): anything else
+	//    is refused here, before anything is copied.
+	state, err := p.virshProvider.getDomainState(ctx, sourceID)
+	if err != nil {
 		return contracts.CloneResponse{}, contracts.NewNotFoundError(
 			fmt.Sprintf("source VM %q not found", sourceID), err)
+	}
+	if err := cloneSourceStateError(state); err != nil {
+		log.Printf("WARN Refusing to clone %s: it is %q, and a libvirt full clone requires a powered-off source", sourceID, state)
+		return contracts.CloneResponse{}, err
 	}
 
 	// Reject a target-name collision up front rather than failing mid-define:
@@ -208,7 +222,10 @@ func (p *Provider) Clone(ctx context.Context, req contracts.CloneRequest) (contr
 			return contracts.CloneResponse{}, err
 		}
 	} else {
-		if err := createFullCopy(ctx, p.virshProvider, srcDiskPath, targetDiskPath); err != nil {
+		// The copy opens the source in the format its definition names when
+		// it runs as root (privileged_copy.go).
+		srcFormat := definitionDiskFormat(srcXML.Stdout, srcDiskPath)
+		if err := createFullCopy(ctx, p.virshProvider, srcDiskPath, srcFormat, targetDiskPath); err != nil {
 			return contracts.CloneResponse{}, err
 		}
 	}
@@ -283,13 +300,23 @@ const defaultDiskFormat = "qcow2"
 // standard format is used; the name-based lookup never yields another answer
 // anyway, as GetVolumeInfo does not report a format.
 func resolveDomainDisksOn(ctx context.Context, vp *VirshProvider, d domainTarget, sp *StorageProvider) ([]string, string, error) {
-	diskPaths, derr := domainDiskPaths(ctx, vp, d.handle)
+	_, diskPaths, format, err := resolveDomainDisksDocOn(ctx, vp, d, sp)
+	return diskPaths, format, err
+}
+
+// resolveDomainDisksDocOn is resolveDomainDisksOn that also returns the
+// definition it read the disks from, for the format each disk is opened in
+// (domainDisksDoc.diskFormat). It runs exactly the commands
+// resolveDomainDisksOn runs.
+func resolveDomainDisksDocOn(ctx context.Context, vp *VirshProvider, d domainTarget, sp *StorageProvider) (*domainDisksDoc, []string, string, error) {
+	doc, derr := domainDisksOf(ctx, vp, d.handle)
 	if derr != nil {
-		return nil, "", contracts.NewRetryableError(
+		return nil, nil, "", contracts.NewRetryableError(
 			fmt.Sprintf("failed to read disks for source VM %q", d.name), derr)
 	}
+	diskPaths := doc.diskFiles()
 	if len(diskPaths) == 0 {
-		return nil, "", contracts.NewInvalidSpecError(
+		return nil, nil, "", contracts.NewInvalidSpecError(
 			fmt.Sprintf("source VM %q has no usable disk to clone", d.name), nil)
 	}
 
@@ -297,12 +324,12 @@ func resolveDomainDisksOn(ctx context.Context, vp *VirshProvider, d domainTarget
 	// qcow2 (the provider's standard) when unavailable.
 	format := defaultDiskFormat
 	if d.diskByPath {
-		return diskPaths, format, nil
+		return doc, diskPaths, format, nil
 	}
 	if vol, verr := sp.GetVolumeInfo(ctx, clonePoolName, vmDiskVolumeName(d.name)); verr == nil && vol.Format != "" {
 		format = vol.Format
 	}
-	return diskPaths, format, nil
+	return doc, diskPaths, format, nil
 }
 
 // createLinkedOverlay creates a copy-on-write qcow2 overlay backed by the
@@ -354,28 +381,32 @@ func createLinkedOverlay(ctx context.Context, vp *VirshProvider, srcDiskPath, sr
 // convention, so full clone failed with "storage volume not found". Operating
 // on the resolved path mirrors the linked-clone path and is naming-agnostic
 // (issue #153, surfaced by libvirt clone E2E validation).
-func createFullCopy(ctx context.Context, vp *VirshProvider, srcDiskPath, targetDiskPath string) error {
+//
+// The source is read as root through passwordless sudo, in srcFormat (its
+// definition's format), when its chain is safe for root to read and sudo
+// allows it: after an external snapshot the VM's active disk is libvirt's
+// 0600 overlay, which the SSH user cannot read. Otherwise the historical copy
+// runs as the SSH user (diskCopy, privileged_copy.go).
+func createFullCopy(ctx context.Context, vp *VirshProvider, srcDiskPath, srcFormat, targetDiskPath string) error {
 	log.Printf("INFO Creating full-clone copy %s from %s", targetDiskPath, srcDiskPath)
 
-	// qemu-img convert -O qcow2 <src> <target>. The source format is
-	// auto-probed by qemu-img (do not force -f, which would break if the
-	// resolved format is wrong); convert flattens any backing chain. The copy
-	// is created with vmDiskMode (withUmask) in a private directory and
-	// renamed onto targetDiskPath (diskWriteDir).
+	// qemu-img convert -O qcow2 <src> <target>; convert flattens any backing
+	// chain. The copy is created with vmDiskMode (withUmask; as root, into a
+	// file the SSH user created under it) in a private directory and renamed
+	// onto targetDiskPath (diskWriteDir).
 	wd, err := newDiskWriteDir(ctx, vp, filepath.Dir(targetDiskPath))
 	if err != nil {
 		return fmt.Errorf("create full-clone copy: %w", err)
 	}
 	defer wd.cleanup(ctx)
 	name := filepath.Base(targetDiskPath)
-	res, err := runHost(ctx, vp, withUmask(vmDiskUmask,
-		"qemu-img", "convert",
-		"-O", "qcow2",
-		srcDiskPath,
-		wd.file(name),
-	)...)
+	res, err := fullCloneCopy(srcDiskPath, srcFormat, wd.file(name), targetDiskPath).run(ctx, vp, nil)
 	if err != nil {
-		return fmt.Errorf("create full-clone copy: %w, output: %s", err, res.Stderr)
+		stderr := ""
+		if res != nil {
+			stderr = res.Stderr
+		}
+		return fmt.Errorf("create full-clone copy: %w, output: %s", err, stderr)
 	}
 	if err := wd.publish(ctx, name, targetDiskPath); err != nil {
 		return fmt.Errorf("create full-clone copy: %w", err)
@@ -513,7 +544,9 @@ func refuseNVRAMInUseOnHost(ctx context.Context, h hostCommandRunner, domainName
 //     unicast address (so the clone gets new NICs on the same L2 segment).
 //   - the primary disk <source file='<srcDiskPath>'/> is re-pointed at
 //     targetDiskPath (the cloned/overlay volume). Only the matching source path
-//     is rewritten, so a cloud-init CD-ROM source is left untouched.
+//     is rewritten, so a cloud-init CD-ROM source is left untouched. That
+//     disk's <driver type> is set to qcow2, the format every clone disk is
+//     written in (setDiskDriverType): a raw source's clone is not raw.
 //   - for a UEFI source, the per-VM <nvram>...</nvram> varstore path is
 //     re-pointed to a fresh per-clone path derived from the SOURCE varstore's
 //     directory and the target name (issue #208). The returned srcNvramPath /
@@ -573,6 +606,11 @@ func rewriteDomainXMLForClone(sourceXML, targetName, srcDiskPath, targetDiskPath
 			return "", "", "", fmt.Errorf("primary disk source %q not found in source domain XML", srcDiskPath)
 		}
 		out = replaced
+		// The clone's disk is always written as qcow2 (clone_disk_format.go):
+		// declare it so, whatever the source's format was.
+		if out, err = setDiskDriverType(out, targetDiskPath, cloneDiskFormat); err != nil {
+			return "", "", "", fmt.Errorf("declare the clone disk's format: %w", err)
+		}
 	}
 
 	// Re-point the per-VM UEFI <nvram> varstore (issue #208). On a UEFI source

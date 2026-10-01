@@ -3,8 +3,10 @@
 This page describes how the libvirt provider clones a VM (`VMClone`), why
 **linked** clones are disabled in this release, how an existing linked clone
 depends on its source VM, and what the provider refuses to do while that
-dependency exists. It applies to single-host libvirt Providers; a clustered
-(`topology: cluster`) libvirt Provider does not clone yet.
+dependency exists. It applies to single-host libvirt Providers and to
+clustered (`topology: cluster`) ones, which clone onto the source VM's own
+host and serve full clones only (see
+[`docs/clustered-provider-inventory.md`](clustered-provider-inventory.md)).
 
 ## Full and linked clones
 
@@ -16,7 +18,38 @@ dependency exists. It applies to single-host libvirt Providers; a clustered
 | Dependency | None: deleting either VM never touches the other's disk | The clone reads every block it has not written from the source's disk, for as long as it exists |
 
 A clone is named `<target namespace>.<target name>` on the host, with the disk
-`<pool directory>/<domain>-disk.qcow2`, and is left powered off.
+`<pool directory>/<domain>-disk.qcow2`, and is left powered off. The copy
+flattens the source's whole image chain, so the clone of a VM with external
+snapshots is one standalone disk, with none of the source's snapshots. The
+clone's disk is always **qcow2**, whatever the source's format, and the
+clone's definition declares it so (`<driver type='qcow2'>`): a raw source's
+clone is a qcow2 disk (its clone used to keep `type='raw'` over the qcow2
+copy and did not boot).
+
+## A full clone needs a powered-off source
+
+A libvirt full clone copies the source VM's disk chain with `qemu-img
+convert`, which cannot open an image a running QEMU holds (`Failed to get
+shared "write" lock`) — and a copy of a disk a running guest is writing would
+not be a consistent clone anyway. **The source VM must be powered off** (`virsh
+domstate` "shut off"). vSphere is different: it clones running VMs.
+
+- The provider reads the source's state before it copies anything, and refuses
+  any other state (running, paused, suspended, in shutdown, ...) with
+  `FailedPrecondition` and the ErrorInfo reason `VM_SOURCE_RUNNING` ("the
+  clone's source VM is "running": power off the source VM to clone it").
+  Nothing is copied or written, and the refusal is never counted toward the
+  Provider's circuit breaker. A clone an earlier attempt already made (its
+  answer lost) is still reported as done, whatever the source's state now.
+- The `VMClone` is **not failed**: it stays `Pending`, with `Ready=False` and
+  `Cloning=False`, reason `SourceMustBePoweredOff`, and one `Warning` event
+  when it starts waiting. It is re-checked with a backoff (15 s, doubling to 5
+  minutes) and at once whenever the source VM's observed power state
+  (`status.powerState`) changes, so it proceeds as soon as the source is off.
+  On a clustered Provider the target `VirtualMachine` the clone created, and
+  its pending host, are kept while it waits.
+- To clone a running VM, set the source's `spec.powerState: Off`, wait for the
+  clone to become `Ready`, then power the source back on.
 
 ## Linked clones are disabled
 
@@ -139,8 +172,13 @@ it, and a backing file is followed only when its header names an absolute
 local path (opened in the format the header names); `qemu-img` is never asked
 to follow a whole chain itself, so it never opens an `nbd:`, `http:` or
 `json:` backing, a device or a FIFO as root. A qcow2 external data file is
-recorded as part of its image (never opened by the check itself; run a QEMU
-with the CVE-2024-4467 fix, whose `qemu-img info` does not open it either). A
+recorded as part of its image (never opened by the check itself; a QEMU
+with the CVE-2024-4467 fix is a prerequisite, see
+[What the copies run as root](#what-the-copies-run-as-root)). Each disk is
+opened in the format its domain definition names (a raw disk, whose bytes are
+the guest's, is never opened at all), and a backing file in the format its
+parent's header names. A backing file whose format nothing names is probed by
+the SSH user only, and so is everything below it. A
 VM "has dependents" when any other domain references one of its disk files as
 a disk, a backing file, a data file, or any other file. Delete only runs the
 check when it has files to remove.
@@ -155,10 +193,17 @@ the provider log. A host that cannot be reached at all during the check (the
 SSH connection or its libvirtd fails) is a host failure instead: `Unavailable`
 with `HOST_UNAVAILABLE` on a clustered Provider, and a plain `Unavailable` —
 which the circuit breaker counts — on a single-host one. Give the provider's
-SSH user passwordless `sudo` for `qemu-img info -U` only
-(`virtrigaud ALL=(root) NOPASSWD: /usr/bin/qemu-img info -U *` — never `qemu-img *`), or membership of the group the
-disks belong to (`kvm` for the disks VirtRigaud creates on Debian/Ubuntu
-hosts), or run it as `root`.
+SSH user passwordless `sudo` for the exact `qemu-img info` reads the check
+makes (`VR_DISK_READ` in [the sudoers rule](#what-the-copies-run-as-root):
+`/usr/bin/qemu-img ^info -U -f (qcow2|raw) --output=json -- /var/lib/libvirt/images/[^/ ]+$`, sudo 1.9.10
+or later — never `qemu-img *`, nor the wildcard `qemu-img info -U *` earlier
+releases documented), or membership of the group the disks belong to (`kvm`
+for the disks VirtRigaud creates on Debian/Ubuntu hosts), or run it as
+`root`. Root only ever reads an image in a named format: an image whose
+format nothing names (a backing file its parent's header gives no format for),
+every image below it, and an image of another format than qcow2 or raw are
+read as the SSH user. The clone and export copies have their own,
+exact rules: see [What the copies run as root](#what-the-copies-run-as-root).
 
 ## What Delete removes
 
@@ -207,8 +252,12 @@ clone of the vanished VM keeps its backing file. Nothing else is looked for.
   never its target's. It used to be world-writable (`0777`). The provider's SSH
   user reads VM disks (disk in-use checks, `GetDiskInfo`, s3/nfs disk export, a
   full clone's copy) as a member of the `kvm` group, or as `root`; the in-use
-  check also uses passwordless `sudo -n qemu-img info -U` where the host
-  allows it. Nothing writes a VM disk through the group. **Disks created or
+  check and `GetDiskInfo` (for the VM's own disk) also use passwordless `sudo -n qemu-img info -U` where the host
+  allows it, and a full clone's copy and the s3/nfs export's flatten run
+  `qemu-img convert` through passwordless `sudo -n` where the host allows it
+  (see [What the copies run as root](#what-the-copies-run-as-root)) — which
+  is what reads the `0600 libvirt-qemu` overlay libvirt creates for an
+  external snapshot. Nothing writes a VM disk through the group. **Disks created or
   imported by an earlier release keep their mode** (an imported disk adopted in
   place is only chowned) — to close one, shut its VM off and run
   `sudo chown -h libvirt-qemu:kvm -- <disk>` and `sudo chmod 0640 -- <disk>`.
@@ -229,9 +278,16 @@ clone of the vanished VM keeps its backing file. Nothing else is looked for.
   owned by the SSH user `0755`), or sticky (`chmod +t`). Anyone else who can
   write there can still replace a finished disk, or a file libvirt later
   opens. The provider logs a `WARN` once per directory when a non-root account
-  other than its SSH user can write one that is not sticky; it never refuses.
-  **A `root` SSH user is not supported on a pool directory other accounts can
-  write.**
+  other than its SSH user can write one that is not sticky. It also
+  **refuses a clone or export copy** in that case, when the source chain has
+  an image in such a directory or the copy would write below one (see
+  [What the copies run as root](#what-the-copies-run-as-root)).
+  **Check your pool directory before upgrading:**
+  `stat -c '%a %U:%G' /var/lib/libvirt/images`. A group-writable directory
+  (for example `0775`) without the sticky bit makes every full clone and
+  every disk export from it fail with `FailedPrecondition` until it is fixed
+  (`chmod g-w`, or `chmod +t`). **A `root` SSH user is not supported on a
+  pool directory other accounts can write.**
 - **UEFI varstore.** For a UEFI source, the clone gets its own copy of the
   source's `<nvram>` varstore, `<nvram directory>/<clone domain>_VARS.fd`. The
   clone is refused (`Conflict`) before any of its files is written when that
@@ -241,6 +297,248 @@ clone of the vanished VM keeps its backing file. Nothing else is looked for.
   conv=excl` under `umask 0177`, so it never follows a symlink at either end,
   never writes into a file that appeared in between (the clone fails instead),
   and is `0600` from the start; it is then `chown -h`'ed to the qemu user.
+
+## What the copies run as root
+
+After an external (disk-only) snapshot — a `VMSnapshot`, or the snapshot a
+`VMMigration` takes before it exports — a VM runs on libvirt's overlay
+`<pool directory>/<domain>-disk.<snapshot>`, which libvirt creates `0600` and
+owned by `libvirt-qemu`. The provider's SSH user cannot read it, even as a
+member of `kvm`, so a full clone or a disk export of such a VM needs root to
+read the source. The three copies that read a VM's whole disk chain — a full
+clone's copy (single-host and clustered), and the flatten of an s3 or nfs
+disk export — therefore run `qemu-img convert` through passwordless
+`sudo -n`:
+
+- **Prerequisite: a QEMU with the fix for CVE-2024-4467** (QEMU 9.0.2,
+  8.2.6 or 7.2.13 and later, or your distribution's backport). Before that
+  fix, `qemu-img info` and `convert` could be made to open a file named in
+  an image's external data file entry. That includes a `json:` pseudo-protocol
+  name, which lets it reach any file root can read.
+- **Every disk root reads is opened in the format its domain definition
+  names**: the `<driver type=...>` of the disk, or raw when there is none, as
+  libvirt itself opens it. This applies to the clone and export copies,
+  `GetDiskInfo`, the disk in-use check and Delete's own-chain walk. The format
+  is never probed. A guest owns every byte of a raw disk, so it can make the
+  disk look like a qcow2 image that names another tenant's disk as its backing
+  file. Because the format is never probed, that header is never read.
+  - A raw disk has no chain and is never walked. It is only checked to be a
+    regular file.
+  - A copy (clone or export) of a disk in any other format (`vmdk`, `qed`,
+    `luks`, ...) is refused before anything reads it.
+  - An export of an explicit disk path must name one of the VM's own disks.
+    So must `GetDiskInfo` (and the pvc export, which copies the disk it
+    resolves), on a single-host Provider too: a path that is not one of the
+    VM's disks is refused (`InvalidArgument`) before anything reads it.
+- **Before a copy opens any image of the source chain** (the disk, then each
+  backing file, one image at a time), that image must pass all of these
+  checks. Any other image is not read at all:
+  - it is a local regular file, not a device or a FIFO;
+  - it is named with its format, qcow2 or raw;
+  - it is **not a symbolic link**;
+  - its directory is writable only by root and the SSH user, or is sticky.
+  A chain image that has an **external data file** is refused as well, once
+  its header has been read. A copy writes its output below a directory,
+  either the clone's pool directory or, for an s3 export, the source's
+  directory. That directory must be just as safe, or root does not write
+  there. **Every such refusal ends the copy.** It is not retried as the SSH
+  user, who reads every VM disk on the host through the `kvm` group: a chain
+  another account could swap is no safer for that user than for root. A
+  refused clone or export fails with `FailedPrecondition`, and a routed
+  (clustered) one also gets the `VM_OPERATION_FAILED` reason. On either
+  kind of Provider the message says what kind of problem it is (for example
+  "an image of its chain is a symbolic link") but names no host path, file
+  or other VM; the provider log has the details. The manager
+  never counts either toward its circuit breaker.
+- The copy's local output is created by the SSH user, under the copy's umask
+  (`0137`: `0640` for a clone's disk; `0177`: `0600` for an export's staging
+  file), inside a private `mktemp -d` directory (`.virtrigaud-write-*`, `0700`)
+  next to it, **before** root writes into it: root never creates the file or
+  follows a link at its name. The clone's disk is then renamed into place
+  with `mv -f -T` and given to `libvirt-qemu:kvm` with `chown -h`, as before;
+  an s3 export's staging file is removed with its directory.
+- On a clustered Provider the copy keeps its guard: the SSH user takes the
+  `flock` on the clone's (or export's) lock file **outside** `sudo`, and
+  `timeout(1)` runs **inside** `sudo`, so it can stop — and after 10 s kill —
+  the root `qemu-img` when the call's time budget runs out.
+- An nfs export that runs as root writes to the destination's server and
+  path with **exactly** the SSH user's uid and gid as its libnfs query,
+  `?uid=<uid>&gid=<gid>`. Every other libnfs option in the URL is dropped.
+  This is the identity the export has always used. libnfs presents the
+  process's own uid and gid by default: for root that is uid 0, which a
+  `root_squash` export maps to its anonymous user and a `no_root_squash`
+  export does not.
+  - When the `VMMigration` names another identity
+    (`spec.storage.nfs.uid`/`gid`, for example the export owner's that a
+    cross-provider migration sets), the export **never runs as root**. The SSH
+    user's own `qemu-img` presents that identity, as it always has, with the
+    source format still pinned. A VM with an external snapshot therefore cannot
+    be exported to NFS with such an identity. To export one, leave `uid`/`gid`
+    unset or set them to the SSH user's.
+  - `uid: 0` and `gid: 0` are refused at `Validating` for every `VMMigration`,
+    whatever its providers (`NFSRootIdentityNotAllowed`). AUTH_SYS identities
+    are whatever the client claims, so on an export without `root_squash` they
+    would be root, able to read or overwrite every file there. Use a dedicated
+    non-zero uid/gid that owns the export.
+- **Only when `sudo` itself refuses** does the copy run as the SSH user. That
+  means `sudo` answers with its own refusal (no passwordless rule for the
+  command, a password or terminal required, or not in sudoers), or `sudo` is
+  not installed. The provider recognises only `sudo`'s exit status and exact
+  messages, never a line `qemu-img` printed. The fallback pins the same
+  source format (`-f <qcow2|raw>`). A disk the SSH user can read is copied as
+  it always was. The overlay of a snapshotted VM fails with
+  "Permission denied", which the provider logs with a pointer to this page. A
+  clustered clone reports this as `VM_OPERATION_FAILED`, which the manager
+  never counts toward its circuit breaker. A refusal of the chain (above) is
+  never followed by this fallback.
+
+`sudo` sees these commands (the umask shell before `sudo` runs as the SSH
+user; `<N>` is the call's remaining budget in seconds, `XXXXXXXXXX` the
+random part `mktemp` picks):
+
+| Copy | Command `sudo -n` runs |
+|---|---|
+| Chain read (in-use check and all copies), `GetDiskInfo`'s size read of a VM's own disk, an adopted imported disk's size | `qemu-img info -U -f <qcow2\|raw> --output=json -- <image>` |
+| Full clone, single-host | `qemu-img convert -f <qcow2\|raw> -O qcow2 <source disk> <pool dir>/.virtrigaud-write-XXXXXXXXXX/<clone domain>-disk.qcow2` |
+| Full clone, clustered | `timeout --kill-after=10s <N>s qemu-img convert -f <qcow2\|raw> -O qcow2 <source disk> <pool dir>/.virtrigaud-write-XXXXXXXXXX/<clone domain>-disk.qcow2` |
+| s3 export | `[timeout --kill-after=10s <N>s] qemu-img convert -U -f qcow2 -O qcow2 <source disk> <source dir>/.virtrigaud-write-XXXXXXXXXX/.virtrigaud-export-<vm>.qcow2` |
+| nfs export | `[timeout --kill-after=10s <N>s] qemu-img convert -U -f <qcow2\|raw> -O qcow2 <source disk> nfs://<server>/<path>?uid=<SSH user's uid>&gid=<SSH user's gid>` |
+
+(`timeout` appears on a clustered Provider only.)
+
+**The sudoers rule.** Allow exactly these shapes, confined to your pool
+directory and your NFS export, and nothing more of `qemu-img` or `timeout` —
+**never `qemu-img *`, `qemu-img convert *` or `timeout *`**: sudoers
+wildcards (`*`) match across spaces, so any rule with a wildcard in these
+commands lets the account add options and files of its choosing, and have
+root write anywhere. Only sudo's regular-expression rules (`^...$`, **sudo
+1.9.10 or later**) can confine them. For the default pool directory
+`/var/lib/libvirt/images`, an SSH user `virtrigaud`, and an NFS migration
+export `nfs.example.com:/exports/virtrigaud` (adjust all three, and the paths
+of `qemu-img` and `timeout`):
+
+```
+# /etc/sudoers.d/virtrigaud — edit with: visudo -f /etc/sudoers.d/virtrigaud
+Cmnd_Alias VR_DISK_READ = /usr/bin/qemu-img ^info -U -f (qcow2|raw) --output=json -- /var/lib/libvirt/images/[^/ ]+$
+Cmnd_Alias VR_CLONE_COPY = /usr/bin/qemu-img ^convert -f (qcow2|raw) -O qcow2 /var/lib/libvirt/images/[^/ ]+ /var/lib/libvirt/images/\.virtrigaud-write-[A-Za-z0-9]{10}/[^/ ]+\.qcow2$, \
+    /usr/bin/timeout ^--kill-after=10s [0-9]+s qemu-img convert -f (qcow2|raw) -O qcow2 /var/lib/libvirt/images/[^/ ]+ /var/lib/libvirt/images/\.virtrigaud-write-[A-Za-z0-9]{10}/[^/ ]+\.qcow2$
+Cmnd_Alias VR_EXPORT_COPY = /usr/bin/qemu-img ^convert -U -f (qcow2|raw) -O qcow2 /var/lib/libvirt/images/[^/ ]+ (/var/lib/libvirt/images/\.virtrigaud-write-[A-Za-z0-9]{10}/\.virtrigaud-export-[^/ ]+\.qcow2|nfs://nfs\.example\.com/exports/virtrigaud/[^?& ]+\?uid=1001&gid=1001)$, \
+    /usr/bin/timeout ^--kill-after=10s [0-9]+s qemu-img convert -U -f (qcow2|raw) -O qcow2 /var/lib/libvirt/images/[^/ ]+ (/var/lib/libvirt/images/\.virtrigaud-write-[A-Za-z0-9]{10}/\.virtrigaud-export-[^/ ]+\.qcow2|nfs://nfs\.example\.com/exports/virtrigaud/[^?& ]+\?uid=1001&gid=1001)$
+virtrigaud ALL=(root) NOPASSWD: VR_DISK_READ, VR_CLONE_COPY, VR_EXPORT_COPY
+```
+
+Replace `uid=1001&gid=1001` with the SSH user's own `id -u` and `id -g`: the
+nfs part then matches only the URL the provider builds for a root export.
+That URL is the server and path with exactly those two parameters, so no other
+identity and no other libnfs option ever reaches a root `qemu-img`. Leave out
+`VR_EXPORT_COPY` if the host never exports disks (no `VMMigration` from it),
+and leave out the `timeout` lines on a single-host Provider.
+
+**What the nfs part changes on the NFS server.** A root `qemu-img` connects
+through libnfs from a **reserved source port** (below 1024), which an
+unprivileged process cannot bind. Linux NFS exports are `secure` by default
+and accept requests only from reserved ports. That is often what kept the SSH
+user's own, unprivileged `qemu-img` off an export. With this rule, the host
+reaches such an export as root, from a reserved port, presenting the SSH
+user's uid and gid. A `secure` export that used to turn the host away now
+accepts it as that uid. So:
+
+- **Grant the nfs part only for exports meant for VirtRigaud.** Name exactly
+  that server and path in the expression, as the example does, never a
+  wildcard server or a parent directory.
+- Keep that export dedicated to migrations (one per trust domain), with
+  `root_squash` on, so only the files the SSH user's uid may touch are
+  reachable. Check the rule
+with `visudo -c`, then as root with `sudo -l -U virtrigaud <the full command>`
+for a real clone path — `sudo -l` prints the command when the rule allows it.
+A VM disk outside the pool directory (another allowed image directory, a
+subdirectory) needs its directory added to the source part of the expression;
+until it is, sudo refuses and the copy runs as the SSH user.
+
+With sudo older than 1.9.10 these commands cannot be confined, and we do not
+recommend a wildcard rule. Without a rule, everything works as before except
+cloning or exporting a VM whose active disk is such an overlay (a VM with an
+external snapshot), which fails as it did before this release.
+
+`VR_DISK_READ` replaces the `qemu-img info -U *` wildcard earlier releases
+documented. That wildcard let the account add options and read any file's
+header as root; replace it when you upgrade. With the rule above, a read of an
+image outside the pool directory (another allowed image directory, a backing
+file elsewhere) is refused by sudo and made as the SSH user. Add that
+directory to the expression if the SSH user cannot read the images there.
+
+What these rules protect, and what they do not. With them, root runs only
+the commands in the table:
+
+- `qemu-img info` and `qemu-img convert` of images in the pool directory;
+- each image opened in the format its domain definition names, or the header
+  of a parent that was itself read in a named format — qcow2 or raw, never
+  probed;
+- output written into VirtRigaud's private `.virtrigaud-write-*` directories,
+  or to the NFS export with the SSH user's own uid and gid and no other libnfs
+  option.
+
+A copy of a chain another account could swap (a symbolic link, a
+group-writable pool directory) is refused before any image of it is opened.
+
+A tenant's input chooses which of its own VMs is read and, for nfs, the name
+of the staged object on the export. It does not choose the options, the
+formats, the NFS identity root presents, or any other file.
+
+These rules do not change two things:
+
+- An account that manages VMs on `qemu:///system`, as the provider's SSH user
+  does, can already obtain root on the host through libvirt (libvirt
+  documents its system connection as root-equivalent). The rules keep what
+  VirtRigaud itself runs as root narrow, exact and auditable. They do not
+  contain an attacker who controls that account.
+- The regular expressions confine the command line, not the files behind it.
+  Anyone who can write the pool directory or the NFS export can still change
+  what is copied: keep them writable only by root and the SSH user (see
+  [Pool directory](#clone-files-on-the-host)).
+
+## Troubleshooting
+
+### A clone or export fails: "the source VM's disk cannot be copied safely"
+
+**Symptom.** A `VMClone` or a `VMMigration` from a libvirt Provider fails with
+`FailedPrecondition`, or `VM_OPERATION_FAILED` on a clustered Provider, and a
+message such as:
+
+```
+the source VM's disk cannot be copied safely: an image of its chain is in a directory other accounts can write (details are in the provider log)
+```
+
+The message never names a host path. The provider log has the full reason,
+on a line that starts with `WARN Refusing to copy <disk>:`.
+
+| The message says | Cause | Fix |
+|---|---|---|
+| an image of its chain is in a directory other accounts can write | The pool directory, or the directory of a backing file, is group- or world-writable and not sticky | `chmod g-w,o-w <dir>`, or `chmod +t <dir>` |
+| the directory it would be written to can be written by other accounts | The same, for the directory the copy writes below: the clone's pool directory, or the source's directory for an s3 export | As above |
+| an image of its chain could not be checked / the directory it would be written to could not be checked | The SSH user could not `stat` the directory | Let the SSH user search the directory (`x`) |
+| an image of its chain is a symbolic link | The disk or a backing file is a symbolic link | Replace the link with the file it points to, with the VM off |
+| an image of its chain has an external data file | A qcow2 in the chain stores its data in a separate file | Flatten the image (`qemu-img convert`) with the VM off |
+| its disk format "…" is not qcow2 or raw | The domain's `<driver type>` is another format | Convert the disk to qcow2 and update the definition |
+| its image chain names a backing file without its format | A header names its backing file with no format | `qemu-img rebase -u -F <format> -b <backing> <image>`, with the VM off |
+| its image chain could not be read and verified | The chain could not be read, for example a `0600` overlay without the sudo rule | Add `VR_DISK_READ` ([The sudoers rule](#what-the-copies-run-as-root)) |
+
+**A directory others can write is named at startup.** Every refusal is
+logged, and the directory is also named before any copy is attempted:
+
+- A **single-host** Provider checks every directory VM disks live in (the
+  allowed image directories and the default pool's directory) when it starts.
+- A **clustered** Provider checks each host's pool directory on first use.
+
+For each one that another account can write and that is not sticky, the
+provider logs, once per directory:
+
+```
+WARN /var/lib/libvirt/images, where VM disks are created, is writable by its group and is not sticky: ... Full clones and disk exports of VMs whose disks are there, and copies written below it, are REFUSED (FailedPrecondition). ...
+```
+
+Check with `stat -c '%a %U:%G' <dir>`. A sticky directory (for example mode
+`1777` or `3777`) is accepted.
 
 ## Known limitations
 
@@ -275,9 +573,11 @@ After upgrading:
   on the host; use `virtrigaud.io/force-delete: "true"` to remove one anyway;
 - new VM disks are `0640 libvirt-qemu:kvm` — make sure the provider's SSH
   user is `root`, in the `kvm` group, or allowed passwordless
-  `sudo qemu-img info -U` (`virtrigaud ALL=(root) NOPASSWD: /usr/bin/qemu-img info -U *`) before upgrading, or the
-  dependency check fails (retryably) and Delete and snapshot operations do not
-  proceed;
+  `sudo qemu-img info` for the exact reads the check makes (`VR_DISK_READ` in
+  [the sudoers rule](#what-the-copies-run-as-root); a host that allowed
+  `qemu-img info -U *` for an earlier release should replace that wildcard)
+  before upgrading, or the dependency check fails (retryably) and Delete and
+  snapshot operations do not proceed;
 - Delete removes fewer files: nothing outside the pool / allowed image
   directories, no symbolic links or their targets, and no backing files other
   than the VM's own external-snapshot chain. A deleted VM whose domain is

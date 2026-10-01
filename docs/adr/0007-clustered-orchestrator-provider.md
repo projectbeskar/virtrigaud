@@ -20,10 +20,26 @@ also on `Delete`, and the previous-incarnation pin R2; see the A6.1 amendment
 under A6) is merged (#365). A6.2 (the restore marker R1 and the pre-schedule
 uniqueness check R4) and A6.3 (the backup and restore guide and the re-attach
 runbook, [`docs/clustered-restore.md`](../clustered-restore.md)) are
-implemented; see the A6.2 amendment under A6. **Not yet done:** the
-end-to-end lab validation (slice 5), which also runs A6's six restore checks.
+implemented; see the A6.2 amendment under A6.
 
-Until slice 5 passes, `topology: cluster` must be treated as experimental.
+**Slice 5 (lab, 2026-09-30): single-Host lab validation done; multi-host still
+open.** A real single-`Host` lab run exercised the upgrade path, schedule and
+bind, the owner stamp, every disk mode, `<pm>`, an honest resize, power, a
+routed snapshot create and delete, a linked-clone refusal, a full clone of a
+stopped source, a failed clone's cleanup, A6's restore scenarios that one
+host can run (not the unreachable-host check), and the base-image guard —
+and found three bugs, addressed in the same PR (B1: a clone or
+export of a snapshotted VM could not read libvirt's 0600 overlay; B2: a clone
+of a running source failed on qemu's image lock; B3: a routed clone failure
+surfaced as gRPC `Unknown`, verified to stay out of the circuit breaker and
+now pinned by a test over a real gRPC hop). See the *Slice 5 (lab, 2026-09-30)* amendment under A5 for
+the full list and for what a single-`Host` lab cannot exercise: multi-host
+placement, the unreachable-host path, and snapshot revert.
+
+`topology: cluster` remains **experimental**. The Slice 5 lab amendment
+recommends keeping it that way until a multi-host lab run covers the three
+paths above — a recommendation for the maintainer (William Rizzo) to decide,
+not a decision made here.
 
 This ADR proposes a new *class* of provider — a **clustered /
 orchestrator** provider — that makes VirtRigaud itself the cluster manager for
@@ -463,6 +479,16 @@ type HostStatus struct {
 // +kubebuilder:validation:Enum=Ready;NotReady;Unknown
 type HostHealth string
 ```
+
+**`spec.labels` operational note (added 2026-09-30, slice 5 lab):** as built,
+the scheduler's D6 filter enforces the `net.virtrigaud.io/<network>` labels
+today — a `Host` missing one is never a placement candidate for a VM that
+needs that network. The `storage.virtrigaud.io/pool-<name>` labels are
+accepted and safe to set, but nothing yet resolves a VM's disks to a required
+pool name, so they are not currently enforced. See
+[Placement labels are load-bearing / First VM checklist / Troubleshooting](../clustered-provider-inventory.md#placement-labels-are-load-bearing)
+in `docs/clustered-provider-inventory.md` for the operational detail and the
+lab-observed failure mode.
 
 ### New kind: `HostPool`
 
@@ -927,9 +953,11 @@ It is the security fix for the released domain-name takeover.
 | 5 | End-to-end lab validation: schedule, create, power, describe, snapshot and delete a real VM on a clustered provider. This is the first real clustered VM. It also runs A6's six restore checks. |
 | A6.4 | After v0.4.0: the automated restore re-attach (`VMRestoreBinding`). |
 
-**Status (2026-09-29):** slices 0, 1 (#337), 2 (#338), 3 (#359) and 4 (#364)
+**Status (2026-09-30):** slices 0, 1 (#337), 2 (#338), 3 (#359) and 4 (#364)
 and A6.1 (#365) are merged; A6.2 and A6.3 are implemented (see the A6.2
-amendment under A6); slice 5 is open.
+amendment under A6); slice 5 has run a single-`Host` lab validation (see the
+*Slice 5 (lab, 2026-09-30)* amendment below) — multi-host placement, the
+unreachable-host path and snapshot revert are still open.
 
 > **Amendment (2026-09-25, slice 3): what slice 3 adds to the wire and the flows.**
 >
@@ -1378,6 +1406,139 @@ follows; A2's `pendingHost` is its prerequisite.
 >
 > Single-host and thin-client Providers never schedule, so none of this reaches
 > them (D9).
+
+> **Amendment (2026-09-30, slice 5): single-Host lab validation, bugs found
+> and fixed, and what is still unverified.**
+>
+> A real libvirt `Host` — the lab has exactly one — ran the first real
+> clustered VM lifecycle end to end.
+>
+> **Validated on the lab:** the upgrade path onto this slice; schedule and
+> bind; the owner stamp; every disk mode; `<pm>` (guest suspend disabled);
+> an honest resize through both `RestartRequired` and
+> `ShrinkPendingPowerOff`; power; a routed snapshot create and delete with a
+> request token; a linked-clone refusal; a full clone of a stopped source
+> (the target stamped with its own UID, its own cloud-init seed, and counted
+> against its own host); removal of a failed clone's target; A6's restore
+> scenarios — a re-applied manifest held, the re-attach runbook, an
+> orphan-then-same-name re-create held, discard-then-fresh-create, and
+> restore-with-status held then re-attached; and the base-image guard
+> refusing another VM's live disk as a base image.
+>
+> **Not validated — a single-`Host` lab cannot exercise it:** multi-host
+> paths (placement across more than one candidate, host (anti-)affinity,
+> committed-capacity accounting across hosts); the unreachable-host path (A6
+> *decision 4*: R1/R4 with a host that cannot be checked, and the disk-guard
+> residual on a host-local pool); and snapshot revert. A second `Host` is
+> needed before any of these can be run for real.
+>
+> **Bugs found and fixed in the same PR:**
+>
+> - **B1 — a full clone (and an s3/nfs disk export) of a VM with an external
+>   disk-only snapshot failed with "Permission denied".** After an external
+>   snapshot the VM's active disk is libvirt's overlay
+>   `<pool>/<domain>-disk.<snapshot>`, mode `0600` `libvirt-qemu`, which the
+>   provider's SSH user cannot read. Fix: the copy now runs `qemu-img convert`
+>   through passwordless `sudo -n` (single-host and clustered); on a clustered
+>   host `timeout(1)` runs inside the `sudo` invocation (so it can stop the
+>   root `qemu-img`) and the `flock` stays held by the SSH user outside
+>   `sudo`. The source format is pinned from the domain definition, the
+>   source's backing chain is verified one image at a time before root reads
+>   it, the output is created by the SSH user (under the copy's umask, in the
+>   private write directory) before root writes into it, and an nfs export
+>   keeps the SSH user's NFS identity (libnfs `uid`/`gid`). When `sudo`
+>   refuses, the copy falls back to running as the SSH user, as before. The
+>   exact `sudoers` entries are in
+>   [`docs/libvirt-clones.md`](../libvirt-clones.md). *(Tightened by the
+>   security review of this PR; see below.)*
+> - **B2 — a full clone of a RUNNING source failed** with qemu's `Failed to
+>   get shared "write" lock`. Decision: a libvirt full clone requires the
+>   source to be powered off. The provider now refuses before any copy with
+>   `FailedPrecondition` + ErrorInfo `VM_SOURCE_RUNNING` (not counted by the
+>   circuit breaker); the `VMClone` stays `Pending` with
+>   `Ready=False/SourceMustBePoweredOff` and a backoff — it is never failed,
+>   keeps its pre-created clustered target, and proceeds once the source is
+>   powered off. vSphere is unchanged: it still clones running VMs.
+> - **B3 — a routed clone failure surfaced as gRPC code `Unknown`**
+>   (`"failed to clone VM on host ..."`). Verified it already carries the
+>   `VM_OPERATION_FAILED` ErrorInfo, which the manager's circuit breaker
+>   excludes, and added a regression test over a real gRPC hop to pin it. No
+>   mapping change was needed — the failure mode was already handled
+>   correctly; only the coverage was missing.
+> - **Follow-ups found while fixing B1–B3, fixed in the same PR:** a clone of
+>   a raw-typed source kept `<driver type='raw'>` over its qcow2 copy (the
+>   clone's disk is now always declared qcow2); a routed clone whose host
+>   failed a read **before** the copy (owner check, `domstate`, `dumpxml`,
+>   pool) was answered `Unknown` and failed the `VMClone` — it is now
+>   `Unavailable` + `VM_OPERATION_FAILED` and retried with a backoff, while
+>   real refusals and failures after the copy started stay terminal; and
+>   `GetDiskInfo` reported 0 sizes for a 0600 snapshot overlay — it now reads
+>   a VM's own disk through the same `sudo -n qemu-img info -U` rule as the
+>   in-use check.
+>
+> **Security review of the B1 fix (2026-09-30): REQUEST CHANGES, addressed in
+> the same PR.** Running `qemu-img` as root widened what a tenant's disk and a
+> tenant's `VMMigration` could reach. The review asked for six changes, all
+> made:
+>
+> 1. **NFS identity.** A root nfs export writes to the destination's server
+>    and path with *exactly* the SSH user's `?uid=&gid=`, and drops every
+>    other libnfs option. A destination that names another uid or gid is
+>    never written as root: the SSH user's own `qemu-img` presents it. The
+>    manager refuses `nfs.uid: 0` / `nfs.gid: 0` at Validating
+>    (`NFSRootIdentityNotAllowed`) — for every provider type, by the
+>    maintainer's decision after the review: every provider presents the
+>    identity as AUTH_SYS. This is a typed check, not a CRD minimum:
+>    tightening v1beta1 is a breaking API change, and the condition says why. The sudoers rule pins the nfs URL to
+>    `[^?& ]+\?uid=<ssh uid>&gid=<ssh gid>$`.
+> 2. **The domain definition's format, everywhere root reads a disk.** The
+>    exports, `GetDiskInfo`, the in-use scan, Delete's own-chain walk and an
+>    adopted imported disk now open each disk in its `<driver type>` (raw by
+>    default), never probed. A raw disk's chain is never walked. A copy of a
+>    disk in any format other than qcow2 or raw is refused. The fix for
+>    **CVE-2024-4467** in the host's QEMU is a documented prerequisite.
+> 3. **Fallback rules.** The copy falls back to the SSH user (with the format
+>    still pinned) *only* when sudo itself refuses. That is detected from
+>    sudo's exit status and exact messages, and every stderr line must be
+>    sudo's. It never falls back after a chain-safety refusal. A refusal is
+>    `FailedPrecondition`, and on a routed call it also carries
+>    `VM_OPERATION_FAILED`, with no host path on the wire.
+> 4. **Swappable chains.** Before a copy opens any image of the chain, the
+>    image must pass three checks: it is not a symbolic link, it is named
+>    with a qcow2 or raw format, and its directory can be written only by
+>    root and the SSH user (or is sticky). A chain image with an external
+>    data file is refused too. The directory a root copy writes below must
+>    be just as safe. For root copies, the old `WARN` is now a refusal.
+>    Refusing was chosen over falling back to the SSH user: the SSH user
+>    reads every VM disk through `kvm`, so a chain another account can
+>    redirect is no safer for it.
+> 5. **Sudoers.** The `qemu-img info -U *` wildcard is replaced by
+>    `^info -U -f (qcow2|raw) --output=json -- <pool>/[^/ ]+$`. Root now only
+>    reads an image in a named qcow2/raw format. An unnamed format, anything
+>    below it, and other formats are read by the SSH user. A test parses the
+>    documented rule and checks it against every `sudo -n` command the
+>    provider runs, and against twenty shapes it must refuse. The earlier
+>    claim that "a tenant's input can never widen it" is replaced by an
+>    account of what the rules do and do not confine.
+> 6. **Test hygiene on the shared lab host.** Every libvirt test runs under a
+>    `TestMain` guard. It shadows the host tools, refuses any argument under
+>    the real `/var/lib/libvirt`, and fails the run if a test calls the real
+>    `sudo`, `ssh` or `virsh` against a real connection. Fixture sudo shims
+>    run only the fixture's own fakes.
+>
+> **Operational consequences** (in [`docs/upgrading.md`](../upgrading.md)):
+> - A pool directory that is group- or world-writable and not sticky now
+>   refuses full clones and exports.
+> - An nfs export with a VMMigration-named identity runs as the SSH user, so
+>   a VM with an external snapshot cannot be exported to NFS that way.
+> - A host that kept the old wildcard should replace it.
+>
+> **Recommendation, not a decision.** This lab run covers the full
+> single-host lifecycle and the A6 restore scenarios one host can run, and closes B1–B3. It
+> does not touch multi-host placement, the unreachable-host path, or
+> snapshot revert. This amendment **recommends** — it does not decide — that
+> `topology: cluster` stay experimental until a multi-host lab run covers
+> those three paths. That call is the maintainer's (William Rizzo) to make.
 
 ### A6: backup and restore of clustered VMs
 

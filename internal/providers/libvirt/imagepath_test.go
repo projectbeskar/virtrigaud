@@ -202,9 +202,7 @@ func TestCheckImageHeader(t *testing.T) {
 // qemu-img (when installed) so the JSON shape the parser relies on is pinned to
 // what qemu-img actually prints, not to hand-written fixtures.
 func TestInspectHostImage_RealQemuImg(t *testing.T) {
-	if _, err := exec.LookPath("qemu-img"); err != nil {
-		t.Skip("qemu-img not installed")
-	}
+	requireRealHostTool(t, "qemu-img")
 	dir := t.TempDir()
 	mk := func(args ...string) {
 		t.Helper()
@@ -370,14 +368,15 @@ esac
 `
 
 // fakeSudoScript stands in for sudo: `sudo -n qemu-img ...` (the disk in-use
-// check's chain read) runs the fake qemu-img "as root" (SUDO_USER set, so a
-// <file>.rootonly image opens), which logs itself; anything else is only
+// check's chain read) runs the fake qemu-img next to it — by path, never
+// another qemu-img — "as root" (SUDO_USER set, so a <file>.rootonly image
+// opens), which logs itself; it never runs the real sudo; anything else is only
 // logged to sudo.log (nothing privileged ever runs in tests). With
 // $FAKE_HOST_DIR/sudo-refuses present it fails like sudo without a
 // passwordless rule.
 const fakeSudoScript = `#!/bin/sh
 if [ -f "$FAKE_HOST_DIR/sudo-refuses" ]; then echo "sudo: a password is required" >&2; exit 1; fi
-if [ "$1" = "-n" ] && [ "$2" = "qemu-img" ]; then shift 2; SUDO_USER=test exec qemu-img "$@"; fi
+if [ "$1" = "-n" ] && [ "$2" = "qemu-img" ]; then shift 2; SUDO_USER=test exec "$(dirname "$0")/qemu-img" "$@"; fi
 printf '%s\n' "$*" >> "$FAKE_HOST_DIR/sudo.log"
 exit 0
 `
@@ -510,11 +509,19 @@ func (h *fakeHost) log(tool string) string {
 	return string(b)
 }
 
+// diskDomainXML is a domain definition whose file-backed disks are sources,
+// each opened as qcow2 (libvirt records the driver type of every disk it
+// defines).
 func diskDomainXML(sources ...string) string {
+	return typedDiskDomainXML("qcow2", sources...)
+}
+
+// typedDiskDomainXML is diskDomainXML with every disk opened in format.
+func typedDiskDomainXML(format string, sources ...string) string {
 	var b strings.Builder
 	b.WriteString("<domain type='kvm'><name>d</name><devices>")
 	for _, s := range sources {
-		b.WriteString("<disk type='file' device='disk'><source file='" + s + "'/></disk>")
+		b.WriteString("<disk type='file' device='disk'><driver name='qemu' type='" + format + "'/><source file='" + s + "'/></disk>")
 	}
 	b.WriteString("</devices></domain>")
 	return b.String()
@@ -822,7 +829,7 @@ func TestConfine_ShutOffDomainBackingChainIsInUse(t *testing.T) {
 		requireRejected(t, err, "existing VM")
 	}
 	qlog := h.log("qemu-img")
-	assert.Contains(t, qlog, "info -U --output=json -- "+overlay, "one image at a time")
+	assert.Contains(t, qlog, "info -U -f qcow2 --output=json -- "+overlay, "one image at a time, in the format its definition names")
 	assert.Contains(t, qlog, "info -U -f qcow2 --output=json -- "+base, "in the format its parent's header names")
 	assert.NotContains(t, qlog, "--backing-chain")
 
@@ -866,6 +873,27 @@ func TestCreateVolumeFromImageFile_RejectsCraftedImport(t *testing.T) {
 	requireRejected(t, err, "external data file")
 	assert.NotContains(t, h.log("qemu-img"), "convert")
 	assert.Contains(t, h.log("qemu-img"), "info --output=json -f qcow2 -- "+inPool)
+}
+
+// TestCreateVolumeFromImageFile_AdoptInPlaceReadsAsQcow2: an imported disk
+// attached in place has its size read (through sudo, as root when allowed) in
+// the qcow2 format the import verified — its format is never probed.
+func TestCreateVolumeFromImageFile_AdoptInPlaceReadsAsQcow2(t *testing.T) {
+	h := newFakeHost(t)
+	vp := h.host("h1")
+	inPool := h.file(h.images, "web-migrated.qcow2")
+	h.info(inPool, `{"format":"qcow2","virtual-size":1073741824}`)
+
+	vol, err := NewStorageProvider(vp).CreateVolumeFromImageFile(context.Background(), inPool, "web-migrated", "default", 0)
+	require.NoError(t, err)
+	assert.Equal(t, "1.00 GiB", vol.Capacity)
+	qlog := splitLines(h.log("qemu-img"))
+	assert.Contains(t, qlog, "info -U -f qcow2 --output=json -- "+inPool)
+	for _, l := range qlog {
+		if strings.HasPrefix(l, "info -U") {
+			assert.Contains(t, l, " -f qcow2 ", "never a format probe: %q", l)
+		}
+	}
 }
 
 // TestImagePrepare_ExistingTargetInUseIsRejected covers the upgrade story: an

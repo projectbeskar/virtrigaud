@@ -39,6 +39,7 @@ import (
 // $SWAP_DIR/sudo.log.
 const swapSudo = `#!/bin/sh
 if [ "$1" = "-n" ]; then shift; fi
+case "$1" in sudo|*/sudo) echo "swap sudo: never runs sudo" >&2; exit 1 ;; esac
 printf '%s\n' "$*" >> "$SWAP_DIR/sudo.log"
 for last in "$@"; do :; done
 case "$1" in
@@ -67,14 +68,15 @@ type swapHost struct {
 func newSwapHost(t *testing.T) *swapHost {
 	t.Helper()
 	requireGNURealpath(t)
-	if _, err := exec.LookPath("qemu-img"); err != nil {
-		t.Skip("qemu-img not available")
-	}
+	requireRealHostTool(t, "qemu-img")
 	bin := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(bin, "sudo"), []byte(swapSudo), 0o700))               //nolint:gosec // test shim must be executable
 	require.NoError(t, os.WriteFile(filepath.Join(bin, "virsh"), []byte("#!/bin/sh\nexit 0\n"), 0o700)) //nolint:gosec // test shim must be executable
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	dir := t.TempDir()
+	// Writable by the test user (the SSH user) alone, whatever the umask: a
+	// root copy refuses a group-writable directory (unsafeChainMemberReason).
+	require.NoError(t, os.Chmod(dir, 0o700))
 	t.Setenv("SWAP_DIR", dir)
 	victim := filepath.Join(dir, "victim")
 	require.NoError(t, os.WriteFile(victim, []byte("root's file"), 0o600))
@@ -129,7 +131,7 @@ func TestCreatedVMFiles_SwappedSymlinkIsNeverFollowed(t *testing.T) {
 		require.NoError(t, err, "%s", out)
 		dst := filepath.Join(s.dir, "team-b.copy-disk.qcow2")
 
-		require.NoError(t, createFullCopy(ctx, s.vp, src, dst))
+		require.NoError(t, createFullCopy(ctx, s.vp, src, "qcow2", dst))
 		s.requireVictimUntouched(t)
 		fi, err := os.Lstat(dst)
 		require.NoError(t, err)
@@ -162,9 +164,7 @@ func TestCreatedVMFiles_SwappedSymlinkIsNeverFollowed(t *testing.T) {
 // vmDiskMode, dd under clonedNVRAMUmask gives 0600 — whatever the caller's
 // umask.
 func TestVMFiles_CreatedWithTheirFinalMode(t *testing.T) {
-	if _, err := exec.LookPath("qemu-img"); err != nil {
-		t.Skip("qemu-img not available")
-	}
+	requireRealHostTool(t, "qemu-img")
 	ctx := context.Background()
 	vp := NewVirshProvider(&ProviderConfig{})
 	vp.uri = "test:///modes"
@@ -282,7 +282,7 @@ func TestDiskWriteDir_ReplacesALinkPlantedAtTheFinalName(t *testing.T) {
 	// The whole full-clone path: the same, through createFullCopy.
 	dst2 := filepath.Join(pool, "team-c.copy-disk.qcow2")
 	require.NoError(t, os.Symlink(s.victim, dst2))
-	require.NoError(t, createFullCopy(ctx, s.vp, src, dst2))
+	require.NoError(t, createFullCopy(ctx, s.vp, src, "qcow2", dst2))
 	s.requireVictimUntouched(t)
 	entries, err := os.ReadDir(pool)
 	require.NoError(t, err)

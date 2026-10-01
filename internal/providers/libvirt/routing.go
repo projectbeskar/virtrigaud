@@ -416,7 +416,13 @@ func requesterFacingMessage(err error) string {
 // guard that could not run (diskCheckFailedError) is Unavailable with the
 // VM_DISK_CHECK_FAILED and VM_OPERATION_FAILED ErrorInfos: retried, not
 // counted. A guard that could not reach the host (guardHostUnreachableError)
-// is a host failure like any other: HOST_UNAVAILABLE (hostOpRPCError).
+// is a host failure like any other: HOST_UNAVAILABLE (hostOpRPCError). A clone
+// refused because its source is not shut off (sourceRunningError) is
+// FailedPrecondition with the VM_SOURCE_RUNNING and VM_OPERATION_FAILED
+// ErrorInfos: the manager keeps the clone pending, never counts it toward its
+// breaker. A copy whose source chain is not safe to copy (copyRefusedError)
+// is FailedPrecondition with VM_OPERATION_FAILED and a message that names no
+// host path: terminal, never counted.
 //
 // The cluster-wide guards of ADR-0007 A6 (slice A6.1) answer first
 // (clusterGuardStatus): a Clone that finds a previous incarnation of its
@@ -440,6 +446,15 @@ func routedRPCError(op string, err error) error {
 	var dc *diskCheckFailedError
 	if stderrors.As(err, &dc) {
 		return diskCheckFailedStatus(fmt.Sprintf("failed to %s: %v", op, dc), true).Err()
+	}
+	var sr *sourceRunningError
+	if stderrors.As(err, &sr) {
+		return sourceRunningStatus(fmt.Sprintf("failed to %s: %v", op, sr), true).Err()
+	}
+	var cr *copyRefusedError
+	if stderrors.As(err, &cr) {
+		log.Printf("WARN %s refused: %v", op, cr)
+		return vmOperationStatus(codes.FailedPrecondition, fmt.Sprintf("failed to %s: %s", op, cr.Error()))
 	}
 	var roe *routedOpError
 	if stderrors.As(err, &roe) {

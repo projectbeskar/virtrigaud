@@ -101,7 +101,7 @@ func TestClustered_Clone_LandsOnTheSourceHostStampedWithItsTarget(t *testing.T) 
 		calls := fx.calls()
 		assert.Equal(t, []string{"host-b virsh list --all", "host-b virsh dumpxml web"}, calls[:2], "the source's owner check runs first")
 		targetDisk := "/var/lib/libvirt/images/" + cloneTargetDomain + "-disk.qcow2"
-		assert.Contains(t, calls, "local qemu-img convert -O qcow2 "+scdDiskPath+" "+cloneWriteFile, "the copy is written in the private directory")
+		assert.Contains(t, calls, "local "+cloneCopyCmd, "the copy is written in the private directory")
 		assert.Contains(t, calls, "local mv -f -T -- "+cloneWriteFile+" "+targetDisk, "and renamed onto the disk's name once complete")
 		assert.Contains(t, calls, "host-b virsh dumpxml "+routingDomainUUID, "the source is read by its checked UUID")
 		for _, c := range calls {

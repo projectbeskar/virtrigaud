@@ -147,6 +147,19 @@ const VMDiskCheckFailedReason = "VM_DISK_CHECK_FAILED"
 // per-Provider circuit breaker.
 const VMPreviousIncarnationReason = "VM_PREVIOUS_INCARNATION"
 
+// VMSourceRunningReason is the google.rpc.ErrorInfo reason (in
+// ErrorInfoDomain) a provider attaches to the codes.FailedPrecondition status
+// of a Clone it refused, before copying anything, because the source VM is not
+// powered off. A libvirt full clone copies the source's disk chain with
+// qemu-img, which cannot take the image lock a running QEMU holds (and a copy
+// of a disk that is being written is not a consistent clone), so the libvirt
+// provider requires the source to be shut off. The refusal holds until the
+// source is powered off; it is not a failure of the clone. The manager maps it
+// to a retryable error marked ErrVMSourceRunning, keeps the VMClone Pending
+// (SourceMustBePoweredOff) and retries with a backoff; FailedPrecondition keeps
+// it out of the per-Provider circuit breaker.
+const VMSourceRunningReason = "VM_SOURCE_RUNNING"
+
 // ProviderError represents a categorized error from a provider
 type ProviderError struct {
 	// Type categorizes the error
@@ -270,6 +283,19 @@ func IsVMOwnDomainElsewhere(err error) bool {
 // pending host, never exclude the host.
 func IsVMPreviousIncarnation(err error) bool {
 	return IsConflict(err) && errors.Is(err, ErrVMPreviousIncarnation)
+}
+
+// ErrVMSourceRunning marks (in an error's chain) a provider's refusal carrying
+// VMSourceRunningReason: the clone's source VM must be powered off before it
+// is cloned. The transport client wraps it into the retryable error it maps
+// that refusal to.
+var ErrVMSourceRunning = errors.New("the clone's source VM must be powered off")
+
+// IsVMSourceRunning reports whether err is a provider's VMSourceRunningReason
+// refusal (a retryable error that says so): the caller keeps the clone
+// pending until the source VM is powered off, and never fails it for this.
+func IsVMSourceRunning(err error) bool {
+	return IsRetryable(err) && errors.Is(err, ErrVMSourceRunning)
 }
 
 // IsInvalidSpec reports whether err is, or wraps, a provider InvalidSpec error.

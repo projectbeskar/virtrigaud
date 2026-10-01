@@ -18,13 +18,13 @@ package libvirt
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"path/filepath"
 	"strings"
 	"time"
 
-	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
 	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
 )
 
@@ -51,29 +51,36 @@ func (s *Server) exportDiskToNFS(ctx context.Context, req *providerv1.ExportDisk
 		return nil, fmt.Errorf("nfs export destination must be an nfs:// URL, got %q", nfsURL)
 	}
 
-	// Resolve the source disk path on the host.
-	diskInfo, err := s.provider.GetDiskInfo(ctx, contracts.GetDiskInfoRequest{
-		VM:         contracts.VMRef{ID: req.VmId, HostID: req.TargetHostId},
-		DiskId:     req.DiskId,
-		SnapshotId: req.SnapshotId,
-	})
+	// The source is one of the domain's own disks, read in the format its
+	// definition names (exportSourceOn).
+	vp, err := virshOf(conn)
 	if err != nil {
-		return nil, fmt.Errorf("failed to resolve source disk info: %w", err)
+		return nil, err
 	}
-	srcPath := diskInfo.Path
-	if srcPath == "" {
-		return nil, fmt.Errorf("source disk %q has no resolvable host path", req.DiskId)
+	srcPath, srcFormat, err := exportSourceOn(ctx, vp, byName(req.VmId), req.DiskId)
+	if err != nil {
+		return nil, fmt.Errorf("failed to resolve the source disk: %w", err)
 	}
-	return exportConvertToNFS(ctx, conn, req, srcPath, nil)
+	return exportConvertToNFS(ctx, conn, req, srcPath, srcFormat, nil)
 }
 
 // exportConvertToNFS is the NFS export core, run on conn — the single host's
 // connection, or a clustered host's leased connection after the owner check
 // (exportDiskRouted): the host's qemu-img flattens srcPath straight into the
 // nfs:// destination. guard wraps the convert (flock + timeout on a clustered
-// host, routed_budget.go); a nil guard — the single-host path — runs the
-// historical command, unchanged.
-func exportConvertToNFS(ctx context.Context, conn libvirtConn, req *providerv1.ExportDiskRequest, srcPath string, guard hostCmdGuard) (*providerv1.ExportDiskResponse, error) {
+// host, routed_budget.go); a nil guard is the single-host path.
+//
+// The source is read as root when passwordless sudo allows it
+// (privileged_copy.go; a chain that is not safe to copy is refused): a
+// snapshotted VM's active disk is libvirt's 0600 overlay, which the SSH user
+// cannot read. The root qemu-img writes to the destination's server and path
+// with exactly the SSH user's uid and gid and no other libnfs option
+// (nfsURLForRoot) — the identity the export has always used. A destination
+// that names another uid or gid (a VMMigration's spec.storage.nfs.uid/gid) is
+// never written as root: the convert runs as the SSH user, which presents
+// that identity as it always has, with the source format still pinned.
+func exportConvertToNFS(ctx context.Context, conn libvirtConn, req *providerv1.ExportDiskRequest, srcPath, srcFormat string,
+	guard *hostCmdGuard) (*providerv1.ExportDiskResponse, error) {
 	nfsURL := strings.TrimSpace(req.DestinationUrl)
 
 	log.Printf("INFO Exporting disk from libvirt host to NFS: backend=nfs vm=%s src=%s dest=%s",
@@ -86,12 +93,23 @@ func exportConvertToNFS(ctx context.Context, conn libvirtConn, req *providerv1.E
 	// values are passed raw — pre-quoting them would now double-quote.
 	// It writes no host file (the destination is the NFS export), so the
 	// guard has no host target to check.
-	convert, err := guard.apply("", "qemu-img", "convert", "-U", "-f", "qcow2", "-O", "qcow2", srcPath, nfsURL)
-	if err != nil {
-		return nil, err
+	h := hostConnRunner{conn: conn}
+	convert := diskCopy{
+		src:       srcPath,
+		srcFormat: srcFormat,
+		args:      []string{"convert", "-U", "-f", srcFormat, "-O", "qcow2", srcPath, nfsURL},
 	}
-	if res, err := conn.RunHost(ctx, convert...); err != nil {
-		return nil, fmt.Errorf("host-side qemu-img convert to nfs failed: %w%s", err, qemuImgStderr(res))
+	if rootURL, err := nfsURLForRoot(ctx, h, nfsURL); err != nil {
+		log.Printf("WARN Exporting %s to NFS as the provider's SSH user, not as root: %v", srcPath, err)
+	} else {
+		convert.privArgs = []string{"convert", "-U", "-f", srcFormat, "-O", "qcow2", srcPath, rootURL}
+	}
+	if res, err := convert.run(ctx, h, guard); err != nil {
+		var roe *routedOpError
+		if errors.As(err, &roe) {
+			return nil, err
+		}
+		return nil, fmt.Errorf("host-side qemu-img convert to nfs failed: %w%s", err, copyStderr(res))
 	}
 
 	log.Printf("INFO Source disk written to NFS export: dest=%s", nfsURL)

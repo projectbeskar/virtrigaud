@@ -250,17 +250,17 @@ func TestClustered_ExportDisk_S3FailedFlattenIsRemoved(t *testing.T) {
 			mk, conv, rm := -1, -1, -1
 			for i, c := range calls {
 				switch {
-				case c == "local mktemp --suffix=.qcow2 "+s3ExportTemplate:
+				case c == "local mktemp -d "+s3ExportStageTemplate:
 					mk = i
 				case strings.HasPrefix(c, "local qemu-img convert") || strings.HasPrefix(c, "local timeout"):
 					if conv < 0 {
 						conv = i
 					}
-				case c == "local rm -f -- "+s3ExportTemp:
+				case c == "local rm -rf -- "+s3ExportStageDir:
 					rm = i
 				}
 			}
-			require.GreaterOrEqual(t, mk, 0, "the temp is made by mktemp: %v", calls)
+			require.GreaterOrEqual(t, mk, 0, "the temp's private directory is made by mktemp -d: %v", calls)
 			require.GreaterOrEqual(t, conv, 0, "the flatten ran: %v", calls)
 			assert.Less(t, mk, conv, "the temp exists before the flatten writes it")
 			assert.Greater(t, rm, conv, "the partial temp is removed after the failed flatten: %v", calls)

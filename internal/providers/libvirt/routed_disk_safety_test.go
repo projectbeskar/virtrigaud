@@ -109,7 +109,7 @@ func TestClustered_Snapshots_RefusedWhileADiskHasDependents(t *testing.T) {
 			assert.NotContains(t, st.Message(), dependentDomain, "another domain (maybe another tenant's) is never named")
 			assert.NotContains(t, st.Message(), "/var/lib", "no host path on the wire")
 			calls := fx.calls()
-			assert.Contains(t, calls, "local sudo -n qemu-img info -U --output=json -- "+dependentDisk,
+			assert.Contains(t, calls, "local sudo -n qemu-img info -U -f qcow2 --output=json -- "+dependentDisk,
 				"the other domain's disk chain was read on the leased host")
 			for _, c := range calls {
 				for _, verb := range scdMutatingSnapshotVerbs {
@@ -185,7 +185,12 @@ func TestClustered_Clone_WritesOnTheHardenedPath(t *testing.T) {
 	diskCheck := idx("local sh -c " + targetKindScript + " sh " + cloneTargetDisk)
 	nvramCheck := idx("local sh -c " + targetKindScript + " sh " + cloneNVRAM)
 	writeDir := idx("local mktemp -d /var/lib/libvirt/images/" + vmDiskWriteDirPrefix + mktempTemplateSuffix)
-	copyAt := idx("local umask " + vmDiskUmask + " qemu-img convert -O qcow2 " + scdDiskPath + " " + cloneWriteFile)
+	// The copy runs as root (privileged_copy.go) into a file the SSH user
+	// created first, under the VM-disk umask, in the private directory.
+	created := idx("local sh -c " + createCopyOutputScript + " sh " + vmDiskUmask + " " + cloneWriteFile)
+	copyAt := idx("local " + cloneCopyCmd)
+	assert.Less(t, writeDir, created)
+	assert.Less(t, created, copyAt, "root writes into the file the SSH user created; it never creates it")
 	publish := idx("local mv -f -T -- " + cloneWriteFile + " " + cloneTargetDisk)
 	diskChown := idx("local sudo chown -h " + qemuFileOwner + " -- " + cloneTargetDisk)
 	dirRemoved := idx("local rm -rf -- " + cloneWriteDir)
@@ -204,7 +209,7 @@ func TestClustered_Clone_WritesOnTheHardenedPath(t *testing.T) {
 	assert.Less(t, nvramUnlink, nvramCopy, "a stale varstore is unlinked, never truncated")
 	assert.Less(t, nvramCopy, nvramChown)
 	assert.Less(t, nvramChown, define)
-	_, _ = guardedCall(t, calls, cloneLock, cloneCopyCmd)
+	_, _ = guardedCall(t, calls, cloneLock, cloneCopyAsRoot, cloneCopyCmd)
 
 	for _, c := range calls {
 		assert.NotContains(t, c, "chmod 777", "nothing is made world-writable: %q", c)

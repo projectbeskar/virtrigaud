@@ -45,10 +45,13 @@ import (
 // testdata/single_host_snapshot_clone_disk.golden.json, captured by running
 // this test file against origin/main — first at 392d79a, then again at df4ec4f
 // for #358's single-host changes (disk-dependents guard, linked clones
-// refused, the private-directory write path, the varstore dd) — with
-// VIRTRIGAUD_UPDATE_CALLSEQ_GOLDEN=1; the slice 3 branch reproduces it byte
-// for byte. A change to any of them — which would restart the ADR-0008 D5
-// soak window — fails here.
+// refused, the private-directory write path, the varstore dd), and again for
+// the ADR-0007 Slice 5 lab fixes to the clone copy (B1: the copy reads the
+// source as root through `sudo -n` after verifying its chain, the SSH user's
+// historical copy when sudo refuses; B2: a source that is not shut off is
+// refused) — with VIRTRIGAUD_UPDATE_CALLSEQ_GOLDEN=1; the slice 3 branch
+// reproduces it byte for byte. A change to any of them — which would restart
+// the ADR-0008 D5 soak window — fails here.
 
 // scdGoldenFile is the golden single-host snapshot / clone / disk results.
 const scdGoldenFile = "testdata/single_host_snapshot_clone_disk.golden.json"
@@ -76,9 +79,17 @@ const (
 // host directory such as /var/lib/libvirt/images; sh answers "no such path"
 // for every host existence check and runs withUmask's fixed script
 // (umaskExecScript) for real, so the command it wraps (qemu-img, sudo dd)
-// reaches its fake; every other host tool (mv included: it never moves a real
-// file) only logs.
-const scdFakeTool = `#!/bin/sh
+// reaches its fake; `sudo -n <cmd>` (the privileged disk copy and its chain
+// read, privileged_copy.go) runs <cmd>'s fake as the test user — or, when
+// local/fail-sudo exists, refuses as sudo does without a passwordless rule —
+// while any other sudo only logs; every other host tool (mv included: it
+// never moves a real file) only logs. sh answers the chain-image and
+// directory checks root copies make (chainMemberScript, diskDirModeScript) as
+// for a regular file in a root-owned 0755 directory — unless local/symlink-<image
+// base name> makes the image a symbolic link, or local/unsafe-dir-<directory
+// base name> makes its directory group-writable (0775) — without looking at
+// the path.
+var scdFakeTool = `#!/bin/sh
 tool=$(basename "$0")
 host=local
 if [ "$tool" = virsh ] && [ "$1" = "-c" ]; then host="${2##*/}"; shift 2; fi
@@ -134,13 +145,48 @@ qemu-img)
   fail qemu-img
   if [ "$1" = info ]; then printf '{"virtual-size": 10737418240, "actual-size": 1073741824, "format": "qcow2"}\n'; fi ;;
 sh)
-  case "$2" in '` + umaskExecScript + `') exec /bin/sh "$@" ;; esac ;;
+  case "$2" in
+  '` + umaskExecScript + `') exec /bin/sh "$@" ;;
+  ` + scdChainMemberPattern + `)
+    if [ -f "$d/symlink-${4##*/}" ]; then echo ` + chainMemberSymlink + `
+    elif [ -f "$d/unsafe-dir-${5##*/}" ]; then printf '775 0\n` + scdSSHUID + `\n'
+    else printf '755 0\n` + scdSSHUID + `\n'; fi ;;
+  ` + scdDirModePattern + `)
+    if [ -f "$d/unsafe-dir-${4##*/}" ]; then printf '775 0\n` + scdSSHUID + `\n'; else printf '755 0\n` + scdSSHUID + `\n'; fi ;;
+  esac ;;
+sudo)
+  if [ "$1" = "-n" ]; then
+    if [ -f "$d/fail-sudo" ]; then echo "sudo: a password is required" >&2; exit 1; fi
+    shift
+    t="$1"; shift
+    case "$t" in qemu-img|timeout)
+      f="${FAKE_SCD_BIN:-$(dirname "$0")}/$t"
+      if [ -x "$f" ]; then exec "$f" "$@"; fi ;;
+    esac
+    echo "fake sudo: $t is not a fixture fake; nothing is run" >&2
+    exit 1
+  fi ;;
+id)
+  case "$1" in -u) echo ` + scdSSHUID + ` ;; -g) echo ` + scdSSHGID + ` ;; esac ;;
 *) exit 0 ;;
 esac
 `
 
+// scdChainMemberPattern and scdDirModePattern are the scdFakeTool sh case
+// patterns that match chainMemberScript and diskDirModeScript.
+var (
+	scdChainMemberPattern = shellQuote(chainMemberScript)
+	scdDirModePattern     = shellQuote(diskDirModeScript)
+)
+
+// scdSSHUID and scdSSHGID are the SSH user's uid and gid the fake id prints.
+const (
+	scdSSHUID = "1001"
+	scdSSHGID = "1002"
+)
+
 // scdTools are the names scdFakeTool is installed under.
-var scdTools = []string{"virsh", "mktemp", "qemu-img", "sh", "sudo", "cp", "mv", "chmod", "chown", "rm", "restorecon", "stat", "sha256sum"}
+var scdTools = []string{"virsh", "mktemp", "qemu-img", "sh", "sudo", "cp", "mv", "chmod", "chown", "rm", "restorecon", "stat", "sha256sum", "id"}
 
 // scdFixture is one scenario's fake host: a single-host Provider (with the
 // registry seam the Server's snapshot RPCs use) on qemu:///single.
@@ -213,6 +259,7 @@ func newSCDFixture(t *testing.T, domains map[string]string) *scdFixture {
 	for _, tool := range scdTools {
 		require.NoError(t, os.WriteFile(filepath.Join(bin, tool), []byte(scdFakeTool), 0o755)) //nolint:gosec // test shim must be executable
 	}
+	installFakeRealpath(t, bin)
 	staging := t.TempDir()
 	t.Setenv("FAKE_SCD_DIR", dir)
 	t.Setenv("FAKE_SCD_STAGING", staging)
@@ -396,6 +443,11 @@ func singleHostSCDScenarios() []scdScenario {
 		{name: "clone-mismatched-target-name", run: cloneCall(&providerv1.CloneRequest{SourceVmId: scdDomain, TargetName: "other", TargetVm: scdTargetVM}), defined: "team-a.copy"},
 		{name: "clone-copy-fails", setup: failing("local", "qemu-img"), run: cloneCall(fullClone), defined: "team-a.copy"},
 		{name: "clone-define-fails", setup: failing("local", "define"), run: cloneCall(fullClone), defined: "team-a.copy"},
+		// A full clone requires a powered-off source (B2): refused before any
+		// copy; and a host whose sudo refuses the privileged copy (B1) runs
+		// the historical copy as the SSH user.
+		{name: "clone-source-running", setup: running, run: cloneCall(fullClone), defined: "team-a.copy"},
+		{name: "clone-copy-sudo-refused", setup: failing("local", "sudo"), run: cloneCall(fullClone), defined: "team-a.copy"},
 		// GetDiskInfo
 		{name: "diskinfo-primary", setup: withSnap, run: diskInfoCall(&providerv1.GetDiskInfoRequest{VmId: scdDomain})},
 		{name: "diskinfo-explicit-path", run: diskInfoCall(&providerv1.GetDiskInfoRequest{VmId: scdDomain, DiskId: "/var/lib/libvirt/images/other.qcow2"})},

@@ -45,6 +45,7 @@ For full documentation see [https://projectbeskar.github.io/virtrigaud](https://
 |------|-------------|
 | [provider-libvirt-clustered.yaml](provider-libvirt-clustered.yaml) | A `topology: cluster` libvirt `Provider` — the operator renders its `Host` CRs into a `<provider>-hosts` Secret mounted at `/etc/virtrigaud/hosts/` (ADR-0007 D3). Credentials/consumption are follow-ups. |
 | [hostpool-clustered.yaml](hostpool-clustered.yaml) | `HostPool` (Spread) + two `Host`s — the clustered-libvirt inventory foundation. Additive; single-host providers unchanged. See [docs/clustered-provider-inventory.md](../docs/clustered-provider-inventory.md). |
+| [host-libvirt-clustered-first-vm.yaml](host-libvirt-clustered-first-vm.yaml) | One `Host` labelled `net.virtrigaud.io/default: "true"` for the `VMNetworkAttachment` of libvirt's `default` network. A clustered VM is placed only on a Host labelled for every libvirt network it uses; without the label it stays `Unschedulable` ("host does not have a required network"). |
 
 ## Provider-Specific Examples
 

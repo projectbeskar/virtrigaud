@@ -57,7 +57,10 @@ import (
 // owner (the qemu user, after chownToQemu), read-only for its group (kvm), and
 // nothing for anyone else. The provider's SSH user reads VM disks (the disk
 // in-use checks, GetDiskInfo, s3/nfs exports, a full clone's copy) as a member
-// of kvm, or as root; nothing writes a VM disk through the group. qemu-img
+// of kvm, or as root; the disk in-use checks and the copies (a full clone's,
+// the s3/nfs exports' flatten) read through passwordless `sudo -n` where the
+// host allows it, which reaches libvirt's 0600 snapshot overlays too
+// (privileged_copy.go); nothing writes a VM disk through the group. qemu-img
 // creates files 0644 at most, so this is the most a create-time mode can give.
 // Disks created by an earlier release keep their mode. Least privilege (0600,
 // every read through `sudo -n`) is a tracked follow-up.
@@ -184,21 +187,53 @@ const (
 // everyone) and does not have the sticky bit. Such an account can plant a
 // symbolic link at the name of a VM file before it is created; the create-time
 // modes and `chown -h` keep root from following one swapped in afterwards.
-// It never refuses: existing hosts keep working. A check that cannot run is
-// logged and not retried.
+// The warning says that full clones and disk exports reading from or writing
+// below dir are refused (checkCopySource, unsafeHostDirReason) — the operator
+// sees why at once, at startup for a single-host Provider
+// (warnUnsafeVMStorageDirs). The warning itself refuses nothing else. A check
+// that cannot run is logged and not retried.
 func (v *VirshProvider) warnIfDiskDirUnsafe(ctx context.Context, dir string) {
 	if _, done := v.checkedDiskDirs.LoadOrStore(dir, true); done {
 		return
 	}
 	res, err := runHost(ctx, v, "sh", "-c", diskDirModeScript, "sh", dir)
 	if err != nil {
-		log.Printf("WARN Could not check the permissions of %s, where VM disks are created: %v", dir, err)
+		log.Printf("WARN Could not check the permissions of %s, where VM disks are created: %v. Full clones and disk "+
+			"exports of VMs with disks there are refused while it cannot be checked (see %s)", dir, err, unsafeDiskDirDoc)
 		return
 	}
 	if reason := unsafeDiskDirReason(res.Stdout); reason != "" {
 		log.Printf("WARN %s, where VM disks are created, %s and is not sticky: that account can plant a symbolic link "+
-			"at a VM file's name before it is created. Make it writable only by root and the provider's SSH user "+
-			"(e.g. root:root 0755, or owned by the SSH user 0755), or set the sticky bit (chmod +t)", dir, reason)
+			"at a VM file's name before it is created, or swap a disk a copy reads. Full clones and disk exports of "+
+			"VMs whose disks are there, and copies written below it, are REFUSED (FailedPrecondition). Make it "+
+			"writable only by root and the provider's SSH user (e.g. root:root 0755, or owned by the SSH user 0755), "+
+			"or set the sticky bit (chmod +t); see %s", dir, reason, unsafeDiskDirDoc)
+	}
+}
+
+// unsafeDiskDirDoc is where the pool-directory rule is documented.
+const unsafeDiskDirDoc = "docs/libvirt-clones.md#clone-files-on-the-host"
+
+// startupStorageCheckTimeout bounds warnUnsafeVMStorageDirs at startup.
+const startupStorageCheckTimeout = 30 * time.Second
+
+// warnUnsafeVMStorageDirs checks, once at a single-host Provider's startup,
+// every directory VM disks live in (deletionDirs: the allowed image
+// directories and the default storage pool's directory) and logs
+// warnIfDiskDirUnsafe's WARN, naming the directory, for each one another
+// account can write that is not sticky — where full clones and disk exports
+// are refused. Best-effort: a host it cannot read only logs, and startup goes
+// on. A clustered Provider checks each host's pool directory on first use
+// instead (it dials hosts lazily).
+func (p *Provider) warnUnsafeVMStorageDirs(ctx context.Context) {
+	vp := p.virshProvider
+	if vp == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(ctx, startupStorageCheckTimeout)
+	defer cancel()
+	for _, dir := range p.deletionDirs(ctx, vp) {
+		vp.warnIfDiskDirUnsafe(ctx, dir)
 	}
 }
 

@@ -57,9 +57,12 @@ func TestClustered_GetDiskInfo_RoutedOwnerChecked(t *testing.T) {
 		"host-b virsh list --all",
 		"host-b virsh dumpxml web",
 		"host-b virsh dumpxml " + uuid,
-		"local qemu-img info -U --output=json " + scdDiskPath,
+		"local sh -c " + backingKindScript + " sh " + scdDiskPath,
+		"local sh -c " + chainMemberScript + " sh " + scdDiskPath + " /var/lib/libvirt/images",
+		"local sudo -n qemu-img info -U -f qcow2 --output=json -- " + scdDiskPath,
 		"host-b virsh snapshot-list " + uuid + " --name",
-	}, fx.calls(), "the disk is read from the checked domain's definition; nothing is looked up by volume name")
+	}, fx.calls(), "the disk is read from the checked domain's definition (as root when sudo allows it: a snapshot "+
+		"overlay is 0600); nothing is looked up by volume name")
 	assert.Zero(t, fx.p.virshProvider.unroutableHits.Load())
 }
 
@@ -131,7 +134,10 @@ func TestClustered_ExportDisk_NFSRoutedOnTheOwnedDisk(t *testing.T) {
 	calls := fx.calls()
 	assert.Equal(t, []string{"host-b virsh list --all", "host-b virsh dumpxml web", "host-b virsh dumpxml " + routingDomainUUID}, calls[:3],
 		"owner check, then the disk resolved from the checked domain")
-	assert.Contains(t, calls, "local qemu-img convert -U -f qcow2 -O qcow2 "+scdDiskPath+" nfs://nas/exports/web.qcow2")
+	// The export reads the source as root (privileged_copy.go) and reaches
+	// the NFS server as the SSH user's uid and gid, as it always has.
+	assert.Contains(t, calls, "local qemu-img convert -U -f qcow2 -O qcow2 "+scdDiskPath+
+		" nfs://nas/exports/web.qcow2?uid="+scdSSHUID+"&gid="+scdSSHGID)
 	assert.Zero(t, fx.p.virshProvider.unroutableHits.Load())
 }
 
@@ -154,19 +160,23 @@ func TestClustered_ExportDisk_S3FlattensTheOwnedDiskOnItsHost(t *testing.T) {
 	assert.Equal(t, contracts.VMOperationFailedReason, errorInfoReason(st), "got %v", err)
 	assert.NotContains(t, st.Message(), "secretAccessKey")
 	calls := fx.calls()
-	assert.Contains(t, calls, "local mktemp --suffix=.qcow2 "+s3ExportTemplate,
-		"the flattened copy is made by mktemp (exclusive, mode 0600), in the source disk's directory")
+	assert.Contains(t, calls, "local mktemp -d "+s3ExportStageTemplate,
+		"the flattened copy is made in a private directory (mktemp -d: mode 0700) in the source disk's directory")
+	assert.Contains(t, calls, "local sh -c "+createCopyOutputScript+" sh "+exportStageUmask+" "+s3ExportTemp,
+		"the SSH user creates the private (0600) staging file root writes into")
 	assert.Contains(t, calls, "local qemu-img convert -U -f qcow2 -O qcow2 "+scdDiskPath+" "+s3ExportTemp,
 		"the owned domain's disk is flattened on its host")
-	assert.Contains(t, calls, "local rm -f -- "+s3ExportTemp, "the flattened temp is removed")
+	assert.Contains(t, calls, "local rm -rf -- "+s3ExportStageDir, "the flattened temp is removed with its directory")
 }
 
-// s3ExportTemplate and s3ExportTemp are the mktemp template and the temp a
-// clustered s3 export of "web" flattens into (the routed mktemp fake only
-// prints the path: nothing is created in /var/lib/libvirt/images).
+// s3ExportStageTemplate, s3ExportStageDir and s3ExportTemp are the mktemp -d
+// template, the private directory and the temp in it a clustered s3 export of
+// "web" flattens into (the routed mktemp fake only prints the path: nothing is
+// created in /var/lib/libvirt/images).
 const (
-	s3ExportTemplate = "/var/lib/libvirt/images/.virtrigaud-export-web." + mktempTemplateSuffix
-	s3ExportTemp     = "/var/lib/libvirt/images/.virtrigaud-export-web.0000000000.qcow2"
+	s3ExportStageTemplate = "/var/lib/libvirt/images/" + vmDiskWriteDirPrefix + mktempTemplateSuffix
+	s3ExportStageDir      = "/var/lib/libvirt/images/" + vmDiskWriteDirPrefix + "0000000000"
+	s3ExportTemp          = s3ExportStageDir + "/.virtrigaud-export-web.qcow2"
 )
 
 func TestClustered_ExportDisk_ForeignDomainIsNotFoundAndNeverRead(t *testing.T) {

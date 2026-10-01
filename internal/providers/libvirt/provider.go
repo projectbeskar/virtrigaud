@@ -347,6 +347,10 @@ func New() (*Provider, error) {
 	// VIRTRIGAUD_LIBVIRT_NATIVE opts a family in; when off this is pure virsh.
 	p.initShadow(slog.Default())
 
+	// Name, at startup, a VM storage directory where clones and exports are
+	// refused because other accounts can write it.
+	p.warnUnsafeVMStorageDirs(ctx)
+
 	log.Printf("INFO Successfully initialized virsh provider")
 	return p, nil
 }
@@ -485,6 +489,7 @@ func NewProvider(ctx context.Context, k8sClient client.Client, provider *v1beta1
 
 	// Wire the ADR-0008 PR 4b shadow-compare reads (D4/D6), consistent with New().
 	p.initShadow(slog.Default())
+	p.warnUnsafeVMStorageDirs(ctx)
 
 	log.Printf("INFO Successfully created virsh-based provider via K8s API")
 	return p, nil

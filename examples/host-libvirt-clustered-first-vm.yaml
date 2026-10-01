@@ -1,0 +1,46 @@
+# A single Host of a clustered (topology: cluster) libvirt Provider, labelled
+# for the libvirt network its first VM uses (ADR-0007 D6).
+#
+# The scheduler places a clustered VM only on a Host whose spec.labels carry
+#   net.virtrigaud.io/<network>: "true"
+# for EVERY libvirt network the VM uses, where <network> is the network's name
+# in the VM's VMNetworkAttachment (spec.network.libvirt.networkName, or the
+# bridge name when no network name is set). Without it the VM stays
+# Placed=False / Unschedulable with "host does not have a required network",
+# even on an empty host. These are Host.spec.labels (placement facts), not
+# Kubernetes metadata labels: `kubectl label` does not set them.
+#
+# This pairs one Host with the VMNetworkAttachment of libvirt's "default"
+# network. See docs/clustered-provider-inventory.md ("First VM checklist") and
+# examples/hostpool-clustered.yaml (the HostPool and a two-host inventory).
+# Placeholder endpoint: no real hostnames or secrets in examples.
+---
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: Host
+metadata:
+  name: host-a
+  namespace: virtrigaud-system
+spec:
+  providerRef:
+    name: libvirt-cluster
+  poolRef:
+    name: pool-a
+  endpoint: qemu+ssh://virtrigaud@host-a.example.com/system
+  labels:
+    # Required: the VM below attaches to libvirt's "default" network.
+    net.virtrigaud.io/default: "true"
+  schedulable: true
+---
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: VMNetworkAttachment
+metadata:
+  name: libvirt-default
+  namespace: default
+spec:
+  network:
+    libvirt:
+      # The name the Host label above carries: net.virtrigaud.io/default.
+      networkName: "default"
+      model: virtio
+  ipAllocation:
+    type: DHCP

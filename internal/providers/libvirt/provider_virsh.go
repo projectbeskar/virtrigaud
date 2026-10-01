@@ -899,8 +899,11 @@ func (p *Provider) planDomainDeletion(ctx context.Context, vp *VirshProvider, id
 	plan := domainDeletionPlan{uuid: doc.UUID, name: doc.Name, seedDir: doc.cloudInitSeedDir(p.stagingDir())}
 
 	var deletable []string
+	// origin maps each deletable (canonical) disk to the path its definition
+	// names it by: its format is looked up there (ownChainFiles).
+	var origin map[string]string
 	if disks := doc.diskFiles(); len(disks) > 0 {
-		if deletable, plan.aliases, err = p.deletableDiskFilesWithAliases(ctx, vp, doc.Name, disks); err != nil {
+		if deletable, plan.aliases, origin, err = p.deletableDiskFilesWithAliases(ctx, vp, doc.Name, disks); err != nil {
 			return domainDeletionPlan{}, guardCheckFailed(guardOpDelete, doc.Name, err)
 		}
 	}
@@ -927,12 +930,18 @@ func (p *Provider) planDomainDeletion(ctx context.Context, vp *VirshProvider, id
 		plan.seedDir = ""
 	}
 	plan.disks = deletable
-	plan.disks = append(plan.disks, p.ownChainFiles(ctx, vp, doc.Name, deletable, others)...)
+	formats := map[string]string{}
+	for c, disk := range origin {
+		formats[c] = doc.diskFormat(disk)
+	}
+	plan.disks = append(plan.disks, p.ownChainFiles(ctx, vp, doc.Name, deletable, formats, others)...)
 	return plan, nil
 }
 
 // ownChainFiles returns the canonical paths of the files BELOW disks in their
-// backing chains (walkBackingChain) that are the domain's own and may go with
+// backing chains (walkBackingChainFrom, each disk opened in the format its
+// definition names, formats; a raw disk has no chain, and a disk without a
+// known format is not walked) that are the domain's own and may go with
 // it (ownChainMembers: the overlays its external snapshots added, down to the
 // disk it was created with), cleared by deletableDiskFiles (a regular file
 // directly inside the storage directories), that no other domain references.
@@ -940,14 +949,20 @@ func (p *Provider) planDomainDeletion(ctx context.Context, vp *VirshProvider, id
 // made from — is never removed, and neither is one another domain still uses
 // (e.g. a linked clone backed by the domain's pre-snapshot disk). A chain that
 // cannot be read is left in place and logged; it never fails the delete.
-func (p *Provider) ownChainFiles(ctx context.Context, vp *VirshProvider, domain string, disks []string, others otherDomains) []string {
+func (p *Provider) ownChainFiles(ctx context.Context, vp *VirshProvider, domain string, disks []string,
+	formats map[string]string, others otherDomains) []string {
 	top := map[string]bool{}
 	for _, d := range disks {
 		top[d] = true
 	}
 	var members []string
 	for _, d := range disks {
-		levels, err := walkBackingChain(ctx, vp, d)
+		format := formats[d]
+		if format == "" {
+			log.Printf("WARN Keeping the backing chain of disk %s of domain %s: its format is not known from the definition", d, domain)
+			continue
+		}
+		levels, err := walkBackingChainFrom(ctx, vp, d, format)
 		if err != nil {
 			log.Printf("WARN Keeping the backing chain of disk %s of domain %s: it could not be read: %v", d, domain, err)
 			continue
@@ -1066,21 +1081,24 @@ func ownChainMembers(domain string, levels []backingLevel) []string {
 // outside the VM storage directories, whatever a domain definition points at,
 // and never the target of a symlink.
 func (p *Provider) deletableDiskFiles(ctx context.Context, vp *VirshProvider, domain string, disks []string) ([]string, error) {
-	out, _, err := p.deletableDiskFilesWithAliases(ctx, vp, domain, disks)
+	out, _, _, err := p.deletableDiskFilesWithAliases(ctx, vp, domain, disks)
 	return out, err
 }
 
 // deletableDiskFilesWithAliases is deletableDiskFiles that also returns the
 // paths of disks that name a returned file other than by its canonical path
 // (the definition's own names for it, e.g. through a symlinked pool
-// directory), for the cluster-wide disk guard. It runs exactly the commands
-// deletableDiskFiles runs.
-func (p *Provider) deletableDiskFilesWithAliases(ctx context.Context, vp *VirshProvider, domain string, disks []string) (out, aliases []string, err error) {
+// directory), for the cluster-wide disk guard, and each returned file's
+// origin: the first path the definition names it by. It runs exactly the
+// commands deletableDiskFiles runs.
+func (p *Provider) deletableDiskFilesWithAliases(ctx context.Context, vp *VirshProvider, domain string,
+	disks []string) (out, aliases []string, origin map[string]string, err error) {
 	dirs := p.deletionDirs(ctx, vp)
 	canon, err := canonicalizeOnHost(ctx, vp, append(append([]string(nil), disks...), dirs...))
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
+	origin = map[string]string{}
 	allowed := map[string]bool{}
 	for _, d := range canon[len(disks):] {
 		if !isForbiddenImageDir(d) {
@@ -1109,12 +1127,13 @@ func (p *Provider) deletableDiskFilesWithAliases(ctx context.Context, vp *VirshP
 		// link would strand the target), so neither is touched.
 		kind, err := hostDiskKind(ctx, vp, disk)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 		switch kind {
 		case diskKindFile:
 			seen[c] = true
 			out = append(out, c)
+			origin[c] = disk
 			alias(disk, c)
 		case diskKindSymlink:
 			log.Printf("WARN Not deleting disk %s of domain %s: it is a symbolic link; neither it nor its target is removed", disk, domain)
@@ -1124,7 +1143,7 @@ func (p *Provider) deletableDiskFilesWithAliases(ctx context.Context, vp *VirshP
 			log.Printf("WARN Not deleting disk %s of domain %s: it is not a regular file; it is left in place", disk, domain)
 		}
 	}
-	return out, aliases, nil
+	return out, aliases, origin, nil
 }
 
 // What hostDiskKind reports about a path (diskKindScript).
@@ -1167,15 +1186,21 @@ func hostDiskKind(ctx context.Context, vp *VirshProvider, path string) (string, 
 // a running linked clone, holds its source VM's disk — cdrom/floppy media and
 // cloud-init seeds are never included.
 func domainDiskPaths(ctx context.Context, vp *VirshProvider, domainName string) ([]string, error) {
-	result, err := vp.runVirshCommand(ctx, "dumpxml", domainName)
-	if err != nil {
-		return nil, fmt.Errorf("failed to dump domain XML: %w", err)
-	}
-	doc, err := parseDomainDisks(result.Stdout)
+	doc, err := domainDisksOf(ctx, vp, domainName)
 	if err != nil {
 		return nil, err
 	}
 	return doc.diskFiles(), nil
+}
+
+// domainDisksOf reads the definition of domainName (a name or UUID) on vp's
+// host (`virsh dumpxml`) for its disks.
+func domainDisksOf(ctx context.Context, vp *VirshProvider, domainName string) (*domainDisksDoc, error) {
+	result, err := vp.runVirshCommand(ctx, "dumpxml", domainName)
+	if err != nil {
+		return nil, fmt.Errorf("failed to dump domain XML: %w", err)
+	}
+	return parseDomainDisks(result.Stdout)
 }
 
 // deleteDiskFile deletes a disk file from vp's libvirt host. diskPath is a
@@ -2692,37 +2717,38 @@ func diskInfoOn(ctx context.Context, vp *VirshProvider, d domainTarget, req cont
 	// guess — that guess only holds for VirtRigaud-created volumes and fails for
 	// adopted/externally-created VMs (Bug G; same class as the clone #207 fix).
 	// resolvePrimaryDisk also skips cloud-init/CDROM devices.
-	diskPaths, format, err := resolveDomainDisksOn(ctx, vp, d, storageProvider)
+	doc, diskPaths, _, err := resolveDomainDisksDocOn(ctx, vp, d, storageProvider)
 	if err != nil {
 		return contracts.GetDiskInfoResponse{}, fmt.Errorf("failed to resolve primary disk: %w", err)
 	}
 	diskPath := diskPaths[0]
 	// An explicit disk path (DiskId carrying a path) overrides the primary.
 	if req.DiskId != "" && strings.Contains(req.DiskId, "/") {
-		// On a clustered host the path must be a disk of the owner-checked
-		// domain: any other file on the host is never read (or exported).
-		if d.diskByPath && !slices.Contains(diskPaths, req.DiskId) {
+		// The path must be a disk of the domain — single-host and clustered
+		// alike: any other file on the host is never read, nor exported (the
+		// pvc export copies the path GetDiskInfo resolves).
+		if !slices.Contains(diskPaths, req.DiskId) {
 			return contracts.GetDiskInfoResponse{}, contracts.NewInvalidSpecError(
 				fmt.Sprintf("disk %q is not a disk of VM %q", req.DiskId, d.name), nil)
 		}
 		diskPath = req.DiskId
 	}
 
-	// Read virtual + actual size (and confirm format) from the disk file itself
+	// Read virtual + actual size from the disk file itself
 	// via qemu-img — read-only with -U so a still-running source's write lock is
-	// ignored. Best-effort: sizes default to 0 (status-only) if it fails.
+	// ignored — through passwordless sudo when it is one of the domain's own
+	// disks (readDiskInfoOnHost): a snapshotted VM's active disk is libvirt's
+	// 0600 overlay. Best-effort: sizes default to 0 (status-only) if it fails.
+	// The disk is read in the format its definition names (never probed).
+	format := doc.diskFormat(diskPath)
 	var virtualSize, actualSize int64
-	if res, qerr := vp.runVirshCommand(ctx, "!", "qemu-img", "info", "-U", "--output=json", diskPath); qerr == nil {
+	if res, qerr := readDiskInfoOnHost(ctx, vp, diskPath, format); qerr == nil {
 		var qi struct {
-			VirtualSize int64  `json:"virtual-size"`
-			ActualSize  int64  `json:"actual-size"`
-			Format      string `json:"format"`
+			VirtualSize int64 `json:"virtual-size"`
+			ActualSize  int64 `json:"actual-size"`
 		}
 		if jerr := json.Unmarshal([]byte(res.Stdout), &qi); jerr == nil {
 			virtualSize, actualSize = qi.VirtualSize, qi.ActualSize
-			if qi.Format != "" {
-				format = qi.Format
-			}
 		} else {
 			log.Printf("WARN Failed to parse qemu-img info for %s: %v", diskPath, jerr)
 		}
