@@ -327,6 +327,9 @@ disk export — therefore run `qemu-img convert` through passwordless
   - A copy (clone or export) of a disk in any other format (`vmdk`, `qed`,
     `luks`, ...) is refused before anything reads it.
   - An export of an explicit disk path must name one of the VM's own disks.
+    So must `GetDiskInfo` (and the pvc export, which copies the disk it
+    resolves), on a single-host Provider too: a path that is not one of the
+    VM's disks is refused (`InvalidArgument`) before anything reads it.
 - **Before a copy opens any image of the source chain** (the disk, then each
   backing file, one image at a time), that image must pass all of these
   checks. Any other image is not read at all:

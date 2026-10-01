@@ -2724,9 +2724,10 @@ func diskInfoOn(ctx context.Context, vp *VirshProvider, d domainTarget, req cont
 	diskPath := diskPaths[0]
 	// An explicit disk path (DiskId carrying a path) overrides the primary.
 	if req.DiskId != "" && strings.Contains(req.DiskId, "/") {
-		// On a clustered host the path must be a disk of the owner-checked
-		// domain: any other file on the host is never read (or exported).
-		if d.diskByPath && !slices.Contains(diskPaths, req.DiskId) {
+		// The path must be a disk of the domain — single-host and clustered
+		// alike: any other file on the host is never read, nor exported (the
+		// pvc export copies the path GetDiskInfo resolves).
+		if !slices.Contains(diskPaths, req.DiskId) {
 			return contracts.GetDiskInfoResponse{}, contracts.NewInvalidSpecError(
 				fmt.Sprintf("disk %q is not a disk of VM %q", req.DiskId, d.name), nil)
 		}
@@ -2738,26 +2739,17 @@ func diskInfoOn(ctx context.Context, vp *VirshProvider, d domainTarget, req cont
 	// ignored — through passwordless sudo when it is one of the domain's own
 	// disks (readDiskInfoOnHost): a snapshotted VM's active disk is libvirt's
 	// 0600 overlay. Best-effort: sizes default to 0 (status-only) if it fails.
-	// A disk of the domain's own is read in the format its definition names
-	// (never probed); a path the caller names that is not one (single host)
-	// is read as the SSH user, as before.
-	ownFormat := ""
-	if slices.Contains(diskPaths, diskPath) {
-		ownFormat = doc.diskFormat(diskPath)
-		format = ownFormat
-	}
+	// The disk is read in the format its definition names (never probed).
+	ownFormat := doc.diskFormat(diskPath)
+	format = ownFormat
 	var virtualSize, actualSize int64
 	if res, qerr := readDiskInfoOnHost(ctx, vp, diskPath, ownFormat); qerr == nil {
 		var qi struct {
-			VirtualSize int64  `json:"virtual-size"`
-			ActualSize  int64  `json:"actual-size"`
-			Format      string `json:"format"`
+			VirtualSize int64 `json:"virtual-size"`
+			ActualSize  int64 `json:"actual-size"`
 		}
 		if jerr := json.Unmarshal([]byte(res.Stdout), &qi); jerr == nil {
 			virtualSize, actualSize = qi.VirtualSize, qi.ActualSize
-			if qi.Format != "" && ownFormat == "" {
-				format = qi.Format
-			}
 		} else {
 			log.Printf("WARN Failed to parse qemu-img info for %s: %v", diskPath, jerr)
 		}

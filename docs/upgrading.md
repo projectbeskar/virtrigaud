@@ -294,7 +294,9 @@ See [`docs/clustered-provider-inventory.md`](clustered-provider-inventory.md) an
   in-use check and Delete. An export or full clone of a disk defined in
   another format (`vmdk`, ...) is refused (`FailedPrecondition`), and so is
   one whose chain names a backing file without its format. `GetDiskInfo`
-  reports the definition's format.
+  reports the definition's format, and refuses an explicit disk path that is
+  not one of the VM's own disks on a single-host Provider too (as a clustered
+  one already did), instead of reading that file as the SSH user.
 - **An nfs VMMigration with `nfs.uid: 0` or `nfs.gid: 0` fails at
   Validating**, whatever its providers (`NFSRootIdentityNotAllowed`; see the
   breaking-change table). A libvirt nfs export runs as root only with the SSH

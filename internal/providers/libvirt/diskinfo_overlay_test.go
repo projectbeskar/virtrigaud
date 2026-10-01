@@ -18,7 +18,6 @@ package libvirt
 
 import (
 	"context"
-	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -68,16 +67,28 @@ func TestSingleHost_GetDiskInfo_SudoRefusedReadsAsBefore(t *testing.T) {
 	assert.Contains(t, fx.calls(), "local qemu-img info -U -f qcow2 --output=json -- "+scdOverlayPath, "the historical read as the SSH user")
 }
 
-func TestSingleHost_GetDiskInfo_CallerPathIsNeverReadAsRoot(t *testing.T) {
+// TestSingleHost_GetDiskInfo_CallerPathMustBeTheDomainsDisk: on a single
+// host too (parity with the clustered owner-checked path), an explicit disk
+// path that is not one of the domain's disks is refused before anything reads
+// it — not as root, and not as the SSH user either (no format probe of a file
+// the caller names) — and the domain's own disk by path is read as before.
+func TestSingleHost_GetDiskInfo_CallerPathMustBeTheDomainsDisk(t *testing.T) {
 	fx := newSCDFixture(t, map[string]string{scdDomain: scdDomainXML(scdDomain, scdDomainOpts{})})
-	const other = "/var/lib/libvirt/images/other.qcow2"
-	_, err := NewServer(fx.p).GetDiskInfo(context.Background(), &providerv1.GetDiskInfoRequest{VmId: scdDomain, DiskId: other})
-	require.NoError(t, err)
-	calls := fx.calls()
-	assert.Contains(t, calls, "local qemu-img info -U --output=json "+other)
-	for _, c := range calls {
-		assert.False(t, strings.HasPrefix(c, "local sudo"), "a path that is not the domain's disk is read as the SSH user only: %q", c)
+	s := NewServer(fx.p)
+	for _, other := range []string{"/var/lib/libvirt/images/other.qcow2", "/etc/shadow"} {
+		_, err := s.GetDiskInfo(context.Background(), &providerv1.GetDiskInfoRequest{VmId: scdDomain, DiskId: other})
+		require.Error(t, err, other)
+		assert.Contains(t, err.Error(), "is not a disk of VM")
 	}
+	for _, c := range fx.calls() {
+		assert.NotContains(t, c, "qemu-img", "no file the caller names is read, by anyone: %q", c)
+	}
+
+	resp, err := s.GetDiskInfo(context.Background(), &providerv1.GetDiskInfoRequest{VmId: scdDomain, DiskId: scdDiskPath})
+	require.NoError(t, err)
+	assert.Equal(t, scdDiskPath, resp.Path)
+	assert.Equal(t, "qcow2", resp.Format)
+	assert.Contains(t, fx.calls(), "local sudo -n qemu-img info -U -f qcow2 --output=json -- "+scdDiskPath)
 }
 
 func TestClustered_GetDiskInfo_SnapshotOverlaySizesAreReadAsRoot(t *testing.T) {

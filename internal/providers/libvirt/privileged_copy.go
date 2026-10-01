@@ -208,23 +208,23 @@ func (c diskCopy) run(ctx context.Context, h hostCommandRunner, guard *hostCmdGu
 	return c.runAsSSHUser(ctx, h, guard)
 }
 
-// readDiskInfoOnHost runs `qemu-img info -U ... <path>` on the host behind h
-// for GetDiskInfo (ADR-0007 Slice 5 lab follow-up). A disk named by the
-// domain's own definition (ownFormat: its definition format, "" for any other
-// path) is read in that format (-f; never probed, so a guest's raw disk is
-// never read as a qcow2 header it wrote) and, for qcow2 and raw, the way the
-// disk in-use check reads it: once it is confirmed not to be a device, FIFO or
-// other non-regular file (checkChainFileKind), through passwordless sudo,
-// falling back to the SSH user when sudo refuses (qemuImgInfoOnHost; the
-// documented `qemu-img info` rule). So the sizes of a snapshotted VM's 0600
-// libvirt-qemu overlay are read during an export instead of reported as 0.
-// qemu-img info opens no backing file. A disk of another format is read as
-// the SSH user, its format still pinned. Any other path — an explicit disk
-// path a single-host caller passed — is read as the SSH user, as before: root
-// never opens a caller-supplied path.
+// readDiskInfoOnHost runs `qemu-img info -U -f <format> ... <path>` on the
+// host behind h for GetDiskInfo (ADR-0007 Slice 5 lab follow-up). path is one
+// of the domain's own disks (diskInfoOn refuses any other path, single-host
+// and clustered alike) and ownFormat the format its definition opens it in:
+// it is read in that format (-f; never probed, so a guest's raw disk is never
+// read as a qcow2 header it wrote) and, for qcow2 and raw, the way the disk
+// in-use check reads it: once it is confirmed not to be a device, FIFO or
+// other non-regular file and not one another account could swap
+// (rootReadableDiskReason), through passwordless sudo, falling back to the
+// SSH user when sudo refuses (qemuImgInfoOnHost; the documented
+// `qemu-img info` rule). So the sizes of a snapshotted VM's 0600 libvirt-qemu
+// overlay are read during an export instead of reported as 0. qemu-img info
+// opens no backing file. A disk of another format is read as the SSH user,
+// its format still pinned. Without a format nothing is read, by anyone.
 func readDiskInfoOnHost(ctx context.Context, h hostCommandRunner, path, ownFormat string) (*VirshResult, error) {
 	if ownFormat == "" {
-		return runHost(ctx, h, "qemu-img", "info", "-U", "--output=json", path)
+		return nil, fmt.Errorf("%s is not a disk of the domain's definition: not read", path)
 	}
 	args := []string{"-U", "-f", ownFormat, "--output=json", "--", path}
 	if privilegedSourceFormats[ownFormat] {
