@@ -106,7 +106,9 @@ a mismatch:
   `virtrigaud.io/force-delete: "true"`. Neither calls a provider. A `Provider`
   that is simply **gone** — the VM still references the `Provider` it is bound
   through, but that object no longer exists — releases the finalizer as before,
-  because there is nothing to delete through.
+  because there is nothing to delete through. A `Provider` that exists but
+  cannot be reached holds the deletion instead (`ProviderUnavailable`, see
+  [below](#deleting-a-vm-while-its-provider-cannot-be-reached)).
 
 ### A re-created `Provider`
 
@@ -246,15 +248,44 @@ This replaces the previous workaround — pointing `spec.providerRef` at a
 CRD rule now rejects for a bound VM.
 
 `virtrigaud.io/force-delete: "true"` is unchanged. It releases the finalizer
-when the provider `Delete` keeps failing, or when no delete can be routed (an
+when the provider `Delete` keeps failing, when no delete can be routed (an
 unbound clustered VM, a placement/topology mismatch, a `ProviderRefMismatch`,
 a cross-namespace `Provider` the VM's namespace may not use
-(`ConsumerNotAllowed`)).
+(`ConsumerNotAllowed`)), or when the manager cannot reach the `Provider`
+(`ProviderUnavailable`, below).
 It is an escape hatch; to detach a VM on purpose, use `orphan-on-delete`.
 On a clustered `Provider`, a force-delete that releases a VM whose `Delete`
 failed can leave its domain running on the host outside the committed-capacity
 accounting; check the host (and cordon it or lower its overcommit ratio) until
 the leftover domain is removed. A tenant cannot trigger this on purpose.
+
+### Deleting a VM while its `Provider` cannot be reached
+
+When the `Provider` exists but the manager has no usable client for it — its
+provider runtime is not `Running` or has no endpoint (during every provider
+rollout or restart), the provider pod is down, or the TLS setup, connection or
+`Validate` call fails — no `Delete` can be sent, and the hypervisor VM may still
+exist. The deletion is **held** instead of releasing the finalizer (earlier
+releases released it, leaving the hypervisor VM running unmanaged):
+
+- A single-host VM shows `Ready=False` with reason **`ProviderUnavailable`**. A
+  clustered VM shows `DeleteBlocked=True/ProviderUnavailable` and
+  `Ready=False/DeleteBlocked`, like its other held deletes
+  ([`clustered-provider-inventory.md`](clustered-provider-inventory.md#shared-storage-the-cluster-wide-disk-guard-a61)).
+  The message is constant and names no endpoint or host; one `Warning` event
+  `DeleteBlocked` is recorded when the hold begins.
+- The delete is retried with a backoff — 15 seconds, doubling up to 5 minutes,
+  counted from the deletion request (single-host) or from when `DeleteBlocked`
+  became `True` (clustered) — and completes on the first retry after the
+  `Provider` answers again.
+- The cause is in the manager log (`Cannot reach the provider to delete the
+  VM`), and each retry counts under
+  `virtrigaud_errors_total{reason="provider-resolve"}`.
+- `orphan-on-delete` (no `Provider` is resolved) and `force-delete` release it
+  at once; the hypervisor VM is then left for manual removal.
+
+A `Provider` that no longer exists in the VM's own namespace is different:
+there is nothing to delete through, and the finalizer is released as before.
 
 ## Upgrade notes
 
