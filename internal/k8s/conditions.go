@@ -231,12 +231,13 @@ const (
 
 // ConditionDeleteBlocked is True while the deletion of a clustered
 // VirtualMachine is held because the provider could not delete it safely yet
-// (ADR-0007 A6.1). Its reason says why (ReasonHostUnreachable,
-// ReasonDiskCheckFailed, ReasonOwnDomainOnAnotherHost, ReasonDiskInUse); it
-// is removed when a later delete attempt fails for another reason. Ready is False with
-// ReasonDeleteBlocked meanwhile. Its LastTransitionTime is when the hold
-// began, which paces the retries (15 s doubling to 5 min). Its message never
-// names a host.
+// (ADR-0007 A6.1), or because the manager could not reach its Provider at all.
+// Its reason says why (ReasonHostUnreachable, ReasonDiskCheckFailed,
+// ReasonOwnDomainOnAnotherHost, ReasonDiskInUse, ReasonProviderUnavailable);
+// it is removed when a later delete attempt fails for another reason (Ready
+// then says ReasonProviderError). Ready is False with ReasonDeleteBlocked
+// meanwhile. Its LastTransitionTime is when the hold began, which paces the
+// retries (15 s doubling to 5 min). Its message never names a host.
 const ConditionDeleteBlocked = "DeleteBlocked"
 
 // DeleteBlocked condition reasons (ADR-0007 A6.1).
@@ -260,6 +261,15 @@ const (
 	// on the VM's own host (e.g. a linked clone of it) or on another host of
 	// the Provider — uses its disk (VM_DISK_IN_USE). Nothing was deleted.
 	ReasonDiskInUse = "DiskInUse"
+	// ReasonProviderUnavailable: the VM's Provider exists, but the manager has
+	// no usable client for it — its provider runtime is not Running or has no
+	// endpoint, or the TLS configuration, gRPC client or validation call
+	// failed (as during every provider rollout or restart). No Delete was
+	// sent, so the hypervisor VM may still exist, and the finalizer is kept
+	// until the Provider answers. It is the DeleteBlocked reason of a clustered
+	// VM and the Ready reason of a single-host VM held for it (a single-host VM
+	// never carries DeleteBlocked).
+	ReasonProviderUnavailable = "ProviderUnavailable"
 )
 
 // ReasonPlacementTopologyMismatch indicates that a VirtualMachine records a

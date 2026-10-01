@@ -1773,6 +1773,17 @@ needs the Provider's permission, see above) or `virtrigaud.io/force-delete`
 (the same, after the failed delete) — both are acted on at once, whatever the
 backoff; or remove the dead host from the Provider (below).
 
+The same hold, with reason `ProviderUnavailable`, applies when the manager
+cannot reach the Provider itself — its runtime is not `Running` (the provider
+runs one replica with the `Recreate` strategy, so every rollout or restart is
+such a window), its pod is down, or the connection to it fails: no `Delete` is
+sent, the finalizer stays (`DeleteBlocked=True/ProviderUnavailable`,
+`Ready=False/DeleteBlocked`), and the delete is retried with the same backoff
+until the Provider answers. Before, such a delete released the finalizer and
+left the domain running — later holding a same-named VM as a previous
+incarnation. See
+[`vm-provider-binding.md`](vm-provider-binding.md#deleting-a-vm-while-its-provider-cannot-be-reached).
+
 **Fencing a host before you remove it.** Deleting the `Host` of a dead host
 (possible only when no VM is bound or pending on it) removes it from the
 Provider, and from then on the guard no longer looks at it. **Fence the host

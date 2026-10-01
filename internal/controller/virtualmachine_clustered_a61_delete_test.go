@@ -185,6 +185,10 @@ func TestHandleDeletion_Clustered_DeleteBlockedFollowsTheLatestRefusal(t *testin
 	assert.Equal(t, vmDeleteRetryInterval, res.RequeueAfter)
 	assert.Nil(t, blockedOf(), "an ordinary failure removes a DeleteBlocked that no longer applies")
 	assert.Contains(t, getVM(t, r, "web").Finalizers, infrav1beta1.VirtualMachineFinalizer)
+	ready := meta.FindStatusCondition(getVM(t, r, "web").Status.Conditions, k8s.ConditionReady)
+	require.NotNil(t, ready)
+	assert.Equal(t, k8s.ReasonProviderError, ready.Reason, "nor does Ready keep the DiskInUse hold's DeleteBlocked")
+	assert.Equal(t, providerDeleteFailedMessage, ready.Message)
 }
 
 // TestHandleDeletion_SingleHost_DiskCheckFailedUnchanged: a single-host VM's

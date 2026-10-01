@@ -209,6 +209,23 @@ providers), and rollback caveats in
 
 ### Fixes
 
+- **Deleting a VirtualMachine while its Provider cannot be reached no longer
+  orphans the hypervisor VM.** When the manager had no client for the
+  Provider — its runtime not `Running` (every provider rollout or restart),
+  the provider pod down, a TLS or network misconfiguration — the finalizer was
+  released without any provider `Delete`, leaving the VM running unmanaged.
+  The delete now waits: `Ready=False/ProviderUnavailable` on a single-host VM,
+  `DeleteBlocked=True/ProviderUnavailable` on a clustered one, retried with a
+  backoff from 15 s doubling to 5 min until the Provider answers;
+  `orphan-on-delete` and `force-delete` still release it at once. A Provider
+  that no longer exists in the VM's own namespace still releases it as before.
+  When a held delete's Provider answers but the `Delete` then fails for
+  another reason, `Ready` becomes `False/ProviderError` instead of keeping the
+  old hold (a clustered VM kept `Ready=False/DeleteBlocked` after any hold).
+  Every `force-delete` that releases a VM without a confirmed provider delete
+  now records a `Warning` event **`VMLeftOnHypervisor`** naming the VM and its
+  provider id (never a host), so leftovers can be found
+  (→ [`docs/vm-provider-binding.md`](docs/vm-provider-binding.md#deleting-a-vm-while-its-provider-cannot-be-reached)).
 - libvirt `Reconfigure` is honest: a failed `setvcpus`, `setmem`, `setmaxmem`
   or offline disk resize is an error (it used to return success), a live change
   is also written to the domain's persistent definition (it used to be undone

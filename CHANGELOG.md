@@ -5,6 +5,54 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-10-01 10:30] - Fix VirtualMachine delete orphaning the hypervisor VM while its Provider cannot be reached
+**Author:** @wrkode (William Rizzo)
+
+> **Operator note.** Deleting a VirtualMachine while its Provider is down, rolling out or unreachable now **waits** (finalizer kept) instead of removing the VirtualMachine and leaving the hypervisor VM running. Release one anyway with `virtrigaud.io/orphan-on-delete: "true"` or `virtrigaud.io/force-delete: "true"`. Every force-delete that leaves a hypervisor VM behind now records a `Warning` event `VMLeftOnHypervisor` — use it to find leftovers.
+
+### Added
+- `internal/controller/virtualmachine_controller.go`: `releaseLeavingHypervisorVM`. Every force-delete release in `handleDeletion` that removes the finalizer without a successful provider `Delete` now records one `Warning` event `VMLeftOnHypervisor` (in the style of VMSnapshot's `SnapshotLeftOnHypervisor`). That covers the new `ProviderUnavailable` path, a failed `Delete` (any held reason), no routable delete (`ProviderRefMismatch`, `ConsumerNotAllowed`, unbound / topology mismatch) and own domain on another host.
+  - The event names the VM, its provider id, its Provider and a constant cause. It never carries resolver, endpoint, host or provider text (ADR-0007 A6, threat 5); the host is logged.
+  - `deletionTarget` (`virtualmachine_clustered.go`) now returns the routing error, and the caller decides between retaining and releasing.
+
+### Fixed
+- `internal/controller/virtualmachine_controller.go`: `handleDeletion` no longer releases the finalizer when `getProviderInstance` fails (runtime not `Running` or no endpoint, TLS / gRPC client / `Validate` failure). It used to log, count `provider-resolve` and remove the finalizer with no provider `Delete`.
+  - New `retainForUnavailableProvider`: keeps the finalizer, retries with the blocked-VM backoff (15 s doubling to 5 min).
+  - Single-host VM: `Ready=False/ProviderUnavailable`, backoff from its `deletionTimestamp`. Clustered VM: `DeleteBlocked=True/ProviderUnavailable` and `Ready=False/DeleteBlocked`, backoff from the hold's start.
+  - Constant message (no error text, endpoint or host), one `Warning` event `DeleteBlocked` per transition, no status write on a repeated hold. The cause goes to the log, as the same line on both paths (`Cannot reach the provider to delete the VM; retaining the finalizer`, with a clustered VM's host).
+  - `force-delete` still releases the finalizer without a provider call (logged as possibly orphaning). `orphan-on-delete` still short-circuits before any Provider is resolved. A Provider NotFound in the VM's own namespace still releases, and the consumer-grant refusal still retains, both unchanged.
+  - New `clearStaleDeleteHold`: once the Provider answers but `Delete` fails for an ordinary reason, any earlier hold's `Ready` — `False/ProviderUnavailable`, or `False/DeleteBlocked` on a clustered VM after any hold (`ProviderUnavailable`, `HostUnreachable`, `DiskCheckFailed`, `DiskInUse`, `OwnDomainOnAnotherHost`) or a single-host `DiskInUse` refusal — becomes `Ready=False/ProviderError` with the constant `providerDeleteFailedMessage`, and a stale `DeleteBlocked` is removed as before. Before, a clustered VM kept `Ready=False/DeleteBlocked` with the old hold's message. A repeated failure writes nothing.
+- `internal/controller/virtualmachine_clustered.go`: `deleteBlockedMessages` gains the `ProviderUnavailable` message. `holdDelete`'s body moves to `recordDeleteHold`, which now writes the status only when it changes and logs the caller's line with the VM's id and host.
+- `internal/k8s/conditions.go`: new `ReasonProviderUnavailable`; `ConditionDeleteBlocked` doc lists it.
+- `internal/controller/host_controller.go`: `reasonProviderUnavailable` reuses `k8s.ReasonProviderUnavailable` (same string).
+- Tests (`internal/controller/virtualmachine_delete_provider_unavailable_test.go`), which fail on the previous code except the two unchanged-behaviour cases:
+  - `TestHandleDeletion_ProviderUnavailable_KeepsFinalizer`;
+  - `TestHandleDeletion_ProviderUnavailable_BackoffFromDeletion`;
+  - `TestHandleDeletion_Clustered_ProviderUnavailableIsHeld`;
+  - `TestHandleDeletion_ProviderUnavailable_ForceDelete` (before / while held / clustered);
+  - `TestHandleDeletion_ProviderUnavailable_OrphanOnDelete`;
+  - `TestHandleDeletion_ProviderUnavailable_ThenDeleteFails`;
+  - `TestHandleDeletion_Clustered_ProviderUnavailableThenDeleteFails`;
+  - `TestHandleDeletion_Clustered_PendingCreate_ProviderUnavailableIsHeld`;
+  - `TestHandleDeletion_Clustered_OwnDomainHoldThenProviderUnavailable`;
+  - `TestHandleDeletion_ProviderUnavailable_OneSearchableLogLine`;
+  - `TestHandleDeletion_ForceDeleteRecordsVMLeftOnHypervisor`;
+  - `TestHandleDeletion_Clustered_DeleteBlockedFollowsTheLatestRefusal` (`virtualmachine_clustered_a61_delete_test.go`) now also checks Ready.
+- Docs:
+  - `docs/upgrading.md`: a behaviour-change row;
+  - `docs/vm-provider-binding.md`: a section on the hold, and `force-delete` covers it. Also the `VMLeftOnHypervisor` event, that a tenant can force-delete its own held VM, and what a cross-namespace consumer's force-delete leaves behind (a domain outside committed capacity, a same-name re-create held at `RestorePending`);
+  - `docs/clustered-provider-inventory.md`: the `ProviderUnavailable` DeleteBlocked reason;
+  - `docs/release-notes/next.md`.
+
+### Why
+Every provider rollout or restart (a clustered libvirt provider runs one replica with `Recreate`), a down provider pod or a TLS / NetworkPolicy misconfiguration made a VM deleted in that window disappear while its domain kept running, untracked. In a regulated deployment an unmanaged running VM is a compliance finding, and on a clustered Provider it later holds a same-named VM as a previous incarnation. Audit of the other delete paths: VMSnapshot already retains on a resolve failure; VMClone, VMSet, VMImage, Host and the Provider controller make no provider call on delete; VMMigration still releases its finalizer when deleting the migration's source snapshot fails (best-effort by design, left as a follow-up).
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-10-01 08:28] - Slice 5 security review nits: NFS uid/gid 0 refused for every provider, single-host GetDiskInfo path parity, startup WARN for unsafe pool directories
 **Author:** @wrkode (William Rizzo)
 

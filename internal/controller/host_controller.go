@@ -81,8 +81,9 @@ const (
 	// reported no health state for the host.
 	reasonHostHealthUnknown = "HostHealthUnknown"
 	// reasonProviderUnavailable is Ready=False: the Host's Provider is missing, its
-	// runtime is not ready, or the inventory RPC failed transiently.
-	reasonProviderUnavailable = "ProviderUnavailable"
+	// runtime is not ready, or the inventory RPC failed transiently. It is the
+	// same string as the VirtualMachine delete-hold reason.
+	reasonProviderUnavailable = k8s.ReasonProviderUnavailable
 	// reasonProviderNotClustered is Ready=False: the Host references a Provider that
 	// is not clustered (spec.topology != cluster) or does not implement the
 	// inventory RPC (Unimplemented) — a misconfiguration, not a transient failure.
