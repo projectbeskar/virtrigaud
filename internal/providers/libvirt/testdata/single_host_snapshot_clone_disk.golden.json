@@ -380,12 +380,10 @@
     "calls": [
       "single virsh dumpxml vrgold-web",
       "single virsh vol-info vrgold-web-disk --pool default",
-      "single virsh vol-path vrgold-web-disk --pool default",
-      "local qemu-img info -U --output=json /var/lib/libvirt/images/other.qcow2",
-      "single virsh snapshot-list vrgold-web --name"
+      "single virsh vol-path vrgold-web-disk --pool default"
     ],
-    "resp": "{\"disk_id\":\"/var/lib/libvirt/images/other.qcow2\",\"format\":\"qcow2\",\"virtual_size_bytes\":10737418240,\"actual_size_bytes\":\u003cunix\u003e,\"path\":\"/var/lib/libvirt/images/other.qcow2\",\"is_bootable\":true,\"metadata\":{\"pool\":\"default\",\"type\":\"file\"}}",
-    "err": ""
+    "resp": "null",
+    "err": "failed to get disk info: InvalidSpec: disk \"/var/lib/libvirt/images/other.qcow2\" is not a disk of VM \"vrgold-web\""
   },
   "diskinfo-ignores-target-host": {
     "calls": [
