@@ -311,7 +311,13 @@ providers), and rollback caveats in
   synchronous copy of several minutes) no longer loses the clone it made: the
   edit used to make the controller's status write fail, the clone was sent
   again, refused as "already exists", and failed, leaving the copy untracked
-  on the host.
+  on the host. The record lands only on the `VMClone` it was made for: never on
+  one deleted and re-created under the same name meanwhile, and never over a
+  stored `Failed`.
+- A `Clone` or `SnapshotCreate` is never sent from a stale read: the object is
+  re-read from the API server right before the call, so a second, untracked
+  snapshot or clone cannot be made from a cache that does not show the first
+  one's result yet.
 - A `VMMigration` with `deleteAfterMigration: true` whose target stays off
   (`powerOn: false`) records a `SourceDeletedTargetNotStarted` Warning when it
   deletes the source.

@@ -19,9 +19,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Before:** both `For()` watches had no predicate, so every update re-ran the object at once, ahead of its hold's backoff. A tenant looping `kubectl annotate --overwrite` on a waiting clone drove one Clone RPC per write, or a ListVMs / multi-host scan on a clustered hold. On a held snapshot delete it drove one SnapshotDelete per write.
   - **VMClone:** `For()` now takes `predicate.GenerationChangedPredicate`, which passes create, delete, spec changes and the start of deletion (that bumps the generation). The controller reads no VMClone labels or annotations.
   - **VMSnapshot:** `For()` now takes `snapshotUpdatePredicate`, which passes generation changes and changes of the `virtrigaud.io/force-delete` annotation, the only metadata the controller reads. Force-delete still releases a held delete at once.
-  - **Steps that relied on the controller's own write to re-trigger it now requeue explicitly:**
-    - VMClone `markFailed`: so the failed clustered clone still removes the target it created, and a failed status write is retried;
-    - VMSnapshot after a synchronous Ready, and after a create task completes: so the retention check is still scheduled.
+  - **Steps that relied on the controller's own write to re-trigger it now requeue explicitly, never at once** (an immediate requeue can run before the informer cache shows the write, and act on the object as it was before):
+    - VMClone `markFailed`: re-checked after `cloneFailedFollowUpDelay` (5 s), so the failed clustered clone still removes the target it created, and a failed status write is retried;
+    - VMSnapshot after a create ends: Ready re-checks after `snapshotRetentionCheckInterval` (1 h, the retention check), and a failed create task after `snapshotFailedRecheckInterval` (5 min).
+  - **Never a provider create from a stale read:**
+    - right before `SnapshotCreate`, `confirmSnapshotNotCreated` re-reads the VMSnapshot through the uncached APIReader (now wired in `cmd/manager`);
+    - right before the Clone RPC, `confirmCloneNotStarted` does the same for the VMClone, single-host and clustered.
+
+    Nothing is sent unless the live object has the same UID and resourceVersion and records no create (a VMClone: phase empty or Pending, no target VM ID or task). A stale read retries after 2 s. Without this, a requeue that read the cache before it showed a synchronous create's result could send a second create: an untracked second snapshot on a single-host provider (no request token), or a second Clone of a clone already Failed.
   - **Unchanged:** the namespace-grant, consumer-grant and source power-state watches.
 
 ### Fixed
@@ -53,7 +58,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - The unaddressable hold keeps its detail, which is the operator's own refusal built from object names, never provider text.
 - `internal/controller/vmclone_controller.go`, `vmclone_clustered.go` (`persistCloneStatus`): an accepted clone is no longer lost to a concurrent edit of its `VMClone`. Medium; integrity; already on `main`.
   - **Cause:** a libvirt single-host Clone is a synchronous disk copy. The post-RPC status update carried the `resourceVersion` read before it, so a VMClone edit during the copy made the update fail with a Conflict. `TargetVMID`/`TaskRef` were lost, the clone was sent again and refused ("already exists"), and it failed with the copy left untracked on a shared host.
-  - The record is now a status merge patch without a `resourceVersion` precondition, retried on transient errors. The clustered target's `TargetUID` record is written the same way.
+  - The record is now a JSON Patch of the status without a `resourceVersion` precondition. It starts with `test` operations on `metadata.uid` and, when set, `status.phase`, so it lands only on the object the reconcile read.
+  - A VMClone deleted and re-created under the same name during the copy, or one stored `Failed` meanwhile, fails the test (422 Invalid). The record is then neither written nor bound, and what the clone made is logged.
+  - Only transient API errors (server timeout, too many requests, timeout, internal error, service unavailable, conflict) are retried.
+  - The clustered target's `TargetUID` record is written the same way.
 - `internal/controller/vmclone_controller.go` (`buildTargetVM`, `cloneTargetPowerState`): `VMClone` `spec.options.powerOn` is honored. The produced VirtualMachine's `spec.powerState` is `On` for `powerOn: true` and `Off` otherwise, on the single-host and clustered flows; the clustered target carries it from its pre-RPC creation.
   - Every provider's Clone leaves the clone powered off: vSphere `PowerOn: false`, libvirt define only, Proxmox clone, mock `Off`. So there is no power flap either way.
 - `internal/controller/vmmigration_controller.go` (`migrationTargetPowerState`): `VMMigration` `spec.target.powerOn` is honored the same way. A target that stays off still becomes `Ready`, so the migration completes.
@@ -76,18 +84,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     - `TestVMSnapshot_UnaddressableDeleteHoldIsIdempotent`.
   - `internal/controller/hold_watch_envtest_test.go` (envtest, a real manager):
     - a clone held for `SourceMustBePoweredOff` makes no Clone call on 10 metadata-only updates, and the source's power-off still re-drives it;
-    - a held snapshot delete makes no SnapshotDelete call on 10 metadata-only updates, and the force-delete annotation still releases it.
+    - a held snapshot delete makes no SnapshotDelete call on 10 metadata-only updates, and the force-delete annotation still releases it;
+    - a synchronous snapshot create sends exactly one SnapshotCreate.
 
-    Both fail without the predicates.
+    The first two fail without the predicates.
   - `internal/controller/watch_predicates_test.go`:
     - `TestSnapshotUpdateNeedsReconcile`;
     - `TestVMClone_FailureRequeuesForTheTargetCleanup`;
-    - `TestVMSnapshot_ReadyRequeuesForItsRetentionCheck`.
+    - `TestVMSnapshot_ReadyRequeuesForItsRetentionCheck`;
+    - `TestVMSnapshot_NoCreateFromAStaleCache`.
   - `internal/controller/vmclone_status_conflict_test.go`:
     - `TestVMClone_AcceptedCloneSurvivesAConcurrentEdit` (single-host and clustered, sync and async);
-    - `TestVMClone_Clustered_TargetUIDSurvivesAConcurrentEdit`.
+    - `TestVMClone_Clustered_TargetUIDSurvivesAConcurrentEdit`;
+    - `TestVMClone_NoCloneFromAStaleCache` (a stored Failed, or a recorded clone).
 
-    Both fail on the previous code.
+    The first two fail on the previous code.
+  - `internal/controller/vmclone_record_envtest_test.go` (envtest, real API-server patch semantics):
+    - the record of a clone is never written onto a VMClone re-created under the same name during the copy, and nothing is bound;
+    - it never overwrites a stored Failed;
+    - it still lands despite a metadata edit.
   - `internal/controller/vmclone_power_on_test.go`:
     - `TestVMClone_SingleHost_PowerOnSetsTheTargetsPowerState`;
     - `TestVMClone_Clustered_PowerOnSetsTheTargetsPowerState`;
