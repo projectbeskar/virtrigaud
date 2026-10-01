@@ -2717,7 +2717,7 @@ func diskInfoOn(ctx context.Context, vp *VirshProvider, d domainTarget, req cont
 	// guess — that guess only holds for VirtRigaud-created volumes and fails for
 	// adopted/externally-created VMs (Bug G; same class as the clone #207 fix).
 	// resolvePrimaryDisk also skips cloud-init/CDROM devices.
-	doc, diskPaths, format, err := resolveDomainDisksDocOn(ctx, vp, d, storageProvider)
+	doc, diskPaths, _, err := resolveDomainDisksDocOn(ctx, vp, d, storageProvider)
 	if err != nil {
 		return contracts.GetDiskInfoResponse{}, fmt.Errorf("failed to resolve primary disk: %w", err)
 	}
@@ -2734,16 +2734,15 @@ func diskInfoOn(ctx context.Context, vp *VirshProvider, d domainTarget, req cont
 		diskPath = req.DiskId
 	}
 
-	// Read virtual + actual size (and confirm format) from the disk file itself
+	// Read virtual + actual size from the disk file itself
 	// via qemu-img — read-only with -U so a still-running source's write lock is
 	// ignored — through passwordless sudo when it is one of the domain's own
 	// disks (readDiskInfoOnHost): a snapshotted VM's active disk is libvirt's
 	// 0600 overlay. Best-effort: sizes default to 0 (status-only) if it fails.
 	// The disk is read in the format its definition names (never probed).
-	ownFormat := doc.diskFormat(diskPath)
-	format = ownFormat
+	format := doc.diskFormat(diskPath)
 	var virtualSize, actualSize int64
-	if res, qerr := readDiskInfoOnHost(ctx, vp, diskPath, ownFormat); qerr == nil {
+	if res, qerr := readDiskInfoOnHost(ctx, vp, diskPath, format); qerr == nil {
 		var qi struct {
 			VirtualSize int64 `json:"virtual-size"`
 			ActualSize  int64 `json:"actual-size"`
