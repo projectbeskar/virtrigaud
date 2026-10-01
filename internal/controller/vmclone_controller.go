@@ -402,17 +402,10 @@ func (r *VMCloneReconciler) startClone(
 		return res, err
 	}
 
-	now := metav1.Now()
-	clone.Status.Phase = infrav1beta1.ClonePhaseCloning
-	clone.Status.StartTime = &now
-	if linked {
-		clone.Status.ActualCloneType = infrav1beta1.CloneTypeLinkedClone
-	} else {
-		clone.Status.ActualCloneType = infrav1beta1.CloneTypeFullClone
-	}
-	k8s.SetCondition(&clone.Status.Conditions, infrav1beta1.VMCloneConditionCloning,
-		metav1.ConditionTrue, infrav1beta1.VMCloneReasonCloning, "Clone operation initiated")
-
+	// The clone is recorded as started only once the provider accepted it
+	// (markCloneStarted): a refused clone that waits keeps exactly the status
+	// it had, so a repeated wait writes nothing (see markCloneStarted).
+	started := metav1.Now()
 	resp, err := cloner.Clone(ctx, req)
 	if err != nil {
 		// A libvirt full clone requires a powered-off source: the clone waits
@@ -427,6 +420,7 @@ func (r *VMCloneReconciler) startClone(
 			fmt.Sprintf("clone failed: %v", err)), nil
 	}
 
+	markCloneStarted(clone, linked, started, cloneStartedMessage)
 	clone.Status.TargetVMID = resp.TargetVmID
 	clone.Status.TaskRef = resp.TaskRef
 
@@ -762,6 +756,43 @@ func (r *VMCloneReconciler) buildTargetVM(
 	return targetVM
 }
 
+// cloneStartedMessage is the Cloning condition message of a single-host clone
+// the provider accepted (a clustered clone's names its host).
+const cloneStartedMessage = "Clone operation initiated"
+
+// cloneInProgressMessage is the Ready condition message (and status.message)
+// of a clone the provider accepted that is not bound yet.
+const cloneInProgressMessage = "Clone in progress"
+
+// markCloneStarted records, in memory, that the provider accepted the clone's
+// Clone RPC issued at started: Phase=Cloning, the start time, the clone type,
+// Cloning=True with msg, and Ready=False/Cloning — replacing whatever wait the
+// clone showed before (e.g. SourceMustBePoweredOff), so a clone in flight never
+// reports a stale hold. The caller persists it with the target ID / task.
+//
+// It is applied ONLY after the RPC succeeded. A Clone the provider refuses
+// with a wait (a running source, an unreachable host, a previous incarnation,
+// ...) must leave the clone's status exactly as it was stored: marking it
+// Cloning before the RPC and flipping it back to Pending/Cloning=False on the
+// refusal made every held reconcile write a changed status (a new
+// LastTransitionTime on the Cloning condition, a new start time), and that
+// write re-triggered the clone's own watch at once — a Clone RPC every ~100 ms
+// that the hold's backoff never governed.
+func markCloneStarted(clone *infrav1beta1.VMClone, linked bool, started metav1.Time, msg string) {
+	clone.Status.Phase = infrav1beta1.ClonePhaseCloning
+	clone.Status.StartTime = &started
+	clone.Status.Message = cloneInProgressMessage
+	if linked {
+		clone.Status.ActualCloneType = infrav1beta1.CloneTypeLinkedClone
+	} else {
+		clone.Status.ActualCloneType = infrav1beta1.CloneTypeFullClone
+	}
+	k8s.SetCondition(&clone.Status.Conditions, infrav1beta1.VMCloneConditionCloning,
+		metav1.ConditionTrue, infrav1beta1.VMCloneReasonCloning, msg)
+	k8s.SetCondition(&clone.Status.Conditions, infrav1beta1.VMCloneConditionReady,
+		metav1.ConditionFalse, infrav1beta1.VMCloneReasonCloning, cloneInProgressMessage)
+}
+
 // finalizeReady marks the VMClone Ready and records the target reference.
 func (r *VMCloneReconciler) finalizeReady(
 	ctx context.Context,
@@ -867,6 +898,11 @@ func (r *VMCloneReconciler) markFailed(ctx context.Context, clone *infrav1beta1.
 		metav1.ConditionFalse, reason, message)
 	k8s.SetCondition(&clone.Status.Conditions, infrav1beta1.VMCloneConditionFailed,
 		metav1.ConditionTrue, reason, message)
+	// A failed clone is not cloning any more (e.g. its clone task failed).
+	if k8s.IsConditionTrue(clone.Status.Conditions, infrav1beta1.VMCloneConditionCloning) {
+		k8s.SetCondition(&clone.Status.Conditions, infrav1beta1.VMCloneConditionCloning,
+			metav1.ConditionFalse, reason, message)
+	}
 	r.Recorder.Event(clone, "Warning", reason, message)
 
 	_ = r.updateStatus(ctx, clone) //nolint:errcheck // status errors retried next reconcile
@@ -874,7 +910,11 @@ func (r *VMCloneReconciler) markFailed(ctx context.Context, clone *infrav1beta1.
 }
 
 // markPending sets the VMClone to the Pending phase (still waiting on a
-// prerequisite) and requeues.
+// prerequisite) and requeues. It is idempotent: a wait repeated with the same
+// reason and message leaves the stored status unchanged and writes nothing
+// (updateStatus), so only the requeue — or a real external event — re-drives
+// the clone. Callers must therefore pass a message that is stable across
+// retries of the same wait (no durations, counters or timestamps).
 func (r *VMCloneReconciler) markPending(ctx context.Context, clone *infrav1beta1.VMClone, reason, message string) ctrl.Result {
 	clone.Status.Phase = infrav1beta1.ClonePhasePending
 	clone.Status.Message = message
@@ -1094,13 +1134,37 @@ func (r *VMCloneReconciler) getProviderInstance(ctx context.Context, provider *i
 	return r.RemoteResolver.GetProvider(ctx, provider)
 }
 
-// updateStatus persists the VMClone status subresource.
+// updateStatus persists the VMClone status subresource. A write that would
+// change nothing is not sent (statusUnchanged): the VMClone's own watch
+// reconciles on every status update, so a wait that rewrote its status on
+// each retry would re-trigger itself at once instead of waiting for its
+// requeue.
 func (r *VMCloneReconciler) updateStatus(ctx context.Context, clone *infrav1beta1.VMClone) error {
+	if r.statusUnchanged(ctx, clone) {
+		return nil
+	}
 	if err := r.Status().Update(ctx, clone); err != nil {
 		logging.FromContext(ctx).Error(err, "Failed to update VMClone status")
 		return err
 	}
 	return nil
+}
+
+// statusUnchanged reports whether writing clone's status would change nothing:
+// the stored VMClone (read through the reconciler's client, the informer
+// cache in the manager) is at clone's resourceVersion — nothing was written
+// since clone was read or last written — and its status is semantically equal
+// to clone's. Any doubt (a read error, a cache that has not caught up with an
+// earlier write) answers false, and the write is sent.
+func (r *VMCloneReconciler) statusUnchanged(ctx context.Context, clone *infrav1beta1.VMClone) bool {
+	if clone.ResourceVersion == "" {
+		return false
+	}
+	stored := &infrav1beta1.VMClone{}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(clone), stored); err != nil {
+		return false
+	}
+	return stored.ResourceVersion == clone.ResourceVersion && equality.Semantic.DeepEqual(stored.Status, clone.Status)
 }
 
 // gateConsumers enforces spec.consumerNamespaceSelector for everything the
