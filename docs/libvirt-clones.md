@@ -429,7 +429,23 @@ nfs part then matches only the URL the provider builds for a root export.
 That URL is the server and path with exactly those two parameters, so no other
 identity and no other libnfs option ever reaches a root `qemu-img`. Leave out
 `VR_EXPORT_COPY` if the host never exports disks (no `VMMigration` from it),
-and leave out the `timeout` lines on a single-host Provider. Check the rule
+and leave out the `timeout` lines on a single-host Provider.
+
+**What the nfs part changes on the NFS server.** A root `qemu-img` connects
+through libnfs from a **reserved source port** (below 1024), which an
+unprivileged process cannot bind. Linux NFS exports are `secure` by default
+and accept requests only from reserved ports. That is often what kept the SSH
+user's own, unprivileged `qemu-img` off an export. With this rule, the host
+reaches such an export as root, from a reserved port, presenting the SSH
+user's uid and gid. A `secure` export that used to turn the host away now
+accepts it as that uid. So:
+
+- **Grant the nfs part only for exports meant for VirtRigaud.** Name exactly
+  that server and path in the expression, as the example does, never a
+  wildcard server or a parent directory.
+- Keep that export dedicated to migrations (one per trust domain), with
+  `root_squash` on, so only the files the SSH user's uid may touch are
+  reachable. Check the rule
 with `visudo -c`, then as root with `sudo -l -U virtrigaud <the full command>`
 for a real clone path — `sudo -l` prints the command when the rule allows it.
 A VM disk outside the pool directory (another allowed image directory, a
