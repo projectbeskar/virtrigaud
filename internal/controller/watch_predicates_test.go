@@ -58,7 +58,7 @@ func TestSnapshotUpdateNeedsReconcile(t *testing.T) {
 			now := metav1.Now()
 			s.DeletionTimestamp, s.Generation = &now, 2
 		}), true},
-		"force-delete set": {mutate(func(s *infrav1beta1.VMSnapshot) { s.Annotations[forceDeleteAnnotation] = "true" }), true},
+		"force-delete set":     {mutate(func(s *infrav1beta1.VMSnapshot) { s.Annotations[forceDeleteAnnotation] = "true" }), true},
 		"force-delete removed": {base.DeepCopy(), true},
 		"another annotation":   {mutate(func(s *infrav1beta1.VMSnapshot) { s.Annotations["example.com/note"] = "b" }), false},
 		"a label":              {mutate(func(s *infrav1beta1.VMSnapshot) { s.Labels = map[string]string{"x": "y"} }), false},
