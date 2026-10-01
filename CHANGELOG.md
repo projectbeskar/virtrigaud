@@ -60,7 +60,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Cause:** a libvirt single-host Clone is a synchronous disk copy. The post-RPC status update carried the `resourceVersion` read before it, so a VMClone edit during the copy made the update fail with a Conflict. `TargetVMID`/`TaskRef` were lost, the clone was sent again and refused ("already exists"), and it failed with the copy left untracked on a shared host.
   - The record is now a JSON Patch of the status without a `resourceVersion` precondition. It starts with `test` operations on `metadata.uid` and, when set, `status.phase`, so it lands only on the object the reconcile read.
   - A VMClone deleted and re-created under the same name during the copy, or one stored `Failed` meanwhile, fails the test (422 Invalid). The record is then neither written nor bound, and what the clone made is logged.
-  - Only transient API errors (server timeout, too many requests, timeout, internal error, service unavailable, conflict) are retried.
+  - Retries are bounded (`cloneRecordBackoff`, 6 attempts over about 6 s). They cover:
+    - transient API errors (server timeout, too many requests, timeout, internal error, service unavailable, conflict);
+    - transport failures (connection refused or reset, EOF, network timeouts);
+    - a deadline of the request itself, but never once the reconcile's own context is done.
+
+    Invalid, NotFound, Forbidden and Unauthorized are never retried.
+  - A record that still cannot be written emits a `CloneRecordNotSaved` Warning on the VMClone, plus a log line. The event names only the target VM ID and says a copy may exist on the host, so the copy is never silently untracked.
   - The clustered target's `TargetUID` record is written the same way.
 - `internal/controller/vmclone_controller.go` (`buildTargetVM`, `cloneTargetPowerState`): `VMClone` `spec.options.powerOn` is honored. The produced VirtualMachine's `spec.powerState` is `On` for `powerOn: true` and `Off` otherwise, on the single-host and clustered flows; the clustered target carries it from its pre-RPC creation.
   - Every provider's Clone leaves the clone powered off: vSphere `PowerOn: false`, libvirt define only, Proxmox clone, mock `Off`. So there is no power flap either way.
@@ -103,6 +109,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     - the record of a clone is never written onto a VMClone re-created under the same name during the copy, and nothing is bound;
     - it never overwrites a stored Failed;
     - it still lands despite a metadata edit.
+  - `internal/controller/vmclone_record_retry_test.go`:
+    - `TestVMClone_RecordSurvivesATransportError`: connection refused or reset, unexpected EOF, request deadline, service unavailable. The record lands after a retry and no second Clone is sent.
+    - `TestVMClone_RecordNotSavedIsAnnounced`.
+    - `TestIsRetriableRecordError`.
   - `internal/controller/vmclone_power_on_test.go`:
     - `TestVMClone_SingleHost_PowerOnSetsTheTargetsPowerState`;
     - `TestVMClone_Clustered_PowerOnSetsTheTargetsPowerState`;
