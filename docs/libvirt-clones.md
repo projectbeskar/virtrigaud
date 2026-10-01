@@ -484,8 +484,12 @@ the SSH user instead, which works only if that user can read the file; if it
 cannot, the check fails closed (`VM_DISK_CHECK_FAILED`) and the clone, export
 or delete waits. To let root read them, list every allowed image directory in
 the rule, each with the same `[^/ ]+` confinement (one file directly inside
-the directory, no subdirectory, no space), and escape any `.` in a path as
-`\.`. For `VIRTRIGAUD_LIBVIRT_IMAGE_DIRS=/var/lib/libvirt/images,/vm-pool01`:
+the directory, no subdirectory, no space). The rule is a regular expression:
+escape **every** regular-expression metacharacter in a directory path with a
+backslash — `.` `+` `*` `?` `(` `)` `[` `]` `{` `}` `|` `^` `$` and `\`
+itself (for example `/srv/vm.pool+1` becomes `/srv/vm\.pool\+1`), or the rule
+matches more paths than you meant. For
+`VIRTRIGAUD_LIBVIRT_IMAGE_DIRS=/var/lib/libvirt/images,/vm-pool01`:
 
 ```
 Cmnd_Alias VR_DISK_READ = /usr/bin/qemu-img ^info -U -f (qcow2|raw) --output=json -- (/var/lib/libvirt/images|/vm-pool01)/[^/ ]+$
@@ -494,6 +498,15 @@ Cmnd_Alias VR_DISK_READ = /usr/bin/qemu-img ^info -U -f (qcow2|raw) --output=jso
 Never widen it to a parent directory (`/`), a subdirectory wildcard or `.*`.
 The copy rules (`VR_CLONE_COPY`, `VR_EXPORT_COPY`) need a directory added only
 when a VM's own disk lives there, as described above.
+
+sudo matches the path as written, and `qemu-img info` follows a **symbolic
+link** inside an allowed directory to wherever it points. Such a read never
+returns the target's contents: a root `qemu-img info` in a pinned format
+reveals only the target's image metadata — its size and format and, for a
+qcow2 image, header fields such as its backing file name and internal
+snapshot names. (The copies refuse symbolic links outright, see above.) Keep
+every allowed image directory writable only by root and the SSH user, so no
+other account can place a link there.
 
 What these rules protect, and what they do not. With them, root runs only
 the commands in the table:
