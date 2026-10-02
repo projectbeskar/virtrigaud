@@ -5,6 +5,32 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-10-02 20:12] - vSphere Create leaves new VMs powered off; imported-disk Create applies disk growth and additional disks
+**Author:** @wrkode (William Rizzo)
+
+### Fixed
+- `internal/providers/vsphere/server.go` (`createVirtualMachine`): Create no longer powers on every VM it creates.
+  - **Before:** after the template clone it called `PowerOn` unconditionally, whatever the VirtualMachine's `spec.powerState`. A VM created with `powerState: Off` booted until the VirtualMachine controller hard-powered it off.
+  - **Now:** the VM is left powered off, as the libvirt and Proxmox providers do. The controller's next reconcile Describes it, sees `Off`, and calls `Power(ON)` only when `spec.powerState` is `On` or empty. `CreateRequest` has no power field; the proto is unchanged.
+  - Cloud-init (`guestinfo.userdata`/`metadata`) and `guestinfo.network.*` are written into the config spec at create time, so the guest reads them on its first boot whenever the controller performs it. The provider uses no vSphere customization spec.
+  - Unchanged: the `Clone` RPC (VMClone) already cloned with `PowerOn: false`; a create that binds the requester's existing VM does not change its power state; image prepare (OVA/OVF import) produces templates and never powers anything on.
+- `internal/providers/vsphere/server.go` (`createVirtualMachine`, imported-disk path): the VM reference returned by `CreateVM_Task` was redeclared with `:=` inside the branch, shadowing the outer one. Every post-create step then addressed an empty reference, which vCenter cannot resolve: the VMClass disk growth (`resizeVMDisk`) and the additional-disk attach failed with a logged warning and were skipped. A VM created from an imported (migrated) disk now gets both. The same bug made the old unconditional power-on fail on this path, so migration targets were not in fact booted by Create.
+
+### Added
+- `internal/providers/vsphere/create_power_test.go`: vcsim tests. A template-clone create and an imported-disk create leave the VM `poweredOff` (Describe reports `Off`), with cloud-init already set, and a later `Power(ON)` starts it. A binding retry keeps the VM's power state either way. `Clone` leaves the clone off and the running source on. An imported-disk create grows the disk to the VMClass size.
+
+### Changed
+- `docs/upgrading.md`, `docs/release-notes/next.md`, `examples/vmmigration-nfs.yaml`: removed the caveat that a vSphere migration target with `powerOn: false` boots briefly; documented the new create behavior.
+
+### Why
+`VMMigration.spec.target.powerOn: false` and `VMClone powerOn: false` now set `spec.powerState: Off` on the VM they produce (#371). A vSphere VM must never boot when its spec says Off: a copy coming up beside a running source would carry the source's IP address and hostname.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout (vSphere provider image)
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-10-12 07:47] - Migration source snapshots: tracked, polled, cleaned up; VMSnapshots bound to their VM and Provider; provider NotFound only for provably missing snapshots; outcome-safe single-host clone retries; no resolver or task text in status
 **Author:** @wrkode (William Rizzo)
 
