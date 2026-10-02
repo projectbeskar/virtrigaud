@@ -342,6 +342,15 @@ See [`docs/clustered-provider-inventory.md`](clustered-provider-inventory.md) an
   when the wait begins; a routed `VMSnapshot` create that is retried does the
   same with a `SnapshotCreateRetrying` event. Tooling that parsed provider text
   out of these conditions should read the events or the manager log instead.
+- **A single-host clone that fails transiently is retried instead of failed.**
+  A `VMClone` on a single-host Provider whose `Clone` hits a transient error —
+  the provider or its libvirt host briefly unreachable, libvirtd restarting, a
+  disk check that could not run — now waits (`Pending`, `Ready=False` reason
+  `CloneRetrying`, one `Warning` event with the provider's answer) and is
+  retried with a backoff from 15 s doubling to 5 min; it used to fail for good.
+  A clone whose call timed out (outcome unknown) still fails. Roll the libvirt
+  provider with the manager: an older libvirt provider reports its transient
+  clone errors as terminal.
 - **A clustered clone whose host fails a read before copying anything is
   retried** (`Pending`, `CloneRetrying`, backoff 15 s to 5 min, never counted
   toward the circuit breaker) instead of failing and removing its target; a

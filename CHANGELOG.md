@@ -164,7 +164,7 @@ CI's Supply Chain Vulnerability Scan (`govulncheck`) failed on every PR because 
 - [ ] Config change only
 - [ ] Documentation only
 
-## [2026-10-02 20:26] - VMMigration keeps its finalizer until its source snapshot is gone; VMSnapshot force-delete works while its Provider is unreachable; no resolver text in clone/snapshot/migration status
+## [2026-10-02 20:26] - VMMigration keeps its finalizer until its source snapshot is gone; VMSnapshot force-delete works while its Provider is unreachable; single-host clones survive transient errors; no resolver text in clone/snapshot/migration status
 **Author:** @wrkode (William Rizzo)
 
 ### Fixed
@@ -185,6 +185,20 @@ CI's Supply Chain Vulnerability Scan (`govulncheck`) failed on every PR because 
   - **Before:** it was retried every 30 s with no status, and `virtrigaud.io/force-delete` was ignored.
   - **Now:** it shows `Ready=False` and `Deleting=False` with reason `ProviderUnavailable` and a constant message, and retries with the blocked-VM backoff. Force-delete releases it with a `SnapshotLeftOnHypervisor` Warning (`retainForUnavailableSnapshotProvider`).
 - `internal/controller/vmmigration_controller.go` (`updateStatus`): conflicts are now retried with `retry.RetryOnConflict` on a live re-read (APIReader), instead of `time.Sleep` plus a cache read. A VMMigration that was re-created meanwhile is never written.
+- `internal/controller/vmclone_controller.go`, `internal/providers/libvirt/server.go`, `clone.go`: a single-host `VMClone` whose Clone RPC fails transiently is held and retried, no longer failed for good.
+  - **Before:** every single-host Clone error except `VM_SOURCE_RUNNING` went to `markFailed`, so one SSH or libvirtd blip ended the clone. Only the clustered path retried.
+  - **Manager:** a retryable answer is held — Unavailable (including a gRPC transport failure), `VM_DISK_CHECK_FAILED`, a copy still in progress, or a rate limit.
+    - The clone stays `Pending` with `Ready=False/CloneRetrying` and a constant message. One Warning event carries the sanitized answer when the hold begins, and a repeated hold writes nothing.
+    - Retries use the blocked-VM backoff, counted from when the hold began. Each retry still re-reads the clone live first (`confirmCloneNotStarted`).
+    - A Clone whose outcome is unknown — gRPC `DeadlineExceeded`, or a provider `Timeout` — still fails. A single-host Clone carries no request token, so resending it could make a second VM.
+  - **libvirt provider:** single-host Clone failures crossed the wire as `codes.Unknown`, so even the provider's own retryable errors were terminal in the manager. `singleHostCloneRPCError` now maps them:
+    - a host transport failure becomes `Unavailable`, which the breaker counts;
+    - any other retryable provider error becomes `Unavailable` + `VM_OPERATION_FAILED`, which the breaker does not count.
+
+    Only the categorized message crosses the wire. Errors that already carry a gRPC status, and every other error, keep their historical form. A `domstate` failure caused by an unreachable host is now retryable instead of "source VM not found", and so is a storage-pool read failure.
+- `internal/controller/hold_watch_envtest_test.go`: fixed a flaky spec, "never re-runs a clone held for SourceMustBePoweredOff" (line 181 saw 2 Clone calls instead of 1).
+  - **Cause:** test isolation, not an extra Clone. Each spec's manager reconciles every VMClone on the envtest apiserver, and envtest never deletes namespaces. A clone left behind by `vmclone_record_envtest_test` was resolved to the held spec's counting provider and counted.
+  - **Fix:** the spies now count and resolve only their own namespace's objects. Before the fix, 3 of 10 seeded runs of the clone and grant specs failed at line 181; after it, 20 of 20 pass.
 
 ### Security
 - `internal/controller/vmclone_controller.go`, `vmclone_clustered.go`, `vmsnapshot_controller.go`, `vmmigration_controller.go`, `rpc_failure_detail.go` (new): raw resolver and transport errors are no longer copied into consumer-readable status and events. Low; information disclosure (ADR-0007 A6, threat 5).
@@ -198,7 +212,8 @@ CI's Supply Chain Vulnerability Scan (`govulncheck`) failed on every PR because 
   - **Clustered clone waits** (`HostUnavailable`, disk check, retryable) and **GetCapabilities waits** now keep a constant condition message. The provider's answer goes into a Warning event when the wait begins. A routed `VMSnapshot` create retry records a `SnapshotCreateRetrying` event.
 
 ### Changed
-- `docs/upgrading.md`, `docs/release-notes/next.md`, `examples/vmmigration-basic.yaml`: document the held `VMMigration` and `VMSnapshot` deletes, the force-delete escape hatch and the status-text change.
+- `docs/upgrading.md`, `docs/release-notes/next.md`, `examples/vmmigration-basic.yaml`: document the held `VMMigration` and `VMSnapshot` deletes, the force-delete escape hatch, the status-text change, and single-host clone retries.
+- `docs/clustered-provider-inventory.md`: state that VirtRigaud never deletes a migration's `nfs` or `s3` staging object (each one is a full, unencrypted copy of the tenant's disk), give the object names, and describe operator-side cleanup. No provider RPC deletes a staged object, and the manager never reaches the staging backend. Its `cleanupIntermediateStorage` builds a PVC store inside the manager pod, which mounts no staging volume, so it is a no-op for every backend. A fix needs a new provider RPC or a manager-side path, which is a design decision. This is not fixed here.
 
 ### Why
 A deleted or terminally failed migration could leave a snapshot on the live source VM that nothing tracks. On libvirt that snapshot later blocks the source VM's own deletion. Resolver errors in tenant-readable status disclosed infrastructure details to cross-namespace consumers.

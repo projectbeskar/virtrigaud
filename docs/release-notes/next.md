@@ -404,6 +404,14 @@ providers), and rollback caveats in
   (→ [Upgrade guide](docs/upgrading.md#behavior-changes-that-are-visible-but-not-breaking)).
 - A `VMMigration` status write that hits a conflict is retried on the live
   object without sleeping in the reconcile.
+- A single-host `VMClone` whose `Clone` fails transiently (an SSH or libvirtd
+  blip, the provider briefly unreachable) is held as `CloneRetrying` and
+  retried with a backoff (15 s doubling to 5 min) instead of failing for good;
+  the libvirt provider now reports its transient single-host clone errors as
+  retryable. A clone whose call timed out still fails.
+- Known limitation: a migration's `nfs` or `s3` staging object (a full copy of
+  the source disk) is never deleted by VirtRigaud; clean it up yourself
+  (→ [`docs/clustered-provider-inventory.md`](docs/clustered-provider-inventory.md)).
 - A `VMMigration` with `deleteAfterMigration: true` whose target stays off
   (`powerOn: false`) records a `SourceDeletedTargetNotStarted` Warning when it
   deletes the source.
