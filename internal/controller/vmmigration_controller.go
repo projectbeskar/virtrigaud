@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	stderrors "errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -541,8 +542,9 @@ func (r *VMMigrationReconciler) handleValidatingPhase(ctx context.Context, migra
 			return r.markConsumerNotAllowed(ctx, migration, err)
 		}
 		if err != nil {
+			logger.Error(err, "Failed to power off source VM before migration")
 			return r.transitionToFailed(ctx, migration,
-				fmt.Sprintf("Failed to power off source VM before migration: %v", err))
+				"Failed to power off source VM before migration: "+migrationFailureDetail(err))
 		}
 		if !done {
 			return res, nil
@@ -694,7 +696,8 @@ func (r *VMMigrationReconciler) handleSnapshottingPhase(ctx context.Context, mig
 	// Get provider instance
 	providerInstance, err := r.getProviderInstance(ctx, sourceProvider)
 	if err != nil {
-		return r.transitionToFailed(ctx, migration, fmt.Sprintf("Failed to get provider instance: %v", err))
+		logger.Error(err, "Failed to get source provider instance")
+		return r.transitionToFailed(ctx, migration, "Failed to get provider instance: "+migrationFailureDetail(err))
 	}
 
 	// Check if we already created a snapshot
@@ -745,7 +748,8 @@ func (r *VMMigrationReconciler) handleSnapshottingPhase(ctx context.Context, mig
 	logger.Info("Creating migration snapshot", "snapshot_name", snapshotName)
 	snapshotResp, err := providerInstance.SnapshotCreate(ctx, snapshotReq)
 	if err != nil {
-		return r.transitionToFailed(ctx, migration, fmt.Sprintf("Failed to create snapshot: %v", err))
+		logger.Error(err, "Failed to create migration snapshot")
+		return r.transitionToFailed(ctx, migration, "Failed to create snapshot: "+migrationFailureDetail(err))
 	}
 
 	// Store snapshot ID in status
@@ -806,7 +810,8 @@ func (r *VMMigrationReconciler) handleExportingPhase(ctx context.Context, migrat
 	// Get provider instance
 	providerInstance, err := r.getProviderInstance(ctx, sourceProvider)
 	if err != nil {
-		return r.transitionToFailed(ctx, migration, fmt.Sprintf("Failed to get provider instance: %v", err))
+		logger.Error(err, "Failed to get source provider instance")
+		return r.transitionToFailed(ctx, migration, "Failed to get provider instance: "+migrationFailureDetail(err))
 	}
 
 	// Check if export is already in progress or already completed.
@@ -843,11 +848,12 @@ func (r *VMMigrationReconciler) handleExportingPhase(ctx context.Context, migrat
 			// Task complete, check status
 			taskStatus, err := providerInstance.TaskStatus(ctx, migration.Status.TaskRef)
 			if err != nil {
-				return r.transitionToFailed(ctx, migration, fmt.Sprintf("Failed to get export task status: %v", err))
+				logger.Error(err, "Failed to get export task status")
+				return r.transitionToFailed(ctx, migration, "Failed to get export task status: "+migrationFailureDetail(err))
 			}
 
 			if taskStatus.Error != "" {
-				return r.transitionToFailed(ctx, migration, fmt.Sprintf("Export failed: %s", taskStatus.Error))
+				return r.transitionToFailed(ctx, migration, "Export failed: "+sanitizeProviderDetail(stderrors.New(taskStatus.Error)))
 			}
 
 			logger.Info("Export task completed successfully")
@@ -962,7 +968,8 @@ func (r *VMMigrationReconciler) handleExportingPhase(ctx context.Context, migrat
 		// reconcile (e.g. after retry/backoff) can re-attempt the export for
 		// this generation. transitionToFailed records the failure durably.
 		r.longOpInFlight.Delete(longOpKey(migration, longOpExport))
-		return r.transitionToFailed(ctx, migration, fmt.Sprintf("Failed to start disk export: %v", err))
+		logger.Error(err, "Failed to start disk export")
+		return r.transitionToFailed(ctx, migration, "Failed to start disk export: "+migrationFailureDetail(err))
 	}
 
 	// Store export info in status
@@ -1082,7 +1089,8 @@ func (r *VMMigrationReconciler) handleImportingPhase(ctx context.Context, migrat
 	// Get provider instance
 	providerInstance, err := r.getProviderInstance(ctx, targetProvider)
 	if err != nil {
-		return r.transitionToFailed(ctx, migration, fmt.Sprintf("Failed to get target provider instance: %v", err))
+		logger.Error(err, "Failed to get target provider instance")
+		return r.transitionToFailed(ctx, migration, "Failed to get target provider instance: "+migrationFailureDetail(err))
 	}
 
 	// Check if import is already in progress or already completed.
@@ -1113,11 +1121,12 @@ func (r *VMMigrationReconciler) handleImportingPhase(ctx context.Context, migrat
 			// Task complete, check status
 			taskStatus, err := providerInstance.TaskStatus(ctx, migration.Status.TaskRef)
 			if err != nil {
-				return r.transitionToFailed(ctx, migration, fmt.Sprintf("Failed to get import task status: %v", err))
+				logger.Error(err, "Failed to get import task status")
+				return r.transitionToFailed(ctx, migration, "Failed to get import task status: "+migrationFailureDetail(err))
 			}
 
 			if taskStatus.Error != "" {
-				return r.transitionToFailed(ctx, migration, fmt.Sprintf("Import failed: %s", taskStatus.Error))
+				return r.transitionToFailed(ctx, migration, "Import failed: "+sanitizeProviderDetail(stderrors.New(taskStatus.Error)))
 			}
 
 			logger.Info("Import task completed successfully")
@@ -1259,7 +1268,8 @@ func (r *VMMigrationReconciler) handleImportingPhase(ctx context.Context, migrat
 		// Release the in-memory guard so a future reconcile can re-attempt the
 		// import for this generation after the failure is recorded.
 		r.longOpInFlight.Delete(longOpKey(migration, longOpImport))
-		return r.transitionToFailed(ctx, migration, fmt.Sprintf("Failed to start disk import: %v", err))
+		logger.Error(err, "Failed to start disk import")
+		return r.transitionToFailed(ctx, migration, "Failed to start disk import: "+migrationFailureDetail(err))
 	}
 
 	// Store import info in status.
@@ -3152,17 +3162,47 @@ func (r *VMMigrationReconciler) gateMigrationStorageBackend(
 	return ""
 }
 
-// getProviderInstance retrieves a provider gRPC client
+// providerResolveError marks a failure to resolve a Provider to a usable
+// client (getProviderInstance). Its text can name the TLS Secret, the provider
+// Service's address and the runtime phase (ADR-0007 A6, threat 5), so
+// migrationFailureDetail never copies it into status or events.
+type providerResolveError struct{ err error }
+
+// Error implements error.
+func (e *providerResolveError) Error() string { return "failed to resolve provider: " + e.err.Error() }
+
+// Unwrap returns the resolver's error.
+func (e *providerResolveError) Unwrap() error { return e.err }
+
+// migrationFailureDetail renders err for the VMMigration's consumer-readable
+// status and events: providerResolveFailedDetail when it is (or wraps) a
+// provider resolve failure, otherwise rpcFailureDetail (the provider's answer
+// made safe, or a constant for a transport failure). The caller logs err in
+// full.
+func migrationFailureDetail(err error) string {
+	var re *providerResolveError
+	if stderrors.As(err, &re) {
+		return providerResolveFailedDetail
+	}
+	return rpcFailureDetail(err)
+}
+
+// getProviderInstance retrieves a provider gRPC client; a resolve failure is a
+// *providerResolveError.
 func (r *VMMigrationReconciler) getProviderInstance(ctx context.Context, provider *infrav1beta1.Provider) (contracts.Provider, error) {
 	// Test hook: allow injecting a fake/counting provider without dialing gRPC.
 	if r.providerInstanceFn != nil {
-		return r.providerInstanceFn(ctx, provider)
+		p, err := r.providerInstanceFn(ctx, provider)
+		if err != nil {
+			return nil, &providerResolveError{err: err}
+		}
+		return p, nil
 	}
 
 	// Resolve the provider client
 	providerClient, err := r.RemoteResolver.GetProvider(ctx, provider)
 	if err != nil {
-		return nil, fmt.Errorf("failed to resolve provider: %w", err)
+		return nil, &providerResolveError{err: err}
 	}
 
 	return providerClient, nil

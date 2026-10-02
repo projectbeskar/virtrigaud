@@ -293,9 +293,13 @@ func (r *VMCloneReconciler) Reconcile(ctx context.Context, req ctrl.Request) (re
 
 	providerInstance, err := r.getProviderInstance(ctx, provider)
 	if err != nil {
+		// The resolver's error can name the TLS Secret, the provider
+		// Service's address and the runtime phase (ADR-0007 A6, threat 5):
+		// it goes to the manager log only, never to this consumer-readable
+		// status.
 		logger.Error(err, "Failed to get provider instance", "provider", providerKey.Name)
 		return r.markPending(ctx, clone, infrav1beta1.VMCloneReasonProviderError,
-			fmt.Sprintf("failed to resolve provider %q: %v", providerKey.Name, err)), nil
+			fmt.Sprintf("failed to resolve provider %q: %s", providerKey.Name, providerResolveFailedDetail)), nil
 	}
 
 	linked := r.requestedCloneType(clone) == infrav1beta1.CloneTypeLinkedClone
@@ -427,10 +431,9 @@ func (r *VMCloneReconciler) startClone(
 			return r.holdCloneForRunningSource(ctx, clone, err), nil
 		}
 		logger.Error(err, "Clone RPC failed")
-		r.Recorder.Event(clone, "Warning", infrav1beta1.VMCloneReasonProviderError,
-			fmt.Sprintf("Clone failed: %v", err))
-		return r.markFailed(ctx, clone, infrav1beta1.VMCloneReasonProviderError,
-			fmt.Sprintf("clone failed: %v", err)), nil
+		detail := rpcFailureDetail(err)
+		r.Recorder.Event(clone, "Warning", infrav1beta1.VMCloneReasonProviderError, "Clone failed: "+detail)
+		return r.markFailed(ctx, clone, infrav1beta1.VMCloneReasonProviderError, "clone failed: "+detail), nil
 	}
 
 	before := clone.DeepCopy()
@@ -481,10 +484,9 @@ func (r *VMCloneReconciler) pollCloneTask(
 	done, err := providerInstance.IsTaskComplete(ctx, clone.Status.TaskRef)
 	if err != nil {
 		logger.Error(err, "Clone task failed", "task_ref", clone.Status.TaskRef)
-		r.Recorder.Event(clone, "Warning", infrav1beta1.VMCloneReasonProviderError,
-			fmt.Sprintf("Clone task failed: %v", err))
-		return r.markFailed(ctx, clone, infrav1beta1.VMCloneReasonProviderError,
-			fmt.Sprintf("clone task failed: %v", err)), nil
+		detail := rpcFailureDetail(err)
+		r.Recorder.Event(clone, "Warning", infrav1beta1.VMCloneReasonProviderError, "Clone task failed: "+detail)
+		return r.markFailed(ctx, clone, infrav1beta1.VMCloneReasonProviderError, "clone task failed: "+detail), nil
 	}
 	if !done {
 		logger.Info("Clone task still in progress", "task_ref", clone.Status.TaskRef)
@@ -894,8 +896,7 @@ func (r *VMCloneReconciler) gateLinkedClone(
 	caps, err := reporter.GetCapabilities(ctx)
 	if err != nil {
 		logging.FromContext(ctx).Info("GetCapabilities failed; not issuing the linked clone until it answers (fail closed)", "error", err.Error())
-		return true, r.markPending(ctx, clone, cloneReasonLinkedUnsupported,
-			fmt.Sprintf("waiting for the provider's capabilities before a linked clone: %v", err))
+		return true, r.markPending(ctx, clone, cloneReasonLinkedUnsupported, cloneCapabilitiesLinkedWaitMessage)
 	}
 	if !caps.SupportsLinkedClones {
 		// e.g. libvirt, which disables linked clones until the source disk is
@@ -905,6 +906,12 @@ func (r *VMCloneReconciler) gateLinkedClone(
 	}
 	return false, ctrl.Result{}
 }
+
+// cloneCapabilitiesLinkedWaitMessage is the Pending message of a linked clone
+// whose provider did not answer GetCapabilities. It is constant: the
+// provider's (or the transport's) error goes to the manager log only.
+const cloneCapabilitiesLinkedWaitMessage = "waiting for the provider's capabilities before a linked clone " +
+	"(GetCapabilities failed; the cause is in the manager log)"
 
 // handleDeletion drops the finalizer without touching the produced target VM.
 func (r *VMCloneReconciler) handleDeletion(ctx context.Context, clone *infrav1beta1.VMClone) (ctrl.Result, error) {

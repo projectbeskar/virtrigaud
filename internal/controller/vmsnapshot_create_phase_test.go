@@ -158,7 +158,9 @@ func TestVMSnapshot_ProviderLookupFailureIsNeverReportedReady(t *testing.T) {
 	// The Provider exists but no client can be resolved for it.
 	require.NoError(t, r.Create(ctx, runningProvider(snapPhaseNS, "prov")))
 	for range 2 {
-		requireRetried(t, reconcileSnapshot(t, r), "Failed to get provider instance: dial provider: connection refused")
+		got := reconcileSnapshot(t, r)
+		requireRetried(t, got, "Failed to get provider instance: "+providerResolveFailedDetail)
+		assert.NotContains(t, got.Status.Message, "connection refused", "the resolver's own error stays in the manager log")
 	}
 	assert.Zero(t, spy.creates.Load(), "no SnapshotCreate was issued")
 	assert.NotContains(t, strings.Join(drainEvents(rec), "\n"), "SnapshotReady")

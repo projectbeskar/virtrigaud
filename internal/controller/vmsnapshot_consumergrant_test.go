@@ -108,7 +108,8 @@ func TestVMSnapshot_CreateWithGrantReachesTheProvider(t *testing.T) {
 	require.NotNil(t, c)
 	assert.Equal(t, infrav1beta1.VMSnapshotReasonProviderError, c.Reason,
 		"a granted Provider is resolved (and fails here only because the test has no resolver)")
-	assert.Contains(t, c.Message, "no remote resolver")
+	assert.Contains(t, c.Message, providerResolveFailedDetail)
+	assert.NotContains(t, c.Message, "no remote resolver", "the resolver's own error stays in the manager log")
 }
 
 func TestVMSnapshot_TaskPollRefusesUngrantedProvider(t *testing.T) {

@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -65,6 +66,17 @@ const snapshotReasonUnsupportedByProvider = "UnsupportedByProvider"
 // result recorded (no task, snapshot id or creation time), which is returned
 // to the initial phase so its create is issued.
 const snapshotCreateNotIssuedMessage = "Snapshot create was not issued to the provider; retrying"
+
+// snapshotCreateRetryingMessage is the status message and Ready condition
+// message of a routed (clustered) snapshot create that did not reach a
+// definite outcome and is retried. It is constant; the provider's answer is in
+// the snapshotReasonCreateRetrying Warning event and the manager log.
+const snapshotCreateRetryingMessage = "Snapshot creation did not reach a definite outcome on the provider and will be retried; " +
+	"the provider's answer is in the SnapshotCreateRetrying event"
+
+// snapshotReasonCreateRetrying is the Warning event reason recorded when a
+// routed snapshot create starts being retried.
+const snapshotReasonCreateRetrying = "SnapshotCreateRetrying"
 
 // VMSnapshotReconciler reconciles a VMSnapshot object
 type VMSnapshotReconciler struct {
@@ -284,8 +296,10 @@ func (r *VMSnapshotReconciler) createSnapshot(ctx context.Context, snapshot *inf
 	// Get provider instance
 	providerInstance, err := r.getProviderInstance(ctx, provider)
 	if err != nil {
+		// The resolver's error stays in the log (it can name a TLS Secret or
+		// a Service address).
 		logger.Error(err, "Failed to get provider instance")
-		return r.retrySnapshotCreate(ctx, snapshot, fmt.Sprintf("Failed to get provider instance: %v", err)), nil
+		return r.retrySnapshotCreate(ctx, snapshot, "Failed to get provider instance: "+providerResolveFailedDetail), nil
 	}
 
 	// Build snapshot create request
@@ -331,19 +345,25 @@ func (r *VMSnapshotReconciler) createSnapshot(ctx context.Context, snapshot *inf
 		// another VM depends on the disk (VM_DISK_IN_USE, a Conflict) fails the
 		// create, as on a single host. Single-host failures are unchanged.
 		logger.Info("Snapshot creation did not reach a definite outcome; retrying", "error", err.Error())
-		return r.retrySnapshotCreate(ctx, snapshot, fmt.Sprintf("Snapshot creation will be retried: %v", err)), nil
+		if c := meta.FindStatusCondition(snapshot.Status.Conditions, infrav1beta1.VMSnapshotConditionReady); c == nil ||
+			c.Message != snapshotCreateRetryingMessage {
+			r.Recorder.Event(snapshot, corev1.EventTypeWarning, snapshotReasonCreateRetrying,
+				"Snapshot creation will be retried: "+rpcFailureDetail(err))
+		}
+		return r.retrySnapshotCreate(ctx, snapshot, snapshotCreateRetryingMessage), nil
 	}
 	if err != nil {
 		logger.Error(err, "Failed to create snapshot")
+		detail := rpcFailureDetail(err)
 		snapshot.Status.Phase = infrav1beta1.SnapshotPhaseFailed
-		snapshot.Status.Message = fmt.Sprintf("Failed to create snapshot: %v", err)
+		snapshot.Status.Message = "Failed to create snapshot: " + detail
 		k8s.SetCondition(&snapshot.Status.Conditions, infrav1beta1.VMSnapshotConditionReady,
 			metav1.ConditionFalse, infrav1beta1.VMSnapshotReasonProviderError,
-			fmt.Sprintf("Snapshot creation failed: %v", err))
+			"Snapshot creation failed: "+detail)
 		k8s.SetCondition(&snapshot.Status.Conditions, infrav1beta1.VMSnapshotConditionCreating,
 			metav1.ConditionFalse, infrav1beta1.VMSnapshotReasonProviderError,
-			fmt.Sprintf("Snapshot creation failed: %v", err))
-		r.Recorder.Event(snapshot, "Warning", "SnapshotFailed", fmt.Sprintf("Failed to create snapshot: %v", err))
+			"Snapshot creation failed: "+detail)
+		r.Recorder.Event(snapshot, "Warning", "SnapshotFailed", "Failed to create snapshot: "+detail)
 		// Status update errors are intentionally ignored to avoid blocking reconciliation
 		_ = r.updateStatus(ctx, snapshot)
 		return ctrl.Result{RequeueAfter: snapshotFailedRecheckInterval}, nil
@@ -515,19 +535,22 @@ func (r *VMSnapshotReconciler) checkSnapshotCreation(ctx context.Context, snapsh
 
 	if taskStatus.IsCompleted {
 		if taskStatus.Error != "" {
-			// Task failed
+			// Task failed. The task's error is the provider's text: made
+			// safe before it reaches status and events.
+			logger.Info("Snapshot creation task failed", "task_ref", snapshot.Status.TaskRef, "error", taskStatus.Error)
+			detail := sanitizeProviderDetail(errors.New(taskStatus.Error))
 			snapshot.Status.Phase = infrav1beta1.SnapshotPhaseFailed
-			snapshot.Status.Message = fmt.Sprintf("Snapshot creation failed: %s", taskStatus.Error)
+			snapshot.Status.Message = "Snapshot creation failed: " + detail
 			snapshot.Status.TaskRef = ""
 
 			k8s.SetCondition(&snapshot.Status.Conditions, infrav1beta1.VMSnapshotConditionReady,
 				metav1.ConditionFalse, infrav1beta1.VMSnapshotReasonProviderError,
-				fmt.Sprintf("Snapshot creation failed: %s", taskStatus.Error))
+				"Snapshot creation failed: "+detail)
 			k8s.SetCondition(&snapshot.Status.Conditions, infrav1beta1.VMSnapshotConditionCreating,
 				metav1.ConditionFalse, infrav1beta1.VMSnapshotReasonProviderError,
 				"Snapshot creation failed")
 
-			r.Recorder.Event(snapshot, "Warning", "SnapshotFailed", fmt.Sprintf("Snapshot creation failed: %s", taskStatus.Error))
+			r.Recorder.Event(snapshot, "Warning", "SnapshotFailed", "Snapshot creation failed: "+detail)
 		} else {
 			// Task succeeded
 			snapshot.Status.Phase = infrav1beta1.SnapshotPhaseReady
