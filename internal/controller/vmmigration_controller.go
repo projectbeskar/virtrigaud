@@ -247,9 +247,8 @@ func (r *VMMigrationReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	}
 
 	// Add finalizer if needed
-	const finalizerName = "vmmigration.infra.virtrigaud.io/finalizer"
-	if !controllerutil.ContainsFinalizer(migration, finalizerName) {
-		controllerutil.AddFinalizer(migration, finalizerName)
+	if !controllerutil.ContainsFinalizer(migration, vmMigrationFinalizer) {
+		controllerutil.AddFinalizer(migration, vmMigrationFinalizer)
 		if err := r.Update(ctx, migration); err != nil {
 			logger.Error(err, "Failed to add finalizer")
 			metrics.RecordError(errReasonAddFinalizer, metrics.ComponentManager)
@@ -268,26 +267,12 @@ func (r *VMMigrationReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		return ctrl.Result{Requeue: true}, nil
 	}
 
-	// Short-circuit for migrations in terminal failed state (max retries exceeded)
-	// This prevents continuous reconciliation of permanently failed migrations
-	if migration.Status.Phase == infrav1beta1.MigrationPhaseFailed {
-		if migration.Spec.Options != nil && migration.Spec.Options.RetryPolicy != nil {
-			maxRetries := int32(3) // Default
-			if migration.Spec.Options.RetryPolicy.MaxRetries != nil {
-				maxRetries = *migration.Spec.Options.RetryPolicy.MaxRetries
-			}
-			if migration.Status.RetryCount >= maxRetries {
-				// Migration has permanently failed, no need to reconcile further
-				logger.V(1).Info("Migration permanently failed, skipping reconciliation",
-					"retries", migration.Status.RetryCount,
-					"max_retries", maxRetries)
-				return ctrl.Result{}, nil
-			}
-		} else {
-			// No retry policy, migration is permanently failed
-			logger.V(1).Info("Migration failed with no retry policy, skipping reconciliation")
-			return ctrl.Result{}, nil
-		}
+	// A migration in a terminal Failed state (no retry policy, or its retries
+	// used up) is not reconciled further, except to delete the source
+	// snapshot it created (handleTerminalFailure): without that, the snapshot
+	// stays on the LIVE source VM until the VMMigration is deleted.
+	if migrationTerminallyFailed(migration) {
+		return r.handleTerminalFailure(ctx, migration)
 	}
 
 	// Every cross-namespace Provider / VMClass the migration acts through or
@@ -1859,31 +1844,18 @@ func (r *VMMigrationReconciler) handleFailedPhase(ctx context.Context, migration
 	logger := logging.FromContext(ctx)
 	logger.Info("Migration is in failed state", "message", migration.Status.Message)
 
-	// Check if retry is configured and allowed
-	if migration.Spec.Options == nil || migration.Spec.Options.RetryPolicy == nil {
-		logger.Info("No retry policy configured, migration remains failed")
-		r.cleanupSnapshotOnTerminalFailure(ctx, migration)
-		return ctrl.Result{}, nil
+	// No retry policy, or its retries used up: the migration stays failed and
+	// only its source snapshot is cleaned up. Reconcile routes such a
+	// migration to handleTerminalFailure before any phase handler; this keeps
+	// a direct call consistent with it.
+	if migrationTerminallyFailed(migration) {
+		return r.handleTerminalFailure(ctx, migration)
 	}
 
 	retryPolicy := migration.Spec.Options.RetryPolicy
 	maxRetries := int32(3) // Default
 	if retryPolicy.MaxRetries != nil {
 		maxRetries = *retryPolicy.MaxRetries
-	}
-
-	// Check if we've exceeded max retries
-	if migration.Status.RetryCount >= maxRetries {
-		logger.Info("Max retries exceeded, migration remains failed",
-			"retries", migration.Status.RetryCount,
-			"max_retries", maxRetries)
-		migration.Status.Message = fmt.Sprintf("Migration failed after %d retries: %s",
-			migration.Status.RetryCount, migration.Status.Message)
-		r.cleanupSnapshotOnTerminalFailure(ctx, migration)
-		if err := r.updateStatus(ctx, migration); err != nil {
-			return ctrl.Result{}, err
-		}
-		return ctrl.Result{}, nil
 	}
 
 	// Calculate backoff delay
@@ -1954,38 +1926,19 @@ func (r *VMMigrationReconciler) handleFailedPhase(ctx context.Context, migration
 	return ctrl.Result{Requeue: true}, nil
 }
 
-// cleanupSnapshotOnTerminalFailure best-effort removes the migration-created
-// source snapshot when the migration has reached a terminal Failed state and is
-// not going to be retried.
-//
-// Without this, a migration that fails before Ready (e.g. no retry policy, so it
-// is immediately terminal) leaves its snapshot on the LIVE source VM until the
-// CR is deleted — which, combined with the await fix in deleteSourceSnapshot, is
-// the accumulation observed on real hardware. The deletion is best-effort: a
-// cleanup error is logged and swallowed so a transient provider failure cannot
-// wedge a migration that is already terminal. Because deleteSourceSnapshot now
-// awaits the task, this usually succeeds on the first pass. Skipped when the
-// user opted out (CleanupPolicy=Never), when there is no migration-created
-// snapshot, or when the user supplied their own snapshot (SnapshotRef set).
-func (r *VMMigrationReconciler) cleanupSnapshotOnTerminalFailure(ctx context.Context, migration *infrav1beta1.VMMigration) {
-	if !cleanupAllowed(migration) || migration.Status.SnapshotID == "" || migration.Spec.Source.SnapshotRef != nil {
-		return
-	}
-
-	logger := logging.FromContext(ctx)
-	snapshotID := migration.Status.SnapshotID
-	if err := r.deleteSourceSnapshot(ctx, migration); err != nil {
-		logger.Error(err, "Failed to delete source snapshot on terminal failure (best-effort, continuing)",
-			"snapshot_id", snapshotID)
-		return
-	}
-	logger.Info("Source snapshot deleted on terminal failure", "snapshot_id", snapshotID)
-}
-
 // handleDeletion handles deletion of VMMigration resources
 func (r *VMMigrationReconciler) handleDeletion(ctx context.Context, migration *infrav1beta1.VMMigration) (ctrl.Result, error) {
 	logger := logging.FromContext(ctx)
 	logger.Info("Handling VMMigration deletion")
+
+	// The source snapshot this migration created comes first: while it may
+	// still be on the source VM and its delete can still succeed, the
+	// finalizer is kept (and nothing else is cleaned up yet), so the snapshot
+	// is never left untracked — on libvirt its metadata would later block
+	// deleting the source VM. force-delete releases it anyway.
+	if hold, res, err := r.releaseSourceSnapshotForDeletion(ctx, migration); hold {
+		return res, err
+	}
 
 	// Perform cleanup operations
 	cleanupErrors := []error{}
@@ -2023,18 +1976,7 @@ func (r *VMMigrationReconciler) handleDeletion(ctx context.Context, migration *i
 		}
 	}
 
-	// 3. Delete migration-created snapshot if exists (unless the user opted out
-	// with CleanupPolicy=Never).
-	if cleanupAllowed(migration) && migration.Status.SnapshotID != "" && migration.Spec.Source.SnapshotRef == nil {
-		if err := r.deleteSourceSnapshot(ctx, migration); err != nil {
-			logger.Error(err, "Failed to delete source snapshot during deletion")
-			cleanupErrors = append(cleanupErrors, fmt.Errorf("snapshot cleanup: %w", err))
-		} else {
-			logger.Info("Source snapshot cleaned up during deletion")
-		}
-	}
-
-	// 4. Delete partially created target VM if migration failed
+	// 3. Delete partially created target VM if migration failed
 	// IMPORTANT: Never delete VMs that have been marked as migration-completed
 	// This ensures that successfully migrated VMs persist independently of the migration resource
 	if migration.Status.Phase == infrav1beta1.MigrationPhaseFailed || migration.Status.Phase == infrav1beta1.MigrationPhaseCreating {
@@ -2095,8 +2037,7 @@ func (r *VMMigrationReconciler) handleDeletion(ctx context.Context, migration *i
 	}
 
 	// Remove finalizer
-	const finalizerName = "vmmigration.infra.virtrigaud.io/finalizer"
-	controllerutil.RemoveFinalizer(migration, finalizerName)
+	controllerutil.RemoveFinalizer(migration, vmMigrationFinalizer)
 	if err := r.Update(ctx, migration); err != nil {
 		logger.Error(err, "Failed to remove finalizer")
 		return ctrl.Result{}, err
@@ -3430,18 +3371,42 @@ func (r *VMMigrationReconciler) waitForSourceBinding(ctx context.Context, migrat
 	return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 }
 
-// deleteSourceSnapshot deletes the migration-created snapshot
+// deleteSourceSnapshot deletes the migration-created snapshot of the source VM
+// and, once nothing is left to delete, clears status.snapshotID (in memory;
+// the caller persists it). It returns nil when the snapshot was deleted and
+// when it is provably gone or can no longer be addressed by anyone: the source
+// VirtualMachine is not found, its Provider in the migration's own namespace is
+// not found, or the provider answers that the snapshot is not found. Any other
+// failure — a read error, a cross-namespace Provider this namespace may not use
+// (or that does not exist), no provider call possible for the VM, the provider
+// client not resolvable, a failed or unfinished delete — is returned: the
+// snapshot may still be on the source VM and a retry can still delete it.
 func (r *VMMigrationReconciler) deleteSourceSnapshot(ctx context.Context, migration *infrav1beta1.VMMigration) error {
 	logger := logging.FromContext(ctx)
 
 	// Get source VM
 	sourceVM, err := r.getSourceVM(ctx, migration)
+	if errors.IsNotFound(err) {
+		logger.Info("Source VM is gone; no source snapshot left to delete",
+			"vm", migration.Spec.Source.VMRef.Name, "snapshot_id", migration.Status.SnapshotID)
+		migration.Status.SnapshotID = ""
+		return nil
+	}
 	if err != nil {
 		return fmt.Errorf("failed to get source VM: %w", err)
 	}
 
-	// Get source provider
+	// Get source provider. A same-namespace Provider that is gone leaves
+	// nothing to address the snapshot through; a cross-namespace one that is
+	// missing is refused like an ungranted one (ConsumerNotAllowed, no
+	// existence oracle) and keeps the cleanup pending.
 	sourceProvider, err := r.sourceProviderFor(ctx, migration, sourceVM)
+	if errors.IsNotFound(err) && !isConsumerNotAllowed(err) {
+		logger.Info("Source Provider is gone; no source snapshot can be deleted",
+			"snapshot_id", migration.Status.SnapshotID, "error", err.Error())
+		migration.Status.SnapshotID = ""
+		return nil
+	}
 	if err != nil {
 		return fmt.Errorf("resolve source provider: %w", err)
 	}
@@ -3460,6 +3425,13 @@ func (r *VMMigrationReconciler) deleteSourceSnapshot(ctx context.Context, migrat
 	// Delete snapshot
 	logger.Info("Deleting source snapshot", "snapshot_id", migration.Status.SnapshotID)
 	taskRef, err := providerInstance.SnapshotDelete(ctx, sourceRef, migration.Status.SnapshotID)
+	if contracts.IsNotFound(err) {
+		// Already gone (e.g. an earlier delete that completed after its
+		// await timed out): an idempotent success.
+		logger.Info("Source snapshot is already gone", "snapshot_id", migration.Status.SnapshotID)
+		migration.Status.SnapshotID = ""
+		return nil
+	}
 	if err != nil {
 		return fmt.Errorf("failed to delete snapshot: %w", err)
 	}

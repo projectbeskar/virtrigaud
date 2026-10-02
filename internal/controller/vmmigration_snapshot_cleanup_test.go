@@ -266,7 +266,9 @@ func TestHandleFailedPhase_TerminalCleansSnapshot(t *testing.T) {
 
 // TestHandleFailedPhase_TerminalCleanupBestEffort proves a snapshot-cleanup
 // failure on terminal failure does NOT wedge the migration: handleFailedPhase
-// still returns without error.
+// still returns without error, keeps the snapshot recorded and retries the
+// delete with the blocked-VM backoff (see vmmigration_snapshot_hold_test.go
+// for the same through Reconcile).
 func TestHandleFailedPhase_TerminalCleanupBestEffort(t *testing.T) {
 	ctx := context.Background()
 	prov := &countingSnapshotProvider{
@@ -281,8 +283,9 @@ func TestHandleFailedPhase_TerminalCleanupBestEffort(t *testing.T) {
 	migration.Status.Message = "export failed"
 	r, _ := newSnapshotReconciler(t, prov, sourceVM, sourceProvider, migration)
 
-	_, err := r.handleFailedPhase(ctx, migration)
+	res, err := r.handleFailedPhase(ctx, migration)
 	require.NoError(t, err, "a best-effort cleanup failure must not wedge a terminal migration")
+	assert.Equal(t, blockedRetryMin, res.RequeueAfter, "the failed cleanup is retried with the blocked-VM backoff")
 
 	assert.EqualValues(t, 1, prov.snapshotDeleteCalls.Load(), "cleanup was attempted")
 	// The delete failed, so the latch must retain the ID for a later retry/delete.
