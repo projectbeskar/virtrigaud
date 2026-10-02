@@ -5,6 +5,53 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-10-11 21:27] - Deleting a Provider that is still in use waits, with its runtime kept, instead of orphaning its VMs (ADR-0010)
+**Author:** @wrkode (William Rizzo)
+
+> **Operator note.**
+> - **Behavior change:** a `Provider` now carries the finalizer `provider.infra.virtrigaud.io/in-use`, added to every existing `Provider` when the manager is rolled. Deleting a `Provider` while any `VirtualMachine` (in any namespace), `VMSnapshot`, in-flight `VMClone` or `VMMigration` still needs it leaves it `Terminating`, with its runtime running, until they are gone (`DeleteBlocked=True/ProviderInUse`). Delete VMs before their `Provider` or namespace.
+> - **Namespace deletion:** Kubernetes deletes the provider runtime's pods with the namespace. A VM whose delete misses the pod's termination window is held (`ProviderUnavailable`), not orphaned; the `Provider` shows `DeleteBlocked=True/ProviderInUseRuntimeNotKept` and the namespace stays `Terminating` until an administrator acts.
+> - **Escape hatch:** `virtrigaud.io/force-delete: "true"` on the `Provider` releases it at once, with a `Warning` event `ProviderForceDeleted`; the hypervisor VMs left are unmanaged.
+> - **Rollback / uninstall:** an older manager, or no manager, never removes the finalizer; delete VMs and Providers first, or remove it by hand (`docs/upgrading.md`).
+
+### Fixed
+- `internal/controller/provider_controller.go`, `internal/controller/provider_inuse.go`: deleting a `Provider` no longer orphans the hypervisor VMs of the VMs that use it.
+  - **Cause:** the `Provider` had no finalizer, and its deletion only removed its runtime. Each of its VMs then took the "Provider not found in the VM's own namespace" delete path, which releases the VM finalizer without a provider `Delete`: the hypervisor VM kept running, unmanaged. Deleting the namespace did the same to most of its VMs. VMs in other namespaces were held forever.
+  - **Hold:** while anything needs it, a `Provider` being deleted keeps its runtime reconciled (phase `Running`, so the resolver keeps serving it) and shows `DeleteBlocked=True/ProviderInUse`. The message counts the objects per kind and per namespace (at most 10 namespaces, never an object name). One `Warning` event `ProviderDeleteBlocked` is recorded when the hold begins or its reason changes. A repeated hold writes nothing: no capability fetch, no `lastHealthCheck` refresh, no status write unless something changed.
+  - **What holds it:**
+    - a `VirtualMachine` whose placement Provider it is (`status.boundProvider`, else `spec.providerRef`), in any namespace, until its `VirtualMachine` finalizer is gone;
+    - a `VMSnapshot` of such a VM with its finalizer;
+    - an in-flight `VMClone` of such a VM;
+    - a `VMMigration` in flight or being deleted, out of such a VM or into this `Provider`.
+  - **Release:** once nothing holds it, the runtime is removed and the finalizer released. Watches on `VirtualMachine`, `VMSnapshot`, `VMClone` and `VMMigration` re-drive only a `Provider` being deleted, and only for a create, a delete, or an update that changes what the object holds. A 2-minute backstop covers a missed event.
+  - **Lookups:** through the existing `virtrigaud.io/placement-provider` VM index and a new `virtrigaud.io/provider-in-use` index on `VMSnapshot`, `VMClone` and `VMMigration`. Nothing lists every object.
+  - **Runtime not kept:** when the `Provider`'s namespace is being deleted, or it was deleted with foreground cascading deletion, the controller does not touch the runtime. It leaves `status.runtime` as it was and reports `DeleteBlocked=True/ProviderInUseRuntimeNotKept`.
+  - **Escape hatch:** `virtrigaud.io/force-delete: "true"` releases the `Provider` at once and records a `Warning` event `ProviderForceDeleted` with the counts.
+  - **Unchanged:** a `Provider` being deleted without the finalizer (deleted before the upgrade) only has its runtime removed, as before. The VM delete path's "Provider not found in the VM's own namespace" release is kept.
+- `api/infra.virtrigaud.io/v1beta1/provider_webhook.go`: an update that leaves `spec` unchanged is always admitted. Before, a `Provider` predating the topology×type rule and breaking it could never take or lose a finalizer, so it could never be deleted. The `spec.type` / `spec.topology` immutability checks are unchanged.
+
+### Added
+- `api/infra.virtrigaud.io/v1beta1/provider_types.go`: `ProviderInUseFinalizer` (Go constant; no CRD schema change).
+- `docs/adr/0010-provider-in-use-finalizer.md`: ADR-0010 (Accepted, maintainer decision 2026-10-01), with alternatives (validating webhook, docs only, runtime outside the tenant namespace, timeout) and the namespace-deletion limit. Indexed in `docs/adr/README.md`.
+- `internal/controller/provider_inuse_test.go`, `internal/controller/provider_inuse_envtest_test.go`:
+  - unit tests: what holds a Provider, case by case; hold and release; a repeated hold writes nothing; the cross-namespace consumer; force-delete; namespace deletion and foreground cascade; the legacy path; message bounds; watches and predicate;
+  - envtest specs, in a real manager: upgrade adds the finalizer; hold with the runtime kept, released through the watch; the cross-namespace consumer; simulated namespace-deletion ordering; force-delete with its event.
+- `api/infra.virtrigaud.io/v1beta1/provider_webhook_test.go`: a metadata-only update of a legacy invalid Provider is admitted; a spec change on it is still refused.
+
+### Changed
+- `internal/controller/provider_controller.go`: the runtime part of the reconcile is split out (`reconcileRuntimeStatus`, `writeProviderStatus`) so a live and a held Provider share it. Added RBAC markers (`vmsnapshots`/`vmclones`/`vmmigrations` and `namespaces`: get/list/watch). The manager already had these verbs and `providers/finalizers: update`, so the generated role does not change.
+- `internal/controller/provider_controller_test.go`: the envtest spec asserts the finalizer and drops it on cleanup.
+- `docs/upgrading.md` (breaking-change row and rollback caveat), `docs/vm-provider-binding.md` (new "Deleting a Provider" section), `docs/release-notes/next.md`.
+
+### Why
+A `Provider` deleted while in use, directly or with its namespace, left every hypervisor VM it managed running with nothing tracking it, an audit finding in regulated environments. The maintainer chose an in-use finalizer (Option A) over an admission webhook or documentation only.
+
+### Impact
+- [x] Breaking change
+- [x] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-10-11 21:00] - Isolate the held-watch envtest specs from objects other specs left behind
 **Author:** @wrkode (William Rizzo)
 
