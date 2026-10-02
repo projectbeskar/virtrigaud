@@ -380,6 +380,30 @@ providers), and rollback caveats in
   re-read from the API server right before the call, so a second, untracked
   snapshot or clone cannot be made from a cache that does not show the first
   one's result yet.
+- **A `VMMigration` no longer leaves the source snapshot it created behind.**
+  Deleting a migration whose snapshot `Delete` failed, or whose source
+  `Provider` could not be reached, released it anyway and left the snapshot
+  untracked on the live source VM (on libvirt it then blocked deleting that
+  VM); a migration that failed for good never cleaned its snapshot up at all.
+  A failed-for-good migration now deletes its snapshot, and a deletion waits
+  for it: `SnapshotCleanup=False/SnapshotCleanupPending` (constant message,
+  one `Warning` event), retried with a backoff from 15 s doubling to 5 min.
+  A gone source VM, a gone `Provider` in the migration's own namespace, or a
+  snapshot the provider no longer finds releases it.
+  `virtrigaud.io/force-delete: "true"` on the `VMMigration` releases it anyway
+  with a `SnapshotLeftOnHypervisor` Warning naming the snapshot
+  (→ [Upgrade guide](docs/upgrading.md#breaking-changes)).
+- A `VMSnapshot` being deleted while its VM's `Provider` cannot be read or
+  reached is held with `Ready=False/ProviderUnavailable` and the same backoff
+  (it was retried every 30 s with no status), and `force-delete` now releases
+  it, with a `SnapshotLeftOnHypervisor` Warning.
+- `VMClone`, `VMSnapshot` and `VMMigration` status and events no longer quote
+  the provider resolver's error (which can name the provider's TLS Secret,
+  Service address and runtime phase) or a gRPC connection error; the cause is
+  in the manager log. Other provider answers in them are sanitized
+  (→ [Upgrade guide](docs/upgrading.md#behavior-changes-that-are-visible-but-not-breaking)).
+- A `VMMigration` status write that hits a conflict is retried on the live
+  object without sleeping in the reconcile.
 - A `VMMigration` with `deleteAfterMigration: true` whose target stays off
   (`powerOn: false`) records a `SourceDeletedTargetNotStarted` Warning when it
   deletes the source.

@@ -164,6 +164,51 @@ CI's Supply Chain Vulnerability Scan (`govulncheck`) failed on every PR because 
 - [ ] Config change only
 - [ ] Documentation only
 
+## [2026-10-02 20:26] - VMMigration keeps its finalizer until its source snapshot is gone; VMSnapshot force-delete works while its Provider is unreachable; no resolver text in clone/snapshot/migration status
+**Author:** @wrkode (William Rizzo)
+
+### Fixed
+- `internal/controller/vmmigration_controller.go`, `vmmigration_snapshot_cleanup.go` (new): a `VMMigration` no longer leaves the source snapshot it created untracked on the live source VM.
+  - **Deletion:** a failed `SnapshotDelete` or an unresolvable source Provider used to be added to `cleanupErrors`, and the finalizer was released anyway. On libvirt the leftover snapshot metadata later blocks deleting the source VM.
+    - The source-snapshot step now runs first. While the snapshot may still exist and a retry can still delete it, the finalizer is kept.
+    - The hold shows `SnapshotCleanup=False/SnapshotCleanupPending` with a constant message, and one `Warning` event `SnapshotCleanupPending` when it begins. The cause goes to the manager log only.
+    - A repeated hold writes nothing. Retries use the blocked-VM backoff (`blockedRetryBackoff`, 15 s doubling to 5 min, from when the hold began). The reconcile triggered by the hold's own status write does not re-send the delete.
+  - **Classification (`deleteSourceSnapshot`):** these release the hold, because nothing is left to delete:
+    - the source VM is not found;
+    - the source Provider is not found in the migration's own namespace;
+    - the provider answers that the snapshot is not found.
+
+    A missing cross-namespace Provider is still a `ConsumerNotAllowed` hold. The Ready-phase cleanup also completes in these three cases now; before, it retried every 5 minutes forever.
+  - **Escape hatch:** `virtrigaud.io/force-delete: "true"` on the `VMMigration` releases it anyway. A `SnapshotLeftOnHypervisor` Warning names the snapshot and the source VM. Setting it while a hold waits acts at once, with no further provider call.
+  - **Terminal failure:** `cleanupSnapshotOnTerminalFailure` was unreachable. The terminal-`Failed` short-circuit in `Reconcile` returned before `handleFailedPhase` called it, and the tests called `handleFailedPhase` directly. A migration that failed for good (no retry policy, or its retries used up; `migrationTerminallyFailed`) now goes to `handleTerminalFailure`. That handler deletes the snapshot and persists the cleared `status.snapshotID`, or holds and retries as above. The unreachable "Migration failed after N retries" message rewrite is gone; it would have grown on every reconcile.
+- `internal/controller/vmsnapshot_controller.go`: a deleting `VMSnapshot` is now held when its VM's Provider cannot be read or resolved to a client.
+  - **Before:** it was retried every 30 s with no status, and `virtrigaud.io/force-delete` was ignored.
+  - **Now:** it shows `Ready=False` and `Deleting=False` with reason `ProviderUnavailable` and a constant message, and retries with the blocked-VM backoff. Force-delete releases it with a `SnapshotLeftOnHypervisor` Warning (`retainForUnavailableSnapshotProvider`).
+- `internal/controller/vmmigration_controller.go` (`updateStatus`): conflicts are now retried with `retry.RetryOnConflict` on a live re-read (APIReader), instead of `time.Sleep` plus a cache read. A VMMigration that was re-created meanwhile is never written.
+
+### Security
+- `internal/controller/vmclone_controller.go`, `vmclone_clustered.go`, `vmsnapshot_controller.go`, `vmmigration_controller.go`, `rpc_failure_detail.go` (new): raw resolver and transport errors are no longer copied into consumer-readable status and events. Low; information disclosure (ADR-0007 A6, threat 5).
+  - **What leaked:** the provider resolver's error can name the provider's TLS Secret (namespace/name), its Service ClusterIP:port and its runtime phase. It went into the `VMClone` status. The same class existed in the `VMSnapshot` create retry and in the `VMMigration` "Failed to get provider instance" messages.
+  - **Now:** a constant `providerResolveFailedDetail` replaces the resolver's error, and the cause goes to the manager log. `rpcFailureDetail` renders provider RPC errors: a gRPC transport failure becomes a constant, and any other answer goes through `sanitizeProviderDetail`.
+  - **Where it applies:**
+    - clone and clone-task failures;
+    - the clustered name-conflict event and the clustered failure message;
+    - snapshot create and task failures;
+    - migration snapshot, export and import failures (`migrationFailureDetail`, `providerResolveError`).
+  - **Clustered clone waits** (`HostUnavailable`, disk check, retryable) and **GetCapabilities waits** now keep a constant condition message. The provider's answer goes into a Warning event when the wait begins. A routed `VMSnapshot` create retry records a `SnapshotCreateRetrying` event.
+
+### Changed
+- `docs/upgrading.md`, `docs/release-notes/next.md`, `examples/vmmigration-basic.yaml`: document the held `VMMigration` and `VMSnapshot` deletes, the force-delete escape hatch and the status-text change.
+
+### Why
+A deleted or terminally failed migration could leave a snapshot on the live source VM that nothing tracks. On libvirt that snapshot later blocks the source VM's own deletion. Resolver errors in tenant-readable status disclosed infrastructure details to cross-namespace consumers.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-10-01 11:27] - VMClone/VMSnapshot holds no longer hot-loop the provider or follow metadata edits; accepted clones survive concurrent edits; VMClone and VMMigration honor powerOn
 **Author:** @wrkode (William Rizzo)
 
