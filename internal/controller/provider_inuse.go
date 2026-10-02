@@ -117,6 +117,11 @@ const (
 		"other namespaces stay held until annotated %s=true or %s=true. Their hypervisor VMs are left unmanaged."
 )
 
+// providerForceDeletedUncheckedMessage is the ProviderForceDeleted message
+// when what still used the Provider could not be checked.
+const providerForceDeletedUncheckedMessage = forceDeleteAnnotation + "=true: releasing the Provider although what still uses it " +
+	"could not be checked (see the manager log). Its runtime is removed; any hypervisor VMs it still managed are left unmanaged."
+
 // providerUsage counts the objects that still need a Provider being deleted.
 type providerUsage struct {
 	vms        int
@@ -422,12 +427,18 @@ func (r *ProviderReconciler) handleDeletion(ctx context.Context, provider *infra
 		return ctrl.Result{}, nil
 	}
 
+	forced := hasProviderForceDeleteAnnotation(provider)
 	usage, err := providerUsageOf(ctx, r.Client, key)
+	usageKnown := err == nil
 	if err != nil {
 		metrics.RecordError(errReasonProviderInUse, metrics.ComponentManager)
-		return ctrl.Result{}, fmt.Errorf("check what still uses Provider %s: %w", key, err)
+		if !forced {
+			return ctrl.Result{}, fmt.Errorf("check what still uses Provider %s: %w", key, err)
+		}
+		// The escape hatch must work even when the check cannot run.
+		logger.Error(err, "Could not check what still uses the Provider; force-delete releases it anyway",
+			"provider", key.String(), "annotation", forceDeleteAnnotation)
 	}
-	forced := hasProviderForceDeleteAnnotation(provider)
 	if usage.total() > 0 && !forced {
 		return r.holdInUseProvider(ctx, provider, usage)
 	}
@@ -439,6 +450,10 @@ func (r *ProviderReconciler) handleDeletion(ctx context.Context, provider *infra
 	if err := k8s.RemoveFinalizer(ctx, r.Client, provider, infravirtrigaudiov1beta1.ProviderInUseFinalizer); err != nil {
 		metrics.RecordError(errReasonProviderFinalizer, metrics.ComponentManager)
 		return ctrl.Result{}, fmt.Errorf("remove in-use finalizer from Provider %s: %w", key, err)
+	}
+	if !usageKnown {
+		r.recordProviderEvent(provider, corev1.EventTypeWarning, eventReasonProviderForceDeleted, providerForceDeletedUncheckedMessage)
+		return ctrl.Result{}, nil
 	}
 	if usage.total() > 0 {
 		msg := providerForceDeletedMessage(usage)

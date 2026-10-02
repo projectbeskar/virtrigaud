@@ -312,6 +312,34 @@ func TestProviderInUse_ForceDeleteOfAnUnusedProviderRecordsNoWarning(t *testing.
 	assert.Empty(t, drainEvents(rec), "nothing was left unmanaged")
 }
 
+// TestProviderInUse_ForceDeleteWorksWhenTheCheckCannotRun pins that the escape
+// hatch never depends on the in-use lookup: without the field indexes the
+// check fails, a plain delete is retried, and force-delete still releases.
+func TestProviderInUse_ForceDeleteWorksWhenTheCheckCannotRun(t *testing.T) {
+	ctx := context.Background()
+	sch := newProviderSAScheme(t)
+	p := inUseProvider()
+	cli := fake.NewClientBuilder().WithScheme(sch).WithObjects(p).
+		WithStatusSubresource(&infravirtrigaudiov1beta1.Provider{}).Build() // no indexes
+	rec := record.NewFakeRecorder(8)
+	r := &ProviderReconciler{Client: cli, Scheme: sch, Recorder: rec}
+	deleteInUseProvider(t, r)
+
+	_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: inUseProviderKey})
+	require.Error(t, err, "a check that cannot run never releases the Provider")
+	assert.False(t, providerGone(t, r))
+
+	got := getInUseProvider(t, r)
+	got.Annotations = map[string]string{forceDeleteAnnotation: "true"}
+	require.NoError(t, r.Update(ctx, got))
+	reconcileProvider(t, r)
+	assert.True(t, providerGone(t, r))
+	events := drainEvents(rec)
+	require.Len(t, events, 1)
+	assert.Contains(t, events[0], "Warning "+eventReasonProviderForceDeleted)
+	assert.Contains(t, events[0], "could not be checked")
+}
+
 // TestProviderInUse_WhatHolds pins ADR-0010 D2, case by case.
 func TestProviderInUse_WhatHolds(t *testing.T) {
 	now := metav1.Now()
