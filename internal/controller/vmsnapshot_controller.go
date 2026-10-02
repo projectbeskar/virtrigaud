@@ -660,10 +660,6 @@ func (r *VMSnapshotReconciler) handleDeletion(ctx context.Context, snapshot *inf
 		// Get the provider. A Provider in another namespace that does not select
 		// this one (spec.consumerNamespaceSelector) is never used.
 		provider, err := getVMProvider(ctx, r.Client, vm)
-		if err != nil && !isConsumerNotAllowed(err) {
-			logger.Error(err, "Failed to get provider", "provider", vm.Spec.ProviderRef.Name)
-			return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
-		}
 
 		// Address the VM (ADR-0007 Addendum A, A1) before resolving a client for
 		// the Provider. An ungranted (or revoked) cross-namespace Provider, a
@@ -672,12 +668,37 @@ func (r *VMSnapshotReconciler) handleDeletion(ctx context.Context, snapshot *inf
 		// never sent a per-VM call. The snapshot is then still on the
 		// hypervisor: the finalizer stays and the delete is retried with
 		// backoff, unless force-delete says to leave the snapshot behind.
-		refErr := err
+		// A Provider that cannot be read, or that has no usable client (its
+		// runtime not Running, TLS or dial failing — every provider rollout),
+		// was sent nothing either and is held the same way (unavailableErr).
+		var refErr, unavailableErr error
 		var ref contracts.VMRef
-		if refErr == nil {
+		var providerInstance contracts.Provider
+		switch {
+		case isConsumerNotAllowed(err):
+			refErr = err
+		case err != nil:
+			unavailableErr = err
+		default:
 			ref, refErr = vmRefFor(vm, provider)
+			if refErr == nil {
+				providerInstance, unavailableErr = r.getProviderInstance(ctx, provider)
+			}
 		}
-		if refErr != nil {
+		if unavailableErr != nil {
+			if !hasSnapshotForceDeleteAnnotation(snapshot) {
+				return r.retainForUnavailableSnapshotProvider(ctx, snapshot, unavailableErr), nil
+			}
+			// The cause stays in the log: resolver text can name a TLS
+			// Secret or a Service address.
+			msg := fmt.Sprintf("%s=true: removing the VMSnapshot although the manager could not reach the VM's Provider %q, "+
+				"so snapshot %q of VM %q was not deleted; it is left on the hypervisor", forceDeleteAnnotation,
+				vm.Spec.ProviderRef.Name, snapshot.Status.SnapshotID, vm.Status.ID)
+			logger.Error(unavailableErr, "Cannot reach the provider to delete the snapshot but force-delete annotation is set; removing finalizer, the snapshot is left on the hypervisor",
+				"snapshot_id", snapshot.Status.SnapshotID, "vm_id", vm.Status.ID, "annotation", forceDeleteAnnotation)
+			r.Recorder.Event(snapshot, corev1.EventTypeWarning, eventReasonSnapshotLeftOnHypervisor, msg)
+			removed = ""
+		} else if refErr != nil {
 			if !hasSnapshotForceDeleteAnnotation(snapshot) {
 				return r.retainForUnaddressableSnapshotDelete(ctx, snapshot, refErr), nil
 			}
@@ -692,9 +713,6 @@ func (r *VMSnapshotReconciler) handleDeletion(ctx context.Context, snapshot *inf
 				"snapshot_id", snapshot.Status.SnapshotID, "vm_id", vm.Status.ID, "reason", vmRefErrorReason(refErr), "annotation", forceDeleteAnnotation)
 			r.Recorder.Event(snapshot, corev1.EventTypeWarning, eventReasonSnapshotLeftOnHypervisor, msg)
 			removed = ""
-		} else if providerInstance, err := r.getProviderInstance(ctx, provider); err != nil {
-			logger.Error(err, "Failed to get provider instance")
-			return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 		} else {
 			// Delete the snapshot via provider
 			logger.Info("Calling provider to delete snapshot", "snapshot_id", snapshot.Status.SnapshotID, "vm_id", vm.Status.ID)
@@ -892,6 +910,41 @@ func (r *VMSnapshotReconciler) retainForUnaddressableSnapshotDelete(ctx context.
 		vmRefWaitMessage(err), snapshotDeleteRetryMax, forceDeleteAnnotation, err)
 	r.holdSnapshotDelete(ctx, snapshot, reason, msg, msg)
 	return ctrl.Result{RequeueAfter: retryAfter}
+}
+
+// snapshotDeleteProviderUnavailableMessage is the status message (and Ready /
+// Deleting condition message) of a VMSnapshot whose delete was not sent
+// because the manager could not reach the VM's Provider
+// (retainForUnavailableSnapshotProvider). It is constant and carries no
+// resolver text.
+var snapshotDeleteProviderUnavailableMessage = fmt.Sprintf("The manager cannot reach the VM's Provider, so the snapshot delete "+
+	"was not sent; the VMSnapshot is kept (the snapshot may still be on the hypervisor) and the delete is retried with a backoff "+
+	"of up to %s. Set %s=true to remove it anyway, leaving the snapshot on the hypervisor. The cause is in the manager log.",
+	blockedRetryMax, forceDeleteAnnotation)
+
+// retainForUnavailableSnapshotProvider keeps the finalizer of a VMSnapshot
+// whose provider SnapshotDelete was not sent because the VM's Provider could
+// not be read or resolved to a usable client (its runtime not Running or
+// without an endpoint, TLS or gRPC setup failing — as during every provider
+// rollout): the snapshot may still be on the hypervisor. It records Ready=False
+// and Deleting=False with reason ProviderUnavailable and the constant
+// snapshotDeleteProviderUnavailableMessage (the cause, which can name a TLS
+// Secret or a Service address, goes to the manager log only), and retries with
+// the blocked-VM backoff (blockedRetryBackoff: 15 s doubling to 5 min, from when
+// the delete was first held) until the Provider answers, the VM is gone, or the
+// force-delete annotation is set.
+func (r *VMSnapshotReconciler) retainForUnavailableSnapshotProvider(ctx context.Context, snapshot *infrav1beta1.VMSnapshot, err error) ctrl.Result {
+	var since time.Time
+	if snapshotDeleteRetrying(snapshot) {
+		since = conditionSince(snapshot.Status.Conditions, infrav1beta1.VMSnapshotConditionDeleting)
+	}
+	retry := blockedRetryBackoff(since)
+	logging.FromContext(ctx).Info("Cannot reach the VM's provider to delete the snapshot; retaining the VMSnapshot finalizer and retrying",
+		"snapshot_id", snapshot.Status.SnapshotID, "retryAfter", retry.String(), "error", err.Error())
+	metrics.RecordError(errReasonProviderResolve, metrics.ComponentManager)
+	r.holdSnapshotDelete(ctx, snapshot, conditions.ReasonProviderUnavailable, snapshotDeleteProviderUnavailableMessage,
+		snapshotDeleteProviderUnavailableMessage)
+	return ctrl.Result{RequeueAfter: retry}
 }
 
 // retainForBlockedSnapshotDelete keeps the finalizer of a VMSnapshot whose
