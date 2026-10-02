@@ -35,6 +35,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -3208,52 +3209,38 @@ func (r *VMMigrationReconciler) getProviderInstance(ctx context.Context, provide
 	return providerClient, nil
 }
 
-// updateStatus updates the migration status with retry on conflicts
+// updateStatus writes the migration's status. On a conflict it re-reads the
+// VMMigration live (APIReader — the informer cache may still hold the version
+// that conflicted), carries this reconcile's status over to it and retries
+// (retry.RetryOnConflict, retry.DefaultRetry). A VMMigration that was
+// deleted and re-created meanwhile (another UID) is never written: an
+// error is returned and the next reconcile starts from the new object.
 func (r *VMMigrationReconciler) updateStatus(ctx context.Context, migration *infrav1beta1.VMMigration) error {
 	logger := logging.FromContext(ctx)
 
-	// Retry with exponential backoff on conflicts
-	maxRetries := 3
-	baseDelay := 100 * time.Millisecond
-
-	for attempt := 0; attempt < maxRetries; attempt++ {
-		err := r.Status().Update(ctx, migration)
-		if err == nil {
-			return nil
-		}
-
-		// If it's a conflict error, retry after a delay
-		if errors.IsConflict(err) {
-			if attempt < maxRetries-1 {
-				delay := baseDelay * time.Duration(1<<uint(attempt)) // Exponential backoff
-				logger.V(1).Info("Status update conflict, retrying",
-					"attempt", attempt+1,
-					"maxRetries", maxRetries,
-					"delay", delay)
-				time.Sleep(delay)
-
-				// Refresh the object before retrying
-				fresh := &infrav1beta1.VMMigration{}
-				if err := r.Get(ctx, types.NamespacedName{
-					Name:      migration.Name,
-					Namespace: migration.Namespace,
-				}, fresh); err != nil {
-					logger.Error(err, "Failed to refresh VMMigration")
-					return err
-				}
-
-				// Copy status to fresh object
-				fresh.Status = migration.Status
-				*migration = *fresh
-				continue
+	attempt := 0
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		attempt++
+		if attempt > 1 {
+			fresh := &infrav1beta1.VMMigration{}
+			if err := r.liveReader().Get(ctx, client.ObjectKeyFromObject(migration), fresh); err != nil {
+				return fmt.Errorf("re-read VMMigration %s/%s after a status conflict: %w", migration.Namespace, migration.Name, err)
 			}
+			if fresh.UID != migration.UID {
+				return fmt.Errorf("VMMigration %s/%s was re-created (uid %s, was %s); not writing the old object's status",
+					migration.Namespace, migration.Name, fresh.UID, migration.UID)
+			}
+			logger.V(1).Info("Status update conflict, retrying on the live object", "attempt", attempt)
+			fresh.Status = migration.Status
+			*migration = *fresh
 		}
-
+		return r.Status().Update(ctx, migration)
+	})
+	if err != nil {
 		logger.Error(err, "Failed to update VMMigration status")
 		return err
 	}
-
-	return fmt.Errorf("failed to update status after %d attempts", maxRetries)
+	return nil
 }
 
 // generateStorageURL generates a storage URL for the migration
