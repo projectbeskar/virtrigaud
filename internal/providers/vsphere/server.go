@@ -530,7 +530,9 @@ func (p *Provider) GetCapabilities(ctx context.Context, req *providerv1.GetCapab
 //   - Imported disk: when req.ImageJson contains a Path the VM is created from scratch
 //     (CreateVM_Task) with the pre-uploaded VMDK attached as a persistent disk.
 //
-// In both cases the VM is powered on immediately after creation. The returned
+// In both cases the VM is left powered off. CreateRequest carries no power field:
+// the VirtualMachine controller powers the VM on afterwards (Power RPC) only when its
+// spec.powerState is On or empty, matching the libvirt and Proxmox providers. The returned
 // CreateResponse.Id contains the vSphere ManagedObjectReference value (e.g. "vm-42")
 // which is used as the stable VM identifier in all subsequent API calls.
 //
@@ -2455,8 +2457,10 @@ func (p *Provider) parseCreateRequest(req *providerv1.CreateRequest) (*VMSpec, e
 // (if provided, via addCloudInitToConfigSpec) are embedded in the config spec before
 // the task is submitted, so they are set at creation time; on the clone path an owner
 // stamp inherited from the template is overwritten or cleared. After the task
-// completes, the primary disk is optionally grown via resizeVMDisk and the VM is
-// powered on. datacenter must be the datacenter the finder is scoped to.
+// completes, the primary disk is optionally grown via resizeVMDisk and additional
+// disks are attached. The VM is NOT powered on: the VirtualMachine controller applies
+// spec.powerState afterwards through the Power RPC, as it does for libvirt and
+// Proxmox. datacenter must be the datacenter the finder is scoped to.
 func (p *Provider) createVirtualMachine(ctx context.Context, spec *VMSpec, datacenter *object.Datacenter, folder *object.Folder) (string, error) {
 	p.logger.Info("Creating virtual machine",
 		"name", spec.Name,
@@ -2975,20 +2979,16 @@ func (p *Provider) createVirtualMachine(ctx context.Context, spec *VMSpec, datac
 		p.logger.Debug("No additional disks to attach", "vm_id", vmID)
 	}
 
-	// Power on the VM if requested (VirtualMachine spec.powerState: "On")
-	// Note: This is a simple implementation - in production you might want to check the actual powerState from the request
-	powerTask, err := newVM.PowerOn(ctx)
-	if err != nil {
-		p.logger.Warn("Failed to power on VM after creation", "vm_id", vmID, "error", err)
-		// Don't fail the entire creation if power on fails
-	} else {
-		_, err = powerTask.WaitForResult(ctx, nil)
-		if err != nil {
-			p.logger.Warn("VM power on task failed", "vm_id", vmID, "error", err)
-		} else {
-			p.logger.Info("VM powered on successfully", "vm_id", vmID)
-		}
-	}
+	// The VM is deliberately left powered off. Power is the VirtualMachine
+	// controller's job, exactly as for libvirt and Proxmox: on its next reconcile
+	// it Describes the VM, compares the observed state with spec.powerState (empty
+	// means On) and calls Power only when they differ. Powering on here would boot
+	// a VM whose spec asks for Off (a VMMigration or VMClone target with
+	// powerOn: false) until the controller hard-powered it off again: long enough
+	// for a migrated copy to appear on the network with the still-running
+	// source's IP and hostname. The guestinfo cloud-init and network keys set
+	// above are read by the guest on its first boot, whenever that happens.
+	p.logger.Info("VM created powered off; the VM controller applies spec.powerState", "vm_id", vmID)
 
 	return vmID, nil
 }
