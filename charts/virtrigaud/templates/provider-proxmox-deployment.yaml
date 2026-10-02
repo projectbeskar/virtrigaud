@@ -74,7 +74,7 @@ spec:
         {{- include "virtrigaud.providerTLSVolumeMount" . | nindent 8 }}
       volumes:
       - name: tmp
-        emptyDir: {}
+        emptyDir: {{ include "virtrigaud.tmpEmptyDir" .Values.providers.proxmox.tmpSizeLimit }}
       {{- include "virtrigaud.providerTLSVolume" . | nindent 6 }}
       {{- with .Values.global.nodeSelector }}
       nodeSelector:

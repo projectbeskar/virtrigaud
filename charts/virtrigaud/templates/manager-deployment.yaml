@@ -38,6 +38,11 @@ spec:
         - --metrics-bind-address=0.0.0.0:8080
         - --health-probe-bind-address=0.0.0.0:8081
         - --leader-elect
+        {{- with .Values.manager.providerTmpSizeLimit }}
+        # /tmp sizeLimit of every provider pod the manager runs for Provider CRs;
+        # unset keeps the per-type defaults (vSphere 512Gi, others 1Gi).
+        - --provider-tmp-size-limit={{ . }}
+        {{- end }}
         {{- if .Values.webhooks.enabled }}
         # Webhook serving certs are mounted at this path; the manager's certwatcher
         # loads tls.crt/tls.key from here and serves on controller-runtime's default
@@ -98,7 +103,7 @@ spec:
         {{- end }}
       volumes:
       - name: tmp
-        emptyDir: {}
+        emptyDir: {{ include "virtrigaud.tmpEmptyDir" .Values.manager.tmpSizeLimit }}
       {{- if .Values.webhooks.enabled }}
       - name: webhook-certs
         secret:

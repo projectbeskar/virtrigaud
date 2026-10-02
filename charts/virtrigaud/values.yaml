@@ -83,6 +83,26 @@ manager:
   # Additional volume mounts
   volumeMounts: []
 
+  # sizeLimit of the manager pod's writable /tmp emptyDir (the root filesystem
+  # is read-only). The manager writes nothing large there; a pod that writes
+  # past the limit is evicted by the kubelet. Empty = no limit.
+  tmpSizeLimit: 128Mi
+
+  # sizeLimit of the writable /tmp emptyDir of every provider pod the manager
+  # runs for Provider CRs (the manager's --provider-tmp-size-limit): a quantity
+  # such as 20Gi, or "none" for no limit. Empty (the default) keeps the
+  # per-type defaults:
+  #   - vSphere: 512Gi. The vSphere provider stages whole disks and images in
+  #     /tmp: an OVA download (up to VIRTRIGAUD_VSPHERE_IMAGE_MAX_DOWNLOAD_GIB,
+  #     default 256 GiB) and, for a migration import or a converted export,
+  #     about twice the disk at once. Migrating a disk larger than about
+  #     256 GiB needs a larger limit (and that much free node disk).
+  #   - libvirt, Proxmox and others: 1Gi. They stream disk data to and from
+  #     the hypervisor over SSH; /tmp only holds SSH material.
+  # One Provider can override it with the annotation
+  # infra.virtrigaud.io/tmp-size-limit (a quantity or "none").
+  providerTmpSizeLimit: ""
+
 # Provider configuration
 #
 # These are OPTIONAL chart-templated standalone provider Deployments. They are
@@ -107,6 +127,9 @@ providers:
       requests:
         cpu: 200m
         memory: 256Mi
+    # sizeLimit of the writable /tmp emptyDir. libvirt streams disk data over
+    # SSH; /tmp only holds SSH material. Empty = no limit.
+    tmpSizeLimit: 1Gi
 
   # vSphere provider  
   vsphere:
@@ -122,6 +145,10 @@ providers:
       requests:
         cpu: 200m
         memory: 256Mi
+    # sizeLimit of the writable /tmp emptyDir. vSphere stages OVA downloads
+    # (up to 256 GiB by default) and about twice a migrated disk there; raise
+    # it for larger disks. Empty = no limit.
+    tmpSizeLimit: 512Gi
 
   # Proxmox provider
   proxmox:
@@ -137,6 +164,9 @@ providers:
       requests:
         cpu: 200m
         memory: 256Mi
+    # sizeLimit of the writable /tmp emptyDir. Proxmox stages disk data on the
+    # node (/var/tmp) over SSH; /tmp only holds SSH material. Empty = no limit.
+    tmpSizeLimit: 1Gi
     
     # ⚠️  REQUIRED: Proxmox VE server configuration
     # The Proxmox provider requires connection to an active Proxmox VE server.

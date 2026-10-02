@@ -159,6 +159,32 @@ helm upgrade virtrigaud virtrigaud/virtrigaud \
 | `manager.image.tag` | Manager image tag | `v0.2.0` |
 | `manager.resources.limits.cpu` | CPU limit | `500m` |
 | `manager.resources.limits.memory` | Memory limit | `512Mi` |
+| `manager.tmpSizeLimit` | `sizeLimit` of the manager pod's `/tmp` emptyDir (empty = none) | `128Mi` |
+| `manager.providerTmpSizeLimit` | `sizeLimit` of the `/tmp` emptyDir of every provider pod run for a `Provider` CR (`--provider-tmp-size-limit`; a quantity or `none`). Empty keeps the per-type defaults: vSphere `512Gi`, others `1Gi` | `""` |
+
+#### `/tmp` size limits
+
+Every pod's root filesystem is read-only, so each gets a writable `/tmp`
+emptyDir, and each emptyDir has a `sizeLimit`: a pod that writes more than that
+to `/tmp` is **evicted** by the kubelet, so a runaway provider cannot fill the
+node's disk.
+
+- **vSphere providers stage whole disks in `/tmp`:**
+  - an OVA image download, capped by `VIRTRIGAUD_VSPHERE_IMAGE_MAX_DOWNLOAD_GIB`
+    (default 256 GiB);
+  - for a migration import, or a converted or multi-extent export, about
+    **twice the disk**.
+
+  The default `512Gi` covers both up to that cap. For larger disks, raise the
+  limit and make sure the node has that much free ephemeral storage.
+- **libvirt and Proxmox providers** stream disk data to and from the hypervisor
+  host over SSH. Their `/tmp` only holds SSH keys, known_hosts and control
+  sockets, so `1Gi` is ample.
+- **One `Provider`:** annotate it
+  `infra.virtrigaud.io/tmp-size-limit: "<quantity>"` (or `"none"`). The webhook
+  refuses an invalid value, and changing it rolls that Provider's pods.
+- **All CR-managed providers:** set `manager.providerTmpSizeLimit`.
+- **Chart-templated providers:** set `providers.<name>.tmpSizeLimit`.
 
 ### Provider Configuration
 
@@ -186,6 +212,9 @@ providers:
   proxmox:
     enabled: false
 ```
+
+Each templated provider has a `providers.<name>.tmpSizeLimit` (vSphere `512Gi`,
+libvirt and Proxmox `1Gi`; see [`/tmp` size limits](#tmp-size-limits)).
 
 See [values.yaml](values.yaml) for complete configuration options.
 
@@ -379,6 +408,11 @@ helm upgrade virtrigaud virtrigaud/virtrigaud \
 ```
 
 ## Uninstallation
+
+Delete your `VirtualMachine`s and `Provider`s **before** uninstalling the chart.
+A `Provider` carries an in-use finalizer (ADR-0010) that only the manager
+releases; one left behind stays `Terminating` until its finalizer is removed by
+hand.
 
 ```bash
 # Uninstall the chart

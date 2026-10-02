@@ -269,3 +269,16 @@ Grafana dashboard labels
 {{- toYaml . }}
 {{- end }}
 {{- end }}
+
+{{/*
+The emptyDir source of a writable /tmp volume, in flow style: {} when the
+sizeLimit is empty or unset (an older values file, e.g. --reuse-values), or
+{sizeLimit: "<limit>"}. Takes the sizeLimit string as its context.
+*/}}
+{{- define "virtrigaud.tmpEmptyDir" -}}
+{{- if . -}}
+{sizeLimit: {{ . | quote }}}
+{{- else -}}
+{}
+{{- end -}}
+{{- end }}
