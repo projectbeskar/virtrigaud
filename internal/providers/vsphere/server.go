@@ -576,6 +576,17 @@ func (p *Provider) Create(ctx context.Context, req *providerv1.CreateRequest) (*
 		}
 	}
 
+	// A disk attached in place must be this VM's own migration landing disk
+	// (disk_guard.go, rules 1 and 2), checked before any vCenter call. Rule 3
+	// (no other VM uses it) is checked below, once the VM is known not to exist.
+	if vmSpec.DiskPath != "" {
+		if _, err := checkInPlaceDiskPath(vmSpec.DiskPath, vmSpec.Name, vmSpec.ImportedDisk); err != nil {
+			p.logger.Warn("Refusing to attach a disk in place: not this VM's own migration landing disk",
+				"vm_name", vmSpec.Name, "disk_path", vmSpec.DiskPath, "imported_disk", vmSpec.ImportedDisk)
+			return nil, err
+		}
+	}
+
 	p.logger.Debug("Parsed VMSpec",
 		"vm_name", vmSpec.Name,
 		"additional_disks_count", len(vmSpec.AdditionalDisks))
@@ -619,7 +630,14 @@ func (p *Provider) Create(ctx context.Context, req *providerv1.CreateRequest) (*
 	}
 	switch len(existing) {
 	case 0:
-		// Name is free in the target folder: create below.
+		// Name is free in the target folder: create below. A disk attached in
+		// place must not be referenced by any VM or template in the inventory
+		// (disk_guard.go, rule 3; fails closed).
+		if vmSpec.DiskPath != "" {
+			if err := p.ensureDiskFileUnused(ctx, vmSpec.DiskPath); err != nil {
+				return nil, err
+			}
+		}
 	case 1:
 		return p.bindExistingVM(ctx, existing[0], vmSpec.Name, vmSpec.Owner)
 	default:
@@ -652,7 +670,9 @@ func (p *Provider) Create(ctx context.Context, req *providerv1.CreateRequest) (*
 //     refuse with FailedPrecondition/VM_IS_IMAGE_ARTIFACT, changing nothing.
 //  4. If the VM is powered on, issue a PowerOff task and wait for it to finish.
 //     A power-off failure is logged but does not abort the deletion.
-//  5. Issue a Destroy task (equivalent to "Delete from Disk" in the vSphere UI)
+//  5. Detach, keeping the file, every disk the VM does not own
+//     (detachForeignDisks): Destroy_Task deletes every attached disk.
+//  6. Issue a Destroy task (equivalent to "Delete from Disk" in the vSphere UI)
 //     and wait for it to complete.
 //
 // The operation blocks until the Destroy task finishes.
@@ -718,6 +738,12 @@ func (p *Provider) Delete(ctx context.Context, req *providerv1.DeleteRequest) (*
 		} else {
 			p.logger.Info("VM powered off successfully", "vm_id", req.Id)
 		}
+	}
+
+	// Destroy_Task deletes every disk attached to the VM, wherever its file
+	// is: detach (keeping the file) any disk the VM does not own first.
+	if err := p.detachForeignDisks(ctx, vm); err != nil {
+		return nil, err
 	}
 
 	// Delete the VM from disk (this removes it from inventory and deletes files)
@@ -2140,6 +2166,11 @@ type VMSpec struct {
 	TemplateName string
 	DiskPath     string // Path to existing disk (for imported disks)
 	DiskFormat   string // Format of existing disk (for imported disks)
+	// ImportedDisk is contracts.VMImage.ImportedDisk: the operator verified
+	// DiskPath as this VM's own migration landing disk. DiskPath is attached in
+	// place only when it is set and the path passes the in-place confinement
+	// (disk_guard.go).
+	ImportedDisk bool
 	NetworkName  string
 	// Static network configuration applied via guestinfo.network.* keys.
 	// Populated from the first entry of NetworksJson (VirtualMachine.spec.networks[0]).
@@ -2192,8 +2223,11 @@ type AdditionalDiskSpec struct {
 //     (vsphere.hardwareVersion key), DiskDefaults, PerformanceProfile (nested virt,
 //     VBS, CPU/memory hot-add), SecurityProfile (SecureBoot, TPM, VT-d).
 //   - req.ImageJson  — contracts.VMImage: TemplateName (for template clones) or Path +
-//     Format (for imported-disk VMs). When Path is non-empty, disk-based creation is
-//     used and TemplateName is ignored.
+//     Format + ImportedDisk (for imported-disk VMs). A Path is used (disk-based
+//     creation, TemplateName ignored) when ImportedDisk is set or no TemplateName
+//     is given; Create then admits it only through the in-place confinement
+//     (disk_guard.go). A Path beside a TemplateName without ImportedDisk is
+//     another provider's source and is ignored.
 //   - req.NetworksJson — []contracts.NetworkAttachment: the first element's
 //     NetworkName attaches a single network adapter, and its StaticIP/Prefix/
 //     Gateway/DNS are surfaced to the guest as guestinfo.network.* for static IP
@@ -2290,21 +2324,32 @@ func (p *Provider) parseCreateRequest(req *providerv1.CreateRequest) (*VMSpec, e
 			TemplateName string `json:"TemplateName"`
 			Path         string `json:"Path"`
 			Format       string `json:"Format"`
+			ImportedDisk bool   `json:"ImportedDisk"`
 		}
 
 		if err := json.Unmarshal([]byte(req.ImageJson), &vmImage); err != nil {
 			return nil, fmt.Errorf("failed to parse VMImage JSON: %w", err)
 		}
 
-		// If Path is set, this is an imported disk (not a template)
-		if vmImage.Path != "" {
+		switch {
+		case vmImage.Path != "" && !vmImage.ImportedDisk && vmImage.TemplateName != "":
+			// A VMImage with several provider sources (e.g. a vSphere template
+			// and a libvirt path): vSphere base images are templates, so the
+			// path is not this provider's and is ignored.
+			p.logger.Info("Ignoring the image path of a template-based image; a vSphere base image is its template",
+				"vm_name", spec.Name)
+			spec.TemplateName = vmImage.TemplateName
+		case vmImage.Path != "":
+			// An existing disk to attach in place. Create admits it only
+			// through the in-place confinement (disk_guard.go): ImportedDisk
+			// set, the VM's own migration landing disk, used by no other VM.
 			spec.DiskPath = vmImage.Path
+			spec.ImportedDisk = vmImage.ImportedDisk
 			spec.DiskFormat = vmImage.Format
 			if spec.DiskFormat == "" {
 				spec.DiskFormat = "vmdk" // Default for vSphere
 			}
-		} else {
-			// Otherwise, it's a template-based VM
+		default:
 			spec.TemplateName = vmImage.TemplateName
 		}
 	}
@@ -4107,6 +4152,12 @@ func (p *Provider) ImportDisk(ctx context.Context, req *providerv1.ImportDiskReq
 
 	// Generate datastore path
 	diskPath := fmt.Sprintf("[%s] %s/%s.vmdk", datastore, diskID, diskID)
+
+	// The upload overwrites the landing folder's disk: refuse when any VM uses
+	// a file there (disk_guard.go; fails closed).
+	if err := p.ensureImportFolderUnused(ctx, datastore, diskID); err != nil {
+		return nil, err
+	}
 
 	// Upload to datastore with progress tracking
 	uploadProgress := func(transferred, total int64) {

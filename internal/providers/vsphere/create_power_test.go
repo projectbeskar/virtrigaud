@@ -18,7 +18,6 @@ package vsphere
 
 import (
 	"context"
-	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -113,13 +112,11 @@ func TestCreate_TemplateCloneLeavesVMPoweredOff(t *testing.T) {
 // beside a still-running source carrying the same IP and hostname.
 func TestCreate_ImportedDiskLeavesVMPoweredOff(t *testing.T) {
 	p, _ := newOwnershipSim(t)
-	const dir = "[" + simDatastore + "] imported"
-	const diskPath = dir + "/disk.vmdk"
-	makeImportedDisk(t, p, dir, diskPath)
+	imageJSON := makeOwnMigratedDisk(t, p, "migrated")
 
 	resp, err := p.Create(context.Background(), &providerv1.CreateRequest{
 		Name:      "migrated",
-		ImageJson: fmt.Sprintf(`{"Path":%q,"Format":"vmdk"}`, diskPath),
+		ImageJson: imageJSON,
 		Owner:     wireOwner(ownerTeamA),
 		UserData:  []byte("#cloud-config\nhostname: migrated\n"),
 	})
@@ -138,14 +135,12 @@ func TestCreate_ImportedDiskLeavesVMPoweredOff(t *testing.T) {
 // ran against an empty reference and were silently skipped.
 func TestCreate_ImportedDiskAppliesPostCreateSteps(t *testing.T) {
 	p, _ := newOwnershipSim(t)
-	const dir = "[" + simDatastore + "] imported"
-	const diskPath = dir + "/disk.vmdk"
-	makeImportedDisk(t, p, dir, diskPath)
+	imageJSON := makeOwnMigratedDisk(t, p, "migrated")
 
 	resp, err := p.Create(context.Background(), &providerv1.CreateRequest{
 		Name:      "migrated",
 		ClassJson: `{"CPU":1,"MemoryMiB":512,"DiskDefaults":{"SizeGiB":2}}`,
-		ImageJson: fmt.Sprintf(`{"Path":%q,"Format":"vmdk"}`, diskPath),
+		ImageJson: imageJSON,
 		Owner:     wireOwner(ownerTeamA),
 	})
 	require.NoError(t, err)

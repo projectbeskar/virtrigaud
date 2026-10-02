@@ -391,21 +391,13 @@ func TestCreate_StampsOwnerOnImportedDiskCreate(t *testing.T) {
 	p, _ := newOwnershipSim(t)
 	ctx := context.Background()
 
-	// CreateVM_Task attaches an existing disk; make one on the simulated datastore.
-	dc, err := p.finder.DefaultDatacenter(ctx)
-	require.NoError(t, err)
-	const diskPath = "[" + simDatastore + "] imported/disk.vmdk"
-	require.NoError(t, object.NewFileManager(p.client.Client).MakeDirectory(ctx, "["+simDatastore+"] imported", dc, true))
-	task, err := object.NewVirtualDiskManager(p.client.Client).CreateVirtualDisk(ctx, diskPath, dc, &types.FileBackedVirtualDiskSpec{
-		VirtualDiskSpec: types.VirtualDiskSpec{DiskType: string(types.VirtualDiskTypeThin), AdapterType: string(types.VirtualDiskAdapterTypeLsiLogic)},
-		CapacityKb:      1024,
-	})
-	require.NoError(t, err)
-	require.NoError(t, task.Wait(ctx))
+	// CreateVM_Task attaches the VM's own migration landing disk in place;
+	// make one on the simulated datastore.
+	imageJSON := makeOwnMigratedDisk(t, p, "migrated")
 
 	resp, err := p.Create(ctx, &providerv1.CreateRequest{
 		Name:      "migrated",
-		ImageJson: fmt.Sprintf(`{"Path":%q,"Format":"vmdk"}`, diskPath),
+		ImageJson: imageJSON,
 		Owner:     wireOwner(ownerTeamA),
 	})
 	require.NoError(t, err)

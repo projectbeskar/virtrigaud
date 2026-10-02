@@ -154,6 +154,13 @@ func (p *Provider) importDiskFromNFS(ctx context.Context, req *providerv1.Import
 	finalPath := fmt.Sprintf("[%s] %s/%s.vmdk", dsName, id, id)
 	folderPath := fmt.Sprintf("[%s] %s", dsName, id)
 
+	// The import deletes the "[<ds>] <id>" folder before it lands the disk, and
+	// on failure: refuse, before either, when any VM uses a file there
+	// (disk_guard.go; fails closed).
+	if err := p.ensureImportFolderUnused(ctx, dsName, id); err != nil {
+		return nil, err
+	}
+
 	// From here on, on ANY failure best-effort delete the "[<ds>] <id>" folder so a
 	// failed import leaves no orphan datastore files (partial vmdk, descriptor).
 	importSucceeded := false
