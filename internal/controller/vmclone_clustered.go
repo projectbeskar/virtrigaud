@@ -300,11 +300,17 @@ const cloneCapabilitiesClusteredWaitMessage = "waiting for the provider's capabi
 // landing host begins or changes reason. The wait's condition message is
 // constant, so the provider's answer — which can differ on every attempt — is
 // in this event and the manager log only, and a repeated wait writes nothing.
+//
+// host is the clone's landing host; "" for a single-host Provider.
 func (r *VMCloneReconciler) announceCloneWait(clone *infrav1beta1.VMClone, reason, host string, err error) {
 	if c := meta.FindStatusCondition(clone.Status.Conditions, infrav1beta1.VMCloneConditionReady); c != nil && c.Reason == reason {
 		return
 	}
-	r.Recorder.Event(clone, "Warning", reason, fmt.Sprintf("Clone on host %s waits: %s", host, rpcFailureDetail(err)))
+	subject := "Clone"
+	if host != "" {
+		subject = fmt.Sprintf("Clone on host %s", host)
+	}
+	r.Recorder.Event(clone, "Warning", reason, fmt.Sprintf("%s waits: %s", subject, rpcFailureDetail(err)))
 }
 
 // waitForCloneHost records that the clone waits for its landing host (reason,

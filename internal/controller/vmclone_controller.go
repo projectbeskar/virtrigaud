@@ -27,6 +27,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -430,6 +432,13 @@ func (r *VMCloneReconciler) startClone(
 		if contracts.IsVMSourceRunning(err) {
 			return r.holdCloneForRunningSource(ctx, clone, err), nil
 		}
+		// A transient failure (the provider or its host briefly unreachable,
+		// a check that could not run, a copy still in progress) is held and
+		// retried with a backoff, never failed: one SSH or libvirtd blip
+		// must not end the clone.
+		if singleHostCloneRetryable(err) {
+			return r.holdCloneForTransientError(ctx, clone, err), nil
+		}
 		logger.Error(err, "Clone RPC failed")
 		detail := rpcFailureDetail(err)
 		r.Recorder.Event(clone, "Warning", infrav1beta1.VMCloneReasonProviderError, "Clone failed: "+detail)
@@ -466,6 +475,60 @@ func (r *VMCloneReconciler) startClone(
 
 	logger.Info("Clone task started", "task_ref", resp.TaskRef)
 	return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+}
+
+// cloneTransientRetryMessage is the Ready condition message of a single-host
+// clone held because its Clone RPC failed transiently
+// (holdCloneForTransientError). It is constant; the provider's answer is in
+// the CloneRetrying Warning event and the manager log.
+var cloneTransientRetryMessage = fmt.Sprintf("the clone is not done yet: the provider could not perform it right now "+
+	"(a transient failure; nothing is known to have been copied); it is retried with a backoff of up to %s; the "+
+	"provider's answer is in the %s event", blockedRetryMax, cloneReasonRetrying)
+
+// singleHostCloneRetryable reports whether a single-host Clone RPC failure is
+// transient and safe to send again: a retryable provider answer — the
+// provider or its host unavailable (gRPC Unavailable, including a transport
+// failure), a disk check that could not run (VM_DISK_CHECK_FAILED), a copy
+// still in progress, a rate limit. A Clone whose outcome is unknown — the
+// call ran out of time (gRPC DeadlineExceeded, a provider Timeout) while the
+// provider may still be copying — is not: a single-host Clone carries no
+// request token, so sending it again could make a second VM; it fails as
+// before.
+func singleHostCloneRetryable(err error) bool {
+	if !contracts.IsRetryable(err) {
+		return false
+	}
+	var pe *contracts.ProviderError
+	if stderrors.As(err, &pe) && pe.Type == contracts.ErrorTypeTimeout {
+		return false
+	}
+	if st, ok := status.FromError(err); ok && st.Code() == codes.DeadlineExceeded {
+		return false
+	}
+	return !stderrors.Is(err, context.DeadlineExceeded)
+}
+
+// holdCloneForTransientError keeps a single-host clone whose Clone RPC failed
+// transiently Pending with Ready=False/CloneRetrying (the constant
+// cloneTransientRetryMessage), records the provider's answer (made safe by
+// rpcFailureDetail) in a Warning event when the hold begins, and retries with
+// the blocked-VM backoff (blockedRetryBackoff: 15 s doubling to 5 min, from
+// when the hold began — the Ready condition's transition to CloneRetrying). A
+// repeated hold writes nothing. The next attempt re-reads the clone live
+// before its Clone (confirmCloneNotStarted).
+func (r *VMCloneReconciler) holdCloneForTransientError(ctx context.Context, clone *infrav1beta1.VMClone, err error) ctrl.Result {
+	var since time.Time
+	if prev := meta.FindStatusCondition(clone.Status.Conditions, infrav1beta1.VMCloneConditionReady); prev != nil &&
+		prev.Reason == cloneReasonRetrying {
+		since = prev.LastTransitionTime.Time
+	}
+	retry := blockedRetryBackoff(since)
+	logging.FromContext(ctx).Info("Clone failed transiently; holding it and retrying with a backoff",
+		"retryAfter", retry.String(), "error", err.Error())
+	r.announceCloneWait(clone, cloneReasonRetrying, "", err)
+	res := r.markPending(ctx, clone, cloneReasonRetrying, cloneTransientRetryMessage)
+	res.RequeueAfter = retry
+	return res
 }
 
 // pollCloneTask checks an in-flight clone task and, on completion, binds the

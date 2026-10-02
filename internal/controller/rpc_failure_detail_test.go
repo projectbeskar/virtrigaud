@@ -95,8 +95,8 @@ func cloneDisclosureFixture() (*infrav1beta1.Provider, *infrav1beta1.VirtualMach
 }
 
 // requireCloneNoLeak asserts the clone's status, conditions and events carry none
-// of leaks.
-func requireCloneNoLeak(t *testing.T, r *VMCloneReconciler, clone *infrav1beta1.VMClone, leaks ...string) *infrav1beta1.VMClone {
+// of leaks, and returns the clone and those texts joined.
+func requireCloneNoLeak(t *testing.T, r *VMCloneReconciler, clone *infrav1beta1.VMClone, leaks ...string) (*infrav1beta1.VMClone, string) {
 	t.Helper()
 	got := &infrav1beta1.VMClone{}
 	require.NoError(t, r.Get(context.Background(), client.ObjectKeyFromObject(clone), got))
@@ -108,7 +108,7 @@ func requireCloneNoLeak(t *testing.T, r *VMCloneReconciler, clone *infrav1beta1.
 	for _, leak := range leaks {
 		assert.NotContains(t, joined, leak)
 	}
-	return got
+	return got, joined
 }
 
 // TestVMClone_ResolverErrorNeverReachesStatus: the resolver's error (TLS
@@ -119,23 +119,26 @@ func TestVMClone_ResolverErrorNeverReachesStatus(t *testing.T) {
 	r := newCloneReconciler(cloneTestScheme(t), errResolver{err: errors.New(leakyResolverDetail)}, prov, src, clone)
 
 	reconcileTwice(t, r, client.ObjectKeyFromObject(clone))
-	got := requireCloneNoLeak(t, r, clone, "10.96.12.7", "provider-tls", "phase Pending")
+	got, _ := requireCloneNoLeak(t, r, clone, "10.96.12.7", "provider-tls", "phase Pending")
 	assert.Equal(t, infrav1beta1.ClonePhasePending, got.Status.Phase)
 	assert.Contains(t, got.Status.Message, providerResolveFailedDetail)
 }
 
 // TestVMClone_FailedCloneDetailIsSanitized: a Clone RPC that failed in the
-// transport, or whose answer carries a credential in a URL, fails the clone
-// with a message that carries neither.
+// transport (held and retried, its answer in the CloneRetrying event), or
+// whose answer carries a credential in a URL (failed), records neither in the
+// clone's status or events.
 func TestVMClone_FailedCloneDetailIsSanitized(t *testing.T) {
 	for name, tc := range map[string]struct {
-		err   error
-		leaks []string
-		want  string
+		err       error
+		leaks     []string
+		wantPhase infrav1beta1.ClonePhase
+		want      string
 	}{
-		"transport failure": {err: transportFailure("clone"), leaks: []string{"10.96.12.7", "dial tcp"}, want: providerUnreachableDetail},
+		"transport failure": {err: transportFailure("clone"), leaks: []string{"10.96.12.7", "dial tcp"},
+			wantPhase: infrav1beta1.ClonePhasePending, want: providerUnreachableDetail},
 		"credential in the answer": {err: contracts.NewInvalidSpecError("clone: fetch https://admin:s3cret@images.example/a.ova failed", nil),
-			leaks: []string{"s3cret"}, want: "images.example/a.ova"},
+			leaks: []string{"s3cret"}, wantPhase: infrav1beta1.ClonePhaseFailed, want: "images.example/a.ova"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			prov, src, clone := cloneDisclosureFixture()
@@ -143,9 +146,9 @@ func TestVMClone_FailedCloneDetailIsSanitized(t *testing.T) {
 			r := newCloneReconciler(cloneTestScheme(t), &okResolver{provider: cp}, prov, src, clone)
 
 			reconcileTwice(t, r, client.ObjectKeyFromObject(clone))
-			got := requireCloneNoLeak(t, r, clone, tc.leaks...)
-			assert.Equal(t, infrav1beta1.ClonePhaseFailed, got.Status.Phase)
-			assert.Contains(t, got.Status.Message, tc.want)
+			got, texts := requireCloneNoLeak(t, r, clone, tc.leaks...)
+			assert.Equal(t, tc.wantPhase, got.Status.Phase)
+			assert.Contains(t, texts, tc.want)
 		})
 	}
 }

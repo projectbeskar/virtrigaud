@@ -151,8 +151,7 @@ func (p *Provider) Clone(ctx context.Context, req contracts.CloneRequest) (contr
 	//    is refused here, before anything is copied.
 	state, err := p.virshProvider.getDomainState(ctx, sourceID)
 	if err != nil {
-		return contracts.CloneResponse{}, contracts.NewNotFoundError(
-			fmt.Sprintf("source VM %q not found", sourceID), err)
+		return contracts.CloneResponse{}, cloneSourceStateReadError(sourceID, err)
 	}
 	if err := cloneSourceStateError(state); err != nil {
 		log.Printf("WARN Refusing to clone %s: it is %q, and a libvirt full clone requires a powered-off source", sourceID, state)
@@ -187,7 +186,11 @@ func (p *Provider) Clone(ctx context.Context, req contracts.CloneRequest) (contr
 	// 3. Create the target disk in the same pool.
 	poolInfo, err := storageProvider.GetPoolInfo(ctx, clonePoolName)
 	if err != nil {
-		return contracts.CloneResponse{}, fmt.Errorf("get pool %q info: %w", clonePoolName, err)
+		// Nothing was copied yet: retryable (the manager holds the clone
+		// with a backoff), whether the host could not be reached or the pool
+		// could not be read (e.g. libvirtd restarting).
+		return contracts.CloneResponse{}, contracts.NewRetryableError(
+			fmt.Sprintf("could not read the clone's storage pool %q", clonePoolName), err)
 	}
 	targetVolumeName := vmDiskVolumeName(domainName)
 	targetDiskPath := filepath.Join(poolInfo.Path, fmt.Sprintf("%s.qcow2", targetVolumeName))
@@ -265,6 +268,19 @@ func (p *Provider) Clone(ctx context.Context, req contracts.CloneRequest) (contr
 	return contracts.CloneResponse{
 		TargetVmID: domainName,
 	}, nil
+}
+
+// cloneSourceStateReadError classifies a failure to read the state of the
+// clone source sourceID on a single host: a host that could not be reached
+// (isHostTransportFailure: the SSH session failed or libvirtd is down) is
+// retryable — nothing was copied, and the source may well exist — and any
+// other failure keeps the historical "source VM not found".
+func cloneSourceStateReadError(sourceID string, err error) error {
+	if isHostTransportFailure(err) {
+		return contracts.NewRetryableError(
+			fmt.Sprintf("could not reach the libvirt host to read the state of clone source %q", sourceID), err)
+	}
+	return contracts.NewNotFoundError(fmt.Sprintf("source VM %q not found", sourceID), err)
 }
 
 // resolvePrimaryDisk returns the source domain's primary (boot) disk path and
