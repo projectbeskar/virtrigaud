@@ -81,6 +81,9 @@ func (v *ProviderCustomValidator) ValidateCreate(_ context.Context, obj runtime.
 	if !ok {
 		return nil, fmt.Errorf("expected a Provider object but got %T", obj)
 	}
+	if err := validateTmpSizeLimitAnnotation(nil, provider); err != nil {
+		return nil, err
+	}
 	return nil, validateProviderTopology(provider)
 }
 
@@ -101,6 +104,9 @@ func (v *ProviderCustomValidator) ValidateUpdate(_ context.Context, oldObj, newO
 		return nil, err
 	}
 	if err := validateTopologyUnchanged(old, provider); err != nil {
+		return nil, err
+	}
+	if err := validateTmpSizeLimitAnnotation(old, provider); err != nil {
 		return nil, err
 	}
 	// An update that leaves the spec as it is (a finalizer, a label, an
@@ -166,6 +172,31 @@ func validateTopologyUnchanged(old, updated *Provider) error {
 		updated.Name,
 		field.ErrorList{fieldErr},
 	)
+}
+
+// validateTmpSizeLimitAnnotation rejects a ProviderTmpSizeLimitAnnotation
+// value that ParseProviderTmpSizeLimit does not accept. On an update (old not
+// nil) only a value that is new or changed is checked, so a Provider that
+// already carries a bad value can still take and lose its finalizers.
+func validateTmpSizeLimitAnnotation(old, updated *Provider) error {
+	value, ok := updated.Annotations[ProviderTmpSizeLimitAnnotation]
+	if !ok {
+		return nil
+	}
+	if old != nil {
+		if prev, had := old.Annotations[ProviderTmpSizeLimitAnnotation]; had && prev == value {
+			return nil
+		}
+	}
+	if _, err := ParseProviderTmpSizeLimit(value); err != nil {
+		return apierrors.NewInvalid(
+			GroupVersion.WithKind("Provider").GroupKind(),
+			updated.Name,
+			field.ErrorList{field.Invalid(
+				field.NewPath("metadata").Child("annotations").Key(ProviderTmpSizeLimitAnnotation), value, err.Error())},
+		)
+	}
+	return nil
 }
 
 // ValidateDelete is a no-op: deletion is always allowed. It returns no admission

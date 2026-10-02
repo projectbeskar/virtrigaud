@@ -295,3 +295,49 @@ func TestProviderCustomValidator_WrongType(t *testing.T) {
 		t.Errorf("wrong-type error should not be an Invalid field error, got %v", err)
 	}
 }
+
+// TestProviderCustomValidator_TmpSizeLimitAnnotation pins the validation of
+// ProviderTmpSizeLimitAnnotation: a positive quantity or "none" is admitted, a
+// bad value is refused on create and when set or changed on update, and an
+// unchanged bad value never blocks a metadata update.
+func TestProviderCustomValidator_TmpSizeLimitAnnotation(t *testing.T) {
+	v := &ProviderCustomValidator{}
+	ctx := context.Background()
+	with := func(value string) *Provider {
+		p := newProviderForTopology("p", ProviderTypeLibvirt, "")
+		p.Annotations = map[string]string{ProviderTmpSizeLimitAnnotation: value}
+		return p
+	}
+	for _, ok := range []string{"20Gi", "512Mi", ProviderTmpSizeLimitNone} {
+		if _, err := v.ValidateCreate(ctx, with(ok)); err != nil {
+			t.Errorf("%q must be admitted, got %v", ok, err)
+		}
+	}
+	for _, bad := range []string{"", "0", "-1Gi", "lots", "None"} {
+		if _, err := v.ValidateCreate(ctx, with(bad)); err == nil || !apierrors.IsInvalid(err) {
+			t.Errorf("%q must be refused as Invalid on create, got %v", bad, err)
+		}
+		if _, err := v.ValidateUpdate(ctx, with("20Gi"), with(bad)); err == nil {
+			t.Errorf("changing the value to %q must be refused", bad)
+		}
+		withFinalizer := with(bad)
+		withFinalizer.Finalizers = []string{ProviderInUseFinalizer}
+		if _, err := v.ValidateUpdate(ctx, with(bad), withFinalizer); err != nil {
+			t.Errorf("an unchanged %q must not block a metadata update, got %v", bad, err)
+		}
+	}
+}
+
+func TestParseProviderTmpSizeLimit(t *testing.T) {
+	q, err := ParseProviderTmpSizeLimit("20Gi")
+	if err != nil || q == nil || q.String() != "20Gi" {
+		t.Fatalf("20Gi: got %v, %v", q, err)
+	}
+	q, err = ParseProviderTmpSizeLimit(ProviderTmpSizeLimitNone)
+	if err != nil || q != nil {
+		t.Fatalf("none: got %v, %v", q, err)
+	}
+	if _, err := ParseProviderTmpSizeLimit("0"); err == nil {
+		t.Fatal("0 must be refused")
+	}
+}

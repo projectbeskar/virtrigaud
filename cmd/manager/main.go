@@ -178,6 +178,12 @@ func main() {
 			"endpoint host and NFS server). Empty = permissive except the always-denied "+
 			"loopback/link-local/metadata/multicast targets (ADR-0006 C3, SSRF gate). "+
 			"Set to lock migration egress to known storage networks.")
+	var providerTmpSizeLimit string
+	flag.StringVar(&providerTmpSizeLimit, "provider-tmp-size-limit", "",
+		"sizeLimit of the writable /tmp emptyDir of every provider pod the manager runs for Provider CRs: a "+
+			"positive quantity (e.g. 20Gi), or 'none' for no limit. Empty (the default) keeps the per-type "+
+			"defaults (vSphere 512Gi, others 1Gi). A Provider's "+
+			infrav1beta1.ProviderTmpSizeLimitAnnotation+" annotation overrides it.")
 	opts := zap.Options{
 		Development: true,
 	}
@@ -354,10 +360,17 @@ func main() {
 		setupLog.Error(err, "unable to create controller", "controller", "VirtualMachine")
 		os.Exit(1)
 	}
+	if providerTmpSizeLimit != "" {
+		if _, err := infrav1beta1.ParseProviderTmpSizeLimit(providerTmpSizeLimit); err != nil {
+			setupLog.Error(err, "invalid --provider-tmp-size-limit")
+			os.Exit(1)
+		}
+	}
 	if err = (&controller.ProviderReconciler{
 		Client:         mgr.GetClient(),
 		Scheme:         mgr.GetScheme(),
 		RemoteResolver: remoteResolver,
+		TmpSizeLimit:   providerTmpSizeLimit,
 		Recorder:       mgr.GetEventRecorderFor("provider-controller"),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Provider")

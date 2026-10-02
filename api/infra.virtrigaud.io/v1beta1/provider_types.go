@@ -69,6 +69,18 @@ const ProviderAllowConsumerOrphanOnDeleteAnnotation = "infra.virtrigaud.io/allow
 // is annotated virtrigaud.io/force-delete=true.
 const ProviderInUseFinalizer = "provider.infra.virtrigaud.io/in-use"
 
+// ProviderTmpSizeLimitAnnotation is the Provider annotation that sets the
+// sizeLimit of the writable /tmp emptyDir of the provider pods the manager
+// runs for it, overriding the manager-wide default (--provider-tmp-size-limit).
+// The value is a positive resource quantity (e.g. "20Gi") or
+// ProviderTmpSizeLimitNone for no limit. A pod that writes more than the limit
+// to /tmp is evicted by the kubelet. Changing it rolls the provider pods.
+const ProviderTmpSizeLimitAnnotation = "infra.virtrigaud.io/tmp-size-limit"
+
+// ProviderTmpSizeLimitNone is the ProviderTmpSizeLimitAnnotation (and
+// --provider-tmp-size-limit) value that leaves /tmp without a sizeLimit.
+const ProviderTmpSizeLimitNone = "none"
+
 // ProviderRuntimeMode specifies how the provider is executed
 // +kubebuilder:validation:Enum=Remote
 type ProviderRuntimeMode string
