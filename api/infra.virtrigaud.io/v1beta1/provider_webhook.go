@@ -23,6 +23,7 @@ import (
 	"strconv"
 	"strings"
 
+	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/validation/field"
@@ -101,6 +102,13 @@ func (v *ProviderCustomValidator) ValidateUpdate(_ context.Context, oldObj, newO
 	}
 	if err := validateTopologyUnchanged(old, provider); err != nil {
 		return nil, err
+	}
+	// An update that leaves the spec as it is (a finalizer, a label, an
+	// annotation) cannot make the spec invalid. Admitting it means a Provider
+	// that predates the topology rule and breaks it can still take and lose
+	// its in-use finalizer, and so can still be deleted (ADR-0010 D7).
+	if equality.Semantic.DeepEqual(old.Spec, provider.Spec) {
+		return nil, nil
 	}
 	return nil, validateProviderTopology(provider)
 }

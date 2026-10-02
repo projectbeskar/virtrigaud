@@ -173,6 +173,31 @@ func TestProviderCustomValidator_ValidateUpdate(t *testing.T) {
 	}
 }
 
+// TestProviderCustomValidator_MetadataOnlyUpdateAdmitted pins ADR-0010 D7: an
+// update that leaves the spec unchanged (adding or removing the in-use
+// finalizer) is admitted even for a Provider that predates the topology×type
+// rule and breaks it, so such a Provider can still be deleted. A spec change on
+// it is still checked.
+func TestProviderCustomValidator_MetadataOnlyUpdateAdmitted(t *testing.T) {
+	v := &ProviderCustomValidator{}
+	ctx := context.Background()
+	legacy := newProviderForTopology("p", ProviderTypeVSphere, ProviderTopologyCluster)
+
+	withFinalizer := legacy.DeepCopy()
+	withFinalizer.Finalizers = []string{ProviderInUseFinalizer}
+	if _, err := v.ValidateUpdate(ctx, legacy, withFinalizer); err != nil {
+		t.Fatalf("adding the finalizer must be admitted, got %v", err)
+	}
+	if _, err := v.ValidateUpdate(ctx, withFinalizer, legacy); err != nil {
+		t.Fatalf("removing the finalizer must be admitted, got %v", err)
+	}
+
+	specChange := legacy.DeepCopy()
+	specChange.Spec.Endpoint = "https://vcenter.example.com"
+	_, err := v.ValidateUpdate(ctx, legacy, specChange)
+	assertTopologyResult(t, err, true)
+}
+
 // TestProviderCustomValidator_TypeImmutable pins that spec.type can never
 // change on update (the controllers decide type-specific safety rules from it,
 // e.g. refusing a libvirt linked clone into another namespace): every change is

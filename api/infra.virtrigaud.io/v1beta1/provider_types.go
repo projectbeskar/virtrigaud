@@ -61,6 +61,14 @@ const (
 // occupy capacity nobody sees. Single-host Providers ignore it.
 const ProviderAllowConsumerOrphanOnDeleteAnnotation = "infra.virtrigaud.io/allow-consumer-orphan-on-delete"
 
+// ProviderInUseFinalizer is the finalizer the Provider controller keeps on
+// every Provider (ADR-0010). A Provider being deleted is held while any
+// VirtualMachine (in any namespace), VMSnapshot, VMClone or VMMigration still
+// needs it, with its runtime kept up so they can still be deleted through it.
+// It is removed once nothing needs the Provider, or at once when the Provider
+// is annotated virtrigaud.io/force-delete=true.
+const ProviderInUseFinalizer = "provider.infra.virtrigaud.io/in-use"
+
 // ProviderRuntimeMode specifies how the provider is executed
 // +kubebuilder:validation:Enum=Remote
 type ProviderRuntimeMode string

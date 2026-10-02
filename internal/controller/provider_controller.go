@@ -32,6 +32,7 @@ import (
 	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -61,6 +62,8 @@ const (
 	errReasonHostInventoryReconcile  = "hostinventory-reconcile-failed"
 	errReasonCleanupFailed           = "cleanup-failed"
 	errReasonTLSNotConfigured        = "tls-not-configured"
+	errReasonProviderFinalizer       = "provider-finalizer"
+	errReasonProviderInUse           = "provider-in-use-check"
 )
 
 // TLS Condition vocabulary surfaced on Provider.Status.Conditions by
@@ -161,6 +164,8 @@ type ProviderReconciler struct {
 // +kubebuilder:rbac:groups=infra.virtrigaud.io,resources=providers/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=infra.virtrigaud.io,resources=providers/finalizers,verbs=update
 // +kubebuilder:rbac:groups=infra.virtrigaud.io,resources=virtualmachines,verbs=get;list;watch
+// +kubebuilder:rbac:groups=infra.virtrigaud.io,resources=vmsnapshots;vmclones;vmmigrations,verbs=get;list;watch
+// +kubebuilder:rbac:groups="",resources=namespaces,verbs=get;list;watch
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=serviceaccounts,verbs=get;list;watch;create;update;patch;delete
@@ -206,46 +211,26 @@ func (r *ProviderReconciler) Reconcile(ctx context.Context, req ctrl.Request) (r
 		return ctrl.Result{}, err
 	}
 
-	// Handle deletion (cleanup deployments and services)
+	// A Provider being deleted is held while anything still needs it, with its
+	// runtime kept up; it is released (runtime torn down, finalizer removed)
+	// only once nothing does, or on force-delete (ADR-0010).
 	if !provider.DeletionTimestamp.IsZero() {
 		return r.handleDeletion(ctx, &provider)
 	}
 
-	// Initialize runtime status if needed
-	if provider.Status.Runtime == nil {
-		provider.Status.Runtime = &infravirtrigaudiov1beta1.ProviderRuntimeStatus{}
-	}
-
-	// Validate that runtime is configured (now required)
-	if provider.Spec.Runtime == nil {
-		err := fmt.Errorf("runtime configuration is required")
-		k8s.SetCondition(&provider.Status.Conditions, "ProviderRuntimeReady", metav1.ConditionFalse, "MissingRuntime", err.Error())
-		provider.Status.ObservedGeneration = provider.Generation
-		if updateErr := r.Status().Update(ctx, &provider); updateErr != nil {
-			logger.Error(updateErr, "Failed to update Provider status")
+	// Keep the in-use finalizer on every live Provider (ADR-0010 D1). This
+	// also adds it to every Provider that existed before the upgrade.
+	if !k8s.HasFinalizer(&provider, infravirtrigaudiov1beta1.ProviderInUseFinalizer) {
+		if err := k8s.AddFinalizer(ctx, r.Client, &provider, infravirtrigaudiov1beta1.ProviderInUseFinalizer); err != nil {
+			metrics.RecordError(errReasonProviderFinalizer, metrics.ComponentManager)
+			return ctrl.Result{}, fmt.Errorf("add in-use finalizer to Provider %s: %w", req.NamespacedName, err)
 		}
-		metrics.RecordError(errReasonRuntimeSpecInvalid, metrics.ComponentManager)
-		return ctrl.Result{}, err
 	}
 
-	// Set runtime mode (always Remote)
-	provider.Status.Runtime.Mode = infravirtrigaudiov1beta1.RuntimeModeRemote
+	// Reconcile the runtime and derive the runtime status fields.
+	result, err := r.reconcileRuntimeStatus(ctx, &provider)
 
-	// Handle remote runtime reconciliation
-	result, err := r.reconcileRemoteRuntime(ctx, &provider)
-
-	// Count connected VMs
-	connectedVMs, countErr := r.countConnectedVMs(ctx, &provider)
-	if countErr != nil {
-		logger.V(1).Info("Failed to count connected VMs", "error", countErr)
-		// Don't fail reconciliation if counting fails, just log it
-	} else {
-		provider.Status.ConnectedVMs = connectedVMs
-	}
-
-	// Set healthy status based on ProviderAvailable condition
-	providerAvailable := k8s.GetCondition(provider.Status.Conditions, "ProviderAvailable")
-	provider.Status.Healthy = providerAvailable != nil && providerAvailable.Status == metav1.ConditionTrue
+	// A healthy live Provider records when it was last seen healthy.
 	if provider.Status.Healthy {
 		now := metav1.Now()
 		provider.Status.LastHealthCheck = &now
@@ -261,23 +246,7 @@ func (r *ProviderReconciler) Reconcile(ctx context.Context, req ctrl.Request) (r
 		r.reconcileReportedCapabilities(ctx, &provider)
 	}
 
-	// Update provider status with retry on conflict
-	provider.Status.ObservedGeneration = provider.Generation
-	updateErr := retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		// Get the latest version
-		latest := &infravirtrigaudiov1beta1.Provider{}
-		if err := r.Get(ctx, types.NamespacedName{Name: provider.Name, Namespace: provider.Namespace}, latest); err != nil {
-			return err
-		}
-
-		// Update status fields
-		latest.Status = provider.Status
-
-		// Try to update
-		return r.Status().Update(ctx, latest)
-	})
-
-	if updateErr != nil {
+	if updateErr := r.writeProviderStatus(ctx, &provider); updateErr != nil {
 		logger.Error(updateErr, "Failed to update Provider status")
 		if err == nil {
 			err = updateErr
@@ -285,6 +254,66 @@ func (r *ProviderReconciler) Reconcile(ctx context.Context, req ctrl.Request) (r
 	}
 
 	return result, err
+}
+
+// reconcileRuntimeStatus reconciles the Provider's remote runtime (Service,
+// ServiceAccount, clustered host inventory, Deployment) and fills in the
+// runtime-derived status fields: status.runtime, the runtime conditions,
+// ConnectedVMs and Healthy. It writes no Provider status; the caller does. It
+// is shared by a live Provider and a Provider held by the in-use finalizer,
+// whose runtime must stay up (ADR-0010 D3).
+func (r *ProviderReconciler) reconcileRuntimeStatus(ctx context.Context, provider *infravirtrigaudiov1beta1.Provider) (ctrl.Result, error) {
+	logger := log.FromContext(ctx)
+
+	// Initialize runtime status if needed
+	if provider.Status.Runtime == nil {
+		provider.Status.Runtime = &infravirtrigaudiov1beta1.ProviderRuntimeStatus{}
+	}
+	provider.Status.ObservedGeneration = provider.Generation
+
+	// Validate that runtime is configured (now required)
+	if provider.Spec.Runtime == nil {
+		err := fmt.Errorf("runtime configuration is required")
+		k8s.SetCondition(&provider.Status.Conditions, "ProviderRuntimeReady", metav1.ConditionFalse, "MissingRuntime", err.Error())
+		metrics.RecordError(errReasonRuntimeSpecInvalid, metrics.ComponentManager)
+		return ctrl.Result{}, err
+	}
+
+	// Set runtime mode (always Remote)
+	provider.Status.Runtime.Mode = infravirtrigaudiov1beta1.RuntimeModeRemote
+
+	// Handle remote runtime reconciliation
+	result, err := r.reconcileRemoteRuntime(ctx, provider)
+
+	// Count connected VMs
+	connectedVMs, countErr := r.countConnectedVMs(ctx, provider)
+	if countErr != nil {
+		logger.V(1).Info("Failed to count connected VMs", "error", countErr)
+		// Don't fail reconciliation if counting fails, just log it
+	} else {
+		provider.Status.ConnectedVMs = connectedVMs
+	}
+
+	// Set healthy status based on ProviderAvailable condition
+	providerAvailable := k8s.GetCondition(provider.Status.Conditions, "ProviderAvailable")
+	provider.Status.Healthy = providerAvailable != nil && providerAvailable.Status == metav1.ConditionTrue
+
+	return result, err
+}
+
+// writeProviderStatus writes provider.Status through the status subresource,
+// re-reading the latest object on a conflict so a concurrent metadata write
+// (the in-use finalizer) does not lose the status.
+func (r *ProviderReconciler) writeProviderStatus(ctx context.Context, provider *infravirtrigaudiov1beta1.Provider) error {
+	provider.Status.ObservedGeneration = provider.Generation
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		latest := &infravirtrigaudiov1beta1.Provider{}
+		if err := r.Get(ctx, types.NamespacedName{Name: provider.Name, Namespace: provider.Namespace}, latest); err != nil {
+			return err
+		}
+		latest.Status = provider.Status
+		return r.Status().Update(ctx, latest)
+	})
 }
 
 // reconcileReportedCapabilities best-effort fetches the provider's
@@ -385,20 +414,6 @@ func capabilitiesToReported(caps contracts.Capabilities) *infravirtrigaudiov1bet
 		// Provider are held.
 		SupportsHonestReconfigure: caps.SupportsHonestReconfigure,
 	}
-}
-
-// handleDeletion cleans up remote runtime resources when Provider is deleted
-func (r *ProviderReconciler) handleDeletion(ctx context.Context, provider *infravirtrigaudiov1beta1.Provider) (ctrl.Result, error) {
-	logger := log.FromContext(ctx)
-
-	// Always clean up remote runtime resources (all providers are remote now)
-	if err := r.cleanupRemoteRuntime(ctx, provider); err != nil {
-		logger.Error(err, "Failed to cleanup remote runtime resources")
-		metrics.RecordError(errReasonCleanupFailed, metrics.ComponentManager)
-		return ctrl.Result{RequeueAfter: time.Minute}, err
-	}
-
-	return ctrl.Result{}, nil
 }
 
 // reconcileRemoteRuntime manages remote provider deployments and services
@@ -1464,6 +1479,14 @@ func (r *ProviderReconciler) cleanupRemoteRuntime(ctx context.Context, provider 
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *ProviderReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	// The in-use finalizer (ADR-0010) finds what still uses a Provider being
+	// deleted through these indexes, never by listing every object.
+	if err := indexPlacementProvider(mgr); err != nil {
+		return err
+	}
+	if err := indexProviderInUse(mgr); err != nil {
+		return err
+	}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&infravirtrigaudiov1beta1.Provider{}).
 		Owns(&appsv1.Deployment{}).
@@ -1487,6 +1510,29 @@ func (r *ProviderReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Watches(
 			&infravirtrigaudiov1beta1.HostPool{},
 			handler.EnqueueRequestsFromMapFunc(r.providersForHostPool),
+		).
+		// Re-check a Provider being deleted when something that holds it goes
+		// away or stops holding it (ADR-0010 D4). Only a Provider being deleted
+		// is enqueued, and only for an event that can change what holds it.
+		Watches(
+			&infravirtrigaudiov1beta1.VirtualMachine{},
+			handler.EnqueueRequestsFromMapFunc(r.providersForInUseVM),
+			builder.WithPredicates(providerUseChanged()),
+		).
+		Watches(
+			&infravirtrigaudiov1beta1.VMSnapshot{},
+			handler.EnqueueRequestsFromMapFunc(r.providersForInUseDependent),
+			builder.WithPredicates(providerUseChanged()),
+		).
+		Watches(
+			&infravirtrigaudiov1beta1.VMClone{},
+			handler.EnqueueRequestsFromMapFunc(r.providersForInUseDependent),
+			builder.WithPredicates(providerUseChanged()),
+		).
+		Watches(
+			&infravirtrigaudiov1beta1.VMMigration{},
+			handler.EnqueueRequestsFromMapFunc(r.providersForInUseDependent),
+			builder.WithPredicates(providerUseChanged()),
 		).
 		WithOptions(controller.Options{
 			MaxConcurrentReconciles: 5, // Process up to 5 providers in parallel
