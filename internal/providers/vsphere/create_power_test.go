@@ -132,6 +132,37 @@ func TestCreate_ImportedDiskLeavesVMPoweredOff(t *testing.T) {
 	requireCreatedOffThenPowersOn(t, p, resp.Id)
 }
 
+// TestCreate_ImportedDiskAppliesPostCreateSteps: the steps after
+// CreateVM_Task address the NEW VM. The imported-disk path once shadowed the
+// VM reference, so the VMClass disk growth (and the additional-disk attach)
+// ran against an empty reference and were silently skipped.
+func TestCreate_ImportedDiskAppliesPostCreateSteps(t *testing.T) {
+	p, _ := newOwnershipSim(t)
+	const dir = "[" + simDatastore + "] imported"
+	const diskPath = dir + "/disk.vmdk"
+	makeImportedDisk(t, p, dir, diskPath)
+
+	resp, err := p.Create(context.Background(), &providerv1.CreateRequest{
+		Name:      "migrated",
+		ClassJson: `{"CPU":1,"MemoryMiB":512,"DiskDefaults":{"SizeGiB":2}}`,
+		ImageJson: fmt.Sprintf(`{"Path":%q,"Format":"vmdk"}`, diskPath),
+		Owner:     wireOwner(ownerTeamA),
+	})
+	require.NoError(t, err)
+
+	var vm mo.VirtualMachine
+	require.NoError(t, property.DefaultCollector(p.client.Client).RetrieveOne(context.Background(), vmRef(resp.Id),
+		[]string{"config.hardware.device"}, &vm))
+	var capacityKB []int64
+	for _, dev := range vm.Config.Hardware.Device {
+		if d, ok := dev.(*types.VirtualDisk); ok {
+			capacityKB = append(capacityKB, d.CapacityInKB)
+		}
+	}
+	require.Len(t, capacityKB, 1, "the imported disk is the VM's only disk")
+	assert.Equal(t, int64(2*1024*1024), capacityKB[0], "the imported disk must be grown to the VMClass disk size")
+}
+
 // TestCreate_BindingRetryKeepsPowerState: a retried create that binds the
 // requester's own existing VM changes nothing about its power state: a VM the
 // controller left off stays off, one it powered on stays on.

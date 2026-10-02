@@ -2884,7 +2884,12 @@ func (p *Provider) createVirtualMachine(ctx context.Context, spec *VMSpec, datac
 			return "", fmt.Errorf("VM creation task failed: %w", err)
 		}
 
-		vmRef, ok := info.Result.(types.ManagedObjectReference)
+		// Assign (never redeclare) the outer vmRef: the disk resize and the
+		// additional-disk attach below address the new VM through it. A `:=`
+		// here shadowed it, leaving those steps an empty reference that
+		// vCenter cannot resolve, so they were silently skipped.
+		var ok bool
+		vmRef, ok = info.Result.(types.ManagedObjectReference)
 		if !ok {
 			return "", fmt.Errorf("unexpected result type from create task: %T", info.Result)
 		}
