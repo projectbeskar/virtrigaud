@@ -254,6 +254,33 @@ owner stamp it would inherit from the source VM is cleared, as is any
 prepared-image stamp (`virtrigaud.image.*`). A clone never claims the source
 `VirtualMachine`'s owner, and is never an image artifact.
 
+### Adoption: what `ListVMs` offers
+
+`ListVMs` is the adoption discovery feed: every VM it returns can become a
+`VirtualMachine` through `virtrigaud.io/adopt-vms`, and deleting that
+`VirtualMachine` destroys the vSphere object. The vSphere `ListVMs` therefore
+lists ordinary VMs only. It leaves out:
+
+- **every vSphere template**, stamped or not. That covers every prepared image
+  (ADR-0009 marks each one as a template) and any template made by hand or by an
+  earlier release;
+- **any object with a prepared-image stamp key** (`virtrigaud.image.*`), valid
+  or not, template or not. An image import in flight is a plain VM until it is
+  marked as a template, and a failed import can leave one behind. `Create` and
+  `Clone` clear these keys, so an ordinary VM never carries them;
+- **any VM whose owner stamp cannot be read** (a key repeated, in any case, or a
+  non-string value): who owns it cannot be told;
+- **any VM whose configuration cannot be read.**
+
+A VM with a readable owner stamp is listed with its owner UID (`ListVMs`
+`provider_raw["owner_uid"]`). The adoption controller skips it while the
+`VirtualMachine` with that UID exists, in any namespace and under any Provider
+object, and may adopt it once that `VirtualMachine` is gone (a stale stamp).
+Before this change the vSphere `ListVMs` reported no owner UID. Adoption through
+one Provider object could therefore adopt a VM that a `VirtualMachine` under
+another Provider object for the same vCenter owned, or a VM whose create had not
+yet recorded its `status.id`.
+
 ### `Describe` no longer reports a transient error as "gone"
 
 When `Describe` returns `Exists=false`, the manager clears `status.id` and calls

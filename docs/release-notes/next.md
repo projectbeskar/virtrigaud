@@ -112,6 +112,16 @@ providers), and rollback caveats in
   re-annotating one in a loop drove one provider call per edit (`Clone`, a
   multi-host scan, or `SnapshotDelete`) and bypassed the wait's backoff. The
   `VMSnapshot` force-delete annotation still releases a held delete at once.
+- vSphere VM adoption (`virtrigaud.io/adopt-vms`) no longer takes templates.
+  It could turn a prepared image (ADR-0009) or any other template into a
+  tenant's `VirtualMachine`, whose delete or resize then destroyed or changed
+  the shared image for every consumer. The vSphere `ListVMs` now leaves out
+  templates, objects with a `virtrigaud.image.*` key and VMs whose owner stamp
+  cannot be read. It also reports each VM's owner UID, so adoption skips a VM
+  that a live `VirtualMachine` owns through another Provider object. Check for
+  `VirtualMachine`s adoption already made from a template before upgrading
+  (→ [Upgrade guide](docs/upgrading.md),
+  [`docs/vm-ownership.md`](docs/vm-ownership.md#adoption-what-listvms-offers)).
 - vSphere and libvirt `Create` no longer silently bind to (and libvirt/vSphere
   `Clone` no longer silently clones) a pre-existing VM/domain/template they
   don't own — both now stamp and check ownership, and fail closed

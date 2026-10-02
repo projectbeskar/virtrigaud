@@ -5,6 +5,34 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-10-02 20:38] - vSphere adoption never takes templates, prepared images or VMs another VirtualMachine owns
+**Author:** @wrkode (William Rizzo)
+
+> **Operator note.** Before upgrading, check for VirtualMachines that adoption already made from a vSphere template (query in `docs/upgrading.md`). Detach each one with `virtrigaud.io/orphan-on-delete: "true"` before deleting it; a plain delete destroys the template.
+
+### Security
+- `internal/providers/vsphere/server.go` (`ListVMs`), `list_adoptable.go`: the VMAdoption discovery feed no longer offers shared image state. High; integrity and availability of shared images; affects v0.3.11 and `main` (v0.3.11 has no stamped prepared images, but any template could be adopted).
+  - **Before:** `ListVMs` listed every object `VirtualMachineList("*")` found, templates included. With `virtrigaud.io/adopt-vms` set, adoption turned prepared images (ADR-0009 Slice 3) and any other template into a tenant-owned `VirtualMachine`. Deleting it destroyed the template for every consumer; a resize changed it.
+  - **Now:** `ListVMs` reads `config.template` and `config.extraConfig` in the same property call. It leaves out:
+    - every template, stamped or not;
+    - every object carrying a `virtrigaud.image.*` key with a non-empty value, valid or not, template or not (an import in flight, or a failed import left behind);
+    - every VM whose owner stamp cannot be read (repeated key in any case, or non-string value);
+    - every VM whose configuration cannot be read.
+  - **Owner stamp:** `ListVMs` now reports a VM's owner UID in `provider_raw["owner_uid"]` (`contracts.VMInfoOwnerUIDKey`), as the libvirt provider does. The adoption controller already skips a VM whose UID names a live `VirtualMachine`. Before, vSphere reported none, so adoption through one Provider object could take a VM owned by a `VirtualMachine` under another Provider object for the same vCenter, or a VM whose create had not yet recorded `status.id` (the controller's name fallback never matches a vSphere MOID).
+  - `ListVMs` has no other caller: the owner-filtered listing is used only for clustered providers, and vSphere does not advertise it. The proto and the adoption controller are unchanged.
+
+### Added
+- `internal/providers/vsphere/list_adoptable_test.go`: a vcsim listing over gRPC through the manager's transport client. An unstamped template, a stamped prepared template, a stamped import in flight, a VM with an invalid image-stamp key and a VM with an ambiguous owner stamp are all absent. An ordinary VM is listed without an owner, and a VirtRigaud-created VM is listed with its owner UID. Plus a table test of `listExclusionFor`.
+
+### Changed
+- `docs/vm-ownership.md`, `docs/upgrading.md`, `docs/release-notes/next.md`: documented what vSphere adoption is offered, and how to find a template already adopted.
+
+### Why
+A tenant adopting a shared prepared image could destroy or alter it for every VM cloned from it. Adoption must offer only ordinary VMs that no live VirtualMachine owns.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout (vSphere provider image)
 ## [2026-10-11 21:27] - Deleting a Provider that is still in use waits, with its runtime kept, instead of orphaning its VMs (ADR-0010); every /tmp emptyDir gets a sizeLimit; vSphere provider runtimes run one replica with Recreate
 **Author:** @wrkode (William Rizzo)
 
