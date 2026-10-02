@@ -121,6 +121,14 @@ func drainRecordedEvents(rec *record.FakeRecorder) []string {
 	}
 }
 
+// fakeRecorderOf returns rec as the *record.FakeRecorder the test built it as.
+func fakeRecorderOf(t *testing.T, rec record.EventRecorder) *record.FakeRecorder {
+	t.Helper()
+	fr, ok := rec.(*record.FakeRecorder)
+	require.True(t, ok, "the reconciler's Recorder is not a FakeRecorder")
+	return fr
+}
+
 // terminalFailedMigration is snapshotFixture's migration, finalized and in a
 // terminal Failed state (no retry policy).
 func terminalFailedMigration() (*infrav1beta1.VirtualMachine, *infrav1beta1.Provider, *infrav1beta1.VMMigration) {

@@ -28,7 +28,6 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	infrav1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
@@ -101,7 +100,7 @@ func requireCloneNoLeak(t *testing.T, r *VMCloneReconciler, clone *infrav1beta1.
 	t.Helper()
 	got := &infrav1beta1.VMClone{}
 	require.NoError(t, r.Get(context.Background(), client.ObjectKeyFromObject(clone), got))
-	texts := append(drainRecordedEvents(r.Recorder.(*record.FakeRecorder)), got.Status.Message)
+	texts := append(drainRecordedEvents(fakeRecorderOf(t, r.Recorder)), got.Status.Message)
 	for _, c := range got.Status.Conditions {
 		texts = append(texts, c.Message)
 	}

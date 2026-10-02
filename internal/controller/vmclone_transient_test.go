@@ -23,7 +23,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/api/meta"
-	"k8s.io/client-go/tools/record"
 
 	infrav1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
@@ -48,7 +47,7 @@ func TestVMClone_Clustered_TransientReadBeforeTheCopyWaitsWithBackoff(t *testing
 	assert.Equal(t, cloneReasonRetrying, ready.Reason)
 	assert.NotContains(t, ready.Message, "a read on the host failed", "the provider's answer is in the event, not the condition")
 	assert.Contains(t, ready.Message, "with a backoff of up to "+blockedRetryMax.String())
-	events := strings.Join(drainRecordedEvents(r.Recorder.(*record.FakeRecorder)), "\n")
+	events := strings.Join(drainRecordedEvents(fakeRecorderOf(t, r.Recorder)), "\n")
 	assert.Contains(t, events, "a read on the host failed before anything was copied")
 	assert.Equal(t, 1, strings.Count(events, "Warning "+cloneReasonRetrying), "announced once, not on every retry")
 	assert.GreaterOrEqual(t, res.RequeueAfter, blockedRetryMin)
