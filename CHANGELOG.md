@@ -5,7 +5,7 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [2026-10-11 21:27] - Deleting a Provider that is still in use waits, with its runtime kept, instead of orphaning its VMs (ADR-0010)
+## [2026-10-11 21:27] - Deleting a Provider that is still in use waits, with its runtime kept, instead of orphaning its VMs (ADR-0010); every /tmp emptyDir gets a sizeLimit
 **Author:** @wrkode (William Rizzo)
 
 > **Operator note.**
@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > - **Namespace deletion:** Kubernetes deletes the provider runtime's pods with the namespace. A VM whose delete misses the pod's termination window is held (`ProviderUnavailable`), not orphaned; the `Provider` shows `DeleteBlocked=True/ProviderInUseRuntimeNotKept` and the namespace stays `Terminating` until an administrator acts.
 > - **Escape hatch:** `virtrigaud.io/force-delete: "true"` on the `Provider` releases it at once, with a `Warning` event `ProviderForceDeleted`; the hypervisor VMs left are unmanaged.
 > - **Rollback / uninstall:** an older manager, or no manager, never removes the finalizer; delete VMs and Providers first, or remove it by hand (`docs/upgrading.md`).
+> - **`/tmp` size limits:** every pod's writable `/tmp` emptyDir now has a `sizeLimit`: vSphere providers `512Gi`, libvirt/Proxmox/other providers `1Gi`, the manager `128Mi`. A pod that writes past it is evicted. vSphere stages OVA downloads and about twice a migrated disk in `/tmp`, so migrating a vSphere disk larger than about 256 GiB needs a larger limit: the Provider annotation `infra.virtrigaud.io/tmp-size-limit`, or `manager.providerTmpSizeLimit` (`--provider-tmp-size-limit`). The manager upgrade rolls every manager-run provider pod once.
 
 ### Fixed
 - `internal/controller/provider_controller.go`, `internal/controller/provider_inuse.go`: deleting a `Provider` no longer orphans the hypervisor VMs of the VMs that use it.
@@ -26,12 +27,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Release:** once nothing holds it, the runtime is removed and the finalizer released. Watches on `VirtualMachine`, `VMSnapshot`, `VMClone` and `VMMigration` re-drive only a `Provider` being deleted, and only for a create, a delete, or an update that changes what the object holds. A 2-minute backstop covers a missed event.
   - **Lookups:** through the existing `virtrigaud.io/placement-provider` VM index and a new `virtrigaud.io/provider-in-use` index on `VMSnapshot`, `VMClone` and `VMMigration`. Nothing lists every object.
   - **Runtime not kept:** when the `Provider`'s namespace is being deleted, or it was deleted with foreground cascading deletion, the controller does not touch the runtime. It leaves `status.runtime` as it was and reports `DeleteBlocked=True/ProviderInUseRuntimeNotKept`.
-  - **Escape hatch:** `virtrigaud.io/force-delete: "true"` releases the `Provider` at once and records a `Warning` event `ProviderForceDeleted` with the counts.
+  - **Escape hatch:** `virtrigaud.io/force-delete: "true"` releases the `Provider` at once and records a `Warning` event `ProviderForceDeleted` with the counts. It works even when the in-use check cannot run: the event then says so, and a plain delete is retried instead.
   - **Unchanged:** a `Provider` being deleted without the finalizer (deleted before the upgrade) only has its runtime removed, as before. The VM delete path's "Provider not found in the VM's own namespace" release is kept.
 - `api/infra.virtrigaud.io/v1beta1/provider_webhook.go`: an update that leaves `spec` unchanged is always admitted. Before, a `Provider` predating the topology×type rule and breaking it could never take or lose a finalizer, so it could never be deleted. The `spec.type` / `spec.topology` immutability checks are unchanged.
 
+### Security
+- `internal/controller/provider_controller.go`, `cmd/manager/main.go`, `api/infra.virtrigaud.io/v1beta1/provider_tmp.go`, `charts/virtrigaud/templates/*-deployment.yaml`, `charts/virtrigaud/values.yaml`: every writable `/tmp` emptyDir now has a `sizeLimit`. Before, all were unbounded, so a provider (the component most exposed to hypervisor- and URL-controlled input) could fill its node's ephemeral storage. Low; hardening.
+  - **Sized from what each component stages:**
+    - **vSphere:** stages whole OVA downloads (capped by `VIRTRIGAUD_VSPHERE_IMAGE_MAX_DOWNLOAD_GIB`, default 256 GiB) and, for an S3/PVC import or a converted/multi-extent export, about twice the disk in `/tmp`. Default `512Gi`.
+    - **libvirt and Proxmox:** stream disk data over SSH; their `/tmp` holds only KB of SSH material. Default `1Gi`.
+    - **Manager:** writes nothing there. Default `128Mi`.
+  - **Manager-run provider pods:** per-type default. The manager flag `--provider-tmp-size-limit` (chart `manager.providerTmpSizeLimit`) sets one value for every type. The Provider annotation `infra.virtrigaud.io/tmp-size-limit` (a positive quantity or `none`) overrides both. The Provider webhook refuses an invalid annotation value, but only when it is set or changed, so it never blocks a finalizer update. The manager refuses an invalid flag at startup. The memory-backed libvirt SSH-key tmpfs keeps its 4Mi.
+  - **Chart:**
+    - `manager.tmpSizeLimit` and `providers.<name>.tmpSizeLimit` (empty = no limit);
+    - a nil-safe helper (`virtrigaud.tmpEmptyDir`), so `--reuse-values` from an older chart still renders a valid emptyDir;
+    - `hack/verify-tmp-sizelimit-render.sh` (`make verify-tmp-sizelimit-render`, wired into CI next to the NetworkPolicy render check) asserts the defaults, the overrides, empty values and `--reuse-values` from v0.3.11.
+  - **Upgrade:** the new pod template rolls every manager-run provider pod once. A clustered libvirt provider (`Recreate`) is briefly down.
+
 ### Added
-- `api/infra.virtrigaud.io/v1beta1/provider_types.go`: `ProviderInUseFinalizer` (Go constant; no CRD schema change).
+- `api/infra.virtrigaud.io/v1beta1/provider_types.go`: `ProviderInUseFinalizer`, `ProviderTmpSizeLimitAnnotation`, `ProviderTmpSizeLimitNone` (Go constants; no CRD schema change). `provider_tmp.go`: `ParseProviderTmpSizeLimit`.
+- `internal/controller/provider_tmp_test.go`, `api/infra.virtrigaud.io/v1beta1/provider_webhook_test.go`: per-type defaults, precedence (annotation > flag > default), `none`, invalid values ignored, the SSH-key tmpfs untouched, and webhook validation of the annotation.
 - `docs/adr/0010-provider-in-use-finalizer.md`: ADR-0010 (Accepted, maintainer decision 2026-10-01), with alternatives (validating webhook, docs only, runtime outside the tenant namespace, timeout) and the namespace-deletion limit. Indexed in `docs/adr/README.md`.
 - `internal/controller/provider_inuse_test.go`, `internal/controller/provider_inuse_envtest_test.go`:
   - unit tests: what holds a Provider, case by case; hold and release; a repeated hold writes nothing; the cross-namespace consumer; force-delete; namespace deletion and foreground cascade; the legacy path; message bounds; watches and predicate;
@@ -41,10 +56,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - `internal/controller/provider_controller.go`: the runtime part of the reconcile is split out (`reconcileRuntimeStatus`, `writeProviderStatus`) so a live and a held Provider share it. Added RBAC markers (`vmsnapshots`/`vmclones`/`vmmigrations` and `namespaces`: get/list/watch). The manager already had these verbs and `providers/finalizers: update`, so the generated role does not change.
 - `internal/controller/provider_controller_test.go`: the envtest spec asserts the finalizer and drops it on cleanup.
-- `docs/upgrading.md` (breaking-change row and rollback caveat), `docs/vm-provider-binding.md` (new "Deleting a Provider" section), `docs/release-notes/next.md`.
+- `docs/upgrading.md` (breaking-change row, `/tmp` limits row, rollback caveat), `docs/vm-provider-binding.md` (new "Deleting a Provider" section), `docs/release-notes/next.md`, `charts/virtrigaud/README.md` ("/tmp size limits", the new values, uninstall order).
 
 ### Why
-A `Provider` deleted while in use, directly or with its namespace, left every hypervisor VM it managed running with nothing tracking it, an audit finding in regulated environments. The maintainer chose an in-use finalizer (Option A) over an admission webhook or documentation only.
+A `Provider` deleted while in use, directly or with its namespace, left every hypervisor VM it managed running with nothing tracking it, an audit finding in regulated environments. The maintainer chose an in-use finalizer (Option A) over an admission webhook or documentation only. Unbounded `/tmp` emptyDirs let one pod exhaust a node's ephemeral storage; the limits are sized so that no supported import breaks at the defaults.
 
 ### Impact
 - [x] Breaking change
