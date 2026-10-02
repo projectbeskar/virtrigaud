@@ -4060,16 +4060,19 @@ func (p *Provider) ImportDisk(ctx context.Context, req *providerv1.ImportDiskReq
 	return response, nil
 }
 
-// ListVMs implements the ProviderServer interface. It enumerates every virtual machine
-// in the default datacenter using the govmomi Finder and returns summary information
-// for each one.
+// ListVMs implements the ProviderServer interface. It enumerates the ordinary virtual
+// machines in the default datacenter using the govmomi Finder and returns summary
+// information for each one. It is the VMAdoption discovery feed, so it leaves out
+// templates, objects carrying a VirtRigaud prepared-image stamp, VMs whose owner stamp
+// cannot be read and VMs whose configuration cannot be read (list_adoptable.go).
 //
 // For each VM the following information is collected via the property collector:
 //   - Name, CPU count, memory size (MB), power state.
 //   - IP addresses (filtered by isValidIPAddress; duplicates removed).
 //   - Disk devices: ID (device key), datastore path, size in GiB, format ("vmdk").
 //   - Network adapters: MAC address and portgroup/network name.
-//   - ProviderRaw map: vm_id (same as Name), power_state, guest_os.
+//   - ProviderRaw map: vm_id (same as Name), power_state, guest_os, and owner_uid
+//     (contracts.VMInfoOwnerUIDKey) when the VM carries a VirtRigaud owner stamp.
 //
 // VMs for which property retrieval fails are skipped with a warning log rather than
 // aborting the entire list operation.
@@ -4115,10 +4118,20 @@ func (p *Provider) ListVMs(ctx context.Context, req *providerv1.ListVMsRequest) 
 			"guest.ipAddress",
 			"guest.net",
 			"config.hardware.device",
+			propConfigTemplate,
+			propConfigExtraConfig,
 		}, &vmMo)
 
 		if err != nil {
 			p.logger.Warn("Failed to retrieve VM properties, skipping", "vm", vm.Name(), "error", err)
+			continue
+		}
+
+		// Only ordinary VMs are listed: never a template, a prepared image or
+		// an object whose ownership cannot be read (list_adoptable.go).
+		if reason := listExclusionFor(vmMo.Config); reason != listedVM {
+			p.logger.Debug("Not listing a vSphere object that is not an adoptable VM",
+				"vm_id", vm.Reference().Value, "reason", string(reason))
 			continue
 		}
 
@@ -4199,6 +4212,12 @@ func (p *Provider) ListVMs(ctx context.Context, req *providerv1.ListVMsRequest) 
 		providerRaw["power_state"] = powerState
 		if vmMo.Summary.Config.GuestFullName != "" {
 			providerRaw["guest_os"] = vmMo.Summary.Config.GuestFullName
+		}
+		// Report the owner stamp's UID (read without error above), so adoption
+		// skips a VM that a live VirtualMachine owns, whatever its namespace or
+		// Provider object.
+		if owner, err := ownerFromExtraConfig(vmMo.Config.ExtraConfig); err == nil && owner.UID != "" {
+			providerRaw[contracts.VMInfoOwnerUIDKey] = owner.UID
 		}
 
 		vmInfo := &providerv1.VMInfo{
