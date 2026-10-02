@@ -67,6 +67,22 @@ Read the upgrade guide before upgrading:
   before it is powered off.
   → [Upgrade guide](docs/upgrading.md#breaking-changes)
 
+- **Deleting a `Provider` that is still in use now waits instead of orphaning
+  its VMs** ([ADR-0010](docs/adr/0010-provider-in-use-finalizer.md)). A new
+  finalizer, `provider.infra.virtrigaud.io/in-use`, keeps a `Provider` being
+  deleted — and its runtime — while any `VirtualMachine` in any namespace (or a
+  `VMSnapshot`, in-flight `VMClone` or `VMMigration`) still needs it, so they are
+  deleted through it; before, every one of them was released without a provider
+  `Delete` and its hypervisor VM kept running, unmanaged. It shows
+  `DeleteBlocked=True/ProviderInUse` with counts per kind and namespace.
+  Deleting a namespace still deletes the provider runtime's pods with it, so a
+  VM whose delete misses the pod's termination window is held, and the
+  namespace stays `Terminating` until an administrator acts. Delete VMs before
+  their `Provider` or namespace; `virtrigaud.io/force-delete: "true"` on the
+  `Provider` releases it at once (`Warning` event `ProviderForceDeleted`).
+  → [Upgrade guide](docs/upgrading.md#breaking-changes),
+  [`docs/vm-provider-binding.md`](docs/vm-provider-binding.md#deleting-a-provider)
+
 See the full breaking-change table, required upgrade order (CRDs → manager →
 providers), and rollback caveats in
 **[docs/upgrading.md](docs/upgrading.md)**.
