@@ -127,6 +127,18 @@ func clearedImageStampExtraConfig() []types.BaseOptionValue {
 	return out
 }
 
+// legacyImportMarker is the one image-stamp key a legacy (identity-less) OVA
+// import carries: imageStampKeyPreparedAt, set to when the import started
+// (RFC 3339, UTC). It makes the import an image artifact for ListVMs and the
+// per-VM guards (carriesImageStampKey) from the moment it exists, including
+// between ImportVApp and MarkAsTemplate, when it is a plain VM. It is not a
+// valid stamp on its own (imageStampFromExtraConfig rejects it: no version),
+// and clearedImageStampExtraConfig clears it on every VM cloned from the
+// template.
+func legacyImportMarker(now time.Time) types.BaseOptionValue {
+	return &types.OptionValue{Key: imageStampKeyPreparedAt, Value: now.UTC().Format(time.RFC3339)}
+}
+
 // imageStampFromExtraConfig reads the image stamp from a VM's ExtraConfig.
 //
 // It returns (nil, nil) when the VM carries no stamp: no image-stamp key, or

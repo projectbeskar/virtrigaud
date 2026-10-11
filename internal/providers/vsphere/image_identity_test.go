@@ -1292,7 +1292,7 @@ func TestImagePrepare_LegacyRequestTakesThePreADRPath(t *testing.T) {
 	refs := objectsNamed(t, p, defaultVMFolder(t, p), "legacy-img")
 	require.Len(t, refs, 1)
 	stamp, err := stampOf(t, p, refs[0])
-	require.NoError(t, err)
+	assert.Error(t, err, "a legacy artifact carries only the legacy-import marker, never a valid stamp")
 	assert.Nil(t, stamp, "a legacy artifact is unstamped")
 
 	resp, err = p.ImagePrepare(ctx, legacy)
