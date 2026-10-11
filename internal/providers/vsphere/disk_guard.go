@@ -604,6 +604,19 @@ func (p *Provider) ensureImportFolderUnused(ctx context.Context, dsName, id stri
 	return nil
 }
 
+// deleteDiskStepMessage is the only text a failed delete-time disk step
+// returns; the vCenter fault can name other VMs' files.
+const deleteDiskStepMessage = "could not prepare the VM's disks for delete (details are in the provider log); will retry"
+
+// errDeleteDiskStep logs a failed delete-time disk step and returns the
+// constant, retryable error the caller sees: Unavailable with
+// VM_OPERATION_FAILED, kept out of the manager's circuit breaker.
+func (p *Provider) errDeleteDiskStep(vmID, step string, err error) error {
+	p.logger.Error("Delete-time disk step failed; the VM is kept and the delete is retried",
+		"vm_id", vmID, "step", step, "error", err)
+	return statusWithReasons(codes.Unavailable, deleteDiskStepMessage, contracts.VMOperationFailedReason).Err()
+}
+
 // detachForeignDisks runs before Delete's Destroy_Task, which deletes every
 // disk attached to the VM wherever its file is. It detaches — keeping the
 // file — every disk the VM does not own:
@@ -625,7 +638,7 @@ func (p *Provider) detachForeignDisks(ctx context.Context, vm *object.VirtualMac
 	var vmMo mo.VirtualMachine
 	if err := property.DefaultCollector(p.client.Client).RetrieveOne(ctx, vm.Reference(),
 		[]string{propName, propConfigHardwareDevice, propConfigFilesVMPathName, propSnapshot, propConfigExtraConfig}, &vmMo); err != nil {
-		return fmt.Errorf("read the disks of VM %s: %w", vm.Reference().Value, err)
+		return p.errDeleteDiskStep(vm.Reference().Value, "reading the VM's disks", err)
 	}
 	if vmMo.Config == nil {
 		p.logger.Warn("VM configuration unavailable; cannot check its disks before delete", "vm_id", vm.Reference().Value)
@@ -687,7 +700,7 @@ func (p *Provider) detachForeignDisks(ctx context.Context, vm *object.VirtualMac
 		return errDiskInUse(foreignDiskSnapshotMessage)
 	}
 	if err := vm.RemoveDevice(ctx, true, foreign...); err != nil {
-		return fmt.Errorf("detach %d disk(s) VM %s does not own before delete: %w", len(foreign), vm.Reference().Value, err)
+		return p.errDeleteDiskStep(vm.Reference().Value, fmt.Sprintf("detaching %d disk(s) it does not own", len(foreign)), err)
 	}
 	return nil
 }

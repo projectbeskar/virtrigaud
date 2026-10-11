@@ -1011,3 +1011,27 @@ func TestCreate_InPlaceDisk_RequiresSystemRead(t *testing.T) {
 		})
 	}
 }
+
+// TestDelete_DetachFailureIsConstantAndRetryable: a vCenter fault while
+// detaching a foreign disk is logged; the caller gets a constant, retryable
+// error kept out of the circuit breaker, and the VM is kept.
+func TestDelete_DetachFailureIsConstantAndRetryable(t *testing.T) {
+	p, _ := newOwnershipSim(t)
+	ctx := context.Background()
+	victim, err := p.Create(ctx, templateCreateRequest("victim", "", wireOwner(ownerTeamA)))
+	require.NoError(t, err)
+	attacker, err := p.Create(ctx, templateCreateRequest("attacker", "", wireOwner(ownerTeamB)))
+	require.NoError(t, err)
+	attachDiskInPlace(t, p, attacker.Id, vmDiskFiles(t, p, victim.Id)[0])
+	p.client.RoundTripper = &failReconfigure{RoundTripper: p.client.RoundTripper, remaining: 1,
+		match: func(types.VirtualMachineConfigSpec) bool { return true }}
+
+	_, err = p.Delete(ctx, &providerv1.DeleteRequest{Id: attacker.Id})
+	requireCode(t, err, codes.Unavailable)
+	assert.Equal(t, []string{contracts.VMOperationFailedReason}, errorReasons(err))
+	assert.Equal(t, deleteDiskStepMessage, status.Convert(err).Message())
+	assert.True(t, vmExists(t, p, attacker.Id))
+
+	_, err = p.Delete(ctx, &providerv1.DeleteRequest{Id: attacker.Id})
+	require.NoError(t, err, "the retry completes the delete")
+}
