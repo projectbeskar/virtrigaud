@@ -40,8 +40,12 @@ import (
 // create/delete/revert — therefore read config.template and config.extraConfig
 // first, and refuse, before changing anything, an object that is a vSphere
 // template or carries a prepared-image stamp key (carriesImageStampKey, the
-// same test the listing uses). Clone is not guarded: cloning FROM a template is
-// what templates are for, and Clone never changes its source.
+// same test the listing uses). A full Clone is not guarded: cloning FROM a
+// template is what templates are for, and a full clone never changes its
+// source. A linked Clone of a source without a snapshot first creates one on
+// the source (clone-base-*), which changes it, so that step is guarded: a
+// linked clone of a template or image artifact is allowed only from a snapshot
+// it already has.
 
 const (
 	// imageArtifactRefusalMessage is the constant message of the refusal. It

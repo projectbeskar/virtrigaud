@@ -2040,6 +2040,11 @@ func (p *Provider) Clone(ctx context.Context, req *providerv1.CloneRequest) (*pr
 			snapshotRef = &latestSnapshot.Snapshot
 			p.logger.Info("Using existing snapshot for linked clone", "snapshot", latestSnapshot.Name)
 		} else {
+			// Creating the snapshot changes the source: never a template's or
+			// an image artifact's (vm_artifact_guard.go).
+			if err := p.refuseImageArtifact(ctx, sourceVM, "linked clone snapshot"); err != nil {
+				return nil, err
+			}
 			// Create a snapshot for the linked clone
 			p.logger.Info("Creating snapshot for linked clone", "source_vm_id", req.SourceVmId)
 			snapshotName := fmt.Sprintf("clone-base-%d", time.Now().Unix())

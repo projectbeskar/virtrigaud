@@ -190,6 +190,32 @@ func TestImageArtifactRefusal(t *testing.T) {
 	})
 }
 
+// TestLinkedClone_NeverSnapshotsAnImageArtifact: a linked Clone of a source
+// without a snapshot first snapshots the source, which changes it. For a
+// template or an image artifact that step is refused (VM_IS_IMAGE_ARTIFACT)
+// and the source is left without a snapshot; an ordinary source is still
+// snapshotted and linked-cloned.
+func TestLinkedClone_NeverSnapshotsAnImageArtifact(t *testing.T) {
+	p, _ := newOwnershipSim(t)
+	ctx := context.Background()
+	tmpl := seededVMID(t, p, simTemplate) // a template, no snapshot (newOwnershipSim)
+	n, _ := vmSnapshotCount(t, p, tmpl)
+	require.Zero(t, n, "fixture: the template has no snapshot")
+
+	_, err := p.Clone(ctx, &providerv1.CloneRequest{SourceVmId: tmpl, TargetName: "linked-from-template", Linked: true})
+	requireArtifactStatus(t, err)
+	n, _ = vmSnapshotCount(t, p, tmpl)
+	assert.Zero(t, n, "no snapshot was created on the template")
+
+	src, err := p.Create(ctx, templateCreateRequest("linked-src", "", wireOwner(ownerTeamA)))
+	require.NoError(t, err)
+	cloned, err := p.Clone(ctx, &providerv1.CloneRequest{SourceVmId: src.Id, TargetName: "linked-copy", Linked: true})
+	require.NoError(t, err, "an ordinary source is still linked-cloned")
+	assert.NotEmpty(t, cloned.TargetVmId)
+	n, _ = vmSnapshotCount(t, p, src.Id)
+	assert.Equal(t, 1, n, "the ordinary source got its clone-base snapshot")
+}
+
 // imageKeysOf returns the image-stamp keys (isImageStampKey, any case) VM id
 // carries with a non-empty value.
 func imageKeysOf(t *testing.T, p *Provider, id string) []string {
