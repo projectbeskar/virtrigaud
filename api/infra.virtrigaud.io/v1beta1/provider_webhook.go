@@ -74,17 +74,40 @@ func SetupProviderWebhookWithManager(mgr ctrl.Manager) error {
 		Complete()
 }
 
+// providerForceDeleteAnnotation is the escape hatch that releases a Provider
+// being deleted at once, even while objects still use it (ADR-0010 D5). It is
+// the same key the controllers read (virtrigaud.io/force-delete).
+const providerForceDeleteAnnotation = "virtrigaud.io/force-delete"
+
+// forceDeleteOnLiveProviderWarning is the admission warning returned when
+// providerForceDeleteAnnotation is set on a Provider that is not being deleted.
+const forceDeleteOnLiveProviderWarning = providerForceDeleteAnnotation + "=true is set on a Provider that is not being deleted: " +
+	"deleting it will release it at once, even while VirtualMachines still use it, leaving their hypervisor VMs unmanaged. " +
+	"Remove the annotation unless that is intended."
+
+// forceDeleteWarnings returns forceDeleteOnLiveProviderWarning when provider is
+// live (not being deleted) and carries providerForceDeleteAnnotation=true. It
+// is a warning, not a denial: setting it ahead of a planned deletion is legal.
+func forceDeleteWarnings(provider *Provider) admission.Warnings {
+	if provider.Annotations[providerForceDeleteAnnotation] == "true" && provider.DeletionTimestamp.IsZero() {
+		return admission.Warnings{forceDeleteOnLiveProviderWarning}
+	}
+	return nil
+}
+
 // ValidateCreate validates a Provider on creation. It enforces the ADR-0007 D2
-// topology×type rule and returns no admission warnings.
+// topology×type rule and the /tmp size-limit annotation, and warns when the
+// force-delete annotation is set (forceDeleteWarnings).
 func (v *ProviderCustomValidator) ValidateCreate(_ context.Context, obj runtime.Object) (admission.Warnings, error) {
 	provider, ok := obj.(*Provider)
 	if !ok {
 		return nil, fmt.Errorf("expected a Provider object but got %T", obj)
 	}
+	warnings := forceDeleteWarnings(provider)
 	if err := validateTmpSizeLimitAnnotation(nil, provider); err != nil {
-		return nil, err
+		return warnings, err
 	}
-	return nil, validateProviderTopology(provider)
+	return warnings, validateProviderTopology(provider)
 }
 
 // ValidateUpdate validates a Provider on update. It rejects any change of
@@ -100,23 +123,24 @@ func (v *ProviderCustomValidator) ValidateUpdate(_ context.Context, oldObj, newO
 	if !ok {
 		return nil, fmt.Errorf("expected a Provider object but got %T", oldObj)
 	}
+	warnings := forceDeleteWarnings(provider)
 	if err := validateTypeUnchanged(old, provider); err != nil {
-		return nil, err
+		return warnings, err
 	}
 	if err := validateTopologyUnchanged(old, provider); err != nil {
-		return nil, err
+		return warnings, err
 	}
 	if err := validateTmpSizeLimitAnnotation(old, provider); err != nil {
-		return nil, err
+		return warnings, err
 	}
 	// An update that leaves the spec as it is (a finalizer, a label, an
 	// annotation) cannot make the spec invalid. Admitting it means a Provider
 	// that predates the topology rule and breaks it can still take and lose
 	// its in-use finalizer, and so can still be deleted (ADR-0010 D7).
 	if equality.Semantic.DeepEqual(old.Spec, provider.Spec) {
-		return nil, nil
+		return warnings, nil
 	}
-	return nil, validateProviderTopology(provider)
+	return warnings, validateProviderTopology(provider)
 }
 
 // validateTypeUnchanged rejects an update that changes spec.type (the CRD

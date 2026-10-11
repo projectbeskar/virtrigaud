@@ -341,3 +341,37 @@ func TestParseProviderTmpSizeLimit(t *testing.T) {
 		t.Fatal("0 must be refused")
 	}
 }
+
+// TestProviderCustomValidator_ForceDeleteOnLiveProviderWarns pins security
+// review L3: the force-delete annotation on a Provider that is not being
+// deleted gets an admission warning (never a denial); on a Provider being
+// deleted, where it is the documented escape hatch, it gets none.
+func TestProviderCustomValidator_ForceDeleteOnLiveProviderWarns(t *testing.T) {
+	v := &ProviderCustomValidator{}
+	ctx := context.Background()
+	plain := newProviderForTopology("p", ProviderTypeLibvirt, "")
+	forced := plain.DeepCopy()
+	forced.Annotations = map[string]string{providerForceDeleteAnnotation: "true"}
+
+	warnings, err := v.ValidateCreate(ctx, forced)
+	if err != nil || len(warnings) != 1 || warnings[0] != forceDeleteOnLiveProviderWarning {
+		t.Fatalf("create: want one warning and no error, got %v, %v", warnings, err)
+	}
+	warnings, err = v.ValidateUpdate(ctx, plain, forced)
+	if err != nil || len(warnings) != 1 {
+		t.Fatalf("update of a live Provider: want one warning and no error, got %v, %v", warnings, err)
+	}
+
+	deleting := forced.DeepCopy()
+	now := metav1.Now()
+	deleting.DeletionTimestamp = &now
+	deleting.Finalizers = []string{ProviderInUseFinalizer}
+	if warnings, err := v.ValidateUpdate(ctx, deleting.DeepCopy(), deleting); err != nil || warnings != nil {
+		t.Fatalf("a Provider being deleted: want no warning, got %v, %v", warnings, err)
+	}
+	notTrue := plain.DeepCopy()
+	notTrue.Annotations = map[string]string{providerForceDeleteAnnotation: "false"}
+	if warnings, _ := v.ValidateCreate(ctx, notTrue); warnings != nil {
+		t.Fatalf("a value other than true: want no warning, got %v", warnings)
+	}
+}
