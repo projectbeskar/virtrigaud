@@ -66,16 +66,18 @@ import (
 //     one tenant's landing disk out of another's reach. A disk landed under
 //     the pre-v0.4.0 bare name ("<vm>-migrated") is refused with its own
 //     message: that migration must be run again.
-//  3. No VM or template in the vCenter inventory references the file, as a
-//     disk, a snapshot's parent disk, or any file in its layout. The scan
-//     fails closed: when it cannot read every VM's devices, nothing is
-//     attached.
+//  3. No VM or template with files on the disk's datastore (or on the same
+//     storage under another datastore name) uses the disk — as a disk, a
+//     snapshot's or linked clone's parent, or a file in its layout — compared
+//     by path and by disk UUID (disk_scan.go). The check fails closed: when
+//     the scan fails, a VM there cannot be read or has an unidentifiable disk,
+//     or the account lacks System.Read, nothing is attached.
 //
 // Any other image Path is refused (InvalidArgument, non-retryable) — vSphere
 // base images are templates, never datastore files. Refusals carry constant
 // messages: never the caller's path, another VM's name, or a vCenter fault.
 //
-// The same inventory scan guards the migration import (an existing
+// The same check guards the migration import (an existing
 // "[<ds>] <ns>.<vm>-migrated" folder is deleted or overwritten only when no VM
 // uses a file in it, checked again right before a failed import's cleanup) and
 // Delete (a disk outside the VM's own directory is detached,
