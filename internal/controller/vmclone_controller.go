@@ -27,8 +27,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -482,30 +480,28 @@ func (r *VMCloneReconciler) startClone(
 // (holdCloneForTransientError). It is constant; the provider's answer is in
 // the CloneRetrying Warning event and the manager log.
 var cloneTransientRetryMessage = fmt.Sprintf("the clone is not done yet: the provider could not perform it right now "+
-	"(a transient failure; nothing is known to have been copied); it is retried with a backoff of up to %s; the "+
+	"(a transient failure; nothing was done); it is retried with a backoff of up to %s; the "+
 	"provider's answer is in the %s event", blockedRetryMax, cloneReasonRetrying)
 
-// singleHostCloneRetryable reports whether a single-host Clone RPC failure is
-// transient and safe to send again: a retryable provider answer — the
-// provider or its host unavailable (gRPC Unavailable, including a transport
-// failure), a disk check that could not run (VM_DISK_CHECK_FAILED), a copy
-// still in progress, a rate limit. A Clone whose outcome is unknown — the
-// call ran out of time (gRPC DeadlineExceeded, a provider Timeout) while the
-// provider may still be copying — is not: a single-host Clone carries no
-// request token, so sending it again could make a second VM; it fails as
-// before.
+// singleHostCloneRetryable reports whether a failed single-host Clone RPC is
+// proven to have done nothing, so it is safe to send again
+// (contracts.IsNothingDone):
+//
+//   - the request never reached the provider: no connection could be made
+//     before the call's deadline, or the circuit breaker refused it
+//     (contracts.IsRequestNotSent);
+//   - the provider answered, retryably, that it did not perform it: gRPC
+//     Unavailable with VM_OPERATION_FAILED, HOST_UNAVAILABLE or
+//     VM_DISK_CHECK_FAILED.
+//
+// Anything else fails the clone. A single-host Clone carries no request
+// token, so a Clone whose outcome is unknown — a transport failure after the
+// request was sent ("error reading from server", "transport is closing", the
+// provider pod killed mid-RPC), a DeadlineExceeded, a provider Timeout — could
+// already have made a VM (a Proxmox clone takes a new VMID each time), and
+// sending it again could make a second, untracked one.
 func singleHostCloneRetryable(err error) bool {
-	if !contracts.IsRetryable(err) {
-		return false
-	}
-	var pe *contracts.ProviderError
-	if stderrors.As(err, &pe) && pe.Type == contracts.ErrorTypeTimeout {
-		return false
-	}
-	if st, ok := status.FromError(err); ok && st.Code() == codes.DeadlineExceeded {
-		return false
-	}
-	return !stderrors.Is(err, context.DeadlineExceeded)
+	return contracts.IsNothingDone(err)
 }
 
 // holdCloneForTransientError keeps a single-host clone whose Clone RPC failed

@@ -52,12 +52,20 @@ func reconcileCloneOnce(t *testing.T, r *VMCloneReconciler, clone *infrav1beta1.
 
 func TestVMClone_SingleHost_TransientCloneErrorIsHeldAndRetried(t *testing.T) {
 	for name, transient := range map[string]error{
-		"provider unavailable (libvirt host unreachable)": contracts.NewRetryableError(
+		// The provider answered that it did nothing (Unavailable with
+		// VM_OPERATION_FAILED, as the transport maps it).
+		"provider: libvirt host unreachable, nothing defined": contracts.NewRetryableError(
 			"clone: failed to clone VM: the libvirt host could not be reached",
-			status.Error(codes.Unavailable, "failed to clone VM: the libvirt host could not be reached")),
-		"transport failure":  transportFailure("clone"),
-		"disk check failed":  contracts.NewRetryableError("clone: disk check could not run", contracts.ErrVMDiskCheckFailed),
-		"copy still running": contracts.NewInProgressError("clone: the same copy is still running", nil),
+			fmt.Errorf("%w: %w", contracts.ErrOperationNotPerformed,
+				status.Error(codes.Unavailable, "failed to clone VM: the libvirt host could not be reached"))),
+		"provider: host unavailable": contracts.NewHostUnavailableError("clone: host unreachable", nil),
+		"provider: disk check failed": contracts.NewRetryableError("clone: disk check could not run",
+			contracts.ErrVMDiskCheckFailed),
+		// The request never reached the provider.
+		"request not sent: no connection": contracts.NewRetryableError("clone: connection error",
+			fmt.Errorf("%w: %w", contracts.ErrRequestNotSent, transportFailure("clone"))),
+		"request not sent: breaker open": contracts.NewRetryableError("clone: circuit breaker open",
+			fmt.Errorf("%w: %w", contracts.ErrRequestNotSent, status.Error(codes.Unavailable, "circuit breaker open"))),
 	} {
 		t.Run(name, func(t *testing.T) {
 			prov, src, clone := cloneDisclosureFixture()
@@ -104,6 +112,14 @@ func TestVMClone_SingleHost_TransientCloneErrorIsHeldAndRetried(t *testing.T) {
 
 func TestVMClone_SingleHost_UnknownOutcomeOrRefusalStillFails(t *testing.T) {
 	for name, failure := range map[string]error{
+		// H2: a transport failure after the request was sent — the provider
+		// pod killed mid-RPC — may have made a VM (Proxmox takes a new VMID
+		// on every clone): never sent again.
+		"mid-RPC transport failure (outcome unknown)": transportFailure("clone"),
+		"connection lost mid-RPC (outcome unknown)": contracts.NewRetryableError("clone: error reading from server: EOF",
+			status.Error(codes.Unavailable, "error reading from server: EOF")),
+		"bare provider Unavailable":  contracts.NewRetryableError("clone: busy", status.Error(codes.Unavailable, "busy")),
+		"in progress without reason": contracts.NewInProgressError("clone: in progress", nil),
 		"deadline exceeded (outcome unknown)": contracts.NewRetryableError("clone: deadline exceeded",
 			status.Error(codes.DeadlineExceeded, "context deadline exceeded")),
 		"provider timeout":     contracts.NewTimeoutError("clone: copy timed out", nil),

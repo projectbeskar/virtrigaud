@@ -21,6 +21,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
+	stderrors "errors"
 	"fmt"
 	"os"
 	"strings"
@@ -132,6 +133,10 @@ func NewClient(ctx context.Context, endpoint string, providerType string, provid
 	//      When the breaker is open, returns Unavailable BEFORE invoker
 	//      runs, so step 1 still observes it.
 	unaryInterceptors := []grpc.UnaryClientInterceptor{
+		// Outermost: marks an RPC that failed before its request was sent
+		// (no connection, or the breaker's fast-fail below), so a caller can
+		// tell it from one whose outcome is unknown (request_sent.go).
+		requestSentInterceptor(),
 		// G4 (#90): record per-RPC latency + status code into the
 		// virtrigaud_provider_rpc_* metric families.
 		providerRPCMetricsInterceptor(providerType),
@@ -150,6 +155,8 @@ func NewClient(ctx context.Context, endpoint string, providerType string, provid
 			grpc.WaitForReady(true),
 		),
 		grpc.WithChainUnaryInterceptor(unaryInterceptors...),
+		// Reports when an RPC's request headers were sent (request_sent.go).
+		grpc.WithStatsHandler(requestSentStatsHandler{}),
 	)
 
 	conn, err := grpc.NewClient(endpoint, opts...)
@@ -1696,6 +1703,13 @@ func (c *Client) mapGRPCError(operation string, err error) error {
 		}
 		return fmt.Errorf("%s failed: %s", operation, st.Message())
 	case codes.Unavailable, codes.DeadlineExceeded:
+		// The request never reached the provider (no connection was made, or
+		// the circuit breaker refused it): nothing was done, so even a
+		// non-idempotent call may be sent again (contracts.IsRequestNotSent).
+		if stderrors.Is(err, errRequestNotSent) {
+			return contracts.NewRetryableError(fmt.Sprintf("%s: %s", operation, st.Message()),
+				fmt.Errorf("%w: %w", contracts.ErrRequestNotSent, err))
+		}
 		if isHostUnavailableStatus(st) {
 			return contracts.NewHostUnavailableError(fmt.Sprintf("%s: %s", operation, st.Message()), err)
 		}
@@ -1704,6 +1718,13 @@ func (c *Client) mapGRPCError(operation string, err error) error {
 			// off and say why instead of retrying on the transient cadence.
 			return contracts.NewRetryableError(fmt.Sprintf("%s: %s", operation, st.Message()),
 				fmt.Errorf("%w: %w", contracts.ErrVMDiskCheckFailed, err))
+		}
+		// The provider answered, retryably, that it did not perform the
+		// operation (VM_OPERATION_FAILED with Unavailable): marked, so a
+		// non-idempotent call may be sent again (contracts.IsNothingDone).
+		if st.Code() == codes.Unavailable && isVMOperationFailedStatus(st) {
+			return contracts.NewRetryableError(fmt.Sprintf("%s: %s", operation, st.Message()),
+				fmt.Errorf("%w: %w", contracts.ErrOperationNotPerformed, err))
 		}
 		return contracts.NewRetryableError(fmt.Sprintf("%s: %s", operation, st.Message()), err)
 	case codes.Unimplemented:

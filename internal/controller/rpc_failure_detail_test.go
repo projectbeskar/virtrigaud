@@ -125,9 +125,9 @@ func TestVMClone_ResolverErrorNeverReachesStatus(t *testing.T) {
 }
 
 // TestVMClone_FailedCloneDetailIsSanitized: a Clone RPC that failed in the
-// transport (held and retried, its answer in the CloneRetrying event), or
-// whose answer carries a credential in a URL (failed), records neither in the
-// clone's status or events.
+// transport (outcome unknown, so failed), or whose answer carries a
+// credential in a URL (failed), records neither in the clone's status or
+// events.
 func TestVMClone_FailedCloneDetailIsSanitized(t *testing.T) {
 	for name, tc := range map[string]struct {
 		err       error
@@ -136,7 +136,7 @@ func TestVMClone_FailedCloneDetailIsSanitized(t *testing.T) {
 		want      string
 	}{
 		"transport failure": {err: transportFailure("clone"), leaks: []string{"10.96.12.7", "dial tcp"},
-			wantPhase: infrav1beta1.ClonePhasePending, want: providerUnreachableDetail},
+			wantPhase: infrav1beta1.ClonePhaseFailed, want: providerUnreachableDetail},
 		"credential in the answer": {err: contracts.NewInvalidSpecError("clone: fetch https://admin:s3cret@images.example/a.ova failed", nil),
 			leaks: []string{"s3cret"}, wantPhase: infrav1beta1.ClonePhaseFailed, want: "images.example/a.ova"},
 	} {

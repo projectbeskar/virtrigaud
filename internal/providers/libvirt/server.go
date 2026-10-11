@@ -879,11 +879,12 @@ func (s *Server) Clone(ctx context.Context, req *providerv1.CloneRequest) (*prov
 //     FailedPrecondition + VM_SOURCE_RUNNING, the sdk InvalidSpec of a linked
 //     clone) keeps it, in the historical wrapped form;
 //   - the host could not be reached (isHostTransportFailure: the SSH session
-//     failed, libvirtd is down) -> Unavailable, which the manager's circuit
-//     breaker counts: the provider's only host is down;
-//   - any other retryable provider error (a list, dumpxml or pool read that
-//     failed before anything was copied) -> Unavailable with the
-//     VM_OPERATION_FAILED ErrorInfo: retried, never counted by the breaker;
+//     failed, libvirtd is down), or any other retryable provider error (a
+//     list, dumpxml or pool read that failed before anything was copied) ->
+//     Unavailable with the VM_OPERATION_FAILED ErrorInfo: the provider
+//     answers that it did not define the clone, so the manager may send the
+//     Clone again (contracts.IsNothingDone); a dropped copy left no domain,
+//     and the next copy replaces its disk. Not counted by the breaker;
 //   - anything else keeps the historical wrapped form (codes.Unknown):
 //     terminal.
 //
@@ -896,7 +897,7 @@ func singleHostCloneRPCError(err error) error {
 	}
 	if isHostTransportFailure(err) {
 		log.Printf("WARN clone VM failed: the libvirt host could not be reached: %v", err)
-		return status.Error(codes.Unavailable, "failed to clone VM: the libvirt host could not be reached")
+		return vmOperationStatus(codes.Unavailable, "failed to clone VM: the libvirt host could not be reached")
 	}
 	var pe *contracts.ProviderError
 	if stderrors.As(err, &pe) && pe.IsRetryable() && pe.Type != contracts.ErrorTypeTimeout {

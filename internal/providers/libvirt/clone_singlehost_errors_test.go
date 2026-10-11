@@ -48,7 +48,7 @@ func TestSingleHostCloneRPCError(t *testing.T) {
 		notInWire    string
 		keepsWrapped bool
 	}{
-		"host unreachable": {err: fmt.Errorf("list: %w", sshDown()), code: codes.Unavailable,
+		"host unreachable": {err: fmt.Errorf("list: %w", sshDown()), code: codes.Unavailable, vmOpFailed: true,
 			wantInWire: "the libvirt host could not be reached", notInWire: "handshake"},
 		"retryable before the copy": {err: contracts.NewRetryableError("failed to list domains", errors.New("virsh: raw output")),
 			code: codes.Unavailable, vmOpFailed: true, wantInWire: "failed to list domains", notInWire: "raw output"},
