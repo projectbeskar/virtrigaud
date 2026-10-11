@@ -3010,7 +3010,7 @@ func (p *Provider) createVirtualMachine(ctx context.Context, spec *VMSpec, datac
 				"size_gib", diskSpec.SizeGiB,
 				"type", diskSpec.Type)
 
-			if err := p.attachAdditionalDisk(ctx, newVM, diskSpec, datacenter, datastore, i+1); err != nil {
+			if err := p.attachAdditionalDisk(ctx, newVM, diskSpec, i+1); err != nil {
 				p.logger.Error("Failed to attach additional disk",
 					"vm_id", vmID,
 					"disk_name", diskSpec.Name,
@@ -3043,13 +3043,17 @@ func (p *Provider) createVirtualMachine(ctx context.Context, spec *VMSpec, datac
 	return vmID, nil
 }
 
-// attachAdditionalDisk attaches a new disk to an existing VM
+// attachAdditionalDisk creates additional disk diskIndex (1-based) of vm and
+// attaches it. The disk file is created in the VM's own home directory — the
+// directory of its .vmx (config.files.vmPathName), on that datastore — never
+// in a directory named after the VM on some other datastore, which may not
+// exist or may belong to another VM (a VM created from an imported disk has
+// its home on the imported disk's datastore, and vCenter may have suffixed the
+// directory name).
 func (p *Provider) attachAdditionalDisk(
 	ctx context.Context,
 	vm *object.VirtualMachine,
 	diskSpec AdditionalDiskSpec,
-	datacenter *object.Datacenter,
-	datastore *object.Datastore,
 	diskIndex int,
 ) error {
 	p.logger.Info("Attaching additional disk",
@@ -3063,9 +3067,20 @@ func (p *Provider) attachAdditionalDisk(
 
 	// Get current VM configuration to find available controller and unit number
 	var vmMo mo.VirtualMachine
-	err := vm.Properties(ctx, vm.Reference(), []string{"config.hardware.device", "config.name"}, &vmMo)
+	err := vm.Properties(ctx, vm.Reference(), []string{propConfigHardwareDevice, "config.name", propConfigFilesVMPathName}, &vmMo)
 	if err != nil {
 		return fmt.Errorf("failed to get VM properties: %w", err)
+	}
+	if vmMo.Config == nil {
+		return fmt.Errorf("VM %s has no readable configuration", vm.Reference().Value)
+	}
+	var home object.DatastorePath
+	if !home.FromString(vmMo.Config.Files.VmPathName) || home.Datastore == "" {
+		return fmt.Errorf("VM %s has no usable home path (config.files.vmPathName)", vm.Reference().Value)
+	}
+	homeDir := path.Dir(home.Path)
+	if homeDir == "." || homeDir == "/" {
+		homeDir = ""
 	}
 
 	// Find SCSI controllers indexed by bus number
@@ -3160,11 +3175,11 @@ func (p *Provider) attachAdditionalDisk(
 		return fmt.Errorf("no available unit numbers on SCSI controller (all 15 slots used)")
 	}
 
-	// Construct datastore path for new disk
-	// Format: [datastore] vm-name/vm-name_N.vmdk
+	// Construct the datastore path of the new disk in the VM's home directory:
+	// "[<home ds>] <home dir>/<vm>_N.vmdk".
 	vmName := vmMo.Config.Name
 	diskFileName := fmt.Sprintf("%s_%d.vmdk", vmName, diskIndex)
-	diskPath := fmt.Sprintf("[%s] %s/%s", datastore.Name(), vmName, diskFileName)
+	diskPath := (&object.DatastorePath{Datastore: home.Datastore, Path: path.Join(homeDir, diskFileName)}).String()
 
 	p.logger.Info("Creating disk file",
 		"path", diskPath,
@@ -3191,8 +3206,7 @@ func (p *Provider) attachAdditionalDisk(
 	// Create disk backing
 	diskBacking := &types.VirtualDiskFlatVer2BackingInfo{
 		VirtualDeviceFileBackingInfo: types.VirtualDeviceFileBackingInfo{
-			FileName:  diskPath,
-			Datastore: types.NewReference(datastore.Reference()),
+			FileName: diskPath,
 		},
 		DiskMode:        diskMode,
 		ThinProvisioned: thinProvisioned,

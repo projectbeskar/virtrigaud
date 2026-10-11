@@ -18,12 +18,14 @@ package vsphere
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/vmware/govmomi/object"
 	"github.com/vmware/govmomi/property"
+	"github.com/vmware/govmomi/simulator"
 	"github.com/vmware/govmomi/vim25/mo"
 	"github.com/vmware/govmomi/vim25/types"
 
@@ -214,4 +216,40 @@ func hasExtraConfigKey(extraConfig []types.BaseOptionValue, key string) bool {
 		}
 	}
 	return false
+}
+
+// TestCreate_AdditionalDiskLandsInVMHome: an additional disk is created in
+// the new VM's own home directory (config.files.vmPathName), not in
+// "[<placement datastore>] <vm name>/". A VM created from an imported disk has
+// its home on the imported disk's datastore, which here is not the provider's
+// default datastore.
+func TestCreate_AdditionalDiskLandsInVMHome(t *testing.T) {
+	p, _ := newOwnershipSim(t, func(m *simulator.Model) { m.Datastore = 2 })
+	const otherDS = "LocalDS_1"
+	require.NotEqual(t, otherDS, p.config.DefaultDatastore)
+	diskPath := "[" + otherDS + "] " + importedDiskRelPath("migrated")
+	makeImportedDisk(t, p, "["+otherDS+"] "+importedDiskName("migrated"), diskPath)
+
+	resp, err := p.Create(context.Background(), &providerv1.CreateRequest{
+		Name:      "migrated",
+		ImageJson: importedDiskImageJSON(diskPath, true),
+		DisksJson: `[{"Name":"data","SizeGiB":1,"Type":"thin"}]`,
+		Owner:     wireOwner(ownerTeamA),
+	})
+	require.NoError(t, err)
+
+	var vm mo.VirtualMachine
+	require.NoError(t, property.DefaultCollector(p.client.Client).RetrieveOne(context.Background(), vmRef(resp.Id),
+		[]string{"config.files.vmPathName"}, &vm))
+	home, ok := datastoreFileOf(vm.Config.Files.VmPathName)
+	require.True(t, ok)
+	require.Equal(t, strings.ToLower(otherDS), home.datastore, "setup: the VM's home is on the imported disk's datastore")
+
+	files := vmDiskFiles(t, p, resp.Id)
+	require.Len(t, files, 2, "the imported disk and the additional disk")
+	assert.Equal(t, diskPath, files[0])
+	added, ok := datastoreFileOf(files[1])
+	require.True(t, ok)
+	assert.True(t, added.inDir(home.dir()), "additional disk %s must be in the VM's home directory %s", files[1], vm.Config.Files.VmPathName)
+	assert.True(t, datastoreFileExists(t, p, files[1]))
 }

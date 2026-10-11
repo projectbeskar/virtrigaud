@@ -134,9 +134,14 @@ func (r *vcenterCloneSemantics) RoundTrip(ctx context.Context, req, res soap.Has
 // Provider connected to it with the placement defaults the create path needs,
 // plus the model so a test can shape inventory the API itself forbids. Clone
 // ExtraConfig semantics are made vCenter-faithful by vcenterCloneSemantics.
-func newOwnershipSim(t *testing.T) (*Provider, *simulator.Model) {
+//
+// Each opt adjusts the model before it is created (e.g. more datastores).
+func newOwnershipSim(t *testing.T, opts ...func(*simulator.Model)) (*Provider, *simulator.Model) {
 	t.Helper()
 	model := simulator.VPX()
+	for _, opt := range opts {
+		opt(model)
+	}
 	require.NoError(t, model.Create())
 	server := model.Service.NewServer()
 
