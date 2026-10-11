@@ -5,16 +5,17 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [2026-10-11 20:32] - Bump OpenTelemetry-Go to v1.45.0 (GO-2026-6505) and golang.org/x/net to v0.60.0
+## [2026-10-11 20:32] - Bump OpenTelemetry-Go to v1.45.0 (GO-2026-6505), golang.org/x/net to v0.60.0 and Go to 1.26.9
 **Author:** @wrkode (William Rizzo)
 
 ### Security
 - `go.mod`, `go.sum`, `sdk/go.mod`, `sdk/go.sum`: fix **GO-2026-6505**, OpenTelemetry-Go exporter configuration logging could leak endpoint URLs in info logs. `go.opentelemetry.io/otel`, `otel/sdk`, `otel/trace`, `otel/metric`, `otel/exporters/otlp/otlptrace` and `otlptrace/otlptracegrpc` move together from v1.43.0 / v1.44.0 to v1.45.0 (`go.opentelemetry.io/proto/otlp` v1.10.0 to v1.11.0). Reached through `internal/obs/tracing/tracing.go` (`otlptracegrpc.New`, `trace.WithBatcher`).
-- `go.mod`, `go.sum`, `sdk/go.mod`, `sdk/go.sum`: `golang.org/x/net` v0.58.0 to v0.60.0, which fixes the HTTP/2 and HPACK advisories (GO-2026-6603, 6610, 6611, 6612, 6617) that `govulncheck` traces from `cmd/manager` and `internal/storage`.
+- `go.mod`, `go.sum`, `sdk/go.mod`, `sdk/go.sum`, `proto/go.mod`, `proto/go.sum`: `golang.org/x/net` v0.58.0 to v0.60.0, which fixes the HTTP/2 and HPACK advisories (GO-2026-6603, 6610, 6611, 6612, 6617) that `govulncheck` traces from `cmd/manager` and `internal/storage`.
+- `go.mod`, `sdk/go.mod`, `proto/go.mod`, `Makefile`, `build/Dockerfile.manager`, `cmd/provider-{libvirt,mock,vsphere,proxmox}/Dockerfile`: bump the Go toolchain **1.26.6 to 1.26.9** (the `go` directive in all three modules and every builder-image pin, in lockstep per the Makefile note), so CI and the shipped binaries carry the patched standard library. Clears the Go standard-library advisories fixed in go1.26.9 that `govulncheck` traced in `net/http`, `crypto/tls`, `net/textproto` and `html/template` (GO-2026-6599, 6600, 6605, 6607, 6608 among them).
 - Transitive bumps from the above: `go-logr/logr` v1.4.4, `grpc-gateway/v2` v2.29.0, `genproto/googleapis/{api,rpc}` 20260803, `x/crypto` v0.57.0, `x/sync` v0.23.0, `x/sys` v0.48.0, `x/term` v0.46.0, `x/text` v0.42.0, `x/tools` v0.49.0. No source changes; no OpenTelemetry API break.
 
 ### Why
-CI's Supply Chain Vulnerability Scan (`govulncheck`) failed on every PR because the OTLP trace exporter at v1.43.0 is affected by GO-2026-6505; the fix is in v1.45.0.
+CI's Supply Chain Vulnerability Scan (`govulncheck`) failed on every PR because the OTLP trace exporter at v1.43.0 is affected by GO-2026-6505; the fix is in v1.45.0. `govulncheck` fails on any reachable vulnerability, so the newer `x/net` and standard-library advisories had to clear in the same change.
 
 ### Impact
 - [ ] Breaking change
