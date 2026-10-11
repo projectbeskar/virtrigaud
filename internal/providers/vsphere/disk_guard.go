@@ -57,7 +57,7 @@ import (
 //  1. contracts.VMImage.ImportedDisk is true: the operator verified the path as
 //     the landing disk a VMMigration in the VM's own namespace imported for
 //     this VM (isOwnMigrationDisk); the tenant cannot set it.
-//  2. The path is exactly "[<ds>] <ns>.<vm>-migrated/<ns>.<vm>-migrated.vmdk",
+//  2. The path is exactly "[<ds>] <ns>_<vm>-migrated/<ns>_<vm>-migrated.vmdk",
 //     <ns> and <vm> being the requesting VirtualMachine's namespace
 //     (CreateRequest.owner, required) and name: the name ImportDisk gives the
 //     disk it lands for that VirtualMachine (landingName, derived from
@@ -78,7 +78,7 @@ import (
 // messages: never the caller's path, another VM's name, or a vCenter fault.
 //
 // The same check guards the migration import (an existing
-// "[<ds>] <ns>.<vm>-migrated" folder is deleted or overwritten only when no VM
+// "[<ds>] <ns>_<vm>-migrated" folder is deleted or overwritten only when no VM
 // uses a file in it, checked again right before a failed import's cleanup) and
 // Delete (a disk outside the VM's own directory is detached,
 // keeping its file, before Destroy_Task, unless it is the VM's own migrated
@@ -106,8 +106,8 @@ const (
 // inPlaceDiskRejectedMessage is the only text a refused in-place disk path
 // returns. It names the rule, never the caller's path.
 const inPlaceDiskRejectedMessage = "imported disk rejected: the vSphere provider attaches a disk in place only when " +
-	"it is the VirtualMachine's own migration landing disk ([<datastore>] <namespace>.<vm name>-migrated/" +
-	"<namespace>.<vm name>-migrated.vmdk, imported by a VMMigration in the same namespace that targets this " +
+	"it is the VirtualMachine's own migration landing disk ([<datastore>] <namespace>_<vm name>-migrated/" +
+	"<namespace>_<vm name>-migrated.vmdk, imported by a VMMigration in the same namespace that targets this " +
 	"VirtualMachine); use a VMImage (template or OVA) for any other image"
 
 // legacyLandingMessage refuses a disk an earlier release landed under the
@@ -182,24 +182,28 @@ func (p *Provider) errDiskCheckFailed(what string, err error) error {
 	return statusWithReasons(codes.Unavailable, msg, contracts.VMDiskCheckFailedReason).Err()
 }
 
-// landingSeparator joins the namespace and the name in a landing name. A
-// namespace is a DNS-1123 label (no dots), so the first dot splits the two
-// unambiguously.
-const landingSeparator = "."
+// landingSeparator joins the namespace and the name in a landing name. It is
+// "_", which no Kubernetes namespace or object name can contain: the landing
+// name splits unambiguously, and no VirtualMachine — which vSphere names, and
+// homes in a directory named, after its bare name — can be named like a
+// landing folder (a VM named "ns-a.web-migrated" in another namespace would
+// squat "ns-a"'s landing if the separator were a dot). vCenter's own
+// directory suffix ("<vm>_<digits>") never ends in "-migrated".
+const landingSeparator = "_"
 
 // maxDatastoreFileNameBytes bounds one component of a datastore path (VMFS
 // and NFS limit a file or directory name to 255 bytes).
 const maxDatastoreFileNameBytes = 255
 
 // landingName is the base name ImportDisk gives the disk it lands for the
-// VirtualMachine namespace/name: "<ns>.<vm>-migrated". The folder and the
+// VirtualMachine namespace/name: "<ns>_<vm>-migrated". The folder and the
 // .vmdk are both named after it.
 func landingName(namespace, name string) string {
 	return namespace + landingSeparator + name + contracts.ImportedDiskNameSuffix
 }
 
 // landingRelPath is the datastore-relative path of that landing disk:
-// "<ns>.<vm>-migrated/<ns>.<vm>-migrated.vmdk".
+// "<ns>_<vm>-migrated/<ns>_<vm>-migrated.vmdk".
 func landingRelPath(namespace, name string) string {
 	n := landingName(namespace, name)
 	return n + "/" + n + vmdkExt
@@ -260,7 +264,7 @@ func errLegacyLanding() error {
 // the VM named vmName, requested by owner, and returns the datastore the disk
 // is on. diskPath is accepted only when imported is set, owner carries a
 // namespace (and, when set, owner.Name is vmName), and diskPath is
-// byte-for-byte "[<ds>] <ns>.<vm>-migrated/<ns>.<vm>-migrated.vmdk" with a
+// byte-for-byte "[<ds>] <ns>_<vm>-migrated/<ns>_<vm>-migrated.vmdk" with a
 // plain datastore name.
 func checkInPlaceDiskPath(diskPath string, owner contracts.ObjectIdentity, vmName string, imported bool) (string, error) {
 	if !imported || vmName == "" || owner.Namespace == "" || (owner.Name != "" && owner.Name != vmName) {

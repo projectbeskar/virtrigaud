@@ -278,11 +278,11 @@ func (r *hideVMConfig) RoundTrip(ctx context.Context, req, res soap.HasFault) er
 func TestCheckInPlaceDiskPath(t *testing.T) {
 	const vm = "web"
 	owner := contracts.ObjectIdentity{UID: "u", Namespace: "team-a", Name: vm}
-	ok := "[ds1] team-a.web-migrated/team-a.web-migrated.vmdk"
+	ok := "[ds1] team-a_web-migrated/team-a_web-migrated.vmdk"
 	ds, err := checkInPlaceDiskPath(ok, owner, vm, true)
 	require.NoError(t, err)
 	assert.Equal(t, "ds1", ds)
-	_, err = checkInPlaceDiskPath("[my datastore] team-a.web-migrated/team-a.web-migrated.vmdk", owner, vm, true)
+	_, err = checkInPlaceDiskPath("[my datastore] team-a_web-migrated/team-a_web-migrated.vmdk", owner, vm, true)
 	require.NoError(t, err, "datastore names may contain spaces")
 	_, err = checkInPlaceDiskPath(ok, contracts.ObjectIdentity{Namespace: "team-a"}, vm, true)
 	require.NoError(t, err, "an owner without a name is the VM being created")
@@ -300,28 +300,28 @@ func TestCheckInPlaceDiskPath(t *testing.T) {
 		"not verified by the operator": {ok, owner, vm, false},
 		"owner without a namespace":    {ok, noNamespace, vm, true},
 		"owner names another VM":       {ok, otherName, vm, true},
-		"same name, another namespace": {"[ds1] team-b.web-migrated/team-b.web-migrated.vmdk", owner, vm, true},
+		"same name, another namespace": {"[ds1] team-b_web-migrated/team-b_web-migrated.vmdk", owner, vm, true},
 		"another VM's landing disk":    {"[ds1] team-a.db-migrated/team-a.db-migrated.vmdk", owner, vm, true},
 		"another VM's own disk":        {"[ds1] web/web.vmdk", owner, vm, true},
 		"name prefix only":             {ok, contracts.ObjectIdentity{Namespace: "team-a"}, "we", true},
 		"namespace prefix only":        {ok, contracts.ObjectIdentity{Namespace: "team"}, vm, true},
-		"other folder":                 {"[ds1] x/team-a.web-migrated.vmdk", owner, vm, true},
-		"nested":                       {"[ds1] a/team-a.web-migrated/team-a.web-migrated.vmdk", owner, vm, true},
-		"dot-dot":                      {"[ds1] team-a.web-migrated/../victim/victim.vmdk", owner, vm, true},
-		"no space":                     {"[ds1]team-a.web-migrated/team-a.web-migrated.vmdk", owner, vm, true},
-		"two spaces":                   {"[ds1]  team-a.web-migrated/team-a.web-migrated.vmdk", owner, vm, true},
+		"other folder":                 {"[ds1] x/team-a_web-migrated.vmdk", owner, vm, true},
+		"nested":                       {"[ds1] a/team-a_web-migrated/team-a_web-migrated.vmdk", owner, vm, true},
+		"dot-dot":                      {"[ds1] team-a_web-migrated/../victim/victim.vmdk", owner, vm, true},
+		"no space":                     {"[ds1]team-a_web-migrated/team-a_web-migrated.vmdk", owner, vm, true},
+		"two spaces":                   {"[ds1]  team-a_web-migrated/team-a_web-migrated.vmdk", owner, vm, true},
 		"trailing text":                {ok + " ", owner, vm, true},
-		"case variant":                 {"[ds1] TEAM-A.web-migrated/TEAM-A.web-migrated.vmdk", owner, vm, true},
-		"flat extent":                  {"[ds1] team-a.web-migrated/team-a.web-migrated-flat.vmdk", owner, vm, true},
-		"empty datastore":              {"[] team-a.web-migrated/team-a.web-migrated.vmdk", owner, vm, true},
-		"padded datastore":             {"[ ds1] team-a.web-migrated/team-a.web-migrated.vmdk", owner, vm, true},
-		"bracket in datastore":         {"[d[s] team-a.web-migrated/team-a.web-migrated.vmdk", owner, vm, true},
-		"glob in datastore":            {"[ds*] team-a.web-migrated/team-a.web-migrated.vmdk", owner, vm, true},
-		"host path":                    {"/vmfs/volumes/ds1/team-a.web-migrated/team-a.web-migrated.vmdk", owner, vm, true},
-		"control character":            {"[ds\x001] team-a.web-migrated/team-a.web-migrated.vmdk", owner, vm, true},
+		"case variant":                 {"[ds1] TEAM-A_web-migrated/TEAM-A_web-migrated.vmdk", owner, vm, true},
+		"flat extent":                  {"[ds1] team-a_web-migrated/team-a_web-migrated-flat.vmdk", owner, vm, true},
+		"empty datastore":              {"[] team-a_web-migrated/team-a_web-migrated.vmdk", owner, vm, true},
+		"padded datastore":             {"[ ds1] team-a_web-migrated/team-a_web-migrated.vmdk", owner, vm, true},
+		"bracket in datastore":         {"[d[s] team-a_web-migrated/team-a_web-migrated.vmdk", owner, vm, true},
+		"glob in datastore":            {"[ds*] team-a_web-migrated/team-a_web-migrated.vmdk", owner, vm, true},
+		"host path":                    {"/vmfs/volumes/ds1/team-a_web-migrated/team-a_web-migrated.vmdk", owner, vm, true},
+		"control character":            {"[ds\x001] team-a_web-migrated/team-a_web-migrated.vmdk", owner, vm, true},
 		"empty":                        {"", owner, vm, true},
 		"no VM name":                   {ok, owner, "", true},
-		"namespace not a DNS label":    {"[ds1] a.b.web-migrated/a.b.web-migrated.vmdk", contracts.ObjectIdentity{Namespace: "a.b"}, vm, true},
+		"namespace not a DNS label":    {"[ds1] a.b_web-migrated/a.b_web-migrated.vmdk", contracts.ObjectIdentity{Namespace: "a.b"}, vm, true},
 	} {
 		t.Run(name, func(t *testing.T) {
 			_, err := checkInPlaceDiskPath(tc.path, tc.owner, tc.vm, tc.imported)
@@ -348,16 +348,16 @@ func TestImportLandingName(t *testing.T) {
 	}
 	id, err := importLandingName(req("team-a", "web", "web-migrated"))
 	require.NoError(t, err)
-	assert.Equal(t, "team-a.web-migrated", id)
+	assert.Equal(t, "team-a_web-migrated", id)
 	id, err = importLandingName(req("team-b", "web", ""))
 	require.NoError(t, err)
-	assert.Equal(t, "team-b.web-migrated", id, "the same VM name in another namespace lands elsewhere")
+	assert.Equal(t, "team-b_web-migrated", id, "the same VM name in another namespace lands elsewhere")
 
 	for name, r := range map[string]*providerv1.ImportDiskRequest{
 		"no target VM (older manager)":  req("", "", "web-migrated"),
 		"no namespace":                  req("", "web", "web-migrated"),
 		"target name of another VM":     req("team-a", "web", "db-migrated"),
-		"target name aims at a landing": req("team-a", "web", "team-b.web-migrated"),
+		"target name aims at a landing": req("team-a", "web", "team-b_web-migrated"),
 		"namespace with a dot":          req("team.a", "web", ""),
 		"name with a slash":             req("team-a", "a/b", ""),
 	} {
@@ -888,7 +888,7 @@ func flat(file, uuid string, parent *types.VirtualDiskFlatVer2BackingInfo) *type
 
 func TestInventoryFileUsers_Identity(t *testing.T) {
 	const (
-		landing     = "[nfs-a] team-a.web-migrated/team-a.web-migrated.vmdk"
+		landing     = "[nfs-a] team-a_web-migrated/team-a_web-migrated.vmdk"
 		landingUUID = "60 00 C2 9a 11 22 33 44-55 66 77 88 99 aa bb cc" // QueryVirtualDiskUuid spelling
 	)
 	f, ok := datastoreFileOf(landing)
@@ -900,11 +900,11 @@ func TestInventoryFileUsers_Identity(t *testing.T) {
 		used    bool
 		unknown bool
 	}{
-		"same path, other case": {vm: vmWithDisks("vm-1", flat("[NFS-A] Team-A.web-migrated/team-a.web-migrated.vmdk", "", nil)), used: true},
+		"same path, other case": {vm: vmWithDisks("vm-1", flat("[NFS-A] Team-A_web-migrated/team-a_web-migrated.vmdk", "", nil)), used: true},
 		"same disk under another datastore name (UUID)": {
-			vm: vmWithDisks("vm-2", flat("[nfs-b] team-a.web-migrated/team-a.web-migrated.vmdk", "6000C29a-1122-3344-5566-778899aabbcc", nil)), used: true},
+			vm: vmWithDisks("vm-2", flat("[nfs-b] team-a_web-migrated/team-a_web-migrated.vmdk", "6000C29a-1122-3344-5566-778899aabbcc", nil)), used: true},
 		"same disk under a host path (UUID)": {
-			vm: vmWithDisks("vm-3", flat("[] /vmfs/volumes/5f0e/team-a.web-migrated/team-a.web-migrated.vmdk", "6000c29a11223344556677889 9aabbcc", nil)), used: true},
+			vm: vmWithDisks("vm-3", flat("[] /vmfs/volumes/5f0e/team-a_web-migrated/team-a_web-migrated.vmdk", "6000c29a11223344556677889 9aabbcc", nil)), used: true},
 		"linked-clone delta whose parent is the disk": {
 			vm: vmWithDisks("vm-4", flat("[nfs-a] other/other-000001.vmdk", "6000c29a00000000000000000000beef", flat(landing, "", nil))), used: true},
 		"host path without UUID": {vm: vmWithDisks("vm-5", flat("[] /vmfs/volumes/5f0e/x/x.vmdk", "", nil)), unknown: true},
@@ -1057,4 +1057,25 @@ func TestDelete_OwnershipIsCaseExact(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, vmExists(t, p, resp.Id))
 	assert.True(t, datastoreFileExists(t, p, caseVariant), "a disk outside the exact home directory is kept")
+}
+
+// TestLandingName_NoVMCanSquatALanding: a VirtualMachine in team-b named
+// like team-a's landing folder ("team-a.web-migrated", a valid Kubernetes
+// name) gets a vSphere home directory of that name, which must not be
+// team-a's landing folder: team-a's import and create are unaffected.
+func TestLandingName_NoVMCanSquatALanding(t *testing.T) {
+	p, _ := newOwnershipSim(t)
+	ctx := context.Background()
+	squat, err := p.Create(ctx, templateCreateRequest("team-a.web-migrated", "", ownerNamed(ownerTeamB, "team-a.web-migrated")))
+	require.NoError(t, err)
+	for _, f := range vmDiskFiles(t, p, squat.Id) {
+		assert.NotContains(t, f, landingName(ownerTeamA.Namespace, "web"))
+	}
+
+	require.NoError(t, p.ensureImportFolderUnused(ctx, simDatastore, landingName(ownerTeamA.Namespace, "web"), true),
+		"team-a's landing folder is not the squatting VM's home")
+	resp, err := p.Create(ctx, &providerv1.CreateRequest{Name: "web", ImageJson: makeOwnMigratedDisk(t, p, "web"), Owner: wireOwner(ownerTeamA)})
+	require.NoError(t, err)
+	assert.Equal(t, []string{ownMigratedDiskPath("web")}, vmDiskFiles(t, p, resp.Id))
+	assert.Equal(t, "team-a_web-migrated", landingName(ownerTeamA.Namespace, "web"))
 }
