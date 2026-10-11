@@ -57,7 +57,15 @@ func TestSingleHostCloneRPCError(t *testing.T) {
 		"source running keeps its status": {err: &sourceRunningError{state: "running"}, code: codes.FailedPrecondition},
 		"invalid spec stays terminal":     {err: contracts.NewInvalidSpecError("target VM exists", nil), code: codes.Unknown, keepsWrapped: true},
 		"timeout stays terminal":          {err: contracts.NewTimeoutError("copy timed out", nil), code: codes.Unknown, keepsWrapped: true},
-		"plain error stays terminal":      {err: errors.New("define target domain: boom"), code: codes.Unknown, keepsWrapped: true},
+		// Security review M3: a define whose outcome is unknown wraps the
+		// VirshError of the dropped session, which isHostTransportFailure
+		// matches; the clone may exist, so it must stay terminal.
+		"define outcome unknown stays terminal": {err: fmt.Errorf("define target domain: %w",
+			fmt.Errorf("%w: %w", errDefineOutcomeUnknown, fmt.Errorf("failed to define domain: %w", sshDown()))),
+			code: codes.Unknown, keepsWrapped: true},
+		"define verified absent is retryable": {err: fmt.Errorf("define target domain: %w",
+			fmt.Errorf("failed to define domain: %w", sshDown())), code: codes.Unavailable, vmOpFailed: true},
+		"plain error stays terminal": {err: errors.New("define target domain: boom"), code: codes.Unknown, keepsWrapped: true},
 	} {
 		t.Run(name, func(t *testing.T) {
 			got := singleHostCloneRPCError(tc.err)

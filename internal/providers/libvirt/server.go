@@ -895,6 +895,13 @@ func singleHostCloneRPCError(err error) error {
 	if stderrors.As(err, &withStatus) {
 		return fmt.Errorf("failed to clone VM: %w", err)
 	}
+	// A define whose outcome could not be established (the session dropped
+	// while virsh define ran) may have defined the clone: never answered as
+	// "nothing done", whatever the transport failure underneath. Terminal.
+	if stderrors.Is(err, errDefineOutcomeUnknown) {
+		log.Printf("WARN clone VM failed: the define's outcome is unknown: %v", err)
+		return fmt.Errorf("failed to clone VM: %w", err)
+	}
 	if isHostTransportFailure(err) {
 		log.Printf("WARN clone VM failed: the libvirt host could not be reached: %v", err)
 		return vmOperationStatus(codes.Unavailable, "failed to clone VM: the libvirt host could not be reached")
