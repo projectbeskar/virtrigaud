@@ -584,6 +584,18 @@ directory and unused by any domain. Any other `spec.importedDisk` is treated as 
 image (confined, then copied or refused). Migrated disks landed by ImportDisk get the
 same header check before conversion.
 
+**vSphere imported disks.** vSphere base images are templates (or OVAs prepared into
+templates), never datastore files, so the vSphere provider attaches a datastore file to a
+new VM only as that VM's own migration landing disk: the manager must have verified it as
+above, the path must be exactly `[<datastore>] <vm name>-migrated/<vm name>-migrated.vmdk`
+(the name vSphere `ImportDisk` gives the disk it lands), and no VM or template anywhere in
+the vCenter inventory may use the file. Any other `spec.importedDisk.path` is refused
+before anything is created (`ValidationError`); a disk another VM uses is a `Conflict`;
+when the inventory cannot be read the create fails closed and is retried. The provider's
+vCenter account therefore needs read access to every VM and template. A migration import
+likewise refuses to reuse a landing folder whose files a VM uses, and deleting a vSphere
+VM never deletes a disk outside its own directory that it does not own.
+
 > **Upgrade warning — legacy shared disks.** Before this change a path or prepared image
 > in the pool directory was attached in place, so several VMs created from the same image
 > may **share one disk file**, and deleting any of them deletes that file for all of

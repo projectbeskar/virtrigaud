@@ -39,6 +39,14 @@ Read the upgrade guide before upgrading:
   pre-upgrade VM.
   → [Upgrade guide](docs/upgrading.md#breaking-changes)
 
+- **vSphere attaches an imported disk in place only when it is the VM's own
+  verified migration disk.** `spec.importedDisk.path` naming any other datastore
+  file (another VM's disk) is refused before anything is created; a migration's
+  landing disk used by another VM is refused too. Deleting a VM no longer deletes
+  a disk it does not own. The vCenter account must be able to read every VM and
+  template in the inventory.
+  → [Upgrade guide](docs/upgrading.md#breaking-changes)
+
 - **libvirt linked clones are disabled.** A `VMClone` with
   `spec.options.type: LinkedClone` through a libvirt Provider fails with
   `LinkedCloneUnsupported`: a linked clone reads its source VM's live disk, and
@@ -327,7 +335,12 @@ providers), and rollback caveats in
   and the controller powers it on when `spec.powerState` is `On` or empty.
   Cloud-init is set at create time and still applies on the first boot. A VM
   created from an imported (migrated) disk is now also grown to its VMClass
-  disk size and gets its additional disks; a bug skipped both
+  disk size and gets its additional disks; a bug skipped both. The grow is
+  grow-only: a migrated VM smaller than the VMClass `diskDefaults.size`
+  (default `40Gi`) is grown to it, using datastore capacity (all at once for a
+  thick disk); a GPT guest sees a moved backup header, which `growpart` repairs.
+  A failed grow or disk attach now fails the create (retried and completed)
+  instead of being skipped silently
   (→ [`docs/upgrading.md`](docs/upgrading.md)).
 - libvirt: hardware-accelerated `<domain type='kvm'>` is used again on hosts
   with a readable `/dev/kvm`, instead of falling back to software emulation.
