@@ -11,6 +11,8 @@
 #      and a set providers.<name>.tmpSizeLimit becomes that pod's sizeLimit.
 #   3. An empty value, or "none", renders an unbounded emptyDir ({}), never an
 #      invalid one; an invalid value fails the render.
+#   3b. The opt-in vSphere provider Deployment runs one replica with the
+#      Recreate strategy, and providers.vsphere.replicaCount > 1 fails.
 #   4. `helm upgrade --reuse-values` from v0.3.11 (whose values.yaml has none
 #      of these keys) still renders: every /tmp is a valid, unbounded emptyDir.
 #
@@ -119,6 +121,23 @@ for bad in "providers.libvirt.tmpSizeLimit=lots" "providers.vsphere.tmpSizeLimit
   fi
   echo "   ok: ${bad} refused"
 done
+
+echo "==> 3b. the vSphere provider runs one replica with Recreate"
+python3 - "${WORKDIR}/default.yaml" <<'PY'
+import sys, yaml
+docs = [d for d in yaml.safe_load_all(open(sys.argv[1])) if d]
+dep = [d for d in docs if d.get("kind") == "Deployment" and d["metadata"]["name"].endswith("provider-vsphere")][0]
+spec = dep["spec"]
+if spec.get("replicas") != 1 or spec.get("strategy", {}).get("type") != "Recreate":
+    sys.exit(f"❌ vSphere provider: replicas={spec.get('replicas')} strategy={spec.get('strategy')}; want 1 and Recreate")
+print("   ok: provider-vsphere replicas=1 strategy=Recreate")
+PY
+if helm template virtrigaud "${CHART_DIR}" --namespace "${NAMESPACE}" "${PROVIDERS[@]}" \
+     --set providers.vsphere.replicaCount=2 > /dev/null 2>&1; then
+  echo "❌ providers.vsphere.replicaCount=2 rendered; it must fail" >&2
+  exit 1
+fi
+echo "   ok: providers.vsphere.replicaCount=2 refused"
 
 echo "==> 4. --reuse-values from ${LEGACY_REF} still renders"
 if ! git -C "${REPO_ROOT}" cat-file -e "${LEGACY_REF}:charts/virtrigaud/values.yaml" 2>/dev/null; then

@@ -5,7 +5,7 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [2026-10-11 21:27] - Deleting a Provider that is still in use waits, with its runtime kept, instead of orphaning its VMs (ADR-0010); every /tmp emptyDir gets a sizeLimit
+## [2026-10-11 21:27] - Deleting a Provider that is still in use waits, with its runtime kept, instead of orphaning its VMs (ADR-0010); every /tmp emptyDir gets a sizeLimit; vSphere provider runtimes run one replica with Recreate
 **Author:** @wrkode (William Rizzo)
 
 > **Operator note.**
@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > - **Namespace deletion:** Kubernetes deletes the provider runtime's pods with the namespace. A VM whose delete misses the pod's termination window is held (`ProviderUnavailable`), not orphaned; the `Provider` shows `DeleteBlocked=True/ProviderInUseRuntimeNotKept` and the namespace stays `Terminating` until an administrator acts.
 > - **Escape hatch:** `virtrigaud.io/force-delete: "true"` on the `Provider` releases it at once, with a `Warning` event `ProviderForceDeleted`; the hypervisor VMs left are unmanaged. The webhook warns (never refuses) when it is set on a `Provider` that is not being deleted.
 > - **Rollback / uninstall:** an older manager, or no manager, never removes the finalizer; delete VMs and Providers first, or remove it by hand (`docs/upgrading.md`).
+> - **vSphere providers run one replica with `Recreate`:** `spec.runtime.replicas` above 1 is ignored for a vSphere `Provider`, and **the vSphere provider is briefly down during every rollout**, including the manager upgrade.
 > - **`/tmp` size limits:** every pod's writable `/tmp` emptyDir now has a `sizeLimit`: vSphere providers `512Gi`, libvirt/Proxmox/other providers `1Gi`, the manager `128Mi`. A pod that writes past it is evicted. vSphere stages OVA downloads and about twice a migrated disk in `/tmp`, so migrating a vSphere disk larger than about 256 GiB needs a larger limit: the Provider annotation `infra.virtrigaud.io/tmp-size-limit`, or `manager.providerTmpSizeLimit` (`--provider-tmp-size-limit`). An administrator can cap the annotation with `manager.providerTmpSizeLimitMax` (`--provider-tmp-size-limit-max`). A limit bounds the pod's `/tmp` but does not reserve node storage: size it to your nodes. The manager upgrade rolls every manager-run provider pod once.
 
 ### Fixed
@@ -61,9 +62,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `api/infra.virtrigaud.io/v1beta1/provider_webhook_test.go`: a metadata-only update of a legacy invalid Provider is admitted; a spec change on it is still refused.
 
 ### Changed
+- `internal/controller/provider_controller.go` (`providerRunsSingleReplica`), `api/infra.virtrigaud.io/v1beta1/provider_types.go` (`spec.runtime.replicas` doc; CRD description regenerated), `charts/virtrigaud/templates/provider-vsphere-deployment.yaml`: a vSphere `Provider`'s runtime now always runs one replica with the `Recreate` strategy, like a clustered `Provider`.
+  - **Why:** the vSphere provider serializes migration landing work with a per-process lock. With `spec.runtime.replicas` > 1 (allowed up to 10), or with the old and new pods overlapping during a `RollingUpdate`, two processes could race on the same landing folder.
+  - **Behaviour:** a larger `spec.runtime.replicas` is ignored and logged, as on the clustered path; it is not refused at admission. The chart's opt-in vSphere Deployment renders `replicas: 1` with `strategy: Recreate`, and `providers.vsphere.replicaCount` > 1 fails the render (checked in `hack/verify-tmp-sizelimit-render.sh`).
+  - **Cost:** the vSphere provider is briefly down on every rollout.
+  - **Tests:** `provider_clustered_deployment_test.go`.
 - `internal/controller/provider_controller.go`: the runtime part of the reconcile is split out (`reconcileRuntimeStatus`, `writeProviderStatus`) so a live and a held Provider share it. Added RBAC markers (`vmsnapshots`/`vmclones`/`vmmigrations` and `namespaces`: get/list/watch). The manager already had these verbs and `providers/finalizers: update`, so the generated role does not change.
 - `internal/controller/provider_controller_test.go`: the envtest spec asserts the finalizer and drops it on cleanup.
-- `docs/upgrading.md` (breaking-change row, `/tmp` limits row, rollback caveat), `docs/vm-provider-binding.md` (new "Deleting a Provider" section), `docs/release-notes/next.md`, `charts/virtrigaud/README.md` ("/tmp size limits", the new values, uninstall order).
+- `docs/upgrading.md` (breaking-change row, `/tmp` limits row, vSphere single-replica row, rollback caveat), `docs/vm-provider-binding.md` (new "Deleting a Provider" section), `docs/release-notes/next.md`, `charts/virtrigaud/README.md` ("/tmp size limits", the new values, uninstall order).
 
 ### Why
 A `Provider` deleted while in use, directly or with its namespace, left every hypervisor VM it managed running with nothing tracking it, an audit finding in regulated environments. The maintainer chose an in-use finalizer (Option A) over an admission webhook or documentation only. Unbounded `/tmp` emptyDirs let one pod exhaust a node's ephemeral storage; the limits are sized so that no supported import breaks at the defaults.

@@ -151,7 +151,10 @@ type ProviderRuntimeSpec struct {
 	// +kubebuilder:validation:MaxItems=10
 	ImagePullSecrets []corev1.LocalObjectReference `json:"imagePullSecrets,omitempty"`
 
-	// Replicas is the number of provider instances (default 1)
+	// Replicas is the number of provider instances (default 1). A clustered
+	// Provider (topology: cluster) and a vSphere Provider always run one
+	// replica, replaced with the Recreate strategy; for them a larger value is
+	// ignored.
 	// +optional
 	// +kubebuilder:default=1
 	// +kubebuilder:validation:Minimum=1

@@ -792,6 +792,20 @@ func (r *ProviderReconciler) reconcileServiceAccount(ctx context.Context, provid
 	return existing, nil
 }
 
+// providerRunsSingleReplica reports whether the Provider's runtime must run
+// exactly one replica, replaced with the Recreate strategy, whatever
+// spec.runtime.replicas says:
+//   - a clustered Provider (ADR-0007 Addendum A, slice 4): its owner transfers
+//     (TransferOwner) and per-host guards are serialized inside one process;
+//   - a vSphere Provider: it serializes migration landing work (the import
+//     folder of a migrated disk) with a per-process lock, so two processes
+//     could race on the same landing folder.
+//
+// Recreate means the provider is briefly unavailable during every rollout.
+func providerRunsSingleReplica(provider *infravirtrigaudiov1beta1.Provider) bool {
+	return isClusterTopology(provider) || provider.Spec.Type == infravirtrigaudiov1beta1.ProviderTypeVSphere
+}
+
 // reconcileDeployment creates or updates the deployment for remote provider
 func (r *ProviderReconciler) reconcileDeployment(ctx context.Context, provider *infravirtrigaudiov1beta1.Provider, deploymentName string) (*appsv1.Deployment, error) {
 	// Default values
@@ -799,16 +813,15 @@ func (r *ProviderReconciler) reconcileDeployment(ctx context.Context, provider *
 	if provider.Spec.Runtime.Replicas != nil {
 		replicas = *provider.Spec.Runtime.Replicas
 	}
-	// A clustered provider runs exactly one replica, replaced with the
-	// Recreate strategy (ADR-0007 Addendum A, slice 4): its owner transfers
-	// (TransferOwner) and its per-host guards are serialized inside one
-	// process, so two replicas — or an old and a new pod overlapping in a
-	// rolling update — could both pass a check before either writes.
+	// Some providers run exactly one replica, replaced with the Recreate
+	// strategy (providerRunsSingleReplica): they serialize work with a
+	// per-process lock, so two replicas — or an old and a new pod overlapping
+	// in a rolling update — could both pass a check before either writes.
 	var strategy appsv1.DeploymentStrategy
-	if isClusterTopology(provider) {
+	if providerRunsSingleReplica(provider) {
 		if replicas > 1 {
-			log.FromContext(ctx).Info("A clustered Provider runs one replica; ignoring spec.runtime.replicas",
-				"provider", provider.Name, "replicas", replicas)
+			log.FromContext(ctx).Info("This Provider runs one replica; ignoring spec.runtime.replicas",
+				"provider", provider.Name, "type", provider.Spec.Type, "replicas", replicas)
 			replicas = 1
 		}
 		strategy = appsv1.DeploymentStrategy{Type: appsv1.RecreateDeploymentStrategyType}
@@ -903,7 +916,7 @@ func (r *ProviderReconciler) reconcileDeployment(ctx context.Context, provider *
 		existing.Spec.Replicas = &replicas
 		existing.Spec.Template = desired.Spec.Template
 		existing.Labels = desired.Labels
-		if isClusterTopology(provider) {
+		if providerRunsSingleReplica(provider) {
 			existing.Spec.Strategy = desired.Spec.Strategy // Recreate (no rollingUpdate parameters)
 		}
 

@@ -9,7 +9,15 @@ metadata:
     {{- include "virtrigaud.labels" . | nindent 4 }}
     app.kubernetes.io/component: provider-vsphere
 spec:
-  replicas: {{ .Values.providers.vsphere.replicaCount }}
+  # The vSphere provider serializes migration landing work with a per-process
+  # lock: it runs one replica, and Recreate keeps an old and a new pod from
+  # overlapping during a rollout (the provider is briefly down instead).
+  {{- if gt (int .Values.providers.vsphere.replicaCount) 1 }}
+  {{- fail "providers.vsphere.replicaCount: the vSphere provider runs one replica (it serializes migration landing work in-process); set it to 1" }}
+  {{- end }}
+  replicas: 1
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       {{- include "virtrigaud.selectorLabels" . | nindent 6 }}

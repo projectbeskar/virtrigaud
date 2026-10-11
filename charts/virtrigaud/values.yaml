@@ -150,6 +150,9 @@ providers:
   # vSphere provider  
   vsphere:
     enabled: false
+    # Must be 1: the vSphere provider serializes migration landing work in one
+    # process, and is replaced with the Recreate strategy (briefly down on a
+    # rollout). A larger value fails the render.
     replicaCount: 1
     image:
       repository: projectbeskar/virtrigaud/provider-vsphere

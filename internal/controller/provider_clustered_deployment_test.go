@@ -36,6 +36,16 @@ import (
 // are serialized inside one process), also when it existed with a rolling
 // update; a single-host Provider keeps its replicas and the default strategy.
 func TestReconcileDeployment_ClusteredProviderRunsOneReplicaWithRecreate(t *testing.T) {
+	for providerType, want := range map[infravirtrigaudiov1beta1.ProviderType]bool{
+		infravirtrigaudiov1beta1.ProviderTypeVSphere: true,
+		infravirtrigaudiov1beta1.ProviderTypeLibvirt: false,
+		infravirtrigaudiov1beta1.ProviderTypeProxmox: false,
+	} {
+		p := providerWithRuntime("p", nil)
+		p.Spec.Type = providerType
+		assert.Equal(t, want, providerRunsSingleReplica(p), "single-host %s", providerType)
+	}
+
 	ctx := context.Background()
 	three := int32(3)
 
@@ -66,6 +76,29 @@ func TestReconcileDeployment_ClusteredProviderRunsOneReplicaWithRecreate(t *test
 	assert.EqualValues(t, 1, *got.Spec.Replicas)
 	assert.Equal(t, appsv1.RecreateDeploymentStrategyType, got.Spec.Strategy.Type)
 	assert.Nil(t, got.Spec.Strategy.RollingUpdate, "Recreate carries no rolling-update parameters")
+
+	// A vSphere Provider runs one replica with Recreate too: it serializes
+	// migration landing work with a per-process lock.
+	vsphere := providerWithRuntime("vsphere", nil)
+	vsphere.Spec.Type = infravirtrigaudiov1beta1.ProviderTypeVSphere
+	vsphere.Spec.Runtime.Replicas = &three
+	vsphereExisting := existing.DeepCopy()
+	vsphereExisting.Name, vsphereExisting.ResourceVersion = "dep-vsphere", ""
+	require.NoError(t, cli.Create(ctx, vsphereExisting))
+	_, err = r.reconcileDeployment(ctx, vsphere, "dep-vsphere")
+	require.NoError(t, err)
+	got = &appsv1.Deployment{}
+	require.NoError(t, cli.Get(ctx, types.NamespacedName{Namespace: "default", Name: "dep-vsphere"}, got))
+	assert.EqualValues(t, 1, *got.Spec.Replicas, "a vSphere Provider runs one replica")
+	assert.Equal(t, appsv1.RecreateDeploymentStrategyType, got.Spec.Strategy.Type)
+	assert.Nil(t, got.Spec.Strategy.RollingUpdate)
+	// ...also when its Deployment does not exist yet.
+	_, err = r.reconcileDeployment(ctx, vsphere, "dep-vsphere-new")
+	require.NoError(t, err)
+	got = &appsv1.Deployment{}
+	require.NoError(t, cli.Get(ctx, types.NamespacedName{Namespace: "default", Name: "dep-vsphere-new"}, got))
+	assert.EqualValues(t, 1, *got.Spec.Replicas)
+	assert.Equal(t, appsv1.RecreateDeploymentStrategyType, got.Spec.Strategy.Type)
 
 	_, err = r.reconcileDeployment(ctx, single, "dep-single")
 	require.NoError(t, err)

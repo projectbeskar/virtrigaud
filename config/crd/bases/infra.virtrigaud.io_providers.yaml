@@ -1686,8 +1686,11 @@ spec:
                     type: object
                   replicas:
                     default: 1
-                    description: Replicas is the number of provider instances (default
-                      1)
+                    description: |-
+                      Replicas is the number of provider instances (default 1). A clustered
+                      Provider (topology: cluster) and a vSphere Provider always run one
+                      replica, replaced with the Recreate strategy; for them a larger value is
+                      ignored.
                     format: int32
                     maximum: 10
                     minimum: 1
