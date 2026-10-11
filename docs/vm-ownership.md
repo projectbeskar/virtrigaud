@@ -332,8 +332,17 @@ before changing anything. The refusal is `FailedPrecondition` with the reason
 `VM_IS_IMAGE_ARTIFACT` and a constant message. The manager maps it to a
 non-retryable `Conflict` and never counts it toward the circuit breaker. An
 object whose configuration cannot be read is refused too, with a plain
-`FailedPrecondition`. `Clone` is not guarded: cloning from a template is what
-templates are for, and `Clone` never changes its source.
+`FailedPrecondition`. A full `Clone` is not guarded: cloning from a template is
+what templates are for, and a full clone never changes its source. A linked
+`Clone` of a source without a snapshot first creates a `clone-base-*` snapshot
+on the source, so that step is guarded: a linked clone of a template or image
+artifact is refused unless the source already has a snapshot.
+
+`Create` and `Clone` clear every `virtrigaud.image.*` key the source carries on
+the new VM, in any case and including keys this release does not write (a newer
+release's after a rollback, or an admin tool's). The same test decides what is
+an image artifact and what is cleared, so a VM made from a template is never
+refused as one.
 
 A refused `Delete` keeps the `VirtualMachine`'s finalizer, and the template is
 never destroyed. The `VirtualMachine` stays `Terminating` and the delete is

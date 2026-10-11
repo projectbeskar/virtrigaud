@@ -123,7 +123,9 @@ providers), and rollback caveats in
   `Delete`, `Power`, `Reconfigure`, `HardwareUpgrade` and snapshot calls now
   refuse a template or image artifact (`VM_IS_IMAGE_ARTIFACT`) before changing
   anything, so a `VirtualMachine` adopted from a template before the upgrade
-  can no longer destroy it. Check for such `VirtualMachine`s, and for adopted
+  can no longer destroy it; nor does a linked clone snapshot one. `Create` and
+  `Clone` clear every `virtrigaud.image.*` key the source carries, so a VM
+  made from a template is never refused as one. Check for such `VirtualMachine`s, and for adopted
   duplicates of a VM managed under another Provider object, before upgrading
   (→ [Upgrade guide](docs/upgrading.md),
   [`docs/vm-ownership.md`](docs/vm-ownership.md#adoption-what-listvms-offers)).
@@ -131,9 +133,9 @@ providers), and rollback caveats in
   no `VirtualMachine` in this cluster. That UID may belong to a live
   `VirtualMachine` of another VirtRigaud installation (or of this cluster
   before a restore) managing the same vCenter or host. Such VMs are counted in
-  the Provider's adoption status. To adopt VMs left behind by
-  `orphan-on-delete`, set `virtrigaud.io/adopt-stamped-vms: "true"` on the
-  single-host Provider
+  the Provider's adoption status. Re-adopting a VM detached with
+  `orphan-on-delete` (it keeps the deleted `VirtualMachine`'s stamp) now needs
+  `virtrigaud.io/adopt-stamped-vms: "true"` on the single-host Provider
   (→ [`docs/vm-ownership.md`](docs/vm-ownership.md#owner-stamps-are-scoped-to-one-cluster)).
 - Single-host libvirt adoption no longer takes a domain whose owner stamp
   cannot be read or names two owners: the single-host `ListVMs` reports
