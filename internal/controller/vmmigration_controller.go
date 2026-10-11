@@ -724,16 +724,16 @@ func (r *VMMigrationReconciler) handleSnapshottingPhase(ctx context.Context, mig
 	}
 
 	// Create snapshot
-	snapshotName := fmt.Sprintf("%s-migration-%s", migration.Spec.Source.VMRef.Name, migration.UID[:8])
+	snapshotName, requestToken := migrationSnapshotIdentity(migration)
 	snapshotReq := contracts.SnapshotCreateRequest{
 		VM:            sourceRef,
 		NameHint:      snapshotName,
 		Description:   fmt.Sprintf("Migration snapshot for %s", migration.Name),
 		IncludeMemory: false, // Disk-only snapshot for migration
 		Quiesce:       false,
-		// The migration's uid: a retried create adopts only the snapshot made
-		// for this migration.
-		RequestToken: string(migration.UID),
+		// The migration's uid (and attempt): a retried create adopts only the
+		// snapshot made for this attempt of this migration.
+		RequestToken: requestToken,
 	}
 
 	// Re-read the source Provider's grant from the API server (not the cache)

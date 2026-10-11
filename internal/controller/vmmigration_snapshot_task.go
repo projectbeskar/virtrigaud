@@ -104,6 +104,28 @@ func migrationSnapshotWaitExceeded(m *infrav1beta1.VMMigration, now time.Time) (
 // while the snapshot task runs. It is constant, so a poll writes nothing.
 const migrationSnapshotInProgressMessage = "The source VM snapshot is being taken; the export starts once its task completes"
 
+// migrationSnapshotIdentity is the name hint and request token of the source
+// snapshot this attempt of the migration takes: "<vm>-migration-<uid8>" and
+// the migration's UID for the first attempt (unchanged), with "-r<n>"
+// appended on retry n. A retry after an unconfirmed snapshot was forgotten
+// (cleanupPolicy Never leaves it on the source VM) therefore never collides
+// with that snapshot's name, and a provider that adopts by request token never
+// adopts it.
+func migrationSnapshotIdentity(m *infrav1beta1.VMMigration) (nameHint, requestToken string) {
+	uid := string(m.UID)
+	short := uid
+	if len(short) > 8 {
+		short = short[:8]
+	}
+	nameHint = fmt.Sprintf("%s-migration-%s", m.Spec.Source.VMRef.Name, short)
+	requestToken = uid
+	if m.Status.RetryCount > 0 {
+		nameHint = fmt.Sprintf("%s-r%d", nameHint, m.Status.RetryCount)
+		requestToken = fmt.Sprintf("%s-r%d", uid, m.Status.RetryCount)
+	}
+	return nameHint, requestToken
+}
+
 // migrationSnapshotConfirmed reports whether the migration's recorded source
 // snapshot was confirmed complete (Snapshotting=True/SnapshotComplete).
 func migrationSnapshotConfirmed(m *infrav1beta1.VMMigration) bool {
