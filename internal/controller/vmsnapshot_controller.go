@@ -791,7 +791,7 @@ func (r *VMSnapshotReconciler) handleDeletion(ctx context.Context, snapshot *inf
 				// snapshot is still on the hypervisor, and say which one.
 				msg := fmt.Sprintf("%s=true: removing the VMSnapshot although the provider did not delete snapshot %q of VM %q "+
 					"(provider %s); it is left on the hypervisor. Provider detail: %s", forceDeleteAnnotation,
-					snapshot.Status.SnapshotID, vm.Status.ID, provider.Name, sanitizeProviderDetail(err))
+					snapshot.Status.SnapshotID, vm.Status.ID, provider.Name, rpcFailureDetail(err))
 				logger.Error(err, "Provider snapshot delete failed but force-delete annotation is set; removing finalizer, the snapshot is left on the hypervisor",
 					"snapshot_id", snapshot.Status.SnapshotID, "vm_id", vm.Status.ID, "provider", provider.Name, "annotation", forceDeleteAnnotation)
 				r.Recorder.Event(snapshot, corev1.EventTypeWarning, eventReasonSnapshotLeftOnHypervisor, msg)
@@ -908,7 +908,7 @@ func (r *VMSnapshotReconciler) retainForFailedSnapshotDelete(ctx context.Context
 	// can carry a connection's ephemeral port), and a status that changed on
 	// every retry would make each retry write it.
 	r.holdSnapshotDelete(ctx, snapshot, infrav1beta1.VMSnapshotReasonProviderError, snapshotDeleteFailedMessage,
-		fmt.Sprintf("%s Provider detail: %s", snapshotDeleteFailedMessage, sanitizeProviderDetail(err)))
+		fmt.Sprintf("%s Provider detail: %s", snapshotDeleteFailedMessage, rpcFailureDetail(err)))
 	return ctrl.Result{RequeueAfter: retryAfter}
 }
 
@@ -1026,7 +1026,7 @@ func (r *VMSnapshotReconciler) retainForBlockedSnapshotDelete(ctx context.Contex
 	msg := fmt.Sprintf("Provider refused to delete the snapshot: other VMs on its hypervisor depend on the VM's disk (e.g. linked clones of the VM), "+
 		"and deleting the snapshot would rewrite it. Delete them first, or set %s=true to remove this VMSnapshot and leave the snapshot "+
 		"on the hypervisor (re-checking every %s). Provider detail: %s",
-		forceDeleteAnnotation, vmDeleteBlockedRetryInterval, sanitizeProviderDetail(err))
+		forceDeleteAnnotation, vmDeleteBlockedRetryInterval, rpcFailureDetail(err))
 	if !snapshotDeleteBlocked(snapshot) {
 		r.Recorder.Event(snapshot, corev1.EventTypeWarning, conditions.ReasonDeleteBlocked, msg)
 	}
