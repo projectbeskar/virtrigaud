@@ -646,9 +646,11 @@ func (p *Provider) Create(ctx context.Context, req *providerv1.CreateRequest) (*
 //  1. Look up the VM power state via its ManagedObjectReference.
 //  2. If the VM is not found (SOAP fault), treat the deletion as already complete
 //     and return success (idempotent behaviour).
-//  3. If the VM is powered on, issue a PowerOff task and wait for it to finish.
+//  3. If the object is a template or an image artifact (refuseImageArtifact),
+//     refuse with FailedPrecondition/VM_IS_IMAGE_ARTIFACT, changing nothing.
+//  4. If the VM is powered on, issue a PowerOff task and wait for it to finish.
 //     A power-off failure is logged but does not abort the deletion.
-//  4. Issue a Destroy task (equivalent to "Delete from Disk" in the vSphere UI)
+//  5. Issue a Destroy task (equivalent to "Delete from Disk" in the vSphere UI)
 //     and wait for it to complete.
 //
 // The operation blocks until the Destroy task finishes.
@@ -687,6 +689,12 @@ func (p *Provider) Delete(ctx context.Context, req *providerv1.DeleteRequest) (*
 			}
 		}
 		return nil, fmt.Errorf("failed to check VM power state: %w", err)
+	}
+
+	// Never destroy a template or an image artifact (vm_artifact_guard.go):
+	// refused before anything is changed, the VM is not even powered off.
+	if err := p.refuseImageArtifact(ctx, vm, "delete"); err != nil {
+		return nil, err
 	}
 
 	p.logger.Info("VM found, proceeding with deletion", "vm_id", req.Id, "power_state", powerState)
@@ -764,6 +772,12 @@ func (p *Provider) Power(ctx context.Context, req *providerv1.PowerRequest) (*pr
 	}
 
 	vm := object.NewVirtualMachine(p.client.Client, vmRef)
+
+	// Never power a template or an image artifact on or off
+	// (vm_artifact_guard.go).
+	if err := p.refuseImageArtifact(ctx, vm, "power"); err != nil {
+		return nil, err
+	}
 
 	// Perform the power operation
 	var task *object.Task
@@ -982,9 +996,15 @@ func (p *Provider) Reconfigure(ctx context.Context, req *providerv1.ReconfigureR
 		"config.hardware.memoryMB",
 		"config.hardware.device",
 		"runtime.powerState",
+		propConfigTemplate,
+		propConfigExtraConfig,
 	}, &vmMo)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get VM properties: %w", err)
+	}
+	// Never resize a template or an image artifact (vm_artifact_guard.go).
+	if err := p.checkNotImageArtifact(req.Id, "reconfigure", vmMo.Config); err != nil {
+		return nil, err
 	}
 
 	// Parse the desired configuration. DesiredJson is a marshaled
@@ -1129,6 +1149,11 @@ func (p *Provider) HardwareUpgrade(ctx context.Context, req *providerv1.Hardware
 
 	if powerState != types.VirtualMachinePowerStatePoweredOff {
 		return nil, fmt.Errorf("VM must be powered off for hardware upgrade, current state: %s", powerState)
+	}
+
+	// Never upgrade a template or an image artifact (vm_artifact_guard.go).
+	if err := p.refuseImageArtifact(ctx, vm, "hardware upgrade"); err != nil {
+		return nil, err
 	}
 
 	// Get current VM configuration to check current hardware version
@@ -1662,6 +1687,11 @@ func (p *Provider) SnapshotCreate(ctx context.Context, req *providerv1.SnapshotC
 
 	vm := object.NewVirtualMachine(p.client.Client, vmRef)
 
+	// Never snapshot a template or an image artifact (vm_artifact_guard.go).
+	if err := p.refuseImageArtifact(ctx, vm, "snapshot create"); err != nil {
+		return nil, err
+	}
+
 	// Generate snapshot name if not provided
 	snapshotName := req.NameHint
 	if snapshotName == "" {
@@ -1761,6 +1791,12 @@ func (p *Provider) SnapshotDelete(ctx context.Context, req *providerv1.SnapshotD
 		return nil, fmt.Errorf("snapshot not found: %s", req.SnapshotId)
 	}
 
+	// Never consolidate a template's or an image artifact's disks
+	// (vm_artifact_guard.go).
+	if err := p.refuseImageArtifact(ctx, vm, "snapshot delete"); err != nil {
+		return nil, err
+	}
+
 	// Remove the snapshot using RemoveSnapshot_Task method
 	// removeChildren: false = consolidate child snapshots into parent
 	// consolidate: true = merge snapshot disks after removal
@@ -1828,6 +1864,11 @@ func (p *Provider) SnapshotRevert(ctx context.Context, req *providerv1.SnapshotR
 	snapshot := p.findSnapshotByID(vmObj.Snapshot.RootSnapshotList, req.SnapshotId)
 	if snapshot == nil {
 		return nil, fmt.Errorf("snapshot not found: %s", req.SnapshotId)
+	}
+
+	// Never revert a template or an image artifact (vm_artifact_guard.go).
+	if err := p.refuseImageArtifact(ctx, vm, "snapshot revert"); err != nil {
+		return nil, err
 	}
 
 	// Store original power state for restoration if needed
