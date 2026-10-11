@@ -210,15 +210,27 @@ func (r *VMSnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		Namespace: snapshot.Namespace,
 		Name:      snapshot.Spec.VMRef.Name,
 	}
-	if err := r.Get(ctx, vmKey, vm); err != nil {
-		logger.Error(err, "Failed to get referenced VM", "vm", snapshot.Spec.VMRef.Name)
-		k8s.SetCondition(&snapshot.Status.Conditions, infrav1beta1.VMSnapshotConditionReady,
-			metav1.ConditionFalse, infrav1beta1.VMSnapshotReasonProviderError,
-			fmt.Sprintf("Referenced VM not found: %v", err))
-		// Status update errors are intentionally ignored to avoid blocking reconciliation
-		_ = r.updateStatus(ctx, snapshot)
+	vmErr := r.Get(ctx, vmKey, vm)
+	vmGone := apierrors.IsNotFound(vmErr)
+	if vmErr != nil && !vmGone {
+		// A failed read says nothing about the VM: nothing is recorded, and
+		// the read is retried.
+		logger.Error(vmErr, "Failed to get referenced VM", "vm", snapshot.Spec.VMRef.Name)
 		metrics.RecordError(errReasonGetVM, metrics.ComponentManager)
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+	}
+
+	// A Ready snapshot's retention policy applies whether or not its VM still
+	// exists or has a provider id: deleteOnVMDelete fires once the VM is gone
+	// (or being deleted), and maxAge whatever the VM's state.
+	if snapshot.Status.Phase == infrav1beta1.SnapshotPhaseReady {
+		if vmGone {
+			vm = nil
+		}
+		return r.handleRetention(ctx, snapshot, vm)
+	}
+	if vmGone {
+		return r.recordSnapshotVMNotFound(ctx, snapshot), nil
 	}
 
 	// Add VM context
@@ -246,7 +258,7 @@ func (r *VMSnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		return r.checkSnapshotCreation(ctx, snapshot, vm)
 	case infrav1beta1.SnapshotPhaseReady:
 		// Snapshot is ready, check for retention policy
-		return r.handleRetention(ctx, snapshot)
+		return r.handleRetention(ctx, snapshot, vm)
 	case infrav1beta1.SnapshotPhaseFailed:
 		// Handle failed snapshots
 		logger.Info("Snapshot is in failed state", "message", snapshot.Status.Message)
@@ -585,8 +597,43 @@ func (r *VMSnapshotReconciler) checkSnapshotCreation(ctx context.Context, snapsh
 	return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 }
 
-// handleRetention handles snapshot retention policies
-func (r *VMSnapshotReconciler) handleRetention(ctx context.Context, snapshot *infrav1beta1.VMSnapshot) (ctrl.Result, error) {
+// snapshotReasonVMNotFound is the Ready condition reason of a VMSnapshot whose
+// referenced VirtualMachine does not exist.
+const snapshotReasonVMNotFound = "VMNotFound"
+
+// snapshotVMNotFoundMessage is the status message and Ready condition message
+// of a VMSnapshot (not Ready) whose referenced VirtualMachine does not exist.
+// It is constant, so a re-check writes nothing.
+const snapshotVMNotFoundMessage = "Referenced VM not found; no snapshot is taken until it exists"
+
+// recordSnapshotVMNotFound records that the VMSnapshot's referenced VM does not
+// exist (Ready=False/VMNotFound, constant message; written only when that
+// changes the status) and re-checks after 30 s.
+func (r *VMSnapshotReconciler) recordSnapshotVMNotFound(ctx context.Context, snapshot *infrav1beta1.VMSnapshot) ctrl.Result {
+	logging.FromContext(ctx).Info("Referenced VM not found", "vm", snapshot.Spec.VMRef.Name)
+	before := snapshot.Status.DeepCopy()
+	snapshot.Status.Message = snapshotVMNotFoundMessage
+	k8s.SetCondition(&snapshot.Status.Conditions, infrav1beta1.VMSnapshotConditionReady,
+		metav1.ConditionFalse, snapshotReasonVMNotFound, snapshotVMNotFoundMessage)
+	if !equality.Semantic.DeepEqual(before, &snapshot.Status) {
+		// Status update errors are intentionally ignored to avoid blocking reconciliation
+		_ = r.updateStatus(ctx, snapshot)
+	}
+	return ctrl.Result{RequeueAfter: 30 * time.Second}
+}
+
+// handleRetention applies a Ready snapshot's retention policy. vm is the
+// referenced VirtualMachine, nil when it no longer exists:
+//
+//   - maxAge: a snapshot older than maxAge (by its creation time) is deleted,
+//     whatever its VM's state;
+//   - deleteOnVMDelete: the snapshot is deleted once its VM is gone or being
+//     deleted. A VM being deleted still exists, so the VMSnapshot's finalizer
+//     deletes the snapshot through the provider — which also lets a libvirt
+//     VM, whose delete is refused while snapshot metadata remains, be
+//     deleted; a VM that is already gone took its snapshots with it, and the
+//     finalizer makes no provider call.
+func (r *VMSnapshotReconciler) handleRetention(ctx context.Context, snapshot *infrav1beta1.VMSnapshot, vm *infrav1beta1.VirtualMachine) (ctrl.Result, error) {
 	logger := logging.FromContext(ctx)
 
 	// Check retention policy. A snapshot with no creation time has no age: an
@@ -609,22 +656,14 @@ func (r *VMSnapshotReconciler) handleRetention(ctx context.Context, snapshot *in
 	}
 
 	// Check retention based on VM deletion
-	if snapshot.Spec.RetentionPolicy != nil && snapshot.Spec.RetentionPolicy.DeleteOnVMDelete {
-		vm := &infrav1beta1.VirtualMachine{}
-		vmKey := client.ObjectKey{
-			Namespace: snapshot.Namespace,
-			Name:      snapshot.Spec.VMRef.Name,
+	if snapshot.Spec.RetentionPolicy != nil && snapshot.Spec.RetentionPolicy.DeleteOnVMDelete &&
+		(vm == nil || !vm.DeletionTimestamp.IsZero()) {
+		logger.Info("Referenced VM is gone or being deleted, deleting snapshot (retentionPolicy.deleteOnVMDelete)")
+		if err := r.Delete(ctx, snapshot); err != nil {
+			logger.Error(err, "Failed to delete snapshot after VM deletion")
+			return ctrl.Result{}, err
 		}
-		if err := r.Get(ctx, vmKey, vm); err != nil {
-			if client.IgnoreNotFound(err) == nil {
-				logger.Info("Referenced VM deleted, deleting snapshot")
-				if err := r.Delete(ctx, snapshot); err != nil {
-					logger.Error(err, "Failed to delete snapshot after VM deletion")
-					return ctrl.Result{}, err
-				}
-				return ctrl.Result{}, nil
-			}
-		}
+		return ctrl.Result{}, nil
 	}
 
 	// Check again later
