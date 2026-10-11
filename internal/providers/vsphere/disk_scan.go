@@ -18,13 +18,17 @@ package vsphere
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path"
+	"slices"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/vmware/govmomi/object"
 	"github.com/vmware/govmomi/property"
+	"github.com/vmware/govmomi/session"
 	"github.com/vmware/govmomi/view"
 	"github.com/vmware/govmomi/vim25/mo"
 	"github.com/vmware/govmomi/vim25/types"
@@ -38,6 +42,16 @@ import (
 // summary.url, or the same NFS server and export. One VM whose configuration
 // vCenter cannot load fails the check closed — but only for operations on a
 // datastore that VM has files on, not for the whole vCenter.
+//
+// vCenter silently leaves out of every listing the VMs the provider's account
+// may not see, so a hidden VM could use the disk unnoticed. Each scan
+// therefore first checks that the account holds System.Read on the vCenter
+// root folder and on every datastore scanned
+// (AuthorizationManager.FetchUserPrivilegeOnEntities); without it the check
+// fails closed (errInventoryNotReadable). It cannot see a permission that
+// removes access further down the tree (a "No access" on one VM folder):
+// grant the account read-only access on the root, propagated, and nothing
+// narrower below it.
 //
 // A scan is shared by concurrent callers (single flight) and reused for
 // diskScanTTL. Every operation of this provider that can change who uses a
@@ -57,7 +71,40 @@ const (
 	propSummary = "summary"
 	propInfo    = "info"
 	propVM      = "vm"
+	// privSystemRead is the privilege needed to see an inventory object.
+	privSystemRead = "System.Read"
 )
+
+// errInventoryNotReadable marks a scan that refused to run because the
+// provider's vCenter account cannot be shown to see every VM involved.
+var errInventoryNotReadable = errors.New("the vCenter account lacks System.Read")
+
+// checkInventoryReadable verifies that the session's user holds
+// privSystemRead on the root folder and on each of entities.
+func (p *Provider) checkInventoryReadable(ctx context.Context, entities []types.ManagedObjectReference) error {
+	us, err := session.NewManager(p.client.Client).UserSession(ctx)
+	if err != nil {
+		return fmt.Errorf("read the current vCenter session: %w", err)
+	}
+	if us == nil {
+		return fmt.Errorf("no current vCenter session")
+	}
+	all := append([]types.ManagedObjectReference{p.client.ServiceContent.RootFolder}, entities...)
+	res, err := object.NewAuthorizationManager(p.client.Client).FetchUserPrivilegeOnEntities(ctx, all, us.UserName)
+	if err != nil {
+		return fmt.Errorf("fetch the privileges of %q: %w", us.UserName, err)
+	}
+	held := map[types.ManagedObjectReference]bool{}
+	for _, r := range res {
+		held[r.Entity] = slices.Contains(r.Privileges, privSystemRead)
+	}
+	for _, e := range all {
+		if !held[e] {
+			return fmt.Errorf("%w on %s %s (user %q)", errInventoryNotReadable, e.Type, e.Value, us.UserName)
+		}
+	}
+	return nil
+}
 
 // diskScanCache shares and briefly reuses datastore scans, keyed by the
 // case-folded datastore name. The zero value is ready to use.
@@ -175,7 +222,7 @@ func (p *Provider) scanDatastoreFileUsers(ctx context.Context, dsName string) (*
 		return nil, fmt.Errorf("datastore %q not found", dsName)
 	}
 	seen := map[types.ManagedObjectReference]bool{}
-	var refs []types.ManagedObjectReference
+	var refs, scanned []types.ManagedObjectReference
 	for i := range dss {
 		ds := &dss[i]
 		same := strings.EqualFold(ds.Name, dsName) || (ds.Summary.Url != "" && urls[ds.Summary.Url]) ||
@@ -183,6 +230,7 @@ func (p *Provider) scanDatastoreFileUsers(ctx context.Context, dsName string) (*
 		if !same {
 			continue
 		}
+		scanned = append(scanned, ds.Self)
 		for _, ref := range ds.Vm {
 			if !seen[ref] {
 				seen[ref] = true
@@ -191,6 +239,9 @@ func (p *Provider) scanDatastoreFileUsers(ctx context.Context, dsName string) (*
 		}
 	}
 
+	if err := p.checkInventoryReadable(ctx, scanned); err != nil {
+		return nil, err
+	}
 	users := newInventoryFileUsers()
 	if len(refs) == 0 {
 		return users, nil

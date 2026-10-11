@@ -955,3 +955,59 @@ func TestCreate_InPlaceDisk_RefusesDiskUnderALinkedCloneDelta(t *testing.T) {
 	requireCode(t, err, codes.FailedPrecondition)
 	assert.Equal(t, []string{contracts.VMDiskInUseReason}, errorReasons(err))
 }
+
+// --- account permissions --------------------------------------------------------
+
+// withoutSystemRead removes System.Read from the privileges vCenter reports
+// for entities of type kind, as for an account restricted below the root.
+type withoutSystemRead struct {
+	soap.RoundTripper
+	kind string
+}
+
+func (r *withoutSystemRead) RoundTrip(ctx context.Context, req, res soap.HasFault) error {
+	if err := r.RoundTripper.RoundTrip(ctx, req, res); err != nil {
+		return err
+	}
+	body, ok := res.(*methods.FetchUserPrivilegeOnEntitiesBody)
+	if !ok || body.Res == nil {
+		return nil
+	}
+	for i := range body.Res.Returnval {
+		pr := &body.Res.Returnval[i]
+		if pr.Entity.Type != r.kind {
+			continue
+		}
+		var kept []string
+		for _, priv := range pr.Privileges {
+			if priv != privSystemRead {
+				kept = append(kept, priv)
+			}
+		}
+		pr.Privileges = kept
+	}
+	return nil
+}
+
+// TestCreate_InPlaceDisk_RequiresSystemRead: VMs the account may not see are
+// left out of every listing, so without System.Read on the root folder and
+// the datastore nothing is attached in place, and nothing is imported.
+func TestCreate_InPlaceDisk_RequiresSystemRead(t *testing.T) {
+	for _, kind := range []string{"Folder", datastoreMoType} {
+		t.Run(kind, func(t *testing.T) {
+			p, _ := newOwnershipSim(t)
+			imageJSON := makeOwnMigratedDisk(t, p, "migrated")
+			p.client.RoundTripper = &withoutSystemRead{RoundTripper: p.client.RoundTripper, kind: kind}
+
+			_, err := p.Create(context.Background(), &providerv1.CreateRequest{
+				Name: "migrated", ImageJson: imageJSON, Owner: ownerNamed(ownerTeamA, "migrated"),
+			})
+			requireCode(t, err, codes.Unavailable)
+			assert.Equal(t, []string{contracts.VMDiskCheckFailedReason}, errorReasons(err))
+			assert.Equal(t, inventoryNotReadableMessage, status.Convert(err).Message())
+
+			err = p.ensureImportFolderUnused(context.Background(), simDatastore, landingName(ownerTeamA.Namespace, "db"), true)
+			requireCode(t, err, codes.Unavailable)
+		})
+	}
+}

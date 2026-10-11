@@ -18,6 +18,7 @@ package vsphere
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path"
 	"slices"
@@ -124,6 +125,13 @@ const diskInUseMessage = "imported disk rejected: another VM or template in the 
 const diskCheckFailedMessage = "could not verify that no other VM uses the disk: the vCenter inventory scan failed " +
 	"(details are in the provider log); will retry"
 
+// inventoryNotReadableMessage is the refusal when the provider's vCenter
+// account cannot be shown to see every VM the check must read.
+const inventoryNotReadableMessage = "could not verify that no other VM uses the disk: the provider's vCenter " +
+	"account lacks the System.Read privilege on the vCenter root folder or on the disk's datastore, so VMs hidden " +
+	"from it cannot be ruled out; grant it read-only access on the vCenter root, propagated (details are in the " +
+	"provider log)"
+
 // foreignDiskSnapshotMessage is the refusal of a Delete that would have to
 // detach a disk the VM does not own while the VM has snapshots: the snapshots
 // still reference the disk, and Destroy_Task would delete it with them.
@@ -165,7 +173,11 @@ func errDiskInUse(msg string) error {
 // VM_DISK_CHECK_FAILED, kept out of the manager's circuit breaker.
 func (p *Provider) errDiskCheckFailed(what string, err error) error {
 	p.logger.Error("vCenter inventory disk scan failed", "operation", what, "error", err)
-	return statusWithReasons(codes.Unavailable, diskCheckFailedMessage, contracts.VMDiskCheckFailedReason).Err()
+	msg := diskCheckFailedMessage
+	if errors.Is(err, errInventoryNotReadable) {
+		msg = inventoryNotReadableMessage
+	}
+	return statusWithReasons(codes.Unavailable, msg, contracts.VMDiskCheckFailedReason).Err()
 }
 
 // landingSeparator joins the namespace and the name in a landing name. A
