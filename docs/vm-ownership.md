@@ -266,20 +266,81 @@ lists ordinary VMs only. It leaves out:
   earlier release;
 - **any object with a prepared-image stamp key** (`virtrigaud.image.*`), valid
   or not, template or not. An image import in flight is a plain VM until it is
-  marked as a template, and a failed import can leave one behind. `Create` and
-  `Clone` clear these keys, so an ordinary VM never carries them;
+  marked as a template, and a failed import can leave one behind. Every OVA
+  import carries such a key from the moment it exists: a stamped import its
+  full stamp, a legacy (identity-less) import one marker key,
+  `virtrigaud.image.preparedat`. `Create` and `Clone` clear these keys, so an
+  ordinary VM never carries them;
 - **any VM whose owner stamp cannot be read** (a key repeated, in any case, or a
   non-string value): who owns it cannot be told;
 - **any VM whose configuration cannot be read.**
 
+Leaving these objects out of `ListVMs` is the provider-side control, and the
+primary one. The manager has a backstop for third-party and SDK providers: a
+listed VM carrying `provider_raw["artifact"]` (`template` or `image`; any value
+counts) is never adopted, single-host or clustered, and the key is never copied
+into a `VirtualMachine`'s status. A provider that lists a template or image
+artifact must set it. The vSphere and Proxmox providers keep leaving these
+objects out instead of listing them tagged, because a manager older than the
+key would adopt a tagged template, and providers can be rolled before the
+manager.
+
 A VM with a readable owner stamp is listed with its owner UID (`ListVMs`
 `provider_raw["owner_uid"]`). The adoption controller skips it while the
 `VirtualMachine` with that UID exists, in any namespace and under any Provider
-object, and may adopt it once that `VirtualMachine` is gone (a stale stamp).
-Before this change the vSphere `ListVMs` reported no owner UID. Adoption through
-one Provider object could therefore adopt a VM that a `VirtualMachine` under
-another Provider object for the same vCenter owned, or a VM whose create had not
-yet recorded its `status.id`.
+object. Before this change the vSphere `ListVMs` reported no owner UID. Adoption
+through one Provider object could therefore adopt a VM that a `VirtualMachine`
+under another Provider object for the same vCenter owned, or a VM whose create
+had not yet recorded its `status.id`.
+
+#### Owner stamps are scoped to one cluster
+
+An owner stamp records the UID of a `VirtualMachine` in the cluster that wrote
+it, and means nothing anywhere else. When no `VirtualMachine` in this cluster
+has a stamped UID, the controller cannot tell a deleted `VirtualMachine` (a
+stale stamp) from a live `VirtualMachine` of **another VirtRigaud
+installation**, or of this cluster before a restore, that manages the same
+vCenter or host. Adoption therefore **never adopts a VM whose owner stamp names
+only UIDs that are not in this cluster**. It logs each one and counts it in the
+Provider's adoption status message ("N not adopted — owner stamp names no
+VirtualMachine in this cluster").
+
+To adopt stale-stamped VMs on purpose, for example after deleting
+`VirtualMachine`s with `virtrigaud.io/orphan-on-delete`, annotate the
+single-host Provider:
+
+```yaml
+metadata:
+  annotations:
+    virtrigaud.io/adopt-vms: "true"
+    virtrigaud.io/adopt-stamped-vms: "true"
+```
+
+Only `"true"` opts in. Set it only when no other VirtRigaud installation
+manages the same vCenter or host, and remove it afterwards. A clustered
+Provider never adopts a stamped VM, with or without the annotation: it reports
+it as a previous incarnation, which you re-attach per the ADR-0007 A6 runbook.
+
+### Per-VM operations refuse templates and image artifacts
+
+A `VirtualMachine` can still address a template, for example one that adoption
+made from a template before this release. The vSphere `Delete`, `Power`,
+`Reconfigure`, `HardwareUpgrade`, `SnapshotCreate`, `SnapshotDelete` and
+`SnapshotRevert` therefore read `config.template` and `config.extraConfig`
+first. They refuse a template, or an object carrying a `virtrigaud.image.*` key,
+before changing anything. The refusal is `FailedPrecondition` with the reason
+`VM_IS_IMAGE_ARTIFACT` and a constant message. The manager maps it to a
+non-retryable `Conflict` and never counts it toward the circuit breaker. An
+object whose configuration cannot be read is refused too, with a plain
+`FailedPrecondition`. `Clone` is not guarded: cloning from a template is what
+templates are for, and `Clone` never changes its source.
+
+A refused `Delete` keeps the `VirtualMachine`'s finalizer, and the template is
+never destroyed. The `VirtualMachine` stays `Terminating` and the delete is
+retried every 15 seconds; the manager log shows
+`Failed to delete VM from provider` with the refusal. To release it, detach
+the `VirtualMachine` with `virtrigaud.io/orphan-on-delete: "true"`. The
+template stays in vCenter.
 
 ### `Describe` no longer reports a transient error as "gone"
 

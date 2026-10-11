@@ -73,7 +73,13 @@ spec:
 # VirtualMachines created by VirtRigaud get libvirt domains named
 # "<namespace>.<name>" (e.g. "team-a.app-web"); the filter below matches domain
 # names, so it does not match those. Adoption also never adopts a domain whose
-# VirtRigaud owner stamp names a VirtualMachine that still exists.
+# VirtRigaud owner stamp names a VirtualMachine that still exists, or whose
+# owner stamp cannot be read. A domain stamped only by VirtualMachines that are
+# NOT in this cluster (deleted, or another VirtRigaud installation's) is not
+# adopted either, unless the single-host Provider also carries
+#   virtrigaud.io/adopt-stamped-vms: "true"
+# (set it only when no other installation manages the same host; see
+# docs/vm-ownership.md#owner-stamps-are-scoped-to-one-cluster).
 #
 # The same annotations work on a CLUSTERED libvirt Provider (spec.topology:
 # cluster, experimental; ADR-0007 Addendum A slice 4). There a domain is
