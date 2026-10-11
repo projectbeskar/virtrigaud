@@ -230,12 +230,38 @@ func hasProviderForceDeleteAnnotation(provider *infravirtrigaudiov1beta1.Provide
 }
 
 // vmHoldsProvider reports whether a VirtualMachine of a Provider still needs
-// it: it is not being deleted, or its VirtualMachine finalizer — which deletes
-// the hypervisor VM through the Provider — is still there. A VM being deleted
-// that only another controller's finalizer keeps does not hold it.
+// it (ADR-0010 D2):
+//   - a VM being deleted that only another controller's finalizer keeps (its
+//     VirtualMachine finalizer, which deletes the hypervisor VM through the
+//     Provider, is gone) does not;
+//   - a VM bound through a Provider (status.boundProvider) does;
+//   - an unbound VM does only while it may have something on the hypervisor
+//     (vmMayExistOnHypervisor). One that never got that far — e.g. held
+//     before its Create because its Provider is being deleted — has nothing to
+//     delete through the Provider, so it must not hold it: that would deadlock
+//     the two deletions.
 func vmHoldsProvider(vm *infravirtrigaudiov1beta1.VirtualMachine) bool {
-	return vm.DeletionTimestamp.IsZero() ||
-		controllerutil.ContainsFinalizer(vm, infravirtrigaudiov1beta1.VirtualMachineFinalizer)
+	if !vm.DeletionTimestamp.IsZero() &&
+		!controllerutil.ContainsFinalizer(vm, infravirtrigaudiov1beta1.VirtualMachineFinalizer) {
+		return false
+	}
+	if _, bound := boundProviderKey(vm); bound {
+		return true
+	}
+	return vmMayExistOnHypervisor(vm)
+}
+
+// vmMayExistOnHypervisor reports whether an unbound VirtualMachine may have a
+// VM on the hypervisor: it has a provider id (status.id), a clustered create in
+// flight (status.placement.pendingHost), or a Provisioning condition with
+// reason CreateRequested — the durable marker written before a single-host
+// Create is sent, whose outcome status.id then records.
+func vmMayExistOnHypervisor(vm *infravirtrigaudiov1beta1.VirtualMachine) bool {
+	if vm.Status.ID != "" || pendingHost(vm) != "" {
+		return true
+	}
+	provisioning := meta.FindStatusCondition(vm.Status.Conditions, k8s.ConditionProvisioning)
+	return provisioning != nil && provisioning.Reason == k8s.ReasonCreateRequested
 }
 
 // snapshotHoldsProvider reports whether a VMSnapshot still has a delete to

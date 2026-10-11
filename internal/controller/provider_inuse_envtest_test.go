@@ -109,6 +109,10 @@ func inUseEnvVM(ns, name, providerNS string) {
 		},
 	}
 	Expect(k8sClient.Create(ctx, vm)).To(Succeed())
+	// Created on the hypervisor: an unbound VM holds its Provider only once it
+	// may have something there (status.id here).
+	vm.Status.ID = ns + "." + name
+	Expect(k8sClient.Status().Update(ctx, vm)).To(Succeed())
 }
 
 // deleteVMThroughProvider simulates the VirtualMachine controller deleting a

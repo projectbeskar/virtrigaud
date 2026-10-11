@@ -370,8 +370,10 @@ func TestProviderInUse_OnlyAllowedNamespacesHold(t *testing.T) {
 		vm.Status.BoundProvider = &infravirtrigaudiov1beta1.BoundProviderRef{Namespace: "default", Name: inUseProviderName}
 		return vm
 	}
+	// unbound leaves status.boundProvider unset (status.id stays set, so only
+	// the grant decides whether the VM holds the Provider).
 	unbound := func(vm *infravirtrigaudiov1beta1.VirtualMachine) *infravirtrigaudiov1beta1.VirtualMachine {
-		vm.Status.ID = "" // refused before any create: never bound
+		vm.Status.BoundProvider = nil
 		return vm
 	}
 	lingeringUnbound := func(ns, name string) *infravirtrigaudiov1beta1.VirtualMachine {
@@ -482,6 +484,56 @@ func TestProviderInUse_NamespaceReadForbiddenStillHolds(t *testing.T) {
 	require.NotNil(t, cond)
 	assert.Equal(t, reasonProviderInUse, cond.Reason)
 	assert.Equal(t, 1, forbiddenLogs, "logged once, not on every reconcile")
+}
+
+// TestProviderInUse_UnboundVMHoldsOnlyIfItMayExistOnTheHypervisor pins the
+// rule for an unbound VM (no status.boundProvider): it holds the Provider only
+// with a provider id, a pending clustered create, or the CreateRequested
+// marker. One held before any Create (e.g. ProviderDeleting) has nothing to
+// delete through the Provider and must not hold it, or the two deletions would
+// wait on each other.
+func TestProviderInUse_UnboundVMHoldsOnlyIfItMayExistOnTheHypervisor(t *testing.T) {
+	neverCreated := func() *infravirtrigaudiov1beta1.VirtualMachine {
+		vm := inUseVM("default", "web", "", inUseProviderName)
+		vm.Status.ID = ""
+		vm.Status.Conditions = []metav1.Condition{{Type: k8s.ConditionProvisioning, Status: metav1.ConditionFalse,
+			Reason: "ProviderDeleting", Message: "held", LastTransitionTime: metav1.Now()}}
+		return vm
+	}
+	cases := map[string]struct {
+		vm    func() *infravirtrigaudiov1beta1.VirtualMachine
+		holds bool
+	}{
+		"no id, pendingHost or marker": {vm: neverCreated},
+		"status.id set": {holds: true, vm: func() *infravirtrigaudiov1beta1.VirtualMachine {
+			vm := neverCreated()
+			vm.Status.ID = "vm-123"
+			return vm
+		}},
+		"status.placement.pendingHost set": {holds: true, vm: func() *infravirtrigaudiov1beta1.VirtualMachine {
+			vm := neverCreated()
+			vm.Status.Placement = &infravirtrigaudiov1beta1.PlacementStatus{PendingHost: "host-a"}
+			return vm
+		}},
+		"Provisioning reason CreateRequested": {holds: true, vm: func() *infravirtrigaudiov1beta1.VirtualMachine {
+			vm := neverCreated()
+			vm.Status.Conditions[0].Reason = k8s.ReasonCreateRequested
+			return vm
+		}},
+		"bound, without any of them": {holds: true, vm: func() *infravirtrigaudiov1beta1.VirtualMachine {
+			vm := neverCreated()
+			vm.Status.BoundProvider = &infravirtrigaudiov1beta1.BoundProviderRef{Namespace: "default", Name: inUseProviderName}
+			return vm
+		}},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			r, _ := newInUseReconciler(t, inUseProvider(), tc.vm())
+			deleteInUseProvider(t, r)
+			reconcileProvider(t, r)
+			assert.Equal(t, !tc.holds, providerGone(t, r))
+		})
+	}
 }
 
 // TestProviderInUse_WhatHolds pins ADR-0010 D2, case by case.
