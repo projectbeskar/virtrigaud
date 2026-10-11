@@ -656,8 +656,10 @@ func (r *VMSnapshotReconciler) handleRetention(ctx context.Context, snapshot *in
 	}
 
 	// Check retention based on VM deletion
+	// A VM being detached (orphan-on-delete) keeps running, snapshots and
+	// all, on the hypervisor: its snapshots are not deleted with it.
 	if snapshot.Spec.RetentionPolicy != nil && snapshot.Spec.RetentionPolicy.DeleteOnVMDelete &&
-		(vm == nil || !vm.DeletionTimestamp.IsZero()) {
+		(vm == nil || (!vm.DeletionTimestamp.IsZero() && !hasOrphanOnDeleteAnnotation(vm))) {
 		logger.Info("Referenced VM is gone or being deleted, deleting snapshot (retentionPolicy.deleteOnVMDelete)")
 		if err := r.Delete(ctx, snapshot); err != nil {
 			logger.Error(err, "Failed to delete snapshot after VM deletion")
@@ -716,6 +718,21 @@ func (r *VMSnapshotReconciler) handleDeletion(ctx context.Context, snapshot *inf
 	// removed is the Normal event recorded once the finalizer is released
 	// ("" = none: nothing was confirmed deleted).
 	removed := "VMSnapshot removed; there was no provider snapshot to delete"
+
+	// A recorded snapshot whose VM no longer exists (or has no provider id)
+	// cannot be deleted by anyone: the VMSnapshot is released, but never
+	// with a claim that there was nothing to delete — the VM may still run
+	// on the hypervisor (e.g. detached with orphan-on-delete), snapshot and
+	// all.
+	if snapshot.Status.SnapshotID != "" && (vmNotFound || vm.Status.ID == "") {
+		msg := fmt.Sprintf("Removing the VMSnapshot although snapshot %q was not deleted: its VM %q no longer exists "+
+			"(or has no provider id), so nothing can delete it; if the VM still exists on the hypervisor (e.g. it was "+
+			"detached with orphan-on-delete), the snapshot is left there", snapshot.Status.SnapshotID, snapshot.Spec.VMRef.Name)
+		logger.Info("The snapshot's VM is gone; removing finalizer, the snapshot may be left on the hypervisor",
+			"snapshot_id", snapshot.Status.SnapshotID, "vm", snapshot.Spec.VMRef.Name)
+		r.Recorder.Event(snapshot, corev1.EventTypeWarning, eventReasonSnapshotLeftOnHypervisor, msg)
+		removed = ""
+	}
 
 	// Only call provider if VM still exists and we have a snapshot ID
 	if !vmNotFound && snapshot.Status.SnapshotID != "" && vm.Status.ID != "" {
