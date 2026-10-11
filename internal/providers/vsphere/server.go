@@ -1781,7 +1781,7 @@ func (p *Provider) SnapshotDelete(ctx context.Context, req *providerv1.SnapshotD
 	var vmObj mo.VirtualMachine
 	err = vm.Properties(ctx, vm.Reference(), []string{"snapshot"}, &vmObj)
 	if isManagedObjectGone(err) {
-		return nil, snapshotNotFoundError("VM %s not found, so it has no snapshot %s", req.VmId, req.SnapshotId)
+		return nil, p.answerSnapshotObjectNotFound(ctx, vm, req.SnapshotId, err)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to get VM snapshot properties: %w", err)
@@ -1811,17 +1811,19 @@ func (p *Provider) SnapshotDelete(ctx context.Context, req *providerv1.SnapshotD
 
 	task, err := vm.RemoveSnapshot(ctx, snapshot.Snapshot.Value, removeChildren, &consolidate)
 	if isManagedObjectGone(err) {
-		return nil, snapshotNotFoundError("snapshot not found: %s", req.SnapshotId)
+		return nil, p.answerSnapshotObjectNotFound(ctx, vm, req.SnapshotId, err)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to start snapshot removal: %w", err)
 	}
 
-	// Wait for snapshot deletion to complete. A snapshot removed meanwhile
-	// (e.g. by an earlier delete whose answer was lost) is gone: NotFound.
+	// Wait for snapshot deletion to complete. A ManagedObjectNotFound here
+	// may name the snapshot (removed meanwhile, e.g. by an earlier delete
+	// whose answer was lost) or the task itself (a vpxd restart): the VM is
+	// re-read before anything is answered NotFound.
 	_, err = task.WaitForResult(ctx, nil)
 	if isManagedObjectGone(err) {
-		return nil, snapshotNotFoundError("snapshot not found: %s", req.SnapshotId)
+		return nil, p.answerSnapshotObjectNotFound(ctx, vm, req.SnapshotId, err)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("snapshot deletion failed: %w", err)

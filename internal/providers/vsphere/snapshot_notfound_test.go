@@ -25,7 +25,10 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/vmware/govmomi/object"
 	"github.com/vmware/govmomi/simulator"
+	"github.com/vmware/govmomi/vim25/soap"
+	"github.com/vmware/govmomi/vim25/types"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
@@ -69,6 +72,32 @@ func newSnapshotSim(t *testing.T) (*Provider, string) {
 	require.NoError(t, err)
 	require.NotEmpty(t, vms)
 	return p, vms[0].Reference().Value
+}
+
+// TestAnswerSnapshotObjectNotFound (re-review M-a): a ManagedObjectNotFound
+// during a snapshot removal may name the task (a vpxd restart) or another
+// object. The VM is re-read: NotFound only when the VM is gone or the snapshot
+// is no longer in its tree; a snapshot that still exists is Unavailable, so
+// the manager retries and never releases it.
+func TestAnswerSnapshotObjectNotFound(t *testing.T) {
+	ctx := context.Background()
+	p, vmID := newSnapshotSim(t)
+	vm := object.NewVirtualMachine(p.client.Client, types.ManagedObjectReference{Type: "VirtualMachine", Value: vmID})
+	taskGone := types.ManagedObjectNotFound{Obj: types.ManagedObjectReference{Type: "Task", Value: "task-404"}}
+	cause := soap.WrapVimFault(&taskGone)
+
+	created, err := p.SnapshotCreate(ctx, &providerv1.SnapshotCreateRequest{VmId: vmID, NameHint: "kept"})
+	require.NoError(t, err)
+
+	err = p.answerSnapshotObjectNotFound(ctx, vm, created.SnapshotId, cause)
+	assert.Equal(t, codes.Unavailable, status.Code(err), "the task is gone, the snapshot is not: %v", err)
+
+	err = p.answerSnapshotObjectNotFound(ctx, vm, "snapshot-404", cause)
+	assert.Equal(t, codes.NotFound, status.Code(err), "not in the tree: %v", err)
+
+	gone := object.NewVirtualMachine(p.client.Client, types.ManagedObjectReference{Type: "VirtualMachine", Value: "vm-404"})
+	err = p.answerSnapshotObjectNotFound(ctx, gone, created.SnapshotId, cause)
+	assert.Equal(t, codes.NotFound, status.Code(err), "the VM itself is gone: %v", err)
 }
 
 func TestSnapshotDelete_MissingSnapshotIsNotFound(t *testing.T) {
