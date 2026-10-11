@@ -32,8 +32,9 @@ import (
 // from a VirtualMachine that has no status.id yet, and a shared host can be
 // fronted by several Provider objects; the owner stamp the provider reports
 // closes both gaps: a domain stamped with a LIVE VirtualMachine's UID is never
-// re-adopted, while an orphan (stamped by a deleted VirtualMachine) or an
-// unstamped domain is adoptable.
+// re-adopted, and an unstamped domain is adoptable. A domain stamped only with
+// UIDs of no VirtualMachine in this cluster is adoptable only with the
+// Provider's adopt-stamped-vms opt-in.
 func TestUnmanagedProviderVMs(t *testing.T) {
 	provider := &infravirtrigaudiov1beta1.Provider{ObjectMeta: metav1.ObjectMeta{Name: "libvirt", Namespace: "infra"}}
 	vm := func(ns, name, uid, providerNS, statusID string) infravirtrigaudiov1beta1.VirtualMachine {
@@ -84,15 +85,43 @@ func TestUnmanagedProviderVMs(t *testing.T) {
 		stamped("team-b.web", "uid-b"),         // managed (live owner stamp; no status.id yet)
 		stamped("team-c.db", "uid-c"),          // managed via another Provider object (live owner stamp)
 		stamped("legacy", ""),                  // managed (legacy name fallback)
-		stamped("team-e.old", "uid-deleted"),   // orphan of a deleted VirtualMachine: adoptable
+		stamped("team-e.old", "uid-deleted"),   // no VirtualMachine here: opt-in only
 		stamped("hand-made", ""),               // never created by VirtRigaud: adoptable
 		stamped("two-stamps", "uid-x,uid-b"),   // any live UID keeps it managed
-		stamped("garbage-stamp", " , ,uid-zz"), // no live UID: adoptable
+		stamped("garbage-stamp", " , ,uid-zz"), // no live UID: opt-in only
+		stamped("blank-stamp", " , "),          // no UID at all: unstamped, adoptable
+	}
+	ids := func(infos []contracts.VMInfo) []string {
+		var out []string
+		for _, v := range infos {
+			out = append(out, v.ID)
+		}
+		return out
 	}
 
-	var got []string
-	for _, v := range unmanagedProviderVMs(provider, all, vms) {
-		got = append(got, v.ID)
-	}
-	assert.ElementsMatch(t, []string{"team-e.old", "hand-made", "garbage-stamp"}, got)
+	// Default: a stamp naming no VirtualMachine in this cluster may be a live
+	// VirtualMachine of another installation sharing the host, so it is
+	// reported, never adopted.
+	unmanaged, foreign := unmanagedProviderVMs(provider, all, vms)
+	assert.ElementsMatch(t, []string{"hand-made", "blank-stamp"}, ids(unmanaged))
+	assert.ElementsMatch(t, []string{"team-e.old", "garbage-stamp"}, ids(foreign))
+
+	// Any value other than "true" is not the opt-in.
+	provider.Annotations = map[string]string{AdoptStampedVMsAnnotation: "yes"}
+	unmanaged, foreign = unmanagedProviderVMs(provider, all, vms)
+	assert.ElementsMatch(t, []string{"hand-made", "blank-stamp"}, ids(unmanaged))
+	assert.Len(t, foreign, 2)
+
+	// Opted in: stale stamps are adoptable. Nothing else changes: live-owned,
+	// unreliable-stamp and artifact VMs are still never offered.
+	provider.Annotations = map[string]string{AdoptStampedVMsAnnotation: "true"}
+	unmanaged, foreign = unmanagedProviderVMs(provider, all, vms)
+	assert.ElementsMatch(t, []string{"team-e.old", "hand-made", "garbage-stamp", "blank-stamp"}, ids(unmanaged))
+	assert.Empty(t, foreign)
+}
+
+func TestForeignStampedSummary(t *testing.T) {
+	assert.Empty(t, foreignStampedSummary(0))
+	assert.Contains(t, foreignStampedSummary(2), "2 not adopted")
+	assert.Contains(t, foreignStampedSummary(2), AdoptStampedVMsAnnotation+"=true")
 }

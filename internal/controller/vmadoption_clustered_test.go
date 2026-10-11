@@ -787,6 +787,26 @@ func TestClusteredAdoption_PreviousIncarnationsAreNeverAdopted(t *testing.T) {
 	assert.Contains(t, st.Message, "re-attach it per the ADR-0007 A6 runbook, or remove it")
 }
 
+// TestClusteredAdoption_StampedVMsOptInDoesNotApply: the single-host opt-in
+// to adopt VMs stamped by no VirtualMachine in this cluster
+// (AdoptStampedVMsAnnotation) never makes a clustered Provider adopt one:
+// those are previous incarnations, re-attached per the ADR-0007 A6 runbook.
+func TestClusteredAdoption_StampedVMsOptInDoesNotApply(t *testing.T) {
+	prov := &fakeClusteredAdopter{caps: routedAdoptionCaps, domains: []*fakeDomain{
+		{host: "host-a", id: "legacy.db", uuid: "uuid-a-db", owner: "uid-elsewhere", power: "Off"},
+	}}
+	provider := clusteredAdoptionProvider()
+	provider.Annotations[AdoptStampedVMsAnnotation] = "true"
+	r := clusteredAdoptionReconciler(t, prov, provider, clusterHost("host-a", "prov-c"))
+
+	reconcileAdoption(t, r)
+	assert.Empty(t, prov.transfers)
+	var vms infravirtrigaudiov1beta1.VirtualMachineList
+	require.NoError(t, r.List(context.Background(), &vms, client.InNamespace(clusterNS)))
+	assert.Empty(t, vms.Items)
+	assert.Contains(t, adoptionStatus(t, r).Message, "re-attach it per the ADR-0007 A6 runbook")
+}
+
 // TestClusteredAdoption_CrossHostDuplicatesAreNeverAdopted: a brownfield
 // domain defined on two hosts — the same UUID, or a disk a VM on another host
 // uses (common on a shared NFS pool) — is skipped and reported on every host,

@@ -59,6 +59,17 @@ const (
 	// Format: JSON object with optional fields: namePattern, powerState, minCPU, minMemoryMiB, maxCPU, maxMemoryMiB
 	// Example: {"namePattern": "prod-.*", "powerState": "on", "minCPU": 2}
 	AdoptionFilterAnnotation = "virtrigaud.io/adopt-filter"
+	// AdoptStampedVMsAnnotation, set to "true" on a single-host Provider that
+	// also has AdoptionAnnotation, lets adoption take a VM whose owner stamp
+	// names only UIDs of no VirtualMachine in this cluster. Without it such a
+	// VM is never adopted: an owner stamp is only meaningful in the cluster
+	// that wrote it, so a UID that is not here may be a deleted VirtualMachine
+	// (a stale stamp) or a LIVE VirtualMachine of another VirtRigaud
+	// installation, or of this cluster before a restore, that manages the same
+	// vCenter or host. A clustered Provider never adopts a stamped VM, with or
+	// without it (previous incarnations are re-attached per the ADR-0007 A6
+	// runbook).
+	AdoptStampedVMsAnnotation = "virtrigaud.io/adopt-stamped-vms"
 	// AdoptedLabel marks a VirtualMachine CR whose underlying VM already
 	// exists on the provider (it was adopted from the hypervisor or produced
 	// by the clone controller) rather than created by the VirtualMachine
@@ -210,7 +221,7 @@ func (r *VMAdoptionReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	}
 
 	// Discover unmanaged VMs
-	unmanagedVMs, err := r.discoverUnmanagedVMs(ctx, &provider, filter)
+	unmanagedVMs, foreignStamped, err := r.discoverUnmanagedVMs(ctx, &provider, filter)
 	if err != nil {
 		logger.Error(err, "Failed to discover unmanaged VMs")
 		provider.Status.Adoption.Message = fmt.Sprintf("Discovery failed: %v", err)
@@ -257,6 +268,7 @@ func (r *VMAdoptionReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	} else {
 		provider.Status.Adoption.Message = fmt.Sprintf("Successfully adopted %d VMs", adoptedCount)
 	}
+	provider.Status.Adoption.Message += foreignStampedSummary(foreignStamped)
 
 	if err := r.Status().Update(ctx, &provider); err != nil {
 		logger.Error(err, "Failed to update adoption status")
@@ -269,20 +281,25 @@ func (r *VMAdoptionReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 }
 
 // discoverUnmanagedVMs finds VMs not yet managed by VirtRigaud
-func (r *VMAdoptionReconciler) discoverUnmanagedVMs(ctx context.Context, provider *infravirtrigaudiov1beta1.Provider, filter *VMAdoptionFilter) ([]contracts.VMInfo, error) {
+// (unmanagedProviderVMs, then the adoption filter). foreignStamped counts the
+// listed VMs left alone because their owner stamp names no VirtualMachine in
+// this cluster and the Provider does not opt in with
+// AdoptStampedVMsAnnotation.
+func (r *VMAdoptionReconciler) discoverUnmanagedVMs(ctx context.Context, provider *infravirtrigaudiov1beta1.Provider,
+	filter *VMAdoptionFilter) (unmanagedVMs []contracts.VMInfo, foreignStamped int, err error) {
 	logger := log.FromContext(ctx)
 
 	// Get provider instance
 	providerInstance, err := r.getProviderInstance(ctx, provider)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get provider instance: %w", err)
+		return nil, 0, fmt.Errorf("failed to get provider instance: %w", err)
 	}
 
 	// List all VMs from provider
 	listed, err := providerInstance.ListVMs(ctx)
 	allVMs := listed.VMs
 	if err != nil {
-		return nil, fmt.Errorf("failed to list VMs: %w", err)
+		return nil, 0, fmt.Errorf("failed to list VMs: %w", err)
 	}
 
 	logger.Info("Discovered VMs from provider", "count", len(allVMs))
@@ -290,12 +307,16 @@ func (r *VMAdoptionReconciler) discoverUnmanagedVMs(ctx context.Context, provide
 	// Get all existing VirtualMachine CRs
 	vmList := &infravirtrigaudiov1beta1.VirtualMachineList{}
 	if err := r.List(ctx, vmList); err != nil {
-		return nil, fmt.Errorf("failed to list VirtualMachine CRs: %w", err)
+		return nil, 0, fmt.Errorf("failed to list VirtualMachine CRs: %w", err)
 	}
 
 	// Filter out managed VMs and apply adoption filter
-	var unmanagedVMs []contracts.VMInfo
-	for _, vmInfo := range unmanagedProviderVMs(provider, allVMs, vmList.Items) {
+	unmanaged, foreign := unmanagedProviderVMs(provider, allVMs, vmList.Items)
+	for _, vmInfo := range foreign {
+		logger.Info("Not adopting a VM whose owner stamp names no VirtualMachine in this cluster",
+			"vm_id", vmInfo.ID, "vm_name", vmInfo.Name, "optIn", AdoptStampedVMsAnnotation)
+	}
+	for _, vmInfo := range unmanaged {
 		// Apply adoption filter if specified
 		if filter != nil && !r.matchesFilter(vmInfo, filter) {
 			logger.V(1).Info("VM filtered out by adoption filter", "vm_id", vmInfo.ID, "vm_name", vmInfo.Name)
@@ -305,8 +326,9 @@ func (r *VMAdoptionReconciler) discoverUnmanagedVMs(ctx context.Context, provide
 		unmanagedVMs = append(unmanagedVMs, vmInfo)
 	}
 
-	logger.Info("Found unmanaged VMs", "count", len(unmanagedVMs), "filtered", filter != nil)
-	return unmanagedVMs, nil
+	logger.Info("Found unmanaged VMs", "count", len(unmanagedVMs), "filtered", filter != nil,
+		"foreignStamped", len(foreign))
+	return unmanagedVMs, len(foreign), nil
 }
 
 // unmanagedProviderVMs returns the VMs of allVMs (provider's ListVMs) that no
@@ -323,8 +345,13 @@ func (r *VMAdoptionReconciler) discoverUnmanagedVMs(ctx context.Context, provide
 //     derive), and a VM managed through another Provider object pointing at
 //     the same host.
 //
-// A VM stamped only with UIDs of VirtualMachines that no longer exist (left
-// behind by a deleted VirtualMachine) is unmanaged and may be adopted; the
+// A VM stamped only with UIDs of no VirtualMachine in this cluster is
+// returned in foreignStamped, NOT in unmanaged, unless the Provider opts in
+// with AdoptStampedVMsAnnotation="true": an owner stamp only means something
+// in the cluster that wrote it, and a UID that is not here may be a deleted
+// VirtualMachine (a stale stamp) or a live VirtualMachine of another
+// VirtRigaud installation (or of this cluster before a restore) sharing the
+// vCenter or host. With the opt-in it is unmanaged and may be adopted; the
 // adopted VirtualMachine is a new object, so the stale stamp never matches its
 // UID.
 //
@@ -336,7 +363,8 @@ func (r *VMAdoptionReconciler) discoverUnmanagedVMs(ctx context.Context, provide
 // state (contracts.VMInfoArtifactKey set to any value: a template or an image
 // artifact), whose delete would destroy the image for every consumer.
 func unmanagedProviderVMs(provider *infravirtrigaudiov1beta1.Provider, allVMs []contracts.VMInfo,
-	vms []infravirtrigaudiov1beta1.VirtualMachine) []contracts.VMInfo {
+	vms []infravirtrigaudiov1beta1.VirtualMachine) (unmanaged, foreignStamped []contracts.VMInfo) {
+	adoptStamped := provider.Annotations[AdoptStampedVMsAnnotation] == "true"
 	managedVMIDs := make(map[string]bool)
 	liveUIDs := make(map[string]bool, len(vms))
 	for _, vm := range vms {
@@ -362,7 +390,6 @@ func unmanagedProviderVMs(provider *infravirtrigaudiov1beta1.Provider, allVMs []
 		}
 	}
 
-	var unmanaged []contracts.VMInfo
 	for _, vmInfo := range allVMs {
 		if vmInfo.ProviderRaw[contracts.VMInfoOwnerStampStateKey] != "" || isArtifact(vmInfo) {
 			continue
@@ -370,9 +397,24 @@ func unmanagedProviderVMs(provider *infravirtrigaudiov1beta1.Provider, allVMs []
 		if managedVMIDs[vmInfo.ID] || ownedByLiveVM(vmInfo, liveUIDs) {
 			continue
 		}
+		if len(contracts.OwnerUIDs(vmInfo)) > 0 && !adoptStamped {
+			foreignStamped = append(foreignStamped, vmInfo)
+			continue
+		}
 		unmanaged = append(unmanaged, vmInfo)
 	}
-	return unmanaged
+	return unmanaged, foreignStamped
+}
+
+// foreignStampedSummary is the part of a single-host discovery's status
+// message about the n listed VMs not adopted because their owner stamp names
+// no VirtualMachine in this cluster; "" when n is zero.
+func foreignStampedSummary(n int) string {
+	if n == 0 {
+		return ""
+	}
+	return fmt.Sprintf("; %d not adopted — owner stamp names no VirtualMachine in this cluster "+
+		"(possibly another VirtRigaud installation's; set %s=true to adopt stale stamps)", n, AdoptStampedVMsAnnotation)
 }
 
 // isArtifact reports whether the provider marked vmInfo as shared image state

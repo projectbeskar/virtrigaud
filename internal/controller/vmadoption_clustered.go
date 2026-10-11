@@ -183,9 +183,11 @@ const (
 	// skipNoIdentity: listed without a host id or a UUID; it cannot be bound
 	// or transferred safely.
 	skipNoIdentity adoptionSkipReason = "listed without a host id or UUID"
-	// skipPreviousIncarnation: stamped only by VirtualMachines that no longer
-	// exist — deleted with orphan-on-delete, or restored with a new UID. Until
-	// ADR-0007 A6.4 it is re-attached by an administrator, never adopted.
+	// skipPreviousIncarnation: stamped only by VirtualMachines that are not in
+	// this cluster — deleted with orphan-on-delete, restored with a new UID, or
+	// a live VirtualMachine of another VirtRigaud installation sharing the
+	// host. Until ADR-0007 A6.4 it is re-attached by an administrator, never
+	// adopted; the single-host opt-in AdoptStampedVMsAnnotation does not apply.
 	skipPreviousIncarnation adoptionSkipReason = "previous incarnation of a VirtualMachine that no longer exists " +
 		"(re-attach it per the ADR-0007 A6 runbook, or remove it)"
 	// skipDuplicate: the same domain (its UUID) is defined on more than one
