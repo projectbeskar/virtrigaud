@@ -26,7 +26,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Polling:** the task is polled through `TaskStatus`, and the migration moves to Exporting only on success, with `status.taskRef` cleared first.
   - **Task failure, unknown task or timeout:** the snapshot is marked `Snapshotting=False/SnapshotFailed`, its id is kept for cleanup, and the migration fails, then retries per its policy.
   - **Bounded wait:** the task is waited for at most `spec.options.timeout`, or 2 h when unset, counted from the create.
-  - **Retry naming:** a retry's snapshot name hint and request token carry the attempt (`-r<n>`), so they never collide with a snapshot an earlier attempt left behind (`cleanupPolicy: Never`).
+  - **Retry naming:** a retry's snapshot name hint and request token carry the attempt (`-r<n>`), so they never collide with a snapshot an earlier attempt left behind (`cleanupPolicy: Never`). The name is cut, deterministically, to fit Proxmox's 40-character snapshot names.
   - **Task error text:** a failed snapshot, export or import task records a constant in the status; the task's text goes to the manager log only.
   - **Reuse:** a snapshot is reused, e.g. by a retry, only once it is confirmed complete. An unconfirmed one is removed and taken again.
   - **Stale reads:** the `SnapshotCreate` is never sent from a stale read (`confirmMigrationSnapshotNotTaken`, a live re-read).
@@ -42,12 +42,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Bound to its VM and Provider (API, additive):** `VMSnapshotStatus.vmUID` and `VMSnapshotStatus.boundProvider` are recorded when the create is issued.
     - A VM re-created under the same name, or a VM that now goes through another Provider, never gets this snapshot's `SnapshotDelete`. On libvirt and Proxmox a snapshot id is a name, so that call could delete another VMSnapshot's snapshot.
     - Such a VMSnapshot is released with a `SnapshotLeftOnHypervisor` Warning, and for retention its VM counts as gone.
-    - A legacy snapshot (no `vmUID`) is bound on first reconcile to a VM created before it; a VM created after it is another VM.
+    - A legacy snapshot (no `vmUID`) is bound on first reconcile only when that is provable across the two clocks. The VM must predate the VMSnapshot object (API-server timestamps), or predate the manager-written `status.creationTime` by more than a 30 s skew margin. Anything later, the ambiguous band included, is another VM.
+    - The manager's readiness check requires these two fields in the installed VMSnapshot CRD, like the other additive security fields. The manager now also gets `vmsnapshots.infra.virtrigaud.io` (RBAC).
   - **Missing VM:** recorded as `Ready=False/VMNotFound` with a constant message, written only on change.
 - `internal/providers/vsphere/server.go` (snapshot functions only), `snapshot_notfound.go` (new), `internal/providers/proxmox/server.go`, `pveapi/client.go`, `pvefake/server.go`: a snapshot that is not there is now answered `codes.NotFound`, so the manager treats the delete as an idempotent success. Before, a VMMigration or VMSnapshot delete held forever.
-  - **vSphere:** no snapshot tree or a snapshot not in it is NotFound, also for `SnapshotRevert`. After any `ManagedObjectNotFound` (which can name the Task, e.g. after a vpxd restart) the VM is re-read: NotFound only if the VM itself is gone or the snapshot left its tree, otherwise Unavailable.
+  - **vSphere:** no snapshot tree or a snapshot not in it is NotFound, also for `SnapshotRevert`. After any `ManagedObjectNotFound` (which can name the Task, e.g. after a vpxd restart) the VM is re-read: NotFound only if the VM itself is gone or the snapshot left its tree, otherwise Unavailable. `isNotFound` compares a reference's type and value only, not `serverGuid`.
   - **Proxmox:** the VM's ACTUAL node is resolved from `/cluster/resources` before the snapshot is listed or deleted (the provider used its first node, so after an HA move PVE's "Configuration file ... does not exist" was taken for "snapshot gone").
     - NotFound only when the VM is absent cluster-wide, the snapshot is not listed on its node, or PVE answers "snapshot '<name>' does not exist".
+    - "Absent cluster-wide" is confirmed with the permission-independent `GET /cluster/nextid?vmid=<id>`, because `/cluster/resources` hides VMs the token may not audit. A VMID in use but not listed is Unavailable, and a likely ACL problem is logged.
     - A bare 404 or any other failure is Unavailable (retried); `DeleteSnapshot` no longer treats a 404 as success.
     - pvefake is node-aware.
 - `internal/controller/vmclone_controller.go`, `internal/transport/grpc/request_sent.go` (new), `client.go`, `internal/providers/contracts/not_performed.go` (new), `internal/providers/libvirt/server.go`, `clone.go`: a single-host clone that fails transiently is held (`Pending`, `CloneRetrying`, a constant message, one Warning event, the blocked-VM backoff), not failed for good. It is retried only when nothing was done (`contracts.IsNothingDone`).
