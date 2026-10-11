@@ -765,6 +765,10 @@ func (r *VMMigrationReconciler) handleSnapshottingPhase(ctx context.Context, mig
 	if snapshotResp.Task != nil && snapshotResp.Task.ID != "" {
 		migration.Status.TaskRef = snapshotResp.Task.ID
 		logger.Info("Snapshot creation task started, waiting for completion", "task_id", snapshotResp.Task.ID)
+		// The wait starts now: the condition's transition time bounds it
+		// (migrationSnapshotWaitLimit).
+		k8s.SetCondition(&migration.Status.Conditions, infrav1beta1.VMMigrationConditionSnapshotting,
+			metav1.ConditionTrue, migrationReasonSnapshotInProgress, migrationSnapshotInProgressMessage)
 
 		if err := r.updateStatus(ctx, migration); err != nil {
 			return ctrl.Result{}, err

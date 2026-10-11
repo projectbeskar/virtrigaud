@@ -73,6 +73,33 @@ const (
 	migrationStaleReadRetryInterval = 2 * time.Second
 )
 
+// migrationDefaultSnapshotWait bounds the wait for a source snapshot task when
+// the migration sets no spec.options.timeout.
+const migrationDefaultSnapshotWait = 2 * time.Hour
+
+// migrationSnapshotWaitLimit is the longest a migration waits for its source
+// snapshot task: spec.options.timeout when set, else
+// migrationDefaultSnapshotWait.
+func migrationSnapshotWaitLimit(m *infrav1beta1.VMMigration) time.Duration {
+	if m.Spec.Options != nil && m.Spec.Options.Timeout != nil && m.Spec.Options.Timeout.Duration > 0 {
+		return m.Spec.Options.Timeout.Duration
+	}
+	return migrationDefaultSnapshotWait
+}
+
+// migrationSnapshotWaitExceeded reports whether the snapshot task has run for
+// longer than migrationSnapshotWaitLimit, counted from when the migration
+// started waiting for it (the Snapshotting=True/SnapshotInProgress
+// transition), and for how long it has run.
+func migrationSnapshotWaitExceeded(m *infrav1beta1.VMMigration, now time.Time) (time.Duration, bool) {
+	c := meta.FindStatusCondition(m.Status.Conditions, infrav1beta1.VMMigrationConditionSnapshotting)
+	if c == nil || c.Status != metav1.ConditionTrue || c.Reason != migrationReasonSnapshotInProgress {
+		return 0, false
+	}
+	waited := now.Sub(c.LastTransitionTime.Time)
+	return waited, waited > migrationSnapshotWaitLimit(m)
+}
+
 // migrationSnapshotInProgressMessage is the Snapshotting condition message
 // while the snapshot task runs. It is constant, so a poll writes nothing.
 const migrationSnapshotInProgressMessage = "The source VM snapshot is being taken; the export starts once its task completes"
@@ -140,6 +167,12 @@ func (r *VMMigrationReconciler) pollMigrationSnapshotTask(
 		return r.failMigrationSnapshot(ctx, migration,
 			"Snapshot creation failed: "+sanitizeProviderDetail(errors.New(taskStatus.Error)))
 	case !taskStatus.IsCompleted:
+		if waited, over := migrationSnapshotWaitExceeded(migration, time.Now()); over {
+			logger.Info("Snapshot task did not finish in time; failing the snapshot", "task_id", taskRef,
+				"waited", waited.String(), "limit", migrationSnapshotWaitLimit(migration).String())
+			return r.failMigrationSnapshot(ctx, migration, fmt.Sprintf(
+				"Snapshot creation failed: its task did not finish within %s", migrationSnapshotWaitLimit(migration)))
+		}
 		logger.Info("Snapshot task still running", "task_id", taskRef)
 		before := migration.Status.DeepCopy()
 		k8s.SetCondition(&migration.Status.Conditions, infrav1beta1.VMMigrationConditionSnapshotting,
