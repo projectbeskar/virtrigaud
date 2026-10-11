@@ -197,6 +197,32 @@ func olderVMImageCRD(t *testing.T, fields ...string) *unstructured.Unstructured 
 	return crd
 }
 
+// TestMissingVMSnapshotCRDFeatures (re-review L-2): a VMSnapshot CRD without
+// status.vmUID or status.boundProvider (one older than the manager) is
+// reported missing and fails readiness.
+func TestMissingVMSnapshotCRDFeatures(t *testing.T) {
+	missing, err := missingVMSnapshotCRDFeatures(generatedCRD(t, VMSnapshotCRDName))
+	require.NoError(t, err)
+	assert.Empty(t, missing, "the generated VMSnapshot CRD has every feature")
+
+	older := generatedCRD(t, VMSnapshotCRDName)
+	unstructured.RemoveNestedField(v1beta1Schema(t, older), "properties", "status", "properties", "vmUID")
+	unstructured.RemoveNestedField(v1beta1Schema(t, older), "properties", "status", "properties", "boundProvider")
+	missing, err = missingVMSnapshotCRDFeatures(older)
+	require.NoError(t, err)
+	assert.Equal(t, []string{crdFeatureSnapshotVMUID, crdFeatureSnapshotBoundProvider}, missing)
+
+	c := NewVMCRDFeatureChecker(&stubCRDReader{
+		crd:    generatedVMCRD(t),
+		others: map[string]*unstructured.Unstructured{VMSnapshotCRDName: older},
+		t:      t,
+	})
+	state, missing := c.Evaluate(context.Background())
+	assert.Equal(t, metrics.CRDFeaturesMissing, state)
+	assert.Equal(t, []string{VMSnapshotCRDName + ": " + crdFeatureSnapshotVMUID, VMSnapshotCRDName + ": " + crdFeatureSnapshotBoundProvider}, missing)
+	require.Error(t, readyzErr(c))
+}
+
 func TestMissingVMImageCRDFeatures(t *testing.T) {
 	missing, err := missingVMImageCRDFeatures(generatedCRD(t, VMImageCRDName))
 	require.NoError(t, err)
@@ -316,7 +342,7 @@ func (s *stubCRDReader) Get(_ context.Context, key client.ObjectKey, obj client.
 			return s.err
 		}
 		crd = s.crd
-	case ProviderCRDName, VMClassCRDName, VMImageCRDName:
+	case ProviderCRDName, VMClassCRDName, VMImageCRDName, VMSnapshotCRDName:
 		if s.otherErr != nil {
 			return s.otherErr
 		}
@@ -414,8 +440,8 @@ func TestVMCRDFeatureChecker_CachesAndKeepsStateOnTransientErrors(t *testing.T) 
 	assert.Equal(t, metrics.CRDFeaturesVerified, state)
 }
 
-func TestRBAC_CRDReadIsGetOnTheFourCheckedCRDs(t *testing.T) {
-	checked := []string{VirtualMachineCRDName, ProviderCRDName, VMClassCRDName, VMImageCRDName}
+func TestRBAC_CRDReadIsGetOnTheCheckedCRDs(t *testing.T) {
+	checked := []string{VirtualMachineCRDName, ProviderCRDName, VMClassCRDName, VMImageCRDName, VMSnapshotCRDName}
 	raw, err := os.ReadFile(filepath.Join("..", "..", "config", "rbac", "role.yaml"))
 	require.NoError(t, err)
 	role := &rbacv1.ClusterRole{}

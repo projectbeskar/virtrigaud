@@ -178,8 +178,10 @@ The same check reads the `Provider`, `VMClass` and `VMImage` CRDs and requires
 `spec.consumerNamespaceSelector` in each (the cross-namespace consumer grant,
 see [`cross-namespace-references.md`](cross-namespace-references.md)): with an
 older CRD no grant can be set, so every cross-namespace reference would be
-refused. A missing feature in any of the four CRDs is `missing`; an unreadable
-one is `unknown`:
+refused. It also reads the `VMSnapshot` CRD and requires `status.vmUID` and
+`status.boundProvider` (a snapshot's binding to its VM and Provider; an older
+CRD would prune them). A missing feature in any of the five CRDs is
+`missing`; an unreadable one is `unknown`:
 
 | State | Meaning | Readiness |
 |---|---|---|
@@ -189,8 +191,8 @@ one is `unknown`:
 
 The state is exported as
 `virtrigaud_manager_vm_crd_security_features{state="verified|missing|unknown"}`
-(1 for the current state). The manager needs `get` on those four CRDs
-(`resourceNames: [virtualmachines, providers, vmclasses, vmimages
+(1 for the current state). The manager needs `get` on those five CRDs
+(`resourceNames: [virtualmachines, providers, vmclasses, vmimages, vmsnapshots
 .infra.virtrigaud.io]`), which the chart's ClusterRole grants.
 
 Failing readiness is deliberate. A manager running against an old CRD looks
