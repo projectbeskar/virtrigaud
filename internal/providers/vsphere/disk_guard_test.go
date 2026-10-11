@@ -1136,3 +1136,42 @@ func TestCreate_InPlaceDisk_MissingLandingDisk(t *testing.T) {
 	require.NoError(t, lerr)
 	assert.Empty(t, refs, "nothing is created")
 }
+
+// listVMOnDatastore adds VM id to datastore dsName's vm list, as vCenter does
+// for every VM with any file on a datastore. vcsim records only the
+// datastores a VM had when it was created, so a disk attached later on
+// another datastore would otherwise be missing from that datastore's list.
+func listVMOnDatastore(t *testing.T, p *Provider, model *simulator.Model, dsName, id string) {
+	t.Helper()
+	ds, err := p.finder.Datastore(context.Background(), dsName)
+	require.NoError(t, err)
+	reg := model.Map()
+	obj, ok := reg.Get(ds.Reference()).(*simulator.Datastore)
+	require.True(t, ok)
+	reg.WithLock(model.Service.Context, obj, func() { obj.Vm = append(obj.Vm, vmRef(id)) })
+}
+
+// TestCreate_InPlaceDisk_SeesAVMHomedOnAnotherDatastore: a VM whose home is
+// on one datastore and whose disk is on another is found by the scan of the
+// disk's datastore (Datastore.vm lists every VM with a file there).
+func TestCreate_InPlaceDisk_SeesAVMHomedOnAnotherDatastore(t *testing.T) {
+	p, model := newOwnershipSim(t, func(m *simulator.Model) { m.Datastore = 2 })
+	ctx := context.Background()
+	const ds2 = "LocalDS_1"
+	landing := "[" + ds2 + "] " + landingRelPath(ownerTeamA.Namespace, "web")
+	makeImportedDisk(t, p, "["+ds2+"] "+landingName(ownerTeamA.Namespace, "web"), landing)
+
+	holder, err := p.Create(ctx, templateCreateRequest("holder", "", wireOwner(ownerTeamB)))
+	require.NoError(t, err)
+	attachDiskInPlace(t, p, holder.Id, landing)
+	listVMOnDatastore(t, p, model, ds2, holder.Id)
+
+	_, err = p.Create(ctx, &providerv1.CreateRequest{
+		Name: "web", ImageJson: importedDiskImageJSON(landing, true), Owner: wireOwner(ownerTeamA),
+	})
+	requireCode(t, err, codes.FailedPrecondition)
+	assert.Equal(t, []string{contracts.VMDiskInUseReason}, errorReasons(err))
+
+	err = p.ensureImportFolderUnused(ctx, ds2, landingName(ownerTeamA.Namespace, "web"), true)
+	requireCode(t, err, codes.FailedPrecondition)
+}
