@@ -18,6 +18,8 @@ package vsphere
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"path"
@@ -191,15 +193,45 @@ func (p *Provider) errDiskCheckFailed(what string, err error) error {
 // directory suffix ("<vm>_<digits>") never ends in "-migrated".
 const landingSeparator = "_"
 
-// maxDatastoreFileNameBytes bounds one component of a datastore path (VMFS
-// and NFS limit a file or directory name to 255 bytes).
-const maxDatastoreFileNameBytes = 255
+const (
+	// maxLandingNameBytes bounds a landing name: the import names the
+	// transient VM ImportVApp creates after it, and vCenter limits a managed
+	// entity's name to 80 characters (the folder and .vmdk names fit easily).
+	maxLandingNameBytes = 80
+	// landingHashMarker precedes the hash of a bounded landing name. An
+	// unbounded one contains exactly one "_" (landingSeparator; Kubernetes
+	// names contain none), so no unbounded name ever equals a bounded one.
+	landingHashMarker = "__"
+	// landingHashHexLen is the number of hex digits (64 bits of SHA-256) of a
+	// bounded landing name's hash.
+	landingHashHexLen = 16
+	// landingHashInputSeparator separates namespace and name in the hash
+	// input; "/" appears in neither.
+	landingHashInputSeparator = "/"
+	// landingPrefixTrim are the characters trimmed from the end of a bounded
+	// landing name's prefix before the marker.
+	landingPrefixTrim = "-._"
+)
 
 // landingName is the base name ImportDisk gives the disk it lands for the
 // VirtualMachine namespace/name: "<ns>_<vm>-migrated". The folder and the
 // .vmdk are both named after it.
+//
+// When that is longer than maxLandingNameBytes, the name is bounded the way
+// the libvirt provider bounds domain names (boundDomainName): the start of
+// "<ns>_<vm>", then landingHashMarker and the first landingHashHexLen hex
+// digits of SHA-256("<ns>/<vm>"), then "-migrated" — exactly 80 bytes,
+// deterministic, and distinct for distinct identities up to a 64-bit hash
+// collision.
 func landingName(namespace, name string) string {
-	return namespace + landingSeparator + name + contracts.ImportedDiskNameSuffix
+	full := namespace + landingSeparator + name + contracts.ImportedDiskNameSuffix
+	if len(full) <= maxLandingNameBytes {
+		return full
+	}
+	sum := sha256.Sum256([]byte(namespace + landingHashInputSeparator + name))
+	tail := landingHashMarker + hex.EncodeToString(sum[:])[:landingHashHexLen] + contracts.ImportedDiskNameSuffix
+	head := namespace + landingSeparator + name
+	return strings.TrimRight(head[:maxLandingNameBytes-len(tail)], landingPrefixTrim) + tail
 }
 
 // landingRelPath is the datastore-relative path of that landing disk:
@@ -219,17 +251,14 @@ func legacyLandingRelPath(name string) string {
 }
 
 // validLandingIdentity reports whether namespace/name can form a landing name:
-// a DNS-1123 label namespace, a DNS-1123 subdomain name, and a name that fits
-// one datastore path component.
+// a DNS-1123 label namespace and a DNS-1123 subdomain name (landingName bounds
+// the length).
 func validLandingIdentity(namespace, name string) error {
 	if errs := validation.IsDNS1123Label(namespace); len(errs) > 0 {
 		return fmt.Errorf("namespace %q: %s", namespace, strings.Join(errs, "; "))
 	}
 	if errs := validation.IsDNS1123Subdomain(name); len(errs) > 0 {
 		return fmt.Errorf("name %q: %s", name, strings.Join(errs, "; "))
-	}
-	if len(landingName(namespace, name))+len(vmdkExt) > maxDatastoreFileNameBytes {
-		return fmt.Errorf("landing name for %s/%s is longer than %d bytes", namespace, name, maxDatastoreFileNameBytes)
 	}
 	return nil
 }

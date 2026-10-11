@@ -1079,3 +1079,43 @@ func TestLandingName_NoVMCanSquatALanding(t *testing.T) {
 	assert.Equal(t, []string{ownMigratedDiskPath("web")}, vmDiskFiles(t, p, resp.Id))
 	assert.Equal(t, "team-a_web-migrated", landingName(ownerTeamA.Namespace, "web"))
 }
+
+func TestLandingName_BoundedTo80(t *testing.T) {
+	ns := strings.Repeat("n", 63)
+	long := strings.Repeat("v", 70)
+	n := landingName(ns, long)
+	assert.Len(t, n, maxLandingNameBytes)
+	assert.True(t, strings.HasSuffix(n, contracts.ImportedDiskNameSuffix))
+	assert.Contains(t, n, landingHashMarker)
+	assert.Equal(t, n, landingName(ns, long), "deterministic")
+	assert.NotEqual(t, n, landingName(ns, long+"x"), "a different name gets a different bounded name")
+	assert.NotEqual(t, n, landingName(ns[:62], "n"+landingSeparator+long), "namespace and name never shift into each other")
+
+	short := landingName("team-a", "web")
+	assert.Equal(t, "team-a_web-migrated", short, "names within the limit are not bounded")
+	assert.NotContains(t, short, landingHashMarker)
+	edge := strings.Repeat("w", maxLandingNameBytes-len("team-a_-migrated"))
+	assert.Equal(t, "team-a_"+edge+"-migrated", landingName("team-a", edge), "exactly 80 bytes is not bounded")
+	assert.Len(t, landingName("team-a", edge+"w"), maxLandingNameBytes)
+}
+
+// TestCreate_InPlaceDisk_LongIdentity: a namespace and name whose landing name
+// would exceed vCenter's 80-character entity limit land, and attach, under the
+// bounded name.
+func TestCreate_InPlaceDisk_LongIdentity(t *testing.T) {
+	p, _ := newOwnershipSim(t)
+	ns := strings.Repeat("n", 40)
+	name := strings.Repeat("v", 60)
+	require.Greater(t, len(ns+"_"+name+"-migrated"), maxLandingNameBytes)
+	id, err := importLandingName(&providerv1.ImportDiskRequest{TargetVm: &providerv1.ObjectIdentity{Namespace: ns, Name: name}})
+	require.NoError(t, err)
+	assert.Equal(t, landingName(ns, name), id)
+	assert.Len(t, id, maxLandingNameBytes)
+
+	resp, err := p.Create(context.Background(), &providerv1.CreateRequest{
+		Name: name, ImageJson: makeLandingDisk(t, p, ns, name),
+		Owner: &providerv1.ObjectIdentity{Uid: "u-long", Namespace: ns, Name: name},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, []string{landingPathIn(ns, name)}, vmDiskFiles(t, p, resp.Id))
+}
