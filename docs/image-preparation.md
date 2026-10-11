@@ -588,9 +588,12 @@ same header check before conversion.
 templates), never datastore files, so the vSphere provider attaches a datastore file to a
 new VM only as that VM's own migration landing disk: the manager must have verified it as
 above, and the path must be exactly
-`[<datastore>] <namespace>.<vm name>-migrated/<namespace>.<vm name>-migrated.vmdk` — the
+`[<datastore>] <namespace>_<vm name>-migrated/<namespace>_<vm name>-migrated.vmdk` — the
 name vSphere `ImportDisk` gives the disk it lands for that VirtualMachine, so the same VM
-name in two namespaces lands in two folders. No VM or template with files on that datastore
+name in two namespaces lands in two folders. `_` appears in no Kubernetes name, so no
+VirtualMachine (vSphere names a VM's home directory after it) can take a landing folder's
+name; a landing name longer than vCenter's 80-character entity limit is shortened to its
+start, `__`, a 16-hex-digit SHA-256 of `<namespace>/<vm name>`, and `-migrated`. No VM or template with files on that datastore
 (or on the same storage under another datastore name) may use the disk, compared by path
 and by disk UUID. Any other `spec.importedDisk.path` is refused before anything is created
 (`ValidationError`), including a disk landed by a release before v0.4.0 under the bare

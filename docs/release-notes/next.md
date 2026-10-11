@@ -41,7 +41,7 @@ Read the upgrade guide before upgrading:
 
 - **vSphere attaches an imported disk in place only when it is the VM's own
   verified migration disk, and migrations land per namespace.** A migration now
-  lands at `[<datastore>] <namespace>.<vm name>-migrated/...`, so a same-named VM
+  lands at `[<datastore>] <namespace>_<vm name>-migrated/...`, so a same-named VM
   in another namespace can no longer reach, overwrite or delete it.
   `spec.importedDisk.path` naming any other datastore file (another VM's disk) is
   refused before anything is created; a landing disk another VM uses is refused
