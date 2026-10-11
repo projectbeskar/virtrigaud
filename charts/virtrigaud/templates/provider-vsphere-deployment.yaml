@@ -68,7 +68,7 @@ spec:
         {{- include "virtrigaud.providerTLSVolumeMount" . | nindent 8 }}
       volumes:
       - name: tmp
-        emptyDir: {{ include "virtrigaud.tmpEmptyDir" .Values.providers.vsphere.tmpSizeLimit }}
+        emptyDir: {{ include "virtrigaud.tmpEmptyDir" (dict "value" .Values.providers.vsphere.tmpSizeLimit "name" "providers.vsphere.tmpSizeLimit") }}
       {{- include "virtrigaud.providerTLSVolume" . | nindent 6 }}
       {{- with .Values.global.nodeSelector }}
       nodeSelector:

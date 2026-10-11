@@ -9,7 +9,8 @@
 #      manager gets no --provider-tmp-size-limit flag (per-type defaults).
 #   2. Overrides: a set manager.providerTmpSizeLimit becomes the manager flag,
 #      and a set providers.<name>.tmpSizeLimit becomes that pod's sizeLimit.
-#   3. An empty value renders an unbounded emptyDir ({}), never an invalid one.
+#   3. An empty value, or "none", renders an unbounded emptyDir ({}), never an
+#      invalid one; an invalid value fails the render.
 #   4. `helm upgrade --reuse-values` from v0.3.11 (whose values.yaml has none
 #      of these keys) still renders: every /tmp is a valid, unbounded emptyDir.
 #
@@ -96,10 +97,28 @@ if "--provider-tmp-size-limit-max=200Gi" not in args:
 print("   ok: --provider-tmp-size-limit-max=200Gi")
 PY
 
-echo "==> 3. empty values render an unbounded emptyDir"
+echo "==> 3. empty values and \"none\" render an unbounded emptyDir; invalid values fail"
 helm template virtrigaud "${CHART_DIR}" --namespace "${NAMESPACE}" "${PROVIDERS[@]}" \
   --set manager.tmpSizeLimit= --set providers.libvirt.tmpSizeLimit= > "${WORKDIR}/empty.yaml"
 check "${WORKDIR}/empty.yaml" - manager=none provider-libvirt=none provider-vsphere=512Gi
+helm template virtrigaud "${CHART_DIR}" --namespace "${NAMESPACE}" "${PROVIDERS[@]}" \
+  --set manager.tmpSizeLimit=none --set providers.vsphere.tmpSizeLimit=none \
+  --set providers.proxmox.tmpSizeLimit=none --set manager.providerTmpSizeLimit=none > "${WORKDIR}/none.yaml"
+check "${WORKDIR}/none.yaml" none manager=none provider-vsphere=none provider-proxmox=none
+for bad in "providers.libvirt.tmpSizeLimit=lots" "providers.vsphere.tmpSizeLimit=0" "manager.tmpSizeLimit=-1Gi" \
+           "manager.providerTmpSizeLimit=big" "manager.providerTmpSizeLimitMax=none" "manager.providerTmpSizeLimitMax=x1"; do
+  if helm template virtrigaud "${CHART_DIR}" --namespace "${NAMESPACE}" "${PROVIDERS[@]}" --set "${bad}" \
+       > /dev/null 2> "${WORKDIR}/bad.err"; then
+    echo "❌ ${bad} rendered; an invalid /tmp sizeLimit must fail the render" >&2
+    exit 1
+  fi
+  key="${bad%%=*}"
+  if ! grep -q "${key}" "${WORKDIR}/bad.err"; then
+    echo "❌ ${bad} failed without naming ${key}: $(cat "${WORKDIR}/bad.err")" >&2
+    exit 1
+  fi
+  echo "   ok: ${bad} refused"
+done
 
 echo "==> 4. --reuse-values from ${LEGACY_REF} still renders"
 if ! git -C "${REPO_ROOT}" cat-file -e "${LEGACY_REF}:charts/virtrigaud/values.yaml" 2>/dev/null; then

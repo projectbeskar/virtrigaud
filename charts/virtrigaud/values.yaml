@@ -85,7 +85,8 @@ manager:
 
   # sizeLimit of the manager pod's writable /tmp emptyDir (the root filesystem
   # is read-only). The manager writes nothing large there; a pod that writes
-  # past the limit is evicted by the kubelet. Empty = no limit.
+  # past the limit is evicted by the kubelet. A positive quantity, or empty or
+  # "none" for no limit; anything else fails the render.
   tmpSizeLimit: 128Mi
 
   # sizeLimit of the writable /tmp emptyDir of every provider pod the manager
@@ -138,7 +139,8 @@ providers:
         cpu: 200m
         memory: 256Mi
     # sizeLimit of the writable /tmp emptyDir. libvirt streams disk data over
-    # SSH; /tmp only holds SSH material. Empty = no limit.
+    # SSH; /tmp only holds SSH material. A quantity, or empty or "none" for no
+    # limit.
     tmpSizeLimit: 1Gi
 
   # vSphere provider  
@@ -157,7 +159,7 @@ providers:
         memory: 256Mi
     # sizeLimit of the writable /tmp emptyDir. vSphere stages OVA downloads
     # (up to 256 GiB by default) and about twice a migrated disk there; raise
-    # it for larger disks. Empty = no limit.
+    # it for larger disks. A quantity, or empty or "none" for no limit.
     tmpSizeLimit: 512Gi
 
   # Proxmox provider
@@ -175,7 +177,8 @@ providers:
         cpu: 200m
         memory: 256Mi
     # sizeLimit of the writable /tmp emptyDir. Proxmox stages disk data on the
-    # node (/var/tmp) over SSH; /tmp only holds SSH material. Empty = no limit.
+    # node (/var/tmp) over SSH; /tmp only holds SSH material. A quantity, or
+    # empty or "none" for no limit.
     tmpSizeLimit: 1Gi
     
     # ⚠️  REQUIRED: Proxmox VE server configuration

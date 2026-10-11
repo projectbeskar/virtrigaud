@@ -38,12 +38,16 @@ spec:
         - --metrics-bind-address=0.0.0.0:8080
         - --health-probe-bind-address=0.0.0.0:8081
         - --leader-elect
-        {{- with .Values.manager.providerTmpSizeLimit }}
+        {{- with include "virtrigaud.tmpSizeLimitValue" (dict "value" .Values.manager.providerTmpSizeLimit "name" "manager.providerTmpSizeLimit") }}
         # /tmp sizeLimit of every provider pod the manager runs for Provider CRs;
         # unset keeps the per-type defaults (vSphere 512Gi, others 1Gi).
         - --provider-tmp-size-limit={{ . }}
         {{- end }}
-        {{- with .Values.manager.providerTmpSizeLimitMax }}
+        {{- $max := include "virtrigaud.tmpSizeLimitValue" (dict "value" .Values.manager.providerTmpSizeLimitMax "name" "manager.providerTmpSizeLimitMax") }}
+        {{- if eq $max "none" }}
+        {{- fail "manager.providerTmpSizeLimitMax: \"none\" is not a ceiling; leave it empty for no ceiling" }}
+        {{- end }}
+        {{- with $max }}
         # Ceiling on every provider pod's /tmp sizeLimit: a Provider's
         # infra.virtrigaud.io/tmp-size-limit annotation above it (or "none") is
         # clamped to it.
@@ -109,7 +113,7 @@ spec:
         {{- end }}
       volumes:
       - name: tmp
-        emptyDir: {{ include "virtrigaud.tmpEmptyDir" .Values.manager.tmpSizeLimit }}
+        emptyDir: {{ include "virtrigaud.tmpEmptyDir" (dict "value" .Values.manager.tmpSizeLimit "name" "manager.tmpSizeLimit") }}
       {{- if .Values.webhooks.enabled }}
       - name: webhook-certs
         secret:
