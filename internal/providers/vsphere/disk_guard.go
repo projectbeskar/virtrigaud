@@ -327,22 +327,40 @@ func isControlRune(r rune) bool {
 }
 
 // datastoreFile is a datastore path in comparable form: datastore name and
-// cleaned relative path, both lower-cased so that a case variant of a file
-// never escapes the in-use check (the check errs towards "in use").
+// cleaned relative path. For "is it in use" questions both are lower-cased
+// (datastoreFileOf), so a case variant of a file never escapes the check (it
+// errs towards "in use"). For "is it this VM's own" questions they keep their
+// case (exactDatastoreFileOf): VMFS is case-sensitive, and "WEB/" is not the
+// home directory "web/".
 type datastoreFile struct {
 	datastore string
 	path      string
 }
 
-// datastoreFileOf parses "[<ds>] <path>" into a datastoreFile; ok is false for
-// anything else (e.g. an empty or "/vmfs/volumes/..." name).
+// datastoreFileOf parses "[<ds>] <path>" into a case-folded datastoreFile, for
+// in-use matching; ok is false for anything else (e.g. an empty or
+// "/vmfs/volumes/..." name).
 func datastoreFileOf(s string) (datastoreFile, bool) {
+	return parseDatastoreFile(s, true)
+}
+
+// exactDatastoreFileOf is datastoreFileOf keeping the case, for ownership
+// decisions.
+func exactDatastoreFileOf(s string) (datastoreFile, bool) {
+	return parseDatastoreFile(s, false)
+}
+
+// parseDatastoreFile parses "[<ds>] <path>", lower-casing both when fold.
+func parseDatastoreFile(s string, fold bool) (datastoreFile, bool) {
 	var dp object.DatastorePath
 	if !dp.FromString(s) || dp.Datastore == "" {
 		return datastoreFile{}, false
 	}
-	rel := strings.TrimPrefix(path.Clean("/"+dp.Path), "/")
-	return datastoreFile{datastore: strings.ToLower(dp.Datastore), path: strings.ToLower(rel)}, true
+	f := datastoreFile{datastore: dp.Datastore, path: strings.TrimPrefix(path.Clean("/"+dp.Path), "/")}
+	if fold {
+		f = datastoreFile{datastore: strings.ToLower(f.datastore), path: strings.ToLower(f.path)}
+	}
+	return f, true
 }
 
 // dir is the directory f is in ("" for the datastore root).
@@ -640,21 +658,30 @@ func (p *Provider) detachForeignDisks(ctx context.Context, vm *object.VirtualMac
 		[]string{propName, propConfigHardwareDevice, propConfigFilesVMPathName, propSnapshot, propConfigExtraConfig}, &vmMo); err != nil {
 		return p.errDeleteDiskStep(vm.Reference().Value, "reading the VM's disks", err)
 	}
+	// FAIL-OPEN, deliberately: a VM whose configuration (or home path) vCenter
+	// cannot load — inaccessible, orphaned — has no disk list to check, and
+	// refusing its delete would keep it forever. It is deleted as before this
+	// check existed (Destroy_Task alone), which removes whatever files vCenter
+	// still associates with it; the log line records that it was not checked.
 	if vmMo.Config == nil {
-		p.logger.Warn("VM configuration unavailable; cannot check its disks before delete", "vm_id", vm.Reference().Value)
+		p.logger.Warn("Deleting a VM whose disks cannot be checked (configuration unavailable): "+
+			"Destroy_Task alone, without detaching disks it may not own", "vm_id", vm.Reference().Value)
 		return nil
 	}
-	home, ok := datastoreFileOf(vmMo.Config.Files.VmPathName)
+	home, ok := exactDatastoreFileOf(vmMo.Config.Files.VmPathName)
 	if !ok {
-		p.logger.Warn("VM home path unreadable; cannot check its disks before delete", "vm_id", vm.Reference().Value)
+		p.logger.Warn("Deleting a VM whose disks cannot be checked (home path unreadable): "+
+			"Destroy_Task alone, without detaching disks it may not own", "vm_id", vm.Reference().Value)
 		return nil
 	}
 	homeDir := home.dir()
 	// The VM's own landing disk: under its namespaced name (the namespace from
 	// its owner stamp) or, for a VM created before v0.4.0, the bare name.
-	ownImported := []string{strings.ToLower(legacyLandingRelPath(vmMo.Name))}
+	// Ownership compares exact case (exactDatastoreFileOf); only "used by
+	// another VM" folds case.
+	ownImported := []string{legacyLandingRelPath(vmMo.Name)}
 	if owner, err := ownerFromExtraConfig(vmMo.Config.ExtraConfig); err == nil && owner.Namespace != "" {
-		ownImported = append(ownImported, strings.ToLower(landingRelPath(owner.Namespace, vmMo.Name)))
+		ownImported = append(ownImported, landingRelPath(owner.Namespace, vmMo.Name))
 	}
 
 	var foreign []types.BaseVirtualDevice
@@ -668,9 +695,15 @@ func (p *Provider) detachForeignDisks(ctx context.Context, vm *object.VirtualMac
 			continue
 		}
 		name := fb.GetVirtualDeviceFileBackingInfo().FileName
-		f, parsed := datastoreFileOf(name)
+		f, parsed := exactDatastoreFileOf(name)
 		if parsed && f.inDir(homeDir) {
 			continue // the VM's own directory
+		}
+		if !parsed {
+			// A disk whose file cannot be identified is never presumed the VM's
+			// own: it is detached and its file kept (possibly left orphaned).
+			p.logger.Warn("A disk of the VM has an unrecognised path; detaching it before delete and keeping its file",
+				"vm_id", vm.Reference().Value, "disk_path", name)
 		}
 		mayOwn := parsed && homeDir.path != "" && (f.dir().path == homeDir.path || slices.Contains(ownImported, f.path))
 		if mayOwn {

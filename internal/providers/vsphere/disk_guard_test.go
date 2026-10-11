@@ -376,6 +376,10 @@ func TestDatastoreFileOf(t *testing.T) {
 	assert.True(t, f.inDir(datastoreFile{datastore: "ds1", path: "dir"}))
 	assert.False(t, f.inDir(datastoreFile{datastore: "ds1", path: "di"}))
 	assert.False(t, f.inDir(datastoreFile{datastore: "ds2", path: "dir"}))
+	exact, ok := exactDatastoreFileOf("[DS1] Dir//a/../Disk.vmdk")
+	require.True(t, ok)
+	assert.Equal(t, datastoreFile{datastore: "DS1", path: "Dir/Disk.vmdk"}, exact, "ownership keeps the case")
+	assert.False(t, exact.inDir(datastoreFile{datastore: "DS1", path: "dir"}))
 	for _, bad := range []string{"", "/vmfs/volumes/x/y.vmdk", "[] a.vmdk", "[ds"} {
 		_, ok := datastoreFileOf(bad)
 		assert.False(t, ok, bad)
@@ -1034,4 +1038,23 @@ func TestDelete_DetachFailureIsConstantAndRetryable(t *testing.T) {
 
 	_, err = p.Delete(ctx, &providerv1.DeleteRequest{Id: attacker.Id})
 	require.NoError(t, err, "the retry completes the delete")
+}
+
+// TestDelete_OwnershipIsCaseExact: a disk in "WEB/" is not in the home
+// directory "web/" of VM "web" (VMFS is case-sensitive), so it is detached and
+// kept, not deleted with the VM.
+func TestDelete_OwnershipIsCaseExact(t *testing.T) {
+	p, _ := newOwnershipSim(t)
+	withVCenterDestroySemantics(p)
+	ctx := context.Background()
+	resp, err := p.Create(ctx, templateCreateRequest("web", "", wireOwner(ownerTeamA)))
+	require.NoError(t, err)
+	const caseVariant = "[" + simDatastore + "] WEB/web-data.vmdk"
+	makeImportedDisk(t, p, "["+simDatastore+"] WEB", caseVariant)
+	attachDiskInPlace(t, p, resp.Id, caseVariant)
+
+	_, err = p.Delete(ctx, &providerv1.DeleteRequest{Id: resp.Id})
+	require.NoError(t, err)
+	assert.False(t, vmExists(t, p, resp.Id))
+	assert.True(t, datastoreFileExists(t, p, caseVariant), "a disk outside the exact home directory is kept")
 }
