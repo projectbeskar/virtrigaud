@@ -266,6 +266,33 @@ spec:
           status:
             description: VMSnapshotStatus defines the observed state of VMSnapshot
             properties:
+              boundProvider:
+                description: |-
+                  BoundProvider is the Provider the snapshot was taken through, recorded
+                  with VMUID. The snapshot is deleted only through this same Provider
+                  (namespace, name and, when recorded, UID). Written only by the
+                  operator.
+                properties:
+                  name:
+                    description: Name of the Provider.
+                    maxLength: 253
+                    type: string
+                  namespace:
+                    description: Namespace of the Provider.
+                    maxLength: 63
+                    type: string
+                  uid:
+                    description: |-
+                      UID of the Provider object at bind time. Empty when it was not known
+                      (never for a VM bound by this operator version). A Provider deleted and
+                      re-created under the same name has a new UID and is not accepted in its
+                      place.
+                    maxLength: 128
+                    type: string
+                required:
+                - name
+                - namespace
+                type: object
               children:
                 description: Children lists child snapshots (for snapshot trees)
                 items:
@@ -464,6 +491,18 @@ spec:
                 description: VirtualSize is the virtual size of the snapshot
                 pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
                 x-kubernetes-int-or-string: true
+              vmUID:
+                description: |-
+                  VMUID is the UID of the VirtualMachine the snapshot was taken of,
+                  recorded when its create is issued. A VirtualMachine deleted and
+                  re-created under the same name has another UID: the snapshot is never
+                  deleted or retained through it (no provider call is made), because on a
+                  provider whose snapshot ids are names the call could reach another
+                  VM's snapshot. Empty for a snapshot taken by an older manager, which is
+                  bound on first reconcile when its VM was created before the snapshot.
+                  Written only by the operator.
+                maxLength: 128
+                type: string
             type: object
         type: object
     served: true

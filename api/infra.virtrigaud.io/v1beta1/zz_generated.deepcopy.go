@@ -5541,6 +5541,11 @@ func (in *VMSnapshotStatus) DeepCopyInto(out *VMSnapshotStatus) {
 		x := (*in).DeepCopy()
 		*out = &x
 	}
+	if in.BoundProvider != nil {
+		in, out := &in.BoundProvider, &out.BoundProvider
+		*out = new(BoundProviderRef)
+		**out = **in
+	}
 	if in.Conditions != nil {
 		in, out := &in.Conditions, &out.Conditions
 		*out = make([]v1.Condition, len(*in))

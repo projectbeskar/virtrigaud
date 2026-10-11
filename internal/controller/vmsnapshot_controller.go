@@ -224,8 +224,19 @@ func (r *VMSnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	// exists or has a provider id: deleteOnVMDelete fires once the VM is gone
 	// (or being deleted), and maxAge whatever the VM's state.
 	if snapshot.Status.Phase == infrav1beta1.SnapshotPhaseReady {
-		if vmGone {
+		switch {
+		case vmGone:
 			vm = nil
+		case snapshotOfOtherVM(snapshot, vm):
+			// A VM re-created under the snapshot's VM name is not its VM:
+			// for retention, the snapshot's VM is gone.
+			logger.Info("The VM named by spec.vmRef is not the one this snapshot was taken of",
+				"vm_uid", vm.UID, "snapshot_vm_uid", snapshot.Status.VMUID)
+			vm = nil
+		case backfillSnapshotBinding(snapshot, vm):
+			// Status update errors are intentionally ignored; the binding is
+			// recorded again on the next reconcile.
+			_ = r.updateStatus(ctx, snapshot)
 		}
 		return r.handleRetention(ctx, snapshot, vm)
 	}
@@ -332,6 +343,11 @@ func (r *VMSnapshotReconciler) createSnapshot(ctx context.Context, snapshot *inf
 	if fresh, res, err := r.confirmSnapshotNotCreated(ctx, snapshot); !fresh {
 		return res, err
 	}
+
+	// The snapshot is bound to this VM (by UID) and this Provider: it is
+	// never deleted through another VM of the same name (see
+	// recordSnapshotBinding).
+	recordSnapshotBinding(snapshot, vm, provider)
 
 	// The create is issued now: only from here on is the snapshot Creating.
 	// The phase is persisted below together with the RPC's outcome (a task to
@@ -719,6 +735,19 @@ func (r *VMSnapshotReconciler) handleDeletion(ctx context.Context, snapshot *inf
 	// ("" = none: nothing was confirmed deleted).
 	removed := "VMSnapshot removed; there was no provider snapshot to delete"
 
+	// A VM re-created under the snapshot's VM name is another VM: a delete
+	// sent through it could reach another snapshot of the same name. No
+	// provider call; released with a Warning.
+	if !vmNotFound && snapshot.Status.SnapshotID != "" && snapshotOfOtherVM(snapshot, vm) {
+		msg := fmt.Sprintf("Removing the VMSnapshot without deleting snapshot %q: the VM %q is not the one it was taken of "+
+			"(it was re-created under the same name), so no provider call is made; if the original VM still exists on the "+
+			"hypervisor, the snapshot is left there", snapshot.Status.SnapshotID, snapshot.Spec.VMRef.Name)
+		logger.Info("The VM named by spec.vmRef is not the snapshot's VM; removing finalizer without a provider call",
+			"snapshot_id", snapshot.Status.SnapshotID, "vm_uid", vm.UID, "snapshot_vm_uid", snapshot.Status.VMUID)
+		r.Recorder.Event(snapshot, corev1.EventTypeWarning, eventReasonSnapshotLeftOnHypervisor, msg)
+		return r.releaseSnapshotFinalizer(ctx, snapshot, "")
+	}
+
 	// A recorded snapshot whose VM no longer exists (or has no provider id)
 	// cannot be deleted by anyone: the VMSnapshot is released, but never
 	// with a claim that there was nothing to delete — the VM may still run
@@ -767,6 +796,17 @@ func (r *VMSnapshotReconciler) handleDeletion(ctx context.Context, snapshot *inf
 			providerGone = true
 		case err != nil:
 			unavailableErr = err
+		case snapshotProviderMismatch(snapshot, provider):
+			// The VM now goes through another Provider than the one the
+			// snapshot was taken through: never sent there.
+			msg := fmt.Sprintf("Removing the VMSnapshot without deleting snapshot %q: it was taken through Provider %s/%s, and "+
+				"its VM now references Provider %s/%s, so no provider call is made; the snapshot may be left on the hypervisor",
+				snapshot.Status.SnapshotID, snapshot.Status.BoundProvider.Namespace, snapshot.Status.BoundProvider.Name,
+				provider.Namespace, provider.Name)
+			logger.Info("The VM's Provider is not the one the snapshot was taken through; removing finalizer without a provider call",
+				"snapshot_id", snapshot.Status.SnapshotID)
+			r.Recorder.Event(snapshot, corev1.EventTypeWarning, eventReasonSnapshotLeftOnHypervisor, msg)
+			return r.releaseSnapshotFinalizer(ctx, snapshot, "")
 		default:
 			ref, refErr = vmRefFor(vm, provider)
 			if refErr == nil {
@@ -848,7 +888,14 @@ func (r *VMSnapshotReconciler) handleDeletion(ctx context.Context, snapshot *inf
 		}
 	}
 
-	// Remove finalizer
+	return r.releaseSnapshotFinalizer(ctx, snapshot, removed)
+}
+
+// releaseSnapshotFinalizer removes the VMSnapshot finalizer and, when removed
+// is not empty (the provider snapshot was confirmed deleted or absent),
+// records it as a Normal SnapshotDeleted event.
+func (r *VMSnapshotReconciler) releaseSnapshotFinalizer(ctx context.Context, snapshot *infrav1beta1.VMSnapshot, removed string) (ctrl.Result, error) {
+	logger := logging.FromContext(ctx)
 	controllerutil.RemoveFinalizer(snapshot, "snapshot.infra.virtrigaud.io/finalizer")
 	if err := r.Update(ctx, snapshot); err != nil {
 		logger.Error(err, "Failed to remove finalizer")
