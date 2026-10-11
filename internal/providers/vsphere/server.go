@@ -3268,6 +3268,14 @@ func (p *Provider) attachAdditionalDisk(
 
 	// Wait for reconfiguration to complete
 	_, err = task.WaitForResult(ctx, nil)
+	if err != nil && fault.Is(err, &types.FileAlreadyExists{}) {
+		// The file is there but not recorded as this VM's disk: an earlier
+		// attempt created it and failed afterwards. It is in this VM's own
+		// home directory under this disk's own name; attach it (no create)
+		// once no other VM is shown to use it, and record it, so the retry
+		// converges instead of failing on the same file forever.
+		err = p.attachExistingAdditionalDisk(ctx, vm, diskPath, deviceSpec, configSpec)
+	}
 	if err != nil {
 		return fmt.Errorf("disk attachment task failed: %w", err)
 	}
@@ -3277,6 +3285,35 @@ func (p *Provider) attachAdditionalDisk(
 		"path", diskPath,
 		"size_gb", diskSpec.SizeGiB)
 
+	return nil
+}
+
+// attachExistingAdditionalDisk attaches the existing file diskPath — an
+// additional disk an earlier attempt created without attaching — instead of
+// creating it: the same reconfigure (device and record), without the file
+// creation, and only when no other VM uses the file (ensureDiskFileUnused).
+func (p *Provider) attachExistingAdditionalDisk(
+	ctx context.Context,
+	vm *object.VirtualMachine,
+	diskPath string,
+	deviceSpec *types.VirtualDeviceConfigSpec,
+	configSpec *types.VirtualMachineConfigSpec,
+) error {
+	if err := p.ensureDiskFileUnused(ctx, diskPath); err != nil {
+		return fmt.Errorf("leftover additional disk %s cannot be attached: %w", diskPath, err)
+	}
+	p.logger.Info("Attaching a leftover additional disk file instead of creating it", "vm_id", vm.Reference().Value, "path", diskPath)
+	deviceSpec.FileOperation = ""
+	if disk, ok := deviceSpec.Device.(*types.VirtualDisk); ok {
+		disk.CapacityInKB = 0 // an existing disk keeps its own size
+	}
+	task, err := vm.Reconfigure(ctx, *configSpec)
+	if err != nil {
+		return fmt.Errorf("start attaching the existing disk: %w", err)
+	}
+	if _, err := task.WaitForResult(ctx, nil); err != nil {
+		return fmt.Errorf("attach the existing disk: %w", err)
+	}
 	return nil
 }
 

@@ -269,3 +269,37 @@ func TestCreate_InheritedDiskRecordsAreCleared(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, files[1], v, "the record names the VM's own disk")
 }
+
+// TestCreate_LeftoverAdditionalDiskFileConverges: when the file of an
+// additional disk already exists in the VM's home directory but is not
+// recorded (an earlier attempt created it, then failed), the retry attaches
+// that file instead of failing on FileAlreadyExists forever.
+func TestCreate_LeftoverAdditionalDiskFileConverges(t *testing.T) {
+	p, _ := newOwnershipSim(t)
+	ctx := context.Background()
+	first, err := p.Create(ctx, templateCreateRequest("web", "", wireOwner(ownerTeamA)))
+	require.NoError(t, err)
+	leftover := "[" + simDatastore + "] web/" + additionalDiskFileName("web", 1)
+	dc, err := p.finder.DefaultDatacenter(ctx)
+	require.NoError(t, err)
+	task, err := object.NewVirtualDiskManager(p.client.Client).CreateVirtualDisk(ctx, leftover, dc, &types.FileBackedVirtualDiskSpec{
+		VirtualDiskSpec: types.VirtualDiskSpec{DiskType: string(types.VirtualDiskTypeThin), AdapterType: string(types.VirtualDiskAdapterTypeLsiLogic)},
+		CapacityKb:      1024,
+	})
+	require.NoError(t, err)
+	require.NoError(t, task.Wait(ctx))
+
+	req := templateCreateRequest("web", "", wireOwner(ownerTeamA))
+	req.DisksJson = `[{"Name":"data","SizeGiB":1}]`
+	again, err := p.Create(ctx, req)
+	require.NoError(t, err, "the bind attaches the leftover file")
+	assert.Equal(t, first.Id, again.Id)
+	files, _ := vmDisks(t, p, first.Id)
+	require.Len(t, files, 2)
+	assert.Equal(t, leftover, files[1])
+
+	_, err = p.Create(ctx, req)
+	require.NoError(t, err)
+	files, _ = vmDisks(t, p, first.Id)
+	assert.Len(t, files, 2, "recorded: not attached again")
+}
