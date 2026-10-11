@@ -21,6 +21,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -205,6 +206,17 @@ type Task struct {
 	StartTime int64   `json:"starttime"`
 	Status    string  `json:"status"`
 	ExitCode  *string `json:"exitstatus,omitempty"`
+}
+
+// ErrNotExist marks a PVE answer that the object asked for does not exist —
+// PVE's "... does not exist" (an HTTP 500 with that text, e.g. a VM whose
+// configuration file is gone) or an HTTP 404.
+var ErrNotExist = errors.New("does not exist")
+
+// pveDoesNotExist reports whether a non-200 PVE answer (statusCode, body) says
+// the object does not exist.
+func pveDoesNotExist(statusCode int, body []byte) bool {
+	return statusCode == http.StatusNotFound || strings.Contains(strings.ToLower(string(body)), "does not exist")
 }
 
 // Snapshot represents a VM snapshot
@@ -985,6 +997,9 @@ func (c *Client) DeleteSnapshot(ctx context.Context, node string, vmid int, snap
 
 	if resp.StatusCode != 200 {
 		body, _ := io.ReadAll(resp.Body)
+		if pveDoesNotExist(resp.StatusCode, body) {
+			return "", fmt.Errorf("delete snapshot %q of VM %d: %w", snapname, vmid, ErrNotExist)
+		}
 		return "", fmt.Errorf("delete snapshot failed with status %d: %s", resp.StatusCode, string(body))
 	}
 
@@ -1038,6 +1053,10 @@ func (c *Client) ListSnapshots(ctx context.Context, node string, vmid int) ([]*S
 	defer resp.Body.Close() //nolint:errcheck // Response body close in defer is not critical
 
 	if resp.StatusCode != 200 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		if pveDoesNotExist(resp.StatusCode, body) {
+			return nil, fmt.Errorf("list snapshots of VM %d: %w", vmid, ErrNotExist)
+		}
 		return nil, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
 	}
 

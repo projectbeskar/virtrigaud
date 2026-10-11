@@ -247,6 +247,7 @@ func (s *Server) setupRoutes() {
 	api.HandleFunc("/nodes/{node}/tasks/{taskid}/status", s.handleGetTaskStatus).Methods("GET")
 
 	// Snapshot operations
+	api.HandleFunc("/nodes/{node}/qemu/{vmid}/snapshot", s.handleListSnapshots).Methods("GET")
 	api.HandleFunc("/nodes/{node}/qemu/{vmid}/snapshot", s.handleCreateSnapshot).Methods("POST")
 	api.HandleFunc("/nodes/{node}/qemu/{vmid}/snapshot/{snapname}", s.handleDeleteSnapshot).Methods("DELETE")
 	api.HandleFunc("/nodes/{node}/qemu/{vmid}/snapshot/{snapname}/rollback", s.handleRevertSnapshot).Methods("POST")
@@ -722,6 +723,32 @@ func (s *Server) handleCreateSnapshot(w http.ResponseWriter, r *http.Request) {
 	taskID := s.createTask(node, "qmsnapshot", vmidStr)
 
 	s.writeResponse(w, taskID)
+}
+
+// handleListSnapshots lists a VM's snapshots as PVE does: the snapshots plus a
+// "current" pseudo-entry for the running state. A VM that does not exist is
+// answered as PVE answers it: HTTP 500, "Configuration file ... does not
+// exist".
+func (s *Server) handleListSnapshots(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	vmid, err := strconv.Atoi(vars["vmid"])
+	if err != nil {
+		s.writeError(w, http.StatusBadRequest, "Invalid VMID")
+		return
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if _, exists := s.vms[vmid]; !exists {
+		s.writeError(w, http.StatusInternalServerError,
+			fmt.Sprintf("Configuration file 'nodes/%s/qemu-server/%d.conf' does not exist", vars["node"], vmid))
+		return
+	}
+	list := make([]*Snapshot, 0, len(s.snapshots[vars["vmid"]])+1)
+	list = append(list, s.snapshots[vars["vmid"]]...)
+	list = append(list, &Snapshot{Name: "current", Description: "You are here!"})
+	s.writeResponse(w, list)
 }
 
 // handleDeleteSnapshot handles snapshot deletion

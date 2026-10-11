@@ -1774,21 +1774,27 @@ func (p *Provider) SnapshotDelete(ctx context.Context, req *providerv1.SnapshotD
 
 	vm := object.NewVirtualMachine(p.client.Client, vmRef)
 
-	// Get the VM's snapshot tree to find the specific snapshot
+	// Get the VM's snapshot tree to find the specific snapshot. A snapshot
+	// that is not there — no tree, not in it, or the VM itself gone — is
+	// answered NotFound (snapshotNotFoundError): deleting it again is an
+	// idempotent success for the manager.
 	var vmObj mo.VirtualMachine
 	err = vm.Properties(ctx, vm.Reference(), []string{"snapshot"}, &vmObj)
+	if isManagedObjectGone(err) {
+		return nil, snapshotNotFoundError("VM %s not found, so it has no snapshot %s", req.VmId, req.SnapshotId)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to get VM snapshot properties: %w", err)
 	}
 
 	if vmObj.Snapshot == nil {
-		return nil, fmt.Errorf("VM has no snapshots")
+		return nil, snapshotNotFoundError("VM has no snapshots")
 	}
 
 	// Find the snapshot by ID in the snapshot tree
 	snapshot := p.findSnapshotByID(vmObj.Snapshot.RootSnapshotList, req.SnapshotId)
 	if snapshot == nil {
-		return nil, fmt.Errorf("snapshot not found: %s", req.SnapshotId)
+		return nil, snapshotNotFoundError("snapshot not found: %s", req.SnapshotId)
 	}
 
 	// Never consolidate a template's or an image artifact's disks
@@ -1804,12 +1810,19 @@ func (p *Provider) SnapshotDelete(ctx context.Context, req *providerv1.SnapshotD
 	consolidate := true
 
 	task, err := vm.RemoveSnapshot(ctx, snapshot.Snapshot.Value, removeChildren, &consolidate)
+	if isManagedObjectGone(err) {
+		return nil, snapshotNotFoundError("snapshot not found: %s", req.SnapshotId)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to start snapshot removal: %w", err)
 	}
 
-	// Wait for snapshot deletion to complete
+	// Wait for snapshot deletion to complete. A snapshot removed meanwhile
+	// (e.g. by an earlier delete whose answer was lost) is gone: NotFound.
 	_, err = task.WaitForResult(ctx, nil)
+	if isManagedObjectGone(err) {
+		return nil, snapshotNotFoundError("snapshot not found: %s", req.SnapshotId)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("snapshot deletion failed: %w", err)
 	}
@@ -1857,13 +1870,13 @@ func (p *Provider) SnapshotRevert(ctx context.Context, req *providerv1.SnapshotR
 	}
 
 	if vmObj.Snapshot == nil {
-		return nil, fmt.Errorf("VM has no snapshots")
+		return nil, snapshotNotFoundError("VM has no snapshots")
 	}
 
 	// Find the snapshot by ID in the snapshot tree
 	snapshot := p.findSnapshotByID(vmObj.Snapshot.RootSnapshotList, req.SnapshotId)
 	if snapshot == nil {
-		return nil, fmt.Errorf("snapshot not found: %s", req.SnapshotId)
+		return nil, snapshotNotFoundError("snapshot not found: %s", req.SnapshotId)
 	}
 
 	// Never revert a template or an image artifact (vm_artifact_guard.go).

@@ -26,6 +26,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -320,6 +322,12 @@ func TestReconcile_DeletionReleasesWhenSnapshotIsGone(t *testing.T) {
 		{name: "source VM gone", dropVM: true},
 		{name: "source Provider gone", dropProv: true},
 		{name: "snapshot not found", deleteErr: contracts.NewNotFoundError("snapshotDelete: snapshot snap-abc not found", nil), wantCalls: 1},
+		// The wire answers of the vSphere and Proxmox providers (H1), as the
+		// transport maps a gRPC NotFound.
+		{name: "vSphere: VM has no snapshots", wantCalls: 1, deleteErr: contracts.NewNotFoundError("snapshotDelete: VM has no snapshots",
+			status.Error(codes.NotFound, "VM has no snapshots"))},
+		{name: "Proxmox: snapshot not found", wantCalls: 1, deleteErr: contracts.NewNotFoundError(`snapshotDelete: snapshot "snap-abc" not found`,
+			status.Error(codes.NotFound, `snapshot "snap-abc" not found`))},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			vm, p, m := deletingMigration()
