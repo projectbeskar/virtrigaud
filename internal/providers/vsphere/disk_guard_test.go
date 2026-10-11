@@ -20,6 +20,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -28,6 +31,7 @@ import (
 	"github.com/vmware/govmomi/find"
 	"github.com/vmware/govmomi/object"
 	"github.com/vmware/govmomi/property"
+	"github.com/vmware/govmomi/simulator"
 	"github.com/vmware/govmomi/vim25"
 	"github.com/vmware/govmomi/vim25/methods"
 	"github.com/vmware/govmomi/vim25/mo"
@@ -220,8 +224,8 @@ func withVCenterDestroySemantics(p *Provider) {
 	p.client.RoundTripper = &vcenterDestroySemantics{RoundTripper: p.client.RoundTripper, c: p.client.Client}
 }
 
-// failVMInventoryView makes the inventory scan's container view (VMs, from
-// the root folder) fail, as a vCenter error would.
+// failVMInventoryView makes the disk scan's datastore view (from the root
+// folder) fail, as a vCenter error would.
 type failVMInventoryView struct {
 	soap.RoundTripper
 	root types.ManagedObjectReference
@@ -230,12 +234,43 @@ type failVMInventoryView struct {
 func (r *failVMInventoryView) RoundTrip(ctx context.Context, req, res soap.HasFault) error {
 	if body, ok := req.(*methods.CreateContainerViewBody); ok && body.Req != nil && body.Req.Container == r.root {
 		for _, kind := range body.Req.Type {
-			if kind == virtualMachineMoType {
+			if kind == datastoreMoType {
 				return fmt.Errorf("fixture: simulated vCenter failure naming %q", "[secret-ds] other-tenant/disk.vmdk")
 			}
 		}
 	}
 	return r.RoundTripper.RoundTrip(ctx, req, res)
+}
+
+// hideVMConfig makes vCenter return no configuration for VM hidden, as for an
+// inaccessible or orphaned VM.
+type hideVMConfig struct {
+	soap.RoundTripper
+	hidden types.ManagedObjectReference
+}
+
+func (r *hideVMConfig) RoundTrip(ctx context.Context, req, res soap.HasFault) error {
+	if err := r.RoundTripper.RoundTrip(ctx, req, res); err != nil {
+		return err
+	}
+	body, ok := res.(*methods.RetrievePropertiesExBody)
+	if !ok || body.Res == nil || body.Res.Returnval == nil {
+		return nil
+	}
+	for i := range body.Res.Returnval.Objects {
+		oc := &body.Res.Returnval.Objects[i]
+		if oc.Obj != r.hidden {
+			continue
+		}
+		var kept []types.DynamicProperty
+		for _, prop := range oc.PropSet {
+			if !strings.HasPrefix(prop.Name, "config") {
+				kept = append(kept, prop)
+			}
+		}
+		oc.PropSet = kept
+	}
+	return nil
 }
 
 // --- pure helpers ------------------------------------------------------------
@@ -586,16 +621,16 @@ func TestEnsureImportFolderUnused(t *testing.T) {
 	ctx := context.Background()
 	id := landingName(ownerTeamA.Namespace, "web")
 
-	require.NoError(t, p.ensureImportFolderUnused(ctx, simDatastore, id), "a free landing folder is fine")
+	require.NoError(t, p.ensureImportFolderUnused(ctx, simDatastore, id, true), "a free landing folder is fine")
 
 	_, err := p.Create(ctx, &providerv1.CreateRequest{Name: "web", ImageJson: makeOwnMigratedDisk(t, p, "web"), Owner: wireOwner(ownerTeamA)})
 	require.NoError(t, err)
-	err = p.ensureImportFolderUnused(ctx, simDatastore, id)
+	err = p.ensureImportFolderUnused(ctx, simDatastore, id, true)
 	requireCode(t, err, codes.FailedPrecondition)
 	assert.Equal(t, []string{contracts.VMDiskInUseReason}, errorReasons(err))
 
 	p.client.RoundTripper = &failVMInventoryView{RoundTripper: p.client.RoundTripper, root: p.client.ServiceContent.RootFolder}
-	requireCode(t, p.ensureImportFolderUnused(ctx, simDatastore, landingName(ownerTeamA.Namespace, "db")), codes.Unavailable)
+	requireCode(t, p.ensureImportFolderUnused(ctx, simDatastore, landingName(ownerTeamA.Namespace, "db"), true), codes.Unavailable)
 }
 
 // --- namespaced landing names --------------------------------------------------
@@ -739,4 +774,89 @@ func TestKeyedMutex(t *testing.T) {
 	again()
 	unlockB()
 	assert.Empty(t, k.locks, "unused keys are dropped")
+}
+
+// --- datastore-scoped scan ------------------------------------------------------
+
+// TestCreate_InPlaceDisk_UnreadableVMOnTheDatastoreFailsClosed: a VM on the
+// disk's datastore whose configuration vCenter cannot load could be using the
+// disk, so the attach is refused (retryable).
+func TestCreate_InPlaceDisk_UnreadableVMOnTheDatastoreFailsClosed(t *testing.T) {
+	p, _ := newOwnershipSim(t)
+	imageJSON := makeOwnMigratedDisk(t, p, "migrated")
+	p.client.RoundTripper = &hideVMConfig{RoundTripper: p.client.RoundTripper, hidden: vmRef(seededVMID(t, p, simUnstamped))}
+
+	_, err := p.Create(context.Background(), &providerv1.CreateRequest{
+		Name: "migrated", ImageJson: imageJSON, Owner: ownerNamed(ownerTeamA, "migrated"),
+	})
+	requireCode(t, err, codes.Unavailable)
+	assert.Equal(t, []string{contracts.VMDiskCheckFailedReason}, errorReasons(err))
+}
+
+// TestCreate_InPlaceDisk_UnreadableVMElsewhereDoesNotBlock: a VM whose
+// configuration cannot be loaded blocks only checks on the datastores it has
+// files on.
+func TestCreate_InPlaceDisk_UnreadableVMElsewhereDoesNotBlock(t *testing.T) {
+	p, _ := newOwnershipSim(t, func(m *simulator.Model) { m.Datastore = 2 })
+	ctx := context.Background()
+	const otherDS = "LocalDS_1"
+	diskPath := "[" + otherDS + "] " + landingRelPath(ownerTeamA.Namespace, "migrated")
+	makeImportedDisk(t, p, "["+otherDS+"] "+landingName(ownerTeamA.Namespace, "migrated"), diskPath)
+	// Every seeded VM lives on LocalDS_0; hide one of them.
+	p.client.RoundTripper = &hideVMConfig{RoundTripper: p.client.RoundTripper, hidden: vmRef(seededVMID(t, p, simUnstamped))}
+
+	resp, err := p.Create(ctx, &providerv1.CreateRequest{
+		Name: "migrated", ImageJson: importedDiskImageJSON(diskPath, true), Owner: ownerNamed(ownerTeamA, "migrated"),
+	})
+	require.NoError(t, err)
+	assert.Equal(t, []string{diskPath}, vmDiskFiles(t, p, resp.Id))
+}
+
+func TestDiskScanCache(t *testing.T) {
+	var c diskScanCache
+	ctx := context.Background()
+	var calls atomic.Int32
+	release := make(chan struct{})
+	scan := func(context.Context) (inventoryFileUsers, error) {
+		calls.Add(1)
+		<-release
+		return inventoryFileUsers{}, nil
+	}
+
+	// Concurrent callers share one scan.
+	var wg sync.WaitGroup
+	for range 5 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, err := c.get(ctx, "ds", false, scan)
+			assert.NoError(t, err)
+		}()
+	}
+	require.Eventually(t, func() bool { return calls.Load() == 1 }, time.Second, time.Millisecond)
+	time.Sleep(20 * time.Millisecond) // let the other callers join the flight
+	close(release)
+	wg.Wait()
+	assert.Equal(t, int32(1), calls.Load(), "one scan for concurrent callers")
+
+	_, err := c.get(ctx, "ds", false, scan)
+	require.NoError(t, err)
+	assert.Equal(t, int32(1), calls.Load(), "reused within the TTL")
+	_, err = c.get(ctx, "ds", true, scan)
+	require.NoError(t, err)
+	assert.Equal(t, int32(2), calls.Load(), "fresh scans again")
+	c.invalidate("ds")
+	_, err = c.get(ctx, "ds", false, scan)
+	require.NoError(t, err)
+	assert.Equal(t, int32(3), calls.Load(), "invalidated scans again")
+	_, err = c.get(ctx, "other", false, scan)
+	require.NoError(t, err)
+	assert.Equal(t, int32(4), calls.Load(), "keys are independent")
+
+	failing := func(context.Context) (inventoryFileUsers, error) { calls.Add(1); return nil, errors.New("boom") }
+	_, err = c.get(ctx, "bad", false, failing)
+	require.Error(t, err)
+	_, err = c.get(ctx, "bad", false, failing)
+	require.Error(t, err)
+	assert.Equal(t, int32(6), calls.Load(), "a failed scan is never reused")
 }

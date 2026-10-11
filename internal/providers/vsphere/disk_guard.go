@@ -26,7 +26,6 @@ import (
 
 	"github.com/vmware/govmomi/object"
 	"github.com/vmware/govmomi/property"
-	"github.com/vmware/govmomi/view"
 	"github.com/vmware/govmomi/vim25/mo"
 	"github.com/vmware/govmomi/vim25/types"
 	"google.golang.org/genproto/googleapis/rpc/errdetails"
@@ -298,7 +297,7 @@ func (p *Provider) cleanupFailedImport(dsName, id string) {
 	ctx, cancel := context.WithTimeout(context.Background(), importCleanupTimeout)
 	defer cancel()
 	folderPath := fmt.Sprintf("[%s] %s", dsName, id)
-	if err := p.ensureImportFolderUnused(ctx, dsName, id); err != nil {
+	if err := p.ensureImportFolderUnused(ctx, dsName, id, true); err != nil {
 		p.logger.Warn("Not deleting a failed import's landing folder: it could not be confirmed unused",
 			"path", folderPath, "error", err)
 		return
@@ -418,7 +417,8 @@ func vmFileRefs(vm *mo.VirtualMachine) []datastoreFile {
 }
 
 // inventoryFileUsers maps each datastore file referenced by a VM or template
-// anywhere in the vCenter inventory to the VMs that reference it.
+// with files on a datastore (scanDatastoreFileUsers) to the VMs that reference
+// it.
 type inventoryFileUsers map[datastoreFile][]types.ManagedObjectReference
 
 // usedByOtherThan reports whether a VM other than self references f.
@@ -442,47 +442,18 @@ func (u inventoryFileUsers) anyInDirUsedBy(d datastoreFile, self types.ManagedOb
 	return false
 }
 
-// scanInventoryFileUsers reads every VirtualMachine (templates included) in
-// the vCenter inventory, across all datacenters, and records which datastore
-// files each references. It fails — and callers fail closed — when the view or
-// any VM's properties cannot be read, or a VM's configuration is unavailable
-// (an inaccessible or orphaned VM, whose disks cannot be known).
-func (p *Provider) scanInventoryFileUsers(ctx context.Context) (inventoryFileUsers, error) {
-	v, err := view.NewManager(p.client.Client).CreateContainerView(ctx, p.client.ServiceContent.RootFolder,
-		[]string{virtualMachineMoType}, true)
-	if err != nil {
-		return nil, fmt.Errorf("create inventory view: %w", err)
-	}
-	defer func() { _ = v.Destroy(context.WithoutCancel(ctx)) }()
-
-	var vms []mo.VirtualMachine
-	if err := v.Retrieve(ctx, []string{virtualMachineMoType},
-		[]string{propName, propConfigHardwareDevice, propLayoutExFile}, &vms); err != nil {
-		return nil, fmt.Errorf("retrieve VM devices: %w", err)
-	}
-	users := inventoryFileUsers{}
-	for i := range vms {
-		vm := &vms[i]
-		if vm.Config == nil {
-			return nil, fmt.Errorf("VM %s (%q) has no readable configuration", vm.Self.Value, vm.Name)
-		}
-		for _, f := range vmFileRefs(vm) {
-			users[f] = append(users[f], vm.Self)
-		}
-	}
-	return users, nil
-}
-
 // ensureDiskFileUnused is rule 3 of the in-place confinement: diskPath must not
-// be referenced by any VM or template in the inventory. Create calls it only
-// after confirming no VM of the requested name exists, so the new VM is not
-// among those scanned.
+// be referenced by any VM or template with files on its datastore
+// (scanDatastoreFileUsers). Create calls it only after confirming no VM of the
+// requested name exists, so the new VM is not among those scanned.
 func (p *Provider) ensureDiskFileUnused(ctx context.Context, diskPath string) error {
 	f, ok := datastoreFileOf(diskPath)
 	if !ok {
 		return errInPlaceDiskRejected()
 	}
-	users, err := p.scanInventoryFileUsers(ctx)
+	var dp object.DatastorePath
+	dp.FromString(diskPath)
+	users, err := p.datastoreFileUsers(ctx, dp.Datastore, false)
 	if err != nil {
 		return p.errDiskCheckFailed("in-place disk check", err)
 	}
@@ -498,13 +469,14 @@ func (p *Provider) ensureDiskFileUnused(ctx context.Context, diskPath string) er
 // landing folder "[<dsName>] <id>" holds a file some VM or template references.
 // The import deletes or overwrites that folder's content, and its name derives
 // from the target VirtualMachine's name only, so a same-named VM in another
-// namespace could otherwise reach another tenant's migrated disk.
-func (p *Provider) ensureImportFolderUnused(ctx context.Context, dsName, id string) error {
+// namespace could otherwise reach another tenant's migrated disk. fresh skips
+// the scan cache (the re-check right before a failed import's cleanup).
+func (p *Provider) ensureImportFolderUnused(ctx context.Context, dsName, id string, fresh bool) error {
 	d, ok := datastoreFileOf(fmt.Sprintf("[%s] %s/%s", dsName, id, id+vmdkExt))
 	if !ok {
 		return sdkerrors.NewInvalidSpec("invalid import target name")
 	}
-	users, err := p.scanInventoryFileUsers(ctx)
+	users, err := p.datastoreFileUsers(ctx, dsName, fresh)
 	if err != nil {
 		return p.errDiskCheckFailed("import folder check", err)
 	}
@@ -558,10 +530,7 @@ func (p *Provider) detachForeignDisks(ctx context.Context, vm *object.VirtualMac
 		ownImported = append(ownImported, strings.ToLower(landingRelPath(owner.Namespace, vmMo.Name)))
 	}
 
-	var (
-		users   inventoryFileUsers
-		foreign []types.BaseVirtualDevice
-	)
+	var foreign []types.BaseVirtualDevice
 	for _, dev := range vmMo.Config.Hardware.Device {
 		disk, isDisk := dev.(*types.VirtualDisk)
 		if !isDisk {
@@ -578,11 +547,11 @@ func (p *Provider) detachForeignDisks(ctx context.Context, vm *object.VirtualMac
 		}
 		mayOwn := parsed && homeDir.path != "" && (f.dir().path == homeDir.path || slices.Contains(ownImported, f.path))
 		if mayOwn {
-			if users == nil {
-				var err error
-				if users, err = p.scanInventoryFileUsers(ctx); err != nil {
-					return p.errDiskCheckFailed("delete disk check", err)
-				}
+			var dp object.DatastorePath
+			dp.FromString(name)
+			users, err := p.datastoreFileUsers(ctx, dp.Datastore, false)
+			if err != nil {
+				return p.errDiskCheckFailed("delete disk check", err)
 			}
 			if !users.usedByOtherThan(f, vm.Reference()) {
 				continue

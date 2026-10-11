@@ -81,6 +81,9 @@ type Provider struct {
 	// in-place attach, an import and its cleanup — keyed by landingLockKey
 	// (disk_guard.go).
 	landingLocks keyedMutex
+	// diskScans shares and briefly reuses the datastore scans of the disk
+	// in-use checks (disk_scan.go).
+	diskScans diskScanCache
 }
 
 // Config holds the vSphere provider configuration
@@ -646,6 +649,11 @@ func (p *Provider) Create(ctx context.Context, req *providerv1.CreateRequest) (*
 				return nil, fmt.Errorf("wait for other work on the imported disk: %w", err)
 			}
 			defer unlock()
+			// Once this create is done, the next check of the datastore must
+			// see the VM it made (or did not make).
+			var dp object.DatastorePath
+			dp.FromString(vmSpec.DiskPath)
+			defer p.diskScans.invalidate(diskScanKey(dp.Datastore))
 			if err := p.ensureDiskFileUnused(ctx, vmSpec.DiskPath); err != nil {
 				return nil, err
 			}
@@ -4184,7 +4192,8 @@ func (p *Provider) ImportDisk(ctx context.Context, req *providerv1.ImportDiskReq
 		return nil, errors.NewInternal("wait for other work on the landing folder", err)
 	}
 	defer unlock()
-	if err := p.ensureImportFolderUnused(ctx, datastore, diskID); err != nil {
+	defer p.diskScans.invalidate(diskScanKey(datastore))
+	if err := p.ensureImportFolderUnused(ctx, datastore, diskID, false); err != nil {
 		return nil, err
 	}
 

@@ -210,7 +210,8 @@ func (p *Provider) importDiskFromS3(ctx context.Context, req *providerv1.ImportD
 		return nil, errors.NewInternal("wait for other work on the landing folder", err)
 	}
 	defer unlock()
-	if err := p.ensureImportFolderUnused(ctx, dsName, id); err != nil {
+	defer p.diskScans.invalidate(diskScanKey(dsName))
+	if err := p.ensureImportFolderUnused(ctx, dsName, id, false); err != nil {
 		return nil, err
 	}
 
