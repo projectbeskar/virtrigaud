@@ -5,6 +5,23 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-10-11 20:32] - Bump OpenTelemetry-Go to v1.45.0 (GO-2026-6505) and golang.org/x/net to v0.60.0
+**Author:** @wrkode (William Rizzo)
+
+### Security
+- `go.mod`, `go.sum`, `sdk/go.mod`, `sdk/go.sum`: fix **GO-2026-6505**, OpenTelemetry-Go exporter configuration logging could leak endpoint URLs in info logs. `go.opentelemetry.io/otel`, `otel/sdk`, `otel/trace`, `otel/metric`, `otel/exporters/otlp/otlptrace` and `otlptrace/otlptracegrpc` move together from v1.43.0 / v1.44.0 to v1.45.0 (`go.opentelemetry.io/proto/otlp` v1.10.0 to v1.11.0). Reached through `internal/obs/tracing/tracing.go` (`otlptracegrpc.New`, `trace.WithBatcher`).
+- `go.mod`, `go.sum`, `sdk/go.mod`, `sdk/go.sum`: `golang.org/x/net` v0.58.0 to v0.60.0, which fixes the HTTP/2 and HPACK advisories (GO-2026-6603, 6610, 6611, 6612, 6617) that `govulncheck` traces from `cmd/manager` and `internal/storage`.
+- Transitive bumps from the above: `go-logr/logr` v1.4.4, `grpc-gateway/v2` v2.29.0, `genproto/googleapis/{api,rpc}` 20260803, `x/crypto` v0.57.0, `x/sync` v0.23.0, `x/sys` v0.48.0, `x/term` v0.46.0, `x/text` v0.42.0, `x/tools` v0.49.0. No source changes; no OpenTelemetry API break.
+
+### Why
+CI's Supply Chain Vulnerability Scan (`govulncheck`) failed on every PR because the OTLP trace exporter at v1.43.0 is affected by GO-2026-6505; the fix is in v1.45.0.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-10-01 11:27] - VMClone/VMSnapshot holds no longer hot-loop the provider or follow metadata edits; accepted clones survive concurrent edits; VMClone and VMMigration honor powerOn
 **Author:** @wrkode (William Rizzo)
 
