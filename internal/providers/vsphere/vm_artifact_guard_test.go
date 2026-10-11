@@ -73,7 +73,9 @@ func TestPerVMOperations_RefuseImageArtifacts(t *testing.T) {
 	require.NoError(t, err)
 	snapInfo, err := snapTask.WaitForResult(ctx, nil)
 	require.NoError(t, err)
-	snapshotID := snapInfo.Result.(types.ManagedObjectReference).Value
+	snapRef, ok := snapInfo.Result.(types.ManagedObjectReference)
+	require.True(t, ok, "fixture: CreateSnapshot returns the snapshot reference")
+	snapshotID := snapRef.Value
 	reconfigureExtraConfig(t, p, importInFlight, stamp...)
 
 	requireRefused := func(t *testing.T, err error) {
