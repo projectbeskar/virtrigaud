@@ -1859,38 +1859,25 @@ func (r *VMMigrationReconciler) handleFailedPhase(ctx context.Context, migration
 		maxRetries = *retryPolicy.MaxRetries
 	}
 
-	// Calculate backoff delay
-	baseDelay := 5 * time.Minute // Default delay
-	if retryPolicy.RetryDelay != nil {
-		baseDelay = retryPolicy.RetryDelay.Duration
-	}
-
-	backoffMultiplier := int32(2) // Default multiplier
-	if retryPolicy.BackoffMultiplier != nil {
-		backoffMultiplier = *retryPolicy.BackoffMultiplier
-	}
-
-	// Exponential backoff: delay = baseDelay * multiplier^retryCount (capped at 30 minutes)
-	retryDelay := baseDelay * time.Duration(1)
-	for i := int32(0); i < migration.Status.RetryCount; i++ {
-		retryDelay *= time.Duration(backoffMultiplier)
-	}
-
-	maxDelay := 30 * time.Minute
-	if retryDelay > maxDelay {
-		retryDelay = maxDelay
-	}
-
-	// Check if enough time has passed since last retry
+	// Retry n (RetryCount+1) waits migrationRetryDelay after the failure it
+	// retries — the first one included.
+	retryDelay := migrationRetryDelay(retryPolicy, migration.Status.RetryCount)
 	now := time.Now()
-	if migration.Status.LastRetryTime != nil {
-		timeSinceLastRetry := now.Sub(migration.Status.LastRetryTime.Time)
-		if timeSinceLastRetry < retryDelay {
-			// Not enough time has passed, requeue
-			remainingWait := retryDelay - timeSinceLastRetry
-			logger.Info("Waiting before retry", "remaining_wait", remainingWait)
-			return ctrl.Result{RequeueAfter: remainingWait}, nil
+	failedAt := migrationFailedAt(migration)
+	if failedAt.IsZero() {
+		// No failure time recorded (a Failed status written by an older
+		// manager): record now as the failure time, so the wait has a fixed
+		// start, and wait the full delay.
+		migration.Status.CompletionTime = &metav1.Time{Time: now}
+		if err := r.updateStatus(ctx, migration); err != nil {
+			return ctrl.Result{}, err
 		}
+		return ctrl.Result{RequeueAfter: retryDelay}, nil
+	}
+	if waited := now.Sub(failedAt); waited < retryDelay {
+		remainingWait := retryDelay - waited
+		logger.Info("Waiting before retry", "remaining_wait", remainingWait, "retry_delay", retryDelay)
+		return ctrl.Result{RequeueAfter: remainingWait}, nil
 	}
 
 	// Perform retry
@@ -1924,7 +1911,50 @@ func (r *VMMigrationReconciler) handleFailedPhase(ctx context.Context, migration
 		return ctrl.Result{}, err
 	}
 
-	return ctrl.Result{Requeue: true}, nil
+	return ctrl.Result{RequeueAfter: migrationPhaseAdvanceRequeue}, nil
+}
+
+// Defaults and cap of a migration's retry backoff (spec.options.retryPolicy).
+const (
+	// migrationDefaultRetryDelay is the retry delay when retryDelay is unset.
+	migrationDefaultRetryDelay = 5 * time.Minute
+	// migrationDefaultBackoffMultiplier is the multiplier when
+	// backoffMultiplier is unset.
+	migrationDefaultBackoffMultiplier = 2
+	// migrationMaxRetryDelay caps every retry delay.
+	migrationMaxRetryDelay = 30 * time.Minute
+)
+
+// migrationRetryDelay is how long retry n = retriesDone+1 waits after the
+// failure it retries: retryDelay × backoffMultiplier^(n-1) — so the first
+// retry waits retryDelay itself — capped at migrationMaxRetryDelay.
+func migrationRetryDelay(policy *infrav1beta1.MigrationRetryPolicy, retriesDone int32) time.Duration {
+	delay := migrationDefaultRetryDelay
+	multiplier := time.Duration(migrationDefaultBackoffMultiplier)
+	if policy != nil {
+		if policy.RetryDelay != nil {
+			delay = policy.RetryDelay.Duration
+		}
+		if policy.BackoffMultiplier != nil {
+			multiplier = time.Duration(*policy.BackoffMultiplier)
+		}
+	}
+	if delay <= 0 {
+		return 0
+	}
+	for i := int32(0); i < retriesDone && delay < migrationMaxRetryDelay; i++ {
+		delay *= multiplier
+	}
+	return min(delay, migrationMaxRetryDelay)
+}
+
+// migrationFailedAt is when the migration last failed: status.completionTime,
+// which transitionToFailed sets on every failure. Zero when unrecorded.
+func migrationFailedAt(m *infrav1beta1.VMMigration) time.Time {
+	if m.Status.CompletionTime == nil {
+		return time.Time{}
+	}
+	return m.Status.CompletionTime.Time
 }
 
 // handleDeletion handles deletion of VMMigration resources
@@ -2070,9 +2100,11 @@ func (r *VMMigrationReconciler) transitionToFailed(ctx context.Context, migratio
 		return ctrl.Result{}, err
 	}
 
-	// Don't requeue here - let handleFailedPhase manage retry timing
-	// This prevents continuous reconciliation loops that can overwhelm the API server
-	return ctrl.Result{Requeue: true}, nil
+	// The Failed phase (handleFailedPhase, or handleTerminalFailure) takes it
+	// from here, after its own wait. Never an immediate requeue after this
+	// write: a reconcile that read the cache before it showed the failure
+	// would re-run the phase that just failed.
+	return ctrl.Result{RequeueAfter: migrationPhaseAdvanceRequeue}, nil
 }
 
 // Helper functions
