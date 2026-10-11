@@ -406,7 +406,19 @@ providers), and rollback caveats in
 - The first retry of a failed migration waits `retryDelay` (it ran at once),
   and later retries back off from the failure they retry.
 - A `VMSnapshot`'s `deleteOnVMDelete` and `maxAge` retention now apply once
-  its VM is gone or being deleted.
+  its VM is gone or being deleted (never while the VM is detached with
+  `orphan-on-delete`).
+- **A `VMSnapshot` is bound to its VM and Provider** (new status fields
+  `vmUID`, `boundProvider`): a VM re-created under the same name, or moved to
+  another Provider, is never sent the snapshot's delete; the VMSnapshot is
+  released with a `SnapshotLeftOnHypervisor` Warning
+  (→ [Upgrade guide](docs/upgrading.md#behavior-changes-that-are-visible-but-not-breaking)).
+- Proxmox snapshot deletes resolve the VM's actual node (an HA move no longer
+  reads as "snapshot gone"); vSphere re-reads the VM before answering a
+  snapshot `NotFound`.
+- A migration's source snapshot task is waited for at most
+  `spec.options.timeout` (2 h by default), and provider task error text no
+  longer reaches the VMMigration status.
 - `VMClone`, `VMSnapshot` and `VMMigration` status and events no longer quote
   the provider resolver's error (which can name the provider's TLS Secret,
   Service address and runtime phase) or a gRPC connection error; the cause is
