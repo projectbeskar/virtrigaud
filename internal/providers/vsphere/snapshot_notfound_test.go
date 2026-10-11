@@ -100,6 +100,18 @@ func TestAnswerSnapshotObjectNotFound(t *testing.T) {
 	assert.Equal(t, codes.NotFound, status.Code(err), "the VM itself is gone: %v", err)
 }
 
+// TestIsNotFound_IgnoresServerGUID: a not-found for the VM is recognised
+// whether or not vCenter set ServerGUID on either reference, so a VM that is
+// really gone is never held forever.
+func TestIsNotFound_IgnoresServerGUID(t *testing.T) {
+	vm := types.ManagedObjectReference{Type: "VirtualMachine", Value: "vm-42"}
+	withGUID := types.ManagedObjectReference{Type: "VirtualMachine", Value: "vm-42", ServerGUID: "a1b2-c3"}
+	assert.True(t, isNotFound(soap.WrapVimFault(&types.ManagedObjectNotFound{Obj: withGUID}), vm))
+	assert.True(t, isNotFound(soap.WrapVimFault(&types.ManagedObjectNotFound{Obj: vm}), withGUID))
+	other := types.ManagedObjectReference{Type: "Task", Value: "vm-42"}
+	assert.False(t, isNotFound(soap.WrapVimFault(&types.ManagedObjectNotFound{Obj: other}), vm), "another type is another object")
+}
+
 func TestSnapshotDelete_MissingSnapshotIsNotFound(t *testing.T) {
 	ctx := context.Background()
 	p, vmID := newSnapshotSim(t)
