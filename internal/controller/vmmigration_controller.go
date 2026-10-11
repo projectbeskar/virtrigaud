@@ -681,7 +681,7 @@ func (r *VMMigrationReconciler) handleSnapshottingPhase(ctx context.Context, mig
 			return ctrl.Result{}, err
 		}
 
-		return ctrl.Result{Requeue: true}, nil
+		return ctrl.Result{RequeueAfter: migrationPhaseAdvanceRequeue}, nil
 	}
 
 	// Get source provider. A refused grant is not a failure: the phase is
@@ -701,25 +701,21 @@ func (r *VMMigrationReconciler) handleSnapshottingPhase(ctx context.Context, mig
 		return r.transitionToFailed(ctx, migration, "Failed to get provider instance: "+migrationFailureDetail(err))
 	}
 
-	// Check if we already created a snapshot
+	// A snapshot is already recorded. It is used only once it is known to be
+	// complete: a snapshot task still running is polled, never assumed done
+	// (the export must not read a disk whose snapshot is still being taken),
+	// and a snapshot that was never confirmed complete (its task failed, or
+	// an earlier attempt stopped before its outcome was known) is removed and
+	// taken again.
 	if migration.Status.SnapshotID != "" {
-		// Check if snapshot is complete
-		// For now, assume it's complete and transition to export
-		// TODO: Check snapshot status via provider
-		migration.Status.Phase = infrav1beta1.MigrationPhaseExporting
-		migration.Status.Message = "Snapshot ready, starting export"
-
-		k8s.SetCondition(&migration.Status.Conditions, infrav1beta1.VMMigrationConditionSnapshotting,
-			metav1.ConditionTrue, "SnapshotComplete",
-			"Source VM snapshot created")
-
-		r.Recorder.Event(migration, "Normal", "SnapshotComplete", "Source VM snapshot created")
-
-		if err := r.updateStatus(ctx, migration); err != nil {
-			return ctrl.Result{}, err
+		switch {
+		case migration.Status.TaskRef != "":
+			return r.pollMigrationSnapshotTask(ctx, migration, providerInstance)
+		case !migrationSnapshotConfirmed(migration):
+			return r.discardUnconfirmedSnapshot(ctx, migration)
+		default:
+			return r.advanceToExporting(ctx, migration, "Snapshot ready, starting export")
 		}
-
-		return ctrl.Result{Requeue: true}, nil
 	}
 
 	sourceRef, err := vmRefFor(sourceVM, sourceProvider)
@@ -743,6 +739,14 @@ func (r *VMMigrationReconciler) handleSnapshottingPhase(ctx context.Context, mig
 	// Re-read the source Provider's grant from the API server (not the cache)
 	// right before the snapshot is created through it.
 	if allowed, res, err := r.confirmSourceConsumerLive(ctx, migration, sourceVM); !allowed {
+		return res, err
+	}
+
+	// Never take the snapshot from a stale read: a single-host provider
+	// honors no request token, so a create sent from a cache that does not
+	// show an earlier create's result would leave an untracked snapshot on
+	// the source VM.
+	if fresh, res, err := r.confirmMigrationSnapshotNotTaken(ctx, migration); !fresh {
 		return res, err
 	}
 
@@ -770,21 +774,7 @@ func (r *VMMigrationReconciler) handleSnapshottingPhase(ctx context.Context, mig
 	}
 
 	// Snapshot created synchronously, move to export
-	migration.Status.Phase = infrav1beta1.MigrationPhaseExporting
-	migration.Status.Message = "Snapshot created, starting export"
-	migration.Status.TaskRef = ""
-
-	k8s.SetCondition(&migration.Status.Conditions, infrav1beta1.VMMigrationConditionSnapshotting,
-		metav1.ConditionTrue, "SnapshotComplete",
-		"Source VM snapshot created")
-
-	r.Recorder.Event(migration, "Normal", "SnapshotComplete", fmt.Sprintf("Snapshot %s created", snapshotResp.SnapshotId))
-
-	if err := r.updateStatus(ctx, migration); err != nil {
-		return ctrl.Result{}, err
-	}
-
-	return ctrl.Result{Requeue: true}, nil
+	return r.advanceToExporting(ctx, migration, "Snapshot created, starting export")
 }
 
 // handleExportingPhase exports the disk from source provider
