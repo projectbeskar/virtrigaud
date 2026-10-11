@@ -284,6 +284,18 @@ func importLandingName(req *providerv1.ImportDiskRequest) (string, error) {
 	return landingName(tv.GetNamespace(), tv.GetName()), nil
 }
 
+// landingDiskNotFoundMessage is the refusal of an in-place disk that does not
+// exist: a precondition the user must fix, not a transient scan failure.
+const landingDiskNotFoundMessage = "imported disk not found: the VirtualMachine's migration landing disk does not " +
+	"exist on its datastore (removed, or never landed); run the VMMigration again"
+
+// errLandingDiskNotFound refuses a landing disk that does not exist:
+// FailedPrecondition, outside the manager's circuit breaker, distinct from
+// the retryable VM_DISK_CHECK_FAILED of a check that could not run.
+func errLandingDiskNotFound() error {
+	return status.Error(codes.FailedPrecondition, landingDiskNotFoundMessage)
+}
+
 // errLegacyLanding refuses a disk landed under the pre-v0.4.0 bare name.
 func errLegacyLanding() error {
 	return sdkerrors.NewInvalidSpec("%s", legacyLandingMessage)
@@ -598,11 +610,12 @@ func (p *Provider) ensureDiskFileUnused(ctx context.Context, diskPath string) er
 	var dp object.DatastorePath
 	dp.FromString(diskPath)
 	uuid, exists, err := p.diskUUID(ctx, diskPath)
-	if err == nil && !exists {
-		err = fmt.Errorf("disk %s not found", diskPath)
-	}
 	if err != nil {
 		return p.errDiskCheckFailed("in-place disk check", err)
+	}
+	if !exists {
+		p.logger.Warn("Refusing to attach an imported disk in place: it does not exist", "disk_path", diskPath)
+		return errLandingDiskNotFound()
 	}
 	users, err := p.datastoreFileUsers(ctx, dp.Datastore, false)
 	if err != nil {

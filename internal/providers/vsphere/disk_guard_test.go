@@ -1119,3 +1119,20 @@ func TestCreate_InPlaceDisk_LongIdentity(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, []string{landingPathIn(ns, name)}, vmDiskFiles(t, p, resp.Id))
 }
+
+// TestCreate_InPlaceDisk_MissingLandingDisk: a verified landing path whose
+// disk does not exist is a precondition failure with a constant message, not
+// a transient "scan failed".
+func TestCreate_InPlaceDisk_MissingLandingDisk(t *testing.T) {
+	p, _ := newOwnershipSim(t)
+	_, err := p.Create(context.Background(), &providerv1.CreateRequest{
+		Name: "migrated", ImageJson: importedDiskImageJSON(ownMigratedDiskPath("migrated"), true),
+		Owner: ownerNamed(ownerTeamA, "migrated"),
+	})
+	requireCode(t, err, codes.FailedPrecondition)
+	assert.Empty(t, errorReasons(err), "not VM_DISK_CHECK_FAILED, not VM_DISK_IN_USE")
+	assert.Equal(t, landingDiskNotFoundMessage, status.Convert(err).Message())
+	refs, lerr := p.vmsNamedInFolder(context.Background(), defaultVMFolder(t, p), "migrated")
+	require.NoError(t, lerr)
+	assert.Empty(t, refs, "nothing is created")
+}
