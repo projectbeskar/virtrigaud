@@ -64,10 +64,14 @@ the delete paths of each kind:
 
 | Object | Holds the Provider while |
 |---|---|
-| `VirtualMachine` | its placement Provider (`status.boundProvider`, else `spec.providerRef`, an empty namespace meaning the VM's own) is this `Provider`, in **any** namespace, and it is not being deleted or still carries the `VirtualMachine` finalizer. A VM being deleted whose finalizer is gone (only another controller's finalizer keeps the object) does not hold it. This is the same key the Host in-use finalizer uses. |
+| `VirtualMachine` | its placement Provider (`status.boundProvider`, else `spec.providerRef`, an empty namespace meaning the VM's own) is this `Provider` — the same key the Host in-use finalizer uses — and all of: (1) it is not being deleted, or still carries the `VirtualMachine` finalizer (a VM kept only by another controller's finalizer does not hold it); (2) it is **bound** (`status.boundProvider` is set), or it **may have something on the hypervisor**: `status.id` is set, `status.placement.pendingHost` is set, or its `Provisioning` condition has reason `CreateRequested` (the durable marker written before a single-host Create). An unbound VM that never got that far — for example one held before its Create because its `Provider` is being deleted — has nothing to delete through the `Provider` and does not hold it; otherwise the two deletions would wait on each other. (3) It is in the `Provider`'s namespace, bound through this `Provider`, or in a namespace the `Provider`'s `spec.consumerNamespaceSelector` allows now (the check every consumer reference makes). A VM from a namespace that may not use the `Provider` is refused anyway, so it cannot hold it. |
 | `VMSnapshot` | it carries its finalizer and its `VirtualMachine` is one of the VMs above (its delete calls `SnapshotDelete` through that VM's Provider). |
 | `VMClone` | it carries its finalizer, is not being deleted and has not finished (phase not `Ready` or `Failed`), and its source VM is one of the VMs above. A clone's delete makes no provider call. |
-| `VMMigration` | it carries its finalizer, and is in flight (phase not `Ready` or `Failed`) or being deleted (its cleanup can delete the source snapshot), and either its source VM is one of the VMs above or its `spec.target.providerRef` is this `Provider`. |
+| `VMMigration` | it carries its finalizer, and is in flight (phase not `Ready` or `Failed`) or being deleted (its cleanup can delete the source snapshot), and either its source VM is one of the VMs counted above, or its `spec.target.providerRef` is this `Provider` **and** it is in the `Provider`'s namespace or one its selector allows (where the import resolves the target from). |
+
+A `VMSnapshot`, `VMClone` or `VMMigration` acting on a VM lives in that VM's
+namespace, so it is counted only when the VM passes rule (3). A read error deciding a
+grant keeps the `Provider` held and is retried.
 
 ### D3: The runtime stays up while the Provider is held
 
@@ -81,7 +85,10 @@ refreshed while it is held, so a hold that has not changed writes nothing.
 The Provider shows `DeleteBlocked=True` with reason `ProviderInUse`. The message gives
 the number of each kind of object and the namespaces they are in, with a count per
 namespace (at most 10 namespaces, then "and N more"). It names no object: the
-`Provider` belongs to its administrator, but the objects may belong to tenants. A
+`Provider` belongs to its administrator, but the objects may belong to tenants.
+Anyone who can read the `Provider`'s status or events therefore sees the names of
+the consumer namespaces that use it — at most 10, never an object name — and only
+namespaces that are bound to it or allowed to use it (D2). A
 `Warning` event `ProviderDeleteBlocked` with the same message is recorded when the hold
 begins or its reason changes, not on every re-check.
 

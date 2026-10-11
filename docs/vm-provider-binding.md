@@ -321,12 +321,19 @@ A `Provider` carries the finalizer `provider.infra.virtrigaud.io/in-use`
 every `Provider`, including those created before the upgrade. Deleting a
 `Provider` that is still needed does not remove it:
 
-- **What holds it:** every `VirtualMachine` whose placement Provider it is
-  (`status.boundProvider`, else `spec.providerRef`) — **in any namespace**,
-  cross-namespace consumers included — until its `VirtualMachine` finalizer is
-  gone; a `VMSnapshot` of one of those VMs with a delete still to run; an
-  in-flight `VMClone` of one of them; a `VMMigration` in flight (or being
-  deleted) out of one of them or into this `Provider`.
+- **What holds it:**
+  - Every `VirtualMachine` whose placement Provider it is (`status.boundProvider`,
+    else `spec.providerRef`), until its `VirtualMachine` finalizer is gone, if:
+    - it is bound, or may have something on the hypervisor (`status.id`,
+      `status.placement.pendingHost`, or the `CreateRequested` provisioning
+      marker); a VM never created holds nothing;
+    - and it is in the `Provider`'s namespace, bound through it, or in a namespace
+      the `Provider`'s `spec.consumerNamespaceSelector` allows. A namespace that
+      may not use the `Provider` cannot hold it.
+  - A `VMSnapshot` of one of those VMs with a delete still to run.
+  - An in-flight `VMClone` of one of them.
+  - A `VMMigration` in flight (or being deleted) out of one of them, or into this
+    `Provider` from its namespace or an allowed one.
 - **Its runtime is kept:** while it is held, its Deployment, Service and
   ServiceAccount are reconciled as before and its runtime phase stays `Running`,
   so the VMs can still be deleted through it.
