@@ -18,6 +18,9 @@ package proxmox
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -29,11 +32,25 @@ import (
 	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
 )
 
-// TestSnapshotDelete_MissingSnapshotIsNotFound pins, against pvefake, that
-// deleting a snapshot that is not there is answered gRPC NotFound — the
-// manager's idempotent "already gone". PVE deletes a snapshot in a worker task
-// that fails when there is nothing to delete, which the manager would retry
-// forever (a VMMigration or VMSnapshot finalizer held for good).
+// These tests pin, against pvefake, when a Proxmox SnapshotDelete answers
+// gRPC NotFound — the manager's idempotent "already gone", which releases a
+// VMMigration or VMSnapshot — and when it must not: only a snapshot that is
+// provably absent (not listed on the VM's ACTUAL node, or its VM absent
+// cluster-wide) is NotFound. A VM moved to another node keeps its snapshot
+// and its delete; a bare 404 is an error, never NotFound.
+
+// takeSnapshot creates snapshot hint on VM 100 and waits for its task.
+func takeSnapshot(t *testing.T, provider *Provider, hint string) string {
+	t.Helper()
+	ctx := context.Background()
+	created, err := provider.SnapshotCreate(ctx, &providerv1.SnapshotCreateRequest{VmId: "100", NameHint: hint})
+	require.NoError(t, err)
+	if created.Task != nil {
+		require.NoError(t, waitForTask(ctx, provider, created.Task.Id))
+	}
+	return created.SnapshotId
+}
+
 func TestSnapshotDelete_MissingSnapshotIsNotFound(t *testing.T) {
 	_, endpoint, err := pvefake.StartFakeServer()
 	require.NoError(t, err)
@@ -51,22 +68,64 @@ func TestSnapshotDelete_MissingSnapshotIsNotFound(t *testing.T) {
 	})
 
 	t.Run("deleted, then deleted again", func(t *testing.T) {
-		created, err := provider.SnapshotCreate(ctx, &providerv1.SnapshotCreateRequest{VmId: "100", NameHint: "mig-snap"})
-		require.NoError(t, err)
-		if created.Task != nil {
-			require.NoError(t, waitForTask(ctx, provider, created.Task.Id))
-		}
-		resp, err := provider.SnapshotDelete(ctx, &providerv1.SnapshotDeleteRequest{VmId: "100", SnapshotId: created.SnapshotId})
+		id := takeSnapshot(t, provider, "mig-snap")
+		resp, err := provider.SnapshotDelete(ctx, &providerv1.SnapshotDeleteRequest{VmId: "100", SnapshotId: id})
 		require.NoError(t, err)
 		if resp.Task != nil {
 			require.NoError(t, waitForTask(ctx, provider, resp.Task.Id))
 		}
-		_, err = provider.SnapshotDelete(ctx, &providerv1.SnapshotDeleteRequest{VmId: "100", SnapshotId: created.SnapshotId})
+		_, err = provider.SnapshotDelete(ctx, &providerv1.SnapshotDeleteRequest{VmId: "100", SnapshotId: id})
 		assert.Equal(t, codes.NotFound, status.Code(err), "a repeated delete is the manager's idempotent success: %v", err)
 	})
 
-	t.Run("VM gone", func(t *testing.T) {
+	t.Run("VM absent cluster-wide", func(t *testing.T) {
 		_, err := provider.SnapshotDelete(ctx, &providerv1.SnapshotDeleteRequest{VmId: "999", SnapshotId: "mig-snap"})
 		assert.Equal(t, codes.NotFound, status.Code(err), "%v", err)
 	})
+}
+
+// TestSnapshotDelete_VMOnAnotherNodeKeepsItsSnapshot is the review's H-1: a
+// VM moved to another node (HA) is answered "Configuration file ... does not
+// exist" by the node the provider would otherwise pick. That is no proof the
+// snapshot is gone: the delete goes to the VM's actual node and deletes it.
+func TestSnapshotDelete_VMOnAnotherNodeKeepsItsSnapshot(t *testing.T) {
+	fake, endpoint, err := pvefake.StartFakeServer()
+	require.NoError(t, err)
+	provider := createTestProvider(endpoint)
+	ctx := context.Background()
+
+	id := takeSnapshot(t, provider, "mig-ha")
+	fake.MoveVM(100, "pve2") // the provider's first node is "pve"
+
+	resp, err := provider.SnapshotDelete(ctx, &providerv1.SnapshotDeleteRequest{VmId: "100", SnapshotId: id})
+	require.NoError(t, err, "the snapshot exists on the VM's node: it is deleted there, never answered NotFound")
+	if resp.Task != nil {
+		require.NoError(t, waitForTask(ctx, provider, resp.Task.Id))
+	}
+	_, err = provider.SnapshotDelete(ctx, &providerv1.SnapshotDeleteRequest{VmId: "100", SnapshotId: id})
+	assert.Equal(t, codes.NotFound, status.Code(err), "now really gone: %v", err)
+}
+
+// TestSnapshotDelete_BareNotFoundIsAnError: an HTTP 404 that is not PVE's
+// answer (no PVE JSON body — e.g. a proxy) is an error the manager retries,
+// never NotFound.
+func TestSnapshotDelete_BareNotFoundIsAnError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/cluster/resources"):
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"data":[{"id":"qemu/100","type":"qemu","vmid":100,"node":"pve"}]}`))
+		case strings.HasSuffix(r.URL.Path, "/nodes"):
+			_, _ = w.Write([]byte(`{"data":[{"node":"pve"}]}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+	provider := createTestProvider(srv.URL)
+
+	_, err := provider.SnapshotDelete(context.Background(), &providerv1.SnapshotDeleteRequest{VmId: "100", SnapshotId: "mig-snap"})
+	require.Error(t, err)
+	assert.NotEqual(t, codes.NotFound, status.Code(err), "%v", err)
+	assert.Equal(t, codes.Unavailable, status.Code(err), "retried by the manager: %v", err)
 }

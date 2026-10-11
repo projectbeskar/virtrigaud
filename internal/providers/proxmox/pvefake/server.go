@@ -222,6 +222,7 @@ func (s *Server) setupRoutes() {
 	// Cluster
 	api.HandleFunc("/nodes", s.handleListNodes).Methods("GET")
 	api.HandleFunc("/cluster/nextid", s.handleClusterNextID).Methods("GET")
+	api.HandleFunc("/cluster/resources", s.handleClusterResources).Methods("GET")
 
 	// VM operations
 	api.HandleFunc("/nodes/{node}/qemu", s.handleCreateVM).Methods("POST")
@@ -725,6 +726,29 @@ func (s *Server) handleCreateSnapshot(w http.ResponseWriter, r *http.Request) {
 	s.writeResponse(w, taskID)
 }
 
+// handleClusterResources answers GET /cluster/resources (?type=vm): every VM
+// with the node it is on.
+func (s *Server) handleClusterResources(w http.ResponseWriter, _ *http.Request) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]map[string]interface{}, 0, len(s.vms))
+	for _, vm := range s.vms {
+		out = append(out, map[string]interface{}{
+			"id": fmt.Sprintf("qemu/%d", vm.VMID), "type": "qemu", "vmid": vm.VMID, "node": vm.Node, "name": vm.Name,
+		})
+	}
+	s.writeResponse(w, out)
+}
+
+// MoveVM moves VM vmid to node, as a PVE HA migration does (tests).
+func (s *Server) MoveVM(vmid int, node string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if vm, ok := s.vms[vmid]; ok {
+		vm.Node = node
+	}
+}
+
 // handleListSnapshots lists a VM's snapshots as PVE does: the snapshots plus a
 // "current" pseudo-entry for the running state. A VM that does not exist is
 // answered as PVE answers it: HTTP 500, "Configuration file ... does not
@@ -740,7 +764,10 @@ func (s *Server) handleListSnapshots(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if _, exists := s.vms[vmid]; !exists {
+	// PVE answers for the node named in the path: a VM on another node (e.g.
+	// after an HA move), like one that does not exist, has no configuration
+	// file there.
+	if vm, exists := s.vms[vmid]; !exists || vm.Node != vars["node"] {
 		s.writeError(w, http.StatusInternalServerError,
 			fmt.Sprintf("Configuration file 'nodes/%s/qemu-server/%d.conf' does not exist", vars["node"], vmid))
 		return
@@ -767,20 +794,27 @@ func (s *Server) handleDeleteSnapshot(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// Check VM exists
-	if _, exists := s.vms[vmid]; !exists {
-		s.writeError(w, http.StatusNotFound, "VM not found")
+	// Check the VM exists on this node (PVE answers per node).
+	if vm, exists := s.vms[vmid]; !exists || vm.Node != node {
+		s.writeError(w, http.StatusInternalServerError,
+			fmt.Sprintf("Configuration file 'nodes/%s/qemu-server/%d.conf' does not exist", node, vmid))
 		return
 	}
 
-	// Find and delete snapshot
+	// Find and delete snapshot; a missing one is answered as PVE does.
 	vmKey := fmt.Sprintf("%d", vmid)
 	snapshots := s.snapshots[vmKey]
+	found := false
 	for i, snap := range snapshots {
 		if snap.Name == snapName {
 			s.snapshots[vmKey] = append(snapshots[:i], snapshots[i+1:]...)
+			found = true
 			break
 		}
+	}
+	if !found {
+		s.writeError(w, http.StatusInternalServerError, fmt.Sprintf("snapshot '%s' does not exist", snapName))
+		return
 	}
 
 	// Create async task

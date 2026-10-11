@@ -208,15 +208,51 @@ type Task struct {
 	ExitCode  *string `json:"exitstatus,omitempty"`
 }
 
-// ErrNotExist marks a PVE answer that the object asked for does not exist —
-// PVE's "... does not exist" (an HTTP 500 with that text, e.g. a VM whose
-// configuration file is gone) or an HTTP 404.
-var ErrNotExist = errors.New("does not exist")
+// ErrSnapshotNotExist marks PVE's answer that the snapshot asked for does not
+// exist: "snapshot '<name>' does not exist". It is the only "does not exist"
+// that says so: "Configuration file 'nodes/<node>/qemu-server/<vmid>.conf' does
+// not exist" only means the VM is not on the node asked (e.g. after an HA
+// move), and a bare HTTP 404 is no answer from PVE at all.
+var ErrSnapshotNotExist = errors.New("snapshot does not exist")
 
-// pveDoesNotExist reports whether a non-200 PVE answer (statusCode, body) says
-// the object does not exist.
-func pveDoesNotExist(statusCode int, body []byte) bool {
-	return statusCode == http.StatusNotFound || strings.Contains(strings.ToLower(string(body)), "does not exist")
+// pveSnapshotDoesNotExist reports whether a non-200 PVE answer body says that
+// snapshot name does not exist.
+func pveSnapshotDoesNotExist(body []byte, name string) bool {
+	return strings.Contains(string(body), fmt.Sprintf("snapshot '%s' does not exist", name))
+}
+
+// ResolveVMNode returns the node VM vmid is on, read from the cluster's
+// resource list (GET /cluster/resources?type=vm), and whether the cluster has
+// such a VM at all. It is the VM's actual node — which an HA migration
+// changes — not the provider's configured or first node.
+func (c *Client) ResolveVMNode(ctx context.Context, vmid int) (string, bool, error) {
+	resp, err := c.request(ctx, "GET", "/api2/json/cluster/resources?type=vm", nil)
+	if err != nil {
+		return "", false, fmt.Errorf("failed to list cluster resources: %w", err)
+	}
+	defer resp.Body.Close() //nolint:errcheck // Response body close in defer is not critical
+	if resp.StatusCode != http.StatusOK {
+		return "", false, fmt.Errorf("list cluster resources failed with status %d", resp.StatusCode)
+	}
+	var out struct {
+		Data []struct {
+			VMID int    `json:"vmid"`
+			Node string `json:"node"`
+			Type string `json:"type"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return "", false, fmt.Errorf("failed to decode cluster resources: %w", err)
+	}
+	for _, r := range out.Data {
+		if r.VMID == vmid && r.Type == "qemu" {
+			if r.Node == "" {
+				return "", false, fmt.Errorf("cluster resources list VM %d without a node", vmid)
+			}
+			return r.Node, true, nil
+		}
+	}
+	return "", false, nil
 }
 
 // Snapshot represents a VM snapshot
@@ -990,15 +1026,12 @@ func (c *Client) DeleteSnapshot(ctx context.Context, node string, vmid int, snap
 	}
 	defer resp.Body.Close() //nolint:errcheck // Response body close in defer is not critical
 
-	if resp.StatusCode == 404 {
-		// Snapshot doesn't exist, consider it deleted
-		return "", nil
-	}
-
 	if resp.StatusCode != 200 {
-		body, _ := io.ReadAll(resp.Body)
-		if pveDoesNotExist(resp.StatusCode, body) {
-			return "", fmt.Errorf("delete snapshot %q of VM %d: %w", snapname, vmid, ErrNotExist)
+		// Only PVE's snapshot-specific answer means the snapshot is gone; a
+		// bare 404 or a VM not on this node is an error.
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		if pveSnapshotDoesNotExist(body, snapname) {
+			return "", fmt.Errorf("delete snapshot %q of VM %d: %w", snapname, vmid, ErrSnapshotNotExist)
 		}
 		return "", fmt.Errorf("delete snapshot failed with status %d: %s", resp.StatusCode, string(body))
 	}
@@ -1053,11 +1086,7 @@ func (c *Client) ListSnapshots(ctx context.Context, node string, vmid int) ([]*S
 	defer resp.Body.Close() //nolint:errcheck // Response body close in defer is not critical
 
 	if resp.StatusCode != 200 {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		if pveDoesNotExist(resp.StatusCode, body) {
-			return nil, fmt.Errorf("list snapshots of VM %d: %w", vmid, ErrNotExist)
-		}
-		return nil, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
+		return nil, fmt.Errorf("list snapshots of VM %d on node %s: unexpected status code: %d", vmid, node, resp.StatusCode)
 	}
 
 	var apiResp APIResponse

@@ -788,26 +788,34 @@ func (p *Provider) SnapshotDelete(ctx context.Context, req *providerv1.SnapshotD
 		return nil, errors.NewUnavailable("PVE client not configured", nil)
 	}
 
-	vmid, node, err := p.parseVMReference(req.VmId)
+	vmid, _, err := p.parseVMReference(req.VmId)
 	if err != nil {
 		return nil, errors.NewInvalidSpec("invalid VM reference: %v", err)
 	}
 
 	// PVE deletes a snapshot in a worker task, which fails ("snapshot ...
 	// does not exist") when there is nothing to delete: the manager would
-	// then retry forever. A snapshot that is not there — not listed, or its
-	// VM gone — is answered NotFound up front, the manager's idempotent
-	// "already gone".
+	// then retry forever. A snapshot that is provably not there is answered
+	// NotFound up front, the manager's idempotent "already gone": its VM is
+	// absent cluster-wide, or the VM's ACTUAL node (an HA move changes it)
+	// does not list it. Anything else that cannot be established is an error.
+	node, exists, err := p.snapshotVMNode(ctx, vmid)
+	if err != nil {
+		return nil, errors.NewUnavailable("PVE cluster resources", err)
+	}
+	if !exists {
+		return nil, errors.NewNotFound("snapshot", req.SnapshotId)
+	}
 	present, err := p.snapshotPresent(ctx, node, vmid, req.SnapshotId)
 	if err != nil {
-		return nil, errors.NewInternal("failed to list snapshots", err)
+		return nil, errors.NewUnavailable("PVE snapshot list", err)
 	}
 	if !present {
 		return nil, errors.NewNotFound("snapshot", req.SnapshotId)
 	}
 
 	taskID, err := p.client.DeleteSnapshot(ctx, node, vmid, req.SnapshotId)
-	if stderrors.Is(err, pveapi.ErrNotExist) {
+	if stderrors.Is(err, pveapi.ErrSnapshotNotExist) {
 		return nil, errors.NewNotFound("snapshot", req.SnapshotId)
 	}
 	if err != nil {
@@ -822,14 +830,11 @@ func (p *Provider) SnapshotDelete(ctx context.Context, req *providerv1.SnapshotD
 	return result, nil
 }
 
-// snapshotPresent reports whether VM vmid on node has the snapshot name. A VM
-// that no longer exists has none. PVE lists a "current" pseudo-entry for the
-// running state, which is never a snapshot.
+// snapshotPresent reports whether VM vmid on node (its actual node,
+// snapshotVMNode) has the snapshot name. PVE lists a "current" pseudo-entry
+// for the running state, which is never a snapshot.
 func (p *Provider) snapshotPresent(ctx context.Context, node string, vmid int, name string) (bool, error) {
 	list, err := p.client.ListSnapshots(ctx, node, vmid)
-	if stderrors.Is(err, pveapi.ErrNotExist) {
-		return false, nil
-	}
 	if err != nil {
 		return false, err
 	}
