@@ -77,6 +77,10 @@ type Provider struct {
 	// throughput watchdog (0 = the defaults; tests only).
 	downloadStallWindow       time.Duration
 	downloadMinBytesPerWindow int64
+	// landingLocks serialises the work on one migration landing folder — an
+	// in-place attach, an import and its cleanup — keyed by landingLockKey
+	// (disk_guard.go).
+	landingLocks keyedMutex
 }
 
 // Config holds the vSphere provider configuration
@@ -580,7 +584,7 @@ func (p *Provider) Create(ctx context.Context, req *providerv1.CreateRequest) (*
 	// (disk_guard.go, rules 1 and 2), checked before any vCenter call. Rule 3
 	// (no other VM uses it) is checked below, once the VM is known not to exist.
 	if vmSpec.DiskPath != "" {
-		if _, err := checkInPlaceDiskPath(vmSpec.DiskPath, vmSpec.Name, vmSpec.ImportedDisk); err != nil {
+		if _, err := checkInPlaceDiskPath(vmSpec.DiskPath, vmSpec.Owner, vmSpec.Name, vmSpec.ImportedDisk); err != nil {
 			p.logger.Warn("Refusing to attach a disk in place: not this VM's own migration landing disk",
 				"vm_name", vmSpec.Name, "disk_path", vmSpec.DiskPath, "imported_disk", vmSpec.ImportedDisk)
 			return nil, err
@@ -633,7 +637,15 @@ func (p *Provider) Create(ctx context.Context, req *providerv1.CreateRequest) (*
 		// Name is free in the target folder: create below. A disk attached in
 		// place must not be referenced by any VM or template in the inventory
 		// (disk_guard.go, rule 3; fails closed).
+		// The landing folder's lock is held until Create returns, so no other
+		// attach or import of this landing disk runs between the check and the
+		// create.
 		if vmSpec.DiskPath != "" {
+			unlock, err := p.landingLocks.lock(ctx, landingLockKeyOfPath(vmSpec.DiskPath))
+			if err != nil {
+				return nil, fmt.Errorf("wait for other work on the imported disk: %w", err)
+			}
+			defer unlock()
 			if err := p.ensureDiskFileUnused(ctx, vmSpec.DiskPath); err != nil {
 				return nil, err
 			}
@@ -4038,10 +4050,12 @@ func (p *Provider) ImportDisk(ctx context.Context, req *providerv1.ImportDiskReq
 		return nil, errors.NewInvalidSpec("unsupported import format: %s", targetFormat)
 	}
 
-	// Generate disk name
-	diskID := req.TargetName
-	if diskID == "" {
-		diskID = fmt.Sprintf("imported-disk-%d", time.Now().Unix())
+	// The landing name derives from the target VirtualMachine's namespace and
+	// name (disk_guard.go: importLandingName); the bare TargetName never
+	// decides the location.
+	diskID, err := importLandingName(req)
+	if err != nil {
+		return nil, err
 	}
 
 	p.logger.Info("Preparing disk import", "disk_id", diskID, "datastore", datastore, "format", targetFormat)
@@ -4162,8 +4176,14 @@ func (p *Provider) ImportDisk(ctx context.Context, req *providerv1.ImportDiskReq
 	// Generate datastore path
 	diskPath := fmt.Sprintf("[%s] %s/%s.vmdk", datastore, diskID, diskID)
 
-	// The upload overwrites the landing folder's disk: refuse when any VM uses
-	// a file there (disk_guard.go; fails closed).
+	// The upload overwrites the landing folder's disk: under the folder's
+	// landing lock, refuse when any VM uses a file there (disk_guard.go; fails
+	// closed).
+	unlock, err := p.landingLocks.lock(ctx, landingLockKey(datastore, diskID))
+	if err != nil {
+		return nil, errors.NewInternal("wait for other work on the landing folder", err)
+	}
+	defer unlock()
 	if err := p.ensureImportFolderUnused(ctx, datastore, diskID); err != nil {
 		return nil, err
 	}

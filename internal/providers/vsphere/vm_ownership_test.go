@@ -403,12 +403,14 @@ func TestCreate_StampsOwnerOnImportedDiskCreate(t *testing.T) {
 	resp, err := p.Create(ctx, &providerv1.CreateRequest{
 		Name:      "migrated",
 		ImageJson: imageJSON,
-		Owner:     wireOwner(ownerTeamA),
+		Owner:     ownerNamed(ownerTeamA, "migrated"),
 	})
 	require.NoError(t, err)
 
 	owner, _, _, _ := vmState(t, p, resp.Id)
-	assert.Equal(t, ownerTeamA, owner, "the imported-disk (CreateVM_Task) path must stamp the owner too")
+	want := ownerTeamA
+	want.Name = "migrated"
+	assert.Equal(t, want, owner, "the imported-disk (CreateVM_Task) path must stamp the owner too")
 }
 
 func TestCreate_ExistingVMInTargetFolder(t *testing.T) {

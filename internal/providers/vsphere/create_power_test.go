@@ -119,7 +119,7 @@ func TestCreate_ImportedDiskLeavesVMPoweredOff(t *testing.T) {
 	resp, err := p.Create(context.Background(), &providerv1.CreateRequest{
 		Name:      "migrated",
 		ImageJson: imageJSON,
-		Owner:     wireOwner(ownerTeamA),
+		Owner:     ownerNamed(ownerTeamA, "migrated"),
 		UserData:  []byte("#cloud-config\nhostname: migrated\n"),
 	})
 	require.NoError(t, err)
@@ -159,7 +159,7 @@ func TestCreate_ImportedDiskAppliesPostCreateSteps(t *testing.T) {
 				ClassJson: `{"CPU":1,"MemoryMiB":512,"DiskDefaults":{"SizeGiB":2}}`,
 				ImageJson: imageJSON,
 				DisksJson: tc.disksJSON,
-				Owner:     wireOwner(ownerTeamA),
+				Owner:     ownerNamed(ownerTeamA, "migrated"),
 			})
 			require.NoError(t, err)
 
@@ -244,14 +244,14 @@ func TestCreate_AdditionalDiskLandsInVMHome(t *testing.T) {
 	p, _ := newOwnershipSim(t, func(m *simulator.Model) { m.Datastore = 2 })
 	const otherDS = "LocalDS_1"
 	require.NotEqual(t, otherDS, p.config.DefaultDatastore)
-	diskPath := "[" + otherDS + "] " + importedDiskRelPath("migrated")
-	makeImportedDisk(t, p, "["+otherDS+"] "+importedDiskName("migrated"), diskPath)
+	diskPath := "[" + otherDS + "] " + landingRelPath(ownerTeamA.Namespace, "migrated")
+	makeImportedDisk(t, p, "["+otherDS+"] "+landingName(ownerTeamA.Namespace, "migrated"), diskPath)
 
 	resp, err := p.Create(context.Background(), &providerv1.CreateRequest{
 		Name:      "migrated",
 		ImageJson: importedDiskImageJSON(diskPath, true),
 		DisksJson: `[{"Name":"data","SizeGiB":1,"Type":"thin"}]`,
-		Owner:     wireOwner(ownerTeamA),
+		Owner:     ownerNamed(ownerTeamA, "migrated"),
 	})
 	require.NoError(t, err)
 

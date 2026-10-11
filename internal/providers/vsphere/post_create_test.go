@@ -200,7 +200,7 @@ func TestCreate_DiskGrowFailureIsRetriedNotSwallowed(t *testing.T) {
 		Name:      "migrated",
 		ClassJson: `{"CPU":1,"MemoryMiB":512,"DiskDefaults":{"SizeGiB":2}}`,
 		ImageJson: imageJSON,
-		Owner:     wireOwner(ownerTeamA),
+		Owner:     ownerNamed(ownerTeamA, "migrated"),
 	}
 	_, err := p.Create(ctx, req)
 	requireRetryablePostCreateFailure(t, err)

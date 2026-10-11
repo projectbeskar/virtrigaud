@@ -20,7 +20,9 @@ import (
 	"context"
 	"fmt"
 	"path"
+	"slices"
 	"strings"
+	"time"
 
 	"github.com/vmware/govmomi/object"
 	"github.com/vmware/govmomi/property"
@@ -30,8 +32,10 @@ import (
 	"google.golang.org/genproto/googleapis/rpc/errdetails"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"k8s.io/apimachinery/pkg/util/validation"
 
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
+	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
 	sdkerrors "github.com/projectbeskar/virtrigaud/sdk/provider/errors"
 )
 
@@ -52,10 +56,15 @@ import (
 //  1. contracts.VMImage.ImportedDisk is true: the operator verified the path as
 //     the landing disk a VMMigration in the VM's own namespace imported for
 //     this VM (isOwnMigrationDisk); the tenant cannot set it.
-//  2. The path is exactly "[<ds>] <vm>-migrated/<vm>-migrated.vmdk", <vm> being
-//     the VM name Create uses: the name ImportDisk gives the disk it lands
-//     (ImportDiskRequest.target_name, "<vm>"+contracts.ImportedDiskNameSuffix,
-//     in a folder of the same name). No other file qualifies.
+//  2. The path is exactly "[<ds>] <ns>.<vm>-migrated/<ns>.<vm>-migrated.vmdk",
+//     <ns> and <vm> being the requesting VirtualMachine's namespace
+//     (CreateRequest.owner, required) and name: the name ImportDisk gives the
+//     disk it lands for that VirtualMachine (landingName, derived from
+//     ImportDiskRequest.target_vm, never from the bare target_name). VM names
+//     repeat across namespaces; the namespace in the landing name is what keeps
+//     one tenant's landing disk out of another's reach. A disk landed under
+//     the pre-v0.4.0 bare name ("<vm>-migrated") is refused with its own
+//     message: that migration must be run again.
 //  3. No VM or template in the vCenter inventory references the file, as a
 //     disk, a snapshot's parent disk, or any file in its layout. The scan
 //     fails closed: when it cannot read every VM's devices, nothing is
@@ -66,10 +75,16 @@ import (
 // messages: never the caller's path, another VM's name, or a vCenter fault.
 //
 // The same inventory scan guards the migration import (an existing
-// "[<ds>] <vm>-migrated" folder is deleted or overwritten only when no VM uses
-// a file in it) and Delete (a disk outside the VM's own directory is detached,
+// "[<ds>] <ns>.<vm>-migrated" folder is deleted or overwritten only when no VM
+// uses a file in it, checked again right before a failed import's cleanup) and
+// Delete (a disk outside the VM's own directory is detached,
 // keeping its file, before Destroy_Task, unless it is the VM's own migrated
 // disk and no other VM uses it; see detachForeignDisks).
+//
+// Work on one landing folder — an in-place attach, an import, its cleanup — is
+// serialised inside the provider (Provider.landingLocks), so two such
+// operations never both pass the check before either acts. The lock is per
+// provider process: run one replica of a vSphere provider.
 
 const (
 	// vmdkExt is the extension of every disk file VirtRigaud places.
@@ -88,9 +103,16 @@ const (
 // inPlaceDiskRejectedMessage is the only text a refused in-place disk path
 // returns. It names the rule, never the caller's path.
 const inPlaceDiskRejectedMessage = "imported disk rejected: the vSphere provider attaches a disk in place only when " +
-	"it is the VirtualMachine's own migration landing disk ([<datastore>] <vm name>-migrated/<vm name>-migrated.vmdk, " +
-	"imported by a VMMigration in the same namespace that targets this VirtualMachine); use a VMImage (template or OVA) " +
-	"for any other image"
+	"it is the VirtualMachine's own migration landing disk ([<datastore>] <namespace>.<vm name>-migrated/" +
+	"<namespace>.<vm name>-migrated.vmdk, imported by a VMMigration in the same namespace that targets this " +
+	"VirtualMachine); use a VMImage (template or OVA) for any other image"
+
+// legacyLandingMessage refuses a disk an earlier release landed under the
+// bare "<vm name>-migrated" name, which does not tell namespaces apart.
+const legacyLandingMessage = "imported disk rejected: it was landed by a release before v0.4.0 under " +
+	"[<datastore>] <vm name>-migrated, a name that does not separate namespaces, so it cannot be proven to be this " +
+	"VirtualMachine's disk; delete this VirtualMachine and its VMMigration and run the migration again (the old " +
+	"landing folder is not removed automatically)"
 
 // diskInUseMessage is the only text a refusal for a disk another VM uses
 // returns. It never names that VM.
@@ -146,26 +168,91 @@ func (p *Provider) errDiskCheckFailed(what string, err error) error {
 	return statusWithReasons(codes.Unavailable, diskCheckFailedMessage, contracts.VMDiskCheckFailedReason).Err()
 }
 
-// importedDiskName is the base name ImportDisk gives the disk it lands for the
-// VM named vmName ("<vm>-migrated"): the folder and the .vmdk are both named
-// after it.
-func importedDiskName(vmName string) string {
-	return vmName + contracts.ImportedDiskNameSuffix
+// landingSeparator joins the namespace and the name in a landing name. A
+// namespace is a DNS-1123 label (no dots), so the first dot splits the two
+// unambiguously.
+const landingSeparator = "."
+
+// maxDatastoreFileNameBytes bounds one component of a datastore path (VMFS
+// and NFS limit a file or directory name to 255 bytes).
+const maxDatastoreFileNameBytes = 255
+
+// landingName is the base name ImportDisk gives the disk it lands for the
+// VirtualMachine namespace/name: "<ns>.<vm>-migrated". The folder and the
+// .vmdk are both named after it.
+func landingName(namespace, name string) string {
+	return namespace + landingSeparator + name + contracts.ImportedDiskNameSuffix
 }
 
-// importedDiskRelPath is the datastore-relative path of vmName's migration
-// landing disk: "<vm>-migrated/<vm>-migrated.vmdk".
-func importedDiskRelPath(vmName string) string {
-	n := importedDiskName(vmName)
+// landingRelPath is the datastore-relative path of that landing disk:
+// "<ns>.<vm>-migrated/<ns>.<vm>-migrated.vmdk".
+func landingRelPath(namespace, name string) string {
+	n := landingName(namespace, name)
 	return n + "/" + n + vmdkExt
 }
 
+// legacyLandingRelPath is where a release before v0.4.0 landed the disk for a
+// VM named name, whatever its namespace: "<vm>-migrated/<vm>-migrated.vmdk".
+// Create refuses it (errLegacyLanding); Delete still recognises it as the
+// VM's own disk when no other VM uses it.
+func legacyLandingRelPath(name string) string {
+	n := name + contracts.ImportedDiskNameSuffix
+	return n + "/" + n + vmdkExt
+}
+
+// validLandingIdentity reports whether namespace/name can form a landing name:
+// a DNS-1123 label namespace, a DNS-1123 subdomain name, and a name that fits
+// one datastore path component.
+func validLandingIdentity(namespace, name string) error {
+	if errs := validation.IsDNS1123Label(namespace); len(errs) > 0 {
+		return fmt.Errorf("namespace %q: %s", namespace, strings.Join(errs, "; "))
+	}
+	if errs := validation.IsDNS1123Subdomain(name); len(errs) > 0 {
+		return fmt.Errorf("name %q: %s", name, strings.Join(errs, "; "))
+	}
+	if len(landingName(namespace, name))+len(vmdkExt) > maxDatastoreFileNameBytes {
+		return fmt.Errorf("landing name for %s/%s is longer than %d bytes", namespace, name, maxDatastoreFileNameBytes)
+	}
+	return nil
+}
+
+// importLandingName is the landing name of a migration import: landingName
+// over req.target_vm. The bare target_name the manager also sends cannot tell
+// namespaces apart and never decides the location; when set it must be the
+// same VM's "<vm>-migrated". A request without target_vm (a manager older
+// than the provider) is refused.
+func importLandingName(req *providerv1.ImportDiskRequest) (string, error) {
+	tv := req.GetTargetVm()
+	if tv.GetNamespace() == "" || tv.GetName() == "" {
+		return "", sdkerrors.NewInvalidSpec("%s", "vSphere disk import requires the target VirtualMachine's namespace "+
+			"and name (ImportDiskRequest.target_vm); upgrade the manager")
+	}
+	if err := validLandingIdentity(tv.GetNamespace(), tv.GetName()); err != nil {
+		return "", sdkerrors.NewInvalidSpec("import target cannot name a vSphere landing disk: %s", err.Error())
+	}
+	if req.GetTargetName() != "" && req.GetTargetName() != tv.GetName()+contracts.ImportedDiskNameSuffix {
+		return "", sdkerrors.NewInvalidSpec("import target name %q does not match its target VM name %q",
+			req.GetTargetName(), tv.GetName())
+	}
+	return landingName(tv.GetNamespace(), tv.GetName()), nil
+}
+
+// errLegacyLanding refuses a disk landed under the pre-v0.4.0 bare name.
+func errLegacyLanding() error {
+	return sdkerrors.NewInvalidSpec("%s", legacyLandingMessage)
+}
+
 // checkInPlaceDiskPath enforces rules 1 and 2 of the in-place confinement for
-// the VM named vmName and returns the datastore the disk is on. diskPath is
-// accepted only when imported is set and it is byte-for-byte
-// "[<ds>] <vm>-migrated/<vm>-migrated.vmdk" with a plain datastore name.
-func checkInPlaceDiskPath(diskPath, vmName string, imported bool) (string, error) {
-	if !imported || vmName == "" || !strings.HasPrefix(diskPath, "[") {
+// the VM named vmName, requested by owner, and returns the datastore the disk
+// is on. diskPath is accepted only when imported is set, owner carries a
+// namespace (and, when set, owner.Name is vmName), and diskPath is
+// byte-for-byte "[<ds>] <ns>.<vm>-migrated/<ns>.<vm>-migrated.vmdk" with a
+// plain datastore name.
+func checkInPlaceDiskPath(diskPath string, owner contracts.ObjectIdentity, vmName string, imported bool) (string, error) {
+	if !imported || vmName == "" || owner.Namespace == "" || (owner.Name != "" && owner.Name != vmName) {
+		return "", errInPlaceDiskRejected()
+	}
+	if validLandingIdentity(owner.Namespace, vmName) != nil || !strings.HasPrefix(diskPath, "[") {
 		return "", errInPlaceDiskRejected()
 	}
 	end := strings.Index(diskPath, "]")
@@ -173,13 +260,53 @@ func checkInPlaceDiskPath(diskPath, vmName string, imported bool) (string, error
 		return "", errInPlaceDiskRejected()
 	}
 	ds := diskPath[1:end]
-	if strings.TrimSpace(ds) != ds || strings.ContainsAny(ds, "[]/") || strings.ContainsFunc(ds, isControlRune) {
+	if strings.TrimSpace(ds) != ds || strings.ContainsAny(ds, "[]/*?") || strings.ContainsFunc(ds, isControlRune) {
 		return "", errInPlaceDiskRejected()
 	}
-	if diskPath[end+1:] != " "+importedDiskRelPath(vmName) {
+	switch diskPath[end+1:] {
+	case " " + landingRelPath(owner.Namespace, vmName):
+		return ds, nil
+	case " " + legacyLandingRelPath(vmName):
+		return "", errLegacyLanding()
+	default:
 		return "", errInPlaceDiskRejected()
 	}
-	return ds, nil
+}
+
+// landingLockKey is the Provider.landingLocks key of the landing folder
+// "[<ds>] <folder>" (case-folded: datastore names and paths may compare
+// case-insensitively).
+func landingLockKey(dsName, folder string) string {
+	return strings.ToLower("[" + dsName + "] " + folder)
+}
+
+// landingLockKeyOfPath is landingLockKey for the folder of a datastore path.
+func landingLockKeyOfPath(diskPath string) string {
+	var dp object.DatastorePath
+	dp.FromString(diskPath)
+	return landingLockKey(dp.Datastore, path.Dir(dp.Path))
+}
+
+// importCleanupTimeout bounds a failed import's landing-folder cleanup, which
+// runs on a fresh context (the request's may be done).
+const importCleanupTimeout = 120 * time.Second
+
+// cleanupFailedImport deletes a failed import's landing folder
+// "[<dsName>] <id>" — but only after checking again, right before the delete,
+// that no VM uses a file in it. The caller holds the folder's landing lock.
+func (p *Provider) cleanupFailedImport(dsName, id string) {
+	ctx, cancel := context.WithTimeout(context.Background(), importCleanupTimeout)
+	defer cancel()
+	folderPath := fmt.Sprintf("[%s] %s", dsName, id)
+	if err := p.ensureImportFolderUnused(ctx, dsName, id); err != nil {
+		p.logger.Warn("Not deleting a failed import's landing folder: it could not be confirmed unused",
+			"path", folderPath, "error", err)
+		return
+	}
+	if err := NewDatastoreFileManager(p).DeleteFile(ctx, folderPath); err != nil {
+		p.logger.Warn("Failed to delete partial import folder after failure (manual cleanup may be needed)",
+			"path", folderPath, "error", err)
+	}
 }
 
 // isControlRune reports C0 controls (including NUL), DEL and C1 controls.
@@ -411,7 +538,7 @@ func (p *Provider) ensureImportFolderUnused(ctx context.Context, dsName, id stri
 func (p *Provider) detachForeignDisks(ctx context.Context, vm *object.VirtualMachine) error {
 	var vmMo mo.VirtualMachine
 	if err := property.DefaultCollector(p.client.Client).RetrieveOne(ctx, vm.Reference(),
-		[]string{propName, propConfigHardwareDevice, propConfigFilesVMPathName, propSnapshot}, &vmMo); err != nil {
+		[]string{propName, propConfigHardwareDevice, propConfigFilesVMPathName, propSnapshot, propConfigExtraConfig}, &vmMo); err != nil {
 		return fmt.Errorf("read the disks of VM %s: %w", vm.Reference().Value, err)
 	}
 	if vmMo.Config == nil {
@@ -424,7 +551,12 @@ func (p *Provider) detachForeignDisks(ctx context.Context, vm *object.VirtualMac
 		return nil
 	}
 	homeDir := home.dir()
-	ownImported := strings.ToLower(importedDiskRelPath(vmMo.Name))
+	// The VM's own landing disk: under its namespaced name (the namespace from
+	// its owner stamp) or, for a VM created before v0.4.0, the bare name.
+	ownImported := []string{strings.ToLower(legacyLandingRelPath(vmMo.Name))}
+	if owner, err := ownerFromExtraConfig(vmMo.Config.ExtraConfig); err == nil && owner.Namespace != "" {
+		ownImported = append(ownImported, strings.ToLower(landingRelPath(owner.Namespace, vmMo.Name)))
+	}
 
 	var (
 		users   inventoryFileUsers
@@ -444,7 +576,7 @@ func (p *Provider) detachForeignDisks(ctx context.Context, vm *object.VirtualMac
 		if parsed && f.inDir(homeDir) {
 			continue // the VM's own directory
 		}
-		mayOwn := parsed && homeDir.path != "" && (f.dir().path == homeDir.path || f.path == ownImported)
+		mayOwn := parsed && homeDir.path != "" && (f.dir().path == homeDir.path || slices.Contains(ownImported, f.path))
 		if mayOwn {
 			if users == nil {
 				var err error

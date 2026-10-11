@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -46,9 +47,23 @@ import (
 // disk another VM uses.
 
 // ownMigratedDiskPath is the landing path ImportDisk gives the disk it imports
-// for the VM named vmName on the simulator's default datastore.
+// for the VM named vmName in ownerTeamA's namespace, on the simulator's
+// default datastore.
 func ownMigratedDiskPath(vmName string) string {
-	return "[" + simDatastore + "] " + importedDiskRelPath(vmName)
+	return landingPathIn(ownerTeamA.Namespace, vmName)
+}
+
+// landingPathIn is the landing path of namespace/vmName on the default
+// datastore.
+func landingPathIn(namespace, vmName string) string {
+	return "[" + simDatastore + "] " + landingRelPath(namespace, vmName)
+}
+
+// ownerNamed is o's identity on the wire, for the VM named name (the owner of
+// a create names the VM being created).
+func ownerNamed(o contracts.ObjectIdentity, name string) *providerv1.ObjectIdentity {
+	o.Name = name
+	return wireOwner(o)
 }
 
 // importedDiskImageJSON is the ImageJson the manager sends for a VM created
@@ -57,12 +72,20 @@ func importedDiskImageJSON(diskPath string, imported bool) string {
 	return fmt.Sprintf(`{"Path":%q,"Format":"vmdk","ImportedDisk":%t}`, diskPath, imported)
 }
 
-// makeOwnMigratedDisk lands vmName's migration disk at ownMigratedDiskPath and
-// returns the ImageJson of a Create that attaches it (ImportedDisk set).
+// makeOwnMigratedDisk lands vmName's migration disk (ownerTeamA's namespace)
+// at ownMigratedDiskPath and returns the ImageJson of a Create that attaches
+// it (ImportedDisk set).
 func makeOwnMigratedDisk(t *testing.T, p *Provider, vmName string) string {
 	t.Helper()
-	diskPath := ownMigratedDiskPath(vmName)
-	makeImportedDisk(t, p, "["+simDatastore+"] "+importedDiskName(vmName), diskPath)
+	return makeLandingDisk(t, p, ownerTeamA.Namespace, vmName)
+}
+
+// makeLandingDisk lands namespace/vmName's migration disk at landingPathIn and
+// returns the ImageJson of a Create that attaches it (ImportedDisk set).
+func makeLandingDisk(t *testing.T, p *Provider, namespace, vmName string) string {
+	t.Helper()
+	diskPath := landingPathIn(namespace, vmName)
+	makeImportedDisk(t, p, "["+simDatastore+"] "+landingName(namespace, vmName), diskPath)
 	return importedDiskImageJSON(diskPath, true)
 }
 
@@ -219,43 +242,93 @@ func (r *failVMInventoryView) RoundTrip(ctx context.Context, req, res soap.HasFa
 
 func TestCheckInPlaceDiskPath(t *testing.T) {
 	const vm = "web"
-	ok := "[ds1] web-migrated/web-migrated.vmdk"
-	ds, err := checkInPlaceDiskPath(ok, vm, true)
+	owner := contracts.ObjectIdentity{UID: "u", Namespace: "team-a", Name: vm}
+	ok := "[ds1] team-a.web-migrated/team-a.web-migrated.vmdk"
+	ds, err := checkInPlaceDiskPath(ok, owner, vm, true)
 	require.NoError(t, err)
 	assert.Equal(t, "ds1", ds)
-	_, err = checkInPlaceDiskPath("[my datastore] web-migrated/web-migrated.vmdk", vm, true)
+	_, err = checkInPlaceDiskPath("[my datastore] team-a.web-migrated/team-a.web-migrated.vmdk", owner, vm, true)
 	require.NoError(t, err, "datastore names may contain spaces")
+	_, err = checkInPlaceDiskPath(ok, contracts.ObjectIdentity{Namespace: "team-a"}, vm, true)
+	require.NoError(t, err, "an owner without a name is the VM being created")
 
+	noNamespace := owner
+	noNamespace.Namespace = ""
+	otherName := owner
+	otherName.Name = "db"
 	for name, tc := range map[string]struct {
 		path     string
+		owner    contracts.ObjectIdentity
 		vm       string
 		imported bool
 	}{
-		"not verified by the operator": {ok, vm, false},
-		"another VM's migrated disk":   {"[ds1] db-migrated/db-migrated.vmdk", vm, true},
-		"another VM's own disk":        {"[ds1] web/web.vmdk", vm, true},
-		"name prefix only":             {"[ds1] web-migrated/web-migrated.vmdk", "we", true},
-		"other folder":                 {"[ds1] x/web-migrated.vmdk", vm, true},
-		"nested":                       {"[ds1] a/web-migrated/web-migrated.vmdk", vm, true},
-		"dot-dot":                      {"[ds1] web-migrated/../victim/victim.vmdk", vm, true},
-		"no space":                     {"[ds1]web-migrated/web-migrated.vmdk", vm, true},
-		"two spaces":                   {"[ds1]  web-migrated/web-migrated.vmdk", vm, true},
-		"trailing text":                {ok + " ", vm, true},
-		"case variant":                 {"[ds1] WEB-migrated/WEB-migrated.vmdk", vm, true},
-		"flat extent":                  {"[ds1] web-migrated/web-migrated-flat.vmdk", vm, true},
-		"empty datastore":              {"[] web-migrated/web-migrated.vmdk", vm, true},
-		"padded datastore":             {"[ ds1] web-migrated/web-migrated.vmdk", vm, true},
-		"bracket in datastore":         {"[d[s] web-migrated/web-migrated.vmdk", vm, true},
-		"host path":                    {"/vmfs/volumes/ds1/web-migrated/web-migrated.vmdk", vm, true},
-		"control character":            {"[ds\x001] web-migrated/web-migrated.vmdk", vm, true},
-		"empty":                        {"", vm, true},
-		"no VM name":                   {ok, "", true},
+		"not verified by the operator": {ok, owner, vm, false},
+		"owner without a namespace":    {ok, noNamespace, vm, true},
+		"owner names another VM":       {ok, otherName, vm, true},
+		"same name, another namespace": {"[ds1] team-b.web-migrated/team-b.web-migrated.vmdk", owner, vm, true},
+		"another VM's landing disk":    {"[ds1] team-a.db-migrated/team-a.db-migrated.vmdk", owner, vm, true},
+		"another VM's own disk":        {"[ds1] web/web.vmdk", owner, vm, true},
+		"name prefix only":             {ok, contracts.ObjectIdentity{Namespace: "team-a"}, "we", true},
+		"namespace prefix only":        {ok, contracts.ObjectIdentity{Namespace: "team"}, vm, true},
+		"other folder":                 {"[ds1] x/team-a.web-migrated.vmdk", owner, vm, true},
+		"nested":                       {"[ds1] a/team-a.web-migrated/team-a.web-migrated.vmdk", owner, vm, true},
+		"dot-dot":                      {"[ds1] team-a.web-migrated/../victim/victim.vmdk", owner, vm, true},
+		"no space":                     {"[ds1]team-a.web-migrated/team-a.web-migrated.vmdk", owner, vm, true},
+		"two spaces":                   {"[ds1]  team-a.web-migrated/team-a.web-migrated.vmdk", owner, vm, true},
+		"trailing text":                {ok + " ", owner, vm, true},
+		"case variant":                 {"[ds1] TEAM-A.web-migrated/TEAM-A.web-migrated.vmdk", owner, vm, true},
+		"flat extent":                  {"[ds1] team-a.web-migrated/team-a.web-migrated-flat.vmdk", owner, vm, true},
+		"empty datastore":              {"[] team-a.web-migrated/team-a.web-migrated.vmdk", owner, vm, true},
+		"padded datastore":             {"[ ds1] team-a.web-migrated/team-a.web-migrated.vmdk", owner, vm, true},
+		"bracket in datastore":         {"[d[s] team-a.web-migrated/team-a.web-migrated.vmdk", owner, vm, true},
+		"glob in datastore":            {"[ds*] team-a.web-migrated/team-a.web-migrated.vmdk", owner, vm, true},
+		"host path":                    {"/vmfs/volumes/ds1/team-a.web-migrated/team-a.web-migrated.vmdk", owner, vm, true},
+		"control character":            {"[ds\x001] team-a.web-migrated/team-a.web-migrated.vmdk", owner, vm, true},
+		"empty":                        {"", owner, vm, true},
+		"no VM name":                   {ok, owner, "", true},
+		"namespace not a DNS label":    {"[ds1] a.b.web-migrated/a.b.web-migrated.vmdk", contracts.ObjectIdentity{Namespace: "a.b"}, vm, true},
 	} {
 		t.Run(name, func(t *testing.T) {
-			_, err := checkInPlaceDiskPath(tc.path, tc.vm, tc.imported)
+			_, err := checkInPlaceDiskPath(tc.path, tc.owner, tc.vm, tc.imported)
 			requireCode(t, err, codes.InvalidArgument)
 			assert.Equal(t, inPlaceDiskRejectedMessage, status.Convert(err).Message(),
 				"the refusal is a constant message: never the caller's path")
+		})
+	}
+
+	t.Run("pre-v0.4.0 bare landing name", func(t *testing.T) {
+		_, err := checkInPlaceDiskPath("[ds1] web-migrated/web-migrated.vmdk", owner, vm, true)
+		requireCode(t, err, codes.InvalidArgument)
+		assert.Equal(t, legacyLandingMessage, status.Convert(err).Message())
+	})
+}
+
+func TestImportLandingName(t *testing.T) {
+	req := func(ns, name, targetName string) *providerv1.ImportDiskRequest {
+		r := &providerv1.ImportDiskRequest{TargetName: targetName}
+		if ns != "" || name != "" {
+			r.TargetVm = &providerv1.ObjectIdentity{Namespace: ns, Name: name}
+		}
+		return r
+	}
+	id, err := importLandingName(req("team-a", "web", "web-migrated"))
+	require.NoError(t, err)
+	assert.Equal(t, "team-a.web-migrated", id)
+	id, err = importLandingName(req("team-b", "web", ""))
+	require.NoError(t, err)
+	assert.Equal(t, "team-b.web-migrated", id, "the same VM name in another namespace lands elsewhere")
+
+	for name, r := range map[string]*providerv1.ImportDiskRequest{
+		"no target VM (older manager)":  req("", "", "web-migrated"),
+		"no namespace":                  req("", "web", "web-migrated"),
+		"target name of another VM":     req("team-a", "web", "db-migrated"),
+		"target name aims at a landing": req("team-a", "web", "team-b.web-migrated"),
+		"namespace with a dot":          req("team.a", "web", ""),
+		"name with a slash":             req("team-a", "a/b", ""),
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := importLandingName(r)
+			requireCode(t, err, codes.InvalidArgument)
 		})
 	}
 }
@@ -314,7 +387,7 @@ func TestCreate_InPlaceDisk_RefusesUnverifiedOwnPath(t *testing.T) {
 	_, err := p.Create(context.Background(), &providerv1.CreateRequest{
 		Name:      "migrated",
 		ImageJson: importedDiskImageJSON(ownMigratedDiskPath("migrated"), false),
-		Owner:     wireOwner(ownerTeamA),
+		Owner:     ownerNamed(ownerTeamA, "migrated"),
 	})
 	requireCode(t, err, codes.InvalidArgument)
 }
@@ -326,7 +399,7 @@ func TestCreate_InPlaceDisk_AcceptsOwnMigratedDisk(t *testing.T) {
 	resp, err := p.Create(context.Background(), &providerv1.CreateRequest{
 		Name:      "migrated",
 		ImageJson: makeOwnMigratedDisk(t, p, "migrated"),
-		Owner:     wireOwner(ownerTeamA),
+		Owner:     ownerNamed(ownerTeamA, "migrated"),
 	})
 	require.NoError(t, err)
 	assert.Equal(t, []string{ownMigratedDiskPath("migrated")}, vmDiskFiles(t, p, resp.Id))
@@ -350,7 +423,7 @@ func TestCreate_InPlaceDisk_IgnoresOtherProvidersPath(t *testing.T) {
 // TestCreate_InPlaceDisk_RefusesDiskUsedByAnotherVM: a landing disk some other
 // VM or template references is never attached, whoever claims it.
 func TestCreate_InPlaceDisk_RefusesDiskUsedByAnotherVM(t *testing.T) {
-	t.Run("same-named VM in another folder (another namespace)", func(t *testing.T) {
+	t.Run("a re-created VirtualMachine in another folder", func(t *testing.T) {
 		p, _ := newOwnershipSim(t)
 		ctx := context.Background()
 		imageJSON := makeOwnMigratedDisk(t, p, "web")
@@ -360,7 +433,7 @@ func TestCreate_InPlaceDisk_RefusesDiskUsedByAnotherVM(t *testing.T) {
 		_, err = defaultVMFolder(t, p).CreateFolder(ctx, simOtherDir)
 		require.NoError(t, err)
 		_, err = p.Create(ctx, &providerv1.CreateRequest{
-			Name: "web", ImageJson: imageJSON, Owner: wireOwner(ownerTeamB),
+			Name: "web", ImageJson: imageJSON, Owner: wireOwner(ownerTeamA),
 			PlacementJson: fmt.Sprintf(`{"Folder":%q}`, simOtherDir),
 		})
 		requireCode(t, err, codes.FailedPrecondition)
@@ -388,7 +461,7 @@ func TestCreate_InPlaceDisk_ScanFailureFailsClosed(t *testing.T) {
 	imageJSON := makeOwnMigratedDisk(t, p, "migrated")
 	p.client.RoundTripper = &failVMInventoryView{RoundTripper: p.client.RoundTripper, root: p.client.ServiceContent.RootFolder}
 
-	_, err := p.Create(context.Background(), &providerv1.CreateRequest{Name: "migrated", ImageJson: imageJSON, Owner: wireOwner(ownerTeamA)})
+	_, err := p.Create(context.Background(), &providerv1.CreateRequest{Name: "migrated", ImageJson: imageJSON, Owner: ownerNamed(ownerTeamA, "migrated")})
 	requireCode(t, err, codes.Unavailable)
 	assert.Equal(t, []string{contracts.VMDiskCheckFailedReason}, errorReasons(err))
 	assert.NotContains(t, err.Error(), "secret-ds")
@@ -428,7 +501,7 @@ func TestDelete_DeletesOwnMigratedDisk(t *testing.T) {
 	p, _ := newOwnershipSim(t)
 	withVCenterDestroySemantics(p)
 	ctx := context.Background()
-	resp, err := p.Create(ctx, &providerv1.CreateRequest{Name: "migrated", ImageJson: makeOwnMigratedDisk(t, p, "migrated"), Owner: wireOwner(ownerTeamA)})
+	resp, err := p.Create(ctx, &providerv1.CreateRequest{Name: "migrated", ImageJson: makeOwnMigratedDisk(t, p, "migrated"), Owner: ownerNamed(ownerTeamA, "migrated")})
 	require.NoError(t, err)
 
 	_, err = p.Delete(ctx, &providerv1.DeleteRequest{Id: resp.Id})
@@ -511,7 +584,7 @@ func TestDelete_TemplateCloneUnchanged(t *testing.T) {
 func TestEnsureImportFolderUnused(t *testing.T) {
 	p, _ := newOwnershipSim(t)
 	ctx := context.Background()
-	id := importedDiskName("web")
+	id := landingName(ownerTeamA.Namespace, "web")
 
 	require.NoError(t, p.ensureImportFolderUnused(ctx, simDatastore, id), "a free landing folder is fine")
 
@@ -522,5 +595,148 @@ func TestEnsureImportFolderUnused(t *testing.T) {
 	assert.Equal(t, []string{contracts.VMDiskInUseReason}, errorReasons(err))
 
 	p.client.RoundTripper = &failVMInventoryView{RoundTripper: p.client.RoundTripper, root: p.client.ServiceContent.RootFolder}
-	requireCode(t, p.ensureImportFolderUnused(ctx, simDatastore, importedDiskName("db")), codes.Unavailable)
+	requireCode(t, p.ensureImportFolderUnused(ctx, simDatastore, landingName(ownerTeamA.Namespace, "db")), codes.Unavailable)
+}
+
+// --- namespaced landing names --------------------------------------------------
+
+// TestCreate_InPlaceDisk_SameNameOtherNamespaceCannotAttach: VM names repeat
+// across namespaces. team-b's "web" can neither attach team-a's landing disk
+// nor reach it through its own landing name.
+func TestCreate_InPlaceDisk_SameNameOtherNamespaceCannotAttach(t *testing.T) {
+	p, _ := newOwnershipSim(t)
+	ctx := context.Background()
+	teamA := makeLandingDisk(t, p, ownerTeamA.Namespace, "web")
+	teamB := makeLandingDisk(t, p, ownerTeamB.Namespace, "web")
+	require.NotEqual(t, teamA, teamB, "the two namespaces land in different folders")
+
+	_, err := defaultVMFolder(t, p).CreateFolder(ctx, simOtherDir)
+	require.NoError(t, err)
+	_, err = p.Create(ctx, &providerv1.CreateRequest{
+		Name: "web", ImageJson: teamA, Owner: wireOwner(ownerTeamB),
+		PlacementJson: fmt.Sprintf(`{"Folder":%q}`, simOtherDir),
+	})
+	requireCode(t, err, codes.InvalidArgument)
+	assert.Equal(t, inPlaceDiskRejectedMessage, status.Convert(err).Message())
+
+	b, err := p.Create(ctx, &providerv1.CreateRequest{
+		Name: "web", ImageJson: teamB, Owner: wireOwner(ownerTeamB),
+		PlacementJson: fmt.Sprintf(`{"Folder":%q}`, simOtherDir),
+	})
+	require.NoError(t, err)
+	assert.Equal(t, []string{landingPathIn(ownerTeamB.Namespace, "web")}, vmDiskFiles(t, p, b.Id))
+
+	a, err := p.Create(ctx, &providerv1.CreateRequest{Name: "web", ImageJson: teamA, Owner: wireOwner(ownerTeamA)})
+	require.NoError(t, err, "team-a's landing disk is untouched and still its own")
+	assert.Equal(t, []string{landingPathIn(ownerTeamA.Namespace, "web")}, vmDiskFiles(t, p, a.Id))
+}
+
+// TestCreate_InPlaceDisk_RefusesWithoutOwnerNamespace: a create without the
+// requesting VirtualMachine's namespace (an older manager) cannot prove the
+// landing disk is its own.
+func TestCreate_InPlaceDisk_RefusesWithoutOwnerNamespace(t *testing.T) {
+	p, _ := newOwnershipSim(t)
+	imageJSON := makeOwnMigratedDisk(t, p, "migrated")
+	for name, owner := range map[string]*providerv1.ObjectIdentity{
+		"no owner":            nil,
+		"owner, no namespace": {Uid: ownerTeamA.UID, Name: "migrated"},
+		"owner of another VM": ownerNamed(ownerTeamA, "other"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := p.Create(context.Background(), &providerv1.CreateRequest{Name: "migrated", ImageJson: imageJSON, Owner: owner})
+			requireCode(t, err, codes.InvalidArgument)
+		})
+	}
+}
+
+// TestCreate_InPlaceDisk_LegacyLandingNeedsANewMigration: a disk a release
+// before v0.4.0 landed under the bare "<vm>-migrated" name (an in-flight
+// migration at upgrade) is refused with a message that says to redo it.
+func TestCreate_InPlaceDisk_LegacyLandingNeedsANewMigration(t *testing.T) {
+	p, _ := newOwnershipSim(t)
+	legacy := "[" + simDatastore + "] " + legacyLandingRelPath("migrated")
+	makeImportedDisk(t, p, "["+simDatastore+"] migrated"+contracts.ImportedDiskNameSuffix, legacy)
+
+	_, err := p.Create(context.Background(), &providerv1.CreateRequest{
+		Name: "migrated", ImageJson: importedDiskImageJSON(legacy, true), Owner: ownerNamed(ownerTeamA, "migrated"),
+	})
+	requireCode(t, err, codes.InvalidArgument)
+	assert.Equal(t, legacyLandingMessage, status.Convert(err).Message())
+	refs, err := p.vmsNamedInFolder(context.Background(), defaultVMFolder(t, p), "migrated")
+	require.NoError(t, err)
+	assert.Empty(t, refs)
+	assert.True(t, datastoreFileExists(t, p, legacy), "the old landing disk is left in place")
+}
+
+// TestCreate_InPlaceDisk_CheckRunsUnderTheLandingLock: the in-use check runs
+// while the landing folder's lock is held, so work that finishes on the same
+// landing disk while a create waits for the lock — here another VM attaching
+// it — is seen, and the create refuses. (Two Creates cannot run concurrently
+// in this test: the provider's shared govmomi Finder is not safe for that.)
+func TestCreate_InPlaceDisk_CheckRunsUnderTheLandingLock(t *testing.T) {
+	p, _ := newOwnershipSim(t)
+	ctx := context.Background()
+	imageJSON := makeOwnMigratedDisk(t, p, "web")
+	other, err := p.Create(ctx, templateCreateRequest("other", "", wireOwner(ownerTeamB)))
+	require.NoError(t, err)
+
+	key := landingLockKeyOfPath(ownMigratedDiskPath("web"))
+	unlock, err := p.landingLocks.lock(ctx, key)
+	require.NoError(t, err)
+	done := make(chan error, 1)
+	go func() {
+		_, err := p.Create(ctx, &providerv1.CreateRequest{Name: "web", ImageJson: imageJSON, Owner: wireOwner(ownerTeamA)})
+		done <- err
+	}()
+	require.Eventually(t, func() bool {
+		p.landingLocks.mu.Lock()
+		defer p.landingLocks.mu.Unlock()
+		l := p.landingLocks.locks[key]
+		return l != nil && l.refs == 2
+	}, 10*time.Second, 5*time.Millisecond, "the create waits for the landing lock")
+
+	attachDiskInPlace(t, p, other.Id, ownMigratedDiskPath("web"))
+	unlock()
+
+	err = <-done
+	requireCode(t, err, codes.FailedPrecondition)
+	assert.Equal(t, []string{contracts.VMDiskInUseReason}, errorReasons(err))
+}
+
+// TestCleanupFailedImport: a failed import's cleanup deletes its landing
+// folder only when, checked again right before the delete, no VM uses it.
+func TestCleanupFailedImport(t *testing.T) {
+	p, _ := newOwnershipSim(t)
+	ctx := context.Background()
+
+	_, err := p.Create(ctx, &providerv1.CreateRequest{Name: "web", ImageJson: makeOwnMigratedDisk(t, p, "web"), Owner: wireOwner(ownerTeamA)})
+	require.NoError(t, err)
+	p.cleanupFailedImport(simDatastore, landingName(ownerTeamA.Namespace, "web"))
+	assert.True(t, datastoreFileExists(t, p, ownMigratedDiskPath("web")), "a folder in use is never deleted")
+
+	makeOwnMigratedDisk(t, p, "db")
+	p.cleanupFailedImport(simDatastore, landingName(ownerTeamA.Namespace, "db"))
+	assert.False(t, datastoreFileExists(t, p, ownMigratedDiskPath("db")), "an unused failed landing is cleaned up")
+}
+
+func TestKeyedMutex(t *testing.T) {
+	var k keyedMutex
+	ctx := context.Background()
+	unlockA, err := k.lock(ctx, "a")
+	require.NoError(t, err)
+	unlockB, err := k.lock(ctx, "b")
+	require.NoError(t, err, "another key is independent")
+
+	short, cancel := context.WithTimeout(ctx, 20*time.Millisecond)
+	defer cancel()
+	_, err = k.lock(short, "a")
+	require.ErrorIs(t, err, context.DeadlineExceeded, "a held key blocks")
+
+	unlockA()
+	unlockA() // idempotent
+	again, err := k.lock(ctx, "a")
+	require.NoError(t, err)
+	again()
+	unlockB()
+	assert.Empty(t, k.locks, "unused keys are dropped")
 }
