@@ -203,6 +203,11 @@ const (
 	// names more than one owner across its definitions; a transfer would be
 	// refused, so nothing is created for it.
 	skipStampUnreliable adoptionSkipReason = "owner stamp unreadable or naming more than one owner (inspect the domain's metadata)"
+	// skipArtifact: the provider marks it as shared image state
+	// (contracts.VMInfoArtifactKey: a template or an image artifact). Adopting
+	// it would let a tenant's delete or resize destroy or change the image for
+	// every consumer. Checked before a pending binding is completed.
+	skipArtifact adoptionSkipReason = "a template or image artifact, not a VM"
 	// skipSingleHostManaged: an unstamped domain whose name is the status.id
 	// of a VirtualMachine bound through a single-host (not clustered)
 	// Provider. A hypervisor fronted by both a single-host and a clustered
@@ -513,6 +518,9 @@ func (r *VMAdoptionReconciler) routedAdopter(ctx context.Context, provider *infr
 //     Provider that is still waiting for its binding and was created for this
 //     very (host, id) (isAwaitingAdoptionOf): its binding is completed;
 //   - a VM without a host id or UUID cannot be adopted (skipped);
+//   - a VM the provider marks as a template or image artifact
+//     (contracts.VMInfoArtifactKey, any value) is skipped, and no pending
+//     binding is completed onto it;
 //   - a VM on a Host whose endpoint another Host object names is skipped
 //     (sharedEndpointHosts);
 //   - a VM whose UUID is listed on more than one host, or one of whose disk
@@ -561,6 +569,10 @@ func planClusteredAdoption(provider *infravirtrigaudiov1beta1.Provider, listed c
 			continue
 		}
 		if managed[vmHostKey{host: info.HostID, id: info.ID}] {
+			continue
+		}
+		if isArtifact(info) {
+			skip(info, skipArtifact)
 			continue
 		}
 		if guards.sharedEndpointHosts[info.HostID] {
@@ -1156,12 +1168,14 @@ func endpointKey(endpoint string) string {
 // adoptedProviderRaw is the listing's provider data recorded in an adopted
 // VM's status.provider, without the owner-stamp keys: after the transfer they
 // describe the domain's previous owner (possibly another namespace's UID), are
-// stale, and are nothing the VM's reader needs.
+// stale, and are nothing the VM's reader needs. The artifact marker
+// (contracts.VMInfoArtifactKey) is stripped too: a VM carrying it is never
+// adopted, and status must never claim a VM is an image artifact.
 func adoptedProviderRaw(raw map[string]string) map[string]string {
 	out := make(map[string]string, len(raw))
 	for k, v := range raw {
 		switch k {
-		case contracts.VMInfoOwnerUIDKey, contracts.VMInfoOwnerStampStateKey:
+		case contracts.VMInfoOwnerUIDKey, contracts.VMInfoOwnerStampStateKey, contracts.VMInfoArtifactKey:
 			continue
 		}
 		out[k] = v

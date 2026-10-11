@@ -45,6 +45,34 @@ const (
 	OwnerStampMultiple = "multiple"
 )
 
+// VMInfoArtifactKey is the VMInfo.ProviderRaw key under which a provider marks
+// a listed object that is shared image state rather than a VM: ArtifactTemplate
+// or ArtifactImage.
+//
+// ListVMs is the adoption discovery feed, and every VM it returns can become a
+// tenant-owned VirtualMachine whose delete destroys the object. A provider
+// therefore does not list templates or image artifacts at all (vSphere leaves
+// them out in listExclusionFor; Proxmox skips template == 1). A provider that
+// does list one MUST set this key on it. Adoption, single-host and clustered,
+// skips any VM carrying the key, whatever its value (including a value this
+// release does not know), and never copies it into a VirtualMachine's status.
+//
+// The provider-side exclusion is the primary control; this key is the
+// manager-side backstop for third-party and SDK providers. A VirtRigaud
+// provider keeps excluding these objects rather than returning them tagged:
+// an older manager does not know the key, and the upgrade order rolls
+// providers before (or independently of) the manager.
+const VMInfoArtifactKey = "artifact"
+
+const (
+	// ArtifactTemplate: a hypervisor template (vSphere config.template,
+	// Proxmox template == 1) that VMs are cloned from.
+	ArtifactTemplate = "template"
+	// ArtifactImage: a VirtRigaud prepared image or an image import in flight
+	// (an object carrying a prepared-image stamp), template or not.
+	ArtifactImage = "image"
+)
+
 // TransferOwnerRequest asks a clustered provider to hand one VM on one of its
 // hosts to a VirtualMachine by re-stamping the VM's owner (ADR-0007 Addendum
 // A, slice 4). It is the manager-side mirror of the provider.v1

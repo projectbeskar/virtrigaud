@@ -332,7 +332,9 @@ func (r *VMAdoptionReconciler) discoverUnmanagedVMs(ctx context.Context, provide
 // (contracts.VMInfoOwnerStampStateKey set to any value: unreadable, or naming
 // more than one owner) is never returned, managed or not: who owns it cannot
 // be told, so it is not offered for adoption (fail closed, as the clustered
-// flow's skipStampUnreliable).
+// flow's skipStampUnreliable). Nor is a VM the provider marks as shared image
+// state (contracts.VMInfoArtifactKey set to any value: a template or an image
+// artifact), whose delete would destroy the image for every consumer.
 func unmanagedProviderVMs(provider *infravirtrigaudiov1beta1.Provider, allVMs []contracts.VMInfo,
 	vms []infravirtrigaudiov1beta1.VirtualMachine) []contracts.VMInfo {
 	managedVMIDs := make(map[string]bool)
@@ -362,7 +364,7 @@ func unmanagedProviderVMs(provider *infravirtrigaudiov1beta1.Provider, allVMs []
 
 	var unmanaged []contracts.VMInfo
 	for _, vmInfo := range allVMs {
-		if vmInfo.ProviderRaw[contracts.VMInfoOwnerStampStateKey] != "" {
+		if vmInfo.ProviderRaw[contracts.VMInfoOwnerStampStateKey] != "" || isArtifact(vmInfo) {
 			continue
 		}
 		if managedVMIDs[vmInfo.ID] || ownedByLiveVM(vmInfo, liveUIDs) {
@@ -371,6 +373,14 @@ func unmanagedProviderVMs(provider *infravirtrigaudiov1beta1.Provider, allVMs []
 		unmanaged = append(unmanaged, vmInfo)
 	}
 	return unmanaged
+}
+
+// isArtifact reports whether the provider marked vmInfo as shared image state
+// (contracts.VMInfoArtifactKey present, whatever its value, even empty): a
+// template or an image artifact, never adopted.
+func isArtifact(vmInfo contracts.VMInfo) bool {
+	_, ok := vmInfo.ProviderRaw[contracts.VMInfoArtifactKey]
+	return ok
 }
 
 // ownedByLiveVM reports whether vmInfo carries an owner stamp

@@ -1066,3 +1066,67 @@ func TestClusteredAdoption_SharedEndpointGuardFailsClosed(t *testing.T) {
 		assert.Contains(t, adoptionStatus(t, r).Message, "list Hosts")
 	})
 }
+
+// TestClusteredAdoption_ArtifactIsNotAdopted: a VM the provider marks as a
+// template or image artifact (contracts.VMInfoArtifactKey, any value, even
+// one this release does not know or an empty one) is skipped before anything
+// is created or transferred, and no pending binding is completed onto it.
+func TestClusteredAdoption_ArtifactIsNotAdopted(t *testing.T) {
+	for _, value := range []string{contracts.ArtifactTemplate, contracts.ArtifactImage, "future-kind", ""} {
+		t.Run("artifact="+value, func(t *testing.T) {
+			prov := &artifactAdopter{value: value, fakeClusteredAdopter: fakeClusteredAdopter{caps: routedAdoptionCaps, domains: []*fakeDomain{
+				{host: "host-a", id: "golden", uuid: "uuid-a-golden", power: "Off"},
+			}}}
+			r := clusteredAdoptionReconciler(t, prov, clusteredAdoptionProvider(), clusterHost("host-a", "prov-c"))
+
+			reconcileAdoption(t, r)
+			assert.Empty(t, prov.transfers, "never stamped")
+			var vms infravirtrigaudiov1beta1.VirtualMachineList
+			require.NoError(t, r.List(context.Background(), &vms))
+			assert.Empty(t, vms.Items, "nothing is created for it")
+			assert.Contains(t, adoptionStatus(t, r).Message, string(skipArtifact))
+		})
+	}
+
+	t.Run("a pending binding is not completed onto an artifact", func(t *testing.T) {
+		waiting := awaitingAdoptedVM("host-a", "web", "uid-waiting")
+		prov := &artifactAdopter{value: contracts.ArtifactTemplate, fakeClusteredAdopter: fakeClusteredAdopter{
+			caps: routedAdoptionCaps, domains: []*fakeDomain{
+				{host: "host-a", id: "web", uuid: "uuid-a-web", owner: "uid-waiting", cpu: 1, memMiB: 1024, maxMemMiB: 1024,
+					vcpusOnline: 1, power: "Off"},
+			}}}
+		r := clusteredAdoptionReconciler(t, prov, clusteredAdoptionProvider(), clusterHost("host-a", "prov-c"), waiting)
+
+		reconcileAdoption(t, r)
+		assert.Empty(t, adoptedVMGet(t, r, waiting.Name).Status.ID, "never bound to a template")
+		assert.Empty(t, prov.transfers)
+	})
+}
+
+// artifactAdopter lists every VM marked as an artifact with value.
+type artifactAdopter struct {
+	fakeClusteredAdopter
+	value string
+}
+
+func (f *artifactAdopter) ListVMs(ctx context.Context) (contracts.VMList, error) {
+	list, err := f.fakeClusteredAdopter.ListVMs(ctx)
+	for i := range list.VMs {
+		list.VMs[i].ProviderRaw[contracts.VMInfoArtifactKey] = f.value
+	}
+	return list, err
+}
+
+// TestAdoptedProviderRaw_StripsStampAndArtifactKeys: an adopted VM's
+// status.provider never carries the previous owner's stamp keys or an
+// artifact marker.
+func TestAdoptedProviderRaw_StripsStampAndArtifactKeys(t *testing.T) {
+	got := adoptedProviderRaw(map[string]string{
+		contracts.VMInfoUUIDKey:            "u",
+		"domain_name":                      "web",
+		contracts.VMInfoOwnerUIDKey:        "uid-old",
+		contracts.VMInfoOwnerStampStateKey: contracts.OwnerStampMultiple,
+		contracts.VMInfoArtifactKey:        contracts.ArtifactImage,
+	})
+	assert.Equal(t, map[string]string{contracts.VMInfoUUIDKey: "u", "domain_name": "web"}, got)
+}

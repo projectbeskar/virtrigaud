@@ -49,6 +49,14 @@ import (
 // ProviderRaw[contracts.VMInfoOwnerUIDKey]. The adoption controller then skips
 // it while the VirtualMachine that UID names still exists (in any namespace,
 // under any Provider), and may adopt it once that VirtualMachine is gone.
+//
+// listExclusionFor is the provider-side half of keeping image state out of
+// adoption, and the primary control. The manager-side half is
+// contracts.VMInfoArtifactKey: adoption skips any listed VM carrying it, as a
+// backstop for third-party and SDK providers that list templates. This
+// provider deliberately keeps EXCLUDING templates and image artifacts rather
+// than returning them tagged with that key: providers can be rolled before the
+// manager, and a manager older than the key would adopt a tagged template.
 
 // listExclusion names why ListVMs leaves a vSphere object out of the listing,
 // or is "" when the object is an ordinary VM that is listed. It is logged.

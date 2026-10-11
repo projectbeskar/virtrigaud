@@ -63,6 +63,10 @@ func TestUnmanagedProviderVMs(t *testing.T) {
 		info.ProviderRaw[contracts.VMInfoOwnerStampStateKey] = state
 		return info
 	}
+	withArtifact := func(info contracts.VMInfo, kind string) contracts.VMInfo {
+		info.ProviderRaw[contracts.VMInfoArtifactKey] = kind
+		return info
+	}
 	all := []contracts.VMInfo{
 		// Owner stamp the provider cannot rely on: never offered, even when
 		// every UID it records is stale or there is none.
@@ -70,14 +74,20 @@ func TestUnmanagedProviderVMs(t *testing.T) {
 		withState(stamped("unreadable-stale", "uid-deleted"), contracts.OwnerStampUnreadable),
 		withState(stamped("multiple-stale", "uid-deleted,uid-gone"), contracts.OwnerStampMultiple),
 		withState(stamped("future-state", ""), "some-future-state"), // any value fails closed
-		stamped("team-a.web", "uid-a"),                              // managed (status.id)
-		stamped("team-b.web", "uid-b"),                              // managed (live owner stamp; no status.id yet)
-		stamped("team-c.db", "uid-c"),                               // managed via another Provider object (live owner stamp)
-		stamped("legacy", ""),                                       // managed (legacy name fallback)
-		stamped("team-e.old", "uid-deleted"),                        // orphan of a deleted VirtualMachine: adoptable
-		stamped("hand-made", ""),                                    // never created by VirtRigaud: adoptable
-		stamped("two-stamps", "uid-x,uid-b"),                        // any live UID keeps it managed
-		stamped("garbage-stamp", " , ,uid-zz"),                      // no live UID: adoptable
+		// Marked by the provider as shared image state: never offered, whatever
+		// the value (even empty or unknown).
+		withArtifact(stamped("tmpl", ""), contracts.ArtifactTemplate),
+		withArtifact(stamped("img", "uid-deleted"), contracts.ArtifactImage),
+		withArtifact(stamped("artifact-empty", ""), ""),
+		withArtifact(stamped("artifact-future", ""), "future-kind"),
+		stamped("team-a.web", "uid-a"),         // managed (status.id)
+		stamped("team-b.web", "uid-b"),         // managed (live owner stamp; no status.id yet)
+		stamped("team-c.db", "uid-c"),          // managed via another Provider object (live owner stamp)
+		stamped("legacy", ""),                  // managed (legacy name fallback)
+		stamped("team-e.old", "uid-deleted"),   // orphan of a deleted VirtualMachine: adoptable
+		stamped("hand-made", ""),               // never created by VirtRigaud: adoptable
+		stamped("two-stamps", "uid-x,uid-b"),   // any live UID keeps it managed
+		stamped("garbage-stamp", " , ,uid-zz"), // no live UID: adoptable
 	}
 
 	var got []string
