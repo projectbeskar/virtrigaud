@@ -176,7 +176,7 @@ func TestImageArtifactRefusal(t *testing.T) {
 	for name, cfg := range map[string]*types.VirtualMachineConfigInfo{
 		"plain VM":                     {},
 		"owner-stamped VM":             {ExtraConfig: ownerExtraConfig(ownerTeamA)},
-		"cleared stamp (empty values)": {ExtraConfig: clearedImageStampExtraConfig()},
+		"cleared stamp (empty values)": {ExtraConfig: clearedImageStampExtraConfig(nil)},
 	} {
 		t.Run(name, func(t *testing.T) { assert.NoError(t, imageArtifactRefusal(cfg)) })
 	}
@@ -188,4 +188,105 @@ func TestImageArtifactRefusal(t *testing.T) {
 		st, _ := status.FromError(err)
 		assert.Empty(t, st.Details(), "not marked as an image artifact: it may not be one")
 	})
+}
+
+// imageKeysOf returns the image-stamp keys (isImageStampKey, any case) VM id
+// carries with a non-empty value.
+func imageKeysOf(t *testing.T, p *Provider, id string) []string {
+	t.Helper()
+	var keys []string
+	for key, value := range extraConfigOf(t, p, vmRef(id)) {
+		if isImageStampKey(key) && value != "" {
+			keys = append(keys, key)
+		}
+	}
+	return keys
+}
+
+// TestCreateAndClone_ShedEveryImageStampKey: every key that makes an object an
+// image artifact (any virtrigaud.image.* key, in any case, including keys
+// VirtRigaud does not write — a newer release's after a rollback, or an admin
+// tool's) is cleared on every VM Create or Clone makes from it. Otherwise the
+// new VM would be refused every per-VM operation, its delete included. A VM
+// created from a stamped identity template stays deletable too.
+func TestCreateAndClone_ShedEveryImageStampKey(t *testing.T) {
+	p, _ := newOwnershipSim(t)
+	c := serveOverGRPC(t, p)
+	ctx := context.Background()
+	unknownKeys := []types.BaseOptionValue{
+		&types.OptionValue{Key: "virtrigaud.image.futurefield", Value: "x"},
+		&types.OptionValue{Key: "VirtRigaud.Image.AdminNote", Value: "y"},
+	}
+	requireDeletable := func(t *testing.T, id string) {
+		t.Helper()
+		assert.Empty(t, imageKeysOf(t, p, id), "no image-stamp key is inherited")
+		_, err := c.Delete(ctx, contracts.VMRef{ID: id})
+		require.NoError(t, err, "the new VM is an ordinary VM and can be deleted")
+	}
+
+	t.Run("create from a stamped identity template", func(t *testing.T) {
+		tmpl := seededVMID(t, p, simStampedTemplate)
+		reconfigureExtraConfig(t, p, tmpl,
+			imageStampExtraConfig(*stampAt(testDigestA, time.Date(2026, 9, 25, 10, 0, 0, 0, time.UTC)))...)
+		markAsTemplate(t, p, tmpl)
+		require.NotEmpty(t, imageKeysOf(t, p, tmpl), "fixture: the template is stamped")
+
+		vm, err := createFromTemplate(p, "from-stamped", simStampedTemplate)
+		require.NoError(t, err)
+		requireDeletable(t, vm.Id)
+	})
+
+	t.Run("create from a template with unknown image keys", func(t *testing.T) {
+		tmpl := seededVMID(t, p, simImportInFlight)
+		reconfigureExtraConfig(t, p, tmpl, unknownKeys...)
+		markAsTemplate(t, p, tmpl)
+		require.Len(t, imageKeysOf(t, p, tmpl), 2, "fixture: the template carries two unknown image keys")
+
+		vm, err := createFromTemplate(p, "from-unknown", simImportInFlight)
+		require.NoError(t, err)
+		requireDeletable(t, vm.Id)
+	})
+
+	t.Run("clone of a VM with unknown image keys", func(t *testing.T) {
+		src, err := p.Create(ctx, templateCreateRequest("clone-src", "", wireOwner(ownerTeamA)))
+		require.NoError(t, err)
+		reconfigureExtraConfig(t, p, src.Id, unknownKeys...)
+		require.Len(t, imageKeysOf(t, p, src.Id), 2, "fixture: the source carries two unknown image keys")
+
+		cloned, err := p.Clone(ctx, &providerv1.CloneRequest{SourceVmId: src.Id, TargetName: "clone-copy"})
+		require.NoError(t, err)
+		requireDeletable(t, cloned.TargetVmId)
+	})
+}
+
+func TestClearedImageStampExtraConfig_FromSource(t *testing.T) {
+	keys := func(opts []types.BaseOptionValue) map[string]any {
+		out := map[string]any{}
+		for _, bov := range opts {
+			ov := bov.GetOptionValue()
+			out[ov.Key] = ov.Value
+		}
+		return out
+	}
+
+	got := keys(clearedImageStampExtraConfig(nil))
+	assert.Len(t, got, len(imageStampKeys), "no source: the fixed keys")
+
+	got = keys(clearedImageStampExtraConfig([]types.BaseOptionValue{
+		&types.OptionValue{Key: "VirtRigaud.Image.UID", Value: "u"}, // a fixed key in another spelling
+		&types.OptionValue{Key: "virtrigaud.image.future", Value: "f"},
+		&types.OptionValue{Key: "virtrigaud.owner.uid", Value: "o"}, // not an image key
+		&types.OptionValue{Key: "guestinfo.userdata", Value: "g"},
+		nil,
+	}))
+	assert.Contains(t, got, "VirtRigaud.Image.UID", "the source's own spelling is cleared")
+	assert.NotContains(t, got, imageStampKeyUID, "each key once, case-insensitively")
+	assert.Contains(t, got, "virtrigaud.image.future", "an unknown image key is cleared")
+	assert.NotContains(t, got, "virtrigaud.owner.uid")
+	assert.NotContains(t, got, "guestinfo.userdata")
+	assert.Len(t, got, len(imageStampKeys)+1)
+	for k, v := range got {
+		assert.Equal(t, "", v, "%s is cleared", k)
+		assert.True(t, isImageStampKey(k))
+	}
 }

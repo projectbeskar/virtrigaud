@@ -2004,13 +2004,17 @@ func (p *Provider) Clone(ctx context.Context, req *providerv1.CloneRequest) (*pr
 	// clone would inherit from the source's ExtraConfig, so the clone never
 	// claims the SOURCE VirtualMachine's owner, and any prepared-image stamp
 	// (ADR-0009 D3): a clone is never an image artifact.
+	clearImage, err := p.imageStampClearing(ctx, sourceVM)
+	if err != nil {
+		return nil, err
+	}
 	cloneSpec := &types.VirtualMachineCloneSpec{
 		Location: types.VirtualMachineRelocateSpec{
 			Datastore: types.NewReference(datastore.Reference()),
 			Pool:      types.NewReference(resourcePool.Reference()),
 		},
 		Config: &types.VirtualMachineConfigSpec{
-			ExtraConfig: append(ownerExtraConfig(contracts.ObjectIdentity{}), clearedImageStampExtraConfig()...),
+			ExtraConfig: append(ownerExtraConfig(contracts.ObjectIdentity{}), clearImage...),
 		},
 		PowerOn:  false, // Don't power on automatically
 		Template: false,
@@ -2575,7 +2579,11 @@ func (p *Provider) createVirtualMachine(ctx context.Context, spec *VMSpec, datac
 	// later same-named create can prove — or disprove — that it owns this VM. A
 	// VM is never a prepared-image artifact: the image stamp a prepared template
 	// carries is cleared too (ADR-0009 D3).
-	extraConfig := append(ownerExtraConfig(spec.Owner), clearedImageStampExtraConfig()...)
+	clearImage, err := p.imageStampClearing(ctx, template) // nil template (imported disk): the fixed keys
+	if err != nil {
+		return "", err
+	}
+	extraConfig := append(ownerExtraConfig(spec.Owner), clearImage...)
 
 	// Configure performance and security features.
 	// Enable nested virtualization if requested

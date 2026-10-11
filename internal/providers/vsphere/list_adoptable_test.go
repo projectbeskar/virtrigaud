@@ -140,7 +140,7 @@ func TestListExclusionFor(t *testing.T) {
 			opt("VirtRigaud.Image.SourceDigest", testDigestA)}}, excludedImageStamp},
 		"non-string stamp value": {&types.VirtualMachineConfigInfo{ExtraConfig: []types.BaseOptionValue{
 			opt(imageStampKeyUID, int32(1))}}, excludedImageStamp},
-		"cleared stamp (empty values)": {&types.VirtualMachineConfigInfo{ExtraConfig: clearedImageStampExtraConfig()}, listedVM},
+		"cleared stamp (empty values)": {&types.VirtualMachineConfigInfo{ExtraConfig: clearedImageStampExtraConfig(nil)}, listedVM},
 		"owner-stamped VM":             {&types.VirtualMachineConfigInfo{ExtraConfig: ownerExtraConfig(ownerTeamA)}, listedVM},
 		"repeated owner key": {&types.VirtualMachineConfigInfo{ExtraConfig: []types.BaseOptionValue{
 			opt(ownerExtraConfigKeyUID, ownerTeamA.UID), opt("Virtrigaud.Owner.UID", ownerTeamB.UID)}}, excludedUnreadableOwnerStamp},

@@ -18,7 +18,6 @@ package vsphere
 
 import (
 	"context"
-	"strings"
 
 	"github.com/vmware/govmomi/vim25/types"
 	"google.golang.org/grpc/status"
@@ -109,13 +108,15 @@ func listCancelledError(ctx context.Context) error {
 // Unlike imageStampFromExtraConfig it does not validate the stamp: any trace
 // of one counts, including a key VirtRigaud does not write and a non-string
 // value. An empty value is a cleared key (vSphere removes a key set to "").
+// The namespace test is isImageStampKey, the same predicate
+// clearedImageStampExtraConfig clears by.
 func carriesImageStampKey(extraConfig []types.BaseOptionValue) bool {
 	for _, bov := range extraConfig {
 		if bov == nil {
 			continue
 		}
 		ov := bov.GetOptionValue()
-		if ov == nil || !strings.HasPrefix(strings.ToLower(ov.Key), imageStampKeyPrefix) {
+		if ov == nil || !isImageStampKey(ov.Key) {
 			continue
 		}
 		if s, ok := ov.Value.(string); ok && s == "" {
