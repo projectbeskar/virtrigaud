@@ -17,8 +17,16 @@ limitations under the License.
 package controller
 
 import (
+	"time"
+
 	infrav1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
 )
+
+// legacyBindingSkewMargin is the clock skew allowed between the manager, which
+// wrote a legacy snapshot's status.creationTime, and the API server, which
+// set the VM's creationTimestamp. A VM created within it of the snapshot is
+// ambiguous and treated as another VM.
+const legacyBindingSkewMargin = 30 * time.Second
 
 // A VMSnapshot is bound to the VirtualMachine — by UID — and the Provider it
 // was taken through (status.vmUID, status.boundProvider), not only to the VM
@@ -35,30 +43,50 @@ func recordSnapshotBinding(snapshot *infrav1beta1.VMSnapshot, vm *infrav1beta1.V
 }
 
 // snapshotOfOtherVM reports whether vm, the VirtualMachine spec.vmRef names
-// now, is not the one the snapshot was taken of:
-//
-//   - a recorded status.vmUID that differs from vm's UID;
-//   - no record (a snapshot taken by an older manager) and vm created after
-//     the snapshot was (status.creationTime): it cannot be the snapshot's VM.
-//
-// A snapshot with no record and no creation time is never judged (today's
-// behaviour).
+// now, is not the one the snapshot was taken of: a recorded status.vmUID that
+// differs from vm's UID, or, for a snapshot taken by an older manager (no
+// record), legacySnapshotOfVM says it is another VM.
 func snapshotOfOtherVM(snapshot *infrav1beta1.VMSnapshot, vm *infrav1beta1.VirtualMachine) bool {
 	if snapshot.Status.VMUID != "" {
 		return snapshot.Status.VMUID != string(vm.UID)
 	}
+	known, same := legacySnapshotOfVM(snapshot, vm)
+	return known && !same
+}
+
+// legacySnapshotOfVM judges whether a snapshot taken by an older manager (no
+// status.vmUID) is of vm. known is false when it cannot be judged (no
+// status.creationTime: today's behaviour).
+//
+//   - vm was created before the VMSnapshot object (both API-server
+//     timestamps, one clock): vm existed before the snapshot was asked for
+//     and still has the same UID — it is the snapshot's VM;
+//   - otherwise vm was created after the VMSnapshot object (a snapshot can
+//     wait for its VM). Its creation is compared with the snapshot's
+//     status.creationTime, written by the manager's clock: more than
+//     legacyBindingSkewMargin before it, the VM existed when the snapshot was
+//     taken; anything later — after it, or within the margin, where the two
+//     clocks cannot tell — is another VM.
+func legacySnapshotOfVM(snapshot *infrav1beta1.VMSnapshot, vm *infrav1beta1.VirtualMachine) (known, same bool) {
 	ct := snapshot.Status.CreationTime
-	return ct != nil && vm.CreationTimestamp.After(ct.Time)
+	if ct == nil {
+		return false, false
+	}
+	if !snapshot.CreationTimestamp.IsZero() && vm.CreationTimestamp.Before(&snapshot.CreationTimestamp) {
+		return true, true
+	}
+	return true, vm.CreationTimestamp.Time.Before(ct.Time.Add(-legacyBindingSkewMargin))
 }
 
 // backfillSnapshotBinding binds a snapshot taken by an older manager (no
-// status.vmUID) to vm when vm existed before the snapshot was taken
-// (creation time earlier than the snapshot's): that is the snapshot's VM. The
+// status.vmUID) to vm when legacySnapshotOfVM proves vm is its VM. The
 // Provider is the one vm is bound through (status.boundProvider), when
 // recorded. It reports whether it changed the status.
 func backfillSnapshotBinding(snapshot *infrav1beta1.VMSnapshot, vm *infrav1beta1.VirtualMachine) bool {
-	ct := snapshot.Status.CreationTime
-	if snapshot.Status.VMUID != "" || ct == nil || vm.UID == "" || vm.CreationTimestamp.After(ct.Time) {
+	if snapshot.Status.VMUID != "" || vm.UID == "" {
+		return false
+	}
+	if known, same := legacySnapshotOfVM(snapshot, vm); !known || !same {
 		return false
 	}
 	snapshot.Status.VMUID = string(vm.UID)
