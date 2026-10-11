@@ -581,7 +581,7 @@ func planClusteredAdoption(provider *infravirtrigaudiov1beta1.Provider, listed c
 			skip(info, skipSharedEndpoint)
 			continue
 		}
-		if info.ProviderRaw[contracts.VMInfoOwnerStampStateKey] != "" {
+		if ownerStampUnreliable(info) {
 			skip(info, skipStampUnreliable)
 			continue
 		}
@@ -1168,9 +1168,10 @@ func endpointKey(endpoint string) string {
 }
 
 // adoptedProviderRaw is the listing's provider data recorded in an adopted
-// VM's status.provider, without the owner-stamp keys: after the transfer they
-// describe the domain's previous owner (possibly another namespace's UID), are
-// stale, and are nothing the VM's reader needs. The artifact marker
+// VM's status.provider, single-host and clustered, without the owner-stamp
+// keys: they describe the VM's previous owner (possibly another namespace's,
+// or with the single-host adopt-stamped-vms opt-in another installation's
+// UID), are stale after the adoption, and are nothing the VM's reader needs. The artifact marker
 // (contracts.VMInfoArtifactKey) is stripped too: a VM carrying it is never
 // adopted, and status must never claim a VM is an image artifact.
 func adoptedProviderRaw(raw map[string]string) map[string]string {

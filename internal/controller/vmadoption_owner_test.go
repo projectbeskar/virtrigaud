@@ -78,6 +78,7 @@ func TestUnmanagedProviderVMs(t *testing.T) {
 		withState(stamped("unreadable-stale", "uid-deleted"), contracts.OwnerStampUnreadable),
 		withState(stamped("multiple-stale", "uid-deleted,uid-gone"), contracts.OwnerStampMultiple),
 		withState(stamped("future-state", ""), "some-future-state"), // any value fails closed
+		withState(stamped("empty-state", ""), ""),                   // present, even empty: fails closed
 		// Marked by the provider as shared image state: never offered, whatever
 		// the value (even empty or unknown).
 		withArtifact(stamped("tmpl", ""), contracts.ArtifactTemplate),
@@ -127,6 +128,29 @@ func TestForeignStampedSummary(t *testing.T) {
 	assert.Empty(t, foreignStampedSummary(0))
 	assert.Contains(t, foreignStampedSummary(2), "2 not adopted")
 	assert.Contains(t, foreignStampedSummary(2), AdoptStampedVMsAnnotation+"=true")
+}
+
+// TestSingleHostAdoption_StatusCarriesNoStampKeys: single-host adoption records
+// the listing's provider data in status.provider WITHOUT the owner-stamp keys,
+// as the clustered flow does. With the adopt-stamped-vms opt-in the VM's stamp
+// names a VirtualMachine that is not in this cluster (possibly another
+// installation's); copying it into the adopted VM's status would publish that
+// foreign UID and claim an owner the VM no longer has.
+func TestSingleHostAdoption_StatusCarriesNoStampKeys(t *testing.T) {
+	prov := &fakeClusteredAdopter{domains: []*fakeDomain{
+		{id: "stale", uuid: "u-stale", owner: "uid-other-cluster", power: "On", cpu: 1, memMiB: 1024},
+	}}
+	provider := readyProvider(clusterNS, "prov-c")
+	provider.Annotations = map[string]string{AdoptionAnnotation: "true", AdoptStampedVMsAnnotation: "true"}
+	r := clusteredAdoptionReconciler(t, prov, provider)
+
+	reconcileAdoption(t, r)
+	vm := adoptedVMGet(t, r, "stale")
+	assert.Equal(t, "stale", vm.Status.ID, "adopted with the opt-in")
+	assert.Equal(t, "u-stale", vm.Status.Provider[contracts.VMInfoUUIDKey], "other provider data is kept")
+	assert.NotContains(t, vm.Status.Provider, contracts.VMInfoOwnerUIDKey, "the previous owner's UID is never copied into status")
+	assert.NotContains(t, vm.Status.Provider, contracts.VMInfoOwnerStampStateKey)
+	assert.NotContains(t, vm.Status.Provider, contracts.VMInfoArtifactKey)
 }
 
 // TestSingleHostAdoption_RecentDiscoveryDoesNotList: a reconcile within

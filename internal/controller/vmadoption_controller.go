@@ -359,11 +359,11 @@ func (r *VMAdoptionReconciler) discoverUnmanagedVMs(ctx context.Context, provide
 // UID.
 //
 // A VM whose owner stamp the provider reports it cannot rely on
-// (contracts.VMInfoOwnerStampStateKey set to any value: unreadable, or naming
+// (contracts.VMInfoOwnerStampStateKey present, any value: unreadable, or naming
 // more than one owner) is never returned, managed or not: who owns it cannot
 // be told, so it is not offered for adoption (fail closed, as the clustered
 // flow's skipStampUnreliable). Nor is a VM the provider marks as shared image
-// state (contracts.VMInfoArtifactKey set to any value: a template or an image
+// state (contracts.VMInfoArtifactKey present, any value: a template or an image
 // artifact), whose delete would destroy the image for every consumer.
 func unmanagedProviderVMs(provider *infravirtrigaudiov1beta1.Provider, allVMs []contracts.VMInfo,
 	vms []infravirtrigaudiov1beta1.VirtualMachine) (unmanaged, foreignStamped []contracts.VMInfo) {
@@ -394,7 +394,7 @@ func unmanagedProviderVMs(provider *infravirtrigaudiov1beta1.Provider, allVMs []
 	}
 
 	for _, vmInfo := range allVMs {
-		if vmInfo.ProviderRaw[contracts.VMInfoOwnerStampStateKey] != "" || isArtifact(vmInfo) {
+		if ownerStampUnreliable(vmInfo) || isArtifact(vmInfo) {
 			continue
 		}
 		if managedVMIDs[vmInfo.ID] || ownedByLiveVM(vmInfo, liveUIDs) {
@@ -418,6 +418,15 @@ func foreignStampedSummary(n int) string {
 	}
 	return fmt.Sprintf("; %d not adopted — owner stamp names no VirtualMachine in this cluster "+
 		"(possibly another VirtRigaud installation's; set %s=true to adopt stale stamps)", n, AdoptStampedVMsAnnotation)
+}
+
+// ownerStampUnreliable reports whether the provider reports that vmInfo's
+// owner stamp cannot be relied on (contracts.VMInfoOwnerStampStateKey present,
+// whatever its value, even empty or one this release does not know). Such a
+// VM is never adopted: who owns it cannot be told.
+func ownerStampUnreliable(vmInfo contracts.VMInfo) bool {
+	_, ok := vmInfo.ProviderRaw[contracts.VMInfoOwnerStampStateKey]
+	return ok
 }
 
 // isArtifact reports whether the provider marked vmInfo as shared image state
@@ -486,7 +495,7 @@ func (r *VMAdoptionReconciler) adoptVM(ctx context.Context, provider *infravirtr
 				recordBoundProvider(existingVM, provider)
 				existingVM.Status.PowerState = observedPowerState(vmInfo.PowerState)
 				existingVM.Status.IPs = vmInfo.IPs
-				existingVM.Status.Provider = vmInfo.ProviderRaw
+				existingVM.Status.Provider = adoptedProviderRaw(vmInfo.ProviderRaw)
 				if err := r.Status().Update(ctx, existingVM); err != nil {
 					logger.Error(err, "Failed to update Status.ID for existing adopted VM", "vm_name", vmName)
 					return fmt.Errorf("failed to update VM status: %w", err)
@@ -528,7 +537,7 @@ func (r *VMAdoptionReconciler) adoptVM(ctx context.Context, provider *infravirtr
 	recordBoundProvider(vm, provider)
 	vm.Status.PowerState = observedPowerState(vmInfo.PowerState)
 	vm.Status.IPs = vmInfo.IPs
-	vm.Status.Provider = vmInfo.ProviderRaw
+	vm.Status.Provider = adoptedProviderRaw(vmInfo.ProviderRaw)
 	if err := r.Status().Update(ctx, vm); err != nil {
 		// If status update fails, log error but don't fail adoption
 		// The VirtualMachine controller will reconcile and may try to create the VM
@@ -576,7 +585,7 @@ func adoptedVMObject(provider *infravirtrigaudiov1beta1.Provider, vmInfo contrac
 			ID:         vmInfo.ID,
 			PowerState: observedPowerState(vmInfo.PowerState),
 			IPs:        vmInfo.IPs,
-			Provider:   vmInfo.ProviderRaw,
+			Provider:   adoptedProviderRaw(vmInfo.ProviderRaw),
 		},
 	}
 

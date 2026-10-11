@@ -32,8 +32,8 @@ const VMInfoUUIDKey = "uuid"
 // Addendum A, slice 4), reading both definitions of an active domain; the
 // single-host libvirt provider reports it too, from the definition it lists.
 // Absent when the VM carries no stamp or exactly one readable owner. Adoption,
-// single-host and clustered, skips a VM with this key set to any value: who
-// owns it cannot be told.
+// single-host and clustered, skips a VM carrying this key, whatever its value
+// (even empty or one this release does not know): who owns it cannot be told.
 const VMInfoOwnerStampStateKey = "owner_stamp_state"
 
 const (
