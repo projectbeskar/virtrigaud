@@ -639,7 +639,17 @@ func (p *Provider) Create(ctx context.Context, req *providerv1.CreateRequest) (*
 			}
 		}
 	case 1:
-		return p.bindExistingVM(ctx, existing[0], vmSpec.Name, vmSpec.Owner)
+		resp, err := p.bindExistingVM(ctx, existing[0], vmSpec.Name, vmSpec.Owner)
+		if err != nil {
+			return nil, err
+		}
+		// A create retried after the VM was made (e.g. past the manager's
+		// deadline) completes the post-create steps the first attempt did not
+		// finish; they are idempotent (post_create.go).
+		if err := p.applyPostCreateStepsOnBind(ctx, resp.Id, vmSpec); err != nil {
+			return nil, err
+		}
+		return resp, nil
 	default:
 		p.logger.Warn("Refusing to bind: more than one VM with the requested name exists in the target folder",
 			"vm_name", vmSpec.Name, "folder", folder.Reference().Value, "count", len(existing))
@@ -2502,10 +2512,13 @@ func (p *Provider) parseCreateRequest(req *providerv1.CreateRequest) (*VMSpec, e
 // (if provided, via addCloudInitToConfigSpec) are embedded in the config spec before
 // the task is submitted, so they are set at creation time; on the clone path an owner
 // stamp inherited from the template is overwritten or cleared. After the task
-// completes, the primary disk is optionally grown via resizeVMDisk and additional
-// disks are attached. The VM is NOT powered on: the VirtualMachine controller applies
-// spec.powerState afterwards through the Power RPC, as it does for libvirt and
-// Proxmox. datacenter must be the datacenter the finder is scoped to.
+// completes, the primary disk is grown (grow-only) to the VMClass size and the
+// additional disks are attached (applyPostCreateSteps, post_create.go); a
+// failure there is returned as a retryable error, the VM is kept, and the
+// manager's next Create binds it and completes the steps. The VM is NOT
+// powered on: the VirtualMachine controller applies spec.powerState afterwards
+// through the Power RPC, as it does for libvirt and Proxmox. datacenter must be
+// the datacenter the finder is scoped to.
 func (p *Provider) createVirtualMachine(ctx context.Context, spec *VMSpec, datacenter *object.Datacenter, folder *object.Folder) (string, error) {
 	p.logger.Info("Creating virtual machine",
 		"name", spec.Name,
@@ -2653,6 +2666,9 @@ func (p *Provider) createVirtualMachine(ctx context.Context, spec *VMSpec, datac
 		return "", err
 	}
 	extraConfig := append(ownerExtraConfig(spec.Owner), clearImage...)
+	// Mark the VM as created with idempotent post-create steps, and clear any
+	// additional-disk record a clone inherits from its template (post_create.go).
+	extraConfig = append(extraConfig, postCreateExtraConfig(spec)...)
 
 	// Configure performance and security features.
 	// Enable nested virtualization if requested
@@ -2988,45 +3004,13 @@ func (p *Provider) createVirtualMachine(ctx context.Context, spec *VMSpec, datac
 	// NOTE: extraConfig and cloud-init are already applied during CloneVM_Task above
 	// No post-clone reconfiguration needed - rely on clone-time settings
 
-	// Resize disk if specified in VMClass
-	if spec.DiskSizeGB > 0 {
-		if err := p.resizeVMDisk(ctx, newVM, spec.DiskSizeGB, vmID); err != nil {
-			p.logger.Warn("Failed to resize VM disk", "vm_id", vmID, "target_size_gb", spec.DiskSizeGB, "error", err)
-			// Don't fail the entire creation if disk resize fails
-		}
-	}
-
-	// Attach additional disks if specified
-	if len(spec.AdditionalDisks) > 0 {
-		p.logger.Debug("Starting additional disk attachment",
-			"vm_id", vmID,
-			"count", len(spec.AdditionalDisks))
-
-		for i, diskSpec := range spec.AdditionalDisks {
-			p.logger.Debug("Attaching disk",
-				"vm_id", vmID,
-				"disk_index", i+1,
-				"disk_name", diskSpec.Name,
-				"size_gib", diskSpec.SizeGiB,
-				"type", diskSpec.Type)
-
-			if err := p.attachAdditionalDisk(ctx, newVM, diskSpec, i+1); err != nil {
-				p.logger.Error("Failed to attach additional disk",
-					"vm_id", vmID,
-					"disk_name", diskSpec.Name,
-					"disk_index", i+1,
-					"error", err)
-				// Continue with remaining disks rather than failing entire creation
-			} else {
-				p.logger.Debug("Successfully attached additional disk",
-					"vm_id", vmID,
-					"disk_name", diskSpec.Name,
-					"disk_index", i+1,
-					"size_gb", diskSpec.SizeGiB)
-			}
-		}
-	} else {
-		p.logger.Debug("No additional disks to attach", "vm_id", vmID)
+	// Grow the primary disk to the VMClass size and attach the additional
+	// disks. The steps are idempotent; a failure fails the create with a
+	// retryable error, and the manager's next Create binds this VM and
+	// completes them (post_create.go). The VM is never reported created with a
+	// step silently skipped.
+	if err := p.applyPostCreateSteps(ctx, newVM, spec); err != nil {
+		return "", err
 	}
 
 	// The VM is deliberately left powered off. Power is the VirtualMachine
@@ -3067,12 +3051,20 @@ func (p *Provider) attachAdditionalDisk(
 
 	// Get current VM configuration to find available controller and unit number
 	var vmMo mo.VirtualMachine
-	err := vm.Properties(ctx, vm.Reference(), []string{propConfigHardwareDevice, "config.name", propConfigFilesVMPathName}, &vmMo)
+	err := vm.Properties(ctx, vm.Reference(),
+		[]string{propConfigHardwareDevice, "config.name", propConfigFilesVMPathName, propConfigExtraConfig}, &vmMo)
 	if err != nil {
 		return fmt.Errorf("failed to get VM properties: %w", err)
 	}
 	if vmMo.Config == nil {
 		return fmt.Errorf("VM %s has no readable configuration", vm.Reference().Value)
+	}
+	// Idempotent: the disk is recorded in the VM's ExtraConfig by the same
+	// reconfigure that adds it, so a recorded disk is never added again.
+	recordKey := additionalDiskExtraConfigKey(diskIndex)
+	if file, done := extraConfigValue(vmMo.Config.ExtraConfig, recordKey); done {
+		p.logger.Info("Additional disk already attached", "vm_id", vm.Reference().Value, "disk_index", diskIndex, "path", file)
+		return nil
 	}
 	var home object.DatastorePath
 	if !home.FromString(vmMo.Config.Files.VmPathName) || home.Datastore == "" {
@@ -3176,9 +3168,10 @@ func (p *Provider) attachAdditionalDisk(
 	}
 
 	// Construct the datastore path of the new disk in the VM's home directory:
-	// "[<home ds>] <home dir>/<vm>_N.vmdk".
+	// "[<home ds>] <home dir>/<vm>-additional-N.vmdk" (additionalDiskFileName:
+	// never one of the "<vm>_N.vmdk" names vCenter gives a template's disks).
 	vmName := vmMo.Config.Name
-	diskFileName := fmt.Sprintf("%s_%d.vmdk", vmName, diskIndex)
+	diskFileName := additionalDiskFileName(vmName, diskIndex)
 	diskPath := (&object.DatastorePath{Datastore: home.Datastore, Path: path.Join(homeDir, diskFileName)}).String()
 
 	p.logger.Info("Creating disk file",
@@ -3240,9 +3233,11 @@ func (p *Provider) attachAdditionalDisk(
 		Device:        diskDevice,
 	}
 
-	// Create reconfigure spec
+	// Create reconfigure spec. The disk's record goes in the same task, so the
+	// disk is recorded exactly when it is added.
 	configSpec := &types.VirtualMachineConfigSpec{
 		DeviceChange: []types.BaseVirtualDeviceConfigSpec{deviceSpec},
+		ExtraConfig:  []types.BaseOptionValue{&types.OptionValue{Key: recordKey, Value: diskPath}},
 	}
 
 	// Perform the reconfiguration to add the disk
