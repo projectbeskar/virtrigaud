@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -158,6 +159,11 @@ type ProviderReconciler struct {
 	// means the per-type default (defaultProviderTmpSizeLimit). A Provider's
 	// ProviderTmpSizeLimitAnnotation overrides both.
 	TmpSizeLimit string
+
+	// namespaceReadForbiddenLogged records the namespaces whose Namespace read
+	// was refused (Forbidden, e.g. namespace-scoped RBAC), so that is logged
+	// once per namespace rather than on every reconcile of a held Provider.
+	namespaceReadForbiddenLogged sync.Map
 
 	// Recorder emits Events on the Provider — currently a Warning when a
 	// clustered Host is skipped from the host-inventory render because its

@@ -23,6 +23,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-logr/logr/funcr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	appsv1 "k8s.io/api/apps/v1"
@@ -35,7 +36,9 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/event"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	infravirtrigaudiov1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
 	"github.com/projectbeskar/virtrigaud/internal/k8s"
@@ -434,6 +437,51 @@ func TestProviderInUse_OnlyAllowedNamespacesHold(t *testing.T) {
 			assert.Contains(t, cond.Message, tc.want)
 		})
 	}
+}
+
+// TestProviderInUse_NamespaceReadForbiddenStillHolds pins the namespace-scoped
+// RBAC case: a manager that may not read Namespaces treats the runtime as
+// keepable, so a held Provider still shows DeleteBlocked/ProviderInUse instead
+// of failing every reconcile, and says so in its log once, not every time.
+func TestProviderInUse_NamespaceReadForbiddenStillHolds(t *testing.T) {
+	sch := newProviderSAScheme(t)
+	cli := fake.NewClientBuilder().
+		WithScheme(sch).
+		WithObjects(inUseProvider(), inUseVM("default", "web", "", inUseProviderName)).
+		WithStatusSubresource(&infravirtrigaudiov1beta1.Provider{}).
+		WithIndex(&infravirtrigaudiov1beta1.VirtualMachine{}, placementProviderIndex, placementProviderIndexValue).
+		WithIndex(&infravirtrigaudiov1beta1.VMSnapshot{}, providerInUseIndex, providerInUseIndexValues).
+		WithIndex(&infravirtrigaudiov1beta1.VMClone{}, providerInUseIndex, providerInUseIndexValues).
+		WithIndex(&infravirtrigaudiov1beta1.VMMigration{}, providerInUseIndex, providerInUseIndexValues).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+				if _, ok := obj.(*corev1.Namespace); ok {
+					return apierrors.NewForbidden(corev1.Resource("namespaces"), key.Name, fmt.Errorf("namespace-scoped RBAC"))
+				}
+				return c.Get(ctx, key, obj, opts...)
+			},
+		}).
+		Build()
+	r := &ProviderReconciler{Client: cli, Scheme: sch, Recorder: record.NewFakeRecorder(16)}
+
+	var forbiddenLogs int
+	logger := funcr.New(func(_, args string) {
+		if strings.Contains(args, "Cannot read the Provider's Namespace") {
+			forbiddenLogs++
+		}
+	}, funcr.Options{})
+	ctx := log.IntoContext(context.Background(), logger)
+
+	deleteInUseProvider(t, r)
+	for i := 0; i < 3; i++ {
+		_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: inUseProviderKey})
+		require.NoError(t, err, "a forbidden Namespace read never fails the reconcile")
+	}
+
+	cond := meta.FindStatusCondition(getInUseProvider(t, r).Status.Conditions, k8s.ConditionDeleteBlocked)
+	require.NotNil(t, cond)
+	assert.Equal(t, reasonProviderInUse, cond.Reason)
+	assert.Equal(t, 1, forbiddenLogs, "logged once, not on every reconcile")
 }
 
 // TestProviderInUse_WhatHolds pins ADR-0010 D2, case by case.

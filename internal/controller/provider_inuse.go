@@ -578,6 +578,11 @@ func (r *ProviderReconciler) holdInUseProvider(ctx context.Context, provider *in
 // deletes the runtime first, and re-creating it would fight the collector), or
 // when its namespace is being deleted (the namespace controller deletes the
 // runtime's pods directly, and nothing can be created there any more).
+//
+// A manager that may not read Namespaces (namespace-scoped RBAC) cannot tell;
+// it treats the runtime as keepable, so the hold is still reported, and logs
+// that once per namespace. Creating the runtime then fails in a namespace being
+// deleted, which the runtime conditions show.
 func (r *ProviderReconciler) providerRuntimeKeepable(ctx context.Context, provider *infravirtrigaudiov1beta1.Provider) (keepable, foreground bool, err error) {
 	if controllerutil.ContainsFinalizer(provider, metav1.FinalizerDeleteDependents) {
 		return false, true, nil
@@ -585,6 +590,13 @@ func (r *ProviderReconciler) providerRuntimeKeepable(ctx context.Context, provid
 	ns := &corev1.Namespace{}
 	if err := r.Get(ctx, client.ObjectKey{Name: provider.Namespace}, ns); err != nil {
 		if apierrors.IsNotFound(err) {
+			return true, false, nil
+		}
+		if apierrors.IsForbidden(err) {
+			if _, logged := r.namespaceReadForbiddenLogged.LoadOrStore(provider.Namespace, struct{}{}); !logged {
+				log.FromContext(ctx).Info("Cannot read the Provider's Namespace (forbidden); assuming it is not being deleted",
+					"provider", provider.Name, "namespace", provider.Namespace)
+			}
 			return true, false, nil
 		}
 		return false, false, fmt.Errorf("get Namespace %s of Provider %s: %w", provider.Namespace, provider.Name, err)
