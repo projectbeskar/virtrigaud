@@ -69,7 +69,7 @@ type diskScanCache struct {
 // diskScanEntry is one scan, in flight until done is closed.
 type diskScanEntry struct {
 	done  chan struct{}
-	users inventoryFileUsers
+	users *inventoryFileUsers
 	err   error
 	at    time.Time
 }
@@ -78,7 +78,7 @@ type diskScanEntry struct {
 // diskScanTTL, or the one in flight, unless fresh; otherwise it runs scan
 // (once, for every concurrent caller). A failed scan is never reused.
 func (c *diskScanCache) get(ctx context.Context, key string, fresh bool,
-	scan func(context.Context) (inventoryFileUsers, error)) (inventoryFileUsers, error) {
+	scan func(context.Context) (*inventoryFileUsers, error)) (*inventoryFileUsers, error) {
 	c.mu.Lock()
 	if c.entries == nil {
 		c.entries = make(map[string]*diskScanEntry)
@@ -124,8 +124,8 @@ func diskScanKey(dsName string) string {
 
 // datastoreFileUsers returns who uses the files of datastore dsName
 // (scanDatastoreFileUsers), through the provider's scan cache.
-func (p *Provider) datastoreFileUsers(ctx context.Context, dsName string, fresh bool) (inventoryFileUsers, error) {
-	return p.diskScans.get(ctx, diskScanKey(dsName), fresh, func(ctx context.Context) (inventoryFileUsers, error) {
+func (p *Provider) datastoreFileUsers(ctx context.Context, dsName string, fresh bool) (*inventoryFileUsers, error) {
+	return p.diskScans.get(ctx, diskScanKey(dsName), fresh, func(ctx context.Context) (*inventoryFileUsers, error) {
 		return p.scanDatastoreFileUsers(ctx, dsName)
 	})
 }
@@ -145,7 +145,7 @@ func nasKey(info types.BaseDatastoreInfo) string {
 // fails — and callers fail closed — when the datastore is not found, a
 // property cannot be read, or one of those VMs has no readable configuration
 // (an inaccessible or orphaned VM, whose disks cannot be known).
-func (p *Provider) scanDatastoreFileUsers(ctx context.Context, dsName string) (inventoryFileUsers, error) {
+func (p *Provider) scanDatastoreFileUsers(ctx context.Context, dsName string) (*inventoryFileUsers, error) {
 	v, err := view.NewManager(p.client.Client).CreateContainerView(ctx, p.client.ServiceContent.RootFolder,
 		[]string{datastoreMoType}, true)
 	if err != nil {
@@ -191,7 +191,7 @@ func (p *Provider) scanDatastoreFileUsers(ctx context.Context, dsName string) (i
 		}
 	}
 
-	users := inventoryFileUsers{}
+	users := newInventoryFileUsers()
 	if len(refs) == 0 {
 		return users, nil
 	}
@@ -205,9 +205,7 @@ func (p *Provider) scanDatastoreFileUsers(ctx context.Context, dsName string) (i
 		if vm.Config == nil {
 			return nil, fmt.Errorf("VM %s (%q) on datastore %q has no readable configuration", vm.Self.Value, vm.Name, dsName)
 		}
-		for _, f := range vmFileRefs(vm) {
-			users[f] = append(users[f], vm.Self)
-		}
+		users.addVM(vm)
 	}
 	return users, nil
 }

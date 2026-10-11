@@ -24,6 +24,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/vmware/govmomi/fault"
 	"github.com/vmware/govmomi/object"
 	"github.com/vmware/govmomi/property"
 	"github.com/vmware/govmomi/vim25/mo"
@@ -352,25 +353,32 @@ func (f datastoreFile) inDir(d datastoreFile) bool {
 	return strings.HasPrefix(f.path, d.path+"/")
 }
 
-// diskBackingChain returns the file names of a disk backing and of every
-// parent in its chain (snapshot deltas and linked-clone bases).
-func diskBackingChain(b types.BaseVirtualDeviceBackingInfo) []string {
-	var files []string
+// chainLink is one disk file of a backing chain: its datastore path as vCenter
+// reports it, and its disk UUID (empty for backings that carry none).
+type chainLink struct {
+	file string
+	uuid string
+}
+
+// diskBackingChain returns a disk backing and every parent in its chain
+// (snapshot deltas and linked-clone bases).
+func diskBackingChain(b types.BaseVirtualDeviceBackingInfo) []chainLink {
+	var links []chainLink
 	for b != nil {
 		fb, ok := b.(types.BaseVirtualDeviceFileBackingInfo)
 		if !ok {
-			return files
+			return links
 		}
-		files = append(files, fb.GetVirtualDeviceFileBackingInfo().FileName)
+		link := chainLink{file: fb.GetVirtualDeviceFileBackingInfo().FileName}
 		switch t := b.(type) {
 		case *types.VirtualDiskFlatVer2BackingInfo:
-			b = backingOrNil(t.Parent)
+			link.uuid, b = t.Uuid, backingOrNil(t.Parent)
 		case *types.VirtualDiskSeSparseBackingInfo:
-			b = backingOrNil(t.Parent)
+			link.uuid, b = t.Uuid, backingOrNil(t.Parent)
 		case *types.VirtualDiskSparseVer2BackingInfo:
-			b = backingOrNil(t.Parent)
+			link.uuid, b = t.Uuid, backingOrNil(t.Parent)
 		case *types.VirtualDiskRawDiskMappingVer1BackingInfo:
-			b = backingOrNil(t.Parent)
+			link.uuid, b = t.Uuid, backingOrNil(t.Parent)
 		case *types.VirtualDiskFlatVer1BackingInfo:
 			b = backingOrNil(t.Parent)
 		case *types.VirtualDiskSparseVer1BackingInfo:
@@ -378,8 +386,9 @@ func diskBackingChain(b types.BaseVirtualDeviceBackingInfo) []string {
 		default:
 			b = nil
 		}
+		links = append(links, link)
 	}
-	return files
+	return links
 }
 
 // backingOrNil returns parent as a backing interface, or a nil interface when
@@ -392,38 +401,73 @@ func backingOrNil[T types.BaseVirtualDeviceBackingInfo](parent T) types.BaseVirt
 	return parent
 }
 
-// vmFileRefs returns every datastore file vm references: the backing chain of
-// each file-backed device, and every file in its layout (snapshot disks
-// included).
-func vmFileRefs(vm *mo.VirtualMachine) []datastoreFile {
-	var names []string
-	if vm.Config != nil {
-		for _, dev := range vm.Config.Hardware.Device {
-			names = append(names, diskBackingChain(dev.GetVirtualDevice().Backing)...)
+// normalizeDiskUUID puts a disk UUID in comparable form. vCenter spells the
+// same UUID "6000C29a-..." in a backing and "60 00 C2 9a ..." from
+// QueryVirtualDiskUuid.
+func normalizeDiskUUID(u string) string {
+	return strings.NewReplacer(" ", "", "-", "").Replace(strings.ToLower(strings.TrimSpace(u)))
+}
+
+// inventoryFileUsers records which VMs (with files on a datastore,
+// scanDatastoreFileUsers) use which disks. A path names a file through one
+// datastore name and one directory spelling; the same disk can also be
+// reached through another (an NFS export mounted under two names, a vSAN or
+// vVols namespace directory by UUID or friendly name, a "[] /vmfs/volumes/..."
+// path). Disks are therefore matched by path (case-insensitively, erring
+// towards "in use") AND by disk UUID, which is stored in the disk itself; and
+// a disk whose path cannot be parsed and that carries no UUID cannot be
+// identified at all, so its VM is recorded as unknown and the check fails
+// closed.
+type inventoryFileUsers struct {
+	byFile  map[datastoreFile][]types.ManagedObjectReference
+	byUUID  map[string][]types.ManagedObjectReference
+	unknown []types.ManagedObjectReference
+}
+
+// newInventoryFileUsers returns an empty inventoryFileUsers.
+func newInventoryFileUsers() *inventoryFileUsers {
+	return &inventoryFileUsers{
+		byFile: map[datastoreFile][]types.ManagedObjectReference{},
+		byUUID: map[string][]types.ManagedObjectReference{},
+	}
+}
+
+// addVM records the files and disks vm uses: the backing chain (path and
+// UUID) of each file-backed device, and every file in its layout. vm must
+// have a configuration.
+func (u *inventoryFileUsers) addVM(vm *mo.VirtualMachine) {
+	unknown := false
+	for _, dev := range vm.Config.Hardware.Device {
+		_, isDisk := dev.(*types.VirtualDisk)
+		for _, link := range diskBackingChain(dev.GetVirtualDevice().Backing) {
+			f, parsed := datastoreFileOf(link.file)
+			if parsed {
+				u.byFile[f] = append(u.byFile[f], vm.Self)
+			}
+			id := normalizeDiskUUID(link.uuid)
+			if id != "" {
+				u.byUUID[id] = append(u.byUUID[id], vm.Self)
+			}
+			if isDisk && !parsed && id == "" {
+				unknown = true
+			}
 		}
 	}
 	if vm.LayoutEx != nil {
-		for _, f := range vm.LayoutEx.File {
-			names = append(names, f.Name)
+		for _, lf := range vm.LayoutEx.File {
+			if f, ok := datastoreFileOf(lf.Name); ok {
+				u.byFile[f] = append(u.byFile[f], vm.Self)
+			}
 		}
 	}
-	refs := make([]datastoreFile, 0, len(names))
-	for _, n := range names {
-		if f, ok := datastoreFileOf(n); ok {
-			refs = append(refs, f)
-		}
+	if unknown {
+		u.unknown = append(u.unknown, vm.Self)
 	}
-	return refs
 }
 
-// inventoryFileUsers maps each datastore file referenced by a VM or template
-// with files on a datastore (scanDatastoreFileUsers) to the VMs that reference
-// it.
-type inventoryFileUsers map[datastoreFile][]types.ManagedObjectReference
-
-// usedByOtherThan reports whether a VM other than self references f.
-func (u inventoryFileUsers) usedByOtherThan(f datastoreFile, self types.ManagedObjectReference) bool {
-	for _, ref := range u[f] {
+// otherThan reports whether refs holds a VM other than self.
+func otherThan(refs []types.ManagedObjectReference, self types.ManagedObjectReference) bool {
+	for _, ref := range refs {
 		if ref != self {
 			return true
 		}
@@ -431,15 +475,50 @@ func (u inventoryFileUsers) usedByOtherThan(f datastoreFile, self types.ManagedO
 	return false
 }
 
+// usedBy reports whether a VM other than self uses the disk at f or, when
+// uuid is not empty, the disk with that UUID under any path.
+func (u *inventoryFileUsers) usedBy(f datastoreFile, uuid string, self types.ManagedObjectReference) bool {
+	if otherThan(u.byFile[f], self) {
+		return true
+	}
+	if id := normalizeDiskUUID(uuid); id != "" && otherThan(u.byUUID[id], self) {
+		return true
+	}
+	return false
+}
+
+// unknownOtherThan reports whether a VM other than self has a disk that
+// cannot be identified (unparseable path, no UUID).
+func (u *inventoryFileUsers) unknownOtherThan(self types.ManagedObjectReference) bool {
+	return otherThan(u.unknown, self)
+}
+
 // anyInDirUsedBy reports whether a VM other than self references a file
 // inside directory d.
-func (u inventoryFileUsers) anyInDirUsedBy(d datastoreFile, self types.ManagedObjectReference) bool {
-	for f := range u {
-		if f.inDir(d) && u.usedByOtherThan(f, self) {
+func (u *inventoryFileUsers) anyInDirUsedBy(d datastoreFile, self types.ManagedObjectReference) bool {
+	for f, refs := range u.byFile {
+		if f.inDir(d) && otherThan(refs, self) {
 			return true
 		}
 	}
 	return false
+}
+
+// diskUUID returns the UUID of the disk at datastore path name (vCenter reads
+// it from the disk), and whether the disk exists.
+func (p *Provider) diskUUID(ctx context.Context, name string) (string, bool, error) {
+	dc, err := p.finder.DefaultDatacenter(ctx)
+	if err != nil {
+		return "", false, fmt.Errorf("find datacenter: %w", err)
+	}
+	uuid, err := object.NewVirtualDiskManager(p.client.Client).QueryVirtualDiskUuid(ctx, name, dc)
+	if err != nil {
+		if fault.Is(err, &types.FileNotFound{}) {
+			return "", false, nil
+		}
+		return "", false, fmt.Errorf("query the UUID of disk %s: %w", name, err)
+	}
+	return uuid, true, nil
 }
 
 // ensureDiskFileUnused is rule 3 of the in-place confinement: diskPath must not
@@ -453,14 +532,25 @@ func (p *Provider) ensureDiskFileUnused(ctx context.Context, diskPath string) er
 	}
 	var dp object.DatastorePath
 	dp.FromString(diskPath)
+	uuid, exists, err := p.diskUUID(ctx, diskPath)
+	if err == nil && !exists {
+		err = fmt.Errorf("disk %s not found", diskPath)
+	}
+	if err != nil {
+		return p.errDiskCheckFailed("in-place disk check", err)
+	}
 	users, err := p.datastoreFileUsers(ctx, dp.Datastore, false)
 	if err != nil {
 		return p.errDiskCheckFailed("in-place disk check", err)
 	}
-	if len(users[f]) > 0 {
-		p.logger.Warn("Refusing to attach an imported disk in place: another VM references it",
-			"disk_path", diskPath, "users", len(users[f]))
+	none := types.ManagedObjectReference{}
+	if users.usedBy(f, uuid, none) {
+		p.logger.Warn("Refusing to attach an imported disk in place: another VM uses it", "disk_path", diskPath)
 		return errDiskInUse(diskInUseMessage)
+	}
+	if users.unknownOtherThan(none) {
+		return p.errDiskCheckFailed("in-place disk check",
+			fmt.Errorf("a VM on datastore %q has a disk that can be identified by neither path nor UUID", dp.Datastore))
 	}
 	return nil
 }
@@ -480,7 +570,19 @@ func (p *Provider) ensureImportFolderUnused(ctx context.Context, dsName, id stri
 	if err != nil {
 		return p.errDiskCheckFailed("import folder check", err)
 	}
-	if users.anyInDirUsedBy(d.dir(), types.ManagedObjectReference{}) {
+	// The landing disk itself may also be in use under another path (an
+	// alias): compare by UUID when it exists.
+	landing := fmt.Sprintf("[%s] %s/%s", dsName, id, id+vmdkExt)
+	uuid, exists, err := p.diskUUID(ctx, landing)
+	if err != nil {
+		return p.errDiskCheckFailed("import folder check", err)
+	}
+	none := types.ManagedObjectReference{}
+	if exists && users.unknownOtherThan(none) {
+		return p.errDiskCheckFailed("import folder check",
+			fmt.Errorf("a VM on datastore %q has a disk that can be identified by neither path nor UUID", dsName))
+	}
+	if users.anyInDirUsedBy(d.dir(), none) || (exists && users.usedBy(d, uuid, none)) {
 		p.logger.Warn("Refusing to import a disk: a VM uses a file in the landing folder",
 			"datastore", dsName, "folder", id)
 		return errDiskInUse("disk import refused: a VM in the vCenter inventory uses a disk in the landing folder " +
@@ -553,7 +655,12 @@ func (p *Provider) detachForeignDisks(ctx context.Context, vm *object.VirtualMac
 			if err != nil {
 				return p.errDiskCheckFailed("delete disk check", err)
 			}
-			if !users.usedByOtherThan(f, vm.Reference()) {
+			ff, _ := datastoreFileOf(name)
+			var diskID string
+			if links := diskBackingChain(disk.Backing); len(links) > 0 {
+				diskID = links[0].uuid
+			}
+			if !users.usedBy(ff, diskID, vm.Reference()) && !users.unknownOtherThan(vm.Reference()) {
 				continue
 			}
 		}

@@ -817,10 +817,10 @@ func TestDiskScanCache(t *testing.T) {
 	ctx := context.Background()
 	var calls atomic.Int32
 	release := make(chan struct{})
-	scan := func(context.Context) (inventoryFileUsers, error) {
+	scan := func(context.Context) (*inventoryFileUsers, error) {
 		calls.Add(1)
 		<-release
-		return inventoryFileUsers{}, nil
+		return newInventoryFileUsers(), nil
 	}
 
 	// Concurrent callers share one scan.
@@ -853,10 +853,105 @@ func TestDiskScanCache(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, int32(4), calls.Load(), "keys are independent")
 
-	failing := func(context.Context) (inventoryFileUsers, error) { calls.Add(1); return nil, errors.New("boom") }
+	failing := func(context.Context) (*inventoryFileUsers, error) { calls.Add(1); return nil, errors.New("boom") }
 	_, err = c.get(ctx, "bad", false, failing)
 	require.Error(t, err)
 	_, err = c.get(ctx, "bad", false, failing)
 	require.Error(t, err)
 	assert.Equal(t, int32(6), calls.Load(), "a failed scan is never reused")
+}
+
+// --- disk identity --------------------------------------------------------------
+
+// vmWithDisks is a VM (for inventoryFileUsers) whose devices have the given
+// backings.
+func vmWithDisks(id string, backings ...types.BaseVirtualDeviceBackingInfo) mo.VirtualMachine {
+	vm := mo.VirtualMachine{Config: &types.VirtualMachineConfigInfo{}}
+	vm.Self = vmRef(id)
+	for _, b := range backings {
+		vm.Config.Hardware.Device = append(vm.Config.Hardware.Device,
+			&types.VirtualDisk{VirtualDevice: types.VirtualDevice{Backing: b}})
+	}
+	return vm
+}
+
+// flat is a flat disk backing at file with uuid and optional parent.
+func flat(file, uuid string, parent *types.VirtualDiskFlatVer2BackingInfo) *types.VirtualDiskFlatVer2BackingInfo {
+	return &types.VirtualDiskFlatVer2BackingInfo{
+		VirtualDeviceFileBackingInfo: types.VirtualDeviceFileBackingInfo{FileName: file}, Uuid: uuid, Parent: parent,
+	}
+}
+
+func TestInventoryFileUsers_Identity(t *testing.T) {
+	const (
+		landing     = "[nfs-a] team-a.web-migrated/team-a.web-migrated.vmdk"
+		landingUUID = "60 00 C2 9a 11 22 33 44-55 66 77 88 99 aa bb cc" // QueryVirtualDiskUuid spelling
+	)
+	f, ok := datastoreFileOf(landing)
+	require.True(t, ok)
+	none := types.ManagedObjectReference{}
+
+	cases := map[string]struct {
+		vm      mo.VirtualMachine
+		used    bool
+		unknown bool
+	}{
+		"same path, other case": {vm: vmWithDisks("vm-1", flat("[NFS-A] Team-A.web-migrated/team-a.web-migrated.vmdk", "", nil)), used: true},
+		"same disk under another datastore name (UUID)": {
+			vm: vmWithDisks("vm-2", flat("[nfs-b] team-a.web-migrated/team-a.web-migrated.vmdk", "6000C29a-1122-3344-5566-778899aabbcc", nil)), used: true},
+		"same disk under a host path (UUID)": {
+			vm: vmWithDisks("vm-3", flat("[] /vmfs/volumes/5f0e/team-a.web-migrated/team-a.web-migrated.vmdk", "6000c29a11223344556677889 9aabbcc", nil)), used: true},
+		"linked-clone delta whose parent is the disk": {
+			vm: vmWithDisks("vm-4", flat("[nfs-a] other/other-000001.vmdk", "6000c29a00000000000000000000beef", flat(landing, "", nil))), used: true},
+		"host path without UUID": {vm: vmWithDisks("vm-5", flat("[] /vmfs/volumes/5f0e/x/x.vmdk", "", nil)), unknown: true},
+		"another disk":           {vm: vmWithDisks("vm-6", flat("[nfs-a] other/other.vmdk", "6000c29a00000000000000000000dead", nil))},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			u := newInventoryFileUsers()
+			u.addVM(&tc.vm)
+			assert.Equal(t, tc.used, u.usedBy(f, landingUUID, none), "in use")
+			assert.Equal(t, tc.unknown, u.unknownOtherThan(none), "unknown")
+			assert.False(t, u.usedBy(f, landingUUID, tc.vm.Self), "a VM never counts against itself")
+		})
+	}
+
+	t.Run("an unparseable CD-ROM is not an unknown disk", func(t *testing.T) {
+		vm := mo.VirtualMachine{Config: &types.VirtualMachineConfigInfo{}}
+		vm.Self = vmRef("vm-7")
+		vm.Config.Hardware.Device = append(vm.Config.Hardware.Device, &types.VirtualCdrom{VirtualDevice: types.VirtualDevice{
+			Backing: &types.VirtualCdromIsoBackingInfo{VirtualDeviceFileBackingInfo: types.VirtualDeviceFileBackingInfo{FileName: "/usr/lib/vmware/isoimages/linux.iso"}},
+		}})
+		u := newInventoryFileUsers()
+		u.addVM(&vm)
+		assert.False(t, u.unknownOtherThan(none))
+	})
+}
+
+// TestCreate_InPlaceDisk_RefusesDiskUnderALinkedCloneDelta: a VM whose disk is
+// a delta on top of the landing disk (a linked clone, a snapshot) uses it,
+// even though no device names it directly.
+func TestCreate_InPlaceDisk_RefusesDiskUnderALinkedCloneDelta(t *testing.T) {
+	p, _ := newOwnershipSim(t)
+	ctx := context.Background()
+	imageJSON := makeOwnMigratedDisk(t, p, "web")
+	other := object.NewVirtualMachine(p.client.Client, vmRef(seededVMID(t, p, simUnstamped)))
+	devices, err := other.Device(ctx)
+	require.NoError(t, err)
+	ctrl, err := devices.FindDiskController("")
+	require.NoError(t, err)
+	delta := &types.VirtualDisk{VirtualDevice: types.VirtualDevice{
+		Key: -1, ControllerKey: ctrl.GetVirtualController().Key, UnitNumber: types.NewInt32(5),
+		Backing: flat("["+simDatastore+"] "+simUnstamped+"/"+simUnstamped+"-000001.vmdk", "", flat(ownMigratedDiskPath("web"), "", nil)),
+	}}
+	task, err := other.Reconfigure(ctx, types.VirtualMachineConfigSpec{DeviceChange: []types.BaseVirtualDeviceConfigSpec{
+		&types.VirtualDeviceConfigSpec{Operation: types.VirtualDeviceConfigSpecOperationAdd,
+			FileOperation: types.VirtualDeviceConfigSpecFileOperationCreate, Device: delta},
+	}})
+	require.NoError(t, err)
+	require.NoError(t, task.Wait(ctx))
+
+	_, err = p.Create(ctx, &providerv1.CreateRequest{Name: "web", ImageJson: imageJSON, Owner: wireOwner(ownerTeamA)})
+	requireCode(t, err, codes.FailedPrecondition)
+	assert.Equal(t, []string{contracts.VMDiskInUseReason}, errorReasons(err))
 }
