@@ -40,10 +40,23 @@ import (
 // requestSentKey is the context key of an RPC's *requestSent.
 type requestSentKey struct{}
 
-// requestSent records whether an RPC's request headers were sent.
-type requestSent struct{ sent atomic.Bool }
+// requestSent records whether an RPC began (the gRPC client started it) and
+// whether its request headers were sent.
+type requestSent struct {
+	begun atomic.Bool
+	sent  atomic.Bool
+}
 
-// requestSentStatsHandler marks an RPC's requestSent on its OutHeader.
+// notSent reports whether the RPC provably never sent its request: it began
+// (so the stats handler is in place and reporting) and no OutHeader followed.
+// With no Begin at all — the stats handler is missing — nothing is proven,
+// and the RPC counts as sent (fail closed: its outcome is unknown).
+func (rs *requestSent) notSent() bool {
+	return rs.begun.Load() && !rs.sent.Load()
+}
+
+// requestSentStatsHandler marks an RPC's requestSent on its Begin and
+// OutHeader.
 type requestSentStatsHandler struct{}
 
 // TagRPC implements stats.Handler.
@@ -51,15 +64,31 @@ func (requestSentStatsHandler) TagRPC(ctx context.Context, _ *stats.RPCTagInfo) 
 	return ctx
 }
 
-// HandleRPC implements stats.Handler: the request's headers were sent.
+// HandleRPC implements stats.Handler: the RPC began, or its request's
+// headers were sent.
 func (requestSentStatsHandler) HandleRPC(ctx context.Context, s stats.RPCStats) {
-	if _, ok := s.(*stats.OutHeader); !ok {
+	rs, ok := ctx.Value(requestSentKey{}).(*requestSent)
+	if !ok {
 		return
 	}
-	if rs, ok := ctx.Value(requestSentKey{}).(*requestSent); ok {
+	switch s.(type) {
+	case *stats.Begin:
+		rs.begun.Store(true)
+	case *stats.OutHeader:
 		rs.sent.Store(true)
 	}
 }
+
+// breakerFastFailError is the circuit breaker's refusal of an RPC
+// (providerCircuitBreakerInterceptor): the invoker never ran, so the request
+// was never sent. It carries the Unavailable status the rest of the stack
+// expects.
+type breakerFastFailError struct{ st *status.Status }
+
+func (e *breakerFastFailError) Error() string { return e.st.Err().Error() }
+
+// GRPCStatus returns the Unavailable status.
+func (e *breakerFastFailError) GRPCStatus() *status.Status { return e.st }
 
 // TagConn implements stats.Handler.
 func (requestSentStatsHandler) TagConn(ctx context.Context, _ *stats.ConnTagInfo) context.Context {
@@ -90,9 +119,11 @@ func (e *requestNotSentError) GRPCStatus() *status.Status {
 
 // requestSentInterceptor is the outermost unary interceptor: it gives every
 // RPC a requestSent the stats handler marks, and wraps an Unavailable or
-// DeadlineExceeded failure whose request was never sent — a connection that
-// could not be made, or the circuit breaker's fast-fail, which never calls
-// the invoker — into a requestNotSentError.
+// DeadlineExceeded failure whose request provably was never sent into a
+// requestNotSentError: the circuit breaker's fast-fail (breakerFastFailError,
+// the invoker never ran), or an RPC that began but sent no headers (no
+// connection could be made). Anything else — headers sent, or no Begin
+// reported at all (no stats handler) — is left as is: outcome unknown.
 func requestSentInterceptor() grpc.UnaryClientInterceptor {
 	return func(
 		ctx context.Context,
@@ -104,7 +135,14 @@ func requestSentInterceptor() grpc.UnaryClientInterceptor {
 	) error {
 		rs := &requestSent{}
 		err := invoker(context.WithValue(ctx, requestSentKey{}, rs), fullMethod, req, reply, cc, opts...)
-		if err == nil || rs.sent.Load() {
+		if err == nil {
+			return nil
+		}
+		var fastFail *breakerFastFailError
+		if errors.As(err, &fastFail) {
+			return &requestNotSentError{err: err}
+		}
+		if !rs.notSent() {
 			return err
 		}
 		switch status.Code(err) {

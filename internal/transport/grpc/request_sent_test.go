@@ -56,21 +56,15 @@ func (s *cloneHandlerServer) Clone(ctx context.Context, _ *providerv1.CloneReque
 	return s.handler(ctx)
 }
 
-// newSentTrackingClient builds a Client with the production interceptor
-// chain, stats handler and WaitForReady default, over dialer.
+// newSentTrackingClient builds a Client with the production call options
+// (providerCallDialOptions, shared with NewClient) over dialer.
 func newSentTrackingClient(t *testing.T, dialer func(context.Context, string) (net.Conn, error), cb *resilience.CircuitBreaker) *Client {
 	t.Helper()
-	interceptors := []grpc.UnaryClientInterceptor{requestSentInterceptor(), providerRPCMetricsInterceptor("sent-test")}
-	if cb != nil {
-		interceptors = append(interceptors, providerCircuitBreakerInterceptor(cb))
-	}
-	conn, err := grpc.NewClient("passthrough:///bufnet",
+	opts := append([]grpc.DialOption{
 		grpc.WithContextDialer(dialer),
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
-		grpc.WithDefaultCallOptions(grpc.WaitForReady(true)),
-		grpc.WithChainUnaryInterceptor(interceptors...),
-		grpc.WithStatsHandler(requestSentStatsHandler{}),
-	)
+	}, providerCallDialOptions("sent-test", cb)...)
+	conn, err := grpc.NewClient("passthrough:///bufnet", opts...)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = conn.Close() })
 	return &Client{conn: conn, client: providerv1.NewProviderClient(conn), vmOps: metrics.NewVMOperationMetrics("sent-test", "p")}
@@ -176,4 +170,47 @@ func TestClone_ProviderAnswerThatItDidNothing(t *testing.T) {
 		require.Error(t, err)
 		assert.False(t, contracts.IsNothingDone(err))
 	})
+}
+
+// TestClone_WithoutTheStatsHandlerNothingIsProvenNotSent (re-review L-c): the
+// tracking fails closed. A client built without the stats handler sees no
+// Begin, so even an RPC that never connected is outcome-unknown — never
+// "nothing done".
+func TestClone_WithoutTheStatsHandlerNothingIsProvenNotSent(t *testing.T) {
+	refused := func(context.Context, string) (net.Conn, error) { return nil, errors.New("connection refused") }
+	conn, err := grpc.NewClient("passthrough:///bufnet",
+		grpc.WithContextDialer(refused),
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithDefaultCallOptions(grpc.WaitForReady(true)),
+		grpc.WithChainUnaryInterceptor(requestSentInterceptor()),
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = conn.Close() })
+	cli := &Client{conn: conn, client: providerv1.NewProviderClient(conn), vmOps: metrics.NewVMOperationMetrics("sent-test", "p")}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	_, err = cli.Clone(ctx, cloneReqForSentTest())
+	require.Error(t, err)
+	assert.False(t, contracts.IsRequestNotSent(err), "no Begin reported: nothing is proven: %v", err)
+	assert.False(t, contracts.IsNothingDone(err))
+}
+
+// TestNewClient_UsesTheSharedCallOptions pins that the production client is
+// built with the request-sent tracking: an RPC to an endpoint nothing listens
+// on is proven not sent.
+func TestNewClient_UsesTheSharedCallOptions(t *testing.T) {
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	addr := lis.Addr().String()
+	require.NoError(t, lis.Close()) // nothing listens there now
+
+	cli, err := NewClient(context.Background(), addr, "sent-test", "p", nil, nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = cli.Close() })
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	_, err = cli.Clone(ctx, cloneReqForSentTest())
+	require.Error(t, err)
+	assert.True(t, contracts.IsRequestNotSent(err), "%v", err)
 }
