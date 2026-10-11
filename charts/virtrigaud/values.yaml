@@ -98,6 +98,10 @@ manager:
   #     default 256 GiB) and, for a migration import or a converted export,
   #     about twice the disk at once. Migrating a disk larger than about
   #     256 GiB needs a larger limit (and that much free node disk).
+  # A sizeLimit bounds the pod's /tmp (the pod is evicted past it); it does
+  # not reserve node storage, so a node with less free ephemeral storage than
+  # the limit can still fill up first. Size it to your nodes, or schedule
+  # vSphere providers on nodes with enough free ephemeral storage.
   #   - libvirt, Proxmox and others: 1Gi. They stream disk data to and from
   #     the hypervisor over SSH; /tmp only holds SSH material.
   # One Provider can override it with the annotation
@@ -159,7 +163,9 @@ providers:
         memory: 256Mi
     # sizeLimit of the writable /tmp emptyDir. vSphere stages OVA downloads
     # (up to 256 GiB by default) and about twice a migrated disk there; raise
-    # it for larger disks. A quantity, or empty or "none" for no limit.
+    # it for larger disks. It bounds the pod's /tmp but does not reserve node
+    # storage: size it to the node's free ephemeral storage. A quantity, or
+    # empty or "none" for no limit.
     tmpSizeLimit: 512Gi
 
   # Proxmox provider

@@ -167,8 +167,15 @@ helm upgrade virtrigaud virtrigaud/virtrigaud \
 
 Every pod's root filesystem is read-only, so each gets a writable `/tmp`
 emptyDir, and each emptyDir has a `sizeLimit`: a pod that writes more than that
-to `/tmp` is **evicted** by the kubelet, so a runaway provider cannot fill the
-node's disk.
+to `/tmp` is **evicted** by the kubelet.
+
+> **The limit bounds the pod's `/tmp`; it does not reserve node storage.** The
+> kubelet enforces it only after the data is written. A node with less free
+> ephemeral storage than the limit (the vSphere default is `512Gi`) can still run
+> out first, and the kubelet then evicts pods by its own disk-pressure rules.
+> Size each limit to the nodes the pod can run on, or give the provider's `/tmp`
+> real capacity: schedule it on nodes with that much free ephemeral storage, or
+> back `/tmp` with a volume sized for its imports.
 
 - **vSphere providers stage whole disks in `/tmp`:**
   - an OVA image download, capped by `VIRTRIGAUD_VSPHERE_IMAGE_MAX_DOWNLOAD_GIB`
@@ -176,8 +183,10 @@ node's disk.
   - for a migration import, or a converted or multi-extent export, about
     **twice the disk**.
 
-  The default `512Gi` covers both up to that cap. For larger disks, raise the
-  limit and make sure the node has that much free ephemeral storage.
+  The default `512Gi` covers both up to that cap; it is a ceiling on what the
+  pod may write, not a guarantee the node has that much free. For larger disks,
+  raise the limit; either way, make sure the node has the free ephemeral storage
+  the imports need, or lower the limit to what it has.
 - **libvirt and Proxmox providers** stream disk data to and from the hypervisor
   host over SSH. Their `/tmp` only holds SSH keys, known_hosts and control
   sockets, so `1Gi` is ample.
@@ -188,7 +197,8 @@ node's disk.
   ceiling: a larger value, or `"none"`, is clamped to it, and the Provider gets a
   `TmpSizeLimitClamped` Warning event.
 - **All CR-managed providers:** set `manager.providerTmpSizeLimit`.
-- **Chart-templated providers:** set `providers.<name>.tmpSizeLimit`.
+- **Chart-templated providers:** set `providers.<name>.tmpSizeLimit` (a
+  quantity, `"none"`, or empty for no limit; anything else fails the render).
 
 ### Provider Configuration
 

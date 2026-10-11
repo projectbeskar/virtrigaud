@@ -91,17 +91,20 @@ providers), and rollback caveats in
 
 ### Security
 
-- Every pod's writable `/tmp` emptyDir now has a `sizeLimit`, so a provider can
-  no longer fill its node's disk:
+- Every pod's writable `/tmp` emptyDir now has a `sizeLimit`; a pod that writes
+  past it is evicted. The limit bounds the pod's `/tmp`, but does not reserve
+  node storage: a node with less free ephemeral storage than the limit can still
+  fill up first, so size it to your nodes. Defaults:
   - vSphere providers: `512Gi`. vSphere stages OVA downloads and about twice a
     migrated disk there.
   - libvirt, Proxmox and the other types: `1Gi`.
   - the manager: `128Mi`.
 
-  Raise one Provider's limit with the annotation
+  Change one Provider's limit with the annotation
   `infra.virtrigaud.io/tmp-size-limit`, or all of them with
-  `manager.providerTmpSizeLimit`. The manager upgrade rolls every provider pod
-  once.
+  `manager.providerTmpSizeLimit`. A cluster administrator can cap what the
+  annotation may ask for with `manager.providerTmpSizeLimitMax`. The manager
+  upgrade rolls every provider pod once.
   → [Upgrade guide](docs/upgrading.md),
   [chart README](charts/virtrigaud/README.md#tmp-size-limits)
 - Editing a waiting `VMClone`'s metadata (labels, annotations), or a
