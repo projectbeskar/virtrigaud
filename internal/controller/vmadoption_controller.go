@@ -70,6 +70,9 @@ const (
 	// without it (previous incarnations are re-attached per the ADR-0007 A6
 	// runbook).
 	AdoptStampedVMsAnnotation = "virtrigaud.io/adopt-stamped-vms"
+	// singleHostDiscoveryInterval is the minimum time between two single-host
+	// discoveries (ListVMs calls) of one Provider.
+	singleHostDiscoveryInterval = 5 * time.Minute
 	// AdoptedLabel marks a VirtualMachine CR whose underlying VM already
 	// exists on the provider (it was adopted from the hypervisor or produced
 	// by the clone controller) rather than created by the VirtualMachine
@@ -220,6 +223,16 @@ func (r *VMAdoptionReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		return r.reconcileClusteredAdoption(ctx, &provider, filter)
 	}
 
+	// Skip a discovery done less than singleHostDiscoveryInterval ago, BEFORE
+	// listing: every Provider update (status writes included) reconciles, and
+	// a ListVMs reads every VM of the hypervisor.
+	if last := provider.Status.Adoption.LastDiscoveryTime; last != nil {
+		if since := time.Since(last.Time); since < singleHostDiscoveryInterval {
+			logger.Info("Skipping discovery, last discovery was recent", "timeSince", since)
+			return ctrl.Result{RequeueAfter: singleHostDiscoveryInterval - since}, nil
+		}
+	}
+
 	// Discover unmanaged VMs
 	unmanagedVMs, foreignStamped, err := r.discoverUnmanagedVMs(ctx, &provider, filter)
 	if err != nil {
@@ -232,18 +245,8 @@ func (r *VMAdoptionReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		return ctrl.Result{RequeueAfter: 5 * time.Minute}, nil
 	}
 
-	// Check if we should skip discovery (if done recently)
-	now := metav1.Now()
-	if provider.Status.Adoption.LastDiscoveryTime != nil {
-		timeSinceLastDiscovery := time.Since(provider.Status.Adoption.LastDiscoveryTime.Time)
-		// Skip if discovery was done less than 5 minutes ago (unless forced by annotation change)
-		if timeSinceLastDiscovery < 5*time.Minute {
-			logger.Info("Skipping discovery, last discovery was recent", "timeSince", timeSinceLastDiscovery)
-			return ctrl.Result{RequeueAfter: 5 * time.Minute}, nil
-		}
-	}
-
 	// Update discovery status
+	now := metav1.Now()
 	provider.Status.Adoption.LastDiscoveryTime = &now
 	// #nosec G115 -- len() returns int, conversion to int32 is safe for VM counts (max 2^31-1 VMs is unrealistic)
 	provider.Status.Adoption.DiscoveredVMs = int32(len(unmanagedVMs))

@@ -4149,6 +4149,12 @@ func (p *Provider) ListVMs(ctx context.Context, req *providerv1.ListVMsRequest) 
 	pc := property.DefaultCollector(p.client.Client)
 
 	for _, vm := range vms {
+		// Stop as soon as the call is cancelled or past its deadline: every
+		// further read would fail, each with its own warning, and a partial
+		// listing must never be answered as the whole datacenter.
+		if ctx.Err() != nil {
+			return nil, listCancelledError(ctx)
+		}
 		// Get VM properties
 		var vmMo mo.VirtualMachine
 		err := pc.RetrieveOne(ctx, vm.Reference(), []string{
@@ -4164,6 +4170,10 @@ func (p *Provider) ListVMs(ctx context.Context, req *providerv1.ListVMsRequest) 
 		}, &vmMo)
 
 		if err != nil {
+			if ctx.Err() != nil {
+				// Cancelled during this read: not this VM's failure.
+				return nil, listCancelledError(ctx)
+			}
 			p.logger.Warn("Failed to retrieve VM properties, skipping", "vm", vm.Name(), "error", err)
 			continue
 		}

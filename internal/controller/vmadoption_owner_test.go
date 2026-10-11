@@ -17,9 +17,12 @@ limitations under the License.
 package controller
 
 import (
+	"context"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 
@@ -124,4 +127,35 @@ func TestForeignStampedSummary(t *testing.T) {
 	assert.Empty(t, foreignStampedSummary(0))
 	assert.Contains(t, foreignStampedSummary(2), "2 not adopted")
 	assert.Contains(t, foreignStampedSummary(2), AdoptStampedVMsAnnotation+"=true")
+}
+
+// TestSingleHostAdoption_RecentDiscoveryDoesNotList: a reconcile within
+// singleHostDiscoveryInterval of the last discovery returns before ListVMs
+// (which reads every VM of the hypervisor), and requeues for the rest of the
+// interval. A stamped VM of no VirtualMachine here is reported, not adopted.
+func TestSingleHostAdoption_RecentDiscoveryDoesNotList(t *testing.T) {
+	prov := &fakeClusteredAdopter{domains: []*fakeDomain{
+		{id: "foreign", uuid: "u-foreign", owner: "uid-other-cluster", power: "On"},
+	}}
+	provider := readyProvider(clusterNS, "prov-c")
+	provider.Annotations = map[string]string{AdoptionAnnotation: "true"}
+	r := clusteredAdoptionReconciler(t, prov, provider)
+
+	reconcileAdoption(t, r)
+	require.Equal(t, 1, prov.lists, "the first discovery lists")
+	st := adoptionStatus(t, r)
+	require.NotNil(t, st.LastDiscoveryTime)
+	assert.Contains(t, st.Message, "1 not adopted", "the foreign-stamped VM is reported")
+	var vms infravirtrigaudiov1beta1.VirtualMachineList
+	require.NoError(t, r.List(context.Background(), &vms))
+	assert.Empty(t, vms.Items, "the foreign-stamped VM is not adopted")
+
+	res := reconcileAdoption(t, r)
+	assert.Equal(t, 1, prov.lists, "a discovery within the interval does not list again")
+	assert.Positive(t, res.RequeueAfter)
+	assert.LessOrEqual(t, res.RequeueAfter, singleHostDiscoveryInterval)
+
+	r.setLastDiscovery(t, time.Now().Add(-singleHostDiscoveryInterval-time.Second))
+	reconcileAdoption(t, r)
+	assert.Equal(t, 2, prov.lists, "an older discovery lists again")
 }

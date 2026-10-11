@@ -17,9 +17,11 @@ limitations under the License.
 package vsphere
 
 import (
+	"context"
 	"strings"
 
 	"github.com/vmware/govmomi/vim25/types"
+	"google.golang.org/grpc/status"
 )
 
 // What ListVMs lists (the VMAdoption discovery feed).
@@ -91,6 +93,14 @@ func listExclusionFor(cfg *types.VirtualMachineConfigInfo) listExclusion {
 		return excludedUnreadableOwnerStamp
 	}
 	return listedVM
+}
+
+// listCancelledError is ListVMs' answer once ctx is cancelled or past its
+// deadline (codes.Canceled or codes.DeadlineExceeded): the listing stops at
+// once, without a warning per remaining VM, and a partial listing is never
+// answered as the whole datacenter.
+func listCancelledError(ctx context.Context) error {
+	return status.FromContextError(ctx.Err()).Err()
 }
 
 // carriesImageStampKey reports whether extraConfig holds any key in the

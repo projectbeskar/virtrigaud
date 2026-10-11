@@ -18,6 +18,8 @@ package vsphere
 
 import (
 	"context"
+	"slices"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -25,8 +27,14 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/vmware/govmomi/object"
 	"github.com/vmware/govmomi/property"
+	"github.com/vmware/govmomi/vim25/methods"
 	"github.com/vmware/govmomi/vim25/mo"
+	"github.com/vmware/govmomi/vim25/soap"
 	"github.com/vmware/govmomi/vim25/types"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+
+	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
 
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
 )
@@ -144,4 +152,49 @@ func TestListExclusionFor(t *testing.T) {
 			assert.Equal(t, tc.want, listExclusionFor(tc.cfg))
 		})
 	}
+}
+
+// cancelAfterFirstVMRead wraps the vim25 round-tripper: it counts ListVMs'
+// per-VM property reads (the ones asking for summary.config.name) and cancels
+// the call's context once the first one has been answered.
+type cancelAfterFirstVMRead struct {
+	soap.RoundTripper
+	cancel  context.CancelFunc
+	vmReads atomic.Int32
+}
+
+func (r *cancelAfterFirstVMRead) RoundTrip(ctx context.Context, req, res soap.HasFault) error {
+	perVM := false
+	if body, ok := req.(*methods.RetrievePropertiesExBody); ok && body.Req != nil {
+		for _, spec := range body.Req.SpecSet {
+			for _, ps := range spec.PropSet {
+				perVM = perVM || slices.Contains(ps.PathSet, "summary.config.name")
+			}
+		}
+	}
+	if perVM {
+		r.vmReads.Add(1)
+	}
+	err := r.RoundTripper.RoundTrip(ctx, req, res)
+	if perVM {
+		r.cancel()
+	}
+	return err
+}
+
+// TestListVMs_StopsWhenCancelled: once the call is cancelled, ListVMs reads no
+// further VM and answers Canceled instead of a partial listing (or a warning
+// per remaining VM).
+func TestListVMs_StopsWhenCancelled(t *testing.T) {
+	p, _ := newOwnershipSim(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	rt := &cancelAfterFirstVMRead{RoundTripper: p.client.RoundTripper, cancel: cancel}
+	p.client.RoundTripper = rt
+
+	resp, err := p.ListVMs(ctx, &providerv1.ListVMsRequest{})
+	require.Error(t, err)
+	assert.Nil(t, resp, "a partial listing is never answered")
+	assert.Equal(t, codes.Canceled, status.Code(err))
+	assert.EqualValues(t, 1, rt.vmReads.Load(), "no VM is read after the cancellation")
 }
