@@ -736,9 +736,18 @@ func (r *VMSnapshotReconciler) handleDeletion(ctx context.Context, snapshot *inf
 		var refErr, unavailableErr error
 		var ref contracts.VMRef
 		var providerInstance contracts.Provider
+		providerGone := false
 		switch {
 		case isConsumerNotAllowed(err):
 			refErr = err
+		case apierrors.IsNotFound(err):
+			// The VM's Provider in its own namespace no longer exists
+			// (one in another namespace that is missing is refused as
+			// ConsumerNotAllowed, above): nothing can delete the
+			// snapshot, and holding would wait forever. Released, as the
+			// VirtualMachine and VMMigration controllers do, with a
+			// Warning naming what may be left.
+			providerGone = true
 		case err != nil:
 			unavailableErr = err
 		default:
@@ -747,7 +756,15 @@ func (r *VMSnapshotReconciler) handleDeletion(ctx context.Context, snapshot *inf
 				providerInstance, unavailableErr = r.getProviderInstance(ctx, provider)
 			}
 		}
-		if unavailableErr != nil {
+		if providerGone {
+			msg := fmt.Sprintf("Removing the VMSnapshot although snapshot %q of VM %q was not deleted: the VM's Provider %q no "+
+				"longer exists, so nothing can delete it; if the VM still exists on the hypervisor, the snapshot is left there",
+				snapshot.Status.SnapshotID, vm.Status.ID, vm.Spec.ProviderRef.Name)
+			logger.Info("The VM's Provider no longer exists; removing finalizer, the snapshot may be left on the hypervisor",
+				"snapshot_id", snapshot.Status.SnapshotID, "vm_id", vm.Status.ID, "error", err.Error())
+			r.Recorder.Event(snapshot, corev1.EventTypeWarning, eventReasonSnapshotLeftOnHypervisor, msg)
+			removed = ""
+		} else if unavailableErr != nil {
 			if !hasSnapshotForceDeleteAnnotation(snapshot) {
 				return r.retainForUnavailableSnapshotProvider(ctx, snapshot, unavailableErr), nil
 			}

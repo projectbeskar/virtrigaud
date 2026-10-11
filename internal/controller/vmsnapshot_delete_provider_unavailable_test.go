@@ -110,22 +110,26 @@ func TestVMSnapshot_DeleteHeldWhileProviderUnavailable(t *testing.T) {
 	assert.Nil(t, get())
 }
 
-func TestVMSnapshot_DeleteHeldWhileProviderUnreadable(t *testing.T) {
+// TestVMSnapshot_ProviderGoneReleasesWithAWarning (security review L3): a
+// VMSnapshot whose VM's Provider no longer exists in its own namespace is
+// released — nothing can delete the snapshot, and holding would wait forever
+// — with a SnapshotLeftOnHypervisor Warning naming it, as the VirtualMachine
+// and VMMigration controllers do; never silently.
+func TestVMSnapshot_ProviderGoneReleasesWithAWarning(t *testing.T) {
 	ctx := context.Background()
-	r, spy, get, _ := deletingSnapshot(t, nil)
+	r, spy, get, events := deletingSnapshot(t, nil)
 	prov := &infrav1beta1.Provider{}
 	prov.Namespace, prov.Name = snapPhaseNS, "prov"
 	require.NoError(t, r.Delete(ctx, prov))
 
-	res, err := r.handleDeletion(ctx, get())
+	_, err := r.handleDeletion(ctx, get())
 	require.NoError(t, err)
-	assert.Equal(t, blockedRetryMin, res.RequeueAfter)
 	assert.Zero(t, spy.calls.Load())
-	snap := get()
-	require.NotNil(t, snap)
-	c := meta.FindStatusCondition(snap.Status.Conditions, infrav1beta1.VMSnapshotConditionDeleting)
-	require.NotNil(t, c)
-	assert.Equal(t, k8s.ReasonProviderUnavailable, c.Reason)
+	assert.Nil(t, get(), "released")
+	evs := strings.Join(eventsOf(events), "\n")
+	assert.Contains(t, evs, "Warning "+eventReasonSnapshotLeftOnHypervisor)
+	assert.Contains(t, evs, `snapshot "snap-1" of VM "vm-100"`)
+	assert.NotContains(t, evs, "Normal SnapshotDeleted")
 }
 
 func TestVMSnapshot_ForceDeleteReleasesWhileProviderUnavailable(t *testing.T) {
