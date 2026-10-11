@@ -327,6 +327,12 @@ func (r *VMAdoptionReconciler) discoverUnmanagedVMs(ctx context.Context, provide
 // behind by a deleted VirtualMachine) is unmanaged and may be adopted; the
 // adopted VirtualMachine is a new object, so the stale stamp never matches its
 // UID.
+//
+// A VM whose owner stamp the provider reports it cannot rely on
+// (contracts.VMInfoOwnerStampStateKey set to any value: unreadable, or naming
+// more than one owner) is never returned, managed or not: who owns it cannot
+// be told, so it is not offered for adoption (fail closed, as the clustered
+// flow's skipStampUnreliable).
 func unmanagedProviderVMs(provider *infravirtrigaudiov1beta1.Provider, allVMs []contracts.VMInfo,
 	vms []infravirtrigaudiov1beta1.VirtualMachine) []contracts.VMInfo {
 	managedVMIDs := make(map[string]bool)
@@ -356,6 +362,9 @@ func unmanagedProviderVMs(provider *infravirtrigaudiov1beta1.Provider, allVMs []
 
 	var unmanaged []contracts.VMInfo
 	for _, vmInfo := range allVMs {
+		if vmInfo.ProviderRaw[contracts.VMInfoOwnerStampStateKey] != "" {
+			continue
+		}
 		if managedVMIDs[vmInfo.ID] || ownedByLiveVM(vmInfo, liveUIDs) {
 			continue
 		}

@@ -59,15 +59,25 @@ func TestUnmanagedProviderVMs(t *testing.T) {
 		}
 		return info
 	}
+	withState := func(info contracts.VMInfo, state string) contracts.VMInfo {
+		info.ProviderRaw[contracts.VMInfoOwnerStampStateKey] = state
+		return info
+	}
 	all := []contracts.VMInfo{
-		stamped("team-a.web", "uid-a"),         // managed (status.id)
-		stamped("team-b.web", "uid-b"),         // managed (live owner stamp; no status.id yet)
-		stamped("team-c.db", "uid-c"),          // managed via another Provider object (live owner stamp)
-		stamped("legacy", ""),                  // managed (legacy name fallback)
-		stamped("team-e.old", "uid-deleted"),   // orphan of a deleted VirtualMachine: adoptable
-		stamped("hand-made", ""),               // never created by VirtRigaud: adoptable
-		stamped("two-stamps", "uid-x,uid-b"),   // any live UID keeps it managed
-		stamped("garbage-stamp", " , ,uid-zz"), // no live UID: adoptable
+		// Owner stamp the provider cannot rely on: never offered, even when
+		// every UID it records is stale or there is none.
+		withState(stamped("unreadable", ""), contracts.OwnerStampUnreadable),
+		withState(stamped("unreadable-stale", "uid-deleted"), contracts.OwnerStampUnreadable),
+		withState(stamped("multiple-stale", "uid-deleted,uid-gone"), contracts.OwnerStampMultiple),
+		withState(stamped("future-state", ""), "some-future-state"), // any value fails closed
+		stamped("team-a.web", "uid-a"),                              // managed (status.id)
+		stamped("team-b.web", "uid-b"),                              // managed (live owner stamp; no status.id yet)
+		stamped("team-c.db", "uid-c"),                               // managed via another Provider object (live owner stamp)
+		stamped("legacy", ""),                                       // managed (legacy name fallback)
+		stamped("team-e.old", "uid-deleted"),                        // orphan of a deleted VirtualMachine: adoptable
+		stamped("hand-made", ""),                                    // never created by VirtRigaud: adoptable
+		stamped("two-stamps", "uid-x,uid-b"),                        // any live UID keeps it managed
+		stamped("garbage-stamp", " , ,uid-zz"),                      // no live UID: adoptable
 	}
 
 	var got []string

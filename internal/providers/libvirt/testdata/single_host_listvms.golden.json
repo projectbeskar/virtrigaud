@@ -63,7 +63,7 @@
       "single virsh list --all",
       "single virsh dumpxml hand-edited"
     ],
-    "resp": "{\"vms\":[{\"id\":\"hand-edited\",\"name\":\"hand-edited\",\"power_state\":\"Off\",\"cpu\":1,\"memory_mib\":1024,\"provider_raw\":{\"domain_id\":\"0\",\"domain_name\":\"hand-edited\",\"owner_uid\":\"0b8f5e0e-7a53-4f6b-9a0e-1d2c3b4a5f60,c4d1a9f2-3e6b-4c7d-8e9f-0a1b2c3d4e5f\",\"power_state\":\"Off\",\"state\":\"shut off\",\"uuid\":\"eeeeeeee-5555-4555-8555-555555555555\"}}]}",
+    "resp": "{\"vms\":[{\"id\":\"hand-edited\",\"name\":\"hand-edited\",\"power_state\":\"Off\",\"cpu\":1,\"memory_mib\":1024,\"provider_raw\":{\"domain_id\":\"0\",\"domain_name\":\"hand-edited\",\"owner_stamp_state\":\"multiple\",\"owner_uid\":\"0b8f5e0e-7a53-4f6b-9a0e-1d2c3b4a5f60,c4d1a9f2-3e6b-4c7d-8e9f-0a1b2c3d4e5f\",\"power_state\":\"Off\",\"state\":\"shut off\",\"uuid\":\"eeeeeeee-5555-4555-8555-555555555555\"}}]}",
     "err": ""
   },
   "unparseable-domain-skipped": {

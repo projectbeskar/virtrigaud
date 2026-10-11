@@ -169,9 +169,10 @@ type vmListFieldCmp struct {
 // join key (see compareList). Deliberately EXCLUDED: IPs (need the guest agent),
 // Disks (carry qemu-img-derived fields), and Networks — comparing them would meter
 // phantom drift, not real config drift, exactly as they are excluded from describe.
-// The owner stamp (contracts.VMInfoOwnerUIDKey) is also excluded: both sides emit
-// it from the same document with the same function (pinned by a parity test), and
-// adding a compared field would change what the running D5 soak meters.
+// The owner stamp keys (contracts.VMInfoOwnerUIDKey and VMInfoOwnerStampStateKey)
+// are also excluded: both sides emit them from the same document with the same
+// functions (pinned by a parity test), and adding a compared field would change
+// what the running D5 soak meters.
 var vmListFields = []vmListFieldCmp{
 	{
 		// Both drivers map domain states to the same On/Off/Suspended/Unknown
@@ -482,11 +483,14 @@ func buildNativeList(lv *golibvirt.Libvirt) ([]contracts.VMInfo, error) {
 // VMInfo. It is split out of buildNativeList so the projection can be pinned
 // against virsh's ListVMs without a live libvirtd.
 //
-// It also carries the VirtRigaud owner stamp (contracts.VMInfoOwnerUIDKey), read
-// from the same document with the same domainOwnerUIDs virsh's ListVMs uses:
-// adoption relies on it to skip domains a live VirtualMachine owns, so it must
-// not disappear when the list family flips to native (ADR-0008 PR 5). The key
-// is deliberately NOT part of the shadow comparison (vmListFields).
+// It also carries the VirtRigaud owner stamp (contracts.VMInfoOwnerUIDKey) and,
+// when the stamps cannot be relied on, the stamp state
+// (contracts.VMInfoOwnerStampStateKey), read from the same document with the
+// same domainStampReport/setStampReport virsh's single-host ListVMs uses:
+// adoption relies on them to skip domains a live VirtualMachine owns or whose
+// owner cannot be told, so they must not disappear when the list family flips
+// to native (ADR-0008 PR 5). Neither key is part of the shadow comparison
+// (vmListFields).
 func nativeListVMInfo(d *libvirtxml.Domain, xmlDesc, powerState string) contracts.VMInfo {
 	info := contracts.VMInfo{
 		ID:          d.Name, // virsh's ListVMs uses the domain name as the ID too
@@ -497,9 +501,7 @@ func nativeListVMInfo(d *libvirtxml.Domain, xmlDesc, powerState string) contract
 	if d.UUID != "" {
 		info.ProviderRaw["uuid"] = d.UUID
 	}
-	if uids := domainOwnerUIDs(xmlDesc); uids != "" {
-		info.ProviderRaw[contracts.VMInfoOwnerUIDKey] = uids
-	}
+	setStampReport(info.ProviderRaw, domainStampReport(xmlDesc))
 	if d.VCPU != nil {
 		info.CPU = int32(d.VCPU.Value)
 	}

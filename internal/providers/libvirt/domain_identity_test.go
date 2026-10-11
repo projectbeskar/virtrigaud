@@ -698,3 +698,70 @@ func TestCreate_Clustered_OwnershipAppliesOnTargetHost(t *testing.T) {
 	_, err = p.Create(context.Background(), contracts.CreateRequest{Name: "web", TargetHostID: "host-a", Owner: ownerTeamB})
 	assert.False(t, contracts.IsConflict(err), "team-b/web does not collide with team-a/web on the target host: %v", err)
 }
+
+// TestDomainStampReport pins what a single-host listing (virsh listVMsOn and
+// the native nativeListVMInfo) reports about one domain document's owner
+// stamps. It fails closed: a document whose stamps cannot be read, or a stamp
+// recording no UID, is "unreadable", and two owners are "multiple" — single-host
+// adoption skips both, exactly as clustered adoption does.
+func TestDomainStampReport(t *testing.T) {
+	stampElem := func(attrs string) string {
+		return `<virtrigaud:owner xmlns:virtrigaud="` + ownerMetadataNamespaceURI + `" ` + attrs + `/>`
+	}
+	withMetadata := func(metadata string) string {
+		return "<domain type='kvm'>\n  <name>d</name>\n  <metadata>" + metadata + "</metadata>\n</domain>\n"
+	}
+	cases := []struct {
+		name  string
+		xml   string
+		uids  string
+		state string
+		owner contracts.ObjectIdentity
+	}{
+		{name: "unstamped", xml: unstampedDomainXML("d")},
+		{name: "one owner", xml: stampedDomainXML("d", ownerTeamA), uids: ownerTeamA.UID, owner: ownerTeamA},
+		{name: "the same owner twice", xml: withMetadata(
+			stampElem(`uid="u1" namespace="n" name="x"`) + stampElem(`uid="u1" namespace="n" name="x"`)),
+			uids: "u1", owner: contracts.ObjectIdentity{UID: "u1", Namespace: "n", Name: "x"}},
+		{name: "malformed XML", xml: "<domain><metadata>" + stampElem(`uid="u1"`), state: contracts.OwnerStampUnreadable},
+		{name: "repeated attribute", xml: withMetadata(stampElem(`uid="u1" uid="u2" namespace="n" name="x"`)),
+			state: contracts.OwnerStampUnreadable},
+		{name: "empty UID", xml: withMetadata(stampElem(`uid="" namespace="n" name="x"`)), state: contracts.OwnerStampUnreadable},
+		{name: "no UID", xml: withMetadata(stampElem(`namespace="n" name="x"`)), state: contracts.OwnerStampUnreadable},
+		{name: "an owner and an empty UID", xml: withMetadata(
+			stampElem(`uid="u1" namespace="n" name="x"`) + stampElem(`uid="" namespace="n" name="y"`)),
+			uids: "u1", state: contracts.OwnerStampUnreadable},
+		{name: "two owners", xml: withMetadata(
+			stampElem(`uid="u1" namespace="n" name="x"`) + stampElem(`uid="u2" namespace="n" name="y"`)),
+			uids: "u1,u2", state: contracts.OwnerStampMultiple},
+		{name: "one UID under two names", xml: withMetadata(
+			stampElem(`uid="u1" namespace="n" name="x"`) + stampElem(`uid="u1" namespace="n" name="y"`)),
+			uids: "u1", state: contracts.OwnerStampMultiple},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			sr := domainStampReport(tc.xml)
+			assert.Equal(t, tc.uids, sr.uids)
+			assert.Equal(t, tc.state, sr.state)
+			assert.Equal(t, tc.owner, sr.owner)
+
+			raw := map[string]string{
+				"uuid":                             "kept",
+				contracts.VMInfoOwnerUIDKey:        "stale",
+				contracts.VMInfoOwnerStampStateKey: "stale",
+			}
+			setStampReport(raw, sr)
+			assert.Equal(t, "kept", raw["uuid"])
+			if tc.uids == "" {
+				assert.NotContains(t, raw, contracts.VMInfoOwnerUIDKey)
+			} else {
+				assert.Equal(t, tc.uids, raw[contracts.VMInfoOwnerUIDKey])
+			}
+			if tc.state == "" {
+				assert.NotContains(t, raw, contracts.VMInfoOwnerStampStateKey)
+			} else {
+				assert.Equal(t, tc.state, raw[contracts.VMInfoOwnerStampStateKey])
+			}
+		})
+	}
+}

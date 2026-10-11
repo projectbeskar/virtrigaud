@@ -519,19 +519,30 @@ func TestListVMs_ReportsOwnerStamp(t *testing.T) {
 // projection (nativeListVMInfo, what buildNativeList emits) carries the same
 // owner stamp as virsh's ListVMs for the same domain definitions — so adoption
 // keeps skipping live-owned domains when the list family flips to native
-// (ADR-0008 PR 5) — and that the key does not create a shadow divergence.
+// (ADR-0008 PR 5) — and the same owner stamp state: a stamp that cannot be
+// read or records no UID is "unreadable", two owners are "multiple", so
+// single-host adoption skips them whichever driver listed them. Neither key
+// creates a shadow divergence.
 func TestListVMs_OwnerStampParityVirshVsNative(t *testing.T) {
 	c := newCreateHost(t)
 	hostDir := filepath.Join(c.root, "h1")
-	stamp := func(uid string) string {
-		return `<virtrigaud:owner xmlns:virtrigaud="` + ownerMetadataNamespaceURI + `" uid="` + uid + `" namespace="n" name="x"/>`
+	stamp := func(attrs string) string {
+		return `<virtrigaud:owner xmlns:virtrigaud="` + ownerMetadataNamespaceURI + `" ` + attrs + `/>`
 	}
-	twoStamps := "<domain type='kvm'>\n  <name>two.stamps</name>\n  <uuid>33333333-2222-4333-8444-555555555555</uuid>\n" +
-		"  <metadata>" + stamp("u1") + stamp("u2") + "</metadata>\n  <memory unit='KiB'>2097152</memory>\n</domain>\n"
+	domainWith := func(name, uuid, metadata string) string {
+		return "<domain type='kvm'>\n  <name>" + name + "</name>\n  <uuid>" + uuid + "</uuid>\n" +
+			"  <metadata>" + metadata + "</metadata>\n  <memory unit='KiB'>2097152</memory>\n</domain>\n"
+	}
 	defs := map[string]string{
 		"team-a.web": stampedDomainXML("team-a.web", ownerTeamA),
 		"web":        unstampedDomainXML("web"),
-		"two.stamps": twoStamps,
+		"two.stamps": domainWith("two.stamps", "33333333-2222-4333-8444-555555555555",
+			stamp(`uid="u1" namespace="n" name="x"`)+stamp(`uid="u2" namespace="n" name="x"`)),
+		// A repeated attribute: XML forbids it, Go's decoder accepts it.
+		"bad.stamp": domainWith("bad.stamp", "44444444-2222-4333-8444-555555555555",
+			stamp(`uid="u3" uid="u4" namespace="n" name="x"`)),
+		"no.uid": domainWith("no.uid", "55555555-2222-4333-8444-555555555555",
+			stamp(`namespace="n" name="x"`)),
 	}
 	for name, xml := range defs {
 		require.NoError(t, os.WriteFile(filepath.Join(hostDir, "dom-"+name+".xml"), []byte(xml), 0o600))
@@ -554,13 +565,38 @@ func TestListVMs_OwnerStampParityVirshVsNative(t *testing.T) {
 		native = append(native, nativeListVMInfo(d, defs[v.Name], v.PowerState))
 	}
 
-	want := map[string]string{"team-a.web": ownerTeamA.UID, "web": "", "two.stamps": "u1,u2"}
+	want := map[string]struct{ uids, state string }{
+		"team-a.web": {uids: ownerTeamA.UID},
+		"web":        {},
+		"two.stamps": {uids: "u1,u2", state: contracts.OwnerStampMultiple},
+		"bad.stamp":  {state: contracts.OwnerStampUnreadable},
+		"no.uid":     {state: contracts.OwnerStampUnreadable},
+	}
 	for i := range virsh {
 		name := virsh[i].Name
-		assert.Equal(t, want[name], virsh[i].ProviderRaw[contracts.VMInfoOwnerUIDKey], "virsh %s", name)
-		assert.Equal(t, want[name], native[i].ProviderRaw[contracts.VMInfoOwnerUIDKey], "native %s", name)
+		for driver, raw := range map[string]map[string]string{"virsh": virsh[i].ProviderRaw, "native": native[i].ProviderRaw} {
+			assert.Equal(t, want[name].uids, raw[contracts.VMInfoOwnerUIDKey], "%s %s owner_uid", driver, name)
+			assert.Equal(t, want[name].state, raw[contracts.VMInfoOwnerStampStateKey], "%s %s owner_stamp_state", driver, name)
+			if want[name].uids == "" {
+				assert.NotContains(t, raw, contracts.VMInfoOwnerUIDKey, "%s %s", driver, name)
+			}
+			if want[name].state == "" {
+				assert.NotContains(t, raw, contracts.VMInfoOwnerStampStateKey, "%s %s", driver, name)
+			}
+		}
+		assert.Empty(t, virsh[i].OwnerNamespace, "a single-host listing reports no owner identity")
+		assert.Empty(t, virsh[i].OwnerName)
 	}
-	assert.Empty(t, compareList(virsh, native), "the owner stamp never meters a shadow divergence")
+	assert.Empty(t, compareList(virsh, native), "the owner stamp keys never meter a shadow divergence")
+	// The keys differ between virsh and native here, yet nothing is metered:
+	// vmListFields does not look at provider_raw beyond "uuid".
+	tampered := append([]contracts.VMInfo(nil), native...)
+	for i := range tampered {
+		raw := map[string]string{"uuid": tampered[i].ProviderRaw["uuid"],
+			contracts.VMInfoOwnerUIDKey: "other", contracts.VMInfoOwnerStampStateKey: contracts.OwnerStampMultiple}
+		tampered[i].ProviderRaw = raw
+	}
+	assert.Empty(t, compareList(virsh, tampered), "the D5 soak does not compare the owner stamp keys")
 }
 
 // TestClustered_Delete_PendingCreateFindsNamespacedDomain: the operator's
