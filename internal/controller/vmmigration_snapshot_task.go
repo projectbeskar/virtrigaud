@@ -109,6 +109,16 @@ const migrationTaskFailedDetail = "the provider's task failed (its answer is in 
 // while the snapshot task runs. It is constant, so a poll writes nothing.
 const migrationSnapshotInProgressMessage = "The source VM snapshot is being taken; the export starts once its task completes"
 
+// Snapshot name length bounds (migrationSnapshotIdentity).
+const (
+	// migrationSnapshotNameMax is the smallest snapshot name limit among the
+	// providers: Proxmox's 40 characters.
+	migrationSnapshotNameMax = 40
+	// migrationSnapshotAttemptSuffixMax is the longest attempt suffix,
+	// "-r99" (retryPolicy.maxRetries is at most 10).
+	migrationSnapshotAttemptSuffixMax = len("-r99")
+)
+
 // migrationSnapshotIdentity is the name hint and request token of the source
 // snapshot this attempt of the migration takes: "<vm>-migration-<uid8>" and
 // the migration's UID for the first attempt (unchanged), with "-r<n>"
@@ -116,13 +126,22 @@ const migrationSnapshotInProgressMessage = "The source VM snapshot is being take
 // (cleanupPolicy Never leaves it on the source VM) therefore never collides
 // with that snapshot's name, and a provider that adopts by request token never
 // adopts it.
+//
+// The name hint always fits migrationSnapshotNameMax, the smallest snapshot
+// name limit among the providers (Proxmox: 40 characters; libvirt sanitises
+// to 64): the VM part is cut, deterministically, to leave room for
+// "-migration-<uid8>" and the longest attempt suffix.
 func migrationSnapshotIdentity(m *infrav1beta1.VMMigration) (nameHint, requestToken string) {
 	uid := string(m.UID)
 	short := uid
 	if len(short) > 8 {
 		short = short[:8]
 	}
-	nameHint = fmt.Sprintf("%s-migration-%s", m.Spec.Source.VMRef.Name, short)
+	vmPart := m.Spec.Source.VMRef.Name
+	if room := migrationSnapshotNameMax - len("-migration-") - len(short) - migrationSnapshotAttemptSuffixMax; len(vmPart) > room {
+		vmPart = vmPart[:room]
+	}
+	nameHint = fmt.Sprintf("%s-migration-%s", vmPart, short)
 	requestToken = uid
 	if m.Status.RetryCount > 0 {
 		nameHint = fmt.Sprintf("%s-r%d", nameHint, m.Status.RetryCount)
