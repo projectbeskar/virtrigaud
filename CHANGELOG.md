@@ -5,6 +5,21 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-10-11 21:00] - Isolate the held-watch envtest specs from objects other specs left behind
+**Author:** @wrkode (William Rizzo)
+
+### Fixed
+- `internal/controller/hold_watch_envtest_test.go`: the counting provider in the "held clones and snapshot deletes ignore metadata-only updates" specs counts only calls for its own namespace and refuses others; the snapshot specs scope their provider the same way. envtest never deletes namespaces, so a VMClone another spec left behind was reconciled by this spec's manager and counted as a second Clone call (`hold_watch_envtest_test.go:181`, expected 1, got 2).
+
+### Why
+The spec failed intermittently on main under full-suite load, failing CI on unrelated PRs. The failure was test isolation, not a product bug: the held clone itself is never re-run.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+(Test-only change.)
 ## [2026-10-11 20:32] - Bump OpenTelemetry-Go to v1.45.0 (GO-2026-6505), golang.org/x/net to v0.60.0 and Go to 1.26.9
 **Author:** @wrkode (William Rizzo)
 

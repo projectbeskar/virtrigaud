@@ -48,21 +48,46 @@ import (
 // annotation.
 
 // countingCloner is a Cloner whose answers can be changed while a manager
-// runs; it counts the Clone calls. It is safe for concurrent use.
+// runs; it counts the Clone calls for clones into namespace. It is safe for
+// concurrent use.
+//
+// The spec's manager reconciles every VMClone of the envtest apiserver,
+// including those other specs left behind in their own namespaces (envtest
+// never deletes a namespace), and resolves them all to this provider. Those
+// are refused (InvalidSpec: they fail and are not retried) and not counted, so
+// the count is this spec's clone's calls only.
 type countingCloner struct {
 	stubProvider
-	mu    sync.Mutex
-	resp  contracts.CloneResponse
-	err   error
-	calls atomic.Int32
+	namespace string
+	mu        sync.Mutex
+	resp      contracts.CloneResponse
+	err       error
+	calls     atomic.Int32
 }
 
-// Clone counts the call and returns the scripted answer.
-func (p *countingCloner) Clone(_ context.Context, _ contracts.CloneRequest) (contracts.CloneResponse, error) {
+// Clone counts a call for a clone into p.namespace and returns the scripted
+// answer; any other clone is refused.
+func (p *countingCloner) Clone(_ context.Context, req contracts.CloneRequest) (contracts.CloneResponse, error) {
+	if req.TargetVM.Namespace != p.namespace {
+		return contracts.CloneResponse{}, contracts.NewInvalidSpecError("not this spec's clone", nil)
+	}
 	p.calls.Add(1)
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.resp, p.err
+}
+
+// onlyProviderIn returns a providerInstanceFn that resolves the Provider of
+// namespace ns to prov and refuses every other one: the spec's manager also
+// reconciles objects other specs left in their namespaces, which must never
+// reach (or be counted by) this spec's spy.
+func onlyProviderIn(ns string, prov contracts.Provider) func(context.Context, *infravirtrigaudiov1beta1.Provider) (contracts.Provider, error) {
+	return func(_ context.Context, p *infravirtrigaudiov1beta1.Provider) (contracts.Provider, error) {
+		if p.Namespace != ns {
+			return nil, fmt.Errorf("provider %s/%s is not this spec's", p.Namespace, p.Name)
+		}
+		return prov, nil
+	}
 }
 
 // answer scripts the next Clone answers.
@@ -150,7 +175,7 @@ var _ = Describe("Held clones and snapshot deletes ignore metadata-only updates 
 		ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{GenerateName: "hold-clone-"}}
 		Expect(k8sClient.Create(ctx, ns)).To(Succeed())
 
-		cp := &countingCloner{}
+		cp := &countingCloner{namespace: ns.Name}
 		cp.answer(contracts.CloneResponse{}, sourceRunningAnswer())
 		startHoldTestManager(func(mgr ctrl.Manager) {
 			Expect(NewVMCloneReconciler(mgr.GetClient(), mgr.GetAPIReader(), mgr.GetScheme(), &stubResolver{provider: cp},
@@ -208,9 +233,7 @@ var _ = Describe("Held clones and snapshot deletes ignore metadata-only updates 
 		startHoldTestManager(func(mgr ctrl.Manager) {
 			r := NewVMSnapshotReconciler(mgr.GetClient(), mgr.GetScheme(), nil, record.NewFakeRecorder(100), false)
 			r.APIReader = mgr.GetAPIReader()
-			r.providerInstanceFn = func(context.Context, *infravirtrigaudiov1beta1.Provider) (contracts.Provider, error) {
-				return spy, nil
-			}
+			r.providerInstanceFn = onlyProviderIn(ns.Name, spy)
 			Expect(r.SetupWithManager(mgr)).To(Succeed())
 		})
 
@@ -251,9 +274,7 @@ var _ = Describe("Held clones and snapshot deletes ignore metadata-only updates 
 		spy.answer(contracts.NewHostUnavailableError(`snapshotDelete: host "kvm-01" is unreachable`, nil))
 		startHoldTestManager(func(mgr ctrl.Manager) {
 			r := NewVMSnapshotReconciler(mgr.GetClient(), mgr.GetScheme(), nil, record.NewFakeRecorder(100), false)
-			r.providerInstanceFn = func(context.Context, *infravirtrigaudiov1beta1.Provider) (contracts.Provider, error) {
-				return spy, nil
-			}
+			r.providerInstanceFn = onlyProviderIn(ns.Name, spy)
 			Expect(r.SetupWithManager(mgr)).To(Succeed())
 		})
 
