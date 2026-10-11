@@ -54,6 +54,8 @@ func TestLegacySnapshotOfVM(t *testing.T) {
 		"VM well before the snapshot": {legacy(taken.Add(-time.Minute)), vmAt(taken.Add(-time.Hour)), true, true},
 		"VM before the VMSnapshot object, even if the manager's clock is behind": {
 			legacy(taken.Add(time.Minute)), vmAt(taken.Add(30 * time.Second)), true, true},
+		"VM created in the same second as the VMSnapshot object (one manifest)": {
+			legacy(taken.Add(-time.Minute).Truncate(time.Second)), vmAt(taken.Add(-time.Minute).Truncate(time.Second)), true, true},
 		"VM within the skew margin (ambiguous)": {legacy(taken.Add(-time.Hour)), vmAt(taken.Add(-10 * time.Second)), true, false},
 		"VM after the snapshot":                 {legacy(taken.Add(-time.Hour)), vmAt(taken.Add(time.Minute)), true, false},
 		"no creation time":                      {&infrav1beta1.VMSnapshot{}, vmAt(taken), false, false},

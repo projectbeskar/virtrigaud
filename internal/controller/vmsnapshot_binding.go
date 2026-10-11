@@ -19,6 +19,8 @@ package controller
 import (
 	"time"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
 	infrav1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
 )
 
@@ -58,9 +60,11 @@ func snapshotOfOtherVM(snapshot *infrav1beta1.VMSnapshot, vm *infrav1beta1.Virtu
 // status.vmUID) is of vm. known is false when it cannot be judged (no
 // status.creationTime: today's behaviour).
 //
-//   - vm was created before the VMSnapshot object (both API-server
-//     timestamps, one clock): vm existed before the snapshot was asked for
-//     and still has the same UID — it is the snapshot's VM;
+//   - vm was created no later than the VMSnapshot object (both API-server
+//     timestamps, one clock, whole seconds — the same second counts): a
+//     snapshot is taken only once its VM is provisioned, after both objects
+//     exist, so the VM with this UID, which exists now, is the one that
+//     existed then — it is the snapshot's VM;
 //   - otherwise vm was created after the VMSnapshot object (a snapshot can
 //     wait for its VM). Its creation is compared with the snapshot's
 //     status.creationTime, written by the manager's clock: more than
@@ -72,10 +76,10 @@ func legacySnapshotOfVM(snapshot *infrav1beta1.VMSnapshot, vm *infrav1beta1.Virt
 	if ct == nil {
 		return false, false
 	}
-	if !snapshot.CreationTimestamp.IsZero() && vm.CreationTimestamp.Before(&snapshot.CreationTimestamp) {
+	if !snapshot.CreationTimestamp.IsZero() && !vm.CreationTimestamp.After(snapshot.CreationTimestamp.Time) {
 		return true, true
 	}
-	return true, vm.CreationTimestamp.Time.Before(ct.Time.Add(-legacyBindingSkewMargin))
+	return true, vm.CreationTimestamp.Before(&metav1.Time{Time: ct.Add(-legacyBindingSkewMargin)})
 }
 
 // backfillSnapshotBinding binds a snapshot taken by an older manager (no
