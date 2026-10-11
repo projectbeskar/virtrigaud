@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	stderrors "errors"
 	"fmt"
 	"time"
 
@@ -157,7 +158,7 @@ func (r *VMMigrationReconciler) handleTerminalFailure(ctx context.Context, migra
 	}
 	logger.Info("Source snapshot deleted on terminal failure", "snapshot_id", snapshotID)
 	r.Recorder.Event(migration, corev1.EventTypeNormal, migrationReasonSourceSnapshotDeleted,
-		"The source snapshot this failed migration created was deleted")
+		"The source snapshot this failed migration created was deleted (or was already gone on the provider)")
 	return ctrl.Result{}, nil
 }
 
@@ -188,6 +189,13 @@ func (r *VMMigrationReconciler) releaseSourceSnapshotForDeletion(ctx context.Con
 	if err := r.deleteSourceSnapshot(ctx, migration); err != nil {
 		if force {
 			r.recordSourceSnapshotLeft(ctx, migration, snapshotID, err)
+			return false, ctrl.Result{}, nil
+		}
+		if stderrors.Is(err, errSourceSnapshotUnaddressable) {
+			// Nothing can address the snapshot any more (its VM or Provider
+			// is gone): holding would wait forever. Released, never reported
+			// deleted.
+			r.recordSourceSnapshotUnaddressable(ctx, migration, snapshotID, err)
 			return false, ctrl.Result{}, nil
 		}
 		res, herr := r.holdSourceSnapshotCleanup(ctx, migration, err)
@@ -226,6 +234,19 @@ func (r *VMMigrationReconciler) holdSourceSnapshotCleanup(ctx context.Context, m
 		}
 	}
 	return ctrl.Result{RequeueAfter: retry}, nil
+}
+
+// recordSourceSnapshotUnaddressable records that a VMMigration is removed
+// although its source snapshot was not deleted because nothing can address it
+// any more (errSourceSnapshotUnaddressable): a SnapshotLeftOnHypervisor
+// Warning naming the snapshot and the source VM, and the cause in the log.
+func (r *VMMigrationReconciler) recordSourceSnapshotUnaddressable(ctx context.Context, migration *infrav1beta1.VMMigration, snapshotID string, cause error) {
+	msg := fmt.Sprintf("Removing the VMMigration although its source snapshot %q of VM %s/%s was not deleted: the source VM or "+
+		"its Provider no longer exists, so nothing can delete it; if the VM still exists on the hypervisor, the snapshot is left there",
+		snapshotID, migration.Namespace, migration.Spec.Source.VMRef.Name)
+	logging.FromContext(ctx).Info("Source snapshot can no longer be addressed; removing finalizer, it may be left on the hypervisor",
+		"snapshot_id", snapshotID, "error", cause.Error())
+	r.Recorder.Event(migration, corev1.EventTypeWarning, eventReasonSnapshotLeftOnHypervisor, msg)
 }
 
 // recordSourceSnapshotLeft records that force-delete removes the VMMigration

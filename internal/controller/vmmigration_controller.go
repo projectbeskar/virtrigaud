@@ -3420,14 +3420,23 @@ func (r *VMMigrationReconciler) waitForSourceBinding(ctx context.Context, migrat
 	return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 }
 
+// errSourceSnapshotUnaddressable is returned (wrapped) by deleteSourceSnapshot
+// when nothing can address the source snapshot any more — the source
+// VirtualMachine, or its Provider in the migration's own namespace, no longer
+// exists — so nothing was deleted. The snapshot may still be on the
+// hypervisor (e.g. a source VM detached with orphan-on-delete): it is never
+// reported deleted. A deleting VMMigration is released with a
+// SnapshotLeftOnHypervisor Warning; anywhere else the cleanup stays pending.
+var errSourceSnapshotUnaddressable = stderrors.New("the source snapshot can no longer be addressed")
+
 // deleteSourceSnapshot deletes the migration-created snapshot of the source VM
-// and, once nothing is left to delete, clears status.snapshotID (in memory;
-// the caller persists it). It returns nil when the snapshot was deleted and
-// when it is provably gone or can no longer be addressed by anyone: the source
-// VirtualMachine is not found, its Provider in the migration's own namespace is
-// not found, or the provider answers that the snapshot is not found. Any other
-// failure — a read error, a cross-namespace Provider this namespace may not use
-// (or that does not exist), no provider call possible for the VM, the provider
+// and, once it is gone, clears status.snapshotID (in memory; the caller
+// persists it). It returns nil when the snapshot was deleted or the provider
+// answers that it is not found. It returns an errSourceSnapshotUnaddressable
+// error, keeping the snapshot id, when the source VirtualMachine or its
+// Provider in the migration's own namespace is not found. Any other failure —
+// a read error, a cross-namespace Provider this namespace may not use (or
+// that does not exist), no provider call possible for the VM, the provider
 // client not resolvable, a failed or unfinished delete — is returned: the
 // snapshot may still be on the source VM and a retry can still delete it.
 func (r *VMMigrationReconciler) deleteSourceSnapshot(ctx context.Context, migration *infrav1beta1.VMMigration) error {
@@ -3436,10 +3445,9 @@ func (r *VMMigrationReconciler) deleteSourceSnapshot(ctx context.Context, migrat
 	// Get source VM
 	sourceVM, err := r.getSourceVM(ctx, migration)
 	if errors.IsNotFound(err) {
-		logger.Info("Source VM is gone; no source snapshot left to delete",
+		logger.Info("Source VM is gone; its snapshot can no longer be addressed",
 			"vm", migration.Spec.Source.VMRef.Name, "snapshot_id", migration.Status.SnapshotID)
-		migration.Status.SnapshotID = ""
-		return nil
+		return fmt.Errorf("source VM %s not found: %w", migration.Spec.Source.VMRef.Name, errSourceSnapshotUnaddressable)
 	}
 	if err != nil {
 		return fmt.Errorf("failed to get source VM: %w", err)
@@ -3451,10 +3459,9 @@ func (r *VMMigrationReconciler) deleteSourceSnapshot(ctx context.Context, migrat
 	// existence oracle) and keeps the cleanup pending.
 	sourceProvider, err := r.sourceProviderFor(ctx, migration, sourceVM)
 	if errors.IsNotFound(err) && !isConsumerNotAllowed(err) {
-		logger.Info("Source Provider is gone; no source snapshot can be deleted",
+		logger.Info("Source Provider is gone; the source snapshot can no longer be addressed",
 			"snapshot_id", migration.Status.SnapshotID, "error", err.Error())
-		migration.Status.SnapshotID = ""
-		return nil
+		return fmt.Errorf("source Provider not found: %w", errSourceSnapshotUnaddressable)
 	}
 	if err != nil {
 		return fmt.Errorf("resolve source provider: %w", err)
