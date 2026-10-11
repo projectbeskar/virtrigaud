@@ -43,6 +43,12 @@ spec:
         # unset keeps the per-type defaults (vSphere 512Gi, others 1Gi).
         - --provider-tmp-size-limit={{ . }}
         {{- end }}
+        {{- with .Values.manager.providerTmpSizeLimitMax }}
+        # Ceiling on every provider pod's /tmp sizeLimit: a Provider's
+        # infra.virtrigaud.io/tmp-size-limit annotation above it (or "none") is
+        # clamped to it.
+        - --provider-tmp-size-limit-max={{ . }}
+        {{- end }}
         {{- if .Values.webhooks.enabled }}
         # Webhook serving certs are mounted at this path; the manager's certwatcher
         # loads tls.crt/tls.key from here and serves on controller-runtime's default

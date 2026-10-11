@@ -25,6 +25,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
@@ -125,3 +126,76 @@ func TestProviderTmp_Precedence(t *testing.T) {
 
 // ptrTo returns a pointer to v.
 func ptrTo(v string) *string { return &v }
+
+// TestProviderTmp_Ceiling pins the administrator's ceiling
+// (--provider-tmp-size-limit-max, security review L1): with it set, a
+// Provider's annotation can only stay within it — a larger value or "none" is
+// clamped to it with one TmpSizeLimitClamped Warning event — and the
+// manager-wide and per-type defaults are capped at it. Without it, nothing is
+// clamped.
+func TestProviderTmp_Ceiling(t *testing.T) {
+	vsphere := infravirtrigaudiov1beta1.ProviderTypeVSphere
+	libvirt := infravirtrigaudiov1beta1.ProviderTypeLibvirt
+	cases := map[string]struct {
+		providerType infravirtrigaudiov1beta1.ProviderType
+		manager      string
+		max          string
+		annotation   *string
+		want         string
+		warned       bool
+	}{
+		"an annotation below the ceiling is kept":    {providerType: libvirt, max: "100Gi", annotation: ptrTo("50Gi"), want: "50Gi"},
+		"an annotation at the ceiling is kept":       {providerType: libvirt, max: "100Gi", annotation: ptrTo("100Gi"), want: "100Gi"},
+		"an annotation above the ceiling is clamped": {providerType: libvirt, max: "100Gi", annotation: ptrTo("1Ti"), want: "100Gi", warned: true},
+		"none is clamped to the ceiling":             {providerType: libvirt, max: "100Gi", annotation: ptrTo(infravirtrigaudiov1beta1.ProviderTmpSizeLimitNone), want: "100Gi", warned: true},
+		"the per-type default is capped":             {providerType: vsphere, max: "100Gi", want: "100Gi"},
+		"a manager-wide none is capped":              {providerType: vsphere, manager: infravirtrigaudiov1beta1.ProviderTmpSizeLimitNone, max: "100Gi", want: "100Gi"},
+		"a default below the ceiling is kept":        {providerType: libvirt, max: "100Gi", want: "1Gi"},
+		"no ceiling: none is honoured":               {providerType: libvirt, annotation: ptrTo(infravirtrigaudiov1beta1.ProviderTmpSizeLimitNone), want: ""},
+		"no ceiling: a large annotation is honoured": {providerType: libvirt, annotation: ptrTo("2Ti"), want: "2Ti"},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			prov := providerWithRuntime("tmp-limit", &infravirtrigaudiov1beta1.ProviderTLSSpec{Enabled: false})
+			prov.Spec.Type = tc.providerType
+			if tc.annotation != nil {
+				prov.Annotations = map[string]string{infravirtrigaudiov1beta1.ProviderTmpSizeLimitAnnotation: *tc.annotation}
+			}
+			rec := record.NewFakeRecorder(8)
+			r := &ProviderReconciler{TmpSizeLimit: tc.manager, TmpSizeLimitMax: tc.max, Recorder: rec}
+
+			for i := 0; i < 3; i++ { // repeated reconciles announce a clamp once
+				got := r.providerTmpSizeLimit(context.Background(), prov)
+				if tc.want == "" {
+					assert.Nil(t, got)
+				} else {
+					require.NotNil(t, got)
+					assert.Equal(t, tc.want, got.String())
+				}
+			}
+			events := drainEvents(rec)
+			if !tc.warned {
+				assert.Empty(t, events)
+				return
+			}
+			require.Len(t, events, 1)
+			assert.Contains(t, events[0], "Warning "+eventReasonTmpSizeLimitClamped)
+			assert.Contains(t, events[0], "--provider-tmp-size-limit-max=100Gi")
+		})
+	}
+}
+
+// TestProviderTmp_CeilingFlag pins the parsing of the ceiling flag: empty is
+// no ceiling, a positive quantity is one, and "none" or garbage is refused.
+func TestProviderTmp_CeilingFlag(t *testing.T) {
+	q, err := ParseProviderTmpSizeLimitMax("")
+	require.NoError(t, err)
+	assert.Nil(t, q)
+	q, err = ParseProviderTmpSizeLimitMax("200Gi")
+	require.NoError(t, err)
+	assert.Equal(t, "200Gi", q.String())
+	for _, bad := range []string{infravirtrigaudiov1beta1.ProviderTmpSizeLimitNone, "0", "lots"} {
+		_, err := ParseProviderTmpSizeLimitMax(bad)
+		assert.Error(t, err, bad)
+	}
+}

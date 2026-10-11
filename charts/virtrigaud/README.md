@@ -160,6 +160,7 @@ helm upgrade virtrigaud virtrigaud/virtrigaud \
 | `manager.resources.limits.cpu` | CPU limit | `500m` |
 | `manager.resources.limits.memory` | Memory limit | `512Mi` |
 | `manager.tmpSizeLimit` | `sizeLimit` of the manager pod's `/tmp` emptyDir (empty = none) | `128Mi` |
+| `manager.providerTmpSizeLimitMax` | Ceiling on every provider pod's `/tmp` `sizeLimit` (`--provider-tmp-size-limit-max`; a quantity, empty = no ceiling). A `Provider` annotation above it, or `none`, is clamped to it with a `TmpSizeLimitClamped` Warning event; the defaults are capped at it too | `""` |
 | `manager.providerTmpSizeLimit` | `sizeLimit` of the `/tmp` emptyDir of every provider pod run for a `Provider` CR (`--provider-tmp-size-limit`; a quantity or `none`). Empty keeps the per-type defaults: vSphere `512Gi`, others `1Gi` | `""` |
 
 #### `/tmp` size limits
@@ -182,7 +183,10 @@ node's disk.
   sockets, so `1Gi` is ample.
 - **One `Provider`:** annotate it
   `infra.virtrigaud.io/tmp-size-limit: "<quantity>"` (or `"none"`). The webhook
-  refuses an invalid value, and changing it rolls that Provider's pods.
+  refuses an invalid value, and changing it rolls that Provider's pods. With
+  `manager.providerTmpSizeLimitMax` set, the annotation cannot go above that
+  ceiling: a larger value, or `"none"`, is clamped to it, and the Provider gets a
+  `TmpSizeLimitClamped` Warning event.
 - **All CR-managed providers:** set `manager.providerTmpSizeLimit`.
 - **Chart-templated providers:** set `providers.<name>.tmpSizeLimit`.
 

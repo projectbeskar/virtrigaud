@@ -160,6 +160,18 @@ type ProviderReconciler struct {
 	// ProviderTmpSizeLimitAnnotation overrides both.
 	TmpSizeLimit string
 
+	// TmpSizeLimitMax is the ceiling on a provider pod's /tmp sizeLimit (the
+	// manager's --provider-tmp-size-limit-max): a positive quantity, or empty
+	// for no ceiling. With it set, a ProviderTmpSizeLimitAnnotation above it
+	// (or "none") is clamped to it with a Warning event, and the manager-wide
+	// and per-type defaults are capped at it.
+	TmpSizeLimitMax string
+
+	// tmpLimitWarned records, per Provider, the annotation value last
+	// announced by a TmpSizeLimitClamped event, so a clamp is announced once,
+	// not on every reconcile.
+	tmpLimitWarned sync.Map
+
 	// namespaceReadForbiddenLogged records the namespaces whose Namespace read
 	// was refused (Forbidden, e.g. namespace-scoped RBAC), so that is logged
 	// once per namespace rather than on every reconcile of a held Provider.
@@ -1189,57 +1201,6 @@ func (r *ProviderReconciler) buildProviderContainer(provider *infravirtrigaudiov
 
 	// Add volumes to pod spec (we'll need to modify the caller to handle this)
 	return container, nil
-}
-
-// The default sizeLimit of a provider pod's writable /tmp emptyDir, per
-// provider type. They are sized for what each provider stages in its own /tmp:
-//   - vSphere stages whole disks and images there: an OVA download (capped by
-//     VIRTRIGAUD_VSPHERE_IMAGE_MAX_DOWNLOAD_GIB, default 256 GiB) and, for a
-//     migration import or a converted/multi-extent export, about twice the
-//     disk at once. 512Gi covers both up to that cap; a larger disk needs a
-//     larger limit (the annotation or --provider-tmp-size-limit).
-//   - libvirt and Proxmox stream disk data to and from the hypervisor host
-//     over SSH; their pod /tmp only holds SSH material, known_hosts files
-//     and control sockets (KB).
-const (
-	vsphereProviderTmpSizeLimit = "512Gi"
-	smallProviderTmpSizeLimit   = "1Gi"
-)
-
-// defaultProviderTmpSizeLimit is the per-type default /tmp sizeLimit of a
-// provider pod (see vsphereProviderTmpSizeLimit).
-func defaultProviderTmpSizeLimit(providerType infravirtrigaudiov1beta1.ProviderType) *resource.Quantity {
-	value := smallProviderTmpSizeLimit
-	if providerType == infravirtrigaudiov1beta1.ProviderTypeVSphere {
-		value = vsphereProviderTmpSizeLimit
-	}
-	limit := resource.MustParse(value)
-	return &limit
-}
-
-// providerTmpSizeLimit returns the sizeLimit of the provider pod's /tmp
-// emptyDir, nil meaning no limit: the Provider's
-// ProviderTmpSizeLimitAnnotation, else the manager-wide TmpSizeLimit, else the
-// per-type default. A value that does not parse (the webhook and the manager's
-// startup refuse one, but the webhook may be off) is ignored and logged.
-func (r *ProviderReconciler) providerTmpSizeLimit(ctx context.Context, provider *infravirtrigaudiov1beta1.Provider) *resource.Quantity {
-	logger := log.FromContext(ctx)
-	if value, ok := provider.Annotations[infravirtrigaudiov1beta1.ProviderTmpSizeLimitAnnotation]; ok {
-		limit, err := infravirtrigaudiov1beta1.ParseProviderTmpSizeLimit(value)
-		if err == nil {
-			return limit
-		}
-		logger.Info("Ignoring an invalid /tmp size-limit annotation",
-			"provider", provider.Name, "annotation", infravirtrigaudiov1beta1.ProviderTmpSizeLimitAnnotation, "error", err.Error())
-	}
-	if r.TmpSizeLimit != "" {
-		limit, err := infravirtrigaudiov1beta1.ParseProviderTmpSizeLimit(r.TmpSizeLimit)
-		if err == nil {
-			return limit
-		}
-		logger.Info("Ignoring an invalid manager-wide /tmp size limit", "error", err.Error())
-	}
-	return defaultProviderTmpSizeLimit(provider.Spec.Type)
 }
 
 // buildPodVolumes builds the volumes for the provider pod

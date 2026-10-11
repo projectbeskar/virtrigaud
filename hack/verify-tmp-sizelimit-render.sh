@@ -83,6 +83,19 @@ helm template virtrigaud "${CHART_DIR}" --namespace "${NAMESPACE}" "${PROVIDERS[
   --set manager.tmpSizeLimit=64Mi > "${WORKDIR}/override.yaml"
 check "${WORKDIR}/override.yaml" 20Gi manager=64Mi provider-vsphere=1Ti provider-libvirt=1Gi
 
+echo "==> 2b. the ceiling becomes the manager flag"
+helm template virtrigaud "${CHART_DIR}" --namespace "${NAMESPACE}" \
+  --set manager.providerTmpSizeLimitMax=200Gi > "${WORKDIR}/max.yaml"
+python3 - "${WORKDIR}/max.yaml" <<'PY'
+import sys, yaml
+docs = [d for d in yaml.safe_load_all(open(sys.argv[1])) if d]
+mgr = [d for d in docs if d.get("kind") == "Deployment" and d["metadata"]["name"].endswith("manager")][0]
+args = mgr["spec"]["template"]["spec"]["containers"][0]["args"]
+if "--provider-tmp-size-limit-max=200Gi" not in args:
+    sys.exit(f"❌ manager args lack --provider-tmp-size-limit-max=200Gi: {args}")
+print("   ok: --provider-tmp-size-limit-max=200Gi")
+PY
+
 echo "==> 3. empty values render an unbounded emptyDir"
 helm template virtrigaud "${CHART_DIR}" --namespace "${NAMESPACE}" "${PROVIDERS[@]}" \
   --set manager.tmpSizeLimit= --set providers.libvirt.tmpSizeLimit= > "${WORKDIR}/empty.yaml"

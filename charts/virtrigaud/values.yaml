@@ -103,6 +103,16 @@ manager:
   # infra.virtrigaud.io/tmp-size-limit (a quantity or "none").
   providerTmpSizeLimit: ""
 
+  # Ceiling on the /tmp sizeLimit of every provider pod the manager runs (the
+  # manager's --provider-tmp-size-limit-max): a quantity such as 200Gi, or
+  # empty (the default) for no ceiling. With it set, a Provider's
+  # infra.virtrigaud.io/tmp-size-limit annotation can only stay within it:
+  # a larger value, or "none", is clamped to the ceiling with a Warning event
+  # (TmpSizeLimitClamped) on the Provider. providerTmpSizeLimit and the
+  # per-type defaults are capped at it too. Set it when Provider authors are
+  # not trusted to size node storage.
+  providerTmpSizeLimitMax: ""
+
 # Provider configuration
 #
 # These are OPTIONAL chart-templated standalone provider Deployments. They are

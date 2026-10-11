@@ -184,6 +184,12 @@ func main() {
 			"positive quantity (e.g. 20Gi), or 'none' for no limit. Empty (the default) keeps the per-type "+
 			"defaults (vSphere 512Gi, others 1Gi). A Provider's "+
 			infrav1beta1.ProviderTmpSizeLimitAnnotation+" annotation overrides it.")
+	var providerTmpSizeLimitMax string
+	flag.StringVar(&providerTmpSizeLimitMax, "provider-tmp-size-limit-max", "",
+		"Ceiling on the /tmp emptyDir sizeLimit of every provider pod the manager runs: a positive quantity, "+
+			"or empty (the default) for no ceiling. With it set, a Provider's "+
+			infrav1beta1.ProviderTmpSizeLimitAnnotation+" annotation above it (or 'none') is clamped to it with "+
+			"a Warning event, and --provider-tmp-size-limit and the per-type defaults are capped at it.")
 	opts := zap.Options{
 		Development: true,
 	}
@@ -366,12 +372,17 @@ func main() {
 			os.Exit(1)
 		}
 	}
+	if _, err := controller.ParseProviderTmpSizeLimitMax(providerTmpSizeLimitMax); err != nil {
+		setupLog.Error(err, "invalid --provider-tmp-size-limit-max")
+		os.Exit(1)
+	}
 	if err = (&controller.ProviderReconciler{
-		Client:         mgr.GetClient(),
-		Scheme:         mgr.GetScheme(),
-		RemoteResolver: remoteResolver,
-		TmpSizeLimit:   providerTmpSizeLimit,
-		Recorder:       mgr.GetEventRecorderFor("provider-controller"),
+		Client:          mgr.GetClient(),
+		Scheme:          mgr.GetScheme(),
+		RemoteResolver:  remoteResolver,
+		TmpSizeLimit:    providerTmpSizeLimit,
+		TmpSizeLimitMax: providerTmpSizeLimitMax,
+		Recorder:        mgr.GetEventRecorderFor("provider-controller"),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Provider")
 		os.Exit(1)
