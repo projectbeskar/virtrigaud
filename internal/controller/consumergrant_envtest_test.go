@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"fmt"
 	"sync/atomic"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -65,12 +66,22 @@ func (p *envtestVMProvider) ListVMsForOwner(context.Context, contracts.OwnerFilt
 }
 
 // atomicResolver counts resolutions; safe for a running controller.
+//
+// When namespace is set, only a Provider in that namespace is resolved and
+// counted; any other is refused. A spec's manager reconciles every object on
+// the envtest apiserver, including those other specs left in their own
+// namespaces (envtest never deletes a namespace), which must never reach this
+// spec's provider or its count.
 type atomicResolver struct {
-	provider contracts.Provider
-	calls    atomic.Int32
+	provider  contracts.Provider
+	namespace string
+	calls     atomic.Int32
 }
 
-func (a *atomicResolver) GetProvider(context.Context, *infravirtrigaudiov1beta1.Provider) (contracts.Provider, error) {
+func (a *atomicResolver) GetProvider(_ context.Context, p *infravirtrigaudiov1beta1.Provider) (contracts.Provider, error) {
+	if a.namespace != "" && p.Namespace != a.namespace {
+		return nil, fmt.Errorf("provider %s/%s is not this spec's", p.Namespace, p.Name)
+	}
 	a.calls.Add(1)
 	return a.provider, nil
 }
@@ -166,7 +177,7 @@ var _ = Describe("Cross-namespace consumer grant (envtest)", func() {
 		})
 		Expect(err).NotTo(HaveOccurred())
 		prov := &envtestVMProvider{}
-		resolver := &atomicResolver{provider: prov}
+		resolver := &atomicResolver{provider: prov, namespace: infra.Name}
 		Expect((&VirtualMachineReconciler{
 			Client: mgr.GetClient(), Scheme: mgr.GetScheme(), RemoteResolver: resolver, Recorder: record.NewFakeRecorder(100),
 		}).SetupWithManager(mgr)).To(Succeed())
