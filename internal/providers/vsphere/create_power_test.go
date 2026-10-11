@@ -133,31 +133,48 @@ func TestCreate_ImportedDiskLeavesVMPoweredOff(t *testing.T) {
 
 // TestCreate_ImportedDiskAppliesPostCreateSteps: the steps after
 // CreateVM_Task address the NEW VM. The imported-disk path once shadowed the
-// VM reference, so the VMClass disk growth (and the additional-disk attach)
-// ran against an empty reference and were silently skipped.
+// VM reference, so the VMClass disk growth and the additional-disk attach ran
+// against an empty reference and were silently skipped. The growth is
+// grow-only: an imported disk larger than the VMClass size is never shrunk.
 func TestCreate_ImportedDiskAppliesPostCreateSteps(t *testing.T) {
-	p, _ := newOwnershipSim(t)
-	imageJSON := makeOwnMigratedDisk(t, p, "migrated")
+	const gib = int64(1024 * 1024) // in KB
+	for name, tc := range map[string]struct {
+		importedKB    int64  // the imported disk's capacity as vCenter reports it
+		disksJSON     string // DisksJson
+		wantPrimaryKB int64
+		wantAdded     []int64 // capacities of the additional disks, in order
+	}{
+		"grown to the VMClass size":       {importedKB: 1024, wantPrimaryKB: 2 * gib},
+		"larger than the VMClass size":    {importedKB: 3 * gib, wantPrimaryKB: 3 * gib},
+		"grown, with additional disks":    {importedKB: 1024, disksJSON: `[{"Name":"data","SizeGiB":1,"Type":"thin"},{"Name":"logs","SizeGiB":3}]`, wantPrimaryKB: 2 * gib, wantAdded: []int64{1 * gib, 3 * gib}},
+		"larger, with an additional disk": {importedKB: 3 * gib, disksJSON: `[{"Name":"data","SizeGiB":1}]`, wantPrimaryKB: 3 * gib, wantAdded: []int64{1 * gib}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			p, _ := newOwnershipSim(t)
+			imageJSON := makeOwnMigratedDisk(t, p, "migrated")
+			withExistingDiskCapacity(p, map[string]int64{ownMigratedDiskPath("migrated"): tc.importedKB})
 
-	resp, err := p.Create(context.Background(), &providerv1.CreateRequest{
-		Name:      "migrated",
-		ClassJson: `{"CPU":1,"MemoryMiB":512,"DiskDefaults":{"SizeGiB":2}}`,
-		ImageJson: imageJSON,
-		Owner:     wireOwner(ownerTeamA),
-	})
-	require.NoError(t, err)
+			resp, err := p.Create(context.Background(), &providerv1.CreateRequest{
+				Name:      "migrated",
+				ClassJson: `{"CPU":1,"MemoryMiB":512,"DiskDefaults":{"SizeGiB":2}}`,
+				ImageJson: imageJSON,
+				DisksJson: tc.disksJSON,
+				Owner:     wireOwner(ownerTeamA),
+			})
+			require.NoError(t, err)
 
-	var vm mo.VirtualMachine
-	require.NoError(t, property.DefaultCollector(p.client.Client).RetrieveOne(context.Background(), vmRef(resp.Id),
-		[]string{"config.hardware.device"}, &vm))
-	var capacityKB []int64
-	for _, dev := range vm.Config.Hardware.Device {
-		if d, ok := dev.(*types.VirtualDisk); ok {
-			capacityKB = append(capacityKB, d.CapacityInKB)
-		}
+			files, capacityKB := vmDisks(t, p, resp.Id)
+			require.Len(t, capacityKB, 1+len(tc.wantAdded))
+			assert.Equal(t, ownMigratedDiskPath("migrated"), files[0], "the imported disk is the primary disk")
+			assert.Equal(t, tc.wantPrimaryKB, capacityKB[0], "grow-only to the VMClass disk size")
+			for i, want := range tc.wantAdded {
+				assert.Equal(t, want, capacityKB[1+i], "additional disk %d", i+1)
+			}
+			for i, f := range files[1:] {
+				assert.Contains(t, f, additionalDiskFileName("migrated", i+1))
+			}
+		})
 	}
-	require.Len(t, capacityKB, 1, "the imported disk is the VM's only disk")
-	assert.Equal(t, int64(2*1024*1024), capacityKB[0], "the imported disk must be grown to the VMClass disk size")
 }
 
 // TestCreate_BindingRetryKeepsPowerState: a retried create that binds the
