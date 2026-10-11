@@ -162,9 +162,11 @@ func TestMigrationSnapshot_FailedOrUnknownTaskFailsTheMigration(t *testing.T) {
 		statusErr error
 		want      string
 	}{
+		// Re-review L-d: the task's free-form text never reaches the status.
 		"task failed": {status: contracts.TaskStatus{IsCompleted: true, Error: "datastore full\nat https://admin:pw@vc.example/sdk"},
-			want: "Snapshot creation failed: datastore full at https://vc.example/sdk"},
-		"task failed, not marked done": {status: contracts.TaskStatus{Error: "quiesce failed"}, want: "quiesce failed"},
+			want: "Snapshot creation failed: " + migrationTaskFailedDetail},
+		"task failed, not marked done": {status: contracts.TaskStatus{Error: "quiesce failed on /vmfs/volumes/ds1"},
+			want: migrationTaskFailedDetail},
 		"task unknown to the provider": {statusErr: contracts.NewNotFoundError("taskStatus: unknown task", nil),
 			want: "cannot be confirmed"},
 	} {
@@ -179,6 +181,8 @@ func TestMigrationSnapshot_FailedOrUnknownTaskFailsTheMigration(t *testing.T) {
 			assert.Equal(t, infrav1beta1.MigrationPhaseFailed, got.Status.Phase)
 			assert.Contains(t, got.Status.Message, tc.want)
 			assert.NotContains(t, got.Status.Message, "pw@")
+			assert.NotContains(t, got.Status.Message, "datastore full")
+			assert.NotContains(t, got.Status.Message, "/vmfs/")
 			assert.Empty(t, got.Status.TaskRef)
 			assert.Equal(t, "snap-t", got.Status.SnapshotID, "kept so the cleanup removes it")
 			assert.Equal(t, migrationReasonSnapshotFailed, snapshottingCondition(got).Reason)

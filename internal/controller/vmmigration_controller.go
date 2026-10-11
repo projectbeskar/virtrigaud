@@ -848,7 +848,8 @@ func (r *VMMigrationReconciler) handleExportingPhase(ctx context.Context, migrat
 			}
 
 			if taskStatus.Error != "" {
-				return r.transitionToFailed(ctx, migration, "Export failed: "+sanitizeProviderDetail(stderrors.New(taskStatus.Error)))
+				logger.Info("Export task failed", "task_id", migration.Status.TaskRef, "error", taskStatus.Error)
+				return r.transitionToFailed(ctx, migration, "Export failed: "+migrationTaskFailedDetail)
 			}
 
 			logger.Info("Export task completed successfully")
@@ -1121,7 +1122,8 @@ func (r *VMMigrationReconciler) handleImportingPhase(ctx context.Context, migrat
 			}
 
 			if taskStatus.Error != "" {
-				return r.transitionToFailed(ctx, migration, "Import failed: "+sanitizeProviderDetail(stderrors.New(taskStatus.Error)))
+				logger.Info("Import task failed", "task_id", migration.Status.TaskRef, "error", taskStatus.Error)
+				return r.transitionToFailed(ctx, migration, "Import failed: "+migrationTaskFailedDetail)
 			}
 
 			logger.Info("Import task completed successfully")

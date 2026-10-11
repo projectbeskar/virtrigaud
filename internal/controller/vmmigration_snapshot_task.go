@@ -18,7 +18,6 @@ package controller
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"time"
 
@@ -99,6 +98,12 @@ func migrationSnapshotWaitExceeded(m *infrav1beta1.VMMigration, now time.Time) (
 	waited := now.Sub(c.LastTransitionTime.Time)
 	return waited, waited > migrationSnapshotWaitLimit(m)
 }
+
+// migrationTaskFailedDetail is what the VMMigration's consumer-readable
+// status says of a provider task (snapshot, export, import) that ended with
+// an error. The task's error text is free-form provider output and goes to
+// the manager log only.
+const migrationTaskFailedDetail = "the provider's task failed (its answer is in the manager log)"
 
 // migrationSnapshotInProgressMessage is the Snapshotting condition message
 // while the snapshot task runs. It is constant, so a poll writes nothing.
@@ -185,9 +190,10 @@ func (r *VMMigrationReconciler) pollMigrationSnapshotTask(
 		logger.Info("Could not poll the snapshot task; polling again", "task_id", taskRef, "error", err.Error())
 		return ctrl.Result{RequeueAfter: migrationSnapshotTaskPollInterval}, nil
 	case taskStatus.Error != "":
+		// The task's own text stays in the manager log: it is free-form
+		// provider output (paths, hosts, datastore names).
 		logger.Info("Snapshot task failed", "task_id", taskRef, "error", taskStatus.Error)
-		return r.failMigrationSnapshot(ctx, migration,
-			"Snapshot creation failed: "+sanitizeProviderDetail(errors.New(taskStatus.Error)))
+		return r.failMigrationSnapshot(ctx, migration, "Snapshot creation failed: "+migrationTaskFailedDetail)
 	case !taskStatus.IsCompleted:
 		if waited, over := migrationSnapshotWaitExceeded(migration, time.Now()); over {
 			logger.Info("Snapshot task did not finish in time; failing the snapshot", "task_id", taskRef,
