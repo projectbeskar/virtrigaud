@@ -40,11 +40,15 @@ Read the upgrade guide before upgrading:
   → [Upgrade guide](docs/upgrading.md#breaking-changes)
 
 - **vSphere attaches an imported disk in place only when it is the VM's own
-  verified migration disk.** `spec.importedDisk.path` naming any other datastore
-  file (another VM's disk) is refused before anything is created; a migration's
-  landing disk used by another VM is refused too. Deleting a VM no longer deletes
-  a disk it does not own. The vCenter account must be able to read every VM and
-  template in the inventory.
+  verified migration disk, and migrations land per namespace.** A migration now
+  lands at `[<datastore>] <namespace>.<vm name>-migrated/...`, so a same-named VM
+  in another namespace can no longer reach, overwrite or delete it.
+  `spec.importedDisk.path` naming any other datastore file (another VM's disk) is
+  refused before anything is created; a landing disk another VM uses is refused
+  too. Deleting a VM no longer deletes a disk it does not own. **A vSphere
+  migration landed before the upgrade whose target VM was not yet created must be
+  run again.** The vCenter account needs `System.Read` on the root folder,
+  propagated.
   → [Upgrade guide](docs/upgrading.md#breaking-changes)
 
 - **libvirt linked clones are disabled.** A `VMClone` with

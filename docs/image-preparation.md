@@ -587,14 +587,20 @@ same header check before conversion.
 **vSphere imported disks.** vSphere base images are templates (or OVAs prepared into
 templates), never datastore files, so the vSphere provider attaches a datastore file to a
 new VM only as that VM's own migration landing disk: the manager must have verified it as
-above, the path must be exactly `[<datastore>] <vm name>-migrated/<vm name>-migrated.vmdk`
-(the name vSphere `ImportDisk` gives the disk it lands), and no VM or template anywhere in
-the vCenter inventory may use the file. Any other `spec.importedDisk.path` is refused
-before anything is created (`ValidationError`); a disk another VM uses is a `Conflict`;
-when the inventory cannot be read the create fails closed and is retried. The provider's
-vCenter account therefore needs read access to every VM and template. A migration import
-likewise refuses to reuse a landing folder whose files a VM uses, and deleting a vSphere
-VM never deletes a disk outside its own directory that it does not own.
+above, and the path must be exactly
+`[<datastore>] <namespace>.<vm name>-migrated/<namespace>.<vm name>-migrated.vmdk` — the
+name vSphere `ImportDisk` gives the disk it lands for that VirtualMachine, so the same VM
+name in two namespaces lands in two folders. No VM or template with files on that datastore
+(or on the same storage under another datastore name) may use the disk, compared by path
+and by disk UUID. Any other `spec.importedDisk.path` is refused before anything is created
+(`ValidationError`), including a disk landed by a release before v0.4.0 under the bare
+`<vm name>-migrated` name (run that migration again); a disk another VM uses is a
+`Conflict`; when the check cannot run — a vCenter error, an inaccessible VM on the
+datastore, or an account without `System.Read` on the root folder and the datastore — the
+create fails closed and is retried. A migration import likewise refuses to reuse a landing
+folder whose files a VM uses (and a failed import deletes its folder only if it is still
+unused), and deleting a vSphere VM never deletes a disk outside its own directory that it
+does not own.
 
 > **Upgrade warning — legacy shared disks.** Before this change a path or prepared image
 > in the pool directory was attached in place, so several VMs created from the same image
