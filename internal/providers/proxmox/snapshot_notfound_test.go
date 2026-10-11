@@ -106,6 +106,25 @@ func TestSnapshotDelete_VMOnAnotherNodeKeepsItsSnapshot(t *testing.T) {
 	assert.Equal(t, codes.NotFound, status.Code(err), "now really gone: %v", err)
 }
 
+// TestSnapshotDelete_VMInvisibleToTheTokenIsNotAbsent (re-review M-1): PVE
+// filters /cluster/resources by the token's VM.Audit privilege, so a VM
+// missing from it may only be invisible. The VMID probe (/cluster/nextid)
+// says it is in use: the snapshot is not answered NotFound.
+func TestSnapshotDelete_VMInvisibleToTheTokenIsNotAbsent(t *testing.T) {
+	fake, endpoint, err := pvefake.StartFakeServer()
+	require.NoError(t, err)
+	provider := createTestProvider(endpoint)
+	ctx := context.Background()
+
+	id := takeSnapshot(t, provider, "mig-acl")
+	fake.HideFromResources(100)
+
+	_, err = provider.SnapshotDelete(ctx, &providerv1.SnapshotDeleteRequest{VmId: "100", SnapshotId: id})
+	require.Error(t, err)
+	assert.NotEqual(t, codes.NotFound, status.Code(err), "an existing VM's snapshot is never 'gone': %v", err)
+	assert.Equal(t, codes.Unavailable, status.Code(err))
+}
+
 // TestSnapshotDelete_BareNotFoundIsAnError: an HTTP 404 that is not PVE's
 // answer (no PVE JSON body — e.g. a proxy) is an error the manager retries,
 // never NotFound.

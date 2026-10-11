@@ -23,14 +23,33 @@ import (
 
 // snapshotVMNode resolves the node VM vmid is actually on, from the cluster's
 // resource list, for the snapshot path. exists is false only when the cluster
-// has no such VM at all (confirmed absent cluster-wide). The provider's
-// configured or first node (parseVMReference, FindNode) is not used: after an
-// HA move PVE answers that node with "Configuration file ... does not exist",
-// which says nothing about the snapshot.
+// has no such VM at all. The provider's configured or first node
+// (parseVMReference, FindNode) is not used: after an HA move PVE answers that
+// node with "Configuration file ... does not exist", which says nothing about
+// the snapshot.
+//
+// PVE filters /cluster/resources by the caller's VM.Audit privilege, so a VM
+// missing from it may only be invisible to this token (a privilege-separated
+// or pool-scoped token, an ACL change). Absence is therefore confirmed with
+// the permission-independent VMID probe (VMIDInUse): only a free VMID is
+// absent. A VMID in use but not listed is an error (the manager retries) and
+// is logged as a likely ACL problem — never a snapshot "gone".
 func (p *Provider) snapshotVMNode(ctx context.Context, vmid int) (node string, exists bool, err error) {
 	node, exists, err = p.client.ResolveVMNode(ctx, vmid)
 	if err != nil {
 		return "", false, fmt.Errorf("resolve the node of VM %d: %w", vmid, err)
 	}
-	return node, exists, nil
+	if exists {
+		return node, true, nil
+	}
+	inUse, err := p.client.VMIDInUse(ctx, vmid)
+	if err != nil {
+		return "", false, fmt.Errorf("confirm that VM %d is absent: %w", vmid, err)
+	}
+	if inUse {
+		p.logger.Warn("VM exists in the cluster but is not visible in /cluster/resources to this token; "+
+			"check the token's VM.Audit privilege (ACL) — its snapshot is not treated as gone", "vmid", vmid)
+		return "", false, fmt.Errorf("VM %d exists but is not visible to this token (VM.Audit)", vmid)
+	}
+	return "", false, nil
 }

@@ -34,17 +34,19 @@ import (
 
 // Server represents a fake Proxmox VE API server
 type Server struct {
-	router       *mux.Router
-	vms          map[int]*VM
-	tasks        map[string]*Task
-	snapshots    map[string][]*Snapshot
-	lastDownload *DownloadRequest
-	lastPowerOp  *PowerOpRequest
-	requests     []RecordedRequest
-	nextID       int
-	mu           sync.RWMutex
-	logger       *slog.Logger
-	config       *Config
+	router    *mux.Router
+	vms       map[int]*VM
+	tasks     map[string]*Task
+	snapshots map[string][]*Snapshot
+	// hiddenFromResources are VMs /cluster/resources leaves out (ACL).
+	hiddenFromResources map[int]bool
+	lastDownload        *DownloadRequest
+	lastPowerOp         *PowerOpRequest
+	requests            []RecordedRequest
+	nextID              int
+	mu                  sync.RWMutex
+	logger              *slog.Logger
+	config              *Config
 }
 
 // RecordedRequest is one API request the fake server received, recorded before
@@ -397,7 +399,25 @@ func (s *Server) handleListNodes(w http.ResponseWriter, _ *http.Request) {
 
 // handleClusterNextID mimics PVE's /cluster/nextid: it returns a free VMID,
 // handing out monotonically increasing ids (skipping any already in use).
-func (s *Server) handleClusterNextID(w http.ResponseWriter, _ *http.Request) {
+func (s *Server) handleClusterNextID(w http.ResponseWriter, r *http.Request) {
+	// ?vmid=<id> asks whether that ID is free, as PVE does: 400 "VM <id>
+	// already exists" for one in use, the ID itself otherwise.
+	if q := r.URL.Query().Get("vmid"); q != "" {
+		id, err := strconv.Atoi(q)
+		if err != nil {
+			s.writeError(w, http.StatusBadRequest, "invalid vmid")
+			return
+		}
+		s.mu.RLock()
+		_, taken := s.vms[id]
+		s.mu.RUnlock()
+		if taken {
+			s.writeError(w, http.StatusBadRequest, fmt.Sprintf("VM %d already exists", id))
+			return
+		}
+		s.writeResponse(w, strconv.Itoa(id))
+		return
+	}
 	s.mu.Lock()
 	if s.nextID < 200000 {
 		s.nextID = 200000
@@ -733,11 +753,25 @@ func (s *Server) handleClusterResources(w http.ResponseWriter, _ *http.Request) 
 	defer s.mu.RUnlock()
 	out := make([]map[string]interface{}, 0, len(s.vms))
 	for _, vm := range s.vms {
+		if s.hiddenFromResources[vm.VMID] {
+			continue
+		}
 		out = append(out, map[string]interface{}{
 			"id": fmt.Sprintf("qemu/%d", vm.VMID), "type": "qemu", "vmid": vm.VMID, "node": vm.Node, "name": vm.Name,
 		})
 	}
 	s.writeResponse(w, out)
+}
+
+// HideFromResources leaves VM vmid out of /cluster/resources, as PVE does for
+// a token without VM.Audit on it (tests).
+func (s *Server) HideFromResources(vmid int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.hiddenFromResources == nil {
+		s.hiddenFromResources = map[int]bool{}
+	}
+	s.hiddenFromResources[vmid] = true
 }
 
 // MoveVM moves VM vmid to node, as a PVE HA migration does (tests).
