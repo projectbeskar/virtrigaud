@@ -56,6 +56,14 @@ func inUseProvider() *infravirtrigaudiov1beta1.Provider {
 	return p
 }
 
+// sharedInUseProvider is inUseProvider shared with every namespace
+// (spec.consumerNamespaceSelector: {}), so VMs in other namespaces may use it.
+func sharedInUseProvider() *infravirtrigaudiov1beta1.Provider {
+	p := inUseProvider()
+	p.Spec.ConsumerNamespaceSelector = &metav1.LabelSelector{}
+	return p
+}
+
 // inUseProviderKey is the key of inUseProvider.
 var inUseProviderKey = types.NamespacedName{Namespace: "default", Name: inUseProviderName}
 
@@ -249,7 +257,7 @@ func TestProviderInUse_RepeatedHoldWritesNothing(t *testing.T) {
 }
 
 func TestProviderInUse_CrossNamespaceConsumerHolds(t *testing.T) {
-	r, _ := newInUseReconciler(t, inUseProvider(), inUseVM("team-b", "api", "default", inUseProviderName))
+	r, _ := newInUseReconciler(t, sharedInUseProvider(), inUseVM("team-b", "api", "default", inUseProviderName))
 	runProviderRuntime(t, r)
 
 	deleteInUseProvider(t, r)
@@ -267,7 +275,7 @@ func TestProviderInUse_CrossNamespaceConsumerHolds(t *testing.T) {
 }
 
 func TestProviderInUse_ForceDeleteReleasesWithWarning(t *testing.T) {
-	r, rec := newInUseReconciler(t, inUseProvider(),
+	r, rec := newInUseReconciler(t, sharedInUseProvider(),
 		inUseVM("default", "web", "", inUseProviderName),
 		inUseVM("team-b", "api", "default", inUseProviderName))
 	runProviderRuntime(t, r)
@@ -338,6 +346,94 @@ func TestProviderInUse_ForceDeleteWorksWhenTheCheckCannotRun(t *testing.T) {
 	require.Len(t, events, 1)
 	assert.Contains(t, events[0], "Warning "+eventReasonProviderForceDeleted)
 	assert.Contains(t, events[0], "could not be checked")
+}
+
+// TestProviderInUse_OnlyAllowedNamespacesHold pins that an object in another
+// namespace holds the Provider only when the Provider would serve it: a VM bound
+// through it, or an object in a namespace its consumerNamespaceSelector allows
+// now. A refused (ungranted) VM or migration neither holds it nor shows up in
+// its DeleteBlocked message.
+func TestProviderInUse_OnlyAllowedNamespacesHold(t *testing.T) {
+	selective := func() *infravirtrigaudiov1beta1.Provider {
+		p := inUseProvider()
+		p.Spec.ConsumerNamespaceSelector = &metav1.LabelSelector{MatchLabels: map[string]string{"tenant": "granted"}}
+		return p
+	}
+	namespaces := []client.Object{
+		&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "granted", Labels: map[string]string{"tenant": "granted"}}},
+		&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "outsider"}},
+	}
+	bound := func(vm *infravirtrigaudiov1beta1.VirtualMachine) *infravirtrigaudiov1beta1.VirtualMachine {
+		vm.Status.BoundProvider = &infravirtrigaudiov1beta1.BoundProviderRef{Namespace: "default", Name: inUseProviderName}
+		return vm
+	}
+	unbound := func(vm *infravirtrigaudiov1beta1.VirtualMachine) *infravirtrigaudiov1beta1.VirtualMachine {
+		vm.Status.ID = "" // refused before any create: never bound
+		return vm
+	}
+	lingeringUnbound := func(ns, name string) *infravirtrigaudiov1beta1.VirtualMachine {
+		// Being deleted, its VirtualMachine finalizer gone: only its snapshot
+		// could still need the Provider.
+		now := metav1.Now()
+		vm := unbound(inUseVM(ns, name, "default", inUseProviderName))
+		vm.Finalizers = []string{"example.com/someone-else"}
+		vm.DeletionTimestamp = &now
+		return vm
+	}
+	migrationInto := func(ns string) *infravirtrigaudiov1beta1.VMMigration {
+		return &infravirtrigaudiov1beta1.VMMigration{
+			ObjectMeta: metav1.ObjectMeta{Name: "mig", Namespace: ns, Finalizers: []string{vmMigrationFinalizerName}},
+			Spec: infravirtrigaudiov1beta1.VMMigrationSpec{
+				Source: infravirtrigaudiov1beta1.MigrationSource{VMRef: infravirtrigaudiov1beta1.LocalObjectReference{Name: "src"}},
+				Target: infravirtrigaudiov1beta1.MigrationTarget{Name: "dst",
+					ProviderRef: infravirtrigaudiov1beta1.ObjectRef{Name: inUseProviderName, Namespace: "default"}},
+			},
+			Status: infravirtrigaudiov1beta1.VMMigrationStatus{Phase: infravirtrigaudiov1beta1.MigrationPhaseImporting},
+		}
+	}
+	cases := []struct {
+		name     string
+		provider *infravirtrigaudiov1beta1.Provider
+		obj      client.Object
+		extra    []client.Object
+		holds    bool
+		want     string
+	}{
+		{name: "an unallowed, unbound VM (no selector)", provider: inUseProvider(),
+			obj: unbound(inUseVM("outsider", "squat", "default", inUseProviderName))},
+		{name: "an unallowed, unbound VM (selector does not match)", provider: selective(),
+			obj: unbound(inUseVM("outsider", "squat", "default", inUseProviderName))},
+		{name: "an unallowed snapshot follows its unallowed VM", provider: inUseProvider(),
+			obj: lingeringUnbound("outsider", "squat"),
+			extra: []client.Object{&infravirtrigaudiov1beta1.VMSnapshot{
+				ObjectMeta: metav1.ObjectMeta{Name: "snap", Namespace: "outsider", Finalizers: []string{vmSnapshotFinalizerName}},
+				Spec:       infravirtrigaudiov1beta1.VMSnapshotSpec{VMRef: infravirtrigaudiov1beta1.LocalObjectReference{Name: "squat"}},
+			}}},
+		{name: "an unallowed migration into the Provider", provider: selective(), obj: migrationInto("outsider")},
+		{name: "an allowed VM", provider: selective(),
+			obj: unbound(inUseVM("granted", "api", "default", inUseProviderName)), holds: true, want: "namespace(s) granted (1)"},
+		{name: "a VM bound through the Provider, though no longer allowed", provider: inUseProvider(),
+			obj: bound(inUseVM("outsider", "legacy", "default", inUseProviderName)), holds: true, want: "namespace(s) outsider (1)"},
+		{name: "an allowed migration into the Provider", provider: selective(), obj: migrationInto("granted"),
+			holds: true, want: "1 VMMigration(s), in namespace(s) granted (1)"},
+		{name: "a migration into the Provider from its own namespace", provider: inUseProvider(), obj: migrationInto("default"),
+			holds: true, want: "1 VMMigration(s)"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			objs := append(append([]client.Object{tc.provider, tc.obj}, tc.extra...), namespaces...)
+			r, _ := newInUseReconciler(t, objs...)
+			deleteInUseProvider(t, r)
+			reconcileProvider(t, r)
+			if !tc.holds {
+				assert.True(t, providerGone(t, r), "a namespace that may not use the Provider cannot hold it")
+				return
+			}
+			cond := meta.FindStatusCondition(getInUseProvider(t, r).Status.Conditions, k8s.ConditionDeleteBlocked)
+			require.NotNil(t, cond)
+			assert.Contains(t, cond.Message, tc.want)
+		})
+	}
 }
 
 // TestProviderInUse_WhatHolds pins ADR-0010 D2, case by case.

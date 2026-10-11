@@ -344,19 +344,41 @@ func indexProviderInUse(mgr ctrl.Manager) error {
 	return nil
 }
 
-// providerUsageOf counts what still needs the Provider key (ADR-0010 D2),
-// through the cache field indexes only: the Provider's VirtualMachines (by
-// placement Provider, in every namespace), the VMSnapshots, VMClones and
-// VMMigrations that act on one of them, and the VMMigrations that target the
-// Provider.
-func providerUsageOf(ctx context.Context, reader client.Reader, key types.NamespacedName) (providerUsage, error) {
+// providerUsageOf counts what still needs provider (ADR-0010 D2), through the
+// cache field indexes only: the Provider's VirtualMachines (by placement
+// Provider, in every namespace), the VMSnapshots, VMClones and VMMigrations
+// that act on one of them, and the VMMigrations that target the Provider.
+//
+// An object in another namespace counts only when the Provider would serve it
+// (ADR-0010 D2): a VM bound through the Provider (status.boundProvider), or an
+// object in a namespace the Provider's spec.consumerNamespaceSelector currently
+// allows (consumerAllowed, the check getForConsumer makes). A namespace that
+// may not use the Provider can therefore neither hold it nor appear in its
+// DeleteBlocked message. A read error deciding a grant is returned: the
+// Provider stays held and the check is retried.
+func providerUsageOf(ctx context.Context, reader client.Reader, provider *infravirtrigaudiov1beta1.Provider) (providerUsage, error) {
 	var u providerUsage
+	key := client.ObjectKeyFromObject(provider)
 	vms, err := listProviderVMs(ctx, reader, key)
 	if err != nil {
 		return u, err
 	}
+
+	allowed := map[string]bool{provider.Namespace: true}
+	namespaceAllowed := func(namespace string) (bool, error) {
+		if ok, seen := allowed[namespace]; seen {
+			return ok, nil
+		}
+		ok, err := consumerAllowed(ctx, reader, provider, namespace)
+		if err != nil {
+			return false, fmt.Errorf("check whether namespace %s may use Provider %s: %w", namespace, key, err)
+		}
+		allowed[namespace] = ok
+		return ok, nil
+	}
+
 	countedMigrations := map[types.NamespacedName]bool{}
-	countMigrations := func(value string) error {
+	countMigrations := func(value string, checkGrant bool) error {
 		var migrations infravirtrigaudiov1beta1.VMMigrationList
 		if err := reader.List(ctx, &migrations, client.MatchingFields{providerInUseIndex: value}, client.UnsafeDisableDeepCopy); err != nil {
 			return fmt.Errorf("list VMMigrations by %s: %w", value, err)
@@ -364,16 +386,38 @@ func providerUsageOf(ctx context.Context, reader client.Reader, key types.Namesp
 		for i := range migrations.Items {
 			m := &migrations.Items[i]
 			mk := client.ObjectKeyFromObject(m)
-			if migrationHoldsProvider(m) && !countedMigrations[mk] {
-				countedMigrations[mk] = true
-				u.add(m.Namespace, &u.migrations)
+			if !migrationHoldsProvider(m) || countedMigrations[mk] {
+				continue
 			}
+			if checkGrant {
+				ok, err := namespaceAllowed(m.Namespace)
+				if err != nil {
+					return err
+				}
+				if !ok {
+					continue
+				}
+			}
+			countedMigrations[mk] = true
+			u.add(m.Namespace, &u.migrations)
 		}
 		return nil
 	}
 
 	for i := range vms {
 		vm := &vms[i]
+		// A VM in another namespace counts only when it is bound through this
+		// Provider or its namespace is allowed to use it; its snapshots, clones
+		// and migrations (same namespace) follow it.
+		if bound, ok := boundProviderKey(vm); !ok || bound != key {
+			ok, err := namespaceAllowed(vm.Namespace)
+			if err != nil {
+				return u, err
+			}
+			if !ok {
+				continue
+			}
+		}
 		if vmHoldsProvider(vm) {
 			u.add(vm.Namespace, &u.vms)
 		}
@@ -399,11 +443,13 @@ func providerUsageOf(ctx context.Context, reader client.Reader, key types.Namesp
 			}
 		}
 
-		if err := countMigrations(value); err != nil {
+		if err := countMigrations(value, false); err != nil {
 			return u, err
 		}
 	}
-	if err := countMigrations(providerInUseProviderValue(key)); err != nil {
+	// A migration into this Provider counts only from its own namespace or an
+	// allowed one: that is where the import resolves the target Provider from.
+	if err := countMigrations(providerInUseProviderValue(key), true); err != nil {
 		return u, err
 	}
 	return u, nil
@@ -428,7 +474,7 @@ func (r *ProviderReconciler) handleDeletion(ctx context.Context, provider *infra
 	}
 
 	forced := hasProviderForceDeleteAnnotation(provider)
-	usage, err := providerUsageOf(ctx, r.Client, key)
+	usage, err := providerUsageOf(ctx, r.Client, provider)
 	usageKnown := err == nil
 	if err != nil {
 		metrics.RecordError(errReasonProviderInUse, metrics.ComponentManager)

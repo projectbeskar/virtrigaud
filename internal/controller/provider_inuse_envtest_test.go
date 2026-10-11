@@ -268,7 +268,16 @@ var _ = Describe("Provider in-use finalizer (envtest)", func() {
 		providerNS := inUseTestNamespace("pinuse-owner-")
 		consumerNS := inUseTestNamespace("pinuse-consumer-")
 		startProviderInUseManager(providerNS, consumerNS)
-		inUseEnvProvider(providerNS)
+		p := inUseEnvProvider(providerNS)
+		// Share it with every namespace: only an allowed (or bound) consumer
+		// holds a Provider.
+		Expect(retry.RetryOnConflict(retry.DefaultRetry, func() error {
+			if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(p), p); err != nil {
+				return err
+			}
+			p.Spec.ConsumerNamespaceSelector = &metav1.LabelSelector{}
+			return k8sClient.Update(ctx, p)
+		})).To(Succeed())
 		inUseEnvVM(consumerNS, "api", providerNS)
 		waitProviderRunning(providerNS)
 
