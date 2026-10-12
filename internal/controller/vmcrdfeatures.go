@@ -83,6 +83,8 @@ const (
 	VMClassCRDName = "vmclasses.infra.virtrigaud.io"
 	// VMImageCRDName is the name of the VMImage CRD.
 	VMImageCRDName = "vmimages.infra.virtrigaud.io"
+	// VMSnapshotCRDName is the name of the VMSnapshot CRD.
+	VMSnapshotCRDName = "vmsnapshots.infra.virtrigaud.io"
 )
 
 // providerRefImmutabilityRuleFragment identifies the spec.providerRef
@@ -144,6 +146,12 @@ const (
 	// one without the honest Reconfigure result and every clustered resize
 	// would be held.
 	crdFeatureProviderHonestReconfigure = "status.reportedCapabilities.supportsHonestReconfigure"
+	// crdFeatureSnapshotVMUID and crdFeatureSnapshotBoundProvider are checked
+	// on the VMSnapshot CRD: an older CRD would prune them, so no snapshot
+	// would stay bound to its VM and Provider, and a VM re-created under the
+	// same name could be sent another VM's snapshot delete.
+	crdFeatureSnapshotVMUID         = "status.vmUID"
+	crdFeatureSnapshotBoundProvider = "status.boundProvider"
 	// crdMissingPrefix prefixes the name of a checked CRD that does not exist.
 	crdMissingPrefix = "the CustomResourceDefinition "
 )
@@ -167,13 +175,14 @@ var securityCRDs = []struct {
 	{ProviderCRDName, missingProviderCRDFeatures},
 	{VMClassCRDName, missingConsumerSelector},
 	{VMImageCRDName, missingVMImageCRDFeatures},
+	{VMSnapshotCRDName, missingVMSnapshotCRDFeatures},
 }
 
 // crdGVK is the CustomResourceDefinition kind, read as unstructured so the
 // manager needs no apiextensions client.
 var crdGVK = schema.GroupVersionKind{Group: "apiextensions.k8s.io", Version: "v1", Kind: "CustomResourceDefinition"}
 
-// +kubebuilder:rbac:groups=apiextensions.k8s.io,resources=customresourcedefinitions,resourceNames=virtualmachines.infra.virtrigaud.io;providers.infra.virtrigaud.io;vmclasses.infra.virtrigaud.io;vmimages.infra.virtrigaud.io,verbs=get
+// +kubebuilder:rbac:groups=apiextensions.k8s.io,resources=customresourcedefinitions,resourceNames=virtualmachines.infra.virtrigaud.io;providers.infra.virtrigaud.io;vmclasses.infra.virtrigaud.io;vmimages.infra.virtrigaud.io;vmsnapshots.infra.virtrigaud.io,verbs=get
 
 // v1beta1SchemaRoot returns the v1beta1 openAPIV3Schema of crd.
 func v1beta1SchemaRoot(crd *unstructured.Unstructured) (map[string]any, error) {
@@ -259,6 +268,26 @@ func missingVMImageCRDFeatures(crd *unstructured.Unstructured) ([]string, error)
 		{"sourceDigest", crdFeatureImageSourceDigest},
 	} {
 		if _, found, _ := unstructured.NestedMap(schemaRoot, append(entry, f.field)...); !found {
+			missing = append(missing, f.feature)
+		}
+	}
+	return missing, nil
+}
+
+// missingVMSnapshotCRDFeatures returns the features the VMSnapshot CRD crd
+// lacks in its v1beta1 schema: the snapshot's binding to its VM and Provider,
+// status.vmUID and status.boundProvider (nil when it has both).
+func missingVMSnapshotCRDFeatures(crd *unstructured.Unstructured) ([]string, error) {
+	schemaRoot, err := v1beta1SchemaRoot(crd)
+	if err != nil {
+		return nil, err
+	}
+	var missing []string
+	for _, f := range []struct{ field, feature string }{
+		{"vmUID", crdFeatureSnapshotVMUID},
+		{"boundProvider", crdFeatureSnapshotBoundProvider},
+	} {
+		if _, found, _ := unstructured.NestedMap(schemaRoot, "properties", "status", "properties", f.field); !found {
 			missing = append(missing, f.feature)
 		}
 	}
@@ -353,7 +382,7 @@ func enumHas(schema map[string]any, path []string, values ...string) bool {
 // Interval.
 type VMCRDFeatureChecker struct {
 	// Reader reads the CRDs; use an uncached reader (mgr.GetAPIReader()) so the
-	// manager needs only get on those four CRDs and no informer.
+	// manager needs only get on those five CRDs and no informer.
 	Reader client.Reader
 	// Interval is how long a result is reused (default one minute).
 	Interval time.Duration

@@ -645,7 +645,9 @@ func isNotFound(err error, ref types.ManagedObjectReference) bool {
 	}
 	found := false
 	fault.In(err, func(f types.BaseMethodFault, _ string, _ []types.LocalizableMessage) bool {
-		if nf, ok := f.(*types.ManagedObjectNotFound); ok && nf.Obj == ref {
+		// Type and Value only: vCenter may set ServerGUID on one reference
+		// and not the other.
+		if nf, ok := f.(*types.ManagedObjectNotFound); ok && nf.Obj.Type == ref.Type && nf.Obj.Value == ref.Value {
 			found = true
 		}
 		return found

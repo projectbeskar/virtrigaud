@@ -16,6 +16,13 @@ spec:
   source:
     vmRef:
       name: my-source-vm
+    # The snapshot the migration creates is deleted when it completes, when it
+    # fails for good, and when the VMMigration is deleted (unless
+    # options.cleanupPolicy is Never). Deleting the VMMigration waits until the
+    # snapshot is gone (condition SnapshotCleanup=False while its provider
+    # cannot delete it); annotate the VMMigration with
+    # virtrigaud.io/force-delete: "true" to remove it anyway and leave the
+    # snapshot on the hypervisor.
     createSnapshot: true
 
   # Target configuration

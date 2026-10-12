@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -65,6 +66,17 @@ const snapshotReasonUnsupportedByProvider = "UnsupportedByProvider"
 // result recorded (no task, snapshot id or creation time), which is returned
 // to the initial phase so its create is issued.
 const snapshotCreateNotIssuedMessage = "Snapshot create was not issued to the provider; retrying"
+
+// snapshotCreateRetryingMessage is the status message and Ready condition
+// message of a routed (clustered) snapshot create that did not reach a
+// definite outcome and is retried. It is constant; the provider's answer is in
+// the snapshotReasonCreateRetrying Warning event and the manager log.
+const snapshotCreateRetryingMessage = "Snapshot creation did not reach a definite outcome on the provider and will be retried; " +
+	"the provider's answer is in the SnapshotCreateRetrying event"
+
+// snapshotReasonCreateRetrying is the Warning event reason recorded when a
+// routed snapshot create starts being retried.
+const snapshotReasonCreateRetrying = "SnapshotCreateRetrying"
 
 // VMSnapshotReconciler reconciles a VMSnapshot object
 type VMSnapshotReconciler struct {
@@ -198,15 +210,38 @@ func (r *VMSnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		Namespace: snapshot.Namespace,
 		Name:      snapshot.Spec.VMRef.Name,
 	}
-	if err := r.Get(ctx, vmKey, vm); err != nil {
-		logger.Error(err, "Failed to get referenced VM", "vm", snapshot.Spec.VMRef.Name)
-		k8s.SetCondition(&snapshot.Status.Conditions, infrav1beta1.VMSnapshotConditionReady,
-			metav1.ConditionFalse, infrav1beta1.VMSnapshotReasonProviderError,
-			fmt.Sprintf("Referenced VM not found: %v", err))
-		// Status update errors are intentionally ignored to avoid blocking reconciliation
-		_ = r.updateStatus(ctx, snapshot)
+	vmErr := r.Get(ctx, vmKey, vm)
+	vmGone := apierrors.IsNotFound(vmErr)
+	if vmErr != nil && !vmGone {
+		// A failed read says nothing about the VM: nothing is recorded, and
+		// the read is retried.
+		logger.Error(vmErr, "Failed to get referenced VM", "vm", snapshot.Spec.VMRef.Name)
 		metrics.RecordError(errReasonGetVM, metrics.ComponentManager)
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+	}
+
+	// A Ready snapshot's retention policy applies whether or not its VM still
+	// exists or has a provider id: deleteOnVMDelete fires once the VM is gone
+	// (or being deleted), and maxAge whatever the VM's state.
+	if snapshot.Status.Phase == infrav1beta1.SnapshotPhaseReady {
+		switch {
+		case vmGone:
+			vm = nil
+		case snapshotOfOtherVM(snapshot, vm):
+			// A VM re-created under the snapshot's VM name is not its VM:
+			// for retention, the snapshot's VM is gone.
+			logger.Info("The VM named by spec.vmRef is not the one this snapshot was taken of",
+				"vm_uid", vm.UID, "snapshot_vm_uid", snapshot.Status.VMUID)
+			vm = nil
+		case backfillSnapshotBinding(snapshot, vm):
+			// Status update errors are intentionally ignored; the binding is
+			// recorded again on the next reconcile.
+			_ = r.updateStatus(ctx, snapshot)
+		}
+		return r.handleRetention(ctx, snapshot, vm)
+	}
+	if vmGone {
+		return r.recordSnapshotVMNotFound(ctx, snapshot), nil
 	}
 
 	// Add VM context
@@ -234,7 +269,7 @@ func (r *VMSnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		return r.checkSnapshotCreation(ctx, snapshot, vm)
 	case infrav1beta1.SnapshotPhaseReady:
 		// Snapshot is ready, check for retention policy
-		return r.handleRetention(ctx, snapshot)
+		return r.handleRetention(ctx, snapshot, vm)
 	case infrav1beta1.SnapshotPhaseFailed:
 		// Handle failed snapshots
 		logger.Info("Snapshot is in failed state", "message", snapshot.Status.Message)
@@ -284,8 +319,10 @@ func (r *VMSnapshotReconciler) createSnapshot(ctx context.Context, snapshot *inf
 	// Get provider instance
 	providerInstance, err := r.getProviderInstance(ctx, provider)
 	if err != nil {
+		// The resolver's error stays in the log (it can name a TLS Secret or
+		// a Service address).
 		logger.Error(err, "Failed to get provider instance")
-		return r.retrySnapshotCreate(ctx, snapshot, fmt.Sprintf("Failed to get provider instance: %v", err)), nil
+		return r.retrySnapshotCreate(ctx, snapshot, "Failed to get provider instance: "+providerResolveFailedDetail), nil
 	}
 
 	// Build snapshot create request
@@ -306,6 +343,11 @@ func (r *VMSnapshotReconciler) createSnapshot(ctx context.Context, snapshot *inf
 	if fresh, res, err := r.confirmSnapshotNotCreated(ctx, snapshot); !fresh {
 		return res, err
 	}
+
+	// The snapshot is bound to this VM (by UID) and this Provider: it is
+	// never deleted through another VM of the same name (see
+	// recordSnapshotBinding).
+	recordSnapshotBinding(snapshot, vm, provider)
 
 	// The create is issued now: only from here on is the snapshot Creating.
 	// The phase is persisted below together with the RPC's outcome (a task to
@@ -331,19 +373,25 @@ func (r *VMSnapshotReconciler) createSnapshot(ctx context.Context, snapshot *inf
 		// another VM depends on the disk (VM_DISK_IN_USE, a Conflict) fails the
 		// create, as on a single host. Single-host failures are unchanged.
 		logger.Info("Snapshot creation did not reach a definite outcome; retrying", "error", err.Error())
-		return r.retrySnapshotCreate(ctx, snapshot, fmt.Sprintf("Snapshot creation will be retried: %v", err)), nil
+		if c := meta.FindStatusCondition(snapshot.Status.Conditions, infrav1beta1.VMSnapshotConditionReady); c == nil ||
+			c.Message != snapshotCreateRetryingMessage {
+			r.Recorder.Event(snapshot, corev1.EventTypeWarning, snapshotReasonCreateRetrying,
+				"Snapshot creation will be retried: "+rpcFailureDetail(err))
+		}
+		return r.retrySnapshotCreate(ctx, snapshot, snapshotCreateRetryingMessage), nil
 	}
 	if err != nil {
 		logger.Error(err, "Failed to create snapshot")
+		detail := rpcFailureDetail(err)
 		snapshot.Status.Phase = infrav1beta1.SnapshotPhaseFailed
-		snapshot.Status.Message = fmt.Sprintf("Failed to create snapshot: %v", err)
+		snapshot.Status.Message = "Failed to create snapshot: " + detail
 		k8s.SetCondition(&snapshot.Status.Conditions, infrav1beta1.VMSnapshotConditionReady,
 			metav1.ConditionFalse, infrav1beta1.VMSnapshotReasonProviderError,
-			fmt.Sprintf("Snapshot creation failed: %v", err))
+			"Snapshot creation failed: "+detail)
 		k8s.SetCondition(&snapshot.Status.Conditions, infrav1beta1.VMSnapshotConditionCreating,
 			metav1.ConditionFalse, infrav1beta1.VMSnapshotReasonProviderError,
-			fmt.Sprintf("Snapshot creation failed: %v", err))
-		r.Recorder.Event(snapshot, "Warning", "SnapshotFailed", fmt.Sprintf("Failed to create snapshot: %v", err))
+			"Snapshot creation failed: "+detail)
+		r.Recorder.Event(snapshot, "Warning", "SnapshotFailed", "Failed to create snapshot: "+detail)
 		// Status update errors are intentionally ignored to avoid blocking reconciliation
 		_ = r.updateStatus(ctx, snapshot)
 		return ctrl.Result{RequeueAfter: snapshotFailedRecheckInterval}, nil
@@ -515,19 +563,22 @@ func (r *VMSnapshotReconciler) checkSnapshotCreation(ctx context.Context, snapsh
 
 	if taskStatus.IsCompleted {
 		if taskStatus.Error != "" {
-			// Task failed
+			// Task failed. The task's error is the provider's text: made
+			// safe before it reaches status and events.
+			logger.Info("Snapshot creation task failed", "task_ref", snapshot.Status.TaskRef, "error", taskStatus.Error)
+			detail := sanitizeProviderDetail(errors.New(taskStatus.Error))
 			snapshot.Status.Phase = infrav1beta1.SnapshotPhaseFailed
-			snapshot.Status.Message = fmt.Sprintf("Snapshot creation failed: %s", taskStatus.Error)
+			snapshot.Status.Message = "Snapshot creation failed: " + detail
 			snapshot.Status.TaskRef = ""
 
 			k8s.SetCondition(&snapshot.Status.Conditions, infrav1beta1.VMSnapshotConditionReady,
 				metav1.ConditionFalse, infrav1beta1.VMSnapshotReasonProviderError,
-				fmt.Sprintf("Snapshot creation failed: %s", taskStatus.Error))
+				"Snapshot creation failed: "+detail)
 			k8s.SetCondition(&snapshot.Status.Conditions, infrav1beta1.VMSnapshotConditionCreating,
 				metav1.ConditionFalse, infrav1beta1.VMSnapshotReasonProviderError,
 				"Snapshot creation failed")
 
-			r.Recorder.Event(snapshot, "Warning", "SnapshotFailed", fmt.Sprintf("Snapshot creation failed: %s", taskStatus.Error))
+			r.Recorder.Event(snapshot, "Warning", "SnapshotFailed", "Snapshot creation failed: "+detail)
 		} else {
 			// Task succeeded
 			snapshot.Status.Phase = infrav1beta1.SnapshotPhaseReady
@@ -562,8 +613,43 @@ func (r *VMSnapshotReconciler) checkSnapshotCreation(ctx context.Context, snapsh
 	return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 }
 
-// handleRetention handles snapshot retention policies
-func (r *VMSnapshotReconciler) handleRetention(ctx context.Context, snapshot *infrav1beta1.VMSnapshot) (ctrl.Result, error) {
+// snapshotReasonVMNotFound is the Ready condition reason of a VMSnapshot whose
+// referenced VirtualMachine does not exist.
+const snapshotReasonVMNotFound = "VMNotFound"
+
+// snapshotVMNotFoundMessage is the status message and Ready condition message
+// of a VMSnapshot (not Ready) whose referenced VirtualMachine does not exist.
+// It is constant, so a re-check writes nothing.
+const snapshotVMNotFoundMessage = "Referenced VM not found; no snapshot is taken until it exists"
+
+// recordSnapshotVMNotFound records that the VMSnapshot's referenced VM does not
+// exist (Ready=False/VMNotFound, constant message; written only when that
+// changes the status) and re-checks after 30 s.
+func (r *VMSnapshotReconciler) recordSnapshotVMNotFound(ctx context.Context, snapshot *infrav1beta1.VMSnapshot) ctrl.Result {
+	logging.FromContext(ctx).Info("Referenced VM not found", "vm", snapshot.Spec.VMRef.Name)
+	before := snapshot.Status.DeepCopy()
+	snapshot.Status.Message = snapshotVMNotFoundMessage
+	k8s.SetCondition(&snapshot.Status.Conditions, infrav1beta1.VMSnapshotConditionReady,
+		metav1.ConditionFalse, snapshotReasonVMNotFound, snapshotVMNotFoundMessage)
+	if !equality.Semantic.DeepEqual(before, &snapshot.Status) {
+		// Status update errors are intentionally ignored to avoid blocking reconciliation
+		_ = r.updateStatus(ctx, snapshot)
+	}
+	return ctrl.Result{RequeueAfter: 30 * time.Second}
+}
+
+// handleRetention applies a Ready snapshot's retention policy. vm is the
+// referenced VirtualMachine, nil when it no longer exists:
+//
+//   - maxAge: a snapshot older than maxAge (by its creation time) is deleted,
+//     whatever its VM's state;
+//   - deleteOnVMDelete: the snapshot is deleted once its VM is gone or being
+//     deleted. A VM being deleted still exists, so the VMSnapshot's finalizer
+//     deletes the snapshot through the provider — which also lets a libvirt
+//     VM, whose delete is refused while snapshot metadata remains, be
+//     deleted; a VM that is already gone took its snapshots with it, and the
+//     finalizer makes no provider call.
+func (r *VMSnapshotReconciler) handleRetention(ctx context.Context, snapshot *infrav1beta1.VMSnapshot, vm *infrav1beta1.VirtualMachine) (ctrl.Result, error) {
 	logger := logging.FromContext(ctx)
 
 	// Check retention policy. A snapshot with no creation time has no age: an
@@ -586,22 +672,16 @@ func (r *VMSnapshotReconciler) handleRetention(ctx context.Context, snapshot *in
 	}
 
 	// Check retention based on VM deletion
-	if snapshot.Spec.RetentionPolicy != nil && snapshot.Spec.RetentionPolicy.DeleteOnVMDelete {
-		vm := &infrav1beta1.VirtualMachine{}
-		vmKey := client.ObjectKey{
-			Namespace: snapshot.Namespace,
-			Name:      snapshot.Spec.VMRef.Name,
+	// A VM being detached (orphan-on-delete) keeps running, snapshots and
+	// all, on the hypervisor: its snapshots are not deleted with it.
+	if snapshot.Spec.RetentionPolicy != nil && snapshot.Spec.RetentionPolicy.DeleteOnVMDelete &&
+		(vm == nil || (!vm.DeletionTimestamp.IsZero() && !hasOrphanOnDeleteAnnotation(vm))) {
+		logger.Info("Referenced VM is gone or being deleted, deleting snapshot (retentionPolicy.deleteOnVMDelete)")
+		if err := r.Delete(ctx, snapshot); err != nil {
+			logger.Error(err, "Failed to delete snapshot after VM deletion")
+			return ctrl.Result{}, err
 		}
-		if err := r.Get(ctx, vmKey, vm); err != nil {
-			if client.IgnoreNotFound(err) == nil {
-				logger.Info("Referenced VM deleted, deleting snapshot")
-				if err := r.Delete(ctx, snapshot); err != nil {
-					logger.Error(err, "Failed to delete snapshot after VM deletion")
-					return ctrl.Result{}, err
-				}
-				return ctrl.Result{}, nil
-			}
-		}
+		return ctrl.Result{}, nil
 	}
 
 	// Check again later
@@ -655,15 +735,39 @@ func (r *VMSnapshotReconciler) handleDeletion(ctx context.Context, snapshot *inf
 	// ("" = none: nothing was confirmed deleted).
 	removed := "VMSnapshot removed; there was no provider snapshot to delete"
 
+	// A VM re-created under the snapshot's VM name is another VM: a delete
+	// sent through it could reach another snapshot of the same name. No
+	// provider call; released with a Warning.
+	if !vmNotFound && snapshot.Status.SnapshotID != "" && snapshotOfOtherVM(snapshot, vm) {
+		msg := fmt.Sprintf("Removing the VMSnapshot without deleting snapshot %q: the VM %q is not the one it was taken of "+
+			"(it was re-created under the same name), so no provider call is made; if the original VM still exists on the "+
+			"hypervisor, the snapshot is left there", snapshot.Status.SnapshotID, snapshot.Spec.VMRef.Name)
+		logger.Info("The VM named by spec.vmRef is not the snapshot's VM; removing finalizer without a provider call",
+			"snapshot_id", snapshot.Status.SnapshotID, "vm_uid", vm.UID, "snapshot_vm_uid", snapshot.Status.VMUID)
+		r.Recorder.Event(snapshot, corev1.EventTypeWarning, eventReasonSnapshotLeftOnHypervisor, msg)
+		return r.releaseSnapshotFinalizer(ctx, snapshot, "")
+	}
+
+	// A recorded snapshot whose VM no longer exists (or has no provider id)
+	// cannot be deleted by anyone: the VMSnapshot is released, but never
+	// with a claim that there was nothing to delete — the VM may still run
+	// on the hypervisor (e.g. detached with orphan-on-delete), snapshot and
+	// all.
+	if snapshot.Status.SnapshotID != "" && (vmNotFound || vm.Status.ID == "") {
+		msg := fmt.Sprintf("Removing the VMSnapshot although snapshot %q was not deleted: its VM %q no longer exists "+
+			"(or has no provider id), so nothing can delete it; if the VM still exists on the hypervisor (e.g. it was "+
+			"detached with orphan-on-delete), the snapshot is left there", snapshot.Status.SnapshotID, snapshot.Spec.VMRef.Name)
+		logger.Info("The snapshot's VM is gone; removing finalizer, the snapshot may be left on the hypervisor",
+			"snapshot_id", snapshot.Status.SnapshotID, "vm", snapshot.Spec.VMRef.Name)
+		r.Recorder.Event(snapshot, corev1.EventTypeWarning, eventReasonSnapshotLeftOnHypervisor, msg)
+		removed = ""
+	}
+
 	// Only call provider if VM still exists and we have a snapshot ID
 	if !vmNotFound && snapshot.Status.SnapshotID != "" && vm.Status.ID != "" {
 		// Get the provider. A Provider in another namespace that does not select
 		// this one (spec.consumerNamespaceSelector) is never used.
 		provider, err := getVMProvider(ctx, r.Client, vm)
-		if err != nil && !isConsumerNotAllowed(err) {
-			logger.Error(err, "Failed to get provider", "provider", vm.Spec.ProviderRef.Name)
-			return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
-		}
 
 		// Address the VM (ADR-0007 Addendum A, A1) before resolving a client for
 		// the Provider. An ungranted (or revoked) cross-namespace Provider, a
@@ -672,12 +776,65 @@ func (r *VMSnapshotReconciler) handleDeletion(ctx context.Context, snapshot *inf
 		// never sent a per-VM call. The snapshot is then still on the
 		// hypervisor: the finalizer stays and the delete is retried with
 		// backoff, unless force-delete says to leave the snapshot behind.
-		refErr := err
+		// A Provider that cannot be read, or that has no usable client (its
+		// runtime not Running, TLS or dial failing — every provider rollout),
+		// was sent nothing either and is held the same way (unavailableErr).
+		var refErr, unavailableErr error
 		var ref contracts.VMRef
-		if refErr == nil {
+		var providerInstance contracts.Provider
+		providerGone := false
+		switch {
+		case isConsumerNotAllowed(err):
+			refErr = err
+		case apierrors.IsNotFound(err):
+			// The VM's Provider in its own namespace no longer exists
+			// (one in another namespace that is missing is refused as
+			// ConsumerNotAllowed, above): nothing can delete the
+			// snapshot, and holding would wait forever. Released, as the
+			// VirtualMachine and VMMigration controllers do, with a
+			// Warning naming what may be left.
+			providerGone = true
+		case err != nil:
+			unavailableErr = err
+		case snapshotProviderMismatch(snapshot, provider):
+			// The VM now goes through another Provider than the one the
+			// snapshot was taken through: never sent there.
+			msg := fmt.Sprintf("Removing the VMSnapshot without deleting snapshot %q: it was taken through Provider %s/%s, and "+
+				"its VM now references Provider %s/%s, so no provider call is made; the snapshot may be left on the hypervisor",
+				snapshot.Status.SnapshotID, snapshot.Status.BoundProvider.Namespace, snapshot.Status.BoundProvider.Name,
+				provider.Namespace, provider.Name)
+			logger.Info("The VM's Provider is not the one the snapshot was taken through; removing finalizer without a provider call",
+				"snapshot_id", snapshot.Status.SnapshotID)
+			r.Recorder.Event(snapshot, corev1.EventTypeWarning, eventReasonSnapshotLeftOnHypervisor, msg)
+			return r.releaseSnapshotFinalizer(ctx, snapshot, "")
+		default:
 			ref, refErr = vmRefFor(vm, provider)
+			if refErr == nil {
+				providerInstance, unavailableErr = r.getProviderInstance(ctx, provider)
+			}
 		}
-		if refErr != nil {
+		if providerGone {
+			msg := fmt.Sprintf("Removing the VMSnapshot although snapshot %q of VM %q was not deleted: the VM's Provider %q no "+
+				"longer exists, so nothing can delete it; if the VM still exists on the hypervisor, the snapshot is left there",
+				snapshot.Status.SnapshotID, vm.Status.ID, vm.Spec.ProviderRef.Name)
+			logger.Info("The VM's Provider no longer exists; removing finalizer, the snapshot may be left on the hypervisor",
+				"snapshot_id", snapshot.Status.SnapshotID, "vm_id", vm.Status.ID, "error", err.Error())
+			r.Recorder.Event(snapshot, corev1.EventTypeWarning, eventReasonSnapshotLeftOnHypervisor, msg)
+			removed = ""
+		} else if unavailableErr != nil {
+			if !hasSnapshotForceDeleteAnnotation(snapshot) {
+				return r.retainForUnavailableSnapshotProvider(ctx, snapshot, unavailableErr), nil
+			}
+			// The cause stays in the log: resolver text can name a TLS
+			// Secret or a Service address.
+			msg := fmt.Sprintf("%s=true: removing the VMSnapshot although the manager could not reach the VM's Provider %q, "+
+				"so snapshot %q of VM %q was not deleted; it is left on the hypervisor", forceDeleteAnnotation,
+				vm.Spec.ProviderRef.Name, snapshot.Status.SnapshotID, vm.Status.ID)
+			logger.Error(unavailableErr, "Cannot reach the provider to delete the snapshot but force-delete annotation is set; removing finalizer, the snapshot is left on the hypervisor",
+				"snapshot_id", snapshot.Status.SnapshotID, "vm_id", vm.Status.ID, "annotation", forceDeleteAnnotation)
+			r.Recorder.Event(snapshot, corev1.EventTypeWarning, eventReasonSnapshotLeftOnHypervisor, msg)
+			removed = ""
+		} else if refErr != nil {
 			if !hasSnapshotForceDeleteAnnotation(snapshot) {
 				return r.retainForUnaddressableSnapshotDelete(ctx, snapshot, refErr), nil
 			}
@@ -692,9 +849,6 @@ func (r *VMSnapshotReconciler) handleDeletion(ctx context.Context, snapshot *inf
 				"snapshot_id", snapshot.Status.SnapshotID, "vm_id", vm.Status.ID, "reason", vmRefErrorReason(refErr), "annotation", forceDeleteAnnotation)
 			r.Recorder.Event(snapshot, corev1.EventTypeWarning, eventReasonSnapshotLeftOnHypervisor, msg)
 			removed = ""
-		} else if providerInstance, err := r.getProviderInstance(ctx, provider); err != nil {
-			logger.Error(err, "Failed to get provider instance")
-			return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 		} else {
 			// Delete the snapshot via provider
 			logger.Info("Calling provider to delete snapshot", "snapshot_id", snapshot.Status.SnapshotID, "vm_id", vm.Status.ID)
@@ -711,7 +865,7 @@ func (r *VMSnapshotReconciler) handleDeletion(ctx context.Context, snapshot *inf
 				// snapshot is still on the hypervisor, and say which one.
 				msg := fmt.Sprintf("%s=true: removing the VMSnapshot although the provider did not delete snapshot %q of VM %q "+
 					"(provider %s); it is left on the hypervisor. Provider detail: %s", forceDeleteAnnotation,
-					snapshot.Status.SnapshotID, vm.Status.ID, provider.Name, sanitizeProviderDetail(err))
+					snapshot.Status.SnapshotID, vm.Status.ID, provider.Name, rpcFailureDetail(err))
 				logger.Error(err, "Provider snapshot delete failed but force-delete annotation is set; removing finalizer, the snapshot is left on the hypervisor",
 					"snapshot_id", snapshot.Status.SnapshotID, "vm_id", vm.Status.ID, "provider", provider.Name, "annotation", forceDeleteAnnotation)
 				r.Recorder.Event(snapshot, corev1.EventTypeWarning, eventReasonSnapshotLeftOnHypervisor, msg)
@@ -734,7 +888,14 @@ func (r *VMSnapshotReconciler) handleDeletion(ctx context.Context, snapshot *inf
 		}
 	}
 
-	// Remove finalizer
+	return r.releaseSnapshotFinalizer(ctx, snapshot, removed)
+}
+
+// releaseSnapshotFinalizer removes the VMSnapshot finalizer and, when removed
+// is not empty (the provider snapshot was confirmed deleted or absent),
+// records it as a Normal SnapshotDeleted event.
+func (r *VMSnapshotReconciler) releaseSnapshotFinalizer(ctx context.Context, snapshot *infrav1beta1.VMSnapshot, removed string) (ctrl.Result, error) {
+	logger := logging.FromContext(ctx)
 	controllerutil.RemoveFinalizer(snapshot, "snapshot.infra.virtrigaud.io/finalizer")
 	if err := r.Update(ctx, snapshot); err != nil {
 		logger.Error(err, "Failed to remove finalizer")
@@ -828,7 +989,7 @@ func (r *VMSnapshotReconciler) retainForFailedSnapshotDelete(ctx context.Context
 	// can carry a connection's ephemeral port), and a status that changed on
 	// every retry would make each retry write it.
 	r.holdSnapshotDelete(ctx, snapshot, infrav1beta1.VMSnapshotReasonProviderError, snapshotDeleteFailedMessage,
-		fmt.Sprintf("%s Provider detail: %s", snapshotDeleteFailedMessage, sanitizeProviderDetail(err)))
+		fmt.Sprintf("%s Provider detail: %s", snapshotDeleteFailedMessage, rpcFailureDetail(err)))
 	return ctrl.Result{RequeueAfter: retryAfter}
 }
 
@@ -894,6 +1055,41 @@ func (r *VMSnapshotReconciler) retainForUnaddressableSnapshotDelete(ctx context.
 	return ctrl.Result{RequeueAfter: retryAfter}
 }
 
+// snapshotDeleteProviderUnavailableMessage is the status message (and Ready /
+// Deleting condition message) of a VMSnapshot whose delete was not sent
+// because the manager could not reach the VM's Provider
+// (retainForUnavailableSnapshotProvider). It is constant and carries no
+// resolver text.
+var snapshotDeleteProviderUnavailableMessage = fmt.Sprintf("The manager cannot reach the VM's Provider, so the snapshot delete "+
+	"was not sent; the VMSnapshot is kept (the snapshot may still be on the hypervisor) and the delete is retried with a backoff "+
+	"of up to %s. Set %s=true to remove it anyway, leaving the snapshot on the hypervisor. The cause is in the manager log.",
+	blockedRetryMax, forceDeleteAnnotation)
+
+// retainForUnavailableSnapshotProvider keeps the finalizer of a VMSnapshot
+// whose provider SnapshotDelete was not sent because the VM's Provider could
+// not be read or resolved to a usable client (its runtime not Running or
+// without an endpoint, TLS or gRPC setup failing — as during every provider
+// rollout): the snapshot may still be on the hypervisor. It records Ready=False
+// and Deleting=False with reason ProviderUnavailable and the constant
+// snapshotDeleteProviderUnavailableMessage (the cause, which can name a TLS
+// Secret or a Service address, goes to the manager log only), and retries with
+// the blocked-VM backoff (blockedRetryBackoff: 15 s doubling to 5 min, from when
+// the delete was first held) until the Provider answers, the VM is gone, or the
+// force-delete annotation is set.
+func (r *VMSnapshotReconciler) retainForUnavailableSnapshotProvider(ctx context.Context, snapshot *infrav1beta1.VMSnapshot, err error) ctrl.Result {
+	var since time.Time
+	if snapshotDeleteRetrying(snapshot) {
+		since = conditionSince(snapshot.Status.Conditions, infrav1beta1.VMSnapshotConditionDeleting)
+	}
+	retry := blockedRetryBackoff(since)
+	logging.FromContext(ctx).Info("Cannot reach the VM's provider to delete the snapshot; retaining the VMSnapshot finalizer and retrying",
+		"snapshot_id", snapshot.Status.SnapshotID, "retryAfter", retry.String(), "error", err.Error())
+	metrics.RecordError(errReasonProviderResolve, metrics.ComponentManager)
+	r.holdSnapshotDelete(ctx, snapshot, conditions.ReasonProviderUnavailable, snapshotDeleteProviderUnavailableMessage,
+		snapshotDeleteProviderUnavailableMessage)
+	return ctrl.Result{RequeueAfter: retry}
+}
+
 // retainForBlockedSnapshotDelete keeps the finalizer of a VMSnapshot whose
 // provider SnapshotDelete was refused with VM_DISK_IN_USE (contracts.IsVMDiskInUse) — other VMs on the
 // hypervisor depend on the VM's disk (e.g. linked clones backed by it), and
@@ -911,7 +1107,7 @@ func (r *VMSnapshotReconciler) retainForBlockedSnapshotDelete(ctx context.Contex
 	msg := fmt.Sprintf("Provider refused to delete the snapshot: other VMs on its hypervisor depend on the VM's disk (e.g. linked clones of the VM), "+
 		"and deleting the snapshot would rewrite it. Delete them first, or set %s=true to remove this VMSnapshot and leave the snapshot "+
 		"on the hypervisor (re-checking every %s). Provider detail: %s",
-		forceDeleteAnnotation, vmDeleteBlockedRetryInterval, sanitizeProviderDetail(err))
+		forceDeleteAnnotation, vmDeleteBlockedRetryInterval, rpcFailureDetail(err))
 	if !snapshotDeleteBlocked(snapshot) {
 		r.Recorder.Event(snapshot, corev1.EventTypeWarning, conditions.ReasonDeleteBlocked, msg)
 	}

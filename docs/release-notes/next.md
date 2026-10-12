@@ -380,6 +380,61 @@ providers), and rollback caveats in
   re-read from the API server right before the call, so a second, untracked
   snapshot or clone cannot be made from a cache that does not show the first
   one's result yet.
+- **A `VMMigration` no longer leaves the source snapshot it created behind.**
+  Deleting a migration whose snapshot `Delete` failed, or whose source
+  `Provider` could not be reached, released it anyway and left the snapshot
+  untracked on the live source VM (on libvirt it then blocked deleting that
+  VM); a migration that failed for good never cleaned its snapshot up at all.
+  A failed-for-good migration now deletes its snapshot, and a deletion waits
+  for it: `SnapshotCleanup=False/SnapshotCleanupPending` (constant message,
+  one `Warning` event), retried with a backoff from 15 s doubling to 5 min.
+  A snapshot the provider no longer finds releases it (vSphere and Proxmox
+  now answer a missing snapshot with `NotFound`); a source VM or own-namespace
+  `Provider` that is gone releases it with a `SnapshotLeftOnHypervisor`
+  Warning, never a "deleted".
+  `virtrigaud.io/force-delete: "true"` on the `VMMigration` releases it anyway
+  with a `SnapshotLeftOnHypervisor` Warning naming the snapshot
+  (→ [Upgrade guide](docs/upgrading.md#breaking-changes)).
+- A `VMSnapshot` being deleted while its VM's `Provider` cannot be read or
+  reached is held with `Ready=False/ProviderUnavailable` and the same backoff
+  (it was retried every 30 s with no status), and `force-delete` now releases
+  it, with a `SnapshotLeftOnHypervisor` Warning. One whose `Provider` no
+  longer exists in its own namespace is released with that Warning.
+- **A migration no longer exports before its source snapshot is taken.** A
+  task-backed snapshot is polled to completion; a failed one fails the
+  migration, and a retry never exports an unconfirmed snapshot.
+- The first retry of a failed migration waits `retryDelay` (it ran at once),
+  and later retries back off from the failure they retry.
+- A `VMSnapshot`'s `deleteOnVMDelete` and `maxAge` retention now apply once
+  its VM is gone or being deleted (never while the VM is detached with
+  `orphan-on-delete`).
+- **A `VMSnapshot` is bound to its VM and Provider** (new status fields
+  `vmUID`, `boundProvider`): a VM re-created under the same name, or moved to
+  another Provider, is never sent the snapshot's delete; the VMSnapshot is
+  released with a `SnapshotLeftOnHypervisor` Warning
+  (→ [Upgrade guide](docs/upgrading.md#behavior-changes-that-are-visible-but-not-breaking)).
+- Proxmox snapshot deletes resolve the VM's actual node (an HA move no longer
+  reads as "snapshot gone"); vSphere re-reads the VM before answering a
+  snapshot `NotFound`.
+- A migration's source snapshot task is waited for at most
+  `spec.options.timeout` (2 h by default), and provider task error text no
+  longer reaches the VMMigration status.
+- `VMClone`, `VMSnapshot` and `VMMigration` status and events no longer quote
+  the provider resolver's error (which can name the provider's TLS Secret,
+  Service address and runtime phase) or a gRPC connection error; the cause is
+  in the manager log. Other provider answers in them are sanitized
+  (→ [Upgrade guide](docs/upgrading.md#behavior-changes-that-are-visible-but-not-breaking)).
+- A `VMMigration` status write that hits a conflict is retried on the live
+  object without sleeping in the reconcile.
+- A single-host `VMClone` whose `Clone` provably did nothing (the request
+  never reached the provider, or the provider answered that it did not
+  perform it — an SSH or libvirtd blip) is held as `CloneRetrying` and
+  retried with a backoff (15 s doubling to 5 min) instead of failing for good.
+  A clone whose outcome is unknown (the connection dropped mid-call, a
+  timeout) still fails, so a retry can never make a second VM.
+- Known limitation: a migration's `nfs` or `s3` staging object (a full copy of
+  the source disk) is never deleted by VirtRigaud; clean it up yourself
+  (→ [`docs/clustered-provider-inventory.md`](docs/clustered-provider-inventory.md)).
 - A `VMMigration` with `deleteAfterMigration: true` whose target stays off
   (`powerOn: false`) records a `SourceDeletedTargetNotStarted` Warning when it
   deletes the source.

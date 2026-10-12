@@ -858,7 +858,7 @@ func (s *Server) Clone(ctx context.Context, req *providerv1.CloneRequest) (*prov
 		if s.clusteredProvider() {
 			return nil, routedRPCError("clone VM", err)
 		}
-		return nil, fmt.Errorf("failed to clone VM: %w", err)
+		return nil, singleHostCloneRPCError(err)
 	}
 
 	result := &providerv1.CloneResponse{
@@ -869,6 +869,49 @@ func (s *Server) Clone(ctx context.Context, req *providerv1.CloneRequest) (*prov
 	}
 
 	return result, nil
+}
+
+// singleHostCloneRPCError converts a single-host Clone failure to its gRPC
+// status, so the manager can tell a transient failure (it holds the clone and
+// retries with a backoff) from a terminal one (it fails the clone):
+//
+//   - an error that already carries a gRPC status (sourceRunningError's
+//     FailedPrecondition + VM_SOURCE_RUNNING, the sdk InvalidSpec of a linked
+//     clone) keeps it, in the historical wrapped form;
+//   - the host could not be reached (isHostTransportFailure: the SSH session
+//     failed, libvirtd is down), or any other retryable provider error (a
+//     list, dumpxml or pool read that failed before anything was copied) ->
+//     Unavailable with the VM_OPERATION_FAILED ErrorInfo: the provider
+//     answers that it did not define the clone, so the manager may send the
+//     Clone again (contracts.IsNothingDone); a dropped copy left no domain,
+//     and the next copy replaces its disk. Not counted by the breaker;
+//   - anything else keeps the historical wrapped form (codes.Unknown):
+//     terminal.
+//
+// Only the categorized message crosses the wire for the first two; the cause
+// is logged.
+func singleHostCloneRPCError(err error) error {
+	var withStatus interface{ GRPCStatus() *status.Status }
+	if stderrors.As(err, &withStatus) {
+		return fmt.Errorf("failed to clone VM: %w", err)
+	}
+	// A define whose outcome could not be established (the session dropped
+	// while virsh define ran) may have defined the clone: never answered as
+	// "nothing done", whatever the transport failure underneath. Terminal.
+	if stderrors.Is(err, errDefineOutcomeUnknown) {
+		log.Printf("WARN clone VM failed: the define's outcome is unknown: %v", err)
+		return fmt.Errorf("failed to clone VM: %w", err)
+	}
+	if isHostTransportFailure(err) {
+		log.Printf("WARN clone VM failed: the libvirt host could not be reached: %v", err)
+		return vmOperationStatus(codes.Unavailable, "failed to clone VM: the libvirt host could not be reached")
+	}
+	var pe *contracts.ProviderError
+	if stderrors.As(err, &pe) && pe.IsRetryable() && pe.Type != contracts.ErrorTypeTimeout {
+		log.Printf("WARN clone VM failed (retryable): %v", err)
+		return vmOperationStatus(codes.Unavailable, "failed to clone VM: "+pe.Message)
+	}
+	return fmt.Errorf("failed to clone VM: %w", err)
 }
 
 // ImagePrepare prepares/imports a VM image into a libvirt storage pool

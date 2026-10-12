@@ -293,9 +293,13 @@ func (r *VMCloneReconciler) Reconcile(ctx context.Context, req ctrl.Request) (re
 
 	providerInstance, err := r.getProviderInstance(ctx, provider)
 	if err != nil {
+		// The resolver's error can name the TLS Secret, the provider
+		// Service's address and the runtime phase (ADR-0007 A6, threat 5):
+		// it goes to the manager log only, never to this consumer-readable
+		// status.
 		logger.Error(err, "Failed to get provider instance", "provider", providerKey.Name)
 		return r.markPending(ctx, clone, infrav1beta1.VMCloneReasonProviderError,
-			fmt.Sprintf("failed to resolve provider %q: %v", providerKey.Name, err)), nil
+			fmt.Sprintf("failed to resolve provider %q: %s", providerKey.Name, providerResolveFailedDetail)), nil
 	}
 
 	linked := r.requestedCloneType(clone) == infrav1beta1.CloneTypeLinkedClone
@@ -426,11 +430,17 @@ func (r *VMCloneReconciler) startClone(
 		if contracts.IsVMSourceRunning(err) {
 			return r.holdCloneForRunningSource(ctx, clone, err), nil
 		}
+		// A transient failure (the provider or its host briefly unreachable,
+		// a check that could not run, a copy still in progress) is held and
+		// retried with a backoff, never failed: one SSH or libvirtd blip
+		// must not end the clone.
+		if singleHostCloneRetryable(err) {
+			return r.holdCloneForTransientError(ctx, clone, err), nil
+		}
 		logger.Error(err, "Clone RPC failed")
-		r.Recorder.Event(clone, "Warning", infrav1beta1.VMCloneReasonProviderError,
-			fmt.Sprintf("Clone failed: %v", err))
-		return r.markFailed(ctx, clone, infrav1beta1.VMCloneReasonProviderError,
-			fmt.Sprintf("clone failed: %v", err)), nil
+		detail := rpcFailureDetail(err)
+		r.Recorder.Event(clone, "Warning", infrav1beta1.VMCloneReasonProviderError, "Clone failed: "+detail)
+		return r.markFailed(ctx, clone, infrav1beta1.VMCloneReasonProviderError, "clone failed: "+detail), nil
 	}
 
 	before := clone.DeepCopy()
@@ -465,6 +475,58 @@ func (r *VMCloneReconciler) startClone(
 	return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 }
 
+// cloneTransientRetryMessage is the Ready condition message of a single-host
+// clone held because its Clone RPC failed transiently
+// (holdCloneForTransientError). It is constant; the provider's answer is in
+// the CloneRetrying Warning event and the manager log.
+var cloneTransientRetryMessage = fmt.Sprintf("the clone is not done yet: the provider could not perform it right now "+
+	"(a transient failure; nothing was done); it is retried with a backoff of up to %s; the "+
+	"provider's answer is in the %s event", blockedRetryMax, cloneReasonRetrying)
+
+// singleHostCloneRetryable reports whether a failed single-host Clone RPC is
+// proven to have done nothing, so it is safe to send again
+// (contracts.IsNothingDone):
+//
+//   - the request never reached the provider: no connection could be made
+//     before the call's deadline, or the circuit breaker refused it
+//     (contracts.IsRequestNotSent);
+//   - the provider answered, retryably, that it did not perform it: gRPC
+//     Unavailable with VM_OPERATION_FAILED, HOST_UNAVAILABLE or
+//     VM_DISK_CHECK_FAILED.
+//
+// Anything else fails the clone. A single-host Clone carries no request
+// token, so a Clone whose outcome is unknown — a transport failure after the
+// request was sent ("error reading from server", "transport is closing", the
+// provider pod killed mid-RPC), a DeadlineExceeded, a provider Timeout — could
+// already have made a VM (a Proxmox clone takes a new VMID each time), and
+// sending it again could make a second, untracked one.
+func singleHostCloneRetryable(err error) bool {
+	return contracts.IsNothingDone(err)
+}
+
+// holdCloneForTransientError keeps a single-host clone whose Clone RPC failed
+// transiently Pending with Ready=False/CloneRetrying (the constant
+// cloneTransientRetryMessage), records the provider's answer (made safe by
+// rpcFailureDetail) in a Warning event when the hold begins, and retries with
+// the blocked-VM backoff (blockedRetryBackoff: 15 s doubling to 5 min, from
+// when the hold began — the Ready condition's transition to CloneRetrying). A
+// repeated hold writes nothing. The next attempt re-reads the clone live
+// before its Clone (confirmCloneNotStarted).
+func (r *VMCloneReconciler) holdCloneForTransientError(ctx context.Context, clone *infrav1beta1.VMClone, err error) ctrl.Result {
+	var since time.Time
+	if prev := meta.FindStatusCondition(clone.Status.Conditions, infrav1beta1.VMCloneConditionReady); prev != nil &&
+		prev.Reason == cloneReasonRetrying {
+		since = prev.LastTransitionTime.Time
+	}
+	retry := blockedRetryBackoff(since)
+	logging.FromContext(ctx).Info("Clone failed transiently; holding it and retrying with a backoff",
+		"retryAfter", retry.String(), "error", err.Error())
+	r.announceCloneWait(clone, cloneReasonRetrying, "", err)
+	res := r.markPending(ctx, clone, cloneReasonRetrying, cloneTransientRetryMessage)
+	res.RequeueAfter = retry
+	return res
+}
+
 // pollCloneTask checks an in-flight clone task and, on completion, binds the
 // target VM.
 func (r *VMCloneReconciler) pollCloneTask(
@@ -481,10 +543,9 @@ func (r *VMCloneReconciler) pollCloneTask(
 	done, err := providerInstance.IsTaskComplete(ctx, clone.Status.TaskRef)
 	if err != nil {
 		logger.Error(err, "Clone task failed", "task_ref", clone.Status.TaskRef)
-		r.Recorder.Event(clone, "Warning", infrav1beta1.VMCloneReasonProviderError,
-			fmt.Sprintf("Clone task failed: %v", err))
-		return r.markFailed(ctx, clone, infrav1beta1.VMCloneReasonProviderError,
-			fmt.Sprintf("clone task failed: %v", err)), nil
+		detail := rpcFailureDetail(err)
+		r.Recorder.Event(clone, "Warning", infrav1beta1.VMCloneReasonProviderError, "Clone task failed: "+detail)
+		return r.markFailed(ctx, clone, infrav1beta1.VMCloneReasonProviderError, "clone task failed: "+detail), nil
 	}
 	if !done {
 		logger.Info("Clone task still in progress", "task_ref", clone.Status.TaskRef)
@@ -894,8 +955,7 @@ func (r *VMCloneReconciler) gateLinkedClone(
 	caps, err := reporter.GetCapabilities(ctx)
 	if err != nil {
 		logging.FromContext(ctx).Info("GetCapabilities failed; not issuing the linked clone until it answers (fail closed)", "error", err.Error())
-		return true, r.markPending(ctx, clone, cloneReasonLinkedUnsupported,
-			fmt.Sprintf("waiting for the provider's capabilities before a linked clone: %v", err))
+		return true, r.markPending(ctx, clone, cloneReasonLinkedUnsupported, cloneCapabilitiesLinkedWaitMessage)
 	}
 	if !caps.SupportsLinkedClones {
 		// e.g. libvirt, which disables linked clones until the source disk is
@@ -905,6 +965,12 @@ func (r *VMCloneReconciler) gateLinkedClone(
 	}
 	return false, ctrl.Result{}
 }
+
+// cloneCapabilitiesLinkedWaitMessage is the Pending message of a linked clone
+// whose provider did not answer GetCapabilities. It is constant: the
+// provider's (or the transport's) error goes to the manager log only.
+const cloneCapabilitiesLinkedWaitMessage = "waiting for the provider's capabilities before a linked clone " +
+	"(GetCapabilities failed; the cause is in the manager log)"
 
 // handleDeletion drops the finalizer without touching the produced target VM.
 func (r *VMCloneReconciler) handleDeletion(ctx context.Context, clone *infrav1beta1.VMClone) (ctrl.Result, error) {

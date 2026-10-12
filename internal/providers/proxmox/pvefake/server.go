@@ -27,6 +27,7 @@ import (
 	"os"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/mux"
@@ -34,17 +35,21 @@ import (
 
 // Server represents a fake Proxmox VE API server
 type Server struct {
-	router       *mux.Router
-	vms          map[int]*VM
-	tasks        map[string]*Task
-	snapshots    map[string][]*Snapshot
-	lastDownload *DownloadRequest
-	lastPowerOp  *PowerOpRequest
-	requests     []RecordedRequest
-	nextID       int
-	mu           sync.RWMutex
-	logger       *slog.Logger
-	config       *Config
+	router    *mux.Router
+	vms       map[int]*VM
+	tasks     map[string]*Task
+	snapshots map[string][]*Snapshot
+	// hiddenFromResources are VMs /cluster/resources leaves out (ACL).
+	hiddenFromResources map[int]bool
+	// errorsInStatusLine sends error messages in the HTTP reason phrase.
+	errorsInStatusLine atomic.Bool
+	lastDownload       *DownloadRequest
+	lastPowerOp        *PowerOpRequest
+	requests           []RecordedRequest
+	nextID             int
+	mu                 sync.RWMutex
+	logger             *slog.Logger
+	config             *Config
 }
 
 // RecordedRequest is one API request the fake server received, recorded before
@@ -222,6 +227,7 @@ func (s *Server) setupRoutes() {
 	// Cluster
 	api.HandleFunc("/nodes", s.handleListNodes).Methods("GET")
 	api.HandleFunc("/cluster/nextid", s.handleClusterNextID).Methods("GET")
+	api.HandleFunc("/cluster/resources", s.handleClusterResources).Methods("GET")
 
 	// VM operations
 	api.HandleFunc("/nodes/{node}/qemu", s.handleCreateVM).Methods("POST")
@@ -247,6 +253,7 @@ func (s *Server) setupRoutes() {
 	api.HandleFunc("/nodes/{node}/tasks/{taskid}/status", s.handleGetTaskStatus).Methods("GET")
 
 	// Snapshot operations
+	api.HandleFunc("/nodes/{node}/qemu/{vmid}/snapshot", s.handleListSnapshots).Methods("GET")
 	api.HandleFunc("/nodes/{node}/qemu/{vmid}/snapshot", s.handleCreateSnapshot).Methods("POST")
 	api.HandleFunc("/nodes/{node}/qemu/{vmid}/snapshot/{snapname}", s.handleDeleteSnapshot).Methods("DELETE")
 	api.HandleFunc("/nodes/{node}/qemu/{vmid}/snapshot/{snapname}/rollback", s.handleRevertSnapshot).Methods("POST")
@@ -395,7 +402,25 @@ func (s *Server) handleListNodes(w http.ResponseWriter, _ *http.Request) {
 
 // handleClusterNextID mimics PVE's /cluster/nextid: it returns a free VMID,
 // handing out monotonically increasing ids (skipping any already in use).
-func (s *Server) handleClusterNextID(w http.ResponseWriter, _ *http.Request) {
+func (s *Server) handleClusterNextID(w http.ResponseWriter, r *http.Request) {
+	// ?vmid=<id> asks whether that ID is free, as PVE does: 400 "VM <id>
+	// already exists" for one in use, the ID itself otherwise.
+	if q := r.URL.Query().Get("vmid"); q != "" {
+		id, err := strconv.Atoi(q)
+		if err != nil {
+			s.writeError(w, http.StatusBadRequest, "invalid vmid")
+			return
+		}
+		s.mu.RLock()
+		_, taken := s.vms[id]
+		s.mu.RUnlock()
+		if taken {
+			s.writeError(w, http.StatusBadRequest, fmt.Sprintf("VM %d already exists", id))
+			return
+		}
+		s.writeResponse(w, strconv.Itoa(id))
+		return
+	}
 	s.mu.Lock()
 	if s.nextID < 200000 {
 		s.nextID = 200000
@@ -724,6 +749,72 @@ func (s *Server) handleCreateSnapshot(w http.ResponseWriter, r *http.Request) {
 	s.writeResponse(w, taskID)
 }
 
+// handleClusterResources answers GET /cluster/resources (?type=vm): every VM
+// with the node it is on.
+func (s *Server) handleClusterResources(w http.ResponseWriter, _ *http.Request) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]map[string]interface{}, 0, len(s.vms))
+	for _, vm := range s.vms {
+		if s.hiddenFromResources[vm.VMID] {
+			continue
+		}
+		out = append(out, map[string]interface{}{
+			"id": fmt.Sprintf("qemu/%d", vm.VMID), "type": "qemu", "vmid": vm.VMID, "node": vm.Node, "name": vm.Name,
+		})
+	}
+	s.writeResponse(w, out)
+}
+
+// HideFromResources leaves VM vmid out of /cluster/resources, as PVE does for
+// a token without VM.Audit on it (tests).
+func (s *Server) HideFromResources(vmid int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.hiddenFromResources == nil {
+		s.hiddenFromResources = map[int]bool{}
+	}
+	s.hiddenFromResources[vmid] = true
+}
+
+// MoveVM moves VM vmid to node, as a PVE HA migration does (tests).
+func (s *Server) MoveVM(vmid int, node string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if vm, ok := s.vms[vmid]; ok {
+		vm.Node = node
+	}
+}
+
+// handleListSnapshots lists a VM's snapshots as PVE does: the snapshots plus a
+// "current" pseudo-entry for the running state. A VM that does not exist is
+// answered as PVE answers it: HTTP 500, "Configuration file ... does not
+// exist".
+func (s *Server) handleListSnapshots(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	vmid, err := strconv.Atoi(vars["vmid"])
+	if err != nil {
+		s.writeError(w, http.StatusBadRequest, "Invalid VMID")
+		return
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// PVE answers for the node named in the path: a VM on another node (e.g.
+	// after an HA move), like one that does not exist, has no configuration
+	// file there.
+	if vm, exists := s.vms[vmid]; !exists || vm.Node != vars["node"] {
+		s.writeError(w, http.StatusInternalServerError,
+			fmt.Sprintf("Configuration file 'nodes/%s/qemu-server/%d.conf' does not exist", vars["node"], vmid))
+		return
+	}
+	list := make([]*Snapshot, 0, len(s.snapshots[vars["vmid"]])+1)
+	list = append(list, s.snapshots[vars["vmid"]]...)
+	list = append(list, &Snapshot{Name: "current", Description: "You are here!"})
+	s.writeResponse(w, list)
+}
+
 // handleDeleteSnapshot handles snapshot deletion
 func (s *Server) handleDeleteSnapshot(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
@@ -740,20 +831,27 @@ func (s *Server) handleDeleteSnapshot(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// Check VM exists
-	if _, exists := s.vms[vmid]; !exists {
-		s.writeError(w, http.StatusNotFound, "VM not found")
+	// Check the VM exists on this node (PVE answers per node).
+	if vm, exists := s.vms[vmid]; !exists || vm.Node != node {
+		s.writeError(w, http.StatusInternalServerError,
+			fmt.Sprintf("Configuration file 'nodes/%s/qemu-server/%d.conf' does not exist", node, vmid))
 		return
 	}
 
-	// Find and delete snapshot
+	// Find and delete snapshot; a missing one is answered as PVE does.
 	vmKey := fmt.Sprintf("%d", vmid)
 	snapshots := s.snapshots[vmKey]
+	found := false
 	for i, snap := range snapshots {
 		if snap.Name == snapName {
 			s.snapshots[vmKey] = append(snapshots[:i], snapshots[i+1:]...)
+			found = true
 			break
 		}
+	}
+	if !found {
+		s.writeError(w, http.StatusInternalServerError, fmt.Sprintf("snapshot '%s' does not exist", snapName))
+		return
 	}
 
 	// Create async task
@@ -830,8 +928,15 @@ func (s *Server) writeResponse(w http.ResponseWriter, data interface{}) {
 	_ = json.NewEncoder(w).Encode(response)
 }
 
-// writeError writes an error response
+// writeError writes an error response. By default the message is in the
+// body; with ErrorsInStatusLine it is in the HTTP reason phrase with a body
+// of {"data":null}, as real PVE answers.
 func (s *Server) writeError(w http.ResponseWriter, statusCode int, message string) {
+	// Not under s.mu: handlers call writeError while holding it.
+	if s.errorsInStatusLine.Load() {
+		writeStatusLineError(w, statusCode, message)
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(statusCode)
 
@@ -839,6 +944,35 @@ func (s *Server) writeError(w http.ResponseWriter, statusCode int, message strin
 		Errors: map[string]string{"error": message},
 	}
 	_ = json.NewEncoder(w).Encode(response)
+}
+
+// writeStatusLineError answers with statusCode and message as the HTTP reason
+// phrase, and the body {"data":null}, as real PVE does. net/http always
+// writes the standard reason phrase, so the connection is hijacked and the
+// response written raw (and the connection closed).
+func writeStatusLineError(w http.ResponseWriter, statusCode int, message string) {
+	hj, ok := w.(http.Hijacker)
+	if !ok {
+		w.WriteHeader(statusCode)
+		_, _ = w.Write([]byte(`{"data":null}`))
+		return
+	}
+	conn, buf, err := hj.Hijack()
+	if err != nil {
+		return
+	}
+	defer conn.Close() //nolint:errcheck // test fake
+	body := `{"data":null}`
+	_, _ = fmt.Fprintf(buf, "HTTP/1.1 %d %s\r\nContent-Type: application/json;charset=UTF-8\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s",
+		statusCode, message, len(body), body)
+	_ = buf.Flush()
+}
+
+// ErrorsInStatusLine makes the fake answer errors as real PVE does: the
+// message in the HTTP status line's reason phrase, the body {"data":null}
+// (tests).
+func (s *Server) ErrorsInStatusLine(on bool) {
+	s.errorsInStatusLine.Store(on)
 }
 
 // handleGetVMConfig handles VM configuration retrieval

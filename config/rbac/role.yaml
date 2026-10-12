@@ -50,6 +50,7 @@ rules:
   - virtualmachines.infra.virtrigaud.io
   - vmclasses.infra.virtrigaud.io
   - vmimages.infra.virtrigaud.io
+  - vmsnapshots.infra.virtrigaud.io
   resources:
   - customresourcedefinitions
   verbs:

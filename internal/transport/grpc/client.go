@@ -21,6 +21,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
+	stderrors "errors"
 	"fmt"
 	"os"
 	"strings"
@@ -121,36 +122,7 @@ func NewClient(ctx context.Context, endpoint string, providerType string, provid
 		opts = append(opts, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	}
 
-	// Build the unary interceptor chain.
-	//
-	// Order is important and deliberate:
-	//   1. providerRPCMetricsInterceptor — records EVERY RPC (including
-	//      circuit-breaker rejections, which show up as code=Unavailable).
-	//      This means dashboards see "the breaker fast-failed this RPC"
-	//      as a normal Unavailable RPC, not a silent drop.
-	//   2. providerCircuitBreakerInterceptor — wraps the actual invoker.
-	//      When the breaker is open, returns Unavailable BEFORE invoker
-	//      runs, so step 1 still observes it.
-	unaryInterceptors := []grpc.UnaryClientInterceptor{
-		// G4 (#90): record per-RPC latency + status code into the
-		// virtrigaud_provider_rpc_* metric families.
-		providerRPCMetricsInterceptor(providerType),
-	}
-	if cb != nil {
-		// G6 (#111): wrap RPCs with circuit-breaker fast-fail. Infra
-		// errors count toward the threshold; business errors (NotFound,
-		// InvalidArgument, ...) pass through without tripping.
-		unaryInterceptors = append(unaryInterceptors, providerCircuitBreakerInterceptor(cb))
-	}
-
-	// Add retry and timeout configurations
-	opts = append(opts,
-		// grpc.WithBlock() removed as it's deprecated in newer gRPC versions
-		grpc.WithDefaultCallOptions(
-			grpc.WaitForReady(true),
-		),
-		grpc.WithChainUnaryInterceptor(unaryInterceptors...),
-	)
+	opts = append(opts, providerCallDialOptions(providerType, cb)...)
 
 	conn, err := grpc.NewClient(endpoint, opts...)
 	if err != nil {
@@ -176,6 +148,42 @@ func NewClient(ctx context.Context, endpoint string, providerType string, provid
 		tasks:         taskMetrics,
 		inflightTasks: make(map[string]struct{}),
 	}, nil
+}
+
+// providerCallDialOptions are the dial options every provider client is built
+// with — NewClient and the tests share them, so the request-sent tracking
+// cannot be dropped from one and not the other: the WaitForReady default, the
+// unary interceptor chain and the request-sent stats handler.
+//
+// The interceptor order is deliberate:
+//  1. requestSentInterceptor — outermost: marks an RPC that failed before its
+//     request was sent (no connection, or the breaker's fast-fail), so a
+//     caller can tell it from one whose outcome is unknown (request_sent.go).
+//  2. providerRPCMetricsInterceptor — records EVERY RPC (including
+//     circuit-breaker rejections, which show up as code=Unavailable), so
+//     dashboards see "the breaker fast-failed this RPC" as a normal
+//     Unavailable RPC, not a silent drop (G4, #90).
+//  3. providerCircuitBreakerInterceptor (when cb is not nil) — wraps the
+//     actual invoker. When the breaker is open it returns Unavailable BEFORE
+//     the invoker runs, so the interceptors above still observe it. Infra
+//     errors count toward the threshold; business errors (NotFound,
+//     InvalidArgument, ...) pass through without tripping (G6, #111).
+func providerCallDialOptions(providerType string, cb *resilience.CircuitBreaker) []grpc.DialOption {
+	unaryInterceptors := []grpc.UnaryClientInterceptor{
+		requestSentInterceptor(),
+		providerRPCMetricsInterceptor(providerType),
+	}
+	if cb != nil {
+		unaryInterceptors = append(unaryInterceptors, providerCircuitBreakerInterceptor(cb))
+	}
+	return []grpc.DialOption{
+		// grpc.WithBlock() removed as it's deprecated in newer gRPC versions
+		grpc.WithDefaultCallOptions(grpc.WaitForReady(true)),
+		grpc.WithChainUnaryInterceptor(unaryInterceptors...),
+		// Reports when an RPC began and when its request headers were sent
+		// (request_sent.go).
+		grpc.WithStatsHandler(requestSentStatsHandler{}),
+	}
 }
 
 // providerRPCMetricsInterceptor returns a UnaryClientInterceptor that
@@ -271,7 +279,9 @@ func providerCircuitBreakerInterceptor(cb *resilience.CircuitBreaker) grpc.Unary
 		// (metrics interceptor, mapGRPCError, retry loops) behave as if the
 		// provider itself returned Unavailable.
 		if cbErr != nil && invokerErr == nil {
-			return status.Errorf(codes.Unavailable, "circuit breaker open: %v", cbErr)
+			// Typed, so the request-sent tracking knows the request never
+			// left the manager (breakerFastFailError).
+			return &breakerFastFailError{st: status.Newf(codes.Unavailable, "circuit breaker open: %v", cbErr)}
 		}
 		return invokerErr
 	}
@@ -1696,6 +1706,13 @@ func (c *Client) mapGRPCError(operation string, err error) error {
 		}
 		return fmt.Errorf("%s failed: %s", operation, st.Message())
 	case codes.Unavailable, codes.DeadlineExceeded:
+		// The request never reached the provider (no connection was made, or
+		// the circuit breaker refused it): nothing was done, so even a
+		// non-idempotent call may be sent again (contracts.IsRequestNotSent).
+		if stderrors.Is(err, errRequestNotSent) {
+			return contracts.NewRetryableError(fmt.Sprintf("%s: %s", operation, st.Message()),
+				fmt.Errorf("%w: %w", contracts.ErrRequestNotSent, err))
+		}
 		if isHostUnavailableStatus(st) {
 			return contracts.NewHostUnavailableError(fmt.Sprintf("%s: %s", operation, st.Message()), err)
 		}
@@ -1704,6 +1721,13 @@ func (c *Client) mapGRPCError(operation string, err error) error {
 			// off and say why instead of retrying on the transient cadence.
 			return contracts.NewRetryableError(fmt.Sprintf("%s: %s", operation, st.Message()),
 				fmt.Errorf("%w: %w", contracts.ErrVMDiskCheckFailed, err))
+		}
+		// The provider answered, retryably, that it did not perform the
+		// operation (VM_OPERATION_FAILED with Unavailable): marked, so a
+		// non-idempotent call may be sent again (contracts.IsNothingDone).
+		if st.Code() == codes.Unavailable && isVMOperationFailedStatus(st) {
+			return contracts.NewRetryableError(fmt.Sprintf("%s: %s", operation, st.Message()),
+				fmt.Errorf("%w: %w", contracts.ErrOperationNotPerformed, err))
 		}
 		return contracts.NewRetryableError(fmt.Sprintf("%s: %s", operation, st.Message()), err)
 	case codes.Unimplemented:

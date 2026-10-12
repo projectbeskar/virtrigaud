@@ -240,8 +240,7 @@ func (r *VMCloneReconciler) gateRoutedClone(ctx context.Context, clone *infrav1b
 	caps, err := reporter.GetCapabilities(ctx)
 	if err != nil {
 		logging.FromContext(ctx).Info("GetCapabilities failed; not creating the clone's target yet", "error", err.Error())
-		return r.markPending(ctx, clone, infrav1beta1.VMCloneReasonProviderError,
-			fmt.Sprintf("waiting for the provider's capabilities before a clustered clone: %v", err)), false
+		return r.markPending(ctx, clone, infrav1beta1.VMCloneReasonProviderError, cloneCapabilitiesClusteredWaitMessage), false
 	}
 	if !caps.SupportsRoutedClone {
 		return r.markFailed(ctx, clone, infrav1beta1.VMCloneReasonUnsupported,
@@ -288,6 +287,30 @@ func cloneHostExcludedMessage(host string, target *infrav1beta1.VirtualMachine) 
 	return fmt.Sprintf("the source VM's host %s is excluded for the target VM %s/%s: a domain of the clone's name that the target "+
 		"does not own exists there, and the clone can land on no other host. Resolve the name conflict and clear the target's "+
 		"status.placement.excludedHosts", host, target.Namespace, target.Name)
+}
+
+// cloneCapabilitiesClusteredWaitMessage is the Pending message of a clustered
+// clone whose provider did not answer GetCapabilities. It is constant: the
+// provider's (or the transport's) error goes to the manager log only.
+const cloneCapabilitiesClusteredWaitMessage = "waiting for the provider's capabilities before a clustered clone " +
+	"(GetCapabilities failed; the cause is in the manager log)"
+
+// announceCloneWait records a Warning event (reason) carrying the provider's
+// answer err, made safe by rpcFailureDetail, when the clone's wait on its
+// landing host begins or changes reason. The wait's condition message is
+// constant, so the provider's answer — which can differ on every attempt — is
+// in this event and the manager log only, and a repeated wait writes nothing.
+//
+// host is the clone's landing host; "" for a single-host Provider.
+func (r *VMCloneReconciler) announceCloneWait(clone *infrav1beta1.VMClone, reason, host string, err error) {
+	if c := meta.FindStatusCondition(clone.Status.Conditions, infrav1beta1.VMCloneConditionReady); c != nil && c.Reason == reason {
+		return
+	}
+	subject := "Clone"
+	if host != "" {
+		subject = fmt.Sprintf("Clone on host %s", host)
+	}
+	r.Recorder.Event(clone, "Warning", reason, fmt.Sprintf("%s waits: %s", subject, rpcFailureDetail(err)))
 }
 
 // waitForCloneHost records that the clone waits for its landing host (reason,
@@ -518,7 +541,7 @@ func (r *VMCloneReconciler) handleClusteredCloneError(
 		// The provider's answer is in the event; the condition says what the
 		// next reconcile — which finds the host excluded — says too, so the
 		// refusal is written once.
-		r.Recorder.Event(clone, "Warning", cloneReasonSourceHostExcluded, fmt.Sprintf("Clone refused on host %s: %v", host, err))
+		r.Recorder.Event(clone, "Warning", cloneReasonSourceHostExcluded, fmt.Sprintf("Clone refused on host %s: %s", host, rpcFailureDetail(err)))
 		return r.waitForCloneHost(ctx, clone, cloneReasonSourceHostExcluded, cloneHostExcludedMessage(host, target),
 			cloneHostBlockedRetryInterval), nil
 	case contracts.IsHostUnavailable(err):
@@ -529,10 +552,11 @@ func (r *VMCloneReconciler) handleClusteredCloneError(
 		retry := blockedRetryBackoff(createHoldSince(target))
 		logger.Info("Clone could not reach a host it needs; retrying on the same host with a backoff", "host", host,
 			"retryAfter", retry.String(), "error", err.Error())
+		r.announceCloneWait(clone, k8s.ReasonHostUnavailable, host, err)
 		return r.waitForCloneHost(ctx, clone, k8s.ReasonHostUnavailable, fmt.Sprintf(
 			"clone on host %s could not reach a host (the landing host, or another host of the Provider the clone must "+
-				"check); it is retried on the same host with a backoff of up to %s: %s",
-			host, blockedRetryMax, providerErrorMessage(err)), retry), nil
+				"check); it is retried on the same host with a backoff of up to %s; the provider's answer is in the %s event",
+			host, blockedRetryMax, k8s.ReasonHostUnavailable), retry), nil
 	case contracts.IsVMDiskCheckFailed(err):
 		// The cluster-wide disk guard could not check every host: nothing was
 		// written, and a fixed short cadence would scan every host again each
@@ -540,10 +564,11 @@ func (r *VMCloneReconciler) handleClusteredCloneError(
 		retry := blockedRetryBackoff(createHoldSince(target))
 		logger.Info("Clone not performed: the provider could not verify the clone's disk file on every host; backing off",
 			"host", host, "retryAfter", retry.String(), "error", err.Error())
+		r.announceCloneWait(clone, cloneReasonRetrying, host, err)
 		return r.waitForCloneHost(ctx, clone, cloneReasonRetrying, fmt.Sprintf(
 			"the clone on host %s waits: the provider could not verify on every host of the Provider that no other VM uses "+
-				"the clone's disk file; it is retried on the same host with a backoff of up to %s: %s",
-			host, blockedRetryMax, providerErrorMessage(err)), retry), nil
+				"the clone's disk file; it is retried on the same host with a backoff of up to %s; the provider's answer is in "+
+				"the %s event", host, blockedRetryMax, cloneReasonRetrying), retry), nil
 	case contracts.IsRetryable(err):
 		// E.g. the provider answered that an earlier attempt's copy is still
 		// running on the host (slice 3 review), that a read on the host failed
@@ -554,15 +579,17 @@ func (r *VMCloneReconciler) handleClusteredCloneError(
 		retry := blockedRetryBackoff(createHoldSince(target))
 		logger.Info("Clone not done yet; retrying on the same host with a backoff", "host", host,
 			"retryAfter", retry.String(), "error", err.Error())
+		r.announceCloneWait(clone, cloneReasonRetrying, host, err)
 		return r.waitForCloneHost(ctx, clone, cloneReasonRetrying, fmt.Sprintf(
-			"clone on host %s is not done yet (%s); it is retried on the same host with a backoff of up to %s",
-			host, providerErrorMessage(err), blockedRetryMax), retry), nil
+			"clone on host %s is not done yet; it is retried on the same host with a backoff of up to %s; the provider's "+
+				"answer is in the %s event", host, blockedRetryMax, cloneReasonRetrying), retry), nil
 	default:
 		logger.Error(err, "Clone RPC failed", "host", host)
-		r.Recorder.Event(clone, "Warning", infrav1beta1.VMCloneReasonProviderError, fmt.Sprintf("Clone failed: %v", err))
+		detail := rpcFailureDetail(err)
+		r.Recorder.Event(clone, "Warning", infrav1beta1.VMCloneReasonProviderError, "Clone failed: "+detail)
 		return r.markFailed(ctx, clone, infrav1beta1.VMCloneReasonProviderError, fmt.Sprintf(
-			"clone failed: %v (the target VM %s/%s this clone created is removed; its finalizer removes anything the clone left on host %s)",
-			err, target.Namespace, target.Name, host)), nil
+			"clone failed: %s (the target VM %s/%s this clone created is removed; its finalizer removes anything the clone left on host %s)",
+			detail, target.Namespace, target.Name, host)), nil
 	}
 }
 

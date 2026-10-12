@@ -21,6 +21,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -205,6 +206,98 @@ type Task struct {
 	StartTime int64   `json:"starttime"`
 	Status    string  `json:"status"`
 	ExitCode  *string `json:"exitstatus,omitempty"`
+}
+
+// ErrSnapshotNotExist marks PVE's answer that the snapshot asked for does not
+// exist: "snapshot '<name>' does not exist". It is the only "does not exist"
+// that says so: "Configuration file 'nodes/<node>/qemu-server/<vmid>.conf' does
+// not exist" only means the VM is not on the node asked (e.g. after an HA
+// move), and a bare HTTP 404 is no answer from PVE at all.
+var ErrSnapshotNotExist = errors.New("snapshot does not exist")
+
+// pveErrorTextLimit bounds how much of an error response body pveErrorText
+// reads.
+const pveErrorTextLimit = 4096
+
+// pveErrorText returns the error text of a non-2xx PVE answer: its HTTP status
+// line (resp.Status — PVE puts the error message in the reason phrase, e.g.
+// "500 snapshot 'x' does not exist", with a body of {"data":null}) followed by
+// up to pveErrorTextLimit bytes of its body (where a proxy, or a PVE version
+// that reports errors there, puts it). It consumes the body. Every match of a
+// PVE error message must read this text, never the body alone; a text that
+// matches nothing is an ordinary, retryable error.
+func pveErrorText(resp *http.Response) string {
+	if resp == nil {
+		return ""
+	}
+	text := resp.Status
+	if resp.Body != nil {
+		if body, err := io.ReadAll(io.LimitReader(resp.Body, pveErrorTextLimit)); err == nil && len(body) > 0 {
+			text += " " + string(body)
+		}
+	}
+	return text
+}
+
+// pveSnapshotDoesNotExist reports whether a non-200 PVE answer's error text
+// (pveErrorText) says that snapshot name does not exist.
+func pveSnapshotDoesNotExist(errText, name string) bool {
+	return strings.Contains(errText, fmt.Sprintf("snapshot '%s' does not exist", name))
+}
+
+// VMIDInUse reports whether VMID vmid is in use in the cluster, through GET
+// /cluster/nextid?vmid=<id>: PVE answers HTTP 400 "VM <id> already exists"
+// for an ID in use and the ID itself for a free one. Unlike
+// /cluster/resources, which lists only the VMs the caller may audit
+// (VM.Audit), this endpoint is open to every authenticated user, so it
+// answers the same whatever the token's privileges.
+func (c *Client) VMIDInUse(ctx context.Context, vmid int) (bool, error) {
+	resp, err := c.request(ctx, "GET", fmt.Sprintf("/api2/json/cluster/nextid?vmid=%d", vmid), nil)
+	if err != nil {
+		return false, fmt.Errorf("failed to probe VMID %d: %w", vmid, err)
+	}
+	defer resp.Body.Close() //nolint:errcheck // Response body close in defer is not critical
+	if resp.StatusCode == http.StatusOK {
+		return false, nil
+	}
+	if resp.StatusCode == http.StatusBadRequest && strings.Contains(pveErrorText(resp), "already exists") {
+		return true, nil
+	}
+	return false, fmt.Errorf("probe VMID %d failed with status %d", vmid, resp.StatusCode)
+}
+
+// ResolveVMNode returns the node VM vmid is on, read from the cluster's
+// resource list (GET /cluster/resources?type=vm), and whether the cluster has
+// such a VM at all. It is the VM's actual node — which an HA migration
+// changes — not the provider's configured or first node.
+func (c *Client) ResolveVMNode(ctx context.Context, vmid int) (string, bool, error) {
+	resp, err := c.request(ctx, "GET", "/api2/json/cluster/resources?type=vm", nil)
+	if err != nil {
+		return "", false, fmt.Errorf("failed to list cluster resources: %w", err)
+	}
+	defer resp.Body.Close() //nolint:errcheck // Response body close in defer is not critical
+	if resp.StatusCode != http.StatusOK {
+		return "", false, fmt.Errorf("list cluster resources failed with status %d", resp.StatusCode)
+	}
+	var out struct {
+		Data []struct {
+			VMID int    `json:"vmid"`
+			Node string `json:"node"`
+			Type string `json:"type"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return "", false, fmt.Errorf("failed to decode cluster resources: %w", err)
+	}
+	for _, r := range out.Data {
+		if r.VMID == vmid && r.Type == "qemu" {
+			if r.Node == "" {
+				return "", false, fmt.Errorf("cluster resources list VM %d without a node", vmid)
+			}
+			return r.Node, true, nil
+		}
+	}
+	return "", false, nil
 }
 
 // Snapshot represents a VM snapshot
@@ -978,14 +1071,14 @@ func (c *Client) DeleteSnapshot(ctx context.Context, node string, vmid int, snap
 	}
 	defer resp.Body.Close() //nolint:errcheck // Response body close in defer is not critical
 
-	if resp.StatusCode == 404 {
-		// Snapshot doesn't exist, consider it deleted
-		return "", nil
-	}
-
 	if resp.StatusCode != 200 {
-		body, _ := io.ReadAll(resp.Body)
-		return "", fmt.Errorf("delete snapshot failed with status %d: %s", resp.StatusCode, string(body))
+		// Only PVE's snapshot-specific answer means the snapshot is gone; a
+		// bare 404 or a VM not on this node is an error.
+		errText := pveErrorText(resp)
+		if pveSnapshotDoesNotExist(errText, snapname) {
+			return "", fmt.Errorf("delete snapshot %q of VM %d: %w", snapname, vmid, ErrSnapshotNotExist)
+		}
+		return "", fmt.Errorf("delete snapshot failed: %s", errText)
 	}
 
 	var apiResp APIResponse
@@ -1038,7 +1131,7 @@ func (c *Client) ListSnapshots(ctx context.Context, node string, vmid int) ([]*S
 	defer resp.Body.Close() //nolint:errcheck // Response body close in defer is not critical
 
 	if resp.StatusCode != 200 {
-		return nil, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
+		return nil, fmt.Errorf("list snapshots of VM %d on node %s: unexpected status code: %d", vmid, node, resp.StatusCode)
 	}
 
 	var apiResp APIResponse

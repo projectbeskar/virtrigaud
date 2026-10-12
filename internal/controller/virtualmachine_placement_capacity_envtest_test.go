@@ -119,7 +119,7 @@ var _ = Describe("Clustered scheduling against committed capacity (envtest)", fu
 		Expect(err).NotTo(HaveOccurred())
 		provider := &envtestVMProvider{}
 		Expect((&VirtualMachineReconciler{
-			Client: mgr.GetClient(), Scheme: mgr.GetScheme(), RemoteResolver: &atomicResolver{provider: provider},
+			Client: mgr.GetClient(), Scheme: mgr.GetScheme(), RemoteResolver: &atomicResolver{provider: provider, namespace: ns.Name},
 			Recorder: record.NewFakeRecorder(1000),
 		}).SetupWithManager(mgr)).To(Succeed())
 		mgrDone := make(chan struct{})

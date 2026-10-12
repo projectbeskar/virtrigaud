@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	stderrors "errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -34,6 +35,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -247,9 +249,8 @@ func (r *VMMigrationReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	}
 
 	// Add finalizer if needed
-	const finalizerName = "vmmigration.infra.virtrigaud.io/finalizer"
-	if !controllerutil.ContainsFinalizer(migration, finalizerName) {
-		controllerutil.AddFinalizer(migration, finalizerName)
+	if !controllerutil.ContainsFinalizer(migration, vmMigrationFinalizer) {
+		controllerutil.AddFinalizer(migration, vmMigrationFinalizer)
 		if err := r.Update(ctx, migration); err != nil {
 			logger.Error(err, "Failed to add finalizer")
 			metrics.RecordError(errReasonAddFinalizer, metrics.ComponentManager)
@@ -268,26 +269,12 @@ func (r *VMMigrationReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		return ctrl.Result{Requeue: true}, nil
 	}
 
-	// Short-circuit for migrations in terminal failed state (max retries exceeded)
-	// This prevents continuous reconciliation of permanently failed migrations
-	if migration.Status.Phase == infrav1beta1.MigrationPhaseFailed {
-		if migration.Spec.Options != nil && migration.Spec.Options.RetryPolicy != nil {
-			maxRetries := int32(3) // Default
-			if migration.Spec.Options.RetryPolicy.MaxRetries != nil {
-				maxRetries = *migration.Spec.Options.RetryPolicy.MaxRetries
-			}
-			if migration.Status.RetryCount >= maxRetries {
-				// Migration has permanently failed, no need to reconcile further
-				logger.V(1).Info("Migration permanently failed, skipping reconciliation",
-					"retries", migration.Status.RetryCount,
-					"max_retries", maxRetries)
-				return ctrl.Result{}, nil
-			}
-		} else {
-			// No retry policy, migration is permanently failed
-			logger.V(1).Info("Migration failed with no retry policy, skipping reconciliation")
-			return ctrl.Result{}, nil
-		}
+	// A migration in a terminal Failed state (no retry policy, or its retries
+	// used up) is not reconciled further, except to delete the source
+	// snapshot it created (handleTerminalFailure): without that, the snapshot
+	// stays on the LIVE source VM until the VMMigration is deleted.
+	if migrationTerminallyFailed(migration) {
+		return r.handleTerminalFailure(ctx, migration)
 	}
 
 	// Every cross-namespace Provider / VMClass the migration acts through or
@@ -556,8 +543,9 @@ func (r *VMMigrationReconciler) handleValidatingPhase(ctx context.Context, migra
 			return r.markConsumerNotAllowed(ctx, migration, err)
 		}
 		if err != nil {
+			logger.Error(err, "Failed to power off source VM before migration")
 			return r.transitionToFailed(ctx, migration,
-				fmt.Sprintf("Failed to power off source VM before migration: %v", err))
+				"Failed to power off source VM before migration: "+migrationFailureDetail(err))
 		}
 		if !done {
 			return res, nil
@@ -693,7 +681,7 @@ func (r *VMMigrationReconciler) handleSnapshottingPhase(ctx context.Context, mig
 			return ctrl.Result{}, err
 		}
 
-		return ctrl.Result{Requeue: true}, nil
+		return ctrl.Result{RequeueAfter: migrationPhaseAdvanceRequeue}, nil
 	}
 
 	// Get source provider. A refused grant is not a failure: the phase is
@@ -709,28 +697,25 @@ func (r *VMMigrationReconciler) handleSnapshottingPhase(ctx context.Context, mig
 	// Get provider instance
 	providerInstance, err := r.getProviderInstance(ctx, sourceProvider)
 	if err != nil {
-		return r.transitionToFailed(ctx, migration, fmt.Sprintf("Failed to get provider instance: %v", err))
+		logger.Error(err, "Failed to get source provider instance")
+		return r.transitionToFailed(ctx, migration, "Failed to get provider instance: "+migrationFailureDetail(err))
 	}
 
-	// Check if we already created a snapshot
+	// A snapshot is already recorded. It is used only once it is known to be
+	// complete: a snapshot task still running is polled, never assumed done
+	// (the export must not read a disk whose snapshot is still being taken),
+	// and a snapshot that was never confirmed complete (its task failed, or
+	// an earlier attempt stopped before its outcome was known) is removed and
+	// taken again.
 	if migration.Status.SnapshotID != "" {
-		// Check if snapshot is complete
-		// For now, assume it's complete and transition to export
-		// TODO: Check snapshot status via provider
-		migration.Status.Phase = infrav1beta1.MigrationPhaseExporting
-		migration.Status.Message = "Snapshot ready, starting export"
-
-		k8s.SetCondition(&migration.Status.Conditions, infrav1beta1.VMMigrationConditionSnapshotting,
-			metav1.ConditionTrue, "SnapshotComplete",
-			"Source VM snapshot created")
-
-		r.Recorder.Event(migration, "Normal", "SnapshotComplete", "Source VM snapshot created")
-
-		if err := r.updateStatus(ctx, migration); err != nil {
-			return ctrl.Result{}, err
+		switch {
+		case migration.Status.TaskRef != "":
+			return r.pollMigrationSnapshotTask(ctx, migration, providerInstance)
+		case !migrationSnapshotConfirmed(migration):
+			return r.discardUnconfirmedSnapshot(ctx, migration)
+		default:
+			return r.advanceToExporting(ctx, migration, "Snapshot ready, starting export")
 		}
-
-		return ctrl.Result{Requeue: true}, nil
 	}
 
 	sourceRef, err := vmRefFor(sourceVM, sourceProvider)
@@ -739,16 +724,16 @@ func (r *VMMigrationReconciler) handleSnapshottingPhase(ctx context.Context, mig
 	}
 
 	// Create snapshot
-	snapshotName := fmt.Sprintf("%s-migration-%s", migration.Spec.Source.VMRef.Name, migration.UID[:8])
+	snapshotName, requestToken := migrationSnapshotIdentity(migration)
 	snapshotReq := contracts.SnapshotCreateRequest{
 		VM:            sourceRef,
 		NameHint:      snapshotName,
 		Description:   fmt.Sprintf("Migration snapshot for %s", migration.Name),
 		IncludeMemory: false, // Disk-only snapshot for migration
 		Quiesce:       false,
-		// The migration's uid: a retried create adopts only the snapshot made
-		// for this migration.
-		RequestToken: string(migration.UID),
+		// The migration's uid (and attempt): a retried create adopts only the
+		// snapshot made for this attempt of this migration.
+		RequestToken: requestToken,
 	}
 
 	// Re-read the source Provider's grant from the API server (not the cache)
@@ -757,10 +742,19 @@ func (r *VMMigrationReconciler) handleSnapshottingPhase(ctx context.Context, mig
 		return res, err
 	}
 
+	// Never take the snapshot from a stale read: a single-host provider
+	// honors no request token, so a create sent from a cache that does not
+	// show an earlier create's result would leave an untracked snapshot on
+	// the source VM.
+	if fresh, res, err := r.confirmMigrationSnapshotNotTaken(ctx, migration); !fresh {
+		return res, err
+	}
+
 	logger.Info("Creating migration snapshot", "snapshot_name", snapshotName)
 	snapshotResp, err := providerInstance.SnapshotCreate(ctx, snapshotReq)
 	if err != nil {
-		return r.transitionToFailed(ctx, migration, fmt.Sprintf("Failed to create snapshot: %v", err))
+		logger.Error(err, "Failed to create migration snapshot")
+		return r.transitionToFailed(ctx, migration, "Failed to create snapshot: "+migrationFailureDetail(err))
 	}
 
 	// Store snapshot ID in status
@@ -771,6 +765,10 @@ func (r *VMMigrationReconciler) handleSnapshottingPhase(ctx context.Context, mig
 	if snapshotResp.Task != nil && snapshotResp.Task.ID != "" {
 		migration.Status.TaskRef = snapshotResp.Task.ID
 		logger.Info("Snapshot creation task started, waiting for completion", "task_id", snapshotResp.Task.ID)
+		// The wait starts now: the condition's transition time bounds it
+		// (migrationSnapshotWaitLimit).
+		k8s.SetCondition(&migration.Status.Conditions, infrav1beta1.VMMigrationConditionSnapshotting,
+			metav1.ConditionTrue, migrationReasonSnapshotInProgress, migrationSnapshotInProgressMessage)
 
 		if err := r.updateStatus(ctx, migration); err != nil {
 			return ctrl.Result{}, err
@@ -780,21 +778,7 @@ func (r *VMMigrationReconciler) handleSnapshottingPhase(ctx context.Context, mig
 	}
 
 	// Snapshot created synchronously, move to export
-	migration.Status.Phase = infrav1beta1.MigrationPhaseExporting
-	migration.Status.Message = "Snapshot created, starting export"
-	migration.Status.TaskRef = ""
-
-	k8s.SetCondition(&migration.Status.Conditions, infrav1beta1.VMMigrationConditionSnapshotting,
-		metav1.ConditionTrue, "SnapshotComplete",
-		"Source VM snapshot created")
-
-	r.Recorder.Event(migration, "Normal", "SnapshotComplete", fmt.Sprintf("Snapshot %s created", snapshotResp.SnapshotId))
-
-	if err := r.updateStatus(ctx, migration); err != nil {
-		return ctrl.Result{}, err
-	}
-
-	return ctrl.Result{Requeue: true}, nil
+	return r.advanceToExporting(ctx, migration, "Snapshot created, starting export")
 }
 
 // handleExportingPhase exports the disk from source provider
@@ -821,7 +805,8 @@ func (r *VMMigrationReconciler) handleExportingPhase(ctx context.Context, migrat
 	// Get provider instance
 	providerInstance, err := r.getProviderInstance(ctx, sourceProvider)
 	if err != nil {
-		return r.transitionToFailed(ctx, migration, fmt.Sprintf("Failed to get provider instance: %v", err))
+		logger.Error(err, "Failed to get source provider instance")
+		return r.transitionToFailed(ctx, migration, "Failed to get provider instance: "+migrationFailureDetail(err))
 	}
 
 	// Check if export is already in progress or already completed.
@@ -858,11 +843,13 @@ func (r *VMMigrationReconciler) handleExportingPhase(ctx context.Context, migrat
 			// Task complete, check status
 			taskStatus, err := providerInstance.TaskStatus(ctx, migration.Status.TaskRef)
 			if err != nil {
-				return r.transitionToFailed(ctx, migration, fmt.Sprintf("Failed to get export task status: %v", err))
+				logger.Error(err, "Failed to get export task status")
+				return r.transitionToFailed(ctx, migration, "Failed to get export task status: "+migrationFailureDetail(err))
 			}
 
 			if taskStatus.Error != "" {
-				return r.transitionToFailed(ctx, migration, fmt.Sprintf("Export failed: %s", taskStatus.Error))
+				logger.Info("Export task failed", "task_id", migration.Status.TaskRef, "error", taskStatus.Error)
+				return r.transitionToFailed(ctx, migration, "Export failed: "+migrationTaskFailedDetail)
 			}
 
 			logger.Info("Export task completed successfully")
@@ -977,7 +964,8 @@ func (r *VMMigrationReconciler) handleExportingPhase(ctx context.Context, migrat
 		// reconcile (e.g. after retry/backoff) can re-attempt the export for
 		// this generation. transitionToFailed records the failure durably.
 		r.longOpInFlight.Delete(longOpKey(migration, longOpExport))
-		return r.transitionToFailed(ctx, migration, fmt.Sprintf("Failed to start disk export: %v", err))
+		logger.Error(err, "Failed to start disk export")
+		return r.transitionToFailed(ctx, migration, "Failed to start disk export: "+migrationFailureDetail(err))
 	}
 
 	// Store export info in status
@@ -1097,7 +1085,8 @@ func (r *VMMigrationReconciler) handleImportingPhase(ctx context.Context, migrat
 	// Get provider instance
 	providerInstance, err := r.getProviderInstance(ctx, targetProvider)
 	if err != nil {
-		return r.transitionToFailed(ctx, migration, fmt.Sprintf("Failed to get target provider instance: %v", err))
+		logger.Error(err, "Failed to get target provider instance")
+		return r.transitionToFailed(ctx, migration, "Failed to get target provider instance: "+migrationFailureDetail(err))
 	}
 
 	// Check if import is already in progress or already completed.
@@ -1128,11 +1117,13 @@ func (r *VMMigrationReconciler) handleImportingPhase(ctx context.Context, migrat
 			// Task complete, check status
 			taskStatus, err := providerInstance.TaskStatus(ctx, migration.Status.TaskRef)
 			if err != nil {
-				return r.transitionToFailed(ctx, migration, fmt.Sprintf("Failed to get import task status: %v", err))
+				logger.Error(err, "Failed to get import task status")
+				return r.transitionToFailed(ctx, migration, "Failed to get import task status: "+migrationFailureDetail(err))
 			}
 
 			if taskStatus.Error != "" {
-				return r.transitionToFailed(ctx, migration, fmt.Sprintf("Import failed: %s", taskStatus.Error))
+				logger.Info("Import task failed", "task_id", migration.Status.TaskRef, "error", taskStatus.Error)
+				return r.transitionToFailed(ctx, migration, "Import failed: "+migrationTaskFailedDetail)
 			}
 
 			logger.Info("Import task completed successfully")
@@ -1274,7 +1265,8 @@ func (r *VMMigrationReconciler) handleImportingPhase(ctx context.Context, migrat
 		// Release the in-memory guard so a future reconcile can re-attempt the
 		// import for this generation after the failure is recorded.
 		r.longOpInFlight.Delete(longOpKey(migration, longOpImport))
-		return r.transitionToFailed(ctx, migration, fmt.Sprintf("Failed to start disk import: %v", err))
+		logger.Error(err, "Failed to start disk import")
+		return r.transitionToFailed(ctx, migration, "Failed to start disk import: "+migrationFailureDetail(err))
 	}
 
 	// Store import info in status.
@@ -1859,11 +1851,12 @@ func (r *VMMigrationReconciler) handleFailedPhase(ctx context.Context, migration
 	logger := logging.FromContext(ctx)
 	logger.Info("Migration is in failed state", "message", migration.Status.Message)
 
-	// Check if retry is configured and allowed
-	if migration.Spec.Options == nil || migration.Spec.Options.RetryPolicy == nil {
-		logger.Info("No retry policy configured, migration remains failed")
-		r.cleanupSnapshotOnTerminalFailure(ctx, migration)
-		return ctrl.Result{}, nil
+	// No retry policy, or its retries used up: the migration stays failed and
+	// only its source snapshot is cleaned up. Reconcile routes such a
+	// migration to handleTerminalFailure before any phase handler; this keeps
+	// a direct call consistent with it.
+	if migrationTerminallyFailed(migration) {
+		return r.handleTerminalFailure(ctx, migration)
 	}
 
 	retryPolicy := migration.Spec.Options.RetryPolicy
@@ -1872,52 +1865,25 @@ func (r *VMMigrationReconciler) handleFailedPhase(ctx context.Context, migration
 		maxRetries = *retryPolicy.MaxRetries
 	}
 
-	// Check if we've exceeded max retries
-	if migration.Status.RetryCount >= maxRetries {
-		logger.Info("Max retries exceeded, migration remains failed",
-			"retries", migration.Status.RetryCount,
-			"max_retries", maxRetries)
-		migration.Status.Message = fmt.Sprintf("Migration failed after %d retries: %s",
-			migration.Status.RetryCount, migration.Status.Message)
-		r.cleanupSnapshotOnTerminalFailure(ctx, migration)
+	// Retry n (RetryCount+1) waits migrationRetryDelay after the failure it
+	// retries — the first one included.
+	retryDelay := migrationRetryDelay(retryPolicy, migration.Status.RetryCount)
+	now := time.Now()
+	failedAt := migrationFailedAt(migration)
+	if failedAt.IsZero() {
+		// No failure time recorded (a Failed status written by an older
+		// manager): record now as the failure time, so the wait has a fixed
+		// start, and wait the full delay.
+		migration.Status.CompletionTime = &metav1.Time{Time: now}
 		if err := r.updateStatus(ctx, migration); err != nil {
 			return ctrl.Result{}, err
 		}
-		return ctrl.Result{}, nil
+		return ctrl.Result{RequeueAfter: retryDelay}, nil
 	}
-
-	// Calculate backoff delay
-	baseDelay := 5 * time.Minute // Default delay
-	if retryPolicy.RetryDelay != nil {
-		baseDelay = retryPolicy.RetryDelay.Duration
-	}
-
-	backoffMultiplier := int32(2) // Default multiplier
-	if retryPolicy.BackoffMultiplier != nil {
-		backoffMultiplier = *retryPolicy.BackoffMultiplier
-	}
-
-	// Exponential backoff: delay = baseDelay * multiplier^retryCount (capped at 30 minutes)
-	retryDelay := baseDelay * time.Duration(1)
-	for i := int32(0); i < migration.Status.RetryCount; i++ {
-		retryDelay *= time.Duration(backoffMultiplier)
-	}
-
-	maxDelay := 30 * time.Minute
-	if retryDelay > maxDelay {
-		retryDelay = maxDelay
-	}
-
-	// Check if enough time has passed since last retry
-	now := time.Now()
-	if migration.Status.LastRetryTime != nil {
-		timeSinceLastRetry := now.Sub(migration.Status.LastRetryTime.Time)
-		if timeSinceLastRetry < retryDelay {
-			// Not enough time has passed, requeue
-			remainingWait := retryDelay - timeSinceLastRetry
-			logger.Info("Waiting before retry", "remaining_wait", remainingWait)
-			return ctrl.Result{RequeueAfter: remainingWait}, nil
-		}
+	if waited := now.Sub(failedAt); waited < retryDelay {
+		remainingWait := retryDelay - waited
+		logger.Info("Waiting before retry", "remaining_wait", remainingWait, "retry_delay", retryDelay)
+		return ctrl.Result{RequeueAfter: remainingWait}, nil
 	}
 
 	// Perform retry
@@ -1951,41 +1917,65 @@ func (r *VMMigrationReconciler) handleFailedPhase(ctx context.Context, migration
 		return ctrl.Result{}, err
 	}
 
-	return ctrl.Result{Requeue: true}, nil
+	return ctrl.Result{RequeueAfter: migrationPhaseAdvanceRequeue}, nil
 }
 
-// cleanupSnapshotOnTerminalFailure best-effort removes the migration-created
-// source snapshot when the migration has reached a terminal Failed state and is
-// not going to be retried.
-//
-// Without this, a migration that fails before Ready (e.g. no retry policy, so it
-// is immediately terminal) leaves its snapshot on the LIVE source VM until the
-// CR is deleted — which, combined with the await fix in deleteSourceSnapshot, is
-// the accumulation observed on real hardware. The deletion is best-effort: a
-// cleanup error is logged and swallowed so a transient provider failure cannot
-// wedge a migration that is already terminal. Because deleteSourceSnapshot now
-// awaits the task, this usually succeeds on the first pass. Skipped when the
-// user opted out (CleanupPolicy=Never), when there is no migration-created
-// snapshot, or when the user supplied their own snapshot (SnapshotRef set).
-func (r *VMMigrationReconciler) cleanupSnapshotOnTerminalFailure(ctx context.Context, migration *infrav1beta1.VMMigration) {
-	if !cleanupAllowed(migration) || migration.Status.SnapshotID == "" || migration.Spec.Source.SnapshotRef != nil {
-		return
-	}
+// Defaults and cap of a migration's retry backoff (spec.options.retryPolicy).
+const (
+	// migrationDefaultRetryDelay is the retry delay when retryDelay is unset.
+	migrationDefaultRetryDelay = 5 * time.Minute
+	// migrationDefaultBackoffMultiplier is the multiplier when
+	// backoffMultiplier is unset.
+	migrationDefaultBackoffMultiplier = 2
+	// migrationMaxRetryDelay caps every retry delay.
+	migrationMaxRetryDelay = 30 * time.Minute
+)
 
-	logger := logging.FromContext(ctx)
-	snapshotID := migration.Status.SnapshotID
-	if err := r.deleteSourceSnapshot(ctx, migration); err != nil {
-		logger.Error(err, "Failed to delete source snapshot on terminal failure (best-effort, continuing)",
-			"snapshot_id", snapshotID)
-		return
+// migrationRetryDelay is how long retry n = retriesDone+1 waits after the
+// failure it retries: retryDelay × backoffMultiplier^(n-1) — so the first
+// retry waits retryDelay itself — capped at migrationMaxRetryDelay.
+func migrationRetryDelay(policy *infrav1beta1.MigrationRetryPolicy, retriesDone int32) time.Duration {
+	delay := migrationDefaultRetryDelay
+	multiplier := time.Duration(migrationDefaultBackoffMultiplier)
+	if policy != nil {
+		if policy.RetryDelay != nil {
+			delay = policy.RetryDelay.Duration
+		}
+		if policy.BackoffMultiplier != nil {
+			multiplier = time.Duration(*policy.BackoffMultiplier)
+		}
 	}
-	logger.Info("Source snapshot deleted on terminal failure", "snapshot_id", snapshotID)
+	if delay <= 0 {
+		return 0
+	}
+	for i := int32(0); i < retriesDone && delay < migrationMaxRetryDelay; i++ {
+		delay *= multiplier
+	}
+	return min(delay, migrationMaxRetryDelay)
+}
+
+// migrationFailedAt is when the migration last failed: status.completionTime,
+// which transitionToFailed sets on every failure. Zero when unrecorded.
+func migrationFailedAt(m *infrav1beta1.VMMigration) time.Time {
+	if m.Status.CompletionTime == nil {
+		return time.Time{}
+	}
+	return m.Status.CompletionTime.Time
 }
 
 // handleDeletion handles deletion of VMMigration resources
 func (r *VMMigrationReconciler) handleDeletion(ctx context.Context, migration *infrav1beta1.VMMigration) (ctrl.Result, error) {
 	logger := logging.FromContext(ctx)
 	logger.Info("Handling VMMigration deletion")
+
+	// The source snapshot this migration created comes first: while it may
+	// still be on the source VM and its delete can still succeed, the
+	// finalizer is kept (and nothing else is cleaned up yet), so the snapshot
+	// is never left untracked — on libvirt its metadata would later block
+	// deleting the source VM. force-delete releases it anyway.
+	if hold, res, err := r.releaseSourceSnapshotForDeletion(ctx, migration); hold {
+		return res, err
+	}
 
 	// Perform cleanup operations
 	cleanupErrors := []error{}
@@ -2023,18 +2013,7 @@ func (r *VMMigrationReconciler) handleDeletion(ctx context.Context, migration *i
 		}
 	}
 
-	// 3. Delete migration-created snapshot if exists (unless the user opted out
-	// with CleanupPolicy=Never).
-	if cleanupAllowed(migration) && migration.Status.SnapshotID != "" && migration.Spec.Source.SnapshotRef == nil {
-		if err := r.deleteSourceSnapshot(ctx, migration); err != nil {
-			logger.Error(err, "Failed to delete source snapshot during deletion")
-			cleanupErrors = append(cleanupErrors, fmt.Errorf("snapshot cleanup: %w", err))
-		} else {
-			logger.Info("Source snapshot cleaned up during deletion")
-		}
-	}
-
-	// 4. Delete partially created target VM if migration failed
+	// 3. Delete partially created target VM if migration failed
 	// IMPORTANT: Never delete VMs that have been marked as migration-completed
 	// This ensures that successfully migrated VMs persist independently of the migration resource
 	if migration.Status.Phase == infrav1beta1.MigrationPhaseFailed || migration.Status.Phase == infrav1beta1.MigrationPhaseCreating {
@@ -2095,8 +2074,7 @@ func (r *VMMigrationReconciler) handleDeletion(ctx context.Context, migration *i
 	}
 
 	// Remove finalizer
-	const finalizerName = "vmmigration.infra.virtrigaud.io/finalizer"
-	controllerutil.RemoveFinalizer(migration, finalizerName)
+	controllerutil.RemoveFinalizer(migration, vmMigrationFinalizer)
 	if err := r.Update(ctx, migration); err != nil {
 		logger.Error(err, "Failed to remove finalizer")
 		return ctrl.Result{}, err
@@ -2128,9 +2106,11 @@ func (r *VMMigrationReconciler) transitionToFailed(ctx context.Context, migratio
 		return ctrl.Result{}, err
 	}
 
-	// Don't requeue here - let handleFailedPhase manage retry timing
-	// This prevents continuous reconciliation loops that can overwhelm the API server
-	return ctrl.Result{Requeue: true}, nil
+	// The Failed phase (handleFailedPhase, or handleTerminalFailure) takes it
+	// from here, after its own wait. Never an immediate requeue after this
+	// write: a reconcile that read the cache before it showed the failure
+	// would re-run the phase that just failed.
+	return ctrl.Result{RequeueAfter: migrationPhaseAdvanceRequeue}, nil
 }
 
 // Helper functions
@@ -3211,68 +3191,84 @@ func (r *VMMigrationReconciler) gateMigrationStorageBackend(
 	return ""
 }
 
-// getProviderInstance retrieves a provider gRPC client
+// providerResolveError marks a failure to resolve a Provider to a usable
+// client (getProviderInstance). Its text can name the TLS Secret, the provider
+// Service's address and the runtime phase (ADR-0007 A6, threat 5), so
+// migrationFailureDetail never copies it into status or events.
+type providerResolveError struct{ err error }
+
+// Error implements error.
+func (e *providerResolveError) Error() string { return "failed to resolve provider: " + e.err.Error() }
+
+// Unwrap returns the resolver's error.
+func (e *providerResolveError) Unwrap() error { return e.err }
+
+// migrationFailureDetail renders err for the VMMigration's consumer-readable
+// status and events: providerResolveFailedDetail when it is (or wraps) a
+// provider resolve failure, otherwise rpcFailureDetail (the provider's answer
+// made safe, or a constant for a transport failure). The caller logs err in
+// full.
+func migrationFailureDetail(err error) string {
+	var re *providerResolveError
+	if stderrors.As(err, &re) {
+		return providerResolveFailedDetail
+	}
+	return rpcFailureDetail(err)
+}
+
+// getProviderInstance retrieves a provider gRPC client; a resolve failure is a
+// *providerResolveError.
 func (r *VMMigrationReconciler) getProviderInstance(ctx context.Context, provider *infrav1beta1.Provider) (contracts.Provider, error) {
 	// Test hook: allow injecting a fake/counting provider without dialing gRPC.
 	if r.providerInstanceFn != nil {
-		return r.providerInstanceFn(ctx, provider)
+		p, err := r.providerInstanceFn(ctx, provider)
+		if err != nil {
+			return nil, &providerResolveError{err: err}
+		}
+		return p, nil
 	}
 
 	// Resolve the provider client
 	providerClient, err := r.RemoteResolver.GetProvider(ctx, provider)
 	if err != nil {
-		return nil, fmt.Errorf("failed to resolve provider: %w", err)
+		return nil, &providerResolveError{err: err}
 	}
 
 	return providerClient, nil
 }
 
-// updateStatus updates the migration status with retry on conflicts
+// updateStatus writes the migration's status. On a conflict it re-reads the
+// VMMigration live (APIReader — the informer cache may still hold the version
+// that conflicted), carries this reconcile's status over to it and retries
+// (retry.RetryOnConflict, retry.DefaultRetry). A VMMigration that was
+// deleted and re-created meanwhile (another UID) is never written: an
+// error is returned and the next reconcile starts from the new object.
 func (r *VMMigrationReconciler) updateStatus(ctx context.Context, migration *infrav1beta1.VMMigration) error {
 	logger := logging.FromContext(ctx)
 
-	// Retry with exponential backoff on conflicts
-	maxRetries := 3
-	baseDelay := 100 * time.Millisecond
-
-	for attempt := 0; attempt < maxRetries; attempt++ {
-		err := r.Status().Update(ctx, migration)
-		if err == nil {
-			return nil
-		}
-
-		// If it's a conflict error, retry after a delay
-		if errors.IsConflict(err) {
-			if attempt < maxRetries-1 {
-				delay := baseDelay * time.Duration(1<<uint(attempt)) // Exponential backoff
-				logger.V(1).Info("Status update conflict, retrying",
-					"attempt", attempt+1,
-					"maxRetries", maxRetries,
-					"delay", delay)
-				time.Sleep(delay)
-
-				// Refresh the object before retrying
-				fresh := &infrav1beta1.VMMigration{}
-				if err := r.Get(ctx, types.NamespacedName{
-					Name:      migration.Name,
-					Namespace: migration.Namespace,
-				}, fresh); err != nil {
-					logger.Error(err, "Failed to refresh VMMigration")
-					return err
-				}
-
-				// Copy status to fresh object
-				fresh.Status = migration.Status
-				*migration = *fresh
-				continue
+	attempt := 0
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		attempt++
+		if attempt > 1 {
+			fresh := &infrav1beta1.VMMigration{}
+			if err := r.liveReader().Get(ctx, client.ObjectKeyFromObject(migration), fresh); err != nil {
+				return fmt.Errorf("re-read VMMigration %s/%s after a status conflict: %w", migration.Namespace, migration.Name, err)
 			}
+			if fresh.UID != migration.UID {
+				return fmt.Errorf("VMMigration %s/%s was re-created (uid %s, was %s); not writing the old object's status",
+					migration.Namespace, migration.Name, fresh.UID, migration.UID)
+			}
+			logger.V(1).Info("Status update conflict, retrying on the live object", "attempt", attempt)
+			fresh.Status = migration.Status
+			*migration = *fresh
 		}
-
+		return r.Status().Update(ctx, migration)
+	})
+	if err != nil {
 		logger.Error(err, "Failed to update VMMigration status")
 		return err
 	}
-
-	return fmt.Errorf("failed to update status after %d attempts", maxRetries)
+	return nil
 }
 
 // generateStorageURL generates a storage URL for the migration
@@ -3430,18 +3426,49 @@ func (r *VMMigrationReconciler) waitForSourceBinding(ctx context.Context, migrat
 	return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 }
 
-// deleteSourceSnapshot deletes the migration-created snapshot
+// errSourceSnapshotUnaddressable is returned (wrapped) by deleteSourceSnapshot
+// when nothing can address the source snapshot any more — the source
+// VirtualMachine, or its Provider in the migration's own namespace, no longer
+// exists — so nothing was deleted. The snapshot may still be on the
+// hypervisor (e.g. a source VM detached with orphan-on-delete): it is never
+// reported deleted. A deleting VMMigration is released with a
+// SnapshotLeftOnHypervisor Warning; anywhere else the cleanup stays pending.
+var errSourceSnapshotUnaddressable = stderrors.New("the source snapshot can no longer be addressed")
+
+// deleteSourceSnapshot deletes the migration-created snapshot of the source VM
+// and, once it is gone, clears status.snapshotID (in memory; the caller
+// persists it). It returns nil when the snapshot was deleted or the provider
+// answers that it is not found. It returns an errSourceSnapshotUnaddressable
+// error, keeping the snapshot id, when the source VirtualMachine or its
+// Provider in the migration's own namespace is not found. Any other failure —
+// a read error, a cross-namespace Provider this namespace may not use (or
+// that does not exist), no provider call possible for the VM, the provider
+// client not resolvable, a failed or unfinished delete — is returned: the
+// snapshot may still be on the source VM and a retry can still delete it.
 func (r *VMMigrationReconciler) deleteSourceSnapshot(ctx context.Context, migration *infrav1beta1.VMMigration) error {
 	logger := logging.FromContext(ctx)
 
 	// Get source VM
 	sourceVM, err := r.getSourceVM(ctx, migration)
+	if errors.IsNotFound(err) {
+		logger.Info("Source VM is gone; its snapshot can no longer be addressed",
+			"vm", migration.Spec.Source.VMRef.Name, "snapshot_id", migration.Status.SnapshotID)
+		return fmt.Errorf("source VM %s not found: %w", migration.Spec.Source.VMRef.Name, errSourceSnapshotUnaddressable)
+	}
 	if err != nil {
 		return fmt.Errorf("failed to get source VM: %w", err)
 	}
 
-	// Get source provider
+	// Get source provider. A same-namespace Provider that is gone leaves
+	// nothing to address the snapshot through; a cross-namespace one that is
+	// missing is refused like an ungranted one (ConsumerNotAllowed, no
+	// existence oracle) and keeps the cleanup pending.
 	sourceProvider, err := r.sourceProviderFor(ctx, migration, sourceVM)
+	if errors.IsNotFound(err) && !isConsumerNotAllowed(err) {
+		logger.Info("Source Provider is gone; the source snapshot can no longer be addressed",
+			"snapshot_id", migration.Status.SnapshotID, "error", err.Error())
+		return fmt.Errorf("source Provider not found: %w", errSourceSnapshotUnaddressable)
+	}
 	if err != nil {
 		return fmt.Errorf("resolve source provider: %w", err)
 	}
@@ -3460,6 +3487,13 @@ func (r *VMMigrationReconciler) deleteSourceSnapshot(ctx context.Context, migrat
 	// Delete snapshot
 	logger.Info("Deleting source snapshot", "snapshot_id", migration.Status.SnapshotID)
 	taskRef, err := providerInstance.SnapshotDelete(ctx, sourceRef, migration.Status.SnapshotID)
+	if contracts.IsNotFound(err) {
+		// Already gone (e.g. an earlier delete that completed after its
+		// await timed out): an idempotent success.
+		logger.Info("Source snapshot is already gone", "snapshot_id", migration.Status.SnapshotID)
+		migration.Status.SnapshotID = ""
+		return nil
+	}
 	if err != nil {
 		return fmt.Errorf("failed to delete snapshot: %w", err)
 	}

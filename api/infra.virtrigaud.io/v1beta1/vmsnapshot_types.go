@@ -249,6 +249,25 @@ type VMSnapshotStatus struct {
 	// +optional
 	TaskRef string `json:"taskRef,omitempty"`
 
+	// VMUID is the UID of the VirtualMachine the snapshot was taken of,
+	// recorded when its create is issued. A VirtualMachine deleted and
+	// re-created under the same name has another UID: the snapshot is never
+	// deleted or retained through it (no provider call is made), because on a
+	// provider whose snapshot ids are names the call could reach another
+	// VM's snapshot. Empty for a snapshot taken by an older manager, which is
+	// bound on first reconcile when its VM was created before the snapshot.
+	// Written only by the operator.
+	// +optional
+	// +kubebuilder:validation:MaxLength=128
+	VMUID string `json:"vmUID,omitempty"`
+
+	// BoundProvider is the Provider the snapshot was taken through, recorded
+	// with VMUID. The snapshot is deleted only through this same Provider
+	// (namespace, name and, when recorded, UID). Written only by the
+	// operator.
+	// +optional
+	BoundProvider *BoundProviderRef `json:"boundProvider,omitempty"`
+
 	// Conditions represent the current service state
 	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`

@@ -17,6 +17,7 @@ limitations under the License.
 package controller
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -44,8 +45,11 @@ func TestVMClone_Clustered_TransientReadBeforeTheCopyWaitsWithBackoff(t *testing
 	assert.Nil(t, meta.FindStatusCondition(got.Status.Conditions, infrav1beta1.VMCloneConditionFailed))
 	ready := cloneReadyCondition(t, got)
 	assert.Equal(t, cloneReasonRetrying, ready.Reason)
-	assert.Contains(t, ready.Message, "a read on the host failed before anything was copied")
+	assert.NotContains(t, ready.Message, "a read on the host failed", "the provider's answer is in the event, not the condition")
 	assert.Contains(t, ready.Message, "with a backoff of up to "+blockedRetryMax.String())
+	events := strings.Join(drainRecordedEvents(fakeRecorderOf(t, r.Recorder)), "\n")
+	assert.Contains(t, events, "a read on the host failed before anything was copied")
+	assert.Equal(t, 1, strings.Count(events, "Warning "+cloneReasonRetrying), "announced once, not on every retry")
 	assert.GreaterOrEqual(t, res.RequeueAfter, blockedRetryMin)
 	assert.LessOrEqual(t, res.RequeueAfter, blockedRetryMax)
 	assert.GreaterOrEqual(t, cp.cloneCnt, 2, "retried on the same host")

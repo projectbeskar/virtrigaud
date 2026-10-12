@@ -1222,8 +1222,17 @@ fails or is stopped never leaves a readable partial copy. The cleanup runs even
 after the budget ran out and is bounded so the answer still reaches the manager
 in time. An `nfs` export writes no host file: a stopped export leaves a partial
 object at the migration's own destination on the NFS export, which the next
-attempt overwrites (the manager does not yet delete NFS staging objects, even
-after a successful migration). Single-host exports are unchanged.
+attempt overwrites. **VirtRigaud never deletes a migration's staged disk
+object on an `nfs` or `s3` backend** — not after a successful import, not when
+the migration fails, and not when the `VMMigration` is deleted: no provider RPC
+deletes a staged object, and the manager does not reach the staging backend
+itself. Each object is a full, unencrypted copy of the tenant's disk
+(`vmmigrations-<namespace>-<name>-export.qcow2` on the NFS export,
+`<prefix>/vmmigrations/<namespace>/<name>/export.vmdk` in the bucket). Until
+this is implemented, remove them yourself once the migration is done — for
+`s3`, a bucket lifecycle rule on the `vmmigrations/` prefix; for `nfs`, a
+periodic cleanup of the export — and restrict access to the staging location
+as you would to the disks themselves. Single-host exports are unchanged.
 
 The locks are separate files, `clone-<domain>.lock` and
 `export-<domain>.lock`, in a directory VirtRigaud owns on each host:

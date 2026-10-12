@@ -288,6 +288,7 @@ rules:
   - providers.infra.virtrigaud.io
   - vmclasses.infra.virtrigaud.io
   - vmimages.infra.virtrigaud.io
+  - vmsnapshots.infra.virtrigaud.io
   verbs:
   - get
 # Deployment resources for remote providers (provider_controller reconciles

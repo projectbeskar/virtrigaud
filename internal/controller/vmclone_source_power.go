@@ -68,7 +68,7 @@ func (r *VMCloneReconciler) holdCloneForRunningSource(ctx context.Context, clone
 	}
 	msg := fmt.Sprintf("waiting for the source VM %q to be powered off (%s); the clone proceeds once the source is off. "+
 		"It is re-checked when the source's power state changes, and with a backoff of up to %s",
-		source, providerErrorMessage(err), blockedRetryMax)
+		source, rpcFailureDetail(err), blockedRetryMax)
 
 	var since time.Time
 	prev := meta.FindStatusCondition(clone.Status.Conditions, infrav1beta1.VMCloneConditionReady)
