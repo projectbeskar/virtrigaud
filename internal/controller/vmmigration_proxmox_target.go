@@ -60,6 +60,6 @@ func proxmoxCrossNamespaceTargetRefused(migration *infrav1beta1.VMMigration, tar
 // requeue).
 func (r *VMMigrationReconciler) failProxmoxCrossNamespaceTarget(ctx context.Context, migration *infrav1beta1.VMMigration) (ctrl.Result, error) {
 	k8s.SetCondition(&migration.Status.Conditions, infrav1beta1.VMMigrationConditionValidating,
-		metav1.ConditionFalse, ReasonProxmoxCrossNamespaceTarget, proxmoxCrossNamespaceTargetMessage)
+		metav1.ConditionFalse, ReasonProxmoxCrossNamespaceTarget, proxmoxCrossNamespaceTargetMessage, migration.Generation)
 	return r.transitionToFailed(ctx, migration, proxmoxCrossNamespaceTargetMessage)
 }
