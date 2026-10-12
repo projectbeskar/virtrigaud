@@ -550,6 +550,8 @@ func (c *Client) GetCapabilities(ctx context.Context) (contracts.Capabilities, e
 		SupportsListOwnerFilter: resp.GetSupportsListOwnerFilter(),
 		// False from a provider that predates the import-time disk-size limit.
 		SupportsImportSizeLimit: resp.GetSupportsImportSizeLimit(),
+		// ADR-0011 D7: empty from a provider that predates DeleteStagedDisk.
+		SupportedStagedDiskDeleteBackends: resp.GetSupportedStagedDiskDeleteBackends(),
 	}, nil
 }
 
@@ -1229,6 +1231,47 @@ func (c *Client) TransferOwner(ctx context.Context, req contracts.TransferOwnerR
 		return c.mapGRPCError("transferOwner", err)
 	}
 	return nil
+}
+
+// stagedDiskDeleteCallTimeout bounds one DeleteStagedDisk call: an S3 stat and
+// delete, or a qemu-img info and truncate over NFS — no disk data moves.
+const stagedDiskDeleteCallTimeout = 2 * time.Minute
+
+// DeleteStagedDisk implements contracts.StagedDiskDeleter (ADR-0011): it asks
+// the provider to remove a VMMigration's nfs / s3 staging object. The request
+// names the migration, never a location. A provider that predates the RPC
+// answers Unimplemented, which maps to a NotSupported error. An answer without
+// an outcome is an error: the caller must not assume the object is gone.
+func (c *Client) DeleteStagedDisk(ctx context.Context, req contracts.StagedDiskDeleteRequest) (contracts.StagedDiskDeleteOutcome, error) {
+	ctx, cancel := context.WithTimeout(ctx, stagedDiskDeleteCallTimeout)
+	defer cancel()
+
+	resp, err := c.client.DeleteStagedDisk(ctx, &providerv1.DeleteStagedDiskRequest{
+		Migration: &providerv1.ObjectIdentity{
+			Uid:       req.Migration.UID,
+			Namespace: req.Migration.Namespace,
+			Name:      req.Migration.Name,
+		},
+		Stage:              req.Stage,
+		BackendType:        req.BackendType,
+		StorageOptionsJson: req.StorageOptionsJSON,
+		Credentials:        req.Credentials,
+		Layout:             req.Layout,
+		TargetVm:           targetIdentityToProto(req.TargetVM),
+	})
+	if err != nil {
+		return "", c.mapGRPCError("deleteStagedDisk", err)
+	}
+	switch resp.GetOutcome() {
+	case providerv1.StagedDiskDeleteOutcome_STAGED_DISK_DELETE_OUTCOME_DELETED:
+		return contracts.StagedDiskDeleted, nil
+	case providerv1.StagedDiskDeleteOutcome_STAGED_DISK_DELETE_OUTCOME_NOT_FOUND:
+		return contracts.StagedDiskNotFound, nil
+	case providerv1.StagedDiskDeleteOutcome_STAGED_DISK_DELETE_OUTCOME_EMPTIED:
+		return contracts.StagedDiskEmptied, nil
+	default:
+		return "", fmt.Errorf("deleteStagedDisk: the provider answered without an outcome (%s)", resp.GetOutcome())
+	}
 }
 
 // ListHosts implements contracts.Provider. It returns the hosts a clustered

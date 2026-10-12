@@ -22,6 +22,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"net/http"
 	"net/url"
 	"strings"
 
@@ -303,6 +304,27 @@ func (s *S3Storage) Delete(ctx context.Context, rawURL string) error {
 		}
 	}
 	return nil
+}
+
+// RemoveObjectIfExists removes the object at key (relative to the bucket) and
+// reports whether it existed. It reads the object's metadata first (S3's
+// DeleteObject answers success for a missing key, so it cannot tell): an
+// object or bucket that does not exist (HTTP 404) is not an error and removes
+// nothing. Errors name neither the bucket nor the key.
+func (s *S3Storage) RemoveObjectIfExists(ctx context.Context, key string) (bool, error) {
+	if key == "" {
+		return false, &StorageError{Type: ErrorTypeInvalidConfig, Message: "empty s3 object key"}
+	}
+	if _, err := s.client.StatObject(ctx, s.bucket, key, minio.StatObjectOptions{}); err != nil {
+		if minio.ToErrorResponse(err).StatusCode == http.StatusNotFound {
+			return false, nil
+		}
+		return false, &StorageError{Type: ErrorTypeOperationFailed, Message: "S3 stat of the object to delete failed", Cause: err}
+	}
+	if err := s.client.RemoveObject(ctx, s.bucket, key, minio.RemoveObjectOptions{}); err != nil {
+		return false, &StorageError{Type: ErrorTypeOperationFailed, Message: "S3 delete failed", Cause: err}
+	}
+	return true, nil
 }
 
 // GetMetadata returns object metadata via StatObject (no body transfer).

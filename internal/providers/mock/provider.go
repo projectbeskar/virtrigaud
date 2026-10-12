@@ -27,6 +27,9 @@ import (
 	"sync/atomic"
 	"time"
 
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+
 	"github.com/projectbeskar/virtrigaud/internal/storage/migration"
 	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
 	"github.com/projectbeskar/virtrigaud/sdk/provider/capabilities"
@@ -732,6 +735,19 @@ func (p *Provider) Clone(ctx context.Context, req *providerv1.CloneRequest) (*pr
 // GetCapabilities returns the provider's capabilities.
 func (p *Provider) GetCapabilities(ctx context.Context, req *providerv1.GetCapabilitiesRequest) (*providerv1.GetCapabilitiesResponse, error) {
 	return p.capabilities.GetCapabilities(ctx, req)
+}
+
+// DeleteStagedDisk answers Unimplemented (ADR-0011): the mock stages migration
+// disks only to pvc (it advertises no nfs or s3 export or import backend), so it
+// never writes or reads an nfs / s3 staging object. It validates the request
+// first, with the same confinement as the real providers, so a malformed
+// request is InvalidArgument here too. It advertises no
+// supported_staged_disk_delete_backends, so the manager never asks it.
+func (p *Provider) DeleteStagedDisk(_ context.Context, req *providerv1.DeleteStagedDiskRequest) (*providerv1.DeleteStagedDiskResponse, error) {
+	if _, err := migration.ResolveStagedDisk(req); err != nil {
+		return nil, err
+	}
+	return nil, status.Error(codes.Unimplemented, "the mock provider stages no nfs or s3 objects (pvc only)")
 }
 
 // Helper methods

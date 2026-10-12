@@ -887,6 +887,12 @@ message GetCapabilitiesResponse {
   // single-host and thin-client providers (they never schedule, and ignore the
   // filter) and on a clustered provider older than A6.2.
   bool supports_list_owner_filter = 22;
+  // supported_staged_disk_delete_backends lists the staging backends ("nfs",
+  // "s3") whose migration staging objects DeleteStagedDisk can remove
+  // (ADR-0011 D7). Empty — a provider that predates it, or one that stages
+  // nothing outside the cluster — means the manager never sends
+  // DeleteStagedDisk and records the staged object as left behind.
+  repeated string supported_staged_disk_delete_backends = 23;
 
   // supports_import_size_limit reports that ImportDisk enforces
   // ImportDiskRequest.max_virtual_size_bytes on the disk it lands (refusing a
@@ -895,6 +901,77 @@ message GetCapabilitiesResponse {
   // limit, so while one applies the manager holds a migration into a
   // Provider that does not report it.
   bool supports_import_size_limit = 24;
+}
+
+// DeleteStagedDisk removes the staging object a VMMigration's ExportDisk wrote
+// to an nfs or s3 backend — a full, unencrypted copy of a tenant's disk —
+// once the migration no longer needs it (ADR-0011). The manager sends it to the
+// migration's TARGET provider.
+//
+// CONFINEMENT (security-critical). The request carries no key, path or URL.
+// The provider derives the object from migration.namespace, migration.name and
+// stage with the same layout function the manager uses to build the
+// ExportDisk/ImportDisk URLs, and validates them (namespace a DNS-1123 label,
+// name a DNS-1123 subdomain, stage in an allowlist) before it touches the
+// backend. It therefore can only remove an object named like a VirtRigaud
+// staging object of that migration, on the backend the request's
+// storage_options_json names, with the request's credentials.
+//
+// Idempotent: an object that does not exist is a success with outcome
+// NOT_FOUND. InvalidArgument: a request that can never succeed (a bad identity,
+// stage, backend or options). Unimplemented: a backend the provider cannot
+// delete from (it does not list it in supported_staged_disk_delete_backends).
+// Any other error is retryable.
+message DeleteStagedDiskRequest {
+  // migration identifies the VMMigration whose staged object is removed. Its
+  // namespace and name name the object (see above); uid is informational
+  // (audit, logs).
+  ObjectIdentity migration = 1;
+  // stage is the staging stage whose object is removed: "export", the only
+  // stage a migration stages today.
+  string stage = 2;
+  // backend_type is the staging backend: "nfs" or "s3".
+  string backend_type = 3;
+  // storage_options_json is the same JSON-encoded, non-secret backend options
+  // the manager sends with ExportDisk / ImportDisk (ADR-0006).
+  string storage_options_json = 4;
+  // credentials are the backend credentials (s3: the same keys as
+  // ExportDiskRequest.credentials). Secret material: never logged.
+  map<string, string> credentials = 5;
+  // layout is the naming layout the migration's staged object was written
+  // with (ADR-0011 D5), recorded by the manager when the export was sent:
+  // "v2" — the nfs file "vmmigrations_<namespace>_<name>_<stage>.qcow2"
+  // ('_' appears in no namespace or name, so it is unambiguous); "v1" or empty
+  // — the legacy nfs file "vmmigrations-<namespace>-<name>-<stage>.qcow2" of a
+  // migration exported before v2. The s3 key is the same in both layouts. Any
+  // other value is InvalidArgument.
+  string layout = 6;
+  // target_vm is the VirtualMachine the migration's import landed a disk for
+  // (namespace and name; the same identity as ImportDiskRequest.target_vm),
+  // set only when the migration sent an import and no other in-flight
+  // migration targets the same VM. A provider whose ImportDisk keeps a
+  // provider-side copy of the disk until Create (Proxmox: the node-side import
+  // stage named after this VM) removes that copy too, confined to its own
+  // stage location. Unset: only the staged object is removed. Providers that
+  // keep no such copy ignore it.
+  ObjectIdentity target_vm = 7;
+}
+
+// StagedDiskDeleteOutcome is what DeleteStagedDisk did.
+enum StagedDiskDeleteOutcome {
+  STAGED_DISK_DELETE_OUTCOME_UNSPECIFIED = 0;
+  // The object existed and was removed.
+  STAGED_DISK_DELETE_OUTCOME_DELETED = 1;
+  // No object existed (already removed, or never written).
+  STAGED_DISK_DELETE_OUTCOME_NOT_FOUND = 2;
+  // The provider cannot unlink on this backend (libnfs through qemu-img) and
+  // truncated the object to zero bytes instead: its data is gone, and an
+  // empty file with the staging name remains.
+  STAGED_DISK_DELETE_OUTCOME_EMPTIED = 3;
+}
+
+message DeleteStagedDiskResponse {
+  StagedDiskDeleteOutcome outcome = 1;
 }
 
 // TransferOwner hands one VM on a clustered ("brain-in-operator") provider's
@@ -1006,6 +1083,11 @@ service Provider {
   rpc ExportDisk(ExportDiskRequest) returns (ExportDiskResponse);
   rpc ImportDisk(ImportDiskRequest) returns (ImportDiskResponse);
   rpc GetDiskInfo(GetDiskInfoRequest) returns (GetDiskInfoResponse);
+
+  // Remove a VMMigration's nfs / s3 staging object (ADR-0011). Providers that
+  // cannot return Unimplemented and leave the backend out of
+  // supported_staged_disk_delete_backends.
+  rpc DeleteStagedDisk(DeleteStagedDiskRequest) returns (DeleteStagedDiskResponse);
   
   // List all VMs managed by this provider. A clustered provider lists every
   // host it fronts, tags each VM with its host_id and names the hosts it could

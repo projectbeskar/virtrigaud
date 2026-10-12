@@ -69,6 +69,9 @@ func GetProviderCapabilities() *capabilities.Manager {
 		// transfer mode as informational and exempts it from the relay check, so
 		// advertising relay (for the S3 path) remains accurate.
 		TransferModes(migration.RelayOnlyTransferModes()...).
+		// ADR-0011: DeleteStagedDisk removes a migration's s3 object (from the
+		// pod) and unlinks its nfs file (kernel mount on the node, staged_disk.go).
+		StagedDiskDeleteBackends(migration.StagedDiskDeleteBackendsS3AndNFS()...).
 		DiskTypes("raw", "qcow2").
 		NetworkTypes("bridge", "vlan").
 		Build()

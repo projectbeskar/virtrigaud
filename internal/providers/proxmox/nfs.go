@@ -18,11 +18,19 @@ package proxmox
 
 import (
 	"context"
+	"encoding/base64"
+	stderrors "errors"
 	"fmt"
 	"net/url"
+	"os/exec"
+	"strconv"
 	"strings"
 	"time"
 
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+
+	"github.com/projectbeskar/virtrigaud/internal/storage"
 	"github.com/projectbeskar/virtrigaud/internal/storage/migration"
 	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
 	"github.com/projectbeskar/virtrigaud/sdk/provider/errors"
@@ -59,12 +67,21 @@ func nfsInMountRel(rawURL, export string) (string, error) {
 	return rel, nil
 }
 
+// nfsKernelMountOptions are the options of every kernel NFS mount of a
+// migration's (tenant-controlled) export: vers=3 matches the numeric-uid
+// AUTH_SYS model the libnfs path uses (NFSv4 string id-mapping would re-map
+// uids via idmapd); nosymfollow makes the node never follow a symbolic link
+// the NFS server serves — a link at the staging name to /etc/pve/priv/* or
+// /root/.ssh/* would otherwise be resolved on the NODE, as root (kernel 5.10+,
+// PVE 7+); nosuid, nodev and noexec make nothing on the export a privilege or
+// a device on the node.
+const nfsKernelMountOptions = "vers=3,nosymfollow,nosuid,nodev,noexec"
+
 // buildNFSKernelMountScript wraps innerCmd in a node-side shell script that mounts
 // the NFS export read-write at a fresh temp dir ($MNT), runs innerCmd (which names
 // the staged file as "$MNT"/<rel>), and unmounts + removes the temp dir on exit —
 // success OR failure — via a trap. extraCleanup (e.g. removing a local temp) is
-// appended to the trap. vers=3 matches the numeric-uid AUTH_SYS model the libnfs
-// path uses (NFSv4 string id-mapping would re-map uids via idmapd).
+// appended to the trap. The mount uses nfsKernelMountOptions.
 func buildNFSKernelMountScript(server, export, innerCmd, extraCleanup string) string {
 	target := proxmoxShellQuote(server + ":" + export)
 	cleanup := `umount "$MNT" 2>/dev/null || true; rmdir "$MNT" 2>/dev/null || true`
@@ -73,8 +90,129 @@ func buildNFSKernelMountScript(server, export, innerCmd, extraCleanup string) st
 	}
 	return "set -e; MNT=$(mktemp -d /var/tmp/.virtrigaud-nfsmnt-XXXXXX); " +
 		"trap '" + cleanup + "' EXIT; " +
-		"mount -t nfs -o vers=3 " + target + " \"$MNT\"; " + innerCmd
+		"mount -t nfs -o " + nfsKernelMountOptions + " " + target + " \"$MNT\"; " + innerCmd
 }
+
+// nfsNotRegularFileMessage is what nfsStageCopy prints (stderr) when the
+// staged object is not a regular file.
+const nfsNotRegularFileMessage = "staged object is not a regular file"
+
+// nfsNotRegularFileExit is nfsStageCopy's exit status for a staged object
+// that is not a regular file; qemuImgFailedExit is qemu-img's exit status
+// when it cannot open or read an image (as opposed to ssh's 255).
+const (
+	nfsNotRegularFileExit = 6
+	qemuImgFailedExit     = 1
+	// nfsTooLargeExit and nfsNoSpaceExit are nfsStageCopy's exit statuses
+	// for a staged object above the copy bound (or that grew past its
+	// measured size during the copy), and for one that does not fit in the
+	// node's free space.
+	nfsTooLargeExit = 7
+	nfsNoSpaceExit  = 8
+)
+
+// remoteExitCode is the exit status of the remote command behind a runSSH
+// error, or -1 when there is none (ssh could not run it).
+func remoteExitCode(err error) int {
+	var exitErr *exec.ExitError
+	if stderrors.As(err, &exitErr) {
+		return exitErr.ExitCode()
+	}
+	return -1
+}
+
+// checkStagedNodeImage checks the header of a staged migration image on the
+// node (a node-local file the tenant can no longer change) before anything
+// converts or imports it: its leading bytes are parsed first, without qemu
+// (migration.CheckStagedImageBytes), then it must probe as wantFormat and
+// reference no other file (migration.CheckStagedImageHeader). It is read
+// WITHOUT -f, exactly as `qm importdisk` (which probes its source) reads it at
+// Create. A declared virtual size above maxVirtualBytes (when positive) is
+// refused. A header that is refused, or that qemu-img cannot read, is
+// InvalidSpec; an SSH failure is Internal (retryable).
+func (p *Provider) checkStagedNodeImage(ctx context.Context, path, wantFormat string, maxVirtualBytes int64) error {
+	// 1. Parse the leading bytes WITHOUT qemu: qemu opens a qcow2 external
+	// data file and VMDK extents while it reads a header, so `qemu-img info`
+	// on a crafted image could open a device node, a node file or an
+	// nbd:/http: target as root before anything refuses it.
+	qp := proxmoxShellQuote(path)
+	headOut, stderr, err := p.ssh.runSSH(ctx, fmt.Sprintf("head -c %d -- %s >/dev/null && head -c %d -- %s | base64 -w0",
+		migration.StagedImageHeadBytes, qp, migration.StagedImageHeadBytes, qp))
+	if err != nil {
+		return errors.NewInternal(
+			fmt.Sprintf("reading the staged image header failed (stderr: %s)", strings.TrimSpace(stderr)), err)
+	}
+	head, err := base64.StdEncoding.DecodeString(strings.TrimSpace(headOut))
+	if err != nil {
+		return errors.NewInternal("decoding the staged image header failed", err)
+	}
+	if _, err := migration.CheckStagedImageBytes(head, wantFormat, maxVirtualBytes); err != nil {
+		p.logger.Warn("Refused a staged migration image", "reason", err.Error())
+		p.logger.Debug("Refused staged migration image", "path", path)
+		return errors.NewInvalidSpec("refused the staged migration image: %v", err)
+	}
+	// 2. Only then ask qemu-img (no network namespace, shared read) — probed
+	// without -f, exactly as `qm importdisk` reads it at Create.
+	infoOut, stderr, err := p.ssh.runSSH(ctx, "unshare -n -- qemu-img info -U --output=json -- "+qp)
+	if err != nil {
+		if remoteExitCode(err) == qemuImgFailedExit {
+			return errors.NewInvalidSpec("the staged migration image is not a readable disk image")
+		}
+		return errors.NewInternal(
+			fmt.Sprintf("qemu-img info on the staged image failed (stderr: %s)", strings.TrimSpace(stderr)), err)
+	}
+	if err := migration.CheckStagedImageHeader(infoOut, wantFormat, path); err != nil {
+		p.logger.Warn("Refused a staged migration image", "reason", err.Error())
+		p.logger.Debug("Refused staged migration image", "path", path)
+		return errors.NewInvalidSpec("refused the staged migration image: %v", err)
+	}
+	return nil
+}
+
+// stagedDownloadBound is the most bytes an S3 staged object may be downloaded
+// into dir on the node: its reported size, refused (constant) above the import
+// limit (InvalidSpec) or when dir's filesystem cannot hold
+// StagedCopySpaceFactor times it (ResourceExhausted).
+func (p *Provider) stagedDownloadBound(ctx context.Context, s3client storage.Storage, sourceURL, dir string, requestLimit int64) (int64, error) {
+	limit, err := migration.StagedCopyLimit(requestLimit)
+	if err != nil {
+		return 0, errors.NewInternal("invalid staged import size limit", err)
+	}
+	meta, err := s3client.GetMetadata(ctx, sourceURL)
+	if err != nil {
+		return 0, errors.NewInternal("failed to read the size of the staged s3 object", err)
+	}
+	// The stage directory is created by the stage script on first use: measure
+	// the filesystem of its nearest existing ancestor.
+	out, stderr, err := p.ssh.runSSH(ctx, `d=`+proxmoxShellQuote(dir)+`; while [ ! -d "$d" ]; do d=$(dirname -- "$d"); done; `+
+		`df -P -B1 -- "$d" | awk 'NR==2 {print $4}'`)
+	if err != nil {
+		return 0, errors.NewInternal(fmt.Sprintf("reading the node's free space failed (stderr: %s)", strings.TrimSpace(stderr)), err)
+	}
+	free, err := strconv.ParseInt(strings.TrimSpace(out), 10, 64)
+	if err != nil {
+		return 0, errors.NewInternal("parsing the node's free space failed", err)
+	}
+	switch err := migration.CheckStagedCopy(meta.Size, limit, free); {
+	case stderrors.Is(err, migration.ErrStagedObjectTooLarge):
+		return 0, errors.NewInvalidSpec("s3 import: %s", err.Error())
+	case err != nil:
+		return 0, status.Error(codes.ResourceExhausted, "s3 import: "+err.Error())
+	}
+	return meta.Size, nil
+}
+
+// nfsStageCopyMeasure is the script nfsStageCopy runs first, as the
+// migration's uid/gid when set (the NFS server decides what that identity may
+// see), with "$1" the staged file: it refuses a staged object that is not a
+// regular file or is a symbolic link (exit 6), and prints its size. It reads
+// no data. The bound and free-space checks run in the root shell
+// (nfsStageCopy): the stage directory's ancestors are created under umask 077,
+// so a dropped-privilege df could not reach it.
+var nfsStageCopyMeasure = fmt.Sprintf(`f="$1"; `+
+	`if [ ! -f "$f" ] || [ -L "$f" ]; then echo "%s" >&2; exit %d; fi; `+
+	`stat -c %%s -- "$f"`,
+	nfsNotRegularFileMessage, nfsNotRegularFileExit)
 
 // buildNFSKernelExportScript builds the TWO-STAGE node-side export: qemu-img as the
 // SSH user (root) flattens the root-owned source disk to a local temp qcow2, then —
@@ -96,7 +234,7 @@ func buildNFSKernelExportScript(server, export, rel, srcFormat, srcPath, hostTmp
 	return "set -e; " + flatten +
 		"MNT=$(mktemp -d /var/tmp/.virtrigaud-nfsmnt-XXXXXX); " +
 		"trap '" + cleanup + "' EXIT; " +
-		"mount -t nfs -o vers=3 " + target + " \"$MNT\"; " + cp
+		"mount -t nfs -o " + nfsKernelMountOptions + " " + target + " \"$MNT\"; " + cp
 }
 
 // nfsSetprivPrefix returns the setpriv prefix that runs the following command as
@@ -224,15 +362,39 @@ func (p *Provider) importDiskFromNFS(ctx context.Context, req *providerv1.Import
 	p.logger.Info("Importing disk from NFS to Proxmox node (kernel mount; stage for qm importdisk at Create)",
 		"id", id, "source", nfsURL, "stage_path", stagePath, "storage_hint", req.StorageHint)
 
-	// Convert from the mounted export to the node-local stage in the root-only
-	// stage directory (buildNFSImportStageScript, import_stage.go). The convert
-	// reads NFS as the migration's uid/gid (setpriv) when set; the stage is
-	// consumed by `qm importdisk` at Create.
-	script := buildNFSImportStageScript(proxmoxImportStageDir, opts.Server, opts.Export, rel, stagePath, opts.UID, opts.GID)
+	// SECURITY: the staged object comes from an NFS server the tenant controls.
+	// It is copied byte for byte, ONCE, into a root-owned temp in the root-only
+	// stage directory and renamed onto the stage (buildNFSImportStageScript):
+	// the copy refuses a non-regular file (the mount is also nosymfollow), is
+	// bounded by the object's measured size and by the import's disk-size limit
+	// (#382), needs room for twice that on the node, and the dropped-privilege
+	// reader holds only a pipe (nfsStageCopy). The stage's header is then parsed
+	// without qemu and checked (checkStagedNodeImage) before anything reads it
+	// as an image: a qcow2 backing file, data file or extent could otherwise
+	// make the node's qemu-img (root) flatten /etc/pve/priv/*, /root/.ssh/* or a
+	// block device into the tenant's disk. The stage stays in the root-only
+	// directory until Create, which checks it again; a refused one is removed.
+	limit, err := migration.StagedCopyLimit(req.MaxVirtualSizeBytes)
+	if err != nil {
+		return nil, errors.NewInternal("invalid staged import size limit", err)
+	}
+	script := buildNFSImportStageScript(proxmoxImportStageDir, opts.Server, opts.Export, rel, stagePath, opts.UID, opts.GID, limit)
 	if _, stderr, err := p.ssh.runSSH(ctx, script); err != nil {
-		p.cleanupNodeFile(stagePath)
+		// The script's trap removed its temp; nothing was published.
+		switch code := remoteExitCode(err); {
+		case code == nfsNotRegularFileExit && strings.Contains(stderr, nfsNotRegularFileMessage):
+			return nil, errors.NewInvalidSpec("nfs import: the staged object is not a regular file")
+		case code == nfsTooLargeExit && strings.Contains(stderr, migration.ErrStagedObjectTooLarge.Error()):
+			return nil, errors.NewInvalidSpec("nfs import: %s", migration.ErrStagedObjectTooLarge.Error())
+		case code == nfsNoSpaceExit && strings.Contains(stderr, migration.ErrStagingSpaceExhausted.Error()):
+			return nil, status.Error(codes.ResourceExhausted, "nfs import: "+migration.ErrStagingSpaceExhausted.Error())
+		}
 		return nil, errors.NewInternal(
 			fmt.Sprintf("node-side nfs-mount stage copy failed (stderr: %s)", strings.TrimSpace(stderr)), err)
+	}
+	if err := p.checkStagedNodeImage(ctx, stagePath, "qcow2", limit); err != nil {
+		p.cleanupNodeFile(stagePath)
+		return nil, err
 	}
 
 	// Validate the staged qcow2 (local file, runs as the SSH user — root reads any

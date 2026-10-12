@@ -416,6 +416,15 @@ type VMMigrationStatus struct {
 	// +optional
 	SnapshotID string `json:"snapshotID,omitempty"`
 
+	// SourceVMUID is the UID of the source VirtualMachine the migration
+	// validated and exported, recorded at Validating. With
+	// spec.source.deleteAfterMigration the controller deletes only that
+	// object (a UID precondition): a source VirtualMachine re-created under the
+	// same name is never deleted. Written by the controller only.
+	// +optional
+	// +kubebuilder:validation:MaxLength=128
+	SourceVMUID string `json:"sourceVMUID,omitempty"`
+
 	// ExportID is the export operation identifier
 	// +optional
 	ExportID string `json:"exportID,omitempty"`
@@ -615,6 +624,50 @@ type MigrationStorageInfo struct {
 	// CleanedUp indicates if intermediate storage was cleaned up
 	// +optional
 	CleanedUp bool `json:"cleanedUp,omitempty"`
+
+	// StagingLayout is the naming layout of the migration's nfs / s3 staged
+	// object, recorded by the controller when the export is sent (ADR-0011
+	// D5). The import and the staged-disk delete use it, so a migration keeps
+	// the name it was exported under. "v2" (new migrations): nfs file
+	// "vmmigrations_<namespace>_<name>_<stage>.qcow2". "v1" or empty (exported
+	// before v2): "vmmigrations-<namespace>-<name>-<stage>.qcow2". The s3 key is
+	// the same in both. Written by the controller only.
+	// +optional
+	// +kubebuilder:validation:Enum=v1;v2
+	StagingLayout string `json:"stagingLayout,omitempty"`
+
+	// StagingDigest is a digest of where the last export staged the object —
+	// the staging backend and its non-secret options, and the target Provider
+	// (namespace, name, UID) that will delete it — recorded by the controller
+	// when the export is sent (ADR-0011 D5). The staged-disk delete is sent only
+	// while the migration's current spec still yields this digest: after
+	// spec.storage or spec.target.providerRef changed, the object is recorded
+	// as left behind instead of being looked for somewhere else. It carries no
+	// location. Written by the controller only.
+	// +optional
+	// +kubebuilder:validation:MaxLength=80
+	StagingDigest string `json:"stagingDigest,omitempty"`
+
+	// ImportTarget is the VirtualMachine an nfs / s3 migration's ImportDisk
+	// was sent for, recorded by the controller just before the import is sent
+	// (ADR-0011 D1). The staged-disk delete names only this VM, never the
+	// current spec.target (which may have been edited since), so a target
+	// provider that keeps a copy of the imported disk for that VM (the Proxmox
+	// import stage) removes only that copy. Written by the controller only.
+	// +optional
+	ImportTarget *MigrationImportTarget `json:"importTarget,omitempty"`
+}
+
+// MigrationImportTarget is the namespace and name of the VirtualMachine a
+// migration's import was sent for.
+type MigrationImportTarget struct {
+	// Namespace is the target VirtualMachine's namespace.
+	// +kubebuilder:validation:MaxLength=63
+	Namespace string `json:"namespace"`
+
+	// Name is the target VirtualMachine's name.
+	// +kubebuilder:validation:MaxLength=253
+	Name string `json:"name"`
 }
 
 // ValidationResults contains results of validation checks

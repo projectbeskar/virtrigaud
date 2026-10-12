@@ -1223,17 +1223,29 @@ fails or is stopped never leaves a readable partial copy. The cleanup runs even
 after the budget ran out and is bounded so the answer still reaches the manager
 in time. An `nfs` export writes no host file: a stopped export leaves a partial
 object at the migration's own destination on the NFS export, which the next
-attempt overwrites. **VirtRigaud never deletes a migration's staged disk
-object on an `nfs` or `s3` backend** — not after a successful import, not when
-the migration fails, and not when the `VMMigration` is deleted: no provider RPC
-deletes a staged object, and the manager does not reach the staging backend
-itself. Each object is a full, unencrypted copy of the tenant's disk
-(`vmmigrations-<namespace>-<name>-export.qcow2` on the NFS export,
-`<prefix>/vmmigrations/<namespace>/<name>/export.vmdk` in the bucket). Until
-this is implemented, remove them yourself once the migration is done — for
-`s3`, a bucket lifecycle rule on the `vmmigrations/` prefix; for `nfs`, a
-periodic cleanup of the export — and restrict access to the staging location
-as you would to the disks themselves. Single-host exports are unchanged.
+attempt overwrites. **The migration's staged disk object on an `nfs` or `s3`
+backend is deleted through the migration's target `Provider`**
+([ADR-0011](adr/0011-migration-staging-cleanup.md)): when the migration
+succeeds, when the `VMMigration` is deleted, and when the migration fails for
+good with `spec.options.cleanupPolicy: Always` (`Never` keeps it). Each object
+is a full, unencrypted copy of the tenant's disk
+(`vmmigrations_<namespace>_<name>_export.qcow2` on the NFS export — the
+dash-separated name for a migration staged before v0.4.0 —
+`<prefix>/vmmigrations/<namespace>/<name>/export.vmdk` in the bucket). A
+clustered libvirt `Provider` is never a migration target, so it is never asked:
+the single-host target deletes the object. On libvirt and vSphere targets an
+`nfs` object is emptied (truncated to zero bytes; qemu-img's libnfs driver
+cannot delete a file), so an empty file with the staging name stays on the
+export. **You still clean up yourself** objects that VirtRigaud records as left
+behind (`StagingCleanup=True`, reason `StagedDiskLeftBehind`: a target provider
+image older than this release, a target `Provider` or S3 credentials Secret
+that no longer exists, or a `VMMigration` removed with
+`virtrigaud.io/force-delete=true`), objects staged before the upgrade by
+migrations that no longer exist, and the empty NFS files. In a versioned bucket
+the delete only adds a delete marker: expire noncurrent versions on the prefix. A bucket lifecycle
+rule on the `vmmigrations/` prefix, and a periodic cleanup of the NFS export,
+remain good backstops. Restrict access to the staging location as you would to
+the disks themselves. Single-host exports are unchanged.
 
 The locks are separate files, `clone-<domain>.lock` and
 `export-<domain>.lock`, in a directory VirtRigaud owns on each host:

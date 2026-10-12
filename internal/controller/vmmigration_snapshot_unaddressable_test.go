@@ -62,6 +62,7 @@ func TestSourceSnapshotUnaddressable_NeverReportedDeleted(t *testing.T) {
 		t.Run(name+": Ready-phase cleanup keeps it recorded", func(t *testing.T) {
 			vm, p, m := snapshotFixture()
 			m.Status.Phase = infrav1beta1.MigrationPhaseReady
+			markPostMigrationCleanupPending(m) // completed by this manager
 			h := newSnapshotHoldHarness(t, &scriptedSnapshotDeleteProvider{}, objsWithout(drop, vm, p, m)...)
 
 			res, err := h.r.handleReadyPhase(context.Background(), m)

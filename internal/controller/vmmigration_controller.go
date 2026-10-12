@@ -20,7 +20,6 @@ import (
 	"context"
 	stderrors "errors"
 	"fmt"
-	"strings"
 	"sync"
 	"time"
 
@@ -50,7 +49,6 @@ import (
 	"github.com/projectbeskar/virtrigaud/internal/obs/metrics"
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
 	"github.com/projectbeskar/virtrigaud/internal/runtime/remote"
-	"github.com/projectbeskar/virtrigaud/internal/storage"
 	storagemigration "github.com/projectbeskar/virtrigaud/internal/storage/migration"
 	"github.com/projectbeskar/virtrigaud/internal/util/k8s"
 )
@@ -587,6 +585,10 @@ func (r *VMMigrationReconciler) handleValidatingPhase(ctx context.Context, migra
 		}
 	}
 
+	// The source VM this migration validates and exports: the only object
+	// spec.source.deleteAfterMigration may delete (UID precondition).
+	migration.Status.SourceVMUID = string(sourceVM.UID)
+
 	// Check if we need to create a snapshot
 	if migration.Spec.Source.CreateSnapshot {
 		migration.Status.Phase = infrav1beta1.MigrationPhaseSnapshotting
@@ -918,6 +920,30 @@ func (r *VMMigrationReconciler) handleExportingPhase(ctx context.Context, migrat
 		return r.waitForSourceBinding(ctx, migration, err)
 	}
 
+	// ADR-0011: from the moment an nfs / s3 export is sent, a staged object
+	// (complete or partial) may exist and must be cleaned up, under the
+	// staging layout recorded with it. Persist both BEFORE the URL is built and
+	// the RPC is sent, so even an export that fails after writing part of the
+	// object is cleaned up later, and the import and delete use its name.
+	if migrationStagesOutsideCluster(migration) {
+		targetProvider, err := r.targetProviderFor(ctx, r.Client, migration)
+		if isConsumerNotAllowed(err) {
+			return r.markConsumerNotAllowed(ctx, migration, err)
+		}
+		if err != nil {
+			return ctrl.Result{}, fmt.Errorf("resolve target provider for the staging digest: %w", err)
+		}
+		digest, err := stagingDigest(migration, targetProvider)
+		if err != nil {
+			return r.transitionToFailed(ctx, migration, fmt.Sprintf("Failed to build storage options: %v", err))
+		}
+		if markStagedDiskMayExist(migration, digest) {
+			if err := r.updateStatus(ctx, migration); err != nil {
+				return ctrl.Result{}, err
+			}
+		}
+	}
+
 	// Generate destination URL for export
 	destinationURL, err := r.generateStorageURL(ctx, migration, "export")
 	if err != nil {
@@ -1051,7 +1077,9 @@ func (r *VMMigrationReconciler) handleExportingPhase(ctx context.Context, migrat
 		metav1.ConditionTrue, "ExportComplete",
 		"Source VM disk exported", migration.Generation)
 
-	r.Recorder.Event(migration, "Normal", "ExportComplete", fmt.Sprintf("Disk exported to %s", destinationURL))
+	// Constant: the destination names the staging location (bucket, key,
+	// NFS server and path), which belongs in no event (ADR-0011).
+	r.Recorder.Event(migration, "Normal", "ExportComplete", "Disk exported successfully")
 
 	if err := r.updateStatus(ctx, migration); err != nil {
 		return ctrl.Result{}, err
@@ -1338,6 +1366,15 @@ func (r *VMMigrationReconciler) handleImportingPhase(ctx context.Context, migrat
 		// An import refused as unverifiable is re-sent on a doubling backoff.
 		if wait := r.importUnverifiable.remaining(string(migration.UID), time.Now()); wait > 0 {
 			return ctrl.Result{RequeueAfter: wait}, nil
+		}
+	}
+
+	// ADR-0011 D1 (review M1): record the VM this import is sent for before
+	// it is sent; the staged-disk delete names only this recorded VM, never a
+	// spec.target edited afterwards.
+	if markImportTarget(migration, targetVM) {
+		if err := r.updateStatus(ctx, migration); err != nil {
+			return ctrl.Result{}, err
 		}
 	}
 
@@ -1856,6 +1893,11 @@ func (r *VMMigrationReconciler) handleValidatingTargetPhase(ctx context.Context,
 	k8s.SetCondition(&migration.Status.Conditions, infrav1beta1.VMMigrationConditionReady,
 		metav1.ConditionTrue, "MigrationComplete",
 		"VM migration completed successfully", migration.Generation)
+	// Written in the same status write as Phase=Ready: the marker that this
+	// manager completed the migration, without which handleReadyPhase deletes
+	// neither the source snapshot nor the source VM (a migration completed
+	// under an older manager, whose Ready cleanup never ran).
+	markPostMigrationCleanupPending(migration)
 
 	r.Recorder.Event(migration, "Normal", "MigrationComplete", fmt.Sprintf("VM migrated successfully to %s/%s", targetNamespace, targetVMName))
 
@@ -1883,74 +1925,103 @@ func (r *VMMigrationReconciler) handleValidatingTargetPhase(ctx context.Context,
 	return ctrl.Result{}, nil
 }
 
-// handleReadyPhase handles migrations that are complete
+// handleReadyPhase handles migrations that are complete. Its cleanup is the
+// staged disk of an nfs / s3 migration (reconcileStagingCleanup, ADR-0011;
+// a held delete is retried in the background and blocks nothing else), the
+// source snapshot the migration created, and the source VM when
+// spec.source.deleteAfterMigration is set. The last two run only for a
+// migration this manager completed (the PostMigrationCleanup marker written
+// with Phase=Ready): one completed under an older manager, whose Ready
+// cleanup could never run, is closed without deleting anything
+// (closeLegacyReadyCleanup).
 func (r *VMMigrationReconciler) handleReadyPhase(ctx context.Context, migration *infrav1beta1.VMMigration) (ctrl.Result, error) {
 	logger := logging.FromContext(ctx)
 	logger.Info("Migration is ready")
 
+	cleanedUp := migration.Status.StorageInfo != nil && migration.Status.StorageInfo.CleanedUp
+	if cleanedUp && !stagingCleanupWanted(migration, stagingTriggerReady) {
+		return ctrl.Result{}, nil
+	}
+	// The cleanup sends provider RPCs, records events and deletes the source
+	// VM: act only on the latest object, never on a cache that has not caught
+	// up with the status write of an earlier pass (which would repeat them).
+	if stale, err := r.migrationCacheIsStale(ctx, migration); err != nil || stale {
+		return ctrl.Result{RequeueAfter: migrationPhaseAdvanceRequeue}, err
+	}
+
+	stagingRetry, err := r.reconcileStagingCleanup(ctx, migration, stagingTriggerReady)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+
 	// Check if cleanup has already been performed
 	if migration.Status.StorageInfo != nil && migration.Status.StorageInfo.CleanedUp {
-		return ctrl.Result{}, nil
+		return stagingCleanupRequeue(ctrl.Result{}, stagingRetry), nil
+	}
+
+	if !postMigrationCleanupStamped(migration) {
+		if err := r.closeLegacyReadyCleanup(ctx, migration); err != nil {
+			return ctrl.Result{}, err
+		}
+		return stagingCleanupRequeue(ctrl.Result{}, stagingRetry), nil
 	}
 
 	// Perform post-migration cleanup
 	cleanupPerformed := false
 
 	// CleanupPolicy=Never opts out of removing migration-created artifacts
-	// (intermediate storage + source snapshot). DeleteAfterMigration is handled
-	// independently below because it is an explicit user action, not policy.
+	// (the staged disk above, and the source snapshot). DeleteAfterMigration is
+	// handled independently below because it is an explicit user action, not
+	// policy. A pvc migration's staged file is on the PVC the migration
+	// created, which is deleted with the VMMigration (handleDeletion): the
+	// manager does not mount migration PVCs, so it never deletes files there.
 	if cleanupAllowed(migration) {
-		// 1. Cleanup intermediate storage
-		if migration.Spec.Storage != nil {
-			if err := r.cleanupIntermediateStorage(ctx, migration); err != nil {
-				logger.Error(err, "Failed to cleanup intermediate storage, will retry")
-				// Don't fail the migration, just log and retry
-				return ctrl.Result{RequeueAfter: 5 * time.Minute}, nil
-			}
-			cleanupPerformed = true
-			logger.Info("Intermediate storage cleaned up")
-		}
-
-		// 2. Delete source snapshot if it was created for migration
+		// Delete source snapshot if it was created for migration
 		if migration.Status.SnapshotID != "" && migration.Spec.Source.SnapshotRef == nil {
 			// Only delete if we created the snapshot (not if user provided one)
 			snapshotID := migration.Status.SnapshotID
 			if err := r.deleteSourceSnapshot(ctx, migration); err != nil {
 				logger.Error(err, "Failed to delete source snapshot, will retry")
-				return ctrl.Result{RequeueAfter: 5 * time.Minute}, nil
+				return stagingCleanupRequeue(ctrl.Result{RequeueAfter: 5 * time.Minute}, stagingRetry), nil
 			}
 			cleanupPerformed = true
 			logger.Info("Source snapshot deleted", "snapshot_id", snapshotID)
 		}
 	}
 
-	// 3. Delete source VM if requested
+	// Delete source VM if requested
 	if migration.Spec.Source.DeleteAfterMigration {
-		if err := r.deleteSourceVM(ctx, migration); err != nil {
+		refused, err := r.deleteSourceVM(ctx, migration)
+		if err != nil {
 			logger.Error(err, "Failed to delete source VM, will retry")
-			return ctrl.Result{RequeueAfter: 5 * time.Minute}, nil
+			return stagingCleanupRequeue(ctrl.Result{RequeueAfter: 5 * time.Minute}, stagingRetry), nil
 		}
-		cleanupPerformed = true
-		logger.Info("Source VM deleted")
-		r.warnIfMigratedWorkloadIsNotRunning(ctx, migration)
+		if refused {
+			r.Recorder.Event(migration, corev1.EventTypeWarning, migrationReasonSourceDeletionRefused, migrationSourceDeletionRefusedMessage)
+		} else {
+			cleanupPerformed = true
+			logger.Info("Source VM deleted")
+			r.warnIfMigratedWorkloadIsNotRunning(ctx, migration)
+		}
 	}
 
 	// Mark cleanup as complete
+	if migration.Status.StorageInfo == nil {
+		migration.Status.StorageInfo = &infrav1beta1.MigrationStorageInfo{}
+	}
+	migration.Status.StorageInfo.CleanedUp = true
+	setPostMigrationCleanupDone(migration, migrationReasonPostMigrationCleanupComplete, migrationPostMigrationCleanupCompleteMessage)
 	if cleanupPerformed {
-		if migration.Status.StorageInfo == nil {
-			migration.Status.StorageInfo = &infrav1beta1.MigrationStorageInfo{}
-		}
-		migration.Status.StorageInfo.CleanedUp = true
 		migration.Status.Message = "Migration completed, cleanup finished"
-
-		if err := r.updateStatus(ctx, migration); err != nil {
-			return ctrl.Result{}, err
-		}
-
+	}
+	if err := r.updateStatus(ctx, migration); err != nil {
+		return ctrl.Result{}, err
+	}
+	if cleanupPerformed {
 		r.Recorder.Event(migration, "Normal", "CleanupComplete", "Post-migration cleanup completed")
 	}
 
-	return ctrl.Result{}, nil
+	return stagingCleanupRequeue(ctrl.Result{}, stagingRetry), nil
 }
 
 // handleFailedPhase handles migrations that have failed
@@ -2084,20 +2155,18 @@ func (r *VMMigrationReconciler) handleDeletion(ctx context.Context, migration *i
 		return res, err
 	}
 
+	// The staged disk of an nfs / s3 migration (ADR-0011) is held the same
+	// way: the finalizer is kept while its delete can still succeed, and
+	// force-delete releases it with a StagedDiskLeftBehind Warning.
+	if hold, res, err := r.releaseStagedDiskForDeletion(ctx, migration); hold {
+		return res, err
+	}
+
 	// Perform cleanup operations
 	cleanupErrors := []error{}
 
-	// 1. Cleanup intermediate storage
-	if migration.Spec.Storage != nil && (migration.Status.StorageInfo == nil || !migration.Status.StorageInfo.CleanedUp) {
-		if err := r.cleanupIntermediateStorage(ctx, migration); err != nil {
-			logger.Error(err, "Failed to cleanup intermediate storage during deletion")
-			cleanupErrors = append(cleanupErrors, fmt.Errorf("storage cleanup: %w", err))
-		} else {
-			logger.Info("Intermediate storage cleaned up during deletion")
-		}
-	}
-
-	// 2. Explicitly delete PVC if it exists (in addition to owner reference cleanup)
+	// Explicitly delete PVC if it exists (in addition to owner reference
+	// cleanup): a pvc migration's staged file goes with it.
 	if migration.Status.StoragePVCName != "" {
 		pvc := &corev1.PersistentVolumeClaim{}
 		pvcKey := client.ObjectKey{
@@ -2120,7 +2189,7 @@ func (r *VMMigrationReconciler) handleDeletion(ctx context.Context, migration *i
 		}
 	}
 
-	// 3. Delete partially created target VM if migration failed
+	// Delete partially created target VM if migration failed
 	// IMPORTANT: Never delete VMs that have been marked as migration-completed
 	// This ensures that successfully migrated VMs persist independently of the migration resource
 	if migration.Status.Phase == infrav1beta1.MigrationPhaseFailed || migration.Status.Phase == infrav1beta1.MigrationPhaseCreating {
@@ -3411,11 +3480,12 @@ func (r *VMMigrationReconciler) generateStorageURL(ctx context.Context, migratio
 		if storageConfig.S3 == nil || storageConfig.S3.Bucket == "" {
 			return "", fmt.Errorf("s3 storage configuration (bucket) is required")
 		}
-		key := fmt.Sprintf("vmmigrations/%s/%s/%s.vmdk",
-			migration.Namespace, migration.Name, stage)
-		prefix := strings.Trim(storageConfig.S3.Prefix, "/")
-		if prefix != "" {
-			key = prefix + "/" + key
+		// StagedObjectKey is the one layout the providers' DeleteStagedDisk
+		// derives the same object from (ADR-0011 D5).
+		key, err := storagemigration.StagedObjectKey(storagemigration.BackendS3, migrationStagingLayout(migration),
+			storageConfig.S3.Prefix, migration.Namespace, migration.Name, stage)
+		if err != nil {
+			return "", fmt.Errorf("s3 staging key: %w", err)
 		}
 		// s3://bucket/<prefix>/<key>
 		return fmt.Sprintf("s3://%s/%s", storageConfig.S3.Bucket, key), nil
@@ -3435,7 +3505,14 @@ func (r *VMMigrationReconciler) generateStorageURL(ctx context.Context, migratio
 		// MNT3ERR_NOENT. We encode namespace/name/stage into a SINGLE filename so the
 		// staged object stays unique and traceable while needing only the export
 		// root (or the operator's optional, pre-created `path`) to exist.
-		key := fmt.Sprintf("vmmigrations-%s-%s-%s.qcow2", migration.Namespace, migration.Name, stage)
+		// The layout recorded when the export was sent (ADR-0011 D5): a
+		// migration exported before layout v2 keeps its legacy name for the
+		// import and the delete.
+		key, err := storagemigration.StagedObjectKey(storagemigration.BackendNFS, migrationStagingLayout(migration), "",
+			migration.Namespace, migration.Name, stage)
+		if err != nil {
+			return "", fmt.Errorf("nfs staging key: %w", err)
+		}
 		return storagemigration.NFSURL(storagemigration.StorageOptions{
 			Server: nfs.Server,
 			Export: nfs.Export,
@@ -3449,59 +3526,6 @@ func (r *VMMigrationReconciler) generateStorageURL(ctx context.Context, migratio
 	}
 }
 
-// cleanupIntermediateStorage removes temporary disk files from intermediate storage
-func (r *VMMigrationReconciler) cleanupIntermediateStorage(ctx context.Context, migration *infrav1beta1.VMMigration) error {
-	logger := logging.FromContext(ctx)
-
-	if migration.Spec.Storage == nil {
-		return nil
-	}
-
-	// Create storage client
-	// Determine PVC mount path based on the PVC name
-	pvcName := migration.Status.StoragePVCName
-	if pvcName == "" && migration.Spec.Storage.PVC != nil && migration.Spec.Storage.PVC.Name != "" {
-		pvcName = migration.Spec.Storage.PVC.Name
-	}
-
-	// Set mount path to match provider controller's mount location
-	// Provider controller always mounts PVCs at /mnt/migration-storage/<pvc-name>
-	// If user specified a custom base path, use it, but always append PVC name
-	basePath := "/mnt/migration-storage"
-	if migration.Spec.Storage.PVC != nil && migration.Spec.Storage.PVC.MountPath != "" {
-		basePath = migration.Spec.Storage.PVC.MountPath
-	}
-	mountPath := fmt.Sprintf("%s/%s", basePath, pvcName)
-
-	storageConfig := storage.StorageConfig{
-		Type:         "pvc",
-		PVCName:      pvcName,
-		PVCNamespace: migration.Namespace,
-		MountPath:    mountPath,
-	}
-
-	store, err := storage.NewStorage(storageConfig)
-	if err != nil {
-		return fmt.Errorf("failed to create storage client: %w", err)
-	}
-	defer store.Close()
-
-	// Delete export file
-	exportURL, err := r.generateStorageURL(ctx, migration, "export")
-	if err != nil {
-		logger.Error(err, "Failed to generate export URL for cleanup")
-	} else {
-		if err := store.Delete(ctx, exportURL); err != nil {
-			logger.Error(err, "Failed to delete export file", "url", exportURL)
-			// Continue with other cleanup even if this fails
-		} else {
-			logger.Info("Deleted export file", "url", exportURL)
-		}
-	}
-
-	return nil
-}
-
 // cleanupAllowed reports whether the controller may remove migration-created
 // artifacts for the given migration.
 //
@@ -3511,9 +3535,9 @@ func (r *VMMigrationReconciler) cleanupIntermediateStorage(ctx context.Context, 
 // retain it is to opt out explicitly with CleanupPolicy=Never. Always and
 // OnSuccess both permit cleanup here: at a terminal state OnSuccess and Always
 // are equivalent for this internal snapshot (a snapshot left on the source VM
-// has no value after the migration has terminated either way). The distinction
-// between Always and OnSuccess is reserved for future artifact classes; PR-1
-// only governs the snapshot.
+// has no value after the migration has terminated either way). The staged
+// disk of an nfs / s3 migration is where Always and OnSuccess differ: see
+// stagingCleanupWanted (ADR-0011 D3).
 func cleanupAllowed(m *infrav1beta1.VMMigration) bool {
 	// Allowed unless the user explicitly opted out with CleanupPolicy=Never.
 	return m.Spec.Options == nil || m.Spec.Options.CleanupPolicy != infrav1beta1.CleanupPolicyNever
@@ -3671,24 +3695,56 @@ func (r *VMMigrationReconciler) warnIfMigratedWorkloadIsNotRunning(ctx context.C
 	r.Recorder.Event(migration, corev1.EventTypeWarning, migrationReasonSourceDeletedTargetNotStarted, msg)
 }
 
-// deleteSourceVM deletes the source VM after successful migration
-func (r *VMMigrationReconciler) deleteSourceVM(ctx context.Context, migration *infrav1beta1.VMMigration) error {
+// deleteSourceVM deletes the source VirtualMachine of a completed migration
+// (spec.source.deleteAfterMigration) — only the object the migration
+// validated and exported. It deletes with a UID precondition: the UID
+// recorded at Validating (status.sourceVMUID), or — for a migration validated
+// before that field existed — the current object's, and then only when that
+// object is older than the migration. refused is true when the source
+// VirtualMachine is another object (re-created under the same name): nothing
+// is deleted, and the caller records a SourceDeletionRefused Warning. A source
+// VirtualMachine that is already gone is done (refused false, no error).
+func (r *VMMigrationReconciler) deleteSourceVM(ctx context.Context, migration *infrav1beta1.VMMigration) (refused bool, err error) {
 	logger := logging.FromContext(ctx)
 
-	// Get source VM
-	sourceVM, err := r.getSourceVM(ctx, migration)
+	// A live read, not the cache: the delete below is not idempotent, and a
+	// stale cache must neither hide the VM nor show one that was replaced.
+	sourceVM := &infrav1beta1.VirtualMachine{}
+	err = r.liveReader().Get(ctx, client.ObjectKey{Namespace: migration.Namespace, Name: migration.Spec.Source.VMRef.Name}, sourceVM)
+	if errors.IsNotFound(err) {
+		logger.Info("Source VM is already gone")
+		return false, nil
+	}
 	if err != nil {
-		return fmt.Errorf("failed to get source VM: %w", err)
+		return false, fmt.Errorf("failed to get source VM: %w", err)
+	}
+
+	uid := types.UID(migration.Status.SourceVMUID)
+	switch {
+	case uid == "" && sourceVM.CreationTimestamp.After(migration.CreationTimestamp.Time):
+		logger.Info("Not deleting the source VM: it was created after the migration (no source UID recorded)",
+			"vm", sourceVM.Name)
+		return true, nil
+	case uid == "":
+		uid = sourceVM.UID
+	case uid != sourceVM.UID:
+		logger.Info("Not deleting the source VM: it is not the VirtualMachine the migration exported", "vm", sourceVM.Name)
+		return true, nil
 	}
 
 	logger.Info("Deleting source VM", "vm", fmt.Sprintf("%s/%s", sourceVM.Namespace, sourceVM.Name))
-
-	// Delete the VM resource
-	if err := r.Delete(ctx, sourceVM); err != nil {
-		return fmt.Errorf("failed to delete source VM: %w", err)
+	if err := r.Delete(ctx, sourceVM, client.Preconditions{UID: &uid}); err != nil {
+		switch {
+		case errors.IsNotFound(err):
+			return false, nil
+		case errors.IsConflict(err):
+			// The UID precondition failed: another object now has the name.
+			return true, nil
+		default:
+			return false, fmt.Errorf("failed to delete source VM: %w", err)
+		}
 	}
-
-	return nil
+	return false, nil
 }
 
 // SetupWithManager sets up the controller with the Manager. Besides its own

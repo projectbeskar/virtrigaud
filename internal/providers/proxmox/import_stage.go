@@ -22,11 +22,13 @@ import (
 	"fmt"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 
 	"k8s.io/apimachinery/pkg/util/validation"
 
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
+	"github.com/projectbeskar/virtrigaud/internal/storage/migration"
 	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
 	"github.com/projectbeskar/virtrigaud/sdk/provider/errors"
 )
@@ -349,39 +351,58 @@ func buildImportStageScript(dir, stagePath, writeCmd string) string {
 // nfsStageCopy is THE producer of the root-owned copy of the staged NFS
 // object: the shell fragment that copies "$MNT"/rel byte for byte into "$TMP"
 // (a root-owned mktemp file in the root-only stage directory, opened by the
-// root shell). It is the one hook for checks on the copy (a header
-// pre-parser, a bounded copy): whatever it leaves in "$TMP" is what is
-// published as the stage.
+// root shell). Whatever it leaves in "$TMP" is what is published as the stage.
 //
-// With uid/gid, the reader runs as that identity (setpriv) so the NFS server
-// sees it, and it holds ONLY the write end of a pipe: `cat > "$TMP"` on the
-// root side opens the copy. That identity is tenant-chosen and may be an
-// account on the node (33/www-data runs pveproxy); it never gets a file
-// descriptor on, or ownership of, the copy, so it cannot rewrite the copy
-// after it is checked. The reader's exit status is recorded by the root side
-// of the pipeline in a status file ("$RC", fd 3, closed for the reader), and
-// a failed read fails the script (POSIX sh has no pipefail).
-//
-// Without uid/gid the root shell reads the export itself.
-func nfsStageCopy(rel string, uid, gid *int64) string {
+//  1. nfsStageCopyMeasure — as the migration's uid/gid when set — refuses a
+//     staged object that is not a regular file (exit 6; the mount is also
+//     nosymfollow) and measures its size ("$SZ"). The root shell then refuses
+//     one above limit (exit 7), or one that does not fit
+//     StagedCopySpaceFactor times in the stage directory's free space (exit
+//     8). The tenant's NFS server controls the size: unbounded, one object
+//     could fill the node's root filesystem. A size or free space that is not
+//     a number fails the copy (exit 1).
+//  2. The copy is bounded by the MEASURED size + 1 byte (`head -c`), not by
+//     limit: a server can report a small size and serve more; a copy longer
+//     than measured exits 7.
+//  3. With uid/gid the reader runs as that identity (setpriv) so the NFS
+//     server sees it, and it holds ONLY the write end of a pipe: the root
+//     shell opens "$TMP" for head. That identity is tenant-chosen and may be
+//     an account on the node (33/www-data runs pveproxy); it never gets a file
+//     descriptor on, or ownership of, the copy, so it cannot rewrite the copy
+//     after it is checked. The reader's exit status is recorded by the root
+//     side of the pipeline in a status file ("$RC", fd 3, closed for the
+//     reader), and a failed read fails the script (POSIX sh has no pipefail).
+//     Without uid/gid the root shell reads the export the same way.
+func nfsStageCopy(rel string, uid, gid *int64, limit int64) string {
 	src := `"$MNT"/` + proxmoxShellQuote(rel)
-	if uid == nil || gid == nil {
-		return `cat -- ` + src + ` > "$TMP"`
+	priv := ""
+	if uid != nil && gid != nil {
+		priv = nfsSetprivPrefix(uid, gid)
 	}
-	return `RC=$(mktemp -p "${TMP%/*}" ` + nfsCopyStatusTemplate + `); ` +
-		`{ if ` + nfsSetprivPrefix(uid, gid) + `cat -- ` + src + ` 3>&-; then echo 0 >&3; else echo 1 >&3; fi; } 3>"$RC" ` +
-		`| cat > "$TMP"; ` +
+	tooLarge := `echo "` + migration.ErrStagedObjectTooLarge.Error() + `" >&2; exit ` + strconv.Itoa(nfsTooLargeExit)
+	return `SZ=$(` + priv + `sh -c ` + proxmoxShellQuote(nfsStageCopyMeasure) + ` sh ` + src + `); ` +
+		`case $SZ in ''|*[!0-9]*) exit 1;; esac; ` +
+		`if [ "$SZ" -gt ` + strconv.FormatInt(limit, 10) + ` ]; then ` + tooLarge + `; fi; ` +
+		`AV=$(df -P -B1 -- "${TMP%/*}" | awk 'NR==2 {print $4}'); ` +
+		`case $AV in ''|*[!0-9]*) exit 1;; esac; ` +
+		`if [ "$AV" -lt $((SZ * ` + strconv.Itoa(migration.StagedCopySpaceFactor) + `)) ]; then echo "` +
+		migration.ErrStagingSpaceExhausted.Error() + `" >&2; exit ` + strconv.Itoa(nfsNoSpaceExit) + `; fi; ` +
+		`RC=$(mktemp -p "${TMP%/*}" ` + nfsCopyStatusTemplate + `); ` +
+		`{ if ` + priv + `cat -- ` + src + ` 3>&-; then echo 0 >&3; else echo 1 >&3; fi; } 3>"$RC" ` +
+		`| head -c $((SZ + 1)) > "$TMP"; ` +
+		`if [ "$(stat -c %s -- "$TMP")" -gt "$SZ" ]; then ` + tooLarge + `; fi; ` +
 		`[ "$(cat -- "$RC")" = 0 ] || exit 1; rm -f -- "$RC"`
 }
 
 // nfsImportStageInner is the part of an NFS import that runs inside the
 // mounted export ("$MNT"): prepare the root-only stage directory and "$TMP"
-// (importStagePrepare), copy the staged qcow2 into "$TMP" (nfsStageCopy) and
-// rename it onto stagePath. The copy is published as is: no qemu-img converts
-// the tenant's bytes as root here (the export holds the source provider's
-// flattened qcow2; `qemu-img check` validates the stage afterwards).
-func nfsImportStageInner(dir, rel, stagePath string, uid, gid *int64) string {
-	return importStagePrepare(dir) + nfsStageCopy(rel, uid, gid) + "; " + importStageCommit(stagePath)
+// (importStagePrepare), copy the staged qcow2 into "$TMP", bounded by limit
+// (nfsStageCopy), and rename it onto stagePath. The copy is published as is:
+// no qemu-img converts the tenant's bytes as root here (the export holds the
+// source provider's flattened qcow2); the caller parses and checks the
+// stage's header before anything reads it as an image.
+func nfsImportStageInner(dir, rel, stagePath string, uid, gid *int64, limit int64) string {
+	return importStagePrepare(dir) + nfsStageCopy(rel, uid, gid, limit) + "; " + importStageCommit(stagePath)
 }
 
 // nfsImportStageCleanup is the trap cleanup of an NFS import: the half-written
@@ -390,8 +411,8 @@ const nfsImportStageCleanup = importStageTempCleanup + `; rm -f -- "$RC" 2>/dev/
 
 // buildNFSImportStageScript is the node-side script of an NFS import: mount
 // the export (buildNFSKernelMountScript), stage "$MNT"/rel at stagePath in dir
-// (nfsImportStageInner), and on exit unmount and remove any half-written stage
-// and status file.
-func buildNFSImportStageScript(dir, server, export, rel, stagePath string, uid, gid *int64) string {
-	return buildNFSKernelMountScript(server, export, nfsImportStageInner(dir, rel, stagePath, uid, gid), nfsImportStageCleanup)
+// (nfsImportStageInner, bounded by limit), and on exit unmount and remove any
+// half-written stage and status file.
+func buildNFSImportStageScript(dir, server, export, rel, stagePath string, uid, gid *int64, limit int64) string {
+	return buildNFSKernelMountScript(server, export, nfsImportStageInner(dir, rel, stagePath, uid, gid, limit), nfsImportStageCleanup)
 }

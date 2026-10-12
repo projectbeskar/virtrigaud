@@ -17,6 +17,7 @@ limitations under the License.
 package migration
 
 import (
+	"errors"
 	"net"
 	"testing"
 )
@@ -131,5 +132,28 @@ func TestValidateHost_HostnameResolution(t *testing.T) {
 	}
 	if err := p.ValidateHost("nope.lab"); err == nil {
 		t.Error("unresolvable host allowed, want error")
+	}
+}
+
+// TestValidateHost_ResolutionFailureIsMarked (review M3a): a name that cannot
+// be resolved is marked ErrHostUnresolvable (it may be transient); a denied
+// address is not.
+func TestValidateHost_ResolutionFailureIsMarked(t *testing.T) {
+	orig := lookupIP
+	defer func() { lookupIP = orig }()
+	lookupIP = func(string) ([]net.IP, error) { return nil, errors.New("temporary DNS failure") }
+	p, err := NewHostPolicy(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := p.ValidateHost("minio.example"); !errors.Is(err, ErrHostUnresolvable) {
+		t.Errorf("resolution failure = %v, want ErrHostUnresolvable", err)
+	}
+	lookupIP = func(string) ([]net.IP, error) { return nil, nil }
+	if err := p.ValidateHost("minio.example"); !errors.Is(err, ErrHostUnresolvable) {
+		t.Errorf("no addresses = %v, want ErrHostUnresolvable", err)
+	}
+	if err := p.ValidateHost("169.254.169.254"); err == nil || errors.Is(err, ErrHostUnresolvable) {
+		t.Errorf("a denied address = %v, want a policy denial", err)
 	}
 }

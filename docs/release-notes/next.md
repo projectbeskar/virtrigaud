@@ -540,9 +540,57 @@ providers), and rollback caveats in
   retried with a backoff (15 s doubling to 5 min) instead of failing for good.
   A clone whose outcome is unknown (the connection dropped mid-call, a
   timeout) still fails, so a retry can never make a second VM.
-- Known limitation: a migration's `nfs` or `s3` staging object (a full copy of
-  the source disk) is never deleted by VirtRigaud; clean it up yourself
-  (→ [`docs/clustered-provider-inventory.md`](docs/clustered-provider-inventory.md)).
+- **A migration's `nfs` / `s3` staged disk is deleted.** The staged object (a
+  full, unencrypted copy of the source disk) was never deleted. The manager now
+  asks the migration's target `Provider` to delete it, through a new provider
+  RPC, `DeleteStagedDisk`
+  (→ [ADR-0011](docs/adr/0011-migration-staging-cleanup.md),
+  → [Upgrade guide](docs/upgrading.md#breaking-changes)):
+  - **When.** After the migration succeeds, and when the `VMMigration` is
+    deleted. With `cleanupPolicy: Always`, also when the migration fails for
+    good. With the default `OnSuccess`, a failed migration's staged disk is
+    kept until the `VMMigration` is deleted. `Never` keeps it in every case.
+  - **Confinement.** The request names the migration, never a bucket, key or
+    path. The provider derives the object from the migration's namespace and
+    name, so it can delete only that migration's own staging object. A spec
+    edited after the export is never deleted at its new location.
+  - **A failed delete is held.** The `StagingCleanup` condition is `False`
+    (reason `StagingCleanupPending`), one Warning event is sent, and the delete
+    is retried with a backoff from 15 s to 5 min. A deleted `VMMigration` is
+    kept by its finalizer meanwhile (and while an export task still runs);
+    `virtrigaud.io/force-delete=true` releases it.
+  - **Older providers.** A provider image older than this release cannot
+    delete. The delete is held for up to 24 hours, then recorded as left
+    behind (`StagedDiskLeftBehind`).
+  - **libvirt and vSphere NFS.** These targets empty an `nfs` object (truncate
+    it to zero bytes) instead of deleting it, because qemu-img cannot delete a
+    file over NFS. An empty file stays on the export. Proxmox deletes it.
+  - **Proxmox import stage.** The Proxmox target also removes the node-side
+    import stage of the migration's target VM, unless another migration in
+    flight targets the same VM.
+  - **Versioned S3 buckets and NFS snapshots** keep the data after the delete:
+    expire noncurrent versions on `vmmigrations/`, and exclude the staging
+    export from snapshots.
+- **Unambiguous NFS staging name.** New migrations stage
+  `vmmigrations_<namespace>_<name>_export.qcow2`. The old dash-separated name
+  was shared by two migrations such as `team-prod/db` and `team/prod-db`.
+  Migrations staged before the upgrade keep their old name.
+- **Fixed: `Ready` cleanup, now guarded.** A migration that succeeds under this
+  release deletes its source snapshot and runs `deleteAfterMigration`, which a
+  broken manager-side PVC cleanup blocked before. A migration completed before
+  the upgrade deletes nothing (one `SourceDeletionSkippedPreUpgrade` Warning).
+  `deleteAfterMigration` deletes only the source VM the migration validated (by
+  UID), never one re-created under the same name.
+- **Security: staged images are checked before import.** NFS and S3 imports on
+  Proxmox, vSphere and libvirt read the staged object once into a local copy,
+  refuse an image that references another file (a backing file, data file or
+  extent could have pulled a node or pod secret into the imported disk), and
+  import that same copy. Headers are parsed in Go before qemu-img opens
+  them. The NFS copy is bounded (`VIRTRIGAUD_MIGRATION_IMPORT_MAX_GIB`,
+  default 1024, lowered by the target `Provider`'s disk-size limit, and a
+  free-space check). Proxmox stages the copy in its root-only stage directory,
+  checks the stage's header again at `Create`, and mounts migration exports
+  `nosymfollow,nosuid,nodev,noexec`.
 - **Proxmox VMs carry an owner stamp; a re-sent `Create` no longer makes a
   duplicate.** The Proxmox provider writes the owning `VirtualMachine`'s
   identity into each new VM's description, in the same call that creates or

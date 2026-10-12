@@ -18,6 +18,7 @@ package proxmox
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -36,7 +37,7 @@ import (
 )
 
 // stagingNode plays the PVE node over SSH for an NFS import: the mount +
-// convert script and `qemu-img check` succeed, `qemu-img info` reports the
+// copy script, the staged header check and `qemu-img check` succeed, `qemu-img info` reports the
 // staged disk's virtual size (or fails), and every command is recorded.
 type stagingNode struct {
 	mu          sync.Mutex
@@ -49,6 +50,14 @@ func (n *stagingNode) run(_ context.Context, cmd string) (string, string, error)
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	n.cmds = append(n.cmds, cmd)
+	// The staged image's own header check (checkStagedNodeImage): a
+	// self-contained qcow2 that declares no size.
+	if strings.HasPrefix(cmd, "head -c ") {
+		return base64.StdEncoding.EncodeToString(minimalQCOW2()), "", nil
+	}
+	if strings.HasPrefix(cmd, "unshare -n -- qemu-img info ") {
+		return `{"format": "qcow2"}`, "", nil
+	}
 	if strings.HasPrefix(cmd, "qemu-img info ") {
 		if n.infoErr != nil {
 			return "", "boom", n.infoErr

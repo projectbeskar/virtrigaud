@@ -196,6 +196,7 @@ func TestHandleReadyPhase_NeverSkipsSnapshotDeletion(t *testing.T) {
 		CleanupPolicy: infrav1beta1.CleanupPolicyNever,
 	}
 	migration.Status.Phase = infrav1beta1.MigrationPhaseReady
+	markPostMigrationCleanupPending(migration) // completed by this manager
 	r, _ := newSnapshotReconciler(t, prov, sourceVM, sourceProvider, migration)
 
 	_, err := r.handleReadyPhase(ctx, migration)
@@ -217,6 +218,7 @@ func TestHandleReadyPhase_OnSuccessDeletesSnapshot(t *testing.T) {
 		CleanupPolicy: infrav1beta1.CleanupPolicyOnSuccess,
 	}
 	migration.Status.Phase = infrav1beta1.MigrationPhaseReady
+	markPostMigrationCleanupPending(migration) // completed by this manager
 	r, _ := newSnapshotReconciler(t, prov, sourceVM, sourceProvider, migration)
 
 	_, err := r.handleReadyPhase(ctx, migration)

@@ -18,6 +18,7 @@ package libvirt
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -146,6 +147,19 @@ func (s *Server) importDiskFromS3(ctx context.Context, req *providerv1.ImportDis
 	// `qemu-img convert /dev/stdin`, which fails on a pipe. The pipe couples the
 	// S3 download (DownloadStream, SHA256 verified in-stream) to conn.StreamIn's
 	// blocking call so the disk is never buffered whole in the pod.
+	// The bucket is tenant-controlled: bound the download by the object's
+	// reported size (and the import limit), and refuse it when the pool's
+	// filesystem cannot hold it twice (the staged object and the converted
+	// disk). A backend that serves more than it reported is refused.
+	// The copy and header limits include the import's disk-size limit (#382).
+	limit, err := migration.StagedCopyLimit(req.MaxVirtualSizeBytes)
+	if err != nil {
+		return nil, fmt.Errorf("s3 import: %w", err)
+	}
+	maxBytes, err := stagedDownloadBound(ctx, hostConnRunner{conn: conn}, s3client, req.SourceUrl, wd.dir, limit)
+	if err != nil {
+		return nil, err
+	}
 	pr, pw := io.Pipe()
 	// The redirect lives in a fixed `sh -c` script; stagePath is its positional
 	// "$1", never interpolated into shell text (writeStdinToFileArgv).
@@ -159,7 +173,7 @@ func (s *Server) importDiskFromS3(ctx context.Context, req *providerv1.ImportDis
 	go func() {
 		resp, derr := s3client.DownloadStream(ctx, storage.StreamDownloadRequest{
 			SourceURL:        req.SourceUrl,
-			Writer:           pw,
+			Writer:           &migration.BoundedWriter{W: pw, Max: maxBytes},
 			ExpectedChecksum: req.ExpectedChecksum,
 		})
 		// Closing the writer with the download error propagates it to
@@ -179,6 +193,9 @@ func (s *Server) importDiskFromS3(ctx context.Context, req *providerv1.ImportDis
 	// Surface the REAL stage failure: the download/checksum error is the root
 	// cause when the stream broke (e.g. checksum mismatch); only if the download
 	// was clean do we attribute a stage failure to the host `cat`.
+	if errors.Is(dl.err, migration.ErrStagedObjectTooLarge) {
+		return nil, stagedCopyRefusal(migration.ErrStagedObjectTooLarge)
+	}
 	if dl.err != nil {
 		return nil, fmt.Errorf("s3 download/transfer failed during stage: %w", dl.err)
 	}
@@ -193,6 +210,9 @@ func (s *Server) importDiskFromS3(ctx context.Context, req *providerv1.ImportDis
 	// file (qcow2 backing / data file, VMDK extent): the convert would flatten
 	// that file into <vm>-migrated.qcow2. Read it in the format the convert
 	// forces, so the check sees exactly what the convert will open.
+	if err := checkStagedHostImageBytes(ctx, hostConnRunner{conn: conn}, stagePath, stagedFormat, limit); err != nil {
+		return nil, fmt.Errorf("inspect staged s3 object: %w", err)
+	}
 	staged, err := inspectHostImageInfoAs(ctx, hostConnRunner{conn: conn}, importedImageSubject, stagePath, stagedFormat)
 	if err != nil {
 		return nil, fmt.Errorf("inspect staged s3 object: %w", err)

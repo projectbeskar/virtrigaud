@@ -107,6 +107,12 @@ type Capabilities struct {
 	// that predates it ignores the limit; while one applies, the migration
 	// controller holds a migration into a Provider that does not report it.
 	SupportsImportSizeLimit bool
+	// SupportedStagedDiskDeleteBackends lists the staging backends ("nfs",
+	// "s3") whose migration staging objects the provider's DeleteStagedDisk
+	// removes (StagedDiskDeleter, ADR-0011 D7). Empty — an older provider, or
+	// one that stages nothing outside the cluster — means the VMMigration
+	// controller never asks it and records the staged object as left behind.
+	SupportedStagedDiskDeleteBackends []string
 }
 
 // CapabilityReporter is an optional capability of a Provider: it reports the

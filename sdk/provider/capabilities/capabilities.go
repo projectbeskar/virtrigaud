@@ -125,6 +125,9 @@ type Manager struct {
 	supportedExportBackends []string
 	supportedImportBackends []string
 	supportedTransferModes  []string
+	// supportedStagedDiskDeleteBackends are the staging backends whose
+	// migration staging objects DeleteStagedDisk removes (ADR-0011 D7).
+	supportedStagedDiskDeleteBackends []string
 }
 
 // NewManager creates a new capability manager.
@@ -196,6 +199,14 @@ func (m *Manager) SetSupportedTransferModes(modes []string) *Manager {
 	return m
 }
 
+// SetSupportedStagedDiskDeleteBackends sets the staging backends ("nfs", "s3")
+// whose migration staging objects the provider's DeleteStagedDisk removes
+// (ADR-0011 D7). Empty means it removes none, and the manager never asks it to.
+func (m *Manager) SetSupportedStagedDiskDeleteBackends(backends []string) *Manager {
+	m.supportedStagedDiskDeleteBackends = backends
+	return m
+}
+
 // GetCapabilities returns the capabilities response for gRPC.
 func (m *Manager) GetCapabilities(ctx context.Context, req *providerv1.GetCapabilitiesRequest) (*providerv1.GetCapabilitiesResponse, error) {
 	return &providerv1.GetCapabilitiesResponse{
@@ -226,6 +237,8 @@ func (m *Manager) GetCapabilities(ctx context.Context, req *providerv1.GetCapabi
 		SupportsListOwnerFilter: m.HasCapability(CapabilityListOwnerFilter),
 		// ImportDisk enforces max_virtual_size_bytes.
 		SupportsImportSizeLimit: m.HasCapability(CapabilityImportSizeLimit),
+		// ADR-0011 D7: the backends DeleteStagedDisk removes staging objects from.
+		SupportedStagedDiskDeleteBackends: m.supportedStagedDiskDeleteBackends,
 	}, nil
 }
 
@@ -449,6 +462,14 @@ func (b *Builder) ImportBackends(backends ...string) *Builder {
 // "direct"). Empty/unset means relay-only (ADR-0006 Slice 0).
 func (b *Builder) TransferModes(modes ...string) *Builder {
 	b.manager.SetSupportedTransferModes(modes)
+	return b
+}
+
+// StagedDiskDeleteBackends sets the staging backends ("nfs", "s3") whose
+// migration staging objects the provider's DeleteStagedDisk removes
+// (ADR-0011 D7). Unset means none.
+func (b *Builder) StagedDiskDeleteBackends(backends ...string) *Builder {
+	b.manager.SetSupportedStagedDiskDeleteBackends(backends)
 	return b
 }
 

@@ -19,27 +19,28 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	Provider_Validate_FullMethodName        = "/provider.v1.Provider/Validate"
-	Provider_Create_FullMethodName          = "/provider.v1.Provider/Create"
-	Provider_Delete_FullMethodName          = "/provider.v1.Provider/Delete"
-	Provider_Power_FullMethodName           = "/provider.v1.Provider/Power"
-	Provider_Reconfigure_FullMethodName     = "/provider.v1.Provider/Reconfigure"
-	Provider_HardwareUpgrade_FullMethodName = "/provider.v1.Provider/HardwareUpgrade"
-	Provider_Describe_FullMethodName        = "/provider.v1.Provider/Describe"
-	Provider_TaskStatus_FullMethodName      = "/provider.v1.Provider/TaskStatus"
-	Provider_SnapshotCreate_FullMethodName  = "/provider.v1.Provider/SnapshotCreate"
-	Provider_SnapshotDelete_FullMethodName  = "/provider.v1.Provider/SnapshotDelete"
-	Provider_SnapshotRevert_FullMethodName  = "/provider.v1.Provider/SnapshotRevert"
-	Provider_Clone_FullMethodName           = "/provider.v1.Provider/Clone"
-	Provider_ImagePrepare_FullMethodName    = "/provider.v1.Provider/ImagePrepare"
-	Provider_GetCapabilities_FullMethodName = "/provider.v1.Provider/GetCapabilities"
-	Provider_ExportDisk_FullMethodName      = "/provider.v1.Provider/ExportDisk"
-	Provider_ImportDisk_FullMethodName      = "/provider.v1.Provider/ImportDisk"
-	Provider_GetDiskInfo_FullMethodName     = "/provider.v1.Provider/GetDiskInfo"
-	Provider_ListVMs_FullMethodName         = "/provider.v1.Provider/ListVMs"
-	Provider_TransferOwner_FullMethodName   = "/provider.v1.Provider/TransferOwner"
-	Provider_ListHosts_FullMethodName       = "/provider.v1.Provider/ListHosts"
-	Provider_GetHostInfo_FullMethodName     = "/provider.v1.Provider/GetHostInfo"
+	Provider_Validate_FullMethodName         = "/provider.v1.Provider/Validate"
+	Provider_Create_FullMethodName           = "/provider.v1.Provider/Create"
+	Provider_Delete_FullMethodName           = "/provider.v1.Provider/Delete"
+	Provider_Power_FullMethodName            = "/provider.v1.Provider/Power"
+	Provider_Reconfigure_FullMethodName      = "/provider.v1.Provider/Reconfigure"
+	Provider_HardwareUpgrade_FullMethodName  = "/provider.v1.Provider/HardwareUpgrade"
+	Provider_Describe_FullMethodName         = "/provider.v1.Provider/Describe"
+	Provider_TaskStatus_FullMethodName       = "/provider.v1.Provider/TaskStatus"
+	Provider_SnapshotCreate_FullMethodName   = "/provider.v1.Provider/SnapshotCreate"
+	Provider_SnapshotDelete_FullMethodName   = "/provider.v1.Provider/SnapshotDelete"
+	Provider_SnapshotRevert_FullMethodName   = "/provider.v1.Provider/SnapshotRevert"
+	Provider_Clone_FullMethodName            = "/provider.v1.Provider/Clone"
+	Provider_ImagePrepare_FullMethodName     = "/provider.v1.Provider/ImagePrepare"
+	Provider_GetCapabilities_FullMethodName  = "/provider.v1.Provider/GetCapabilities"
+	Provider_ExportDisk_FullMethodName       = "/provider.v1.Provider/ExportDisk"
+	Provider_ImportDisk_FullMethodName       = "/provider.v1.Provider/ImportDisk"
+	Provider_GetDiskInfo_FullMethodName      = "/provider.v1.Provider/GetDiskInfo"
+	Provider_DeleteStagedDisk_FullMethodName = "/provider.v1.Provider/DeleteStagedDisk"
+	Provider_ListVMs_FullMethodName          = "/provider.v1.Provider/ListVMs"
+	Provider_TransferOwner_FullMethodName    = "/provider.v1.Provider/TransferOwner"
+	Provider_ListHosts_FullMethodName        = "/provider.v1.Provider/ListHosts"
+	Provider_GetHostInfo_FullMethodName      = "/provider.v1.Provider/GetHostInfo"
 )
 
 // ProviderClient is the client API for Provider service.
@@ -82,6 +83,10 @@ type ProviderClient interface {
 	ExportDisk(ctx context.Context, in *ExportDiskRequest, opts ...grpc.CallOption) (*ExportDiskResponse, error)
 	ImportDisk(ctx context.Context, in *ImportDiskRequest, opts ...grpc.CallOption) (*ImportDiskResponse, error)
 	GetDiskInfo(ctx context.Context, in *GetDiskInfoRequest, opts ...grpc.CallOption) (*GetDiskInfoResponse, error)
+	// Remove a VMMigration's nfs / s3 staging object (ADR-0011). Providers that
+	// cannot return Unimplemented and leave the backend out of
+	// supported_staged_disk_delete_backends.
+	DeleteStagedDisk(ctx context.Context, in *DeleteStagedDiskRequest, opts ...grpc.CallOption) (*DeleteStagedDiskResponse, error)
 	// List all VMs managed by this provider. A clustered provider lists every
 	// host it fronts, tags each VM with its host_id and names the hosts it could
 	// not list in unreachable_host_ids (ADR-0007 Addendum A, A3).
@@ -277,6 +282,16 @@ func (c *providerClient) GetDiskInfo(ctx context.Context, in *GetDiskInfoRequest
 	return out, nil
 }
 
+func (c *providerClient) DeleteStagedDisk(ctx context.Context, in *DeleteStagedDiskRequest, opts ...grpc.CallOption) (*DeleteStagedDiskResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(DeleteStagedDiskResponse)
+	err := c.cc.Invoke(ctx, Provider_DeleteStagedDisk_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *providerClient) ListVMs(ctx context.Context, in *ListVMsRequest, opts ...grpc.CallOption) (*ListVMsResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(ListVMsResponse)
@@ -357,6 +372,10 @@ type ProviderServer interface {
 	ExportDisk(context.Context, *ExportDiskRequest) (*ExportDiskResponse, error)
 	ImportDisk(context.Context, *ImportDiskRequest) (*ImportDiskResponse, error)
 	GetDiskInfo(context.Context, *GetDiskInfoRequest) (*GetDiskInfoResponse, error)
+	// Remove a VMMigration's nfs / s3 staging object (ADR-0011). Providers that
+	// cannot return Unimplemented and leave the backend out of
+	// supported_staged_disk_delete_backends.
+	DeleteStagedDisk(context.Context, *DeleteStagedDiskRequest) (*DeleteStagedDiskResponse, error)
 	// List all VMs managed by this provider. A clustered provider lists every
 	// host it fronts, tags each VM with its host_id and names the hosts it could
 	// not list in unreachable_host_ids (ADR-0007 Addendum A, A3).
@@ -432,6 +451,9 @@ func (UnimplementedProviderServer) ImportDisk(context.Context, *ImportDiskReques
 }
 func (UnimplementedProviderServer) GetDiskInfo(context.Context, *GetDiskInfoRequest) (*GetDiskInfoResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method GetDiskInfo not implemented")
+}
+func (UnimplementedProviderServer) DeleteStagedDisk(context.Context, *DeleteStagedDiskRequest) (*DeleteStagedDiskResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method DeleteStagedDisk not implemented")
 }
 func (UnimplementedProviderServer) ListVMs(context.Context, *ListVMsRequest) (*ListVMsResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method ListVMs not implemented")
@@ -772,6 +794,24 @@ func _Provider_GetDiskInfo_Handler(srv interface{}, ctx context.Context, dec fun
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Provider_DeleteStagedDisk_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(DeleteStagedDiskRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ProviderServer).DeleteStagedDisk(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Provider_DeleteStagedDisk_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ProviderServer).DeleteStagedDisk(ctx, req.(*DeleteStagedDiskRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _Provider_ListVMs_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(ListVMsRequest)
 	if err := dec(in); err != nil {
@@ -918,6 +958,10 @@ var Provider_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "GetDiskInfo",
 			Handler:    _Provider_GetDiskInfo_Handler,
+		},
+		{
+			MethodName: "DeleteStagedDisk",
+			Handler:    _Provider_DeleteStagedDisk_Handler,
 		},
 		{
 			MethodName: "ListVMs",

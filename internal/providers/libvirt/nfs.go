@@ -18,15 +18,23 @@ package libvirt
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
-	"github.com/projectbeskar/virtrigaud/internal/providers/importlimit"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+
+	"github.com/projectbeskar/virtrigaud/internal/storage"
+	"github.com/projectbeskar/virtrigaud/internal/storage/migration"
 	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
+	sdkerrors "github.com/projectbeskar/virtrigaud/sdk/provider/errors"
 )
 
 // exportDiskToNFS implements the ADR-0006 Slice 4 libvirt SOURCE path for the NFS
@@ -123,6 +131,160 @@ func exportConvertToNFS(ctx context.Context, conn libvirtConn, req *providerv1.E
 	}, nil
 }
 
+// nfsStagedCopySuffix names the private byte copy of a staged NFS object
+// that an import checks and converts.
+const nfsStagedCopySuffix = ".nfs-staged"
+
+// stagedHeadScript prints the first "$2" bytes of the file "$1" as one line of
+// base64 (the header bytes travel over the text channel intact); it fails when
+// the file cannot be read.
+const stagedHeadScript = `head -c "$2" -- "$1" >/dev/null && head -c "$2" -- "$1" | base64 -w0`
+
+// checkStagedHostImageBytes parses the leading bytes of the staged image at
+// path on the host WITHOUT qemu (migration.CheckStagedImageBytes), before
+// inspectHostImageAs lets `qemu-img info` open it: qemu opens a qcow2
+// external data file and VMDK extents while it reads a header, so a crafted
+// header could make the host open a device node, a host file or an
+// nbd:/http: target before any check refuses it. A declared virtual size above
+// limit (migration.StagedCopyLimit of the request) is refused too. A refused
+// header is InvalidSpec; a host command failure is retryable.
+func checkStagedHostImageBytes(ctx context.Context, h hostCommandRunner, path, format string, limit int64) error {
+	res, err := runHost(ctx, h, "sh", "-c", stagedHeadScript, "sh", path, strconv.Itoa(migration.StagedImageHeadBytes))
+	if err != nil {
+		return hostCheckFailed("read the staged image header", err)
+	}
+	head, err := base64.StdEncoding.DecodeString(strings.TrimSpace(res.Stdout))
+	if err != nil {
+		return hostCheckFailed("decode the staged image header", err)
+	}
+	if _, err := migration.CheckStagedImageBytes(head, format, limit); err != nil {
+		return newImageRejection(importedImageSubject, err.Error())
+	}
+	return nil
+}
+
+// boundedNFSCopy copies the staged NFS object byte for byte to dst, bounded
+// (re-review Medium 1): the tenant's NFS server controls the object's size.
+// Its size is read first (`qemu-img info -f raw`, which opens nothing but that
+// file) and refused above limit (ErrStagedObjectTooLarge, InvalidSpec) or when
+// the private directory's filesystem has less than StagedCopySpaceFactor times
+// it free (ErrStagingSpaceExhausted, retryable). The copy itself is
+// `qemu-img dd` of at most the measured size + 1 MiB, so an object that grows after it
+// was measured is still bounded by the measured size, and a copy longer than
+// the measured size is refused. A refused or failed copy is removed with wd.
+func boundedNFSCopy(ctx context.Context, conn libvirtConn, wd *diskWriteDir, nfsURL, dst string, limit int64) error {
+	h := hostConnRunner{conn: conn}
+	res, err := conn.RunHost(ctx, "qemu-img", "info", "-U", "--output=json", "-f", "raw", nfsURL)
+	if err != nil {
+		return fmt.Errorf("host-side size check of the staged nfs object failed: %w%s", err, qemuImgStderr(res))
+	}
+	var info struct {
+		VirtualSize int64 `json:"virtual-size"`
+	}
+	if err := json.Unmarshal([]byte(res.Stdout), &info); err != nil {
+		return hostCheckFailed("parse the staged object size", err)
+	}
+	free, err := hostFreeBytes(ctx, h, wd.dir)
+	if err != nil {
+		return err
+	}
+	if err := stagedCopyRefusal(migration.CheckStagedCopy(info.VirtualSize, limit, free)); err != nil {
+		return err
+	}
+	if res, err := conn.RunHost(ctx, withUmask(vmDiskUmask, "qemu-img", "dd", "-f", "raw", "-O", "raw", "bs=1M",
+		"count="+strconv.FormatInt(migration.StagedCopyDDCount(info.VirtualSize), 10), "if="+nfsURL, "of="+dst)...); err != nil {
+		return fmt.Errorf("host-side copy of the staged nfs object failed: %w%s", err, qemuImgStderr(res))
+	}
+	sz, err := runHost(ctx, h, "stat", "-c", "%s", "--", dst)
+	if err != nil {
+		return hostCheckFailed("read the staged copy size", err)
+	}
+	copied, err := strconv.ParseInt(strings.TrimSpace(sz.Stdout), 10, 64)
+	if err != nil {
+		return hostCheckFailed("parse the staged copy size", err)
+	}
+	if copied > info.VirtualSize || copied > limit {
+		return stagedCopyRefusal(migration.ErrStagedObjectTooLarge)
+	}
+	return nil
+}
+
+// hostFreeBytes is the free space (available blocks x fragment size) of the
+// host filesystem holding dir.
+func hostFreeBytes(ctx context.Context, h hostCommandRunner, dir string) (int64, error) {
+	fs, err := runHost(ctx, h, "stat", "-f", "-c", "%a %S", "--", dir)
+	if err != nil {
+		return 0, hostCheckFailed("read the free space for the staged copy", err)
+	}
+	var avail, frsize int64
+	if _, err := fmt.Sscanf(strings.TrimSpace(fs.Stdout), "%d %d", &avail, &frsize); err != nil {
+		return 0, hostCheckFailed("parse the free space for the staged copy", err)
+	}
+	return avail * frsize, nil
+}
+
+// stagedDownloadBound is the most bytes an S3 staged object may be downloaded
+// into dir on the host: its reported size, refused (constant) above the import
+// limit or when dir's filesystem cannot hold StagedCopySpaceFactor times it.
+func stagedDownloadBound(ctx context.Context, h hostCommandRunner, s3client storage.Storage, sourceURL, dir string, limit int64) (int64, error) {
+	meta, err := s3client.GetMetadata(ctx, sourceURL)
+	if err != nil {
+		return 0, fmt.Errorf("s3 import: read the size of the staged object: %w", err)
+	}
+	free, err := hostFreeBytes(ctx, h, dir)
+	if err != nil {
+		return 0, err
+	}
+	if err := stagedCopyRefusal(migration.CheckStagedCopy(meta.Size, limit, free)); err != nil {
+		return 0, err
+	}
+	return meta.Size, nil
+}
+
+// stagedCopyRefusal maps a migration.CheckStagedCopy refusal to the provider
+// error: too large is InvalidSpec (permanent), no space is ResourceExhausted
+// (retryable). Both constant; nil stays nil.
+func stagedCopyRefusal(err error) error {
+	switch {
+	case err == nil:
+		return nil
+	case errors.Is(err, migration.ErrStagedObjectTooLarge):
+		return sdkerrors.NewInvalidSpec("%s", "staged import: "+err.Error())
+	default:
+		return status.Error(codes.ResourceExhausted, "staged import: "+err.Error())
+	}
+}
+
+// copyCheckConvertNFSObject reads the staged NFS object ONCE — a byte copy
+// (`qemu-img convert -f raw -O raw`, which interprets no header and opens no
+// other file) into the private directory wd — then checks the header of that
+// copy — first its bytes without qemu (checkStagedHostImageBytes), then with
+// qemu-img (inspectHostImageAs: no backing file, data file or extent, qcow2) — and
+// converts that same copy to the qcow2 volume name in wd, which it returns.
+// The tenant-controlled NFS server can therefore not swap the object between
+// the check and the convert. The copy is removed once converted (and with wd
+// in any case).
+func copyCheckConvertNFSObject(ctx context.Context, conn libvirtConn, wd *diskWriteDir, nfsURL, name string, limit int64) (string, error) {
+	h := hostConnRunner{conn: conn}
+	stagedCopy := wd.file(name + nfsStagedCopySuffix)
+	if err := boundedNFSCopy(ctx, conn, wd, nfsURL, stagedCopy, limit); err != nil {
+		return "", err
+	}
+	if err := checkStagedHostImageBytes(ctx, h, stagedCopy, migration.StagedFormatQCOW2, limit); err != nil {
+		return "", fmt.Errorf("inspect staged nfs object: %w", err)
+	}
+	if _, err := inspectHostImageAs(ctx, h, importedImageSubject, stagedCopy, "qcow2"); err != nil {
+		return "", fmt.Errorf("inspect staged nfs object: %w", err)
+	}
+	newDisk := wd.file(name)
+	if res, err := conn.RunHost(ctx, withUmask(vmDiskUmask, "qemu-img", "convert", "-f", "qcow2", "-O", "qcow2",
+		stagedCopy, newDisk)...); err != nil {
+		return "", fmt.Errorf("host-side qemu-img convert of the staged nfs object failed: %w%s", err, qemuImgStderr(res))
+	}
+	removeHostPath(ctx, h, stagedCopy, false)
+	return newDisk, nil
+}
+
 // importDiskFromNFS implements the ADR-0006 Slice 4 libvirt TARGET path: the
 // host's qemu-img reads the staged qcow2 directly from the NFS export over libnfs
 // and writes it into the target storage pool. No download, no pod staging.
@@ -179,37 +341,34 @@ func (s *Server) importDiskFromNFS(ctx context.Context, req *providerv1.ImportDi
 	log.Printf("INFO Importing disk from NFS to libvirt host: backend=nfs pool=%s volume=%s src=%s target=%s",
 		poolName, volumeName, nfsURL, targetPath)
 
-	// SECURITY: refuse a staged object whose qcow2 header references another
-	// file (backing file, data file): the convert would flatten that host file
-	// into <vm>-migrated.qcow2. Read it as qcow2, as the convert does.
-	staged, err := inspectHostImageInfoAs(ctx, hostConnRunner{conn: conn}, importedImageSubject, nfsURL, "qcow2")
-	if err != nil {
-		return nil, fmt.Errorf("inspect staged nfs object: %w", err)
-	}
-	// The disk-size limit, early, from that same read (the converted output
-	// is checked again below: the export may change between two reads).
-	if err := importlimit.Check(staged.VirtualSize, nil, req.MaxVirtualSizeBytes); err != nil {
-		return nil, err
-	}
-
-	// Read the staged qcow2 straight from NFS and write the pool volume,
-	// created with vmDiskMode (withUmask: Create adopts it without a chmod) in
-	// a private directory next to it, checked there and then renamed into
-	// place (diskWriteDir). Raw values: RunHost shell-quotes every argv
-	// element itself.
-	wd, err := newDiskWriteDir(ctx, hostConnRunner{conn: conn}, poolPath)
+	// SECURITY: the staged object is on an NFS server the tenant controls, so
+	// it can change between two reads. It is read ONCE: copied byte for byte
+	// (`-f raw` interprets no header and opens nothing else) into a private
+	// directory next to the pool volume. The header check (a backing file or
+	// data file would make the convert flatten a host file into
+	// <vm>-migrated.qcow2) and the convert both read that private copy, so they
+	// see the same bytes. The pool volume is created with vmDiskMode (withUmask:
+	// Create adopts it without a chmod) in the same private directory, checked
+	// there and then renamed into place (diskWriteDir). Raw values: RunHost
+	// shell-quotes every argv element itself.
+	h := hostConnRunner{conn: conn}
+	wd, err := newDiskWriteDir(ctx, h, poolPath)
 	if err != nil {
 		return nil, fmt.Errorf("nfs import: %w", err)
 	}
 	defer wd.cleanup(ctx)
-	newDisk := wd.file(filepath.Base(targetPath))
-	if res, err := conn.RunHost(ctx, withUmask(vmDiskUmask, "qemu-img", "convert", "-f", "qcow2", "-O", "qcow2",
-		nfsURL, newDisk)...); err != nil {
-		return nil, fmt.Errorf("host-side qemu-img convert from nfs failed: %w%s", err, qemuImgStderr(res))
+	// The copy is bounded by the import's disk-size limit too (#382).
+	limit, err := migration.StagedCopyLimit(req.MaxVirtualSizeBytes)
+	if err != nil {
+		return nil, fmt.Errorf("nfs import: %w", err)
+	}
+	newDisk, err := copyCheckConvertNFSObject(ctx, conn, wd, nfsURL, filepath.Base(targetPath), limit)
+	if err != nil {
+		return nil, err
 	}
 
 	// Validate the converted qcow2 (ADR-0006 D5 structural integrity for NFS).
-	if res, err := conn.RunHost(ctx, "qemu-img", "check", newDisk); err != nil {
+	if res, err := conn.RunHost(ctx, "qemu-img", "check", "-f", "qcow2", newDisk); err != nil {
 		return nil, fmt.Errorf("qemu-img check failed on imported qcow2 %s: %w%s", targetPath, err, qemuImgStderr(res))
 	}
 	// The disk-size limit, on the converted disk in the private directory,

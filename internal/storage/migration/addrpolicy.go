@@ -17,6 +17,7 @@ limitations under the License.
 package migration
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"net/url"
@@ -47,6 +48,11 @@ type HostPolicy struct {
 	allow           []*net.IPNet
 	allowConfigured bool
 }
+
+// ErrHostUnresolvable marks a ValidateHost failure that is a name-resolution
+// failure (DNS error, no addresses), which can be transient — unlike a
+// policy denial (an always-denied address, or one outside the allowlist).
+var ErrHostUnresolvable = errors.New("storage host could not be resolved")
 
 // NewHostPolicy builds a HostPolicy from operator-supplied allowlist entries,
 // each an IP or CIDR. An empty/nil list yields a permissive-except-always-denied
@@ -110,10 +116,10 @@ func (p *HostPolicy) ValidateHost(host string) error {
 
 	ips, err := resolveHost(h)
 	if err != nil {
-		return fmt.Errorf("cannot resolve storage host %q: %w", h, err)
+		return fmt.Errorf("cannot resolve storage host %q: %w: %w", h, ErrHostUnresolvable, err)
 	}
 	if len(ips) == 0 {
-		return fmt.Errorf("storage host %q resolved to no addresses", h)
+		return fmt.Errorf("storage host %q resolved to no addresses: %w", h, ErrHostUnresolvable)
 	}
 	for _, ip := range ips {
 		if isAlwaysDenied(ip) {

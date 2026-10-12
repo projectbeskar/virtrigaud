@@ -26,6 +26,7 @@ import (
 	"github.com/vmware/govmomi/vmdk"
 
 	"github.com/projectbeskar/virtrigaud/internal/diskutil"
+	"github.com/projectbeskar/virtrigaud/internal/storage/migration"
 	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
 	"github.com/projectbeskar/virtrigaud/sdk/provider/errors"
 )
@@ -108,20 +109,45 @@ func (p *Provider) importDiskFromNFS(ctx context.Context, req *providerv1.Import
 	p.logger.Info("Importing disk from NFS (qemu-img nfs:// -> streamOptimized vmdk + NFC lease)",
 		"id", id, "source", nfsURL, "backend", req.BackendType, "storage_hint", req.StorageHint)
 
-	// --- 1. READ + CONVERT in one pass: nfs:// qcow2 -> streamOptimized vmdk ---
-	// The pod's qemu-img reads the staged qcow2 directly from nfs:// (block-nfs) and
-	// writes the streamOptimized vmdk the NFC lease requires. No S3 download. The
-	// nfs:// URL passes through diskutil's exec argv unquoted-but-unshelled (no
-	// injection surface); it is C7'-hardened by the controller.
+	// --- 1. COPY, CHECK, CONVERT: nfs:// qcow2 -> local copy -> streamOptimized vmdk ---
+	// SECURITY: the staged object comes from an NFS server the tenant controls.
+	// It is first copied byte for byte into the pod (`-f raw` interprets no
+	// header and opens nothing else), bounded by size and by the pod's free
+	// /tmp space (boundedNFSCopy: the tenant controls the size, and a full /tmp
+	// evicts the provider pod for every tenant), so the tenant can no longer
+	// change what is checked and then converted. The local copy's header must reference no
+	// other file (checkStagedLocalImage): a backing file or data file would
+	// otherwise make the pod's qemu-img read its service-account token, its
+	// vCenter credentials or a json:/nbd:/http: target into the tenant's disk.
+	// Only then is it converted, read as qcow2 (-f qcow2), to the
+	// streamOptimized vmdk the NFC lease requires. The copy is removed on return.
 	vmdkLocal := fmt.Sprintf("/tmp/%s.vmdk", id)
-	defer func() { _ = os.Remove(vmdkLocal) }()
+	stagedLocal := fmt.Sprintf("/tmp/%s.staged.qcow2", id)
+	defer func() {
+		_ = os.Remove(vmdkLocal)
+		_ = os.Remove(stagedLocal)
+	}()
 
 	qemuImg := diskutil.NewQemuImg()
+	if p.qemuImgPath != "" {
+		qemuImg = diskutil.NewQemuImgWithPath(p.qemuImgPath)
+	}
 	if !qemuImg.IsInstalled() {
 		return nil, errors.NewInternal("qemu-img is not available in the provider image; cannot convert nfs import", nil)
 	}
+	// The copy and header limits include the import's disk-size limit (#382).
+	limit, err := migration.StagedCopyLimit(req.MaxVirtualSizeBytes)
+	if err != nil {
+		return nil, errors.NewInternal("invalid staged import size limit", err)
+	}
+	if err := p.boundedNFSCopy(ctx, nfsURL, stagedLocal, limit); err != nil {
+		return nil, err
+	}
+	if err := p.checkStagedLocalImage(ctx, stagedLocal, string(diskutil.FormatQCOW2), limit); err != nil {
+		return nil, err
+	}
 	if err := qemuImg.Convert(ctx, diskutil.ConvertOptions{
-		SourcePath:        nfsURL,
+		SourcePath:        stagedLocal,
 		DestinationPath:   vmdkLocal,
 		SourceFormat:      diskutil.FormatQCOW2,
 		DestinationFormat: diskutil.FormatVMDK,
