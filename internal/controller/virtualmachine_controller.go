@@ -1699,7 +1699,7 @@ func (r *VirtualMachineReconciler) createVMOn(
 	// begins from here on. One that began earlier — which the cached Provider
 	// may not show yet — is caught by re-reading it live: nothing is created
 	// through a Provider being deleted (ADR-0010).
-	if res, held := r.holdIfProviderDeletingLive(ctx, vm, vm.Status.DeepCopy(), providerCR); held {
+	if res, held := r.holdIfProviderDeletingLive(ctx, vm, providerCR, !clustered, attempt); held {
 		return res, nil
 	}
 

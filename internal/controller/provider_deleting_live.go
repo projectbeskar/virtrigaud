@@ -70,13 +70,21 @@ func providerDeletingLive(ctx context.Context, reader client.Reader, provider *i
 // gone), holds the VM instead (holdForDeletingProvider: Ready=False/
 // ProviderDeleting, a constant message, one Warning event, a slow re-check)
 // and reports held. A read error also holds — nothing is sent — and is
-// retried on the provider-error cadence. persisted is the status as it was
-// last written; the hold writes only when it changes it.
+// retried on the provider-error cadence.
+//
+// The hold compares against vm.Status as it stands on entry — for a fresh
+// single-host create or a first clustered placement, the status just written
+// (the create marker, or the pending host) — and writes only when it changes
+// it. A single-host create marker written for this attempt alone
+// (markerDroppableUnsent) is replaced: no Create was sent for it, so it must
+// not later read as a Create whose outcome is unknown. A marker of an earlier
+// attempt whose outcome is unknown (a re-send) is kept.
 func (r *VirtualMachineReconciler) holdIfProviderDeletingLive(
 	ctx context.Context,
 	vm *infravirtrigaudiov1beta1.VirtualMachine,
-	persisted *infravirtrigaudiov1beta1.VirtualMachineStatus,
 	providerCR *infravirtrigaudiov1beta1.Provider,
+	singleHost bool,
+	attempt createAttempt,
 ) (ctrl.Result, bool) {
 	deleting, err := providerDeletingLive(ctx, r.liveReader(), providerCR)
 	if err != nil {
@@ -86,7 +94,25 @@ func (r *VirtualMachineReconciler) holdIfProviderDeletingLive(
 	if !deleting {
 		return ctrl.Result{}, false
 	}
-	return r.holdForDeletingProvider(ctx, vm, persisted, providerCR), true
+	before := vm.Status.DeepCopy()
+	if singleHost && createRequested(vm) && markerDroppableUnsent(attempt) {
+		// holdForDeletingProvider then records Provisioning=False/
+		// ProviderDeleting in its place.
+		meta.RemoveStatusCondition(&vm.Status.Conditions, k8s.ConditionProvisioning)
+	}
+	return r.holdForDeletingProvider(ctx, vm, before, providerCR), true
+}
+
+// markerDroppableUnsent reports whether the create marker requestCreate just
+// wrote for attempt stands for this attempt alone, so it may be removed when
+// the Create is then not sent: the VM had no marker before (markerID ""), or
+// an operator confirmed that the earlier attempt made no VM. A re-send keeps
+// it: the earlier attempt's outcome is still unknown.
+func markerDroppableUnsent(attempt createAttempt) bool {
+	if attempt.resend {
+		return false
+	}
+	return attempt.markerID == "" || attempt.confirmed
 }
 
 // cloneProviderDeletingMessage is the Ready message of a VMClone held because

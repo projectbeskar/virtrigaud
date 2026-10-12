@@ -503,7 +503,9 @@ deletion began. So right before every `Create` (after the marker or the
 pending host is recorded), `Clone` and `ImportDisk`, the `Provider` is re-read
 from the API server, and nothing is sent when it is being deleted, gone or
 replaced: the `VirtualMachine`, `VMClone` or `VMMigration` gets
-`Ready=False/ProviderDeleting` (a VM keeps a marker written just before), with
+`Ready=False/ProviderDeleting` (a create marker written for this attempt alone is
+replaced by `Provisioning=False/ProviderDeleting`, since no Create was sent; the
+marker of an earlier attempt whose outcome is unknown is kept), with
 a constant message and one `Warning` event, re-checked every minute (ADR-0010).
 
 ## Upgrade notes

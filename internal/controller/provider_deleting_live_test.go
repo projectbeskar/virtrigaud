@@ -112,13 +112,29 @@ func TestReconcileVM_SingleHost_NoCreateWhenProviderDeletingLive(t *testing.T) {
 
 		held, _ := storedVM(t, r)
 		assert.Empty(t, held.Status.ID)
-		assert.True(t, createRequested(held), "the create marker is kept: it was written before the live check")
-		ready := meta.FindStatusCondition(held.Status.Conditions, k8s.ConditionReady)
-		require.NotNil(t, ready)
-		assert.Equal(t, k8s.ReasonProviderDeleting, ready.Reason)
-		assert.Equal(t, providerDeletingMessage, ready.Message)
+		assert.False(t, createRequested(held),
+			"the marker written for this attempt is replaced: no Create was sent, so it never reads as an unknown outcome")
+		for _, condType := range []string{k8s.ConditionReady, k8s.ConditionProvisioning} {
+			c := meta.FindStatusCondition(held.Status.Conditions, condType)
+			require.NotNil(t, c, condType)
+			assert.Equal(t, k8s.ReasonProviderDeleting, c.Reason, condType)
+			assert.Equal(t, providerDeletingMessage, c.Message, condType)
+			assert.Equal(t, held.Generation, c.ObservedGeneration, condType)
+		}
 		assert.Equal(t, 1, providerDeletingEvents(rec))
 	}
+}
+
+// Only a marker that stands for the unsent attempt alone is dropped; a
+// re-send keeps the earlier attempt's marker (its outcome is unknown).
+func TestMarkerDroppableUnsent(t *testing.T) {
+	assert.True(t, markerDroppableUnsent(createAttempt{}), "a fresh create")
+	assert.True(t, markerDroppableUnsent(createAttempt{priorID: "vm-1"}), "a re-create of a vanished VM")
+	assert.True(t, markerDroppableUnsent(createAttempt{markerID: "2026-10-12T10:00:00Z", confirmed: true}),
+		"an operator confirmed the earlier attempt made nothing")
+	assert.False(t, markerDroppableUnsent(createAttempt{markerID: "2026-10-12T10:00:00Z", resend: true}), "a re-send")
+	assert.False(t, markerDroppableUnsent(createAttempt{markerID: "2026-10-12T10:00:00Z"}),
+		"any other attempt over an earlier marker")
 }
 
 func TestVMClone_NoCloneWhenProviderDeletingLive(t *testing.T) {
