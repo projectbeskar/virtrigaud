@@ -27,6 +27,7 @@ import (
 	"os"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/mux"
@@ -40,13 +41,15 @@ type Server struct {
 	snapshots map[string][]*Snapshot
 	// hiddenFromResources are VMs /cluster/resources leaves out (ACL).
 	hiddenFromResources map[int]bool
-	lastDownload        *DownloadRequest
-	lastPowerOp         *PowerOpRequest
-	requests            []RecordedRequest
-	nextID              int
-	mu                  sync.RWMutex
-	logger              *slog.Logger
-	config              *Config
+	// errorsInStatusLine sends error messages in the HTTP reason phrase.
+	errorsInStatusLine atomic.Bool
+	lastDownload       *DownloadRequest
+	lastPowerOp        *PowerOpRequest
+	requests           []RecordedRequest
+	nextID             int
+	mu                 sync.RWMutex
+	logger             *slog.Logger
+	config             *Config
 }
 
 // RecordedRequest is one API request the fake server received, recorded before
@@ -925,8 +928,15 @@ func (s *Server) writeResponse(w http.ResponseWriter, data interface{}) {
 	_ = json.NewEncoder(w).Encode(response)
 }
 
-// writeError writes an error response
+// writeError writes an error response. By default the message is in the
+// body; with ErrorsInStatusLine it is in the HTTP reason phrase with a body
+// of {"data":null}, as real PVE answers.
 func (s *Server) writeError(w http.ResponseWriter, statusCode int, message string) {
+	// Not under s.mu: handlers call writeError while holding it.
+	if s.errorsInStatusLine.Load() {
+		writeStatusLineError(w, statusCode, message)
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(statusCode)
 
@@ -934,6 +944,35 @@ func (s *Server) writeError(w http.ResponseWriter, statusCode int, message strin
 		Errors: map[string]string{"error": message},
 	}
 	_ = json.NewEncoder(w).Encode(response)
+}
+
+// writeStatusLineError answers with statusCode and message as the HTTP reason
+// phrase, and the body {"data":null}, as real PVE does. net/http always
+// writes the standard reason phrase, so the connection is hijacked and the
+// response written raw (and the connection closed).
+func writeStatusLineError(w http.ResponseWriter, statusCode int, message string) {
+	hj, ok := w.(http.Hijacker)
+	if !ok {
+		w.WriteHeader(statusCode)
+		_, _ = w.Write([]byte(`{"data":null}`))
+		return
+	}
+	conn, buf, err := hj.Hijack()
+	if err != nil {
+		return
+	}
+	defer conn.Close() //nolint:errcheck // test fake
+	body := `{"data":null}`
+	_, _ = fmt.Fprintf(buf, "HTTP/1.1 %d %s\r\nContent-Type: application/json;charset=UTF-8\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s",
+		statusCode, message, len(body), body)
+	_ = buf.Flush()
+}
+
+// ErrorsInStatusLine makes the fake answer errors as real PVE does: the
+// message in the HTTP status line's reason phrase, the body {"data":null}
+// (tests).
+func (s *Server) ErrorsInStatusLine(on bool) {
+	s.errorsInStatusLine.Store(on)
 }
 
 // handleGetVMConfig handles VM configuration retrieval

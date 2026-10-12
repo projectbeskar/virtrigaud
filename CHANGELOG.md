@@ -51,7 +51,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     - NotFound only when the VM is absent cluster-wide, the snapshot is not listed on its node, or PVE answers "snapshot '<name>' does not exist".
     - "Absent cluster-wide" is confirmed with the permission-independent `GET /cluster/nextid?vmid=<id>`, because `/cluster/resources` hides VMs the token may not audit. A VMID in use but not listed is Unavailable, and a likely ACL problem is logged.
     - A bare 404 or any other failure is Unavailable (retried); `DeleteSnapshot` no longer treats a 404 as success.
-    - pvefake is node-aware.
+    - PVE error messages are matched in `pveErrorText(resp)`, which reads the HTTP status line's reason phrase (where real PVE puts them, with a body of `{"data":null}`) and the body. A text that matches nothing stays retryable, never NotFound.
+    - pvefake is node-aware, and can answer errors in the status line.
 - `internal/controller/vmclone_controller.go`, `internal/transport/grpc/request_sent.go` (new), `client.go`, `internal/providers/contracts/not_performed.go` (new), `internal/providers/libvirt/server.go`, `clone.go`: a single-host clone that fails transiently is held (`Pending`, `CloneRetrying`, a constant message, one Warning event, the blocked-VM backoff), not failed for good. It is retried only when nothing was done (`contracts.IsNothingDone`).
   - **The request never reached the provider.** This is proven, failing closed: the client's stats handler reported the RPC's Begin and no OutHeader followed (no connection was made), or the circuit breaker fast-failed (a typed error). Such a failure is marked `ErrRequestNotSent`. With no Begin at all (no stats handler), the outcome is unknown. `NewClient` and the tests share one call-options builder.
   - **The provider answered that it did nothing.** That is Unavailable with `VM_OPERATION_FAILED`, `HOST_UNAVAILABLE` or `VM_DISK_CHECK_FAILED`.

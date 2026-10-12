@@ -215,10 +215,34 @@ type Task struct {
 // move), and a bare HTTP 404 is no answer from PVE at all.
 var ErrSnapshotNotExist = errors.New("snapshot does not exist")
 
-// pveSnapshotDoesNotExist reports whether a non-200 PVE answer body says that
-// snapshot name does not exist.
-func pveSnapshotDoesNotExist(body []byte, name string) bool {
-	return strings.Contains(string(body), fmt.Sprintf("snapshot '%s' does not exist", name))
+// pveErrorTextLimit bounds how much of an error response body pveErrorText
+// reads.
+const pveErrorTextLimit = 4096
+
+// pveErrorText returns the error text of a non-2xx PVE answer: its HTTP status
+// line (resp.Status — PVE puts the error message in the reason phrase, e.g.
+// "500 snapshot 'x' does not exist", with a body of {"data":null}) followed by
+// up to pveErrorTextLimit bytes of its body (where a proxy, or a PVE version
+// that reports errors there, puts it). It consumes the body. Every match of a
+// PVE error message must read this text, never the body alone; a text that
+// matches nothing is an ordinary, retryable error.
+func pveErrorText(resp *http.Response) string {
+	if resp == nil {
+		return ""
+	}
+	text := resp.Status
+	if resp.Body != nil {
+		if body, err := io.ReadAll(io.LimitReader(resp.Body, pveErrorTextLimit)); err == nil && len(body) > 0 {
+			text += " " + string(body)
+		}
+	}
+	return text
+}
+
+// pveSnapshotDoesNotExist reports whether a non-200 PVE answer's error text
+// (pveErrorText) says that snapshot name does not exist.
+func pveSnapshotDoesNotExist(errText, name string) bool {
+	return strings.Contains(errText, fmt.Sprintf("snapshot '%s' does not exist", name))
 }
 
 // VMIDInUse reports whether VMID vmid is in use in the cluster, through GET
@@ -233,11 +257,10 @@ func (c *Client) VMIDInUse(ctx context.Context, vmid int) (bool, error) {
 		return false, fmt.Errorf("failed to probe VMID %d: %w", vmid, err)
 	}
 	defer resp.Body.Close() //nolint:errcheck // Response body close in defer is not critical
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-	switch {
-	case resp.StatusCode == http.StatusOK:
+	if resp.StatusCode == http.StatusOK {
 		return false, nil
-	case resp.StatusCode == http.StatusBadRequest && strings.Contains(string(body), "already exists"):
+	}
+	if resp.StatusCode == http.StatusBadRequest && strings.Contains(pveErrorText(resp), "already exists") {
 		return true, nil
 	}
 	return false, fmt.Errorf("probe VMID %d failed with status %d", vmid, resp.StatusCode)
@@ -1051,11 +1074,11 @@ func (c *Client) DeleteSnapshot(ctx context.Context, node string, vmid int, snap
 	if resp.StatusCode != 200 {
 		// Only PVE's snapshot-specific answer means the snapshot is gone; a
 		// bare 404 or a VM not on this node is an error.
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		if pveSnapshotDoesNotExist(body, snapname) {
+		errText := pveErrorText(resp)
+		if pveSnapshotDoesNotExist(errText, snapname) {
 			return "", fmt.Errorf("delete snapshot %q of VM %d: %w", snapname, vmid, ErrSnapshotNotExist)
 		}
-		return "", fmt.Errorf("delete snapshot failed with status %d: %s", resp.StatusCode, string(body))
+		return "", fmt.Errorf("delete snapshot failed: %s", errText)
 	}
 
 	var apiResp APIResponse
