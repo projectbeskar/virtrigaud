@@ -1717,7 +1717,7 @@ func (c *Client) mapGRPCStatus(operation string, err error) error {
 			return contracts.NewRetryableError(fmt.Sprintf("%s: %s", operation, st.Message()),
 				fmt.Errorf("%w: %w", contracts.ErrVMSourceRunning, err))
 		}
-		return fmt.Errorf("%s failed: %s", operation, st.Message())
+		return &untypedRPCError{msg: fmt.Sprintf("%s failed: %s", operation, st.Message()), cause: err}
 	case codes.Unavailable, codes.DeadlineExceeded:
 		// The request never reached the provider (no connection was made, or
 		// the circuit breaker refused it): nothing was done, so even a
@@ -1751,9 +1751,25 @@ func (c *Client) mapGRPCStatus(operation string, err error) error {
 		// classified non-retryable (a missing RPC will not appear on retry).
 		return contracts.NewNotSupportedError(fmt.Sprintf("%s: %s", operation, st.Message()))
 	default:
-		return fmt.Errorf("%s failed: %s", operation, st.Message())
+		return &untypedRPCError{msg: fmt.Sprintf("%s failed: %s", operation, st.Message()), cause: err}
 	}
 }
+
+// untypedRPCError is a provider answer mapGRPCError does not categorize. Its
+// text is unchanged ("<operation> failed: <message>"), and it keeps the gRPC
+// status in its chain, so a caller can read the answer's code and details
+// (status.FromError): e.g. a non-retryable FailedPrecondition, or a
+// VM_OPERATION_FAILED carried on codes.Unknown.
+type untypedRPCError struct {
+	msg   string
+	cause error
+}
+
+// Error returns the categorized text.
+func (e *untypedRPCError) Error() string { return e.msg }
+
+// Unwrap returns the gRPC status error.
+func (e *untypedRPCError) Unwrap() error { return e.cause }
 
 // TLSConfig represents TLS configuration for gRPC clients.
 //

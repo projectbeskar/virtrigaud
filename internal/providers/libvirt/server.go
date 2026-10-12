@@ -298,6 +298,12 @@ func (s *Server) Describe(ctx context.Context, req *providerv1.DescribeRequest) 
 		if s.clusteredProvider() {
 			return nil, routedRPCError("describe VM", err)
 		}
+		// A domain that does not exist is a definite NotFound on the wire
+		// (the manager's delete-time confirmation relies on it).
+		var pe *contracts.ProviderError
+		if stderrors.As(err, &pe) && pe.Type == contracts.ErrorTypeNotFound {
+			return nil, status.Error(codes.NotFound, "failed to describe VM: "+pe.Message)
+		}
 		return nil, fmt.Errorf("failed to describe VM: %w", err)
 	}
 

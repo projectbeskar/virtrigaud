@@ -22,9 +22,11 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -64,18 +66,9 @@ func (r *VirtualMachineReconciler) orphanRefusal(ctx context.Context, vm *infrav
 	if !vmIsBound(vm) {
 		return ctrl.Result{}, false, nil
 	}
-	key := placementProviderKey(vm)
-	provider := &infravirtrigaudiov1beta1.Provider{}
-	if err := r.Get(ctx, key, provider); err != nil {
-		if apierrors.IsNotFound(err) {
-			return ctrl.Result{}, false, nil // no Provider, no accounting to leave
-		}
-		return ctrl.Result{}, false, fmt.Errorf("get Provider %s to decide orphan-on-delete of VirtualMachine %s/%s: %w",
-			key, vm.Namespace, vm.Name, err)
-	}
-	if !isClusterTopology(provider) || vm.Namespace == provider.Namespace ||
-		provider.Annotations[infravirtrigaudiov1beta1.ProviderAllowConsumerOrphanOnDeleteAnnotation] == "true" {
-		return ctrl.Result{}, false, nil
+	key, denied, err := r.consumerDetachDenied(ctx, vm, infravirtrigaudiov1beta1.VirtualMachineOrphanOnDeleteAnnotation)
+	if err != nil || !denied {
+		return ctrl.Result{}, false, err
 	}
 
 	msg := fmt.Sprintf("%s=true is not honoured: VirtualMachines in namespace %s may not detach VMs from the clustered Provider %s "+
@@ -100,4 +93,111 @@ func (r *VirtualMachineReconciler) orphanRefusal(ctx context.Context, vm *infrav
 	}
 	r.updateStatus(ctx, vm)
 	return ctrl.Result{RequeueAfter: orphanRefusedRetryInterval}, true, nil
+}
+
+// consumerDetachDenied reports whether vm may NOT leave its hypervisor VM
+// behind (orphan-on-delete, or force-delete without a confirmed provider
+// delete; annotation names which, for the error) because it is a consumer of
+// a clustered Provider that has not allowed it (review M4): its placement
+// Provider exists, has topology: cluster, is in another namespace than vm, and
+// does not carry ProviderAllowConsumerOrphanOnDeleteAnnotation: "true". It
+// returns the Provider's key for the caller's message. A Provider that does
+// not exist denies nothing (no accounting to leave); a failed read is
+// returned as an error. The caller decides whether vm has anything to leave.
+func (r *VirtualMachineReconciler) consumerDetachDenied(
+	ctx context.Context,
+	vm *infravirtrigaudiov1beta1.VirtualMachine,
+	annotation string,
+) (types.NamespacedName, bool, error) {
+	key := placementProviderKey(vm)
+	provider := &infravirtrigaudiov1beta1.Provider{}
+	if err := r.Get(ctx, key, provider); err != nil {
+		if apierrors.IsNotFound(err) {
+			return key, false, nil
+		}
+		return key, false, fmt.Errorf("get Provider %s to decide %s of VirtualMachine %s/%s: %w",
+			key, annotation, vm.Namespace, vm.Name, err)
+	}
+	denied := isClusterTopology(provider) && vm.Namespace != provider.Namespace &&
+		provider.Annotations[infravirtrigaudiov1beta1.ProviderAllowConsumerOrphanOnDeleteAnnotation] != "true"
+	return key, denied, nil
+}
+
+// errReasonForceDeleteNotAllowed is the metrics reason of a refused
+// force-delete.
+const errReasonForceDeleteNotAllowed = "force-delete-not-allowed"
+
+// forceDeleteRefusedMessage is the ConditionForceDeleteRefused message (and
+// Warning event) of a refused force-delete of a VM in namespace ns whose
+// clustered Provider is provider. It is constant for a given VM.
+func forceDeleteRefusedMessage(ns string, provider types.NamespacedName) string {
+	return fmt.Sprintf("%s=true is not honoured: VirtualMachines in namespace %s may not be released from the clustered "+
+		"Provider %s without a confirmed provider delete (the hypervisor VM would keep running on its host outside the "+
+		"capacity accounting). The delete keeps being retried as if the annotation were not set; ask the Provider's "+
+		"administrator to set %s=\"true\" on it, or to remove the hypervisor VM",
+		forceDeleteAnnotation, ns, provider, infravirtrigaudiov1beta1.ProviderAllowConsumerOrphanOnDeleteAnnotation)
+}
+
+// forceDeleteHonoured decides, for a VirtualMachine being deleted, whether
+// its force-delete escape hatch may release it without a confirmed provider
+// delete. It is false when the annotation is not set, and — the cross-namespace
+// gate, as for orphan-on-delete (orphanRefusal) — when vm has something to
+// leave behind (it is bound, or its own domain was found on another host)
+// and is a consumer of a clustered Provider that has not allowed it
+// (consumerDetachDenied). A refused force-delete is ignored: the delete is
+// retried as if it were not set, and ConditionForceDeleteRefused=True (with a
+// Warning event when it is set) says why it does not release the VM.
+// Same-namespace VMs and single-host Providers are unchanged.
+//
+// The condition is removed once the force-delete is honoured or the
+// annotation is gone. Its status is written only when that changes something,
+// so a repeated refusal writes nothing. A failed Provider read is returned as
+// an error (the finalizer stays).
+func (r *VirtualMachineReconciler) forceDeleteHonoured(ctx context.Context, vm *infravirtrigaudiov1beta1.VirtualMachine) (bool, error) {
+	if !hasForceDeleteAnnotation(vm) {
+		r.clearForceDeleteRefused(ctx, vm)
+		return false, nil
+	}
+	if !vmIsBound(vm) && !heldForOwnDomainElsewhere(vm) {
+		r.clearForceDeleteRefused(ctx, vm)
+		return true, nil
+	}
+	key, denied, err := r.consumerDetachDenied(ctx, vm, forceDeleteAnnotation)
+	if err != nil {
+		return false, err
+	}
+	if !denied {
+		r.clearForceDeleteRefused(ctx, vm)
+		return true, nil
+	}
+
+	msg := forceDeleteRefusedMessage(vm.Namespace, key)
+	persisted := vm.Status.DeepCopy()
+	prev := meta.FindStatusCondition(vm.Status.Conditions, k8s.ConditionForceDeleteRefused)
+	isNew := prev == nil || prev.Status != metav1.ConditionTrue
+	meta.SetStatusCondition(&vm.Status.Conditions, metav1.Condition{
+		Type:               k8s.ConditionForceDeleteRefused,
+		Status:             metav1.ConditionTrue,
+		Reason:             k8s.ReasonForceDeleteNotAllowed,
+		Message:            msg,
+		ObservedGeneration: vm.Generation,
+	})
+	log.FromContext(ctx).Info("Not honouring force-delete of a consumer VM on a clustered Provider; the delete is retried as if it were not set",
+		"provider", key.String(), "annotation", forceDeleteAnnotation)
+	metrics.RecordError(errReasonForceDeleteNotAllowed, metrics.ComponentManager)
+	if !equality.Semantic.DeepEqual(persisted, &vm.Status) {
+		r.updateStatus(ctx, vm)
+	}
+	if isNew {
+		r.recordEvent(vm, corev1.EventTypeWarning, k8s.ReasonForceDeleteNotAllowed, msg)
+	}
+	return false, nil
+}
+
+// clearForceDeleteRefused removes ConditionForceDeleteRefused from vm and
+// writes the status when it was there.
+func (r *VirtualMachineReconciler) clearForceDeleteRefused(ctx context.Context, vm *infravirtrigaudiov1beta1.VirtualMachine) {
+	if meta.RemoveStatusCondition(&vm.Status.Conditions, k8s.ConditionForceDeleteRefused) {
+		r.updateStatus(ctx, vm)
+	}
 }

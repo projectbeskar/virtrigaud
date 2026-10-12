@@ -908,12 +908,13 @@ in another namespace than its clustered Provider is detached only when the
 Provider carries `infra.virtrigaud.io/allow-consumer-orphan-on-delete: "true"`.
 Otherwise its deletion is held with `Ready=False/OrphanOnDeleteNotAllowed`
 until the administrator allows it or the annotation is removed (see
-[`vm-provider-binding.md`](vm-provider-binding.md)). The same caution applies
-to `virtrigaud.io/force-delete`: if it releases a VM whose provider `Delete`
-failed (for example the host was unreachable), the domain may keep running
-outside the accounting. That cannot be done on purpose, since the `Delete`
-has to fail, but after a force-delete check the host and cordon it, or lower
-its overcommit ratio, until the leftover domain is gone.
+[`vm-provider-binding.md`](vm-provider-binding.md)). `virtrigaud.io/force-delete`
+needs the same permission for such a VM: if it released a VM whose provider
+`Delete` failed or was held (for example the host was unreachable), the domain
+would keep running outside the accounting, so without the permission it is
+ignored (`ForceDeleteRefused=True/ForceDeleteNotAllowed`) and the delete keeps
+being retried. After an allowed force-delete, check the host and cordon it, or
+lower its overcommit ratio, until the leftover domain is gone.
 
 **No per-tenant quota.** Nothing limits how much of a shared clustered Provider
 one consumer namespace may take: hosts fill first come, first served. If you
@@ -1779,8 +1780,9 @@ and the delete is retried with a backoff per VM — 15 seconds, doubling up to
 detach the VM with `virtrigaud.io/orphan-on-delete=true` (the domain and its
 disks stay for manual removal; a VM in another namespace than the Provider
 needs the Provider's permission, see above) or `virtrigaud.io/force-delete`
-(the same, after the failed delete) — both are acted on at once, whatever the
-backoff; or remove the dead host from the Provider (below).
+(the same, after the failed delete, with the same permission) — both are acted
+on at once, whatever the backoff; or remove the dead host from the Provider
+(below).
 
 The same hold, with reason `ProviderUnavailable`, applies when the manager
 cannot reach the Provider itself — its runtime is not `Running` (the provider

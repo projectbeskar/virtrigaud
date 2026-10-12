@@ -157,7 +157,9 @@ used). Otherwise the VM reports `Ready=False` / `ConsumerNotAllowed` and no
 provider call is made — for a bound VM too. Like a `ProviderRefMismatch`,
 deleting such a VM keeps the finalizer (also when that cross-namespace
 `Provider` no longer exists) until access is restored or the VM carries
-`virtrigaud.io/orphan-on-delete` or `virtrigaud.io/force-delete`. See
+`virtrigaud.io/orphan-on-delete` or `virtrigaud.io/force-delete` (on a
+clustered `Provider`, both need that `Provider`'s permission, see
+[Detaching a VM without deleting it](#detaching-a-vm-without-deleting-it-virtrigaudioorphan-on-delete)). See
 [`cross-namespace-references.md`](cross-namespace-references.md).
 
 ## 3. The manager checks the installed CRD
@@ -249,7 +251,7 @@ This replaces the previous workaround — pointing `spec.providerRef` at a
 `Provider` that doesn't exist and then deleting the `VirtualMachine` — which the
 CRD rule now rejects for a bound VM.
 
-`virtrigaud.io/force-delete: "true"` is unchanged. It releases the finalizer
+`virtrigaud.io/force-delete: "true"` releases the finalizer
 when the provider `Delete` keeps failing, when no delete can be routed (an
 unbound clustered VM, a placement/topology mismatch, a `ProviderRefMismatch`,
 a cross-namespace `Provider` the VM's namespace may not use
@@ -267,12 +269,27 @@ On a clustered `Provider`, a force-delete that releases a VM whose `Delete`
 failed or was held (`HostUnreachable`, `DiskCheckFailed`, `DiskInUse`,
 `OwnDomainOnAnotherHost`, `ProviderUnavailable`) leaves its domain running on
 the host outside the committed-capacity accounting; check the host (and cordon
-it or lower its overcommit ratio) until the leftover domain is removed. This is
-not limited to administrators: whoever can annotate and delete a
-`VirtualMachine` — a tenant included, on its own VM while its delete is held —
-can force-delete it. Restricting that for VMs in another namespace than their
-clustered `Provider` is a tracked follow-up; until then, use a policy engine
-(Kyverno, Gatekeeper) if tenants must not force-delete their VMs.
+it or lower its overcommit ratio) until the leftover domain is removed.
+
+So, as for `orphan-on-delete`, a VM in **another namespace** than its clustered
+`Provider` (a consumer) is force-deleted only when the `Provider`'s
+administrator has set `infra.virtrigaud.io/allow-consumer-orphan-on-delete:
+"true"` on it — the same permission covers both, since both leave the domain
+running outside the accounting. Otherwise the annotation is **ignored**: the
+finalizer stays, the VM gets `ForceDeleteRefused=True` with reason
+`ForceDeleteNotAllowed` (a constant message naming the `Provider` and the
+permission) and one `Warning` event `ForceDeleteNotAllowed`, and the delete
+keeps being retried exactly as if the annotation were not set — `Ready` and,
+on a clustered VM, `DeleteBlocked` still say why it waits. It completes as soon
+as the provider deletes the VM (or answers that it is gone, for example after
+the administrator removed it by hand). Removing the annotation, or the
+`Provider` allowing it, removes the condition. Each refusal counts under
+`virtrigaud_errors_total{reason="force-delete-not-allowed"}`. This applies to a
+consumer VM that is bound, or whose own domain was found on another host; a VM
+in the `Provider`'s own namespace and every VM of a single-host `Provider` are
+force-deleted as before. It also applies when the VM's namespace may no longer
+use the `Provider` (`ConsumerNotAllowed`) or its reference no longer matches
+(`ProviderRefMismatch`): the `Provider`'s administrator then decides.
 
 ### Deleting a VM while its `Provider` cannot be reached
 
@@ -302,13 +319,17 @@ releases released it, leaving the hypervisor VM running unmanaged):
   constant message; the provider's answer is in the manager log).
 - `orphan-on-delete` (no `Provider` is resolved) and `force-delete` release it
   at once; the hypervisor VM is then left for manual removal. On a clustered
-  `Provider` in **another namespace**, `orphan-on-delete` needs the Provider's
-  permission (above) but `force-delete` does not: it releases the held VM
-  without any provider `Delete`, so its domain keeps running on its host, no
-  longer counted toward that host's committed capacity, and re-creating a VM
-  with the same namespace and name is then held at `Placed=False/RestorePending`
-  until that domain is re-attached or removed
-  ([`clustered-restore.md`](clustered-restore.md)).
+  `Provider` in **another namespace**, both need the Provider's permission
+  (above); without it the delete stays held. A force-deleted clustered VM's
+  domain keeps running on its host, no longer counted toward that host's
+  committed capacity, and re-creating a VM with the same namespace and name is
+  then held at `Placed=False/RestorePending` until that domain is re-attached
+  or removed ([`clustered-restore.md`](clustered-restore.md)).
+- A held delete is retried on its backoff only. The `VirtualMachine`
+  controller reconciles a VM being deleted when its deletion is requested and
+  then only when its annotations or finalizers change — never on its own
+  status writes — so `orphan-on-delete` or `force-delete` set while it is held
+  is acted on at once, and a hold does not re-run itself.
 
 A `Provider` that no longer exists in the VM's own namespace is different:
 there is nothing to delete through, and the finalizer is released as before.
@@ -394,6 +415,74 @@ once no VM uses it, remove the finalizer by hand:
 kubectl patch provider <name> -n <namespace> --type=json \
   -p '[{"op":"remove","path":"/metadata/finalizers"}]'
 ```
+
+## A Create whose outcome is unknown (`CreateRequested`)
+
+A single-host `VirtualMachine` has no provider id until its Create is
+recorded. So that a VM made by a Create is never lost track of, the manager
+re-reads the `VirtualMachine` live, then records `Provisioning=True` with
+reason **`CreateRequested`** (and the `Provider` it is sent through,
+`status.boundProvider`) over that read, with an optimistic lock on its
+`resourceVersion`; only once that write is confirmed is the Create sent. Each
+such write is one **attempt**, identified by the condition's
+`lastTransitionTime` (RFC 3339). The Create's outcome — `status.id` and its
+`Provisioning` condition — replaces the marker. The marker is kept when the
+outcome is unknown: a transport failure or deadline, an error the provider did
+not classify as a refusal, a `VM_OPERATION_FAILED`, `HOST_UNAVAILABLE` or
+`VM_DISK_CHECK_FAILED` answer (a provider also sends these for an operation
+that may still complete on its host), or **any** failure answering a re-send
+of the Create: that answer is about the re-send only and says nothing about
+what the earlier attempt made (vSphere, for example, answers `Conflict` for
+its own VM while the clone is still running). A re-send is retried with a
+backoff from its last attempt (15 seconds, then about as long as the failures
+have lasted, up to 5 minutes), and is not sent while the VM is being deleted
+or its spec changed since the reconcile read it. On a first Create, a
+`Conflict`, `InvalidSpec`, `NotFound`, `NotSupported`,
+`Unauthorized`, `QuotaExceeded`, an answer carrying the reason
+`CREATE_NOT_PERFORMED` (the provider made nothing), and a non-retryable
+`FailedPrecondition` or `PermissionDenied` replace it. The last two hold the VM
+with `Ready=False/CreateRefused` (one `Warning` event carrying the provider's
+answer) and are re-checked with a backoff of 15 seconds doubling to 5
+minutes. In any owner-stamp lookup, a listed VM whose stamp the provider
+reports it cannot read (`owner_stamp_state`) makes the answer ambiguous, and
+the VM is held. While the manager
+keeps running it also remembers a created id whose record failed, and writes
+it on the next reconcile.
+
+A VM with the marker and no `status.id`:
+
+| Provider | Create | Delete |
+|---|---|---|
+| vSphere | The Create is sent again: the provider re-binds the VM stamped with this VirtualMachine's UID. | Held (`CreateOutcomeUnknown`): vSphere's `ListVMs` does not report owner stamps. |
+| libvirt | The Create is sent again (re-bind, as above). | The VM stamped with this VirtualMachine's UID is found (`ListVMs`) and deleted by id. If none is listed, the finalizer is released only on a positive confirmation: once no Create can still be running (10 minutes after it was requested), each domain name the Create could have used (`<namespace>.<name>`, and the bare name) must answer a definite not-found — the libvirt provider answers `NotFound` when virsh reports no such domain — and a Normal `CreateConfirmedAbsent` event is recorded. Any other answer holds the delete. |
+| Proxmox | The Create is sent again: the provider re-binds the VM stamped with this VirtualMachine's UID. A VM created by a Proxmox provider image that does not stamp (before `feat/rc1-proxmox-owner-stamp`) cannot be re-bound, so roll the provider with or before the manager. | The VM stamped with this VirtualMachine's UID is found (`ListVMs`) and deleted by id. If none is listed, held: a VMID cannot be confirmed absent by name (so is a legacy, unstamped VM). |
+| The mock provider | Held: `Ready=False/CreateOutcomeUnknown`, one `Warning` event, re-checked every minute. A second Create would make a second VM. | Held (`CreateOutcomeUnknown`). |
+
+To resolve a held VM, check the hypervisor for it:
+
+- **It exists:** record its id, and the VM is managed (or, if being deleted,
+  deleted) as usual:
+  `kubectl patch virtualmachine <name> -n <ns> --subresource=status --type=merge -p '{"status":{"id":"<provider id>"}}'`
+  (a Proxmox VMID, a vSphere managed object id such as `vm-1234`).
+- **It does not exist:** confirm it for this attempt:
+  `kubectl annotate virtualmachine <name> -n <ns> virtrigaud.io/create-outcome=not-created@<attempt id>`,
+  where the attempt id is the `lastTransitionTime` of the `Provisioning`
+  condition:
+  `kubectl get virtualmachine <name> -n <ns> -o jsonpath='{.status.conditions[?(@.type=="Provisioning")].lastTransitionTime}'`.
+  The manager checks it against the live object, records a `Warning` event
+  **`CreateOutcomeConfirmed`** (audit), removes the annotation and creates
+  the VM (or, while it is being deleted, releases it). A value naming another
+  attempt, or any other value, is ignored and removed; the annotation is also
+  removed before every new attempt, so a confirmation never carries over.
+- A held delete is also released by `virtrigaud.io/force-delete: "true"`
+  (with a `VMLeftOnHypervisor` event) or detached by
+  `virtrigaud.io/orphan-on-delete: "true"`.
+
+A VM with the marker whose `spec.providerRef` no longer names the `Provider`
+the Create was sent through is refused like a bound one
+(`ProviderRefMismatch`). The marker counts as using the `Provider` (with
+`status.id` and `status.placement.pendingHost`); a VM held because its
+`Provider` is being deleted (`ProviderDeleting`) never gets one.
 
 ## Upgrade notes
 

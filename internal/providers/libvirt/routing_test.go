@@ -731,13 +731,15 @@ func TestSingleHost_DeleteAbsentStillCleansOrphans(t *testing.T) {
 }
 
 // TestSingleHost_ServerErrorsKeepLegacyWireForm pins that the routed error
-// mapping is clustered-only: a single-host Describe failure keeps the
-// historical wrapped (codes.Unknown) form.
+// mapping is clustered-only. A single-host Describe of a domain virsh does not
+// have is a definite codes.NotFound (VIR_ERR_NO_DOMAIN,
+// describe_notfound_test.go); any other single-host Describe failure keeps
+// the historical wrapped (codes.Unknown) form.
 func TestSingleHost_ServerErrorsKeepLegacyWireForm(t *testing.T) {
 	newRoutingFixture(t, map[string]map[string]string{"single": {}})
 	p := &Provider{virshProvider: localHostVP("single")}
 	_, err := NewServer(p).Describe(context.Background(), &providerv1.DescribeRequest{Id: "gone"})
 	require.Error(t, err)
-	assert.Equal(t, codes.Unknown, status.Code(err))
+	assert.Equal(t, codes.NotFound, status.Code(err))
 	assert.Contains(t, err.Error(), "failed to describe VM")
 }

@@ -213,7 +213,7 @@ func (r *VirtualMachineReconciler) recordReconfigureFailure(vm *infravirtrigaudi
 		Type:               k8s.ConditionReconfiguring,
 		Status:             metav1.ConditionFalse,
 		Reason:             k8s.ReasonProviderError,
-		Message:            fmt.Sprintf("Failed to reconfigure VM: %v", err),
+		Message:            "Failed to reconfigure VM: " + providerFailureDetail(err),
 		ObservedGeneration: vm.Generation,
 	})
 	return retryAfter

@@ -54,11 +54,12 @@ const (
 // that, set to "true" on a clustered Provider by its administrator, lets
 // VirtualMachines in OTHER namespaces
 // (consumers granted through spec.consumerNamespaceSelector) be detached with
-// virtrigaud.io/orphan-on-delete. Without it, only VMs in the Provider's own
-// namespace may be orphaned on a clustered Provider: an orphaned VM keeps
-// running on its host but leaves the committed-capacity accounting (ADR-0007
-// Addendum A, scheduler-accuracy amendment), so a consumer could otherwise
-// occupy capacity nobody sees. Single-host Providers ignore it.
+// virtrigaud.io/orphan-on-delete, or released with virtrigaud.io/force-delete
+// without a confirmed provider delete. Without it, only VMs in the Provider's
+// own namespace may be orphaned or force-deleted on a clustered Provider: such
+// a VM keeps running on its host but leaves the committed-capacity accounting
+// (ADR-0007 Addendum A, scheduler-accuracy amendment), so a consumer could
+// otherwise occupy capacity nobody sees. Single-host Providers ignore it.
 const ProviderAllowConsumerOrphanOnDeleteAnnotation = "infra.virtrigaud.io/allow-consumer-orphan-on-delete"
 
 // ProviderInUseFinalizer is the finalizer the Provider controller keeps on

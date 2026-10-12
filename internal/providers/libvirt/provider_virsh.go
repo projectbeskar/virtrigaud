@@ -1667,7 +1667,13 @@ func (p *Provider) Describe(ctx context.Context, vm contracts.VMRef) (contracts.
 	if p.virshProvider == nil {
 		return contracts.DescribeResponse{}, contracts.NewRetryableError("virsh provider not initialized", nil)
 	}
-	return p.describeOn(ctx, p.singleHostConn(), id)
+	resp, err := p.describeOn(ctx, p.singleHostConn(), id)
+	if err != nil && virshNoDomain(err) {
+		// virsh answered VIR_ERR_NO_DOMAIN: the domain does not exist. That is a
+		// definite answer (NotFound), not a failure to retry.
+		return contracts.DescribeResponse{}, contracts.NewNotFoundError(fmt.Sprintf("domain %q not found", id), err)
+	}
+	return resp, err
 }
 
 // describeClustered is the routed, OWNER-CHECKED Describe of a clustered VM on
