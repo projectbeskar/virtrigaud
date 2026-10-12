@@ -17,6 +17,7 @@ limitations under the License.
 package migration
 
 import (
+	"errors"
 	"fmt"
 	"net/url"
 	"path"
@@ -25,8 +26,36 @@ import (
 )
 
 // nfsUIDGIDMax is the AUTH_SYS uid/gid ceiling (uint32). Values outside
-// [0, nfsUIDGIDMax] are rejected so they cannot smuggle anything into the URL.
+// [1, nfsUIDGIDMax] are rejected so they cannot smuggle anything into the URL.
 const nfsUIDGIDMax = 4294967295
+
+// ErrNFSRootIdentity refuses an NFS uid or gid of 0. The provider presents the
+// identity to the NFS server as its AUTH_SYS credential, which the client
+// chooses: uid or gid 0 is root on an export without root_squash. The message
+// is constant (it names no value) so it may reach status as is.
+var ErrNFSRootIdentity = errors.New("nfs uid/gid 0 (root) is not allowed: use a dedicated non-zero uid/gid that owns the export, or leave them unset")
+
+// ValidateNFSIdentity checks an optional NFS uid and gid: each, when set, must
+// be in [1, 2^32-1]. 0 is refused with ErrNFSRootIdentity (whatever provider
+// presents it: libnfs URL parameters, or setpriv on a Proxmox node); a value
+// outside the AUTH_SYS range with a range error.
+func ValidateNFSIdentity(uid, gid *int64) error {
+	for _, id := range []struct {
+		name string
+		v    *int64
+	}{{"uid", uid}, {"gid", gid}} {
+		if id.v == nil {
+			continue
+		}
+		if *id.v == 0 {
+			return ErrNFSRootIdentity
+		}
+		if *id.v < 0 || *id.v > nfsUIDGIDMax {
+			return fmt.Errorf("nfs %s %d out of range [1,%d]", id.name, *id.v, nfsUIDGIDMax)
+		}
+	}
+	return nil
+}
 
 // NFSURL builds the libnfs/qemu-img URL for an NFS staging object —
 // "nfs://<server><export>/<path>/<key>[?uid=N&gid=N]" — from the NFS coordinates
@@ -73,17 +102,14 @@ func NFSURL(opts StorageOptions, key string) (string, error) {
 
 	u := "nfs://" + server + full
 
+	if err := ValidateNFSIdentity(opts.UID, opts.GID); err != nil {
+		return "", err
+	}
 	q := url.Values{}
 	if opts.UID != nil {
-		if *opts.UID < 0 || *opts.UID > nfsUIDGIDMax {
-			return "", fmt.Errorf("nfs uid %d out of range [0,%d]", *opts.UID, nfsUIDGIDMax)
-		}
 		q.Set("uid", strconv.FormatInt(*opts.UID, 10))
 	}
 	if opts.GID != nil {
-		if *opts.GID < 0 || *opts.GID > nfsUIDGIDMax {
-			return "", fmt.Errorf("nfs gid %d out of range [0,%d]", *opts.GID, nfsUIDGIDMax)
-		}
 		q.Set("gid", strconv.FormatInt(*opts.GID, 10))
 	}
 	if len(q) > 0 {

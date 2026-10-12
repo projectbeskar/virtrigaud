@@ -85,6 +85,8 @@ func MarshalStorageOptions(opts StorageOptions) (string, error) {
 
 // ParseStorageOptions deserializes the gRPC storage_options_json field. An empty
 // string yields a zero StorageOptions (the legacy pvc path passes no options).
+// An NFS uid or gid of 0, or out of the AUTH_SYS range, is refused
+// (ValidateNFSIdentity; ErrNFSRootIdentity for 0).
 func ParseStorageOptions(raw string) (StorageOptions, error) {
 	var opts StorageOptions
 	if raw == "" {
@@ -92,6 +94,11 @@ func ParseStorageOptions(raw string) (StorageOptions, error) {
 	}
 	if err := json.Unmarshal([]byte(raw), &opts); err != nil {
 		return StorageOptions{}, fmt.Errorf("parse storage options json: %w", err)
+	}
+	// The NFS identity is refused here too, for every provider that reads the
+	// options (Proxmox presents it with setpriv rather than a libnfs URL).
+	if err := ValidateNFSIdentity(opts.UID, opts.GID); err != nil {
+		return StorageOptions{}, err
 	}
 	return opts, nil
 }

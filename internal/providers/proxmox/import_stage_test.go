@@ -491,3 +491,24 @@ func TestImportedDiskFormat(t *testing.T) {
 		assert.Equal(t, codes.InvalidArgument, status.Code(err), "%v", bad)
 	}
 }
+
+// TestNFSImportExport_RootIdentityRefused (review N4): an NFS uid or gid of 0
+// is refused before anything runs on the node, for the import and the export.
+func TestNFSImportExport_RootIdentityRefused(t *testing.T) {
+	for _, opts := range []string{
+		`{"server":"nfs.example","export":"/export","uid":0,"gid":1000}`,
+		`{"server":"nfs.example","export":"/export","uid":1000,"gid":0}`,
+	} {
+		p, _, node := newConfinementProvider(t)
+		_, err := p.ImportDisk(context.Background(), &providerv1.ImportDiskRequest{
+			BackendType: "nfs", SourceUrl: "nfs://nfs.example/export/web.qcow2", StorageOptionsJson: opts,
+			TargetVm: &providerv1.ObjectIdentity{Namespace: "team-a", Name: "web"},
+		})
+		assert.Equal(t, codes.InvalidArgument, status.Code(err), opts)
+		_, err = p.ExportDisk(context.Background(), &providerv1.ExportDiskRequest{
+			VmId: "100", BackendType: "nfs", DestinationUrl: "nfs://nfs.example/export/web.qcow2", StorageOptionsJson: opts,
+		})
+		assert.Equal(t, codes.InvalidArgument, status.Code(err), opts)
+		assert.Empty(t, node.all(), "nothing runs on the node")
+	}
+}
