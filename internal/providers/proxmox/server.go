@@ -25,7 +25,9 @@ import (
 	"math"
 	"net/url"
 	"os"
+	"regexp"
 	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -1695,8 +1697,52 @@ func (p *Provider) GetDiskInfo(ctx context.Context, req *providerv1.GetDiskInfoR
 		},
 	}
 
+	// Every disk of the VM with its provisioned size, for the manager's
+	// disk-size limit check before a clone.
+	response.Disks = p.configDiskCapacities(config)
+
 	p.logger.Info("Disk info retrieved", "disk_id", diskID, "format", format, "size_bytes", virtualSizeBytes)
 	return response, nil
+}
+
+// pveBusDiskKey matches the VM config keys of attached bus disks (scsi0,
+// virtio1, sata2, ide3); "unusedN" (detached) and EFI/TPM state volumes are
+// not bus disks.
+var pveBusDiskKey = regexp.MustCompile(`^(scsi|virtio|sata|ide)[0-9]+$`)
+
+// configDiskCapacities lists every attached disk in a VM config with the
+// provisioned size its "size=" option names. CD-ROM media (including the
+// cloud-init drive) are skipped; a disk whose size is missing or does not
+// parse is listed with size 0 (unknown).
+func (p *Provider) configDiskCapacities(config map[string]interface{}) []*providerv1.DiskCapacity {
+	keys := make([]string, 0, len(config))
+	for k := range config {
+		if pveBusDiskKey.MatchString(k) {
+			keys = append(keys, k)
+		}
+	}
+	sort.Strings(keys)
+	var out []*providerv1.DiskCapacity
+	for _, k := range keys {
+		value, ok := config[k].(string)
+		if !ok {
+			continue
+		}
+		parts := strings.Split(value, ",")
+		if slices.Contains(parts, "media=cdrom") || strings.Contains(parts[0], "cloudinit") {
+			continue
+		}
+		c := &providerv1.DiskCapacity{DiskId: k, Path: parts[0]}
+		for _, part := range parts[1:] {
+			if size, found := strings.CutPrefix(part, "size="); found {
+				if b, err := p.parseDiskSize(size); err == nil && b > 0 {
+					c.VirtualSizeBytes = b
+				}
+			}
+		}
+		out = append(out, c)
+	}
+	return out
 }
 
 // exportNeedsConversion decides whether the export path must run a qemu-img

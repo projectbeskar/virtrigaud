@@ -1215,7 +1215,7 @@ func (s *Server) GetDiskInfo(ctx context.Context, req *providerv1.GetDiskInfoReq
 		return nil, fmt.Errorf("failed to get disk info: %w", err)
 	}
 
-	return &providerv1.GetDiskInfoResponse{
+	out := &providerv1.GetDiskInfoResponse{
 		DiskId:           resp.DiskId,
 		Format:           resp.Format,
 		VirtualSizeBytes: resp.VirtualSizeBytes,
@@ -1225,7 +1225,13 @@ func (s *Server) GetDiskInfo(ctx context.Context, req *providerv1.GetDiskInfoReq
 		Snapshots:        resp.Snapshots,
 		BackingFile:      resp.BackingFile,
 		Metadata:         resp.Metadata,
-	}, nil
+	}
+	for _, d := range resp.Disks {
+		out.Disks = append(out.Disks, &providerv1.DiskCapacity{
+			DiskId: d.ID, Path: d.Path, VirtualSizeBytes: d.VirtualSizeBytes,
+		})
+	}
+	return out, nil
 }
 
 // ImportDisk imports a disk from an external source (for VM migration)

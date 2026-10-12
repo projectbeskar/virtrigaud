@@ -650,6 +650,23 @@ message GetDiskInfoResponse {
   repeated string snapshots = 7; // Available snapshots
   string backing_file = 8;     // Backing file (for linked clones)
   map<string, string> metadata = 9; // Additional provider-specific metadata
+
+  // disks lists EVERY disk of the VM as it is now — its data disks, not CD-ROM
+  // or cloud-init media — each with its current virtual size, whatever
+  // disk_id and snapshot_id asked for. The manager checks them against the
+  // administrator's disk-size limit before a clone copies them. A size the
+  // provider could not read is 0, which the manager treats as unknown. A
+  // provider that predates the field leaves it empty, and the manager then
+  // fails closed (it clones nothing through it while a limit applies).
+  // Additive and backward-compatible.
+  repeated DiskCapacity disks = 10;
+}
+
+// DiskCapacity is one disk of a VM and its current virtual size (capacity).
+message DiskCapacity {
+  string disk_id = 1;            // Provider-specific disk identifier
+  string path = 2;               // Path or location, when the provider has one
+  int64 virtual_size_bytes = 3;  // Virtual size (capacity); 0 = not read
 }
 
 // List all VMs managed by this provider

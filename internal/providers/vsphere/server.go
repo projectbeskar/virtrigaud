@@ -3637,8 +3637,34 @@ func (p *Provider) GetDiskInfo(ctx context.Context, req *providerv1.GetDiskInfoR
 		},
 	}
 
+	// Every disk of the VM with its capacity, for the manager's disk-size
+	// limit check before a clone.
+	response.Disks = vmDiskCapacities(vmMo.Config.Hardware.Device)
+
 	p.logger.Info("Disk info retrieved", "disk_id", diskLabel, "path", diskPath, "size_bytes", virtualSizeBytes)
 	return response, nil
+}
+
+// vmDiskCapacities lists every VirtualDisk among devices with its capacity
+// (CapacityInBytes, or CapacityInKB when the former is unset).
+func vmDiskCapacities(devices []types.BaseVirtualDevice) []*providerv1.DiskCapacity {
+	var out []*providerv1.DiskCapacity
+	for _, device := range devices {
+		disk, ok := device.(*types.VirtualDisk)
+		if !ok {
+			continue
+		}
+		size := disk.CapacityInBytes
+		if size <= 0 {
+			size = disk.CapacityInKB * 1024
+		}
+		c := &providerv1.DiskCapacity{DiskId: fmt.Sprintf("%d", disk.Key), VirtualSizeBytes: size}
+		if b, ok := disk.Backing.(types.BaseVirtualDeviceFileBackingInfo); ok {
+			c.Path = b.GetVirtualDeviceFileBackingInfo().FileName
+		}
+		out = append(out, c)
+	}
+	return out
 }
 
 // extractSnapshotNames performs a depth-first traversal of snapshotTree and returns a

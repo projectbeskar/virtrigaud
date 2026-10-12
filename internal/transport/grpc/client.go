@@ -1083,6 +1083,13 @@ func (c *Client) GetDiskInfo(ctx context.Context, req contracts.GetDiskInfoReque
 		BackingFile:      resp.BackingFile,
 		Metadata:         resp.Metadata,
 	}
+	for _, d := range resp.GetDisks() {
+		result.Disks = append(result.Disks, contracts.DiskCapacity{
+			ID:               d.GetDiskId(),
+			Path:             d.GetPath(),
+			VirtualSizeBytes: d.GetVirtualSizeBytes(),
+		})
+	}
 
 	return result, nil
 }

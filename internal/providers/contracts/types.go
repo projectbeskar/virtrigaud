@@ -318,6 +318,22 @@ type GetDiskInfoResponse struct {
 	BackingFile string
 	// Metadata contains additional provider-specific metadata
 	Metadata map[string]string
+	// Disks lists every disk of the VM as it is now (data disks, not CD-ROM
+	// or cloud-init media) with its current virtual size, whatever DiskId and
+	// SnapshotId asked for. Empty from a provider that predates it; a size
+	// the provider could not read is 0. The manager checks them against the
+	// disk-size limit before a clone.
+	Disks []DiskCapacity
+}
+
+// DiskCapacity is one disk of a VM and its current virtual size.
+type DiskCapacity struct {
+	// ID is the provider-specific disk identifier.
+	ID string
+	// Path is the disk's path or location, when the provider has one.
+	Path string
+	// VirtualSizeBytes is the virtual size (capacity); 0 means it was not read.
+	VirtualSizeBytes int64
 }
 
 // PowerState represents VM power states
