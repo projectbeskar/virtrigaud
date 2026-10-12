@@ -96,8 +96,8 @@ func forceDeleteWarnings(provider *Provider) admission.Warnings {
 }
 
 // ValidateCreate validates a Provider on creation. It enforces the ADR-0007 D2
-// topology×type rule and the /tmp size-limit annotation, and warns when the
-// force-delete annotation is set (forceDeleteWarnings).
+// topology×type rule, the /tmp size-limit and the disk-size limit annotations,
+// and warns when the force-delete annotation is set (forceDeleteWarnings).
 func (v *ProviderCustomValidator) ValidateCreate(_ context.Context, obj runtime.Object) (admission.Warnings, error) {
 	provider, ok := obj.(*Provider)
 	if !ok {
@@ -105,6 +105,9 @@ func (v *ProviderCustomValidator) ValidateCreate(_ context.Context, obj runtime.
 	}
 	warnings := forceDeleteWarnings(provider)
 	if err := validateTmpSizeLimitAnnotation(nil, provider); err != nil {
+		return warnings, err
+	}
+	if err := validateMaxDiskSizeAnnotation(nil, provider); err != nil {
 		return warnings, err
 	}
 	return warnings, validateProviderTopology(provider)
@@ -131,6 +134,9 @@ func (v *ProviderCustomValidator) ValidateUpdate(_ context.Context, oldObj, newO
 		return warnings, err
 	}
 	if err := validateTmpSizeLimitAnnotation(old, provider); err != nil {
+		return warnings, err
+	}
+	if err := validateMaxDiskSizeAnnotation(old, provider); err != nil {
 		return warnings, err
 	}
 	// An update that leaves the spec as it is (a finalizer, a label, an
@@ -218,6 +224,32 @@ func validateTmpSizeLimitAnnotation(old, updated *Provider) error {
 			updated.Name,
 			field.ErrorList{field.Invalid(
 				field.NewPath("metadata").Child("annotations").Key(ProviderTmpSizeLimitAnnotation), value, err.Error())},
+		)
+	}
+	return nil
+}
+
+// validateMaxDiskSizeAnnotation rejects a ProviderMaxDiskSizeAnnotation value
+// that ParseMaxDiskSize does not accept. On an update (old not nil) only a
+// value that is new or changed is checked, so a Provider that already carries
+// a bad value can still take and lose its finalizers. (The controllers fail
+// closed on a bad value: nothing is created or grown through the Provider.)
+func validateMaxDiskSizeAnnotation(old, updated *Provider) error {
+	value, ok := updated.Annotations[ProviderMaxDiskSizeAnnotation]
+	if !ok {
+		return nil
+	}
+	if old != nil {
+		if prev, had := old.Annotations[ProviderMaxDiskSizeAnnotation]; had && prev == value {
+			return nil
+		}
+	}
+	if _, err := ParseMaxDiskSize(value); err != nil {
+		return apierrors.NewInvalid(
+			GroupVersion.WithKind("Provider").GroupKind(),
+			updated.Name,
+			field.ErrorList{field.Invalid(
+				field.NewPath("metadata").Child("annotations").Key(ProviderMaxDiskSizeAnnotation), value, err.Error())},
 		)
 	}
 	return nil
