@@ -22,6 +22,7 @@ import (
 	"slices"
 
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/selection"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -32,7 +33,8 @@ import (
 // that just recorded its use, may not be in the cache yet. Right before the
 // finalizer is removed, the same usage is computed again from the API server
 // (liveIndexedReader); anything found there holds the Provider. It runs once
-// per Provider release, so whole-kind live Lists are affordable.
+// per Provider release, so whole-kind live Lists (read in pages of
+// liveListPageSize) are affordable.
 
 // liveIndexedReader is a client.Reader over an uncached reader (the API
 // server) that also answers a List selected by one of the manager's cache
@@ -69,22 +71,37 @@ func (l liveIndexedReader) List(ctx context.Context, list client.ObjectList, opt
 	value := reqs[0].Value
 	lo.FieldSelector = nil
 	lo.UnsafeDisableDeepCopy = nil
-	if err := l.Reader.List(ctx, list, lo); err != nil {
-		return err
-	}
-	items, err := apimeta.ExtractList(list)
-	if err != nil {
-		return fmt.Errorf("live list: extract items: %w", err)
-	}
-	kept := items[:0]
-	for _, item := range items {
-		obj, ok := item.(client.Object)
-		if ok && slices.Contains(extract(obj), value) {
-			kept = append(kept, item)
+	lo.Limit = liveListPageSize
+	lo.Continue = ""
+	var kept []runtime.Object
+	for {
+		if err := l.Reader.List(ctx, list, lo); err != nil {
+			return err
 		}
+		items, err := apimeta.ExtractList(list)
+		if err != nil {
+			return fmt.Errorf("live list: extract items: %w", err)
+		}
+		for _, item := range items {
+			obj, ok := item.(client.Object)
+			if ok && slices.Contains(extract(obj), value) {
+				// A copy: the next page is decoded into the same list.
+				kept = append(kept, item.DeepCopyObject())
+			}
+		}
+		next := list.GetContinue()
+		if next == "" {
+			break
+		}
+		lo.Continue = next
 	}
 	if err := apimeta.SetList(list, kept); err != nil {
 		return fmt.Errorf("live list: set items: %w", err)
 	}
+	list.SetContinue("")
 	return nil
 }
+
+// liveListPageSize is the page size of liveIndexedReader's live Lists, so a
+// cluster with many objects of a kind is read in bounded pages.
+const liveListPageSize = 500

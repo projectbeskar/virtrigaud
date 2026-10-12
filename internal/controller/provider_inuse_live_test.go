@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -62,6 +63,51 @@ func TestProviderInUse_LiveUsageHoldsWhatTheCacheMissed(t *testing.T) {
 	}
 	reconcileProvider(t, r)
 	assert.True(t, providerGone(t, r))
+}
+
+// pagingVMReader serves VirtualMachine Lists one item per page, through
+// Limit/Continue, and records the options of every call.
+type pagingVMReader struct {
+	client.Reader
+	vms   []infravirtrigaudiov1beta1.VirtualMachine
+	calls []client.ListOptions
+}
+
+func (p *pagingVMReader) List(_ context.Context, list client.ObjectList, opts ...client.ListOption) error {
+	lo := client.ListOptions{}
+	lo.ApplyOptions(opts)
+	p.calls = append(p.calls, lo)
+	start := 0
+	if lo.Continue != "" {
+		_, _ = fmt.Sscanf(lo.Continue, "%d", &start)
+	}
+	vmList := list.(*infravirtrigaudiov1beta1.VirtualMachineList)
+	vmList.Items = []infravirtrigaudiov1beta1.VirtualMachine{*p.vms[start].DeepCopy()}
+	vmList.Continue = ""
+	if start+1 < len(p.vms) {
+		vmList.Continue = fmt.Sprintf("%d", start+1)
+	}
+	return nil
+}
+
+func TestLiveIndexedReader_ReadsEveryPage(t *testing.T) {
+	ctx := context.Background()
+	reader := &pagingVMReader{vms: []infravirtrigaudiov1beta1.VirtualMachine{
+		*inUseVM("default", "a", "", inUseProviderName),
+		*inUseVM("default", "b", "", "another-provider"),
+		*inUseVM("default", "c", "", inUseProviderName),
+	}}
+	vms, err := listProviderVMs(ctx, liveIndexedReader{Reader: reader}, inUseProviderKey)
+	require.NoError(t, err)
+	require.Len(t, vms, 2, "matches on every page are kept")
+	assert.Equal(t, "a", vms[0].Name)
+	assert.Equal(t, "c", vms[1].Name)
+	require.Len(t, reader.calls, 3)
+	for _, c := range reader.calls {
+		assert.Equal(t, int64(liveListPageSize), c.Limit)
+		assert.Nil(t, c.FieldSelector, "the API server is never sent the cache-only field selector")
+	}
+	assert.Equal(t, "2", reader.calls[2].Continue)
 }
 
 func TestLiveIndexedReader_FiltersByIndexAndRefusesOtherSelectors(t *testing.T) {
