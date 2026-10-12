@@ -1292,6 +1292,16 @@ func (r *VMMigrationReconciler) handleImportingPhase(ctx context.Context, migrat
 	if refusal := r.importDiskSizeRefusal(migration, targetProvider); refusal != nil {
 		return r.holdMigrationForDiskSizeLimit(ctx, migration, infrav1beta1.VMMigrationConditionImporting, refusal)
 	}
+	// The staged object may have been replaced since the export: the target
+	// provider enforces the limit itself on the disk it is about to land
+	// (max_virtual_size_bytes). An import it already refused for that limit is
+	// not sent again until the limit changes (disk_size_limit_copies.go).
+	if limit, _ := r.migrationTargetLimit(targetProvider); limit != nil {
+		importReq.MaxVirtualSizeBytes = limit.Value()
+		if importRefusedByTargetAt(migration, limit) {
+			return ctrl.Result{RequeueAfter: diskSizeLimitRetryInterval}, nil
+		}
+	}
 
 	// Claim the in-memory import guard for this object generation BEFORE
 	// issuing the RPC. ImportDisk writes the target qcow2; a duplicate driven
@@ -1308,6 +1318,13 @@ func (r *VMMigrationReconciler) handleImportingPhase(ctx context.Context, migrat
 		// Release the in-memory guard so a future reconcile can re-attempt the
 		// import for this generation after the failure is recorded.
 		r.longOpInFlight.Delete(longOpKey(migration, longOpImport))
+		// The target provider refused to land a disk above its disk-size
+		// limit (or one whose size it could not read): nothing was landed.
+		// Held, not failed.
+		if refusal := providerImportRefusal(err, importReq.MaxVirtualSizeBytes); refusal != nil {
+			logger.Info("The target provider refused the import for its disk-size limit", "error", err.Error())
+			return r.holdMigrationForDiskSizeLimit(ctx, migration, infrav1beta1.VMMigrationConditionImporting, refusal)
+		}
 		logger.Error(err, "Failed to start disk import")
 		return r.transitionToFailed(ctx, migration, "Failed to start disk import: "+migrationFailureDetail(err))
 	}

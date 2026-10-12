@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 
@@ -217,6 +218,8 @@ type sizedMigrationProvider struct {
 	exports        int
 	imports        int
 	lastExportDisk contracts.ExportDiskRequest
+	importErr      error
+	lastImport     contracts.ImportDiskRequest
 }
 
 func (p *sizedMigrationProvider) GetDiskInfo(_ context.Context, req contracts.GetDiskInfoRequest) (contracts.GetDiskInfoResponse, error) {
@@ -229,8 +232,12 @@ func (p *sizedMigrationProvider) ExportDisk(_ context.Context, req contracts.Exp
 	return contracts.ExportDiskResponse{ExportId: "exp-1"}, nil
 }
 
-func (p *sizedMigrationProvider) ImportDisk(_ context.Context, _ contracts.ImportDiskRequest) (contracts.ImportDiskResponse, error) {
+func (p *sizedMigrationProvider) ImportDisk(_ context.Context, req contracts.ImportDiskRequest) (contracts.ImportDiskResponse, error) {
 	p.imports++
+	p.lastImport = req
+	if p.importErr != nil {
+		return contracts.ImportDiskResponse{}, p.importErr
+	}
 	return contracts.ImportDiskResponse{DiskId: "target-vm-migrated", Path: "/pool/target-vm-migrated.qcow2"}, nil
 }
 
@@ -434,4 +441,96 @@ func TestVMMigration_DiskSizeLimit_CheckedRightBeforeImport(t *testing.T) {
 			assert.Equal(t, infravirtrigaudiov1beta1.MigrationPhaseImporting, got.Status.Phase)
 		})
 	}
+}
+
+// providerRefusal is what the transport client returns for a provider's
+// DISK_SIZE_EXCEEDS_LIMIT (or DISK_SIZE_UNVERIFIABLE) ImportDisk refusal.
+func providerRefusal(marker error) error {
+	return contracts.NewConflictError("importDisk: refused by the provider", fmt.Errorf("%w: %w", marker, errors.New("grpc status")))
+}
+
+// TestVMMigration_DiskSizeLimit_TargetProviderEnforcesAtImport (review
+// H1-residual): the import carries the target's limit (max_virtual_size_bytes),
+// so the provider checks the disk it is about to land — the staged object may
+// have been replaced since the export. Its refusal holds the migration in
+// Importing (never fails it); a refusal for the same limit is not re-sent; a
+// changed limit sends the import again.
+func TestVMMigration_DiskSizeLimit_TargetProviderEnforcesAtImport(t *testing.T) {
+	ctx := context.Background()
+	sourceVM, sourceProvider, targetProvider, migration := directionFixture(
+		infravirtrigaudiov1beta1.ProviderTypeVSphere, infravirtrigaudiov1beta1.ProviderTypeLibvirt)
+	migration.Status.DiskInfo.SourceSize = qty("50Gi") // what was exported: within the limit
+	prov := &sizedMigrationProvider{sizes: &diskSizes{}, importErr: providerRefusal(contracts.ErrDiskSizeExceedsLimit)}
+	r, _ := directionReconciler(t, prov, sourceVM, sourceProvider, targetProvider, migration, s3CredsSecret())
+	rec := record.NewFakeRecorder(32)
+	r.Recorder = rec
+	r.MaxDiskSize = qty("100Gi")
+
+	res, err := r.handleImportingPhase(ctx, migration)
+	require.NoError(t, err)
+	assert.Equal(t, diskSizeLimitRetryInterval, res.RequeueAfter)
+	require.Equal(t, 1, prov.imports)
+	assert.Equal(t, int64(100)<<30, prov.lastImport.MaxVirtualSizeBytes, "the import carries the target's limit")
+
+	got := getXNSMigration(t, r, migration)
+	assert.Equal(t, infravirtrigaudiov1beta1.MigrationPhaseImporting, got.Status.Phase, "held, not failed")
+	c := meta.FindStatusCondition(got.Status.Conditions, infravirtrigaudiov1beta1.VMMigrationConditionImporting)
+	require.NotNil(t, c)
+	assert.Equal(t, metav1.ConditionFalse, c.Status)
+	assert.Equal(t, k8s.ReasonDiskSizeExceedsLimit, c.Reason)
+	assert.Equal(t, providerImportRefusedMessage(int64(100)<<30), c.Message)
+	assert.NotContains(t, c.Message, "grpc status", "the provider's text is not shown")
+	assert.False(t, r.longOpAlreadyStarted(got, longOpImport), "the import guard is released")
+	assert.Len(t, diskLimitEvents(rec, k8s.ReasonDiskSizeExceedsLimit), 1)
+
+	// The same limit: the import (a full download or convert) is not re-sent.
+	_, err = r.handleImportingPhase(ctx, got.DeepCopy())
+	require.NoError(t, err)
+	assert.Equal(t, 1, prov.imports, "not re-sent for the same limit")
+
+	// A raised limit: the import is sent again, with the new limit.
+	r.MaxDiskSize = qty("1Ti")
+	prov.importErr = nil
+	_, err = r.handleImportingPhase(ctx, getXNSMigration(t, r, migration))
+	require.NoError(t, err)
+	assert.Equal(t, 2, prov.imports)
+	assert.Equal(t, int64(1)<<40, prov.lastImport.MaxVirtualSizeBytes)
+}
+
+// TestVMMigration_DiskSizeLimit_TargetCannotReadSize: a provider that could
+// not read the staged disk's size holds the migration (fail closed) and the
+// import is retried on the hold's re-check.
+func TestVMMigration_DiskSizeLimit_TargetCannotReadSize(t *testing.T) {
+	ctx := context.Background()
+	sourceVM, sourceProvider, targetProvider, migration := directionFixture(
+		infravirtrigaudiov1beta1.ProviderTypeVSphere, infravirtrigaudiov1beta1.ProviderTypeLibvirt)
+	migration.Status.DiskInfo.SourceSize = qty("50Gi")
+	prov := &sizedMigrationProvider{sizes: &diskSizes{}, importErr: providerRefusal(contracts.ErrDiskSizeUnverifiable)}
+	r, _ := directionReconciler(t, prov, sourceVM, sourceProvider, targetProvider, migration, s3CredsSecret())
+	r.MaxDiskSize = qty("100Gi")
+
+	_, err := r.handleImportingPhase(ctx, migration)
+	require.NoError(t, err)
+	got := getXNSMigration(t, r, migration)
+	c := meta.FindStatusCondition(got.Status.Conditions, infravirtrigaudiov1beta1.VMMigrationConditionImporting)
+	require.NotNil(t, c)
+	assert.Equal(t, k8s.ReasonDiskSizeLimitUnverifiable, c.Reason)
+	assert.Equal(t, infravirtrigaudiov1beta1.MigrationPhaseImporting, got.Status.Phase)
+
+	_, err = r.handleImportingPhase(ctx, got.DeepCopy())
+	require.NoError(t, err)
+	assert.Equal(t, 2, prov.imports, "an unreadable size is retried")
+}
+
+// TestVMMigration_NoLimitSendsNoMaxSize: without a limit the import carries
+// none (0), so nothing changes on the provider side.
+func TestVMMigration_NoLimitSendsNoMaxSize(t *testing.T) {
+	sourceVM, sourceProvider, targetProvider, migration := directionFixture(
+		infravirtrigaudiov1beta1.ProviderTypeVSphere, infravirtrigaudiov1beta1.ProviderTypeLibvirt)
+	prov := &sizedMigrationProvider{sizes: &diskSizes{}}
+	r, _ := directionReconciler(t, prov, sourceVM, sourceProvider, targetProvider, migration, s3CredsSecret())
+	_, err := r.handleImportingPhase(context.Background(), migration)
+	require.NoError(t, err)
+	require.Equal(t, 1, prov.imports)
+	assert.Zero(t, prov.lastImport.MaxVirtualSizeBytes)
 }

@@ -259,6 +259,47 @@ func (r *VMMigrationReconciler) importDiskSizeRefusal(migration *infravirtrigaud
 	}}, "nothing is imported")
 }
 
+// providerImportRefusedMessage is the Importing=False message of an import
+// the target provider refused because the disk it would land is above limit
+// (in bytes). It names the limit, so a changed limit is a new message — and
+// importRefusedByTargetAt lets the import be sent again.
+func providerImportRefusedMessage(limitBytes int64) string {
+	return fmt.Sprintf("The target provider refused to import the staged disk: its virtual size is above the disk-size "+
+		"limit %s (the staged object differs from what was exported, or was replaced). Nothing was imported. Delete this "+
+		"VMMigration and migrate again, or raise the limit", resource.NewQuantity(limitBytes, resource.BinarySI).String())
+}
+
+// providerImportUnverifiableMessage is the Importing=False message of an
+// import the target provider refused because it could not read the disk's
+// virtual size while a limit applies. The import is sent again on the hold's
+// re-check (the read may have failed transiently).
+const providerImportUnverifiableMessage = "The target provider could not read the virtual size of the staged disk, and a " +
+	"disk-size limit applies: nothing was imported. The import is retried"
+
+// providerImportRefusal maps an ImportDisk error to the hold it calls for: a
+// provider's DISK_SIZE_EXCEEDS_LIMIT or DISK_SIZE_UNVERIFIABLE refusal of an
+// import sent with limitBytes; nil for any other error. Its messages are
+// constant for a given limit; the provider's own text is never shown.
+func providerImportRefusal(err error, limitBytes int64) *diskSizeRefusal {
+	switch {
+	case contracts.IsDiskSizeExceedsLimit(err):
+		return &diskSizeRefusal{reason: k8s.ReasonDiskSizeExceedsLimit, message: providerImportRefusedMessage(limitBytes)}
+	case contracts.IsDiskSizeUnverifiable(err):
+		return unverifiable(providerImportUnverifiableMessage)
+	}
+	return nil
+}
+
+// importRefusedByTargetAt reports whether migration is held because its
+// target provider refused the import for this same limit: the refusal is a
+// fact about the staged disk, so the import (a full download or convert) is
+// not sent again until the limit changes.
+func importRefusedByTargetAt(migration *infravirtrigaudiov1beta1.VMMigration, limit *resource.Quantity) bool {
+	c := meta.FindStatusCondition(migration.Status.Conditions, infravirtrigaudiov1beta1.VMMigrationConditionImporting)
+	return c != nil && c.Status == metav1.ConditionFalse && c.Reason == k8s.ReasonDiskSizeExceedsLimit &&
+		c.Message == providerImportRefusedMessage(limit.Value())
+}
+
 // holdMigrationForDiskSizeLimit keeps migration in its current phase — no
 // further provider call for it — with refusal as the condType=False reason
 // and message (Validating, Exporting or Importing), written only when it
