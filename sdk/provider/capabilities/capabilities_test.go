@@ -170,3 +170,24 @@ func TestBuilder_StorageBackendsDefaultEmpty(t *testing.T) {
 		t.Error("backend/transfer-mode lists should be empty when not advertised")
 	}
 }
+
+// TestBuilder_StagedDiskDeleteBackends verifies the ADR-0011 staged-disk delete
+// backends surface on GetCapabilitiesResponse, and default to none.
+func TestBuilder_StagedDiskDeleteBackends(t *testing.T) {
+	m := NewBuilder().Core().StagedDiskDeleteBackends("nfs", "s3").Build()
+	resp, err := m.GetCapabilities(context.Background(), &providerv1.GetCapabilitiesRequest{})
+	if err != nil {
+		t.Fatalf("GetCapabilities: %v", err)
+	}
+	if want := []string{"nfs", "s3"}; !reflect.DeepEqual(resp.SupportedStagedDiskDeleteBackends, want) {
+		t.Errorf("SupportedStagedDiskDeleteBackends = %v, want %v", resp.SupportedStagedDiskDeleteBackends, want)
+	}
+
+	resp, err = NewBuilder().Core().Build().GetCapabilities(context.Background(), &providerv1.GetCapabilitiesRequest{})
+	if err != nil {
+		t.Fatalf("GetCapabilities: %v", err)
+	}
+	if len(resp.SupportedStagedDiskDeleteBackends) != 0 {
+		t.Errorf("SupportedStagedDiskDeleteBackends = %v, want none when not advertised", resp.SupportedStagedDiskDeleteBackends)
+	}
+}
