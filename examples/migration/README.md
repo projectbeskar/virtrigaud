@@ -91,7 +91,11 @@ A Proxmox target stages the disk on the PVE node at
 the target VM's create imports it with `qm importdisk` and removes it. The create
 accepts only that exact stage, and only for a `VMMigration` in the target VM's own
 namespace: a migration whose `spec.target.namespace` names another namespace
-completes its import, but its target VM's create is refused (`ValidationError`).
+fails at `Validating` (reason `ProxmoxCrossNamespaceTarget`) before anything is
+exported or imported. A stage is removed when the
+target VM's create consumes it; a migration that fails or is deleted between
+import and create leaves its stage behind, so sweep stale stages periodically
+(see [`docs/upgrading.md`](../../docs/upgrading.md#stale-proxmox-import-stages)).
 See [`docs/image-preparation.md`](../../docs/image-preparation.md#libvirt-image-paths-sourcelibvirtpath).
 
 ## NFS staging backend (ADR-0006 Slice 4)

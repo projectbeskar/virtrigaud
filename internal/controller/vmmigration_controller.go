@@ -411,6 +411,13 @@ func (r *VMMigrationReconciler) handleValidatingPhase(ctx context.Context, migra
 		return r.transitionToFailed(ctx, migration, fmt.Sprintf("Failed to get target provider: %v", err))
 	}
 
+	// A Proxmox target VM in another namespace can never get its imported
+	// disk (the provider imports only an own-namespace verified disk): fail
+	// before any export or import.
+	if proxmoxCrossNamespaceTargetRefused(migration, targetProvider) {
+		return r.failProxmoxCrossNamespaceTarget(ctx, migration)
+	}
+
 	// Validate providers are ready
 	if !r.isProviderReady(sourceProvider) {
 		k8s.SetCondition(&migration.Status.Conditions, infrav1beta1.VMMigrationConditionValidating,
@@ -1123,6 +1130,12 @@ func (r *VMMigrationReconciler) handleImportingPhase(ctx context.Context, migrat
 	}
 	if err != nil {
 		return r.transitionToFailed(ctx, migration, fmt.Sprintf("Failed to get target provider: %v", err))
+	}
+
+	// A migration that passed Validating before this check existed (in flight
+	// across an upgrade) is refused here, before its import.
+	if proxmoxCrossNamespaceTargetRefused(migration, targetProvider) {
+		return r.failProxmoxCrossNamespaceTarget(ctx, migration)
 	}
 
 	// Get provider instance

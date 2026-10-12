@@ -62,8 +62,8 @@ Read the upgrade guide before upgrading:
   are now named per namespace); anything else is refused before anything is
   created. **Upgrade the manager before the Proxmox provider.** A Proxmox-target
   migration staged before the upgrade whose target VM was not yet created must
-  be run again. A granted cross-namespace migration into Proxmox is refused, as
-  on vSphere.
+  be run again. A migration into another namespace through a Proxmox target
+  fails at `Validating` (`ProxmoxCrossNamespaceTarget`) before any export.
   → [Upgrade guide](docs/upgrading.md#breaking-changes)
 
 - **libvirt linked clones are disabled.** A `VMClone` with

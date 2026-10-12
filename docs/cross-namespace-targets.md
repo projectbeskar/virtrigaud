@@ -145,11 +145,15 @@ prove it belongs to that VM: the VM's `spec.importedDisk.migrationRef` has to
 name a `VMMigration` in the **VM's own namespace**. A migration into another
 namespace lives in the source namespace, so the lookup finds nothing, and the
 target VM's imported disk is handled as a base image. On libvirt it's confined,
-then copied into the VM's own disk or refused; on vSphere and Proxmox, whose
-base images are templates, the create is refused (`ValidationError`). It's never attached
+then copied into the VM's own disk or refused; on vSphere, whose base images
+are templates, the create is refused (`ValidationError`). It's never attached
 in place, so this fails closed. For a granted cross-namespace migration, expect
-the disk to be copied (libvirt), or the target VM's create to be refused. A migration into its
-own namespace is unaffected. See
+the disk to be copied (libvirt), or the target VM's create to be refused (vSphere).
+A migration into another namespace through a **Proxmox** target Provider is
+refused up front: it fails at `Validating` (`Phase=Failed`, `Validating=False`,
+reason `ProxmoxCrossNamespaceTarget`) before anything is exported or imported,
+because its target VM's create would be refused. A migration into its own
+namespace is unaffected. See
 [`image-preparation.md`](image-preparation.md) for the base-image rules.
 
 ### No libvirt linked clone into another namespace
