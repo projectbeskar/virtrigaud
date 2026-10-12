@@ -206,6 +206,18 @@ func main() {
 	// Override the logger with flag-based options if provided
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
 
+	// The administrator's disk-size ceiling, checked before anything else
+	// starts: an invalid value stops the manager rather than running without
+	// the cap it was asked to enforce.
+	maxDiskSizeLimit, err := controller.ParseMaxDiskSizeFlag(maxDiskSize)
+	if err != nil {
+		setupLog.Error(err, "invalid --max-disk-size")
+		os.Exit(1)
+	}
+	if maxDiskSizeLimit != nil {
+		setupLog.Info("Disk-size ceiling set", "max-disk-size", maxDiskSizeLimit.String())
+	}
+
 	// Emit a virtrigaud_build_info{version,git_sha,go_version,component} sample
 	// so the manager's /metrics endpoint exposes a virtrigaud_* family at startup.
 	// Without this call the build_info GaugeVec stays empty and the family does
@@ -361,17 +373,6 @@ func main() {
 	// while the installed VMImage CRD verifiably cannot record per-Provider
 	// prepare state, VM creates that need a prepare are held.
 	vmCRDCheck := controller.NewVMCRDFeatureChecker(mgr.GetAPIReader())
-
-	// The administrator's disk-size ceiling: an invalid value stops the
-	// manager rather than running without the cap it was asked to enforce.
-	maxDiskSizeLimit, err := controller.ParseMaxDiskSizeFlag(maxDiskSize)
-	if err != nil {
-		setupLog.Error(err, "invalid --max-disk-size")
-		os.Exit(1)
-	}
-	if maxDiskSizeLimit != nil {
-		setupLog.Info("Disk-size ceiling set", "max-disk-size", maxDiskSizeLimit.String())
-	}
 
 	vmReconciler := &controller.VirtualMachineReconciler{
 		Client:           mgr.GetClient(),

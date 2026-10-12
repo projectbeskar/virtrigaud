@@ -18,6 +18,8 @@ package main
 
 import (
 	"crypto/tls"
+	"os"
+	"os/exec"
 	"strings"
 	"testing"
 
@@ -109,4 +111,37 @@ func TestEnforceTLSMinVersion(t *testing.T) {
 		assert.Equal(t, []string{"http/1.1"}, cfg2.NextProtos)
 		assert.NotNil(t, cfg2.GetCertificate)
 	})
+}
+
+// managerSubprocessEnv, when set to "1", makes
+// TestMaxDiskSizeFlag_InvalidRefusedAtStartup run main() itself (in a child
+// test process) with the --max-disk-size value in managerSubprocessMaxDiskEnv.
+const (
+	managerSubprocessEnv        = "VIRTRIGAUD_TEST_RUN_MANAGER_MAIN"
+	managerSubprocessMaxDiskEnv = "VIRTRIGAUD_TEST_MAX_DISK_SIZE"
+)
+
+// TestMaxDiskSizeFlag_InvalidRefusedAtStartup: an invalid --max-disk-size
+// stops the manager at once (exit 1, before any cluster connection) rather
+// than running without the cap the administrator asked for.
+func TestMaxDiskSizeFlag_InvalidRefusedAtStartup(t *testing.T) {
+	if os.Getenv(managerSubprocessEnv) == "1" {
+		os.Args = []string{"manager", "--max-disk-size=" + os.Getenv(managerSubprocessMaxDiskEnv)}
+		main()
+		return
+	}
+	for _, bad := range []string{"lots", "500", "0", "-1Gi", "1023Mi", "none"} {
+		t.Run(bad, func(t *testing.T) {
+			cmd := exec.Command(os.Args[0], "-test.run=^TestMaxDiskSizeFlag_InvalidRefusedAtStartup$") // #nosec G204 -- re-runs this test binary
+			// No usable kubeconfig: should the value be accepted by mistake,
+			// main() fails to find a cluster instead of reaching a real one.
+			cmd.Env = append(os.Environ(), managerSubprocessEnv+"=1", managerSubprocessMaxDiskEnv+"="+bad,
+				"KUBECONFIG="+t.TempDir()+"/none", "KUBERNETES_SERVICE_HOST=", "HOME="+t.TempDir())
+			out, err := cmd.CombinedOutput()
+			var exitErr *exec.ExitError
+			require.ErrorAs(t, err, &exitErr, "the manager must exit: %s", out)
+			assert.Equal(t, 1, exitErr.ExitCode())
+			assert.Contains(t, string(out), "invalid --max-disk-size")
+		})
+	}
 }
