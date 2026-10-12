@@ -517,6 +517,10 @@ verify-webhook-render: ## Render the chart with webhooks.enabled=true and assert
 verify-networkpolicy-render: ## Render the chart's NetworkPolicies: opt-in, valid peers, and never enabled by --reuse-values from v0.3.11
 	@./hack/verify-networkpolicy-render.sh
 
+.PHONY: verify-tmp-sizelimit-render
+verify-tmp-sizelimit-render: ## Render the chart's /tmp emptyDir sizeLimits: defaults, overrides, empty values, --reuse-values from v0.3.11
+	@./hack/verify-tmp-sizelimit-render.sh
+
 ifndef ignore-not-found
   ignore-not-found = false
 endif

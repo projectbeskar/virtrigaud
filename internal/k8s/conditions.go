@@ -54,6 +54,8 @@ const (
 	ReasonWaitingForDependencies = "WaitingForDependencies"
 	// ReasonTaskInProgress indicates async task in progress
 	ReasonTaskInProgress = "TaskInProgress"
+	// ReasonCreateRequested marks a VirtualMachine whose provider Create may have been sent: the outcome is recorded by status.id.
+	ReasonCreateRequested = "CreateRequested"
 	// ReasonProviderConflict indicates the provider refused to create the
 	// resource because one with the same provider-side identity (e.g. a libvirt
 	// domain name) already exists and is NOT owned by this object. It is never

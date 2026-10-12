@@ -159,6 +159,46 @@ helm upgrade virtrigaud virtrigaud/virtrigaud \
 | `manager.image.tag` | Manager image tag | `v0.2.0` |
 | `manager.resources.limits.cpu` | CPU limit | `500m` |
 | `manager.resources.limits.memory` | Memory limit | `512Mi` |
+| `manager.tmpSizeLimit` | `sizeLimit` of the manager pod's `/tmp` emptyDir (empty = none) | `128Mi` |
+| `manager.providerTmpSizeLimitMax` | Ceiling on every provider pod's `/tmp` `sizeLimit` (`--provider-tmp-size-limit-max`; a quantity, empty = no ceiling). A `Provider` annotation above it, or `none`, is clamped to it with a `TmpSizeLimitClamped` Warning event; the defaults are capped at it too | `""` |
+| `manager.providerTmpSizeLimit` | `sizeLimit` of the `/tmp` emptyDir of every provider pod run for a `Provider` CR (`--provider-tmp-size-limit`; a quantity or `none`). Empty keeps the per-type defaults: vSphere `512Gi`, others `1Gi` | `""` |
+
+#### `/tmp` size limits
+
+Every pod's root filesystem is read-only, so each gets a writable `/tmp`
+emptyDir, and each emptyDir has a `sizeLimit`: a pod that writes more than that
+to `/tmp` is **evicted** by the kubelet.
+
+> **The limit bounds the pod's `/tmp`; it does not reserve node storage.** The
+> kubelet enforces it only after the data is written. A node with less free
+> ephemeral storage than the limit (the vSphere default is `512Gi`) can still run
+> out first, and the kubelet then evicts pods by its own disk-pressure rules.
+> Size each limit to the nodes the pod can run on, or give the provider's `/tmp`
+> real capacity: schedule it on nodes with that much free ephemeral storage, or
+> back `/tmp` with a volume sized for its imports.
+
+- **vSphere providers stage whole disks in `/tmp`:**
+  - an OVA image download, capped by `VIRTRIGAUD_VSPHERE_IMAGE_MAX_DOWNLOAD_GIB`
+    (default 256 GiB);
+  - for a migration import, or a converted or multi-extent export, about
+    **twice the disk**.
+
+  The default `512Gi` covers both up to that cap; it is a ceiling on what the
+  pod may write, not a guarantee the node has that much free. For larger disks,
+  raise the limit; either way, make sure the node has the free ephemeral storage
+  the imports need, or lower the limit to what it has.
+- **libvirt and Proxmox providers** stream disk data to and from the hypervisor
+  host over SSH. Their `/tmp` only holds SSH keys, known_hosts and control
+  sockets, so `1Gi` is ample.
+- **One `Provider`:** annotate it
+  `infra.virtrigaud.io/tmp-size-limit: "<quantity>"` (or `"none"`). The webhook
+  refuses an invalid value, and changing it rolls that Provider's pods. With
+  `manager.providerTmpSizeLimitMax` set, the annotation cannot go above that
+  ceiling: a larger value, or `"none"`, is clamped to it, and the Provider gets a
+  `TmpSizeLimitClamped` Warning event.
+- **All CR-managed providers:** set `manager.providerTmpSizeLimit`.
+- **Chart-templated providers:** set `providers.<name>.tmpSizeLimit` (a
+  quantity, `"none"`, or empty for no limit; anything else fails the render).
 
 ### Provider Configuration
 
@@ -186,6 +226,9 @@ providers:
   proxmox:
     enabled: false
 ```
+
+Each templated provider has a `providers.<name>.tmpSizeLimit` (vSphere `512Gi`,
+libvirt and Proxmox `1Gi`; see [`/tmp` size limits](#tmp-size-limits)).
 
 See [values.yaml](values.yaml) for complete configuration options.
 
@@ -379,6 +422,11 @@ helm upgrade virtrigaud virtrigaud/virtrigaud \
 ```
 
 ## Uninstallation
+
+Delete your `VirtualMachine`s and `Provider`s **before** uninstalling the chart.
+A `Provider` carries an in-use finalizer (ADR-0010) that only the manager
+releases; one left behind stays `Terminating` until its finalizer is removed by
+hand.
 
 ```bash
 # Uninstall the chart

@@ -269,3 +269,37 @@ Grafana dashboard labels
 {{- toYaml . }}
 {{- end }}
 {{- end }}
+
+{{/*
+Validates a /tmp sizeLimit setting and returns it as a string: "" (unset, as in
+an older values file under --reuse-values), "none", or a positive resource
+quantity such as 20Gi. Anything else fails the render, so a typo never reaches
+the API server (or the manager, which would refuse to start). Takes a dict with
+"value" and "name" (the values key, for the error message).
+*/}}
+{{- define "virtrigaud.tmpSizeLimitValue" -}}
+{{- $v := "" -}}
+{{- if not (kindIs "invalid" .value) -}}
+{{- $v = toString .value -}}
+{{- end -}}
+{{- if and (ne $v "") (ne $v "none") -}}
+{{- if or (not (regexMatch "^[0-9]+(\\.[0-9]+)?(Ki|Mi|Gi|Ti|Pi|Ei|k|M|G|T|P|E)?$" $v)) (regexMatch "^0+(\\.0+)?[A-Za-z]*$" $v) -}}
+{{- fail (printf "%s: invalid /tmp sizeLimit %q; use a positive quantity such as 20Gi, \"none\", or leave it empty" .name $v) -}}
+{{- end -}}
+{{- end -}}
+{{- $v -}}
+{{- end }}
+
+{{/*
+The emptyDir source of a writable /tmp volume, in flow style: {} when the
+sizeLimit is empty, unset or "none", else {sizeLimit: "<limit>"}. Takes a dict
+with "value" and "name" (see virtrigaud.tmpSizeLimitValue).
+*/}}
+{{- define "virtrigaud.tmpEmptyDir" -}}
+{{- $v := include "virtrigaud.tmpSizeLimitValue" . -}}
+{{- if and $v (ne $v "none") -}}
+{sizeLimit: {{ $v | quote }}}
+{{- else -}}
+{}
+{{- end -}}
+{{- end }}

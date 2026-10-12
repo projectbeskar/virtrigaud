@@ -580,6 +580,14 @@ jobs:
           git fetch --no-tags --depth=1 origin +refs/tags/v0.3.11:refs/tags/v0.3.11
           ./hack/verify-networkpolicy-render.sh
 
+      - name: Validate /tmp emptyDir sizeLimit render
+        run: |
+          # Asserts the default /tmp sizeLimits (manager 128Mi, libvirt and
+          # Proxmox 1Gi, vSphere 512Gi), the overrides, that an empty value
+          # renders a valid unbounded emptyDir, and that --reuse-values from
+          # v0.3.11 (fetched by the previous step) still renders.
+          ./hack/verify-tmp-sizelimit-render.sh
+
   conformance:
     name: Conformance Tests
     runs-on: ubuntu-22.04

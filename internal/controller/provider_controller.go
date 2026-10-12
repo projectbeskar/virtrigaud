@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -32,6 +33,7 @@ import (
 	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -61,6 +63,8 @@ const (
 	errReasonHostInventoryReconcile  = "hostinventory-reconcile-failed"
 	errReasonCleanupFailed           = "cleanup-failed"
 	errReasonTLSNotConfigured        = "tls-not-configured"
+	errReasonProviderFinalizer       = "provider-finalizer"
+	errReasonProviderInUse           = "provider-in-use-check"
 )
 
 // TLS Condition vocabulary surfaced on Provider.Status.Conditions by
@@ -149,6 +153,30 @@ type ProviderReconciler struct {
 	// is nil-safe and treats a nil resolver as "capabilities unavailable".
 	RemoteResolver *remote.Resolver
 
+	// TmpSizeLimit is the manager-wide sizeLimit of the writable /tmp emptyDir
+	// of the provider pods (the manager's --provider-tmp-size-limit): a value
+	// ParseProviderTmpSizeLimit accepts, applied to every provider type. Empty
+	// means the per-type default (defaultProviderTmpSizeLimit). A Provider's
+	// ProviderTmpSizeLimitAnnotation overrides both.
+	TmpSizeLimit string
+
+	// TmpSizeLimitMax is the ceiling on a provider pod's /tmp sizeLimit (the
+	// manager's --provider-tmp-size-limit-max): a positive quantity, or empty
+	// for no ceiling. With it set, a ProviderTmpSizeLimitAnnotation above it
+	// (or "none") is clamped to it with a Warning event, and the manager-wide
+	// and per-type defaults are capped at it.
+	TmpSizeLimitMax string
+
+	// tmpLimitWarned records, per Provider, the annotation value last
+	// announced by a TmpSizeLimitClamped event, so a clamp is announced once,
+	// not on every reconcile.
+	tmpLimitWarned sync.Map
+
+	// namespaceReadForbiddenLogged records the namespaces whose Namespace read
+	// was refused (Forbidden, e.g. namespace-scoped RBAC), so that is logged
+	// once per namespace rather than on every reconcile of a held Provider.
+	namespaceReadForbiddenLogged sync.Map
+
 	// Recorder emits Events on the Provider — currently a Warning when a
 	// clustered Host is skipped from the host-inventory render because its
 	// credentials could not be resolved (ADR-0007 D3). May be nil in tests;
@@ -161,6 +189,8 @@ type ProviderReconciler struct {
 // +kubebuilder:rbac:groups=infra.virtrigaud.io,resources=providers/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=infra.virtrigaud.io,resources=providers/finalizers,verbs=update
 // +kubebuilder:rbac:groups=infra.virtrigaud.io,resources=virtualmachines,verbs=get;list;watch
+// +kubebuilder:rbac:groups=infra.virtrigaud.io,resources=vmsnapshots;vmclones;vmmigrations,verbs=get;list;watch
+// +kubebuilder:rbac:groups="",resources=namespaces,verbs=get;list;watch
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=serviceaccounts,verbs=get;list;watch;create;update;patch;delete
@@ -206,46 +236,26 @@ func (r *ProviderReconciler) Reconcile(ctx context.Context, req ctrl.Request) (r
 		return ctrl.Result{}, err
 	}
 
-	// Handle deletion (cleanup deployments and services)
+	// A Provider being deleted is held while anything still needs it, with its
+	// runtime kept up; it is released (runtime torn down, finalizer removed)
+	// only once nothing does, or on force-delete (ADR-0010).
 	if !provider.DeletionTimestamp.IsZero() {
 		return r.handleDeletion(ctx, &provider)
 	}
 
-	// Initialize runtime status if needed
-	if provider.Status.Runtime == nil {
-		provider.Status.Runtime = &infravirtrigaudiov1beta1.ProviderRuntimeStatus{}
-	}
-
-	// Validate that runtime is configured (now required)
-	if provider.Spec.Runtime == nil {
-		err := fmt.Errorf("runtime configuration is required")
-		k8s.SetCondition(&provider.Status.Conditions, "ProviderRuntimeReady", metav1.ConditionFalse, "MissingRuntime", err.Error())
-		provider.Status.ObservedGeneration = provider.Generation
-		if updateErr := r.Status().Update(ctx, &provider); updateErr != nil {
-			logger.Error(updateErr, "Failed to update Provider status")
+	// Keep the in-use finalizer on every live Provider (ADR-0010 D1). This
+	// also adds it to every Provider that existed before the upgrade.
+	if !k8s.HasFinalizer(&provider, infravirtrigaudiov1beta1.ProviderInUseFinalizer) {
+		if err := k8s.AddFinalizer(ctx, r.Client, &provider, infravirtrigaudiov1beta1.ProviderInUseFinalizer); err != nil {
+			metrics.RecordError(errReasonProviderFinalizer, metrics.ComponentManager)
+			return ctrl.Result{}, fmt.Errorf("add in-use finalizer to Provider %s: %w", req.NamespacedName, err)
 		}
-		metrics.RecordError(errReasonRuntimeSpecInvalid, metrics.ComponentManager)
-		return ctrl.Result{}, err
 	}
 
-	// Set runtime mode (always Remote)
-	provider.Status.Runtime.Mode = infravirtrigaudiov1beta1.RuntimeModeRemote
+	// Reconcile the runtime and derive the runtime status fields.
+	result, err := r.reconcileRuntimeStatus(ctx, &provider)
 
-	// Handle remote runtime reconciliation
-	result, err := r.reconcileRemoteRuntime(ctx, &provider)
-
-	// Count connected VMs
-	connectedVMs, countErr := r.countConnectedVMs(ctx, &provider)
-	if countErr != nil {
-		logger.V(1).Info("Failed to count connected VMs", "error", countErr)
-		// Don't fail reconciliation if counting fails, just log it
-	} else {
-		provider.Status.ConnectedVMs = connectedVMs
-	}
-
-	// Set healthy status based on ProviderAvailable condition
-	providerAvailable := k8s.GetCondition(provider.Status.Conditions, "ProviderAvailable")
-	provider.Status.Healthy = providerAvailable != nil && providerAvailable.Status == metav1.ConditionTrue
+	// A healthy live Provider records when it was last seen healthy.
 	if provider.Status.Healthy {
 		now := metav1.Now()
 		provider.Status.LastHealthCheck = &now
@@ -261,23 +271,7 @@ func (r *ProviderReconciler) Reconcile(ctx context.Context, req ctrl.Request) (r
 		r.reconcileReportedCapabilities(ctx, &provider)
 	}
 
-	// Update provider status with retry on conflict
-	provider.Status.ObservedGeneration = provider.Generation
-	updateErr := retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		// Get the latest version
-		latest := &infravirtrigaudiov1beta1.Provider{}
-		if err := r.Get(ctx, types.NamespacedName{Name: provider.Name, Namespace: provider.Namespace}, latest); err != nil {
-			return err
-		}
-
-		// Update status fields
-		latest.Status = provider.Status
-
-		// Try to update
-		return r.Status().Update(ctx, latest)
-	})
-
-	if updateErr != nil {
+	if updateErr := r.writeProviderStatus(ctx, &provider); updateErr != nil {
 		logger.Error(updateErr, "Failed to update Provider status")
 		if err == nil {
 			err = updateErr
@@ -285,6 +279,66 @@ func (r *ProviderReconciler) Reconcile(ctx context.Context, req ctrl.Request) (r
 	}
 
 	return result, err
+}
+
+// reconcileRuntimeStatus reconciles the Provider's remote runtime (Service,
+// ServiceAccount, clustered host inventory, Deployment) and fills in the
+// runtime-derived status fields: status.runtime, the runtime conditions,
+// ConnectedVMs and Healthy. It writes no Provider status; the caller does. It
+// is shared by a live Provider and a Provider held by the in-use finalizer,
+// whose runtime must stay up (ADR-0010 D3).
+func (r *ProviderReconciler) reconcileRuntimeStatus(ctx context.Context, provider *infravirtrigaudiov1beta1.Provider) (ctrl.Result, error) {
+	logger := log.FromContext(ctx)
+
+	// Initialize runtime status if needed
+	if provider.Status.Runtime == nil {
+		provider.Status.Runtime = &infravirtrigaudiov1beta1.ProviderRuntimeStatus{}
+	}
+	provider.Status.ObservedGeneration = provider.Generation
+
+	// Validate that runtime is configured (now required)
+	if provider.Spec.Runtime == nil {
+		err := fmt.Errorf("runtime configuration is required")
+		k8s.SetCondition(&provider.Status.Conditions, "ProviderRuntimeReady", metav1.ConditionFalse, "MissingRuntime", err.Error())
+		metrics.RecordError(errReasonRuntimeSpecInvalid, metrics.ComponentManager)
+		return ctrl.Result{}, err
+	}
+
+	// Set runtime mode (always Remote)
+	provider.Status.Runtime.Mode = infravirtrigaudiov1beta1.RuntimeModeRemote
+
+	// Handle remote runtime reconciliation
+	result, err := r.reconcileRemoteRuntime(ctx, provider)
+
+	// Count connected VMs
+	connectedVMs, countErr := r.countConnectedVMs(ctx, provider)
+	if countErr != nil {
+		logger.V(1).Info("Failed to count connected VMs", "error", countErr)
+		// Don't fail reconciliation if counting fails, just log it
+	} else {
+		provider.Status.ConnectedVMs = connectedVMs
+	}
+
+	// Set healthy status based on ProviderAvailable condition
+	providerAvailable := k8s.GetCondition(provider.Status.Conditions, "ProviderAvailable")
+	provider.Status.Healthy = providerAvailable != nil && providerAvailable.Status == metav1.ConditionTrue
+
+	return result, err
+}
+
+// writeProviderStatus writes provider.Status through the status subresource,
+// re-reading the latest object on a conflict so a concurrent metadata write
+// (the in-use finalizer) does not lose the status.
+func (r *ProviderReconciler) writeProviderStatus(ctx context.Context, provider *infravirtrigaudiov1beta1.Provider) error {
+	provider.Status.ObservedGeneration = provider.Generation
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		latest := &infravirtrigaudiov1beta1.Provider{}
+		if err := r.Get(ctx, types.NamespacedName{Name: provider.Name, Namespace: provider.Namespace}, latest); err != nil {
+			return err
+		}
+		latest.Status = provider.Status
+		return r.Status().Update(ctx, latest)
+	})
 }
 
 // reconcileReportedCapabilities best-effort fetches the provider's
@@ -385,20 +439,6 @@ func capabilitiesToReported(caps contracts.Capabilities) *infravirtrigaudiov1bet
 		// Provider are held.
 		SupportsHonestReconfigure: caps.SupportsHonestReconfigure,
 	}
-}
-
-// handleDeletion cleans up remote runtime resources when Provider is deleted
-func (r *ProviderReconciler) handleDeletion(ctx context.Context, provider *infravirtrigaudiov1beta1.Provider) (ctrl.Result, error) {
-	logger := log.FromContext(ctx)
-
-	// Always clean up remote runtime resources (all providers are remote now)
-	if err := r.cleanupRemoteRuntime(ctx, provider); err != nil {
-		logger.Error(err, "Failed to cleanup remote runtime resources")
-		metrics.RecordError(errReasonCleanupFailed, metrics.ComponentManager)
-		return ctrl.Result{RequeueAfter: time.Minute}, err
-	}
-
-	return ctrl.Result{}, nil
 }
 
 // reconcileRemoteRuntime manages remote provider deployments and services
@@ -752,6 +792,20 @@ func (r *ProviderReconciler) reconcileServiceAccount(ctx context.Context, provid
 	return existing, nil
 }
 
+// providerRunsSingleReplica reports whether the Provider's runtime must run
+// exactly one replica, replaced with the Recreate strategy, whatever
+// spec.runtime.replicas says:
+//   - a clustered Provider (ADR-0007 Addendum A, slice 4): its owner transfers
+//     (TransferOwner) and per-host guards are serialized inside one process;
+//   - a vSphere Provider: it serializes migration landing work (the import
+//     folder of a migrated disk) with a per-process lock, so two processes
+//     could race on the same landing folder.
+//
+// Recreate means the provider is briefly unavailable during every rollout.
+func providerRunsSingleReplica(provider *infravirtrigaudiov1beta1.Provider) bool {
+	return isClusterTopology(provider) || provider.Spec.Type == infravirtrigaudiov1beta1.ProviderTypeVSphere
+}
+
 // reconcileDeployment creates or updates the deployment for remote provider
 func (r *ProviderReconciler) reconcileDeployment(ctx context.Context, provider *infravirtrigaudiov1beta1.Provider, deploymentName string) (*appsv1.Deployment, error) {
 	// Default values
@@ -759,16 +813,15 @@ func (r *ProviderReconciler) reconcileDeployment(ctx context.Context, provider *
 	if provider.Spec.Runtime.Replicas != nil {
 		replicas = *provider.Spec.Runtime.Replicas
 	}
-	// A clustered provider runs exactly one replica, replaced with the
-	// Recreate strategy (ADR-0007 Addendum A, slice 4): its owner transfers
-	// (TransferOwner) and its per-host guards are serialized inside one
-	// process, so two replicas — or an old and a new pod overlapping in a
-	// rolling update — could both pass a check before either writes.
+	// Some providers run exactly one replica, replaced with the Recreate
+	// strategy (providerRunsSingleReplica): they serialize work with a
+	// per-process lock, so two replicas — or an old and a new pod overlapping
+	// in a rolling update — could both pass a check before either writes.
 	var strategy appsv1.DeploymentStrategy
-	if isClusterTopology(provider) {
+	if providerRunsSingleReplica(provider) {
 		if replicas > 1 {
-			log.FromContext(ctx).Info("A clustered Provider runs one replica; ignoring spec.runtime.replicas",
-				"provider", provider.Name, "replicas", replicas)
+			log.FromContext(ctx).Info("This Provider runs one replica; ignoring spec.runtime.replicas",
+				"provider", provider.Name, "type", provider.Spec.Type, "replicas", replicas)
 			replicas = 1
 		}
 		strategy = appsv1.DeploymentStrategy{Type: appsv1.RecreateDeploymentStrategyType}
@@ -822,7 +875,7 @@ func (r *ProviderReconciler) reconcileDeployment(ctx context.Context, provider *
 					ServiceAccountName:            r.getServiceAccountName(provider),
 					AutomountServiceAccountToken:  util.BoolPtr(false),
 					Containers:                    []corev1.Container{*container},
-					Volumes:                       r.buildPodVolumes(provider),
+					Volumes:                       r.buildPodVolumes(ctx, provider),
 					NodeSelector:                  provider.Spec.Runtime.NodeSelector,
 					Tolerations:                   provider.Spec.Runtime.Tolerations,
 					Affinity:                      provider.Spec.Runtime.Affinity,
@@ -863,7 +916,7 @@ func (r *ProviderReconciler) reconcileDeployment(ctx context.Context, provider *
 		existing.Spec.Replicas = &replicas
 		existing.Spec.Template = desired.Spec.Template
 		existing.Labels = desired.Labels
-		if isClusterTopology(provider) {
+		if providerRunsSingleReplica(provider) {
 			existing.Spec.Strategy = desired.Spec.Strategy // Recreate (no rollingUpdate parameters)
 		}
 
@@ -1164,7 +1217,7 @@ func (r *ProviderReconciler) buildProviderContainer(provider *infravirtrigaudiov
 }
 
 // buildPodVolumes builds the volumes for the provider pod
-func (r *ProviderReconciler) buildPodVolumes(provider *infravirtrigaudiov1beta1.Provider) []corev1.Volume {
+func (r *ProviderReconciler) buildPodVolumes(ctx context.Context, provider *infravirtrigaudiov1beta1.Provider) []corev1.Volume {
 	var volumes []corev1.Volume
 
 	// Add credentials volume
@@ -1219,11 +1272,13 @@ func (r *ProviderReconciler) buildPodVolumes(provider *infravirtrigaudiov1beta1.
 	migrationVolumes := r.discoverMigrationPVCs(context.Background(), provider.Namespace)
 	volumes = append(volumes, migrationVolumes...)
 
-	// Add temporary directory volume (needed for read-only root filesystem)
+	// Add temporary directory volume (needed for read-only root filesystem),
+	// bounded so a provider cannot fill the node's ephemeral storage. A pod
+	// that writes past the limit is evicted by the kubelet.
 	volumes = append(volumes, corev1.Volume{
 		Name: "tmp",
 		VolumeSource: corev1.VolumeSource{
-			EmptyDir: &corev1.EmptyDirVolumeSource{},
+			EmptyDir: &corev1.EmptyDirVolumeSource{SizeLimit: r.providerTmpSizeLimit(ctx, provider)},
 		},
 	})
 
@@ -1464,6 +1519,14 @@ func (r *ProviderReconciler) cleanupRemoteRuntime(ctx context.Context, provider 
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *ProviderReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	// The in-use finalizer (ADR-0010) finds what still uses a Provider being
+	// deleted through these indexes, never by listing every object.
+	if err := indexPlacementProvider(mgr); err != nil {
+		return err
+	}
+	if err := indexProviderInUse(mgr); err != nil {
+		return err
+	}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&infravirtrigaudiov1beta1.Provider{}).
 		Owns(&appsv1.Deployment{}).
@@ -1487,6 +1550,29 @@ func (r *ProviderReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Watches(
 			&infravirtrigaudiov1beta1.HostPool{},
 			handler.EnqueueRequestsFromMapFunc(r.providersForHostPool),
+		).
+		// Re-check a Provider being deleted when something that holds it goes
+		// away or stops holding it (ADR-0010 D4). Only a Provider being deleted
+		// is enqueued, and only for an event that can change what holds it.
+		Watches(
+			&infravirtrigaudiov1beta1.VirtualMachine{},
+			handler.EnqueueRequestsFromMapFunc(r.providersForInUseVM),
+			builder.WithPredicates(providerUseChanged()),
+		).
+		Watches(
+			&infravirtrigaudiov1beta1.VMSnapshot{},
+			handler.EnqueueRequestsFromMapFunc(r.providersForInUseDependent),
+			builder.WithPredicates(providerUseChanged()),
+		).
+		Watches(
+			&infravirtrigaudiov1beta1.VMClone{},
+			handler.EnqueueRequestsFromMapFunc(r.providersForInUseDependent),
+			builder.WithPredicates(providerUseChanged()),
+		).
+		Watches(
+			&infravirtrigaudiov1beta1.VMMigration{},
+			handler.EnqueueRequestsFromMapFunc(r.providersForInUseDependent),
+			builder.WithPredicates(providerUseChanged()),
 		).
 		WithOptions(controller.Options{
 			MaxConcurrentReconciles: 5, // Process up to 5 providers in parallel

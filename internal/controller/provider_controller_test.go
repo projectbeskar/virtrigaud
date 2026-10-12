@@ -74,6 +74,11 @@ var _ = Describe("Provider Controller", func() {
 
 			By("Cleanup the specific resource instance Provider")
 			Expect(k8sClient.Delete(ctx, resource)).To(Succeed())
+			// No Provider controller runs here to release the in-use finalizer
+			// (ADR-0010), so drop it for the object to go.
+			Expect(k8sClient.Get(ctx, typeNamespacedName, resource)).To(Succeed())
+			resource.Finalizers = nil
+			Expect(k8sClient.Update(ctx, resource)).To(Succeed())
 		})
 		It("should successfully reconcile the resource", func() {
 			By("Reconciling the created resource")
@@ -86,8 +91,11 @@ var _ = Describe("Provider Controller", func() {
 				NamespacedName: typeNamespacedName,
 			})
 			Expect(err).NotTo(HaveOccurred())
-			// TODO(user): Add more specific assertions depending on your controller's reconciliation logic.
-			// Example: If you expect a certain status condition after reconciliation, verify it here.
+
+			By("Keeping the in-use finalizer on the live Provider (ADR-0010)")
+			reconciled := &infravirtrigaudiov1beta1.Provider{}
+			Expect(k8sClient.Get(ctx, typeNamespacedName, reconciled)).To(Succeed())
+			Expect(reconciled.Finalizers).To(ContainElement(infravirtrigaudiov1beta1.ProviderInUseFinalizer))
 		})
 	})
 })

@@ -83,6 +83,41 @@ manager:
   # Additional volume mounts
   volumeMounts: []
 
+  # sizeLimit of the manager pod's writable /tmp emptyDir (the root filesystem
+  # is read-only). The manager writes nothing large there; a pod that writes
+  # past the limit is evicted by the kubelet. A positive quantity, or empty or
+  # "none" for no limit; anything else fails the render.
+  tmpSizeLimit: 128Mi
+
+  # sizeLimit of the writable /tmp emptyDir of every provider pod the manager
+  # runs for Provider CRs (the manager's --provider-tmp-size-limit): a quantity
+  # such as 20Gi, or "none" for no limit. Empty (the default) keeps the
+  # per-type defaults:
+  #   - vSphere: 512Gi. The vSphere provider stages whole disks and images in
+  #     /tmp: an OVA download (up to VIRTRIGAUD_VSPHERE_IMAGE_MAX_DOWNLOAD_GIB,
+  #     default 256 GiB) and, for a migration import or a converted export,
+  #     about twice the disk at once. Migrating a disk larger than about
+  #     256 GiB needs a larger limit (and that much free node disk).
+  # A sizeLimit bounds the pod's /tmp (the pod is evicted past it); it does
+  # not reserve node storage, so a node with less free ephemeral storage than
+  # the limit can still fill up first. Size it to your nodes, or schedule
+  # vSphere providers on nodes with enough free ephemeral storage.
+  #   - libvirt, Proxmox and others: 1Gi. They stream disk data to and from
+  #     the hypervisor over SSH; /tmp only holds SSH material.
+  # One Provider can override it with the annotation
+  # infra.virtrigaud.io/tmp-size-limit (a quantity or "none").
+  providerTmpSizeLimit: ""
+
+  # Ceiling on the /tmp sizeLimit of every provider pod the manager runs (the
+  # manager's --provider-tmp-size-limit-max): a quantity such as 200Gi, or
+  # empty (the default) for no ceiling. With it set, a Provider's
+  # infra.virtrigaud.io/tmp-size-limit annotation can only stay within it:
+  # a larger value, or "none", is clamped to the ceiling with a Warning event
+  # (TmpSizeLimitClamped) on the Provider. providerTmpSizeLimit and the
+  # per-type defaults are capped at it too. Set it when Provider authors are
+  # not trusted to size node storage.
+  providerTmpSizeLimitMax: ""
+
 # Provider configuration
 #
 # These are OPTIONAL chart-templated standalone provider Deployments. They are
@@ -107,10 +142,17 @@ providers:
       requests:
         cpu: 200m
         memory: 256Mi
+    # sizeLimit of the writable /tmp emptyDir. libvirt streams disk data over
+    # SSH; /tmp only holds SSH material. A quantity, or empty or "none" for no
+    # limit.
+    tmpSizeLimit: 1Gi
 
   # vSphere provider  
   vsphere:
     enabled: false
+    # Must be 1: the vSphere provider serializes migration landing work in one
+    # process, and is replaced with the Recreate strategy (briefly down on a
+    # rollout). A larger value fails the render.
     replicaCount: 1
     image:
       repository: projectbeskar/virtrigaud/provider-vsphere
@@ -122,6 +164,12 @@ providers:
       requests:
         cpu: 200m
         memory: 256Mi
+    # sizeLimit of the writable /tmp emptyDir. vSphere stages OVA downloads
+    # (up to 256 GiB by default) and about twice a migrated disk there; raise
+    # it for larger disks. It bounds the pod's /tmp but does not reserve node
+    # storage: size it to the node's free ephemeral storage. A quantity, or
+    # empty or "none" for no limit.
+    tmpSizeLimit: 512Gi
 
   # Proxmox provider
   proxmox:
@@ -137,6 +185,10 @@ providers:
       requests:
         cpu: 200m
         memory: 256Mi
+    # sizeLimit of the writable /tmp emptyDir. Proxmox stages disk data on the
+    # node (/var/tmp) over SSH; /tmp only holds SSH material. A quantity, or
+    # empty or "none" for no limit.
+    tmpSizeLimit: 1Gi
     
     # ⚠️  REQUIRED: Proxmox VE server configuration
     # The Proxmox provider requires connection to an active Proxmox VE server.

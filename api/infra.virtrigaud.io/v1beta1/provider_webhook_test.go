@@ -173,6 +173,31 @@ func TestProviderCustomValidator_ValidateUpdate(t *testing.T) {
 	}
 }
 
+// TestProviderCustomValidator_MetadataOnlyUpdateAdmitted pins ADR-0010 D7: an
+// update that leaves the spec unchanged (adding or removing the in-use
+// finalizer) is admitted even for a Provider that predates the topology×type
+// rule and breaks it, so such a Provider can still be deleted. A spec change on
+// it is still checked.
+func TestProviderCustomValidator_MetadataOnlyUpdateAdmitted(t *testing.T) {
+	v := &ProviderCustomValidator{}
+	ctx := context.Background()
+	legacy := newProviderForTopology("p", ProviderTypeVSphere, ProviderTopologyCluster)
+
+	withFinalizer := legacy.DeepCopy()
+	withFinalizer.Finalizers = []string{ProviderInUseFinalizer}
+	if _, err := v.ValidateUpdate(ctx, legacy, withFinalizer); err != nil {
+		t.Fatalf("adding the finalizer must be admitted, got %v", err)
+	}
+	if _, err := v.ValidateUpdate(ctx, withFinalizer, legacy); err != nil {
+		t.Fatalf("removing the finalizer must be admitted, got %v", err)
+	}
+
+	specChange := legacy.DeepCopy()
+	specChange.Spec.Endpoint = "https://vcenter.example.com"
+	_, err := v.ValidateUpdate(ctx, legacy, specChange)
+	assertTopologyResult(t, err, true)
+}
+
 // TestProviderCustomValidator_TypeImmutable pins that spec.type can never
 // change on update (the controllers decide type-specific safety rules from it,
 // e.g. refusing a libvirt linked clone into another namespace): every change is
@@ -268,5 +293,85 @@ func TestProviderCustomValidator_WrongType(t *testing.T) {
 		t.Error("expected ValidateUpdate to error on a non-Provider object")
 	} else if apierrors.IsInvalid(err) {
 		t.Errorf("wrong-type error should not be an Invalid field error, got %v", err)
+	}
+}
+
+// TestProviderCustomValidator_TmpSizeLimitAnnotation pins the validation of
+// ProviderTmpSizeLimitAnnotation: a positive quantity or "none" is admitted, a
+// bad value is refused on create and when set or changed on update, and an
+// unchanged bad value never blocks a metadata update.
+func TestProviderCustomValidator_TmpSizeLimitAnnotation(t *testing.T) {
+	v := &ProviderCustomValidator{}
+	ctx := context.Background()
+	with := func(value string) *Provider {
+		p := newProviderForTopology("p", ProviderTypeLibvirt, "")
+		p.Annotations = map[string]string{ProviderTmpSizeLimitAnnotation: value}
+		return p
+	}
+	for _, ok := range []string{"20Gi", "512Mi", ProviderTmpSizeLimitNone} {
+		if _, err := v.ValidateCreate(ctx, with(ok)); err != nil {
+			t.Errorf("%q must be admitted, got %v", ok, err)
+		}
+	}
+	for _, bad := range []string{"", "0", "-1Gi", "lots", "None"} {
+		if _, err := v.ValidateCreate(ctx, with(bad)); err == nil || !apierrors.IsInvalid(err) {
+			t.Errorf("%q must be refused as Invalid on create, got %v", bad, err)
+		}
+		if _, err := v.ValidateUpdate(ctx, with("20Gi"), with(bad)); err == nil {
+			t.Errorf("changing the value to %q must be refused", bad)
+		}
+		withFinalizer := with(bad)
+		withFinalizer.Finalizers = []string{ProviderInUseFinalizer}
+		if _, err := v.ValidateUpdate(ctx, with(bad), withFinalizer); err != nil {
+			t.Errorf("an unchanged %q must not block a metadata update, got %v", bad, err)
+		}
+	}
+}
+
+func TestParseProviderTmpSizeLimit(t *testing.T) {
+	q, err := ParseProviderTmpSizeLimit("20Gi")
+	if err != nil || q == nil || q.String() != "20Gi" {
+		t.Fatalf("20Gi: got %v, %v", q, err)
+	}
+	q, err = ParseProviderTmpSizeLimit(ProviderTmpSizeLimitNone)
+	if err != nil || q != nil {
+		t.Fatalf("none: got %v, %v", q, err)
+	}
+	if _, err := ParseProviderTmpSizeLimit("0"); err == nil {
+		t.Fatal("0 must be refused")
+	}
+}
+
+// TestProviderCustomValidator_ForceDeleteOnLiveProviderWarns pins security
+// review L3: the force-delete annotation on a Provider that is not being
+// deleted gets an admission warning (never a denial); on a Provider being
+// deleted, where it is the documented escape hatch, it gets none.
+func TestProviderCustomValidator_ForceDeleteOnLiveProviderWarns(t *testing.T) {
+	v := &ProviderCustomValidator{}
+	ctx := context.Background()
+	plain := newProviderForTopology("p", ProviderTypeLibvirt, "")
+	forced := plain.DeepCopy()
+	forced.Annotations = map[string]string{providerForceDeleteAnnotation: "true"}
+
+	warnings, err := v.ValidateCreate(ctx, forced)
+	if err != nil || len(warnings) != 1 || warnings[0] != forceDeleteOnLiveProviderWarning {
+		t.Fatalf("create: want one warning and no error, got %v, %v", warnings, err)
+	}
+	warnings, err = v.ValidateUpdate(ctx, plain, forced)
+	if err != nil || len(warnings) != 1 {
+		t.Fatalf("update of a live Provider: want one warning and no error, got %v, %v", warnings, err)
+	}
+
+	deleting := forced.DeepCopy()
+	now := metav1.Now()
+	deleting.DeletionTimestamp = &now
+	deleting.Finalizers = []string{ProviderInUseFinalizer}
+	if warnings, err := v.ValidateUpdate(ctx, deleting.DeepCopy(), deleting); err != nil || warnings != nil {
+		t.Fatalf("a Provider being deleted: want no warning, got %v, %v", warnings, err)
+	}
+	notTrue := plain.DeepCopy()
+	notTrue.Annotations = map[string]string{providerForceDeleteAnnotation: "false"}
+	if warnings, _ := v.ValidateCreate(ctx, notTrue); warnings != nil {
+		t.Fatalf("a value other than true: want no warning, got %v", warnings)
 	}
 }

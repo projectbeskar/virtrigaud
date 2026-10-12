@@ -61,6 +61,26 @@ const (
 // occupy capacity nobody sees. Single-host Providers ignore it.
 const ProviderAllowConsumerOrphanOnDeleteAnnotation = "infra.virtrigaud.io/allow-consumer-orphan-on-delete"
 
+// ProviderInUseFinalizer is the finalizer the Provider controller keeps on
+// every Provider (ADR-0010). A Provider being deleted is held while any
+// VirtualMachine (in any namespace), VMSnapshot, VMClone or VMMigration still
+// needs it, with its runtime kept up so they can still be deleted through it.
+// It is removed once nothing needs the Provider, or at once when the Provider
+// is annotated virtrigaud.io/force-delete=true.
+const ProviderInUseFinalizer = "provider.infra.virtrigaud.io/in-use"
+
+// ProviderTmpSizeLimitAnnotation is the Provider annotation that sets the
+// sizeLimit of the writable /tmp emptyDir of the provider pods the manager
+// runs for it, overriding the manager-wide default (--provider-tmp-size-limit).
+// The value is a positive resource quantity (e.g. "20Gi") or
+// ProviderTmpSizeLimitNone for no limit. A pod that writes more than the limit
+// to /tmp is evicted by the kubelet. Changing it rolls the provider pods.
+const ProviderTmpSizeLimitAnnotation = "infra.virtrigaud.io/tmp-size-limit"
+
+// ProviderTmpSizeLimitNone is the ProviderTmpSizeLimitAnnotation (and
+// --provider-tmp-size-limit) value that leaves /tmp without a sizeLimit.
+const ProviderTmpSizeLimitNone = "none"
+
 // ProviderRuntimeMode specifies how the provider is executed
 // +kubebuilder:validation:Enum=Remote
 type ProviderRuntimeMode string
@@ -131,7 +151,10 @@ type ProviderRuntimeSpec struct {
 	// +kubebuilder:validation:MaxItems=10
 	ImagePullSecrets []corev1.LocalObjectReference `json:"imagePullSecrets,omitempty"`
 
-	// Replicas is the number of provider instances (default 1)
+	// Replicas is the number of provider instances (default 1). A clustered
+	// Provider (topology: cluster) and a vSphere Provider always run one
+	// replica, replaced with the Recreate strategy; for them a larger value is
+	// ignored.
 	// +optional
 	// +kubebuilder:default=1
 	// +kubebuilder:validation:Minimum=1

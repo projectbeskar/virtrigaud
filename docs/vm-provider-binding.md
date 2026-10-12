@@ -310,6 +310,88 @@ releases released it, leaving the hypervisor VM running unmanaged):
 
 A `Provider` that no longer exists in the VM's own namespace is different:
 there is nothing to delete through, and the finalizer is released as before.
+Since the `Provider` in-use finalizer (below), that happens only after an
+administrator force-deletes the `Provider`, or for a `Provider` deleted before
+the upgrade.
+
+## Deleting a `Provider`
+
+A `Provider` carries the finalizer `provider.infra.virtrigaud.io/in-use`
+([ADR-0010](adr/0010-provider-in-use-finalizer.md)); the manager adds it to
+every `Provider`, including those created before the upgrade. Deleting a
+`Provider` that is still needed does not remove it:
+
+- **What holds it:**
+  - Every `VirtualMachine` whose placement Provider it is (`status.boundProvider`,
+    else `spec.providerRef`), until its `VirtualMachine` finalizer is gone, if:
+    - it is bound, or may have something on the hypervisor (`status.id`,
+      `status.placement.pendingHost`, or the `CreateRequested` provisioning
+      marker); a VM never created holds nothing;
+    - and it is in the `Provider`'s namespace, bound through it, or in a namespace
+      the `Provider`'s `spec.consumerNamespaceSelector` allows. A namespace that
+      may not use the `Provider` cannot hold it.
+  - A `VMSnapshot` of one of those VMs with a delete still to run.
+  - An in-flight `VMClone` of one of them.
+  - A `VMMigration` in flight (or being deleted) out of one of them, or into this
+    `Provider` from its namespace or an allowed one.
+- **Its runtime is kept:** while it is held, its Deployment, Service and
+  ServiceAccount are reconciled as before and its runtime phase stays `Running`,
+  so the VMs can still be deleted through it.
+- **What you see:** `DeleteBlocked=True` with reason `ProviderInUse`; the
+  message gives the number of objects of each kind and the namespaces they are
+  in, with a count per namespace (at most 10 namespaces are named, and never an
+  object). One `Warning` event `ProviderDeleteBlocked` is recorded when the hold
+  begins. A hold that has not changed writes nothing.
+- **Release:** as soon as the last object goes (the manager watches them), the
+  runtime is removed and the finalizer released.
+
+### Deleting a namespace that contains a `Provider`
+
+Kubernetes deletes every object in a namespace being deleted, **including the
+provider runtime's Deployment and pods** — a finalizer cannot stop that, and
+nothing can be re-created in that namespace. So:
+
+1. The `Provider` is held by its VMs, so they are not released without a
+   provider `Delete`.
+2. A VM whose delete reaches the provider while its pod is terminating (a 15 s
+   `preStop` within a 30 s grace period) is deleted normally.
+3. A VM whose delete comes later is held with `ProviderUnavailable` (above), not
+   orphaned. The `Provider` shows `DeleteBlocked=True` with reason
+   `ProviderInUseRuntimeNotKept`, and the namespace stays `Terminating`.
+4. To finish, set `virtrigaud.io/force-delete: "true"` on the `Provider` or on
+   each remaining VM. The hypervisor VMs left are then unmanaged.
+
+**Delete the VMs, and wait for them to go, before deleting their namespace.**
+A `Provider` deleted with `kubectl delete --cascade=foreground` has the same
+limit (the garbage collector deletes its runtime first); use the default
+cascade.
+
+VMs in **other** namespaces are not deleted with the namespace, so a `Provider`
+with cross-namespace consumers waits for them. Delete them, detach them with
+`virtrigaud.io/orphan-on-delete: "true"` (a clustered `Provider` must allow
+that for consumers, above), or force-delete the `Provider`.
+
+### Releasing a held `Provider`: `virtrigaud.io/force-delete`
+
+Annotating a `Provider` being deleted `virtrigaud.io/force-delete: "true"`
+releases it at once: its runtime is removed, the finalizer is released, and a
+`Warning` event `ProviderForceDeleted` records how many objects (per kind and
+namespace) still used it. The objects are not touched. VMs in the `Provider`'s
+namespace are released on their next delete without any provider call; VMs in
+other namespaces stay held until they are annotated `orphan-on-delete` or
+`force-delete`. Either way their hypervisor VMs are left running, unmanaged.
+
+### Uninstalling and rolling back
+
+Delete VMs and `Provider`s **before** removing the manager: without it, nothing
+releases the finalizer and they stay `Terminating`. After a rollback to a manager
+without this finalizer, a `Provider` deleted later also stays `Terminating`;
+once no VM uses it, remove the finalizer by hand:
+
+```sh
+kubectl patch provider <name> -n <namespace> --type=json \
+  -p '[{"op":"remove","path":"/metadata/finalizers"}]'
+```
 
 ## Upgrade notes
 
