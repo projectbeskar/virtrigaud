@@ -463,6 +463,16 @@ is a VM-scoped not-performed answer, and the stage is kept for the retry.
 Libvirt already had the header check, but its convert read the NFS object a second
 time; Proxmox and vSphere had none. These were pre-existing.
 
+**Residual risk: expansion on convert.** The free-space check covers twice the
+staged FILE size: the copy, plus a converted disk of the same size. A **compressed**
+staged image (compressed qcow2 clusters, or a streamOptimized VMDK) expands when it
+is converted (libvirt `-O qcow2` into the pool directory, Proxmox `qm importdisk`
+into the storage). It can grow up to its declared virtual size. The check is not
+made against the virtual size: that would refuse every sparse disk larger than the
+free space. The bound on this growth is the target `Provider`'s disk-size limit
+(#382). With a limit set, the declared virtual size is refused above it before
+anything is converted. **Set a disk-size limit on Providers whose hosts are shared.**
+
 **VMDK grain directory at end.** VirtRigaud's own vSphere export stages one of two
 VMDKs. The first is a `sparseMonolithic` clone (`CopyVirtualDisk`), uploaded as is.
 The second is a multi-file VMDK flattened by `qemu-img convert -O vmdk -o

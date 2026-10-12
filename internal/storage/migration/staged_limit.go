@@ -46,7 +46,13 @@ const DefaultStagedImportMaxGiB = 1024
 
 // StagedCopySpaceFactor is how many times the staged object's size must be
 // free where it is copied: the copy itself and the converted disk made from
-// it.
+// it. The converted disk holds the image's allocated data, which for a
+// COMPRESSED staged image (compressed qcow2 clusters, a streamOptimized VMDK)
+// can exceed the file size, up to the declared virtual size. The check is
+// deliberately not made against the virtual size, which would refuse every
+// sparse disk larger than the free space; the bound on that growth is the
+// target Provider's disk-size limit (#382, max_virtual_size_bytes), which
+// operators of shared hosts should set (ADR-0011 D10).
 const StagedCopySpaceFactor = 2
 
 // gib is one GiB in bytes.

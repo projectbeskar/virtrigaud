@@ -106,6 +106,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `CheckStagedImageBytes` returns the declared virtual size and refuses one above the limit.
   - All three providers' S3 downloads are bounded by the object's reported size (`BoundedWriter`), with a free-space pre-check.
   - A raw image that qemu would probe as a VMDK descriptor is refused.
+- Final review:
+  - `internal/storage/migration/image_header_test.go`: real qemu-img `streamOptimized` and `monolithicSparse` VMDKs pass the header check. Both keep the grain directory offset in the header, as VirtRigaud's vSphere export does (a `sparseMonolithic` clone, or a qemu-img flatten). A grain directory at end (VMware NFC/OVF footer layout) stays refused; ADR-0011 records why.
+  - ADR-0011, `docs/upgrading.md`: the import's free-space check covers twice the staged file size. A compressed staged image can expand up to its virtual size when converted. Set a disk-size limit (#382) on Providers whose hosts are shared.
 - Logging: left-behind causes are logged at V(1). Provider delete failures log the reason at Warn, and the stderr, host and path at debug.
 
 ### Why
