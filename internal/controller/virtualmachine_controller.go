@@ -1031,10 +1031,11 @@ func (r *VirtualMachineReconciler) handleDeletion(ctx context.Context, vm *infra
 				return r.releaseLeavingHypervisorVM(ctx, vm, vmLeftProviderUnavailable)
 			} else {
 				logger.Info("Deleting VM from provider", "id", ref.ID, "host", ref.HostID)
-				// A routed (clustered) ref carries the VM's owner: the provider
-				// destroys the VM only when its owner stamp matches (A2). A
-				// single-host ref is the bare id, unchanged.
-				taskRef, err := providerInstance.Delete(ctx, ref)
+				// The ref carries the VM's owner: a clustered provider destroys
+				// the VM only when its owner stamp matches (A2), and an
+				// owner-checking single-host provider (Proxmox) never destroys
+				// a VM stamped with another owner (deleteRef).
+				taskRef, err := providerInstance.Delete(ctx, deleteRef(vm, ref))
 				switch {
 				case err == nil:
 					if taskRef != "" {

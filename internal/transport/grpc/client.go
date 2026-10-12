@@ -682,9 +682,13 @@ func (c *Client) Create(ctx context.Context, req contracts.CreateRequest) (resul
 }
 
 // Delete implements contracts.Provider. For a routed VM (clustered provider)
-// it threads vm.HostID to the wire as target_host_id and vm.Owner as owner
-// (ADR-0007 Addendum A, A1/A2); a single-host request carries neither, exactly
-// as before.
+// it threads vm.HostID to the wire as target_host_id (ADR-0007 Addendum A,
+// A1/A2). Unlike the other per-VM calls it sends vm.Owner as owner whenever
+// the caller set one with a UID, single-host included: a provider that checks
+// it (clustered libvirt, Proxmox) then never destroys a VM stamped with
+// another owner, e.g. one that reused a Proxmox VMID. Providers that do not
+// check it on a single-host delete (vSphere, single-host libvirt, mock)
+// ignore it.
 //
 // Records virtrigaud_vm_operations_total{operation="Delete",...} via
 // deferred recordVMOp using the named retErr return value (G7.1 / #124).
@@ -697,7 +701,7 @@ func (c *Client) Delete(ctx context.Context, vm contracts.VMRef) (taskRef string
 	resp, err := c.client.Delete(ctx, &providerv1.DeleteRequest{
 		Id:           vm.ID,
 		TargetHostId: vm.HostID,
-		Owner:        routedOwner(vm),
+		Owner:        objectIdentityToProto(vm.Owner),
 	})
 	if err != nil {
 		return "", c.mapGRPCError("delete", err)

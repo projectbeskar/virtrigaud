@@ -567,8 +567,8 @@ func TestReconcileVM_Clustered_UnboundNeverCallsProvider(t *testing.T) {
 }
 
 // TestHandleDeletion_SingleHost_DeleteCarriesNoHost pins D9 for delete: the
-// single-host delete is the bare id (the owner rides along and is ignored by
-// the single-host provider).
+// single-host delete carries no host, only the id and the VM's owner (which
+// an owner-checking single-host provider, Proxmox, checks; others ignore it).
 func TestHandleDeletion_SingleHost_DeleteCarriesNoHost(t *testing.T) {
 	ctx := context.Background()
 	vm := deletionVM("vm-single-del")
@@ -577,7 +577,8 @@ func TestHandleDeletion_SingleHost_DeleteCarriesNoHost(t *testing.T) {
 	r := newTestReconciler(coverageTestScheme(t), &stubResolver{provider: prov}, vm, deletionProviderCR())
 	_, err := r.handleDeletion(ctx, markForDeletion(t, r, vm))
 	require.NoError(t, err)
-	assert.Equal(t, []contracts.VMRef{{ID: "100"}}, prov.deleteRefs)
+	assert.Equal(t, []contracts.VMRef{{ID: "100",
+		Owner: contracts.ObjectIdentity{UID: "uid-single", Namespace: "default", Name: "vm-single-del"}}}, prov.deleteRefs)
 }
 
 // guard against an accidental tight loop constant regression.
