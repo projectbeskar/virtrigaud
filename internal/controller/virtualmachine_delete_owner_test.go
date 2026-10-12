@@ -48,9 +48,9 @@ func TestHandleDeletion_SingleHostDeleteCarriesOwner(t *testing.T) {
 	assert.True(t, apierrors.IsNotFound(r.Get(ctx, client.ObjectKeyFromObject(vm), &infravirtrigaudiov1beta1.VirtualMachine{})))
 }
 
-// An adopted VirtualMachine's delete carries no owner: its hypervisor VM is
-// unstamped, and its name may not be the VirtualMachine's.
-func TestHandleDeletion_AdoptedDeleteCarriesNoOwner(t *testing.T) {
+// An adopted VirtualMachine's delete carries its owner too: the
+// tenant-editable adopted label never turns the owner check off.
+func TestHandleDeletion_AdoptedDeleteCarriesTheOwner(t *testing.T) {
 	ctx := context.Background()
 	prov := &routingProvider{}
 	vm := deletionVM("web-01")
@@ -62,7 +62,7 @@ func TestHandleDeletion_AdoptedDeleteCarriesNoOwner(t *testing.T) {
 	_, err := r.handleDeletion(ctx, marked)
 	require.NoError(t, err)
 	require.Len(t, prov.deleteOwners, 1)
-	assert.True(t, prov.deleteOwners[0].IsZero(), "an adopted VM's delete is unchanged")
+	assert.Equal(t, contracts.ObjectIdentity{UID: "uid-adopted", Namespace: "default", Name: "web-01"}, prov.deleteOwners[0])
 }
 
 func TestDeleteRef(t *testing.T) {

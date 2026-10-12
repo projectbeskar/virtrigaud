@@ -557,9 +557,12 @@ providers), and rollback caveats in
   `virtrigaud.io/orphan-on-delete: "true"`.
 - **Single-host provider `Delete` requests carry the VM's owner**, so the
   Proxmox owner-checked delete never destroys an unrelated VM that reused the
-  VMID. Adopted VMs (and clone targets) send none. Proxmox also accepts an
-  unstamped VM under the name adoption gave it (sanitized PVE name or
-  `vm-<vmid>`).
+  VMID; such an answer (`VM_NOT_OWNED`) releases the VirtualMachine with a
+  `VMLeftOnHypervisor` Warning. Adopted VMs and clone targets send it too;
+  Proxmox accepts an unstamped VM under the name adoption gave it (sanitized
+  PVE name or `vm-<vmid>`). A Proxmox template is never deleted
+  (`VM_IS_IMAGE_ARTIFACT`), and a delete refused for an unreadable owner stamp
+  is held as `Ready=False/OwnerStampUnreadable`.
 - **Nothing is created through a Provider being deleted, even before the
   manager's cache sees the deletion.** The Provider is re-read from the API
   server right before every `Create`, `Clone` and `ImportDisk`; a deleting,
