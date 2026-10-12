@@ -81,7 +81,10 @@ func (p *pagingVMReader) List(_ context.Context, list client.ObjectList, opts ..
 	if lo.Continue != "" {
 		_, _ = fmt.Sscanf(lo.Continue, "%d", &start)
 	}
-	vmList := list.(*infravirtrigaudiov1beta1.VirtualMachineList)
+	vmList, ok := list.(*infravirtrigaudiov1beta1.VirtualMachineList)
+	if !ok {
+		return fmt.Errorf("pagingVMReader lists VirtualMachines only, not %T", list)
+	}
 	vmList.Items = []infravirtrigaudiov1beta1.VirtualMachine{*p.vms[start].DeepCopy()}
 	vmList.Continue = ""
 	if start+1 < len(p.vms) {
