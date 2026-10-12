@@ -57,7 +57,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     - in `Validating`, the source's primary disk (real size, `GetDiskInfo`) and the target VMClass;
     - right before `ExportDisk`, the disk being exported (same VM, disk and snapshot), whose size is recorded in `status.diskInfo.sourceSize`;
     - right before `ImportDisk`, that recorded size, and the provider then enforces the limit on the disk it lands (`max_virtual_size_bytes`).
-    - A provider refusal at import holds the migration in `Importing`. A `DISK_SIZE_EXCEEDS_LIMIT` refusal is not re-sent until the limit changes (its message names the limit). An unverifiable size is retried on the 2-minute re-check.
+    - A provider refusal at import holds the migration in `Importing`. A `DISK_SIZE_EXCEEDS_LIMIT` refusal is not re-sent until the limit changes (its message names the limit). An unverifiable size is re-sent on a doubling backoff (2 minutes to 32 minutes; each attempt is a full download or convert), reset by a successful import.
 
     A held migration stays in its phase, with `Validating`, `Exporting` or `Importing` set to False.
   - Fail closed (`DiskSizeLimitUnverifiable`) in these cases:

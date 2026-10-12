@@ -95,6 +95,13 @@ type VMMigrationReconciler struct {
 	// the always-forbidden loopback/link-local/metadata/multicast targets.
 	StorageHostPolicy *storagemigration.HostPolicy
 
+	// importUnverifiable paces re-sending an import the target provider
+	// refused because it could not read the disk's size (DISK_SIZE_UNVERIFIABLE):
+	// each attempt is a full download or convert, so the wait doubles from
+	// diskSizeLimitRetryInterval to importUnverifiableMaxRetryInterval. Only the
+	// elected leader runs this reconciler, so in-process state is correct.
+	importUnverifiable unschedulableBackoff
+
 	// MaxDiskSize is the administrator's disk-size ceiling (the manager's
 	// --max-disk-size; nil for none), lowered per target Provider by its
 	// infra.virtrigaud.io/max-disk-size annotation: a migration that would
@@ -1310,6 +1317,10 @@ func (r *VMMigrationReconciler) handleImportingPhase(ctx context.Context, migrat
 		if importRefusedByTargetAt(migration, limit) {
 			return ctrl.Result{RequeueAfter: diskSizeLimitRetryInterval}, nil
 		}
+		// An import refused as unverifiable is re-sent on a doubling backoff.
+		if wait := r.importUnverifiable.remaining(string(migration.UID), time.Now()); wait > 0 {
+			return ctrl.Result{RequeueAfter: wait}, nil
+		}
 	}
 
 	// Claim the in-memory import guard for this object generation BEFORE
@@ -1332,11 +1343,20 @@ func (r *VMMigrationReconciler) handleImportingPhase(ctx context.Context, migrat
 		// Held, not failed.
 		if refusal := providerImportRefusal(err, importReq.MaxVirtualSizeBytes); refusal != nil {
 			logger.Info("The target provider refused the import for its disk-size limit", "error", err.Error())
-			return r.holdMigrationForDiskSizeLimit(ctx, migration, infrav1beta1.VMMigrationConditionImporting, refusal)
+			res, holdErr := r.holdMigrationForDiskSizeLimit(ctx, migration, infrav1beta1.VMMigrationConditionImporting, refusal)
+			if holdErr == nil && contracts.IsDiskSizeUnverifiable(err) {
+				res.RequeueAfter = r.importUnverifiable.nextWithin(string(migration.UID), time.Now(),
+					diskSizeLimitRetryInterval, importUnverifiableMaxRetryInterval)
+			}
+			return res, holdErr
 		}
 		logger.Error(err, "Failed to start disk import")
 		return r.transitionToFailed(ctx, migration, "Failed to start disk import: "+migrationFailureDetail(err))
 	}
+
+	// The import went through: a later unverifiable refusal starts its
+	// backoff afresh.
+	r.importUnverifiable.reset(string(migration.UID))
 
 	// Store import info in status.
 	//

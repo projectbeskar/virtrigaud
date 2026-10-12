@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -517,17 +518,40 @@ func TestVMMigration_DiskSizeLimit_TargetCannotReadSize(t *testing.T) {
 	r, _ := directionReconciler(t, prov, sourceVM, sourceProvider, targetProvider, migration, s3CredsSecret())
 	r.MaxDiskSize = qty("100Gi")
 
-	_, err := r.handleImportingPhase(ctx, migration)
+	res, err := r.handleImportingPhase(ctx, migration)
 	require.NoError(t, err)
+	assert.Equal(t, diskSizeLimitRetryInterval, res.RequeueAfter, "the first retry after 2 minutes")
 	got := getXNSMigration(t, r, migration)
 	c := meta.FindStatusCondition(got.Status.Conditions, infravirtrigaudiov1beta1.VMMigrationConditionImporting)
 	require.NotNil(t, c)
 	assert.Equal(t, k8s.ReasonDiskSizeLimitUnverifiable, c.Reason)
 	assert.Equal(t, infravirtrigaudiov1beta1.MigrationPhaseImporting, got.Status.Phase)
 
-	_, err = r.handleImportingPhase(ctx, got.DeepCopy())
+	// Within the wait (any reconcile, e.g. a watch event) nothing is re-sent.
+	res, err = r.handleImportingPhase(ctx, got.DeepCopy())
 	require.NoError(t, err)
-	assert.Equal(t, 2, prov.imports, "an unreadable size is retried")
+	assert.Equal(t, 1, prov.imports, "not re-sent before the backoff ends")
+	assert.Positive(t, res.RequeueAfter)
+
+	// Once the wait is over the import is retried; another refusal doubles it
+	// (review L: each attempt is a full download or convert).
+	uid := string(migration.UID)
+	for i, want := range []time.Duration{4 * time.Minute, 8 * time.Minute, 16 * time.Minute, 32 * time.Minute, 32 * time.Minute} {
+		r.importUnverifiable.entries[uid].until = time.Now().Add(-time.Second)
+		res, err = r.handleImportingPhase(ctx, getXNSMigration(t, r, migration))
+		require.NoError(t, err)
+		assert.Equal(t, i+2, prov.imports)
+		assert.Equal(t, want, res.RequeueAfter)
+	}
+
+	// A successful import resets the backoff.
+	prov.importErr = nil
+	r.importUnverifiable.entries[uid].until = time.Now().Add(-time.Second)
+	_, err = r.handleImportingPhase(ctx, getXNSMigration(t, r, migration))
+	require.NoError(t, err)
+	assert.Zero(t, r.importUnverifiable.remaining(uid, time.Now()))
+	_, kept := r.importUnverifiable.entries[uid]
+	assert.False(t, kept)
 }
 
 // TestVMMigration_NoLimitSendsNoMaxSize: without a limit the import carries

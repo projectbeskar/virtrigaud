@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -278,12 +279,19 @@ func providerImportRefusedMessage(limitBytes int64) string {
 		"VMMigration and migrate again, or raise the limit", resource.NewQuantity(limitBytes, resource.BinarySI).String())
 }
 
+// importUnverifiableMaxRetryInterval caps the doubling wait before an import
+// refused as DISK_SIZE_UNVERIFIABLE is sent again (2, 4, 8, 16, 32 minutes).
+// It stays below the hour after which the backoff forgets a run of failures.
+const importUnverifiableMaxRetryInterval = 32 * time.Minute
+
 // providerImportUnverifiableMessage is the Importing=False message of an
 // import the target provider refused because it could not read the disk's
-// virtual size while a limit applies. The import is sent again on the hold's
-// re-check (the read may have failed transiently).
+// virtual size while a limit applies. The import is sent again (the read may
+// have failed transiently) on a doubling backoff: each attempt is a full
+// download or convert.
 const providerImportUnverifiableMessage = "The target provider could not read the virtual size of the staged disk, and a " +
-	"disk-size limit applies: nothing was imported. The import is retried"
+	"disk-size limit applies: nothing was imported. The import is retried after 2 minutes, then waits twice as long " +
+	"each time, up to 32 minutes"
 
 // providerImportRefusal maps an ImportDisk error to the hold it calls for: a
 // provider's DISK_SIZE_EXCEEDS_LIMIT or DISK_SIZE_UNVERIFIABLE refusal of an
