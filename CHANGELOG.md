@@ -24,6 +24,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Single source of truth:** one builder (`importStagePath`) and one predicate (`isImportStagePath`) define the stage location.
   - **Verification:** the S3 script and the uid-less NFS script are tested against real files with the local `sh` and `bash` (and `qemu-img`).
   - **Legacy `/var/tmp` stages:** they stay refused and are never removed.
+- `internal/providers/proxmox/import_size_limit.go` (`checkNodeImportSize`, #382): the target-side disk-size check reads and removes only an import stage (`isImportStagePath`); any other path is refused untouched. It runs on the root-owned stage in the stage directory, never on the NFS object. `import_size_limit_test.go` now sends `target_vm` and expects the new stage path and `rm -f --`.
 - `internal/controller/vmmigration_proxmox_target.go` (new), `vmmigration_controller.go` (`handleValidatingPhase`, `handleImportingPhase`): the manager refuses a VMMigration whose target Provider is Proxmox and whose target VM is in another namespace than the migration. The target VM's create would be refused anyway, because the disk is not verified as its own-namespace migration disk.
   - It fails at Validating, before any export or import: `Phase=Failed`, `Validating=False`, reason `ProxmoxCrossNamespaceTarget`, the constant `proxmoxCrossNamespaceTargetMessage`, one `MigrationFailed` event, and no immediate requeue.
   - A migration that passed Validating before this check existed fails the same way at Importing, before `ImportDisk`.

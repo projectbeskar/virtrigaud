@@ -35,6 +35,11 @@ func (p *Provider) checkNodeImportSize(ctx context.Context, stagePath, format st
 	if maxBytes <= 0 {
 		return nil
 	}
+	// Only a stage this provider wrote (importStagePath, in the root-only stage
+	// directory) is ever read or removed here.
+	if !isImportStagePath(stagePath) {
+		return importedDiskRejected()
+	}
 	stdout, _, err := p.ssh.runSSH(ctx, fmt.Sprintf("qemu-img info -f %s --output=json -- %s",
 		proxmoxShellQuote(format), proxmoxShellQuote(stagePath)))
 	var size int64
