@@ -563,6 +563,18 @@ providers), and rollback caveats in
   PVE name or `vm-<vmid>`). A Proxmox template is never deleted
   (`VM_IS_IMAGE_ARTIFACT`), and a delete refused for an unreadable owner stamp
   is held as `Ready=False/OwnerStampUnreadable`.
+- Known limitation: adoption does not re-stamp the VM it adopts, so a Proxmox
+  VM that still carries a previous owner's stamp (detached with
+  `orphan-on-delete`, then adopted again) is left in place when its new
+  VirtualMachine is deleted (`VM_NOT_OWNED`, a `VMLeftOnHypervisor` Warning
+  naming its id); remove it by hand. Re-stamping on adoption is planned after
+  this release.
+- Known limitation: on a single-host Proxmox Provider only `Delete` is
+  owner-checked. `Describe`, `Power`, `Reconfigure` and the snapshot calls act
+  on whatever VM has the recorded VMID, so if a VM is deleted outside
+  VirtRigaud and PVE gives its VMID to a new VM, the old `VirtualMachine`
+  addresses that VM. Do not delete VirtRigaud-managed VMs outside VirtRigaud;
+  delete the `VirtualMachine` (or detach it with `orphan-on-delete`) instead.
 - **Nothing is created through a Provider being deleted, even before the
   manager's cache sees the deletion.** The Provider is re-read from the API
   server right before every `Create`, `Clone` and `ImportDisk`; a deleting,
