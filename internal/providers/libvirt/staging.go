@@ -226,6 +226,23 @@ const (
 // message).
 var virshNoDomainMarkers = []string{"failed to get domain", "Domain not found"}
 
+// virshNoDomain reports whether err is a virsh command that failed because
+// its domain does not exist: a *VirshError whose stderr carries one of
+// virshNoDomainMarkers. Any other error, including an SSH or connection
+// failure, is not.
+func virshNoDomain(err error) bool {
+	var ve *VirshError
+	if !errors.As(err, &ve) {
+		return false
+	}
+	for _, m := range virshNoDomainMarkers {
+		if strings.Contains(ve.Stderr, m) {
+			return true
+		}
+	}
+	return false
+}
+
 // verifyDefined runs `virsh domuuid <domainName>` after a define reported an
 // error and compares the answer with the UUID in domainXML (the fresh random
 // UUID the create generated). domainName has passed the naming rule, so virsh

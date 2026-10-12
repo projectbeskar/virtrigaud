@@ -312,6 +312,57 @@ providers), and rollback caveats in
   now records a `Warning` event **`VMLeftOnHypervisor`** naming the VM and its
   provider id (never a host), so leftovers can be found
   (→ [`docs/vm-provider-binding.md`](docs/vm-provider-binding.md#deleting-a-vm-while-its-provider-cannot-be-reached)).
+- **On a clustered Provider, `force-delete` of a consumer VM needs the
+  Provider's permission, like `orphan-on-delete`.** A VM in another namespace
+  than its clustered Provider could be released with `force-delete` while its
+  delete was held or failing, leaving its domain running on the shared hosts
+  outside the capacity accounting. Unless the Provider carries
+  `infra.virtrigaud.io/allow-consumer-orphan-on-delete: "true"`, the annotation
+  is now ignored for such a VM (`ForceDeleteRefused=True/ForceDeleteNotAllowed`
+  and a `Warning` event) and its delete keeps being retried as if it were not
+  set. Same-namespace VMs and single-host Providers are unchanged
+  (→ [`docs/vm-provider-binding.md`](docs/vm-provider-binding.md#detaching-a-vm-without-deleting-it-virtrigaudioorphan-on-delete)).
+- **A single-host VM no longer loses its provider id after a Create, and is
+  never created twice or released while its Create's outcome is unknown.**
+  Editing or deleting a VM while its Create ran made the status write that
+  records the id fail with a conflict: the next reconcile created a second VM
+  (Proxmox) or a delete released the VM without deleting it on the
+  hypervisor. Before a Create the VM now records
+  `Provisioning=True/CreateRequested`, confirmed before the RPC, and re-reads
+  itself live (the marker is written with an optimistic lock); the id is
+  written with a UID- and id-checked status patch,
+  retried on transient errors (a **`VMRecordNotSaved`** event names a VM it
+  could not record). A Create whose outcome stays unknown is re-sent on
+  vSphere, libvirt and Proxmox (they re-bind the VM they stamped; roll the
+  Proxmox provider with the manager); otherwise the VM waits
+  with `Ready=False/CreateOutcomeUnknown` until an operator records its
+  `status.id` or confirms that this attempt made no VM
+  (`virtrigaud.io/create-outcome=not-created@<attempt id>`, audited by a
+  `CreateOutcomeConfirmed` event), and its delete is held the same way
+  (libvirt and Proxmox find and delete the VM by its owner stamp; libvirt
+  releases it only when the provider confirms no such domain exists)
+  (→ [`docs/vm-provider-binding.md`](docs/vm-provider-binding.md#a-create-whose-outcome-is-unknown-createrequested)).
+- A Create refused with a non-retryable `FailedPrecondition` or
+  `PermissionDenied` is held as `Ready=False/CreateRefused` (the event
+  carries the provider's answer) and re-checked with a backoff instead of
+  every 5 s.
+- A Create answered with a retryable `VM_DISK_CHECK_FAILED` or
+  `VM_OPERATION_FAILED` backs off from 15 s to 5 min
+  (`Ready=False/CreateBackoff`) instead of retrying every 5 s.
+- **`spec.powerState: OffGraceful` no longer loops on a powered-off VM.**
+  Providers report such a VM as `Off`, so it was sent a graceful shutdown on
+  every reconcile (on vSphere an `InvalidPowerState` fault and
+  `Ready=False/ProviderError` every few seconds). `Off` now satisfies
+  `OffGraceful`.
+- A VirtualMachine is created only through a Provider that is not being
+  deleted: on one that is, it shows `Ready=False/ProviderDeleting` and nothing
+  is created — point it at another Provider, or delete it.
+- A VirtualMachine's `Ready` condition no longer carries the provider
+  resolver's error (which named the provider's TLS Secret, Service address and
+  runtime phase) or a gRPC transport error: it says so with a constant message
+  and the cause goes to the manager log. A VM being deleted is no longer
+  reconciled on its own status writes, so a held delete is retried on its
+  backoff only; `force-delete` and `orphan-on-delete` still take effect at once.
 - libvirt `Reconfigure` is honest: a failed `setvcpus`, `setmem`, `setmaxmem`
   or offline disk resize is an error (it used to return success), a live change
   is also written to the domain's persistent definition (it used to be undone

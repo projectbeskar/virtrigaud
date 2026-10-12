@@ -68,3 +68,21 @@ func adoptedDesiredPowerState(reported string) infravirtrigaudiov1beta1.PowerSta
 	}
 	return infravirtrigaudiov1beta1.PowerStateOn
 }
+
+// powerStateSatisfied reports whether a VM a provider reports in power state
+// reported is already in the desired spec.powerState, so no Power call is
+// sent. Every provider reports a powered-off VM as Off (vSphere poweredOff,
+// libvirt shut off, Proxmox stopped, mock), never as OffGraceful: OffGraceful
+// names how to power a running VM off, and a VM observed Off satisfies it.
+// Without that, a VM whose spec asks for OffGraceful was sent a graceful
+// shutdown on every reconcile once it was off (on vSphere an InvalidPowerState
+// fault, and Ready=False/ProviderError, every few seconds). A Suspended or
+// Unknown VM never satisfies Off or OffGraceful here; reconcileVM handles it
+// before (powerStateUnmanaged).
+func powerStateSatisfied(desired infravirtrigaudiov1beta1.PowerState, reported string) bool {
+	if reported == string(desired) {
+		return true
+	}
+	return desired == infravirtrigaudiov1beta1.PowerStateOffGraceful &&
+		reported == string(infravirtrigaudiov1beta1.PowerStateOff)
+}

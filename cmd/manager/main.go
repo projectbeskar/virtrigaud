@@ -361,6 +361,7 @@ func main() {
 		RemoteResolver:   remoteResolver,
 		Recorder:         mgr.GetEventRecorderFor("virtualmachine-controller"),
 		ImageCRDFeatures: vmCRDCheck,
+		APIReader:        mgr.GetAPIReader(),
 	}
 	if err = vmReconciler.SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "VirtualMachine")

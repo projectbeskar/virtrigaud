@@ -177,9 +177,14 @@ func TestCreateVM_TransientErrorKeepsFastRetry(t *testing.T) {
 			require.NoError(t, err)
 			assert.Equal(t, 5*time.Second, res.RequeueAfter)
 
+			// The provider did not refuse the Create: its outcome is unknown,
+			// so the create marker stays and Ready says why.
 			c := meta.FindStatusCondition(vm.Status.Conditions, k8s.ConditionProvisioning)
 			require.NotNil(t, c)
-			assert.Equal(t, k8s.ReasonProviderError, c.Reason)
+			assert.Equal(t, k8s.ReasonCreateRequested, c.Reason)
+			ready := meta.FindStatusCondition(vm.Status.Conditions, k8s.ConditionReady)
+			require.NotNil(t, ready)
+			assert.Equal(t, k8s.ReasonProviderError, ready.Reason)
 		})
 	}
 }

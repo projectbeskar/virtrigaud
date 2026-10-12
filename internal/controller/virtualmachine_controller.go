@@ -20,8 +20,11 @@ import (
 	"context"
 	stderrors "errors"
 	"fmt"
+	"maps"
+	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -33,6 +36,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -236,6 +240,11 @@ type VirtualMachineReconciler struct {
 	client.Client
 	Scheme         *runtime.Scheme
 	RemoteResolver ProviderResolver
+	// APIReader reads straight from the API server, bypassing the informer
+	// cache (the manager's GetAPIReader): a single-host VM is re-read through
+	// it right before its Create (requestCreate), so a stale cached copy never
+	// sends a second Create. Optional: nil uses the client.
+	APIReader client.Reader
 	// Recorder emits Kubernetes events on the VirtualMachine (e.g. an
 	// orphan-on-delete detach, a provider reference mismatch). Optional: nil
 	// disables events.
@@ -273,6 +282,14 @@ type VirtualMachineReconciler struct {
 	// clock returns the current time for the image-prepare backoff and stall
 	// bounds; nil uses time.Now. Tests set it.
 	clock func() time.Time
+	// unsavedCreates holds, per VirtualMachine UID, the unsavedCreate of a
+	// single-host Create the provider confirmed whose record could not be
+	// written to the VM's status (recordCreatedVM). In-process state is
+	// correct: only the elected leader runs this reconciler.
+	unsavedCreates sync.Map
+	// recordBackoff overrides defaultCreateRecordBackoff; nil uses it. Tests
+	// set it.
+	recordBackoff *wait.Backoff
 }
 
 // now returns the reconciler's current time (clock, or time.Now).
@@ -417,10 +434,17 @@ func (r *VirtualMachineReconciler) reconcileVM(ctx context.Context, vm *infravir
 	// Update observed generation
 	vm.Status.ObservedGeneration = vm.Generation
 
+	// A recorded id supersedes any in-memory record of an unsaved create.
+	if vm.Status.ID != "" {
+		r.forgetUnsavedCreate(vm.UID)
+	}
+
 	// A bound VM whose spec.providerRef no longer names the Provider it is
 	// bound through is refused before anything is resolved: its status.id is
 	// meaningful only on that Provider.
-	if vmIsBound(vm) {
+	// So is a VM whose requested Create (the create marker) went through
+	// another Provider: it may exist there.
+	if vmIsBound(vm) || createRequested(vm) {
 		if err := checkBoundProvider(vm, vmProviderKey(vm)); err != nil {
 			return r.handleNotRoutable(ctx, vm, err)
 		}
@@ -483,12 +507,26 @@ func (r *VirtualMachineReconciler) reconcileVM(ctx context.Context, vm *infravir
 		return r.handleNotRoutable(ctx, vm, err)
 	}
 
+	// Nothing is created through a Provider that is being deleted: a VM is
+	// created only through a Provider that is not. An unbound VM is held
+	// before any provider call — unless the provider already created it and only its
+	// record is missing (recordCreatedVM), which is recorded below as usual.
+	if providerDeleting(provider) && !vmIsBound(vm) {
+		if _, unsaved := r.lookupUnsavedCreate(vm); !unsaved {
+			return r.holdForDeletingProvider(ctx, vm, persisted, provider), nil
+		}
+	}
+
 	// Get provider instance (remote or in-process)
 	logger.V(1).Info("Getting provider instance", "provider", provider.Name, "runtime_phase", provider.Status.Runtime.Phase, "endpoint", provider.Status.Runtime.Endpoint)
 	providerInstance, err := r.getProviderInstance(ctx, provider)
 	if err != nil {
+		// The resolver's error names the TLS Secret, the provider Service's
+		// address and the runtime phase: it goes to the manager log only, and
+		// the VM (readable by a consumer of a Provider in another namespace)
+		// gets a constant message (ADR-0007 A6, threat 5).
 		logger.Error(err, "Failed to get provider instance - will retry in 5s", "provider", provider.Name, "runtime_phase", provider.Status.Runtime.Phase)
-		k8s.SetReadyCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonProviderError, err.Error())
+		k8s.SetReadyCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonProviderError, providerResolveFailedMessage)
 		metrics.RecordError(errReasonProviderResolve, metrics.ComponentManager)
 		r.updateStatus(ctx, vm)
 		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
@@ -513,7 +551,7 @@ func (r *VirtualMachineReconciler) reconcileVM(ctx context.Context, vm *infravir
 		done, err := providerInstance.IsTaskComplete(ctx, vm.Status.LastTaskRef)
 		if err != nil {
 			logger.Error(err, "Failed to check task status")
-			k8s.SetProvisioningCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonProviderError, fmt.Sprintf("Failed to check task: %v", err))
+			k8s.SetProvisioningCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonProviderError, "Failed to check task: "+providerFailureDetail(err))
 			metrics.RecordError(errReasonProviderTask, metrics.ComponentManager)
 			r.updateStatus(ctx, vm)
 			return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
@@ -535,7 +573,7 @@ func (r *VirtualMachineReconciler) reconcileVM(ctx context.Context, vm *infravir
 		done, err := providerInstance.IsTaskComplete(ctx, vm.Status.ReconfigureTaskRef)
 		if err != nil {
 			logger.Error(err, "Failed to check reconfigure task status")
-			k8s.SetReconfiguringCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonProviderError, fmt.Sprintf("Failed to check reconfigure task: %v", err))
+			k8s.SetReconfiguringCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonProviderError, "Failed to check reconfigure task: "+providerFailureDetail(err))
 			metrics.RecordError(errReasonProviderTask, metrics.ComponentManager)
 			r.updateStatus(ctx, vm)
 			return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
@@ -590,6 +628,30 @@ func (r *VirtualMachineReconciler) reconcileVM(ctx context.Context, vm *infravir
 		if err := deps.createRefusal(); err != nil {
 			return r.refuseConsumer(ctx, vm, persisted, err)
 		}
+		// A single-host Create the provider already confirmed, whose record
+		// was not written, is recorded again rather than sent a second time
+		// (recordCreatedVM).
+		if rec, ok := r.lookupUnsavedCreate(vm); ok && !isClusterTopology(provider) {
+			if res, handled, err := r.resaveUnsavedCreate(ctx, vm, provider, rec); handled {
+				return res, err
+			}
+		}
+		// A single-host VM whose requested Create's outcome was never
+		// recorded (the create marker) is created again only through a
+		// provider that re-binds the VM it made, or after an operator
+		// confirmed none was made (resolveCreateMarker).
+		var attempt createAttempt
+		if !isClusterTopology(provider) && createRequested(vm) {
+			res, decided, proceed, err := r.resolveCreateMarker(ctx, vm, persisted, provider)
+			if !proceed || err != nil {
+				return res, err
+			}
+			attempt = decided
+			if attempt.resend {
+				logger.Info("Re-sending the requested Create")
+				return r.createVMOn(ctx, vm, providerInstance, provider, vmClass, vmImage, networks, nil, attempt)
+			}
+		}
 		// Prepare the image first — unless a clustered create is already in
 		// flight (status.placement.pendingHost): that create is re-sent as it
 		// was, and its image was prepared before the first attempt.
@@ -614,7 +676,7 @@ func (r *VirtualMachineReconciler) reconcileVM(ctx context.Context, vm *infravir
 			}
 		}
 		logger.Info("Creating VM")
-		return r.createVMOn(ctx, vm, providerInstance, provider, vmClass, vmImage, networks, discovered)
+		return r.createVMOn(ctx, vm, providerInstance, provider, vmClass, vmImage, networks, discovered, attempt)
 	}
 
 	// Address the VM for every per-VM call below (ADR-0007 Addendum A, A1). A
@@ -637,7 +699,7 @@ func (r *VirtualMachineReconciler) reconcileVM(ctx context.Context, vm *infravir
 			return res, nil
 		}
 		logger.Error(err, "Failed to describe VM")
-		k8s.SetReadyCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonProviderError, fmt.Sprintf("Failed to describe VM: %v", err))
+		k8s.SetReadyCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonProviderError, "Failed to describe VM: "+providerFailureDetail(err))
 		metrics.RecordError(errReasonProviderDescribe, metrics.ComponentManager)
 		r.updateStatus(ctx, vm)
 		return ctrl.Result{RequeueAfter: routedCallRetryAfter(ref, err)}, nil
@@ -655,14 +717,20 @@ func (r *VirtualMachineReconciler) reconcileVM(ctx context.Context, vm *infravir
 		if err := deps.createRefusal(); err != nil {
 			return r.refuseConsumer(ctx, vm, persisted, err)
 		}
+		// Nor is it re-created through a Provider that is being deleted.
+		if providerDeleting(provider) {
+			return r.holdForDeletingProvider(ctx, vm, persisted, provider), nil
+		}
 		logger.Info("VM no longer exists, recreating")
+		priorID := vm.Status.ID
+		r.forgetUnsavedCreate(vm.UID)
 		vm.Status.ID = ""
 		// A re-create is a create: the image is prepared (or re-validated)
 		// first, exactly as for a new VM.
 		if done, res, err := r.prepareImageForCreate(ctx, vm, persisted, vmImage, provider, providerInstance); done {
 			return res, err
 		}
-		return r.createVM(ctx, vm, providerInstance, provider, vmClass, vmImage, networks)
+		return r.createVMOn(ctx, vm, providerInstance, provider, vmClass, vmImage, networks, nil, createAttempt{priorID: priorID})
 	}
 
 	// ADR-0007 A6, R1: an owner-checked call on the bound host succeeded, so
@@ -739,7 +807,9 @@ func (r *VirtualMachineReconciler) reconcileVM(ctx context.Context, vm *infravir
 		}
 	}
 
-	if desc.PowerState != string(desiredPowerState) {
+	// A VM observed Off satisfies OffGraceful (powerStateSatisfied): it is
+	// never sent a graceful shutdown again once it is off.
+	if !powerStateSatisfied(desiredPowerState, desc.PowerState) {
 		logger.Info("Power state mismatch, adjusting", "current", desc.PowerState, "desired", desiredPowerState)
 		return r.adjustPowerState(ctx, vm, providerInstance, ref, string(desiredPowerState))
 	}
@@ -823,6 +893,11 @@ func (r *VirtualMachineReconciler) handleDeletion(ctx context.Context, vm *infra
 	// counting as committed until the finalizer is gone.
 	r.forgetPlacement(vm)
 
+	// A VM the provider created whose record was not saved is deleted
+	// through the provider like any bound VM, never released as if nothing
+	// had been created (recordCreatedVM).
+	r.bindUnsavedCreateForDelete(ctx, vm)
+
 	// Orphan-on-delete: detach the hypervisor VM instead of destroying it. No
 	// provider is called; the finalizer is simply removed — unless the VM is a
 	// consumer of a clustered Provider that has not allowed it
@@ -835,6 +910,25 @@ func (r *VirtualMachineReconciler) handleDeletion(ctx context.Context, vm *infra
 		return r.orphanOnDelete(ctx, vm)
 	}
 
+	// The force-delete escape hatch releases the VM without a confirmed
+	// provider delete — unless the VM is a consumer, in another namespace, of
+	// a clustered Provider that has not allowed that (forceDeleteHonoured):
+	// its domain would keep running on the shared hosts outside the
+	// committed-capacity accounting. A refused force-delete is ignored here.
+	force, err := r.forceDeleteHonoured(ctx, vm)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+
+	// A single-host VM with a requested Create but no recorded id may exist
+	// on the hypervisor: it is found and deleted, or held — never released as
+	// if nothing had been created (resolveCreateMarkerForDelete).
+	if !vmIsBound(vm) && createRequested(vm) {
+		if res, resolved, err := r.resolveCreateMarkerForDelete(ctx, vm, force); !resolved {
+			return res, err
+		}
+	}
+
 	// A VM that was never placed but whose OWN domain the pre-schedule check
 	// found on a host it cannot be placed on (ADR-0007 A6.2, R4:
 	// OwnDomainOnAnotherHost with no pendingHost) has nothing to route a
@@ -842,7 +936,7 @@ func (r *VirtualMachineReconciler) handleDeletion(ctx context.Context, vm *infra
 	// is held like a placed one's (A6.1), until a pendingHost points at the
 	// domain or force-delete / orphan-on-delete (above) releases it.
 	if !vmIsBound(vm) && heldForOwnDomainElsewhere(vm) {
-		if !hasForceDeleteAnnotation(vm) {
+		if !force {
 			return r.holdDelete(ctx, vm, k8s.ReasonOwnDomainOnAnotherHost, ownDomainUnplacedDeleteMessage, errOwnDomainUnplaced), nil
 		}
 		return r.releaseLeavingHypervisorVM(ctx, vm, vmLeftOwnDomainElsewhere)
@@ -858,7 +952,7 @@ func (r *VirtualMachineReconciler) handleDeletion(ctx context.Context, vm *infra
 		// Provider that is gone, the mismatch does not release the finalizer):
 		// removing the CR takes orphan-on-delete or force-delete.
 		if err := checkBoundProvider(vm, providerKey); err != nil {
-			if res, retain := r.retainForUnroutableDelete(ctx, vm, err); retain {
+			if res, retain := r.retainForUnroutableDelete(ctx, vm, force, err); retain {
 				return res, nil
 			}
 			return r.releaseLeavingHypervisorVM(ctx, vm, vmLeftNotRoutable)
@@ -874,7 +968,7 @@ func (r *VirtualMachineReconciler) handleDeletion(ctx context.Context, vm *infra
 		if err := getForConsumer(ctx, r.Client, providerKey, provider, vm.Namespace); err != nil {
 			switch {
 			case isConsumerNotAllowed(err):
-				if res, retain := r.retainForUnroutableDelete(ctx, vm, err); retain {
+				if res, retain := r.retainForUnroutableDelete(ctx, vm, force, err); retain {
 					return res, nil
 				}
 				// force-delete: released without any provider call.
@@ -891,7 +985,7 @@ func (r *VirtualMachineReconciler) handleDeletion(ctx context.Context, vm *infra
 			// mismatch, or one bound through another Provider object): the
 			// finalizer is retained, unless force-delete releases it without
 			// any provider call.
-			if res, retain := r.retainForUnroutableDelete(ctx, vm, routeErr); retain {
+			if res, retain := r.retainForUnroutableDelete(ctx, vm, force, routeErr); retain {
 				return res, nil
 			}
 			return r.releaseLeavingHypervisorVM(ctx, vm, vmLeftNotRoutable)
@@ -905,7 +999,7 @@ func (r *VirtualMachineReconciler) handleDeletion(ctx context.Context, vm *infra
 			// without any provider call.
 			providerInstance, err := r.getProviderInstance(ctx, provider)
 			if err != nil {
-				if res, retain := r.retainForUnavailableProvider(ctx, vm, ref.Routed(), err); retain {
+				if res, retain := r.retainForUnavailableProvider(ctx, vm, ref.Routed(), force, err); retain {
 					return res, nil
 				}
 				return r.releaseLeavingHypervisorVM(ctx, vm, vmLeftProviderUnavailable)
@@ -927,7 +1021,7 @@ func (r *VirtualMachineReconciler) handleDeletion(ctx context.Context, vm *infra
 					// releasing the finalizer would leave that domain running.
 					// Keep it until pendingHost points at that host (the next
 					// Delete then removes it), or force-delete / orphan-on-delete.
-					if !hasForceDeleteAnnotation(vm) {
+					if !force {
 						return r.holdDelete(ctx, vm, k8s.ReasonOwnDomainOnAnotherHost, ownDomainDeleteMessage, err), nil
 					}
 					return r.releaseLeavingHypervisorVM(ctx, vm, vmLeftOwnDomainElsewhere)
@@ -937,7 +1031,7 @@ func (r *VirtualMachineReconciler) handleDeletion(ctx context.Context, vm *infra
 					// provider also answers not-found for a domain this VM does not
 					// own, which it never destroys.
 					logger.Info("VM already absent from provider; proceeding with cleanup", "id", ref.ID)
-				case hasForceDeleteAnnotation(vm):
+				case force:
 					// Operator opted out of the safety gate: drop the finalizer even
 					// though the provider VM may be left behind. Logged loudly.
 					logger.Error(err, "Provider VM delete failed but force-delete annotation is set; removing finalizer (the provider VM may be orphaned)",
@@ -1073,9 +1167,10 @@ func (r *VirtualMachineReconciler) retainForBlockedDelete(
 // provider rollout or restart, or while the provider pod is down). No Delete
 // was sent, so the hypervisor VM may still exist.
 //
-// With the force-delete escape hatch set it returns retain == false and the
-// caller removes the finalizer WITHOUT any provider call (logged loudly: the
-// hypervisor VM may be left behind). Otherwise the finalizer is kept
+// With the force-delete escape hatch honoured (force, see
+// forceDeleteHonoured) it returns retain == false and the caller removes the
+// finalizer WITHOUT any provider call (logged loudly: the hypervisor VM may
+// be left behind). Otherwise the finalizer is kept
 // (retain == true) and the delete is retried with the blocked-VM backoff
 // (blockedRetryBackoff: 15 s doubling to 5 min):
 //
@@ -1090,9 +1185,10 @@ func (r *VirtualMachineReconciler) retainForBlockedDelete(
 // Either way the message is constant (deleteBlockedMessages) and names no
 // endpoint or host, the cause goes to the log only, a Warning event is
 // recorded only when the hold begins (or, clustered, its reason changes), and
-// a repeated hold writes nothing: a VM being deleted is reconciled on every
-// update of it, so a status write per retry would retry at once. A force-delete
-// or orphan-on-delete set while held is acted on at once for the same reason.
+// a repeated hold writes nothing. The retry comes from the returned
+// RequeueAfter alone: a deleting VM's status writes do not re-trigger it
+// (vmUpdateNeedsReconcile), while a force-delete or orphan-on-delete set while
+// held — an annotation change — is acted on at once.
 // The hold counts under the provider-resolve error reason, and both paths log
 // providerUnavailableDeleteLogMessage with the cause, so one search of the
 // manager log finds every such hold.
@@ -1100,11 +1196,12 @@ func (r *VirtualMachineReconciler) retainForUnavailableProvider(
 	ctx context.Context,
 	vm *infravirtrigaudiov1beta1.VirtualMachine,
 	routed bool,
+	force bool,
 	err error,
 ) (ctrl.Result, bool) {
 	logger := log.FromContext(ctx)
 	metrics.RecordError(errReasonProviderResolve, metrics.ComponentManager)
-	if hasForceDeleteAnnotation(vm) {
+	if force {
 		logger.Error(err, "Cannot reach the provider to delete the VM but force-delete annotation is set; removing finalizer (the provider VM may be orphaned)",
 			"id", vm.Status.ID, "annotation", forceDeleteAnnotation)
 		return ctrl.Result{}, false
@@ -1164,9 +1261,9 @@ func placementHostForLog(vm *infravirtrigaudiov1beta1.VirtualMachine) string {
 // delete hold's Ready (a single-host Ready=False/ProviderUnavailable or
 // DeleteBlocked, a clustered Ready=False/DeleteBlocked) once the Provider
 // answers but its Delete fails for an ordinary reason (clearStaleDeleteHold).
-// It is constant: the delete is retried every vmDeleteRetryInterval, and a VM
-// being deleted is reconciled on every update of it. The provider's answer is
-// in the manager log.
+// It is constant, so a repeated failure leaves the status unchanged: the
+// delete is retried every vmDeleteRetryInterval. The provider's answer is in
+// the manager log.
 var providerDeleteFailedMessage = fmt.Sprintf("Delete in progress: the provider did not delete the hypervisor VM, so the "+
 	"finalizer is kept and the delete is retried every %s (the manager log has the provider's answer). To release the "+
 	"VirtualMachine without deleting the hypervisor VM, set %s=true (or %s=true); the hypervisor VM and its disks are "+
@@ -1207,6 +1304,7 @@ func (r *VirtualMachineReconciler) removeFinalizer(ctx context.Context, vm *infr
 		metrics.RecordError(errReasonRemoveFinalizer, metrics.ComponentManager)
 		return ctrl.Result{}, err
 	}
+	r.forgetUnsavedCreate(vm.UID)
 
 	logger.Info("VirtualMachine deleted successfully")
 	return ctrl.Result{}, nil
@@ -1411,14 +1509,15 @@ func (r *VirtualMachineReconciler) createVM(
 	vmImage *infravirtrigaudiov1beta1.VMImage,
 	networks []*infravirtrigaudiov1beta1.VMNetworkAttachment,
 ) (ctrl.Result, error) {
-	return r.createVMOn(ctx, vm, provider, providerCR, vmClass, vmImage, networks, nil)
+	return r.createVMOn(ctx, vm, provider, providerCR, vmClass, vmImage, networks, nil, createAttempt{})
 }
 
 // createVMOn is createVM with, for a clustered VM placed for the first time,
 // the VM's own domain the pre-schedule check found (discovered, ADR-0007 A6,
 // R4): its host is recorded as the pending host, at the domain's own size,
 // instead of scheduling one. nil schedules as usual; single-host providers
-// never get one.
+// never get one. A single-host Create is sent only after its create marker is
+// recorded (requestCreate, attempt).
 func (r *VirtualMachineReconciler) createVMOn(
 	ctx context.Context,
 	vm *infravirtrigaudiov1beta1.VirtualMachine,
@@ -1428,6 +1527,7 @@ func (r *VirtualMachineReconciler) createVMOn(
 	vmImage *infravirtrigaudiov1beta1.VMImage,
 	networks []*infravirtrigaudiov1beta1.VMNetworkAttachment,
 	discovered *contracts.VMInfo,
+	attempt createAttempt,
 ) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
@@ -1435,7 +1535,7 @@ func (r *VirtualMachineReconciler) createVMOn(
 	if vm.Spec.ImageRef == nil && vm.Spec.ImportedDisk == nil {
 		err := fmt.Errorf("either imageRef or importedDisk must be specified")
 		logger.Error(err, "Invalid VM specification")
-		k8s.SetProvisioningCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonProviderError, err.Error())
+		setCreateFailure(vm, k8s.ReasonProviderError, err.Error())
 		r.updateStatus(ctx, vm)
 		return ctrl.Result{}, err
 	}
@@ -1444,7 +1544,7 @@ func (r *VirtualMachineReconciler) createVMOn(
 	if vm.Spec.ImageRef != nil && vm.Spec.ImportedDisk != nil {
 		err := fmt.Errorf("imageRef and importedDisk are mutually exclusive")
 		logger.Error(err, "Invalid VM specification")
-		k8s.SetProvisioningCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonProviderError, err.Error())
+		setCreateFailure(vm, k8s.ReasonProviderError, err.Error())
 		r.updateStatus(ctx, vm)
 		return ctrl.Result{}, err
 	}
@@ -1457,12 +1557,12 @@ func (r *VirtualMachineReconciler) createVMOn(
 			// A VMClass value out of range (e.g. memory at or above its
 			// maximum) only changes with an edit: surface it as a validation
 			// error and re-check on the slower spec cadence.
-			k8s.SetProvisioningCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonValidationError,
+			setCreateFailure(vm, k8s.ReasonValidationError,
 				fmt.Sprintf("Failed to build create request: %s", providerErrorMessage(err)))
 			r.updateStatus(ctx, vm)
 			return ctrl.Result{RequeueAfter: vmCreateInvalidSpecRetryInterval}, nil
 		}
-		k8s.SetProvisioningCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonProviderError, fmt.Sprintf("Failed to build create request: %v", err))
+		setCreateFailure(vm, k8s.ReasonProviderError, fmt.Sprintf("Failed to build create request: %v", err))
 		r.updateStatus(ctx, vm)
 		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 	}
@@ -1533,6 +1633,13 @@ func (r *VirtualMachineReconciler) createVMOn(
 			logger.Info("Retrying clustered create on its pending host (not re-scheduling)", "host", host)
 		}
 		req.TargetHostID = host
+	} else {
+		// A single-host Create is sent only once its marker is recorded.
+		res, ok := r.requestCreate(ctx, vm, providerCR, attempt)
+		if !ok {
+			return res, nil
+		}
+		r.recordConfirmedCreate(vm, attempt)
 	}
 
 	// Create VM
@@ -1556,13 +1663,29 @@ func (r *VirtualMachineReconciler) createVMOn(
 		// we write Status.ID: a VM whose create was refused is bound to nothing,
 		// so deleting it never reaches provider.Delete (handleDeletion gates on
 		// Status.ID) and cannot touch the colliding hypervisor VM.
-		if res, handled := r.handleRejectedCreate(ctx, vm, err); handled {
+		// A Conflict answering a re-send leaves the outcome unknown: the
+		// marker stays (createOutcomeKnown).
+		if res, handled := r.handleRejectedCreate(ctx, vm, err, !createOutcomeKnown(err, attempt)); handled {
+			return res, nil
+		}
+		// A retryable VM_DISK_CHECK_FAILED / VM_OPERATION_FAILED is retried
+		// with a backoff, not every few seconds (holdCreateBackoff).
+		if res, held := r.holdCreateBackoff(ctx, vm, err, attempt); held {
 			return res, nil
 		}
 		logger.Error(err, "Failed to create VM")
 		reason, requeueAfter := providerFailureOutcome(err)
+		if !createOutcomeKnown(err, attempt) {
+			// The provider did not refuse it: the Create may have made a VM.
+			// The create marker stays (Provisioning=True/CreateRequested);
+			// Ready says why the VM is not created yet.
+			k8s.SetReadyCondition(&vm.Status.Conditions, metav1.ConditionFalse, reason,
+				"Failed to create VM: "+providerFailureDetail(err))
+			r.updateStatus(ctx, vm)
+			return ctrl.Result{RequeueAfter: requeueAfter}, nil
+		}
 		k8s.SetProvisioningCondition(&vm.Status.Conditions, metav1.ConditionFalse, reason,
-			fmt.Sprintf("Failed to create VM: %s", providerErrorMessage(err)))
+			"Failed to create VM: "+providerFailureDetail(err))
 		r.updateStatus(ctx, vm)
 		return ctrl.Result{RequeueAfter: requeueAfter}, nil
 	}
@@ -1592,11 +1715,16 @@ func (r *VirtualMachineReconciler) createVMOn(
 
 	if resp.TaskRef != "" {
 		vm.Status.LastTaskRef = resp.TaskRef
-		k8s.SetProvisioningCondition(&vm.Status.Conditions, metav1.ConditionTrue, k8s.ReasonCreating, "VM creation initiated")
-	} else {
-		k8s.SetProvisioningCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonReconcileSuccess, "VM created")
 	}
+	// The Create's outcome replaces the create marker.
+	setCreateOutcome(vm, resp.TaskRef != "")
 
+	// A single-host VM has no record of its create other than this one: it
+	// must not be lost (recordCreatedVM). A clustered VM's pendingHost,
+	// written before the Create, already makes a retry land on the same host.
+	if !clustered {
+		return r.recordCreatedVM(ctx, vm)
+	}
 	r.updateStatus(ctx, vm)
 	return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 }
@@ -1618,10 +1746,15 @@ func (r *VirtualMachineReconciler) createVMOn(
 // unresolvable create does not hot-loop against the provider.
 // Status.ID is left empty. Any other error returns handled=false and keeps the
 // existing transient-retry path.
+//
+// keepMarker records the answer on Ready only, keeping the create marker: the
+// answer to a re-send, which leaves the earlier attempt's outcome unknown
+// (createOutcomeKnown).
 func (r *VirtualMachineReconciler) handleRejectedCreate(
 	ctx context.Context,
 	vm *infravirtrigaudiov1beta1.VirtualMachine,
 	err error,
+	keepMarker bool,
 ) (ctrl.Result, bool) {
 	var (
 		reason     string
@@ -1636,20 +1769,20 @@ func (r *VirtualMachineReconciler) handleRejectedCreate(
 		return ctrl.Result{}, false
 	}
 
-	// Surface the provider's categorized message, not err.Error(): the latter
-	// also embeds the raw gRPC status chain, which is noise in a condition.
-	msg := err.Error()
-	var pe *contracts.ProviderError
-	if stderrors.As(err, &pe) && pe.Message != "" {
-		msg = pe.Message
-	}
-	msg = fmt.Sprintf("Provider rejected VM create (non-retryable; re-checking every %s): %s", retryAfter, msg)
+	// Surface the provider's categorized message, not err.Error() (which also
+	// embeds the raw gRPC status chain), made safe for status: URL userinfo
+	// removed, one line, bounded (sanitizeProviderDetail).
+	msg := fmt.Sprintf("Provider rejected VM create (non-retryable; re-checking every %s): %s", retryAfter, sanitizeProviderDetail(err))
 
 	log.FromContext(ctx).Info("Provider rejected VM create with a non-retryable error; not binding and backing off",
 		"reason", reason, "retryAfter", retryAfter.String(), "error", err.Error())
 	metrics.RecordError(errReasonProviderCreateRejected, metrics.ComponentManager)
 
-	for _, condType := range []string{k8s.ConditionReady, k8s.ConditionProvisioning} {
+	condTypes := []string{k8s.ConditionReady, k8s.ConditionProvisioning}
+	if keepMarker {
+		condTypes = condTypes[:1]
+	}
+	for _, condType := range condTypes {
 		meta.SetStatusCondition(&vm.Status.Conditions, metav1.Condition{
 			Type:               condType,
 			Status:             metav1.ConditionFalse,
@@ -1964,7 +2097,7 @@ func (r *VirtualMachineReconciler) adjustPowerState(
 			return res, nil
 		}
 		logger.Error(err, "Failed to adjust power state")
-		k8s.SetReadyCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonProviderError, fmt.Sprintf("Failed to adjust power state: %v", err))
+		k8s.SetReadyCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonProviderError, "Failed to adjust power state: "+providerFailureDetail(err))
 		r.updateStatus(ctx, vm)
 		return ctrl.Result{RequeueAfter: routedCallRetryAfter(ref, err)}, nil
 	}
@@ -2782,12 +2915,27 @@ func (r *VirtualMachineReconciler) vmsForGrantChange(ctx context.Context, indexV
 
 // vmUpdateNeedsReconcile is the VirtualMachine update filter: a spec change
 // (a new generation) is reconciled, a status-only update is not (it would
-// loop on the controller's own writes) — except for a VM being deleted, whose
-// every update is reconciled. That is what makes a force-delete or
-// orphan-on-delete annotation set on a VM whose delete is held (a backoff of
-// up to 5 minutes, ADR-0007 A6.1) take effect at once.
+// loop on the controller's own writes). A VM being deleted is reconciled
+// when its deletion is requested, and then only when something the delete
+// path reads in its metadata changes: its annotations — a force-delete or
+// orphan-on-delete set on a VM whose delete is held (a backoff of up to 5
+// minutes, ADR-0007 A6.1) takes effect at once — or its finalizers. Its own
+// status writes, and any other metadata-only update, are not reconciled: every
+// delete-path hold returns its own RequeueAfter, so a hold is retried on its
+// backoff and never at once because it wrote its status. Labels are not read
+// by the delete path.
 func vmUpdateNeedsReconcile(oldVM, newVM *infravirtrigaudiov1beta1.VirtualMachine) bool {
-	return oldVM.Generation != newVM.Generation || !newVM.DeletionTimestamp.IsZero()
+	if oldVM.Generation != newVM.Generation {
+		return true
+	}
+	if newVM.DeletionTimestamp.IsZero() {
+		// An operator resolving a create held for an unknown outcome.
+		return oldVM.Annotations[createOutcomeAnnotation] != newVM.Annotations[createOutcomeAnnotation]
+	}
+	if oldVM.DeletionTimestamp.IsZero() {
+		return true // the deletion was just requested
+	}
+	return !maps.Equal(oldVM.Annotations, newVM.Annotations) || !slices.Equal(oldVM.Finalizers, newVM.Finalizers)
 }
 
 // SetupWithManager sets up the controller with the Manager. Besides its own

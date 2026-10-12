@@ -226,6 +226,13 @@ finalizer**: the `VirtualMachine` stays in `Terminating` with
 - set `virtrigaud.io/force-delete: "true"` to drop the finalizer (also without
   a provider call).
 
+On a clustered `Provider`, both annotations need that `Provider`'s permission
+(`infra.virtrigaud.io/allow-consumer-orphan-on-delete: "true"`): without it the
+VM keeps its finalizer (`OrphanOnDeleteNotAllowed`, or `ForceDeleteRefused=True`
+for force-delete), because its domain would keep running on the shared hosts
+outside the capacity accounting. See
+[`vm-provider-binding.md`](vm-provider-binding.md#detaching-a-vm-without-deleting-it-virtrigaudioorphan-on-delete).
+
 A refused `VMClass` or `VMImage` doesn't block deletion: the delete only uses
 the `Provider`. A cross-namespace `Provider` that no longer exists is refused
 like one that doesn't select the namespace (the finalizer is kept), so the

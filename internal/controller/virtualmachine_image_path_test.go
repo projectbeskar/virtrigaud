@@ -96,12 +96,15 @@ func TestCreateVM_RejectedImagePathIsAValidationFailure(t *testing.T) {
 	assert.Contains(t, c.Message, `libvirt image path "/etc/shadow" rejected`)
 	assert.NotContains(t, c.Message, "rpc error")
 
-	// A transient provider failure keeps the fast retry.
+	// A transient provider failure keeps the fast retry. The provider did not
+	// refuse the Create, so its outcome is unknown: the create marker stays
+	// and Ready says why.
 	prov.err = errors.New("dial tcp: connection refused")
 	res, err = r.createVM(context.Background(), vm, prov, providerCR, vmClass, vmImage, nil)
 	require.NoError(t, err)
 	assert.Equal(t, providerErrorRetryInterval, res.RequeueAfter)
-	assert.Equal(t, k8s.ReasonProviderError, provisioningReason(vm))
+	assert.Equal(t, k8s.ReasonCreateRequested, provisioningReason(vm))
+	assert.Equal(t, k8s.ReasonProviderError, k8s.GetCondition(vm.Status.Conditions, k8s.ConditionReady).Reason)
 }
 
 // TestEnsureImageOnProvider_RejectedSourceRecordedOnImage proves an

@@ -234,7 +234,7 @@ func (r *VirtualMachineReconciler) handleClusteredCreateError(
 	err error,
 ) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
-	msg := providerErrorMessage(err)
+	msg := providerFailureDetail(err)
 
 	// Checked before the plain Conflict: a previous incarnation of this VM
 	// holds it on its pending host (ADR-0007 A6, R2) — excluding the host
@@ -283,7 +283,12 @@ func (r *VirtualMachineReconciler) handleClusteredCreateError(
 
 	setPlacedCondition(vm, metav1.ConditionFalse, k8s.ReasonCreatePending,
 		fmt.Sprintf("create on host %s is not confirmed: %s", host, msg))
-	if res, handled := r.handleRejectedCreate(ctx, vm, err); handled {
+	if res, handled := r.handleRejectedCreate(ctx, vm, err, false); handled {
+		return res, nil
+	}
+	// A retryable VM_OPERATION_FAILED on the pending host is retried with a
+	// backoff, not every few seconds (holdCreateBackoff).
+	if res, held := r.holdCreateBackoff(ctx, vm, err, createAttempt{}); held {
 		return res, nil
 	}
 	logger.Error(err, "Failed to create VM", "host", host)
@@ -508,8 +513,9 @@ var deleteBlockedMessages = map[string]string{
 // Ready=False/DeleteBlocked, with a constant message that names no host, emits
 // one Warning event per transition (a new reason included), and retries with
 // the blocked-VM backoff from when the hold began (15 s doubling to 5 min). A
-// force-delete or orphan-on-delete set meanwhile is acted on at once: a VM
-// being deleted is reconciled on every update.
+// force-delete or orphan-on-delete set meanwhile is acted on at once: a
+// deleting VM is reconciled when its annotations change
+// (vmUpdateNeedsReconcile).
 func (r *VirtualMachineReconciler) retainForUncheckedDelete(
 	ctx context.Context,
 	vm *infravirtrigaudiov1beta1.VirtualMachine,
@@ -543,9 +549,10 @@ const deleteHeldLogMessage = "Delete held; retaining the finalizer"
 // DeleteBlocked, both with msg, on a clustered vm whose delete is held, and
 // returns the backoff retry counted from when the hold began. The status is
 // written, and a Warning event recorded, only when that changes something (a
-// new hold or a new reason): a VM being deleted is reconciled on every update
-// of it, so a write per retry would retry at once instead of on the backoff.
-// msg must therefore be the same on every retry of the same hold. The cause
+// new hold or a new reason), and msg must be the same on every retry of the
+// same hold: a repeated hold leaves the status unchanged. The retry comes from
+// the returned RequeueAfter only (a deleting VM's own status writes do not
+// re-trigger it, vmUpdateNeedsReconcile). The cause
 // (err) goes to the log only, as logMsg, with the VM's id and host.
 func (r *VirtualMachineReconciler) recordDeleteHold(
 	ctx context.Context,
@@ -835,7 +842,7 @@ func (r *VirtualMachineReconciler) handleBoundHostUnavailable(
 		Type:               k8s.ConditionReady,
 		Status:             metav1.ConditionFalse,
 		Reason:             k8s.ReasonHostUnavailable,
-		Message:            fmt.Sprintf("bound host %s is unavailable: %s", ref.HostID, providerErrorMessage(err)),
+		Message:            fmt.Sprintf("bound host %s is unavailable: %s", ref.HostID, providerFailureDetail(err)),
 		ObservedGeneration: vm.Generation,
 	})
 	metrics.RecordError(errReason, metrics.ComponentManager)
@@ -936,16 +943,18 @@ func (r *VirtualMachineReconciler) deletionTarget(
 // failure). By default the finalizer is retained (retain == true, with the
 // matching condition set and the result to return): the hypervisor VM must not
 // be silently orphaned, nor deleted through the wrong Provider. With the
-// force-delete escape hatch set it returns retain == false and the caller
+// force-delete escape hatch honoured (force, see forceDeleteHonoured) it
+// returns retain == false and the caller
 // removes the finalizer WITHOUT any provider call (the hypervisor VM may be
 // left behind), exactly as for any other undeletable VM.
 func (r *VirtualMachineReconciler) retainForUnroutableDelete(
 	ctx context.Context,
 	vm *infravirtrigaudiov1beta1.VirtualMachine,
+	force bool,
 	err error,
 ) (ctrl.Result, bool) {
 	logger := log.FromContext(ctx)
-	if hasForceDeleteAnnotation(vm) {
+	if force {
 		logger.Error(err, "Cannot route the provider delete but force-delete annotation is set; removing finalizer (the provider VM may be orphaned)",
 			"id", vm.Status.ID, "annotation", forceDeleteAnnotation)
 		metrics.RecordError(errReasonProviderDelete, metrics.ComponentManager)

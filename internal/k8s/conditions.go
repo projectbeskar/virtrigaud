@@ -54,8 +54,6 @@ const (
 	ReasonWaitingForDependencies = "WaitingForDependencies"
 	// ReasonTaskInProgress indicates async task in progress
 	ReasonTaskInProgress = "TaskInProgress"
-	// ReasonCreateRequested marks a VirtualMachine whose provider Create may have been sent: the outcome is recorded by status.id.
-	ReasonCreateRequested = "CreateRequested"
 	// ReasonProviderConflict indicates the provider refused to create the
 	// resource because one with the same provider-side identity (e.g. a libvirt
 	// domain name) already exists and is NOT owned by this object. It is never
@@ -136,6 +134,49 @@ const (
 	// detach VMs: an orphaned VM would keep running on its host outside the
 	// committed-capacity accounting. The finalizer is kept.
 	ReasonOrphanOnDeleteNotAllowed = "OrphanOnDeleteNotAllowed"
+	// ReasonForceDeleteNotAllowed is the reason of ConditionForceDeleteRefused
+	// (and of its Warning event): virtrigaud.io/force-delete=true is set on a
+	// VirtualMachine whose clustered Provider is in another namespace and has
+	// not allowed consumers to leave VMs on its hosts. The force-delete is
+	// ignored and the delete is retried as if it were not set.
+	ReasonForceDeleteNotAllowed = "ForceDeleteNotAllowed"
+	// ReasonProviderDeleting is Ready=False (and Provisioning=False) on a
+	// VirtualMachine that is not created on the hypervisor yet — or whose
+	// hypervisor VM is gone and would be re-created — while its Provider is
+	// being deleted (a non-zero deletionTimestamp). Nothing is created through
+	// a Provider on its way out: a new VM would keep its deletion waiting. The
+	// VM is re-checked periodically and proceeds once the Provider is gone and
+	// re-created, or is deleted itself.
+	ReasonProviderDeleting = "ProviderDeleting"
+	// ReasonCreateRequested is the Provisioning reason of a single-host
+	// VirtualMachine with no status.id for which a provider Create was
+	// requested: it is written, and confirmed, BEFORE the Create is sent, and
+	// replaced by the Create's outcome once the provider answers and its id is
+	// recorded. It is the durable record that the VM may exist on the
+	// hypervisor although no id is recorded: such a VM is never released on
+	// delete as if nothing had been created, and it counts as using its
+	// Provider.
+	ReasonCreateRequested = "CreateRequested"
+	// ReasonCreateOutcomeUnknown is Ready=False on a single-host VirtualMachine
+	// whose Create was requested (ReasonCreateRequested) but whose outcome was
+	// never recorded, when the provider cannot tell whether that Create made a
+	// VM: no second Create is sent (and, on delete, the finalizer is kept)
+	// until an operator records the VM's id or confirms it was not created.
+	ReasonCreateOutcomeUnknown = "CreateOutcomeUnknown"
+	// ReasonCreateBackoff is Ready=False (and, when the provider performed
+	// nothing, Provisioning=False) on a VirtualMachine whose Create the
+	// provider answered with a retryable VM_DISK_CHECK_FAILED or
+	// VM_OPERATION_FAILED: the Create is retried with a backoff (15 s
+	// doubling to 5 min) counted from when Ready took this reason, instead of
+	// every few seconds.
+	ReasonCreateBackoff = "CreateBackoff"
+	// ReasonCreateRefused is Ready=False and Provisioning=False on a
+	// VirtualMachine whose Create the provider refused with a non-retryable
+	// FailedPrecondition (a precondition only an operator can satisfy, e.g.
+	// an imported disk that no longer exists) or PermissionDenied: nothing
+	// was created. The Create is re-checked with a backoff (15 s doubling to
+	// 5 min) counted from when Ready took this reason.
+	ReasonCreateRefused = "CreateRefused"
 	// ReasonPendingSizeGrew is Placed=False (and Provisioning=False) on a
 	// clustered VM whose pending Create would now ask for more than the size
 	// it was admitted at (status.placement.pendingResources), because its
@@ -241,6 +282,17 @@ const (
 // meanwhile. Its LastTransitionTime is when the hold began, which paces the
 // retries (15 s doubling to 5 min). Its message never names a host.
 const ConditionDeleteBlocked = "DeleteBlocked"
+
+// ConditionForceDeleteRefused is True, with ReasonForceDeleteNotAllowed, on a
+// VirtualMachine being deleted whose virtrigaud.io/force-delete=true is not
+// honoured: it is a consumer, in another namespace, of a clustered Provider
+// that does not carry infra.virtrigaud.io/allow-consumer-orphan-on-delete:
+// "true". Releasing it without a confirmed provider delete would leave its
+// domain running on the shared hosts outside the committed-capacity
+// accounting. The delete is retried as if force-delete were not set (Ready
+// and DeleteBlocked say why it waits); the condition is removed when the
+// annotation is removed or the Provider allows it. Its message is constant.
+const ConditionForceDeleteRefused = "ForceDeleteRefused"
 
 // DeleteBlocked condition reasons (ADR-0007 A6.1).
 const (
