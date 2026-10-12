@@ -784,15 +784,24 @@ func TestDeleteSendsTheRecordedLayout(t *testing.T) {
 	}
 }
 
-// TestDeleteNamesTheTargetVMOnlyWhenItsImportMayHaveStaged: DeleteStagedDisk
+// TestDeleteNamesOnlyTheRecordedImportTarget (review M1): DeleteStagedDisk
 // names the target VM (so Proxmox also removes its node-side import stage)
-// only for a migration that sent an import, and never while another in-flight
-// VMMigration targets the same VM (its Create may be about to read that
-// stage). A Ready or Failed one, or one in another target, does not count.
-func TestDeleteNamesTheTargetVMOnlyWhenItsImportMayHaveStaged(t *testing.T) {
+// only as RECORDED when the import was sent (status.storageInfo.importTarget),
+// never the current spec.target a tenant may have edited since; not when that
+// VM is in a namespace that no longer grants this migration's namespace; and
+// never while another in-flight VMMigration — including a Failed one still
+// waiting for a retry — targets, or recorded an import for, the same VM. A
+// Ready or terminally failed one, or one for another VM, does not count.
+func TestDeleteNamesOnlyTheRecordedImportTarget(t *testing.T) {
+	recorded := func(ns, name string) func(m *infrav1beta1.VMMigration) {
+		return func(m *infrav1beta1.VMMigration) {
+			m.Status.StorageInfo.ImportTarget = &infrav1beta1.MigrationImportTarget{Namespace: ns, Name: name}
+		}
+	}
+	own := recorded("default", "target-vm")
 	want := contracts.ObjectIdentity{Namespace: "default", Name: "target-vm"}
-	other := func(name string, phase infrav1beta1.MigrationPhase, targetName string) *infrav1beta1.VMMigration {
-		return &infrav1beta1.VMMigration{
+	other := func(name string, phase infrav1beta1.MigrationPhase, targetName string, mutate ...func(*infrav1beta1.VMMigration)) client.Object {
+		o := &infrav1beta1.VMMigration{
 			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default", UID: types.UID("uid-" + name)},
 			Spec: infrav1beta1.VMMigrationSpec{
 				Source: infrav1beta1.MigrationSource{VMRef: infrav1beta1.LocalObjectReference{Name: "other-source"}},
@@ -800,32 +809,150 @@ func TestDeleteNamesTheTargetVMOnlyWhenItsImportMayHaveStaged(t *testing.T) {
 			},
 			Status: infrav1beta1.VMMigrationStatus{Phase: phase},
 		}
+		for _, f := range mutate {
+			f(o)
+		}
+		return o
+	}
+	retryPending := func(o *infrav1beta1.VMMigration) {
+		maxRetries := int32(3)
+		o.Spec.Options = &infrav1beta1.MigrationOptions{RetryPolicy: &infrav1beta1.MigrationRetryPolicy{MaxRetries: &maxRetries}}
+		o.Status.RetryCount = 1
+	}
+	granting := func(source string) client.Object {
+		return &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "team-b",
+			Annotations: map[string]string{AllowedSourceNamespacesAnnotation: source}}}
 	}
 	for name, tc := range map[string]struct {
-		phase  infrav1beta1.MigrationPhase
-		mutate func(m *infrav1beta1.VMMigration)
-		others []client.Object
-		want   contracts.ObjectIdentity
+		mutate  []func(m *infrav1beta1.VMMigration)
+		others  []client.Object
+		want    contracts.ObjectIdentity
+		mayHold bool
 	}{
-		"ready":                                {phase: infrav1beta1.MigrationPhaseReady, want: want},
-		"failed after the import (import id)":  {phase: infrav1beta1.MigrationPhaseFailed, mutate: func(m *infrav1beta1.VMMigration) { m.Status.ImportID = "imp-1" }, want: want},
-		"failed before the import":             {phase: infrav1beta1.MigrationPhaseFailed},
-		"another migration is creating it":     {phase: infrav1beta1.MigrationPhaseReady, others: []client.Object{other("again", infrav1beta1.MigrationPhaseCreating, "target-vm")}},
-		"another migration is importing it":    {phase: infrav1beta1.MigrationPhaseReady, others: []client.Object{other("again", infrav1beta1.MigrationPhaseImporting, "target-vm")}},
-		"a failed or ready one does not count": {phase: infrav1beta1.MigrationPhaseReady, others: []client.Object{other("f", infrav1beta1.MigrationPhaseFailed, "target-vm"), other("r", infrav1beta1.MigrationPhaseReady, "target-vm")}, want: want},
-		"one for another VM does not count":    {phase: infrav1beta1.MigrationPhaseReady, others: []client.Object{other("elsewhere", infrav1beta1.MigrationPhaseCreating, "another-vm")}, want: want},
+		"import recorded":    {mutate: []func(*infrav1beta1.VMMigration){own}, want: want},
+		"no import recorded": {},
+		"spec target name edited after the import": {
+			mutate: []func(*infrav1beta1.VMMigration){own, func(m *infrav1beta1.VMMigration) {
+				m.Spec.Target.Name = "their-vm"
+			}},
+			want: want,
+		},
+		// Moving the target to another namespace also moves the target
+		// Provider's grant check, which may hold the delete; when it is sent,
+		// it names the recorded VM, never the edited one.
+		"spec target namespace edited after the import": {
+			mutate: []func(*infrav1beta1.VMMigration){own, func(m *infrav1beta1.VMMigration) {
+				m.Spec.Target.ProviderRef.Namespace = "default"
+				m.Spec.Target.Namespace, m.Spec.Target.Name = "team-b", "their-vm"
+			}},
+			others:  []client.Object{granting("default")},
+			want:    want,
+			mayHold: true,
+		},
+		"cross-namespace import, grant revoked": {mutate: []func(*infrav1beta1.VMMigration){recorded("team-b", "web")}},
+		"cross-namespace import, grant revoked (annotation names another namespace)": {
+			mutate: []func(*infrav1beta1.VMMigration){recorded("team-b", "web")},
+			others: []client.Object{granting("team-c")},
+		},
+		"cross-namespace import, granted": {
+			mutate: []func(*infrav1beta1.VMMigration){recorded("team-b", "web")},
+			others: []client.Object{granting("default")},
+			want:   contracts.ObjectIdentity{Namespace: "team-b", Name: "web"},
+		},
+		"another migration is creating it": {
+			mutate: []func(*infrav1beta1.VMMigration){own},
+			others: []client.Object{other("again", infrav1beta1.MigrationPhaseCreating, "target-vm")},
+		},
+		"another migration failed and waits for a retry": {
+			mutate: []func(*infrav1beta1.VMMigration){own},
+			others: []client.Object{other("again", infrav1beta1.MigrationPhaseFailed, "target-vm", retryPending)},
+		},
+		"another migration recorded an import for it, then its spec was edited": {
+			mutate: []func(*infrav1beta1.VMMigration){own},
+			others: []client.Object{other("again", infrav1beta1.MigrationPhaseImporting, "elsewhere",
+				func(o *infrav1beta1.VMMigration) {
+					o.Status.StorageInfo = &infrav1beta1.MigrationStorageInfo{
+						ImportTarget: &infrav1beta1.MigrationImportTarget{Namespace: "default", Name: "target-vm"}}
+				})},
+		},
+		"a terminally failed or ready one does not count": {
+			mutate: []func(*infrav1beta1.VMMigration){own},
+			others: []client.Object{other("f", infrav1beta1.MigrationPhaseFailed, "target-vm"), other("r", infrav1beta1.MigrationPhaseReady, "target-vm")},
+			want:   want,
+		},
+		"one for another VM does not count": {
+			mutate: []func(*infrav1beta1.VMMigration){own},
+			others: []client.Object{other("elsewhere", infrav1beta1.MigrationPhaseCreating, "another-vm")},
+			want:   want,
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			prov := newStagingProvider()
-			m, objs := stagingFixture(tc.phase)
-			m.Spec.Options = &infrav1beta1.MigrationOptions{CleanupPolicy: infrav1beta1.CleanupPolicyAlways}
-			if tc.mutate != nil {
-				tc.mutate(m)
+			m, objs := stagingFixture(infrav1beta1.MigrationPhaseReady)
+			for _, f := range tc.mutate {
+				f(m)
 			}
 			h := newStagingHarness(t, prov, m, append(objs, tc.others...)...)
 			h.reconcile(t, m)
+			if tc.mayHold && prov.calls.Load() == 0 {
+				return
+			}
 			require.EqualValues(t, 1, prov.calls.Load())
 			assert.Equal(t, tc.want, prov.lastRequest().TargetVM)
+		})
+	}
+}
+
+// importTargetObserver is an ImportDisk provider that records whether the
+// migration's import target was already stored when the import arrived.
+type importTargetObserver struct {
+	capturingMigrationProvider
+	c         client.Client
+	key       client.ObjectKey
+	importErr error
+	saw       *infrav1beta1.MigrationImportTarget
+}
+
+func (p *importTargetObserver) ImportDisk(ctx context.Context, req contracts.ImportDiskRequest) (contracts.ImportDiskResponse, error) {
+	got := &infrav1beta1.VMMigration{}
+	if err := p.c.Get(ctx, p.key, got); err == nil && got.Status.StorageInfo != nil {
+		p.saw = got.Status.StorageInfo.ImportTarget
+	}
+	p.importCalls++
+	p.lastImportReq = req
+	return p.importResp, p.importErr
+}
+
+// TestImportRecordsItsTargetBeforeTheRPC (review M1): the VM an nfs / s3
+// import is sent for is stored before ImportDisk runs, whatever its outcome,
+// and it is the VM the import names.
+func TestImportRecordsItsTargetBeforeTheRPC(t *testing.T) {
+	for name, importErr := range map[string]error{
+		"successful import": nil,
+		"failed import":     contracts.NewRetryableError("importDisk: connection reset", nil),
+	} {
+		t.Run(name, func(t *testing.T) {
+			sourceVM, sourceProvider, targetProvider, migration := directionFixture(
+				infrav1beta1.ProviderTypeLibvirt, infrav1beta1.ProviderTypeVSphere)
+			prov := &importTargetObserver{
+				capturingMigrationProvider: capturingMigrationProvider{importResp: contracts.ImportDiskResponse{DiskId: "d", Path: "p"}},
+				key:                        client.ObjectKeyFromObject(migration),
+				importErr:                  importErr,
+			}
+			r, c := directionReconciler(t, prov, sourceVM, sourceProvider, targetProvider, migration, s3CredsSecret())
+			prov.c = c
+
+			_, err := r.handleImportingPhase(context.Background(), migration)
+			require.NoError(t, err)
+			require.Equal(t, 1, prov.importCalls)
+			require.NotNil(t, prov.saw, "the import target was stored before the import was sent")
+			assert.Equal(t, prov.lastImportReq.TargetVM.Namespace, prov.saw.Namespace)
+			assert.Equal(t, prov.lastImportReq.TargetVM.Name, prov.saw.Name)
+
+			got := &infrav1beta1.VMMigration{}
+			require.NoError(t, c.Get(context.Background(), client.ObjectKeyFromObject(migration), got))
+			require.NotNil(t, got.Status.StorageInfo)
+			assert.Equal(t, &infrav1beta1.MigrationImportTarget{Namespace: "default", Name: "target-vm"}, got.Status.StorageInfo.ImportTarget)
 		})
 	}
 }

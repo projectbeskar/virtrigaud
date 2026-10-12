@@ -35,7 +35,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `api/infra.virtrigaud.io/v1beta1/vmmigration_types.go` (regenerated CRD; additive status fields written by the controller only):
   - `status.storageInfo.stagingLayout` (`v1`/`v2`);
   - `status.storageInfo.stagingDigest`;
-  - `status.sourceVMUID`.
+  - `status.sourceVMUID`;
+  - `status.storageInfo.importTarget` (namespace and name of the VM the import was sent for, persisted before `ImportDisk`).
 - `internal/storage/migration/staging.go` (new):
   - `StagedObjectKey`: the single layout source for the export URL, the import URL and the delete. Layout `v2` is unambiguous: NFS `vmmigrations_<ns>_<name>_<stage>.qcow2`.
   - `ResolveStagedDisk`: validates a request. The namespace must be a DNS-1123 label, the name a DNS-1123 subdomain, the stage `export`, and the layout `v1` or `v2`. NFS paths go through `NFSURL`.
@@ -47,7 +48,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `internal/providers/{proxmox,libvirt,vsphere,mock}/staged_disk.go`, plus the capabilities of each provider:
   - Proxmox: deletes the S3 object from the pod, and unlinks the NFS file through the kernel mount as the migration's uid/gid. A failed `rm`, or a file still present, is an error, never `DELETED`.
     - With `target_vm` it first removes that VM's node-side import stage: `rm -f --` in every stage format, confined to `isImportStagePath`. A failed removal is retryable and leaves the staged object untouched.
-    - The manager sends `target_vm` only for a migration that sent an import, and only when no other in-flight migration targets the same VM (`stagedImportTarget`).
+    - The manager's `target_vm` is only the VM recorded in `status.storageInfo.importTarget` when the import was sent, never the current, editable `spec.target`. It is left unset in three cases: the recorded VM's namespace no longer grants the migration's namespace; another in-flight migration (including a `Failed` one waiting for a retry) targets the same VM; or another in-flight migration recorded an import for it (`stagedImportTarget`).
   - libvirt (single host) and vSphere: delete the S3 object, and empty the NFS object with qemu-img over libnfs.
   - libvirt clustered and mock: `Unimplemented`; they advertise nothing.
 - `internal/providers/contracts/staged_disk.go` (new), `capabilities.go`, `internal/transport/grpc/client.go`, `sdk/provider/capabilities/capabilities.go`: `StagedDiskDeleter`, the client's `DeleteStagedDisk`, and the capability plumbing.

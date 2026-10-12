@@ -870,6 +870,27 @@ spec:
                     description: CleanedUp indicates if intermediate storage was cleaned
                       up
                     type: boolean
+                  importTarget:
+                    description: |-
+                      ImportTarget is the VirtualMachine an nfs / s3 migration's ImportDisk
+                      was sent for, recorded by the controller just before the import is sent
+                      (ADR-0011 D1). The staged-disk delete names only this VM, never the
+                      current spec.target (which may have been edited since), so a target
+                      provider that keeps a copy of the imported disk for that VM (the Proxmox
+                      import stage) removes only that copy. Written by the controller only.
+                    properties:
+                      name:
+                        description: Name is the target VirtualMachine's name.
+                        maxLength: 253
+                        type: string
+                      namespace:
+                        description: Namespace is the target VirtualMachine's namespace.
+                        maxLength: 63
+                        type: string
+                    required:
+                    - name
+                    - namespace
+                    type: object
                   size:
                     anyOf:
                     - type: integer

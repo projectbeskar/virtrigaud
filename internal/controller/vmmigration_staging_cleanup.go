@@ -32,6 +32,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	infrav1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
 	"github.com/projectbeskar/virtrigaud/internal/k8s"
@@ -706,49 +707,83 @@ func (r *VMMigrationReconciler) deleteStagedDisk(ctx context.Context, m *infrav1
 	}
 }
 
-// migrationSentImport reports whether the migration may have sent its
-// ImportDisk: it is (or was, before it ended) past the Transferring phase —
-// an import id, a landed path, an Importing condition, or a phase from
-// Importing on. A migration that failed before the import has no
-// provider-side copy of its disk to remove.
-func migrationSentImport(m *infrav1beta1.VMMigration) bool {
-	if m.Status.ImportID != "" || (m.Status.DiskInfo != nil && m.Status.DiskInfo.TargetPath != "") ||
-		meta.FindStatusCondition(m.Status.Conditions, infrav1beta1.VMMigrationConditionImporting) != nil {
-		return true
+// markImportTarget records, for an nfs / s3 migration, the VirtualMachine
+// key its ImportDisk is about to be sent for
+// (status.storageInfo.importTarget). It reports whether the status changed;
+// the caller persists it BEFORE the import is sent, so an import that fails
+// after the provider staged something is still cleaned up — for that VM only.
+func markImportTarget(m *infrav1beta1.VMMigration, key client.ObjectKey) bool {
+	if !migrationStagesOutsideCluster(m) {
+		return false
 	}
-	switch m.Status.Phase {
-	case infrav1beta1.MigrationPhaseImporting, infrav1beta1.MigrationPhaseCreating,
-		infrav1beta1.MigrationPhaseValidatingTarget, infrav1beta1.MigrationPhaseReady:
-		return true
+	if m.Status.StorageInfo == nil {
+		m.Status.StorageInfo = &infrav1beta1.MigrationStorageInfo{}
 	}
-	return false
+	if t := m.Status.StorageInfo.ImportTarget; t != nil && t.Namespace == key.Namespace && t.Name == key.Name {
+		return false
+	}
+	m.Status.StorageInfo.ImportTarget = &infrav1beta1.MigrationImportTarget{Namespace: key.Namespace, Name: key.Name}
+	return true
+}
+
+// recordedImportTarget is the VM key the migration's import was sent for
+// (markImportTarget), or false when none was recorded.
+func recordedImportTarget(m *infrav1beta1.VMMigration) (client.ObjectKey, bool) {
+	if m.Status.StorageInfo == nil || m.Status.StorageInfo.ImportTarget == nil {
+		return client.ObjectKey{}, false
+	}
+	t := m.Status.StorageInfo.ImportTarget
+	if t.Namespace == "" || t.Name == "" {
+		return client.ObjectKey{}, false
+	}
+	return client.ObjectKey{Namespace: t.Namespace, Name: t.Name}, true
+}
+
+// migrationInFlight reports whether a VMMigration may still import into, or
+// create from, its target: not being deleted, not Ready, and not failed for
+// good (a Failed migration waiting for a retry is still in flight).
+func migrationInFlight(m *infrav1beta1.VMMigration) bool {
+	return m.DeletionTimestamp.IsZero() && m.Status.Phase != infrav1beta1.MigrationPhaseReady && !migrationTerminallyFailed(m)
 }
 
 // stagedImportTarget is the target VM DeleteStagedDisk names so the target
 // provider also removes the provider-side copy its ImportDisk kept for that
 // VM until Create (Proxmox: the node-side import stage, named after the
-// target VM, not the migration). It is set only when the migration sent an
-// import (migrationSentImport) and no other VMMigration that is still in
-// flight — not Ready, not Failed, not being deleted — targets the same VM:
-// that one's import may have written, and its Create may be about to read,
-// the same stage. Otherwise it is zero and only the staged object is removed.
-// A failed list is an error (the delete is held and retried).
+// target VM, not the migration). It is ONLY the VM the import was sent for,
+// as recorded in status (recordedImportTarget) — never the current
+// spec.target, which a tenant may have edited since. It is zero (only the
+// staged object is removed) when no import was recorded; when the recorded VM
+// is in another namespace that no longer grants this migration's namespace
+// (AllowedSourceNamespacesAnnotation, read live); and when another VMMigration
+// still in flight (migrationInFlight) targets, or recorded an import for, the
+// same VM: that one's import may have written, and its Create may be about to
+// read, the same stage. A failed read is an error (the delete is held and
+// retried).
 func (r *VMMigrationReconciler) stagedImportTarget(ctx context.Context, m *infrav1beta1.VMMigration) (contracts.ObjectIdentity, error) {
-	if !migrationSentImport(m) {
+	key, ok := recordedImportTarget(m)
+	if !ok {
 		return contracts.ObjectIdentity{}, nil
 	}
-	key := migrationTargetVMKey(m)
+	allowed, err := targetNamespaceAllowed(ctx, r.liveReader(), m.Namespace, key.Namespace)
+	if err != nil {
+		return contracts.ObjectIdentity{}, fmt.Errorf("check the import target namespace grant: %w", err)
+	}
+	if !allowed {
+		return contracts.ObjectIdentity{}, nil
+	}
 	migrations := &infrav1beta1.VMMigrationList{}
 	if err := r.List(ctx, migrations); err != nil {
 		return contracts.ObjectIdentity{}, fmt.Errorf("list VMMigrations sharing the target VM: %w", err)
 	}
 	for i := range migrations.Items {
 		other := &migrations.Items[i]
-		if other.UID == m.UID || !other.DeletionTimestamp.IsZero() ||
-			other.Status.Phase == infrav1beta1.MigrationPhaseReady || other.Status.Phase == infrav1beta1.MigrationPhaseFailed {
+		if other.UID == m.UID || !migrationInFlight(other) {
 			continue
 		}
 		if migrationTargetVMKey(other) == key {
+			return contracts.ObjectIdentity{}, nil
+		}
+		if recorded, ok := recordedImportTarget(other); ok && recorded == key {
 			return contracts.ObjectIdentity{}, nil
 		}
 	}

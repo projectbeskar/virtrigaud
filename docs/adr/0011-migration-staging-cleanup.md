@@ -134,11 +134,21 @@ only on paths `isImportStagePath` accepts, and BEFORE the staged object. If that
 removal fails, the call is retryable and the staged object is not touched. The
 other providers ignore `target_vm`: libvirt's landed disk IS the VM's disk.
 
-The manager sets `target_vm` only when the migration sent an import (an import id,
-a landed path, an `Importing` condition, or a phase from `Importing` on). It also
-requires that no other in-flight VMMigration targets the same VM. Here "in flight"
-means not `Ready`, not `Failed`, and not being deleted: such a migration's import
-may have written the same stage, and its `Create` may be about to read it.
+The manager records the VM an `nfs` / `s3` import is sent for in
+`status.storageInfo.importTarget`, and persists it before `ImportDisk` is sent.
+`target_vm` is only ever that recorded VM, never the current `spec.target`: a tenant
+can edit `spec.target` after the import, and the stage of the VM it would then name
+(possibly in another namespace) is not this migration's.
+
+`target_vm` is left unset in three cases:
+
+- no import was recorded;
+- the recorded VM is in another namespace that no longer grants this migration's
+  namespace (`AllowedSourceNamespacesAnnotation`, read live);
+- another VMMigration still in flight targets, or recorded an import for, the same
+  VM. "In flight" means not being deleted, not `Ready`, and not failed for good: a
+  `Failed` migration that still waits for a retry counts. Its import may have
+  written the same stage, and its `Create` may be about to read it.
 
 A `Create` of that VM that is still running is not disturbed: `qm importdisk` keeps
 reading a stage it has already opened after the stage is unlinked. A `Create` that

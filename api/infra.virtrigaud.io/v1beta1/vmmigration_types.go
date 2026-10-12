@@ -647,6 +647,27 @@ type MigrationStorageInfo struct {
 	// +optional
 	// +kubebuilder:validation:MaxLength=80
 	StagingDigest string `json:"stagingDigest,omitempty"`
+
+	// ImportTarget is the VirtualMachine an nfs / s3 migration's ImportDisk
+	// was sent for, recorded by the controller just before the import is sent
+	// (ADR-0011 D1). The staged-disk delete names only this VM, never the
+	// current spec.target (which may have been edited since), so a target
+	// provider that keeps a copy of the imported disk for that VM (the Proxmox
+	// import stage) removes only that copy. Written by the controller only.
+	// +optional
+	ImportTarget *MigrationImportTarget `json:"importTarget,omitempty"`
+}
+
+// MigrationImportTarget is the namespace and name of the VirtualMachine a
+// migration's import was sent for.
+type MigrationImportTarget struct {
+	// Namespace is the target VirtualMachine's namespace.
+	// +kubebuilder:validation:MaxLength=63
+	Namespace string `json:"namespace"`
+
+	// Name is the target VirtualMachine's name.
+	// +kubebuilder:validation:MaxLength=253
+	Name string `json:"name"`
 }
 
 // ValidationResults contains results of validation checks

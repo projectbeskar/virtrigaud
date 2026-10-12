@@ -1369,6 +1369,15 @@ func (r *VMMigrationReconciler) handleImportingPhase(ctx context.Context, migrat
 		}
 	}
 
+	// ADR-0011 D1 (review M1): record the VM this import is sent for before
+	// it is sent; the staged-disk delete names only this recorded VM, never a
+	// spec.target edited afterwards.
+	if markImportTarget(migration, targetVM) {
+		if err := r.updateStatus(ctx, migration); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
+
 	// Claim the in-memory import guard for this object generation BEFORE
 	// issuing the RPC. ImportDisk writes the target qcow2; a duplicate driven
 	// by a stale cache would overwrite it. If another reconcile already claimed
