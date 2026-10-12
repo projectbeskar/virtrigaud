@@ -1327,6 +1327,7 @@ func (r *VirtualMachineReconciler) removeFinalizer(ctx context.Context, vm *infr
 		return ctrl.Result{}, err
 	}
 	r.forgetUnsavedCreate(vm.UID)
+	r.diskLimitWarned.Delete(string(vm.UID))
 
 	logger.Info("VirtualMachine deleted successfully")
 	return ctrl.Result{}, nil

@@ -174,10 +174,10 @@ webhooks:
   sideEffects: None
 {{- /* The VirtualMachine and VMClass disk-size webhooks
        (api/infra.virtrigaud.io/v1beta1/disk_size_webhook.go) check only the
-       administrator's --max-disk-size ceiling, and the manager registers them
-       only when it is set: render them under the same condition, so a release
-       without a ceiling adds no admission dependency on VM and VMClass writes
-       (and never points the API server at a path the manager does not serve). */}}
+       administrator's --max-disk-size ceiling (the manager serves them whenever
+       webhooks are on, admitting everything without a ceiling). Render them
+       only when the ceiling is set, so a release without one adds no admission
+       dependency on VM and VMClass writes. */}}
 {{- with include "virtrigaud.maxDiskSizeValue" . }}
 {{- range $hook := list (dict "name" "vvirtualmachine-disksize.kb.io" "path" "/validate-infra-virtrigaud-io-v1beta1-virtualmachine" "resource" "virtualmachines") (dict "name" "vvmclass-disksize.kb.io" "path" "/validate-infra-virtrigaud-io-v1beta1-vmclass" "resource" "vmclasses") }}
 - admissionReviewVersions:

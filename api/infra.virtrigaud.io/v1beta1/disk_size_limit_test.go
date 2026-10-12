@@ -162,7 +162,8 @@ func vmWithDisks(sizes map[string]int32, order ...string) *VirtualMachine {
 }
 
 func TestVirtualMachineDiskSizeValidator(t *testing.T) {
-	v := &VirtualMachineDiskSizeValidator{MaxDiskSize: resource.MustParse("100Gi")}
+	limit := resource.MustParse("100Gi")
+	v := &VirtualMachineDiskSizeValidator{MaxDiskSize: &limit}
 	ctx := context.Background()
 	for _, tc := range []struct {
 		name    string
@@ -214,6 +215,13 @@ func TestVirtualMachineDiskSizeValidator(t *testing.T) {
 	if _, err := v.ValidateCreate(ctx, &VMClass{}); err == nil {
 		t.Fatal("a wrong type is an error")
 	}
+	// Served with no ceiling (webhooks on, --max-disk-size unset): admits all.
+	if _, err := (&VirtualMachineDiskSizeValidator{}).ValidateCreate(ctx, vmWithDisks(map[string]int32{"a": 65536}, "a")); err != nil {
+		t.Fatalf("no ceiling admits every size: %v", err)
+	}
+	if _, err := (&VMClassDiskSizeValidator{}).ValidateCreate(ctx, classWithDisk("64Ti")); err != nil {
+		t.Fatalf("no ceiling admits every size: %v", err)
+	}
 }
 
 func classWithDisk(size string) *VMClass {
@@ -225,7 +233,8 @@ func classWithDisk(size string) *VMClass {
 }
 
 func TestVMClassDiskSizeValidator(t *testing.T) {
-	v := &VMClassDiskSizeValidator{MaxDiskSize: resource.MustParse("100Gi")}
+	limit := resource.MustParse("100Gi")
+	v := &VMClassDiskSizeValidator{MaxDiskSize: &limit}
 	ctx := context.Background()
 	for _, tc := range []struct {
 		name    string

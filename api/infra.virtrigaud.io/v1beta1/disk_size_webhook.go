@@ -31,9 +31,11 @@ import (
 
 // The disk-size webhooks refuse, at admission, a disk size above the
 // manager-wide ceiling (--max-disk-size) on a VirtualMachine (spec.disks) or a
-// VMClass (spec.diskDefaults.size). They are registered, and the chart renders
-// their configuration, only when that ceiling is set: without one they have
-// nothing to check and add no admission dependency. They check only the
+// VMClass (spec.diskDefaults.size). The manager serves them whenever webhooks
+// are on (with no ceiling they admit everything, so a webhook configuration
+// generated from the markers below never points at a path nobody serves); the
+// chart renders their configuration only when the ceiling is set, so without
+// one VM and VMClass writes gain no admission dependency. They check only the
 // administrator's ceiling, not a Provider's own lower
 // ProviderMaxDiskSizeAnnotation (a VMClass is not tied to a Provider): the
 // controllers enforce both before any provider call, and they are the
@@ -52,8 +54,9 @@ import (
 // and returns no warnings.
 // +kubebuilder:object:generate=false
 type VirtualMachineDiskSizeValidator struct {
-	// MaxDiskSize is the manager-wide disk-size ceiling (--max-disk-size).
-	MaxDiskSize resource.Quantity
+	// MaxDiskSize is the manager-wide disk-size ceiling (--max-disk-size);
+	// nil admits every size.
+	MaxDiskSize *resource.Quantity
 }
 
 // VMClassDiskSizeValidator refuses a VMClass whose spec.diskDefaults.size is
@@ -61,8 +64,9 @@ type VirtualMachineDiskSizeValidator struct {
 // warnings.
 // +kubebuilder:object:generate=false
 type VMClassDiskSizeValidator struct {
-	// MaxDiskSize is the manager-wide disk-size ceiling (--max-disk-size).
-	MaxDiskSize resource.Quantity
+	// MaxDiskSize is the manager-wide disk-size ceiling (--max-disk-size);
+	// nil admits every size.
+	MaxDiskSize *resource.Quantity
 }
 
 var (
@@ -71,11 +75,11 @@ var (
 )
 
 // SetupDiskSizeWebhooksWithManager registers the VirtualMachine and VMClass
-// disk-size validating webhooks with ceiling maxDiskSize. Callers register them
-// only when webhook serving is configured AND a ceiling is set (see
-// cmd/manager/main.go); the chart renders their configuration under the same
-// two conditions.
-func SetupDiskSizeWebhooksWithManager(mgr ctrl.Manager, maxDiskSize resource.Quantity) error {
+// disk-size validating webhooks with ceiling maxDiskSize (nil: they admit
+// everything). Callers register them whenever webhook serving is configured
+// (see cmd/manager/main.go); the chart renders their configuration only when
+// a ceiling is set.
+func SetupDiskSizeWebhooksWithManager(mgr ctrl.Manager, maxDiskSize *resource.Quantity) error {
 	if err := ctrl.NewWebhookManagedBy(mgr).
 		For(&VirtualMachine{}).
 		WithValidator(&VirtualMachineDiskSizeValidator{MaxDiskSize: maxDiskSize}).
@@ -136,17 +140,20 @@ func (v *VirtualMachineDiskSizeValidator) validate(old, vm *VirtualMachine) erro
 			previous[d.Name] = d.SizeGiB
 		}
 	}
+	if v.MaxDiskSize == nil {
+		return nil
+	}
 	var errs field.ErrorList
 	for i, d := range vm.Spec.Disks {
 		size := DiskSizeGiBQuantity(d.SizeGiB)
-		if size.Cmp(v.MaxDiskSize) <= 0 {
+		if size.Cmp(*v.MaxDiskSize) <= 0 {
 			continue
 		}
 		if had, ok := previous[d.Name]; ok && had >= d.SizeGiB {
 			continue
 		}
 		errs = append(errs, field.Invalid(
-			field.NewPath("spec", "disks").Index(i).Child("sizeGiB"), d.SizeGiB, diskSizeLimitDetail(v.MaxDiskSize)))
+			field.NewPath("spec", "disks").Index(i).Child("sizeGiB"), d.SizeGiB, diskSizeLimitDetail(*v.MaxDiskSize)))
 	}
 	if len(errs) == 0 {
 		return nil
@@ -187,13 +194,16 @@ func (v *VMClassDiskSizeValidator) ValidateDelete(_ context.Context, _ runtime.O
 // validate checks class's spec.diskDefaults.size against the ceiling; old
 // (nil on create) supplies the size it already had.
 func (v *VMClassDiskSizeValidator) validate(old, class *VMClass) error {
+	if v.MaxDiskSize == nil {
+		return nil
+	}
 	req, ok := ClassDiskSizeRequest(class)
-	if !ok || req.Size.Cmp(v.MaxDiskSize) <= 0 {
+	if !ok || req.Size.Cmp(*v.MaxDiskSize) <= 0 {
 		return nil
 	}
 	if prev, had := ClassDiskSizeRequest(old); had && prev.Size.Cmp(req.Size) >= 0 {
 		return nil
 	}
 	return apierrors.NewInvalid(GroupVersion.WithKind("VMClass").GroupKind(), class.Name, field.ErrorList{field.Invalid(
-		field.NewPath("spec", "diskDefaults", "size"), req.Size.String(), diskSizeLimitDetail(v.MaxDiskSize))})
+		field.NewPath("spec", "diskDefaults", "size"), req.Size.String(), diskSizeLimitDetail(*v.MaxDiskSize))})
 }

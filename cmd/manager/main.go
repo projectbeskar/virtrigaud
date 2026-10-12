@@ -538,16 +538,15 @@ func main() {
 			setupLog.Error(err, "unable to create webhook", "webhook", "Provider")
 			os.Exit(1)
 		}
-		// The VirtualMachine and VMClass disk-size webhooks check only the
-		// administrator's ceiling, so they exist only when one is set: the
-		// chart renders their configuration under the same condition
-		// (manager.maxDiskSize), and without a ceiling VM and VMClass writes
-		// gain no admission dependency.
-		if maxDiskSizeLimit != nil {
-			if err := infrav1beta1.SetupDiskSizeWebhooksWithManager(mgr, *maxDiskSizeLimit); err != nil {
-				setupLog.Error(err, "unable to create webhook", "webhook", "VirtualMachine/VMClass disk size")
-				os.Exit(1)
-			}
+		// The VirtualMachine and VMClass disk-size webhooks check the
+		// administrator's ceiling. They are served whenever webhooks are on
+		// (with no ceiling they admit everything), so a configuration that
+		// names them never hits an unserved path; the chart renders their
+		// configuration only when manager.maxDiskSize is set, so without a
+		// ceiling VM and VMClass writes gain no admission dependency.
+		if err := infrav1beta1.SetupDiskSizeWebhooksWithManager(mgr, maxDiskSizeLimit); err != nil {
+			setupLog.Error(err, "unable to create webhook", "webhook", "VirtualMachine/VMClass disk size")
+			os.Exit(1)
 		}
 	} else {
 		setupLog.Info("Webhooks disabled (no --webhook-cert-path set); skipping Provider validating webhook registration")
