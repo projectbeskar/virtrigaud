@@ -5,7 +5,7 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [2026-10-02 20:38] - Adoption never takes templates, image artifacts, VMs another VirtualMachine owns, or VMs stamped outside this cluster; vSphere per-VM operations refuse templates
+## [2026-10-12 07:35] - Adoption never takes templates, image artifacts, VMs another VirtualMachine owns, or VMs stamped outside this cluster; vSphere per-VM operations refuse templates
 **Author:** @wrkode (William Rizzo)
 
 > **Operator note.** Before upgrading, run the two checks in `docs/upgrading.md`: a `VirtualMachine` (adopted or not) whose `status.id` is a vSphere template, and an adopted `VirtualMachine` duplicating one under another Provider object for the same vCenter. Detach each match with `virtrigaud.io/orphan-on-delete: "true"` before deleting it; a plain delete before the upgrade destroys the template or the other VirtualMachine's VM. **Behaviour change:** adoption no longer adopts a VM whose owner stamp names no `VirtualMachine` in this cluster; set `virtrigaud.io/adopt-stamped-vms: "true"` on a single-host Provider to adopt such VMs on purpose.
