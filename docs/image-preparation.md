@@ -615,7 +615,9 @@ namespaces gets two stages (a name over 200 bytes is shortened to its start, `__
 16-hex-digit SHA-256 of `<namespace>/<vm name>`, and `-migrated`). The stage directory is
 created by `ImportDisk` with mode `0700` and must stay a root-owned `0700` directory (an
 import fails otherwise); each disk is written to a fresh temporary file in it and renamed
-onto the stage name, so no other account on the node can create, link or swap a stage. On
+onto the stage name, so no other account on the node can create, link or swap a stage.
+Stage names are unique within one Kubernetes cluster only: run one VirtRigaud installation
+per PVE node. On
 the node, `qm importdisk` runs only if the stage is a regular file, not a symbolic link,
 with a single hard link, owned by the SSH user (root), and not writable by group or
 others. Any other `spec.importedDisk.path` is refused before anything is created

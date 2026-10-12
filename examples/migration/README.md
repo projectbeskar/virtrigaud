@@ -92,7 +92,9 @@ the target VM's create imports it with `qm importdisk` and removes it. The creat
 accepts only that exact stage, and only for a `VMMigration` in the target VM's own
 namespace: a migration whose `spec.target.namespace` names another namespace
 fails at `Validating` (reason `ProxmoxCrossNamespaceTarget`) before anything is
-exported or imported. A stage is removed when the
+exported or imported. Run **one VirtRigaud installation per PVE node**: stage
+names are unique within one Kubernetes cluster only, and every installation
+uses the same stage directory. A stage is removed when the
 target VM's create consumes it; a migration that fails or is deleted between
 import and create leaves its stage behind, so sweep stale stages periodically
 (see [`docs/upgrading.md`](../../docs/upgrading.md#stale-proxmox-import-stages)).

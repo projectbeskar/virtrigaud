@@ -41,7 +41,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - the rebuild check;
   - stage naming and bounding;
   - ImportDisk (S3 and NFS) refusing a request without `target_vm`.
-- `docs/upgrading.md`, `docs/release-notes/next.md`, `docs/image-preparation.md`, `docs/cross-namespace-targets.md`, `docs/vm-ownership.md`, `examples/migration/README.md`: document the Proxmox stage rule, the upgrade order and the in-flight handling.
+- `docs/upgrading.md`, `docs/release-notes/next.md`, `docs/image-preparation.md`, `docs/cross-namespace-targets.md`, `docs/vm-ownership.md`, `examples/migration/README.md`: document the Proxmox stage rule, the upgrade order and the in-flight handling, a periodic sweep of stale stages, and that each PVE node must be used by **one VirtRigaud installation** only (stage names are unique within one Kubernetes cluster, and every installation uses the same stage directory).
 
 ### Why
 The Proxmox provider was the only one that did not confine `spec.importedDisk.path`; libvirt (#334) and vSphere (#379) already did. Any tenant could read any node file through it and have the provider delete the original.
