@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -109,6 +110,45 @@ func TestInspectHostImageInfoAs_ReportsVirtualSize(t *testing.T) {
 	assert.Equal(t, "qcow2", info.Format)
 	require.Error(t, importlimit.Check(info.VirtualSize, nil, int64(100)<<30))
 	assert.Len(t, h.calls, 1, "one read serves both checks")
+}
+
+// TestPrivateLocalImportCopy (review M2): over a local connection the pvc
+// import checks and lands a private copy of the staged disk, so replacing the
+// staged file after the copy changes nothing; a symbolic link or a
+// non-regular file is refused.
+func TestPrivateLocalImportCopy(t *testing.T) {
+	staging := t.TempDir()
+	src := filepath.Join(staging, "disk.qcow2")
+	require.NoError(t, os.WriteFile(src, []byte("staged bytes"), 0o644))
+
+	path, cleanup, err := privateLocalImportCopy(src)
+	require.NoError(t, err)
+	got, err := os.ReadFile(path)
+	require.NoError(t, err)
+	assert.Equal(t, "staged bytes", string(got))
+	fi, err := os.Stat(path)
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0o600), fi.Mode().Perm())
+	di, err := os.Stat(filepath.Dir(path))
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0o700), di.Mode().Perm())
+
+	// The tenant replaces the staged file: the private copy is unaffected.
+	require.NoError(t, os.WriteFile(src, []byte("a much larger disk"), 0o644))
+	got, err = os.ReadFile(path)
+	require.NoError(t, err)
+	assert.Equal(t, "staged bytes", string(got))
+
+	cleanup()
+	_, err = os.Stat(filepath.Dir(path))
+	assert.True(t, os.IsNotExist(err), "cleanup removes the copy and its directory")
+
+	link := filepath.Join(staging, "link.qcow2")
+	require.NoError(t, os.Symlink(src, link))
+	_, _, err = privateLocalImportCopy(link)
+	assert.Error(t, err, "a symbolic link is not followed")
+	_, _, err = privateLocalImportCopy(staging)
+	assert.Error(t, err, "a directory is not a staged disk")
 }
 
 // TestServer_AdvertisesImportSizeLimit: a single-host provider, whose

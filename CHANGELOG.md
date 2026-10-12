@@ -39,7 +39,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **libvirt** (`import_size_limit.go`, `imagepath.go` `inspectHostImageInfoAs`):
     - s3: the private staged copy, reusing the existing header read;
     - nfs: early from the existing header read, and again on the converted disk in the private directory before it is published;
-    - pvc: the host copy before it becomes the volume (removed on refusal).
+    - pvc: a private copy of the staged file before it becomes the volume — the host copy over SSH (removed on refusal), or, over a local connection, a copy in the provider's own container (`privateLocalImportCopy`; previously the tenant's file was read in place twice).
   - **Proxmox** (`import_size_limit.go`): the node-local stage that `qm importdisk` lands (s3, nfs), removed on refusal. The pvc path is rejected earlier and is unchanged.
   - The mock provider ignores the field.
   - `internal/transport/grpc/client.go` sends the field and maps the two refusals to a non-retryable Conflict marked `ErrDiskSizeExceedsLimit` / `ErrDiskSizeUnverifiable` (`contracts`), never counted toward the circuit breaker.

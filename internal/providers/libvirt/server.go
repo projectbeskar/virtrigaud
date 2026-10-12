@@ -1336,15 +1336,23 @@ func (s *Server) ImportDisk(ctx context.Context, req *providerv1.ImportDiskReque
 		finalSourcePath = remotePath
 		log.Printf("INFO Disk copied to remote host: %s", finalSourcePath)
 	} else {
-		// Local libvirt connection - use source path directly
-		finalSourcePath = sourcePath
-		log.Printf("INFO Using local libvirt connection with path: %s", finalSourcePath)
+		// Local libvirt connection: import from a PRIVATE copy, as the SSH
+		// branch does, never the staged file in place — it lives in the
+		// tenant's staging PVC and could be replaced between the disk-size
+		// check below and the import that reads it again.
+		localCopy, cleanup, err := privateLocalImportCopy(sourcePath)
+		if err != nil {
+			return nil, fmt.Errorf("copy the staged disk to a private location: %w", err)
+		}
+		defer cleanup()
+		finalSourcePath = localCopy
+		log.Printf("INFO Using local libvirt connection with a private copy: %s", finalSourcePath)
 	}
 
 	// The disk-size limit, on the copy about to become the volume, read as
 	// qcow2 as the import reads it. A refused copy is removed: nothing lands.
 	if err := checkHostImportSize(ctx, hostConnRunner{conn: conn}, finalSourcePath, "qcow2", req.MaxVirtualSizeBytes); err != nil {
-		if finalSourcePath != sourcePath {
+		if strings.Contains(conn.uri(), "ssh://") {
 			if _, rmErr := conn.RunHost(ctx, "rm", "-f", "--", finalSourcePath); rmErr != nil {
 				log.Printf("WARN Failed to remove the refused import copy %s: %v", finalSourcePath, rmErr)
 			}

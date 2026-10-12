@@ -242,10 +242,13 @@ manager's `--max-disk-size`) sets a ceiling **tenants cannot raise**:
     is held in `Importing` (`Importing=False`) and not sent again for the same
     limit. vSphere checks the pod-local vmdk before the upload or the NFC
     lease (pvc, s3, nfs); libvirt checks the private staged copy (s3), the
-    converted disk before it is published (nfs), and the host copy before it
-    becomes the volume (pvc); Proxmox checks the node-local stage `qm
-    importdisk` lands (s3, nfs). A provider image from before this release
-    ignores the field.
+    converted disk before it is published (nfs), and a private copy of the
+    staged file before it becomes the volume (pvc: the copy on the host over
+    SSH, or in the provider's own container over a local connection); Proxmox
+    checks the node-local stage `qm importdisk` lands (s3, nfs). A provider
+    image from before this release ignores the field and does not report
+    `supports_import_size_limit`, so while a limit applies a migration into it
+    is held (`DiskSizeLimitUnverifiable`, "upgrade the provider image").
 
   A size the provider does not report (a provider image from before this
   release, a disk that is not file-backed on libvirt, a read error) refuses the
