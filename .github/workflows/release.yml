@@ -154,7 +154,7 @@ jobs:
           touch "/tmp/digests/${digest#sha256:}"
 
       - name: Upload digest
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: digests-${{ matrix.component }}-${{ matrix.arch }}
           path: /tmp/digests/*
@@ -177,7 +177,7 @@ jobs:
         component: [manager, provider-libvirt, provider-vsphere, provider-proxmox, kubectl]
     steps:
       - name: Download digests
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
         with:
           path: /tmp/digests
           pattern: digests-${{ matrix.component }}-*
@@ -277,7 +277,7 @@ jobs:
             > "/tmp/index-digest/${{ matrix.component }}"
 
       - name: Upload signed index digest
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: index-digest-${{ matrix.component }}
           path: /tmp/index-digest/${{ matrix.component }}
@@ -302,7 +302,7 @@ jobs:
       map: ${{ steps.assemble.outputs.map }}
     steps:
       - name: Download all index-digest artifacts
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
         with:
           path: /tmp/index-digests
           pattern: index-digest-*
@@ -442,7 +442,7 @@ jobs:
           output: 'trivy-results-${{ matrix.component }}.sarif'
 
       - name: Upload Trivy scan results
-        uses: github/codeql-action/upload-sarif@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2  # v4
+        uses: github/codeql-action/upload-sarif@24c54180a607b1449ed407dd24f251e4e9147c8d  # v4
         with:
           sarif_file: 'trivy-results-${{ matrix.component }}.sarif'
 
@@ -518,7 +518,7 @@ jobs:
           done
 
       - name: Generate SBOM
-        uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26  # v0.24.2
+        uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c  # v0.24.3
         with:
           image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME_PREFIX }}/${{ matrix.component }}:${{ needs.prepare.outputs.tag }}
           format: spdx-json
@@ -532,7 +532,7 @@ jobs:
           upload-release-assets: false
 
       - name: Upload SBOM
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: sbom-${{ matrix.component }}
           path: sbom-${{ matrix.component }}.spdx.json
@@ -642,7 +642,7 @@ jobs:
           helm package charts/virtrigaud --destination ./helm-packages/
 
       - name: Upload chart
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: helm-chart
           path: helm-packages/*.tgz
@@ -688,7 +688,7 @@ jobs:
           done
 
       - name: Upload CLI tools
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: cli-tools-${{ matrix.os }}-${{ matrix.arch }}
           path: dist/*
@@ -745,7 +745,7 @@ jobs:
           EOF
 
       - name: Upload changelog
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: changelog
           path: CHANGELOG.md
@@ -760,7 +760,7 @@ jobs:
     steps:
       - name: Download all artifacts (with retry resilience)
         id: download-artifacts
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
         continue-on-error: true
 
       - name: Retry failed artifact downloads
@@ -869,7 +869,7 @@ jobs:
           version: '3.12.0'
 
       - name: Download helm chart
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
         with:
           name: helm-chart
           path: ./charts
