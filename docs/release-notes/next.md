@@ -118,6 +118,18 @@ providers), and rollback caveats in
   upgrade rolls every provider pod once.
   → [Upgrade guide](docs/upgrading.md),
   [chart README](charts/virtrigaud/README.md#tmp-size-limits)
+- **Opt-in administrator disk-size limit.** By default a tenant can ask for
+  disks up to the CRD bound of 64Ti each and fill a shared datastore or pool.
+  Set `manager.maxDiskSize` (the manager's `--max-disk-size`, e.g. `500Gi`) to
+  cap every disk VirtRigaud creates or grows: VMs, clones and migrations that
+  would create a larger disk are held (`DiskSizeExceedsLimit`), and a Reconfigure
+  never grows a disk beyond it. VMs that already have larger disks keep running
+  and are never shrunk. A Provider's owner can lower the limit for that Provider
+  with the annotation `infra.virtrigaud.io/max-disk-size` (never raise it). With
+  webhooks enabled, VirtualMachine and VMClass writes above the limit are also
+  refused at admission. Nothing changes unless it is set.
+  → [Upgrade guide](docs/upgrading.md),
+  [chart README](charts/virtrigaud/README.md#disk-size-limit)
 - Editing a waiting `VMClone`'s metadata (labels, annotations), or a
   `VMSnapshot` whose delete is held, no longer re-runs it at once. A tenant
   re-annotating one in a loop drove one provider call per edit (`Clone`, a
