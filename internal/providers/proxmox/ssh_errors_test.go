@@ -63,7 +63,7 @@ func TestRebind_ImportedDiskRebuildChecksPrerequisites(t *testing.T) {
 	srv.PutVM(pvefake.VM{VMID: 4800, Name: testOwnerName, Node: "pve", Status: "stopped",
 		Description: testStamp(testOwnerUID, ownerStampPhaseCreating).line()})
 
-	req := createReq(testOwner(), `{"Path":"/var/tmp/.virtrigaud-import-web.qcow2","Format":"qcow2"}`)
+	req := createReq(testOwner(), ownStageImageJSON)
 	_, err := p.Create(context.Background(), req)
 	assert.Equal(t, classOutcomeUnknown, classOf(t, err))
 	_, exists := srv.GetVM(4800)

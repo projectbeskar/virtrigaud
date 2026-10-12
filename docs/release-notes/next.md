@@ -51,6 +51,21 @@ Read the upgrade guide before upgrading:
   propagated.
   → [Upgrade guide](docs/upgrading.md#breaking-changes)
 
+- **Security (affects v0.3.11): Proxmox imports a migrated disk only from the
+  VM's own verified migration stage.** With the migration SSH data plane
+  configured, a Proxmox `Create` ran `qm importdisk` on any node path in
+  `spec.importedDisk.path` and then deleted it, so a tenant could copy any file
+  the SSH user can read on the PVE node (another VM's disk, `/etc/pve/priv/*`)
+  into their own VM. Now the path must be verified by the manager as this VM's
+  own migration disk and be exactly
+  `/var/lib/virtrigaud/import-stage/<namespace>_<vm name>-migrated.<format>` (stages
+  are now named per namespace); anything else is refused before anything is
+  created. **Upgrade the manager before the Proxmox provider.** A Proxmox-target
+  migration staged before the upgrade whose target VM was not yet created must
+  be run again. A migration into another namespace through a Proxmox target
+  fails at `Validating` (`ProxmoxCrossNamespaceTarget`) before any export.
+  → [Upgrade guide](docs/upgrading.md#breaking-changes)
+
 - **libvirt linked clones are disabled.** A `VMClone` with
   `spec.options.type: LinkedClone` through a libvirt Provider fails with
   `LinkedCloneUnsupported`: a linked clone reads its source VM's live disk, and

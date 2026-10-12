@@ -154,22 +154,26 @@ func TestProxmoxExportStagePath(t *testing.T) {
 		"vm id separators must be sanitized so the temp cannot escape the staging dir")
 }
 
-// TestProxmoxImportStagePath asserts the import stage path is deterministic per id
-// (so a retry overwrites rather than leaks) and uses the source format suffix.
+// TestProxmoxImportStagePath asserts the import stage path is deterministic per
+// target VM (so a retry overwrites rather than leaks) and uses the source format
+// suffix.
 func TestProxmoxImportStagePath(t *testing.T) {
-	a := proxmoxImportStagePath("web-01-migrated", "qcow2")
-	b := proxmoxImportStagePath("web-01-migrated", "qcow2")
-	assert.Equal(t, a, b, "import stage path must be deterministic per id (retry-safe)")
-	assert.True(t, strings.HasPrefix(a, proxmoxImportStageDir+"/.virtrigaud-import-"), "got %q", a)
-	assert.True(t, strings.HasSuffix(a, ".qcow2"), "got %q", a)
+	a := importStagePath("team-a", "web-01", "qcow2")
+	b := importStagePath("team-a", "web-01", "qcow2")
+	assert.Equal(t, a, b, "import stage path must be deterministic per target VM (retry-safe)")
+	assert.Equal(t, "/var/lib/virtrigaud/import-stage/team-a_web-01-migrated.qcow2", a)
 }
 
-// TestBuildImportDiskCommand pins the `qm importdisk` argv: vmid, shell-quoted
-// path/storage, and an explicit format so PVE does not probe.
+// TestBuildImportDiskCommand pins the `qm importdisk` argv: the node-side stage
+// check, then vmid, shell-quoted path/storage, and an explicit format so PVE does
+// not probe.
 func TestBuildImportDiskCommand(t *testing.T) {
-	cmd := buildImportDiskCommand(110001, "/var/tmp/.virtrigaud-import-web.qcow2", "local-lvm", "qcow2")
+	cmd := buildImportDiskCommand(110001, "/var/lib/virtrigaud/import-stage/ns_web-migrated.qcow2", "local-lvm", "qcow2")
+	q := "'/var/lib/virtrigaud/import-stage/ns_web-migrated.qcow2'"
 	assert.Equal(t,
-		"qm importdisk 110001 '/var/tmp/.virtrigaud-import-web.qcow2' 'local-lvm' --format 'qcow2'",
+		"[ -f "+q+" ] && [ ! -L "+q+" ] && [ \"$(stat -c '%h %u' -- "+q+")\" = \"1 $(id -u)\" ] && "+
+			"[ $(( 0$(stat -c %a -- "+q+") & 022 )) -eq 0 ] && "+
+			"qm importdisk 110001 "+q+" 'local-lvm' --format 'qcow2'",
 		cmd)
 }
 
@@ -306,22 +310,24 @@ func TestImportDisk_S3NoSSHTransport(t *testing.T) {
 
 // TestParseCreateRequest_ImportedDiskPath verifies the migration import→create
 // handoff: a contracts.VMImage carrying a node Path (and no TemplateName)
-// populates VMConfig.ImportedDiskPath/Format so Create takes the importdisk path.
+// populates VMConfig.ImportedDiskPath/Format so Create takes the importdisk path,
+// when it is the VM's own verified stage (ImportedDisk, import_stage.go).
 func TestParseCreateRequest_ImportedDiskPath(t *testing.T) {
 	_, endpoint, err := pvefake.StartFakeServer()
 	require.NoError(t, err)
 	provider := createTestProvider(endpoint)
 
 	req := &providerv1.CreateRequest{
-		Name:      "web-migrated",
+		Name:      "web",
 		ClassJson: `{"cpus": 2, "memory": "2Gi"}`,
-		// contracts.VMImage marshals with capitalized field names (Path/Format).
-		ImageJson: `{"Path":"/var/tmp/.virtrigaud-import-web-migrated.qcow2","Format":"qcow2"}`,
+		// contracts.VMImage marshals with capitalized field names (Path/Format/ImportedDisk).
+		ImageJson: `{"Path":"/var/lib/virtrigaud/import-stage/team-a_web-migrated.qcow2","Format":"qcow2","ImportedDisk":true}`,
+		Owner:     &providerv1.ObjectIdentity{Uid: "u1", Namespace: "team-a", Name: "web"},
 	}
 
 	cfg, _, err := provider.parseCreateRequest(context.Background(), req)
 	require.NoError(t, err)
-	assert.Equal(t, "/var/tmp/.virtrigaud-import-web-migrated.qcow2", cfg.ImportedDiskPath)
+	assert.Equal(t, "/var/lib/virtrigaud/import-stage/team-a_web-migrated.qcow2", cfg.ImportedDiskPath)
 	assert.Equal(t, "qcow2", cfg.ImportedDiskFormat)
 	assert.Empty(t, cfg.Template, "an imported-disk create must not be treated as a template clone")
 }

@@ -327,13 +327,17 @@ func sshMayHaveRun(ctx context.Context, err error) bool {
 }
 
 // importStageReady checks the prerequisites of rebuilding an imported-disk VM:
-// the SSH data plane is configured and the staged disk is on the node. Its
-// error says which one is missing, in words fit for a wire message.
+// the SSH data plane is configured and the staged disk is on the node (an
+// import stage path that passes importStageNodeCheck). Its error says which
+// one is missing, in words fit for a wire message (never the path).
 func (p *Provider) importStageReady(ctx context.Context, stagePath string) error {
 	if p.ssh == nil {
 		return fmt.Errorf("the migration SSH data plane is not configured")
 	}
-	if _, _, err := p.ssh.runSSH(ctx, "test -f "+proxmoxShellQuote(stagePath)); err != nil {
+	if !isImportStagePath(stagePath) {
+		return fmt.Errorf("the staged disk path is not an import stage")
+	}
+	if _, _, err := p.ssh.runSSH(ctx, importStageNodeCheck(stagePath)); err != nil {
 		p.logCause("checking the staged disk failed", err)
 		if sshMayHaveRun(ctx, err) {
 			return fmt.Errorf("the staged disk could not be checked")

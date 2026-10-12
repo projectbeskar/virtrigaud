@@ -5,6 +5,60 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-10-12 15:36] - Proxmox: imported-disk Create confined to the VM's own namespaced migration stage
+**Author:** @wrkode (William Rizzo)
+
+> **Operator note.** Upgrade the manager before the Proxmox provider: an older manager sends neither `VMImage.ImportedDisk` nor `ImportDiskRequest.target_vm`, and the new provider refuses every Proxmox-target migration without them. A migration into another namespace through a Proxmox target Provider now fails at `Validating` (`ProxmoxCrossNamespaceTarget`) before anything is exported. Stale stages (a migration failed or deleted between import and create) are not removed yet: sweep `/var/lib/virtrigaud/import-stage` periodically (docs/upgrading.md, "Stale Proxmox import stages"). **A Proxmox-target migration between its import and its create at upgrade time must be run again**: its stage carries the old bare name and is refused. Remove leftover `/var/tmp/.virtrigaud-import-*` files on the PVE nodes by hand once no migration is in flight; the provider never removes a bare-name stage. See `docs/upgrading.md`.
+
+### Security
+- `internal/providers/proxmox/import_stage.go` (new), `server.go` (`parseCreateRequest`), `s3import.go` (`createFromImportedDisk`, `cleanupNodeFile`, `buildImportDiskCommand`), `create_errors.go` (`importStageReady`): Proxmox Create no longer imports and deletes an arbitrary node file. High/Critical; affects v0.3.11 and later (#259). Precondition: the Proxmox migration SSH data plane is configured.
+  - **Before:** any `contracts.VMImage.Path` without a `TemplateName` was taken as a migration stage. Create ran `qm importdisk <vmid> <path>` over SSH and then `rm -f <path>`, ignoring `VMImage.ImportedDisk`. `VirtualMachine.spec.importedDisk.path` is tenant-writable, so a tenant could copy any file or block device the SSH user can read on the PVE node (another tenant's VM disk, `/etc/pve/priv/*`, keys) into their own VM, and the provider then deleted the source. It also bypassed any disk-size cap.
+  - **Now:** Create takes the importdisk path only when `ImportedDisk` is true, which the manager sets only for the VM's own verified migration disk (`isOwnMigrationDisk`). The path must also be byte-for-byte this VM's stage, `/var/lib/virtrigaud/import-stage/<namespace>_<vm name>-migrated.<qcow2|raw|vmdk>`. The namespace comes from `CreateRequest.owner`, and the owner's name must match the VM name. A name over 200 bytes is bounded with a SHA-256 hash, as vSphere landing names are. Anything else is refused with `InvalidArgument` and a constant message (`importedDiskRejectedMessage`, never the path) before any PVE or SSH call. Nothing is created.
+  - `qm importdisk` runs in the same shell command as a node-side check (`importStageNodeCheck`). The stage must be a regular file, not a symbolic link, with one hard link, owned by the running user (root on a PVE node, `stat -c %u` = `id -u`), and with no group or other write bit (`stat -c %a` & 022 = 0). The check is tested against real files with the local `sh` and `bash`. A failed check fails the import, and the VM shell is rolled back. `cleanupNodeFile` removes only paths matching the anchored stage pattern (`isImportStagePath`), with `rm -f --`. The interrupted-create rebuild (`importStageReady`, #380) re-validates the path and runs the same node check.
+  - **Legacy:** a stage an earlier release wrote under the bare name `/var/tmp/.virtrigaud-import-<vm name>-migrated.<ext>` is refused even for the VM's own verified migration, as vSphere (#379) refuses bare-name landings: same-named VMs in different namespaces shared that file, so it cannot be proven to be this VM's disk. The refusal is `InvalidArgument` with the constant `legacyImportStageMessage` ("run the migration again"); nothing is created and nothing runs on the node. `isImportStagePath` matches only namespaced stages (`<ns>_<...>-migrated.<ext>`), so the provider never removes a bare-name file; it is left for manual cleanup. ImportDisk never writes that name again.
+- `internal/providers/proxmox/s3import.go` (`importDiskFromS3`), `nfs.go` (`importDiskFromNFS`): ImportDisk names the stage from `ImportDiskRequest.target_vm` (namespace and name), never from the bare `target_name`. A same-named VM in another namespace therefore gets a different stage, and neither can name the other's. A request without `target_vm`, with an invalid identity, or whose `target_name` is not `<vm>-migrated` is refused with `InvalidArgument` before any node command. The `imported-disk-<unix time>` fallback name is gone.
+- `internal/providers/proxmox/import_stage.go` (`proxmoxImportStageDir`, `importStagePath`, `isImportStagePath`, `buildImportStageScript`, `buildNFSImportStageScript`), `s3import.go`, `nfs.go`: stages no longer live in world-writable `/var/tmp` under a predictable name. Before, another account on the PVE node could pre-create, link or swap a stage there.
+  - **Location:** stages now live in `/var/lib/virtrigaud/import-stage/<namespace>_<vm name>-migrated.<format>`. ImportDisk (re)creates that directory with `install -d -m 0700` and verifies it is not a symlink, is owned by the SSH user, and has mode 700, or fails.
+  - **Write:** the disk is written to a fresh `mktemp` file in that directory (umask 077), then renamed onto the stage with `mv -T`. A failure or SSH hang-up removes the temp file.
+  - **NFS (`nfsStageCopy`, the one producer of the root-owned copy):** the staged object is copied byte for byte into the root-owned `$TMP`; no qemu-img convert runs. With `nfs.uid`/`gid`, the reader runs under setpriv and holds **only the write end of a pipe**: `setpriv … cat -- "$MNT"/<rel> | cat > "$TMP"`, where the root side opens the copy.
+    - The tenant-chosen identity may be a node account (33/www-data runs pveproxy). It therefore never gets a descriptor on the copy, nor ownership of it, and cannot rewrite the copy after it is checked (review N1).
+    - An earlier revision of this branch converted as that identity and adopted the inode it wrote; that is gone.
+    - The reader's exit status is recorded by the root side in a status file (fd 3, closed for the reader), and a failed read fails the script; POSIX sh has no pipefail.
+    - Without uid/gid, the root shell reads the export.
+    - Tested with a fake `setpriv` that records its open descriptors.
+  - **Single source of truth:** one builder (`importStagePath`) and one predicate (`isImportStagePath`) define the stage location.
+  - **Verification:** the S3 script and the uid-less NFS script are tested against real files with the local `sh` and `bash` (and `qemu-img`).
+  - **Legacy `/var/tmp` stages:** they stay refused and are never removed.
+- `internal/providers/proxmox/import_size_limit.go` (`checkNodeImportSize`, #382): the target-side disk-size check reads and removes only an import stage (`isImportStagePath`); any other path is refused untouched. It runs on the root-owned stage in the stage directory, never on the NFS object. `import_size_limit_test.go` now sends `target_vm` and expects the new stage path and `rm -f --`.
+- `internal/storage/migration/nfs.go` (`ValidateNFSIdentity`, `ErrNFSRootIdentity`), `options.go` (`ParseStorageOptions`): an NFS uid or gid of 0 is refused by `NFSURL` (libvirt, vSphere) and by `ParseStorageOptions` (Proxmox presents the identity with setpriv), with the constant `ErrNFSRootIdentity` (review N4). The accepted range is now [1, 2^32-1]. The manager already refused it at Validating (`NFSRootIdentityNotAllowed`); this covers any other sender. No minimum beyond 0 is imposed.
+- `internal/controller/vmmigration_proxmox_target.go` (new), `vmmigration_controller.go` (`handleValidatingPhase`, `handleImportingPhase`): the manager refuses a VMMigration whose target Provider is Proxmox and whose target VM is in another namespace than the migration. The target VM's create would be refused anyway, because the disk is not verified as its own-namespace migration disk.
+  - It fails at Validating, before any export or import: `Phase=Failed`, `Validating=False`, reason `ProxmoxCrossNamespaceTarget`, the constant `proxmoxCrossNamespaceTargetMessage`, one `MigrationFailed` event, and no immediate requeue.
+  - A migration that passed Validating before this check existed fails the same way at Importing, before `ImportDisk`.
+  - Proven in envtest and with fake-client phase tests.
+  - Same-namespace Proxmox migrations and other provider types are unchanged.
+- `internal/providers/proxmox/import_stage.go` (`importedDiskFormat`), `server.go`, `s3import.go`, `pveapi/client.go`: `spec.importedDisk.format` is tenant-writable and becomes the `qm importdisk --format` value. Only `qcow2`, `raw` or `vmdk` is accepted; empty still defaults to qcow2. Any other value (another string or JSON type) is refused with `InvalidArgument` and the constant `importedDiskFormatRejectedMessage`, before anything is created. The comments are corrected: `--format` is the **target** format written into the VM's storage, and PVE still probes the stage's own format. A Create-side header check of the stage is not part of this change.
+- `internal/providers/proxmox/nfs.go`, `s3import.go`: the node-side `qemu-img check` of a staged disk pins `-f qcow2`, so a vmdk descriptor or raw file published as a stage is refused instead of being probed (the staged image's header is checked in full by the migration staging-cleanup branch's header pre-parser).
+
+### Changed
+- `internal/providers/proxmox/s3_test.go`, `ssh_errors_test.go`, `importdisk_rebuild_test.go`, `import_stage_test.go` (new): imported-disk tests use the VM's own verified stage. New tests cover:
+  - a foreign absolute path, another VM's block device, `ImportedDisk` false, missing or non-bool, traversal, another namespace's or VM's stage (new and legacy names), the VM's own legacy stage (its own constant message, every format, with or without an owner), other directories and extensions, and whitespace variants: each refused with the constant message, no node command, no PVE change;
+  - an owner mismatch;
+  - the own stage (qcow2/raw/vmdk) imported behind the node check, then removed;
+  - a failed node check (symlink), with the shell rolled back and the stage kept;
+  - `cleanupNodeFile` refusing non-stage paths;
+  - the rebuild check;
+  - stage naming and bounding;
+  - ImportDisk (S3 and NFS) refusing a request without `target_vm`.
+- `docs/upgrading.md`, `docs/release-notes/next.md`, `docs/image-preparation.md`, `docs/cross-namespace-targets.md`, `docs/vm-ownership.md`, `examples/migration/README.md`: document the Proxmox stage rule, the upgrade order and the in-flight handling, a periodic sweep of stale stages, and that each PVE node must be used by **one VirtRigaud installation** only (stage names are unique within one Kubernetes cluster, and every installation uses the same stage directory).
+
+### Why
+The Proxmox provider was the only one that did not confine `spec.importedDisk.path`; libvirt (#334) and vSphere (#379) already did. Any tenant could read any node file through it and have the provider delete the original.
+
+### Impact
+- [x] Breaking change
+- [x] Requires cluster rollout
+- [ ] Config change only
+
 ## [2026-10-12 13:08] - v0.4.0-rc1 follow-ups: image-artifact holds, owner on single-host deletes, live Provider check before creating RPCs, force-delete gate for snapshots and migrations, observedGeneration, shared finalizer constants, RBAC group fix
 **Author:** @wrkode (William Rizzo)
 

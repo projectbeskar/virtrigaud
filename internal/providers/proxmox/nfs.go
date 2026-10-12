@@ -215,31 +215,31 @@ func (p *Provider) importDiskFromNFS(ctx context.Context, req *providerv1.Import
 	}
 
 	// NFS always stages qcow2 (the controller derives import format qcow2 for nfs).
-	id := sanitizeProxmoxName(req.TargetName)
-	if req.TargetName == "" {
-		id = fmt.Sprintf("imported-disk-%d", time.Now().Unix())
+	// The stage is named after the target VirtualMachine (import_stage.go).
+	id, stagePath, err := importStageForRequest(req, "qcow2")
+	if err != nil {
+		return nil, err
 	}
-	stagePath := proxmoxImportStagePath(id, "qcow2")
 
 	p.logger.Info("Importing disk from NFS to Proxmox node (kernel mount; stage for qm importdisk at Create)",
 		"id", id, "source", nfsURL, "stage_path", stagePath, "storage_hint", req.StorageHint)
 
-	// Convert from the mounted export to the node-local stage file. The convert
-	// reads NFS as the migration's uid/gid (setpriv); the stage lands in /var/tmp
-	// (world-writable) and is consumed by `qm importdisk` at Create.
-	mountFile := `"$MNT"/` + proxmoxShellQuote(rel)
-	inner := nfsSetprivPrefix(opts.UID, opts.GID) +
-		fmt.Sprintf("qemu-img convert -O qcow2 %s %s", mountFile, proxmoxShellQuote(stagePath))
-	script := buildNFSKernelMountScript(opts.Server, opts.Export, inner, "")
+	// Convert from the mounted export to the node-local stage in the root-only
+	// stage directory (buildNFSImportStageScript, import_stage.go). The convert
+	// reads NFS as the migration's uid/gid (setpriv) when set; the stage is
+	// consumed by `qm importdisk` at Create.
+	script := buildNFSImportStageScript(proxmoxImportStageDir, opts.Server, opts.Export, rel, stagePath, opts.UID, opts.GID)
 	if _, stderr, err := p.ssh.runSSH(ctx, script); err != nil {
 		p.cleanupNodeFile(stagePath)
 		return nil, errors.NewInternal(
-			fmt.Sprintf("node-side nfs-mount qemu-img import failed (stderr: %s)", strings.TrimSpace(stderr)), err)
+			fmt.Sprintf("node-side nfs-mount stage copy failed (stderr: %s)", strings.TrimSpace(stderr)), err)
 	}
 
 	// Validate the staged qcow2 (local file, runs as the SSH user — root reads any
 	// file). ADR-0006 D5 structural integrity for NFS (no in-stream byte checksum).
-	if _, stderr, err := p.ssh.runSSH(ctx, fmt.Sprintf("qemu-img check %s", proxmoxShellQuote(stagePath))); err != nil {
+	// The stage is the tenant's bytes as copied: pin the format so a vmdk
+	// descriptor or raw file is refused here instead of being probed.
+	if _, stderr, err := p.ssh.runSSH(ctx, fmt.Sprintf("qemu-img check -f qcow2 -- %s", proxmoxShellQuote(stagePath))); err != nil {
 		p.cleanupNodeFile(stagePath)
 		return nil, errors.NewInternal(
 			fmt.Sprintf("qemu-img check failed on staged qcow2 %s (stderr: %s)", stagePath, strings.TrimSpace(stderr)), err)

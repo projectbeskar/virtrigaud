@@ -79,12 +79,13 @@ func TestImportDiskFromNFS_DiskSizeLimit(t *testing.T) {
 	_, endpoint, err := pvefake.StartFakeServer()
 	require.NoError(t, err)
 	const limit = int64(100) << 30
-	stage := proxmoxImportStagePath("web-migrated", "qcow2")
+	stage := importStagePath("team-a", "web", "qcow2")
 	req := func(max int64) *providerv1.ImportDiskRequest {
 		return &providerv1.ImportDiskRequest{
 			SourceUrl:           "nfs://nfs.example.invalid/export/mig/disk.qcow2",
 			BackendType:         migration.BackendNFS,
 			TargetName:          "web-migrated",
+			TargetVm:            &providerv1.ObjectIdentity{Namespace: "team-a", Name: "web"},
 			StorageOptionsJson:  `{"server":"nfs.example.invalid","export":"/export"}`,
 			MaxVirtualSizeBytes: max,
 		}
@@ -108,7 +109,7 @@ func TestImportDiskFromNFS_DiskSizeLimit(t *testing.T) {
 			if tc.message == "" {
 				require.NoError(t, err)
 				assert.Equal(t, stage, resp.Path)
-				assert.Empty(t, tc.node.ran("rm -f "), "the stage is kept for qm importdisk")
+				assert.Empty(t, tc.node.ran("rm -f -- "), "the stage is kept for qm importdisk")
 				if tc.max == 0 {
 					assert.Empty(t, tc.node.ran("qemu-img info "), "no limit: no size is read")
 				}
@@ -123,7 +124,7 @@ func TestImportDiskFromNFS_DiskSizeLimit(t *testing.T) {
 			info := tc.node.ran("qemu-img info ")
 			require.Len(t, info, 1)
 			assert.Contains(t, info[0], "-f 'qcow2'", "the stage is read as qcow2: nothing is probed")
-			assert.Equal(t, []string{"rm -f " + proxmoxShellQuote(stage)}, tc.node.ran("rm -f "), "the refused stage is removed")
+			assert.Equal(t, []string{"rm -f -- " + proxmoxShellQuote(stage)}, tc.node.ran("rm -f -- "), "the refused stage is removed")
 		})
 	}
 }

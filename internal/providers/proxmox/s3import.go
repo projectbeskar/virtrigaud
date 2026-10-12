@@ -24,7 +24,6 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
-	"time"
 
 	"github.com/projectbeskar/virtrigaud/internal/providers/proxmox/pveapi"
 	"github.com/projectbeskar/virtrigaud/internal/storage"
@@ -32,14 +31,6 @@ import (
 	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
 	"github.com/projectbeskar/virtrigaud/sdk/provider/errors"
 )
-
-// proxmoxImportStageDir is the directory on the PVE node into which the import
-// path stages the downloaded qcow2 before the Create path consumes it with
-// `qm importdisk`. /var/tmp is a real on-disk path on every PVE node, local to
-// the node, and large enough for a multi-GB disk. The staged file persists across
-// the ImportDisk → Create handoff (two separate RPCs); Create removes it after a
-// successful importdisk, and a best-effort sweep removes stale stages.
-const proxmoxImportStageDir = "/var/tmp"
 
 // importDiskFromS3 implements the ADR-0006 Proxmox TARGET path: download the
 // staged qcow2 object from S3 and STAGE it as a regular file on the PVE node, then
@@ -92,9 +83,11 @@ func (p *Provider) importDiskFromS3(ctx context.Context, req *providerv1.ImportD
 		return nil, errors.NewInvalidSpec("unsupported s3 import source format: %s", srcFormat)
 	}
 
-	id := sanitizeProxmoxName(req.TargetName)
-	if req.TargetName == "" {
-		id = fmt.Sprintf("imported-disk-%d", time.Now().Unix())
+	// The stage is named after the target VirtualMachine's namespace and name
+	// (import_stage.go), the only stage that VM's Create will import.
+	id, stagePath, err := importStageForRequest(req, srcFormat)
+	if err != nil {
+		return nil, err
 	}
 
 	// Build the S3 client (the pod is the S3 client). Options come from
@@ -109,20 +102,19 @@ func (p *Provider) importDiskFromS3(ctx context.Context, req *providerv1.ImportD
 	}
 	defer s3client.Close()
 
-	stagePath := proxmoxImportStagePath(id, srcFormat)
-
 	// Never log credentials — only the backend, paths, format.
 	p.logger.Info("Importing disk from S3 to Proxmox node (stage for qm importdisk at Create)",
 		"backend", req.BackendType, "id", id, "source", req.SourceUrl,
 		"src_format", srcFormat, "stage_path", stagePath, "storage_hint", req.StorageHint)
 
 	// --- STAGE (ADR D5) ---
-	// S3 → SSH stdin → `cat > <stagePath>` on the node. cat writes sequentially
-	// (no seek), so the non-seekable pipe is fine. The pipe couples DownloadStream
-	// (SHA256 verified in-stream) to the SSH stdin so the disk is never buffered
-	// whole in the pod.
+	// S3 → SSH stdin → `cat > "$TMP"` on the node, then `mv -T` onto the stage
+	// (buildImportStageScript: a fresh mktemp file in the root-only stage
+	// directory). cat writes sequentially (no seek), so the non-seekable pipe is
+	// fine. The pipe couples DownloadStream (SHA256 verified in-stream) to the
+	// SSH stdin so the disk is never buffered whole in the pod.
 	pr, pw := io.Pipe()
-	stageCmd := fmt.Sprintf("cat > %s", proxmoxShellQuote(stagePath))
+	stageCmd := buildImportStageScript(proxmoxImportStageDir, stagePath, `cat > "$TMP"`)
 
 	type dlResult struct {
 		resp storage.DownloadResponse
@@ -164,7 +156,7 @@ func (p *Provider) importDiskFromS3(ctx context.Context, req *providerv1.ImportD
 	// qemu-img check on the staged qcow2 (only meaningful for qcow2; raw has no
 	// internal structure to check). Surface stderr on failure.
 	if srcFormat == "qcow2" {
-		if _, stderr, err := p.ssh.runSSH(ctx, fmt.Sprintf("qemu-img check %s", proxmoxShellQuote(stagePath))); err != nil {
+		if _, stderr, err := p.ssh.runSSH(ctx, fmt.Sprintf("qemu-img check -f qcow2 -- %s", proxmoxShellQuote(stagePath))); err != nil {
 			p.cleanupNodeFile(stagePath)
 			return nil, errors.NewInternal(
 				fmt.Sprintf("qemu-img check failed on staged qcow2 %s (stderr: %s)", stagePath, strings.TrimSpace(stderr)), err)
@@ -191,25 +183,22 @@ func (p *Provider) importDiskFromS3(ctx context.Context, req *providerv1.ImportD
 	}, nil
 }
 
-// cleanupNodeFile best-effort removes a node-side file over SSH and WARNs on
-// failure. Used to clean up a partial/leaked stage so a failed import does not
-// leave a multi-GB temp on the node.
+// cleanupNodeFile best-effort removes an import stage on the node over SSH and
+// WARNs on failure. Used to clean up a partial/leaked stage so a failed import
+// does not leave a multi-GB temp on the node, and a consumed one after Create.
+// It removes nothing but an import stage path (isImportStagePath): any other
+// path is refused and logged, never passed to rm.
 func (p *Provider) cleanupNodeFile(path string) {
 	if p.ssh == nil || path == "" {
 		return
 	}
-	if _, _, err := p.ssh.runSSH(context.Background(), fmt.Sprintf("rm -f %s", proxmoxShellQuote(path))); err != nil {
+	if !isImportStagePath(path) {
+		p.logger.Error("Refusing to remove a node file that is not an import stage")
+		return
+	}
+	if _, _, err := p.ssh.runSSH(context.Background(), fmt.Sprintf("rm -f -- %s", proxmoxShellQuote(path))); err != nil {
 		p.logger.Warn("Failed to remove node-side temp (manual cleanup may be needed)", "path", path, "error", err)
 	}
-}
-
-// proxmoxImportStagePath returns the path of the node-side staging file for an S3
-// import. It lives in proxmoxImportStageDir under a dot-prefixed name keyed on the
-// import id (deterministic per migration so a retry overwrites the same stage
-// rather than leaking). The suffix matches the staged object's format.
-func proxmoxImportStagePath(id, srcFormat string) string {
-	return fmt.Sprintf("%s/.virtrigaud-import-%s.%s",
-		strings.TrimRight(proxmoxImportStageDir, "/"), sanitizeProxmoxName(id), srcFormat)
 }
 
 // proxmoxImportTargetStorage is the default PVE storage `qm importdisk` lands the
@@ -230,8 +219,10 @@ const proxmoxImportedDiskInterface = "scsi0"
 // SEQUENCE (each step is greppable in logs; secrets never logged):
 //  1. CreateVM(vmConfig) — a diskless shell with the requested cpu/mem/net (the
 //     PVE API has no disk param here, so no template disk is laid down).
-//  2. `qm importdisk <vmid> <stagedPath> <storage> --format qcow2` — lays the
-//     staged qcow2 into the VM's storage as an UNUSED disk (unused0).
+//  2. `qm importdisk <vmid> <stagedPath> <storage> --format <format>` — lays the
+//     staged disk into the VM's storage as an UNUSED disk (unused0). --format
+//     is the TARGET format written into the storage (qcow2 by default; PVE
+//     probes the stage's own format, whatever its file extension says).
 //  3. `qm set <vmid> --scsihw virtio-scsi-pci --scsi0 <storage>:<imported-volume>
 //     --boot order=scsi0 [--ide2 <storage>:cloudinit --ciuser/--sshkeys]` — wires
 //     the imported disk as the boot disk and attaches cloud-init when present.
@@ -252,6 +243,11 @@ func (p *Provider) createFromImportedDisk(
 ) (*providerv1.CreateResponse, error) {
 	if p.ssh == nil {
 		return nil, p.createNotPerformed("migration SSH data plane not configured; cannot attach imported disk via qm importdisk; nothing was created", nil)
+	}
+	// parseCreateRequest admitted the path (checkImportedDiskPath); never
+	// import or remove anything that is not an import stage.
+	if !isImportStagePath(vmConfig.ImportedDiskPath) {
+		return nil, importedDiskRejected()
 	}
 
 	// Resolve the target storage: explicit VM config wins, then the provider's
@@ -318,7 +314,7 @@ func (p *Provider) createFromImportedDisk(
 		return fail(fmt.Sprintf("%s for VM %d", what, vmConfig.VMID), cause)
 	}
 
-	// 2. importdisk: lay the staged qcow2 into the VM's storage as an unused disk.
+	// 2. importdisk: lay the staged disk into the VM's storage as an unused disk.
 	importCmd := buildImportDiskCommand(vmConfig.VMID, vmConfig.ImportedDiskPath, storageName, importFormat)
 	importStdout, importStderr, err := p.ssh.runSSH(ctx, importCmd)
 	if err != nil {
@@ -432,11 +428,15 @@ func parseUnusedVolid(qmConfig string) string {
 }
 
 // buildImportDiskCommand builds the `qm importdisk` command that lays the staged
-// disk image into the VM's storage. The path and storage are shell-quoted; the
-// format is passed explicitly so PVE does not have to probe. It is a free
-// function so the exact argv is unit-testable without SSH.
+// disk image into the VM's storage. The path, storage and format are
+// shell-quoted. format is the TARGET format `qm importdisk --format` writes
+// into the storage (validated to importStageFormats by importedDiskFormat); it
+// does not tell PVE the stage's format, which PVE probes. It runs only when
+// the stage passes importStageNodeCheck (a regular file, not a symbolic link,
+// one hard link); otherwise the command fails and nothing is imported. It is a
+// free function so the exact argv is unit-testable without SSH.
 func buildImportDiskCommand(vmid int, stagePath, storage, format string) string {
-	return fmt.Sprintf("qm importdisk %d %s %s --format %s",
+	return fmt.Sprintf("%s && qm importdisk %d %s %s --format %s", importStageNodeCheck(stagePath),
 		vmid, proxmoxShellQuote(stagePath), proxmoxShellQuote(storage), proxmoxShellQuote(format))
 }
 

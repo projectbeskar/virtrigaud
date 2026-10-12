@@ -86,6 +86,20 @@ both an API token (`token_id`/`token_secret`) and SSH credentials (`ssh_user` +
 `ssh_password` and/or `ssh_privatekey`) plus a pinned `known_hosts`, because the
 Proxmox disk data plane runs `qemu-img`/`qm` on the PVE node over SSH.
 
+A Proxmox target stages the disk on the PVE node at
+`/var/lib/virtrigaud/import-stage/<target namespace>_<target VM name>-migrated.<format>` (a directory only root can enter);
+the target VM's create imports it with `qm importdisk` and removes it. The create
+accepts only that exact stage, and only for a `VMMigration` in the target VM's own
+namespace: a migration whose `spec.target.namespace` names another namespace
+fails at `Validating` (reason `ProxmoxCrossNamespaceTarget`) before anything is
+exported or imported. Run **one VirtRigaud installation per PVE node**: stage
+names are unique within one Kubernetes cluster only, and every installation
+uses the same stage directory. A stage is removed when the
+target VM's create consumes it; a migration that fails or is deleted between
+import and create leaves its stage behind, so sweep stale stages periodically
+(see [`docs/upgrading.md`](../../docs/upgrading.md#stale-proxmox-import-stages)).
+See [`docs/image-preparation.md`](../../docs/image-preparation.md#libvirt-image-paths-sourcelibvirtpath).
+
 ## NFS staging backend (ADR-0006 Slice 4)
 
 NFS is the validated **second** staging backend. Instead of an object store, the

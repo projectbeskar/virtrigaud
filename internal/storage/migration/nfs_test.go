@@ -16,7 +16,10 @@ limitations under the License.
 
 package migration
 
-import "testing"
+import (
+	"errors"
+	"testing"
+)
 
 func i64(v int64) *int64 { return &v }
 
@@ -88,6 +91,40 @@ func TestNFSURL_UIDGIDRange(t *testing.T) {
 	}
 	if _, err := NFSURL(StorageOptions{Server: "h", Export: "/e", GID: i64(4294967296)}, "k"); err == nil {
 		t.Error("out-of-range gid accepted")
+	}
+}
+
+// TestNFSRootIdentityRefused (review N4): uid or gid 0 is root on an export
+// without root_squash; NFSURL and ParseStorageOptions refuse it with the
+// constant ErrNFSRootIdentity, and accept 1 and the AUTH_SYS maximum.
+func TestNFSRootIdentityRefused(t *testing.T) {
+	for _, o := range []StorageOptions{
+		{Server: "h", Export: "/e", UID: i64(0)},
+		{Server: "h", Export: "/e", GID: i64(0)},
+		{Server: "h", Export: "/e", UID: i64(1000), GID: i64(0)},
+	} {
+		if _, err := NFSURL(o, "k"); !errors.Is(err, ErrNFSRootIdentity) {
+			t.Errorf("NFSURL(%+v) = %v, want ErrNFSRootIdentity", o, err)
+		}
+		raw, err := MarshalStorageOptions(o)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := ParseStorageOptions(raw); !errors.Is(err, ErrNFSRootIdentity) {
+			t.Errorf("ParseStorageOptions(%s) = %v, want ErrNFSRootIdentity", raw, err)
+		}
+	}
+	if _, err := ParseStorageOptions(`{"uid":-5}`); err == nil || errors.Is(err, ErrNFSRootIdentity) {
+		t.Errorf("negative uid: %v, want a range error", err)
+	}
+	for _, ok := range []StorageOptions{
+		{Server: "h", Export: "/e", UID: i64(1), GID: i64(1)},
+		{Server: "h", Export: "/e", UID: i64(4294967295)},
+		{Server: "h", Export: "/e"},
+	} {
+		if _, err := NFSURL(ok, "k"); err != nil {
+			t.Errorf("NFSURL(%+v) = %v, want ok", ok, err)
+		}
 	}
 }
 

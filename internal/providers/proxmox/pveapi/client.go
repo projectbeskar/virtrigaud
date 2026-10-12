@@ -179,8 +179,10 @@ type VMConfig struct {
 	// Carried out-of-band (json:"-") so it never reaches the PVE config API body.
 	ImportedDiskPath string `json:"-"`
 
-	// ImportedDiskFormat is the on-disk format of ImportedDiskPath (e.g. qcow2).
-	// Empty defaults to qcow2.
+	// ImportedDiskFormat is the format `qm importdisk --format` writes the
+	// imported disk in (the TARGET format in the VM's storage; PVE probes the
+	// format of ImportedDiskPath itself). One of qcow2, raw, vmdk; empty
+	// defaults to qcow2.
 	ImportedDiskFormat string `json:"-"`
 }
 

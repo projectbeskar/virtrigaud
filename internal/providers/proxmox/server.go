@@ -1296,12 +1296,28 @@ func (p *Provider) parseCreateRequest(ctx context.Context, req *providerv1.Creat
 			// contracts.VMImage with a node-side Path (set by ImportDisk and
 			// threaded through VirtualMachine.Spec.ImportedDisk.Path) and no
 			// TemplateName. Capturing it here switches Create onto the
-			// importdisk-attach path. The Format guides the qemu-img/import format.
+			// importdisk-attach path. The Format is the disk format `qm
+			// importdisk --format` writes into the VM's storage (the TARGET
+			// format; PVE still probes the stage's own format).
+			//
+			// The path and format are tenant-writable: the path is taken only
+			// when the manager marked it as this VM's own verified migration
+			// disk (ImportedDisk) and it is exactly this VM's import stage, and
+			// the format only when it is one of importStageFormats
+			// (import_stage.go); anything else is refused before anything is
+			// created.
 			if path, ok := contractsImage["Path"].(string); ok && strings.TrimSpace(path) != "" && config.Template == "" {
-				config.ImportedDiskPath = strings.TrimSpace(path)
-				if format, ok := contractsImage["Format"].(string); ok && format != "" {
-					config.ImportedDiskFormat = format
+				imported, _ := contractsImage["ImportedDisk"].(bool)
+				owner := contracts.ObjectIdentity{Namespace: req.GetOwner().GetNamespace(), Name: req.GetOwner().GetName()}
+				if err := checkImportedDiskPath(path, imported, owner, req.Name); err != nil {
+					return nil, "", err
 				}
+				format, err := importedDiskFormat(contractsImage["Format"])
+				if err != nil {
+					return nil, "", err
+				}
+				config.ImportedDiskPath = path
+				config.ImportedDiskFormat = format
 				p.logger.Info("Parsed imported-disk path from contracts.VMImage (migration import)",
 					"path", config.ImportedDiskPath, "format", config.ImportedDiskFormat)
 			}
