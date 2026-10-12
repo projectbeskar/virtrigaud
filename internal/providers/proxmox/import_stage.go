@@ -99,11 +99,10 @@ const (
 	legacyImportStageFilePrefix = ".virtrigaud-import-"
 )
 
-// nfsImportWorkDirTemplate is the mktemp template of the per-import work
-// directory an NFS import converts into when it reads the export as the
-// migration's uid/gid (setpriv), which cannot write the root-only stage
-// directory.
-const nfsImportWorkDirTemplate = "/var/tmp/.virtrigaud-nfsimport-XXXXXX"
+// nfsCopyStatusTemplate is the mktemp template, in the stage directory, of the
+// file the root side of an NFS copy records the reader's exit status in. It
+// starts with "." and never matches importStagePathRE.
+const nfsCopyStatusTemplate = ".rc-XXXXXXXXXX"
 
 // importStageSeparator joins namespace and VM name in a stage name. It appears
 // in no Kubernetes namespace or name, so "<ns>_<vm>" is unambiguous and no VM
@@ -347,42 +346,52 @@ func buildImportStageScript(dir, stagePath, writeCmd string) string {
 		writeCmd + "; " + importStageCommit(stagePath)
 }
 
-// nfsImportStageInner is the part of an NFS import that runs inside the
-// mounted export ("$MNT"): convert the staged qcow2 at "$MNT"/rel to "$TMP"
-// in dir, then rename it onto stagePath.
+// nfsStageCopy is THE producer of the root-owned copy of the staged NFS
+// object: the shell fragment that copies "$MNT"/rel byte for byte into "$TMP"
+// (a root-owned mktemp file in the root-only stage directory, opened by the
+// root shell). It is the one hook for checks on the copy (a header
+// pre-parser, a bounded copy): whatever it leaves in "$TMP" is what is
+// published as the stage.
 //
-// Without uid/gid, qemu-img runs as the SSH user and converts straight into
-// "$TMP". With them, it runs as uid/gid (setpriv) so the NFS server sees that
-// identity, and that identity cannot enter the root-only stage directory: it
-// converts into "$W/out" instead — W a fresh root-owned 0711 directory in
-// /var/tmp (so the identity can neither rename nor replace "out"), "out" its
-// 0700 directory — and the result is renamed into "$TMP" (mv moves a symbolic
-// link itself, never its target), checked to be a regular file with one link,
-// and given to the SSH user, 0600, before the rename onto stagePath.
-func nfsImportStageInner(dir, rel, stagePath string, uid, gid *int64) string {
+// With uid/gid, the reader runs as that identity (setpriv) so the NFS server
+// sees it, and it holds ONLY the write end of a pipe: `cat > "$TMP"` on the
+// root side opens the copy. That identity is tenant-chosen and may be an
+// account on the node (33/www-data runs pveproxy); it never gets a file
+// descriptor on, or ownership of, the copy, so it cannot rewrite the copy
+// after it is checked. The reader's exit status is recorded by the root side
+// of the pipeline in a status file ("$RC", fd 3, closed for the reader), and
+// a failed read fails the script (POSIX sh has no pipefail).
+//
+// Without uid/gid the root shell reads the export itself.
+func nfsStageCopy(rel string, uid, gid *int64) string {
 	src := `"$MNT"/` + proxmoxShellQuote(rel)
-	s := importStagePrepare(dir)
-	if uid != nil && gid != nil {
-		s += fmt.Sprintf(`W=$(mktemp -d %s); chmod 0711 "$W"; mkdir -m 0700 "$W/out"; chown %d:%d "$W/out"; `,
-			nfsImportWorkDirTemplate, *uid, *gid) +
-			nfsSetprivPrefix(uid, gid) + `qemu-img convert -O qcow2 ` + src + ` "$W/out/disk.qcow2"; ` +
-			`mv -T -- "$W/out/disk.qcow2" "$TMP"; ` +
-			`[ -f "$TMP" ] && [ ! -L "$TMP" ] && [ "$(stat -c %h -- "$TMP")" = 1 ] || exit 1; ` +
-			`chown "$(id -u):$(id -g)" -- "$TMP"; chmod 0600 -- "$TMP"; `
-	} else {
-		s += `qemu-img convert -O qcow2 ` + src + ` "$TMP"; `
+	if uid == nil || gid == nil {
+		return `cat -- ` + src + ` > "$TMP"`
 	}
-	return s + importStageCommit(stagePath)
+	return `RC=$(mktemp -p "${TMP%/*}" ` + nfsCopyStatusTemplate + `); ` +
+		`{ if ` + nfsSetprivPrefix(uid, gid) + `cat -- ` + src + ` 3>&-; then echo 0 >&3; else echo 1 >&3; fi; } 3>"$RC" ` +
+		`| cat > "$TMP"; ` +
+		`[ "$(cat -- "$RC")" = 0 ] || exit 1; rm -f -- "$RC"`
+}
+
+// nfsImportStageInner is the part of an NFS import that runs inside the
+// mounted export ("$MNT"): prepare the root-only stage directory and "$TMP"
+// (importStagePrepare), copy the staged qcow2 into "$TMP" (nfsStageCopy) and
+// rename it onto stagePath. The copy is published as is: no qemu-img converts
+// the tenant's bytes as root here (the export holds the source provider's
+// flattened qcow2; `qemu-img check` validates the stage afterwards).
+func nfsImportStageInner(dir, rel, stagePath string, uid, gid *int64) string {
+	return importStagePrepare(dir) + nfsStageCopy(rel, uid, gid) + "; " + importStageCommit(stagePath)
 }
 
 // nfsImportStageCleanup is the trap cleanup of an NFS import: the half-written
-// "$TMP" and the work directory "$W" (rm -rf never follows a symbolic link).
-const nfsImportStageCleanup = importStageTempCleanup + `; rm -rf -- "$W" 2>/dev/null || true`
+// "$TMP" and the copy's status file "$RC".
+const nfsImportStageCleanup = importStageTempCleanup + `; rm -f -- "$RC" 2>/dev/null || true`
 
 // buildNFSImportStageScript is the node-side script of an NFS import: mount
 // the export (buildNFSKernelMountScript), stage "$MNT"/rel at stagePath in dir
 // (nfsImportStageInner), and on exit unmount and remove any half-written stage
-// and work directory.
+// and status file.
 func buildNFSImportStageScript(dir, server, export, rel, stagePath string, uid, gid *int64) string {
 	return buildNFSKernelMountScript(server, export, nfsImportStageInner(dir, rel, stagePath, uid, gid), nfsImportStageCleanup)
 }

@@ -127,17 +127,14 @@ func TestBuildImportStageScript_RealShell(t *testing.T) {
 	}
 }
 
-// TestNFSImportStageInner_RealShell: the NFS stage (without a uid/gid, so
-// qemu-img runs as the SSH user) converts "$MNT"/rel through a temp file onto
-// the stage, which passes the node check, and leaves nothing else. It needs a
-// local qemu-img.
+// TestNFSImportStageInner_RealShell: the NFS stage without a uid/gid (the root
+// shell reads the export) copies "$MNT"/rel byte for byte through a temp file
+// onto the stage, which passes the node check, and leaves nothing else.
 func TestNFSImportStageInner_RealShell(t *testing.T) {
 	requireGNUStat(t)
-	if _, err := exec.LookPath("qemu-img"); err != nil {
-		t.Skip("qemu-img not available")
-	}
 	mnt := t.TempDir()
-	require.NoError(t, exec.Command("qemu-img", "create", "-q", "-f", "qcow2", filepath.Join(mnt, "src.qcow2"), "1M").Run())
+	src := filepath.Join(mnt, "src.qcow2")
+	require.NoError(t, os.WriteFile(src, []byte("QFI\xfb staged bytes"), 0o644))
 	for _, shell := range localShells(t) {
 		t.Run(shell, func(t *testing.T) {
 			dir := filepath.Join(t.TempDir(), "import-stage")
@@ -148,27 +145,89 @@ func TestNFSImportStageInner_RealShell(t *testing.T) {
 			require.NoError(t, err, string(out))
 			assert.Equal(t, []string{"team-a_web-migrated.qcow2"}, dirEntries(t, dir))
 			assert.Equal(t, os.FileMode(0o600), modeOf(t, stage))
+			got, err := os.ReadFile(stage)
+			require.NoError(t, err)
+			assert.Equal(t, "QFI\xfb staged bytes", string(got), "a byte-for-byte copy")
 			require.NoError(t, exec.Command(shell, "-c", importStageNodeCheck(stage)).Run())
-			require.NoError(t, exec.Command("qemu-img", "check", "-q", stage).Run())
 		})
 	}
 }
 
-// TestNFSImportStageInner_SetprivShape pins the order of the uid/gid variant
-// (it needs root to run): the identity converts only inside its own work
-// directory, and the result is moved into the root-only directory, checked,
-// re-owned and only then renamed onto the stage.
-func TestNFSImportStageInner_SetprivShape(t *testing.T) {
+// fakeSetprivDir puts a fake `setpriv` first on PATH: it records the file
+// descriptors it holds (its /proc/self/fd links) in $FDLOG, drops the five
+// setpriv arguments nfsSetprivPrefix passes (--reuid U --regid G
+// --clear-groups) and runs the rest. A real setpriv needs root.
+func fakeSetprivDir(t *testing.T) string {
+	t.Helper()
+	if _, err := os.Stat("/proc/self/fd"); err != nil {
+		t.Skip("no /proc")
+	}
+	bin := t.TempDir()
+	script := "#!/bin/sh\nfor f in /proc/$$/fd/*; do readlink \"$f\"; done > \"$FDLOG\" 2>/dev/null\nshift 5\nexec \"$@\"\n"
+	require.NoError(t, os.WriteFile(filepath.Join(bin, "setpriv"), []byte(script), 0o755)) //nolint:gosec // test helper must be executable
+	return bin
+}
+
+// TestNFSStageCopy_SetprivHoldsOnlyAPipe (review N1): with a uid/gid, the
+// reader (setpriv) holds no file descriptor on the copy or anything in the
+// stage directory — only the pipe — and the root side writes the copy, owned
+// by the running user. A failed read fails the script and leaves neither the
+// copy, its status file nor a stage.
+func TestNFSStageCopy_SetprivHoldsOnlyAPipe(t *testing.T) {
+	requireGNUStat(t)
+	bin := fakeSetprivDir(t)
+	uid, gid := int64(4242), int64(4343)
+	mnt := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(mnt, "src.qcow2"), []byte("tenant bytes"), 0o644))
+
+	for _, shell := range localShells(t) {
+		t.Run(shell, func(t *testing.T) {
+			dir := filepath.Join(t.TempDir(), "import-stage")
+			stage := filepath.Join(dir, "team-a_web-migrated.qcow2")
+			fdlog := filepath.Join(t.TempDir(), "fds")
+			run := func(rel string) ([]byte, error) {
+				script := "set -e; MNT=" + proxmoxShellQuote(mnt) + "; trap '" + nfsImportStageCleanup + "' EXIT; " +
+					nfsImportStageInner(dir, rel, stage, &uid, &gid)
+				cmd := exec.Command(shell, "-c", script)
+				cmd.Env = append(os.Environ(), "PATH="+bin+":"+os.Getenv("PATH"), "FDLOG="+fdlog)
+				return cmd.CombinedOutput()
+			}
+
+			out, err := run("src.qcow2")
+			require.NoError(t, err, string(out))
+			got, err := os.ReadFile(stage)
+			require.NoError(t, err)
+			assert.Equal(t, "tenant bytes", string(got))
+			assert.Equal(t, []string{"team-a_web-migrated.qcow2"}, dirEntries(t, dir), "no temp or status file left")
+			require.NoError(t, exec.Command(shell, "-c", importStageNodeCheck(stage)).Run())
+
+			fds, err := os.ReadFile(fdlog)
+			require.NoError(t, err)
+			require.NotEmpty(t, strings.TrimSpace(string(fds)))
+			assert.NotContains(t, string(fds), dir, "the reader holds no descriptor in the stage directory")
+			assert.Contains(t, string(fds), "pipe:", "the reader writes into a pipe")
+
+			// A failed read (missing object) fails closed and leaves nothing.
+			require.NoError(t, os.Remove(stage))
+			out, err = run("missing.qcow2")
+			require.Error(t, err, string(out))
+			assert.Empty(t, dirEntries(t, dir), "no stage, temp or status file after a failed read")
+		})
+	}
+}
+
+// TestNFSStageCopy_Shape pins the uid/gid copy: the setpriv'd reader writes
+// only into the pipe (fd 3 closed for it), the root side opens the copy, and
+// the status check precedes the rename onto the stage.
+func TestNFSStageCopy_Shape(t *testing.T) {
 	uid, gid := int64(4242), int64(4343)
 	s := nfsImportStageInner(proxmoxImportStageDir, "ns/web/disk.qcow2", importStagePath("team-a", "web", "qcow2"), &uid, &gid)
 	steps := []string{
 		"install -d -m 0700 '/var/lib/virtrigaud/import-stage'",
 		`TMP=$(mktemp -p '/var/lib/virtrigaud/import-stage' .stage-XXXXXXXXXX)`,
-		`W=$(mktemp -d /var/tmp/.virtrigaud-nfsimport-XXXXXX); chmod 0711 "$W"; mkdir -m 0700 "$W/out"; chown 4242:4343 "$W/out"`,
-		`setpriv --reuid 4242 --regid 4343 --clear-groups qemu-img convert -O qcow2 "$MNT"/'ns/web/disk.qcow2' "$W/out/disk.qcow2"`,
-		`mv -T -- "$W/out/disk.qcow2" "$TMP"`,
-		`[ -f "$TMP" ] && [ ! -L "$TMP" ] && [ "$(stat -c %h -- "$TMP")" = 1 ] || exit 1`,
-		`chown "$(id -u):$(id -g)" -- "$TMP"; chmod 0600 -- "$TMP"`,
+		`RC=$(mktemp -p "${TMP%/*}" .rc-XXXXXXXXXX)`,
+		`{ if setpriv --reuid 4242 --regid 4343 --clear-groups cat -- "$MNT"/'ns/web/disk.qcow2' 3>&-; then echo 0 >&3; else echo 1 >&3; fi; } 3>"$RC" | cat > "$TMP"`,
+		`[ "$(cat -- "$RC")" = 0 ] || exit 1`,
 		`mv -T -- "$TMP" '/var/lib/virtrigaud/import-stage/team-a_web-migrated.qcow2'`,
 	}
 	at := 0
@@ -177,9 +236,11 @@ func TestNFSImportStageInner_SetprivShape(t *testing.T) {
 		require.GreaterOrEqual(t, i, 0, "missing or out of order: %s\nin: %s", step, s)
 		at += i + len(step)
 	}
-	assert.NotContains(t, s, "/var/tmp/.virtrigaud-import-", "never stages in /var/tmp")
+	assert.NotContains(t, s, "/var/tmp/", "nothing is written outside the stage directory")
+	assert.NotContains(t, s, "chown", "no inode is adopted from the NFS identity")
+	assert.NotContains(t, s, "qemu-img", "no qemu-img runs on the tenant's bytes in the copy")
 
 	full := buildNFSImportStageScript(proxmoxImportStageDir, "nfs.example", "/export", "ns/web/disk.qcow2",
 		importStagePath("team-a", "web", "qcow2"), &uid, &gid)
-	assert.Contains(t, full, nfsImportStageCleanup, "the trap removes the temp and the work directory")
+	assert.Contains(t, full, nfsImportStageCleanup, "the trap removes the temp and the status file")
 }

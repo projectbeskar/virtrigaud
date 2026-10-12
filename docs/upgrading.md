@@ -107,9 +107,8 @@ stage directory on every PVE node periodically, for example daily from root's cr
 # List stages older than 2 days; delete only those whose VMMigration is no longer in flight
 # (no VMMigration for <namespace>/<vm name> in phase Importing, Creating or ValidatingTarget).
 find /var/lib/virtrigaud/import-stage -maxdepth 1 -type f -name '*_*-migrated.*' -mtime +2 -print
-# Interrupted writes and NFS work directories are always safe to remove when old:
-find /var/lib/virtrigaud/import-stage -maxdepth 1 -type f -name '.stage-*' -mmin +720 -delete
-find /var/tmp -maxdepth 1 -type d -name '.virtrigaud-nfsimport-*' -mmin +720 -exec rm -rf -- {} +
+# Interrupted writes (and their NFS copy status files) are always safe to remove when old:
+find /var/lib/virtrigaud/import-stage -maxdepth 1 -type f \( -name '.stage-*' -o -name '.rc-*' \) -mmin +720 -delete
 ```
 
 **One VirtRigaud installation per PVE node.** Stage names are unique within one

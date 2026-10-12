@@ -20,7 +20,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `internal/providers/proxmox/import_stage.go` (`proxmoxImportStageDir`, `importStagePath`, `isImportStagePath`, `buildImportStageScript`, `buildNFSImportStageScript`), `s3import.go`, `nfs.go`: stages no longer live in world-writable `/var/tmp` under a predictable name. Before, another account on the PVE node could pre-create, link or swap a stage there.
   - **Location:** stages now live in `/var/lib/virtrigaud/import-stage/<namespace>_<vm name>-migrated.<format>`. ImportDisk (re)creates that directory with `install -d -m 0700` and verifies it is not a symlink, is owned by the SSH user, and has mode 700, or fails.
   - **Write:** the disk is written to a fresh `mktemp` file in that directory (umask 077), then renamed onto the stage with `mv -T`. A failure or SSH hang-up removes the temp file.
-  - **NFS with `nfs.uid`/`gid`:** that identity cannot enter the directory. It converts inside its own 0700 subdirectory of a fresh root-owned 0711 `/var/tmp` work directory. The result is moved in (a symlink is moved, never followed), checked to be a regular single-link file, re-owned to the SSH user with mode 0600, then renamed onto the stage.
+  - **NFS (`nfsStageCopy`, the one producer of the root-owned copy):** the staged object is copied byte for byte into the root-owned `$TMP`; no qemu-img convert runs. With `nfs.uid`/`gid`, the reader runs under setpriv and holds **only the write end of a pipe**: `setpriv … cat -- "$MNT"/<rel> | cat > "$TMP"`, where the root side opens the copy.
+    - The tenant-chosen identity may be a node account (33/www-data runs pveproxy). It therefore never gets a descriptor on the copy, nor ownership of it, and cannot rewrite the copy after it is checked (review N1).
+    - An earlier revision of this branch converted as that identity and adopted the inode it wrote; that is gone.
+    - The reader's exit status is recorded by the root side in a status file (fd 3, closed for the reader), and a failed read fails the script; POSIX sh has no pipefail.
+    - Without uid/gid, the root shell reads the export.
+    - Tested with a fake `setpriv` that records its open descriptors.
   - **Single source of truth:** one builder (`importStagePath`) and one predicate (`isImportStagePath`) define the stage location.
   - **Verification:** the S3 script and the uid-less NFS script are tested against real files with the local `sh` and `bash` (and `qemu-img`).
   - **Legacy `/var/tmp` stages:** they stay refused and are never removed.
