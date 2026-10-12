@@ -134,6 +134,11 @@ func (p *Provider) importDiskFromNFS(ctx context.Context, req *providerv1.Import
 	if _, statErr := vmdk.Stat(vmdkLocal); statErr != nil {
 		return nil, errors.NewInternal("converted vmdk is not a valid streamOptimized image for NFC import", statErr)
 	}
+	// The disk-size limit, on the converted vmdk the NFC lease will land (the
+	// NFS export itself may change between two reads of it).
+	if err := checkLandingVirtualSize(ctx, vmdkLocal, req.MaxVirtualSizeBytes); err != nil {
+		return nil, err
+	}
 
 	// --- 2. RESOLVE datastore + placement (pool, folder, host) ---
 	datastore, err := p.resolveImportDatastore(ctx, req.StorageHint)

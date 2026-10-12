@@ -4228,6 +4228,11 @@ func (p *Provider) ImportDisk(ctx context.Context, req *providerv1.ImportDiskReq
 		vmdkPath = tempFile
 	}
 
+	// The disk-size limit, on the pod-local vmdk about to be uploaded.
+	if err := checkLandingVirtualSize(ctx, vmdkPath, req.MaxVirtualSizeBytes); err != nil {
+		return nil, err
+	}
+
 	// Upload to datastore
 	p.logger.Info("Uploading VMDK to datastore", "datastore", datastore, "disk_id", diskID)
 
