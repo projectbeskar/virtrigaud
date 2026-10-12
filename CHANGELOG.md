@@ -5,7 +5,7 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [2026-10-11 21:21] - Migration source snapshots: tracked, polled, cleaned up; VMSnapshots bound to their VM and Provider; provider NotFound only for provably missing snapshots; outcome-safe single-host clone retries; no resolver or task text in status
+## [2026-10-12 07:47] - Migration source snapshots: tracked, polled, cleaned up; VMSnapshots bound to their VM and Provider; provider NotFound only for provably missing snapshots; outcome-safe single-host clone retries; no resolver or task text in status
 **Author:** @wrkode (William Rizzo)
 
 ### Fixed
