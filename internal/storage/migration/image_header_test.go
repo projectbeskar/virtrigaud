@@ -20,6 +20,9 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -275,4 +278,38 @@ func TestBoundedWriter(t *testing.T) {
 	_, err = w.Write([]byte("f"))
 	assert.ErrorIs(t, err, ErrStagedObjectTooLarge)
 	assert.Equal(t, "abcde", buf.String())
+}
+
+// TestCheckStagedImageBytes_RealQemuImgVMDK (review: GD_AT_END): the VMDKs
+// VirtRigaud's own vSphere export stages — a vSphere sparseMonolithic clone
+// uploaded as is, or a multi-file VMDK flattened by `qemu-img convert -O vmdk
+// -o subformat=streamOptimized` — keep their grain directory at a fixed
+// offset in the header, never "at end" (the footer layout of VMware NFC/OVF
+// streamOptimized exports, which VirtRigaud does not use). Real qemu-img
+// output of both subformats passes the header check unchanged.
+func TestCheckStagedImageBytes_RealQemuImgVMDK(t *testing.T) {
+	qemuImg, err := exec.LookPath("qemu-img")
+	if err != nil {
+		t.Skip("qemu-img not installed")
+	}
+	dir := t.TempDir()
+	src := filepath.Join(dir, "src.raw")
+	data := make([]byte, 8<<20)
+	copy(data[1<<20:], "some disk data")
+	require.NoError(t, os.WriteFile(src, data, 0o600))
+	for _, sub := range []string{"streamOptimized", "monolithicSparse"} {
+		t.Run(sub, func(t *testing.T) {
+			dst := filepath.Join(dir, sub+".vmdk")
+			out, err := exec.Command(qemuImg, "convert", "-f", "raw", "-O", "vmdk", "-o", "subformat="+sub, src, dst).CombinedOutput() //nolint:gosec // test runs qemu-img on its own fixture
+			require.NoError(t, err, string(out))
+			img, err := os.ReadFile(dst) //nolint:gosec // test reads its own fixture
+			require.NoError(t, err)
+			head := img[:min(len(img), StagedImageHeadBytes)]
+			assert.NotEqual(t, uint64(vmdkGDAtEnd), binary.LittleEndian.Uint64(head[vmdkGDOffsetAt:]),
+				"qemu-img writes the grain directory offset in the header")
+			virtual, err := CheckStagedImageBytes(head, StagedFormatVMDK, 0)
+			require.NoError(t, err)
+			assert.Equal(t, int64(len(data)), virtual)
+		})
+	}
 }

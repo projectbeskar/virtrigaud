@@ -271,8 +271,11 @@ func checkVMDKSparseHeader(head []byte) error {
 	}
 	// A grain directory "at end" makes qemu replace this header with the
 	// footer near the end of the file, which the bytes checked here do not
-	// include: refused. qemu-img's own streamOptimized output (what the
-	// vSphere export writes) does not use it.
+	// include: refused. VirtRigaud's vSphere export never stages one: it
+	// uploads a sparseMonolithic clone, or a qemu-img streamOptimized flatten,
+	// and both keep the grain directory offset in the header (qemu-img writes
+	// sector 30; TestCheckStagedImageBytes_RealQemuImgVMDK). Only VMware
+	// NFC/OVF streamOptimized exports keep it in a footer.
 	if le.Uint64(head[vmdkGDOffsetAt:]) == vmdkGDAtEnd {
 		return rejected("the VMDK keeps its header in a footer (grain directory at end), which cannot be checked")
 	}

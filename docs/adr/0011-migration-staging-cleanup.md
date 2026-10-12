@@ -463,6 +463,15 @@ is a VM-scoped not-performed answer, and the stage is kept for the retry.
 Libvirt already had the header check, but its convert read the NFS object a second
 time; Proxmox and vSphere had none. These were pre-existing.
 
+**VMDK grain directory at end.** VirtRigaud's own vSphere export stages one of two
+VMDKs. The first is a `sparseMonolithic` clone (`CopyVirtualDisk`), uploaded as is.
+The second is a multi-file VMDK flattened by `qemu-img convert -O vmdk -o
+subformat=streamOptimized`. Both keep the grain directory offset in the header.
+qemu-img 8.2 writes `gd_offset` = sector 30 for both subformats; a test checks this
+against real qemu-img output. Only VMware NFC/OVF streamOptimized exports use "grain
+directory at end" with a footer, and VirtRigaud does not use them. Such a file,
+staged by hand, is refused.
+
 ### D11 — The controller's status fields are trusted: tenants never write them
 
 The staging marker (`StagingCleanup`), `status.storageInfo.stagingLayout`,
