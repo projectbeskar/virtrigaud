@@ -22,6 +22,7 @@ import (
 	stderrors "errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"net/url"
 	"os"
 	"slices"
@@ -2243,10 +2244,10 @@ func (p *Provider) ListVMs(ctx context.Context, req *providerv1.ListVMsRequest) 
 		}
 
 		// Extract CPU and memory
-		cpu := int32(vm.CPUs)
+		cpu := countToInt32(int64(vm.CPUs))
 		if cpu == 0 {
-			if cores, ok := config["cores"].(float64); ok {
-				cpu = int32(cores)
+			if cores, ok := config["cores"].(float64); ok && cores > 0 {
+				cpu = countToInt32(int64(cores))
 			} else {
 				cpu = 1 // Default
 			}
@@ -2384,5 +2385,18 @@ func (p *Provider) parseDiskSize(sizeStr string) (int64, error) {
 		return int64(value * 1024 * 1024 * 1024 * 1024), nil
 	default:
 		return 0, fmt.Errorf("unknown unit: %s", unit)
+	}
+}
+
+// countToInt32 converts a count PVE reports (vCPUs) to the int32 the gRPC
+// contract carries, clamped to [0, math.MaxInt32] instead of wrapping.
+func countToInt32(v int64) int32 {
+	switch {
+	case v < 0:
+		return 0
+	case v > math.MaxInt32:
+		return math.MaxInt32
+	default:
+		return int32(v)
 	}
 }

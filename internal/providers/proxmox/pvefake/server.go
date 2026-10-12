@@ -69,6 +69,8 @@ type Server struct {
 	// nodeNames are the nodes /nodes lists, in order (SetNodes); empty means
 	// pve, pve2.
 	nodeNames []string
+	// taskSeq numbers the UPIDs createTaskAs issues (guarded by mu).
+	taskSeq uint32
 }
 
 // SetEmptyResourceNames makes /cluster/resources list a guest whose config
@@ -1286,8 +1288,9 @@ func (s *Server) createTask(node, taskType, id string) string {
 // createTaskAs creates a new async task run as user. The caller holds s.mu.
 func (s *Server) createTaskAs(user, node, taskType, id string) string {
 	timestamp := time.Now().Unix()
+	s.taskSeq++
 	taskID := fmt.Sprintf("UPID:%s:%08X:%s:%s:%s:%d:",
-		node, rand.Intn(99999999), taskType, id, user, timestamp)
+		node, s.taskSeq, taskType, id, user, timestamp)
 
 	task := &Task{
 		UPID:      taskID,

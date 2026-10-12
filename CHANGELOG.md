@@ -62,6 +62,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Each VM reports `owner_uid` / `owner_stamp_state`.
   - A VM whose config can't be read (e.g. on a down node, listed with status `unknown`) is reported `unreadable`, not skipped.
   - Only a failed cluster list fails the call.
+  - The vCPU count is converted with `countToInt32` (clamped, never wrapped; gosec G115).
   - `ListNodes`' cache expires after a minute, and the node list is sorted, so `FindNode`'s default node no longer depends on `/nodes` order.
 - Hardening against PVE behaviour that couldn't be verified without a lab; the code is correct for either form:
   - `internal/providers/proxmox/pveapi/client.go`: PVE's error message is read from the HTTP status line's reason phrase as well as the body (`pveErrorText`, body read through a `LimitReader`). It feeds `vmMissingAnswer`, `VMIDFree` and `APIError` (new `Reason` and `Text()`), and the "already exists" and InvalidSpec texts in `classifySubmitError`.
