@@ -10,7 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 > **Operator note.**
 > - **Behavior change (clustered Providers):** `virtrigaud.io/force-delete` on a VM in **another namespace** than its `topology: cluster` Provider is now ignored unless the Provider carries `infra.virtrigaud.io/allow-consumer-orphan-on-delete: "true"` (the orphan-on-delete permission). The VM shows `ForceDeleteRefused=True/ForceDeleteNotAllowed` and its delete keeps being retried. Same-namespace VMs and single-host Providers are unchanged.
-> - **Behavior change (single-host Providers):** before a Create, a VM now records `Provisioning=True/CreateRequested`. If the Create's outcome is never recorded, vSphere, libvirt and Proxmox are sent the Create again: they re-bind the VM they stamped. Roll the Proxmox provider from `feat/rc1-proxmox-owner-stamp` with or before this manager; an older Proxmox image does not stamp, and a re-send there makes a second VM. A delete that cannot find the VM by its stamp waits with `Ready=False/CreateOutcomeUnknown`. The operator records `status.id`, or annotates `virtrigaud.io/create-outcome=not-created@<attempt id>` (the marker's `lastTransitionTime`), or (delete only) uses force-delete. See `docs/vm-provider-binding.md`.
+> - **Behavior change (single-host Providers):** before a Create, a VM now records `Provisioning=True/CreateRequested`. If the Create's outcome is never recorded, vSphere, libvirt and Proxmox are sent the Create again: they re-bind the VM they stamped. Roll the Proxmox provider with the owner stamp (#380) with or before this manager; an older Proxmox image does not stamp, and a re-send there makes a second VM. A delete that cannot find the VM by its stamp waits with `Ready=False/CreateOutcomeUnknown`. The operator records `status.id`, or annotates `virtrigaud.io/create-outcome=not-created@<attempt id>` (the marker's `lastTransitionTime`), or (delete only) uses force-delete. See `docs/vm-provider-binding.md`.
 > - Search events for `VMRecordNotSaved` (a provider VM id the manager created but could not record) and `CreateOutcomeUnknown`.
 
 ### Security
@@ -51,7 +51,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     - No Create is sent when the live object is being deleted, or has a newer generation than the request was built from (re-review L2).
     - A failure before the provider call (spec validation, building the request) is recorded on Ready only while the marker is present (review M2).
     - A marker without an id:
-      - vSphere, libvirt and Proxmox are sent the Create again; they re-bind the VM stamped with the VM's UID. Proxmox stamps since `feat/rc1-proxmox-owner-stamp` (P).
+      - vSphere, libvirt and Proxmox are sent the Create again; they re-bind the VM stamped with the VM's UID. Proxmox stamps since #380 (P).
       - Every other type (the mock provider) waits with `Ready=False/CreateOutcomeUnknown`, a constant message and one `Warning` event, re-checked every minute. An operator resolves it by recording `status.id` (status patch) or annotating `virtrigaud.io/create-outcome=not-created@<attempt id>` (review M3).
       - The annotation names one attempt. Any other value is ignored and removed, and the annotation is removed before every new attempt. When it authorizes a create or a release, a `CreateOutcomeConfirmed` Warning event records it.
       - A re-send or a confirmed create goes ahead only while the live object still carries the attempt (and the confirmation) it was decided on (review L2).
@@ -104,7 +104,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     - One `Warning` event on the transition carries the provider's sanitized answer.
     - It is re-checked on the blocked-VM backoff.
     - The transport keeps the gRPC status in the chain of an answer it does not categorize (text unchanged), so the controller can read its code. This also makes a `VM_OPERATION_FAILED` on `codes.Unknown` visible.
-  - `VM_IS_IMAGE_ARTIFACT` is not covered: `contracts.IsVMIsImageArtifact` is not on this base. It is a post-merge follow-up.
+  - `VM_IS_IMAGE_ARTIFACT` (the vSphere Delete/Power refusal of #377) is not held specifically yet: it takes the generic failed-delete path with the finalizer kept. A dedicated hold is a follow-up.
 - `internal/controller/virtualmachine_controller.go` (`handleRejectedCreate`): a rejected Create's provider message is sanitized (`sanitizeProviderDetail`: URL userinfo removed, one line, at most 256 bytes) (review L4).
 
 ### Tests

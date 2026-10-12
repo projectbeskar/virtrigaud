@@ -220,7 +220,7 @@ func setCreateFailure(vm *infravirtrigaudiov1beta1.VirtualMachine, reason, msg s
 //
 // It is decided by provider type: GetCapabilities has no field that reports
 // owner-stamp re-binding. A Proxmox provider image from before the owner
-// stamp (feat/rc1-proxmox-owner-stamp) would make a second VM on a re-send,
+// stamp (#380) would make a second VM on a re-send,
 // so the Proxmox provider must be rolled before, or with, this manager
 // (docs/upgrading.md).
 func createRebindsOwnedVM(provider *infravirtrigaudiov1beta1.Provider) bool {
