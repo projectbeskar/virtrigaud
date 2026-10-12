@@ -1650,8 +1650,21 @@ func (c *Client) convertPowerOp(op contracts.PowerOp) (providerv1.PowerOp, error
 	}
 }
 
-// mapGRPCError converts gRPC errors to contracts errors where possible
+// mapGRPCError converts gRPC errors to contracts errors where possible. A
+// status that carries contracts.CreateNotPerformedReason (the provider made
+// nothing) is also marked with contracts.ErrCreateNotPerformed, whatever its
+// code, so contracts.IsCreateNotPerformed sees it.
 func (c *Client) mapGRPCError(operation string, err error) error {
+	mapped := c.mapGRPCStatus(operation, err)
+	if contracts.HasErrorInfoReason(err, contracts.CreateNotPerformedReason) {
+		return contracts.MarkCreateNotPerformed(mapped)
+	}
+	return mapped
+}
+
+// mapGRPCStatus converts a gRPC error to a contracts error by its code and
+// ErrorInfo reasons (mapGRPCError).
+func (c *Client) mapGRPCStatus(operation string, err error) error {
 	st, ok := status.FromError(err)
 	if !ok {
 		return fmt.Errorf("%s failed: %w", operation, err)

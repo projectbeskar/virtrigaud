@@ -109,3 +109,21 @@ func TestProxmoxProvider_NodeDiscovery(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "pve", node, "FindNode returns the first discovered node, not a hardcoded default")
 }
+
+// TestProxmoxProvider_NodeDiscoveryIsDeterministic (M-B): /nodes is not
+// ordered; the node list is sorted, so the default node (the first) does not
+// depend on the order PVE answers in, and does not flip when the cache
+// refreshes.
+func TestProxmoxProvider_NodeDiscoveryIsDeterministic(t *testing.T) {
+	srv, endpoint, err := pvefake.StartFakeServer()
+	require.NoError(t, err)
+	srv.SetNodes("pve3", "pve1", "pve2")
+	provider := createTestProvider(endpoint)
+
+	nodes, err := provider.client.ListNodes(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, []string{"pve1", "pve2", "pve3"}, nodes)
+	node, err := provider.client.FindNode(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, "pve1", node)
+}
