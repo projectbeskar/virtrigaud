@@ -239,12 +239,24 @@ func withholdDiskGrowthOverLimit(req *contracts.CreateRequest, ceiling *resource
 		withheld = append(withheld, infravirtrigaudiov1beta1.DiskSizeRequest{Field: field, Size: infravirtrigaudiov1beta1.DiskSizeGiBQuantity(dd.SizeGiB)})
 		dd.SizeGiB = 0
 	}
+	diskWithheld := false
 	for i := range req.Disks {
 		if over(req.Disks[i].SizeGiB) {
 			withheld = append(withheld, infravirtrigaudiov1beta1.DiskSizeRequest{
 				Field: fmt.Sprintf("spec.disks[%s].sizeGiB", req.Disks[i].Name),
 				Size:  infravirtrigaudiov1beta1.DiskSizeGiBQuantity(req.Disks[i].SizeGiB),
 			})
+			req.Disks[i].SizeGiB = 0
+			diskWithheld = true
+		}
+	}
+	// Proxmox applies every spec.disks size to its first disk, scsi0, acting
+	// on the first positive one and refusing one smaller than scsi0 as a
+	// shrink. Withholding one entry would expose the next, smaller one to that
+	// check and turn the Reconfigure into a failure retried on a backoff. So
+	// on a Proxmox Provider no spec.disks size is sent once one is withheld.
+	if diskWithheld && provider != nil && provider.Spec.Type == infravirtrigaudiov1beta1.ProviderTypeProxmox {
+		for i := range req.Disks {
 			req.Disks[i].SizeGiB = 0
 		}
 	}

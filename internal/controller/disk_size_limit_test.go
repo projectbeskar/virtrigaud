@@ -377,6 +377,31 @@ func TestWithholdDiskGrowthOverLimit(t *testing.T) {
 	assert.Zero(t, req.Disks[1].SizeGiB)
 }
 
+// TestWithholdDiskGrowthOverLimit_ProxmoxSendsNoDiskSize (review L1): Proxmox
+// applies every spec.disks size to scsi0 and refuses a smaller one as a
+// shrink, so once one entry is withheld none is sent — the next, smaller
+// entry would otherwise turn a Reconfigure into a failure retried forever.
+// Other provider types keep the entries within the limit.
+func TestWithholdDiskGrowthOverLimit_ProxmoxSendsNoDiskSize(t *testing.T) {
+	newReq := func() contracts.CreateRequest {
+		return contracts.CreateRequest{Disks: []contracts.DiskSpec{{Name: "data", SizeGiB: 800}, {Name: "small", SizeGiB: 50}}}
+	}
+	proxmox := &infravirtrigaudiov1beta1.Provider{Spec: infravirtrigaudiov1beta1.ProviderSpec{Type: infravirtrigaudiov1beta1.ProviderTypeProxmox}}
+	req := newReq()
+	require.NotNil(t, withholdDiskGrowthOverLimit(&req, qty("100Gi"), proxmox, nil))
+	assert.Zero(t, req.Disks[0].SizeGiB)
+	assert.Zero(t, req.Disks[1].SizeGiB, "on Proxmox no spec.disks size is sent once one is withheld")
+
+	req = newReq()
+	assert.Nil(t, withholdDiskGrowthOverLimit(&req, qty("1Ti"), proxmox, nil))
+	assert.Equal(t, newReq(), req, "nothing withheld: Proxmox gets every size as before")
+
+	libvirt := &infravirtrigaudiov1beta1.Provider{Spec: infravirtrigaudiov1beta1.ProviderSpec{Type: infravirtrigaudiov1beta1.ProviderTypeLibvirt}}
+	req = newReq()
+	require.NotNil(t, withholdDiskGrowthOverLimit(&req, qty("100Gi"), libvirt, nil))
+	assert.Equal(t, int32(50), req.Disks[1].SizeGiB)
+}
+
 func TestParseMaxDiskSizeFlag(t *testing.T) {
 	q, err := ParseMaxDiskSizeFlag("")
 	require.NoError(t, err)
