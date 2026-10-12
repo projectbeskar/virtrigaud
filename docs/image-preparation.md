@@ -605,6 +605,21 @@ folder whose files a VM uses (and a failed import deletes its folder only if it 
 unused), and deleting a vSphere VM never deletes a disk outside its own directory that it
 does not own.
 
+**Proxmox imported disks.** Proxmox base images are templates, so the Proxmox provider
+reads a node file only as a VM's own migration stage: the disk `ImportDisk` staged on
+the PVE node for that VirtualMachine, which `Create` imports with `qm importdisk` and then
+removes. The manager must have verified the path as above, and the path must be exactly
+`/var/tmp/.virtrigaud-import-<namespace>_<vm name>-migrated.<qcow2|raw|vmdk>` — the name
+`ImportDisk` derives from the target VM's namespace and name, so the same VM name in two
+namespaces gets two stages (a name over 200 bytes is shortened to its start, `__`, a
+16-hex-digit SHA-256 of `<namespace>/<vm name>`, and `-migrated`). On the node,
+`qm importdisk` runs only if the stage is a regular file, not a symbolic link, with a single
+hard link. Any other `spec.importedDisk.path` is refused before anything is created
+(`ValidationError`, the message never contains the path), and the provider never removes a
+node file that is not an import stage. A stage an earlier release created under the bare
+`/var/tmp/.virtrigaud-import-<vm name>-migrated.<format>` name is still accepted for the
+VM's own verified migration, so a migration in flight across the upgrade completes.
+
 > **Upgrade warning — legacy shared disks.** Before this change a path or prepared image
 > in the pool directory was attached in place, so several VMs created from the same image
 > may **share one disk file**, and deleting any of them deletes that file for all of

@@ -86,6 +86,14 @@ both an API token (`token_id`/`token_secret`) and SSH credentials (`ssh_user` +
 `ssh_password` and/or `ssh_privatekey`) plus a pinned `known_hosts`, because the
 Proxmox disk data plane runs `qemu-img`/`qm` on the PVE node over SSH.
 
+A Proxmox target stages the disk on the PVE node at
+`/var/tmp/.virtrigaud-import-<target namespace>_<target VM name>-migrated.<format>`;
+the target VM's create imports it with `qm importdisk` and removes it. The create
+accepts only that exact stage, and only for a `VMMigration` in the target VM's own
+namespace: a migration whose `spec.target.namespace` names another namespace
+completes its import, but its target VM's create is refused (`ValidationError`).
+See [`docs/image-preparation.md`](../../docs/image-preparation.md#libvirt-image-paths-sourcelibvirtpath).
+
 ## NFS staging backend (ADR-0006 Slice 4)
 
 NFS is the validated **second** staging backend. Instead of an object store, the
