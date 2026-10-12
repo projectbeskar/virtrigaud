@@ -60,9 +60,9 @@ func (h *localQemuImgHost) runVirshCommand(ctx context.Context, args ...string) 
 // qcow2Image creates a sparse qcow2 of virtual size size (e.g. "2T").
 func qcow2Image(t *testing.T, size string) string {
 	t.Helper()
-	if _, err := exec.LookPath("qemu-img"); err != nil {
-		t.Skip("qemu-img not installed")
-	}
+	// The package's host guard shims qemu-img even where it is missing
+	// (exit 127), so ask the guard, not PATH.
+	requireRealHostTool(t, "qemu-img")
 	path := filepath.Join(t.TempDir(), "staged.qcow2")
 	out, err := exec.Command("qemu-img", "create", "-f", "qcow2", path, size).CombinedOutput()
 	require.NoError(t, err, string(out))
