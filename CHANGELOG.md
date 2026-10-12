@@ -5,7 +5,7 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [2026-10-11 21:00] - vSphere Create leaves new VMs powered off; imported disks confined to the VM's own namespaced migration disk; post-create steps completed or failed, never skipped
+## [2026-10-12 08:38] - vSphere Create leaves new VMs powered off; imported disks confined to the VM's own namespaced migration disk; post-create steps completed or failed, never skipped
 **Author:** @wrkode (William Rizzo)
 
 ### Security
