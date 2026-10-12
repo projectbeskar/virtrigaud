@@ -44,7 +44,8 @@ import (
 // infra.virtrigaud.io/max-disk-size annotation
 // (infravirtrigaudiov1beta1.EffectiveMaxDiskSize), bounds every disk
 // VirtRigaud asks a provider to create or grow. It is enforced here, before
-// any provider call — the admission webhooks are optional and may be off:
+// the provider call that would create or grow the disk — the admission
+// webhooks are optional and may be off:
 //
 //   - a VirtualMachine Create (and the re-create of a vanished VM): every
 //     disk it asks for — the VMClass spec.diskDefaults.size primary disk and
@@ -55,9 +56,10 @@ import (
 //     "leave this disk as it is"), so a disk is never grown beyond the limit,
 //     while the VM's other changes are applied. A VM created before the limit
 //     with larger disks keeps running and is never shrunk
-//     (withholdDiskGrowthOverLimit);
-//   - a VMClone before its Clone RPC, and a VMMigration in its Validating
-//     phase, for the disks they would create on the target.
+//     (withholdDiskGrowthOverLimit). The withheld growth is recorded as DiskSizeWithinLimit=False;
+//   - a VMClone before its Clone RPC, and a VMMigration in Validating, before
+//     ExportDisk and before ImportDisk, by the source's real disk sizes
+//     (disk_size_limit_copies.go).
 
 // diskSizeLimitRetryInterval re-checks an object held by the disk-size limit.
 // The hold ends only with an edit (a smaller size, a raised limit), and the
@@ -167,7 +169,8 @@ func (r *VirtualMachineReconciler) refuseCreateOverDiskSizeLimit(
 }
 
 // holdForDiskSizeLimit keeps vm from being created (or re-created): no
-// provider call is made — no image prepare, no placement, no Create. Ready=False
+// further provider call is made for it — no image prepare, no placement, no
+// Create (a re-create was preceded by the Describe that found the VM gone). Ready=False
 // and Provisioning=False carry refusal (Provisioning is left alone while the
 // create marker is set: a Create may already have made the VM, and the marker
 // must survive), a Warning event is recorded when the hold begins or its

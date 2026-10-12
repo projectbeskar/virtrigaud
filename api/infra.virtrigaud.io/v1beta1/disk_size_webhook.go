@@ -38,7 +38,8 @@ import (
 // one VM and VMClass writes gain no admission dependency. They check only the
 // administrator's ceiling, not a Provider's own lower
 // ProviderMaxDiskSizeAnnotation (a VMClass is not tied to a Provider): the
-// controllers enforce both before any provider call, and they are the
+// controllers enforce both before the provider call that would create or
+// grow a disk, and they are the
 // enforcement that holds when webhooks are off.
 //
 // Only GROWTH beyond the ceiling is refused: an object stored with a larger
@@ -131,25 +132,42 @@ func (v *VirtualMachineDiskSizeValidator) ValidateDelete(_ context.Context, _ ru
 	return nil, nil
 }
 
+// diskOccurrence identifies a spec.disks entry by its name and the
+// occurrence of that name (0 for the first).
+// +kubebuilder:object:generate=false
+type diskOccurrence struct {
+	name string
+	n    int
+}
+
 // validate checks vm's spec.disks against the ceiling; old (nil on create)
 // supplies the sizes a disk of the same name already had.
 func (v *VirtualMachineDiskSizeValidator) validate(old, vm *VirtualMachine) error {
-	previous := map[string]int32{}
-	if old != nil {
-		for _, d := range old.Spec.Disks {
-			previous[d.Name] = d.SizeGiB
-		}
-	}
 	if v.MaxDiskSize == nil {
 		return nil
 	}
+	// A disk is matched with the old one of the same name and the same
+	// occurrence of that name (the schema does not make names unique), so a
+	// repeated name can neither borrow another entry's larger size nor be
+	// refused for keeping its own.
+	previous := map[diskOccurrence]int32{}
+	if old != nil {
+		seen := map[string]int{}
+		for _, d := range old.Spec.Disks {
+			previous[diskOccurrence{d.Name, seen[d.Name]}] = d.SizeGiB
+			seen[d.Name]++
+		}
+	}
+	seen := map[string]int{}
 	var errs field.ErrorList
 	for i, d := range vm.Spec.Disks {
+		key := diskOccurrence{d.Name, seen[d.Name]}
+		seen[d.Name]++
 		size := DiskSizeGiBQuantity(d.SizeGiB)
 		if size.Cmp(*v.MaxDiskSize) <= 0 {
 			continue
 		}
-		if had, ok := previous[d.Name]; ok && had >= d.SizeGiB {
+		if had, ok := previous[key]; ok && had >= d.SizeGiB {
 			continue
 		}
 		errs = append(errs, field.Invalid(

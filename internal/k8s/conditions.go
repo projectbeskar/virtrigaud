@@ -204,13 +204,14 @@ const (
 	// spec.diskDefaults.size, spec.disks[].sizeGiB) is above the disk-size
 	// limit that applies to its Provider: the smaller of the manager's
 	// --max-disk-size and the Provider's infra.virtrigaud.io/max-disk-size
-	// annotation. Nothing is created and no provider call is made; the VM is
-	// re-checked periodically and created once its sizes fit. On a VM that
-	// exists it is the Reconfiguring=False reason of a Reconfigure that
-	// applied everything except the growth of a disk beyond the limit (that
-	// disk is never grown past it, and never shrunk). It is also the
-	// Ready=False reason of a pending VMClone, and the Validating=False reason
-	// of a VMMigration, refused for the same cause.
+	// annotation. Nothing is created: no image prepare, placement or Create
+	// is sent. The VM is re-checked periodically and created once its sizes
+	// fit. On a VM that exists it is the DiskSizeWithinLimit=False reason of a
+	// Reconfigure that sent everything except the growth of a disk beyond the
+	// limit (that disk is never grown past it, and never shrunk). It is also
+	// the Ready=False reason of a pending VMClone, and the Validating=False,
+	// Exporting=False or Importing=False reason of a VMMigration, held for the
+	// same cause — a clone or migration by the source's real disk sizes.
 	ReasonDiskSizeExceedsLimit = "DiskSizeExceedsLimit"
 	// ReasonDiskSizeLimitUnverifiable is used like ReasonDiskSizeExceedsLimit
 	// when the disk-size limit cannot be checked: the Provider's

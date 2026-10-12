@@ -222,6 +222,21 @@ func TestVirtualMachineDiskSizeValidator(t *testing.T) {
 	if _, err := v.ValidateCreate(ctx, &VMClass{}); err == nil {
 		t.Fatal("a wrong type is an error")
 	}
+	// A repeated disk name is matched by occurrence: the second "a" cannot
+	// borrow the first one's larger size, and keeping both is admitted.
+	dup := func(sizes ...int32) *VirtualMachine {
+		vm := &VirtualMachine{ObjectMeta: metav1.ObjectMeta{Name: "web"}}
+		for _, s := range sizes {
+			vm.Spec.Disks = append(vm.Spec.Disks, DiskSpec{Name: "a", SizeGiB: s})
+		}
+		return vm
+	}
+	if _, err := v.ValidateUpdate(ctx, dup(500, 50), dup(500, 500)); err == nil || !strings.Contains(err.Error(), "spec.disks[1].sizeGiB") {
+		t.Fatalf("growing the second of two same-named disks beyond the limit must be refused, got %v", err)
+	}
+	if _, err := v.ValidateUpdate(ctx, dup(50, 500), dup(50, 500)); err != nil {
+		t.Fatalf("keeping both same-named disks is admitted, got %v", err)
+	}
 	// Served with no ceiling (webhooks on, --max-disk-size unset): admits all.
 	if _, err := (&VirtualMachineDiskSizeValidator{}).ValidateCreate(ctx, vmWithDisks(map[string]int32{"a": 65536}, "a")); err != nil {
 		t.Fatalf("no ceiling admits every size: %v", err)
