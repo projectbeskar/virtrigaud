@@ -30,6 +30,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	infravirtrigaudiov1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
+	storagemigration "github.com/projectbeskar/virtrigaud/internal/storage/migration"
 )
 
 // These tests pin the sizeLimit of the provider pod's writable /tmp emptyDir:
@@ -198,4 +199,40 @@ func TestProviderTmp_CeilingFlag(t *testing.T) {
 		_, err := ParseProviderTmpSizeLimitMax(bad)
 		assert.Error(t, err, bad)
 	}
+}
+
+// TestProviderTmp_VSphereGetsItsTmpLimitAsEnv (re-review N3): a vSphere
+// provider container gets its /tmp sizeLimit in VIRTRIGAUD_TMP_SIZE_LIMIT, so
+// it bounds staged copies by the emptyDir limit, not the node's free space;
+// other types and "none" get no variable.
+func TestProviderTmp_VSphereGetsItsTmpLimitAsEnv(t *testing.T) {
+	envOf := func(providerType infravirtrigaudiov1beta1.ProviderType, tmpLimit string) (string, bool) {
+		sch := newProviderSAScheme(t)
+		prov := providerWithRuntime("tmp-env", &infravirtrigaudiov1beta1.ProviderTLSSpec{Enabled: false})
+		prov.Spec.Type = providerType
+		cli := fake.NewClientBuilder().WithScheme(sch).WithObjects(prov).
+			WithStatusSubresource(&infravirtrigaudiov1beta1.Provider{}).Build()
+		r := &ProviderReconciler{Client: cli, Scheme: sch, TmpSizeLimit: tmpLimit}
+		_, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Name: "tmp-env", Namespace: "default"}})
+		require.NoError(t, err)
+		dep := &appsv1.Deployment{}
+		require.NoError(t, cli.Get(context.Background(),
+			types.NamespacedName{Name: "virtrigaud-provider-default-tmp-env", Namespace: "default"}, dep))
+		for _, e := range dep.Spec.Template.Spec.Containers[0].Env {
+			if e.Name == storagemigration.EnvTmpSizeLimit {
+				return e.Value, true
+			}
+		}
+		return "", false
+	}
+	v, ok := envOf(infravirtrigaudiov1beta1.ProviderTypeVSphere, "")
+	assert.True(t, ok)
+	assert.Equal(t, "512Gi", v)
+	v, ok = envOf(infravirtrigaudiov1beta1.ProviderTypeVSphere, "100Gi")
+	assert.True(t, ok)
+	assert.Equal(t, "100Gi", v)
+	_, ok = envOf(infravirtrigaudiov1beta1.ProviderTypeVSphere, infravirtrigaudiov1beta1.ProviderTmpSizeLimitNone)
+	assert.False(t, ok, "no limit, no variable")
+	_, ok = envOf(infravirtrigaudiov1beta1.ProviderTypeLibvirt, "")
+	assert.False(t, ok)
 }

@@ -51,6 +51,7 @@ func TestHandleReadyPhase_DeleteAfterMigrationWithTargetOffWarns(t *testing.T) {
 			migration.Spec.Source.DeleteAfterMigration = true
 			migration.Spec.Target.PowerOn = tc.powerOn
 			migration.Status.Phase = infrav1beta1.MigrationPhaseReady
+			markPostMigrationCleanupPending(migration) // completed by this manager
 			r, c := newSnapshotReconciler(t, &countingSnapshotProvider{}, sourceVM, sourceProvider, migration)
 
 			_, err := r.handleReadyPhase(ctx, migration)

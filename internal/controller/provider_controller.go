@@ -47,6 +47,7 @@ import (
 	"github.com/projectbeskar/virtrigaud/internal/obs/metrics"
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
 	"github.com/projectbeskar/virtrigaud/internal/runtime/remote"
+	storagemigration "github.com/projectbeskar/virtrigaud/internal/storage/migration"
 	"github.com/projectbeskar/virtrigaud/internal/util"
 )
 
@@ -839,6 +840,8 @@ func (r *ProviderReconciler) reconcileDeployment(ctx context.Context, provider *
 	if err != nil {
 		return nil, fmt.Errorf("failed to build container spec: %w", err)
 	}
+	volumes := r.buildPodVolumes(ctx, provider)
+	addTmpSizeLimitEnv(provider, container, volumes)
 
 	// Build deployment spec
 	desired := &appsv1.Deployment{
@@ -882,7 +885,7 @@ func (r *ProviderReconciler) reconcileDeployment(ctx context.Context, provider *
 					ServiceAccountName:            r.getServiceAccountName(provider),
 					AutomountServiceAccountToken:  util.BoolPtr(false),
 					Containers:                    []corev1.Container{*container},
-					Volumes:                       r.buildPodVolumes(ctx, provider),
+					Volumes:                       volumes,
 					NodeSelector:                  provider.Spec.Runtime.NodeSelector,
 					Tolerations:                   provider.Spec.Runtime.Tolerations,
 					Affinity:                      provider.Spec.Runtime.Affinity,
@@ -1221,6 +1224,22 @@ func (r *ProviderReconciler) buildProviderContainer(provider *infravirtrigaudiov
 
 	// Add volumes to pod spec (we'll need to modify the caller to handle this)
 	return container, nil
+}
+
+// addTmpSizeLimitEnv gives a vSphere provider container the effective
+// sizeLimit of its /tmp emptyDir (migration.EnvTmpSizeLimit): it stages whole
+// disks there and bounds its staged copies by it (statfs shows the node, not
+// the emptyDir limit). No limit, or another provider type: nothing is added.
+func addTmpSizeLimitEnv(provider *infravirtrigaudiov1beta1.Provider, container *corev1.Container, volumes []corev1.Volume) {
+	if provider.Spec.Type != infravirtrigaudiov1beta1.ProviderTypeVSphere {
+		return
+	}
+	for _, v := range volumes {
+		if v.Name == "tmp" && v.EmptyDir != nil && v.EmptyDir.SizeLimit != nil {
+			container.Env = append(container.Env, corev1.EnvVar{Name: storagemigration.EnvTmpSizeLimit, Value: v.EmptyDir.SizeLimit.String()})
+			return
+		}
+	}
 }
 
 // buildPodVolumes builds the volumes for the provider pod

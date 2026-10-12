@@ -276,7 +276,9 @@ func cloneHoldsProvider(clone *infravirtrigaudiov1beta1.VMClone) bool {
 
 // migrationHoldsProvider reports whether a VMMigration still needs its
 // Providers: it carries its finalizer and is in flight, or is being deleted
-// (its cleanup can delete the source snapshot through the source Provider).
+// (its cleanup can delete the source snapshot through the source Provider),
+// or — Ready or Failed — its nfs / s3 staged disk may still exist and its
+// cleanupPolicy will delete it through the target Provider (ADR-0011 D8).
 func migrationHoldsProvider(migration *infravirtrigaudiov1beta1.VMMigration) bool {
 	if !controllerutil.ContainsFinalizer(migration, infravirtrigaudiov1beta1.VMMigrationFinalizer) {
 		return false
@@ -284,8 +286,11 @@ func migrationHoldsProvider(migration *infravirtrigaudiov1beta1.VMMigration) boo
 	if !migration.DeletionTimestamp.IsZero() {
 		return true
 	}
-	return migration.Status.Phase != infravirtrigaudiov1beta1.MigrationPhaseReady &&
-		migration.Status.Phase != infravirtrigaudiov1beta1.MigrationPhaseFailed
+	if migration.Status.Phase != infravirtrigaudiov1beta1.MigrationPhaseReady &&
+		migration.Status.Phase != infravirtrigaudiov1beta1.MigrationPhaseFailed {
+		return true
+	}
+	return stagingCleanupWanted(migration, stagingTriggerDeletion)
 }
 
 // providerInUseVMValue is the providerInUseIndex value of an object that acts

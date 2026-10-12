@@ -130,13 +130,27 @@ func snapshotCleanupNotDue(m *infrav1beta1.VMMigration, now time.Time) (time.Dur
 }
 
 // handleTerminalFailure reconciles a migration that failed for good
-// (migrationTerminallyFailed). Its only remaining work is the source snapshot
-// it created: it is deleted (deleteSourceSnapshot) — on the LIVE source VM it
-// would otherwise stay until the VMMigration is deleted, and on libvirt its
-// metadata blocks deleting the source VM. A delete that cannot be made or
-// fails is held (holdSourceSnapshotCleanup) and retried with the blocked-VM
-// backoff; nothing else is reconciled.
+// (migrationTerminallyFailed). Its only remaining work is cleanup. The staged
+// disk of an nfs / s3 migration is deleted when cleanupPolicy is Always
+// (reconcileStagingCleanup, ADR-0011 D3; with the default OnSuccess it is kept
+// until the VMMigration is deleted). The source snapshot it created is
+// deleted (deleteSourceSnapshot) — on the LIVE source VM it would otherwise
+// stay until the VMMigration is deleted, and on libvirt its metadata blocks
+// deleting the source VM. A delete that cannot be made or fails is held
+// (holdStagingCleanup / holdSourceSnapshotCleanup) and retried with the
+// blocked-VM backoff; nothing else is reconciled.
 func (r *VMMigrationReconciler) handleTerminalFailure(ctx context.Context, migration *infrav1beta1.VMMigration) (ctrl.Result, error) {
+	stagingRetry, err := r.reconcileStagingCleanup(ctx, migration, stagingTriggerTerminalFailure)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	res, err := r.terminalSnapshotCleanup(ctx, migration)
+	return stagingCleanupRequeue(res, stagingRetry), err
+}
+
+// terminalSnapshotCleanup deletes the source snapshot a terminally failed
+// migration created, holding a delete that cannot be made or fails.
+func (r *VMMigrationReconciler) terminalSnapshotCleanup(ctx context.Context, migration *infrav1beta1.VMMigration) (ctrl.Result, error) {
 	logger := logging.FromContext(ctx)
 	if !migrationSnapshotCleanupPending(migration) {
 		logger.V(1).Info("Migration permanently failed, skipping reconciliation",
