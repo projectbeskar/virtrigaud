@@ -614,7 +614,7 @@ removes. The manager must have verified the path as above, and the path must be 
 namespaces gets two stages (a name over 200 bytes is shortened to its start, `__`, a
 16-hex-digit SHA-256 of `<namespace>/<vm name>`, and `-migrated`). On the node,
 `qm importdisk` runs only if the stage is a regular file, not a symbolic link, with a single
-hard link. Any other `spec.importedDisk.path` is refused before anything is created
+hard link, owned by the SSH user (root), and not writable by group or others. Any other `spec.importedDisk.path` is refused before anything is created
 (`ValidationError`, the message never contains the path), and the provider never removes a
 node file that is not an import stage. A stage an earlier release created under the bare
 `/var/tmp/.virtrigaud-import-<vm name>-migrated.<format>` name is refused, even for the VM's

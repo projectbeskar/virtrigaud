@@ -262,10 +262,18 @@ func isImportStagePath(path string) bool {
 }
 
 // importStageNodeCheck is the node-side shell condition a stage must meet
-// before `qm importdisk` reads it: a regular file (-f), not a symbolic link
-// (-f alone follows one), with exactly one hard link (not a second name of
-// another file). It is a free function so the exact text is unit-testable.
+// before `qm importdisk` reads it (or a rebuild relies on it):
+//   - a regular file (-f), not a symbolic link (-f alone follows one);
+//   - exactly one hard link (not a second name of another file);
+//   - owned by the user running the command (root on a PVE node: ImportDisk
+//     writes every stage as that user), so no other account made or swapped it;
+//   - no group or other write bit (mode & 022 == 0), so no other account could
+//     have rewritten it after it was staged.
+//
+// A stat that fails fails the check. It is a free function so the exact text
+// is unit-testable, and it is run against real files in the tests.
 func importStageNodeCheck(stagePath string) string {
 	q := proxmoxShellQuote(stagePath)
-	return fmt.Sprintf(`[ -f %s ] && [ ! -L %s ] && [ "$(stat -c %%h -- %s)" = 1 ]`, q, q, q)
+	return fmt.Sprintf(`[ -f %s ] && [ ! -L %s ] && [ "$(stat -c '%%h %%u' -- %s)" = "1 $(id -u)" ] && `+
+		`[ $(( 0$(stat -c %%a -- %s) & 022 )) -eq 0 ]`, q, q, q, q)
 }

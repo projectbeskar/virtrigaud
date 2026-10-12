@@ -171,7 +171,8 @@ func TestBuildImportDiskCommand(t *testing.T) {
 	cmd := buildImportDiskCommand(110001, "/var/tmp/.virtrigaud-import-ns_web-migrated.qcow2", "local-lvm", "qcow2")
 	q := "'/var/tmp/.virtrigaud-import-ns_web-migrated.qcow2'"
 	assert.Equal(t,
-		"[ -f "+q+" ] && [ ! -L "+q+" ] && [ \"$(stat -c %h -- "+q+")\" = 1 ] && "+
+		"[ -f "+q+" ] && [ ! -L "+q+" ] && [ \"$(stat -c '%h %u' -- "+q+")\" = \"1 $(id -u)\" ] && "+
+			"[ $(( 0$(stat -c %a -- "+q+") & 022 )) -eq 0 ] && "+
 			"qm importdisk 110001 "+q+" 'local-lvm' --format 'qcow2'",
 		cmd)
 }

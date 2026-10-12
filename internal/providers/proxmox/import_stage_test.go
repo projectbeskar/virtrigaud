@@ -20,6 +20,9 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -393,6 +396,56 @@ func TestIsImportStagePath(t *testing.T) {
 	assert.False(t, isImportStagePath("/var/tmp/.virtrigaud-import-a..b.qcow2"))
 	assert.False(t, isImportStagePath("/var/tmp/.virtrigaud-import-a/b.qcow2"))
 	assert.False(t, isImportStagePath("/var/tmp/.virtrigaud-export-a.qcow2"))
+}
+
+// TestImportStageNodeCheck_RealShell runs the node-side stage check against
+// real files with the local POSIX sh and bash (GNU stat, as on a PVE node).
+// Only a regular, single-link file owned by the running user with no group or
+// other write bit passes. (A file owned by another user cannot be made
+// without root; the owner comparison is exercised by the passing case.)
+func TestImportStageNodeCheck_RealShell(t *testing.T) {
+	if err := exec.Command("stat", "-c", "%h", "/").Run(); err != nil {
+		t.Skip("GNU stat not available")
+	}
+	dir := t.TempDir()
+	mk := func(name string, mode os.FileMode) string {
+		p := filepath.Join(dir, name)
+		require.NoError(t, os.WriteFile(p, []byte("disk"), 0o600))
+		require.NoError(t, os.Chmod(p, mode))
+		return p
+	}
+	ok600 := mk("ok600.qcow2", 0o600)
+	ok644 := mk("ok644.qcow2", 0o644)
+	groupWrite := mk("g.qcow2", 0o660)
+	otherWrite := mk("o.qcow2", 0o602)
+	linked := mk("linked.qcow2", 0o600)
+	require.NoError(t, os.Link(linked, filepath.Join(dir, "second-name.qcow2")))
+	symlink := filepath.Join(dir, "sym.qcow2")
+	require.NoError(t, os.Symlink(ok600, symlink))
+	subdir := filepath.Join(dir, "d.qcow2")
+	require.NoError(t, os.Mkdir(subdir, 0o700))
+	quoted := mk("it's quoted.qcow2", 0o600)
+
+	cases := map[string]bool{
+		ok600:                           true,
+		ok644:                           true,
+		quoted:                          true,
+		groupWrite:                      false,
+		otherWrite:                      false,
+		linked:                          false,
+		symlink:                         false,
+		subdir:                          false,
+		filepath.Join(dir, "missing.x"): false,
+	}
+	for _, shell := range []string{"sh", "bash"} {
+		if _, err := exec.LookPath(shell); err != nil {
+			continue
+		}
+		for path, want := range cases {
+			err := exec.Command(shell, "-c", importStageNodeCheck(path)).Run()
+			assert.Equal(t, want, err == nil, "%s: %s (err %v)", shell, filepath.Base(path), err)
+		}
+	}
 }
 
 // TestCreate_ImportedDiskFormatConfined: spec.importedDisk.format is
