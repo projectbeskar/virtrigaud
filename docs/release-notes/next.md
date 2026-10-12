@@ -582,7 +582,10 @@ providers), and rollback caveats in
 - The kustomize helper ClusterRoles in `config/rbac`
   (`*-admin-role`, `*-editor-role`, `*-viewer-role`) named the API group
   `infra.virtrigaud.io.infra.virtrigaud.io` and granted nothing; they now
-  grant `infra.virtrigaud.io`.
+  grant `infra.virtrigaud.io`, so **subjects already bound to them gain that
+  access** — review the bindings first. The admin roles list their verbs
+  instead of `*`, and the `provider-*` roles are labelled
+  `virtrigaud.io/role-scope: platform-admin`.
 - A `VMMigration` with `deleteAfterMigration: true` whose target stays off
   (`powerOn: false`) records a `SourceDeletedTargetNotStarted` Warning when it
   deletes the source.

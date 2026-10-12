@@ -1,6 +1,11 @@
 # This rule is not used by the project virtrigaud itself.
 # It is provided to allow the cluster admin to help manage permissions for users.
 #
+# PLATFORM-ADMIN ONLY: a Provider holds hypervisor credentials and decides who may
+# use it (spec.consumerNamespaceSelector) and whether its consumers may leave VMs
+# behind (infra.virtrigaud.io/allow-consumer-orphan-on-delete). Bind this role
+# to platform administrators only, never to tenants.
+#
 # Grants permissions to create, update, and delete resources within the infra.virtrigaud.io.
 # This role is intended for users who need to manage these resources
 # but should not control RBAC or manage permissions for others.
@@ -11,6 +16,7 @@ metadata:
   labels:
     app.kubernetes.io/name: virtrigaud
     app.kubernetes.io/managed-by: kustomize
+    virtrigaud.io/role-scope: platform-admin
   name: provider-editor-role
 rules:
 - apiGroups:

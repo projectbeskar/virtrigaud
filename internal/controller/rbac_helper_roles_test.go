@@ -53,6 +53,11 @@ func TestRBAC_HelperRolesUseTheAPIGroup(t *testing.T) {
 		require.NotEmpty(t, role.Rules, base)
 		for _, rule := range role.Rules {
 			assert.Equal(t, []string{infravirtrigaudiov1beta1.GroupVersion.Group}, rule.APIGroups, base)
+			assert.NotContains(t, rule.Verbs, "*", "%s: verbs are listed explicitly", base)
+		}
+		if strings.HasPrefix(base, "provider_") {
+			assert.Equal(t, "platform-admin", role.Labels["virtrigaud.io/role-scope"],
+				"%s: Provider roles are for platform administrators only", base)
 		}
 		checked++
 	}
