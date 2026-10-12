@@ -41,7 +41,12 @@ import (
 // since (delete-safety fix, review item 5): a successful start (power-on,
 // power-on-define-fails, power-reboot, power-reboot-stop-fails) is followed by
 // the read-only linked-clone dependents count — `dumpxml` of the domain and
-// `list --all --uuid`. The Reconfigure sequences, errors and restart-required
+// `list --all --uuid`. They were regenerated once more for idempotent Power
+// (v0.4.0-rc1 F3): a FAILED start / destroy / shutdown fallback is followed by
+// a read-only `domstate`, and an op whose domain is already in the requested
+// state succeeds (power-off-already-off, power-on-already-running,
+// power-shutdown-graceful-already-off); every successful sequence is
+// unchanged. The Reconfigure sequences, errors and restart-required
 // answers were deliberately re-captured (VIRTRIGAUD_UPDATE_CALLSEQ_GOLDEN=1)
 // when Reconfigure stopped reporting success for changes it did not apply (the
 // honest-result fix, see reconfigure.go). A change to any single-host sequence
@@ -265,7 +270,26 @@ func singleHostCallSeqScenarios() []callSeqScenario {
 			fx.script("local", "fail-define", "")
 		}, run: power(contracts.PowerOpOn)},
 		{name: "power-off", run: power(contracts.PowerOpOff)},
-		{name: "power-off-fails", setup: func(fx *routingFixture) { fx.script("single", "fail-destroy", "") }, run: power(contracts.PowerOpOff)},
+		{name: "power-off-fails", setup: func(fx *routingFixture) {
+			running(fx)
+			fx.script("single", "fail-destroy", "")
+		}, run: power(contracts.PowerOpOff)},
+		// Power is idempotent (v0.4.0-rc1 F3): a failed destroy / shutdown of
+		// a domain that is already shut off, or a failed start of a running
+		// one, re-reads domstate and succeeds.
+		{name: "power-off-already-off", setup: func(fx *routingFixture) { fx.script("single", "fail-destroy", "") }, run: power(contracts.PowerOpOff)},
+		{name: "power-on-already-running", setup: func(fx *routingFixture) {
+			running(fx)
+			fx.script("single", "fail-start", "")
+		}, run: power(contracts.PowerOpOn)},
+		{name: "power-shutdown-graceful-already-off", setup: func(fx *routingFixture) {
+			fx.script("single", "fail-shutdown", "")
+			fx.script("single", "fail-destroy", "")
+		}, run: power(contracts.PowerOpShutdownGraceful)},
+		{name: "power-off-fails-state-unreadable", setup: func(fx *routingFixture) {
+			fx.script("single", "fail-destroy", "")
+			fx.script("single", "fail-domstate", "")
+		}, run: power(contracts.PowerOpOff)},
 		{name: "power-reboot", run: power(contracts.PowerOpReboot)},
 		{name: "power-reboot-stop-fails", setup: func(fx *routingFixture) { fx.script("single", "fail-destroy", "") }, run: power(contracts.PowerOpReboot)},
 		{name: "power-shutdown-graceful", run: power(contracts.PowerOpShutdownGraceful)},

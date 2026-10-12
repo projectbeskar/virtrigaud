@@ -1490,6 +1490,15 @@ func (p *Provider) runPowerOp(ctx context.Context, c libvirtConn, d domainTarget
 	}
 
 	if err != nil {
+		// Power is idempotent: a start of a running domain, or a destroy /
+		// shutdown of a stopped one, fails in virsh ("domain is already
+		// running", "domain is not running") — also when another actor won
+		// a race to the same change. The domain's state, re-read after the
+		// failure, decides: already in the requested state is success.
+		if powerOpAlreadySatisfied(ctx, vp, id, op) {
+			log.Printf("INFO Power operation %s on %s: the domain is already in the requested state", op, d.name)
+			return nil
+		}
 		return contracts.NewRetryableError(fmt.Sprintf("failed to perform power operation %s", op), err)
 	}
 
@@ -1500,6 +1509,28 @@ func (p *Provider) runPowerOp(ctx context.Context, c libvirtConn, d domainTarget
 		p.recordLinkedCloneDependents(ctx, vp, d)
 	}
 	return nil
+}
+
+// powerOpAlreadySatisfied re-reads the state of domain handle on vp's host
+// after op failed and reports whether the domain is already in the state op
+// asks for: running (or idle/blocked) for On, shut off for Off and
+// ShutdownGraceful. Reboot is never satisfied by a state, and a state that
+// cannot be read is not satisfied (the failure stands).
+func powerOpAlreadySatisfied(ctx context.Context, vp *VirshProvider, handle string, op contracts.PowerOp) bool {
+	var want map[string]bool
+	switch op {
+	case contracts.PowerOpOn:
+		want = map[string]bool{domStateRunning: true, domStateIdle: true, domStateBlocked: true}
+	case contracts.PowerOpOff, contracts.PowerOpShutdownGraceful:
+		want = map[string]bool{domStateShutOff: true, domStateShutoff: true}
+	default:
+		return false
+	}
+	state, err := vp.getDomainState(ctx, handle)
+	if err != nil {
+		return false
+	}
+	return want[strings.ToLower(strings.TrimSpace(state))]
 }
 
 // syncPersistentXML updates the persistent definition of domainName on vp's
