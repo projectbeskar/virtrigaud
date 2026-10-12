@@ -4207,6 +4207,11 @@ func (p *Provider) ImportDisk(ctx context.Context, req *providerv1.ImportDiskReq
 
 	p.logger.Info("Download completed", "bytes", downloadResp.BytesTransferred, "checksum", downloadResp.Checksum)
 
+	// The disk-size limit, early, on the private download (before converting).
+	if err := refuseOversizedBeforeConvert(ctx, tempFile, targetFormat, req.MaxVirtualSizeBytes); err != nil {
+		return nil, err
+	}
+
 	// Convert to VMDK if needed
 	var vmdkPath string
 	if targetFormat != "vmdk" {

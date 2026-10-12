@@ -163,6 +163,10 @@ func (p *Provider) importDiskFromS3(ctx context.Context, req *providerv1.ImportD
 	if !qemuImg.IsInstalled() {
 		return nil, errors.NewInternal("qemu-img is not available in the provider image; cannot convert s3 import", nil)
 	}
+	// The disk-size limit, early, on the private download (before converting).
+	if err := refuseOversizedBeforeConvert(ctx, srcLocal, srcFormat, req.MaxVirtualSizeBytes); err != nil {
+		return nil, err
+	}
 	if err := qemuImg.Convert(ctx, diskutil.ConvertOptions{
 		SourcePath:        srcLocal,
 		DestinationPath:   vmdkLocal,

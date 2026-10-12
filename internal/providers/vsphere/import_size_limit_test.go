@@ -79,3 +79,26 @@ func TestGetCapabilities_AdvertisesImportSizeLimit(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, caps.GetSupportsImportSizeLimit())
 }
+
+// TestRefuseOversizedBeforeConvert: the early check refuses a staged qcow2
+// already known to be above the limit, before any convert; a size it cannot
+// read is left to the authoritative check on the converted vmdk.
+func TestRefuseOversizedBeforeConvert(t *testing.T) {
+	if _, err := exec.LookPath("qemu-img"); err != nil {
+		t.Skip("qemu-img not installed")
+	}
+	ctx := context.Background()
+	const limit = int64(100) << 30
+	big := filepath.Join(t.TempDir(), "staged.qcow2")
+	out, err := exec.Command("qemu-img", "create", "-f", "qcow2", big, "2T").CombinedOutput()
+	require.NoError(t, err, string(out))
+
+	err = refuseOversizedBeforeConvert(ctx, big, "qcow2", limit)
+	require.Error(t, err)
+	assert.Equal(t, importlimit.ExceedsMessage, err.Error())
+	assert.NoError(t, refuseOversizedBeforeConvert(ctx, big, "qcow2", 0))
+
+	garbage := filepath.Join(t.TempDir(), "garbage.qcow2")
+	require.NoError(t, os.WriteFile(garbage, []byte("x"), 0o600))
+	assert.NoError(t, refuseOversizedBeforeConvert(ctx, garbage, "qcow2", limit), "left to the landing check")
+}

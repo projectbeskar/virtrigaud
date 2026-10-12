@@ -37,3 +37,20 @@ func checkLandingVirtualSize(ctx context.Context, vmdkPath string, maxBytes int6
 	size, err := importlimit.LocalVirtualSize(ctx, vmdkPath, "vmdk")
 	return importlimit.Check(size, err, maxBytes)
 }
+
+// refuseOversizedBeforeConvert is an early, cheaper refusal: the private
+// download at path, read as format, is refused when it is already known to be
+// above maxBytes, before it is converted (a sparse multi-TiB image would
+// otherwise be converted first). It refuses only a size it read: a size it
+// cannot read is left to checkLandingVirtualSize, which fails closed on the
+// converted vmdk right before the landing.
+func refuseOversizedBeforeConvert(ctx context.Context, path, format string, maxBytes int64) error {
+	if maxBytes <= 0 {
+		return nil
+	}
+	size, err := importlimit.LocalVirtualSize(ctx, path, format)
+	if err != nil {
+		return nil
+	}
+	return importlimit.Check(size, nil, maxBytes)
+}
