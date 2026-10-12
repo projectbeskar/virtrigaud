@@ -1436,6 +1436,21 @@ func isVMIsImageArtifactStatus(st *status.Status) bool {
 	return false
 }
 
+// statusHasReason reports whether st has code and carries a
+// google.rpc.ErrorInfo with reason in VirtRigaud's domain.
+func statusHasReason(st *status.Status, code codes.Code, reason string) bool {
+	if st == nil || st.Code() != code {
+		return false
+	}
+	for _, d := range st.Details() {
+		if info, ok := d.(*errdetails.ErrorInfo); ok &&
+			info.GetReason() == reason && info.GetDomain() == contracts.ErrorInfoDomain {
+			return true
+		}
+	}
+	return false
+}
+
 // isVMDiskInUseStatus reports whether a gRPC status is a provider's refusal of
 // a per-VM operation because another VM on the host depends on this VM's disk
 // (e.g. its linked clone): codes.FailedPrecondition carrying a
@@ -1702,6 +1717,13 @@ func (c *Client) mapGRPCStatus(operation string, err error) error {
 
 	switch st.Code() {
 	case codes.NotFound:
+		// A VM exists at that id but is not the requester's (VM_NOT_OWNED):
+		// still NotFound, marked so the controller can tell it from a VM that
+		// is gone (contracts.IsVMNotOwned).
+		if statusHasReason(st, codes.NotFound, contracts.VMNotOwnedReason) {
+			return contracts.NewNotFoundError(fmt.Sprintf("%s: %s", operation, st.Message()),
+				fmt.Errorf("%w: %w", contracts.ErrVMNotOwned, err))
+		}
 		return contracts.NewNotFoundError(fmt.Sprintf("%s: %s", operation, st.Message()), err)
 	case codes.InvalidArgument:
 		return contracts.NewInvalidSpecError(fmt.Sprintf("%s: %s", operation, st.Message()), err)
@@ -1739,6 +1761,13 @@ func (c *Client) mapGRPCStatus(operation string, err error) error {
 		if isVMIsImageArtifactStatus(st) {
 			return contracts.NewConflictError(fmt.Sprintf("%s: %s", operation, st.Message()),
 				fmt.Errorf("%w: %w", contracts.ErrVMIsImageArtifact, err))
+		}
+		// The provider refused because the VM's owner stamp cannot be read or
+		// records more than one owner: typed Conflict (non-retryable, nothing
+		// changed), marked (contracts.IsOwnerStampUnreadable).
+		if statusHasReason(st, codes.FailedPrecondition, contracts.OwnerStampUnreadableReason) {
+			return contracts.NewConflictError(fmt.Sprintf("%s: %s", operation, st.Message()),
+				fmt.Errorf("%w: %w", contracts.ErrOwnerStampUnreadable, err))
 		}
 		// A clone refused because its source VM is not powered off (libvirt):
 		// retryable and marked, so the VMClone controller keeps the clone

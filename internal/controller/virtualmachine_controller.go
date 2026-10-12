@@ -1052,6 +1052,15 @@ func (r *VirtualMachineReconciler) handleDeletion(ctx context.Context, vm *infra
 						return r.holdDelete(ctx, vm, k8s.ReasonOwnDomainOnAnotherHost, ownDomainDeleteMessage, err), nil
 					}
 					return r.releaseLeavingHypervisorVM(ctx, vm, vmLeftOwnDomainElsewhere)
+				case contracts.IsVMNotOwned(err):
+					// The provider found a VM at this id that is not this
+					// VirtualMachine's (VM_NOT_OWNED: another owner's stamp, or
+					// unstamped under another name) and left it alone. This
+					// VirtualMachine's own VM is treated as gone — a reused id —
+					// but something still runs there, possibly this VM's own
+					// (e.g. it was re-created under a new UID by a restore), so
+					// the release is recorded instead of silent.
+					r.recordVMNotOwnedRelease(ctx, vm, ref)
 				case contracts.IsNotFound(err):
 					// The hypervisor VM is already gone — nothing to orphan, so
 					// proceed to finalizer removal (idempotent delete). A clustered

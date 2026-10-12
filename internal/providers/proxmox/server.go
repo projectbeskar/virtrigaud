@@ -482,14 +482,11 @@ func (p *Provider) Delete(ctx context.Context, req *providerv1.DeleteRequest) (*
 		return nil, errors.NewInvalidSpec("invalid VM reference: %v", err)
 	}
 
-	// A request that names its owner destroys the VM only when the VM is not
-	// stamped with another owner (its VMID reused) and its stamp can be read.
-	// Without an owner (today's manager on a single-host Provider) the delete
-	// is unchanged.
-	if owner := deleteOwner(req); !owner.IsZero() {
-		if err := p.checkDeleteOwner(ctx, node, vmid, owner); err != nil {
-			return nil, err
-		}
+	// A template is never destroyed; a request that names its owner destroys
+	// the VM only when the VM is not stamped with another owner (its VMID
+	// reused) and its stamp can be read (checkDelete).
+	if err := p.checkDelete(ctx, node, vmid, deleteOwner(req)); err != nil {
+		return nil, err
 	}
 
 	// Proxmox refuses to destroy a running VM ("VM <id> is running - destroy

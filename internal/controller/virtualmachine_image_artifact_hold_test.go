@@ -104,6 +104,38 @@ func TestHandleDeletion_ImageArtifactRefusalIsHeld(t *testing.T) {
 	assert.EqualValues(t, 2, prov.calls.Load())
 }
 
+// A Delete answered VM_NOT_OWNED releases the VirtualMachine (its own VM is
+// gone; the VMID was reused) but records it: one constant VMLeftOnHypervisor
+// Warning, never silent.
+func TestHandleDeletion_VMNotOwnedReleasesWithAWarning(t *testing.T) {
+	ctx := context.Background()
+	notOwned := contracts.NewNotFoundError("delete: the VM at this VMID is not this VirtualMachine's",
+		fmt.Errorf("%w: rpc error: code = NotFound", contracts.ErrVMNotOwned))
+	prov := &deleteStubProvider{err: notOwned}
+	vm := deletionVM("vm-restored")
+	r := newTestReconciler(coverageTestScheme(t), &stubResolver{provider: prov}, vm, deletionProviderCR())
+	rec := record.NewFakeRecorder(10)
+	r.Recorder = rec
+	marked := markForDeletion(t, r, vm)
+
+	_, err := r.handleDeletion(ctx, marked)
+	require.NoError(t, err)
+	assert.True(t, apierrors.IsNotFound(r.Get(ctx, client.ObjectKeyFromObject(vm), &infravirtrigaudiov1beta1.VirtualMachine{})))
+	events := drainEvents(rec)
+	require.Len(t, events, 1)
+	assert.Equal(t, "Warning "+eventReasonVMLeftOnHypervisor+" "+vmNotOwnedLeftMessage, events[0])
+
+	// A plain NotFound (the VM is gone) still releases silently.
+	gone := deletionVM("vm-gone-silently")
+	r2 := newTestReconciler(coverageTestScheme(t), &stubResolver{provider: &deleteStubProvider{
+		err: contracts.NewNotFoundError("delete: VM not found", nil)}}, gone, deletionProviderCR())
+	rec2 := record.NewFakeRecorder(10)
+	r2.Recorder = rec2
+	_, err = r2.handleDeletion(ctx, markForDeletion(t, r2, gone))
+	require.NoError(t, err)
+	assert.Empty(t, drainEvents(rec2))
+}
+
 func TestHandleDeletion_ImageArtifactForceDeleteStillWins(t *testing.T) {
 	ctx := context.Background()
 	prov := &deleteStubProvider{err: imageArtifactRefusal("delete")}

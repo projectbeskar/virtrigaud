@@ -31,6 +31,7 @@ import (
 	infravirtrigaudiov1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
 	"github.com/projectbeskar/virtrigaud/internal/k8s"
 	"github.com/projectbeskar/virtrigaud/internal/obs/metrics"
+	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
 )
 
 // A provider refuses a per-VM operation with VM_IS_IMAGE_ARTIFACT
@@ -144,6 +145,33 @@ func (r *VirtualMachineReconciler) holdImageArtifactPower(
 		r.recordEvent(vm, corev1.EventTypeWarning, k8s.ReasonVMIsImageArtifact, imageArtifactPowerMessage)
 	}
 	return ctrl.Result{RequeueAfter: retry}
+}
+
+// vmNotOwnedLeftMessage is the VMLeftOnHypervisor Warning recorded when a
+// VirtualMachine is released because its provider Delete answered
+// VM_NOT_OWNED. It is constant: nothing the provider found is put in it.
+const vmNotOwnedLeftMessage = "The VirtualMachine was removed without deleting a hypervisor VM: the provider " +
+	"reports that the VM at its id is not this VirtualMachine's (another owner's stamp, or another name), and left " +
+	"it in place. Its own VM is treated as gone. If this VirtualMachine was re-created under a new UID (for example " +
+	"by a backup restore), that VM may be its own and is now unmanaged: check the hypervisor and remove or adopt it"
+
+// errReasonVMNotOwned is the metrics reason of a delete released on a
+// VM_NOT_OWNED answer.
+const errReasonVMNotOwned = "vm-not-owned"
+
+// recordVMNotOwnedRelease records that vm's provider Delete was answered
+// VM_NOT_OWNED (contracts.IsVMNotOwned): the caller releases the finalizer —
+// the VM at the id is not this VirtualMachine's (a reused id) — and this logs
+// it at Info, counts it, and records the constant VMLeftOnHypervisor Warning.
+func (r *VirtualMachineReconciler) recordVMNotOwnedRelease(
+	ctx context.Context,
+	vm *infravirtrigaudiov1beta1.VirtualMachine,
+	ref contracts.VMRef,
+) {
+	log.FromContext(ctx).Info("The provider reports that the VM at this id is not this VirtualMachine's; releasing the "+
+		"finalizer without deleting it", "id", ref.ID, "host", ref.HostID)
+	metrics.RecordError(errReasonVMNotOwned, metrics.ComponentManager)
+	r.recordEvent(vm, corev1.EventTypeWarning, eventReasonVMLeftOnHypervisor, vmNotOwnedLeftMessage)
 }
 
 // setImageArtifactReady sets Ready=False/VMIsImageArtifact with msg on vm and

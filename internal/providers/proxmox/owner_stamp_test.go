@@ -18,6 +18,7 @@ package proxmox
 
 import (
 	"context"
+	"google.golang.org/genproto/googleapis/rpc/errdetails"
 	"net/http"
 	"strconv"
 	"testing"
@@ -447,17 +448,19 @@ func TestDelete_OwnerChecks(t *testing.T) {
 		owner       *contracts.ObjectIdentity
 		wantCode    codes.Code
 		wantRemoved bool
+		wantReason  string
 	}{
-		{"own VM", pvefake.VM{Description: testStamp(testOwnerUID, ownerStampPhaseReady).line()}, &mine, codes.OK, true},
-		{"own half-created VM", pvefake.VM{Description: testStamp(testOwnerUID, ownerStampPhaseCreating).line()}, &mine, codes.OK, true},
-		{"unstamped (pre-upgrade) VM with the VirtualMachine's name", pvefake.VM{Description: "notes"}, &mine, codes.OK, true},
-		{"unstamped VM with another name (a reused VMID)", pvefake.VM{Name: "someone-else", Description: "notes"}, &mine, codes.NotFound, false},
-		{"VM of another owner", pvefake.VM{Description: testStamp(testOtherUID, ownerStampPhaseReady).line()}, &mine, codes.NotFound, false},
-		{"template", pvefake.VM{Template: 1}, &mine, codes.NotFound, false},
-		{"unreadable stamp", pvefake.VM{Description: "virtrigaud.owner v1 tampered"}, &mine, codes.FailedPrecondition, false},
+		{"own VM", pvefake.VM{Description: testStamp(testOwnerUID, ownerStampPhaseReady).line()}, &mine, codes.OK, true, ""},
+		{"own half-created VM", pvefake.VM{Description: testStamp(testOwnerUID, ownerStampPhaseCreating).line()}, &mine, codes.OK, true, ""},
+		{"unstamped (pre-upgrade) VM with the VirtualMachine's name", pvefake.VM{Description: "notes"}, &mine, codes.OK, true, ""},
+		{"unstamped VM with another name (a reused VMID)", pvefake.VM{Name: "someone-else", Description: "notes"}, &mine, codes.NotFound, false, contracts.VMNotOwnedReason},
+		{"VM of another owner", pvefake.VM{Description: testStamp(testOtherUID, ownerStampPhaseReady).line()}, &mine, codes.NotFound, false, contracts.VMNotOwnedReason},
+		{"template", pvefake.VM{Template: 1}, &mine, codes.FailedPrecondition, false, contracts.VMIsImageArtifactReason},
+		{"template, no owner on the request", pvefake.VM{Template: 1}, nil, codes.FailedPrecondition, false, contracts.VMIsImageArtifactReason},
+		{"unreadable stamp", pvefake.VM{Description: "virtrigaud.owner v1 tampered"}, &mine, codes.FailedPrecondition, false, contracts.OwnerStampUnreadableReason},
 		{"two owners", pvefake.VM{Description: testStamp(testOwnerUID, ownerStampPhaseReady).line() + "\n" +
-			testStamp(testOtherUID, ownerStampPhaseReady).line()}, &mine, codes.FailedPrecondition, false},
-		{"no owner on the request: unchanged", pvefake.VM{Description: testStamp(testOtherUID, ownerStampPhaseReady).line()}, nil, codes.OK, true},
+			testStamp(testOtherUID, ownerStampPhaseReady).line()}, &mine, codes.FailedPrecondition, false, contracts.OwnerStampUnreadableReason},
+		{"no owner on the request: unchanged", pvefake.VM{Description: testStamp(testOtherUID, ownerStampPhaseReady).line()}, nil, codes.OK, true, ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -471,6 +474,9 @@ func TestDelete_OwnerChecks(t *testing.T) {
 
 			_, err := p.Delete(context.Background(), deleteReq("600", tc.owner))
 			assert.Equal(t, tc.wantCode, status.Code(err), "error: %v", err)
+			if tc.wantReason != "" {
+				assert.Equal(t, []string{tc.wantReason}, deleteErrorReasons(err))
+			}
 			_, exists := srv.GetVM(600)
 			assert.Equal(t, !tc.wantRemoved, exists)
 			if !tc.wantRemoved {
@@ -523,4 +529,15 @@ func TestDelete_ConfigReadFailureHoldsTheDelete(t *testing.T) {
 	assert.Equal(t, codes.Unavailable, status.Code(err))
 	_, exists := srv.GetVM(601)
 	assert.True(t, exists)
+}
+
+// deleteErrorReasons returns the google.rpc.ErrorInfo reasons err carries.
+func deleteErrorReasons(err error) []string {
+	var out []string
+	for _, d := range status.Convert(err).Details() {
+		if info, ok := d.(*errdetails.ErrorInfo); ok {
+			out = append(out, info.GetReason())
+		}
+	}
+	return out
 }
