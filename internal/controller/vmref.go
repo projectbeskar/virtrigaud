@@ -213,10 +213,14 @@ func vmOwnerIdentity(vm *infravirtrigaudiov1beta1.VirtualMachine) contracts.Obje
 // delete (vSphere, single-host libvirt, mock) ignore it. A VM with no UID
 // (never true for a stored object) sends none.
 //
-// An adopted VirtualMachine (AdoptedLabel) sends none: the VM it adopted is
-// unstamped, and Proxmox deletes an unstamped VM only when its PVE name is
-// the owner's name, which the adoption controller's sanitized name may not
-// be — the delete would be answered not-found and the VM left in place.
+// An adopted VirtualMachine (AdoptedLabel, which clone targets carry too)
+// sends none: adoption does not re-stamp the VM it adopts, which may still
+// carry the stamp of a previous owner (a VirtualMachine detached with
+// orphan-on-delete, then adopted again) or have been renamed on the
+// hypervisor — an owner-checked delete would then be answered not-found and
+// the VM left in place. (An unstamped adopted VM under the adoption
+// controller's name for it would match: Proxmox applies
+// contracts.AdoptedVMName.)
 func deleteRef(vm *infravirtrigaudiov1beta1.VirtualMachine, ref contracts.VMRef) contracts.VMRef {
 	if ref.Routed() || vm.UID == "" || vm.Labels[AdoptedLabel] == AdoptedLabelValue {
 		return ref

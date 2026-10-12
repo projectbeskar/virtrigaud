@@ -640,15 +640,12 @@ func (p *Provider) ensureOwnerStamp(ctx context.Context, node string, vmid int, 
 //     (FailedPrecondition / Unavailable), nothing destroyed.
 //
 // An unstamped VM (created before owner stamps, adopted, or a clone made
-// without a target UID) is deleted as before when its PVE name is the
-// owner's name (the name Create gives it); an unstamped VM with any other
-// name is NotFound and never destroyed (a reused VMID). An adopted VM whose
-// PVE name differs from its VirtualMachine's is therefore left in place —
-// including one whose VirtualMachine name is the adoption controller's
-// sanitized form of the PVE name (lower-cased, '_', '.' and ' ' turned into
-// '-'): that sanitizer (sanitizeVMName) is unexported in internal/controller,
-// which a provider must not import, so it is not applied here. The rule
-// applies only to a Delete that carries an owner.
+// without a target UID) is deleted as before when it is named like the
+// owner (unstampedNamedLikeOwner): its PVE name is the owner's name (the name
+// Create gives it), or the adoption controller named the owner from it
+// (contracts.AdoptedVMName: the sanitized PVE name, or "vm-<vmid>"). An
+// unstamped VM with any other name is NotFound and never destroyed (a reused
+// VMID). The rule applies only to a Delete that carries an owner.
 func (p *Provider) checkDeleteOwner(ctx context.Context, node string, vmid int, owner contracts.ObjectIdentity) error {
 	cfg, err := p.client.GetVMConfig(ctx, node, vmid)
 	if stderrors.Is(err, pveapi.ErrVMNotFound) {
@@ -673,7 +670,7 @@ func (p *Provider) checkDeleteOwner(ctx context.Context, node string, vmid int, 
 			Message: fmt.Sprintf("Proxmox VM %d carries an owner stamp that cannot be read or records more than one owner; "+
 				"not deleting it. Fix the %q line of its description (Notes), or remove the VM by hand", vmid, ownerStampMarker),
 		}
-	case read.stamp == nil && configString(cfg, pveConfigKeyName) != owner.Name:
+	case read.stamp == nil && !unstampedNamedLikeOwner(configString(cfg, pveConfigKeyName), vmid, owner):
 		// An unstamped VM is this VirtualMachine's only if it has the name
 		// Create gave it (the VirtualMachine's name): another name means the
 		// VMID was reused by an unrelated VM.
@@ -690,6 +687,18 @@ func (p *Provider) checkDeleteOwner(ctx context.Context, node string, vmid int, 
 		return errors.NewNotFound("VM", strconv.Itoa(vmid))
 	}
 	return nil
+}
+
+// unstampedNamedLikeOwner reports whether an unstamped VM whose PVE name is
+// pveName (VMID vmid) is named like owner's VirtualMachine: pveName is the
+// owner's name — the name Create gives the VM — or the name the adoption
+// controller gives the VirtualMachine adopting it (contracts.AdoptedVMName).
+// Anything else is another VM at a reused VMID.
+func unstampedNamedLikeOwner(pveName string, vmid int, owner contracts.ObjectIdentity) bool {
+	if owner.Name == "" {
+		return false
+	}
+	return pveName == owner.Name || contracts.AdoptedVMName(pveName, strconv.Itoa(vmid)) == owner.Name
 }
 
 // deleteOwner reads DeleteRequest.owner; the zero identity when absent.

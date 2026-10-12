@@ -713,7 +713,7 @@ func isAwaitingAdoptionOf(vm *infravirtrigaudiov1beta1.VirtualMachine, provider 
 func clusteredAdoptedVMName(host, id string) string {
 	sum := sha256.Sum256([]byte(host + "/" + id))
 	suffix := hex.EncodeToString(sum[:])[:adoptedVMNameHashLen]
-	base := sanitizeVMName(id)
+	base := contracts.SanitizeVMName(id)
 	if base == "" {
 		base = "vm"
 	}

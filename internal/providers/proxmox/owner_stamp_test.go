@@ -481,6 +481,38 @@ func TestDelete_OwnerChecks(t *testing.T) {
 	}
 }
 
+// TestDelete_OwnerChecks_AdoptedName: an unstamped VM adopted under the
+// adoption controller's name for it (contracts.AdoptedVMName: the sanitized
+// PVE name, or "vm-<vmid>") is deletable with its VirtualMachine's owner; an
+// unstamped VM with any other name is still NotFound and untouched.
+func TestDelete_OwnerChecks_AdoptedName(t *testing.T) {
+	cases := []struct {
+		name        string
+		pveName     string
+		ownerName   string
+		wantCode    codes.Code
+		wantRemoved bool
+	}{
+		{"sanitized PVE name", "Web_01.Prod", "web-01-prod", codes.OK, true},
+		{"fallback vm-<vmid> for a name with nothing usable", "日本", "vm-610", codes.OK, true},
+		{"exact PVE name", "web", "web", codes.OK, true},
+		{"another name (a reused VMID)", "Database_01", "web-01-prod", codes.NotFound, false},
+		{"fallback name of another VMID", "日本", "vm-611", codes.NotFound, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p, srv := newStampTestProvider(t)
+			srv.PutVM(pvefake.VM{VMID: 610, Name: tc.pveName, Node: "pve", Status: "stopped", Description: "notes"})
+			owner := contracts.ObjectIdentity{UID: testOwnerUID, Namespace: testNamespace, Name: tc.ownerName}
+
+			_, err := p.Delete(context.Background(), deleteReq("610", &owner))
+			assert.Equal(t, tc.wantCode, status.Code(err), "error: %v", err)
+			_, exists := srv.GetVM(610)
+			assert.Equal(t, !tc.wantRemoved, exists)
+		})
+	}
+}
+
 func TestDelete_ConfigReadFailureHoldsTheDelete(t *testing.T) {
 	p, srv := newStampTestProvider(t)
 	srv.PutVM(pvefake.VM{VMID: 601, Name: "victim", Node: "pve", Status: "stopped"})
