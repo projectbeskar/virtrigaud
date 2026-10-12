@@ -1339,6 +1339,17 @@ func (s *Server) ImportDisk(ctx context.Context, req *providerv1.ImportDiskReque
 		log.Printf("INFO Using local libvirt connection with path: %s", finalSourcePath)
 	}
 
+	// The disk-size limit, on the copy about to become the volume, read as
+	// qcow2 as the import reads it. A refused copy is removed: nothing lands.
+	if err := checkHostImportSize(ctx, hostConnRunner{conn: conn}, finalSourcePath, "qcow2", req.MaxVirtualSizeBytes); err != nil {
+		if finalSourcePath != sourcePath {
+			if _, rmErr := conn.RunHost(ctx, "rm", "-f", "--", finalSourcePath); rmErr != nil {
+				log.Printf("WARN Failed to remove the refused import copy %s: %v", finalSourcePath, rmErr)
+			}
+		}
+		return nil, err
+	}
+
 	// Get source disk info using qemu-img (shell exec through the seam)
 	infoResult, err := conn.RunHost(ctx, "qemu-img", "info", "--output=json", finalSourcePath)
 	if err != nil {

@@ -610,8 +610,11 @@ func checkRegularFile(ctx context.Context, h hostCommandRunner, displayPath, can
 // qemuImgInfo is the subset of `qemu-img info --output=json` checkImageHeader
 // and the backing-chain walk need to find references to other files.
 type qemuImgInfo struct {
-	Filename            string `json:"filename"`
-	Format              string `json:"format"`
+	Filename string `json:"filename"`
+	Format   string `json:"format"`
+	// VirtualSize is the image's virtual size in bytes (the disk-size limit
+	// check of an import reuses this read).
+	VirtualSize         int64  `json:"virtual-size"`
 	BackingFilename     string `json:"backing-filename"`
 	FullBackingFilename string `json:"full-backing-filename"`
 	// BackingFilenameFormat is the backing file's format as the header
@@ -661,6 +664,13 @@ func inspectHostImage(ctx context.Context, h hostCommandRunner, subject, path st
 // -f format`) — for callers whose convert forces a source format, so the
 // header is read exactly as the convert will read it. An empty format probes.
 func inspectHostImageAs(ctx context.Context, h hostCommandRunner, subject, path, format string) (string, error) {
+	info, err := inspectHostImageInfoAs(ctx, h, subject, path, format)
+	return info.Format, err
+}
+
+// inspectHostImageInfoAs is inspectHostImageAs returning the whole qemu-img
+// info it read (e.g. the virtual size), so a caller can reuse the one read.
+func inspectHostImageInfoAs(ctx context.Context, h hostCommandRunner, subject, path, format string) (qemuImgInfo, error) {
 	argv := []string{"qemu-img", "info", "--output=json"}
 	if format != "" {
 		argv = append(argv, "-f", format)
@@ -668,18 +678,18 @@ func inspectHostImageAs(ctx context.Context, h hostCommandRunner, subject, path,
 	res, err := runHost(ctx, h, append(argv, "--", path)...)
 	if err != nil {
 		if res != nil && res.ExitCode == qemuImgFailureExitCode {
-			return "", newImageRejection(subject, "qemu-img cannot read it as a disk image")
+			return qemuImgInfo{}, newImageRejection(subject, "qemu-img cannot read it as a disk image")
 		}
-		return "", hostCheckFailed("inspect image", err)
+		return qemuImgInfo{}, hostCheckFailed("inspect image", err)
 	}
 	var info qemuImgInfo
 	if err := json.Unmarshal([]byte(res.Stdout), &info); err != nil {
-		return "", hostCheckFailed("parse qemu-img info output", err)
+		return qemuImgInfo{}, hostCheckFailed("parse qemu-img info output", err)
 	}
 	if reason := checkImageHeader(info, path); reason != "" {
-		return "", newImageRejection(subject, reason)
+		return qemuImgInfo{}, newImageRejection(subject, reason)
 	}
-	return info.Format, nil
+	return info, nil
 }
 
 // checkImageHeader returns a rejection reason when an image references any file

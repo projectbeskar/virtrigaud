@@ -26,6 +26,7 @@ import (
 
 	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
 
+	"github.com/projectbeskar/virtrigaud/internal/providers/importlimit"
 	"github.com/projectbeskar/virtrigaud/internal/providers/libvirt/hostconn"
 	"github.com/projectbeskar/virtrigaud/internal/storage"
 	"github.com/projectbeskar/virtrigaud/internal/storage/migration"
@@ -192,8 +193,14 @@ func (s *Server) importDiskFromS3(ctx context.Context, req *providerv1.ImportDis
 	// file (qcow2 backing / data file, VMDK extent): the convert would flatten
 	// that file into <vm>-migrated.qcow2. Read it in the format the convert
 	// forces, so the check sees exactly what the convert will open.
-	if _, err := inspectHostImageAs(ctx, hostConnRunner{conn: conn}, importedImageSubject, stagePath, stagedFormat); err != nil {
+	staged, err := inspectHostImageInfoAs(ctx, hostConnRunner{conn: conn}, importedImageSubject, stagePath, stagedFormat)
+	if err != nil {
 		return nil, fmt.Errorf("inspect staged s3 object: %w", err)
+	}
+	// The disk-size limit, from that same read of the private staged copy
+	// (nothing is landed before this).
+	if err := importlimit.Check(staged.VirtualSize, nil, req.MaxVirtualSizeBytes); err != nil {
+		return nil, err
 	}
 
 	// --- CONVERT (ADR D4) ---
