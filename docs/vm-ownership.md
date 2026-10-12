@@ -680,7 +680,8 @@ not stamp the VM it adopts, so an adopted VM that still carries a previous
 owner's stamp (a `VirtualMachine` detached with `virtrigaud.io/orphan-on-delete`,
 then adopted again) is answered `NotFound` + `VM_NOT_OWNED`: it is left in
 place, and the manager releases the `VirtualMachine` with a `VMLeftOnHypervisor`
-Warning event (constant message, metric reason `vm-not-owned`). That is the
+Warning event naming the VM's provider id (and an error-level manager log line with the
+id, the Provider and the VirtualMachine; metric reason `vm-not-owned`). That is the
 fail-safe direction: without the owner, a reused VMID could make the delete
 destroy an unrelated VM.
 

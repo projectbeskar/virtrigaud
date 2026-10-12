@@ -182,13 +182,21 @@ func (r *VirtualMachineReconciler) holdImageArtifactPower(
 	return ctrl.Result{RequeueAfter: retry}
 }
 
-// vmNotOwnedLeftMessage is the VMLeftOnHypervisor Warning recorded when a
+// vmNotOwnedLeftFormat is the VMLeftOnHypervisor Warning recorded when a
 // VirtualMachine is released because its provider Delete answered
-// VM_NOT_OWNED. It is constant: nothing the provider found is put in it.
-const vmNotOwnedLeftMessage = "The VirtualMachine was removed without deleting a hypervisor VM: the provider " +
-	"reports that the VM at its id is not this VirtualMachine's (another owner's stamp, or another name), and left " +
+// VM_NOT_OWNED, formatted with the VirtualMachine's own status.id (the
+// provider VM id it recorded: fixed per VM, so the event still deduplicates,
+// and not secret). Nothing the provider found is put in it.
+const vmNotOwnedLeftFormat = "The VirtualMachine was removed without deleting a hypervisor VM: the provider " +
+	"reports that the VM at its id %q is not this VirtualMachine's (another owner's stamp, or another name), and left " +
 	"it in place. Its own VM is treated as gone. If this VirtualMachine was re-created under a new UID (for example " +
 	"by a backup restore), that VM may be its own and is now unmanaged: check the hypervisor and remove or adopt it"
+
+// vmNotOwnedLeftMessage is the VMLeftOnHypervisor Warning message for vm
+// (vmNotOwnedLeftFormat).
+func vmNotOwnedLeftMessage(vm *infravirtrigaudiov1beta1.VirtualMachine) string {
+	return fmt.Sprintf(vmNotOwnedLeftFormat, vm.Status.ID)
+}
 
 // errReasonVMNotOwned is the metrics reason of a delete released on a
 // VM_NOT_OWNED answer.
@@ -197,16 +205,20 @@ const errReasonVMNotOwned = "vm-not-owned"
 // recordVMNotOwnedRelease records that vm's provider Delete was answered
 // VM_NOT_OWNED (contracts.IsVMNotOwned): the caller releases the finalizer —
 // the VM at the id is not this VirtualMachine's (a reused id) — and this logs
-// it at Info, counts it, and records the constant VMLeftOnHypervisor Warning.
+// it at error level (logr has no warning level; the VirtualMachine and its
+// events go away moments later, so the log line is the durable record),
+// counts it, and records the VMLeftOnHypervisor Warning naming the id.
 func (r *VirtualMachineReconciler) recordVMNotOwnedRelease(
 	ctx context.Context,
 	vm *infravirtrigaudiov1beta1.VirtualMachine,
 	ref contracts.VMRef,
 ) {
-	log.FromContext(ctx).Info("The provider reports that the VM at this id is not this VirtualMachine's; releasing the "+
-		"finalizer without deleting it", "id", ref.ID, "host", ref.HostID)
+	log.FromContext(ctx).Error(contracts.ErrVMNotOwned, "The provider reports that the VM at this id is not this "+
+		"VirtualMachine's; releasing the finalizer without deleting it, the VM there is left in place",
+		"namespace", vm.Namespace, "name", vm.Name, "id", ref.ID, "host", ref.HostID,
+		"provider", placementProviderKey(vm).String())
 	metrics.RecordError(errReasonVMNotOwned, metrics.ComponentManager)
-	r.recordEvent(vm, corev1.EventTypeWarning, eventReasonVMLeftOnHypervisor, vmNotOwnedLeftMessage)
+	r.recordEvent(vm, corev1.EventTypeWarning, eventReasonVMLeftOnHypervisor, vmNotOwnedLeftMessage(vm))
 }
 
 // setHeldReady sets Ready=False/reason with msg on vm and reports whether

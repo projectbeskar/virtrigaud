@@ -123,7 +123,8 @@ func TestHandleDeletion_VMNotOwnedReleasesWithAWarning(t *testing.T) {
 	assert.True(t, apierrors.IsNotFound(r.Get(ctx, client.ObjectKeyFromObject(vm), &infravirtrigaudiov1beta1.VirtualMachine{})))
 	events := drainEvents(rec)
 	require.Len(t, events, 1)
-	assert.Equal(t, "Warning "+eventReasonVMLeftOnHypervisor+" "+vmNotOwnedLeftMessage, events[0])
+	assert.Equal(t, "Warning "+eventReasonVMLeftOnHypervisor+" "+vmNotOwnedLeftMessage(marked), events[0])
+	assert.Contains(t, events[0], `"100"`, "the event names the provider VM id")
 
 	// A plain NotFound (the VM is gone) still releases silently.
 	gone := deletionVM("vm-gone-silently")
