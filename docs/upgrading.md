@@ -423,6 +423,50 @@ See [`docs/clustered-provider-inventory.md`](clustered-provider-inventory.md) an
   retryable clustered clone answer now backs off instead of retrying every
   30 s.
 
+- **Proxmox VMs carry an owner stamp, and a re-sent `Create` re-binds**
+  ([`docs/vm-ownership.md`](vm-ownership.md#proxmox)). Every VM the Proxmox
+  provider creates, and every clone made for a target `VirtualMachine` with a
+  UID, gets a `virtrigaud.owner v1 uid=… namespace=… name=… phase=… sum=…`
+  line in its description (Notes). The line is reserved: the provider replaces
+  any line that mentions `virtrigaud.owner`, and a hand-edited one makes the
+  stamp unreadable, which fails closed. Setting the description needs
+  `VM.Config.Options` on the new VM; `PVEVMAdmin` includes it. Restrict
+  `VM.Config.Options` on these VMs to the provider's token and trusted admins.
+  **Give each Proxmox Provider its own PVE API token.** Providers that share a
+  token hold each other's creates while a clone runs, because the in-progress
+  guard identifies the provider's own PVE tasks by their user.
+  - **Re-bind.** A `Create` sent again after an unknown outcome returns the VM
+    stamped with the `VirtualMachine`'s UID, anywhere in the cluster, instead
+    of making a second one. While PVE is still cloning or creating a VM for
+    that owner, the re-sent `Create` waits (outcome unknown) and starts
+    nothing, after a provider restart too.
+  - **`ListVMs`** reports `owner_uid` / `owner_stamp_state`. It now lists from
+    `/cluster/resources`, so a down node's VMs are listed as `unreadable`
+    rather than skipped.
+  - **"Gone" means gone everywhere.** A VM is gone only when its VMID is free
+    cluster-wide. PVE answers HTTP 500 "does not exist" both for a deleted VM
+    and for one on another node. So `Describe` and `Delete` of a VM that
+    moved to another node now return a retryable error instead of
+    `Exists=false` / success.
+  - **Owner-checked `Delete`.** A `Delete` that carries an owner never
+    destroys a VM stamped for another owner, a template, or an unstamped VM
+    whose PVE name isn't the owner's name. The latter is a reused VMID, or an
+    adopted VM with a different name; remove those by hand.
+  - **Error classes.** `Create`/`Clone` failures are classified:
+    - `InvalidSpec` only for request errors;
+    - the new ErrorInfo reason `CREATE_NOT_PERFORMED` when nothing was made.
+      Alone for provider-wide failures, which count toward the circuit
+      breaker; with `VM_OPERATION_FAILED` for one VM's, which don't;
+    - outcome-unknown otherwise.
+
+    A clone-call timeout or 5xx is no longer `InvalidSpec`. A VMID taken
+    since `/cluster/nextid` is retried instead of being a `Conflict`. A failed
+    `/cluster/nextid` fails the create instead of using a time-derived VMID.
+  - **VMs created before the upgrade are unstamped.** They stay bound and are
+    deleted as before (with an owner on the request: when their PVE name is
+    the `VirtualMachine`'s name). They are never re-bound by a `Create` and
+    can't be looked up by owner.
+
 ## Post-upgrade verification checklist
 
 - [ ] `kubectl get pods -n virtrigaud-system` — manager and provider pods Ready.
@@ -570,6 +614,12 @@ See [`docs/clustered-provider-inventory.md`](clustered-provider-inventory.md) an
   `virtrigaud_provider_image_prepare_legacy_requests_total{provider_type="vsphere"}`.
   Templates prepared under the new scheme are never touched by legacy mode and are
   reused when the manager rolls forward.
+- **Rolling the Proxmox provider back stops owner stamping and re-binding.**
+  An older provider creates unstamped VMs, never re-binds a re-sent `Create`
+  (so it makes a duplicate), lists no `owner_uid`, and ignores the owner on
+  `Delete`. Stamps already written stay in the VMs' descriptions and are used
+  again when the provider rolls forward. Don't edit or copy those lines in the
+  meantime.
 - If you do need a full rollback during a maintenance window, go in reverse order
   (providers → manager → CRDs) and expect the caveats above; a partial rollback
   (providers only, or manager only) is safer and sufficient for most of the issues

@@ -18,6 +18,7 @@ package proxmox
 
 import (
 	"context"
+	stderrors "errors"
 	"fmt"
 	"io"
 	"net/url"
@@ -231,17 +232,21 @@ const proxmoxImportedDiskInterface = "scsi0"
 //     the imported disk as the boot disk and attaches cloud-init when present.
 //  4. Remove the node-side stage (best-effort).
 //
-// On a failure AFTER the shell is created, the shell VMID is best-effort deleted
-// so a failed import does not leak a half-built VM. The staged disk is left in
+// The shell carries the owner stamp from step 1 ("creating"), and "ready" once
+// step 3 is done. On a failure AFTER the shell is created, the shell is removed
+// when it is verifiably this request's (failAfterSubmit), so a failed import
+// does not leak a half-built VM; the answer is VM_OPERATION_FAILED then, and
+// outcome-unknown when it could not be removed. The staged disk is left in
 // place on failure so a retry can re-attach it (the stage path is deterministic).
 func (p *Provider) createFromImportedDisk(
 	ctx context.Context,
 	req *providerv1.CreateRequest,
 	vmConfig *pveapi.VMConfig,
 	node string,
+	stamp *ownerStamp,
 ) (*providerv1.CreateResponse, error) {
 	if p.ssh == nil {
-		return nil, errors.NewUnavailable("migration SSH data plane not configured; cannot attach imported disk via qm importdisk", nil)
+		return nil, p.createNotPerformed("migration SSH data plane not configured; cannot attach imported disk via qm importdisk; nothing was created", nil)
 	}
 
 	// Resolve the target storage: explicit VM config wins, then the provider's
@@ -265,45 +270,54 @@ func (p *Provider) createFromImportedDisk(
 		"stage_path", vmConfig.ImportedDiskPath, "storage", storageName, "format", importFormat)
 
 	// 1. Bare VM shell (diskless). Clear any template/clone hints so this is a
-	// from-scratch create, not a clone.
+	// from-scratch create, not a clone. The owner stamp ("creating") is part of
+	// the create request, so the shell is never unowned.
 	vmConfig.Template = ""
 	vmConfig.Clone = ""
+	if stamp != nil {
+		if vmConfig.Custom == nil {
+			vmConfig.Custom = make(map[string]string)
+		}
+		vmConfig.Custom[pveConfigKeyDescription] = composeDescription("", stamp)
+	}
+	p.trackTask(stamp, node, vmConfig.VMID, "")
 	taskID, err := p.client.CreateVM(ctx, node, vmConfig)
 	if err != nil {
-		return nil, errors.NewInternal("failed to create VM shell for imported disk", err)
+		return nil, p.submitFailed(stamp, vmConfig.VMID, p.classifySubmitError(ctx, "create VM shell for imported disk", vmConfig.VMID, stamp, err))
 	}
-	if taskID != "" {
-		if err := p.client.WaitForTask(ctx, node, taskID); err != nil {
-			return nil, errors.NewInternal("VM shell create task failed", err)
+	p.trackTask(stamp, node, vmConfig.VMID, taskID)
+	if err := p.client.WaitForTask(ctx, node, taskID); err != nil {
+		if stderrors.Is(err, pveapi.ErrTaskFailed) {
+			p.untrackTask(stamp, vmConfig.VMID)
 		}
+		return nil, p.failAfterTask(ctx, node, vmConfig.VMID, req.Name, stamp, "the VM shell create task failed", err)
 	}
+	p.untrackTask(stamp, vmConfig.VMID)
 
-	// From here on, on ANY failure best-effort delete the half-built shell so a
-	// failed import leaves no orphan VM. The staged disk is intentionally kept.
-	attachOK := false
-	defer func() {
-		if attachOK {
-			return
+	// From here on, ANY failure removes the half-built shell (failAfterSubmit,
+	// after checking it is this request's VM) so a failed import leaves no
+	// orphan VM; the answer says whether that worked. purge=true also reclaims
+	// any disk already imported into the shell (it is never started). The staged
+	// disk is intentionally kept.
+	fail := func(what string, cause error) error {
+		return p.failAfterSubmit(ctx, node, vmConfig.VMID, req.Name, stamp, true, what, cause)
+	}
+	// An SSH command whose connection failed or broke, or that was cut off,
+	// may have run (or still run) on the node: the shell is never removed
+	// under it (outcome unknown; a re-sent Create rebuilds it once its
+	// prerequisites are checked).
+	failSSH := func(what string, cause error) error {
+		if sshMayHaveRun(ctx, cause) {
+			return p.outcomeUnknown(fmt.Sprintf("%s for VM %d: the SSH command may still be running on the node", what, vmConfig.VMID), cause)
 		}
-		// purge=true so the rollback also reclaims any disk already imported into
-		// the half-built shell (the shell is never started, so no stop is needed).
-		delTask, derr := p.client.DeleteVM(context.Background(), node, vmConfig.VMID, true)
-		if derr != nil {
-			p.logger.Warn("Failed to delete half-built VM shell after imported-disk failure (manual cleanup may be needed)",
-				"vmid", vmConfig.VMID, "error", derr)
-			return
-		}
-		if delTask != "" {
-			_ = p.client.WaitForTask(context.Background(), node, delTask)
-		}
-	}()
+		return fail(fmt.Sprintf("%s for VM %d", what, vmConfig.VMID), cause)
+	}
 
 	// 2. importdisk: lay the staged qcow2 into the VM's storage as an unused disk.
 	importCmd := buildImportDiskCommand(vmConfig.VMID, vmConfig.ImportedDiskPath, storageName, importFormat)
 	importStdout, importStderr, err := p.ssh.runSSH(ctx, importCmd)
 	if err != nil {
-		return nil, errors.NewInternal(
-			fmt.Sprintf("qm importdisk failed for vmid %d (stderr: %s)", vmConfig.VMID, strings.TrimSpace(importStderr)), err)
+		return nil, failSSH("qm importdisk failed", err)
 	}
 
 	// 3a. Attach the imported disk as the virtio-scsi boot disk over SSH. The volid
@@ -325,9 +339,8 @@ func (p *Provider) createFromImportedDisk(
 			"vmid", vmConfig.VMID, "assumed_volume", importedVolume)
 	}
 	setCmd := buildImportedDiskSetCommand(vmConfig.VMID, importedVolume)
-	if _, stderr, err := p.ssh.runSSH(ctx, setCmd); err != nil {
-		return nil, errors.NewInternal(
-			fmt.Sprintf("qm set (attach imported disk) failed for vmid %d (stderr: %s)", vmConfig.VMID, strings.TrimSpace(stderr)), err)
+	if _, _, err := p.ssh.runSSH(ctx, setCmd); err != nil {
+		return nil, failSSH("qm set (attach imported disk) failed", err)
 	}
 
 	// 3b. Wire cloud-init via the PVE API (ReconfigureVMRaw url-encodes the values
@@ -341,18 +354,24 @@ func (p *Provider) createFromImportedDisk(
 		if len(ciValues) > 0 {
 			ciTask, ciErr := p.client.ReconfigureVMRaw(ctx, node, vmConfig.VMID, ciValues)
 			if ciErr != nil {
-				return nil, errors.NewInternal(
-					fmt.Sprintf("failed to attach cloud-init to imported-disk VM %d", vmConfig.VMID), ciErr)
+				return nil, fail(fmt.Sprintf("failed to attach cloud-init to imported-disk VM %d", vmConfig.VMID), ciErr)
 			}
-			if ciTask != "" {
-				if err := p.client.WaitForTask(ctx, node, ciTask); err != nil {
-					return nil, errors.NewInternal("cloud-init reconfigure task failed", err)
-				}
+			if err := p.client.WaitForTask(ctx, node, ciTask); err != nil {
+				return nil, fail("cloud-init reconfigure task failed", err)
 			}
 		}
 	}
 
-	attachOK = true
+	// 3c. Every step succeeded: mark the VM ready, BEFORE the stage is removed,
+	// so a re-sent Create that finds it still "creating" can rebuild it.
+	if stamp != nil {
+		ready := stamp.withPhase(ownerStampPhaseReady)
+		if err := p.writeOwnerStamp(ctx, node, vmConfig.VMID, "", &ready); err != nil {
+			// This call wrote "ready" (perhaps only partly): its rollback may
+			// remove a VM stamped ready.
+			return nil, p.failAfterSubmit(ctx, node, vmConfig.VMID, req.Name, &ready, true, "marking the imported-disk VM ready failed", err)
+		}
+	}
 
 	// 4. Clean up the node-side stage (best-effort). The disk now lives in PVE
 	// storage as a managed volume; the stage temp is no longer needed.

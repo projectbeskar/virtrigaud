@@ -5,6 +5,93 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-10-12 08:41] - Proxmox: owner stamp on Create/Clone, re-bind of a re-sent Create (in-flight safe), owner-checked Delete, CREATE_NOT_PERFORMED and classified Create/Clone errors
+**Author:** @wrkode (William Rizzo)
+
+### Added
+- `internal/providers/proxmox/vm_ownership.go`: Proxmox VMs carry an owner stamp, as vSphere and libvirt VMs already do.
+  - **Format:** one strict description (Notes) line, `virtrigaud.owner v1 uid=… namespace=… name=… phase=creating|ready sum=<16 hex>`.
+  - **Where it is written:** in the same PVE call that makes the VM (`POST …/qemu` or `…/clone`). `Clone` writes it only when `target_vm` carries a UID.
+  - **Phases:** `phase=ready` once every step has succeeded, then read back.
+  - **Why the description and not a tag:** both the create and clone endpoints accept it, it needs no charset encoding, and it isn't subject to `user-tag-access`/`registered-tags`.
+  - **Tamper evidence:** any non-canonical line that mentions the marker, a repeated stamp, or a checksum mismatch makes the stamp `unreadable`. Two owners make it `multiple`.
+  - **Reserved input:** an owner identity outside `[A-Za-z0-9][A-Za-z0-9._-]*` is `InvalidSpec`.
+  - **Clones:** keep the source's notes but never its stamp. An unstamped clone request always carries an explicit description when the source has one (PVE ignores an empty one and copies the source's).
+  - **8 KiB limit:** notes that leave no room for the stamp are truncated and marked, with a warning, instead of dropped.
+  - **Keyed sum deferred:** an HMAC keyed with the provider credential was considered and deferred. Credential rotation would invalidate every stamp, so it needs key versioning first. The docs tell operators to restrict `VM.Config.Options` / `VM.Audit`.
+- `internal/providers/proxmox/server.go` (`Create`, `Clone`): re-bind. With an owner, the provider searches the whole cluster (`/cluster/resources?type=vm`) and reads the stamp of every QEMU guest with the requested name.
+  - **One `ready` match:** returned unchanged (`node:vmid` off the default node).
+  - **A `creating` match:** finished and marked ready. An interrupted imported-disk create is removed and rebuilt from its stage only when SSH is configured and the stage still exists.
+  - **A locked match:** left alone (outcome unknown).
+  - **Ambiguity:** an unreadable or multiple same-named stamp, a template carrying the UID, two matches, or a namespace/name mismatch fails closed with `AlreadyExists`.
+- `internal/providers/proxmox/inflight.go`: a re-sent `Create`/`Clone` never starts a second VM while PVE is still making the first. During a clone or create, the VM's config is temporary (`lock: clone|create`, no name, no description) and invisible to the owner lookup.
+  - **Per-owner lock:** one `Create`/`Clone` per owner UID at a time, rollback included.
+  - **In-flight record:** each create/clone task started for an owner (node, VMID, UPID; the VMID alone after a lost answer) is answered outcome-unknown until it is seen to end.
+  - **After a restart:** an unnamed guest locked for clone/create, with an unrecorded clone/create task of this provider's PVE user running on its node (or unlistable tasks), holds the lookup. Another user's GUI clone does not.
+- `internal/providers/contracts/create_not_performed.go`: `CreateNotPerformedReason` (`CREATE_NOT_PERFORMED`), `ErrCreateNotPerformed`, `MarkCreateNotPerformed` and `IsCreateNotPerformed`: the provider made nothing; the call is safe to retry and to treat as refused.
+- `internal/transport/grpc/client.go` (`mapGRPCError`): marks any answer that carries `CREATE_NOT_PERFORMED` in `provider.virtrigaud.io`, whatever its code.
+- `internal/providers/proxmox/pveapi/client.go`:
+  - new calls: `ListClusterVMs`, `VMIDFree` (`/cluster/nextid?vmid=`), `ListActiveTasks`, `Identity`;
+  - `APIError` for non-200 create/clone answers;
+  - `WaitForTask` wraps `ErrTaskFailed`.
+- `internal/providers/proxmox/pvefake/server.go`: PVE-faithful behaviour:
+  - descriptions on create, clone and config get/put; temporary clone/create configs; clone task ids (the source VMID) and task users;
+  - per-node VMs, with HTTP 500 "Configuration file … does not exist" for a missing VM; the clone `target` node; down nodes (HTTP 595);
+  - `/cluster/resources` (with hidden VMIDs), `/cluster/nextid?vmid=`, active task listing;
+  - injectable faults (after-apply, raw body, hook), failing and manual tasks, test helpers;
+  - two modes to test both possible PVE behaviours: `SetErrorsInStatusLine` (error message in the reason phrase, `{"data":null}` body) and `SetEmptyResourceNames` (nameless guests listed with an empty name instead of `VM <vmid>`);
+  - `SetNodes` (unordered `/nodes`).
+- `internal/providers/proxmox/*_test.go`, `internal/providers/contracts/create_not_performed_test.go`, `internal/transport/grpc/client_create_not_performed_test.go`, `internal/resilience/retry_test.go`: tests for every rule and error class above, in both error and name forms.
+
+### Changed
+- `internal/providers/proxmox/create_errors.go`, `server.go`, `s3import.go`: `Create`/`Clone` failures are classified for the VM controller.
+  - **`InvalidSpec`:** request errors and PVE's JSON 400 (its error text quoted, cut to 512 bytes).
+  - **`NotFound`:** `Clone` source gone.
+  - **`PermissionDenied`:** PVE's JSON 401/403.
+  - **`AlreadyExists`:** a re-bind refusal.
+  - **`Unavailable` + `CREATE_NOT_PERFORMED`** when nothing was made. Two scopes:
+    - **provider-wide**, the reason alone, counted by the circuit breaker: client, node discovery, `/cluster/nextid`, the cluster list, SSH data plane not configured;
+    - **one VM's**, plus `VM_OPERATION_FAILED` so the breaker ignores it: the template, source or same-named stamp read; a 5xx "already exists" for a VMID that another VM has certainly taken; a failed later step whose VM was verifiably this request's (stamp, unlocked, stopped, not marked ready by another call) and was destroyed, with its VMID then free cluster-wide.
+  - **`Unavailable` without it:** outcome unknown. A transport error or other 5xx, any other or non-PVE 4xx, an unfollowed task, an unremovable VM, an SSH command that may still run (exit 255, cut off), the in-flight holds.
+  - **Wire messages:** carry the category only. The PVE detail goes to the provider log.
+  - **Before:** any clone-call error was `InvalidSpec`, a VMID collision was a non-retryable `AlreadyExists`, and a failed `/cluster/nextid` silently used a time-derived VMID.
+- `internal/providers/proxmox/pveapi/client.go`, `server.go`: real PVE's HTTP 500 "Configuration file … does not exist" is mapped to `ErrVMNotFound`, like 404.
+  - **Gone:** a VM is treated as gone only when its VMID is absent from `/cluster/resources` and free per `/cluster/nextid?vmid=`. A VM that moved to another node gives the same answer.
+  - **Affects:** `Describe` (`Exists=false`), `Delete` (success), the create rollback, the owner lookup, `ListVMs` and the `Clone` source.
+- `internal/providers/proxmox/server.go` (`ListVMs`): lists from `/cluster/resources?type=vm` within the node selector.
+  - Each VM reports `owner_uid` / `owner_stamp_state`.
+  - A VM whose config can't be read (e.g. on a down node, listed with status `unknown`) is reported `unreadable`, not skipped.
+  - Only a failed cluster list fails the call.
+  - `ListNodes`' cache expires after a minute, and the node list is sorted, so `FindNode`'s default node no longer depends on `/nodes` order.
+- Hardening against PVE behaviour that couldn't be verified without a lab; the code is correct for either form:
+  - `internal/providers/proxmox/pveapi/client.go`: PVE's error message is read from the HTTP status line's reason phrase as well as the body (`pveErrorText`, body read through a `LimitReader`). It feeds `vmMissingAnswer`, `VMIDFree` and `APIError` (new `Reason` and `Text()`), and the "already exists" and InvalidSpec texts in `classifySubmitError`.
+  - `internal/providers/proxmox/vm_ownership.go`: the restart guard treats a guest listed as `VM <vmid>` (pvestatd's default for a config without a name) like one with an empty name, and confirms from its config. A nameless guest on a down node (status `unknown`) no longer holds every Create.
+- Imported-disk rebuild, in-flight records, "already exists" check, retries:
+  - `internal/providers/proxmox/server.go`, `create_errors.go`, `ssh.go`: a re-sent Create rebuilds an interrupted imported-disk VM only when `pgrep -f` over SSH shows no `qm importdisk <vmid>` still running. A match, or a check that can't run, is outcome-unknown.
+  - `internal/providers/proxmox/inflight.go`: in-flight records expire after 2 × the task timeout (`recordedAt`); the owner lookup and the restart guard then decide.
+  - `internal/providers/proxmox/create_errors.go`: `vmidTakenByAnother` reads the stamp wherever the VM lives (`vmConfigAnywhere`). The 512-byte wire detail is cut at a rune boundary.
+  - `internal/resilience/retry.go`: `IsRetryable` uses `errors.As`, so a marked or wrapped `ProviderError` keeps its retryability.
+- `docs/vm-ownership.md`, `docs/upgrading.md`:
+  - give each Proxmox Provider its own PVE API token;
+  - the delete name rule is exact and applies only to owner-carrying deletes. The adoption controller's `sanitizeVMName` isn't reachable from a provider, so a sanitized adopted name doesn't match.
+
+### Security
+- `internal/providers/proxmox/vm_ownership.go`, `server.go` (`Delete`): when `DeleteRequest.owner` carries a UID, Delete never stops or destroys any of these; it answers `NotFound`:
+  - a VM stamped with another owner (a reused VMID);
+  - a template;
+  - an unstamped VM whose PVE name isn't the owner's name (a reused VMID, or an adopted VM with another name).
+
+  An unreadable or multiple stamp holds the delete (`FailedPrecondition`). Without an owner the delete is unchanged except for the cluster-wide gone check. Today the manager sends the owner on clustered deletes only.
+
+### Why
+Proxmox picks a new VMID on every Create and doesn't keep names unique. A Create re-sent after an unknown outcome made a duplicate VM (also while PVE was still cloning the first one), a VM couldn't be found by its VirtualMachine, adoption could take a VM managed through another Provider object, any clone-call failure was reported as an invalid spec, and a VM on another node was reported gone. With owner stamps, in-flight tracking and the `CREATE_NOT_PERFORMED` contract, the VM controller can treat Proxmox like vSphere and libvirt.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-10-12 08:52] - VMMigration controller test no longer registers types on the global scheme (race)
 **Author:** @wrkode (William Rizzo)
 

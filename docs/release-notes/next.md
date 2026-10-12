@@ -459,6 +459,26 @@ providers), and rollback caveats in
 - Known limitation: a migration's `nfs` or `s3` staging object (a full copy of
   the source disk) is never deleted by VirtRigaud; clean it up yourself
   (→ [`docs/clustered-provider-inventory.md`](docs/clustered-provider-inventory.md)).
+- **Proxmox VMs carry an owner stamp; a re-sent `Create` no longer makes a
+  duplicate.** The Proxmox provider writes the owning `VirtualMachine`'s
+  identity into each new VM's description, in the same call that creates or
+  clones it. A `Create` sent again after an unknown outcome returns, and
+  finishes if needed, the VM an earlier one made. While PVE is still cloning,
+  the re-sent `Create` waits instead of starting a second clone.
+  - **`ListVMs`** reports `owner_uid` / `owner_stamp_state`, so adoption skips
+    VMs managed through another Provider object and a VM can be found by its
+    owner. It also keeps listing a down node's VMs.
+  - **`Delete`.** One that carries an owner never destroys a VM stamped for
+    someone else (a reused VMID), a template, or an unstamped VM with another
+    name.
+  - **"Not found".** A VM that PVE reports missing from one node is treated as
+    gone only when its VMID is free cluster-wide.
+  - **Error classes.** `Create`/`Clone` failures are now classified: the new
+    `CREATE_NOT_PERFORMED` reason marks a create that made nothing, and a
+    clone timeout or 5xx is no longer reported as an invalid spec.
+
+  VMs created before this release stay unstamped and behave as before.
+  → [VM ownership: Proxmox](docs/vm-ownership.md#proxmox)
 - A `VMMigration` with `deleteAfterMigration: true` whose target stays off
   (`powerOn: false`) records a `SourceDeletedTargetNotStarted` Warning when it
   deletes the source.

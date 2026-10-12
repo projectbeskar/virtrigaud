@@ -26,6 +26,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -59,11 +60,19 @@ type Client struct {
 	baseURL    *url.URL
 
 	// cachedNodes memoizes the cluster's node names (discovered via /nodes) for
-	// the client's lifetime; the node set rarely changes and a provider restart
-	// re-discovers it.
-	nodesMu     sync.Mutex
-	cachedNodes []string
+	// NodeCacheTTL, so a node added to or removed from the cluster is seen
+	// without a provider restart.
+	nodesMu       sync.Mutex
+	cachedNodes   []string
+	nodesCachedAt time.Time
 }
+
+// DefaultTaskTimeout is how long WaitForTask waits for a task when the Config
+// sets no TaskTimeout.
+const DefaultTaskTimeout = 5 * time.Minute
+
+// NodeCacheTTL is how long ListNodes reuses the cluster's node names.
+const NodeCacheTTL = time.Minute
 
 // NewClient creates a new PVE API client
 func NewClient(config *Config) (*Client, error) {
@@ -99,7 +108,7 @@ func NewClient(config *Config) (*Client, error) {
 		config.TaskPollInterval = 2 * time.Second
 	}
 	if config.TaskTimeout == 0 {
-		config.TaskTimeout = 5 * time.Minute
+		config.TaskTimeout = DefaultTaskTimeout
 	}
 
 	// Create HTTP client with TLS configuration
@@ -214,30 +223,6 @@ type Task struct {
 // not exist" only means the VM is not on the node asked (e.g. after an HA
 // move), and a bare HTTP 404 is no answer from PVE at all.
 var ErrSnapshotNotExist = errors.New("snapshot does not exist")
-
-// pveErrorTextLimit bounds how much of an error response body pveErrorText
-// reads.
-const pveErrorTextLimit = 4096
-
-// pveErrorText returns the error text of a non-2xx PVE answer: its HTTP status
-// line (resp.Status — PVE puts the error message in the reason phrase, e.g.
-// "500 snapshot 'x' does not exist", with a body of {"data":null}) followed by
-// up to pveErrorTextLimit bytes of its body (where a proxy, or a PVE version
-// that reports errors there, puts it). It consumes the body. Every match of a
-// PVE error message must read this text, never the body alone; a text that
-// matches nothing is an ordinary, retryable error.
-func pveErrorText(resp *http.Response) string {
-	if resp == nil {
-		return ""
-	}
-	text := resp.Status
-	if resp.Body != nil {
-		if body, err := io.ReadAll(io.LimitReader(resp.Body, pveErrorTextLimit)); err == nil && len(body) > 0 {
-			text += " " + string(body)
-		}
-	}
-	return text
-}
 
 // pveSnapshotDoesNotExist reports whether a non-200 PVE answer's error text
 // (pveErrorText) says that snapshot name does not exist.
@@ -423,11 +408,10 @@ func (c *Client) GetVM(ctx context.Context, node string, vmid int) (*VM, error) 
 	}
 	defer resp.Body.Close() //nolint:errcheck // Response body close in defer is not critical
 
-	if resp.StatusCode == 404 {
-		return nil, ErrVMNotFound
-	}
-
 	if resp.StatusCode != 200 {
+		if vmMissingAnswer(resp.StatusCode, pveErrorText(resp)) {
+			return nil, ErrVMNotFound
+		}
 		return nil, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
 	}
 
@@ -466,8 +450,7 @@ func (c *Client) CreateVM(ctx context.Context, node string, config *VMConfig) (s
 	defer resp.Body.Close() //nolint:errcheck // Response body close in defer is not critical
 
 	if resp.StatusCode != 200 {
-		body, _ := io.ReadAll(resp.Body)
-		return "", fmt.Errorf("create VM failed with status %d: %s", resp.StatusCode, string(body))
+		return "", newAPIError("create VM", resp)
 	}
 
 	var apiResp APIResponse
@@ -521,8 +504,7 @@ func (c *Client) CloneVM(ctx context.Context, node string, vmid int, config *VMC
 	defer resp.Body.Close() //nolint:errcheck // Response body close in defer is not critical
 
 	if resp.StatusCode != 200 {
-		body, _ := io.ReadAll(resp.Body)
-		return "", fmt.Errorf("clone VM failed with status %d: %s", resp.StatusCode, string(body))
+		return "", newAPIError("clone VM", resp)
 	}
 
 	var apiResp APIResponse
@@ -622,14 +604,14 @@ func (c *Client) DeleteVM(ctx context.Context, node string, vmid int, purge bool
 	}
 	defer resp.Body.Close() //nolint:errcheck // Response body close in defer is not critical
 
-	if resp.StatusCode == 404 {
-		// VM doesn't exist, consider it deleted
-		return "", nil
-	}
-
 	if resp.StatusCode != 200 {
-		body, _ := io.ReadAll(resp.Body)
-		return "", fmt.Errorf("delete VM failed with status %d: %s", resp.StatusCode, string(body))
+		text := pveErrorText(resp)
+		if vmMissingAnswer(resp.StatusCode, text) {
+			// No such VM on this node. It may be on another one: callers
+			// confirm cluster-wide before treating it as deleted.
+			return "", ErrVMNotFound
+		}
+		return "", fmt.Errorf("delete VM failed with status %d: %s", resp.StatusCode, text)
 	}
 
 	var apiResp APIResponse
@@ -737,7 +719,7 @@ func (c *Client) WaitForTask(ctx context.Context, node, taskID string) error {
 
 			if task.Status == "stopped" {
 				if task.ExitCode != nil && *task.ExitCode != "OK" {
-					return fmt.Errorf("task failed with exit code: %s", *task.ExitCode)
+					return fmt.Errorf("%w with exit code: %s", ErrTaskFailed, *task.ExitCode)
 				}
 				return nil
 			}
@@ -900,11 +882,11 @@ func (c *Client) FindNode(ctx context.Context) (string, error) {
 }
 
 // ListNodes returns the names of the nodes in the PVE cluster (GET /nodes). The
-// result is cached for the client's lifetime since the node set rarely changes.
+// result is cached for NodeCacheTTL.
 func (c *Client) ListNodes(ctx context.Context) ([]string, error) {
 	c.nodesMu.Lock()
 	defer c.nodesMu.Unlock()
-	if len(c.cachedNodes) > 0 {
+	if len(c.cachedNodes) > 0 && time.Since(c.nodesCachedAt) < NodeCacheTTL {
 		return c.cachedNodes, nil
 	}
 
@@ -937,8 +919,134 @@ func (c *Client) ListNodes(ctx context.Context) ([]string, error) {
 	if len(nodes) == 0 {
 		return nil, fmt.Errorf("PVE returned no nodes")
 	}
+	// /nodes is not ordered: sort, so FindNode's default node (nodes[0]) is the
+	// same on every refresh.
+	sort.Strings(nodes)
 	c.cachedNodes = nodes
+	c.nodesCachedAt = time.Now()
 	return nodes, nil
+}
+
+// vmMissingAnswer reports whether a PVE answer to a per-VM call says that the
+// VM's configuration does not exist ON THE NODE ASKED: HTTP 404, or the HTTP
+// 500 "Configuration file 'nodes/<node>/qemu-server/<vmid>.conf' does not
+// exist" real PVE answers (in the reason phrase or the body: text is
+// pveErrorText). A VM that lives on another node gets the same
+// answer, so it never proves the VM is gone (VMIDFree does).
+func vmMissingAnswer(status int, text string) bool {
+	return status == http.StatusNotFound ||
+		(status == http.StatusInternalServerError && strings.Contains(text, "Configuration file") && strings.Contains(text, "does not exist"))
+}
+
+// VMIDFree reports whether no guest in the cluster has vmid, whatever the
+// caller's permissions: GET /cluster/nextid?vmid=<vmid> answers 200 for a free
+// id and 400 "... already exists" for one in use.
+func (c *Client) VMIDFree(ctx context.Context, vmid int) (bool, error) {
+	resp, err := c.request(ctx, "GET", fmt.Sprintf("/api2/json/cluster/nextid?vmid=%d", vmid), nil)
+	if err != nil {
+		return false, fmt.Errorf("check VMID %d: %w", vmid, err)
+	}
+	defer resp.Body.Close() //nolint:errcheck // defer close is not critical
+
+	if resp.StatusCode == http.StatusOK {
+		return true, nil
+	}
+	text := pveErrorText(resp)
+	if resp.StatusCode == http.StatusBadRequest && strings.Contains(text, "already exists") {
+		return false, nil
+	}
+	return false, fmt.Errorf("check VMID %d: status %d: %s", vmid, resp.StatusCode, text)
+}
+
+// ActiveTask is a task still running on a node (GET
+// /nodes/{node}/tasks?source=active).
+type ActiveTask struct {
+	UPID string `json:"upid"`
+	Type string `json:"type"`
+	ID   string `json:"id"`
+	User string `json:"user"`
+}
+
+// ListActiveTasks lists the tasks still running on node that the caller may
+// see (its own, at least).
+func (c *Client) ListActiveTasks(ctx context.Context, node string) ([]ActiveTask, error) {
+	resp, err := c.request(ctx, "GET", fmt.Sprintf("/api2/json/nodes/%s/tasks?source=active", node), nil)
+	if err != nil {
+		return nil, fmt.Errorf("list active tasks of node %s: %w", node, err)
+	}
+	defer resp.Body.Close() //nolint:errcheck // defer close is not critical
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("list active tasks of node %s: status %d: %s", node, resp.StatusCode, string(body))
+	}
+	var out struct {
+		Data []ActiveTask `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, fmt.Errorf("decode active tasks of node %s: %w", node, err)
+	}
+	return out.Data, nil
+}
+
+// Identity is the PVE user the client acts as, as PVE records it on the tasks
+// it starts: the API token id ("user@realm!token") or the user name.
+func (c *Client) Identity() string {
+	if c.config.TokenID != "" {
+		return c.config.TokenID
+	}
+	return c.config.Username
+}
+
+// ClusterResourceTypeQEMU is the /cluster/resources "type" of a QEMU VM (the
+// other guest type, "lxc", is a container and never a VirtRigaud VM).
+const ClusterResourceTypeQEMU = "qemu"
+
+// ClusterVM is one guest as listed by GET /cluster/resources?type=vm.
+type ClusterVM struct {
+	// Type is the guest type: ClusterResourceTypeQEMU or "lxc".
+	Type string `json:"type"`
+	// VMID is the cluster-unique guest id.
+	VMID int `json:"vmid"`
+	// Name is the guest name (not unique in a PVE cluster).
+	Name string `json:"name"`
+	// Node is the node the guest's configuration lives on.
+	Node string `json:"node"`
+	// Status is the guest's status ("running", "stopped", or "unknown" for a
+	// guest on a node that does not answer).
+	Status string `json:"status"`
+	// Template is 1 for a template, 0 (or absent) otherwise.
+	Template int `json:"template,omitempty"`
+	// MaxCPU is the guest's vCPU count.
+	MaxCPU float64 `json:"maxcpu,omitempty"`
+	// MaxMem is the guest's memory, in bytes.
+	MaxMem int64 `json:"maxmem,omitempty"`
+}
+
+// ListClusterVMs lists every guest of the cluster in one call (GET
+// /cluster/resources?type=vm), from the cluster's replicated configuration:
+// a guest on a node that is down is still listed (status "unknown"), so the
+// answer never silently omits a VM. It returns only the guests the API
+// token may audit.
+func (c *Client) ListClusterVMs(ctx context.Context) ([]ClusterVM, error) {
+	resp, err := c.request(ctx, "GET", "/api2/json/cluster/resources?type=vm", nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list cluster resources: %w", err)
+	}
+	defer resp.Body.Close() //nolint:errcheck // defer close is not critical
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("list cluster resources failed with status %d: %s", resp.StatusCode, string(body))
+	}
+
+	var out struct {
+		Data []ClusterVM `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, fmt.Errorf("failed to decode cluster resources: %w", err)
+	}
+	return out.Data, nil
 }
 
 // ReconfigureConfig represents VM reconfiguration parameters
@@ -1162,11 +1270,10 @@ func (c *Client) GetVMConfig(ctx context.Context, node string, vmid int) (map[st
 	}
 	defer resp.Body.Close() //nolint:errcheck // Response body close in defer is not critical
 
-	if resp.StatusCode == 404 {
-		return nil, ErrVMNotFound
-	}
-
 	if resp.StatusCode != 200 {
+		if vmMissingAnswer(resp.StatusCode, pveErrorText(resp)) {
+			return nil, ErrVMNotFound
+		}
 		return nil, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
 	}
 
@@ -1182,10 +1289,77 @@ func (c *Client) GetVMConfig(ctx context.Context, node string, vmid int) (map[st
 	return nil, fmt.Errorf("unexpected response format")
 }
 
+// APIError is a PVE API answer with a non-200 HTTP status: PVE received the
+// request and answered it. Callers classify it by StatusCode (a 4xx is a
+// request PVE rejected before doing anything), whereas a transport failure,
+// where no answer arrived, is never an APIError.
+type APIError struct {
+	// Operation names the call, e.g. "create VM".
+	Operation string
+	// StatusCode is the HTTP status PVE answered with.
+	StatusCode int
+	// Reason is the reason phrase of the HTTP status line, where PVE puts its
+	// error message (e.g. "Configuration file ... does not exist").
+	Reason string
+	// Body is PVE's answer body (often only {"data":null}; parameter errors
+	// are in its "errors").
+	Body string
+}
+
+// Text is the whole error text of the answer: its reason phrase and its body.
+func (e *APIError) Text() string {
+	return strings.TrimSpace(e.Reason + " " + e.Body)
+}
+
+// Error implements error, in the historical "<operation> failed with status
+// <code>: <text>" form.
+func (e *APIError) Error() string {
+	return fmt.Sprintf("%s failed with status %d: %s", e.Operation, e.StatusCode, e.Text())
+}
+
+// maxErrorBodyLen bounds how much of an error answer's body is read.
+const maxErrorBodyLen = 64 << 10
+
+// readErrorAnswer returns the reason phrase of resp's status line and the
+// start of its body (at most maxErrorBodyLen bytes).
+func readErrorAnswer(resp *http.Response) (reason, body string) {
+	if resp == nil {
+		return "", ""
+	}
+	var b []byte
+	if resp.Body != nil {
+		b, _ = io.ReadAll(io.LimitReader(resp.Body, maxErrorBodyLen))
+	}
+	reason = strings.TrimSpace(strings.TrimPrefix(resp.Status, strconv.Itoa(resp.StatusCode)))
+	if reason == http.StatusText(resp.StatusCode) {
+		reason = "" // the generic phrase carries no PVE message
+	}
+	return reason, string(b)
+}
+
+// pveErrorText is the error text of a non-200 PVE answer: PVE puts its
+// message in the HTTP reason phrase (the body is often just {"data":null}),
+// and some answers carry it in the body, so both are combined. It consumes
+// the body. Every match of a PVE error message must read this text, never the
+// body alone; a text that matches nothing is an ordinary, retryable error.
+func pveErrorText(resp *http.Response) string {
+	reason, body := readErrorAnswer(resp)
+	return strings.TrimSpace(reason + " " + body)
+}
+
+// newAPIError reads a non-200 answer of operation into an APIError.
+func newAPIError(operation string, resp *http.Response) *APIError {
+	reason, body := readErrorAnswer(resp)
+	return &APIError{Operation: operation, StatusCode: resp.StatusCode, Reason: reason, Body: body}
+}
+
 // Custom errors
 var (
-	ErrVMNotFound           = fmt.Errorf("VM not found")
-	ErrNodeNotFound         = fmt.Errorf("node not found")
+	ErrVMNotFound   = fmt.Errorf("VM not found")
+	ErrNodeNotFound = fmt.Errorf("node not found")
+	// ErrTaskFailed is wrapped by WaitForTask when the task FINISHED with an
+	// exit status other than OK, as opposed to a timeout or a failed status
+	// query, after which the task's outcome is unknown.
 	ErrTaskFailed           = fmt.Errorf("task failed")
 	ErrDiskShrinkNotAllowed = fmt.Errorf("disk shrinking not allowed")
 )

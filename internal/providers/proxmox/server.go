@@ -24,12 +24,14 @@ import (
 	"log/slog"
 	"net/url"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
 
 	v1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
 	"github.com/projectbeskar/virtrigaud/internal/diskutil"
+	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
 	"github.com/projectbeskar/virtrigaud/internal/providers/proxmox/pveapi"
 	"github.com/projectbeskar/virtrigaud/internal/storage"
 	"github.com/projectbeskar/virtrigaud/internal/storage/migration"
@@ -51,6 +53,12 @@ type Provider struct {
 	// that case rather than panicking. The control plane (Create/Delete/etc.)
 	// never depends on it.
 	ssh *sshTransport
+
+	// inflight records the create/clone tasks this provider started for an
+	// owner and has not seen end (inflight.go).
+	inflight inflightTracker
+	// ownerLocks serializes the Creates and Clones of one owner (inflight.go).
+	ownerLocks ownerLocks
 }
 
 // readCredentialFile reads a credential from a mounted secret file
@@ -197,32 +205,54 @@ func (p *Provider) Validate(ctx context.Context, req *providerv1.ValidateRequest
 	}, nil
 }
 
-// Create creates a new virtual machine
+// Create creates a new virtual machine.
+//
+// When the request carries an owner (CreateRequest.owner with a UID), the VM
+// is stamped with it (vm_ownership.go) by the very request that makes it, and
+// a VM the cluster already has with this name and this owner's UID is
+// re-bound instead of making a second one: a Create re-sent after an unknown
+// outcome returns the VM the first one made, finishing it first if it was
+// interrupted. Failures are classified as described in create_errors.go.
 func (p *Provider) Create(ctx context.Context, req *providerv1.CreateRequest) (*providerv1.CreateResponse, error) {
 	if p.client == nil {
-		return nil, errors.NewUnavailable("PVE client not configured", nil)
+		return nil, p.createNotPerformed("PVE client not configured; nothing was created", nil)
 	}
 
-	// Parse the request
+	owner, err := ownerFromCreateRequest(req)
+	if err != nil {
+		return nil, err
+	}
+	unlock, err := p.lockOwner(owner.UID)
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
+
+	// Parse the request (node discovery and VMID allocation happen here; their
+	// failures are already classified).
 	vmConfig, node, err := p.parseCreateRequest(ctx, req)
 	if err != nil {
-		return nil, errors.NewInvalidSpec("failed to parse create request: %v", err)
+		return nil, err
 	}
 
-	// Check if VM already exists (idempotency)
-	if existing, existErr := p.client.GetVM(ctx, node, vmConfig.VMID); existErr == nil && existing != nil {
-		// VM exists, check if it matches our requirements
-		if existing.Name == req.Name {
-			p.logger.Info("VM already exists with same name, skipping creation",
-				"vmid", vmConfig.VMID, "name", req.Name)
-			return &providerv1.CreateResponse{
-				Id: fmt.Sprintf("%d", vmConfig.VMID),
-			}, nil
+	var stamp *ownerStamp
+	if !owner.IsZero() {
+		// A task an earlier Create for this owner started and that has not
+		// ended makes a VM the owner lookup cannot see yet (inflight.go).
+		if err := p.checkInflight(ctx, owner.UID); err != nil {
+			return nil, err
 		}
-		// VM exists but with different name, generate new VMID
-		p.logger.Warn("VM exists with different name, generating new VMID",
-			"existing_vmid", vmConfig.VMID, "existing_name", existing.Name, "requested_name", req.Name)
-		vmConfig.VMID = p.nextVMID(ctx)
+		existing, err := p.findOwnedVM(ctx, req.Name, owner)
+		if err != nil {
+			return nil, err
+		}
+		if existing != nil {
+			resp, recreate, err := p.rebindCreate(ctx, req, vmConfig, existing)
+			if err != nil || !recreate {
+				return resp, err
+			}
+		}
+		stamp = &ownerStamp{owner: owner, phase: ownerStampPhaseCreating}
 	}
 
 	// ADR-0006 Proxmox TARGET: when the request carries a pre-staged imported
@@ -230,144 +260,212 @@ func (p *Provider) Create(ctx context.Context, req *providerv1.CreateRequest) (*
 	// and attaches the staged disk via `qm importdisk` instead of cloning a
 	// template. Handled entirely by createFromImportedDisk and returns early.
 	if vmConfig.ImportedDiskPath != "" {
-		return p.createFromImportedDisk(ctx, req, vmConfig, node)
+		return p.createFromImportedDisk(ctx, req, vmConfig, node, stamp)
 	}
 
-	var taskID string
+	if vmConfig.Custom == nil {
+		vmConfig.Custom = make(map[string]string)
+	}
 
-	// Determine if we need to clone from a template or create a new VM
-	if vmConfig.Template != "" {
-		// Parse template ID from the Template field
-		templateID, parseErr := strconv.Atoi(vmConfig.Template)
-		if parseErr != nil {
-			return nil, errors.NewInvalidSpec("invalid template ID '%s': %v", vmConfig.Template, parseErr)
+	if vmConfig.Template == "" {
+		// A new VM (not from a template): the whole configuration, the owner
+		// stamp included (already "ready": nothing follows), is in the one
+		// create request.
+		if stamp != nil {
+			ready := stamp.withPhase(ownerStampPhaseReady)
+			vmConfig.Custom[pveConfigKeyDescription] = composeDescription("", &ready)
 		}
-
-		// Clone from template
-		p.logger.Info("Cloning VM from template", "template_id", templateID, "new_vmid", vmConfig.VMID)
-
-		// Set full clone flag
-		if vmConfig.Custom == nil {
-			vmConfig.Custom = make(map[string]string)
-		}
-		vmConfig.Custom["full"] = "1" // Full clone by default
-
-		taskID, err = p.client.CloneVM(ctx, node, templateID, vmConfig)
-		if err != nil {
-			return nil, errors.NewInvalidSpec("failed to clone template: %v", err)
-		}
-
-		// Wait for clone to complete
-		if taskID != "" {
-			if err = p.client.WaitForTask(ctx, node, taskID); err != nil {
-				return nil, errors.NewInternal("clone task failed", err)
-			}
-		}
-
-		// Apply the VMClass sizing on top of the cloned template. A PVE clone
-		// inherits the template's cores/memory, so they MUST be set explicitly or
-		// the VM comes up at the template's size, not the class's (#261 P1-1). This
-		// runs for EVERY clone, independent of cloud-init — the cloud-init
-		// reconfigure below is gated and would otherwise skip a plain VM. (The
-		// diskless create path applies sizing via configToValues at create time.)
-		if err := p.applyVMClassSizing(ctx, node, vmConfig.VMID, vmConfig.CPUs, vmConfig.Memory); err != nil {
-			return nil, errors.NewInternal("failed to apply VMClass sizing to cloned VM", err)
-		}
-
-		// After cloning, we need to reconfigure the VM with cloud-init settings
-		if len(req.UserData) > 0 || vmConfig.SSHKeys != "" {
-			p.logger.Info("Reconfiguring cloned VM with cloud-init", "vmid", vmConfig.VMID)
-
-			// Auto-detect primary boot disk from cloned VM
-			primaryDisk, err := p.client.DetectPrimaryDisk(ctx, node, vmConfig.VMID)
-			if err != nil {
-				p.logger.Warn("Failed to detect primary disk, using scsi0 as fallback", "error", err)
-				primaryDisk = "scsi0"
-			}
-			p.logger.Info("Detected primary boot disk", "vmid", vmConfig.VMID, "disk", primaryDisk)
-
-			// Build reconfiguration values for cloud-init. Sizing (cores/memory) is
-			// already applied above for every clone, so it is not repeated here.
-			reconfigValues := url.Values{}
-			if vmConfig.IDE2 != "" {
-				reconfigValues.Set("ide2", vmConfig.IDE2)
-			}
-			if vmConfig.SSHKeys != "" {
-				reconfigValues.Set("sshkeys", vmConfig.SSHKeys)
-			}
-			if vmConfig.CIUser != "" {
-				reconfigValues.Set("ciuser", vmConfig.CIUser)
-			}
-			// Set boot order: detected primary disk first, then cloud-init drive
-			bootOrder := fmt.Sprintf("order=%s;ide2", primaryDisk)
-			reconfigValues.Set("boot", bootOrder)
-			p.logger.Info("Setting boot order", "vmid", vmConfig.VMID, "boot", bootOrder)
-
-			// Add network config (these should already be in the cloned VM, but just to be safe)
-			for _, netConfig := range vmConfig.Networks {
-				netString := p.buildNetworkString(netConfig)
-				if netString != "" {
-					reconfigValues.Set(fmt.Sprintf("net%d", netConfig.Index), netString)
-				}
-			}
-			// Add IP config
-			for _, ipConfig := range vmConfig.IPConfigs {
-				ipString := p.buildIPConfigString(ipConfig)
-				if ipString != "" {
-					reconfigValues.Set(fmt.Sprintf("ipconfig%d", ipConfig.Index), ipString)
-				}
-			}
-
-			// Reconfigure the cloned VM with cloud-init settings
-			taskID, err = p.client.ReconfigureVMRaw(ctx, node, vmConfig.VMID, reconfigValues)
-			if err != nil {
-				return nil, errors.NewInternal("failed to reconfigure VM", err)
-			}
-
-			// Wait for reconfiguration if async
-			if taskID != "" {
-				if err = p.client.WaitForTask(ctx, node, taskID); err != nil {
-					return nil, errors.NewInternal("reconfigure task failed", err)
-				}
-			}
-		}
-	} else {
-		// Create a new VM (not from template)
 		p.logger.Info("Creating new VM", "vmid", vmConfig.VMID)
-		taskID, err = p.client.CreateVM(ctx, node, vmConfig)
+		p.trackTask(stamp, node, vmConfig.VMID, "")
+		taskID, err := p.client.CreateVM(ctx, node, vmConfig)
+		if err != nil {
+			return nil, p.submitFailed(stamp, vmConfig.VMID, p.classifySubmitError(ctx, "create VM", vmConfig.VMID, stamp, err))
+		}
+		// The task is not awaited: it stays recorded until a later Create for
+		// this owner sees it end.
+		p.trackTask(stamp, node, vmConfig.VMID, taskID)
+		result := &providerv1.CreateResponse{Id: fmt.Sprintf("%d", vmConfig.VMID)}
+		if taskID != "" {
+			result.Task = &providerv1.TaskRef{Id: taskID}
+		}
+		return result, nil
 	}
 
-	// Handle errors
+	// Clone from a template.
+	templateID, parseErr := strconv.Atoi(vmConfig.Template)
+	if parseErr != nil {
+		return nil, errors.NewInvalidSpec("invalid template ID '%s': %v", vmConfig.Template, parseErr)
+	}
+	// The clone inherits the template's description: keep it, minus any owner
+	// stamp, and add this VM's own.
+	base, sourceHas, err := p.inheritedDescription(ctx, node, templateID)
+	if stderrors.Is(err, pveapi.ErrVMNotFound) {
+		return nil, errors.NewInvalidSpec("template %d not found on node %s", templateID, node)
+	}
 	if err != nil {
-		// Map specific PVE errors to appropriate SDK errors
-		errMsg := err.Error()
-		if strings.Contains(errMsg, "already exists") {
-			return nil, errors.NewAlreadyExists("VM", fmt.Sprintf("%d", vmConfig.VMID))
+		return nil, p.vmCreateNotPerformed(fmt.Sprintf("cannot read template %d; nothing was created (will retry)", templateID), err)
+	}
+	p.warnIfTruncated(vmConfig.VMID, base, stamp)
+	if desc := cloneRequestDescription(base, sourceHas, stamp); desc != "" {
+		vmConfig.Custom[pveConfigKeyDescription] = desc
+	}
+	vmConfig.Custom["full"] = "1" // Full clone by default
+
+	p.logger.Info("Cloning VM from template", "template_id", templateID, "new_vmid", vmConfig.VMID)
+	p.trackTask(stamp, node, vmConfig.VMID, "")
+	taskID, err := p.client.CloneVM(ctx, node, templateID, vmConfig)
+	if err != nil {
+		return nil, p.submitFailed(stamp, vmConfig.VMID, p.classifySubmitError(ctx, "clone template", vmConfig.VMID, stamp, err))
+	}
+	p.trackTask(stamp, node, vmConfig.VMID, taskID)
+	if err := p.client.WaitForTask(ctx, node, taskID); err != nil {
+		if stderrors.Is(err, pveapi.ErrTaskFailed) {
+			p.untrackTask(stamp, vmConfig.VMID)
 		}
-		if strings.Contains(errMsg, "insufficient") || strings.Contains(errMsg, "no space") {
-			return nil, errors.NewRateLimit(time.Minute * 5) // Retry after 5 minutes for resource exhaustion
+		return nil, p.failAfterTask(ctx, node, vmConfig.VMID, req.Name, stamp, "the template clone task failed", err)
+	}
+	p.untrackTask(stamp, vmConfig.VMID)
+	if err := p.ensureOwnerStamp(ctx, node, vmConfig.VMID, base, stamp); err != nil {
+		return nil, p.failAfterSubmit(ctx, node, vmConfig.VMID, req.Name, stamp, true, "stamping the cloned VM with its owner failed", err)
+	}
+	if err := p.configureClonedVM(ctx, req, vmConfig, node); err != nil {
+		return nil, p.failAfterSubmit(ctx, node, vmConfig.VMID, req.Name, stamp, true, "configuring the cloned VM failed", err)
+	}
+	if stamp != nil {
+		ready := stamp.withPhase(ownerStampPhaseReady)
+		if err := p.writeOwnerStamp(ctx, node, vmConfig.VMID, base, &ready); err != nil {
+			return nil, p.failAfterSubmit(ctx, node, vmConfig.VMID, req.Name, &ready, true, "marking the cloned VM ready failed", err)
 		}
-		if strings.Contains(errMsg, "permission") || strings.Contains(errMsg, "access denied") {
-			return nil, errors.NewPermissionDenied("create VM")
-		}
-		if strings.Contains(errMsg, "invalid") || strings.Contains(errMsg, "bad parameter") {
-			return nil, errors.NewInvalidSpec("invalid VM configuration: %v", err)
-		}
-		if strings.Contains(errMsg, "timeout") || strings.Contains(errMsg, "connection") {
-			return nil, errors.NewUnavailable("Proxmox VE API unavailable: %v", err)
-		}
-		return nil, errors.NewInternal("failed to create VM", err)
+	}
+	return &providerv1.CreateResponse{Id: fmt.Sprintf("%d", vmConfig.VMID)}, nil
+}
+
+// configureClonedVM applies, to a VM cloned from a template, what the clone
+// does not carry: the VMClass sizing and the cloud-init settings. Every value
+// is set with an idempotent config update, so a re-sent Create that finds its
+// VM interrupted runs it again.
+func (p *Provider) configureClonedVM(ctx context.Context, req *providerv1.CreateRequest, vmConfig *pveapi.VMConfig, node string) error {
+	// Apply the VMClass sizing on top of the cloned template. A PVE clone
+	// inherits the template's cores/memory, so they MUST be set explicitly or
+	// the VM comes up at the template's size, not the class's (#261 P1-1). This
+	// runs for EVERY clone, independent of cloud-init — the cloud-init
+	// reconfigure below is gated and would otherwise skip a plain VM. (The
+	// diskless create path applies sizing via configToValues at create time.)
+	if err := p.applyVMClassSizing(ctx, node, vmConfig.VMID, vmConfig.CPUs, vmConfig.Memory); err != nil {
+		return fmt.Errorf("apply VMClass sizing to cloned VM %d: %w", vmConfig.VMID, err)
 	}
 
-	result := &providerv1.CreateResponse{
-		Id: fmt.Sprintf("%d", vmConfig.VMID),
+	// After cloning, reconfigure the VM with the cloud-init settings.
+	if len(req.UserData) == 0 && vmConfig.SSHKeys == "" {
+		return nil
+	}
+	p.logger.Info("Reconfiguring cloned VM with cloud-init", "vmid", vmConfig.VMID)
+
+	// Auto-detect primary boot disk from cloned VM
+	primaryDisk, err := p.client.DetectPrimaryDisk(ctx, node, vmConfig.VMID)
+	if err != nil {
+		p.logger.Warn("Failed to detect primary disk, using scsi0 as fallback", "error", err)
+		primaryDisk = "scsi0"
+	}
+	p.logger.Info("Detected primary boot disk", "vmid", vmConfig.VMID, "disk", primaryDisk)
+
+	// Build reconfiguration values for cloud-init. Sizing (cores/memory) is
+	// already applied above for every clone, so it is not repeated here.
+	reconfigValues := url.Values{}
+	if vmConfig.IDE2 != "" {
+		reconfigValues.Set("ide2", vmConfig.IDE2)
+	}
+	if vmConfig.SSHKeys != "" {
+		reconfigValues.Set("sshkeys", vmConfig.SSHKeys)
+	}
+	if vmConfig.CIUser != "" {
+		reconfigValues.Set("ciuser", vmConfig.CIUser)
+	}
+	// Set boot order: detected primary disk first, then cloud-init drive
+	bootOrder := fmt.Sprintf("order=%s;ide2", primaryDisk)
+	reconfigValues.Set("boot", bootOrder)
+	p.logger.Info("Setting boot order", "vmid", vmConfig.VMID, "boot", bootOrder)
+
+	// Add network config (these should already be in the cloned VM, but just to be safe)
+	for _, netConfig := range vmConfig.Networks {
+		netString := p.buildNetworkString(netConfig)
+		if netString != "" {
+			reconfigValues.Set(fmt.Sprintf("net%d", netConfig.Index), netString)
+		}
+	}
+	// Add IP config
+	for _, ipConfig := range vmConfig.IPConfigs {
+		ipString := p.buildIPConfigString(ipConfig)
+		if ipString != "" {
+			reconfigValues.Set(fmt.Sprintf("ipconfig%d", ipConfig.Index), ipString)
+		}
 	}
 
-	if taskID != "" {
-		result.Task = &providerv1.TaskRef{Id: taskID}
+	taskID, err := p.client.ReconfigureVMRaw(ctx, node, vmConfig.VMID, reconfigValues)
+	if err != nil {
+		return fmt.Errorf("reconfigure cloned VM %d with cloud-init: %w", vmConfig.VMID, err)
 	}
+	if err := p.client.WaitForTask(ctx, node, taskID); err != nil {
+		return fmt.Errorf("reconfigure cloned VM %d with cloud-init: %w", vmConfig.VMID, err)
+	}
+	return nil
+}
 
-	return result, nil
+// rebindCreate answers a Create that found the VM vm, stamped with this
+// request's owner, which an earlier Create for the same VirtualMachine made.
+// A "ready" VM is returned as it is. A "creating" one was interrupted: it is
+// finished (a template clone: sizing and cloud-init applied again; a plain
+// create: nothing to add) and marked ready, or — for a migration's
+// imported-disk create, whose steps cannot be re-run on the half-built VM —
+// removed (recreate=true), so the caller builds it again from the staged
+// disk. A VM a PVE task is still working on (locked) is not touched: the
+// answer is retryable and leaves the outcome unknown.
+func (p *Provider) rebindCreate(ctx context.Context, req *providerv1.CreateRequest, vmConfig *pveapi.VMConfig, vm *ownedVM) (resp *providerv1.CreateResponse, recreate bool, err error) {
+	id := p.vmIDOn(ctx, vm.node, vm.vmid)
+	logArgs := []any{"name", req.Name, "vmid", vm.vmid, "node", vm.node, "owner_uid", vm.stamp.owner.UID}
+	if vm.stamp.phase == ownerStampPhaseReady {
+		p.logger.Info("A VM stamped with this VirtualMachine's UID already exists; treating the create as idempotent", logArgs...)
+		return &providerv1.CreateResponse{Id: id}, false, nil
+	}
+	if vm.lock != "" {
+		return nil, false, p.outcomeUnknown(fmt.Sprintf("Proxmox VM %d, made by an earlier Create for this VirtualMachine, "+
+			"is still being worked on (lock %q); will retry", vm.vmid, vm.lock), nil)
+	}
+	if vmConfig.ImportedDiskPath != "" {
+		if vm.status != pveStatusStopped {
+			return nil, false, p.outcomeUnknown(fmt.Sprintf("Proxmox VM %d, an interrupted imported-disk create for this "+
+				"VirtualMachine, is %s, not stopped; not rebuilding it", vm.vmid, vm.status), nil)
+		}
+		// Remove the half-built VM only when it can be built again (the SSH
+		// data plane is configured and the staged disk is still on the node)
+		// and no `qm importdisk` of the interrupted create still runs.
+		err := p.importStageReady(ctx, vmConfig.ImportedDiskPath)
+		if err == nil {
+			err = p.importdiskIdle(ctx, vm.vmid)
+		}
+		if err != nil {
+			return nil, false, p.outcomeUnknown(fmt.Sprintf("Proxmox VM %d, an interrupted imported-disk create for this "+
+				"VirtualMachine, cannot be rebuilt (%v); not removing it", vm.vmid, err), nil)
+		}
+		p.logger.Warn("An imported-disk create for this VirtualMachine was interrupted; removing its half-built VM to build it again", logArgs...)
+		if err := p.rollbackCreatedVM(ctx, vm.node, vm.vmid, req.Name, &vm.stamp, true); err != nil {
+			return nil, false, p.outcomeUnknown(fmt.Sprintf("removing the half-built VM %d of an interrupted imported-disk create failed", vm.vmid), err)
+		}
+		return nil, true, nil
+	}
+	p.logger.Info("A VM stamped with this VirtualMachine's UID was left half-created; finishing it", logArgs...)
+	if vmConfig.Template != "" {
+		finishing := *vmConfig
+		finishing.VMID = vm.vmid
+		if err := p.configureClonedVM(ctx, req, &finishing, vm.node); err != nil {
+			return nil, false, p.outcomeUnknown(fmt.Sprintf("finishing Proxmox VM %d failed", vm.vmid), err)
+		}
+	}
+	ready := vm.stamp.withPhase(ownerStampPhaseReady)
+	if err := p.writeOwnerStamp(ctx, vm.node, vm.vmid, vm.description, &ready); err != nil {
+		return nil, false, p.outcomeUnknown(fmt.Sprintf("marking Proxmox VM %d ready failed", vm.vmid), err)
+	}
+	return &providerv1.CreateResponse{Id: id}, false, nil
 }
 
 // Delete deletes a virtual machine
@@ -381,11 +479,21 @@ func (p *Provider) Delete(ctx context.Context, req *providerv1.DeleteRequest) (*
 		return nil, errors.NewInvalidSpec("invalid VM reference: %v", err)
 	}
 
+	// A request that names its owner destroys the VM only when the VM is not
+	// stamped with another owner (its VMID reused) and its stamp can be read.
+	// Without an owner (today's manager on a single-host Provider) the delete
+	// is unchanged.
+	if owner := deleteOwner(req); !owner.IsZero() {
+		if err := p.checkDeleteOwner(ctx, node, vmid, owner); err != nil {
+			return nil, err
+		}
+	}
+
 	// Proxmox refuses to destroy a running VM ("VM <id> is running - destroy
 	// failed"), so stop it first and wait for the stop to complete — mirroring
-	// vSphere (power-off → Destroy) and libvirt (destroyDomain → undefine). If PVE
-	// no longer knows the VM, GetVM/DeleteVM treat it as already deleted, so a
-	// missing VM is not an error.
+	// vSphere (power-off → Destroy) and libvirt (destroyDomain → undefine). A VM
+	// that no node of the cluster knows is already deleted, so it is not an
+	// error; one only missing from this node is (see below).
 	vm, err := p.client.GetVM(ctx, node, vmid)
 	if err == nil && vm != nil {
 		switch vm.Status {
@@ -408,6 +516,20 @@ func (p *Provider) Delete(ctx context.Context, req *providerv1.DeleteRequest) (*
 	// controller removes the finalizer on success, so returning success while the
 	// VM still exists would orphan it.
 	taskID, err := p.client.DeleteVM(ctx, node, vmid, true)
+	if stderrors.Is(err, pveapi.ErrVMNotFound) {
+		// Not on this node: already deleted only when no node has the VMID
+		// (a VM moved to another node is not deleted, and success would
+		// release the VirtualMachine's finalizer).
+		gone, goneErr := p.vmGone(ctx, vmid)
+		switch {
+		case goneErr != nil:
+			p.logCause("cannot confirm that the VM is gone", goneErr)
+			return nil, errors.NewUnavailable(fmt.Sprintf("Proxmox VM %d is not on node %s and the cluster could not be checked for it; not deleting", vmid, node), nil)
+		case !gone:
+			return nil, errors.NewUnavailable(fmt.Sprintf("Proxmox VM %d is not on node %s but exists elsewhere in the cluster; not deleting", vmid, node), nil)
+		}
+		return &providerv1.TaskResponse{}, nil
+	}
 	if err != nil {
 		return nil, errors.NewInternal("failed to delete VM", err)
 	}
@@ -628,7 +750,18 @@ func (p *Provider) Describe(ctx context.Context, req *providerv1.DescribeRequest
 
 	vm, err := p.client.GetVM(ctx, node, vmid)
 	if err != nil {
-		if err == pveapi.ErrVMNotFound {
+		if stderrors.Is(err, pveapi.ErrVMNotFound) {
+			// "Not on this node" is reported as gone only when no node of the
+			// cluster has the VMID: a VM moved to another node is not gone, and
+			// Exists=false makes the manager create it again.
+			gone, goneErr := p.vmGone(ctx, vmid)
+			if goneErr != nil {
+				p.logCause("cannot confirm that the VM is gone", goneErr)
+				return nil, errors.NewUnavailable(fmt.Sprintf("Proxmox VM %d is not on node %s and the cluster could not be checked for it", vmid, node), nil)
+			}
+			if !gone {
+				return nil, errors.NewUnavailable(fmt.Sprintf("Proxmox VM %d is not on node %s but exists elsewhere in the cluster", vmid, node), nil)
+			}
 			return &providerv1.DescribeResponse{
 				Exists:     false,
 				PowerState: "notfound",
@@ -870,12 +1003,23 @@ func (p *Provider) SnapshotRevert(ctx context.Context, req *providerv1.SnapshotR
 	return result, nil
 }
 
-// Clone clones a virtual machine
+// allocateVMID allocates the VMID of a VM Create or Clone is about to make,
+// from the cluster (/cluster/nextid). Unlike nextVMID it never falls back to a
+// time-derived id: a failure is answered VM_OPERATION_FAILED (nothing was
+// created; retry), so a VM is only ever created under a VMID PVE handed out.
+func (p *Provider) allocateVMID(ctx context.Context) (int, error) {
+	id, err := p.client.GetNextVMID(ctx)
+	if err != nil {
+		return 0, p.createNotPerformed("cannot allocate a VMID from /cluster/nextid; nothing was created (will retry)", err)
+	}
+	return id, nil
+}
+
 // nextVMID allocates a VMID from the cluster (/cluster/nextid). On error it falls
-// back to a time-derived id (logging a warning) so VM creation does not hard-fail
-// when the endpoint is unavailable — but the API path is preferred because a
-// purely time-based id collides when two VMs are created in the same second
-// (#261 P2-2).
+// back to a time-derived id (logging a warning) so the legacy disk import does
+// not hard-fail when the endpoint is unavailable — but the API path is
+// preferred because a purely time-based id collides when two VMs are created
+// in the same second (#261 P2-2). Create and Clone use allocateVMID.
 func (p *Provider) nextVMID(ctx context.Context) int {
 	id, err := p.client.GetNextVMID(ctx)
 	if err != nil {
@@ -929,18 +1073,56 @@ func (p *Provider) applyVMClassSizing(ctx context.Context, node string, vmid, cp
 	return nil
 }
 
+// Clone clones a VM. When the request names the target VirtualMachine with a
+// UID (CloneRequest.target_vm.uid), the clone is stamped with it and a VM
+// named target_name already stamped with that UID is returned instead of a
+// second clone (finished first if it was interrupted). Without a UID the
+// clone is unstamped: it never inherits the source's stamp. Failures are
+// classified as for Create (create_errors.go).
 func (p *Provider) Clone(ctx context.Context, req *providerv1.CloneRequest) (*providerv1.CloneResponse, error) {
 	if p.client == nil {
-		return nil, errors.NewUnavailable("PVE client not configured", nil)
+		return nil, p.createNotPerformed("PVE client not configured; nothing was cloned", nil)
 	}
+
+	owner, err := cloneTargetOwner(req)
+	if err != nil {
+		return nil, err
+	}
+	unlock, err := p.lockOwner(owner.UID)
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
 
 	sourceVMID, sourceNode, err := p.parseVMReference(req.SourceVmId)
 	if err != nil {
+		if _, convErr := strconv.Atoi(req.SourceVmId); convErr == nil {
+			// A bare VMID: only the node discovery can have failed.
+			return nil, p.createNotPerformed("cannot find the PVE node of the clone source; nothing was cloned (will retry)", err)
+		}
 		return nil, errors.NewInvalidSpec("invalid source VM reference: %v", err)
 	}
 
+	var stamp *ownerStamp
+	if !owner.IsZero() {
+		if err := p.checkInflight(ctx, owner.UID); err != nil {
+			return nil, err
+		}
+		existing, err := p.findOwnedVM(ctx, req.TargetName, owner)
+		if err != nil {
+			return nil, err
+		}
+		if existing != nil {
+			return p.rebindClone(ctx, req, existing)
+		}
+		stamp = &ownerStamp{owner: owner, phase: ownerStampPhaseCreating}
+	}
+
 	// Generate new VMID for clone
-	targetVMID := p.nextVMID(ctx)
+	targetVMID, err := p.allocateVMID(ctx)
+	if err != nil {
+		return nil, err
+	}
 
 	config := &pveapi.VMConfig{
 		VMID:   targetVMID,
@@ -973,14 +1155,38 @@ func (p *Provider) Clone(ctx context.Context, req *providerv1.CloneRequest) (*pr
 		}
 	}
 
+	// The clone inherits the source's description: keep it, minus the source's
+	// owner stamp, plus the clone's own (none without a target UID).
+	base, sourceHas, err := p.inheritedDescription(ctx, sourceNode, sourceVMID)
+	if stderrors.Is(err, pveapi.ErrVMNotFound) {
+		if gone, goneErr := p.vmGone(ctx, sourceVMID); goneErr == nil && gone {
+			return nil, errors.NewNotFound("VM", req.SourceVmId)
+		}
+		err = fmt.Errorf("clone source %d is not on node %s but may exist elsewhere in the cluster", sourceVMID, sourceNode)
+	}
+	if err != nil {
+		return nil, p.vmCreateNotPerformed(fmt.Sprintf("cannot read clone source %d; nothing was cloned (will retry)", sourceVMID), err)
+	}
+	p.warnIfTruncated(targetVMID, base, stamp)
+	if desc := cloneRequestDescription(base, sourceHas, stamp); desc != "" {
+		config.Custom[pveConfigKeyDescription] = desc
+	}
+
+	p.trackTask(stamp, sourceNode, targetVMID, "")
 	cloneTask, err := p.client.CloneVM(ctx, sourceNode, sourceVMID, config)
 	if err != nil {
-		return nil, errors.NewInternal("failed to clone VM", err)
+		return nil, p.submitFailed(stamp, targetVMID, p.classifySubmitError(ctx, "clone VM", targetVMID, stamp, err))
 	}
-	if cloneTask != "" {
-		if werr := p.client.WaitForTask(ctx, sourceNode, cloneTask); werr != nil {
-			return nil, errors.NewInternal("clone task failed", werr)
+	p.trackTask(stamp, sourceNode, targetVMID, cloneTask)
+	if werr := p.client.WaitForTask(ctx, sourceNode, cloneTask); werr != nil {
+		if stderrors.Is(werr, pveapi.ErrTaskFailed) {
+			p.untrackTask(stamp, targetVMID)
 		}
+		return nil, p.failAfterTask(ctx, targetNode, targetVMID, req.TargetName, stamp, "the clone task failed", werr)
+	}
+	p.untrackTask(stamp, targetVMID)
+	if err := p.ensureOwnerStamp(ctx, targetNode, targetVMID, base, stamp); err != nil {
+		return nil, p.failAfterSubmit(ctx, targetNode, targetVMID, req.TargetName, stamp, true, "stamping the clone failed", err)
 	}
 
 	// Apply the VMClass sizing override (#261 P1-2): a clone inherits the source's
@@ -988,12 +1194,45 @@ func (p *Provider) Clone(ctx context.Context, req *providerv1.CloneRequest) (*pr
 	// override is silently ignored.
 	cpus, memMiB := parseClassSizing(req.ClassJson)
 	if err := p.applyVMClassSizing(ctx, targetNode, targetVMID, cpus, memMiB); err != nil {
-		return nil, errors.NewInternal("failed to apply VMClass sizing to cloned VM", err)
+		return nil, p.failAfterSubmit(ctx, targetNode, targetVMID, req.TargetName, stamp, true, "applying VMClass sizing to the clone failed", err)
+	}
+	if stamp != nil {
+		ready := stamp.withPhase(ownerStampPhaseReady)
+		if err := p.writeOwnerStamp(ctx, targetNode, targetVMID, base, &ready); err != nil {
+			return nil, p.failAfterSubmit(ctx, targetNode, targetVMID, req.TargetName, &ready, true, "marking the clone ready failed", err)
+		}
 	}
 
 	return &providerv1.CloneResponse{
 		TargetVmId: fmt.Sprintf("%d", targetVMID),
 	}, nil
+}
+
+// rebindClone answers a Clone that found vm, a VM named target_name stamped
+// with the target VirtualMachine's UID, which an earlier Clone for it made: a
+// "ready" clone is returned; an interrupted ("creating") one gets the VMClass
+// sizing again and is marked ready; a locked one is left alone (retryable,
+// outcome unknown).
+func (p *Provider) rebindClone(ctx context.Context, req *providerv1.CloneRequest, vm *ownedVM) (*providerv1.CloneResponse, error) {
+	id := p.vmIDOn(ctx, vm.node, vm.vmid)
+	if vm.stamp.phase == ownerStampPhaseReady {
+		p.logger.Info("A clone stamped with the target VirtualMachine's UID already exists; treating the clone as idempotent",
+			"name", req.TargetName, "vmid", vm.vmid, "node", vm.node)
+		return &providerv1.CloneResponse{TargetVmId: id}, nil
+	}
+	if vm.lock != "" {
+		return nil, p.outcomeUnknown(fmt.Sprintf("Proxmox VM %d, made by an earlier Clone for this VirtualMachine, "+
+			"is still being worked on (lock %q); will retry", vm.vmid, vm.lock), nil)
+	}
+	cpus, memMiB := parseClassSizing(req.ClassJson)
+	if err := p.applyVMClassSizing(ctx, vm.node, vm.vmid, cpus, memMiB); err != nil {
+		return nil, p.outcomeUnknown(fmt.Sprintf("finishing clone %d failed", vm.vmid), err)
+	}
+	ready := vm.stamp.withPhase(ownerStampPhaseReady)
+	if err := p.writeOwnerStamp(ctx, vm.node, vm.vmid, vm.description, &ready); err != nil {
+		return nil, p.outcomeUnknown(fmt.Sprintf("marking clone %d ready failed", vm.vmid), err)
+	}
+	return &providerv1.CloneResponse{TargetVmId: id}, nil
 }
 
 // ImagePrepare is implemented in image.go (structured source parsing, target_name
@@ -1008,8 +1247,12 @@ func (p *Provider) GetCapabilities(ctx context.Context, req *providerv1.GetCapab
 
 // parseCreateRequest parses the gRPC create request into PVE API format
 func (p *Provider) parseCreateRequest(ctx context.Context, req *providerv1.CreateRequest) (*pveapi.VMConfig, string, error) {
-	// Generate VMID from name hash or use timestamp
-	vmid := p.nextVMID(ctx)
+	// Allocate the VMID from the cluster. Its failure, like the node
+	// discovery's below, is answered VM_OPERATION_FAILED: nothing was created.
+	vmid, err := p.allocateVMID(ctx)
+	if err != nil {
+		return nil, "", err
+	}
 
 	config := &pveapi.VMConfig{
 		VMID: vmid,
@@ -1260,9 +1503,9 @@ func (p *Provider) parseCreateRequest(ctx context.Context, req *providerv1.Creat
 	}
 
 	// Find appropriate node
-	node, err := p.client.FindNode(context.Background())
+	node, err := p.client.FindNode(ctx)
 	if err != nil {
-		return nil, "", fmt.Errorf("failed to find node: %w", err)
+		return nil, "", p.createNotPerformed("cannot find the PVE node to create the VM on; nothing was created (will retry)", err)
 	}
 
 	return config, node, nil
@@ -1919,6 +2162,13 @@ func (p *Provider) ImportDisk(ctx context.Context, req *providerv1.ImportDiskReq
 // Proxmox is a thin client of pve-cluster and never schedules, so it does not
 // advertise supports_list_owner_filter, ignores the filter and never sets
 // owner_filter_applied (D7, honesty-first).
+//
+// Each VM reports its owner stamp (vm_ownership.go) as provider_raw
+// "owner_uid", plus "owner_stamp_state" (unreadable / multiple) when the stamp
+// cannot be relied on, including when the VM's config cannot be read (e.g. its
+// node is down). The listing comes from /cluster/resources, which lists VMs on
+// offline nodes too; it fails as a whole only when that list cannot be read,
+// and never silently omits a VM. Templates are skipped.
 func (p *Provider) ListVMs(ctx context.Context, req *providerv1.ListVMsRequest) (*providerv1.ListVMsResponse, error) {
 	p.logger.Info("Listing all virtual machines")
 
@@ -1926,143 +2176,169 @@ func (p *Provider) ListVMs(ctx context.Context, req *providerv1.ListVMsRequest) 
 		return nil, fmt.Errorf("Proxmox client not configured")
 	}
 
-	// Use the configured node selector, or discover the cluster's nodes via the
-	// API when none is set (#261 P1-4) instead of failing.
-	nodes := p.client.Config().NodeSelector
-	if len(nodes) == 0 {
-		discovered, err := p.client.ListNodes(ctx)
-		if err != nil {
-			return nil, fmt.Errorf("no node selector configured and node discovery failed: %w", err)
-		}
-		nodes = discovered
+	// One cluster-wide list (/cluster/resources?type=vm), from the cluster's
+	// replicated configuration: a VM on a node that is down is still listed
+	// (status "unknown"), so the listing never silently omits a VM, and one
+	// node being down does not fail it. Its scope is the configured node
+	// selector, or every node.
+	clusterVMs, err := p.client.ListClusterVMs(ctx)
+	if err != nil {
+		p.logger.Error("Failed to list the cluster's VMs", "error", err)
+		return nil, errors.NewUnavailable("cannot list the Proxmox cluster's VMs", nil)
+	}
+	inScope := func(string) bool { return true }
+	if sel := p.client.Config().NodeSelector; len(sel) > 0 {
+		inScope = func(node string) bool { return slices.Contains(sel, node) }
 	}
 
 	var allVMs []*providerv1.VMInfo
 
-	// List VMs from each node
-	for _, node := range nodes {
-		vms, err := p.client.ListVMs(ctx, node)
-		if err != nil {
-			p.logger.Warn("Failed to list VMs from node", "node", node, "error", err)
+	for _, cvm := range clusterVMs {
+		if cvm.Type != pveapi.ClusterResourceTypeQEMU || !inScope(cvm.Node) {
+			continue
+		}
+		node := cvm.Node
+		vm := pveapi.VM{VMID: cvm.VMID, Name: cvm.Name, Status: cvm.Status, Node: cvm.Node,
+			CPUs: int(cvm.MaxCPU), Memory: cvm.MaxMem, Template: cvm.Template}
+		// Skip templates: ListVMs is the adoption feed, and a template is
+		// shared image state, never a VM. Excluded rather than returned
+		// tagged with contracts.VMInfoArtifactKey, which a manager older
+		// than that key would not honour.
+		if vm.Template == 1 {
 			continue
 		}
 
-		for _, vm := range vms {
-			// Skip templates: ListVMs is the adoption feed, and a template is
-			// shared image state, never a VM. Excluded rather than returned
-			// tagged with contracts.VMInfoArtifactKey, which a manager older
-			// than that key would not honour.
-			if vm.Template == 1 {
-				continue
+		// Get VM config for detailed information. A VM whose config cannot
+		// be read is still listed, with owner_stamp_state "unreadable", so
+		// it is never mistaken for an absent or unowned VM.
+		config, err := p.client.GetVMConfig(ctx, node, vm.VMID)
+		if stderrors.Is(err, pveapi.ErrVMNotFound) {
+			if gone, goneErr := p.vmGone(ctx, vm.VMID); goneErr == nil && gone {
+				continue // removed since the node listing
 			}
-
-			// Get VM config for detailed information
-			config, err := p.client.GetVMConfig(ctx, node, vm.VMID)
-			if err != nil {
-				p.logger.Warn("Failed to get VM config", "vmid", vm.VMID, "error", err)
-				continue
-			}
-
-			// Extract power state
-			powerState := "Off"
-			if vm.Status == "running" {
-				powerState = "On"
-			}
-
-			// Extract CPU and memory
-			cpu := int32(vm.CPUs)
-			if cpu == 0 {
-				if cores, ok := config["cores"].(float64); ok {
-					cpu = int32(cores)
-				} else {
-					cpu = 1 // Default
-				}
-			}
-
-			memoryMiB := vm.Memory / (1024 * 1024) // Convert bytes to MiB
-			if memoryMiB == 0 {
-				if mem, ok := config["memory"].(float64); ok {
-					memoryMiB = int64(mem)
-				} else {
-					memoryMiB = 1024 // Default 1 GiB
-				}
-			}
-
-			// Extract disk information
-			var disks []*providerv1.DiskInfo
-			for key, value := range config {
-				if strings.HasPrefix(key, "virtio") || strings.HasPrefix(key, "scsi") || strings.HasPrefix(key, "ide") || strings.HasPrefix(key, "sata") {
-					if diskStr, ok := value.(string); ok && diskStr != "" {
-						// Parse disk string format: storage:size,format=qcow2
-						parts := strings.Split(diskStr, ",")
-						diskPath := parts[0]
-						format := "qcow2"
-						for _, part := range parts[1:] {
-							if strings.HasPrefix(part, "format=") {
-								format = strings.TrimPrefix(part, "format=")
-							}
-						}
-
-						// Extract size if available
-						sizeGiB := int32(0)
-						if sizeParts := strings.Split(diskPath, ":"); len(sizeParts) > 1 {
-							if size, err := strconv.ParseInt(sizeParts[1], 10, 32); err == nil {
-								sizeGiB = int32(size)
-							}
-						}
-
-						diskInfo := &providerv1.DiskInfo{
-							Id:      fmt.Sprintf("%d-%s", vm.VMID, key),
-							Path:    diskPath,
-							SizeGib: sizeGiB,
-							Format:  format,
-						}
-						disks = append(disks, diskInfo)
-					}
-				}
-			}
-
-			// Extract network information
-			var networks []*providerv1.NetworkInfo
-			for key, value := range config {
-				if strings.HasPrefix(key, "net") {
-					if netStr, ok := value.(string); ok && netStr != "" {
-						// Parse network string: model=...,mac=...,bridge=...
-						networkInfo := &providerv1.NetworkInfo{}
-						parts := strings.Split(netStr, ",")
-						for _, part := range parts {
-							if strings.HasPrefix(part, "mac=") {
-								networkInfo.Mac = strings.TrimPrefix(part, "mac=")
-							} else if strings.HasPrefix(part, "bridge=") {
-								networkInfo.Name = strings.TrimPrefix(part, "bridge=")
-							}
-						}
-						networks = append(networks, networkInfo)
-					}
-				}
-			}
-
-			// Build provider raw metadata
-			providerRaw := make(map[string]string)
-			providerRaw["vmid"] = strconv.Itoa(vm.VMID)
-			providerRaw["node"] = node
-			providerRaw["status"] = vm.Status
-			providerRaw["power_state"] = powerState
-
-			vmInfo := &providerv1.VMInfo{
-				Id:          strconv.Itoa(vm.VMID),
-				Name:        vm.Name,
-				PowerState:  powerState,
-				Ips:         []string{}, // IPs would need guest agent or other method
-				Cpu:         cpu,
-				MemoryMib:   memoryMiB,
-				Disks:       disks,
-				Networks:    networks,
-				ProviderRaw: providerRaw,
-			}
-
-			allVMs = append(allVMs, vmInfo)
+			err = fmt.Errorf("VM %d is not on node %s but may exist elsewhere in the cluster", vm.VMID, node)
 		}
+		if err != nil {
+			p.logger.Warn("Failed to get VM config; listing the VM with an unreadable owner stamp", "vmid", vm.VMID, "error", err)
+			allVMs = append(allVMs, &providerv1.VMInfo{
+				Id:   strconv.Itoa(vm.VMID),
+				Name: vm.Name,
+				ProviderRaw: map[string]string{
+					"vmid":                             strconv.Itoa(vm.VMID),
+					"node":                             node,
+					"status":                           vm.Status,
+					contracts.VMInfoOwnerStampStateKey: contracts.OwnerStampUnreadable,
+				},
+			})
+			continue
+		}
+		if configIsTemplate(config) {
+			continue
+		}
+
+		// Extract power state
+		powerState := "Off"
+		if vm.Status == "running" {
+			powerState = "On"
+		}
+
+		// Extract CPU and memory
+		cpu := int32(vm.CPUs)
+		if cpu == 0 {
+			if cores, ok := config["cores"].(float64); ok {
+				cpu = int32(cores)
+			} else {
+				cpu = 1 // Default
+			}
+		}
+
+		memoryMiB := vm.Memory / (1024 * 1024) // Convert bytes to MiB
+		if memoryMiB == 0 {
+			if mem, ok := config["memory"].(float64); ok {
+				memoryMiB = int64(mem)
+			} else {
+				memoryMiB = 1024 // Default 1 GiB
+			}
+		}
+
+		// Extract disk information
+		var disks []*providerv1.DiskInfo
+		for key, value := range config {
+			if strings.HasPrefix(key, "virtio") || strings.HasPrefix(key, "scsi") || strings.HasPrefix(key, "ide") || strings.HasPrefix(key, "sata") {
+				if diskStr, ok := value.(string); ok && diskStr != "" {
+					// Parse disk string format: storage:size,format=qcow2
+					parts := strings.Split(diskStr, ",")
+					diskPath := parts[0]
+					format := "qcow2"
+					for _, part := range parts[1:] {
+						if strings.HasPrefix(part, "format=") {
+							format = strings.TrimPrefix(part, "format=")
+						}
+					}
+
+					// Extract size if available
+					sizeGiB := int32(0)
+					if sizeParts := strings.Split(diskPath, ":"); len(sizeParts) > 1 {
+						if size, err := strconv.ParseInt(sizeParts[1], 10, 32); err == nil {
+							sizeGiB = int32(size)
+						}
+					}
+
+					diskInfo := &providerv1.DiskInfo{
+						Id:      fmt.Sprintf("%d-%s", vm.VMID, key),
+						Path:    diskPath,
+						SizeGib: sizeGiB,
+						Format:  format,
+					}
+					disks = append(disks, diskInfo)
+				}
+			}
+		}
+
+		// Extract network information
+		var networks []*providerv1.NetworkInfo
+		for key, value := range config {
+			if strings.HasPrefix(key, "net") {
+				if netStr, ok := value.(string); ok && netStr != "" {
+					// Parse network string: model=...,mac=...,bridge=...
+					networkInfo := &providerv1.NetworkInfo{}
+					parts := strings.Split(netStr, ",")
+					for _, part := range parts {
+						if strings.HasPrefix(part, "mac=") {
+							networkInfo.Mac = strings.TrimPrefix(part, "mac=")
+						} else if strings.HasPrefix(part, "bridge=") {
+							networkInfo.Name = strings.TrimPrefix(part, "bridge=")
+						}
+					}
+					networks = append(networks, networkInfo)
+				}
+			}
+		}
+
+		// Build provider raw metadata
+		providerRaw := make(map[string]string)
+		providerRaw["vmid"] = strconv.Itoa(vm.VMID)
+		providerRaw["node"] = node
+		providerRaw["status"] = vm.Status
+		providerRaw["power_state"] = powerState
+		// The owner stamp (vm_ownership.go): owner_uid, and
+		// owner_stamp_state when it cannot be relied on. Adoption skips a
+		// VM owned by a live VirtualMachine or with a stamp state.
+		ownerRaw(providerRaw, readOwnerStamp(configString(config, pveConfigKeyDescription)))
+
+		vmInfo := &providerv1.VMInfo{
+			Id:          strconv.Itoa(vm.VMID),
+			Name:        vm.Name,
+			PowerState:  powerState,
+			Ips:         []string{}, // IPs would need guest agent or other method
+			Cpu:         cpu,
+			MemoryMib:   memoryMiB,
+			Disks:       disks,
+			Networks:    networks,
+			ProviderRaw: providerRaw,
+		}
+
+		allVMs = append(allVMs, vmInfo)
 	}
 
 	return &providerv1.ListVMsResponse{

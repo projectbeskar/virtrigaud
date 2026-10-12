@@ -150,6 +150,9 @@ type sshTransport struct {
 	keyFile string
 	// logger carries the structured host-key audit log.
 	logger *slog.Logger
+	// runOverride, when set (tests only), runs remote commands for runSSH
+	// instead of ssh.
+	runOverride func(ctx context.Context, remoteCmd string) (stdout, stderr string, err error)
 }
 
 // proxmoxHostKeyPolicy captures the resolved SSH host-key verification posture.
@@ -469,6 +472,9 @@ func (t *sshTransport) buildSSHCommand(ctx context.Context, remoteCmd string) (*
 // On a non-zero exit it returns an error that includes the trimmed stderr so the
 // real cause is surfaced.
 func (t *sshTransport) runSSH(ctx context.Context, remoteCmd string) (stdout, stderr string, err error) {
+	if t.runOverride != nil {
+		return t.runOverride(ctx, remoteCmd)
+	}
 	cmd, err := t.buildSSHCommand(ctx, remoteCmd)
 	if err != nil {
 		return "", "", err

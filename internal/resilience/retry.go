@@ -18,6 +18,7 @@ package resilience
 
 import (
 	"context"
+	"errors"
 	"math"
 	"math/rand"
 	"time"
@@ -51,8 +52,10 @@ func IsRetryable(err error) bool {
 		return false
 	}
 
-	// Check if it's a ProviderError
-	if providerErr, ok := err.(*contracts.ProviderError); ok {
+	// Check if it is, or wraps, a ProviderError (e.g. one marked with
+	// contracts.MarkCreateNotPerformed).
+	var providerErr *contracts.ProviderError
+	if errors.As(err, &providerErr) {
 		return providerErr.IsRetryable()
 	}
 
