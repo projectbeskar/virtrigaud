@@ -67,7 +67,7 @@ var _ = Describe("VMMigration Ready cleanup (envtest)", func() {
 		c.sourceVM = holdTestVM(c.ns, "src-vm", infravirtrigaudiov1beta1.ObservedPowerStateOff)
 
 		c.m = &infravirtrigaudiov1beta1.VMMigration{
-			ObjectMeta: metav1.ObjectMeta{Name: "mig", Namespace: c.ns, Finalizers: []string{vmMigrationFinalizer}},
+			ObjectMeta: metav1.ObjectMeta{Name: "mig", Namespace: c.ns, Finalizers: []string{infravirtrigaudiov1beta1.VMMigrationFinalizer}},
 			Spec: infravirtrigaudiov1beta1.VMMigrationSpec{
 				Source: infravirtrigaudiov1beta1.MigrationSource{
 					VMRef:                infravirtrigaudiov1beta1.LocalObjectReference{Name: "src-vm"},

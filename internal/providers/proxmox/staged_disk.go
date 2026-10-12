@@ -43,6 +43,12 @@ const (
 // through the same kernel mount, and as the same uid/gid, as the NFS import
 // (nfs.go). Nothing is logged that names a credential; the location is logged
 // at debug only.
+//
+// When the request names the migration's target VM (target_vm), the node-side
+// import stage ImportDisk wrote for that VM is removed first
+// (deleteImportStages): the outcome reports the staged object, and a stage
+// that could not be removed fails the call (retryable) before the object is
+// touched, so a retry still finds it.
 func (p *Provider) DeleteStagedDisk(ctx context.Context, req *providerv1.DeleteStagedDiskRequest) (*providerv1.DeleteStagedDiskResponse, error) {
 	disk, err := migration.ResolveStagedDisk(req)
 	if err != nil {
@@ -50,6 +56,13 @@ func (p *Provider) DeleteStagedDisk(ctx context.Context, req *providerv1.DeleteS
 	}
 	migrationRef := req.GetMigration().GetNamespace() + "/" + req.GetMigration().GetName()
 	p.logger.Debug("Deleting a migration's staged disk", "migration", migrationRef, "backend", disk.Backend, "key", disk.Key)
+
+	if err := p.deleteImportStages(ctx, req.GetTargetVm()); err != nil {
+		p.logger.Warn("Could not remove a migration's node-side import stage", "migration", migrationRef,
+			"reason", status.Convert(err).Message())
+		p.logger.Debug("Import stage removal failure cause", "migration", migrationRef, "error", err.Error())
+		return nil, err
+	}
 
 	var outcome providerv1.StagedDiskDeleteOutcome
 	switch disk.Backend {
@@ -68,6 +81,48 @@ func (p *Provider) DeleteStagedDisk(ctx context.Context, req *providerv1.DeleteS
 	}
 	p.logger.Info("Migration staged disk removed", "migration", migrationRef, "backend", disk.Backend, "outcome", outcome.String())
 	return &providerv1.DeleteStagedDiskResponse{Outcome: outcome}, nil
+}
+
+// deleteImportStages removes the node-side import stages of the VM target
+// names (importStagePath in every importStageFormats format; `rm -f`, so an
+// absent stage is not an error). It removes nothing when target is unset, and
+// only paths isImportStagePath accepts: never a legacy /var/tmp stage, the
+// stage directory, or anything else on the node. Without the SSH data plane
+// nothing can have been staged (ImportDisk needs it), so nothing is removed.
+//
+// A Create of that VM may be running: `qm importdisk` keeps reading a stage it
+// has opened after it is unlinked; one that has not reached importdisk fails
+// its stage check and removes its VM shell. The manager names the target VM
+// only for a migration that is done (Ready or failed for good) or being
+// deleted, that sent an import, and when no other in-flight migration targets
+// the same VM.
+func (p *Provider) deleteImportStages(ctx context.Context, target *providerv1.ObjectIdentity) error {
+	if target.GetNamespace() == "" && target.GetName() == "" {
+		return nil
+	}
+	if err := validStageIdentity(target.GetNamespace(), target.GetName()); err != nil {
+		return &migration.StagedDiskError{Code: codes.InvalidArgument,
+			Msg: "DeleteStagedDisk: the target VM cannot name a Proxmox import stage", Cause: err}
+	}
+	if p.ssh == nil {
+		p.logger.Warn("The migration SSH data plane is not configured: no node-side import stage to remove")
+		return nil
+	}
+	quoted := make([]string, 0, len(importStageFormats))
+	for _, format := range importStageFormats {
+		path := importStagePath(target.GetNamespace(), target.GetName(), format)
+		if !isImportStagePath(path) {
+			return &migration.StagedDiskError{Code: codes.InvalidArgument,
+				Msg: "DeleteStagedDisk: the target VM cannot name a Proxmox import stage"}
+		}
+		quoted = append(quoted, proxmoxShellQuote(path))
+	}
+	if _, stderr, err := p.ssh.runSSH(ctx, "rm -f -- "+strings.Join(quoted, " ")); err != nil {
+		return &migration.StagedDiskError{Code: codes.Unavailable,
+			Msg:   "DeleteStagedDisk: the node-side import stage removal failed; the cause is in the provider log",
+			Cause: fmt.Errorf("%w (stderr: %s)", err, strings.TrimSpace(stderr))}
+	}
+	return nil
 }
 
 // deleteNFSStagedDisk unlinks the staged file on the export through a kernel

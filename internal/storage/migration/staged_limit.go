@@ -62,12 +62,22 @@ var (
 	ErrStagingSpaceExhausted = errors.New("not enough free space to copy the staged object")
 )
 
-// StagedCopyLimit is the most bytes an import copies from a staging backend:
-// requestBytes when it is set (> 0) and smaller, otherwise the provider bound
-// (EnvStagedImportMaxGiB, default DefaultStagedImportMaxGiB).
+// stagedImageMetadataSlack is the fixed part of the room StagedCopyLimit
+// leaves above a request's disk-size limit for an image's own metadata.
+const stagedImageMetadataSlack = int64(16) << 20
+
+// StagedCopyLimit is the most bytes an import copies from a staging backend,
+// and the largest virtual size a staged image header may declare: the
+// provider bound (EnvStagedImportMaxGiB, default DefaultStagedImportMaxGiB),
+// lowered by requestBytes when that is set (> 0).
 //
-// Hook: the import size cap (PR #382) adds ImportDiskRequest.max_virtual_size_bytes;
-// providers pass it here as requestBytes once it exists (0 until then).
+// requestBytes is ImportDiskRequest.max_virtual_size_bytes (#382), a limit on
+// the disk's VIRTUAL size, while the copy is bounded by the staged FILE size,
+// which for a fully allocated qcow2 or vmdk exceeds the virtual size by its
+// metadata (L1/L2 tables, refcounts, grain tables: well under 1/64). The
+// request bound is therefore requestBytes + requestBytes/64 +
+// stagedImageMetadataSlack, so a disk exactly at the limit is not refused
+// here; the exact disk-size check runs on the converted disk (importlimit).
 func StagedCopyLimit(requestBytes int64) (int64, error) {
 	limit := int64(DefaultStagedImportMaxGiB) * gib
 	if raw := strings.TrimSpace(os.Getenv(EnvStagedImportMaxGiB)); raw != "" {
@@ -78,7 +88,10 @@ func StagedCopyLimit(requestBytes int64) (int64, error) {
 		limit = n * gib
 	}
 	if requestBytes > 0 && requestBytes < limit {
-		limit = requestBytes
+		// requestBytes < limit <= 2^50: the sum cannot overflow.
+		if bound := requestBytes + requestBytes/64 + stagedImageMetadataSlack; bound < limit {
+			limit = bound
+		}
 	}
 	return limit, nil
 }

@@ -33,6 +33,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -121,7 +122,7 @@ func stagingScheme(t *testing.T) *runtime.Scheme {
 func stagingFixture(phase infrav1beta1.MigrationPhase) (*infrav1beta1.VMMigration, []client.Object) {
 	vm, srcProvider, m := snapshotFixture()
 	m.Status.SnapshotID = ""
-	m.Finalizers = []string{vmMigrationFinalizer}
+	m.Finalizers = []string{infrav1beta1.VMMigrationFinalizer}
 	m.Status.Phase = phase
 	m.Spec.Storage = &infrav1beta1.MigrationStorage{
 		Type: storagemigration.BackendS3,
@@ -500,7 +501,7 @@ func TestDeletionHoldsReleasesAndForceDeletes(t *testing.T) {
 		assert.Equal(t, blockedRetryMin, res.RequeueAfter)
 		got := h.get(t, m)
 		require.NotNil(t, got, "the finalizer is kept")
-		assert.Contains(t, got.Finalizers, vmMigrationFinalizer)
+		assert.Contains(t, got.Finalizers, infrav1beta1.VMMigrationFinalizer)
 		assert.Equal(t, migrationReasonStagingCleanupPending, stagingCondition(got).Reason)
 
 		prov.answer(contracts.StagedDiskDeleted, nil)
@@ -780,6 +781,52 @@ func TestDeleteSendsTheRecordedLayout(t *testing.T) {
 		h.reconcile(t, m)
 		require.EqualValues(t, 1, prov.calls.Load())
 		assert.Equal(t, want, prov.lastRequest().Layout)
+	}
+}
+
+// TestDeleteNamesTheTargetVMOnlyWhenItsImportMayHaveStaged: DeleteStagedDisk
+// names the target VM (so Proxmox also removes its node-side import stage)
+// only for a migration that sent an import, and never while another in-flight
+// VMMigration targets the same VM (its Create may be about to read that
+// stage). A Ready or Failed one, or one in another target, does not count.
+func TestDeleteNamesTheTargetVMOnlyWhenItsImportMayHaveStaged(t *testing.T) {
+	want := contracts.ObjectIdentity{Namespace: "default", Name: "target-vm"}
+	other := func(name string, phase infrav1beta1.MigrationPhase, targetName string) *infrav1beta1.VMMigration {
+		return &infrav1beta1.VMMigration{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default", UID: types.UID("uid-" + name)},
+			Spec: infrav1beta1.VMMigrationSpec{
+				Source: infrav1beta1.MigrationSource{VMRef: infrav1beta1.LocalObjectReference{Name: "other-source"}},
+				Target: infrav1beta1.MigrationTarget{Name: targetName, ProviderRef: infrav1beta1.ObjectRef{Name: "target-provider"}},
+			},
+			Status: infrav1beta1.VMMigrationStatus{Phase: phase},
+		}
+	}
+	for name, tc := range map[string]struct {
+		phase  infrav1beta1.MigrationPhase
+		mutate func(m *infrav1beta1.VMMigration)
+		others []client.Object
+		want   contracts.ObjectIdentity
+	}{
+		"ready":                                {phase: infrav1beta1.MigrationPhaseReady, want: want},
+		"failed after the import (import id)":  {phase: infrav1beta1.MigrationPhaseFailed, mutate: func(m *infrav1beta1.VMMigration) { m.Status.ImportID = "imp-1" }, want: want},
+		"failed before the import":             {phase: infrav1beta1.MigrationPhaseFailed},
+		"another migration is creating it":     {phase: infrav1beta1.MigrationPhaseReady, others: []client.Object{other("again", infrav1beta1.MigrationPhaseCreating, "target-vm")}},
+		"another migration is importing it":    {phase: infrav1beta1.MigrationPhaseReady, others: []client.Object{other("again", infrav1beta1.MigrationPhaseImporting, "target-vm")}},
+		"a failed or ready one does not count": {phase: infrav1beta1.MigrationPhaseReady, others: []client.Object{other("f", infrav1beta1.MigrationPhaseFailed, "target-vm"), other("r", infrav1beta1.MigrationPhaseReady, "target-vm")}, want: want},
+		"one for another VM does not count":    {phase: infrav1beta1.MigrationPhaseReady, others: []client.Object{other("elsewhere", infrav1beta1.MigrationPhaseCreating, "another-vm")}, want: want},
+	} {
+		t.Run(name, func(t *testing.T) {
+			prov := newStagingProvider()
+			m, objs := stagingFixture(tc.phase)
+			m.Spec.Options = &infrav1beta1.MigrationOptions{CleanupPolicy: infrav1beta1.CleanupPolicyAlways}
+			if tc.mutate != nil {
+				tc.mutate(m)
+			}
+			h := newStagingHarness(t, prov, m, append(objs, tc.others...)...)
+			h.reconcile(t, m)
+			require.EqualValues(t, 1, prov.calls.Load())
+			assert.Equal(t, tc.want, prov.lastRequest().TargetVM)
+		})
 	}
 }
 

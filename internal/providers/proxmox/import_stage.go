@@ -353,12 +353,14 @@ func buildImportStageScript(dir, stagePath, writeCmd string) string {
 // (a root-owned mktemp file in the root-only stage directory, opened by the
 // root shell). Whatever it leaves in "$TMP" is what is published as the stage.
 //
-//  1. nfsStageCopyChecks — as the migration's uid/gid when set — refuses a
+//  1. nfsStageCopyMeasure — as the migration's uid/gid when set — refuses a
 //     staged object that is not a regular file (exit 6; the mount is also
-//     nosymfollow), one above limit (exit 7), or one that does not fit
+//     nosymfollow) and measures its size ("$SZ"). The root shell then refuses
+//     one above limit (exit 7), or one that does not fit
 //     StagedCopySpaceFactor times in the stage directory's free space (exit
-//     8), and measures its size ("$SZ"). The tenant's NFS server controls the
-//     size: unbounded, one object could fill the node's root filesystem.
+//     8). The tenant's NFS server controls the size: unbounded, one object
+//     could fill the node's root filesystem. A size or free space that is not
+//     a number fails the copy (exit 1).
 //  2. The copy is bounded by the MEASURED size + 1 byte (`head -c`), not by
 //     limit: a server can report a small size and serve more; a copy longer
 //     than measured exits 7.
@@ -377,13 +379,18 @@ func nfsStageCopy(rel string, uid, gid *int64, limit int64) string {
 	if uid != nil && gid != nil {
 		priv = nfsSetprivPrefix(uid, gid)
 	}
-	return `SZ=$(` + priv + `sh -c ` + proxmoxShellQuote(nfsStageCopyChecks) + ` sh ` + src + ` ` +
-		strconv.FormatInt(limit, 10) + ` "${TMP%/*}"); ` +
+	tooLarge := `echo "` + migration.ErrStagedObjectTooLarge.Error() + `" >&2; exit ` + strconv.Itoa(nfsTooLargeExit)
+	return `SZ=$(` + priv + `sh -c ` + proxmoxShellQuote(nfsStageCopyMeasure) + ` sh ` + src + `); ` +
+		`case $SZ in ''|*[!0-9]*) exit 1;; esac; ` +
+		`if [ "$SZ" -gt ` + strconv.FormatInt(limit, 10) + ` ]; then ` + tooLarge + `; fi; ` +
+		`AV=$(df -P -B1 -- "${TMP%/*}" | awk 'NR==2 {print $4}'); ` +
+		`case $AV in ''|*[!0-9]*) exit 1;; esac; ` +
+		`if [ "$AV" -lt $((SZ * ` + strconv.Itoa(migration.StagedCopySpaceFactor) + `)) ]; then echo "` +
+		migration.ErrStagingSpaceExhausted.Error() + `" >&2; exit ` + strconv.Itoa(nfsNoSpaceExit) + `; fi; ` +
 		`RC=$(mktemp -p "${TMP%/*}" ` + nfsCopyStatusTemplate + `); ` +
 		`{ if ` + priv + `cat -- ` + src + ` 3>&-; then echo 0 >&3; else echo 1 >&3; fi; } 3>"$RC" ` +
 		`| head -c $((SZ + 1)) > "$TMP"; ` +
-		`if [ "$(stat -c %s -- "$TMP")" -gt "$SZ" ]; then echo "` + migration.ErrStagedObjectTooLarge.Error() +
-		`" >&2; exit ` + strconv.Itoa(nfsTooLargeExit) + `; fi; ` +
+		`if [ "$(stat -c %s -- "$TMP")" -gt "$SZ" ]; then ` + tooLarge + `; fi; ` +
 		`[ "$(cat -- "$RC")" = 0 ] || exit 1; rm -f -- "$RC"`
 }
 

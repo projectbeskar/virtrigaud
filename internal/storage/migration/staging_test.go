@@ -390,7 +390,11 @@ func TestStagedCopyLimitAndCheck(t *testing.T) {
 	assert.Equal(t, int64(8)<<30, limit)
 	limit, err = StagedCopyLimit(1 << 30)
 	require.NoError(t, err)
-	assert.Equal(t, int64(1)<<30, limit, "a smaller request bound wins")
+	assert.Equal(t, int64(1)<<30+int64(1)<<24+stagedImageMetadataSlack, limit,
+		"a smaller request bound wins, with room for the image's metadata")
+	limit, err = StagedCopyLimit(8<<30 - 1)
+	require.NoError(t, err)
+	assert.Equal(t, int64(8)<<30, limit, "the room never lifts the provider bound")
 	limit, err = StagedCopyLimit(1 << 40)
 	require.NoError(t, err)
 	assert.Equal(t, int64(8)<<30, limit, "a request cannot raise the provider bound")

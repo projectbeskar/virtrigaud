@@ -946,6 +946,15 @@ message DeleteStagedDiskRequest {
   // migration exported before v2. The s3 key is the same in both layouts. Any
   // other value is InvalidArgument.
   string layout = 6;
+  // target_vm is the VirtualMachine the migration's import landed a disk for
+  // (namespace and name; the same identity as ImportDiskRequest.target_vm),
+  // set only when the migration sent an import and no other in-flight
+  // migration targets the same VM. A provider whose ImportDisk keeps a
+  // provider-side copy of the disk until Create (Proxmox: the node-side import
+  // stage named after this VM) removes that copy too, confined to its own
+  // stage location. Unset: only the staged object is removed. Providers that
+  // keep no such copy ignore it.
+  ObjectIdentity target_vm = 7;
 }
 
 // StagedDiskDeleteOutcome is what DeleteStagedDisk did.

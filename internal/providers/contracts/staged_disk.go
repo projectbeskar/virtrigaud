@@ -39,6 +39,12 @@ type StagedDiskDeleteRequest struct {
 	// Layout is the staging layout the object was written with ("v1" or "v2";
 	// empty means "v1"), as the manager recorded it when the export was sent.
 	Layout string
+	// TargetVM is the VirtualMachine the migration's import landed a disk
+	// for, set only when the migration sent an import and no other in-flight
+	// migration targets the same VM: a provider that keeps a provider-side
+	// copy of the imported disk until Create (Proxmox's import stage) removes
+	// it too. Zero: only the staged object is removed.
+	TargetVM ObjectIdentity
 }
 
 // StagedDiskDeleteOutcome is what a DeleteStagedDisk did.

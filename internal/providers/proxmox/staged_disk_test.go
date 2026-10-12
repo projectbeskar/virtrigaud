@@ -51,16 +51,16 @@ func stagedDeleteReq(t *testing.T, ns, backend string, opts migration.StorageOpt
 	}
 }
 
-// recordingNode records the scripts runSSH is asked to run and answers them
+// stagedDeleteNode records the scripts runSSH is asked to run and answers them
 // with stdout / err.
-type recordingNode struct {
+type stagedDeleteNode struct {
 	mu      sync.Mutex
 	scripts []string
 	stdout  string
 	err     error
 }
 
-func (n *recordingNode) run(_ context.Context, cmd string) (string, string, error) {
+func (n *stagedDeleteNode) run(_ context.Context, cmd string) (string, string, error) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	n.scripts = append(n.scripts, cmd)
@@ -74,7 +74,7 @@ func nfsOpts() migration.StorageOptions {
 }
 
 func TestDeleteStagedDisk_NFSUnlinksThroughTheNodeMount(t *testing.T) {
-	node := &recordingNode{stdout: nfsStagedDeletedMarker + "\n"}
+	node := &stagedDeleteNode{stdout: nfsStagedDeletedMarker + "\n"}
 	p := &Provider{logger: slog.Default(), ssh: &sshTransport{host: "pve", logger: slog.Default(), runOverride: node.run}}
 
 	resp, err := p.DeleteStagedDisk(context.Background(), stagedDeleteReq(t, "team-a", migration.BackendNFS, nfsOpts(), nil))
@@ -97,7 +97,7 @@ func TestDeleteStagedDisk_NFSUnlinksThroughTheNodeMount(t *testing.T) {
 
 func TestDeleteStagedDisk_NFSFailures(t *testing.T) {
 	t.Run("a node failure is retryable and names no location", func(t *testing.T) {
-		node := &recordingNode{err: errors.New("exit status 32")}
+		node := &stagedDeleteNode{err: errors.New("exit status 32")}
 		p := &Provider{logger: slog.Default(), ssh: &sshTransport{host: "pve", logger: slog.Default(), runOverride: node.run}}
 		_, err := p.DeleteStagedDisk(context.Background(), stagedDeleteReq(t, "team-a", migration.BackendNFS, nfsOpts(), nil))
 		require.Error(t, err)
@@ -107,7 +107,7 @@ func TestDeleteStagedDisk_NFSFailures(t *testing.T) {
 		assert.NotContains(t, msg, "/exports")
 	})
 	t.Run("no result printed is an error, not a success", func(t *testing.T) {
-		node := &recordingNode{stdout: ""}
+		node := &stagedDeleteNode{stdout: ""}
 		p := &Provider{logger: slog.Default(), ssh: &sshTransport{host: "pve", logger: slog.Default(), runOverride: node.run}}
 		_, err := p.DeleteStagedDisk(context.Background(), stagedDeleteReq(t, "team-a", migration.BackendNFS, nfsOpts(), nil))
 		require.Error(t, err)
@@ -119,7 +119,7 @@ func TestDeleteStagedDisk_NFSFailures(t *testing.T) {
 		assert.Equal(t, codes.Unavailable, status.Code(err))
 	})
 	t.Run("a request that is not a migration never reaches the node", func(t *testing.T) {
-		node := &recordingNode{stdout: nfsStagedDeletedMarker}
+		node := &stagedDeleteNode{stdout: nfsStagedDeletedMarker}
 		p := &Provider{logger: slog.Default(), ssh: &sshTransport{host: "pve", logger: slog.Default(), runOverride: node.run}}
 		for _, req := range []*providerv1.DeleteStagedDiskRequest{
 			stagedDeleteReq(t, "../../etc", migration.BackendNFS, nfsOpts(), nil),
@@ -254,6 +254,77 @@ func TestDeleteStagedDisk_S3RemovesOnlyTheMigrationsObject(t *testing.T) {
 	assert.Equal(t, providerv1.StagedDiskDeleteOutcome_STAGED_DISK_DELETE_OUTCOME_DELETED, resp.GetOutcome())
 	assert.False(t, srv.Has("p/vmmigrations/team-a/web/export.vmdk"))
 	assert.True(t, srv.Has("p/vmmigrations/team-b/web/export.vmdk"))
+}
+
+// TestDeleteStagedDisk_RemovesTheTargetVMsImportStage (rebase item 3): with
+// target_vm the node-side import stage of that VM — in every stage format,
+// only paths isImportStagePath accepts — is removed with `rm -f --` BEFORE the
+// staged object; a removal that fails is retryable and the object is not
+// touched; a target_vm that cannot name a stage is refused before anything
+// runs; without target_vm no stage is touched; without the SSH data plane
+// (an s3-only setup) nothing can have been staged and the object is removed.
+func TestDeleteStagedDisk_RemovesTheTargetVMsImportStage(t *testing.T) {
+	withTarget := func(ns, name string) *providerv1.DeleteStagedDiskRequest {
+		req := stagedDeleteReq(t, "team-a", migration.BackendNFS, nfsOpts(), nil)
+		req.TargetVm = &providerv1.ObjectIdentity{Namespace: ns, Name: name}
+		return req
+	}
+	newProvider := func(node *stagedDeleteNode) *Provider {
+		return &Provider{logger: slog.Default(), ssh: &sshTransport{host: "pve", logger: slog.Default(), runOverride: node.run}}
+	}
+
+	t.Run("removed first, every format", func(t *testing.T) {
+		node := &stagedDeleteNode{stdout: nfsStagedDeletedMarker + "\n"}
+		resp, err := newProvider(node).DeleteStagedDisk(context.Background(), withTarget("team-a", "web"))
+		require.NoError(t, err)
+		assert.Equal(t, providerv1.StagedDiskDeleteOutcome_STAGED_DISK_DELETE_OUTCOME_DELETED, resp.GetOutcome())
+		require.Len(t, node.scripts, 2)
+		assert.Equal(t, "rm -f -- '/var/lib/virtrigaud/import-stage/team-a_web-migrated.qcow2' "+
+			"'/var/lib/virtrigaud/import-stage/team-a_web-migrated.raw' "+
+			"'/var/lib/virtrigaud/import-stage/team-a_web-migrated.vmdk'", node.scripts[0])
+		assert.Contains(t, node.scripts[1], "mount -t nfs ", "then the staged object")
+	})
+	t.Run("a failed removal is retryable and the object is kept", func(t *testing.T) {
+		node := &stagedDeleteNode{err: errors.New("exit status 1")}
+		_, err := newProvider(node).DeleteStagedDisk(context.Background(), withTarget("team-a", "web"))
+		assert.Equal(t, codes.Unavailable, status.Code(err))
+		assert.NotContains(t, status.Convert(err).Message(), "/var/lib", "the status names no path")
+		require.Len(t, node.scripts, 1, "the staged object is not touched")
+	})
+	for name, tv := range map[string][2]string{
+		"traversal name":       {"team-a", "../../etc"},
+		"namespace with _":     {"team_a", "web"},
+		"upper-case namespace": {"Team-A", "web"},
+		"name only":            {"", "web"},
+		"namespace only":       {"team-a", ""},
+	} {
+		t.Run("refused: "+name, func(t *testing.T) {
+			node := &stagedDeleteNode{stdout: nfsStagedDeletedMarker + "\n"}
+			_, err := newProvider(node).DeleteStagedDisk(context.Background(), withTarget(tv[0], tv[1]))
+			assert.Equal(t, codes.InvalidArgument, status.Code(err), "%v", err)
+			assert.Empty(t, node.scripts, "nothing runs on the node")
+		})
+	}
+	t.Run("no target: no stage is touched", func(t *testing.T) {
+		node := &stagedDeleteNode{stdout: nfsStagedDeletedMarker + "\n"}
+		_, err := newProvider(node).DeleteStagedDisk(context.Background(), stagedDeleteReq(t, "team-a", migration.BackendNFS, nfsOpts(), nil))
+		require.NoError(t, err)
+		require.Len(t, node.scripts, 1)
+		assert.NotContains(t, node.scripts[0], "import-stage")
+	})
+	t.Run("s3 without the SSH data plane", func(t *testing.T) {
+		srv := s3fake.New("staging")
+		defer srv.Close()
+		srv.Put("p/vmmigrations/team-a/web/export.vmdk", []byte("disk"))
+		opts := migration.StorageOptions{Backend: migration.BackendS3, Bucket: "staging", Endpoint: srv.Endpoint(),
+			UsePathStyle: true, Prefix: "p"}
+		req := stagedDeleteReq(t, "team-a", migration.BackendS3, opts,
+			map[string]string{migration.CredKeyAccessKeyID: "AK", migration.CredKeySecretAccessKey: "SK"})
+		req.TargetVm = &providerv1.ObjectIdentity{Namespace: "team-a", Name: "web"}
+		resp, err := (&Provider{logger: slog.Default()}).DeleteStagedDisk(context.Background(), req)
+		require.NoError(t, err)
+		assert.Equal(t, providerv1.StagedDiskDeleteOutcome_STAGED_DISK_DELETE_OUTCOME_DELETED, resp.GetOutcome())
+	})
 }
 
 func TestCapabilities_StagedDiskDeleteBackends(t *testing.T) {

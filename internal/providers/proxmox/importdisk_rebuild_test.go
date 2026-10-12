@@ -53,6 +53,9 @@ func (n *fakeNode) run(t *testing.T) func(ctx context.Context, cmd string) (stri
 		case strings.Contains(cmd, "qm importdisk "):
 			return "Successfully imported disk as 'unused0:local-lvm:vm-1-disk-0'", "", nil
 		}
+		if out, ok := stagedHeaderAnswer(cmd); ok {
+			return out, "", nil
+		}
 		return "", "", nil
 	}
 }

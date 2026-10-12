@@ -72,7 +72,7 @@ var _ = Describe("VMMigration staged-disk cleanup (envtest)", func() {
 		})).To(Succeed())
 
 		m := &infravirtrigaudiov1beta1.VMMigration{
-			ObjectMeta: metav1.ObjectMeta{Name: "mig", Namespace: ns, Finalizers: []string{vmMigrationFinalizer}},
+			ObjectMeta: metav1.ObjectMeta{Name: "mig", Namespace: ns, Finalizers: []string{infravirtrigaudiov1beta1.VMMigrationFinalizer}},
 			Spec: infravirtrigaudiov1beta1.VMMigrationSpec{
 				Source: infravirtrigaudiov1beta1.MigrationSource{VMRef: infravirtrigaudiov1beta1.LocalObjectReference{Name: "src-vm"}},
 				Target: infravirtrigaudiov1beta1.MigrationTarget{Name: "web", ProviderRef: infravirtrigaudiov1beta1.ObjectRef{Name: "prov-1"}},
@@ -130,7 +130,7 @@ var _ = Describe("VMMigration staged-disk cleanup (envtest)", func() {
 		Consistently(func(g Gomega) {
 			got := &infravirtrigaudiov1beta1.VMMigration{}
 			g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(m), got)).To(Succeed())
-			g.Expect(got.Finalizers).To(ContainElement(vmMigrationFinalizer))
+			g.Expect(got.Finalizers).To(ContainElement(infravirtrigaudiov1beta1.VMMigrationFinalizer))
 		}, "3s", "250ms").Should(Succeed())
 
 		By("the provider recovers: the staged disk is deleted and the VMMigration released")

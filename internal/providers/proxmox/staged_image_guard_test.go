@@ -19,10 +19,9 @@ package proxmox
 import (
 	"context"
 	"encoding/base64"
+	"encoding/binary"
 	"log/slog"
-	"os"
-	"os/exec"
-	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -36,17 +35,8 @@ import (
 	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
 )
 
-// importNode answers the node commands of an NFS import: the mount+copy
-// script, the header inspection (with infoOut), the publish and the check.
-type importNode struct {
-	mu        sync.Mutex
-	t         *testing.T
-	infoOut   string
-	infoExit  int
-	head      []byte
-	fetchExit int
-	commands  []string
-}
+// guardStagePath is the stage nfsImportReq's import writes.
+var guardStagePath = importStagePath("team-a", "web", "qcow2")
 
 // minimalQCOW2 is the leading bytes of a self-contained qcow2 v2 image:
 // magic, version 2, 64 KiB clusters, no backing file, no extensions.
@@ -58,29 +48,97 @@ func minimalQCOW2() []byte {
 	return b
 }
 
+// minimalSparseVMDK is the leading bytes of a single-file sparse VMDK of
+// 1 GiB with no embedded descriptor.
+func minimalSparseVMDK() []byte {
+	b := make([]byte, 4096)
+	binary.LittleEndian.PutUint32(b[0:], 0x564d444b) // "KDMV"
+	binary.LittleEndian.PutUint32(b[4:], 1)          // version
+	binary.LittleEndian.PutUint64(b[12:], 2097152)   // capacity in sectors
+	binary.LittleEndian.PutUint64(b[56:], 30)        // grain directory offset
+	return b
+}
+
+// stagedHeaderAnswer answers the two commands of checkStagedNodeImage for a
+// self-contained image of the stage's format (from its extension): the
+// base64 of its leading bytes, and qemu-img info's JSON.
+func stagedHeaderAnswer(cmd string) (string, bool) {
+	format := "qcow2"
+	for _, f := range importStageFormats {
+		if strings.HasSuffix(strings.TrimRight(cmd, "' "), "."+f) || strings.Contains(cmd, "."+f+"'") {
+			format = f
+		}
+	}
+	switch {
+	case strings.HasPrefix(cmd, "head -c "):
+		head := map[string][]byte{"qcow2": minimalQCOW2(), "vmdk": minimalSparseVMDK(), "raw": make([]byte, 4096)}[format]
+		return base64.StdEncoding.EncodeToString(head), true
+	case strings.HasPrefix(cmd, "unshare -n -- qemu-img info "):
+		return `{"format":"` + format + `"}`, true
+	}
+	return "", false
+}
+
+// importNode answers the node commands of an NFS import — the mount + stage
+// copy script, the header parse (head, unless overridden), the qemu-img
+// probe (infoOut / infoExit) and the qemu-img check — and models the stage
+// directory: the copy script publishes the stage, `rm -f -- <stage>` removes
+// it.
+type importNode struct {
+	mu        sync.Mutex
+	t         *testing.T
+	infoOut   string
+	infoExit  int
+	head      []byte
+	fetchExit int
+	checkExit int
+	commands  []string
+	stages    map[string]bool
+}
+
 func (n *importNode) run(_ context.Context, cmd string) (string, string, error) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	n.commands = append(n.commands, cmd)
-	if n.fetchExit != 0 && strings.HasPrefix(cmd, "set -e; MNT=") {
-		msg := migration.ErrStagedObjectTooLarge.Error()
-		if n.fetchExit == nfsNoSpaceExit {
-			msg = migration.ErrStagingSpaceExhausted.Error()
+	switch {
+	case strings.HasPrefix(cmd, "set -e; MNT="):
+		if n.fetchExit != 0 {
+			msg := map[int]string{
+				nfsNotRegularFileExit: nfsNotRegularFileMessage,
+				nfsTooLargeExit:       migration.ErrStagedObjectTooLarge.Error(),
+				nfsNoSpaceExit:        migration.ErrStagingSpaceExhausted.Error(),
+			}[n.fetchExit]
+			return "", msg, exitErr(n.t, n.fetchExit)
 		}
-		return "", msg, exitErr(n.t, n.fetchExit)
-	}
-	if strings.HasPrefix(cmd, "head -c ") {
-		head := n.head
-		if head == nil {
-			head = minimalQCOW2()
+		if n.stages == nil {
+			n.stages = map[string]bool{}
 		}
-		return base64.StdEncoding.EncodeToString(head), "", nil
-	}
-	if strings.HasPrefix(cmd, "unshare -n -- qemu-img info") {
+		n.stages[guardStagePath] = true
+		return "", "", nil
+	case strings.HasPrefix(cmd, "rm -f -- "):
+		for path := range n.stages {
+			if strings.Contains(cmd, proxmoxShellQuote(path)) {
+				delete(n.stages, path)
+			}
+		}
+		return "", "", nil
+	case strings.HasPrefix(cmd, "head -c ") && n.head != nil:
+		return base64.StdEncoding.EncodeToString(n.head), "", nil
+	case strings.HasPrefix(cmd, "unshare -n -- qemu-img info"):
 		if n.infoExit != 0 {
 			return "", "qemu-img: Could not open", exitErr(n.t, n.infoExit)
 		}
-		return n.infoOut, "", nil
+		if n.infoOut != "" {
+			return n.infoOut, "", nil
+		}
+	case strings.HasPrefix(cmd, "qemu-img check ") && n.checkExit != 0:
+		return "", "corrupt", exitErr(n.t, n.checkExit)
+	case strings.HasPrefix(cmd, "qemu-img info -f "):
+		// The disk-size limit check (#382) on the stage: 1 MiB.
+		return `{"virtual-size": 1048576, "format": "qcow2"}`, "", nil
+	}
+	if out, ok := stagedHeaderAnswer(cmd); ok {
+		return out, "", nil
 	}
 	return "", "", nil
 }
@@ -96,6 +154,13 @@ func (n *importNode) ran(prefix string) bool {
 	return false
 }
 
+// stageLeft reports whether a stage is left in the modelled stage directory.
+func (n *importNode) stageLeft() bool {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return len(n.stages) > 0
+}
+
 func nfsImportReq(t *testing.T) *providerv1.ImportDiskRequest {
 	t.Helper()
 	uid, gid := int64(2000), int64(2000)
@@ -108,13 +173,22 @@ func nfsImportReq(t *testing.T) *providerv1.ImportDiskRequest {
 		StorageOptionsJson: opts,
 		Format:             "qcow2",
 		TargetName:         "web-migrated",
+		TargetVm:           &providerv1.ObjectIdentity{Namespace: "team-a", Name: "web"},
 	}
+}
+
+func newImportNodeProvider(t *testing.T, node *importNode) *Provider {
+	t.Helper()
+	p, _ := newStampTestProvider(t)
+	node.t = t
+	p.ssh = &sshTransport{host: "pve", logger: slog.Default(), runOverride: node.run}
+	return p
 }
 
 // TestNFSImport_RefusesAStagedImageThatReferencesOtherFiles (review High):
 // a staged qcow2 whose header names a backing file, an external data file, or
-// that is not qcow2, is refused (InvalidArgument) before anything converts or
-// publishes it, and its node-local copy is removed.
+// that is not qcow2, is refused (InvalidArgument) before anything checks it as
+// qcow2, and the stage is removed: nothing is left in the stage directory.
 func TestNFSImport_RefusesAStagedImageThatReferencesOtherFiles(t *testing.T) {
 	for name, info := range map[string]string{
 		"backing file to a node secret": `{"format":"qcow2","backing-filename":"/etc/pve/priv/authkey.key"}`,
@@ -123,165 +197,134 @@ func TestNFSImport_RefusesAStagedImageThatReferencesOtherFiles(t *testing.T) {
 		"not qcow2":                     `{"format":"vmdk"}`,
 	} {
 		t.Run(name, func(t *testing.T) {
-			p, _ := newStampTestProvider(t)
-			node := &importNode{t: t, infoOut: info}
-			p.ssh = &sshTransport{host: "pve", logger: slog.Default(), runOverride: node.run}
+			node := &importNode{infoOut: info}
+			p := newImportNodeProvider(t, node)
 
 			_, err := p.ImportDisk(context.Background(), nfsImportReq(t))
 			require.Error(t, err)
 			assert.Equal(t, codes.InvalidArgument, status.Code(err), "got %v", err)
-			assert.False(t, node.ran("mv "), "a refused image is never published")
-			assert.False(t, node.ran("qemu-img check"), "nor checked")
+			assert.False(t, node.ran("qemu-img check"), "a refused image is never checked")
 			assert.False(t, node.ran("qemu-img convert"), "nor converted")
-			assert.True(t, node.ran("rm -f '/var/tmp/"), "its node-local copy is removed")
+			assert.True(t, node.ran("rm -f -- "+proxmoxShellQuote(guardStagePath)), "the refused stage is removed")
+			assert.False(t, node.stageLeft(), "nothing is left in the stage directory")
 		})
 	}
 }
 
-// TestNFSImport_PublishesASelfContainedImage: the copy is inspected WITHOUT
-// -f (as qm importdisk probes it), then published and checked as qcow2; the
-// mount is nosymfollow and the fetch refuses non-regular files.
-func TestNFSImport_PublishesASelfContainedImage(t *testing.T) {
-	p, _ := newStampTestProvider(t)
-	node := &importNode{t: t, infoOut: `{"format":"qcow2","virtual-size":1073741824}`}
-	p.ssh = &sshTransport{host: "pve", logger: slog.Default(), runOverride: node.run}
+// TestNFSImport_StagesASelfContainedImage: the staged object is copied into
+// the root-only stage directory by the confinement stage script (nosymfollow
+// mount, measured as the NFS identity, bounded copy, the PIPE form), then its
+// header is parsed, probed WITHOUT -f (as qm importdisk does) and checked as
+// qcow2. The stage is kept for Create.
+func TestNFSImport_StagesASelfContainedImage(t *testing.T) {
+	node := &importNode{infoOut: `{"format":"qcow2","virtual-size":1073741824}`}
+	p := newImportNodeProvider(t, node)
 
 	resp, err := p.ImportDisk(context.Background(), nfsImportReq(t))
 	require.NoError(t, err)
-	require.GreaterOrEqual(t, len(node.commands), 4)
-	fetch := node.commands[0]
-	assert.Contains(t, fetch, "nosymfollow")
-	assert.Contains(t, fetch, `sh "$MNT"/'vmmigrations_team-a_web_export.qcow2' `)
-	assert.Contains(t, fetch, "setpriv --reuid 2000 --regid 2000 --clear-groups sh -c ")
+	require.Len(t, node.commands, 4)
+	stage := node.commands[0]
+	src := `"$MNT"/'vmmigrations_team-a_web_export.qcow2'`
+	assert.Contains(t, stage, "nosymfollow,nosuid,nodev,noexec")
+	assert.Contains(t, stage, "TMP=$(mktemp -p '/var/lib/virtrigaud/import-stage' .stage-XXXXXXXXXX)")
+	assert.Contains(t, stage, "SZ=$(setpriv --reuid 2000 --regid 2000 --clear-groups sh -c ")
+	assert.Contains(t, stage, " sh "+src+"); ")
 	// The PIPE form: the dropped-privilege cat writes only to a pipe; the root
-	// shell opens the copy for head, which bounds it.
-	assert.Contains(t, fetch, `(setpriv --reuid 2000 --regid 2000 --clear-groups cat -- "$MNT"/'vmmigrations_team-a_web_export.qcow2' || echo failed > "$VRFETCHRC") | head -c `)
-	assert.NotContains(t, fetch, `cat -- "$MNT"/'vmmigrations_team-a_web_export.qcow2' >`, "the uid process never holds the copy")
-	assert.Contains(t, fetch, `trap 'umount "$MNT" 2>/dev/null || true; rmdir "$MNT" 2>/dev/null || true; rm -f "$VRFETCHRC"`)
+	// shell opens the copy for head, which bounds it by the measured size.
+	assert.Contains(t, stage, `{ if setpriv --reuid 2000 --regid 2000 --clear-groups cat -- `+src+` 3>&-; then echo 0 >&3; else echo 1 >&3; fi; } 3>"$RC" | head -c $((SZ + 1)) > "$TMP"`)
+	assert.NotContains(t, stage, "cat -- "+src+" >", "the NFS identity never holds the copy")
+	assert.NotContains(t, stage, ".nfs-download", "no copy outside the stage directory")
+	assert.Contains(t, stage, `mv -T -- "$TMP" `+proxmoxShellQuote(guardStagePath))
+
 	assert.True(t, strings.HasPrefix(node.commands[1], "head -c 65536 -- "), "the header is parsed before qemu opens it")
 	assert.True(t, strings.HasPrefix(node.commands[2], "unshare -n -- qemu-img info -U --output=json -- "), "probed, as qm importdisk does")
 	assert.NotContains(t, node.commands[2], "-f ")
-	assert.True(t, strings.HasPrefix(node.commands[3], "mv -f -- "))
-	assert.Contains(t, node.commands[4], "qemu-img check -f qcow2 -- ")
-	assert.Equal(t, resp.GetPath(), strings.Trim(strings.Fields(node.commands[3])[4], "'"))
+	assert.Equal(t, "qemu-img check -f qcow2 -- "+proxmoxShellQuote(guardStagePath), node.commands[3])
+	assert.Equal(t, guardStagePath, resp.GetPath())
+	assert.True(t, node.stageLeft(), "the stage is kept for Create")
 }
 
-// TestNFSImport_UnreadableImageIsInvalidAndSSHFailureIsNot: qemu-img exit 1
-// (cannot read the image) is InvalidArgument; ssh's 255 stays retryable.
-func TestNFSImport_UnreadableImageIsInvalidAndSSHFailureIsNot(t *testing.T) {
-	for exit, want := range map[int]codes.Code{1: codes.InvalidArgument, 255: codes.Internal} {
-		p, _ := newStampTestProvider(t)
-		node := &importNode{t: t, infoExit: exit}
-		p.ssh = &sshTransport{host: "pve", logger: slog.Default(), runOverride: node.run}
-		_, err := p.ImportDisk(context.Background(), nfsImportReq(t))
-		assert.Equal(t, want, status.Code(err), "exit %d: %v", exit, err)
-		assert.False(t, node.ran("mv "))
-	}
-}
-
-// TestNFSStagedFetchCmd_RunsAsWritten runs the fetch command (under the
-// mount script's `set -e`) against a local directory standing in for the
-// mount: a regular file is copied byte for byte (mode 0600); a symbolic link
-// or a directory at the staging name is refused with exit 6, a file larger
-// than the bound with exit 7 — and in each refusal nothing is read into the
-// copy (the caller removes it).
-func TestNFSStagedFetchCmd_RunsAsWritten(t *testing.T) {
-	mnt := t.TempDir()
-	dst := filepath.Join(t.TempDir(), "stage.nfs-download")
-	run := func(rel string, limit int64) (string, int) {
-		cmd := exec.Command("sh", "-c", "set -e; "+nfsStagedFetchCmd(rel, dst, nil, nil, limit)) //nolint:gosec // test runs the command under test
-		cmd.Env = append(os.Environ(), "MNT="+mnt)
-		out, err := cmd.CombinedOutput()
-		if ee, ok := err.(*exec.ExitError); ok {
-			return string(out), ee.ExitCode()
-		}
-		require.NoError(t, err)
-		return string(out), 0
-	}
-	copied := func() []byte {
-		data, err := os.ReadFile(dst) //nolint:gosec // test reads its fixture
-		if os.IsNotExist(err) {
-			return nil
-		}
-		require.NoError(t, err)
-		return data
-	}
-	const bound = int64(1) << 30
-
-	require.NoError(t, os.WriteFile(filepath.Join(mnt, "good.qcow2"), []byte("QFI\xfbdata"), 0o600))
-	_, code := run("good.qcow2", bound)
-	assert.Equal(t, 0, code)
-	assert.Equal(t, []byte("QFI\xfbdata"), copied())
-	fi, err := os.Stat(dst)
+// TestNFSImport_CopyBoundFollowsTheImportSizeLimit (#382): the stage copy is
+// bounded by the provider bound lowered by max_virtual_size_bytes (with room
+// for the image's metadata), and the same bound refuses a header that
+// declares a larger virtual size.
+func TestNFSImport_CopyBoundFollowsTheImportSizeLimit(t *testing.T) {
+	const max = int64(1) << 30
+	want, err := migration.StagedCopyLimit(max)
 	require.NoError(t, err)
-	assert.Equal(t, os.FileMode(0o600), fi.Mode().Perm())
-	require.NoError(t, os.Remove(dst))
 
-	out, code := run("good.qcow2", 4)
-	assert.Equal(t, nfsTooLargeExit, code, "larger than the bound")
-	assert.Contains(t, out, migration.ErrStagedObjectTooLarge.Error())
-	assert.Empty(t, copied(), "nothing is copied")
-	_ = os.Remove(dst)
+	node := &importNode{infoOut: `{"format":"qcow2"}`}
+	p := newImportNodeProvider(t, node)
+	req := nfsImportReq(t)
+	req.MaxVirtualSizeBytes = max
+	_, err = p.ImportDisk(context.Background(), req)
+	require.NoError(t, err)
+	assert.Contains(t, node.commands[0], `if [ "$SZ" -gt `+strconv.FormatInt(want, 10)+` ]; then`)
 
-	secret := filepath.Join(t.TempDir(), "authkey.key")
-	require.NoError(t, os.WriteFile(secret, []byte("PRIVATE"), 0o600))
-	require.NoError(t, os.Symlink(secret, filepath.Join(mnt, "link.qcow2")))
-	out, code = run("link.qcow2", bound)
-	assert.Equal(t, nfsNotRegularFileExit, code)
-	assert.Contains(t, out, nfsNotRegularFileMessage)
-	assert.Empty(t, copied(), "a symbolic link is never read")
-	_ = os.Remove(dst)
-
-	require.NoError(t, os.Mkdir(filepath.Join(mnt, "dir.qcow2"), 0o700))
-	_, code = run("dir.qcow2", bound)
-	assert.Equal(t, nfsNotRegularFileExit, code)
-	assert.Empty(t, copied())
-	_ = os.Remove(dst)
-
-	// The object grows after it was measured (a tenant NFS server reports a
-	// small size, then serves more): the checks see 9 bytes, then cat finds
-	// many more. The copy is bounded by the MEASURED size + 1 — not by the
-	// (much larger) limit — and refused as too large (7), not as a read
-	// failure, though head closing the pipe makes cat fail.
-	grow := filepath.Join(mnt, "grow.qcow2")
-	require.NoError(t, os.WriteFile(grow, []byte("123456789"), 0o600))
-	cmd := exec.Command("sh", "-c", //nolint:gosec // test runs the command under test
-		"set -e; "+strings.Replace(nfsStagedFetchCmd("grow.qcow2", dst, nil, nil, bound), "; VRFETCHRC=",
-			"; head -c 100000 /dev/zero >> "+proxmoxShellQuote(grow)+"; VRFETCHRC=", 1))
-	cmd.Env = append(os.Environ(), "MNT="+mnt)
-	grown, err := cmd.CombinedOutput()
-	var ee *exec.ExitError
-	require.ErrorAs(t, err, &ee, string(grown))
-	assert.Equal(t, nfsTooLargeExit, ee.ExitCode())
-	assert.Len(t, copied(), 10, "head copied at most bound+1 bytes")
-	_ = os.Remove(dst)
-
-	if os.Geteuid() == 0 {
-		return
-	}
-	// A staged file the uid cannot read: the read failure is exit 9.
-	unreadable := filepath.Join(mnt, "unreadable.qcow2")
-	require.NoError(t, os.WriteFile(unreadable, []byte("data"), 0o000))
-	out, code = run("unreadable.qcow2", bound)
-	assert.Equal(t, nfsReadFailedExit, code, out)
-	assert.Contains(t, out, nfsFetchReadFailedMessage)
+	big := minimalQCOW2()
+	binary.BigEndian.PutUint64(big[24:], uint64(2*max)) // declared virtual size
+	node = &importNode{head: big, infoOut: `{"format":"qcow2"}`}
+	p = newImportNodeProvider(t, node)
+	_, err = p.ImportDisk(context.Background(), req)
+	assert.Equal(t, codes.InvalidArgument, status.Code(err), "got %v", err)
+	assert.False(t, node.ran("unshare -n -- qemu-img info"), "refused from the header alone")
+	assert.False(t, node.stageLeft(), "the refused stage is removed")
 }
 
-// TestNFSImport_BoundRefusalsLeaveNothing (re-review Medium 1): a staged
-// object above the bound is InvalidArgument, one that does not fit in the
-// node's free space is ResourceExhausted; both constant, and the node-local
-// copy is removed.
-func TestNFSImport_BoundRefusalsLeaveNothing(t *testing.T) {
-	for exit, want := range map[int]codes.Code{nfsTooLargeExit: codes.InvalidArgument, nfsNoSpaceExit: codes.ResourceExhausted} {
-		p, _ := newStampTestProvider(t)
-		node := &importNode{t: t, fetchExit: exit}
-		p.ssh = &sshTransport{host: "pve", logger: slog.Default(), runOverride: node.run}
+// TestNFSImport_FailuresLeaveNoStage (rebase item 6): an unreadable image
+// (qemu-img exit 1) is InvalidArgument, an SSH failure (255) stays retryable,
+// a failing qemu-img check is Internal; in every case the stage is removed.
+func TestNFSImport_FailuresLeaveNoStage(t *testing.T) {
+	for name, tc := range map[string]struct {
+		node *importNode
+		want codes.Code
+	}{
+		"unreadable image":   {node: &importNode{infoExit: 1}, want: codes.InvalidArgument},
+		"ssh failure":        {node: &importNode{infoExit: 255}, want: codes.Internal},
+		"qemu-img check":     {node: &importNode{checkExit: 3}, want: codes.Internal},
+		"unparsable header":  {node: &importNode{head: []byte("not an image")}, want: codes.InvalidArgument},
+		"header is raw vmdk": {node: &importNode{head: minimalSparseVMDK()}, want: codes.InvalidArgument},
+	} {
+		t.Run(name, func(t *testing.T) {
+			p := newImportNodeProvider(t, tc.node)
+			_, err := p.ImportDisk(context.Background(), nfsImportReq(t))
+			assert.Equal(t, tc.want, status.Code(err), "%v", err)
+			assert.True(t, tc.node.ran("rm -f -- "+proxmoxShellQuote(guardStagePath)))
+			assert.False(t, tc.node.stageLeft(), "nothing is left in the stage directory")
+		})
+	}
+}
+
+// TestNFSImport_CopyRefusalsLeaveNothing (re-review Medium 1): a staged object
+// that is not a regular file or is above the bound is InvalidArgument, one
+// that does not fit in the node's free space is ResourceExhausted; all
+// constant, none names the server, and nothing is staged or inspected.
+func TestNFSImport_CopyRefusalsLeaveNothing(t *testing.T) {
+	for exit, want := range map[int]codes.Code{
+		nfsNotRegularFileExit: codes.InvalidArgument,
+		nfsTooLargeExit:       codes.InvalidArgument,
+		nfsNoSpaceExit:        codes.ResourceExhausted,
+	} {
+		node := &importNode{fetchExit: exit}
+		p := newImportNodeProvider(t, node)
 		_, err := p.ImportDisk(context.Background(), nfsImportReq(t))
 		assert.Equal(t, want, status.Code(err), "exit %d: %v", exit, err)
 		assert.NotContains(t, status.Convert(err).Message(), "nfs.example")
-		assert.True(t, node.ran("rm -f '/var/tmp/"), "the node-local copy is removed")
 		assert.False(t, node.ran("head -c "), "nothing is inspected")
+		assert.False(t, node.stageLeft(), "nothing is staged")
 	}
+}
+
+// TestNFSImport_RequiresTheTargetVM: the stage is named after the target VM;
+// a request without one is refused before anything runs on the node.
+func TestNFSImport_RequiresTheTargetVM(t *testing.T) {
+	node := &importNode{}
+	p := newImportNodeProvider(t, node)
+	req := nfsImportReq(t)
+	req.TargetVm = nil
+	_, err := p.ImportDisk(context.Background(), req)
+	assert.Equal(t, codes.InvalidArgument, status.Code(err), "%v", err)
+	assert.Empty(t, node.commands)
 }
 
 // TestNFSImport_ParsesTheHeaderBeforeQemuOpensIt (re-review Medium 2): a
@@ -300,13 +343,56 @@ func TestNFSImport_ParsesTheHeaderBeforeQemuOpensIt(t *testing.T) {
 		"not qcow2":              []byte("KDMV but not what is expected"),
 	} {
 		t.Run(name, func(t *testing.T) {
-			p, _ := newStampTestProvider(t)
-			node := &importNode{t: t, head: head, infoOut: `{"format":"qcow2"}`}
-			p.ssh = &sshTransport{host: "pve", logger: slog.Default(), runOverride: node.run}
+			node := &importNode{head: head, infoOut: `{"format":"qcow2"}`}
+			p := newImportNodeProvider(t, node)
 			_, err := p.ImportDisk(context.Background(), nfsImportReq(t))
 			assert.Equal(t, codes.InvalidArgument, status.Code(err), "got %v", err)
 			assert.False(t, node.ran("unshare -n -- qemu-img info"), "qemu never opens a refused header")
-			assert.False(t, node.ran("mv "))
+			assert.False(t, node.stageLeft())
 		})
 	}
+}
+
+// TestCreate_RechecksTheStageHeader (rebase item 2): Create parses and checks
+// the stage's header again before it builds anything: a refused header is
+// InvalidSpec, nothing is created, no importdisk runs and the stage is
+// removed; a header that could not be read is VM-scoped not-performed and the
+// stage is kept for a retry.
+func TestCreate_RechecksTheStageHeader(t *testing.T) {
+	backing := minimalQCOW2()
+	backing[15], backing[19] = 1, 8 // backing file offset/size
+	t.Run("refused", func(t *testing.T) {
+		p, srv, node := newConfinementProvider(t)
+		p.ssh.runOverride = func(ctx context.Context, cmd string) (string, string, error) {
+			if strings.HasPrefix(cmd, "head -c ") {
+				_, _, _ = node.run(ctx, cmd)
+				return base64.StdEncoding.EncodeToString(backing), "", nil
+			}
+			return node.run(ctx, cmd)
+		}
+		_, err := p.Create(context.Background(), createReq(testOwner(), ownStageImageJSON))
+		assert.Equal(t, classInvalidSpec, classOf(t, err))
+		assert.Empty(t, srv.VMsNamed(testOwnerName), "nothing is created")
+		var removed bool
+		for _, c := range node.all() {
+			assert.NotContains(t, c, "qm importdisk", "the refused stage is never imported")
+			removed = removed || c == "rm -f -- "+proxmoxShellQuote(ownStagePath)
+		}
+		assert.True(t, removed, "the refused stage is removed")
+	})
+	t.Run("unreadable", func(t *testing.T) {
+		p, srv, node := newConfinementProvider(t)
+		node.fail = func(cmd string) error {
+			if strings.HasPrefix(cmd, "head -c ") {
+				return exitErr(t, 255)
+			}
+			return nil
+		}
+		_, err := p.Create(context.Background(), createReq(testOwner(), ownStageImageJSON))
+		assert.Equal(t, classNothingRemainsVM, classOf(t, err))
+		assert.Empty(t, srv.VMsNamed(testOwnerName), "nothing is created")
+		for _, c := range node.all() {
+			assert.False(t, strings.HasPrefix(c, "rm "), "the stage is kept for a retry: %s", c)
+		}
+	})
 }

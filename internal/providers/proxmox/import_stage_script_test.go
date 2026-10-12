@@ -25,6 +25,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/projectbeskar/virtrigaud/internal/storage/migration"
 )
 
 // The stage-writing scripts are run here against a local directory with the
@@ -140,7 +142,7 @@ func TestNFSImportStageInner_RealShell(t *testing.T) {
 			dir := filepath.Join(t.TempDir(), "import-stage")
 			stage := filepath.Join(dir, "team-a_web-migrated.qcow2")
 			script := "set -e; MNT=" + proxmoxShellQuote(mnt) + "; trap '" + nfsImportStageCleanup + "' EXIT; " +
-				nfsImportStageInner(dir, "src.qcow2", stage, nil, nil)
+				nfsImportStageInner(dir, "src.qcow2", stage, nil, nil, testCopyLimit)
 			out, err := exec.Command(shell, "-c", script).CombinedOutput()
 			require.NoError(t, err, string(out))
 			assert.Equal(t, []string{"team-a_web-migrated.qcow2"}, dirEntries(t, dir))
@@ -187,7 +189,7 @@ func TestNFSStageCopy_SetprivHoldsOnlyAPipe(t *testing.T) {
 			fdlog := filepath.Join(t.TempDir(), "fds")
 			run := func(rel string) ([]byte, error) {
 				script := "set -e; MNT=" + proxmoxShellQuote(mnt) + "; trap '" + nfsImportStageCleanup + "' EXIT; " +
-					nfsImportStageInner(dir, rel, stage, &uid, &gid)
+					nfsImportStageInner(dir, rel, stage, &uid, &gid, testCopyLimit)
 				cmd := exec.Command(shell, "-c", script)
 				cmd.Env = append(os.Environ(), "PATH="+bin+":"+os.Getenv("PATH"), "FDLOG="+fdlog)
 				return cmd.CombinedOutput()
@@ -221,12 +223,19 @@ func TestNFSStageCopy_SetprivHoldsOnlyAPipe(t *testing.T) {
 // the status check precedes the rename onto the stage.
 func TestNFSStageCopy_Shape(t *testing.T) {
 	uid, gid := int64(4242), int64(4343)
-	s := nfsImportStageInner(proxmoxImportStageDir, "ns/web/disk.qcow2", importStagePath("team-a", "web", "qcow2"), &uid, &gid)
+	s := nfsImportStageInner(proxmoxImportStageDir, "ns/web/disk.qcow2", importStagePath("team-a", "web", "qcow2"), &uid, &gid, 5000)
 	steps := []string{
 		"install -d -m 0700 '/var/lib/virtrigaud/import-stage'",
 		`TMP=$(mktemp -p '/var/lib/virtrigaud/import-stage' .stage-XXXXXXXXXX)`,
+		// Measured as the NFS identity; bound and space checked by root.
+		`SZ=$(setpriv --reuid 4242 --regid 4343 --clear-groups sh -c `,
+		` sh "$MNT"/'ns/web/disk.qcow2'); `,
+		`if [ "$SZ" -gt 5000 ]; then`,
+		`AV=$(df -P -B1 -- "${TMP%/*}" | awk 'NR==2 {print $4}')`,
+		`if [ "$AV" -lt $((SZ * 2)) ]; then`,
 		`RC=$(mktemp -p "${TMP%/*}" .rc-XXXXXXXXXX)`,
-		`{ if setpriv --reuid 4242 --regid 4343 --clear-groups cat -- "$MNT"/'ns/web/disk.qcow2' 3>&-; then echo 0 >&3; else echo 1 >&3; fi; } 3>"$RC" | cat > "$TMP"`,
+		`{ if setpriv --reuid 4242 --regid 4343 --clear-groups cat -- "$MNT"/'ns/web/disk.qcow2' 3>&-; then echo 0 >&3; else echo 1 >&3; fi; } 3>"$RC" | head -c $((SZ + 1)) > "$TMP"`,
+		`if [ "$(stat -c %s -- "$TMP")" -gt "$SZ" ]; then`,
 		`[ "$(cat -- "$RC")" = 0 ] || exit 1`,
 		`mv -T -- "$TMP" '/var/lib/virtrigaud/import-stage/team-a_web-migrated.qcow2'`,
 	}
@@ -240,7 +249,102 @@ func TestNFSStageCopy_Shape(t *testing.T) {
 	assert.NotContains(t, s, "chown", "no inode is adopted from the NFS identity")
 	assert.NotContains(t, s, "qemu-img", "no qemu-img runs on the tenant's bytes in the copy")
 
+	assert.NotContains(t, nfsStageCopyMeasure, "df ", "the NFS identity never measures the stage directory")
 	full := buildNFSImportStageScript(proxmoxImportStageDir, "nfs.example", "/export", "ns/web/disk.qcow2",
-		importStagePath("team-a", "web", "qcow2"), &uid, &gid)
+		importStagePath("team-a", "web", "qcow2"), &uid, &gid, 5000)
 	assert.Contains(t, full, nfsImportStageCleanup, "the trap removes the temp and the status file")
+}
+
+// testCopyLimit is the copy bound of the real-shell stage tests.
+const testCopyLimit = int64(1) << 30
+
+// fakeToolsDir puts fake commands first on PATH: `setpriv` drops its five
+// arguments (as fakeSetprivDir) and, when it runs cat, appends grow bytes
+// after the file (a server serving more than it reported); `df`, when dfAvail
+// is set, reports dfAvail free bytes.
+func fakeToolsDir(t *testing.T, grow, dfAvail string) string {
+	t.Helper()
+	bin := t.TempDir()
+	setpriv := "#!/bin/sh\nshift 5\nif [ \"$1\" = cat ]; then \"$@\" || exit $?; printf %s " + proxmoxShellQuote(grow) + "; exit 0; fi\nexec \"$@\"\n"
+	require.NoError(t, os.WriteFile(filepath.Join(bin, "setpriv"), []byte(setpriv), 0o755)) //nolint:gosec // test helper must be executable
+	if dfAvail != "" {
+		df := "#!/bin/sh\necho 'Filesystem 1-blocks Used Available Capacity Mounted'\necho 'fake 1 1 " + dfAvail + " 1% /'\n"
+		require.NoError(t, os.WriteFile(filepath.Join(bin, "df"), []byte(df), 0o755)) //nolint:gosec // test helper must be executable
+	}
+	return bin
+}
+
+// TestNFSStageCopy_RefusalsLeaveNothing (rebase item 6): every refusal or
+// failure of the NFS stage copy exits with its status and leaves NOTHING in
+// the stage directory — no stage, no temp, no status file: a symbolic link or
+// a directory at the staging name (6), an object above the bound (7), one that
+// grows past its measured size while it is copied (7, the copy is cut at
+// size + 1), too little free space (8), a free space that is not a number
+// (1), and a missing object.
+func TestNFSStageCopy_RefusalsLeaveNothing(t *testing.T) {
+	requireGNUStat(t)
+	uid, gid := int64(4242), int64(4343)
+	mnt := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(mnt, "good.qcow2"), []byte("QFI\xfbdata"), 0o600))
+	secret := filepath.Join(t.TempDir(), "authkey.key")
+	require.NoError(t, os.WriteFile(secret, []byte("PRIVATE"), 0o600))
+	require.NoError(t, os.Symlink(secret, filepath.Join(mnt, "link.qcow2")))
+	require.NoError(t, os.Mkdir(filepath.Join(mnt, "dir.qcow2"), 0o700))
+
+	for name, tc := range map[string]struct {
+		rel     string
+		limit   int64
+		grow    string
+		dfAvail string
+		exit    int
+		stderr  string
+	}{
+		"symbolic link":           {rel: "link.qcow2", limit: testCopyLimit, exit: nfsNotRegularFileExit, stderr: nfsNotRegularFileMessage},
+		"directory":               {rel: "dir.qcow2", limit: testCopyLimit, exit: nfsNotRegularFileExit, stderr: nfsNotRegularFileMessage},
+		"above the bound":         {rel: "good.qcow2", limit: 4, exit: nfsTooLargeExit, stderr: migration.ErrStagedObjectTooLarge.Error()},
+		"grows while copied":      {rel: "good.qcow2", limit: testCopyLimit, grow: "and a great deal more", exit: nfsTooLargeExit, stderr: migration.ErrStagedObjectTooLarge.Error()},
+		"no room for two copies":  {rel: "good.qcow2", limit: testCopyLimit, dfAvail: "15", exit: nfsNoSpaceExit, stderr: migration.ErrStagingSpaceExhausted.Error()},
+		"free space not a number": {rel: "good.qcow2", limit: testCopyLimit, dfAvail: "-", exit: 1},
+		"missing staged object":   {rel: "missing.qcow2", limit: testCopyLimit, exit: -1},
+	} {
+		for _, shell := range localShells(t) {
+			t.Run(name+"/"+shell, func(t *testing.T) {
+				bin := fakeToolsDir(t, tc.grow, tc.dfAvail)
+				dir := filepath.Join(t.TempDir(), "import-stage")
+				stage := filepath.Join(dir, "team-a_web-migrated.qcow2")
+				script := "set -e; MNT=" + proxmoxShellQuote(mnt) + "; trap '" + nfsImportStageCleanup + "' EXIT; " +
+					nfsImportStageInner(dir, tc.rel, stage, &uid, &gid, tc.limit)
+				cmd := exec.Command(shell, "-c", script) //nolint:gosec // test runs the script under test
+				cmd.Env = append(os.Environ(), "PATH="+bin+":"+os.Getenv("PATH"))
+				out, err := cmd.CombinedOutput()
+				var ee *exec.ExitError
+				require.ErrorAs(t, err, &ee, string(out))
+				if tc.exit >= 0 {
+					assert.Equal(t, tc.exit, ee.ExitCode(), string(out))
+				}
+				if tc.stderr != "" {
+					assert.Contains(t, string(out), tc.stderr)
+				}
+				assert.NotContains(t, string(out), "PRIVATE", "a linked file is never read")
+				assert.Empty(t, dirEntries(t, dir), "no stage, temp or status file")
+			})
+		}
+	}
+
+	// The same copy with room and an object as reported is published.
+	for _, shell := range localShells(t) {
+		bin := fakeToolsDir(t, "", "64")
+		dir := filepath.Join(t.TempDir(), "import-stage")
+		stage := filepath.Join(dir, "team-a_web-migrated.qcow2")
+		script := "set -e; MNT=" + proxmoxShellQuote(mnt) + "; trap '" + nfsImportStageCleanup + "' EXIT; " +
+			nfsImportStageInner(dir, "good.qcow2", stage, &uid, &gid, 8)
+		cmd := exec.Command(shell, "-c", script) //nolint:gosec // test runs the script under test
+		cmd.Env = append(os.Environ(), "PATH="+bin+":"+os.Getenv("PATH"))
+		out, err := cmd.CombinedOutput()
+		require.NoError(t, err, string(out))
+		got, err := os.ReadFile(stage) //nolint:gosec // test reads its fixture
+		require.NoError(t, err)
+		assert.Equal(t, "QFI\xfbdata", string(got), "an object exactly at the bound is copied")
+		assert.Equal(t, []string{"team-a_web-migrated.qcow2"}, dirEntries(t, dir))
+	}
 }

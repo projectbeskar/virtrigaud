@@ -1257,6 +1257,7 @@ func (c *Client) DeleteStagedDisk(ctx context.Context, req contracts.StagedDiskD
 		StorageOptionsJson: req.StorageOptionsJSON,
 		Credentials:        req.Credentials,
 		Layout:             req.Layout,
+		TargetVm:           targetIdentityToProto(req.TargetVM),
 	})
 	if err != nil {
 		return "", c.mapGRPCError("deleteStagedDisk", err)

@@ -45,7 +45,7 @@ func readyDeleteAfterFixture() (*infrav1beta1.VirtualMachine, *infrav1beta1.Prov
 	m.Spec.Source.DeleteAfterMigration = true
 	m.Spec.Target.PowerOn = true
 	m.Status.Phase = infrav1beta1.MigrationPhaseReady
-	m.Finalizers = []string{vmMigrationFinalizer}
+	m.Finalizers = []string{infrav1beta1.VMMigrationFinalizer}
 	return vm, p, m
 }
 

@@ -202,24 +202,17 @@ func (p *Provider) stagedDownloadBound(ctx context.Context, s3client storage.Sto
 	return meta.Size, nil
 }
 
-// nfsStageCopyChecks is the script nfsStageCopy runs first (as the
-// migration's uid/gid when set) with "$1" the staged file, "$2" the copy bound
-// in bytes and "$3" the directory the copy goes to: it refuses a staged object
-// that is not a regular file or is a symbolic link (exit 6), one larger than
-// the bound (exit 7), or one that does not fit StagedCopySpaceFactor times in
-// the free space of "$3" (exit 8). It reads no data, and prints the measured
-// size.
-var nfsStageCopyChecks = fmt.Sprintf(`f="$1"; lim="$2"; dir="$3"; `+
-	`if [ ! -f "$f" ] || [ -L "$f" ]; then echo "%[1]s" >&2; exit %[2]d; fi; `+
-	`sz=$(stat -c %%s -- "$f"); `+
-	`if [ "$sz" -gt "$lim" ]; then echo "%[3]s" >&2; exit %[4]d; fi; `+
-	`avail=$(df -P -B1 -- "$dir" | awk 'NR==2 {print $4}'); `+
-	`if [ "$avail" -lt $((sz * %[7]d)) ]; then echo "%[5]s" >&2; exit %[6]d; fi; `+
-	`echo "$sz"`,
-	nfsNotRegularFileMessage, nfsNotRegularFileExit,
-	migration.ErrStagedObjectTooLarge.Error(), nfsTooLargeExit,
-	migration.ErrStagingSpaceExhausted.Error(), nfsNoSpaceExit,
-	migration.StagedCopySpaceFactor)
+// nfsStageCopyMeasure is the script nfsStageCopy runs first, as the
+// migration's uid/gid when set (the NFS server decides what that identity may
+// see), with "$1" the staged file: it refuses a staged object that is not a
+// regular file or is a symbolic link (exit 6), and prints its size. It reads
+// no data. The bound and free-space checks run in the root shell
+// (nfsStageCopy): the stage directory's ancestors are created under umask 077,
+// so a dropped-privilege df could not reach it.
+var nfsStageCopyMeasure = fmt.Sprintf(`f="$1"; `+
+	`if [ ! -f "$f" ] || [ -L "$f" ]; then echo "%s" >&2; exit %d; fi; `+
+	`stat -c %%s -- "$f"`,
+	nfsNotRegularFileMessage, nfsNotRegularFileExit)
 
 // buildNFSKernelExportScript builds the TWO-STAGE node-side export: qemu-img as the
 // SSH user (root) flattens the root-owned source disk to a local temp qcow2, then —

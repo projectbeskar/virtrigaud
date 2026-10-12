@@ -26,6 +26,9 @@ import (
 	"regexp"
 	"strings"
 
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+
 	"github.com/projectbeskar/virtrigaud/internal/providers/proxmox/pveapi"
 	"github.com/projectbeskar/virtrigaud/internal/storage"
 	"github.com/projectbeskar/virtrigaud/internal/storage/migration"
@@ -294,6 +297,9 @@ func (p *Provider) createFromImportedDisk(
 	if importFormat == "" {
 		importFormat = "qcow2"
 	}
+	if err := p.recheckImportStage(ctx, vmConfig.ImportedDiskPath); err != nil {
+		return nil, err
+	}
 
 	p.logger.Info("Creating VM from imported disk (ADR-0006 Proxmox TARGET)",
 		"vmid", vmConfig.VMID, "name", req.Name, "node", node,
@@ -412,6 +418,37 @@ func (p *Provider) createFromImportedDisk(
 	return &providerv1.CreateResponse{
 		Id: fmt.Sprintf("%d", vmConfig.VMID),
 	}, nil
+}
+
+// recheckImportStage parses and checks the stage's header again
+// (checkStagedNodeImage, bounded by the default staged-image limit: a
+// CreateRequest carries no disk-size limit) before Create builds anything
+// from it, in the format ImportDisk staged it as: the stage's extension (`qm
+// importdisk --format` is the TARGET format; PVE probes the source).
+// ImportDisk checked the same stage when it wrote it, but `qm importdisk`
+// reads it as root and probes its format, so the bytes it is about to read
+// are checked, not the bytes an earlier call saw. Nothing has been created
+// yet: a refused stage is removed (it is this provider's own file in the
+// root-only stage directory) and the answer is InvalidSpec; a stage that
+// could not be checked is VM-scoped not-performed.
+func (p *Provider) recheckImportStage(ctx context.Context, stagePath string) error {
+	limit, err := migration.StagedCopyLimit(0)
+	if err != nil {
+		return p.vmCreateNotPerformed("the staged disk could not be checked; nothing was created", err)
+	}
+	// isImportStagePath (checked by the caller) admits only a stage format
+	// extension.
+	format := stagePath[strings.LastIndexByte(stagePath, '.')+1:]
+	err = p.checkStagedNodeImage(ctx, stagePath, format, limit)
+	switch {
+	case err == nil:
+		return nil
+	case status.Code(err) == codes.InvalidArgument:
+		p.cleanupNodeFile(stagePath)
+		return err
+	default:
+		return p.vmCreateNotPerformed("the staged disk could not be checked; nothing was created", err)
+	}
 }
 
 // importedDiskVolume returns the conventional PVE volid for the first imported

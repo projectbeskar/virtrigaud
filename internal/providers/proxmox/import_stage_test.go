@@ -59,7 +59,8 @@ func imageJSON(path string, imported bool) string {
 }
 
 // recordingNode records every remote command and answers with fail(cmd) (nil:
-// success). An importdisk reports the volid it made.
+// success). An importdisk reports the volid it made; the stage header check
+// finds a self-contained image (stagedHeaderAnswer).
 type recordingNode struct {
 	mu       sync.Mutex
 	commands []string
@@ -77,6 +78,11 @@ func (n *recordingNode) run(_ context.Context, cmd string) (string, string, erro
 	}
 	if strings.Contains(cmd, "qm importdisk ") {
 		return "Successfully imported disk as 'unused0:local-lvm:vm-1-disk-0'", "", nil
+	}
+	// Create re-checks the stage's header (recheckImportStage): a
+	// self-contained image of the stage's format.
+	if out, ok := stagedHeaderAnswer(cmd); ok {
+		return out, "", nil
 	}
 	return "", "", nil
 }

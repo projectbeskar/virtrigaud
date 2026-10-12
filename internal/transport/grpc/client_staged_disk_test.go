@@ -66,6 +66,7 @@ var stagedReq = contracts.StagedDiskDeleteRequest{
 	StorageOptionsJSON: `{"backend":"s3","bucket":"b"}`,
 	Credentials:        map[string]string{"accessKeyID": "AK", "secretAccessKey": "SK"},
 	Layout:             "v2",
+	TargetVM:           contracts.ObjectIdentity{Namespace: "team-b", Name: "web-copy"},
 }
 
 // TestClient_DeleteStagedDisk_SendsTheMigrationAndMapsTheOutcome: the request
@@ -103,12 +104,31 @@ func TestClient_DeleteStagedDisk_SendsTheMigrationAndMapsTheOutcome(t *testing.T
 			assert.Equal(t, stagedReq.StorageOptionsJSON, r.GetStorageOptionsJson())
 			assert.Equal(t, stagedReq.Credentials, r.GetCredentials())
 			assert.Equal(t, "v2", r.GetLayout())
+			assert.Equal(t, "team-b", r.GetTargetVm().GetNamespace())
+			assert.Equal(t, "web-copy", r.GetTargetVm().GetName())
 
 			caps, err := c.GetCapabilities(context.Background())
 			require.NoError(t, err)
 			assert.Equal(t, []string{"nfs", "s3"}, caps.SupportedStagedDiskDeleteBackends)
 		})
 	}
+}
+
+// TestClient_DeleteStagedDisk_NoTargetVM: a request without a target VM sends
+// none (the provider then removes only the staged object).
+func TestClient_DeleteStagedDisk_NoTargetVM(t *testing.T) {
+	srv := &stagedDiskServer{resp: &providerv1.DeleteStagedDiskResponse{
+		Outcome: providerv1.StagedDiskDeleteOutcome_STAGED_DISK_DELETE_OUTCOME_DELETED}}
+	dialer, cleanup := startBufconnServer(t, srv)
+	defer cleanup()
+	req := stagedReq
+	req.TargetVM = contracts.ObjectIdentity{}
+	_, err := newTestClient(t, dialer, "proxmox").DeleteStagedDisk(context.Background(), req)
+	require.NoError(t, err)
+	srv.mu.Lock()
+	defer srv.mu.Unlock()
+	require.Len(t, srv.calls, 1)
+	assert.Nil(t, srv.calls[0].GetTargetVm())
 }
 
 // TestClient_DeleteStagedDisk_Errors: an older provider (Unimplemented) is

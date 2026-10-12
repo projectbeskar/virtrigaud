@@ -670,6 +670,10 @@ func (r *VMMigrationReconciler) deleteStagedDisk(ctx context.Context, m *infrav1
 	if err != nil {
 		return "", fmt.Errorf("load staging credentials: %w", err)
 	}
+	targetVM, err := r.stagedImportTarget(ctx, m)
+	if err != nil {
+		return "", err
+	}
 
 	outcome, err := deleter.DeleteStagedDisk(ctx, contracts.StagedDiskDeleteRequest{
 		Migration:          contracts.ObjectIdentity{UID: string(m.UID), Namespace: m.Namespace, Name: m.Name},
@@ -678,6 +682,7 @@ func (r *VMMigrationReconciler) deleteStagedDisk(ctx context.Context, m *infrav1
 		StorageOptionsJSON: optionsJSON,
 		Credentials:        creds,
 		Layout:             migrationStagingLayout(m),
+		TargetVM:           targetVM,
 	})
 	if err == nil && outcome == contracts.StagedDiskNotFound && recorded == "" {
 		// Exported by an older manager that recorded no digest: "not found"
@@ -699,6 +704,55 @@ func (r *VMMigrationReconciler) deleteStagedDisk(ctx context.Context, m *infrav1
 	default:
 		return "", fmt.Errorf("delete staged disk: %w", err)
 	}
+}
+
+// migrationSentImport reports whether the migration may have sent its
+// ImportDisk: it is (or was, before it ended) past the Transferring phase —
+// an import id, a landed path, an Importing condition, or a phase from
+// Importing on. A migration that failed before the import has no
+// provider-side copy of its disk to remove.
+func migrationSentImport(m *infrav1beta1.VMMigration) bool {
+	if m.Status.ImportID != "" || (m.Status.DiskInfo != nil && m.Status.DiskInfo.TargetPath != "") ||
+		meta.FindStatusCondition(m.Status.Conditions, infrav1beta1.VMMigrationConditionImporting) != nil {
+		return true
+	}
+	switch m.Status.Phase {
+	case infrav1beta1.MigrationPhaseImporting, infrav1beta1.MigrationPhaseCreating,
+		infrav1beta1.MigrationPhaseValidatingTarget, infrav1beta1.MigrationPhaseReady:
+		return true
+	}
+	return false
+}
+
+// stagedImportTarget is the target VM DeleteStagedDisk names so the target
+// provider also removes the provider-side copy its ImportDisk kept for that
+// VM until Create (Proxmox: the node-side import stage, named after the
+// target VM, not the migration). It is set only when the migration sent an
+// import (migrationSentImport) and no other VMMigration that is still in
+// flight — not Ready, not Failed, not being deleted — targets the same VM:
+// that one's import may have written, and its Create may be about to read,
+// the same stage. Otherwise it is zero and only the staged object is removed.
+// A failed list is an error (the delete is held and retried).
+func (r *VMMigrationReconciler) stagedImportTarget(ctx context.Context, m *infrav1beta1.VMMigration) (contracts.ObjectIdentity, error) {
+	if !migrationSentImport(m) {
+		return contracts.ObjectIdentity{}, nil
+	}
+	key := migrationTargetVMKey(m)
+	migrations := &infrav1beta1.VMMigrationList{}
+	if err := r.List(ctx, migrations); err != nil {
+		return contracts.ObjectIdentity{}, fmt.Errorf("list VMMigrations sharing the target VM: %w", err)
+	}
+	for i := range migrations.Items {
+		other := &migrations.Items[i]
+		if other.UID == m.UID || !other.DeletionTimestamp.IsZero() ||
+			other.Status.Phase == infrav1beta1.MigrationPhaseReady || other.Status.Phase == infrav1beta1.MigrationPhaseFailed {
+			continue
+		}
+		if migrationTargetVMKey(other) == key {
+			return contracts.ObjectIdentity{}, nil
+		}
+	}
+	return contracts.ObjectIdentity{Namespace: key.Namespace, Name: key.Name}, nil
 }
 
 // stagedDiskUnsupportedGrace is how long a target provider that does not
