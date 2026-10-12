@@ -95,6 +95,12 @@ type VMMigrationReconciler struct {
 	// the always-forbidden loopback/link-local/metadata/multicast targets.
 	StorageHostPolicy *storagemigration.HostPolicy
 
+	// MaxDiskSize is the administrator's disk-size ceiling (the manager's
+	// --max-disk-size; nil for none), lowered per target Provider by its
+	// infra.virtrigaud.io/max-disk-size annotation: a migration that would
+	// create a disk above the limit is held in Validating (disk_size_limit.go).
+	MaxDiskSize *resource.Quantity
+
 	// longOpInFlight is an in-memory guard against re-issuing a long-running,
 	// non-idempotent migration RPC (ExportDisk / ImportDisk) when a reconcile
 	// re-enters before the prior status write has propagated to the informer
@@ -426,6 +432,18 @@ func (r *VMMigrationReconciler) handleValidatingPhase(ctx context.Context, migra
 		return r.transitionToFailed(ctx, migration, fmt.Sprintf(
 			"target provider %s/%s has topology: cluster; migrating into a clustered provider is not supported yet "+
 				"(disk import is not routed to a host until ADR-0007 P3)", targetProvider.Namespace, targetProvider.Name))
+	}
+
+	// No disk above the administrator's disk-size limit for the target
+	// Provider is created by a migration: it is held here, before any side
+	// effect (disk_size_limit.go).
+	refusal, err := r.migrationDiskSizeRefusal(ctx, migration, sourceVM, targetProvider)
+	if err != nil {
+		logger.Error(err, "Failed to read a VMClass to check the migration's disk sizes")
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+	}
+	if refusal != nil {
+		return r.holdMigrationForDiskSizeLimit(ctx, migration, refusal)
 	}
 
 	// A clustered SOURCE VM is addressed by its confirmed host binding. One with

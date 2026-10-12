@@ -190,6 +190,26 @@ const (
 	// is applied only once the VM is powered off; until then the VM counts at
 	// its current size. The operator never powers the VM off by itself.
 	ReasonShrinkPendingPowerOff = "ShrinkPendingPowerOff"
+	// ReasonDiskSizeExceedsLimit is Ready=False (and Provisioning=False) on a
+	// VirtualMachine that is not created yet — or whose hypervisor VM is gone
+	// and would be re-created — when one of the disks it asks for (VMClass
+	// spec.diskDefaults.size, spec.disks[].sizeGiB) is above the disk-size
+	// limit that applies to its Provider: the smaller of the manager's
+	// --max-disk-size and the Provider's infra.virtrigaud.io/max-disk-size
+	// annotation. Nothing is created and no provider call is made; the VM is
+	// re-checked periodically and created once its sizes fit. On a VM that
+	// exists it is the Reconfiguring=False reason of a Reconfigure that
+	// applied everything except the growth of a disk beyond the limit (that
+	// disk is never grown past it, and never shrunk). It is also the
+	// Ready=False reason of a pending VMClone, and the Validating=False reason
+	// of a VMMigration, refused for the same cause.
+	ReasonDiskSizeExceedsLimit = "DiskSizeExceedsLimit"
+	// ReasonDiskSizeLimitUnverifiable is used like ReasonDiskSizeExceedsLimit
+	// when the disk-size limit cannot be checked: the Provider's
+	// infra.virtrigaud.io/max-disk-size annotation is not a valid limit, or a
+	// VMClass whose size counts is missing. VirtRigaud fails closed: nothing is
+	// created, cloned, migrated or grown until it can be checked.
+	ReasonDiskSizeLimitUnverifiable = "DiskSizeLimitUnverifiable"
 )
 
 // ConditionPlaced is the single positive placement condition of a VirtualMachine

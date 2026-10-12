@@ -31,6 +31,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -131,6 +132,11 @@ type VMCloneReconciler struct {
 	// unschedulable paces the re-checks of clustered clones that do not fit
 	// on their source's host.
 	unschedulable unschedulableBackoff
+	// MaxDiskSize is the administrator's disk-size ceiling (the manager's
+	// --max-disk-size; nil for none), lowered per Provider by its
+	// infra.virtrigaud.io/max-disk-size annotation: a clone that would create
+	// a disk above the limit is not issued (disk_size_limit.go).
+	MaxDiskSize *resource.Quantity
 }
 
 // NewVMCloneReconciler creates a new VMClone reconciler. apiReader must be an
@@ -336,6 +342,18 @@ func (r *VMCloneReconciler) Reconcile(ctx context.Context, req ctrl.Request) (re
 	} else if !errors.IsNotFound(err) {
 		logger.Error(err, "Failed to check for existing target VM", "vm", existingKey.Name)
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+	}
+
+	// No disk above the administrator's disk-size limit is created by a
+	// clone (disk_size_limit.go). Checked only before a clone is issued, like
+	// the linked-clone checks below.
+	refusal, err := r.cloneDiskSizeRefusal(ctx, clone, sourceVM, provider)
+	if err != nil {
+		logger.Error(err, "Failed to read a VMClass to check the clone's disk sizes")
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+	}
+	if refusal != nil {
+		return r.holdCloneForDiskSizeLimit(ctx, clone, refusal), nil
 	}
 
 	// Linked-clone checks (intrinsic correctness, independent of the #176

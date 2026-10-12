@@ -33,6 +33,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -255,6 +256,16 @@ type VirtualMachineReconciler struct {
 	// EnsureImageOnProvider). *VMCRDFeatureChecker implements it. Optional:
 	// nil skips the check.
 	ImageCRDFeatures VMImageCRDFeatureReporter
+	// MaxDiskSize is the administrator's disk-size ceiling (the manager's
+	// --max-disk-size; nil for none), lowered per Provider by its
+	// infra.virtrigaud.io/max-disk-size annotation: no disk above the limit
+	// is created, and no disk is grown beyond it (disk_size_limit.go).
+	MaxDiskSize *resource.Quantity
+
+	// diskLimitWarned remembers, per VM UID, the message of the last
+	// DiskSizeExceedsLimit Warning recorded for a Reconfigure whose disk growth
+	// was withheld, so it is recorded once (warnDiskGrowthWithheld).
+	diskLimitWarned sync.Map
 
 	// imagePrepares de-duplicates concurrent image prepares of one VMImage
 	// through one Provider object within this manager (prepareImageOnce).
@@ -647,10 +658,16 @@ func (r *VirtualMachineReconciler) reconcileVM(ctx context.Context, vm *infravir
 				return res, err
 			}
 			attempt = decided
-			if attempt.resend {
-				logger.Info("Re-sending the requested Create")
-				return r.createVMOn(ctx, vm, providerInstance, provider, vmClass, vmImage, networks, nil, attempt)
-			}
+		}
+		// No disk above the administrator's disk-size limit is created: the
+		// Create is not sent — nor an image prepare or a placement before it
+		// (disk_size_limit.go).
+		if res, held := r.refuseCreateOverDiskSizeLimit(ctx, vm, persisted, provider, vmClass); held {
+			return res, nil
+		}
+		if attempt.resend {
+			logger.Info("Re-sending the requested Create")
+			return r.createVMOn(ctx, vm, providerInstance, provider, vmClass, vmImage, networks, nil, attempt)
 		}
 		// Prepare the image first — unless a clustered create is already in
 		// flight (status.placement.pendingHost): that create is re-sent as it
@@ -720,6 +737,11 @@ func (r *VirtualMachineReconciler) reconcileVM(ctx context.Context, vm *infravir
 		// Nor is it re-created through a Provider that is being deleted.
 		if providerDeleting(provider) {
 			return r.holdForDeletingProvider(ctx, vm, persisted, provider), nil
+		}
+		// Nor with a disk above the disk-size limit: a re-create creates its
+		// disks anew.
+		if res, held := r.refuseCreateOverDiskSizeLimit(ctx, vm, persisted, provider, vmClass); held {
+			return res, nil
 		}
 		logger.Info("VM no longer exists, recreating")
 		priorID := vm.Status.ID
@@ -2722,6 +2744,13 @@ func (r *VirtualMachineReconciler) reconfigureVM(
 		return ctrl.Result{}, err
 	}
 
+	// No disk is grown beyond the disk-size limit: a size above it is
+	// withheld from the request (the VM's other changes still go out), and
+	// reported once (disk_size_limit.go). A disk already larger is never
+	// shrunk: every provider resizes grow-only.
+	withheld := withholdDiskGrowthOverLimit(&req, r.MaxDiskSize, providerCR, vmClass)
+	r.warnDiskGrowthWithheld(vm, withheld)
+
 	// Call provider reconfigure
 	result, err := provider.Reconfigure(ctx, ref, req)
 	taskRef := result.TaskRef
@@ -2772,7 +2801,12 @@ func (r *VirtualMachineReconciler) reconfigureVM(
 		// Reconfigure completed synchronously, update current resources
 		r.updateCurrentResources(vm, vmClass)
 		vm.Status.Phase = infravirtrigaudiov1beta1.VirtualMachinePhaseRunning
-		k8s.SetReconfiguringCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonReconcileSuccess, "VM reconfigured successfully")
+		if withheld != nil {
+			// Applied, except a disk's growth beyond the limit: say so.
+			k8s.SetReconfiguringCondition(&vm.Status.Conditions, metav1.ConditionFalse, withheld.reason, withheld.message)
+		} else {
+			k8s.SetReconfiguringCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonReconcileSuccess, "VM reconfigured successfully")
+		}
 		k8s.SetReadyCondition(&vm.Status.Conditions, metav1.ConditionTrue, k8s.ReasonReconcileSuccess, "VM is ready")
 	}
 
