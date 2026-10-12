@@ -212,6 +212,16 @@ func (r *VMMigrationReconciler) exportDiskSizeRefusal(ctx context.Context, migra
 	inst contracts.Provider, exportReq contracts.ExportDiskRequest) (*diskSizeRefusal, *resource.Quantity, error) {
 	targetProvider, err := r.getTargetProvider(ctx, migration)
 	if err != nil {
+		// Without a manager-wide ceiling a target Provider that cannot be
+		// read here (gone, or not usable from this namespace) sets no limit
+		// at this point: the export goes on exactly as without this check,
+		// and the import — which needs that Provider — re-reads it and, if it
+		// carries a limit, refuses for want of a recorded size. With a
+		// ceiling, wait for it.
+		if r.MaxDiskSize == nil {
+			log.FromContext(ctx).Info("Target provider unreadable before export; no disk-size limit checked here", "error", err.Error())
+			return nil, nil, nil
+		}
 		return nil, nil, fmt.Errorf("get the target provider to check the disk-size limit: %w", err)
 	}
 	limit, refusal := r.migrationTargetLimit(targetProvider)
