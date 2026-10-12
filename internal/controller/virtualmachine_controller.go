@@ -483,14 +483,14 @@ func (r *VirtualMachineReconciler) reconcileVM(ctx context.Context, vm *infravir
 		// Check both wrapped errors and error message for "not found"
 		if errors.IsNotFound(err) || strings.Contains(err.Error(), "not found") {
 			logger.Info("Provider not found, skipping reconciliation until Provider exists", "provider", vm.Spec.ProviderRef.Name, "error", err.Error())
-			k8s.SetReadyCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonWaitingForDependencies, fmt.Sprintf("Provider %s not found", vm.Spec.ProviderRef.Name))
+			k8s.SetReadyCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonWaitingForDependencies, fmt.Sprintf("Provider %s not found", vm.Spec.ProviderRef.Name), vm.Generation)
 			metrics.RecordError(errReasonDepsNotFound, metrics.ComponentManager)
 			r.updateStatus(ctx, vm)
 			// Requeue with longer interval when Provider is missing to reduce log noise
 			return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 		}
 		logger.Error(err, "Failed to get dependencies - will retry in 5s", "provider", vm.Spec.ProviderRef.Name, "class", vm.Spec.ClassRef.Name, "image", imageRefName)
-		k8s.SetReadyCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonWaitingForDependencies, err.Error())
+		k8s.SetReadyCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonWaitingForDependencies, err.Error(), vm.Generation)
 		metrics.RecordError(errReasonDepsError, metrics.ComponentManager)
 		r.updateStatus(ctx, vm)
 		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
@@ -537,7 +537,7 @@ func (r *VirtualMachineReconciler) reconcileVM(ctx context.Context, vm *infravir
 		// the VM (readable by a consumer of a Provider in another namespace)
 		// gets a constant message (ADR-0007 A6, threat 5).
 		logger.Error(err, "Failed to get provider instance - will retry in 5s", "provider", provider.Name, "runtime_phase", provider.Status.Runtime.Phase)
-		k8s.SetReadyCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonProviderError, providerResolveFailedMessage)
+		k8s.SetReadyCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonProviderError, providerResolveFailedMessage, vm.Generation)
 		metrics.RecordError(errReasonProviderResolve, metrics.ComponentManager)
 		r.updateStatus(ctx, vm)
 		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
@@ -562,7 +562,7 @@ func (r *VirtualMachineReconciler) reconcileVM(ctx context.Context, vm *infravir
 		done, err := providerInstance.IsTaskComplete(ctx, vm.Status.LastTaskRef)
 		if err != nil {
 			logger.Error(err, "Failed to check task status")
-			k8s.SetProvisioningCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonProviderError, "Failed to check task: "+providerFailureDetail(err))
+			k8s.SetProvisioningCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonProviderError, "Failed to check task: "+providerFailureDetail(err), vm.Generation)
 			metrics.RecordError(errReasonProviderTask, metrics.ComponentManager)
 			r.updateStatus(ctx, vm)
 			return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
@@ -570,7 +570,7 @@ func (r *VirtualMachineReconciler) reconcileVM(ctx context.Context, vm *infravir
 
 		if !done {
 			logger.Info("Task still in progress", "taskRef", vm.Status.LastTaskRef)
-			k8s.SetProvisioningCondition(&vm.Status.Conditions, metav1.ConditionTrue, k8s.ReasonTaskInProgress, "Task in progress")
+			k8s.SetProvisioningCondition(&vm.Status.Conditions, metav1.ConditionTrue, k8s.ReasonTaskInProgress, "Task in progress", vm.Generation)
 			r.updateStatus(ctx, vm)
 			return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 		}
@@ -584,7 +584,7 @@ func (r *VirtualMachineReconciler) reconcileVM(ctx context.Context, vm *infravir
 		done, err := providerInstance.IsTaskComplete(ctx, vm.Status.ReconfigureTaskRef)
 		if err != nil {
 			logger.Error(err, "Failed to check reconfigure task status")
-			k8s.SetReconfiguringCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonProviderError, "Failed to check reconfigure task: "+providerFailureDetail(err))
+			k8s.SetReconfiguringCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonProviderError, "Failed to check reconfigure task: "+providerFailureDetail(err), vm.Generation)
 			metrics.RecordError(errReasonProviderTask, metrics.ComponentManager)
 			r.updateStatus(ctx, vm)
 			return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
@@ -597,7 +597,7 @@ func (r *VirtualMachineReconciler) reconcileVM(ctx context.Context, vm *infravir
 			if c := r.placements.Load(); c != nil {
 				c.Touch(vmSchedulingUID(vm))
 			}
-			k8s.SetReconfiguringCondition(&vm.Status.Conditions, metav1.ConditionTrue, k8s.ReasonTaskInProgress, "Reconfiguration in progress")
+			k8s.SetReconfiguringCondition(&vm.Status.Conditions, metav1.ConditionTrue, k8s.ReasonTaskInProgress, "Reconfiguration in progress", vm.Generation)
 			r.updateStatus(ctx, vm)
 			return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 		}
@@ -612,7 +612,7 @@ func (r *VirtualMachineReconciler) reconcileVM(ctx context.Context, vm *infravir
 		r.updateCurrentResources(vm, vmClass)
 		vm.Status.ReconfigureTaskRef = ""
 		vm.Status.Phase = infravirtrigaudiov1beta1.VirtualMachinePhaseRunning
-		k8s.SetReconfiguringCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonReconcileSuccess, "VM reconfigured successfully")
+		k8s.SetReconfiguringCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonReconcileSuccess, "VM reconfigured successfully", vm.Generation)
 	}
 
 	// Ensure VM exists.
@@ -630,7 +630,7 @@ func (r *VirtualMachineReconciler) reconcileVM(ctx context.Context, vm *infravir
 			logger.Info("Adopted VM has no Status.ID yet; waiting for adoption/clone controller to set it (not creating)",
 				"name", vm.Name, "namespace", vm.Namespace)
 			k8s.SetProvisioningCondition(&vm.Status.Conditions, metav1.ConditionTrue,
-				k8s.ReasonWaitingForDependencies, "Waiting for adoption/clone controller to set Status.ID")
+				k8s.ReasonWaitingForDependencies, "Waiting for adoption/clone controller to set Status.ID", vm.Generation)
 			r.updateStatus(ctx, vm)
 			return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 		}
@@ -716,7 +716,7 @@ func (r *VirtualMachineReconciler) reconcileVM(ctx context.Context, vm *infravir
 			return res, nil
 		}
 		logger.Error(err, "Failed to describe VM")
-		k8s.SetReadyCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonProviderError, "Failed to describe VM: "+providerFailureDetail(err))
+		k8s.SetReadyCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonProviderError, "Failed to describe VM: "+providerFailureDetail(err), vm.Generation)
 		metrics.RecordError(errReasonProviderDescribe, metrics.ComponentManager)
 		r.updateStatus(ctx, vm)
 		return ctrl.Result{RequeueAfter: routedCallRetryAfter(ref, err)}, nil
@@ -815,7 +815,7 @@ func (r *VirtualMachineReconciler) reconcileVM(ctx context.Context, vm *infravir
 		}
 		logger.Info("VM is suspended or in an unknown state; not adjusting its power state or size", "powerState", desc.PowerState,
 			"desired", desiredPowerState)
-		k8s.SetReadyCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonPowerStateUnmanaged, msg)
+		k8s.SetReadyCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonPowerStateUnmanaged, msg, vm.Generation)
 		r.updateStatus(ctx, vm)
 		return ctrl.Result{RequeueAfter: r.getRequeueInterval(vm, desc)}, nil
 	}
@@ -852,7 +852,7 @@ func (r *VirtualMachineReconciler) reconcileVM(ctx context.Context, vm *infravir
 	if rcErr != nil {
 		logger.Error(rcErr, "Invalid spec.resources override")
 		k8s.SetReconfiguringCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonValidationError,
-			fmt.Sprintf("Invalid spec.resources override: %s", providerErrorMessage(rcErr)))
+			fmt.Sprintf("Invalid spec.resources override: %s", providerErrorMessage(rcErr)), vm.Generation)
 		r.updateStatus(ctx, vm)
 		return ctrl.Result{RequeueAfter: vmCreateInvalidSpecRetryInterval}, nil
 	}
@@ -889,8 +889,8 @@ func (r *VirtualMachineReconciler) reconcileVM(ctx context.Context, vm *infravir
 	}
 
 	// VM is ready
-	k8s.SetReadyCondition(&vm.Status.Conditions, metav1.ConditionTrue, k8s.ReasonReconcileSuccess, "VM is ready")
-	k8s.SetProvisioningCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonReconcileSuccess, "VM provisioned")
+	k8s.SetReadyCondition(&vm.Status.Conditions, metav1.ConditionTrue, k8s.ReasonReconcileSuccess, "VM is ready", vm.Generation)
+	k8s.SetProvisioningCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonReconcileSuccess, "VM provisioned", vm.Generation)
 	// A withheld disk growth stops being reported once the spec's sizes fit
 	// the limit again (lowered, or the limit raised): nothing would be
 	// withheld any more (clearDiskSizeWithinLimitWhenFits).
@@ -1726,12 +1726,12 @@ func (r *VirtualMachineReconciler) createVMOn(
 			// The create marker stays (Provisioning=True/CreateRequested);
 			// Ready says why the VM is not created yet.
 			k8s.SetReadyCondition(&vm.Status.Conditions, metav1.ConditionFalse, reason,
-				"Failed to create VM: "+providerFailureDetail(err))
+				"Failed to create VM: "+providerFailureDetail(err), vm.Generation)
 			r.updateStatus(ctx, vm)
 			return ctrl.Result{RequeueAfter: requeueAfter}, nil
 		}
 		k8s.SetProvisioningCondition(&vm.Status.Conditions, metav1.ConditionFalse, reason,
-			"Failed to create VM: "+providerFailureDetail(err))
+			"Failed to create VM: "+providerFailureDetail(err), vm.Generation)
 		r.updateStatus(ctx, vm)
 		return ctrl.Result{RequeueAfter: requeueAfter}, nil
 	}
@@ -1899,14 +1899,14 @@ func (r *VirtualMachineReconciler) resolveClusterPlacement(
 	case len(pools) == 0:
 		msg := fmt.Sprintf("clustered provider %q has no HostPool in namespace %s", providerCR.Name, clusterNS)
 		logger.Info("Cannot schedule VM: " + msg)
-		k8s.SetProvisioningCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonNoHostPool, msg)
+		k8s.SetProvisioningCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonNoHostPool, msg, vm.Generation)
 		metrics.RecordError(errReasonPlacement, metrics.ComponentManager)
 		r.updatePlacementStatus(ctx, vm)
 		return nil, ctrl.Result{RequeueAfter: placementConfigRetryInterval}, nil
 	case len(pools) > 1:
 		msg := fmt.Sprintf("clustered provider %q has %d HostPools in namespace %s; v1 supports exactly one pool per clustered provider (multi-pool is deferred)", providerCR.Name, len(pools), clusterNS)
 		logger.Info("Cannot schedule VM: " + msg)
-		k8s.SetProvisioningCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonMultipleHostPools, msg)
+		k8s.SetProvisioningCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonMultipleHostPools, msg, vm.Generation)
 		metrics.RecordError(errReasonPlacement, metrics.ComponentManager)
 		r.updatePlacementStatus(ctx, vm)
 		return nil, ctrl.Result{RequeueAfter: placementConfigRetryInterval}, nil
@@ -1948,7 +1948,7 @@ func (r *VirtualMachineReconciler) resolveClusterPlacement(
 			if errors.IsNotFound(err) {
 				msg := fmt.Sprintf("referenced VMPlacementPolicy %q not found in namespace %s", vm.Spec.PlacementRef.Name, vm.Namespace)
 				logger.Info("Cannot schedule VM: " + msg)
-				k8s.SetProvisioningCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonPlacementPolicyNotFound, msg)
+				k8s.SetProvisioningCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonPlacementPolicyNotFound, msg, vm.Generation)
 				metrics.RecordError(errReasonPlacement, metrics.ComponentManager)
 				r.updatePlacementStatus(ctx, vm)
 				return nil, ctrl.Result{RequeueAfter: placementConfigRetryInterval}, nil
@@ -2026,7 +2026,7 @@ func (r *VirtualMachineReconciler) resolveClusterPlacement(
 				pool.Name, strings.Join(excludedHosts, ", "))
 			logger.Info("Cannot schedule VM: " + msg)
 			setPlacedCondition(vm, metav1.ConditionFalse, k8s.ReasonAllHostsExcluded, msg)
-			k8s.SetProvisioningCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonUnschedulable, msg)
+			k8s.SetProvisioningCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonUnschedulable, msg, vm.Generation)
 			metrics.RecordError(errReasonPlacement, metrics.ComponentManager)
 			r.updatePlacementStatus(ctx, vm)
 			return nil, ctrl.Result{RequeueAfter: vmCreateConflictRetryInterval}, nil
@@ -2052,7 +2052,7 @@ func (r *VirtualMachineReconciler) resolveClusterPlacement(
 				}
 			}
 			setPlacedCondition(vm, metav1.ConditionFalse, k8s.ReasonUnschedulable, msg)
-			k8s.SetProvisioningCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonUnschedulable, msg)
+			k8s.SetProvisioningCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonUnschedulable, msg, vm.Generation)
 			metrics.RecordError(errReasonPlacement, metrics.ComponentManager)
 			r.updatePlacementStatus(ctx, vm)
 			return nil, ctrl.Result{RequeueAfter: retryAfter}, nil
@@ -2062,7 +2062,7 @@ func (r *VirtualMachineReconciler) resolveClusterPlacement(
 		// but surface it and retry slowly rather than hot-looping.
 		msg := fmt.Sprintf("placement error in pool %q: %v", pool.Name, err)
 		logger.Error(err, "Placement error scheduling VM", "pool", pool.Name)
-		k8s.SetProvisioningCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonPlacementError, msg)
+		k8s.SetProvisioningCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonPlacementError, msg, vm.Generation)
 		metrics.RecordError(errReasonPlacement, metrics.ComponentManager)
 		r.updatePlacementStatus(ctx, vm)
 		return nil, ctrl.Result{RequeueAfter: placementConfigRetryInterval}, nil
@@ -2149,14 +2149,14 @@ func (r *VirtualMachineReconciler) adjustPowerState(
 			return r.holdImageArtifactPower(ctx, vm, err), nil
 		}
 		logger.Error(err, "Failed to adjust power state")
-		k8s.SetReadyCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonProviderError, "Failed to adjust power state: "+providerFailureDetail(err))
+		k8s.SetReadyCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonProviderError, "Failed to adjust power state: "+providerFailureDetail(err), vm.Generation)
 		r.updateStatus(ctx, vm)
 		return ctrl.Result{RequeueAfter: routedCallRetryAfter(ref, err)}, nil
 	}
 
 	if taskRef != "" {
 		vm.Status.LastTaskRef = taskRef
-		k8s.SetReconfiguringCondition(&vm.Status.Conditions, metav1.ConditionTrue, k8s.ReasonUpdating, "Adjusting power state")
+		k8s.SetReconfiguringCondition(&vm.Status.Conditions, metav1.ConditionTrue, k8s.ReasonUpdating, "Adjusting power state", vm.Generation)
 	}
 
 	r.updateStatus(ctx, vm)
@@ -2767,7 +2767,7 @@ func (r *VirtualMachineReconciler) reconfigureVM(
 		logger.Error(err, "Failed to build reconfigure request")
 		if contracts.IsInvalidSpec(err) {
 			k8s.SetReconfiguringCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonValidationError,
-				fmt.Sprintf("Failed to build reconfigure request: %s", providerErrorMessage(err)))
+				fmt.Sprintf("Failed to build reconfigure request: %s", providerErrorMessage(err)), vm.Generation)
 			r.updateStatus(ctx, vm)
 			return ctrl.Result{RequeueAfter: vmCreateInvalidSpecRetryInterval}, nil
 		}
@@ -2823,7 +2823,7 @@ func (r *VirtualMachineReconciler) reconfigureVM(
 		return ctrl.Result{RequeueAfter: restartPendingRecheckInterval}, nil
 	case taskRef != "":
 		vm.Status.ReconfigureTaskRef = taskRef
-		k8s.SetReconfiguringCondition(&vm.Status.Conditions, metav1.ConditionTrue, k8s.ReasonUpdating, "VM reconfiguration in progress")
+		k8s.SetReconfiguringCondition(&vm.Status.Conditions, metav1.ConditionTrue, k8s.ReasonUpdating, "VM reconfiguration in progress", vm.Generation)
 	case result.RestartRequired:
 		// Applied to the persistent definition only: see recordRestartPending
 		// for what status.currentResources then holds.
@@ -2835,8 +2835,8 @@ func (r *VirtualMachineReconciler) reconfigureVM(
 		// Reconfigure completed synchronously, update current resources
 		r.updateCurrentResources(vm, vmClass)
 		vm.Status.Phase = infravirtrigaudiov1beta1.VirtualMachinePhaseRunning
-		k8s.SetReconfiguringCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonReconcileSuccess, "VM reconfigured successfully")
-		k8s.SetReadyCondition(&vm.Status.Conditions, metav1.ConditionTrue, k8s.ReasonReconcileSuccess, "VM is ready")
+		k8s.SetReconfiguringCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonReconcileSuccess, "VM reconfigured successfully", vm.Generation)
+		k8s.SetReadyCondition(&vm.Status.Conditions, metav1.ConditionTrue, k8s.ReasonReconcileSuccess, "VM is ready", vm.Generation)
 	}
 
 	r.updateStatus(ctx, vm)

@@ -101,7 +101,7 @@ func (r *VMSetReconciler) Reconcile(ctx context.Context, req ctrl.Request) (resu
 	logger.Info("VMSet has no active controller; reporting ControllerNotImplemented")
 	vmSet.Status.ObservedGeneration = vmSet.Generation
 	k8s.SetCondition(&vmSet.Status.Conditions, vmSetConditionReady,
-		metav1.ConditionFalse, vmSetReasonNotImplemented, vmSetNotImplementedMessage)
+		metav1.ConditionFalse, vmSetReasonNotImplemented, vmSetNotImplementedMessage, vmSet.Generation)
 	if err := r.Status().Update(ctx, vmSet); err != nil {
 		logger.Error(err, "Failed to update VMSet status")
 		return ctrl.Result{}, err

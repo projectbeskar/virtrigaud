@@ -1108,7 +1108,7 @@ func (r *VirtualMachineReconciler) prepareImageForCreate(
 		logger.Info("Waiting for image prepare to complete before creating VM",
 			"image", vmImage.Name, "provider", provider.Name)
 		k8s.SetProvisioningCondition(&vm.Status.Conditions, metav1.ConditionTrue, k8s.ReasonTaskInProgress,
-			fmt.Sprintf("Preparing image %s on provider %s", vmImage.Name, provider.Name))
+			fmt.Sprintf("Preparing image %s on provider %s", vmImage.Name, provider.Name), vm.Generation)
 		r.updateStatus(ctx, vm)
 		return true, imageEnsureResultToReconcile(), nil
 	case isConsumerNotAllowed(perr):
@@ -1123,7 +1123,7 @@ func (r *VirtualMachineReconciler) prepareImageForCreate(
 			"image", vmImage.Name, "provider", provider.Name, "reason", perr.Error())
 		k8s.SetReadyCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonWaitingForDependencies,
 			fmt.Sprintf("Image %s not prepared on provider %s: %s", vmImage.Name, provider.Name,
-				strings.TrimPrefix(perr.Error(), errImagePrepareHold.Error()+": ")))
+				strings.TrimPrefix(perr.Error(), errImagePrepareHold.Error()+": ")), vm.Generation)
 		r.updateStatus(ctx, vm)
 		return true, ctrl.Result{RequeueAfter: imageHoldRequeueAfter(perr)}, nil
 	default:
@@ -1131,7 +1131,7 @@ func (r *VirtualMachineReconciler) prepareImageForCreate(
 		logger.Error(perr, "Failed to ensure image on provider - will retry",
 			"image", vmImage.Name, "provider", provider.Name, "retryIn", requeueAfter)
 		k8s.SetReadyCondition(&vm.Status.Conditions, metav1.ConditionFalse, reason,
-			fmt.Sprintf("Image prepare failed: %s", sanitizeProviderDetail(perr)))
+			fmt.Sprintf("Image prepare failed: %s", sanitizeProviderDetail(perr)), vm.Generation)
 		metrics.RecordError(errReasonImagePrepare, metrics.ComponentManager)
 		r.updateStatus(ctx, vm)
 		return true, ctrl.Result{RequeueAfter: requeueAfter}, nil

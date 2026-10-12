@@ -177,7 +177,7 @@ func (r *VirtualMachineReconciler) refuseGrownPendingCreate(
 	log.FromContext(ctx).Info("Not retrying a pending clustered create that has grown since it was admitted", "host", host,
 		"admittedCPU", admitted.CPU, "admittedMemoryMiB", admitted.MemoryMiB, "cpu", cpu, "memoryMiB", mem)
 	setPlacedCondition(vm, metav1.ConditionFalse, k8s.ReasonPendingSizeGrew, msg)
-	k8s.SetProvisioningCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonPendingSizeGrew, msg)
+	k8s.SetProvisioningCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonPendingSizeGrew, msg, vm.Generation)
 	metrics.RecordError(errReasonPlacement, metrics.ComponentManager)
 	r.updatePlacementStatus(ctx, vm)
 	return ctrl.Result{RequeueAfter: placementConfigRetryInterval}, true
@@ -256,7 +256,7 @@ func (r *VirtualMachineReconciler) handleClusteredCreateError(
 				"create must check); it is retried on the same host with a backoff of up to %s and never re-scheduled "+
 				"(an administrator may clear status.placement.pendingHost to release it): %s", host, blockedRetryMax, msg))
 		k8s.SetProvisioningCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonProviderError,
-			fmt.Sprintf("Failed to create VM: %s", msg))
+			fmt.Sprintf("Failed to create VM: %s", msg), vm.Generation)
 		r.updateStatus(ctx, vm)
 		// Backed off like the other holds (A6.1 fix verification, N2): each
 		// retry may scan every host of the Provider, and a host that is down
@@ -276,7 +276,7 @@ func (r *VirtualMachineReconciler) handleClusteredCreateError(
 				"other VM uses this VM's disk file; it is retried on the same host with a backoff of up to %s: %s",
 			host, blockedRetryMax, msg))
 		k8s.SetProvisioningCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonProviderError,
-			fmt.Sprintf("Failed to create VM: %s", msg))
+			fmt.Sprintf("Failed to create VM: %s", msg), vm.Generation)
 		r.updateStatus(ctx, vm)
 		return ctrl.Result{RequeueAfter: blockedRetryBackoff(createHoldSince(vm))}, nil
 	}
@@ -294,7 +294,7 @@ func (r *VirtualMachineReconciler) handleClusteredCreateError(
 	logger.Error(err, "Failed to create VM", "host", host)
 	reason, requeueAfter := providerFailureOutcome(err)
 	k8s.SetProvisioningCondition(&vm.Status.Conditions, metav1.ConditionFalse, reason,
-		fmt.Sprintf("Failed to create VM: %s", msg))
+		fmt.Sprintf("Failed to create VM: %s", msg), vm.Generation)
 	r.updateStatus(ctx, vm)
 	return ctrl.Result{RequeueAfter: requeueAfter}, nil
 }

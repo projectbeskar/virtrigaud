@@ -398,14 +398,22 @@ const ReasonConsumerNotAllowed = "ConsumerNotAllowed"
 // restore the VM, or delete and re-create the VirtualMachine.
 const ReasonVMMissingOnHost = "VMMissingOnHost"
 
-// SetCondition sets a condition on the given list of conditions
-func SetCondition(conditions *[]metav1.Condition, conditionType string, status metav1.ConditionStatus, reason, message string) {
+// SetCondition sets the condition conditionType on conditions, recording
+// observedGeneration — the generation of the object the conditions belong to
+// (its metadata.generation), as the spec this condition reflects.
+//
+// LastTransitionTime is set when the condition is added and when its status
+// or reason changes; a change of the message alone keeps it. A repeated call
+// with the same values (and generation) changes nothing.
+func SetCondition(conditions *[]metav1.Condition, conditionType string, status metav1.ConditionStatus, reason, message string,
+	observedGeneration int64) {
 	newCondition := metav1.Condition{
 		Type:               conditionType,
 		Status:             status,
 		Reason:             reason,
 		Message:            message,
 		LastTransitionTime: metav1.Now(),
+		ObservedGeneration: observedGeneration,
 	}
 
 	for i, existing := range *conditions {
@@ -453,27 +461,32 @@ func IsConditionUnknown(conditions []metav1.Condition, conditionType string) boo
 	return condition != nil && condition.Status == metav1.ConditionUnknown
 }
 
-// SetReadyCondition sets the Ready condition
-func SetReadyCondition(conditions *[]metav1.Condition, status metav1.ConditionStatus, reason, message string) {
-	SetCondition(conditions, ConditionReady, status, reason, message)
+// SetReadyCondition sets the Ready condition (see SetCondition).
+func SetReadyCondition(conditions *[]metav1.Condition, status metav1.ConditionStatus, reason, message string,
+	observedGeneration int64) {
+	SetCondition(conditions, ConditionReady, status, reason, message, observedGeneration)
 }
 
-// SetProvisioningCondition sets the Provisioning condition
-func SetProvisioningCondition(conditions *[]metav1.Condition, status metav1.ConditionStatus, reason, message string) {
-	SetCondition(conditions, ConditionProvisioning, status, reason, message)
+// SetProvisioningCondition sets the Provisioning condition (see SetCondition).
+func SetProvisioningCondition(conditions *[]metav1.Condition, status metav1.ConditionStatus, reason, message string,
+	observedGeneration int64) {
+	SetCondition(conditions, ConditionProvisioning, status, reason, message, observedGeneration)
 }
 
-// SetReconfiguringCondition sets the Reconfiguring condition
-func SetReconfiguringCondition(conditions *[]metav1.Condition, status metav1.ConditionStatus, reason, message string) {
-	SetCondition(conditions, ConditionReconfiguring, status, reason, message)
+// SetReconfiguringCondition sets the Reconfiguring condition (see SetCondition).
+func SetReconfiguringCondition(conditions *[]metav1.Condition, status metav1.ConditionStatus, reason, message string,
+	observedGeneration int64) {
+	SetCondition(conditions, ConditionReconfiguring, status, reason, message, observedGeneration)
 }
 
-// SetErrorCondition sets the Error condition
-func SetErrorCondition(conditions *[]metav1.Condition, status metav1.ConditionStatus, reason, message string) {
-	SetCondition(conditions, ConditionError, status, reason, message)
+// SetErrorCondition sets the Error condition (see SetCondition).
+func SetErrorCondition(conditions *[]metav1.Condition, status metav1.ConditionStatus, reason, message string,
+	observedGeneration int64) {
+	SetCondition(conditions, ConditionError, status, reason, message, observedGeneration)
 }
 
-// SetHealthyCondition sets the Healthy condition
-func SetHealthyCondition(conditions *[]metav1.Condition, status metav1.ConditionStatus, reason, message string) {
-	SetCondition(conditions, ConditionHealthy, status, reason, message)
+// SetHealthyCondition sets the Healthy condition (see SetCondition).
+func SetHealthyCondition(conditions *[]metav1.Condition, status metav1.ConditionStatus, reason, message string,
+	observedGeneration int64) {
+	SetCondition(conditions, ConditionHealthy, status, reason, message, observedGeneration)
 }

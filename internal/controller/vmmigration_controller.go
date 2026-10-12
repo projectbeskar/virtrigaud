@@ -344,7 +344,7 @@ func (r *VMMigrationReconciler) handlePendingPhase(ctx context.Context, migratio
 
 	k8s.SetCondition(&migration.Status.Conditions, infrav1beta1.VMMigrationConditionValidating,
 		metav1.ConditionTrue, "ValidationStarted",
-		"Migration validation started")
+		"Migration validation started", migration.Generation)
 
 	r.Recorder.Event(migration, "Normal", "ValidationStarted", "Starting migration validation")
 
@@ -365,7 +365,7 @@ func (r *VMMigrationReconciler) handleValidatingPhase(ctx context.Context, migra
 	// alone, before anything is read or done.
 	if msg := nfsRootIdentityRefusal(migration); msg != "" {
 		k8s.SetCondition(&migration.Status.Conditions, infrav1beta1.VMMigrationConditionValidating,
-			metav1.ConditionFalse, ReasonNFSRootIdentityNotAllowed, msg)
+			metav1.ConditionFalse, ReasonNFSRootIdentityNotAllowed, msg, migration.Generation)
 		return r.transitionToFailed(ctx, migration, msg)
 	}
 
@@ -385,7 +385,7 @@ func (r *VMMigrationReconciler) handleValidatingPhase(ctx context.Context, migra
 	if sourceVM.Status.ID == "" {
 		k8s.SetCondition(&migration.Status.Conditions, infrav1beta1.VMMigrationConditionValidating,
 			metav1.ConditionFalse, "SourceVMNotReady",
-			"Source VM is not yet provisioned")
+			"Source VM is not yet provisioned", migration.Generation)
 		if err := r.updateStatus(ctx, migration); err != nil {
 			return ctrl.Result{}, err
 		}
@@ -415,7 +415,7 @@ func (r *VMMigrationReconciler) handleValidatingPhase(ctx context.Context, migra
 	if !r.isProviderReady(sourceProvider) {
 		k8s.SetCondition(&migration.Status.Conditions, infrav1beta1.VMMigrationConditionValidating,
 			metav1.ConditionFalse, "SourceProviderNotReady",
-			"Source provider is not ready")
+			"Source provider is not ready", migration.Generation)
 		if err := r.updateStatus(ctx, migration); err != nil {
 			return ctrl.Result{}, err
 		}
@@ -425,7 +425,7 @@ func (r *VMMigrationReconciler) handleValidatingPhase(ctx context.Context, migra
 	if !r.isProviderReady(targetProvider) {
 		k8s.SetCondition(&migration.Status.Conditions, infrav1beta1.VMMigrationConditionValidating,
 			metav1.ConditionFalse, "TargetProviderNotReady",
-			"Target provider is not ready")
+			"Target provider is not ready", migration.Generation)
 		if err := r.updateStatus(ctx, migration); err != nil {
 			return ctrl.Result{}, err
 		}
@@ -446,7 +446,7 @@ func (r *VMMigrationReconciler) handleValidatingPhase(ctx context.Context, migra
 	sourceRef, err := vmRefFor(sourceVM, sourceProvider)
 	if err != nil {
 		k8s.SetCondition(&migration.Status.Conditions, infrav1beta1.VMMigrationConditionValidating,
-			metav1.ConditionFalse, vmRefErrorReason(err), err.Error())
+			metav1.ConditionFalse, vmRefErrorReason(err), err.Error(), migration.Generation)
 		return r.waitForSourceBinding(ctx, migration, err)
 	}
 
@@ -545,7 +545,7 @@ func (r *VMMigrationReconciler) handleValidatingPhase(ctx context.Context, migra
 				}
 
 				k8s.SetCondition(&migration.Status.Conditions, infrav1beta1.VMMigrationConditionValidating,
-					metav1.ConditionFalse, "WaitingForStorageMount", reason)
+					metav1.ConditionFalse, "WaitingForStorageMount", reason, migration.Generation)
 				migration.Status.Message = fmt.Sprintf("Waiting for providers to mount migration storage: %s", reason)
 				if err := r.updateStatus(ctx, migration); err != nil {
 					return ctrl.Result{}, err
@@ -592,7 +592,7 @@ func (r *VMMigrationReconciler) handleValidatingPhase(ctx context.Context, migra
 
 	k8s.SetCondition(&migration.Status.Conditions, infrav1beta1.VMMigrationConditionValidating,
 		metav1.ConditionTrue, "ValidationComplete",
-		"Migration validation completed successfully")
+		"Migration validation completed successfully", migration.Generation)
 
 	r.Recorder.Event(migration, "Normal", "ValidationComplete", "Migration validation completed")
 
@@ -703,7 +703,7 @@ func (r *VMMigrationReconciler) handleSnapshottingPhase(ctx context.Context, mig
 
 		k8s.SetCondition(&migration.Status.Conditions, infrav1beta1.VMMigrationConditionSnapshotting,
 			metav1.ConditionTrue, "SnapshotSelected",
-			"Using existing snapshot")
+			"Using existing snapshot", migration.Generation)
 
 		if err := r.updateStatus(ctx, migration); err != nil {
 			return ctrl.Result{}, err
@@ -796,7 +796,7 @@ func (r *VMMigrationReconciler) handleSnapshottingPhase(ctx context.Context, mig
 		// The wait starts now: the condition's transition time bounds it
 		// (migrationSnapshotWaitLimit).
 		k8s.SetCondition(&migration.Status.Conditions, infrav1beta1.VMMigrationConditionSnapshotting,
-			metav1.ConditionTrue, migrationReasonSnapshotInProgress, migrationSnapshotInProgressMessage)
+			metav1.ConditionTrue, migrationReasonSnapshotInProgress, migrationSnapshotInProgressMessage, migration.Generation)
 
 		if err := r.updateStatus(ctx, migration); err != nil {
 			return ctrl.Result{}, err
@@ -890,7 +890,7 @@ func (r *VMMigrationReconciler) handleExportingPhase(ctx context.Context, migrat
 
 		k8s.SetCondition(&migration.Status.Conditions, infrav1beta1.VMMigrationConditionExporting,
 			metav1.ConditionTrue, "ExportComplete",
-			"Source VM disk exported")
+			"Source VM disk exported", migration.Generation)
 
 		r.Recorder.Event(migration, "Normal", "ExportComplete", "Disk exported successfully")
 
@@ -1042,7 +1042,7 @@ func (r *VMMigrationReconciler) handleExportingPhase(ctx context.Context, migrat
 
 	k8s.SetCondition(&migration.Status.Conditions, infrav1beta1.VMMigrationConditionExporting,
 		metav1.ConditionTrue, "ExportComplete",
-		"Source VM disk exported")
+		"Source VM disk exported", migration.Generation)
 
 	r.Recorder.Event(migration, "Normal", "ExportComplete", fmt.Sprintf("Disk exported to %s", destinationURL))
 
@@ -1074,7 +1074,7 @@ func (r *VMMigrationReconciler) handleTransferringPhase(ctx context.Context, mig
 
 	k8s.SetCondition(&migration.Status.Conditions, infrav1beta1.VMMigrationConditionTransferring,
 		metav1.ConditionTrue, "TransferComplete",
-		"Disk transfer completed")
+		"Disk transfer completed", migration.Generation)
 
 	r.Recorder.Event(migration, "Normal", "TransferComplete", "Disk transfer completed")
 
@@ -1179,7 +1179,7 @@ func (r *VMMigrationReconciler) handleImportingPhase(ctx context.Context, migrat
 
 		k8s.SetCondition(&migration.Status.Conditions, infrav1beta1.VMMigrationConditionImporting,
 			metav1.ConditionTrue, "ImportComplete",
-			"Disk imported to target provider")
+			"Disk imported to target provider", migration.Generation)
 
 		r.Recorder.Event(migration, "Normal", "ImportComplete", "Disk imported successfully")
 
@@ -1422,7 +1422,7 @@ func (r *VMMigrationReconciler) handleImportingPhase(ctx context.Context, migrat
 
 	k8s.SetCondition(&migration.Status.Conditions, infrav1beta1.VMMigrationConditionImporting,
 		metav1.ConditionTrue, "ImportComplete",
-		"Disk imported to target provider")
+		"Disk imported to target provider", migration.Generation)
 
 	r.Recorder.Event(migration, "Normal", "ImportComplete", fmt.Sprintf("Disk imported as %s", importResp.DiskId))
 
@@ -1842,7 +1842,7 @@ func (r *VMMigrationReconciler) handleValidatingTargetPhase(ctx context.Context,
 
 	k8s.SetCondition(&migration.Status.Conditions, infrav1beta1.VMMigrationConditionReady,
 		metav1.ConditionTrue, "MigrationComplete",
-		"VM migration completed successfully")
+		"VM migration completed successfully", migration.Generation)
 
 	r.Recorder.Event(migration, "Normal", "MigrationComplete", fmt.Sprintf("VM migrated successfully to %s/%s", targetNamespace, targetVMName))
 
@@ -2002,7 +2002,7 @@ func (r *VMMigrationReconciler) handleFailedPhase(ctx context.Context, migration
 	// Update conditions
 	k8s.SetCondition(&migration.Status.Conditions, infrav1beta1.VMMigrationConditionFailed,
 		metav1.ConditionFalse, "Retrying",
-		fmt.Sprintf("Retrying migration (attempt %d/%d)", migration.Status.RetryCount, maxRetries))
+		fmt.Sprintf("Retrying migration (attempt %d/%d)", migration.Status.RetryCount, maxRetries), migration.Generation)
 
 	r.Recorder.Event(migration, "Normal", "RetryingMigration",
 		fmt.Sprintf("Retrying migration (attempt %d/%d)", migration.Status.RetryCount, maxRetries))
@@ -2189,10 +2189,10 @@ func (r *VMMigrationReconciler) transitionToFailed(ctx context.Context, migratio
 
 	k8s.SetCondition(&migration.Status.Conditions, infrav1beta1.VMMigrationConditionFailed,
 		metav1.ConditionTrue, "MigrationFailed",
-		message)
+		message, migration.Generation)
 	k8s.SetCondition(&migration.Status.Conditions, infrav1beta1.VMMigrationConditionReady,
 		metav1.ConditionFalse, "MigrationFailed",
-		message)
+		message, migration.Generation)
 
 	r.Recorder.Event(migration, "Warning", "MigrationFailed", message)
 

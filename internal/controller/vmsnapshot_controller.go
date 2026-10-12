@@ -253,7 +253,7 @@ func (r *VMSnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		logger.Info("VM not yet provisioned, waiting")
 		k8s.SetCondition(&snapshot.Status.Conditions, infrav1beta1.VMSnapshotConditionCreating,
 			metav1.ConditionTrue, infrav1beta1.VMSnapshotReasonCreating,
-			"Waiting for VM to be provisioned")
+			"Waiting for VM to be provisioned", snapshot.Generation)
 		// Status update errors are intentionally ignored to avoid blocking reconciliation
 		_ = r.updateStatus(ctx, snapshot)
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
@@ -356,7 +356,7 @@ func (r *VMSnapshotReconciler) createSnapshot(ctx context.Context, snapshot *inf
 	snapshot.Status.Message = "Creating snapshot"
 	k8s.SetCondition(&snapshot.Status.Conditions, infrav1beta1.VMSnapshotConditionCreating,
 		metav1.ConditionTrue, infrav1beta1.VMSnapshotReasonCreating,
-		"Snapshot creation initiated")
+		"Snapshot creation initiated", snapshot.Generation)
 
 	// Call provider to create snapshot
 	resp, err := providerInstance.SnapshotCreate(ctx, req)
@@ -387,10 +387,10 @@ func (r *VMSnapshotReconciler) createSnapshot(ctx context.Context, snapshot *inf
 		snapshot.Status.Message = "Failed to create snapshot: " + detail
 		k8s.SetCondition(&snapshot.Status.Conditions, infrav1beta1.VMSnapshotConditionReady,
 			metav1.ConditionFalse, infrav1beta1.VMSnapshotReasonProviderError,
-			"Snapshot creation failed: "+detail)
+			"Snapshot creation failed: "+detail, snapshot.Generation)
 		k8s.SetCondition(&snapshot.Status.Conditions, infrav1beta1.VMSnapshotConditionCreating,
 			metav1.ConditionFalse, infrav1beta1.VMSnapshotReasonProviderError,
-			"Snapshot creation failed: "+detail)
+			"Snapshot creation failed: "+detail, snapshot.Generation)
 		r.Recorder.Event(snapshot, "Warning", "SnapshotFailed", "Failed to create snapshot: "+detail)
 		// Status update errors are intentionally ignored to avoid blocking reconciliation
 		_ = r.updateStatus(ctx, snapshot)
@@ -413,10 +413,10 @@ func (r *VMSnapshotReconciler) createSnapshot(ctx context.Context, snapshot *inf
 
 		k8s.SetCondition(&snapshot.Status.Conditions, infrav1beta1.VMSnapshotConditionReady,
 			metav1.ConditionTrue, infrav1beta1.VMSnapshotReasonCreated,
-			"Snapshot created successfully")
+			"Snapshot created successfully", snapshot.Generation)
 		k8s.SetCondition(&snapshot.Status.Conditions, infrav1beta1.VMSnapshotConditionCreating,
 			metav1.ConditionFalse, infrav1beta1.VMSnapshotReasonCreated,
-			"Snapshot creation completed")
+			"Snapshot creation completed", snapshot.Generation)
 
 		r.Recorder.Event(snapshot, "Normal", "SnapshotReady", "Snapshot created successfully")
 		logger.Info("Snapshot created successfully", "snapshot_id", resp.SnapshotId)
@@ -494,7 +494,7 @@ func (r *VMSnapshotReconciler) checkSnapshotCreation(ctx context.Context, snapsh
 		snapshot.Status.Phase = ""
 		snapshot.Status.Message = snapshotCreateNotIssuedMessage
 		k8s.SetCondition(&snapshot.Status.Conditions, infrav1beta1.VMSnapshotConditionCreating,
-			metav1.ConditionTrue, infrav1beta1.VMSnapshotReasonCreating, snapshotCreateNotIssuedMessage)
+			metav1.ConditionTrue, infrav1beta1.VMSnapshotReasonCreating, snapshotCreateNotIssuedMessage, snapshot.Generation)
 		// Status update errors are intentionally ignored to avoid blocking reconciliation
 		_ = r.updateStatus(ctx, snapshot)
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
@@ -508,10 +508,10 @@ func (r *VMSnapshotReconciler) checkSnapshotCreation(ctx context.Context, snapsh
 
 		k8s.SetCondition(&snapshot.Status.Conditions, infrav1beta1.VMSnapshotConditionReady,
 			metav1.ConditionTrue, infrav1beta1.VMSnapshotReasonCreated,
-			"Snapshot created successfully")
+			"Snapshot created successfully", snapshot.Generation)
 		k8s.SetCondition(&snapshot.Status.Conditions, infrav1beta1.VMSnapshotConditionCreating,
 			metav1.ConditionFalse, infrav1beta1.VMSnapshotReasonCreated,
-			"Snapshot creation completed")
+			"Snapshot creation completed", snapshot.Generation)
 
 		r.Recorder.Event(snapshot, "Normal", "SnapshotReady", "Snapshot created successfully")
 
@@ -540,7 +540,7 @@ func (r *VMSnapshotReconciler) checkSnapshotCreation(ctx context.Context, snapsh
 	if err := checkVMProvider(vm, provider); err != nil {
 		logger.Info("VM is not bound through the Provider its spec.providerRef names; not polling the snapshot task", "error", err.Error())
 		k8s.SetCondition(&snapshot.Status.Conditions, infrav1beta1.VMSnapshotConditionCreating,
-			metav1.ConditionTrue, vmRefErrorReason(err), err.Error())
+			metav1.ConditionTrue, vmRefErrorReason(err), err.Error(), snapshot.Generation)
 		// Status update errors are intentionally ignored to avoid blocking reconciliation
 		_ = r.updateStatus(ctx, snapshot)
 		return ctrl.Result{RequeueAfter: providerRefMismatchRetryInterval}, nil
@@ -573,10 +573,10 @@ func (r *VMSnapshotReconciler) checkSnapshotCreation(ctx context.Context, snapsh
 
 			k8s.SetCondition(&snapshot.Status.Conditions, infrav1beta1.VMSnapshotConditionReady,
 				metav1.ConditionFalse, infrav1beta1.VMSnapshotReasonProviderError,
-				"Snapshot creation failed: "+detail)
+				"Snapshot creation failed: "+detail, snapshot.Generation)
 			k8s.SetCondition(&snapshot.Status.Conditions, infrav1beta1.VMSnapshotConditionCreating,
 				metav1.ConditionFalse, infrav1beta1.VMSnapshotReasonProviderError,
-				"Snapshot creation failed")
+				"Snapshot creation failed", snapshot.Generation)
 
 			r.Recorder.Event(snapshot, "Warning", "SnapshotFailed", "Snapshot creation failed: "+detail)
 		} else {
@@ -587,10 +587,10 @@ func (r *VMSnapshotReconciler) checkSnapshotCreation(ctx context.Context, snapsh
 
 			k8s.SetCondition(&snapshot.Status.Conditions, infrav1beta1.VMSnapshotConditionReady,
 				metav1.ConditionTrue, infrav1beta1.VMSnapshotReasonCreated,
-				"Snapshot created successfully")
+				"Snapshot created successfully", snapshot.Generation)
 			k8s.SetCondition(&snapshot.Status.Conditions, infrav1beta1.VMSnapshotConditionCreating,
 				metav1.ConditionFalse, infrav1beta1.VMSnapshotReasonCreated,
-				"Snapshot creation completed")
+				"Snapshot creation completed", snapshot.Generation)
 
 			r.Recorder.Event(snapshot, "Normal", "SnapshotReady", "Snapshot created successfully")
 		}
@@ -630,7 +630,7 @@ func (r *VMSnapshotReconciler) recordSnapshotVMNotFound(ctx context.Context, sna
 	before := snapshot.Status.DeepCopy()
 	snapshot.Status.Message = snapshotVMNotFoundMessage
 	k8s.SetCondition(&snapshot.Status.Conditions, infrav1beta1.VMSnapshotConditionReady,
-		metav1.ConditionFalse, snapshotReasonVMNotFound, snapshotVMNotFoundMessage)
+		metav1.ConditionFalse, snapshotReasonVMNotFound, snapshotVMNotFoundMessage, snapshot.Generation)
 	if !equality.Semantic.DeepEqual(before, &snapshot.Status) {
 		// Status update errors are intentionally ignored to avoid blocking reconciliation
 		_ = r.updateStatus(ctx, snapshot)
@@ -704,7 +704,7 @@ func (r *VMSnapshotReconciler) handleDeletion(ctx context.Context, snapshot *inf
 		snapshot.Status.Phase = infrav1beta1.SnapshotPhaseDeleting
 		k8s.SetCondition(&snapshot.Status.Conditions, infrav1beta1.VMSnapshotConditionDeleting,
 			metav1.ConditionTrue, infrav1beta1.VMSnapshotReasonDeleting,
-			"Snapshot deletion initiated")
+			"Snapshot deletion initiated", snapshot.Generation)
 
 		_ = r.updateStatus(ctx, snapshot) //nolint:errcheck // Status update errors logged elsewhere
 
@@ -1225,9 +1225,9 @@ func (r *VMSnapshotReconciler) blockSnapshot(ctx context.Context, snapshot *infr
 	snapshot.Status.Phase = infrav1beta1.SnapshotPhaseFailed
 	snapshot.Status.Message = message
 	k8s.SetCondition(&snapshot.Status.Conditions, infrav1beta1.VMSnapshotConditionReady,
-		metav1.ConditionFalse, snapshotReasonUnsupportedByProvider, message)
+		metav1.ConditionFalse, snapshotReasonUnsupportedByProvider, message, snapshot.Generation)
 	k8s.SetCondition(&snapshot.Status.Conditions, infrav1beta1.VMSnapshotConditionCreating,
-		metav1.ConditionFalse, snapshotReasonUnsupportedByProvider, message)
+		metav1.ConditionFalse, snapshotReasonUnsupportedByProvider, message, snapshot.Generation)
 	r.Recorder.Event(snapshot, "Warning", snapshotReasonUnsupportedByProvider, message)
 
 	// Status update errors are intentionally ignored to avoid blocking
@@ -1260,7 +1260,7 @@ func (r *VMSnapshotReconciler) waitForVMBinding(ctx context.Context, snapshot *i
 	snapshot.Status.Phase = ""
 	snapshot.Status.Message = vmRefWaitMessage(cause)
 	k8s.SetCondition(&snapshot.Status.Conditions, infrav1beta1.VMSnapshotConditionCreating,
-		metav1.ConditionTrue, vmRefErrorReason(cause), cause.Error())
+		metav1.ConditionTrue, vmRefErrorReason(cause), cause.Error(), snapshot.Generation)
 	// Status update errors are intentionally ignored to avoid blocking reconciliation
 	_ = r.updateStatus(ctx, snapshot)
 	return ctrl.Result{RequeueAfter: 30 * time.Second}
@@ -1274,7 +1274,7 @@ func (r *VMSnapshotReconciler) retrySnapshotCreate(ctx context.Context, snapshot
 	snapshot.Status.Phase = ""
 	snapshot.Status.Message = message
 	k8s.SetCondition(&snapshot.Status.Conditions, infrav1beta1.VMSnapshotConditionReady,
-		metav1.ConditionFalse, infrav1beta1.VMSnapshotReasonProviderError, message)
+		metav1.ConditionFalse, infrav1beta1.VMSnapshotReasonProviderError, message, snapshot.Generation)
 	// Status update errors are intentionally ignored to avoid blocking reconciliation
 	_ = r.updateStatus(ctx, snapshot)
 	return ctrl.Result{RequeueAfter: 30 * time.Second}

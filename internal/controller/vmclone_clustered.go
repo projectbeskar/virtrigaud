@@ -839,7 +839,7 @@ func (r *VMCloneReconciler) removeFailedClusteredTarget(ctx context.Context, clo
 // is then made again, on the state it finds).
 func (r *VMCloneReconciler) recordTargetCleanup(ctx context.Context, clone *infrav1beta1.VMClone,
 	status metav1.ConditionStatus, reason, msg string) ctrl.Result {
-	utilk8s.SetCondition(&clone.Status.Conditions, cloneConditionTargetCleanup, status, reason, msg)
+	utilk8s.SetCondition(&clone.Status.Conditions, cloneConditionTargetCleanup, status, reason, msg, clone.Generation)
 	if err := r.updateStatus(ctx, clone); err != nil {
 		return ctrl.Result{RequeueAfter: 30 * time.Second}
 	}

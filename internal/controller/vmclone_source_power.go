@@ -80,7 +80,7 @@ func (r *VMCloneReconciler) holdCloneForRunningSource(ctx context.Context, clone
 		r.Recorder.Event(clone, corev1.EventTypeWarning, cloneReasonSourceMustBePoweredOff, msg)
 	}
 	utilk8s.SetCondition(&clone.Status.Conditions, infrav1beta1.VMCloneConditionCloning, metav1.ConditionFalse,
-		cloneReasonSourceMustBePoweredOff, "waiting for the source VM to be powered off")
+		cloneReasonSourceMustBePoweredOff, "waiting for the source VM to be powered off", clone.Generation)
 	res := r.markPending(ctx, clone, cloneReasonSourceMustBePoweredOff, msg)
 	res.RequeueAfter = blockedRetryBackoff(since)
 	return res
