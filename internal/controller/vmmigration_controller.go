@@ -1292,6 +1292,11 @@ func (r *VMMigrationReconciler) handleImportingPhase(ctx context.Context, migrat
 	if allowed, res, err := r.confirmTargetConsumersLive(ctx, migration); !allowed {
 		return res, err
 	}
+	// Nothing is imported through a target Provider being deleted; the cached
+	// Provider may not show the deletion yet, so it is re-read live (ADR-0010).
+	if held, res, err := r.holdMigrationIfProviderDeletingLive(ctx, migration, targetProvider); held {
+		return res, err
+	}
 
 	// The exported disk's size, recorded at export, is checked against the
 	// target Provider's disk-size limit as it is now, right before the import

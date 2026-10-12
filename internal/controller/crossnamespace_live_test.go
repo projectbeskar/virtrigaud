@@ -147,7 +147,8 @@ func TestLiveGrant_SameNamespaceNeverReadsLive(t *testing.T) {
 	clone := xnsClone("")
 	cp := &clonerProvider{cloneResp: contracts.CloneResponse{TargetVmID: "vm-clone-1"}}
 	r, _ := newXNSCloneReconciler(t, cp, clone)
-	live := newLiveReader(t, nil, nil)
+	// The Provider is re-read live before the Clone RPC (ADR-0010); no grant is.
+	live := newLiveReader(t, nil, nil, xnsSharedProvider())
 	r.APIReader = live
 	live.vmClones = r.Client
 

@@ -196,6 +196,10 @@ func (r *VMCloneReconciler) startClusteredClone(
 	if fresh, res, err := r.confirmCloneNotStarted(ctx, clone); !fresh {
 		return res, err
 	}
+	// Nor from a Provider being deleted (see startClone).
+	if held, res, err := r.holdCloneIfProviderDeletingLive(ctx, clone, provider); held {
+		return res, err
+	}
 
 	// Recorded as started only once the provider accepted the clone
 	// (markCloneStarted): every refusal below is a wait that must leave the

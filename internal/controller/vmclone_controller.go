@@ -439,6 +439,11 @@ func (r *VMCloneReconciler) startClone(
 	if fresh, res, err := r.confirmCloneNotStarted(ctx, clone); !fresh {
 		return res, err
 	}
+	// Nothing is cloned through a Provider being deleted; the cached Provider
+	// may not show the deletion yet, so it is re-read live (ADR-0010).
+	if held, res, err := r.holdCloneIfProviderDeletingLive(ctx, clone, provider); held {
+		return res, err
+	}
 
 	// The clone is recorded as started only once the provider accepted it
 	// (markCloneStarted): a refused clone that waits keeps exactly the status

@@ -1679,6 +1679,15 @@ func (r *VirtualMachineReconciler) createVMOn(
 		r.recordConfirmedCreate(vm, attempt)
 	}
 
+	// The VM now records its use of the Provider (its create marker, or its
+	// pending host), so the Provider's in-use finalizer holds a deletion that
+	// begins from here on. One that began earlier — which the cached Provider
+	// may not show yet — is caught by re-reading it live: nothing is created
+	// through a Provider being deleted (ADR-0010).
+	if res, held := r.holdIfProviderDeletingLive(ctx, vm, vm.Status.DeepCopy(), providerCR); held {
+		return res, nil
+	}
+
 	// Create VM
 	resp, err := provider.Create(ctx, req)
 	if err != nil && clustered {
