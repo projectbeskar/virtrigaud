@@ -354,6 +354,15 @@ const (
 	// VM and the Ready reason of a single-host VM held for it (a single-host VM
 	// never carries DeleteBlocked).
 	ReasonProviderUnavailable = "ProviderUnavailable"
+	// ReasonVMIsImageArtifact: the provider refused a Delete or a power
+	// change because the hypervisor object the VirtualMachine is bound to is
+	// a template or a VirtRigaud image artifact, not an ordinary VM
+	// (VM_IS_IMAGE_ARTIFACT); acting on it would destroy or change the image
+	// for every VM cloned from it. Nothing was changed. It is the Ready reason
+	// of a single-host VM held for it (delete or power) and the DeleteBlocked
+	// reason of a clustered one. The hold lasts until the VirtualMachine is
+	// detached with virtrigaud.io/orphan-on-delete=true.
+	ReasonVMIsImageArtifact = "VMIsImageArtifact"
 )
 
 // ReasonPlacementTopologyMismatch indicates that a VirtualMachine records a

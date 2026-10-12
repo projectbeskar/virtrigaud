@@ -1070,6 +1070,13 @@ func (r *VirtualMachineReconciler) handleDeletion(ctx context.Context, vm *infra
 					// clone backed by its disk), and deleting it would destroy
 					// their data. Keep the finalizer, say why, and re-check.
 					return r.retainForBlockedDelete(ctx, vm, ref.ID, err, ref.Routed()), nil
+				case contracts.IsVMIsImageArtifact(err):
+					// The provider refused BEFORE changing anything: the object
+					// is a template or an image artifact, not a VM (vSphere).
+					// Retrying cannot change that; hold the delete on a constant
+					// condition and a slow backoff until the owner detaches the
+					// VirtualMachine (orphan-on-delete).
+					return r.retainForImageArtifactDelete(ctx, vm, ref.Routed(), err), nil
 				case ref.Routed() && (contracts.IsHostUnavailable(err) || contracts.IsVMDiskCheckFailed(err)):
 					// A clustered delete the provider did not perform because a
 					// host it needs could not be reached or checked (ADR-0007
@@ -1300,15 +1307,17 @@ var providerDeleteFailedMessage = fmt.Sprintf("Delete in progress: the provider 
 // for an ordinary reason, a hold that no longer says why the delete waits: a
 // clustered VM's DeleteBlocked condition (A6.1 fix verification, N8), and the
 // Ready=False that went with any earlier hold — reason DeleteBlocked (every
-// clustered hold, and a single-host DiskInUse refusal) or ProviderUnavailable
-// (a single-host VM whose Provider could not be reached). Ready then becomes
+// clustered hold, and a single-host DiskInUse refusal), ProviderUnavailable
+// (a single-host VM whose Provider could not be reached) or VMIsImageArtifact
+// (a single-host image-artifact refusal). Ready then becomes
 // Ready=False/ProviderError with the constant providerDeleteFailedMessage. It
 // reports whether the status changed; a repeated failure changes nothing, so
 // it is never rewritten (and never re-triggers the deleting VM) per retry.
 func clearStaleDeleteHold(vm *infravirtrigaudiov1beta1.VirtualMachine) bool {
 	changed := meta.RemoveStatusCondition(&vm.Status.Conditions, k8s.ConditionDeleteBlocked)
 	c := meta.FindStatusCondition(vm.Status.Conditions, k8s.ConditionReady)
-	staleReady := c != nil && (c.Reason == k8s.ReasonDeleteBlocked || c.Reason == k8s.ReasonProviderUnavailable)
+	staleReady := c != nil && (c.Reason == k8s.ReasonDeleteBlocked || c.Reason == k8s.ReasonProviderUnavailable ||
+		c.Reason == k8s.ReasonVMIsImageArtifact)
 	if !changed && !staleReady {
 		return false
 	}
@@ -2122,6 +2131,12 @@ func (r *VirtualMachineReconciler) adjustPowerState(
 		// answer to Describe (ADR-0007 Addendum A, slice 2).
 		if res, handled := r.handleRoutedOpError(ctx, vm, ref, err, errReasonProviderPower); handled {
 			return res, nil
+		}
+		// The object is a template or an image artifact, not a VM: the
+		// refusal holds until the owner detaches the VirtualMachine, so it is
+		// held on a constant condition instead of a 5 s error loop.
+		if contracts.IsVMIsImageArtifact(err) {
+			return r.holdImageArtifactPower(ctx, vm, err), nil
 		}
 		logger.Error(err, "Failed to adjust power state")
 		k8s.SetReadyCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonProviderError, "Failed to adjust power state: "+providerFailureDetail(err))
