@@ -131,12 +131,12 @@ func CheckStagedImageBytes(head []byte, wantFormat string, maxVirtualBytes int64
 		if err := checkQCOW2Header(head); err != nil {
 			return 0, err
 		}
-		virtual = int64(min(binary.BigEndian.Uint64(head[qcow2SizeAt:]), uint64(1)<<62)) //nolint:gosec // clamped
+		virtual = int64(min(binary.BigEndian.Uint64(head[qcow2SizeAt:]), uint64(1)<<62)) // #nosec G115 -- clamped below 2^62
 	case StagedFormatVMDK:
 		if err := checkVMDKSparseHeader(head); err != nil {
 			return 0, err
 		}
-		virtual = int64(min(binary.LittleEndian.Uint64(head[vmdkCapacityAt:]), uint64(1)<<53) * vmdkSectorSize) //nolint:gosec // clamped
+		virtual = int64(min(binary.LittleEndian.Uint64(head[vmdkCapacityAt:]), uint64(1)<<53) * vmdkSectorSize) // #nosec G115 -- clamped below 2^62 (2^53 sectors of 512 bytes)
 	case StagedFormatRaw:
 		for _, magic := range otherImageMagics {
 			if bytes.HasPrefix(head, magic) {

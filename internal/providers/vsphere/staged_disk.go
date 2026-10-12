@@ -85,7 +85,7 @@ func (p *Provider) runQemuImg(ctx context.Context, args ...string) (string, stri
 		bin = "qemu-img"
 	}
 	var stdout, stderr bytes.Buffer
-	cmd := exec.CommandContext(ctx, bin, args...) //nolint:gosec // fixed binary; argv built by migration.EmptyNFSStagedDisk
+	cmd := exec.CommandContext(ctx, bin, args...) // #nosec G204 -- the provider's qemu-img; argv (no shell) built by migration.EmptyNFSStagedDisk
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	err := cmd.Run()
@@ -135,7 +135,7 @@ func (p *Provider) checkStagedLocalImage(ctx context.Context, path, format strin
 // readFileHead returns the first n bytes of the local file path (fewer when
 // it is shorter).
 func readFileHead(path string, n int) ([]byte, error) {
-	f, err := os.Open(path) //nolint:gosec // path is the provider's own temp file
+	f, err := os.Open(path) // #nosec G304 -- path is the provider's own temp file
 	if err != nil {
 		return nil, err
 	}
