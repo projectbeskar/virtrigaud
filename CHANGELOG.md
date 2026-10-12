@@ -5,6 +5,21 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-10-12 08:52] - VMMigration controller test no longer registers types on the global scheme (race)
+**Author:** @wrkode (William Rizzo)
+
+### Fixed
+- `internal/controller/vmmigration_controller_test.go`: the spec's `BeforeEach` registered the API types on the global `scheme.Scheme`, rewriting its maps while an envtest manager's event broadcaster (the Provider in-use specs record events) read them to decode an Event; `go test -race ./internal/controller/` failed about one run in five. The fake client now gets a private scheme.
+
+### Why
+A flaky race report hides real ones. CI does not run this package with `-race`, so only local and pre-merge race checks were affected.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-10-12 08:38] - vSphere Create leaves new VMs powered off; imported disks confined to the VM's own namespaced migration disk; post-create steps completed or failed, never skipped
 **Author:** @wrkode (William Rizzo)
 
