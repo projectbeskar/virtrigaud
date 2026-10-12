@@ -11,7 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > **Operator note.**
 > - Nothing changes unless `manager.maxDiskSize` (`--max-disk-size`) is set or a Provider carries `infra.virtrigaud.io/max-disk-size`.
 > - Before setting a limit, list the VMs and VMClasses above it: they keep running, but cloning, migrating or re-creating them, or growing their disks, is refused.
-> - **Roll the provider images with the manager.** `GetDiskInfo` now lists every disk's size. An older provider image does not, so while a limit applies, clones through it are refused (`DiskSizeLimitUnverifiable`).
+> - **Roll the provider images with the manager.** `GetDiskInfo` now lists every disk's size, and `ImportDisk` now enforces the limit on the disk it lands. An older provider image does neither: while a limit applies, clones through it are refused (`DiskSizeLimitUnverifiable`), and its imports rely on the manager's checks only.
+> - Keep `vmmigrations/status` (like `virtualmachines/status`) writable by the manager only: the pre-import check trusts `status.diskInfo.sourceSize`.
 > - A migration exported before a limit was set is held before its import (no recorded size). Delete it and migrate again.
 
 ### Added
@@ -30,6 +31,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Implemented in vSphere (every `VirtualDisk`'s capacity), libvirt (`qemu-img info` of every file-backed disk; a block, volume or network disk reports 0) and Proxmox (the `size=` of every attached bus disk; CD-ROM, cloud-init, unused and EFI/TPM volumes are skipped).
   - The mock provider still answers `GetDiskInfo` with Unimplemented, so clones through it fail closed under a limit.
   - Bindings regenerated. The transport client maps the new field.
+- `proto/provider/v1/provider.proto`: `ImportDiskRequest.max_virtual_size_bytes` (field 12; additive) — the target Provider's limit for the import, 0 = none.
+  - **Why:** the staged object can be replaced between the export and the import (a tenant-chosen NFS export, a staging PVC in the tenant's namespace), and the manager's earlier checks trust the source provider's report. The target provider now checks the disk it is about to land.
+  - The provider reads the virtual size of the disk it is about to land, in a location the tenant cannot change, and refuses a larger one before anything is landed: `FailedPrecondition` with the ErrorInfo reason `DISK_SIZE_EXCEEDS_LIMIT`, or `DISK_SIZE_UNVERIFIABLE` when it cannot read the size. The message is constant.
+  - Shared helper: `internal/providers/importlimit` (new).
+  - **vSphere** (`import_size_limit.go`): the pod-local vmdk, right before the datastore upload or the NFC lease (pvc, s3, nfs).
+  - **libvirt** (`import_size_limit.go`, `imagepath.go` `inspectHostImageInfoAs`):
+    - s3: the private staged copy, reusing the existing header read;
+    - nfs: early from the existing header read, and again on the converted disk in the private directory before it is published;
+    - pvc: the host copy before it becomes the volume (removed on refusal).
+  - **Proxmox** (`import_size_limit.go`): the node-local stage that `qm importdisk` lands (s3, nfs), removed on refusal. The pvc path is rejected earlier and is unchanged.
+  - The mock provider ignores the field.
+  - `internal/transport/grpc/client.go` sends the field and maps the two refusals to a non-retryable Conflict marked `ErrDiskSizeExceedsLimit` / `ErrDiskSizeUnverifiable` (`contracts`), never counted toward the circuit breaker.
 - `internal/controller/disk_size_limit.go`, `disk_size_limit_copies.go` (new): enforcement before the provider call that would create or grow a disk, whether or not webhooks are on.
   - **VirtualMachine create and re-create**: a VMClass `spec.diskDefaults.size` or any `spec.disks[].sizeGiB` above the limit holds the VM. On a libvirt Provider, a class with no size counts as the libvirt default primary disk, 20Gi.
     - No image prepare, placement or Create is sent.
@@ -37,13 +50,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     - Status is written only on change, with one Warning event per hold, and the VM is re-checked every 2 minutes.
   - **Reconfigure**: a disk size above the limit is sent as 0, which every provider reads as "leave this disk as it is".
     - CPU and memory changes go ahead. No disk is grown beyond the limit, and none is shrunk.
-    - It is recorded as `DiskSizeWithinLimit=False` (new condition type) on every outcome (done, async task, pending restart, failure), with one Warning per VM and message. The next Reconfigure that withholds nothing removes it.
+    - It is recorded as `DiskSizeWithinLimit=False` (new condition type) on every outcome (done, async task, pending restart, failure), with one Warning per VM and message. It is removed by the next Reconfigure that withholds nothing, or by a reconcile once the spec's sizes fit the limit again.
     - On a Proxmox Provider no `spec.disks` size is sent once one is withheld. Proxmox applies every entry to scsi0 and refuses a smaller one as a shrink, so withholding one entry would otherwise expose a later, smaller entry to that check and turn the Reconfigure into a retried failure.
   - **VMClone**: before the Clone RPC, every disk of the source is checked by the size its provider reports (`GetDiskInfo` `disks`), never by its VMClass or `spec.disks`. A lowered class, a removed `spec.disks` entry or an adopted VM can no longer bypass the limit. The target-class override is checked too. A held clone stays `Pending` with `Ready=False`.
   - **VMMigration**: checked against the target Provider's limit at three points:
     - in `Validating`, the source's primary disk (real size, `GetDiskInfo`) and the target VMClass;
     - right before `ExportDisk`, the disk being exported (same VM, disk and snapshot), whose size is recorded in `status.diskInfo.sourceSize`;
-    - right before `ImportDisk`, that recorded size.
+    - right before `ImportDisk`, that recorded size, and the provider then enforces the limit on the disk it lands (`max_virtual_size_bytes`).
+    - A provider refusal at import holds the migration in `Importing`. A `DISK_SIZE_EXCEEDS_LIMIT` refusal is not re-sent until the limit changes (its message names the limit). An unverifiable size is retried on the 2-minute re-check.
 
     A held migration stays in its phase, with `Validating`, `Exporting` or `Importing` set to False.
   - Fail closed (`DiskSizeLimitUnverifiable`) in these cases:
@@ -74,7 +88,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Envtest: VM, VMClone and VMMigration condition writes, written once.
   - Providers: vSphere (vcsim) and Proxmox (pvefake) `GetDiskInfo` disk lists, and `SizeGiB=0` is a no-op in vSphere, Proxmox and libvirt Reconfigure.
   - Manager: an invalid flag exits 1.
-- Docs: `charts/virtrigaud/README.md` ("Disk-size limit"), `docs/upgrading.md`, `docs/release-notes/next.md`.
+- Docs:
+  - `charts/virtrigaud/README.md` ("Disk-size limit"), including that Proxmox Create does not apply `Class.DiskDefaults` and that VMImage `status.providerStatus[].size` is never filled;
+  - `docs/upgrading.md`, `docs/release-notes/next.md`;
+  - `docs/vm-provider-binding.md`: keep `vmmigrations/status` manager-only.
+- Tests (import enforcement):
+  - `importlimit` unit tests;
+  - vSphere: a 2 TiB sparse streamOptimized vmdk refused against 100 GiB, with real qemu-img;
+  - libvirt: the host check and the shared header read on real qcow2 images;
+  - Proxmox: `ImportDisk` over NFS end to end against a fake node — oversized and unreadable sizes refused with the stage removed; within the limit, or with no limit, staged;
+  - the client's wire field and refusal mapping;
+  - the migration controller holding on a provider refusal, not re-sending it for the same limit, and re-sending after a limit change.
 
 ### Why
 Until now the only bound on a VM disk was the CRD's 64Ti. A tenant who owns its namespace could fill a shared datastore or pool through new disks, resizes, VMClass `diskDefaults`, additional disks, clones and migrations. In regulated multi-tenant deployments the cap must be one a tenant cannot raise.

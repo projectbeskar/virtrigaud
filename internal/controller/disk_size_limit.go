@@ -128,11 +128,16 @@ const libvirtDefaultPrimaryDiskGiB = 20
 // Provider whose class sets none, the 20 GiB the libvirt provider then uses —
 // and each spec.disks entry.
 //
+// The class size is checked on every provider type, although only vSphere
+// and libvirt apply it (they grow the image's primary disk to it, never
+// shrink it); the Proxmox provider's Create does not apply
+// Class.DiskDefaults and keeps the template's disk as it is.
+//
 // Not covered: a primary disk that comes out LARGER than what is asked for,
-// because the image (a vSphere or Proxmox template, a libvirt base image)
-// is larger. Providers only grow an image's disk to the class size, never
-// shrink it, and no image's size is known before the Create (VMImage status
-// does not record it), so that size is not checked here.
+// because the image (a vSphere or Proxmox template, a libvirt base image) is
+// larger. No image's size is known before the Create — VMImage
+// status.providerStatus[].size exists but nothing populates it — so that size
+// is not checked here.
 func vmDiskSizeRequests(vm *infravirtrigaudiov1beta1.VirtualMachine, vmClass *infravirtrigaudiov1beta1.VMClass,
 	provider *infravirtrigaudiov1beta1.Provider) []infravirtrigaudiov1beta1.DiskSizeRequest {
 	disks := infravirtrigaudiov1beta1.SpecDiskSizeRequests(vm.Spec.Disks)

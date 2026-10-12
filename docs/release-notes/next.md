@@ -124,7 +124,9 @@ providers), and rollback caveats in
   cap every disk VirtRigaud creates or grows: VMs that would create a larger
   disk are held (`DiskSizeExceedsLimit`), a Reconfigure never grows a disk
   beyond it, and clones and migrations are checked by the real sizes of the
-  source's disks as its provider reports them (an unknown size refuses them).
+  source's disks as its provider reports them (an unknown size refuses them);
+  the target provider also enforces the limit on the disk it is about to land
+  at the import, so a replaced staged object cannot get past it.
   VMs that already have larger disks keep running and are never shrunk. An
   image or template larger than the class size is not covered. A Provider's
   owner can lower the limit for that Provider with the annotation

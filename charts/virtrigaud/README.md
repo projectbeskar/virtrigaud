@@ -229,7 +229,23 @@ manager's `--max-disk-size`) sets a ceiling **tenants cannot raise**:
   - a `VMMigration` is checked for the migrated disk and the target class in
     `Validating`, again right before the export (the size is recorded in
     `status.diskInfo.sourceSize`), and that record right before the import;
-    it stays in its phase.
+    it stays in its phase;
+  - **the target provider enforces the limit itself at the import.** The
+    staged object can be replaced between the export and the import (a
+    tenant-chosen NFS export, a staging PVC in the tenant's namespace), and the
+    earlier checks trust the *source* provider's report. So the manager sends
+    the target's limit with `ImportDisk` (`max_virtual_size_bytes`), and the
+    target provider reads the virtual size of the disk it is about to land — a
+    private copy or the converted output, never the staging location itself —
+    and refuses a larger one (`DISK_SIZE_EXCEEDS_LIMIT`), or one whose size it
+    cannot read (`DISK_SIZE_UNVERIFIABLE`). Nothing is landed; the migration
+    is held in `Importing` (`Importing=False`) and not sent again for the same
+    limit. vSphere checks the pod-local vmdk before the upload or the NFC
+    lease (pvc, s3, nfs); libvirt checks the private staged copy (s3), the
+    converted disk before it is published (nfs), and the host copy before it
+    becomes the volume (pvc); Proxmox checks the node-local stage `qm
+    importdisk` lands (s3, nfs). A provider image from before this release
+    ignores the field.
 
   A size the provider does not report (a provider image from before this
   release, a disk that is not file-backed on libvirt, a read error) refuses the
@@ -237,13 +253,19 @@ manager's `--max-disk-size`) sets a ceiling **tenants cannot raise**:
   does a migration that reaches the import with no recorded size (it was
   exported before the limit was set): delete it and migrate again.
 - **Not covered: images larger than the class.** The limit bounds the sizes
-  VirtRigaud asks for. A VM's primary disk comes out of its image (a vSphere or
-  Proxmox template, a libvirt base image) and is only grown to the class size,
-  never shrunk. An image whose disk is already larger than the limit therefore
-  gives a larger disk, and that is not checked: no image's size is known before
-  the Create. Control which images tenants can use (VMImages are namespaced;
-  shared ones need `spec.consumerNamespaceSelector`), or bound the
-  hypervisor's own storage.
+  VirtRigaud asks for. A VM's primary disk comes out of its image:
+  - vSphere (template) and libvirt (base image) grow it to the class
+    `spec.diskDefaults.size`, never shrink it;
+  - Proxmox does not apply `spec.diskDefaults.size` at all: the VM gets the
+    template's disk as it is (the class size is still checked against the
+    limit).
+
+  An image whose disk is already larger than the limit therefore gives a larger
+  disk, and that is not checked: no image's size is known before the Create
+  (VMImage `status.providerStatus[].size` exists but nothing fills it yet).
+  Control which images tenants can use (VMImages are namespaced; shared ones
+  need `spec.consumerNamespaceSelector`), or bound the hypervisor's own
+  storage.
 - **Existing VMs** whose disks are already larger keep running, are never
   shrunk, and stay `Ready`.
 - **Per Provider:** a Provider's owner can lower the limit for that Provider with

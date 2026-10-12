@@ -58,6 +58,13 @@ Only a writer of the `virtualmachines/status` subresource (the operator, or an
 administrator) can unbind a VM. Keep that permission away from tenants: it
 controls `status.id`, which decides what the operator acts on.
 
+The same holds for `vmmigrations/status`: the disk-size limit trusts
+`status.diskInfo.sourceSize` (the exported disk's size, recorded by the
+manager) when it checks a migration before its import, so write access to
+`vmmigrations/status` must stay with the manager — never grant it to tenants.
+(The target provider also enforces the limit on the disk it lands, so a forged
+record cannot land a larger disk through an up-to-date provider.)
+
 ## 2. The operator checks the binding (defense in depth)
 
 When the operator binds a VM to a hypervisor VM, it records the `Provider` it
