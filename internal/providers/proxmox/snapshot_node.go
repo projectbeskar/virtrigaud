@@ -31,7 +31,7 @@ import (
 // PVE filters /cluster/resources by the caller's VM.Audit privilege, so a VM
 // missing from it may only be invisible to this token (a privilege-separated
 // or pool-scoped token, an ACL change). Absence is therefore confirmed with
-// the permission-independent VMID probe (VMIDInUse): only a free VMID is
+// the permission-independent VMID probe (VMIDFree): only a free VMID is
 // absent. A VMID in use but not listed is an error (the manager retries) and
 // is logged as a likely ACL problem — never a snapshot "gone".
 func (p *Provider) snapshotVMNode(ctx context.Context, vmid int) (node string, exists bool, err error) {
@@ -42,11 +42,11 @@ func (p *Provider) snapshotVMNode(ctx context.Context, vmid int) (node string, e
 	if exists {
 		return node, true, nil
 	}
-	inUse, err := p.client.VMIDInUse(ctx, vmid)
+	free, err := p.client.VMIDFree(ctx, vmid)
 	if err != nil {
 		return "", false, fmt.Errorf("confirm that VM %d is absent: %w", vmid, err)
 	}
-	if inUse {
+	if !free {
 		p.logger.Warn("VM exists in the cluster but is not visible in /cluster/resources to this token; "+
 			"check the token's VM.Audit privilege (ACL) — its snapshot is not treated as gone", "vmid", vmid)
 		return "", false, fmt.Errorf("VM %d exists but is not visible to this token (VM.Audit)", vmid)
