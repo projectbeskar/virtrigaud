@@ -396,7 +396,7 @@
       "local qemu-img info -U -f qcow2 --output=json -- /var/lib/libvirt/images/vrgold-web-disk.qcow2",
       "single virsh snapshot-list vrgold-web --name"
     ],
-    "resp": "{\"disk_id\":\"/var/lib/libvirt/images/vrgold-web-disk.qcow2\",\"format\":\"qcow2\",\"virtual_size_bytes\":10737418240,\"actual_size_bytes\":\u003cunix\u003e,\"path\":\"/var/lib/libvirt/images/vrgold-web-disk.qcow2\",\"is_bootable\":true,\"metadata\":{\"pool\":\"default\",\"type\":\"file\"}}",
+    "resp": "{\"disk_id\":\"/var/lib/libvirt/images/vrgold-web-disk.qcow2\",\"format\":\"qcow2\",\"virtual_size_bytes\":10737418240,\"actual_size_bytes\":\u003cunix\u003e,\"path\":\"/var/lib/libvirt/images/vrgold-web-disk.qcow2\",\"is_bootable\":true,\"metadata\":{\"pool\":\"default\",\"type\":\"file\"},\"disks\":[{\"disk_id\":\"/var/lib/libvirt/images/vrgold-web-disk.qcow2\",\"path\":\"/var/lib/libvirt/images/vrgold-web-disk.qcow2\",\"virtual_size_bytes\":10737418240}]}",
     "err": ""
   },
   "diskinfo-missing-domain": {
@@ -417,7 +417,7 @@
       "local qemu-img info -U -f qcow2 --output=json -- /var/lib/libvirt/images/vrgold-web-disk.qcow2",
       "single virsh snapshot-list vrgold-web --name"
     ],
-    "resp": "{\"disk_id\":\"/var/lib/libvirt/images/vrgold-web-disk.qcow2\",\"format\":\"qcow2\",\"virtual_size_bytes\":10737418240,\"actual_size_bytes\":\u003cunix\u003e,\"path\":\"/var/lib/libvirt/images/vrgold-web-disk.qcow2\",\"is_bootable\":true,\"metadata\":{\"pool\":\"default\",\"type\":\"file\"}}",
+    "resp": "{\"disk_id\":\"/var/lib/libvirt/images/vrgold-web-disk.qcow2\",\"format\":\"qcow2\",\"virtual_size_bytes\":10737418240,\"actual_size_bytes\":\u003cunix\u003e,\"path\":\"/var/lib/libvirt/images/vrgold-web-disk.qcow2\",\"is_bootable\":true,\"metadata\":{\"pool\":\"default\",\"type\":\"file\"},\"disks\":[{\"disk_id\":\"/var/lib/libvirt/images/vrgold-web-disk.qcow2\",\"path\":\"/var/lib/libvirt/images/vrgold-web-disk.qcow2\",\"virtual_size_bytes\":10737418240}]}",
     "err": ""
   },
   "diskinfo-primary": {
@@ -431,7 +431,7 @@
       "local qemu-img info -U -f qcow2 --output=json -- /var/lib/libvirt/images/vrgold-web-disk.qcow2",
       "single virsh snapshot-list vrgold-web --name"
     ],
-    "resp": "{\"disk_id\":\"/var/lib/libvirt/images/vrgold-web-disk.qcow2\",\"format\":\"qcow2\",\"virtual_size_bytes\":10737418240,\"actual_size_bytes\":\u003cunix\u003e,\"path\":\"/var/lib/libvirt/images/vrgold-web-disk.qcow2\",\"is_bootable\":true,\"snapshots\":[\"s1\",\"s2\"],\"metadata\":{\"pool\":\"default\",\"type\":\"file\"}}",
+    "resp": "{\"disk_id\":\"/var/lib/libvirt/images/vrgold-web-disk.qcow2\",\"format\":\"qcow2\",\"virtual_size_bytes\":10737418240,\"actual_size_bytes\":\u003cunix\u003e,\"path\":\"/var/lib/libvirt/images/vrgold-web-disk.qcow2\",\"is_bootable\":true,\"snapshots\":[\"s1\",\"s2\"],\"metadata\":{\"pool\":\"default\",\"type\":\"file\"},\"disks\":[{\"disk_id\":\"/var/lib/libvirt/images/vrgold-web-disk.qcow2\",\"path\":\"/var/lib/libvirt/images/vrgold-web-disk.qcow2\",\"virtual_size_bytes\":10737418240}]}",
     "err": ""
   },
   "diskinfo-qemu-img-fails": {
@@ -445,7 +445,7 @@
       "local qemu-img info -U -f qcow2 --output=json -- /var/lib/libvirt/images/vrgold-web-disk.qcow2",
       "single virsh snapshot-list vrgold-web --name"
     ],
-    "resp": "{\"disk_id\":\"/var/lib/libvirt/images/vrgold-web-disk.qcow2\",\"format\":\"qcow2\",\"path\":\"/var/lib/libvirt/images/vrgold-web-disk.qcow2\",\"is_bootable\":true,\"metadata\":{\"pool\":\"default\",\"type\":\"file\"}}",
+    "resp": "{\"disk_id\":\"/var/lib/libvirt/images/vrgold-web-disk.qcow2\",\"format\":\"qcow2\",\"path\":\"/var/lib/libvirt/images/vrgold-web-disk.qcow2\",\"is_bootable\":true,\"metadata\":{\"pool\":\"default\",\"type\":\"file\"},\"disks\":[{\"disk_id\":\"/var/lib/libvirt/images/vrgold-web-disk.qcow2\",\"path\":\"/var/lib/libvirt/images/vrgold-web-disk.qcow2\"}]}",
     "err": ""
   },
   "diskinfo-snapshot-list-fails": {
@@ -459,7 +459,7 @@
       "local qemu-img info -U -f qcow2 --output=json -- /var/lib/libvirt/images/vrgold-web-disk.qcow2",
       "single virsh snapshot-list vrgold-web --name"
     ],
-    "resp": "{\"disk_id\":\"/var/lib/libvirt/images/vrgold-web-disk.qcow2\",\"format\":\"qcow2\",\"virtual_size_bytes\":10737418240,\"actual_size_bytes\":\u003cunix\u003e,\"path\":\"/var/lib/libvirt/images/vrgold-web-disk.qcow2\",\"is_bootable\":true,\"metadata\":{\"pool\":\"default\",\"type\":\"file\"}}",
+    "resp": "{\"disk_id\":\"/var/lib/libvirt/images/vrgold-web-disk.qcow2\",\"format\":\"qcow2\",\"virtual_size_bytes\":10737418240,\"actual_size_bytes\":\u003cunix\u003e,\"path\":\"/var/lib/libvirt/images/vrgold-web-disk.qcow2\",\"is_bootable\":true,\"metadata\":{\"pool\":\"default\",\"type\":\"file\"},\"disks\":[{\"disk_id\":\"/var/lib/libvirt/images/vrgold-web-disk.qcow2\",\"path\":\"/var/lib/libvirt/images/vrgold-web-disk.qcow2\",\"virtual_size_bytes\":10737418240}]}",
     "err": ""
   },
   "export-nfs-needs-ssh": {

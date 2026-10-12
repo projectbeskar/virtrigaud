@@ -190,6 +190,13 @@ func main() {
 			"or empty (the default) for no ceiling. With it set, a Provider's "+
 			infrav1beta1.ProviderTmpSizeLimitAnnotation+" annotation above it (or 'none') is clamped to it with "+
 			"a Warning event, and --provider-tmp-size-limit and the per-type defaults are capped at it.")
+	var maxDiskSize string
+	flag.StringVar(&maxDiskSize, "max-disk-size", "",
+		"Administrator's ceiling on the size of every disk VirtRigaud creates or grows (a VM's VMClass "+
+			"spec.diskDefaults.size and spec.disks[].sizeGiB, a clone's, a migration's): a whole number of bytes from 1Gi to 64Pi "+
+			"such as 500Gi (use binary units: 500G is about 465.7Gi), or empty (the default) for no ceiling beyond the "+
+			"CRD's bounds. A Provider's "+infrav1beta1.ProviderMaxDiskSizeAnnotation+" annotation can only lower it. "+
+			"Disks already larger are kept and never shrunk; only new disks and growth beyond it are refused.")
 	opts := zap.Options{
 		Development: true,
 	}
@@ -198,6 +205,18 @@ func main() {
 
 	// Override the logger with flag-based options if provided
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
+
+	// The administrator's disk-size ceiling, checked before anything else
+	// starts: an invalid value stops the manager rather than running without
+	// the cap it was asked to enforce.
+	maxDiskSizeLimit, err := controller.ParseMaxDiskSizeFlag(maxDiskSize)
+	if err != nil {
+		setupLog.Error(err, "invalid --max-disk-size")
+		os.Exit(1)
+	}
+	if maxDiskSizeLimit != nil {
+		setupLog.Info("Disk-size ceiling set", "max-disk-size", maxDiskSizeLimit.String())
+	}
 
 	// Emit a virtrigaud_build_info{version,git_sha,go_version,component} sample
 	// so the manager's /metrics endpoint exposes a virtrigaud_* family at startup.
@@ -362,6 +381,7 @@ func main() {
 		Recorder:         mgr.GetEventRecorderFor("virtualmachine-controller"),
 		ImageCRDFeatures: vmCRDCheck,
 		APIReader:        mgr.GetAPIReader(),
+		MaxDiskSize:      maxDiskSizeLimit,
 	}
 	if err = vmReconciler.SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "VirtualMachine")
@@ -444,6 +464,7 @@ func main() {
 		os.Exit(1)
 	}
 	vmmigrationReconciler.StorageHostPolicy = storageHostPolicy
+	vmmigrationReconciler.MaxDiskSize = maxDiskSizeLimit
 	if err = vmmigrationReconciler.SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "VMMigration")
 		os.Exit(1)
@@ -472,6 +493,7 @@ func main() {
 	// same per-Provider lock, and in the same assume cache, as a VM's create
 	// or resize: share the VirtualMachine controller's.
 	vmcloneReconciler.Placements = vmReconciler.PlacementAssumptions()
+	vmcloneReconciler.MaxDiskSize = maxDiskSizeLimit
 	if err = vmcloneReconciler.SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "VMClone")
 		os.Exit(1)
@@ -514,6 +536,16 @@ func main() {
 	if len(webhookCertPath) > 0 {
 		if err := infrav1beta1.SetupProviderWebhookWithManager(mgr); err != nil {
 			setupLog.Error(err, "unable to create webhook", "webhook", "Provider")
+			os.Exit(1)
+		}
+		// The VirtualMachine and VMClass disk-size webhooks check the
+		// administrator's ceiling. They are served whenever webhooks are on
+		// (with no ceiling they admit everything), so a configuration that
+		// names them never hits an unserved path; the chart renders their
+		// configuration only when manager.maxDiskSize is set, so without a
+		// ceiling VM and VMClass writes gain no admission dependency.
+		if err := infrav1beta1.SetupDiskSizeWebhooksWithManager(mgr, maxDiskSizeLimit); err != nil {
+			setupLog.Error(err, "unable to create webhook", "webhook", "VirtualMachine/VMClass disk size")
 			os.Exit(1)
 		}
 	} else {

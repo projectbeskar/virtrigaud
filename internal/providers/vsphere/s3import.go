@@ -163,6 +163,10 @@ func (p *Provider) importDiskFromS3(ctx context.Context, req *providerv1.ImportD
 	if !qemuImg.IsInstalled() {
 		return nil, errors.NewInternal("qemu-img is not available in the provider image; cannot convert s3 import", nil)
 	}
+	// The disk-size limit, early, on the private download (before converting).
+	if err := refuseOversizedBeforeConvert(ctx, srcLocal, srcFormat, req.MaxVirtualSizeBytes); err != nil {
+		return nil, err
+	}
 	if err := qemuImg.Convert(ctx, diskutil.ConvertOptions{
 		SourcePath:        srcLocal,
 		DestinationPath:   vmdkLocal,
@@ -179,6 +183,10 @@ func (p *Provider) importDiskFromS3(ctx context.Context, req *providerv1.ImportD
 	// change or a Subformat regression).
 	if _, statErr := vmdk.Stat(vmdkLocal); statErr != nil {
 		return nil, errors.NewInternal("converted vmdk is not a valid streamOptimized image for NFC import", statErr)
+	}
+	// The disk-size limit, on the converted vmdk the NFC lease will land.
+	if err := checkLandingVirtualSize(ctx, vmdkLocal, req.MaxVirtualSizeBytes); err != nil {
+		return nil, err
 	}
 
 	// --- 3. RESOLVE datastore + placement (pool, folder, host) ---

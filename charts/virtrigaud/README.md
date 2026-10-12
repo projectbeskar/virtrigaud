@@ -162,6 +162,7 @@ helm upgrade virtrigaud virtrigaud/virtrigaud \
 | `manager.tmpSizeLimit` | `sizeLimit` of the manager pod's `/tmp` emptyDir (empty = none) | `128Mi` |
 | `manager.providerTmpSizeLimitMax` | Ceiling on every provider pod's `/tmp` `sizeLimit` (`--provider-tmp-size-limit-max`; a quantity, empty = no ceiling). A `Provider` annotation above it, or `none`, is clamped to it with a `TmpSizeLimitClamped` Warning event; the defaults are capped at it too | `""` |
 | `manager.providerTmpSizeLimit` | `sizeLimit` of the `/tmp` emptyDir of every provider pod run for a `Provider` CR (`--provider-tmp-size-limit`; a quantity or `none`). Empty keeps the per-type defaults: vSphere `512Gi`, others `1Gi` | `""` |
+| `manager.maxDiskSize` | Administrator's ceiling on every disk VirtRigaud creates or grows (`--max-disk-size`; a whole number of bytes from `1Gi` to `64Pi`, use binary units such as `500Gi`; empty = no ceiling beyond the CRD's 64Ti per disk). See [Disk-size limit](#disk-size-limit) | `""` |
 
 #### `/tmp` size limits
 
@@ -199,6 +200,110 @@ to `/tmp` is **evicted** by the kubelet.
 - **All CR-managed providers:** set `manager.providerTmpSizeLimit`.
 - **Chart-templated providers:** set `providers.<name>.tmpSizeLimit` (a
   quantity, `"none"`, or empty for no limit; anything else fails the render).
+
+#### Disk-size limit
+
+By default the only bound on a VM disk is the CRD's: 64Ti per disk. Tenants who
+own their namespace can ask for that much (and grow existing disks, and add up
+to 20 more) and fill a shared datastore or pool. `manager.maxDiskSize` (the
+manager's `--max-disk-size`) sets a ceiling **tenants cannot raise**:
+
+- **New disks:** a VM whose VMClass `spec.diskDefaults.size` or any
+  `spec.disks[].sizeGiB` is above the limit is not created. On a libvirt
+  Provider a class without `spec.diskDefaults.size` counts as the libvirt
+  default primary disk, 20Gi. The VM waits with `Ready=False`, reason
+  `DiskSizeExceedsLimit`, and a Warning event, and is created once its sizes
+  fit. A vanished VM is not re-created above it either.
+- **Growth:** a Reconfigure never grows a disk beyond the limit. The VM's other
+  changes (CPU, memory) are applied, the over-limit disk is left as it is, and
+  the VM reports `DiskSizeWithinLimit=False`, reason `DiskSizeExceedsLimit`,
+  whatever the Reconfigure's outcome (done, an async task, pending a restart,
+  failed). The next Reconfigure that withholds nothing removes the condition.
+  On a Proxmox Provider, which applies every `spec.disks` size to its first
+  disk, no `spec.disks` size is sent at all once one is withheld.
+- **Clones and migrations** copy the source VM's real disks, whatever its spec
+  says now, so they are checked by the sizes the source's provider reports
+  (`GetDiskInfo`), not by its VMClass or `spec.disks`:
+  - a `VMClone` is checked for every disk of the source and the target class
+    override, before the clone is issued; it stays `Pending`;
+  - a `VMMigration` is checked for the migrated disk and the target class in
+    `Validating`, again right before the export (the size is recorded in
+    `status.diskInfo.sourceSize`), and that record right before the import;
+    it stays in its phase;
+  - **the target provider enforces the limit itself at the import.** The
+    staged object can be replaced between the export and the import (a
+    tenant-chosen NFS export, a staging PVC in the tenant's namespace), and the
+    earlier checks trust the *source* provider's report. So the manager sends
+    the target's limit with `ImportDisk` (`max_virtual_size_bytes`), and the
+    target provider reads the virtual size of the disk it is about to land — a
+    private copy or the converted output, never the staging location itself —
+    and refuses a larger one (`DISK_SIZE_EXCEEDS_LIMIT`), or one whose size it
+    cannot read (`DISK_SIZE_UNVERIFIABLE`). Nothing is landed; the migration
+    is held in `Importing` (`Importing=False`) and not sent again for the same
+    limit. vSphere checks the pod-local vmdk before the upload or the NFC
+    lease (pvc, s3, nfs); libvirt checks the private staged copy (s3), the
+    converted disk before it is published (nfs), and a private copy of the
+    staged file before it becomes the volume (pvc: the copy on the host over
+    SSH, or in the provider's own container over a local connection); Proxmox
+    checks the node-local stage `qm importdisk` lands (s3, nfs). A provider
+    image from before this release ignores the field and does not report
+    `supports_import_size_limit`, so while a limit applies a migration into it
+    is held (`DiskSizeLimitUnverifiable`, "upgrade the provider image").
+
+  A size the provider does not report (a provider image from before this
+  release, a disk that is not file-backed on libvirt, a read error) refuses the
+  clone or migration while a limit applies (`DiskSizeLimitUnverifiable`). So
+  does a migration that reaches the import with no recorded size (it was
+  exported before the limit was set): delete it and migrate again.
+- **Not covered: images larger than the class.** The limit bounds the sizes
+  VirtRigaud asks for. A VM's primary disk comes out of its image:
+  - vSphere (template) and libvirt (base image) grow it to the class
+    `spec.diskDefaults.size`, never shrink it;
+  - Proxmox does not apply `spec.diskDefaults.size` at all: the VM gets the
+    template's disk as it is (the class size is still checked against the
+    limit).
+
+  An image whose disk is already larger than the limit therefore gives a larger
+  disk, and that is not checked: no image's size is known before the Create
+  (VMImage `status.providerStatus[].size` exists but nothing fills it yet).
+  Control which images tenants can use (VMImages are namespaced; shared ones
+  need `spec.consumerNamespaceSelector`), or bound the hypervisor's own
+  storage.
+- **Existing VMs** whose disks are already larger keep running, are never
+  shrunk, and stay `Ready`.
+- **Per Provider:** a Provider's owner can lower the limit for that Provider with
+  the annotation `infra.virtrigaud.io/max-disk-size: "<quantity>"` — on a
+  clustered Provider shared with other namespaces, the Provider's owner is the
+  administrator of its consumers. The annotation can never raise the manager's
+  ceiling. The Provider webhook refuses an invalid value; if one is stored
+  anyway, nothing is created or grown through that Provider
+  (`DiskSizeLimitUnverifiable`) until it is fixed.
+- **Admission:** with `webhooks.enabled=true` and `manager.maxDiskSize` set, the
+  chart also renders the `vvirtualmachine-disksize.kb.io` and
+  `vvmclass-disksize.kb.io` validating webhooks, which refuse a larger
+  `spec.disks[].sizeGiB` or `spec.diskDefaults.size` (or growing one beyond the
+  limit) at `kubectl apply` time. They check the manager's ceiling only, not a
+  Provider's annotation. Without `manager.maxDiskSize` they are not rendered, so
+  VM and VMClass writes gain no admission dependency. The controllers enforce
+  the limit whether or not webhooks are on.
+- **Kustomize installs:** `config/webhook/manifests.yaml` is generated from the
+  Go markers and always lists the VM and VMClass disk-size webhooks, with
+  `failurePolicy: Fail`. It is not part of `config/default` (its `[WEBHOOK]`
+  sections are commented out). If you enable it, VM and VMClass writes depend
+  on the webhook being reachable even without a ceiling (the manager serves
+  them whenever webhooks are on, and admits everything without one): remove
+  those two entries, or set their `failurePolicy` to `Ignore`, if you do not
+  use `--max-disk-size`.
+- **Upgrade the provider images with the manager.** The clone and migration
+  checks read the source's disk sizes from `GetDiskInfo`'s new `disks` list.
+  A provider image from before this release does not fill it, so while a
+  limit applies, clones through it are refused (`DiskSizeLimitUnverifiable`);
+  migrations read the primary disk's size, which older images do report.
+
+The limit is per disk, not a total per VM or per namespace (a VM can have up to
+20 additional disks): bound totals with the hypervisor's own storage quotas, or
+an object-count `ResourceQuota` on `virtualmachines.infra.virtrigaud.io`. Sizes are compared exactly: `500G` is
+about `465.7Gi`, so prefer binary units.
 
 ### Provider Configuration
 

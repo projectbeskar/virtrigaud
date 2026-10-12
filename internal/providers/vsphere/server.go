@@ -501,8 +501,10 @@ func (p *Provider) GetCapabilities(ctx context.Context, req *providerv1.GetCapab
 		// Not yet: a smaller disk size is ignored silently. Flipped by the
 		// vSphere honest-Reconfigure follow-up.
 		SupportsHonestReconfigure: false,
-		SupportedDiskTypes:        []string{"thin", "thick", "eager-zeroed"},
-		SupportedNetworkTypes:     []string{"standard", "distributed"},
+		// ImportDisk enforces max_virtual_size_bytes (import_size_limit.go).
+		SupportsImportSizeLimit: true,
+		SupportedDiskTypes:      []string{"thin", "thick", "eager-zeroed"},
+		SupportedNetworkTypes:   []string{"standard", "distributed"},
 		// Disk migration: ExportDisk and ImportDisk are implemented (issue #178).
 		// Previously these were left at the zero value, understating real support
 		// and (once capability gating is enabled, #176) wrongly blocking migration.
@@ -3637,8 +3639,34 @@ func (p *Provider) GetDiskInfo(ctx context.Context, req *providerv1.GetDiskInfoR
 		},
 	}
 
+	// Every disk of the VM with its capacity, for the manager's disk-size
+	// limit check before a clone.
+	response.Disks = vmDiskCapacities(vmMo.Config.Hardware.Device)
+
 	p.logger.Info("Disk info retrieved", "disk_id", diskLabel, "path", diskPath, "size_bytes", virtualSizeBytes)
 	return response, nil
+}
+
+// vmDiskCapacities lists every VirtualDisk among devices with its capacity
+// (CapacityInBytes, or CapacityInKB when the former is unset).
+func vmDiskCapacities(devices []types.BaseVirtualDevice) []*providerv1.DiskCapacity {
+	var out []*providerv1.DiskCapacity
+	for _, device := range devices {
+		disk, ok := device.(*types.VirtualDisk)
+		if !ok {
+			continue
+		}
+		size := disk.CapacityInBytes
+		if size <= 0 {
+			size = disk.CapacityInKB * 1024
+		}
+		c := &providerv1.DiskCapacity{DiskId: fmt.Sprintf("%d", disk.Key), VirtualSizeBytes: size}
+		if b, ok := disk.Backing.(types.BaseVirtualDeviceFileBackingInfo); ok {
+			c.Path = b.GetVirtualDeviceFileBackingInfo().FileName
+		}
+		out = append(out, c)
+	}
+	return out
 }
 
 // extractSnapshotNames performs a depth-first traversal of snapshotTree and returns a
@@ -4179,6 +4207,11 @@ func (p *Provider) ImportDisk(ctx context.Context, req *providerv1.ImportDiskReq
 
 	p.logger.Info("Download completed", "bytes", downloadResp.BytesTransferred, "checksum", downloadResp.Checksum)
 
+	// The disk-size limit, early, on the private download (before converting).
+	if err := refuseOversizedBeforeConvert(ctx, tempFile, targetFormat, req.MaxVirtualSizeBytes); err != nil {
+		return nil, err
+	}
+
 	// Convert to VMDK if needed
 	var vmdkPath string
 	if targetFormat != "vmdk" {
@@ -4200,6 +4233,11 @@ func (p *Provider) ImportDisk(ctx context.Context, req *providerv1.ImportDiskReq
 		defer os.Remove(vmdkPath)
 	} else {
 		vmdkPath = tempFile
+	}
+
+	// The disk-size limit, on the pod-local vmdk about to be uploaded.
+	if err := checkLandingVirtualSize(ctx, vmdkPath, req.MaxVirtualSizeBytes); err != nil {
+		return nil, err
 	}
 
 	// Upload to datastore

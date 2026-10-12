@@ -80,6 +80,11 @@ const (
 	// does not implement the filter must not advertise it: it ignores the
 	// filter and leaves owner_filter_applied false.
 	CapabilityListOwnerFilter Capability = "list_owner_filter"
+	// CapabilityImportSizeLimit marks a provider whose ImportDisk enforces
+	// ImportDiskRequest.max_virtual_size_bytes on the disk it lands; reported
+	// as GetCapabilitiesResponse.supports_import_size_limit. Advertise it only
+	// with an ImportDisk that does.
+	CapabilityImportSizeLimit Capability = "import_size_limit"
 
 	// Provider-specific capabilities
 	CapabilityVSphere     Capability = "vsphere"
@@ -219,6 +224,8 @@ func (m *Manager) GetCapabilities(ctx context.Context, req *providerv1.GetCapabi
 		SupportsRoutedAdoption: m.HasCapability(CapabilityRoutedAdoption),
 		// ADR-0007 A6.2: ListVMs honours the owner filter.
 		SupportsListOwnerFilter: m.HasCapability(CapabilityListOwnerFilter),
+		// ImportDisk enforces max_virtual_size_bytes.
+		SupportsImportSizeLimit: m.HasCapability(CapabilityImportSizeLimit),
 	}, nil
 }
 
@@ -333,6 +340,14 @@ func (b *Builder) ImageImport() *Builder {
 // with ImageImport.
 func (b *Builder) ImageArtifactIdentity() *Builder {
 	b.manager.AddCapability(CapabilityImageArtifactIdentity)
+	return b
+}
+
+// ImportSizeLimit adds CapabilityImportSizeLimit: ImportDisk refuses a disk
+// above ImportDiskRequest.max_virtual_size_bytes (or one it cannot measure)
+// before landing it.
+func (b *Builder) ImportSizeLimit() *Builder {
+	b.manager.AddCapability(CapabilityImportSizeLimit)
 	return b
 }
 

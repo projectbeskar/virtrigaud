@@ -24,3 +24,43 @@ webhooks:
     resources:
     - providers
   sideEffects: None
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: webhook-service
+      namespace: system
+      path: /validate-infra-virtrigaud-io-v1beta1-virtualmachine
+  failurePolicy: Fail
+  name: vvirtualmachine-disksize.kb.io
+  rules:
+  - apiGroups:
+    - infra.virtrigaud.io
+    apiVersions:
+    - v1beta1
+    operations:
+    - CREATE
+    - UPDATE
+    resources:
+    - virtualmachines
+  sideEffects: None
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: webhook-service
+      namespace: system
+      path: /validate-infra-virtrigaud-io-v1beta1-vmclass
+  failurePolicy: Fail
+  name: vvmclass-disksize.kb.io
+  rules:
+  - apiGroups:
+    - infra.virtrigaud.io
+    apiVersions:
+    - v1beta1
+    operations:
+    - CREATE
+    - UPDATE
+    resources:
+    - vmclasses
+  sideEffects: None

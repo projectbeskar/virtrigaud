@@ -271,6 +271,46 @@ Grafana dashboard labels
 {{- end }}
 
 {{/*
+Validates manager.maxDiskSize (the manager's --max-disk-size) and returns it as
+a string: "" (unset, as in an older values file under --reuse-values) or a
+quantity with a unit of at least G (such as 500Gi or 2Ti). A missing unit
+("500" is 500 bytes), a smaller unit, zero or "none" fails the render: the
+manager would refuse to start with it. So does a value below 1Gi (e.g. "1G"
+or "0.5Gi"), which the manager refuses too. Takes the root context.
+*/}}
+{{- define "virtrigaud.maxDiskSizeValue" -}}
+{{- $v := "" -}}
+{{- if and .Values.manager (not (kindIs "invalid" .Values.manager.maxDiskSize)) -}}
+{{- $v = toString .Values.manager.maxDiskSize -}}
+{{- end -}}
+{{- if ne $v "" -}}
+{{- if or (not (regexMatch "^[0-9]+(\\.[0-9]+)?(Gi|Ti|Pi|Ei|G|T|P|E)$" $v)) (regexMatch "^0+(\\.0+)?[A-Za-z]*$" $v) -}}
+{{- fail (printf "manager.maxDiskSize: invalid disk-size limit %q; use a quantity of at least 1Gi such as 500Gi or 2Ti, or leave it empty for no limit" $v) -}}
+{{- end -}}
+{{- /* Below 1Gi is possible only with a G or Gi unit: refuse it here, as the
+       manager does (it would otherwise crash-loop, and with failurePolicy
+       Fail block VM and VMClass writes). 1Gi is 1.073741824G. */ -}}
+{{- $num := regexFind "^[0-9]+(\\.[0-9]+)?" $v -}}
+{{- $unit := trimPrefix $num $v -}}
+{{- if or (and (eq $unit "Gi") (lt (float64 $num) 1.0)) (and (eq $unit "G") (lt (float64 $num) 1.073741824)) -}}
+{{- fail (printf "manager.maxDiskSize: invalid disk-size limit %q; it must be at least 1Gi (1Gi is about 1.074G)" $v) -}}
+{{- end -}}
+{{- /* At most 64Pi (the manager refuses more): 64Pi in each unit. */ -}}
+{{- $max := dict "Gi" 67108864.0 "G" 72057594.037927936 "Ti" 65536.0 "T" 72057.594037927936 "Pi" 64.0 "P" 72.057594037927936 "Ei" 0.0625 "E" 0.072057594037927936 -}}
+{{- if gt (float64 $num) (get $max $unit) -}}
+{{- fail (printf "manager.maxDiskSize: invalid disk-size limit %q; it must be at most 64Pi" $v) -}}
+{{- end -}}
+{{- /* A whole number of bytes, as the manager requires ("1.1Gi" is not). */ -}}
+{{- $unitBytes := dict "Gi" 1073741824.0 "G" 1000000000.0 "Ti" 1099511627776.0 "T" 1000000000000.0 "Pi" 1125899906842624.0 "P" 1000000000000000.0 "Ei" 1152921504606846976.0 "E" 1000000000000000000.0 -}}
+{{- $bytes := mulf (float64 $num) (get $unitBytes $unit) -}}
+{{- if ne $bytes (floor $bytes) -}}
+{{- fail (printf "manager.maxDiskSize: invalid disk-size limit %q; it must be a whole number of bytes (1.1Gi is not; 1.5Gi is)" $v) -}}
+{{- end -}}
+{{- end -}}
+{{- $v -}}
+{{- end }}
+
+{{/*
 Validates a /tmp sizeLimit setting and returns it as a string: "" (unset, as in
 an older values file under --reuse-values), "none", or a positive resource
 quantity such as 20Gi. Anything else fails the render, so a typo never reaches

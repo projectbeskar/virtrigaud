@@ -607,6 +607,18 @@ message ImportDiskRequest {
   // back to the VM unchanged. Additive and backward-compatible: other providers
   // ignore it, and an unset value keeps the legacy target_name naming.
   ObjectIdentity target_vm = 11;
+
+  // max_virtual_size_bytes is the disk-size limit of the target Provider for
+  // this import (the manager's --max-disk-size, lowered by the Provider's
+  // infra.virtrigaud.io/max-disk-size annotation); 0 means no limit. When it is
+  // set, the provider reads the virtual size of the disk it is about to land —
+  // from the image header, in a location the tenant cannot change (a private
+  // copy or the converted output), not from the manager's earlier record —
+  // and refuses one above it with codes.FailedPrecondition and the ErrorInfo
+  // reason DISK_SIZE_EXCEEDS_LIMIT, or with DISK_SIZE_UNVERIFIABLE when it
+  // cannot read that size. Nothing is landed either way. Additive and
+  // backward-compatible: a provider that predates it ignores it.
+  int64 max_virtual_size_bytes = 12;
 }
 
 message ImportDiskResponse {
@@ -650,6 +662,23 @@ message GetDiskInfoResponse {
   repeated string snapshots = 7; // Available snapshots
   string backing_file = 8;     // Backing file (for linked clones)
   map<string, string> metadata = 9; // Additional provider-specific metadata
+
+  // disks lists EVERY disk of the VM as it is now — its data disks, not CD-ROM
+  // or cloud-init media — each with its current virtual size, whatever
+  // disk_id and snapshot_id asked for. The manager checks them against the
+  // administrator's disk-size limit before a clone copies them. A size the
+  // provider could not read is 0, which the manager treats as unknown. A
+  // provider that predates the field leaves it empty, and the manager then
+  // fails closed (it clones nothing through it while a limit applies).
+  // Additive and backward-compatible.
+  repeated DiskCapacity disks = 10;
+}
+
+// DiskCapacity is one disk of a VM and its current virtual size (capacity).
+message DiskCapacity {
+  string disk_id = 1;            // Provider-specific disk identifier
+  string path = 2;               // Path or location, when the provider has one
+  int64 virtual_size_bytes = 3;  // Virtual size (capacity); 0 = not read
 }
 
 // List all VMs managed by this provider
@@ -858,6 +887,14 @@ message GetCapabilitiesResponse {
   // single-host and thin-client providers (they never schedule, and ignore the
   // filter) and on a clustered provider older than A6.2.
   bool supports_list_owner_filter = 22;
+
+  // supports_import_size_limit reports that ImportDisk enforces
+  // ImportDiskRequest.max_virtual_size_bytes on the disk it lands (refusing a
+  // larger one with DISK_SIZE_EXCEEDS_LIMIT, or one it cannot measure with
+  // DISK_SIZE_UNVERIFIABLE). A provider that predates the field ignores the
+  // limit, so while one applies the manager holds a migration into a
+  // Provider that does not report it.
+  bool supports_import_size_limit = 24;
 }
 
 // TransferOwner hands one VM on a clustered ("brain-in-operator") provider's

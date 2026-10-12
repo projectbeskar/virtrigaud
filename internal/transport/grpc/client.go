@@ -548,6 +548,8 @@ func (c *Client) GetCapabilities(ctx context.Context) (contracts.Capabilities, e
 		SupportsRoutedAdoption: resp.GetSupportsRoutedAdoption(),
 		// ADR-0007 A6.2: false from a provider that predates it.
 		SupportsListOwnerFilter: resp.GetSupportsListOwnerFilter(),
+		// False from a provider that predates the import-time disk-size limit.
+		SupportsImportSizeLimit: resp.GetSupportsImportSizeLimit(),
 	}, nil
 }
 
@@ -1021,17 +1023,18 @@ func (c *Client) ImportDisk(ctx context.Context, req contracts.ImportDiskRequest
 	defer cancel()
 
 	grpcReq := &providerv1.ImportDiskRequest{
-		SourceUrl:          req.SourceURL,
-		StorageHint:        req.StorageHint,
-		Format:             req.Format,
-		TargetName:         req.TargetName,
-		VerifyChecksum:     req.VerifyChecksum,
-		ExpectedChecksum:   req.ExpectedChecksum,
-		Credentials:        req.Credentials,
-		BackendType:        req.BackendType,
-		TransferMode:       req.TransferMode,
-		StorageOptionsJson: req.StorageOptionsJSON,
-		TargetVm:           targetIdentityToProto(req.TargetVM),
+		SourceUrl:           req.SourceURL,
+		StorageHint:         req.StorageHint,
+		Format:              req.Format,
+		TargetName:          req.TargetName,
+		VerifyChecksum:      req.VerifyChecksum,
+		ExpectedChecksum:    req.ExpectedChecksum,
+		Credentials:         req.Credentials,
+		BackendType:         req.BackendType,
+		TransferMode:        req.TransferMode,
+		StorageOptionsJson:  req.StorageOptionsJSON,
+		TargetVm:            targetIdentityToProto(req.TargetVM),
+		MaxVirtualSizeBytes: req.MaxVirtualSizeBytes,
 	}
 
 	resp, err := c.client.ImportDisk(ctx, grpcReq)
@@ -1082,6 +1085,13 @@ func (c *Client) GetDiskInfo(ctx context.Context, req contracts.GetDiskInfoReque
 		Snapshots:        resp.Snapshots,
 		BackingFile:      resp.BackingFile,
 		Metadata:         resp.Metadata,
+	}
+	for _, d := range resp.GetDisks() {
+		result.Disks = append(result.Disks, contracts.DiskCapacity{
+			ID:               d.GetDiskId(),
+			Path:             d.GetPath(),
+			VirtualSizeBytes: d.GetVirtualSizeBytes(),
+		})
 	}
 
 	return result, nil
@@ -1441,6 +1451,22 @@ func isVMDiskInUseStatus(st *status.Status) bool {
 	return false
 }
 
+// failedPreconditionReason reports whether a gRPC status is
+// codes.FailedPrecondition carrying a google.rpc.ErrorInfo with reason in
+// VirtRigaud's domain.
+func failedPreconditionReason(st *status.Status, reason string) bool {
+	if st == nil || st.Code() != codes.FailedPrecondition {
+		return false
+	}
+	for _, d := range st.Details() {
+		if info, ok := d.(*errdetails.ErrorInfo); ok &&
+			info.GetReason() == reason && info.GetDomain() == contracts.ErrorInfoDomain {
+			return true
+		}
+	}
+	return false
+}
+
 // isVMSourceRunningStatus reports whether a gRPC status is a provider's
 // refusal of a Clone because the source VM is not powered off (a libvirt full
 // clone requires a shut-off source): codes.FailedPrecondition carrying a
@@ -1716,6 +1742,18 @@ func (c *Client) mapGRPCStatus(operation string, err error) error {
 		if isVMSourceRunningStatus(st) {
 			return contracts.NewRetryableError(fmt.Sprintf("%s: %s", operation, st.Message()),
 				fmt.Errorf("%w: %w", contracts.ErrVMSourceRunning, err))
+		}
+		// An import refused because the disk it would land is above the
+		// target's disk-size limit, or its size could not be read: typed
+		// Conflict (non-retryable, nothing landed), marked so the migration
+		// controller holds the migration instead of failing it.
+		if failedPreconditionReason(st, contracts.DiskSizeExceedsLimitReason) {
+			return contracts.NewConflictError(fmt.Sprintf("%s: %s", operation, st.Message()),
+				fmt.Errorf("%w: %w", contracts.ErrDiskSizeExceedsLimit, err))
+		}
+		if failedPreconditionReason(st, contracts.DiskSizeUnverifiableReason) {
+			return contracts.NewConflictError(fmt.Sprintf("%s: %s", operation, st.Message()),
+				fmt.Errorf("%w: %w", contracts.ErrDiskSizeUnverifiable, err))
 		}
 		return &untypedRPCError{msg: fmt.Sprintf("%s failed: %s", operation, st.Message()), cause: err}
 	case codes.Unavailable, codes.DeadlineExceeded:

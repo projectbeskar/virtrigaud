@@ -1066,6 +1066,8 @@ func (s *Server) GetCapabilities(ctx context.Context, req *providerv1.GetCapabil
 		// Reconfigure applies every change live and persistently, persistently
 		// only with restart_required, or fails (reconfigure.go).
 		SupportsHonestReconfigure: true,
+		// ImportDisk enforces max_virtual_size_bytes (import_size_limit.go).
+		SupportsImportSizeLimit: true,
 	}, nil
 }
 
@@ -1215,7 +1217,7 @@ func (s *Server) GetDiskInfo(ctx context.Context, req *providerv1.GetDiskInfoReq
 		return nil, fmt.Errorf("failed to get disk info: %w", err)
 	}
 
-	return &providerv1.GetDiskInfoResponse{
+	out := &providerv1.GetDiskInfoResponse{
 		DiskId:           resp.DiskId,
 		Format:           resp.Format,
 		VirtualSizeBytes: resp.VirtualSizeBytes,
@@ -1225,7 +1227,13 @@ func (s *Server) GetDiskInfo(ctx context.Context, req *providerv1.GetDiskInfoReq
 		Snapshots:        resp.Snapshots,
 		BackingFile:      resp.BackingFile,
 		Metadata:         resp.Metadata,
-	}, nil
+	}
+	for _, d := range resp.Disks {
+		out.Disks = append(out.Disks, &providerv1.DiskCapacity{
+			DiskId: d.ID, Path: d.Path, VirtualSizeBytes: d.VirtualSizeBytes,
+		})
+	}
+	return out, nil
 }
 
 // ImportDisk imports a disk from an external source (for VM migration)
@@ -1328,9 +1336,28 @@ func (s *Server) ImportDisk(ctx context.Context, req *providerv1.ImportDiskReque
 		finalSourcePath = remotePath
 		log.Printf("INFO Disk copied to remote host: %s", finalSourcePath)
 	} else {
-		// Local libvirt connection - use source path directly
-		finalSourcePath = sourcePath
-		log.Printf("INFO Using local libvirt connection with path: %s", finalSourcePath)
+		// Local libvirt connection: import from a PRIVATE copy, as the SSH
+		// branch does, never the staged file in place — it lives in the
+		// tenant's staging PVC and could be replaced between the disk-size
+		// check below and the import that reads it again.
+		localCopy, cleanup, err := privateLocalImportCopy(sourcePath)
+		if err != nil {
+			return nil, fmt.Errorf("copy the staged disk to a private location: %w", err)
+		}
+		defer cleanup()
+		finalSourcePath = localCopy
+		log.Printf("INFO Using local libvirt connection with a private copy: %s", finalSourcePath)
+	}
+
+	// The disk-size limit, on the copy about to become the volume, read as
+	// qcow2 as the import reads it. A refused copy is removed: nothing lands.
+	if err := checkHostImportSize(ctx, hostConnRunner{conn: conn}, finalSourcePath, "qcow2", req.MaxVirtualSizeBytes); err != nil {
+		if strings.Contains(conn.uri(), "ssh://") {
+			if _, rmErr := conn.RunHost(ctx, "rm", "-f", "--", finalSourcePath); rmErr != nil {
+				log.Printf("WARN Failed to remove the refused import copy %s: %v", finalSourcePath, rmErr)
+			}
+		}
+		return nil, err
 	}
 
 	// Get source disk info using qemu-img (shell exec through the seam)

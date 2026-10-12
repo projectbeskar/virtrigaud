@@ -95,6 +95,19 @@ type VMMigrationReconciler struct {
 	// the always-forbidden loopback/link-local/metadata/multicast targets.
 	StorageHostPolicy *storagemigration.HostPolicy
 
+	// importUnverifiable paces re-sending an import the target provider
+	// refused because it could not read the disk's size (DISK_SIZE_UNVERIFIABLE):
+	// each attempt is a full download or convert, so the wait doubles from
+	// diskSizeLimitRetryInterval to importUnverifiableMaxRetryInterval. Only the
+	// elected leader runs this reconciler, so in-process state is correct.
+	importUnverifiable unschedulableBackoff
+
+	// MaxDiskSize is the administrator's disk-size ceiling (the manager's
+	// --max-disk-size; nil for none), lowered per target Provider by its
+	// infra.virtrigaud.io/max-disk-size annotation: a migration that would
+	// create a disk above the limit is held in Validating (disk_size_limit.go).
+	MaxDiskSize *resource.Quantity
+
 	// longOpInFlight is an in-memory guard against re-issuing a long-running,
 	// non-idempotent migration RPC (ExportDisk / ImportDisk) when a reconcile
 	// re-enters before the prior status write has propagated to the informer
@@ -430,10 +443,25 @@ func (r *VMMigrationReconciler) handleValidatingPhase(ctx context.Context, migra
 
 	// A clustered SOURCE VM is addressed by its confirmed host binding. One with
 	// no binding is never sent a per-VM call (A1): wait for it.
-	if _, err := vmRefFor(sourceVM, sourceProvider); err != nil {
+	sourceRef, err := vmRefFor(sourceVM, sourceProvider)
+	if err != nil {
 		k8s.SetCondition(&migration.Status.Conditions, infrav1beta1.VMMigrationConditionValidating,
 			metav1.ConditionFalse, vmRefErrorReason(err), err.Error())
 		return r.waitForSourceBinding(ctx, migration, err)
+	}
+
+	// No disk above the administrator's disk-size limit for the target
+	// Provider is created by a migration: the source's real disk size (read
+	// from its provider) and the target class are checked here, before any
+	// side effect (disk_size_limit_copies.go). The only provider call made
+	// for it is that read-only GetDiskInfo, and only while a limit applies.
+	refusal, err := r.migrationDiskSizeRefusal(ctx, migration, sourceVM, sourceRef, sourceProvider, targetProvider)
+	if err != nil {
+		logger.Error(err, "Failed to check the migration's disk sizes")
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+	}
+	if refusal != nil {
+		return r.holdMigrationForDiskSizeLimit(ctx, migration, infrav1beta1.VMMigrationConditionValidating, refusal)
 	}
 
 	// Gate the requested storage backend and transfer mode against what both
@@ -946,6 +974,18 @@ func (r *VMMigrationReconciler) handleExportingPhase(ctx context.Context, migrat
 		return res, err
 	}
 
+	// The disk about to be exported is checked against the target Provider's
+	// disk-size limit by its real size, right before the export, and that size
+	// is recorded for the check before ImportDisk (disk_size_limit_copies.go).
+	sizeRefusal, exportedSize, err := r.exportDiskSizeRefusal(ctx, migration, providerInstance, exportReq)
+	if err != nil {
+		logger.Error(err, "Failed to check the exported disk's size")
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+	}
+	if sizeRefusal != nil {
+		return r.holdMigrationForDiskSizeLimit(ctx, migration, infrav1beta1.VMMigrationConditionExporting, sizeRefusal)
+	}
+
 	// Claim the in-memory export guard for this object generation BEFORE
 	// issuing the RPC. If another reconcile already claimed it, a duplicate
 	// ExportDisk would overwrite the staged object with non-deterministic
@@ -979,6 +1019,9 @@ func (r *VMMigrationReconciler) handleExportingPhase(ctx context.Context, migrat
 	migration.Status.DiskInfo.SourceDiskID = exportReq.DiskId
 	migration.Status.DiskInfo.SourceFormat = diskFormat
 	migration.Status.DiskInfo.SourceChecksum = exportResp.Checksum
+	if exportedSize != nil {
+		migration.Status.DiskInfo.SourceSize = exportedSize
+	}
 
 	// If there's a task, we need to wait for it
 	if exportResp.TaskRef != "" {
@@ -1250,6 +1293,36 @@ func (r *VMMigrationReconciler) handleImportingPhase(ctx context.Context, migrat
 		return res, err
 	}
 
+	// The exported disk's size, recorded at export, is checked against the
+	// target Provider's disk-size limit as it is now, right before the import
+	// lands it (disk_size_limit_copies.go).
+	if refusal := r.importDiskSizeRefusal(migration, targetProvider); refusal != nil {
+		return r.holdMigrationForDiskSizeLimit(ctx, migration, infrav1beta1.VMMigrationConditionImporting, refusal)
+	}
+	// The staged object may have been replaced since the export: the target
+	// provider enforces the limit itself on the disk it is about to land
+	// (max_virtual_size_bytes). An import it already refused for that limit is
+	// not sent again until the limit changes (disk_size_limit_copies.go).
+	if limit, _ := r.migrationTargetLimit(targetProvider); limit != nil {
+		// A provider image that predates the field would ignore it: hold.
+		refusal, err := targetImportLimitRefusal(ctx, providerInstance, limit)
+		if err != nil {
+			logger.Error(err, "Failed to check the target provider's import-time disk-size limit")
+			return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+		}
+		if refusal != nil {
+			return r.holdMigrationForDiskSizeLimit(ctx, migration, infrav1beta1.VMMigrationConditionImporting, refusal)
+		}
+		importReq.MaxVirtualSizeBytes = limit.Value()
+		if importRefusedByTargetAt(migration, limit) {
+			return ctrl.Result{RequeueAfter: diskSizeLimitRetryInterval}, nil
+		}
+		// An import refused as unverifiable is re-sent on a doubling backoff.
+		if wait := r.importUnverifiable.remaining(string(migration.UID), time.Now()); wait > 0 {
+			return ctrl.Result{RequeueAfter: wait}, nil
+		}
+	}
+
 	// Claim the in-memory import guard for this object generation BEFORE
 	// issuing the RPC. ImportDisk writes the target qcow2; a duplicate driven
 	// by a stale cache would overwrite it. If another reconcile already claimed
@@ -1265,9 +1338,25 @@ func (r *VMMigrationReconciler) handleImportingPhase(ctx context.Context, migrat
 		// Release the in-memory guard so a future reconcile can re-attempt the
 		// import for this generation after the failure is recorded.
 		r.longOpInFlight.Delete(longOpKey(migration, longOpImport))
+		// The target provider refused to land a disk above its disk-size
+		// limit (or one whose size it could not read): nothing was landed.
+		// Held, not failed.
+		if refusal := providerImportRefusal(err, importReq.MaxVirtualSizeBytes); refusal != nil {
+			logger.Info("The target provider refused the import for its disk-size limit", "error", err.Error())
+			res, holdErr := r.holdMigrationForDiskSizeLimit(ctx, migration, infrav1beta1.VMMigrationConditionImporting, refusal)
+			if holdErr == nil && contracts.IsDiskSizeUnverifiable(err) {
+				res.RequeueAfter = r.importUnverifiable.nextWithin(string(migration.UID), time.Now(),
+					diskSizeLimitRetryInterval, importUnverifiableMaxRetryInterval)
+			}
+			return res, holdErr
+		}
 		logger.Error(err, "Failed to start disk import")
 		return r.transitionToFailed(ctx, migration, "Failed to start disk import: "+migrationFailureDetail(err))
 	}
+
+	// The import went through: a later unverifiable refusal starts its
+	// backoff afresh.
+	r.importUnverifiable.reset(string(migration.UID))
 
 	// Store import info in status.
 	//

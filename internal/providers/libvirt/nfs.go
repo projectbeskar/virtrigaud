@@ -25,6 +25,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/projectbeskar/virtrigaud/internal/providers/importlimit"
 	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
 )
 
@@ -181,8 +182,14 @@ func (s *Server) importDiskFromNFS(ctx context.Context, req *providerv1.ImportDi
 	// SECURITY: refuse a staged object whose qcow2 header references another
 	// file (backing file, data file): the convert would flatten that host file
 	// into <vm>-migrated.qcow2. Read it as qcow2, as the convert does.
-	if _, err := inspectHostImageAs(ctx, hostConnRunner{conn: conn}, importedImageSubject, nfsURL, "qcow2"); err != nil {
+	staged, err := inspectHostImageInfoAs(ctx, hostConnRunner{conn: conn}, importedImageSubject, nfsURL, "qcow2")
+	if err != nil {
 		return nil, fmt.Errorf("inspect staged nfs object: %w", err)
+	}
+	// The disk-size limit, early, from that same read (the converted output
+	// is checked again below: the export may change between two reads).
+	if err := importlimit.Check(staged.VirtualSize, nil, req.MaxVirtualSizeBytes); err != nil {
+		return nil, err
 	}
 
 	// Read the staged qcow2 straight from NFS and write the pool volume,
@@ -204,6 +211,11 @@ func (s *Server) importDiskFromNFS(ctx context.Context, req *providerv1.ImportDi
 	// Validate the converted qcow2 (ADR-0006 D5 structural integrity for NFS).
 	if res, err := conn.RunHost(ctx, "qemu-img", "check", newDisk); err != nil {
 		return nil, fmt.Errorf("qemu-img check failed on imported qcow2 %s: %w%s", targetPath, err, qemuImgStderr(res))
+	}
+	// The disk-size limit, on the converted disk in the private directory,
+	// right before it is published (the removed directory lands nothing).
+	if err := checkHostImportSize(ctx, hostConnRunner{conn: conn}, newDisk, "qcow2", req.MaxVirtualSizeBytes); err != nil {
+		return nil, err
 	}
 	if err := wd.publish(ctx, filepath.Base(targetPath), targetPath); err != nil {
 		return nil, fmt.Errorf("nfs import: %w", err)

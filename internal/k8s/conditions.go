@@ -28,6 +28,15 @@ const (
 	ConditionProvisioning = "Provisioning"
 	// ConditionReconfiguring indicates the resource is being reconfigured
 	ConditionReconfiguring = "Reconfiguring"
+	// ConditionDiskSizeWithinLimit is False (reason DiskSizeExceedsLimit or
+	// DiskSizeLimitUnverifiable) on a VirtualMachine whose last Reconfigure
+	// withheld the growth of a disk beyond the disk-size limit: the disk was
+	// left as it is while the VM's other changes went ahead. It is set
+	// whatever that Reconfigure's outcome (synchronous, an async task, a
+	// change pending a restart, a failure) and removed by the next Reconfigure
+	// that withholds nothing, or by a reconcile once the spec's sizes fit the
+	// limit again. It is never set on a VM without a limit.
+	ConditionDiskSizeWithinLimit = "DiskSizeWithinLimit"
 	// ConditionError indicates an error condition
 	ConditionError = "Error"
 	// ConditionHealthy indicates the resource is healthy
@@ -190,6 +199,27 @@ const (
 	// is applied only once the VM is powered off; until then the VM counts at
 	// its current size. The operator never powers the VM off by itself.
 	ReasonShrinkPendingPowerOff = "ShrinkPendingPowerOff"
+	// ReasonDiskSizeExceedsLimit is Ready=False (and Provisioning=False) on a
+	// VirtualMachine that is not created yet — or whose hypervisor VM is gone
+	// and would be re-created — when one of the disks it asks for (VMClass
+	// spec.diskDefaults.size, spec.disks[].sizeGiB) is above the disk-size
+	// limit that applies to its Provider: the smaller of the manager's
+	// --max-disk-size and the Provider's infra.virtrigaud.io/max-disk-size
+	// annotation. Nothing is created: no image prepare, placement or Create
+	// is sent. The VM is re-checked periodically and created once its sizes
+	// fit. On a VM that exists it is the DiskSizeWithinLimit=False reason of a
+	// Reconfigure that sent everything except the growth of a disk beyond the
+	// limit (that disk is never grown past it, and never shrunk). It is also
+	// the Ready=False reason of a pending VMClone, and the Validating=False,
+	// Exporting=False or Importing=False reason of a VMMigration, held for the
+	// same cause — a clone or migration by the source's real disk sizes.
+	ReasonDiskSizeExceedsLimit = "DiskSizeExceedsLimit"
+	// ReasonDiskSizeLimitUnverifiable is used like ReasonDiskSizeExceedsLimit
+	// when the disk-size limit cannot be checked: the Provider's
+	// infra.virtrigaud.io/max-disk-size annotation is not a valid limit, or a
+	// VMClass whose size counts is missing. VirtRigaud fails closed: nothing is
+	// created, cloned, migrated or grown until it can be checked.
+	ReasonDiskSizeLimitUnverifiable = "DiskSizeLimitUnverifiable"
 )
 
 // ConditionPlaced is the single positive placement condition of a VirtualMachine
