@@ -44,16 +44,21 @@ func (d *domainDisksDoc) diskCapacityTargets() []domainDiskElem {
 
 // domainDiskCapacities lists every disk of the domain (diskCapacityTargets)
 // with its virtual size, read from the disk file itself with qemu-img in the
-// format its definition names (readDiskInfoOnHost). A disk that is not
-// file-backed, or whose size could not be read, is listed with size 0, which
-// the manager treats as unknown (it fails closed under a disk-size limit).
-func domainDiskCapacities(ctx context.Context, h hostCommandRunner, doc *domainDisksDoc) []contracts.DiskCapacity {
+// format its definition names (readDiskInfoOnHost). known holds sizes already
+// read (the primary disk GetDiskInfo describes, 0 if that read failed), which
+// are not read again: GetDiskInfo of a one-disk domain runs no extra command.
+// A disk that is not file-backed, or whose size could not be read, is listed
+// with size 0, which the manager treats as unknown (it fails closed under a
+// disk-size limit).
+func domainDiskCapacities(ctx context.Context, h hostCommandRunner, doc *domainDisksDoc, known map[string]int64) []contracts.DiskCapacity {
 	targets := doc.diskCapacityTargets()
 	out := make([]contracts.DiskCapacity, 0, len(targets))
 	for _, e := range targets {
 		path := e.file()
 		c := contracts.DiskCapacity{ID: path, Path: path}
-		if path != "" {
+		if size, ok := known[path]; ok && path != "" {
+			c.VirtualSizeBytes = size
+		} else if path != "" {
 			c.VirtualSizeBytes = qemuImgVirtualSize(ctx, h, path, e.format())
 		}
 		out = append(out, c)

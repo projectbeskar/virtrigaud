@@ -2783,7 +2783,7 @@ func diskInfoOn(ctx context.Context, vp *VirshProvider, d domainTarget, req cont
 		},
 		// Every disk of the domain with its virtual size, for the manager's
 		// disk-size limit check before a clone.
-		Disks: domainDiskCapacities(ctx, vp, doc),
+		Disks: domainDiskCapacities(ctx, vp, doc, map[string]int64{diskPath: virtualSize}),
 	}
 
 	log.Printf("INFO Disk info retrieved: path=%s (format=%s, virtual=%d bytes, actual=%d bytes)",

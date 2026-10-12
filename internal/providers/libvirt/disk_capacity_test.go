@@ -59,10 +59,10 @@ func TestDomainDiskCapacities(t *testing.T) {
 </devices></domain>`)
 	require.NoError(t, err)
 
+	// The primary's size is already known: it is not read again.
 	got := domainDiskCapacities(context.Background(), qemuImgSizes{
-		"/pool/team-a.web.vmdk": 40 << 30,
-		"/pool/data.vmdk":       800 << 30,
-	}, doc)
+		"/pool/data.vmdk": 800 << 30,
+	}, doc, map[string]int64{"/pool/team-a.web.vmdk": 40 << 30})
 	assert.Equal(t, []contracts.DiskCapacity{
 		{ID: "/pool/team-a.web.vmdk", Path: "/pool/team-a.web.vmdk", VirtualSizeBytes: 40 << 30},
 		{ID: "/pool/data.vmdk", Path: "/pool/data.vmdk", VirtualSizeBytes: 800 << 30},
