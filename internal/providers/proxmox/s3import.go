@@ -32,14 +32,6 @@ import (
 	"github.com/projectbeskar/virtrigaud/sdk/provider/errors"
 )
 
-// proxmoxImportStageDir is the directory on the PVE node into which the import
-// path stages the downloaded qcow2 before the Create path consumes it with
-// `qm importdisk`. /var/tmp is a real on-disk path on every PVE node, local to
-// the node, and large enough for a multi-GB disk. The staged file persists across
-// the ImportDisk → Create handoff (two separate RPCs); Create removes it after a
-// successful importdisk, and a best-effort sweep removes stale stages.
-const proxmoxImportStageDir = "/var/tmp"
-
 // importDiskFromS3 implements the ADR-0006 Proxmox TARGET path: download the
 // staged qcow2 object from S3 and STAGE it as a regular file on the PVE node, then
 // return that node path. It is the symmetric sibling of exportDiskToS3.
@@ -116,12 +108,13 @@ func (p *Provider) importDiskFromS3(ctx context.Context, req *providerv1.ImportD
 		"src_format", srcFormat, "stage_path", stagePath, "storage_hint", req.StorageHint)
 
 	// --- STAGE (ADR D5) ---
-	// S3 → SSH stdin → `cat > <stagePath>` on the node. cat writes sequentially
-	// (no seek), so the non-seekable pipe is fine. The pipe couples DownloadStream
-	// (SHA256 verified in-stream) to the SSH stdin so the disk is never buffered
-	// whole in the pod.
+	// S3 → SSH stdin → `cat > "$TMP"` on the node, then `mv -T` onto the stage
+	// (buildImportStageScript: a fresh mktemp file in the root-only stage
+	// directory). cat writes sequentially (no seek), so the non-seekable pipe is
+	// fine. The pipe couples DownloadStream (SHA256 verified in-stream) to the
+	// SSH stdin so the disk is never buffered whole in the pod.
 	pr, pw := io.Pipe()
-	stageCmd := fmt.Sprintf("cat > %s", proxmoxShellQuote(stagePath))
+	stageCmd := buildImportStageScript(proxmoxImportStageDir, stagePath, `cat > "$TMP"`)
 
 	type dlResult struct {
 		resp storage.DownloadResponse

@@ -48,8 +48,9 @@ import (
 //  1. contracts.VMImage.ImportedDisk is true: the manager verified the path as
 //     the disk a VMMigration in the VM's own namespace imported for this VM
 //     (isOwnMigrationDisk); tenants cannot set it.
-//  2. The path is exactly the stage ImportDisk creates for this VM:
-//     "/var/tmp/.virtrigaud-import-<ns>_<vm>-migrated.<qcow2|raw|vmdk>", <ns>
+//  2. The path is exactly the stage ImportDisk creates for this VM
+//     (importStagePath):
+//     "/var/lib/virtrigaud/import-stage/<ns>_<vm>-migrated.<qcow2|raw|vmdk>", <ns>
 //     and <vm> being the requesting VirtualMachine's namespace
 //     (CreateRequest.owner, required) and name (importStageName, derived from
 //     ImportDiskRequest.target_vm). "_" appears in no Kubernetes name, so a
@@ -61,15 +62,48 @@ import (
 //     must be run again (see legacyImportStagePath). The provider never
 //     removes such a file: it is left for manual cleanup.
 //  3. On the node, the stage is a regular file, not a symbolic link, with one
-//     hard link (importStageNodeCheck). The check runs in the same shell
-//     command as `qm importdisk`.
+//     hard link, owned by the running user and not group/other-writable
+//     (importStageNodeCheck). The check runs in the same shell command as
+//     `qm importdisk`.
 //
 // Any other image Path is refused (InvalidArgument, nothing created) with a
 // constant message that never echoes the path. A node file is only ever
 // removed when its path is an import stage (isImportStagePath).
+//
+// Stages live in proxmoxImportStageDir, a directory only the SSH user (root)
+// can enter, never in a world-writable one: ImportDisk (re)creates it 0700,
+// writes the disk to a fresh mktemp file inside it and renames that onto the
+// stage name (buildImportStageScript), so no other account on the node can
+// pre-create, link or swap a stage. The stage name is unique per Kubernetes
+// cluster (namespace and VM name), not across clusters: one VirtRigaud
+// installation per PVE node.
 
-// importStageFilePrefix starts the file name of every import stage.
-const importStageFilePrefix = ".virtrigaud-import-"
+// proxmoxImportStageDir is the directory on the PVE node that holds import
+// stages between ImportDisk and the target VM's Create. It is a root-only
+// (0700) directory on the node's local disk, created by ImportDisk when
+// missing; /var/lib holds multi-GB data on every PVE node.
+const proxmoxImportStageDir = "/var/lib/virtrigaud/import-stage"
+
+// importStageTempTemplate is the mktemp template of a stage being written in
+// proxmoxImportStageDir. It starts with "." and never matches
+// importStagePathRE, so a half-written stage is never imported or removed as
+// a stage.
+const importStageTempTemplate = ".stage-XXXXXXXXXX"
+
+// legacyImportStageDir and legacyImportStageFilePrefix are where and how a
+// release before this fix staged disks: world-writable /var/tmp, named
+// ".virtrigaud-import-<vm>-migrated.<format>". Such stages are refused, never
+// removed (legacyImportStagePath).
+const (
+	legacyImportStageDir        = "/var/tmp"
+	legacyImportStageFilePrefix = ".virtrigaud-import-"
+)
+
+// nfsImportWorkDirTemplate is the mktemp template of the per-import work
+// directory an NFS import converts into when it reads the export as the
+// migration's uid/gid (setpriv), which cannot write the root-only stage
+// directory.
+const nfsImportWorkDirTemplate = "/var/tmp/.virtrigaud-nfsimport-XXXXXX"
 
 // importStageSeparator joins namespace and VM name in a stage name. It appears
 // in no Kubernetes namespace or name, so "<ns>_<vm>" is unambiguous and no VM
@@ -103,16 +137,16 @@ var importStageFormats = []string{"qcow2", "raw", "vmdk"}
 // importStagePathRE matches every node path ImportDisk stages a disk at: a
 // plain file name "<ns>_<...>-migrated.<format>" in proxmoxImportStageDir (a
 // DNS-label namespace, the separator, then the bounded or unbounded rest of
-// the stage name). An earlier release's bare "<vm>-migrated" stages (no "_")
-// do not match. cleanupNodeFile removes nothing else.
-var importStagePathRE = regexp.MustCompile(`^` + regexp.QuoteMeta(strings.TrimRight(proxmoxImportStageDir, "/")+"/"+importStageFilePrefix) +
+// the stage name). An earlier release's /var/tmp stages and in-progress
+// mktemp files do not match. cleanupNodeFile removes nothing else.
+var importStagePathRE = regexp.MustCompile(`^` + regexp.QuoteMeta(proxmoxImportStageDir+"/") +
 	`[a-z0-9][a-z0-9-]*` + importStageSeparator + `[a-z0-9._-]+` + regexp.QuoteMeta(contracts.ImportedDiskNameSuffix) +
 	`\.(qcow2|raw|vmdk)$`)
 
 // importedDiskRejectedMessage is the only text a refused imported-disk path
 // returns. It names the rule, never the caller's path.
 const importedDiskRejectedMessage = "imported disk rejected: the Proxmox provider imports a disk only when it is " +
-	"the VirtualMachine's own migration stage (/var/tmp/.virtrigaud-import-<namespace>_<vm name>-migrated.<format>, " +
+	"the VirtualMachine's own migration stage (/var/lib/virtrigaud/import-stage/<namespace>_<vm name>-migrated.<format>, " +
 	"staged by a VMMigration in the same namespace that targets this VirtualMachine); use a VMImage (template) " +
 	"for any other image"
 
@@ -173,10 +207,12 @@ func importStageName(namespace, name string) string {
 	return strings.TrimRight(head[:maxImportStageNameBytes-len(tail)], importStagePrefixTrim) + tail
 }
 
-// importStageFilePath is the node path of the stage named stageName in
-// format: "/var/tmp/.virtrigaud-import-<stageName>.<format>".
-func importStageFilePath(stageName, format string) string {
-	return strings.TrimRight(proxmoxImportStageDir, "/") + "/" + importStageFilePrefix + stageName + "." + format
+// importStagePath is THE node path of the stage of the disk a migration
+// imports for the VirtualMachine namespace/name in format:
+// "/var/lib/virtrigaud/import-stage/<importStageName>.<format>". It is the only
+// builder of stage paths; isImportStagePath is the only predicate.
+func importStagePath(namespace, name, format string) string {
+	return proxmoxImportStageDir + "/" + importStageName(namespace, name) + "." + format
 }
 
 // legacyImportStagePath is where a release before this fix staged the disk
@@ -185,7 +221,7 @@ func importStageFilePath(stageName, format string) string {
 // (errLegacyImportStage) and never removes it; ImportDisk never creates it
 // any more.
 func legacyImportStagePath(vmName, format string) string {
-	return importStageFilePath(vmName+contracts.ImportedDiskNameSuffix, format)
+	return legacyImportStageDir + "/" + legacyImportStageFilePrefix + vmName + contracts.ImportedDiskNameSuffix + "." + format
 }
 
 // validStageIdentity reports whether namespace/name can form a stage name: a
@@ -218,8 +254,7 @@ func importStageForRequest(req *providerv1.ImportDiskRequest, format string) (na
 		return "", "", errors.NewInvalidSpec("import target name %q does not match its target VM name %q",
 			req.GetTargetName(), tv.GetName())
 	}
-	name = importStageName(tv.GetNamespace(), tv.GetName())
-	return name, importStageFilePath(name, format), nil
+	return importStageName(tv.GetNamespace(), tv.GetName()), importStagePath(tv.GetNamespace(), tv.GetName(), format), nil
 }
 
 // checkImportedDiskPath enforces rules 1 and 2 of the imported-disk
@@ -238,7 +273,7 @@ func checkImportedDiskPath(diskPath string, imported bool, owner contracts.Objec
 	}
 	namespaced := owner.Namespace != "" && validStageIdentity(owner.Namespace, vmName) == nil
 	for _, format := range importStageFormats {
-		if namespaced && diskPath == importStageFilePath(importStageName(owner.Namespace, vmName), format) {
+		if namespaced && diskPath == importStagePath(owner.Namespace, vmName, format) {
 			return nil
 		}
 		if diskPath == legacyImportStagePath(vmName, format) {
@@ -276,4 +311,78 @@ func importStageNodeCheck(stagePath string) string {
 	q := proxmoxShellQuote(stagePath)
 	return fmt.Sprintf(`[ -f %s ] && [ ! -L %s ] && [ "$(stat -c '%%h %%u' -- %s)" = "1 $(id -u)" ] && `+
 		`[ $(( 0$(stat -c %%a -- %s) & 022 )) -eq 0 ]`, q, q, q, q)
+}
+
+// importStagePrepare is the shell fragment that makes dir a directory only the
+// running user can enter — (re)created 0700 by `install -d`, then verified to
+// be no symbolic link, owned by the running user, mode 700, or the script
+// exits 1 — and creates a fresh, empty file "$TMP" in it (mktemp, 0600 under
+// umask 077). The caller writes the stage content to "$TMP" and renames it
+// into place with importStageCommit.
+func importStagePrepare(dir string) string {
+	qd := proxmoxShellQuote(dir)
+	return "umask 077; install -d -m 0700 " + qd + "; " +
+		"[ ! -L " + qd + " ] && [ \"$(stat -c '%u %a' -- " + qd + ")\" = \"$(id -u) 700\" ] || exit 1; " +
+		"TMP=$(mktemp -p " + qd + " " + importStageTempTemplate + "); "
+}
+
+// importStageCommit is the shell fragment that atomically renames "$TMP" onto
+// the stage path (mv -T: never into a directory of that name).
+func importStageCommit(stagePath string) string {
+	return `mv -T -- "$TMP" ` + proxmoxShellQuote(stagePath)
+}
+
+// importStageTempCleanup removes a stage left half-written in "$TMP".
+const importStageTempCleanup = `rm -f -- "$TMP" 2>/dev/null || true`
+
+// buildImportStageScript is the node-side script that stages a disk at
+// stagePath (in dir): it prepares dir and "$TMP" (importStagePrepare), runs
+// writeCmd — which writes the disk to "$TMP" — and renames "$TMP" onto
+// stagePath. Any failure, or a hang-up of the SSH session, removes "$TMP" and
+// leaves no stage. dir is a parameter only so the tests can run the script
+// against a local directory; production passes proxmoxImportStageDir.
+func buildImportStageScript(dir, stagePath, writeCmd string) string {
+	return "set -e; " + importStagePrepare(dir) +
+		"trap '" + importStageTempCleanup + "' EXIT; trap 'exit 1' HUP INT TERM; " +
+		writeCmd + "; " + importStageCommit(stagePath)
+}
+
+// nfsImportStageInner is the part of an NFS import that runs inside the
+// mounted export ("$MNT"): convert the staged qcow2 at "$MNT"/rel to "$TMP"
+// in dir, then rename it onto stagePath.
+//
+// Without uid/gid, qemu-img runs as the SSH user and converts straight into
+// "$TMP". With them, it runs as uid/gid (setpriv) so the NFS server sees that
+// identity, and that identity cannot enter the root-only stage directory: it
+// converts into "$W/out" instead — W a fresh root-owned 0711 directory in
+// /var/tmp (so the identity can neither rename nor replace "out"), "out" its
+// 0700 directory — and the result is renamed into "$TMP" (mv moves a symbolic
+// link itself, never its target), checked to be a regular file with one link,
+// and given to the SSH user, 0600, before the rename onto stagePath.
+func nfsImportStageInner(dir, rel, stagePath string, uid, gid *int64) string {
+	src := `"$MNT"/` + proxmoxShellQuote(rel)
+	s := importStagePrepare(dir)
+	if uid != nil && gid != nil {
+		s += fmt.Sprintf(`W=$(mktemp -d %s); chmod 0711 "$W"; mkdir -m 0700 "$W/out"; chown %d:%d "$W/out"; `,
+			nfsImportWorkDirTemplate, *uid, *gid) +
+			nfsSetprivPrefix(uid, gid) + `qemu-img convert -O qcow2 ` + src + ` "$W/out/disk.qcow2"; ` +
+			`mv -T -- "$W/out/disk.qcow2" "$TMP"; ` +
+			`[ -f "$TMP" ] && [ ! -L "$TMP" ] && [ "$(stat -c %h -- "$TMP")" = 1 ] || exit 1; ` +
+			`chown "$(id -u):$(id -g)" -- "$TMP"; chmod 0600 -- "$TMP"; `
+	} else {
+		s += `qemu-img convert -O qcow2 ` + src + ` "$TMP"; `
+	}
+	return s + importStageCommit(stagePath)
+}
+
+// nfsImportStageCleanup is the trap cleanup of an NFS import: the half-written
+// "$TMP" and the work directory "$W" (rm -rf never follows a symbolic link).
+const nfsImportStageCleanup = importStageTempCleanup + `; rm -rf -- "$W" 2>/dev/null || true`
+
+// buildNFSImportStageScript is the node-side script of an NFS import: mount
+// the export (buildNFSKernelMountScript), stage "$MNT"/rel at stagePath in dir
+// (nfsImportStageInner), and on exit unmount and remove any half-written stage
+// and work directory.
+func buildNFSImportStageScript(dir, server, export, rel, stagePath string, uid, gid *int64) string {
+	return buildNFSKernelMountScript(server, export, nfsImportStageInner(dir, rel, stagePath, uid, gid), nfsImportStageCleanup)
 }

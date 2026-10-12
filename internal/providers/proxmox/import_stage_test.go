@@ -40,7 +40,7 @@ import (
 const (
 	// ownStagePath is the stage ImportDisk creates for testOwner()
 	// (team-a/web).
-	ownStagePath = "/var/tmp/.virtrigaud-import-team-a_web-migrated.qcow2"
+	ownStagePath = "/var/lib/virtrigaud/import-stage/team-a_web-migrated.qcow2"
 	// legacyOwnStagePath is where an earlier release staged web's disk.
 	legacyOwnStagePath = "/var/tmp/.virtrigaud-import-web-migrated.qcow2"
 )
@@ -108,16 +108,19 @@ func TestCreate_ImportedDiskPathConfined(t *testing.T) {
 		"ImportedDisk not a bool":           `{"Path":"` + ownStagePath + `","Format":"qcow2","ImportedDisk":"true"}`,
 		"legacy stage without ImportedDisk": imageJSON(legacyOwnStagePath, false),
 		"traversal out of the stage":        imageJSON(ownStagePath+"/../../../etc/shadow", true),
-		"traversal into the stage dir":      imageJSON("/var/tmp/../var/tmp/.virtrigaud-import-team-a_web-migrated.qcow2", true),
-		"another namespace's stage":         imageJSON("/var/tmp/.virtrigaud-import-team-b_web-migrated.qcow2", true),
-		"another VM's stage":                imageJSON("/var/tmp/.virtrigaud-import-team-a_db-migrated.qcow2", true),
+		"traversal into the stage dir":      imageJSON("/var/lib/../lib/virtrigaud/import-stage/team-a_web-migrated.qcow2", true),
+		"another namespace's stage":         imageJSON("/var/lib/virtrigaud/import-stage/team-b_web-migrated.qcow2", true),
+		"another VM's stage":                imageJSON("/var/lib/virtrigaud/import-stage/team-a_db-migrated.qcow2", true),
 		"another VM's legacy stage":         imageJSON("/var/tmp/.virtrigaud-import-db-migrated.qcow2", true),
 		"stage in another directory":        imageJSON("/tmp/.virtrigaud-import-team-a_web-migrated.qcow2", true),
-		"stage with a foreign extension":    imageJSON("/var/tmp/.virtrigaud-import-team-a_web-migrated.img", true),
+		"stage with a foreign extension":    imageJSON("/var/lib/virtrigaud/import-stage/team-a_web-migrated.img", true),
 		"stage with trailing space":         imageJSON(ownStagePath+" ", true),
 		"stage with trailing newline":       imageJSON(ownStagePath+"\n", true),
 		"relative stage":                    imageJSON(".virtrigaud-import-team-a_web-migrated.qcow2", true),
 		"pre-fix bare TargetName stage":     imageJSON("/var/tmp/.virtrigaud-import-web.qcow2", true),
+		"namespaced name in /var/tmp":       imageJSON("/var/tmp/.virtrigaud-import-team-a_web-migrated.qcow2", true),
+		"in-progress stage temp file":       imageJSON(proxmoxImportStageDir+"/.stage-abcdefghij", true),
+		"stage directory itself":            imageJSON(proxmoxImportStageDir, true),
 	}
 	for name, image := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -201,8 +204,8 @@ func TestCreate_LegacyImportStageRefused(t *testing.T) {
 func TestCreate_OwnImportStageImportedAndRemoved(t *testing.T) {
 	for name, path := range map[string]string{
 		"namespaced stage":      ownStagePath,
-		"namespaced raw stage":  "/var/tmp/.virtrigaud-import-team-a_web-migrated.raw",
-		"namespaced vmdk stage": "/var/tmp/.virtrigaud-import-team-a_web-migrated.vmdk",
+		"namespaced raw stage":  "/var/lib/virtrigaud/import-stage/team-a_web-migrated.raw",
+		"namespaced vmdk stage": "/var/lib/virtrigaud/import-stage/team-a_web-migrated.vmdk",
 	} {
 		t.Run(name, func(t *testing.T) {
 			p, srv, node := newConfinementProvider(t)
@@ -265,7 +268,11 @@ func TestCleanupNodeFile_RemovesOnlyImportStages(t *testing.T) {
 		"/var/tmp/.virtrigaud-import-Web-migrated.qcow2",
 		"/var/tmp/.virtrigaud-import-.qcow2",
 		legacyOwnStagePath,
-		"/var/tmp/.virtrigaud-import-team-a_../../etc/x-migrated.qcow2",
+		"/var/lib/virtrigaud/import-stage/team-a_../../etc/x-migrated.qcow2",
+		"/var/tmp/.virtrigaud-import-team-a_web-migrated.qcow2",
+		"/var/lib/virtrigaud/import-stage/.stage-abcdefghij",
+		"/var/lib/virtrigaud/import-stage/sub/team-a_web-migrated.qcow2",
+		"/var/lib/virtrigaud/import-stage/",
 	} {
 		t.Run(path, func(t *testing.T) {
 			p, _, node := newConfinementProvider(t)
@@ -315,9 +322,9 @@ func TestCheckImportedDiskPath(t *testing.T) {
 		"not imported":            {ownStagePath, false, owner, "web"},
 		"no vm name":              {ownStagePath, true, owner, ""},
 		"vm name not owner name":  {ownStagePath, true, owner, "db"},
-		"vm name not a DNS name":  {"/var/tmp/.virtrigaud-import-team-a_Web-migrated.qcow2", true, contracts.ObjectIdentity{Namespace: "team-a"}, "Web"},
-		"vm name with a slash":    {"/var/tmp/.virtrigaud-import-team-a_../x-migrated.qcow2", true, contracts.ObjectIdentity{Namespace: "team-a"}, "../x"},
-		"namespace not DNS label": {"/var/tmp/.virtrigaud-import-team.a_web-migrated.qcow2", true, contracts.ObjectIdentity{Namespace: "team.a"}, "web"},
+		"vm name not a DNS name":  {"/var/lib/virtrigaud/import-stage/team-a_Web-migrated.qcow2", true, contracts.ObjectIdentity{Namespace: "team-a"}, "Web"},
+		"vm name with a slash":    {"/var/lib/virtrigaud/import-stage/team-a_../x-migrated.qcow2", true, contracts.ObjectIdentity{Namespace: "team-a"}, "../x"},
+		"namespace not DNS label": {"/var/lib/virtrigaud/import-stage/team.a_web-migrated.qcow2", true, contracts.ObjectIdentity{Namespace: "team.a"}, "web"},
 		"no namespace":            {ownStagePath, true, contracts.ObjectIdentity{}, "web"},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -341,8 +348,8 @@ func TestImportStageName(t *testing.T) {
 	assert.True(t, strings.HasSuffix(got, contracts.ImportedDiskNameSuffix))
 	assert.Contains(t, got, importStageHashMarker)
 	assert.NotEqual(t, got, importStageName(long, name[:252]+"w"), "bounded names stay distinct")
-	assert.True(t, isImportStagePath(importStageFilePath(got, "qcow2")))
-	assert.LessOrEqual(t, len(importStageFilePrefix+got+".qcow2"), 255, "fits a file name")
+	assert.True(t, isImportStagePath(proxmoxImportStageDir+"/"+got+".qcow2"))
+	assert.LessOrEqual(t, len(got+".qcow2"), 255, "fits a file name")
 }
 
 func TestImportStageForRequest(t *testing.T) {
@@ -350,7 +357,7 @@ func TestImportStageForRequest(t *testing.T) {
 	name, path, err := importStageForRequest(&providerv1.ImportDiskRequest{TargetVm: tv, TargetName: "web-migrated"}, "vmdk")
 	require.NoError(t, err)
 	assert.Equal(t, "team-a_web-migrated", name)
-	assert.Equal(t, "/var/tmp/.virtrigaud-import-team-a_web-migrated.vmdk", path)
+	assert.Equal(t, "/var/lib/virtrigaud/import-stage/team-a_web-migrated.vmdk", path)
 
 	_, _, err = importStageForRequest(&providerv1.ImportDiskRequest{TargetVm: tv}, "qcow2")
 	require.NoError(t, err, "target_name is optional")
@@ -389,10 +396,10 @@ func TestImportDisk_RequiresTargetVM(t *testing.T) {
 
 func TestIsImportStagePath(t *testing.T) {
 	assert.True(t, isImportStagePath(ownStagePath))
-	assert.True(t, isImportStagePath("/var/tmp/.virtrigaud-import-team-a_web-migrated.vmdk"))
+	assert.True(t, isImportStagePath("/var/lib/virtrigaud/import-stage/team-a_web-migrated.vmdk"))
 	assert.False(t, isImportStagePath(legacyOwnStagePath), "legacy bare-name stages are never removed")
 	assert.False(t, isImportStagePath("/var/tmp/.virtrigaud-import-imported-disk-1700000000.raw"))
-	assert.False(t, isImportStagePath("/var/tmp/.virtrigaud-import-team-a_web.qcow2"), "no -migrated suffix")
+	assert.False(t, isImportStagePath("/var/lib/virtrigaud/import-stage/team-a_web.qcow2"), "no -migrated suffix")
 	assert.False(t, isImportStagePath("/var/tmp/.virtrigaud-import-a..b.qcow2"))
 	assert.False(t, isImportStagePath("/var/tmp/.virtrigaud-import-a/b.qcow2"))
 	assert.False(t, isImportStagePath("/var/tmp/.virtrigaud-export-a.qcow2"))
@@ -404,9 +411,7 @@ func TestIsImportStagePath(t *testing.T) {
 // other write bit passes. (A file owned by another user cannot be made
 // without root; the owner comparison is exercised by the passing case.)
 func TestImportStageNodeCheck_RealShell(t *testing.T) {
-	if err := exec.Command("stat", "-c", "%h", "/").Run(); err != nil {
-		t.Skip("GNU stat not available")
-	}
+	requireGNUStat(t)
 	dir := t.TempDir()
 	mk := func(name string, mode os.FileMode) string {
 		p := filepath.Join(dir, name)

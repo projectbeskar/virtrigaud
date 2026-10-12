@@ -224,13 +224,11 @@ func (p *Provider) importDiskFromNFS(ctx context.Context, req *providerv1.Import
 	p.logger.Info("Importing disk from NFS to Proxmox node (kernel mount; stage for qm importdisk at Create)",
 		"id", id, "source", nfsURL, "stage_path", stagePath, "storage_hint", req.StorageHint)
 
-	// Convert from the mounted export to the node-local stage file. The convert
-	// reads NFS as the migration's uid/gid (setpriv); the stage lands in /var/tmp
-	// (world-writable) and is consumed by `qm importdisk` at Create.
-	mountFile := `"$MNT"/` + proxmoxShellQuote(rel)
-	inner := nfsSetprivPrefix(opts.UID, opts.GID) +
-		fmt.Sprintf("qemu-img convert -O qcow2 %s %s", mountFile, proxmoxShellQuote(stagePath))
-	script := buildNFSKernelMountScript(opts.Server, opts.Export, inner, "")
+	// Convert from the mounted export to the node-local stage in the root-only
+	// stage directory (buildNFSImportStageScript, import_stage.go). The convert
+	// reads NFS as the migration's uid/gid (setpriv) when set; the stage is
+	// consumed by `qm importdisk` at Create.
+	script := buildNFSImportStageScript(proxmoxImportStageDir, opts.Server, opts.Export, rel, stagePath, opts.UID, opts.GID)
 	if _, stderr, err := p.ssh.runSSH(ctx, script); err != nil {
 		p.cleanupNodeFile(stagePath)
 		return nil, errors.NewInternal(

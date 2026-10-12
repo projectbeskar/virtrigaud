@@ -58,7 +58,7 @@ Read the upgrade guide before upgrading:
   the SSH user can read on the PVE node (another VM's disk, `/etc/pve/priv/*`)
   into their own VM. Now the path must be verified by the manager as this VM's
   own migration disk and be exactly
-  `/var/tmp/.virtrigaud-import-<namespace>_<vm name>-migrated.<format>` (stages
+  `/var/lib/virtrigaud/import-stage/<namespace>_<vm name>-migrated.<format>` (stages
   are now named per namespace); anything else is refused before anything is
   created. **Upgrade the manager before the Proxmox provider.** A Proxmox-target
   migration staged before the upgrade whose target VM was not yet created must

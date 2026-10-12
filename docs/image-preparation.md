@@ -609,12 +609,16 @@ does not own.
 reads a node file only as a VM's own migration stage: the disk `ImportDisk` staged on
 the PVE node for that VirtualMachine, which `Create` imports with `qm importdisk` and then
 removes. The manager must have verified the path as above, and the path must be exactly
-`/var/tmp/.virtrigaud-import-<namespace>_<vm name>-migrated.<qcow2|raw|vmdk>` — the name
+`/var/lib/virtrigaud/import-stage/<namespace>_<vm name>-migrated.<qcow2|raw|vmdk>` — the name
 `ImportDisk` derives from the target VM's namespace and name, so the same VM name in two
 namespaces gets two stages (a name over 200 bytes is shortened to its start, `__`, a
-16-hex-digit SHA-256 of `<namespace>/<vm name>`, and `-migrated`). On the node,
-`qm importdisk` runs only if the stage is a regular file, not a symbolic link, with a single
-hard link, owned by the SSH user (root), and not writable by group or others. Any other `spec.importedDisk.path` is refused before anything is created
+16-hex-digit SHA-256 of `<namespace>/<vm name>`, and `-migrated`). The stage directory is
+created by `ImportDisk` with mode `0700` and must stay a root-owned `0700` directory (an
+import fails otherwise); each disk is written to a fresh temporary file in it and renamed
+onto the stage name, so no other account on the node can create, link or swap a stage. On
+the node, `qm importdisk` runs only if the stage is a regular file, not a symbolic link,
+with a single hard link, owned by the SSH user (root), and not writable by group or
+others. Any other `spec.importedDisk.path` is refused before anything is created
 (`ValidationError`, the message never contains the path), and the provider never removes a
 node file that is not an import stage. A stage an earlier release created under the bare
 `/var/tmp/.virtrigaud-import-<vm name>-migrated.<format>` name is refused, even for the VM's

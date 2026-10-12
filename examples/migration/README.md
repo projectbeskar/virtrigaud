@@ -87,7 +87,7 @@ both an API token (`token_id`/`token_secret`) and SSH credentials (`ssh_user` +
 Proxmox disk data plane runs `qemu-img`/`qm` on the PVE node over SSH.
 
 A Proxmox target stages the disk on the PVE node at
-`/var/tmp/.virtrigaud-import-<target namespace>_<target VM name>-migrated.<format>`;
+`/var/lib/virtrigaud/import-stage/<target namespace>_<target VM name>-migrated.<format>` (a directory only root can enter);
 the target VM's create imports it with `qm importdisk` and removes it. The create
 accepts only that exact stage, and only for a `VMMigration` in the target VM's own
 namespace: a migration whose `spec.target.namespace` names another namespace

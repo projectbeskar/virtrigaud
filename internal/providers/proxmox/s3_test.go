@@ -158,18 +158,18 @@ func TestProxmoxExportStagePath(t *testing.T) {
 // target VM (so a retry overwrites rather than leaks) and uses the source format
 // suffix.
 func TestProxmoxImportStagePath(t *testing.T) {
-	a := importStageFilePath(importStageName("team-a", "web-01"), "qcow2")
-	b := importStageFilePath(importStageName("team-a", "web-01"), "qcow2")
+	a := importStagePath("team-a", "web-01", "qcow2")
+	b := importStagePath("team-a", "web-01", "qcow2")
 	assert.Equal(t, a, b, "import stage path must be deterministic per target VM (retry-safe)")
-	assert.Equal(t, "/var/tmp/.virtrigaud-import-team-a_web-01-migrated.qcow2", a)
+	assert.Equal(t, "/var/lib/virtrigaud/import-stage/team-a_web-01-migrated.qcow2", a)
 }
 
 // TestBuildImportDiskCommand pins the `qm importdisk` argv: the node-side stage
 // check, then vmid, shell-quoted path/storage, and an explicit format so PVE does
 // not probe.
 func TestBuildImportDiskCommand(t *testing.T) {
-	cmd := buildImportDiskCommand(110001, "/var/tmp/.virtrigaud-import-ns_web-migrated.qcow2", "local-lvm", "qcow2")
-	q := "'/var/tmp/.virtrigaud-import-ns_web-migrated.qcow2'"
+	cmd := buildImportDiskCommand(110001, "/var/lib/virtrigaud/import-stage/ns_web-migrated.qcow2", "local-lvm", "qcow2")
+	q := "'/var/lib/virtrigaud/import-stage/ns_web-migrated.qcow2'"
 	assert.Equal(t,
 		"[ -f "+q+" ] && [ ! -L "+q+" ] && [ \"$(stat -c '%h %u' -- "+q+")\" = \"1 $(id -u)\" ] && "+
 			"[ $(( 0$(stat -c %a -- "+q+") & 022 )) -eq 0 ] && "+
@@ -321,13 +321,13 @@ func TestParseCreateRequest_ImportedDiskPath(t *testing.T) {
 		Name:      "web",
 		ClassJson: `{"cpus": 2, "memory": "2Gi"}`,
 		// contracts.VMImage marshals with capitalized field names (Path/Format/ImportedDisk).
-		ImageJson: `{"Path":"/var/tmp/.virtrigaud-import-team-a_web-migrated.qcow2","Format":"qcow2","ImportedDisk":true}`,
+		ImageJson: `{"Path":"/var/lib/virtrigaud/import-stage/team-a_web-migrated.qcow2","Format":"qcow2","ImportedDisk":true}`,
 		Owner:     &providerv1.ObjectIdentity{Uid: "u1", Namespace: "team-a", Name: "web"},
 	}
 
 	cfg, _, err := provider.parseCreateRequest(context.Background(), req)
 	require.NoError(t, err)
-	assert.Equal(t, "/var/tmp/.virtrigaud-import-team-a_web-migrated.qcow2", cfg.ImportedDiskPath)
+	assert.Equal(t, "/var/lib/virtrigaud/import-stage/team-a_web-migrated.qcow2", cfg.ImportedDiskPath)
 	assert.Equal(t, "qcow2", cfg.ImportedDiskFormat)
 	assert.Empty(t, cfg.Template, "an imported-disk create must not be treated as a template clone")
 }
