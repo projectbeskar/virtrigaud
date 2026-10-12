@@ -77,6 +77,13 @@ type Provider struct {
 	// throughput watchdog (0 = the defaults; tests only).
 	downloadStallWindow       time.Duration
 	downloadMinBytesPerWindow int64
+	// landingLocks serialises the work on one migration landing folder — an
+	// in-place attach, an import and its cleanup — keyed by landingLockKey
+	// (disk_guard.go).
+	landingLocks keyedMutex
+	// diskScans shares and briefly reuses the datastore scans of the disk
+	// in-use checks (disk_scan.go).
+	diskScans diskScanCache
 }
 
 // Config holds the vSphere provider configuration
@@ -530,7 +537,9 @@ func (p *Provider) GetCapabilities(ctx context.Context, req *providerv1.GetCapab
 //   - Imported disk: when req.ImageJson contains a Path the VM is created from scratch
 //     (CreateVM_Task) with the pre-uploaded VMDK attached as a persistent disk.
 //
-// In both cases the VM is powered on immediately after creation. The returned
+// In both cases the VM is left powered off. CreateRequest carries no power field:
+// the VirtualMachine controller powers the VM on afterwards (Power RPC) only when its
+// spec.powerState is On or empty, matching the libvirt and Proxmox providers. The returned
 // CreateResponse.Id contains the vSphere ManagedObjectReference value (e.g. "vm-42")
 // which is used as the stable VM identifier in all subsequent API calls.
 //
@@ -570,6 +579,17 @@ func (p *Provider) Create(ctx context.Context, req *providerv1.CreateRequest) (*
 	// MOID-shaped or otherwise unsafe name can never reach a lookup.
 	if vmSpec.DiskPath == "" && vmSpec.TemplateName != "" {
 		if err := templateRefError(vmSpec.TemplateName); err != nil {
+			return nil, err
+		}
+	}
+
+	// A disk attached in place must be this VM's own migration landing disk
+	// (disk_guard.go, rules 1 and 2), checked before any vCenter call. Rule 3
+	// (no other VM uses it) is checked below, once the VM is known not to exist.
+	if vmSpec.DiskPath != "" {
+		if _, err := checkInPlaceDiskPath(vmSpec.DiskPath, vmSpec.Owner, vmSpec.Name, vmSpec.ImportedDisk); err != nil {
+			p.logger.Warn("Refusing to attach a disk in place: not this VM's own migration landing disk",
+				"vm_name", vmSpec.Name, "disk_path", vmSpec.DiskPath, "imported_disk", vmSpec.ImportedDisk)
 			return nil, err
 		}
 	}
@@ -617,9 +637,39 @@ func (p *Provider) Create(ctx context.Context, req *providerv1.CreateRequest) (*
 	}
 	switch len(existing) {
 	case 0:
-		// Name is free in the target folder: create below.
+		// Name is free in the target folder: create below. A disk attached in
+		// place must not be referenced by any VM or template in the inventory
+		// (disk_guard.go, rule 3; fails closed).
+		// The landing folder's lock is held until Create returns, so no other
+		// attach or import of this landing disk runs between the check and the
+		// create.
+		if vmSpec.DiskPath != "" {
+			unlock, err := p.landingLocks.lock(ctx, landingLockKeyOfPath(vmSpec.DiskPath))
+			if err != nil {
+				return nil, fmt.Errorf("wait for other work on the imported disk: %w", err)
+			}
+			defer unlock()
+			// Once this create is done, the next check of the datastore must
+			// see the VM it made (or did not make).
+			var dp object.DatastorePath
+			dp.FromString(vmSpec.DiskPath)
+			defer p.diskScans.invalidate(diskScanKey(dp.Datastore))
+			if err := p.ensureDiskFileUnused(ctx, vmSpec.DiskPath); err != nil {
+				return nil, err
+			}
+		}
 	case 1:
-		return p.bindExistingVM(ctx, existing[0], vmSpec.Name, vmSpec.Owner)
+		resp, err := p.bindExistingVM(ctx, existing[0], vmSpec.Name, vmSpec.Owner)
+		if err != nil {
+			return nil, err
+		}
+		// A create retried after the VM was made (e.g. past the manager's
+		// deadline) completes the post-create steps the first attempt did not
+		// finish; they are idempotent (post_create.go).
+		if err := p.applyPostCreateStepsOnBind(ctx, resp.Id, vmSpec); err != nil {
+			return nil, err
+		}
+		return resp, nil
 	default:
 		p.logger.Warn("Refusing to bind: more than one VM with the requested name exists in the target folder",
 			"vm_name", vmSpec.Name, "folder", folder.Reference().Value, "count", len(existing))
@@ -650,7 +700,9 @@ func (p *Provider) Create(ctx context.Context, req *providerv1.CreateRequest) (*
 //     refuse with FailedPrecondition/VM_IS_IMAGE_ARTIFACT, changing nothing.
 //  4. If the VM is powered on, issue a PowerOff task and wait for it to finish.
 //     A power-off failure is logged but does not abort the deletion.
-//  5. Issue a Destroy task (equivalent to "Delete from Disk" in the vSphere UI)
+//  5. Detach, keeping the file, every disk the VM does not own
+//     (detachForeignDisks): Destroy_Task deletes every attached disk.
+//  6. Issue a Destroy task (equivalent to "Delete from Disk" in the vSphere UI)
 //     and wait for it to complete.
 //
 // The operation blocks until the Destroy task finishes.
@@ -716,6 +768,12 @@ func (p *Provider) Delete(ctx context.Context, req *providerv1.DeleteRequest) (*
 		} else {
 			p.logger.Info("VM powered off successfully", "vm_id", req.Id)
 		}
+	}
+
+	// Destroy_Task deletes every disk attached to the VM, wherever its file
+	// is: detach (keeping the file) any disk the VM does not own first.
+	if err := p.detachForeignDisks(ctx, vm); err != nil {
+		return nil, err
 	}
 
 	// Delete the VM from disk (this removes it from inventory and deletes files)
@@ -2138,6 +2196,11 @@ type VMSpec struct {
 	TemplateName string
 	DiskPath     string // Path to existing disk (for imported disks)
 	DiskFormat   string // Format of existing disk (for imported disks)
+	// ImportedDisk is contracts.VMImage.ImportedDisk: the operator verified
+	// DiskPath as this VM's own migration landing disk. DiskPath is attached in
+	// place only when it is set and the path passes the in-place confinement
+	// (disk_guard.go).
+	ImportedDisk bool
 	NetworkName  string
 	// Static network configuration applied via guestinfo.network.* keys.
 	// Populated from the first entry of NetworksJson (VirtualMachine.spec.networks[0]).
@@ -2190,8 +2253,11 @@ type AdditionalDiskSpec struct {
 //     (vsphere.hardwareVersion key), DiskDefaults, PerformanceProfile (nested virt,
 //     VBS, CPU/memory hot-add), SecurityProfile (SecureBoot, TPM, VT-d).
 //   - req.ImageJson  — contracts.VMImage: TemplateName (for template clones) or Path +
-//     Format (for imported-disk VMs). When Path is non-empty, disk-based creation is
-//     used and TemplateName is ignored.
+//     Format + ImportedDisk (for imported-disk VMs). A Path is used (disk-based
+//     creation, TemplateName ignored) when ImportedDisk is set or no TemplateName
+//     is given; Create then admits it only through the in-place confinement
+//     (disk_guard.go). A Path beside a TemplateName without ImportedDisk is
+//     another provider's source and is ignored.
 //   - req.NetworksJson — []contracts.NetworkAttachment: the first element's
 //     NetworkName attaches a single network adapter, and its StaticIP/Prefix/
 //     Gateway/DNS are surfaced to the guest as guestinfo.network.* for static IP
@@ -2288,21 +2354,32 @@ func (p *Provider) parseCreateRequest(req *providerv1.CreateRequest) (*VMSpec, e
 			TemplateName string `json:"TemplateName"`
 			Path         string `json:"Path"`
 			Format       string `json:"Format"`
+			ImportedDisk bool   `json:"ImportedDisk"`
 		}
 
 		if err := json.Unmarshal([]byte(req.ImageJson), &vmImage); err != nil {
 			return nil, fmt.Errorf("failed to parse VMImage JSON: %w", err)
 		}
 
-		// If Path is set, this is an imported disk (not a template)
-		if vmImage.Path != "" {
+		switch {
+		case vmImage.Path != "" && !vmImage.ImportedDisk && vmImage.TemplateName != "":
+			// A VMImage with several provider sources (e.g. a vSphere template
+			// and a libvirt path): vSphere base images are templates, so the
+			// path is not this provider's and is ignored.
+			p.logger.Info("Ignoring the image path of a template-based image; a vSphere base image is its template",
+				"vm_name", spec.Name)
+			spec.TemplateName = vmImage.TemplateName
+		case vmImage.Path != "":
+			// An existing disk to attach in place. Create admits it only
+			// through the in-place confinement (disk_guard.go): ImportedDisk
+			// set, the VM's own migration landing disk, used by no other VM.
 			spec.DiskPath = vmImage.Path
+			spec.ImportedDisk = vmImage.ImportedDisk
 			spec.DiskFormat = vmImage.Format
 			if spec.DiskFormat == "" {
 				spec.DiskFormat = "vmdk" // Default for vSphere
 			}
-		} else {
-			// Otherwise, it's a template-based VM
+		default:
 			spec.TemplateName = vmImage.TemplateName
 		}
 	}
@@ -2455,8 +2532,13 @@ func (p *Provider) parseCreateRequest(req *providerv1.CreateRequest) (*VMSpec, e
 // (if provided, via addCloudInitToConfigSpec) are embedded in the config spec before
 // the task is submitted, so they are set at creation time; on the clone path an owner
 // stamp inherited from the template is overwritten or cleared. After the task
-// completes, the primary disk is optionally grown via resizeVMDisk and the VM is
-// powered on. datacenter must be the datacenter the finder is scoped to.
+// completes, the primary disk is grown (grow-only) to the VMClass size and the
+// additional disks are attached (applyPostCreateSteps, post_create.go); a
+// failure there is returned as a retryable error, the VM is kept, and the
+// manager's next Create binds it and completes the steps. The VM is NOT
+// powered on: the VirtualMachine controller applies spec.powerState afterwards
+// through the Power RPC, as it does for libvirt and Proxmox. datacenter must be
+// the datacenter the finder is scoped to.
 func (p *Provider) createVirtualMachine(ctx context.Context, spec *VMSpec, datacenter *object.Datacenter, folder *object.Folder) (string, error) {
 	p.logger.Info("Creating virtual machine",
 		"name", spec.Name,
@@ -2604,6 +2686,9 @@ func (p *Provider) createVirtualMachine(ctx context.Context, spec *VMSpec, datac
 		return "", err
 	}
 	extraConfig := append(ownerExtraConfig(spec.Owner), clearImage...)
+	// Mark the VM as created with idempotent post-create steps, and clear any
+	// additional-disk record a clone inherits from its template (post_create.go).
+	extraConfig = append(extraConfig, postCreateExtraConfig(spec)...)
 
 	// Configure performance and security features.
 	// Enable nested virtualization if requested
@@ -2880,7 +2965,12 @@ func (p *Provider) createVirtualMachine(ctx context.Context, spec *VMSpec, datac
 			return "", fmt.Errorf("VM creation task failed: %w", err)
 		}
 
-		vmRef, ok := info.Result.(types.ManagedObjectReference)
+		// Assign (never redeclare) the outer vmRef: the disk resize and the
+		// additional-disk attach below address the new VM through it. A `:=`
+		// here shadowed it, leaving those steps an empty reference that
+		// vCenter cannot resolve, so they were silently skipped.
+		var ok bool
+		vmRef, ok = info.Result.(types.ManagedObjectReference)
 		if !ok {
 			return "", fmt.Errorf("unexpected result type from create task: %T", info.Result)
 		}
@@ -2934,72 +3024,40 @@ func (p *Provider) createVirtualMachine(ctx context.Context, spec *VMSpec, datac
 	// NOTE: extraConfig and cloud-init are already applied during CloneVM_Task above
 	// No post-clone reconfiguration needed - rely on clone-time settings
 
-	// Resize disk if specified in VMClass
-	if spec.DiskSizeGB > 0 {
-		if err := p.resizeVMDisk(ctx, newVM, spec.DiskSizeGB, vmID); err != nil {
-			p.logger.Warn("Failed to resize VM disk", "vm_id", vmID, "target_size_gb", spec.DiskSizeGB, "error", err)
-			// Don't fail the entire creation if disk resize fails
-		}
+	// Grow the primary disk to the VMClass size and attach the additional
+	// disks. The steps are idempotent; a failure fails the create with a
+	// retryable error, and the manager's next Create binds this VM and
+	// completes them (post_create.go). The VM is never reported created with a
+	// step silently skipped.
+	if err := p.applyPostCreateSteps(ctx, newVM, spec); err != nil {
+		return "", err
 	}
 
-	// Attach additional disks if specified
-	if len(spec.AdditionalDisks) > 0 {
-		p.logger.Debug("Starting additional disk attachment",
-			"vm_id", vmID,
-			"count", len(spec.AdditionalDisks))
-
-		for i, diskSpec := range spec.AdditionalDisks {
-			p.logger.Debug("Attaching disk",
-				"vm_id", vmID,
-				"disk_index", i+1,
-				"disk_name", diskSpec.Name,
-				"size_gib", diskSpec.SizeGiB,
-				"type", diskSpec.Type)
-
-			if err := p.attachAdditionalDisk(ctx, newVM, diskSpec, datacenter, datastore, i+1); err != nil {
-				p.logger.Error("Failed to attach additional disk",
-					"vm_id", vmID,
-					"disk_name", diskSpec.Name,
-					"disk_index", i+1,
-					"error", err)
-				// Continue with remaining disks rather than failing entire creation
-			} else {
-				p.logger.Debug("Successfully attached additional disk",
-					"vm_id", vmID,
-					"disk_name", diskSpec.Name,
-					"disk_index", i+1,
-					"size_gb", diskSpec.SizeGiB)
-			}
-		}
-	} else {
-		p.logger.Debug("No additional disks to attach", "vm_id", vmID)
-	}
-
-	// Power on the VM if requested (VirtualMachine spec.powerState: "On")
-	// Note: This is a simple implementation - in production you might want to check the actual powerState from the request
-	powerTask, err := newVM.PowerOn(ctx)
-	if err != nil {
-		p.logger.Warn("Failed to power on VM after creation", "vm_id", vmID, "error", err)
-		// Don't fail the entire creation if power on fails
-	} else {
-		_, err = powerTask.WaitForResult(ctx, nil)
-		if err != nil {
-			p.logger.Warn("VM power on task failed", "vm_id", vmID, "error", err)
-		} else {
-			p.logger.Info("VM powered on successfully", "vm_id", vmID)
-		}
-	}
+	// The VM is deliberately left powered off. Power is the VirtualMachine
+	// controller's job, exactly as for libvirt and Proxmox: on its next reconcile
+	// it Describes the VM, compares the observed state with spec.powerState (empty
+	// means On) and calls Power only when they differ. Powering on here would boot
+	// a VM whose spec asks for Off (a VMMigration or VMClone target with
+	// powerOn: false) until the controller hard-powered it off again: long enough
+	// for a migrated copy to appear on the network with the still-running
+	// source's IP and hostname. The guestinfo cloud-init and network keys set
+	// above are read by the guest on its first boot, whenever that happens.
+	p.logger.Info("VM created powered off; the VM controller applies spec.powerState", "vm_id", vmID)
 
 	return vmID, nil
 }
 
-// attachAdditionalDisk attaches a new disk to an existing VM
+// attachAdditionalDisk creates additional disk diskIndex (1-based) of vm and
+// attaches it. The disk file is created in the VM's own home directory — the
+// directory of its .vmx (config.files.vmPathName), on that datastore — never
+// in a directory named after the VM on some other datastore, which may not
+// exist or may belong to another VM (a VM created from an imported disk has
+// its home on the imported disk's datastore, and vCenter may have suffixed the
+// directory name).
 func (p *Provider) attachAdditionalDisk(
 	ctx context.Context,
 	vm *object.VirtualMachine,
 	diskSpec AdditionalDiskSpec,
-	datacenter *object.Datacenter,
-	datastore *object.Datastore,
 	diskIndex int,
 ) error {
 	p.logger.Info("Attaching additional disk",
@@ -3013,9 +3071,28 @@ func (p *Provider) attachAdditionalDisk(
 
 	// Get current VM configuration to find available controller and unit number
 	var vmMo mo.VirtualMachine
-	err := vm.Properties(ctx, vm.Reference(), []string{"config.hardware.device", "config.name"}, &vmMo)
+	err := vm.Properties(ctx, vm.Reference(),
+		[]string{propConfigHardwareDevice, "config.name", propConfigFilesVMPathName, propConfigExtraConfig}, &vmMo)
 	if err != nil {
 		return fmt.Errorf("failed to get VM properties: %w", err)
+	}
+	if vmMo.Config == nil {
+		return fmt.Errorf("VM %s has no readable configuration", vm.Reference().Value)
+	}
+	// Idempotent: the disk is recorded in the VM's ExtraConfig by the same
+	// reconfigure that adds it, so a recorded disk is never added again.
+	recordKey := additionalDiskExtraConfigKey(diskIndex)
+	if file, done := extraConfigValue(vmMo.Config.ExtraConfig, recordKey); done {
+		p.logger.Info("Additional disk already attached", "vm_id", vm.Reference().Value, "disk_index", diskIndex, "path", file)
+		return nil
+	}
+	var home object.DatastorePath
+	if !home.FromString(vmMo.Config.Files.VmPathName) || home.Datastore == "" {
+		return fmt.Errorf("VM %s has no usable home path (config.files.vmPathName)", vm.Reference().Value)
+	}
+	homeDir := path.Dir(home.Path)
+	if homeDir == "." || homeDir == "/" {
+		homeDir = ""
 	}
 
 	// Find SCSI controllers indexed by bus number
@@ -3110,11 +3187,12 @@ func (p *Provider) attachAdditionalDisk(
 		return fmt.Errorf("no available unit numbers on SCSI controller (all 15 slots used)")
 	}
 
-	// Construct datastore path for new disk
-	// Format: [datastore] vm-name/vm-name_N.vmdk
+	// Construct the datastore path of the new disk in the VM's home directory:
+	// "[<home ds>] <home dir>/<vm>-additional-N.vmdk" (additionalDiskFileName:
+	// never one of the "<vm>_N.vmdk" names vCenter gives a template's disks).
 	vmName := vmMo.Config.Name
-	diskFileName := fmt.Sprintf("%s_%d.vmdk", vmName, diskIndex)
-	diskPath := fmt.Sprintf("[%s] %s/%s", datastore.Name(), vmName, diskFileName)
+	diskFileName := additionalDiskFileName(vmName, diskIndex)
+	diskPath := (&object.DatastorePath{Datastore: home.Datastore, Path: path.Join(homeDir, diskFileName)}).String()
 
 	p.logger.Info("Creating disk file",
 		"path", diskPath,
@@ -3141,8 +3219,7 @@ func (p *Provider) attachAdditionalDisk(
 	// Create disk backing
 	diskBacking := &types.VirtualDiskFlatVer2BackingInfo{
 		VirtualDeviceFileBackingInfo: types.VirtualDeviceFileBackingInfo{
-			FileName:  diskPath,
-			Datastore: types.NewReference(datastore.Reference()),
+			FileName: diskPath,
 		},
 		DiskMode:        diskMode,
 		ThinProvisioned: thinProvisioned,
@@ -3176,9 +3253,11 @@ func (p *Provider) attachAdditionalDisk(
 		Device:        diskDevice,
 	}
 
-	// Create reconfigure spec
+	// Create reconfigure spec. The disk's record goes in the same task, so the
+	// disk is recorded exactly when it is added.
 	configSpec := &types.VirtualMachineConfigSpec{
 		DeviceChange: []types.BaseVirtualDeviceConfigSpec{deviceSpec},
+		ExtraConfig:  []types.BaseOptionValue{&types.OptionValue{Key: recordKey, Value: diskPath}},
 	}
 
 	// Perform the reconfiguration to add the disk
@@ -3189,6 +3268,14 @@ func (p *Provider) attachAdditionalDisk(
 
 	// Wait for reconfiguration to complete
 	_, err = task.WaitForResult(ctx, nil)
+	if err != nil && fault.Is(err, &types.FileAlreadyExists{}) {
+		// The file is there but not recorded as this VM's disk: an earlier
+		// attempt created it and failed afterwards. It is in this VM's own
+		// home directory under this disk's own name; attach it (no create)
+		// once no other VM is shown to use it, and record it, so the retry
+		// converges instead of failing on the same file forever.
+		err = p.attachExistingAdditionalDisk(ctx, vm, diskPath, deviceSpec, configSpec)
+	}
 	if err != nil {
 		return fmt.Errorf("disk attachment task failed: %w", err)
 	}
@@ -3198,6 +3285,35 @@ func (p *Provider) attachAdditionalDisk(
 		"path", diskPath,
 		"size_gb", diskSpec.SizeGiB)
 
+	return nil
+}
+
+// attachExistingAdditionalDisk attaches the existing file diskPath — an
+// additional disk an earlier attempt created without attaching — instead of
+// creating it: the same reconfigure (device and record), without the file
+// creation, and only when no other VM uses the file (ensureDiskFileUnused).
+func (p *Provider) attachExistingAdditionalDisk(
+	ctx context.Context,
+	vm *object.VirtualMachine,
+	diskPath string,
+	deviceSpec *types.VirtualDeviceConfigSpec,
+	configSpec *types.VirtualMachineConfigSpec,
+) error {
+	if err := p.ensureDiskFileUnused(ctx, diskPath); err != nil {
+		return fmt.Errorf("leftover additional disk %s cannot be attached: %w", diskPath, err)
+	}
+	p.logger.Info("Attaching a leftover additional disk file instead of creating it", "vm_id", vm.Reference().Value, "path", diskPath)
+	deviceSpec.FileOperation = ""
+	if disk, ok := deviceSpec.Device.(*types.VirtualDisk); ok {
+		disk.CapacityInKB = 0 // an existing disk keeps its own size
+	}
+	task, err := vm.Reconfigure(ctx, *configSpec)
+	if err != nil {
+		return fmt.Errorf("start attaching the existing disk: %w", err)
+	}
+	if _, err := task.WaitForResult(ctx, nil); err != nil {
+		return fmt.Errorf("attach the existing disk: %w", err)
+	}
 	return nil
 }
 
@@ -3979,10 +4095,12 @@ func (p *Provider) ImportDisk(ctx context.Context, req *providerv1.ImportDiskReq
 		return nil, errors.NewInvalidSpec("unsupported import format: %s", targetFormat)
 	}
 
-	// Generate disk name
-	diskID := req.TargetName
-	if diskID == "" {
-		diskID = fmt.Sprintf("imported-disk-%d", time.Now().Unix())
+	// The landing name derives from the target VirtualMachine's namespace and
+	// name (disk_guard.go: importLandingName); the bare TargetName never
+	// decides the location.
+	diskID, err := importLandingName(req)
+	if err != nil {
+		return nil, err
 	}
 
 	p.logger.Info("Preparing disk import", "disk_id", diskID, "datastore", datastore, "format", targetFormat)
@@ -4102,6 +4220,19 @@ func (p *Provider) ImportDisk(ctx context.Context, req *providerv1.ImportDiskReq
 
 	// Generate datastore path
 	diskPath := fmt.Sprintf("[%s] %s/%s.vmdk", datastore, diskID, diskID)
+
+	// The upload overwrites the landing folder's disk: under the folder's
+	// landing lock, refuse when any VM uses a file there (disk_guard.go; fails
+	// closed).
+	unlock, err := p.landingLocks.lock(ctx, landingLockKey(datastore, diskID))
+	if err != nil {
+		return nil, errors.NewInternal("wait for other work on the landing folder", err)
+	}
+	defer unlock()
+	defer p.diskScans.invalidate(diskScanKey(datastore))
+	if err := p.ensureImportFolderUnused(ctx, datastore, diskID, false); err != nil {
+		return nil, err
+	}
 
 	// Upload to datastore with progress tracking
 	uploadProgress := func(transferred, total int64) {

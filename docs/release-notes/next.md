@@ -39,6 +39,18 @@ Read the upgrade guide before upgrading:
   pre-upgrade VM.
   → [Upgrade guide](docs/upgrading.md#breaking-changes)
 
+- **vSphere attaches an imported disk in place only when it is the VM's own
+  verified migration disk, and migrations land per namespace.** A migration now
+  lands at `[<datastore>] <namespace>_<vm name>-migrated/...`, so a same-named VM
+  in another namespace can no longer reach, overwrite or delete it.
+  `spec.importedDisk.path` naming any other datastore file (another VM's disk) is
+  refused before anything is created; a landing disk another VM uses is refused
+  too. Deleting a VM no longer deletes a disk it does not own. **A vSphere
+  migration landed before the upgrade whose target VM was not yet created must be
+  run again.** The vCenter account needs `System.Read` on the root folder,
+  propagated.
+  → [Upgrade guide](docs/upgrading.md#breaking-changes)
+
 - **libvirt linked clones are disabled.** A `VMClone` with
   `spec.options.type: LinkedClone` through a libvirt Provider fails with
   `LinkedCloneUnsupported`: a linked clone reads its source VM's live disk, and
@@ -62,9 +74,8 @@ Read the upgrade guide before upgrading:
   `powerOn: true`.** `VMClone` `spec.options.powerOn` and `VMMigration`
   `spec.target.powerOn` (default `false`) were never read, so every clone and
   migrated VM came up running. The produced VirtualMachine's `spec.powerState`
-  is now `On` only for `powerOn: true`. A vSphere migration target with
-  `powerOn: false` is still booted briefly by the vSphere provider's Create
-  before it is powered off.
+  is now `On` only for `powerOn: true`. A target with `powerOn: false` is never
+  booted, on any provider.
   → [Upgrade guide](docs/upgrading.md#breaking-changes)
 
 - **Deleting a `Provider` that is still in use now waits instead of orphaning
@@ -322,6 +333,19 @@ providers), and rollback caveats in
   (→ [`docs/reconfigure-results.md`](docs/reconfigure-results.md)).
 - vSphere `Describe` no longer treats a transient vCenter error as "the VM is
   gone" (which used to trigger a spurious re-create).
+- vSphere `Create` no longer powers on every new VM. A VirtualMachine with
+  `spec.powerState: Off` booted until the VirtualMachine controller
+  hard-powered it off. Create now leaves the VM off, like libvirt and Proxmox,
+  and the controller powers it on when `spec.powerState` is `On` or empty.
+  Cloud-init is set at create time and still applies on the first boot. A VM
+  created from an imported (migrated) disk is now also grown to its VMClass
+  disk size and gets its additional disks; a bug skipped both. The grow is
+  grow-only: a migrated VM smaller than the VMClass `diskDefaults.size`
+  (default `40Gi`) is grown to it, using datastore capacity (all at once for a
+  thick disk); a GPT guest sees a moved backup header, which `growpart` repairs.
+  A failed grow or disk attach now fails the create (retried and completed)
+  instead of being skipped silently
+  (→ [`docs/upgrading.md`](docs/upgrading.md)).
 - libvirt: hardware-accelerated `<domain type='kvm'>` is used again on hosts
   with a readable `/dev/kvm`, instead of falling back to software emulation.
 - Chart: `networkPolicy` (previously `security.networkPolicies`) is never

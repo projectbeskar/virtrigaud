@@ -22,6 +22,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -42,10 +43,12 @@ var _ = Describe("VMMigration Controller", func() {
 	BeforeEach(func() {
 		ctx = context.Background()
 
-		// Register our scheme
-		s := scheme.Scheme
-		err := infrav1beta1.AddToScheme(s)
-		Expect(err).NotTo(HaveOccurred())
+		// A private scheme: registering types on the global scheme.Scheme
+		// writes its maps while envtest managers' event broadcasters read
+		// them to decode events (a data race under -race).
+		s := runtime.NewScheme()
+		Expect(scheme.AddToScheme(s)).To(Succeed())
+		Expect(infrav1beta1.AddToScheme(s)).To(Succeed())
 
 		// Create fake client
 		fakeClient = fake.NewClientBuilder().

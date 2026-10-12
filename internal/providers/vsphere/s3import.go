@@ -21,7 +21,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"time"
 
 	"github.com/vmware/govmomi/object"
 	"github.com/vmware/govmomi/ovf"
@@ -89,12 +88,14 @@ func (p *Provider) importDiskFromS3(ctx context.Context, req *providerv1.ImportD
 	}
 
 	// <id> is the stable name used for the temp files, the import VM/disk name,
-	// the final datastore path, and the returned DiskId. It comes from
-	// req.TargetName. vmdk.Import derives the on-datastore disk name from the local
-	// vmdk basename, so the local file MUST be named "<id>.vmdk".
-	id := req.TargetName
-	if id == "" {
-		id = fmt.Sprintf("imported-disk-%d", time.Now().Unix())
+	// the final datastore path, and the returned DiskId: the landing name of the
+	// target VirtualMachine, "<ns>.<vm>-migrated" (disk_guard.go:
+	// importLandingName; the bare TargetName never decides it). vmdk.Import
+	// derives the on-datastore disk name from the local vmdk basename, so the
+	// local file MUST be named "<id>.vmdk".
+	id, err := importLandingName(req)
+	if err != nil {
+		return nil, err
 	}
 
 	// Source format: the reverse-relay staged object is qcow2 (libvirt's native
@@ -199,20 +200,27 @@ func (p *Provider) importDiskFromS3(ctx context.Context, req *providerv1.ImportD
 	}
 
 	finalPath := fmt.Sprintf("[%s] %s/%s.vmdk", dsName, id, id)
-	folderPath := fmt.Sprintf("[%s] %s", dsName, id)
+
+	// The import deletes the "[<ds>] <id>" folder before it lands the disk, and
+	// on failure. Under the folder's landing lock (held until return, after the
+	// cleanup below), refuse before either when any VM uses a file there
+	// (disk_guard.go; fails closed); the cleanup checks again.
+	unlock, err := p.landingLocks.lock(ctx, landingLockKey(dsName, id))
+	if err != nil {
+		return nil, errors.NewInternal("wait for other work on the landing folder", err)
+	}
+	defer unlock()
+	defer p.diskScans.invalidate(diskScanKey(dsName))
+	if err := p.ensureImportFolderUnused(ctx, dsName, id, false); err != nil {
+		return nil, err
+	}
 
 	// From here on, on ANY failure best-effort delete the "[<ds>] <id>" folder so a
 	// failed import leaves no orphan datastore files (partial vmdk, descriptor).
 	importSucceeded := false
-	dsFileManager := NewDatastoreFileManager(p)
 	defer func() {
-		if importSucceeded {
-			return
-		}
-		cleanupCtx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
-		defer cancel()
-		if err := dsFileManager.DeleteFile(cleanupCtx, folderPath); err != nil {
-			p.logger.Warn("Failed to delete partial import folder after failure (manual cleanup may be needed)", "path", folderPath, "error", err)
+		if !importSucceeded {
+			p.cleanupFailedImport(dsName, id)
 		}
 	}()
 

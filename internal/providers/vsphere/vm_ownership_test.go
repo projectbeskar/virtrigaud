@@ -134,9 +134,14 @@ func (r *vcenterCloneSemantics) RoundTrip(ctx context.Context, req, res soap.Has
 // Provider connected to it with the placement defaults the create path needs,
 // plus the model so a test can shape inventory the API itself forbids. Clone
 // ExtraConfig semantics are made vCenter-faithful by vcenterCloneSemantics.
-func newOwnershipSim(t *testing.T) (*Provider, *simulator.Model) {
+//
+// Each opt adjusts the model before it is created (e.g. more datastores).
+func newOwnershipSim(t *testing.T, opts ...func(*simulator.Model)) (*Provider, *simulator.Model) {
 	t.Helper()
 	model := simulator.VPX()
+	for _, opt := range opts {
+		opt(model)
+	}
 	require.NoError(t, model.Create())
 	server := model.Service.NewServer()
 
@@ -391,27 +396,21 @@ func TestCreate_StampsOwnerOnImportedDiskCreate(t *testing.T) {
 	p, _ := newOwnershipSim(t)
 	ctx := context.Background()
 
-	// CreateVM_Task attaches an existing disk; make one on the simulated datastore.
-	dc, err := p.finder.DefaultDatacenter(ctx)
-	require.NoError(t, err)
-	const diskPath = "[" + simDatastore + "] imported/disk.vmdk"
-	require.NoError(t, object.NewFileManager(p.client.Client).MakeDirectory(ctx, "["+simDatastore+"] imported", dc, true))
-	task, err := object.NewVirtualDiskManager(p.client.Client).CreateVirtualDisk(ctx, diskPath, dc, &types.FileBackedVirtualDiskSpec{
-		VirtualDiskSpec: types.VirtualDiskSpec{DiskType: string(types.VirtualDiskTypeThin), AdapterType: string(types.VirtualDiskAdapterTypeLsiLogic)},
-		CapacityKb:      1024,
-	})
-	require.NoError(t, err)
-	require.NoError(t, task.Wait(ctx))
+	// CreateVM_Task attaches the VM's own migration landing disk in place;
+	// make one on the simulated datastore.
+	imageJSON := makeOwnMigratedDisk(t, p, "migrated")
 
 	resp, err := p.Create(ctx, &providerv1.CreateRequest{
 		Name:      "migrated",
-		ImageJson: fmt.Sprintf(`{"Path":%q,"Format":"vmdk"}`, diskPath),
-		Owner:     wireOwner(ownerTeamA),
+		ImageJson: imageJSON,
+		Owner:     ownerNamed(ownerTeamA, "migrated"),
 	})
 	require.NoError(t, err)
 
 	owner, _, _, _ := vmState(t, p, resp.Id)
-	assert.Equal(t, ownerTeamA, owner, "the imported-disk (CreateVM_Task) path must stamp the owner too")
+	want := ownerTeamA
+	want.Name = "migrated"
+	assert.Equal(t, want, owner, "the imported-disk (CreateVM_Task) path must stamp the owner too")
 }
 
 func TestCreate_ExistingVMInTargetFolder(t *testing.T) {
