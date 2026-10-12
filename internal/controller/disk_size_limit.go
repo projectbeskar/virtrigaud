@@ -267,6 +267,24 @@ func withholdDiskGrowthOverLimit(req *contracts.CreateRequest, ceiling *resource
 	}
 }
 
+// setDiskSizeWithinLimitCondition records on vm whether its Reconfigure
+// withheld a disk growth: DiskSizeWithinLimit=False with withheld's reason and
+// message, or — when nothing was withheld — no such condition at all (a VM
+// without a limit never carries it).
+func setDiskSizeWithinLimitCondition(vm *infravirtrigaudiov1beta1.VirtualMachine, withheld *diskSizeRefusal) {
+	if withheld == nil {
+		meta.RemoveStatusCondition(&vm.Status.Conditions, k8s.ConditionDiskSizeWithinLimit)
+		return
+	}
+	meta.SetStatusCondition(&vm.Status.Conditions, metav1.Condition{
+		Type:               k8s.ConditionDiskSizeWithinLimit,
+		Status:             metav1.ConditionFalse,
+		Reason:             withheld.reason,
+		Message:            withheld.message,
+		ObservedGeneration: vm.Generation,
+	})
+}
+
 // warnDiskGrowthWithheld records the Warning event of a Reconfigure whose
 // disk growth was withheld, once per VM and message (r.diskLimitWarned); a
 // nil refusal forgets the VM so the next withheld growth is reported again.

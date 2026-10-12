@@ -28,6 +28,14 @@ const (
 	ConditionProvisioning = "Provisioning"
 	// ConditionReconfiguring indicates the resource is being reconfigured
 	ConditionReconfiguring = "Reconfiguring"
+	// ConditionDiskSizeWithinLimit is False (reason DiskSizeExceedsLimit or
+	// DiskSizeLimitUnverifiable) on a VirtualMachine whose last Reconfigure
+	// withheld the growth of a disk beyond the disk-size limit: the disk was
+	// left as it is while the VM's other changes went ahead. It is set
+	// whatever that Reconfigure's outcome (synchronous, an async task, a
+	// change pending a restart, a failure) and removed by the next Reconfigure
+	// that withholds nothing. It is never set on a VM without a limit.
+	ConditionDiskSizeWithinLimit = "DiskSizeWithinLimit"
 	// ConditionError indicates an error condition
 	ConditionError = "Error"
 	// ConditionHealthy indicates the resource is healthy

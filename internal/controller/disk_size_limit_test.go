@@ -191,12 +191,16 @@ func TestReconcileVM_DiskSizeLimit_NoRecreateAboveLimit(t *testing.T) {
 // synchronously and honestly).
 type reconfigureRecorder struct {
 	fakeDescribeProvider
-	reqs []contracts.CreateRequest
+	reqs   []contracts.CreateRequest
+	result contracts.ReconfigureResult
+	err    error
 }
 
 func (p *reconfigureRecorder) Reconfigure(_ context.Context, _ contracts.VMRef, req contracts.CreateRequest) (contracts.ReconfigureResult, error) {
 	p.reqs = append(p.reqs, req)
-	return contracts.ReconfigureResult{Honest: true}, nil
+	res := p.result
+	res.Honest = true
+	return res, p.err
 }
 
 // existingVMFixture is a created, running VM whose class asks for classSize
@@ -262,11 +266,14 @@ func TestReconcileVM_DiskSizeLimit_ReconfigureWithholdsGrowth(t *testing.T) {
 
 	got, _ := storedVM(t, r)
 	assert.True(t, meta.IsStatusConditionTrue(got.Status.Conditions, k8s.ConditionReady), "the VM stays Ready")
-	rc := meta.FindStatusCondition(got.Status.Conditions, k8s.ConditionReconfiguring)
-	require.NotNil(t, rc)
-	assert.Equal(t, metav1.ConditionFalse, rc.Status)
-	assert.Equal(t, k8s.ReasonDiskSizeExceedsLimit, rc.Reason)
-	assert.Contains(t, rc.Message, "VMClass test-class spec.diskDefaults.size (500Gi), spec.disks[data].sizeGiB (800Gi): above the disk-size limit 100Gi, so not grown")
+	assert.Equal(t, k8s.ReasonReconcileSuccess, meta.FindStatusCondition(got.Status.Conditions, k8s.ConditionReconfiguring).Reason,
+		"the reconfigure itself succeeded")
+	dc := meta.FindStatusCondition(got.Status.Conditions, k8s.ConditionDiskSizeWithinLimit)
+	require.NotNil(t, dc)
+	assert.Equal(t, metav1.ConditionFalse, dc.Status)
+	assert.Equal(t, k8s.ReasonDiskSizeExceedsLimit, dc.Reason)
+	assert.Equal(t, got.Generation, dc.ObservedGeneration)
+	assert.Contains(t, dc.Message, "VMClass test-class spec.diskDefaults.size (500Gi), spec.disks[data].sizeGiB (800Gi): above the disk-size limit 100Gi, so not grown")
 	require.NotNil(t, got.Status.CurrentResources)
 	assert.Equal(t, int32(4), *got.Status.CurrentResources.CPU, "the applied CPU is recorded")
 	assert.Len(t, diskLimitEvents(rec, k8s.ReasonDiskSizeExceedsLimit), 1, "one Warning event")
@@ -278,6 +285,43 @@ func TestReconcileVM_DiskSizeLimit_ReconfigureWithholdsGrowth(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, p.reqs, 2)
 	assert.Empty(t, diskLimitEvents(rec, k8s.ReasonDiskSizeExceedsLimit), "reported once")
+
+	// A Reconfigure that withholds nothing (the limit was raised) clears it.
+	r.MaxDiskSize = qty("1Ti")
+	got, _ = storedVM(t, r)
+	got.Status.CurrentResources.CPU = &two
+	_, err = r.reconcileVM(ctx, got)
+	require.NoError(t, err)
+	require.Len(t, p.reqs, 3)
+	assert.Equal(t, int32(800), p.reqs[2].Disks[0].SizeGiB)
+	cleared, _ := storedVM(t, r)
+	assert.Nil(t, meta.FindStatusCondition(cleared.Status.Conditions, k8s.ConditionDiskSizeWithinLimit))
+}
+
+// TestReconcileVM_DiskSizeLimit_WithheldGrowthRecordedOnEveryOutcome (review
+// L4): an async task, a change pending a restart and a failed Reconfigure
+// keep the DiskSizeWithinLimit=False record too.
+func TestReconcileVM_DiskSizeLimit_WithheldGrowthRecordedOnEveryOutcome(t *testing.T) {
+	for name, set := range map[string]func(*reconfigureRecorder){
+		"async task":      func(p *reconfigureRecorder) { p.result.TaskRef = "task-1" },
+		"restart pending": func(p *reconfigureRecorder) { p.result.RestartRequired = true },
+		"failure":         func(p *reconfigureRecorder) { p.err = contracts.NewRetryableError("host busy", nil) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			r, p, _ := existingVMFixture(t, qty("100Gi"), "", 2, infravirtrigaudiov1beta1.DiskSpec{Name: "data", SizeGiB: 800})
+			set(p)
+			stored, _ := storedVM(t, r)
+			_, err := r.reconcileVM(context.Background(), stored)
+			require.NoError(t, err)
+			require.Len(t, p.reqs, 1)
+			assert.Zero(t, p.reqs[0].Disks[0].SizeGiB)
+			got, _ := storedVM(t, r)
+			dc := meta.FindStatusCondition(got.Status.Conditions, k8s.ConditionDiskSizeWithinLimit)
+			require.NotNil(t, dc, "the withheld growth is recorded")
+			assert.Equal(t, metav1.ConditionFalse, dc.Status)
+			assert.Equal(t, k8s.ReasonDiskSizeExceedsLimit, dc.Reason)
+		})
+	}
 }
 
 // TestReconcileVM_DiskSizeLimit_ReconfigureWithoutLimitUnchanged: with no

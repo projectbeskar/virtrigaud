@@ -2751,6 +2751,10 @@ func (r *VirtualMachineReconciler) reconfigureVM(
 	// shrunk: every provider resizes grow-only.
 	withheld := withholdDiskGrowthOverLimit(&req, r.MaxDiskSize, providerCR, vmClass)
 	r.warnDiskGrowthWithheld(vm, withheld)
+	// Recorded in its own condition, before the call, so every outcome below
+	// (synchronous, an async task, a change pending a restart, a failure)
+	// keeps it with the status write that ends this reconcile.
+	setDiskSizeWithinLimitCondition(vm, withheld)
 
 	// Call provider reconfigure
 	result, err := provider.Reconfigure(ctx, ref, req)
@@ -2802,12 +2806,7 @@ func (r *VirtualMachineReconciler) reconfigureVM(
 		// Reconfigure completed synchronously, update current resources
 		r.updateCurrentResources(vm, vmClass)
 		vm.Status.Phase = infravirtrigaudiov1beta1.VirtualMachinePhaseRunning
-		if withheld != nil {
-			// Applied, except a disk's growth beyond the limit: say so.
-			k8s.SetReconfiguringCondition(&vm.Status.Conditions, metav1.ConditionFalse, withheld.reason, withheld.message)
-		} else {
-			k8s.SetReconfiguringCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonReconcileSuccess, "VM reconfigured successfully")
-		}
+		k8s.SetReconfiguringCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonReconcileSuccess, "VM reconfigured successfully")
 		k8s.SetReadyCondition(&vm.Status.Conditions, metav1.ConditionTrue, k8s.ReasonReconcileSuccess, "VM is ready")
 	}
 
