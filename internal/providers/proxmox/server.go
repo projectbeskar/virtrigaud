@@ -1305,14 +1305,8 @@ func (p *Provider) parseCreateRequest(ctx context.Context, req *providerv1.Creat
 			if path, ok := contractsImage["Path"].(string); ok && strings.TrimSpace(path) != "" && config.Template == "" {
 				imported, _ := contractsImage["ImportedDisk"].(bool)
 				owner := contracts.ObjectIdentity{Namespace: req.GetOwner().GetNamespace(), Name: req.GetOwner().GetName()}
-				legacy, err := checkImportedDiskPath(path, imported, owner, req.Name)
-				if err != nil {
+				if err := checkImportedDiskPath(path, imported, owner, req.Name); err != nil {
 					return nil, "", err
-				}
-				if legacy {
-					p.logger.Warn("Importing a disk staged by an earlier release under its bare name; "+
-						"accepted for this VirtualMachine's own verified migration only",
-						"name", req.Name, "namespace", owner.Namespace)
 				}
 				config.ImportedDiskPath = path
 				if format, ok := contractsImage["Format"].(string); ok && format != "" {

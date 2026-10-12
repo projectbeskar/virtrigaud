@@ -617,8 +617,9 @@ namespaces gets two stages (a name over 200 bytes is shortened to its start, `__
 hard link. Any other `spec.importedDisk.path` is refused before anything is created
 (`ValidationError`, the message never contains the path), and the provider never removes a
 node file that is not an import stage. A stage an earlier release created under the bare
-`/var/tmp/.virtrigaud-import-<vm name>-migrated.<format>` name is still accepted for the
-VM's own verified migration, so a migration in flight across the upgrade completes.
+`/var/tmp/.virtrigaud-import-<vm name>-migrated.<format>` name is refused, even for the VM's
+own migration (same-named VMs in different namespaces shared it): run that migration again,
+and remove the old file by hand.
 
 > **Upgrade warning — legacy shared disks.** Before this change a path or prepared image
 > in the pool directory was attached in place, so several VMs created from the same image

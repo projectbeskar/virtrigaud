@@ -60,8 +60,10 @@ Read the upgrade guide before upgrading:
   own migration disk and be exactly
   `/var/tmp/.virtrigaud-import-<namespace>_<vm name>-migrated.<format>` (stages
   are now named per namespace); anything else is refused before anything is
-  created. **Upgrade the manager before the Proxmox provider.** A granted
-  cross-namespace migration into Proxmox is refused, as on vSphere.
+  created. **Upgrade the manager before the Proxmox provider.** A Proxmox-target
+  migration staged before the upgrade whose target VM was not yet created must
+  be run again. A granted cross-namespace migration into Proxmox is refused, as
+  on vSphere.
   → [Upgrade guide](docs/upgrading.md#breaking-changes)
 
 - **libvirt linked clones are disabled.** A `VMClone` with

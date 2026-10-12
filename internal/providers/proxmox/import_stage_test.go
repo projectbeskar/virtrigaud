@@ -166,15 +166,40 @@ func TestCreate_ImportedDiskOwnerMustMatch(t *testing.T) {
 	})
 }
 
+// TestCreate_LegacyImportStageRefused: a stage an earlier release created
+// under the bare "<vm>-migrated" name (shared by same-named VMs of every
+// namespace) is refused even for the VM's own verified migration, with its own
+// constant "run the migration again" message; nothing is created, nothing runs
+// on the node and the file is not removed.
+func TestCreate_LegacyImportStageRefused(t *testing.T) {
+	for name, owner := range map[string]contracts.ObjectIdentity{
+		"with owner":              testOwner(),
+		"no owner (no namespace)": {Name: testOwnerName},
+	} {
+		for _, ext := range importStageFormats {
+			t.Run(name+"/"+ext, func(t *testing.T) {
+				p, srv, node := newConfinementProvider(t)
+				path := legacyImportStagePath(testOwnerName, ext)
+				_, err := p.Create(context.Background(), createReq(owner, imageJSON(path, true)))
+				assert.Equal(t, classInvalidSpec, classOf(t, err))
+				msg := status.Convert(err).Message()
+				assert.Equal(t, legacyImportStageMessage, msg)
+				assert.NotContains(t, msg, path)
+				assert.Empty(t, node.all(), "no node command runs (no importdisk, no rm)")
+				assert.Empty(t, srv.VMsNamed(testOwnerName), "nothing is created")
+				assert.Empty(t, srv.MutatingRequests(), "no PVE change is requested")
+			})
+		}
+	}
+}
+
 // TestCreate_OwnImportStageImportedAndRemoved: the VM's own stage is imported
-// (behind the node-side stage check) and removed afterwards — the new
-// namespaced name and an earlier release's bare name alike.
+// (behind the node-side stage check) and removed afterwards.
 func TestCreate_OwnImportStageImportedAndRemoved(t *testing.T) {
 	for name, path := range map[string]string{
 		"namespaced stage":      ownStagePath,
 		"namespaced raw stage":  "/var/tmp/.virtrigaud-import-team-a_web-migrated.raw",
 		"namespaced vmdk stage": "/var/tmp/.virtrigaud-import-team-a_web-migrated.vmdk",
-		"legacy stage":          legacyOwnStagePath,
 	} {
 		t.Run(name, func(t *testing.T) {
 			p, srv, node := newConfinementProvider(t)
@@ -236,6 +261,8 @@ func TestCleanupNodeFile_RemovesOnlyImportStages(t *testing.T) {
 		"/var/tmp/.virtrigaud-import-web.qcow2\n",
 		"/var/tmp/.virtrigaud-import-Web-migrated.qcow2",
 		"/var/tmp/.virtrigaud-import-.qcow2",
+		legacyOwnStagePath,
+		"/var/tmp/.virtrigaud-import-team-a_../../etc/x-migrated.qcow2",
 	} {
 		t.Run(path, func(t *testing.T) {
 			p, _, node := newConfinementProvider(t)
@@ -264,18 +291,17 @@ func TestImportStageReady_RefusesNonStagePath(t *testing.T) {
 
 func TestCheckImportedDiskPath(t *testing.T) {
 	owner := contracts.ObjectIdentity{UID: "u", Namespace: "team-a", Name: "web"}
-	legacy, err := checkImportedDiskPath(ownStagePath, true, owner, "web")
-	require.NoError(t, err)
-	assert.False(t, legacy)
+	require.NoError(t, checkImportedDiskPath(ownStagePath, true, owner, "web"))
 
-	legacy, err = checkImportedDiskPath(legacyOwnStagePath, true, owner, "web")
-	require.NoError(t, err)
-	assert.True(t, legacy)
-
-	// The legacy name does not need the namespace (the manager verified it).
-	legacy, err = checkImportedDiskPath(legacyOwnStagePath, true, contracts.ObjectIdentity{}, "web")
-	require.NoError(t, err)
-	assert.True(t, legacy)
+	// The VM's own legacy bare-name stage gets its own "run it again" refusal,
+	// with or without the namespace; not imported, it is the generic one.
+	for _, o := range []contracts.ObjectIdentity{owner, {}} {
+		err := checkImportedDiskPath(legacyOwnStagePath, true, o, "web")
+		assert.Equal(t, codes.InvalidArgument, status.Code(err))
+		assert.Equal(t, legacyImportStageMessage, status.Convert(err).Message())
+	}
+	err := checkImportedDiskPath(legacyOwnStagePath, false, owner, "web")
+	assert.Equal(t, importedDiskRejectedMessage, status.Convert(err).Message())
 
 	for name, tc := range map[string]struct {
 		path     string
@@ -292,7 +318,7 @@ func TestCheckImportedDiskPath(t *testing.T) {
 		"no namespace":            {ownStagePath, true, contracts.ObjectIdentity{}, "web"},
 	} {
 		t.Run(name, func(t *testing.T) {
-			_, err := checkImportedDiskPath(tc.path, tc.imported, tc.owner, tc.vm)
+			err := checkImportedDiskPath(tc.path, tc.imported, tc.owner, tc.vm)
 			require.Error(t, err)
 			assert.Equal(t, codes.InvalidArgument, status.Code(err))
 			assert.Equal(t, importedDiskRejectedMessage, status.Convert(err).Message())
@@ -360,8 +386,10 @@ func TestImportDisk_RequiresTargetVM(t *testing.T) {
 
 func TestIsImportStagePath(t *testing.T) {
 	assert.True(t, isImportStagePath(ownStagePath))
-	assert.True(t, isImportStagePath(legacyOwnStagePath))
-	assert.True(t, isImportStagePath("/var/tmp/.virtrigaud-import-imported-disk-1700000000.raw"))
+	assert.True(t, isImportStagePath("/var/tmp/.virtrigaud-import-team-a_web-migrated.vmdk"))
+	assert.False(t, isImportStagePath(legacyOwnStagePath), "legacy bare-name stages are never removed")
+	assert.False(t, isImportStagePath("/var/tmp/.virtrigaud-import-imported-disk-1700000000.raw"))
+	assert.False(t, isImportStagePath("/var/tmp/.virtrigaud-import-team-a_web.qcow2"), "no -migrated suffix")
 	assert.False(t, isImportStagePath("/var/tmp/.virtrigaud-import-a..b.qcow2"))
 	assert.False(t, isImportStagePath("/var/tmp/.virtrigaud-import-a/b.qcow2"))
 	assert.False(t, isImportStagePath("/var/tmp/.virtrigaud-export-a.qcow2"))

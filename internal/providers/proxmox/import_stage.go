@@ -54,9 +54,11 @@ import (
 //     ImportDiskRequest.target_vm). "_" appears in no Kubernetes name, so a
 //     same-named VM in another namespace never gets, nor can name, this stage.
 //     A stage an earlier release created under the bare name
-//     ("/var/tmp/.virtrigaud-import-<vm>-migrated.<ext>") is still accepted
-//     for this VM's own verified migration, so a migration in flight across
-//     the upgrade completes (see legacyImportStagePath).
+//     ("/var/tmp/.virtrigaud-import-<vm>-migrated.<ext>") is refused with its
+//     own message: that name does not separate namespaces (two same-named VMs
+//     shared it), so it cannot be proven to be this VM's disk; that migration
+//     must be run again (see legacyImportStagePath). The provider never
+//     removes such a file: it is left for manual cleanup.
 //  3. On the node, the stage is a regular file, not a symbolic link, with one
 //     hard link (importStageNodeCheck). The check runs in the same shell
 //     command as `qm importdisk`.
@@ -97,11 +99,14 @@ const (
 // staged object's source format).
 var importStageFormats = []string{"qcow2", "raw", "vmdk"}
 
-// importStagePathRE matches every node path ImportDisk stages a disk at (this
-// release's namespaced names and an earlier release's bare ones): a plain file
-// name in proxmoxImportStageDir. cleanupNodeFile removes nothing else.
+// importStagePathRE matches every node path ImportDisk stages a disk at: a
+// plain file name "<ns>_<...>-migrated.<format>" in proxmoxImportStageDir (a
+// DNS-label namespace, the separator, then the bounded or unbounded rest of
+// the stage name). An earlier release's bare "<vm>-migrated" stages (no "_")
+// do not match. cleanupNodeFile removes nothing else.
 var importStagePathRE = regexp.MustCompile(`^` + regexp.QuoteMeta(strings.TrimRight(proxmoxImportStageDir, "/")+"/"+importStageFilePrefix) +
-	`[a-z0-9][a-z0-9._-]*\.(qcow2|raw|vmdk)$`)
+	`[a-z0-9][a-z0-9-]*` + importStageSeparator + `[a-z0-9._-]+` + regexp.QuoteMeta(contracts.ImportedDiskNameSuffix) +
+	`\.(qcow2|raw|vmdk)$`)
 
 // importedDiskRejectedMessage is the only text a refused imported-disk path
 // returns. It names the rule, never the caller's path.
@@ -109,6 +114,13 @@ const importedDiskRejectedMessage = "imported disk rejected: the Proxmox provide
 	"the VirtualMachine's own migration stage (/var/tmp/.virtrigaud-import-<namespace>_<vm name>-migrated.<format>, " +
 	"staged by a VMMigration in the same namespace that targets this VirtualMachine); use a VMImage (template) " +
 	"for any other image"
+
+// legacyImportStageMessage refuses a stage an earlier release created under
+// the bare "<vm name>-migrated" name, which does not tell namespaces apart.
+const legacyImportStageMessage = "imported disk rejected: it was staged by an earlier release under " +
+	"/var/tmp/.virtrigaud-import-<vm name>-migrated.<format>, a name that does not separate namespaces, so it " +
+	"cannot be proven to be this VirtualMachine's disk; delete this VirtualMachine and its VMMigration and run " +
+	"the migration again (the old stage file is not removed automatically)"
 
 // importTargetRequiredMessage refuses an ImportDisk without the target VM's
 // identity (a manager older than the provider).
@@ -144,9 +156,9 @@ func importStageFilePath(stageName, format string) string {
 
 // legacyImportStagePath is where a release before this fix staged the disk
 // for a VM named vmName, whatever its namespace:
-// "/var/tmp/.virtrigaud-import-<vm>-migrated.<format>". Create still accepts
-// it for the VM's own verified migration (ImportedDisk) so a migration staged
-// before the upgrade completes; ImportDisk never creates it any more.
+// "/var/tmp/.virtrigaud-import-<vm>-migrated.<format>". Create refuses it
+// (errLegacyImportStage) and never removes it; ImportDisk never creates it
+// any more.
 func legacyImportStagePath(vmName, format string) string {
 	return importStageFilePath(vmName+contracts.ImportedDiskNameSuffix, format)
 }
@@ -189,30 +201,37 @@ func importStageForRequest(req *providerv1.ImportDiskRequest, format string) (na
 // confinement for the VM named vmName, requested by owner. diskPath is
 // accepted only when imported is set, vmName is a valid VM name (and, when
 // owner names one, the same), and diskPath is byte-for-byte this VM's
-// namespaced stage (owner.Namespace required) or its legacy bare stage, in a
-// stage format. legacy reports the latter. Every refusal is
+// namespaced stage (owner.Namespace required), in a stage format. Its legacy
+// bare stage is refused with errLegacyImportStage; every other refusal is
 // importedDiskRejected.
-func checkImportedDiskPath(diskPath string, imported bool, owner contracts.ObjectIdentity, vmName string) (legacy bool, err error) {
+func checkImportedDiskPath(diskPath string, imported bool, owner contracts.ObjectIdentity, vmName string) error {
 	if !imported || vmName == "" || (owner.Name != "" && owner.Name != vmName) {
-		return false, importedDiskRejected()
+		return importedDiskRejected()
 	}
 	if errs := validation.IsDNS1123Subdomain(vmName); len(errs) > 0 {
-		return false, importedDiskRejected()
+		return importedDiskRejected()
 	}
 	namespaced := owner.Namespace != "" && validStageIdentity(owner.Namespace, vmName) == nil
 	for _, format := range importStageFormats {
 		if namespaced && diskPath == importStageFilePath(importStageName(owner.Namespace, vmName), format) {
-			return false, nil
+			return nil
 		}
 		if diskPath == legacyImportStagePath(vmName, format) {
-			return true, nil
+			return errLegacyImportStage()
 		}
 	}
-	return false, importedDiskRejected()
+	return importedDiskRejected()
 }
 
-// isImportStagePath reports whether path is an import stage path (either
-// naming): the only node files the provider's import code ever removes.
+// errLegacyImportStage refuses a stage an earlier release created under the
+// bare "<vm name>-migrated" name (InvalidSpec, as vSphere's errLegacyLanding).
+func errLegacyImportStage() error {
+	return errors.NewInvalidSpec("%s", legacyImportStageMessage)
+}
+
+// isImportStagePath reports whether path is a namespaced import stage path
+// ("<ns>_<...>-migrated.<format>"): the only node files the provider's import
+// code ever removes. A legacy bare-name stage does not match.
 func isImportStagePath(path string) bool {
 	return importStagePathRE.MatchString(path) && !strings.Contains(path, "..")
 }
