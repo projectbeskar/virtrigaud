@@ -5,7 +5,7 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [2026-10-12 00:09] - VirtualMachine controller: durable single-host create marker, force-delete gated for clustered consumers, no transport errors in status, quieter deleting VMs, OffGraceful loop fixed, no create on a deleting Provider, create backoff and refusals
+## [2026-10-12 10:37] - VirtualMachine controller: durable single-host create marker, force-delete gated for clustered consumers, no transport errors in status, quieter deleting VMs, OffGraceful loop fixed, no create on a deleting Provider, create backoff and refusals
 **Author:** @wrkode (William Rizzo)
 
 > **Operator note.**
