@@ -344,18 +344,6 @@ func (r *VMCloneReconciler) Reconcile(ctx context.Context, req ctrl.Request) (re
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
 
-	// No disk above the administrator's disk-size limit is created by a
-	// clone (disk_size_limit.go). Checked only before a clone is issued, like
-	// the linked-clone checks below.
-	refusal, err := r.cloneDiskSizeRefusal(ctx, clone, sourceVM, provider)
-	if err != nil {
-		logger.Error(err, "Failed to read a VMClass to check the clone's disk sizes")
-		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
-	}
-	if refusal != nil {
-		return r.holdCloneForDiskSizeLimit(ctx, clone, refusal), nil
-	}
-
 	// Linked-clone checks (intrinsic correctness, independent of the #176
 	// enforcement flag), made only before a clone is issued: a clone already
 	// in flight is never re-gated on its task poll or bind.
@@ -372,6 +360,21 @@ func (r *VMCloneReconciler) Reconcile(ctx context.Context, req ctrl.Request) (re
 	if err != nil {
 		logger.Info("Source VM has no host binding; waiting before cloning", "vm", sourceKey.Name, "error", err.Error())
 		return r.markPending(ctx, clone, vmRefErrorReason(err), err.Error()), nil
+	}
+
+	// No disk above the administrator's disk-size limit is created by a
+	// clone: every real disk of the source (as its provider reports it) and
+	// the target class are checked, only before a clone is issued, like the
+	// linked-clone checks above (disk_size_limit_copies.go). The only
+	// provider call made for it is a read-only GetDiskInfo, and only while a
+	// limit applies.
+	refusal, err := r.cloneDiskSizeRefusal(ctx, clone, sourceVM, sourceRef, providerInstance, provider)
+	if err != nil {
+		logger.Error(err, "Failed to read a VMClass to check the clone's disk sizes")
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+	}
+	if refusal != nil {
+		return r.holdCloneForDiskSizeLimit(ctx, clone, refusal), nil
 	}
 
 	// Issue the clone. A routed source (clustered provider) clones onto its own

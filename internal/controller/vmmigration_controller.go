@@ -434,24 +434,27 @@ func (r *VMMigrationReconciler) handleValidatingPhase(ctx context.Context, migra
 				"(disk import is not routed to a host until ADR-0007 P3)", targetProvider.Namespace, targetProvider.Name))
 	}
 
-	// No disk above the administrator's disk-size limit for the target
-	// Provider is created by a migration: it is held here, before any side
-	// effect (disk_size_limit.go).
-	refusal, err := r.migrationDiskSizeRefusal(ctx, migration, sourceVM, targetProvider)
-	if err != nil {
-		logger.Error(err, "Failed to read a VMClass to check the migration's disk sizes")
-		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
-	}
-	if refusal != nil {
-		return r.holdMigrationForDiskSizeLimit(ctx, migration, refusal)
-	}
-
 	// A clustered SOURCE VM is addressed by its confirmed host binding. One with
 	// no binding is never sent a per-VM call (A1): wait for it.
-	if _, err := vmRefFor(sourceVM, sourceProvider); err != nil {
+	sourceRef, err := vmRefFor(sourceVM, sourceProvider)
+	if err != nil {
 		k8s.SetCondition(&migration.Status.Conditions, infrav1beta1.VMMigrationConditionValidating,
 			metav1.ConditionFalse, vmRefErrorReason(err), err.Error())
 		return r.waitForSourceBinding(ctx, migration, err)
+	}
+
+	// No disk above the administrator's disk-size limit for the target
+	// Provider is created by a migration: the source's real disk size (read
+	// from its provider) and the target class are checked here, before any
+	// side effect (disk_size_limit_copies.go). The only provider call made
+	// for it is that read-only GetDiskInfo, and only while a limit applies.
+	refusal, err := r.migrationDiskSizeRefusal(ctx, migration, sourceVM, sourceRef, sourceProvider, targetProvider)
+	if err != nil {
+		logger.Error(err, "Failed to check the migration's disk sizes")
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+	}
+	if refusal != nil {
+		return r.holdMigrationForDiskSizeLimit(ctx, migration, infrav1beta1.VMMigrationConditionValidating, refusal)
 	}
 
 	// Gate the requested storage backend and transfer mode against what both
@@ -964,6 +967,18 @@ func (r *VMMigrationReconciler) handleExportingPhase(ctx context.Context, migrat
 		return res, err
 	}
 
+	// The disk about to be exported is checked against the target Provider's
+	// disk-size limit by its real size, right before the export, and that size
+	// is recorded for the check before ImportDisk (disk_size_limit_copies.go).
+	sizeRefusal, exportedSize, err := r.exportDiskSizeRefusal(ctx, migration, providerInstance, exportReq)
+	if err != nil {
+		logger.Error(err, "Failed to check the exported disk's size")
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+	}
+	if sizeRefusal != nil {
+		return r.holdMigrationForDiskSizeLimit(ctx, migration, infrav1beta1.VMMigrationConditionExporting, sizeRefusal)
+	}
+
 	// Claim the in-memory export guard for this object generation BEFORE
 	// issuing the RPC. If another reconcile already claimed it, a duplicate
 	// ExportDisk would overwrite the staged object with non-deterministic
@@ -997,6 +1012,9 @@ func (r *VMMigrationReconciler) handleExportingPhase(ctx context.Context, migrat
 	migration.Status.DiskInfo.SourceDiskID = exportReq.DiskId
 	migration.Status.DiskInfo.SourceFormat = diskFormat
 	migration.Status.DiskInfo.SourceChecksum = exportResp.Checksum
+	if exportedSize != nil {
+		migration.Status.DiskInfo.SourceSize = exportedSize
+	}
 
 	// If there's a task, we need to wait for it
 	if exportResp.TaskRef != "" {
@@ -1266,6 +1284,13 @@ func (r *VMMigrationReconciler) handleImportingPhase(ctx context.Context, migrat
 	}
 	if allowed, res, err := r.confirmTargetConsumersLive(ctx, migration); !allowed {
 		return res, err
+	}
+
+	// The exported disk's size, recorded at export, is checked against the
+	// target Provider's disk-size limit as it is now, right before the import
+	// lands it (disk_size_limit_copies.go).
+	if refusal := r.importDiskSizeRefusal(migration, targetProvider); refusal != nil {
+		return r.holdMigrationForDiskSizeLimit(ctx, migration, infrav1beta1.VMMigrationConditionImporting, refusal)
 	}
 
 	// Claim the in-memory import guard for this object generation BEFORE

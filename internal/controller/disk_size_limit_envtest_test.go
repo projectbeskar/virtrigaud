@@ -153,8 +153,10 @@ var _ = Describe("Disk-size limit (envtest)", func() {
 		ready("src-prov", infravirtrigaudiov1beta1.ProviderTypeVSphere, nil)
 		ready("tgt-prov", infravirtrigaudiov1beta1.ProviderTypeLibvirt,
 			map[string]string{infravirtrigaudiov1beta1.ProviderMaxDiskSizeAnnotation: "50Gi"})
+		// The source's class asks for a small disk; its real disk is larger
+		// (a class lowered after the VM was created): the real size counts.
 		srcClass := envtestClass(ns.Name, "big", nil)
-		srcClass.Spec.DiskDefaults = &infravirtrigaudiov1beta1.DiskDefaults{Size: resource.MustParse("80Gi")}
+		srcClass.Spec.DiskDefaults = &infravirtrigaudiov1beta1.DiskDefaults{Size: resource.MustParse("10Gi")}
 		Expect(k8sClient.Create(ctx, srcClass)).To(Succeed())
 		src := &infravirtrigaudiov1beta1.VirtualMachine{
 			ObjectMeta: metav1.ObjectMeta{Name: "src-vm", Namespace: ns.Name},
@@ -183,7 +185,7 @@ var _ = Describe("Disk-size limit (envtest)", func() {
 		migration.Status.Phase = infravirtrigaudiov1beta1.MigrationPhaseValidating
 		Expect(k8sClient.Status().Update(ctx, migration)).To(Succeed())
 
-		spy := &migrationSpy{}
+		spy := &sizedMigrationProvider{sizes: &diskSizes{primary: 80 << 30}}
 		rec := record.NewFakeRecorder(100)
 		ceiling := resource.MustParse("1Ti")
 		r := &VMMigrationReconciler{
@@ -208,10 +210,9 @@ var _ = Describe("Disk-size limit (envtest)", func() {
 		Expect(c).NotTo(BeNil())
 		Expect(c.Status).To(Equal(metav1.ConditionFalse))
 		Expect(c.Reason).To(Equal(k8s.ReasonDiskSizeExceedsLimit))
-		Expect(c.Message).To(ContainSubstring("VMClass big spec.diskDefaults.size asks for 80Gi, above the disk-size limit 50Gi: nothing is migrated"))
+		Expect(c.Message).To(ContainSubstring("the disk of source VM src-vm asks for 80Gi, above the disk-size limit 50Gi: nothing is migrated"))
 		Expect(c.ObservedGeneration).To(Equal(held.Generation))
-		imports, exports, snapshots, power := spy.calls()
-		Expect(imports+exports+snapshots+power).To(BeZero(), "no provider call")
+		Expect(spy.exports+spy.imports).To(BeZero(), "no export or import")
 		Expect(diskLimitEvents(rec, k8s.ReasonDiskSizeExceedsLimit)).To(HaveLen(1))
 
 		_, err = r.handleValidatingPhase(ctx, get())
