@@ -215,11 +215,11 @@ func (p *Provider) importDiskFromNFS(ctx context.Context, req *providerv1.Import
 	}
 
 	// NFS always stages qcow2 (the controller derives import format qcow2 for nfs).
-	id := sanitizeProxmoxName(req.TargetName)
-	if req.TargetName == "" {
-		id = fmt.Sprintf("imported-disk-%d", time.Now().Unix())
+	// The stage is named after the target VirtualMachine (import_stage.go).
+	id, stagePath, err := importStageForRequest(req, "qcow2")
+	if err != nil {
+		return nil, err
 	}
-	stagePath := proxmoxImportStagePath(id, "qcow2")
 
 	p.logger.Info("Importing disk from NFS to Proxmox node (kernel mount; stage for qm importdisk at Create)",
 		"id", id, "source", nfsURL, "stage_path", stagePath, "storage_hint", req.StorageHint)

@@ -1297,8 +1297,24 @@ func (p *Provider) parseCreateRequest(ctx context.Context, req *providerv1.Creat
 			// threaded through VirtualMachine.Spec.ImportedDisk.Path) and no
 			// TemplateName. Capturing it here switches Create onto the
 			// importdisk-attach path. The Format guides the qemu-img/import format.
+			//
+			// The path is tenant-writable: it is taken only when the manager
+			// marked it as this VM's own verified migration disk (ImportedDisk)
+			// and it is exactly this VM's import stage (import_stage.go); any
+			// other Path is refused before anything is created.
 			if path, ok := contractsImage["Path"].(string); ok && strings.TrimSpace(path) != "" && config.Template == "" {
-				config.ImportedDiskPath = strings.TrimSpace(path)
+				imported, _ := contractsImage["ImportedDisk"].(bool)
+				owner := contracts.ObjectIdentity{Namespace: req.GetOwner().GetNamespace(), Name: req.GetOwner().GetName()}
+				legacy, err := checkImportedDiskPath(path, imported, owner, req.Name)
+				if err != nil {
+					return nil, "", err
+				}
+				if legacy {
+					p.logger.Warn("Importing a disk staged by an earlier release under its bare name; "+
+						"accepted for this VirtualMachine's own verified migration only",
+						"name", req.Name, "namespace", owner.Namespace)
+				}
+				config.ImportedDiskPath = path
 				if format, ok := contractsImage["Format"].(string); ok && format != "" {
 					config.ImportedDiskFormat = format
 				}

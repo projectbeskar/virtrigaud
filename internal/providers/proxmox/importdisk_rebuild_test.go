@@ -50,18 +50,19 @@ func (n *fakeNode) run(t *testing.T) func(ctx context.Context, cmd string) (stri
 				return "4242\n", "", nil
 			}
 			return "", "", exitErr(t, n.pgrepExit)
-		case strings.HasPrefix(cmd, "qm importdisk"):
+		case strings.Contains(cmd, "qm importdisk "):
 			return "Successfully imported disk as 'unused0:local-lvm:vm-1-disk-0'", "", nil
 		}
 		return "", "", nil
 	}
 }
 
-func (n *fakeNode) ran(prefix string) bool {
+// ran reports whether a command containing substr was run.
+func (n *fakeNode) ran(substr string) bool {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	for _, c := range n.commands {
-		if strings.HasPrefix(c, prefix) {
+		if strings.Contains(c, substr) {
 			return true
 		}
 	}
@@ -74,7 +75,7 @@ func (n *fakeNode) ran(prefix string) bool {
 // the half-built VM in place (outcome unknown).
 func TestRebind_ImportedDiskRebuildWaitsForARunningImportdisk(t *testing.T) {
 	const halfBuilt = 4950
-	req := createReq(testOwner(), `{"Path":"/var/tmp/.virtrigaud-import-web.qcow2","Format":"qcow2"}`)
+	req := createReq(testOwner(), ownStageImageJSON)
 	for name, tc := range map[string]struct {
 		pgrepExit   int
 		wantRebuilt bool
