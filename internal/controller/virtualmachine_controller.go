@@ -891,6 +891,10 @@ func (r *VirtualMachineReconciler) reconcileVM(ctx context.Context, vm *infravir
 	// VM is ready
 	k8s.SetReadyCondition(&vm.Status.Conditions, metav1.ConditionTrue, k8s.ReasonReconcileSuccess, "VM is ready")
 	k8s.SetProvisioningCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonReconcileSuccess, "VM provisioned")
+	// A withheld disk growth stops being reported once the spec's sizes fit
+	// the limit again (lowered, or the limit raised): nothing would be
+	// withheld any more (clearDiskSizeWithinLimitWhenFits).
+	clearDiskSizeWithinLimitWhenFits(vm, r.MaxDiskSize, provider, vmClass)
 
 	r.updateStatus(ctx, vm)
 

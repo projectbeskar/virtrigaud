@@ -34,7 +34,8 @@ const (
 	// left as it is while the VM's other changes went ahead. It is set
 	// whatever that Reconfigure's outcome (synchronous, an async task, a
 	// change pending a restart, a failure) and removed by the next Reconfigure
-	// that withholds nothing. It is never set on a VM without a limit.
+	// that withholds nothing, or by a reconcile once the spec's sizes fit the
+	// limit again. It is never set on a VM without a limit.
 	ConditionDiskSizeWithinLimit = "DiskSizeWithinLimit"
 	// ConditionError indicates an error condition
 	ConditionError = "Error"

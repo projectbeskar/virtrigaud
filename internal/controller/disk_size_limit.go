@@ -300,6 +300,21 @@ func setDiskSizeWithinLimitCondition(vm *infravirtrigaudiov1beta1.VirtualMachine
 	})
 }
 
+// clearDiskSizeWithinLimitWhenFits removes a DiskSizeWithinLimit=False
+// record from vm once every disk size its spec asks for (vmDiskSizeRequests)
+// fits the limit that applies to provider: a Reconfigure would withhold
+// nothing now. It only ever removes the condition (only a Reconfigure sets
+// it), so it cannot loop.
+func clearDiskSizeWithinLimitWhenFits(vm *infravirtrigaudiov1beta1.VirtualMachine, ceiling *resource.Quantity,
+	provider *infravirtrigaudiov1beta1.Provider, vmClass *infravirtrigaudiov1beta1.VMClass) {
+	if meta.FindStatusCondition(vm.Status.Conditions, k8s.ConditionDiskSizeWithinLimit) == nil {
+		return
+	}
+	if checkDiskSizeLimit(ceiling, provider, vmDiskSizeRequests(vm, vmClass, provider), "") == nil {
+		meta.RemoveStatusCondition(&vm.Status.Conditions, k8s.ConditionDiskSizeWithinLimit)
+	}
+}
+
 // warnDiskGrowthWithheld records the Warning event of a Reconfigure whose
 // disk growth was withheld, once per VM and message (r.diskLimitWarned); a
 // nil refusal forgets the VM so the next withheld growth is reported again.

@@ -434,6 +434,40 @@ func TestHoldForDiskSizeLimit_KeepsTheCreateMarker(t *testing.T) {
 	assert.Len(t, diskLimitEvents(rec, k8s.ReasonDiskSizeExceedsLimit), 1)
 }
 
+// TestReconcileVM_DiskSizeLimit_ClearsStaleWithheldRecord (review L-c): a
+// DiskSizeWithinLimit=False record is removed by the normal reconcile once the
+// spec's sizes fit the limit again; while they do not, it stays.
+func TestReconcileVM_DiskSizeLimit_ClearsStaleWithheldRecord(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		dataGiB int32
+		stays   bool
+	}{
+		{name: "the spec fits again", dataGiB: 80, stays: false},
+		{name: "the spec is still above the limit", dataGiB: 800, stays: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			r, p, _ := existingVMFixture(t, qty("100Gi"), "50Gi", 4, infravirtrigaudiov1beta1.DiskSpec{Name: "data", SizeGiB: tc.dataGiB})
+			stored, _ := storedVM(t, r)
+			setDiskSizeWithinLimitCondition(stored, &diskSizeRefusal{reason: k8s.ReasonDiskSizeExceedsLimit, message: "withheld"})
+			require.NoError(t, r.Status().Update(ctx, stored))
+
+			_, err := r.reconcileVM(ctx, stored)
+			require.NoError(t, err)
+			assert.Empty(t, p.reqs, "no Reconfigure is needed")
+			got, _ := storedVM(t, r)
+			c := meta.FindStatusCondition(got.Status.Conditions, k8s.ConditionDiskSizeWithinLimit)
+			if tc.stays {
+				assert.NotNil(t, c)
+			} else {
+				assert.Nil(t, c)
+			}
+			assert.True(t, meta.IsStatusConditionTrue(got.Status.Conditions, k8s.ConditionReady))
+		})
+	}
+}
+
 func TestParseMaxDiskSizeFlag(t *testing.T) {
 	q, err := ParseMaxDiskSizeFlag("")
 	require.NoError(t, err)
