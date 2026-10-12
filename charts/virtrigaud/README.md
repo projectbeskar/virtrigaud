@@ -216,7 +216,11 @@ manager's `--max-disk-size`) sets a ceiling **tenants cannot raise**:
   fit. A vanished VM is not re-created above it either.
 - **Growth:** a Reconfigure never grows a disk beyond the limit. The VM's other
   changes (CPU, memory) are applied, the over-limit disk is left as it is, and
-  the VM reports `Reconfiguring=False`, reason `DiskSizeExceedsLimit`.
+  the VM reports `DiskSizeWithinLimit=False`, reason `DiskSizeExceedsLimit`,
+  whatever the Reconfigure's outcome (done, an async task, pending a restart,
+  failed). The next Reconfigure that withholds nothing removes the condition.
+  On a Proxmox Provider, which applies every `spec.disks` size to its first
+  disk, no `spec.disks` size is sent at all once one is withheld.
 - **Clones and migrations** copy the source VM's real disks, whatever its spec
   says now, so they are checked by the sizes the source's provider reports
   (`GetDiskInfo`), not by its VMClass or `spec.disks`:
@@ -257,6 +261,19 @@ manager's `--max-disk-size`) sets a ceiling **tenants cannot raise**:
   Provider's annotation. Without `manager.maxDiskSize` they are not rendered, so
   VM and VMClass writes gain no admission dependency. The controllers enforce
   the limit whether or not webhooks are on.
+- **Kustomize installs:** `config/webhook/manifests.yaml` is generated from the
+  Go markers and always lists the VM and VMClass disk-size webhooks, with
+  `failurePolicy: Fail`. It is not part of `config/default` (its `[WEBHOOK]`
+  sections are commented out). If you enable it, VM and VMClass writes depend
+  on the webhook being reachable even without a ceiling (the manager serves
+  them whenever webhooks are on, and admits everything without one): remove
+  those two entries, or set their `failurePolicy` to `Ignore`, if you do not
+  use `--max-disk-size`.
+- **Upgrade the provider images with the manager.** The clone and migration
+  checks read the source's disk sizes from `GetDiskInfo`'s new `disks` list.
+  A provider image from before this release does not fill it, so while a
+  limit applies, clones through it are refused (`DiskSizeLimitUnverifiable`);
+  migrations read the primary disk's size, which older images do report.
 
 The limit is per disk, not a total per VM or per namespace (a VM can have up to
 20 additional disks): bound totals with the hypervisor's own storage quotas, or

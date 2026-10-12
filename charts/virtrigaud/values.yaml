@@ -124,13 +124,17 @@ manager:
   # 64Ti per disk. Use binary units (Gi, Ti): disk sizes are whole GiB, and
   # "500G" is only about 465.7Gi. With it set:
   #   - no VM is created with a disk above it (its VMClass
-  #     spec.diskDefaults.size or a spec.disks[].sizeGiB): the VM waits with
-  #     Ready=False, reason DiskSizeExceedsLimit, and a Warning event;
+  #     spec.diskDefaults.size — on libvirt 20Gi when the class sets none — or
+  #     a spec.disks[].sizeGiB): the VM waits with Ready=False, reason
+  #     DiskSizeExceedsLimit, and a Warning event;
   #   - no disk is grown beyond it: a Reconfigure applies the VM's other
-  #     changes and leaves that disk as it is (Reconfiguring=False,
-  #     DiskSizeExceedsLimit);
-  #   - no VMClone or VMMigration that would create a larger disk is started;
+  #     changes and leaves that disk as it is (DiskSizeWithinLimit=False);
+  #   - no VMClone or VMMigration whose source has a larger disk (by the size
+  #     its provider reports) proceeds; a size that cannot be read refuses it
+  #     too (DiskSizeLimitUnverifiable);
   #   - VMs that already have larger disks keep running and are never shrunk.
+  # Not covered: an image or template whose own disk is larger than the class
+  # size gives a larger primary disk (see the chart README).
   # A Provider's owner can lower it for that Provider with the annotation
   # infra.virtrigaud.io/max-disk-size (never raise it). With
   # webhooks.enabled=true, the VirtualMachine and VMClass validating webhooks

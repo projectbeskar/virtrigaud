@@ -5,43 +5,85 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [2026-10-12 12:51] - Administrator disk-size limit: --max-disk-size, per-Provider max-disk-size annotation, opt-in VM/VMClass disk-size webhooks
+## [2026-10-12 13:32] - Administrator disk-size limit: --max-disk-size, per-Provider max-disk-size annotation, real-size checks for clones and migrations, opt-in VM/VMClass disk-size webhooks
 **Author:** @wrkode (William Rizzo)
 
-> **Operator note.** Nothing changes unless `manager.maxDiskSize` (`--max-disk-size`) is set or a Provider carries `infra.virtrigaud.io/max-disk-size`. Before setting a limit, list the VMs and VMClasses above it: they keep running, but cloning, migrating or re-creating them, or growing their disks, is refused.
+> **Operator note.**
+> - Nothing changes unless `manager.maxDiskSize` (`--max-disk-size`) is set or a Provider carries `infra.virtrigaud.io/max-disk-size`.
+> - Before setting a limit, list the VMs and VMClasses above it: they keep running, but cloning, migrating or re-creating them, or growing their disks, is refused.
+> - **Roll the provider images with the manager.** `GetDiskInfo` now lists every disk's size. An older provider image does not, so while a limit applies, clones through it are refused (`DiskSizeLimitUnverifiable`).
+> - A migration exported before a limit was set is held before its import (no recorded size). Delete it and migrate again.
 
 ### Added
-- `cmd/manager/main.go`: `--max-disk-size` — the administrator's ceiling on every disk VirtRigaud creates or grows (a quantity of at least `1Gi`; empty = no ceiling beyond the CRD's 64Ti per disk). It is parsed before anything else starts; an invalid value (`500`, `0`, `none`, `1023Mi`, ...) stops the manager with exit 1. It is passed to the VirtualMachine, VMClone and VMMigration controllers, and registers the disk-size webhooks when webhooks are on.
-- `api/infra.virtrigaud.io/v1beta1/disk_size_limit.go` (new): `ProviderMaxDiskSizeAnnotation` (`infra.virtrigaud.io/max-disk-size`), with which a Provider's owner lowers the limit for that Provider — the limit that applies is the smaller of the two (`EffectiveMaxDiskSize`), so the annotation can never raise the ceiling. On a clustered Provider shared with other namespaces the Provider's owner is the administrator of its consumers. Also `ParseMaxDiskSize`, `DiskSizeGiBQuantity`, `ClassDiskSizeRequest`, `SpecDiskSizeRequests`, `FirstDiskOverLimit`. Sizes are compared as `resource.Quantity` (a GiB disk size as `n*2^30` bytes), so `500G` (about 465.7Gi) is smaller than a 500 GiB disk. No CRD schema change.
-- `internal/controller/disk_size_limit.go` (new): enforcement before any provider call, whether or not webhooks are on:
-  - **VirtualMachine create and re-create** (`refuseCreateOverDiskSizeLimit`, `holdForDiskSizeLimit`): if the VMClass `spec.diskDefaults.size` or any `spec.disks[].sizeGiB` is above the limit, no image prepare, placement or Create is sent. `Ready=False` and `Provisioning=False` (only `Ready` while the create marker is set) with reason `DiskSizeExceedsLimit` and a message naming the field, its size and the limit; observedGeneration set; written only on change; one Warning event per hold; re-checked every 2 minutes. The check runs after the unsaved-create resave and the create-marker resolution, so an already-made VM is still recorded.
-  - **Reconfigure** (`withholdDiskGrowthOverLimit`): a disk size above the limit is sent as 0, which every provider reads as "leave this disk as it is" (vSphere and Proxmox resize only for a positive `SizeGiB`, libvirt only for a positive class `DiskDefaults.SizeGiB`). The VM's CPU and memory changes are applied, no disk is grown beyond the limit, and none is shrunk (all three providers resize grow-only). `Reconfiguring=False/DiskSizeExceedsLimit` on a synchronous success; one Warning event per VM and message. A VM whose disks are already above the limit keeps running and stays `Ready`.
-  - **VMClone** (`cloneDiskSizeRefusal`): before the Clone RPC (and, on a clustered Provider, before the target VM is created), the source VM's `spec.disks`, its VMClass and the target class override are checked. The clone stays `Pending` with `Ready=False/DiskSizeExceedsLimit`.
-  - **VMMigration** (`migrationDiskSizeRefusal`): in `Validating`, before any side effect, the migrated disk (sized by the source VM's VMClass) and the target VMClass are checked against the **target** Provider's limit. The migration is held in `Validating` (`Validating=False/DiskSizeExceedsLimit`), not failed.
-  - Fail closed (`DiskSizeLimitUnverifiable`): an invalid Provider annotation (nothing is created, cloned, migrated or grown through that Provider; a Reconfigure withholds every disk size), or a missing source VMClass for a clone or migration while a limit applies.
-- `internal/k8s/conditions.go`: `ReasonDiskSizeExceedsLimit`, `ReasonDiskSizeLimitUnverifiable`.
-- `api/infra.virtrigaud.io/v1beta1/disk_size_webhook.go` (new): `vvirtualmachine-disksize.kb.io` and `vvmclass-disksize.kb.io` validating webhooks. They refuse a `spec.disks[].sizeGiB` or `spec.diskDefaults.size` above `--max-disk-size`, and growing one beyond it; a stored size already above it can be kept or lowered, so finalizers, labels and other fields stay editable. They check only the manager's ceiling (a VMClass is not tied to a Provider); the controllers enforce both. The manager serves them whenever webhooks are on (`--webhook-cert-path`); without `--max-disk-size` they admit everything, so a configuration generated from the markers never hits an unserved path. `config/webhook/manifests.yaml` regenerated.
-- `api/infra.virtrigaud.io/v1beta1/provider_webhook.go`: refuses an invalid `infra.virtrigaud.io/max-disk-size` value on create, and on update when the value is new or changed.
-- `charts/virtrigaud/values.yaml`, `templates/manager-deployment.yaml`, `templates/_helpers.tpl` (`virtrigaud.maxDiskSizeValue`), `templates/webhooks.yaml`: `manager.maxDiskSize` becomes `--max-disk-size`. A value without a unit of at least G, zero, or `none` fails the render. With `webhooks.enabled=true` the two disk-size webhooks are rendered only when `manager.maxDiskSize` is set, with the same caBundle and `failurePolicy` as `vprovider.kb.io`. Without it, VM and VMClass writes gain no admission dependency.
-- `hack/verify-max-disk-size-render.sh` (new), `make verify-max-disk-size-render`, and a CI step next to the `/tmp` sizeLimit render check. The check asserts:
-  - the flag and webhooks are absent by default;
+- `cmd/manager/main.go`: `--max-disk-size` — the administrator's ceiling on every disk VirtRigaud creates or grows.
+  - The value is a quantity of at least `1Gi`. Empty means no ceiling beyond the CRD's 64Ti per disk.
+  - It is parsed before anything else starts. An invalid value (`500`, `0`, `none`, `1G`, `1023Mi`, ...) stops the manager with exit 1.
+  - It is passed to the VirtualMachine, VMClone and VMMigration controllers.
+  - The VM/VMClass disk-size webhooks are registered whenever webhooks are on.
+- `api/infra.virtrigaud.io/v1beta1/disk_size_limit.go` (new):
+  - `ProviderMaxDiskSizeAnnotation` (`infra.virtrigaud.io/max-disk-size`): a Provider's owner lowers the limit for that Provider. The limit that applies is the smaller of the two (`EffectiveMaxDiskSize`), so the annotation can never raise the ceiling.
+  - On a clustered Provider shared with other namespaces, the Provider's owner is the administrator of its consumers.
+  - Helpers: `ParseMaxDiskSize`, `DiskSizeGiBQuantity`, `ClassDiskSizeRequest`, `SpecDiskSizeRequests`, `FirstDiskOverLimit`.
+  - Sizes are compared as `resource.Quantity`, so `500G` (about 465.7Gi) is smaller than a 500 GiB disk.
+  - No CRD schema change.
+- `proto/provider/v1/provider.proto`: `GetDiskInfoResponse.disks` (new `DiskCapacity` message, tag 10) — every disk of the VM, with its current virtual size, whatever `disk_id` asked for. The change is additive and backward-compatible.
+  - Implemented in vSphere (every `VirtualDisk`'s capacity), libvirt (`qemu-img info` of every file-backed disk; a block, volume or network disk reports 0) and Proxmox (the `size=` of every attached bus disk; CD-ROM, cloud-init, unused and EFI/TPM volumes are skipped).
+  - The mock provider still answers `GetDiskInfo` with Unimplemented, so clones through it fail closed under a limit.
+  - Bindings regenerated. The transport client maps the new field.
+- `internal/controller/disk_size_limit.go`, `disk_size_limit_copies.go` (new): enforcement before the provider call that would create or grow a disk, whether or not webhooks are on.
+  - **VirtualMachine create and re-create**: a VMClass `spec.diskDefaults.size` or any `spec.disks[].sizeGiB` above the limit holds the VM. On a libvirt Provider, a class with no size counts as the libvirt default primary disk, 20Gi.
+    - No image prepare, placement or Create is sent.
+    - Conditions: `Ready=False` and `Provisioning=False`, reason `DiskSizeExceedsLimit`. If the create marker is set, only `Ready` changes and the marker survives.
+    - Status is written only on change, with one Warning event per hold, and the VM is re-checked every 2 minutes.
+  - **Reconfigure**: a disk size above the limit is sent as 0, which every provider reads as "leave this disk as it is".
+    - CPU and memory changes go ahead. No disk is grown beyond the limit, and none is shrunk.
+    - It is recorded as `DiskSizeWithinLimit=False` (new condition type) on every outcome (done, async task, pending restart, failure), with one Warning per VM and message. The next Reconfigure that withholds nothing removes it.
+    - On a Proxmox Provider no `spec.disks` size is sent once one is withheld. Proxmox applies every entry to scsi0 and refuses a smaller one as a shrink, so withholding one entry would otherwise expose a later, smaller entry to that check and turn the Reconfigure into a retried failure.
+  - **VMClone**: before the Clone RPC, every disk of the source is checked by the size its provider reports (`GetDiskInfo` `disks`), never by its VMClass or `spec.disks`. A lowered class, a removed `spec.disks` entry or an adopted VM can no longer bypass the limit. The target-class override is checked too. A held clone stays `Pending` with `Ready=False`.
+  - **VMMigration**: checked against the target Provider's limit at three points:
+    - in `Validating`, the source's primary disk (real size, `GetDiskInfo`) and the target VMClass;
+    - right before `ExportDisk`, the disk being exported (same VM, disk and snapshot), whose size is recorded in `status.diskInfo.sourceSize`;
+    - right before `ImportDisk`, that recorded size.
+
+    A held migration stays in its phase, with `Validating`, `Exporting` or `Importing` set to False.
+  - Fail closed (`DiskSizeLimitUnverifiable`) in these cases:
+    - an invalid Provider annotation;
+    - a disk size the provider does not report, or a read error (the provider's error text and disk paths never reach status);
+    - an import with no recorded size while a limit applies.
+  - Without a limit, no `GetDiskInfo` is sent, and an unreadable target Provider never delays an export.
+- `internal/k8s/conditions.go`: `ConditionDiskSizeWithinLimit`, `ReasonDiskSizeExceedsLimit`, `ReasonDiskSizeLimitUnverifiable`.
+- `api/infra.virtrigaud.io/v1beta1/disk_size_webhook.go` (new): `vvirtualmachine-disksize.kb.io` and `vvmclass-disksize.kb.io` validating webhooks.
+  - They refuse a `spec.disks[].sizeGiB` or `spec.diskDefaults.size` above `--max-disk-size`, or growing one beyond it.
+  - A stored size already above it can be kept or lowered. Repeated disk names are matched by occurrence.
+  - They check only the manager's ceiling. The controllers enforce both the ceiling and the Provider annotation.
+  - Served whenever webhooks are on. Without a ceiling they admit everything.
+  - `config/webhook/manifests.yaml` regenerated. It always lists them with `failurePolicy: Fail`; see the chart README for kustomize installs.
+- `api/infra.virtrigaud.io/v1beta1/provider_webhook.go`: refuses an invalid `infra.virtrigaud.io/max-disk-size` value on create, and on update when it is new or changed.
+- Chart (`charts/virtrigaud/values.yaml`, `templates/manager-deployment.yaml`, `templates/_helpers.tpl` `virtrigaud.maxDiskSizeValue`, `templates/webhooks.yaml`): `manager.maxDiskSize` becomes `--max-disk-size`.
+  - Anything the manager refuses fails the render: no unit of at least G, zero, `none`, or a value below 1Gi such as `1G` or `0.5Gi`.
+  - The two disk-size webhooks render only with webhooks on and `manager.maxDiskSize` set, with the same caBundle and `failurePolicy` as `vprovider.kb.io`.
+- `hack/verify-max-disk-size-render.sh` (new), `make verify-max-disk-size-render`, and a CI step. The check asserts:
+  - no flag and no webhooks by default;
   - the flag is rendered when set;
-  - the webhooks render only with webhooks on, with a coherent caBundle, and in sync with `config/webhook/manifests.yaml`;
-  - invalid values fail the render;
+  - the webhooks render coherent and in sync with `config/webhook/manifests.yaml`;
+  - invalid and sub-1Gi values fail the render while boundary values (`1Gi`, `1.1G`) render;
   - `--reuse-values` from v0.3.11 still renders.
 - Tests:
-  - `api/.../disk_size_limit_test.go`: parsing, the effective limit, and webhook table tests (create, grow, keep, lower, rename, the Provider annotation).
-  - `internal/controller/disk_size_limit_test.go`: create, re-create, existing VM, Reconfigure withholding, clone, migration, and the flag parser.
-  - `internal/controller/disk_size_limit_envtest_test.go`: the VM and VMMigration condition writes against a real API server, with no write on a repeated hold and the hold ending once the size fits.
-  - `cmd/manager/main_test.go`: an invalid `--max-disk-size` exits 1 at startup.
-- Docs: `charts/virtrigaud/README.md` (values row, new "Disk-size limit" section), `docs/upgrading.md` (behaviour-change row), `docs/release-notes/next.md`.
+  - API: parsing (aligned with the chart boundaries), the effective limit, webhook table tests (including repeated names), the Provider annotation.
+  - Controller: create, re-create, the libvirt default, the create marker surviving a hold, Reconfigure withholding on every outcome, the Proxmox guard, clone and migration by real sizes (unknown size, read error, old provider), the export and import re-checks, no read without a limit.
+  - Envtest: VM, VMClone and VMMigration condition writes, written once.
+  - Providers: vSphere (vcsim) and Proxmox (pvefake) `GetDiskInfo` disk lists, and `SizeGiB=0` is a no-op in vSphere, Proxmox and libvirt Reconfigure.
+  - Manager: an invalid flag exits 1.
+- Docs: `charts/virtrigaud/README.md` ("Disk-size limit"), `docs/upgrading.md`, `docs/release-notes/next.md`.
 
 ### Why
-Until now the only bound on a VM disk was the CRD's 64Ti, and a tenant who owns its namespace could fill a shared datastore or pool through new disks, resizes, VMClass `diskDefaults`, additional disks, clones and migrations. In regulated multi-tenant deployments the cap must be one a tenant cannot raise. A manager flag (with an annotation that can only lower it) does that without a CRD change. The controllers enforce it because webhooks are optional.
+Until now the only bound on a VM disk was the CRD's 64Ti. A tenant who owns its namespace could fill a shared datastore or pool through new disks, resizes, VMClass `diskDefaults`, additional disks, clones and migrations. In regulated multi-tenant deployments the cap must be one a tenant cannot raise.
+
+A clone or migration copies the source's real disks, so it is checked by their real sizes. Images or templates larger than the class are not covered: no image's size is known before the Create, and refusing every image-based create under a limit would break normal use.
 
 ### Impact
 - [ ] Breaking change
-- [ ] Requires cluster rollout
+- [x] Requires cluster rollout
 - [x] Config change only
 - [ ] Documentation only
 
