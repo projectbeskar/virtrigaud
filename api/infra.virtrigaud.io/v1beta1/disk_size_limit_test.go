@@ -38,7 +38,7 @@ func TestParseMaxDiskSize(t *testing.T) {
 		{"", ""},
 		{"0", ""},
 		{"-1Gi", ""},
-		{"500", ""},   // 500 bytes: a missing unit
+		{"500", ""},    // 500 bytes: a missing unit
 		{"1023Mi", ""}, // below 1Gi
 		{"lots", ""},
 		{"none", ""},

@@ -211,7 +211,7 @@ var _ = Describe("Disk-size limit (envtest)", func() {
 		Expect(c.Message).To(ContainSubstring("VMClass big spec.diskDefaults.size asks for 80Gi, above the disk-size limit 50Gi: nothing is migrated"))
 		Expect(c.ObservedGeneration).To(Equal(held.Generation))
 		imports, exports, snapshots, power := spy.calls()
-		Expect(imports + exports + snapshots + power).To(BeZero(), "no provider call")
+		Expect(imports+exports+snapshots+power).To(BeZero(), "no provider call")
 		Expect(diskLimitEvents(rec, k8s.ReasonDiskSizeExceedsLimit)).To(HaveLen(1))
 
 		_, err = r.handleValidatingPhase(ctx, get())
