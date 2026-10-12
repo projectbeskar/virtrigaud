@@ -735,6 +735,21 @@ func (r *VMSnapshotReconciler) handleDeletion(ctx context.Context, snapshot *inf
 	// ("" = none: nothing was confirmed deleted).
 	removed := "VMSnapshot removed; there was no provider snapshot to delete"
 
+	// force-delete is honoured unless the snapshot's VM is a consumer, in
+	// another namespace, of a clustered Provider that has not allowed it
+	// (snapshotForceDeleteHonoured): the snapshot would stay on the shared
+	// hosts outside the capacity accounting. A refused force-delete is
+	// ignored here.
+	var forceVM *infrav1beta1.VirtualMachine
+	if !vmNotFound {
+		forceVM = vm
+	}
+	force, err := r.snapshotForceDeleteHonoured(ctx, snapshot, forceVM)
+	if err != nil {
+		logger.Error(err, "Cannot decide the force-delete of the snapshot; keeping the finalizer")
+		return ctrl.Result{}, err
+	}
+
 	// A VM re-created under the snapshot's VM name is another VM: a delete
 	// sent through it could reach another snapshot of the same name. No
 	// provider call; released with a Warning.
@@ -822,7 +837,7 @@ func (r *VMSnapshotReconciler) handleDeletion(ctx context.Context, snapshot *inf
 			r.Recorder.Event(snapshot, corev1.EventTypeWarning, eventReasonSnapshotLeftOnHypervisor, msg)
 			removed = ""
 		} else if unavailableErr != nil {
-			if !hasSnapshotForceDeleteAnnotation(snapshot) {
+			if !force {
 				return r.retainForUnavailableSnapshotProvider(ctx, snapshot, unavailableErr), nil
 			}
 			// The cause stays in the log: resolver text can name a TLS
@@ -835,7 +850,7 @@ func (r *VMSnapshotReconciler) handleDeletion(ctx context.Context, snapshot *inf
 			r.Recorder.Event(snapshot, corev1.EventTypeWarning, eventReasonSnapshotLeftOnHypervisor, msg)
 			removed = ""
 		} else if refErr != nil {
-			if !hasSnapshotForceDeleteAnnotation(snapshot) {
+			if !force {
 				return r.retainForUnaddressableSnapshotDelete(ctx, snapshot, refErr), nil
 			}
 			providerName := ""
@@ -860,7 +875,7 @@ func (r *VMSnapshotReconciler) handleDeletion(ctx context.Context, snapshot *inf
 			case contracts.IsNotFound(err):
 				logger.Info("The provider snapshot is already gone", "snapshot_id", snapshot.Status.SnapshotID)
 				removed = "The provider snapshot was already gone"
-			case hasSnapshotForceDeleteAnnotation(snapshot):
+			case force:
 				// The operator opted out: release the finalizer although the
 				// snapshot is still on the hypervisor, and say which one.
 				msg := fmt.Sprintf("%s=true: removing the VMSnapshot although the provider did not delete snapshot %q of VM %q "+

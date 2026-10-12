@@ -23,7 +23,6 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -110,16 +109,10 @@ func (r *VirtualMachineReconciler) consumerDetachDenied(
 	annotation string,
 ) (types.NamespacedName, bool, error) {
 	key := placementProviderKey(vm)
-	provider := &infravirtrigaudiov1beta1.Provider{}
-	if err := r.Get(ctx, key, provider); err != nil {
-		if apierrors.IsNotFound(err) {
-			return key, false, nil
-		}
-		return key, false, fmt.Errorf("get Provider %s to decide %s of VirtualMachine %s/%s: %w",
-			key, annotation, vm.Namespace, vm.Name, err)
+	denied, err := consumerDetachDeniedFor(ctx, r.Client, key, vm.Namespace)
+	if err != nil {
+		return key, false, fmt.Errorf("decide %s of VirtualMachine %s/%s: %w", annotation, vm.Namespace, vm.Name, err)
 	}
-	denied := isClusterTopology(provider) && vm.Namespace != provider.Namespace &&
-		provider.Annotations[infravirtrigaudiov1beta1.ProviderAllowConsumerOrphanOnDeleteAnnotation] != "true"
 	return key, denied, nil
 }
 
@@ -173,15 +166,7 @@ func (r *VirtualMachineReconciler) forceDeleteHonoured(ctx context.Context, vm *
 
 	msg := forceDeleteRefusedMessage(vm.Namespace, key)
 	persisted := vm.Status.DeepCopy()
-	prev := meta.FindStatusCondition(vm.Status.Conditions, k8s.ConditionForceDeleteRefused)
-	isNew := prev == nil || prev.Status != metav1.ConditionTrue
-	meta.SetStatusCondition(&vm.Status.Conditions, metav1.Condition{
-		Type:               k8s.ConditionForceDeleteRefused,
-		Status:             metav1.ConditionTrue,
-		Reason:             k8s.ReasonForceDeleteNotAllowed,
-		Message:            msg,
-		ObservedGeneration: vm.Generation,
-	})
+	isNew := setForceDeleteRefused(&vm.Status.Conditions, vm.Generation, msg)
 	log.FromContext(ctx).Info("Not honouring force-delete of a consumer VM on a clustered Provider; the delete is retried as if it were not set",
 		"provider", key.String(), "annotation", forceDeleteAnnotation)
 	metrics.RecordError(errReasonForceDeleteNotAllowed, metrics.ComponentManager)

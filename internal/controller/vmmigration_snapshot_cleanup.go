@@ -175,7 +175,13 @@ func (r *VMMigrationReconciler) releaseSourceSnapshotForDeletion(ctx context.Con
 	if !migrationSnapshotCleanupPending(migration) {
 		return false, ctrl.Result{}, nil
 	}
-	force := hasMigrationForceDeleteAnnotation(migration)
+	// force-delete is honoured unless the source VM is a consumer, in another
+	// namespace, of a clustered Provider that has not allowed it
+	// (migrationForceDeleteHonoured).
+	force, err := r.migrationForceDeleteHonoured(ctx, migration)
+	if err != nil {
+		return true, ctrl.Result{}, err
+	}
 	if wait, notDue := snapshotCleanupNotDue(migration, time.Now()); notDue {
 		if !force {
 			return true, ctrl.Result{RequeueAfter: wait}, nil
