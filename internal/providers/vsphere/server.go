@@ -84,6 +84,9 @@ type Provider struct {
 	// diskScans shares and briefly reuses the datastore scans of the disk
 	// in-use checks (disk_scan.go).
 	diskScans diskScanCache
+	// qemuImgPath is the qemu-img binary DeleteStagedDisk runs for nfs
+	// (staged_disk.go); empty means "qemu-img" on PATH. Tests only.
+	qemuImgPath string
 }
 
 // Config holds the vSphere provider configuration
@@ -524,6 +527,9 @@ func (p *Provider) GetCapabilities(ctx context.Context, req *providerv1.GetCapab
 		SupportedExportBackends: migration.PVCS3AndNFSExportBackends(),
 		SupportedImportBackends: migration.PVCS3AndNFSImportBackends(),
 		SupportedTransferModes:  migration.RelayOnlyTransferModes(),
+		// ADR-0011: DeleteStagedDisk removes a migration's s3 object and empties
+		// its nfs file (qemu-img over libnfs cannot unlink; staged_disk.go).
+		SupportedStagedDiskDeleteBackends: migration.StagedDiskDeleteBackendsS3AndNFS(),
 	}, nil
 }
 

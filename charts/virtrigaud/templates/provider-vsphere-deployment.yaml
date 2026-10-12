@@ -66,9 +66,19 @@ spec:
         resources:
           {{- toYaml .Values.providers.vsphere.resources | nindent 10 }}
         {{- $tlsEnv := include "virtrigaud.providerTLSEnv" . }}
-        {{- if $tlsEnv | trim }}
+        {{- $tmpLimit := include "virtrigaud.tmpSizeLimitValue" (dict "value" .Values.providers.vsphere.tmpSizeLimit "name" "providers.vsphere.tmpSizeLimit") }}
+        {{- $hasTmpLimit := and $tmpLimit (ne $tmpLimit "none") }}
+        {{- if or ($tlsEnv | trim) $hasTmpLimit }}
         env:
+        {{- if $tlsEnv | trim }}
         {{- $tlsEnv | nindent 8 }}
+        {{- end }}
+        {{- if $hasTmpLimit }}
+        # The /tmp emptyDir sizeLimit: the provider bounds staged copies by it
+        # (statfs shows the node's free space, not this limit).
+        - name: VIRTRIGAUD_TMP_SIZE_LIMIT
+          value: {{ $tmpLimit | quote }}
+        {{- end }}
         {{- end }}
         volumeMounts:
         - name: tmp

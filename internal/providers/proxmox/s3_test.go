@@ -114,7 +114,7 @@ func TestNFSSetprivPrefix(t *testing.T) {
 func TestBuildNFSKernelMountScript(t *testing.T) {
 	s := buildNFSKernelMountScript("172.16.56.13", "/export/virtrigaud", "INNER_CMD", "")
 	assert.Contains(t, s, "MNT=$(mktemp -d /var/tmp/.virtrigaud-nfsmnt-XXXXXX)")
-	assert.Contains(t, s, "mount -t nfs -o vers=3 '172.16.56.13:/export/virtrigaud' \"$MNT\"")
+	assert.Contains(t, s, "mount -t nfs -o vers=3,nosymfollow,nosuid,nodev,noexec '172.16.56.13:/export/virtrigaud' \"$MNT\"")
 	assert.Contains(t, s, "trap 'umount \"$MNT\" 2>/dev/null || true; rmdir \"$MNT\" 2>/dev/null || true' EXIT")
 	assert.True(t, strings.HasSuffix(s, "INNER_CMD"), "inner command runs after the mount")
 
@@ -137,7 +137,7 @@ func TestBuildNFSKernelExportScript(t *testing.T) {
 	assert.Contains(t, s, "qemu-img convert -U -f 'qcow2' -O qcow2 '/mnt/pve/dir/images/101/vm-101-disk-1.qcow2' \"$TMP\"")
 	assert.Contains(t, s, `chmod 0644 "$TMP"`)
 	// stage 2: dropped-privilege copy onto the export
-	assert.Contains(t, s, "mount -t nfs -o vers=3 '172.16.56.13:/export/virtrigaud' \"$MNT\"")
+	assert.Contains(t, s, "mount -t nfs -o vers=3,nosymfollow,nosuid,nodev,noexec '172.16.56.13:/export/virtrigaud' \"$MNT\"")
 	assert.Contains(t, s, `setpriv --reuid 1000 --regid 1000 --clear-groups cp "$TMP" "$MNT"/'vmmigrations-ns-m1-export.qcow2'`)
 	// the temp is removed on exit
 	assert.Contains(t, s, `rm -f "$TMP" 2>/dev/null || true`)

@@ -1068,6 +1068,10 @@ func (s *Server) GetCapabilities(ctx context.Context, req *providerv1.GetCapabil
 		SupportsHonestReconfigure: true,
 		// ImportDisk enforces max_virtual_size_bytes (import_size_limit.go).
 		SupportsImportSizeLimit: true,
+		// ADR-0011: DeleteStagedDisk removes a migration's s3 object and empties
+		// its nfs file (the host's qemu-img over libnfs cannot unlink;
+		// staged_disk.go). A clustered provider advertises none.
+		SupportedStagedDiskDeleteBackends: migration.StagedDiskDeleteBackendsS3AndNFS(),
 	}, nil
 }
 

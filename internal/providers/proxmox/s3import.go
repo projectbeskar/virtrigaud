@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"io"
 	"net/url"
+	"path/filepath"
 	"regexp"
 	"strings"
 
@@ -113,6 +114,14 @@ func (p *Provider) importDiskFromS3(ctx context.Context, req *providerv1.ImportD
 	// directory). cat writes sequentially (no seek), so the non-seekable pipe is
 	// fine. The pipe couples DownloadStream (SHA256 verified in-stream) to the
 	// SSH stdin so the disk is never buffered whole in the pod.
+	// The bucket is tenant-controlled: bound the download by the object's
+	// reported size (and the import limit), and refuse it when the node's
+	// stage filesystem cannot hold it twice. A backend that serves more than it
+	// reported is refused.
+	maxBytes, err := p.stagedDownloadBound(ctx, s3client, req.SourceUrl, filepath.Dir(stagePath), req.MaxVirtualSizeBytes)
+	if err != nil {
+		return nil, err
+	}
 	pr, pw := io.Pipe()
 	stageCmd := buildImportStageScript(proxmoxImportStageDir, stagePath, `cat > "$TMP"`)
 
@@ -124,7 +133,7 @@ func (p *Provider) importDiskFromS3(ctx context.Context, req *providerv1.ImportD
 	go func() {
 		resp, derr := s3client.DownloadStream(ctx, storage.StreamDownloadRequest{
 			SourceURL:        req.SourceUrl,
-			Writer:           pw,
+			Writer:           &migration.BoundedWriter{W: pw, Max: maxBytes},
 			ExpectedChecksum: req.ExpectedChecksum,
 		})
 		_ = pw.CloseWithError(derr)
@@ -142,6 +151,9 @@ func (p *Provider) importDiskFromS3(ctx context.Context, req *providerv1.ImportD
 	if dl.err != nil || stageErr != nil {
 		p.cleanupNodeFile(stagePath)
 	}
+	if stderrors.Is(dl.err, migration.ErrStagedObjectTooLarge) {
+		return nil, errors.NewInvalidSpec("s3 import: %s", migration.ErrStagedObjectTooLarge.Error())
+	}
 	if dl.err != nil {
 		return nil, errors.NewInternal("s3 download/transfer failed during stage", dl.err)
 	}
@@ -151,6 +163,23 @@ func (p *Provider) importDiskFromS3(ctx context.Context, req *providerv1.ImportD
 
 	p.logger.Info("S3 object staged on node",
 		"bytes", dl.resp.BytesTransferred, "sha256_verified", req.ExpectedChecksum != "")
+
+	// --- SECURITY: header guard ---
+	// The object comes from a bucket the tenant controls. `qm importdisk`
+	// probes its source at Create, so a qcow2/vmdk header naming a backing
+	// file, data file or extent would make the node (root) flatten a node file
+	// or a json:/nbd: target into the tenant's disk. The staged file is local
+	// now (nobody else can change it): refuse anything but a self-contained
+	// image that probes as the expected format.
+	limit, err := migration.StagedCopyLimit(req.MaxVirtualSizeBytes)
+	if err != nil {
+		p.cleanupNodeFile(stagePath)
+		return nil, errors.NewInternal("invalid staged import size limit", err)
+	}
+	if err := p.checkStagedNodeImage(ctx, stagePath, srcFormat, limit); err != nil {
+		p.cleanupNodeFile(stagePath)
+		return nil, err
+	}
 
 	// --- VALIDATE (ADR D5) ---
 	// qemu-img check on the staged qcow2 (only meaningful for qcow2; raw has no

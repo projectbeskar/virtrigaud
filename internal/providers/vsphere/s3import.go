@@ -18,6 +18,7 @@ package vsphere
 
 import (
 	"context"
+	stderrors "errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -135,16 +136,32 @@ func (p *Provider) importDiskFromS3(ctx context.Context, req *providerv1.ImportD
 		_ = os.Remove(vmdkLocal)
 	}()
 
+	// The bucket is tenant-controlled: bound the download by the object's
+	// reported size (and the import limit), and refuse it when /tmp — an
+	// emptyDir with a sizeLimit — cannot hold it twice (the download and the
+	// vmdk). A backend that serves more than it reported is refused.
+	// The copy and header limits include the import's disk-size limit (#382).
+	limit, err := migration.StagedCopyLimit(req.MaxVirtualSizeBytes)
+	if err != nil {
+		return nil, errors.NewInternal("invalid staged import size limit", err)
+	}
+	maxBytes, err := p.stagedDownloadBound(ctx, s3client, req.SourceUrl, limit)
+	if err != nil {
+		return nil, err
+	}
 	srcFile, err := os.Create(srcLocal)
 	if err != nil {
 		return nil, errors.NewInternal("failed to create temp download file", err)
 	}
 	dl, dlErr := s3client.DownloadStream(ctx, storage.StreamDownloadRequest{
 		SourceURL:        req.SourceUrl,
-		Writer:           srcFile,
+		Writer:           &migration.BoundedWriter{W: srcFile, Max: maxBytes},
 		ExpectedChecksum: req.ExpectedChecksum, // SHA256 verified in-stream when set
 	})
 	closeErr := srcFile.Close()
+	if stderrors.Is(dlErr, migration.ErrStagedObjectTooLarge) {
+		return nil, stagedCopyRefusal(migration.ErrStagedObjectTooLarge)
+	}
 	if dlErr != nil {
 		return nil, errors.NewInternal("failed to download disk from s3", dlErr)
 	}
@@ -153,6 +170,12 @@ func (p *Provider) importDiskFromS3(ctx context.Context, req *providerv1.ImportD
 	}
 	p.logger.Info("S3 object downloaded to pod",
 		"bytes", dl.BytesTransferred, "sha256-verified", req.ExpectedChecksum != "")
+
+	// SECURITY: the object comes from a bucket the tenant controls. Refuse a
+	// header that references any other file before converting it.
+	if err := p.checkStagedLocalImage(ctx, srcLocal, srcFormat, limit); err != nil {
+		return nil, err
+	}
 
 	// --- 2. CONVERT (ADR D4) — qcow2 → streamOptimized vmdk ---
 	// streamOptimized is MANDATORY for the NFC lease import path: vmdk.Stat checks
