@@ -20,6 +20,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -400,6 +401,37 @@ func TestWithholdDiskGrowthOverLimit_ProxmoxSendsNoDiskSize(t *testing.T) {
 	req = newReq()
 	require.NotNil(t, withholdDiskGrowthOverLimit(&req, qty("100Gi"), libvirt, nil))
 	assert.Equal(t, int32(50), req.Disks[1].SizeGiB)
+}
+
+// TestHoldForDiskSizeLimit_KeepsTheCreateMarker (review L5): a hold of a VM
+// whose Create was requested (the create marker) changes only Ready: the
+// marker — the durable record that the VM may exist — survives unchanged.
+func TestHoldForDiskSizeLimit_KeepsTheCreateMarker(t *testing.T) {
+	ctx := context.Background()
+	r, rp, rec := diskCapFixture(t, qty("100Gi"), nil, "", infravirtrigaudiov1beta1.DiskSpec{Name: "data", SizeGiB: 500})
+	stored, _ := storedVM(t, r)
+	marked := metav1.NewTime(time.Now().Add(-time.Minute).Truncate(time.Second))
+	stored.Status.Conditions = []metav1.Condition{{
+		Type: k8s.ConditionProvisioning, Status: metav1.ConditionTrue, Reason: k8s.ReasonCreateRequested,
+		Message: "create requested", LastTransitionTime: marked, ObservedGeneration: stored.Generation,
+	}}
+	require.NoError(t, r.Status().Update(ctx, stored))
+	require.True(t, createRequested(stored))
+
+	persisted := stored.Status.DeepCopy()
+	res := r.holdForDiskSizeLimit(ctx, stored, persisted, checkDiskSizeLimit(r.MaxDiskSize, nil,
+		vmDiskSizeRequests(stored, nil, nil), "nothing is created"))
+	assert.Equal(t, diskSizeLimitRetryInterval, res.RequeueAfter)
+	assert.Empty(t, rp.createReqs)
+
+	got, _ := storedVM(t, r)
+	assert.True(t, createRequested(got), "the create marker survives the hold")
+	p := meta.FindStatusCondition(got.Status.Conditions, k8s.ConditionProvisioning)
+	require.NotNil(t, p)
+	assert.Equal(t, k8s.ReasonCreateRequested, p.Reason)
+	assert.True(t, p.LastTransitionTime.Equal(&marked), "the marker's attempt id is unchanged")
+	assert.Equal(t, k8s.ReasonDiskSizeExceedsLimit, meta.FindStatusCondition(got.Status.Conditions, k8s.ConditionReady).Reason)
+	assert.Len(t, diskLimitEvents(rec, k8s.ReasonDiskSizeExceedsLimit), 1)
 }
 
 func TestParseMaxDiskSizeFlag(t *testing.T) {

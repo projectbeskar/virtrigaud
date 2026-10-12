@@ -132,6 +132,84 @@ var _ = Describe("Disk-size limit (envtest)", func() {
 		Expect(created.Status.ID).To(Equal(ns.Name + ".web"))
 	})
 
+	It("holds a VMClone whose source's real disk is above the limit, writing its status once", func() {
+		ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{GenerateName: "disk-cap-clone-"}}
+		Expect(k8sClient.Create(ctx, ns)).To(Succeed())
+		prov := holdTestProvider(ns.Name)
+		Expect(k8sClient.Create(ctx, prov)).To(Succeed())
+		prov.Status.Runtime = &infravirtrigaudiov1beta1.ProviderRuntimeStatus{Phase: "Running", Endpoint: "provider:9443"}
+		Expect(k8sClient.Status().Update(ctx, prov)).To(Succeed())
+		// The class asks for a small disk; the real disk is larger.
+		class := envtestClass(ns.Name, "small", nil)
+		class.Spec.DiskDefaults = &infravirtrigaudiov1beta1.DiskDefaults{Size: resource.MustParse("10Gi")}
+		Expect(k8sClient.Create(ctx, class)).To(Succeed())
+		src := &infravirtrigaudiov1beta1.VirtualMachine{
+			ObjectMeta: metav1.ObjectMeta{Name: "src-vm", Namespace: ns.Name},
+			Spec: infravirtrigaudiov1beta1.VirtualMachineSpec{
+				ProviderRef:  infravirtrigaudiov1beta1.ObjectRef{Name: prov.Name},
+				ClassRef:     infravirtrigaudiov1beta1.ObjectRef{Name: "small"},
+				ImportedDisk: &infravirtrigaudiov1beta1.ImportedDiskRef{DiskID: "disk-1", Format: "qcow2", Source: "manual"},
+			},
+		}
+		Expect(k8sClient.Create(ctx, src)).To(Succeed())
+		removeVMFinalizersOnCleanup(src)
+		src.Status.ID = "vm-1"
+		Expect(k8sClient.Status().Update(ctx, src)).To(Succeed())
+		clone := &infravirtrigaudiov1beta1.VMClone{
+			ObjectMeta: metav1.ObjectMeta{Name: "clone-1", Namespace: ns.Name},
+			Spec: infravirtrigaudiov1beta1.VMCloneSpec{
+				Source: infravirtrigaudiov1beta1.CloneSource{VMRef: &infravirtrigaudiov1beta1.LocalObjectReference{Name: "src-vm"}},
+				Target: infravirtrigaudiov1beta1.VMCloneTarget{Name: "clone-target"},
+			},
+		}
+		Expect(k8sClient.Create(ctx, clone)).To(Succeed())
+		DeferCleanup(func() {
+			Expect(retry.RetryOnConflict(retry.DefaultRetry, func() error {
+				got := &infravirtrigaudiov1beta1.VMClone{}
+				if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(clone), got); err != nil {
+					return client.IgnoreNotFound(err)
+				}
+				got.Finalizers = nil
+				return k8sClient.Update(ctx, got)
+			})).To(Succeed())
+			Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, clone))).To(Succeed())
+		})
+
+		cp := &sizedCloner{sizes: &diskSizes{disks: capacities(500 << 30)}}
+		rec := record.NewFakeRecorder(100)
+		limit := resource.MustParse("100Gi")
+		r := &VMCloneReconciler{
+			Client: k8sClient, Scheme: k8sClient.Scheme(), APIReader: k8sClient,
+			RemoteResolver: &stubResolver{provider: cp}, Recorder: rec, MaxDiskSize: &limit,
+		}
+		req := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(clone)}
+		_, err := r.Reconcile(ctx, req) // adds the finalizer
+		Expect(err).NotTo(HaveOccurred())
+		res, err := r.Reconcile(ctx, req)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(res.RequeueAfter).To(Equal(diskSizeLimitRetryInterval))
+		Expect(cp.cloneCnt).To(BeZero(), "no Clone RPC")
+
+		held := &infravirtrigaudiov1beta1.VMClone{}
+		Expect(k8sClient.Get(ctx, req.NamespacedName, held)).To(Succeed())
+		Expect(held.Status.Phase).To(Equal(infravirtrigaudiov1beta1.ClonePhasePending))
+		c := meta.FindStatusCondition(held.Status.Conditions, infravirtrigaudiov1beta1.VMCloneConditionReady)
+		Expect(c).NotTo(BeNil())
+		Expect(c.Status).To(Equal(metav1.ConditionFalse))
+		Expect(c.Reason).To(Equal(k8s.ReasonDiskSizeExceedsLimit))
+		Expect(c.Message).To(ContainSubstring("disk 0 of source VM src-vm asks for 500Gi, above the disk-size limit 100Gi: nothing is cloned"))
+		Expect(diskLimitEvents(rec, k8s.ReasonDiskSizeExceedsLimit)).To(HaveLen(1))
+
+		// A repeated hold writes nothing and records no event.
+		_, err = r.Reconcile(ctx, req)
+		Expect(err).NotTo(HaveOccurred())
+		again := &infravirtrigaudiov1beta1.VMClone{}
+		Expect(k8sClient.Get(ctx, req.NamespacedName, again)).To(Succeed())
+		Expect(again.ResourceVersion).To(Equal(held.ResourceVersion), "a repeated hold does not write the clone")
+		Expect(diskLimitEvents(rec, k8s.ReasonDiskSizeExceedsLimit)).To(BeEmpty())
+		Expect(cp.cloneCnt).To(BeZero())
+	})
+
 	It("holds a VMMigration above the target's limit in Validating with a persisted condition", func() {
 		ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{GenerateName: "disk-cap-mig-"}}
 		Expect(k8sClient.Create(ctx, ns)).To(Succeed())
