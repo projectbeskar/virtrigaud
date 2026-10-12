@@ -629,67 +629,92 @@ func (p *Provider) ensureOwnerStamp(ctx context.Context, node string, vmid int, 
 	return p.writeOwnerStamp(ctx, node, vmid, base, stamp)
 }
 
-// checkDeleteOwner decides whether Delete may destroy the VM when the request
-// names its owner (DeleteRequest.owner). It returns nil to go on with the
-// delete, and otherwise the answer:
-//   - the VM's stamp records another UID, or it is a template: NotFound. This
-//     VirtualMachine's VM is gone (its VMID was reused) and the VM there is
-//     never destroyed;
-//   - the stamp is unreadable or records more than one owner, or the config
-//     cannot be read: an error that keeps the VirtualMachine's finalizer
-//     (FailedPrecondition / Unavailable), nothing destroyed.
+// The constant messages of Delete's refusals (checkDelete). They name no VM,
+// stamp or owner: the details go to the provider log only.
+const (
+	// deleteNotOwnedMessage answers a Delete whose VMID holds a VM that is not
+	// the requester's (VM_NOT_OWNED).
+	deleteNotOwnedMessage = "the VM at this VMID is not this VirtualMachine's (its VMID was reused, or it was " +
+		"re-created under another UID); it was not touched"
+	// deleteTemplateMessage answers a Delete whose VMID holds a template
+	// (VM_IS_IMAGE_ARTIFACT).
+	deleteTemplateMessage = "refused: the Proxmox VMID names a template, not a VM; deleting it would destroy the " +
+		"image for every VM cloned from it, so nothing was changed"
+	// deleteStampUnreadableMessage answers a Delete whose VM carries an owner
+	// stamp that cannot be read or records more than one owner
+	// (OWNER_STAMP_UNREADABLE).
+	deleteStampUnreadableMessage = "refused: the VM carries an owner stamp (" + ownerStampMarker + " line of its " +
+		"description) that cannot be read or records more than one owner; nothing was changed. Fix the stamp, or " +
+		"remove the VM by hand"
+)
+
+// checkDelete decides whether Delete may destroy the VM at vmid on node. It
+// returns nil to go on with the delete, and otherwise the answer; nothing is
+// stopped or destroyed then:
+//   - the config cannot be read: Unavailable (retried);
+//   - the VM is a template: FailedPrecondition + VM_IS_IMAGE_ARTIFACT, with or
+//     without an owner on the request — a template (for example an adopted
+//     VM converted to one) is never destroyed by a VirtualMachine's delete;
+//   - with an owner (DeleteRequest.owner) only: a VM stamped with another UID,
+//     or unstamped and not named like the owner (unstampedNamedLikeOwner), is
+//     NotFound + VM_NOT_OWNED — the requester's VM is gone, and the VM at the
+//     VMID is not its own; a stamp that cannot be read or records more than
+//     one owner is FailedPrecondition + OWNER_STAMP_UNREADABLE.
 //
-// An unstamped VM (created before owner stamps, adopted, or a clone made
-// without a target UID) is deleted as before when its PVE name is the
-// owner's name (the name Create gives it); an unstamped VM with any other
-// name is NotFound and never destroyed (a reused VMID). An adopted VM whose
-// PVE name differs from its VirtualMachine's is therefore left in place —
-// including one whose VirtualMachine name is the adoption controller's
-// sanitized form of the PVE name (lower-cased, '_', '.' and ' ' turned into
-// '-'): that sanitizer (sanitizeVMName) is unexported in internal/controller,
-// which a provider must not import, so it is not applied here. The rule
-// applies only to a Delete that carries an owner.
-func (p *Provider) checkDeleteOwner(ctx context.Context, node string, vmid int, owner contracts.ObjectIdentity) error {
+// A VM the config read cannot find on this node is left to the delete itself,
+// which confirms cluster-wide whether it is gone.
+func (p *Provider) checkDelete(ctx context.Context, node string, vmid int, owner contracts.ObjectIdentity) error {
 	cfg, err := p.client.GetVMConfig(ctx, node, vmid)
 	if stderrors.Is(err, pveapi.ErrVMNotFound) {
 		return nil // not on this node: the delete confirms cluster-wide that it is gone
 	}
 	if err != nil {
-		p.logger.Error("Reading the owner stamp before a delete failed; not deleting", "vmid", vmid, "node", node, "error", err)
-		return errors.NewUnavailable(fmt.Sprintf("cannot read the owner stamp of Proxmox VM %d; not deleting it (will retry)", vmid), nil)
+		p.logger.Error("Reading the VM configuration before a delete failed; not deleting", "vmid", vmid, "node", node, "error", err)
+		return errors.NewUnavailable(fmt.Sprintf("cannot read the configuration of Proxmox VM %d; not deleting it (will retry)", vmid), nil)
 	}
 	logArgs := []any{"vmid", vmid, "node", node, "requester_uid", owner.UID, "requester_namespace", owner.Namespace, "requester_name", owner.Name}
 	if configIsTemplate(cfg) {
-		p.logger.Warn("Refusing to delete: the VMID now names a template, never a VirtualMachine's VM", logArgs...)
-		return errors.NewNotFound("VM", strconv.Itoa(vmid))
+		p.logger.Warn("Refusing to delete: the VMID names a template, never a VirtualMachine's VM", logArgs...)
+		return statusWithReasons(codes.FailedPrecondition, deleteTemplateMessage, contracts.VMIsImageArtifactReason)
+	}
+	if owner.IsZero() {
+		return nil
 	}
 	read := readOwnerStamp(configString(cfg, pveConfigKeyDescription))
 	switch {
 	case read.state != "":
 		p.logger.Warn("Refusing to delete: the VM's owner stamp cannot be relied on",
 			append(logArgs, "owner_stamp_state", read.state, "problem", read.problem)...)
-		return &errors.ProviderError{
-			Code: codes.FailedPrecondition,
-			Message: fmt.Sprintf("Proxmox VM %d carries an owner stamp that cannot be read or records more than one owner; "+
-				"not deleting it. Fix the %q line of its description (Notes), or remove the VM by hand", vmid, ownerStampMarker),
-		}
-	case read.stamp == nil && configString(cfg, pveConfigKeyName) != owner.Name:
+		return statusWithReasons(codes.FailedPrecondition, deleteStampUnreadableMessage, contracts.OwnerStampUnreadableReason)
+	case read.stamp == nil && !unstampedNamedLikeOwner(configString(cfg, pveConfigKeyName), vmid, owner):
 		// An unstamped VM is this VirtualMachine's only if it has the name
-		// Create gave it (the VirtualMachine's name): another name means the
-		// VMID was reused by an unrelated VM.
+		// Create (or adoption) gave it: another name means the VMID was
+		// reused by an unrelated VM.
 		p.logger.Warn("Refusing to delete: the VM is unstamped and not named like this VirtualMachine (its VMID was reused?)",
 			append(logArgs, "vm_name", configString(cfg, pveConfigKeyName))...)
-		return errors.NewNotFound("VM", strconv.Itoa(vmid))
+		return statusWithReasons(codes.NotFound, deleteNotOwnedMessage, contracts.VMNotOwnedReason)
 	case read.stamp == nil:
 		p.logger.Info("The VM carries no owner stamp (created before owner stamps, adopted, or cloned without a target UID) "+
-			"and has this VirtualMachine's name; deleting it as before", logArgs...)
+			"and is named like this VirtualMachine; deleting it as before", logArgs...)
 		return nil
 	case read.stamp.owner.UID != owner.UID:
-		p.logger.Warn("Refusing to delete: the VM is stamped with another owner (its VMID was reused)",
+		p.logger.Warn("Refusing to delete: the VM is stamped with another owner (its VMID was reused, or the requester was re-created)",
 			append(logArgs, "owner_uid", read.stamp.owner.UID, "owner_namespace", read.stamp.owner.Namespace, "owner_name", read.stamp.owner.Name)...)
-		return errors.NewNotFound("VM", strconv.Itoa(vmid))
+		return statusWithReasons(codes.NotFound, deleteNotOwnedMessage, contracts.VMNotOwnedReason)
 	}
 	return nil
+}
+
+// unstampedNamedLikeOwner reports whether an unstamped VM whose PVE name is
+// pveName (VMID vmid) is named like owner's VirtualMachine: pveName is the
+// owner's name — the name Create gives the VM — or the name the adoption
+// controller gives the VirtualMachine adopting it (contracts.AdoptedVMName).
+// Anything else is another VM at a reused VMID.
+func unstampedNamedLikeOwner(pveName string, vmid int, owner contracts.ObjectIdentity) bool {
+	if owner.Name == "" {
+		return false
+	}
+	return pveName == owner.Name || contracts.AdoptedVMName(pveName, strconv.Itoa(vmid)) == owner.Name
 }
 
 // deleteOwner reads DeleteRequest.owner; the zero identity when absent.

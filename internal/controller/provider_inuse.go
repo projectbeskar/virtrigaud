@@ -65,14 +65,6 @@ const providerInUseListedNamespaces = 10
 // target Provider (providerInUseProviderValue).
 const providerInUseIndex = "virtrigaud.io/provider-in-use"
 
-// The finalizers of the VMSnapshot and VMMigration controllers, read here to
-// tell whether such an object still has a delete to run. They must match the
-// literals those controllers add and remove.
-const (
-	vmSnapshotFinalizerName  = "snapshot.infra.virtrigaud.io/finalizer"
-	vmMigrationFinalizerName = "vmmigration.infra.virtrigaud.io/finalizer"
-)
-
 // DeleteBlocked condition reasons on a Provider being deleted (ADR-0010).
 const (
 	// reasonProviderInUse: objects still need the Provider; its runtime is
@@ -268,14 +260,14 @@ func vmMayExistOnHypervisor(vm *infravirtrigaudiov1beta1.VirtualMachine) bool {
 // run (its finalizer is there). Its delete calls SnapshotDelete through its
 // VM's Provider while that VM exists.
 func snapshotHoldsProvider(snapshot *infravirtrigaudiov1beta1.VMSnapshot) bool {
-	return controllerutil.ContainsFinalizer(snapshot, vmSnapshotFinalizerName)
+	return controllerutil.ContainsFinalizer(snapshot, infravirtrigaudiov1beta1.VMSnapshotFinalizer)
 }
 
 // cloneHoldsProvider reports whether a VMClone is still cloning through its
 // source VM's Provider: it carries its finalizer, is not being deleted (its
 // delete makes no provider call) and has not finished.
 func cloneHoldsProvider(clone *infravirtrigaudiov1beta1.VMClone) bool {
-	if !controllerutil.ContainsFinalizer(clone, vmCloneFinalizer) || !clone.DeletionTimestamp.IsZero() {
+	if !controllerutil.ContainsFinalizer(clone, infravirtrigaudiov1beta1.VMCloneFinalizer) || !clone.DeletionTimestamp.IsZero() {
 		return false
 	}
 	return clone.Status.Phase != infravirtrigaudiov1beta1.ClonePhaseReady &&
@@ -286,7 +278,7 @@ func cloneHoldsProvider(clone *infravirtrigaudiov1beta1.VMClone) bool {
 // Providers: it carries its finalizer and is in flight, or is being deleted
 // (its cleanup can delete the source snapshot through the source Provider).
 func migrationHoldsProvider(migration *infravirtrigaudiov1beta1.VMMigration) bool {
-	if !controllerutil.ContainsFinalizer(migration, vmMigrationFinalizerName) {
+	if !controllerutil.ContainsFinalizer(migration, infravirtrigaudiov1beta1.VMMigrationFinalizer) {
 		return false
 	}
 	if !migration.DeletionTimestamp.IsZero() {
@@ -481,8 +473,18 @@ func providerUsageOf(ctx context.Context, reader client.Reader, provider *infrav
 	return u, nil
 }
 
+// liveReader returns the uncached reader (APIReader), or the client.
+func (r *ProviderReconciler) liveReader() client.Reader {
+	if r.APIReader != nil {
+		return r.APIReader
+	}
+	return r.Client
+}
+
 // handleDeletion handles a Provider being deleted (ADR-0010). While anything
-// still needs it, it is held with its runtime kept up (holdInUseProvider).
+// still needs it — counted from the cache, and once more from the API server
+// right before the finalizer is removed — it is held with its runtime kept up
+// (holdInUseProvider).
 // Once nothing does, or when force-delete is set, its runtime is torn down
 // and the in-use finalizer removed. A Provider without the in-use finalizer
 // (deleted before the upgrade, kept by another finalizer) only has its runtime
@@ -513,6 +515,23 @@ func (r *ProviderReconciler) handleDeletion(ctx context.Context, provider *infra
 	}
 	if usage.total() > 0 && !forced {
 		return r.holdInUseProvider(ctx, provider, usage)
+	}
+	// The cache says nothing uses the Provider; it may lag (a create marker,
+	// clone or migration that just recorded its use). Before the finalizer is
+	// removed, the usage is counted again from the API server, and anything
+	// found there holds the Provider (ADR-0010).
+	if !forced {
+		live, err := providerUsageOf(ctx, liveIndexedReader{Reader: r.liveReader()}, provider)
+		if err != nil {
+			metrics.RecordError(errReasonProviderInUse, metrics.ComponentManager)
+			return ctrl.Result{}, fmt.Errorf("check live what still uses Provider %s: %w", key, err)
+		}
+		if live.total() > 0 {
+			logger.Info("The API server shows objects still using the Provider that the cache did not; holding it",
+				"provider", key.String(), "virtualMachines", live.vms, "snapshots", live.snapshots,
+				"clones", live.clones, "migrations", live.migrations)
+			return r.holdInUseProvider(ctx, provider, live)
+		}
 	}
 
 	if err := r.cleanupRemoteRuntime(ctx, provider); err != nil {

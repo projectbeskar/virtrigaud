@@ -95,7 +95,7 @@ func TestVMSnapshotRetention_KeepsASnapshotWithoutAPolicy(t *testing.T) {
 // remains).
 func TestVMSnapshotRetention_VMBeingDeleted(t *testing.T) {
 	vm := sourceVMWithID(snapPhaseNS, "web", "prov", "vm-100")
-	vm.Finalizers = []string{"virtualmachine.infra.virtrigaud.io/finalizer"}
+	vm.Finalizers = []string{infrav1beta1.VirtualMachineFinalizer}
 	now := metav1.Now()
 	vm.DeletionTimestamp = &now
 	r, _ := newSnapPhaseReconciler(t, vm, runningProvider(snapPhaseNS, "prov"),

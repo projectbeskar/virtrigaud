@@ -436,7 +436,7 @@ func (r *ProviderReconciler) surfaceHostCredentialStatus(ctx context.Context, pr
 
 	if len(credSkips) == 0 {
 		k8s.SetCondition(&provider.Status.Conditions, conditionHostCredentialsReady, metav1.ConditionTrue,
-			reasonCredentialsResolved, fmt.Sprintf("resolved credentials for all %d host(s)", rendered))
+			reasonCredentialsResolved, fmt.Sprintf("resolved credentials for all %d host(s)", rendered), provider.Generation)
 		return
 	}
 
@@ -445,7 +445,7 @@ func (r *ProviderReconciler) surfaceHostCredentialStatus(ctx context.Context, pr
 		len(credSkips), detail, rendered)
 
 	k8s.SetCondition(&provider.Status.Conditions, conditionHostCredentialsReady, metav1.ConditionFalse,
-		condReason, msg)
+		condReason, msg, provider.Generation)
 	if r.Recorder != nil {
 		r.Recorder.Event(provider, corev1.EventTypeWarning, eventReasonCredentialsUnresolved, msg)
 	}

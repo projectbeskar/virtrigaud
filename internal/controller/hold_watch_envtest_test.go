@@ -260,7 +260,7 @@ var _ = Describe("Held clones and snapshot deletes ignore metadata-only updates 
 		// A Ready snapshot, recorded before the controller starts.
 		snap := &infravirtrigaudiov1beta1.VMSnapshot{
 			ObjectMeta: metav1.ObjectMeta{Name: "snap-h", Namespace: ns.Name,
-				Finalizers: []string{"snapshot.infra.virtrigaud.io/finalizer"}},
+				Finalizers: []string{infravirtrigaudiov1beta1.VMSnapshotFinalizer}},
 			Spec: infravirtrigaudiov1beta1.VMSnapshotSpec{VMRef: infravirtrigaudiov1beta1.LocalObjectReference{Name: "web"}},
 		}
 		Expect(k8sClient.Create(ctx, snap)).To(Succeed())

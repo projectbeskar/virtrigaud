@@ -32,10 +32,9 @@ import (
 	"github.com/projectbeskar/virtrigaud/internal/obs/logging"
 )
 
-// vmMigrationFinalizer is the VMMigration finalizer: it is released only once
-// the migration-created source snapshot is deleted (or provably gone), or the
-// force-delete annotation says to leave it behind.
-const vmMigrationFinalizer = "vmmigration.infra.virtrigaud.io/finalizer"
+// The VMMigration finalizer (infrav1beta1.VMMigrationFinalizer) is released
+// only once the migration-created source snapshot is deleted (or provably
+// gone), or the force-delete annotation says to leave it behind.
 
 const (
 	// migrationConditionSnapshotCleanup is the VMMigration condition recording
@@ -175,7 +174,13 @@ func (r *VMMigrationReconciler) releaseSourceSnapshotForDeletion(ctx context.Con
 	if !migrationSnapshotCleanupPending(migration) {
 		return false, ctrl.Result{}, nil
 	}
-	force := hasMigrationForceDeleteAnnotation(migration)
+	// force-delete is honoured unless the source VM is a consumer, in another
+	// namespace, of a clustered Provider that has not allowed it
+	// (migrationForceDeleteHonoured).
+	force, err := r.migrationForceDeleteHonoured(ctx, migration)
+	if err != nil {
+		return true, ctrl.Result{}, err
+	}
 	if wait, notDue := snapshotCleanupNotDue(migration, time.Now()); notDue {
 		if !force {
 			return true, ctrl.Result{RequeueAfter: wait}, nil

@@ -21,6 +21,12 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
+// VMMigrationFinalizer is the finalizer the VMMigration controller keeps on a
+// VMMigration until the source snapshot it created and its intermediate
+// storage are cleaned up (or it is released with
+// virtrigaud.io/force-delete=true).
+const VMMigrationFinalizer = "vmmigration.infra.virtrigaud.io/finalizer"
+
 // VMMigrationSpec defines the desired state of VMMigration
 type VMMigrationSpec struct {
 	// Source defines the source VM to migrate from

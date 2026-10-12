@@ -293,6 +293,49 @@ func IsVMIsImageArtifact(err error) bool {
 	return IsConflict(err) && errors.Is(err, ErrVMIsImageArtifact)
 }
 
+// VMNotOwnedReason is the google.rpc.ErrorInfo reason (in ErrorInfoDomain) a
+// provider attaches to the codes.NotFound status of an owner-checked per-VM
+// operation when a VM exists at the requested id but is not the requesting
+// VirtualMachine's: it is stamped with another owner, or it is unstamped and
+// not named like the owner (e.g. a Proxmox VMID reused by an unrelated VM).
+// The VM was not touched. For a Delete the requester's own VM is treated as
+// gone, but — unlike a plain NotFound — something is known to still run at
+// that id, so the manager records it (a VMLeftOnHypervisor Warning) instead
+// of releasing silently: the requester may be a re-created object (for
+// example after a backup restore, under a new UID) whose VM is still running.
+const VMNotOwnedReason = "VM_NOT_OWNED"
+
+// ErrVMNotOwned marks (in an error's chain) a provider's NotFound carrying
+// VMNotOwnedReason. The transport client wraps it into the NotFound it maps
+// that answer to.
+var ErrVMNotOwned = errors.New("a VM exists at that id but is not the requester's")
+
+// IsVMNotOwned reports whether err is a provider's VMNotOwnedReason answer (a
+// NotFound that says so), as opposed to a plain NotFound.
+func IsVMNotOwned(err error) bool {
+	return IsNotFound(err) && errors.Is(err, ErrVMNotOwned)
+}
+
+// OwnerStampUnreadableReason is the google.rpc.ErrorInfo reason (in
+// ErrorInfoDomain) a provider attaches to the codes.FailedPrecondition status
+// of an owner-checked per-VM operation it refused because the VM's owner
+// stamp cannot be read or records more than one owner: who owns the VM cannot
+// be told, so nothing was changed. The refusal holds until an administrator
+// fixes the stamp or removes the VM by hand; the manager maps it to a
+// non-retryable Conflict, and FailedPrecondition keeps it out of the circuit
+// breaker.
+const OwnerStampUnreadableReason = "OWNER_STAMP_UNREADABLE"
+
+// ErrOwnerStampUnreadable marks (in an error's chain) a provider's refusal
+// carrying OwnerStampUnreadableReason.
+var ErrOwnerStampUnreadable = errors.New("the VM's owner stamp cannot be read or records more than one owner")
+
+// IsOwnerStampUnreadable reports whether err is a provider's
+// OwnerStampUnreadableReason refusal (a Conflict that says so).
+func IsOwnerStampUnreadable(err error) bool {
+	return IsConflict(err) && errors.Is(err, ErrOwnerStampUnreadable)
+}
+
 // ErrVMDiskCheckFailed marks (in an error's chain) a provider's answer
 // carrying VMDiskCheckFailedReason: the operation was not performed because
 // the provider could not verify that no other VM uses this VM's disk (on a

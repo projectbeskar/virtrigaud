@@ -135,7 +135,7 @@ func fakeRecorderOf(t *testing.T, rec record.EventRecorder) *record.FakeRecorder
 // terminal Failed state (no retry policy).
 func terminalFailedMigration() (*infrav1beta1.VirtualMachine, *infrav1beta1.Provider, *infrav1beta1.VMMigration) {
 	vm, p, m := snapshotFixture()
-	m.Finalizers = []string{vmMigrationFinalizer}
+	m.Finalizers = []string{infrav1beta1.VMMigrationFinalizer}
 	m.Status.Phase = infrav1beta1.MigrationPhaseFailed
 	m.Status.Message = "export failed"
 	return vm, p, m
@@ -145,7 +145,7 @@ func terminalFailedMigration() (*infrav1beta1.VirtualMachine, *infrav1beta1.Prov
 // Exporting phase (a migration deleted mid-flight).
 func deletingMigration() (*infrav1beta1.VirtualMachine, *infrav1beta1.Provider, *infrav1beta1.VMMigration) {
 	vm, p, m := snapshotFixture()
-	m.Finalizers = []string{vmMigrationFinalizer}
+	m.Finalizers = []string{infrav1beta1.VMMigrationFinalizer}
 	now := metav1.Now()
 	m.DeletionTimestamp = &now
 	m.Status.Phase = infrav1beta1.MigrationPhaseExporting
@@ -285,7 +285,7 @@ func TestReconcile_DeletionHoldsWhileSourceSnapshotMayRemain(t *testing.T) {
 
 			got := h.get(t, m)
 			require.NotNil(t, got, "the finalizer must be kept")
-			assert.Contains(t, got.Finalizers, vmMigrationFinalizer)
+			assert.Contains(t, got.Finalizers, infrav1beta1.VMMigrationFinalizer)
 			assert.Equal(t, "snap-abc", got.Status.SnapshotID)
 			c := meta.FindStatusCondition(got.Status.Conditions, migrationConditionSnapshotCleanup)
 			require.NotNil(t, c)

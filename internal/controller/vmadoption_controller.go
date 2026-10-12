@@ -452,11 +452,11 @@ func ownedByLiveVM(vmInfo contracts.VMInfo, liveUIDs map[string]bool) bool {
 func (r *VMAdoptionReconciler) adoptVM(ctx context.Context, provider *infravirtrigaudiov1beta1.Provider, vmInfo contracts.VMInfo) error {
 	logger := log.FromContext(ctx).WithValues("vm_id", vmInfo.ID, "vm_name", vmInfo.Name)
 
-	// Generate VM name from VM name (sanitize for Kubernetes)
-	vmName := sanitizeVMName(vmInfo.Name)
-	if vmName == "" {
-		vmName = fmt.Sprintf("vm-%s", vmInfo.ID)
-	}
+	// Name the VirtualMachine after the hypervisor VM (sanitized for
+	// Kubernetes; "vm-<id>" when nothing usable is left). A provider that
+	// matches an unstamped VM's name against its owner applies the same rule
+	// (contracts.AdoptedVMName).
+	vmName := contracts.AdoptedVMName(vmInfo.Name, vmInfo.ID)
 
 	// Check if VM CR already exists
 	existingVM := &infravirtrigaudiov1beta1.VirtualMachine{}
@@ -687,32 +687,6 @@ func (r *VMAdoptionReconciler) isProviderReady(provider *infravirtrigaudiov1beta
 	// Check ProviderAvailable condition
 	providerAvailable := k8s.GetCondition(provider.Status.Conditions, "ProviderAvailable")
 	return providerAvailable != nil && providerAvailable.Status == metav1.ConditionTrue
-}
-
-// sanitizeVMName sanitizes VM name for Kubernetes resource name
-func sanitizeVMName(name string) string {
-	// Convert to lowercase
-	name = strings.ToLower(name)
-	// Replace invalid characters with hyphens
-	name = strings.ReplaceAll(name, "_", "-")
-	name = strings.ReplaceAll(name, ".", "-")
-	name = strings.ReplaceAll(name, " ", "-")
-	// Remove invalid characters
-	var result strings.Builder
-	for _, r := range name {
-		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' {
-			result.WriteRune(r)
-		}
-	}
-	name = result.String()
-	// Ensure it starts and ends with alphanumeric
-	name = strings.Trim(name, "-")
-	// Limit length to 63 characters (Kubernetes limit)
-	if len(name) > 63 {
-		name = name[:63]
-		name = strings.Trim(name, "-")
-	}
-	return name
 }
 
 // parseFilterAnnotation parses the filter annotation JSON string

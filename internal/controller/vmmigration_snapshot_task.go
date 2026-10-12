@@ -166,7 +166,7 @@ func (r *VMMigrationReconciler) advanceToExporting(ctx context.Context, migratio
 	migration.Status.Message = message
 	migration.Status.TaskRef = ""
 	k8s.SetCondition(&migration.Status.Conditions, infrav1beta1.VMMigrationConditionSnapshotting,
-		metav1.ConditionTrue, migrationReasonSnapshotComplete, "Source VM snapshot created")
+		metav1.ConditionTrue, migrationReasonSnapshotComplete, "Source VM snapshot created", migration.Generation)
 	if !alreadyConfirmed {
 		r.Recorder.Event(migration, corev1.EventTypeNormal, migrationReasonSnapshotComplete,
 			fmt.Sprintf("Snapshot %s of the source VM is complete", migration.Status.SnapshotID))
@@ -223,7 +223,7 @@ func (r *VMMigrationReconciler) pollMigrationSnapshotTask(
 		logger.Info("Snapshot task still running", "task_id", taskRef)
 		before := migration.Status.DeepCopy()
 		k8s.SetCondition(&migration.Status.Conditions, infrav1beta1.VMMigrationConditionSnapshotting,
-			metav1.ConditionTrue, migrationReasonSnapshotInProgress, migrationSnapshotInProgressMessage)
+			metav1.ConditionTrue, migrationReasonSnapshotInProgress, migrationSnapshotInProgressMessage, migration.Generation)
 		if !equality.Semantic.DeepEqual(before, &migration.Status) {
 			if err := r.updateStatus(ctx, migration); err != nil {
 				return ctrl.Result{}, err
@@ -243,7 +243,7 @@ func (r *VMMigrationReconciler) pollMigrationSnapshotTask(
 func (r *VMMigrationReconciler) failMigrationSnapshot(ctx context.Context, migration *infrav1beta1.VMMigration, message string) (ctrl.Result, error) {
 	migration.Status.TaskRef = ""
 	k8s.SetCondition(&migration.Status.Conditions, infrav1beta1.VMMigrationConditionSnapshotting,
-		metav1.ConditionFalse, migrationReasonSnapshotFailed, "The source VM snapshot was not confirmed complete; it is not exported")
+		metav1.ConditionFalse, migrationReasonSnapshotFailed, "The source VM snapshot was not confirmed complete; it is not exported", migration.Generation)
 	return r.transitionToFailed(ctx, migration, message)
 }
 
@@ -273,7 +273,7 @@ func (r *VMMigrationReconciler) discardUnconfirmedSnapshot(ctx context.Context, 
 	logger.Info("Discarded an unconfirmed source snapshot; a new one is taken", "snapshot_id", snapshotID)
 	migration.Status.TaskRef = ""
 	k8s.SetCondition(&migration.Status.Conditions, infrav1beta1.VMMigrationConditionSnapshotting,
-		metav1.ConditionFalse, migrationReasonSnapshotDiscarded, "An unconfirmed source snapshot was removed; a new one is taken")
+		metav1.ConditionFalse, migrationReasonSnapshotDiscarded, "An unconfirmed source snapshot was removed; a new one is taken", migration.Generation)
 	if err := r.updateStatus(ctx, migration); err != nil {
 		return ctrl.Result{}, err
 	}

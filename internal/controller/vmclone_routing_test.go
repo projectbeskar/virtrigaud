@@ -179,7 +179,7 @@ func resumeBindFixture(t *testing.T, targetPlacement *infrav1beta1.PlacementStat
 		Status: infrav1beta1.VirtualMachineStatus{Placement: targetPlacement},
 	}
 	clone := &infrav1beta1.VMClone{
-		ObjectMeta: metav1.ObjectMeta{Name: "clone-r", Namespace: "default", UID: "uid-clone-r", Finalizers: []string{vmCloneFinalizer}},
+		ObjectMeta: metav1.ObjectMeta{Name: "clone-r", Namespace: "default", UID: "uid-clone-r", Finalizers: []string{infrav1beta1.VMCloneFinalizer}},
 		Spec: infrav1beta1.VMCloneSpec{
 			Source: infrav1beta1.CloneSource{VMRef: &infrav1beta1.LocalObjectReference{Name: src.Name}},
 			Target: infrav1beta1.VMCloneTarget{Name: "clone-r-target"},

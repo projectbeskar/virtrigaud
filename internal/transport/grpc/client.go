@@ -682,9 +682,13 @@ func (c *Client) Create(ctx context.Context, req contracts.CreateRequest) (resul
 }
 
 // Delete implements contracts.Provider. For a routed VM (clustered provider)
-// it threads vm.HostID to the wire as target_host_id and vm.Owner as owner
-// (ADR-0007 Addendum A, A1/A2); a single-host request carries neither, exactly
-// as before.
+// it threads vm.HostID to the wire as target_host_id (ADR-0007 Addendum A,
+// A1/A2). Unlike the other per-VM calls it sends vm.Owner as owner whenever
+// the caller set one with a UID, single-host included: a provider that checks
+// it (clustered libvirt, Proxmox) then never destroys a VM stamped with
+// another owner, e.g. one that reused a Proxmox VMID. Providers that do not
+// check it on a single-host delete (vSphere, single-host libvirt, mock)
+// ignore it.
 //
 // Records virtrigaud_vm_operations_total{operation="Delete",...} via
 // deferred recordVMOp using the named retErr return value (G7.1 / #124).
@@ -697,7 +701,7 @@ func (c *Client) Delete(ctx context.Context, vm contracts.VMRef) (taskRef string
 	resp, err := c.client.Delete(ctx, &providerv1.DeleteRequest{
 		Id:           vm.ID,
 		TargetHostId: vm.HostID,
-		Owner:        routedOwner(vm),
+		Owner:        objectIdentityToProto(vm.Owner),
 	})
 	if err != nil {
 		return "", c.mapGRPCError("delete", err)
@@ -1432,6 +1436,21 @@ func isVMIsImageArtifactStatus(st *status.Status) bool {
 	return false
 }
 
+// statusHasReason reports whether st has code and carries a
+// google.rpc.ErrorInfo with reason in VirtRigaud's domain.
+func statusHasReason(st *status.Status, code codes.Code, reason string) bool {
+	if st == nil || st.Code() != code {
+		return false
+	}
+	for _, d := range st.Details() {
+		if info, ok := d.(*errdetails.ErrorInfo); ok &&
+			info.GetReason() == reason && info.GetDomain() == contracts.ErrorInfoDomain {
+			return true
+		}
+	}
+	return false
+}
+
 // isVMDiskInUseStatus reports whether a gRPC status is a provider's refusal of
 // a per-VM operation because another VM on the host depends on this VM's disk
 // (e.g. its linked clone): codes.FailedPrecondition carrying a
@@ -1698,6 +1717,13 @@ func (c *Client) mapGRPCStatus(operation string, err error) error {
 
 	switch st.Code() {
 	case codes.NotFound:
+		// A VM exists at that id but is not the requester's (VM_NOT_OWNED):
+		// still NotFound, marked so the controller can tell it from a VM that
+		// is gone (contracts.IsVMNotOwned).
+		if statusHasReason(st, codes.NotFound, contracts.VMNotOwnedReason) {
+			return contracts.NewNotFoundError(fmt.Sprintf("%s: %s", operation, st.Message()),
+				fmt.Errorf("%w: %w", contracts.ErrVMNotOwned, err))
+		}
 		return contracts.NewNotFoundError(fmt.Sprintf("%s: %s", operation, st.Message()), err)
 	case codes.InvalidArgument:
 		return contracts.NewInvalidSpecError(fmt.Sprintf("%s: %s", operation, st.Message()), err)
@@ -1735,6 +1761,13 @@ func (c *Client) mapGRPCStatus(operation string, err error) error {
 		if isVMIsImageArtifactStatus(st) {
 			return contracts.NewConflictError(fmt.Sprintf("%s: %s", operation, st.Message()),
 				fmt.Errorf("%w: %w", contracts.ErrVMIsImageArtifact, err))
+		}
+		// The provider refused because the VM's owner stamp cannot be read or
+		// records more than one owner: typed Conflict (non-retryable, nothing
+		// changed), marked (contracts.IsOwnerStampUnreadable).
+		if statusHasReason(st, codes.FailedPrecondition, contracts.OwnerStampUnreadableReason) {
+			return contracts.NewConflictError(fmt.Sprintf("%s: %s", operation, st.Message()),
+				fmt.Errorf("%w: %w", contracts.ErrOwnerStampUnreadable, err))
 		}
 		// A clone refused because its source VM is not powered off (libvirt):
 		// retryable and marked, so the VMClone controller keeps the clone

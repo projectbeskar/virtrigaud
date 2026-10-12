@@ -335,7 +335,12 @@ made from a template before this release. The vSphere `Delete`, `Power`,
 first. They refuse a template, or an object carrying a `virtrigaud.image.*` key,
 before changing anything. The refusal is `FailedPrecondition` with the reason
 `VM_IS_IMAGE_ARTIFACT` and a constant message. The manager maps it to a
-non-retryable `Conflict` and never counts it toward the circuit breaker. An
+non-retryable `Conflict` and never counts it toward the circuit breaker. A
+refused `Delete` keeps the `VirtualMachine`'s finalizer with
+`Ready=False/VMIsImageArtifact` (clustered: `DeleteBlocked=True/VMIsImageArtifact`),
+and a refused `Power` sets `Ready=False/VMIsImageArtifact`. Both carry a
+constant message, one `Warning` event and a backoff of up to 5 minutes; detach
+such a `VirtualMachine` with `virtrigaud.io/orphan-on-delete: "true"`. An
 object whose configuration cannot be read is refused too, with a plain
 `FailedPrecondition`. A full `Clone` is not guarded: cloning from a template is
 what templates are for, and a full clone never changes its source. A linked
@@ -652,29 +657,45 @@ before it stops or destroys anything:
 |---|---|
 | Stamped with the request's UID (`creating` or `ready`) | Deleted |
 | Unstamped (created before this release, adopted, or a clone without a target UID) **and** named like the owner (`DeleteRequest.owner.name`, the name `Create` gives a VM) | Deleted, as before |
-| Unstamped with any other name: its VMID was reused by an unrelated VM | `NotFound`. The VM is **never** stopped or destroyed. |
-| Stamped with another UID: this `VirtualMachine`'s VM is gone and its VMID was reused | `NotFound`, never stopped or destroyed |
-| A template | `NotFound`, never destroyed |
-| Unreadable or multiple stamp | `FailedPrecondition`. Nothing is destroyed, and the delete is held until the stamp is fixed or the VM is removed by hand. |
+| Unstamped with any other name: its VMID was reused by an unrelated VM | `NotFound` + `VM_NOT_OWNED`. The VM is **never** stopped or destroyed. |
+| Stamped with another UID: this `VirtualMachine`'s VM is gone and its VMID was reused | `NotFound` + `VM_NOT_OWNED`, never stopped or destroyed |
+| A template (with or without an owner on the request) | `FailedPrecondition` + `VM_IS_IMAGE_ARTIFACT`, never destroyed |
+| Unreadable or multiple stamp | `FailedPrecondition` + `OWNER_STAMP_UNREADABLE`. Nothing is destroyed, and the delete is held until the stamp is fixed or the VM is removed by hand. |
 | Its config can't be read | Retryable, nothing destroyed |
 | Not on the node asked | Deleted as gone only when the VMID is free cluster-wide; otherwise retryable |
 
-The name rule applies **only to a `Delete` that carries an owner**. It
-compares names exactly.
-
-An adopted VM keeps its PVE name. The adoption flow names its
-`VirtualMachine` after a sanitized form of that name: lower-cased, with `_`,
-`.` and spaces turned into `-`. When the two differ (for example PVE
-`Web_01`, `VirtualMachine` `web-01`), an owner-carrying `Delete` answers
-`NotFound` and leaves the VM in place. Remove it by hand, or use
-`virtrigaud.io/orphan-on-delete`. The provider can't accept the sanitized form
-yet: the sanitizer is unexported in `internal/controller`, which a provider
-must not import. Moving it to a shared package is a follow-up.
+The name rule applies **only to a `Delete` that carries an owner**. An
+unstamped VM is named like the owner when its PVE name is the owner's name, or
+when the adoption flow would name its `VirtualMachine` after it
+(`contracts.AdoptedVMName`, shared with the adoption controller): the PVE name
+lower-cased, with `_`, `.` and spaces turned into `-`, other characters
+dropped, cut to 63 characters — or `vm-<vmid>` when nothing is left. For
+example PVE `Web_01` matches the owner `web-01`. Any other name is `NotFound`.
 
 Without an owner on the request, `Delete` is unchanged, except for the gone
-check above. Today the manager sends `DeleteRequest.owner` only for clustered
-Providers, so the owner checks take effect once the manager sends the owner
-on Proxmox deletes too.
+check above. The manager sends `DeleteRequest.owner` on every delete of a
+VirtualMachine with a UID — clustered and single-host, adopted VMs and clone
+targets included; nothing a tenant can edit turns the check off. Adoption does
+not stamp the VM it adopts, so an adopted VM that still carries a previous
+owner's stamp (a `VirtualMachine` detached with `virtrigaud.io/orphan-on-delete`,
+then adopted again) is answered `NotFound` + `VM_NOT_OWNED`: it is left in
+place, and the manager releases the `VirtualMachine` with a `VMLeftOnHypervisor`
+Warning event naming the VM's provider id (and an error-level manager log line with the
+id, the Provider and the VirtualMachine; metric reason `vm-not-owned`). That is the
+fail-safe direction: without the owner, a reused VMID could make the delete
+destroy an unrelated VM.
+
+A template at the VMID is never deleted, with or without an owner on the
+request: `FailedPrecondition` + `VM_IS_IMAGE_ARTIFACT`, which the manager holds
+as `Ready=False/VMIsImageArtifact` until the VirtualMachine is detached. A stamp
+that cannot be read or records more than one owner is `FailedPrecondition` +
+`OWNER_STAMP_UNREADABLE`, held as `Ready=False/OwnerStampUnreadable` until an
+administrator fixes the stamp or removes the VM.
+
+`status.id` and `status.boundProvider` are what bind a VirtualMachine to a
+hypervisor VM, so write access to `virtualmachines/status` must stay with the
+platform administrators and the manager: the tenant-facing roles (including
+the `virtualmachine-editor-role` helper) grant only `get` on it.
 
 ### `Create` and `Clone` error classes
 
@@ -721,7 +742,8 @@ Proxmox VMs created before this release carry no stamp. They:
 - **are reported by `ListVMs` without `owner_uid`.** The adoption rules for
   unstamped VMs are unchanged, and the manager can't look them up by owner;
 - **are deleted as before** when the request carries no owner, or when their
-  PVE name is the `VirtualMachine`'s name.
+  PVE name is the `VirtualMachine`'s name or the name adoption gave it (see
+  `Delete` above).
 
 The provider doesn't stamp existing VMs by itself. Proxmox doesn't implement
 `TransferOwner`, and adopted VMs stay unstamped.

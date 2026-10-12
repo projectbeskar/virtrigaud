@@ -107,7 +107,7 @@ func (r *VirtualMachineReconciler) recordRestartPending(vm *infravirtrigaudiov1b
 		ObservedGeneration: vm.Generation,
 	})
 	vm.Status.Phase = infravirtrigaudiov1beta1.VirtualMachinePhaseRunning
-	k8s.SetReadyCondition(&vm.Status.Conditions, metav1.ConditionTrue, k8s.ReasonReconcileSuccess, "VM is ready")
+	k8s.SetReadyCondition(&vm.Status.Conditions, metav1.ConditionTrue, k8s.ReasonReconcileSuccess, "VM is ready", vm.Generation)
 }
 
 // providerAdvertisesHonestReconfigure reports whether the Provider CR reports

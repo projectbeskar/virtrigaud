@@ -20,25 +20,32 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// SetCondition sets or updates a condition in the conditions slice
-func SetCondition(conditions *[]metav1.Condition, conditionType string, status metav1.ConditionStatus, reason, message string) {
+// SetCondition sets or updates the condition conditionType in conditions,
+// recording observedGeneration — the generation of the object the conditions
+// belong to (its metadata.generation), as the spec this condition reflects.
+//
+// LastTransitionTime is set when the condition is added, and when its status,
+// reason or message changes; a call that changes none of them leaves it (and
+// the rest of the condition) as it is, apart from ObservedGeneration, so a
+// repeated call with the same values changes nothing once the generation is
+// recorded.
+func SetCondition(conditions *[]metav1.Condition, conditionType string, status metav1.ConditionStatus, reason, message string,
+	observedGeneration int64) {
 	if conditions == nil {
-		*conditions = []metav1.Condition{}
+		return
 	}
-
-	now := metav1.Now()
 
 	// Find existing condition
 	for i, condition := range *conditions {
 		if condition.Type == conditionType {
-			// Update existing condition if status or reason changed
+			// Update existing condition if status, reason or message changed
 			if condition.Status != status || condition.Reason != reason || condition.Message != message {
 				(*conditions)[i].Status = status
 				(*conditions)[i].Reason = reason
 				(*conditions)[i].Message = message
-				(*conditions)[i].LastTransitionTime = now
-				(*conditions)[i].ObservedGeneration = (*conditions)[i].ObservedGeneration + 1
+				(*conditions)[i].LastTransitionTime = metav1.Now()
 			}
+			(*conditions)[i].ObservedGeneration = observedGeneration
 			return
 		}
 	}
@@ -49,8 +56,8 @@ func SetCondition(conditions *[]metav1.Condition, conditionType string, status m
 		Status:             status,
 		Reason:             reason,
 		Message:            message,
-		LastTransitionTime: now,
-		ObservedGeneration: 1,
+		LastTransitionTime: metav1.Now(),
+		ObservedGeneration: observedGeneration,
 	})
 }
 

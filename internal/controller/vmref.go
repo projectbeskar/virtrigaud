@@ -205,6 +205,30 @@ func vmOwnerIdentity(vm *infravirtrigaudiov1beta1.VirtualMachine) contracts.Obje
 	return contracts.ObjectIdentity{UID: string(vm.UID), Namespace: vm.Namespace, Name: vm.Name}
 }
 
+// deleteRef is the reference the finalizer's provider Delete is sent with. A
+// routed (clustered) ref already carries the VM's owner. A single-host ref
+// gets it too, so a provider that checks it (Proxmox: owner-checked Delete)
+// never destroys a VM stamped with another owner — e.g. an unrelated VM that
+// reused a Proxmox VMID. Providers that do not check it on a single-host
+// delete (vSphere, single-host libvirt, mock) ignore it. A VM with no UID
+// (never true for a stored object) sends none.
+//
+// Adopted VirtualMachines (and clone targets) send it too: nothing a tenant
+// can edit (such as the adopted label) decides whether the owner is checked.
+// An unstamped adopted VM matches by the name adoption gave it (Proxmox
+// applies contracts.AdoptedVMName). One that still carries a previous
+// owner's stamp, or was renamed on the hypervisor, is answered VM_NOT_OWNED:
+// it is left in place, never destroyed, and the release is recorded as a
+// VMLeftOnHypervisor Warning — the fail-safe direction, where omitting the
+// owner could destroy an unrelated VM at a reused id.
+func deleteRef(vm *infravirtrigaudiov1beta1.VirtualMachine, ref contracts.VMRef) contracts.VMRef {
+	if ref.Routed() || vm.UID == "" {
+		return ref
+	}
+	ref.Owner = vmOwnerIdentity(vm)
+	return ref
+}
+
 // boundHost returns the VM's confirmed host binding, or "".
 func boundHost(vm *infravirtrigaudiov1beta1.VirtualMachine) string {
 	if vm.Status.Placement == nil {

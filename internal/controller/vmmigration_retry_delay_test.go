@@ -50,7 +50,7 @@ func TestMigrationRetryDelay(t *testing.T) {
 // retries allowed.
 func retryingMigration(failedAgo time.Duration, retriesDone int32) *infrav1beta1.VMMigration {
 	_, _, m := snapshotFixture()
-	m.Finalizers = []string{vmMigrationFinalizer}
+	m.Finalizers = []string{infrav1beta1.VMMigrationFinalizer}
 	m.Status.SnapshotID = ""
 	m.Status.Phase = infrav1beta1.MigrationPhaseFailed
 	m.Status.RetryCount = retriesDone

@@ -126,7 +126,7 @@ func TestVMSnapshot_DeleteRefusedForDependentsKeepsFinalizer(t *testing.T) {
 
 	snap := get()
 	require.NotNil(t, snap, "the VMSnapshot (and the snapshot it tracks) must not be dropped")
-	assert.Contains(t, snap.Finalizers, "snapshot.infra.virtrigaud.io/finalizer")
+	assert.Contains(t, snap.Finalizers, infrav1beta1.VMSnapshotFinalizer)
 	for _, condType := range []string{infrav1beta1.VMSnapshotConditionReady, infrav1beta1.VMSnapshotConditionDeleting} {
 		c := meta.FindStatusCondition(snap.Status.Conditions, condType)
 		require.NotNil(t, c, condType)
@@ -202,7 +202,7 @@ func TestVMSnapshot_FailedDeleteKeepsTheFinalizer(t *testing.T) {
 			assert.Equal(t, snapshotDeleteRetryMin, res.RequeueAfter)
 			snap := get()
 			require.NotNil(t, snap, "the VMSnapshot is kept")
-			assert.Contains(t, snap.Finalizers, "snapshot.infra.virtrigaud.io/finalizer")
+			assert.Contains(t, snap.Finalizers, infrav1beta1.VMSnapshotFinalizer)
 			for _, condType := range []string{infrav1beta1.VMSnapshotConditionReady, infrav1beta1.VMSnapshotConditionDeleting} {
 				c := meta.FindStatusCondition(snap.Status.Conditions, condType)
 				require.NotNil(t, c, condType)

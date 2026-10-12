@@ -229,7 +229,7 @@ func createAndCloneFixture(t *testing.T) (*VirtualMachineReconciler, *VMCloneRec
 		Spec: infrav1beta1.VirtualMachineSpec{ProviderRef: infrav1beta1.ObjectRef{Name: "prov-cluster"}, ClassRef: infrav1beta1.ObjectRef{Name: "test-class"}},
 	}
 	clone := &infrav1beta1.VMClone{
-		ObjectMeta: metav1.ObjectMeta{Name: "clone", Namespace: capNS, UID: "uid-clone", Finalizers: []string{vmCloneFinalizer}},
+		ObjectMeta: metav1.ObjectMeta{Name: "clone", Namespace: capNS, UID: "uid-clone", Finalizers: []string{infrav1beta1.VMCloneFinalizer}},
 		Spec: infrav1beta1.VMCloneSpec{
 			Source: infrav1beta1.CloneSource{VMRef: &infrav1beta1.LocalObjectReference{Name: "src"}},
 			Target: infrav1beta1.VMCloneTarget{Name: "copy"},

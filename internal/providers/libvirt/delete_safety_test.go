@@ -273,6 +273,17 @@ func TestDelete_SingleHost_FullCloneIsIndependent(t *testing.T) {
 	}
 }
 
+// The manager sends the VM's owner on single-host deletes too: a single-host
+// libvirt provider ignores it (an unstamped legacy domain stays deletable).
+func TestDelete_SingleHost_IgnoresTheOwner(t *testing.T) {
+	c := newCreateHost(t)
+	src, _ := c.linkedPair(false)
+	owner := contracts.ObjectIdentity{UID: "uid-not-on-the-domain", Namespace: "team-a", Name: "web"}
+	_, err := c.p.Delete(context.Background(), contracts.VMRef{ID: "team-a.web", Owner: owner})
+	require.NoError(t, err)
+	assert.Equal(t, []string{src}, c.removals())
+}
+
 // TestDelete_SingleHost_NothingOutsideThePoolIsRemoved: a domain whose
 // definition names files outside the VM storage directories — directly, or
 // through a symlink in the pool — has only its in-pool disk removed; media are

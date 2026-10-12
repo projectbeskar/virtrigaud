@@ -107,7 +107,7 @@ func TestVMClone_BindRefusesATargetItCannotOwn(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			ns := "default"
 			clone := bpClone(ns)
-			clone.Finalizers = []string{vmCloneFinalizer}
+			clone.Finalizers = []string{infrav1beta1.VMCloneFinalizer}
 			clone.Status.Phase = infrav1beta1.ClonePhaseCloning
 			clone.Status.TargetVMID = "vm-clone-999"
 			existing := &infrav1beta1.VirtualMachine{
@@ -483,7 +483,7 @@ func TestVMSnapshot_RefusesAVMBoundElsewhere(t *testing.T) {
 	t.Run("delete keeps the finalizer", func(t *testing.T) {
 		ctx := context.Background()
 		snap := snapshot.DeepCopy()
-		snap.Finalizers = []string{"snapshot.infra.virtrigaud.io/finalizer"}
+		snap.Finalizers = []string{infrav1beta1.VMSnapshotFinalizer}
 		snap.Status.SnapshotID = "snap-1"
 		r := newR(vm, provB, snap)
 		require.NoError(t, r.Delete(ctx, snap))

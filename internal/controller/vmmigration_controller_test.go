@@ -122,7 +122,7 @@ var _ = Describe("VMMigration Controller", func() {
 				updated := &infrav1beta1.VMMigration{}
 				err = fakeClient.Get(ctx, req.NamespacedName, updated)
 				Expect(err).NotTo(HaveOccurred())
-				Expect(updated.Finalizers).To(ContainElement("vmmigration.infra.virtrigaud.io/finalizer"))
+				Expect(updated.Finalizers).To(ContainElement(infrav1beta1.VMMigrationFinalizer))
 			})
 		})
 
@@ -132,7 +132,7 @@ var _ = Describe("VMMigration Controller", func() {
 					ObjectMeta: metav1.ObjectMeta{
 						Name:       "test-migration",
 						Namespace:  "default",
-						Finalizers: []string{"vmmigration.infra.virtrigaud.io/finalizer"},
+						Finalizers: []string{infrav1beta1.VMMigrationFinalizer},
 					},
 					Spec: infrav1beta1.VMMigrationSpec{
 						Source: infrav1beta1.MigrationSource{

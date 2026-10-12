@@ -548,6 +548,56 @@ providers), and rollback caveats in
 
   VMs created before this release stay unstamped and behave as before.
   → [VM ownership: Proxmox](docs/vm-ownership.md#proxmox)
+- **A vSphere VM bound to a template or an image artifact is held when its
+  delete or power change is refused.** The provider refuses both
+  (`VM_IS_IMAGE_ARTIFACT`); the manager used to retry them every 15 s / 5 s.
+  Now: `Ready=False/VMIsImageArtifact` (a clustered delete:
+  `DeleteBlocked=True/VMIsImageArtifact`), a constant message, one `Warning`
+  event and a backoff up to 5 min. Detach the VM with
+  `virtrigaud.io/orphan-on-delete: "true"`.
+- **Single-host provider `Delete` requests carry the VM's owner**, so the
+  Proxmox owner-checked delete never destroys an unrelated VM that reused the
+  VMID; such an answer (`VM_NOT_OWNED`) releases the VirtualMachine with a
+  `VMLeftOnHypervisor` Warning. Adopted VMs and clone targets send it too;
+  Proxmox accepts an unstamped VM under the name adoption gave it (sanitized
+  PVE name or `vm-<vmid>`). A Proxmox template is never deleted
+  (`VM_IS_IMAGE_ARTIFACT`), and a delete refused for an unreadable owner stamp
+  is held as `Ready=False/OwnerStampUnreadable`.
+- Known limitation: adoption does not re-stamp the VM it adopts, so a Proxmox
+  VM that still carries a previous owner's stamp (detached with
+  `orphan-on-delete`, then adopted again) is left in place when its new
+  VirtualMachine is deleted (`VM_NOT_OWNED`, a `VMLeftOnHypervisor` Warning
+  naming its id); remove it by hand. Re-stamping on adoption is planned after
+  this release.
+- Known limitation: on a single-host Proxmox Provider only `Delete` is
+  owner-checked. `Describe`, `Power`, `Reconfigure` and the snapshot calls act
+  on whatever VM has the recorded VMID, so if a VM is deleted outside
+  VirtRigaud and PVE gives its VMID to a new VM, the old `VirtualMachine`
+  addresses that VM. Do not delete VirtRigaud-managed VMs outside VirtRigaud;
+  delete the `VirtualMachine` (or detach it with `orphan-on-delete`) instead.
+- **Nothing is created through a Provider being deleted, even before the
+  manager's cache sees the deletion.** The Provider is re-read from the API
+  server right before every `Create`, `Clone` and `ImportDisk`; a deleting,
+  gone or replaced Provider holds the object with `Ready=False/ProviderDeleting`.
+  The other side of the race is closed too: before a deleting Provider's
+  in-use finalizer is removed, what still uses it is counted again from the
+  API server, and a use the cache had not seen yet keeps it held.
+- **`force-delete` of a `VMSnapshot` or `VMMigration` in another namespace than
+  its clustered Provider needs the Provider's
+  `infra.virtrigaud.io/allow-consumer-orphan-on-delete: "true"`**, as for a
+  `VirtualMachine`; otherwise `ForceDeleteRefused=True/ForceDeleteNotAllowed`
+  and the delete keeps being retried.
+- Conditions set by the VMClone, VMMigration, VMSnapshot, VMSet and Provider
+  controllers (and the VirtualMachine conditions set through the shared
+  helper) now record the object's `metadata.generation` as
+  `observedGeneration` (it was `0`, or a per-change counter).
+- The kustomize helper ClusterRoles in `config/rbac`
+  (`*-admin-role`, `*-editor-role`, `*-viewer-role`) named the API group
+  `infra.virtrigaud.io.infra.virtrigaud.io` and granted nothing; they now
+  grant `infra.virtrigaud.io`, so **subjects already bound to them gain that
+  access** — review the bindings first. The admin roles list their verbs
+  instead of `*`, and the `provider-*` roles are labelled
+  `virtrigaud.io/role-scope: platform-admin`.
 - A `VMMigration` with `deleteAfterMigration: true` whose target stays off
   (`powerOn: false`) records a `SourceDeletedTargetNotStarted` Warning when it
   deletes the source.

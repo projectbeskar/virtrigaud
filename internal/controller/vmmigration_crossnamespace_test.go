@@ -436,7 +436,7 @@ func TestVMMigrationXNS_DeletionCleanupNeedsGrant(t *testing.T) {
 			ctx := context.Background()
 			sourceVM, sourceProvider, targetProvider, migration := creatingFixture(xnsTarget)
 			migration.Spec.Storage = nil
-			migration.Finalizers = []string{"vmmigration.infra.virtrigaud.io/finalizer"}
+			migration.Finalizers = []string{infrav1beta1.VMMigrationFinalizer}
 			target := readyTargetVM(xnsTarget)
 			r, _ := directionReconciler(t, &capturingMigrationProvider{}, sourceVM, sourceProvider, targetProvider, migration,
 				grantNamespace(xnsTarget, tc.grant), target)

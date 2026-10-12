@@ -196,6 +196,10 @@ func (r *VMCloneReconciler) startClusteredClone(
 	if fresh, res, err := r.confirmCloneNotStarted(ctx, clone); !fresh {
 		return res, err
 	}
+	// Nor from a Provider being deleted (see startClone).
+	if held, res, err := r.holdCloneIfProviderDeletingLive(ctx, clone, provider); held {
+		return res, err
+	}
 
 	// Recorded as started only once the provider accepted the clone
 	// (markCloneStarted): every refusal below is a wait that must leave the
@@ -835,7 +839,7 @@ func (r *VMCloneReconciler) removeFailedClusteredTarget(ctx context.Context, clo
 // is then made again, on the state it finds).
 func (r *VMCloneReconciler) recordTargetCleanup(ctx context.Context, clone *infrav1beta1.VMClone,
 	status metav1.ConditionStatus, reason, msg string) ctrl.Result {
-	utilk8s.SetCondition(&clone.Status.Conditions, cloneConditionTargetCleanup, status, reason, msg)
+	utilk8s.SetCondition(&clone.Status.Conditions, cloneConditionTargetCleanup, status, reason, msg, clone.Generation)
 	if err := r.updateStatus(ctx, clone); err != nil {
 		return ctrl.Result{RequeueAfter: 30 * time.Second}
 	}

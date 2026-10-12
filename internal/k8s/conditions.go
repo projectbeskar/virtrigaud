@@ -354,6 +354,23 @@ const (
 	// VM and the Ready reason of a single-host VM held for it (a single-host VM
 	// never carries DeleteBlocked).
 	ReasonProviderUnavailable = "ProviderUnavailable"
+	// ReasonVMIsImageArtifact: the provider refused a Delete or a power
+	// change because the hypervisor object the VirtualMachine is bound to is
+	// a template or a VirtRigaud image artifact, not an ordinary VM
+	// (VM_IS_IMAGE_ARTIFACT); acting on it would destroy or change the image
+	// for every VM cloned from it. Nothing was changed. It is the Ready reason
+	// of a single-host VM held for it (delete or power) and the DeleteBlocked
+	// reason of a clustered one. The hold lasts until the VirtualMachine is
+	// detached with virtrigaud.io/orphan-on-delete=true.
+	ReasonVMIsImageArtifact = "VMIsImageArtifact"
+	// ReasonOwnerStampUnreadable: the provider refused a Delete because the
+	// VM's owner stamp cannot be read or records more than one owner
+	// (OWNER_STAMP_UNREADABLE), so who owns it cannot be told. Nothing was
+	// changed. It is the Ready reason of a single-host VM held for it and the
+	// DeleteBlocked reason of a clustered one; the hold lasts until an
+	// administrator fixes the stamp or removes the VM, or the VirtualMachine
+	// is detached.
+	ReasonOwnerStampUnreadable = "OwnerStampUnreadable"
 )
 
 // ReasonPlacementTopologyMismatch indicates that a VirtualMachine records a
@@ -389,14 +406,22 @@ const ReasonConsumerNotAllowed = "ConsumerNotAllowed"
 // restore the VM, or delete and re-create the VirtualMachine.
 const ReasonVMMissingOnHost = "VMMissingOnHost"
 
-// SetCondition sets a condition on the given list of conditions
-func SetCondition(conditions *[]metav1.Condition, conditionType string, status metav1.ConditionStatus, reason, message string) {
+// SetCondition sets the condition conditionType on conditions, recording
+// observedGeneration — the generation of the object the conditions belong to
+// (its metadata.generation), as the spec this condition reflects.
+//
+// LastTransitionTime is set when the condition is added and when its status
+// or reason changes; a change of the message alone keeps it. A repeated call
+// with the same values (and generation) changes nothing.
+func SetCondition(conditions *[]metav1.Condition, conditionType string, status metav1.ConditionStatus, reason, message string,
+	observedGeneration int64) {
 	newCondition := metav1.Condition{
 		Type:               conditionType,
 		Status:             status,
 		Reason:             reason,
 		Message:            message,
 		LastTransitionTime: metav1.Now(),
+		ObservedGeneration: observedGeneration,
 	}
 
 	for i, existing := range *conditions {
@@ -444,27 +469,32 @@ func IsConditionUnknown(conditions []metav1.Condition, conditionType string) boo
 	return condition != nil && condition.Status == metav1.ConditionUnknown
 }
 
-// SetReadyCondition sets the Ready condition
-func SetReadyCondition(conditions *[]metav1.Condition, status metav1.ConditionStatus, reason, message string) {
-	SetCondition(conditions, ConditionReady, status, reason, message)
+// SetReadyCondition sets the Ready condition (see SetCondition).
+func SetReadyCondition(conditions *[]metav1.Condition, status metav1.ConditionStatus, reason, message string,
+	observedGeneration int64) {
+	SetCondition(conditions, ConditionReady, status, reason, message, observedGeneration)
 }
 
-// SetProvisioningCondition sets the Provisioning condition
-func SetProvisioningCondition(conditions *[]metav1.Condition, status metav1.ConditionStatus, reason, message string) {
-	SetCondition(conditions, ConditionProvisioning, status, reason, message)
+// SetProvisioningCondition sets the Provisioning condition (see SetCondition).
+func SetProvisioningCondition(conditions *[]metav1.Condition, status metav1.ConditionStatus, reason, message string,
+	observedGeneration int64) {
+	SetCondition(conditions, ConditionProvisioning, status, reason, message, observedGeneration)
 }
 
-// SetReconfiguringCondition sets the Reconfiguring condition
-func SetReconfiguringCondition(conditions *[]metav1.Condition, status metav1.ConditionStatus, reason, message string) {
-	SetCondition(conditions, ConditionReconfiguring, status, reason, message)
+// SetReconfiguringCondition sets the Reconfiguring condition (see SetCondition).
+func SetReconfiguringCondition(conditions *[]metav1.Condition, status metav1.ConditionStatus, reason, message string,
+	observedGeneration int64) {
+	SetCondition(conditions, ConditionReconfiguring, status, reason, message, observedGeneration)
 }
 
-// SetErrorCondition sets the Error condition
-func SetErrorCondition(conditions *[]metav1.Condition, status metav1.ConditionStatus, reason, message string) {
-	SetCondition(conditions, ConditionError, status, reason, message)
+// SetErrorCondition sets the Error condition (see SetCondition).
+func SetErrorCondition(conditions *[]metav1.Condition, status metav1.ConditionStatus, reason, message string,
+	observedGeneration int64) {
+	SetCondition(conditions, ConditionError, status, reason, message, observedGeneration)
 }
 
-// SetHealthyCondition sets the Healthy condition
-func SetHealthyCondition(conditions *[]metav1.Condition, status metav1.ConditionStatus, reason, message string) {
-	SetCondition(conditions, ConditionHealthy, status, reason, message)
+// SetHealthyCondition sets the Healthy condition (see SetCondition).
+func SetHealthyCondition(conditions *[]metav1.Condition, status metav1.ConditionStatus, reason, message string,
+	observedGeneration int64) {
+	SetCondition(conditions, ConditionHealthy, status, reason, message, observedGeneration)
 }

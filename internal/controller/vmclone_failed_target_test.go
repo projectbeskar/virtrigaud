@@ -122,7 +122,7 @@ func failedCloneWithTarget(t *testing.T, target *infrav1beta1.VirtualMachine, to
 	prov.Spec.Type = infrav1beta1.ProviderTypeLibvirt
 	prov.Spec.Topology = topology
 	clone := &infrav1beta1.VMClone{
-		ObjectMeta: metav1.ObjectMeta{Name: "clone-c", Namespace: "default", UID: "uid-clone-c", Finalizers: []string{vmCloneFinalizer}},
+		ObjectMeta: metav1.ObjectMeta{Name: "clone-c", Namespace: "default", UID: "uid-clone-c", Finalizers: []string{infrav1beta1.VMCloneFinalizer}},
 		Spec: infrav1beta1.VMCloneSpec{
 			Source: infrav1beta1.CloneSource{VMRef: &infrav1beta1.LocalObjectReference{Name: "src-c"}},
 			Target: infrav1beta1.VMCloneTarget{Name: targetKey.Name},
@@ -257,7 +257,7 @@ func TestVMClone_FailedCloneRespectsTheTargetNamespaceGrant(t *testing.T) {
 			prov.Spec.Topology = infrav1beta1.ProviderTopologyCluster
 			target.Spec.ProviderRef = infrav1beta1.ObjectRef{Name: "prov-c", Namespace: "default"}
 			clone := &infrav1beta1.VMClone{
-				ObjectMeta: metav1.ObjectMeta{Name: "clone-c", Namespace: "default", UID: "uid-clone-c", Finalizers: []string{vmCloneFinalizer}},
+				ObjectMeta: metav1.ObjectMeta{Name: "clone-c", Namespace: "default", UID: "uid-clone-c", Finalizers: []string{infrav1beta1.VMCloneFinalizer}},
 				Spec: infrav1beta1.VMCloneSpec{
 					Source: infrav1beta1.CloneSource{VMRef: &infrav1beta1.LocalObjectReference{Name: "src-c"}},
 					Target: infrav1beta1.VMCloneTarget{Name: targetKey.Name, Namespace: "team-b"},

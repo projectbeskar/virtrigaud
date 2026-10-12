@@ -230,27 +230,6 @@ func pveSnapshotDoesNotExist(errText, name string) bool {
 	return strings.Contains(errText, fmt.Sprintf("snapshot '%s' does not exist", name))
 }
 
-// VMIDInUse reports whether VMID vmid is in use in the cluster, through GET
-// /cluster/nextid?vmid=<id>: PVE answers HTTP 400 "VM <id> already exists"
-// for an ID in use and the ID itself for a free one. Unlike
-// /cluster/resources, which lists only the VMs the caller may audit
-// (VM.Audit), this endpoint is open to every authenticated user, so it
-// answers the same whatever the token's privileges.
-func (c *Client) VMIDInUse(ctx context.Context, vmid int) (bool, error) {
-	resp, err := c.request(ctx, "GET", fmt.Sprintf("/api2/json/cluster/nextid?vmid=%d", vmid), nil)
-	if err != nil {
-		return false, fmt.Errorf("failed to probe VMID %d: %w", vmid, err)
-	}
-	defer resp.Body.Close() //nolint:errcheck // Response body close in defer is not critical
-	if resp.StatusCode == http.StatusOK {
-		return false, nil
-	}
-	if resp.StatusCode == http.StatusBadRequest && strings.Contains(pveErrorText(resp), "already exists") {
-		return true, nil
-	}
-	return false, fmt.Errorf("probe VMID %d failed with status %d", vmid, resp.StatusCode)
-}
-
 // ResolveVMNode returns the node VM vmid is on, read from the cluster's
 // resource list (GET /cluster/resources?type=vm), and whether the cluster has
 // such a VM at all. It is the VM's actual node — which an HA migration
@@ -939,8 +918,13 @@ func vmMissingAnswer(status int, text string) bool {
 }
 
 // VMIDFree reports whether no guest in the cluster has vmid, whatever the
-// caller's permissions: GET /cluster/nextid?vmid=<vmid> answers 200 for a free
-// id and 400 "... already exists" for one in use.
+// caller's permissions, through GET /cluster/nextid?vmid=<vmid>: PVE answers
+// HTTP 200 (the id itself) for a free id and HTTP 400 "VM <id> already
+// exists" for one in use. Unlike /cluster/resources, which lists only the VMs
+// the caller may audit (VM.Audit), this endpoint is open to every
+// authenticated user, so it answers the same whatever the token's privileges.
+// Any other answer — another status, or a 400 that does not say the id
+// exists — is an error, never "free" or "in use".
 func (c *Client) VMIDFree(ctx context.Context, vmid int) (bool, error) {
 	resp, err := c.request(ctx, "GET", fmt.Sprintf("/api2/json/cluster/nextid?vmid=%d", vmid), nil)
 	if err != nil {

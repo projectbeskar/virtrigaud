@@ -145,6 +145,13 @@ type ProviderReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
 
+	// APIReader reads straight from the API server, bypassing the informer
+	// cache (the manager's GetAPIReader): right before the in-use finalizer of
+	// a Provider being deleted is removed, what still uses it is counted again
+	// through it (ADR-0010), so a use the cache has not seen yet holds the
+	// Provider. Optional: nil uses the client.
+	APIReader client.Reader
+
 	// RemoteResolver resolves a Provider CR to a transport-level
 	// contracts.Provider (the gRPC client) so the reconciler can query the
 	// running provider — currently used to best-effort fetch capabilities
@@ -299,7 +306,7 @@ func (r *ProviderReconciler) reconcileRuntimeStatus(ctx context.Context, provide
 	// Validate that runtime is configured (now required)
 	if provider.Spec.Runtime == nil {
 		err := fmt.Errorf("runtime configuration is required")
-		k8s.SetCondition(&provider.Status.Conditions, "ProviderRuntimeReady", metav1.ConditionFalse, "MissingRuntime", err.Error())
+		k8s.SetCondition(&provider.Status.Conditions, "ProviderRuntimeReady", metav1.ConditionFalse, "MissingRuntime", err.Error(), provider.Generation)
 		metrics.RecordError(errReasonRuntimeSpecInvalid, metrics.ComponentManager)
 		return ctrl.Result{}, err
 	}
@@ -364,7 +371,7 @@ func (r *ProviderReconciler) reconcileReportedCapabilities(ctx context.Context, 
 			"provider", provider.Name, "namespace", provider.Namespace)
 		k8s.SetCondition(&provider.Status.Conditions,
 			providerConditionCapabilitiesReported, metav1.ConditionFalse,
-			providerReasonCapabilitiesUnavailable, "No remote resolver configured")
+			providerReasonCapabilitiesUnavailable, "No remote resolver configured", provider.Generation)
 		return
 	}
 
@@ -375,7 +382,7 @@ func (r *ProviderReconciler) reconcileReportedCapabilities(ctx context.Context, 
 		k8s.SetCondition(&provider.Status.Conditions,
 			providerConditionCapabilitiesReported, metav1.ConditionFalse,
 			providerReasonCapabilitiesUnavailable,
-			fmt.Sprintf("Failed to resolve provider: %v", err))
+			fmt.Sprintf("Failed to resolve provider: %v", err), provider.Generation)
 		return
 	}
 
@@ -389,7 +396,7 @@ func (r *ProviderReconciler) reconcileReportedCapabilities(ctx context.Context, 
 		k8s.SetCondition(&provider.Status.Conditions,
 			providerConditionCapabilitiesReported, metav1.ConditionFalse,
 			providerReasonCapabilitiesUnavailable,
-			"Provider does not report capabilities")
+			"Provider does not report capabilities", provider.Generation)
 		return
 	}
 
@@ -400,14 +407,14 @@ func (r *ProviderReconciler) reconcileReportedCapabilities(ctx context.Context, 
 		k8s.SetCondition(&provider.Status.Conditions,
 			providerConditionCapabilitiesReported, metav1.ConditionFalse,
 			providerReasonCapabilitiesUnavailable,
-			fmt.Sprintf("GetCapabilities RPC failed: %v", err))
+			fmt.Sprintf("GetCapabilities RPC failed: %v", err), provider.Generation)
 		return
 	}
 
 	provider.Status.ReportedCapabilities = capabilitiesToReported(caps)
 	k8s.SetCondition(&provider.Status.Conditions,
 		providerConditionCapabilitiesReported, metav1.ConditionTrue,
-		providerReasonCapabilitiesFetched, "Provider capabilities reported")
+		providerReasonCapabilitiesFetched, "Provider capabilities reported", provider.Generation)
 }
 
 // capabilitiesToReported maps the transport-agnostic contracts.Capabilities
@@ -447,7 +454,7 @@ func (r *ProviderReconciler) reconcileRemoteRuntime(ctx context.Context, provide
 
 	// Validate remote runtime configuration
 	if err := r.validateRemoteRuntimeSpec(provider); err != nil {
-		k8s.SetCondition(&provider.Status.Conditions, "ProviderRuntimeReady", metav1.ConditionFalse, "InvalidConfiguration", err.Error())
+		k8s.SetCondition(&provider.Status.Conditions, "ProviderRuntimeReady", metav1.ConditionFalse, "InvalidConfiguration", err.Error(), provider.Generation)
 		provider.Status.Runtime.Phase = infravirtrigaudiov1beta1.ProviderRuntimePhaseFailed
 		provider.Status.Runtime.Message = err.Error()
 		metrics.RecordError(errReasonRuntimeSpecInvalid, metrics.ComponentManager)
@@ -463,7 +470,7 @@ func (r *ProviderReconciler) reconcileRemoteRuntime(ctx context.Context, provide
 	if !r.evaluateTLSPosture(ctx, provider) {
 		provider.Status.Runtime.Phase = infravirtrigaudiov1beta1.ProviderRuntimePhaseFailed
 		provider.Status.Runtime.Message = "TLS configuration required (see TLSConfigured Condition)"
-		k8s.SetCondition(&provider.Status.Conditions, "ProviderRuntimeReady", metav1.ConditionFalse, "TLSNotConfigured", "Refusing to deploy provider runtime without an explicit TLS decision")
+		k8s.SetCondition(&provider.Status.Conditions, "ProviderRuntimeReady", metav1.ConditionFalse, "TLSNotConfigured", "Refusing to deploy provider runtime without an explicit TLS decision", provider.Generation)
 		metrics.RecordError(errReasonTLSNotConfigured, metrics.ComponentManager)
 		// Requeue on the same cadence as other config errors. Once the
 		// operator edits the CR the Watch fires regardless, so the
@@ -480,7 +487,7 @@ func (r *ProviderReconciler) reconcileRemoteRuntime(ctx context.Context, provide
 	service, err := r.reconcileService(ctx, provider, serviceName)
 	if err != nil {
 		logger.Error(err, "Failed to reconcile service")
-		k8s.SetCondition(&provider.Status.Conditions, "ProviderRuntimeReady", metav1.ConditionFalse, "ServiceError", fmt.Sprintf("Failed to create service: %v", err))
+		k8s.SetCondition(&provider.Status.Conditions, "ProviderRuntimeReady", metav1.ConditionFalse, "ServiceError", fmt.Sprintf("Failed to create service: %v", err), provider.Generation)
 		provider.Status.Runtime.Phase = infravirtrigaudiov1beta1.ProviderRuntimePhaseFailed
 		provider.Status.Runtime.Message = err.Error()
 		metrics.RecordError(errReasonServiceReconcile, metrics.ComponentManager)
@@ -492,7 +499,7 @@ func (r *ProviderReconciler) reconcileRemoteRuntime(ctx context.Context, provide
 	// (token-less, binding-less) identity instead of the namespace default SA.
 	if _, err := r.reconcileServiceAccount(ctx, provider, serviceAccountName); err != nil {
 		logger.Error(err, "Failed to reconcile service account")
-		k8s.SetCondition(&provider.Status.Conditions, "ProviderRuntimeReady", metav1.ConditionFalse, "ServiceAccountError", fmt.Sprintf("Failed to create service account: %v", err))
+		k8s.SetCondition(&provider.Status.Conditions, "ProviderRuntimeReady", metav1.ConditionFalse, "ServiceAccountError", fmt.Sprintf("Failed to create service account: %v", err), provider.Generation)
 		provider.Status.Runtime.Phase = infravirtrigaudiov1beta1.ProviderRuntimePhaseFailed
 		provider.Status.Runtime.Message = err.Error()
 		metrics.RecordError(errReasonServiceAccountReconcile, metrics.ComponentManager)
@@ -505,7 +512,7 @@ func (r *ProviderReconciler) reconcileRemoteRuntime(ctx context.Context, provide
 	// API calls — the single-host path stays byte-for-byte unchanged (D9).
 	if err := r.reconcileHostInventorySecret(ctx, provider); err != nil {
 		logger.Error(err, "Failed to reconcile host-inventory secret")
-		k8s.SetCondition(&provider.Status.Conditions, "ProviderRuntimeReady", metav1.ConditionFalse, "HostInventoryError", fmt.Sprintf("Failed to render host inventory: %v", err))
+		k8s.SetCondition(&provider.Status.Conditions, "ProviderRuntimeReady", metav1.ConditionFalse, "HostInventoryError", fmt.Sprintf("Failed to render host inventory: %v", err), provider.Generation)
 		provider.Status.Runtime.Phase = infravirtrigaudiov1beta1.ProviderRuntimePhaseFailed
 		provider.Status.Runtime.Message = err.Error()
 		metrics.RecordError(errReasonHostInventoryReconcile, metrics.ComponentManager)
@@ -516,7 +523,7 @@ func (r *ProviderReconciler) reconcileRemoteRuntime(ctx context.Context, provide
 	deployment, err := r.reconcileDeployment(ctx, provider, deploymentName)
 	if err != nil {
 		logger.Error(err, "Failed to reconcile deployment")
-		k8s.SetCondition(&provider.Status.Conditions, "ProviderRuntimeReady", metav1.ConditionFalse, "DeploymentError", fmt.Sprintf("Failed to create deployment: %v", err))
+		k8s.SetCondition(&provider.Status.Conditions, "ProviderRuntimeReady", metav1.ConditionFalse, "DeploymentError", fmt.Sprintf("Failed to create deployment: %v", err), provider.Generation)
 		provider.Status.Runtime.Phase = infravirtrigaudiov1beta1.ProviderRuntimePhaseFailed
 		provider.Status.Runtime.Message = err.Error()
 		metrics.RecordError(errReasonDeploymentReconcile, metrics.ComponentManager)
@@ -537,14 +544,14 @@ func (r *ProviderReconciler) reconcileRemoteRuntime(ctx context.Context, provide
 		provider.Status.Runtime.Phase = infravirtrigaudiov1beta1.ProviderRuntimePhaseRunning
 		provider.Status.Runtime.Message = "Remote provider runtime is ready"
 
-		k8s.SetCondition(&provider.Status.Conditions, "ProviderRuntimeReady", metav1.ConditionTrue, "DeploymentReady", fmt.Sprintf("Deployment has %d ready replicas", deployment.Status.ReadyReplicas))
+		k8s.SetCondition(&provider.Status.Conditions, "ProviderRuntimeReady", metav1.ConditionTrue, "DeploymentReady", fmt.Sprintf("Deployment has %d ready replicas", deployment.Status.ReadyReplicas), provider.Generation)
 
-		k8s.SetCondition(&provider.Status.Conditions, "ProviderAvailable", metav1.ConditionTrue, "RemoteAvailable", "Remote provider is available")
+		k8s.SetCondition(&provider.Status.Conditions, "ProviderAvailable", metav1.ConditionTrue, "RemoteAvailable", "Remote provider is available", provider.Generation)
 	} else {
 		provider.Status.Runtime.Phase = infravirtrigaudiov1beta1.ProviderRuntimePhasePending
 		provider.Status.Runtime.Message = "Waiting for deployment to be ready"
 
-		k8s.SetCondition(&provider.Status.Conditions, "ProviderRuntimeReady", metav1.ConditionFalse, "DeploymentNotReady", "Deployment pods are not ready yet")
+		k8s.SetCondition(&provider.Status.Conditions, "ProviderRuntimeReady", metav1.ConditionFalse, "DeploymentNotReady", "Deployment pods are not ready yet", provider.Generation)
 
 		// Requeue to check readiness again
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
@@ -595,7 +602,7 @@ func (r *ProviderReconciler) evaluateTLSPosture(ctx context.Context, provider *i
 		// exactly what to do; we never silently fall back to plaintext.
 		k8s.SetCondition(&provider.Status.Conditions,
 			providerConditionTLSConfigured, metav1.ConditionFalse,
-			providerReasonTLSBlockMissing, tlsBlockMissingMessage)
+			providerReasonTLSBlockMissing, tlsBlockMissingMessage, provider.Generation)
 		logger.Info("Provider has no TLS block on spec.runtime.service.tls; refusing to deploy until operator decides",
 			"provider", provider.Name, "namespace", provider.Namespace)
 		return false
@@ -606,7 +613,7 @@ func (r *ProviderReconciler) evaluateTLSPosture(ctx context.Context, provider *i
 		k8s.SetCondition(&provider.Status.Conditions,
 			providerConditionTLSConfigured, metav1.ConditionFalse,
 			providerReasonTLSDisabled,
-			"TLS is explicitly disabled (tls.enabled=false); manager↔provider gRPC traffic will be plaintext. Compensating controls (NetworkPolicy + encrypted CNI) are the operator's responsibility.")
+			"TLS is explicitly disabled (tls.enabled=false); manager↔provider gRPC traffic will be plaintext. Compensating controls (NetworkPolicy + encrypted CNI) are the operator's responsibility.", provider.Generation)
 		logger.Info("WARNING: Provider TLS explicitly disabled; gRPC traffic will be plaintext",
 			"provider", provider.Name, "namespace", provider.Namespace)
 		return true
@@ -615,14 +622,14 @@ func (r *ProviderReconciler) evaluateTLSPosture(ctx context.Context, provider *i
 		k8s.SetCondition(&provider.Status.Conditions,
 			providerConditionTLSConfigured, metav1.ConditionFalse,
 			providerReasonTLSSecretRefEmpty,
-			"spec.runtime.service.tls.enabled=true but secretRef is missing. Set secretRef.name to a Secret containing tls.crt / tls.key / ca.crt.")
+			"spec.runtime.service.tls.enabled=true but secretRef is missing. Set secretRef.name to a Secret containing tls.crt / tls.key / ca.crt.", provider.Generation)
 		return false
 
 	default:
 		k8s.SetCondition(&provider.Status.Conditions,
 			providerConditionTLSConfigured, metav1.ConditionTrue,
 			providerReasonTLSEnabled,
-			fmt.Sprintf("TLS enabled; using Secret %q", tlsSpec.SecretRef.Name))
+			fmt.Sprintf("TLS enabled; using Secret %q", tlsSpec.SecretRef.Name), provider.Generation)
 		return true
 	}
 }

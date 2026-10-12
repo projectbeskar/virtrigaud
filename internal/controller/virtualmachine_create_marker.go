@@ -188,10 +188,10 @@ func setCreateRequested(vm *infravirtrigaudiov1beta1.VirtualMachine, now time.Ti
 // the provider confirmed: still running (an async task) or done.
 func setCreateOutcome(vm *infravirtrigaudiov1beta1.VirtualMachine, async bool) {
 	if async {
-		k8s.SetProvisioningCondition(&vm.Status.Conditions, metav1.ConditionTrue, k8s.ReasonCreating, "VM creation initiated")
+		k8s.SetProvisioningCondition(&vm.Status.Conditions, metav1.ConditionTrue, k8s.ReasonCreating, "VM creation initiated", vm.Generation)
 		return
 	}
-	k8s.SetProvisioningCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonReconcileSuccess, "VM created")
+	k8s.SetProvisioningCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonReconcileSuccess, "VM created", vm.Generation)
 }
 
 // setCreateFailure records a create that failed before any provider call

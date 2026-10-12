@@ -20,6 +20,11 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
+// VMCloneFinalizer is the finalizer the VMClone controller keeps on a VMClone
+// so its (minimal) clean-up runs before the object disappears. Deleting a
+// VMClone never cascades to the target VirtualMachine it produced.
+const VMCloneFinalizer = "clone.infra.virtrigaud.io/finalizer"
+
 // VMCloneSpec defines the desired state of VMClone
 type VMCloneSpec struct {
 	// Source defines the source for cloning

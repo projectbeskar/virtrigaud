@@ -57,11 +57,6 @@ import (
 )
 
 const (
-	// vmCloneFinalizer guards a VMClone so the controller runs its (minimal)
-	// cleanup before the object disappears. Deleting a VMClone never cascades
-	// to the produced target VM — only the finalizer is removed.
-	vmCloneFinalizer = "clone.infra.virtrigaud.io/finalizer"
-
 	// errReasonGetClone is the metrics.RecordError reason for a failed VMClone
 	// Get in the reconcile entry path.
 	errReasonGetClone = "get-clone"
@@ -211,8 +206,8 @@ func (r *VMCloneReconciler) Reconcile(ctx context.Context, req ctrl.Request) (re
 	}
 
 	// Add finalizer if needed.
-	if !controllerutil.ContainsFinalizer(clone, vmCloneFinalizer) {
-		controllerutil.AddFinalizer(clone, vmCloneFinalizer)
+	if !controllerutil.ContainsFinalizer(clone, infrav1beta1.VMCloneFinalizer) {
+		controllerutil.AddFinalizer(clone, infrav1beta1.VMCloneFinalizer)
 		if err := r.Update(ctx, clone); err != nil {
 			logger.Error(err, "Failed to add finalizer")
 			metrics.RecordError(errReasonAddFinalizer, metrics.ComponentManager)
@@ -437,6 +432,11 @@ func (r *VMCloneReconciler) startClone(
 	// not show this clone's earlier outcome (Failed, or a recorded target)
 	// would send the Clone a second time.
 	if fresh, res, err := r.confirmCloneNotStarted(ctx, clone); !fresh {
+		return res, err
+	}
+	// Nothing is cloned through a Provider being deleted; the cached Provider
+	// may not show the deletion yet, so it is re-read live (ADR-0010).
+	if held, res, err := r.holdCloneIfProviderDeletingLive(ctx, clone, provider); held {
 		return res, err
 	}
 
@@ -894,9 +894,9 @@ func markCloneStarted(clone *infrav1beta1.VMClone, linked bool, started metav1.T
 		clone.Status.ActualCloneType = infrav1beta1.CloneTypeFullClone
 	}
 	k8s.SetCondition(&clone.Status.Conditions, infrav1beta1.VMCloneConditionCloning,
-		metav1.ConditionTrue, infrav1beta1.VMCloneReasonCloning, msg)
+		metav1.ConditionTrue, infrav1beta1.VMCloneReasonCloning, msg, clone.Generation)
 	k8s.SetCondition(&clone.Status.Conditions, infrav1beta1.VMCloneConditionReady,
-		metav1.ConditionFalse, infrav1beta1.VMCloneReasonCloning, cloneInProgressMessage)
+		metav1.ConditionFalse, infrav1beta1.VMCloneReasonCloning, cloneInProgressMessage, clone.Generation)
 }
 
 // cloneTargetPowerState is the desired power state (spec.powerState) of the
@@ -927,9 +927,9 @@ func (r *VMCloneReconciler) finalizeReady(
 	clone.Status.CompletionTime = &now
 	clone.Status.TargetRef = &infrav1beta1.LocalObjectReference{Name: targetVM.Name}
 	k8s.SetCondition(&clone.Status.Conditions, infrav1beta1.VMCloneConditionReady,
-		metav1.ConditionTrue, infrav1beta1.VMCloneReasonCompleted, "Clone completed successfully")
+		metav1.ConditionTrue, infrav1beta1.VMCloneReasonCompleted, "Clone completed successfully", clone.Generation)
 	k8s.SetCondition(&clone.Status.Conditions, infrav1beta1.VMCloneConditionCloning,
-		metav1.ConditionFalse, infrav1beta1.VMCloneReasonCompleted, "Clone completed")
+		metav1.ConditionFalse, infrav1beta1.VMCloneReasonCompleted, "Clone completed", clone.Generation)
 
 	if err := r.updateStatus(ctx, clone); err != nil {
 		return ctrl.Result{}, err
@@ -998,7 +998,7 @@ func (r *VMCloneReconciler) handleDeletion(ctx context.Context, clone *infrav1be
 	logger := logging.FromContext(ctx)
 	logger.Info("Deleting VMClone (target VM is intentionally preserved)")
 
-	controllerutil.RemoveFinalizer(clone, vmCloneFinalizer)
+	controllerutil.RemoveFinalizer(clone, infrav1beta1.VMCloneFinalizer)
 	if err := r.Update(ctx, clone); err != nil {
 		logger.Error(err, "Failed to remove finalizer")
 		metrics.RecordError(errReasonRemoveFinalizer, metrics.ComponentManager)
@@ -1028,13 +1028,13 @@ func (r *VMCloneReconciler) markFailed(ctx context.Context, clone *infrav1beta1.
 	clone.Status.Message = message
 	clone.Status.TaskRef = ""
 	k8s.SetCondition(&clone.Status.Conditions, infrav1beta1.VMCloneConditionReady,
-		metav1.ConditionFalse, reason, message)
+		metav1.ConditionFalse, reason, message, clone.Generation)
 	k8s.SetCondition(&clone.Status.Conditions, infrav1beta1.VMCloneConditionFailed,
-		metav1.ConditionTrue, reason, message)
+		metav1.ConditionTrue, reason, message, clone.Generation)
 	// A failed clone is not cloning any more (e.g. its clone task failed).
 	if k8s.IsConditionTrue(clone.Status.Conditions, infrav1beta1.VMCloneConditionCloning) {
 		k8s.SetCondition(&clone.Status.Conditions, infrav1beta1.VMCloneConditionCloning,
-			metav1.ConditionFalse, reason, message)
+			metav1.ConditionFalse, reason, message, clone.Generation)
 	}
 	r.Recorder.Event(clone, "Warning", reason, message)
 
@@ -1058,7 +1058,7 @@ func (r *VMCloneReconciler) markPending(ctx context.Context, clone *infrav1beta1
 	clone.Status.Phase = infrav1beta1.ClonePhasePending
 	clone.Status.Message = message
 	k8s.SetCondition(&clone.Status.Conditions, infrav1beta1.VMCloneConditionReady,
-		metav1.ConditionFalse, reason, message)
+		metav1.ConditionFalse, reason, message, clone.Generation)
 	_ = r.updateStatus(ctx, clone) //nolint:errcheck // status errors retried next reconcile
 	return ctrl.Result{RequeueAfter: 30 * time.Second}
 }

@@ -387,7 +387,7 @@ func TestProviderInUse_OnlyAllowedNamespacesHold(t *testing.T) {
 	}
 	migrationInto := func(ns string) *infravirtrigaudiov1beta1.VMMigration {
 		return &infravirtrigaudiov1beta1.VMMigration{
-			ObjectMeta: metav1.ObjectMeta{Name: "mig", Namespace: ns, Finalizers: []string{vmMigrationFinalizerName}},
+			ObjectMeta: metav1.ObjectMeta{Name: "mig", Namespace: ns, Finalizers: []string{infravirtrigaudiov1beta1.VMMigrationFinalizer}},
 			Spec: infravirtrigaudiov1beta1.VMMigrationSpec{
 				Source: infravirtrigaudiov1beta1.MigrationSource{VMRef: infravirtrigaudiov1beta1.LocalObjectReference{Name: "src"}},
 				Target: infravirtrigaudiov1beta1.MigrationTarget{Name: "dst",
@@ -411,7 +411,7 @@ func TestProviderInUse_OnlyAllowedNamespacesHold(t *testing.T) {
 		{name: "an unallowed snapshot follows its unallowed VM", provider: inUseProvider(),
 			obj: lingeringUnbound("outsider", "squat"),
 			extra: []client.Object{&infravirtrigaudiov1beta1.VMSnapshot{
-				ObjectMeta: metav1.ObjectMeta{Name: "snap", Namespace: "outsider", Finalizers: []string{vmSnapshotFinalizerName}},
+				ObjectMeta: metav1.ObjectMeta{Name: "snap", Namespace: "outsider", Finalizers: []string{infravirtrigaudiov1beta1.VMSnapshotFinalizer}},
 				Spec:       infravirtrigaudiov1beta1.VMSnapshotSpec{VMRef: infravirtrigaudiov1beta1.LocalObjectReference{Name: "squat"}},
 			}}},
 		{name: "an unallowed migration into the Provider", provider: selective(), obj: migrationInto("outsider")},
@@ -557,14 +557,14 @@ func TestProviderInUse_WhatHolds(t *testing.T) {
 			Spec:       infravirtrigaudiov1beta1.VMSnapshotSpec{VMRef: infravirtrigaudiov1beta1.LocalObjectReference{Name: vmName}},
 		}
 		if finalizer {
-			s.Finalizers = []string{vmSnapshotFinalizerName}
+			s.Finalizers = []string{infravirtrigaudiov1beta1.VMSnapshotFinalizer}
 		}
 		return s
 	}
 	clone := func(vmName string, phase infravirtrigaudiov1beta1.ClonePhase) *infravirtrigaudiov1beta1.VMClone {
 		return &infravirtrigaudiov1beta1.VMClone{
 			ObjectMeta: metav1.ObjectMeta{Name: "clone-" + vmName + "-" + strings.ToLower(string(phase)), Namespace: "default",
-				Finalizers: []string{vmCloneFinalizer}},
+				Finalizers: []string{infravirtrigaudiov1beta1.VMCloneFinalizer}},
 			Spec: infravirtrigaudiov1beta1.VMCloneSpec{
 				Source: infravirtrigaudiov1beta1.CloneSource{VMRef: &infravirtrigaudiov1beta1.LocalObjectReference{Name: vmName}},
 				Target: infravirtrigaudiov1beta1.VMCloneTarget{Name: "copy"},
@@ -574,7 +574,7 @@ func TestProviderInUse_WhatHolds(t *testing.T) {
 	}
 	migration := func(name, sourceVM string, phase infravirtrigaudiov1beta1.MigrationPhase, deleting bool) *infravirtrigaudiov1beta1.VMMigration {
 		m := &infravirtrigaudiov1beta1.VMMigration{
-			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default", Finalizers: []string{vmMigrationFinalizerName}},
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default", Finalizers: []string{infravirtrigaudiov1beta1.VMMigrationFinalizer}},
 			Spec: infravirtrigaudiov1beta1.VMMigrationSpec{
 				Source: infravirtrigaudiov1beta1.MigrationSource{VMRef: infravirtrigaudiov1beta1.LocalObjectReference{Name: sourceVM}},
 				Target: infravirtrigaudiov1beta1.MigrationTarget{Name: "moved",
@@ -777,7 +777,7 @@ func TestProviderInUse_WatchPredicate(t *testing.T) {
 	assert.True(t, pred.Delete(event.DeleteEvent{Object: vm}))
 
 	clone := &infravirtrigaudiov1beta1.VMClone{
-		ObjectMeta: metav1.ObjectMeta{Name: "c", Namespace: "default", Finalizers: []string{vmCloneFinalizer}},
+		ObjectMeta: metav1.ObjectMeta{Name: "c", Namespace: "default", Finalizers: []string{infravirtrigaudiov1beta1.VMCloneFinalizer}},
 		Spec: infravirtrigaudiov1beta1.VMCloneSpec{
 			Source: infravirtrigaudiov1beta1.CloneSource{VMRef: &infravirtrigaudiov1beta1.LocalObjectReference{Name: "web"}},
 		},

@@ -374,7 +374,7 @@ func TestVMMigrationConsumer_ExportDiskNotIssuedWhenRevokedLive(t *testing.T) {
 
 func TestVMMigrationConsumer_UnchangedRefusalIsNotRewritten(t *testing.T) {
 	migration, objs := xnsSourceMigration(t, infrav1beta1.MigrationPhaseSnapshotting, nil)
-	migration.Finalizers = []string{"vmmigration.infra.virtrigaud.io/finalizer"}
+	migration.Finalizers = []string{infrav1beta1.VMMigrationFinalizer}
 	r, _ := countedMigrationReconciler(t, &migrationSpy{}, append(objs, migration)...)
 
 	reconcileMigration(t, r, migration, 1)

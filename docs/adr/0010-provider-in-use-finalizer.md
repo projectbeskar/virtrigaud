@@ -105,8 +105,17 @@ it (its finalizers, its deletion, its placement Provider, its source VM, its pha
 The lookups use cache field indexes: the existing `virtrigaud.io/placement-provider`
 index for VMs, and a new `virtrigaud.io/provider-in-use` index on `VMSnapshot`,
 `VMClone` and `VMMigration` (by the VM they act on, and for a migration by its target
-Provider). Nothing lists every object in the cluster. A held `Provider` is also
-re-checked every 2 minutes as a backstop.
+Provider). A held `Provider` is also re-checked every 2 minutes as a backstop.
+
+The cache can lag: an object that just recorded its use of the `Provider` (a
+VirtualMachine's create marker or pending host, a clone, a migration) may not be in
+it yet. So when the cache shows nothing using a `Provider` being deleted, the same
+usage is counted once more from the API server before the finalizer is removed
+(lists of each kind in every namespace, read in pages of 500, filtered by the same index extractors); a use
+found there holds the `Provider`. A failed live read keeps it held and is retried.
+`force-delete` skips the live count. On the consumer side, the `Provider` is re-read
+from the API server right before every `Create`, `Clone` and `ImportDisk` (nothing is
+sent through a `Provider` being deleted), so together the two checks close the race.
 
 ### D5: Escape hatch: `virtrigaud.io/force-delete`
 

@@ -37,7 +37,7 @@ import (
 
 func TestVMSnapshotRetention_OrphanedVMKeepsItsSnapshots(t *testing.T) {
 	vm := sourceVMWithID(snapPhaseNS, "web", "prov", "vm-100")
-	vm.Finalizers = []string{"virtualmachine.infra.virtrigaud.io/finalizer"}
+	vm.Finalizers = []string{infrav1beta1.VirtualMachineFinalizer}
 	vm.Annotations = map[string]string{infrav1beta1.VirtualMachineOrphanOnDeleteAnnotation: "true"}
 	now := metav1.Now()
 	vm.DeletionTimestamp = &now

@@ -79,7 +79,7 @@ func (w *failingRecordWriter) Patch(ctx context.Context, obj client.Object, patc
 func singleHostRecordFixture(t *testing.T) (*VMCloneReconciler, *infrav1beta1.VMClone, *clonerProvider) {
 	t.Helper()
 	clone := &infrav1beta1.VMClone{
-		ObjectMeta: metav1.ObjectMeta{Name: "clone-1", Namespace: "default", Finalizers: []string{vmCloneFinalizer}},
+		ObjectMeta: metav1.ObjectMeta{Name: "clone-1", Namespace: "default", Finalizers: []string{infrav1beta1.VMCloneFinalizer}},
 		Spec: infrav1beta1.VMCloneSpec{
 			Source: infrav1beta1.CloneSource{VMRef: &infrav1beta1.LocalObjectReference{Name: "src-vm"}},
 			Target: infrav1beta1.VMCloneTarget{Name: "clone-target"},
