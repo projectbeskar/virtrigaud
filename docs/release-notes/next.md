@@ -564,6 +564,9 @@ providers), and rollback caveats in
   manager's cache sees the deletion.** The Provider is re-read from the API
   server right before every `Create`, `Clone` and `ImportDisk`; a deleting,
   gone or replaced Provider holds the object with `Ready=False/ProviderDeleting`.
+  The other side of the race is closed too: before a deleting Provider's
+  in-use finalizer is removed, what still uses it is counted again from the
+  API server, and a use the cache had not seen yet keeps it held.
 - **`force-delete` of a `VMSnapshot` or `VMMigration` in another namespace than
   its clustered Provider needs the Provider's
   `infra.virtrigaud.io/allow-consumer-orphan-on-delete: "true"`**, as for a

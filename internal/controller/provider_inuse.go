@@ -473,8 +473,18 @@ func providerUsageOf(ctx context.Context, reader client.Reader, provider *infrav
 	return u, nil
 }
 
+// liveReader returns the uncached reader (APIReader), or the client.
+func (r *ProviderReconciler) liveReader() client.Reader {
+	if r.APIReader != nil {
+		return r.APIReader
+	}
+	return r.Client
+}
+
 // handleDeletion handles a Provider being deleted (ADR-0010). While anything
-// still needs it, it is held with its runtime kept up (holdInUseProvider).
+// still needs it — counted from the cache, and once more from the API server
+// right before the finalizer is removed — it is held with its runtime kept up
+// (holdInUseProvider).
 // Once nothing does, or when force-delete is set, its runtime is torn down
 // and the in-use finalizer removed. A Provider without the in-use finalizer
 // (deleted before the upgrade, kept by another finalizer) only has its runtime
@@ -505,6 +515,23 @@ func (r *ProviderReconciler) handleDeletion(ctx context.Context, provider *infra
 	}
 	if usage.total() > 0 && !forced {
 		return r.holdInUseProvider(ctx, provider, usage)
+	}
+	// The cache says nothing uses the Provider; it may lag (a create marker,
+	// clone or migration that just recorded its use). Before the finalizer is
+	// removed, the usage is counted again from the API server, and anything
+	// found there holds the Provider (ADR-0010).
+	if !forced {
+		live, err := providerUsageOf(ctx, liveIndexedReader{Reader: r.liveReader()}, provider)
+		if err != nil {
+			metrics.RecordError(errReasonProviderInUse, metrics.ComponentManager)
+			return ctrl.Result{}, fmt.Errorf("check live what still uses Provider %s: %w", key, err)
+		}
+		if live.total() > 0 {
+			logger.Info("The API server shows objects still using the Provider that the cache did not; holding it",
+				"provider", key.String(), "virtualMachines", live.vms, "snapshots", live.snapshots,
+				"clones", live.clones, "migrations", live.migrations)
+			return r.holdInUseProvider(ctx, provider, live)
+		}
 	}
 
 	if err := r.cleanupRemoteRuntime(ctx, provider); err != nil {

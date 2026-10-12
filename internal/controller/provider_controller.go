@@ -145,6 +145,13 @@ type ProviderReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
 
+	// APIReader reads straight from the API server, bypassing the informer
+	// cache (the manager's GetAPIReader): right before the in-use finalizer of
+	// a Provider being deleted is removed, what still uses it is counted again
+	// through it (ADR-0010), so a use the cache has not seen yet holds the
+	// Provider. Optional: nil uses the client.
+	APIReader client.Reader
+
 	// RemoteResolver resolves a Provider CR to a transport-level
 	// contracts.Provider (the gRPC client) so the reconciler can query the
 	// running provider — currently used to best-effort fetch capabilities

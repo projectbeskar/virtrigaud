@@ -400,6 +400,7 @@ func main() {
 	if err = (&controller.ProviderReconciler{
 		Client:          mgr.GetClient(),
 		Scheme:          mgr.GetScheme(),
+		APIReader:       mgr.GetAPIReader(),
 		RemoteResolver:  remoteResolver,
 		TmpSizeLimit:    providerTmpSizeLimit,
 		TmpSizeLimitMax: providerTmpSizeLimitMax,
