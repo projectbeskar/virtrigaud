@@ -298,6 +298,13 @@ force-deleted as before. It also applies when the VM's namespace may no longer
 use the `Provider` (`ConsumerNotAllowed`) or its reference no longer matches
 (`ProviderRefMismatch`): the `Provider`'s administrator then decides.
 
+The same gate applies to `virtrigaud.io/force-delete` on a `VMSnapshot` (whose
+provider snapshot delete failed or could not be sent) and on a `VMMigration`
+(whose source snapshot delete failed) when its VM is in another namespace than
+its clustered `Provider`: without the `Provider`'s permission the annotation is
+ignored, the object gets `ForceDeleteRefused=True/ForceDeleteNotAllowed` and
+one `Warning` event, and its delete keeps being retried.
+
 ### Deleting a VM while its `Provider` cannot be reached
 
 When the `Provider` exists but the manager has no usable client for it — its
@@ -490,6 +497,14 @@ the Create was sent through is refused like a bound one
 (`ProviderRefMismatch`). The marker counts as using the `Provider` (with
 `status.id` and `status.placement.pendingHost`); a VM held because its
 `Provider` is being deleted (`ProviderDeleting`) never gets one.
+
+The manager's cache can show a `Provider` as not being deleted after its
+deletion began. So right before every `Create` (after the marker or the
+pending host is recorded), `Clone` and `ImportDisk`, the `Provider` is re-read
+from the API server, and nothing is sent when it is being deleted, gone or
+replaced: the `VirtualMachine`, `VMClone` or `VMMigration` gets
+`Ready=False/ProviderDeleting` (a VM keeps a marker written just before), with
+a constant message and one `Warning` event, re-checked every minute (ADR-0010).
 
 ## Upgrade notes
 

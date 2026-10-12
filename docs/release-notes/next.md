@@ -548,6 +548,35 @@ providers), and rollback caveats in
 
   VMs created before this release stay unstamped and behave as before.
   → [VM ownership: Proxmox](docs/vm-ownership.md#proxmox)
+- **A vSphere VM bound to a template or an image artifact is held when its
+  delete or power change is refused.** The provider refuses both
+  (`VM_IS_IMAGE_ARTIFACT`); the manager used to retry them every 15 s / 5 s.
+  Now: `Ready=False/VMIsImageArtifact` (a clustered delete:
+  `DeleteBlocked=True/VMIsImageArtifact`), a constant message, one `Warning`
+  event and a backoff up to 5 min. Detach the VM with
+  `virtrigaud.io/orphan-on-delete: "true"`.
+- **Single-host provider `Delete` requests carry the VM's owner**, so the
+  Proxmox owner-checked delete never destroys an unrelated VM that reused the
+  VMID. Adopted VMs (and clone targets) send none. Proxmox also accepts an
+  unstamped VM under the name adoption gave it (sanitized PVE name or
+  `vm-<vmid>`).
+- **Nothing is created through a Provider being deleted, even before the
+  manager's cache sees the deletion.** The Provider is re-read from the API
+  server right before every `Create`, `Clone` and `ImportDisk`; a deleting,
+  gone or replaced Provider holds the object with `Ready=False/ProviderDeleting`.
+- **`force-delete` of a `VMSnapshot` or `VMMigration` in another namespace than
+  its clustered Provider needs the Provider's
+  `infra.virtrigaud.io/allow-consumer-orphan-on-delete: "true"`**, as for a
+  `VirtualMachine`; otherwise `ForceDeleteRefused=True/ForceDeleteNotAllowed`
+  and the delete keeps being retried.
+- Conditions set by the VMClone, VMMigration, VMSnapshot, VMSet and Provider
+  controllers (and the VirtualMachine conditions set through the shared
+  helper) now record the object's `metadata.generation` as
+  `observedGeneration` (it was `0`, or a per-change counter).
+- The kustomize helper ClusterRoles in `config/rbac`
+  (`*-admin-role`, `*-editor-role`, `*-viewer-role`) named the API group
+  `infra.virtrigaud.io.infra.virtrigaud.io` and granted nothing; they now
+  grant `infra.virtrigaud.io`.
 - A `VMMigration` with `deleteAfterMigration: true` whose target stays off
   (`powerOn: false`) records a `SourceDeletedTargetNotStarted` Warning when it
   deletes the source.

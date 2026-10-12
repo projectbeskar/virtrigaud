@@ -335,7 +335,12 @@ made from a template before this release. The vSphere `Delete`, `Power`,
 first. They refuse a template, or an object carrying a `virtrigaud.image.*` key,
 before changing anything. The refusal is `FailedPrecondition` with the reason
 `VM_IS_IMAGE_ARTIFACT` and a constant message. The manager maps it to a
-non-retryable `Conflict` and never counts it toward the circuit breaker. An
+non-retryable `Conflict` and never counts it toward the circuit breaker. A
+refused `Delete` keeps the `VirtualMachine`'s finalizer with
+`Ready=False/VMIsImageArtifact` (clustered: `DeleteBlocked=True/VMIsImageArtifact`),
+and a refused `Power` sets `Ready=False/VMIsImageArtifact`. Both carry a
+constant message, one `Warning` event and a backoff of up to 5 minutes; detach
+such a `VirtualMachine` with `virtrigaud.io/orphan-on-delete: "true"`. An
 object whose configuration cannot be read is refused too, with a plain
 `FailedPrecondition`. A full `Clone` is not guarded: cloning from a template is
 what templates are for, and a full clone never changes its source. A linked
@@ -659,22 +664,21 @@ before it stops or destroys anything:
 | Its config can't be read | Retryable, nothing destroyed |
 | Not on the node asked | Deleted as gone only when the VMID is free cluster-wide; otherwise retryable |
 
-The name rule applies **only to a `Delete` that carries an owner**. It
-compares names exactly.
-
-An adopted VM keeps its PVE name. The adoption flow names its
-`VirtualMachine` after a sanitized form of that name: lower-cased, with `_`,
-`.` and spaces turned into `-`. When the two differ (for example PVE
-`Web_01`, `VirtualMachine` `web-01`), an owner-carrying `Delete` answers
-`NotFound` and leaves the VM in place. Remove it by hand, or use
-`virtrigaud.io/orphan-on-delete`. The provider can't accept the sanitized form
-yet: the sanitizer is unexported in `internal/controller`, which a provider
-must not import. Moving it to a shared package is a follow-up.
+The name rule applies **only to a `Delete` that carries an owner**. An
+unstamped VM is named like the owner when its PVE name is the owner's name, or
+when the adoption flow would name its `VirtualMachine` after it
+(`contracts.AdoptedVMName`, shared with the adoption controller): the PVE name
+lower-cased, with `_`, `.` and spaces turned into `-`, other characters
+dropped, cut to 63 characters — or `vm-<vmid>` when nothing is left. For
+example PVE `Web_01` matches the owner `web-01`. Any other name is `NotFound`.
 
 Without an owner on the request, `Delete` is unchanged, except for the gone
-check above. Today the manager sends `DeleteRequest.owner` only for clustered
-Providers, so the owner checks take effect once the manager sends the owner
-on Proxmox deletes too.
+check above. The manager sends `DeleteRequest.owner` on every delete of a
+VirtualMachine with a UID — clustered and single-host — except an adopted one
+(label `virtrigaud.io/adopted=true`, which clone targets carry too). Adoption
+does not stamp the VM it adopts, and the VM may still carry a previous owner's
+stamp (a `VirtualMachine` detached with `virtrigaud.io/orphan-on-delete`, then
+adopted again), which would make an owner-checked delete answer `NotFound`.
 
 ### `Create` and `Clone` error classes
 
@@ -721,7 +725,8 @@ Proxmox VMs created before this release carry no stamp. They:
 - **are reported by `ListVMs` without `owner_uid`.** The adoption rules for
   unstamped VMs are unchanged, and the manager can't look them up by owner;
 - **are deleted as before** when the request carries no owner, or when their
-  PVE name is the `VirtualMachine`'s name.
+  PVE name is the `VirtualMachine`'s name or the name adoption gave it (see
+  `Delete` above).
 
 The provider doesn't stamp existing VMs by itself. Proxmox doesn't implement
 `TransferOwner`, and adopted VMs stay unstamped.

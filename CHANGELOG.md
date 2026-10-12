@@ -5,6 +5,40 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-10-12 13:08] - v0.4.0-rc1 follow-ups: image-artifact holds, owner on single-host deletes, live Provider check before creating RPCs, force-delete gate for snapshots and migrations, observedGeneration, shared finalizer constants, RBAC group fix
+**Author:** @wrkode (William Rizzo)
+
+> **Operator note.**
+> - **Behavior change (clustered Providers):** `virtrigaud.io/force-delete` on a `VMSnapshot` or `VMMigration` whose VM is in **another namespace** than its `topology: cluster` Provider is ignored unless the Provider carries `infra.virtrigaud.io/allow-consumer-orphan-on-delete: "true"`, as for a `VirtualMachine` (#381). The object shows `ForceDeleteRefused=True/ForceDeleteNotAllowed` and its delete keeps being retried.
+> - **Behavior change (Proxmox):** single-host deletes now carry the VM's owner, so the owner-checked Delete (#380) applies. An unstamped Proxmox VM renamed on the hypervisor is no longer deleted with its `VirtualMachine` (`Refusing to delete` in the provider log). Adopted VMs and clone targets send no owner.
+
+### Security
+- `internal/controller/consumer_force_delete.go` (new), `vmsnapshot_controller.go` (`handleDeletion`), `vmmigration_snapshot_cleanup.go` (`releaseSourceSnapshotForDeletion`), `virtualmachine_clustered_orphan.go`: the cross-namespace force-delete gate now covers `VMSnapshot` and `VMMigration`. Low; capacity-accounting bypass on shared hosts.
+  - **Before:** a consumer's `force-delete` released a `VMSnapshot` whose provider delete failed or could not be sent, or a `VMMigration` whose source snapshot delete failed, leaving the snapshot on a shared clustered host outside the accounting.
+  - **Now:** honoured only when the VM's Provider is not clustered, is in the object's namespace, or allows consumers to leave state behind. Otherwise `ForceDeleteRefused=True/ForceDeleteNotAllowed` (constant message per object, one `Warning` event, status written only on change) and the delete is retried as if the annotation were not set. The Provider check is shared with the VirtualMachine gate (`consumerDetachDeniedFor`).
+- `internal/controller/vmref.go` (`deleteRef`), `virtualmachine_controller.go`, `internal/transport/grpc/client.go` (`Delete`): single-host `DeleteRequest.owner` is now sent (the VM's UID, namespace and name), so Proxmox never destroys an unrelated VM that reused the VMID. vSphere, single-host libvirt and mock ignore it (tests added for each). Adopted `VirtualMachine`s (`virtrigaud.io/adopted=true`, clone targets included) send none: their VM may carry a previous owner's stamp.
+- `internal/controller/provider_deleting_live.go` (new), `virtualmachine_controller.go` (`createVMOn`), `vmclone_controller.go` (`startClone`), `vmclone_clustered.go` (`startClusteredClone`), `vmmigration_controller.go` (`handleImportingPhase`): right before `Create`, `Clone` and `ImportDisk`, after the object recorded its use of the Provider, the Provider is re-read through the `APIReader`. A Provider being deleted, gone or replaced (other UID) holds the object with `Ready=False/ProviderDeleting` (constant message, one event, re-check every minute); nothing is sent. Closes the ADR-0010 race where a stale cache let a creating RPC run through a Provider whose in-use finalizer had already been released.
+
+### Fixed
+- `internal/controller/virtualmachine_image_artifact_hold.go` (new), `virtualmachine_controller.go` (`handleDeletion`, `adjustPowerState`, `clearStaleDeleteHold`), `internal/k8s/conditions.go` (`ReasonVMIsImageArtifact`): a vSphere `Delete` or `Power` refused with `VM_IS_IMAGE_ARTIFACT` (`contracts.IsVMIsImageArtifact`) is held instead of retried every 15 s / 5 s as a generic failure. Delete: finalizer kept, `Ready=False/VMIsImageArtifact` (clustered: `DeleteBlocked=True/VMIsImageArtifact`, `Ready=False/DeleteBlocked`). Power: `Ready=False/VMIsImageArtifact`. Constant messages pointing at `virtrigaud.io/orphan-on-delete: "true"`, one `Warning` event, blocked-VM backoff (15 s to 5 min), no write on a repeated refusal; metric reason `vm-is-image-artifact`. `force-delete` and `orphan-on-delete` still release a held delete.
+- `internal/k8s/conditions.go`, `internal/util/k8s/conditions.go` and every caller in `internal/controller` (114 call sites): `SetCondition` and the `Set*Condition` helpers take the owning object's generation and record it as `observedGeneration`. `internal/k8s` never set it; `internal/util/k8s` stored a per-change counter. `LastTransitionTime` semantics are unchanged in both, and a repeated call with the same values changes nothing (envtest pins that an unchanged VM reconcile writes nothing, before and after a spec change).
+- `config/rbac/*_{admin,editor,viewer}_role.yaml`: the 15 helper ClusterRoles named the API group `infra.virtrigaud.io.infra.virtrigaud.io` and granted nothing; they now grant `infra.virtrigaud.io` (`internal/controller/rbac_helper_roles_test.go` pins it). The chart has no such roles; its manager RBAC already used the right group.
+
+### Changed
+- `internal/providers/contracts/adopted_name.go` (new), `internal/controller/vmadoption_controller.go`, `vmadoption_clustered.go`, `internal/providers/proxmox/vm_ownership.go`: the adoption controller's `sanitizeVMName` is now `contracts.SanitizeVMName`, with `contracts.AdoptedVMName` (sanitized name or `vm-<id>`) as the single owner of the adopted-VM naming rule. Proxmox's owner-checked Delete accepts an unstamped VM whose adopted name is the owner's; any other name is still refused as a reused VMID.
+- `api/infra.virtrigaud.io/v1beta1/vmsnapshot_types.go`, `vmclone_types.go`, `vmmigration_types.go`: exported `VMSnapshotFinalizer`, `VMCloneFinalizer` and `VMMigrationFinalizer` (values unchanged; no CRD or deepcopy change). Every finalizer literal and duplicated local constant in `internal/controller` uses them.
+- `internal/providers/proxmox/pveapi/client.go`, `internal/providers/proxmox/snapshot_node.go`: `VMIDInUse` removed; the snapshot node lookup uses `VMIDFree`, the one `/cluster/nextid?vmid=` probe (any answer other than 200 or 400 "already exists" is an error). Unit test added.
+- `docs/upgrading.md`, `docs/release-notes/next.md`, `docs/vm-ownership.md`, `docs/vm-provider-binding.md`: the behavior changes above.
+
+### Why
+Follow-ups from the v0.4.0-rc1 review after #376–#381: an image-artifact refusal hot-looped like a transient failure, single-host Proxmox deletes skipped the owner check #380 added, the cached Provider check left the ADR-0010 race open for creating RPCs, and snapshot/migration force-delete bypassed the consumer gate #381 added for VMs. The rest is cleanup the review asked for: correct `observedGeneration`, one finalizer constant per kind, one VMID probe, one adopted-name rule, and helper RBAC roles that grant something.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-10-12 13:32] - Administrator disk-size limit: --max-disk-size, per-Provider max-disk-size annotation, real-size checks for clones and migrations, opt-in VM/VMClass disk-size webhooks
 **Author:** @wrkode (William Rizzo)
 
