@@ -28,6 +28,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/record"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	infravirtrigaudiov1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
 	"github.com/projectbeskar/virtrigaud/internal/k8s"
@@ -342,5 +343,42 @@ func TestParseMaxDiskSizeFlag(t *testing.T) {
 	for _, bad := range []string{"none", "lots", "0", "500", "-5Gi"} {
 		_, err := ParseMaxDiskSizeFlag(bad)
 		assert.Error(t, err, bad)
+	}
+}
+
+// TestReconcileVM_DiskSizeLimit_LibvirtDefaultPrimaryDisk (review M1): on a
+// libvirt Provider a class without spec.diskDefaults.size still makes a 20 GiB
+// primary disk, so a limit below that refuses the create; other provider
+// types (whose default is the template's size, not known here) do not.
+func TestReconcileVM_DiskSizeLimit_LibvirtDefaultPrimaryDisk(t *testing.T) {
+	for _, tc := range []struct {
+		ptype infravirtrigaudiov1beta1.ProviderType
+		held  bool
+	}{
+		{ptype: infravirtrigaudiov1beta1.ProviderTypeLibvirt, held: true},
+		{ptype: infravirtrigaudiov1beta1.ProviderTypeVSphere, held: false},
+	} {
+		t.Run(string(tc.ptype), func(t *testing.T) {
+			ctx := context.Background()
+			r, rp, _ := diskCapFixture(t, qty("10Gi"), nil, "")
+			prov := &infravirtrigaudiov1beta1.Provider{}
+			require.NoError(t, r.Get(ctx, client.ObjectKey{Namespace: "default", Name: "test-prov"}, prov))
+			prov.Spec.Type = tc.ptype
+			require.NoError(t, r.Update(ctx, prov))
+
+			stored, _ := storedVM(t, r)
+			_, err := r.reconcileVM(ctx, stored)
+			require.NoError(t, err)
+			got, _ := storedVM(t, r)
+			ready := meta.FindStatusCondition(got.Status.Conditions, k8s.ConditionReady)
+			if !tc.held {
+				assert.Len(t, rp.createReqs, 1)
+				return
+			}
+			assert.Empty(t, rp.createReqs)
+			require.NotNil(t, ready)
+			assert.Equal(t, k8s.ReasonDiskSizeExceedsLimit, ready.Reason)
+			assert.Contains(t, ready.Message, "the libvirt default primary disk (VMClass test-class sets no spec.diskDefaults.size) asks for 20Gi")
+		})
 	}
 }

@@ -209,17 +209,37 @@ to 20 more) and fill a shared datastore or pool. `manager.maxDiskSize` (the
 manager's `--max-disk-size`) sets a ceiling **tenants cannot raise**:
 
 - **New disks:** a VM whose VMClass `spec.diskDefaults.size` or any
-  `spec.disks[].sizeGiB` is above the limit is not created. It waits with
-  `Ready=False`, reason `DiskSizeExceedsLimit`, and a Warning event, and is
-  created once its sizes fit. A vanished VM is not re-created above it either.
+  `spec.disks[].sizeGiB` is above the limit is not created. On a libvirt
+  Provider a class without `spec.diskDefaults.size` counts as the libvirt
+  default primary disk, 20Gi. The VM waits with `Ready=False`, reason
+  `DiskSizeExceedsLimit`, and a Warning event, and is created once its sizes
+  fit. A vanished VM is not re-created above it either.
 - **Growth:** a Reconfigure never grows a disk beyond the limit. The VM's other
   changes (CPU, memory) are applied, the over-limit disk is left as it is, and
   the VM reports `Reconfiguring=False`, reason `DiskSizeExceedsLimit`.
-- **Clones and migrations:** a `VMClone` (source VM's disks, its VMClass and the
-  target class) or `VMMigration` (the migrated disk, sized by the source VM's
-  VMClass, and the target class) that would create a larger disk is not started:
-  the clone stays `Pending` and the migration stays in `Validating`, with the
-  same reason.
+- **Clones and migrations** copy the source VM's real disks, whatever its spec
+  says now, so they are checked by the sizes the source's provider reports
+  (`GetDiskInfo`), not by its VMClass or `spec.disks`:
+  - a `VMClone` is checked for every disk of the source and the target class
+    override, before the clone is issued; it stays `Pending`;
+  - a `VMMigration` is checked for the migrated disk and the target class in
+    `Validating`, again right before the export (the size is recorded in
+    `status.diskInfo.sourceSize`), and that record right before the import;
+    it stays in its phase.
+
+  A size the provider does not report (a provider image from before this
+  release, a disk that is not file-backed on libvirt, a read error) refuses the
+  clone or migration while a limit applies (`DiskSizeLimitUnverifiable`). So
+  does a migration that reaches the import with no recorded size (it was
+  exported before the limit was set): delete it and migrate again.
+- **Not covered: images larger than the class.** The limit bounds the sizes
+  VirtRigaud asks for. A VM's primary disk comes out of its image (a vSphere or
+  Proxmox template, a libvirt base image) and is only grown to the class size,
+  never shrunk. An image whose disk is already larger than the limit therefore
+  gives a larger disk, and that is not checked: no image's size is known before
+  the Create. Control which images tenants can use (VMImages are namespaced;
+  shared ones need `spec.consumerNamespaceSelector`), or bound the
+  hypervisor's own storage.
 - **Existing VMs** whose disks are already larger keep running, are never
   shrunk, and stay `Ready`.
 - **Per Provider:** a Provider's owner can lower the limit for that Provider with

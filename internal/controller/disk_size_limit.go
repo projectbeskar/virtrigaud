@@ -116,12 +116,35 @@ func diskSizeExceedsMessage(over infravirtrigaudiov1beta1.DiskSizeRequest, limit
 		over.Field, over.Size.String(), limit.String(), outcome, infravirtrigaudiov1beta1.ProviderMaxDiskSizeAnnotation)
 }
 
-// vmDiskSizeRequests are the disk sizes a Create of vm with vmClass asks for:
-// the class's primary-disk size and each spec.disks entry.
-func vmDiskSizeRequests(vm *infravirtrigaudiov1beta1.VirtualMachine, vmClass *infravirtrigaudiov1beta1.VMClass) []infravirtrigaudiov1beta1.DiskSizeRequest {
+// libvirtDefaultPrimaryDiskGiB is the primary-disk size the libvirt provider
+// creates (or grows an image to) when the VMClass sets no
+// spec.diskDefaults.size (internal/providers/libvirt extractDiskSize).
+const libvirtDefaultPrimaryDiskGiB = 20
+
+// vmDiskSizeRequests are the disk sizes a Create of vm with vmClass through
+// provider asks for: the class's primary-disk size — or, on a libvirt
+// Provider whose class sets none, the 20 GiB the libvirt provider then uses —
+// and each spec.disks entry.
+//
+// Not covered: a primary disk that comes out LARGER than what is asked for,
+// because the image (a vSphere or Proxmox template, a libvirt base image)
+// is larger. Providers only grow an image's disk to the class size, never
+// shrink it, and no image's size is known before the Create (VMImage status
+// does not record it), so that size is not checked here.
+func vmDiskSizeRequests(vm *infravirtrigaudiov1beta1.VirtualMachine, vmClass *infravirtrigaudiov1beta1.VMClass,
+	provider *infravirtrigaudiov1beta1.Provider) []infravirtrigaudiov1beta1.DiskSizeRequest {
 	disks := infravirtrigaudiov1beta1.SpecDiskSizeRequests(vm.Spec.Disks)
 	if req, ok := infravirtrigaudiov1beta1.ClassDiskSizeRequest(vmClass); ok {
 		disks = append([]infravirtrigaudiov1beta1.DiskSizeRequest{req}, disks...)
+	} else if provider != nil && provider.Spec.Type == infravirtrigaudiov1beta1.ProviderTypeLibvirt {
+		className := ""
+		if vmClass != nil {
+			className = vmClass.Name
+		}
+		disks = append([]infravirtrigaudiov1beta1.DiskSizeRequest{{
+			Field: fmt.Sprintf("the libvirt default primary disk (VMClass %s sets no spec.diskDefaults.size)", className),
+			Size:  infravirtrigaudiov1beta1.DiskSizeGiBQuantity(libvirtDefaultPrimaryDiskGiB),
+		}}, disks...)
 	}
 	return disks
 }
@@ -136,7 +159,7 @@ func (r *VirtualMachineReconciler) refuseCreateOverDiskSizeLimit(
 	provider *infravirtrigaudiov1beta1.Provider,
 	vmClass *infravirtrigaudiov1beta1.VMClass,
 ) (ctrl.Result, bool) {
-	refusal := checkDiskSizeLimit(r.MaxDiskSize, provider, vmDiskSizeRequests(vm, vmClass), "nothing is created")
+	refusal := checkDiskSizeLimit(r.MaxDiskSize, provider, vmDiskSizeRequests(vm, vmClass, provider), "nothing is created")
 	if refusal == nil {
 		return ctrl.Result{}, false
 	}
