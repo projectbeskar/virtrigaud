@@ -31,6 +31,7 @@ import (
 	"google.golang.org/grpc/status"
 
 	"github.com/projectbeskar/virtrigaud/internal/providers/importlimit"
+	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
 )
 
 // localQemuImgHost runs the "!" host commands it is given with the local
@@ -108,4 +109,14 @@ func TestInspectHostImageInfoAs_ReportsVirtualSize(t *testing.T) {
 	assert.Equal(t, "qcow2", info.Format)
 	require.Error(t, importlimit.Check(info.VirtualSize, nil, int64(100)<<30))
 	assert.Len(t, h.calls, 1, "one read serves both checks")
+}
+
+// TestServer_AdvertisesImportSizeLimit: a single-host provider, whose
+// ImportDisk enforces max_virtual_size_bytes, advertises it; a clustered one
+// (ImportDisk not routed) does not.
+func TestServer_AdvertisesImportSizeLimit(t *testing.T) {
+	caps, err := (&Server{}).GetCapabilities(context.Background(), &providerv1.GetCapabilitiesRequest{})
+	require.NoError(t, err)
+	assert.True(t, caps.GetSupportsImportSizeLimit())
+	assert.False(t, clusteredCapabilities().GetSupportsImportSizeLimit())
 }

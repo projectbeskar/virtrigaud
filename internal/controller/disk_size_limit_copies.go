@@ -200,7 +200,16 @@ func (r *VMMigrationReconciler) migrationDiskSizeRefusal(ctx context.Context, mi
 	disks = append(disks, infravirtrigaudiov1beta1.DiskSizeRequest{
 		Field: fmt.Sprintf("the disk of source VM %s", sourceVM.Name), Size: size,
 	})
-	return checkDiskSizeLimit(r.MaxDiskSize, targetProvider, disks, migrationOutcome), nil
+	if refusal := checkDiskSizeLimit(r.MaxDiskSize, targetProvider, disks, migrationOutcome); refusal != nil {
+		return refusal, nil
+	}
+	// The import-time check must run too: refuse early, before any export,
+	// a target provider that would ignore the limit.
+	target, err := r.getProviderInstance(ctx, targetProvider)
+	if err != nil {
+		return nil, fmt.Errorf("resolve the target provider to check its import-time disk-size limit: %w", err)
+	}
+	return targetImportLimitRefusal(ctx, target, limit)
 }
 
 // exportDiskSizeRefusal is the check right before ExportDisk: the disk
@@ -298,6 +307,37 @@ func importRefusedByTargetAt(migration *infravirtrigaudiov1beta1.VMMigration, li
 	c := meta.FindStatusCondition(migration.Status.Conditions, infravirtrigaudiov1beta1.VMMigrationConditionImporting)
 	return c != nil && c.Status == metav1.ConditionFalse && c.Reason == k8s.ReasonDiskSizeExceedsLimit &&
 		c.Message == providerImportRefusedMessage(limit.Value())
+}
+
+// importSizeLimitUnsupportedMessage is the hold message of a migration whose
+// target provider does not enforce the limit at the import.
+const importSizeLimitUnsupportedMessage = "The target provider does not enforce the disk-size limit when it imports " +
+	"a disk (it does not report supports_import_size_limit): upgrade the provider image. Nothing is migrated into it " +
+	"while a disk-size limit applies"
+
+// targetImportLimitRefusal is the refusal of a migration into inst (the
+// target Provider's instance) while limit applies and the provider does not
+// report CapabilityImportSizeLimit: an older provider image silently ignores
+// ImportDiskRequest.MaxVirtualSizeBytes, so the import-time check — the one
+// that holds against a replaced staged object — would not run. nil when no
+// limit applies (nothing changes then) or the provider reports it. An error
+// only for a failed capability query (retried).
+func targetImportLimitRefusal(ctx context.Context, inst contracts.Provider, limit *resource.Quantity) (*diskSizeRefusal, error) {
+	if limit == nil {
+		return nil, nil
+	}
+	reporter, ok := inst.(contracts.CapabilityReporter)
+	if !ok {
+		return unverifiable(importSizeLimitUnsupportedMessage), nil
+	}
+	caps, err := reporter.GetCapabilities(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("query the target provider's capabilities: %w", err)
+	}
+	if !caps.SupportsImportSizeLimit {
+		return unverifiable(importSizeLimitUnsupportedMessage), nil
+	}
+	return nil, nil
 }
 
 // holdMigrationForDiskSizeLimit keeps migration in its current phase — no

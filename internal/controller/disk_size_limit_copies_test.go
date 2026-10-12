@@ -220,6 +220,14 @@ type sizedMigrationProvider struct {
 	lastExportDisk contracts.ExportDiskRequest
 	importErr      error
 	lastImport     contracts.ImportDiskRequest
+	// oldImage plays a provider image that predates the import-time limit
+	// (it does not report SupportsImportSizeLimit).
+	oldImage bool
+	capsErr  error
+}
+
+func (p *sizedMigrationProvider) GetCapabilities(_ context.Context) (contracts.Capabilities, error) {
+	return contracts.Capabilities{SupportsDiskImport: true, SupportsImportSizeLimit: !p.oldImage}, p.capsErr
 }
 
 func (p *sizedMigrationProvider) GetDiskInfo(_ context.Context, req contracts.GetDiskInfoRequest) (contracts.GetDiskInfoResponse, error) {
@@ -533,4 +541,66 @@ func TestVMMigration_NoLimitSendsNoMaxSize(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 1, prov.imports)
 	assert.Zero(t, prov.lastImport.MaxVirtualSizeBytes)
+}
+
+// TestVMMigration_DiskSizeLimit_OldTargetImageHeld (review M1): while a limit
+// applies, a target provider that does not report supports_import_size_limit
+// (an older image would silently ignore max_virtual_size_bytes) holds the
+// migration — in Validating before any export, and again before the import —
+// with a constant "upgrade the provider image" message. Without a limit the
+// migration is unaffected and no capability is even needed.
+func TestVMMigration_DiskSizeLimit_OldTargetImageHeld(t *testing.T) {
+	ctx := context.Background()
+
+	// Validating: held before any export.
+	migration, objs := xnsMigration("")
+	migration.Status.Phase = infravirtrigaudiov1beta1.MigrationPhaseValidating
+	prov := &sizedMigrationProvider{sizes: &diskSizes{primary: 10 * gib}, oldImage: true}
+	r, _ := newXNSMigrationReconciler(t, mountTestScheme(t), prov, append(objs, migration)...)
+	r.MaxDiskSize = qty("100Gi")
+	_, err := r.handleValidatingPhase(ctx, migration)
+	require.NoError(t, err)
+	got := getXNSMigration(t, r, migration)
+	assert.Equal(t, infravirtrigaudiov1beta1.MigrationPhaseValidating, got.Status.Phase)
+	c := meta.FindStatusCondition(got.Status.Conditions, infravirtrigaudiov1beta1.VMMigrationConditionValidating)
+	require.NotNil(t, c)
+	assert.Equal(t, k8s.ReasonDiskSizeLimitUnverifiable, c.Reason)
+	assert.Equal(t, importSizeLimitUnsupportedMessage, c.Message)
+	assert.Zero(t, prov.exports+prov.imports)
+
+	// No limit: the same old image migrates as before.
+	migration, objs = xnsMigration("")
+	migration.Status.Phase = infravirtrigaudiov1beta1.MigrationPhaseValidating
+	prov = &sizedMigrationProvider{sizes: &diskSizes{primary: 10 * gib}, oldImage: true}
+	r, _ = newXNSMigrationReconciler(t, mountTestScheme(t), prov, append(objs, migration)...)
+	_, err = r.handleValidatingPhase(ctx, migration)
+	require.NoError(t, err)
+	assert.Equal(t, infravirtrigaudiov1beta1.MigrationPhaseExporting, getXNSMigration(t, r, migration).Status.Phase)
+
+	// Importing: held before ImportDisk (the target was upgraded away after
+	// Validating, or the migration predates the check).
+	sourceVM, sourceProvider, targetProvider, imp := directionFixture(
+		infravirtrigaudiov1beta1.ProviderTypeVSphere, infravirtrigaudiov1beta1.ProviderTypeLibvirt)
+	imp.Status.DiskInfo.SourceSize = qty("50Gi")
+	prov = &sizedMigrationProvider{sizes: &diskSizes{}, oldImage: true}
+	r, _ = directionReconciler(t, prov, sourceVM, sourceProvider, targetProvider, imp, s3CredsSecret())
+	r.MaxDiskSize = qty("100Gi")
+	_, err = r.handleImportingPhase(ctx, imp)
+	require.NoError(t, err)
+	assert.Zero(t, prov.imports, "no ImportDisk into a provider that would ignore the limit")
+	c = meta.FindStatusCondition(getXNSMigration(t, r, imp).Status.Conditions, infravirtrigaudiov1beta1.VMMigrationConditionImporting)
+	require.NotNil(t, c)
+	assert.Equal(t, importSizeLimitUnsupportedMessage, c.Message)
+
+	// A failed capability query is retried, not held.
+	sourceVM, sourceProvider, targetProvider, imp = directionFixture(
+		infravirtrigaudiov1beta1.ProviderTypeVSphere, infravirtrigaudiov1beta1.ProviderTypeLibvirt)
+	imp.Status.DiskInfo.SourceSize = qty("50Gi")
+	prov = &sizedMigrationProvider{sizes: &diskSizes{}, capsErr: errors.New("unreachable")}
+	r, _ = directionReconciler(t, prov, sourceVM, sourceProvider, targetProvider, imp, s3CredsSecret())
+	r.MaxDiskSize = qty("100Gi")
+	res, err := r.handleImportingPhase(ctx, imp)
+	require.NoError(t, err)
+	assert.Positive(t, res.RequeueAfter)
+	assert.Zero(t, prov.imports)
 }

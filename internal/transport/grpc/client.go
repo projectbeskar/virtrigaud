@@ -548,6 +548,8 @@ func (c *Client) GetCapabilities(ctx context.Context) (contracts.Capabilities, e
 		SupportsRoutedAdoption: resp.GetSupportsRoutedAdoption(),
 		// ADR-0007 A6.2: false from a provider that predates it.
 		SupportsListOwnerFilter: resp.GetSupportsListOwnerFilter(),
+		// False from a provider that predates the import-time disk-size limit.
+		SupportsImportSizeLimit: resp.GetSupportsImportSizeLimit(),
 	}, nil
 }
 

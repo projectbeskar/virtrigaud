@@ -127,3 +127,12 @@ func TestImportDiskFromNFS_DiskSizeLimit(t *testing.T) {
 		})
 	}
 }
+
+// TestGetCapabilities_AdvertisesImportSizeLimit: the production Proxmox
+// capability set reports that ImportDisk enforces max_virtual_size_bytes.
+func TestGetCapabilities_AdvertisesImportSizeLimit(t *testing.T) {
+	p := &Provider{capabilities: GetProviderCapabilities()}
+	caps, err := p.GetCapabilities(context.Background(), &providerv1.GetCapabilitiesRequest{})
+	require.NoError(t, err)
+	assert.True(t, caps.GetSupportsImportSizeLimit())
+}

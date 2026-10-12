@@ -887,6 +887,14 @@ message GetCapabilitiesResponse {
   // single-host and thin-client providers (they never schedule, and ignore the
   // filter) and on a clustered provider older than A6.2.
   bool supports_list_owner_filter = 22;
+
+  // supports_import_size_limit reports that ImportDisk enforces
+  // ImportDiskRequest.max_virtual_size_bytes on the disk it lands (refusing a
+  // larger one with DISK_SIZE_EXCEEDS_LIMIT, or one it cannot measure with
+  // DISK_SIZE_UNVERIFIABLE). A provider that predates the field ignores the
+  // limit, so while one applies the manager holds a migration into a
+  // Provider that does not report it.
+  bool supports_import_size_limit = 24;
 }
 
 // TransferOwner hands one VM on a clustered ("brain-in-operator") provider's

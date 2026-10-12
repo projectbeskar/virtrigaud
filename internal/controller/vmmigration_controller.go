@@ -1297,6 +1297,15 @@ func (r *VMMigrationReconciler) handleImportingPhase(ctx context.Context, migrat
 	// (max_virtual_size_bytes). An import it already refused for that limit is
 	// not sent again until the limit changes (disk_size_limit_copies.go).
 	if limit, _ := r.migrationTargetLimit(targetProvider); limit != nil {
+		// A provider image that predates the field would ignore it: hold.
+		refusal, err := targetImportLimitRefusal(ctx, providerInstance, limit)
+		if err != nil {
+			logger.Error(err, "Failed to check the target provider's import-time disk-size limit")
+			return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+		}
+		if refusal != nil {
+			return r.holdMigrationForDiskSizeLimit(ctx, migration, infrav1beta1.VMMigrationConditionImporting, refusal)
+		}
 		importReq.MaxVirtualSizeBytes = limit.Value()
 		if importRefusedByTargetAt(migration, limit) {
 			return ctrl.Result{RequeueAfter: diskSizeLimitRetryInterval}, nil

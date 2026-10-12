@@ -29,6 +29,7 @@ import (
 	"google.golang.org/grpc/status"
 
 	"github.com/projectbeskar/virtrigaud/internal/providers/importlimit"
+	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
 )
 
 // streamOptimizedVMDK creates a sparse streamOptimized vmdk of virtual size
@@ -69,4 +70,12 @@ func TestCheckLandingVirtualSize(t *testing.T) {
 	err = checkLandingVirtualSize(ctx, garbage, limit)
 	require.Error(t, err)
 	assert.Equal(t, importlimit.UnverifiableMessage, err.Error(), "an unreadable size fails closed")
+}
+
+// TestGetCapabilities_AdvertisesImportSizeLimit: vSphere reports that
+// ImportDisk enforces max_virtual_size_bytes.
+func TestGetCapabilities_AdvertisesImportSizeLimit(t *testing.T) {
+	caps, err := (&Provider{}).GetCapabilities(context.Background(), &providerv1.GetCapabilitiesRequest{})
+	require.NoError(t, err)
+	assert.True(t, caps.GetSupportsImportSizeLimit())
 }

@@ -102,6 +102,11 @@ type Capabilities struct {
 	// VM's first placement otherwise. False for single-host and thin-client
 	// providers (they never schedule).
 	SupportsListOwnerFilter bool
+	// SupportsImportSizeLimit reports that ImportDisk enforces
+	// ImportDiskRequest.MaxVirtualSizeBytes on the disk it lands. A provider
+	// that predates it ignores the limit; while one applies, the migration
+	// controller holds a migration into a Provider that does not report it.
+	SupportsImportSizeLimit bool
 }
 
 // CapabilityReporter is an optional capability of a Provider: it reports the

@@ -1066,6 +1066,8 @@ func (s *Server) GetCapabilities(ctx context.Context, req *providerv1.GetCapabil
 		// Reconfigure applies every change live and persistently, persistently
 		// only with restart_required, or fails (reconfigure.go).
 		SupportsHonestReconfigure: true,
+		// ImportDisk enforces max_virtual_size_bytes (import_size_limit.go).
+		SupportsImportSizeLimit: true,
 	}, nil
 }
 
