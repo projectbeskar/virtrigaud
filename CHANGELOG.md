@@ -5,6 +5,115 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-10-12 15:38] - VMMigration: delete nfs/s3 staged disks through a new provider RPC (ADR-0011); guarded Ready cleanup; staged-image checks on every import
+**Author:** @wrkode (William Rizzo)
+
+> **Operator note.**
+> - **Behavior change:** a migration's `nfs` / `s3` staged disk (a full, unencrypted copy of the source disk) is now deleted by the migration's **target** `Provider`. This happens when the migration is `Ready`, when the `VMMigration` is deleted, and when the migration fails for good with `cleanupPolicy: Always`. The default `OnSuccess` keeps a failed migration's staged disk until the `VMMigration` is deleted, and `Never` keeps it in every case. Deleting such a `VMMigration` waits while the delete can still succeed (`StagingCleanup=False/StagingCleanupPending`, retried 15 s→5 min), and while an export task still runs. `virtrigaud.io/force-delete=true` releases it.
+> - **Roll the providers with the manager.** An older provider image cannot delete. The delete is held for up to 24 hours, then recorded `StagedDiskLeftBehind` (Warning) and released.
+> - **Ready cleanup only for migrations completed by this release.** A `Ready` migration completed before the upgrade deletes neither its source snapshot nor its source VM (one `SourceDeletionSkippedPreUpgrade` Warning). `deleteAfterMigration` deletes only the source VM whose UID the migration recorded.
+> - **New NFS staging name** `vmmigrations_<ns>_<name>_export.qcow2` for new migrations; in-flight ones keep the old name.
+> - **Versioned / object-lock S3 buckets and NFS snapshots** keep the data after the delete. Expire noncurrent versions on `vmmigrations/`, and exclude the staging export from snapshots.
+
+### Added
+- `docs/adr/0011-migration-staging-cleanup.md`, `docs/adr/README.md`: ADR-0011 (Accepted; Option A chosen by the maintainer on 2026-10-11, amended 2026-10-12 after the security review). It records:
+  - which provider deletes (the target), and the RPC shape;
+  - when the RPC is sent (a decision table by `cleanupPolicy`);
+  - the hold, backoff and force-delete behavior;
+  - the confinement: staging layouts and the staging digest;
+  - capability negotiation, with the 24 h grace for older providers;
+  - D9: the post-migration cleanup guard;
+  - D10: the staged-image header checks;
+  - the residual risks: versioned buckets, NFS snapshots and libnfs symlinks;
+  - the alternatives: B (the manager deletes directly) and C (documentation or lifecycle policies only).
+- `proto/provider/v1/provider.proto`, `proto/rpc/provider/v1/*.pb.go` (regenerated with buf, protoc-gen-go v1.34.2, protoc-gen-go-grpc v1.5.1):
+  - RPC `DeleteStagedDisk`. Its request carries the migration identity, stage, backend, options JSON, credentials and staging `layout`; it carries no key, path or URL.
+  - enum `StagedDiskDeleteOutcome` (`DELETED`, `NOT_FOUND`, `EMPTIED`).
+  - capability `supported_staged_disk_delete_backends` (field 23).
+
+  Additive; no package bump.
+- `api/infra.virtrigaud.io/v1beta1/vmmigration_types.go` (regenerated CRD; additive status fields written by the controller only):
+  - `status.storageInfo.stagingLayout` (`v1`/`v2`);
+  - `status.storageInfo.stagingDigest`;
+  - `status.sourceVMUID`.
+- `internal/storage/migration/staging.go` (new):
+  - `StagedObjectKey`: the single layout source for the export URL, the import URL and the delete. Layout `v2` is unambiguous: NFS `vmmigrations_<ns>_<name>_<stage>.qcow2`.
+  - `ResolveStagedDisk`: validates a request. The namespace must be a DNS-1123 label, the name a DNS-1123 subdomain, the stage `export`, and the layout `v1` or `v2`. NFS paths go through `NFSURL`.
+  - `DeleteS3StagedDisk` and `EmptyNFSStagedDisk`.
+  - `StagedDiskError`: the gRPC status carries no location.
+- `internal/storage/migration/staged_image.go` (new): `CheckStagedImageHeader`.
+- `internal/storage/s3.go`: `RemoveObjectIfExists`.
+- `internal/storage/s3fake/s3fake.go` (new): an in-process S3 server for tests.
+- `internal/providers/{proxmox,libvirt,vsphere,mock}/staged_disk.go`, plus the capabilities of each provider:
+  - Proxmox: deletes the S3 object from the pod, and unlinks the NFS file through the kernel mount as the migration's uid/gid. A failed `rm`, or a file still present, is an error, never `DELETED`.
+  - libvirt (single host) and vSphere: delete the S3 object, and empty the NFS object with qemu-img over libnfs.
+  - libvirt clustered and mock: `Unimplemented`; they advertise nothing.
+- `internal/providers/contracts/staged_disk.go` (new), `capabilities.go`, `internal/transport/grpc/client.go`, `sdk/provider/capabilities/capabilities.go`: `StagedDiskDeleter`, the client's `DeleteStagedDisk`, and the capability plumbing.
+- `internal/controller/vmmigration_staging_cleanup.go` (new):
+  - the `StagingCleanup` condition, with constant messages that name no location;
+  - the decision table;
+  - the hold, with the blocked-VM backoff;
+  - the deletion release, with force-delete;
+  - the staging marker, layout and digest, written before the export URL is built;
+  - waiting for a running export task;
+  - the 24 h grace for unsupported providers;
+  - a DNS failure is a hold;
+  - the outcome is persisted before the finalizer is removed.
+- `internal/controller/vmmigration_ready_cleanup.go` (new): the `PostMigrationCleanup` marker, written with Phase=Ready. It also closes legacy Ready migrations (`SourceDeletionSkippedPreUpgrade`) and handles the live-object check.
+
+### Changed
+- `internal/controller/vmmigration_controller.go`:
+  - Validating records `status.sourceVMUID`.
+  - The Ready transition stamps `PostMigrationCleanup`.
+  - `handleReadyPhase` acts only on the live object. It runs the staging cleanup, and runs the source snapshot and `deleteAfterMigration` only for stamped migrations.
+  - `deleteSourceVM` reads the VM live and deletes with a UID precondition. A re-created VM is refused (`SourceDeletionRefused`), and a VM that is already gone counts as done.
+  - The export phase writes the staging marker before the URL is built.
+  - `generateStorageURL` uses the recorded layout.
+  - The `ExportComplete` event no longer names the destination.
+- `internal/controller/vmmigration_snapshot_cleanup.go`: `handleTerminalFailure` runs the staging cleanup (`Always`), then the snapshot cleanup.
+- `internal/controller/provider_inuse.go`: a Ready or Failed migration whose staged disk is still to be deleted holds its Providers.
+- `internal/storage/migration/addrpolicy.go`: name-resolution failures are marked `ErrHostUnresolvable`.
+
+### Fixed
+- `internal/controller/vmmigration_controller.go`: removed `cleanupIntermediateStorage`. It built a PVC client **in the manager**, which never mounts migration PVCs, so it failed for every migration with `spec.storage` and blocked the Ready cleanup (the source snapshot and `deleteAfterMigration`). The cleanup is now guarded, see the operator note.
+
+### Security
+- Staged migration disks no longer stay on the staging backend. Deletion is confined to the object the provider derives from the migration identity. A delete is never aimed at a location changed after the export (staging digest).
+- The NFS staging name is now unambiguous (layout v2). Before, two namespaces could share a staged file: one tenant's export, import or delete could reach another's.
+- **Pre-existing High, fixed.** NFS and S3 imports on Proxmox and vSphere ran `qemu-img convert` / `qm importdisk` on a tenant-controlled image without a header check. A backing file, data file or `json:` target could flatten node or pod secrets (`/etc/pve/priv/*`, `/root/.ssh/*`, the service-account token, provider credentials) into the tenant's disk.
+  - `internal/providers/proxmox/nfs.go`, `s3import.go` (only `importDiskFromS3`): the object is copied to the node, a non-regular file is refused, the header of the copy is checked as `qm importdisk` probes it, and the same copy is published.
+  - `internal/providers/vsphere/nfs.go`, `s3import.go`, `staged_disk.go`: the object is byte-copied into the pod, its header is checked, and that copy is converted with `-f qcow2`.
+  - `internal/providers/libvirt/nfs.go`: already had the check, but its convert read the NFS object a second time. It now copies once, then checks and converts the copy.
+- `internal/providers/proxmox/nfs.go`: migration NFS exports are mounted `nosymfollow,nosuid,nodev,noexec`.
+- `internal/storage/migration/image_header.go` (new): `CheckStagedImageBytes` parses a staged image's first 64 KiB in Go **before** qemu-img opens it. qemu opens a qcow2 external data file and VMDK extents while reading a header, so a crafted image could otherwise make the node or pod open device nodes, host files or `nbd:`/`http:` targets, as root on PVE.
+  - qcow2: magic and version; no backing file; no encryption; no data-file bit or extension; only known incompatible features.
+  - VMDK: only monolithicSparse/streamOptimized, with one SPARSE extent and no parent.
+  - raw: must not start with a foreign magic.
+  - It is wired into the Proxmox, vSphere and libvirt staged imports. `qemu-img info` then runs with `-U`, and on Proxmox under `unshare -n`.
+- `internal/storage/migration/staged_limit.go` (new) and the three NFS imports: the staged copy is bounded. Its size is read first and refused above `VIRTRIGAUD_MIGRATION_IMPORT_MAX_GIB` (default 1024; the hook for #382's `max_virtual_size_bytes` is in `StagedCopyLimit`), or when less than twice its size is free. The copy reads at most bound+1 bytes (`qemu-img dd`, or `head -c` on Proxmox), and a copy that grew is refused. Refusals are constant and nothing is left behind.
+- `internal/controller/vmmigration_staging_cleanup.go`:
+  - the v1 layout is kept for any legacy export trace;
+  - the staging digest is computed over a versioned canonical struct;
+  - a held delete is checked for being due before the export task is polled.
+- Docs: tenants must never get `vmmigrations/status` (ADR-0011 D11).
+- Second re-review:
+  - Staged copies are bounded by the **measured** size, not the limit (Proxmox `head -c` of the measured size + 1 in the pipe form; `qemu-img dd` of the measured size + under 1 MiB). A copy longer than measured is refused.
+  - VMDK: capacity 0 is refused (qemu's descriptor-file path), as is a grain directory at end (an unverifiable footer). The descriptor must be NUL-terminated within its declared size, the extent file must be a plain name, and qemu's parent region is scanned.
+  - vSphere: staged copies are bounded by the `/tmp` emptyDir `sizeLimit`, read from `VIRTRIGAUD_TMP_SIZE_LIMIT`, which `internal/controller/provider_controller.go` and `charts/virtrigaud/templates/provider-vsphere-deployment.yaml` set, minus the current `/tmp` usage. Free space uses Bavail × Frsize.
+  - `CheckStagedImageBytes` returns the declared virtual size and refuses one above the limit.
+  - All three providers' S3 downloads are bounded by the object's reported size (`BoundedWriter`), with a free-space pre-check.
+  - A raw image that qemu would probe as a VMDK descriptor is refused.
+- Logging: left-behind causes are logged at V(1). Provider delete failures log the reason at Warn, and the stderr, host and path at debug.
+
+### Why
+Option A from the v0.4.0-rc1 backlog (#15): staged migration disks on NFS and S3 were never deleted, and the manager-side cleanup could not reach them while it silently blocked the Ready cleanup. The security review (REQUEST CHANGES) added: the maintainer decisions D1 (guard), D2 (`EMPTIED` accepted) and D3 (fix the NFS name in rc1); findings M1–M4 and L; and the pre-existing import header gap.
+
+### Impact
+- [x] Breaking change
+- [x] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-10-12 15:36] - Proxmox: imported-disk Create confined to the VM's own namespaced migration stage
 **Author:** @wrkode (William Rizzo)
 

@@ -141,8 +141,17 @@ requirements below):**
   `--migration-storage-allowed-hosts`; loopback/link-local/metadata targets are
   always rejected.
 - **Flat staging object.** The staged disk is a single flat file in the export
-  root, `vmmigrations-<ns>-<name>-<stage>.qcow2` (NFS, unlike S3 keys, cannot
-  auto-create directories). One export per tenant keeps these from colliding.
+  root, `vmmigrations_<ns>_<name>_<stage>.qcow2` (NFS, unlike S3 keys, cannot
+  auto-create directories; a migration staged before v0.4.0 keeps the old
+  `vmmigrations-<ns>-<name>-<stage>.qcow2`). Still give each tenant its own export.
+- **Cleanup.** The target `Provider` deletes the staged disk when the migration
+  succeeds and when the `VMMigration` is deleted (also on a final failure with
+  `cleanupPolicy: Always`; `Never` keeps it). libvirt and vSphere targets can
+  only empty it (an empty file stays on the export). Proxmox deletes it. Exclude
+  the export from server-side snapshots. See
+  [ADR-0011](../../docs/adr/0011-migration-staging-cleanup.md).
+- **Staged image check.** The import refuses a staged image that references any
+  other file (backing file, data file) or is not qcow2.
 
 **Hardening (ADR-0006 C6).** AUTH_SYS over NFSv3 is **cleartext with no Kerberos**
 — the uid/gid is an assertion, not an authenticated identity. Run the migration
