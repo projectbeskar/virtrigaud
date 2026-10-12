@@ -171,6 +171,11 @@ func (p *Provider) importDiskFromS3(ctx context.Context, req *providerv1.ImportD
 		}
 	}
 
+	// The disk-size limit, on the node-local stage `qm importdisk` will land.
+	if err := p.checkNodeImportSize(ctx, stagePath, srcFormat, req.MaxVirtualSizeBytes); err != nil {
+		return nil, err
+	}
+
 	p.logger.Info("Disk import from S3 staged on node (awaiting Create → qm importdisk)",
 		"id", id, "stage_path", stagePath, "bytes", dl.resp.BytesTransferred)
 

@@ -245,6 +245,12 @@ func (p *Provider) importDiskFromNFS(ctx context.Context, req *providerv1.Import
 			fmt.Sprintf("qemu-img check failed on staged qcow2 %s (stderr: %s)", stagePath, strings.TrimSpace(stderr)), err)
 	}
 
+	// The disk-size limit, on the converted node-local stage `qm importdisk`
+	// will land (the NFS export may change between two reads of it).
+	if err := p.checkNodeImportSize(ctx, stagePath, "qcow2", req.MaxVirtualSizeBytes); err != nil {
+		return nil, err
+	}
+
 	p.logger.Info("Disk import from NFS staged on node (awaiting Create → qm importdisk)",
 		"id", id, "stage_path", stagePath)
 
