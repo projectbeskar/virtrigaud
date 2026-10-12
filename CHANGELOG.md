@@ -17,7 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - `cmd/manager/main.go`: `--max-disk-size` — the administrator's ceiling on every disk VirtRigaud creates or grows.
-  - The value is a quantity of at least `1Gi`. Empty means no ceiling beyond the CRD's 64Ti per disk.
+  - The value is a whole number of bytes from `1Gi` to `64Pi`; a larger value (e.g. `1e30`, which would otherwise read as no limit) or a fraction of a byte (`1.1Gi`) is refused, never clamped. Empty means no ceiling beyond the CRD's 64Ti per disk.
   - It is parsed before anything else starts. An invalid value (`500`, `0`, `none`, `1G`, `1023Mi`, ...) stops the manager with exit 1.
   - It is passed to the VirtualMachine, VMClone and VMMigration controllers.
   - The VM/VMClass disk-size webhooks are registered whenever webhooks are on.

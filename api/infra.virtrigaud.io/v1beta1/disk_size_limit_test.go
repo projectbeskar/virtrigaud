@@ -40,6 +40,12 @@ func TestParseMaxDiskSize(t *testing.T) {
 		{"1.5Gi", "1.5Gi"},
 		{"1.1G", "1.1G"},
 		{"1G", ""},
+		{"64Pi", "64Pi"},
+		{"65Pi", ""},
+		{"1e30", ""}, // past int64: would read as Value()=0, no limit
+		{"9Ei", ""},
+		{"1.0000000001Gi", ""}, // not a whole number of bytes
+		{"1.1Gi", ""},          // 1181116006.4 bytes
 		{"0.5Gi", ""},
 		{"1.07G", ""},
 		{"", ""},

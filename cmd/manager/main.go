@@ -193,7 +193,7 @@ func main() {
 	var maxDiskSize string
 	flag.StringVar(&maxDiskSize, "max-disk-size", "",
 		"Administrator's ceiling on the size of every disk VirtRigaud creates or grows (a VM's VMClass "+
-			"spec.diskDefaults.size and spec.disks[].sizeGiB, a clone's, a migration's): a quantity of at least 1Gi "+
+			"spec.diskDefaults.size and spec.disks[].sizeGiB, a clone's, a migration's): a whole number of bytes from 1Gi to 64Pi "+
 			"such as 500Gi (use binary units: 500G is about 465.7Gi), or empty (the default) for no ceiling beyond the "+
 			"CRD's bounds. A Provider's "+infrav1beta1.ProviderMaxDiskSizeAnnotation+" annotation can only lower it. "+
 			"Disks already larger are kept and never shrunk; only new disks and growth beyond it are refused.")

@@ -162,7 +162,7 @@ helm upgrade virtrigaud virtrigaud/virtrigaud \
 | `manager.tmpSizeLimit` | `sizeLimit` of the manager pod's `/tmp` emptyDir (empty = none) | `128Mi` |
 | `manager.providerTmpSizeLimitMax` | Ceiling on every provider pod's `/tmp` `sizeLimit` (`--provider-tmp-size-limit-max`; a quantity, empty = no ceiling). A `Provider` annotation above it, or `none`, is clamped to it with a `TmpSizeLimitClamped` Warning event; the defaults are capped at it too | `""` |
 | `manager.providerTmpSizeLimit` | `sizeLimit` of the `/tmp` emptyDir of every provider pod run for a `Provider` CR (`--provider-tmp-size-limit`; a quantity or `none`). Empty keeps the per-type defaults: vSphere `512Gi`, others `1Gi` | `""` |
-| `manager.maxDiskSize` | Administrator's ceiling on every disk VirtRigaud creates or grows (`--max-disk-size`; a quantity of at least `1Gi`, use binary units such as `500Gi`; empty = no ceiling beyond the CRD's 64Ti per disk). See [Disk-size limit](#disk-size-limit) | `""` |
+| `manager.maxDiskSize` | Administrator's ceiling on every disk VirtRigaud creates or grows (`--max-disk-size`; a whole number of bytes from `1Gi` to `64Pi`, use binary units such as `500Gi`; empty = no ceiling beyond the CRD's 64Ti per disk). See [Disk-size limit](#disk-size-limit) | `""` |
 
 #### `/tmp` size limits
 

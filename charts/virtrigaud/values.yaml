@@ -119,8 +119,8 @@ manager:
   providerTmpSizeLimitMax: ""
 
   # Administrator's ceiling on the size of every disk VirtRigaud creates or
-  # grows (the manager's --max-disk-size): a quantity of at least 1Gi such as
-  # 500Gi or 2Ti, or empty (the default) for no ceiling beyond the CRD bound of
+  # grows (the manager's --max-disk-size): a whole number of bytes from 1Gi to
+  # 64Pi such as 500Gi or 2Ti, or empty (the default) for no ceiling beyond the CRD bound of
   # 64Ti per disk. Use binary units (Gi, Ti): disk sizes are whole GiB, and
   # "500G" is only about 465.7Gi. With it set:
   #   - no VM is created with a disk above it (its VMClass

@@ -104,11 +104,11 @@ helm template virtrigaud "${CHART_DIR}" --namespace "${NAMESPACE}" --set manager
 check "${WORKDIR}/max-hooks.yaml" 2Ti vprovider.kb.io,vvirtualmachine-disksize.kb.io,vvmclass-disksize.kb.io
 
 echo "==> 4. invalid values (and anything below 1Gi, which the manager refuses) fail the render"
-for ok in "1Gi" "1.5Gi" "1.1G" "2T"; do
+for ok in "1Gi" "1.5Gi" "1.1G" "2T" "64Pi"; do
   helm template virtrigaud "${CHART_DIR}" --namespace "${NAMESPACE}" --set-string "manager.maxDiskSize=${ok}" > "${WORKDIR}/ok.yaml"
   check "${WORKDIR}/ok.yaml" "${ok}" -
 done
-for bad in "500" "lots" "0Gi" "100Mi" "none" "-1Gi" "1.5" "1G" "0.5Gi" "1.07G"; do
+for bad in "500" "lots" "0Gi" "100Mi" "none" "-1Gi" "1.5" "1G" "0.5Gi" "1.07G" "65Pi" "1E" "70000Ti" "1.1Gi"; do
   if helm template virtrigaud "${CHART_DIR}" --namespace "${NAMESPACE}" --set-string "manager.maxDiskSize=${bad}" \
        > /dev/null 2> "${WORKDIR}/bad.err"; then
     echo "❌ manager.maxDiskSize=${bad} rendered; an invalid disk-size limit must fail the render" >&2

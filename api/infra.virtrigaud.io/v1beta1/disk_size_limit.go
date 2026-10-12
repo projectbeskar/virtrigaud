@@ -36,12 +36,19 @@ const ProviderMaxDiskSizeAnnotation = "infra.virtrigaud.io/max-disk-size"
 // bytesPerDiskGiB is the size of one GiB, the unit of DiskSpec.SizeGiB.
 const bytesPerDiskGiB = int64(1) << 30
 
+// maxDiskSizeLimitBytes is the largest disk-size limit accepted: 64Pi, 1024
+// times the CRD's 64Ti bound per disk. A larger value is a typo, and one past
+// what an int64 holds (e.g. "1e30") would otherwise read as no limit at all.
+const maxDiskSizeLimitBytes = int64(64) << 50
+
 // ParseMaxDiskSize parses a disk-size limit (the manager's --max-disk-size or
-// a ProviderMaxDiskSizeAnnotation value): a resource quantity of at least 1Gi.
-// Disk sizes are whole GiB, so a smaller limit would refuse every disk — most
-// likely a missing unit ("500" is 500 bytes); it is refused, not applied. Use a
-// binary suffix (Gi, Ti): "500G" is 500*10^9 bytes, about 465.7Gi, so a 500 GiB
-// disk exceeds it.
+// a ProviderMaxDiskSizeAnnotation value): a resource quantity of at least 1Gi
+// and at most 64Pi, in whole bytes. Disk sizes are whole GiB, so a smaller
+// limit would refuse every disk — most likely a missing unit ("500" is 500
+// bytes); it is refused, not applied. A value above 64Pi, or one that is not a
+// whole number of bytes, is refused too: it is never clamped or rounded into
+// another limit. Use a binary suffix (Gi, Ti): "500G" is 500*10^9 bytes, about
+// 465.7Gi, so a 500 GiB disk exceeds it.
 func ParseMaxDiskSize(value string) (*resource.Quantity, error) {
 	q, err := resource.ParseQuantity(value)
 	if err != nil {
@@ -49,6 +56,14 @@ func ParseMaxDiskSize(value string) (*resource.Quantity, error) {
 	}
 	if q.Cmp(*resource.NewQuantity(bytesPerDiskGiB, resource.BinarySI)) < 0 {
 		return nil, fmt.Errorf("invalid disk-size limit %q: must be at least 1Gi (disk sizes are whole GiB; use a unit such as Gi or Ti)", value)
+	}
+	if q.Cmp(*resource.NewQuantity(maxDiskSizeLimitBytes, resource.BinarySI)) > 0 {
+		return nil, fmt.Errorf("invalid disk-size limit %q: must be at most 64Pi", value)
+	}
+	// Value rounds up to whole bytes; within the bound above it cannot
+	// overflow, so a differing value means a fraction of a byte.
+	if resource.NewQuantity(q.Value(), resource.BinarySI).Cmp(q) != 0 {
+		return nil, fmt.Errorf("invalid disk-size limit %q: must be a whole number of bytes", value)
 	}
 	return &q, nil
 }

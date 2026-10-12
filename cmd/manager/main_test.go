@@ -130,7 +130,7 @@ func TestMaxDiskSizeFlag_InvalidRefusedAtStartup(t *testing.T) {
 		main()
 		return
 	}
-	for _, bad := range []string{"lots", "500", "0", "-1Gi", "1023Mi", "none"} {
+	for _, bad := range []string{"lots", "500", "0", "-1Gi", "1023Mi", "none", "1e30", "65Pi", "1.1Gi"} {
 		t.Run(bad, func(t *testing.T) {
 			cmd := exec.Command(os.Args[0], "-test.run=^TestMaxDiskSizeFlag_InvalidRefusedAtStartup$") // #nosec G204 -- re-runs this test binary
 			// No usable kubeconfig: should the value be accepted by mistake,
