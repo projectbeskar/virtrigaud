@@ -646,9 +646,11 @@ func (p *Provider) Create(ctx context.Context, req *providerv1.CreateRequest) (*
 //  1. Look up the VM power state via its ManagedObjectReference.
 //  2. If the VM is not found (SOAP fault), treat the deletion as already complete
 //     and return success (idempotent behaviour).
-//  3. If the VM is powered on, issue a PowerOff task and wait for it to finish.
+//  3. If the object is a template or an image artifact (refuseImageArtifact),
+//     refuse with FailedPrecondition/VM_IS_IMAGE_ARTIFACT, changing nothing.
+//  4. If the VM is powered on, issue a PowerOff task and wait for it to finish.
 //     A power-off failure is logged but does not abort the deletion.
-//  4. Issue a Destroy task (equivalent to "Delete from Disk" in the vSphere UI)
+//  5. Issue a Destroy task (equivalent to "Delete from Disk" in the vSphere UI)
 //     and wait for it to complete.
 //
 // The operation blocks until the Destroy task finishes.
@@ -687,6 +689,12 @@ func (p *Provider) Delete(ctx context.Context, req *providerv1.DeleteRequest) (*
 			}
 		}
 		return nil, fmt.Errorf("failed to check VM power state: %w", err)
+	}
+
+	// Never destroy a template or an image artifact (vm_artifact_guard.go):
+	// refused before anything is changed, the VM is not even powered off.
+	if err := p.refuseImageArtifact(ctx, vm, "delete"); err != nil {
+		return nil, err
 	}
 
 	p.logger.Info("VM found, proceeding with deletion", "vm_id", req.Id, "power_state", powerState)
@@ -764,6 +772,12 @@ func (p *Provider) Power(ctx context.Context, req *providerv1.PowerRequest) (*pr
 	}
 
 	vm := object.NewVirtualMachine(p.client.Client, vmRef)
+
+	// Never power a template or an image artifact on or off
+	// (vm_artifact_guard.go).
+	if err := p.refuseImageArtifact(ctx, vm, "power"); err != nil {
+		return nil, err
+	}
 
 	// Perform the power operation
 	var task *object.Task
@@ -982,9 +996,15 @@ func (p *Provider) Reconfigure(ctx context.Context, req *providerv1.ReconfigureR
 		"config.hardware.memoryMB",
 		"config.hardware.device",
 		"runtime.powerState",
+		propConfigTemplate,
+		propConfigExtraConfig,
 	}, &vmMo)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get VM properties: %w", err)
+	}
+	// Never resize a template or an image artifact (vm_artifact_guard.go).
+	if err := p.checkNotImageArtifact(req.Id, "reconfigure", vmMo.Config); err != nil {
+		return nil, err
 	}
 
 	// Parse the desired configuration. DesiredJson is a marshaled
@@ -1129,6 +1149,11 @@ func (p *Provider) HardwareUpgrade(ctx context.Context, req *providerv1.Hardware
 
 	if powerState != types.VirtualMachinePowerStatePoweredOff {
 		return nil, fmt.Errorf("VM must be powered off for hardware upgrade, current state: %s", powerState)
+	}
+
+	// Never upgrade a template or an image artifact (vm_artifact_guard.go).
+	if err := p.refuseImageArtifact(ctx, vm, "hardware upgrade"); err != nil {
+		return nil, err
 	}
 
 	// Get current VM configuration to check current hardware version
@@ -1662,6 +1687,11 @@ func (p *Provider) SnapshotCreate(ctx context.Context, req *providerv1.SnapshotC
 
 	vm := object.NewVirtualMachine(p.client.Client, vmRef)
 
+	// Never snapshot a template or an image artifact (vm_artifact_guard.go).
+	if err := p.refuseImageArtifact(ctx, vm, "snapshot create"); err != nil {
+		return nil, err
+	}
+
 	// Generate snapshot name if not provided
 	snapshotName := req.NameHint
 	if snapshotName == "" {
@@ -1761,6 +1791,12 @@ func (p *Provider) SnapshotDelete(ctx context.Context, req *providerv1.SnapshotD
 		return nil, fmt.Errorf("snapshot not found: %s", req.SnapshotId)
 	}
 
+	// Never consolidate a template's or an image artifact's disks
+	// (vm_artifact_guard.go).
+	if err := p.refuseImageArtifact(ctx, vm, "snapshot delete"); err != nil {
+		return nil, err
+	}
+
 	// Remove the snapshot using RemoveSnapshot_Task method
 	// removeChildren: false = consolidate child snapshots into parent
 	// consolidate: true = merge snapshot disks after removal
@@ -1828,6 +1864,11 @@ func (p *Provider) SnapshotRevert(ctx context.Context, req *providerv1.SnapshotR
 	snapshot := p.findSnapshotByID(vmObj.Snapshot.RootSnapshotList, req.SnapshotId)
 	if snapshot == nil {
 		return nil, fmt.Errorf("snapshot not found: %s", req.SnapshotId)
+	}
+
+	// Never revert a template or an image artifact (vm_artifact_guard.go).
+	if err := p.refuseImageArtifact(ctx, vm, "snapshot revert"); err != nil {
+		return nil, err
 	}
 
 	// Store original power state for restoration if needed
@@ -1963,13 +2004,17 @@ func (p *Provider) Clone(ctx context.Context, req *providerv1.CloneRequest) (*pr
 	// clone would inherit from the source's ExtraConfig, so the clone never
 	// claims the SOURCE VirtualMachine's owner, and any prepared-image stamp
 	// (ADR-0009 D3): a clone is never an image artifact.
+	clearImage, err := p.imageStampClearing(ctx, sourceVM)
+	if err != nil {
+		return nil, err
+	}
 	cloneSpec := &types.VirtualMachineCloneSpec{
 		Location: types.VirtualMachineRelocateSpec{
 			Datastore: types.NewReference(datastore.Reference()),
 			Pool:      types.NewReference(resourcePool.Reference()),
 		},
 		Config: &types.VirtualMachineConfigSpec{
-			ExtraConfig: append(ownerExtraConfig(contracts.ObjectIdentity{}), clearedImageStampExtraConfig()...),
+			ExtraConfig: append(ownerExtraConfig(contracts.ObjectIdentity{}), clearImage...),
 		},
 		PowerOn:  false, // Don't power on automatically
 		Template: false,
@@ -1995,6 +2040,11 @@ func (p *Provider) Clone(ctx context.Context, req *providerv1.CloneRequest) (*pr
 			snapshotRef = &latestSnapshot.Snapshot
 			p.logger.Info("Using existing snapshot for linked clone", "snapshot", latestSnapshot.Name)
 		} else {
+			// Creating the snapshot changes the source: never a template's or
+			// an image artifact's (vm_artifact_guard.go).
+			if err := p.refuseImageArtifact(ctx, sourceVM, "linked clone snapshot"); err != nil {
+				return nil, err
+			}
 			// Create a snapshot for the linked clone
 			p.logger.Info("Creating snapshot for linked clone", "source_vm_id", req.SourceVmId)
 			snapshotName := fmt.Sprintf("clone-base-%d", time.Now().Unix())
@@ -2534,7 +2584,11 @@ func (p *Provider) createVirtualMachine(ctx context.Context, spec *VMSpec, datac
 	// later same-named create can prove — or disprove — that it owns this VM. A
 	// VM is never a prepared-image artifact: the image stamp a prepared template
 	// carries is cleared too (ADR-0009 D3).
-	extraConfig := append(ownerExtraConfig(spec.Owner), clearedImageStampExtraConfig()...)
+	clearImage, err := p.imageStampClearing(ctx, template) // nil template (imported disk): the fixed keys
+	if err != nil {
+		return "", err
+	}
+	extraConfig := append(ownerExtraConfig(spec.Owner), clearImage...)
 
 	// Configure performance and security features.
 	// Enable nested virtualization if requested
@@ -4060,16 +4114,19 @@ func (p *Provider) ImportDisk(ctx context.Context, req *providerv1.ImportDiskReq
 	return response, nil
 }
 
-// ListVMs implements the ProviderServer interface. It enumerates every virtual machine
-// in the default datacenter using the govmomi Finder and returns summary information
-// for each one.
+// ListVMs implements the ProviderServer interface. It enumerates the ordinary virtual
+// machines in the default datacenter using the govmomi Finder and returns summary
+// information for each one. It is the VMAdoption discovery feed, so it leaves out
+// templates, objects carrying a VirtRigaud prepared-image stamp, VMs whose owner stamp
+// cannot be read and VMs whose configuration cannot be read (list_adoptable.go).
 //
 // For each VM the following information is collected via the property collector:
 //   - Name, CPU count, memory size (MB), power state.
 //   - IP addresses (filtered by isValidIPAddress; duplicates removed).
 //   - Disk devices: ID (device key), datastore path, size in GiB, format ("vmdk").
 //   - Network adapters: MAC address and portgroup/network name.
-//   - ProviderRaw map: vm_id (same as Name), power_state, guest_os.
+//   - ProviderRaw map: vm_id (same as Name), power_state, guest_os, and owner_uid
+//     (contracts.VMInfoOwnerUIDKey) when the VM carries a VirtRigaud owner stamp.
 //
 // VMs for which property retrieval fails are skipped with a warning log rather than
 // aborting the entire list operation.
@@ -4105,6 +4162,12 @@ func (p *Provider) ListVMs(ctx context.Context, req *providerv1.ListVMsRequest) 
 	pc := property.DefaultCollector(p.client.Client)
 
 	for _, vm := range vms {
+		// Stop as soon as the call is cancelled or past its deadline: every
+		// further read would fail, each with its own warning, and a partial
+		// listing must never be answered as the whole datacenter.
+		if ctx.Err() != nil {
+			return nil, listCancelledError(ctx)
+		}
 		// Get VM properties
 		var vmMo mo.VirtualMachine
 		err := pc.RetrieveOne(ctx, vm.Reference(), []string{
@@ -4115,10 +4178,24 @@ func (p *Provider) ListVMs(ctx context.Context, req *providerv1.ListVMsRequest) 
 			"guest.ipAddress",
 			"guest.net",
 			"config.hardware.device",
+			propConfigTemplate,
+			propConfigExtraConfig,
 		}, &vmMo)
 
 		if err != nil {
+			if ctx.Err() != nil {
+				// Cancelled during this read: not this VM's failure.
+				return nil, listCancelledError(ctx)
+			}
 			p.logger.Warn("Failed to retrieve VM properties, skipping", "vm", vm.Name(), "error", err)
+			continue
+		}
+
+		// Only ordinary VMs are listed: never a template, a prepared image or
+		// an object whose ownership cannot be read (list_adoptable.go).
+		if reason := listExclusionFor(vmMo.Config); reason != listedVM {
+			p.logger.Debug("Not listing a vSphere object that is not an adoptable VM",
+				"vm_id", vm.Reference().Value, "reason", string(reason))
 			continue
 		}
 
@@ -4199,6 +4276,12 @@ func (p *Provider) ListVMs(ctx context.Context, req *providerv1.ListVMsRequest) 
 		providerRaw["power_state"] = powerState
 		if vmMo.Summary.Config.GuestFullName != "" {
 			providerRaw["guest_os"] = vmMo.Summary.Config.GuestFullName
+		}
+		// Report the owner stamp's UID (read without error above), so adoption
+		// skips a VM that a live VirtualMachine owns, whatever its namespace or
+		// Provider object.
+		if owner, err := ownerFromExtraConfig(vmMo.Config.ExtraConfig); err == nil && owner.UID != "" {
+			providerRaw[contracts.VMInfoOwnerUIDKey] = owner.UID
 		}
 
 		vmInfo := &providerv1.VMInfo{

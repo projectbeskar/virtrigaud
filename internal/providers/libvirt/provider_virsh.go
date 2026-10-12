@@ -3176,23 +3176,19 @@ func (p *Provider) listVMsOn(ctx context.Context, vp *VirshProvider, opts listOp
 		if dx.UUID != "" {
 			providerRaw["uuid"] = dx.UUID
 		}
-		// Report the VirtRigaud owner stamp(s) read from the same document, so
-		// adoption can skip a domain that a live VirtualMachine owns (no extra
-		// virsh call; the list shadow comparison does not look at this key).
-		if uids := domainOwnerUIDs(raw.Stdout); uids != "" {
-			providerRaw[contracts.VMInfoOwnerUIDKey] = uids
-		}
+		// Report the VirtRigaud owner stamp(s) and, when they cannot be relied
+		// on, the stamp state, so adoption skips a domain that a live
+		// VirtualMachine owns or whose owner cannot be told. A single-host
+		// listing reads them from the same document (no extra virsh call; the
+		// list shadow comparison does not look at these keys); a clustered one
+		// also reads the persistent definition of an active domain.
 		var owner contracts.ObjectIdentity
 		if opts.stampReport {
 			sr := clusteredStampReport(ctx, vp, domain, raw.Stdout, dx.UUID, opts.onReadFailure)
-			delete(providerRaw, contracts.VMInfoOwnerUIDKey)
-			if sr.uids != "" {
-				providerRaw[contracts.VMInfoOwnerUIDKey] = sr.uids
-			}
-			if sr.state != "" {
-				providerRaw[contracts.VMInfoOwnerStampStateKey] = sr.state
-			}
+			setStampReport(providerRaw, sr)
 			owner = sr.owner
+		} else {
+			setStampReport(providerRaw, domainStampReport(raw.Stdout))
 		}
 
 		vmInfos = append(vmInfos, contracts.VMInfo{
@@ -3271,6 +3267,45 @@ func clusteredStampReport(ctx context.Context, vp *VirshProvider, domain VirshDo
 		}
 		stamps = append(stamps, persisted...)
 	}
+	return classifyStamps(stamps)
+}
+
+// domainStampReport is what a single-host listing reports about the owner
+// stamps of one domain document (the definition it already read): a document
+// whose stamps cannot be read is OwnerStampUnreadable, and otherwise the
+// stamps are classified as a clustered listing classifies them
+// (classifyStamps). A single-host listing does not report the owner it
+// records (VMInfo.OwnerNamespace/OwnerName are set by clustered providers
+// only).
+func domainStampReport(domainXML string) stampReport {
+	stamps, err := domainOwners(domainXML)
+	if err != nil {
+		return stampReport{state: contracts.OwnerStampUnreadable}
+	}
+	return classifyStamps(stamps)
+}
+
+// setStampReport records sr in a listed VM's providerRaw: the stamped UIDs
+// under contracts.VMInfoOwnerUIDKey and the stamp state under
+// contracts.VMInfoOwnerStampStateKey, each only when non-empty. Any previous
+// value of either key is removed.
+func setStampReport(providerRaw map[string]string, sr stampReport) {
+	delete(providerRaw, contracts.VMInfoOwnerUIDKey)
+	delete(providerRaw, contracts.VMInfoOwnerStampStateKey)
+	if sr.uids != "" {
+		providerRaw[contracts.VMInfoOwnerUIDKey] = sr.uids
+	}
+	if sr.state != "" {
+		providerRaw[contracts.VMInfoOwnerStampStateKey] = sr.state
+	}
+}
+
+// classifyStamps classifies the owner stamps read from a domain's
+// definitions: a stamp that records no UID makes the report
+// OwnerStampUnreadable; more than one distinct owner, OwnerStampMultiple;
+// exactly one, that owner (stampReport.owner). No stamp is an empty report.
+// The report's uids are the distinct non-empty UIDs, in order.
+func classifyStamps(stamps []contracts.ObjectIdentity) stampReport {
 	distinct := map[contracts.ObjectIdentity]bool{}
 	var unique []contracts.ObjectIdentity
 	for _, s := range stamps {

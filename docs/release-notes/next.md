@@ -112,6 +112,36 @@ providers), and rollback caveats in
   re-annotating one in a loop drove one provider call per edit (`Clone`, a
   multi-host scan, or `SnapshotDelete`) and bypassed the wait's backoff. The
   `VMSnapshot` force-delete annotation still releases a held delete at once.
+- vSphere VM adoption (`virtrigaud.io/adopt-vms`) no longer takes templates.
+  It could turn a prepared image (ADR-0009) or any other template into a
+  tenant's `VirtualMachine`, whose delete or resize then destroyed or changed
+  the shared image for every consumer. The vSphere `ListVMs` now leaves out
+  templates, objects with a `virtrigaud.image.*` key and VMs whose owner stamp
+  cannot be read. It also reports each VM's owner UID, so adoption skips a VM
+  that a live `VirtualMachine` owns through another Provider object. A legacy
+  OVA import is marked as an image from the moment it exists. The vSphere
+  `Delete`, `Power`, `Reconfigure`, `HardwareUpgrade` and snapshot calls now
+  refuse a template or image artifact (`VM_IS_IMAGE_ARTIFACT`) before changing
+  anything, so a `VirtualMachine` adopted from a template before the upgrade
+  can no longer destroy it; nor does a linked clone snapshot one. `Create` and
+  `Clone` clear every `virtrigaud.image.*` key the source carries, so a VM
+  made from a template is never refused as one. Check for such `VirtualMachine`s, and for adopted
+  duplicates of a VM managed under another Provider object, before upgrading
+  (→ [Upgrade guide](docs/upgrading.md),
+  [`docs/vm-ownership.md`](docs/vm-ownership.md#adoption-what-listvms-offers)).
+- **Behaviour change:** adoption no longer adopts a VM whose owner stamp names
+  no `VirtualMachine` in this cluster. That UID may belong to a live
+  `VirtualMachine` of another VirtRigaud installation (or of this cluster
+  before a restore) managing the same vCenter or host. Such VMs are counted in
+  the Provider's adoption status. Re-adopting a VM detached with
+  `orphan-on-delete` (it keeps the deleted `VirtualMachine`'s stamp) now needs
+  `virtrigaud.io/adopt-stamped-vms: "true"` on the single-host Provider
+  (→ [`docs/vm-ownership.md`](docs/vm-ownership.md#owner-stamps-are-scoped-to-one-cluster)).
+- Single-host libvirt adoption no longer takes a domain whose owner stamp
+  cannot be read or names two owners: the single-host `ListVMs` reports
+  `owner_stamp_state` as the clustered one does. Adoption also skips any VM a
+  provider marks with `provider_raw["artifact"]`, a backstop for third-party
+  providers that list templates.
 - vSphere and libvirt `Create` no longer silently bind to (and libvirt/vSphere
   `Clone` no longer silently clones) a pre-existing VM/domain/template they
   don't own — both now stamp and check ownership, and fail closed

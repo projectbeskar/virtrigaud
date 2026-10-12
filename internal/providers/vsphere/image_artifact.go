@@ -17,6 +17,7 @@ limitations under the License.
 package vsphere
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"slices"
@@ -24,6 +25,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/vmware/govmomi/object"
+	"github.com/vmware/govmomi/vim25/mo"
 	"github.com/vmware/govmomi/vim25/types"
 
 	"github.com/projectbeskar/virtrigaud/internal/imageartifact"
@@ -114,17 +117,78 @@ func imageStampExtraConfig(s imageartifact.Stamp) []types.BaseOptionValue {
 	return out
 }
 
-// clearedImageStampExtraConfig returns every image-stamp key with an empty
-// value. vSphere removes an ExtraConfig key set to "", so Create and Clone add
-// these to the new VM's config: a clone of a prepared template (which copies
-// the template's ExtraConfig) never carries the template's image stamp
-// (ADR-0009 D3). The same mechanism clears the owner stamp (ownerExtraConfig).
-func clearedImageStampExtraConfig() []types.BaseOptionValue {
+// isImageStampKey reports whether key lies in the prepared-image stamp
+// namespace (virtrigaud.image.*), compared case-insensitively as VMX keys are.
+// It is the ONE predicate for both detecting an image artifact
+// (carriesImageStampKey) and clearing a stamp on a new VM
+// (clearedImageStampExtraConfig), so every key that makes an object an
+// artifact is a key a clone sheds: a key VirtRigaud does not write (a newer
+// release's, rolled back; an admin tool's) included.
+func isImageStampKey(key string) bool {
+	return strings.HasPrefix(strings.ToLower(key), imageStampKeyPrefix)
+}
+
+// clearedImageStampExtraConfig returns, with an empty value, every
+// image-stamp key the source's ExtraConfig (source) carries — in the source's
+// own spelling — and every key of imageStampKeys it does not, each key once
+// (case-insensitively). vSphere removes an ExtraConfig key set to "", so
+// Create and Clone add these to the new VM's config: a clone of a prepared
+// template (which copies the template's ExtraConfig) never carries any
+// image-stamp key (ADR-0009 D3), so it is never mistaken for an image
+// artifact. A nil source (no source VM, e.g. an imported disk) clears the
+// fixed keys. The same mechanism clears the owner stamp (ownerExtraConfig).
+func clearedImageStampExtraConfig(source []types.BaseOptionValue) []types.BaseOptionValue {
 	out := make([]types.BaseOptionValue, 0, len(imageStampKeys))
+	seen := make(map[string]bool, len(imageStampKeys))
+	add := func(key string) {
+		if lower := strings.ToLower(key); !seen[lower] {
+			seen[lower] = true
+			out = append(out, &types.OptionValue{Key: key, Value: ""})
+		}
+	}
+	for _, bov := range source {
+		if bov == nil {
+			continue
+		}
+		if ov := bov.GetOptionValue(); ov != nil && isImageStampKey(ov.Key) {
+			add(ov.Key)
+		}
+	}
 	for _, key := range imageStampKeys {
-		out = append(out, &types.OptionValue{Key: key, Value: ""})
+		add(key)
 	}
 	return out
+}
+
+// imageStampClearing reads the ExtraConfig of src, the VM or template a new VM
+// is cloned from, and returns clearedImageStampExtraConfig for it. A nil src
+// (no source VM) clears the fixed keys. A failed read fails the operation
+// before anything is created: a VM that inherited an unknown image-stamp key
+// would be refused every per-VM operation (vm_artifact_guard.go).
+func (p *Provider) imageStampClearing(ctx context.Context, src *object.VirtualMachine) ([]types.BaseOptionValue, error) {
+	if src == nil {
+		return clearedImageStampExtraConfig(nil), nil
+	}
+	var vm mo.VirtualMachine
+	if err := src.Properties(ctx, src.Reference(), []string{propConfigExtraConfig}, &vm); err != nil {
+		return nil, fmt.Errorf("read the source's configuration to clear its image stamp: %w", err)
+	}
+	if vm.Config == nil {
+		return nil, fmt.Errorf("read the source's configuration to clear its image stamp: no configuration")
+	}
+	return clearedImageStampExtraConfig(vm.Config.ExtraConfig), nil
+}
+
+// legacyImportMarker is the one image-stamp key a legacy (identity-less) OVA
+// import carries: imageStampKeyPreparedAt, set to when the import started
+// (RFC 3339, UTC). It makes the import an image artifact for ListVMs and the
+// per-VM guards (carriesImageStampKey) from the moment it exists, including
+// between ImportVApp and MarkAsTemplate, when it is a plain VM. It is not a
+// valid stamp on its own (imageStampFromExtraConfig rejects it: no version),
+// and clearedImageStampExtraConfig clears it on every VM cloned from the
+// template.
+func legacyImportMarker(now time.Time) types.BaseOptionValue {
+	return &types.OptionValue{Key: imageStampKeyPreparedAt, Value: now.UTC().Format(time.RFC3339)}
 }
 
 // imageStampFromExtraConfig reads the image stamp from a VM's ExtraConfig.

@@ -234,6 +234,31 @@ func IsVMDiskInUse(err error) bool {
 	return IsConflict(err) && errors.Is(err, ErrVMDiskInUse)
 }
 
+// VMIsImageArtifactReason is the google.rpc.ErrorInfo reason (in
+// ErrorInfoDomain) a provider attaches to the codes.FailedPrecondition status
+// of a per-VM operation (Delete, Power, Reconfigure, HardwareUpgrade, snapshot
+// create/delete/revert) it refused because the object addressed is not a VM
+// but shared image state: a hypervisor template, or an object carrying a
+// VirtRigaud prepared-image stamp (an image, or an image import in flight).
+// Performing it would destroy or change the image for every VM cloned from
+// it. Nothing was changed. The refusal is not retryable as such (it holds
+// until an operator detaches the VirtualMachine, e.g. with orphan-on-delete);
+// the manager maps it to ErrorTypeConflict, and FailedPrecondition keeps it
+// out of the per-Provider circuit breaker.
+const VMIsImageArtifactReason = "VM_IS_IMAGE_ARTIFACT"
+
+// ErrVMIsImageArtifact marks (in an error's chain) a provider's refusal
+// carrying VMIsImageArtifactReason. The transport client wraps it into the
+// Conflict it maps that refusal to.
+var ErrVMIsImageArtifact = errors.New("the object is a template or an image artifact, not a VM")
+
+// IsVMIsImageArtifact reports whether err is a provider's
+// VMIsImageArtifactReason refusal (a Conflict that says so), as opposed to any
+// other Conflict.
+func IsVMIsImageArtifact(err error) bool {
+	return IsConflict(err) && errors.Is(err, ErrVMIsImageArtifact)
+}
+
 // ErrVMDiskCheckFailed marks (in an error's chain) a provider's answer
 // carrying VMDiskCheckFailedReason: the operation was not performed because
 // the provider could not verify that no other VM uses this VM's disk (on a

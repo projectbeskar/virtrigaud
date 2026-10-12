@@ -1393,6 +1393,25 @@ func isVMOperationFailedStatus(st *status.Status) bool {
 	return false
 }
 
+// isVMIsImageArtifactStatus reports whether a gRPC status is a provider's
+// refusal of a per-VM operation because the object addressed is a template or
+// an image artifact, not a VM: codes.FailedPrecondition carrying a
+// google.rpc.ErrorInfo with contracts.VMIsImageArtifactReason in VirtRigaud's
+// domain. The provider answered and changed nothing, so it is healthy.
+func isVMIsImageArtifactStatus(st *status.Status) bool {
+	if st == nil || st.Code() != codes.FailedPrecondition {
+		return false
+	}
+	for _, d := range st.Details() {
+		if info, ok := d.(*errdetails.ErrorInfo); ok &&
+			info.GetReason() == contracts.VMIsImageArtifactReason &&
+			info.GetDomain() == contracts.ErrorInfoDomain {
+			return true
+		}
+	}
+	return false
+}
+
 // isVMDiskInUseStatus reports whether a gRPC status is a provider's refusal of
 // a per-VM operation because another VM on the host depends on this VM's disk
 // (e.g. its linked clone): codes.FailedPrecondition carrying a
@@ -1660,6 +1679,13 @@ func (c *Client) mapGRPCError(operation string, err error) error {
 		if isVMDiskInUseStatus(st) {
 			return contracts.NewConflictError(fmt.Sprintf("%s: %s", operation, st.Message()),
 				fmt.Errorf("%w: %w", contracts.ErrVMDiskInUse, err))
+		}
+		// The provider refused because the object is a template or an image
+		// artifact, not a VM: typed Conflict (non-retryable, nothing changed),
+		// marked so a controller can tell it from any other Conflict.
+		if isVMIsImageArtifactStatus(st) {
+			return contracts.NewConflictError(fmt.Sprintf("%s: %s", operation, st.Message()),
+				fmt.Errorf("%w: %w", contracts.ErrVMIsImageArtifact, err))
 		}
 		// A clone refused because its source VM is not powered off (libvirt):
 		// retryable and marked, so the VMClone controller keeps the clone

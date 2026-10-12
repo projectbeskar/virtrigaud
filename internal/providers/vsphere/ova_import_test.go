@@ -20,6 +20,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -175,7 +176,74 @@ func TestImagePrepare_OVAImport_StripsReservedExtraConfig(t *testing.T) {
 	require.True(t, found)
 	extra := extraConfigOf(t, p, vm.Reference())
 	for key := range extra {
+		if key == imageStampKeyPreparedAt {
+			continue // the provider's own legacy-import marker (TestImagePrepare_LegacyOVAImport_MarkedInFlight)
+		}
 		assert.False(t, isReservedExtraConfigKey(key), "reserved key %q must not be imported", key)
 	}
 	assert.Equal(t, "yes", extra["guestinfo.keep"], "unreserved OVF ExtraConfig is still imported")
+}
+
+// importVAppRecorder wraps the vim25 round-tripper and records the
+// ExtraConfig of every ImportVApp request's VM import spec: what the entity
+// carries from the moment it exists.
+type importVAppRecorder struct {
+	soap.RoundTripper
+	extraConfig [][]types.BaseOptionValue
+}
+
+func (r *importVAppRecorder) RoundTrip(ctx context.Context, req, res soap.HasFault) error {
+	if body, ok := req.(*methods.ImportVAppBody); ok && body.Req != nil {
+		if spec, ok := body.Req.Spec.(*types.VirtualMachineImportSpec); ok {
+			r.extraConfig = append(r.extraConfig, spec.ConfigSpec.ExtraConfig)
+		}
+	}
+	return r.RoundTripper.RoundTrip(ctx, req, res)
+}
+
+// TestImagePrepare_LegacyOVAImport_MarkedInFlight: a legacy (identity-less)
+// OVA import is a plain VM between ImportVApp and MarkAsTemplate. It must
+// carry an image-stamp key from the moment it exists, so ListVMs never offers
+// it for adoption and the per-VM guards refuse it. The marker is not a valid
+// stamp, and a VM created from the template does not inherit it.
+func TestImagePrepare_LegacyOVAImport_MarkedInFlight(t *testing.T) {
+	p, cleanup := newImageTestProvider(t)
+	defer cleanup()
+	ctx := context.Background()
+	rec := &importVAppRecorder{RoundTripper: p.client.RoundTripper}
+	p.client.RoundTripper = rec
+
+	ovaURL, _, closeSrv := newOVATarServer(t)
+	defer closeSrv()
+	const targetName = "legacy-image"
+	_, err := p.ImagePrepare(ctx, &providerv1.ImagePrepareRequest{
+		ImageJson:  `{"source":{"vsphere":{"ovaURL":"` + ovaURL + `"}}}`,
+		TargetName: targetName,
+	})
+	require.NoError(t, err)
+
+	require.Len(t, rec.extraConfig, 1, "one import")
+	assert.True(t, carriesImageStampKey(rec.extraConfig[0]), "the import spec carries an image-stamp key")
+	assert.Equal(t, excludedImageStamp, listExclusionFor(&types.VirtualMachineConfigInfo{ExtraConfig: rec.extraConfig[0]}),
+		"an import in flight (not yet a template) is never listed for adoption")
+	requireArtifactStatus(t, imageArtifactRefusal(&types.VirtualMachineConfigInfo{ExtraConfig: rec.extraConfig[0]}))
+
+	vm, found, err := p.lookupTemplate(ctx, targetName)
+	require.NoError(t, err)
+	require.True(t, found)
+	var tmpl mo.VirtualMachine
+	require.NoError(t, property.DefaultCollector(p.client.Client).RetrieveOne(ctx, vm.Reference(),
+		[]string{propConfigExtraConfig}, &tmpl))
+	_, perr := time.Parse(time.RFC3339, extraConfigOf(t, p, vm.Reference())[imageStampKeyPreparedAt])
+	assert.NoError(t, perr, "the marker records when the import started")
+	stamp, serr := imageStampFromExtraConfig(tmpl.Config.ExtraConfig)
+	assert.Nil(t, stamp)
+	assert.Error(t, serr, "the marker alone is never a valid image stamp")
+
+	created, err := p.Create(ctx, &providerv1.CreateRequest{Name: "from-legacy",
+		ImageJson: `{"TemplateName":"` + targetName + `"}`, Owner: wireOwner(ownerTeamA)})
+	require.NoError(t, err)
+	for key := range extraConfigOf(t, p, vmRef(created.Id)) {
+		assert.False(t, strings.HasPrefix(key, imageStampKeyPrefix), "a VM created from the template inherits no image key (%q)", key)
+	}
 }

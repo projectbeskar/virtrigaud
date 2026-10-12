@@ -228,9 +228,26 @@ stamped with the UID of a `VirtualMachine` that still exists**, in any namespace
 and through any Provider object. This covers a domain whose create is still in
 flight (its `status.id` is not written yet, and the operator can't derive a
 namespaced name) and a domain managed through another Provider object that
-points at the same host. A domain stamped only by a `VirtualMachine` that was
-deleted (its domain left behind) is adoptable; the adopted `VirtualMachine` is a
-new object with a new UID.
+points at the same host.
+
+A domain stamped only with UIDs of no `VirtualMachine` in this cluster is **not
+adopted** unless the Provider also carries
+`virtrigaud.io/adopt-stamped-vms: "true"` (single-host only). An owner stamp
+only means something in the cluster that wrote it: the UID may belong to a
+deleted `VirtualMachine` (a stale stamp), or to a live `VirtualMachine` of
+another VirtRigaud installation, or of this cluster before a restore, that
+manages the same host. Each such domain is logged and counted in the
+Provider's adoption status message. With the opt-in it is adopted; the adopted
+`VirtualMachine` is a new object with a new UID.
+
+`ListVMs` also reports, under `provider_raw["owner_stamp_state"]`, a domain
+whose owner stamp cannot be relied on: `unreadable` (a stamp that cannot be
+parsed, repeats an attribute, or records no UID) or `multiple` (more than one
+owner, which only a hand-edited definition has). Adoption never adopts such a
+domain, on a single-host or a clustered provider. The single-host provider
+reports it from the definition it lists; before this release it reported only
+the readable UIDs, and adoption could take a domain whose stamp it could not
+read.
 
 On a **single-host** provider the adopted domain keeps whatever stamp it had:
 a single-host provider does not check owners on per-VM calls. On a

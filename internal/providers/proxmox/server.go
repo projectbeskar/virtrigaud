@@ -1907,7 +1907,10 @@ func (p *Provider) ListVMs(ctx context.Context, req *providerv1.ListVMsRequest) 
 		}
 
 		for _, vm := range vms {
-			// Skip templates
+			// Skip templates: ListVMs is the adoption feed, and a template is
+			// shared image state, never a VM. Excluded rather than returned
+			// tagged with contracts.VMInfoArtifactKey, which a manager older
+			// than that key would not honour.
 			if vm.Template == 1 {
 				continue
 			}

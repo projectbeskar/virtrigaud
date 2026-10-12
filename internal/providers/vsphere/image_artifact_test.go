@@ -96,7 +96,7 @@ func TestImageStampFromExtraConfig_AbsentOrCleared(t *testing.T) {
 	for name, ec := range map[string][]types.BaseOptionValue{
 		"nil":            nil,
 		"no stamp keys":  {optVal("guestinfo.userdata", "x"), optVal(ownerExtraConfigKeyUID, testImageUID)},
-		"cleared stamp":  clearedImageStampExtraConfig(),
+		"cleared stamp":  clearedImageStampExtraConfig(nil),
 		"nil entries":    {nil, optVal("a", "b")},
 		"only other ns.": {optVal("virtrigaud.imagex.uid", testImageUID)},
 	} {
@@ -144,7 +144,7 @@ func TestImageStampFromExtraConfig_FailsClosed(t *testing.T) {
 }
 
 func TestClearedImageStampExtraConfig(t *testing.T) {
-	ec := clearedImageStampExtraConfig()
+	ec := clearedImageStampExtraConfig(nil)
 	assert.Equal(t, imageStampKeys, optionKeys(ec))
 	for _, bov := range ec {
 		assert.Equal(t, "", bov.GetOptionValue().Value, "vSphere removes a key set to the empty string")

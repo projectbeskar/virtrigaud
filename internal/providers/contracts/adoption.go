@@ -26,10 +26,14 @@ import "context"
 const VMInfoUUIDKey = "uuid"
 
 // VMInfoOwnerStampStateKey is the VMInfo.ProviderRaw key under which a
-// clustered provider reports that a listed VM's owner stamp cannot be relied
-// on (ADR-0007 Addendum A, slice 4): OwnerStampUnreadable or
-// OwnerStampMultiple. Absent when the VM carries no stamp or exactly one
-// readable owner. Adoption skips a VM with this key set.
+// provider that stamps the VMs it creates with their owner reports that a
+// listed VM's owner stamp cannot be relied on: OwnerStampUnreadable or
+// OwnerStampMultiple. The clustered libvirt provider reports it (ADR-0007
+// Addendum A, slice 4), reading both definitions of an active domain; the
+// single-host libvirt provider reports it too, from the definition it lists.
+// Absent when the VM carries no stamp or exactly one readable owner. Adoption,
+// single-host and clustered, skips a VM carrying this key, whatever its value
+// (even empty or one this release does not know): who owns it cannot be told.
 const VMInfoOwnerStampStateKey = "owner_stamp_state"
 
 const (
@@ -39,6 +43,34 @@ const (
 	// OwnerStampMultiple: more than one owner is recorded across the VM's
 	// definitions (only a hand-edited definition has that).
 	OwnerStampMultiple = "multiple"
+)
+
+// VMInfoArtifactKey is the VMInfo.ProviderRaw key under which a provider marks
+// a listed object that is shared image state rather than a VM: ArtifactTemplate
+// or ArtifactImage.
+//
+// ListVMs is the adoption discovery feed, and every VM it returns can become a
+// tenant-owned VirtualMachine whose delete destroys the object. A provider
+// therefore does not list templates or image artifacts at all (vSphere leaves
+// them out in listExclusionFor; Proxmox skips template == 1). A provider that
+// does list one MUST set this key on it. Adoption, single-host and clustered,
+// skips any VM carrying the key, whatever its value (including a value this
+// release does not know), and never copies it into a VirtualMachine's status.
+//
+// The provider-side exclusion is the primary control; this key is the
+// manager-side backstop for third-party and SDK providers. A VirtRigaud
+// provider keeps excluding these objects rather than returning them tagged:
+// an older manager does not know the key, and the upgrade order rolls
+// providers before (or independently of) the manager.
+const VMInfoArtifactKey = "artifact"
+
+const (
+	// ArtifactTemplate: a hypervisor template (vSphere config.template,
+	// Proxmox template == 1) that VMs are cloned from.
+	ArtifactTemplate = "template"
+	// ArtifactImage: a VirtRigaud prepared image or an image import in flight
+	// (an object carrying a prepared-image stamp), template or not.
+	ArtifactImage = "image"
 )
 
 // TransferOwnerRequest asks a clustered provider to hand one VM on one of its

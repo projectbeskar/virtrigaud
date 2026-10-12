@@ -285,6 +285,16 @@ func (p *Provider) importOVA(ctx context.Context, imp *importer.Importer, fpath 
 		// After the stripping: the only virtrigaud.image.* keys the entity can
 		// ever carry are the ones written here.
 		vmSpec.ConfigSpec.ExtraConfig = append(vmSpec.ConfigSpec.ExtraConfig, imageStampExtraConfig(*stamp)...)
+	} else if vmSpec, ok := spec.ImportSpec.(*types.VirtualMachineImportSpec); ok {
+		// A legacy (unstamped) import is a plain VM between ImportVApp and
+		// MarkAsTemplate. One image-stamp key marks it as an image artifact
+		// from the moment it exists, so ListVMs never offers it for adoption
+		// and per-VM operations refuse it (carriesImageStampKey). The key is
+		// in imageStampKeys, so Create and Clone clear it on every VM made
+		// from the template. Alone it is not a valid stamp
+		// (imageStampFromExtraConfig), and a legacy name never reaches the
+		// identity path (it has no '_').
+		vmSpec.ConfigSpec.ExtraConfig = append(vmSpec.ConfigSpec.ExtraConfig, legacyImportMarker(time.Now()))
 	}
 
 	lease, err := imp.ResourcePool.ImportVApp(ctx, spec.ImportSpec, imp.Folder, imp.Host)

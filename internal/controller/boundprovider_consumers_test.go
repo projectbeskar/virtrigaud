@@ -288,7 +288,7 @@ func TestUnmanagedProviderVMs_CountsVMsBoundThroughTheProvider(t *testing.T) {
 		Status: infrav1beta1.VirtualMachineStatus{ID: "101",
 			BoundProvider: &infrav1beta1.BoundProviderRef{Namespace: "infra", Name: "prov-a"}},
 	}
-	got := unmanagedProviderVMs(prov, []contracts.VMInfo{{ID: "101"}, {ID: "102"}}, []infrav1beta1.VirtualMachine{repointed})
+	got, _ := unmanagedProviderVMs(prov, []contracts.VMInfo{{ID: "101"}, {ID: "102"}}, []infrav1beta1.VirtualMachine{repointed})
 	require.Len(t, got, 1)
 	assert.Equal(t, "102", got[0].ID, "a VM bound through the Provider still owns its hypervisor VM (no second adoption)")
 }

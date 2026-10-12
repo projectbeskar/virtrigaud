@@ -17,9 +17,12 @@ limitations under the License.
 package controller
 
 import (
+	"context"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 
@@ -32,8 +35,9 @@ import (
 // from a VirtualMachine that has no status.id yet, and a shared host can be
 // fronted by several Provider objects; the owner stamp the provider reports
 // closes both gaps: a domain stamped with a LIVE VirtualMachine's UID is never
-// re-adopted, while an orphan (stamped by a deleted VirtualMachine) or an
-// unstamped domain is adoptable.
+// re-adopted, and an unstamped domain is adoptable. A domain stamped only with
+// UIDs of no VirtualMachine in this cluster is adoptable only with the
+// Provider's adopt-stamped-vms opt-in.
 func TestUnmanagedProviderVMs(t *testing.T) {
 	provider := &infravirtrigaudiov1beta1.Provider{ObjectMeta: metav1.ObjectMeta{Name: "libvirt", Namespace: "infra"}}
 	vm := func(ns, name, uid, providerNS, statusID string) infravirtrigaudiov1beta1.VirtualMachine {
@@ -59,20 +63,123 @@ func TestUnmanagedProviderVMs(t *testing.T) {
 		}
 		return info
 	}
+	withState := func(info contracts.VMInfo, state string) contracts.VMInfo {
+		info.ProviderRaw[contracts.VMInfoOwnerStampStateKey] = state
+		return info
+	}
+	withArtifact := func(info contracts.VMInfo, kind string) contracts.VMInfo {
+		info.ProviderRaw[contracts.VMInfoArtifactKey] = kind
+		return info
+	}
 	all := []contracts.VMInfo{
+		// Owner stamp the provider cannot rely on: never offered, even when
+		// every UID it records is stale or there is none.
+		withState(stamped("unreadable", ""), contracts.OwnerStampUnreadable),
+		withState(stamped("unreadable-stale", "uid-deleted"), contracts.OwnerStampUnreadable),
+		withState(stamped("multiple-stale", "uid-deleted,uid-gone"), contracts.OwnerStampMultiple),
+		withState(stamped("future-state", ""), "some-future-state"), // any value fails closed
+		withState(stamped("empty-state", ""), ""),                   // present, even empty: fails closed
+		// Marked by the provider as shared image state: never offered, whatever
+		// the value (even empty or unknown).
+		withArtifact(stamped("tmpl", ""), contracts.ArtifactTemplate),
+		withArtifact(stamped("img", "uid-deleted"), contracts.ArtifactImage),
+		withArtifact(stamped("artifact-empty", ""), ""),
+		withArtifact(stamped("artifact-future", ""), "future-kind"),
 		stamped("team-a.web", "uid-a"),         // managed (status.id)
 		stamped("team-b.web", "uid-b"),         // managed (live owner stamp; no status.id yet)
 		stamped("team-c.db", "uid-c"),          // managed via another Provider object (live owner stamp)
 		stamped("legacy", ""),                  // managed (legacy name fallback)
-		stamped("team-e.old", "uid-deleted"),   // orphan of a deleted VirtualMachine: adoptable
+		stamped("team-e.old", "uid-deleted"),   // no VirtualMachine here: opt-in only
 		stamped("hand-made", ""),               // never created by VirtRigaud: adoptable
 		stamped("two-stamps", "uid-x,uid-b"),   // any live UID keeps it managed
-		stamped("garbage-stamp", " , ,uid-zz"), // no live UID: adoptable
+		stamped("garbage-stamp", " , ,uid-zz"), // no live UID: opt-in only
+		stamped("blank-stamp", " , "),          // no UID at all: unstamped, adoptable
+	}
+	ids := func(infos []contracts.VMInfo) []string {
+		var out []string
+		for _, v := range infos {
+			out = append(out, v.ID)
+		}
+		return out
 	}
 
-	var got []string
-	for _, v := range unmanagedProviderVMs(provider, all, vms) {
-		got = append(got, v.ID)
-	}
-	assert.ElementsMatch(t, []string{"team-e.old", "hand-made", "garbage-stamp"}, got)
+	// Default: a stamp naming no VirtualMachine in this cluster may be a live
+	// VirtualMachine of another installation sharing the host, so it is
+	// reported, never adopted.
+	unmanaged, foreign := unmanagedProviderVMs(provider, all, vms)
+	assert.ElementsMatch(t, []string{"hand-made", "blank-stamp"}, ids(unmanaged))
+	assert.ElementsMatch(t, []string{"team-e.old", "garbage-stamp"}, ids(foreign))
+
+	// Any value other than "true" is not the opt-in.
+	provider.Annotations = map[string]string{AdoptStampedVMsAnnotation: "yes"}
+	unmanaged, foreign = unmanagedProviderVMs(provider, all, vms)
+	assert.ElementsMatch(t, []string{"hand-made", "blank-stamp"}, ids(unmanaged))
+	assert.Len(t, foreign, 2)
+
+	// Opted in: stale stamps are adoptable. Nothing else changes: live-owned,
+	// unreliable-stamp and artifact VMs are still never offered.
+	provider.Annotations = map[string]string{AdoptStampedVMsAnnotation: "true"}
+	unmanaged, foreign = unmanagedProviderVMs(provider, all, vms)
+	assert.ElementsMatch(t, []string{"team-e.old", "hand-made", "garbage-stamp", "blank-stamp"}, ids(unmanaged))
+	assert.Empty(t, foreign)
+}
+
+func TestForeignStampedSummary(t *testing.T) {
+	assert.Empty(t, foreignStampedSummary(0))
+	assert.Contains(t, foreignStampedSummary(2), "2 not adopted")
+	assert.Contains(t, foreignStampedSummary(2), AdoptStampedVMsAnnotation+"=true")
+}
+
+// TestSingleHostAdoption_StatusCarriesNoStampKeys: single-host adoption records
+// the listing's provider data in status.provider WITHOUT the owner-stamp keys,
+// as the clustered flow does. With the adopt-stamped-vms opt-in the VM's stamp
+// names a VirtualMachine that is not in this cluster (possibly another
+// installation's); copying it into the adopted VM's status would publish that
+// foreign UID and claim an owner the VM no longer has.
+func TestSingleHostAdoption_StatusCarriesNoStampKeys(t *testing.T) {
+	prov := &fakeClusteredAdopter{domains: []*fakeDomain{
+		{id: "stale", uuid: "u-stale", owner: "uid-other-cluster", power: "On", cpu: 1, memMiB: 1024},
+	}}
+	provider := readyProvider(clusterNS, "prov-c")
+	provider.Annotations = map[string]string{AdoptionAnnotation: "true", AdoptStampedVMsAnnotation: "true"}
+	r := clusteredAdoptionReconciler(t, prov, provider)
+
+	reconcileAdoption(t, r)
+	vm := adoptedVMGet(t, r, "stale")
+	assert.Equal(t, "stale", vm.Status.ID, "adopted with the opt-in")
+	assert.Equal(t, "u-stale", vm.Status.Provider[contracts.VMInfoUUIDKey], "other provider data is kept")
+	assert.NotContains(t, vm.Status.Provider, contracts.VMInfoOwnerUIDKey, "the previous owner's UID is never copied into status")
+	assert.NotContains(t, vm.Status.Provider, contracts.VMInfoOwnerStampStateKey)
+	assert.NotContains(t, vm.Status.Provider, contracts.VMInfoArtifactKey)
+}
+
+// TestSingleHostAdoption_RecentDiscoveryDoesNotList: a reconcile within
+// singleHostDiscoveryInterval of the last discovery returns before ListVMs
+// (which reads every VM of the hypervisor), and requeues for the rest of the
+// interval. A stamped VM of no VirtualMachine here is reported, not adopted.
+func TestSingleHostAdoption_RecentDiscoveryDoesNotList(t *testing.T) {
+	prov := &fakeClusteredAdopter{domains: []*fakeDomain{
+		{id: "foreign", uuid: "u-foreign", owner: "uid-other-cluster", power: "On"},
+	}}
+	provider := readyProvider(clusterNS, "prov-c")
+	provider.Annotations = map[string]string{AdoptionAnnotation: "true"}
+	r := clusteredAdoptionReconciler(t, prov, provider)
+
+	reconcileAdoption(t, r)
+	require.Equal(t, 1, prov.lists, "the first discovery lists")
+	st := adoptionStatus(t, r)
+	require.NotNil(t, st.LastDiscoveryTime)
+	assert.Contains(t, st.Message, "1 not adopted", "the foreign-stamped VM is reported")
+	var vms infravirtrigaudiov1beta1.VirtualMachineList
+	require.NoError(t, r.List(context.Background(), &vms))
+	assert.Empty(t, vms.Items, "the foreign-stamped VM is not adopted")
+
+	res := reconcileAdoption(t, r)
+	assert.Equal(t, 1, prov.lists, "a discovery within the interval does not list again")
+	assert.Positive(t, res.RequeueAfter)
+	assert.LessOrEqual(t, res.RequeueAfter, singleHostDiscoveryInterval)
+
+	r.setLastDiscovery(t, time.Now().Add(-singleHostDiscoveryInterval-time.Second))
+	reconcileAdoption(t, r)
+	assert.Equal(t, 2, prov.lists, "an older discovery lists again")
 }
