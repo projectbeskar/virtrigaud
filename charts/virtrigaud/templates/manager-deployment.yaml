@@ -53,6 +53,12 @@ spec:
         # clamped to it.
         - --provider-tmp-size-limit-max={{ . }}
         {{- end }}
+        {{- with include "virtrigaud.maxDiskSizeValue" . }}
+        # Administrator's ceiling on every disk VirtRigaud creates or grows; a
+        # Provider's infra.virtrigaud.io/max-disk-size annotation can only lower
+        # it.
+        - --max-disk-size={{ . }}
+        {{- end }}
         {{- if .Values.webhooks.enabled }}
         # Webhook serving certs are mounted at this path; the manager's certwatcher
         # loads tls.crt/tls.key from here and serves on controller-runtime's default

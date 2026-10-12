@@ -521,6 +521,10 @@ verify-networkpolicy-render: ## Render the chart's NetworkPolicies: opt-in, vali
 verify-tmp-sizelimit-render: ## Render the chart's /tmp emptyDir sizeLimits: defaults, overrides, empty values, --reuse-values from v0.3.11
 	@./hack/verify-tmp-sizelimit-render.sh
 
+.PHONY: verify-max-disk-size-render
+verify-max-disk-size-render: ## Render the chart's disk-size ceiling: the manager flag, the opt-in VM/VMClass webhooks (in sync with config/webhook), invalid values, --reuse-values from v0.3.11
+	@./hack/verify-max-disk-size-render.sh
+
 ifndef ignore-not-found
   ignore-not-found = false
 endif

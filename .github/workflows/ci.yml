@@ -588,6 +588,15 @@ jobs:
           # v0.3.11 (fetched by the previous step) still renders.
           ./hack/verify-tmp-sizelimit-render.sh
 
+      - name: Validate disk-size ceiling render
+        run: |
+          # Asserts manager.maxDiskSize becomes --max-disk-size, that the
+          # VirtualMachine/VMClass disk-size webhooks render only with it (and
+          # webhooks on), with a coherent caBundle and in sync with
+          # config/webhook/manifests.yaml, that invalid values fail the render,
+          # and that --reuse-values from v0.3.11 (fetched above) still renders.
+          ./hack/verify-max-disk-size-render.sh
+
   conformance:
     name: Conformance Tests
     runs-on: ubuntu-22.04

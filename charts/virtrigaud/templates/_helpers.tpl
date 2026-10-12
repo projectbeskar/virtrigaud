@@ -271,6 +271,27 @@ Grafana dashboard labels
 {{- end }}
 
 {{/*
+Validates manager.maxDiskSize (the manager's --max-disk-size) and returns it as
+a string: "" (unset, as in an older values file under --reuse-values) or a
+quantity with a unit of at least G (such as 500Gi or 2Ti). A missing unit
+("500" is 500 bytes), a smaller unit, zero or "none" fails the render: the
+manager would refuse to start with it. The manager also refuses a value below
+1Gi (e.g. "1G"). Takes the root context.
+*/}}
+{{- define "virtrigaud.maxDiskSizeValue" -}}
+{{- $v := "" -}}
+{{- if and .Values.manager (not (kindIs "invalid" .Values.manager.maxDiskSize)) -}}
+{{- $v = toString .Values.manager.maxDiskSize -}}
+{{- end -}}
+{{- if ne $v "" -}}
+{{- if or (not (regexMatch "^[0-9]+(\\.[0-9]+)?(Gi|Ti|Pi|Ei|G|T|P|E)$" $v)) (regexMatch "^0+(\\.0+)?[A-Za-z]*$" $v) -}}
+{{- fail (printf "manager.maxDiskSize: invalid disk-size limit %q; use a quantity of at least 1Gi such as 500Gi or 2Ti, or leave it empty for no limit" $v) -}}
+{{- end -}}
+{{- end -}}
+{{- $v -}}
+{{- end }}
+
+{{/*
 Validates a /tmp sizeLimit setting and returns it as a string: "" (unset, as in
 an older values file under --reuse-values), "none", or a positive resource
 quantity such as 20Gi. Anything else fails the render, so a typo never reaches

@@ -118,6 +118,26 @@ manager:
   # not trusted to size node storage.
   providerTmpSizeLimitMax: ""
 
+  # Administrator's ceiling on the size of every disk VirtRigaud creates or
+  # grows (the manager's --max-disk-size): a quantity of at least 1Gi such as
+  # 500Gi or 2Ti, or empty (the default) for no ceiling beyond the CRD bound of
+  # 64Ti per disk. Use binary units (Gi, Ti): disk sizes are whole GiB, and
+  # "500G" is only about 465.7Gi. With it set:
+  #   - no VM is created with a disk above it (its VMClass
+  #     spec.diskDefaults.size or a spec.disks[].sizeGiB): the VM waits with
+  #     Ready=False, reason DiskSizeExceedsLimit, and a Warning event;
+  #   - no disk is grown beyond it: a Reconfigure applies the VM's other
+  #     changes and leaves that disk as it is (Reconfiguring=False,
+  #     DiskSizeExceedsLimit);
+  #   - no VMClone or VMMigration that would create a larger disk is started;
+  #   - VMs that already have larger disks keep running and are never shrunk.
+  # A Provider's owner can lower it for that Provider with the annotation
+  # infra.virtrigaud.io/max-disk-size (never raise it). With
+  # webhooks.enabled=true, the VirtualMachine and VMClass validating webhooks
+  # also refuse a larger size at admission; they are rendered only when this
+  # is set.
+  maxDiskSize: ""
+
 # Provider configuration
 #
 # These are OPTIONAL chart-templated standalone provider Deployments. They are

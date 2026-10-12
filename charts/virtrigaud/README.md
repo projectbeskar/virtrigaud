@@ -162,6 +162,7 @@ helm upgrade virtrigaud virtrigaud/virtrigaud \
 | `manager.tmpSizeLimit` | `sizeLimit` of the manager pod's `/tmp` emptyDir (empty = none) | `128Mi` |
 | `manager.providerTmpSizeLimitMax` | Ceiling on every provider pod's `/tmp` `sizeLimit` (`--provider-tmp-size-limit-max`; a quantity, empty = no ceiling). A `Provider` annotation above it, or `none`, is clamped to it with a `TmpSizeLimitClamped` Warning event; the defaults are capped at it too | `""` |
 | `manager.providerTmpSizeLimit` | `sizeLimit` of the `/tmp` emptyDir of every provider pod run for a `Provider` CR (`--provider-tmp-size-limit`; a quantity or `none`). Empty keeps the per-type defaults: vSphere `512Gi`, others `1Gi` | `""` |
+| `manager.maxDiskSize` | Administrator's ceiling on every disk VirtRigaud creates or grows (`--max-disk-size`; a quantity of at least `1Gi`, use binary units such as `500Gi`; empty = no ceiling beyond the CRD's 64Ti per disk). See [Disk-size limit](#disk-size-limit) | `""` |
 
 #### `/tmp` size limits
 
@@ -199,6 +200,48 @@ to `/tmp` is **evicted** by the kubelet.
 - **All CR-managed providers:** set `manager.providerTmpSizeLimit`.
 - **Chart-templated providers:** set `providers.<name>.tmpSizeLimit` (a
   quantity, `"none"`, or empty for no limit; anything else fails the render).
+
+#### Disk-size limit
+
+By default the only bound on a VM disk is the CRD's: 64Ti per disk. Tenants who
+own their namespace can ask for that much (and grow existing disks, and add up
+to 20 more) and fill a shared datastore or pool. `manager.maxDiskSize` (the
+manager's `--max-disk-size`) sets a ceiling **tenants cannot raise**:
+
+- **New disks:** a VM whose VMClass `spec.diskDefaults.size` or any
+  `spec.disks[].sizeGiB` is above the limit is not created. It waits with
+  `Ready=False`, reason `DiskSizeExceedsLimit`, and a Warning event, and is
+  created once its sizes fit. A vanished VM is not re-created above it either.
+- **Growth:** a Reconfigure never grows a disk beyond the limit. The VM's other
+  changes (CPU, memory) are applied, the over-limit disk is left as it is, and
+  the VM reports `Reconfiguring=False`, reason `DiskSizeExceedsLimit`.
+- **Clones and migrations:** a `VMClone` (source VM's disks, its VMClass and the
+  target class) or `VMMigration` (the migrated disk, sized by the source VM's
+  VMClass, and the target class) that would create a larger disk is not started:
+  the clone stays `Pending` and the migration stays in `Validating`, with the
+  same reason.
+- **Existing VMs** whose disks are already larger keep running, are never
+  shrunk, and stay `Ready`.
+- **Per Provider:** a Provider's owner can lower the limit for that Provider with
+  the annotation `infra.virtrigaud.io/max-disk-size: "<quantity>"` — on a
+  clustered Provider shared with other namespaces, the Provider's owner is the
+  administrator of its consumers. The annotation can never raise the manager's
+  ceiling. The Provider webhook refuses an invalid value; if one is stored
+  anyway, nothing is created or grown through that Provider
+  (`DiskSizeLimitUnverifiable`) until it is fixed.
+- **Admission:** with `webhooks.enabled=true` and `manager.maxDiskSize` set, the
+  chart also renders the `vvirtualmachine-disksize.kb.io` and
+  `vvmclass-disksize.kb.io` validating webhooks, which refuse a larger
+  `spec.disks[].sizeGiB` or `spec.diskDefaults.size` (or growing one beyond the
+  limit) at `kubectl apply` time. They check the manager's ceiling only, not a
+  Provider's annotation. Without `manager.maxDiskSize` they are not rendered, so
+  VM and VMClass writes gain no admission dependency. The controllers enforce
+  the limit whether or not webhooks are on.
+
+The limit is per disk, not a total per VM or per namespace (a VM can have up to
+20 additional disks): bound totals with the hypervisor's own storage quotas, or
+an object-count `ResourceQuota` on `virtualmachines.infra.virtrigaud.io`. Sizes are compared exactly: `500G` is
+about `465.7Gi`, so prefer binary units.
 
 ### Provider Configuration
 
