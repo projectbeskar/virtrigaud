@@ -37,6 +37,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Proven in envtest and with fake-client phase tests.
   - Same-namespace Proxmox migrations and other provider types are unchanged.
 - `internal/providers/proxmox/import_stage.go` (`importedDiskFormat`), `server.go`, `s3import.go`, `pveapi/client.go`: `spec.importedDisk.format` is tenant-writable and becomes the `qm importdisk --format` value. Only `qcow2`, `raw` or `vmdk` is accepted; empty still defaults to qcow2. Any other value (another string or JSON type) is refused with `InvalidArgument` and the constant `importedDiskFormatRejectedMessage`, before anything is created. The comments are corrected: `--format` is the **target** format written into the VM's storage, and PVE still probes the stage's own format. A Create-side header check of the stage is not part of this change.
+- `internal/providers/proxmox/nfs.go`, `s3import.go`: the node-side `qemu-img check` of a staged disk pins `-f qcow2`, so a vmdk descriptor or raw file published as a stage is refused instead of being probed (the staged image's header is checked in full by the migration staging-cleanup branch's header pre-parser).
 
 ### Changed
 - `internal/providers/proxmox/s3_test.go`, `ssh_errors_test.go`, `importdisk_rebuild_test.go`, `import_stage_test.go` (new): imported-disk tests use the VM's own verified stage. New tests cover:

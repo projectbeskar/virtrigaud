@@ -232,12 +232,14 @@ func (p *Provider) importDiskFromNFS(ctx context.Context, req *providerv1.Import
 	if _, stderr, err := p.ssh.runSSH(ctx, script); err != nil {
 		p.cleanupNodeFile(stagePath)
 		return nil, errors.NewInternal(
-			fmt.Sprintf("node-side nfs-mount qemu-img import failed (stderr: %s)", strings.TrimSpace(stderr)), err)
+			fmt.Sprintf("node-side nfs-mount stage copy failed (stderr: %s)", strings.TrimSpace(stderr)), err)
 	}
 
 	// Validate the staged qcow2 (local file, runs as the SSH user — root reads any
 	// file). ADR-0006 D5 structural integrity for NFS (no in-stream byte checksum).
-	if _, stderr, err := p.ssh.runSSH(ctx, fmt.Sprintf("qemu-img check %s", proxmoxShellQuote(stagePath))); err != nil {
+	// The stage is the tenant's bytes as copied: pin the format so a vmdk
+	// descriptor or raw file is refused here instead of being probed.
+	if _, stderr, err := p.ssh.runSSH(ctx, fmt.Sprintf("qemu-img check -f qcow2 -- %s", proxmoxShellQuote(stagePath))); err != nil {
 		p.cleanupNodeFile(stagePath)
 		return nil, errors.NewInternal(
 			fmt.Sprintf("qemu-img check failed on staged qcow2 %s (stderr: %s)", stagePath, strings.TrimSpace(stderr)), err)

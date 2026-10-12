@@ -156,7 +156,7 @@ func (p *Provider) importDiskFromS3(ctx context.Context, req *providerv1.ImportD
 	// qemu-img check on the staged qcow2 (only meaningful for qcow2; raw has no
 	// internal structure to check). Surface stderr on failure.
 	if srcFormat == "qcow2" {
-		if _, stderr, err := p.ssh.runSSH(ctx, fmt.Sprintf("qemu-img check %s", proxmoxShellQuote(stagePath))); err != nil {
+		if _, stderr, err := p.ssh.runSSH(ctx, fmt.Sprintf("qemu-img check -f qcow2 -- %s", proxmoxShellQuote(stagePath))); err != nil {
 			p.cleanupNodeFile(stagePath)
 			return nil, errors.NewInternal(
 				fmt.Sprintf("qemu-img check failed on staged qcow2 %s (stderr: %s)", stagePath, strings.TrimSpace(stderr)), err)
