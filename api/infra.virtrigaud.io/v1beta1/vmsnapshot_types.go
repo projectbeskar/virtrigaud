@@ -21,6 +21,11 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
+// VMSnapshotFinalizer is the finalizer the VMSnapshot controller keeps on a
+// VMSnapshot until its provider snapshot is deleted (or provably gone), or
+// the VMSnapshot is released with virtrigaud.io/force-delete=true.
+const VMSnapshotFinalizer = "snapshot.infra.virtrigaud.io/finalizer"
+
 // VMSnapshotSpec defines the desired state of VMSnapshot
 type VMSnapshotSpec struct {
 	// VMRef references the virtual machine to snapshot

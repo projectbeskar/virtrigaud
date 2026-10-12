@@ -334,7 +334,7 @@ func TestReconcile_ExportingPhase_NoImmediateRequeue(t *testing.T) {
 	sourceVM, sourceProvider, migration := raceMigrationFixture()
 	// Reconcile requires the finalizer to already be present, else it short
 	// circuits on finalizer-add. Seed it.
-	migration.Finalizers = []string{"vmmigration.infra.virtrigaud.io/finalizer"}
+	migration.Finalizers = []string{infrav1beta1.VMMigrationFinalizer}
 	r, c := newRaceReconciler(t, prov, sourceVM, sourceProvider, migration)
 
 	req := ctrl.Request{NamespacedName: types.NamespacedName{

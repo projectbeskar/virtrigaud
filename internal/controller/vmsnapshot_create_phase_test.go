@@ -85,7 +85,7 @@ func pendingSnapshot() *infrav1beta1.VMSnapshot {
 	return &infrav1beta1.VMSnapshot{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: snapPhaseName, Namespace: snapPhaseNS, Generation: 1,
-			Finalizers: []string{"snapshot.infra.virtrigaud.io/finalizer"},
+			Finalizers: []string{infrav1beta1.VMSnapshotFinalizer},
 		},
 		Spec: infrav1beta1.VMSnapshotSpec{VMRef: infrav1beta1.LocalObjectReference{Name: "web"}},
 	}

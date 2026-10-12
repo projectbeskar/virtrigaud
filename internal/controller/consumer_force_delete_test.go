@@ -219,7 +219,7 @@ var _ = Describe("Cross-namespace force-delete of a VMSnapshot (envtest)", func(
 
 		snap := &infravirtrigaudiov1beta1.VMSnapshot{
 			ObjectMeta: metav1.ObjectMeta{Name: "nightly", Namespace: tenant.Name,
-				Finalizers:  []string{vmSnapshotFinalizerName},
+				Finalizers:  []string{infravirtrigaudiov1beta1.VMSnapshotFinalizer},
 				Annotations: map[string]string{forceDeleteAnnotation: "true"}},
 			Spec: infrav1beta1VMSnapshotSpec("web"),
 		}

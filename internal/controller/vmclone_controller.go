@@ -57,11 +57,6 @@ import (
 )
 
 const (
-	// vmCloneFinalizer guards a VMClone so the controller runs its (minimal)
-	// cleanup before the object disappears. Deleting a VMClone never cascades
-	// to the produced target VM — only the finalizer is removed.
-	vmCloneFinalizer = "clone.infra.virtrigaud.io/finalizer"
-
 	// errReasonGetClone is the metrics.RecordError reason for a failed VMClone
 	// Get in the reconcile entry path.
 	errReasonGetClone = "get-clone"
@@ -211,8 +206,8 @@ func (r *VMCloneReconciler) Reconcile(ctx context.Context, req ctrl.Request) (re
 	}
 
 	// Add finalizer if needed.
-	if !controllerutil.ContainsFinalizer(clone, vmCloneFinalizer) {
-		controllerutil.AddFinalizer(clone, vmCloneFinalizer)
+	if !controllerutil.ContainsFinalizer(clone, infrav1beta1.VMCloneFinalizer) {
+		controllerutil.AddFinalizer(clone, infrav1beta1.VMCloneFinalizer)
 		if err := r.Update(ctx, clone); err != nil {
 			logger.Error(err, "Failed to add finalizer")
 			metrics.RecordError(errReasonAddFinalizer, metrics.ComponentManager)
@@ -1003,7 +998,7 @@ func (r *VMCloneReconciler) handleDeletion(ctx context.Context, clone *infrav1be
 	logger := logging.FromContext(ctx)
 	logger.Info("Deleting VMClone (target VM is intentionally preserved)")
 
-	controllerutil.RemoveFinalizer(clone, vmCloneFinalizer)
+	controllerutil.RemoveFinalizer(clone, infrav1beta1.VMCloneFinalizer)
 	if err := r.Update(ctx, clone); err != nil {
 		logger.Error(err, "Failed to remove finalizer")
 		metrics.RecordError(errReasonRemoveFinalizer, metrics.ComponentManager)

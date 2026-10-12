@@ -73,7 +73,7 @@ func (p *snapshotTaskProvider) SnapshotDelete(_ context.Context, _ contracts.VMR
 // finalized, in the Snapshotting phase, and no snapshot recorded yet.
 func snapshottingMigration() (*infrav1beta1.VirtualMachine, *infrav1beta1.Provider, *infrav1beta1.VMMigration) {
 	vm, p, m := snapshotFixture()
-	m.Finalizers = []string{vmMigrationFinalizer}
+	m.Finalizers = []string{infrav1beta1.VMMigrationFinalizer}
 	m.Spec.Source.CreateSnapshot = true
 	m.Status.Phase = infrav1beta1.MigrationPhaseSnapshotting
 	m.Status.SnapshotID = ""

@@ -210,7 +210,7 @@ func TestVMClone_NoCloneFromAStaleCache(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			clone := &infrav1beta1.VMClone{
-				ObjectMeta: metav1.ObjectMeta{Name: "clone-1", Namespace: "default", Finalizers: []string{vmCloneFinalizer}},
+				ObjectMeta: metav1.ObjectMeta{Name: "clone-1", Namespace: "default", Finalizers: []string{infrav1beta1.VMCloneFinalizer}},
 				Spec: infrav1beta1.VMCloneSpec{
 					Source: infrav1beta1.CloneSource{VMRef: &infrav1beta1.LocalObjectReference{Name: "src-vm"}},
 					Target: infrav1beta1.VMCloneTarget{Name: "clone-target"},
@@ -249,7 +249,7 @@ func TestVMClone_Clustered_NoTargetFromAStaleCache(t *testing.T) {
 	cp := &clonerProvider{cloneResp: contracts.CloneResponse{TargetVmID: "default.clone-c-target"}}
 	r, clone := clusteredCloneFixture(t, boundSource(), cp)
 	stored := getClone(t, r, clone)
-	stored.Finalizers = []string{vmCloneFinalizer}
+	stored.Finalizers = []string{infrav1beta1.VMCloneFinalizer}
 	require.NoError(t, r.Update(ctx, stored))
 	stale := getClone(t, r, clone) // Pending/empty, as the cache still shows it
 	failed := stale.DeepCopy()

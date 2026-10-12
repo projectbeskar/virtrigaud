@@ -105,7 +105,7 @@ func TestLiveGrant_CloneRPCNotIssuedWhenRevokedLive(t *testing.T) {
 // is kept for a later bind.
 func TestLiveGrant_CloneBindCreateNotIssuedWhenRevokedLive(t *testing.T) {
 	clone := xnsClone(xnsTarget)
-	clone.Finalizers = []string{vmCloneFinalizer}
+	clone.Finalizers = []string{infrav1beta1.VMCloneFinalizer}
 	clone.Status.Phase = infrav1beta1.ClonePhaseCloning
 	clone.Status.TargetVMID = "vm-clone-1"
 	cp := &clonerProvider{cloneResp: contracts.CloneResponse{TargetVmID: "vm-clone-1"}}
@@ -163,7 +163,7 @@ func TestLiveGrant_SameNamespaceNeverReadsLive(t *testing.T) {
 func TestLiveGrant_CloneLiveReadErrorFailsClosed(t *testing.T) {
 	ctx := context.Background()
 	clone := xnsClone(xnsTarget)
-	clone.Finalizers = []string{vmCloneFinalizer}
+	clone.Finalizers = []string{infrav1beta1.VMCloneFinalizer}
 	cp := &clonerProvider{cloneResp: contracts.CloneResponse{TargetVmID: "vm-clone-1"}}
 	r, _ := newXNSCloneReconciler(t, cp, clone, grantNamespace(xnsTarget, strPtr(xnsSource)))
 	r.APIReader = newLiveReader(t, nil, errors.New("apiserver unavailable"))

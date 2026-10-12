@@ -262,8 +262,8 @@ func (r *VMMigrationReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	}
 
 	// Add finalizer if needed
-	if !controllerutil.ContainsFinalizer(migration, vmMigrationFinalizer) {
-		controllerutil.AddFinalizer(migration, vmMigrationFinalizer)
+	if !controllerutil.ContainsFinalizer(migration, infrav1beta1.VMMigrationFinalizer) {
+		controllerutil.AddFinalizer(migration, infrav1beta1.VMMigrationFinalizer)
 		if err := r.Update(ctx, migration); err != nil {
 			logger.Error(err, "Failed to add finalizer")
 			metrics.RecordError(errReasonAddFinalizer, metrics.ComponentManager)
@@ -2168,7 +2168,7 @@ func (r *VMMigrationReconciler) handleDeletion(ctx context.Context, migration *i
 	}
 
 	// Remove finalizer
-	controllerutil.RemoveFinalizer(migration, vmMigrationFinalizer)
+	controllerutil.RemoveFinalizer(migration, infrav1beta1.VMMigrationFinalizer)
 	if err := r.Update(ctx, migration); err != nil {
 		logger.Error(err, "Failed to remove finalizer")
 		return ctrl.Result{}, err

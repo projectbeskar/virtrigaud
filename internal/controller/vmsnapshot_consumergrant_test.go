@@ -129,7 +129,7 @@ func TestVMSnapshot_TaskPollRefusesUngrantedProvider(t *testing.T) {
 func TestVMSnapshot_DeleteNeverUsesUngrantedProvider(t *testing.T) {
 	ctx := context.Background()
 	_, snap, objs := snapConsumerFixture(nil)
-	snap.Finalizers = []string{"snapshot.infra.virtrigaud.io/finalizer"}
+	snap.Finalizers = []string{infrav1beta1.VMSnapshotFinalizer}
 	snap.Status.SnapshotID = "snap-1"
 	r, rec := newSnapConsumerReconciler(t, append(objs, snap)...)
 	require.NoError(t, r.Delete(ctx, snap))
@@ -145,7 +145,7 @@ func TestVMSnapshot_DeleteNeverUsesUngrantedProvider(t *testing.T) {
 	assert.Equal(t, snapshotDeleteRetryMin, res.RequeueAfter)
 	kept := &infrav1beta1.VMSnapshot{}
 	require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(snap), kept), "the finalizer is kept")
-	assert.Contains(t, kept.Finalizers, "snapshot.infra.virtrigaud.io/finalizer")
+	assert.Contains(t, kept.Finalizers, infrav1beta1.VMSnapshotFinalizer)
 	requireSnapshotRefused(t, kept)
 	deleting := meta.FindStatusCondition(kept.Status.Conditions, infrav1beta1.VMSnapshotConditionDeleting)
 	require.NotNil(t, deleting)
@@ -179,7 +179,7 @@ func TestVMSnapshot_DeleteNeverUsesUngrantedProvider(t *testing.T) {
 func TestVMSnapshot_DeleteReleasesWhenTheVMIsGone(t *testing.T) {
 	ctx := context.Background()
 	_, snap, objs := snapConsumerFixture(nil)
-	snap.Finalizers = []string{"snapshot.infra.virtrigaud.io/finalizer"}
+	snap.Finalizers = []string{infrav1beta1.VMSnapshotFinalizer}
 	snap.Status.SnapshotID = "snap-1"
 	var noVM []client.Object
 	for _, o := range objs {

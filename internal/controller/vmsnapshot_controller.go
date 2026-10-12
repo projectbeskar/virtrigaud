@@ -194,8 +194,8 @@ func (r *VMSnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	}
 
 	// Add finalizer if needed
-	if !controllerutil.ContainsFinalizer(snapshot, "snapshot.infra.virtrigaud.io/finalizer") {
-		controllerutil.AddFinalizer(snapshot, "snapshot.infra.virtrigaud.io/finalizer")
+	if !controllerutil.ContainsFinalizer(snapshot, infrav1beta1.VMSnapshotFinalizer) {
+		controllerutil.AddFinalizer(snapshot, infrav1beta1.VMSnapshotFinalizer)
 		if err := r.Update(ctx, snapshot); err != nil {
 			logger.Error(err, "Failed to add finalizer")
 			metrics.RecordError(errReasonAddFinalizer, metrics.ComponentManager)
@@ -911,7 +911,7 @@ func (r *VMSnapshotReconciler) handleDeletion(ctx context.Context, snapshot *inf
 // records it as a Normal SnapshotDeleted event.
 func (r *VMSnapshotReconciler) releaseSnapshotFinalizer(ctx context.Context, snapshot *infrav1beta1.VMSnapshot, removed string) (ctrl.Result, error) {
 	logger := logging.FromContext(ctx)
-	controllerutil.RemoveFinalizer(snapshot, "snapshot.infra.virtrigaud.io/finalizer")
+	controllerutil.RemoveFinalizer(snapshot, infrav1beta1.VMSnapshotFinalizer)
 	if err := r.Update(ctx, snapshot); err != nil {
 		logger.Error(err, "Failed to remove finalizer")
 		return ctrl.Result{}, err

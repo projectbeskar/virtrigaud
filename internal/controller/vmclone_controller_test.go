@@ -489,7 +489,7 @@ func TestVMClone_ResumeSeedsStatusIDOnExistingTarget(t *testing.T) {
 			Name:       "clone-resume",
 			Namespace:  ns,
 			UID:        "uid-clone-resume",
-			Finalizers: []string{vmCloneFinalizer},
+			Finalizers: []string{infrav1beta1.VMCloneFinalizer},
 		},
 		Spec: infrav1beta1.VMCloneSpec{
 			Source: infrav1beta1.CloneSource{VMRef: &infrav1beta1.LocalObjectReference{Name: "src-vm"}},
@@ -541,7 +541,7 @@ func TestVMClone_DeletionDoesNotDeleteTarget(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{
 			Name:              "clone-del",
 			Namespace:         ns,
-			Finalizers:        []string{vmCloneFinalizer},
+			Finalizers:        []string{infrav1beta1.VMCloneFinalizer},
 			DeletionTimestamp: &now,
 		},
 		Spec: infrav1beta1.VMCloneSpec{
@@ -562,7 +562,7 @@ func TestVMClone_DeletionDoesNotDeleteTarget(t *testing.T) {
 	got := &infrav1beta1.VMClone{}
 	err = r.Get(context.Background(), client.ObjectKeyFromObject(clone), got)
 	if err == nil {
-		assert.NotContains(t, got.Finalizers, vmCloneFinalizer)
+		assert.NotContains(t, got.Finalizers, infrav1beta1.VMCloneFinalizer)
 	}
 
 	// Target VM must still exist.

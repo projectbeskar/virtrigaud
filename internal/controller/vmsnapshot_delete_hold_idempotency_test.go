@@ -81,7 +81,7 @@ func TestVMSnapshot_FailedDeleteHoldIsIdempotent(t *testing.T) {
 	assert.Equal(t, held.Status, after.Status)
 	assert.Contains(t, after.Status.Message, snapshotDeleteRetryMax.String(), "the message names the backoff's cap")
 	require.NotNil(t, after)
-	assert.Contains(t, after.Finalizers, "snapshot.infra.virtrigaud.io/finalizer")
+	assert.Contains(t, after.Finalizers, infrav1beta1.VMSnapshotFinalizer)
 
 	assert.Equal(t, infrav1beta1.SnapshotPhaseDeleting, get().Status.Phase)
 }

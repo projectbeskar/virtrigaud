@@ -32,10 +32,9 @@ import (
 	"github.com/projectbeskar/virtrigaud/internal/obs/logging"
 )
 
-// vmMigrationFinalizer is the VMMigration finalizer: it is released only once
-// the migration-created source snapshot is deleted (or provably gone), or the
-// force-delete annotation says to leave it behind.
-const vmMigrationFinalizer = "vmmigration.infra.virtrigaud.io/finalizer"
+// The VMMigration finalizer (infrav1beta1.VMMigrationFinalizer) is released
+// only once the migration-created source snapshot is deleted (or provably
+// gone), or the force-delete annotation says to leave it behind.
 
 const (
 	// migrationConditionSnapshotCleanup is the VMMigration condition recording

@@ -151,7 +151,7 @@ func clusteredSnapshotFixture(t *testing.T, vm *infrav1beta1.VirtualMachine, sna
 	prov.Spec.Type = infrav1beta1.ProviderTypeLibvirt
 	prov.Spec.Topology = infrav1beta1.ProviderTopologyCluster
 	snap := &infrav1beta1.VMSnapshot{
-		ObjectMeta: metav1.ObjectMeta{Name: "snap-c", Namespace: "default", Finalizers: []string{"snapshot.infra.virtrigaud.io/finalizer"}},
+		ObjectMeta: metav1.ObjectMeta{Name: "snap-c", Namespace: "default", Finalizers: []string{infrav1beta1.VMSnapshotFinalizer}},
 		Spec:       infrav1beta1.VMSnapshotSpec{VMRef: infrav1beta1.LocalObjectReference{Name: vm.Name}},
 		Status:     snapStatus,
 	}

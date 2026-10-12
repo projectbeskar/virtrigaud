@@ -131,7 +131,7 @@ func TestVMCloneConsumer_CrossNamespaceTargetNeedsProviderAndClassGrants(t *test
 func TestVMCloneConsumer_InFlightCloneKeepsItsStateWhenRevoked(t *testing.T) {
 	ctx := context.Background()
 	clone := xnsClone(xnsTarget)
-	clone.Finalizers = []string{vmCloneFinalizer}
+	clone.Finalizers = []string{infrav1beta1.VMCloneFinalizer}
 	clone.Status.Phase = infrav1beta1.ClonePhaseCloning
 	clone.Status.TargetVMID = "vm-clone-1"
 	cp := &clonerProvider{cloneResp: contracts.CloneResponse{TargetVmID: "vm-clone-1"}}
