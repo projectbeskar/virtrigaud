@@ -5,7 +5,7 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [2026-10-12 08:41] - Proxmox: owner stamp on Create/Clone, re-bind of a re-sent Create (in-flight safe), owner-checked Delete, CREATE_NOT_PERFORMED and classified Create/Clone errors
+## [2026-10-12 09:21] - Proxmox: owner stamp on Create/Clone, re-bind of a re-sent Create (in-flight safe), owner-checked Delete, CREATE_NOT_PERFORMED and classified Create/Clone errors
 **Author:** @wrkode (William Rizzo)
 
 ### Added
@@ -39,7 +39,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - per-node VMs, with HTTP 500 "Configuration file … does not exist" for a missing VM; the clone `target` node; down nodes (HTTP 595);
   - `/cluster/resources` (with hidden VMIDs), `/cluster/nextid?vmid=`, active task listing;
   - injectable faults (after-apply, raw body, hook), failing and manual tasks, test helpers;
-  - two modes to test both possible PVE behaviours: `SetErrorsInStatusLine` (error message in the reason phrase, `{"data":null}` body) and `SetEmptyResourceNames` (nameless guests listed with an empty name instead of `VM <vmid>`);
+  - two modes to test both possible PVE behaviours: `ErrorsInStatusLine` (error message in the reason phrase, `{"data":null}` body) and `SetEmptyResourceNames` (nameless guests listed with an empty name instead of `VM <vmid>`);
   - `SetNodes` (unordered `/nodes`).
 - `internal/providers/proxmox/*_test.go`, `internal/providers/contracts/create_not_performed_test.go`, `internal/transport/grpc/client_create_not_performed_test.go`, `internal/resilience/retry_test.go`: tests for every rule and error class above, in both error and name forms.
 
