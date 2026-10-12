@@ -607,6 +607,18 @@ message ImportDiskRequest {
   // back to the VM unchanged. Additive and backward-compatible: other providers
   // ignore it, and an unset value keeps the legacy target_name naming.
   ObjectIdentity target_vm = 11;
+
+  // max_virtual_size_bytes is the disk-size limit of the target Provider for
+  // this import (the manager's --max-disk-size, lowered by the Provider's
+  // infra.virtrigaud.io/max-disk-size annotation); 0 means no limit. When it is
+  // set, the provider reads the virtual size of the disk it is about to land —
+  // from the image header, in a location the tenant cannot change (a private
+  // copy or the converted output), not from the manager's earlier record —
+  // and refuses one above it with codes.FailedPrecondition and the ErrorInfo
+  // reason DISK_SIZE_EXCEEDS_LIMIT, or with DISK_SIZE_UNVERIFIABLE when it
+  // cannot read that size. Nothing is landed either way. Additive and
+  // backward-compatible: a provider that predates it ignores it.
+  int64 max_virtual_size_bytes = 12;
 }
 
 message ImportDiskResponse {

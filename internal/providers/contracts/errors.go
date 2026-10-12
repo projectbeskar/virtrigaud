@@ -160,6 +160,40 @@ const VMPreviousIncarnationReason = "VM_PREVIOUS_INCARNATION"
 // it out of the per-Provider circuit breaker.
 const VMSourceRunningReason = "VM_SOURCE_RUNNING"
 
+// DiskSizeExceedsLimitReason is the google.rpc.ErrorInfo reason (in
+// ErrorInfoDomain) a provider attaches to the codes.FailedPrecondition status
+// of an ImportDisk it refused because the disk it was about to land has a
+// virtual size above ImportDiskRequest.MaxVirtualSizeBytes. Nothing was
+// landed. The manager maps it to a Conflict marked ErrDiskSizeExceedsLimit and
+// holds the migration (DiskSizeExceedsLimit) instead of failing it.
+const DiskSizeExceedsLimitReason = "DISK_SIZE_EXCEEDS_LIMIT"
+
+// DiskSizeUnverifiableReason is DiskSizeExceedsLimitReason's counterpart for
+// an ImportDisk refused because MaxVirtualSizeBytes was set and the provider
+// could not read the disk's virtual size (fail closed). Nothing was landed.
+// The manager holds the migration (DiskSizeLimitUnverifiable).
+const DiskSizeUnverifiableReason = "DISK_SIZE_UNVERIFIABLE"
+
+// ErrDiskSizeExceedsLimit marks (in an error's chain) a provider's refusal
+// carrying DiskSizeExceedsLimitReason.
+var ErrDiskSizeExceedsLimit = errors.New("the disk is above the disk-size limit")
+
+// ErrDiskSizeUnverifiable marks (in an error's chain) a provider's refusal
+// carrying DiskSizeUnverifiableReason.
+var ErrDiskSizeUnverifiable = errors.New("the disk's size could not be checked against the disk-size limit")
+
+// IsDiskSizeExceedsLimit reports whether err is a provider's
+// DiskSizeExceedsLimitReason refusal.
+func IsDiskSizeExceedsLimit(err error) bool {
+	return errors.Is(err, ErrDiskSizeExceedsLimit)
+}
+
+// IsDiskSizeUnverifiable reports whether err is a provider's
+// DiskSizeUnverifiableReason refusal.
+func IsDiskSizeUnverifiable(err error) bool {
+	return errors.Is(err, ErrDiskSizeUnverifiable)
+}
+
 // ProviderError represents a categorized error from a provider
 type ProviderError struct {
 	// Type categorizes the error

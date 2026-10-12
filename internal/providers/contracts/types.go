@@ -271,6 +271,12 @@ type ImportDiskRequest struct {
 	// and returns the landing path in ImportDiskResponse.Path. Providers that do
 	// not need it ignore it; left empty, the legacy TargetName naming applies.
 	TargetVM ObjectIdentity
+	// MaxVirtualSizeBytes is the target Provider's disk-size limit for this
+	// import (wire: max_virtual_size_bytes); 0 means none. The provider reads
+	// the virtual size of the disk it is about to land and refuses a larger one
+	// (DiskSizeExceedsLimitReason), or one whose size it cannot read
+	// (DiskSizeUnverifiableReason); nothing is landed.
+	MaxVirtualSizeBytes int64
 }
 
 // ImportDiskResponse contains the result of a disk import operation
