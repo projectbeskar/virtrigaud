@@ -21,6 +21,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 
 	"k8s.io/apimachinery/pkg/util/validation"
@@ -126,6 +127,30 @@ const legacyImportStageMessage = "imported disk rejected: it was staged by an ea
 // identity (a manager older than the provider).
 const importTargetRequiredMessage = "Proxmox disk import requires the target VirtualMachine's namespace and name " +
 	"(ImportDiskRequest.target_vm); upgrade the manager"
+
+// importedDiskFormatRejectedMessage is the only text a refused imported-disk
+// format returns. It never echoes the requested value.
+const importedDiskFormatRejectedMessage = "imported disk rejected: spec.importedDisk.format must be qcow2, raw or vmdk"
+
+// importedDiskFormat returns the `qm importdisk --format` value (the TARGET
+// format written into the VM's storage) for the image's Format field, which
+// is tenant-writable (spec.importedDisk.format): absent or empty means "" (the
+// caller's qcow2 default); one of importStageFormats is returned as is;
+// anything else — another string or another JSON type — is refused with
+// importedDiskFormatRejectedMessage.
+func importedDiskFormat(raw any) (string, error) {
+	if raw == nil {
+		return "", nil
+	}
+	format, ok := raw.(string)
+	if !ok {
+		return "", errors.NewInvalidSpec("%s", importedDiskFormatRejectedMessage)
+	}
+	if format == "" || slices.Contains(importStageFormats, format) {
+		return format, nil
+	}
+	return "", errors.NewInvalidSpec("%s", importedDiskFormatRejectedMessage)
+}
 
 // importedDiskRejected is the InvalidSpec refusal of an imported-disk path.
 func importedDiskRejected() error {

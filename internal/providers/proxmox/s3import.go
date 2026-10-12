@@ -226,8 +226,10 @@ const proxmoxImportedDiskInterface = "scsi0"
 // SEQUENCE (each step is greppable in logs; secrets never logged):
 //  1. CreateVM(vmConfig) — a diskless shell with the requested cpu/mem/net (the
 //     PVE API has no disk param here, so no template disk is laid down).
-//  2. `qm importdisk <vmid> <stagedPath> <storage> --format qcow2` — lays the
-//     staged qcow2 into the VM's storage as an UNUSED disk (unused0).
+//  2. `qm importdisk <vmid> <stagedPath> <storage> --format <format>` — lays the
+//     staged disk into the VM's storage as an UNUSED disk (unused0). --format
+//     is the TARGET format written into the storage (qcow2 by default; PVE
+//     probes the stage's own format, whatever its file extension says).
 //  3. `qm set <vmid> --scsihw virtio-scsi-pci --scsi0 <storage>:<imported-volume>
 //     --boot order=scsi0 [--ide2 <storage>:cloudinit --ciuser/--sshkeys]` — wires
 //     the imported disk as the boot disk and attaches cloud-init when present.
@@ -319,7 +321,7 @@ func (p *Provider) createFromImportedDisk(
 		return fail(fmt.Sprintf("%s for VM %d", what, vmConfig.VMID), cause)
 	}
 
-	// 2. importdisk: lay the staged qcow2 into the VM's storage as an unused disk.
+	// 2. importdisk: lay the staged disk into the VM's storage as an unused disk.
 	importCmd := buildImportDiskCommand(vmConfig.VMID, vmConfig.ImportedDiskPath, storageName, importFormat)
 	importStdout, importStderr, err := p.ssh.runSSH(ctx, importCmd)
 	if err != nil {
@@ -433,8 +435,10 @@ func parseUnusedVolid(qmConfig string) string {
 }
 
 // buildImportDiskCommand builds the `qm importdisk` command that lays the staged
-// disk image into the VM's storage. The path and storage are shell-quoted; the
-// format is passed explicitly so PVE does not have to probe. It runs only when
+// disk image into the VM's storage. The path, storage and format are
+// shell-quoted. format is the TARGET format `qm importdisk --format` writes
+// into the storage (validated to importStageFormats by importedDiskFormat); it
+// does not tell PVE the stage's format, which PVE probes. It runs only when
 // the stage passes importStageNodeCheck (a regular file, not a symbolic link,
 // one hard link); otherwise the command fails and nothing is imported. It is a
 // free function so the exact argv is unit-testable without SSH.

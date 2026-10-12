@@ -394,3 +394,42 @@ func TestIsImportStagePath(t *testing.T) {
 	assert.False(t, isImportStagePath("/var/tmp/.virtrigaud-import-a/b.qcow2"))
 	assert.False(t, isImportStagePath("/var/tmp/.virtrigaud-export-a.qcow2"))
 }
+
+// TestCreate_ImportedDiskFormatConfined: spec.importedDisk.format is
+// tenant-writable and becomes the `qm importdisk --format` value; anything but
+// qcow2, raw or vmdk is refused with a constant message before anything
+// happens.
+func TestCreate_ImportedDiskFormatConfined(t *testing.T) {
+	for name, format := range map[string]string{
+		"unknown format":      `"vdi"`,
+		"shell metacharacter": `"qcow2; rm -rf /"`,
+		"upper case":          `"QCOW2"`,
+		"not a string":        `5`,
+		"object":              `{"x":1}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			p, srv, node := newConfinementProvider(t)
+			image := `{"Path":"` + ownStagePath + `","Format":` + format + `,"ImportedDisk":true}`
+			_, err := p.Create(context.Background(), createReq(testOwner(), image))
+			assert.Equal(t, classInvalidSpec, classOf(t, err))
+			assert.Equal(t, importedDiskFormatRejectedMessage, status.Convert(err).Message())
+			assert.Empty(t, node.all())
+			assert.Empty(t, srv.VMsNamed(testOwnerName))
+			assert.Empty(t, srv.MutatingRequests())
+		})
+	}
+}
+
+func TestImportedDiskFormat(t *testing.T) {
+	for _, ok := range []any{nil, "", "qcow2", "raw", "vmdk"} {
+		got, err := importedDiskFormat(ok)
+		require.NoError(t, err, "%v", ok)
+		if s, isStr := ok.(string); isStr {
+			assert.Equal(t, s, got)
+		}
+	}
+	for _, bad := range []any{"vdi", "qcow2 ", true, 1.0} {
+		_, err := importedDiskFormat(bad)
+		assert.Equal(t, codes.InvalidArgument, status.Code(err), "%v", bad)
+	}
+}
