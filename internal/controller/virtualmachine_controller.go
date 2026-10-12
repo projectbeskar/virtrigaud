@@ -1086,7 +1086,13 @@ func (r *VirtualMachineReconciler) handleDeletion(ctx context.Context, vm *infra
 					// Retrying cannot change that; hold the delete on a constant
 					// condition and a slow backoff until the owner detaches the
 					// VirtualMachine (orphan-on-delete).
-					return r.retainForImageArtifactDelete(ctx, vm, ref.Routed(), err), nil
+					return r.retainForRefusedDelete(ctx, vm, ref.Routed(), imageArtifactDeleteHold, err), nil
+				case contracts.IsOwnerStampUnreadable(err):
+					// The provider refused BEFORE changing anything: it cannot
+					// tell who owns the VM (unreadable or multi-owner stamp).
+					// Held like the image-artifact refusal until an
+					// administrator fixes the stamp or removes the VM.
+					return r.retainForRefusedDelete(ctx, vm, ref.Routed(), ownerStampUnreadableDeleteHold, err), nil
 				case ref.Routed() && (contracts.IsHostUnavailable(err) || contracts.IsVMDiskCheckFailed(err)):
 					// A clustered delete the provider did not perform because a
 					// host it needs could not be reached or checked (ADR-0007
@@ -1318,8 +1324,8 @@ var providerDeleteFailedMessage = fmt.Sprintf("Delete in progress: the provider 
 // clustered VM's DeleteBlocked condition (A6.1 fix verification, N8), and the
 // Ready=False that went with any earlier hold — reason DeleteBlocked (every
 // clustered hold, and a single-host DiskInUse refusal), ProviderUnavailable
-// (a single-host VM whose Provider could not be reached) or VMIsImageArtifact
-// (a single-host image-artifact refusal). Ready then becomes
+// (a single-host VM whose Provider could not be reached), VMIsImageArtifact
+// or OwnerStampUnreadable (a single-host refusal). Ready then becomes
 // Ready=False/ProviderError with the constant providerDeleteFailedMessage. It
 // reports whether the status changed; a repeated failure changes nothing, so
 // it is never rewritten (and never re-triggers the deleting VM) per retry.
@@ -1327,7 +1333,7 @@ func clearStaleDeleteHold(vm *infravirtrigaudiov1beta1.VirtualMachine) bool {
 	changed := meta.RemoveStatusCondition(&vm.Status.Conditions, k8s.ConditionDeleteBlocked)
 	c := meta.FindStatusCondition(vm.Status.Conditions, k8s.ConditionReady)
 	staleReady := c != nil && (c.Reason == k8s.ReasonDeleteBlocked || c.Reason == k8s.ReasonProviderUnavailable ||
-		c.Reason == k8s.ReasonVMIsImageArtifact)
+		c.Reason == k8s.ReasonVMIsImageArtifact || c.Reason == k8s.ReasonOwnerStampUnreadable)
 	if !changed && !staleReady {
 		return false
 	}

@@ -363,6 +363,14 @@ const (
 	// reason of a clustered one. The hold lasts until the VirtualMachine is
 	// detached with virtrigaud.io/orphan-on-delete=true.
 	ReasonVMIsImageArtifact = "VMIsImageArtifact"
+	// ReasonOwnerStampUnreadable: the provider refused a Delete because the
+	// VM's owner stamp cannot be read or records more than one owner
+	// (OWNER_STAMP_UNREADABLE), so who owns it cannot be told. Nothing was
+	// changed. It is the Ready reason of a single-host VM held for it and the
+	// DeleteBlocked reason of a clustered one; the hold lasts until an
+	// administrator fixes the stamp or removes the VM, or the VirtualMachine
+	// is detached.
+	ReasonOwnerStampUnreadable = "OwnerStampUnreadable"
 )
 
 // ReasonPlacementTopologyMismatch indicates that a VirtualMachine records a

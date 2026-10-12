@@ -68,49 +68,84 @@ var imageArtifactPowerMessage = fmt.Sprintf("Power change refused: the provider 
 // held because the provider reports the object is an image artifact.
 const errReasonVMIsImageArtifact = "vm-is-image-artifact"
 
-// retainForImageArtifactDelete keeps the finalizer of a VirtualMachine whose
-// provider Delete was refused with VM_IS_IMAGE_ARTIFACT
-// (contracts.IsVMIsImageArtifact). Nothing was deleted, and retrying cannot
-// change the answer, so the delete is held — never retried as an ordinary
-// failure:
+// ownerStampUnreadableDeleteMessage is the Ready (and, clustered,
+// DeleteBlocked) message of a VirtualMachine whose provider Delete was refused
+// with OWNER_STAMP_UNREADABLE. It is constant.
+var ownerStampUnreadableDeleteMessage = fmt.Sprintf("Delete refused: the provider cannot tell who owns the "+
+	"hypervisor VM at this VirtualMachine's id (its owner stamp cannot be read or records more than one owner), so "+
+	"nothing was deleted and the finalizer is kept (re-checked with a backoff of up to %s). An administrator fixes the "+
+	"stamp or removes the VM by hand. %s", blockedRetryMax, imageArtifactDetachHint)
+
+// errReasonOwnerStampUnreadable is the metrics reason of a delete held because
+// the provider cannot read the VM's owner stamp.
+const errReasonOwnerStampUnreadable = "owner-stamp-unreadable"
+
+// refusedDeleteHold is a non-retryable provider refusal of a Delete that
+// holds the VirtualMachine until someone acts: its condition reason, constant
+// message, metrics reason and log line.
+type refusedDeleteHold struct {
+	reason, message, metricsReason, logMessage string
+}
+
+// imageArtifactDeleteHold holds a Delete refused with VM_IS_IMAGE_ARTIFACT
+// (contracts.IsVMIsImageArtifact).
+var imageArtifactDeleteHold = refusedDeleteHold{
+	reason:        k8s.ReasonVMIsImageArtifact,
+	message:       imageArtifactDeleteMessage,
+	metricsReason: errReasonVMIsImageArtifact,
+	logMessage:    "Provider refused to delete the VM: the object is a template or an image artifact; retaining the finalizer",
+}
+
+// ownerStampUnreadableDeleteHold holds a Delete refused with
+// OWNER_STAMP_UNREADABLE (contracts.IsOwnerStampUnreadable).
+var ownerStampUnreadableDeleteHold = refusedDeleteHold{
+	reason:        k8s.ReasonOwnerStampUnreadable,
+	message:       ownerStampUnreadableDeleteMessage,
+	metricsReason: errReasonOwnerStampUnreadable,
+	logMessage:    "Provider refused to delete the VM: its owner stamp cannot be read; retaining the finalizer",
+}
+
+// retainForRefusedDelete keeps the finalizer of a VirtualMachine whose
+// provider Delete was refused, before anything changed, for a reason retrying
+// cannot change (hold: VM_IS_IMAGE_ARTIFACT, OWNER_STAMP_UNREADABLE). The
+// delete is held — never retried as an ordinary failure:
 //
-//   - a single-host VM gets Ready=False/VMIsImageArtifact with the constant
-//     imageArtifactDeleteMessage (it never carries DeleteBlocked), and is
-//     re-checked with the blocked-VM backoff counted from its
-//     deletionTimestamp;
+//   - a single-host VM gets Ready=False/<hold.reason> with the constant
+//     hold.message (it never carries DeleteBlocked), and is re-checked with
+//     the blocked-VM backoff counted from its deletionTimestamp;
 //   - a clustered (routed) VM is held like every other clustered delete:
-//     DeleteBlocked=True/VMIsImageArtifact and Ready=False/DeleteBlocked
+//     DeleteBlocked=True/<hold.reason> and Ready=False/DeleteBlocked
 //     (recordDeleteHold).
 //
 // The status is written, and one Warning event recorded, only when the hold
 // begins; the cause goes to the log only. A force-delete or orphan-on-delete
 // set meanwhile is acted on at once (an annotation change re-triggers a
 // deleting VM, vmUpdateNeedsReconcile).
-func (r *VirtualMachineReconciler) retainForImageArtifactDelete(
+func (r *VirtualMachineReconciler) retainForRefusedDelete(
 	ctx context.Context,
 	vm *infravirtrigaudiov1beta1.VirtualMachine,
 	routed bool,
+	hold refusedDeleteHold,
 	err error,
 ) ctrl.Result {
-	metrics.RecordError(errReasonVMIsImageArtifact, metrics.ComponentManager)
+	metrics.RecordError(hold.metricsReason, metrics.ComponentManager)
 	if routed {
-		return r.recordDeleteHold(ctx, vm, k8s.ReasonVMIsImageArtifact, imageArtifactDeleteMessage, deleteHeldLogMessage, err)
+		return r.recordDeleteHold(ctx, vm, hold.reason, hold.message, deleteHeldLogMessage, err)
 	}
 	var since time.Time
 	if vm.DeletionTimestamp != nil {
 		since = vm.DeletionTimestamp.Time
 	}
 	retry := blockedRetryBackoff(since)
-	log.FromContext(ctx).Info("Provider refused to delete the VM: the object is a template or an image artifact; "+
-		"retaining the finalizer", "id", vm.Status.ID, "retryAfter", retry.String(), "error", err.Error())
+	log.FromContext(ctx).Info(hold.logMessage, "id", vm.Status.ID, "retryAfter", retry.String(), "error", err.Error())
 	persisted := vm.Status.DeepCopy()
-	transition := r.setImageArtifactReady(vm, imageArtifactDeleteMessage)
+	transition := setHeldReady(vm, hold.reason, hold.message)
 	meta.RemoveStatusCondition(&vm.Status.Conditions, k8s.ConditionDeleteBlocked)
 	if !equality.Semantic.DeepEqual(persisted, &vm.Status) {
 		r.updateStatus(ctx, vm)
 	}
 	if transition {
-		r.recordEvent(vm, corev1.EventTypeWarning, k8s.ReasonVMIsImageArtifact, imageArtifactDeleteMessage)
+		r.recordEvent(vm, corev1.EventTypeWarning, hold.reason, hold.message)
 	}
 	return ctrl.Result{RequeueAfter: retry}
 }
@@ -134,7 +169,7 @@ func (r *VirtualMachineReconciler) holdImageArtifactPower(
 		prev.Status == metav1.ConditionFalse && prev.Reason == k8s.ReasonVMIsImageArtifact {
 		since = prev.LastTransitionTime.Time
 	}
-	transition := r.setImageArtifactReady(vm, imageArtifactPowerMessage)
+	transition := setHeldReady(vm, k8s.ReasonVMIsImageArtifact, imageArtifactPowerMessage)
 	retry := blockedRetryBackoff(since)
 	log.FromContext(ctx).Info("Provider refused the power change: the object is a template or an image artifact; holding",
 		"id", vm.Status.ID, "retryAfter", retry.String(), "error", err.Error())
@@ -174,19 +209,18 @@ func (r *VirtualMachineReconciler) recordVMNotOwnedRelease(
 	r.recordEvent(vm, corev1.EventTypeWarning, eventReasonVMLeftOnHypervisor, vmNotOwnedLeftMessage)
 }
 
-// setImageArtifactReady sets Ready=False/VMIsImageArtifact with msg on vm and
-// reports whether that begins a hold (Ready was not already False for that
-// reason with that message).
-func (r *VirtualMachineReconciler) setImageArtifactReady(vm *infravirtrigaudiov1beta1.VirtualMachine, msg string) bool {
+// setHeldReady sets Ready=False/reason with msg on vm and reports whether
+// that begins a hold (Ready was not already False for that reason with that
+// message).
+func setHeldReady(vm *infravirtrigaudiov1beta1.VirtualMachine, reason, msg string) bool {
 	// Read before the condition is set: FindStatusCondition returns a pointer
 	// into the slice that SetStatusCondition updates in place.
 	prev := meta.FindStatusCondition(vm.Status.Conditions, k8s.ConditionReady)
-	transition := prev == nil || prev.Status != metav1.ConditionFalse || prev.Reason != k8s.ReasonVMIsImageArtifact ||
-		prev.Message != msg
+	transition := prev == nil || prev.Status != metav1.ConditionFalse || prev.Reason != reason || prev.Message != msg
 	meta.SetStatusCondition(&vm.Status.Conditions, metav1.Condition{
 		Type:               k8s.ConditionReady,
 		Status:             metav1.ConditionFalse,
-		Reason:             k8s.ReasonVMIsImageArtifact,
+		Reason:             reason,
 		Message:            msg,
 		ObservedGeneration: vm.Generation,
 	})

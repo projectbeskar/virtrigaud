@@ -136,6 +136,40 @@ func TestHandleDeletion_VMNotOwnedReleasesWithAWarning(t *testing.T) {
 	assert.Empty(t, drainEvents(rec2))
 }
 
+// A Delete refused because the VM's owner stamp cannot be read is held on a
+// constant condition, one event and the blocked-VM backoff — not retried every
+// 15 s as an ordinary failure.
+func TestHandleDeletion_OwnerStampUnreadableIsHeld(t *testing.T) {
+	ctx := context.Background()
+	refusal := contracts.NewConflictError("delete: refused: the VM carries an owner stamp that cannot be read",
+		fmt.Errorf("%w: rpc error: code = FailedPrecondition", contracts.ErrOwnerStampUnreadable))
+	prov := &deleteStubProvider{err: refusal}
+	vm := deletionVM("vm-stamp")
+	r := newTestReconciler(coverageTestScheme(t), &stubResolver{provider: prov}, vm, deletionProviderCR())
+	rec := record.NewFakeRecorder(10)
+	r.Recorder = rec
+	marked := markForDeletion(t, r, vm)
+
+	res, err := r.handleDeletion(ctx, marked)
+	require.NoError(t, err)
+	assert.GreaterOrEqual(t, res.RequeueAfter, blockedRetryMin)
+	held := &infravirtrigaudiov1beta1.VirtualMachine{}
+	require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(vm), held))
+	ready := meta.FindStatusCondition(held.Status.Conditions, k8s.ConditionReady)
+	require.NotNil(t, ready)
+	assert.Equal(t, k8s.ReasonOwnerStampUnreadable, ready.Reason)
+	assert.Equal(t, ownerStampUnreadableDeleteMessage, ready.Message)
+	assert.Len(t, drainEvents(rec), 1)
+
+	rv := held.ResourceVersion
+	_, err = r.handleDeletion(ctx, held.DeepCopy())
+	require.NoError(t, err)
+	again := &infravirtrigaudiov1beta1.VirtualMachine{}
+	require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(vm), again))
+	assert.Equal(t, rv, again.ResourceVersion)
+	assert.Empty(t, drainEvents(rec))
+}
+
 func TestHandleDeletion_ImageArtifactForceDeleteStillWins(t *testing.T) {
 	ctx := context.Background()
 	prov := &deleteStubProvider{err: imageArtifactRefusal("delete")}
