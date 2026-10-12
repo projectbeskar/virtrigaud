@@ -565,6 +565,9 @@ providers), and rollback caveats in
   - **libvirt and vSphere NFS.** These targets empty an `nfs` object (truncate
     it to zero bytes) instead of deleting it, because qemu-img cannot delete a
     file over NFS. An empty file stays on the export. Proxmox deletes it.
+  - **Proxmox import stage.** The Proxmox target also removes the node-side
+    import stage of the migration's target VM, unless another migration in
+    flight targets the same VM.
   - **Versioned S3 buckets and NFS snapshots** keep the data after the delete:
     expire noncurrent versions on `vmmigrations/`, and exclude the staging
     export from snapshots.
@@ -584,7 +587,9 @@ providers), and rollback caveats in
   extent could have pulled a node or pod secret into the imported disk), and
   import that same copy. Headers are parsed in Go before qemu-img opens
   them. The NFS copy is bounded (`VIRTRIGAUD_MIGRATION_IMPORT_MAX_GIB`,
-  default 1024, and a free-space check). Proxmox mounts migration exports
+  default 1024, lowered by the target `Provider`'s disk-size limit, and a
+  free-space check). Proxmox stages the copy in its root-only stage directory,
+  checks the stage's header again at `Create`, and mounts migration exports
   `nosymfollow,nosuid,nodev,noexec`.
 - **Proxmox VMs carry an owner stamp; a re-sent `Create` no longer makes a
   duplicate.** The Proxmox provider writes the owning `VirtualMachine`'s

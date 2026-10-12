@@ -27,7 +27,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - the residual risks: versioned buckets, NFS snapshots and libnfs symlinks;
   - the alternatives: B (the manager deletes directly) and C (documentation or lifecycle policies only).
 - `proto/provider/v1/provider.proto`, `proto/rpc/provider/v1/*.pb.go` (regenerated with buf, protoc-gen-go v1.34.2, protoc-gen-go-grpc v1.5.1):
-  - RPC `DeleteStagedDisk`. Its request carries the migration identity, stage, backend, options JSON, credentials and staging `layout`; it carries no key, path or URL.
+  - RPC `DeleteStagedDisk`. Its request carries the migration identity, the stage, the backend, the options JSON, the credentials, the staging `layout` (field 6) and, when the migration sent an import, its `target_vm` (field 7). It carries no key, path or URL.
   - enum `StagedDiskDeleteOutcome` (`DELETED`, `NOT_FOUND`, `EMPTIED`).
   - capability `supported_staged_disk_delete_backends` (field 23).
 
@@ -46,6 +46,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `internal/storage/s3fake/s3fake.go` (new): an in-process S3 server for tests.
 - `internal/providers/{proxmox,libvirt,vsphere,mock}/staged_disk.go`, plus the capabilities of each provider:
   - Proxmox: deletes the S3 object from the pod, and unlinks the NFS file through the kernel mount as the migration's uid/gid. A failed `rm`, or a file still present, is an error, never `DELETED`.
+    - With `target_vm` it first removes that VM's node-side import stage: `rm -f --` in every stage format, confined to `isImportStagePath`. A failed removal is retryable and leaves the staged object untouched.
+    - The manager sends `target_vm` only for a migration that sent an import, and only when no other in-flight migration targets the same VM (`stagedImportTarget`).
   - libvirt (single host) and vSphere: delete the S3 object, and empty the NFS object with qemu-img over libnfs.
   - libvirt clustered and mock: `Unimplemented`; they advertise nothing.
 - `internal/providers/contracts/staged_disk.go` (new), `capabilities.go`, `internal/transport/grpc/client.go`, `sdk/provider/capabilities/capabilities.go`: `StagedDiskDeleter`, the client's `DeleteStagedDisk`, and the capability plumbing.
@@ -81,7 +83,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Staged migration disks no longer stay on the staging backend. Deletion is confined to the object the provider derives from the migration identity. A delete is never aimed at a location changed after the export (staging digest).
 - The NFS staging name is now unambiguous (layout v2). Before, two namespaces could share a staged file: one tenant's export, import or delete could reach another's.
 - **Pre-existing High, fixed.** NFS and S3 imports on Proxmox and vSphere ran `qemu-img convert` / `qm importdisk` on a tenant-controlled image without a header check. A backing file, data file or `json:` target could flatten node or pod secrets (`/etc/pve/priv/*`, `/root/.ssh/*`, the service-account token, provider credentials) into the tenant's disk.
-  - `internal/providers/proxmox/nfs.go`, `s3import.go` (only `importDiskFromS3`): the object is copied to the node, a non-regular file is refused, the header of the copy is checked as `qm importdisk` probes it, and the same copy is published.
+  - `internal/providers/proxmox/nfs.go`, `import_stage.go`, `s3import.go`: the object is copied by the imported-disk confinement's stage builder (#384) into a root-owned temp in the root-only `/var/lib/virtrigaud/import-stage`, then renamed onto the stage. `nfsStageCopy` refuses a non-regular file and is bounded. The stage's header is then checked as `qm importdisk` probes it, and a refused stage is removed. `Create` (`recheckImportStage`) parses and checks the stage again, in its extension's format, before it builds anything. A refused stage is removed and nothing is created.
   - `internal/providers/vsphere/nfs.go`, `s3import.go`, `staged_disk.go`: the object is byte-copied into the pod, its header is checked, and that copy is converted with `-f qcow2`.
   - `internal/providers/libvirt/nfs.go`: already had the check, but its convert read the NFS object a second time. It now copies once, then checks and converts the copy.
 - `internal/providers/proxmox/nfs.go`: migration NFS exports are mounted `nosymfollow,nosuid,nodev,noexec`.
@@ -90,7 +92,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - VMDK: only monolithicSparse/streamOptimized, with one SPARSE extent and no parent.
   - raw: must not start with a foreign magic.
   - It is wired into the Proxmox, vSphere and libvirt staged imports. `qemu-img info` then runs with `-U`, and on Proxmox under `unshare -n`.
-- `internal/storage/migration/staged_limit.go` (new) and the three NFS imports: the staged copy is bounded. Its size is read first and refused above `VIRTRIGAUD_MIGRATION_IMPORT_MAX_GIB` (default 1024; the hook for #382's `max_virtual_size_bytes` is in `StagedCopyLimit`), or when less than twice its size is free. The copy reads at most bound+1 bytes (`qemu-img dd`, or `head -c` on Proxmox), and a copy that grew is refused. Refusals are constant and nothing is left behind.
+- `internal/storage/migration/staged_limit.go` (new) and the three NFS imports: the staged copy is bounded. Its size is read first and refused above `VIRTRIGAUD_MIGRATION_IMPORT_MAX_GIB` (default 1024), lowered by #382's `max_virtual_size_bytes` plus metadata room (1/64 + 16 MiB, `StagedCopyLimit`), or when less than twice its size is free. On Proxmox the migration's uid/gid only measures the object; root checks the bound and the free space. The copy reads at most bound+1 bytes (`qemu-img dd`, or `head -c` on Proxmox), and a copy that grew is refused. Refusals are constant and nothing is left behind.
 - `internal/controller/vmmigration_staging_cleanup.go`:
   - the v1 layout is kept for any legacy export trace;
   - the staging digest is computed over a versioned canonical struct;

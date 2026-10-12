@@ -117,12 +117,34 @@ message DeleteStagedDiskRequest {
   string storage_options_json = 4;       // same JSON as ExportDisk / ImportDisk
   map<string, string> credentials = 5;   // s3 only; same keys as ExportDisk
   string layout = 6;                     // "v2", or "v1"/empty (legacy); see D5
+  ObjectIdentity target_vm = 7;          // the import's target VM, when set (below)
 }
 
 message DeleteStagedDiskResponse {
   StagedDiskDeleteOutcome outcome = 1;   // DELETED | NOT_FOUND | EMPTIED
 }
 ```
+
+`target_vm` names the VirtualMachine the migration's import landed a disk for (the
+same identity as `ImportDiskRequest.target_vm`). A provider whose `ImportDisk` keeps
+a provider-side copy until `Create` removes that copy too. Only Proxmox keeps one:
+the node-side import stage, `/var/lib/virtrigaud/import-stage/<ns>_<vm>-migrated.<format>`,
+named after the target VM. Proxmox removes it with `rm -f --`, in every stage format,
+only on paths `isImportStagePath` accepts, and BEFORE the staged object. If that
+removal fails, the call is retryable and the staged object is not touched. The
+other providers ignore `target_vm`: libvirt's landed disk IS the VM's disk.
+
+The manager sets `target_vm` only when the migration sent an import (an import id,
+a landed path, an `Importing` condition, or a phase from `Importing` on). It also
+requires that no other in-flight VMMigration targets the same VM. Here "in flight"
+means not `Ready`, not `Failed`, and not being deleted: such a migration's import
+may have written the same stage, and its `Create` may be about to read it.
+
+A `Create` of that VM that is still running is not disturbed: `qm importdisk` keeps
+reading a stage it has already opened after the stage is unlinked. A `Create` that
+has not reached `qm importdisk` fails its node-side stage check and removes its VM
+shell. Without the SSH data plane nothing can have been staged on the node, so
+nothing is removed there.
 
 - **Idempotent.** An object that does not exist is a success with outcome
   `NOT_FOUND`. A gRPC `NotFound` status is also treated as success by the manager.
@@ -374,11 +396,14 @@ into the tenant's imported disk. Every NFS and S3 import therefore:
    file the tenant cannot change (libvirt: `qemu-img dd -f raw -O raw` into the
    private write directory; vSphere: the same into the pod; Proxmox: `head -c`
    through the `nosymfollow,nosuid,nodev,noexec` kernel mount, refusing a
-   non-regular file; S3: the download). The bound: the object's size is read first
+   non-regular file, into a root-owned temp in the root-only stage directory that
+   is renamed onto the stage (the stage builder of the imported-disk confinement,
+   #384); S3: the download). The bound: the object's size is read first
    (`qemu-img info -f raw`, or `stat` on the mount — neither opens anything else)
    and refused above the copy limit (`VIRTRIGAUD_MIGRATION_IMPORT_MAX_GIB`, default
-   1024 GiB, lowered by the import size cap of #382 once it lands:
-   `migration.StagedCopyLimit`) or when less than twice its size is free where it
+   1024 GiB, lowered by the import's `max_virtual_size_bytes` (#382). That limit is
+   a virtual size, so it gets room for the image's metadata: + 1/64 + 16 MiB.
+   See `migration.StagedCopyLimit`.) or when less than twice its size is free where it
    is copied (the Proxmox stage directory `/var/lib/virtrigaud/import-stage`, the pool directory, the pod's `/tmp` — a full pod
    `/tmp` evicts the provider for every tenant; the vSphere pod measures `/tmp`
    against its emptyDir `sizeLimit`, passed as `VIRTRIGAUD_TMP_SIZE_LIMIT`, not
@@ -387,8 +412,12 @@ into the tenant's imported disk. Every NFS and S3 import therefore:
    tenant NFS server can report a small size and serve more — and a copy longer
    than measured is refused. S3 downloads are bounded the same way by the
    object's reported size (`BoundedWriter`), with the same free-space pre-check.
-   On Proxmox the copy is in the pipe form (`setpriv … cat -- src | head -c … >
-   dst`): root opens the copy, the dropped-privilege reader holds only a pipe.
+   On Proxmox the migration's `uid`/`gid` (`setpriv`) only measures the object (a
+   regular file, and its size). The bound and the free space are checked by root:
+   the stage directory's ancestors are created under `umask 077`, so a
+   dropped-privilege `df` could not reach it. The copy is in the pipe form
+   (`setpriv … cat -- src | head -c $((SZ + 1)) > "$TMP"`): root opens the copy,
+   and the dropped-privilege reader holds only a pipe.
    Too large is `InvalidArgument`, no space `ResourceExhausted`; both constant;
 2. checks that copy's header **in Go first, without qemu**
    (`migration.CheckStagedImageBytes` on its first 64 KiB): qemu opens a qcow2
@@ -407,11 +436,19 @@ into the tenant's imported disk. Every NFS and S3 import therefore:
    also not in the fixed region qemu searches for one. Raw: must not start with
    another format's magic, nor read as a VMDK descriptor by qemu's text probe.
    The declared virtual size (qcow2 size, VMDK capacity) is returned and refused
-   above the copy limit until #382's import cap replaces it. Only then `qemu-img info -U` (on Proxmox under
+   above the copy limit, which includes #382's limit. #382's exact check runs on
+   the disk as it will be landed. Only then `qemu-img info -U` (on Proxmox under
    `unshare -n`) and `migration.CheckStagedImageHeader` / libvirt's
    `inspectHostImageAs` check it again: exactly the expected format, no backing
    file, no data file, no extent outside the file. A refusal is `InvalidArgument`;
 3. converts or imports **that same copy**, with an explicit source format.
+
+On Proxmox the checked copy IS the stage: it stays in the root-only stage directory
+until `Create`, and a refused or failed check removes it. `Create` parses and
+checks the stage's header again, in the format of the stage's extension, before it
+builds anything: `qm importdisk` reads the stage as root and probes it. A refused
+stage is removed (`InvalidSpec`, nothing is created). A stage that cannot be read
+is a VM-scoped not-performed answer, and the stage is kept for the retry.
 
 Libvirt already had the header check, but its convert read the NFS object a second
 time; Proxmox and vSphere had none. These were pre-existing.
