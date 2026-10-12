@@ -275,8 +275,8 @@ Validates manager.maxDiskSize (the manager's --max-disk-size) and returns it as
 a string: "" (unset, as in an older values file under --reuse-values) or a
 quantity with a unit of at least G (such as 500Gi or 2Ti). A missing unit
 ("500" is 500 bytes), a smaller unit, zero or "none" fails the render: the
-manager would refuse to start with it. The manager also refuses a value below
-1Gi (e.g. "1G"). Takes the root context.
+manager would refuse to start with it. So does a value below 1Gi (e.g. "1G"
+or "0.5Gi"), which the manager refuses too. Takes the root context.
 */}}
 {{- define "virtrigaud.maxDiskSizeValue" -}}
 {{- $v := "" -}}
@@ -286,6 +286,14 @@ manager would refuse to start with it. The manager also refuses a value below
 {{- if ne $v "" -}}
 {{- if or (not (regexMatch "^[0-9]+(\\.[0-9]+)?(Gi|Ti|Pi|Ei|G|T|P|E)$" $v)) (regexMatch "^0+(\\.0+)?[A-Za-z]*$" $v) -}}
 {{- fail (printf "manager.maxDiskSize: invalid disk-size limit %q; use a quantity of at least 1Gi such as 500Gi or 2Ti, or leave it empty for no limit" $v) -}}
+{{- end -}}
+{{- /* Below 1Gi is possible only with a G or Gi unit: refuse it here, as the
+       manager does (it would otherwise crash-loop, and with failurePolicy
+       Fail block VM and VMClass writes). 1Gi is 1.073741824G. */ -}}
+{{- $num := regexFind "^[0-9]+(\\.[0-9]+)?" $v -}}
+{{- $unit := trimPrefix $num $v -}}
+{{- if or (and (eq $unit "Gi") (lt (float64 $num) 1.0)) (and (eq $unit "G") (lt (float64 $num) 1.073741824)) -}}
+{{- fail (printf "manager.maxDiskSize: invalid disk-size limit %q; it must be at least 1Gi (1Gi is about 1.074G)" $v) -}}
 {{- end -}}
 {{- end -}}
 {{- $v -}}

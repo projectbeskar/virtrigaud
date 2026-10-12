@@ -35,6 +35,13 @@ func TestParseMaxDiskSize(t *testing.T) {
 		{"1Gi", "1Gi"},
 		{"2Ti", "2Ti"},
 		{"1073741824", "1Gi"},
+		// The chart's render check (hack/verify-max-disk-size-render.sh)
+		// accepts and refuses exactly these boundary values too.
+		{"1.5Gi", "1.5Gi"},
+		{"1.1G", "1.1G"},
+		{"1G", ""},
+		{"0.5Gi", ""},
+		{"1.07G", ""},
 		{"", ""},
 		{"0", ""},
 		{"-1Gi", ""},
