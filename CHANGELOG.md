@@ -11,7 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > **Operator note.**
 > - Nothing changes unless `manager.maxDiskSize` (`--max-disk-size`) is set or a Provider carries `infra.virtrigaud.io/max-disk-size`.
 > - Before setting a limit, list the VMs and VMClasses above it: they keep running, but cloning, migrating or re-creating them, or growing their disks, is refused.
-> - **Roll the provider images with the manager.** `GetDiskInfo` now lists every disk's size, and `ImportDisk` now enforces the limit on the disk it lands. An older provider image does neither: while a limit applies, clones through it are refused (`DiskSizeLimitUnverifiable`), and its imports rely on the manager's checks only.
+> - **Roll the provider images with the manager.** `GetDiskInfo` now lists every disk's size, and `ImportDisk` now enforces the limit on the disk it lands. An older provider image does neither: while a limit applies, clones through it are refused (`DiskSizeLimitUnverifiable`), and while a limit applies a migration into it is held (`DiskSizeLimitUnverifiable`, "upgrade the provider image"), because it does not report `supports_import_size_limit`.
 > - Keep `vmmigrations/status` (like `virtualmachines/status`) writable by the manager only: the pre-import check trusts `status.diskInfo.sourceSize`.
 > - A migration exported before a limit was set is held before its import (no recorded size). Delete it and migrate again.
 
@@ -42,6 +42,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     - pvc: a private copy of the staged file before it becomes the volume — the host copy over SSH (removed on refusal), or, over a local connection, a copy in the provider's own container (`privateLocalImportCopy`; previously the tenant's file was read in place twice).
   - **Proxmox** (`import_size_limit.go`): the node-local stage that `qm importdisk` lands (s3, nfs), removed on refusal. The pvc path is rejected earlier and is unchanged.
   - The mock provider ignores the field.
+  - `GetCapabilitiesResponse.supports_import_size_limit` (field 24; additive), advertised by vSphere, single-host libvirt and Proxmox (`sdk` `CapabilityImportSizeLimit`). While a limit applies, a migration into a target that does not report it is held in `Validating` (before any export) or `Importing`. Without a limit, nothing changes.
   - `internal/transport/grpc/client.go` sends the field and maps the two refusals to a non-retryable Conflict marked `ErrDiskSizeExceedsLimit` / `ErrDiskSizeUnverifiable` (`contracts`), never counted toward the circuit breaker.
 - `internal/controller/disk_size_limit.go`, `disk_size_limit_copies.go` (new): enforcement before the provider call that would create or grow a disk, whether or not webhooks are on.
   - **VirtualMachine create and re-create**: a VMClass `spec.diskDefaults.size` or any `spec.disks[].sizeGiB` above the limit holds the VM. On a libvirt Provider, a class with no size counts as the libvirt default primary disk, 20Gi.
