@@ -662,6 +662,21 @@ func checkRoutedSnapshotID(id string) error {
 	return nil
 }
 
+// checkSnapshotIDArgument refuses (InvalidSpec), on every topology, a
+// snapshot id that is unsafe as a virsh argument or in a file name: empty,
+// starting with '-' (virsh would read it as an option), or containing '/' or
+// a control character (the overlay cleanup derives a file name from it). It
+// is deliberately looser than checkRoutedSnapshotID, which a clustered
+// provider applies first: a single-host snapshot an earlier release named
+// otherwise can still be deleted or reverted.
+func checkSnapshotIDArgument(id string) error {
+	if id == "" || strings.HasPrefix(id, "-") || strings.ContainsRune(id, '/') || strings.ContainsFunc(id, isControlRune) {
+		return contracts.NewInvalidSpecError(fmt.Sprintf(
+			"snapshot id %q is not valid: it must not be empty, start with '-', or contain '/' or control characters", id), nil)
+	}
+	return nil
+}
+
 // SnapshotDelete deletes a VM snapshot. On a clustered provider it is routed
 // and owner-checked like SnapshotCreate: a snapshot of a domain this VM does not
 // own is never deleted (NotFound).
@@ -712,6 +727,9 @@ func routedTaskResponse(host hostconn.HostID, r *providerv1.TaskResponse) *provi
 // snapshot_overlay_cleanup.go — libvirt leaves them in the pool), which never
 // fails the RPC.
 func snapshotDeleteOn(ctx context.Context, backend providerBackend, conn libvirtConn, domain, snapshotID string) (*providerv1.TaskResponse, error) {
+	if err := checkSnapshotIDArgument(snapshotID); err != nil {
+		return nil, err
+	}
 	// Check if snapshot exists
 	exists, err := conn.snapshotExists(ctx, domain, snapshotID)
 	if err != nil {
@@ -790,6 +808,9 @@ func (s *Server) SnapshotRevert(ctx context.Context, req *providerv1.SnapshotRev
 // domain (see snapshotCreateOn). The virsh command sequence is the historical
 // one, unchanged.
 func snapshotRevertOn(ctx context.Context, conn libvirtConn, domain, snapshotID string) (*providerv1.TaskResponse, error) {
+	if err := checkSnapshotIDArgument(snapshotID); err != nil {
+		return nil, err
+	}
 	// Check if snapshot exists
 	exists, err := conn.snapshotExists(ctx, domain, snapshotID)
 	if err != nil {
