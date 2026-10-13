@@ -682,7 +682,9 @@ providers), and rollback caveats in
   `/var/lib/libvirt/images` destroyed, undefined and recreated it there. An
   existing pool is now never destroyed or redefined (only started when
   inactive); one at another path fails the operation closed with an
-  actionable `InvalidSpec` naming the host and the path. Mount shared storage
+  `InvalidSpec` whose constant message says an administrator must fix the
+  host (the host and the pool's path are in the provider log, never in a
+  status). Mount shared storage
   **at** `/var/lib/libvirt/images` — see the host prerequisites in
   [`docs/clustered-provider-inventory.md`](../clustered-provider-inventory.md#host-prerequisites).
 - **libvirt: deleting a snapshot removes its leftover overlay file.** libvirt

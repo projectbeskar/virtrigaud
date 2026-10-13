@@ -156,9 +156,9 @@ func TestEnsureDefaultStoragePool_NeverRewritesAnExistingPool(t *testing.T) {
 			require.Error(t, err)
 			assert.True(t, contracts.IsInvalidSpec(err), "non-retryable: only the host's administrator can fix it: %v", err)
 			msg := err.Error()
-			assert.Contains(t, msg, `the libvirt storage pool "default" on the libvirt host is at `+nfs)
-			assert.Contains(t, msg, "VirtRigaud requires it at "+fx.required)
-			assert.Contains(t, msg, "the pool was not changed")
+			assert.Contains(t, msg, defaultPoolMisplacedMessage)
+			assert.NotContains(t, msg, nfs, "the operator's pool path never reaches a status")
+			assert.NotContains(t, msg, "kvm-01", "nor does the host")
 			assert.Empty(t, mutationsIn(fx.poolCalls()), "the operator's pool is never touched")
 		})
 	}
@@ -230,8 +230,8 @@ func TestCreate_DefaultPoolElsewhereIsInvalidArgument(t *testing.T) {
 	st, ok := status.FromError(err)
 	require.True(t, ok, "%v", err)
 	assert.Equal(t, codes.InvalidArgument, st.Code(), st.Message())
-	assert.Contains(t, st.Message(), `storage pool "default"`)
-	assert.Contains(t, st.Message(), "the pool was not changed")
+	assert.Equal(t, defaultPoolMisplacedMessage, st.Message(), "a constant message: no host, no path")
+	assert.NotContains(t, st.Message(), elsewhere)
 	for _, c := range fx.calls() {
 		for _, m := range poolMutations {
 			assert.NotContains(t, c, " "+m+" ", "the pool is never touched: %q", c)

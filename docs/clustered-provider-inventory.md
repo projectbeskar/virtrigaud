@@ -204,9 +204,9 @@ needs:
   pool, the provider creates one at that path on the first create or disk
   import. If it has one at that path, the provider only starts it when it is
   inactive. **A `default` pool at any other directory is never changed**: the
-  create or import fails with `InvalidSpec` (`the libvirt storage pool
-  "default" on host "<host>" is at <path>; VirtRigaud requires it at
-  /var/lib/libvirt/images ...`) and the pool is left exactly as it is — the
+  create or import fails with `InvalidSpec` and the constant message `the libvirt storage pool "default" on the VM's host is not at /var/lib/libvirt/images; VirtRigaud requires it there and did not change it — an administrator must fix the host (details in the provider log)` — the VM's status names neither the host nor the pool's
+  path; the provider log does (`ERROR The libvirt storage pool "default" on
+  host "<host>" is at "<path>" ...`). The pool is left exactly as it is — the
   provider never destroys, undefines or redefines a pool. (Before v0.4.0-rc1
   it destroyed and recreated such a pool at `/var/lib/libvirt/images`.) A pool
   whose path is a symbolic link to `/var/lib/libvirt/images`, or the reverse,

@@ -87,21 +87,25 @@ func NewStorageProvider(virshProvider *VirshProvider) *StorageProvider {
 // variable only so tests can root the pool in a temporary directory.
 var defaultPoolRequiredDir = DefaultImageDir
 
-// defaultPoolMisplacedError is the refusal of an operation that needs the
-// "default" storage pool on a host whose "default" pool exists at another
-// directory. It is non-retryable (InvalidSpec): only the host's administrator
-// can fix it, and the VirtualMachine controller re-checks it on its slow
-// cadence. The pool is never changed.
-func defaultPoolMisplacedError(host, dir string) error {
-	return contracts.NewInvalidSpecError(fmt.Sprintf(
-		"the libvirt storage pool %q on %s is at %s; VirtRigaud requires it at %s "+
-			"(mount shared storage at %s instead of moving the pool); the pool was not changed",
-		defaultStoragePool, host, dir, defaultPoolRequiredDir, defaultPoolRequiredDir), nil)
+// defaultPoolMisplacedMessage is the CONSTANT refusal of an operation that
+// needs the "default" storage pool on a host whose "default" pool exists at
+// another directory. It reaches tenant-visible status (VirtualMachine Ready,
+// VMMigration status), so it names neither the host nor the pool's path; both
+// are logged by the provider (EnsureDefaultStoragePool).
+const defaultPoolMisplacedMessage = `the libvirt storage pool "default" on the VM's host is not at ` + DefaultImageDir +
+	`; VirtRigaud requires it there and did not change it — an administrator must fix the host (details in the provider log)`
+
+// errDefaultPoolMisplaced is defaultPoolMisplacedMessage as a non-retryable
+// InvalidSpec: only the host's administrator can fix it, and the
+// VirtualMachine controller re-checks it on its slow cadence. The pool is
+// never changed.
+func errDefaultPoolMisplaced() error {
+	return contracts.NewInvalidSpecError(defaultPoolMisplacedMessage, nil)
 }
 
-// hostLabel names the libvirt host of uri for an operator-facing message —
-// host "<name>" with its host name only (never the user or port) — or "the
-// libvirt host" for a local connection.
+// hostLabel names the libvirt host of uri for the provider log — host
+// "<name>" with its host name only (never the user or port) — or "the libvirt
+// host" for a local connection. It never reaches a status.
 func hostLabel(uri string) string {
 	if u, err := url.Parse(uri); err == nil && u.Hostname() != "" {
 		return fmt.Sprintf("host %q", u.Hostname())
@@ -120,7 +124,8 @@ func hostLabel(uri string) string {
 //   - a "default" pool at defaultPoolRequiredDir: it is started if inactive,
 //     and otherwise left alone;
 //   - a "default" pool at any other directory: the operation fails closed
-//     (defaultPoolMisplacedError) and the pool is left exactly as it is;
+//     (errDefaultPoolMisplaced, a constant message; the host and the path
+//     are logged) and the pool is left exactly as it is;
 //   - a pool definition that cannot be read: a retryable error, nothing done.
 func (s *StorageProvider) EnsureDefaultStoragePool(ctx context.Context) error {
 	log.Printf("INFO Ensuring default storage pool exists and is active")
@@ -145,9 +150,10 @@ func (s *StorageProvider) EnsureDefaultStoragePool(ctx context.Context) error {
 			return err
 		}
 		if !atRequiredDir {
-			log.Printf("ERROR The libvirt storage pool %q is at %q, not %s; refusing to use it, and leaving it unchanged",
-				defaultStoragePool, dir, defaultPoolRequiredDir)
-			return defaultPoolMisplacedError(hostLabel(s.virshProvider.uri), dir)
+			log.Printf("ERROR The libvirt storage pool %q on %s is at %q, not %s; refusing to use it, and leaving it unchanged "+
+				"(mount shared storage at %s instead of moving the pool)",
+				defaultStoragePool, hostLabel(s.virshProvider.uri), dir, defaultPoolRequiredDir, defaultPoolRequiredDir)
+			return errDefaultPoolMisplaced()
 		}
 	}
 

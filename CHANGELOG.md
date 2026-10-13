@@ -22,7 +22,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `internal/providers/libvirt/storage.go`: `EnsureDefaultStoragePool` (called by Create, `ImportDisk` and the NFS / S3 imports) never destroys, undefines or redefines an existing pool (rc1 lab, F1; since 19499ea). It reads the pool definition structurally:
   - no `default` pool: created at `/var/lib/libvirt/images`;
   - at that path (lexically, or once both are resolved on the host): started only if inactive;
-  - at any other path: untouched, `InvalidSpec` naming the host and the path;
+  - at any other path: untouched, `InvalidSpec` with a constant message (no host, no path: it reaches tenant-visible status); the host and the pool's path are logged by the provider;
   - unreadable: retryable, nothing done.
 - `internal/providers/libvirt/provider_virsh.go`: a Create failure that is `InvalidSpec` is returned unwrapped (non-retryable, `InvalidArgument` on the wire) instead of as a retryable error.
 - `internal/providers/libvirt/snapshot_overlay_cleanup.go` (new), `internal/providers/libvirt/server.go`, `internal/providers/libvirt/conn.go`: `SnapshotDelete` removes the overlay file `<domain>-disk.<snapshot>` that libvirt 10 leaves in the pool after deleting an external snapshot (rc1 lab, F2). It records the snapshot's overlays before the delete, and after it removes only the domain's own overlay when it is out of every current chain, referenced by no other snapshot, a regular file inside the storage directories, and used by no other domain (cluster-wide on a clustered Provider), using Delete's helpers. Anything unestablished keeps the file. A failed removal is logged only and never fails the RPC. `Provider.SnapshotDelete` now shares the gRPC core.
