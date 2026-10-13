@@ -78,6 +78,16 @@ const reasonSourcePoweredOff = "SourcePoweredOff"
 // sourcePoweredOffMessage is the constant message of SourcePowerOff=True.
 const sourcePoweredOffMessage = "The source VM is powered off"
 
+// sourceVMNotFoundMessage is the constant failure message of a migration
+// whose source VM its provider does not find (gone from the hypervisor, or not
+// this VM's): waiting for it to power off could never succeed.
+const sourceVMNotFoundMessage = "Failed to power off source VM before migration: the source VM was not found on its provider; " +
+	"check the source VirtualMachine's status"
+
+// errSourceVMNotFound is returned by ensureSourcePoweredOff when the source
+// VM's provider answers that it does not exist.
+var errSourceVMNotFound = stderrors.New("the source VM was not found on its provider")
+
 // reasonWaitingForSourcePowerOff is the Validating condition reason (and the
 // event reason) of a migration waiting for its source VM to be powered off.
 const reasonWaitingForSourcePowerOff = "WaitingForSourcePowerOff"
@@ -159,6 +169,12 @@ func (r *VMMigrationReconciler) ensureSourcePoweredOff(ctx context.Context, migr
 	if err == nil {
 		var desc contracts.DescribeResponse
 		desc, err = providerInstance.Describe(ctx, ref)
+		if contracts.IsNotFound(err) || (err == nil && !desc.Exists) {
+			// Gone (or not this VM's): it can never be observed Off. Fail fast
+			// instead of waiting out the budget.
+			logger.Info("The source VM's provider does not find it; failing the migration", "vm", sourceVM.Name)
+			return false, ctrl.Result{}, errSourceVMNotFound
+		}
 		if err == nil && desc.PowerState == string(contracts.PowerStateOff) {
 			logger.Info("Source VM is powered off; proceeding with migration", "vm", sourceVM.Name)
 			// Recorded with the caller's status write (the phase advances).

@@ -299,3 +299,39 @@ func TestPendingPhase_RestartsThePowerOffBudget(t *testing.T) {
 	assert.Equal(t, infrav1beta1.MigrationPhaseValidating, got.Status.Phase)
 	assert.Nil(t, meta.FindStatusCondition(got.Status.Conditions, migrationConditionSourcePowerOff))
 }
+
+// notFoundSourceProvider answers that the source VM does not exist.
+type notFoundSourceProvider struct {
+	powerSpyProvider
+	asError bool
+}
+
+func (p *notFoundSourceProvider) Describe(_ context.Context, _ contracts.VMRef) (contracts.DescribeResponse, error) {
+	if p.asError {
+		return contracts.DescribeResponse{}, contracts.NewNotFoundError("domain not found", nil)
+	}
+	return contracts.DescribeResponse{Exists: false}, nil
+}
+
+// TestValidatingPhase_SourceNotFoundFailsFast: a source its provider does not
+// find can never be observed Off, so the migration fails at once with a
+// constant message instead of waiting out the budget.
+func TestValidatingPhase_SourceNotFoundFailsFast(t *testing.T) {
+	for name, asError := range map[string]bool{"Exists=false": false, "NotFound error": true} {
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			migration, objs := xnsMigration("")
+			migration.Status.Phase = infrav1beta1.MigrationPhaseValidating
+			migration.Spec.Source.PowerOffBeforeMigration = true
+			prov := &notFoundSourceProvider{asError: asError}
+			r, _ := newXNSMigrationReconciler(t, mountTestScheme(t), prov, append(objs, migration)...)
+
+			_, err := r.handleValidatingPhase(ctx, migration)
+			require.NoError(t, err)
+			got := getXNSMigration(t, r, migration)
+			assert.Equal(t, infrav1beta1.MigrationPhaseFailed, got.Status.Phase)
+			assert.Equal(t, sourceVMNotFoundMessage, got.Status.Message)
+			assert.Empty(t, prov.ops())
+		})
+	}
+}

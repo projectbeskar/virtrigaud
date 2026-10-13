@@ -581,6 +581,9 @@ func (r *VMMigrationReconciler) handleValidatingPhase(ctx context.Context, migra
 			logger.Info("Timed out waiting for the source VM to be powered off", "timeout", migrationSourcePowerOffTimeout)
 			return r.transitionToFailed(ctx, migration, sourcePowerOffTimedOutMessage)
 		}
+		if stderrors.Is(err, errSourceVMNotFound) {
+			return r.transitionToFailed(ctx, migration, sourceVMNotFoundMessage)
+		}
 		if err != nil {
 			logger.Error(err, "Failed to power off source VM before migration")
 			return r.transitionToFailed(ctx, migration,
