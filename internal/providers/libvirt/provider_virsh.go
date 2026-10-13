@@ -127,11 +127,13 @@ func (p *Provider) createVM(ctx context.Context, vp *VirshProvider, req contract
 	// Create VM with cloud-init support
 	vmID, err := p.createVMWithCloudInit(ctx, vp, req, domainName, g)
 	if err != nil {
-		if isInvalidArgument(err) || contracts.IsConflict(err) {
-			// A rejected request (e.g. a confined image path) or a name
+		if isInvalidArgument(err) || contracts.IsConflict(err) || contracts.IsInvalidSpec(err) {
+			// A rejected request (e.g. a confined image path), a name
 			// conflict on the host (the VM's disk path is another domain's
-			// disk) is not retryable: return it as-is so it reaches the manager
-			// as InvalidArgument / AlreadyExists.
+			// disk), or a host whose "default" storage pool is not where
+			// VirtRigaud requires it (defaultPoolMisplacedError) is not
+			// retryable: return it as-is so it reaches the manager as
+			// InvalidArgument / AlreadyExists.
 			return contracts.CreateResponse{}, fmt.Errorf("failed to create VM: %w", err)
 		}
 		return contracts.CreateResponse{}, contracts.NewRetryableError("failed to create VM", err)

@@ -103,7 +103,7 @@ case "$1" in
     echo "error: failed to get domain '$2'" >&2; exit 1 ;;
   pool-list) printf ' Name      State    Autostart\n-------------------------------\n default   active   yes\n\n' ;;
   pool-info) printf 'Name:           default\nState:          running\n' ;;
-  pool-dumpxml) printf "<pool type='dir'><name>default</name><target><path>%s</path></target></pool>\n<!-- /var/lib/libvirt/images -->\n" "$(cat "$d/pooldir")" ;;
+  pool-dumpxml) printf "<pool type='dir'><name>default</name><target><path>%s</path></target></pool>\n" "$(cat "$d/pooldir")" ;;
   vol-create)
     cat "$3" > "$d/vol-create.xml"
     name=$(sed -n 's:.*<name>\(.*\)</name>.*:\1:p' "$d/vol-create.xml" | head -n 1)
