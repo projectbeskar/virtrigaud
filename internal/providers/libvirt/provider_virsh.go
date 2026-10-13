@@ -2603,36 +2603,12 @@ func (p *Provider) SnapshotDelete(ctx context.Context, vm contracts.VMRef, snaps
 		return "", contracts.NewRetryableError("virsh provider not initialized", nil)
 	}
 
-	// Check if snapshot exists
-	exists, err := p.virshProvider.snapshotExists(ctx, vmId, snapshotId)
-	if err != nil {
-		return "", fmt.Errorf("failed to check snapshot existence: %w", err)
+	// The gRPC SnapshotDelete's core: the existence check, the dependents
+	// guard, the delete, and the cleanup of the overlay files libvirt leaves
+	// behind (snapshot_overlay_cleanup.go). Synchronous: no task reference.
+	if _, err := snapshotDeleteOn(ctx, p, p.singleHostConn(), vmId, snapshotId); err != nil {
+		return "", err
 	}
-
-	if !exists {
-		log.Printf("WARN Snapshot %s does not exist, considering deletion successful", snapshotId)
-		return "", nil
-	}
-
-	if err := refuseIfDiskHasDependents(ctx, p.virshProvider, vmId, guardOpSnapshotDelete); err != nil {
-		return "", fmt.Errorf("failed to delete snapshot: %w", err)
-	}
-
-	// Delete the snapshot
-	args := []string{
-		"snapshot-delete",
-		vmId,
-		snapshotId,
-	}
-
-	result, err := p.virshProvider.runVirshCommand(ctx, args...)
-	if err != nil {
-		return "", fmt.Errorf("failed to delete snapshot: %w", err)
-	}
-
-	log.Printf("INFO Snapshot deleted successfully: %s\nOutput: %s", snapshotId, result.Stdout)
-
-	// Return empty task reference (synchronous operation)
 	return "", nil
 }
 

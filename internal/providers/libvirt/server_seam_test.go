@@ -167,6 +167,7 @@ type fakeSeamProvider struct {
 	prepID    string
 	prepPath  string
 	prepErr   error
+	overlays  []string
 }
 
 // clustered reports single-host topology: this fake stands in for a single-host
@@ -180,6 +181,12 @@ func (f *fakeSeamProvider) conn(_ context.Context) (libvirtConn, error) {
 func (f *fakeSeamProvider) Clone(_ context.Context, req contracts.CloneRequest) (contracts.CloneResponse, error) {
 	f.cloneReq = req
 	return f.cloneResp, f.cloneErr
+}
+
+// removeSnapshotOverlays records the overlays a SnapshotDelete handed over for
+// cleanup; the fake host has no files to remove.
+func (f *fakeSeamProvider) removeSnapshotOverlays(_ context.Context, _ libvirtConn, _, _ string, overlays []string) {
+	f.overlays = append(f.overlays, overlays...)
 }
 
 func (f *fakeSeamProvider) imagePrepare(_ context.Context, _ imageartifact.Request, _, _ string) (imagePrepareResult, error) {
