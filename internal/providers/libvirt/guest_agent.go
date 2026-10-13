@@ -178,7 +178,7 @@ func (g *GuestAgentProvider) GetGuestInfo(ctx context.Context, domainName string
 	// Check if guest agent is available and responsive
 	if !g.isGuestAgentAvailable(ctx, domainName) {
 		info.AgentStatus = "not_available"
-		log.Printf("WARN QEMU Guest Agent not available for domain: %s", domainName)
+		log.Printf("DEBUG QEMU Guest Agent not available for domain: %s", domainName)
 		return info, nil
 	}
 
@@ -248,8 +248,9 @@ func truncateGuestName(s string) string {
 
 // isGuestAgentAvailable checks if QEMU Guest Agent is available and responsive
 func (g *GuestAgentProvider) isGuestAgentAvailable(ctx context.Context, domainName string) bool {
-	// Ping the guest agent.
-	result, err := g.agentCommand(ctx, domainName, guestAgentRequest{Execute: qgaGuestPing})
+	// Ping the guest agent. No agent is an expected answer, not an error
+	// (withExpectedFailures: its failure is logged at DEBUG).
+	result, err := g.agentCommand(withExpectedFailures(ctx), domainName, guestAgentRequest{Execute: qgaGuestPing})
 	if err != nil {
 		log.Printf("DEBUG Guest agent ping failed for %s: %v", domainName, err)
 		return false

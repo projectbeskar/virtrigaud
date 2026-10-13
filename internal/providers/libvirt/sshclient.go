@@ -309,8 +309,7 @@ func (v *VirshProvider) runOverSSHStdin(ctx context.Context, remoteCmd string, s
 		Duration: duration,
 	}
 	if runErr != nil {
-		log.Printf("ERROR Command failed: %s (exit code: %d, duration: %v)", remoteCmd, exitCode, duration)
-		log.Printf("ERROR Stderr: %s", result.Stderr)
+		logCommandFailure(ctx, remoteCmd, exitCode, duration, result.Stderr)
 		return result, &VirshError{Command: remoteCmd, ExitCode: exitCode, Stderr: result.Stderr, Stdout: result.Stdout, Cause: runErr}
 	}
 	log.Printf("DEBUG Command successful: %s (duration: %v)", remoteCmd, duration)
