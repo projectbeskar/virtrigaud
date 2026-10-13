@@ -81,13 +81,19 @@ func storedMigration(t *testing.T, c client.Client, m *infrav1beta1.VMMigration)
 	return got
 }
 
-// timedOutPowerOffWait returns a Validating condition recording a wait for the
-// source power-off that began longer than migrationSourcePowerOffTimeout ago.
+// timedOutPowerOffWait returns a SourcePowerOff condition recording a wait for
+// the source power-off that began longer than migrationSourcePowerOffTimeout
+// ago, next to a Validating condition rewritten just now by another check of
+// the phase (which must not restart the budget).
 func timedOutPowerOffWait() []metav1.Condition {
 	return []metav1.Condition{{
-		Type: infrav1beta1.VMMigrationConditionValidating, Status: metav1.ConditionFalse,
+		Type: migrationConditionSourcePowerOff, Status: metav1.ConditionFalse,
 		Reason: reasonWaitingForSourcePowerOff, Message: waitingForSourcePowerOffMessage,
 		LastTransitionTime: metav1.NewTime(time.Now().Add(-migrationSourcePowerOffTimeout - time.Minute)),
+	}, {
+		Type: infrav1beta1.VMMigrationConditionValidating, Status: metav1.ConditionFalse,
+		Reason: "SourceProviderNotReady", Message: "Source provider is not ready",
+		LastTransitionTime: metav1.Now(),
 	}}
 }
 
@@ -236,4 +242,60 @@ func TestValidatingPhase_SourcePowerOffTimeoutFails(t *testing.T) {
 	assert.Equal(t, infrav1beta1.MigrationPhaseFailed, got.Status.Phase)
 	assert.Equal(t, sourcePowerOffTimedOutMessage, got.Status.Message)
 	assert.Empty(t, prov.ops())
+}
+
+// TestEnsureSourcePoweredOff_BudgetSurvivesValidatingFlaps: other checks of
+// the Validating phase rewrite the Validating condition (a provider not
+// ready, a binding or mount wait); the power-off budget is measured from the
+// SourcePowerOff condition, which they never touch, so it is not restarted.
+func TestEnsureSourcePoweredOff_BudgetSurvivesValidatingFlaps(t *testing.T) {
+	ctx := context.Background()
+	prov := &powerSpyProvider{}
+	sourceVM, sourceProvider, migration := snapshotFixture()
+	migration.Spec.Source.PowerOffBeforeMigration = true
+	r, c := newSnapshotReconciler(t, prov, sourceVM, sourceProvider, migration)
+
+	_, _, err := r.ensureSourcePoweredOff(ctx, migration)
+	require.NoError(t, err)
+	stored := storedMigration(t, c, migration)
+	started := meta.FindStatusCondition(stored.Status.Conditions, migrationConditionSourcePowerOff)
+	require.NotNil(t, started)
+	assert.Equal(t, metav1.ConditionFalse, started.Status)
+
+	// Another check flaps Validating; the wait resumes.
+	meta.SetStatusCondition(&stored.Status.Conditions, metav1.Condition{
+		Type: infrav1beta1.VMMigrationConditionValidating, Status: metav1.ConditionFalse,
+		Reason: "TargetProviderNotReady", Message: "Target provider is not ready",
+		LastTransitionTime: metav1.NewTime(time.Now().Add(time.Second)), ObservedGeneration: stored.Generation,
+	})
+	require.NoError(t, c.Status().Update(ctx, stored))
+	_, _, err = r.ensureSourcePoweredOff(ctx, stored)
+	require.NoError(t, err)
+	resumed := meta.FindStatusCondition(storedMigration(t, c, migration).Status.Conditions, migrationConditionSourcePowerOff)
+	require.NotNil(t, resumed)
+	assert.True(t, started.LastTransitionTime.Equal(&resumed.LastTransitionTime), "the budget's start is kept")
+
+	// Once the source is Off the gate is recorded True.
+	prov.poweredOff.Store(true)
+	done, _, err := r.ensureSourcePoweredOff(ctx, stored)
+	require.NoError(t, err)
+	assert.True(t, done)
+	assert.True(t, meta.IsStatusConditionTrue(stored.Status.Conditions, migrationConditionSourcePowerOff))
+}
+
+// TestPendingPhase_RestartsThePowerOffBudget: a retried migration (Failed ->
+// Pending -> Validating) gets a fresh power-off budget.
+func TestPendingPhase_RestartsThePowerOffBudget(t *testing.T) {
+	ctx := context.Background()
+	sourceVM, sourceProvider, migration := snapshotFixture()
+	migration.Spec.Source.PowerOffBeforeMigration = true
+	migration.Status.Phase = infrav1beta1.MigrationPhasePending
+	migration.Status.Conditions = timedOutPowerOffWait()
+	r, c := newSnapshotReconciler(t, &powerSpyProvider{}, sourceVM, sourceProvider, migration)
+
+	_, err := r.handlePendingPhase(ctx, migration)
+	require.NoError(t, err)
+	got := storedMigration(t, c, migration)
+	assert.Equal(t, infrav1beta1.MigrationPhaseValidating, got.Status.Phase)
+	assert.Nil(t, meta.FindStatusCondition(got.Status.Conditions, migrationConditionSourcePowerOff))
 }

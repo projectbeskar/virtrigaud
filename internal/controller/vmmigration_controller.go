@@ -336,9 +336,11 @@ func (r *VMMigrationReconciler) handlePendingPhase(ctx context.Context, migratio
 	logger := logging.FromContext(ctx)
 	logger.Info("Handling pending phase")
 
-	// Transition to validating
+	// Transition to validating. A retried migration's source power-off wait
+	// starts a fresh budget (vmmigration_source_power.go).
 	migration.Status.Phase = infrav1beta1.MigrationPhaseValidating
 	migration.Status.Message = "Starting validation"
+	meta.RemoveStatusCondition(&migration.Status.Conditions, migrationConditionSourcePowerOff)
 
 	k8s.SetCondition(&migration.Status.Conditions, infrav1beta1.VMMigrationConditionValidating,
 		metav1.ConditionTrue, "ValidationStarted",

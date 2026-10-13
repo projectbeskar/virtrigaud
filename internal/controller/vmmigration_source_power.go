@@ -54,11 +54,29 @@ const migrationPowerOffPollInterval = 5 * time.Second
 
 // migrationSourcePowerOffTimeout bounds how long a migration waits for its
 // source VM to be powered off by the VirtualMachine controller. It is measured
-// from the Validating condition's transition to
-// reasonWaitingForSourcePowerOff, so the budget survives requeues and manager
-// restarts. A hard power-off takes seconds; the budget absorbs a provider that
-// is briefly unavailable and the VirtualMachine controller's retry backoff.
+// from the SourcePowerOff condition's transition to
+// reasonWaitingForSourcePowerOff — a condition only this wait writes, so
+// other checks of the Validating phase rewriting the Validating condition
+// (a provider not ready, a binding or mount wait) never restart it — and
+// survives requeues and manager restarts. A hard power-off takes seconds; the
+// budget absorbs a provider that is briefly unavailable and the
+// VirtualMachine controller's retry backoff.
 const migrationSourcePowerOffTimeout = 10 * time.Minute
+
+// migrationConditionSourcePowerOff is the VMMigration condition recording the
+// source power-off gate of spec.source.powerOffBeforeMigration: False with
+// reasonWaitingForSourcePowerOff from the first wait (its transition time
+// starts the budget), True with reasonSourcePoweredOff once the source is
+// observed Off. It is removed when the migration (re)starts Validating from
+// Pending (handlePendingPhase), so a retried migration gets a fresh budget.
+const migrationConditionSourcePowerOff = "SourcePowerOff"
+
+// reasonSourcePoweredOff is the SourcePowerOff condition reason once the
+// source VM is observed Off.
+const reasonSourcePoweredOff = "SourcePoweredOff"
+
+// sourcePoweredOffMessage is the constant message of SourcePowerOff=True.
+const sourcePoweredOffMessage = "The source VM is powered off"
 
 // reasonWaitingForSourcePowerOff is the Validating condition reason (and the
 // event reason) of a migration waiting for its source VM to be powered off.
@@ -143,6 +161,9 @@ func (r *VMMigrationReconciler) ensureSourcePoweredOff(ctx context.Context, migr
 		desc, err = providerInstance.Describe(ctx, ref)
 		if err == nil && desc.PowerState == string(contracts.PowerStateOff) {
 			logger.Info("Source VM is powered off; proceeding with migration", "vm", sourceVM.Name)
+			// Recorded with the caller's status write (the phase advances).
+			k8s.SetCondition(&migration.Status.Conditions, migrationConditionSourcePowerOff,
+				metav1.ConditionTrue, reasonSourcePoweredOff, sourcePoweredOffMessage, migration.Generation)
 			return true, ctrl.Result{}, nil
 		}
 	}
@@ -156,18 +177,21 @@ func (r *VMMigrationReconciler) ensureSourcePoweredOff(ctx context.Context, migr
 }
 
 // waitForSourcePowerOff records that migration waits for its source VM to be
-// powered off — Validating=False/WaitingForSourcePowerOff with a constant
-// message, an event on the transition only, and a status write only when
-// something changed — and requeues, or returns errSourcePowerOffTimedOut once
-// the wait has lasted migrationSourcePowerOffTimeout.
+// powered off — SourcePowerOff=False and Validating=False, both
+// WaitingForSourcePowerOff with a constant message, an event when the wait
+// starts only, and a status write only when something changed — and requeues,
+// or returns errSourcePowerOffTimedOut once the wait (measured from the
+// SourcePowerOff condition) has lasted migrationSourcePowerOffTimeout.
 func (r *VMMigrationReconciler) waitForSourcePowerOff(ctx context.Context, migration *infrav1beta1.VMMigration) (bool, ctrl.Result, error) {
-	prev := meta.FindStatusCondition(migration.Status.Conditions, infrav1beta1.VMMigrationConditionValidating)
+	prev := meta.FindStatusCondition(migration.Status.Conditions, migrationConditionSourcePowerOff)
 	waiting := prev != nil && prev.Status == metav1.ConditionFalse && prev.Reason == reasonWaitingForSourcePowerOff
 	if waiting && time.Since(prev.LastTransitionTime.Time) > migrationSourcePowerOffTimeout {
 		return false, ctrl.Result{}, errSourcePowerOffTimedOut
 	}
 
 	before := migration.Status.DeepCopy()
+	k8s.SetCondition(&migration.Status.Conditions, migrationConditionSourcePowerOff,
+		metav1.ConditionFalse, reasonWaitingForSourcePowerOff, waitingForSourcePowerOffMessage, migration.Generation)
 	k8s.SetCondition(&migration.Status.Conditions, infrav1beta1.VMMigrationConditionValidating,
 		metav1.ConditionFalse, reasonWaitingForSourcePowerOff, waitingForSourcePowerOffMessage, migration.Generation)
 	migration.Status.Message = waitingForSourcePowerOffMessage

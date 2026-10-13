@@ -202,6 +202,10 @@ var _ = Describe("VMMigration source power-off has one actor (envtest)", func() 
 			Expect(c.Reason).To(Equal(reasonWaitingForSourcePowerOff))
 			Expect(c.Message).To(Equal(waitingForSourcePowerOffMessage))
 			Expect(c.ObservedGeneration).To(Equal(got.Generation))
+			gate := meta.FindStatusCondition(got.Status.Conditions, migrationConditionSourcePowerOff)
+			Expect(gate).NotTo(BeNil())
+			Expect(gate.Status).To(Equal(metav1.ConditionFalse))
+			Expect(gate.Reason).To(Equal(reasonWaitingForSourcePowerOff))
 		}
 
 		By("the migration sets the source's desired power state to Off and waits, sending no Power call")
@@ -242,6 +246,7 @@ var _ = Describe("VMMigration source power-off has one actor (envtest)", func() 
 		got := getMigration()
 		Expect(got.Status.Phase).To(Equal(infravirtrigaudiov1beta1.MigrationPhaseExporting))
 		Expect(meta.IsStatusConditionTrue(got.Status.Conditions, infravirtrigaudiov1beta1.VMMigrationConditionValidating)).To(BeTrue())
+		Expect(meta.IsStatusConditionTrue(got.Status.Conditions, migrationConditionSourcePowerOff)).To(BeTrue())
 		Expect(hv.callsBy("migration")).To(BeZero(), "the migration controller never sent Power")
 
 		By("the VirtualMachine controller records the source Off and sends no further power-off")
