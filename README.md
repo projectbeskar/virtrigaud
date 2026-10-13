@@ -302,6 +302,13 @@ Go 1.26+ is required for source builds.
 
    When you apply a Provider CR, the controller creates a dedicated Deployment and Service for the provider pod in the same namespace. Each Provider CR has isolated credentials.
 
+   > **libvirt: the host's `default` storage pool must be at
+   > `/var/lib/libvirt/images`.** The provider creates it there when it is
+   > missing, but never changes an existing pool: a `default` pool at another
+   > path fails VM creation with an actionable `InvalidSpec`. Mount shared
+   > storage at `/var/lib/libvirt/images` instead of moving the pool — see
+   > [host prerequisites](docs/clustered-provider-inventory.md#host-prerequisites).
+
    > **libvirt: `spec.userData` is required for SSH access.** A `VirtualMachine`
    > created without `spec.userData` gets a minimal default cloud-init that only
    > sets the hostname and starts `qemu-guest-agent` — it does **not** create a

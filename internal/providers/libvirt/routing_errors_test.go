@@ -110,14 +110,16 @@ func TestClustered_DeadLeasedHostIsHostUnavailable(t *testing.T) {
 // that description after them.
 func TestClustered_VMOperationFailureCarriesVMOperationFailed(t *testing.T) {
 	fx, p := clusteredOpsFixture(t)
-	fx.script("host-b", "fail-start", "")
+	// The domain runs and its destroy fails: a real power failure (a failed
+	// start of a running domain is success — Power is idempotent).
+	fx.script("host-b", "fail-destroy", "")
 	fx.script("host-b", "state", "running\n")
 	fx.script("host-b", "fail-blockresize", "")
 	s := NewServer(p)
 	ctx := context.Background()
 	owner := ownerFromIdentity(ownerTeamA)
 
-	_, perr := s.Power(ctx, &providerv1.PowerRequest{Id: "web", Op: providerv1.PowerOp_POWER_OP_ON, TargetHostId: "host-b", Owner: owner})
+	_, perr := s.Power(ctx, &providerv1.PowerRequest{Id: "web", Op: providerv1.PowerOp_POWER_OP_OFF, TargetHostId: "host-b", Owner: owner})
 	desired, err := json.Marshal(reconfigureTo(0, 0, 20))
 	require.NoError(t, err)
 	_, rerr := s.Reconfigure(ctx, &providerv1.ReconfigureRequest{Id: "web", DesiredJson: string(desired), TargetHostId: "host-b", Owner: owner})

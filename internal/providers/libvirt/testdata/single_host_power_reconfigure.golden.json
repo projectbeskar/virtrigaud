@@ -9,9 +9,24 @@
     ],
     "err": ""
   },
+  "power-off-already-off": {
+    "calls": [
+      "single destroy vrcallseq-web",
+      "single domstate vrcallseq-web"
+    ],
+    "err": ""
+  },
   "power-off-fails": {
     "calls": [
-      "single destroy vrcallseq-web"
+      "single destroy vrcallseq-web",
+      "single domstate vrcallseq-web"
+    ],
+    "err": "Retryable: failed to perform power operation Off (caused by: failed to stop domain vrcallseq-web: virsh command 'virsh -c qemu:///single destroy vrcallseq-web' failed (exit code 1): stderr=error: scripted failure of destroy\n, stdout=)"
+  },
+  "power-off-fails-state-unreadable": {
+    "calls": [
+      "single destroy vrcallseq-web",
+      "single domstate vrcallseq-web"
     ],
     "err": "Retryable: failed to perform power operation Off (caused by: failed to stop domain vrcallseq-web: virsh command 'virsh -c qemu:///single destroy vrcallseq-web' failed (exit code 1): stderr=error: scripted failure of destroy\n, stdout=)"
   },
@@ -23,6 +38,13 @@
       "local rm -f /tmp/vrcallseq-web-sync.xml",
       "single dumpxml vrcallseq-web",
       "single list --all --uuid"
+    ],
+    "err": ""
+  },
+  "power-on-already-running": {
+    "calls": [
+      "single start vrcallseq-web",
+      "single domstate vrcallseq-web"
     ],
     "err": ""
   },
@@ -38,7 +60,8 @@
   },
   "power-on-start-fails": {
     "calls": [
-      "single start vrcallseq-web"
+      "single start vrcallseq-web",
+      "single domstate vrcallseq-web"
     ],
     "err": "Retryable: failed to perform power operation On (caused by: failed to start domain vrcallseq-web: virsh command 'virsh -c qemu:///single start vrcallseq-web' failed (exit code 1): stderr=error: scripted failure of start\n, stdout=)"
   },
@@ -69,6 +92,14 @@
   "power-shutdown-graceful": {
     "calls": [
       "single shutdown vrcallseq-web"
+    ],
+    "err": ""
+  },
+  "power-shutdown-graceful-already-off": {
+    "calls": [
+      "single shutdown vrcallseq-web",
+      "single destroy vrcallseq-web",
+      "single domstate vrcallseq-web"
     ],
     "err": ""
   },

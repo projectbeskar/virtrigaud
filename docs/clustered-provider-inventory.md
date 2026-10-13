@@ -193,6 +193,35 @@ above and the [First VM checklist](#first-vm-checklist) below).
 is the smallest version: one `Host` labelled `net.virtrigaud.io/default: "true"`
 and the `VMNetworkAttachment` of libvirt's `default` network that needs it.
 
+## Host prerequisites
+
+Every libvirt host — of a single-host Provider or a `topology: cluster` one —
+needs:
+
+- **libvirt's `default` storage pool at `/var/lib/libvirt/images`.** VM disks,
+  cloud-init seeds (`/var/lib/libvirt/images/cloud-init`), imported migration
+  disks and prepared images are created there. If the host has no `default`
+  pool, the provider creates one at that path on the first create or disk
+  import. If it has one at that path, the provider only starts it when it is
+  inactive. **A `default` pool at any other directory is never changed**: the
+  create or import fails with `InvalidSpec` and the constant message `the libvirt storage pool "default" on the VM's host is not at /var/lib/libvirt/images; VirtRigaud requires it there and did not change it — an administrator must fix the host (details in the provider log)` — the VM's status names neither the host nor the pool's
+  path; the provider log does (`ERROR The libvirt storage pool "default" on
+  host "<host>" is at "<path>" ...`). The pool is left exactly as it is — the
+  provider never destroys, undefines or redefines a pool. (Before v0.4.0-rc1
+  it destroyed and recreated such a pool at `/var/lib/libvirt/images`.) A pool
+  whose path is a symbolic link to `/var/lib/libvirt/images`, or the reverse,
+  counts as that directory. Check each host with
+  `virsh pool-dumpxml default | grep '<path>'`.
+- **Shared storage mounted *at* the default pool's path.** To share VM storage
+  between the hosts of a clustered Provider (an NFS export, say), mount it at
+  `/var/lib/libvirt/images` on every host of the Provider — same path
+  everywhere, NFS locking on (see
+  [Shared storage: the cluster-wide disk guard](#shared-storage-the-cluster-wide-disk-guard-a61))
+  — instead of pointing the `default` pool at the mount.
+- **A separate image catalog.** Keep `VIRTRIGAUD_LIBVIRT_IMAGE_DIRS` (where
+  tenants may name base images) apart from the pool when the pool is shared:
+  see "Keep the image catalog apart from a shared pool" in the same section.
+
 ## First VM checklist
 
 Before creating the first `VirtualMachine` on a `topology: cluster` Provider,

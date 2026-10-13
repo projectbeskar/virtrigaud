@@ -49,7 +49,10 @@ import (
 // the ADR-0007 Slice 5 lab fixes to the clone copy (B1: the copy reads the
 // source as root through `sudo -n` after verifying its chain, the SSH user's
 // historical copy when sudo refuses; B2: a source that is not shut off is
-// refused) — with VIRTRIGAUD_UPDATE_CALLSEQ_GOLDEN=1; the slice 3 branch
+// refused), and for the v0.4.0-rc1 F2 overlay cleanup (SnapshotDelete reads
+// the snapshot's definition, `snapshot-dumpxml`, before deleting it; this fake
+// has none, so nothing is cleaned up after) — with
+// VIRTRIGAUD_UPDATE_CALLSEQ_GOLDEN=1; the slice 3 branch
 // reproduces it byte for byte. A change to any of them — which would restart
 // the ADR-0008 D5 soak window — fails here.
 

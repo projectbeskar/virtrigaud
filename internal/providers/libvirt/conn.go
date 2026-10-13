@@ -92,6 +92,11 @@ type providerBackend interface {
 	// OwnerFilterApplied (ADR-0007 A6.2, R4; routed_list_owner.go). The Server
 	// calls it only on a clustered provider; single-host ignores the filter.
 	ListVMsForOwner(ctx context.Context, owner contracts.OwnerFilter) (contracts.VMList, error)
+
+	// removeSnapshotOverlays removes, after a successful SnapshotDelete on
+	// c's host, those overlay files of the deleted snapshot that are safe to
+	// remove (snapshot_overlay_cleanup.go). It never fails the RPC.
+	removeSnapshotOverlays(ctx context.Context, c libvirtConn, domain, snapshotID string, overlays []string)
 }
 
 // libvirtConn is the libvirt-specific view of one host's connection that the

@@ -5,6 +5,50 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-10-13 00:22] - rc1 lab fixes: one-actor source power-off for migrations, idempotent Power, libvirt default pool never rewritten, snapshot overlay cleanup
+**Author:** @wrkode (William Rizzo)
+
+> **Operator note.**
+> - **libvirt hosts: the `default` storage pool must be at `/var/lib/libvirt/images`.** The provider no longer destroys and recreates a `default` pool at another path (it did since v0.3.11 — it rewrote an NFS-backed pool on the lab). Such a pool is now left untouched and creates / disk imports on that host fail with `InvalidSpec`. Check every host with `virsh pool-dumpxml default` before upgrading; mount shared storage **at** `/var/lib/libvirt/images`.
+> - `powerOffBeforeMigration` now waits for the VirtualMachine controller to power the source off (at most 10 minutes) instead of powering it off itself.
+
+### Fixed
+- `internal/controller/vmmigration_source_power.go` (new), `internal/controller/vmmigration_controller.go`: a `VMMigration` with `spec.source.powerOffBeforeMigration: true` on a running source failed terminally (rc1 lab, F3). The migration set the source VM's `spec.powerState` to `Off` and also sent its own `Power(Off)`. The VirtualMachine controller powered the source off as well, and the second `virsh destroy` failed on the stopped domain. The migration now has one actor: it sets the desired state and waits on a read-only `Describe`. The wait is recorded as `Validating=False` and `SourcePowerOff=False` (reason `WaitingForSourcePowerOff`) with a constant message, written only on change, with an event when the wait starts. It requeues every 5 s for at most 10 minutes, measured from the `SourcePowerOff` condition (other Validating checks do not restart it; a retry from Pending starts a fresh budget), then fails with a constant message. A failed `Describe` or an unresolvable provider instance is waited out; a source the provider does not find (`Exists=false` or NotFound) fails at once with a constant message. The migration never calls `Power`. The source is still not powered back on. VMClone only waits for its source (no power call) and is unchanged.
+- `internal/providers/libvirt/provider_virsh.go`, `internal/providers/vsphere/server.go`, `internal/providers/proxmox/server.go`, `internal/providers/mock/provider.go`: `Power` is idempotent. An `Off` / `ShutdownGraceful` of a VM that is already off, or an `On` of a running one, succeeds, also when another actor won the race:
+  - libvirt re-reads `domstate` after a failed `start` / `destroy` / `shutdown`; an unreadable state or `Reboot` keeps the failure;
+  - vSphere re-reads the power state after a failed task (`InvalidPowerState`);
+  - Proxmox returns no task when the VM is already in the requested state, and re-reads the status after a failed request;
+  - mock returns no task.
+- `internal/providers/libvirt/storage.go`: `EnsureDefaultStoragePool` (called by Create, `ImportDisk` and the NFS / S3 imports) never destroys, undefines or redefines an existing pool (rc1 lab, F1; since 19499ea). It reads the pool definition structurally:
+  - no `default` pool: created at `/var/lib/libvirt/images`;
+  - at that path (lexically, or once both are resolved on the host): started only if inactive;
+  - at any other path: untouched, `InvalidSpec` with a constant message (no host, no path: it reaches tenant-visible status); the host and the pool's path are logged by the provider;
+  - unreadable: retryable, nothing done.
+- `internal/providers/libvirt/provider_virsh.go`: a Create failure that is `InvalidSpec` is returned unwrapped (non-retryable, `InvalidArgument` on the wire) instead of as a retryable error.
+- `internal/providers/libvirt/snapshot_overlay_cleanup.go` (new), `internal/providers/libvirt/server.go`, `internal/providers/libvirt/conn.go`: `SnapshotDelete` removes the overlay file `<domain>-disk.<snapshot>` that libvirt 10 leaves in the pool after deleting an external snapshot (rc1 lab, F2). It records the snapshot's overlays before the delete, and after it removes only the domain's own overlay when it is out of every current chain, referenced by no other snapshot, a regular file inside the storage directories, and used by no other domain (cluster-wide on a clustered Provider), using Delete's helpers. Anything unestablished keeps the file. A failed removal is logged only and never fails the RPC. `Provider.SnapshotDelete` now shares the gRPC core.
+
+### Security
+- `internal/providers/libvirt/storage.go`: the misplaced-`default`-pool refusal is a constant message. It reaches tenant-visible status (`VirtualMachine` `Ready`, `VMMigration` status), so it names neither the hypervisor host nor the operator's pool path. Both are in the provider's `ERROR` log line.
+- `internal/providers/libvirt/server.go`: `SnapshotDelete` and `SnapshotRevert` refuse, on single-host providers too, a snapshot id that is empty, starts with `-` (read by virsh as an option), or contains `/` or a control character (the overlay cleanup builds a file name from it). The check returns `InvalidSpec` before any host call. It is looser than the clustered pattern, so snapshots an earlier release named otherwise can still be deleted.
+- `internal/providers/libvirt/virsh_probe_log.go` (new), `internal/providers/libvirt/virsh.go`, `internal/providers/libvirt/sshclient.go`, `internal/providers/libvirt/guest_agent.go`: `Describe`'s best-effort probes no longer log two `ERROR` lines per poll. These are `dommemstat`, `cpu-stats` and `domblkstat` on a shut-off domain, and `domifaddr --source agent`, `guestinfo` and `guest-ping` without a guest agent. Their failures are `DEBUG`; every other failed command keeps `ERROR`.
+
+### Changed
+- `internal/providers/libvirt/testdata/single_host_power_reconfigure.golden.json`, `internal/providers/libvirt/testdata/single_host_snapshot_clone_disk.golden.json`: regenerated. Only failing power operations gain a read-only `domstate`, and `snapshot-delete` gains a read-only `snapshot-dumpxml`. Every successful sequence is unchanged.
+- `docs/upgrading.md`, `docs/release-notes/next.md`, `docs/clustered-provider-inventory.md` (new "Host prerequisites"), `docs/libvirt-clones.md` ("What SnapshotDelete removes"), `README.md`: the default-pool requirement, the shared-pool recommendation, the migration power-off wait, idempotent Power and the overlay cleanup.
+
+### Known follow-ups
+- `createDefaultStoragePool` still stages the pool definition at the fixed path `/tmp/default-pool.xml` on the host (pre-existing; tracked separately).
+- Overlays of additional data disks (`<domain>-disk-<n>.<snapshot>`), and overlays left by snapshots deleted before this release, are not removed.
+
+### Why
+Three bugs found while lab-testing the v0.4.0-rc1 candidate on a two-host clustered libvirt Provider. Migrations with `powerOffBeforeMigration` failed. An operator's NFS-backed `default` pool was silently rewritten. Every deleted snapshot leaked its overlay file.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-10-12 15:38] - VMMigration: delete nfs/s3 staged disks through a new provider RPC (ADR-0011); guarded Ready cleanup; staged-image checks on every import
 **Author:** @wrkode (William Rizzo)
 

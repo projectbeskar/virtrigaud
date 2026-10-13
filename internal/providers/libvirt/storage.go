@@ -19,10 +19,14 @@ package libvirt
 import (
 	"context"
 	"encoding/json"
+	"encoding/xml"
 	"fmt"
 	"log"
+	"net/url"
 	"path/filepath"
 	"strings"
+
+	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
 )
 
 // StorageProvider manages libvirt storage operations
@@ -77,41 +81,84 @@ func NewStorageProvider(virshProvider *VirshProvider) *StorageProvider {
 	}
 }
 
-// EnsureDefaultStoragePool ensures the default storage pool exists and is active
+// defaultPoolRequiredDir is the directory the "default" storage pool must
+// have as its target: VM disks, cloud-init seeds, imported disks and prepared
+// images are created in, and confined to, DefaultImageDir (imagepath.go). A
+// variable only so tests can root the pool in a temporary directory.
+var defaultPoolRequiredDir = DefaultImageDir
+
+// defaultPoolMisplacedMessage is the CONSTANT refusal of an operation that
+// needs the "default" storage pool on a host whose "default" pool exists at
+// another directory. It reaches tenant-visible status (VirtualMachine Ready,
+// VMMigration status), so it names neither the host nor the pool's path; both
+// are logged by the provider (EnsureDefaultStoragePool).
+const defaultPoolMisplacedMessage = `the libvirt storage pool "default" on the VM's host is not at ` + DefaultImageDir +
+	`; VirtRigaud requires it there and did not change it — an administrator must fix the host (details in the provider log)`
+
+// errDefaultPoolMisplaced is defaultPoolMisplacedMessage as a non-retryable
+// InvalidSpec: only the host's administrator can fix it, and the
+// VirtualMachine controller re-checks it on its slow cadence. The pool is
+// never changed.
+func errDefaultPoolMisplaced() error {
+	return contracts.NewInvalidSpecError(defaultPoolMisplacedMessage, nil)
+}
+
+// hostLabel names the libvirt host of uri for the provider log — host
+// "<name>" with its host name only (never the user or port) — or "the libvirt
+// host" for a local connection. It never reaches a status.
+func hostLabel(uri string) string {
+	if u, err := url.Parse(uri); err == nil && u.Hostname() != "" {
+		return fmt.Sprintf("host %q", u.Hostname())
+	}
+	return "the libvirt host"
+}
+
+// EnsureDefaultStoragePool ensures the "default" storage pool exists at
+// defaultPoolRequiredDir and is active, WITHOUT ever destroying, undefining
+// or redefining an existing pool (v0.4.0-rc1 F1: an earlier version deleted
+// and recreated an operator's "default" pool that was not at
+// /var/lib/libvirt/images, silently rewriting an NFS-backed pool):
+//
+//   - no "default" pool on the host: it is created at defaultPoolRequiredDir
+//     (and started);
+//   - a "default" pool at defaultPoolRequiredDir: it is started if inactive,
+//     and otherwise left alone;
+//   - a "default" pool at any other directory: the operation fails closed
+//     (errDefaultPoolMisplaced, a constant message; the host and the path
+//     are logged) and the pool is left exactly as it is;
+//   - a pool definition that cannot be read: a retryable error, nothing done.
 func (s *StorageProvider) EnsureDefaultStoragePool(ctx context.Context) error {
 	log.Printf("INFO Ensuring default storage pool exists and is active")
 
-	// Check if default pool exists
-	result, err := s.virshProvider.runVirshCommand(ctx, "pool-list", "--all")
+	res, err := s.virshProvider.runVirshCommand(ctx, "pool-dumpxml", defaultStoragePool)
 	if err != nil {
-		return fmt.Errorf("failed to list storage pools: %w", err)
-	}
-
-	// Parse pool list to check if default pool exists
-	hasDefaultPool := strings.Contains(result.Stdout, "default")
-
-	if hasDefaultPool {
-		// Check if the existing pool uses the correct path
-		poolInfo, err := s.virshProvider.runVirshCommand(ctx, "pool-dumpxml", "default")
-		if err == nil && !strings.Contains(poolInfo.Stdout, "/var/lib/libvirt/images") {
-			// Old pool with wrong path (e.g., /home/wrkode/libvirt-images) - delete and recreate
-			log.Printf("INFO Deleting old default storage pool with incorrect path")
-			_, _ = s.virshProvider.runVirshCommand(ctx, "pool-destroy", "default")
-			_, _ = s.virshProvider.runVirshCommand(ctx, "pool-undefine", "default")
-			hasDefaultPool = false
+		if res == nil || res.ExitCode <= 0 || !strings.Contains(res.Stderr, poolNotFoundMarker) {
+			return contracts.NewRetryableError(fmt.Sprintf("could not read the libvirt storage pool %q", defaultStoragePool), err)
 		}
-	}
-
-	if !hasDefaultPool {
-		// Create default storage pool
-		log.Printf("INFO Creating default storage pool")
+		log.Printf("INFO Creating default storage pool at %s", defaultPoolRequiredDir)
 		if err := s.createDefaultStoragePool(ctx); err != nil {
 			return fmt.Errorf("failed to create default storage pool: %w", err)
 		}
+	} else {
+		var def poolTargetXML
+		if err := xml.Unmarshal([]byte(res.Stdout), &def); err != nil {
+			return contracts.NewRetryableError(fmt.Sprintf("could not parse the libvirt storage pool %q", defaultStoragePool), err)
+		}
+		dir := strings.TrimSpace(def.Target.Path)
+		atRequiredDir, err := s.isRequiredPoolDir(ctx, dir)
+		if err != nil {
+			return err
+		}
+		if !atRequiredDir {
+			log.Printf("ERROR The libvirt storage pool %q on %s is at %q, not %s; refusing to use it, and leaving it unchanged "+
+				"(mount shared storage at %s instead of moving the pool)",
+				defaultStoragePool, hostLabel(s.virshProvider.uri), dir, defaultPoolRequiredDir, defaultPoolRequiredDir)
+			return errDefaultPoolMisplaced()
+		}
 	}
 
-	// Ensure the pool is active
-	if err := s.ensurePoolActive(ctx, "default"); err != nil {
+	// Ensure the pool is active (started only if it is not).
+	if err := s.ensurePoolActive(ctx, defaultStoragePool); err != nil {
 		return fmt.Errorf("failed to activate default storage pool: %w", err)
 	}
 
@@ -119,10 +166,28 @@ func (s *StorageProvider) EnsureDefaultStoragePool(ctx context.Context) error {
 	return nil
 }
 
+// isRequiredPoolDir reports whether dir, a storage pool's target path, is
+// defaultPoolRequiredDir: lexically, or — when it names it through a symbolic
+// link, or the required directory is itself a link to it — once both are
+// resolved on the host. A path that cannot be resolved is a retryable error.
+func (s *StorageProvider) isRequiredPoolDir(ctx context.Context, dir string) (bool, error) {
+	if !strings.HasPrefix(dir, "/") {
+		return false, nil
+	}
+	if filepath.Clean(dir) == filepath.Clean(defaultPoolRequiredDir) {
+		return true, nil
+	}
+	canon, err := canonicalizeOnHost(ctx, s.virshProvider, []string{dir, defaultPoolRequiredDir})
+	if err != nil {
+		return false, err
+	}
+	return canon[0] == canon[1], nil
+}
+
 // createDefaultStoragePool creates the default storage pool
 func (s *StorageProvider) createDefaultStoragePool(ctx context.Context) error {
 	// Use standard libvirt directory for storage pool
-	poolPath := "/var/lib/libvirt/images"
+	poolPath := defaultPoolRequiredDir
 	if _, err := s.virshProvider.runVirshCommand(ctx, "!", "mkdir", "-p", poolPath); err != nil {
 		return fmt.Errorf("failed to create pool directory: %w", err)
 	}

@@ -851,11 +851,17 @@ func (p *Provider) Power(ctx context.Context, req *providerv1.PowerRequest) (*pr
 	case providerv1.PowerOp_POWER_OP_ON:
 		task, err = vm.PowerOn(ctx)
 		if err != nil {
+			if p.alreadyInPowerState(ctx, vm, types.VirtualMachinePowerStatePoweredOn) {
+				return &providerv1.TaskResponse{}, nil
+			}
 			return nil, fmt.Errorf("failed to start power on task: %w", err)
 		}
 	case providerv1.PowerOp_POWER_OP_OFF:
 		task, err = vm.PowerOff(ctx)
 		if err != nil {
+			if p.alreadyInPowerState(ctx, vm, types.VirtualMachinePowerStatePoweredOff) {
+				return &providerv1.TaskResponse{}, nil
+			}
 			return nil, fmt.Errorf("failed to start power off task: %w", err)
 		}
 	case providerv1.PowerOp_POWER_OP_REBOOT:
@@ -878,6 +884,13 @@ func (p *Provider) Power(ctx context.Context, req *providerv1.PowerRequest) (*pr
 	// In a real implementation, you might want to return the task reference for async tracking
 	_, err = task.WaitForResult(ctx, nil)
 	if err != nil {
+		want := types.VirtualMachinePowerStatePoweredOff
+		if req.Op == providerv1.PowerOp_POWER_OP_ON {
+			want = types.VirtualMachinePowerStatePoweredOn
+		}
+		if p.alreadyInPowerState(ctx, vm, want) {
+			return &providerv1.TaskResponse{}, nil
+		}
 		return nil, fmt.Errorf("power operation failed: %w", err)
 	}
 
@@ -1002,17 +1015,38 @@ func (p *Provider) fallbackToPowerOff(ctx context.Context, vm *object.VirtualMac
 
 	task, err := vm.PowerOff(ctx)
 	if err != nil {
+		if p.alreadyInPowerState(ctx, vm, types.VirtualMachinePowerStatePoweredOff) {
+			return &providerv1.TaskResponse{}, nil
+		}
 		return nil, fmt.Errorf("failed to start power off task: %w", err)
 	}
 
 	// Wait for power off to complete
 	_, err = task.WaitForResult(ctx, nil)
 	if err != nil {
+		if p.alreadyInPowerState(ctx, vm, types.VirtualMachinePowerStatePoweredOff) {
+			return &providerv1.TaskResponse{}, nil
+		}
 		return nil, fmt.Errorf("power off operation failed: %w", err)
 	}
 
 	p.logger.Info("Hard power off completed successfully", "vm_id", vmID)
 	return &providerv1.TaskResponse{}, nil
+}
+
+// alreadyInPowerState reports, after a power task failed (vCenter answers
+// InvalidPowerState for a power-off of a powered-off VM and a power-on of a
+// running one — also when another actor won a race to the same change),
+// whether vm is already in the requested state want: Power is idempotent, so
+// that is success. The state is re-read from vCenter; one that cannot be read
+// is not the requested state (the failure stands).
+func (p *Provider) alreadyInPowerState(ctx context.Context, vm *object.VirtualMachine, want types.VirtualMachinePowerState) bool {
+	state, err := vm.PowerState(ctx)
+	if err != nil || state != want {
+		return false
+	}
+	p.logger.Info("Power operation: the VM is already in the requested state", "vm_id", vm.Reference().Value, "power_state", string(state))
+	return true
 }
 
 // Reconfigure implements the ProviderServer interface. It applies the desired

@@ -127,11 +127,13 @@ func (p *Provider) createVM(ctx context.Context, vp *VirshProvider, req contract
 	// Create VM with cloud-init support
 	vmID, err := p.createVMWithCloudInit(ctx, vp, req, domainName, g)
 	if err != nil {
-		if isInvalidArgument(err) || contracts.IsConflict(err) {
-			// A rejected request (e.g. a confined image path) or a name
+		if isInvalidArgument(err) || contracts.IsConflict(err) || contracts.IsInvalidSpec(err) {
+			// A rejected request (e.g. a confined image path), a name
 			// conflict on the host (the VM's disk path is another domain's
-			// disk) is not retryable: return it as-is so it reaches the manager
-			// as InvalidArgument / AlreadyExists.
+			// disk), or a host whose "default" storage pool is not where
+			// VirtRigaud requires it (defaultPoolMisplacedError) is not
+			// retryable: return it as-is so it reaches the manager as
+			// InvalidArgument / AlreadyExists.
 			return contracts.CreateResponse{}, fmt.Errorf("failed to create VM: %w", err)
 		}
 		return contracts.CreateResponse{}, contracts.NewRetryableError("failed to create VM", err)
@@ -1490,6 +1492,15 @@ func (p *Provider) runPowerOp(ctx context.Context, c libvirtConn, d domainTarget
 	}
 
 	if err != nil {
+		// Power is idempotent: a start of a running domain, or a destroy /
+		// shutdown of a stopped one, fails in virsh ("domain is already
+		// running", "domain is not running") — also when another actor won
+		// a race to the same change. The domain's state, re-read after the
+		// failure, decides: already in the requested state is success.
+		if powerOpAlreadySatisfied(ctx, vp, id, op) {
+			log.Printf("INFO Power operation %s on %s: the domain is already in the requested state", op, d.name)
+			return nil
+		}
 		return contracts.NewRetryableError(fmt.Sprintf("failed to perform power operation %s", op), err)
 	}
 
@@ -1500,6 +1511,28 @@ func (p *Provider) runPowerOp(ctx context.Context, c libvirtConn, d domainTarget
 		p.recordLinkedCloneDependents(ctx, vp, d)
 	}
 	return nil
+}
+
+// powerOpAlreadySatisfied re-reads the state of domain handle on vp's host
+// after op failed and reports whether the domain is already in the state op
+// asks for: running (or idle/blocked) for On, shut off for Off and
+// ShutdownGraceful. Reboot is never satisfied by a state, and a state that
+// cannot be read is not satisfied (the failure stands).
+func powerOpAlreadySatisfied(ctx context.Context, vp *VirshProvider, handle string, op contracts.PowerOp) bool {
+	var want map[string]bool
+	switch op {
+	case contracts.PowerOpOn:
+		want = map[string]bool{domStateRunning: true, domStateIdle: true, domStateBlocked: true}
+	case contracts.PowerOpOff, contracts.PowerOpShutdownGraceful:
+		want = map[string]bool{domStateShutOff: true, domStateShutoff: true}
+	default:
+		return false
+	}
+	state, err := vp.getDomainState(ctx, handle)
+	if err != nil {
+		return false
+	}
+	return want[strings.ToLower(strings.TrimSpace(state))]
 }
 
 // syncPersistentXML updates the persistent definition of domainName on vp's
@@ -2570,36 +2603,12 @@ func (p *Provider) SnapshotDelete(ctx context.Context, vm contracts.VMRef, snaps
 		return "", contracts.NewRetryableError("virsh provider not initialized", nil)
 	}
 
-	// Check if snapshot exists
-	exists, err := p.virshProvider.snapshotExists(ctx, vmId, snapshotId)
-	if err != nil {
-		return "", fmt.Errorf("failed to check snapshot existence: %w", err)
+	// The gRPC SnapshotDelete's core: the existence check, the dependents
+	// guard, the delete, and the cleanup of the overlay files libvirt leaves
+	// behind (snapshot_overlay_cleanup.go). Synchronous: no task reference.
+	if _, err := snapshotDeleteOn(ctx, p, p.singleHostConn(), vmId, snapshotId); err != nil {
+		return "", err
 	}
-
-	if !exists {
-		log.Printf("WARN Snapshot %s does not exist, considering deletion successful", snapshotId)
-		return "", nil
-	}
-
-	if err := refuseIfDiskHasDependents(ctx, p.virshProvider, vmId, guardOpSnapshotDelete); err != nil {
-		return "", fmt.Errorf("failed to delete snapshot: %w", err)
-	}
-
-	// Delete the snapshot
-	args := []string{
-		"snapshot-delete",
-		vmId,
-		snapshotId,
-	}
-
-	result, err := p.virshProvider.runVirshCommand(ctx, args...)
-	if err != nil {
-		return "", fmt.Errorf("failed to delete snapshot: %w", err)
-	}
-
-	log.Printf("INFO Snapshot deleted successfully: %s\nOutput: %s", snapshotId, result.Stdout)
-
-	// Return empty task reference (synchronous operation)
 	return "", nil
 }
 

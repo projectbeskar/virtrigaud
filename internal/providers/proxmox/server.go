@@ -567,6 +567,15 @@ func (p *Provider) Power(ctx context.Context, req *providerv1.PowerRequest) (*pr
 		return nil, errors.NewInvalidSpec("unsupported power operation: %v", req.Op)
 	}
 
+	// Power is idempotent: a VM already in the requested state is success,
+	// with no task. PVE fails a start of a running VM ("already running"), and
+	// a stop or shutdown of a stopped one may fail too — also when another
+	// actor won a race to the same change.
+	want := pveRequestedStatus(req.Op)
+	if p.pveAlreadyInStatus(ctx, node, vmid, want) {
+		return &providerv1.TaskResponse{}, nil
+	}
+
 	var taskID string
 	if req.Op == providerv1.PowerOp_POWER_OP_SHUTDOWN_GRACEFUL && req.GracefulTimeoutSeconds > 0 {
 		// Honor the caller's graceful-shutdown deadline and escalate to a hard
@@ -580,6 +589,9 @@ func (p *Provider) Power(ctx context.Context, req *providerv1.PowerRequest) (*pr
 		taskID, err = p.client.PowerOperation(ctx, node, vmid, operation)
 	}
 	if err != nil {
+		if p.pveAlreadyInStatus(ctx, node, vmid, want) {
+			return &providerv1.TaskResponse{}, nil
+		}
 		return nil, errors.NewInternal("failed to perform power operation", err)
 	}
 
@@ -589,6 +601,38 @@ func (p *Provider) Power(ctx context.Context, req *providerv1.PowerRequest) (*pr
 	}
 
 	return result, nil
+}
+
+// pveStatusRunning is the status (status/current "status") of a running VM;
+// pveStatusStopped (vm_ownership.go) is that of a stopped one.
+const pveStatusRunning = "running"
+
+// pveRequestedStatus is the PVE status op leaves the VM in — running for On,
+// stopped for Off and ShutdownGraceful — or "" for an op (Reboot) that no
+// status satisfies.
+func pveRequestedStatus(op providerv1.PowerOp) string {
+	switch op {
+	case providerv1.PowerOp_POWER_OP_ON:
+		return pveStatusRunning
+	case providerv1.PowerOp_POWER_OP_OFF, providerv1.PowerOp_POWER_OP_SHUTDOWN_GRACEFUL:
+		return pveStatusStopped
+	default:
+		return ""
+	}
+}
+
+// pveAlreadyInStatus reports whether VM vmid on node is already in status
+// want (never for an empty want). A status that cannot be read is not want.
+func (p *Provider) pveAlreadyInStatus(ctx context.Context, node string, vmid int, want string) bool {
+	if want == "" {
+		return false
+	}
+	vm, err := p.client.GetVM(ctx, node, vmid)
+	if err != nil || vm == nil || vm.Status != want {
+		return false
+	}
+	p.logger.Info("Power operation: the VM is already in the requested state", "vmid", vmid, "status", want)
+	return true
 }
 
 // Reconfigure reconfigures a virtual machine

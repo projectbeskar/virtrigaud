@@ -329,6 +329,9 @@ func TestClustered_Snapshots_RoutedOwnerCheckedByUUID(t *testing.T) {
 		assert.Equal(t, append(append(append(append([]string{}, snapshotOwnerCheck...),
 			"host-b virsh snapshot-list "+uuid+" --name"),
 			snapshotDependentsGuard...),
+			// The overlay files are read before the delete (rc1 F2); this
+			// fake host has no snapshot definition, so none is cleaned up.
+			"host-b virsh snapshot-dumpxml "+uuid+" s1",
 			"host-b virsh snapshot-delete "+uuid+" s1"), fx.calls())
 	})
 

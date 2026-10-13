@@ -328,7 +328,7 @@ case "$1" in
   dumpxml) exec cat "$d/dom-$2.xml" ;;
   pool-list) printf ' Name      State    Autostart\n-------------------------------\n default   active   yes\n\n' ;;
   pool-info) printf 'Name:           default\nState:          running\n' ;;
-  pool-dumpxml) printf "<pool type='dir'><name>default</name><target><path>%s</path></target></pool>\n<!-- /var/lib/libvirt/images -->\n" "$(cat "$d/pooldir")" ;;
+  pool-dumpxml) printf "<pool type='dir'><name>default</name><target><path>%s</path></target></pool>\n" "$(cat "$d/pooldir")" ;;
   vol-path) exec cat "$d/vol-$3-$5" ;;
   *) exit 0 ;;
 esac
@@ -460,6 +460,11 @@ func newFakeHost(t *testing.T) *fakeHost {
 	h.outside = filepath.Join(h.base, "secret")
 	require.NoError(t, os.MkdirAll(h.images, 0o750))
 	require.NoError(t, os.MkdirAll(h.outside, 0o750))
+	// The fake hosts' "default" pool is at h.images (host), which is where
+	// EnsureDefaultStoragePool requires it.
+	prev := defaultPoolRequiredDir
+	defaultPoolRequiredDir = h.images
+	t.Cleanup(func() { defaultPoolRequiredDir = prev })
 	return h
 }
 

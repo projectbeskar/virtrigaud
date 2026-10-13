@@ -635,6 +635,7 @@
       "single virsh snapshot-list vrgold-web --name",
       "single virsh dumpxml vrgold-web",
       "single virsh list --all --uuid",
+      "single virsh snapshot-dumpxml vrgold-web s1",
       "single virsh snapshot-delete vrgold-web s1"
     ],
     "resp": "{}",
@@ -645,6 +646,7 @@
       "single virsh snapshot-list vrgold-web --name",
       "single virsh dumpxml vrgold-web",
       "single virsh list --all --uuid",
+      "single virsh snapshot-dumpxml vrgold-web s1",
       "single virsh snapshot-delete vrgold-web s1"
     ],
     "resp": "null",
@@ -655,6 +657,7 @@
       "single virsh snapshot-list vrgold-web --name",
       "single virsh dumpxml vrgold-web",
       "single virsh list --all --uuid",
+      "single virsh snapshot-dumpxml vrgold-web s2",
       "single virsh snapshot-delete vrgold-web s2"
     ],
     "resp": "{}",

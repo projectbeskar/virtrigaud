@@ -34,7 +34,8 @@ import (
 var fixtureImagesDir string
 
 // TestMain creates fixtureImagesDir and the fixture disk paths inside it
-// before any test runs, and removes it afterwards. It also installs the host
+// before any test runs, and removes it afterwards, and makes it the directory
+// the "default" storage pool must be at (defaultPoolRequiredDir). It also installs the host
 // guard (installHostGuard): the machine these tests run on may be a real
 // libvirt host, so no test may run sudo, ssh or a real virsh, or run any host
 // tool on a path under the real /var/lib/libvirt. A guard hit fails the run.
@@ -50,6 +51,9 @@ func TestMain(m *testing.M) {
 		os.Exit(1)
 	}
 	fixtureImagesDir = dir
+	// The fake hosts' "default" storage pool is rooted in the fixture
+	// directory (FAKE_POOL_DIR), never the real /var/lib/libvirt/images.
+	defaultPoolRequiredDir = dir
 	routingDiskPath = filepath.Join(dir, "web-disk.qcow2")
 	opsDiskPath = filepath.Join(dir, opsDomainName+"-disk.qcow2")
 	code := m.Run()

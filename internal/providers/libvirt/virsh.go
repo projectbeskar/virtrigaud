@@ -803,9 +803,7 @@ func (v *VirshProvider) runLocalStdin(ctx context.Context, argv []string, stdin 
 	}
 
 	if runErr != nil {
-		log.Printf("ERROR Command failed: %s (exit code: %d, duration: %v)",
-			command, result.ExitCode, duration)
-		log.Printf("ERROR Stderr: %s", result.Stderr)
+		logCommandFailure(ctx, command, result.ExitCode, duration, result.Stderr)
 		return result, &VirshError{
 			Command:  command,
 			ExitCode: result.ExitCode,
@@ -1012,8 +1010,12 @@ func (v *VirshProvider) Cleanup() error {
 	return nil
 }
 
-// enrichDomainInfo adds comprehensive monitoring data similar to vSphere provider
+// enrichDomainInfo adds comprehensive monitoring data similar to vSphere
+// provider. Every probe is best-effort and routinely unavailable (no guest
+// agent, a shut-off domain): its failures are logged at DEBUG
+// (withExpectedFailures).
 func (v *VirshProvider) enrichDomainInfo(ctx context.Context, domainName string, info map[string]string) error {
+	ctx = withExpectedFailures(ctx)
 	// Get memory statistics
 	if memStats, err := v.getDomainMemoryStats(ctx, domainName); err == nil {
 		for k, v := range memStats {

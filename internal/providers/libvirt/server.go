@@ -662,6 +662,21 @@ func checkRoutedSnapshotID(id string) error {
 	return nil
 }
 
+// checkSnapshotIDArgument refuses (InvalidSpec), on every topology, a
+// snapshot id that is unsafe as a virsh argument or in a file name: empty,
+// starting with '-' (virsh would read it as an option), or containing '/' or
+// a control character (the overlay cleanup derives a file name from it). It
+// is deliberately looser than checkRoutedSnapshotID, which a clustered
+// provider applies first: a single-host snapshot an earlier release named
+// otherwise can still be deleted or reverted.
+func checkSnapshotIDArgument(id string) error {
+	if id == "" || strings.HasPrefix(id, "-") || strings.ContainsRune(id, '/') || strings.ContainsFunc(id, isControlRune) {
+		return contracts.NewInvalidSpecError(fmt.Sprintf(
+			"snapshot id %q is not valid: it must not be empty, start with '-', or contain '/' or control characters", id), nil)
+	}
+	return nil
+}
+
 // SnapshotDelete deletes a VM snapshot. On a clustered provider it is routed
 // and owner-checked like SnapshotCreate: a snapshot of a domain this VM does not
 // own is never deleted (NotFound).
@@ -673,7 +688,7 @@ func (s *Server) SnapshotDelete(ctx context.Context, req *providerv1.SnapshotDel
 		var resp *providerv1.TaskResponse
 		err := s.provider.withOwnedDomain(ctx, snapshotVMRef(req.GetVmId(), req.GetTargetHostId(), req.GetOwner()), "snapshot delete",
 			func(c libvirtConn, d domainTarget) error {
-				r, err := snapshotDeleteOn(ctx, c, d.handle, req.SnapshotId)
+				r, err := snapshotDeleteOn(ctx, s.provider, c, d.handle, req.SnapshotId)
 				resp = routedTaskResponse(c.HostID(), r)
 				return err
 			})
@@ -692,7 +707,7 @@ func (s *Server) SnapshotDelete(ctx context.Context, req *providerv1.SnapshotDel
 	if err != nil {
 		return nil, err
 	}
-	return snapshotDeleteOn(ctx, conn, req.VmId, req.SnapshotId)
+	return snapshotDeleteOn(ctx, s.provider, conn, req.VmId, req.SnapshotId)
 }
 
 // routedTaskResponse host-encodes the task reference of a routed call's
@@ -706,9 +721,15 @@ func routedTaskResponse(host hostconn.HostID, r *providerv1.TaskResponse) *provi
 }
 
 // snapshotDeleteOn is the SnapshotDelete core, run on connection conn against
-// domain (see snapshotCreateOn). The virsh command sequence is the historical
-// one, unchanged.
-func snapshotDeleteOn(ctx context.Context, conn libvirtConn, domain, snapshotID string) (*providerv1.TaskResponse, error) {
+// domain (see snapshotCreateOn). Before the delete it records the snapshot's
+// external overlay files (`virsh snapshot-dumpxml`); after a successful delete
+// backend removes those that are safe to remove (removeSnapshotOverlays,
+// snapshot_overlay_cleanup.go — libvirt leaves them in the pool), which never
+// fails the RPC.
+func snapshotDeleteOn(ctx context.Context, backend providerBackend, conn libvirtConn, domain, snapshotID string) (*providerv1.TaskResponse, error) {
+	if err := checkSnapshotIDArgument(snapshotID); err != nil {
+		return nil, err
+	}
 	// Check if snapshot exists
 	exists, err := conn.snapshotExists(ctx, domain, snapshotID)
 	if err != nil {
@@ -726,10 +747,12 @@ func snapshotDeleteOn(ctx context.Context, conn libvirtConn, domain, snapshotID 
 		return nil, fmt.Errorf("failed to delete snapshot: %w", err)
 	}
 
-	// Delete the snapshot
-	// Format: virsh snapshot-delete DOMAIN SNAPSHOT --metadata
-	// Using --metadata keeps the data but removes snapshot metadata (safer for external snapshots)
-	// For internal snapshots, this will delete both metadata and disk changes
+	// The overlay files the snapshot added, read before it is deleted.
+	overlays := snapshotOverlaysOf(ctx, conn, domain, snapshotID)
+
+	// Delete the snapshot. For an external (disk-only) snapshot libvirt
+	// commits the overlay back into its base and pivots the domain onto it,
+	// but leaves the overlay file behind.
 	args := []string{
 		"snapshot-delete",
 		domain,
@@ -742,6 +765,7 @@ func snapshotDeleteOn(ctx context.Context, conn libvirtConn, domain, snapshotID 
 	}
 
 	log.Printf("INFO Snapshot deleted successfully: %s\nOutput: %s", snapshotID, result.Stdout)
+	backend.removeSnapshotOverlays(ctx, conn, domain, snapshotID, overlays)
 
 	// Return empty response (synchronous operation)
 	return &providerv1.TaskResponse{}, nil
@@ -784,6 +808,9 @@ func (s *Server) SnapshotRevert(ctx context.Context, req *providerv1.SnapshotRev
 // domain (see snapshotCreateOn). The virsh command sequence is the historical
 // one, unchanged.
 func snapshotRevertOn(ctx context.Context, conn libvirtConn, domain, snapshotID string) (*providerv1.TaskResponse, error) {
+	if err := checkSnapshotIDArgument(snapshotID); err != nil {
+		return nil, err
+	}
 	// Check if snapshot exists
 	exists, err := conn.snapshotExists(ctx, domain, snapshotID)
 	if err != nil {

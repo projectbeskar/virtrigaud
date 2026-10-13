@@ -294,6 +294,28 @@ func (p *Provider) Delete(ctx context.Context, req *providerv1.DeleteRequest) (*
 	}, nil
 }
 
+// Mock VM power states (VirtualMachine.PowerState).
+const (
+	// mockPowerStateOn is a running mock VM.
+	mockPowerStateOn = "On"
+	// mockPowerStateOff is a stopped mock VM.
+	mockPowerStateOff = "Off"
+)
+
+// mockRequestedPowerState is the power state op leaves a VM in — On for
+// POWER_OP_ON, Off for POWER_OP_OFF and POWER_OP_SHUTDOWN_GRACEFUL — or ""
+// for an op (reboot) that no state satisfies.
+func mockRequestedPowerState(op providerv1.PowerOp) string {
+	switch op {
+	case providerv1.PowerOp_POWER_OP_ON:
+		return mockPowerStateOn
+	case providerv1.PowerOp_POWER_OP_OFF, providerv1.PowerOp_POWER_OP_SHUTDOWN_GRACEFUL:
+		return mockPowerStateOff
+	default:
+		return ""
+	}
+}
+
 // Power performs power operations on a virtual machine.
 func (p *Provider) Power(ctx context.Context, req *providerv1.PowerRequest) (*providerv1.TaskResponse, error) {
 	p.simulateDelay()
@@ -304,10 +326,20 @@ func (p *Provider) Power(ctx context.Context, req *providerv1.PowerRequest) (*pr
 
 	p.mu.RLock()
 	vm, exists := p.vms[req.Id]
+	var current string
+	if exists {
+		current = vm.PowerState
+	}
 	p.mu.RUnlock()
 
 	if !exists {
 		return nil, errors.NewNotFound("VirtualMachine", req.Id)
+	}
+
+	// Power is idempotent, as on the real providers: a VM already in the
+	// requested state is success, with no task.
+	if want := mockRequestedPowerState(req.Op); want != "" && current == want {
+		return &providerv1.TaskResponse{}, nil
 	}
 
 	// Create async task
@@ -329,20 +361,20 @@ func (p *Provider) Power(ctx context.Context, req *providerv1.PowerRequest) (*pr
 		var newState string
 		switch req.Op {
 		case providerv1.PowerOp_POWER_OP_ON:
-			newState = "On"
+			newState = mockPowerStateOn
 			// Assign IP when powering on
 			if len(vm.IPs) == 0 {
 				vm.IPs = []string{fmt.Sprintf("192.168.1.%d", 100+rand.Intn(50))}
 			}
 		case providerv1.PowerOp_POWER_OP_OFF:
-			newState = "Off"
+			newState = mockPowerStateOff
 			// Clear IPs when powering off
 			vm.IPs = []string{}
 		case providerv1.PowerOp_POWER_OP_REBOOT:
-			newState = "On"
+			newState = mockPowerStateOn
 		case providerv1.PowerOp_POWER_OP_SHUTDOWN_GRACEFUL:
 			// Mock graceful shutdown - same as regular Off but with a slight delay
-			newState = "Off"
+			newState = mockPowerStateOff
 			// Clear IPs when shutting down
 			vm.IPs = []string{}
 		}

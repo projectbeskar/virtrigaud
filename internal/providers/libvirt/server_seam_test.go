@@ -167,6 +167,7 @@ type fakeSeamProvider struct {
 	prepID    string
 	prepPath  string
 	prepErr   error
+	overlays  []string
 }
 
 // clustered reports single-host topology: this fake stands in for a single-host
@@ -180,6 +181,12 @@ func (f *fakeSeamProvider) conn(_ context.Context) (libvirtConn, error) {
 func (f *fakeSeamProvider) Clone(_ context.Context, req contracts.CloneRequest) (contracts.CloneResponse, error) {
 	f.cloneReq = req
 	return f.cloneResp, f.cloneErr
+}
+
+// removeSnapshotOverlays records the overlays a SnapshotDelete handed over for
+// cleanup; the fake host has no files to remove.
+func (f *fakeSeamProvider) removeSnapshotOverlays(_ context.Context, _ libvirtConn, _, _ string, overlays []string) {
+	f.overlays = append(f.overlays, overlays...)
 }
 
 func (f *fakeSeamProvider) imagePrepare(_ context.Context, _ imageartifact.Request, _, _ string) (imagePrepareResult, error) {
@@ -315,4 +322,28 @@ func TestServer_SnapshotCreate_ConnErrorSurfaces(t *testing.T) {
 	_, err := s.SnapshotCreate(context.Background(), &providerv1.SnapshotCreateRequest{VmId: "vm-1"})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "registry cold")
+}
+
+// TestServer_SingleHostSnapshotIDIsChecked: on a single-host provider too, a
+// snapshot id virsh would read as an option, or one that is not a plain file
+// name component, is refused before anything reaches the host
+// (SnapshotDelete, its Provider-level twin, and SnapshotRevert).
+func TestServer_SingleHostSnapshotIDIsChecked(t *testing.T) {
+	for _, id := range []string{"", "--metadata", "-x", "../web-disk", "a/b", "s\n1"} {
+		fc := &fakeSeamConn{id: "host-a", snapExists: true}
+		s := &Server{provider: &fakeSeamProvider{hostConn: fc}}
+
+		_, err := s.SnapshotDelete(context.Background(), &providerv1.SnapshotDeleteRequest{VmId: "vm-1", SnapshotId: id})
+		require.Error(t, err, "%q", id)
+		assert.True(t, contracts.IsInvalidSpec(err), "%q: %v", id, err)
+		_, err = s.SnapshotRevert(context.Background(), &providerv1.SnapshotRevertRequest{VmId: "vm-1", SnapshotId: id})
+		require.Error(t, err, "%q", id)
+		assert.True(t, contracts.IsInvalidSpec(err), "%q: %v", id, err)
+		assert.Empty(t, fc.virshCalls, "%q: nothing reaches the host", id)
+	}
+	_, err := (&Provider{virshProvider: NewVirshProvider(&ProviderConfig{})}).SnapshotDelete(context.Background(),
+		contracts.VMRef{ID: "vm-1"}, "--metadata")
+	assert.True(t, contracts.IsInvalidSpec(err), "the Provider-level SnapshotDelete shares the check: %v", err)
+	assert.NoError(t, checkSnapshotIDArgument("snapshot-1700000000"))
+	assert.NoError(t, checkSnapshotIDArgument("_legacy.name"), "looser than the routed check: earlier names still work")
 }
