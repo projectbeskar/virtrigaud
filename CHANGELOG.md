@@ -26,11 +26,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - unreadable: retryable, nothing done.
 - `internal/providers/libvirt/provider_virsh.go`: a Create failure that is `InvalidSpec` is returned unwrapped (non-retryable, `InvalidArgument` on the wire) instead of as a retryable error.
 - `internal/providers/libvirt/snapshot_overlay_cleanup.go` (new), `internal/providers/libvirt/server.go`, `internal/providers/libvirt/conn.go`: `SnapshotDelete` removes the overlay file `<domain>-disk.<snapshot>` that libvirt 10 leaves in the pool after deleting an external snapshot (rc1 lab, F2). It records the snapshot's overlays before the delete, and after it removes only the domain's own overlay when it is out of every current chain, referenced by no other snapshot, a regular file inside the storage directories, and used by no other domain (cluster-wide on a clustered Provider), using Delete's helpers. Anything unestablished keeps the file. A failed removal is logged only and never fails the RPC. `Provider.SnapshotDelete` now shares the gRPC core.
+
+### Security
+- `internal/providers/libvirt/storage.go`: the misplaced-`default`-pool refusal is a constant message. It reaches tenant-visible status (`VirtualMachine` `Ready`, `VMMigration` status), so it names neither the hypervisor host nor the operator's pool path. Both are in the provider's `ERROR` log line.
+- `internal/providers/libvirt/server.go`: `SnapshotDelete` and `SnapshotRevert` refuse, on single-host providers too, a snapshot id that is empty, starts with `-` (read by virsh as an option), or contains `/` or a control character (the overlay cleanup builds a file name from it). The check returns `InvalidSpec` before any host call. It is looser than the clustered pattern, so snapshots an earlier release named otherwise can still be deleted.
 - `internal/providers/libvirt/virsh_probe_log.go` (new), `internal/providers/libvirt/virsh.go`, `internal/providers/libvirt/sshclient.go`, `internal/providers/libvirt/guest_agent.go`: `Describe`'s best-effort probes no longer log two `ERROR` lines per poll. These are `dommemstat`, `cpu-stats` and `domblkstat` on a shut-off domain, and `domifaddr --source agent`, `guestinfo` and `guest-ping` without a guest agent. Their failures are `DEBUG`; every other failed command keeps `ERROR`.
 
 ### Changed
 - `internal/providers/libvirt/testdata/single_host_power_reconfigure.golden.json`, `internal/providers/libvirt/testdata/single_host_snapshot_clone_disk.golden.json`: regenerated. Only failing power operations gain a read-only `domstate`, and `snapshot-delete` gains a read-only `snapshot-dumpxml`. Every successful sequence is unchanged.
 - `docs/upgrading.md`, `docs/release-notes/next.md`, `docs/clustered-provider-inventory.md` (new "Host prerequisites"), `docs/libvirt-clones.md` ("What SnapshotDelete removes"), `README.md`: the default-pool requirement, the shared-pool recommendation, the migration power-off wait, idempotent Power and the overlay cleanup.
+
+### Known follow-ups
+- `createDefaultStoragePool` still stages the pool definition at the fixed path `/tmp/default-pool.xml` on the host (pre-existing; tracked separately).
+- Overlays of additional data disks (`<domain>-disk-<n>.<snapshot>`), and overlays left by snapshots deleted before this release, are not removed.
 
 ### Why
 Three bugs found while lab-testing the v0.4.0-rc1 candidate on a two-host clustered libvirt Provider. Migrations with `powerOffBeforeMigration` failed. An operator's NFS-backed `default` pool was silently rewritten. Every deleted snapshot leaked its overlay file.
