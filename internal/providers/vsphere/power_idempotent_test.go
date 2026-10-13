@@ -18,11 +18,14 @@ package vsphere
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/vmware/govmomi/object"
+	"github.com/vmware/govmomi/vim25/methods"
+	"github.com/vmware/govmomi/vim25/soap"
 	"github.com/vmware/govmomi/vim25/types"
 
 	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
@@ -74,5 +77,45 @@ func TestPower_IdempotentInRequestedState(t *testing.T) {
 	assert.Equal(t, types.VirtualMachinePowerStatePoweredOff, runtimePowerState(t, p, id))
 
 	require.NoError(t, power(providerv1.PowerOp_POWER_OP_ON))
+	assert.Equal(t, types.VirtualMachinePowerStatePoweredOn, runtimePowerState(t, p, id))
+}
+
+// refusePowerOff fails every PowerOffVM_Task request before it reaches
+// vCenter: the VM stays powered on.
+type refusePowerOff struct {
+	soap.RoundTripper
+}
+
+func (r *refusePowerOff) RoundTrip(ctx context.Context, req, res soap.HasFault) error {
+	if _, ok := req.(*methods.PowerOffVM_TaskBody); ok {
+		return errors.New("injected: power off refused")
+	}
+	return r.RoundTripper.RoundTrip(ctx, req, res)
+}
+
+// TestPower_RealFailureStaysAnError: idempotency never hides a real failure.
+// A power-off that fails while the VM is still powered on stays an error —
+// directly and through the graceful-shutdown fallback.
+func TestPower_RealFailureStaysAnError(t *testing.T) {
+	ctx := context.Background()
+	p, _ := newOwnershipSim(t)
+	dc, err := p.finder.DefaultDatacenter(ctx)
+	require.NoError(t, err)
+	p.finder.SetDatacenter(dc)
+	vm, err := p.finder.VirtualMachine(ctx, simUnstamped)
+	require.NoError(t, err)
+	id := vm.Reference().Value
+	if runtimePowerState(t, p, id) != types.VirtualMachinePowerStatePoweredOn {
+		task, err := vm.PowerOn(ctx)
+		require.NoError(t, err)
+		require.NoError(t, task.Wait(ctx))
+	}
+	p.client.RoundTripper = &refusePowerOff{RoundTripper: p.client.RoundTripper}
+
+	for _, op := range []providerv1.PowerOp{providerv1.PowerOp_POWER_OP_OFF, providerv1.PowerOp_POWER_OP_SHUTDOWN_GRACEFUL} {
+		_, err := p.Power(ctx, &providerv1.PowerRequest{Id: id, Op: op, GracefulTimeoutSeconds: 1})
+		require.Error(t, err, "%s: the VM is still on, so the failure stands", op)
+		assert.Contains(t, err.Error(), "injected: power off refused", "%s", op)
+	}
 	assert.Equal(t, types.VirtualMachinePowerStatePoweredOn, runtimePowerState(t, p, id))
 }
