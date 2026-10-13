@@ -131,13 +131,20 @@ func (c *overlayCase) script(name, content string) { c.fx.script(c.host, name, c
 // deleteS1 runs the SnapshotDelete RPC of web's snapshot s1; it must succeed.
 func (c *overlayCase) deleteS1(t *testing.T) {
 	t.Helper()
+	c.deleteSnap(t, "s1")
+}
+
+// deleteSnap runs the SnapshotDelete RPC of web's snapshot snap; it must
+// succeed.
+func (c *overlayCase) deleteSnap(t *testing.T, snap string) {
+	t.Helper()
 	vp := localHostVP(c.host)
 	reg, err := hostconn.NewRegistry(newVirshConn(hostconn.HostID(c.host), vp))
 	require.NoError(t, err)
 	p := &Provider{virshProvider: vp, registry: reg, hostID: hostconn.HostID(c.host)}
-	_, err = NewServer(p).SnapshotDelete(context.Background(), &providerv1.SnapshotDeleteRequest{VmId: "web", SnapshotId: "s1"})
+	_, err = NewServer(p).SnapshotDelete(context.Background(), &providerv1.SnapshotDeleteRequest{VmId: "web", SnapshotId: snap})
 	require.NoError(t, err, "SnapshotDelete never fails for its overlay cleanup")
-	assert.Contains(t, c.fx.calls(), c.host+" snapshot-delete web s1")
+	assert.Contains(t, c.fx.calls(), c.host+" snapshot-delete web "+snap)
 }
 
 // removed reports whether the cleanup removed the overlay (the sudo shim logs
@@ -304,4 +311,48 @@ func TestClusteredSnapshotDelete_OverlayCleanupIsGuardedClusterWide(t *testing.T
 			}
 		})
 	}
+}
+
+// TestSnapshotDelete_SnapshotNamedLikeTheBaseKeepsTheBase: a snapshot named
+// "qcow2" makes the own-overlay name <domain>-disk.qcow2 — the live base disk.
+// Even if the snapshot names that file, it is in the domain's current chain,
+// so it is never removed.
+func TestSnapshotDelete_SnapshotNamedLikeTheBaseKeepsTheBase(t *testing.T) {
+	c := newOverlayCase(t, nil)
+	c.script("snaps", "qcow2\n")
+	c.script("snapxml-qcow2", externalSnapshotXML("qcow2", c.base, c.base))
+	c.deleteSnap(t, "qcow2")
+	for _, call := range c.fx.calls() {
+		assert.NotContains(t, call, " rm ", "the live base disk is never removed: %q", call)
+	}
+	assert.FileExists(t, c.base)
+}
+
+// TestClusteredSnapshotDelete_UncheckableHostKeepsTheOverlay: a host of the
+// Provider that cannot be scanned (it is down) leaves the cluster-wide answer
+// unknown, so the overlay is kept — and the SnapshotDelete still succeeds.
+func TestClusteredSnapshotDelete_UncheckableHostKeepsTheOverlay(t *testing.T) {
+	s := newSharedPoolWithDeadHost(t)
+	base := s.disk("team-a.web-disk.qcow2", "base")
+	overlay := s.disk("team-a.web-disk.s1", "overlay")
+	s.defineOn("host-b", "team-a.web", uuidVMOnB, guardDomainXML("team-a.web", uuidVMOnB, base, ownerTeamA, false))
+	hb := filepath.Join(s.root, "host-b")
+	require.NoError(t, os.WriteFile(filepath.Join(hb, "snaps"), []byte("s1\n"), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(hb, "snapxml-s1"), []byte(externalSnapshotXML("s1", overlay, base)), 0o600))
+
+	createVirsh, err := lookPathIn(os.Getenv("PATH"), "virsh")
+	require.NoError(t, err)
+	bin := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(bin, "virsh"), []byte(clusteredSnapFakeVirsh), 0o755)) //nolint:gosec // test shim must be executable
+	t.Setenv("FAKE_CREATE_VIRSH", createVirsh)
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	_, err = NewServer(s.p).SnapshotDelete(context.Background(), &providerv1.SnapshotDeleteRequest{
+		VmId: "team-a.web", SnapshotId: "s1", TargetHostId: "host-b", Owner: teamAOwner,
+	})
+	require.NoError(t, err, "the overlay cleanup never fails the delete")
+	assert.Positive(t, s.dials("host-c"), "the dead host was asked")
+	sudo, _ := os.ReadFile(filepath.Join(s.root, "sudo.log")) //nolint:gosec // test reads its own log
+	assert.NotContains(t, string(sudo), "rm -f", "a host that cannot be checked keeps the overlay")
+	assert.FileExists(t, overlay)
 }
