@@ -664,6 +664,36 @@ providers), and rollback caveats in
 - A `VMMigration` with `deleteAfterMigration: true` whose target stays off
   (`powerOn: false`) records a `SourceDeletedTargetNotStarted` Warning when it
   deletes the source.
+- **A `VMMigration` with `powerOffBeforeMigration: true` on a running source no
+  longer fails.** The migration set the source's `spec.powerState` to `Off`
+  *and* powered it off itself; the VirtualMachine controller powered it off
+  too, and on libvirt the second `virsh destroy` failed on the stopped domain,
+  failing the migration terminally (`MigrationFailed: Failed to power off
+  source VM before migration`). The migration now leaves the power-off to the
+  VirtualMachine controller and waits (`Validating=False/WaitingForSourcePowerOff`,
+  at most 10 minutes) until the source is observed off.
+- **Power is idempotent on every provider.** A power-off of a VM that is
+  already off, or a power-on of one that is already running, succeeds
+  (libvirt: `domstate` re-read after a failed `start`/`destroy`/`shutdown`;
+  vSphere: `InvalidPowerState`; Proxmox: no task when already in the
+  requested state; mock).
+- **libvirt no longer rewrites an operator's `default` storage pool.** Since
+  v0.3.11, a create or disk import on a host whose `default` pool was not at
+  `/var/lib/libvirt/images` destroyed, undefined and recreated it there. An
+  existing pool is now never destroyed or redefined (only started when
+  inactive); one at another path fails the operation closed with an
+  actionable `InvalidSpec` naming the host and the path. Mount shared storage
+  **at** `/var/lib/libvirt/images` — see the host prerequisites in
+  [`docs/clustered-provider-inventory.md`](../clustered-provider-inventory.md#host-prerequisites).
+- **libvirt: deleting a snapshot removes its leftover overlay file.** libvirt
+  10 commits an external snapshot into its base on delete but leaves the
+  overlay `<domain>-disk.<snapshot>` in the pool; `SnapshotDelete` now removes
+  it when it is provably unused (same rules as VM delete, cluster-wide on a
+  clustered Provider). Overlays from snapshots deleted before the upgrade are
+  not swept.
+- libvirt `Describe` no longer logs `ERROR` lines on every poll for expected
+  probe failures (no guest agent; statistics of a shut-off domain); they are
+  `DEBUG`.
 - Provider SDK: the `sdk/provider/client` RPC methods (`Create`, `Describe`,
   `TaskStatus` and the others) return a nil error on success again. Before, a
   successful call returned a non-nil error that printed as `<nil>`, and

@@ -241,6 +241,35 @@ It never removes any other backing file, cdrom or floppy media, or any file
 outside those directories: such a file is left in place and logged by the
 provider.
 
+### What SnapshotDelete removes
+
+`virsh snapshot-delete` of VirtRigaud's external (disk-only) snapshots
+commits the overlay back into its base and pivots the domain onto the base,
+but libvirt (10, Ubuntu 24.04) **leaves the overlay file** —
+`<domain>-disk.<snapshot name>` — in the pool, and Delete no longer finds it
+(it is not in the domain's chain any more). `SnapshotDelete` therefore reads
+the snapshot's overlay files (`virsh snapshot-dumpxml`) before deleting it and,
+once the delete succeeded, removes each one only when **all** of these hold:
+
+- it is the domain's own primary-disk overlay, `<domain>-disk.<snapshot name>`,
+  exactly as the snapshot names it;
+- it is in no backing chain of the domain's current disks (read with
+  `qemu-img info`; a chain that cannot be read keeps the file);
+- no other snapshot of the domain references it, in its disk list or in the
+  domain definition it recorded;
+- it is a regular file (not a symbolic link) directly inside the default
+  storage pool's directory or an allowed image directory — the same rules as
+  Delete;
+- no other domain on the host uses it, and on a clustered Provider no domain
+  on **any other host** of the Provider does (the cluster-wide disk guard).
+
+Anything that cannot be established keeps the file. A failure to remove it is
+logged by the provider (no path reaches a status) and never fails the
+`SnapshotDelete`: the snapshot itself is gone. Overlays of additional data
+disks (`<domain>-disk-<n>.<snapshot name>`) and overlays left by snapshots
+deleted before this release are not removed. `SnapshotRevert` does not remove
+files.
+
 A single-host Provider deleting a VM whose domain no longer exists still cleans
 up the disk VirtRigaud named after it, `<name>-disk.qcow2` in the default pool's
 directory, but only if it exists and no remaining domain uses it — a linked
