@@ -23,6 +23,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -310,6 +311,43 @@ var _ = Describe("Status writes never replace a newer status with a stale copy (
 		Expect(res.RequeueAfter).To(Equal(providerStatusConflictRequeue))
 		got = infrav1ProviderGet(key)
 		Expect(got.Status.Version).To(Equal("v-newer"), "nothing was written over the newer status")
+	})
+})
+
+var _ = Describe("Create-outcome annotation removal keeps no stale VirtualMachine status (envtest)", func() {
+	It("refuses to remove the annotation from a read that another status write has moved past", func() {
+		ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{GenerateName: "clobber-vm-"}}
+		Expect(k8sClient.Create(ctx, ns)).To(Succeed())
+		vm := holdTestVM(ns.Name, "web", infravirtrigaudiov1beta1.ObservedPowerStateOn)
+		key := client.ObjectKeyFromObject(vm)
+		Expect(k8sClient.Get(ctx, key, vm)).To(Succeed())
+		vm.Annotations = map[string]string{createOutcomeAnnotation: "ignored-value"}
+		Expect(k8sClient.Update(ctx, vm)).To(Succeed())
+
+		stale := &infravirtrigaudiov1beta1.VirtualMachine{}
+		Expect(k8sClient.Get(ctx, key, stale)).To(Succeed())
+
+		// Another writer (a clone or adoption binding) stores a newer status.
+		newer := stale.DeepCopy()
+		newer.Status.ID = "bound-by-another-writer"
+		Expect(k8sClient.Status().Update(ctx, newer)).To(Succeed())
+
+		r := &VirtualMachineReconciler{Client: k8sClient, Scheme: k8sClient.Scheme()}
+		err := r.removeCreateOutcomeAnnotation(ctx, stale)
+		Expect(apierrors.IsConflict(err)).To(BeTrue(), "the stale read is refused: %v", err)
+
+		got := &infravirtrigaudiov1beta1.VirtualMachine{}
+		Expect(k8sClient.Get(ctx, key, got)).To(Succeed())
+		Expect(got.Annotations).To(HaveKey(createOutcomeAnnotation), "nothing was patched")
+		Expect(got.Status.ID).To(Equal("bound-by-another-writer"))
+
+		By("a fresh read removes it and keeps the reconcile's status")
+		fresh := &infravirtrigaudiov1beta1.VirtualMachine{}
+		Expect(k8sClient.Get(ctx, key, fresh)).To(Succeed())
+		Expect(r.removeCreateOutcomeAnnotation(ctx, fresh)).To(Succeed())
+		Expect(fresh.Status.ID).To(Equal("bound-by-another-writer"))
+		Expect(k8sClient.Get(ctx, key, got)).To(Succeed())
+		Expect(got.Annotations).NotTo(HaveKey(createOutcomeAnnotation))
 	})
 })
 
