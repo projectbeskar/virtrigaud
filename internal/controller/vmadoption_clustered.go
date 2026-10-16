@@ -355,7 +355,7 @@ func (r *VMAdoptionReconciler) reconcileClusteredAdoption(ctx context.Context, p
 	provider.Status.Adoption.FailedAdoptions = failed
 	provider.Status.Adoption.Message = clusteredAdoptionMessage(adopted, failed, deferred, plan.skipped, listed.UnreachableHostIDs) +
 		strandedSummary(stranded)
-	if err := r.Status().Update(ctx, provider); err != nil {
+	if err := r.writeAdoptionResult(ctx, provider, provider.Status.Adoption); err != nil {
 		logger.Error(err, "Failed to update adoption status")
 		metrics.RecordError(errReasonAdoptionStatus, metrics.ComponentManager)
 		return ctrl.Result{}, err
@@ -475,8 +475,7 @@ func skippedVMName(sk adoptionSkip) string {
 // requeues.
 func (r *VMAdoptionReconciler) clusteredAdoptionFailed(ctx context.Context, provider *infravirtrigaudiov1beta1.Provider,
 	msg, reason string) (ctrl.Result, error) {
-	provider.Status.Adoption.Message = msg
-	if err := r.Status().Update(ctx, provider); err != nil {
+	if err := r.writeAdoptionMessage(ctx, provider, msg); err != nil {
 		log.FromContext(ctx).Error(err, "Failed to update adoption status")
 	}
 	metrics.RecordError(reason, metrics.ComponentManager)
@@ -503,8 +502,7 @@ func (r *VMAdoptionReconciler) routedAdopter(ctx context.Context, provider *infr
 		}
 	}
 	logger.Info("Not adopting from a clustered provider", "provider", provider.Name, "reason", msg)
-	provider.Status.Adoption.Message = msg
-	if err := r.Status().Update(ctx, provider); err != nil {
+	if err := r.writeAdoptionMessage(ctx, provider, msg); err != nil {
 		logger.Error(err, "Failed to update adoption status")
 	}
 	return nil, false

@@ -486,7 +486,12 @@ func (r *VirtualMachineReconciler) removeCreateOutcomeAnnotation(ctx context.Con
 		return nil
 	}
 	status := vm.Status.DeepCopy()
-	patch := client.MergeFrom(vm.DeepCopy())
+	// Optimistic lock: the patch succeeds only if the VirtualMachine is still
+	// the version this reconcile read, so keeping this reconcile's status
+	// under the new resourceVersion below can never carry a status older than
+	// one another writer stored meanwhile. A conflict is returned and the
+	// reconcile runs again from the live object.
+	patch := client.MergeFromWithOptions(vm.DeepCopy(), client.MergeFromWithOptimisticLock{})
 	delete(vm.Annotations, createOutcomeAnnotation)
 	if err := r.Patch(ctx, vm, patch); err != nil {
 		return fmt.Errorf("remove annotation %s from VirtualMachine %s/%s: %w", createOutcomeAnnotation, vm.Namespace, vm.Name, err)

@@ -601,7 +601,7 @@ func (r *ProviderReconciler) holdInUseProvider(ctx context.Context, provider *in
 	provider.Status.ObservedGeneration = provider.Generation
 
 	if !equality.Semantic.DeepEqual(base.Status, provider.Status) {
-		if err := r.writeProviderStatus(ctx, provider); err != nil {
+		if err := r.writeProviderStatus(ctx, &base.Status, provider); err != nil {
 			return ctrl.Result{}, fmt.Errorf("update status of held Provider %s/%s: %w", provider.Namespace, provider.Name, err)
 		}
 	}

@@ -174,8 +174,9 @@ func (r *VMAdoptionReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	if adoptVMs != "true" {
 		// Clear adoption status if annotation is removed
 		if provider.Status.Adoption != nil {
-			provider.Status.Adoption = nil
-			if err := r.Status().Update(ctx, &provider); err != nil {
+			if err := r.writeAdoptionStatus(ctx, &provider, func(st *infravirtrigaudiov1beta1.ProviderStatus) {
+				st.Adoption = nil
+			}); err != nil {
 				logger.Error(err, "Failed to clear adoption status")
 			}
 		}
@@ -190,8 +191,7 @@ func (r *VMAdoptionReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	// Check if provider is ready
 	if !r.isProviderReady(&provider) {
 		logger.Info("Provider not ready, waiting", "provider", provider.Name)
-		provider.Status.Adoption.Message = "Provider not ready"
-		if err := r.Status().Update(ctx, &provider); err != nil {
+		if err := r.writeAdoptionMessage(ctx, &provider, adoptionProviderNotReadyMessage); err != nil {
 			logger.Error(err, "Failed to update adoption status")
 		}
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
@@ -203,8 +203,7 @@ func (r *VMAdoptionReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		parsedFilter, err := parseFilterAnnotation(filterStr)
 		if err != nil {
 			logger.Error(err, "Failed to parse filter annotation", "filter", filterStr)
-			provider.Status.Adoption.Message = fmt.Sprintf("Invalid filter: %v", err)
-			if updateErr := r.Status().Update(ctx, &provider); updateErr != nil {
+			if updateErr := r.writeAdoptionMessage(ctx, &provider, fmt.Sprintf("Invalid filter: %v", err)); updateErr != nil {
 				logger.Error(updateErr, "Failed to update adoption status")
 			}
 			metrics.RecordError(errReasonInvalidFilter, metrics.ComponentManager)
@@ -237,8 +236,7 @@ func (r *VMAdoptionReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	unmanagedVMs, foreignStamped, err := r.discoverUnmanagedVMs(ctx, &provider, filter)
 	if err != nil {
 		logger.Error(err, "Failed to discover unmanaged VMs")
-		provider.Status.Adoption.Message = fmt.Sprintf("Discovery failed: %v", err)
-		if updateErr := r.Status().Update(ctx, &provider); updateErr != nil {
+		if updateErr := r.writeAdoptionMessage(ctx, &provider, fmt.Sprintf("Discovery failed: %v", err)); updateErr != nil {
 			logger.Error(updateErr, "Failed to update adoption status")
 		}
 		metrics.RecordError(errReasonDiscoverVMs, metrics.ComponentManager)
@@ -273,7 +271,7 @@ func (r *VMAdoptionReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	}
 	provider.Status.Adoption.Message += foreignStampedSummary(foreignStamped)
 
-	if err := r.Status().Update(ctx, &provider); err != nil {
+	if err := r.writeAdoptionResult(ctx, &provider, provider.Status.Adoption); err != nil {
 		logger.Error(err, "Failed to update adoption status")
 		metrics.RecordError(errReasonAdoptionStatus, metrics.ComponentManager)
 		return ctrl.Result{}, err
