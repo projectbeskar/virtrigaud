@@ -59,8 +59,12 @@ import (
 //     server and applies ONLY the RPC's result fields (and the phase
 //     transition it completes) to the live object, as long as the live phase
 //     is still the one the RPC was sent in. A result that still cannot be
-//     written is kept in memory (pendingMigrationResult) and applied by the
-//     next reconcile of that phase.
+//     written is kept in memory (pendingMigrationResult) and written by the
+//     next reconcile of that phase, so this manager process does not re-send
+//     the RPC. It is in memory only: a manager restart or leader change
+//     between the RPC and the write, or while a result is held, loses it and
+//     the new leader can re-send ExportDisk / ImportDisk / SnapshotCreate
+//     (pre-existing).
 
 // migrationStatusConflictRequeue is when a reconcile whose status write lost
 // to a concurrent write (or found the live status moved on) runs again. The

@@ -109,14 +109,20 @@ type VMMigrationReconciler struct {
 	// non-idempotent migration RPC (ExportDisk / ImportDisk) when a reconcile
 	// re-enters before the prior status write has propagated to the informer
 	// cache. It is keyed by longOpKey(migration, op) and holds a sentinel for
-	// the duration of (and after) the RPC for a given object generation.
+	// the duration of (and after) the RPC for a given object generation, or a
+	// pendingMigrationResult when the RPC's result could not be persisted
+	// (vmmigration_status_write.go; SnapshotCreate results use it too, under
+	// longOpSnapshot).
 	//
 	// This guards the cache-staleness race ONLY; controller-runtime already
 	// serializes reconciles per object key. The guard lives in the manager
-	// process and is intentionally NOT persisted: on a manager restart it is
-	// lost, but by then the durable Status (ExportID/ImportID + the
-	// Exporting/Importing condition) is internally consistent, so the
-	// persisted-state guard below (condition == True) prevents a duplicate RPC.
+	// process and is intentionally NOT persisted: it keeps an RPC from being
+	// re-sent by THIS manager process only. Once the result is written, the
+	// durable Status (ExportID/ImportID + the Exporting/Importing condition)
+	// prevents a duplicate RPC after a restart. A manager restart or leader
+	// change after the RPC returned but before its result was written — or
+	// while a pendingMigrationResult is held — loses the result, and the new
+	// leader re-sends ExportDisk / ImportDisk (pre-existing; not closed here).
 	longOpInFlight sync.Map
 
 	// providerInstanceFn, when non-nil, overrides provider-instance resolution.
@@ -1012,8 +1018,9 @@ func (r *VMMigrationReconciler) handleExportingPhase(ctx context.Context, migrat
 	}
 
 	// Record the export's result (vmmigration_status_write.go): on a conflict
-	// it is applied to the live object, never lost to a requeue, since the
-	// in-memory guard keeps ExportDisk from being sent again.
+	// it is applied to the live object rather than dropped by a requeue, since
+	// the in-memory guard keeps this manager process from sending ExportDisk
+	// again.
 	result := exportResultApplier(exportResp, exportReq.DiskId, diskFormat, exportedSize)
 
 	// If there's a task, we need to wait for it
@@ -1407,8 +1414,9 @@ func (r *VMMigrationReconciler) handleImportingPhase(ctx context.Context, migrat
 	r.importUnverifiable.reset(string(migration.UID))
 
 	// Record the import's result (vmmigration_status_write.go): on a conflict
-	// it is applied to the live object, never lost to a requeue, since the
-	// in-memory guard keeps ImportDisk from being sent again.
+	// it is applied to the live object rather than dropped by a requeue, since
+	// the in-memory guard keeps this manager process from sending ImportDisk
+	// again.
 	//
 	// Space precheck (ADR-0006 Slice 2): there is intentionally NO target-side
 	// capacity gate here today, so nothing asserts that the imported disk's

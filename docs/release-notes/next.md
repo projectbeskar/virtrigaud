@@ -338,8 +338,12 @@ providers), and rollback caveats in
   A status write now never replaces a newer status: it either loses the
   conflict and the migration is reconciled again from the live state, or —
   for the result of a snapshot, export or import — only that result is
-  written onto the live object, so it is never lost and the operation is
-  never sent twice. The same fix stops the `Provider` controller from
+  written onto the live object; a result that cannot be written yet is held
+  and written by the next reconcile, so the manager does not send the
+  operation again. A manager restart or leader change between the operation
+  and its write can still lose the result and re-send it, as before. A result
+  dropped because the migration had moved on is reported with a `Warning`
+  event `ProviderResultNotRecorded`. The same fix stops the `Provider` controller from
   dropping `status.adoption` written by VM adoption, and adoption from losing
   its status to the `Provider` controller's frequent writes.
 - **A vSphere disk export no longer leaks a full copy of the disk on the
