@@ -1753,7 +1753,7 @@ func (r *VMMigrationReconciler) handleCreatingPhase(ctx context.Context, migrati
 	// virtrigaud.io/migration and virtrigaud.io/migration-completed).
 	targetAnnotations := userTargetAnnotations(migration.Spec.Target.Annotations)
 	targetAnnotations["virtrigaud.io/migrated-from"] = fmt.Sprintf("%s/%s", migration.Namespace, migration.Spec.Source.VMRef.Name)
-	targetAnnotations["virtrigaud.io/migration"] = fmt.Sprintf("%s/%s", migration.Namespace, migration.Name)
+	targetAnnotations[migrationProvenanceAnnotation] = migrationProvenance(migration)
 	targetAnnotations["virtrigaud.io/imported-disk-id"] = migration.Status.ImportID
 	targetAnnotations["virtrigaud.io/disk-checksum"] = migration.Status.DiskInfo.TargetChecksum
 
@@ -1828,9 +1828,19 @@ func (r *VMMigrationReconciler) handleCreatingPhase(ctx context.Context, migrati
 		return res, err
 	}
 
-	// Create the VM resource
+	// Create the VM resource. AlreadyExists for the VM this migration created
+	// (an earlier reconcile's Create the cache did not show yet) is that VM,
+	// not a failure; any other VM of that name still fails the migration.
 	if err := r.Create(ctx, targetVM); err != nil {
-		return r.transitionToFailed(ctx, migration, fmt.Sprintf("Failed to create target VM: %v", err))
+		created, checkErr := r.targetVMCreatedByMigration(ctx, migration, vmKey, err)
+		if checkErr != nil {
+			return ctrl.Result{}, checkErr
+		}
+		if !created {
+			return r.transitionToFailed(ctx, migration, fmt.Sprintf("Failed to create target VM: %v", err))
+		}
+		logger.Info("Target VM already created by this migration", "name", targetVMName)
+		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 	}
 
 	logger.Info("Target VM created", "name", targetVMName)
@@ -1844,6 +1854,43 @@ func (r *VMMigrationReconciler) handleCreatingPhase(ctx context.Context, migrati
 
 	// Requeue to check VM status
 	return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+}
+
+// migrationProvenanceAnnotation names, on a VirtualMachine a migration
+// created, that migration as "<namespace>/<name>". It is written last, after
+// the user's target annotations, so a user cannot set it through the
+// migration.
+const migrationProvenanceAnnotation = "virtrigaud.io/migration"
+
+// migrationProvenance is migrationProvenanceAnnotation's value for migration.
+func migrationProvenance(migration *infrav1beta1.VMMigration) string {
+	return fmt.Sprintf("%s/%s", migration.Namespace, migration.Name)
+}
+
+// targetVMCreatedByMigration reports whether createErr, the error of the
+// Creating phase's Create of the target VM key, is AlreadyExists for the
+// VirtualMachine this migration created: re-read from the API server, it
+// names the migration in migrationProvenanceAnnotation and attaches this
+// migration's imported disk (spec.importedDisk: source "migration", this
+// migration's name and status.importID). Any other error, or another VM of
+// that name, is false. A failed re-read is returned.
+func (r *VMMigrationReconciler) targetVMCreatedByMigration(ctx context.Context, migration *infrav1beta1.VMMigration,
+	key client.ObjectKey, createErr error) (bool, error) {
+	if !errors.IsAlreadyExists(createErr) {
+		return false, nil
+	}
+	existing := &infrav1beta1.VirtualMachine{}
+	if err := r.liveReader().Get(ctx, key, existing); err != nil {
+		if errors.IsNotFound(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("re-read target VirtualMachine %s after AlreadyExists: %w", key, err)
+	}
+	disk := existing.Spec.ImportedDisk
+	return existing.Annotations[migrationProvenanceAnnotation] == migrationProvenance(migration) &&
+		disk != nil && disk.Source == "migration" &&
+		disk.MigrationRef != nil && disk.MigrationRef.Name == migration.Name &&
+		migration.Status.ImportID != "" && disk.DiskID == migration.Status.ImportID, nil
 }
 
 // migrationTargetPowerState is the desired power state (spec.powerState) of the
@@ -2237,7 +2284,7 @@ func (r *VMMigrationReconciler) handleDeletion(ctx context.Context, migration *i
 				// VM is a successfully migrated VM, never delete it
 			} else if targetVM.Annotations != nil {
 				// Only delete if it has our migration annotation AND no completion marker
-				if migrationRef, ok := targetVM.Annotations["virtrigaud.io/migration"]; ok {
+				if migrationRef, ok := targetVM.Annotations[migrationProvenanceAnnotation]; ok {
 					expectedRef := fmt.Sprintf("%s/%s", migration.Namespace, migration.Name)
 					if migrationRef == expectedRef {
 						logger.Info("Deleting partially created target VM", "vm", targetVMName)
