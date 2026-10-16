@@ -1,0 +1,153 @@
+/*
+Copyright 2026.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package proxmox
+
+import (
+	"context"
+	stderrors "errors"
+	"fmt"
+
+	"google.golang.org/grpc/codes"
+
+	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
+	"github.com/projectbeskar/virtrigaud/internal/providers/proxmox/pveapi"
+	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
+	"github.com/projectbeskar/virtrigaud/sdk/provider/errors"
+)
+
+// Owner checks of the per-VM calls other than Delete (Describe, Power,
+// Reconfigure, SnapshotCreate, SnapshotDelete, SnapshotRevert).
+//
+// Proxmox VMIDs are reused: once a VM is destroyed (outside VirtRigaud, say),
+// /cluster/nextid may hand its VMID to the next VM anyone creates. A
+// VirtualMachine whose status.id still records that VMID would otherwise
+// read, power, resize, snapshot or revert the unrelated VM that took it over.
+// When the request names its owner (the manager sends the VirtualMachine's
+// identity on every one of these calls), the VM's owner stamp is checked
+// against it BEFORE anything of the VM is read for the answer or changed — the
+// same rule as Delete's (checkDelete):
+//
+//   - stamped with the requester's UID: the call goes on;
+//   - unstamped (created before owner stamps, adopted, or cloned without a
+//     target UID) and named like the owner (unstampedNamedLikeOwner: the
+//     name Create or adoption gave it): the call goes on, as before;
+//   - stamped with another UID, or unstamped with any other name: NotFound +
+//     VM_NOT_OWNED, and the VM is neither read nor changed;
+//   - a stamp that cannot be read or records more than one owner:
+//     FailedPrecondition + OWNER_STAMP_UNREADABLE (fail closed);
+//   - the config cannot be read: Unavailable (retried), nothing done.
+//
+// A request without an owner (a manager older than this check) is not
+// checked, exactly as before. Templates keep their handling: only Delete
+// refuses them (VM_IS_IMAGE_ARTIFACT); for the calls here a template is owner
+// checked like any VM.
+
+// The per-VM calls an owner check names in its answer and log line.
+const (
+	ownerCheckOpDescribe       = "describe"
+	ownerCheckOpPower          = "power operation"
+	ownerCheckOpReconfigure    = "reconfigure"
+	ownerCheckOpSnapshotCreate = "snapshot create"
+	ownerCheckOpSnapshotDelete = "snapshot delete"
+	ownerCheckOpSnapshotRevert = "snapshot revert"
+)
+
+// vmNotOwnedMessage is the constant answer (per call) to a request for a VM
+// that is not the requester's (VM_NOT_OWNED). It names no VM, stamp or owner:
+// it lands in the requesting object's status, and the details go to the
+// provider log only.
+func vmNotOwnedMessage(op string) string {
+	return fmt.Sprintf("the Proxmox VM at this VMID is not this VirtualMachine's (it carries another owner's stamp, or "+
+		"it is unstamped and named differently: its VMID was reused, or the VirtualMachine was re-created under another "+
+		"UID); the %s was not performed and none of the VM's state was read", op)
+}
+
+// ownerStampUnreadableMessage is the constant answer (per call) to a request
+// for a VM whose owner stamp cannot be read or records more than one owner
+// (OWNER_STAMP_UNREADABLE).
+func ownerStampUnreadableMessage(op string) string {
+	return fmt.Sprintf("refused: the VM carries an owner stamp (%s line of its description) that cannot be read or "+
+		"records more than one owner, so who owns it cannot be told; the %s was not performed. Fix the stamp, or "+
+		"remove the VM by hand", ownerStampMarker, op)
+}
+
+// requestOwner reads the owner of a per-VM request; the zero identity when
+// it is absent or carries no UID (a manager older than the owner checks).
+func requestOwner(o *providerv1.ObjectIdentity) contracts.ObjectIdentity {
+	return contracts.ObjectIdentity{UID: o.GetUid(), Namespace: o.GetNamespace(), Name: o.GetName()}
+}
+
+// checkVMOwner reads the config of VM vmid on node and decides, with
+// checkOwnerInConfig, whether the per-VM call op made for owner may go on. It
+// returns nil to go on, and the answer otherwise. A request without an owner
+// is not checked and costs no API call.
+//
+// A VM the config read cannot find on node is left to the call itself: each
+// call already handles a VM that is not on the node asked (Describe confirms
+// cluster-wide whether it is gone; the others fail on PVE's answer), and there
+// is no VM there whose state it could read or change.
+func (p *Provider) checkVMOwner(ctx context.Context, node string, vmid int, owner contracts.ObjectIdentity, op string) error {
+	if owner.IsZero() {
+		return nil
+	}
+	cfg, err := p.client.GetVMConfig(ctx, node, vmid)
+	if stderrors.Is(err, pveapi.ErrVMNotFound) {
+		return nil
+	}
+	if err != nil {
+		p.logger.Error("Reading the VM configuration to check its owner failed; not performing the call",
+			"op", op, "vmid", vmid, "node", node, "error", err)
+		return errors.NewUnavailable(fmt.Sprintf("cannot read the configuration of Proxmox VM %d to check its owner; "+
+			"the %s was not performed (will retry)", vmid, op), nil)
+	}
+	return p.checkOwnerInConfig(cfg, node, vmid, owner, op)
+}
+
+// checkOwnerInConfig decides from cfg, the already-read config of VM vmid on
+// node, whether the per-VM call op made for owner may go on (see the rules
+// above). A request without an owner always may.
+func (p *Provider) checkOwnerInConfig(cfg map[string]interface{}, node string, vmid int, owner contracts.ObjectIdentity, op string) error {
+	if owner.IsZero() {
+		return nil
+	}
+	read := readOwnerStamp(configString(cfg, pveConfigKeyDescription))
+	pveName := configString(cfg, pveConfigKeyName)
+	logArgs := []any{"op", op, "vmid", vmid, "node", node,
+		"requester_uid", owner.UID, "requester_namespace", owner.Namespace, "requester_name", owner.Name}
+	switch {
+	case read.state != "":
+		p.logger.Warn("Refusing the call: the VM's owner stamp cannot be relied on",
+			append(logArgs, "owner_stamp_state", read.state, "problem", read.problem)...)
+		return statusWithReasons(codes.FailedPrecondition, ownerStampUnreadableMessage(op), contracts.OwnerStampUnreadableReason)
+	case read.stamp == nil && !unstampedNamedLikeOwner(pveName, vmid, owner):
+		p.logger.Warn("Refusing the call: the VM is unstamped and not named like this VirtualMachine (its VMID was reused?)",
+			append(logArgs, "vm_name", pveName)...)
+		return statusWithReasons(codes.NotFound, vmNotOwnedMessage(op), contracts.VMNotOwnedReason)
+	case read.stamp == nil:
+		// A VM created before owner stamps, adopted, or cloned without a
+		// target UID, named like this VirtualMachine: managed as before.
+		p.logger.Debug("The VM carries no owner stamp and is named like this VirtualMachine; performing the call as before",
+			logArgs...)
+		return nil
+	case read.stamp.owner.UID != owner.UID:
+		p.logger.Warn("Refusing the call: the VM is stamped with another owner (its VMID was reused, or the requester was re-created)",
+			append(logArgs, "owner_uid", read.stamp.owner.UID, "owner_namespace", read.stamp.owner.Namespace,
+				"owner_name", read.stamp.owner.Name)...)
+		return statusWithReasons(codes.NotFound, vmNotOwnedMessage(op), contracts.VMNotOwnedReason)
+	}
+	return nil
+}
