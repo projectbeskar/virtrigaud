@@ -162,19 +162,32 @@ func migrationSnapshotConfirmed(m *infrav1beta1.VMMigration) bool {
 // Exporting phase uses status.taskRef for its own task.
 func (r *VMMigrationReconciler) advanceToExporting(ctx context.Context, migration *infrav1beta1.VMMigration, message string) (ctrl.Result, error) {
 	alreadyConfirmed := migrationSnapshotConfirmed(migration)
-	migration.Status.Phase = infrav1beta1.MigrationPhaseExporting
-	migration.Status.Message = message
-	migration.Status.TaskRef = ""
-	k8s.SetCondition(&migration.Status.Conditions, infrav1beta1.VMMigrationConditionSnapshotting,
-		metav1.ConditionTrue, migrationReasonSnapshotComplete, "Source VM snapshot created", migration.Generation)
+	markSnapshotCompleteForExport(migration, message)
 	if !alreadyConfirmed {
-		r.Recorder.Event(migration, corev1.EventTypeNormal, migrationReasonSnapshotComplete,
-			fmt.Sprintf("Snapshot %s of the source VM is complete", migration.Status.SnapshotID))
+		r.recordSnapshotCompleteEvent(migration)
 	}
 	if err := r.updateStatus(ctx, migration); err != nil {
 		return ctrl.Result{}, err
 	}
 	return ctrl.Result{RequeueAfter: migrationPhaseAdvanceRequeue}, nil
+}
+
+// markSnapshotCompleteForExport records the source snapshot as complete
+// (Snapshotting=True/SnapshotComplete) and moves the migration to Exporting
+// with message, clearing the snapshot task reference.
+func markSnapshotCompleteForExport(m *infrav1beta1.VMMigration, message string) {
+	m.Status.Phase = infrav1beta1.MigrationPhaseExporting
+	m.Status.Message = message
+	m.Status.TaskRef = ""
+	k8s.SetCondition(&m.Status.Conditions, infrav1beta1.VMMigrationConditionSnapshotting,
+		metav1.ConditionTrue, migrationReasonSnapshotComplete, "Source VM snapshot created", m.Generation)
+}
+
+// recordSnapshotCompleteEvent emits the Normal SnapshotComplete event for the
+// migration's recorded source snapshot.
+func (r *VMMigrationReconciler) recordSnapshotCompleteEvent(migration *infrav1beta1.VMMigration) {
+	r.Recorder.Event(migration, corev1.EventTypeNormal, migrationReasonSnapshotComplete,
+		fmt.Sprintf("Snapshot %s of the source VM is complete", migration.Status.SnapshotID))
 }
 
 // pollMigrationSnapshotTask polls the task of a task-backed SnapshotCreate
