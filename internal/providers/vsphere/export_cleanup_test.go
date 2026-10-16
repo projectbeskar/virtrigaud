@@ -22,6 +22,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os/exec"
 	"path"
 	"strings"
 	"testing"
@@ -279,6 +280,11 @@ func TestExportDisk_DownloadFailure_NothingLeaks(t *testing.T) {
 }
 
 func TestExportDisk_Success_NothingLeaks(t *testing.T) {
+	// vcsim stores the clone as a descriptor plus extent, which the success
+	// path flattens with qemu-img before uploading.
+	if _, err := exec.LookPath("qemu-img"); err != nil {
+		t.Skip("qemu-img not installed")
+	}
 	p, _ := newOwnershipSim(t)
 	vmID, _, folder := exportSource(t, p)
 	before := folderFiles(t, p, folder)
