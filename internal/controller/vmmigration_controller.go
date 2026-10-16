@@ -34,7 +34,6 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/tools/record"
-	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -110,14 +109,20 @@ type VMMigrationReconciler struct {
 	// non-idempotent migration RPC (ExportDisk / ImportDisk) when a reconcile
 	// re-enters before the prior status write has propagated to the informer
 	// cache. It is keyed by longOpKey(migration, op) and holds a sentinel for
-	// the duration of (and after) the RPC for a given object generation.
+	// the duration of (and after) the RPC for a given object generation, or a
+	// pendingMigrationResult when the RPC's result could not be persisted
+	// (vmmigration_status_write.go; SnapshotCreate results use it too, under
+	// longOpSnapshot).
 	//
 	// This guards the cache-staleness race ONLY; controller-runtime already
 	// serializes reconciles per object key. The guard lives in the manager
-	// process and is intentionally NOT persisted: on a manager restart it is
-	// lost, but by then the durable Status (ExportID/ImportID + the
-	// Exporting/Importing condition) is internally consistent, so the
-	// persisted-state guard below (condition == True) prevents a duplicate RPC.
+	// process and is intentionally NOT persisted: it keeps an RPC from being
+	// re-sent by THIS manager process only. Once the result is written, the
+	// durable Status (ExportID/ImportID + the Exporting/Importing condition)
+	// prevents a duplicate RPC after a restart. A manager restart or leader
+	// change after the RPC returned but before its result was written — or
+	// while a pendingMigrationResult is held — loses the result, and the new
+	// leader re-sends ExportDisk / ImportDisk (pre-existing; not closed here).
 	longOpInFlight sync.Map
 
 	// providerInstanceFn, when non-nil, overrides provider-instance resolution.
@@ -136,6 +141,9 @@ const (
 	longOpExport migrationLongOp = "export"
 	// longOpImport marks the synchronous ImportDisk RPC.
 	longOpImport migrationLongOp = "import"
+	// longOpSnapshot keys a SnapshotCreate result that could not be persisted
+	// (pendingMigrationResult). SnapshotCreate has no in-flight guard.
+	longOpSnapshot migrationLongOp = "snapshot"
 )
 
 // longOpKey builds the in-memory guard key for a migration's long-running RPC.
@@ -230,6 +238,14 @@ func (r *VMMigrationReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 			outcome = metrics.OutcomeRequeue
 		}
 		timer.Finish(outcome)
+	}()
+	// A status write that lost to a concurrent write is not an error: the
+	// reconcile runs again from the live state (vmmigration_status_write.go).
+	// Registered after the metrics defer so it runs first.
+	defer func() {
+		if retErr != nil && isMigrationStatusContention(retErr) {
+			result, retErr = ctrl.Result{RequeueAfter: migrationStatusConflictRequeue}, nil
+		}
 	}()
 
 	// Add correlation context
@@ -626,6 +642,13 @@ func (r *VMMigrationReconciler) handleSnapshottingPhase(ctx context.Context, mig
 	logger := logging.FromContext(ctx)
 	logger.Info("Handling snapshotting phase")
 
+	// A snapshot an earlier reconcile took but could not record is recorded
+	// first, before anything that can fail the phase: otherwise it would be
+	// taken again (vmmigration_status_write.go).
+	if done, res, err := r.recordPendingMigrationResult(ctx, migration, longOpSnapshot); done {
+		return res, err
+	}
+
 	// Get source VM
 	sourceVM, err := r.getSourceVM(ctx, migration)
 	if err != nil {
@@ -723,34 +746,64 @@ func (r *VMMigrationReconciler) handleSnapshottingPhase(ctx context.Context, mig
 		return r.transitionToFailed(ctx, migration, "Failed to create snapshot: "+migrationFailureDetail(err))
 	}
 
-	// Store snapshot ID in status
-	migration.Status.SnapshotID = snapshotResp.SnapshotId
-	migration.Status.Message = fmt.Sprintf("Snapshot %s created", snapshotResp.SnapshotId)
+	// Record the snapshot (vmmigration_status_write.go): on a conflict it is
+	// applied to the live object rather than lost to a requeue, which would
+	// take a second snapshot on a provider that honors no request token.
+	recordSnapshot := func(m *infrav1beta1.VMMigration) {
+		m.Status.SnapshotID = snapshotResp.SnapshotId
+		m.Status.Message = fmt.Sprintf("Snapshot %s created", snapshotResp.SnapshotId)
+	}
 
 	// If there's a task, we need to wait for it to complete
 	if snapshotResp.Task != nil && snapshotResp.Task.ID != "" {
-		migration.Status.TaskRef = snapshotResp.Task.ID
-		logger.Info("Snapshot creation task started, waiting for completion", "task_id", snapshotResp.Task.ID)
-		// The wait starts now: the condition's transition time bounds it
-		// (migrationSnapshotWaitLimit).
-		k8s.SetCondition(&migration.Status.Conditions, infrav1beta1.VMMigrationConditionSnapshotting,
-			metav1.ConditionTrue, migrationReasonSnapshotInProgress, migrationSnapshotInProgressMessage, migration.Generation)
-
-		if err := r.updateStatus(ctx, migration); err != nil {
+		taskID := snapshotResp.Task.ID
+		logger.Info("Snapshot creation task started, waiting for completion", "task_id", taskID)
+		inProgress := func(m *infrav1beta1.VMMigration) {
+			recordSnapshot(m)
+			m.Status.TaskRef = taskID
+			// The wait starts now: the condition's transition time bounds it
+			// (migrationSnapshotWaitLimit).
+			k8s.SetCondition(&m.Status.Conditions, infrav1beta1.VMMigrationConditionSnapshotting,
+				metav1.ConditionTrue, migrationReasonSnapshotInProgress, migrationSnapshotInProgressMessage, m.Generation)
+		}
+		if err := r.recordLongOpResult(ctx, migration, longOpSnapshot, infrav1beta1.MigrationPhaseSnapshotting,
+			inProgress, inProgress, "snapshot_id", snapshotResp.SnapshotId, "task_id", taskID); err != nil {
 			return ctrl.Result{}, err
 		}
 
 		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 	}
 
-	// Snapshot created synchronously, move to export
-	return r.advanceToExporting(ctx, migration, "Snapshot created, starting export")
+	// Snapshot created synchronously, move to export. A result kept for the
+	// next reconcile records the snapshot as complete; that reconcile then
+	// moves to Exporting.
+	complete := func(m *infrav1beta1.VMMigration) {
+		recordSnapshot(m)
+		k8s.SetCondition(&m.Status.Conditions, infrav1beta1.VMMigrationConditionSnapshotting,
+			metav1.ConditionTrue, migrationReasonSnapshotComplete, "Source VM snapshot created", m.Generation)
+	}
+	if err := r.recordLongOpResult(ctx, migration, longOpSnapshot, infrav1beta1.MigrationPhaseSnapshotting,
+		complete, func(m *infrav1beta1.VMMigration) {
+			recordSnapshot(m)
+			markSnapshotCompleteForExport(m, "Snapshot created, starting export")
+		}, "snapshot_id", snapshotResp.SnapshotId); err != nil {
+		return ctrl.Result{}, err
+	}
+	r.recordSnapshotCompleteEvent(migration)
+	return ctrl.Result{RequeueAfter: migrationPhaseAdvanceRequeue}, nil
 }
 
 // handleExportingPhase exports the disk from source provider
 func (r *VMMigrationReconciler) handleExportingPhase(ctx context.Context, migration *infrav1beta1.VMMigration) (ctrl.Result, error) {
 	logger := logging.FromContext(ctx)
 	logger.Info("Handling exporting phase")
+
+	// An ExportDisk result an earlier reconcile could not persist is recorded
+	// first, before anything that can fail the phase: the import verifies its
+	// checksum, and the in-memory guard keeps the export from being sent again.
+	if done, res, err := r.recordPendingMigrationResult(ctx, migration, longOpExport); done {
+		return res, err
+	}
 
 	// Get source VM
 	sourceVM, err := r.getSourceVM(ctx, migration)
@@ -822,13 +875,7 @@ func (r *VMMigrationReconciler) handleExportingPhase(ctx context.Context, migrat
 		}
 
 		// Export complete, transition to importing (skip transfer phase for direct export)
-		migration.Status.Phase = infrav1beta1.MigrationPhaseImporting
-		migration.Status.Message = "Disk exported successfully"
-		migration.Status.TaskRef = ""
-
-		k8s.SetCondition(&migration.Status.Conditions, infrav1beta1.VMMigrationConditionExporting,
-			metav1.ConditionTrue, "ExportComplete",
-			"Source VM disk exported", migration.Generation)
+		markExportComplete(migration)
 
 		r.Recorder.Event(migration, "Normal", "ExportComplete", "Disk exported successfully")
 
@@ -970,49 +1017,35 @@ func (r *VMMigrationReconciler) handleExportingPhase(ctx context.Context, migrat
 		return r.transitionToFailed(ctx, migration, "Failed to start disk export: "+migrationFailureDetail(err))
 	}
 
-	// Store export info in status
-	migration.Status.ExportID = exportResp.ExportId
-	migration.Status.Message = fmt.Sprintf("Exporting disk (estimated size: %d bytes)", exportResp.EstimatedSizeBytes)
-
-	// Initialize disk info in status
-	if migration.Status.DiskInfo == nil {
-		migration.Status.DiskInfo = &infrav1beta1.MigrationDiskInfo{}
-	}
-	migration.Status.DiskInfo.SourceDiskID = exportReq.DiskId
-	migration.Status.DiskInfo.SourceFormat = diskFormat
-	migration.Status.DiskInfo.SourceChecksum = exportResp.Checksum
-	if exportedSize != nil {
-		migration.Status.DiskInfo.SourceSize = exportedSize
-	}
+	// Record the export's result (vmmigration_status_write.go): on a conflict
+	// it is applied to the live object rather than dropped by a requeue, since
+	// the in-memory guard keeps this manager process from sending ExportDisk
+	// again.
+	result := exportResultApplier(exportResp, exportReq.DiskId, diskFormat, exportedSize)
 
 	// If there's a task, we need to wait for it
 	if exportResp.TaskRef != "" {
-		migration.Status.TaskRef = exportResp.TaskRef
 		logger.Info("Export task started", "task_id", exportResp.TaskRef, "export_id", exportResp.ExportId)
-
-		if err := r.updateStatus(ctx, migration); err != nil {
+		if err := r.recordLongOpResult(ctx, migration, longOpExport, infrav1beta1.MigrationPhaseExporting, result, result,
+			"export_id", exportResp.ExportId, "task_id", exportResp.TaskRef); err != nil {
 			return ctrl.Result{}, err
 		}
-
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
 
 	// Export completed synchronously, transition to importing
-	migration.Status.Phase = infrav1beta1.MigrationPhaseImporting
-	migration.Status.Message = "Disk exported successfully"
-	migration.Status.TaskRef = ""
-
-	k8s.SetCondition(&migration.Status.Conditions, infrav1beta1.VMMigrationConditionExporting,
-		metav1.ConditionTrue, "ExportComplete",
-		"Source VM disk exported", migration.Generation)
+	completed := func(m *infrav1beta1.VMMigration) {
+		result(m)
+		markExportComplete(m)
+	}
+	if err := r.recordLongOpResult(ctx, migration, longOpExport, infrav1beta1.MigrationPhaseExporting, result, completed,
+		"export_id", exportResp.ExportId); err != nil {
+		return ctrl.Result{}, err
+	}
 
 	// Constant: the destination names the staging location (bucket, key,
 	// NFS server and path), which belongs in no event (ADR-0011).
 	r.Recorder.Event(migration, "Normal", "ExportComplete", "Disk exported successfully")
-
-	if err := r.updateStatus(ctx, migration); err != nil {
-		return ctrl.Result{}, err
-	}
 
 	// CRITICAL: do NOT immediate-requeue here. The synchronous ExportDisk above
 	// can take ~16 minutes; an immediate requeue re-reads the informer cache
@@ -1023,6 +1056,42 @@ func (r *VMMigrationReconciler) handleExportingPhase(ctx context.Context, migrat
 	// above emits a watch event (no status-filtering predicate in
 	// SetupWithManager) that re-drives reconcile with a fresh cache.
 	return ctrl.Result{}, nil
+}
+
+// exportResultApplier returns the function that records an ExportDisk result
+// on a VMMigration's status: the export id, the exported disk (id, format,
+// checksum and, when it was measured, size) in status.diskInfo — its target
+// fields are kept — and the export task, if any.
+func exportResultApplier(resp contracts.ExportDiskResponse, diskID, format string,
+	size *resource.Quantity) func(*infrav1beta1.VMMigration) {
+	return func(m *infrav1beta1.VMMigration) {
+		m.Status.ExportID = resp.ExportId
+		m.Status.Message = fmt.Sprintf("Exporting disk (estimated size: %d bytes)", resp.EstimatedSizeBytes)
+		if m.Status.DiskInfo == nil {
+			m.Status.DiskInfo = &infrav1beta1.MigrationDiskInfo{}
+		}
+		m.Status.DiskInfo.SourceDiskID = diskID
+		m.Status.DiskInfo.SourceFormat = format
+		m.Status.DiskInfo.SourceChecksum = resp.Checksum
+		if size != nil {
+			q := size.DeepCopy()
+			m.Status.DiskInfo.SourceSize = &q
+		}
+		if resp.TaskRef != "" {
+			m.Status.TaskRef = resp.TaskRef
+		}
+	}
+}
+
+// markExportComplete moves a migration whose disk export finished to
+// Importing: Exporting=True/ExportComplete and the export task cleared.
+func markExportComplete(m *infrav1beta1.VMMigration) {
+	m.Status.Phase = infrav1beta1.MigrationPhaseImporting
+	m.Status.Message = "Disk exported successfully"
+	m.Status.TaskRef = ""
+	k8s.SetCondition(&m.Status.Conditions, infrav1beta1.VMMigrationConditionExporting,
+		metav1.ConditionTrue, "ExportComplete",
+		"Source VM disk exported", m.Generation)
 }
 
 // handleTransferringPhase transfers the disk to intermediate storage
@@ -1072,6 +1141,14 @@ func (r *VMMigrationReconciler) handleConvertingPhase(ctx context.Context, migra
 func (r *VMMigrationReconciler) handleImportingPhase(ctx context.Context, migration *infrav1beta1.VMMigration) (ctrl.Result, error) {
 	logger := logging.FromContext(ctx)
 	logger.Info("Handling importing phase")
+
+	// An ImportDisk result an earlier reconcile could not persist is recorded
+	// first, before anything that can fail the phase: the Creating phase needs
+	// its status.diskInfo, and the in-memory guard keeps the import from being
+	// sent again.
+	if done, res, err := r.recordPendingMigrationResult(ctx, migration, longOpImport); done {
+		return res, err
+	}
 
 	// Re-check the target namespace grant: the import lands a disk named for
 	// the target VM (libvirt: "<target namespace>.<name>-migrated"), which that
@@ -1143,13 +1220,7 @@ func (r *VMMigrationReconciler) handleImportingPhase(ctx context.Context, migrat
 		}
 
 		// Import complete, transition to creating
-		migration.Status.Phase = infrav1beta1.MigrationPhaseCreating
-		migration.Status.Message = "Disk imported, creating target VM"
-		migration.Status.TaskRef = ""
-
-		k8s.SetCondition(&migration.Status.Conditions, infrav1beta1.VMMigrationConditionImporting,
-			metav1.ConditionTrue, "ImportComplete",
-			"Disk imported to target provider", migration.Generation)
+		markImportComplete(migration)
 
 		r.Recorder.Event(migration, "Normal", "ImportComplete", "Disk imported successfully")
 
@@ -1342,7 +1413,10 @@ func (r *VMMigrationReconciler) handleImportingPhase(ctx context.Context, migrat
 	// backoff afresh.
 	r.importUnverifiable.reset(string(migration.UID))
 
-	// Store import info in status.
+	// Record the import's result (vmmigration_status_write.go): on a conflict
+	// it is applied to the live object rather than dropped by a requeue, since
+	// the in-memory guard keeps this manager process from sending ImportDisk
+	// again.
 	//
 	// Space precheck (ADR-0006 Slice 2): there is intentionally NO target-side
 	// capacity gate here today, so nothing asserts that the imported disk's
@@ -1353,61 +1427,33 @@ func (r *VMMigrationReconciler) handleImportingPhase(ctx context.Context, migrat
 	// message only and is NOT compared against any datastore capacity. If a
 	// target-side capacity gate is added later, it MUST budget the *virtual*
 	// (provisioned) size for vSphere targets, never the used/actual size.
-	migration.Status.ImportID = importResp.DiskId
-	migration.Status.Message = fmt.Sprintf("Importing disk (size: %d bytes)", importResp.ActualSizeBytes)
-
-	// Update disk info in status.
-	//
-	// TargetFormat is the format the disk landed in on the TARGET provider,
-	// derived from the target provider type (vSphere target -> vmdk, libvirt
-	// target -> qcow2) rather than hard-defaulted to qcow2. For the forward
-	// vSphere -> libvirt path this still resolves to qcow2, so that path is
-	// unchanged; for the reverse libvirt -> vSphere path it correctly labels the
-	// landed disk as vmdk.
-	//
-	// TargetPath is the provider-native path returned by ImportDisk (e.g.
-	// "[datastore1] <id>/<id>.vmdk" for vSphere). It is CRITICAL for the reverse
-	// path: the VM controller must attach the disk at exactly this path rather
-	// than synthesizing a bogus libvirt-style path. The created target VM copies
-	// it into Spec.ImportedDisk.Path in the creating phase.
-	if migration.Status.DiskInfo == nil {
-		migration.Status.DiskInfo = &infrav1beta1.MigrationDiskInfo{}
-	}
-	migration.Status.DiskInfo.TargetDiskID = importResp.DiskId
-	migration.Status.DiskInfo.TargetFormat = landedTargetFormat(targetProvider)
-	migration.Status.DiskInfo.TargetPath = importResp.Path
-	migration.Status.DiskInfo.TargetChecksum = importResp.Checksum
-	logger.Info("Recorded imported disk info",
-		"target_disk_id", importResp.DiskId,
-		"target_format", migration.Status.DiskInfo.TargetFormat,
-		"target_path", importResp.Path)
+	landedFormat := landedTargetFormat(targetProvider)
+	result := importResultApplier(importResp, landedFormat)
 
 	// If there's a task, we need to wait for it
 	if importResp.TaskRef != "" {
-		migration.Status.TaskRef = importResp.TaskRef
 		logger.Info("Import task started", "task_id", importResp.TaskRef, "import_id", importResp.DiskId)
-
-		if err := r.updateStatus(ctx, migration); err != nil {
+		if err := r.recordLongOpResult(ctx, migration, longOpImport, infrav1beta1.MigrationPhaseImporting, result, result,
+			"import_id", importResp.DiskId, "task_id", importResp.TaskRef); err != nil {
 			return ctrl.Result{}, err
 		}
-
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
 
 	// Import completed synchronously, transition to creating
-	migration.Status.Phase = infrav1beta1.MigrationPhaseCreating
-	migration.Status.Message = "Disk imported, creating target VM"
-	migration.Status.TaskRef = ""
-
-	k8s.SetCondition(&migration.Status.Conditions, infrav1beta1.VMMigrationConditionImporting,
-		metav1.ConditionTrue, "ImportComplete",
-		"Disk imported to target provider", migration.Generation)
-
-	r.Recorder.Event(migration, "Normal", "ImportComplete", fmt.Sprintf("Disk imported as %s", importResp.DiskId))
-
-	if err := r.updateStatus(ctx, migration); err != nil {
+	completed := func(m *infrav1beta1.VMMigration) {
+		result(m)
+		markImportComplete(m)
+	}
+	if err := r.recordLongOpResult(ctx, migration, longOpImport, infrav1beta1.MigrationPhaseImporting, result, completed,
+		"import_id", importResp.DiskId, "target_path", importResp.Path); err != nil {
 		return ctrl.Result{}, err
 	}
+	logger.Info("Recorded imported disk info",
+		"target_disk_id", importResp.DiskId,
+		"target_format", landedFormat,
+		"target_path", importResp.Path)
+	r.Recorder.Event(migration, "Normal", "ImportComplete", fmt.Sprintf("Disk imported as %s", importResp.DiskId))
 
 	// Do NOT immediate-requeue here. ImportDisk above is synchronous and
 	// long-running and writes the target qcow2; an immediate requeue re-reads a
@@ -1419,6 +1465,45 @@ func (r *VMMigrationReconciler) handleImportingPhase(ctx context.Context, migrat
 	// write alone to re-enqueue left a synchronous Proxmox import wedged in
 	// Creating).
 	return ctrl.Result{RequeueAfter: migrationImportSettleInterval}, nil
+}
+
+// importResultApplier returns the function that records an ImportDisk
+// result on a VMMigration's status: the import id, the landed disk (id,
+// format, path, checksum) in status.diskInfo — its source fields are kept —
+// and the import task, if any. landedFormat is the format the disk landed in
+// on the target provider (landedTargetFormat).
+//
+// TargetPath is the provider-native path returned by ImportDisk (e.g.
+// "[datastore1] <id>/<id>.vmdk" for vSphere). It is CRITICAL for the reverse
+// path: the VM controller must attach the disk at exactly this path rather
+// than synthesizing a bogus libvirt-style path. The created target VM copies
+// it into Spec.ImportedDisk.Path in the creating phase.
+func importResultApplier(resp contracts.ImportDiskResponse, landedFormat string) func(*infrav1beta1.VMMigration) {
+	return func(m *infrav1beta1.VMMigration) {
+		m.Status.ImportID = resp.DiskId
+		m.Status.Message = fmt.Sprintf("Importing disk (size: %d bytes)", resp.ActualSizeBytes)
+		if m.Status.DiskInfo == nil {
+			m.Status.DiskInfo = &infrav1beta1.MigrationDiskInfo{}
+		}
+		m.Status.DiskInfo.TargetDiskID = resp.DiskId
+		m.Status.DiskInfo.TargetFormat = landedFormat
+		m.Status.DiskInfo.TargetPath = resp.Path
+		m.Status.DiskInfo.TargetChecksum = resp.Checksum
+		if resp.TaskRef != "" {
+			m.Status.TaskRef = resp.TaskRef
+		}
+	}
+}
+
+// markImportComplete moves a migration whose disk import finished to
+// Creating: Importing=True/ImportComplete and the import task cleared.
+func markImportComplete(m *infrav1beta1.VMMigration) {
+	m.Status.Phase = infrav1beta1.MigrationPhaseCreating
+	m.Status.Message = "Disk imported, creating target VM"
+	m.Status.TaskRef = ""
+	k8s.SetCondition(&m.Status.Conditions, infrav1beta1.VMMigrationConditionImporting,
+		metav1.ConditionTrue, "ImportComplete",
+		"Disk imported to target provider", m.Generation)
 }
 
 // migrationTargetVMKey is the namespace/name of the VirtualMachine a migration
@@ -1668,7 +1753,7 @@ func (r *VMMigrationReconciler) handleCreatingPhase(ctx context.Context, migrati
 	// virtrigaud.io/migration and virtrigaud.io/migration-completed).
 	targetAnnotations := userTargetAnnotations(migration.Spec.Target.Annotations)
 	targetAnnotations["virtrigaud.io/migrated-from"] = fmt.Sprintf("%s/%s", migration.Namespace, migration.Spec.Source.VMRef.Name)
-	targetAnnotations["virtrigaud.io/migration"] = fmt.Sprintf("%s/%s", migration.Namespace, migration.Name)
+	targetAnnotations[migrationProvenanceAnnotation] = migrationProvenance(migration)
 	targetAnnotations["virtrigaud.io/imported-disk-id"] = migration.Status.ImportID
 	targetAnnotations["virtrigaud.io/disk-checksum"] = migration.Status.DiskInfo.TargetChecksum
 
@@ -1743,9 +1828,19 @@ func (r *VMMigrationReconciler) handleCreatingPhase(ctx context.Context, migrati
 		return res, err
 	}
 
-	// Create the VM resource
+	// Create the VM resource. AlreadyExists for the VM this migration created
+	// (an earlier reconcile's Create the cache did not show yet) is that VM,
+	// not a failure; any other VM of that name still fails the migration.
 	if err := r.Create(ctx, targetVM); err != nil {
-		return r.transitionToFailed(ctx, migration, fmt.Sprintf("Failed to create target VM: %v", err))
+		created, checkErr := r.targetVMCreatedByMigration(ctx, migration, vmKey, err)
+		if checkErr != nil {
+			return ctrl.Result{}, checkErr
+		}
+		if !created {
+			return r.transitionToFailed(ctx, migration, fmt.Sprintf("Failed to create target VM: %v", err))
+		}
+		logger.Info("Target VM already created by this migration", "name", targetVMName)
+		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 	}
 
 	logger.Info("Target VM created", "name", targetVMName)
@@ -1759,6 +1854,43 @@ func (r *VMMigrationReconciler) handleCreatingPhase(ctx context.Context, migrati
 
 	// Requeue to check VM status
 	return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+}
+
+// migrationProvenanceAnnotation names, on a VirtualMachine a migration
+// created, that migration as "<namespace>/<name>". It is written last, after
+// the user's target annotations, so a user cannot set it through the
+// migration.
+const migrationProvenanceAnnotation = "virtrigaud.io/migration"
+
+// migrationProvenance is migrationProvenanceAnnotation's value for migration.
+func migrationProvenance(migration *infrav1beta1.VMMigration) string {
+	return fmt.Sprintf("%s/%s", migration.Namespace, migration.Name)
+}
+
+// targetVMCreatedByMigration reports whether createErr, the error of the
+// Creating phase's Create of the target VM key, is AlreadyExists for the
+// VirtualMachine this migration created: re-read from the API server, it
+// names the migration in migrationProvenanceAnnotation and attaches this
+// migration's imported disk (spec.importedDisk: source "migration", this
+// migration's name and status.importID). Any other error, or another VM of
+// that name, is false. A failed re-read is returned.
+func (r *VMMigrationReconciler) targetVMCreatedByMigration(ctx context.Context, migration *infrav1beta1.VMMigration,
+	key client.ObjectKey, createErr error) (bool, error) {
+	if !errors.IsAlreadyExists(createErr) {
+		return false, nil
+	}
+	existing := &infrav1beta1.VirtualMachine{}
+	if err := r.liveReader().Get(ctx, key, existing); err != nil {
+		if errors.IsNotFound(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("re-read target VirtualMachine %s after AlreadyExists: %w", key, err)
+	}
+	disk := existing.Spec.ImportedDisk
+	return existing.Annotations[migrationProvenanceAnnotation] == migrationProvenance(migration) &&
+		disk != nil && disk.Source == "migration" &&
+		disk.MigrationRef != nil && disk.MigrationRef.Name == migration.Name &&
+		migration.Status.ImportID != "" && disk.DiskID == migration.Status.ImportID, nil
 }
 
 // migrationTargetPowerState is the desired power state (spec.powerState) of the
@@ -2152,7 +2284,7 @@ func (r *VMMigrationReconciler) handleDeletion(ctx context.Context, migration *i
 				// VM is a successfully migrated VM, never delete it
 			} else if targetVM.Annotations != nil {
 				// Only delete if it has our migration annotation AND no completion marker
-				if migrationRef, ok := targetVM.Annotations["virtrigaud.io/migration"]; ok {
+				if migrationRef, ok := targetVM.Annotations[migrationProvenanceAnnotation]; ok {
 					expectedRef := fmt.Sprintf("%s/%s", migration.Namespace, migration.Name)
 					if migrationRef == expectedRef {
 						logger.Info("Deleting partially created target VM", "vm", targetVMName)
@@ -2184,6 +2316,7 @@ func (r *VMMigrationReconciler) handleDeletion(ctx context.Context, migration *i
 		logger.Error(err, "Failed to remove finalizer")
 		return ctrl.Result{}, err
 	}
+	r.forgetMigrationLongOps(migration)
 
 	logger.Info("VMMigration deleted successfully")
 	return ctrl.Result{}, nil
@@ -3335,40 +3468,6 @@ func (r *VMMigrationReconciler) getProviderInstance(ctx context.Context, provide
 	}
 
 	return providerClient, nil
-}
-
-// updateStatus writes the migration's status. On a conflict it re-reads the
-// VMMigration live (APIReader — the informer cache may still hold the version
-// that conflicted), carries this reconcile's status over to it and retries
-// (retry.RetryOnConflict, retry.DefaultRetry). A VMMigration that was
-// deleted and re-created meanwhile (another UID) is never written: an
-// error is returned and the next reconcile starts from the new object.
-func (r *VMMigrationReconciler) updateStatus(ctx context.Context, migration *infrav1beta1.VMMigration) error {
-	logger := logging.FromContext(ctx)
-
-	attempt := 0
-	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		attempt++
-		if attempt > 1 {
-			fresh := &infrav1beta1.VMMigration{}
-			if err := r.liveReader().Get(ctx, client.ObjectKeyFromObject(migration), fresh); err != nil {
-				return fmt.Errorf("re-read VMMigration %s/%s after a status conflict: %w", migration.Namespace, migration.Name, err)
-			}
-			if fresh.UID != migration.UID {
-				return fmt.Errorf("VMMigration %s/%s was re-created (uid %s, was %s); not writing the old object's status",
-					migration.Namespace, migration.Name, fresh.UID, migration.UID)
-			}
-			logger.V(1).Info("Status update conflict, retrying on the live object", "attempt", attempt)
-			fresh.Status = migration.Status
-			*migration = *fresh
-		}
-		return r.Status().Update(ctx, migration)
-	})
-	if err != nil {
-		logger.Error(err, "Failed to update VMMigration status")
-		return err
-	}
-	return nil
 }
 
 // generateStorageURL generates a storage URL for the migration

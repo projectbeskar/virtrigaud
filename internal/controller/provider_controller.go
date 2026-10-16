@@ -260,6 +260,11 @@ func (r *ProviderReconciler) Reconcile(ctx context.Context, req ctrl.Request) (r
 		}
 	}
 
+	// The status as read: writeProviderStatus writes over a concurrent
+	// status.adoption write only while this controller's own fields are
+	// still as read here (provider_status_write.go).
+	base := provider.Status.DeepCopy()
+
 	// Reconcile the runtime and derive the runtime status fields.
 	result, err := r.reconcileRuntimeStatus(ctx, &provider)
 
@@ -279,7 +284,17 @@ func (r *ProviderReconciler) Reconcile(ctx context.Context, req ctrl.Request) (r
 		r.reconcileReportedCapabilities(ctx, &provider)
 	}
 
-	if updateErr := r.writeProviderStatus(ctx, &provider); updateErr != nil {
+	if updateErr := r.writeProviderStatus(ctx, base, &provider); updateErr != nil {
+		// This reconcile's read was behind a newer write of its own fields:
+		// nothing was written and it runs again shortly from the live state
+		// (not an error).
+		if isProviderStatusContention(updateErr) {
+			logger.Info("Provider status changed since this reconcile read it; not overwriting it, requeueing")
+			if err == nil {
+				return ctrl.Result{RequeueAfter: providerStatusConflictRequeue}, nil
+			}
+			return result, err
+		}
 		logger.Error(updateErr, "Failed to update Provider status")
 		if err == nil {
 			err = updateErr
@@ -332,21 +347,6 @@ func (r *ProviderReconciler) reconcileRuntimeStatus(ctx context.Context, provide
 	provider.Status.Healthy = providerAvailable != nil && providerAvailable.Status == metav1.ConditionTrue
 
 	return result, err
-}
-
-// writeProviderStatus writes provider.Status through the status subresource,
-// re-reading the latest object on a conflict so a concurrent metadata write
-// (the in-use finalizer) does not lose the status.
-func (r *ProviderReconciler) writeProviderStatus(ctx context.Context, provider *infravirtrigaudiov1beta1.Provider) error {
-	provider.Status.ObservedGeneration = provider.Generation
-	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		latest := &infravirtrigaudiov1beta1.Provider{}
-		if err := r.Get(ctx, types.NamespacedName{Name: provider.Name, Namespace: provider.Namespace}, latest); err != nil {
-			return err
-		}
-		latest.Status = provider.Status
-		return r.Status().Update(ctx, latest)
-	})
 }
 
 // reconcileReportedCapabilities best-effort fetches the provider's

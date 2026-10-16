@@ -5,6 +5,38 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-10-16 21:00] - Status writes never replace a newer status with a stale copy (VMMigration, Provider, VMAdoption)
+**Author:** @wrkode (William Rizzo)
+
+### Fixed
+- `internal/controller/vmmigration_status_write.go` (new), `internal/controller/vmmigration_controller.go`: `updateStatus` no longer copies the reconcile's in-memory status onto the re-read object after a conflict. That copy was a blind last-writer-wins write: a reconcile that started from a stale cache replaced the whole live status. Pre-existing since df7e440 (2025-11, so in v0.3.11); exposed by the v0.4.0-rc1 lab run, where a libvirt → S3 → vSphere migration failed with "import did not record disk info". Reconcile A recorded `status.diskInfo` and moved to `Creating`. Reconcile B, from a cache predating A's write, took the already-imported branch, and its write dropped A's `diskInfo`. The same write could drop or bring back `sourceSize`, the staging marker / layout / digest / import target, `sourceVMUID`, the `PostMigrationCleanup` marker, `taskRef` or the phase. A brought-back phase can resend a non-idempotent RPC. Now:
+  - `updateStatus` writes under the resourceVersion the reconcile read. A conflict is never retried onto a re-read object. `Reconcile` turns it into a requeue after 2 s (`migrationStatusConflictRequeue`; not an error, not immediate), and the next reconcile starts from the live state.
+  - The results of `SnapshotCreate`, `ExportDisk` and `ImportDisk` are written with `recordMigrationResult`. On a conflict it re-reads the `VMMigration` from the API server. While that is the same object (UID) and still in the RPC's phase, it applies only the result's fields (and the phase transition the result completes) to the live object, with retry-on-conflict. A live status in another phase, or a re-created object, is not written: the result is dropped, logged at `ERROR` with the provider's ids, and reported with a `Warning` event `ProviderResultNotRecorded` (constant message).
+  - A snapshot, export or import result that still cannot be written (for example, the API server is unavailable) is held in memory (for export / import in place of the in-flight guard), bound to the migration attempt. The next reconcile of the phase writes it first, before resolving any source, provider or target, instead of advancing to `Importing` / `Creating` without it or taking the snapshot again. This manager process therefore does not re-send the RPC. The held result is in memory only: a manager restart or leader change between the RPC and its write, or while a result is held, loses it, and the new leader can re-send `ExportDisk` / `ImportDisk` / `SnapshotCreate` (pre-existing, not closed by this change). Held results and guards of a `VMMigration` are dropped once its finalizer is released.
+- `internal/controller/provider_status_write.go` (new), `internal/controller/provider_controller.go`, `internal/controller/provider_inuse.go`: `writeProviderStatus` copied the whole in-memory status onto the re-read Provider on every attempt, dropping `status.adoption` written by the VMAdoption controller (the two conflicted in the lab). It now writes under the resourceVersion it read. On a conflict it re-reads the Provider. Only when the Provider controller's own fields still equal what it read does it write them onto the live object, keeping the live `status.adoption`. Otherwise it writes nothing and the reconcile runs again.
+- `internal/controller/vmadoption_controller.go`, `internal/controller/vmadoption_clustered.go`: every adoption status write sets `status.adoption` alone on the Provider re-read from the API server, with retry-on-conflict (`writeAdoptionStatus`). Before, it wrote the whole status from the reconcile's read, and the Provider controller's frequent writes made it conflict and lose the discovery result. A message-only write keeps the stored discovery time and counts.
+- `internal/controller/virtualmachine_create_marker.go`: removing the create-outcome annotation is an optimistic-locked patch. The reconcile keeps its own `VirtualMachine` status under the patch's new resourceVersion, and that status can no longer be older than one another writer stored meanwhile. A conflict requeues.
+- `internal/controller/vmmigration_controller.go` (pre-existing): in `Creating`, a target-VM `Create` that answers `AlreadyExists` no longer fails the migration when the existing VirtualMachine is the one this migration created. That happens when an earlier `Create` is not yet in the cache. The VM is re-read from the API server and must carry the migration's `virtrigaud.io/migration` provenance annotation and attach this migration's imported disk (`spec.importedDisk`: source `migration`, this migration's name and `status.importID`). Any other VM of that name still fails the migration as before.
+
+### Changed
+- `internal/controller/vmmigration_update_status_test.go`, `internal/controller/vmmigration_pending_result_test.go` (new), `internal/controller/status_write_clobber_envtest_test.go` (new): unit and envtest coverage. Envtest specs, and how each behaves against the pre-fix writers (checked by swapping the old `updateStatus` / `writeProviderStatus` / adoption writes back in):
+  - The lab race: reconcile B from a stale cache leaves A's `diskInfo` in place, and the next reconcile creates the target VM on the imported disk. **Fails on the old code** (B's write empties `diskInfo.targetPath`).
+  - `status.adoption` is kept when the Provider controller reconciles from a read that predates the adoption write (its cache catches up right after its first read, as in the lab). **Fails on the old code** (adoption dropped without any conflict).
+  - A Provider controller write whose own fields moved past its read is refused, and a reconcile from that read requeues. **Fails on the old code** (the stale write overwrites the newer field).
+  - An `ImportDisk` result is recorded on the live object when the `VMMigration` was edited during the import. **Passes on the old code too**: a regression guard for the new rule that an ordinary status conflict is requeued, not retried.
+  - The create-outcome annotation removal is refused (a conflict, nothing patched) from a VirtualMachine read that another status write has moved past. **Fails on the old code** (the unlocked patch succeeded).
+  Unit tests (`vmmigration_creating_test.go` too) cover the held-result paths (snapshot sync and task, export before provider resolution, import), the dropped-result event, attempt binding, guard eviction, and `AlreadyExists` in `Creating` for the migration's own VM and for other VMs.
+- `docs/release-notes/next.md`: Fixes entry.
+
+### Why
+The v0.4.0-rc1 lab run lost an imported disk's record to a stale status write and failed the migration. The same blind copy could undo any status field another reconcile or controller had written, and on a migration it could resend a non-idempotent RPC.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-10-16 21:00] - rc1 lab fix: vSphere ExportDisk no longer leaks a full copy of the disk on the source datastore
 **Author:** @wrkode (William Rizzo)
 
