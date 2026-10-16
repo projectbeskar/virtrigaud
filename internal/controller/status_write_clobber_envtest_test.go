@@ -35,24 +35,36 @@ import (
 // staleReadClient serves, for the one object set with serveStale, the copy
 // held there instead of the stored object — an informer cache that has not
 // caught up with a write yet. Every other read and every write goes to the
-// API server.
+// API server. With serveStaleOnce only the next Get of that key is stale: the
+// cache catches up right after the reconcile's first read.
 type staleReadClient struct {
 	client.Client
 	mu    sync.Mutex
 	stale client.Object
+	once  bool
 }
 
 // serveStale makes Get of obj's key answer obj (nil: read through again).
 func (c *staleReadClient) serveStale(obj client.Object) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.stale = obj
+	c.stale, c.once = obj, false
+}
+
+// serveStaleOnce makes only the next Get of obj's key answer obj.
+func (c *staleReadClient) serveStaleOnce(obj client.Object) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.stale, c.once = obj, true
 }
 
 // Get answers the stale copy for its key, else reads the API server.
 func (c *staleReadClient) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
 	c.mu.Lock()
 	stale := c.stale
+	if stale != nil && c.once && key == client.ObjectKeyFromObject(stale) {
+		c.stale = nil
+	}
 	c.mu.Unlock()
 	if stale != nil && key == client.ObjectKeyFromObject(stale) {
 		switch dst := obj.(type) {
@@ -175,6 +187,10 @@ var _ = Describe("Status writes never replace a newer status with a stale copy (
 		Expect(final.Status.Phase).To(Equal(infravirtrigaudiov1beta1.MigrationPhaseCreating))
 	})
 
+	// A regression guard, not a reproduction: the pre-fix updateStatus also
+	// passed it. It pins that the new rule (an ordinary status conflict is
+	// requeued, never retried onto the live object) does not apply to an RPC
+	// result, which would then be lost.
 	It("records an ImportDisk result on the live VMMigration when another write landed while the import ran", func() {
 		ns := newNamespace("clobber-rpc-")
 		Expect(k8sClient.Create(ctx, holdTestProvider(ns))).To(Succeed())
@@ -241,8 +257,8 @@ var _ = Describe("Status writes never replace a newer status with a stale copy (
 			LastDiscoveryTime: &now, DiscoveredVMs: 3, AdoptedVMs: 2, FailedAdoptions: 1, Message: "Adopted 2 VMs, 1 failed",
 		})).To(Succeed())
 
-		By("the Provider controller reconciles from a read that predates it")
-		c.serveStale(providerRead)
+		By("the Provider controller reconciles from a read that predates it (its cache catches up right after)")
+		c.serveStaleOnce(providerRead)
 		_, _ = pr.Reconcile(ctx, ctrl.Request{NamespacedName: key})
 
 		got := &infravirtrigaudiov1beta1.Provider{}

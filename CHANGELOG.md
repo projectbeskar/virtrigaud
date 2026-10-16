@@ -18,7 +18,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `internal/controller/virtualmachine_create_marker.go`: removing the create-outcome annotation is an optimistic-locked patch. The reconcile keeps its own `VirtualMachine` status under the patch's new resourceVersion, and that status can no longer be older than one another writer stored meanwhile. A conflict requeues.
 
 ### Changed
-- `internal/controller/vmmigration_update_status_test.go`, `internal/controller/status_write_clobber_envtest_test.go` (new): unit and envtest coverage. The envtest reproduces the lab race (reconcile B from a stale cache leaves A's `diskInfo` in place, and the next reconcile creates the target VM on the imported disk). It also covers: an `ImportDisk` result recorded on the live object when the `VMMigration` changed during the import; `status.adoption` kept across a Provider controller write from an older read; a Provider controller write whose own fields moved on being refused. Each envtest spec fails against the old writers.
+- `internal/controller/vmmigration_update_status_test.go`, `internal/controller/vmmigration_pending_result_test.go` (new), `internal/controller/status_write_clobber_envtest_test.go` (new): unit and envtest coverage. Envtest specs, and how each behaves against the pre-fix writers (checked by swapping the old `updateStatus` / `writeProviderStatus` / adoption writes back in):
+  - The lab race: reconcile B from a stale cache leaves A's `diskInfo` in place, and the next reconcile creates the target VM on the imported disk. **Fails on the old code** (B's write empties `diskInfo.targetPath`).
+  - `status.adoption` is kept when the Provider controller reconciles from a read that predates the adoption write (its cache catches up right after its first read, as in the lab). **Fails on the old code** (adoption dropped without any conflict).
+  - A Provider controller write whose own fields moved past its read is refused, and a reconcile from that read requeues. **Fails on the old code** (the stale write overwrites the newer field).
+  - An `ImportDisk` result is recorded on the live object when the `VMMigration` was edited during the import. **Passes on the old code too**: a regression guard for the new rule that an ordinary status conflict is requeued, not retried.
+  Unit tests cover the held-result paths (snapshot sync and task, export before provider resolution, import), the dropped-result event, attempt binding and guard eviction.
 - `docs/release-notes/next.md`: Fixes entry.
 
 ### Why
