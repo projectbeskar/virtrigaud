@@ -169,7 +169,7 @@ func TestVMRefFor_RefusesMismatchedBoundProvider(t *testing.T) {
 
 	ref, err := vmRefFor(vm, prov)
 	require.NoError(t, err)
-	assert.Equal(t, contracts.VMRef{ID: "vm-100"}, ref, "the bound Provider gets the bare id, as before")
+	assert.Equal(t, contracts.VMRef{ID: "vm-100", Owner: vmOwnerIdentity(vm)}, ref, "the bound Provider gets the bare id and the VM's owner")
 
 	other := providerCRWithUID(bpNS, "prov-b", "uid-b")
 	_, err = vmRefFor(vm, other)
@@ -179,7 +179,7 @@ func TestVMRefFor_RefusesMismatchedBoundProvider(t *testing.T) {
 	recreated := providerCRWithUID(bpNS, "prov-a", "uid-a2")
 	ref, err = vmRefFor(vm, recreated)
 	require.NoError(t, err, "a Provider re-created under the same namespace/name is accepted")
-	assert.Equal(t, contracts.VMRef{ID: "vm-100"}, ref)
+	assert.Equal(t, contracts.VMRef{ID: "vm-100", Owner: vmOwnerIdentity(vm)}, ref)
 
 	clustered := withRuntime(clusteredProviderCR("prov-c", bpNS))
 	cvm := boundVM("cweb", infravirtrigaudiov1beta1.ObjectRef{Name: "prov-c"},

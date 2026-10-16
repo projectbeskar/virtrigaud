@@ -155,9 +155,12 @@ func placementTopologyError(vm *infravirtrigaudiov1beta1.VirtualMachine, provide
 //     *ProviderRefMismatchError (no ref) — its status.id is meaningful only on
 //     the Provider that assigned it.
 //   - single-host / thin-client Provider (topology single, the default): the
-//     ref carries status.id only — no host, no owner — byte-for-byte today's
-//     call (D9). A VM that nevertheless records a clustered placement fails
-//     CLOSED with a *PlacementTopologyMismatchError (no ref).
+//     ref carries status.id and no host (D9), and the VM's identity as Owner
+//     (singleHostRef): the transport sends it on Describe, Delete, Power,
+//     Reconfigure and the snapshot calls, so a provider that checks it
+//     (Proxmox) never reads or acts on a VM that reused the VM's id. A VM
+//     that nevertheless records a clustered placement fails CLOSED with a
+//     *PlacementTopologyMismatchError (no ref).
 //   - clustered Provider (topology cluster): HostID is the confirmed binding,
 //     status.placement.host, and Owner is the VM's identity, which the provider
 //     checks against the VM's owner stamp. An empty binding returns an
@@ -171,7 +174,7 @@ func vmRefFor(vm *infravirtrigaudiov1beta1.VirtualMachine, provider *infravirtri
 		if err := placementTopologyError(vm, provider); err != nil {
 			return contracts.VMRef{}, err
 		}
-		return contracts.VMRef{ID: vm.Status.ID}, nil
+		return singleHostRef(vm), nil
 	}
 	host := boundHost(vm)
 	if host == "" {
@@ -203,6 +206,25 @@ func pendingCreateRef(vm *infravirtrigaudiov1beta1.VirtualMachine) (contracts.VM
 // routed Describe / owner-checked Delete require it (A2).
 func vmOwnerIdentity(vm *infravirtrigaudiov1beta1.VirtualMachine) contracts.ObjectIdentity {
 	return contracts.ObjectIdentity{UID: string(vm.UID), Namespace: vm.Namespace, Name: vm.Name}
+}
+
+// singleHostRef is the reference of a per-VM call on vm through a single-host
+// (or thin-client) Provider: status.id, no host, and the VM's identity as
+// Owner. A VM with no UID (never true for a stored object) carries none.
+//
+// The transport sends the owner on Describe, Delete, Power, Reconfigure and
+// the snapshot calls, never on a clone source, ExportDisk or GetDiskInfo
+// (those carry one only when routed). A provider that checks it (Proxmox,
+// whose VMIDs are reused) answers a VM stamped with another owner, or an
+// unstamped VM named differently, VM_NOT_OWNED and never reads or changes it;
+// one that does not (vSphere, single-host libvirt, mock) ignores it, so their
+// single-host calls are unchanged.
+func singleHostRef(vm *infravirtrigaudiov1beta1.VirtualMachine) contracts.VMRef {
+	ref := contracts.VMRef{ID: vm.Status.ID}
+	if vm.UID != "" {
+		ref.Owner = vmOwnerIdentity(vm)
+	}
+	return ref
 }
 
 // deleteRef is the reference the finalizer's provider Delete is sent with. A

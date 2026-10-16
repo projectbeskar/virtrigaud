@@ -158,13 +158,22 @@ func TestVMRefFor(t *testing.T) {
 		assert.True(t, isVMUnbound(err))
 	})
 
-	t.Run("single-host: bare id, no host, no owner", func(t *testing.T) {
+	t.Run("single-host: bare id, no host, the VM as owner", func(t *testing.T) {
 		plain := bound.DeepCopy()
 		plain.Status.Placement = nil
 		ref, err := vmRefFor(plain, singleProviderCR("prov-single", clusteredNS))
 		require.NoError(t, err)
-		assert.Equal(t, contracts.VMRef{ID: "vm"}, ref)
+		assert.Equal(t, contracts.VMRef{ID: "vm", Owner: boundOwner}, ref)
 		assert.False(t, ref.Routed())
+	})
+
+	t.Run("single-host VM without a UID: no owner", func(t *testing.T) {
+		plain := bound.DeepCopy()
+		plain.Status.Placement = nil
+		plain.UID = ""
+		ref, err := vmRefFor(plain, singleProviderCR("prov-single", clusteredNS))
+		require.NoError(t, err)
+		assert.Equal(t, contracts.VMRef{ID: "vm"}, ref)
 	})
 
 	t.Run("single-host with a recorded clustered placement fails closed", func(t *testing.T) {
