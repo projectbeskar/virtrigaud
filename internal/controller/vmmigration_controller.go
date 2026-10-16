@@ -135,6 +135,9 @@ const (
 	longOpExport migrationLongOp = "export"
 	// longOpImport marks the synchronous ImportDisk RPC.
 	longOpImport migrationLongOp = "import"
+	// longOpSnapshot keys a SnapshotCreate result that could not be persisted
+	// (pendingMigrationResult). SnapshotCreate has no in-flight guard.
+	longOpSnapshot migrationLongOp = "snapshot"
 )
 
 // longOpKey builds the in-memory guard key for a migration's long-running RPC.
@@ -633,6 +636,13 @@ func (r *VMMigrationReconciler) handleSnapshottingPhase(ctx context.Context, mig
 	logger := logging.FromContext(ctx)
 	logger.Info("Handling snapshotting phase")
 
+	// A snapshot an earlier reconcile took but could not record is recorded
+	// first, before anything that can fail the phase: otherwise it would be
+	// taken again (vmmigration_status_write.go).
+	if done, res, err := r.recordPendingMigrationResult(ctx, migration, longOpSnapshot); done {
+		return res, err
+	}
+
 	// Get source VM
 	sourceVM, err := r.getSourceVM(ctx, migration)
 	if err != nil {
@@ -742,25 +752,35 @@ func (r *VMMigrationReconciler) handleSnapshottingPhase(ctx context.Context, mig
 	if snapshotResp.Task != nil && snapshotResp.Task.ID != "" {
 		taskID := snapshotResp.Task.ID
 		logger.Info("Snapshot creation task started, waiting for completion", "task_id", taskID)
-		if err := r.recordMigrationResult(ctx, migration, infrav1beta1.MigrationPhaseSnapshotting, func(m *infrav1beta1.VMMigration) {
+		inProgress := func(m *infrav1beta1.VMMigration) {
 			recordSnapshot(m)
 			m.Status.TaskRef = taskID
 			// The wait starts now: the condition's transition time bounds it
 			// (migrationSnapshotWaitLimit).
 			k8s.SetCondition(&m.Status.Conditions, infrav1beta1.VMMigrationConditionSnapshotting,
 				metav1.ConditionTrue, migrationReasonSnapshotInProgress, migrationSnapshotInProgressMessage, m.Generation)
-		}); err != nil {
+		}
+		if err := r.recordLongOpResult(ctx, migration, longOpSnapshot, infrav1beta1.MigrationPhaseSnapshotting,
+			inProgress, inProgress, "snapshot_id", snapshotResp.SnapshotId, "task_id", taskID); err != nil {
 			return ctrl.Result{}, err
 		}
 
 		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 	}
 
-	// Snapshot created synchronously, move to export
-	if err := r.recordMigrationResult(ctx, migration, infrav1beta1.MigrationPhaseSnapshotting, func(m *infrav1beta1.VMMigration) {
+	// Snapshot created synchronously, move to export. A result kept for the
+	// next reconcile records the snapshot as complete; that reconcile then
+	// moves to Exporting.
+	complete := func(m *infrav1beta1.VMMigration) {
 		recordSnapshot(m)
-		markSnapshotCompleteForExport(m, "Snapshot created, starting export")
-	}); err != nil {
+		k8s.SetCondition(&m.Status.Conditions, infrav1beta1.VMMigrationConditionSnapshotting,
+			metav1.ConditionTrue, migrationReasonSnapshotComplete, "Source VM snapshot created", m.Generation)
+	}
+	if err := r.recordLongOpResult(ctx, migration, longOpSnapshot, infrav1beta1.MigrationPhaseSnapshotting,
+		complete, func(m *infrav1beta1.VMMigration) {
+			recordSnapshot(m)
+			markSnapshotCompleteForExport(m, "Snapshot created, starting export")
+		}, "snapshot_id", snapshotResp.SnapshotId); err != nil {
 		return ctrl.Result{}, err
 	}
 	r.recordSnapshotCompleteEvent(migration)
@@ -771,6 +791,13 @@ func (r *VMMigrationReconciler) handleSnapshottingPhase(ctx context.Context, mig
 func (r *VMMigrationReconciler) handleExportingPhase(ctx context.Context, migration *infrav1beta1.VMMigration) (ctrl.Result, error) {
 	logger := logging.FromContext(ctx)
 	logger.Info("Handling exporting phase")
+
+	// An ExportDisk result an earlier reconcile could not persist is recorded
+	// first, before anything that can fail the phase: the import verifies its
+	// checksum, and the in-memory guard keeps the export from being sent again.
+	if done, res, err := r.recordPendingMigrationResult(ctx, migration, longOpExport); done {
+		return res, err
+	}
 
 	// Get source VM
 	sourceVM, err := r.getSourceVM(ctx, migration)
@@ -813,17 +840,6 @@ func (r *VMMigrationReconciler) handleExportingPhase(ctx context.Context, migrat
 		k8s.IsConditionTrue(migration.Status.Conditions, infrav1beta1.VMMigrationConditionExporting) ||
 		r.longOpAlreadyStarted(migration, longOpExport)
 	if exportAlreadyDone {
-		// An ExportDisk result an earlier reconcile could not persist is
-		// recorded first: the import verifies its checksum, and the in-memory
-		// guard keeps the export from being sent again.
-		if r.applyPendingMigrationResult(migration, longOpExport) {
-			if err := r.updateStatus(ctx, migration); err != nil {
-				return ctrl.Result{}, err
-			}
-			r.clearPendingMigrationResult(migration, longOpExport)
-			logger.Info("Recorded the result of an earlier disk export", "export_id", migration.Status.ExportID)
-			return ctrl.Result{RequeueAfter: migrationPhaseAdvanceRequeue}, nil
-		}
 		// Check export task status if there is one
 		if migration.Status.TaskRef != "" {
 			done, err := providerInstance.IsTaskComplete(ctx, migration.Status.TaskRef)
@@ -1003,7 +1019,8 @@ func (r *VMMigrationReconciler) handleExportingPhase(ctx context.Context, migrat
 	// If there's a task, we need to wait for it
 	if exportResp.TaskRef != "" {
 		logger.Info("Export task started", "task_id", exportResp.TaskRef, "export_id", exportResp.ExportId)
-		if err := r.recordLongOpResult(ctx, migration, longOpExport, infrav1beta1.MigrationPhaseExporting, result, result); err != nil {
+		if err := r.recordLongOpResult(ctx, migration, longOpExport, infrav1beta1.MigrationPhaseExporting, result, result,
+			"export_id", exportResp.ExportId, "task_id", exportResp.TaskRef); err != nil {
 			return ctrl.Result{}, err
 		}
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
@@ -1014,7 +1031,8 @@ func (r *VMMigrationReconciler) handleExportingPhase(ctx context.Context, migrat
 		result(m)
 		markExportComplete(m)
 	}
-	if err := r.recordLongOpResult(ctx, migration, longOpExport, infrav1beta1.MigrationPhaseExporting, result, completed); err != nil {
+	if err := r.recordLongOpResult(ctx, migration, longOpExport, infrav1beta1.MigrationPhaseExporting, result, completed,
+		"export_id", exportResp.ExportId); err != nil {
 		return ctrl.Result{}, err
 	}
 
@@ -1117,6 +1135,14 @@ func (r *VMMigrationReconciler) handleImportingPhase(ctx context.Context, migrat
 	logger := logging.FromContext(ctx)
 	logger.Info("Handling importing phase")
 
+	// An ImportDisk result an earlier reconcile could not persist is recorded
+	// first, before anything that can fail the phase: the Creating phase needs
+	// its status.diskInfo, and the in-memory guard keeps the import from being
+	// sent again.
+	if done, res, err := r.recordPendingMigrationResult(ctx, migration, longOpImport); done {
+		return res, err
+	}
+
 	// Re-check the target namespace grant: the import lands a disk named for
 	// the target VM (libvirt: "<target namespace>.<name>-migrated"), which that
 	// namespace's VM may later attach in place.
@@ -1158,17 +1184,6 @@ func (r *VMMigrationReconciler) handleImportingPhase(ctx context.Context, migrat
 		k8s.IsConditionTrue(migration.Status.Conditions, infrav1beta1.VMMigrationConditionImporting) ||
 		r.longOpAlreadyStarted(migration, longOpImport)
 	if importAlreadyDone {
-		// An ImportDisk result an earlier reconcile could not persist is
-		// recorded first: the Creating phase needs its status.diskInfo, and
-		// the in-memory guard keeps the import from being sent again.
-		if r.applyPendingMigrationResult(migration, longOpImport) {
-			if err := r.updateStatus(ctx, migration); err != nil {
-				return ctrl.Result{}, err
-			}
-			r.clearPendingMigrationResult(migration, longOpImport)
-			logger.Info("Recorded the result of an earlier disk import", "import_id", migration.Status.ImportID)
-			return ctrl.Result{RequeueAfter: migrationPhaseAdvanceRequeue}, nil
-		}
 		// Check import task status if there is one
 		if migration.Status.TaskRef != "" {
 			done, err := providerInstance.IsTaskComplete(ctx, migration.Status.TaskRef)
@@ -1410,7 +1425,8 @@ func (r *VMMigrationReconciler) handleImportingPhase(ctx context.Context, migrat
 	// If there's a task, we need to wait for it
 	if importResp.TaskRef != "" {
 		logger.Info("Import task started", "task_id", importResp.TaskRef, "import_id", importResp.DiskId)
-		if err := r.recordLongOpResult(ctx, migration, longOpImport, infrav1beta1.MigrationPhaseImporting, result, result); err != nil {
+		if err := r.recordLongOpResult(ctx, migration, longOpImport, infrav1beta1.MigrationPhaseImporting, result, result,
+			"import_id", importResp.DiskId, "task_id", importResp.TaskRef); err != nil {
 			return ctrl.Result{}, err
 		}
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
@@ -1421,7 +1437,8 @@ func (r *VMMigrationReconciler) handleImportingPhase(ctx context.Context, migrat
 		result(m)
 		markImportComplete(m)
 	}
-	if err := r.recordLongOpResult(ctx, migration, longOpImport, infrav1beta1.MigrationPhaseImporting, result, completed); err != nil {
+	if err := r.recordLongOpResult(ctx, migration, longOpImport, infrav1beta1.MigrationPhaseImporting, result, completed,
+		"import_id", importResp.DiskId, "target_path", importResp.Path); err != nil {
 		return ctrl.Result{}, err
 	}
 	logger.Info("Recorded imported disk info",
@@ -2244,6 +2261,7 @@ func (r *VMMigrationReconciler) handleDeletion(ctx context.Context, migration *i
 		logger.Error(err, "Failed to remove finalizer")
 		return ctrl.Result{}, err
 	}
+	r.forgetMigrationLongOps(migration)
 
 	logger.Info("VMMigration deleted successfully")
 	return ctrl.Result{}, nil

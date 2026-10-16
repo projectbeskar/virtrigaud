@@ -20,10 +20,13 @@ import (
 	"context"
 	stderrors "errors"
 	"fmt"
+	"strings"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/client-go/util/retry"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	infrav1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
@@ -174,43 +177,98 @@ func (r *VMMigrationReconciler) recordMigrationResult(
 	return nil
 }
 
-// pendingMigrationResult is the result of a long-running provider RPC
-// (ExportDisk / ImportDisk) that could not be persisted. It is kept in
-// longOpInFlight in place of the in-flight sentinel, so the in-memory guard
-// still keeps the RPC from being sent again, and the next reconcile of the
-// phase applies it (applyPendingMigrationResult) instead of advancing without
-// it.
+// pendingMigrationResult is the result of a provider RPC (SnapshotCreate,
+// ExportDisk, ImportDisk) that could not be persisted. It is kept in
+// longOpInFlight under the RPC's longOpKey — for ExportDisk / ImportDisk in
+// place of the in-flight sentinel, so the in-memory guard still keeps the RPC
+// from being sent again by this manager process — and the next reconcile of
+// the phase writes it before doing anything else
+// (recordPendingMigrationResult). It is bound to the migration attempt
+// (status.retryCount) it was sent for; it is held in memory only, so a manager
+// restart or leader change while it is held loses it.
 type pendingMigrationResult struct {
-	apply func(*infrav1beta1.VMMigration)
+	retryCount int32
+	apply      func(*infrav1beta1.VMMigration)
 }
 
-// recordLongOpResult persists the result of the long-running RPC op with
-// recordMigrationResult. When it cannot be written for any reason other than
-// the live status having moved on or the VMMigration having been re-created,
-// the result (resultOnly: its fields without the phase transition) is kept as
-// a pendingMigrationResult for the next reconcile of the phase.
+// migrationReasonProviderResultNotRecorded is the Warning event reason when a
+// provider RPC's result is not recorded because the VMMigration moved on to
+// another phase or was re-created while the RPC ran.
+const migrationReasonProviderResultNotRecorded = "ProviderResultNotRecorded"
+
+// migrationProviderResultNotRecordedMessage is the constant message of the
+// ProviderResultNotRecorded event; the result's ids are in the manager log.
+const migrationProviderResultNotRecordedMessage = "The result of a provider operation was not recorded: " +
+	"the migration had moved to another phase or was re-created while it ran"
+
+// recordLongOpResult persists the result of the provider RPC op with
+// recordMigrationResult. ids are logged (key/value pairs: the provider's
+// artifact ids) when the result is not recorded.
+//
+//   - The live status moved to another phase, or the VMMigration was
+//     re-created: the result is dropped — an Error log with ids and a
+//     Warning event with a constant message.
+//   - Any other failure: the result (resultOnly: its fields without the phase
+//     transition) is kept as a pendingMigrationResult for the next reconcile
+//     of the phase.
 func (r *VMMigrationReconciler) recordLongOpResult(
 	ctx context.Context,
 	migration *infrav1beta1.VMMigration,
 	op migrationLongOp,
 	phase infrav1beta1.MigrationPhase,
 	resultOnly, apply func(*infrav1beta1.VMMigration),
+	ids ...any,
 ) error {
+	logger := logging.FromContext(ctx)
 	key := longOpKey(migration, op)
+	retryCount := migration.Status.RetryCount
 	err := r.recordMigrationResult(ctx, migration, phase, apply)
-	if err != nil && !stderrors.Is(err, errMigrationStatusMovedOn) && !stderrors.Is(err, errMigrationRecreated) {
-		logging.FromContext(ctx).Error(err, "Could not record the provider's result; it is kept for the next reconcile",
-			"operation", string(op))
-		r.longOpInFlight.Store(key, pendingMigrationResult{apply: resultOnly})
+	switch {
+	case err == nil:
+		return nil
+	case stderrors.Is(err, errMigrationStatusMovedOn), stderrors.Is(err, errMigrationRecreated):
+		logger.Error(err, "The provider operation's result was not recorded: the VMMigration moved on or was re-created",
+			append([]any{"operation", string(op)}, ids...)...)
+		r.Recorder.Event(migration, corev1.EventTypeWarning, migrationReasonProviderResultNotRecorded,
+			migrationProviderResultNotRecordedMessage)
+	default:
+		logger.Error(err, "Could not record the provider operation's result; it is kept for the next reconcile",
+			append([]any{"operation", string(op)}, ids...)...)
+		r.longOpInFlight.Store(key, pendingMigrationResult{retryCount: retryCount, apply: resultOnly})
 	}
 	return err
 }
 
+// recordPendingMigrationResult writes the result of op that an earlier
+// reconcile could not persist, if one is held for this attempt, and reports
+// whether it did. Phase handlers call it first, before resolving any source,
+// provider or target, so no failure path of the phase can drop the result;
+// the reconcile then requeues and continues from the recorded status. A
+// failed write keeps the result held.
+func (r *VMMigrationReconciler) recordPendingMigrationResult(
+	ctx context.Context,
+	migration *infrav1beta1.VMMigration,
+	op migrationLongOp,
+) (bool, ctrl.Result, error) {
+	if !r.applyPendingMigrationResult(migration, op) {
+		return false, ctrl.Result{}, nil
+	}
+	if err := r.updateStatus(ctx, migration); err != nil {
+		return true, ctrl.Result{}, err
+	}
+	r.clearPendingMigrationResult(migration, op)
+	logging.FromContext(ctx).Info("Recorded the result of an earlier provider operation", "operation", string(op))
+	return true, ctrl.Result{RequeueAfter: migrationPhaseAdvanceRequeue}, nil
+}
+
 // applyPendingMigrationResult applies to migration the result of op that an
-// earlier reconcile could not persist, if there is one, and reports whether
-// it did. The caller writes it; clearPendingMigrationResult then drops it.
+// earlier reconcile could not persist, if one is held for the migration's
+// current attempt, and reports whether it did. A result held for another
+// attempt is dropped. The caller writes it; clearPendingMigrationResult then
+// drops it.
 func (r *VMMigrationReconciler) applyPendingMigrationResult(migration *infrav1beta1.VMMigration, op migrationLongOp) bool {
-	v, ok := r.longOpInFlight.Load(longOpKey(migration, op))
+	key := longOpKey(migration, op)
+	v, ok := r.longOpInFlight.Load(key)
 	if !ok {
 		return false
 	}
@@ -218,12 +276,34 @@ func (r *VMMigrationReconciler) applyPendingMigrationResult(migration *infrav1be
 	if !ok {
 		return false
 	}
+	if pending.retryCount != migration.Status.RetryCount {
+		r.clearPendingMigrationResult(migration, op)
+		return false
+	}
 	pending.apply(migration)
 	return true
 }
 
-// clearPendingMigrationResult drops a persisted pending result of op, keeping
-// the in-flight sentinel (the RPC was sent for this generation).
+// clearPendingMigrationResult drops a pending result of op. For ExportDisk /
+// ImportDisk the in-flight sentinel is kept (the RPC was sent for this
+// generation); SnapshotCreate has no in-memory guard, so its entry is removed.
 func (r *VMMigrationReconciler) clearPendingMigrationResult(migration *infrav1beta1.VMMigration, op migrationLongOp) {
-	r.longOpInFlight.Store(longOpKey(migration, op), struct{}{})
+	key := longOpKey(migration, op)
+	if op == longOpSnapshot {
+		r.longOpInFlight.Delete(key)
+		return
+	}
+	r.longOpInFlight.Store(key, struct{}{})
+}
+
+// forgetMigrationLongOps removes every in-memory guard and pending result of
+// migration (all generations), once its finalizer is released.
+func (r *VMMigrationReconciler) forgetMigrationLongOps(migration *infrav1beta1.VMMigration) {
+	prefix := string(migration.UID) + "/"
+	r.longOpInFlight.Range(func(k, _ any) bool {
+		if key, ok := k.(string); ok && strings.HasPrefix(key, prefix) {
+			r.longOpInFlight.Delete(k)
+		}
+		return true
+	})
 }
