@@ -901,6 +901,17 @@ message GetCapabilitiesResponse {
   // limit, so while one applies the manager holds a migration into a
   // Provider that does not report it.
   bool supports_import_size_limit = 24;
+
+  // supports_owner_transfer reports that TransferOwner re-stamps a VM this
+  // provider's ListVMs reported with the VirtualMachine that adopts it,
+  // compare-and-swap, in the provider's own topology: a single-host provider
+  // addresses the VM by VMInfo.id alone (target_host_id empty). The manager's
+  // single-host adoption stamps the VMs it adopts only through a provider that
+  // reports it; through an older one it adopts them unstamped, as before, and
+  // says so in the Provider's adoption status. A clustered provider reports
+  // supports_routed_adoption for its (routed) TransferOwner; this field does
+  // not change how a clustered Provider adopts.
+  bool supports_owner_transfer = 25;
 }
 
 // DeleteStagedDisk removes the staging object a VMMigration's ExportDisk wrote
@@ -974,33 +985,42 @@ message DeleteStagedDiskResponse {
   StagedDiskDeleteOutcome outcome = 1;
 }
 
-// TransferOwner hands one VM on a clustered ("brain-in-operator") provider's
-// host to a VirtualMachine: it re-stamps the VM with that VirtualMachine's
-// identity (owner), after which the provider's routed, owner-checked per-VM
-// calls accept it (ADR-0007 Addendum A, slice 4). The adoption flow uses it
-// for a VM it listed; restoring a VirtualMachine from a backup, which gives it
-// a new uid, can use it the same way (A6). It changes the owner stamp only: it
-// never creates, moves, starts or otherwise changes the VM.
+// TransferOwner hands one VM to a VirtualMachine: it re-stamps the VM with
+// that VirtualMachine's identity (owner), after which the provider's
+// owner-checked per-VM calls accept it. On a clustered ("brain-in-operator")
+// provider the VM is on target_host_id and the call is routed there (ADR-0007
+// Addendum A, slice 4); on a single-host provider that reports
+// supports_owner_transfer the VM is addressed by id alone. The adoption flow
+// uses it for a VM it listed; restoring a VirtualMachine from a backup, which
+// gives it a new uid, can use it the same way (A6). It changes the owner stamp
+// only: it never creates, moves, starts or otherwise changes the VM.
 //
 // It is a compare-and-swap. The provider stamps the VM ONLY when:
-//   - the VM named id on target_host_id still carries expected_uuid, and
+//   - the VM named id (on target_host_id) is still the VM the manager listed:
+//     it carries expected_uuid when one is sent (required by a libvirt
+//     provider), and
 //   - every owner stamped on it is either owner itself (an idempotent retry,
 //     which succeeds) or listed in replaceable_owner_uids — the stamps of
 //     VirtualMachines the manager has verified no longer exist. An unstamped
 //     VM may be taken over.
-// A VM stamped for anyone else, with more than one stamp, or whose stamp
-// cannot be read, is refused (ALREADY_EXISTS) and left untouched; a VM that is
-// gone or was replaced since it was listed is NOT_FOUND. The stamp is read back
-// before the call succeeds. Failures are routed errors (HOST_UNAVAILABLE,
-// VM_OPERATION_FAILED). Single-host and thin-client providers return
-// Unimplemented: their adoption does not stamp (they do not check owners on
-// per-VM calls).
+// The check and the write are atomic where the hypervisor allows it (vSphere:
+// the config changeVersion; Proxmox: the config digest) and serialized in the
+// provider process otherwise (libvirt). A VM stamped for anyone else, with
+// more than one stamp, or whose stamp cannot be read, and a template or image
+// artifact, is refused (ALREADY_EXISTS) and left untouched; a VM that is gone
+// or was replaced since it was listed is NOT_FOUND; a concurrent change is a
+// retryable error. The stamp is read back before the call succeeds. Refusal
+// messages never name another owner. A clustered provider's failures are
+// routed errors (HOST_UNAVAILABLE, VM_OPERATION_FAILED). Providers that do not
+// stamp return Unimplemented and report neither supports_owner_transfer nor
+// supports_routed_adoption.
 message TransferOwnerRequest {
   // id is the VM's provider-specific identifier (VMInfo.id).
   string id = 1;
   // target_host_id is the host the VM is on (VMInfo.host_id, or the
   // VirtualMachine's recorded binding). Required by a clustered provider,
-  // which never looks a VM's host up by itself. AGNOSTIC.
+  // which never looks a VM's host up by itself; empty for a single-host
+  // provider, which refuses one. AGNOSTIC.
   string target_host_id = 2;
   // owner is the identity of the VirtualMachine that takes the VM over; uid is
   // required, and the provider stamps uid, namespace and name
@@ -1012,9 +1032,13 @@ message TransferOwnerRequest {
   // stamps may be replaced. Empty takes over only an unstamped VM.
   repeated string replaceable_owner_uids = 4;
   // expected_uuid is the provider's immutable identifier of the VM (libvirt:
-  // the domain UUID, VMInfo provider_raw "uuid"). Required by a clustered
-  // provider, which answers NOT_FOUND when the VM named id on the host now
-  // carries another, so a VM replaced since it was listed is never stamped.
+  // the domain UUID, VMInfo provider_raw "uuid"). Required by a libvirt
+  // provider (clustered or single-host), which answers NOT_FOUND when the VM
+  // named id now carries another, so a VM replaced since it was listed is
+  // never stamped. vSphere (whose MOIDs are never reused) compares it with
+  // the VM's instance UUID when it is sent; Proxmox, whose listing reports
+  // none, requires instead that the VM's PVE name is the owner's (as an
+  // unstamped VM's Delete does), so a reused VMID is never stamped.
   string expected_uuid = 5;
 }
 
@@ -1094,10 +1118,11 @@ service Provider {
   // not list in unreachable_host_ids (ADR-0007 Addendum A, A3).
   rpc ListVMs(ListVMsRequest) returns (ListVMsResponse);
 
-  // Hand a VM on a clustered provider's host to a VirtualMachine by
-  // re-stamping its owner, compare-and-swap (ADR-0007 Addendum A, slice 4).
-  // Single-host and thin-client providers return Unimplemented and advertise
-  // supports_routed_adoption = false.
+  // Hand a VM to a VirtualMachine by re-stamping its owner, compare-and-swap
+  // (ADR-0007 Addendum A, slice 4; single-host adoption). A clustered provider
+  // routes it to the VM's host and reports supports_routed_adoption; a
+  // single-host provider that stamps reports supports_owner_transfer.
+  // Providers that do neither return Unimplemented.
   rpc TransferOwner(TransferOwnerRequest) returns (TransferOwnerResponse);
 
   // Host inventory (ADR-0007 P1). Clustered providers report the hosts they
