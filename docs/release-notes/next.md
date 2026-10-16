@@ -744,6 +744,10 @@ providers), and rollback caveats in
   `TaskStatus` and the others) return a nil error on success again. Before, a
   successful call returned a non-nil error that printed as `<nil>`, and
   `WaitForTask` failed on its first poll.
+- **vSphere: a disk import works on a freshly started provider.** A migration
+  into vSphere (S3 or NFS) whose `ImportDisk` was the provider's first call
+  after a restart failed with `datastore/StoragePod "<name>" not found`: the
+  import looked up the datastore before selecting the datacenter.
 
 ## Known limitations
 
