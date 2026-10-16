@@ -550,6 +550,8 @@ func (c *Client) GetCapabilities(ctx context.Context) (contracts.Capabilities, e
 		SupportsListOwnerFilter: resp.GetSupportsListOwnerFilter(),
 		// False from a provider that predates the import-time disk-size limit.
 		SupportsImportSizeLimit: resp.GetSupportsImportSizeLimit(),
+		// False from a provider whose single-host adoption does not stamp.
+		SupportsOwnerTransfer: resp.GetSupportsOwnerTransfer(),
 		// ADR-0011 D7: empty from a provider that predates DeleteStagedDisk.
 		SupportedStagedDiskDeleteBackends: resp.GetSupportedStagedDiskDeleteBackends(),
 	}, nil
@@ -1212,10 +1214,11 @@ func (c *Client) listVMs(ctx context.Context, req *providerv1.ListVMsRequest) (c
 const transferOwnerCallTimeout = 2 * time.Minute
 
 // TransferOwner implements contracts.OwnerTransferrer (ADR-0007 Addendum A, slice 4): it
-// asks a clustered provider to stamp the VM req.VM addresses — on host
-// req.VM.HostID — with its adopting VirtualMachine's identity. A provider that
-// does not adopt (single-host, thin-client, or a clustered one older than
-// slice 4) answers Unimplemented, which maps to a NotSupported error.
+// asks the provider to stamp the VM req.VM addresses — on host req.VM.HostID
+// for a clustered provider, by id alone for a single-host one — with its
+// adopting VirtualMachine's identity. A provider that does not stamp (one
+// reporting neither supports_routed_adoption nor supports_owner_transfer)
+// answers Unimplemented, which maps to a NotSupported error.
 func (c *Client) TransferOwner(ctx context.Context, req contracts.TransferOwnerRequest) error {
 	ctx, cancel := context.WithTimeout(ctx, transferOwnerCallTimeout)
 	defer cancel()

@@ -85,6 +85,12 @@ const (
 	// as GetCapabilitiesResponse.supports_import_size_limit. Advertise it only
 	// with an ImportDisk that does.
 	CapabilityImportSizeLimit Capability = "import_size_limit"
+	// CapabilityOwnerTransfer marks a single-host provider whose TransferOwner
+	// re-stamps a listed VM (addressed by id alone) with the VirtualMachine
+	// that adopts it, compare-and-swap; reported as
+	// GetCapabilitiesResponse.supports_owner_transfer. Advertise it only with a
+	// TransferOwner that does.
+	CapabilityOwnerTransfer Capability = "owner_transfer"
 
 	// Provider-specific capabilities
 	CapabilityVSphere     Capability = "vsphere"
@@ -237,6 +243,8 @@ func (m *Manager) GetCapabilities(ctx context.Context, req *providerv1.GetCapabi
 		SupportsListOwnerFilter: m.HasCapability(CapabilityListOwnerFilter),
 		// ImportDisk enforces max_virtual_size_bytes.
 		SupportsImportSizeLimit: m.HasCapability(CapabilityImportSizeLimit),
+		// Single-host TransferOwner (adoption re-stamps the VM it adopts).
+		SupportsOwnerTransfer: m.HasCapability(CapabilityOwnerTransfer),
 		// ADR-0011 D7: the backends DeleteStagedDisk removes staging objects from.
 		SupportedStagedDiskDeleteBackends: m.supportedStagedDiskDeleteBackends,
 	}, nil
@@ -361,6 +369,13 @@ func (b *Builder) ImageArtifactIdentity() *Builder {
 // before landing it.
 func (b *Builder) ImportSizeLimit() *Builder {
 	b.manager.AddCapability(CapabilityImportSizeLimit)
+	return b
+}
+
+// OwnerTransfer adds CapabilityOwnerTransfer: TransferOwner re-stamps a listed
+// VM with the VirtualMachine that adopts it, compare-and-swap.
+func (b *Builder) OwnerTransfer() *Builder {
+	b.manager.AddCapability(CapabilityOwnerTransfer)
 	return b
 }
 

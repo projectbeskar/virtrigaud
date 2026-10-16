@@ -107,6 +107,14 @@ type Capabilities struct {
 	// that predates it ignores the limit; while one applies, the migration
 	// controller holds a migration into a Provider that does not report it.
 	SupportsImportSizeLimit bool
+	// SupportsOwnerTransfer reports that a single-host provider's
+	// TransferOwner re-stamps a VM its ListVMs reported (addressed by id
+	// alone) with the VirtualMachine that adopts it, compare-and-swap. The
+	// adoption controller stamps the VMs it adopts from a single-host Provider
+	// only when it is reported; through an older provider it adopts them
+	// unstamped, as before, and says so in the Provider's adoption status. It
+	// does not change clustered adoption (SupportsRoutedAdoption).
+	SupportsOwnerTransfer bool
 	// SupportedStagedDiskDeleteBackends lists the staging backends ("nfs",
 	// "s3") whose migration staging objects the provider's DeleteStagedDisk
 	// removes (StagedDiskDeleter, ADR-0011 D7). Empty — an older provider, or

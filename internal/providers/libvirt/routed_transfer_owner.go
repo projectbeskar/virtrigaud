@@ -20,7 +20,6 @@ import (
 	"context"
 	"fmt"
 	"log"
-	"slices"
 	"strings"
 	"sync"
 
@@ -307,24 +306,10 @@ func transferOwnerOn(ctx context.Context, vp *VirshProvider, host hostconn.HostI
 // never a stamp) a stamp that cannot be read, more than one stamp, a stamp
 // without a UID, and a stamp that is neither owner's nor in replaceable.
 func ownerTransferDecision(owner contracts.ObjectIdentity, recorded []contracts.ObjectIdentity, readErr error, replaceable []string) (already bool, err error) {
-	switch {
-	case readErr != nil:
+	if readErr != nil {
 		return false, fmt.Errorf("its owner metadata cannot be read: %w", readErr)
-	case len(recorded) == 0:
-		return false, nil
-	case len(recorded) > 1:
-		return false, fmt.Errorf("it carries %d owner stamps", len(recorded))
 	}
-	uid := recorded[0].UID
-	switch {
-	case uid == "":
-		return false, fmt.Errorf("its owner stamp has no uid")
-	case uid == owner.UID:
-		return true, nil
-	case slices.Contains(replaceable, uid):
-		return false, nil
-	}
-	return false, fmt.Errorf("it is stamped for a VirtualMachine the manager did not report as gone")
+	return contracts.OwnerTransferDecision(owner, recorded, replaceable)
 }
 
 // verifyOwnerStamp reads domain uuid back and requires that it is still named
