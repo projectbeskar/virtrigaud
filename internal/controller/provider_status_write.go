@@ -20,6 +20,7 @@ import (
 	"context"
 	stderrors "errors"
 	"fmt"
+	"time"
 
 	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/client-go/util/retry"
@@ -53,6 +54,19 @@ import (
 // changed since the reconcile read the Provider, so the status it computed is
 // not written over them.
 var errProviderStatusMovedOn = stderrors.New("the Provider's status changed since this reconcile read it")
+
+// providerStatusConflictRequeue is when a Provider reconcile whose status
+// was not written, because its own fields had moved past what it read
+// (errProviderStatusMovedOn), runs again. The newer write's own watch event
+// usually re-drives it sooner; it is never an immediate requeue.
+const providerStatusConflictRequeue = 2 * time.Second
+
+// isProviderStatusContention reports whether err is a Provider controller
+// status write refused because its own fields changed since the read
+// (errProviderStatusMovedOn): a requeue, not an error.
+func isProviderStatusContention(err error) bool {
+	return stderrors.Is(err, errProviderStatusMovedOn)
+}
 
 // errProviderRecreated means the Provider was deleted and re-created (another
 // UID) since it was read: nothing decided for the old object is written.

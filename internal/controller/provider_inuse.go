@@ -602,6 +602,10 @@ func (r *ProviderReconciler) holdInUseProvider(ctx context.Context, provider *in
 
 	if !equality.Semantic.DeepEqual(base.Status, provider.Status) {
 		if err := r.writeProviderStatus(ctx, &base.Status, provider); err != nil {
+			if isProviderStatusContention(err) {
+				log.FromContext(ctx).Info("Provider status changed since this reconcile read it; not overwriting it, requeueing")
+				return ctrl.Result{RequeueAfter: providerStatusConflictRequeue}, nil
+			}
 			return ctrl.Result{}, fmt.Errorf("update status of held Provider %s/%s: %w", provider.Namespace, provider.Name, err)
 		}
 	}

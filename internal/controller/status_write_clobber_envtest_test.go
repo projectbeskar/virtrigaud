@@ -282,11 +282,27 @@ var _ = Describe("Status writes never replace a newer status with a stale copy (
 		read.Status.Version = "v-stale"
 		err := pr.writeProviderStatus(ctx, base, read)
 		Expect(err).To(MatchError(ContainSubstring(errProviderStatusMovedOn.Error())))
-		got := &infravirtrigaudiov1beta1.Provider{}
-		Expect(k8sClient.Get(ctx, key, got)).To(Succeed())
+		got := infrav1ProviderGet(key)
 		Expect(got.Status.Version).To(Equal("v-newer"))
+
+		By("a reconcile from that older read requeues shortly instead of failing")
+		c := &staleReadClient{Client: k8sClient}
+		c.serveStale(read)
+		stalePR := &ProviderReconciler{Client: c, APIReader: k8sClient, Scheme: k8sClient.Scheme()}
+		res, err := stalePR.Reconcile(ctx, ctrl.Request{NamespacedName: key})
+		Expect(err).NotTo(HaveOccurred(), "a refused stale write is not a reconcile error")
+		Expect(res.RequeueAfter).To(Equal(providerStatusConflictRequeue))
+		got = infrav1ProviderGet(key)
+		Expect(got.Status.Version).To(Equal("v-newer"), "nothing was written over the newer status")
 	})
 })
+
+// infrav1ProviderGet reads the Provider key from the API server.
+func infrav1ProviderGet(key client.ObjectKey) *infravirtrigaudiov1beta1.Provider {
+	got := &infravirtrigaudiov1beta1.Provider{}
+	Expect(k8sClient.Get(ctx, key, got)).To(Succeed())
+	return got
+}
 
 // labelDuringImportProvider is countingMigrationProvider whose ImportDisk
 // adds a label to the VMMigration key while it runs, as a user or another

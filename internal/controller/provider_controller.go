@@ -285,6 +285,16 @@ func (r *ProviderReconciler) Reconcile(ctx context.Context, req ctrl.Request) (r
 	}
 
 	if updateErr := r.writeProviderStatus(ctx, base, &provider); updateErr != nil {
+		// This reconcile's read was behind a newer write of its own fields:
+		// nothing was written and it runs again shortly from the live state
+		// (not an error).
+		if isProviderStatusContention(updateErr) {
+			logger.Info("Provider status changed since this reconcile read it; not overwriting it, requeueing")
+			if err == nil {
+				return ctrl.Result{RequeueAfter: providerStatusConflictRequeue}, nil
+			}
+			return result, err
+		}
 		logger.Error(updateErr, "Failed to update Provider status")
 		if err == nil {
 			err = updateErr
