@@ -269,7 +269,7 @@ func TestExportDisk_CloneFailsAfterCreatingFiles_NothingLeaks(t *testing.T) {
 func TestExportDisk_DownloadFailure_NothingLeaks(t *testing.T) {
 	p, _ := newOwnershipSim(t)
 	vmID, _, folder := exportSource(t, p)
-	p.client.Client.Client.Transport = &failDatastoreHTTP{RoundTripper: p.client.Client.Client.Transport}
+	p.client.Transport = &failDatastoreHTTP{RoundTripper: p.client.Transport}
 
 	_, err := p.ExportDisk(context.Background(), s3ExportRequest(t, vmID, "http://127.0.0.1:1"))
 
