@@ -213,22 +213,12 @@ func (p *Provider) importDiskFromS3(ctx context.Context, req *providerv1.ImportD
 	}
 
 	// --- 3. RESOLVE datastore + placement (pool, folder, host) ---
-	datastore, err := p.resolveImportDatastore(ctx, req.StorageHint)
+	target, err := p.resolveImportTarget(ctx, req.StorageHint)
 	if err != nil {
-		return nil, errors.NewInternal("failed to resolve target datastore", err)
+		return nil, err
 	}
+	datacenter, datastore, pool, folder, host := target.datacenter, target.datastore, target.pool, target.folder, target.host
 	dsName := datastore.Name()
-
-	datacenter, err := p.finder.DefaultDatacenter(ctx)
-	if err != nil {
-		return nil, errors.NewInternal("failed to get datacenter", err)
-	}
-	p.finder.SetDatacenter(datacenter)
-
-	pool, folder, host, err := p.resolveImportPlacement(ctx, datacenter)
-	if err != nil {
-		return nil, errors.NewInternal("failed to resolve import placement", err)
-	}
 
 	finalPath := fmt.Sprintf("[%s] %s/%s.vmdk", dsName, id, id)
 
@@ -400,6 +390,44 @@ func (p *Provider) nfcImportStreamOptimized(
 		p.logger.Warn("Failed to unregister transient import VM (leftover .vmx may remain in folder)", "vm", info.Entity.Value, "error", err)
 	}
 	return nil
+}
+
+// importTarget is where an ImportDisk lands its disk: the datastore of the
+// landing folder, and the datacenter and placement (pool, folder, host) of the
+// transient NFC import VM.
+type importTarget struct {
+	datacenter *object.Datacenter
+	datastore  *object.Datastore
+	pool       *object.ResourcePool
+	folder     *object.Folder
+	host       *object.HostSystem
+}
+
+// resolveImportTarget scopes the finder to the default datacenter, then
+// resolves the landing datastore (resolveImportDatastore) and the NFC import
+// placement (resolveImportPlacement). The datacenter must be set first: the
+// finder resolves relative names such as the DefaultDatastore only inside a
+// datacenter, and a freshly started provider has none until an RPC sets it, so
+// an ImportDisk that was the first such RPC after a provider restart failed
+// with "datastore/StoragePod not found". The returned errors are gRPC Internal
+// errors ready to return from ImportDisk.
+func (p *Provider) resolveImportTarget(ctx context.Context, storageHint string) (*importTarget, error) {
+	datacenter, err := p.finder.DefaultDatacenter(ctx)
+	if err != nil {
+		return nil, errors.NewInternal("failed to get datacenter", err)
+	}
+	p.finder.SetDatacenter(datacenter)
+
+	datastore, err := p.resolveImportDatastore(ctx, storageHint)
+	if err != nil {
+		return nil, errors.NewInternal("failed to resolve target datastore", err)
+	}
+
+	pool, folder, host, err := p.resolveImportPlacement(ctx, datacenter)
+	if err != nil {
+		return nil, errors.NewInternal("failed to resolve import placement", err)
+	}
+	return &importTarget{datacenter: datacenter, datastore: datastore, pool: pool, folder: folder, host: host}, nil
 }
 
 // resolveImportPlacement resolves the resource pool, VM folder, and host used by
