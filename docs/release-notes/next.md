@@ -808,6 +808,12 @@ says so. Each links to the page that documents it in full, where one exists.
   Versioned or object-lock S3 buckets and NFS server snapshots keep the data:
   expire noncurrent versions on `vmmigrations/` and exclude the staging export
   from snapshots (→ [ADR-0011](docs/adr/0011-migration-staging-cleanup.md)).
+- **`verifyChecksums` does not checksum NFS migrations.** On the `nfs` backend
+  the disk is written by `qemu-img` over NFS, which computes no byte checksum, so
+  no source or target checksum is recorded. Integrity rests on the target's
+  `qemu-img check` of the converted image. Use `s3` when you need an end-to-end
+  SHA-256 comparison
+  (→ [ADR-0006](docs/adr/0006-storage-backend-agnostic-cross-hypervisor-migration.md)).
 - **Leftovers from earlier releases are not cleaned up automatically:** staged
   migration objects, libvirt snapshot overlay files (`<domain>-disk.<snapshot>`)
   and vSphere `virtrigaud-export-*` files. Find and remove them as described in
