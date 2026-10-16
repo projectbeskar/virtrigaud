@@ -328,6 +328,17 @@ providers), and rollback caveats in
 
 ### Fixes
 
+- **A vSphere disk export no longer leaks a full copy of the disk on the
+  source datastore.** `ExportDisk` clones the disk to a temporary
+  `virtrigaud-export-…vmdk` next to it and deleted only the descriptor, so on
+  VMFS the `-flat.vmdk` extent (the whole disk) stayed in the VM's folder and
+  outlived the VM (found on vCenter 8 in the rc1 lab; also in v0.3.11). The
+  clone is now removed with `VirtualDiskManager.DeleteVirtualDisk` on every
+  exit, including a clone that failed or was cancelled part-way. Files left by
+  earlier exports are not removed: look for `virtrigaud-export-*` files in the
+  VM folders of datastores used as migration sources and delete them.
+  → [Upgrade guide](docs/upgrading.md#leftover-virtrigaud-export--files-on-vsphere-datastores)
+
 - **Deleting a VirtualMachine while its Provider cannot be reached no longer
   orphans the hypervisor VM.** When the manager had no client for the
   Provider — its runtime not `Running` (every provider rollout or restart),

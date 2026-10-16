@@ -5,6 +5,34 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-10-16 21:00] - rc1 lab fix: vSphere ExportDisk no longer leaks a full copy of the disk on the source datastore
+**Author:** @wrkode (William Rizzo)
+
+> **Operator note.** Exports by earlier releases (also v0.3.11) left `virtrigaud-export-*` files, a full copy of each exported disk, in the source VMs' folders on the datastores. This release stops leaking but does not remove them: delete them by hand (see `docs/upgrading.md`, "Leftover `virtrigaud-export-*` files on vSphere datastores").
+
+### Fixed
+- `internal/providers/vsphere/export_cleanup.go` (new), `internal/providers/vsphere/server.go`: `ExportDisk` cloned the source disk to a temporary `virtrigaud-export-<vm id>-<unix time>.vmdk` and deleted it with the datastore file manager. On VMFS the clone is a descriptor plus a `-flat.vmdk` extent; deleting the descriptor path left the 12 GiB extent in the source VM's folder (rc1 lab, vCenter 8), which then also kept the folder alive after the VM was destroyed. The clone is now removed with `VirtualDiskManager.DeleteVirtualDisk` (descriptor and all extents; same datacenter as the copy; the task is awaited). If that fails (for example the descriptor is already gone), the fallback deletes, with the datastore file manager, only files in the clone's folder named exactly `<temp name>-flat.vmdk`, `<temp name>-s<NNN>.vmdk` or `<temp name>-sesparse.vmdk` (and the descriptor); the temporary name is anchored and quoted, never a broader glob, and a non-export file is refused. A failed removal is logged provider-side at `ERROR` and never reaches the caller or tenant-visible status.
+- `internal/providers/vsphere/server.go`: the cleanup is registered before the clone starts, so a clone task that failed or was cancelled after it created (part of) its files is removed too. Before, the cleanup was registered only after a successful clone. A clone task whose wait was abandoned (cancelled request) is cancelled on vCenter and awaited before the cleanup runs, so the cleanup does not race a copy that is still writing.
+- `internal/providers/vsphere/export_cleanup.go`: the cleanup runs on a fresh context with a 10 minute bound (was 30 s, too short to delete a large extent); the request's context may already be cancelled.
+- `internal/providers/vsphere/export_cleanup.go`, `internal/providers/vsphere/server.go`: the temporary name gains a random suffix (`virtrigaud-export-<vm id>-<unix time>-<8 hex>.vmdk`), so two exports of the same VM in the same second can never share a name; with the cleanup now also running after a failed clone, a shared name would let one export delete the other's clone. The `virtrigaud-export-` prefix is unchanged.
+- `internal/providers/vsphere/disk_guard.go`, `internal/providers/vsphere/s3import.go`: reviewed, no change. The vSphere provider makes no other temporary clone: `CopyVirtualDisk` is called only by `ExportDisk`, and `cleanupFailedImport` deletes a whole landing folder (every file in it), not a single descriptor.
+
+### Security
+- `internal/providers/vsphere/export_cleanup.go`: closes a storage leak on the tenant's side of the datastore: a full, readable copy of a tenant's disk stayed on the datastore after every vSphere export, in the source VM's folder, outliving the migration and the VM. Pre-existing (v0.3.11 and earlier).
+
+### Changed
+- `internal/providers/vsphere/export_cleanup_test.go` (new): vcsim tests. After `ExportDisk` on the S3 relay path (success, forced datastore-download failure, and a clone that fails after vCenter created its files) no `virtrigaud-export-*` file, descriptor or extent, remains in the VM folder, and the folder is as before the export. vcsim stores a copied disk as a descriptor plus a `-flat.vmdk` file like VMFS; the tests fail on the previous cleanup (the extent remained). `DeleteVirtualDisk`, the descriptor-gone fallback (decoys with the same prefix are untouched), a clone that does not exist, and a refusal to delete a non-export disk are tested directly.
+- `docs/upgrading.md`, `docs/release-notes/next.md`: how to find and delete the leftovers of earlier exports.
+
+### Why
+A rc1 lab export on a real vCenter 8 / VMFS datastore left a 12 GiB `virtrigaud-export-…-flat.vmdk` in the source VM's folder. It was a full copy of the tenant's disk, outside any VM and any quota, and it blocked the VM folder's removal.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout (vSphere provider pods)
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-10-13 00:22] - rc1 lab fixes: one-actor source power-off for migrations, idempotent Power, libvirt default pool never rewritten, snapshot overlay cleanup
 **Author:** @wrkode (William Rizzo)
 
