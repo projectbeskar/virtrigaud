@@ -5,6 +5,21 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-10-16 23:25] - Release notes: NFS migrations carry no checksum (known limitation)
+**Author:** @wrkode (William Rizzo)
+
+### Changed
+- `docs/release-notes/next.md`: Known limitations now say that `verifyChecksums` records no source or target checksum on the `nfs` backend (`qemu-img` writes over NFS and computes none); integrity rests on the target's `qemu-img check`, and `s3` is the backend with an end-to-end SHA-256 comparison.
+
+### Why
+Seen in the v0.4.0-rc1 lab: an NFS migration with `verifyChecksums: true` completed with empty checksums. The behaviour is by design (ADR-0006) but was documented only in the ADR.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [ ] Config change only
+- [x] Documentation only
+
 ## [2026-10-16 22:45] - vSphere: a disk import is no longer refused on a freshly started provider
 **Author:** @wrkode (William Rizzo)
 
