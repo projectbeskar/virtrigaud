@@ -1095,6 +1095,11 @@ func (s *Server) GetCapabilities(ctx context.Context, req *providerv1.GetCapabil
 		SupportsHonestReconfigure: true,
 		// ImportDisk enforces max_virtual_size_bytes (import_size_limit.go).
 		SupportsImportSizeLimit: true,
+		// TransferOwner stamps a domain the manager's single-host adoption
+		// takes over (adoption_transfer_owner.go). Reported only by an
+		// initialized single-host provider: a clustered one reports
+		// supports_routed_adoption (clusteredCapabilities).
+		SupportsOwnerTransfer: s.provider != nil && !s.provider.clustered(),
 		// ADR-0011: DeleteStagedDisk removes a migration's s3 object and empties
 		// its nfs file (the host's qemu-img over libnfs cannot unlink;
 		// staged_disk.go). A clustered provider advertises none.
@@ -1556,20 +1561,19 @@ func (s *Server) ListVMs(ctx context.Context, req *providerv1.ListVMsRequest) (*
 	}, nil
 }
 
-// TransferOwner re-stamps a VM on a clustered provider's host with the
-// VirtualMachine that takes it over, compare-and-swap (ADR-0007 Addendum A,
-// slice 4; Provider.TransferOwner). Single-host providers answer Unimplemented
-// and advertise supports_routed_adoption = false: their adoption does not
-// stamp, and is unchanged. Errors are the sanitized routed errors:
-// InvalidArgument (missing host, owner, id or expected uuid), NotFound (the VM
-// is not on the host any more, or was replaced), AlreadyExists (the VM is
-// stamped for another VirtualMachine, or its stamp cannot be read; nothing was
-// changed), HOST_UNAVAILABLE and VM_OPERATION_FAILED — none of which counts
-// toward the manager's circuit breaker.
+// TransferOwner re-stamps a VM with the VirtualMachine that takes it over,
+// compare-and-swap (Provider.TransferOwner): on a clustered provider a VM on
+// the request's host (ADR-0007 Addendum A, slice 4), on a single-host provider
+// a domain of its one host (single-host adoption; supports_owner_transfer).
+// Errors are the sanitized routed errors: InvalidArgument (a missing or
+// unexpected host, owner, id or expected uuid), NotFound (the VM is not on the
+// host any more, or was replaced), AlreadyExists (the VM is stamped for
+// another VirtualMachine, or its stamp cannot be read; nothing was changed),
+// HOST_UNAVAILABLE and VM_OPERATION_FAILED — none of which counts toward the
+// manager's circuit breaker.
 func (s *Server) TransferOwner(ctx context.Context, req *providerv1.TransferOwnerRequest) (*providerv1.TransferOwnerResponse, error) {
-	if !s.clusteredProvider() {
-		return nil, status.Error(codes.Unimplemented,
-			"TransferOwner is implemented by a clustered libvirt provider only; single-host adoption does not stamp domains")
+	if s.provider == nil {
+		return nil, status.Error(codes.Unavailable, "provider not initialized")
 	}
 	err := s.provider.TransferOwner(ctx, contracts.TransferOwnerRequest{
 		VM: contracts.VMRef{
