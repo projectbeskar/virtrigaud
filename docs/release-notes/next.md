@@ -328,6 +328,20 @@ providers), and rollback caveats in
 
 ### Fixes
 
+- **A `VMMigration` no longer fails with "import did not record disk info"
+  (affects v0.3.11).** When two reconciles of a migration overlapped (the
+  second started from a cache that did not yet show the first one's write),
+  the second one's status write replaced the whole live status with its older
+  copy. That could drop `status.diskInfo` (seen on a libvirt → S3 → vSphere
+  migration, which then failed at `Creating`), or any other recorded field:
+  the staging marker, the source VM's UID, the task reference, even the phase.
+  A status write now never replaces a newer status: it either loses the
+  conflict and the migration is reconciled again from the live state, or —
+  for the result of a snapshot, export or import — only that result is
+  written onto the live object, so it is never lost and the operation is
+  never sent twice. The same fix stops the `Provider` controller from
+  dropping `status.adoption` written by VM adoption, and adoption from losing
+  its status to the `Provider` controller's frequent writes.
 - **A vSphere disk export no longer leaks a full copy of the disk on the
   source datastore.** `ExportDisk` clones the disk to a temporary
   `virtrigaud-export-…vmdk` next to it and deleted only the descriptor, so on
