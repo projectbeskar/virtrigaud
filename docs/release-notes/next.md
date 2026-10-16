@@ -1,7 +1,7 @@
 <!--
 Draft release notes for VirtRigaud v0.4.0-rc1, the release candidate that follows
-v0.3.11 (GA follows after a soak). Paste the body below (from "About this release
-candidate" onward) into the GitHub pre-release; see docs/upgrading.md for the full
+v0.3.11 (GA follows after a soak). Paste everything below this comment into the
+GitHub pre-release; see docs/upgrading.md for the full
 upgrade guide these notes link to, and CHANGELOG.md for the complete, dated
 changelog. For the GA release, drop the rc section and re-title.
 -->
@@ -38,18 +38,6 @@ this release (owner stamps, imported-disk confinement, NFS/S3 import hardening,
 idempotent power) were tested only against the test fake, not a real PVE cluster.
 If you run Proxmox, treat it as untested and try these paths on a lab cluster
 first.
-
-## Breaking changes" onward) into the GitHub release. Fill in the version
-number in the title before publishing; see docs/upgrading.md for the full upgrade
-guide these notes link to, and CHANGELOG.md for the complete, dated changelog.
--->
-
-This release is a security-hardening release: a full codebase security review
-found and fixed several cross-tenant and privilege-escalation issues in the
-vSphere and libvirt providers, cross-namespace clone/migration targets, and VM
-provider binding. **Several fixes are breaking or change default behavior.**
-Read the upgrade guide before upgrading:
-**[Upgrading from v0.3.11](docs/upgrading.md)**.
 
 ## Breaking changes
 
