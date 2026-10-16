@@ -24,7 +24,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `status.adoption` is kept when the Provider controller reconciles from a read that predates the adoption write (its cache catches up right after its first read, as in the lab). **Fails on the old code** (adoption dropped without any conflict).
   - A Provider controller write whose own fields moved past its read is refused, and a reconcile from that read requeues. **Fails on the old code** (the stale write overwrites the newer field).
   - An `ImportDisk` result is recorded on the live object when the `VMMigration` was edited during the import. **Passes on the old code too**: a regression guard for the new rule that an ordinary status conflict is requeued, not retried.
-  Unit tests cover the held-result paths (snapshot sync and task, export before provider resolution, import), the dropped-result event, attempt binding and guard eviction.
+  - The create-outcome annotation removal is refused (a conflict, nothing patched) from a VirtualMachine read that another status write has moved past. **Fails on the old code** (the unlocked patch succeeded).
+  Unit tests (`vmmigration_creating_test.go` too) cover the held-result paths (snapshot sync and task, export before provider resolution, import), the dropped-result event, attempt binding, guard eviction, and `AlreadyExists` in `Creating` for the migration's own VM and for other VMs.
 - `docs/release-notes/next.md`: Fixes entry.
 
 ### Why
