@@ -123,6 +123,33 @@ one cluster) that migrate a same-named VM in a same-named namespace onto the sam
 would write, import and remove the same stage. Point each PVE node (cluster) at exactly
 one VirtRigaud installation.
 
+### Leftover `virtrigaud-export-*` files on vSphere datastores
+
+Before this release, every vSphere disk export (a `VMMigration` from a vSphere source,
+including the S3 and NFS staging paths) leaked a **full copy of the exported disk** on the
+source datastore. The export clones the disk to a temporary
+`virtrigaud-export-<vm id>-<unix time>.vmdk` next to the source disk and used to delete only
+that descriptor; on VMFS the data lives in a separate `virtrigaud-export-…-flat.vmdk`
+extent, which stayed behind in the source VM's folder (observed: 12 GiB for a 12 GiB disk).
+The leftover also kept the folder alive after the VM was destroyed. This affected v0.3.11
+as well. The fix removes the clone completely on every exit of the export, but it does not
+remove files that earlier exports already left.
+
+On every datastore that has been a vSphere **migration source**, look for leftovers in the
+VM folders (datastore browser, or `ls` on an ESXi host) and delete them:
+
+```sh
+# On an ESXi host: list leftovers (descriptor and -flat extent) on all datastores.
+find /vmfs/volumes/*/ -maxdepth 2 -name 'virtrigaud-export-*.vmdk'
+```
+
+Delete a file only if its name starts with `virtrigaud-export-` and no export is running
+(no `VMMigration` from that vSphere source in phase `Exporting`). Delete the descriptor and
+its `-flat.vmdk` together, from the vSphere client (Datastore browser, Delete) or with
+`vmkfstools -U <descriptor>.vmdk` on the host. A VM folder that still holds only such files
+after its VM was destroyed can be removed once they are gone. The provider logs a leftover it
+could not delete at `ERROR` ("Failed to delete temporary export disk on the datastore").
+
 ## Required upgrade order
 
 1. **CRDs first.**
