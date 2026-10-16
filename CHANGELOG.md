@@ -5,6 +5,25 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-10-16 22:45] - vSphere: a disk import is no longer refused on a freshly started provider
+**Author:** @wrkode (William Rizzo)
+
+### Fixed
+- `internal/providers/vsphere/s3import.go`, `internal/providers/vsphere/nfs.go`: `ImportDisk` (S3 and NFS) resolved the target datastore before scoping the shared finder to the default datacenter. govmomi's finder resolves a relative name such as the `DefaultDatastore` only inside a datacenter, and a freshly started provider has none until an RPC sets it. So a migration into vSphere whose `ImportDisk` was the first such RPC after a provider (re)start failed for good with `failed to resolve target datastore: datastore/StoragePod "<name>" not found`, after the source disk was already exported and converted. Pre-existing (in v0.3.11); found in the v0.4.0-rc1 lab run of a libvirt → S3 → vSphere migration right after the provider roll. The datacenter, datastore and NFC import placement are now resolved together by `resolveImportTarget`, which sets the datacenter first.
+
+### Changed
+- `internal/providers/vsphere/import_target_test.go` (new): on vcsim, with the unscoped finder a new provider has, `resolveImportDatastore` alone fails (the old order) and `resolveImportTarget` resolves the datastore and placement.
+- `docs/release-notes/next.md`: Fixes entry.
+
+### Why
+A migration into vSphere must not depend on which RPC the provider happened to serve first after a restart; the failure was terminal and wasted the export.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-10-16 22:08] - v0.4.0-rc1 release notes: release-candidate framing, what to test, consolidated known limitations
 **Author:** @wrkode (William Rizzo)
 

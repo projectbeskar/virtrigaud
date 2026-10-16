@@ -167,22 +167,12 @@ func (p *Provider) importDiskFromNFS(ctx context.Context, req *providerv1.Import
 	}
 
 	// --- 2. RESOLVE datastore + placement (pool, folder, host) ---
-	datastore, err := p.resolveImportDatastore(ctx, req.StorageHint)
+	target, err := p.resolveImportTarget(ctx, req.StorageHint)
 	if err != nil {
-		return nil, errors.NewInternal("failed to resolve target datastore", err)
+		return nil, err
 	}
+	datacenter, datastore, pool, folder, host := target.datacenter, target.datastore, target.pool, target.folder, target.host
 	dsName := datastore.Name()
-
-	datacenter, err := p.finder.DefaultDatacenter(ctx)
-	if err != nil {
-		return nil, errors.NewInternal("failed to get datacenter", err)
-	}
-	p.finder.SetDatacenter(datacenter)
-
-	pool, folder, host, err := p.resolveImportPlacement(ctx, datacenter)
-	if err != nil {
-		return nil, errors.NewInternal("failed to resolve import placement", err)
-	}
 
 	finalPath := fmt.Sprintf("[%s] %s/%s.vmdk", dsName, id, id)
 
