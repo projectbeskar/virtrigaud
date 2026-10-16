@@ -441,6 +441,31 @@ type VMMigrationStatus struct {
 	// +optional
 	TargetVMID string `json:"targetVMID,omitempty"`
 
+	// TargetVMUID is the UID of the target VirtualMachine this migration
+	// created, recorded from the response of its own Create (or, when that
+	// record was lost, from the VirtualMachine that carries this migration's
+	// claim, see targetVMClaim). Every later step — waiting for the target,
+	// validating it, marking it migration-completed, deleting a partial one —
+	// acts only on the VirtualMachine with this UID: another VirtualMachine
+	// under the target's name (one created by someone else, before or after
+	// the migration's own) fails the migration and is never touched. Written
+	// by the controller only.
+	// +optional
+	// +kubebuilder:validation:MaxLength=128
+	TargetVMUID string `json:"targetVMUID,omitempty"`
+
+	// TargetVMClaim is the hex SHA-256 digest of the one-time random token
+	// the controller writes, as the virtrigaud.io/migration-claim annotation,
+	// on the target VirtualMachine it creates. It is recorded BEFORE that
+	// Create, so a Create that succeeded but whose targetVMUID was never
+	// recorded (a lost status write, a manager restart) is still recognized
+	// as this migration's: a VirtualMachine whose claim token hashes to this
+	// digest. Only the digest is stored here; the token cannot be derived
+	// from it. Written by the controller only.
+	// +optional
+	// +kubebuilder:validation:MaxLength=64
+	TargetVMClaim string `json:"targetVMClaim,omitempty"`
+
 	// StartTime is when the migration started
 	// +optional
 	StartTime *metav1.Time `json:"startTime,omitempty"`
