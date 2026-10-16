@@ -5,6 +5,29 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-10-16 22:08] - v0.4.0-rc1 release notes: release-candidate framing, what to test, consolidated known limitations
+**Author:** @wrkode (William Rizzo)
+
+### Changed
+- `docs/release-notes/next.md`: the notes are now for v0.4.0-rc1 (a release candidate; GA follows after a soak). New "About this release candidate / what to test" section (upgrade from v0.3.11, clustered libvirt, NFS/S3 migrations and staging cleanup, the disk-size limit, Provider deletion), stating that the Proxmox changes were validated only against the test fake, not a real PVE cluster.
+- `docs/release-notes/next.md`: new "Known limitations" section before "Upgrade" that gathers the scattered limitations (metrics `--metrics-secure` default, experimental clustered libvirt, namespace deletion with an in-use Provider, adoption and single-host Proxmox owner checks, unstamped single-host clone targets, the libvirt `default` pool path, the disk-size limit's image gap, vSphere hot-add, leftover imported disks, NFS/S3 staging-cleanup residue, leftovers from earlier releases, re-sent provider RPCs after a manager restart, cross-namespace migration target names). The two earlier "Known limitation:" bullets are merged into it. The "Upgrade" section now states the lab-validated roll order (CRDs, manager, providers).
+- `docs/release-notes/next.md`: a link to `docs/clustered-provider-inventory.md` used a `../` path that does not resolve once the notes are pasted into the release; it now matches the other links.
+
+### Added
+- `docs/upgrading.md`: new "Leftovers from earlier releases" section: where to find staged migration objects (S3 and NFS names), libvirt snapshot overlay files, vSphere `virtrigaud-export-*` files and Proxmox import stages that this release does not clean up.
+
+### Fixed
+- `docs/upgrading.md`: the "Stale Proxmox import stages" text said the provider does not remove stages when a migration is deleted; since ADR-0011 the staged-disk delete removes the target VM's stage, so the text now says which stages still need a sweep.
+
+### Why
+The first release candidate needs to tell testers what to exercise and what is known not to work yet, in one place, instead of in scattered bullets. The Proxmox caveat keeps a fake-only validation from being read as tested on real PVE.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [ ] Config change only
+- [x] Documentation only
+
 ## [2026-10-16 21:00] - Status writes never replace a newer status with a stale copy (VMMigration, Provider, VMAdoption)
 **Author:** @wrkode (William Rizzo)
 

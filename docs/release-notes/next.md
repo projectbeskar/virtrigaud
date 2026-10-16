@@ -1,6 +1,45 @@
 <!--
-Draft release notes for the release that follows v0.3.11. Paste the body below
-(from "## Breaking changes" onward) into the GitHub release. Fill in the version
+Draft release notes for VirtRigaud v0.4.0-rc1, the release candidate that follows
+v0.3.11 (GA follows after a soak). Paste the body below (from "About this release
+candidate" onward) into the GitHub pre-release; see docs/upgrading.md for the full
+upgrade guide these notes link to, and CHANGELOG.md for the complete, dated
+changelog. For the GA release, drop the rc section and re-title.
+-->
+
+This is **v0.4.0-rc1, a release candidate**. It is a security-hardening release: a
+full codebase security review found and fixed several cross-tenant and
+privilege-escalation issues in the vSphere and libvirt providers, cross-namespace
+clone/migration targets, and VM provider binding. **Several fixes are breaking or
+change default behavior.** Read the upgrade guide before upgrading:
+**[Upgrading from v0.3.11](docs/upgrading.md)**.
+
+## About this release candidate / what to test
+
+v0.4.0 GA follows after a soak of this candidate. Please try it on a non-production
+cluster and report what you find (GitHub issues; include the Provider type, the
+`kubectl describe` of the object involved and the provider log, never a Secret).
+The most useful things to exercise:
+
+- **Upgrading from v0.3.11**, following [docs/upgrading.md](docs/upgrading.md): the
+  CRDs, then the manager, then the providers, with the grants and vCenter
+  privileges it lists. Tell us where the guide was wrong or unclear.
+- **Clustered libvirt** (`topology: cluster`, experimental): placement, deletes
+  while a host is unreachable, restore and re-attach.
+- **Migrations over NFS and S3**, in any direction you use, including the new
+  staging cleanup (`StagingCleanup` condition, `DeleteStagedDisk`) and the
+  import-time checks on the staged image.
+- **The administrator disk-size limit** (`manager.maxDiskSize`,
+  `infra.virtrigaud.io/max-disk-size`), including clones and migrations.
+- **Deleting a `Provider`** that still has VMs (the in-use finalizer, ADR-0010),
+  and VM deletes while a provider is rolling out.
+
+**Proxmox was not validated against a real PVE cluster.** The Proxmox changes in
+this release (owner stamps, imported-disk confinement, NFS/S3 import hardening,
+idempotent power) were tested only against the test fake, not a real PVE cluster.
+If you run Proxmox, treat it as untested and try these paths on a lab cluster
+first.
+
+## Breaking changes" onward) into the GitHub release. Fill in the version
 number in the title before publishing; see docs/upgrading.md for the full upgrade
 guide these notes link to, and CHANGELOG.md for the complete, dated changelog.
 -->
@@ -655,18 +694,6 @@ providers), and rollback caveats in
   PVE name or `vm-<vmid>`). A Proxmox template is never deleted
   (`VM_IS_IMAGE_ARTIFACT`), and a delete refused for an unreadable owner stamp
   is held as `Ready=False/OwnerStampUnreadable`.
-- Known limitation: adoption does not re-stamp the VM it adopts, so a Proxmox
-  VM that still carries a previous owner's stamp (detached with
-  `orphan-on-delete`, then adopted again) is left in place when its new
-  VirtualMachine is deleted (`VM_NOT_OWNED`, a `VMLeftOnHypervisor` Warning
-  naming its id); remove it by hand. Re-stamping on adoption is planned after
-  this release.
-- Known limitation: on a single-host Proxmox Provider only `Delete` is
-  owner-checked. `Describe`, `Power`, `Reconfigure` and the snapshot calls act
-  on whatever VM has the recorded VMID, so if a VM is deleted outside
-  VirtRigaud and PVE gives its VMID to a new VM, the old `VirtualMachine`
-  addresses that VM. Do not delete VirtRigaud-managed VMs outside VirtRigaud;
-  delete the `VirtualMachine` (or detach it with `orphan-on-delete`) instead.
 - **Nothing is created through a Provider being deleted, even before the
   manager's cache sees the deletion.** The Provider is re-read from the API
   server right before every `Create`, `Clone` and `ImportDisk`; a deleting,
@@ -715,7 +742,7 @@ providers), and rollback caveats in
   host (the host and the pool's path are in the provider log, never in a
   status). Mount shared storage
   **at** `/var/lib/libvirt/images` — see the host prerequisites in
-  [`docs/clustered-provider-inventory.md`](../clustered-provider-inventory.md#host-prerequisites).
+  [`docs/clustered-provider-inventory.md`](docs/clustered-provider-inventory.md#host-prerequisites).
 - **libvirt: deleting a snapshot removes its leftover overlay file.** libvirt
   10 commits an external snapshot into its base on delete but leaves the
   overlay `<domain>-disk.<snapshot>` in the pool; `SnapshotDelete` now removes
@@ -730,8 +757,83 @@ providers), and rollback caveats in
   successful call returned a non-nil error that printed as `<nil>`, and
   `WaitForTask` failed on its first poll.
 
+## Known limitations
+
+These are known in v0.4.0-rc1 and are not regressions from v0.3.11 unless a bullet
+says so. Each links to the page that documents it in full, where one exists.
+
+- **Metrics are served over plain HTTP by default.** The manager's
+  `--metrics-secure` is still off by default (planned for v0.5). `/metrics`
+  includes administrator-sensitive gauges, so expose it only behind the chart's
+  NetworkPolicy (`networkPolicy.enabled`, default off) or turn on
+  `--metrics-secure=true` yourself
+  (→ [`docs/clustered-provider-inventory.md`](docs/clustered-provider-inventory.md#committed-capacity)).
+- **Clustered libvirt providers are experimental.** `topology: cluster` is opt-in
+  and may still change. Migration into a clustered provider and host-to-host
+  migration are not implemented
+  (→ [`docs/clustered-provider-inventory.md`](docs/clustered-provider-inventory.md)).
+- **Deleting a namespace that holds an in-use `Provider`.** Kubernetes deletes the
+  provider's runtime with the namespace, and nothing can stop that. VMs whose
+  deletes miss the pod's termination window are held (`ProviderUnavailable`) and
+  the namespace stays `Terminating` until an administrator acts
+  (`virtrigaud.io/force-delete: "true"` on the `Provider` or on each VM, which
+  leaves the hypervisor VMs unmanaged). Delete the VMs before the namespace
+  (→ [ADR-0010](docs/adr/0010-provider-in-use-finalizer.md),
+  [`docs/vm-provider-binding.md`](docs/vm-provider-binding.md#deleting-a-namespace-that-contains-a-provider)).
+- **Owner checks are not complete on adoption and on single-host Proxmox.**
+  Adoption does not re-stamp the VMs it adopts: a Proxmox VM that still carries a
+  previous owner's stamp (detached with `orphan-on-delete`, then adopted again) is
+  left in place when its new `VirtualMachine` is deleted (`VM_NOT_OWNED`, a
+  `VMLeftOnHypervisor` Warning naming its id); remove it by hand. Re-stamping on
+  adoption is planned after this release. On a single-host Proxmox Provider only
+  `Delete` is owner-checked: `Describe`, `Power`, `Reconfigure` and the snapshot
+  calls act on whatever VM has the recorded VMID, so if a VM is deleted outside
+  VirtRigaud and PVE reuses its VMID, the old `VirtualMachine` addresses that VM.
+  Do not delete VirtRigaud-managed VMs outside VirtRigaud; delete the
+  `VirtualMachine`, or detach it with `orphan-on-delete`
+  (→ [`docs/vm-ownership.md`](docs/vm-ownership.md#limits)).
+- **Single-host `VMClone` targets are not stamped with their owner**, so a re-sent
+  `Clone` is not re-bound and can make a second clone on Proxmox
+  (→ [`docs/vm-ownership.md`](docs/vm-ownership.md#limits)).
+- **libvirt: the `default` storage pool must be at `/var/lib/libvirt/images`.**
+  Mount shared storage at that path, and keep `VIRTRIGAUD_LIBVIRT_IMAGE_DIRS`
+  (the image catalog) apart from the pool. A pool at another path is refused with
+  `InvalidSpec` and never modified
+  (→ [`docs/clustered-provider-inventory.md`](docs/clustered-provider-inventory.md#host-prerequisites)).
+- **The disk-size limit does not cover an oversized image.** It checks class and
+  spec sizes and the real disk sizes of clone and migration sources, but not an
+  image or template whose own disk is larger than the class
+  (→ [chart README](charts/virtrigaud/README.md#disk-size-limit)).
+- **vSphere: resizing a running VM needs hot-add.** Changing the CPU or memory of
+  a powered-on VM works only if CPU/memory hot-add is enabled on that VM.
+  Otherwise vCenter refuses and VirtRigaud retries until the VM is powered off.
+  The vSphere provider reports online reconfigure as supported regardless of the
+  VM.
+- **A migration that fails after its disk was imported leaves that disk on the
+  target.** The landed disk is not removed automatically; delete it by hand.
+- **NFS staging cleanup does not remove the file on libvirt and vSphere targets.**
+  It empties the staged file (a 0-byte file remains); Proxmox deletes it.
+  Versioned or object-lock S3 buckets and NFS server snapshots keep the data:
+  expire noncurrent versions on `vmmigrations/` and exclude the staging export
+  from snapshots (→ [ADR-0011](docs/adr/0011-migration-staging-cleanup.md)).
+- **Leftovers from earlier releases are not cleaned up automatically:** staged
+  migration objects, libvirt snapshot overlay files (`<domain>-disk.<snapshot>`)
+  and vSphere `virtrigaud-export-*` files. Find and remove them as described in
+  [docs/upgrading.md](docs/upgrading.md#leftovers-from-earlier-releases).
+- **A manager restart or leader change can re-send a provider call.** Between a
+  `SnapshotCreate`, `ExportDisk` or `ImportDisk` RPC and the write of its result
+  to the status, the result can be lost and the RPC sent again.
+- **A cross-namespace migration adopts a same-named target VM.** If a
+  `VirtualMachine` with the target's name already exists in the target namespace,
+  the migration treats it as its own target VM. Make sure the target name is free,
+  or use a unique one.
+
 ## Upgrade
 
 See **[docs/upgrading.md](docs/upgrading.md)** for the full breaking-change
 table, required upgrade order, new required privileges, and a post-upgrade
-verification checklist.
+verification checklist. The roll order validated in the rc1 lab is **CRDs, then
+the manager, then the providers**; apply the cross-namespace grants
+(`spec.consumerNamespaceSelector`) between the CRDs and the manager, and roll
+providers promptly after the manager (see
+[Required upgrade order](docs/upgrading.md#required-upgrade-order)).

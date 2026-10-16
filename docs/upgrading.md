@@ -104,9 +104,11 @@ See [`docs/clustered-provider-inventory.md`](clustered-provider-inventory.md) an
 A Proxmox-target migration stages its disk on the PVE node in
 `/var/lib/virtrigaud/import-stage/<namespace>_<vm name>-migrated.<format>`, and the target
 VM's create removes the stage after `qm importdisk`. A migration that fails, or is deleted,
-between its import and its create leaves the stage (often many GB) on the node: the
-provider does not yet remove stages when a migration is deleted. Until it does, sweep the
-stage directory on every PVE node periodically, for example daily from root's crontab:
+between its import and its create leaves the stage (often many GB) on the node. From this
+release the staged-disk delete also removes the stage of the migration's target VM (see the
+`nfs` / `s3` staging row above), but only for migrations that run under this release and
+only while a target provider that supports `DeleteStagedDisk` is reachable. Sweep the stage
+directory on every PVE node periodically for the rest, for example daily from root's crontab:
 
 ```sh
 # List stages older than 2 days; delete only those whose VMMigration is no longer in flight
@@ -149,6 +151,29 @@ its `-flat.vmdk` together, from the vSphere client (Datastore browser, Delete) o
 `vmkfstools -U <descriptor>.vmdk` on the host. A VM folder that still holds only such files
 after its VM was destroyed can be removed once they are gone. The provider logs a leftover it
 could not delete at `ERROR` ("Failed to delete temporary export disk on the datastore").
+
+### Leftovers from earlier releases
+
+VirtRigaud does not clean up files that releases before this one left behind. Look for
+the following once after upgrading, and delete only what no `VMMigration` in flight uses:
+
+- **Staged migration objects** (full, unencrypted copies of source disks) of migrations
+  that no longer exist, and the empty files NFS cleanup leaves on libvirt and vSphere
+  targets. On S3 they are under `<prefix>/vmmigrations/<namespace>/<name>/export.vmdk` in
+  the migration's bucket; on NFS they are `vmmigrations_<namespace>_<name>_export.qcow2`
+  (new name) or `vmmigrations-<namespace>-<name>-export.qcow2` (name used before this
+  release) on the export. Objects recorded as `StagedDiskLeftBehind` are never retried.
+  Versioned buckets also need a lifecycle rule for noncurrent versions (see the staging row
+  in the breaking-change table).
+- **libvirt snapshot overlay files** `<domain>-disk.<snapshot>` in the storage pool, left
+  by snapshots deleted before this release. List the pool's `*-disk.*` files that are not
+  `.qcow2`, check with `virsh domblklist --all` and `qemu-img info --backing-chain` that no
+  domain uses them, then remove them.
+- **vSphere `virtrigaud-export-*` files** in the VM folders of migration-source datastores:
+  see [Leftover `virtrigaud-export-*` files on vSphere
+  datastores](#leftover-virtrigaud-export--files-on-vsphere-datastores).
+- **Proxmox import stages** and `/var/tmp/.virtrigaud-import-*` files on the PVE nodes: see
+  [Stale Proxmox import stages](#stale-proxmox-import-stages).
 
 ## Required upgrade order
 
