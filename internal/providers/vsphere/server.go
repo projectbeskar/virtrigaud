@@ -338,9 +338,11 @@ func selectBestDatastoreByFreeSpace(datastores []mo.Datastore) mo.Datastore {
 
 // cloneDiskToStreamOptimized copies the VMDK at sourcePath to destPath using the
 // VirtualDiskManager API, converting the on-disk format to sparseMonolithic in the
-// process. sparseMonolithic produces a single, self-contained, compressed VMDK file
-// that is universally compatible with OVF/OVA tooling and can be downloaded in one
-// HTTP request.
+// process. sparseMonolithic is requested to produce a single, self-contained,
+// compressed VMDK file that is universally compatible with OVF/OVA tooling and can
+// be downloaded in one HTTP request. vCenter may nevertheless create a descriptor
+// plus separate extent files (on VMFS, a "-flat.vmdk"), so callers must remove the
+// result with deleteExportClone, which deletes the descriptor and every extent.
 //
 // sourcePath and destPath must be fully-qualified vSphere datastore paths of the form
 // "[datastoreName] path/to/file.vmdk". Both paths are resolved against the default
@@ -380,11 +382,31 @@ func (p *Provider) cloneDiskToStreamOptimized(ctx context.Context, sourcePath, d
 	// Wait for task completion
 	err = task.Wait(ctx)
 	if err != nil {
+		if ctx.Err() != nil {
+			// The wait was abandoned, not the task: vCenter may still be copying.
+			// Stop it and let it settle so the caller's cleanup does not race a
+			// copy that is still writing (or that recreates the files afterwards).
+			p.abortCloneTask(task)
+		}
 		return fmt.Errorf("disk clone failed: %w", err)
 	}
 
 	p.logger.Info("Disk clone completed successfully", "destination", destPath)
 	return nil
+}
+
+// abortCloneTask asks vCenter to cancel the CopyVirtualDisk task and waits, on a
+// fresh bounded context, for it to reach a terminal state. It is best effort:
+// failures are logged and the caller's cleanup still runs.
+func (p *Provider) abortCloneTask(task *object.Task) {
+	ctx, cancel := context.WithTimeout(context.Background(), exportCloneAbortTimeout)
+	defer cancel()
+	if err := task.Cancel(ctx); err != nil {
+		p.logger.Warn("Failed to cancel the disk clone task", "task", task.Reference().Value, "error", err)
+	}
+	// The outcome of a cancelled task is an error by definition; only that it is
+	// no longer running matters.
+	_ = task.Wait(ctx)
 }
 
 // flattenVMDK collapses a possibly multi-file VMDK (a tiny text descriptor plus
@@ -3750,8 +3772,12 @@ func (p *Provider) extractSnapshotNames(snapshotTree []types.VirtualMachineSnaps
 //  5. The final self-contained file is uploaded to the destination storage (pvc or
 //     s3) via the storage client. The reported Checksum (SHA256) and
 //     EstimatedSizeBytes are computed over exactly the uploaded object.
-//  6. Temporary local files and the temporary datastore VMDK are cleaned up via deferred
-//     calls regardless of success or failure.
+//  6. Temporary local files and the temporary datastore clone are cleaned up via deferred
+//     calls regardless of success or failure, including a clone task that failed or was
+//     cancelled part-way. The clone is a full copy of the disk (a descriptor plus, on
+//     VMFS, a "-flat.vmdk" extent), so it is removed with
+//     VirtualDiskManager.DeleteVirtualDisk, never as a single datastore file; see
+//     deleteExportClone.
 //
 // The operation runs synchronously; Task in the response is nil.
 func (p *Provider) ExportDisk(ctx context.Context, req *providerv1.ExportDiskRequest) (*providerv1.ExportDiskResponse, error) {
@@ -3897,28 +3923,26 @@ func (p *Provider) ExportDisk(ctx context.Context, req *providerv1.ExportDiskReq
 
 	// Create temporary destination path for sparseMonolithic clone
 	// Use a unique name to avoid conflicts
-	tempDiskName := fmt.Sprintf("virtrigaud-export-%s-%d.vmdk", req.VmId, time.Now().Unix())
+	tempDiskName, err := newExportTempDiskName(req.VmId, time.Now())
+	if err != nil {
+		return nil, errors.NewInternal("failed to name the temporary export disk", err)
+	}
 	destPath := path.Join(path.Dir(srcFilePath), tempDiskName)
 	destDatastorePath := fmt.Sprintf("[%s] %s", srcDsName, destPath)
 
 	p.logger.Info("Creating sparseMonolithic clone", "source", sourceDiskPath, "destination", destDatastorePath)
 
-	// Get VirtualDiskManager
+	// Remove the temporary clone on EVERY exit from here on, including a clone
+	// that failed or was cancelled after it created (part of) its files. The
+	// clone is a full copy of the tenant's disk: a descriptor plus, on VMFS, a
+	// separate "-flat.vmdk" extent, so it must be removed with
+	// VirtualDiskManager.DeleteVirtualDisk, not as a single datastore file.
+	defer p.cleanupExportClone(destDatastorePath)
+
 	err = p.cloneDiskToStreamOptimized(ctx, sourceDiskPath, destDatastorePath)
 	if err != nil {
 		return nil, errors.NewInternal("failed to clone disk to streamOptimized format", err)
 	}
-
-	// Ensure cleanup of temporary disk on datastore
-	defer func() {
-		cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-		if err := dsManager.DeleteFile(cleanupCtx, destDatastorePath); err != nil {
-			p.logger.Warn("Failed to cleanup temporary disk on datastore", "path", destDatastorePath, "error", err)
-		} else {
-			p.logger.Info("Cleaned up temporary disk from datastore", "path", destDatastorePath)
-		}
-	}()
 
 	// Now download the streamOptimized VMDK (single file, no extent files)
 	tempFile := fmt.Sprintf("%s/disk.vmdk", tempDir)
