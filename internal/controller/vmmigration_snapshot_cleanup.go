@@ -133,7 +133,9 @@ func snapshotCleanupNotDue(m *infrav1beta1.VMMigration, now time.Time) (time.Dur
 // (migrationTerminallyFailed). Its only remaining work is cleanup. The staged
 // disk of an nfs / s3 migration is deleted when cleanupPolicy is Always
 // (reconcileStagingCleanup, ADR-0011 D3; with the default OnSuccess it is kept
-// until the VMMigration is deleted). The source snapshot it created is
+// until the VMMigration is deleted); so is the disk its import landed on the
+// target provider when no VirtualMachine uses it (reconcileLandedDiskCleanup,
+// rc2 R7). The source snapshot it created is
 // deleted (deleteSourceSnapshot) — on the LIVE source VM it would otherwise
 // stay until the VMMigration is deleted, and on libvirt its metadata blocks
 // deleting the source VM. A delete that cannot be made or fails is held
@@ -144,8 +146,12 @@ func (r *VMMigrationReconciler) handleTerminalFailure(ctx context.Context, migra
 	if err != nil {
 		return ctrl.Result{}, err
 	}
+	landedRetry, err := r.reconcileLandedDiskCleanup(ctx, migration, stagingTriggerTerminalFailure)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
 	res, err := r.terminalSnapshotCleanup(ctx, migration)
-	return stagingCleanupRequeue(res, stagingRetry), err
+	return stagingCleanupRequeue(stagingCleanupRequeue(res, stagingRetry), landedRetry), err
 }
 
 // terminalSnapshotCleanup deletes the source snapshot a terminally failed

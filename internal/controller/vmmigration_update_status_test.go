@@ -213,7 +213,10 @@ func TestImportingPhase_UnrecordedResultIsRecordedByTheNextReconcile(t *testing.
 		WithStatusSubresource(migration).
 		WithInterceptorFuncs(interceptor.Funcs{
 			SubResourceUpdate: func(ctx context.Context, c client.Client, sub string, obj client.Object, opts ...client.SubResourceUpdateOption) error {
-				if failing {
+				// Only the result write fails: the marker written before the
+				// import is sent (LandedDiskCleanup, rc2 R7) goes through,
+				// as it must before any import is sent.
+				if failing && prov.importCalls.Load() > 0 {
 					return apierrors.NewServiceUnavailable("apiserver unavailable")
 				}
 				return c.SubResource(sub).Update(ctx, obj, opts...)
