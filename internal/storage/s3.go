@@ -20,7 +20,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -360,46 +359,3 @@ func (s *S3Storage) ValidateURL(rawURL string) error {
 // Close releases the backend. The minio client holds no long-lived connections
 // that require explicit teardown.
 func (s *S3Storage) Close() error { return nil }
-
-// refusalCodes are the S3 error codes of a request the service refused for the
-// caller's credentials or the bucket, before it applied anything. They are the
-// only 4xx answers that prove an upload did not complete: any other code can
-// answer the retry of a request the service had already applied. The client
-// retries an upload's completing call when its answer is lost, and the retry
-// of a completed multipart upload is answered NoSuchUpload (404) because the
-// service dropped the upload id.
-var refusalCodes = map[string]bool{
-	"AccessDenied":          true,
-	"AllAccessDisabled":     true,
-	"InvalidAccessKeyId":    true,
-	"SignatureDoesNotMatch": true,
-	"NoSuchBucket":          true,
-	"InvalidBucketName":     true,
-	"ExpiredToken":          true,
-	"InvalidToken":          true,
-	"AccountProblem":        true,
-	"InvalidSecurity":       true,
-}
-
-// IsServiceRejection reports whether err is, or wraps, an S3 service answer
-// that refused the request for the caller's credentials or the bucket
-// (AccessDenied, NoSuchBucket, InvalidAccessKeyId, ...; refusalCodes), with an
-// HTTP 4xx status: the service did not apply it, and could not have applied an
-// earlier try of it. Every other answer is not one, a 4xx such as NoSuchUpload
-// included: the service may have applied the request (an upload's completing
-// call) before the answer was lost.
-func IsServiceRejection(err error) bool {
-	var resp minio.ErrorResponse
-	if !errors.As(err, &resp) {
-		return false
-	}
-	return resp.StatusCode >= 400 && resp.StatusCode < 500 && refusalCodes[resp.Code]
-}
-
-// IsInvalidConfig reports whether err is, or wraps, a StorageError of type
-// ErrorTypeInvalidConfig: the request was refused locally, before any call to
-// the backend.
-func IsInvalidConfig(err error) bool {
-	var se *StorageError
-	return errors.As(err, &se) && se.Type == ErrorTypeInvalidConfig
-}

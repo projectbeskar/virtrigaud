@@ -30,7 +30,6 @@ import (
 	"google.golang.org/grpc/status"
 
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
-	"github.com/projectbeskar/virtrigaud/internal/storage"
 )
 
 // Definite outcomes of the single-host SnapshotCreate, ExportDisk and
@@ -362,22 +361,35 @@ var snapshotRefusalMarkers = []string{
 }
 
 // snapshotRefusedBeforeExecution reports whether err is a virsh command whose
-// stderr is one of snapshotRefusalMarkers, or says the domain does not exist.
+// first "error:" line - libvirt's own error; the lines after it are context,
+// and a later one can name another failure - is one of snapshotRefusalMarkers,
+// or says the domain does not exist.
 func snapshotRefusedBeforeExecution(err error) bool {
-	if virshNoDomain(err) {
-		return true
-	}
 	var ve *VirshError
 	if !stderrors.As(err, &ve) {
 		return false
 	}
-	stderr := strings.ToLower(ve.Stderr)
-	for _, m := range snapshotRefusalMarkers {
-		if strings.Contains(stderr, m) {
+	line := firstErrorLine(ve.Stderr)
+	if line == "" {
+		return false
+	}
+	for _, m := range append([]string{"failed to get domain", "domain not found"}, snapshotRefusalMarkers...) {
+		if strings.Contains(line, m) {
 			return true
 		}
 	}
 	return false
+}
+
+// firstErrorLine returns the first line of stderr that starts with "error:",
+// in lower case, or "".
+func firstErrorLine(stderr string) string {
+	for _, l := range strings.Split(stderr, "\n") {
+		if l = strings.ToLower(strings.TrimSpace(l)); strings.HasPrefix(l, "error:") {
+			return l
+		}
+	}
+	return ""
 }
 
 // endedFailure answers a failure of the one host command that changes state
@@ -399,61 +411,47 @@ func endedFailure(ctx context.Context, wire string, err error) error {
 	return err
 }
 
-// errTrackingReader is r that remembers the first read error that is not a
-// clean end of input. The s3 export reads the flattened disk from the host
-// through it, so a failed upload can be told apart: when the source failed
-// mid-stream, the upload cannot have been completed.
+// errTrackingReader is r that remembers whether the S3 client read it to its
+// end. The s3 export reads the flattened disk from the host through it. The
+// client (minio-go's putObjectMultipartStreamNoLength) sends the completing
+// call of an upload only after it has read the source to a clean end, so a
+// source that was not read to its end proves no completing call was sent, and
+// no upload error - a credentials refusal included - means the object was
+// published.
 type errTrackingReader struct {
-	r   io.Reader
-	mu  sync.Mutex
-	err error
+	r     io.Reader
+	mu    sync.Mutex
+	ended bool
 }
 
-// Read reads from the wrapped reader and records a read error other than
-// io.EOF.
+// Read reads from the wrapped reader and notes when it ends. io.ErrUnexpectedEOF
+// counts as an end: the S3 client reads it as one.
 func (t *errTrackingReader) Read(p []byte) (int, error) {
 	n, err := t.r.Read(p)
-	if err != nil && !stderrors.Is(err, io.EOF) {
+	if err != nil && (stderrors.Is(err, io.EOF) || stderrors.Is(err, io.ErrUnexpectedEOF)) {
 		t.mu.Lock()
-		if t.err == nil {
-			t.err = err
-		}
+		t.ended = true
 		t.mu.Unlock()
 	}
 	return n, err
 }
 
-// failure returns the first recorded read error, or nil.
-func (t *errTrackingReader) failure() error {
+// readToEnd reports whether the source was read to its end (or to an error
+// the S3 client takes for its end).
+func (t *errTrackingReader) readToEnd() bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	return t.err
+	return t.ended
 }
 
 // uploadNotPublished reports whether a failed s3 upload provably did not
-// publish the object:
-//
-//   - the S3 service refused the request for the caller's credentials or the
-//     bucket (AccessDenied, NoSuchBucket, ...; storage.IsServiceRejection). Any
-//     other 4xx is not enough: the client retries a completing call whose
-//     answer was lost, and the retry of an upload the service had already
-//     completed is answered NoSuchUpload (404);
-//   - the request was refused locally, before any call (an invalid
-//     destination);
-//   - the source stream failed (readErr, other than io.ErrUnexpectedEOF,
-//     which the S3 client reads as a clean end): the client completes an
-//     upload only after it has read the source to a clean end.
-//
-// Anything else — a network error, a 5xx, a deadline — may have happened after
-// the service completed the object: unknown.
-func uploadNotPublished(readErr, uploadErr error) bool {
-	switch {
-	case storage.IsServiceRejection(uploadErr), storage.IsInvalidConfig(uploadErr):
-		return true
-	case readErr != nil && !stderrors.Is(readErr, io.ErrUnexpectedEOF):
-		return true
-	}
-	return false
+// publish the object: its source was never read to the end, so the client
+// never sent the completing call (errTrackingReader). Once the source was read
+// to its end the completing call may have been sent and applied - and the
+// client retries it when its answer is lost, with any answer, NoSuchUpload or
+// a credentials refusal included - so the upload's own error proves nothing.
+func uploadNotPublished(sourceReadToEnd bool) bool {
+	return !sourceReadToEnd
 }
 
 // singleHostImportFailure answers a failed single-host s3 or nfs import with

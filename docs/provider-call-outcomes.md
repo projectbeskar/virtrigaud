@@ -147,24 +147,36 @@ constant status text (the detail is in the provider log, never in a status or ev
 
 | Call | Definite (the attempt fails, the marker is cleared) | Unknown (the marker is kept) |
 |---|---|---|
-| `SnapshotCreate` | The domain's state, disk dependencies, snapshot names or disk sources cannot be read (not performed); the domain does not exist (`NotFound`); the snapshot name is already taken (`AlreadyExists`, nothing is created); the disk is a linked clone's backing file (`FailedPrecondition`); `virsh snapshot-create-as --atomic` ended with an exit status of its own with one of libvirt's **refusals before it executes anything** (`cannot acquire state change lock`, `Requested operation is not valid`, `unsupported configuration`, `already exists`) **and** the snapshot names and `domblklist --details` sources, read again, are as before (not performed). | The create's connection dropped, `virsh` was killed (exit status 128 or above), reported that it lost libvirtd or timed out its keepalive; the request's deadline passed; **any other error text** (libvirt saves a snapshot's metadata last and drops the snapshot from its list when that fails, after the disk sources were switched); the snapshot exists, the disk sources changed, or either could not be read after the failed create. |
-| `ExportDisk` `s3` | The storage configuration is unusable (`InvalidArgument`); the source domain or disk is missing or refused; a check before the flatten, or the flatten **ended with an exit status of its own** (it writes only into a private directory that is removed, and the upload is the only publishing step); the S3 service refused the upload for the credentials or the bucket (`AccessDenied`, `NoSuchBucket`, `InvalidAccessKeyId`, ...); the host stream broke before the upload completed (it is never completed, so nothing is published). | The flatten's session dropped or the command was killed (it may still run, and a retry would start a second one); the upload may have completed: an HTTP 5xx, a network error, a deadline, or a 4xx that is not a credential or bucket refusal (a retried completing call of an upload the service had already completed is answered `NoSuchUpload`). |
+| `SnapshotCreate` | The domain's state, disk dependencies, snapshot names or disk sources cannot be read (not performed); the domain does not exist (`NotFound`); the snapshot name is already taken (`AlreadyExists`, nothing is created); the disk is a linked clone's backing file (`FailedPrecondition`); `virsh snapshot-create-as --atomic` ended with an exit status of its own and its first `error:` line is one of libvirt's **refusals before it executes anything** (`cannot acquire state change lock`, `Requested operation is not valid`, `unsupported configuration`, `already exists`) **and** the snapshot names and `domblklist --details` sources, read again, are as before (not performed). | The create's connection dropped, `virsh` was killed (exit status 128 or above), reported that it lost libvirtd or timed out its keepalive; the request's deadline passed; **any other error text** (libvirt saves a snapshot's metadata last and drops the snapshot from its list when that fails, after the disk sources were switched); the snapshot exists, the disk sources changed, or either could not be read after the failed create. |
+| `ExportDisk` `s3` | The storage configuration is unusable (`InvalidArgument`); the source domain or disk is missing or refused; a check before the flatten, or the flatten **ended with an exit status of its own** (it writes only into a private directory that is removed, and the upload is the only publishing step); **any upload error before the flattened disk was read to its end** - a credentials or bucket refusal, a 5xx, an unreachable service, a broken host stream - because the S3 client sends an upload's completing call only after it has read its source to the end. | The flatten's session dropped or the command was killed (it may still run, and a retry would start a second one); **any upload error once the source was read to its end**, whatever the error: the completing call may have been applied, and the client retries it when its answer is lost (the retry of an applied upload is answered `NoSuchUpload`, or even `AccessDenied`). |
 | `ExportDisk` `nfs` | An invalid destination (`InvalidArgument`); the source domain or disk is missing or refused; any check before the convert; the in-place `qemu-img convert` **ended with an exit status of its own** (it no longer writes; any partial staged file is replaced by the next export). | The convert was killed or its connection dropped: it may still be writing the staged file. |
 | `ExportDisk` `pvc` | Every failure. The export runs in the provider's own process: the local `qemu-img` is killed with the call, the copy is an in-process write that has finished when the call returns, and a partial file is replaced by the next export. | None. |
 | `ImportDisk` `s3` and `nfs` | The request is unusable (`InvalidArgument`, `FailedPrecondition`); a read, a check, the download or the stage into the private directory fails (the directory is removed, and the rename runs only in the same call); the `qemu-img convert` / `dd` **ended with an exit status of its own**; the rename ended with an exit status of its own. | The convert, `dd` or rename session dropped or was killed (a convert may still run; the rename may have happened). |
 | `ImportDisk` `pvc` | The request is unusable; the staged disk is missing (`NotFound`); any failure up to and including the copy to the host's pool directory, as above. | A failure after that copy (the pool or volume step): the disk is already on the host. |
 
-**A failure answering a re-send is never definite.** When the object already carries the
-marker of an earlier call whose outcome was not recorded - the manager sends the call
-again, or the operator confirmed it - the answer says nothing about what the earlier
-call made (a `SnapshotCreate` answered `AlreadyExists` may be the snapshot the first
-call took). The marker is kept and the object is held or settled, whatever the answer.
+**A failure answering the manager's own re-send is never definite.** When the object
+already carries the marker of an earlier call whose outcome was not recorded and the
+manager sends the call again, the answer says nothing about what the earlier call made
+(a `SnapshotCreate` answered `AlreadyExists` may be the snapshot the first call took).
+The marker is kept and the object is held or settled, whatever the answer. A routed
+(clustered) `SnapshotCreate` is exempt: its provider adopts the earlier snapshot by
+request token, so its definite answers stay definite.
+
+**A call sent on the operator's confirmation is a first send**, as a confirmed VM
+`Create` is: a definite failure fails the attempt. The exception is an answer that
+contradicts the confirmation - a plain `Conflict` (a snapshot of that name exists, the
+landing name is in use by another domain) - which holds the object again. A disk-size,
+disk-in-use or template `Conflict` says nothing about the earlier call and stays definite.
 
 A failure that already carries a typed refusal keeps it (for example the disk-size limit
 refusals, which hold the migration instead of failing it), with the refusal's own text.
 
-Two things the table does not show:
+Three things the table does not show:
 
+- **A single-host libvirt command can outlive the settle time.** The flatten,
+  `qemu-img convert` and `dd` run on the host without `timeout(1)` (tracked as R20), and a
+  command whose session dropped keeps running. The manager's 35-minute settle assumes the
+  earlier call has ended by then; an orphan can still be running past it.
 - **A host that cannot be reached fails the attempt.** The reads and checks before a
   call's first change are "not performed" whatever state the connection is in, so a
   `VMMigration` whose libvirt host is down fails the attempt (as in rc1) and its retry
@@ -223,8 +235,8 @@ re-drives it at once.
   - a snapshot create that lost its connection, was killed, failed with an error that is
     not a refusal before execution, or left the snapshot (or changed disk sources)
     behind is held for an operator;
-  - an `s3` export whose flatten was killed or whose upload may have completed is
-    re-sent after the settle time;
+  - an `s3` export whose flatten was killed, or that failed after its source was read to
+    the end, is re-sent after the settle time;
   - an `nfs` export whose convert was killed, an import whose convert, `dd` or rename
     was killed or lost, and an import that failed after the disk landed, are held.
   A provider image older than rc2 still answers every libvirt failure untyped, and the

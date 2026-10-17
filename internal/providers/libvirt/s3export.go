@@ -204,7 +204,7 @@ func exportFlattenToS3(ctx context.Context, conn libvirtConn, req *providerv1.Ex
 	})
 	if err != nil {
 		err = fmt.Errorf("s3 upload failed during stream: %w", err)
-		if uploadNotPublished(tracked.failure(), err) {
+		if uploadNotPublished(tracked.readToEnd()) {
 			return nil, atStage(stageBefore, err)
 		}
 		return nil, err

@@ -241,6 +241,7 @@ func TestSingleHostExportS3_Outcomes(t *testing.T) {
 		_, err := fx.server().ExportDisk(context.Background(), fx.s3ExportRequest(t))
 		assertNotPerformedStatus(t, err)
 		assertConstantText(t, err, "403", transferBucket, "AccessDenied")
+		assert.Zero(t, fx.s3.CompleteRequests(), "the client never sent the completing call: nothing can be published")
 	})
 	t.Run("b: the host stream breaks mid-upload - not published", func(t *testing.T) {
 		fx := newTransferFixture(t)
@@ -255,6 +256,7 @@ func TestSingleHostExportS3_Outcomes(t *testing.T) {
 			started = started || r.Method == "POST"
 		}
 		assert.True(t, started, "the upload had started: it is the broken source that stopped it")
+		assert.Zero(t, fx.s3.CompleteRequests(), "an upload is completed only after its source was read to the end")
 	})
 	t.Run("c: the completing call took effect, its answer was lost and its retry got NoSuchUpload (404) - unknown", func(t *testing.T) {
 		fx := newTransferFixture(t)
@@ -264,22 +266,52 @@ func TestSingleHostExportS3_Outcomes(t *testing.T) {
 		_, err := fx.server().ExportDisk(ctx, fx.s3ExportRequest(t))
 		assertUnknownOutcome(t, err)
 		assert.Equal(t, []string{"exports/disk.qcow2"}, fx.s3.Keys(), "the object was published although the call failed")
+		assert.GreaterOrEqual(t, fx.s3.CompleteRequests(), 2, "the completing call was retried")
 	})
-	t.Run("c: the service fails the upload (5xx) - unknown", func(t *testing.T) {
+	t.Run("c: the completing call took effect, its answer was lost and its retry got AccessDenied (403) - unknown", func(t *testing.T) {
+		fx := newTransferFixture(t)
+		fx.s3.LoseNextComplete()
+		fx.s3.AnswerRetriedCompleteWith(403)
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_, err := fx.server().ExportDisk(ctx, fx.s3ExportRequest(t))
+		assertUnknownOutcome(t, err)
+		assert.Equal(t, []string{"exports/disk.qcow2"}, fx.s3.Keys(), "the object was published although the retried call was refused")
+		assert.GreaterOrEqual(t, fx.s3.CompleteRequests(), 2)
+	})
+	t.Run("b: the service fails the upload (5xx) before the source was read to the end - not published", func(t *testing.T) {
 		fx := newTransferFixture(t)
 		fx.s3.FailWith(500)
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
 		_, err := fx.server().ExportDisk(ctx, fx.s3ExportRequest(t))
-		assertUnknownOutcome(t, err)
+		assertNotPerformedStatus(t, err)
+		assert.Zero(t, fx.s3.CompleteRequests())
 	})
-	t.Run("c: the service cannot be reached - unknown", func(t *testing.T) {
+	t.Run("b: the service cannot be reached - not published", func(t *testing.T) {
 		fx := newTransferFixture(t)
 		req := fx.s3ExportRequest(t)
 		fx.s3.Close()
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
 		_, err := fx.server().ExportDisk(ctx, req)
+		assertNotPerformedStatus(t, err)
+	})
+	t.Run("c: the completing call fails (5xx) - unknown (the service may have applied it)", func(t *testing.T) {
+		fx := newTransferFixture(t)
+		fx.s3.FailCompleteWith(500)
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_, err := fx.server().ExportDisk(ctx, fx.s3ExportRequest(t))
+		assertUnknownOutcome(t, err)
+		assert.Positive(t, fx.s3.CompleteRequests())
+	})
+	t.Run("c: the completing call is refused (403) - still unknown once the source was read to the end", func(t *testing.T) {
+		fx := newTransferFixture(t)
+		fx.s3.FailCompleteWith(403)
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_, err := fx.server().ExportDisk(ctx, fx.s3ExportRequest(t))
 		assertUnknownOutcome(t, err)
 	})
 	t.Run("success uploads the object", func(t *testing.T) {
