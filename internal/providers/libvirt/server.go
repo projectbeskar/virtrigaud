@@ -1130,6 +1130,9 @@ func (s *Server) GetCapabilities(ctx context.Context, req *providerv1.GetCapabil
 		// its nfs file (the host's qemu-img over libnfs cannot unlink;
 		// staged_disk.go). A clustered provider advertises none.
 		SupportedStagedDiskDeleteBackends: migration.StagedDiskDeleteBackendsS3AndNFS(),
+		// rc2 R7: DeleteLandedDisk removes a migration's landed disk no domain
+		// uses (landed_disk.go). A clustered provider does not report it.
+		SupportsLandedDiskDelete: true,
 	}, nil
 }
 
