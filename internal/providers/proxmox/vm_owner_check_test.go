@@ -393,3 +393,30 @@ func TestOwnerCheck_CloneRebindDoesNotNeedTheSource(t *testing.T) {
 	assert.Equal(t, []string{contracts.VMNotOwnedReason}, deleteErrorReasons(err))
 	assert.Empty(t, srv.VMsNamed("web-clone-2"), "nothing is cloned from a source that is not the requester's")
 }
+
+// TestOwnerCheck_AcceptsAStampWrittenByTransferOwner: a VM adopted again and
+// re-stamped by TransferOwner (a stale stamp replaced, #392) is its new
+// VirtualMachine's for every owner-checked call, and no longer the previous
+// owner's: the stamp TransferOwner writes is the one the checks read.
+func TestOwnerCheck_AcceptsAStampWrittenByTransferOwner(t *testing.T) {
+	ctx := context.Background()
+	stale := testStamp(testOtherUID, ownerStampPhaseReady).line()
+	p, srv := newOwnerCheckFixture(t, pvefake.VM{Description: "notes\n" + stale})
+	newOwner := testOwner()
+
+	_, err := p.TransferOwner(ctx, &providerv1.TransferOwnerRequest{
+		Id: ownerCheckID, Owner: ownerProto(newOwner), ReplaceableOwnerUids: []string{testOtherUID},
+	})
+	require.NoError(t, err)
+	vm, ok := srv.GetVM(ownerCheckVMID)
+	require.True(t, ok)
+	require.Equal(t, newOwner, stampOf(t, vm).owner)
+
+	for _, call := range ownerCheckCalls() {
+		require.NoError(t, call.run(ctx, p, ownerProto(newOwner)), "%s: the re-stamped VM is its new owner's", call.name)
+	}
+	previous := ownerProto(contracts.ObjectIdentity{UID: testOtherUID, Namespace: testNamespace, Name: testOwnerName})
+	_, err = p.Describe(ctx, &providerv1.DescribeRequest{Id: ownerCheckID, Owner: previous})
+	assert.Equal(t, codes.NotFound, status.Code(err), "the previous owner no longer reaches it")
+	assert.Equal(t, []string{contracts.VMNotOwnedReason}, deleteErrorReasons(err))
+}
