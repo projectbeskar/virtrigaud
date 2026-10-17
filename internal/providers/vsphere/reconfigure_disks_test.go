@@ -19,6 +19,7 @@ package vsphere
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -226,6 +227,65 @@ func TestReconfigure_TaskFaultStaysOutOfTheBreaker(t *testing.T) {
 	assert.Equal(t, []string{contracts.VMOperationFailedReason}, errorReasons(err))
 	assert.Contains(t, err.Error(), reconfigureTaskFailedMessage)
 	assert.NotContains(t, err.Error(), "secret-ds")
+}
+
+// startFault answers the next ReconfigVM_Task call itself with err, as
+// vCenter (a fault) or the transport would before any task exists.
+type startFault struct {
+	soap.RoundTripper
+	err error
+}
+
+func (r *startFault) RoundTrip(ctx context.Context, req, res soap.HasFault) error {
+	if _, ok := req.(*methods.ReconfigVM_TaskBody); ok {
+		return r.err
+	}
+	return r.RoundTripper.RoundTrip(ctx, req, res)
+}
+
+// TestReconfigure_StartFaultStaysOutOfTheBreaker: vCenter refusing to start
+// the task (TaskInProgress during a backup snapshot, InvalidState,
+// InvalidPowerState) is an answer about this VM: VM_OPERATION_FAILED with
+// the constant message, kept out of the breaker. A transport failure, and a
+// NotAuthenticated session fault, still count (plain error, no reason).
+func TestReconfigure_StartFaultStaysOutOfTheBreaker(t *testing.T) {
+	p, id, _ := multiDiskVM(t)
+	inner := p.client.RoundTripper
+	desired := contracts.CreateRequest{Disks: []contracts.DiskSpec{{Name: "data", SizeGiB: 3}}}
+
+	for name, f := range map[string]types.BaseMethodFault{
+		"TaskInProgress":    &types.TaskInProgress{},
+		"InvalidState":      &types.InvalidState{},
+		"InvalidPowerState": &types.InvalidPowerState{},
+	} {
+		t.Run(name, func(t *testing.T) {
+			p.client.RoundTripper = &startFault{RoundTripper: inner, err: soap.WrapVimFault(f)}
+			err := reconfigure(t, p, id, desired)
+			requireCode(t, err, codes.Unknown)
+			assert.Equal(t, []string{contracts.VMOperationFailedReason}, errorReasons(err))
+			assert.Contains(t, err.Error(), reconfigureTaskFailedMessage)
+		})
+	}
+	t.Run("SOAP fault", func(t *testing.T) {
+		p.client.RoundTripper = &startFault{RoundTripper: inner,
+			err: soap.WrapSoapFault(&soap.Fault{String: "fixture", Detail: struct {
+				Fault types.AnyType `xml:",any,typeattr"`
+			}{Fault: &types.TaskInProgress{}}})}
+		err := reconfigure(t, p, id, desired)
+		assert.Equal(t, []string{contracts.VMOperationFailedReason}, errorReasons(err))
+	})
+
+	for name, cause := range map[string]error{
+		"transport":        fmt.Errorf("fixture: connection reset to vcenter"),
+		"NotAuthenticated": soap.WrapVimFault(&types.NotAuthenticated{}),
+	} {
+		t.Run(name, func(t *testing.T) {
+			p.client.RoundTripper = &startFault{RoundTripper: inner, err: cause}
+			err := reconfigure(t, p, id, desired)
+			require.Error(t, err)
+			assert.Empty(t, errorReasons(err), "not a VM answer: it still counts toward the breaker")
+		})
+	}
 }
 
 // taskFault makes vcsim fail every ReconfigVM_Task that edits a disk AS A
