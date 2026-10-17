@@ -30,6 +30,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
+	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
 	"github.com/projectbeskar/virtrigaud/internal/storage/migration"
 	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
 	"github.com/projectbeskar/virtrigaud/sdk/provider/capabilities"
@@ -84,6 +85,9 @@ type VirtualMachine struct {
 	Created     time.Time
 	LastUpdated time.Time
 	Snapshots   map[string]*Snapshot
+	// Owner is the VM's owner stamp, set by TransferOwner (zero when
+	// unstamped); ListVMs reports its UID as provider_raw "owner_uid".
+	Owner contracts.ObjectIdentity
 }
 
 // Snapshot represents a mock VM snapshot.
@@ -120,6 +124,8 @@ func NewProvider(opts ...Option) *Provider {
 		// ADR-0009 D7: ImagePrepare names, stamps and verifies artifacts by
 		// the VMImage identity and source digest (image.go).
 		ImageArtifactIdentity().
+		// TransferOwner stamps a VM adoption takes over (transfer_owner.go).
+		OwnerTransfer().
 		TaskStatus().
 		// ADR-0006 Slice 0: advertise the status quo honestly. The mock's
 		// migration path (like the production providers) is pod-side only —
@@ -505,6 +511,9 @@ func (p *Provider) ListVMs(ctx context.Context, req *providerv1.ListVMsRequest) 
 		providerRaw["vm_id"] = vm.ID
 		providerRaw["power_state"] = vm.PowerState
 		providerRaw["console_url"] = vm.ConsoleURL
+		if vm.Owner.UID != "" {
+			providerRaw[contracts.VMInfoOwnerUIDKey] = vm.Owner.UID
+		}
 
 		vmInfo := &providerv1.VMInfo{
 			Id:          vm.ID,
