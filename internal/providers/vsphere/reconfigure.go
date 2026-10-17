@@ -350,7 +350,7 @@ type specDiskMatch struct {
 const (
 	specDiskUnrecorded = "no disk is recorded under this name (added after the VM was created, or recorded " +
 		"by an earlier release without a name)"
-	specDiskNameRepeated = "the name is used by more than one spec.disks entry"
+	specDiskNameRepeated  = "the name is used by more than one spec.disks entry"
 	specDiskNameAmbiguous = "more than one disk is recorded under this name"
 )
 
