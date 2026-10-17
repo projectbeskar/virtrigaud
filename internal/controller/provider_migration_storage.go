@@ -23,13 +23,16 @@ import (
 	stderrors "errors"
 	"fmt"
 	"sort"
+	"time"
 
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	storagev1 "k8s.io/api/storage/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/validation"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -37,6 +40,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	infravirtrigaudiov1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
+	"github.com/projectbeskar/virtrigaud/internal/k8s"
+	"github.com/projectbeskar/virtrigaud/internal/obs/metrics"
 	storagemigration "github.com/projectbeskar/virtrigaud/internal/storage/migration"
 )
 
@@ -52,11 +57,16 @@ import (
 //   - the PVC is the one the migration controller recorded in
 //     status.storagePVCName, and migrationPVCReferenceError accepts it: it
 //     carries the migration-storage label AND is either the PVC the migration
-//     created (controller ownerReference with the migration's UID) or the PVC
-//     spec.storage.pvc.name names, not controlled by another VMMigration;
+//     created (the UID it recorded in status.storagePVCUID from its own create;
+//     an ownerReference alone can be forged) or the PVC spec.storage.pvc.name
+//     names, not controlled by another VMMigration;
 //   - the PVC is not being deleted and is Bound — or, only while the migration
 //     waits for the mount (phase Validating), Pending on a WaitForFirstConsumer
-//     StorageClass, which binds only once a pod uses it.
+//     StorageClass, which binds only once a pod uses it;
+//   - for a Failed migration that will be retried: the mount had worked, i.e.
+//     a Ready pod of P carries the PVC. Otherwise (a Bound PVC P's pod cannot
+//     use, e.g. a ReadWriteOnce or node-pinned volume) it is dropped, so it
+//     cannot keep P down between retries.
 //
 // The source mounts the PVC read-write (it exports into it); a Provider that is
 // only the target mounts it read-only (it only reads the staged disk).
@@ -90,6 +100,33 @@ const (
 	// the PVC name.
 	migrationPVCRetainedMessage = "Migration PVC %s was not created by this VMMigration; " +
 		"it is no longer mounted into the provider pods and is left for its owner to delete"
+
+	// migrationPVCNameSuffix makes the name of the PVC a migration creates:
+	// <migration-name>-storage.
+	migrationPVCNameSuffix = "-storage"
+
+	// providerPodNameLabel / providerPodInstanceLabel select a Provider's
+	// runtime pods (their value of providerPodInstanceLabel is the Provider's
+	// name).
+	providerPodNameLabel     = "app.kubernetes.io/name"
+	providerPodNameValue     = "virtrigaud-provider"
+	providerPodInstanceLabel = "app.kubernetes.io/instance"
+
+	// migrationStorageVolumeHashLen is the number of hex digits of the PVC
+	// name's SHA-256 in a volume name that cannot carry the name itself.
+	migrationStorageVolumeHashLen = 16
+
+	// errReasonMigrationStorageDiscovery is the metrics reason of a failed
+	// migration-storage discovery (the Deployment is left as it is).
+	errReasonMigrationStorageDiscovery = "migration-storage-discovery-failed"
+	// reasonMigrationStorageDiscoveryFailed is the ProviderRuntimeReady
+	// reason when a Deployment cannot be created because migration storage
+	// could not be read.
+	reasonMigrationStorageDiscoveryFailed = "MigrationStorageDiscoveryFailed"
+	// migrationStorageDiscoveryFailedMessage is that condition's message.
+	migrationStorageDiscoveryFailedMessage = "The migration storage to mount into the provider pods could not be read; retrying"
+	// migrationStorageDiscoveryRetry is the requeue delay after such a failure.
+	migrationStorageDiscoveryRetry = 30 * time.Second
 )
 
 // Reasons migrationPVCReferenceError refuses a PVC. The VMMigration controller
@@ -107,6 +144,12 @@ var (
 	errMigrationPVCOtherMigration = stderrors.New("the PVC belongs to another VMMigration")
 	// errMigrationPVCNameMismatch: the PVC is not the one the spec names.
 	errMigrationPVCNameMismatch = stderrors.New("the PVC is not the one spec.storage.pvc.name names")
+	// errMigrationPVCSpecChanged: spec.storage.pvc no longer names the PVC the
+	// migration recorded.
+	errMigrationPVCSpecChanged = stderrors.New("spec.storage.pvc changed after the migration recorded its PVC; " +
+		"re-create the VMMigration to use another PVC")
+	// errMigrationStorageDiscovery wraps a read error of discoverMigrationStorage.
+	errMigrationStorageDiscovery = stderrors.New("discover migration storage")
 )
 
 // migrationStorageMount is one migration PVC mounted into a provider pod.
@@ -116,13 +159,54 @@ type migrationStorageMount struct {
 	// readOnly is true when the Provider only reads the PVC (it is the target,
 	// never the source, of every migration that references it).
 	readOnly bool
+	// volumeName is the pod volume name (assignMigrationVolumeNames).
+	volumeName string
+}
+
+// migrationAutoPVCName is the name of the PVC migration m creates when
+// spec.storage.pvc.name is empty.
+func migrationAutoPVCName(m *infravirtrigaudiov1beta1.VMMigration) string {
+	return m.Name + migrationPVCNameSuffix
+}
+
+// migrationCreatedPVC reports whether pvc is the PVC m created: the one whose
+// UID m recorded in status.storagePVCUID from the API server's answer to its
+// own create. Anyone who can create PVCs can also create one under m's PVC
+// name carrying an ownerReference to m (its name and UID are readable), so
+// the ownerReference alone proves nothing. A migration whose PVC an older
+// manager created (status.storagePVCName set, no UID recorded — only a
+// manager writes status) falls back to the controller ownerReference with
+// m's UID, as before.
+func migrationCreatedPVC(pvc *corev1.PersistentVolumeClaim, m *infravirtrigaudiov1beta1.VMMigration) bool {
+	if m.Status.StoragePVCUID != "" {
+		return string(pvc.UID) == m.Status.StoragePVCUID
+	}
+	return m.Status.StoragePVCName != "" && pvc.Name == m.Status.StoragePVCName &&
+		pvc.Name == migrationAutoPVCName(m) && metav1.IsControlledBy(pvc, m)
+}
+
+// migrationPVCSpecChangedError returns errMigrationPVCSpecChanged when m has
+// recorded a PVC that its spec no longer names (spec.storage.pvc.name set,
+// changed or removed after the record), nil otherwise.
+func migrationPVCSpecChangedError(m *infravirtrigaudiov1beta1.VMMigration) error {
+	if m.Status.StoragePVCName == "" {
+		return nil
+	}
+	want := migrationNamedPVC(m)
+	if want == "" {
+		want = migrationAutoPVCName(m)
+	}
+	if m.Status.StoragePVCName != want {
+		return errMigrationPVCSpecChanged
+	}
+	return nil
 }
 
 // migrationPVCReferenceError reports why migration m may not use pvc as its
 // migration storage, or nil when it may: pvc carries the migration-storage
 // label and is either the PVC spec.storage.pvc.name names (and not controlled
-// by another VMMigration) or, with no name in the spec, a PVC m created
-// (controller ownerReference with m's UID).
+// by another VMMigration) or, with no name in the spec, the PVC m created
+// (migrationCreatedPVC).
 func migrationPVCReferenceError(pvc *corev1.PersistentVolumeClaim, m *infravirtrigaudiov1beta1.VMMigration) error {
 	if pvc.Labels[migrationPVCLabelKey] != migrationPVCLabelValue {
 		return errMigrationPVCNotLabelled
@@ -136,7 +220,7 @@ func migrationPVCReferenceError(pvc *corev1.PersistentVolumeClaim, m *infravirtr
 		}
 		return nil
 	}
-	if !metav1.IsControlledBy(pvc, m) {
+	if !migrationCreatedPVC(pvc, m) {
 		return errMigrationPVCNotOwned
 	}
 	return nil
@@ -201,9 +285,19 @@ func migrationStorageProviders(ctx context.Context, reader client.Reader, m *inf
 // discoverMigrationStorage returns the migration PVCs to mount into provider's
 // pod, sorted by PVC name so an unchanged set renders an unchanged pod
 // template (no rollout). See the comment at the top of this file for the
-// rules. A read error is returned: the caller must leave the Deployment as it
-// is rather than unmount the storage of migrations in flight.
+// rules. A read error is returned, wrapping errMigrationStorageDiscovery: the
+// caller must leave the Deployment as it is rather than unmount the storage of
+// migrations in flight.
 func (r *ProviderReconciler) discoverMigrationStorage(ctx context.Context, provider *infravirtrigaudiov1beta1.Provider) ([]migrationStorageMount, error) {
+	mounts, err := r.collectMigrationStorage(ctx, provider)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", errMigrationStorageDiscovery, err)
+	}
+	return assignMigrationVolumeNames(ctx, mounts), nil
+}
+
+// collectMigrationStorage is discoverMigrationStorage without the volume names.
+func (r *ProviderReconciler) collectMigrationStorage(ctx context.Context, provider *infravirtrigaudiov1beta1.Provider) ([]migrationStorageMount, error) {
 	migrations := &infravirtrigaudiov1beta1.VMMigrationList{}
 	if err := r.List(ctx, migrations, client.InNamespace(provider.Namespace)); err != nil {
 		return nil, fmt.Errorf("list VMMigrations in %s: %w", provider.Namespace, err)
@@ -233,6 +327,17 @@ func (r *ProviderReconciler) discoverMigrationStorage(ctx context.Context, provi
 			continue
 		}
 		name := m.Status.StoragePVCName
+		if m.Status.Phase == infravirtrigaudiov1beta1.MigrationPhaseFailed {
+			// Between retries keep only a mount that worked, so a Bound PVC
+			// the pod cannot use does not hold the provider down.
+			held, err := r.providerPodCarriesPVC(ctx, provider, name)
+			if err != nil {
+				return nil, err
+			}
+			if !held {
+				continue
+			}
+		}
 		// Read-write when any migration exports into it through this Provider.
 		ro, seen := readOnly[name]
 		readOnly[name] = (!seen || ro) && !isSource
@@ -244,6 +349,70 @@ func (r *ProviderReconciler) discoverMigrationStorage(ctx context.Context, provi
 	}
 	sort.Slice(mounts, func(i, j int) bool { return mounts[i].pvcName < mounts[j].pvcName })
 	return mounts, nil
+}
+
+// migrationStorageDiscoveryFailed handles a read error of
+// discoverMigrationStorage: the Deployment was left as it is. When it exists
+// the Provider's runtime status is not downgraded (the runtime is fine; only
+// the mount set could not be recomputed); when it does not, ProviderRuntimeReady
+// is False with reason MigrationStorageDiscoveryFailed and a constant message.
+// Either way the render is retried after migrationStorageDiscoveryRetry.
+func (r *ProviderReconciler) migrationStorageDiscoveryFailed(ctx context.Context, provider *infravirtrigaudiov1beta1.Provider,
+	deploymentName string, err error) (ctrl.Result, error) {
+	log.FromContext(ctx).Error(err, "Failed to read migration storage; leaving the provider Deployment as it is")
+	metrics.RecordError(errReasonMigrationStorageDiscovery, metrics.ComponentManager)
+	getErr := r.Get(ctx, types.NamespacedName{Namespace: provider.Namespace, Name: deploymentName}, &appsv1.Deployment{})
+	if apierrors.IsNotFound(getErr) {
+		k8s.SetCondition(&provider.Status.Conditions, "ProviderRuntimeReady", metav1.ConditionFalse,
+			reasonMigrationStorageDiscoveryFailed, migrationStorageDiscoveryFailedMessage, provider.Generation)
+	}
+	return ctrl.Result{RequeueAfter: migrationStorageDiscoveryRetry}, nil
+}
+
+// providerPodCarriesPVC reports whether a Running, Ready, non-terminating pod
+// of provider has the PVC pvcName as a volume: the mount worked.
+func (r *ProviderReconciler) providerPodCarriesPVC(ctx context.Context, provider *infravirtrigaudiov1beta1.Provider, pvcName string) (bool, error) {
+	pods := &corev1.PodList{}
+	if err := r.List(ctx, pods, client.InNamespace(provider.Namespace), client.MatchingLabels{
+		providerPodNameLabel:     providerPodNameValue,
+		providerPodInstanceLabel: provider.Name,
+	}); err != nil {
+		return false, fmt.Errorf("list pods of Provider %s/%s: %w", provider.Namespace, provider.Name, err)
+	}
+	for i := range pods.Items {
+		pod := &pods.Items[i]
+		if pod.DeletionTimestamp.IsZero() && pod.Status.Phase == corev1.PodRunning &&
+			podConditionTrue(pod, corev1.PodReady) && volumesContainPVC(pod.Spec.Volumes, pvcName) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// assignMigrationVolumeNames gives each mount (sorted by PVC name) its pod
+// volume name: migrationStorageVolumeName, or, when another mount already
+// has that name (a hashed name can equal another PVC's literal one), the
+// "migration-" prefix and a longer hash of the PVC name alone. A mount whose
+// name still clashes is left out (and logged), so the rendered Deployment is
+// never invalid.
+func assignMigrationVolumeNames(ctx context.Context, mounts []migrationStorageMount) []migrationStorageMount {
+	used := map[string]bool{}
+	out := make([]migrationStorageMount, 0, len(mounts))
+	for _, m := range mounts {
+		name := migrationStorageVolumeName(m.pvcName)
+		if used[name] {
+			sum := sha256.Sum256([]byte(m.pvcName))
+			name = migrationStorageVolumePrefix + hex.EncodeToString(sum[:])[:validation.DNS1123LabelMaxLength-len(migrationStorageVolumePrefix)]
+		}
+		if used[name] {
+			log.FromContext(ctx).Info("Not mounting a migration PVC whose volume name clashes with another's", "pvc", m.pvcName)
+			continue
+		}
+		used[name] = true
+		m.volumeName = name
+		out = append(out, m)
+	}
+	return out
 }
 
 // migrationPVCMountable reports whether m's recorded migration PVC may be
@@ -265,7 +434,11 @@ func (r *ProviderReconciler) migrationPVCMountable(ctx context.Context, m *infra
 	if !pvc.DeletionTimestamp.IsZero() {
 		return false, nil
 	}
-	if refErr := migrationPVCReferenceError(pvc, m); refErr != nil {
+	refErr := migrationPVCSpecChangedError(m)
+	if refErr == nil {
+		refErr = migrationPVCReferenceError(pvc, m)
+	}
+	if refErr != nil {
 		log.FromContext(ctx).V(1).Info("Not mounting a migration PVC the VMMigration may not use",
 			"vmmigration", m.Name, "pvc", pvc.Name, "reason", refErr.Error())
 		return false, nil
@@ -318,7 +491,7 @@ func migrationStorageVolumeName(pvcName string) string {
 		return name
 	}
 	sum := sha256.Sum256([]byte(pvcName))
-	suffix := hex.EncodeToString(sum[:])[:16]
+	suffix := hex.EncodeToString(sum[:])[:migrationStorageVolumeHashLen]
 	stem := make([]byte, 0, len(pvcName))
 	for i := 0; i < len(pvcName) && len(stem) < validation.DNS1123LabelMaxLength-len(migrationStorageVolumePrefix)-len(suffix)-1; i++ {
 		c := pvcName[i]
@@ -336,7 +509,7 @@ func migrationStorageVolumes(mounts []migrationStorageMount) []corev1.Volume {
 	volumes := make([]corev1.Volume, 0, len(mounts))
 	for _, m := range mounts {
 		volumes = append(volumes, corev1.Volume{
-			Name: migrationStorageVolumeName(m.pvcName),
+			Name: m.volumeName,
 			VolumeSource: corev1.VolumeSource{
 				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: m.pvcName},
 			},
@@ -351,7 +524,7 @@ func migrationStorageVolumeMounts(mounts []migrationStorageMount) []corev1.Volum
 	out := make([]corev1.VolumeMount, 0, len(mounts))
 	for _, m := range mounts {
 		out = append(out, corev1.VolumeMount{
-			Name:      migrationStorageVolumeName(m.pvcName),
+			Name:      m.volumeName,
 			MountPath: migrationStorageMountRoot + "/" + m.pvcName,
 			ReadOnly:  m.readOnly,
 		})
@@ -359,17 +532,28 @@ func migrationStorageVolumeMounts(mounts []migrationStorageMount) []corev1.Volum
 	return out
 }
 
-// providersForMigration maps a VMMigration event to its source and target
-// Providers in its own namespace, so their Deployments mount or unmount its
-// migration PVC promptly.
+// providersForMigration maps a VMMigration event to the Providers whose
+// Deployments may have to mount or unmount its migration PVC: while it is in
+// flight, its source and target Providers in its own namespace. When it is
+// deleted (gone from the cache, which is updated before handlers run), no
+// longer in flight, or its source Provider cannot be resolved (the source VM
+// is gone), every Provider in its namespace is re-rendered instead: a Provider
+// that mounted the PVC earlier can no longer be found through the source VM,
+// and must not keep a stale read-write mount (rendering is idempotent).
 func (r *ProviderReconciler) providersForMigration(ctx context.Context, obj client.Object) []reconcile.Request {
 	m, ok := obj.(*infravirtrigaudiov1beta1.VMMigration)
 	if !ok {
 		return nil
 	}
+	if !migrationStorageInFlight(m) || apierrors.IsNotFound(r.Get(ctx, client.ObjectKeyFromObject(m), &infravirtrigaudiov1beta1.VMMigration{})) {
+		return r.providersInNamespace(ctx, m.Namespace)
+	}
 	source, target, err := migrationStorageProviders(ctx, r.Client, m)
-	if err != nil {
-		log.FromContext(ctx).Error(err, "failed to resolve the Providers of a VMMigration's migration storage", "vmmigration", m.Name)
+	if err != nil || source == nil {
+		if err != nil {
+			log.FromContext(ctx).Error(err, "failed to resolve the Providers of a VMMigration's migration storage", "vmmigration", m.Name)
+		}
+		return r.providersInNamespace(ctx, m.Namespace)
 	}
 	var reqs []reconcile.Request
 	for _, key := range []*types.NamespacedName{source, target} {
@@ -384,29 +568,45 @@ func (r *ProviderReconciler) providersForMigration(ctx context.Context, obj clie
 	return reqs
 }
 
-// providersForMigrationPVC maps a PVC event to the Providers of every
-// VMMigration in its namespace that records it as its migration PVC, so a
-// PVC that becomes Bound is mounted and one that starts deleting is unmounted
-// promptly (issue #184). Any other PVC maps to nothing.
+// providersForMigrationPVC maps a PVC event to every Provider in its
+// namespace when the PVC carries the migration-storage label or a VMMigration
+// there records it, so a PVC that becomes Bound is mounted and one that
+// starts deleting is unmounted promptly (issue #184) — also by a Provider the
+// PVC can no longer be traced to (its migration or source VM is gone).
+// Rendering is idempotent, so the other Providers do not roll. Any other PVC
+// maps to nothing.
 func (r *ProviderReconciler) providersForMigrationPVC(ctx context.Context, obj client.Object) []reconcile.Request {
-	migrations := &infravirtrigaudiov1beta1.VMMigrationList{}
-	if err := r.List(ctx, migrations, client.InNamespace(obj.GetNamespace())); err != nil {
-		log.FromContext(ctx).Error(err, "failed to list VMMigrations for a PVC event", "namespace", obj.GetNamespace())
-		return nil
-	}
-	seen := map[types.NamespacedName]bool{}
-	var reqs []reconcile.Request
-	for i := range migrations.Items {
-		m := &migrations.Items[i]
-		if m.Status.StoragePVCName != obj.GetName() {
-			continue
+	if obj.GetLabels()[migrationPVCLabelKey] != migrationPVCLabelValue {
+		migrations := &infravirtrigaudiov1beta1.VMMigrationList{}
+		if err := r.List(ctx, migrations, client.InNamespace(obj.GetNamespace())); err != nil {
+			log.FromContext(ctx).Error(err, "failed to list VMMigrations for a PVC event", "namespace", obj.GetNamespace())
+			return nil
 		}
-		for _, req := range r.providersForMigration(ctx, m) {
-			if !seen[req.NamespacedName] {
-				seen[req.NamespacedName] = true
-				reqs = append(reqs, req)
+		referenced := false
+		for i := range migrations.Items {
+			if migrations.Items[i].Status.StoragePVCName == obj.GetName() {
+				referenced = true
+				break
 			}
 		}
+		if !referenced {
+			return nil
+		}
+	}
+	return r.providersInNamespace(ctx, obj.GetNamespace())
+}
+
+// providersInNamespace returns a reconcile request for every Provider in
+// namespace.
+func (r *ProviderReconciler) providersInNamespace(ctx context.Context, namespace string) []reconcile.Request {
+	providers := &infravirtrigaudiov1beta1.ProviderList{}
+	if err := r.List(ctx, providers, client.InNamespace(namespace)); err != nil {
+		log.FromContext(ctx).Error(err, "failed to list Providers to re-render their migration storage", "namespace", namespace)
+		return nil
+	}
+	reqs := make([]reconcile.Request, 0, len(providers.Items))
+	for i := range providers.Items {
+		reqs = append(reqs, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(&providers.Items[i])})
 	}
 	return reqs
 }
@@ -418,8 +618,9 @@ func migrationStorageSignature(m *infravirtrigaudiov1beta1.VMMigration) string {
 	if m.Spec.Source.ProviderRef != nil {
 		sourceRef = m.Spec.Source.ProviderRef.Namespace + "/" + m.Spec.Source.ProviderRef.Name
 	}
-	return fmt.Sprintf("%s|%t|%t|%s|%s|%s|%s", m.Status.StoragePVCName, migrationStorageInFlight(m),
-		m.Status.Phase == infravirtrigaudiov1beta1.MigrationPhaseValidating, migrationNamedPVC(m),
+	return fmt.Sprintf("%s|%s|%t|%t|%t|%s|%s|%s|%s", m.Status.StoragePVCName, m.Status.StoragePVCUID, migrationStorageInFlight(m),
+		m.Status.Phase == infravirtrigaudiov1beta1.MigrationPhaseValidating,
+		m.Status.Phase == infravirtrigaudiov1beta1.MigrationPhaseFailed, migrationNamedPVC(m),
 		m.Spec.Source.VMRef.Name, sourceRef, migrationTargetProviderKey(m))
 }
 

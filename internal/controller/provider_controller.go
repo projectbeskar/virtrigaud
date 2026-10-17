@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	stderrors "errors"
 	"fmt"
 	"sync"
 	"time"
@@ -203,6 +204,7 @@ type ProviderReconciler struct {
 // +kubebuilder:rbac:groups="",resources=serviceaccounts,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;watch
 // +kubebuilder:rbac:groups=storage.k8s.io,resources=storageclasses,verbs=get
+// +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 
 // Reconcile manages Provider resources and their runtime deployments.
@@ -522,6 +524,9 @@ func (r *ProviderReconciler) reconcileRemoteRuntime(ctx context.Context, provide
 
 	// Reconcile Deployment
 	deployment, err := r.reconcileDeployment(ctx, provider, deploymentName)
+	if stderrors.Is(err, errMigrationStorageDiscovery) {
+		return r.migrationStorageDiscoveryFailed(ctx, provider, deploymentName, err)
+	}
 	if err != nil {
 		logger.Error(err, "Failed to reconcile deployment")
 		k8s.SetCondition(&provider.Status.Conditions, "ProviderRuntimeReady", metav1.ConditionFalse, "DeploymentError", fmt.Sprintf("Failed to create deployment: %v", err), provider.Generation)
