@@ -60,7 +60,6 @@ func TestHandleCreatingPhase_NilDiskInfoFailsCleanly(t *testing.T) {
 		"the failure message must name the missing disk info")
 }
 
-
 // creatingHarness is a Creating migration (importRaceFixture, disk imported)
 // against a fake API server (live). With lagging set, the reconciler's
 // cached client does not show VirtualMachines yet (its Get answers NotFound)

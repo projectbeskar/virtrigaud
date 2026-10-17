@@ -175,9 +175,9 @@ func landingMigration(name, ns string) *infravirtrigaudiov1beta1.VMMigration {
 			Target: infravirtrigaudiov1beta1.MigrationTarget{Name: "web"},
 		},
 		Status: infravirtrigaudiov1beta1.VMMigrationStatus{
-			ImportID:     "web" + contracts.ImportedDiskNameSuffix,
-			DiskInfo:     &infravirtrigaudiov1beta1.MigrationDiskInfo{TargetPath: importedDiskPath},
-			TargetVMUID:  string(landingVMUID),
+			ImportID:    "web" + contracts.ImportedDiskNameSuffix,
+			DiskInfo:    &infravirtrigaudiov1beta1.MigrationDiskInfo{TargetPath: importedDiskPath},
+			TargetVMUID: string(landingVMUID),
 		},
 	}
 }
