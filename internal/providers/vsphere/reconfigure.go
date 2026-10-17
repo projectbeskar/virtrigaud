@@ -26,9 +26,11 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/vmware/govmomi/fault"
 	"github.com/vmware/govmomi/object"
 	"github.com/vmware/govmomi/task"
 	"github.com/vmware/govmomi/vim25/mo"
+	"github.com/vmware/govmomi/vim25/soap"
 	"github.com/vmware/govmomi/vim25/types"
 	"google.golang.org/grpc/codes"
 
@@ -98,9 +100,10 @@ const (
 	reconfigureNeedsPowerOffFormat = "the VM is not powered off and cannot take this change now: %s; nothing was changed, " +
 		"and the change is applied once the VM is powered off"
 	// reconfigureTaskFailedMessage is the answer to a ReconfigVM_Task vCenter
-	// failed; the fault (which can name datastores and files) is logged.
-	reconfigureTaskFailedMessage = "vCenter failed the reconfigure task of this VM (details are in the provider log); " +
-		"it is retried"
+	// refused to start or failed; the fault (which can name datastores and
+	// files) is logged.
+	reconfigureTaskFailedMessage = "vCenter refused or failed the reconfigure task of this VM (details are in the " +
+		"provider log); it is retried"
 	// suspendedVMReason is why a suspended VM takes no change.
 	suspendedVMReason = "it is suspended, and vCenter changes no hardware of a suspended VM"
 )
@@ -174,6 +177,13 @@ func (p *Provider) reconfigureVM(ctx context.Context, vm *object.VirtualMachine,
 	p.logger.Info("Applying VM reconfiguration", "vm_id", req.Id)
 	t, err := vm.Reconfigure(ctx, *spec)
 	if err != nil {
+		if isVMFault(err) {
+			// vCenter answered and refused this VM's task (e.g.
+			// TaskInProgress during a backup snapshot, InvalidState,
+			// InvalidPowerState): a per-VM answer, kept out of the breaker.
+			p.logger.Error("vCenter refused the reconfigure task", "vm_id", req.Id, "error", err)
+			return nil, statusWithReasons(codes.Unknown, reconfigureTaskFailedMessage, contracts.VMOperationFailedReason).Err()
+		}
 		return nil, fmt.Errorf("failed to start reconfiguration: %w", err)
 	}
 	if _, err := t.WaitForResult(ctx, nil); err != nil {
@@ -197,6 +207,18 @@ func isTaskFault(err error) bool {
 	var v task.Error
 	var ptr *task.Error
 	return stderrors.As(err, &v) || stderrors.As(err, &ptr)
+}
+
+// isVMFault reports whether err, returned when starting a VM's task, is
+// vCenter's answer about that VM — a SOAP or vim fault — as opposed to a
+// failure to reach vCenter (transport, context), which says nothing about the
+// VM. A NotAuthenticated fault (the provider's session) is about the
+// provider, not the VM, and is not one.
+func isVMFault(err error) bool {
+	if err == nil || fault.Is(err, &types.NotAuthenticated{}) {
+		return false
+	}
+	return soap.IsSoapFault(err) || soap.IsVimFault(err)
 }
 
 // planReconfigure builds the config spec that takes the VM vmMo (read with
@@ -513,19 +535,26 @@ func (p *Provider) planDiskGrowth(vmID string, cfg *types.VirtualMachineConfigIn
 		if want <= 0 {
 			continue // withheld (above the disk-size limit) or unset: leave it
 		}
+		// A disk skipped while the call still succeeds is logged at Warn — the
+		// operator must see it — except an entry no disk was ever recorded
+		// for (expected on VMs created by rc1 or earlier).
 		if m.rec == nil {
-			p.logger.Info("Leaving a spec.disks entry's disk as it is: no single disk is recorded for it; Reconfigure never adds a disk",
+			logSkip := p.logger.Warn
+			if m.why == specDiskUnrecorded {
+				logSkip = p.logger.Info
+			}
+			logSkip("Leaving a spec.disks entry's disk as it is: no single disk is recorded for it; Reconfigure never adds a disk",
 				"vm_id", vmID, "disk_name", names[i], "why", m.why)
 			continue
 		}
 		disk := findRecordedDisk(disks, m.rec)
 		if disk == nil {
-			p.logger.Info("Leaving a spec.disks entry's disk as it is: its recorded disk is not on the VM",
+			p.logger.Warn("Leaving a spec.disks entry's disk as it is: its recorded disk is not on the VM",
 				"vm_id", vmID, "disk_name", names[i], "disk_index", m.rec.index)
 			continue
 		}
 		if why := diskNotExtendable(disk); why != "" {
-			p.logger.Info("Leaving a spec.disks entry's disk as it is: vCenter cannot extend it",
+			p.logger.Warn("Leaving a spec.disks entry's disk as it is: vCenter cannot extend it",
 				"vm_id", vmID, "disk_name", names[i], "disk_index", m.rec.index, "why", why)
 			continue
 		}
