@@ -185,6 +185,19 @@ func providerCallOutcomeKnown(err error) bool {
 		contracts.IsVMDiskInUse(err) || contracts.IsVMSourceRunning(err)
 }
 
+// providerCallOutcomeKnownFor is providerCallOutcomeKnown for a call that is
+// the first of its marker (resend false) or follows an earlier call whose
+// outcome was never recorded (resend true: the marker was already on the
+// object, whether the manager re-sends it or an operator confirmed it). A
+// failure answering a re-send is the answer to THIS request only and says
+// nothing about what the earlier call made, so it never makes the outcome
+// known: an AlreadyExists or NotFound answering a re-sent SnapshotCreate may
+// be the snapshot the first call took. The marker is kept, as for a VM Create
+// (createOutcomeKnown).
+func providerCallOutcomeKnownFor(err error, resend bool) bool {
+	return !resend && providerCallOutcomeKnown(err)
+}
+
 // operationOutcomeManagers lists the field managers (with their operation)
 // that own obj's operationOutcomeAnnotation, for the confirmation's log line.
 // The API server's audit log is the authoritative record of who set it.

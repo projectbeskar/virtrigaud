@@ -770,13 +770,14 @@ func (r *VMMigrationReconciler) handleSnapshottingPhase(ctx context.Context, mig
 
 	// Record durably that the snapshot is requested; nothing is sent if that
 	// write fails (vmmigration_request_marker.go).
-	if err := r.markMigrationRequested(ctx, migration, longOpSnapshot); err != nil {
+	snapshotResend, err := r.markMigrationRequested(ctx, migration, longOpSnapshot)
+	if err != nil {
 		return ctrl.Result{}, err
 	}
 
 	logger.Info("Creating migration snapshot", "snapshot_name", snapshotName)
 	snapshotResp, err := providerInstance.SnapshotCreate(ctx, snapshotReq)
-	if err != nil && (!providerCallOutcomeKnown(err) || (snapshotReq.VM.HostID != "" && contracts.IsRetryable(err))) {
+	if err != nil && (!providerCallOutcomeKnownFor(err, snapshotResend) || (snapshotReq.VM.HostID != "" && contracts.IsRetryable(err))) {
 		// No definite outcome (a deadline, a dropped connection): the snapshot
 		// may still be taken. A routed create's retryable answer is one too:
 		// the clustered provider answers "retry" while the snapshot it may
@@ -1071,7 +1072,8 @@ func (r *VMMigrationReconciler) handleExportingPhase(ctx context.Context, migrat
 	}
 	// Record durably that the export is requested; nothing is sent if that
 	// write fails (vmmigration_request_marker.go).
-	if err := r.markMigrationRequested(ctx, migration, longOpExport); err != nil {
+	exportResend, err := r.markMigrationRequested(ctx, migration, longOpExport)
+	if err != nil {
 		return ctrl.Result{}, err
 	}
 	if !r.markLongOpStarted(migration, longOpExport) {
@@ -1086,7 +1088,7 @@ func (r *VMMigrationReconciler) handleExportingPhase(ctx context.Context, migrat
 		// reconcile (e.g. after retry/backoff) can re-attempt the export for
 		// this generation. transitionToFailed records the failure durably.
 		r.longOpInFlight.Delete(longOpKey(migration, longOpExport))
-		if !providerCallOutcomeKnown(err) {
+		if !providerCallOutcomeKnownFor(err, exportResend) {
 			// No definite outcome (a deadline, a dropped connection): the
 			// export may still be writing the staged object. The marker is
 			// kept and the migration is never failed for it.
@@ -1482,7 +1484,8 @@ func (r *VMMigrationReconciler) handleImportingPhase(ctx context.Context, migrat
 	}
 	// Record durably that the import is requested; nothing is sent if that
 	// write fails (vmmigration_request_marker.go).
-	if err := r.markMigrationRequested(ctx, migration, longOpImport); err != nil {
+	importResend, err := r.markMigrationRequested(ctx, migration, longOpImport)
+	if err != nil {
 		return ctrl.Result{}, err
 	}
 	if !r.markLongOpStarted(migration, longOpImport) {
@@ -1496,7 +1499,7 @@ func (r *VMMigrationReconciler) handleImportingPhase(ctx context.Context, migrat
 		// Release the in-memory guard so a future reconcile can re-attempt the
 		// import for this generation after the failure is recorded.
 		r.longOpInFlight.Delete(longOpKey(migration, longOpImport))
-		if !providerCallOutcomeKnown(err) {
+		if !providerCallOutcomeKnownFor(err, importResend) {
 			// No definite outcome (a deadline, a dropped connection): the
 			// import may still land the disk. The marker is kept and the
 			// migration is never failed for it.
