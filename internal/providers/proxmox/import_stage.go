@@ -339,13 +339,33 @@ const importStageTempCleanup = `rm -f -- "$TMP" 2>/dev/null || true`
 // buildImportStageScript is the node-side script that stages a disk at
 // stagePath (in dir): it prepares dir and "$TMP" (importStagePrepare), runs
 // writeCmd — which writes the disk to "$TMP" — and renames "$TMP" onto
-// stagePath. Any failure, or a hang-up of the SSH session, removes "$TMP" and
-// leaves no stage. dir is a parameter only so the tests can run the script
-// against a local directory; production passes proxmoxImportStageDir.
+// stagePath. A failing writeCmd removes "$TMP" and leaves no stage.
+//
+// A cancelled call does NOT stop it: the command runs without a pty, so the
+// node sends it no hang-up when the SSH session goes away (the HUP trap does
+// not fire), and a writeCmd that reads stdin just sees end of input. writeCmd
+// must therefore fail on a short copy itself — the s3 import uses
+// importStageWriteExactly — or a truncated "$TMP" would be published. dir is a
+// parameter only so the tests can run the script against a local directory;
+// production passes proxmoxImportStageDir.
 func buildImportStageScript(dir, stagePath, writeCmd string) string {
 	return "set -e; " + importStagePrepare(dir) +
 		"trap '" + importStageTempCleanup + "' EXIT; trap 'exit 1' HUP INT TERM; " +
 		writeCmd + "; " + importStageCommit(stagePath)
+}
+
+// importStageShortCopyExit is the exit code of importStageWriteExactly when
+// stdin ended before the expected number of bytes (a cancelled call, a
+// backend that served less than it reported).
+const importStageShortCopyExit = 9
+
+// importStageWriteExactly is the writeCmd of the s3 stage: it copies stdin to
+// "$TMP" and fails (exit importStageShortCopyExit) unless exactly size bytes
+// arrived, so a copy cut short — its SSH session dropped by a cancelled call,
+// which the node sees only as end of input — is never published.
+func importStageWriteExactly(size int64) string {
+	return fmt.Sprintf(`cat > "$TMP"; [ "$(stat -c %%s -- "$TMP")" = "%d" ] || `+
+		`{ echo "stage copy is short: expected %d bytes" >&2; exit %d; }`, size, size, importStageShortCopyExit)
 }
 
 // nfsStageCopy is THE producer of the root-owned copy of the staged NFS

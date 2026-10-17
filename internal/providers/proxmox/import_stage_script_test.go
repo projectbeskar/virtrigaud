@@ -129,6 +129,39 @@ func TestBuildImportStageScript_RealShell(t *testing.T) {
 	}
 }
 
+// TestImportStageWriteExactly_RealShell (rc2 R6 audit): the s3 stage is
+// published only when exactly the expected number of bytes arrived. A copy
+// cut short — a cancelled call closes the node's stdin, which cat sees as end
+// of input, and no hang-up reaches the non-pty command — leaves neither stage
+// nor temp, and an earlier stage is kept.
+func TestImportStageWriteExactly_RealShell(t *testing.T) {
+	requireGNUStat(t)
+	for _, shell := range localShells(t) {
+		t.Run(shell, func(t *testing.T) {
+			dir := filepath.Join(t.TempDir(), "import-stage")
+			stage := filepath.Join(dir, "team-a_web-migrated.qcow2")
+			run := func(stdin string, size int64) error {
+				cmd := exec.Command(shell, "-c", buildImportStageScript(dir, stage, importStageWriteExactly(size)))
+				cmd.Stdin = strings.NewReader(stdin)
+				return cmd.Run()
+			}
+			require.NoError(t, run("disk-bytes", int64(len("disk-bytes"))))
+			got, err := os.ReadFile(stage)
+			require.NoError(t, err)
+			assert.Equal(t, "disk-bytes", string(got))
+
+			err = run("disk", int64(len("disk-bytes-v2")))
+			var exit *exec.ExitError
+			require.ErrorAs(t, err, &exit)
+			assert.Equal(t, importStageShortCopyExit, exit.ExitCode())
+			got, err = os.ReadFile(stage)
+			require.NoError(t, err)
+			assert.Equal(t, "disk-bytes", string(got), "a short copy is never published")
+			assert.Equal(t, []string{"team-a_web-migrated.qcow2"}, dirEntries(t, dir), "no temp left")
+		})
+	}
+}
+
 // TestNFSImportStageInner_RealShell: the NFS stage without a uid/gid (the root
 // shell reads the export) copies "$MNT"/rel byte for byte through a temp file
 // onto the stage, which passes the node check, and leaves nothing else.
