@@ -140,9 +140,9 @@ const (
 		"(details are in the provider log)"
 	wireExportNotPerformed = "disk export not performed: a step failed before the export was published " +
 		"(details are in the provider log)"
-	wirePVCExportFailed = "disk export failed: it did not complete, and nothing is still writing; a partial file " +
+	wirePVCExportFailed = "disk export failed: it did not complete and nothing is still writing; any partial file " +
 		"on the migration volume is replaced by the next export (details are in the provider log)"
-	wireExportFailed = "disk export failed: the host command ended with an error and nothing was exported " +
+	wireExportFailed = "disk export failed: the host command ended with an error and the export did not complete " +
 		"(details are in the provider log)"
 	wireImportRefused = "disk import not performed: the request was refused before anything was imported " +
 		"(details are in the provider log)"
