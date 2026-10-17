@@ -363,7 +363,7 @@ func TestSingleHostSnapshotCreate_Outcomes(t *testing.T) {
 		assertUnknownOutcome(t, err)
 	})
 	t.Run("c: the snapshots cannot be listed after a failed create - unknown", func(t *testing.T) {
-		err, _ := run(t, func(fx *scdFixture) {
+		err, calls := run(t, func(fx *scdFixture) {
 			fx.script("single", "fail-snapshot-create-as", "")
 			// The list works once (the name check) and fails afterwards.
 			r21Patch(t, `snapshot-list)
@@ -371,6 +371,8 @@ func TestSingleHostSnapshotCreate_Outcomes(t *testing.T) {
       if [ -f "$d/listed-once" ]; then echo "error: list failed" >&2; exit 1; fi; : > "$d/listed-once"`)
 		}, scdSnapshotRequest("x"))
 		assertUnknownOutcome(t, err)
+		assert.Equal(t, 2, strings.Count(strings.Join(calls, "\n"), "snapshot-list"),
+			"the name check before the create, and the read after it that failed")
 	})
 	t.Run("success is unchanged", func(t *testing.T) {
 		fx := newSCDFixture(t, map[string]string{scdDomain: scdDomainXML(scdDomain, scdDomainOpts{})})
