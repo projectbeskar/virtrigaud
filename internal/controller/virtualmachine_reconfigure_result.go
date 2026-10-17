@@ -106,7 +106,6 @@ func (r *VirtualMachineReconciler) recordRestartPending(vm *infravirtrigaudiov1b
 		Message:            msg,
 		ObservedGeneration: vm.Generation,
 	})
-	vm.Status.Phase = infravirtrigaudiov1beta1.VirtualMachinePhaseRunning
 	k8s.SetReadyCondition(&vm.Status.Conditions, metav1.ConditionTrue, k8s.ReasonReconcileSuccess, "VM is ready", vm.Generation)
 }
 
@@ -168,7 +167,6 @@ func (r *VirtualMachineReconciler) recordUnmarkedResult(vm *infravirtrigaudiov1b
 		"the VM's Provider answered the resize without the honest-result marker (an older provider image), so the answer is not "+
 			"trusted: the VM is counted at the larger of its previous and its requested size, and the resize is re-checked every "+
 			"2 minutes. Upgrade the provider image")
-	vm.Status.Phase = infravirtrigaudiov1beta1.VirtualMachinePhaseRunning
 }
 
 // recordAtLeastDesired raises status.currentResources, per resource, to the

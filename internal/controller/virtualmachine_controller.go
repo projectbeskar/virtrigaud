@@ -611,7 +611,6 @@ func (r *VirtualMachineReconciler) reconcileVM(ctx context.Context, vm *infravir
 		logger.Info("Reconfigure task completed", "taskRef", vm.Status.ReconfigureTaskRef)
 		r.updateCurrentResources(vm, vmClass)
 		vm.Status.ReconfigureTaskRef = ""
-		vm.Status.Phase = infravirtrigaudiov1beta1.VirtualMachinePhaseRunning
 		k8s.SetReconfiguringCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonReconcileSuccess, "VM reconfigured successfully", vm.Generation)
 	}
 
@@ -920,6 +919,9 @@ func (r *VirtualMachineReconciler) handleDeletion(ctx context.Context, vm *infra
 	if !k8s.HasFinalizer(vm, infravirtrigaudiov1beta1.VirtualMachineFinalizer) {
 		return ctrl.Result{}, nil
 	}
+
+	// Show the deletion in status.phase for as long as it takes.
+	r.markDeleting(ctx, vm)
 
 	// A VM being deleted is never scheduled again: drop any in-flight
 	// assumption and backoff record it has. Its durable placement record keeps
@@ -2750,8 +2752,10 @@ func overrideImageWithPreparedLocation(
 	}
 }
 
-// updateStatus updates the VM status
+// updateStatus updates the VM status, with status.phase derived from the state
+// it carries (derivePhase), so the phase is the same whichever path wrote it.
 func (r *VirtualMachineReconciler) updateStatus(ctx context.Context, vm *infravirtrigaudiov1beta1.VirtualMachine) {
+	applyDerivedPhase(vm)
 	if err := r.Status().Update(ctx, vm); err != nil {
 		log.FromContext(ctx).Error(err, "Failed to update VirtualMachine status")
 	}
@@ -2868,7 +2872,6 @@ func (r *VirtualMachineReconciler) reconfigureVM(
 	r.recordReconfigureSuccess(vm)
 
 	// Update status with reconfiguration info
-	vm.Status.Phase = infravirtrigaudiov1beta1.VirtualMachinePhaseReconfiguring
 	now := metav1.NewTime(r.now())
 	vm.Status.LastReconfigureTime = &now
 
@@ -2894,7 +2897,6 @@ func (r *VirtualMachineReconciler) reconfigureVM(
 	default:
 		// Reconfigure completed synchronously, update current resources
 		r.updateCurrentResources(vm, vmClass)
-		vm.Status.Phase = infravirtrigaudiov1beta1.VirtualMachinePhaseRunning
 		k8s.SetReconfiguringCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonReconcileSuccess, "VM reconfigured successfully", vm.Generation)
 		k8s.SetReadyCondition(&vm.Status.Conditions, metav1.ConditionTrue, k8s.ReasonReconcileSuccess, "VM is ready", vm.Generation)
 	}

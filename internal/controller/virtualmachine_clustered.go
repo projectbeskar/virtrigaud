@@ -102,6 +102,7 @@ func (r *VirtualMachineReconciler) recordPendingHost(
 	setPlacedCondition(vm, metav1.ConditionFalse, k8s.ReasonCreatePending,
 		fmt.Sprintf("create pending on host %s (pool %s)", p.hostID, p.poolName))
 
+	applyDerivedPhase(vm)
 	// Bounded, so the assumption covering this write (placementAssumeTTL, twice
 	// this bound) always outlives it.
 	writeCtx, cancel := context.WithTimeout(ctx, pendingHostWriteTimeout)
@@ -682,6 +683,7 @@ func (r *VirtualMachineReconciler) handleClusteredCreateConflict(
 	log.FromContext(ctx).Info("Create refused with a name conflict on the pending host; excluding the host and re-scheduling",
 		"host", host, "excludedHosts", pl.ExcludedHosts)
 
+	applyDerivedPhase(vm)
 	if err := r.Status().Update(ctx, vm); err != nil {
 		if apierrors.IsConflict(err) {
 			log.FromContext(ctx).Info("Excluded-host write lost a resourceVersion race; requeueing (the create is retried on the same host)",

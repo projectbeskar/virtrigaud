@@ -373,6 +373,7 @@ func (r *VirtualMachineReconciler) requestCreate(
 	toWrite.Status.ObservedGeneration = toWrite.Generation
 	setCreateRequested(toWrite, r.now())
 	recordBoundProvider(toWrite, providerCR)
+	applyDerivedPhase(toWrite)
 	writeCtx, cancel := context.WithTimeout(ctx, createRecordAttemptTimeout)
 	defer cancel()
 	if err := r.Status().Update(writeCtx, toWrite); err != nil {
