@@ -66,6 +66,19 @@ func TestMapGRPCError_ReconfigureNeedsPowerOffIsRetryableAndMarked(t *testing.T)
 	}
 }
 
+// TestReconfigureTaskFault_NeverCountsTowardTheBreaker: a vSphere
+// ReconfigVM_Task fault or a Proxmox config update PVE failed is answered
+// Unknown + VM_OPERATION_FAILED with a constant message: one VM's failing
+// reconfigure never opens the Provider's breaker, and the manager shows the
+// provider's message (not "could not be reached").
+func TestReconfigureTaskFault_NeverCountsTowardTheBreaker(t *testing.T) {
+	err := needsPowerOffErr(t, codes.Unknown, contracts.ErrorInfoDomain, contracts.VMOperationFailedReason)
+	assert.False(t, isInfraFailure(err))
+	assert.False(t, countsTowardBreaker(providerv1.Provider_Reconfigure_FullMethodName, err))
+	plain := status.Error(codes.Unknown, "vCenter unreachable")
+	assert.True(t, countsTowardBreaker(providerv1.Provider_Reconfigure_FullMethodName, plain), "an unmarked Unknown still counts")
+}
+
 // TestReconfigureNeedsPowerOff_NeverCountsTowardTheBreaker: the refusal is the
 // provider's answer about one VM, retried on that VM's backoff; it must not
 // open the Provider's circuit breaker for every other VM.
