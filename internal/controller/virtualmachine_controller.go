@@ -2866,7 +2866,12 @@ func (r *VirtualMachineReconciler) reconfigureVM(
 		if res, held := r.holdOwnerRefusal(ctx, vm, ref, err, "reconfigure"); held {
 			return res, nil
 		}
-		logger.Error(err, "Failed to reconfigure VM", "retryAfter", retryAfter)
+		if contracts.IsReconfigureNeedsPowerOff(err) {
+			logger.Info("Reconfigure waits for the VM to be powered off: the running VM cannot take the change",
+				"retryAfter", retryAfter, "detail", err.Error())
+		} else {
+			logger.Error(err, "Failed to reconfigure VM", "retryAfter", retryAfter)
+		}
 		r.updateStatus(ctx, vm)
 		return ctrl.Result{RequeueAfter: max(retryAfter, routedCallRetryAfter(ref, err))}, nil
 	}
