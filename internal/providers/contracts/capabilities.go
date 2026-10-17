@@ -140,6 +140,12 @@ type Capabilities struct {
 	// a listed backend a re-sent ImportDisk lands the disk at the same name
 	// and never makes a second one (rc2 R6).
 	ResendSafeImportBackends []string
+	// SupportsLandedDiskDelete reports that the provider's DeleteLandedDisk
+	// removes the disk a migration's ImportDisk landed for a target VM that
+	// does not use it (LandedDiskDeleter, rc2 R7). False — a provider that
+	// predates it — means the VMMigration controller never asks it and
+	// records the landed disk as left behind.
+	SupportsLandedDiskDelete bool
 }
 
 // CapabilityReporter is an optional capability of a Provider: it reports the
