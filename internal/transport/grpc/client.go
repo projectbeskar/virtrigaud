@@ -557,6 +557,8 @@ func (c *Client) GetCapabilities(ctx context.Context) (contracts.Capabilities, e
 		SupportsOwnerRebind: resp.GetSupportsOwnerRebind(),
 		// ADR-0011 D7: empty from a provider that predates DeleteStagedDisk.
 		SupportedStagedDiskDeleteBackends: resp.GetSupportedStagedDiskDeleteBackends(),
+		// rc2 R7: false from a provider that predates DeleteLandedDisk.
+		SupportsLandedDiskDelete: resp.GetSupportsLandedDiskDelete(),
 	}, nil
 }
 
@@ -1282,6 +1284,42 @@ func (c *Client) DeleteStagedDisk(ctx context.Context, req contracts.StagedDiskD
 		return contracts.StagedDiskEmptied, nil
 	default:
 		return "", fmt.Errorf("deleteStagedDisk: the provider answered without an outcome (%s)", resp.GetOutcome())
+	}
+}
+
+// landedDiskDeleteCallTimeout bounds one DeleteLandedDisk call: an in-use
+// scan of the target's VMs and one file or folder delete — no disk data moves.
+const landedDiskDeleteCallTimeout = 3 * time.Minute
+
+// DeleteLandedDisk implements contracts.LandedDiskDeleter (rc2 R7): it asks
+// the target provider to remove the disk a VMMigration's import landed for a
+// target VM that does not use it. A provider that predates the RPC answers
+// Unimplemented, which maps to a NotSupported error; a disk a VM uses is a
+// Conflict marked contracts.ErrVMDiskInUse. An answer without an outcome is an
+// error: the caller must not assume the disk is gone.
+func (c *Client) DeleteLandedDisk(ctx context.Context, req contracts.LandedDiskDeleteRequest) (contracts.LandedDiskDeleteOutcome, error) {
+	ctx, cancel := context.WithTimeout(ctx, landedDiskDeleteCallTimeout)
+	defer cancel()
+
+	resp, err := c.client.DeleteLandedDisk(ctx, &providerv1.DeleteLandedDiskRequest{
+		Migration: &providerv1.ObjectIdentity{
+			Uid:       req.Migration.UID,
+			Namespace: req.Migration.Namespace,
+			Name:      req.Migration.Name,
+		},
+		TargetVm: targetIdentityToProto(req.TargetVM),
+		Path:     req.Path,
+	})
+	if err != nil {
+		return "", c.mapGRPCError("deleteLandedDisk", err)
+	}
+	switch resp.GetOutcome() {
+	case providerv1.LandedDiskDeleteOutcome_LANDED_DISK_DELETE_OUTCOME_DELETED:
+		return contracts.LandedDiskDeleted, nil
+	case providerv1.LandedDiskDeleteOutcome_LANDED_DISK_DELETE_OUTCOME_NOT_FOUND:
+		return contracts.LandedDiskNotFound, nil
+	default:
+		return "", fmt.Errorf("deleteLandedDisk: the provider answered without an outcome (%s)", resp.GetOutcome())
 	}
 }
 

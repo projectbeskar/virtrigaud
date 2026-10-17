@@ -128,6 +128,12 @@ type Capabilities struct {
 	// one that stages nothing outside the cluster — means the VMMigration
 	// controller never asks it and records the staged object as left behind.
 	SupportedStagedDiskDeleteBackends []string
+	// SupportsLandedDiskDelete reports that the provider's DeleteLandedDisk
+	// removes the disk a migration's ImportDisk landed for a target VM that
+	// does not use it (LandedDiskDeleter, rc2 R7). False — a provider that
+	// predates it — means the VMMigration controller never asks it and
+	// records the landed disk as left behind.
+	SupportsLandedDiskDelete bool
 }
 
 // CapabilityReporter is an optional capability of a Provider: it reports the
