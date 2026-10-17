@@ -19,6 +19,7 @@ package vsphere
 import (
 	"context"
 	"encoding/json"
+	stderrors "errors"
 	"fmt"
 	"path"
 	"sort"
@@ -26,6 +27,7 @@ import (
 	"strings"
 
 	"github.com/vmware/govmomi/object"
+	"github.com/vmware/govmomi/task"
 	"github.com/vmware/govmomi/vim25/mo"
 	"github.com/vmware/govmomi/vim25/types"
 	"google.golang.org/grpc/codes"
@@ -35,42 +37,47 @@ import (
 	sdkerrors "github.com/projectbeskar/virtrigaud/sdk/provider/errors"
 )
 
-// Reconfigure: which disk each size goes to, and what a running VM can take.
+// Reconfigure: what it changes, and what a running VM can take.
 //
-// Disks. A Reconfigure resizes the disks Create made, matched the way Create
-// made them (post_create.go):
+// CPU and memory are set to the VMClass values (with any spec.resources
+// override applied).
 //
-//   - the primary disk — the first VirtualDisk that is not a recorded
-//     additional disk, the disk Create grows — to the VMClass
-//     spec.diskDefaults.size (Class.DiskDefaults.SizeGiB). That size is a
-//     floor, as at Create: a disk already that large (a template's larger
-//     disk) is left as it is;
-//   - spec.disks[i] (Disks[i]) to the additional disk Create attached for it:
-//     the disk recorded under the name record (additionalDiskNameKey) holding
-//     the entry's name — the n-th entry of a name to the n-th disk recorded
-//     with it — or, on a VM whose disk was recorded without a name (created
-//     before names were recorded), the disk recorded at position i+1. The
-//     disk is found by the file its record names (or that file's base name,
-//     after a storage migration). Its size is the disk's size: it is grown,
-//     and a smaller size is refused (InvalidArgument, nothing changed) —
-//     a disk is never shrunk.
+// Disks. Reconfigure never touches the primary (root) disk: the VMClass
+// spec.diskDefaults.size is applied by Create only. It grows only the
+// additional disks Create attached for spec.disks entries, each found by the
+// spec.disks name recorded with it when it was attached
+// (additionalDiskNameKey) and then by the file its record names (or that
+// file's base name, after a storage migration). Such a disk is grown to the
+// entry's size; a smaller size is refused (InvalidArgument, nothing changed) —
+// a disk is never shrunk — and a size of 0 (the manager withholds a growth
+// above the disk-size limit that way) leaves it. Left alone, and logged:
 //
-// A size of 0 is "leave this disk as it is" (the manager withholds a growth
-// above the disk-size limit that way). A spec.disks entry with no disk
-// recorded for it — added to spec.disks after the VM was created, or on a VM
-// created before Create recorded its disks — is left alone and logged:
-// Reconfigure never adds a disk.
+//   - an entry no disk is recorded under its name for: added to spec.disks
+//     after the VM was created, or a disk an earlier release recorded without
+//     a name (Reconfigure never matches by position: the list may have been
+//     edited since), or an adopted VM. Reconfigure never adds a disk;
+//   - an entry whose name is ambiguous: used by more than one spec.disks
+//     entry, or recorded on more than one disk;
+//   - a disk vCenter cannot extend: a delta disk (the VM has snapshots, or it
+//     is a linked clone) or a physical-mode RDM.
 //
-// CPU and memory on a running VM. vCenter changes the CPU count of a powered-on
-// VM only with CPU hot-add (more vCPUs) or hot-remove (fewer) enabled on it,
-// and its memory only upwards, with memory hot-add enabled and within the
-// VM's hot-plug memory limit. Otherwise the change cannot be applied, and
-// vSphere has no pending state to stage it for the next boot. So it is
-// refused before anything is changed — disk growth included — with
-// FailedPrecondition carrying RECONFIGURE_NEEDS_POWER_OFF, which the manager
-// shows as Reconfiguring=False/ResizePendingPowerOff; the same Reconfigure
-// sent once the VM is powered off applies it. A suspended VM is treated as
-// powered on.
+// What a VM that is not powered off can take. A suspended VM takes no
+// hardware change at all. A running VM changes its CPU count only with CPU
+// hot-add (more vCPUs) or hot-remove (fewer) enabled on it, its memory only
+// upwards, with memory hot-add enabled and within its hot-plug memory limit,
+// and a disk on a shared SCSI bus or with multi-writer sharing only while it
+// is off. vSphere has no pending state to stage anything for the next boot.
+// So such a change is refused before anything is changed — the rest of the
+// request included — with FailedPrecondition carrying
+// RECONFIGURE_NEEDS_POWER_OFF, which the manager shows as
+// Reconfiguring=False/ResizePendingPowerOff; the same Reconfigure sent once the
+// VM is powered off applies it.
+//
+// A CPU count that is not a multiple of the VM's cores per socket is refused
+// (InvalidArgument) before anything is changed. A ReconfigVM_Task that vCenter
+// fails is answered with VM_OPERATION_FAILED and a constant message (the fault
+// is logged), so one VM's failing reconfigure never counts toward the
+// manager's per-Provider circuit breaker.
 
 const (
 	// additionalDiskNameKeySuffix forms the ExtraConfig key recording the
@@ -79,13 +86,23 @@ const (
 	// kibPerGiB is the number of KiB in a GiB (VirtualDisk.CapacityInKB).
 	kibPerGiB int64 = 1024 * 1024
 	// diskShrinkRefusedFormat is the refusal of a spec.disks size below the
-	// disk's current size (name, requested GiB, current GiB).
+	// disk's current size (name, requested GiB, current GiB, current GiB).
 	diskShrinkRefusedFormat = "spec.disks[%s] asks for %d GiB but the disk already has %d GiB: a disk is never shrunk; " +
 		"set its size to %d GiB or more"
-	// reconfigureNeedsPowerOffFormat is the refusal of a CPU/memory change the
-	// running VM cannot take (the reasons, joined).
-	reconfigureNeedsPowerOffFormat = "the VM is powered on and cannot take this change online: %s; nothing was changed, " +
+	// cpuNotMultipleOfCoresFormat is the refusal of a CPU count that is not a
+	// multiple of the VM's cores per socket (vCPUs, cores per socket).
+	cpuNotMultipleOfCoresFormat = "%d vCPUs is not a multiple of the VM's %d cores per socket, which vCenter refuses; " +
+		"ask for a multiple of it"
+	// reconfigureNeedsPowerOffFormat is the refusal of a change the VM cannot
+	// take unless it is powered off (the reasons, joined).
+	reconfigureNeedsPowerOffFormat = "the VM is not powered off and cannot take this change now: %s; nothing was changed, " +
 		"and the change is applied once the VM is powered off"
+	// reconfigureTaskFailedMessage is the answer to a ReconfigVM_Task vCenter
+	// failed; the fault (which can name datastores and files) is logged.
+	reconfigureTaskFailedMessage = "vCenter failed the reconfigure task of this VM (details are in the provider log); " +
+		"it is retried"
+	// suspendedVMReason is why a suspended VM takes no change.
+	suspendedVMReason = "it is suspended, and vCenter changes no hardware of a suspended VM"
 )
 
 // additionalDiskNameKey is the ExtraConfig key recording the spec.disks name
@@ -95,15 +112,13 @@ func additionalDiskNameKey(index int) string {
 }
 
 // reconfigureDesired is the part of a marshaled contracts.CreateRequest a
-// vSphere Reconfigure applies. contracts.VMClass, DiskDefaults and DiskSpec
-// carry no json tags, so the keys are their Go field names.
+// vSphere Reconfigure applies. contracts.VMClass and DiskSpec carry no json
+// tags, so the keys are their Go field names. Class.DiskDefaults is not read:
+// the VMClass disk size is applied by Create only.
 type reconfigureDesired struct {
 	Class struct {
-		CPU          int32 `json:"CPU"`
-		MemoryMiB    int32 `json:"MemoryMiB"`
-		DiskDefaults *struct {
-			SizeGiB int32 `json:"SizeGiB"`
-		} `json:"DiskDefaults"`
+		CPU       int32 `json:"CPU"`
+		MemoryMiB int32 `json:"MemoryMiB"`
 	} `json:"Class"`
 	Disks []struct {
 		Name    string `json:"Name"`
@@ -114,6 +129,7 @@ type reconfigureDesired struct {
 // reconfigureProperties are the VM properties a Reconfigure reads.
 var reconfigureProperties = []string{
 	"config.hardware.numCPU",
+	"config.hardware.numCoresPerSocket",
 	"config.hardware.memoryMB",
 	"config.hardware.device",
 	"config.cpuHotAddEnabled",
@@ -156,25 +172,38 @@ func (p *Provider) reconfigureVM(ctx context.Context, vm *object.VirtualMachine,
 	}
 
 	p.logger.Info("Applying VM reconfiguration", "vm_id", req.Id)
-	task, err := vm.Reconfigure(ctx, *spec)
+	t, err := vm.Reconfigure(ctx, *spec)
 	if err != nil {
 		return nil, fmt.Errorf("failed to start reconfiguration: %w", err)
 	}
-	if _, err := task.WaitForResult(ctx, nil); err != nil {
+	if _, err := t.WaitForResult(ctx, nil); err != nil {
+		if isTaskFault(err) {
+			p.logger.Error("vCenter failed the reconfigure task", "vm_id", req.Id, "error", err)
+			return nil, statusWithReasons(codes.Unknown, reconfigureTaskFailedMessage, contracts.VMOperationFailedReason).Err()
+		}
 		return nil, fmt.Errorf("reconfiguration failed: %w", err)
 	}
 	p.logger.Info("VM reconfigured successfully", "vm_id", req.Id)
 
 	// Completed synchronously. RestartRequired is false: vSphere has no
 	// pending state — ReconfigVM_Task applied the change, or it was refused
-	// above (a running VM that cannot take it) or failed.
+	// above (a VM that cannot take it now) or failed.
 	return &providerv1.TaskResponse{RestartRequired: false}, nil
 }
 
+// isTaskFault reports whether err is a vCenter task's fault (the task ran and
+// failed), as opposed to a failure to reach vCenter or to wait for the task.
+func isTaskFault(err error) bool {
+	var v task.Error
+	var ptr *task.Error
+	return stderrors.As(err, &v) || stderrors.As(err, &ptr)
+}
+
 // planReconfigure builds the config spec that takes the VM vmMo (read with
-// reconfigureProperties) to desired, or nil when nothing changes. It refuses,
-// before anything is changed, a spec.disks size below its disk's
-// (InvalidArgument) and a CPU/memory change the running VM cannot take
+// reconfigureProperties) to desired, or nil when nothing changes. Before
+// anything is changed it refuses a CPU count that is not a multiple of the
+// cores per socket and a spec.disks size below its disk's (InvalidArgument),
+// and a change the VM cannot take unless it is powered off
 // (FailedPrecondition, RECONFIGURE_NEEDS_POWER_OFF).
 func (p *Provider) planReconfigure(vmID string, vmMo *mo.VirtualMachine, desired *reconfigureDesired) (*types.VirtualMachineConfigSpec, error) {
 	cfg := vmMo.Config
@@ -184,6 +213,9 @@ func (p *Provider) planReconfigure(vmID string, vmMo *mo.VirtualMachine, desired
 	cpuFrom, cpuTo := cfg.Hardware.NumCPU, cfg.Hardware.NumCPU
 	if desired.Class.CPU > 0 && desired.Class.CPU != cfg.Hardware.NumCPU {
 		cpuTo = desired.Class.CPU
+		if cps := cfg.Hardware.NumCoresPerSocket; cps > 1 && cpuTo%cps != 0 {
+			return nil, sdkerrors.NewInvalidSpec(cpuNotMultipleOfCoresFormat, cpuTo, cps)
+		}
 		p.logger.Info("CPU change requested", "vm_id", vmID, "old", cpuFrom, "new", cpuTo)
 		spec.NumCPUs = cpuTo
 		changed = true
@@ -197,7 +229,7 @@ func (p *Provider) planReconfigure(vmID string, vmMo *mo.VirtualMachine, desired
 		changed = true
 	}
 
-	edits, err := p.planDiskGrowth(vmID, cfg, desired)
+	edits, offOnly, err := p.planDiskGrowth(vmID, cfg, desired)
 	if err != nil {
 		return nil, err
 	}
@@ -209,21 +241,27 @@ func (p *Provider) planReconfigure(vmID string, vmMo *mo.VirtualMachine, desired
 		return nil, nil
 	}
 
-	if vmMo.Runtime.PowerState != types.VirtualMachinePowerStatePoweredOff {
-		if reasons := onlineResizeBlockers(cfg, cpuFrom, cpuTo, memFrom, memTo); len(reasons) > 0 {
-			p.logger.Info("Refusing a CPU/memory change the running VM cannot take; it is applied once the VM is powered off",
-				"vm_id", vmID, "power_state", vmMo.Runtime.PowerState, "reasons", reasons)
-			return nil, statusWithReasons(codes.FailedPrecondition,
-				fmt.Sprintf(reconfigureNeedsPowerOffFormat, strings.Join(reasons, "; ")),
-				contracts.ReconfigureNeedsPowerOffReason).Err()
-		}
+	var reasons []string
+	switch vmMo.Runtime.PowerState {
+	case types.VirtualMachinePowerStatePoweredOff:
+	case types.VirtualMachinePowerStateSuspended:
+		reasons = []string{suspendedVMReason}
+	default:
+		reasons = append(onlineResizeBlockers(cfg, cpuFrom, cpuTo, memFrom, memTo), offOnly...)
+	}
+	if len(reasons) > 0 {
+		p.logger.Info("Refusing a change the VM cannot take unless it is powered off; it is applied once the VM is off",
+			"vm_id", vmID, "power_state", vmMo.Runtime.PowerState, "reasons", reasons)
+		return nil, statusWithReasons(codes.FailedPrecondition,
+			fmt.Sprintf(reconfigureNeedsPowerOffFormat, strings.Join(reasons, "; ")),
+			contracts.ReconfigureNeedsPowerOffReason).Err()
 	}
 	return spec, nil
 }
 
-// onlineResizeBlockers lists why a VM that is not powered off cannot take a
-// change of its CPU count from cpuFrom to cpuTo and its memory from memFrom to
-// memTo MiB, or nothing when it can (cfg: its config).
+// onlineResizeBlockers lists why a running VM cannot take a change of its CPU
+// count from cpuFrom to cpuTo and its memory from memFrom to memTo MiB, or
+// nothing when it can (cfg: its config).
 func onlineResizeBlockers(cfg *types.VirtualMachineConfigInfo, cpuFrom, cpuTo int32, memFrom, memTo int64) []string {
 	var reasons []string
 	switch {
@@ -301,31 +339,47 @@ func additionalDiskRecords(extraConfig []types.BaseOptionValue) []additionalDisk
 	return out
 }
 
+// specDiskMatch is the record of the disk Create attached for one spec.disks
+// entry, or why there is none.
+type specDiskMatch struct {
+	rec *additionalDiskRecord
+	why string
+}
+
+// Reasons a spec.disks entry has no disk (specDiskMatch.why).
+const (
+	specDiskUnrecorded = "no disk is recorded under this name (added after the VM was created, or recorded " +
+		"by an earlier release without a name)"
+	specDiskNameRepeated = "the name is used by more than one spec.disks entry"
+	specDiskNameAmbiguous = "more than one disk is recorded under this name"
+)
+
 // matchSpecDisks maps each entry of names (the spec.disks names, in order) to
-// the record of the disk Create attached for it, or nil (see the package
-// comment above): by recorded name — the n-th entry of a name to the n-th
-// record with it — else, for a record without a name, by position.
-func matchSpecDisks(names []string, records []additionalDiskRecord) []*additionalDiskRecord {
+// the record of the disk Create attached for it: the one record carrying the
+// entry's name. A name used by more than one entry, or recorded on more than
+// one disk, matches nothing; neither does a record without a name.
+func matchSpecDisks(names []string, records []additionalDiskRecord) []specDiskMatch {
+	inSpec := map[string]int{}
+	for _, n := range names {
+		inSpec[n]++
+	}
 	byName := map[string][]*additionalDiskRecord{}
-	byIndex := map[int]*additionalDiskRecord{}
 	for i := range records {
-		rec := &records[i]
-		byIndex[rec.index] = rec
-		if rec.name != "" {
+		if rec := &records[i]; rec.name != "" {
 			byName[rec.name] = append(byName[rec.name], rec)
 		}
 	}
-	seen := map[string]int{}
-	out := make([]*additionalDiskRecord, len(names))
+	out := make([]specDiskMatch, len(names))
 	for i, name := range names {
-		n := seen[name]
-		seen[name] = n + 1
-		if named := byName[name]; n < len(named) {
-			out[i] = named[n]
-			continue
-		}
-		if rec := byIndex[i+1]; rec != nil && rec.name == "" {
-			out[i] = rec
+		switch recs := byName[name]; {
+		case inSpec[name] > 1:
+			out[i].why = specDiskNameRepeated
+		case len(recs) > 1:
+			out[i].why = specDiskNameAmbiguous
+		case len(recs) == 0 || name == "":
+			out[i].why = specDiskUnrecorded
+		default:
+			out[i].rec = recs[0]
 		}
 	}
 	return out
@@ -371,6 +425,65 @@ func findRecordedDisk(disks []*types.VirtualDisk, rec *additionalDiskRecord) *ty
 	return found
 }
 
+// diskNotExtendable says why vCenter cannot extend disk — a delta disk (the
+// VM has snapshots, or it is a linked clone) or a physical-mode RDM — or "".
+func diskNotExtendable(disk *types.VirtualDisk) string {
+	const delta = "it is a delta disk (the VM has snapshots, or it is a linked clone)"
+	switch b := disk.Backing.(type) {
+	case *types.VirtualDiskFlatVer2BackingInfo:
+		if b.Parent != nil {
+			return delta
+		}
+	case *types.VirtualDiskSeSparseBackingInfo:
+		if b.Parent != nil {
+			return delta
+		}
+	case *types.VirtualDiskSparseVer2BackingInfo:
+		if b.Parent != nil {
+			return delta
+		}
+	case *types.VirtualDiskRawDiskMappingVer1BackingInfo:
+		if b.CompatibilityMode == string(types.VirtualDiskCompatibilityModePhysicalMode) {
+			return "it is a physical-mode RDM"
+		}
+		if b.Parent != nil {
+			return delta
+		}
+	}
+	return ""
+}
+
+// diskSharing returns the sharing mode of disk's backing ("" when unset).
+func diskSharing(disk *types.VirtualDisk) string {
+	switch b := disk.Backing.(type) {
+	case *types.VirtualDiskFlatVer2BackingInfo:
+		return b.Sharing
+	case *types.VirtualDiskRawDiskMappingVer1BackingInfo:
+		return b.Sharing
+	}
+	return ""
+}
+
+// diskGrowNeedsPowerOff says why disk can be grown only while the VM is off —
+// it is on a SCSI controller whose bus is shared, or it is shared
+// multi-writer — or "" (name: its spec.disks entry; devices: the VM's devices).
+func diskGrowNeedsPowerOff(name string, disk *types.VirtualDisk, devices []types.BaseVirtualDevice) string {
+	if diskSharing(disk) == string(types.VirtualDiskSharingSharingMultiWriter) {
+		return fmt.Sprintf("the disk of spec.disks[%s] has multi-writer sharing", name)
+	}
+	for _, dev := range devices {
+		ctrl, ok := dev.(types.BaseVirtualSCSIController)
+		if !ok {
+			continue
+		}
+		c := ctrl.GetVirtualSCSIController()
+		if c.Key == disk.ControllerKey && c.SharedBus != "" && c.SharedBus != types.VirtualSCSISharingNoSharing {
+			return fmt.Sprintf("the disk of spec.disks[%s] is on a SCSI controller with a shared bus (%s)", name, c.SharedBus)
+		}
+	}
+	return ""
+}
+
 // grownDisk returns the edit that grows disk to sizeGiB.
 func grownDisk(disk *types.VirtualDisk, sizeGiB int64) types.BaseVirtualDeviceConfigSpec {
 	grown := *disk
@@ -379,72 +492,56 @@ func grownDisk(disk *types.VirtualDisk, sizeGiB int64) types.BaseVirtualDeviceCo
 	return &types.VirtualDeviceConfigSpec{Operation: types.VirtualDeviceConfigSpecOperationEdit, Device: &grown}
 }
 
-// planDiskGrowth returns the disk edits desired asks for on the VM whose
-// config is cfg: the primary disk grown to the VMClass size (a floor), and
-// each spec.disks entry's own disk grown to its size. A spec.disks size below
-// its disk's is refused (InvalidArgument) before anything is changed.
-func (p *Provider) planDiskGrowth(vmID string, cfg *types.VirtualMachineConfigInfo, desired *reconfigureDesired) ([]types.BaseVirtualDeviceConfigSpec, error) {
+// planDiskGrowth returns the edits that grow each spec.disks entry's own disk
+// to its size on the VM whose config is cfg, and why any of them needs the VM
+// powered off (offOnly). A spec.disks size below its disk's is refused
+// (InvalidArgument) before anything is changed. The primary disk is never
+// touched.
+func (p *Provider) planDiskGrowth(vmID string, cfg *types.VirtualMachineConfigInfo, desired *reconfigureDesired) (edits []types.BaseVirtualDeviceConfigSpec, offOnly []string, err error) {
 	var disks []*types.VirtualDisk
 	for _, dev := range cfg.Hardware.Device {
 		if d, ok := dev.(*types.VirtualDisk); ok {
 			disks = append(disks, d)
 		}
 	}
-	records := additionalDiskRecords(cfg.ExtraConfig)
-	additional := map[int32]bool{} // device keys of recorded additional disks
-	for i := range records {
-		if d := findRecordedDisk(disks, &records[i]); d != nil {
-			additional[d.Key] = true
-		}
-	}
-
-	var edits []types.BaseVirtualDeviceConfigSpec
-	// The primary disk: the first disk that is not a recorded additional disk.
-	if dd := desired.Class.DiskDefaults; dd != nil && dd.SizeGiB > 0 {
-		var primary *types.VirtualDisk
-		for _, d := range disks {
-			if !additional[d.Key] {
-				primary = d
-				break
-			}
-		}
-		switch {
-		case primary == nil:
-			p.logger.Info("No primary disk found; the VMClass disk size is not applied", "vm_id", vmID)
-		case int64(dd.SizeGiB)*kibPerGiB > primary.CapacityInKB:
-			p.logger.Info("Primary disk grow requested", "vm_id", vmID,
-				"old_gb", primary.CapacityInKB/kibPerGiB, "new_gb", dd.SizeGiB)
-			edits = append(edits, grownDisk(primary, int64(dd.SizeGiB)))
-		}
-	}
-
 	names := make([]string, len(desired.Disks))
 	for i, d := range desired.Disks {
 		names[i] = d.Name
 	}
-	for i, rec := range matchSpecDisks(names, records) {
+	for i, m := range matchSpecDisks(names, additionalDiskRecords(cfg.ExtraConfig)) {
 		want := int64(desired.Disks[i].SizeGiB)
 		if want <= 0 {
 			continue // withheld (above the disk-size limit) or unset: leave it
 		}
-		var disk *types.VirtualDisk
-		if rec != nil {
-			disk = findRecordedDisk(disks, rec)
+		if m.rec == nil {
+			p.logger.Info("Leaving a spec.disks entry's disk as it is: no single disk is recorded for it; Reconfigure never adds a disk",
+				"vm_id", vmID, "disk_name", names[i], "why", m.why)
+			continue
 		}
+		disk := findRecordedDisk(disks, m.rec)
 		if disk == nil {
-			p.logger.Info("No disk on the VM was attached for this spec.disks entry; Reconfigure does not add disks, leaving it",
-				"vm_id", vmID, "disk_name", names[i], "position", i+1)
+			p.logger.Info("Leaving a spec.disks entry's disk as it is: its recorded disk is not on the VM",
+				"vm_id", vmID, "disk_name", names[i], "disk_index", m.rec.index)
+			continue
+		}
+		if why := diskNotExtendable(disk); why != "" {
+			p.logger.Info("Leaving a spec.disks entry's disk as it is: vCenter cannot extend it",
+				"vm_id", vmID, "disk_name", names[i], "disk_index", m.rec.index, "why", why)
 			continue
 		}
 		currentGiB := disk.CapacityInKB / kibPerGiB
 		if want < currentGiB {
-			return nil, sdkerrors.NewInvalidSpec(diskShrinkRefusedFormat, names[i], want, currentGiB, currentGiB)
+			return nil, nil, sdkerrors.NewInvalidSpec(diskShrinkRefusedFormat, names[i], want, currentGiB, currentGiB)
 		}
-		if want*kibPerGiB > disk.CapacityInKB {
-			p.logger.Info("Additional disk grow requested", "vm_id", vmID, "disk_name", names[i],
-				"disk_index", rec.index, "old_gb", currentGiB, "new_gb", want)
-			edits = append(edits, grownDisk(disk, want))
+		if want*kibPerGiB <= disk.CapacityInKB {
+			continue
 		}
+		p.logger.Info("Additional disk grow requested", "vm_id", vmID, "disk_name", names[i],
+			"disk_index", m.rec.index, "old_gb", currentGiB, "new_gb", want)
+		if why := diskGrowNeedsPowerOff(names[i], disk, cfg.Hardware.Device); why != "" {
+			offOnly = append(offOnly, why)
+		}
+		edits = append(edits, grownDisk(disk, want))
 	}
-	return edits, nil
+	return edits, offOnly, nil
 }

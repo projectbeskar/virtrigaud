@@ -1088,20 +1088,20 @@ func (p *Provider) alreadyInPowerState(ctx context.Context, vm *object.VirtualMa
 
 // Reconfigure implements the ProviderServer interface. It applies the desired
 // configuration described by req.DesiredJson — a marshaled
-// contracts.CreateRequest, whose VMClass, DiskDefaults and DiskSpec carry NO json
-// tags, so the keys are their Go field names (Class.CPU, Class.MemoryMiB,
-// Class.DiskDefaults.SizeGiB, Disks[].Name/SizeGiB) — to the virtual machine
-// identified by req.Id, as one ReconfigVM_Task:
+// contracts.CreateRequest, whose VMClass and DiskSpec carry NO json tags, so
+// the keys are their Go field names (Class.CPU, Class.MemoryMiB,
+// Disks[].Name/SizeGiB) — to the virtual machine identified by req.Id, as one
+// ReconfigVM_Task:
 //
 //   - CPU and memory, when they differ from the VM's. On a VM that is not
 //     powered off the change must be one vCenter can apply online (CPU
 //     hot-add/hot-remove, memory hot-add within the hot-plug limit, never less
-//     memory); otherwise nothing is changed and the call fails with
-//     FailedPrecondition carrying RECONFIGURE_NEEDS_POWER_OFF.
-//   - The primary disk grown to Class.DiskDefaults.SizeGiB (a floor), and each
-//     spec.disks entry's own additional disk grown to its size (a smaller one
-//     is refused with InvalidArgument). Disks are matched the way Create made
-//     them; see reconfigure.go.
+//     memory, nothing on a suspended VM); otherwise nothing is changed and the
+//     call fails with FailedPrecondition carrying RECONFIGURE_NEEDS_POWER_OFF.
+//   - Each spec.disks entry's own additional disk, found by the name recorded
+//     with it, grown to its size (a smaller one is refused with
+//     InvalidArgument). The primary disk is never touched (the VMClass disk
+//     size is applied by Create only); see reconfigure.go.
 //
 // If nothing differs the method returns success without contacting vSphere.
 func (p *Provider) Reconfigure(ctx context.Context, req *providerv1.ReconfigureRequest) (*providerv1.TaskResponse, error) {
