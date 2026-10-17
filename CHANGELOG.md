@@ -5,6 +5,29 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-10-17 08:40] - pvc staging: staged files are opened beneath the PVC mount with no symbolic link followed (rc2 R17)
+**Author:** @wrkode (William Rizzo)
+
+### Security
+- `internal/storage/stagedfile` (new package): `OpenRead`, `Create` and `Remove` resolve a path strictly beneath a trusted root with no symbolic link in any component: `openat2` with `RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS | RESOLVE_NO_MAGICLINKS`, falling back (ENOSYS, or EPERM from a seccomp profile) to a per-component `openat(O_NOFOLLOW | O_DIRECTORY)` walk. `OpenRead` opens with `O_NONBLOCK | O_NOCTTY` and accepts only a regular file with exactly one link (FIFOs, devices, sockets, directories and hard-linked files are refused). `Create` makes missing parents with `mkdirat` under the same walk, refuses a link or special file at the name, replaces an earlier regular file by unlinking its name, and creates the new file with `O_CREAT | O_EXCL | O_NOFOLLOW`. Errors are `*stagedfile.Error`: constant, path-free text (matching `ErrUnsafe` for a refusal, `fs.ErrNotExist` when missing) and a log-only `Detail()`. Non-Linux builds fail closed (`ErrUnsupported`).
+- `internal/storage/pvc.go`: `PVCStorage.Upload`, `Download`, `Delete` and `GetMetadata` use `stagedfile` beneath the mount (they used `os.MkdirAll` / `os.Create` / `os.Open` / `os.Stat` / `os.Remove` on a joined path, so a link the tenant planted in the PVC — as the staged file or any parent directory — made the vSphere and libvirt `ImportDisk` read the provider pod's credentials, TLS key or ServiceAccount token into the tenant's target disk, and made `ExportDisk` write wherever the pod can write). Failures are `StorageError`s with constant messages (new `ErrorTypeUnsafePath` for a refusal); paths and system errors go to the provider log. New `storage.SplitPVCURL` (validated `pvc://<dns-1123-name>/<relative path>`) and `storage.PVCMountRoot`.
+- `internal/providers/libvirt/staged_source.go` (new), `internal/providers/libvirt/server.go`, `internal/providers/libvirt/conn.go`, `internal/providers/libvirt/import_size_limit.go`: the pod-side (pvc) `ImportDisk` opens the staged disk once with `stagedfile` (pvc:// beneath `/mnt/migration-storage/<pvc>`; file:// from `/` under the same rules) and both the SSH copy to the host (`copyDiskToRemote` now takes the open reader) and the local private copy (`privateLocalImportCopy` now takes the open file) read that descriptor. Before, the SSH branch used `os.Open` (all links followed) and the local branch `O_NOFOLLOW` on the last component only, so a linked parent directory still worked. A refusal is `FailedPrecondition` with the constant `refused the staged disk: …` message; a missing disk is `NotFound`; a bad URL is `InvalidArgument` (constant messages, no paths).
+
+### Added
+- Tests: `internal/storage/stagedfile/stagedfile_linux_test.go` (openat2 and the fallback walk: symlinked final component, symlinked parent at each depth, link to an `/etc` file, link inside the root, same-filesystem hard link, FIFO without blocking, `/dev/null`, directory, `..`/absolute paths, missing file; create through a planted link, a dangling link and a linked parent; remove through a linked parent), `internal/storage/pvc_staged_file_test.go`, `internal/providers/libvirt/staged_source_test.go` (including an SSH `ImportDisk` that copies nothing to the host for a planted link).
+
+### Changed
+- `examples/migration/README.md`: "Staged-file hardening (pvc backend)". `docs/upgrading.md`: a visible-but-not-breaking bullet (a link in the PVC's `vmmigrations/` tree now fails a pvc migration).
+
+### Why
+The pvc staging backend mounts a tenant-writable PVC into the credentialed provider pods (read-only on the target after #399, which does not help: a link resolves in the pod's filesystem). A planted symbolic link let the tenant exfiltrate provider credentials through the imported disk, or redirect the export's write. NFS (libnfs resolves links inside the NFS namespace) and S3 (object keys) open no local tenant-writable path and are unchanged; the Proxmox provider rejects the pvc backend before any file access.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-10-17 08:24] - A failed or deleted VMMigration deletes the disk its import landed; vSphere imports leave no import-VM files (rc2 R7)
 **Author:** @wrkode (William Rizzo)
 

@@ -467,6 +467,15 @@ the following once after upgrading, and delete only what no `VMMigration` in fli
   directory next to the source disk. `GetDiskInfo` reads the sizes of a VM's
   own disk through the same `sudo -n qemu-img info -U` rule as the in-use
   check, so an export of a snapshotted VM no longer reports 0 sizes.
+- **pvc migrations refuse links and special files in the staging PVC**
+  ([`examples/migration/README.md`](../examples/migration/README.md#staged-file-hardening-pvc-backend)).
+  The vSphere and libvirt providers now resolve every staged-file path beneath
+  the PVC mount with no symbolic link in any component, and import only a
+  regular single-link file. A `pvc` migration whose PVC holds a symbolic link
+  in the `vmmigrations/…` tree (for example `vmmigrations` linked to another
+  directory of the same PVC), or a hard link to the staged disk, now fails
+  with `refused the staged file` / `refused the staged disk`; replace the link
+  with a real directory. s3 and nfs migrations are unaffected.
 - **A libvirt clone's disk is declared qcow2** (`<driver type='qcow2'>`), the
   format it is always written in: the clone of a raw-typed source used to
   keep `type='raw'` and did not boot. Clones made earlier from raw sources
