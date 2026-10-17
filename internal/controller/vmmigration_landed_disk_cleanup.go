@@ -125,8 +125,8 @@ const (
 	landedDiskLeftRefused   = "The migration's landed disk was not deleted: the target provider refused the request."
 	landedDiskLeftNamespace = "The migration's landed disk was not deleted: the target namespace no longer grants this " +
 		"migration's namespace."
-	landedDiskLeftUnrecorded = "The migration's landed disk was not deleted: the VirtualMachine the import was sent for " +
-		"was not recorded."
+	landedDiskLeftUnrecorded = "The migration's landed disk was not deleted: the VirtualMachine the import was sent for, " +
+		"or the Provider it was sent to, was not recorded."
 )
 
 // landedDiskLeftBehindError is a landed-disk delete that can never succeed:
@@ -437,7 +437,9 @@ func logLandedDiskLeftBehind(ctx context.Context, left *landedDiskLeftBehindErro
 // when another VMMigration in flight targets, or recorded an import for, the
 // same VirtualMachine. Otherwise DeleteLandedDisk is sent to the target
 // Provider the import was sent to (the recorded UID, resolved through the
-// live grant check), naming only the recorded VirtualMachine, never the
+// live grant check; a Provider that no longer grants this namespace
+// (consumerNamespaceSelector) holds the cleanup, retryably, as it holds the
+// staged disk's), naming only the recorded VirtualMachine, never the
 // current spec.target. The provider refuses (VM_DISK_IN_USE) a disk any VM
 // on it uses; that disk is kept too.
 func (r *VMMigrationReconciler) cleanupLandedDisk(ctx context.Context, m *infrav1beta1.VMMigration) (landedDiskDone, error) {
@@ -449,7 +451,10 @@ func (r *VMMigrationReconciler) cleanupLandedDisk(ctx context.Context, m *infrav
 	}
 	recorded := *m.Status.StorageInfo.ImportTarget
 	key, ok := recordedImportTarget(m)
-	if !ok {
+	// Never sent without the Provider the import was sent to: an empty UID
+	// (written by an older manager, or by anything but markLandedDiskMayExist)
+	// cannot prove the current target Provider is the one the disk is on.
+	if !ok || recorded.ProviderUID == "" {
 		return landedDiskDone{}, landedLeftBehind(landedDiskLeftUnrecorded, nil)
 	}
 	live := r.liveReader()
@@ -495,7 +500,7 @@ func (r *VMMigrationReconciler) cleanupLandedDisk(ctx context.Context, m *infrav
 	if err != nil {
 		return landedDiskDone{}, fmt.Errorf("resolve target provider: %w", err)
 	}
-	if recorded.ProviderUID != "" && string(provider.UID) != recorded.ProviderUID {
+	if string(provider.UID) != recorded.ProviderUID {
 		return landedDiskDone{}, landedLeftBehind(landedDiskLeftProviderChanged, nil)
 	}
 	instance, err := r.getProviderInstance(ctx, provider)
