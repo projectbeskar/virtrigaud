@@ -3,16 +3,43 @@
 The VirtRigaud manager writes some annotations and labels on the
 `VirtualMachine`s it creates or adopts: where a migrated VM came from, which
 `VMClone` produced a VM, that a VM was adopted from a hypervisor, and so on.
-Anyone who can create or edit a `VirtualMachine` can write the same keys, so
-on their own they prove nothing. The controllers never decide which object is
-theirs from them (a `VMMigration` binds its target by UID, see
-[`cross-namespace-targets.md`](cross-namespace-targets.md#the-target-vm-must-be-the-migrations-own)),
-but a forged marker can still mislead people and tools that read it.
+Without a guard, anyone who can create or edit a `VirtualMachine` can write
+the same keys.
 
-The chart therefore installs a **ValidatingAdmissionPolicy** that lets only
-the manager's ServiceAccount add or change these keys. It runs inside the API
+**For adoption and clones this policy is a security control, not a
+convenience.** Some controllers still decide which `VirtualMachine` a
+hypervisor VM is bound to from these keys:
+
+- **Single-host adoption** binds a hypervisor VM's id to an existing
+  `VirtualMachine` that carries the label `virtrigaud.io/adopted=true` and
+  the matching name.
+- **Clustered adoption** recognizes the `VirtualMachine` waiting for a domain
+  by `virtrigaud.io/adopted-host` and `virtrigaud.io/adopted-id`.
+- **`VMClone`** binds the cloned VM only to a target that carries its
+  `virtrigaud.io/clone-uid` marker.
+
+Each of these has other checks too (the referenced Provider, an empty
+`status.id`, the name). But without the policy, a tenant who can create
+`VirtualMachine`s in the Provider's or the clone target's namespace can forge
+the marker. **Don't set `admissionPolicy.reservedKeys.enabled: false`** unless
+another admission control (Kyverno, Gatekeeper) reserves the same keys.
+
+A `VMMigration` doesn't rely on the policy. It binds its target by the UID its
+own `Create` returned and by a claim only it can produce
+([`cross-namespace-targets.md`](cross-namespace-targets.md#the-target-vm-must-be-the-migrations-own)).
+Its provenance annotations are informational, and a forged one can still
+mislead people and tools that read it.
+
+The chart installs a **ValidatingAdmissionPolicy** that lets only the
+manager's ServiceAccount add or change these keys. It runs inside the API
 server. It's not a webhook, so it doesn't need `webhooks.enabled` and keeps
 working while the manager is down.
+
+**On Kubernetes older than 1.30 there's no policy.** There, the adoption and
+clone markers above stay forgeable by anyone who can create
+`VirtualMachine`s in those namespaces. Restrict `create`/`update` on
+`virtualmachines` there to trusted users, or reserve the keys with another
+admission control.
 
 ## What it rejects
 
@@ -116,12 +143,26 @@ admissionPolicy:
   writes. Add every other installation's manager ServiceAccount
   (`system:serviceaccount:<namespace>:<name>`) to `exemptUsernames`, or turn
   the policy off on all but one installation and list every manager there.
+- **A leader-election overlap with the policy off.** When a migration's
+  `Create` of its target VM answers `AlreadyExists` for a VM that carries a
+  `virtrigaud.io/migration-claim` it can't match, the migration re-checks
+  instead of failing, because with the policy on only a manager (an
+  overlapping leader) can have written that annotation. With the policy off,
+  a tenant can plant the annotation as well. That only delays the
+  `TargetVMNotOwned` failure by one re-check.
+- **The kustomize copy follows `config/default`.** `config/default` fills the
+  exempted manager's namespace and name from its ServiceAccount with
+  `replacements`, after its own `namespace` and `namePrefix`. An overlay on
+  top of `config/default` that changes either must repeat that
+  `replacements` block. Otherwise the policy keeps exempting the old name and
+  denies the manager.
 - **Cluster administrators aren't exempt by default.** A policy applies to
   `system:masters` too. To keep a break-glass path, list a group in
   `exemptGroups`.
 
 The kustomize deployment (`config/default`) installs the same policy from
-`config/admission-policy/`, exempting `virtrigaud-system/virtrigaud-controller-manager`.
+`config/admission-policy/`, exempting the manager ServiceAccount
+(`virtrigaud-system/virtrigaud-controller-manager` by default).
 On a cluster older than 1.30, remove `../admission-policy` from
 `config/default/kustomization.yaml`.
 
