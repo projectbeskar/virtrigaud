@@ -21,12 +21,15 @@ import (
 	"fmt"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/genproto/googleapis/rpc/errdetails"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -222,17 +225,53 @@ func TestVMSnapshot_LibvirtDefiniteFailureFailsTheAttempt(t *testing.T) {
 	}
 }
 
-// TestVMSnapshot_FailureAnsweringAResendIsNeverDefinite: a SnapshotCreate sent
-// again after an operator's confirmation, answered with a typed refusal (the
-// snapshot the first call took has the name: AlreadyExists), keeps the marker
-// and holds - it must not fail the VMSnapshot, or the first snapshot leaks
-// (the rule of a VM Create's re-send, createOutcomeKnown).
-func TestVMSnapshot_FailureAnsweringAResendIsNeverDefinite(t *testing.T) {
+// TestProviderCallOutcomeKnownFor: how a call was sent decides what its failure
+// proves. A first send is read as providerCallOutcomeKnown; the manager's own
+// re-send proves nothing; a send on an operator's confirmation is a first send
+// unless the answer contradicts the confirmation.
+func TestProviderCallOutcomeKnownFor(t *testing.T) {
+	notPerformed := libvirtNotPerformed(t, "exportDisk")
+	invalid := contracts.NewInvalidSpecError("bad", nil)
+	taken := contracts.NewConflictError("a snapshot with this name already exists", nil)
+	size := contracts.NewConflictError("too big", contracts.ErrDiskSizeExceedsLimit)
+	inUse := contracts.NewConflictError("a linked clone depends on it", contracts.ErrVMDiskInUse)
+	unknown := libvirtUntyped("exportDisk")
+
+	first, auto, confirmed := callAttempt{}, callAttempt{resend: true}, callAttempt{confirmed: true}
+	for name, tc := range map[string]struct {
+		err           error
+		first, a, cfm bool
+	}{
+		"not performed":               {notPerformed, true, false, true},
+		"invalid spec":                {invalid, true, false, true},
+		"name taken (plain conflict)": {taken, true, false, false},
+		"disk above the size limit":   {size, true, false, true},
+		"disk another VM uses":        {inUse, true, false, true},
+		"untyped":                     {unknown, false, false, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			assert.Equal(t, tc.first, providerCallOutcomeKnownFor(tc.err, first), "first send")
+			assert.Equal(t, tc.a, providerCallOutcomeKnownFor(tc.err, auto), "automatic re-send")
+			assert.Equal(t, tc.cfm, providerCallOutcomeKnownFor(tc.err, confirmed), "operator-confirmed send")
+		})
+	}
+	assert.Equal(t, callAttempt{}, newCallAttempt(nil, false))
+	assert.Equal(t, callAttempt{}, newCallAttempt(nil, true), "a confirmation without a marker is no attempt")
+	marker := &metav1.Condition{}
+	assert.Equal(t, callAttempt{resend: true}, newCallAttempt(marker, false))
+	assert.Equal(t, callAttempt{confirmed: true}, newCallAttempt(marker, true))
+}
+
+// confirmedSnapshotSend leaves a VMSnapshot whose first create's result was
+// lost, held after a restart, and confirmed by the operator; the provider then
+// answers the confirmed create with err.
+func confirmedSnapshotSend(t *testing.T, err error) (*snapshotRecorder, *infrav1beta1.VMSnapshot) {
+	t.Helper()
 	faults := &statusWriteFaults{}
 	faults.results.Store(true)
 	r, rec, snap := markerSnapshotFixture(t, false, faults)
-	_, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(snap)})
-	require.Error(t, err, "the first create's outcome could not be written")
+	_, rerr := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(snap)})
+	require.Error(t, rerr, "the first create's outcome could not be written")
 	require.Len(t, rec.creates, 1)
 	faults.results.Store(false)
 
@@ -243,38 +282,170 @@ func TestVMSnapshot_FailureAnsweringAResendIsNeverDefinite(t *testing.T) {
 		requestMarkerAttemptID(got.Status.Conditions, snapshotConditionRequested)}
 	require.NoError(t, r2.Update(context.Background(), got))
 
-	rec.createErr = contracts.NewConflictError("snapshotCreate: a snapshot with this name already exists", nil)
+	rec.createErr = err
 	_, got = reconcileSnapshotOnce(t, r2, snap)
 	require.Len(t, rec.creates, 2, "sent again on the confirmation")
-	assert.NotEqual(t, infrav1beta1.SnapshotPhaseFailed, got.Status.Phase, "the answer to a re-send never fails the snapshot")
-	assert.True(t, snapshotRequested(got), "the marker is kept")
+	return rec, got
 }
 
-// TestMigrationExport_FailureAnsweringAResendIsNeverDefinite: the same for an
-// ExportDisk sent again after an operator's confirmation.
-func TestMigrationExport_FailureAnsweringAResendIsNeverDefinite(t *testing.T) {
+// TestVMSnapshot_ConfirmedSendIsAFirstSendExceptContradictions: after the
+// operator's confirmation a definite refusal fails the VMSnapshot (as a first
+// send's would; holding forever is no outcome), but a Conflict - a snapshot of
+// that name exists - contradicts the confirmation and holds again.
+func TestVMSnapshot_ConfirmedSendIsAFirstSendExceptContradictions(t *testing.T) {
+	_, got := confirmedSnapshotSend(t, contracts.NewInvalidSpecError("snapshotCreate: invalid name", nil))
+	assert.Equal(t, infrav1beta1.SnapshotPhaseFailed, got.Status.Phase, "a definite failure answering the confirmed send fails it")
+	assert.False(t, snapshotRequested(got))
+
+	_, got = confirmedSnapshotSend(t, libvirtNotPerformed(t, "snapshotCreate"))
+	assert.Equal(t, infrav1beta1.SnapshotPhaseFailed, got.Status.Phase)
+
+	_, got = confirmedSnapshotSend(t, contracts.NewConflictError("snapshotCreate: a snapshot with this name already exists", nil))
+	assert.NotEqual(t, infrav1beta1.SnapshotPhaseFailed, got.Status.Phase, "the answer contradicts the confirmation: held again")
+	assert.True(t, snapshotRequested(got), "the marker is kept")
+
+	_, got = confirmedSnapshotSend(t, libvirtUntyped("snapshotCreate"))
+	assert.True(t, snapshotRequested(got), "an unknown outcome is held, as ever")
+}
+
+// TestVMSnapshot_RoutedResendKeepsItsDefiniteAnswers: a clustered provider
+// adopts the earlier snapshot by request token, so a definite refusal answering
+// the manager's own re-send of a routed create is still a definite outcome.
+func TestVMSnapshot_RoutedResendKeepsItsDefiniteAnswers(t *testing.T) {
+	faults := &statusWriteFaults{}
+	faults.results.Store(true)
+	r, rec, snap := markerSnapshotFixture(t, true, faults)
+	_, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(snap)})
+	require.Error(t, err)
+	require.Len(t, rec.creates, 1)
+	faults.results.Store(false)
+
+	r2 := restartedSnapshotReconciler(r)
+	got := &infrav1beta1.VMSnapshot{}
+	require.NoError(t, r2.Get(context.Background(), client.ObjectKeyFromObject(snap), got))
+	cond := meta.FindStatusCondition(got.Status.Conditions, snapshotConditionRequested)
+	require.NotNil(t, cond)
+	cond.LastTransitionTime = metav1.NewTime(time.Now().Add(-2 * time.Minute))
+	require.NoError(t, r2.Status().Update(context.Background(), got))
+
+	rec.createErr = contracts.NewNotFoundError("snapshotCreate: the domain is gone", nil)
+	_, got = reconcileSnapshotOnce(t, r2, snap)
+	require.Len(t, rec.creates, 2, "the routed create is sent again")
+	assert.Equal(t, infrav1beta1.SnapshotPhaseFailed, got.Status.Phase, "a definite answer to a routed re-send stays definite")
+	assert.False(t, snapshotRequested(got))
+}
+
+// lostExport leaves a VMMigration whose first ExportDisk's result was lost (the
+// status write failed), after a restart.
+func lostExport(t *testing.T, caps contracts.Capabilities) (*VMMigrationReconciler, client.Client, *infrav1beta1.VMMigration) {
+	t.Helper()
 	vm, p, m := raceMigrationFixture()
-	prov := &capsMigrationProvider{}
+	first := &capsMigrationProvider{caps: caps}
 	var failing atomic.Bool
 	failing.Store(true)
 	c := failingStatusWrites(t, &failing, vm, p, m)
-	r := migrationReconcilerOn(c, prov)
+	r := migrationReconcilerOn(c, first)
 	_, err := r.handleExportingPhase(context.Background(), storedMigration(t, c, m))
 	require.Error(t, err)
-	require.EqualValues(t, 1, prov.exportCalls.Load())
+	require.EqualValues(t, 1, first.exportCalls.Load())
 	failing.Store(false)
+	return restarted(r), c, m
+}
 
-	again := &failingTransfersProvider{err: libvirtNotPerformed(t, "exportDisk")}
-	r2 := restarted(r)
-	r2.providerInstanceFn = func(context.Context, *infrav1beta1.Provider) (contracts.Provider, error) { return again, nil }
-	_, err = r2.handleExportingPhase(context.Background(), storedMigration(t, c, m))
+func sendExportAgain(t *testing.T, r *VMMigrationReconciler, c client.Client, m *infrav1beta1.VMMigration, again *failingTransfersProvider) {
+	t.Helper()
+	r.providerInstanceFn = func(context.Context, *infrav1beta1.Provider) (contracts.Provider, error) { return again, nil }
+	_, err := r.handleExportingPhase(context.Background(), storedMigration(t, c, m))
 	require.NoError(t, err)
-	require.EqualValues(t, 0, again.exportCalls.Load(), "held first")
-	confirmAttempt(t, c, m, migrationConditionExportRequested, "")
-	_, err = r2.handleExportingPhase(context.Background(), storedMigration(t, c, m))
-	require.NoError(t, err)
-	require.EqualValues(t, 1, again.exportCalls.Load(), "sent again on the confirmation")
+}
+
+// TestMigrationExport_AutomaticResendIsNeverDefinite: the manager's own re-send
+// of an ExportDisk (the backend is re-send safe, the settle time has passed),
+// answered "not performed", keeps the marker: the answer says nothing about the
+// first call.
+func TestMigrationExport_AutomaticResendIsNeverDefinite(t *testing.T) {
+	r, c, m := lostExport(t, contracts.Capabilities{ResendSafeExportBackends: []string{"pvc"}})
+	backdateMarker(t, c, m, migrationConditionExportRequested, migrationResendSettleTime+time.Minute)
+	again := &failingTransfersProvider{capsMigrationProvider: capsMigrationProvider{caps: contracts.Capabilities{ResendSafeExportBackends: []string{"pvc"}}},
+		err: libvirtNotPerformed(t, "exportDisk")}
+	sendExportAgain(t, r, c, m, again)
+	require.EqualValues(t, 1, again.exportCalls.Load(), "re-sent")
 	got := storedMigration(t, c, m)
-	assert.NotEqual(t, infrav1beta1.MigrationPhaseFailed, got.Status.Phase, "the answer to a re-send never fails the migration")
+	assert.NotEqual(t, infrav1beta1.MigrationPhaseFailed, got.Status.Phase)
 	assert.True(t, migrationRequested(got, longOpExport), "the marker is kept")
+}
+
+// TestMigrationExport_ConfirmedSendIsAFirstSendExceptContradictions: after the
+// operator's confirmation a "not performed" fails the migration, a plain
+// Conflict holds it again.
+func TestMigrationExport_ConfirmedSendIsAFirstSendExceptContradictions(t *testing.T) {
+	for name, tc := range map[string]struct {
+		err    error
+		failed bool
+	}{
+		"not performed":        {err: libvirtNotPerformed(t, "exportDisk"), failed: true},
+		"invalid request":      {err: contracts.NewInvalidSpecError("exportDisk: bad", nil), failed: true},
+		"conflict":             {err: contracts.NewConflictError("exportDisk: already exists", nil), failed: false},
+		"untyped (lost, held)": {err: libvirtUntyped("exportDisk"), failed: false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			r, c, m := lostExport(t, contracts.Capabilities{})
+			again := &failingTransfersProvider{err: tc.err}
+			sendExportAgain(t, r, c, m, again)
+			require.EqualValues(t, 0, again.exportCalls.Load(), "held first")
+			confirmAttempt(t, c, m, migrationConditionExportRequested, "")
+			sendExportAgain(t, r, c, m, again)
+			require.EqualValues(t, 1, again.exportCalls.Load(), "sent again on the confirmation")
+			got := storedMigration(t, c, m)
+			if tc.failed {
+				assert.Equal(t, infrav1beta1.MigrationPhaseFailed, got.Status.Phase)
+				assert.False(t, migrationRequested(got, longOpExport))
+				return
+			}
+			assert.NotEqual(t, infrav1beta1.MigrationPhaseFailed, got.Status.Phase)
+			assert.True(t, migrationRequested(got, longOpExport), "the marker is kept")
+		})
+	}
+}
+
+// TestMigrationImport_ConfirmedSendLandingNameInUseHolds: an import sent on an
+// operator's confirmation, refused because the landing name is in use (a
+// Conflict), contradicts the confirmation and holds; a "not performed" fails.
+func TestMigrationImport_ConfirmedSendLandingNameInUseHolds(t *testing.T) {
+	for name, tc := range map[string]struct {
+		err    error
+		failed bool
+	}{
+		"landing name in use": {err: contracts.NewConflictError("importDisk: the disk already exists and is in use by another domain", nil), failed: false},
+		"not performed":       {err: libvirtNotPerformed(t, "importDisk"), failed: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			p, m := importRaceFixture()
+			var failing atomic.Bool
+			failing.Store(true)
+			c := failingStatusWrites(t, &failing, p, m)
+			r := migrationReconcilerOn(c, &capsMigrationProvider{})
+			_, err := r.handleImportingPhase(context.Background(), storedMigration(t, c, m))
+			require.Error(t, err)
+			failing.Store(false)
+
+			again := &failingTransfersProvider{err: tc.err}
+			r2 := restarted(r)
+			r2.providerInstanceFn = func(context.Context, *infrav1beta1.Provider) (contracts.Provider, error) { return again, nil }
+			_, err = r2.handleImportingPhase(context.Background(), storedMigration(t, c, m))
+			require.NoError(t, err)
+			require.EqualValues(t, 0, again.importCalls.Load(), "held first")
+			confirmAttempt(t, c, m, migrationConditionImportRequested, "")
+			_, err = r2.handleImportingPhase(context.Background(), storedMigration(t, c, m))
+			require.NoError(t, err)
+			require.EqualValues(t, 1, again.importCalls.Load())
+			got := storedMigration(t, c, m)
+			if tc.failed {
+				assert.Equal(t, infrav1beta1.MigrationPhaseFailed, got.Status.Phase)
+				return
+			}
+			assert.NotEqual(t, infrav1beta1.MigrationPhaseFailed, got.Status.Phase)
+			assert.True(t, migrationRequested(got, longOpImport))
+		})
+	}
 }
