@@ -51,3 +51,18 @@ func TestDeleteStagedDisk_UnimplementedAndNotAdvertised(t *testing.T) {
 	_, err = p.DeleteStagedDisk(context.Background(), req)
 	assert.Equal(t, codes.InvalidArgument, status.Code(err))
 }
+
+// TestDeleteLandedDisk_UnimplementedAndNotAdvertised: the mock lands no disk,
+// so it does not report the landed-disk delete and answers Unimplemented (rc2
+// R7).
+func TestDeleteLandedDisk_UnimplementedAndNotAdvertised(t *testing.T) {
+	p := NewProvider()
+	caps, err := p.GetCapabilities(context.Background(), &providerv1.GetCapabilitiesRequest{})
+	require.NoError(t, err)
+	assert.False(t, caps.GetSupportsLandedDiskDelete())
+
+	_, err = p.DeleteLandedDisk(context.Background(), &providerv1.DeleteLandedDiskRequest{
+		TargetVm: &providerv1.ObjectIdentity{Namespace: "team-a", Name: "web"},
+	})
+	assert.Equal(t, codes.Unimplemented, status.Code(err))
+}
