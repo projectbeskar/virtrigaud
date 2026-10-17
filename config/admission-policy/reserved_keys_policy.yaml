@@ -1,0 +1,83 @@
+# Reserved VirtRigaud keys (security review M1): a ValidatingAdmissionPolicy
+# (admissionregistration.k8s.io/v1, Kubernetes 1.30+) that lets ONLY the
+# VirtRigaud manager add or change the annotations and labels it alone writes
+# on a VirtualMachine — provenance, claim, completion, clone and adoption
+# markers. Any other identity is rejected when it creates a VirtualMachine
+# carrying one of them, or adds or changes one on an update. An update that
+# leaves them as they are (kubectl apply/edit of other fields) and removing
+# one are allowed. Keys users and administrators set themselves
+# (virtrigaud.io/orphan-on-delete, virtrigaud.io/force-delete,
+# virtrigaud.io/create-outcome, infra.virtrigaud.io/placement-uid, ...) are
+# not listed and stay allowed. docs/admission-policy.md has the inventory.
+#
+# The Helm chart renders the same policy (charts/virtrigaud/templates/
+# admission-policy.yaml); hack/verify-admission-policy-render.sh keeps the two
+# in step. The manager identity below is this kustomization's ServiceAccount
+# (namespace virtrigaud-system, name prefix virtrigaud-); change it with them.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: reserved-keys
+  labels:
+    app.kubernetes.io/name: virtrigaud
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["infra.virtrigaud.io"]
+        apiVersions: ["*"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["virtualmachines"]
+  matchConditions:
+    - name: not-the-virtrigaud-manager
+      expression: >-
+        !(request.userInfo.username in ['system:serviceaccount:virtrigaud-system:virtrigaud-controller-manager'])
+  variables:
+    - name: reservedAnnotations
+      expression: >-
+        ['virtrigaud.io/migration', 'virtrigaud.io/migration-claim', 'virtrigaud.io/migrated-from',
+        'virtrigaud.io/imported-disk-id', 'virtrigaud.io/disk-checksum', 'virtrigaud.io/migration-completed',
+        'virtrigaud.io/migration-completed-at', 'virtrigaud.io/clone', 'virtrigaud.io/clone-uid',
+        'virtrigaud.io/cloned-from', 'virtrigaud.io/adopted-host', 'virtrigaud.io/adopted-id']
+    - name: reservedLabels
+      expression: >-
+        ['virtrigaud.io/adopted']
+    - name: setAnnotations
+      expression: >-
+        variables.reservedAnnotations.filter(k,
+        has(object.metadata.annotations) && k in object.metadata.annotations &&
+        !(oldObject != null && has(oldObject.metadata.annotations) && k in oldObject.metadata.annotations &&
+        oldObject.metadata.annotations[k] == object.metadata.annotations[k]))
+    - name: setLabels
+      expression: >-
+        variables.reservedLabels.filter(k,
+        has(object.metadata.labels) && k in object.metadata.labels &&
+        !(oldObject != null && has(oldObject.metadata.labels) && k in oldObject.metadata.labels &&
+        oldObject.metadata.labels[k] == object.metadata.labels[k]))
+  validations:
+    - expression: size(variables.setAnnotations) == 0
+      reason: Forbidden
+      message: >-
+        a reserved virtrigaud.io annotation is set by the VirtRigaud manager only and cannot be added or changed
+      messageExpression: >-
+        'annotation(s) ' + variables.setAnnotations.join(', ') +
+        ' are reserved for the VirtRigaud manager and cannot be added or changed'
+    - expression: size(variables.setLabels) == 0
+      reason: Forbidden
+      message: >-
+        a reserved virtrigaud.io label is set by the VirtRigaud manager only and cannot be added or changed
+      messageExpression: >-
+        'label(s) ' + variables.setLabels.join(', ') +
+        ' are reserved for the VirtRigaud manager and cannot be added or changed'
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: reserved-keys
+  labels:
+    app.kubernetes.io/name: virtrigaud
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  policyName: reserved-keys
+  validationActions: ["Deny"]

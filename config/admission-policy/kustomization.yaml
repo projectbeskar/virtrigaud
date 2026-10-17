@@ -1,0 +1,7 @@
+resources:
+- reserved_keys_policy.yaml
+
+# The binding names its policy (spec.policyName): keep it in step with the
+# policy's name when a namePrefix/nameSuffix is applied.
+configurations:
+- kustomizeconfig.yaml

@@ -18,6 +18,9 @@ resources:
 - ../crd
 - ../rbac
 - ../manager
+# Reserved virtrigaud.io keys on VirtualMachines (ValidatingAdmissionPolicy,
+# Kubernetes 1.30+; docs/admission-policy.md). Remove on an older cluster.
+- ../admission-policy
 # [WEBHOOK] To enable webhook, uncomment all the sections with [WEBHOOK] prefix including the one in
 # crd/kustomization.yaml
 #- ../webhook

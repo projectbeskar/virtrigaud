@@ -474,6 +474,28 @@ networkPolicy:
 # its Service and serving cert). For self-signed (the default) the chart keeps the
 # generated caBundle coherent with the serving cert and persists it across upgrades.
 #
+# Reserved VirtRigaud keys (docs/admission-policy.md). A ValidatingAdmissionPolicy
+# (Kubernetes 1.30+; nothing is rendered on an older cluster) that lets only the
+# manager's ServiceAccount add or change the virtrigaud.io annotations and labels
+# the manager alone writes on a VirtualMachine (migration / clone / adoption
+# provenance, the migration claim, migration-completed). It is evaluated in the
+# API server — not a webhook — so it does not need webhooks.enabled. Keys users
+# set themselves (orphan-on-delete, force-delete, create-outcome, placement-uid)
+# are not affected, and an update that leaves the reserved keys unchanged is
+# always allowed.
+admissionPolicy:
+  reservedKeys:
+    enabled: true
+    # Other identities that may set the reserved keys, e.g. a backup tool that
+    # re-creates VirtualMachines with their annotations on restore
+    # ("system:serviceaccount:velero:velero"), or the manager of another
+    # VirtRigaud installation in this cluster.
+    exemptUsernames: []
+    # Groups whose members may set the reserved keys (e.g. "system:masters"
+    # for break-glass administrators). Empty by default: nobody but the
+    # manager and exemptUsernames.
+    exemptGroups: []
+
 # Production / banking / GitOps posture (security review): prefer
 # `certificates.source: cert-manager`. The self-signed default persists its cert
 # across upgrades via Helm `lookup`, which only works under `helm install/upgrade`
