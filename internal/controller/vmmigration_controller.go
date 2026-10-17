@@ -1465,8 +1465,10 @@ func (r *VMMigrationReconciler) handleImportingPhase(ctx context.Context, migrat
 
 	// ADR-0011 D1 (review M1): record the VM this import is sent for before
 	// it is sent; the staged-disk delete names only this recorded VM, never a
-	// spec.target edited afterwards.
-	if markImportTarget(migration, targetVM) {
+	// spec.target edited afterwards. rc2 R7: the landed-disk cleanup records
+	// that a disk may be landed, for this VM on this Provider, at the same time.
+	importMarked := markImportTarget(migration, targetVM)
+	if markLandedDiskMayExist(migration, targetVM, targetProvider) || importMarked {
 		if err := r.updateStatus(ctx, migration); err != nil {
 			return ctrl.Result{}, err
 		}
@@ -2430,6 +2432,12 @@ func (r *VMMigrationReconciler) handleDeletion(ctx context.Context, migration *i
 	// way: the finalizer is kept while its delete can still succeed, and
 	// force-delete releases it with a StagedDiskLeftBehind Warning.
 	if hold, res, err := r.releaseStagedDiskForDeletion(ctx, migration); hold {
+		return res, err
+	}
+
+	// The disk the import landed on the target provider (rc2 R7) is held the
+	// same way, unless a VirtualMachine uses it (vmmigration_landed_disk_cleanup.go).
+	if hold, res, err := r.releaseLandedDiskForDeletion(ctx, migration); hold {
 		return res, err
 	}
 
