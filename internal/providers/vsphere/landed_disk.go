@@ -43,6 +43,12 @@ import (
 // is removed only when — checked right before the delete, without the scan
 // cache — no VM or template references any file in it (ensureImportFolderUnused,
 // which fails closed). Nothing outside that one folder is ever removed.
+//
+// Limits: the scan sees the VMs and templates of this vCenter only, so the
+// landing datastore must not be shared with hypervisors or vCenters this
+// Provider does not manage; and the landing lock is per provider process, so
+// run one replica of a vSphere provider (the controller does: Recreate, one
+// replica).
 
 const (
 	// landedDiskRequestInvalidMessage refuses a request without a valid
