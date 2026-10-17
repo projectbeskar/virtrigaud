@@ -19,27 +19,31 @@ package proxmox
 import (
 	"context"
 	"encoding/json"
+	"net/http"
 	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/genproto/googleapis/rpc/errdetails"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
 	"github.com/projectbeskar/virtrigaud/internal/providers/proxmox/pvefake"
 	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
 )
 
-// Reconfigure sends a size only to the disk it is for (reconfigure.go): the
-// VMClass size to the primary disk, and no spec.disks size to any disk (the
-// Proxmox Create attaches none). Before this fix every spec.disks size went to
-// scsi0 — the root disk — and a disk grow returned before the CPU/memory
-// change was sent. Validated against pvefake only, not a real PVE.
+// Reconfigure changes no disk (reconfigure.go): no spec.disks size (the
+// Proxmox Create attaches none) and not the VMClass size. Before this fix
+// every spec.disks size went to scsi0 — the root disk — and a disk grow
+// returned before the CPU/memory change was sent. Validated against pvefake
+// only, not a real PVE.
 
 // twoDiskVM creates a VM on a fake PVE and gives it the disks scsi0 (32G, the
 // boot disk) and scsi1 (10G, a template's data disk).
-func twoDiskVM(t *testing.T, extra map[string]string) (*Provider, *pvefake.Server, string, int) {
+func twoDiskVM(t *testing.T) (*Provider, *pvefake.Server, string, int) {
 	t.Helper()
 	server, endpoint, err := pvefake.StartFakeServer()
 	require.NoError(t, err)
@@ -59,9 +63,6 @@ func twoDiskVM(t *testing.T, extra map[string]string) (*Provider, *pvefake.Serve
 		"scsi1": "local-lvm:vm-" + resp.Id + "-disk-1,size=10G",
 		"ide2":  "local-lvm:vm-" + resp.Id + "-cloudinit,media=cdrom",
 		"boot":  "order=scsi0;ide2;net0",
-	}
-	for k, v := range extra {
-		vm.Config[k] = v
 	}
 	server.PutVM(vm)
 	return provider, server, resp.Id, vmid
@@ -98,7 +99,7 @@ func resizes(server *pvefake.Server) int {
 // wrong-disk resize: spec.disks sizes reach neither scsi0 (the root disk) nor
 // scsi1, while the CPU/memory change in the same request is applied.
 func TestProxmoxReconfigure_SpecDisksResizeNoDisk(t *testing.T) {
-	provider, server, id, vmid := twoDiskVM(t, nil)
+	provider, server, id, vmid := twoDiskVM(t)
 
 	require.NoError(t, reconfigureTo(t, provider, id, contracts.CreateRequest{
 		Class: contracts.VMClass{CPU: 2, MemoryMiB: 2048},
@@ -119,57 +120,44 @@ func TestProxmoxReconfigure_SpecDisksResizeNoDisk(t *testing.T) {
 	assert.Zero(t, resizes(server))
 }
 
-// TestProxmoxReconfigure_ClassSizeGrowsPrimaryDiskThenCPUMemory: the VMClass
-// size grows the primary disk only, and the CPU/memory change in the same
-// request is applied too (a grow used to return before sending it).
-func TestProxmoxReconfigure_ClassSizeGrowsPrimaryDiskThenCPUMemory(t *testing.T) {
-	provider, server, id, vmid := twoDiskVM(t, nil)
+// TestProxmoxReconfigure_ClassSizeChangesNoDisk: the VMClass disk size is not
+// applied by Reconfigure (Create applies it, which the Proxmox Create does not
+// do yet): no disk is resized, and the CPU/memory change is applied.
+func TestProxmoxReconfigure_ClassSizeChangesNoDisk(t *testing.T) {
+	provider, server, id, vmid := twoDiskVM(t)
 
 	require.NoError(t, reconfigureTo(t, provider, id, contracts.CreateRequest{
 		Class: contracts.VMClass{CPU: 4, MemoryMiB: 4096, DiskDefaults: &contracts.DiskDefaults{SizeGiB: 64}},
+		Disks: []contracts.DiskSpec{{Name: "data", SizeGiB: 64}},
 	}))
-	assert.Equal(t, 1, resizes(server))
+	assert.Zero(t, resizes(server))
 	vm, _ := server.GetVM(vmid)
-	assert.Contains(t, vm.Config["scsi0"], "size=64G", "the primary disk is grown")
-	assert.Contains(t, vm.Config["scsi1"], "size=10G", "another disk is not")
-	assert.Equal(t, 4, vm.CPUs, "the CPU change is applied after the grow")
-	assert.Equal(t, int64(4096)<<20, vm.Memory)
-
-	// The VMClass size is a floor: equal or smaller sends no resize, no error.
-	require.NoError(t, reconfigureTo(t, provider, id, contracts.CreateRequest{
-		Class: contracts.VMClass{DiskDefaults: &contracts.DiskDefaults{SizeGiB: 64}},
-	}))
-	require.NoError(t, reconfigureTo(t, provider, id, contracts.CreateRequest{
-		Class: contracts.VMClass{DiskDefaults: &contracts.DiskDefaults{SizeGiB: 8}},
-	}))
-	assert.Equal(t, 1, resizes(server))
-}
-
-// TestProxmoxReconfigure_PrimaryDiskFollowsBootOrder: the primary disk is the
-// first disk of the boot order, not always scsi0.
-func TestProxmoxReconfigure_PrimaryDiskFollowsBootOrder(t *testing.T) {
-	provider, server, id, vmid := twoDiskVM(t, map[string]string{"boot": "order=ide2;scsi1;scsi0"})
-	require.NoError(t, reconfigureTo(t, provider, id, contracts.CreateRequest{
-		Class: contracts.VMClass{DiskDefaults: &contracts.DiskDefaults{SizeGiB: 20}},
-	}))
-	vm, _ := server.GetVM(vmid)
-	assert.Contains(t, vm.Config["scsi1"], "size=20G", "the boot disk is grown (the CD-ROM is skipped)")
 	assert.Contains(t, vm.Config["scsi0"], "size=32G")
+	assert.Contains(t, vm.Config["scsi1"], "size=10G")
+	assert.Equal(t, 4, vm.CPUs)
+	assert.Equal(t, int64(4096)<<20, vm.Memory)
 }
 
-func TestPVEPrimaryDisk(t *testing.T) {
-	for name, tc := range map[string]struct {
-		config map[string]any
-		want   string
-	}{
-		"boot order":            {map[string]any{"boot": "order=virtio1;net0", "scsi0": "a:1,size=1G", "virtio1": "a:2,size=1G"}, "virtio1"},
-		"legacy boot string":    {map[string]any{"boot": "cdn", "scsi0": "a:1,size=1G"}, "scsi0"},
-		"no boot: bus order":    {map[string]any{"scsi0": "a:1,size=1G", "virtio0": "a:2,size=1G"}, "virtio0"},
-		"cd-rom and cloud-init": {map[string]any{"ide2": "a:cloudinit,media=cdrom", "sata0": "a:vm-1-cloudinit"}, ""},
-		"unused is not a disk":  {map[string]any{"unused0": "a:3", "ide0": "a:4,size=2G"}, "ide0"},
-	} {
-		t.Run(name, func(t *testing.T) {
-			assert.Equal(t, tc.want, pvePrimaryDisk(tc.config))
-		})
+// TestProxmoxReconfigure_ConfigFailureStaysOutOfTheBreaker: a CPU/memory
+// config update PVE fails is answered with VM_OPERATION_FAILED and a constant
+// message, which the manager never counts toward the Provider's circuit
+// breaker.
+func TestProxmoxReconfigure_ConfigFailureStaysOutOfTheBreaker(t *testing.T) {
+	provider, server, id, _ := twoDiskVM(t)
+	server.InjectFault(pvefake.Fault{Method: http.MethodPut, PathContains: "/qemu/" + id + "/config",
+		Status: http.StatusInternalServerError, Body: `{"data":null,"message":"secret-node hotplug problem"}`})
+
+	err := reconfigureTo(t, provider, id, contracts.CreateRequest{Class: contracts.VMClass{CPU: 4}})
+	require.Error(t, err)
+	st, ok := status.FromError(err)
+	require.True(t, ok)
+	assert.Equal(t, codes.Unknown, st.Code())
+	assert.Equal(t, reconfigureFailedMessage, st.Message())
+	var reasons []string
+	for _, d := range st.Details() {
+		if info, ok := d.(*errdetails.ErrorInfo); ok {
+			reasons = append(reasons, info.GetReason())
+		}
 	}
+	assert.Equal(t, []string{contracts.VMOperationFailedReason}, reasons)
 }

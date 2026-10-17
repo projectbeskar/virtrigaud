@@ -19,48 +19,42 @@ package proxmox
 import (
 	"context"
 	"encoding/json"
-	"fmt"
-	"slices"
-	"strings"
 
+	"google.golang.org/grpc/codes"
+
+	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
 	"github.com/projectbeskar/virtrigaud/internal/providers/proxmox/pveapi"
 	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
 	"github.com/projectbeskar/virtrigaud/sdk/provider/errors"
 )
 
-// Reconfigure: which disk a size goes to.
+// Reconfigure sets CPU and memory, and changes no disk.
 //
 // The Proxmox Create keeps the template's disks as they are: it applies
 // neither the VMClass spec.diskDefaults.size nor spec.disks (it attaches no
-// additional disk). So a Reconfigure:
+// additional disk). So no spec.disks size has a disk to go to — not scsi0,
+// the root disk, where every one used to go, and not a template's other disks
+// (scsi1, ...) — and the VMClass size is not applied either (that belongs to
+// Create). The entries are logged. The CPU/memory change is always sent; a
+// disk grow used to return before it, dropping it while reporting success.
 //
-//   - grows the VM's primary disk — the first disk of its boot order, else the
-//     disk Create would pick (virtio, scsi, sata, ide; pveapi
-//     DetectPrimaryDisk) — to the VMClass size (Class.DiskDefaults.SizeGiB).
-//     That size is a floor, as on vSphere and libvirt: a disk already that
-//     large is left as it is;
-//   - leaves every disk alone for spec.disks: no disk was made for an entry,
-//     so no disk is its — the template's other disks (scsi1, ...) are not.
-//     The entries are logged. Before this fix every spec.disks size went to
-//     scsi0, the root disk.
-//
-// The grow runs, and is waited for, before the CPU/memory change: a
-// Reconfigure that grows a disk no longer returns before sending the CPU and
-// memory (which it used to drop while reporting success).
+// A config update PVE fails is answered with VM_OPERATION_FAILED and a
+// constant message (the cause is logged), so one VM's failing reconfigure
+// never counts toward the manager's per-Provider circuit breaker. The config
+// read before it (an unreachable PVE fails there) is not.
 
-// pveGiB is the number of bytes in a GiB.
-const pveGiB int64 = 1 << 30
+// reconfigureFailedMessage is the answer to a CPU/memory config update PVE
+// failed.
+const reconfigureFailedMessage = "PVE failed the CPU/memory configuration update of this VM " +
+	"(details are in the provider log); it is retried"
 
 // pveReconfigureDesired is the part of a marshaled contracts.CreateRequest a
-// Proxmox Reconfigure applies. contracts.VMClass, DiskDefaults and DiskSpec
-// carry no json tags, so the keys are their Go field names.
+// Proxmox Reconfigure reads. contracts.VMClass and DiskSpec carry no json
+// tags, so the keys are their Go field names.
 type pveReconfigureDesired struct {
 	Class struct {
-		CPU          int32 `json:"CPU"`
-		MemoryMiB    int32 `json:"MemoryMiB"`
-		DiskDefaults *struct {
-			SizeGiB int32 `json:"SizeGiB"`
-		} `json:"DiskDefaults"`
+		CPU       int32 `json:"CPU"`
+		MemoryMiB int32 `json:"MemoryMiB"`
 	} `json:"Class"`
 	Disks []struct {
 		Name    string `json:"Name"`
@@ -77,105 +71,12 @@ func parseReconfigureDesired(desiredJSON string) (*pveReconfigureDesired, error)
 	return &d, nil
 }
 
-// pveDiskPrefixes is the bus order Create picks a primary disk in
-// (pveapi.Client.DetectPrimaryDisk).
-var pveDiskPrefixes = []string{"virtio", "scsi", "sata", "ide"}
-
-// pveIsDisk reports whether the config value of bus key is an attached disk
-// (not a CD-ROM, not the cloud-init drive).
-func pveIsDisk(key string, value any) bool {
-	s, ok := value.(string)
-	if !ok || s == "" || !pveBusDiskKey.MatchString(key) {
-		return false
-	}
-	parts := strings.Split(s, ",")
-	return !slices.Contains(parts, "media=cdrom") && !strings.Contains(parts[0], "cloudinit")
-}
-
-// pvePrimaryDisk returns the config key of the VM's primary disk: the first
-// disk in its boot order ("boot: order=scsi0;ide2;net0"), else the first disk
-// in pveDiskPrefixes order — or "" when it has none.
-func pvePrimaryDisk(config map[string]any) string {
-	if boot, ok := config["boot"].(string); ok {
-		for _, opt := range strings.Split(boot, ",") {
-			order, found := strings.CutPrefix(strings.TrimSpace(opt), "order=")
-			if !found {
-				continue
-			}
-			for _, key := range strings.Split(order, ";") {
-				if key = strings.TrimSpace(key); pveIsDisk(key, config[key]) {
-					return key
-				}
-			}
-		}
-	}
-	for _, prefix := range pveDiskPrefixes {
-		for i := 0; i < 32; i++ {
-			key := fmt.Sprintf("%s%d", prefix, i)
-			if pveIsDisk(key, config[key]) {
-				return key
-			}
-		}
-	}
-	return ""
-}
-
-// pveDiskSizeBytes returns the size the "size=" option of disk config value
-// names, or 0 when it has none or it does not parse.
-func (p *Provider) pveDiskSizeBytes(value any) int64 {
-	s, _ := value.(string)
-	for _, part := range strings.Split(s, ",") {
-		if size, found := strings.CutPrefix(part, "size="); found {
-			if b, err := p.parseDiskSize(size); err == nil && b > 0 {
-				return b
-			}
-		}
-	}
-	return 0
-}
-
-// growPrimaryDisk grows VM vmid's primary disk to sizeGiB (a floor) and waits
-// for the resize task, so the CPU/memory change that follows is sent after it.
-func (p *Provider) growPrimaryDisk(ctx context.Context, node string, vmid int, config map[string]any, sizeGiB int64) error {
-	key := pvePrimaryDisk(config)
-	if key == "" {
-		p.logger.Info("The VM has no disk; the VMClass disk size is not applied", "vmid", vmid)
-		return nil
-	}
-	current := p.pveDiskSizeBytes(config[key])
-	if current == 0 {
-		// PVE refuses a smaller absolute size; without the current one a grow
-		// could be a shrink request, so nothing is sent.
-		p.logger.Warn("The primary disk's size is unknown; the VMClass disk size is not applied", "vmid", vmid, "disk", key)
-		return nil
-	}
-	if sizeGiB*pveGiB <= current {
-		return nil
-	}
-	p.logger.Info("Primary disk grow requested", "vmid", vmid, "disk", key,
-		"old_bytes", current, "new_gb", sizeGiB)
-	taskID, err := p.client.ResizeDisk(ctx, node, vmid, key, sizeGiB)
-	if err != nil {
-		return errors.NewInternal("failed to resize disk", err)
-	}
-	if err := p.client.WaitForTask(ctx, node, taskID); err != nil {
-		return errors.NewInternal("disk resize task failed", err)
-	}
-	return nil
-}
-
-// reconfigureVM applies desired to VM vmid on node, whose current config is
-// currentConfig: the primary disk grow first (waited for), then CPU/memory.
-func (p *Provider) reconfigureVM(ctx context.Context, node string, vmid int, currentConfig map[string]any, desired *pveReconfigureDesired) (*providerv1.TaskResponse, error) {
+// reconfigureVM applies desired's CPU and memory to VM vmid on node.
+func (p *Provider) reconfigureVM(ctx context.Context, node string, vmid int, desired *pveReconfigureDesired) (*providerv1.TaskResponse, error) {
 	for _, d := range desired.Disks {
 		if d.SizeGiB > 0 {
-			p.logger.Info("No disk was made for this spec.disks entry (the Proxmox Create does not attach spec.disks); leaving every disk as it is",
+			p.logger.Info("No disk was made for this spec.disks entry (the Proxmox Create attaches none); leaving every disk as it is",
 				"vmid", vmid, "disk_name", d.Name)
-		}
-	}
-	if dd := desired.Class.DiskDefaults; dd != nil && dd.SizeGiB > 0 {
-		if err := p.growPrimaryDisk(ctx, node, vmid, currentConfig, int64(dd.SizeGiB)); err != nil {
-			return nil, err
 		}
 	}
 
@@ -194,7 +95,8 @@ func (p *Provider) reconfigureVM(ctx context.Context, node string, vmid int, cur
 	}
 	taskID, err := p.client.ReconfigureVM(ctx, node, vmid, config)
 	if err != nil {
-		return nil, errors.NewInternal("failed to reconfigure VM", err)
+		p.logger.Error("PVE failed the CPU/memory configuration update", "vmid", vmid, "error", err)
+		return nil, statusWithReasons(codes.Unknown, reconfigureFailedMessage, contracts.VMOperationFailedReason)
 	}
 	// RestartRequired stays false: this provider does not yet detect a change
 	// PVE stored as pending (hot-plug not enabled for it) and so cannot report

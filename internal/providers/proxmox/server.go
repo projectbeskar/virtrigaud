@@ -642,10 +642,10 @@ func (p *Provider) pveAlreadyInStatus(ctx context.Context, node string, vmid int
 	return true
 }
 
-// Reconfigure reconfigures a virtual machine: it grows the VM's primary disk
-// to the VMClass disk size (a floor) and sets its CPU count and memory. A
-// spec.disks size changes no disk — the Proxmox Create attaches none — see
-// reconfigure.go. The VM must be the requester's (vm_owner_check.go).
+// Reconfigure reconfigures a virtual machine: it sets its CPU count and
+// memory and changes no disk — neither a spec.disks size (the Proxmox Create
+// attaches none) nor the VMClass disk size — see reconfigure.go. The VM must
+// be the requester's (vm_owner_check.go).
 func (p *Provider) Reconfigure(ctx context.Context, req *providerv1.ReconfigureRequest) (*providerv1.TaskResponse, error) {
 	if p.client == nil {
 		return nil, errors.NewUnavailable("PVE client not configured", nil)
@@ -667,13 +667,12 @@ func (p *Provider) Reconfigure(ctx context.Context, req *providerv1.ReconfigureR
 		return nil, err
 	}
 
-	// Grow the primary disk to the VMClass size, then apply CPU/memory
-	// (reconfigure.go): no spec.disks size goes to a disk Create did not make.
+	// Apply CPU/memory (reconfigure.go): no size goes to a disk.
 	desired, err := parseReconfigureDesired(req.DesiredJson)
 	if err != nil {
 		return nil, err
 	}
-	return p.reconfigureVM(ctx, node, vmid, currentConfig, desired)
+	return p.reconfigureVM(ctx, node, vmid, desired)
 }
 
 // Describe describes a virtual machine's current state
