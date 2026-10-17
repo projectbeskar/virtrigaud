@@ -209,9 +209,7 @@ func TestRemoveImportVMStubs_KeepsTheLandedDisk(t *testing.T) {
 	require.NoError(t, vm.Unregister(ctx))
 	ds, err := p.datastoreByName(ctx, simDatastore)
 	require.NoError(t, err)
-	dc, err := p.finder.DefaultDatacenter(ctx)
-	require.NoError(t, err)
-	p.removeImportVMStubs(ctx, ds, dc, stubs)
+	p.removeImportVMStubs(ctx, ds, testDatacenter(t, p), stubs)
 
 	assert.False(t, datastoreFileExists(t, p, "["+simDatastore+"] "+id+"/"+id+".vmx"), "the stub .vmx is removed")
 	assert.True(t, datastoreFileExists(t, p, landed), "the landed disk is never removed")

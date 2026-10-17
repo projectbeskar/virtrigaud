@@ -147,12 +147,13 @@ func (p *Provider) landedDiskDatastoreName(ctx context.Context, recordedPath, ns
 
 // datastoreByName finds the plain datastore dsName in the default datacenter.
 func (p *Provider) datastoreByName(ctx context.Context, dsName string) (*object.Datastore, error) {
-	dc, err := p.finder.DefaultDatacenter(ctx)
+	finder, _, err := p.dcFinder(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("find datacenter: %w", err)
 	}
-	p.finder.SetDatacenter(dc)
-	return p.finder.Datastore(ctx, dsName)
+	ds, err := finder.Datastore(ctx, dsName)
+	p.noteInventoryError(err)
+	return ds, err
 }
 
 // landingFolderExists reports whether the landing folder "[<dsName>] <id>"
