@@ -905,9 +905,9 @@ func (r *VirtualMachineReconciler) handleRoutedOpError(
 // reason no delete can be routed (routeErr), which the caller hands to
 // retainForUnroutableDelete.
 //
-//   - Status.ID set: the ref comes from vmRefFor — the bare id for a single-host
-//     provider (unchanged), the bound host and the VM's owner for a clustered
-//     one.
+//   - Status.ID set: the ref comes from vmRefFor — the id and the VM's owner
+//     for a single-host provider (singleHostRef), the bound host and the VM's
+//     owner for a clustered one.
 //   - Status.ID empty but pendingHost set (a clustered create in flight): an
 //     owner-checked Delete is sent to the pending host, so a domain the create
 //     already made there does not leak. The provider destroys it only if its

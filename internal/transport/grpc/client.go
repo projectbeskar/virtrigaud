@@ -573,8 +573,8 @@ func (c *Client) Clone(ctx context.Context, req contracts.CloneRequest) (contrac
 		SourceVmId:   req.Source.ID,
 		SourceHostId: req.Source.HostID,
 		// ADR-0007 Addendum A, slice 3: a routed (clustered) clone also names its
-		// landing host and the source's owner; a single-host clone carries
-		// neither, exactly as before.
+		// landing host. Every clone names the source's owner (vmOwner), which a
+		// clustered provider and the single-host Proxmox provider check.
 		SourceOwner:   vmOwner(req.Source),
 		TargetHostId:  routedTargetHost(req),
 		TargetName:    req.TargetName,

@@ -697,9 +697,10 @@ func (r *VirtualMachineReconciler) reconcileVM(ctx context.Context, vm *infravir
 	}
 
 	// Address the VM for every per-VM call below (ADR-0007 Addendum A, A1). A
-	// single-host / thin-client provider gets the bare id, exactly as before; a
-	// clustered VM gets its confirmed host, and one with no binding is never sent
-	// a per-VM call — the provider must never pick a host.
+	// single-host / thin-client provider gets the id and the VM's owner, no host
+	// (singleHostRef); a clustered VM gets its confirmed host and owner, and one
+	// with no binding is never sent a per-VM call — the provider must never pick
+	// a host.
 	ref, err := vmRefFor(vm, provider)
 	if err != nil {
 		return r.handleNotRoutable(ctx, vm, err)

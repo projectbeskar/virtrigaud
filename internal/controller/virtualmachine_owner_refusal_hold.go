@@ -85,9 +85,17 @@ func ownerRefusalHoldFor(err error) (ownerRefusalHold, bool) {
 // (ownerRefusalHoldFor), and reports whether it did: Ready=False/<reason> with
 // the constant message, one Warning event when the hold begins, the status
 // written only when it changes, and a re-check with the blocked-VM backoff
-// counted from when the hold began (15 s doubling to 5 min). status.id is
-// kept: the VM is never created again on this answer. A clustered VM's
-// NotFound is handled before this (handleRoutedOpError).
+// (15 s doubling to 5 min). status.id is kept: the VM is never created again
+// on this answer. A clustered VM's NotFound is handled before this
+// (handleRoutedOpError).
+//
+// The backoff is counted from Ready's LastTransitionTime once the hold is in
+// place, and that time moves only when Ready's status does: a VM whose Ready
+// was already False for another reason (a provider error, say) keeps that
+// older time, so its hold may be re-checked at the 5-minute maximum from the
+// second check on. That is deliberate and harmless: the refusal is not
+// transient (it ends when someone deletes the VirtualMachine, or renames or
+// re-stamps the VM), and the condition's time keeps its Kubernetes meaning.
 func (r *VirtualMachineReconciler) holdOwnerRefusal(
 	ctx context.Context,
 	vm *infravirtrigaudiov1beta1.VirtualMachine,
