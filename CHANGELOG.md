@@ -22,6 +22,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `internal/controller/vmadoption_controller.go`: single-host discovery reads the provider's capabilities first: stamped adoption when `SupportsOwnerTransfer`, the previous flow otherwise (its message now says adopted VMs are not stamped), and no adoption at all while the capabilities cannot be read. `discoverUnmanagedVMs` takes the resolved provider.
 - `internal/controller/vmadoption_clustered.go`: `removeStrandedAdoptedVM` reuses the shared `removeWaitingVM`; a skipped VM without a host is named by its id alone. Clustered adoption is otherwise unchanged.
 - `internal/providers/libvirt/routed_transfer_owner.go`: the decision delegates to `contracts.OwnerTransferDecision`; TransferOwner validation runs before the topology dispatch.
+- `examples/vm-adoption-example.yaml`: notes that adopted domains are stamped.
 - `docs/vm-ownership.md`: new section "Adoption stamps the adopted VM" (which VMs, the per-provider compare-and-swap, order and every intermediate state, older providers and managers, VMs adopted before this release); the Proxmox `Delete` and "Existing VMs" text no longer says adoption leaves the stamp; vSphere privilege row. `docs/libvirt-domain-ownership.md`, `docs/clustered-provider-inventory.md`: single-host adoption now stamps. `docs/upgrading.md`: new behaviour row, privilege bullets, rollback caveat.
 
 ### Why

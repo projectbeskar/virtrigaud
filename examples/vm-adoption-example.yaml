@@ -81,6 +81,11 @@ spec:
 # (set it only when no other installation manages the same host; see
 # docs/vm-ownership.md#owner-stamps-are-scoped-to-one-cluster).
 #
+# Every adopted domain is stamped with its new VirtualMachine before that
+# VirtualMachine is bound (a stale stamp is replaced only with the opt-in
+# above), through a provider that reports supportsOwnerTransfer; see
+# docs/vm-ownership.md#adoption-stamps-the-adopted-vm.
+#
 # The same annotations work on a CLUSTERED libvirt Provider (spec.topology:
 # cluster, experimental; ADR-0007 Addendum A slice 4). There a domain is
 # identified by (host, domain name), the adopted VirtualMachine is named
