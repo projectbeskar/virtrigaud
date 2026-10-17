@@ -1315,6 +1315,12 @@ func (c *Client) DeleteLandedDisk(ctx context.Context, req contracts.LandedDiskD
 		Path:     req.Path,
 	})
 	if err != nil {
+		// A FailedPrecondition other than VM_DISK_IN_USE is a provider that
+		// cannot delete landed disks in its configuration (Proxmox without
+		// the migration SSH data plane): refused, never retried blindly.
+		if st, ok := status.FromError(err); ok && st.Code() == codes.FailedPrecondition && !isVMDiskInUseStatus(st) {
+			return "", contracts.NewInvalidSpecError("deleteLandedDisk: "+st.Message(), err)
+		}
 		return "", c.mapGRPCError("deleteLandedDisk", err)
 	}
 	switch resp.GetOutcome() {

@@ -4316,8 +4316,13 @@ func (x *DeleteStagedDiskResponse) GetOutcome() StagedDiskDeleteOutcome {
 // established.
 //
 // Idempotent: a disk that does not exist is a success with outcome NOT_FOUND.
-// InvalidArgument: a request that can never succeed (a bad identity or path).
+// A provider answers NOT_FOUND only after it looked: one that cannot look
+// (Proxmox without its migration SSH data plane) answers FailedPrecondition
+// without an ErrorInfo reason, which the manager treats like InvalidArgument.
+// InvalidArgument: a request that can never succeed (a bad identity or path,
+// or something other than a regular file at the landing name).
 // Unimplemented: a provider that does not report supports_landed_disk_delete.
+// Unavailable while an import of the same landing name runs in the provider.
 // Any other error is retryable.
 type DeleteLandedDiskRequest struct {
 	state         protoimpl.MessageState

@@ -57,6 +57,13 @@ const (
 	// of the target VM's import stages. It never echoes the path.
 	landedDiskPathMismatchMessage = "DeleteLandedDisk: the recorded landing path is not the target VirtualMachine's " +
 		"import stage"
+	// landedDiskNoSSHMessage refuses a delete the provider cannot perform: the
+	// migration SSH data plane is not configured.
+	landedDiskNoSSHMessage = "DeleteLandedDisk: the migration SSH data plane is not configured, so the node-side " +
+		"import stage cannot be checked or removed"
+	// landedDiskImportInFlightMessage is the retryable answer while an import,
+	// or another delete, of the same stage runs in this provider.
+	landedDiskImportInFlightMessage = "DeleteLandedDisk: an import of this VM's stage is in progress; will retry"
 	// landedDiskFailedMessage is the retryable answer of a node-side delete
 	// that failed; the cause goes to the provider log (debug) only.
 	landedDiskFailedMessage = "DeleteLandedDisk: the node-side import stage could not be removed; the cause is in " +
@@ -65,8 +72,9 @@ const (
 
 // DeleteLandedDisk removes the import stage a migration's ImportDisk landed
 // for req.target_vm (see above): DELETED when one existed, NOT_FOUND
-// otherwise. Without the SSH data plane ImportDisk can stage nothing, so
-// nothing exists to remove (NOT_FOUND).
+// otherwise. Without the SSH data plane it can check nothing and answers
+// FailedPrecondition (never NOT_FOUND); while an import of the same stage
+// runs in this process it answers Unavailable (landing_guard.go).
 func (p *Provider) DeleteLandedDisk(ctx context.Context, req *providerv1.DeleteLandedDiskRequest) (*providerv1.DeleteLandedDiskResponse, error) {
 	tv := req.GetTargetVm()
 	if tv.GetNamespace() == "" || tv.GetName() == "" || validStageIdentity(tv.GetNamespace(), tv.GetName()) != nil {
@@ -86,9 +94,16 @@ func (p *Provider) DeleteLandedDisk(ctx context.Context, req *providerv1.DeleteL
 	migrationRef := req.GetMigration().GetNamespace() + "/" + req.GetMigration().GetName()
 	notFound := &providerv1.DeleteLandedDiskResponse{Outcome: providerv1.LandedDiskDeleteOutcome_LANDED_DISK_DELETE_OUTCOME_NOT_FOUND}
 	if p.ssh == nil {
-		p.logger.Info("The migration SSH data plane is not configured: no node-side import stage can exist", "migration", migrationRef)
-		return notFound, nil
+		// Nothing can be checked, so nothing is claimed: not NOT_FOUND (which
+		// the manager would record as deleted) but a refusal.
+		p.logger.Warn("Cannot delete a migration's import stage: the migration SSH data plane is not configured", "migration", migrationRef)
+		return nil, status.Error(codes.FailedPrecondition, landedDiskNoSSHMessage)
 	}
+	release, ok := stageGuards.beginDelete(importStageName(tv.GetNamespace(), tv.GetName()))
+	if !ok {
+		return nil, status.Error(codes.Unavailable, landedDiskImportInFlightMessage)
+	}
+	defer release()
 	stdout, stderr, err := p.ssh.runSSH(ctx, buildLandedStageDeleteScript(paths))
 	switch {
 	case err != nil:
