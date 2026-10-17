@@ -1,21 +1,244 @@
 <!--
-Draft release notes for VirtRigaud v0.4.0-rc1, the release candidate that follows
-v0.3.11 (GA follows after a soak). Paste everything below this comment into the
-GitHub pre-release; see docs/upgrading.md for the full
-upgrade guide these notes link to, and CHANGELOG.md for the complete, dated
-changelog. For the GA release, drop the rc section and re-title.
+Draft release notes for VirtRigaud v0.4.0-rc2, the second release candidate for
+v0.4.0 (GA follows after a soak). rc1 (v0.4.0-rc1, published from the previous
+version of this file) followed v0.3.11. Paste everything below this comment into
+the GitHub pre-release. The notes are cumulative since v0.3.11: a user going from
+v0.3.11 to rc2 needs all of them, while "Changes since v0.4.0-rc1" is the short
+list for someone already on rc1. See docs/upgrading.md for the full upgrade guide
+these notes link to, and CHANGELOG.md for the complete, dated changelog. For the
+GA release, drop the rc sections and re-title.
 -->
 
-This is **v0.4.0-rc1, a release candidate**. It is a security-hardening release: a
-full codebase security review found and fixed several cross-tenant and
-privilege-escalation issues in the vSphere and libvirt providers, cross-namespace
-clone/migration targets, and VM provider binding. **Several fixes are breaking or
-change default behavior.** Read the upgrade guide before upgrading:
+This is **v0.4.0-rc2, a release candidate** (GA follows after a soak). It is a
+security-hardening release: a full codebase security review found and fixed several
+cross-tenant and privilege-escalation issues in the vSphere and libvirt providers,
+cross-namespace clone/migration targets, and VM provider binding. rc2 adds a second
+round of fixes on top of rc1 (below), about proving that the VM a migration, adoption,
+clone or per-VM call acts on is the one VirtRigaud owns. **Several fixes are breaking
+or change default behavior.** Read the upgrade guide before upgrading:
 **[Upgrading from v0.3.11](docs/upgrading.md)**.
+
+The notes below are cumulative since v0.3.11. If you are already on v0.4.0-rc1, read
+"Changes since v0.4.0-rc1" first.
+
+## Changes since v0.4.0-rc1
+
+<!-- Wave 2 items (R5–R10, R14–R16) to be added as they merge -->
+
+Four changes, all about ownership. One is breaking (#394); the other three change
+behaviour you can observe. Apply them in the usual order: **CRDs, then the admission
+policy and any grants, then the manager, then the providers promptly after it** (see
+[Upgrade order for rc2](#upgrade-order-for-rc2)).
+
+| PR | What changed | Breaking |
+|---|---|---|
+| #394 (R1) | A `VMMigration` accepts only the target VM it created; a new admission policy reserves the manager-owned `virtrigaud.io/*` keys | **Yes** |
+| #393 (R3) | Every per-VM call on single-host Proxmox is owner-checked; the manager sends the owner on all single-host calls | Behaviour change |
+| #392 (R2) | Single-host adoption stamps the adopted VM with its new owner | Behaviour change |
+| #395 (R4) | Single-host `VMClone` targets are created first and stamped; a re-sent `Clone` re-binds | Behaviour change |
+
+### A VMMigration accepts only the target VM it created (#394, breaking)
+
+Before, a migration treated **any** `VirtualMachine` with the target's name as its own
+target. Someone with create rights in the target namespace could plant a same-named VM;
+the migration then attached the landed disk to it and reported against it. The
+provenance annotation and `spec.importedDisk` were forgeable.
+
+Now the migration records the UID its own `Create` returned (`status.targetVMUID`). Before
+the `Create` it records the SHA-256 digest of a random claim token
+(`status.targetVMClaim`; the token itself goes only on the VM it creates, as the
+annotation `virtrigaud.io/migration-claim`), so a `Create` whose UID write was lost to a
+conflict or restart is recognised by its claim and not mistaken for a stranger. Any other
+VM under the target name fails the migration:
+
+```text
+VMMigration  Failed  reason: TargetVMNotOwned
+```
+
+- The check runs first at `Validating`, **before the source is powered off, snapshotted
+  or exported**. The foreign VM is never read into the migration's status, annotated or
+  deleted; deleting the migration deletes only the VM bound by UID.
+- A VM is declared "not ours" only after a live re-read of both objects, so a lagging
+  cache never fails a migration over its own VM.
+- Reserved labels in `spec.target.labels` (`virtrigaud.io/adopted`) are no longer copied
+  to the target VM (Normal event `TargetLabelsDropped`).
+- **A migration in `Creating` or `Validating-Target` during the upgrade fails closed with
+  `TargetVMNotOwned`.** Its target was created without the binding, and there is
+  deliberately no fallback to the forgeable fields. Let such migrations finish before
+  upgrading, or do not start new ones. Afterwards, for one that failed: check its target
+  VM, delete the source yourself if you meant to (`deleteAfterMigration` does not run for
+  a failed migration), and re-create the migration. If another VM holds the target name,
+  delete or rename it, or pick another `spec.target.name`.
+
+**New ValidatingAdmissionPolicy.** The chart (and `config/admission-policy/` for
+kustomize) installs a `ValidatingAdmissionPolicy` and binding that lets only the
+manager's ServiceAccount create a `VirtualMachine` with, or add or change on one, the
+manager-owned keys: `virtrigaud.io/migration`, `migration-claim`, `migrated-from`,
+`imported-disk-id`, `disk-checksum`, `migration-completed(-at)`, `clone`, `clone-uid`,
+`cloned-from`, `adopted-host`, `adopted-id`, and the label `virtrigaud.io/adopted`.
+Updates that leave those keys unchanged, removing a key, and the keys users set
+(`orphan-on-delete`, `force-delete`, `create-outcome`, `placement-uid`) are not affected.
+
+```yaml
+# values.yaml
+admissionPolicy:
+  reservedKeys:
+    enabled: true            # default
+    exemptUsernames: []      # e.g. ["system:serviceaccount:velero:velero"]
+    exemptGroups: []         # e.g. ["platform-break-glass"]
+```
+
+- **It is a security control for migration, adoption and clone, not a convenience.**
+  Single-host and clustered adoption and `VMClone` still bind from these markers, so
+  without the policy anyone who can create `VirtualMachine`s in those namespaces can
+  forge them. Do not set `reservedKeys.enabled: false` unless another admission control
+  (Kyverno, Gatekeeper) reserves the same keys.
+- **Kubernetes 1.30+ only** (`admissionregistration.k8s.io/v1`). It is not a webhook, so
+  it works with webhooks disabled and while the manager is down. Below 1.30 nothing is
+  rendered; see Known limitations.
+- **Restore tools and a second installation are rejected unless exempted.** A restore
+  that re-creates `VirtualMachine`s with their annotations (Velero) fails for every VM
+  carrying a reserved key: add the tool's identity to `exemptUsernames` or
+  `exemptGroups` before you restore. Another VirtRigaud installation's manager in the
+  same cluster needs the same. `system:masters` is not exempt.
+- **The installer needs new rights:** create/update/delete on the cluster-scoped
+  `validatingadmissionpolicies` and `validatingadmissionpolicybindings`.
+- Check it: `kubectl get validatingadmissionpolicy,validatingadmissionpolicybinding | grep reserved-keys`.
+
+→ [Reserved keys and the admission policy](docs/admission-policy.md),
+[The target VM must be the migration's own](docs/cross-namespace-targets.md#the-target-vm-must-be-the-migrations-own),
+[Upgrade guide](docs/upgrading.md#breaking-changes)
+
+### Single-host Proxmox: every per-VM call is owner-checked (#393)
+
+In rc1 only `Delete` was owner-checked on a single-host Proxmox Provider. `Describe`,
+`Power`, `Reconfigure`, the snapshot calls, `GetDiskInfo`, `ExportDisk` and a clone's
+source acted on whatever VM held the recorded VMID, so if PVE reused a VMID a
+`VirtualMachine` could read, power, resize, snapshot, export or clone **another tenant's
+VM**. The manager filled `owner` only for clustered refs, so a provider-only fix would
+have done nothing; both halves changed.
+
+- **The manager sends the owner (UID, namespace, name) on every single-host per-VM
+  call.** vSphere, single-host libvirt and mock ignore it on these calls; their behaviour
+  is unchanged.
+- **The Proxmox provider checks it before it reads or changes anything.** The VM at the
+  VMID must be stamped with the requester's UID, or be unstamped and named like the owner
+  (the legacy name rule, see Known limitations). A VM stamped for someone else, or
+  unstamped with another name, is answered `NotFound` / `VM_NOT_OWNED`; an unreadable or
+  multiple stamp is `FailedPrecondition` / `OWNER_STAMP_UNREADABLE`.
+- **A refused `VirtualMachine` is held**, not re-created: `Ready=False/VMNotOwned` (or
+  `OwnerStampUnreadable`), a constant message, one Warning event, `status.id` kept, a
+  backoff up to 5 minutes. Deleting the `VirtualMachine` releases it and leaves the other
+  VM alone.
+- **A `VMMigration` or `VMClone` whose source is refused fails before any side effect**
+  (nothing exported, snapshotted or cloned; with `powerOffBeforeMigration` the source's
+  `spec.powerState` is no longer set to `Off` first). A refused `VMSnapshot` delete is
+  released as already gone; a snapshot create fails.
+
+**Who is held after the upgrade, and what to do.** Look for these before upgrading:
+
+| Held VM | Resolve |
+|---|---|
+| An unstamped Proxmox VM renamed in PVE after VirtRigaud created it | Rename it back to the `VirtualMachine`'s name |
+| A VM an earlier release adopted while it carried a previous owner's stamp (compare the `VirtualMachine` UID with `qm config <vmid> \| grep virtrigaud.owner`) | Remove the stale `virtrigaud.owner` line from the VM's Notes, or delete the `VirtualMachine` (the VM is left in place) and let adoption take it again; adoption now stamps it (next section) |
+| A `VirtualMachine` whose VMID was reused by another VM | Delete the `VirtualMachine` (the other VM is left alone) and create it again |
+
+After the upgrade, search for `Ready` reason `VMNotOwned`, for failed `VMMigration`s and
+`VMClone`s whose message says the source VM was refused, and for `Refusing the call` in
+the Proxmox provider log. The check needs **both** the rc2 manager and the rc2 Proxmox
+provider. It was tested against the Proxmox test fake only, not a real PVE cluster.
+
+→ [Per-VM calls](docs/vm-ownership.md#per-vm-calls-describe-power-reconfigure-snapshots-disks-and-clone-sources),
+[Upgrade guide](docs/upgrading.md#breaking-changes)
+
+### Single-host adoption stamps the adopted VM (#392)
+
+In rc1, adoption left the adopted VM's owner stamp as it was, so a Proxmox VM detached
+with `orphan-on-delete` and adopted again kept the deleted `VirtualMachine`'s stamp and
+was left in place (`VM_NOT_OWNED`) when its new `VirtualMachine` was deleted. Now:
+
+1. The adopting `VirtualMachine` is created **without** `status.id` (annotated
+   `virtrigaud.io/adopted-id`).
+2. The VM is stamped with it through `TransferOwner`, a compare-and-swap on the
+   hypervisor (vSphere `config.changeVersion`, Proxmox config `digest`, libvirt domain
+   UUID under a per-host lock). It is stamped only over no stamp, or over a stale stamp
+   whose UID an uncached read of the API server finds on no `VirtualMachine` (the latter
+   only with `virtrigaud.io/adopt-stamped-vms`).
+3. Only then is `status.id` written. An interrupted adoption is finished, bound or
+   removed by the next discovery (every 5 minutes).
+
+- A VM already bound by `status.id` to a `VirtualMachine` of **another** single-host
+  Provider object with the same type and endpoint is no longer adopted.
+- **The capability `supports_owner_transfer`** (GetCapabilities field 25) says a provider
+  can stamp on adoption. The rc2 vSphere, libvirt, Proxmox and mock providers report it.
+  A provider without it (older, or third party) adopts as before, **unstamped**, and the
+  Provider's adoption status says so. If capabilities cannot be read, nothing is adopted
+  that round.
+- VMs adopted by earlier releases are **not** backfilled. Clustered adoption of
+  stale-stamped domains is unchanged (the ADR-0007 A6 runbook).
+- New privileges: vSphere `VirtualMachine.Config.AdvancedConfig` and Proxmox
+  `VM.Config.Options` on the VMs adoption takes over (the stamp is written on them).
+
+→ [Adoption stamps the adopted VM](docs/vm-ownership.md#adoption-stamps-the-adopted-vm),
+[Upgrade guide](docs/upgrading.md#breaking-changes)
+
+### Single-host VMClone targets are stamped; a re-sent Clone re-binds (#395)
+
+In rc1 the single-host controller created the target `VirtualMachine` after the clone, so
+the clone was never stamped and a `Clone` sent again after a manager restart or a lost
+record made a **second clone on Proxmox**, or failed on vSphere and libvirt and left the
+first clone untracked. Now:
+
+- The target `VirtualMachine` is created first, unbound. Its UID is recorded in
+  `status.targetUID` and sent as `CloneRequest.target_vm`; every provider stamps the clone
+  with it (vSphere in the same `CloneVM_Task`). A re-sent `Clone` returns the clone
+  stamped with that UID; a same-named VM the target does not own is refused with
+  `AlreadyExists` (a first attempt fails with `Ready=False/ProviderConflict`).
+- Before a `Clone`, the `VMClone` records `CloneRequested=True` with a resourceVersion
+  precondition; if that write fails, nothing is sent.
+- **A `Clone` whose outcome is unknown no longer fails the `VMClone`.** It waits
+  (`Pending`, `Ready=False/CloneOutcomeUnknown`, constant message, one Warning event) and
+  is sent again with a backoff of 15 s doubling to 5 min. A Proxmox `CREATE_NOT_PERFORMED`
+  and untyped vSphere clone errors are held and retried the same way. A target deleted
+  after a `Clone` was requested fails as `TargetConflict`; it is never re-sent for a new
+  target.
+- **The capability `supports_owner_rebind`** (GetCapabilities field 26) gates re-sends of
+  **both `Create` and `Clone`**. Only a provider that reports it (the rc2 vSphere,
+  libvirt, Proxmox and mock providers) is ever sent either again. To any other, an
+  unknown outcome is never re-sent: a `Create` is held (`CreateOutcomeUnknown`), a
+  `Clone` fails as in rc1. This replaces the rc1 rule that chose by provider type, under
+  which an older Proxmox image, which does not stamp, could make a second VMID.
+- A failed clone removes the unbound target it created, unless the provider reported a
+  cloned VM or a `Clone` of unknown outcome is on record; then the target is kept for an
+  administrator.
+- To abandon a `VMClone` held in `CloneOutcomeUnknown`: remove or adopt any VM stamped
+  with its `status.targetUID`, then delete the `VMClone` **and** its target
+  `VirtualMachine` (deleting the `VMClone` never touches the target).
+- Clones made before rc2 are unstamped and are not re-bound.
+- Proxmox re-bind is tested against the test fake only.
+
+→ [Clones: re-bind](docs/vm-ownership.md#clones-re-bind),
+[Upgrade guide](docs/upgrading.md#breaking-changes)
+
+### Upgrade order for rc2
+
+Same as the rc1 order, with the admission policy added:
+**CRDs, then the admission policy and any cross-namespace grants, then the manager, then
+the providers promptly.** The policy is installed by `helm upgrade` or `config/default`;
+the installing identity needs the new cluster-scoped rights above. Exempt your restore
+tool before the next restore.
+
+Roll the providers **right after the manager**, especially a v0.3.x Proxmox provider.
+Until it is upgraded, the single-host Proxmox owner checks do not apply (an older
+provider ignores the owner), and it does not report `supports_owner_rebind`, so a
+`Create` or `Clone` of unknown outcome through it is held or fails rather than re-sent.
+Rolling a provider back stops adoption stamping; rolling the manager back can leave an
+adoption annotated `virtrigaud.io/adopted-id` without `status.id`: delete that
+`VirtualMachine` (no provider call is made) and let adoption take the VM again.
 
 ## About this release candidate / what to test
 
-v0.4.0 GA follows after a soak of this candidate. Please try it on a non-production
+v0.4.0 GA follows after a soak of this candidate (rc1 was the first). Please try it on a non-production
 cluster and report what you find (GitHub issues; include the Provider type, the
 `kubectl describe` of the object involved and the provider log, never a Secret).
 The most useful things to exercise:
@@ -32,12 +255,18 @@ The most useful things to exercise:
   `infra.virtrigaud.io/max-disk-size`), including clones and migrations.
 - **Deleting a `Provider`** that still has VMs (the in-use finalizer, ADR-0010),
   and VM deletes while a provider is rolling out.
+- **New in rc2:** a `VMMigration` into a namespace that already has a same-named
+  `VirtualMachine` (it must fail `TargetVMNotOwned` before touching the source);
+  the admission policy on Kubernetes 1.30+ (your restore tool and any second
+  VirtRigaud installation exempted); single-host adoption of a VM that carries a
+  stale stamp; a `VMClone` through a manager restart; and, on Proxmox, a reused
+  VMID under a managed `VirtualMachine`.
 
 **Proxmox was not validated against a real PVE cluster.** The Proxmox changes in
-this release (owner stamps, imported-disk confinement, NFS/S3 import hardening,
-idempotent power) were tested only against the test fake, not a real PVE cluster.
-If you run Proxmox, treat it as untested and try these paths on a lab cluster
-first.
+this release (owner stamps, per-VM owner checks, adoption stamping, clone
+re-binding, imported-disk confinement, NFS/S3 import hardening, idempotent power)
+were tested only against the test fake, not a real PVE cluster. If you run
+Proxmox, treat it as untested and try these paths on a lab cluster first.
 
 ## Breaking changes
 
@@ -136,8 +365,28 @@ first.
   → [Upgrade guide](docs/upgrading.md#breaking-changes),
   [`docs/vm-provider-binding.md`](docs/vm-provider-binding.md#deleting-a-provider)
 
-See the full breaking-change table, required upgrade order (CRDs → manager →
-providers), and rollback caveats in
+- **New in rc2: a `VMMigration` acts only on the target `VirtualMachine` it
+  created** (UID binding plus a claim, `status.targetVMUID` / `targetVMClaim`). A
+  same-named `VirtualMachine` that the migration did not create fails it with
+  `TargetVMNotOwned` at `Validating`, before the source is powered off or exported;
+  before, the migration took it as its own target. **A migration in `Creating` or
+  `Validating-Target` while you upgrade fails closed with `TargetVMNotOwned`** (its
+  target VM is left as it is); let migrations finish first.
+  → [Changes since v0.4.0-rc1](#a-vmmigration-accepts-only-the-target-vm-it-created-394-breaking),
+  [Upgrade guide](docs/upgrading.md#breaking-changes)
+- **New in rc2: only the manager may set the manager-owned `virtrigaud.io/*`
+  annotations and the `virtrigaud.io/adopted` label on a `VirtualMachine`**, enforced
+  by a new `ValidatingAdmissionPolicy` (Kubernetes 1.30+; chart value
+  `admissionPolicy.reservedKeys`, default on). Backup and restore tools (Velero)
+  and a second VirtRigaud installation in the cluster are rejected unless listed in
+  `exemptUsernames` / `exemptGroups`. Installing it needs create rights on
+  `validatingadmissionpolicies` and `validatingadmissionpolicybindings`. It is a
+  security control for migration, adoption and clone: do not disable it without a
+  replacement. → [`docs/admission-policy.md`](docs/admission-policy.md),
+  [Upgrade guide](docs/upgrading.md#breaking-changes)
+
+See the full breaking-change table, required upgrade order (CRDs → admission
+policy and grants → manager → providers), and rollback caveats in
 **[docs/upgrading.md](docs/upgrading.md)**.
 
 ## Highlights
@@ -421,9 +670,11 @@ providers), and rollback caveats in
   itself live (the marker is written with an optimistic lock); the id is
   written with a UID- and id-checked status patch,
   retried on transient errors (a **`VMRecordNotSaved`** event names a VM it
-  could not record). A Create whose outcome stays unknown is re-sent on
-  vSphere, libvirt and Proxmox (they re-bind the VM they stamped; roll the
-  Proxmox provider with the manager); otherwise the VM waits
+  could not record). A Create whose outcome stays unknown is re-sent only to a
+  provider that reports `supports_owner_rebind` (new in rc2: the vSphere, libvirt,
+  Proxmox and mock providers of this release, which re-bind the VM they stamped;
+  an older provider image, including an older Proxmox one, is never re-sent it);
+  otherwise the VM waits
   with `Ready=False/CreateOutcomeUnknown` until an operator records its
   `status.id` or confirms that this attempt made no VM
   (`virtrigaud.io/create-outcome=not-created@<attempt id>`, audited by a
@@ -595,7 +846,10 @@ providers), and rollback caveats in
   perform it — an SSH or libvirtd blip) is held as `CloneRetrying` and
   retried with a backoff (15 s doubling to 5 min) instead of failing for good.
   A clone whose outcome is unknown (the connection dropped mid-call, a
-  timeout) still fails, so a retry can never make a second VM.
+  timeout) used to fail so that a retry could never make a second VM; since
+  rc2 it is held and re-sent to a provider that stamps and re-binds
+  (`supports_owner_rebind`), and still fails on any other
+  (→ [Changes since v0.4.0-rc1](#single-host-vmclone-targets-are-stamped-a-re-sent-clone-re-binds-395)).
 - **A migration's `nfs` / `s3` staged disk is deleted.** The staged object (a
   full, unencrypted copy of the source disk) was never deleted. The manager now
   asks the migration's target `Provider` to delete it, through a new provider
@@ -682,6 +936,27 @@ providers), and rollback caveats in
   PVE name or `vm-<vmid>`). A Proxmox template is never deleted
   (`VM_IS_IMAGE_ARTIFACT`), and a delete refused for an unreadable owner stamp
   is held as `Ready=False/OwnerStampUnreadable`.
+- **New in rc2: every other single-host per-VM call carries the owner too, and
+  Proxmox checks it.** `Describe`, `Power`, `Reconfigure`, the snapshot calls,
+  `GetDiskInfo`, `ExportDisk` and a clone's source are answered `VM_NOT_OWNED`
+  (or `OWNER_STAMP_UNREADABLE`) for a reused VMID instead of acting on another
+  tenant's VM. The `VirtualMachine` is held `Ready=False/VMNotOwned`; a
+  migration or clone of a refused source fails before any side effect. Renamed
+  unstamped VMs and stale-stamped adopted VMs are held after the upgrade
+  (→ [Changes since v0.4.0-rc1](#single-host-proxmox-every-per-vm-call-is-owner-checked-393)).
+- **New in rc2: single-host adoption stamps the adopted VM** with its new
+  owner (`TransferOwner`, compare-and-swap; capability `supports_owner_transfer`),
+  and never adopts a VM bound to a `VirtualMachine` of another Provider object
+  for the same endpoint. This fixes the rc1 case where a re-adopted Proxmox VM
+  kept a previous owner's stamp and was left behind on delete. VMs adopted by
+  earlier releases are not backfilled
+  (→ [Changes since v0.4.0-rc1](#single-host-adoption-stamps-the-adopted-vm-392)).
+- **New in rc2: single-host `VMClone` targets are created first and stamped,
+  and a re-sent `Clone` re-binds** instead of making a second clone (Proxmox) or
+  failing and leaving the first clone untracked (vSphere, libvirt). New
+  `VMClone` states: `Ready=False/CloneOutcomeUnknown` (held, re-sent with a
+  backoff) and `Failed` / `ProviderConflict`
+  (→ [Changes since v0.4.0-rc1](#single-host-vmclone-targets-are-stamped-a-re-sent-clone-re-binds-395)).
 - **Nothing is created through a Provider being deleted, even before the
   manager's cache sees the deletion.** The Provider is re-read from the API
   server right before every `Create`, `Clone` and `ImportDisk`; a deleting,
@@ -751,7 +1026,7 @@ providers), and rollback caveats in
 
 ## Known limitations
 
-These are known in v0.4.0-rc1 and are not regressions from v0.3.11 unless a bullet
+These are known in v0.4.0-rc2 and are not regressions from v0.3.11 unless a bullet
 says so. Each links to the page that documents it in full, where one exists.
 
 - **Metrics are served over plain HTTP by default.** The manager's
@@ -772,21 +1047,41 @@ says so. Each links to the page that documents it in full, where one exists.
   leaves the hypervisor VMs unmanaged). Delete the VMs before the namespace
   (→ [ADR-0010](docs/adr/0010-provider-in-use-finalizer.md),
   [`docs/vm-provider-binding.md`](docs/vm-provider-binding.md#deleting-a-namespace-that-contains-a-provider)).
-- **Owner checks are not complete on adoption and on single-host Proxmox.**
-  Adoption does not re-stamp the VMs it adopts: a Proxmox VM that still carries a
-  previous owner's stamp (detached with `orphan-on-delete`, then adopted again) is
-  left in place when its new `VirtualMachine` is deleted (`VM_NOT_OWNED`, a
-  `VMLeftOnHypervisor` Warning naming its id); remove it by hand. Re-stamping on
-  adoption is planned after this release. On a single-host Proxmox Provider only
-  `Delete` is owner-checked: `Describe`, `Power`, `Reconfigure` and the snapshot
-  calls act on whatever VM has the recorded VMID, so if a VM is deleted outside
-  VirtRigaud and PVE reuses its VMID, the old `VirtualMachine` addresses that VM.
-  Do not delete VirtRigaud-managed VMs outside VirtRigaud; delete the
-  `VirtualMachine`, or detach it with `orphan-on-delete`
+- **Proxmox: the legacy name rule can be claimed by whoever can create a VM.**
+  An unstamped VM named like its `VirtualMachine` still passes the owner check (VMs
+  created before owner stamps exist have no other proof), and the provider cannot tell
+  whether the `VirtualMachine`'s own VM was ever stamped. So once a `VirtualMachine`'s
+  VM is removed, a PVE user with `VM.Allocate` on a pool or path where VirtRigaud's VMs
+  live can create an unstamped VM with that name at the freed VMID, and the
+  `VirtualMachine` then reads, powers, resizes, snapshots and copies it as its own.
+  A VM stamped for anyone else is refused. Grant `VM.Allocate` there as carefully as
+  `VM.Config.Options`; closing this is tracked for a later release
   (→ [`docs/vm-ownership.md`](docs/vm-ownership.md#limits)).
-- **Single-host `VMClone` targets are not stamped with their owner**, so a re-sent
-  `Clone` is not re-bound and can make a second clone on Proxmox
+- **Proxmox: the owner check and the call are two requests.** A VMID freed and reused
+  between them is not caught. Do not delete VirtRigaud-managed VMs outside VirtRigaud:
+  delete the `VirtualMachine`, or detach it with `orphan-on-delete`
   (→ [`docs/vm-ownership.md`](docs/vm-ownership.md#limits)).
+- **The admission policy needs Kubernetes 1.30+.** On an older cluster nothing is
+  installed, and anyone who can create or update `VirtualMachine`s in a namespace can
+  forge the adoption markers (`virtrigaud.io/adopted`, `adopted-id`, `adopted-host`) and
+  the `VMClone` marker (`clone-uid`). Restrict `create`/`update` on `virtualmachines` to
+  trusted users there, or reserve the keys with Kyverno or Gatekeeper. (A `VMMigration`
+  no longer depends on the markers.)
+  → [`docs/admission-policy.md`](docs/admission-policy.md)
+- **A kustomize overlay that changes the namespace or name prefix must repeat the
+  `replacements` block of `config/default`.** Otherwise the admission policy keeps
+  exempting the old manager name and denies the manager's own writes.
+  → [`docs/admission-policy.md`](docs/admission-policy.md#configuration)
+- **A leader-election overlap during a migration's target `Create` can still fail the
+  migration.** If the new leader finds the target VM carrying a claim it cannot match
+  (the old leader's), it re-checks, but if the claim never matches the migration fails
+  `TargetVMNotOwned`. This fails closed; delete the target VM it created and re-create
+  the migration (→ [`docs/cross-namespace-targets.md`](docs/cross-namespace-targets.md#the-target-vm-must-be-the-migrations-own)).
+- **VMs adopted before rc2 are not re-stamped, and clones made before rc2 are
+  unstamped.** Their deletes follow the unstamped rules. On Proxmox, a VM adopted earlier
+  that still carries a previous owner's stamp is held `Ready=False/VMNotOwned` (and
+  left behind on delete with `VMLeftOnHypervisor`) until you remove the stale
+  `virtrigaud.owner` line from its Notes (→ [`docs/vm-ownership.md`](docs/vm-ownership.md#vms-adopted-before-this-release)).
 - **libvirt: the `default` storage pool must be at `/var/lib/libvirt/images`.**
   Mount shared storage at that path, and keep `VIRTRIGAUD_LIBVIRT_IMAGE_DIRS`
   (the image catalog) apart from the pool. A pool at another path is refused with
@@ -821,17 +1116,16 @@ says so. Each links to the page that documents it in full, where one exists.
 - **A manager restart or leader change can re-send a provider call.** Between a
   `SnapshotCreate`, `ExportDisk` or `ImportDisk` RPC and the write of its result
   to the status, the result can be lost and the RPC sent again.
-- **A cross-namespace migration adopts a same-named target VM.** If a
-  `VirtualMachine` with the target's name already exists in the target namespace,
-  the migration treats it as its own target VM. Make sure the target name is free,
-  or use a unique one.
 
 ## Upgrade
 
 See **[docs/upgrading.md](docs/upgrading.md)** for the full breaking-change
 table, required upgrade order, new required privileges, and a post-upgrade
-verification checklist. The roll order validated in the rc1 lab is **CRDs, then
-the manager, then the providers**; apply the cross-namespace grants
-(`spec.consumerNamespaceSelector`) between the CRDs and the manager, and roll
-providers promptly after the manager (see
-[Required upgrade order](docs/upgrading.md#required-upgrade-order)).
+verification checklist. The roll order is **CRDs, then the cross-namespace grants
+(`spec.consumerNamespaceSelector`) and the admission policy, then the manager, then
+the providers**, and roll the providers promptly after the manager: until a
+provider is upgraded, a Proxmox provider does not enforce the new owner checks, and
+no provider that predates rc2 is ever sent a `Create` or `Clone` again after an
+unknown outcome. The order was validated in the rc1 lab (see
+[Required upgrade order](docs/upgrading.md#required-upgrade-order) and
+[Changes since v0.4.0-rc1](#upgrade-order-for-rc2)).
