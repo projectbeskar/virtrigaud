@@ -185,6 +185,26 @@ func TestLandedDiskCleanupWanted_DecisionTable(t *testing.T) {
 	assert.False(t, landedDiskCleanupWanted(m, stagingTriggerDeletion), "done is done")
 }
 
+// TestMigrationHoldsProviderWhileLandedDiskCleanupIsPending: a failed
+// migration whose landed disk its cleanupPolicy will delete keeps its target
+// Provider from being deleted; once done, or with cleanupPolicy Never, or
+// when Ready (the disk is the target VM's), it does not.
+func TestMigrationHoldsProviderWhileLandedDiskCleanupIsPending(t *testing.T) {
+	m, _ := landedFixture(infrav1beta1.MigrationPhaseFailed)
+	assert.True(t, migrationHoldsProvider(m))
+
+	ready, _ := landedFixture(infrav1beta1.MigrationPhaseReady)
+	assert.False(t, migrationHoldsProvider(ready))
+
+	never, _ := landedFixture(infrav1beta1.MigrationPhaseFailed)
+	never.Spec.Options = &infrav1beta1.MigrationOptions{CleanupPolicy: infrav1beta1.CleanupPolicyNever}
+	assert.False(t, migrationHoldsProvider(never))
+
+	meta.SetStatusCondition(&m.Status.Conditions, metav1.Condition{Type: migrationConditionLandedDiskCleanup,
+		Status: metav1.ConditionTrue, Reason: migrationReasonLandedDiskDeleted, Message: migrationLandedDiskDeletedMessage})
+	assert.False(t, migrationHoldsProvider(m))
+}
+
 // TestMarkLandedDiskMayExist records the VM, the Provider UID and the marker
 // once.
 func TestMarkLandedDiskMayExist(t *testing.T) {
