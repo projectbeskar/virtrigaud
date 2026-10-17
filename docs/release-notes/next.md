@@ -1026,7 +1026,7 @@ policy and grants → manager → providers), and rollback caveats in
 
 ## Known limitations
 
-These are known in v0.4.0-rc1 and are not regressions from v0.3.11 unless a bullet
+These are known in v0.4.0-rc2 and are not regressions from v0.3.11 unless a bullet
 says so. Each links to the page that documents it in full, where one exists.
 
 - **Metrics are served over plain HTTP by default.** The manager's
@@ -1047,21 +1047,41 @@ says so. Each links to the page that documents it in full, where one exists.
   leaves the hypervisor VMs unmanaged). Delete the VMs before the namespace
   (→ [ADR-0010](docs/adr/0010-provider-in-use-finalizer.md),
   [`docs/vm-provider-binding.md`](docs/vm-provider-binding.md#deleting-a-namespace-that-contains-a-provider)).
-- **Owner checks are not complete on adoption and on single-host Proxmox.**
-  Adoption does not re-stamp the VMs it adopts: a Proxmox VM that still carries a
-  previous owner's stamp (detached with `orphan-on-delete`, then adopted again) is
-  left in place when its new `VirtualMachine` is deleted (`VM_NOT_OWNED`, a
-  `VMLeftOnHypervisor` Warning naming its id); remove it by hand. Re-stamping on
-  adoption is planned after this release. On a single-host Proxmox Provider only
-  `Delete` is owner-checked: `Describe`, `Power`, `Reconfigure` and the snapshot
-  calls act on whatever VM has the recorded VMID, so if a VM is deleted outside
-  VirtRigaud and PVE reuses its VMID, the old `VirtualMachine` addresses that VM.
-  Do not delete VirtRigaud-managed VMs outside VirtRigaud; delete the
-  `VirtualMachine`, or detach it with `orphan-on-delete`
+- **Proxmox: the legacy name rule can be claimed by whoever can create a VM.**
+  An unstamped VM named like its `VirtualMachine` still passes the owner check (VMs
+  created before owner stamps exist have no other proof), and the provider cannot tell
+  whether the `VirtualMachine`'s own VM was ever stamped. So once a `VirtualMachine`'s
+  VM is removed, a PVE user with `VM.Allocate` on a pool or path where VirtRigaud's VMs
+  live can create an unstamped VM with that name at the freed VMID, and the
+  `VirtualMachine` then reads, powers, resizes, snapshots and copies it as its own.
+  A VM stamped for anyone else is refused. Grant `VM.Allocate` there as carefully as
+  `VM.Config.Options`; closing this is tracked for a later release
   (→ [`docs/vm-ownership.md`](docs/vm-ownership.md#limits)).
-- **Single-host `VMClone` targets are not stamped with their owner**, so a re-sent
-  `Clone` is not re-bound and can make a second clone on Proxmox
+- **Proxmox: the owner check and the call are two requests.** A VMID freed and reused
+  between them is not caught. Do not delete VirtRigaud-managed VMs outside VirtRigaud:
+  delete the `VirtualMachine`, or detach it with `orphan-on-delete`
   (→ [`docs/vm-ownership.md`](docs/vm-ownership.md#limits)).
+- **The admission policy needs Kubernetes 1.30+.** On an older cluster nothing is
+  installed, and anyone who can create or update `VirtualMachine`s in a namespace can
+  forge the adoption markers (`virtrigaud.io/adopted`, `adopted-id`, `adopted-host`) and
+  the `VMClone` marker (`clone-uid`). Restrict `create`/`update` on `virtualmachines` to
+  trusted users there, or reserve the keys with Kyverno or Gatekeeper. (A `VMMigration`
+  no longer depends on the markers.)
+  → [`docs/admission-policy.md`](docs/admission-policy.md)
+- **A kustomize overlay that changes the namespace or name prefix must repeat the
+  `replacements` block of `config/default`.** Otherwise the admission policy keeps
+  exempting the old manager name and denies the manager's own writes.
+  → [`docs/admission-policy.md`](docs/admission-policy.md#configuration)
+- **A leader-election overlap during a migration's target `Create` can still fail the
+  migration.** If the new leader finds the target VM carrying a claim it cannot match
+  (the old leader's), it re-checks, but if the claim never matches the migration fails
+  `TargetVMNotOwned`. This fails closed; delete the target VM it created and re-create
+  the migration (→ [`docs/cross-namespace-targets.md`](docs/cross-namespace-targets.md#the-target-vm-must-be-the-migrations-own)).
+- **VMs adopted before rc2 are not re-stamped, and clones made before rc2 are
+  unstamped.** Their deletes follow the unstamped rules. On Proxmox, a VM adopted earlier
+  that still carries a previous owner's stamp is held `Ready=False/VMNotOwned` (and
+  left behind on delete with `VMLeftOnHypervisor`) until you remove the stale
+  `virtrigaud.owner` line from its Notes (→ [`docs/vm-ownership.md`](docs/vm-ownership.md#vms-adopted-before-this-release)).
 - **libvirt: the `default` storage pool must be at `/var/lib/libvirt/images`.**
   Mount shared storage at that path, and keep `VIRTRIGAUD_LIBVIRT_IMAGE_DIRS`
   (the image catalog) apart from the pool. A pool at another path is refused with
@@ -1096,17 +1116,17 @@ says so. Each links to the page that documents it in full, where one exists.
 - **A manager restart or leader change can re-send a provider call.** Between a
   `SnapshotCreate`, `ExportDisk` or `ImportDisk` RPC and the write of its result
   to the status, the result can be lost and the RPC sent again.
-- **A cross-namespace migration adopts a same-named target VM.** If a
-  `VirtualMachine` with the target's name already exists in the target namespace,
-  the migration treats it as its own target VM. Make sure the target name is free,
-  or use a unique one.
 
 ## Upgrade
 
 See **[docs/upgrading.md](docs/upgrading.md)** for the full breaking-change
 table, required upgrade order, new required privileges, and a post-upgrade
-verification checklist. The roll order validated in the rc1 lab is **CRDs, then
-the manager, then the providers**; apply the cross-namespace grants
-(`spec.consumerNamespaceSelector`) between the CRDs and the manager, and roll
-providers promptly after the manager (see
-[Required upgrade order](docs/upgrading.md#required-upgrade-order)).
+verification checklist. The roll order is **CRDs, then the cross-namespace grants
+(`spec.consumerNamespaceSelector`) and the admission policy, then the manager, then
+the providers**, and roll the providers promptly after the manager: until a
+provider is upgraded, a Proxmox provider does not enforce the new owner checks, and
+no provider that predates rc2 is ever sent a `Create` or `Clone` again after an
+unknown outcome. The order was validated in the rc1 lab; the rc2 changes have not
+yet been through a lab upgrade (see
+[Required upgrade order](docs/upgrading.md#required-upgrade-order) and
+[Changes since v0.4.0-rc1](#upgrade-order-for-rc2)).
