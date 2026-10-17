@@ -567,6 +567,13 @@ func (p *Provider) Power(ctx context.Context, req *providerv1.PowerRequest) (*pr
 		return nil, errors.NewInvalidSpec("unsupported power operation: %v", req.Op)
 	}
 
+	// A VM that is not the requester's (its VMID reused) is never started,
+	// stopped or rebooted — not even read for the idempotency check below
+	// (vm_owner_check.go).
+	if err := p.checkVMOwner(ctx, node, vmid, requestOwner(req.GetOwner()), ownerCheckOpPower); err != nil {
+		return nil, err
+	}
+
 	// Power is idempotent: a VM already in the requested state is success,
 	// with no task. PVE fails a start of a running VM ("already running"), and
 	// a stop or shutdown of a stopped one may fail too — also when another
@@ -650,6 +657,11 @@ func (p *Provider) Reconfigure(ctx context.Context, req *providerv1.ReconfigureR
 	currentConfig, err := p.client.GetVMConfig(ctx, node, vmid)
 	if err != nil {
 		return nil, errors.NewInternal("failed to get current VM config", err)
+	}
+	// The same config decides whether the VM is the requester's: one that is
+	// not (its VMID reused) is never resized (vm_owner_check.go).
+	if err := p.checkOwnerInConfig(currentConfig, node, vmid, requestOwner(req.GetOwner()), ownerCheckOpReconfigure); err != nil {
+		return nil, err
 	}
 
 	// Parse the desired configuration
@@ -790,6 +802,16 @@ func (p *Provider) Describe(ctx context.Context, req *providerv1.DescribeRequest
 	vmid, node, err := p.parseVMReference(req.Id)
 	if err != nil {
 		return nil, errors.NewInvalidSpec("invalid VM reference: %v", err)
+	}
+
+	// A VM that is not the requester's (its VMID reused) is answered
+	// VM_NOT_OWNED, and none of its state is returned (vm_owner_check.go).
+	// It is not reported Exists=false: the manager would create the
+	// VirtualMachine's VM again, and a VM the provider cannot prove gone (an
+	// adopted VM carrying an earlier owner's stamp, a VM renamed in PVE) must
+	// not get a second one.
+	if err := p.checkVMOwner(ctx, node, vmid, requestOwner(req.GetOwner()), ownerCheckOpDescribe); err != nil {
+		return nil, err
 	}
 
 	vm, err := p.client.GetVM(ctx, node, vmid)
@@ -936,6 +958,12 @@ func (p *Provider) SnapshotCreate(ctx context.Context, req *providerv1.SnapshotC
 		return nil, errors.NewInvalidSpec("invalid VM reference: %v", err)
 	}
 
+	// A VM that is not the requester's (its VMID reused) is never
+	// snapshotted (vm_owner_check.go).
+	if err := p.checkVMOwner(ctx, node, vmid, requestOwner(req.GetOwner()), ownerCheckOpSnapshotCreate); err != nil {
+		return nil, err
+	}
+
 	// Generate snapshot name if not provided
 	snapName := req.NameHint
 	if snapName == "" {
@@ -982,6 +1010,12 @@ func (p *Provider) SnapshotDelete(ctx context.Context, req *providerv1.SnapshotD
 	}
 	if !exists {
 		return nil, errors.NewNotFound("snapshot", req.SnapshotId)
+	}
+	// A VM that is not the requester's (its VMID reused) has none of the
+	// requester's snapshots: VM_NOT_OWNED (a NotFound), and none of its
+	// snapshots is listed or deleted (vm_owner_check.go).
+	if err := p.checkVMOwner(ctx, node, vmid, requestOwner(req.GetOwner()), ownerCheckOpSnapshotDelete); err != nil {
+		return nil, err
 	}
 	present, err := p.snapshotPresent(ctx, node, vmid, req.SnapshotId)
 	if err != nil {
@@ -1032,6 +1066,12 @@ func (p *Provider) SnapshotRevert(ctx context.Context, req *providerv1.SnapshotR
 	vmid, node, err := p.parseVMReference(req.VmId)
 	if err != nil {
 		return nil, errors.NewInvalidSpec("invalid VM reference: %v", err)
+	}
+
+	// A VM that is not the requester's (its VMID reused) is never reverted
+	// (vm_owner_check.go).
+	if err := p.checkVMOwner(ctx, node, vmid, requestOwner(req.GetOwner()), ownerCheckOpSnapshotRevert); err != nil {
+		return nil, err
 	}
 
 	taskID, err := p.client.RevertSnapshot(ctx, node, vmid, req.SnapshotId)
@@ -1160,6 +1200,15 @@ func (p *Provider) Clone(ctx context.Context, req *providerv1.CloneRequest) (*pr
 			return p.rebindClone(ctx, req, existing)
 		}
 		stamp = &ownerStamp{owner: owner, phase: ownerStampPhaseCreating}
+	}
+
+	// A source VM that is not the requester's source VirtualMachine's (its
+	// VMID reused) is never cloned: its disks would be copied into a VM the
+	// requester owns (vm_owner_check.go). Checked after the re-bind above,
+	// which never reads the source: a retried Clone whose target already
+	// exists is answered with it even if the source's VMID was reused since.
+	if err := p.checkCloneSourceOwner(ctx, sourceNode, sourceVMID, requestOwner(req.GetSourceOwner())); err != nil {
+		return nil, err
 	}
 
 	// Generate new VMID for clone
@@ -1643,6 +1692,11 @@ func (p *Provider) GetDiskInfo(ctx context.Context, req *providerv1.GetDiskInfoR
 	if err != nil {
 		return nil, errors.NewInternal("failed to get VM config", err)
 	}
+	// The same config decides whether the VM is the requester's: the disks of
+	// one that is not (its VMID reused) are never described (vm_owner_check.go).
+	if err := p.checkOwnerInConfig(config, node, vmid, requestOwner(req.GetOwner()), ownerCheckOpGetDiskInfo); err != nil {
+		return nil, err
+	}
 
 	// Get VM info for additional details
 	vmInfo, err := p.client.GetVM(ctx, node, vmid)
@@ -1842,6 +1896,12 @@ func (p *Provider) ExportDisk(ctx context.Context, req *providerv1.ExportDiskReq
 		}
 	}
 
+	// The disk of a VM that is not the requester's (its VMID reused) is never
+	// read or copied (vm_owner_check.go). Checked before every backend path.
+	if err := p.checkRequestVMOwner(ctx, req.VmId, requestOwner(req.GetOwner()), ownerCheckOpExportDisk); err != nil {
+		return nil, err
+	}
+
 	// ADR-0006 Slice 4 Proxmox SOURCE path: the node's qemu-img writes the
 	// flattened qcow2 straight to the NFS export (libnfs), no pod hop.
 	if req.BackendType == migration.BackendNFS {
@@ -1870,7 +1930,13 @@ func (p *Provider) ExportDisk(ctx context.Context, req *providerv1.ExportDiskReq
 		VmId:       req.VmId,
 		DiskId:     req.DiskId,
 		SnapshotId: req.SnapshotId,
+		// Owner-checked on the very config that yields the volume copied
+		// below, not only by ExportDisk's pre-check (vm_owner_check.go).
+		Owner: req.GetOwner(),
 	})
+	if isOwnerRefusal(err) {
+		return nil, err
+	}
 	if err != nil {
 		return nil, errors.NewInternal("failed to get disk info", err)
 	}

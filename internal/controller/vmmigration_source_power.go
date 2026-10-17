@@ -124,7 +124,10 @@ var errSourcePowerOffTimedOut = stderrors.New("timed out waiting for the source 
 // an unresolvable provider instance is waited out the same way. After
 // migrationSourcePowerOffTimeout it returns errSourcePowerOffTimedOut. Errors
 // resolving the source VM or its Provider are returned as before (the caller
-// fails the migration or marks it consumer-refused).
+// fails the migration or marks it consumer-refused). The Describe runs before
+// the spec patch: a source that is gone returns errSourceVMNotFound, and one
+// the provider refuses as not the source VirtualMachine's VM returns that
+// owner refusal (isOwnerRefusal), both before the patch.
 func (r *VMMigrationReconciler) ensureSourcePoweredOff(ctx context.Context, migration *infrav1beta1.VMMigration) (bool, ctrl.Result, error) {
 	logger := logging.FromContext(ctx)
 
@@ -143,6 +146,38 @@ func (r *VMMigrationReconciler) ensureSourcePoweredOff(ctx context.Context, migr
 		return false, ctrl.Result{}, fmt.Errorf("resolve source provider: %w", err)
 	}
 
+	ref, refErr := vmRefFor(sourceVM, sourceProvider)
+
+	// A read-only Describe is the authority: the source's recorded
+	// status.powerState may lag the hypervisor in either direction. It runs
+	// before the spec patch below, so a source the provider refuses — not the
+	// source VirtualMachine's VM (a reused id), or one whose owner cannot be
+	// told — fails the migration before anything is changed, the source
+	// VirtualMachine's spec included.
+	var (
+		desc     contracts.DescribeResponse
+		observed bool
+	)
+	var providerInstance contracts.Provider
+	if refErr == nil {
+		providerInstance, err = r.getProviderInstance(ctx, sourceProvider)
+	}
+	if refErr == nil && err == nil {
+		desc, err = providerInstance.Describe(ctx, ref)
+		if isOwnerRefusal(err) {
+			logger.Info("The source VM's provider refused it as not the source VirtualMachine's; failing the migration",
+				"vm", sourceVM.Name, "error", err.Error())
+			return false, ctrl.Result{}, err
+		}
+		if contracts.IsNotFound(err) || (err == nil && !desc.Exists) {
+			// Gone (or, clustered, not this VM's): it can never be observed
+			// Off. Fail fast instead of waiting out the budget.
+			logger.Info("The source VM's provider does not find it; failing the migration", "vm", sourceVM.Name)
+			return false, ctrl.Result{}, errSourceVMNotFound
+		}
+		observed = err == nil
+	}
+
 	// Align the source VM's desired power state with the migration intent: the
 	// VirtualMachine reconciler powers it off, and does not race the export by
 	// powering it back on (which can re-lock a vSphere disk and would, for a
@@ -157,31 +192,16 @@ func (r *VMMigrationReconciler) ensureSourcePoweredOff(ctx context.Context, migr
 		logger.Info("Set source VM desired power state to Off for migration", "vm", sourceVM.Name)
 	}
 
-	ref, err := vmRefFor(sourceVM, sourceProvider)
-	if err != nil {
-		res, werr := r.waitForSourceBinding(ctx, migration, err)
+	if refErr != nil {
+		res, werr := r.waitForSourceBinding(ctx, migration, refErr)
 		return false, res, werr
 	}
-
-	// A read-only Describe is the authority: the source's recorded
-	// status.powerState may lag the hypervisor in either direction.
-	providerInstance, err := r.getProviderInstance(ctx, sourceProvider)
-	if err == nil {
-		var desc contracts.DescribeResponse
-		desc, err = providerInstance.Describe(ctx, ref)
-		if contracts.IsNotFound(err) || (err == nil && !desc.Exists) {
-			// Gone (or not this VM's): it can never be observed Off. Fail fast
-			// instead of waiting out the budget.
-			logger.Info("The source VM's provider does not find it; failing the migration", "vm", sourceVM.Name)
-			return false, ctrl.Result{}, errSourceVMNotFound
-		}
-		if err == nil && desc.PowerState == string(contracts.PowerStateOff) {
-			logger.Info("Source VM is powered off; proceeding with migration", "vm", sourceVM.Name)
-			// Recorded with the caller's status write (the phase advances).
-			k8s.SetCondition(&migration.Status.Conditions, migrationConditionSourcePowerOff,
-				metav1.ConditionTrue, reasonSourcePoweredOff, sourcePoweredOffMessage, migration.Generation)
-			return true, ctrl.Result{}, nil
-		}
+	if observed && desc.PowerState == string(contracts.PowerStateOff) {
+		logger.Info("Source VM is powered off; proceeding with migration", "vm", sourceVM.Name)
+		// Recorded with the caller's status write (the phase advances).
+		k8s.SetCondition(&migration.Status.Conditions, migrationConditionSourcePowerOff,
+			metav1.ConditionTrue, reasonSourcePoweredOff, sourcePoweredOffMessage, migration.Generation)
+		return true, ctrl.Result{}, nil
 	}
 	if err != nil {
 		// Transient (provider restarting, host briefly unreachable): keep

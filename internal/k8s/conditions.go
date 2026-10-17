@@ -363,7 +363,8 @@ const (
 	// reason of a clustered one. The hold lasts until the VirtualMachine is
 	// detached with virtrigaud.io/orphan-on-delete=true.
 	ReasonVMIsImageArtifact = "VMIsImageArtifact"
-	// ReasonOwnerStampUnreadable: the provider refused a Delete because the
+	// ReasonOwnerStampUnreadable: the provider refused a Delete (or, single-host
+	// Proxmox, a Describe, power change or reconfigure) because the
 	// VM's owner stamp cannot be read or records more than one owner
 	// (OWNER_STAMP_UNREADABLE), so who owns it cannot be told. Nothing was
 	// changed. It is the Ready reason of a single-host VM held for it and the
@@ -405,6 +406,16 @@ const ReasonConsumerNotAllowed = "ConsumerNotAllowed"
 // fencing that risks two running copies of one disk (D8). An administrator must
 // restore the VM, or delete and re-create the VirtualMachine.
 const ReasonVMMissingOnHost = "VMMissingOnHost"
+
+// ReasonVMNotOwned indicates that a single-host provider answered a
+// VirtualMachine's Describe, power change or reconfigure with VM_NOT_OWNED: a
+// VM exists at the VirtualMachine's id but is not its own (it carries another
+// owner's stamp, or it is unstamped and named differently — e.g. a Proxmox
+// VMID reused after the VirtualMachine's VM was removed outside VirtRigaud).
+// Nothing of that VM was read or changed, and no VM is created in its place;
+// the VirtualMachine is held until it is deleted (which leaves that VM
+// untouched) or the provider recognizes the VM as its own again.
+const ReasonVMNotOwned = "VMNotOwned"
 
 // SetCondition sets the condition conditionType on conditions, recording
 // observedGeneration — the generation of the object the conditions belong to

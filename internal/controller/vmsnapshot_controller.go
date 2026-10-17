@@ -872,6 +872,11 @@ func (r *VMSnapshotReconciler) handleDeletion(ctx context.Context, snapshot *inf
 			case err == nil:
 				logger.Info("Snapshot deleted successfully via provider")
 				removed = "Snapshot deleted from the provider"
+			case contracts.IsVMNotOwned(err):
+				// Released, but not as "already gone": the snapshot may be
+				// left on the VM at this id (snapshot_not_owned_release.go).
+				recordSnapshotNotOwnedRelease(ctx, r.Recorder, snapshot, vm.Status.ID, snapshot.Status.SnapshotID)
+				removed = ""
 			case contracts.IsNotFound(err):
 				logger.Info("The provider snapshot is already gone", "snapshot_id", snapshot.Status.SnapshotID)
 				removed = "The provider snapshot was already gone"

@@ -697,9 +697,10 @@ func (r *VirtualMachineReconciler) reconcileVM(ctx context.Context, vm *infravir
 	}
 
 	// Address the VM for every per-VM call below (ADR-0007 Addendum A, A1). A
-	// single-host / thin-client provider gets the bare id, exactly as before; a
-	// clustered VM gets its confirmed host, and one with no binding is never sent
-	// a per-VM call — the provider must never pick a host.
+	// single-host / thin-client provider gets the id and the VM's owner, no host
+	// (singleHostRef); a clustered VM gets its confirmed host and owner, and one
+	// with no binding is never sent a per-VM call — the provider must never pick
+	// a host.
 	ref, err := vmRefFor(vm, provider)
 	if err != nil {
 		return r.handleNotRoutable(ctx, vm, err)
@@ -713,6 +714,12 @@ func (r *VirtualMachineReconciler) reconcileVM(ctx context.Context, vm *infravir
 	desc, err := providerInstance.Describe(ctx, ref)
 	if err != nil {
 		if res, handled := r.handleRoutedOpError(ctx, vm, ref, err, errReasonProviderDescribe); handled {
+			return res, nil
+		}
+		// A VM at the id that is not this VirtualMachine's (a reused id), or
+		// whose owner cannot be told: held, never re-created (VM_NOT_OWNED is
+		// not "gone").
+		if res, held := r.holdOwnerRefusal(ctx, vm, ref, err, "describe"); held {
 			return res, nil
 		}
 		logger.Error(err, "Failed to describe VM")
@@ -2163,6 +2170,9 @@ func (r *VirtualMachineReconciler) adjustPowerState(
 		if contracts.IsVMIsImageArtifact(err) {
 			return r.holdImageArtifactPower(ctx, vm, err), nil
 		}
+		if res, held := r.holdOwnerRefusal(ctx, vm, ref, err, "power"); held {
+			return res, nil
+		}
 		logger.Error(err, "Failed to adjust power state")
 		k8s.SetReadyCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonProviderError, "Failed to adjust power state: "+providerFailureDetail(err), vm.Generation)
 		r.updateStatus(ctx, vm)
@@ -2814,6 +2824,9 @@ func (r *VirtualMachineReconciler) reconfigureVM(
 		// not-found is a host-level fact, not a reconfigure failure to retry
 		// every few seconds (ADR-0007 Addendum A, slice 2).
 		if res, handled := r.handleRoutedOpError(ctx, vm, ref, err, errReasonProviderReconfigure); handled {
+			return res, nil
+		}
+		if res, held := r.holdOwnerRefusal(ctx, vm, ref, err, "reconfigure"); held {
 			return res, nil
 		}
 		logger.Error(err, "Failed to reconfigure VM", "retryAfter", retryAfter)

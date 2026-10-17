@@ -573,9 +573,9 @@ func (c *Client) Clone(ctx context.Context, req contracts.CloneRequest) (contrac
 		SourceVmId:   req.Source.ID,
 		SourceHostId: req.Source.HostID,
 		// ADR-0007 Addendum A, slice 3: a routed (clustered) clone also names its
-		// landing host and the source's owner; a single-host clone carries
-		// neither, exactly as before.
-		SourceOwner:   routedOwner(req.Source),
+		// landing host. Every clone names the source's owner (vmOwner), which a
+		// clustered provider and the single-host Proxmox provider check.
+		SourceOwner:   vmOwner(req.Source),
 		TargetHostId:  routedTargetHost(req),
 		TargetName:    req.TargetName,
 		Linked:        req.Linked,
@@ -687,7 +687,7 @@ func (c *Client) Create(ctx context.Context, req contracts.CreateRequest) (resul
 
 // Delete implements contracts.Provider. For a routed VM (clustered provider)
 // it threads vm.HostID to the wire as target_host_id (ADR-0007 Addendum A,
-// A1/A2). Unlike the other per-VM calls it sends vm.Owner as owner whenever
+// A1/A2). It sends vm.Owner as owner (vmOwner) whenever
 // the caller set one with a UID, single-host included: a provider that checks
 // it (clustered libvirt, Proxmox) then never destroys a VM stamped with
 // another owner, e.g. one that reused a Proxmox VMID. Providers that do not
@@ -705,7 +705,7 @@ func (c *Client) Delete(ctx context.Context, vm contracts.VMRef) (taskRef string
 	resp, err := c.client.Delete(ctx, &providerv1.DeleteRequest{
 		Id:           vm.ID,
 		TargetHostId: vm.HostID,
-		Owner:        objectIdentityToProto(vm.Owner),
+		Owner:        vmOwner(vm),
 	})
 	if err != nil {
 		return "", c.mapGRPCError("delete", err)
@@ -721,7 +721,8 @@ func (c *Client) Delete(ctx context.Context, vm contracts.VMRef) (taskRef string
 
 // Power implements contracts.Provider. For a routed VM (clustered provider)
 // it threads vm.HostID to the wire as target_host_id and vm.Owner as owner
-// (ADR-0007 Addendum A, slice 2); a single-host request carries neither.
+// (ADR-0007 Addendum A, slice 2); a single-host request carries vm.Owner only
+// (vmOwner), which the single-host Proxmox provider checks.
 //
 // Records virtrigaud_vm_operations_total{operation="Power",...} via
 // deferred recordVMOp using the named retErr return value (G7.1 / #124).
@@ -740,7 +741,7 @@ func (c *Client) Power(ctx context.Context, vm contracts.VMRef, op contracts.Pow
 		Id:           vm.ID,
 		Op:           grpcOp,
 		TargetHostId: vm.HostID,
-		Owner:        routedOwner(vm),
+		Owner:        vmOwner(vm),
 	}
 
 	// Set default graceful timeout for graceful shutdown operations
@@ -763,7 +764,8 @@ func (c *Client) Power(ctx context.Context, vm contracts.VMRef, op contracts.Pow
 
 // Reconfigure implements contracts.Provider. For a routed VM (clustered
 // provider) it threads vm.HostID to the wire as target_host_id and vm.Owner as
-// owner (ADR-0007 Addendum A, slice 2); a single-host request carries neither.
+// owner (ADR-0007 Addendum A, slice 2); a single-host request carries vm.Owner
+// only (vmOwner), which the single-host Proxmox provider checks.
 //
 // The provider's restart_required answer (a change applied to the VM's
 // persistent definition only, taking effect at its next power cycle) is
@@ -787,7 +789,7 @@ func (c *Client) Reconfigure(ctx context.Context, vm contracts.VMRef, desired co
 		Id:           vm.ID,
 		DesiredJson:  string(desiredJSON),
 		TargetHostId: vm.HostID,
-		Owner:        routedOwner(vm),
+		Owner:        vmOwner(vm),
 	})
 	if err != nil {
 		return contracts.ReconfigureResult{}, c.mapGRPCError("reconfigure", err)
@@ -803,7 +805,10 @@ func (c *Client) Reconfigure(ctx context.Context, vm contracts.VMRef, desired co
 	return result, nil
 }
 
-// Describe implements contracts.Provider.
+// Describe implements contracts.Provider. It threads vm.HostID to the wire as
+// target_host_id for a routed VM, and vm.Owner as owner for every VM
+// (vmOwner): a provider that checks it answers a VM that is not the
+// requester's exists=false (clustered) or VM_NOT_OWNED (single-host Proxmox).
 //
 // Records virtrigaud_vm_operations_total{operation="Describe",...} via
 // deferred recordVMOp using the named retErr return value (G7.1 / #124).
@@ -816,7 +821,7 @@ func (c *Client) Describe(ctx context.Context, vm contracts.VMRef) (result contr
 	resp, err := c.client.Describe(ctx, &providerv1.DescribeRequest{
 		Id:           vm.ID,
 		TargetHostId: vm.HostID,
-		Owner:        routedOwner(vm),
+		Owner:        vmOwner(vm),
 	})
 	if err != nil {
 		return contracts.DescribeResponse{}, c.mapGRPCError("describe", err)
@@ -912,7 +917,7 @@ func (c *Client) SnapshotCreate(ctx context.Context, req contracts.SnapshotCreat
 		Description:   req.Description,
 		IncludeMemory: req.IncludeMemory,
 		TargetHostId:  req.VM.HostID,
-		Owner:         routedOwner(req.VM),
+		Owner:         vmOwner(req.VM),
 		RequestToken:  req.RequestToken,
 		// Note: Quiesce not in proto yet, would need to add to provider.proto
 	}
@@ -945,7 +950,7 @@ func (c *Client) SnapshotDelete(ctx context.Context, vm contracts.VMRef, snapsho
 		VmId:         vm.ID,
 		SnapshotId:   snapshotID,
 		TargetHostId: vm.HostID,
-		Owner:        routedOwner(vm),
+		Owner:        vmOwner(vm),
 	}
 
 	resp, err := c.client.SnapshotDelete(ctx, grpcReq)
@@ -970,7 +975,7 @@ func (c *Client) SnapshotRevert(ctx context.Context, vm contracts.VMRef, snapsho
 		VmId:         vm.ID,
 		SnapshotId:   snapshotID,
 		TargetHostId: vm.HostID,
-		Owner:        routedOwner(vm),
+		Owner:        vmOwner(vm),
 	}
 
 	resp, err := c.client.SnapshotRevert(ctx, grpcReq)
@@ -994,7 +999,7 @@ func (c *Client) ExportDisk(ctx context.Context, req contracts.ExportDiskRequest
 	grpcReq := &providerv1.ExportDiskRequest{
 		VmId:               req.VM.ID,
 		TargetHostId:       req.VM.HostID,
-		Owner:              routedOwner(req.VM),
+		Owner:              vmOwner(req.VM),
 		DiskId:             req.DiskId,
 		SnapshotId:         req.SnapshotId,
 		DestinationUrl:     req.DestinationURL,
@@ -1075,7 +1080,7 @@ func (c *Client) GetDiskInfo(ctx context.Context, req contracts.GetDiskInfoReque
 		DiskId:       req.DiskId,
 		SnapshotId:   req.SnapshotId,
 		TargetHostId: req.VM.HostID,
-		Owner:        routedOwner(req.VM),
+		Owner:        vmOwner(req.VM),
 	}
 
 	resp, err := c.client.GetDiskInfo(ctx, grpcReq)
@@ -1407,13 +1412,14 @@ func (c *Client) convertCreateRequest(req contracts.CreateRequest) (*providerv1.
 	return grpcReq, nil
 }
 
-// routedOwner is the owner a per-VM request carries on the wire: vm.Owner for a
-// routed (clustered) VM, which the provider checks against the VM's owner
-// stamp, and nothing for a single-host VM, whose requests are unchanged.
-func routedOwner(vm contracts.VMRef) *providerv1.ObjectIdentity {
-	if !vm.Routed() {
-		return nil
-	}
+// vmOwner is the owner every per-VM request carries on the wire (Describe,
+// Delete, Power, Reconfigure, the snapshot calls, GetDiskInfo, ExportDisk, and
+// CloneRequest.source_owner): vm.Owner, routed or not (nil without a UID). A
+// clustered provider checks it against the VM's owner stamp on the bound
+// host; the single-host Proxmox provider checks it against the stamp of the
+// VM at the VMID, which PVE may have handed to an unrelated VM; the other
+// single-host providers (vSphere, libvirt, mock) ignore it.
+func vmOwner(vm contracts.VMRef) *providerv1.ObjectIdentity {
 	return objectIdentityToProto(vm.Owner)
 }
 

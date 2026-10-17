@@ -223,7 +223,9 @@ Adoption stamps a VM only when it adopts it: **a VM adopted by an earlier
 release keeps the stamp it had.** On vSphere and single-host libvirt nothing
 checks that stamp on a single-host per-VM call. On Proxmox, an adopted VM that
 still carries a previous owner's stamp is answered `VM_NOT_OWNED` by its
-`VirtualMachine`'s `Delete` and left on the cluster. To find them, compare each
+`VirtualMachine`'s `Delete` and left on the cluster, and by every other per-VM
+call too: its `VirtualMachine` is held as `Ready=False/VMNotOwned` (see
+[Per-VM calls](#per-vm-calls-describe-power-reconfigure-snapshots-disks-and-clone-sources)). To find them, compare each
 adopted Proxmox `VirtualMachine`'s UID with the stamp on its VM
 (`qm config <vmid> | grep virtrigaud.owner`). To fix one, either remove the
 `virtrigaud.owner` line from the VM's Notes (the VM is then unstamped and is
@@ -814,6 +816,9 @@ That second check doesn't depend on the token's permissions. This applies to:
 
 - `Describe`: `Exists=false` only for a gone VM. A VM on another node is a
   retryable error. `Exists=false` would make the manager create the VM again.
+  A VM at the VMID that isn't the requester's is never `Exists=false` either:
+  it's answered `VM_NOT_OWNED` (see
+  [per-VM calls](#per-vm-calls-describe-power-reconfigure-snapshots-disks-and-clone-sources)).
 - `Delete`: success only for a gone VM. A VM on another node is a retryable
   error, and the finalizer is kept.
 - The `Create`/`Clone` rollback: "nothing remains" only for a gone VM.
@@ -874,6 +879,122 @@ hypervisor VM, so write access to `virtualmachines/status` must stay with the
 platform administrators and the manager: the tenant-facing roles (including
 the `virtualmachine-editor-role` helper) grant only `get` on it.
 
+### Per-VM calls: `Describe`, `Power`, `Reconfigure`, snapshots, disks and clone sources
+
+A VM deleted outside VirtRigaud frees its VMID, and PVE may hand that VMID to
+the next VM anyone creates. Before this check, a `VirtualMachine` whose
+`status.id` still recorded the VMID read that new VM's state, and could power
+it off, resize it, snapshot it or revert it. A `VMMigration` or `VMClone` of
+that `VirtualMachine` read and copied the other VM's disks.
+
+The manager now sends the `VirtualMachine`'s identity (UID, namespace, name) as
+`owner` on every per-VM request, single-host included: `Describe`, `Power`,
+`Reconfigure`, `SnapshotCreate`, `SnapshotDelete`, `SnapshotRevert`,
+`GetDiskInfo`, `ExportDisk`, and the source of a `Clone`
+(`CloneRequest.source_owner`). The Proxmox provider reads the VM's config and
+checks its stamp **before** it reads anything else of the VM, copies its disks
+or changes it. It applies the same rule as `Delete`:
+
+| The VM at that VMID | Result |
+|---|---|
+| Stamped with the request's UID (`creating` or `ready`) | The call goes on |
+| Unstamped (created before owner stamps, adopted, or a clone without a target UID) **and** named like the owner (the owner's name, or the name adoption gave it; see `Delete`) | The call goes on, as before |
+| Unstamped with any other name: its VMID was reused by an unrelated VM | `NotFound` + `VM_NOT_OWNED`. Nothing of the VM is read or changed. |
+| Stamped with another UID: its VMID was reused by another `VirtualMachine`'s VM | `NotFound` + `VM_NOT_OWNED`. Nothing of the VM is read or changed. |
+| Unreadable or multiple stamp | `FailedPrecondition` + `OWNER_STAMP_UNREADABLE`. Nothing is done. |
+| Its config can't be read | Retryable, nothing done. `Reconfigure` and `GetDiskInfo` keep their historical `Internal` answer for this; a `Clone` answers `Unavailable` + `CREATE_NOT_PERFORMED` + `VM_OPERATION_FAILED` (nothing was cloned, see the error classes below). |
+| Not on the node asked | Handled by the call as before: `Describe` reports it gone only when the VMID is free cluster-wide (see [When is a VM gone?](#when-is-a-vm-gone)) |
+
+- **A template is checked like any VM.** Only `Delete` refuses templates
+  outright (`VM_IS_IMAGE_ARTIFACT`); these calls keep their handling, plus the
+  owner check.
+- **`SnapshotDelete` checks the VM on its actual node.** It resolves the node
+  from `/cluster/resources` (an HA move changes it), as before, and checks the
+  stamp of the VM there.
+- **API load: every checked call except `Reconfigure` and `GetDiskInfo` costs
+  one extra `GET /nodes/{node}/qemu/{vmid}/config`.** `Reconfigure` and
+  `GetDiskInfo` already read the VM's config and check the stamp in it. The
+  extra read is made only when the request carries an owner. Size the PVE API
+  rate limits and the token's request budget with it: the VM controller sends
+  a `Describe` on every reconcile of every bound VM.
+- **`ExportDisk` checks before either backend path, and again on the config it
+  copies from.** The S3 and NFS exports run on the node over SSH; a refused
+  export reaches neither, so no disk is read or copied. Each path's own disk
+  read (the config that yields the volume it copies) carries the owner too, so
+  a VM that took the VMID over after the first check is not copied either.
+- **A `Clone` checks its source before anything is cloned:** after the
+  re-bind lookup, which never reads the source, and before the VMID allocation
+  and the clone task. A retried `Clone` whose target already exists is
+  therefore answered with it even if the source's VMID was reused since. The
+  clone *target* (`target_vm`) is stamped as before.
+- **`Describe` doesn't answer `Exists=false` for a VM that isn't the
+  requester's.** On a single-host Provider, `Exists=false` makes the manager
+  create the VM again. The provider can't prove the requester's own VM is gone:
+  an adopted VM can still carry an earlier owner's stamp, and an unstamped VM
+  may have been renamed in PVE. So it answers `VM_NOT_OWNED` and returns none of
+  the VM's state.
+
+What the manager does with each answer:
+
+| Call | `VM_NOT_OWNED` | `OWNER_STAMP_UNREADABLE` |
+|---|---|---|
+| `Describe`, `Power`, `Reconfigure` (VM controller) | `Ready=False/VMNotOwned`. `status.id` is kept, and **no VM is created in its place**. | `Ready=False/OwnerStampUnreadable` |
+| `SnapshotDelete` (`VMSnapshot` finalizer, migration cleanup) | Released, since it can't be deleted through a VM that isn't the `VirtualMachine`'s. It is **not** reported as already gone: a `SnapshotLeftOnHypervisor` Warning says the snapshot may be left on the VM at that id (if that VM is the `VirtualMachine`'s after all: renamed in PVE, or the `VirtualMachine` re-created under a new UID), and the manager logs the VM and snapshot ids. | Held and retried, like any failed snapshot delete |
+| `SnapshotCreate` (`VMSnapshot`) | The `VMSnapshot` fails | The same |
+| `VMMigration` source: the `powerOffBeforeMigration` `Describe`, the source snapshot, the disk-size checks' `GetDiskInfo`, `ExportDisk` | The migration **fails** with a constant message, before anything is exported. The power-off `Describe` now runs before the source `VirtualMachine`'s `spec.powerState` is set to `Off`, so a refused source's spec isn't changed either. | The same |
+| `VMClone` source: the disk-size check's `GetDiskInfo`, `Clone` | The clone **fails** (`Failed=True`, reason `VMNotOwned`) with a constant message and one `Warning` event. Nothing was cloned. | The same, reason `OwnerStampUnreadable` |
+
+The VM controller's two holds use a constant message, record one `Warning`
+event when they begin, write the status only when it changes, and re-check
+with a backoff of up to 5 minutes. The metric reasons are `vm-not-owned` and
+`owner-stamp-unreadable`. A migration or clone is failed rather than held: it
+is a one-shot copy, and the refusal doesn't change on a retry. Its message
+names neither the VM at the VMID nor its owner; the provider's answer is in
+the manager log.
+
+To resolve `VMNotOwned`:
+
+- **The VM at the VMID really is another VM** (the common case): delete the
+  `VirtualMachine`. Its `Delete` is answered `VM_NOT_OWNED`, so it is released
+  and the other VM is left alone, with a `VMLeftOnHypervisor` event. Create
+  the `VirtualMachine` again to get a new VM.
+- **The VM is this `VirtualMachine`'s, renamed in PVE** (it is unstamped):
+  rename it back; the next `Describe` accepts it. Or delete the
+  `VirtualMachine` (the VM is left in place) and let adoption take the VM
+  again: through a Proxmox provider of this release (it reports
+  `supportsOwnerTransfer`), adoption stamps it with its new `VirtualMachine`
+  (see [Adoption stamps the adopted VM](#adoption-stamps-the-adopted-vm)).
+  An unstamped VM needs only `virtrigaud.io/adopt-vms` on the Provider.
+- **The VM is this `VirtualMachine`'s, adopted by an earlier release while it
+  carried an earlier owner's stamp** (see
+  [VMs adopted before this release](#vms-adopted-before-this-release)): remove
+  the `virtrigaud.owner` line from the VM's Notes in PVE; the VM is then
+  unstamped and accepted while its PVE name matches. Or delete (or detach with
+  `virtrigaud.io/orphan-on-delete: "true"`) the `VirtualMachine` and let
+  adoption take the VM again. That re-stamps it only when all of these hold:
+  the provider reports `supportsOwnerTransfer`; the Provider has
+  `virtrigaud.io/adopt-vms` **and** `virtrigaud.io/adopt-stamped-vms: "true"`;
+  no `VirtualMachine` in the cluster has the stamped UID (adoption checks this
+  uncached; the deleted `VirtualMachine`'s own UID doesn't count once it is
+  gone); and the VM's PVE name is the one adoption gives the new
+  `VirtualMachine`. Otherwise remove the stamp line by hand.
+- **`OwnerStampUnreadable`**: adoption never takes such a VM. An administrator
+  fixes or removes the `virtrigaud.owner` line(s) in the VM's Notes, or
+  removes the VM.
+
+A VM adopted by this release is stamped with its `VirtualMachine` before it
+is bound, so adoption no longer leads to this hold.
+
+The provider log names the VMID, the requester and, for a stamped VM, the
+owner recorded on it: search for `Refusing the call`.
+
+A request without an owner, from a manager older than this check, is acted on
+as before. So is any request through an older Proxmox provider, which ignores
+the owner. **The protection needs both the manager and the Proxmox provider of
+this release.** vSphere, single-host libvirt and the mock provider ignore the
+owner on all of these calls, including `source_owner` (single-host libvirt
+reads it only on its clustered path).
+
 ### `Create` and `Clone` error classes
 
 The VM controller decides from a failed `Create` whether a VM may exist. The
@@ -911,8 +1032,12 @@ was a non-retryable `AlreadyExists`.
 
 Proxmox VMs created before this release carry no stamp. They:
 
-- **stay bound and managed as before.** Every operation after `Create` uses
-  `status.id`;
+- **stay bound and managed as before** while their PVE name is the
+  `VirtualMachine`'s name or the name adoption gave it. Every operation after
+  `Create` uses `status.id`. One renamed in PVE is answered `VM_NOT_OWNED` by
+  `Describe`, `Power`, `Reconfigure` and the snapshot calls, and is held as
+  `Ready=False/VMNotOwned` (see
+  [per-VM calls](#per-vm-calls-describe-power-reconfigure-snapshots-disks-and-clone-sources));
 - **are never re-bound.** A `Create` for their `VirtualMachine` doesn't find
   them by owner. This only matters for a `VirtualMachine` that never recorded
   its `status.id`, which a re-sent `Create` treats as having no VM;
@@ -932,8 +1057,22 @@ that adoption bound before this release keeps the stamp it had.
 - `VMClone` sends no target UID today (the target `VirtualMachine` is created
   after the clone), so `VMClone` clones are unstamped. They aren't re-bound by
   a re-sent `Clone`, and a re-sent `Clone` can make a second clone.
-- Describe, Power and Reconfigure don't check the stamp. A request for a VMID
-  that was reused acts on the VM that has it now, as before.
+- The owner check and the call are two PVE requests. A VMID freed and reused
+  between them isn't caught. PVE's config `digest` parameter could close this
+  for `Reconfigure` (its config `PUT` and disk `resize`), as `TransferOwner`
+  already uses it; `Reconfigure` doesn't use it yet. `Power` and the snapshot
+  calls have no such parameter.
+- **The legacy name rule can be claimed by anyone who can create a VM.** An
+  unstamped VM named like the owner is treated as the owner's (see the table
+  above), and the provider can't tell whether the `VirtualMachine`'s own VM
+  was stamped. So once a `VirtualMachine`'s VM is removed, anyone who can
+  create a VM at the freed VMID — `VM.Allocate` on a pool or path it can be
+  created in, such as a shared pool — can create an unstamped VM with the
+  `VirtualMachine`'s name there, and the `VirtualMachine` then reads, powers,
+  resizes, snapshots and copies it as its own. A VM at that VMID stamped for
+  anyone else is refused. Grant `VM.Allocate` on the pools and paths where
+  VirtRigaud's VMs live only as you would `VM.Config.Options` (see
+  [The owner stamp](#the-owner-stamp-1)).
 - **Give each Provider its own PVE API token.** The restart guard tells this
   provider's clone and create tasks from other users' by the PVE user that
   ran them. Two Provider objects, or two provider replicas, that share a token

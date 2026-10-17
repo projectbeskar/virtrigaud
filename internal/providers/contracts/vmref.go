@@ -36,13 +36,14 @@ type VMRef struct {
 	HostID string
 	// Owner is the identity of the VirtualMachine the call is made for — the
 	// identity Create stamps onto the hypervisor VM (#333). The operator fills it
-	// with HostID on a clustered provider, and the transport sends it only with a
-	// host (the owner of the Describe, Delete, Power, Reconfigure, snapshot,
-	// ExportDisk and GetDiskInfo requests, and CloneRequest.source_owner). A
-	// clustered provider acts on, or reports, a VM only when its owner stamp
-	// records Owner.UID, so a VirtualMachine can never read, power, reconfigure,
-	// snapshot, clone, export or destroy another tenant's VM that took over the
-	// name on its host.
+	// for every bound VirtualMachine. The transport sends it on every per-VM
+	// request of every VM (Describe, Delete, Power, Reconfigure, snapshot,
+	// ExportDisk, GetDiskInfo, and CloneRequest.source_owner). A clustered
+	// provider acts on, or reports, a VM only when its
+	// owner stamp records Owner.UID, so a VirtualMachine can never read, power,
+	// reconfigure, snapshot, clone, export or destroy another tenant's VM that
+	// took over the name on its host; the single-host Proxmox provider checks
+	// it the same way on the calls it is sent with, against a reused VMID.
 	Owner ObjectIdentity
 }
 

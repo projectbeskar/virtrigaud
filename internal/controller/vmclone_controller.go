@@ -364,6 +364,12 @@ func (r *VMCloneReconciler) Reconcile(ctx context.Context, req ctrl.Request) (re
 	// provider call made for it is a read-only GetDiskInfo, and only while a
 	// limit applies.
 	refusal, err := r.cloneDiskSizeRefusal(ctx, clone, sourceVM, sourceRef, providerInstance, provider)
+	if isSourceOwnerRefused(err) {
+		// The source VM is not the source VirtualMachine's (a reused id), or
+		// its owner cannot be told: nothing is cloned (copy_source_owner_refusal.go).
+		logger.Info("The provider refused the source VM as not the source VirtualMachine's", "error", err.Error())
+		return r.markFailed(ctx, clone, ownerRefusalReason(err), cloneSourceNotOwnedMessage), nil
+	}
 	if err != nil {
 		logger.Error(err, "Failed to read a VMClass to check the clone's disk sizes")
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
@@ -450,6 +456,13 @@ func (r *VMCloneReconciler) startClone(
 		// (Pending) until it is off, and is never failed for it.
 		if contracts.IsVMSourceRunning(err) {
 			return r.holdCloneForRunningSource(ctx, clone, err), nil
+		}
+		// The source VM is not the source VirtualMachine's (a reused id), or
+		// its owner cannot be told: refused before anything was cloned, and
+		// failed with a constant message (copy_source_owner_refusal.go).
+		if isOwnerRefusal(err) {
+			logger.Info("The provider refused the source VM as not the source VirtualMachine's", "error", err.Error())
+			return r.markFailed(ctx, clone, ownerRefusalReason(err), cloneSourceNotOwnedMessage), nil
 		}
 		// A transient failure (the provider or its host briefly unreachable,
 		// a check that could not run, a copy still in progress) is held and

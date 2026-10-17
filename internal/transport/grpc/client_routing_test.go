@@ -269,10 +269,9 @@ func TestClient_SnapshotCreate_SendsTheRequestToken(t *testing.T) {
 
 // TestClient_PerVMCalls_SingleHostSendsNoHost proves D9 on the wire: a
 // single-host VMRef (empty HostID) puts nothing in target_host_id /
-// source_host_id, and no owner is sent — even if one were set — so single-host
-// requests are exactly what they were before routing. The one exception is
-// Delete, which carries the owner the caller set so an owner-checking
-// provider (Proxmox) never destroys a VM stamped with another owner.
+// source_host_id. The owner the caller set is sent on every per-VM request
+// (the clone source's as source_owner), so an owner-checking provider
+// (Proxmox) never reads, copies or acts on a VM that reused the VM's VMID.
 func TestClient_PerVMCalls_SingleHostSendsNoHost(t *testing.T) {
 	srv := &routingRecorderServer{}
 	cli := newTestClientForVMOps(t, srv, "libvirt", "single")
@@ -282,13 +281,13 @@ func TestClient_PerVMCalls_SingleHostSendsNoHost(t *testing.T) {
 	for name, idHost := range wireRouting(t, srv) {
 		assert.Equal(t, [2]string{"legacy", ""}, idHost, "%s must carry no host for a single-host VM", name)
 	}
-	for name, got := range routedOwners(t, srv) {
-		if name == "Delete" {
-			require.NotNil(t, got, "a single-host Delete carries the owner")
-			assert.Equal(t, "uid-x", got.Uid)
-			continue
-		}
-		assert.Nil(t, got, "a single-host %s carries no owner", name)
+	owners := routedOwners(t, srv)
+	assert.Len(t, owners, 10, "every per-VM call is checked")
+	for name, got := range owners {
+		require.NotNil(t, got, "a single-host %s carries the owner", name)
+		assert.Equal(t, "uid-x", got.Uid, name)
+		assert.Equal(t, "ns", got.Namespace, name)
+		assert.Equal(t, "legacy", got.Name, name)
 	}
 	assert.Empty(t, recordedAs[*providerv1.CloneRequest](t, srv, "Clone").TargetHostId,
 		"a single-host clone carries no landing host")
