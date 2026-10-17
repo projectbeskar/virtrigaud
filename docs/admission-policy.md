@@ -76,9 +76,11 @@ administrators. The manager also writes `virtrigaud.io/reconcile-trigger` and
 `virtrigaud.io/migration-pvc` on `Provider`s, but nothing reads them as proof
 of anything.
 
-A `VMClone` or `VMMigration` never copies reserved `virtrigaud.io` keys from
-its `spec.target.annotations` or `spec.target.labels` onto the VM it
-creates. The manager creates that VM, so the policy wouldn't stop them.
+The manager creates the target VM of a `VMClone` or `VMMigration`, so the
+policy wouldn't stop a reserved key copied through it. A `VMMigration`
+therefore drops every `virtrigaud.io` key from its `spec.target.annotations`
+and `spec.target.labels`. A `VMClone` drops them from its
+`spec.target.annotations` and always sets `virtrigaud.io/adopted` itself.
 
 `internal/controller/admission_policy_test.go` keeps this classification and
 the policy in step. A new manager-owned key fails that test until it's added
