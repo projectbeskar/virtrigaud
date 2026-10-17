@@ -1186,12 +1186,6 @@ func (p *Provider) Clone(ctx context.Context, req *providerv1.CloneRequest) (*pr
 		}
 		return nil, errors.NewInvalidSpec("invalid source VM reference: %v", err)
 	}
-	// A source VM that is not the requester's source VirtualMachine's (its
-	// VMID reused) is never cloned: its disks would be copied into a VM the
-	// requester owns (vm_owner_check.go).
-	if err := p.checkCloneSourceOwner(ctx, sourceNode, sourceVMID, requestOwner(req.GetSourceOwner())); err != nil {
-		return nil, err
-	}
 
 	var stamp *ownerStamp
 	if !owner.IsZero() {
@@ -1206,6 +1200,15 @@ func (p *Provider) Clone(ctx context.Context, req *providerv1.CloneRequest) (*pr
 			return p.rebindClone(ctx, req, existing)
 		}
 		stamp = &ownerStamp{owner: owner, phase: ownerStampPhaseCreating}
+	}
+
+	// A source VM that is not the requester's source VirtualMachine's (its
+	// VMID reused) is never cloned: its disks would be copied into a VM the
+	// requester owns (vm_owner_check.go). Checked after the re-bind above,
+	// which never reads the source: a retried Clone whose target already
+	// exists is answered with it even if the source's VMID was reused since.
+	if err := p.checkCloneSourceOwner(ctx, sourceNode, sourceVMID, requestOwner(req.GetSourceOwner())); err != nil {
+		return nil, err
 	}
 
 	// Generate new VMID for clone

@@ -20,6 +20,7 @@ import (
 	"context"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -357,4 +358,38 @@ func TestOwnerCheck_ExportPathsCheckTheConfigTheyCopyFrom(t *testing.T) {
 			onlyConfigReadOfVM(t, requestsSince(srv, before))
 		})
 	}
+}
+
+// TestOwnerCheck_CloneRebindDoesNotNeedTheSource: a retried Clone whose target
+// already exists (stamped with its target UID) is answered with it, even if
+// the source's VMID was reused since — the re-bind never reads the source. A
+// Clone that would make a new VM from that source is refused.
+func TestOwnerCheck_CloneRebindDoesNotNeedTheSource(t *testing.T) {
+	ctx := context.Background()
+	p, srv := newStampTestProvider(t)
+	src, err := p.Create(ctx, createReq(testOwner(), ""))
+	require.NoError(t, err)
+	target := contracts.ObjectIdentity{UID: testOtherUID, Namespace: testNamespace, Name: "web-clone"}
+	req := &providerv1.CloneRequest{SourceVmId: src.Id, TargetName: target.Name, TargetVm: ownerProto(target),
+		ClassJson: sizedClassJSON, SourceOwner: ownerProto(testOwner())}
+	first, err := p.Clone(ctx, req)
+	require.NoError(t, err)
+
+	// The source VM is replaced at its VMID by another tenant's VM.
+	vmid, err := strconv.Atoi(src.Id)
+	require.NoError(t, err)
+	srv.SetDescription(vmid, testStamp("9d8c7b6a-5f4e-4d3c-8b2a-1f0e9d8c7b6a", ownerStampPhaseReady).line())
+
+	second, err := p.Clone(ctx, req)
+	require.NoError(t, err, "the retried clone re-binds its existing target")
+	assert.Equal(t, first.TargetVmId, second.TargetVmId)
+	assert.Len(t, srv.VMsNamed("web-clone"), 1)
+
+	fresh := &providerv1.CloneRequest{SourceVmId: src.Id, TargetName: "web-clone-2",
+		TargetVm:    ownerProto(contracts.ObjectIdentity{UID: "1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d", Namespace: testNamespace, Name: "web-clone-2"}),
+		SourceOwner: ownerProto(testOwner())}
+	_, err = p.Clone(ctx, fresh)
+	assert.Equal(t, codes.NotFound, status.Code(err), "error: %v", err)
+	assert.Equal(t, []string{contracts.VMNotOwnedReason}, deleteErrorReasons(err))
+	assert.Empty(t, srv.VMsNamed("web-clone-2"), "nothing is cloned from a source that is not the requester's")
 }
