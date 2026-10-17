@@ -120,7 +120,7 @@ helm template virtrigaud "${CHART_DIR}" --namespace "${NAMESPACE}" --kube-versio
 check "${WORKDIR}/default.yaml" 1 "[\"system:serviceaccount:${NAMESPACE}:virtrigaud\"]"
 
 echo "==> 2. enabled=false renders nothing"
-helm template virtrigaud "${CHART_DIR}" --namespace "${NAMESPACE}" \
+helm template virtrigaud "${CHART_DIR}" --namespace "${NAMESPACE}" --kube-version 1.30.0 \
   --set admissionPolicy.reservedKeys.enabled=false > "${WORKDIR}/disabled.yaml"
 check "${WORKDIR}/disabled.yaml" 0
 
@@ -132,7 +132,7 @@ helm template virtrigaud "${CHART_DIR}" --namespace "${NAMESPACE}" --kube-versio
 check "${WORKDIR}/old-with-api.yaml" 1 "[\"system:serviceaccount:${NAMESPACE}:virtrigaud\"]"
 
 echo "==> 4. ServiceAccount name and exemptions reach the match conditions"
-helm template virtrigaud "${CHART_DIR}" --namespace tenant-ops \
+helm template virtrigaud "${CHART_DIR}" --namespace tenant-ops --kube-version 1.30.0 \
   --set manager.serviceAccount.name=vr-manager \
   --set 'admissionPolicy.reservedKeys.exemptUsernames[0]=system:serviceaccount:velero:velero' \
   --set 'admissionPolicy.reservedKeys.exemptGroups[0]=vr-break-glass' > "${WORKDIR}/exempt.yaml"
