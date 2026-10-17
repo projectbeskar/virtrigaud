@@ -86,6 +86,27 @@ func TestDeleteLandedDisk_KeepsADiskAVMUses(t *testing.T) {
 	assert.True(t, datastoreFileExists(t, p, ownMigratedDiskPath("web")), "a disk in use is never deleted")
 }
 
+// TestDeleteLandedDisk_KeepsAFolderAVMOrTemplateHasFilesIn (security review):
+// a VM or a template whose own (non-disk) files are in the landing folder —
+// its .vmx, not the landed disk — makes the delete refuse the whole folder.
+func TestDeleteLandedDisk_KeepsAFolderAVMOrTemplateHasFilesIn(t *testing.T) {
+	for name, template := range map[string]bool{"VM": false, "template": true} {
+		t.Run(name, func(t *testing.T) {
+			p, _ := newOwnershipSim(t)
+			ctx := context.Background()
+			id := landingName(ownerTeamA.Namespace, "web")
+			plantVM(t, p, defaultVMFolder(t, p), id, nil, template) // homed in "[ds] <id>/"
+			makeImportedDisk(t, p, "["+simDatastore+"] "+id, ownMigratedDiskPath("web"))
+
+			_, err := p.DeleteLandedDisk(ctx, landedReq(ownerTeamA.Namespace, "web", ownMigratedDiskPath("web")))
+			requireCode(t, err, codes.FailedPrecondition)
+			assert.Equal(t, []string{contracts.VMDiskInUseReason}, errorReasons(err))
+			assert.True(t, datastoreFileExists(t, p, ownMigratedDiskPath("web")))
+			assert.True(t, datastoreFileExists(t, p, "["+simDatastore+"] "+id+"/"+id+".vmx"))
+		})
+	}
+}
+
 // TestDeleteLandedDisk_ScanFailureFailsClosed: when the inventory scan fails
 // nothing is deleted and the answer is retryable.
 func TestDeleteLandedDisk_ScanFailureFailsClosed(t *testing.T) {
