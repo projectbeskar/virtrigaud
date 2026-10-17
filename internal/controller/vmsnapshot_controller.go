@@ -373,7 +373,7 @@ func (r *VMSnapshotReconciler) createSnapshot(ctx context.Context, snapshot *inf
 
 	// Call provider to create snapshot
 	resp, err := providerInstance.SnapshotCreate(ctx, req)
-	if err != nil && req.VM.HostID != "" && contracts.IsRetryable(err) {
+	if err != nil && req.VM.HostID != "" && (contracts.IsRetryable(err) || !providerCallOutcomeKnown(err)) {
 		// A ROUTED (clustered) create without a definite outcome — its host
 		// unavailable, its time budget run out while libvirtd may still be
 		// writing the snapshot, or another job on the VM still running — is
@@ -393,9 +393,21 @@ func (r *VMSnapshotReconciler) createSnapshot(ctx context.Context, snapshot *inf
 		}
 		return r.retrySnapshotCreate(ctx, snapshot, snapshotCreateRetryingMessage), nil
 	}
+	if err != nil && !providerCallOutcomeKnown(err) {
+		// A single-host create without a definite outcome (a deadline, a
+		// dropped connection): the snapshot may still be taken, and this
+		// provider cannot be asked again without risking a second one. The
+		// marker is kept and the snapshot is held, never failed
+		// (vmsnapshot_request_marker.go).
+		logger.Error(err, "The snapshot create failed without a definite outcome; keeping its marker")
+		snapshot.Status.Phase = ""
+		attempt := requestMarkerAttemptID(snapshot.Status.Conditions, snapshotConditionRequested)
+		return r.holdSnapshotOutcomeUnknown(ctx, snapshot, attempt, snapshotOutcomeUnknownMessage), nil
+	}
 	if err != nil {
 		logger.Error(err, "Failed to create snapshot")
-		// The provider answered: its failure is the outcome.
+		// A definite answer — nothing was done, or a refusal: the failure is
+		// the outcome.
 		clearSnapshotRequest(snapshot)
 		detail := rpcFailureDetail(err)
 		snapshot.Status.Phase = infrav1beta1.SnapshotPhaseFailed

@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	stderrors "errors"
 	"fmt"
 	"slices"
 	"time"
@@ -46,7 +47,10 @@ import (
 // handler that finds the marker without the result (resolveMigrationRequest)
 // knows the call may have run: the result was lost to a manager restart or
 // leader change after the call, or while a result whose write failed was held
-// in memory (pendingMigrationResult). It then:
+// in memory (pendingMigrationResult) — or the call failed without a definite
+// outcome (a deadline, a transport failure after the request was written;
+// afterUnknownMigrationCall keeps the marker and never fails the migration).
+// It then:
 //
 //   - SnapshotCreate: sends it again only through a clustered (routed)
 //     provider, which adopts the snapshot an earlier call made for the same
@@ -65,6 +69,11 @@ import (
 //     re-send replaces it (or is refused because a VM uses it) — where the
 //     target provider reports the backend in resend_safe_import_backends;
 //     after migrationResendSettleTime, otherwise held (ImportOutcomeUnknown).
+//
+// Automatic re-sends are capped (maxResends, counted in the marker): past the
+// cap the migration is held for an operator. A cause that cannot be decided
+// yet (the provider, the source VM or the capabilities cannot be read) is
+// retried quietly, with no hold.
 //
 // A held migration names the operator's action in its Ready message: check
 // the provider for what the call made, remove it, and confirm with
@@ -118,6 +127,11 @@ type migrationRequestKind struct {
 	// operatorMessage is the Ready message while the call waits for an
 	// operator.
 	operatorMessage string
+	// exhaustedMessage is the Ready message once maxResends automatic
+	// re-sends reached no recorded outcome.
+	exhaustedMessage string
+	// maxResends caps the automatic re-sends of one call.
+	maxResends int
 }
 
 // migrationOperatorActionFormat is the shared tail of the operator messages:
@@ -125,6 +139,25 @@ type migrationRequestKind struct {
 const migrationOperatorActionFormat = " Then annotate the VMMigration %s=%s<attempt id>, the attempt id being the " +
 	"lastTransitionTime of the %s condition, to send it again; or delete the VMMigration (anything the call made " +
 	"that the migration did not record is left for you to remove). Re-checked every %s"
+
+// Caps on automatic re-sends (migrationRequestKind.maxResends).
+const (
+	// migrationSnapshotResendMax caps the routed SnapshotCreate re-sends:
+	// about ten minutes at one a minute.
+	migrationSnapshotResendMax = 10
+	// migrationDiskResendMax caps the ExportDisk / ImportDisk re-sends: each
+	// is a full disk copy, 35 minutes after the last.
+	migrationDiskResendMax = 3
+)
+
+// migrationOutcomeUnknownCause is the shared head of the hold messages.
+const migrationOutcomeUnknownCause = "its outcome is unknown: its result was lost to a manager restart or leader change, " +
+	"or the call failed without a definite answer (a deadline, a dropped connection)"
+
+// migrationExhaustedFormat is the head of the exhausted messages: the call
+// and the cap.
+const migrationExhaustedFormat = "The %s was sent again automatically %d times and none of them reached a recorded " +
+	"outcome, so it is not sent again without an operator. Check the provider (its answers are in the manager log) and "
 
 // migrationRequests are the markers of the three calls.
 var migrationRequests = map[migrationLongOp]migrationRequestKind{
@@ -134,13 +167,19 @@ var migrationRequests = map[migrationLongOp]migrationRequestKind{
 		unknownReason: migrationReasonSnapshotOutcomeUnknown,
 		requestedMessage: "A SnapshotCreate of the source VM was requested (the attempt id is this condition's " +
 			"lastTransitionTime); the snapshot is recorded here once the provider answers",
-		resendMessage: "The source snapshot's SnapshotCreate was sent but its result was never recorded; it is sent " +
-			"again: the provider returns the snapshot an earlier call made for this migration attempt",
-		operatorMessage: fmt.Sprintf("The source snapshot's SnapshotCreate was sent but its result was never recorded "+
-			"(a manager restart or leader change), and the provider cannot be asked again without risking a second "+
-			"snapshot of the live source VM. Check the source VM for the snapshot named in the %s event and remove it."+
+		resendMessage: "The source snapshot's SnapshotCreate was sent but " + migrationOutcomeUnknownCause +
+			". It is sent again, at most once a minute: the provider returns the snapshot an earlier call made for this " +
+			"migration attempt",
+		operatorMessage: fmt.Sprintf("The source snapshot's SnapshotCreate was sent but "+migrationOutcomeUnknownCause+
+			", and the provider cannot be asked again without risking a second snapshot of the live source VM. Check the "+
+			"source VM for the snapshot named in the %s event and remove it."+
 			migrationOperatorActionFormat, migrationReasonSnapshotOutcomeUnknown, operationOutcomeAnnotation,
 			operationOutcomeNotPerformedPrefix, migrationConditionSnapshotRequested, requestMarkerRecheckInterval),
+		exhaustedMessage: fmt.Sprintf(migrationExhaustedFormat+"the source VM for the snapshot named in the %s event."+
+			migrationOperatorActionFormat, "SnapshotCreate", migrationSnapshotResendMax, migrationReasonSnapshotOutcomeUnknown,
+			operationOutcomeAnnotation, operationOutcomeNotPerformedPrefix, migrationConditionSnapshotRequested,
+			requestMarkerRecheckInterval),
+		maxResends: migrationSnapshotResendMax,
 	},
 	longOpExport: {
 		call:          "ExportDisk",
@@ -148,15 +187,19 @@ var migrationRequests = map[migrationLongOp]migrationRequestKind{
 		unknownReason: migrationReasonExportOutcomeUnknown,
 		requestedMessage: "An ExportDisk of the source disk was requested (the attempt id is this condition's " +
 			"lastTransitionTime); its result is recorded here once the provider answers",
-		resendMessage: fmt.Sprintf("The ExportDisk was sent but its result was never recorded; it is sent again "+
+		resendMessage: fmt.Sprintf("The ExportDisk was sent but "+migrationOutcomeUnknownCause+". It is sent again "+
 			"%s after it was requested (after the earlier call's deadline): the source provider replaces the staged "+
 			"object", migrationResendSettleTime),
-		operatorMessage: fmt.Sprintf("The ExportDisk was sent but its result was never recorded (a manager restart or "+
-			"leader change), and the source provider does not report that a re-sent export is safe on this staging "+
-			"backend (resend_safe_export_backends): an earlier export could still be writing the staged object. Make "+
-			"sure no export of this migration is still running on the source provider."+
+		operatorMessage: fmt.Sprintf("The ExportDisk was sent but "+migrationOutcomeUnknownCause+", and the source "+
+			"provider does not report that a re-sent export is safe on this staging backend "+
+			"(resend_safe_export_backends): an earlier export could still be writing the staged object. Make sure no "+
+			"export of this migration is still running on the source provider."+
 			migrationOperatorActionFormat, operationOutcomeAnnotation, operationOutcomeNotPerformedPrefix,
 			migrationConditionExportRequested, requestMarkerRecheckInterval),
+		exhaustedMessage: fmt.Sprintf(migrationExhaustedFormat+"that no export of this migration is still running."+
+			migrationOperatorActionFormat, "ExportDisk", migrationDiskResendMax, operationOutcomeAnnotation,
+			operationOutcomeNotPerformedPrefix, migrationConditionExportRequested, requestMarkerRecheckInterval),
+		maxResends: migrationDiskResendMax,
 	},
 	longOpImport: {
 		call:          "ImportDisk",
@@ -164,15 +207,20 @@ var migrationRequests = map[migrationLongOp]migrationRequestKind{
 		unknownReason: migrationReasonImportOutcomeUnknown,
 		requestedMessage: "An ImportDisk to the target provider was requested (the attempt id is this condition's " +
 			"lastTransitionTime); its result is recorded here once the provider answers",
-		resendMessage: fmt.Sprintf("The ImportDisk was sent but its result was never recorded; it is sent again "+
+		resendMessage: fmt.Sprintf("The ImportDisk was sent but "+migrationOutcomeUnknownCause+". It is sent again "+
 			"%s after it was requested (after the earlier call's deadline): the target provider lands the disk at the "+
 			"same name, replacing what an earlier call landed", migrationResendSettleTime),
-		operatorMessage: fmt.Sprintf("The ImportDisk was sent but its result was never recorded (a manager restart or "+
-			"leader change), and the target provider does not report that a re-sent import is safe on this staging "+
-			"backend (resend_safe_import_backends): it could land a second disk. Check the target provider for the "+
-			"disk landed for the target VirtualMachine (named for it, ending in -migrated) and remove it."+
+		operatorMessage: fmt.Sprintf("The ImportDisk was sent but "+migrationOutcomeUnknownCause+", and the target "+
+			"provider does not report that a re-sent import is safe on this staging backend "+
+			"(resend_safe_import_backends): it could land a second disk. Check the target provider for the disk landed "+
+			"for the target VirtualMachine (named for it, ending in -migrated) and remove it."+
 			migrationOperatorActionFormat, operationOutcomeAnnotation, operationOutcomeNotPerformedPrefix,
 			migrationConditionImportRequested, requestMarkerRecheckInterval),
+		exhaustedMessage: fmt.Sprintf(migrationExhaustedFormat+"the target provider for the disk landed for the target "+
+			"VirtualMachine (ending in -migrated)."+migrationOperatorActionFormat, "ImportDisk", migrationDiskResendMax,
+			operationOutcomeAnnotation, operationOutcomeNotPerformedPrefix, migrationConditionImportRequested,
+			requestMarkerRecheckInterval),
+		maxResends: migrationDiskResendMax,
 	},
 }
 
@@ -198,10 +246,15 @@ func migrationRequested(m *infrav1beta1.VMMigration, op migrationLongOp) bool {
 // clearMigrationRequest removes op's marker from migration (in memory; the
 // caller's status write persists it), and the Ready hold it caused.
 func clearMigrationRequest(m *infrav1beta1.VMMigration, op migrationLongOp) {
-	kind := migrationRequests[op]
-	meta.RemoveStatusCondition(&m.Status.Conditions, kind.condType)
+	meta.RemoveStatusCondition(&m.Status.Conditions, migrationRequests[op].condType)
+	clearMigrationOutcomeUnknownHold(m, op)
+}
+
+// clearMigrationOutcomeUnknownHold removes the Ready hold of op's unknown
+// outcome, keeping the marker.
+func clearMigrationOutcomeUnknownHold(m *infrav1beta1.VMMigration, op migrationLongOp) {
 	if c := meta.FindStatusCondition(m.Status.Conditions, infrav1beta1.VMMigrationConditionReady); c != nil &&
-		c.Reason == kind.unknownReason {
+		c.Reason == migrationRequests[op].unknownReason {
 		meta.RemoveStatusCondition(&m.Status.Conditions, infrav1beta1.VMMigrationConditionReady)
 	}
 }
@@ -216,13 +269,18 @@ func clearingMigrationRequest(op migrationLongOp, apply func(*infrav1beta1.VMMig
 }
 
 // markMigrationRequested durably records, right before op is sent, that it
-// was requested: a new marker (a new attempt id) written over migration as
-// read, with the optimistic lock of its resourceVersion. An operator's
-// operationOutcomeAnnotation is removed first, so it never authorizes a later
-// attempt. Any error means nothing may be sent; a Conflict is a status
-// contention (Reconcile requeues). On success migration carries the written
-// status and resourceVersion.
+// was requested: a new marker (a strictly later attempt id) written over
+// migration as read, with the optimistic lock of its resourceVersion; an
+// automatic re-send counts itself in the marker (nextRequestResends). An
+// operator's operationOutcomeAnnotation is removed first, so it never
+// authorizes a later attempt. Any error means nothing may be sent; a Conflict
+// is a status contention (Reconcile requeues). On success migration carries
+// the written status and resourceVersion.
 func (r *VMMigrationReconciler) markMigrationRequested(ctx context.Context, migration *infrav1beta1.VMMigration, op migrationLongOp) error {
+	kind := migrationRequests[op]
+	prev := requestMarker(migration.Status.Conditions, kind.condType)
+	resends := nextRequestResends(prev, operationOutcomeConfirmed(migration.Annotations,
+		requestMarkerAttemptID(migration.Status.Conditions, kind.condType)))
 	if _, ok := migration.Annotations[operationOutcomeAnnotation]; ok {
 		updated := migration.DeepCopy()
 		delete(updated.Annotations, operationOutcomeAnnotation)
@@ -233,10 +291,9 @@ func (r *VMMigrationReconciler) markMigrationRequested(ctx context.Context, migr
 		migration.ResourceVersion = updated.ResourceVersion
 		migration.Annotations = updated.Annotations
 	}
-	clearMigrationRequest(migration, op)
-	kind := migrationRequests[op]
-	setRequestMarker(&migration.Status.Conditions, kind.condType, kind.condType, kind.requestedMessage,
-		migration.Generation, time.Now())
+	clearMigrationOutcomeUnknownHold(migration, op)
+	setRequestMarker(&migration.Status.Conditions, kind.condType, kind.condType,
+		withResendCount(kind.requestedMessage, resends), migration.Generation, time.Now())
 	if err := r.updateStatus(ctx, migration); err != nil {
 		logging.FromContext(ctx).Info("Cannot record the requested provider call on the VMMigration; not sending it",
 			"call", kind.call)
@@ -255,7 +312,13 @@ func (r *VMMigrationReconciler) markMigrationRequested(ctx context.Context, migr
 //     read — a cache that does not show the result yet is not an unknown
 //     outcome.
 //   - An operator confirmed this attempt (operationOutcomeAnnotation):
-//     continue (audited with a Warning event).
+//     continue (audited with a Warning event; the annotation's field
+//     managers are logged).
+//   - maxResends automatic re-sends reached no outcome: held for an operator
+//     (exhaustedMessage).
+//   - It cannot be told yet whether the call may be sent again (the source
+//     VM, a Provider or its capabilities cannot be read): retried after
+//     requestMarkerRecheckInterval, with no hold and no event.
 //   - The call may be sent again (migrationResendAllowed): continue once its
 //     settle time has passed, held until then.
 //   - Otherwise: held for an operator (Ready=False/<call>OutcomeUnknown).
@@ -291,15 +354,22 @@ func (r *VMMigrationReconciler) resolveMigrationRequest(ctx context.Context, mig
 
 	attempt := requestMarkerAttemptID(migration.Status.Conditions, kind.condType)
 	if operationOutcomeConfirmed(migration.Annotations, attempt) {
-		logger.Info("An operator confirmed that the requested call left nothing behind; sending it again", "attempt", attempt)
+		logger.Info("An operator confirmed that the requested call left nothing behind; sending it again", "attempt", attempt,
+			"annotationManagers", operationOutcomeManagers(migration))
 		r.Recorder.Event(migration, corev1.EventTypeWarning, eventReasonOperationOutcomeConfirmed,
 			fmt.Sprintf("An operator confirmed that the %s of attempt %s left nothing behind; it is sent again", kind.call, attempt))
 		return false, ctrl.Result{}, nil
 	}
 
+	if requestResends(marker) >= kind.maxResends {
+		res, err := r.holdMigrationOutcomeUnknown(ctx, migration, op, attempt, kind.exhaustedMessage, requestMarkerRecheckInterval)
+		return true, res, err
+	}
 	resend, wait, err := r.migrationResendAllowed(ctx, migration, op, marker)
 	if err != nil {
-		logger.Info("Cannot tell whether the requested call may be sent again; holding the migration", "error", err.Error())
+		logger.Info("Cannot tell yet whether the requested call may be sent again; checking again", "error", err.Error(),
+			"retryAfter", requestMarkerRecheckInterval.String())
+		return true, ctrl.Result{RequeueAfter: requestMarkerRecheckInterval}, nil
 	}
 	if resend && wait <= 0 {
 		logger.Info("The requested call's outcome was not recorded; sending it again (safe for this provider and call)",
@@ -312,6 +382,23 @@ func (r *VMMigrationReconciler) resolveMigrationRequest(ctx context.Context, mig
 	}
 	res, err := r.holdMigrationOutcomeUnknown(ctx, migration, op, attempt, message, requeue)
 	return true, res, err
+}
+
+// afterUnknownMigrationCall handles op's failure cause that leaves its
+// outcome unknown (!providerCallOutcomeKnown): the earlier call may still be
+// running, so the marker is kept and the migration is never failed for it —
+// it is decided like a lost result (resolveMigrationRequest: re-sent where
+// safe after the settle time, held otherwise). Nothing is sent in this
+// reconcile.
+func (r *VMMigrationReconciler) afterUnknownMigrationCall(ctx context.Context, migration *infrav1beta1.VMMigration,
+	op migrationLongOp, cause error) (ctrl.Result, error) {
+	logging.FromContext(ctx).Error(cause, "The provider call failed without a definite outcome; keeping its marker",
+		"call", migrationRequests[op].call)
+	held, res, err := r.resolveMigrationRequest(ctx, migration, op)
+	if held {
+		return res, err
+	}
+	return ctrl.Result{RequeueAfter: migrationStaleReadRetryInterval}, nil
 }
 
 // migrationResendAllowed reports whether op, requested with marker and with
@@ -434,4 +521,21 @@ func migrationOutcomeUnknownEvent(migration *infrav1beta1.VMMigration, op migrat
 		}
 	}
 	return msg
+}
+
+// errExportCallMayStillWrite is the staging-cleanup hold cause of a deleting
+// VMMigration whose ExportDisk's outcome is unknown and whose deadline has not
+// passed yet (exportCallMayStillWrite).
+var errExportCallMayStillWrite = stderrors.New("an ExportDisk whose outcome is unknown may still be writing the staged object")
+
+// exportCallMayStillWrite reports whether m carries an ExportRequested marker
+// with no recorded export result whose settle time (migrationResendSettleTime,
+// past the call's deadline) has not passed at now: its export may still be
+// writing the staged object, so the staged object is not deleted yet.
+func exportCallMayStillWrite(m *infrav1beta1.VMMigration, now time.Time) bool {
+	marker := requestMarker(m.Status.Conditions, migrationConditionExportRequested)
+	if marker == nil || migrationResultRecorded(m, longOpExport) {
+		return false
+	}
+	return now.Before(marker.LastTransitionTime.Add(migrationResendSettleTime))
 }

@@ -196,3 +196,56 @@ func TestVMSnapshotRequest_FailedCreateClearsTheMarker(t *testing.T) {
 	assert.Equal(t, infrav1beta1.SnapshotPhaseFailed, got.Status.Phase)
 	assert.False(t, snapshotRequested(got))
 }
+
+// presetSnapshotMarker stores a SnapshotRequested marker with resends
+// automatic re-sends, requested age ago.
+func presetSnapshotMarker(t *testing.T, r *VMSnapshotReconciler, snap *infrav1beta1.VMSnapshot, resends int, age time.Duration) {
+	t.Helper()
+	got := &infrav1beta1.VMSnapshot{}
+	require.NoError(t, r.Get(context.Background(), client.ObjectKeyFromObject(snap), got))
+	setRequestMarker(&got.Status.Conditions, snapshotConditionRequested, snapshotConditionRequested,
+		withResendCount(snapshotRequestedMessage, resends), got.Generation, time.Now().Add(-age))
+	require.NoError(t, r.Status().Update(context.Background(), got))
+}
+
+// TestVMSnapshotRequest_RoutedResendsAreCapped (review L3): a routed create
+// re-sent snapshotRoutedResendMax times without a recorded outcome is held
+// with the constant exhausted message instead of being re-sent forever.
+func TestVMSnapshotRequest_RoutedResendsAreCapped(t *testing.T) {
+	r, rec, snap := markerSnapshotFixture(t, true, &statusWriteFaults{})
+	presetSnapshotMarker(t, r, snap, snapshotRoutedResendMax, time.Hour)
+	_, got := reconcileSnapshotOnce(t, r, snap)
+	assert.Empty(t, rec.creates)
+	ready := meta.FindStatusCondition(got.Status.Conditions, infrav1beta1.VMSnapshotConditionReady)
+	require.NotNil(t, ready)
+	assert.Equal(t, snapshotReasonOutcomeUnknown, ready.Reason)
+	assert.Equal(t, snapshotResendsExhaustedMessage, ready.Message)
+
+	// Below the cap it is still re-sent, and counts itself.
+	r, rec, snap = markerSnapshotFixture(t, true, &statusWriteFaults{})
+	presetSnapshotMarker(t, r, snap, snapshotRoutedResendMax-2, time.Hour)
+	rec.createErr = contracts.NewRetryableError("outcome unknown", nil)
+	_, got = reconcileSnapshotOnce(t, r, snap)
+	require.Len(t, rec.creates, 1)
+	assert.Equal(t, snapshotRoutedResendMax-1, requestResends(requestMarker(got.Status.Conditions, snapshotConditionRequested)))
+}
+
+// TestVMSnapshotRequest_UndecidableIsRetriedQuietly (review L7): a marker
+// whose Provider cannot be read yet is re-checked with no hold and no event.
+func TestVMSnapshotRequest_UndecidableIsRetriedQuietly(t *testing.T) {
+	r, rec, snap := markerSnapshotFixture(t, false, &statusWriteFaults{})
+	presetSnapshotMarker(t, r, snap, 0, time.Hour)
+	prov := &infrav1beta1.Provider{}
+	require.NoError(t, r.Get(context.Background(), client.ObjectKey{Namespace: "default", Name: "prov-c"}, prov))
+	require.NoError(t, r.Delete(context.Background(), prov))
+	events := record.NewFakeRecorder(10)
+	r.Recorder = events
+
+	before := &infrav1beta1.VMSnapshot{}
+	require.NoError(t, r.Get(context.Background(), client.ObjectKeyFromObject(snap), before))
+	res, got := reconcileSnapshotOnce(t, r, snap)
+	assert.Empty(t, rec.creates)
+	assert.Equal(t, requestMarkerRecheckInterval, res.RequeueAfter)
+	assert.Equal(t, before.ResourceVersion, got.ResourceVersion, "nothing is written")
+	assert.Empty(t, drainRecordedEvents(events))
+}
