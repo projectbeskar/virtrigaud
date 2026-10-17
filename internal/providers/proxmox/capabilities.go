@@ -80,6 +80,15 @@ func GetProviderCapabilities() *capabilities.Manager {
 		// ADR-0011: DeleteStagedDisk removes a migration's s3 object (from the
 		// pod) and unlinks its nfs file (kernel mount on the node, staged_disk.go).
 		StagedDiskDeleteBackends(migration.StagedDiskDeleteBackendsS3AndNFS()...).
+		// rc2 R6: a re-sent ExportDisk is safe on s3 only (the object is
+		// replaced when the upload completes; the node temp is per call). The
+		// nfs export copies onto the staged file in place on the node, which
+		// a cancelled call's SSH session does not stop.
+		ResendSafeExportBackends(migration.BackendS3).
+		// A re-sent ImportDisk stages at the deterministic
+		// "<ns>_<vm>-migrated" path through a private temp and mv -T
+		// (import_stage.go): it replaces the stage, never adds a second one.
+		ResendSafeImportBackends(migration.S3AndNFSImportBackends()...).
 		DiskTypes("raw", "qcow2").
 		NetworkTypes("bridge", "vlan").
 		Build()
