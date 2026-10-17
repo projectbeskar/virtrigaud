@@ -175,6 +175,57 @@ Either way the target VM receives the source's user-data — any provisioning
 secrets in it (passwords, keys, tokens) included. Grant a namespace only if its
 users may see the source VMs' user-data, or keep secrets out of user-data.
 
+## The target VM must be the migration's own
+
+The target's name (`spec.target.name`) is chosen by the migration's owner, but
+in a granted namespace other people can create `VirtualMachine`s too. One of
+them could create a VM under that name first and copy every field that looks
+like provenance onto it: the `virtrigaud.io/migration` annotation, and a
+`spec.importedDisk` that names the migration and its `status.importID`. Before
+this release, a migration took any VM with the target's name as its own. It
+then reported that VM's status as the migration's result, marked it
+`migration-completed`, and could delete the source after it.
+
+**A migration now acts only on the `VirtualMachine` it created:**
+
+- When its own `Create` of the target VM succeeds, it records the UID the API
+  server returned in `status.targetVMUID`. From then on, only the VM with
+  that UID is its target: waiting for it, validating it, marking it completed,
+  and deleting a partly created one when the migration is deleted (with a UID
+  precondition).
+- Just before the `Create`, it writes a **claim**: a fresh random token goes
+  into the VM's `virtrigaud.io/migration-claim` annotation, and only its
+  SHA-256 digest into `status.targetVMClaim`. The digest is stored first, and
+  no `Create` is sent unless that write succeeds. If the `Create` succeeded
+  but the UID was never recorded (a lost status write, a manager restart),
+  the next reconcile finds the VM whose token matches the digest and records
+  its UID. Reading the `VMMigration` gives you only the digest, which can't
+  be turned back into the token.
+- **Any other `VirtualMachine` under the target's name fails the
+  migration**: `Phase=Failed`, `Ready=False` and `Failed=True` with reason
+  `TargetVMNotOwned`, and a fixed message that names nothing about the other
+  VM. That VM is never read into the migration's status, annotated or
+  deleted. The check runs at `Validating`, before the source is powered off,
+  snapshotted or exported, so a name that's already taken costs nothing.
+  `Creating` and `Validating-Target` check again against the API server, in
+  case the VM was created during the export. With a retry policy, the
+  migration retries and fails the same way until the name is free.
+- A migration whose target VM disappears while it's being validated fails
+  with reason `TargetVMGone`.
+- The landing disk follows the same rule. It's attached in place only for the
+  VM the migration created (its UID or its claim). A same-named VM with a
+  copied `spec.importedDisk` gets it handled as a base image, like any other
+  unverified path.
+
+To fix a `TargetVMNotOwned` failure, delete or rename the other
+`VirtualMachine`, or pick another `spec.target.name`, then run the migration
+again.
+
+The chart's [reserved-keys admission policy](admission-policy.md) also stops
+anyone but the manager from setting `virtrigaud.io/migration`,
+`virtrigaud.io/migration-claim` and the other provenance keys on a
+`VirtualMachine`.
+
 ## Source references
 
 Every source reference is local to the object's namespace.
@@ -224,6 +275,15 @@ objects.
   Provider.
 - The same-namespace behavior is unchanged, and so is every object that
   doesn't set these fields.
+- **A later release binds a migration to the target VM it created**
+  ([above](#the-target-vm-must-be-the-migrations-own)), in every namespace. A
+  migration that's in `Creating` or `Validating-Target` when the manager is
+  upgraded created its target VM before that binding existed, so it has no
+  recorded UID or claim. It fails with `TargetVMNotOwned`, and its target VM
+  is left as it is. Let migrations finish, or don't start new ones, before
+  upgrading. For a migration that fails this way, check the target VM, then
+  delete the source yourself if you meant to (`deleteAfterMigration` doesn't
+  run for a failed migration).
 - **A later release also requires the consumer grant** on the `Provider` and
   `VMClass` a cross-namespace target references. See the upgrade notes in
   [`cross-namespace-references.md`](cross-namespace-references.md#upgrade-notes).
