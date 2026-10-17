@@ -22,7 +22,6 @@ import (
 	stderrors "errors"
 	"fmt"
 	"log"
-	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -1342,30 +1341,17 @@ func (s *Server) ImportDisk(ctx context.Context, req *providerv1.ImportDiskReque
 		return nil, err
 	}
 
-	// Parse source URL (expecting pvc:// or file:// URL)
-	sourceURL := req.SourceUrl
-	var sourcePath string
-
-	if strings.HasPrefix(sourceURL, "pvc://") {
-		// PVC URL format: pvc://<pvc-name>/<path>
-		// Provider pods have PVCs mounted at /mnt/migration-storage/<pvc-name>
-		pvcURL := strings.TrimPrefix(sourceURL, "pvc://")
-		sourcePath = fmt.Sprintf("/mnt/migration-storage/%s", pvcURL)
-		log.Printf("INFO Converting PVC URL to file path: %s -> %s", sourceURL, sourcePath)
-	} else if strings.HasPrefix(sourceURL, "file://") {
-		// Direct file path
-		sourcePath = strings.TrimPrefix(sourceURL, "file://")
-		log.Printf("INFO Using direct file path: %s", sourcePath)
-	} else {
-		return nil, fmt.Errorf("unsupported source URL scheme (expected pvc:// or file://): %s", sourceURL)
+	// Open the staged disk once (pvc:// only, beneath the PVC's mount), with
+	// no symbolic link followed in any component and only if it is a regular
+	// single-link file (staged_source.go): the staging PVC is writable by the
+	// tenant. Every later read uses this descriptor.
+	src, sourcePath, err := openStagedImportSource(req.SourceUrl)
+	if err != nil {
+		return nil, err
 	}
+	defer func() { _ = src.Close() }()
 
 	log.Printf("INFO Importing disk from path: %s", sourcePath)
-
-	// Validate source file exists locally
-	if _, err := os.Stat(sourcePath); err != nil {
-		return nil, fmt.Errorf("source disk file not found locally: %s (error: %w)", sourcePath, err)
-	}
 
 	// Generate target volume name from TargetName or source filename
 	volumeName, err := importVolumeName(req)
@@ -1394,7 +1380,7 @@ func (s *Server) ImportDisk(ctx context.Context, req *providerv1.ImportDiskReque
 			return nil, err
 		}
 		log.Printf("INFO Copying disk file to remote libvirt host...")
-		remotePath, err := conn.copyDiskToRemote(ctx, sourcePath, volumeName)
+		remotePath, err := conn.copyDiskToRemote(ctx, src, volumeName)
 		if err != nil {
 			return nil, fmt.Errorf("failed to copy disk to remote host: %w", err)
 		}
@@ -1405,7 +1391,7 @@ func (s *Server) ImportDisk(ctx context.Context, req *providerv1.ImportDiskReque
 		// branch does, never the staged file in place — it lives in the
 		// tenant's staging PVC and could be replaced between the disk-size
 		// check below and the import that reads it again.
-		localCopy, cleanup, err := privateLocalImportCopy(sourcePath)
+		localCopy, cleanup, err := privateLocalImportCopy(src)
 		if err != nil {
 			return nil, fmt.Errorf("copy the staged disk to a private location: %w", err)
 		}

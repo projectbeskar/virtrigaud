@@ -50,10 +50,11 @@ func (c *createHost) withRegistry() *Server {
 	return NewServer(c.p)
 }
 
-// importFor runs a pvc/file:// ImportDisk of a staged disk for the VM target
-// (legacy request when target is zero) and returns the response.
+// importFor runs a pvc ImportDisk of a staged disk for the VM target (legacy
+// request when target is zero) and returns the response. The staged file's
+// directory stands in for the PVC mount (stagedPVCURL).
 func (c *createHost) importFor(s *Server, staged string, target contracts.ObjectIdentity, targetName string) (*providerv1.ImportDiskResponse, error) {
-	req := &providerv1.ImportDiskRequest{SourceUrl: "file://" + staged, Format: "qcow2", TargetName: targetName}
+	req := &providerv1.ImportDiskRequest{SourceUrl: stagedPVCURL(c.t, staged), Format: "qcow2", TargetName: targetName}
 	if target.Namespace != "" {
 		req.TargetVm = &providerv1.ObjectIdentity{Namespace: target.Namespace, Name: target.Name}
 	}

@@ -22,7 +22,6 @@ import (
 	"io"
 	"log"
 	"net/url"
-	"os"
 	"path/filepath"
 
 	golibvirt "github.com/digitalocean/go-libvirt"
@@ -117,10 +116,10 @@ type libvirtConn interface {
 	snapshotExists(ctx context.Context, domain, snapshot string) (bool, error)
 	// uri is the libvirt connection URI (the import RPC branches on ssh://).
 	uri() string
-	// copyDiskToRemote copies a local disk file into the host image pool over
-	// the in-process SSH client (ADR-0008 PR 3: `cat > remotePath`, replacing
-	// scp) and returns the remote path.
-	copyDiskToRemote(ctx context.Context, localPath, volumeName string) (string, error)
+	// copyDiskToRemote copies a local disk (src, an already-open staged file)
+	// into the host image pool over the in-process SSH client (ADR-0008 PR 3:
+	// `cat > remotePath`, replacing scp) and returns the remote path.
+	copyDiskToRemote(ctx context.Context, src io.Reader, volumeName string) (string, error)
 	// storageProvider returns the storage helper bound to this host.
 	storageProvider() *StorageProvider
 	// callLibvirt runs fn against this host's go-libvirt client under the
@@ -298,8 +297,8 @@ func (c *virshConn) snapshotExists(ctx context.Context, domain, snapshot string)
 func (c *virshConn) uri() string { return c.virsh.uri }
 
 // copyDiskToRemote delegates to the wrapped VirshProvider.
-func (c *virshConn) copyDiskToRemote(ctx context.Context, localPath, volumeName string) (string, error) {
-	return c.virsh.copyDiskToRemote(ctx, localPath, volumeName)
+func (c *virshConn) copyDiskToRemote(ctx context.Context, src io.Reader, volumeName string) (string, error) {
+	return c.virsh.copyDiskToRemote(ctx, src, volumeName)
 }
 
 // storageProvider returns a StorageProvider bound to this host's VirshProvider.
@@ -337,8 +336,10 @@ func hostIDFromEndpoint(endpoint string) hostconn.HostID {
 	return hostconn.HostID(endpoint)
 }
 
-// copyDiskToRemote copies a disk file from local pod storage to the remote
-// libvirt host, returning the remote path.
+// copyDiskToRemote copies a disk from local pod storage to the remote libvirt
+// host, returning the remote path. src is the staged file the caller opened
+// with openStagedImportSource (no symbolic link followed, a regular file); it
+// is never reopened by path here, so it cannot be swapped for a link.
 //
 // This method was moved off the gRPC Server (ADR-0008 PR 2); it is reached
 // through the libvirtConn seam (virshConn.copyDiskToRemote). ADR-0008 PR 3
@@ -347,7 +348,7 @@ func hostIDFromEndpoint(endpoint string) hostconn.HostID {
 // primitive importDiskFromS3's host-side stage step uses. Host-key
 // verification, auth-method selection, and the streamSem budget all now live
 // in runSSHStdin's single implementation instead of being re-derived here.
-func (v *VirshProvider) copyDiskToRemote(ctx context.Context, localPath, volumeName string) (string, error) {
+func (v *VirshProvider) copyDiskToRemote(ctx context.Context, src io.Reader, volumeName string) (string, error) {
 	// IMPORTANT: Copy directly to libvirt pool directory for efficient in-place usage
 	// This allows CreateVolumeFromImageFile to detect and use the disk without copying
 	remoteDir := "/var/lib/libvirt/images"
@@ -360,13 +361,7 @@ func (v *VirshProvider) copyDiskToRemote(ctx context.Context, localPath, volumeN
 		log.Printf("WARN Failed to ensure pool directory exists (may already exist): %v", err)
 	}
 
-	log.Printf("INFO Copying disk file (%s) to remote host over SSH...", localPath)
-
-	f, err := os.Open(localPath)
-	if err != nil {
-		return "", fmt.Errorf("open local disk file %s for remote copy: %w", localPath, err)
-	}
-	defer func() { _ = f.Close() }()
+	log.Printf("INFO Copying disk file (volume %s) to remote host over SSH...", volumeName)
 
 	// The disk is written in a private directory next to remotePath and
 	// renamed into place (diskWriteDir), created with vmDiskMode, so Create
@@ -384,7 +379,7 @@ func (v *VirshProvider) copyDiskToRemote(ctx context.Context, localPath, volumeN
 	if err != nil {
 		return "", fmt.Errorf("build remote copy command: %w", err)
 	}
-	if err := runSSHStdin(ctx, v, f, remoteCmd); err != nil {
+	if err := runSSHStdin(ctx, v, src, remoteCmd); err != nil {
 		return "", fmt.Errorf("disk copy to remote host failed: %w", err)
 	}
 	if err := wd.publish(ctx, name, remotePath); err != nil {
