@@ -190,8 +190,10 @@ func (r *VirtualMachineReconciler) recordAtLeastDesired(vm *infravirtrigaudiov1b
 }
 
 // recordReconfigureFailure records a Reconfigure that failed with err:
-// Reconfiguring=False/ProviderError (observedGeneration set, so a later spec
-// change is sent at once) and — on a clustered Provider, whose
+// Reconfiguring=False/ProviderError — or ResizePendingPowerOff when the
+// provider refused a change the running VM cannot take
+// (contracts.IsReconfigureNeedsPowerOff) — (observedGeneration set, so a
+// later spec change is sent at once) and — on a clustered Provider, whose
 // committed-capacity accounting trusts status.currentResources — the size
 // counted at max(recorded, desired) per resource, because the failed call may
 // have applied part of the change (review H1). A NotFound (the domain is gone
@@ -207,15 +209,33 @@ func (r *VirtualMachineReconciler) recordReconfigureFailure(vm *infravirtrigaudi
 		r.recordAtLeastDesired(vm, vmClass)
 	}
 	retryAfter := r.reconfigureRetry.nextWithin(vmSchedulingUID(vm), r.now(), providerErrorRetryInterval, reconfigureRetryMaxInterval)
+	reason, message := k8s.ReasonProviderError, "Failed to reconfigure VM: "+providerFailureDetail(err)
+	if contracts.IsReconfigureNeedsPowerOff(err) {
+		// The running VM cannot take the change and nothing was changed: say
+		// so with a constant message (the provider's text names the VM's
+		// settings, not the remedy), so a VM waiting for its power-off keeps
+		// an unchanged status while it is asked again.
+		reason, message = k8s.ReasonResizePendingPowerOff, resizePendingPowerOffMessage
+	}
 	meta.SetStatusCondition(&vm.Status.Conditions, metav1.Condition{
 		Type:               k8s.ConditionReconfiguring,
 		Status:             metav1.ConditionFalse,
-		Reason:             k8s.ReasonProviderError,
-		Message:            "Failed to reconfigure VM: " + providerFailureDetail(err),
+		Reason:             reason,
+		Message:            message,
 		ObservedGeneration: vm.Generation,
 	})
 	return retryAfter
 }
+
+// resizePendingPowerOffMessage is the Reconfiguring=False/ResizePendingPowerOff
+// message of a VM whose CPU/memory change the provider can apply only while
+// the VM is powered off (contracts.IsReconfigureNeedsPowerOff).
+const resizePendingPowerOffMessage = "The change cannot be applied unless the VM is powered off: the hypervisor does " +
+	"not allow it on this VM while it runs (on vSphere: CPU or memory hot-add, or CPU hot-remove for fewer vCPUs, is " +
+	"not enabled on the VM; the memory asked for is above the VM's hot-plug memory limit; memory is never removed from " +
+	"a running VM; a disk on a shared SCSI bus or with multi-writer sharing is grown only while the VM is off; a " +
+	"suspended VM takes no change). Nothing was changed. It is applied once the VM is powered off " +
+	"(spec.powerState: Off); until then status.currentResources keeps the VM's current size"
 
 // recordReconfigureSuccess forgets the VM's failed-Reconfigure backoff: the
 // provider answered (applied, or applied to the definition pending a
@@ -235,9 +255,11 @@ func (r *VirtualMachineReconciler) recordReconfigureSuccess(vm *infravirtrigaudi
 //     has passed since the last Reconfigure, or at once when the spec changed
 //     since (the condition's observedGeneration); otherwise wait.
 //   - Reconfiguring=False/ProviderError (the last Reconfigure failed, possibly
-//     after changing part of the definition): due once the VM's
-//     reconfigureRetry backoff (5 s doubling to 5 min) has passed, or at once
-//     when the spec changed since; otherwise wait (review H2).
+//     after changing part of the definition) or ResizePendingPowerOff (the
+//     running VM cannot take the change; it is applied once the VM is off):
+//     due once the VM's reconfigureRetry backoff (5 s doubling to 5 min) has
+//     passed, or at once when the spec changed since — a spec.powerState: Off
+//     is such a change; otherwise wait (review H2).
 //   - anything else: not due.
 func (r *VirtualMachineReconciler) pendingReconfigureRecheck(vm *infravirtrigaudiov1beta1.VirtualMachine) (due bool, wait time.Duration) {
 	cond := meta.FindStatusCondition(vm.Status.Conditions, k8s.ConditionReconfiguring)
@@ -245,7 +267,8 @@ func (r *VirtualMachineReconciler) pendingReconfigureRecheck(vm *infravirtrigaud
 		return false, 0
 	}
 	switch {
-	case cond.Status == metav1.ConditionFalse && cond.Reason == k8s.ReasonProviderError:
+	case cond.Status == metav1.ConditionFalse &&
+		(cond.Reason == k8s.ReasonProviderError || cond.Reason == k8s.ReasonResizePendingPowerOff):
 		if cond.ObservedGeneration != vm.Generation {
 			return true, 0
 		}
@@ -332,10 +355,12 @@ func (r *VirtualMachineReconciler) syncMemoryCeiling(ctx context.Context, vm *in
 }
 
 // lastReconfigureFailed reports whether the VM's last Reconfigure failed and has
-// not been retried successfully since.
+// not been retried successfully since — including one refused because the
+// running VM cannot take it (ResizePendingPowerOff).
 func lastReconfigureFailed(vm *infravirtrigaudiov1beta1.VirtualMachine) bool {
 	cond := meta.FindStatusCondition(vm.Status.Conditions, k8s.ConditionReconfiguring)
-	return cond != nil && cond.Status == metav1.ConditionFalse && cond.Reason == k8s.ReasonProviderError
+	return cond != nil && cond.Status == metav1.ConditionFalse &&
+		(cond.Reason == k8s.ReasonProviderError || cond.Reason == k8s.ReasonResizePendingPowerOff)
 }
 
 // syncRecordedCPU raises the recorded CPU (status.currentResources.cpu) of a

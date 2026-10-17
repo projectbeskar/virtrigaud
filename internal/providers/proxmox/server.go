@@ -642,7 +642,10 @@ func (p *Provider) pveAlreadyInStatus(ctx context.Context, node string, vmid int
 	return true
 }
 
-// Reconfigure reconfigures a virtual machine
+// Reconfigure reconfigures a virtual machine: it sets its CPU count and
+// memory and changes no disk — neither a spec.disks size (the Proxmox Create
+// attaches none) nor the VMClass disk size — see reconfigure.go. The VM must
+// be the requester's (vm_owner_check.go).
 func (p *Provider) Reconfigure(ctx context.Context, req *providerv1.ReconfigureRequest) (*providerv1.TaskResponse, error) {
 	if p.client == nil {
 		return nil, errors.NewUnavailable("PVE client not configured", nil)
@@ -664,133 +667,12 @@ func (p *Provider) Reconfigure(ctx context.Context, req *providerv1.ReconfigureR
 		return nil, err
 	}
 
-	// Parse the desired configuration
-	var desired map[string]interface{}
-	if err := json.Unmarshal([]byte(req.DesiredJson), &desired); err != nil {
-		return nil, errors.NewInvalidSpec("failed to parse desired configuration: %v", err)
+	// Apply CPU/memory (reconfigure.go): no size goes to a disk.
+	desired, err := parseReconfigureDesired(req.DesiredJson)
+	if err != nil {
+		return nil, err
 	}
-
-	// Extract reconfiguration parameters
-	config := &pveapi.ReconfigureConfig{}
-
-	// Handle CPU/memory changes. DesiredJson is a marshaled contracts.CreateRequest,
-	// so the nested VMClass is under the (tag-less) key "Class" with fields "CPU"
-	// and "MemoryMiB" — NOT "class"/"cpus"/"memory" (reading those silently
-	// dropped every reconfigure of CPU/memory; #261 P1-1).
-	if classData, ok := desired["Class"].(map[string]interface{}); ok {
-		if cpus, ok := classData["CPU"].(float64); ok && cpus > 0 {
-			cpuCount := int(cpus)
-			config.CPUs = &cpuCount
-
-			// Check if VM is running - CPU changes may require power cycle
-			vm, err := p.client.GetVM(ctx, node, vmid)
-			if err == nil && vm.Status == "running" {
-				// PVE supports online CPU changes in most cases, but check current config
-				if currentCPUs, exists := currentConfig["cores"]; exists {
-					if currentCPUCount, ok := currentCPUs.(float64); ok && int(currentCPUCount) != cpuCount {
-						// Online CPU change is supported in PVE for most guest OSes
-						p.logger.Info("CPU change will be applied online", "vmid", vmid, "old", int(currentCPUCount), "new", cpuCount)
-					}
-				}
-			}
-		}
-
-		// Handle memory changes. MemoryMiB is already in MiB, which is what PVE's
-		// `memory` config field expects.
-		if mem, ok := classData["MemoryMiB"].(float64); ok && mem > 0 {
-			memMB := int64(mem)
-			config.Memory = &memMB
-
-			// Check if VM is running - memory changes may require power cycle for some guest OSes
-			vm, err := p.client.GetVM(ctx, node, vmid)
-			if err == nil && vm.Status == "running" {
-				// PVE supports online memory changes with balloon driver
-				if currentMem, exists := currentConfig["memory"]; exists {
-					if currentMemMB, ok := currentMem.(float64); ok && int64(currentMemMB) != memMB {
-						p.logger.Info("Memory change will be applied online (requires balloon driver)", "vmid", vmid, "old", int64(currentMemMB), "new", memMB)
-					}
-				}
-			}
-		}
-	}
-
-	// Handle disk changes. The marshaled contracts.CreateRequest nests disks under
-	// the tag-less key "Disks", each a DiskSpec with a numeric "SizeGiB" (GiB) and a
-	// "Name" — NOT "disks"/"size"/"name". Reading the wrong keys silently dropped
-	// every disk resize (same #261 wrong-key class as the CPU/memory fix above).
-	if disksData, ok := desired["Disks"].([]interface{}); ok {
-		for _, diskData := range disksData {
-			if disk, ok := diskData.(map[string]interface{}); ok {
-				if diskName, ok := disk["Name"].(string); ok {
-					if sizeVal, ok := disk["SizeGiB"].(float64); ok && sizeVal > 0 {
-						sizeGB := int64(sizeVal)
-
-						// Find corresponding disk in current config
-						diskKey := "scsi0" // Default to scsi0, could be smarter
-						if diskName == "root" {
-							diskKey = "scsi0"
-						}
-
-						// Check current disk size to prevent shrinking
-						if currentDisk, exists := currentConfig[diskKey]; exists {
-							if currentDiskStr, ok := currentDisk.(string); ok {
-								// Parse current disk size from config string (e.g., "local:vm-100-disk-0,size=32G")
-								if strings.Contains(currentDiskStr, "size=") {
-									parts := strings.Split(currentDiskStr, ",")
-									for _, part := range parts {
-										if strings.HasPrefix(part, "size=") {
-											sizeStr := strings.TrimPrefix(part, "size=")
-											sizeStr = strings.TrimSuffix(sizeStr, "G")
-											if currentSize, err := strconv.ParseInt(sizeStr, 10, 64); err == nil {
-												if sizeGB < currentSize {
-													return nil, errors.NewInvalidSpec("disk shrinking not allowed: current=%dG, requested=%dG", currentSize, sizeGB)
-												}
-												if sizeGB > currentSize {
-													// Use ResizeDisk for disk expansion
-													taskID, err := p.client.ResizeDisk(ctx, node, vmid, diskKey, sizeGB)
-													if err != nil {
-														return nil, errors.NewInternal("failed to resize disk", err)
-													}
-
-													result := &providerv1.TaskResponse{}
-													if taskID != "" {
-														result.Task = &providerv1.TaskRef{Id: taskID}
-													}
-													return result, nil
-												}
-											}
-										}
-									}
-								}
-							}
-						}
-					}
-				}
-			}
-		}
-	}
-
-	// Apply CPU/Memory changes if any
-	if config.CPUs != nil || config.Memory != nil {
-		taskID, err := p.client.ReconfigureVM(ctx, node, vmid, config)
-		if err != nil {
-			return nil, errors.NewInternal("failed to reconfigure VM", err)
-		}
-
-		// RestartRequired stays false: this provider does not yet detect a
-		// change PVE stored as pending (hotplug not enabled for it) and so
-		// cannot report it; the Reconfigure contract's restart_required is
-		// set only by providers that do.
-		result := &providerv1.TaskResponse{RestartRequired: false}
-		if taskID != "" {
-			result.Task = &providerv1.TaskRef{Id: taskID}
-		}
-
-		return result, nil
-	}
-
-	// No changes needed
-	return &providerv1.TaskResponse{}, nil
+	return p.reconfigureVM(ctx, node, vmid, desired)
 }
 
 // Describe describes a virtual machine's current state
