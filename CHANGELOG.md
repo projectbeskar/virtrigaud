@@ -5,6 +5,32 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-10-17 07:55] - ADR-0012 (Accepted): retiring the Proxmox legacy unstamped-name rule (rc2 R14)
+**Author:** @wrkode (William Rizzo)
+
+### Added
+- `docs/adr/0012-proxmox-legacy-unstamped-name-rule.md`: design record (Status: **Accepted**, 2026-10-17) for security review finding M2 of #393. The single-host Proxmox owner check accepts an unstamped VM named like its owner. This keeps VMs working after an upgrade if they were created by v0.3.11 or earlier, adopted before #392, or cloned by a pre-rc2 manager. It also means a PVE principal with `VM.Allocate` can plant a look-alike at a freed VMID and pass every owner check. Decision:
+  - **(A) A confirmed-stamp latch.** The manager records `status.ownerStamp.confirmedID` once `Describe` reports `owner_check=STAMPED`. From then on it sends `ObjectIdentity.require_owner_stamp`. Other `ObjectIdentity` uses ignore the field. Proto field numbers are assigned at implementation time.
+  - **(B) One-time stamping of legacy VMs.** Legacy VMs are stamped once through the existing compare-and-swap `TransferOwner`. This is on by default, with a per-Provider opt-out (`virtrigaud.io/stamp-legacy-vms: "false"`). Each VM stamped gets one Normal audit event, and stamping is paced per Provider.
+  - **Phase 1 timing.** Phase 1 targets **v0.4.1**, or v0.5.0 without a PVE lab. Validation on a real PVE cluster is its release gate.
+  - **Dropping the rule.** The name rule is dropped by default in v0.5.0, gated on the unconfirmed-VMs gauge reaching 0. A one-minor escape hatch remains until v0.6.0.
+  - **Rejected and scheduled.** A creation-time cutoff and the status quo are rejected. The `meta` ctime binding spike (Option E) is scheduled with the PVE lab's return.
+  - **Accepted risk.** The forged-stamp residual is accepted for v0.4.0.
+  - **Other providers.** vSphere and libvirt have no name rule and need no change.
+- `docs/adr/README.md`: index row for ADR-0012.
+
+### Changed
+- `docs/vm-ownership.md` (Proxmox Limits): adds the v0.4.0 mitigation. Do not grant `VM.Allocate` on the pools and paths VirtRigaud's VMs live in to principals other than VirtRigaud's Provider tokens and its administrators. The entry also links ADR-0012 and its v0.4.1 plan. A new Limits entry records the accepted risk that a stamp can be copied by someone who knows the UID and holds `VM.Config.Options`.
+
+### Why
+M2 of the #393 security review touches both load-bearing contracts (proto and CRD status), so it needed a maintainer decision before any change. The fix is deferred to v0.4.1 behind real-PVE validation. v0.4.0 ships the ACL guidance and records the accepted risk.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [ ] Config change only
+- [x] Documentation only
+
 ## [2026-10-17 07:55] - Release notes: v0.4.0-rc2, "Changes since v0.4.0-rc1" (Wave 1)
 **Author:** @wrkode (William Rizzo)
 
