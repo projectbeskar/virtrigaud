@@ -43,6 +43,8 @@ type Request struct {
 	Bucket string
 	// Key is the rest of the path (the object key).
 	Key string
+	// Query is the raw query string (an upload's id, a part number).
+	Query string
 }
 
 // Server is a fake S3 endpoint. Create it with New and Close it when done.
@@ -60,6 +62,44 @@ type Server struct {
 	// loseComplete makes the next completing call of a multipart upload take
 	// effect and then drop the connection without answering.
 	loseComplete bool
+	// retryCompleteCode, when not 0, is the HTTP status the completing call of
+	// an upload that no longer exists is answered with (default 404
+	// NoSuchUpload).
+	retryCompleteCode int
+	// failCompleteCode, when not 0, is the HTTP status every completing call is
+	// answered with, without being applied.
+	failCompleteCode int
+}
+
+// FailCompleteWith makes every completing call of a multipart upload answer
+// HTTP code (0 stops failing) and not take effect; the other requests of the
+// upload are served.
+func (s *Server) FailCompleteWith(code int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.failCompleteCode = code
+}
+
+// AnswerRetriedCompleteWith makes a completing call for an upload the server
+// has already completed (so no longer knows) answer HTTP code, with the S3
+// error code of that status, instead of NoSuchUpload.
+func (s *Server) AnswerRetriedCompleteWith(code int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.retryCompleteCode = code
+}
+
+// CompleteRequests counts the completing calls of multipart uploads received.
+func (s *Server) CompleteRequests() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n := 0
+	for _, r := range s.requests {
+		if r.Method == http.MethodPost && strings.Contains(r.Query, "uploadId=") {
+			n++
+		}
+	}
+	return n
 }
 
 // LoseNextComplete makes the next request that completes a multipart upload
@@ -144,7 +184,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 	bucket, key, _ := strings.Cut(path, "/")
 
 	s.mu.Lock()
-	s.requests = append(s.requests, Request{Method: r.Method, Bucket: bucket, Key: key})
+	s.requests = append(s.requests, Request{Method: r.Method, Bucket: bucket, Key: key, Query: r.URL.RawQuery})
 	failCode := s.failCode
 	s.mu.Unlock()
 
@@ -248,8 +288,16 @@ func (s *Server) serveMultipart(w http.ResponseWriter, r *http.Request, key stri
 		return true
 	case r.Method == http.MethodPost && q.Get("uploadId") != "":
 		_, _ = io.Copy(io.Discard, r.Body)
+		if s.failCompleteCode != 0 {
+			writeError(w, s.failCompleteCode, failureCodeName(s.failCompleteCode))
+			return true
+		}
 		parts := s.parts[key]
 		if parts == nil {
+			if s.retryCompleteCode != 0 {
+				writeError(w, s.retryCompleteCode, failureCodeName(s.retryCompleteCode))
+				return true
+			}
 			writeError(w, http.StatusNotFound, "NoSuchUpload")
 			return true
 		}

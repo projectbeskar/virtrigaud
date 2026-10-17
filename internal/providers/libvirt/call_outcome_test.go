@@ -33,7 +33,6 @@ import (
 	"google.golang.org/grpc/status"
 
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
-	"github.com/projectbeskar/virtrigaud/internal/storage"
 	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
 )
 
@@ -189,6 +188,11 @@ func TestSnapshotRefusedBeforeExecution(t *testing.T) {
 		assert.Equal(t, want, snapshotRefusedBeforeExecution(virshFailure(1, stderr)), stderr)
 	}
 	assert.False(t, snapshotRefusedBeforeExecution(errors.New("cannot acquire state change lock")), "not a virsh error")
+	assert.False(t, snapshotRefusedBeforeExecution(virshFailure(1,
+		"error: unable to save metadata for snapshot x\nerror: Requested operation is not valid: domain is not running\n")),
+		"only the first error line is libvirt's error; a later one is not read")
+	assert.True(t, snapshotRefusedBeforeExecution(virshFailure(1,
+		"warning: x\nerror: Requested operation is not valid: domain is not running\nerror: Disconnected\n")))
 }
 
 // TestEndedFailure: the command that changes state is answered "failed,
@@ -230,30 +234,32 @@ func TestStageErrorReadsAsItsCause(t *testing.T) {
 	assert.False(t, ok)
 }
 
-// TestUploadNotPublished: an s3 upload provably did not publish when the
-// service refused it with a 4xx, the request was refused locally, or the source
-// failed mid-stream; any other failure may have completed it.
+// TestUploadNotPublished: an s3 upload provably did not publish only when its
+// source was never read to the end (the client never sent the completing call).
 func TestUploadNotPublished(t *testing.T) {
-	read := errors.New("ssh: stream broke")
-	assert.True(t, uploadNotPublished(read, errors.New("put failed")), "the source failed: the upload cannot complete")
-	assert.False(t, uploadNotPublished(io.ErrUnexpectedEOF, errors.New("put failed")),
-		"the S3 client reads ErrUnexpectedEOF as a clean end of input")
-	assert.False(t, uploadNotPublished(nil, errors.New("connection reset")))
-	assert.True(t, uploadNotPublished(nil, &storage.StorageError{Type: storage.ErrorTypeInvalidConfig, Message: "bad url"}))
+	assert.True(t, uploadNotPublished(false))
+	assert.False(t, uploadNotPublished(true))
 }
 
-// TestErrTrackingReader records the first read error other than a clean end.
+// TestErrTrackingReader notes whether the source was read to its end.
 func TestErrTrackingReader(t *testing.T) {
 	boom := errors.New("boom")
 	tr := &errTrackingReader{r: io.MultiReader(strings.NewReader("ab"), failingReader{boom})}
 	_, err := io.ReadAll(tr)
 	require.ErrorIs(t, err, boom)
-	assert.ErrorIs(t, tr.failure(), boom)
+	assert.False(t, tr.readToEnd(), "a source that broke was not read to its end")
 
 	clean := &errTrackingReader{r: strings.NewReader("ab")}
 	_, err = io.ReadAll(clean)
 	require.NoError(t, err)
-	assert.NoError(t, clean.failure(), "io.EOF is not a failure")
+	assert.True(t, clean.readToEnd())
+
+	unexpected := &errTrackingReader{r: io.MultiReader(strings.NewReader("ab"), failingReader{io.ErrUnexpectedEOF})}
+	_, _ = io.ReadAll(unexpected)
+	assert.True(t, unexpected.readToEnd(), "the S3 client reads ErrUnexpectedEOF as an end")
+
+	untouched := &errTrackingReader{r: strings.NewReader("ab")}
+	assert.False(t, untouched.readToEnd())
 }
 
 type failingReader struct{ err error }
