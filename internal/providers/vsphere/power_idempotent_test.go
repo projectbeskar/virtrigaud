@@ -39,10 +39,7 @@ import (
 func TestPower_IdempotentInRequestedState(t *testing.T) {
 	ctx := context.Background()
 	p, _ := newOwnershipSim(t)
-	dc, err := p.finder.DefaultDatacenter(ctx)
-	require.NoError(t, err)
-	p.finder.SetDatacenter(dc)
-	vm, err := p.finder.VirtualMachine(ctx, simUnstamped)
+	vm, err := testFinder(t, p).VirtualMachine(ctx, simUnstamped)
 	require.NoError(t, err)
 	id := vm.Reference().Value
 	if runtimePowerState(t, p, id) != types.VirtualMachinePowerStatePoweredOn {
@@ -99,10 +96,7 @@ func (r *refusePowerOff) RoundTrip(ctx context.Context, req, res soap.HasFault) 
 func TestPower_RealFailureStaysAnError(t *testing.T) {
 	ctx := context.Background()
 	p, _ := newOwnershipSim(t)
-	dc, err := p.finder.DefaultDatacenter(ctx)
-	require.NoError(t, err)
-	p.finder.SetDatacenter(dc)
-	vm, err := p.finder.VirtualMachine(ctx, simUnstamped)
+	vm, err := testFinder(t, p).VirtualMachine(ctx, simUnstamped)
 	require.NoError(t, err)
 	id := vm.Reference().Value
 	if runtimePowerState(t, p, id) != types.VirtualMachinePowerStatePoweredOn {

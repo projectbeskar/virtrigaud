@@ -28,6 +28,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/vmware/govmomi/find"
 	"github.com/vmware/govmomi/object"
 	"github.com/vmware/govmomi/vim25/types"
 )
@@ -102,7 +103,7 @@ func (p *Provider) deleteExportClone(ctx context.Context, diskPath string) error
 		return fmt.Errorf("delete temporary export disk %s: not a virtrigaud export clone", diskPath)
 	}
 
-	datacenter, err := p.finder.DefaultDatacenter(ctx)
+	finder, datacenter, err := p.dcFinder(ctx)
 	if err != nil {
 		return fmt.Errorf("delete temporary export disk %s: get datacenter: %w", diskPath, err)
 	}
@@ -117,8 +118,7 @@ func (p *Provider) deleteExportClone(ctx context.Context, diskPath string) error
 	p.logger.Info("DeleteVirtualDisk did not remove the temporary export disk, removing its files by exact name",
 		"path", diskPath, "error", vdmErr)
 
-	p.finder.SetDatacenter(datacenter)
-	removed, ferr := p.removeExportCloneFiles(ctx, datacenter, dsName, filePath)
+	removed, ferr := p.removeExportCloneFiles(ctx, finder, datacenter, dsName, filePath)
 	if ferr != nil {
 		return fmt.Errorf("delete temporary export disk %s: %w", diskPath, errors.Join(vdmErr, ferr))
 	}
@@ -137,8 +137,9 @@ func (p *Provider) deleteExportClone(ctx context.Context, diskPath string) error
 // deleted before the descriptor so an interrupted run still leaves a
 // descriptor that DeleteVirtualDisk can finish. It returns the datastore paths
 // it deleted. A missing folder is not an error.
-func (p *Provider) removeExportCloneFiles(ctx context.Context, datacenter *object.Datacenter, dsName, descriptorPath string) ([]string, error) {
-	ds, err := p.finder.Datastore(ctx, dsName)
+func (p *Provider) removeExportCloneFiles(ctx context.Context, finder *find.Finder, datacenter *object.Datacenter, dsName, descriptorPath string) ([]string, error) {
+	ds, err := finder.Datastore(ctx, dsName)
+	p.noteInventoryError(err)
 	if err != nil {
 		return nil, fmt.Errorf("find datastore %s: %w", dsName, err)
 	}

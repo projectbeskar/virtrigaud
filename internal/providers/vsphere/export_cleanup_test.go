@@ -61,7 +61,7 @@ func folderFiles(t *testing.T, p *Provider, folder string) []string {
 	var dp object.DatastorePath
 	require.True(t, dp.FromString(folder))
 	ctx := context.Background()
-	ds, err := p.finder.Datastore(ctx, dp.Datastore)
+	ds, err := testFinder(t, p).Datastore(ctx, dp.Datastore)
 	require.NoError(t, err)
 	names, err := listDatastoreFolder(ctx, ds, dp.Path)
 	require.NoError(t, err)
@@ -221,7 +221,7 @@ func makeFolderFile(t *testing.T, p *Provider, dsPath string) {
 	t.Helper()
 	var dp object.DatastorePath
 	require.True(t, dp.FromString(dsPath))
-	ds, err := p.finder.Datastore(context.Background(), dp.Datastore)
+	ds, err := testFinder(t, p).Datastore(context.Background(), dp.Datastore)
 	require.NoError(t, err)
 	require.NoError(t, ds.Upload(context.Background(), strings.NewReader("x"), dp.Path, nil))
 }

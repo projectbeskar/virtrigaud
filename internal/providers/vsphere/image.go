@@ -228,7 +228,7 @@ func (p *Provider) ImagePrepare(ctx context.Context, req *providerv1.ImagePrepar
 	if parsed.Mode == imageartifact.ModeLegacy {
 		imageartifact.SignalLegacyRequest(ctx, p.logger, vsphereProviderType, parsed.LegacyTargetName)
 	}
-	if p.client == nil || p.finder == nil {
+	if p.client == nil {
 		return nil, errors.NewUnavailable("vSphere", fmt.Errorf("provider client not initialized"))
 	}
 
@@ -343,12 +343,11 @@ func (p *Provider) imagePrepareLegacy(ctx context.Context, req *providerv1.Image
 		"storage_hint", req.GetStorageHint(),
 	)
 
-	// Set datacenter context so finder lookups (VM, datastore, folder) resolve.
-	datacenter, err := p.finder.DefaultDatacenter(ctx)
+	// The datacenter must resolve before the lookups below (VM, datastore, folder).
+	finder, _, err := p.dcFinder(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("ImagePrepare: find default datacenter: %w", err)
 	}
-	p.finder.SetDatacenter(datacenter)
 
 	// 1) Idempotency gate (load-bearing): a re-run must never re-import. If a
 	//    TEMPLATE named targetName already exists, we are done — the prepared
@@ -356,7 +355,7 @@ func (p *Provider) imagePrepareLegacy(ctx context.Context, req *providerv1.Image
 	//    never treated as the prepared image (it would then be cloned by every VM
 	//    using this VMImage): the gate fails closed instead, as it does when the
 	//    name is ambiguous or the lookup fails.
-	vm, err := p.findPreparedTemplate(ctx, targetName)
+	vm, err := p.findPreparedTemplate(ctx, finder, targetName)
 	if err != nil {
 		return nil, err
 	}
@@ -369,7 +368,7 @@ func (p *Provider) imagePrepareLegacy(ctx context.Context, req *providerv1.Image
 	switch {
 	case src.TemplateName != "":
 		// 2) templateName: verify-only. Don't fabricate an import.
-		return p.imagePrepareVerifyTemplate(ctx, src.TemplateName)
+		return p.imagePrepareVerifyTemplate(ctx, finder, src.TemplateName)
 	case src.ContentLibrary != nil:
 		// 3) contentLibrary: verify-only.
 		return p.imagePrepareVerifyContentLibrary(ctx, src.ContentLibrary)
@@ -403,8 +402,8 @@ func imagePrepareDone(templateName string) *providerv1.ImagePrepareResponse {
 //     never overwritten or adopted by an import;
 //   - a vCenter lookup failure is returned (retryable) instead of being treated
 //     as "not found", which would start a duplicate import.
-func (p *Provider) findPreparedTemplate(ctx context.Context, name string) (*object.VirtualMachine, error) {
-	vm, found, err := p.lookupTemplate(ctx, name)
+func (p *Provider) findPreparedTemplate(ctx context.Context, finder *find.Finder, name string) (*object.VirtualMachine, error) {
+	vm, found, err := p.lookupTemplate(ctx, finder, name)
 	if err != nil {
 		return nil, fmt.Errorf("ImagePrepare: check for an existing template %q: %w", name, err)
 	}
@@ -419,8 +418,8 @@ func (p *Provider) findPreparedTemplate(ctx context.Context, name string) (*obje
 // template itself, so no import is performed. A missing template yields an
 // honest NotFound rather than a fabricated success; a same-named regular VM or
 // an ambiguous name yields InvalidSpec (lookupTemplate).
-func (p *Provider) imagePrepareVerifyTemplate(ctx context.Context, templateName string) (*providerv1.ImagePrepareResponse, error) {
-	vm, found, err := p.lookupTemplate(ctx, templateName)
+func (p *Provider) imagePrepareVerifyTemplate(ctx context.Context, finder *find.Finder, templateName string) (*providerv1.ImagePrepareResponse, error) {
+	vm, found, err := p.lookupTemplate(ctx, finder, templateName)
 	if err != nil {
 		return nil, fmt.Errorf("ImagePrepare: look up template %q: %w", templateName, err)
 	}
@@ -523,7 +522,7 @@ func (p *Provider) imagePrepareImportOVA(ctx context.Context, src vsphereImageSo
 		Log:          p.ovaImportLog,
 		Sinker:       progress.NewProgressLogger(p.ovaImportLog, "ImagePrepare upload"),
 		Client:       p.client.Client,
-		Finder:       p.finder,
+		Finder:       placement.finder,
 		Datacenter:   placement.datacenter,
 		Datastore:    placement.datastore,
 		ResourcePool: placement.resourcePool,
@@ -585,6 +584,8 @@ func (p *Provider) imagePrepareImportOVA(ctx context.Context, src vsphereImageSo
 // imagePlacement bundles the resolved vSphere placement objects for an OVA
 // import.
 type imagePlacement struct {
+	// finder is scoped to datacenter and owned by this call; the OVA importer uses it.
+	finder       *find.Finder
 	datacenter   *object.Datacenter
 	resourcePool *object.ResourcePool
 	datastore    *object.Datastore
@@ -602,24 +603,24 @@ type imagePlacement struct {
 //     DefaultStoragePod (datastore cluster).
 //   - Folder:       DefaultFolder → datacenter default VM folder.
 func (p *Provider) resolveImagePlacement(ctx context.Context, storageHint string) (*imagePlacement, error) {
-	datacenter, err := p.finder.DefaultDatacenter(ctx)
+	finder, datacenter, err := p.dcFinder(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("ImagePrepare: find default datacenter: %w", err)
 	}
-	p.finder.SetDatacenter(datacenter)
 
-	resourcePool, datastore, err := p.resolveImageComputeAndStorage(ctx, p.finder, storageHint)
+	resourcePool, datastore, err := p.resolveImageComputeAndStorage(ctx, finder, storageHint)
 	if err != nil {
 		return nil, err
 	}
 
 	// Folder: DefaultFolder, falling back to the datacenter VM folder.
-	folder, err := p.resolveImageFolder(ctx, datacenter)
+	folder, err := p.resolveImageFolder(ctx, finder, datacenter)
 	if err != nil {
 		return nil, err
 	}
 
 	return &imagePlacement{
+		finder:       finder,
 		datacenter:   datacenter,
 		resourcePool: resourcePool,
 		datastore:    datastore,
@@ -638,6 +639,7 @@ func (p *Provider) resolveImageComputeAndStorage(ctx context.Context, finder *fi
 	var resourcePool *object.ResourcePool
 	if cluster := strings.TrimSpace(p.config.DefaultCluster); cluster != "" {
 		cc, err := finder.ClusterComputeResource(ctx, cluster)
+		p.noteInventoryError(err)
 		if err != nil {
 			return nil, nil, fmt.Errorf("ImagePrepare: find cluster %q: %w", cluster, err)
 		}
@@ -648,6 +650,7 @@ func (p *Provider) resolveImageComputeAndStorage(ctx context.Context, finder *fi
 	} else {
 		var err error
 		resourcePool, err = finder.ResourcePoolOrDefault(ctx, "")
+		p.noteInventoryError(err)
 		if err != nil {
 			return nil, nil, fmt.Errorf("ImagePrepare: resolve default resource pool: %w", err)
 		}
@@ -668,6 +671,7 @@ func (p *Provider) resolveImageComputeAndStorage(ctx context.Context, finder *fi
 func (p *Provider) resolveImageDatastore(ctx context.Context, finder *find.Finder, storageHint string) (*object.Datastore, error) {
 	if hint := strings.TrimSpace(storageHint); hint != "" {
 		ds, err := finder.Datastore(ctx, hint)
+		p.noteInventoryError(err)
 		if err != nil {
 			return nil, fmt.Errorf("ImagePrepare: find datastore from storage hint %q: %w", hint, err)
 		}
@@ -675,13 +679,14 @@ func (p *Provider) resolveImageDatastore(ctx context.Context, finder *find.Finde
 	}
 	if ds := strings.TrimSpace(p.config.DefaultDatastore); ds != "" {
 		found, err := finder.Datastore(ctx, ds)
+		p.noteInventoryError(err)
 		if err != nil {
 			return nil, fmt.Errorf("ImagePrepare: find default datastore %q: %w", ds, err)
 		}
 		return found, nil
 	}
 	if pod := strings.TrimSpace(p.config.DefaultStoragePod); pod != "" {
-		ds, err := p.resolveDatastoreFromStoragePod(ctx, pod)
+		ds, err := p.resolveDatastoreFromStoragePod(ctx, finder, pod)
 		if err != nil {
 			return nil, fmt.Errorf("ImagePrepare: resolve datastore from StoragePod %q: %w", pod, err)
 		}
@@ -697,16 +702,17 @@ func (p *Provider) resolveImageDatastore(ctx context.Context, finder *find.Finde
 // finder error. This is the pre-ADR-0009 behaviour, kept for legacy mode only
 // (where the bare-name gate searches the whole datacenter anyway); an identity
 // prepare uses the strict resolveArtifactFolder instead (ADR-0009 D5).
-func (p *Provider) resolveImageFolder(ctx context.Context, datacenter *object.Datacenter) (*object.Folder, error) {
+func (p *Provider) resolveImageFolder(ctx context.Context, finder *find.Finder, datacenter *object.Datacenter) (*object.Folder, error) {
 	folderName := strings.TrimSpace(p.config.DefaultFolder)
 	if folderName != "" {
-		if folder, err := p.finder.Folder(ctx, folderName); err == nil {
+		if folder, err := finder.Folder(ctx, folderName); err == nil {
 			return folder, nil
 		}
 		p.logger.Warn("ImagePrepare: default folder not found; using datacenter VM folder",
 			"folder", folderName)
 	}
-	folder, err := p.finder.Folder(ctx, datacenter.Name()+"/vm")
+	folder, err := finder.Folder(ctx, datacenter.Name()+"/vm")
+	p.noteInventoryError(err)
 	if err != nil {
 		return nil, fmt.Errorf("ImagePrepare: find datacenter VM folder: %w", err)
 	}

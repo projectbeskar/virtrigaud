@@ -205,20 +205,16 @@ func (s *StorageProvider) createDefaultStoragePool(ctx context.Context) error {
   </target>
 </pool>`, poolPath)
 
-	// Write pool XML to a temporary file on the host (content over stdin — no
-	// heredoc, no shell interpolation; see writeRemoteFile).
-	poolFile := "/tmp/default-pool.xml"
-	if err := s.virshProvider.writeRemoteFile(ctx, poolFile, []byte(poolXML)); err != nil {
-		return fmt.Errorf("failed to write pool XML: %w", err)
-	}
-
-	// Define the pool
-	if _, err := s.virshProvider.runRemoteVirshCommand(ctx, "pool-define", poolFile); err != nil {
+	// Define the pool from stdin (`virsh pool-define /dev/stdin`, as vol-create
+	// does): the XML never rests in a file on the host. This used to write the
+	// fixed path /tmp/default-pool.xml on the host first, which two concurrent
+	// calls (or two providers sharing a host) clobbered, and which anything else
+	// on the host could pre-create or link elsewhere (a fixed name in a shared
+	// /tmp). The same XML goes to every caller, but nothing may be shared.
+	if _, err := s.virshProvider.runVirshStdin(ctx, []byte(poolXML), "pool-define", "/dev/stdin"); err != nil {
+		// The VirshError already carries virsh's stderr.
 		return fmt.Errorf("failed to define storage pool: %w", err)
 	}
-
-	// Clean up temporary file
-	_, _ = s.virshProvider.runVirshCommand(ctx, "!", "rm", "-f", poolFile)
 
 	// Build the pool (create directory structure)
 	if _, err := s.virshProvider.runVirshCommand(ctx, "pool-build", "default"); err != nil {
