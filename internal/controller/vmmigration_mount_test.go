@@ -48,7 +48,7 @@ func mountTestScheme(t *testing.T) *runtime.Scheme {
 }
 
 // mountPVCVolume builds the volume the provider controller attaches for a
-// migration PVC (name scheme mirrors discoverMigrationPVCs).
+// migration PVC (name scheme mirrors migrationStorageVolumeName).
 func mountPVCVolume(pvcName string) corev1.Volume {
 	return corev1.Volume{
 		Name: "migration-" + pvcName,
