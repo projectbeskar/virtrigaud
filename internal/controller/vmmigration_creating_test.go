@@ -89,14 +89,14 @@ func newCreatingHarness(t *testing.T, lagging bool, funcs *interceptor.Funcs, ob
 			all = append(all, o)
 		}
 	}
-	var live client.Client = fake.NewClientBuilder().WithScheme(capGatingScheme(t)).WithObjects(all...).
+	var live client.WithWatch = fake.NewClientBuilder().WithScheme(capGatingScheme(t)).WithObjects(all...).
 		WithStatusSubresource(&infrav1beta1.VMMigration{}).Build()
 	if funcs != nil {
-		live = interceptor.NewClient(live.(client.WithWatch), *funcs)
+		live = interceptor.NewClient(live, *funcs)
 	}
-	cached := live
+	var cached client.Client = live
 	if lagging {
-		cached = interceptor.NewClient(live.(client.WithWatch), interceptor.Funcs{
+		cached = interceptor.NewClient(live, interceptor.Funcs{
 			Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
 				if _, ok := obj.(*infrav1beta1.VirtualMachine); ok {
 					return apierrors.NewNotFound(schema.GroupResource{Group: "infra.virtrigaud.io", Resource: "virtualmachines"}, key.Name)
