@@ -159,6 +159,23 @@ export only on a **trusted network**, keep **`root_squash` on**, give each tenan
 its **own export**, and prefer narrow per-client ACLs over broad subnets. The disk
 bytes themselves are not encrypted in transit.
 
+## A migration held with `SnapshotOutcomeUnknown`, `ExportOutcomeUnknown` or `ImportOutcomeUnknown`
+
+The manager records `SnapshotRequested`, `ExportRequested` or `ImportRequested` on
+the migration before each provider call. If it restarts after a call but before
+writing the call's result, it does not send the call again blindly.
+
+- **Re-sent automatically:** a snapshot through a clustered Provider, and an export
+  or import on a staging backend the provider reports as re-send safe. The export
+  or import waits 35 minutes first.
+- **Held:** anything else waits with one of these `Ready` reasons until you act.
+  1. Remove what the call may have made. The `Warning` event of the same name tells
+     you what to look for.
+  2. Run `kubectl annotate vmmigration <name> virtrigaud.io/operation-outcome=not-performed@<attempt id>`.
+     The attempt id is the `lastTransitionTime` of the `...Requested` condition.
+
+See [`docs/provider-call-outcomes.md`](../../docs/provider-call-outcomes.md).
+
 ## Reference
 
 - [VMMigration CRD source](../../api/infra.virtrigaud.io/v1beta1/vmmigration_types.go)

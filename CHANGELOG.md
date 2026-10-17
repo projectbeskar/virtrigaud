@@ -5,6 +5,54 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-10-17 08:19] - A provider call whose result was lost, or whose outcome is unknown, is never re-sent blindly: durable requested-call markers (rc2 R6)
+**Author:** @wrkode (William Rizzo)
+
+### Fixed
+- `internal/controller/vmmigration_request_marker.go` (new), `internal/controller/vmmigration_controller.go`, `internal/controller/vmmigration_snapshot_task.go`, `internal/controller/provider_request_marker.go` (new): before a `VMMigration`'s `SnapshotCreate`, `ExportDisk` or `ImportDisk`, the migration records `SnapshotRequested` / `ExportRequested` / `ImportRequested=True`. The marker is written with the read `resourceVersion` as precondition, and nothing is sent if that write fails. The call's result, or a definite failure (`providerCallOutcomeKnown`: nothing done — request not sent, host unavailable, operation not performed — or a refusal: invalid spec, not found, conflict, owner or disk-size refusal), removes it in the same status write. A failure without a definite outcome — a deadline, `Unavailable` after the request was written, an unclassified error, and a routed `SnapshotCreate`'s "retry" — keeps the marker and never fails the migration (`afterUnknownMigrationCall`; rc1 failed the attempt and the retry policy re-sent the call while the first could still be writing). A phase that finds the marker without a result first re-reads the object live, so a stale cache is not taken for an unknown outcome. It then sends the call again only where that cannot duplicate anything:
+  - a routed (clustered) `SnapshotCreate` for the same migration attempt (the provider adopts the snapshot by request token), at most once a minute and at most 10 times;
+  - an `ExportDisk` / `ImportDisk` on a staging backend the provider reports re-send safe, once 35 minutes have passed since the marker (past the manager's 30-minute call deadline), at most 3 times.
+
+  Automatic re-sends are counted in the marker's message; each send writes a strictly later attempt id. When it cannot be told yet whether a call may be re-sent (source VM, Provider or capabilities unreadable), the migration is re-checked every minute with no hold and no event.
+
+  Otherwise the migration is held in its phase with `Ready=False` and reason `SnapshotOutcomeUnknown`, `ExportOutcomeUnknown` or `ImportOutcomeUnknown`. The hold has a constant message, one `Warning` event naming the attempt (and the snapshot name), and is written only on change. The operator's `virtrigaud.io/operation-outcome=not-performed@<attempt id>` sends the call again (and restarts the re-send count); it is audited with an `OperationOutcomeConfirmed` event, its field managers are logged, and it is removed before the call. A disk-size refusal of an import also persists the marker's removal. Metrics reason `provider-outcome-unknown`.
+- `internal/controller/vmsnapshot_request_marker.go` (new), `internal/controller/vmsnapshot_controller.go`: a `VMSnapshot` records `SnapshotRequested` the same way, together with its binding, before its `SnapshotCreate`; the create's outcome replaces it. A `VMSnapshot` found in the initial phase with the marker:
+  - routed: the create is re-sent (the provider adopts the snapshot made for its uid), paced;
+  - single-host: held `Ready=False/SnapshotOutcomeUnknown` until the operator's confirmation — also when the create fails without a definite outcome (it is no longer failed).
+
+  The confirmation annotation re-drives the snapshot through its update predicate.
+- `internal/controller/vmmigration_staging_cleanup.go`: a deleting migration whose `ExportDisk` outcome is unknown does not delete its nfs / s3 staged object until 35 minutes after the marker (a host-side copy outlives the cancelled call and could re-create it, unowned); force-delete still releases it.
+- `internal/providers/libvirt/routed_snapshot_token.go`: a clustered `SnapshotCreate` adopts the snapshot recorded with its request token only when `virsh domjobinfo` reports no job on the domain (libvirt lists a snapshot when its job starts and removes it if the job fails); while a job runs it answers retryable `Unavailable` (VM_OPERATION_FAILED); an unreadable job state is an error.
+- `internal/providers/proxmox/import_stage.go`, `internal/providers/proxmox/s3import.go`: the s3 stage is published (`mv -T`) only when exactly the object's reported size arrived (`importStageWriteExactly`): a cancelled call closed the node's stdin, `cat` saw end of input and a truncated stage was published (pre-existing). `cleanupNodeFile` is bounded (2 min). The stage script's comment no longer claims a hang-up stops it.
+- `internal/controller/vmmigration_status_write.go`: `forgetMigrationLongOps` logs every unrecorded result it evicts at `Error`, with the provider's ids (review L1 of #388). `pendingMigrationResult` keeps them.
+
+### Added
+- `proto/provider/v1/provider.proto` (bindings regenerated), `internal/providers/contracts/capabilities.go`, `internal/transport/grpc/client.go`, `sdk/provider/capabilities/capabilities.go` (`Manager.SetResendSafeExportBackends` / `SetResendSafeImportBackends`, `Builder.ResendSafeExportBackends` / `ResendSafeImportBackends`): `GetCapabilitiesResponse.resend_safe_export_backends` (27) and `resend_safe_import_backends` (28). These are the staging backends on which a re-sent `ExportDisk` / `ImportDisk`, after the earlier call's deadline, replaces what the earlier call wrote and never makes a second artifact. They are declared only where proven (per-provider audit):
+  - `internal/providers/vsphere/server.go`: s3 and nfs both ways;
+  - `internal/providers/libvirt/server.go`: single-host export s3, import pvc+s3+nfs; clustered export s3+nfs;
+  - `internal/providers/proxmox/capabilities.go`: s3 both ways (the nfs import's node script copies to completion and publishes the stage after a cancelled call: not re-send safe);
+  - mock: none.
+- Tests:
+  - `internal/controller/vmmigration_request_marker_test.go`, `internal/controller/vmsnapshot_request_marker_test.go`: a failed or conflicting marker write sends nothing; restart after the call (new reconciler: in-memory state dropped) holds, or re-sends with the same token or after the settle time; operator confirmation; earlier-attempt marker; stale cache; a failure clears the marker; L1 eviction log.
+  - `internal/controller/vmmigration_request_marker_review_test.go`: deadline / dropped connection / unclassified failures keep the marker and hold (or settle), nothing-done and refusals fail; a routed "retry" keeps the marker; strictly increasing attempt ids and the re-send count through `markMigrationRequested`; the caps; the quiet undecidable path; the staged-object delete waiting for an unknown export; the confirmation's field managers; the outcome classification. `internal/controller/vmsnapshot_clustered_test.go`, `vmsnapshot_request_marker_test.go`: a single-host create without a definite outcome is held, a nothing-done one fails; routed re-send cap; quiet undecidable path.
+  - `internal/providers/libvirt/routed_snapshot_token_test.go` (fake virsh `domjobinfo`): adopted only with no job; retryable while one runs; error when unreadable. `internal/providers/proxmox/import_stage_script_test.go` (real shell): a short s3 copy is never published and an earlier stage is kept.
+  - `internal/controller/provider_request_marker_envtest_test.go` (envtest): held export plus confirmation; settled re-send; a real `Conflict` sends nothing; held single-host `VMSnapshot` plus confirmation.
+  - Per-provider capability tests in `internal/providers/{vsphere,libvirt,proxmox,mock}/resend_safe_capabilities_test.go`, the SDK builder and the transport client.
+
+### Changed
+- `internal/controller/vmmigration_pending_result_test.go`, `internal/controller/vmmigration_update_status_test.go`: the failing-write fakes let the marker write through, so the call is still sent and its result write fails.
+- `internal/providers/vsphere/s3import.go`: comment — the landing name is `<ns>_<vm>-migrated`.
+- `docs/provider-call-outcomes.md` (new), `docs/README.md`, `docs/upgrading.md` (behaviour row), `examples/migration/README.md`.
+
+### Why
+This was a known limitation in rc1. Between a `SnapshotCreate`, `ExportDisk` or `ImportDisk` and the write of its result, a manager restart or leader change lost the result, and the new leader sent the call again. On vSphere and the mock that took a second snapshot of the live source VM. A call that timed out failed the attempt and was re-sent by the retry policy while a host-side copy could still be writing. #388 made the result durable within one process only. This applies the `CreateRequested` / `CloneRequested` pattern (#395) to these calls, re-sending only where a per-provider audit shows the re-send replaces rather than duplicates (review and audit of #402 included).
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-10-17 07:55] - ADR-0012 (Accepted): retiring the Proxmox legacy unstamped-name rule (rc2 R14)
 **Author:** @wrkode (William Rizzo)
 

@@ -557,6 +557,10 @@ func (c *Client) GetCapabilities(ctx context.Context) (contracts.Capabilities, e
 		SupportsOwnerRebind: resp.GetSupportsOwnerRebind(),
 		// ADR-0011 D7: empty from a provider that predates DeleteStagedDisk.
 		SupportedStagedDiskDeleteBackends: resp.GetSupportedStagedDiskDeleteBackends(),
+		// rc2 R6: empty from a provider that predates the fields, which is
+		// never sent an ExportDisk or ImportDisk whose outcome was lost again.
+		ResendSafeExportBackends: resp.GetResendSafeExportBackends(),
+		ResendSafeImportBackends: resp.GetResendSafeImportBackends(),
 	}, nil
 }
 

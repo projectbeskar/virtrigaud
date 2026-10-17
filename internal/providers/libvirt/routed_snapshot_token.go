@@ -19,12 +19,14 @@ package libvirt
 import (
 	"context"
 	"encoding/xml"
+	stderrors "errors"
 	"fmt"
 	"log"
 	"regexp"
 	"strings"
 	"time"
 
+	"google.golang.org/grpc/codes"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
@@ -157,6 +159,19 @@ func existingRoutedSnapshot(ctx context.Context, c libvirtConn, domain string, r
 		return nil, err
 	}
 	if want := req.GetRequestToken(); want != "" && token == want {
+		// libvirt lists a snapshot as soon as its job starts — before the
+		// guest's memory and disks are written — and removes it if the job
+		// fails. It is this request's finished snapshot only once no job
+		// runs on the domain; until then the answer is "retry" (rc2 R6).
+		running, err := domainJobRunning(ctx, c, domain)
+		if err != nil {
+			return nil, err
+		}
+		if running {
+			log.Printf("INFO Snapshot %s on domain %s was made for this request but a job still runs on the domain; retry", name, domain)
+			return nil, &routedOpError{code: codes.Unavailable, cause: errSnapshotJobRunning, wire: fmt.Sprintf(
+				"create snapshot: the snapshot %q made for this request is still being taken on the host; retry", name)}
+		}
 		log.Printf("INFO Snapshot %s on domain %s was made for this request; treating the create as done", name, domain)
 		return &providerv1.SnapshotCreateResponse{SnapshotId: name}, nil
 	}
@@ -164,4 +179,29 @@ func existingRoutedSnapshot(ctx context.Context, c libvirtConn, domain string, r
 	return nil, contracts.NewConflictError(fmt.Sprintf(
 		"a snapshot named %q already exists on this VM and was not made for this request (for example one an earlier "+
 			"snapshot of the same name left behind); delete it on the VM or use another snapshot name", name), nil)
+}
+
+// errSnapshotJobRunning is the logged cause of a retry answered while the job
+// that takes this request's snapshot still runs on the domain.
+var errSnapshotJobRunning = stderrors.New("a job is still running on the domain")
+
+// domainJobTypeNone is the "Job type" `virsh domjobinfo` reports for a domain
+// with no active job.
+const domainJobTypeNone = "None"
+
+// domainJobRunning reports whether a job (e.g. a snapshot still being taken)
+// is active on domain, from `virsh domjobinfo`: its "Job type" is anything but
+// None. A failed or unreadable answer is an error, never assumed either way.
+func domainJobRunning(ctx context.Context, c libvirtConn, domain string) (bool, error) {
+	res, err := c.Virsh(ctx, "domjobinfo", domain)
+	if err != nil {
+		return false, fmt.Errorf("read the active job of domain %s: %w", domain, err)
+	}
+	for _, line := range strings.Split(res.Stdout, "\n") {
+		key, value, ok := strings.Cut(line, ":")
+		if ok && strings.TrimSpace(key) == "Job type" {
+			return strings.TrimSpace(value) != domainJobTypeNone, nil
+		}
+	}
+	return false, fmt.Errorf("read the active job of domain %s: no job type in the answer", domain)
 }

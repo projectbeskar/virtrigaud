@@ -25,6 +25,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -126,7 +127,10 @@ func (p *Provider) importDiskFromS3(ctx context.Context, req *providerv1.ImportD
 		return nil, err
 	}
 	pr, pw := io.Pipe()
-	stageCmd := buildImportStageScript(proxmoxImportStageDir, stagePath, `cat > "$TMP"`)
+	// The stage is published only when exactly the object's reported size
+	// arrived: a call cancelled mid-copy closes the node's stdin, and a
+	// truncated copy must never become the stage (importStageWriteExactly).
+	stageCmd := buildImportStageScript(proxmoxImportStageDir, stagePath, importStageWriteExactly(maxBytes))
 
 	type dlResult struct {
 		resp storage.DownloadResponse
@@ -215,6 +219,9 @@ func (p *Provider) importDiskFromS3(ctx context.Context, req *providerv1.ImportD
 	}, nil
 }
 
+// nodeFileCleanupTimeout bounds cleanupNodeFile's rm over SSH.
+const nodeFileCleanupTimeout = 2 * time.Minute
+
 // cleanupNodeFile best-effort removes an import stage on the node over SSH and
 // WARNs on failure. Used to clean up a partial/leaked stage so a failed import
 // does not leave a multi-GB temp on the node, and a consumed one after Create.
@@ -228,7 +235,11 @@ func (p *Provider) cleanupNodeFile(path string) {
 		p.logger.Error("Refusing to remove a node file that is not an import stage")
 		return
 	}
-	if _, _, err := p.ssh.runSSH(context.Background(), fmt.Sprintf("rm -f -- %s", proxmoxShellQuote(path))); err != nil {
+	// Detached from the (possibly cancelled) call, but bounded: a node that
+	// does not answer must not hold the provider's goroutine forever.
+	ctx, cancel := context.WithTimeout(context.Background(), nodeFileCleanupTimeout)
+	defer cancel()
+	if _, _, err := p.ssh.runSSH(ctx, fmt.Sprintf("rm -f -- %s", proxmoxShellQuote(path))); err != nil {
 		p.logger.Warn("Failed to remove node-side temp (manual cleanup may be needed)", "path", path, "error", err)
 	}
 }
