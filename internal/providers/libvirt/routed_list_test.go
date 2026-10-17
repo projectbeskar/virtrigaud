@@ -495,7 +495,8 @@ func TestCompareList_JoinsOnHostAndID(t *testing.T) {
 
 // TestClustered_Capabilities_AdvertiseRoutedAdoption: a clustered provider
 // advertises supports_routed_adoption now that ListVMs and TransferOwner are
-// routed; a single-host provider does not.
+// routed; a single-host provider does not (it reports supports_owner_transfer
+// instead, adoption_transfer_owner_test.go).
 func TestClustered_Capabilities_AdvertiseRoutedAdoption(t *testing.T) {
 	clustered := clusterOf(t, []string{"host-a"})
 	caps, err := NewServer(clustered).GetCapabilities(context.Background(), &providerv1.GetCapabilitiesRequest{})
@@ -508,7 +509,7 @@ func TestClustered_Capabilities_AdvertiseRoutedAdoption(t *testing.T) {
 	assert.False(t, caps.GetSupportsRoutedAdoption())
 
 	_, err = NewServer(single).TransferOwner(context.Background(), &providerv1.TransferOwnerRequest{Id: "web"})
-	assert.Equal(t, codes.Unimplemented, status.Code(err), "single-host adoption does not stamp")
+	assert.Equal(t, codes.InvalidArgument, status.Code(err), "a request without an owner is refused before any virsh call")
 }
 
 // TestSoleOwner: the owner namespace and name are reported only for a domain

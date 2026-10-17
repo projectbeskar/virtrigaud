@@ -249,12 +249,22 @@ reports it from the definition it lists; before this release it reported only
 the readable UIDs, and adoption could take a domain whose stamp it could not
 read.
 
-On a **single-host** provider the adopted domain keeps whatever stamp it had:
-a single-host provider does not check owners on per-VM calls. On a
-**clustered** provider every routed call is owner-checked, so the domain is
-handed to the adopted `VirtualMachine` first: `TransferOwner` writes its owner
-stamp (UID, namespace and name) with `virsh metadata` — a serialized
-check-and-set on the domain's UUID and its current stamp — and reads it back.
+The adopted domain is **handed to its `VirtualMachine`** before the
+`VirtualMachine` is bound: `TransferOwner` writes the owner stamp (UID,
+namespace and name) with `virsh metadata` — a check-and-set on the domain's
+name, its UUID (the one `ListVMs` reported) and its current stamp, serialized
+per host in the provider process — and reads it back from both definitions of
+a running domain. On a **single-host** provider (which reports
+`supportsOwnerTransfer`) this is what lets another Provider object's adoption
+see the domain as owned, and replaces the stamp of a `VirtualMachine` that was
+detached with `orphan-on-delete` when the domain is adopted again with
+`adopt-stamped-vms`. A single-host provider still doesn't check owners on
+per-VM calls. Two provider processes fronting the same host aren't serialized
+against each other, so run one Provider per host endpoint. See
+[Adoption stamps the adopted VM](vm-ownership.md#adoption-stamps-the-adopted-vm)
+for which domains are stamped, the order, and an older provider. On a
+**clustered** provider every routed call is owner-checked, so the same transfer
+is what lets the adopting `VirtualMachine` reach its domain at all.
 Until ADR-0007 A6.4 a clustered provider adopts **only unstamped** domains: a
 domain stamped by a `VirtualMachine` that no longer exists (left by
 `orphan-on-delete`, or by a restore that gave the `VirtualMachine` a new UID)

@@ -71,6 +71,166 @@ To resolve a refused create, do one of the following:
 - **Rename the `VirtualMachine`.** Names are immutable, so recreate it under a
   different name.
 
+## Adoption stamps the adopted VM
+
+Adoption (`virtrigaud.io/adopt-vms` on a Provider) creates a `VirtualMachine`
+for each VM no `VirtualMachine` manages. The VM is then **stamped with that
+`VirtualMachine`'s identity** (its UID, namespace and name), exactly as if
+VirtRigaud had created it, before the `VirtualMachine` is bound to it
+(`status.id`). This applies to every provider that stamps: vSphere, libvirt
+(single-host and clustered) and Proxmox. Owner-checked calls then accept the
+adopted VM, the Proxmox `Delete` removes it, and every other Provider object's
+adoption sees it as owned.
+
+Before this change, single-host adoption left the VM's stamp as it was. An
+adopted VM that still carried a previous owner's stamp — a `VirtualMachine`
+detached with `virtrigaud.io/orphan-on-delete`, then adopted again — was
+answered `VM_NOT_OWNED` by its new `VirtualMachine`'s Proxmox `Delete` and left
+on the hypervisor. An unstamped adopted VM stayed unstamped, so another Provider
+object for the same vCenter or host could adopt it a second time.
+
+The stamp is written by the `TransferOwner` RPC. A single-host provider that
+implements it reports `supportsOwnerTransfer`; a clustered libvirt provider
+already used it for its own adoption (`supportsRoutedAdoption`, see
+[`clustered-provider-inventory.md`](clustered-provider-inventory.md#listing-and-adoption-slice-4)).
+
+### Which VMs are stamped
+
+Adoption only stamps a VM it would adopt anyway. It never adopts, and never
+stamps:
+
+- a VM bound to a `VirtualMachine` of this Provider (its `status.id`);
+- a VM whose stamp names the UID of a `VirtualMachine` that exists, in any
+  namespace and under any Provider object;
+- a VM whose stamp can't be read or names more than one owner, a template, or
+  an image artifact;
+- a VM whose id is the `status.id` of a `VirtualMachine` bound through **another**
+  single-host Provider object of the same type and endpoint. Such a VM may be
+  unstamped (created before owner stamps, or adopted before this release), and
+  stamping it would take it away from that `VirtualMachine`. It is reported as
+  `bound to a VirtualMachine of another Provider object for the same endpoint`.
+  The same endpoint reached under two names (a DNS alias, a host name and its
+  IP) is not recognized.
+
+Of the rest, it stamps:
+
+- **an unstamped VM**;
+- **a VM stamped only with UIDs of no `VirtualMachine` in this cluster**, only
+  with the Provider's `virtrigaud.io/adopt-stamped-vms: "true"` opt-in (see
+  [Owner stamps are scoped to one cluster](#owner-stamps-are-scoped-to-one-cluster)),
+  and only after an **uncached** list of every `VirtualMachine` from the API
+  server confirms that none has one of those UIDs. A UID is never reused, so a
+  UID absent from the API server never comes back. Those UIDs are the only
+  stamps the provider may replace. A stamp the check finds alive is reported
+  (`its owner stamp names a VirtualMachine that exists`), and when the check
+  can't be made the VM is reported and retried at the next discovery.
+
+The adopted `VirtualMachine` and its `VMClass` are created in the Provider's
+own namespace, as before. Consumer grants (`spec.consumerNamespaceSelector`)
+don't widen this. An existing adopting `VirtualMachine` whose class or image is
+in another namespace that doesn't grant it is neither stamped onto the VM nor
+bound.
+
+### Compare-and-swap on the hypervisor
+
+`TransferOwner` never overwrites a stamp it wasn't told it may replace. The
+provider reads the VM, refuses unless every stamp on it is absent, the new
+owner's (an idempotent retry), or one of the replaceable UIDs, and then writes
+the stamp so that a concurrent change is detected:
+
+| Provider | The VM must still be the VM listed | The write is conditional on |
+|---|---|---|
+| vSphere | Its MOID (never reused in a vCenter), and its instance UUID when one is sent | The VM's `config.changeVersion` at the read. vCenter refuses the reconfigure (`ConcurrentAccess`) if the configuration changed since. |
+| libvirt | Its domain name **and** domain UUID (`ListVMs` `provider_raw["uuid"]`) | A per-host lock in the provider process. libvirt has no conditional metadata write, so two provider processes fronting one host aren't serialized: run one Provider per host endpoint. |
+| Proxmox | Its PVE name, which must be the adopting `VirtualMachine`'s name (the rule an unstamped VM's `Delete` uses), so a reused VMID is never stamped | The config `digest` at the read. PVE refuses the update (`detected modified configuration`) if the configuration changed since. |
+
+The new stamp is read back before the call succeeds. A refusal is
+`AlreadyExists` (owned by someone else, or a stamp, template or artifact that
+can't be taken over) or `NotFound` (gone, or not the VM listed). Its message
+names only the VM, never another owner. A concurrent change, a locked Proxmox
+VM (`lock: backup`, `clone`, ...) or a hypervisor error is retryable and is
+marked `VM_OPERATION_FAILED`, so it doesn't count toward the Provider's circuit
+breaker. The rest of the VM is never changed: the Proxmox notes other than the
+stamp line are kept, and no other ExtraConfig key or metadata element is
+touched.
+
+The write needs the privilege the provider already needs to stamp a VM at
+create time: vSphere `VirtualMachine.Config.AdvancedConfig`, Proxmox
+`VM.Config.Options`.
+
+### Order, and what deleting the `VirtualMachine` does meanwhile
+
+The VM can only be stamped with a `VirtualMachine` that exists (it needs a
+UID), and the `VirtualMachine` must never be bound to a VM that doesn't carry its
+stamp. So one discovery:
+
+1. creates the `VirtualMachine`, labelled `virtrigaud.io/adopted=true` and
+   annotated `virtrigaud.io/adopted-id: <VM id>`, **without** `status.id`. The
+   VirtualMachine controller waits for its `status.id` and never creates a VM
+   for it;
+2. re-reads it from the API server, and stamps the VM with it only while it
+   still exists, is not being deleted and still waits for that VM;
+3. writes `status.id` and `status.boundProvider` only after the stamp was read
+   back, and only while the `VirtualMachine` still waits for that VM.
+
+A failure or a manager restart between these steps is finished by the next
+discovery (every 5 minutes while one is pending):
+
+| State left behind | Next discovery | Deleting the `VirtualMachine` in this state |
+|---|---|---|
+| Created, VM not stamped (the transfer failed retryably) | Stamps the VM with the waiting `VirtualMachine` (found by its annotation) and binds it | No provider call: the VM is untouched |
+| VM stamped, not bound (the status write was lost) | Sees the VM stamped with the waiting `VirtualMachine`'s UID and writes the binding, without a second transfer | No provider call. The VM stays on the hypervisor, stamped with a UID that no longer exists; adopting it again needs `adopt-stamped-vms` |
+| The provider refused the transfer (the VM is someone else's now, gone, or replaced), or the listing shows the VM can no longer be adopted by the waiting `VirtualMachine` | Deletes the waiting `VirtualMachine` again: re-read first, preconditioned on its UID and resourceVersion, only while it still waits. It has no `status.id`, so its deletion makes no provider call | — |
+
+A waiting `VirtualMachine` created by an older manager (no `adopted-id`
+annotation) is bound the same way when its VM can be stamped, but is never
+deleted by adoption.
+
+Only a `VirtualMachine` named as adoption names it (the sanitized VM name, or
+`vm-<id>`) is ever handed a VM or bound to it, and only for a VM that passes
+the Provider's `virtrigaud.io/adopt-filter`. A `VirtualMachine` someone creates
+in the Provider's namespace with the adopted label and an `adopted-id`
+annotation under another name gets nothing; a waiting one whose VM the filter
+now excludes is withdrawn. A libvirt domain listed without a UUID is skipped
+(the provider needs it for the compare-and-swap), and a Proxmox VM found on a
+node outside the Provider's node selector is refused.
+
+### What operators see
+
+`Provider.status.adoption.message` counts the VMs adopted, failed and deferred,
+the unfinished adoptions withdrawn, and — by reason, naming a few VM ids — the
+VMs not adopted. The reasons are constant text and never name another owner.
+The manager log has the details, and refusals count in
+`virtrigaud_errors_total{reason="adoption-owner-transfer"}`.
+
+### Older providers, older managers
+
+- **A provider that doesn't report `supportsOwnerTransfer`** (older than this
+  release, or a third-party provider): adoption works as before. The
+  `VirtualMachine` is created and bound in one pass and the VM keeps whatever
+  stamp it had. The adoption message ends with `adopted VMs are not stamped
+  with their new owner ... upgrade the provider`.
+- **A provider whose capabilities can't be read**: nothing is adopted that
+  discovery, because the provider might be able to stamp
+  (`Waiting for the provider's capabilities before a discovery ...`). Retried
+  every 5 minutes.
+- **A manager older than this release** never calls `TransferOwner` for a
+  single-host Provider, so a newer provider changes nothing for it.
+
+### VMs adopted before this release
+
+Adoption stamps a VM only when it adopts it: **a VM adopted by an earlier
+release keeps the stamp it had.** On vSphere and single-host libvirt nothing
+checks that stamp on a single-host per-VM call. On Proxmox, an adopted VM that
+still carries a previous owner's stamp is answered `VM_NOT_OWNED` by its
+`VirtualMachine`'s `Delete` and left on the cluster. To find them, compare each
+adopted Proxmox `VirtualMachine`'s UID with the stamp on its VM
+(`qm config <vmid> | grep virtrigaud.owner`). To fix one, either remove the
+`virtrigaud.owner` line from the VM's Notes (the VM is then unstamped and is
+deleted with its `VirtualMachine` while its PVE name matches), or detach the
+`VirtualMachine` with `virtrigaud.io/orphan-on-delete: "true"`, delete it, and
+let adoption take the VM again with `adopt-stamped-vms` (it is then stamped).
+
 ## vSphere
 
 ### What was wrong
@@ -296,7 +456,10 @@ A VM with a readable owner stamp is listed with its owner UID (`ListVMs`
 object. Before this change the vSphere `ListVMs` reported no owner UID. Adoption
 through one Provider object could therefore adopt a VM that a `VirtualMachine`
 under another Provider object for the same vCenter owned, or a VM whose create
-had not yet recorded its `status.id`.
+had not yet recorded its `status.id`. A VM adoption takes over is stamped with
+its adopting `VirtualMachine` (see
+[Adoption stamps the adopted VM](#adoption-stamps-the-adopted-vm)), so it is
+listed as owned from then on.
 
 #### Owner stamps are scoped to one cluster
 
@@ -322,9 +485,17 @@ metadata:
 ```
 
 Only `"true"` opts in. Set it only when no other VirtRigaud installation
-manages the same vCenter or host, and remove it afterwards. A clustered
-Provider never adopts a stamped VM, with or without the annotation: it reports
-it as a previous incarnation, which you re-attach per the ADR-0007 A6 runbook.
+manages the same vCenter or host, and remove it afterwards. Through a provider
+that reports `supportsOwnerTransfer`, the stale stamp is **replaced** by the
+adopting `VirtualMachine`'s, after an uncached check that no `VirtualMachine`
+in this cluster has the stale UID (see
+[Adoption stamps the adopted VM](#adoption-stamps-the-adopted-vm)). That check
+can't see another installation: if one does manage the VM, it loses it (its
+owner-checked calls then refuse the VM), which is why the opt-in must stay off
+whenever an endpoint is shared between installations.
+A clustered Provider never adopts a stamped VM, with or without the
+annotation: it reports it as a previous incarnation, which you re-attach per
+the ADR-0007 A6 runbook.
 
 ### Per-VM operations refuse templates and image artifacts
 
@@ -379,7 +550,7 @@ requirement to the account in the Provider's credential Secret:
 
 | Privilege | ID | Needed for |
 |---|---|---|
-| Virtual machine > Change Configuration > Advanced configuration | `VirtualMachine.Config.AdvancedConfig` | **Every** `Create` and `Clone`. The owner stamp, and the clearing of an inherited stamp, are ExtraConfig writes. Grant it on the target VM folder and resource pool. |
+| Virtual machine > Change Configuration > Advanced configuration | `VirtualMachine.Config.AdvancedConfig` | **Every** `Create` and `Clone`, and adoption (`TransferOwner`). The owner stamp, and the clearing of an inherited stamp, are ExtraConfig writes. Grant it on the target VM folder and resource pool, and on the VMs adoption may take over. |
 
 Without this privilege, creates fail with a vCenter permission error. They
 don't create an unstamped VM. Deployments that already inject cloud-init
@@ -449,9 +620,10 @@ keep VM names unique. Before owner stamps, that caused three problems:
 
 ### The owner stamp
 
-Every VM that `Create` makes, and every clone that `Clone` makes for a target
-`VirtualMachine` with a UID, gets one line in its **description** (the "Notes"
-field in the PVE GUI):
+Every VM that `Create` makes, every clone that `Clone` makes for a target
+`VirtualMachine` with a UID, and every VM adoption takes over (`TransferOwner`,
+`phase=ready`), gets one line in its **description** (the "Notes" field in the
+PVE GUI):
 
 ```
 virtrigaud.owner v1 uid=<uid> namespace=<namespace> name=<name> phase=<creating|ready> sum=<16 hex digits>
@@ -675,15 +847,20 @@ example PVE `Web_01` matches the owner `web-01`. Any other name is `NotFound`.
 Without an owner on the request, `Delete` is unchanged, except for the gone
 check above. The manager sends `DeleteRequest.owner` on every delete of a
 VirtualMachine with a UID — clustered and single-host, adopted VMs and clone
-targets included; nothing a tenant can edit turns the check off. Adoption does
-not stamp the VM it adopts, so an adopted VM that still carries a previous
-owner's stamp (a `VirtualMachine` detached with `virtrigaud.io/orphan-on-delete`,
-then adopted again) is answered `NotFound` + `VM_NOT_OWNED`: it is left in
-place, and the manager releases the `VirtualMachine` with a `VMLeftOnHypervisor`
-Warning event naming the VM's provider id (and an error-level manager log line with the
-id, the Provider and the VirtualMachine; metric reason `vm-not-owned`). That is the
-fail-safe direction: without the owner, a reused VMID could make the delete
-destroy an unrelated VM.
+targets included; nothing a tenant can edit turns the check off. Adoption
+stamps the VM it adopts with the adopting `VirtualMachine` (see
+[Adoption stamps the adopted VM](#adoption-stamps-the-adopted-vm)), so its
+`Delete` removes it. A VM adopted by an earlier release that still carries a
+previous owner's stamp (a `VirtualMachine` detached with
+`virtrigaud.io/orphan-on-delete`, then adopted again), or one adopted through a
+provider that doesn't report `supportsOwnerTransfer`, is answered `NotFound` +
+`VM_NOT_OWNED`: it is left in place, and the manager releases the
+`VirtualMachine` with a `VMLeftOnHypervisor` Warning event naming the VM's
+provider id (and an error-level manager log line with the id, the Provider and
+the VirtualMachine; metric reason `vm-not-owned`). That is the fail-safe
+direction: without the owner, a reused VMID could make the delete destroy an
+unrelated VM. See [VMs adopted before this release](#vms-adopted-before-this-release)
+to fix such a VM.
 
 A template at the VMID is never deleted, with or without an owner on the
 request: `FailedPrecondition` + `VM_IS_IMAGE_ARTIFACT`, which the manager holds
@@ -745,8 +922,10 @@ Proxmox VMs created before this release carry no stamp. They:
   PVE name is the `VirtualMachine`'s name or the name adoption gave it (see
   `Delete` above).
 
-The provider doesn't stamp existing VMs by itself. Proxmox doesn't implement
-`TransferOwner`, and adopted VMs stay unstamped.
+The provider doesn't stamp existing VMs by itself. A VM adoption takes over
+is stamped through `TransferOwner` (compare-and-swap on the config `digest`,
+see [Adoption stamps the adopted VM](#adoption-stamps-the-adopted-vm)); a VM
+that adoption bound before this release keeps the stamp it had.
 
 ### Limits
 

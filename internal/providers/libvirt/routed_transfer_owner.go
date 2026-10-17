@@ -20,7 +20,6 @@ import (
 	"context"
 	"fmt"
 	"log"
-	"slices"
 	"strings"
 	"sync"
 
@@ -72,9 +71,12 @@ import (
 //     belong to one clustered Provider (the adoption controller refuses to
 //     adopt from a shared endpoint).
 //
-// Single-host adoption does not stamp and is unchanged: a single-host provider
-// does not check owners on per-VM calls, and its TransferOwner answers
-// Unimplemented.
+// A SINGLE-HOST provider runs the same core on its one host
+// (transferOwnerSingleHost, adoption_transfer_owner.go): the manager's
+// single-host adoption stamps every domain it adopts with the adopting
+// VirtualMachine, so a domain adopted again after its previous VirtualMachine
+// was detached (orphan-on-delete) no longer carries that VirtualMachine's
+// stamp, and another Provider object's adoption sees it as owned.
 
 // domainStateShutOff is the `virsh list --all` state of an inactive domain.
 const domainStateShutOff = "shut off"
@@ -156,13 +158,14 @@ const transferRefusedMessage = "libvirt domain %q on host %s is owned by another
 
 // TransferOwner re-stamps the domain req.VM.ID on host req.VM.HostID with
 // req.VM.Owner, compare-and-swap (see the file comment). It is the backend of
-// the TransferOwner RPC and is implemented in CLUSTERED topology only.
+// the TransferOwner RPC. A single-host provider runs the same core on its one
+// host (transferOwnerSingleHost).
 func (p *Provider) TransferOwner(ctx context.Context, req contracts.TransferOwnerRequest) error {
-	if !p.clustered() {
-		return contracts.NewNotSupportedError("TransferOwner is implemented by a clustered libvirt provider only")
-	}
 	if err := validateTransferOwnerRequest(req); err != nil {
 		return err
+	}
+	if !p.clustered() {
+		return p.transferOwnerSingleHost(ctx, req)
 	}
 	unlock, err := p.transferLocks.lock(ctx, strings.TrimSpace(req.VM.HostID))
 	if err != nil {
@@ -307,24 +310,10 @@ func transferOwnerOn(ctx context.Context, vp *VirshProvider, host hostconn.HostI
 // never a stamp) a stamp that cannot be read, more than one stamp, a stamp
 // without a UID, and a stamp that is neither owner's nor in replaceable.
 func ownerTransferDecision(owner contracts.ObjectIdentity, recorded []contracts.ObjectIdentity, readErr error, replaceable []string) (already bool, err error) {
-	switch {
-	case readErr != nil:
+	if readErr != nil {
 		return false, fmt.Errorf("its owner metadata cannot be read: %w", readErr)
-	case len(recorded) == 0:
-		return false, nil
-	case len(recorded) > 1:
-		return false, fmt.Errorf("it carries %d owner stamps", len(recorded))
 	}
-	uid := recorded[0].UID
-	switch {
-	case uid == "":
-		return false, fmt.Errorf("its owner stamp has no uid")
-	case uid == owner.UID:
-		return true, nil
-	case slices.Contains(replaceable, uid):
-		return false, nil
-	}
-	return false, fmt.Errorf("it is stamped for a VirtualMachine the manager did not report as gone")
+	return contracts.OwnerTransferDecision(owner, recorded, replaceable)
 }
 
 // verifyOwnerStamp reads domain uuid back and requires that it is still named

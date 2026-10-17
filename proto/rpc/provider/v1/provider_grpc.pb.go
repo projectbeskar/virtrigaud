@@ -91,10 +91,11 @@ type ProviderClient interface {
 	// host it fronts, tags each VM with its host_id and names the hosts it could
 	// not list in unreachable_host_ids (ADR-0007 Addendum A, A3).
 	ListVMs(ctx context.Context, in *ListVMsRequest, opts ...grpc.CallOption) (*ListVMsResponse, error)
-	// Hand a VM on a clustered provider's host to a VirtualMachine by
-	// re-stamping its owner, compare-and-swap (ADR-0007 Addendum A, slice 4).
-	// Single-host and thin-client providers return Unimplemented and advertise
-	// supports_routed_adoption = false.
+	// Hand a VM to a VirtualMachine by re-stamping its owner, compare-and-swap
+	// (ADR-0007 Addendum A, slice 4; single-host adoption). A clustered provider
+	// routes it to the VM's host and reports supports_routed_adoption; a
+	// single-host provider that stamps reports supports_owner_transfer.
+	// Providers that do neither return Unimplemented.
 	TransferOwner(ctx context.Context, in *TransferOwnerRequest, opts ...grpc.CallOption) (*TransferOwnerResponse, error)
 	// Host inventory (ADR-0007 P1). Clustered providers report the hosts they
 	// front so the operator can schedule across them; single-host and thin-client
@@ -380,10 +381,11 @@ type ProviderServer interface {
 	// host it fronts, tags each VM with its host_id and names the hosts it could
 	// not list in unreachable_host_ids (ADR-0007 Addendum A, A3).
 	ListVMs(context.Context, *ListVMsRequest) (*ListVMsResponse, error)
-	// Hand a VM on a clustered provider's host to a VirtualMachine by
-	// re-stamping its owner, compare-and-swap (ADR-0007 Addendum A, slice 4).
-	// Single-host and thin-client providers return Unimplemented and advertise
-	// supports_routed_adoption = false.
+	// Hand a VM to a VirtualMachine by re-stamping its owner, compare-and-swap
+	// (ADR-0007 Addendum A, slice 4; single-host adoption). A clustered provider
+	// routes it to the VM's host and reports supports_routed_adoption; a
+	// single-host provider that stamps reports supports_owner_transfer.
+	// Providers that do neither return Unimplemented.
 	TransferOwner(context.Context, *TransferOwnerRequest) (*TransferOwnerResponse, error)
 	// Host inventory (ADR-0007 P1). Clustered providers report the hosts they
 	// front so the operator can schedule across them; single-host and thin-client

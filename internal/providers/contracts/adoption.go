@@ -16,7 +16,11 @@ limitations under the License.
 
 package contracts
 
-import "context"
+import (
+	"context"
+	"fmt"
+	"slices"
+)
 
 // VMInfoUUIDKey is the VMInfo.ProviderRaw key under which a provider reports a
 // listed VM's immutable identifier when it has one (libvirt: the domain UUID).
@@ -73,32 +77,71 @@ const (
 	ArtifactImage = "image"
 )
 
-// TransferOwnerRequest asks a clustered provider to hand one VM on one of its
-// hosts to a VirtualMachine by re-stamping the VM's owner (ADR-0007 Addendum
-// A, slice 4). It is the manager-side mirror of the provider.v1
-// TransferOwnerRequest message.
+// TransferOwnerRequest asks a provider to hand one VM to a VirtualMachine by
+// re-stamping the VM's owner: on a clustered provider a VM on one of its hosts
+// (ADR-0007 Addendum A, slice 4), on a single-host provider that reports
+// Capabilities.SupportsOwnerTransfer a VM addressed by its id alone. It is the
+// manager-side mirror of the provider.v1 TransferOwnerRequest message.
 type TransferOwnerRequest struct {
 	// VM addresses the VM: its ID (VMInfo.ID), the host it is on
-	// (VMInfo.HostID) and, as Owner, the identity of the VirtualMachine that
-	// takes it over. The provider stamps Owner onto the VM.
+	// (VMInfo.HostID; empty on a single-host provider) and, as Owner, the
+	// identity of the VirtualMachine that takes it over. The provider stamps
+	// Owner onto the VM.
 	VM VMRef
 	// ReplaceableOwnerUIDs are the owner UIDs recorded on the VM
 	// (VMInfoOwnerUIDKey) that the manager verified belong to no existing
 	// VirtualMachine. Only these stamps may be replaced; empty takes over only
 	// an unstamped VM (or one already stamped with Owner, an idempotent retry).
 	ReplaceableOwnerUIDs []string
-	// ExpectedUUID is the VM's immutable identifier (VMInfoUUIDKey). The
-	// provider refuses to stamp a VM that no longer carries it.
+	// ExpectedUUID is the VM's immutable identifier (VMInfoUUIDKey), when the
+	// provider lists one. The provider refuses to stamp a VM that no longer
+	// carries it.
 	ExpectedUUID string
 }
 
+// OwnerTransferDecision is the compare-and-swap decision every provider's
+// TransferOwner makes once it has read the owner stamps recorded on the VM
+// (none for an unstamped VM): may the VM be stamped with owner?
+//
+//   - unstamped: yes (already false);
+//   - exactly owner's stamp (UID, namespace and name): already true — an
+//     idempotent retry, nothing is written;
+//   - one stamp whose UID is in replaceable (owners the manager verified no
+//     longer exist): yes;
+//   - anything else — more than one stamp, a stamp without a UID, owner's UID
+//     under another namespace or name (an edited stamp), or another owner's
+//     UID that is not replaceable: refused (a non-nil error). The error names
+//     no owner and is meant for the provider log; the caller answers the
+//     constant refusal (Conflict) on the wire.
+func OwnerTransferDecision(owner ObjectIdentity, recorded []ObjectIdentity, replaceable []string) (already bool, err error) {
+	switch {
+	case len(recorded) == 0:
+		return false, nil
+	case len(recorded) > 1:
+		return false, fmt.Errorf("it carries %d owner stamps", len(recorded))
+	}
+	got := recorded[0]
+	switch {
+	case got.UID == "":
+		return false, fmt.Errorf("its owner stamp has no uid")
+	case got.UID == owner.UID && got == owner:
+		return true, nil
+	case got.UID == owner.UID:
+		return false, fmt.Errorf("it carries the new owner's uid under another namespace or name (an edited stamp)")
+	case slices.Contains(replaceable, got.UID):
+		return false, nil
+	}
+	return false, fmt.Errorf("it is stamped for a VirtualMachine the manager did not report as gone")
+}
+
 // OwnerTransferrer is an optional capability of a Provider: it re-stamps a VM
-// on a clustered provider's host with the VirtualMachine that takes it over
-// (TransferOwner), compare-and-swap. The manager gRPC client implements it;
-// the adoption controller type-asserts a Provider to OwnerTransferrer, and uses
-// it only when the provider reports Capabilities.SupportsRoutedAdoption, so
-// the core Provider interface and the test fakes that do not adopt are
-// unaffected. This mirrors the Cloner pattern.
+// with the VirtualMachine that takes it over (TransferOwner),
+// compare-and-swap. The manager gRPC client implements it; the adoption
+// controller type-asserts a Provider to OwnerTransferrer, and uses it only
+// when the provider reports Capabilities.SupportsRoutedAdoption (clustered)
+// or Capabilities.SupportsOwnerTransfer (single-host), so the core Provider
+// interface and the test fakes that do not adopt are unaffected. This mirrors
+// the Cloner pattern.
 //
 // A6 (restore re-binding) can reuse it: a VirtualMachine restored from a
 // backup has a new UID, so its VM's stamp names a VirtualMachine that no longer
@@ -109,6 +152,7 @@ type OwnerTransferrer interface {
 	// when it already did); it refuses — Conflict, never touching the VM —
 	// when the VM carries a stamp that is neither the owner's nor replaceable,
 	// or a stamp that cannot be read, and returns NotFound when the VM (with
-	// ExpectedUUID) is not on the host.
+	// ExpectedUUID) is not on the host. A provider that does not stamp answers
+	// NotSupported.
 	TransferOwner(ctx context.Context, req TransferOwnerRequest) error
 }

@@ -56,6 +56,9 @@ func GetProviderCapabilities() *capabilities.Manager {
 		DiskImport("qcow2", "raw", "vmdk").
 		// ImportDisk enforces max_virtual_size_bytes (import_size_limit.go).
 		ImportSizeLimit().
+		// TransferOwner stamps a VM the manager's adoption takes over,
+		// compare-and-swap on the config digest (transfer_owner.go).
+		OwnerTransfer().
 		// ADR-0006: two real data paths for Proxmox, both node-side. (1) The S3
 		// relay — bytes flow node ↔ provider-pod ↔ S3 over SSH (the pod is the S3
 		// client). (2) The NFS qemu-img path (Slice 4) — the node's qemu-img reads/

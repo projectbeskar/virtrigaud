@@ -309,10 +309,11 @@ func (c *Client) ListVMsResponse(ctx context.Context) (*providerv1.ListVMsRespon
 	return resp, nil
 }
 
-// TransferOwner asks a clustered provider to re-stamp a VM on one of its hosts
-// with the VirtualMachine that takes it over, compare-and-swap (ADR-0007
-// Addendum A, slice 4). Providers that do not advertise
-// supports_routed_adoption return a gRPC Unimplemented error.
+// TransferOwner asks a provider to re-stamp a VM with the VirtualMachine that
+// takes it over, compare-and-swap: a clustered provider a VM on one of its
+// hosts (ADR-0007 Addendum A, slice 4), a single-host one a VM addressed by id
+// alone. Providers that advertise neither supports_routed_adoption nor
+// supports_owner_transfer return a gRPC Unimplemented error.
 func (c *Client) TransferOwner(ctx context.Context, req *providerv1.TransferOwnerRequest) (*providerv1.TransferOwnerResponse, error) {
 	ctx, cancel := c.withTimeout(ctx, "/provider.v1.Provider/TransferOwner")
 	defer cancel()

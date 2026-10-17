@@ -61,7 +61,7 @@ func (s *slice4Server) TransferOwner(_ context.Context, r *providerv1.TransferOw
 }
 
 func (s *slice4Server) GetCapabilities(context.Context, *providerv1.GetCapabilitiesRequest) (*providerv1.GetCapabilitiesResponse, error) {
-	return &providerv1.GetCapabilitiesResponse{SupportsClustering: true, SupportsRoutedAdoption: true}, nil
+	return &providerv1.GetCapabilitiesResponse{SupportsClustering: true, SupportsRoutedAdoption: true, SupportsOwnerTransfer: true}, nil
 }
 
 // TestClient_ListVMs_CarriesHostIDsAndUnreachableHosts: the manager's client
@@ -92,6 +92,7 @@ func TestClient_ListVMs_CarriesHostIDsAndUnreachableHosts(t *testing.T) {
 	caps, err := c.GetCapabilities(context.Background())
 	require.NoError(t, err)
 	assert.True(t, caps.SupportsRoutedAdoption)
+	assert.True(t, caps.SupportsOwnerTransfer, "supports_owner_transfer reaches the manager")
 }
 
 // TestClient_ListVMs_SingleHostHasNoHosts: a single-host provider's answer
