@@ -5,6 +5,31 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-10-17 08:30] - vSphere: a finder per call instead of one shared; libvirt: no fixed /tmp files on the host (rc2 R8, R9)
+**Author:** @wrkode (William Rizzo)
+
+### Fixed
+- `internal/providers/vsphere/datacenter_finder.go` (new), `server.go`, `image.go`, `image_identity.go`, `s3import.go`, `export_cleanup.go`, `disk_guard.go`, `datastore_helper.go`, `template_source.go`, `vm_ownership.go`: the provider kept one shared `*find.Finder` and re-scoped it with `SetDatacenter` at the start of about twenty RPC paths. A govmomi `Finder` is not safe for concurrent use (`SetDatacenter` rewrites it and it fills a folder cache lazily), so concurrent RPCs raced on it (`go test -race` reports it), and a path that used the finder before scoping it ran against whatever the previous RPC had left behind (#390 was one such ordering bug). The shared finder and `Provider.finder` are gone. `Provider.dcFinder` returns a finder of the caller's own, already scoped to the default datacenter, and that datacenter; every RPC path takes one and passes it to the helpers that need it (`resolveVMFolder`, `createVirtualMachine`, `resolveDatastoreFromStoragePod`, `lookupTemplate`/`templateCandidates`, `findPreparedTemplate`, `resolveImportDatastore`/`resolveImportPlacement`, `removeExportCloneFiles`, `resolveImageFolder`; `imagePlacement` carries the finder the OVA importer uses). Behaviour is otherwise unchanged, including the error an RPC returns when the default datacenter cannot be resolved (no datacenter, or several and no default).
+- `internal/providers/vsphere/datacenter_finder.go`: finding the default datacenter is a vCenter round trip, so the datacenter reference is cached on the `Provider` for 60 seconds and for the current vCenter client only (a reconnect in `Validate` builds a new client and the entry misses). A finder or inventory call that fails with "not found" (`find.NotFoundError` or `ManagedObjectNotFound`) drops the entry (`noteInventoryError`, called after each finder lookup), so a renamed or re-created datacenter costs at most the one failed call. Each caller gets its own copy of the object; a failed lookup is never cached. The RPCs that address a VM by managed object ID keep the datacenter lookup as a guard that only fails on a cache miss.
+- `internal/providers/libvirt/storage.go`: `createDefaultStoragePool` wrote the pool XML to the fixed host path `/tmp/default-pool.xml` before `virsh pool-define`. Two concurrent calls on one host (two providers sharing it, or a clustered fan-out) overwrote each other's file, and a fixed name in a shared `/tmp` can be pre-created or linked elsewhere by anything on the host. The XML now goes to `virsh pool-define /dev/stdin` over stdin (as `vol-create` already does): no file is made, so there is nothing to clean up.
+- `internal/providers/libvirt/provider_virsh.go`: `syncPersistentXML` (the persistent-definition sync after a start or reboot) had the same flaw with `/tmp/<domain>-sync.xml`, which a failed define also left behind; it now re-defines from stdin (`virsh define /dev/stdin`). It also now connects with the provider's own `-c` URI like every other call (the file-based form ran `virsh define <path>` without one on a non-SSH transport).
+
+### Changed
+- `internal/providers/vsphere/server.go`: `createVSphereClient` returns `(*govmomi.Client, error)` (it no longer builds a finder). Tests use `testFinder` / `testDatacenter` (`datacenter_finder_test.go`).
+- `internal/providers/libvirt/testdata/single_host_power_reconfigure.golden.json`: the single-host Power sequences that sync the persistent XML now end in `define /dev/stdin` where they had `define /tmp/<domain>-sync.xml` and `rm -f /tmp/<domain>-sync.xml`.
+
+### Added
+- Tests: `internal/providers/vsphere/datacenter_finder_test.go` (a finder and a datacenter copy per call; ambiguous datacenter is an error and not cached; cache rules: client, TTL, copy; expiry and client swap through `dcFinder` with a clock seam; not-found invalidation; `TestDCFinder_ConcurrentRPCs` runs Describe, ListVMs, ImportDisk target resolution and an ImagePrepare template lookup concurrently and fails under `-race` on the previous code, where the shared finder's `SetDatacenter` races); `internal/providers/libvirt/host_tempfile_test.go` (pool define and persistent-XML sync read stdin whole, concurrent calls share no file, a failed define leaves none, the old fixed paths are never created or touched, the `-c` URI of the persistent-XML sync for system, session, `qemu+tcp`, `qemu+tls` and `?socket=` URIs).
+
+### Why
+Two rc2 hardening items: the vSphere provider shared mutable state between concurrent RPCs, and the libvirt provider staged XML in predictable files in the hypervisor's shared `/tmp`. Neither changes what an operator configures. Not covered: the pod-local `/tmp/<export>.<fmt>` and `/tmp/<disk>-download.img` files of the libvirt PVC export/import (they live in the provider pod's own `/tmp`, not on a hypervisor host).
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-10-17 07:55] - ADR-0012 (Accepted): retiring the Proxmox legacy unstamped-name rule (rc2 R14)
 **Author:** @wrkode (William Rizzo)
 

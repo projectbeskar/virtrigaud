@@ -99,7 +99,7 @@ func datastoreFileExists(t *testing.T, p *Provider, name string) bool {
 	ctx := context.Background()
 	var dp object.DatastorePath
 	require.True(t, dp.FromString(name))
-	ds, err := p.finder.Datastore(ctx, dp.Datastore)
+	ds, err := testFinder(t, p).Datastore(ctx, dp.Datastore)
 	require.NoError(t, err)
 	_, err = ds.Stat(ctx, dp.Path)
 	if err != nil {
@@ -1143,7 +1143,7 @@ func TestCreate_InPlaceDisk_MissingLandingDisk(t *testing.T) {
 // another datastore would otherwise be missing from that datastore's list.
 func listVMOnDatastore(t *testing.T, p *Provider, model *simulator.Model, dsName, id string) {
 	t.Helper()
-	ds, err := p.finder.Datastore(context.Background(), dsName)
+	ds, err := testFinder(t, p).Datastore(context.Background(), dsName)
 	require.NoError(t, err)
 	reg := model.Map()
 	obj, ok := reg.Get(ds.Reference()).(*simulator.Datastore)

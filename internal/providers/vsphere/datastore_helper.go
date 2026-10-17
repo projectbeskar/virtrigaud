@@ -52,14 +52,14 @@ func (dfm *DatastoreFileManager) DownloadFile(ctx context.Context, datastorePath
 	}
 
 	// Set datacenter context for finder
-	datacenter, err := dfm.provider.finder.DefaultDatacenter(ctx)
+	finder, _, err := dfm.provider.dcFinder(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to get datacenter: %w", err)
 	}
-	dfm.provider.finder.SetDatacenter(datacenter)
 
 	// Find the datastore
-	datastore, err := dfm.provider.finder.Datastore(ctx, dsName)
+	datastore, err := finder.Datastore(ctx, dsName)
+	dfm.provider.noteInventoryError(err)
 	if err != nil {
 		return fmt.Errorf("failed to find datastore %s: %w", dsName, err)
 	}
@@ -112,14 +112,14 @@ func (dfm *DatastoreFileManager) UploadFile(ctx context.Context, reader io.Reade
 	}
 
 	// Set datacenter context for finder
-	datacenter, err := dfm.provider.finder.DefaultDatacenter(ctx)
+	finder, _, err := dfm.provider.dcFinder(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to get datacenter: %w", err)
 	}
-	dfm.provider.finder.SetDatacenter(datacenter)
 
 	// Find the datastore
-	datastore, err := dfm.provider.finder.Datastore(ctx, dsName)
+	datastore, err := finder.Datastore(ctx, dsName)
+	dfm.provider.noteInventoryError(err)
 	if err != nil {
 		return fmt.Errorf("failed to find datastore %s: %w", dsName, err)
 	}
@@ -177,14 +177,14 @@ func (dfm *DatastoreFileManager) DeleteFile(ctx context.Context, datastorePath s
 	}
 
 	// Set datacenter context for finder
-	datacenter, err := dfm.provider.finder.DefaultDatacenter(ctx)
+	finder, datacenter, err := dfm.provider.dcFinder(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to get datacenter: %w", err)
 	}
-	dfm.provider.finder.SetDatacenter(datacenter)
 
 	// Find the datastore
-	datastore, err := dfm.provider.finder.Datastore(ctx, dsName)
+	datastore, err := finder.Datastore(ctx, dsName)
+	dfm.provider.noteInventoryError(err)
 	if err != nil {
 		return fmt.Errorf("failed to find datastore %s: %w", dsName, err)
 	}
@@ -208,7 +208,7 @@ func (dfm *DatastoreFileManager) DeleteFile(ctx context.Context, datastorePath s
 // createDirectory creates a directory in the datastore
 func (dfm *DatastoreFileManager) createDirectory(ctx context.Context, datastore *object.Datastore, dirPath string) error {
 	// Get datacenter for file manager
-	datacenter, err := dfm.provider.finder.DefaultDatacenter(ctx)
+	_, datacenter, err := dfm.provider.dcFinder(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to get datacenter: %w", err)
 	}

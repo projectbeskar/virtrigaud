@@ -143,7 +143,7 @@ func stampConfig(uid, digest string, at time.Time) []types.BaseOptionValue {
 // folderAt resolves the folder at inventory path.
 func folderAt(t *testing.T, p *Provider, inventoryPath string) *object.Folder {
 	t.Helper()
-	f, err := p.finder.Folder(context.Background(), inventoryPath)
+	f, err := testFinder(t, p).Folder(context.Background(), inventoryPath)
 	require.NoError(t, err)
 	return f
 }
@@ -162,7 +162,7 @@ func objectsNamed(t *testing.T, p *Provider, folder *object.Folder, name string)
 func plantVM(t *testing.T, p *Provider, folder *object.Folder, name string, extra []types.BaseOptionValue, template bool) types.ManagedObjectReference {
 	t.Helper()
 	ctx := context.Background()
-	cluster, err := p.finder.ClusterComputeResource(ctx, simCluster)
+	cluster, err := testFinder(t, p).ClusterComputeResource(ctx, simCluster)
 	require.NoError(t, err)
 	pool, err := cluster.ResourcePool(ctx)
 	require.NoError(t, err)
@@ -1005,10 +1005,10 @@ func TestVcsimImportVAppAllowsDuplicateNames(t *testing.T) {
 	defer cleanup()
 	archive, descriptor, err := p.newOVAArchive(localPath, ovaURL)
 	require.NoError(t, err)
-	pool, ds, err := p.resolveImageComputeAndStorage(ctx, p.finder, "")
+	pool, ds, err := p.resolveImageComputeAndStorage(ctx, testFinder(t, p), "")
 	require.NoError(t, err)
 	name := "dup-import"
-	_, err = (&importer.Importer{Log: p.ovaImportLog, Client: p.client.Client, Finder: p.finder,
+	_, err = (&importer.Importer{Log: p.ovaImportLog, Client: p.client.Client, Finder: testFinder(t, p),
 		Datastore: ds, ResourcePool: pool, Folder: folder, Archive: archive}).
 		Import(ctx, descriptor, importer.Options{Name: &name})
 	require.NoError(t, err, "vcsim accepts a same-named ImportVApp (vCenter answers DuplicateName)")

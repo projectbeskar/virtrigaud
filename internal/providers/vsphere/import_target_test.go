@@ -34,9 +34,9 @@ import (
 func TestResolveImportTarget_FreshProvider(t *testing.T) {
 	p, _ := newOwnershipSim(t)
 	ctx := context.Background()
-	p.finder = find.NewFinder(p.client.Client, true) // as a freshly started provider has it
-
-	_, err := p.resolveImportDatastore(ctx, "")
+	// A finder with no datacenter, as a freshly started provider used to have it.
+	unscoped := find.NewFinder(p.client.Client, true)
+	_, err := p.resolveImportDatastore(ctx, unscoped, "")
 	require.Error(t, err, "precondition: an unscoped finder cannot resolve a relative datastore name")
 
 	target, err := p.resolveImportTarget(ctx, "")

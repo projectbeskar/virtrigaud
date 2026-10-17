@@ -191,14 +191,11 @@ func (p *Provider) imagePrepareIdentity(ctx context.Context, req *providerv1.Ima
 	}
 	bound := artifactStalenessBound(req.GetImageJson())
 
-	// A finder of this call's own: the shared p.finder is re-scoped by every
-	// RPC (SetDatacenter), which concurrent prepares must not race on.
-	finder := find.NewFinder(p.client.Client, true)
-	datacenter, err := finder.DefaultDatacenter(ctx)
+	// A finder of this call's own, scoped to the default datacenter.
+	finder, _, err := p.dcFinder(ctx)
 	if err != nil {
 		return nil, p.artifactRetryError(ctx, name, "resolve the default datacenter", err)
 	}
-	finder.SetDatacenter(datacenter)
 	folder, err := p.resolveArtifactFolder(ctx, finder, name)
 	if err != nil {
 		return nil, err
@@ -331,6 +328,7 @@ func (p *Provider) nameHeldOutOfSight(ctx context.Context, loc artifactLocation,
 // finder must be scoped to the default datacenter.
 func (p *Provider) resolveArtifactFolder(ctx context.Context, finder *find.Finder, artifact string) (*object.Folder, error) {
 	vmFolder, err := finder.DefaultFolder(ctx)
+	p.noteInventoryError(err)
 	if err != nil {
 		return nil, p.artifactRetryError(ctx, artifact, "resolve the datacenter VM folder", err)
 	}
@@ -340,6 +338,7 @@ func (p *Provider) resolveArtifactFolder(ctx context.Context, finder *find.Finde
 	}
 
 	folder, err := finder.Folder(ctx, folderName)
+	p.noteInventoryError(err)
 	if err != nil {
 		if reason := importFolderLookupReason(err); reason != "" {
 			return nil, p.importFolderError(ctx, folderName, reason, err)

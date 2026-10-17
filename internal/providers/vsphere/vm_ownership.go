@@ -251,7 +251,7 @@ func vmConflictError(name string) error {
 // other error — e.g. a transient vCenter failure — is returned: falling back
 // then would make the existing-VM check look in a different folder than a
 // previous attempt created the VM in.
-func (p *Provider) resolveVMFolder(ctx context.Context, folderOverride string) (*object.Folder, error) {
+func (p *Provider) resolveVMFolder(ctx context.Context, finder *find.Finder, folderOverride string) (*object.Folder, error) {
 	folderName := p.config.DefaultFolder
 	if folderOverride != "" {
 		folderName = folderOverride
@@ -259,7 +259,7 @@ func (p *Provider) resolveVMFolder(ctx context.Context, folderOverride string) (
 	}
 
 	if folderName != "" {
-		folder, err := p.finder.Folder(ctx, folderName)
+		folder, err := finder.Folder(ctx, folderName)
 		if err == nil {
 			return folder, nil
 		}
@@ -271,7 +271,8 @@ func (p *Provider) resolveVMFolder(ctx context.Context, folderOverride string) (
 		p.logger.Warn("Failed to find folder, using datacenter default VM folder", "folder", folderName, "error", err)
 	}
 
-	folder, err := p.finder.DefaultFolder(ctx)
+	folder, err := finder.DefaultFolder(ctx)
+	p.noteInventoryError(err)
 	if err != nil {
 		return nil, fmt.Errorf("failed to find datacenter VM folder: %w", err)
 	}

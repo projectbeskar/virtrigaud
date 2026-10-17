@@ -22,6 +22,7 @@ import (
 	"path"
 	"strings"
 
+	"github.com/vmware/govmomi/find"
 	"github.com/vmware/govmomi/object"
 	"github.com/vmware/govmomi/property"
 	"github.com/vmware/govmomi/view"
@@ -167,8 +168,9 @@ func selectTemplate(ref string, candidates []templateCandidate) (tmpl types.Mana
 // other returned error is a vCenter failure (retryable), never "not found"; it
 // may carry other objects' identifiers, so lookupTemplate logs it and returns a
 // generic error instead (templateLookupFailedError).
-func (p *Provider) templateCandidates(ctx context.Context, ref string) ([]templateCandidate, error) {
-	vmFolder, err := p.finder.DefaultFolder(ctx)
+func (p *Provider) templateCandidates(ctx context.Context, finder *find.Finder, ref string) ([]templateCandidate, error) {
+	vmFolder, err := finder.DefaultFolder(ctx)
+	p.noteInventoryError(err)
 	if err != nil {
 		return nil, fmt.Errorf("find datacenter VM folder: %w", err)
 	}
@@ -252,11 +254,11 @@ func templateLookupFailedError(ref string) error {
 // error means the reference is unsafe, outside the default datacenter,
 // ambiguous, or names a regular VM; any other error is a generic, retryable
 // vCenter failure (templateLookupFailedError).
-func (p *Provider) lookupTemplate(ctx context.Context, ref string) (*object.VirtualMachine, bool, error) {
+func (p *Provider) lookupTemplate(ctx context.Context, finder *find.Finder, ref string) (*object.VirtualMachine, bool, error) {
 	if err := templateRefError(ref); err != nil {
 		return nil, false, err
 	}
-	candidates, err := p.templateCandidates(ctx, ref)
+	candidates, err := p.templateCandidates(ctx, finder, ref)
 	if err != nil {
 		if s, ok := status.FromError(err); ok && s.Code() == codes.InvalidArgument {
 			p.logger.Warn("Refusing template reference", "template", ref, "error", err)

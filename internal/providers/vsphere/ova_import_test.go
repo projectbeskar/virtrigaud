@@ -155,7 +155,7 @@ func TestImagePrepare_OVAImport_StripsReservedExtraConfig(t *testing.T) {
 	require.NoError(t, err)
 	controlName := "control-import"
 	stock := &importer.Importer{
-		Log: p.ovaImportLog, Client: p.client.Client, Finder: p.finder, Datacenter: placement.datacenter,
+		Log: p.ovaImportLog, Client: p.client.Client, Finder: placement.finder, Datacenter: placement.datacenter,
 		Datastore: placement.datastore, ResourcePool: placement.resourcePool, Folder: placement.folder, Archive: archive,
 	}
 	controlRef, err := stock.Import(ctx, descriptor, importer.Options{Name: &controlName, DiskProvisioning: ovaDiskProvisioningThin})
@@ -171,7 +171,7 @@ func TestImagePrepare_OVAImport_StripsReservedExtraConfig(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, targetName, resp.GetPreparedImageId())
 
-	vm, found, err := p.lookupTemplate(ctx, targetName)
+	vm, found, err := p.lookupTemplate(ctx, testFinder(t, p), targetName)
 	require.NoError(t, err)
 	require.True(t, found)
 	extra := extraConfigOf(t, p, vm.Reference())
@@ -228,7 +228,7 @@ func TestImagePrepare_LegacyOVAImport_MarkedInFlight(t *testing.T) {
 		"an import in flight (not yet a template) is never listed for adoption")
 	requireArtifactStatus(t, imageArtifactRefusal(&types.VirtualMachineConfigInfo{ExtraConfig: rec.extraConfig[0]}))
 
-	vm, found, err := p.lookupTemplate(ctx, targetName)
+	vm, found, err := p.lookupTemplate(ctx, testFinder(t, p), targetName)
 	require.NoError(t, err)
 	require.True(t, found)
 	var tmpl mo.VirtualMachine

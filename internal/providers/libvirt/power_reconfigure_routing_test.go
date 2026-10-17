@@ -49,7 +49,6 @@ const routingDomainUUID = "11111111-2222-4333-8444-555555555555"
 // by ownerTeamA, and returns the clustered provider over them.
 func clusteredOpsFixture(t *testing.T) (*routingFixture, *Provider) {
 	t.Helper()
-	t.Cleanup(func() { _ = os.Remove("/tmp/" + routingDomainUUID + "-sync.xml") })
 	fx := newOpsFixture(t, map[string]map[string]string{
 		"host-a": {},
 		"host-b": {"web": routingDomainXML("web", ownerTeamA)},
@@ -87,8 +86,8 @@ func TestClustered_Power_RoutedToLeasedHostOnTheCheckedDomain(t *testing.T) {
 	uuid := routingDomainUUID
 	sync := []string{
 		"host-b dumpxml " + uuid,
-		"local define /tmp/" + uuid + "-sync.xml",
-		"local rm -f /tmp/" + uuid + "-sync.xml",
+		// The persistent definition is re-defined from stdin: no host file.
+		"host-b define /dev/stdin",
 		// After a start: count the domains depending on its disk (linked
 		// clones) for the Describe warning — read-only, on the same host.
 		"host-b dumpxml " + uuid,

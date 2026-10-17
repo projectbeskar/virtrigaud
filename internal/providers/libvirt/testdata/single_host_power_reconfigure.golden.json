@@ -34,8 +34,7 @@
     "calls": [
       "single start vrcallseq-web",
       "single dumpxml vrcallseq-web",
-      "local define /tmp/vrcallseq-web-sync.xml",
-      "local rm -f /tmp/vrcallseq-web-sync.xml",
+      "single define /dev/stdin",
       "single dumpxml vrcallseq-web",
       "single list --all --uuid"
     ],
@@ -52,7 +51,7 @@
     "calls": [
       "single start vrcallseq-web",
       "single dumpxml vrcallseq-web",
-      "local define /tmp/vrcallseq-web-sync.xml",
+      "single define /dev/stdin",
       "single dumpxml vrcallseq-web",
       "single list --all --uuid"
     ],
@@ -70,8 +69,7 @@
       "single destroy vrcallseq-web",
       "single start vrcallseq-web",
       "single dumpxml vrcallseq-web",
-      "local define /tmp/vrcallseq-web-sync.xml",
-      "local rm -f /tmp/vrcallseq-web-sync.xml",
+      "single define /dev/stdin",
       "single dumpxml vrcallseq-web",
       "single list --all --uuid"
     ],
@@ -82,8 +80,7 @@
       "single destroy vrcallseq-web",
       "single start vrcallseq-web",
       "single dumpxml vrcallseq-web",
-      "local define /tmp/vrcallseq-web-sync.xml",
-      "local rm -f /tmp/vrcallseq-web-sync.xml",
+      "single define /dev/stdin",
       "single dumpxml vrcallseq-web",
       "single list --all --uuid"
     ],
