@@ -26,7 +26,9 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/vmware/govmomi/object"
 	"github.com/vmware/govmomi/property"
+	"github.com/vmware/govmomi/vim25/methods"
 	"github.com/vmware/govmomi/vim25/mo"
+	"github.com/vmware/govmomi/vim25/soap"
 	"github.com/vmware/govmomi/vim25/types"
 	"google.golang.org/grpc/codes"
 
@@ -34,10 +36,10 @@ import (
 	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
 )
 
-// Reconfigure sends each size to its own disk (reconfigure.go): the VMClass
-// size to the primary disk, each spec.disks entry to the additional disk
-// Create attached for it. Before this fix every Reconfigure grew the FIRST
-// disk — the root disk — to spec.disks[0].sizeGiB.
+// Reconfigure sends each spec.disks size to the additional disk Create
+// attached for that entry, and never touches the root disk (reconfigure.go).
+// Before this fix every Reconfigure grew the FIRST disk — the root disk — to
+// spec.disks[0].sizeGiB.
 
 const kibGiB = kibPerGiB // KiB per GiB, for brevity
 
@@ -92,7 +94,8 @@ func capacities(t *testing.T, p *Provider, id string) []int64 {
 
 // TestReconfigure_SpecDisksGrowTheirOwnDisk is the regression test for the
 // wrong-disk resize: spec.disks sizes grow the additional disks Create made
-// for them and never the root disk; the VMClass size grows the root disk only.
+// for them and never the root disk; the VMClass size is not applied by
+// Reconfigure at all (Create applies it).
 func TestReconfigure_SpecDisksGrowTheirOwnDisk(t *testing.T) {
 	p, id, before := multiDiskVM(t)
 	rootKB := before[0]
@@ -103,20 +106,12 @@ func TestReconfigure_SpecDisksGrowTheirOwnDisk(t *testing.T) {
 	assert.Equal(t, []int64{rootKB, 3 * kibGiB, 4 * kibGiB}, capacities(t, p, id),
 		"each spec.disks size goes to its own disk; the root disk is untouched")
 
-	rootGiB := rootKB/kibGiB + 5
 	require.NoError(t, reconfigure(t, p, id, contracts.CreateRequest{
-		Class: contracts.VMClass{DiskDefaults: &contracts.DiskDefaults{SizeGiB: int32(rootGiB)}}, // #nosec G115 -- a simulator disk size
+		Class: contracts.VMClass{DiskDefaults: &contracts.DiskDefaults{SizeGiB: int32(rootKB/kibGiB) + 5}}, // #nosec G115 -- a simulator disk size
 		Disks: []contracts.DiskSpec{{Name: "data", SizeGiB: 3}, {Name: "logs", SizeGiB: 4}},
 	}))
-	assert.Equal(t, []int64{rootGiB * kibGiB, 3 * kibGiB, 4 * kibGiB}, capacities(t, p, id),
-		"the VMClass size grows the root disk only")
-
-	// The VMClass size is a floor, as at Create: a smaller one leaves the root
-	// disk as it is, without an error.
-	require.NoError(t, reconfigure(t, p, id, contracts.CreateRequest{
-		Class: contracts.VMClass{DiskDefaults: &contracts.DiskDefaults{SizeGiB: 1}},
-	}))
-	assert.Equal(t, rootGiB*kibGiB, capacities(t, p, id)[0])
+	assert.Equal(t, []int64{rootKB, 3 * kibGiB, 4 * kibGiB}, capacities(t, p, id),
+		"the VMClass size never grows the root disk on Reconfigure")
 }
 
 // TestReconfigure_SpecDisksMatchedByName: a disk is found by the spec.disks
@@ -140,10 +135,11 @@ func TestReconfigure_SpecDisksMatchedByName(t *testing.T) {
 	assert.Equal(t, []int64{before[0], 6 * kibGiB, 8 * kibGiB}, capacities(t, p, id), "removed entry: the other keeps its disk")
 }
 
-// TestReconfigure_LegacyRecordsMatchedByPosition: a VM whose additional disks
-// were recorded without a name (created before names were recorded) has them
-// matched by position, as Create attached them.
-func TestReconfigure_LegacyRecordsMatchedByPosition(t *testing.T) {
+// TestReconfigure_NamelessRecordsAreLeftAlone: a VM whose additional disks
+// were recorded without a name (created by an earlier release) keeps them as
+// they are: the spec.disks list may have been edited since, so position
+// proves nothing. (main never resized an additional disk either.)
+func TestReconfigure_NamelessRecordsAreLeftAlone(t *testing.T) {
 	p, id, before := multiDiskVM(t)
 	vm := object.NewVirtualMachine(p.client.Client, vmRef(id))
 	task, err := vm.Reconfigure(context.Background(), types.VirtualMachineConfigSpec{ExtraConfig: []types.BaseOptionValue{
@@ -154,9 +150,24 @@ func TestReconfigure_LegacyRecordsMatchedByPosition(t *testing.T) {
 	require.NoError(t, task.Wait(context.Background()))
 
 	require.NoError(t, reconfigure(t, p, id, contracts.CreateRequest{
+		Class: contracts.VMClass{CPU: 3},
 		Disks: []contracts.DiskSpec{{Name: "data", SizeGiB: 3}, {Name: "logs", SizeGiB: 4}},
 	}))
-	assert.Equal(t, []int64{before[0], 3 * kibGiB, 4 * kibGiB}, capacities(t, p, id))
+	assert.Equal(t, before, capacities(t, p, id))
+	var m mo.VirtualMachine
+	require.NoError(t, property.DefaultCollector(p.client.Client).RetrieveOne(context.Background(), vmRef(id),
+		[]string{"config.hardware.numCPU"}, &m))
+	assert.Equal(t, int32(3), m.Config.Hardware.NumCPU, "the CPU change is applied")
+}
+
+// TestReconfigure_RepeatedSpecDiskNameIsLeftAlone: a name used by two
+// spec.disks entries is ambiguous: neither size goes to its disk.
+func TestReconfigure_RepeatedSpecDiskNameIsLeftAlone(t *testing.T) {
+	p, id, before := multiDiskVM(t)
+	require.NoError(t, reconfigure(t, p, id, contracts.CreateRequest{
+		Disks: []contracts.DiskSpec{{Name: "data", SizeGiB: 3}, {Name: "data", SizeGiB: 7}, {Name: "logs", SizeGiB: 4}},
+	}))
+	assert.Equal(t, []int64{before[0], before[1], 4 * kibGiB}, capacities(t, p, id))
 }
 
 // TestReconfigure_UnattachedSpecDiskIsLeftAlone: a spec.disks entry no disk
@@ -202,21 +213,58 @@ func TestReconfigure_SpecDiskShrinkIsRefused(t *testing.T) {
 	assert.Equal(t, []int64{before[0], 4 * kibGiB, 2 * kibGiB}, capacities(t, p, id), "a withheld size never resizes a disk")
 }
 
+// TestReconfigure_TaskFaultStaysOutOfTheBreaker: a ReconfigVM_Task vCenter
+// fails is answered with VM_OPERATION_FAILED and a constant message (the
+// fault, which can name datastores, stays in the provider log), so the
+// manager never counts one VM's failing reconfigure toward the Provider's
+// circuit breaker.
+func TestReconfigure_TaskFaultStaysOutOfTheBreaker(t *testing.T) {
+	p, id, _ := multiDiskVM(t)
+	p.client.RoundTripper = &taskFault{RoundTripper: p.client.RoundTripper}
+	err := reconfigure(t, p, id, contracts.CreateRequest{Disks: []contracts.DiskSpec{{Name: "data", SizeGiB: 3}}})
+	requireCode(t, err, codes.Unknown)
+	assert.Equal(t, []string{contracts.VMOperationFailedReason}, errorReasons(err))
+	assert.Contains(t, err.Error(), reconfigureTaskFailedMessage)
+	assert.NotContains(t, err.Error(), "secret-ds")
+}
+
+// taskFault makes vcsim fail every ReconfigVM_Task that edits a disk AS A
+// TASK (not as a SOAP fault): the edited device key is replaced by one the VM
+// does not have, which vCenter answers with InvalidDeviceSpec.
+type taskFault struct {
+	soap.RoundTripper
+}
+
+func (r *taskFault) RoundTrip(ctx context.Context, req, res soap.HasFault) error {
+	if body, ok := req.(*methods.ReconfigVM_TaskBody); ok && body.Req != nil {
+		for _, dc := range body.Req.Spec.DeviceChange {
+			if s := dc.GetVirtualDeviceConfigSpec(); s.Operation == types.VirtualDeviceConfigSpecOperationEdit {
+				s.Device.GetVirtualDevice().Key = 99999
+			}
+		}
+	}
+	return r.RoundTripper.RoundTrip(ctx, req, res)
+}
+
 // TestMatchSpecDisks pins the matching rules on records alone.
 func TestMatchSpecDisks(t *testing.T) {
 	records := []additionalDiskRecord{
 		{index: 1, file: "a", name: "data"},
 		{index: 2, file: "b"},
-		{index: 3, file: "c", name: "data"},
+		{index: 3, file: "c", name: "logs"},
+		{index: 4, file: "d", name: "logs"},
 	}
-	got := matchSpecDisks([]string{"data", "x", "data", "data"}, records)
-	require.Len(t, got, 4)
-	assert.Equal(t, 1, got[0].index, "first data")
-	assert.Equal(t, 2, got[1].index, "an unnamed record is matched by position")
-	assert.Equal(t, 3, got[2].index, "second data")
-	assert.Nil(t, got[3], "no third data, and position 4 has no record")
-
-	assert.Nil(t, matchSpecDisks([]string{"y"}, records)[0], "position 1 is named for another entry")
+	got := matchSpecDisks([]string{"data", "x", "logs", "y", "y", ""}, records)
+	require.Len(t, got, 6)
+	require.NotNil(t, got[0].rec)
+	assert.Equal(t, 1, got[0].rec.index)
+	assert.Nil(t, got[1].rec, "an unnamed record is never matched by position")
+	assert.Equal(t, specDiskUnrecorded, got[1].why)
+	assert.Nil(t, got[2].rec)
+	assert.Equal(t, specDiskNameAmbiguous, got[2].why, "two disks recorded under one name")
+	assert.Equal(t, specDiskNameRepeated, got[3].why, "one name used by two entries")
+	assert.Equal(t, specDiskNameRepeated, got[4].why)
+	assert.Nil(t, got[5].rec)
 }
 
 // TestAdditionalDiskRecords reads records case-insensitively and drops

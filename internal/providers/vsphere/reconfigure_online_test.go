@@ -18,6 +18,7 @@ package vsphere
 
 import (
 	"context"
+	"log/slog"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -74,34 +75,46 @@ func requireNeedsPowerOff(t *testing.T, err error, why string) {
 	assert.Contains(t, err.Error(), why)
 }
 
+// powerOnVM powers VM id on.
+func powerOnVM(t *testing.T, p *Provider, id string) *object.VirtualMachine {
+	t.Helper()
+	vm := object.NewVirtualMachine(p.client.Client, vmRef(id))
+	task, err := vm.PowerOn(context.Background())
+	require.NoError(t, err)
+	require.NoError(t, task.Wait(context.Background()))
+	return vm
+}
+
 func TestReconfigure_RunningVMWithoutHotAdd_RefusedBeforeAnyChange(t *testing.T) {
-	p, vm := hotPlugVM(t, false, false, false)
-	id := vm.Reference().Value
-	before := diskCapacitiesOf(t, vm)
+	p, id, before := multiDiskVM(t) // no hot-add
+	vm := powerOnVM(t, p, id)
+	cpu0, mem0 := size(t, vm)
 
 	err := reconfigure(t, p, id, contracts.CreateRequest{
-		Class: contracts.VMClass{CPU: 4, MemoryMiB: 4096, DiskDefaults: &contracts.DiskDefaults{SizeGiB: int32(before[0]>>30) + 5}}, // #nosec G115 -- a simulator disk size
+		Class: contracts.VMClass{CPU: cpu0 + 1, MemoryMiB: mem0 + 1024},
+		Disks: []contracts.DiskSpec{{Name: "data", SizeGiB: 3}},
 	})
 	requireNeedsPowerOff(t, err, "CPU hot-add is not enabled on it; memory hot-add is not enabled on it")
 	cpu, mem := size(t, vm)
-	assert.Equal(t, int32(2), cpu)
-	assert.Equal(t, int32(2048), mem)
-	assert.Equal(t, before, diskCapacitiesOf(t, vm), "the disk grow in the same request is not applied either")
+	assert.Equal(t, cpu0, cpu)
+	assert.Equal(t, mem0, mem)
+	assert.Equal(t, before, capacities(t, p, id), "the disk grow in the same request is not applied either")
 
 	// Unchanged CPU/memory: a disk grow alone goes ahead on the running VM.
 	require.NoError(t, reconfigure(t, p, id, contracts.CreateRequest{
-		Class: contracts.VMClass{CPU: 2, MemoryMiB: 2048, DiskDefaults: &contracts.DiskDefaults{SizeGiB: int32(before[0]>>30) + 5}}, // #nosec G115 -- a simulator disk size
+		Class: contracts.VMClass{CPU: cpu0, MemoryMiB: mem0},
+		Disks: []contracts.DiskSpec{{Name: "data", SizeGiB: 3}},
 	}))
-	assert.Equal(t, before[0]+5<<30, diskCapacitiesOf(t, vm)[0])
+	assert.Equal(t, []int64{before[0], 3 * kibGiB, before[2]}, capacities(t, p, id))
 
-	// Powered off, the same change is applied.
+	// Powered off, the CPU/memory change is applied.
 	task, err := vm.PowerOff(context.Background())
 	require.NoError(t, err)
 	require.NoError(t, task.Wait(context.Background()))
-	require.NoError(t, reconfigure(t, p, id, contracts.CreateRequest{Class: contracts.VMClass{CPU: 4, MemoryMiB: 4096}}))
+	require.NoError(t, reconfigure(t, p, id, contracts.CreateRequest{Class: contracts.VMClass{CPU: cpu0 + 1, MemoryMiB: mem0 + 1024}}))
 	cpu, mem = size(t, vm)
-	assert.Equal(t, int32(4), cpu)
-	assert.Equal(t, int32(4096), mem)
+	assert.Equal(t, cpu0+1, cpu)
+	assert.Equal(t, mem0+1024, mem)
 }
 
 func TestReconfigure_RunningVMWithHotAdd_GrowsOnline(t *testing.T) {
@@ -130,13 +143,131 @@ func TestReconfigure_RunningVMWithHotRemove_ShrinksCPUOnline(t *testing.T) {
 	assert.Equal(t, int32(1), cpu)
 }
 
-func TestReconfigure_SuspendedVMIsTreatedAsRunning(t *testing.T) {
-	p, vm := hotPlugVM(t, false, false, false)
+// TestReconfigure_SuspendedVMTakesNoChange: vCenter changes no hardware of a
+// suspended VM, hot-add or not, disks included.
+func TestReconfigure_SuspendedVMTakesNoChange(t *testing.T) {
+	p, vm := hotPlugVM(t, true, true, true)
 	task, err := vm.Suspend(context.Background())
 	require.NoError(t, err)
 	require.NoError(t, task.Wait(context.Background()))
 	requireNeedsPowerOff(t, reconfigure(t, p, vm.Reference().Value, contracts.CreateRequest{Class: contracts.VMClass{CPU: 4}}),
-		"CPU hot-add is not enabled on it")
+		suspendedVMReason)
+
+	p2, id, before := multiDiskVM(t)
+	vm2 := powerOnVM(t, p2, id)
+	task, err = vm2.Suspend(context.Background())
+	require.NoError(t, err)
+	require.NoError(t, task.Wait(context.Background()))
+	requireNeedsPowerOff(t, reconfigure(t, p2, id, contracts.CreateRequest{Disks: []contracts.DiskSpec{{Name: "data", SizeGiB: 3}}}),
+		suspendedVMReason)
+	assert.Equal(t, before, capacities(t, p2, id))
+}
+
+// TestReconfigure_CPUNotMultipleOfCoresPerSocketIsRefused: vCenter refuses a
+// CPU count that is not a multiple of the cores per socket; it is refused
+// first, before anything changes.
+func TestReconfigure_CPUNotMultipleOfCoresPerSocketIsRefused(t *testing.T) {
+	p, vm := simVM(t) // powered off
+	ctx := context.Background()
+	task, err := vm.Reconfigure(ctx, types.VirtualMachineConfigSpec{NumCPUs: 4, NumCoresPerSocket: 2})
+	require.NoError(t, err)
+	require.NoError(t, task.Wait(ctx))
+
+	err = reconfigure(t, p, vm.Reference().Value, contracts.CreateRequest{Class: contracts.VMClass{CPU: 3, MemoryMiB: 4096}})
+	requireCode(t, err, codes.InvalidArgument)
+	assert.Contains(t, err.Error(), "3 vCPUs is not a multiple of the VM's 2 cores per socket")
+	cpu, _ := size(t, vm)
+	assert.Equal(t, int32(4), cpu)
+
+	require.NoError(t, reconfigure(t, p, vm.Reference().Value, contracts.CreateRequest{Class: contracts.VMClass{CPU: 6}}))
+	cpu, _ = size(t, vm)
+	assert.Equal(t, int32(6), cpu)
+}
+
+// diskVM is a synthetic VM read for planReconfigure: one recorded additional
+// disk "data" (2 GiB) with backing, on a SCSI controller with sharedBus.
+func diskVM(power types.VirtualMachinePowerState, backing types.BaseVirtualDeviceBackingInfo, sharedBus types.VirtualSCSISharing) *mo.VirtualMachine {
+	unit := int32(1)
+	return &mo.VirtualMachine{
+		Runtime: types.VirtualMachineRuntimeInfo{PowerState: power},
+		Config: &types.VirtualMachineConfigInfo{
+			Hardware: types.VirtualHardware{
+				NumCPU: 2, NumCoresPerSocket: 1, MemoryMB: 2048,
+				Device: []types.BaseVirtualDevice{
+					&types.ParaVirtualSCSIController{VirtualSCSIController: types.VirtualSCSIController{
+						VirtualController: types.VirtualController{VirtualDevice: types.VirtualDevice{Key: 1000}},
+						SharedBus:         sharedBus,
+					}},
+					&types.VirtualDisk{
+						VirtualDevice: types.VirtualDevice{Key: 2001, ControllerKey: 1000, UnitNumber: &unit, Backing: backing},
+						CapacityInKB:  2 * kibPerGiB,
+					},
+				},
+			},
+			ExtraConfig: []types.BaseOptionValue{
+				&types.OptionValue{Key: additionalDiskExtraConfigKey(1), Value: "[ds] web/web-additional-1.vmdk"},
+				&types.OptionValue{Key: additionalDiskNameKey(1), Value: "data"},
+			},
+		},
+	}
+}
+
+func flatBacking(parent *types.VirtualDiskFlatVer2BackingInfo, sharing string) *types.VirtualDiskFlatVer2BackingInfo {
+	return &types.VirtualDiskFlatVer2BackingInfo{
+		VirtualDeviceFileBackingInfo: types.VirtualDeviceFileBackingInfo{FileName: "[ds] web/web-additional-1.vmdk"},
+		Parent:                       parent,
+		Sharing:                      sharing,
+	}
+}
+
+// TestPlanReconfigure_DiskPreChecks: a disk vCenter cannot extend (delta,
+// physical-mode RDM) is left alone without an error; a disk on a shared SCSI
+// bus or with multi-writer sharing is grown only while the VM is off.
+func TestPlanReconfigure_DiskPreChecks(t *testing.T) {
+	p := &Provider{logger: slog.Default()}
+	grow := &reconfigureDesired{}
+	grow.Disks = append(grow.Disks, struct {
+		Name    string `json:"Name"`
+		SizeGiB int32  `json:"SizeGiB"`
+	}{Name: "data", SizeGiB: 5})
+	on, off := types.VirtualMachinePowerStatePoweredOn, types.VirtualMachinePowerStatePoweredOff
+	noSharing := types.VirtualSCSISharingNoSharing
+
+	spec, err := p.planReconfigure("vm-1", diskVM(on, flatBacking(nil, ""), noSharing), grow)
+	require.NoError(t, err)
+	require.NotNil(t, spec, "a plain disk is grown on a running VM")
+	require.Len(t, spec.DeviceChange, 1)
+
+	for name, b := range map[string]types.BaseVirtualDeviceBackingInfo{
+		"delta (snapshot or linked clone)": flatBacking(&types.VirtualDiskFlatVer2BackingInfo{}, ""),
+		"physical-mode RDM": &types.VirtualDiskRawDiskMappingVer1BackingInfo{
+			VirtualDeviceFileBackingInfo: types.VirtualDeviceFileBackingInfo{FileName: "[ds] web/web-additional-1.vmdk"},
+			CompatibilityMode:            string(types.VirtualDiskCompatibilityModePhysicalMode),
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			spec, err := p.planReconfigure("vm-1", diskVM(off, b, noSharing), grow)
+			require.NoError(t, err, "left alone, not an error")
+			assert.Nil(t, spec, "nothing to change")
+		})
+	}
+
+	for name, vm := range map[string]func(types.VirtualMachinePowerState) *mo.VirtualMachine{
+		"shared SCSI bus": func(s types.VirtualMachinePowerState) *mo.VirtualMachine {
+			return diskVM(s, flatBacking(nil, ""), types.VirtualSCSISharingPhysicalSharing)
+		},
+		"multi-writer": func(s types.VirtualMachinePowerState) *mo.VirtualMachine {
+			return diskVM(s, flatBacking(nil, string(types.VirtualDiskSharingSharingMultiWriter)), noSharing)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := p.planReconfigure("vm-1", vm(on), grow)
+			requireNeedsPowerOff(t, err, "spec.disks[data]")
+			spec, err := p.planReconfigure("vm-1", vm(off), grow)
+			require.NoError(t, err)
+			require.NotNil(t, spec, "grown while the VM is off")
+		})
+	}
 }
 
 // TestOnlineResizeBlockers pins the rules, including the hot-plug memory
