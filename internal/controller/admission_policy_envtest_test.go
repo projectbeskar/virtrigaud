@@ -123,10 +123,17 @@ var _ = Describe("Reserved virtrigaud.io keys admission policy (envtest)", func(
 			ExpectWithOffset(1, err.Error()).To(ContainSubstring("reserved for the VirtRigaud manager"))
 		}
 
-		// The policy takes effect asynchronously.
-		Eventually(func() error {
-			return tenant.Create(ctx, vm("probe", map[string]string{migrationProvenanceAnnotation: ns + "/mig"}, nil))
-		}, "30s", "250ms").Should(HaveOccurred())
+		// The policy takes effect asynchronously: probe with a fresh name each
+		// time until the policy itself refuses it (a probe admitted before
+		// that is simply left behind).
+		Eventually(func() string {
+			probe := vm("", map[string]string{migrationProvenanceAnnotation: ns + "/mig"}, nil)
+			probe.GenerateName = "probe-"
+			if err := tenant.Create(ctx, probe); err != nil {
+				return err.Error()
+			}
+			return ""
+		}, "30s", "250ms").Should(ContainSubstring("reserved for the VirtRigaud manager"))
 
 		By("a tenant cannot create a VirtualMachine carrying a manager-owned key")
 		for _, key := range managerOwnedVMAnnotations {
