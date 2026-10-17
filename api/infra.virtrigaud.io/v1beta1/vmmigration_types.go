@@ -490,6 +490,17 @@ type VMMigrationStatus struct {
 	// +optional
 	StoragePVCName string `json:"storagePVCName,omitempty"`
 
+	// StoragePVCUID is the UID of the migration PVC this migration created
+	// (pvc backend, no spec.storage.pvc.name), taken from the API server's
+	// answer to its create. Only the PVC with this UID is mounted into the
+	// provider pods and deleted with the migration: a PVC of the same name
+	// that anyone else created — even one carrying an ownerReference to this
+	// migration — is refused. Empty for a PVC named in spec.storage.pvc.name.
+	// Written by the controller only.
+	// +optional
+	// +kubebuilder:validation:MaxLength=128
+	StoragePVCUID string `json:"storagePVCUID,omitempty"`
+
 	// Conditions represent the current service state
 	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
