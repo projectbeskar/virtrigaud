@@ -528,8 +528,11 @@ func (p *Provider) GetCapabilities(ctx context.Context, req *providerv1.GetCapab
 		SupportsHonestReconfigure: false,
 		// ImportDisk enforces max_virtual_size_bytes (import_size_limit.go).
 		SupportsImportSizeLimit: true,
-		SupportedDiskTypes:      []string{"thin", "thick", "eager-zeroed"},
-		SupportedNetworkTypes:   []string{"standard", "distributed"},
+		// TransferOwner stamps a VM the manager's adoption takes over,
+		// compare-and-swap on the config changeVersion (transfer_owner.go).
+		SupportsOwnerTransfer: true,
+		SupportedDiskTypes:    []string{"thin", "thick", "eager-zeroed"},
+		SupportedNetworkTypes: []string{"standard", "distributed"},
 		// Disk migration: ExportDisk and ImportDisk are implemented (issue #178).
 		// Previously these were left at the zero value, understating real support
 		// and (once capability gating is enabled, #176) wrongly blocking migration.
