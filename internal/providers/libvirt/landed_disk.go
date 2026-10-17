@@ -19,6 +19,7 @@ package libvirt
 import (
 	"context"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"log"
 	"path/filepath"
@@ -27,7 +28,6 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
-	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
 	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
 )
 
@@ -40,10 +40,14 @@ import (
 // The file is derived from the request's target VM, exactly as ImportDisk
 // names it, in the default pool's directory (the manager never sends a storage
 // hint); a recorded path, when sent, must be exactly that file. It is removed
-// only when it is a regular file — a symbolic link there is refused — and no
-// domain on the host uses it as a disk, backing file or shared directory
-// (pathInUseOnHost, the same fail-closed scan ImportDisk runs before it lands
-// over the name). Nothing else is ever removed.
+// only when it is a regular file — a symbolic link, directory or device there
+// is refused — and no domain on the host uses it as a disk, backing file or
+// shared directory (pathInUseOnHost, the same fail-closed scan ImportDisk runs
+// before it lands over the name; it canonicalizes, so a domain using the disk
+// through a symbolic link alias is seen too). The check, the scan and the rm
+// run under the landing-name lock (landing_lock.go). The scan sees this host's
+// domains only: the pool directory must not be shared with hypervisors this
+// Provider does not manage. Nothing else is ever removed.
 
 const (
 	// landedDiskInvalidMessage refuses a request without a valid target VM
@@ -60,6 +64,12 @@ const (
 	// landedDiskSymlinkMessage refuses a landing name that is a symbolic
 	// link: VirtRigaud never wrote one there, and never removes one.
 	landedDiskSymlinkMessage = "DeleteLandedDisk: the landing name is a symbolic link on the host; it is not removed"
+	// landedDiskNotAFileMessage refuses a landing name that is neither a
+	// regular file nor absent (a directory, a device).
+	landedDiskNotAFileMessage = "DeleteLandedDisk: the landing name is not a regular file on the host; it is not removed"
+	// landedDiskImportInFlightMessage is the retryable answer while an
+	// ImportDisk of the same landing name runs in this provider.
+	landedDiskImportInFlightMessage = "DeleteLandedDisk: an import of this landing disk is in progress; will retry"
 	// landedDiskFailedMessage is the retryable answer of a host step that
 	// failed; the cause goes to the provider log only.
 	landedDiskFailedMessage = "DeleteLandedDisk: the landed disk could not be checked or removed on the host; the " +
@@ -101,20 +111,34 @@ func (s *Server) DeleteLandedDisk(ctx context.Context, req *providerv1.DeleteLan
 	}
 	migrationRef := req.GetMigration().GetNamespace() + "/" + req.GetMigration().GetName()
 
-	h := hostConnRunner{conn: conn}
-	exists, err := checkWriteTarget(ctx, h, importedDiskSubject(volumeName), landed)
+	// Serialised with ImportDisk and Create's in-place attach of the same
+	// landing name (landing_lock.go); an import in flight is answered
+	// retryably, never with NOT_FOUND. Everything below runs under the lock.
+	unlock, err := landingLocks.lockUnlessImporting(ctx, volumeName)
+	if errors.Is(err, errLandingImportInFlight) {
+		return nil, status.Error(codes.Unavailable, landedDiskImportInFlightMessage)
+	}
 	if err != nil {
-		// A symbolic link at the name is refused for good (never followed,
-		// never removed); a failed check is retryable. Both keep the name as
-		// it is.
-		if contracts.IsConflict(err) {
-			return nil, status.Error(codes.InvalidArgument, landedDiskSymlinkMessage)
-		}
+		return nil, landedDiskFailed("wait for other work on the landing disk", err)
+	}
+	defer unlock()
+
+	h := hostConnRunner{conn: conn}
+	kind, err := hostDiskKind(ctx, h, landed)
+	if err != nil {
 		return nil, landedDiskFailed("check the landed disk", err)
 	}
-	if !exists {
+	switch kind {
+	case diskKindAbsent:
 		log.Printf("INFO The landed disk of migration %s is already gone: %s", migrationRef, landed)
 		return &providerv1.DeleteLandedDiskResponse{Outcome: providerv1.LandedDiskDeleteOutcome_LANDED_DISK_DELETE_OUTCOME_NOT_FOUND}, nil
+	case diskKindSymlink:
+		// Never followed, never removed: VirtRigaud never writes a link there.
+		return nil, status.Error(codes.InvalidArgument, landedDiskSymlinkMessage)
+	case diskKindFile:
+	default:
+		// A directory, a device, ...: not a disk VirtRigaud landed.
+		return nil, status.Error(codes.InvalidArgument, landedDiskNotAFileMessage)
 	}
 	inUse, err := pathInUseOnHost(ctx, h, landed)
 	if err != nil {

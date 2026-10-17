@@ -1309,6 +1309,17 @@ func (s *Server) ImportDisk(ctx context.Context, req *providerv1.ImportDiskReque
 	if s.clusteredProvider() {
 		return nil, notRoutedYet("ImportDisk", sliceRoutedImport)
 	}
+	// rc2 R7: the landing name is held for the whole import (check, land,
+	// rename), serialised with Create's in-place attach and DeleteLandedDisk
+	// of the same name (landing_lock.go). A request whose name is invalid is
+	// refused below, by the import path itself.
+	if name, nameErr := importVolumeName(req); nameErr == nil && name != "" {
+		unlock, err := landingLocks.lockForImport(ctx, sanitizeVolumeName(name))
+		if err != nil {
+			return nil, status.Error(codes.Unavailable, "ImportDisk: gave up waiting for other work on the landing disk")
+		}
+		defer unlock()
+	}
 	// ADR-0006: libvirt is a TARGET for the S3 relay import (Slice 1). Accept pvc
 	// and s3; reject nfs/unknown honestly. Only the relay transfer mode is
 	// implemented; an explicit "direct" fails loudly.
