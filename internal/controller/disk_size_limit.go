@@ -131,7 +131,8 @@ const libvirtDefaultPrimaryDiskGiB = 20
 // The class size is checked on every provider type, although only vSphere
 // and libvirt apply it (they grow the image's primary disk to it, never
 // shrink it); the Proxmox provider's Create does not apply
-// Class.DiskDefaults and keeps the template's disk as it is.
+// Class.DiskDefaults and keeps the template's disk as it is (its Reconfigure
+// grows the primary disk to it, which withholdDiskGrowthOverLimit bounds).
 //
 // Not covered: a primary disk that comes out LARGER than what is asked for,
 // because the image (a vSphere or Proxmox template, a libvirt base image) is
@@ -258,11 +259,15 @@ func withholdDiskGrowthOverLimit(req *contracts.CreateRequest, ceiling *resource
 			diskWithheld = true
 		}
 	}
-	// Proxmox applies every spec.disks size to its first disk, scsi0, acting
-	// on the first positive one and refusing one smaller than scsi0 as a
-	// shrink. Withholding one entry would expose the next, smaller one to that
-	// check and turn the Reconfigure into a failure retried on a backoff. So
-	// on a Proxmox Provider no spec.disks size is sent once one is withheld.
+	// A Proxmox provider image before rc2 applied every spec.disks size to
+	// its first disk, scsi0, acting on the first positive one and refusing one
+	// smaller than scsi0 as a shrink. Withholding one entry would expose the
+	// next, smaller one to that check and turn the Reconfigure into a failure
+	// retried on a backoff. So on a Proxmox Provider no spec.disks size is
+	// sent once one is withheld. (The current Proxmox provider sends no
+	// spec.disks size to any disk — its Create attaches none — so this
+	// changes nothing for it; it is kept for a Provider still running an
+	// older image.)
 	if diskWithheld && provider != nil && provider.Spec.Type == infravirtrigaudiov1beta1.ProviderTypeProxmox {
 		for i := range req.Disks {
 			req.Disks[i].SizeGiB = 0
