@@ -235,7 +235,9 @@ func TestDiscoverMigrationStorage_Phases(t *testing.T) {
 		{"importing", func(m *infravirtrigaudiov1beta1.VMMigration) {
 			m.Status.Phase = infravirtrigaudiov1beta1.MigrationPhaseImporting
 		}, true},
-		{"ready", func(m *infravirtrigaudiov1beta1.VMMigration) { m.Status.Phase = infravirtrigaudiov1beta1.MigrationPhaseReady }, false},
+		{"ready", func(m *infravirtrigaudiov1beta1.VMMigration) {
+			m.Status.Phase = infravirtrigaudiov1beta1.MigrationPhaseReady
+		}, false},
 		{"failed, no retry policy", func(m *infravirtrigaudiov1beta1.VMMigration) {
 			m.Status.Phase = infravirtrigaudiov1beta1.MigrationPhaseFailed
 		}, false},
