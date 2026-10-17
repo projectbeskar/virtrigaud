@@ -259,7 +259,8 @@ func TestMigrationSnapshot_RestartAfterCall_SingleHostIsHeldThenConfirmed(t *tes
 	require.True(t, migrationRequested(storedMigration(t, c, m), longOpSnapshot), "the marker survived")
 
 	r2 := restarted(r)
-	rec := r2.Recorder.(*record.FakeRecorder)
+	rec := record.NewFakeRecorder(50)
+	r2.Recorder = rec
 	res, err := r2.handleSnapshottingPhase(context.Background(), storedMigration(t, c, m))
 	require.NoError(t, err)
 	assert.Equal(t, requestMarkerRecheckInterval, res.RequeueAfter)

@@ -124,7 +124,8 @@ func TestVMSnapshotRequest_RestartAfterCall_SingleHostIsHeld(t *testing.T) {
 	faults.results.Store(false)
 
 	r2 := restartedSnapshotReconciler(r)
-	events := r2.Recorder.(*record.FakeRecorder)
+	events := record.NewFakeRecorder(20)
+	r2.Recorder = events
 	res, got := reconcileSnapshotOnce(t, r2, snap)
 	assert.Len(t, rec.creates, 1, "not sent again")
 	assert.Equal(t, requestMarkerRecheckInterval, res.RequeueAfter)

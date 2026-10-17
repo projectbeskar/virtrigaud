@@ -64,9 +64,9 @@ func TestSnapshotUpdateNeedsReconcile(t *testing.T) {
 		"operation-outcome confirmation set (rc2 R6)": {mutate(func(s *infrav1beta1.VMSnapshot) {
 			s.Annotations[operationOutcomeAnnotation] = operationOutcomeNotPerformedPrefix + "2026-10-17T10:00:00Z"
 		}), true},
-		"another annotation":   {mutate(func(s *infrav1beta1.VMSnapshot) { s.Annotations["example.com/note"] = "b" }), false},
-		"a label":              {mutate(func(s *infrav1beta1.VMSnapshot) { s.Labels = map[string]string{"x": "y"} }), false},
-		"status only":          {mutate(func(s *infrav1beta1.VMSnapshot) { s.Status.Message = "held" }), false},
+		"another annotation": {mutate(func(s *infrav1beta1.VMSnapshot) { s.Annotations["example.com/note"] = "b" }), false},
+		"a label":            {mutate(func(s *infrav1beta1.VMSnapshot) { s.Labels = map[string]string{"x": "y"} }), false},
+		"status only":        {mutate(func(s *infrav1beta1.VMSnapshot) { s.Status.Message = "held" }), false},
 	} {
 		t.Run(name, func(t *testing.T) {
 			oldSnap := base
