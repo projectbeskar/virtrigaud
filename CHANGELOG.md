@@ -5,6 +5,38 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-10-17 08:24] - A failed or deleted VMMigration deletes the disk its import landed; vSphere imports leave no import-VM files (rc2 R7)
+**Author:** @wrkode (William Rizzo)
+
+### Added
+- `proto/provider/v1/provider.proto` (bindings regenerated): `DeleteLandedDisk` RPC (`DeleteLandedDiskRequest{migration, target_vm, path}`, `LandedDiskDeleteOutcome` DELETED / NOT_FOUND) and `GetCapabilitiesResponse.supports_landed_disk_delete` (field 27). Additive.
+- `internal/providers/contracts/landed_disk.go` (new: `LandedDiskDeleter`, `LandedDiskDeleteRequest`), `internal/providers/contracts/capabilities.go` (`SupportsLandedDiskDelete`), `internal/transport/grpc/client.go` (`DeleteLandedDisk`, capability mapping), `sdk/provider/capabilities/capabilities.go` (`CapabilityLandedDiskDelete`, `Builder.LandedDiskDelete`).
+- `internal/providers/vsphere/landed_disk.go` (new): `DeleteLandedDisk` derives the landing folder `[<ds>] <ns>_<vm>-migrated` from the target VM (`landingName`); a recorded path must be exactly that VM's landing disk and chooses the datastore, otherwise the plain `DefaultDatastore` is used (a datastore cluster is refused). Under the folder's landing lock it deletes the folder only after a fresh, fail-closed scan shows no VM or template references any file in it (`ensureImportFolderUnused`; `VM_DISK_IN_USE` otherwise). Constant messages; the vCenter fault goes to the provider log.
+- `internal/providers/libvirt/landed_disk.go` (new): `DeleteLandedDisk` removes `<default pool>/<ns>.<vm>-migrated.qcow2` (`importedDiskVolumeName`) with `rm -f` only when it is not a symbolic link and no domain uses it (`pathInUseOnHost`, fail closed); a clustered provider answers `Unimplemented` and does not report the capability.
+- `internal/providers/proxmox/landed_disk.go` (new): `DeleteLandedDisk` removes the target VM's node-side import stages (every format, `isImportStagePath` only) with a fixed, quoted script that reports whether one existed; legacy `/var/tmp` stages are never touched.
+- `internal/providers/mock/provider.go`: `DeleteLandedDisk` answers `Unimplemented` (the mock lands nothing; capability not reported).
+- `internal/controller/vmmigration_landed_disk_cleanup.go` (new): `LandedDiskCleanup` condition. Before `ImportDisk` the controller persists `LandedDiskCleanup=Unknown/LandedDiskMayExist` and `status.storageInfo.importTarget` (every backend, with the target Provider's UID). On terminal failure (`cleanupPolicy: Always`) and on deletion (`OnSuccess`, `Always`) it sends `DeleteLandedDisk` to the Provider with that UID for the recorded VM and `status.diskInfo.targetPath` — unless the migration is `Ready`, the recorded `VirtualMachine` is the migration's own target or names an imported disk, or the provider reports the disk in use (`LandedDiskInUse`), or another in-flight `VMMigration` targets the same VM (`LandedDiskHandedOver`). `Never` records `LandedDiskRetained`. A retryable failure is held (`LandedDiskCleanupPending`, blocked-VM backoff, one Warning; a deleting VMMigration keeps its finalizer; `virtrigaud.io/force-delete=true` releases it); an older provider image, a gone or replaced Provider, a namespace grant that was withdrawn, or a refused request records `LandedDiskLeftBehind` with one Warning. Constant messages only; status written only on change.
+- `api/infra.virtrigaud.io/v1beta1/vmmigration_types.go` (CRDs regenerated): optional `MigrationImportTarget.providerUID`; `importTarget` is now recorded for every backend.
+- Tests: `internal/transport/grpc/client_landed_disk_test.go`; `internal/providers/vsphere/landed_disk_test.go` (vcsim: unused folder deleted with or without the recorded path, another namespace's landing untouched, a disk a VM uses kept with `VM_DISK_IN_USE`, scan failure fails closed, foreign/legacy/other paths and bad identities refused, datastore cluster refused, transient import-VM stubs removed while the landed `.vmdk` stays); `internal/providers/libvirt/landed_disk_test.go` (recorded host runner); `internal/providers/proxmox/landed_disk_test.go` (scripted SSH node, and the delete script run against real files); `internal/providers/mock/staged_disk_test.go`; `internal/controller/vmmigration_landed_disk_cleanup_test.go` (decision table, marker before the RPC, terminal failure per policy, deletion, kept / handed over / left behind, hold, force-delete, Provider hold) and `internal/controller/vmmigration_landed_disk_cleanup_envtest_test.go` (envtest: deleted once with no second RPC, kept while the target VM exists, older provider left behind, deletion held then released).
+
+### Fixed
+- `internal/providers/vsphere/s3import.go`: after the NFC import unregisters its transient import VM, the VM's own files in the landing folder (`<id>.vmx`, `.vmsd`, `.hlog`, `.nvram`, `.vmxf` and the non-disk files of its layout) are deleted with `DeleteDatastoreFile` — only when the VM's `.vmx` is exactly `[<ds>] <id>/<id>.vmx`, never a `.vmdk`, fail-soft (logged at `WARN`, never fails the import). Applies to the `s3` and `nfs` import paths.
+
+### Changed
+- `internal/controller/vmmigration_controller.go`: the Importing phase records the landed-disk marker with the import target; `handleDeletion` runs the landed-disk release after the staged-disk release. `internal/controller/vmmigration_snapshot_cleanup.go`: `handleTerminalFailure` runs the landed-disk cleanup. `internal/controller/provider_inuse.go`: a `Failed` migration whose landed disk will still be deleted holds its target Provider (ADR-0010).
+- `internal/providers/{vsphere,libvirt}/server.go`, `internal/providers/proxmox/capabilities.go`: report `supports_landed_disk_delete` (libvirt single-host only).
+- `internal/controller/vmmigration_update_status_test.go`: the lost-result test fails only the result write (the marker is written before the import).
+- `docs/upgrading.md` (behaviour row; "Leftovers from earlier releases": landed disks and vSphere import-VM files, which no longer accumulate from rc2 on; Proxmox stage note), `docs/adr/0011-migration-staging-cleanup.md` (Addendum A), `docs/adr/README.md`.
+
+### Why
+rc1 lab finding V3 (a known limitation): a migration that failed, or was deleted, after `ImportDisk` landed its disk left that disk (often many GB) on the target forever, and every vSphere import left ~1.4 KB of transient import-VM files in its landing folder. Not validated on real hypervisors yet (vcsim, recorded host runners, envtest).
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-10-17 07:55] - ADR-0012 (Accepted): retiring the Proxmox legacy unstamped-name rule (rc2 R14)
 **Author:** @wrkode (William Rizzo)
 
