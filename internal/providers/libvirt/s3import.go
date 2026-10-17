@@ -25,6 +25,8 @@ import (
 	"strings"
 	"time"
 
+	"google.golang.org/grpc/codes"
+
 	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
 
 	"github.com/projectbeskar/virtrigaud/internal/providers/importlimit"
@@ -57,6 +59,18 @@ import (
 // Crash-resume of an interrupted transfer is OUT of scope for Slice 1: a failure
 // retries the whole import. This is the documented follow-up.
 func (s *Server) importDiskFromS3(ctx context.Context, req *providerv1.ImportDiskRequest) (*providerv1.ImportDiskResponse, error) {
+	resp, err := s.importDiskFromS3Steps(ctx, req)
+	if err != nil {
+		return nil, singleHostImportFailure(ctx, err)
+	}
+	return resp, nil
+}
+
+// importDiskFromS3Steps is the S3 import. Every step before the rename onto
+// the landing name (wd.publish) works in a private directory that is removed
+// whatever happens, so its failure landed nothing — that is the import's one
+// publishing step, tagged stagePublish; singleHostImportFailure reads the tag.
+func (s *Server) importDiskFromS3Steps(ctx context.Context, req *providerv1.ImportDiskRequest) (*providerv1.ImportDiskResponse, error) {
 	if s.provider == nil {
 		return nil, fmt.Errorf("libvirt provider not initialized")
 	}
@@ -68,14 +82,15 @@ func (s *Server) importDiskFromS3(ctx context.Context, req *providerv1.ImportDis
 	if !strings.Contains(conn.uri(), "ssh://") {
 		// Relay-to-host conversion needs an SSH transport to stream into the
 		// host's qemu-img. A local connection is not the Slice 1 target shape.
-		return nil, fmt.Errorf("s3 import requires an ssh:// libvirt transport (host-side qemu-img conversion); got %q", conn.uri())
+		return nil, refusal(codes.FailedPrecondition, wireImportRefused,
+			fmt.Errorf("s3 import requires an ssh:// libvirt transport (host-side qemu-img conversion); got %q", conn.uri()))
 	}
 
 	// Build the S3 client (pod is the S3 client). Options come from
 	// storage_options_json; credentials from the credentials map. Never logged.
 	storageConfig, err := migration.S3StorageConfigFromRequest(req.StorageOptionsJson, req.Credentials)
 	if err != nil {
-		return nil, fmt.Errorf("invalid s3 import configuration: %w", err)
+		return nil, atStage(stageInvalid, fmt.Errorf("invalid s3 import configuration: %w", err))
 	}
 	s3client, err := storage.NewStorage(storageConfig)
 	if err != nil {
@@ -244,7 +259,7 @@ func (s *Server) importDiskFromS3(ctx context.Context, req *providerv1.ImportDis
 		return nil, fmt.Errorf("qemu-img check failed on converted qcow2 %s: %w%s", targetPath, err, qemuImgStderr(res))
 	}
 	if err := wd.publish(ctx, volumeName+qcow2Ext, targetPath); err != nil {
-		return nil, fmt.Errorf("s3 import: %w", err)
+		return nil, atStage(stagePublish, fmt.Errorf("s3 import: %w", err))
 	}
 
 	// Make libvirt aware of the new volume.

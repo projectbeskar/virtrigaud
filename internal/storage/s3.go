@@ -20,6 +20,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -359,3 +360,25 @@ func (s *S3Storage) ValidateURL(rawURL string) error {
 // Close releases the backend. The minio client holds no long-lived connections
 // that require explicit teardown.
 func (s *S3Storage) Close() error { return nil }
+
+// IsServiceRejection reports whether err is, or wraps, an S3 service answer
+// with an HTTP 4xx status (AccessDenied, NoSuchBucket, InvalidAccessKeyId,
+// ...): the service refused the request and did not apply it. A 5xx answer, a
+// 200 whose body carries an error, and a connection that failed are not: the
+// service may have applied the request (an upload's completing call, for
+// one) before the answer was lost.
+func IsServiceRejection(err error) bool {
+	var resp minio.ErrorResponse
+	if !errors.As(err, &resp) {
+		return false
+	}
+	return resp.StatusCode >= 400 && resp.StatusCode < 500
+}
+
+// IsInvalidConfig reports whether err is, or wraps, a StorageError of type
+// ErrorTypeInvalidConfig: the request was refused locally, before any call to
+// the backend.
+func IsInvalidConfig(err error) bool {
+	var se *StorageError
+	return errors.As(err, &se) && se.Type == ErrorTypeInvalidConfig
+}

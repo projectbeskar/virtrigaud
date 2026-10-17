@@ -25,6 +25,8 @@ import (
 	"strings"
 	"time"
 
+	"google.golang.org/grpc/codes"
+
 	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
 
 	"github.com/projectbeskar/virtrigaud/internal/storage"
@@ -65,30 +67,69 @@ import (
 // whole export. This is the documented follow-up.
 func (s *Server) exportDiskToS3(ctx context.Context, req *providerv1.ExportDiskRequest) (*providerv1.ExportDiskResponse, error) {
 	if s.provider == nil {
-		return nil, fmt.Errorf("libvirt provider not initialized")
+		return nil, nothingDone(wireExportNotPerformed, fmt.Errorf("libvirt provider not initialized"))
 	}
 	conn, err := s.provider.conn(ctx)
 	if err != nil {
-		return nil, err
+		return nil, nothingDone(wireExportNotPerformed, err)
 	}
 
 	if !strings.Contains(conn.uri(), "ssh://") {
 		// The flatten + stream-out runs on the libvirt host over SSH. A local
 		// connection is not the Slice 2 source shape.
-		return nil, fmt.Errorf("s3 export requires an ssh:// libvirt transport (host-side qemu-img flatten + stream); got %q", conn.uri())
+		return nil, refusal(codes.FailedPrecondition, wireExportRefused,
+			fmt.Errorf("s3 export requires an ssh:// libvirt transport (host-side qemu-img flatten + stream); got %q", conn.uri()))
 	}
 
 	// The source is one of the domain's own disks, read in the format its
 	// definition names (exportSourceOn).
 	vp, err := virshOf(conn)
 	if err != nil {
-		return nil, err
+		return nil, nothingDone(wireExportNotPerformed, err)
 	}
 	srcPath, srcFormat, err := exportSourceOn(ctx, vp, byName(req.VmId), req.DiskId)
 	if err != nil {
-		return nil, fmt.Errorf("failed to resolve the source disk: %w", err)
+		return nil, nothingDone(wireExportNotPerformed, fmt.Errorf("failed to resolve the source disk: %w", err))
 	}
-	return exportFlattenToS3(ctx, conn, req, req.VmId, srcPath, srcFormat, nil)
+	resp, err := exportFlattenToS3(ctx, conn, req, req.VmId, srcPath, srcFormat, nil)
+	if err != nil {
+		return nil, singleHostExportFailure(ctx, err)
+	}
+	return resp, nil
+}
+
+// singleHostExportFailure answers a failed single-host s3 or nfs export with
+// the outcome the provider can prove (call_outcome.go). exportFlattenToS3 and
+// exportConvertToNFS tag the failures they can prove:
+//
+//   - stageInvalid: the request's storage configuration is unusable —
+//     InvalidArgument.
+//   - stageBefore: nothing was published. The s3 export flattens into a
+//     private directory on the host and publishes only when the upload
+//     completes; the nfs export's checks (the source chain, the destination's
+//     identity) only read. A typed refusal stays, any other failure is "not
+//     performed", whatever state the connection is in.
+//   - stageCommand: the nfs export's in-place convert. "Failed, nothing
+//     exported" only when the host command ended on its own with an exit
+//     status (it no longer writes); otherwise the untyped error, because a
+//     command that outlives a cancelled call may still be writing.
+//
+// An untagged failure — the upload's result was lost, or the S3 service may
+// have completed it — is returned unchanged: unknown.
+func singleHostExportFailure(ctx context.Context, err error) error {
+	stage, _, ok := stageOf(err)
+	if !ok {
+		return err
+	}
+	switch stage {
+	case stageInvalid:
+		return refusal(codes.InvalidArgument, wireExportRefused, err)
+	case stageBefore:
+		return nothingDone(wireExportNotPerformed, err)
+	case stageCommand:
+		return endedFailure(ctx, wireExportFailed, err)
+	}
+	return err
 }
 
 // exportFlattenToS3 is the S3 export core, run on conn — the single host's
@@ -104,11 +145,11 @@ func exportFlattenToS3(ctx context.Context, conn libvirtConn, req *providerv1.Ex
 	// storage_options_json; credentials from the credentials map. Never logged.
 	storageConfig, err := migration.S3StorageConfigFromRequest(req.StorageOptionsJson, req.Credentials)
 	if err != nil {
-		return nil, fmt.Errorf("invalid s3 export configuration: %w", err)
+		return nil, atStage(stageInvalid, fmt.Errorf("invalid s3 export configuration: %w", err))
 	}
 	s3client, err := storage.NewStorage(storageConfig)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create s3 client: %w", err)
+		return nil, atStage(stageBefore, fmt.Errorf("failed to create s3 client: %w", err))
 	}
 	defer s3client.Close()
 
@@ -120,7 +161,10 @@ func exportFlattenToS3(ctx context.Context, conn libvirtConn, req *providerv1.Ex
 	// --- FLATTEN (ADR D4) ---
 	hostTmp, cleanup, err := flattenForExport(ctx, hostConnRunner{conn: conn}, srcPath, srcFormat, vmID, guard)
 	if err != nil {
-		return nil, err
+		// Everything the flatten writes is in a private directory that is
+		// removed, and the upload below is the only publishing step: a failure
+		// here published nothing, whatever state the host connection is in.
+		return nil, atStage(stageBefore, err)
 	}
 	defer cleanup()
 
@@ -137,17 +181,22 @@ func exportFlattenToS3(ctx context.Context, conn libvirtConn, req *providerv1.Ex
 	// io.ErrClosedPipe instead of leaving it blocked forever.
 	rc, err := conn.Stream(ctx, "cat", hostTmp)
 	if err != nil {
-		return nil, fmt.Errorf("failed to start host-side stream (cat %s): %w", hostTmp, err)
+		return nil, atStage(stageBefore, fmt.Errorf("failed to start host-side stream (cat %s): %w", hostTmp, err))
 	}
 	defer func() { _ = rc.Close() }()
 
+	tracked := &errTrackingReader{r: rc}
 	ul, err := s3client.UploadStream(ctx, storage.StreamUploadRequest{
 		DestinationURL: req.DestinationUrl,
-		Reader:         rc,
+		Reader:         tracked,
 		ContentLength:  -1, // size unknown; minio streaming auto-multipart
 	})
 	if err != nil {
-		return nil, fmt.Errorf("s3 upload failed during stream: %w", err)
+		err = fmt.Errorf("s3 upload failed during stream: %w", err)
+		if uploadNotPublished(tracked.failure(), err) {
+			return nil, atStage(stageBefore, err)
+		}
+		return nil, err
 	}
 
 	log.Printf("INFO Disk export to S3 completed: export_id=%s bytes=%d checksum=%s",

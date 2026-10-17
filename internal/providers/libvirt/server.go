@@ -509,13 +509,19 @@ func (s *Server) SnapshotCreate(ctx context.Context, req *providerv1.SnapshotCre
 	// Obtain the per-host connection through the seam (ADR-0008 PR 2) instead of
 	// type-asserting the concrete *Provider.
 	if s.provider == nil {
-		return nil, fmt.Errorf("libvirt provider not initialized")
+		return nil, nothingDone(wireSnapshotNotPerformed, fmt.Errorf("libvirt provider not initialized"))
 	}
 	conn, err := s.provider.conn(ctx)
 	if err != nil {
-		return nil, err
+		return nil, nothingDone(wireSnapshotNotPerformed, err)
 	}
-	return snapshotCreateOn(ctx, conn, req.VmId, req)
+	// A single host's failures are answered with the outcome the provider
+	// can prove (call_outcome.go, singleHostSnapshotFailure).
+	resp, err := snapshotCreateWith(ctx, conn, req.VmId, req, snapshotCreateOptions{refuseExisting: true})
+	if err != nil {
+		return nil, singleHostSnapshotFailure(ctx, conn, req.VmId, err)
+	}
+	return resp, nil
 }
 
 // libvirtJobBusyMarker is libvirt's error text for a domain job that could not
@@ -560,6 +566,32 @@ func snapshotVMRef(vmID, hostID string, owner *providerv1.ObjectIdentity) contra
 // host's leased connection and the owner-checked domain's UUID. The virsh
 // command sequence is the historical one, unchanged.
 func snapshotCreateOn(ctx context.Context, conn libvirtConn, domain string, req *providerv1.SnapshotCreateRequest) (*providerv1.SnapshotCreateResponse, error) {
+	return snapshotCreateWith(ctx, conn, domain, req, snapshotCreateOptions{})
+}
+
+// snapshotCreateOptions shapes snapshotCreateWith.
+type snapshotCreateOptions struct {
+	// refuseExisting makes the core read the domain's snapshot names before it
+	// creates anything and refuse a name that is already taken
+	// (errSnapshotExists), so that a snapshot found after a failed create is
+	// known to be this call's. Only the single-host RPC sets it (a clustered
+	// create finds an earlier attempt's snapshot by its request token
+	// instead, so its command sequence stays as it was).
+	refuseExisting bool
+}
+
+// errSnapshotExists is the refusal of a snapshot create whose name is already
+// taken on the domain (snapshotCreateOptions.refuseExisting). Nothing was
+// created.
+var errSnapshotExists = stderrors.New("a snapshot with this name already exists on the domain")
+
+// snapshotCreateWith is snapshotCreateOn with options. Every failure it
+// returns is tagged with the stage it happened in (stageError), which only the
+// single-host RPC reads (singleHostSnapshotFailure): stageBefore for the reads
+// and checks, stageCommand (subject: the snapshot's name) for the one
+// snapshot-create-as that changes the domain.
+func snapshotCreateWith(ctx context.Context, conn libvirtConn, domain string, req *providerv1.SnapshotCreateRequest,
+	opts snapshotCreateOptions) (*providerv1.SnapshotCreateResponse, error) {
 	// Generate snapshot name if not provided
 	snapshotName := req.NameHint
 	if snapshotName == "" {
@@ -578,7 +610,7 @@ func snapshotCreateOn(ctx context.Context, conn libvirtConn, domain string, req 
 	// Check if domain exists and get its state
 	domainState, err := conn.getDomainState(ctx, domain)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get domain state: %w", err)
+		return nil, atStage(stageBefore, fmt.Errorf("failed to get domain state: %w", err))
 	}
 
 	log.Printf("INFO Domain %s is in state: %s", domain, domainState)
@@ -586,7 +618,17 @@ func snapshotCreateOn(ctx context.Context, conn libvirtConn, domain string, req 
 	// No snapshot of a VM whose disk another domain depends on (a linked
 	// clone): see the disk dependency guard (disk_dependents.go).
 	if err := refuseIfDiskHasDependents(ctx, hostConnRunner{conn: conn}, domain, guardOpSnapshotCreate); err != nil {
-		return nil, fmt.Errorf("failed to create snapshot: %w", err)
+		return nil, atStage(stageBefore, fmt.Errorf("failed to create snapshot: %w", err))
+	}
+
+	if opts.refuseExisting {
+		exists, err := conn.snapshotExists(ctx, domain, snapshotName)
+		if err != nil {
+			return nil, atStage(stageBefore, fmt.Errorf("failed to create snapshot: %w", err))
+		}
+		if exists {
+			return nil, atStage(stageBefore, fmt.Errorf("failed to create snapshot %q: %w", snapshotName, errSnapshotExists))
+		}
 	}
 
 	// Build the virsh snapshot-create-as arguments. A memory-inclusive (full
@@ -610,7 +652,7 @@ func snapshotCreateOn(ctx context.Context, conn libvirtConn, domain string, req 
 	// Execute snapshot creation (control-plane exec through the seam)
 	result, err := conn.Virsh(ctx, args...)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create snapshot: %w", err)
+		return nil, atStageOf(stageCommand, snapshotName, fmt.Errorf("failed to create snapshot: %w", err))
 	}
 
 	log.Printf("INFO Snapshot created successfully: %s\nOutput: %s", snapshotName, result.Stdout)
@@ -620,6 +662,53 @@ func snapshotCreateOn(ctx context.Context, conn libvirtConn, domain string, req 
 		SnapshotId: snapshotName,
 		// No task reference - libvirt snapshots are synchronous
 	}, nil
+}
+
+// singleHostSnapshotFailure answers a failed single-host SnapshotCreate with
+// the outcome the provider can prove (call_outcome.go):
+//
+//   - before the create (stageBefore: the reads, the dependency check, the
+//     name check): nothing was done. A domain that does not exist is NotFound,
+//     a name already taken is AlreadyExists, a typed refusal of the dependency
+//     check stays, any other failure is "not performed".
+//   - the create (stageCommand): `snapshot-create-as --atomic` rolls a failed
+//     snapshot back. The answer is "not created" only when virsh ended on its
+//     own with an exit status AND the domain's snapshot names, read again,
+//     prove the snapshot is absent; a domain that vanished is NotFound. A
+//     dropped connection, a signal, an expired request, a snapshot that
+//     exists, or a list that cannot be read leave the untyped error: the
+//     snapshot may have been (or still be being) taken.
+func singleHostSnapshotFailure(ctx context.Context, conn libvirtConn, domain string, err error) error {
+	stage, subject, ok := stageOf(err)
+	if !ok {
+		return err
+	}
+	switch stage {
+	case stageBefore:
+		switch {
+		case stderrors.Is(err, errSnapshotExists):
+			return refusal(codes.AlreadyExists, wireSnapshotExists, err)
+		case virshNoDomain(err):
+			return refusal(codes.NotFound, wireDomainNotFound, err)
+		}
+		return nothingDone(wireSnapshotNotPerformed, err)
+	case stageCommand:
+		if !hostCommandEnded(ctx, err) {
+			log.Printf("WARN libvirt snapshot create outcome unknown: %v", err)
+			return err
+		}
+		if virshNoDomain(err) {
+			return refusal(codes.NotFound, wireDomainNotFound, err)
+		}
+		exists, listErr := conn.snapshotExists(ctx, domain, subject)
+		if listErr != nil || exists {
+			log.Printf("WARN libvirt snapshot create outcome unknown: snapshot %q exists=%t after: %v (list error: %v)",
+				subject, exists, err, listErr)
+			return err
+		}
+		return notPerformed(wireSnapshotNotCreated, err)
+	}
+	return err
 }
 
 // buildSnapshotCreateArgs builds the `virsh snapshot-create-as` arguments and
@@ -1240,7 +1329,7 @@ func (s *Server) ExportDisk(ctx context.Context, req *providerv1.ExportDiskReque
 	}
 
 	if s.provider == nil {
-		return nil, fmt.Errorf("provider not initialized")
+		return nil, nothingDone(wireExportNotPerformed, fmt.Errorf("provider not initialized"))
 	}
 
 	resp, err := s.provider.ExportDisk(ctx, contracts.ExportDiskRequest{
@@ -1253,7 +1342,13 @@ func (s *Server) ExportDisk(ctx context.Context, req *providerv1.ExportDiskReque
 		Credentials:    req.Credentials,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("failed to export disk: %w", err)
+		// The pvc export runs in the provider's own process: the disk is read
+		// from the host, converted by a local qemu-img (killed with the call)
+		// into the pod's /tmp (removed), and copied by an in-process write
+		// that has finished when the call returns. Whatever failed, nothing
+		// is still writing, and the partial file a failed copy leaves on the
+		// migration volume is never read: the next export truncates it.
+		return nil, nothingDone(wirePVCExportFailed, fmt.Errorf("failed to export disk: %w", err))
 	}
 
 	result := &providerv1.ExportDiskResponse{
@@ -1349,12 +1444,18 @@ func (s *Server) ImportDisk(ctx context.Context, req *providerv1.ImportDiskReque
 
 	// Obtain the per-host connection through the seam (ADR-0008 PR 2) instead of
 	// type-asserting the concrete *Provider.
+	//
+	// Until copyDiskToRemote has renamed the disk onto its landing name, a
+	// failure landed nothing (singleHostImportFailure, copyDiskToRemote): it is
+	// answered as such, so the manager does not hold the migration. From the
+	// rename on, the disk is on the host and a failure keeps its historical
+	// answer.
 	if s.provider == nil {
-		return nil, fmt.Errorf("libvirt provider not initialized")
+		return nil, nothingDone(wireImportNotPerformed, fmt.Errorf("libvirt provider not initialized"))
 	}
 	conn, err := s.provider.conn(ctx)
 	if err != nil {
-		return nil, err
+		return nil, nothingDone(wireImportNotPerformed, err)
 	}
 
 	// Parse source URL (expecting pvc:// or file:// URL)
@@ -1372,20 +1473,22 @@ func (s *Server) ImportDisk(ctx context.Context, req *providerv1.ImportDiskReque
 		sourcePath = strings.TrimPrefix(sourceURL, "file://")
 		log.Printf("INFO Using direct file path: %s", sourcePath)
 	} else {
-		return nil, fmt.Errorf("unsupported source URL scheme (expected pvc:// or file://): %s", sourceURL)
+		return nil, refusal(codes.InvalidArgument, wireImportRefused,
+			fmt.Errorf("unsupported source URL scheme (expected pvc:// or file://): %s", sourceURL))
 	}
 
 	log.Printf("INFO Importing disk from path: %s", sourcePath)
 
 	// Validate source file exists locally
 	if _, err := os.Stat(sourcePath); err != nil {
-		return nil, fmt.Errorf("source disk file not found locally: %s (error: %w)", sourcePath, err)
+		return nil, refusal(codes.NotFound, wireStagedDiskMissing,
+			fmt.Errorf("source disk file not found locally: %s (error: %w)", sourcePath, err))
 	}
 
 	// Generate target volume name from TargetName or source filename
 	volumeName, err := importVolumeName(req)
 	if err != nil {
-		return nil, err
+		return nil, nothingDone(wireImportNotPerformed, err)
 	}
 	if volumeName == "" {
 		// Extract filename without extension
@@ -1406,12 +1509,12 @@ func (s *Server) ImportDisk(ctx context.Context, req *providerv1.ImportDiskReque
 		// over a disk another domain uses.
 		if err := ensureDiskTargetFree(ctx, hostConnRunner{conn: conn}, importedDiskSubject(volumeName),
 			filepath.Join(DefaultImageDir, volumeName+qcow2Ext)); err != nil {
-			return nil, err
+			return nil, nothingDone(wireImportNotPerformed, err)
 		}
 		log.Printf("INFO Copying disk file to remote libvirt host...")
 		remotePath, err := conn.copyDiskToRemote(ctx, sourcePath, volumeName)
 		if err != nil {
-			return nil, fmt.Errorf("failed to copy disk to remote host: %w", err)
+			return nil, singleHostImportFailure(ctx, fmt.Errorf("failed to copy disk to remote host: %w", err))
 		}
 		finalSourcePath = remotePath
 		log.Printf("INFO Disk copied to remote host: %s", finalSourcePath)
@@ -1422,7 +1525,7 @@ func (s *Server) ImportDisk(ctx context.Context, req *providerv1.ImportDiskReque
 		// check below and the import that reads it again.
 		localCopy, cleanup, err := privateLocalImportCopy(sourcePath)
 		if err != nil {
-			return nil, fmt.Errorf("copy the staged disk to a private location: %w", err)
+			return nil, nothingDone(wireImportNotPerformed, fmt.Errorf("copy the staged disk to a private location: %w", err))
 		}
 		defer cleanup()
 		finalSourcePath = localCopy
