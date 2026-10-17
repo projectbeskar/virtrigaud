@@ -8,8 +8,15 @@ object's status, the result is lost. In v0.4.0-rc1 the new leader then sent the 
 again. Depending on the provider, that could take a second snapshot of the live
 source VM or land a second disk.
 
+The same holds for a call that **fails without a definite answer**: it ran past its
+deadline, or the connection dropped after the request was written (a provider pod
+restarted mid-call). The provider may still be completing it — a command running on
+the hypervisor host outlives a cancelled call. In rc1 such a failure failed the
+migration attempt, and the retry policy sent the call again a few minutes later,
+possibly while the first one was still writing.
+
 Since rc2 (R6), the manager writes a durable record before each of these calls and
-uses it to decide what to do when a result is missing.
+uses it to decide what to do when a result is missing or the outcome is unknown.
 
 ## The marker
 
@@ -27,7 +34,18 @@ with `status: "True"`:
   `resourceVersion` the reconcile read. If that write fails for any reason,
   including a conflict with another writer, **nothing is sent**.
 - **Removed with the outcome.** The call's result, or a definite failure from the
-  provider, is written with the marker removed, in the same status write.
+  provider, is written with the marker removed, in the same status write. A
+  definite failure is one that proves the outcome:
+  - nothing was done: the request never reached the provider, its host was
+    unreachable, or it answered that it did not perform the call;
+  - the provider refused the call before doing anything: an invalid request, a VM
+    not found or not owned, a name conflict, a disk-size refusal.
+
+  Every other failure — a deadline, `Unavailable` after the request was written, an
+  error the provider did not classify (a single-host libvirt provider sends most of
+  its failures that way) — **keeps the marker** and is handled like a lost result,
+  below. The object is never failed for it. Through a clustered Provider, a
+  `SnapshotCreate` answered "retry" is handled the same way.
 - **Attempt id.** The marker's `lastTransitionTime` (RFC 3339) identifies the
   attempt. Every new send writes a new, later one.
 
@@ -35,11 +53,23 @@ A marker with no recorded result therefore means the call may have run, but its
 outcome is unknown. The manager never treats a stale informer cache as that case:
 it first re-reads the object from the API server.
 
+- **Automatic re-sends are capped.** Each one is counted in the marker's message
+  (`(automatic re-send <n>)`):
+  - a routed `SnapshotCreate` is re-sent at most 10 times (about ten minutes);
+  - an `ExportDisk` or `ImportDisk` at most 3 times.
+
+  After that, the object is held for an operator with a constant message. An
+  operator's confirmation starts the count again.
+- **Undecided cases are re-checked quietly.** When the manager cannot tell yet
+  whether a call may be sent again — the source VM, a Provider or its capabilities
+  cannot be read — it re-checks every minute. It writes no hold and records no
+  event.
+
 ## What happens to a call whose outcome is unknown
 
 | Call | Sent again when | Otherwise |
 |---|---|---|
-| `SnapshotCreate` (`VMMigration` and `VMSnapshot`) | The VM is on a **clustered** Provider (`topology: cluster`). The routed create records the request token (the `VMSnapshot` UID, or the migration UID and attempt) with the snapshot, and a re-send returns that snapshot. For a `VMMigration`, the marker must belong to the current attempt. Re-sends are at least one minute apart. | Held: `Ready=False`, reason `SnapshotOutcomeUnknown` |
+| `SnapshotCreate` (`VMMigration` and `VMSnapshot`) | The VM is on a **clustered** Provider (`topology: cluster`). The routed create records the request token (the `VMSnapshot` UID, or the migration UID and attempt) with the snapshot. A re-send returns that snapshot, but only once no job runs on the domain. libvirt lists a snapshot as soon as its job starts, before memory and disks are written, so until then the answer is "retry". For a `VMMigration`, the marker must belong to the current attempt. Re-sends are at least one minute apart. | Held: `Ready=False`, reason `SnapshotOutcomeUnknown` |
 | `ExportDisk` | The source Provider lists the migration's staging backend in the capability `resend_safe_export_backends`, **and** 35 minutes have passed since the marker. The manager's deadline on an export is 30 minutes, so the earlier call has ended by then. Until then, the migration waits with `Ready=False/ExportOutcomeUnknown` and a message saying it will be re-sent. | Held: `Ready=False/ExportOutcomeUnknown` |
 | `ImportDisk` | The target Provider lists the backend in `resend_safe_import_backends`, and 35 minutes have passed. | Held: `Ready=False/ImportOutcomeUnknown` |
 
@@ -66,10 +96,12 @@ the backends where this is proven:
 | vSphere | `s3`, `nfs` | `s3`, `nfs` |
 | libvirt, single host | `s3` | `pvc`, `s3`, `nfs` |
 | libvirt, clustered | `s3`, `nfs` | — (import is not served) |
-| Proxmox | `s3` | `s3`, `nfs` |
+| Proxmox | `s3` | `s3` |
 | mock | — | — |
 
-The reasons:
+The reasons rest on one fact: **a command on the hypervisor host outlives a
+cancelled call**. It runs without a pty, so closing the SSH session sends it no
+hang-up.
 
 - **vSphere:** every step of an export honours the call's cancellation, and the
   temporary datastore clone has a unique name and is always removed. The `pvc` copy
@@ -84,7 +116,14 @@ The reasons:
   routed time budget.
 - **Proxmox:**
   - Exports: the `nfs` export copies onto the staged file in place on the node.
-  - Imports: imports are staged through a private temporary file and `mv -T`.
+  - `s3` imports: the bytes are streamed from the provider pod into a private
+    temporary file, and `mv -T` publishes it onto the stage only when exactly the
+    object's size arrived. A cancelled call ends the node's input, and the short copy
+    is discarded.
+  - `nfs` imports: the whole node-side stage (mount, copy, `mv -T` onto the stage)
+    runs with no input from the pod, no time limit and no lock. After a cancelled
+    call it copies to completion and publishes the stage at an arbitrary later time,
+    so it is **not** re-send safe.
 
 A provider image older than rc2 reports neither field. An export or import whose
 outcome it lost is held.
@@ -116,7 +155,10 @@ that was asked for.
 
    How the annotation is handled:
    - The manager logs the confirmation and records a `Warning` event
-     `OperationOutcomeConfirmed` for audit.
+     `OperationOutcomeConfirmed`. The log line names the annotation's field
+     managers (`annotationManagers`, for example `kubectl-annotate/Update`). The
+     API server's audit log is the authoritative record of **who** set the
+     annotation.
    - It removes the annotation before it sends the call, so a confirmation never
      carries over to a later attempt.
    - A value that names another attempt is ignored.
@@ -128,11 +170,21 @@ re-drives it at once.
 
 ## Limitations
 
-- **A failure answer is still final.** A call the provider answered with a failure
-  is recorded as failed, as before. For example, an export that ran past its
-  deadline fails the migration attempt, and the retry policy then sends it again.
-  For a migration snapshot, a retry takes a new snapshot under the next attempt's
-  name (`-r<n>`).
+- **More holds on single-host libvirt.** Most single-host libvirt failures carry no
+  classification, so they now keep the marker instead of failing the attempt:
+  - a snapshot is held for an operator;
+  - an `s3` export is re-sent after the settle time;
+  - an `nfs` or `pvc` export is held.
+- **A lost failure write is held.** A known failure whose status write itself is
+  lost (a conflict on the failure write, a restart before it) leaves the marker. The
+  object is then held for an operator, although the provider answered definitely.
+  Confirming the attempt sends the call again.
+- **A deleting migration waits out an unknown export.** If an `ExportRequested`
+  marker has no result, the staged object of an `nfs` or `s3` migration is not
+  deleted until 35 minutes after the marker. An export still running on the host
+  could otherwise re-create the object after the delete, and nothing would own it.
+  `virtrigaud.io/force-delete` releases the migration at once, with a
+  `StagedDiskLeftBehind` warning.
 - **Deleting a held object skips the lost call's snapshot.** A `VMSnapshot` or
   `VMMigration` deleted while it is held releases its finalizer as before. A
   snapshot the lost call may have made is not looked up.
