@@ -21,9 +21,11 @@ import (
 	stderrors "errors"
 	"io"
 	"log"
+	"os/exec"
 	"strings"
 	"sync"
 
+	"golang.org/x/crypto/ssh"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
@@ -262,14 +264,21 @@ func nothingDone(wire string, err error) error {
 // hostCommandEnded reports whether err is a host command that ended on its
 // own with a non-zero exit status while the request was still alive: the
 // command is no longer running. A dropped connection (no exit status), a
-// signal (128+n: a sudo or a shell killed while its child may live on) and a
-// request whose context ended are not.
+// signal (128+n: a sudo or a shell killed while its child may live on), a
+// request whose context ended, and a command reported as failed for what it
+// printed (a stdout past its bound completes with status 0 and is given exit
+// code 1: its Cause is not a process exit) are not.
 func hostCommandEnded(ctx context.Context, err error) bool {
 	if ctx.Err() != nil {
 		return false
 	}
 	var ve *VirshError
 	if !stderrors.As(err, &ve) {
+		return false
+	}
+	var sshExit *ssh.ExitError
+	var localExit *exec.ExitError
+	if !stderrors.As(ve.Cause, &sshExit) && !stderrors.As(ve.Cause, &localExit) {
 		return false
 	}
 	return ve.ExitCode > 0 && ve.ExitCode < 128
