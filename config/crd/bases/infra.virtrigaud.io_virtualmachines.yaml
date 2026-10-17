@@ -794,7 +794,18 @@ spec:
                 format: int64
                 type: integer
               phase:
-                description: Phase represents the current phase of the VM
+                description: |-
+                  Phase is the VM's phase, derived by the controller from the rest of its
+                  status on every status write (never set by hand): Pending (not created
+                  yet: waiting for its Provider, class, image or placement), Provisioning
+                  (a create is requested or in flight, or its outcome is not known),
+                  Running or Stopped (by status.powerState; a suspended VM counts as
+                  Running), Reconfiguring (a resize is in flight), Deleting (the VM is
+                  being deleted, also while the delete is held) and Failed (a hold that
+                  needs an operator, such as VMNotOwned, OwnerStampUnreadable,
+                  ConsumerNotAllowed or CreateOutcomeUnknown; a create the provider
+                  refused; or a power state the provider cannot classify). The Ready
+                  condition's reason says why.
                 enum:
                 - Pending
                 - Provisioning
