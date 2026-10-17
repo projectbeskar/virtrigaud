@@ -38,7 +38,8 @@ single hard link**:
   credentials, TLS key or ServiceAccount token into the target VM's disk, or
   redirect the export's write.
 - FIFOs, device nodes, sockets, directories and hard-linked files at the staged
-  name are refused.
+  name are refused. (A PVC filesystem that reports a link count other than 1
+  for a regular file — some exotic CSI/FUSE drivers — is refused too.)
 - The export replaces an earlier staged file by removing its name and creating
   a new file; a link or special file planted at the name is refused and left in
   place.
