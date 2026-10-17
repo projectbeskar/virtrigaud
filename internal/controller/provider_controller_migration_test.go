@@ -18,13 +18,17 @@ package controller
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	stderrors "errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	storagev1 "k8s.io/api/storage/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -36,7 +40,9 @@ import (
 	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/event"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	infravirtrigaudiov1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
 	storagemigration "github.com/projectbeskar/virtrigaud/internal/storage/migration"
@@ -104,7 +110,7 @@ func msMigration(ns, name string, uid types.UID, pvcName, named string) *infravi
 func msPVCObj(ns, name string, labelled bool, owner *infravirtrigaudiov1beta1.VMMigration) *corev1.PersistentVolumeClaim {
 	sc := msWFFC
 	pvc := &corev1.PersistentVolumeClaim{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns, UID: types.UID("uid-" + ns + "-" + name)},
 		Spec:       corev1.PersistentVolumeClaimSpec{StorageClassName: &sc},
 		Status:     corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound},
 	}
@@ -131,11 +137,32 @@ func msStorageClasses() []client.Object {
 	}
 }
 
+// msOwnPVC is the Bound, labelled PVC m created, with its UID recorded in
+// m's status as the migration controller records it.
+func msOwnPVC(m *infravirtrigaudiov1beta1.VMMigration) *corev1.PersistentVolumeClaim {
+	pvc := msPVCObj(m.Namespace, m.Status.StoragePVCName, true, m)
+	m.Status.StoragePVCUID = string(pvc.UID)
+	return pvc
+}
+
+// msReadyPod is a Running, Ready pod of Provider name carrying PVC pvcName.
+func msReadyPod(ns, name, pvcName string) *corev1.Pod {
+	return &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: name + "-pod", Namespace: ns, Labels: map[string]string{
+			providerPodNameLabel: providerPodNameValue, providerPodInstanceLabel: name,
+		}},
+		Spec: corev1.PodSpec{Volumes: []corev1.Volume{{Name: "v", VolumeSource: corev1.VolumeSource{
+			PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: pvcName},
+		}}}},
+		Status: corev1.PodStatus{Phase: corev1.PodRunning, Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}},
+	}
+}
+
 // msWorld is the default fixture: three Providers, the source VM, an
-// in-flight migration and its own Bound, labelled PVC.
+// in-flight migration and its own Bound, labelled PVC (UID recorded).
 func msWorld() (*infravirtrigaudiov1beta1.VMMigration, *corev1.PersistentVolumeClaim, []client.Object) {
 	m := msMigration(msNS, msMig, msMigUID, msPVC, "")
-	pvc := msPVCObj(msNS, msPVC, true, m)
+	pvc := msOwnPVC(m)
 	objs := []client.Object{
 		msProvider(msNS, msSource), msProvider(msNS, msTarget), msProvider(msNS, msBystander),
 		msSourceVMObj(msNS),
@@ -226,39 +253,49 @@ func TestDiscoverMigrationStorage_DeletedMigration(t *testing.T) {
 // release the mount; a Failed migration that will be retried keeps it.
 func TestDiscoverMigrationStorage_Phases(t *testing.T) {
 	retries := int32(2)
+	retryPending := func(m *infravirtrigaudiov1beta1.VMMigration) {
+		m.Status.Phase = infravirtrigaudiov1beta1.MigrationPhaseFailed
+		m.Spec.Options = &infravirtrigaudiov1beta1.MigrationOptions{RetryPolicy: &infravirtrigaudiov1beta1.MigrationRetryPolicy{MaxRetries: &retries}}
+		m.Status.RetryCount = 1
+	}
 	cases := []struct {
 		name    string
 		mutate  func(*infravirtrigaudiov1beta1.VMMigration)
+		extra   []client.Object
 		mounted bool
 	}{
-		{"exporting", func(*infravirtrigaudiov1beta1.VMMigration) {}, true},
+		{"exporting", func(*infravirtrigaudiov1beta1.VMMigration) {}, nil, true},
 		{"importing", func(m *infravirtrigaudiov1beta1.VMMigration) {
 			m.Status.Phase = infravirtrigaudiov1beta1.MigrationPhaseImporting
-		}, true},
+		}, nil, true},
 		{"ready", func(m *infravirtrigaudiov1beta1.VMMigration) {
 			m.Status.Phase = infravirtrigaudiov1beta1.MigrationPhaseReady
-		}, false},
+		}, nil, false},
 		{"failed, no retry policy", func(m *infravirtrigaudiov1beta1.VMMigration) {
 			m.Status.Phase = infravirtrigaudiov1beta1.MigrationPhaseFailed
-		}, false},
-		{"failed, retry pending", func(m *infravirtrigaudiov1beta1.VMMigration) {
-			m.Status.Phase = infravirtrigaudiov1beta1.MigrationPhaseFailed
-			m.Spec.Options = &infravirtrigaudiov1beta1.MigrationOptions{RetryPolicy: &infravirtrigaudiov1beta1.MigrationRetryPolicy{MaxRetries: &retries}}
-			m.Status.RetryCount = 1
-		}, true},
+		}, nil, false},
+		{"failed, retry pending, the mount worked (a Ready pod carries the PVC)", retryPending,
+			[]client.Object{msReadyPod(msNS, msSource, msPVC)}, true},
+		{"failed, retry pending, the mount never worked (no Ready pod with it)", retryPending, nil, false},
+		{"failed, retry pending, only a not-Ready pod carries it", retryPending, []client.Object{func() client.Object {
+			p := msReadyPod(msNS, msSource, msPVC)
+			p.Status.Phase = corev1.PodPending
+			p.Status.Conditions = nil
+			return p
+		}()}, false},
 		{"failed, retries used up", func(m *infravirtrigaudiov1beta1.VMMigration) {
 			m.Status.Phase = infravirtrigaudiov1beta1.MigrationPhaseFailed
 			m.Spec.Options = &infravirtrigaudiov1beta1.MigrationOptions{RetryPolicy: &infravirtrigaudiov1beta1.MigrationRetryPolicy{MaxRetries: &retries}}
 			m.Status.RetryCount = 2
-		}, false},
-		{"no PVC recorded yet", func(m *infravirtrigaudiov1beta1.VMMigration) { m.Status.StoragePVCName = "" }, false},
-		{"s3 backend", func(m *infravirtrigaudiov1beta1.VMMigration) { m.Spec.Storage.Type = storagemigration.BackendS3 }, false},
+		}, []client.Object{msReadyPod(msNS, msSource, msPVC)}, false},
+		{"no PVC recorded yet", func(m *infravirtrigaudiov1beta1.VMMigration) { m.Status.StoragePVCName = "" }, nil, false},
+		{"s3 backend", func(m *infravirtrigaudiov1beta1.VMMigration) { m.Spec.Storage.Type = storagemigration.BackendS3 }, nil, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			m, pvc, objs := msWorld()
 			tc.mutate(m)
-			r := msReconciler(t, append(objs, m, pvc)...)
+			r := msReconciler(t, append(append(objs, m, pvc), tc.extra...)...)
 			if tc.mounted {
 				assert.Contains(t, msMounts(t, r, msSource), msPVC)
 			} else {
@@ -284,7 +321,13 @@ func TestDiscoverMigrationStorage_Reference(t *testing.T) {
 		}, true},
 		{"auto name taken by a PVC the migration did not create", func() (*infravirtrigaudiov1beta1.VMMigration, *corev1.PersistentVolumeClaim) {
 			m := msMigration(msNS, msMig, msMigUID, msPVC, "")
+			m.Status.StoragePVCUID = "uid-of-the-pvc-it-created"
 			return m, msPVCObj(msNS, msPVC, true, nil)
+		}, false},
+		{"squat with a forged controller ownerReference to the migration", func() (*infravirtrigaudiov1beta1.VMMigration, *corev1.PersistentVolumeClaim) {
+			m := msMigration(msNS, msMig, msMigUID, msPVC, "")
+			m.Status.StoragePVCUID = "uid-of-the-pvc-it-created"
+			return m, msPVCObj(msNS, msPVC, true, m) // ownerRef names m's UID; the PVC's own UID differs
 		}, false},
 		{"auto name controlled by a migration of the same name with another UID", func() (*infravirtrigaudiov1beta1.VMMigration, *corev1.PersistentVolumeClaim) {
 			m := msMigration(msNS, msMig, msMigUID, msPVC, "")
@@ -293,7 +336,17 @@ func TestDiscoverMigrationStorage_Reference(t *testing.T) {
 		}, false},
 		{"owned but label removed", func() (*infravirtrigaudiov1beta1.VMMigration, *corev1.PersistentVolumeClaim) {
 			m := msMigration(msNS, msMig, msMigUID, msPVC, "")
-			return m, msPVCObj(msNS, msPVC, false, m)
+			pvc := msOwnPVC(m)
+			pvc.Labels = nil
+			return m, pvc
+		}, false},
+		{"legacy: created by an older manager (no UID recorded), controlled by the migration", func() (*infravirtrigaudiov1beta1.VMMigration, *corev1.PersistentVolumeClaim) {
+			m := msMigration(msNS, msMig, msMigUID, msPVC, "")
+			return m, msPVCObj(msNS, msPVC, true, m)
+		}, true},
+		{"legacy fallback never applies to a name other than <migration>-storage", func() (*infravirtrigaudiov1beta1.VMMigration, *corev1.PersistentVolumeClaim) {
+			m := msMigration(msNS, msMig, msMigUID, "elsewhere", "")
+			return m, msPVCObj(msNS, "elsewhere", true, m)
 		}, false},
 		{"named, labelled", func() (*infravirtrigaudiov1beta1.VMMigration, *corev1.PersistentVolumeClaim) {
 			return msMigration(msNS, msMig, msMigUID, "shared", "shared"), msPVCObj(msNS, "shared", true, nil)
@@ -449,7 +502,39 @@ func TestDiscoverMigrationStorage_ReadErrorIsReturned(t *testing.T) {
 	r := msReconciler(t, append(objs, m, pvc)...)
 	r.Client = failingPVCGetClient{Client: r.Client}
 	_, err := r.discoverMigrationStorage(context.Background(), msProvider(msNS, msSource))
-	require.Error(t, err)
+	require.ErrorIs(t, err, errMigrationStorageDiscovery)
+}
+
+// TestMigrationStorageDiscoveryFailed: a discovery read error does not
+// downgrade a Provider whose Deployment exists; without a Deployment it is
+// reported with its own reason and a constant message. Neither returns an
+// error (the render is retried after a fixed delay).
+func TestMigrationStorageDiscoveryFailed(t *testing.T) {
+	ctx := context.Background()
+	s := migrationTestScheme(t)
+	require.NoError(t, appsv1.AddToScheme(s))
+	readErr := fmt.Errorf("%w: list VMMigrations: boom", errMigrationStorageDiscovery)
+
+	t.Run("deployment exists", func(t *testing.T) {
+		p := msProvider(msNS, msSource)
+		p.Status.Runtime = &infravirtrigaudiov1beta1.ProviderRuntimeStatus{Phase: infravirtrigaudiov1beta1.ProviderRuntimePhaseRunning}
+		dep := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "dep", Namespace: msNS}}
+		r := &ProviderReconciler{Client: fake.NewClientBuilder().WithScheme(s).WithObjects(dep).Build(), Scheme: s}
+		res, err := r.migrationStorageDiscoveryFailed(ctx, p, "dep", readErr)
+		require.NoError(t, err)
+		assert.Equal(t, migrationStorageDiscoveryRetry, res.RequeueAfter)
+		assert.Equal(t, infravirtrigaudiov1beta1.ProviderRuntimePhaseRunning, p.Status.Runtime.Phase, "not downgraded")
+		assert.Empty(t, p.Status.Conditions)
+	})
+	t.Run("no deployment yet", func(t *testing.T) {
+		p := msProvider(msNS, msSource)
+		r := &ProviderReconciler{Client: fake.NewClientBuilder().WithScheme(s).Build(), Scheme: s}
+		_, err := r.migrationStorageDiscoveryFailed(ctx, p, "dep", readErr)
+		require.NoError(t, err)
+		require.Len(t, p.Status.Conditions, 1)
+		assert.Equal(t, reasonMigrationStorageDiscoveryFailed, p.Status.Conditions[0].Reason)
+		assert.Equal(t, migrationStorageDiscoveryFailedMessage, p.Status.Conditions[0].Message)
+	})
 }
 
 // failingPVCGetClient fails every PVC Get with a non-NotFound error.
@@ -465,7 +550,8 @@ func (f failingPVCGetClient) Get(ctx context.Context, key client.ObjectKey, obj 
 // TestMigrationStorageVolumes renders read-only mounts for the target and
 // names volumes "migration-<pvc>" when that is a valid DNS label.
 func TestMigrationStorageVolumes(t *testing.T) {
-	mounts := []migrationStorageMount{{pvcName: "a-storage"}, {pvcName: "b-storage", readOnly: true}}
+	mounts := assignMigrationVolumeNames(context.Background(),
+		[]migrationStorageMount{{pvcName: "a-storage"}, {pvcName: "b-storage", readOnly: true}})
 	vols := migrationStorageVolumes(mounts)
 	vms := migrationStorageVolumeMounts(mounts)
 	require.Len(t, vols, 2)
@@ -491,13 +577,59 @@ func TestMigrationStorageVolumeName(t *testing.T) {
 	assert.NotEqual(t, migrationStorageVolumeName(long), migrationStorageVolumeName(long+"x"))
 }
 
+// TestAssignMigrationVolumeNames_Collision: a PVC literally named like
+// another PVC's hashed volume name never yields two volumes of one name (an
+// invalid Deployment): the second one gets the long hash-only name.
+func TestAssignMigrationVolumeNames_Collision(t *testing.T) {
+	dotted := "x.y"
+	hashed := migrationStorageVolumeName(dotted) // migration-x-y-<16 hex>
+	literal := strings.TrimPrefix(hashed, migrationStorageVolumePrefix)
+	require.Equal(t, hashed, migrationStorageVolumeName(literal), "the literal PVC name maps to the same volume name")
+
+	mounts := assignMigrationVolumeNames(context.Background(), []migrationStorageMount{{pvcName: literal}, {pvcName: dotted}})
+	require.Len(t, mounts, 2)
+	seen := map[string]bool{}
+	for _, m := range mounts {
+		assert.Empty(t, validation.IsDNS1123Label(m.volumeName), m.volumeName)
+		assert.False(t, seen[m.volumeName], "duplicate volume name %s", m.volumeName)
+		seen[m.volumeName] = true
+	}
+	vols := migrationStorageVolumes(mounts)
+	vms := migrationStorageVolumeMounts(mounts)
+	for i := range vols {
+		assert.Equal(t, vols[i].Name, vms[i].Name)
+	}
+
+	// A mount whose fallback name is taken too is left out rather than
+	// rendered: here a PVC is literally named like x.y's hash-only fallback.
+	sum := sha256.Sum256([]byte(dotted))
+	fallbackLiteral := hex.EncodeToString(sum[:])[:validation.DNS1123LabelMaxLength-len(migrationStorageVolumePrefix)]
+	all := []migrationStorageMount{{pvcName: fallbackLiteral}, {pvcName: literal}, {pvcName: dotted}}
+	got := assignMigrationVolumeNames(context.Background(), all)
+	require.Len(t, got, 2)
+	for _, m := range got {
+		assert.NotEqual(t, dotted, m.pvcName, "the PVC with no free volume name is not mounted")
+	}
+}
+
 // TestMigrationPVCReferenceError covers the reasons the VMMigration
 // controller reports when it validates the storage.
 func TestMigrationPVCReferenceError(t *testing.T) {
 	m := msMigration(msNS, msMig, msMigUID, msPVC, "")
-	assert.NoError(t, migrationPVCReferenceError(msPVCObj(msNS, msPVC, true, m), m))
+	own := msOwnPVC(m)
+	assert.NoError(t, migrationPVCReferenceError(own, m))
 	assert.ErrorIs(t, migrationPVCReferenceError(msPVCObj(msNS, msPVC, false, m), m), errMigrationPVCNotLabelled)
-	assert.ErrorIs(t, migrationPVCReferenceError(msPVCObj(msNS, msPVC, true, nil), m), errMigrationPVCNotOwned)
+	unowned := msPVCObj(msNS, msPVC, true, nil)
+	unowned.UID = "uid-someone-else"
+	assert.ErrorIs(t, migrationPVCReferenceError(unowned, m), errMigrationPVCNotOwned)
+	forged := msPVCObj(msNS, msPVC, true, m)
+	forged.UID = "uid-squatter"
+	assert.ErrorIs(t, migrationPVCReferenceError(forged, m), errMigrationPVCNotOwned, "a forged ownerReference proves nothing")
+
+	legacy := msMigration(msNS, msMig, msMigUID, msPVC, "") // older manager: no UID recorded
+	assert.NoError(t, migrationPVCReferenceError(msPVCObj(msNS, msPVC, true, legacy), legacy))
+	fresh := msMigration(msNS, msMig, msMigUID, "", "") // nothing recorded yet: nothing is legacy
+	assert.ErrorIs(t, migrationPVCReferenceError(msPVCObj(msNS, msPVC, true, fresh), fresh), errMigrationPVCNotOwned)
 
 	named := msMigration(msNS, msMig, msMigUID, "shared", "shared")
 	assert.NoError(t, migrationPVCReferenceError(msPVCObj(msNS, "shared", true, nil), named))
@@ -506,41 +638,74 @@ func TestMigrationPVCReferenceError(t *testing.T) {
 	assert.ErrorIs(t, migrationPVCReferenceError(msPVCObj(msNS, "shared", true, other), named), errMigrationPVCOtherMigration)
 }
 
-// TestProvidersForMigrationPVC: a PVC event re-drives the source and target
-// Providers of the migrations that record it, and nothing for any other PVC.
-func TestProvidersForMigrationPVC(t *testing.T) {
-	m, pvc, objs := msWorld()
-	r := msReconciler(t, append(objs, m, pvc)...)
-	ctx := context.Background()
-
-	reqs := r.providersForMigrationPVC(ctx, pvc)
+// msRequestNames returns the Provider names of reqs (all in msNS).
+func msRequestNames(t *testing.T, reqs []reconcile.Request) []string {
+	t.Helper()
 	var names []string
 	for _, req := range reqs {
 		assert.Equal(t, msNS, req.Namespace)
 		names = append(names, req.Name)
 	}
-	assert.ElementsMatch(t, []string{msSource, msTarget}, names)
-
-	assert.Empty(t, r.providersForMigrationPVC(ctx, msPVCObj(msNS, "rogue", true, nil)))
-	assert.Empty(t, r.providersForMigrationPVC(ctx, msPVCObj("team-b", msPVC, true, nil)), "same name, other namespace")
+	return names
 }
 
-// TestProvidersForMigration: a migration maps to its same-namespace source
-// and target Providers, once each.
-func TestProvidersForMigration(t *testing.T) {
-	m, _, objs := msWorld()
-	r := msReconciler(t, objs...)
+// TestProvidersForMigrationPVC: an event of a labelled or referenced PVC
+// re-renders every Provider in its namespace (one that mounted it earlier may
+// no longer be traceable through its migration); any other PVC maps to
+// nothing.
+func TestProvidersForMigrationPVC(t *testing.T) {
+	m, pvc, objs := msWorld()
+	unlabelledRef := msMigration(msNS, "named", "named-uid", "plain-ref", "plain-ref")
+	r := msReconciler(t, append(objs, m, pvc, unlabelledRef)...)
 	ctx := context.Background()
-	assert.Len(t, r.providersForMigration(ctx, m), 2)
+	all := []string{msSource, msTarget, msBystander}
 
-	m.Spec.Target.ProviderRef.Name = msSource
-	reqs := r.providersForMigration(ctx, m)
-	require.Len(t, reqs, 1)
-	assert.Equal(t, msSource, reqs[0].Name)
+	assert.ElementsMatch(t, all, msRequestNames(t, r.providersForMigrationPVC(ctx, pvc)))
+	assert.ElementsMatch(t, all, msRequestNames(t, r.providersForMigrationPVC(ctx, msPVCObj(msNS, "rogue", true, nil))),
+		"a labelled PVC nothing references may still be mounted from before")
+	assert.ElementsMatch(t, all, msRequestNames(t, r.providersForMigrationPVC(ctx, msPVCObj(msNS, "plain-ref", false, nil))),
+		"an unlabelled PVC a migration records")
+	assert.Empty(t, r.providersForMigrationPVC(ctx, msPVCObj(msNS, "plain", false, nil)))
+	assert.Empty(t, r.providersForMigrationPVC(ctx, msPVCObj("team-b", msPVC, true, nil)), "no Provider in that namespace")
+}
 
-	m.Spec.Target.ProviderRef = infravirtrigaudiov1beta1.ObjectRef{Name: msTarget, Namespace: "elsewhere"}
-	m.Spec.Source.VMRef.Name = "missing-vm"
-	assert.Empty(t, r.providersForMigration(ctx, m), "cross-namespace target and unresolvable source map to nothing")
+// TestProvidersForMigration: an in-flight migration maps to its
+// same-namespace source and target Providers, once each; a deleted or
+// finished migration, or one whose source VM is gone, re-renders every
+// Provider in its namespace, so the source never keeps a stale mount.
+func TestProvidersForMigration(t *testing.T) {
+	ctx := context.Background()
+	all := []string{msSource, msTarget, msBystander}
+
+	m, _, objs := msWorld()
+	r := msReconciler(t, append(objs, m)...)
+	assert.ElementsMatch(t, []string{msSource, msTarget}, msRequestNames(t, r.providersForMigration(ctx, m)))
+
+	same := m.DeepCopy()
+	same.Spec.Target.ProviderRef.Name = msSource
+	assert.ElementsMatch(t, []string{msSource}, msRequestNames(t, r.providersForMigration(ctx, same)))
+
+	ready := m.DeepCopy()
+	ready.Status.Phase = infravirtrigaudiov1beta1.MigrationPhaseReady
+	assert.ElementsMatch(t, all, msRequestNames(t, r.providersForMigration(ctx, ready)), "no longer in flight")
+
+	t.Run("source VM gone", func(t *testing.T) {
+		m, _, objs := msWorld()
+		var noVM []client.Object
+		for _, o := range objs {
+			if _, isVM := o.(*infravirtrigaudiov1beta1.VirtualMachine); !isVM {
+				noVM = append(noVM, o)
+			}
+		}
+		r := msReconciler(t, append(noVM, m)...)
+		assert.ElementsMatch(t, all, msRequestNames(t, r.providersForMigration(ctx, m)),
+			"the source Provider can no longer be found through the VM, so every Provider re-renders")
+	})
+	t.Run("migration deleted", func(t *testing.T) {
+		m, _, objs := msWorld()
+		r := msReconciler(t, objs...) // not in the cache any more
+		assert.ElementsMatch(t, all, msRequestNames(t, r.providersForMigration(ctx, m)))
+	})
 }
 
 // TestMigrationStorageChanged: progress writes do not re-drive Providers;
@@ -621,13 +786,45 @@ func TestEnsureMigrationPVC_RefusesUnusablePVCs(t *testing.T) {
 		_, err := r.ensureMigrationPVC(ctx, m)
 		require.ErrorIs(t, err, errMigrationPVCNotOwned)
 	})
-	t.Run("auto-created PVC already there", func(t *testing.T) {
+	t.Run("auto name squatted with a forged controller ownerReference", func(t *testing.T) {
 		m := msMigration(msNS, msMig, msMigUID, "", "")
-		c := fake.NewClientBuilder().WithScheme(s).WithObjects(m, msPVCObj(msNS, msPVC, true, m)).Build()
+		m.Status.Phase = infravirtrigaudiov1beta1.MigrationPhaseValidating
+		c := fake.NewClientBuilder().WithScheme(s).WithObjects(m, msPVCObj(msNS, msPVC, true, m)).
+			WithStatusSubresource(&infravirtrigaudiov1beta1.VMMigration{}).Build()
+		r := NewVMMigrationReconciler(c, c, s, nil, record.NewFakeRecorder(10), false)
+		_, err := r.ensureMigrationPVC(ctx, m)
+		require.ErrorIs(t, err, errMigrationPVCNotOwned)
+		assert.Empty(t, m.Status.StoragePVCUID, "nothing is recorded for a PVC the migration did not create")
+	})
+	t.Run("creates the PVC and records the UID the API server answered", func(t *testing.T) {
+		m := msMigration(msNS, msMig, msMigUID, "", "")
+		m.Status.Phase = infravirtrigaudiov1beta1.MigrationPhaseValidating
+		c := fake.NewClientBuilder().WithScheme(s).WithObjects(m).
+			WithStatusSubresource(&infravirtrigaudiov1beta1.VMMigration{}).
+			WithInterceptorFuncs(interceptor.Funcs{Create: func(ctx context.Context, cl client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+				obj.SetUID("uid-created-by-apiserver")
+				return cl.Create(ctx, obj, opts...)
+			}}).Build()
 		r := NewVMMigrationReconciler(c, c, s, nil, record.NewFakeRecorder(10), false)
 		name, err := r.ensureMigrationPVC(ctx, m)
 		require.NoError(t, err)
 		assert.Equal(t, msPVC, name)
+		got := &infravirtrigaudiov1beta1.VMMigration{}
+		require.NoError(t, c.Get(ctx, client.ObjectKeyFromObject(m), got))
+		assert.Equal(t, msPVC, got.Status.StoragePVCName)
+		assert.Equal(t, "uid-created-by-apiserver", got.Status.StoragePVCUID)
+
+		_, err = r.ensureMigrationPVC(ctx, got)
+		require.NoError(t, err, "a later reconcile accepts that PVC")
+	})
+	t.Run("spec.storage.pvc.name changed after the record", func(t *testing.T) {
+		m := msMigration(msNS, msMig, msMigUID, "shared", "elsewhere")
+		c := fake.NewClientBuilder().WithScheme(s).WithObjects(m, msPVCObj(msNS, "elsewhere", true, nil)).Build()
+		r := NewVMMigrationReconciler(c, c, s, nil, record.NewFakeRecorder(10), false)
+		_, err := r.ensureMigrationPVC(ctx, m)
+		require.ErrorIs(t, err, errMigrationPVCSpecChanged)
+		_, err = r.generateStorageURL(ctx, m, "export")
+		require.ErrorIs(t, err, errMigrationPVCSpecChanged, "every later phase fails on it too")
 	})
 }
 
@@ -660,9 +857,22 @@ func TestHandleDeletion_DeletesOnlyTheMigrationsOwnPVC(t *testing.T) {
 
 	t.Run("controller-created PVC is deleted", func(t *testing.T) {
 		m := msMigration(msNS, msMig, msMigUID, msPVC, "")
-		exists, rec := run(t, m, msPVCObj(msNS, msPVC, true, m))
+		exists, rec := run(t, m, msOwnPVC(m))
 		assert.False(t, exists)
 		assert.Empty(t, rec.Events)
+	})
+	t.Run("legacy controller-created PVC (no UID recorded) is deleted", func(t *testing.T) {
+		m := msMigration(msNS, msMig, msMigUID, msPVC, "")
+		exists, _ := run(t, m, msPVCObj(msNS, msPVC, true, m))
+		assert.False(t, exists)
+	})
+	t.Run("squat with a forged ownerReference survives", func(t *testing.T) {
+		m := msMigration(msNS, msMig, msMigUID, msPVC, "")
+		m.Status.StoragePVCUID = "uid-of-the-pvc-it-created"
+		exists, rec := run(t, m, msPVCObj(msNS, msPVC, true, m))
+		assert.True(t, exists, "only the PVC with the recorded UID is deleted")
+		require.Len(t, rec.Events, 1)
+		assert.Contains(t, <-rec.Events, eventReasonMigrationPVCRetained)
 	})
 	t.Run("user-named PVC survives with a Normal event", func(t *testing.T) {
 		m := msMigration(msNS, msMig, msMigUID, "shared", "shared")

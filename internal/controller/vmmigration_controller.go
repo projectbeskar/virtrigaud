@@ -2356,7 +2356,7 @@ func (r *VMMigrationReconciler) handleDeletion(ctx context.Context, migration *i
 
 	// Explicitly delete PVC if it exists (in addition to owner reference
 	// cleanup): a pvc migration's staged file goes with it. Only the PVC this
-	// migration created (controller ownerReference with its UID) is deleted;
+	// migration created (the UID it recorded, migrationCreatedPVC) is deleted;
 	// a user's PVC (spec.storage.pvc.name) is left for its owner.
 	if migration.Status.StoragePVCName != "" {
 		pvc := &corev1.PersistentVolumeClaim{}
@@ -2364,7 +2364,7 @@ func (r *VMMigrationReconciler) handleDeletion(ctx context.Context, migration *i
 			Namespace: migration.Namespace,
 			Name:      migration.Status.StoragePVCName,
 		}
-		if err := r.Get(ctx, pvcKey, pvc); err == nil && !metav1.IsControlledBy(pvc, migration) {
+		if err := r.Get(ctx, pvcKey, pvc); err == nil && (migrationNamedPVC(migration) != "" || !migrationCreatedPVC(pvc, migration)) {
 			logger.Info("Migration PVC was not created by this migration; leaving it for its owner", "pvc_name", pvc.Name)
 			r.Recorder.Eventf(migration, corev1.EventTypeNormal, eventReasonMigrationPVCRetained, migrationPVCRetainedMessage, pvc.Name)
 		} else if err == nil {
@@ -2960,6 +2960,9 @@ func (r *VMMigrationReconciler) ensureMigrationPVC(ctx context.Context, migratio
 	}
 
 	pvcConfig := migration.Spec.Storage.PVC
+	if err := migrationPVCSpecChangedError(migration); err != nil {
+		return "", err
+	}
 
 	// If PVC name specified, verify it exists
 	if pvcConfig.Name != "" {
@@ -2984,11 +2987,12 @@ func (r *VMMigrationReconciler) ensureMigrationPVC(ctx context.Context, migratio
 	}
 
 	// Auto-create PVC
-	pvcName := fmt.Sprintf("%s-storage", migration.Name)
+	pvcName := migrationAutoPVCName(migration)
 
-	// Check if PVC already exists
+	// Check if PVC already exists (live: the cache may not show the PVC this
+	// migration has just created).
 	existingPVC := &corev1.PersistentVolumeClaim{}
-	err := r.Get(ctx, types.NamespacedName{
+	err := r.liveReader().Get(ctx, types.NamespacedName{
 		Name:      pvcName,
 		Namespace: migration.Namespace,
 	}, existingPVC)
@@ -3054,7 +3058,25 @@ func (r *VMMigrationReconciler) ensureMigrationPVC(ctx context.Context, migratio
 	}
 
 	if err := r.Create(ctx, pvc); err != nil {
+		if errors.IsAlreadyExists(err) {
+			// Someone else created a PVC under this name since the check.
+			return "", fmt.Errorf("PVC %s cannot be used as migration storage: %w", pvcName, errMigrationPVCNotOwned)
+		}
 		return "", fmt.Errorf("failed to create PVC: %w", err)
+	}
+	// Record the created PVC's UID, from the API server's answer to this
+	// create: only that PVC is ever mounted or deleted for this migration
+	// (an ownerReference to it can be forged). Unrecorded, it could never be
+	// told from a squatter's, so it is removed again for a clean retry.
+	createdUID := string(pvc.UID)
+	if err := r.recordMigrationResult(ctx, migration, infrav1beta1.MigrationPhaseValidating, func(m *infrav1beta1.VMMigration) {
+		m.Status.StoragePVCName = pvcName
+		m.Status.StoragePVCUID = createdUID
+	}); err != nil {
+		if delErr := r.Delete(ctx, pvc, client.Preconditions{UID: &pvc.UID}); delErr != nil && !errors.IsNotFound(delErr) {
+			logger.Error(delErr, "Failed to remove an unrecorded migration PVC", "pvc", pvcName)
+		}
+		return "", fmt.Errorf("record migration PVC %s: %w", pvcName, err)
 	}
 
 	logger.Info("Successfully created migration PVC", "pvc", pvcName)
@@ -3658,6 +3680,9 @@ func (r *VMMigrationReconciler) generateStorageURL(ctx context.Context, migratio
 		pvcName := migration.Status.StoragePVCName
 		if pvcName == "" {
 			return "", fmt.Errorf("storage PVC name not set in migration status")
+		}
+		if err := migrationPVCSpecChangedError(migration); err != nil {
+			return "", err
 		}
 
 		// PVC URL format: pvc://<pvc-name>/<path>
