@@ -2017,7 +2017,7 @@ func (r *VMMigrationReconciler) handleValidatingTargetPhase(ctx context.Context,
 	// target's name fails the migration instead.
 	vmKey := migrationTargetVMKey(migration)
 	targetVMName, targetNamespace := vmKey.Name, vmKey.Namespace
-	state, targetVM, err := r.classifyTargetVM(ctx, migration, true)
+	state, _, err := r.classifyTargetVM(ctx, migration, true)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -2032,7 +2032,7 @@ func (r *VMMigrationReconciler) handleValidatingTargetPhase(ctx context.Context,
 	// This is the committing step (Phase=Ready, then the source's
 	// deleteAfterMigration): decide on the live object, not the cache. A VM
 	// that is being deleted is gone.
-	targetVM, err = r.liveOwnedTargetVM(ctx, migration)
+	targetVM, err := r.liveOwnedTargetVM(ctx, migration)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
