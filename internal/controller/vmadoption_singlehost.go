@@ -237,8 +237,12 @@ func planSingleHostAdoption(provider *infravirtrigaudiov1beta1.Provider, listed 
 	bound := boundThroughSiblingProviders(provider, vms, providers)
 	libvirt := provider.Spec.Type == infravirtrigaudiov1beta1.ProviderTypeLibvirt
 
+	isForeign := make(map[string]bool, len(foreign))
+	for _, info := range foreign {
+		isForeign[info.ID] = true
+	}
+
 	var plan singleHostAdoptionPlan
-	plan.foreignStamped = len(foreign)
 	for _, info := range listed {
 		w := waiting[info.ID]
 		uids := ownerUIDs(info)
@@ -246,6 +250,9 @@ func planSingleHostAdoption(provider *infravirtrigaudiov1beta1.Provider, listed 
 		case w != nil && len(uids) == 1 && uids[0] == string(w.UID) && !ownerStampUnreliable(info) && !isArtifact(info):
 			plan.complete = append(plan.complete, pendingAdoption{info: info, vm: w})
 		case !adoptable[info.ID]:
+			if isForeign[info.ID] {
+				plan.foreignStamped++
+			}
 			if releasable(w) {
 				plan.release = append(plan.release, pendingAdoption{info: info, vm: w})
 			}

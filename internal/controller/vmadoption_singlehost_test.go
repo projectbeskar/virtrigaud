@@ -282,6 +282,8 @@ func TestSingleHostStampedAdoption_RestartWindowIsCompleted(t *testing.T) {
 	reconcileAdoption(t, r)
 	assert.Equal(t, "web", adoptedVMGet(t, r, "web").Status.ID)
 	assert.Len(t, prov.transfersTo("", "web"), before, "no second transfer")
+	assert.NotContains(t, adoptionStatus(t, r).Message, "not adopted",
+		"a VM stamped by its waiting adopter is not counted as foreign-stamped")
 }
 
 // TestSingleHostStampedAdoption_WaitingVMWhoseVMIsTakenIsWithdrawn: a
