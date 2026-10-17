@@ -1876,9 +1876,17 @@ func (r *VMMigrationReconciler) handleCreatingPhase(ctx context.Context, migrati
 			// The name was taken after the live read above. It cannot be
 			// this migration's (its claim token is new); decide it from the
 			// API server all the same.
-			state, _, cErr := r.classifyTargetVM(ctx, migration, true)
+			state, other, cErr := r.classifyTargetVM(ctx, migration, true)
 			if cErr != nil {
 				return ctrl.Result{}, cErr
+			}
+			if state == targetVMNotOwned && claimedByAnotherCreate(other) {
+				// It carries a claim, which only a manager writes when the
+				// reserved-keys admission policy is on: most likely a Create
+				// of this migration by a previous leader that overlapped this
+				// one. Not failed on this answer alone (docs/admission-policy.md).
+				logger.Info("The target name was taken by a VM carrying another claim; re-checking", "name", targetVMName)
+				return ctrl.Result{RequeueAfter: migrationPhaseAdvanceRequeue}, nil
 			}
 			if state == targetVMNotOwned {
 				return r.failTargetVMNotOwned(ctx, migration)

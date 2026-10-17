@@ -561,3 +561,41 @@ func TestValidatingTargetPhase_DecidesOnTheLiveVM(t *testing.T) {
 		})
 	}
 }
+
+// TestHandleCreatingPhase_AlreadyExistsWithAnotherClaimRequeues (review
+// L-2): a VM that took the name between the live check and the Create and
+// carries a claim token (only a manager writes one with the admission policy
+// on: an overlapping leader's Create) is re-checked, not failed on that
+// answer; one without a claim fails.
+func TestHandleCreatingPhase_AlreadyExistsWithAnotherClaimRequeues(t *testing.T) {
+	for name, tc := range map[string]struct {
+		claim     string
+		wantPhase infrav1beta1.MigrationPhase
+	}{
+		"another claim": {"other-leaders-token", infrav1beta1.MigrationPhaseCreating},
+		"no claim":      {"", infrav1beta1.MigrationPhaseFailed},
+	} {
+		t.Run(name, func(t *testing.T) {
+			funcs := &interceptor.Funcs{Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+				if _, ok := obj.(*infrav1beta1.VirtualMachine); ok {
+					racer := plantedTargetVM()
+					if tc.claim != "" {
+						racer.Annotations[migrationTargetClaimAnnotation] = tc.claim
+					}
+					if err := c.Create(ctx, racer); err != nil {
+						return err
+					}
+				}
+				return c.Create(ctx, obj, opts...)
+			}}
+			h := newCreatingHarness(t, false, funcs)
+
+			res, err := h.r.handleCreatingPhase(context.Background(), h.migration)
+			require.NoError(t, err)
+			assert.Equal(t, tc.wantPhase, h.get(t).Status.Phase)
+			if tc.wantPhase == infrav1beta1.MigrationPhaseCreating {
+				assert.Equal(t, migrationPhaseAdvanceRequeue, res.RequeueAfter)
+			}
+		})
+	}
+}

@@ -224,6 +224,16 @@ func (r *VMMigrationReconciler) classifyTargetVM(
 	return targetVMNotOwned, live, nil
 }
 
+// claimedByAnotherCreate reports whether vm carries a migration claim token
+// (migrationTargetClaimAnnotation) at all. With the reserved-keys admission
+// policy on, only a manager can have written it, so a VM that carries one
+// but is not this migration's (migrationOwnsTargetVM false) is most likely
+// the Create of an overlapping leader. Without the policy a tenant can plant
+// the annotation too; it then only delays the failure by one requeue.
+func claimedByAnotherCreate(vm *infrav1beta1.VirtualMachine) bool {
+	return vm != nil && vm.Annotations[migrationTargetClaimAnnotation] != ""
+}
+
 // liveOwnedTargetVM re-reads the VirtualMachine under the migration's target
 // key from the API server. nil (no error) means it is gone: absent, or being
 // deleted. The caller checks ownership (migrationOwnsTargetVM) of a VM it
