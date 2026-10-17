@@ -2,8 +2,10 @@
 
 ## Status
 
-**Proposed (2026-10-17), awaiting maintainer sign-off.** Design only; nothing in
-this record is implemented yet.
+**Accepted (2026-10-17, decided by William Rizzo).** The decision is Options A
+and B, as proposed in PR #397. The maintainer's answers to the review questions
+are recorded in [Decisions on the open questions](#decisions-on-the-open-questions).
+Nothing in this record is implemented yet. Phase 1 targets v0.4.1, not v0.4.0.
 
 **Author**: William Rizzo ([@wrkode](https://github.com/wrkode))
 
@@ -208,7 +210,7 @@ The next `Describe` reports `STAMPED`, and Option A latches.
     Provider status reports "N VMs unconfirmed: upgrade the provider".
 - **PVE API cost.** This is once per legacy VM: 1 config `GET`, 1 config
   `POST` with its task wait, and 1 read-back `GET`. The manager paces it per
-  Provider (proposal: at most one in flight and 30 per minute), so an upgrade
+  Provider (initial values: at most one in flight and 30 per minute), so an upgrade
   with thousands of legacy VMs does not burst the token's budget.
 - **Effort.** Small to medium. It is one controller step that reuses the
   adoption `TransferOwner` client and its error classification.
@@ -262,15 +264,16 @@ It also has a first-contact gap for legacy VMs, the same as B. It is additive to
 this design: `status.ownerStamp` would gain `fingerprint`, and the request would
 carry `expected_fingerprint`.
 
-## Decision (proposed)
+## Decision
 
 **Adopt A and B together in one release, then drop the name rule in the next
 minor release. Spike E separately.**
 
 ### D1: Wire contract (additive)
 
-Field numbers are the next free ones at implementation time. Today they are 4,
-8 and 27.
+Field numbers are assigned at implementation time, as the next free numbers
+then. The numbers below are placeholders. `GetCapabilitiesResponse` field 26 is
+taken (`supports_owner_rebind`), and open PR #402 proposes 27 and 28.
 
 ```proto
 message ObjectIdentity {
@@ -307,13 +310,13 @@ message DescribeResponse {
 }
 
 message GetCapabilitiesResponse {
-  // ... fields 1-26 unchanged ...
+  // ... existing fields unchanged ...
   // supports_owner_stamp_required reports that the provider honours
   // ObjectIdentity.require_owner_stamp and reports
   // DescribeResponse.owner_check. The manager uses it only to report, in the
   // Provider status, whether the legacy rule is still in effect; the flag is
   // safe to send to any provider.
-  bool supports_owner_stamp_required = 27;
+  bool supports_owner_stamp_required = <next free>;
 }
 ```
 
@@ -322,7 +325,8 @@ per-VM request messages. The provider reads the owner through one helper
 (`requestOwner`) and the manager writes it through one (`vmOwnerIdentity` /
 `contracts.VMRef`), so one field reaches every call. The cost is that the field
 is meaningless on the other `ObjectIdentity` uses (migration, image, target
-identities). The field comment says so.
+identities). Every other use ignores it, and the field comment and the proto
+documentation of those messages say so.
 
 Provider parity:
 - **Proxmox** honours the flag and reports `owner_check`.
@@ -387,16 +391,17 @@ an id must be explicit.
    - a gauge `virtrigaud_vm_owner_stamp_unconfirmed{provider_namespace,provider}`
      reports the same count;
    - this count is the pre-flight gate for D4.
-4. **Opt-out.** A per-Provider opt-out of Option B
-   (`virtrigaud.io/stamp-legacy-vms: "false"`) is proposed for operators who
-   must not have VirtRigaud write the Notes of existing VMs. Open question 2
-   decides whether it ships.
+4. **Opt-out.** Option B is on by default. A Provider annotated
+   `virtrigaud.io/stamp-legacy-vms: "false"` opts out, for operators who must
+   not have VirtRigaud write the Notes of existing VMs. Each VM stamped gets
+   one Normal audit event (`OwnerStampMigrated`). Stamping is paced per
+   Provider. The release notes announce it.
 
 ### D4: Phases
 
 | Phase | Release | What |
 |---|---|---|
-| 1 | v0.4.0 (rc2 if accepted into scope, otherwise rc3 or v0.4.1) | D1 to D3: the flag, `owner_check`, the latch, one-time legacy stamping, reporting. The name rule still applies to unconfirmed VMs. `docs/vm-ownership.md` Limits is rewritten to the residual below. |
+| 1 | v0.4.1 (v0.5.0 if no real PVE lab is available before then). **Release gate:** validation on a real PVE cluster. | D1 to D3: the flag, `owner_check`, the latch, one-time legacy stamping, reporting. The name rule still applies to unconfirmed VMs. `docs/vm-ownership.md` Limits is rewritten to the residual below. |
 | 2 | v0.5.0 | The Proxmox provider drops the name rule by default: with an owner UID present, an unstamped VM is `VM_NOT_OWNED` on every per-VM call and on `Delete` (fail-safe: `VMLeftOnHypervisor`). `TransferOwner` keeps its name check, because it is the VMID-reuse guard of adoption, not an authorization. An escape hatch `PROXMOX_ALLOW_LEGACY_UNSTAMPED_NAME_RULE=true` restores phase-1 behaviour, logs a warning at start and is reported in capabilities and diagnostics. Upgrade notes require the D3 gauge to be 0 first. |
 | 3 | v0.6.0 | The escape hatch is removed. `require_owner_stamp` stays on the wire, and a provider without the rule ignores it. |
 
@@ -461,7 +466,8 @@ provider change there.
     a manager downgrade or a lost status.
 - **Behaviour change visible to operators.**
   - Phase 1 writes one Notes line on each legacy Proxmox VM, the same line
-    adoption writes today. Opt-out is pending decision.
+    adoption writes today. A per-Provider opt-out exists, and each stamp
+    records a Normal audit event.
   - A confirmed VM whose stamp is removed by hand becomes `VMNotOwned` instead
     of silently accepted.
   - Phase 2 holds any VM still unstamped.
@@ -521,23 +527,30 @@ provider change there.
   - for the Option E spike: whether `meta` can be set by a non-root token on
     create and update, and what a restore in place does to `ctime`.
 
-## Open questions (for the maintainer)
+## Decisions on the open questions
 
-1. **Release target for phase 1.** rc2 (it is about two proto fields, one
-   capability, one status struct and two controller steps) or rc3/v0.4.1?
-2. **Option B default.** Should one-time legacy stamping be on by default with
-   a per-Provider opt-out (proposed), or opt-in? It writes Notes on existing
-   VMs.
-3. **Phase 2.** Is v0.5.0 the right release to drop the name rule, and should
-   an escape hatch exist for one minor (proposed)?
-4. **Proto placement.** Is a single `ObjectIdentity.require_owner_stamp`
-   acceptable (proposed), or should there be per-request fields?
-5. **Option E spike.** Should it be scheduled (virtualization specialist plus
-   a lab check of `meta` read-only-ness, restore behaviour and PVE version
-   coverage)? It is the only fix for a copied stamp.
-6. **Residual risk.** Does the security review accept the forged-stamp
-   residual (known UID plus `VM.Config.Options`) for v0.4.0, given the
-   documented ACL boundary?
-7. **PVE permission (to verify).** Does `POST /nodes/{node}/qemu` with `name`
-   or `description` require `VM.Config.Options` in addition to `VM.Allocate`?
-   This refines the "who" above but does not change the design.
+These were decided by William Rizzo on 2026-10-17.
+
+1. **Release target.** Phase 1 is not in v0.4.0 (rc2). It targets **v0.4.1**,
+   or v0.5.0 if a real PVE lab is not available before then. **Validation on a
+   real PVE cluster is a release gate** for Phase 1. In v0.4.0 the mitigation
+   is operator guidance only: `docs/vm-ownership.md` Limits advises against
+   granting `VM.Allocate` on VirtRigaud's pools and paths to anyone else.
+2. **Option B default.** One-time legacy stamping is **on by default**, with a
+   per-Provider opt-out (`virtrigaud.io/stamp-legacy-vms: "false"`). It is
+   announced in the release notes, records one Normal audit event per VM
+   stamped, and is paced per Provider (D3).
+3. **Phase 2.** The name rule is dropped by default in **v0.5.0**, with a
+   one-minor escape hatch. The upgrade is gated on the "unconfirmed VMs" gauge
+   reaching 0. The hatch is removed in v0.6.0 (D4).
+4. **Proto placement.** A single `ObjectIdentity.require_owner_stamp` field.
+   Other `ObjectIdentity` uses ignore it, and this is documented (D1). Field
+   numbers are assigned at implementation time.
+5. **Option E.** The spike on binding to PVE's `meta` ctime is scheduled
+   together with the PVE lab's return.
+6. **Residual risk.** The forged-stamp residual (D5: a known UID plus
+   `VM.Config.Options` on the planted VM) is **accepted for v0.4.0**, given the
+   PVE ACL boundary. It is recorded in the security posture documentation
+   (`docs/vm-ownership.md`, Proxmox Limits).
+7. **PVE permission.** Whether creating a VM with `name` or `description` also
+   needs `VM.Config.Options` is checked on the first PVE lab day.

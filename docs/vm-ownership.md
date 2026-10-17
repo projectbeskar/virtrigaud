@@ -1231,10 +1231,30 @@ that adoption bound before this release keeps the stamp it had.
   created in, such as a shared pool — can create an unstamped VM with the
   `VirtualMachine`'s name there, and the `VirtualMachine` then reads, powers,
   resizes, snapshots and copies it as its own. A VM at that VMID stamped for
-  anyone else is refused. Grant `VM.Allocate` on the pools and paths where
-  VirtRigaud's VMs live only as you would `VM.Config.Options` (see
-  [The owner stamp](#the-owner-stamp-1)). Retiring the rule is
-  proposed in [ADR-0012](adr/0012-proxmox-legacy-unstamped-name-rule.md).
+  anyone else is refused.
+
+  **What to do in v0.4.0.** Do not grant `VM.Allocate` on the pools and paths
+  where VirtRigaud's VMs live to any principal other than VirtRigaud's own
+  Provider tokens and its administrators. Treat `VM.Allocate` there like
+  `VM.Config.Options` (see [The owner stamp](#the-owner-stamp-1)). This
+  includes inherited grants, such as one on `/vms` or `/`, and shared pools.
+
+  **What comes next.** [ADR-0012](adr/0012-proxmox-legacy-unstamped-name-rule.md)
+  retires the rule:
+  - the manager records each VM whose stamp the provider has confirmed, and
+    from then on requires the stamp for it;
+  - legacy VMs are stamped once;
+  - the rule is dropped by default in v0.5.0.
+
+  The first part (phase 1) is planned for v0.4.1 and is not in v0.4.0.
+- **Accepted risk (v0.4.0): a stamp can be copied.** The stamp's checksum
+  detects edits, not forgery. Anyone who knows a `VirtualMachine`'s UID and can
+  set a VM's description (`VM.Config.Options`) can write that
+  `VirtualMachine`'s stamp on a VM they plant at its freed VMID. The UID is not
+  secret: it is readable through the Kubernetes API and in the original VM's
+  Notes with `VM.Audit`. This is accepted for v0.4.0, given the PVE ACL
+  boundary above. ADR-0012's Option E (binding to a PVE creation attribute)
+  would close it and is scheduled as a spike.
 - **Give each Provider its own PVE API token.** The restart guard tells this
   provider's clone and create tasks from other users' by the PVE user that
   ran them. Two Provider objects, or two provider replicas, that share a token
