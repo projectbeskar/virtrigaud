@@ -393,9 +393,13 @@ func uploadNotPublished(readErr, uploadErr error) bool {
 //   - stagePublish: the rename. It either replaced the landing name or did
 //     not; "failed, nothing landed" only when mv ended on its own with an exit
 //     status, otherwise the untyped error (the rename may have happened).
-//   - anything else is before the rename: the private directory — with the
-//     staged object and the converted disk — is removed, a host command that
-//     outlives a cancelled call can only write into it, and the rename runs
+//   - stageCommand: a qemu-img convert or dd that rewrites the whole disk in
+//     the private directory. Nothing landed in any case, but a command whose
+//     session dropped (or that was killed) may still run, and a retry would
+//     start a second full conversion: known only when the command ended on its
+//     own with an exit status (endedFailure), otherwise the untyped error.
+//   - anything else is before those: reads, checks, the download and the
+//     stage into the private directory — which is removed, and the rename runs
 //     only in the same sequential call, which has returned. Nothing landed,
 //     whatever state the connection is in. A typed refusal stays.
 func singleHostImportFailure(ctx context.Context, err error) error {
@@ -403,7 +407,7 @@ func singleHostImportFailure(ctx context.Context, err error) error {
 	switch stage {
 	case stageInvalid:
 		return refusal(codes.InvalidArgument, wireImportRefused, err)
-	case stagePublish:
+	case stagePublish, stageCommand:
 		return endedFailure(ctx, wireImportFailed, err)
 	}
 	return nothingDone(wireImportNotPerformed, err)

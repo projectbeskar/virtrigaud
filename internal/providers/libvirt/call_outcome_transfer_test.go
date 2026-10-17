@@ -218,14 +218,14 @@ func TestSingleHostExportS3_Outcomes(t *testing.T) {
 		assert.True(t, fx.calledWith("rm -rf"), "the staging directory is removed: %v", fx.calls())
 		assert.Empty(t, fx.s3.Keys(), "nothing was uploaded")
 	})
-	t.Run("a: the flatten is killed or its connection drops - still nothing published", func(t *testing.T) {
+	t.Run("c: the flatten is killed or its connection drops - unknown (it may still run; a retry would start a second)", func(t *testing.T) {
 		for name, code := range map[string]string{"killed": "137", "connection": "255"} {
 			t.Run(name, func(t *testing.T) {
 				fx := newTransferFixture(t)
 				fx.script("local", "exit-qemu-img-convert", code)
 				_, err := fx.server().ExportDisk(context.Background(), fx.s3ExportRequest(t))
-				assertNotPerformedStatus(t, err)
-				assert.Empty(t, fx.s3.Keys())
+				assertUnknownOutcome(t, err)
+				assert.Empty(t, fx.s3.Keys(), "nothing was published in any case")
 			})
 		}
 	})
@@ -450,13 +450,13 @@ func TestSingleHostImportS3_Outcomes(t *testing.T) {
 		assertConstantText(t, err, "scripted", "qemu-img", poolSecret)
 		assert.False(t, fx.calledWith("mv"))
 	})
-	t.Run("a: the convert is killed or the connection drops - nothing landed either", func(t *testing.T) {
+	t.Run("c: the convert is killed or the connection drops - unknown (it may still run; a retry would start a second)", func(t *testing.T) {
 		for name, code := range map[string]string{"killed": "137", "connection": "255"} {
 			t.Run(name, func(t *testing.T) {
 				fx := newTransferFixture(t)
 				fx.script("local", "exit-qemu-img-convert", code)
 				_, err := fx.server().ImportDisk(context.Background(), fx.s3ImportRequest(t))
-				assertNotPerformedStatus(t, err)
+				assertUnknownOutcome(t, err)
 				assert.False(t, fx.calledWith("mv"), "the rename is only ever run by this call, which has returned")
 			})
 		}
@@ -512,16 +512,31 @@ func TestSingleHostImportNFS_Outcomes(t *testing.T) {
 		assertConstantText(t, err, "nfs.example", "exports")
 		assert.False(t, fx.calledWith("mv"))
 	})
-	t.Run("a: the convert fails or is killed - nothing landed", func(t *testing.T) {
-		for name, script := range map[string][2]string{"fails": {"fail-qemu-img-convert", ""}, "killed": {"exit-qemu-img-convert", "137"}} {
-			t.Run(name, func(t *testing.T) {
-				fx := newTransferFixture(t)
-				fx.script("local", script[0], script[1])
-				_, err := fx.server().ImportDisk(context.Background(), nfsImportRequest())
-				assertNotPerformedStatus(t, err)
-				assert.False(t, fx.calledWith("mv"))
-			})
-		}
+	t.Run("a: the convert ends with an error - nothing landed", func(t *testing.T) {
+		fx := newTransferFixture(t)
+		fx.script("local", "fail-qemu-img-convert", "")
+		_, err := fx.server().ImportDisk(context.Background(), nfsImportRequest())
+		assertNotPerformedStatus(t, err)
+		assert.False(t, fx.calledWith("mv"))
+	})
+	t.Run("c: the convert is killed - unknown (it may still run)", func(t *testing.T) {
+		fx := newTransferFixture(t)
+		fx.script("local", "exit-qemu-img-convert", "137")
+		_, err := fx.server().ImportDisk(context.Background(), nfsImportRequest())
+		assertUnknownOutcome(t, err)
+		assert.False(t, fx.calledWith("mv"))
+	})
+	t.Run("c: the bounded copy of the staged object is killed - unknown", func(t *testing.T) {
+		fx := newTransferFixture(t)
+		fx.script("local", "exit-qemu-img-dd", "255")
+		_, err := fx.server().ImportDisk(context.Background(), nfsImportRequest())
+		assertUnknownOutcome(t, err)
+	})
+	t.Run("a: the bounded copy ends with an error - nothing landed", func(t *testing.T) {
+		fx := newTransferFixture(t)
+		fx.script("local", "fail-qemu-img-dd", "")
+		_, err := fx.server().ImportDisk(context.Background(), nfsImportRequest())
+		assertNotPerformedStatus(t, err)
 	})
 	t.Run("b: the rename fails with an exit status - nothing landed", func(t *testing.T) {
 		fx := newTransferFixture(t)
