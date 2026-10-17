@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"net/url"
 	"regexp"
+	"slices"
 	"strings"
 
 	"google.golang.org/grpc/codes"
@@ -240,6 +241,12 @@ func (p *Provider) transferTargetConfig(ctx context.Context, node string, vmid i
 				p.logger.Error("Cannot confirm that a VM is gone before transferring its owner", "vmid", vmid, "error", gerr)
 				return nil, "", transferRetryError(vmid)
 			}
+			return nil, "", statusWithReasons(codes.NotFound, fmt.Sprintf(transferGoneMessage, vmid))
+		}
+		if sel := p.client.Config().NodeSelector; len(sel) > 0 && !slices.Contains(sel, other) {
+			// Outside the Provider's node scope: ListVMs never offered it.
+			p.logger.Warn("Refusing to transfer the owner of a VM on a node outside the Provider's node selector",
+				"vmid", vmid, "node", other)
 			return nil, "", statusWithReasons(codes.NotFound, fmt.Sprintf(transferGoneMessage, vmid))
 		}
 		node = other

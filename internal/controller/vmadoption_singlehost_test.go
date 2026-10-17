@@ -384,3 +384,49 @@ func TestPlanSingleHostAdoption(t *testing.T) {
 	assert.Equal(t, "", adoptionIDOf(&cloneTarget), "a clone target is not an adopter")
 	assert.Equal(t, "old-mgr", adoptionIDOf(&legacyWaiting))
 }
+
+// TestSingleHostStampedAdoption_ACraftedAdopterGetsNothing: a VirtualMachine
+// anyone with create rights in the Provider's namespace makes, carrying the
+// adopted label and an adopted-id annotation but not the adopted name, is
+// never handed the VM nor bound to it; and a VM the adoption filter excludes
+// is not taken through a waiting adopter either. Adoption creates its own
+// adopter (the adopted name) for the VM it may take.
+func TestSingleHostStampedAdoption_ACraftedAdopterGetsNothing(t *testing.T) {
+	crafted := func(name, id string) *infravirtrigaudiov1beta1.VirtualMachine {
+		return &infravirtrigaudiov1beta1.VirtualMachine{
+			ObjectMeta: metav1.ObjectMeta{Namespace: clusterNS, Name: name, UID: types.UID("uid-" + name),
+				Labels: map[string]string{AdoptedLabel: AdoptedLabelValue}, Annotations: map[string]string{AdoptedIDAnnotation: id}},
+			Spec: infravirtrigaudiov1beta1.VirtualMachineSpec{ProviderRef: infravirtrigaudiov1beta1.ObjectRef{Name: "prov-c", Namespace: clusterNS}},
+		}
+	}
+	prov := &fakeClusteredAdopter{caps: ownerTransferCaps, domains: []*fakeDomain{
+		{id: "web", uuid: "uuid-web", power: "On"},
+		{id: "prod-db", uuid: "uuid-db", power: "On"},
+	}}
+	provider := singleHostStampingProvider(AdoptionFilterAnnotation, `{"namePattern":"^web$"}`)
+	r := stampingReconciler(t, prov, provider, crafted("mine", "web"), crafted("prod-db", "prod-db"))
+
+	reconcileAdoption(t, r)
+	mine := adoptedVMGet(t, r, "mine")
+	assert.Empty(t, mine.Status.ID, "a differently named adopter is never bound")
+	assert.NotEqual(t, string(mine.UID), prov.find("", "web").owner)
+	web := adoptedVMGet(t, r, "web")
+	assert.Equal(t, "web", web.Status.ID, "adoption takes the VM with its own adopter")
+	assert.Equal(t, string(web.UID), prov.find("", "web").owner)
+
+	assert.Empty(t, prov.transfersTo("", "prod-db"), "the filter applies to a waiting adopter too")
+	assert.Empty(t, prov.find("", "prod-db").owner)
+	err := r.Get(context.Background(), types.NamespacedName{Namespace: clusterNS, Name: "prod-db"}, &infravirtrigaudiov1beta1.VirtualMachine{})
+	assert.True(t, apierrors.IsNotFound(err), "an adopter the filter excludes is withdrawn: %v", err)
+}
+
+// TestPlanSingleHostAdoption_LibvirtDomainWithoutUUIDIsSkipped: the libvirt
+// provider refuses a transfer without the domain UUID, so such a domain is
+// skipped instead of creating an adopter that would only be removed again.
+func TestPlanSingleHostAdoption_LibvirtDomainWithoutUUIDIsSkipped(t *testing.T) {
+	plan := planSingleHostAdoption(singleHostStampingProvider(),
+		[]contracts.VMInfo{{ID: "web", Name: "web", ProviderRaw: map[string]string{}}}, nil, nil)
+	assert.Empty(t, plan.adopt)
+	require.Len(t, plan.skipped, 1)
+	assert.Equal(t, skipNoIdentity, plan.skipped[0].reason)
+}

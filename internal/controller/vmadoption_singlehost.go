@@ -202,12 +202,24 @@ func adoptionIDOf(vm *infravirtrigaudiov1beta1.VirtualMachine) string {
 
 // awaitingSingleHostAdoptionOf reports whether vm is an adopting VirtualMachine
 // of provider that is not bound yet and waits for VM id: labelled adopted, in
-// the Provider's namespace, referencing it, no status.id, not being deleted,
+// the Provider's namespace, referencing it, no status.id, no create requested
+// and no pending host (it never went through Create), not being deleted,
 // adoptionIDOf id.
 func awaitingSingleHostAdoptionOf(vm *infravirtrigaudiov1beta1.VirtualMachine, provider *infravirtrigaudiov1beta1.Provider, id string) bool {
 	return vmIsAdopted(vm) && vm.Status.ID == "" && vm.DeletionTimestamp.IsZero() &&
+		!createRequested(vm) && pendingHost(vm) == "" &&
 		vm.Namespace == provider.Namespace && vmProviderKey(vm) == client.ObjectKeyFromObject(provider) &&
 		id != "" && adoptionIDOf(vm) == id
+}
+
+// waitsToAdopt reports whether vm is the adopting VirtualMachine of provider
+// for the listed VM info: awaitingSingleHostAdoptionOf info.ID AND named as
+// adoption names it (contracts.AdoptedVMName). A VirtualMachine anyone could
+// create in the Provider's namespace under another name, carrying the label
+// and annotation, is never handed a VM nor bound to one (it would bypass the
+// adoption filter and the adopted name).
+func waitsToAdopt(vm *infravirtrigaudiov1beta1.VirtualMachine, provider *infravirtrigaudiov1beta1.Provider, info contracts.VMInfo) bool {
+	return awaitingSingleHostAdoptionOf(vm, provider, info.ID) && vm.Name == contracts.AdoptedVMName(info.Name, info.ID)
 }
 
 // planSingleHostAdoption decides what one stamped single-host discovery does
@@ -245,6 +257,9 @@ func planSingleHostAdoption(provider *infravirtrigaudiov1beta1.Provider, listed 
 	var plan singleHostAdoptionPlan
 	for _, info := range listed {
 		w := waiting[info.ID]
+		if w != nil && !waitsToAdopt(w, provider, info) {
+			w = nil // waits for this id under another name: not this adoption's
+		}
 		uids := ownerUIDs(info)
 		switch {
 		case w != nil && len(uids) == 1 && uids[0] == string(w.UID) && !ownerStampUnreliable(info) && !isArtifact(info):
@@ -258,6 +273,12 @@ func planSingleHostAdoption(provider *infravirtrigaudiov1beta1.Provider, listed 
 			}
 		case bound[info.ID]:
 			plan.skipped = append(plan.skipped, adoptionSkip{info: info, reason: skipBoundElsewhere})
+			if releasable(w) {
+				plan.release = append(plan.release, pendingAdoption{info: info, vm: w})
+			}
+		case libvirt && strings.TrimSpace(info.ProviderRaw[contracts.VMInfoUUIDKey]) == "":
+			// The libvirt provider refuses a transfer without the domain UUID.
+			plan.skipped = append(plan.skipped, adoptionSkip{info: info, reason: skipNoIdentity})
 			if releasable(w) {
 				plan.release = append(plan.release, pendingAdoption{info: info, vm: w})
 			}
@@ -341,8 +362,13 @@ func (r *VMAdoptionReconciler) reconcileStampedSingleHostAdoption(ctx context.Co
 
 	var candidates []singleHostCandidate
 	for _, c := range plan.adopt {
-		if c.waiting == nil && filter != nil && !r.matchesFilter(c.info, filter) {
+		if filter != nil && !r.matchesFilter(c.info, filter) {
 			logger.V(1).Info("VM filtered out by adoption filter", "vm_id", c.info.ID, "vm_name", c.info.Name)
+			// One this flow created before the filter changed waits for a
+			// VM it may no longer take: withdrawn.
+			if releasable(c.waiting) {
+				plan.release = append(plan.release, pendingAdoption{info: c.info, vm: c.waiting})
+			}
 			continue
 		}
 		candidates = append(candidates, c)
@@ -382,7 +408,7 @@ func (r *VMAdoptionReconciler) reconcileStampedSingleHostAdoption(ctx context.Co
 	withdrawn := 0
 	for _, p := range plan.release {
 		if r.removeWaitingVM(ctx, p.vm, func(fresh *infravirtrigaudiov1beta1.VirtualMachine) bool {
-			return awaitingSingleHostAdoptionOf(fresh, provider, p.info.ID)
+			return waitsToAdopt(fresh, provider, p.info)
 		}) {
 			withdrawn++
 			continue
@@ -513,7 +539,7 @@ func (r *VMAdoptionReconciler) adoptAndStampVM(ctx context.Context, provider *in
 			vm = created
 		case err != nil:
 			return fmt.Errorf("get VirtualMachine %s/%s: %w", provider.Namespace, name, err)
-		case !awaitingSingleHostAdoptionOf(existing, provider, info.ID):
+		case !waitsToAdopt(existing, provider, info):
 			return fmt.Errorf("VirtualMachine %s/%s exists and is not waiting for this adoption: %w",
 				provider.Namespace, name, errAdoptionSkipped)
 		default:
@@ -539,7 +565,7 @@ func (r *VMAdoptionReconciler) adoptAndStampVM(ctx context.Context, provider *in
 		}
 		return fmt.Errorf("re-read VirtualMachine %s/%s: %w", vm.Namespace, vm.Name, err)
 	}
-	if fresh.UID != vm.UID || !awaitingSingleHostAdoptionOf(fresh, provider, info.ID) {
+	if fresh.UID != vm.UID || !waitsToAdopt(fresh, provider, info) {
 		return fmt.Errorf("VirtualMachine %s/%s is no longer waiting for this adoption: %w", vm.Namespace, vm.Name, errAdoptionDeferred)
 	}
 	vm = fresh
@@ -553,8 +579,10 @@ func (r *VMAdoptionReconciler) adoptAndStampVM(ctx context.Context, provider *in
 			metrics.RecordError(errReasonAdoptionTransfer, metrics.ComponentManager)
 			return fmt.Errorf("transfer the owner of VM %s: %w", info.ID, err)
 		}
-		removed := r.removeWaitingVM(ctx, vm, func(f *infravirtrigaudiov1beta1.VirtualMachine) bool {
-			return awaitingSingleHostAdoptionOf(f, provider, info.ID)
+		// Only an adopter this flow created is removed; one an older manager
+		// created is left as it is (it keeps waiting, with no provider call).
+		removed := !releasable(vm) || r.removeWaitingVM(ctx, vm, func(f *infravirtrigaudiov1beta1.VirtualMachine) bool {
+			return waitsToAdopt(f, provider, info)
 		})
 		if !removed {
 			return fmt.Errorf("transfer the owner of VM %s: %w (%s/%s): %w: %w", info.ID, errAdoptionStranded,
@@ -613,8 +641,18 @@ func (r *VMAdoptionReconciler) writeSingleHostBinding(ctx context.Context, provi
 			return fmt.Errorf("VirtualMachine %s was replaced: %w", key, errAdoptionDeferred)
 		case latest.Status.ID == info.ID && latest.DeletionTimestamp.IsZero():
 			return nil // already bound
-		case !awaitingSingleHostAdoptionOf(latest, provider, info.ID):
+		case !waitsToAdopt(latest, provider, info):
 			return fmt.Errorf("VirtualMachine %s is no longer waiting for this adoption: %w", key, errAdoptionDeferred)
+		}
+		// Never bind a VirtualMachine whose VMClass or VMImage is in another
+		// namespace that does not select the Provider's — checked on the
+		// object written, which may have been edited since the transfer.
+		if err := checkVMConsumerRefs(ctx, r.Client, latest); err != nil {
+			if isConsumerNotAllowed(err) {
+				return fmt.Errorf("VirtualMachine %s references an ungranted cross-namespace object (%s): %w",
+					key, err.Error(), errAdoptionSkipped)
+			}
+			return fmt.Errorf("check consumer grants of adopted VirtualMachine %s: %w", key, err)
 		}
 		latest.Status.ID = info.ID
 		recordBoundProvider(latest, provider)

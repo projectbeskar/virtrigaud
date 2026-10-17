@@ -772,7 +772,11 @@ func (r *VMAdoptionReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Named("vmadoption").
 		Watches(&infravirtrigaudiov1beta1.Provider{}, &handler.EnqueueRequestForObject{}).
 		WithOptions(controller.Options{
-			MaxConcurrentReconciles: 1, // Process one provider at a time
+			// Process one provider at a time. Single-host adoption relies on
+			// it: two Provider objects fronting one libvirt host never stamp
+			// concurrently (libvirt has no conditional metadata write; see
+			// internal/providers/libvirt/adoption_transfer_owner.go).
+			MaxConcurrentReconciles: 1,
 		}).
 		WithEventFilter(predicate.Funcs{
 			CreateFunc: func(e event.CreateEvent) bool {

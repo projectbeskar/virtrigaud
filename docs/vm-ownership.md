@@ -186,6 +186,15 @@ A waiting `VirtualMachine` created by an older manager (no `adopted-id`
 annotation) is bound the same way when its VM can be stamped, but is never
 deleted by adoption.
 
+Only a `VirtualMachine` named as adoption names it (the sanitized VM name, or
+`vm-<id>`) is ever handed a VM or bound to it, and only for a VM that passes
+the Provider's `virtrigaud.io/adopt-filter`. A `VirtualMachine` someone creates
+in the Provider's namespace with the adopted label and an `adopted-id`
+annotation under another name gets nothing; a waiting one whose VM the filter
+now excludes is withdrawn. A libvirt domain listed without a UUID is skipped
+(the provider needs it for the compare-and-swap), and a Proxmox VM found on a
+node outside the Provider's node selector is refused.
+
 ### What operators see
 
 `Provider.status.adoption.message` counts the VMs adopted, failed and deferred,
@@ -477,9 +486,13 @@ metadata:
 
 Only `"true"` opts in. Set it only when no other VirtRigaud installation
 manages the same vCenter or host, and remove it afterwards. Through a provider
-that reports `supportsOwnerTransfer`, the stale stamp is replaced by the
+that reports `supportsOwnerTransfer`, the stale stamp is **replaced** by the
 adopting `VirtualMachine`'s, after an uncached check that no `VirtualMachine`
-has the stale UID (see [Adoption stamps the adopted VM](#adoption-stamps-the-adopted-vm)).
+in this cluster has the stale UID (see
+[Adoption stamps the adopted VM](#adoption-stamps-the-adopted-vm)). That check
+can't see another installation: if one does manage the VM, it loses it (its
+owner-checked calls then refuse the VM), which is why the opt-in must stay off
+whenever an endpoint is shared between installations.
 A clustered Provider never adopts a stamped VM, with or without the
 annotation: it reports it as a previous incarnation, which you re-attach per
 the ADR-0007 A6 runbook.

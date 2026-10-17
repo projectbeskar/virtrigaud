@@ -37,7 +37,12 @@ const singleHostTransferLabel = hostconn.HostID("single-host")
 // or listed replaceable, and the stamp is written with `virsh metadata` and
 // read back. Transfers are serialized in the provider process; two provider
 // processes fronting the same host are not (see the file comment of
-// routed_transfer_owner.go).
+// routed_transfer_owner.go). Within one installation the manager runs every
+// Provider's adoption one at a time (the VMAdoption controller's
+// MaxConcurrentReconciles is 1, under leader election), and a later discovery
+// lists the earlier one's stamp; two installations sharing a host remain
+// unserialized, which is why adopt-stamped-vms must only be set when no other
+// installation manages the host.
 //
 // The request must not name a host: a single-host provider has none to route
 // to, and silently ignoring one would hide a manager that believes the
