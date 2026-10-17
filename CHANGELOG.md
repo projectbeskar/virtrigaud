@@ -5,6 +5,29 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-10-17 00:06] - Proxmox: Describe, Power, Reconfigure and snapshot calls are owner-checked against a reused VMID
+**Author:** @wrkode (William Rizzo)
+
+### Security
+- `internal/providers/proxmox/vm_owner_check.go` (new), `internal/providers/proxmox/server.go`: on a single-host Proxmox Provider only `Delete` checked the VM's owner stamp. `Describe`, `Power`, `Reconfigure`, `SnapshotCreate`, `SnapshotDelete` and `SnapshotRevert` acted on whatever VM held the recorded VMID, so a `VirtualMachine` whose VM was deleted outside VirtRigaud could read, power off, resize, snapshot or revert an unrelated VM (another tenant's) that PVE gave the freed VMID. When the request carries an owner, the provider now reads the VM's config and checks the stamp first, with `Delete`'s rule: a VM stamped with the requester's UID, or unstamped and named like the owner (its name, or `contracts.AdoptedVMName`), is acted on as before; a VM stamped with another UID, or unstamped with another name, is `NotFound` + `VM_NOT_OWNED` and is neither read nor changed; an unreadable or multiple stamp is `FailedPrecondition` + `OWNER_STAMP_UNREADABLE`; a config that cannot be read is retryable. `Describe` answers `VM_NOT_OWNED`, never `Exists=false` (which would make the manager create the VM again for a VM it cannot prove gone). `Reconfigure` reuses the config it already reads; the other calls make one extra config read, only when an owner is sent. `SnapshotDelete` checks the VM on its actual node. Requests without an owner (an older manager) are unchanged; templates keep their handling and are owner-checked like any VM.
+
+### Changed
+- `internal/controller/vmref.go`, `internal/providers/contracts/vmref.go`: `vmRefFor` gives a single-host ref the VirtualMachine's identity as `Owner` (`singleHostRef`; none without a UID).
+- `internal/transport/grpc/client.go`: `Describe`, `Power`, `Reconfigure`, `SnapshotCreate`, `SnapshotDelete` and `SnapshotRevert` send the owner for every VM (`vmOwner`), not only routed ones. `ExportDisk`, `GetDiskInfo` and the clone source still send it only when routed. vSphere, single-host libvirt and mock ignore it.
+- `internal/controller/virtualmachine_owner_refusal_hold.go` (new), `internal/controller/virtualmachine_controller.go`, `internal/k8s/conditions.go`: a single-host `Describe`, `Power` or `Reconfigure` answered `VM_NOT_OWNED` holds the `VirtualMachine` as `Ready=False/VMNotOwned` (new reason), one answered `OWNER_STAMP_UNREADABLE` as `Ready=False/OwnerStampUnreadable`: constant message, one `Warning` event when the hold begins, status written only on change, blocked-VM backoff (up to 5 min), `status.id` kept and nothing re-created. `VMSnapshot` and `VMMigration` handling is unchanged (a `VM_NOT_OWNED` snapshot delete is "already gone").
+- `proto/provider/v1/provider.proto`, `proto/rpc/provider/v1/provider.pb.go` (regenerated, comments only): the `owner` of `Describe`, `Power`, `Reconfigure`, snapshot and `Delete` requests is sent single-host too, and checked by a single-host Proxmox provider. No wire change.
+- `internal/providers/proxmox/vm_owner_check_test.go` (new): every guarded call against pvefake with VMID reuse by another tenant's VM and by a VM made outside VirtRigaud, legacy unstamped and adopted names, unreadable and multiple stamps, a template, no owner, a config-read failure, a gone VM, and a snapshot delete after a node move. `internal/controller/virtualmachine_owner_refusal_hold_test.go` (new): unit and envtest holds for `Describe` and `Power`, no re-create, no status churn, release on delete. `internal/transport/grpc/client_routing_test.go`, `internal/controller/virtualmachine_clustered_test.go`, `internal/controller/virtualmachine_boundprovider_test.go`: single-host refs and requests carry the owner.
+- `docs/vm-ownership.md`: new section "`Describe`, `Power`, `Reconfigure` and snapshots"; "When is a VM gone?", "Existing VMs" and "Limits" updated (the limitation that these calls do not check the stamp is removed; the remaining unchecked calls are listed). `docs/upgrading.md`: behaviour-change row.
+
+### Why
+A reused Proxmox VMID let one tenant's `VirtualMachine` observe and change another tenant's VM. Validated against the in-repo PVE fake (pvefake) only; there is no real PVE cluster in CI or the lab for this change.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-10-17 00:18] - Adoption stamps the adopted VM with its new owner (single-host)
 **Author:** @wrkode (William Rizzo)
 
