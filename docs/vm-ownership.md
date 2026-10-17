@@ -909,15 +909,22 @@ or changes it. It applies the same rule as `Delete`:
 - **`SnapshotDelete` checks the VM on its actual node.** It resolves the node
   from `/cluster/resources` (an HA move changes it), as before, and checks the
   stamp of the VM there.
-- **`Reconfigure` and `GetDiskInfo` cost no extra API call.** They already
-  read the VM's config and check the stamp in it. The other calls read the
-  config once more, only when the request carries an owner.
-- **`ExportDisk` checks before either backend path.** The S3 and NFS exports
-  run on the node over SSH; a refused export reaches neither, so no disk is
-  read or copied.
-- **A `Clone` checks its source before anything is cloned:** before the
-  re-bind lookup, the VMID allocation and the clone task. The clone *target*
-  (`target_vm`) is stamped as before.
+- **API load: every checked call except `Reconfigure` and `GetDiskInfo` costs
+  one extra `GET /nodes/{node}/qemu/{vmid}/config`.** `Reconfigure` and
+  `GetDiskInfo` already read the VM's config and check the stamp in it. The
+  extra read is made only when the request carries an owner. Size the PVE API
+  rate limits and the token's request budget with it: the VM controller sends
+  a `Describe` on every reconcile of every bound VM.
+- **`ExportDisk` checks before either backend path, and again on the config it
+  copies from.** The S3 and NFS exports run on the node over SSH; a refused
+  export reaches neither, so no disk is read or copied. Each path's own disk
+  read (the config that yields the volume it copies) carries the owner too, so
+  a VM that took the VMID over after the first check is not copied either.
+- **A `Clone` checks its source before anything is cloned:** after the
+  re-bind lookup, which never reads the source, and before the VMID allocation
+  and the clone task. A retried `Clone` whose target already exists is
+  therefore answered with it even if the source's VMID was reused since. The
+  clone *target* (`target_vm`) is stamped as before.
 - **`Describe` doesn't answer `Exists=false` for a VM that isn't the
   requester's.** On a single-host Provider, `Exists=false` makes the manager
   create the VM again. The provider can't prove the requester's own VM is gone:
@@ -930,7 +937,7 @@ What the manager does with each answer:
 | Call | `VM_NOT_OWNED` | `OWNER_STAMP_UNREADABLE` |
 |---|---|---|
 | `Describe`, `Power`, `Reconfigure` (VM controller) | `Ready=False/VMNotOwned`. `status.id` is kept, and **no VM is created in its place**. | `Ready=False/OwnerStampUnreadable` |
-| `SnapshotDelete` (`VMSnapshot` finalizer, migration cleanup) | Treated as "already gone": the requester's VM, and its snapshots with it, aren't at that VMID. The `VMSnapshot` is released. | Held and retried, like any failed snapshot delete |
+| `SnapshotDelete` (`VMSnapshot` finalizer, migration cleanup) | Released, since it can't be deleted through a VM that isn't the `VirtualMachine`'s. It is **not** reported as already gone: a `SnapshotLeftOnHypervisor` Warning says the snapshot may be left on the VM at that id (if that VM is the `VirtualMachine`'s after all: renamed in PVE, or the `VirtualMachine` re-created under a new UID), and the manager logs the VM and snapshot ids. | Held and retried, like any failed snapshot delete |
 | `SnapshotCreate` (`VMSnapshot`) | The `VMSnapshot` fails | The same |
 | `VMMigration` source: the `powerOffBeforeMigration` `Describe`, the source snapshot, the disk-size checks' `GetDiskInfo`, `ExportDisk` | The migration **fails** with a constant message, before anything is exported. The power-off `Describe` now runs before the source `VirtualMachine`'s `spec.powerState` is set to `Off`, so a refused source's spec isn't changed either. | The same |
 | `VMClone` source: the disk-size check's `GetDiskInfo`, `Clone` | The clone **fails** (`Failed=True`, reason `VMNotOwned`) with a constant message and one `Warning` event. Nothing was cloned. | The same, reason `OwnerStampUnreadable` |
@@ -1026,7 +1033,18 @@ that adoption bound before this release keeps the stamp it had.
   after the clone), so `VMClone` clones are unstamped. They aren't re-bound by
   a re-sent `Clone`, and a re-sent `Clone` can make a second clone.
 - The owner check and the call are two PVE requests. A VMID freed and reused
-  between them isn't caught. PVE's config `digest` parameter could close this
+  between them isn't caught.
+- **The legacy name rule can be claimed by anyone who can create a VM.** An
+  unstamped VM named like the owner is treated as the owner's (see the table
+  above). So when a `VirtualMachine`'s VM is removed, anyone who can create a
+  VM with that VMID — `VM.Allocate` on a pool or path the freed VMID can be
+  created in, such as a shared pool — can make an unstamped VM with the
+  `VirtualMachine`'s name there, and the `VirtualMachine` then reads, powers,
+  resizes, snapshots and copies it as its own. A stamped `VirtualMachine`'s VM
+  is matched by its UID instead, which a new VM carries only if its creator
+  also writes a stamp into its description. Grant `VM.Allocate` on the pools
+  and paths where VirtRigaud's VMs live only as you would `VM.Config.Options`
+  (see [The owner stamp](#the-owner-stamp-1)). PVE's config `digest` parameter could close this
   for `Reconfigure` (its config `PUT` and disk `resize`); it isn't used yet.
   `Power` and the snapshot calls have no such parameter.
 - **Give each Provider its own PVE API token.** The restart guard tells this
