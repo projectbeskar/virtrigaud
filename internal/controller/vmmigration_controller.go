@@ -2355,16 +2355,21 @@ func (r *VMMigrationReconciler) handleDeletion(ctx context.Context, migration *i
 	cleanupErrors := []error{}
 
 	// Explicitly delete PVC if it exists (in addition to owner reference
-	// cleanup): a pvc migration's staged file goes with it.
+	// cleanup): a pvc migration's staged file goes with it. Only the PVC this
+	// migration created (the UID it recorded, migrationCreatedPVC) is deleted;
+	// a user's PVC (spec.storage.pvc.name) is left for its owner.
 	if migration.Status.StoragePVCName != "" {
 		pvc := &corev1.PersistentVolumeClaim{}
 		pvcKey := client.ObjectKey{
 			Namespace: migration.Namespace,
 			Name:      migration.Status.StoragePVCName,
 		}
-		if err := r.Get(ctx, pvcKey, pvc); err == nil {
+		if err := r.Get(ctx, pvcKey, pvc); err == nil && (migrationNamedPVC(migration) != "" || !migrationCreatedPVC(pvc, migration)) {
+			logger.Info("Migration PVC was not created by this migration; leaving it for its owner", "pvc_name", pvc.Name)
+			r.Recorder.Eventf(migration, corev1.EventTypeNormal, eventReasonMigrationPVCRetained, migrationPVCRetainedMessage, pvc.Name)
+		} else if err == nil {
 			logger.Info("Explicitly deleting PVC", "pvc_name", migration.Status.StoragePVCName)
-			if err := r.Delete(ctx, pvc); err != nil && !errors.IsNotFound(err) {
+			if err := r.Delete(ctx, pvc, client.Preconditions{UID: &pvc.UID}); err != nil && !errors.IsNotFound(err) {
 				logger.Error(err, "Failed to delete PVC during cleanup", "pvc_name", migration.Status.StoragePVCName)
 				cleanupErrors = append(cleanupErrors, fmt.Errorf("PVC cleanup: %w", err))
 			} else {
@@ -2955,6 +2960,9 @@ func (r *VMMigrationReconciler) ensureMigrationPVC(ctx context.Context, migratio
 	}
 
 	pvcConfig := migration.Spec.Storage.PVC
+	if err := migrationPVCSpecChangedError(migration); err != nil {
+		return "", err
+	}
 
 	// If PVC name specified, verify it exists
 	if pvcConfig.Name != "" {
@@ -2969,22 +2977,32 @@ func (r *VMMigrationReconciler) ensureMigrationPVC(ctx context.Context, migratio
 			}
 			return "", fmt.Errorf("failed to get PVC %s: %w", pvcConfig.Name, err)
 		}
+		// Only a PVC its owner labelled as migration storage, and not another
+		// migration's, is mounted into the provider pods (discoverMigrationStorage).
+		if err := migrationPVCReferenceError(pvc, migration); err != nil {
+			return "", fmt.Errorf("PVC %s cannot be used as migration storage: %w", pvcConfig.Name, err)
+		}
 		logger.Info("Using existing PVC for migration", "pvc", pvcConfig.Name)
 		return pvcConfig.Name, nil
 	}
 
 	// Auto-create PVC
-	pvcName := fmt.Sprintf("%s-storage", migration.Name)
+	pvcName := migrationAutoPVCName(migration)
 
-	// Check if PVC already exists
+	// Check if PVC already exists (live: the cache may not show the PVC this
+	// migration has just created).
 	existingPVC := &corev1.PersistentVolumeClaim{}
-	err := r.Get(ctx, types.NamespacedName{
+	err := r.liveReader().Get(ctx, types.NamespacedName{
 		Name:      pvcName,
 		Namespace: migration.Namespace,
 	}, existingPVC)
 
 	if err == nil {
-		// PVC already exists
+		// PVC already exists: it must be the one this migration created, or
+		// the provider pods never mount it (discoverMigrationStorage).
+		if err := migrationPVCReferenceError(existingPVC, migration); err != nil {
+			return "", fmt.Errorf("PVC %s cannot be used as migration storage: %w", pvcName, err)
+		}
 		logger.Info("Migration PVC already exists", "pvc", pvcName)
 		return pvcName, nil
 	}
@@ -3015,7 +3033,7 @@ func (r *VMMigrationReconciler) ensureMigrationPVC(ctx context.Context, migratio
 			Labels: map[string]string{
 				"app.kubernetes.io/managed-by": "virtrigaud",
 				"virtrigaud.io/migration":      migration.Name,
-				"virtrigaud.io/component":      "migration-storage",
+				migrationPVCLabelKey:           migrationPVCLabelValue,
 			},
 			Annotations: map[string]string{
 				"virtrigaud.io/created-by": "vmmigration-controller",
@@ -3040,7 +3058,25 @@ func (r *VMMigrationReconciler) ensureMigrationPVC(ctx context.Context, migratio
 	}
 
 	if err := r.Create(ctx, pvc); err != nil {
+		if errors.IsAlreadyExists(err) {
+			// Someone else created a PVC under this name since the check.
+			return "", fmt.Errorf("PVC %s cannot be used as migration storage: %w", pvcName, errMigrationPVCNotOwned)
+		}
 		return "", fmt.Errorf("failed to create PVC: %w", err)
+	}
+	// Record the created PVC's UID, from the API server's answer to this
+	// create: only that PVC is ever mounted or deleted for this migration
+	// (an ownerReference to it can be forged). Unrecorded, it could never be
+	// told from a squatter's, so it is removed again for a clean retry.
+	createdUID := string(pvc.UID)
+	if err := r.recordMigrationResult(ctx, migration, infrav1beta1.MigrationPhaseValidating, func(m *infrav1beta1.VMMigration) {
+		m.Status.StoragePVCName = pvcName
+		m.Status.StoragePVCUID = createdUID
+	}); err != nil {
+		if delErr := r.Delete(ctx, pvc, client.Preconditions{UID: &pvc.UID}); delErr != nil && !errors.IsNotFound(delErr) {
+			logger.Error(delErr, "Failed to remove an unrecorded migration PVC", "pvc", pvcName)
+		}
+		return "", fmt.Errorf("record migration PVC %s: %w", pvcName, err)
 	}
 
 	logger.Info("Successfully created migration PVC", "pvc", pvcName)
@@ -3142,9 +3178,8 @@ func (r *VMMigrationReconciler) migrationProvidersMounted(ctx context.Context, s
 
 // providerMountReady performs a single, non-blocking check that the given
 // provider's Deployment has rolled a Running, Ready pod carrying the migration
-// PVC. The provider controller is responsible for discovering migration PVCs
-// (label virtrigaud.io/component=migration-storage) and attaching them to its
-// Deployment; this only observes the result. The returned reason explains what
+// PVC. The provider controller attaches the PVCs live VMMigrations reference
+// (discoverMigrationStorage) to its Deployment; this only observes the result. The returned reason explains what
 // is still pending when ready is false.
 func (r *VMMigrationReconciler) providerMountReady(ctx context.Context, provider *infrav1beta1.Provider, pvcName string) (bool, string, error) {
 	deploymentName := fmt.Sprintf("virtrigaud-provider-%s-%s", provider.Namespace, provider.Name)
@@ -3206,7 +3241,22 @@ func (r *VMMigrationReconciler) migrationMountDeadlineExceeded(ctx context.Conte
 	if err := r.Get(ctx, types.NamespacedName{Name: pvcName, Namespace: migration.Namespace}, pvc); err != nil {
 		return false, fmt.Errorf("get migration PVC %s: %w", pvcName, err)
 	}
-	return time.Since(pvc.CreationTimestamp.Time) > migrationMountTimeout, nil
+	return time.Since(migrationMountWaitStart(migration, pvc)) > migrationMountTimeout, nil
+}
+
+// migrationMountWaitStart is when the wait for the migration PVC mount began:
+// the latest of the PVC's creation, the migration's start and its last retry.
+// The provider pods mount a PVC only once a migration references it
+// (discoverMigrationStorage), so an older PVC named in spec.storage.pvc.name
+// gets the full budget too.
+func migrationMountWaitStart(migration *infrav1beta1.VMMigration, pvc *corev1.PersistentVolumeClaim) time.Time {
+	start := pvc.CreationTimestamp.Time
+	for _, t := range []*metav1.Time{migration.Status.StartTime, migration.Status.LastRetryTime} {
+		if t != nil && t.After(start) {
+			start = t.Time
+		}
+	}
+	return start
 }
 
 // volumesContainPVC reports whether any volume in the slice binds the named PVC.
@@ -3630,6 +3680,9 @@ func (r *VMMigrationReconciler) generateStorageURL(ctx context.Context, migratio
 		pvcName := migration.Status.StoragePVCName
 		if pvcName == "" {
 			return "", fmt.Errorf("storage PVC name not set in migration status")
+		}
+		if err := migrationPVCSpecChangedError(migration); err != nil {
+			return "", err
 		}
 
 		// PVC URL format: pvc://<pvc-name>/<path>

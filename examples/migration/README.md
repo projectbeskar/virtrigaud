@@ -159,6 +159,94 @@ export only on a **trusted network**, keep **`root_squash` on**, give each tenan
 its **own export**, and prefer narrow per-client ACLs over broad subnets. The disk
 bytes themselves are not encrypted in transit.
 
+## PVC staging backend (legacy): what the provider pods mount
+
+With `storage.type: pvc` the staged disk lives on a PVC that is mounted into the
+source and target provider pods at `/mnt/migration-storage/<pvc-name>`. Those pods
+hold the hypervisor credentials, so the provider controller mounts a PVC into a
+provider pod **only** when all of these hold:
+
+- A `VMMigration` in the **Provider's namespace** references it in
+  `status.storagePVCName` (the migration controller records it at `Validating`).
+  A pod mounts PVCs of its own namespace only, so the migration and both
+  Providers must share one namespace.
+- That migration is in flight: not being deleted, not `Ready`, and not `Failed`
+  with no retry left. A `Failed` migration that will be retried keeps its mount
+  only if the mount worked, meaning a Ready pod of that Provider carries the PVC.
+  Otherwise it is dropped, so a `Bound` PVC the pod can't use (for example a
+  `ReadWriteOnce` or node-pinned volume) can't hold the Provider down between
+  retries. The retry mounts it again.
+- The Provider is that migration's **source** (the source VM's own Provider) or
+  its **target**. Other Providers in the namespace mount nothing.
+- The PVC carries the label `virtrigaud.io/component=migration-storage` **and** is
+  one of these:
+  - The PVC the migration created, `<migration-name>-storage`. The migration
+    records that PVC's UID in `status.storagePVCUID` from the API server's answer
+    to its create, and only that exact object counts. An `ownerReference` to the
+    migration proves nothing, because anyone who can create PVCs can forge one.
+  - The existing PVC `spec.storage.pvc.name` names, as long as it isn't another
+    `VMMigration`'s.
+
+  If a `<migration-name>-storage` PVC the migration didn't create is already
+  there, the migration fails at `Validating` with
+  `PVC <name> cannot be used as migration storage: the PVC was not created by this VMMigration ...`.
+  Changing `spec.storage.pvc` after the migration has recorded its PVC fails the
+  migration too, with `spec.storage.pvc changed after the migration recorded its PVC ...`.
+- The PVC isn't being deleted and is `Bound`. A `Pending` PVC is mounted only
+  while the migration waits for the mount (phase `Validating`) and only when its
+  StorageClass uses `volumeBindingMode: WaitForFirstConsumer`, because then a pod
+  has to use it before it binds. A `Pending` PVC on an `Immediate` StorageClass is
+  mounted once it binds. A PVC that never binds is never mounted, so it can't
+  stall the provider rollout (or, for vSphere and clustered Providers, which use
+  the `Recreate` strategy, take the provider down). The migration fails when its
+  5-minute mount budget runs out.
+
+The label alone mounts nothing. For an **existing PVC** (`spec.storage.pvc.name`),
+the label is how the PVC's owner agrees to its use as migration storage. Without
+it, the migration fails at `Validating` with
+`PVC <name> cannot be used as migration storage: the PVC is not labelled ...`:
+
+```bash
+kubectl -n <namespace> label pvc <name> virtrigaud.io/component=migration-storage
+```
+
+**Deleting the migration.** Deleting a `VMMigration` deletes the PVC it created
+(the one whose UID it recorded), along with the staged disk on it.
+VirtRigaud **never deletes** a PVC named in `spec.storage.pvc.name`, or any other
+PVC the migration didn't create. That PVC is unmounted from the provider pods and
+left for its owner, and the migration records a Normal `MigrationPVCRetained`
+event naming it. The staged disk stays on that PVC under
+`vmmigrations/<namespace>/<migration-name>/`, so remove it yourself when you no
+longer need it.
+
+The source pod mounts the PVC read-write, because it exports into it. A Provider
+that is only the target mounts it **read-only**, because it only reads the staged disk.
+
+If two migrations name the same existing PVC and one exports through a Provider
+while the other only imports through it, that Provider mounts the PVC read-write.
+When the exporting migration finishes, the mount flips to read-only, and the pod
+is rolled for that change.
+
+**When provider pods are rolled.** A provider pod is rolled when a migration's PVC
+is mounted (at `Validating`). It is rolled again when the PVC is released: when
+the migration becomes `Ready`, fails with no retry left, fails with a mount that
+never worked, or is deleted. Earlier releases also rolled the pod when the PVC was
+mounted, but kept the PVC mounted until the migration was deleted. The roll at
+`Ready` or at final failure is new. Every roll can interrupt other migrations
+running through the same Provider.
+
+The manager reads StorageClasses (`get` only) to tell `WaitForFirstConsumer` from
+`Immediate`. A namespace-scoped install (`rbac.scope: namespace`) can't grant
+that. There, a `Pending` PVC is mounted while the migration waits for it (in
+earlier releases it was mounted whatever its state), and the mount budget still
+applies.
+
+If the manager can't read the migrations or PVCs it needs to decide the mounts,
+it leaves the provider Deployment as it is and retries after 30 seconds. A Provider
+whose Deployment already exists keeps its runtime status. One whose Deployment
+doesn't exist yet reports `ProviderRuntimeReady=False` with reason
+`MigrationStorageDiscoveryFailed`.
+
 ## Reference
 
 - [VMMigration CRD source](../../api/infra.virtrigaud.io/v1beta1/vmmigration_types.go)
