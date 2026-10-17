@@ -1079,23 +1079,23 @@ func (p *Provider) alreadyInPowerState(ctx context.Context, vm *object.VirtualMa
 }
 
 // Reconfigure implements the ProviderServer interface. It applies the desired
-// configuration described by req.DesiredJson to the virtual machine identified by
-// req.Id. The JSON payload is expected to contain a subset of the following top-level
-// keys:
+// configuration described by req.DesiredJson — a marshaled
+// contracts.CreateRequest, whose VMClass, DiskDefaults and DiskSpec carry NO json
+// tags, so the keys are their Go field names (Class.CPU, Class.MemoryMiB,
+// Class.DiskDefaults.SizeGiB, Disks[].Name/SizeGiB) — to the virtual machine
+// identified by req.Id, as one ReconfigVM_Task:
 //
-//   - "Class": object with "CPU" (number) and/or "MemoryMiB" (number, MiB) fields
-//     for CPU and memory adjustments.
-//   - "Disks": array where the first element may carry a "SizeGiB" (number, GiB)
-//     field to expand the primary disk.
+//   - CPU and memory, when they differ from the VM's. On a VM that is not
+//     powered off the change must be one vCenter can apply online (CPU
+//     hot-add/hot-remove, memory hot-add within the hot-plug limit, never less
+//     memory); otherwise nothing is changed and the call fails with
+//     FailedPrecondition carrying RECONFIGURE_NEEDS_POWER_OFF.
+//   - The primary disk grown to Class.DiskDefaults.SizeGiB (a floor), and each
+//     spec.disks entry's own additional disk grown to its size (a smaller one
+//     is refused with InvalidArgument). Disks are matched the way Create made
+//     them; see reconfigure.go.
 //
-// These are the Go field names of the marshaled contracts.CreateRequest — VMClass
-// and DiskSpec carry NO json tags — NOT lowercase cpus/memory/size.
-//
-// Current values are retrieved from vCenter before building the change-spec so that
-// only actual differences trigger a ReconfigVM_Task. If no changes are detected the
-// method returns success immediately without contacting vSphere. Disk shrinks are not
-// permitted; a resize is only applied when the desired size is larger than the current
-// allocated size.
+// If nothing differs the method returns success without contacting vSphere.
 func (p *Provider) Reconfigure(ctx context.Context, req *providerv1.ReconfigureRequest) (*providerv1.TaskResponse, error) {
 	if p.client == nil {
 		return nil, fmt.Errorf("vSphere client not configured")
@@ -1118,123 +1118,10 @@ func (p *Provider) Reconfigure(ctx context.Context, req *providerv1.ReconfigureR
 
 	vm := object.NewVirtualMachine(p.client.Client, vmRef)
 
-	// Get current VM properties
-	var vmMo mo.VirtualMachine
-	err = vm.Properties(ctx, vm.Reference(), []string{
-		"config.hardware.numCPU",
-		"config.hardware.memoryMB",
-		"config.hardware.device",
-		"runtime.powerState",
-		propConfigTemplate,
-		propConfigExtraConfig,
-	}, &vmMo)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get VM properties: %w", err)
-	}
-	// Never resize a template or an image artifact (vm_artifact_guard.go).
-	if err := p.checkNotImageArtifact(req.Id, "reconfigure", vmMo.Config); err != nil {
-		return nil, err
-	}
-
-	// Parse the desired configuration. DesiredJson is a marshaled
-	// contracts.CreateRequest; VMClass and DiskSpec carry NO json tags, so the keys
-	// are the Go field names — Class.CPU, Class.MemoryMiB (numeric MiB), and
-	// Disks[].SizeGiB (numeric GiB). Reading lowercase cpus/memory/size (the prior
-	// bug) never matched, so every CPU/memory change was silently dropped while the
-	// RPC reported success — the VM stayed at its creation-time size and status
-	// falsely reported the new size. Mirror the typed parse the Create path uses.
-	var desired struct {
-		Class struct {
-			CPU       int32 `json:"CPU"`
-			MemoryMiB int32 `json:"MemoryMiB"`
-		} `json:"Class"`
-		Disks []struct {
-			SizeGiB int32 `json:"SizeGiB"`
-		} `json:"Disks"`
-	}
-	if err := json.Unmarshal([]byte(req.DesiredJson), &desired); err != nil {
-		return nil, fmt.Errorf("failed to parse desired configuration: %w", err)
-	}
-
-	// Build the reconfiguration spec
-	configSpec := &types.VirtualMachineConfigSpec{}
-	hasChanges := false
-
-	// CPU
-	if desired.Class.CPU > 0 && desired.Class.CPU != vmMo.Config.Hardware.NumCPU {
-		p.logger.Info("CPU change requested", "vm_id", req.Id, "old", vmMo.Config.Hardware.NumCPU, "new", desired.Class.CPU)
-		configSpec.NumCPUs = desired.Class.CPU
-		hasChanges = true
-	}
-
-	// Memory (MemoryMiB is already MiB; vSphere MemoryMB is the same numeric value)
-	if desired.Class.MemoryMiB > 0 {
-		newMemoryMB := int64(desired.Class.MemoryMiB)
-		currentMemoryMB := int64(vmMo.Config.Hardware.MemoryMB)
-		if newMemoryMB != currentMemoryMB {
-			p.logger.Info("Memory change requested", "vm_id", req.Id, "old_mb", currentMemoryMB, "new_mb", newMemoryMB)
-			configSpec.MemoryMB = newMemoryMB
-			hasChanges = true
-		}
-	}
-
-	// Disk resize (grow-only): the primary disk's SizeGiB from the desired spec.
-	if len(desired.Disks) > 0 && desired.Disks[0].SizeGiB > 0 {
-		sizeGB := int64(desired.Disks[0].SizeGiB)
-		// Find the primary disk
-		var primaryDisk *types.VirtualDisk
-		for _, device := range vmMo.Config.Hardware.Device {
-			if disk, ok := device.(*types.VirtualDisk); ok {
-				primaryDisk = disk
-				break
-			}
-		}
-		if primaryDisk != nil {
-			currentSizeGB := primaryDisk.CapacityInKB / (1024 * 1024)
-			if sizeGB > currentSizeGB {
-				p.logger.Info("Disk resize requested", "vm_id", req.Id, "old_gb", currentSizeGB, "new_gb", sizeGB)
-
-				// Create a new disk with updated size
-				newDisk := *primaryDisk
-				newDisk.CapacityInKB = sizeGB * 1024 * 1024 // Convert GiB to KB
-
-				deviceSpec := &types.VirtualDeviceConfigSpec{
-					Operation: types.VirtualDeviceConfigSpecOperationEdit,
-					Device:    &newDisk,
-				}
-
-				configSpec.DeviceChange = append(configSpec.DeviceChange, deviceSpec)
-				hasChanges = true
-			}
-		}
-	}
-
-	// If no changes, return success immediately
-	if !hasChanges {
-		p.logger.Info("No configuration changes needed", "vm_id", req.Id)
-		return &providerv1.TaskResponse{}, nil
-	}
-
-	// Perform the reconfiguration
-	p.logger.Info("Applying VM reconfiguration", "vm_id", req.Id)
-	task, err := vm.Reconfigure(ctx, *configSpec)
-	if err != nil {
-		return nil, fmt.Errorf("failed to start reconfiguration: %w", err)
-	}
-
-	// Wait for the reconfiguration to complete
-	_, err = task.WaitForResult(ctx, nil)
-	if err != nil {
-		return nil, fmt.Errorf("reconfiguration failed: %w", err)
-	}
-
-	p.logger.Info("VM reconfigured successfully", "vm_id", req.Id)
-
-	// Return empty task response since we completed synchronously.
-	// RestartRequired is false: vSphere has no pending state for CPU/memory —
-	// ReconfigVM_Task either applies the change (hot-add, or a powered-off VM)
-	// or fails, and a failure is returned above.
-	return &providerv1.TaskResponse{RestartRequired: false}, nil
+	// Read, plan and apply the change (reconfigure.go): each size goes to the
+	// disk Create made for it, and a CPU/memory change a running VM cannot
+	// take is refused before anything is changed.
+	return p.reconfigureVM(ctx, vm, req)
 }
 
 // HardwareUpgrade implements the ProviderServer interface. It upgrades the virtual
@@ -3336,11 +3223,12 @@ func (p *Provider) attachAdditionalDisk(
 		Device:        diskDevice,
 	}
 
-	// Create reconfigure spec. The disk's record goes in the same task, so the
-	// disk is recorded exactly when it is added.
+	// Create reconfigure spec. The disk's record — its file and its spec.disks
+	// name, by which Reconfigure finds it (reconfigure.go) — goes in the same
+	// task, so the disk is recorded exactly when it is added.
 	configSpec := &types.VirtualMachineConfigSpec{
 		DeviceChange: []types.BaseVirtualDeviceConfigSpec{deviceSpec},
-		ExtraConfig:  []types.BaseOptionValue{&types.OptionValue{Key: recordKey, Value: diskPath}},
+		ExtraConfig:  additionalDiskRecordExtraConfig(diskIndex, diskPath, diskSpec.Name),
 	}
 
 	// Perform the reconfiguration to add the disk

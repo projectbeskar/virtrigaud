@@ -90,7 +90,21 @@ func additionalDiskFileName(vmName string, index int) string {
 func postCreateExtraConfig(spec *VMSpec) []types.BaseOptionValue {
 	out := []types.BaseOptionValue{&types.OptionValue{Key: postCreateMarkerKey, Value: postCreateMarkerValue}}
 	for i := range spec.AdditionalDisks {
-		out = append(out, &types.OptionValue{Key: additionalDiskExtraConfigKey(i + 1), Value: ""})
+		out = append(out,
+			&types.OptionValue{Key: additionalDiskExtraConfigKey(i + 1), Value: ""},
+			&types.OptionValue{Key: additionalDiskNameKey(i + 1), Value: ""})
+	}
+	return out
+}
+
+// additionalDiskRecordExtraConfig returns the ExtraConfig entries recording
+// additional disk index (1-based) as attached: its file, and the spec.disks
+// name it was attached for (when it has one), by which Reconfigure finds the
+// disk of a spec.disks entry even after the list was edited.
+func additionalDiskRecordExtraConfig(index int, file, name string) []types.BaseOptionValue {
+	out := []types.BaseOptionValue{&types.OptionValue{Key: additionalDiskExtraConfigKey(index), Value: file}}
+	if name != "" {
+		out = append(out, &types.OptionValue{Key: additionalDiskNameKey(index), Value: name})
 	}
 	return out
 }
