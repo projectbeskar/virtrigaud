@@ -37,6 +37,7 @@ const (
 	Provider_ImportDisk_FullMethodName       = "/provider.v1.Provider/ImportDisk"
 	Provider_GetDiskInfo_FullMethodName      = "/provider.v1.Provider/GetDiskInfo"
 	Provider_DeleteStagedDisk_FullMethodName = "/provider.v1.Provider/DeleteStagedDisk"
+	Provider_DeleteLandedDisk_FullMethodName = "/provider.v1.Provider/DeleteLandedDisk"
 	Provider_ListVMs_FullMethodName          = "/provider.v1.Provider/ListVMs"
 	Provider_TransferOwner_FullMethodName    = "/provider.v1.Provider/TransferOwner"
 	Provider_ListHosts_FullMethodName        = "/provider.v1.Provider/ListHosts"
@@ -87,6 +88,10 @@ type ProviderClient interface {
 	// cannot return Unimplemented and leave the backend out of
 	// supported_staged_disk_delete_backends.
 	DeleteStagedDisk(ctx context.Context, in *DeleteStagedDiskRequest, opts ...grpc.CallOption) (*DeleteStagedDiskResponse, error)
+	// Remove the disk a VMMigration's ImportDisk landed for a target VM that
+	// does not use it (rc2 R7). Providers that cannot return Unimplemented and
+	// do not report supports_landed_disk_delete.
+	DeleteLandedDisk(ctx context.Context, in *DeleteLandedDiskRequest, opts ...grpc.CallOption) (*DeleteLandedDiskResponse, error)
 	// List all VMs managed by this provider. A clustered provider lists every
 	// host it fronts, tags each VM with its host_id and names the hosts it could
 	// not list in unreachable_host_ids (ADR-0007 Addendum A, A3).
@@ -293,6 +298,16 @@ func (c *providerClient) DeleteStagedDisk(ctx context.Context, in *DeleteStagedD
 	return out, nil
 }
 
+func (c *providerClient) DeleteLandedDisk(ctx context.Context, in *DeleteLandedDiskRequest, opts ...grpc.CallOption) (*DeleteLandedDiskResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(DeleteLandedDiskResponse)
+	err := c.cc.Invoke(ctx, Provider_DeleteLandedDisk_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *providerClient) ListVMs(ctx context.Context, in *ListVMsRequest, opts ...grpc.CallOption) (*ListVMsResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(ListVMsResponse)
@@ -377,6 +392,10 @@ type ProviderServer interface {
 	// cannot return Unimplemented and leave the backend out of
 	// supported_staged_disk_delete_backends.
 	DeleteStagedDisk(context.Context, *DeleteStagedDiskRequest) (*DeleteStagedDiskResponse, error)
+	// Remove the disk a VMMigration's ImportDisk landed for a target VM that
+	// does not use it (rc2 R7). Providers that cannot return Unimplemented and
+	// do not report supports_landed_disk_delete.
+	DeleteLandedDisk(context.Context, *DeleteLandedDiskRequest) (*DeleteLandedDiskResponse, error)
 	// List all VMs managed by this provider. A clustered provider lists every
 	// host it fronts, tags each VM with its host_id and names the hosts it could
 	// not list in unreachable_host_ids (ADR-0007 Addendum A, A3).
@@ -456,6 +475,9 @@ func (UnimplementedProviderServer) GetDiskInfo(context.Context, *GetDiskInfoRequ
 }
 func (UnimplementedProviderServer) DeleteStagedDisk(context.Context, *DeleteStagedDiskRequest) (*DeleteStagedDiskResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method DeleteStagedDisk not implemented")
+}
+func (UnimplementedProviderServer) DeleteLandedDisk(context.Context, *DeleteLandedDiskRequest) (*DeleteLandedDiskResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method DeleteLandedDisk not implemented")
 }
 func (UnimplementedProviderServer) ListVMs(context.Context, *ListVMsRequest) (*ListVMsResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method ListVMs not implemented")
@@ -814,6 +836,24 @@ func _Provider_DeleteStagedDisk_Handler(srv interface{}, ctx context.Context, de
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Provider_DeleteLandedDisk_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(DeleteLandedDiskRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ProviderServer).DeleteLandedDisk(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Provider_DeleteLandedDisk_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ProviderServer).DeleteLandedDisk(ctx, req.(*DeleteLandedDiskRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _Provider_ListVMs_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(ListVMsRequest)
 	if err := dec(in); err != nil {
@@ -964,6 +1004,10 @@ var Provider_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "DeleteStagedDisk",
 			Handler:    _Provider_DeleteStagedDisk_Handler,
+		},
+		{
+			MethodName: "DeleteLandedDisk",
+			Handler:    _Provider_DeleteLandedDisk_Handler,
 		},
 		{
 			MethodName: "ListVMs",

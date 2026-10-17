@@ -986,6 +986,13 @@ message GetCapabilitiesResponse {
   // the same deterministic name (replacing what the earlier call landed, or
   // refusing because a VM uses it) — never a second disk (rc2 R6).
   repeated string resend_safe_import_backends = 28;
+
+  // supports_landed_disk_delete reports that DeleteLandedDisk removes the
+  // disk a migration's ImportDisk landed for a target VM that does not use it
+  // (rc2 R7). From a provider that does not report it (one that predates the
+  // field) the manager never sends DeleteLandedDisk: it records the landed
+  // disk as left behind, with a Warning.
+  bool supports_landed_disk_delete = 29;
 }
 
 // DeleteStagedDisk removes the staging object a VMMigration's ExportDisk wrote
@@ -1057,6 +1064,57 @@ enum StagedDiskDeleteOutcome {
 
 message DeleteStagedDiskResponse {
   StagedDiskDeleteOutcome outcome = 1;
+}
+
+// DeleteLandedDisk removes the disk a VMMigration's ImportDisk landed on this
+// (target) provider for target_vm, when the migration ended without a VM that
+// uses it: it failed for good, or the VMMigration was deleted before (or
+// without) a target VM that attached the disk (rc2 R7). The manager sends it to
+// the migration's TARGET provider, the one the import was sent to.
+//
+// CONFINEMENT (security-critical). The provider derives the landed disk from
+// target_vm (namespace and name) with exactly the rule its ImportDisk names it
+// with — vSphere: the landing folder "[<datastore>] <ns>_<vm>-migrated";
+// libvirt: "<default pool>/<ns>.<vm>-migrated.qcow2"; Proxmox: the node-side
+// import stage "<stage dir>/<ns>_<vm>-migrated.<ext>" — and validates the
+// identity (namespace a DNS-1123 label, name a DNS-1123 subdomain) before it
+// touches anything. path, when set, must be exactly that landed disk (it
+// chooses the vSphere datastore); any other path is InvalidArgument. Nothing
+// else is ever removed.
+//
+// It refuses — FailedPrecondition with the ErrorInfo reason VM_DISK_IN_USE,
+// leaving the disk — when any VM or template on the target uses the disk (or,
+// on vSphere, any file of its landing folder), and fails closed (a retryable
+// error, VM_DISK_CHECK_FAILED where it applies) when that cannot be
+// established.
+//
+// Idempotent: a disk that does not exist is a success with outcome NOT_FOUND.
+// InvalidArgument: a request that can never succeed (a bad identity or path).
+// Unimplemented: a provider that does not report supports_landed_disk_delete.
+// Any other error is retryable.
+message DeleteLandedDiskRequest {
+  // migration is the VMMigration whose import landed the disk; informational
+  // (audit, logs).
+  ObjectIdentity migration = 1;
+  // target_vm is the VirtualMachine the import landed the disk for (namespace
+  // and name; the same identity as ImportDiskRequest.target_vm). Required.
+  ObjectIdentity target_vm = 2;
+  // path is the landing path ImportDisk returned (ImportDiskResponse.path), as
+  // the manager recorded it, or empty when no import result was recorded.
+  string path = 3;
+}
+
+// LandedDiskDeleteOutcome is what DeleteLandedDisk did.
+enum LandedDiskDeleteOutcome {
+  LANDED_DISK_DELETE_OUTCOME_UNSPECIFIED = 0;
+  // The landed disk existed and was removed.
+  LANDED_DISK_DELETE_OUTCOME_DELETED = 1;
+  // No landed disk existed (already removed, consumed, or never landed).
+  LANDED_DISK_DELETE_OUTCOME_NOT_FOUND = 2;
+}
+
+message DeleteLandedDiskResponse {
+  LandedDiskDeleteOutcome outcome = 1;
 }
 
 // TransferOwner hands one VM to a VirtualMachine: it re-stamps the VM with
@@ -1186,7 +1244,12 @@ service Provider {
   // cannot return Unimplemented and leave the backend out of
   // supported_staged_disk_delete_backends.
   rpc DeleteStagedDisk(DeleteStagedDiskRequest) returns (DeleteStagedDiskResponse);
-  
+
+  // Remove the disk a VMMigration's ImportDisk landed for a target VM that
+  // does not use it (rc2 R7). Providers that cannot return Unimplemented and
+  // do not report supports_landed_disk_delete.
+  rpc DeleteLandedDisk(DeleteLandedDiskRequest) returns (DeleteLandedDiskResponse);
+
   // List all VMs managed by this provider. A clustered provider lists every
   // host it fronts, tags each VM with its host_id and names the hosts it could
   // not list in unreachable_host_ids (ADR-0007 Addendum A, A3).
