@@ -521,3 +521,84 @@ func TestCloneAttemptPacer(t *testing.T) {
 	p.forget("u")
 	assert.Zero(t, p.wait("u", t0.Add(2*time.Minute)))
 }
+
+// seedResend makes clone a clone whose earlier Clone's outcome is unknown: its
+// target exists (created by it, UID recorded) and CloneRequested is on record.
+func seedResend(t *testing.T, r *VMCloneReconciler, clone *infrav1beta1.VMClone, provider string) {
+	t.Helper()
+	ctx := context.Background()
+	target := &infrav1beta1.VirtualMachine{
+		ObjectMeta: metav1.ObjectMeta{Name: "clone-target", Namespace: clone.Namespace,
+			Labels:      map[string]string{AdoptedLabel: AdoptedLabelValue},
+			Annotations: map[string]string{CloneAnnotationCloneUID: string(clone.UID)}},
+		Spec: infrav1beta1.VirtualMachineSpec{ProviderRef: infrav1beta1.ObjectRef{Name: provider},
+			ClassRef: infrav1beta1.ObjectRef{Name: "src-class"}},
+	}
+	require.NoError(t, r.Create(ctx, target))
+	live := getClone(t, r, clone)
+	live.Finalizers = []string{infrav1beta1.VMCloneFinalizer}
+	require.NoError(t, r.Update(ctx, live))
+	live = getClone(t, r, clone)
+	live.Status.TargetUID = string(target.UID)
+	meta.SetStatusCondition(&live.Status.Conditions, metav1.Condition{Type: cloneConditionRequested,
+		Status: metav1.ConditionTrue, Reason: cloneReasonRequested, Message: cloneRequestedMessage})
+	require.NoError(t, r.Status().Update(ctx, live))
+}
+
+// TestVMClone_SourceOwnerRefusal_FirstAttemptFailsAndRemovesTheTarget (with
+// #393): a first attempt the provider refuses as not the source
+// VirtualMachine's VM made nothing: the clone fails with the constant message,
+// the request record is dropped, and the empty target is removed.
+func TestVMClone_SourceOwnerRefusal_FirstAttemptFailsAndRemovesTheTarget(t *testing.T) {
+	for name, refusal := range ownerRefusals("clone") {
+		t.Run(name, func(t *testing.T) {
+			cp := &stampingCloner{script: []cloneStep{{err: refusal}}}
+			r, clone := stampFixture(t, cp)
+			reconcileCloneOnce(t, r, clone) // finalizer
+			reconcileCloneOnce(t, r, clone)
+			got := getClone(t, r, clone)
+			assert.Equal(t, infrav1beta1.ClonePhaseFailed, got.Status.Phase)
+			assert.Equal(t, cloneSourceNotOwnedMessage, got.Status.Message)
+			assert.False(t, cloneRequested(got), "nothing was made")
+			reconcileCloneOnce(t, r, clone)
+			err := r.Get(context.Background(), client.ObjectKey{Namespace: "default", Name: "clone-target"}, &infrav1beta1.VirtualMachine{})
+			assert.True(t, apierrors.IsNotFound(err), "the empty target is removed")
+		})
+	}
+}
+
+// TestVMClone_SourceOwnerRefusal_OnAResendIsHeld (review M2): answering a
+// re-send, an owner refusal of the SOURCE says nothing about the clone an
+// earlier attempt made (the provider re-binds before it checks the source):
+// the clone is held, never failed, and its target is kept.
+func TestVMClone_SourceOwnerRefusal_OnAResendIsHeld(t *testing.T) {
+	for name, refusal := range ownerRefusals("clone") {
+		t.Run(name, func(t *testing.T) {
+			cp := &stampingCloner{script: []cloneStep{{err: refusal}}}
+			r, clone := stampFixture(t, cp)
+			seedResend(t, r, clone, "prov-1")
+			reconcileCloneOnce(t, r, clone)
+			require.Len(t, cp.reqs, 1)
+			got := getClone(t, r, clone)
+			assert.Equal(t, infrav1beta1.ClonePhasePending, got.Status.Phase, "never Failed on a re-send's answer")
+			assert.Equal(t, cloneReasonOutcomeUnknown, cloneReadyCondition(t, got).Reason)
+			assert.True(t, cloneRequested(got))
+			cloneTarget(t, r) // kept
+		})
+	}
+}
+
+// TestVMClone_ResendSkipsTheSourceDiskSizeGate (review M2): a re-send never
+// reads the source's disks for the disk-size limit — the first attempt passed
+// it, and the re-bind does not read the source — so an owner refusal there
+// can neither fail the clone nor remove its target.
+func TestVMClone_ResendSkipsTheSourceDiskSizeGate(t *testing.T) {
+	r, cp, _, clone := cloneFixture(t, qty("100Gi"), &diskSizes{err: vmNotOwnedAnswer("getDiskInfo")})
+	cp.caps.SupportsOwnerRebind = true
+	seedResend(t, r, clone, "prov-1")
+
+	reconcileTwice(t, r, client.ObjectKeyFromObject(clone))
+	assert.Zero(t, cp.sizes.calls, "no GetDiskInfo on a re-send")
+	assert.Equal(t, 1, cp.cloneCnt, "the Clone is sent again (the provider re-binds)")
+	assert.Equal(t, infrav1beta1.ClonePhaseReady, getClone(t, r, clone).Status.Phase)
+}
