@@ -29,6 +29,16 @@ clone's definition declares it so (`<driver type='qcow2'>`): a raw source's
 clone is a qcow2 disk (its clone used to keep `type='raw'` over the qcow2
 copy and did not boot).
 
+The clone is **stamped with its target VirtualMachine's identity** (uid
+included), which the manager creates before the clone and sends in
+`CloneRequest.target_vm`. A `Clone` sent again — the manager restarted, or its
+answer or record was lost — is answered with the domain an earlier attempt
+defined when that domain carries the target's stamp, before the source's state
+is read; nothing is copied again. A domain of the clone's name that does not
+carry it is refused with `AlreadyExists` and never redefined. See
+[VM ownership: Clones: re-bind](vm-ownership.md#clones-re-bind) and
+[`libvirt-domain-ownership.md`](libvirt-domain-ownership.md) (rule 6).
+
 ## A full clone needs a powered-off source
 
 A libvirt full clone copies the source VM's disk chain with `qemu-img

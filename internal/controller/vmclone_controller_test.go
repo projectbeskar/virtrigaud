@@ -22,12 +22,14 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	infrav1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
@@ -152,6 +154,18 @@ func ensureCloneUIDs(objs ...client.Object) {
 	}
 }
 
+// assignUIDOnCreate is a fake-client interceptor that assigns a UID on Create,
+// as the API server does: a clone stamps its target VirtualMachine's UID onto
+// the clone, on every topology (rc2 R4).
+var assignUIDOnCreate = interceptor.Funcs{
+	Create: func(ctx context.Context, cl client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+		if obj.GetUID() == "" {
+			obj.SetUID(types.UID("uid-" + obj.GetNamespace() + "-" + obj.GetName()))
+		}
+		return cl.Create(ctx, obj, opts...)
+	},
+}
+
 func newCloneReconciler(s *runtime.Scheme, resolver ProviderResolver, objs ...client.Object) *VMCloneReconciler {
 	ensureCloneUIDs(objs...)
 	fc := fake.NewClientBuilder().
@@ -162,6 +176,7 @@ func newCloneReconciler(s *runtime.Scheme, resolver ProviderResolver, objs ...cl
 			&infrav1beta1.VirtualMachine{},
 		).
 		WithIndex(&infrav1beta1.VirtualMachine{}, placementProviderIndex, placementProviderIndexValue).
+		WithInterceptorFuncs(assignUIDOnCreate).
 		Build()
 	return &VMCloneReconciler{
 		Client:         fc,
@@ -226,8 +241,6 @@ func TestVMClone_HappyPath(t *testing.T) {
 	assert.Equal(t, "vm-source-123", cp.lastClone.Source.ID)
 	assert.Empty(t, cp.lastClone.Source.HostID, "a single-host source is never sent a host")
 	assert.Equal(t, "clone-target", cp.lastClone.TargetName)
-	assert.Equal(t, contracts.ObjectIdentity{Namespace: ns, Name: "clone-target"}, cp.lastClone.TargetVM,
-		"the provider is told which VirtualMachine the clone is for (namespace + name, no UID yet)")
 	assert.False(t, cp.lastClone.Linked)
 
 	// Target VM CR exists, has Status.ID seeded, adopted label, provenance.
@@ -235,6 +248,14 @@ func TestVMClone_HappyPath(t *testing.T) {
 	require.NoError(t, r.Get(context.Background(),
 		client.ObjectKey{Namespace: ns, Name: "clone-target"}, target))
 	assert.Equal(t, "vm-clone-999", target.Status.ID)
+	// rc2 R4: the target was created before the Clone, and the Clone carried
+	// its identity WITH its UID, which the provider stamps on the clone.
+	require.NotEmpty(t, target.UID)
+	assert.Equal(t, contracts.ObjectIdentity{UID: string(target.UID), Namespace: ns, Name: "clone-target"}, cp.lastClone.TargetVM,
+		"the provider is told which VirtualMachine the clone is for, with its UID")
+	assert.Equal(t, string(target.UID), got.Status.TargetUID, "the clone records the target it created")
+	assert.Nil(t, meta.FindStatusCondition(got.Status.Conditions, cloneConditionRequested),
+		"the requested Clone's outcome is recorded")
 	assert.Equal(t, AdoptedLabelValue, target.Labels[AdoptedLabel])
 	assert.Equal(t, "demo", target.Labels["app"])
 	assert.Equal(t, "src-vm", target.Annotations[CloneAnnotationClonedFrom])

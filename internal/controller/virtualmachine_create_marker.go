@@ -58,11 +58,13 @@ import (
 //
 // A VM with the marker and no id is handled as follows.
 //
-//   - Create: a provider that re-binds the VM it stamped with its owner
-//     (vSphere: the owner extraConfig; libvirt: the domain metadata; Proxmox:
-//     its owner stamp) is sent the same Create again, which returns the
-//     existing VM's id (createRebindsOwnedVM). Any other provider (the mock
-//     provider) could create a second VM, so the VM waits, Ready=False/
+//   - Create: a provider that re-binds the VM it stamped with its owner and
+//     reports it (GetCapabilitiesResponse.supports_owner_rebind,
+//     providerRebindsOwnedVM: vSphere's owner extraConfig, libvirt's domain
+//     metadata, Proxmox's owner stamp, the mock's record) is sent the same
+//     Create again, which returns the existing VM's id. Any other provider —
+//     one that predates the capability — could create a second VM, so the VM
+//     waits, Ready=False/
 //     CreateOutcomeUnknown, until an operator records the VM's id (a status
 //     patch of status.id) or confirms that this attempt made no VM
 //     (virtrigaud.io/create-outcome=not-created@<attempt id>).
@@ -109,7 +111,7 @@ const createRequestedMessage = "A provider Create was requested for this VM (the
 // createOutcomeUnknownMessage is the Ready message of a VM held because its
 // requested Create's outcome is unknown and the provider cannot tell.
 var createOutcomeUnknownMessage = fmt.Sprintf("A provider Create was sent for this VM but its outcome was never recorded, and "+
-	"this Provider's type cannot find the VM it may have made (its VMs carry no owner stamp), so no second Create is sent. "+
+	"this Provider does not report that it re-binds the VM it made (supports_owner_rebind), so no second Create is sent. "+
 	"Check the hypervisor for this VM. If it exists, record its id with a status patch of status.id; if it does not, "+
 	"annotate the VirtualMachine %s=%s<attempt id>, the attempt id being the lastTransitionTime of the Provisioning "+
 	"condition. Re-checked every %s",
@@ -210,26 +212,6 @@ func setCreateFailure(vm *infravirtrigaudiov1beta1.VirtualMachine, reason, msg s
 		Message:            msg,
 		ObservedGeneration: vm.Generation,
 	})
-}
-
-// createRebindsOwnedVM reports whether provider's Create, sent again for the
-// same VirtualMachine, returns the VM an earlier Create made instead of making
-// a second one: vSphere, libvirt and Proxmox stamp the VMs they create with
-// their owner's UID and re-bind a VM stamped with the requester's UID. The
-// mock provider does not.
-//
-// It is decided by provider type: GetCapabilities has no field that reports
-// owner-stamp re-binding. A Proxmox provider image from before the owner
-// stamp (#380) would make a second VM on a re-send,
-// so the Proxmox provider must be rolled before, or with, this manager
-// (docs/upgrading.md).
-func createRebindsOwnedVM(provider *infravirtrigaudiov1beta1.Provider) bool {
-	switch provider.Spec.Type {
-	case infravirtrigaudiov1beta1.ProviderTypeVSphere, infravirtrigaudiov1beta1.ProviderTypeLibvirt,
-		infravirtrigaudiov1beta1.ProviderTypeProxmox:
-		return true
-	}
-	return false
 }
 
 // createLookupByOwner reports whether provider's ListVMs reports every VM's
@@ -415,7 +397,7 @@ func (r *VirtualMachineReconciler) resolveCreateMarker(
 	ctx context.Context,
 	vm *infravirtrigaudiov1beta1.VirtualMachine,
 	persisted *infravirtrigaudiov1beta1.VirtualMachineStatus,
-	provider *infravirtrigaudiov1beta1.Provider,
+	instance contracts.Provider,
 ) (res ctrl.Result, attempt createAttempt, proceed bool, err error) {
 	logger := log.FromContext(ctx)
 	attempt.markerID = markerAttemptID(vm)
@@ -432,7 +414,13 @@ func (r *VirtualMachineReconciler) resolveCreateMarker(
 			return ctrl.Result{}, attempt, false, err
 		}
 	}
-	if createRebindsOwnedVM(provider) {
+	rebinds, capErr := providerRebindsOwnedVM(ctx, instance)
+	if capErr != nil {
+		// Never re-send on an unknown answer: try again later.
+		logger.Info("Cannot read the provider's capabilities; not re-sending the requested Create yet", "error", capErr.Error())
+		return ctrl.Result{RequeueAfter: providerErrorRetryInterval}, attempt, false, nil
+	}
+	if rebinds {
 		// Re-sends are paced (review L1): while they keep failing, each
 		// waits longer, so an outage does not rewrite the marker and Ready
 		// every few seconds.

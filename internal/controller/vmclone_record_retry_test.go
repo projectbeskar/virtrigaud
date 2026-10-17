@@ -43,8 +43,10 @@ import (
 // transport failure of its write (retried within a bound), and that a record
 // that still cannot be written is announced, never silently dropped.
 
-// failingRecordClient fails the first failures VMClone status patches with
-// err, counting every attempt.
+// failingRecordClient fails the first failures VMClone status patches that
+// record a clone the provider made (status.targetVMID set) with err, counting
+// every such attempt. The earlier record of the target VirtualMachine the
+// clone created (status.targetUID, rc2 R4) is written untouched.
 type failingRecordClient struct {
 	client.Client
 	err      error
@@ -65,7 +67,7 @@ type failingRecordWriter struct {
 
 // Patch fails while failures remain, then writes.
 func (w *failingRecordWriter) Patch(ctx context.Context, obj client.Object, patch client.Patch, opts ...client.SubResourcePatchOption) error {
-	if _, ok := obj.(*infrav1beta1.VMClone); ok {
+	if c, ok := obj.(*infrav1beta1.VMClone); ok && c.Status.TargetVMID != "" {
 		w.c.attempts++
 		if w.c.attempts <= w.c.failures {
 			return w.c.err

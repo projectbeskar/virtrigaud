@@ -127,6 +127,9 @@ type VMCloneReconciler struct {
 	// unschedulable paces the re-checks of clustered clones that do not fit
 	// on their source's host.
 	unschedulable unschedulableBackoff
+	// cloneAttempts paces the attempts of held single-host clones
+	// (vmclone_target_stamp.go).
+	cloneAttempts cloneAttemptPacer
 	// MaxDiskSize is the administrator's disk-size ceiling (the manager's
 	// --max-disk-size; nil for none), lowered per Provider by its
 	// infra.virtrigaud.io/max-disk-size annotation: a clone that would create
@@ -216,14 +219,16 @@ func (r *VMCloneReconciler) Reconcile(ctx context.Context, req ctrl.Request) (re
 		return ctrl.Result{Requeue: true}, nil
 	}
 
-	// Terminal states: nothing further to do, except that a clustered clone
+	// Terminal states: nothing further to do, except that a clone
 	// that failed for good removes the target VirtualMachine it created before
 	// its Clone RPC (vmclone_clustered.go).
 	switch clone.Status.Phase {
 	case infrav1beta1.ClonePhaseReady:
+		r.cloneAttempts.forget(clone.UID)
 		return ctrl.Result{}, nil
 	case infrav1beta1.ClonePhaseFailed:
-		return r.removeFailedClusteredTarget(ctx, clone), nil
+		r.cloneAttempts.forget(clone.UID)
+		return r.removeFailedCloneTarget(ctx, clone), nil
 	}
 
 	clone.Status.ObservedGeneration = clone.Generation
@@ -324,13 +329,14 @@ func (r *VMCloneReconciler) Reconcile(ctx context.Context, req ctrl.Request) (re
 
 	// No clone issued yet. Refuse if a VM with the target name already exists
 	// and was NOT produced by this clone (no recorded TargetVMID) — cloning
-	// over a foreign VM would be destructive. On a clustered provider the
-	// clone creates its target BEFORE the Clone RPC (vmclone_clustered.go), so
-	// a target carrying this clone's marker and no binding is its own.
+	// over a foreign VM would be destructive. The clone creates its target
+	// BEFORE the Clone RPC (ensureCloneTarget, on every topology), so a target
+	// carrying this clone's marker, the UID it recorded, and no binding is its
+	// own.
 	existing := &infrav1beta1.VirtualMachine{}
 	existingKey := client.ObjectKey{Namespace: targetNamespace, Name: clone.Spec.Target.Name}
 	if err := r.Get(ctx, existingKey, existing); err == nil {
-		if !isClusterTopology(provider) || cloneTargetBindable(clone, existing, provider, "") != nil {
+		if cloneTargetBindable(clone, existing, provider, "") != nil {
 			return r.markFailed(ctx, clone, infrav1beta1.VMCloneReasonProviderError,
 				fmt.Sprintf("target VM %q already exists and was not created by this clone", existingKey.Name)), nil
 		}
@@ -362,20 +368,25 @@ func (r *VMCloneReconciler) Reconcile(ctx context.Context, req ctrl.Request) (re
 	// the target class are checked, only before a clone is issued, like the
 	// linked-clone checks above (disk_size_limit_copies.go). The only
 	// provider call made for it is a read-only GetDiskInfo, and only while a
-	// limit applies.
-	refusal, err := r.cloneDiskSizeRefusal(ctx, clone, sourceVM, sourceRef, providerInstance, provider)
-	if isSourceOwnerRefused(err) {
-		// The source VM is not the source VirtualMachine's (a reused id), or
-		// its owner cannot be told: nothing is cloned (copy_source_owner_refusal.go).
-		logger.Info("The provider refused the source VM as not the source VirtualMachine's", "error", err.Error())
-		return r.markFailed(ctx, clone, ownerRefusalReason(err), cloneSourceNotOwnedMessage), nil
-	}
-	if err != nil {
-		logger.Error(err, "Failed to read a VMClass to check the clone's disk sizes")
-		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
-	}
-	if refusal != nil {
-		return r.holdCloneForDiskSizeLimit(ctx, clone, refusal), nil
+	// limit applies. A re-send (a Clone of unknown outcome on record, rc2 R4)
+	// skips it: the first attempt passed it, the provider re-binds the clone
+	// it made without reading the source, and an owner refusal of the source
+	// here must not fail the clone and remove its target.
+	if !cloneRequested(clone) {
+		refusal, err := r.cloneDiskSizeRefusal(ctx, clone, sourceVM, sourceRef, providerInstance, provider)
+		if isSourceOwnerRefused(err) {
+			// The source VM is not the source VirtualMachine's (a reused id), or
+			// its owner cannot be told: nothing is cloned (copy_source_owner_refusal.go).
+			logger.Info("The provider refused the source VM as not the source VirtualMachine's", "error", err.Error())
+			return r.markFailed(ctx, clone, ownerRefusalReason(err), cloneSourceNotOwnedMessage), nil
+		}
+		if err != nil {
+			logger.Error(err, "Failed to read a VMClass to check the clone's disk sizes")
+			return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+		}
+		if refusal != nil {
+			return r.holdCloneForDiskSizeLimit(ctx, clone, refusal), nil
+		}
 	}
 
 	// Issue the clone. A routed source (clustered provider) clones onto its own
@@ -386,8 +397,11 @@ func (r *VMCloneReconciler) Reconcile(ctx context.Context, req ctrl.Request) (re
 	return r.startClone(ctx, clone, sourceRef, provider, providerInstance, targetNamespace, sourceVM, linked)
 }
 
-// startClone issues the Clone RPC for the source VM source addresses and
-// records the resulting task / target ID.
+// startClone issues the single-host Clone RPC for the source VM source
+// addresses and records the resulting task / target ID. The target
+// VirtualMachine is created first, and the Clone carries its UID, which the
+// provider stamps on the clone; a provider that re-binds is sent the Clone
+// again when its outcome is unknown (vmclone_target_stamp.go, rc2 R4).
 func (r *VMCloneReconciler) startClone(
 	ctx context.Context,
 	clone *infrav1beta1.VMClone,
@@ -407,15 +421,46 @@ func (r *VMCloneReconciler) startClone(
 			"provider does not support clone"), nil
 	}
 
-	// TargetVM names the VirtualMachine bindTargetVM will create for the clone.
-	// A provider whose VM names are host-global (libvirt) names the clone from
-	// it with its Create naming rule ("<namespace>.<name>") and returns that
-	// name as TargetVmID, which is recorded as the VM's status.id — the
-	// operator never re-derives it.
+	// The target VirtualMachine, created by this clone (or by an earlier
+	// reconcile of it) BEFORE the Clone RPC, as on a clustered provider, so
+	// the clone is stamped with its UID and a re-sent Clone re-binds the
+	// clone already made (vmclone_target_stamp.go, rc2 R4).
+	target, res, done, err := r.ensureCloneTarget(ctx, clone, sourceVM, provider, targetNamespace)
+	if done {
+		return res, err
+	}
+
+	// A held clone's next attempt waits for its backoff, whatever brought
+	// this reconcile (cloneAttemptPacer): nothing is sent, nothing written.
+	if wait := r.cloneAttempts.wait(clone.UID, time.Now()); wait > 0 {
+		logger.V(1).Info("Waiting before the next Clone attempt", "retryAfter", wait.String())
+		return ctrl.Result{RequeueAfter: wait}, nil
+	}
+
+	// Only a provider that reports supports_owner_rebind is ever sent a
+	// Clone again (providerRebindsOwnedVM); nothing is sent while that
+	// cannot be read. A Clone requested earlier, whose outcome is unknown, is
+	// never sent to a provider that does not report it.
+	rebinds, capErr := providerRebindsOwnedVM(ctx, providerInstance)
+	if capErr != nil {
+		logger.Info("Cannot read the provider's capabilities; not cloning yet", "error", capErr.Error())
+		return r.markPending(ctx, clone, infrav1beta1.VMCloneReasonProviderError, cloneCapabilitiesRebindWaitMessage), nil
+	}
+	resend := cloneRequested(clone)
+	if resend && !rebinds {
+		logger.Info("A requested Clone's outcome is unknown and the provider does not re-bind the clone it made; not sending it again")
+		return r.markFailed(ctx, clone, cloneReasonOutcomeUnknown, cloneResendNotSupportedMessage), nil
+	}
+
+	// TargetVM names the VirtualMachine the clone is bound to, with its UID:
+	// the provider stamps the clone with it. A provider whose VM names are
+	// host-global (libvirt) names the clone from it with its Create naming
+	// rule ("<namespace>.<name>") and returns that name as TargetVmID, which
+	// is recorded as the VM's status.id — the operator never re-derives it.
 	req := contracts.CloneRequest{
 		Source:        source,
 		TargetName:    clone.Spec.Target.Name,
-		TargetVM:      contracts.ObjectIdentity{Namespace: targetNamespace, Name: clone.Spec.Target.Name},
+		TargetVM:      contracts.ObjectIdentity{UID: string(target.UID), Namespace: target.Namespace, Name: target.Name},
 		Linked:        linked,
 		ClassJSON:     r.classJSON(ctx, clone),
 		PlacementJSON: r.placementJSON(ctx, clone),
@@ -446,37 +491,25 @@ func (r *VMCloneReconciler) startClone(
 		return res, err
 	}
 
+	// A provider that re-binds a stamped clone is told a re-send from a first
+	// attempt by the CloneRequested record, written before the RPC (once);
+	// nothing is sent if it cannot be written.
+	if rebinds {
+		if res, recorded := r.markCloneRequested(ctx, clone); !recorded {
+			return res, nil
+		}
+	}
+
 	// The clone is recorded as started only once the provider accepted it
 	// (markCloneStarted): a refused clone that waits keeps exactly the status
 	// it had, so a repeated wait writes nothing (see markCloneStarted).
 	started := metav1.Now()
 	resp, err := cloner.Clone(ctx, req)
 	if err != nil {
-		// A libvirt full clone requires a powered-off source: the clone waits
-		// (Pending) until it is off, and is never failed for it.
-		if contracts.IsVMSourceRunning(err) {
-			return r.holdCloneForRunningSource(ctx, clone, err), nil
-		}
-		// The source VM is not the source VirtualMachine's (a reused id), or
-		// its owner cannot be told: refused before anything was cloned, and
-		// failed with a constant message (copy_source_owner_refusal.go).
-		if isOwnerRefusal(err) {
-			logger.Info("The provider refused the source VM as not the source VirtualMachine's", "error", err.Error())
-			return r.markFailed(ctx, clone, ownerRefusalReason(err), cloneSourceNotOwnedMessage), nil
-		}
-		// A transient failure (the provider or its host briefly unreachable,
-		// a check that could not run, a copy still in progress) is held and
-		// retried with a backoff, never failed: one SSH or libvirtd blip
-		// must not end the clone.
-		if singleHostCloneRetryable(err) {
-			return r.holdCloneForTransientError(ctx, clone, err), nil
-		}
-		logger.Error(err, "Clone RPC failed")
-		detail := rpcFailureDetail(err)
-		r.Recorder.Event(clone, "Warning", infrav1beta1.VMCloneReasonProviderError, "Clone failed: "+detail)
-		return r.markFailed(ctx, clone, infrav1beta1.VMCloneReasonProviderError, "clone failed: "+detail), nil
+		return r.handleSingleHostCloneError(ctx, clone, err, rebinds, resend), nil
 	}
 
+	r.cloneAttempts.forget(clone.UID)
 	before := clone.DeepCopy()
 	markCloneStarted(clone, linked, started, cloneStartedMessage)
 	clone.Status.TargetVMID = resp.TargetVmID
@@ -542,17 +575,13 @@ func singleHostCloneRetryable(err error) bool {
 // transiently Pending with Ready=False/CloneRetrying (the constant
 // cloneTransientRetryMessage), records the provider's answer (made safe by
 // rpcFailureDetail) in a Warning event when the hold begins, and retries with
-// the blocked-VM backoff (blockedRetryBackoff: 15 s doubling to 5 min, from
-// when the hold began — the Ready condition's transition to CloneRetrying). A
-// repeated hold writes nothing. The next attempt re-reads the clone live
+// the blocked-VM backoff (15 s doubling to 5 min, from when the failing streak
+// began — CloneRetrying and CloneOutcomeUnknown holds count as one streak —
+// and gating every attempt, whatever triggers the reconcile;
+// cloneAttemptPacer). A repeated hold writes nothing. The next attempt re-reads the clone live
 // before its Clone (confirmCloneNotStarted).
 func (r *VMCloneReconciler) holdCloneForTransientError(ctx context.Context, clone *infrav1beta1.VMClone, err error) ctrl.Result {
-	var since time.Time
-	if prev := meta.FindStatusCondition(clone.Status.Conditions, infrav1beta1.VMCloneConditionReady); prev != nil &&
-		prev.Reason == cloneReasonRetrying {
-		since = prev.LastTransitionTime.Time
-	}
-	retry := blockedRetryBackoff(since)
+	retry := r.cloneAttempts.failed(clone.UID, cloneHoldSince(clone), time.Now())
 	logging.FromContext(ctx).Info("Clone failed transiently; holding it and retrying with a backoff",
 		"retryAfter", retry.String(), "error", err.Error())
 	r.announceCloneWait(clone, cloneReasonRetrying, "", err)
@@ -642,6 +671,13 @@ func (r *VMCloneReconciler) bindTargetVM(
 	// Ensure the target VM CR exists (idempotent across requeues).
 	targetVM := &infrav1beta1.VirtualMachine{}
 	switch err := r.Get(ctx, vmKey, targetVM); {
+	case errors.IsNotFound(err) && clone.Status.TargetUID != "":
+		// The target this clone created before its Clone (status.targetUID)
+		// is gone: the cloned VM is never bound to a new VirtualMachine made
+		// in its place. Only a clone started by a manager that created the
+		// target after the clone (no targetUID) creates it here.
+		return r.markFailed(ctx, clone, cloneReasonTargetConflict,
+			fmt.Sprintf(cloneTargetGoneMessageFormat, vmKey.Namespace, vmKey.Name, targetVMID)), nil
 	case errors.IsNotFound(err):
 		// Re-read the grants from the API server (not the cache) right before
 		// the Create in the target namespace.
@@ -910,6 +946,8 @@ func markCloneStarted(clone *infrav1beta1.VMClone, linked bool, started metav1.T
 		metav1.ConditionTrue, infrav1beta1.VMCloneReasonCloning, msg, clone.Generation)
 	k8s.SetCondition(&clone.Status.Conditions, infrav1beta1.VMCloneConditionReady,
 		metav1.ConditionFalse, infrav1beta1.VMCloneReasonCloning, cloneInProgressMessage, clone.Generation)
+	// The requested Clone's outcome is now recorded (vmclone_target_stamp.go).
+	meta.RemoveStatusCondition(&clone.Status.Conditions, cloneConditionRequested)
 }
 
 // cloneTargetPowerState is the desired power state (spec.powerState) of the
@@ -1029,7 +1067,7 @@ func (r *VMCloneReconciler) handleDeletion(ctx context.Context, clone *infrav1be
 //
 // It requeues once, explicitly, after cloneFailedFollowUpDelay (never at once:
 // the cache must show the Failed write first): the next reconcile of the Failed clone makes
-// its one-time target decision (removeFailedClusteredTarget — a clustered
+// its one-time target decision (removeFailedCloneTarget — a
 // clone removes the target VirtualMachine it created), and retries a status
 // write that failed. The VMClone watch ignores the clone's own status writes
 // (GenerationChangedPredicate), so nothing else would bring that reconcile.

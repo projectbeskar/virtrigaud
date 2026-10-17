@@ -36,14 +36,15 @@ type CloneRequest struct {
 	// TargetName is the desired name of the cloned VM.
 	TargetName string
 	// TargetVM identifies the VirtualMachine the clone will be bound to: its
-	// namespace and name (== TargetName). On a single-host provider it carries
-	// no UID (the VirtualMachine is created after the clone). On a clustered
-	// provider the VirtualMachine exists before the clone and UID is set: the
-	// clone's domain is stamped with this identity (ADR-0007 Addendum A, slice
-	// 3). A provider whose VM names are host-global names the clone from it
+	// namespace and name (== TargetName) and its UID. The VirtualMachine is
+	// created before the clone on every topology, and the provider stamps the
+	// clone with this identity (a clustered provider: ADR-0007 Addendum A,
+	// slice 3; a single-host one: rc2 R4), so a Clone sent again for the same
+	// UID returns the clone an earlier attempt made instead of a second one.
+	// A provider whose VM names are host-global names the clone from it
 	// (libvirt: "<namespace>.<name>", the same rule as Create) and returns that
-	// name as TargetVmID. Providers that do not need it ignore it; left empty,
-	// the legacy TargetName naming applies.
+	// name as TargetVmID. Left empty, the legacy TargetName naming applies and
+	// the clone is unstamped.
 	TargetVM ObjectIdentity
 	// Linked requests a copy-on-write linked clone when true. Best-effort:
 	// providers that cannot honor it fall back to a full clone unless the

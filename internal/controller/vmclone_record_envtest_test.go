@@ -99,8 +99,11 @@ var _ = Describe("The record of an accepted clone (envtest)", func() {
 		Expect(got.Status.TargetVMID).To(BeEmpty(), "the old clone's record never lands on the new VMClone")
 		Expect(got.Status.Phase).To(BeEmpty())
 		Expect(got.Status.StartTime).To(BeNil())
-		err := k8sClient.Get(ctx, client.ObjectKey{Namespace: ns.Name, Name: "web"}, &infravirtrigaudiov1beta1.VirtualMachine{})
-		Expect(apierrors.IsNotFound(err)).To(BeTrue(), "nothing is bound")
+		// The old clone created its target before the Clone (rc2 R4); it is
+		// never bound to the old clone's VM.
+		target := &infravirtrigaudiov1beta1.VirtualMachine{}
+		Expect(k8sClient.Get(ctx, client.ObjectKey{Namespace: ns.Name, Name: "web"}, target)).To(Succeed())
+		Expect(target.Status.ID).To(BeEmpty(), "nothing is bound")
 	})
 
 	It("never overwrites a stored Failed", func() {
@@ -190,9 +193,11 @@ var _ = Describe("The record of an accepted clone (envtest)", func() {
 	})
 })
 
-// applyThenResetOnce applies the first VMClone status patch and then answers
-// it with a connection reset (the API server applied it; the answer was lost),
-// as a dropped connection does.
+// applyThenResetOnce applies the first VMClone status patch that records a
+// clone the provider made (status.targetVMID set) and then answers it with a
+// connection reset (the API server applied it; the answer was lost), as a
+// dropped connection does. The earlier record of the target the clone created
+// (status.targetUID, rc2 R4) is written untouched.
 type applyThenResetOnce struct {
 	client.Client
 	done bool
@@ -212,7 +217,7 @@ type applyThenResetWriter struct {
 // Patch applies the patch; the first VMClone patch's answer is a reset.
 func (w *applyThenResetWriter) Patch(ctx context.Context, obj client.Object, patch client.Patch, opts ...client.SubResourcePatchOption) error {
 	err := w.SubResourceWriter.Patch(ctx, obj, patch, opts...)
-	if _, isClone := obj.(*infravirtrigaudiov1beta1.VMClone); isClone && !w.c.done && err == nil {
+	if c, isClone := obj.(*infravirtrigaudiov1beta1.VMClone); isClone && c.Status.TargetVMID != "" && !w.c.done && err == nil {
 		w.c.done = true
 		return &net.OpError{Op: "read", Net: "tcp", Err: os.NewSyscallError("read", syscall.ECONNRESET)}
 	}

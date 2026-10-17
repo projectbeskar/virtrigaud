@@ -118,7 +118,7 @@ func newXNSCloneReconciler(t *testing.T, cp contracts.Provider, clone *infrav1be
 		clone,
 	}, extra...)
 	fc := fake.NewClientBuilder().WithScheme(s).WithObjects(objs...).
-		WithStatusSubresource(&infrav1beta1.VMClone{}, &infrav1beta1.VirtualMachine{}).
+		WithStatusSubresource(&infrav1beta1.VMClone{}, &infrav1beta1.VirtualMachine{}).WithInterceptorFuncs(assignUIDOnCreate).
 		Build()
 	rec := record.NewFakeRecorder(100)
 	return &VMCloneReconciler{Client: fc, Scheme: s, RemoteResolver: &stubResolver{provider: cp}, Recorder: rec}, rec
@@ -150,6 +150,25 @@ func assertNothingInNamespace(t *testing.T, c client.Client, ns string) {
 	vms := &infrav1beta1.VirtualMachineList{}
 	require.NoError(t, c.List(ctx, vms, client.InNamespace(ns)))
 	assert.Empty(t, vms.Items, "no VirtualMachine may be created in %s", ns)
+	secrets := &corev1.SecretList{}
+	require.NoError(t, c.List(ctx, secrets, client.InNamespace(ns)))
+	assert.Empty(t, secrets.Items, "no Secret may be created in %s", ns)
+	pvcs := &corev1.PersistentVolumeClaimList{}
+	require.NoError(t, c.List(ctx, pvcs, client.InNamespace(ns)))
+	assert.Empty(t, pvcs.Items, "no PVC may be created in %s", ns)
+}
+
+// assertOnlyUnboundTargetInNamespace fails unless the only VirtualMachine in
+// ns is the clone's target "web", created before the Clone RPC while the grant
+// held (rc2 R4), and never bound (no status.id) — and no Secret or PVC exists.
+func assertOnlyUnboundTargetInNamespace(t *testing.T, c client.Client, ns string) {
+	t.Helper()
+	ctx := context.Background()
+	vms := &infrav1beta1.VirtualMachineList{}
+	require.NoError(t, c.List(ctx, vms, client.InNamespace(ns)))
+	require.Len(t, vms.Items, 1, "only the clone's own target exists in %s", ns)
+	assert.Equal(t, "web", vms.Items[0].Name)
+	assert.Empty(t, vms.Items[0].Status.ID, "the target is never bound while the grant is revoked")
 	secrets := &corev1.SecretList{}
 	require.NoError(t, c.List(ctx, secrets, client.InNamespace(ns)))
 	assert.Empty(t, secrets.Items, "no Secret may be created in %s", ns)
@@ -201,7 +220,7 @@ func TestVMCloneXNS_SameNamespaceUnchanged(t *testing.T) {
 			cp := &clonerProvider{cloneResp: contracts.CloneResponse{TargetVmID: "vm-clone-1"}}
 			fc := fake.NewClientBuilder().WithScheme(s).
 				WithObjects(runningProvider(xnsSource, "prov-1"), sourceVMWithID(xnsSource, "src-vm", "prov-1", "vm-source-123"), clone).
-				WithStatusSubresource(&infrav1beta1.VMClone{}, &infrav1beta1.VirtualMachine{}).
+				WithStatusSubresource(&infrav1beta1.VMClone{}, &infrav1beta1.VirtualMachine{}).WithInterceptorFuncs(assignUIDOnCreate).
 				Build()
 			r := &VMCloneReconciler{Client: fc, Scheme: s, RemoteResolver: &stubResolver{provider: cp}, Recorder: record.NewFakeRecorder(50)}
 
@@ -269,7 +288,7 @@ func TestVMCloneXNS_AllowedWithGrant(t *testing.T) {
 			got := getClone(t, r, clone)
 			assert.Equal(t, infrav1beta1.ClonePhaseReady, got.Status.Phase)
 			require.NotNil(t, cp.lastClone)
-			assert.Equal(t, contracts.ObjectIdentity{Namespace: xnsTarget, Name: "web"}, cp.lastClone.TargetVM)
+			assert.Equal(t, contracts.ObjectIdentity{UID: "uid-" + xnsTarget + "-web", Namespace: xnsTarget, Name: "web"}, cp.lastClone.TargetVM)
 
 			vm := &infrav1beta1.VirtualMachine{}
 			require.NoError(t, r.Get(context.Background(), client.ObjectKey{Namespace: xnsTarget, Name: "web"}, vm))
@@ -346,9 +365,10 @@ func TestVMCloneXNS_RecoversWhenSpecMovesToOwnNamespace(t *testing.T) {
 }
 
 // TestVMCloneXNS_RevokedDuringCloneRPC: the grant is revoked while the
-// synchronous Clone RPC runs. The bind step re-checks, so no VirtualMachine is
-// created in the target namespace; the provider's target ID is kept so a
-// renewed grant resumes the bind instead of cloning again.
+// synchronous Clone RPC runs. The bind step re-checks, so the target
+// VirtualMachine — created before the RPC while the grant held, so the clone
+// is stamped with its UID (rc2 R4) — is never bound; the provider's target ID
+// is kept so a renewed grant resumes the bind instead of cloning again.
 func TestVMCloneXNS_RevokedDuringCloneRPC(t *testing.T) {
 	ctx := context.Background()
 	clone := xnsClone(xnsTarget)
@@ -373,7 +393,7 @@ func TestVMCloneXNS_RevokedDuringCloneRPC(t *testing.T) {
 	assertCloneRefused(t, got)
 	assert.Equal(t, infrav1beta1.ClonePhaseCloning, got.Status.Phase, "an in-flight clone keeps its phase")
 	assert.Equal(t, "vm-clone-1", got.Status.TargetVMID, "the provider's target ID is kept for a later bind")
-	assertNothingInNamespace(t, r.Client, xnsTarget)
+	assertOnlyUnboundTargetInNamespace(t, r.Client, xnsTarget)
 
 	// Re-grant: the bind resumes from the recorded ID, with no second clone.
 	cp.onClone = nil
@@ -387,8 +407,8 @@ func TestVMCloneXNS_RevokedDuringCloneRPC(t *testing.T) {
 }
 
 // TestVMCloneXNS_RevokedWhileTaskInFlight: an async clone whose grant is
-// revoked while its task runs stops before polling/binding; nothing is created
-// in the target namespace until the grant is back.
+// revoked while its task runs stops before polling/binding; its target (made
+// before the RPC while the grant held) is not bound until the grant is back.
 func TestVMCloneXNS_RevokedWhileTaskInFlight(t *testing.T) {
 	ctx := context.Background()
 	clone := xnsClone(xnsTarget)
@@ -413,7 +433,7 @@ func TestVMCloneXNS_RevokedWhileTaskInFlight(t *testing.T) {
 	got := getClone(t, r, clone)
 	assertCloneRefused(t, got)
 	assert.Equal(t, "task-1", got.Status.TaskRef, "the task is kept for a renewed grant")
-	assertNothingInNamespace(t, r.Client, xnsTarget)
+	assertOnlyUnboundTargetInNamespace(t, r.Client, xnsTarget)
 }
 
 // TestVMCloneXNS_ReadyCloneUntouchedByRevocation: revoking after the clone is

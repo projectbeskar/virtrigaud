@@ -115,6 +115,13 @@ type Capabilities struct {
 	// unstamped, as before, and says so in the Provider's adoption status. It
 	// does not change clustered adoption (SupportsRoutedAdoption).
 	SupportsOwnerTransfer bool
+	// SupportsOwnerRebind reports that Create and Clone stamp the VM they make
+	// with its owner and return the VM an earlier attempt made when sent again
+	// for the same owner (GetCapabilitiesResponse.supports_owner_rebind, rc2
+	// R4). The manager re-sends a Create or Clone whose outcome is unknown
+	// only to a provider that reports it; false from a provider that predates
+	// the field, which is never sent one again.
+	SupportsOwnerRebind bool
 	// SupportedStagedDiskDeleteBackends lists the staging backends ("nfs",
 	// "s3") whose migration staging objects the provider's DeleteStagedDisk
 	// removes (StagedDiskDeleter, ADR-0011 D7). Empty — an older provider, or

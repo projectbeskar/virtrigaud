@@ -209,6 +209,36 @@ func TestCreateMarker_RebindingProvidersAreSentTheCreateAgain(t *testing.T) {
 	}
 }
 
+// TestCreateMarker_ProviderWithoutTheCapabilityIsNeverSentItAgain (rc2 R4
+// review M3): re-sending is decided by the provider's supports_owner_rebind,
+// not its type. A Proxmox (or vSphere, libvirt) image that predates the field
+// — a v0.3.11 Proxmox image would make a second VMID — is never sent the
+// Create again: the VM waits for an operator, as before. While the capability
+// cannot be read, nothing is sent either.
+func TestCreateMarker_ProviderWithoutTheCapabilityIsNeverSentItAgain(t *testing.T) {
+	ctx := context.Background()
+	t.Run("capability absent", func(t *testing.T) {
+		r, rp, _ := createRecordFixture(t, infravirtrigaudiov1beta1.ProviderTypeProxmox, nil)
+		r.RemoteResolver = &stubResolver{provider: rp} // an older image: no capability
+		marked := seedMarker(t, r, time.Minute)
+		_, err := r.reconcileVM(ctx, marked)
+		require.NoError(t, err)
+		assert.Empty(t, rp.createReqs, "never sent again")
+		got, _ := storedVM(t, r)
+		assert.True(t, createRequested(got), "the marker is kept")
+		assert.Equal(t, k8s.ReasonCreateOutcomeUnknown, meta.FindStatusCondition(got.Status.Conditions, k8s.ConditionReady).Reason)
+	})
+	t.Run("capability unreadable", func(t *testing.T) {
+		r, rp, _ := createRecordFixture(t, infravirtrigaudiov1beta1.ProviderTypeProxmox, nil)
+		r.RemoteResolver = &stubResolver{provider: &ownerRebindingProvider{routingProvider: rp, capsErr: errors.New("unreachable")}}
+		marked := seedMarker(t, r, time.Minute)
+		res, err := r.reconcileVM(ctx, marked)
+		require.NoError(t, err)
+		assert.Empty(t, rp.createReqs, "nothing is sent on an unknown answer")
+		assert.Equal(t, providerErrorRetryInterval, res.RequeueAfter)
+	})
+}
+
 // TestCreateMarker_StaleCacheNeverCreates (review M1): the live re-read right
 // before the Create sees what a stale cached copy does not.
 func TestCreateMarker_StaleCacheNeverCreates(t *testing.T) {

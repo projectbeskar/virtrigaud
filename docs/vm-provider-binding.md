@@ -141,7 +141,11 @@ is tracked as a follow-up ADR. Until then, treat the right to delete and create
   on. Anything else — a `VirtualMachine` created under the target name by
   someone else, one already bound to another VM, one that references another
   `Provider` — fails the clone with reason `TargetConflict`, leaves that
-  VM's binding untouched, and names the cloned VM left on the provider.
+  VM's binding untouched, and names the cloned VM left on the provider. The
+  target is created before the `Clone`, on every topology, and the `VMClone`
+  records its UID (`status.targetUID`): only that object is ever bound or
+  stamped onto the clone (see
+  [VM ownership: Clones: re-bind](vm-ownership.md#clones-re-bind)).
 - `spec.target.annotations` of a `VMClone` or `VMMigration` are copied to the
   target without keys in the reserved `virtrigaud.io` domain
   (`virtrigaud.io/...` and `*.virtrigaud.io/...`), such as
@@ -463,14 +467,20 @@ the VM is held. While the manager
 keeps running it also remembers a created id whose record failed, and writes
 it on the next reconcile.
 
-A VM with the marker and no `status.id`:
+A VM with the marker and no `status.id` is sent the Create again only when its
+provider reports `supports_owner_rebind` (GetCapabilities field 26, rc2 R4):
+the rc2 vSphere, libvirt, Proxmox and mock providers do. A provider that does
+not — every image older than rc2 — is never sent it again: the VM is held
+(`Ready=False/CreateOutcomeUnknown`, one `Warning` event, re-checked every
+minute), whatever its type. While the capability can't be read, nothing is
+sent. With the capability:
 
 | Provider | Create | Delete |
 |---|---|---|
 | vSphere | The Create is sent again: the provider re-binds the VM stamped with this VirtualMachine's UID. | Held (`CreateOutcomeUnknown`): vSphere's `ListVMs` does not report owner stamps. |
 | libvirt | The Create is sent again (re-bind, as above). | The VM stamped with this VirtualMachine's UID is found (`ListVMs`) and deleted by id. If none is listed, the finalizer is released only on a positive confirmation: once no Create can still be running (10 minutes after it was requested), each domain name the Create could have used (`<namespace>.<name>`, and the bare name) must answer a definite not-found — the libvirt provider answers `NotFound` when virsh reports no such domain — and a Normal `CreateConfirmedAbsent` event is recorded. Any other answer holds the delete. |
-| Proxmox | The Create is sent again: the provider re-binds the VM stamped with this VirtualMachine's UID. A VM created by a Proxmox provider image that does not stamp (before the owner stamp, #380) cannot be re-bound, so roll the provider with or before the manager. | The VM stamped with this VirtualMachine's UID is found (`ListVMs`) and deleted by id. If none is listed, held: a VMID cannot be confirmed absent by name (so is a legacy, unstamped VM). |
-| The mock provider | Held: `Ready=False/CreateOutcomeUnknown`, one `Warning` event, re-checked every minute. A second Create would make a second VM. | Held (`CreateOutcomeUnknown`). |
+| Proxmox | The Create is sent again: the provider re-binds the VM stamped with this VirtualMachine's UID. A VM created by a Proxmox provider image that does not stamp (before the owner stamp, #380) cannot be re-bound; such an image does not report the capability, so it is never sent the Create again. | The VM stamped with this VirtualMachine's UID is found (`ListVMs`) and deleted by id. If none is listed, held: a VMID cannot be confirmed absent by name (so is a legacy, unstamped VM). |
+| The mock provider | The Create is sent again: the mock re-binds the VM it recorded for this VirtualMachine's UID. | Held (`CreateOutcomeUnknown`). |
 
 To resolve a held VM, check the hypervisor for it:
 

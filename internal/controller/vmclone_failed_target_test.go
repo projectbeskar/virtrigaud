@@ -160,6 +160,9 @@ func cloneTargetVM(cloneUID string, st infrav1beta1.VirtualMachineStatus) *infra
 }
 
 func TestVMClone_FailedCloneRemovesOnlyItsOwnUnboundClusteredTarget(t *testing.T) {
+	// A single-host target whose clone the provider reported (status.targetVMID)
+	// is kept: without an id, its finalizer could not remove that VM.
+	const reportedCase = "a single-host clone's target whose clone the provider reported"
 	pending := infrav1beta1.VirtualMachineStatus{Placement: &infrav1beta1.PlacementStatus{PendingHost: "host-alpha"}}
 	for name, tc := range map[string]struct {
 		target   *infrav1beta1.VirtualMachine
@@ -176,10 +179,18 @@ func TestVMClone_FailedCloneRemovesOnlyItsOwnUnboundClusteredTarget(t *testing.T
 				Placement: &infrav1beta1.PlacementStatus{Host: "host-alpha"}}), infrav1beta1.ProviderTopologyCluster, false},
 		"its own target with an id but no placement yet": {
 			cloneTargetVM("uid-clone-c", infrav1beta1.VirtualMachineStatus{ID: "default.clone-c-target"}), infrav1beta1.ProviderTopologyCluster, false},
-		"a single-host clone's target": {cloneTargetVM("uid-clone-c", infrav1beta1.VirtualMachineStatus{}), infrav1beta1.ProviderTopologySingle, false},
+		// rc2 R4: a single-host clone creates its target before the Clone too.
+		"a single-host clone's own unbound target, no clone reported": {
+			cloneTargetVM("uid-clone-c", infrav1beta1.VirtualMachineStatus{}), infrav1beta1.ProviderTopologySingle, true},
+		reportedCase: {cloneTargetVM("uid-clone-c", infrav1beta1.VirtualMachineStatus{}), infrav1beta1.ProviderTopologySingle, false},
 	} {
 		t.Run(name, func(t *testing.T) {
 			r, clone := failedCloneWithTarget(t, tc.target, tc.topology)
+			if name == reportedCase {
+				live := getClone(t, r, clone)
+				live.Status.TargetVMID = "default.clone-c-target"
+				require.NoError(t, r.Status().Update(context.Background(), live))
+			}
 			reconcileClone(t, r, clone, 1)
 			assert.Equal(t, tc.removed, targetGone(t, r))
 			assert.Equal(t, infrav1beta1.ClonePhaseFailed, getClone(t, r, clone).Status.Phase, "the clone stays Failed")

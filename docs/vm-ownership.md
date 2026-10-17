@@ -235,6 +235,147 @@ adopted Proxmox `VirtualMachine`'s UID with the stamp on its VM
 deleted with its `VirtualMachine` while its PVE name matches), or detach the
 `VirtualMachine` with `virtrigaud.io/orphan-on-delete: "true"`, delete it, and
 let adoption take the VM again with `adopt-stamped-vms` (it is then stamped).
+## Clones: re-bind
+
+A `VMClone` gets the same guarantee as a `Create`: **a `Clone` sent again for
+the same target never makes a second clone.** A `Clone` is sent again when the
+manager restarts, or when its answer, or the status write that records it, is
+lost between the RPC and the record.
+
+1. **The target exists first.** The `VMClone` controller creates the target
+   `VirtualMachine` before the `Clone`, on every topology (single-host since
+   rc2, clustered since ADR-0007 slice 3), and records its UID in the
+   `VMClone`'s `status.targetUID`. Until the clone is bound, the target waits
+   with no `status.id` (`Provisioning=True/WaitingForDependencies`) and is
+   never created by the VirtualMachine controller.
+2. **The owner goes on the wire.** The `Clone` carries
+   `CloneRequest.target_vm` with the target's namespace, name and UID.
+3. **The clone is stamped.** Each provider stamps the clone with the target's
+   identity as it stamps a created VM: vSphere in the clone's ExtraConfig (see
+   [vSphere: Clones](#clones)), libvirt in the domain `<metadata>` (see
+   [`libvirt-domain-ownership.md`](libvirt-domain-ownership.md), rule 6),
+   Proxmox in the description (see [Proxmox](#proxmox)). The mock provider
+   records it too.
+4. **A re-sent `Clone` re-binds.** A clone under the target name stamped with
+   that UID is returned as the clone, and nothing is cloned again. Anything
+   the provider can't prove is the target's is refused with `AlreadyExists`,
+   the class a `Create` uses (on Proxmox, whose names aren't unique, only the
+   cases of its re-bind table are refused).
+
+**Re-sending needs the provider's word.** A provider that stamps and re-binds
+reports `GetCapabilitiesResponse.supports_owner_rebind` (field 26). The rc2
+vSphere, libvirt (single-host and clustered), Proxmox and mock providers report
+it; no older image does. The manager reads it before every single-host `Clone`
+(and before re-sending a `Create` whose outcome is unknown), and sends nothing
+while it can't be read (`Pending`, constant message). It never sends a
+`Clone` or `Create` again to a provider that doesn't report it: a Proxmox image
+older than the capability ignores `target_vm`, and a re-send would make a
+second VMID.
+
+Before it sends a `Clone` to a provider that reports the capability, the
+`VMClone` records `CloneRequested=True`, with a resourceVersion precondition;
+if that write fails, nothing is sent. It is removed once the provider accepts
+the `Clone`, and dropped in the same status write when the answer proves that
+a first attempt made nothing (nothing done, a running source, a refusal).
+Like a VirtualMachine's create marker, it tells a re-send from a first
+attempt:
+
+| Provider's answer to a single-host `Clone` | `VMClone` |
+|---|---|
+| The clone's id (new, or re-bound) | Bound and `Ready`, as before |
+| A source that isn't powered off (libvirt) | `Pending`, `Ready=False/SourceMustBePoweredOff`, as before |
+| Nothing was done: `VM_OPERATION_FAILED`, `HOST_UNAVAILABLE`, `VM_DISK_CHECK_FAILED`, `CREATE_NOT_PERFORMED`, or the request was never sent | `Pending`, `Ready=False/CloneRetrying`, retried with a backoff of 15 s doubling to 5 min |
+| `AlreadyExists` to a **first** attempt | **Failed**, `Ready=False/ProviderConflict` with a constant message; the provider's answer is in the `ProviderConflict` Warning event. Nothing was cloned. |
+| Any other refusal to a first attempt (`InvalidSpec`, `NotFound`, `PermissionDenied`, …) | **Failed**, as before |
+| Anything else (a transport failure after the request was sent, a deadline, a provider timeout, an error the provider didn't classify), **or any failure answering a re-send** | `Pending`, `Ready=False/CloneOutcomeUnknown` with a constant message; the provider's answer is in the `CloneOutcomeUnknown` Warning event (once). The `Clone` is sent again with a backoff of 15 s doubling to 5 min, and a repeated hold writes nothing. |
+| A `Clone` is on record (`CloneRequested`) but the provider no longer reports `supports_owner_rebind` (e.g. an older image rolled back in) | **Failed**, `Ready=False/CloneOutcomeUnknown` with a constant message; nothing is sent. The target is kept. |
+
+A failure that answers a re-send is never treated as final: it is the answer
+to that request only. vSphere, for example, can answer `AlreadyExists` for the
+clone an earlier attempt is still making. A provider that doesn't report
+`supports_owner_rebind` keeps the old behaviour: an unknown outcome fails the
+clone, because sending it again could make a second VM.
+
+**Pacing.** Every attempt of a held clone (`CloneRetrying` or
+`CloneOutcomeUnknown`, counted as one streak) waits for its backoff, whatever
+reconciles the `VMClone` meanwhile (a spec edit, a grant or a source power
+change): such a reconcile sends nothing and writes nothing. The pacing is kept
+in the manager's memory; after a manager restart the next attempt is due at
+once.
+
+Other rules:
+
+- **A deleted target isn't replaced.** If the target `VirtualMachine` the
+  clone created is deleted after a `Clone` was requested for it, the clone
+  fails with `TargetConflict` and is never sent again for a new target: a
+  `Clone` stamped with the new target's UID wouldn't re-bind the first
+  attempt's clone (Proxmox would make a second VM).
+- **The target is identified by its UID.** A target this clone created whose
+  UID the `VMClone` never recorded (the manager stopped between creating it
+  and recording it) is recorded before any `Clone` is sent. A target that is
+  gone when the cloned VM is to be bound is never re-created for it: the clone
+  fails with `TargetConflict`, naming the cloned VM left on the provider. (Only
+  a clone started by a manager older than rc2, which created its target after
+  the clone, creates it at the bind.)
+- **Adoption never takes a clone's target.** The waiting target carries
+  `virtrigaud.io/adopted=true` and the clone's `virtrigaud.io/clone-uid`
+  marker. Adoption never binds it to a listed VM that shares its name, and
+  never treats it as an adopter: only its clone binds it.
+- **A source owner refusal fails only a first attempt.** A provider that
+  refuses the clone's source as not the source `VirtualMachine`'s
+  (`VM_NOT_OWNED`, `OWNER_STAMP_UNREADABLE`) fails a first attempt; answering
+  a re-send, it is held like any other answer to a re-send (the provider
+  re-binds before it checks the source). A re-send also skips the disk-size
+  check of the source's disks: the first attempt passed it.
+- **A failed clone removes its own empty target.** A single-host clone that
+  fails for good deletes the unbound target it created (`TargetCleanup=True/
+  TargetRemoved`), once, when the provider reported no cloned VM and no `Clone`
+  of unknown outcome is on record. When the provider did report one
+  (`status.targetVMID`), or a `Clone` of unknown outcome is on record
+  (`CloneRequested`; e.g. a re-send stopped by a pre-clone check), the target
+  is kept (`TargetCleanup=False/TargetKept`): record the cloned VM's id as the
+  target's `status.id` to manage the clone, or delete the target and remove the
+  VM on the provider. A clustered clone removes its target as before.
+- **Metrics.** `virtrigaud_errors_total{reason="clone-outcome-unknown"}` and
+  `{reason="provider-clone-rejected"}`.
+
+**A `CloneOutcomeUnknown` that doesn't resolve.** The provider keeps answering
+the re-send with an error. Its answer is in the event and the manager log.
+Fix the cause (for example a provider or host that stays down). To give up,
+look on the hypervisor for a VM named like the target and stamped with the
+target `VirtualMachine`'s UID (`status.targetUID`), and remove or adopt it.
+Then delete the `VMClone` and the target `VirtualMachine`. Deleting the
+`VMClone` alone never touches its target.
+
+**Upgrade order.** Roll the providers promptly after the manager, as the
+[upgrade guide](upgrading.md#required-upgrade-order) says. Until a provider
+reports `supports_owner_rebind`, nothing is ever sent to it again: a `Clone`
+or `Create` whose outcome is unknown fails (`Clone`) or waits for an operator
+(`Create`, `CreateOutcomeUnknown`), as before rc2. An older vSphere or libvirt
+provider also ignores the target's UID, so its clones are unstamped. A manager
+older than rc2 behind a new provider sends no UID: clones stay unstamped and
+are never re-bound, and a name already taken is refused with `AlreadyExists`.
+(The libvirt provider used to answer that case with a non-retryable
+`codes.Unknown`, and the manager fails the clone either way.)
+
+**vSphere specifics (same as `Create`).** vCenter can show the destination VM
+in the folder before `CloneVM_Task` completes. A re-send that finds it there
+with its stamp readable re-binds it while the copy still runs; one that finds
+its configuration not yet readable is refused as a name conflict, which,
+answering a re-send, keeps the clone waiting and is retried. The target folder
+is the Provider's default folder, resolved again on every attempt: if it
+changes between attempts (an edited Provider, or a folder deleted so the
+datacenter's default VM folder is used instead), the re-send looks in the new
+folder, doesn't find the first attempt's clone and makes a second one there,
+exactly as a re-sent `Create` would. Don't change a vSphere Provider's
+default folder while clones or creates are held.
+
+**What was validated.** The provider behaviour is covered by unit tests
+against vcsim (vSphere), the libvirt fake-virsh harness and `pvefake`
+(Proxmox, including a re-send while PVE is still cloning, after a provider
+restart and after a lost answer: no second VMID). The controller path is
+covered by unit tests and envtest. There is no real PVE cluster in CI: the
+Proxmox behaviour is validated against the fake only.
 
 ## vSphere
 
@@ -416,13 +557,29 @@ image's stamped template is ADR-0009 Slice 7.
 
 ### Clones
 
-The `Clone` RPC never binds to an existing VM. If the target name is taken in
-the folder, `CloneVM_Task` fails with `DuplicateName`. `CloneRequest` carries no
-owner, because the target `VirtualMachine` is created after the clone and given
-the returned ID directly. The clone is therefore left **unstamped**, and the
-owner stamp it would inherit from the source VM is cleared, as is any
-prepared-image stamp (`virtrigaud.image.*`). A clone never claims the source
-`VirtualMachine`'s owner, and is never an image artifact.
+The clone is stamped with its **target** `VirtualMachine`
+(`CloneRequest.target_vm`, uid included; see [Clones](#clones-re-bind)) in
+the same `CloneVM_Task` that makes it: the three owner keys, as a create's.
+The owner stamp it would inherit from the source VM is replaced, and any
+prepared-image stamp (`virtrigaud.image.*`) is cleared. A clone never claims
+the source `VirtualMachine`'s owner, and is never an image artifact.
+
+Before cloning, the provider looks for the target name among the direct
+children of the folder it clones into (the Provider's default folder),
+exactly as `Create` does:
+
+| VM with the target name in the target folder | Result |
+|---|---|
+| None | The clone is made and stamped. |
+| One, stamped with the target's UID, not a template | Idempotent success: its MOID is returned and nothing is cloned (a re-sent `Clone`). |
+| One with no stamp, another UID, an unreadable stamp, or a template | **Refused** (`AlreadyExists`) |
+| Any, when the request carries no UID (a manager older than rc2) | **Refused** |
+| More than one | **Refused** |
+| The folder or the stamp can't be read | Error, retried |
+
+The check runs before the source is read or changed, so a refused linked clone
+never takes the `clone-base-*` snapshot on its source. A request without a UID
+clones unstamped, as before.
 
 ### Adoption: what `ListVMs` offers
 
@@ -703,9 +860,10 @@ Kubernetes UIDs and names always fit it.
   and copies the source's, so when nothing is left to send (no notes, no
   stamp) but the source has a description, the request carries the note
   `Cloned by VirtRigaud.` The provider still reads the clone's description
-  back, and rewrites it if it carries a stamp it shouldn't. A clone made for
-  a `VirtualMachine` without a UID (`VMClone` today, see below) is left
-  unstamped.
+  back, and rewrites it if it carries a stamp it shouldn't. A `VMClone` sends
+  its target `VirtualMachine`'s UID since rc2 (see
+  [Clones: re-bind](#clones-re-bind)); a clone requested without a UID (a
+  manager older than rc2) is left unstamped.
 - PVE limits a description to 8 KiB. When inherited notes and the stamp
   don't fit together, the notes are cut at a character boundary and end with
   `[notes truncated by VirtRigaud to fit the owner stamp]`. The provider logs
@@ -1057,9 +1215,9 @@ that adoption bound before this release keeps the stamp it had.
 
 ### Limits
 
-- `VMClone` sends no target UID today (the target `VirtualMachine` is created
-  after the clone), so `VMClone` clones are unstamped. They aren't re-bound by
-  a re-sent `Clone`, and a re-sent `Clone` can make a second clone.
+- Clones made for a `VMClone` before rc2, or by a manager older than rc2, are
+  unstamped: nothing re-binds them, and their delete follows the unstamped
+  rules above.
 - The owner check and the call are two PVE requests. A VMID freed and reused
   between them isn't caught. PVE's config `digest` parameter could close this
   for `Reconfigure` (its config `PUT` and disk `resize`), as `TransferOwner`
