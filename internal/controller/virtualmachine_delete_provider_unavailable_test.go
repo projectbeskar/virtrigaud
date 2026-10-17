@@ -166,7 +166,10 @@ func TestHandleDeletion_ProviderUnavailable_BackoffFromDeletion(t *testing.T) {
 		{ago: 3 * time.Minute, min: 3 * time.Minute, max: blockedRetryMax},
 		{ago: time.Hour, min: blockedRetryMax, max: blockedRetryMax},
 	} {
-		deleting := marked.DeepCopy()
+		// A fresh read each time: the first reconcile records phase Deleting
+		// (a write), so a copy of the object read before it would be stale.
+		deleting := &infravirtrigaudiov1beta1.VirtualMachine{}
+		require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(marked), deleting))
 		since := metav1.NewTime(time.Now().Add(-tc.ago))
 		deleting.DeletionTimestamp = &since
 		res, err := r.handleDeletion(ctx, deleting)
