@@ -62,9 +62,11 @@ import (
 //     written is kept in memory (pendingMigrationResult) and written by the
 //     next reconcile of that phase, so this manager process does not re-send
 //     the RPC. It is in memory only: a manager restart or leader change
-//     between the RPC and the write, or while a result is held, loses it and
-//     the new leader can re-send ExportDisk / ImportDisk / SnapshotCreate
-//     (pre-existing).
+//     between the RPC and the write, or while a result is held, loses it.
+//     The durable requested-call marker written before the RPC
+//     (vmmigration_request_marker.go, rc2 R6) then tells the next leader that
+//     the call may have run: it is sent again only where that is safe for the
+//     provider and call, and the migration is held otherwise.
 
 // migrationStatusConflictRequeue is when a reconcile whose status write lost
 // to a concurrent write (or found the live status moved on) runs again. The
@@ -193,6 +195,10 @@ func (r *VMMigrationReconciler) recordMigrationResult(
 type pendingMigrationResult struct {
 	retryCount int32
 	apply      func(*infrav1beta1.VMMigration)
+	// ids are the provider's artifact ids of the result (logger key/value
+	// pairs), logged if the result is dropped unrecorded
+	// (forgetMigrationLongOps).
+	ids []any
 }
 
 // migrationReasonProviderResultNotRecorded is the Warning event reason when a
@@ -238,7 +244,7 @@ func (r *VMMigrationReconciler) recordLongOpResult(
 	default:
 		logger.Error(err, "Could not record the provider operation's result; it is kept for the next reconcile",
 			append([]any{"operation", string(op)}, ids...)...)
-		r.longOpInFlight.Store(key, pendingMigrationResult{retryCount: retryCount, apply: resultOnly})
+		r.longOpInFlight.Store(key, pendingMigrationResult{retryCount: retryCount, apply: resultOnly, ids: ids})
 	}
 	return err
 }
@@ -301,13 +307,27 @@ func (r *VMMigrationReconciler) clearPendingMigrationResult(migration *infrav1be
 }
 
 // forgetMigrationLongOps removes every in-memory guard and pending result of
-// migration (all generations), once its finalizer is released.
-func (r *VMMigrationReconciler) forgetMigrationLongOps(migration *infrav1beta1.VMMigration) {
+// migration (all generations), once its finalizer is released. A pending
+// result dropped here was never recorded: it is logged at Error with the
+// provider's artifact ids (what the call made, for the operator to find).
+func (r *VMMigrationReconciler) forgetMigrationLongOps(ctx context.Context, migration *infrav1beta1.VMMigration) {
+	logger := logging.FromContext(ctx)
 	prefix := string(migration.UID) + "/"
-	r.longOpInFlight.Range(func(k, _ any) bool {
-		if key, ok := k.(string); ok && strings.HasPrefix(key, prefix) {
-			r.longOpInFlight.Delete(k)
+	r.longOpInFlight.Range(func(k, v any) bool {
+		key, ok := k.(string)
+		if !ok || !strings.HasPrefix(key, prefix) {
+			return true
 		}
+		if pending, held := v.(pendingMigrationResult); held {
+			logger.Error(errMigrationResultEvicted, "A provider operation's result was never recorded; the VMMigration is "+
+				"released and the result is dropped",
+				append([]any{"key", key, "retryCount", pending.retryCount}, pending.ids...)...)
+		}
+		r.longOpInFlight.Delete(k)
 		return true
 	})
 }
+
+// errMigrationResultEvicted is logged when a VMMigration is released while a
+// provider result it never recorded is held in memory.
+var errMigrationResultEvicted = stderrors.New("unrecorded provider result dropped with the released VMMigration")

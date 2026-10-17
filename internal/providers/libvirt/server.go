@@ -1130,6 +1130,16 @@ func (s *Server) GetCapabilities(ctx context.Context, req *providerv1.GetCapabil
 		// its nfs file (the host's qemu-img over libnfs cannot unlink;
 		// staged_disk.go). A clustered provider advertises none.
 		SupportedStagedDiskDeleteBackends: migration.StagedDiskDeleteBackendsS3AndNFS(),
+		// rc2 R6: a re-sent ExportDisk is safe on s3 only: the object is
+		// replaced atomically when the upload completes, and the host-side
+		// flatten writes into its own random directory. The nfs and pvc
+		// exports write the destination in place, and a cancelled call's
+		// qemu-img (nfs) or copy loop (pvc) can still be writing it.
+		ResendSafeExportBackends: []string{migration.BackendS3},
+		// Every import lands at the deterministic name derived from target_vm,
+		// written in a private directory and renamed onto it (diskWriteDir);
+		// a landed disk a domain uses is refused (ensureDiskTargetFree).
+		ResendSafeImportBackends: migration.PVCS3AndNFSImportBackends(),
 	}, nil
 }
 
@@ -1181,6 +1191,11 @@ func clusteredCapabilities() *providerv1.GetCapabilitiesResponse {
 		// The routed Create and Clone bind a domain on the host stamped with
 		// the same owner uid instead of making a second one (rc2 R4).
 		SupportsOwnerRebind: true,
+		// rc2 R6: the routed export runs under the per-domain export lock and
+		// the routed time budget (routed_budget.go), so a re-send never
+		// overlaps an earlier copy; it replaces the s3 object or nfs file.
+		// Disk import is not served by a clustered provider.
+		ResendSafeExportBackends: migration.S3AndNFSExportBackends(),
 	}
 }
 

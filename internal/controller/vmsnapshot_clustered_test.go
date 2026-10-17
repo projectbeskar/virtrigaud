@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -119,23 +120,43 @@ func TestVMSnapshot_Clustered_SendsItsUIDAsRequestToken(t *testing.T) {
 	assert.Empty(t, got.Status.SnapshotID)
 }
 
-// TestVMSnapshot_SingleHost_RetryableFailureStillFails pins that the retry
-// applies to routed (clustered) creates only: a single-host provider's
-// retryable failure fails the snapshot, as before.
-func TestVMSnapshot_SingleHost_RetryableFailureStillFails(t *testing.T) {
-	vm := boundSource()
-	vm.Status.Placement = nil
-	r, rec, snap := clusteredSnapshotFixture(t, vm, infrav1beta1.VMSnapshotStatus{})
-	prov := &infrav1beta1.Provider{}
-	require.NoError(t, r.Get(context.Background(), client.ObjectKey{Namespace: "default", Name: "prov-c"}, prov))
-	prov.Spec.Topology = infrav1beta1.ProviderTopologySingle
-	require.NoError(t, r.Update(context.Background(), prov))
-	rec.createErr = contracts.NewRetryableError("create snapshot: unavailable", nil)
+// TestVMSnapshot_SingleHost_RetryableFailure pins that the retry applies to
+// routed (clustered) creates only. A single-host create answered "nothing
+// done" (the request never reached the provider, its host unreachable) fails
+// the snapshot, as before; one answered without a definite outcome (a bare
+// Unavailable: the connection dropped after the request was written) is held
+// SnapshotOutcomeUnknown with its marker, never failed (rc2 R6 review M1).
+func TestVMSnapshot_SingleHost_RetryableFailure(t *testing.T) {
+	for name, tc := range map[string]struct {
+		err       error
+		wantPhase infrav1beta1.SnapshotPhase
+	}{
+		"nothing done (host unavailable)":    {contracts.NewHostUnavailableError("create snapshot: host unavailable", nil), infrav1beta1.SnapshotPhaseFailed},
+		"nothing done (request not sent)":    {fmt.Errorf("%w: dial", contracts.ErrRequestNotSent), infrav1beta1.SnapshotPhaseFailed},
+		"outcome unknown (bare Unavailable)": {contracts.NewRetryableError("create snapshot: unavailable", nil), ""},
+	} {
+		t.Run(name, func(t *testing.T) {
+			vm := boundSource()
+			vm.Status.Placement = nil
+			r, rec, snap := clusteredSnapshotFixture(t, vm, infrav1beta1.VMSnapshotStatus{})
+			prov := &infrav1beta1.Provider{}
+			require.NoError(t, r.Get(context.Background(), client.ObjectKey{Namespace: "default", Name: "prov-c"}, prov))
+			prov.Spec.Topology = infrav1beta1.ProviderTopologySingle
+			require.NoError(t, r.Update(context.Background(), prov))
+			rec.createErr = tc.err
 
-	got := reconcileClusteredSnapshot(t, r, snap)
-	require.Len(t, rec.creates, 1)
-	assert.Empty(t, rec.creates[0].VM.HostID, "a single-host request carries no host")
-	assert.Equal(t, infrav1beta1.SnapshotPhaseFailed, got.Status.Phase)
+			got := reconcileClusteredSnapshot(t, r, snap)
+			require.Len(t, rec.creates, 1)
+			assert.Empty(t, rec.creates[0].VM.HostID, "a single-host request carries no host")
+			assert.Equal(t, tc.wantPhase, got.Status.Phase)
+			assert.Equal(t, tc.wantPhase == "", snapshotRequested(got), "the marker is kept only for an unknown outcome")
+			if tc.wantPhase == "" {
+				ready := meta.FindStatusCondition(got.Status.Conditions, infrav1beta1.VMSnapshotConditionReady)
+				require.NotNil(t, ready)
+				assert.Equal(t, snapshotReasonOutcomeUnknown, ready.Reason)
+			}
+		})
+	}
 }
 
 func (p *snapshotRecorder) SnapshotDelete(_ context.Context, vm contracts.VMRef, _ string) (string, error) {

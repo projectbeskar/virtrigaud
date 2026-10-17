@@ -287,6 +287,13 @@ func (r *VMSnapshotReconciler) createSnapshot(ctx context.Context, snapshot *inf
 
 	logger.Info("Creating VM snapshot")
 
+	// A SnapshotCreate requested before a restart whose outcome was never
+	// recorded is sent again only through a provider that adopts the earlier
+	// call's snapshot (routed), else held (vmsnapshot_request_marker.go).
+	if held, res, err := r.resolveSnapshotRequest(ctx, snapshot, vm); held {
+		return res, err
+	}
+
 	// Every failure before the SnapshotCreate RPC below (provider lookup,
 	// binding, provider client) leaves the snapshot in the initial phase, so
 	// the create is retried unchanged; the capability gate fails it. The
@@ -349,6 +356,12 @@ func (r *VMSnapshotReconciler) createSnapshot(ctx context.Context, snapshot *inf
 	// recordSnapshotBinding).
 	recordSnapshotBinding(snapshot, vm, provider)
 
+	// Record durably (with the binding) that the create is requested; nothing
+	// is sent if that write fails (vmsnapshot_request_marker.go).
+	if res, sent := r.markSnapshotRequested(ctx, snapshot); !sent {
+		return res, nil
+	}
+
 	// The create is issued now: only from here on is the snapshot Creating.
 	// The phase is persisted below together with the RPC's outcome (a task to
 	// poll, Ready, or Failed), never on its own.
@@ -360,7 +373,7 @@ func (r *VMSnapshotReconciler) createSnapshot(ctx context.Context, snapshot *inf
 
 	// Call provider to create snapshot
 	resp, err := providerInstance.SnapshotCreate(ctx, req)
-	if err != nil && req.VM.HostID != "" && contracts.IsRetryable(err) {
+	if err != nil && req.VM.HostID != "" && (contracts.IsRetryable(err) || !providerCallOutcomeKnown(err)) {
 		// A ROUTED (clustered) create without a definite outcome — its host
 		// unavailable, its time budget run out while libvirtd may still be
 		// writing the snapshot, or another job on the VM still running — is
@@ -380,8 +393,22 @@ func (r *VMSnapshotReconciler) createSnapshot(ctx context.Context, snapshot *inf
 		}
 		return r.retrySnapshotCreate(ctx, snapshot, snapshotCreateRetryingMessage), nil
 	}
+	if err != nil && !providerCallOutcomeKnown(err) {
+		// A single-host create without a definite outcome (a deadline, a
+		// dropped connection): the snapshot may still be taken, and this
+		// provider cannot be asked again without risking a second one. The
+		// marker is kept and the snapshot is held, never failed
+		// (vmsnapshot_request_marker.go).
+		logger.Error(err, "The snapshot create failed without a definite outcome; keeping its marker")
+		snapshot.Status.Phase = ""
+		attempt := requestMarkerAttemptID(snapshot.Status.Conditions, snapshotConditionRequested)
+		return r.holdSnapshotOutcomeUnknown(ctx, snapshot, attempt, snapshotOutcomeUnknownMessage), nil
+	}
 	if err != nil {
 		logger.Error(err, "Failed to create snapshot")
+		// A definite answer — nothing was done, or a refusal: the failure is
+		// the outcome.
+		clearSnapshotRequest(snapshot)
 		detail := rpcFailureDetail(err)
 		snapshot.Status.Phase = infrav1beta1.SnapshotPhaseFailed
 		snapshot.Status.Message = "Failed to create snapshot: " + detail
@@ -397,7 +424,9 @@ func (r *VMSnapshotReconciler) createSnapshot(ctx context.Context, snapshot *inf
 		return ctrl.Result{RequeueAfter: snapshotFailedRecheckInterval}, nil
 	}
 
-	// Update status with snapshot information
+	// Update status with snapshot information; the outcome replaces the
+	// requested-create marker.
+	clearSnapshotRequest(snapshot)
 	snapshot.Status.SnapshotID = resp.SnapshotId
 	snapshot.Status.CreationTime = &metav1.Time{Time: time.Now()}
 
@@ -1366,7 +1395,10 @@ func (r *VMSnapshotReconciler) snapshotsForGrantChange(ctx context.Context, inde
 // requeue.
 func snapshotUpdateNeedsReconcile(oldSnap, newSnap *infrav1beta1.VMSnapshot) bool {
 	return oldSnap.Generation != newSnap.Generation ||
-		oldSnap.Annotations[forceDeleteAnnotation] != newSnap.Annotations[forceDeleteAnnotation]
+		oldSnap.Annotations[forceDeleteAnnotation] != newSnap.Annotations[forceDeleteAnnotation] ||
+		// An operator's confirmation re-drives a create held for an unknown
+		// outcome at once (vmsnapshot_request_marker.go).
+		oldSnap.Annotations[operationOutcomeAnnotation] != newSnap.Annotations[operationOutcomeAnnotation]
 }
 
 // snapshotUpdatePredicate applies snapshotUpdateNeedsReconcile to update

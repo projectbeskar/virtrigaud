@@ -37,14 +37,16 @@ import (
 )
 
 // failingStatusWrites returns a fake client seeded with objs whose VMMigration
-// status updates answer ServiceUnavailable while *failing is true.
+// status updates answer ServiceUnavailable while *failing is true — except
+// the write of a requested-call marker before the call (rc2 R6), so the call
+// is sent and the write of its result fails.
 func failingStatusWrites(t *testing.T, failing *atomic.Bool, objs ...client.Object) client.Client {
 	t.Helper()
 	return fake.NewClientBuilder().WithScheme(capGatingScheme(t)).WithObjects(objs...).
 		WithStatusSubresource(&infrav1beta1.VMMigration{}).
 		WithInterceptorFuncs(interceptor.Funcs{
 			SubResourceUpdate: func(ctx context.Context, c client.Client, sub string, obj client.Object, opts ...client.SubResourceUpdateOption) error {
-				if failing.Load() {
+				if failing.Load() && !carriesMigrationRequestMarker(obj) {
 					return apierrors.NewServiceUnavailable("apiserver unavailable")
 				}
 				return c.SubResource(sub).Update(ctx, obj, opts...)
@@ -203,10 +205,25 @@ func TestForgetMigrationLongOps(t *testing.T) {
 	r.longOpInFlight.Store(longOpKey(m2, longOpExport), struct{}{})
 	r.longOpInFlight.Store(longOpKey(other, longOpExport), struct{}{})
 
-	r.forgetMigrationLongOps(m)
+	r.forgetMigrationLongOps(context.Background(), m)
 	n := 0
 	r.longOpInFlight.Range(func(k, _ any) bool { n++; return true })
 	assert.Equal(t, 1, n)
 	_, kept := r.longOpInFlight.Load(longOpKey(other, longOpExport))
 	assert.True(t, kept)
+}
+
+// carriesMigrationRequestMarker reports whether obj is a VMMigration whose
+// status carries a requested-call marker (the write before the call).
+func carriesMigrationRequestMarker(obj client.Object) bool {
+	m, ok := obj.(*infrav1beta1.VMMigration)
+	if !ok {
+		return false
+	}
+	for _, op := range []migrationLongOp{longOpSnapshot, longOpExport, longOpImport} {
+		if migrationRequested(m, op) {
+			return true
+		}
+	}
+	return false
 }

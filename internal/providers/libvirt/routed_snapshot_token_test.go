@@ -28,6 +28,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
+	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
 	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
 )
 
@@ -50,6 +51,52 @@ func answerSnapshotDescription(t *testing.T, desc string) {
 	bin := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(bin, "virsh"), []byte(script), 0o755)) //nolint:gosec // test shim must be executable
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+// TestClustered_SnapshotCreate_AdoptsOnlyAFinishedSnapshot (rc2 R6 audit):
+// libvirt lists a snapshot as soon as its job starts, before memory and disks
+// are written, and removes it if the job fails. A retry finds this request's
+// snapshot but adopts it only once no job runs on the domain; while one runs
+// the answer is retryable (Unavailable, VM_OPERATION_FAILED), and a job state
+// that cannot be read is an error — never an adoption. (The fake virsh
+// answers domjobinfo from host-b/jobtype, or fails with host-b/fail-domjobinfo.)
+func TestClustered_SnapshotCreate_AdoptsOnlyAFinishedSnapshot(t *testing.T) {
+	for name, tc := range map[string]struct {
+		jobType  string
+		wantCode codes.Code
+	}{
+		"no job: adopted":            {jobType: "None", wantCode: codes.OK},
+		"snapshot job still running": {jobType: "Unbounded", wantCode: codes.Unavailable},
+		"job state cannot be read":   {jobType: "", wantCode: codes.Unknown},
+	} {
+		t.Run(name, func(t *testing.T) {
+			fx := ownedWebOnB(t, scdDomainXML("web", scdDomainOpts{owner: ownerTeamA})) // snapshots s1, s2
+			answerSnapshotDescription(t, "nightly "+tokenMarker("uid-1"))
+			host := filepath.Join(fx.dir, "host-b")
+			if tc.jobType == "" {
+				require.NoError(t, os.WriteFile(filepath.Join(host, "fail-domjobinfo"), nil, 0o600))
+			} else {
+				require.NoError(t, os.WriteFile(filepath.Join(host, "jobtype"), []byte(tc.jobType), 0o600))
+			}
+			resp, err := NewServer(fx.p).SnapshotCreate(context.Background(), &providerv1.SnapshotCreateRequest{
+				VmId: "web", TargetHostId: "host-b", Owner: teamAOwner, NameHint: "s2", RequestToken: "uid-1",
+			})
+			assert.Equal(t, tc.wantCode, status.Code(err), "got %v", err)
+			if tc.wantCode == codes.OK {
+				assert.Equal(t, "s2", resp.GetSnapshotId())
+			}
+			if tc.wantCode == codes.Unavailable {
+				st, _ := status.FromError(err)
+				assert.Equal(t, contracts.VMOperationFailedReason, errorInfoReason(st), "retryable, out of the breaker")
+				assert.Contains(t, st.Message(), "still being taken")
+			}
+			for _, c := range fx.calls() {
+				for _, verb := range scdMutatingSnapshotVerbs {
+					assert.NotContains(t, c, verb, "nothing is created or replaced: %q", c)
+				}
+			}
+		})
+	}
 }
 
 // tokenMarker is the recorded form of token in a snapshot's description.

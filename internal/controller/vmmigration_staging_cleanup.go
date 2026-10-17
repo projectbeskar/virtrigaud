@@ -543,6 +543,13 @@ var errExportTaskRunning = stderrors.New("the migration's export task is still r
 // synchronous today; a synchronous export cannot overlap a deletion, whose
 // reconcile is serialized with the export's.)
 func (r *VMMigrationReconciler) exportTaskMayBeRunning(ctx context.Context, m *infrav1beta1.VMMigration) (bool, error) {
+	// An ExportDisk whose outcome is unknown (its marker without a result,
+	// rc2 R6) may still be writing the staged object — a host-side copy
+	// outlives a cancelled call — until its deadline: deleting the object
+	// before then could let that writer re-create it, unowned.
+	if exportCallMayStillWrite(m, time.Now()) {
+		return true, errExportCallMayStillWrite
+	}
 	if m.Status.Phase != infrav1beta1.MigrationPhaseExporting || m.Status.TaskRef == "" {
 		return false, nil
 	}

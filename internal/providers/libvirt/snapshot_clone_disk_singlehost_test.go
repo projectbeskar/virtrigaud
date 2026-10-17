@@ -73,7 +73,8 @@ const (
 // single-host RPCs run (virsh and the host-shell commands). Every call is
 // logged as "<host> <tool> <args>" — the host is the -c URI path for virsh,
 // "local" otherwise. Per host, fail-<subcommand or tool> makes it fail, "state"
-// holds the domstate answer (default "shut off"), snaps-<domain> the snapshot
+// holds the domstate answer (default "shut off"), "jobtype" the domjobinfo
+// "Job type" (default None), snaps-<domain> the snapshot
 // list, and dom-<name>.xml marks a domain as present (`list --all --uuid`
 // prints the UUID of every domain seeded under its UUID, as #358's disk
 // guards read the host). mktemp is deterministic
@@ -118,6 +119,10 @@ virsh)
       fail snapshot-list
       [ -f "$d/dom-$2.xml" ] || nodom "$2"
       if [ -f "$d/snaps-$2" ]; then cat "$d/snaps-$2"; fi ;;
+    domjobinfo)
+      fail domjobinfo
+      [ -f "$d/dom-$2.xml" ] || nodom "$2"
+      if [ -f "$d/jobtype" ]; then printf 'Job type:         %s\n' "$(cat "$d/jobtype")"; else printf 'Job type:         None\n'; fi ;;
     snapshot-create-as) fail snapshot-create-as; [ -f "$d/dom-$2.xml" ] || nodom "$2"; echo "Domain snapshot $3 created" ;;
     snapshot-delete) fail snapshot-delete; [ -f "$d/dom-$2.xml" ] || nodom "$2"; echo "Domain snapshot $3 deleted" ;;
     snapshot-revert) fail snapshot-revert; [ -f "$d/dom-$2.xml" ] || nodom "$2" ;;

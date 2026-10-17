@@ -671,6 +671,12 @@ func (r *VMMigrationReconciler) handleSnapshottingPhase(ctx context.Context, mig
 	if done, res, err := r.recordPendingMigrationResult(ctx, migration, longOpSnapshot); done {
 		return res, err
 	}
+	// A SnapshotCreate requested before a restart whose result was never
+	// recorded is sent again only where that is safe, else held
+	// (vmmigration_request_marker.go).
+	if held, res, err := r.resolveMigrationRequest(ctx, migration, longOpSnapshot); held {
+		return res, err
+	}
 
 	// Get source VM
 	sourceVM, err := r.getSourceVM(ctx, migration)
@@ -762,8 +768,28 @@ func (r *VMMigrationReconciler) handleSnapshottingPhase(ctx context.Context, mig
 		return res, err
 	}
 
+	// Record durably that the snapshot is requested; nothing is sent if that
+	// write fails (vmmigration_request_marker.go).
+	if err := r.markMigrationRequested(ctx, migration, longOpSnapshot); err != nil {
+		return ctrl.Result{}, err
+	}
+
 	logger.Info("Creating migration snapshot", "snapshot_name", snapshotName)
 	snapshotResp, err := providerInstance.SnapshotCreate(ctx, snapshotReq)
+	if err != nil && (!providerCallOutcomeKnown(err) || (snapshotReq.VM.HostID != "" && contracts.IsRetryable(err))) {
+		// No definite outcome (a deadline, a dropped connection): the snapshot
+		// may still be taken. A routed create's retryable answer is one too:
+		// the clustered provider answers "retry" while the snapshot it may
+		// still complete runs (and adopts it by request token once done). The
+		// marker is kept and the migration is never failed for it
+		// (vmmigration_request_marker.go).
+		return r.afterUnknownMigrationCall(ctx, migration, longOpSnapshot, err)
+	}
+	if err != nil {
+		// A definite answer — nothing was done, or a refusal: the failure is
+		// the outcome.
+		clearMigrationRequest(migration, longOpSnapshot)
+	}
 	if isOwnerRefusal(err) {
 		logger.Info("The source VM's provider refused the snapshot: the VM is not the source VirtualMachine's", "error", err.Error())
 		return r.transitionToFailed(ctx, migration, migrationSourceNotOwnedMessage)
@@ -779,6 +805,7 @@ func (r *VMMigrationReconciler) handleSnapshottingPhase(ctx context.Context, mig
 	recordSnapshot := func(m *infrav1beta1.VMMigration) {
 		m.Status.SnapshotID = snapshotResp.SnapshotId
 		m.Status.Message = fmt.Sprintf("Snapshot %s created", snapshotResp.SnapshotId)
+		clearMigrationRequest(m, longOpSnapshot)
 	}
 
 	// If there's a task, we need to wait for it to complete
@@ -829,6 +856,12 @@ func (r *VMMigrationReconciler) handleExportingPhase(ctx context.Context, migrat
 	// first, before anything that can fail the phase: the import verifies its
 	// checksum, and the in-memory guard keeps the export from being sent again.
 	if done, res, err := r.recordPendingMigrationResult(ctx, migration, longOpExport); done {
+		return res, err
+	}
+	// An ExportDisk requested before a restart whose result was never
+	// recorded is sent again only where that is safe, else held
+	// (vmmigration_request_marker.go).
+	if held, res, err := r.resolveMigrationRequest(ctx, migration, longOpExport); held {
 		return res, err
 	}
 
@@ -1032,6 +1065,15 @@ func (r *VMMigrationReconciler) handleExportingPhase(ctx context.Context, migrat
 	// bytes; skip the RPC and re-drive so the already-running/completed export
 	// drives the transition instead. This complements the durable
 	// ExportID/condition guard above against a still-stale cache.
+	if r.longOpAlreadyStarted(migration, longOpExport) {
+		logger.Info("Export already issued for this migration generation; skipping duplicate ExportDisk RPC")
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+	}
+	// Record durably that the export is requested; nothing is sent if that
+	// write fails (vmmigration_request_marker.go).
+	if err := r.markMigrationRequested(ctx, migration, longOpExport); err != nil {
+		return ctrl.Result{}, err
+	}
 	if !r.markLongOpStarted(migration, longOpExport) {
 		logger.Info("Export already issued for this migration generation; skipping duplicate ExportDisk RPC")
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
@@ -1044,6 +1086,15 @@ func (r *VMMigrationReconciler) handleExportingPhase(ctx context.Context, migrat
 		// reconcile (e.g. after retry/backoff) can re-attempt the export for
 		// this generation. transitionToFailed records the failure durably.
 		r.longOpInFlight.Delete(longOpKey(migration, longOpExport))
+		if !providerCallOutcomeKnown(err) {
+			// No definite outcome (a deadline, a dropped connection): the
+			// export may still be writing the staged object. The marker is
+			// kept and the migration is never failed for it.
+			return r.afterUnknownMigrationCall(ctx, migration, longOpExport, err)
+		}
+		// A definite answer — nothing was done, or a refusal: the failure is
+		// the outcome.
+		clearMigrationRequest(migration, longOpExport)
 		logger.Error(err, "Failed to start disk export")
 		if isOwnerRefusal(err) {
 			// Refused before any disk was read: a constant message, never
@@ -1057,7 +1108,7 @@ func (r *VMMigrationReconciler) handleExportingPhase(ctx context.Context, migrat
 	// it is applied to the live object rather than dropped by a requeue, since
 	// the in-memory guard keeps this manager process from sending ExportDisk
 	// again.
-	result := exportResultApplier(exportResp, exportReq.DiskId, diskFormat, exportedSize)
+	result := clearingMigrationRequest(longOpExport, exportResultApplier(exportResp, exportReq.DiskId, diskFormat, exportedSize))
 
 	// If there's a task, we need to wait for it
 	if exportResp.TaskRef != "" {
@@ -1122,6 +1173,7 @@ func exportResultApplier(resp contracts.ExportDiskResponse, diskID, format strin
 // markExportComplete moves a migration whose disk export finished to
 // Importing: Exporting=True/ExportComplete and the export task cleared.
 func markExportComplete(m *infrav1beta1.VMMigration) {
+	clearMigrationRequest(m, longOpExport)
 	m.Status.Phase = infrav1beta1.MigrationPhaseImporting
 	m.Status.Message = "Disk exported successfully"
 	m.Status.TaskRef = ""
@@ -1183,6 +1235,12 @@ func (r *VMMigrationReconciler) handleImportingPhase(ctx context.Context, migrat
 	// its status.diskInfo, and the in-memory guard keeps the import from being
 	// sent again.
 	if done, res, err := r.recordPendingMigrationResult(ctx, migration, longOpImport); done {
+		return res, err
+	}
+	// An ImportDisk requested before a restart whose result was never
+	// recorded is sent again only where that is safe, else held
+	// (vmmigration_request_marker.go).
+	if held, res, err := r.resolveMigrationRequest(ctx, migration, longOpImport); held {
 		return res, err
 	}
 
@@ -1418,6 +1476,15 @@ func (r *VMMigrationReconciler) handleImportingPhase(ctx context.Context, migrat
 	// issuing the RPC. ImportDisk writes the target qcow2; a duplicate driven
 	// by a stale cache would overwrite it. If another reconcile already claimed
 	// it, skip the RPC and re-drive.
+	if r.longOpAlreadyStarted(migration, longOpImport) {
+		logger.Info("Import already issued for this migration generation; skipping duplicate ImportDisk RPC")
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+	}
+	// Record durably that the import is requested; nothing is sent if that
+	// write fails (vmmigration_request_marker.go).
+	if err := r.markMigrationRequested(ctx, migration, longOpImport); err != nil {
+		return ctrl.Result{}, err
+	}
 	if !r.markLongOpStarted(migration, longOpImport) {
 		logger.Info("Import already issued for this migration generation; skipping duplicate ImportDisk RPC")
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
@@ -1429,11 +1496,25 @@ func (r *VMMigrationReconciler) handleImportingPhase(ctx context.Context, migrat
 		// Release the in-memory guard so a future reconcile can re-attempt the
 		// import for this generation after the failure is recorded.
 		r.longOpInFlight.Delete(longOpKey(migration, longOpImport))
+		if !providerCallOutcomeKnown(err) {
+			// No definite outcome (a deadline, a dropped connection): the
+			// import may still land the disk. The marker is kept and the
+			// migration is never failed for it.
+			return r.afterUnknownMigrationCall(ctx, migration, longOpImport, err)
+		}
+		// A definite answer — nothing was done, or a refusal (the disk-size
+		// limit included): the failure is the outcome.
+		clearMigrationRequest(migration, longOpImport)
 		// The target provider refused to land a disk above its disk-size
 		// limit (or one whose size it could not read): nothing was landed.
 		// Held, not failed.
 		if refusal := providerImportRefusal(err, importReq.MaxVirtualSizeBytes); refusal != nil {
 			logger.Info("The target provider refused the import for its disk-size limit", "error", err.Error())
+			// The hold writes nothing when it is unchanged: the refusal
+			// (nothing landed) is recorded by removing the marker first.
+			if werr := r.updateStatus(ctx, migration); werr != nil {
+				return ctrl.Result{}, werr
+			}
 			res, holdErr := r.holdMigrationForDiskSizeLimit(ctx, migration, infrav1beta1.VMMigrationConditionImporting, refusal)
 			if holdErr == nil && contracts.IsDiskSizeUnverifiable(err) {
 				res.RequeueAfter = r.importUnverifiable.nextWithin(string(migration.UID), time.Now(),
@@ -1464,7 +1545,7 @@ func (r *VMMigrationReconciler) handleImportingPhase(ctx context.Context, migrat
 	// target-side capacity gate is added later, it MUST budget the *virtual*
 	// (provisioned) size for vSphere targets, never the used/actual size.
 	landedFormat := landedTargetFormat(targetProvider)
-	result := importResultApplier(importResp, landedFormat)
+	result := clearingMigrationRequest(longOpImport, importResultApplier(importResp, landedFormat))
 
 	// If there's a task, we need to wait for it
 	if importResp.TaskRef != "" {
@@ -1534,6 +1615,7 @@ func importResultApplier(resp contracts.ImportDiskResponse, landedFormat string)
 // markImportComplete moves a migration whose disk import finished to
 // Creating: Importing=True/ImportComplete and the import task cleared.
 func markImportComplete(m *infrav1beta1.VMMigration) {
+	clearMigrationRequest(m, longOpImport)
 	m.Status.Phase = infrav1beta1.MigrationPhaseCreating
 	m.Status.Message = "Disk imported, creating target VM"
 	m.Status.TaskRef = ""
@@ -2450,7 +2532,7 @@ func (r *VMMigrationReconciler) handleDeletion(ctx context.Context, migration *i
 		logger.Error(err, "Failed to remove finalizer")
 		return ctrl.Result{}, err
 	}
-	r.forgetMigrationLongOps(migration)
+	r.forgetMigrationLongOps(ctx, migration)
 
 	logger.Info("VMMigration deleted successfully")
 	return ctrl.Result{}, nil

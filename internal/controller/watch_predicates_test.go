@@ -40,8 +40,8 @@ import (
 // requeue (hold_watch_envtest_test.go runs the predicates in a real manager).
 
 // TestSnapshotUpdateNeedsReconcile: only a generation change (a spec change,
-// or the start of the deletion) or a change of the force-delete annotation
-// re-runs a VMSnapshot.
+// or the start of the deletion) or a change of the force-delete or
+// operation-outcome annotation re-runs a VMSnapshot.
 func TestSnapshotUpdateNeedsReconcile(t *testing.T) {
 	base := &infrav1beta1.VMSnapshot{ObjectMeta: metav1.ObjectMeta{Name: "s", Namespace: "default", Generation: 1,
 		Annotations: map[string]string{"example.com/note": "a"}}}
@@ -61,9 +61,12 @@ func TestSnapshotUpdateNeedsReconcile(t *testing.T) {
 		}), true},
 		"force-delete set":     {mutate(func(s *infrav1beta1.VMSnapshot) { s.Annotations[forceDeleteAnnotation] = "true" }), true},
 		"force-delete removed": {base.DeepCopy(), true},
-		"another annotation":   {mutate(func(s *infrav1beta1.VMSnapshot) { s.Annotations["example.com/note"] = "b" }), false},
-		"a label":              {mutate(func(s *infrav1beta1.VMSnapshot) { s.Labels = map[string]string{"x": "y"} }), false},
-		"status only":          {mutate(func(s *infrav1beta1.VMSnapshot) { s.Status.Message = "held" }), false},
+		"operation-outcome confirmation set (rc2 R6)": {mutate(func(s *infrav1beta1.VMSnapshot) {
+			s.Annotations[operationOutcomeAnnotation] = operationOutcomeNotPerformedPrefix + "2026-10-17T10:00:00Z"
+		}), true},
+		"another annotation": {mutate(func(s *infrav1beta1.VMSnapshot) { s.Annotations["example.com/note"] = "b" }), false},
+		"a label":            {mutate(func(s *infrav1beta1.VMSnapshot) { s.Labels = map[string]string{"x": "y"} }), false},
+		"status only":        {mutate(func(s *infrav1beta1.VMSnapshot) { s.Status.Message = "held" }), false},
 	} {
 		t.Run(name, func(t *testing.T) {
 			oldSnap := base

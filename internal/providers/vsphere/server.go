@@ -567,6 +567,16 @@ func (p *Provider) GetCapabilities(ctx context.Context, req *providerv1.GetCapab
 		// ADR-0011: DeleteStagedDisk removes a migration's s3 object and empties
 		// its nfs file (qemu-img over libnfs cannot unlink; staged_disk.go).
 		SupportedStagedDiskDeleteBackends: migration.StagedDiskDeleteBackendsS3AndNFS(),
+		// rc2 R6: a re-sent ExportDisk on s3 / nfs replaces the staged object
+		// at destination_url: every step honours the call's context (the
+		// datastore clone task is cancelled, qemu-img runs under it, the
+		// upload is atomic) and the temporary clone has a unique name and is
+		// removed on every exit. The pvc copy does not stop on cancellation.
+		ResendSafeExportBackends: []string{migration.BackendS3, migration.BackendNFS},
+		// A re-sent ImportDisk on s3 / nfs lands at the deterministic
+		// "<ns>_<vm>-migrated" folder, replacing it, or is refused
+		// (VM_DISK_IN_USE) when a VM uses it — never a second disk.
+		ResendSafeImportBackends: []string{migration.BackendS3, migration.BackendNFS},
 	}, nil
 }
 

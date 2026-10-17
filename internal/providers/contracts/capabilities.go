@@ -128,6 +128,18 @@ type Capabilities struct {
 	// one that stages nothing outside the cluster — means the VMMigration
 	// controller never asks it and records the staged object as left behind.
 	SupportedStagedDiskDeleteBackends []string
+	// ResendSafeExportBackends lists the staging backends on which an
+	// ExportDisk sent again for the same destination, once the earlier call's
+	// deadline has passed, replaces what the earlier call wrote and leaves
+	// nothing else behind (GetCapabilitiesResponse.resend_safe_export_backends,
+	// rc2 R6). The VMMigration controller re-sends an ExportDisk whose outcome
+	// it lost only on a listed backend; empty from a provider that predates
+	// the field, which is never sent one again.
+	ResendSafeExportBackends []string
+	// ResendSafeImportBackends is ResendSafeExportBackends for ImportDisk: on
+	// a listed backend a re-sent ImportDisk lands the disk at the same name
+	// and never makes a second one (rc2 R6).
+	ResendSafeImportBackends []string
 }
 
 // CapabilityReporter is an optional capability of a Provider: it reports the

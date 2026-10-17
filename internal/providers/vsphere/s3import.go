@@ -91,7 +91,7 @@ func (p *Provider) importDiskFromS3(ctx context.Context, req *providerv1.ImportD
 
 	// <id> is the stable name used for the temp files, the import VM/disk name,
 	// the final datastore path, and the returned DiskId: the landing name of the
-	// target VirtualMachine, "<ns>.<vm>-migrated" (disk_guard.go:
+	// target VirtualMachine, "<ns>_<vm>-migrated" (disk_guard.go:
 	// importLandingName; the bare TargetName never decides it). vmdk.Import
 	// derives the on-datastore disk name from the local vmdk basename, so the
 	// local file MUST be named "<id>.vmdk".
