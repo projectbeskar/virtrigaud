@@ -267,10 +267,9 @@ func TestReconfigure_StartFaultStaysOutOfTheBreaker(t *testing.T) {
 		})
 	}
 	t.Run("SOAP fault", func(t *testing.T) {
-		p.client.RoundTripper = &startFault{RoundTripper: inner,
-			err: soap.WrapSoapFault(&soap.Fault{String: "fixture", Detail: struct {
-				Fault types.AnyType `xml:",any,typeattr"`
-			}{Fault: &types.TaskInProgress{}}})}
+		sf := &soap.Fault{String: "fixture"}
+		sf.Detail.Fault = &types.TaskInProgress{}
+		p.client.RoundTripper = &startFault{RoundTripper: inner, err: soap.WrapSoapFault(sf)}
 		err := reconfigure(t, p, id, desired)
 		assert.Equal(t, []string{contracts.VMOperationFailedReason}, errorReasons(err))
 	})
