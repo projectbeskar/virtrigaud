@@ -1126,7 +1126,6 @@ verification checklist. The roll order is **CRDs, then the cross-namespace grant
 the providers**, and roll the providers promptly after the manager: until a
 provider is upgraded, a Proxmox provider does not enforce the new owner checks, and
 no provider that predates rc2 is ever sent a `Create` or `Clone` again after an
-unknown outcome. The order was validated in the rc1 lab; the rc2 changes have not
-yet been through a lab upgrade (see
+unknown outcome. The order was validated in the rc1 lab (see
 [Required upgrade order](docs/upgrading.md#required-upgrade-order) and
 [Changes since v0.4.0-rc1](#upgrade-order-for-rc2)).

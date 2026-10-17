@@ -5,6 +5,22 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-10-17 07:55] - Release notes: v0.4.0-rc2, "Changes since v0.4.0-rc1" (Wave 1)
+**Author:** @wrkode (William Rizzo)
+
+### Changed
+- `docs/release-notes/next.md`: re-framed from the shipped v0.4.0-rc1 notes to the v0.4.0-rc2 draft. The rc1 content stays as the cumulative "since v0.3.11" notes. New section "Changes since v0.4.0-rc1" covers Wave 1: #394 (migration target UID binding and claim, `TargetVMNotOwned`, the reserved-keys `ValidatingAdmissionPolicy`, breaking), #393 (single-host Proxmox per-VM owner checks, `VMNotOwned` / `OwnerStampUnreadable` holds, who is held after the upgrade), #392 (single-host adoption stamps the adopted VM, `supports_owner_transfer`) and #395 (single-host `VMClone` targets stamped, re-sent `Clone` re-binds, `CloneOutcomeUnknown`, `supports_owner_rebind` gating `Create` and `Clone` re-sends), plus the rc2 upgrade order. The Breaking changes list, the test pointers and the Create/Clone/Delete/adoption bullets are updated to match; a placeholder comment marks where Wave 2 (R5-R10, R14-R16) goes.
+- `docs/release-notes/next.md` (Known limitations): removed the three rc1 items Wave 1 fixed (adoption re-stamp and single-host Proxmox owner checks, unstamped single-host `VMClone` targets, a cross-namespace migration adopting a same-named target). Added the Proxmox legacy name rule, the Proxmox check-then-act window, no admission policy below Kubernetes 1.30, kustomize overlays repeating the `replacements` block, a leader-election overlap during a migration's target `Create`, and VMs adopted / clones made before rc2 staying unstamped.
+
+### Why
+rc2 changes behaviour that operators must act on (a breaking migration change, a new admission policy with installer privileges, VMs held after the upgrade). The published pre-release body has to say so, and must stop listing limitations that are fixed.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [ ] Config change only
+- [x] Documentation only
+
 ## [2026-10-17 06:50] - Single-host VMClone targets are stamped with their owner; a re-sent Clone re-binds (rc2 R4)
 **Author:** @wrkode (William Rizzo)
 
