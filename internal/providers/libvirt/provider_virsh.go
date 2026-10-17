@@ -264,6 +264,18 @@ func virshConnFrom(c hostconn.Conn) (*virshConn, error) {
 func (p *Provider) createVMWithCloudInit(ctx context.Context, vp *VirshProvider, req contracts.CreateRequest, domainName string, g *clusterDiskGuard) (string, error) {
 	log.Printf("INFO Creating VM with enhanced cloud-init configuration and storage: %s (libvirt domain %s)", req.Name, domainName)
 
+	// rc2 R7: a single-host create that may attach the VM's migration landing
+	// disk in place holds that landing name from its confinement and in-use
+	// check through the define, serialised with ImportDisk and
+	// DeleteLandedDisk of the same name (landing_lock.go).
+	if req.Image.ImportedDisk && g == nil {
+		unlock, err := landingLocks.lock(ctx, domainName+contracts.ImportedDiskNameSuffix)
+		if err != nil {
+			return "", contracts.NewRetryableError("gave up waiting for other work on the migration landing disk", err)
+		}
+		defer unlock()
+	}
+
 	// Initialize providers
 	cloudInitProvider := NewCloudInitProvider(vp)
 	cloudInitProvider.stagingDir = p.stagingDir()
@@ -1165,11 +1177,11 @@ const (
 const diskKindScript = `if [ -L "$1" ]; then echo ` + diskKindSymlink + `; elif [ -f "$1" ]; then echo ` + diskKindFile +
 	`; elif [ -e "$1" ]; then echo ` + diskKindOther + `; fi`
 
-// hostDiskKind reports what is at path on vp's host, without following a
-// symlink at the path itself: diskKindSymlink, diskKindFile, diskKindOther or
-// diskKindAbsent. A failure to check is a retryable error.
-func hostDiskKind(ctx context.Context, vp *VirshProvider, path string) (string, error) {
-	res, err := runHost(ctx, vp, "sh", "-c", diskKindScript, "sh", path)
+// hostDiskKind reports what is at path on the host behind h, without
+// following a symlink at the path itself: diskKindSymlink, diskKindFile,
+// diskKindOther or diskKindAbsent. A failure to check is a retryable error.
+func hostDiskKind(ctx context.Context, h hostCommandRunner, path string) (string, error) {
+	res, err := runHost(ctx, h, "sh", "-c", diskKindScript, "sh", path)
 	if err != nil {
 		return "", contracts.NewRetryableError(fmt.Sprintf("check %s on the host", path), err)
 	}
