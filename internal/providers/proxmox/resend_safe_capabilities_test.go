@@ -28,12 +28,13 @@ import (
 )
 
 // TestCapabilities_ResendSafeBackends pins where a re-sent ExportDisk /
-// ImportDisk is declared safe (rc2 R6): exports on s3 only (the nfs export
-// copies onto the staged file in place on the node), imports on s3 and nfs
-// (private temp + mv -T onto the deterministic stage).
+// ImportDisk is declared safe (rc2 R6): s3 only, both ways. The nfs export
+// copies onto the staged file in place on the node, and the nfs import's
+// node script (copy, then mv -T onto the stage) outlives a cancelled call
+// with no time limit or lock: neither is re-send safe.
 func TestCapabilities_ResendSafeBackends(t *testing.T) {
 	resp, err := GetProviderCapabilities().GetCapabilities(context.Background(), &providerv1.GetCapabilitiesRequest{})
 	require.NoError(t, err)
 	assert.Equal(t, []string{migration.BackendS3}, resp.GetResendSafeExportBackends())
-	assert.ElementsMatch(t, []string{migration.BackendNFS, migration.BackendS3}, resp.GetResendSafeImportBackends())
+	assert.Equal(t, []string{migration.BackendS3}, resp.GetResendSafeImportBackends())
 }
