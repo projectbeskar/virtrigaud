@@ -3614,7 +3614,9 @@ var errSourceSnapshotUnaddressable = stderrors.New("the source snapshot can no l
 // deleteSourceSnapshot deletes the migration-created snapshot of the source VM
 // and, once it is gone, clears status.snapshotID (in memory; the caller
 // persists it). It returns nil when the snapshot was deleted or the provider
-// answers that it is not found. It returns an errSourceSnapshotUnaddressable
+// answers that it is not found; a VM_NOT_OWNED answer (the VM at the source's
+// id is not its VirtualMachine's) is released too, but recorded as a
+// SnapshotLeftOnHypervisor Warning (recordSnapshotNotOwnedRelease). It returns an errSourceSnapshotUnaddressable
 // error, keeping the snapshot id, when the source VirtualMachine or its
 // Provider in the migration's own namespace is not found. Any other failure —
 // a read error, a cross-namespace Provider this namespace may not use (or
@@ -3663,6 +3665,14 @@ func (r *VMMigrationReconciler) deleteSourceSnapshot(ctx context.Context, migrat
 	// Delete snapshot
 	logger.Info("Deleting source snapshot", "snapshot_id", migration.Status.SnapshotID)
 	taskRef, err := providerInstance.SnapshotDelete(ctx, sourceRef, migration.Status.SnapshotID)
+	if contracts.IsVMNotOwned(err) {
+		// The VM at the source's id is not the source VirtualMachine's: the
+		// snapshot cannot be deleted through it and is released, but recorded
+		// as possibly left on that VM, never as gone (snapshot_not_owned_release.go).
+		recordSnapshotNotOwnedRelease(ctx, r.Recorder, migration, sourceVM.Status.ID, migration.Status.SnapshotID)
+		migration.Status.SnapshotID = ""
+		return nil
+	}
 	if contracts.IsNotFound(err) {
 		// Already gone (e.g. an earlier delete that completed after its
 		// await timed out): an idempotent success.
