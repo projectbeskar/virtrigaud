@@ -294,7 +294,8 @@ func TestClustered_Snapshots_RoutedOwnerCheckedByUUID(t *testing.T) {
 		assert.Equal(t, "s2", resp.SnapshotId)
 		assert.Equal(t, append(append([]string{}, snapshotOwnerCheck...),
 			"host-b virsh snapshot-list "+uuid+" --name",
-			"host-b virsh snapshot-dumpxml "+uuid+" s2"), fx.calls(), "no second snapshot is made")
+			"host-b virsh snapshot-dumpxml "+uuid+" s2",
+			"host-b virsh domjobinfo "+uuid), fx.calls(), "no second snapshot is made; it is adopted once no job runs")
 	})
 
 	t.Run("create when the name check fails makes nothing", func(t *testing.T) {

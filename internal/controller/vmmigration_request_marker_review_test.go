@@ -157,6 +157,29 @@ func TestMigrationRequest_OutcomeOfAFailedCall(t *testing.T) {
 	})
 }
 
+// TestMigrationSnapshot_RoutedRetryableAnswerKeepsTheMarker: a clustered
+// provider answers "retry" (Unavailable, VM_OPERATION_FAILED — which the
+// transport marks "not performed") while the snapshot it may still complete
+// runs. For a routed create that is no definite outcome: the marker is kept
+// and the create is re-sent, paced; the migration is not failed (a retry
+// under a new name would orphan the first snapshot).
+func TestMigrationSnapshot_RoutedRetryableAnswerKeepsTheMarker(t *testing.T) {
+	vm, p, m := clusteredSnapshottingMigration()
+	c := fake.NewClientBuilder().WithScheme(capGatingScheme(t)).WithObjects(vm, p, m).
+		WithStatusSubresource(&infrav1beta1.VMMigration{}).Build()
+	prov := &erringMigrationProvider{err: contracts.NewRetryableError("snapshot still being taken",
+		contracts.ErrOperationNotPerformed)}
+	r := migrationReconcilerOn(c, prov)
+	res, err := r.handleSnapshottingPhase(context.Background(), storedMigration(t, c, m))
+	require.NoError(t, err)
+	assert.Equal(t, 1, prov.calls)
+	assert.Positive(t, res.RequeueAfter)
+	got := storedMigration(t, c, m)
+	assert.Equal(t, infrav1beta1.MigrationPhaseSnapshotting, got.Status.Phase)
+	assert.True(t, migrationRequested(got, longOpSnapshot))
+	assert.Equal(t, migrationRequests[longOpSnapshot].resendMessage, migrationReady(got).Message)
+}
+
 // TestMarkMigrationRequested_AttemptIDsIncreaseAndResendsCount (review L1,
 // L3): every marker write is a strictly later attempt — within one second
 // too — and an automatic re-send counts itself; an operator's confirmation
