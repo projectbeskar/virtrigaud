@@ -30,6 +30,8 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
+	"github.com/projectbeskar/virtrigaud/internal/storage/migration"
+
 	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
 )
 
@@ -98,9 +100,45 @@ func TestDeleteLandedDisk_Refusals(t *testing.T) {
 		})
 	}
 
-	resp, err := (&Provider{logger: slog.Default()}).DeleteLandedDisk(context.Background(), landedStageReq("team-a", "web", ""))
-	require.NoError(t, err)
-	assert.Equal(t, providerv1.LandedDiskDeleteOutcome_LANDED_DISK_DELETE_OUTCOME_NOT_FOUND, resp.GetOutcome())
+	// Without the SSH data plane nothing can be checked: a refusal, never a
+	// NOT_FOUND the manager would record as deleted (security review).
+	_, err := (&Provider{logger: slog.Default()}).DeleteLandedDisk(context.Background(), landedStageReq("team-a", "web", ""))
+	assert.Equal(t, codes.FailedPrecondition, status.Code(err))
+	assert.Equal(t, landedDiskNoSSHMessage, status.Convert(err).Message())
+}
+
+// TestDeleteLandedDisk_ExcludesAnImportOfTheSameStage (security review): while
+// an import of the VM's stage runs the delete answers Unavailable and runs
+// nothing on the node; while a delete runs an import of that stage is refused
+// (retryably); another VM's stage is unaffected.
+func TestDeleteLandedDisk_ExcludesAnImportOfTheSameStage(t *testing.T) {
+	name := importStageName("team-a", "web")
+	release, ok := stageGuards.beginImport(name)
+	require.True(t, ok)
+	node := &stagedDeleteNode{stdout: landedStageDeletedMarker}
+	_, err := landedStageProvider(node).DeleteLandedDisk(context.Background(), landedStageReq("team-a", "web", ""))
+	assert.Equal(t, codes.Unavailable, status.Code(err))
+	assert.Empty(t, node.scripts, "nothing runs on the node")
+
+	resp, err := landedStageProvider(node).DeleteLandedDisk(context.Background(), landedStageReq("team-a", "db", ""))
+	require.NoError(t, err, "another VM's stage is not held")
+	assert.Equal(t, providerv1.LandedDiskDeleteOutcome_LANDED_DISK_DELETE_OUTCOME_DELETED, resp.GetOutcome())
+	release()
+
+	releaseDelete, ok := stageGuards.beginDelete(name)
+	require.True(t, ok)
+	_, err = (&Provider{logger: slog.Default()}).ImportDisk(context.Background(), &providerv1.ImportDiskRequest{
+		BackendType: migration.BackendS3, TransferMode: "relay", TargetName: "web-migrated",
+		TargetVm: &providerv1.ObjectIdentity{Namespace: "team-a", Name: "web"},
+	})
+	assert.Equal(t, codes.Unavailable, status.Code(err), "an import waits for the delete to finish")
+	releaseDelete()
+
+	_, ok = stageGuards.beginDelete(name)
+	assert.True(t, ok, "released")
+	stageGuards.mu.Lock()
+	delete(stageGuards.deleting, name)
+	stageGuards.mu.Unlock()
 }
 
 // TestBuildLandedStageDeleteScript_RunsAsWritten runs the script against real

@@ -124,6 +124,11 @@ func TestClient_DeleteLandedDisk_Errors(t *testing.T) {
 		}},
 		"in use": {&landedDiskServer{err: inUse.Err()}, func(t *testing.T, err error) {
 			assert.True(t, contracts.IsVMDiskInUse(err), "got %v", err)
+			assert.False(t, contracts.IsInvalidSpec(err))
+		}},
+		"cannot delete in its configuration": {&landedDiskServer{err: status.Error(codes.FailedPrecondition, "no SSH data plane")}, func(t *testing.T, err error) {
+			assert.True(t, contracts.IsInvalidSpec(err), "refused, never retried blindly: got %v", err)
+			assert.False(t, contracts.IsVMDiskInUse(err))
 		}},
 		"no outcome": {&landedDiskServer{resp: &providerv1.DeleteLandedDiskResponse{}}, func(t *testing.T, err error) {
 			assert.False(t, contracts.IsNotSupported(err))
