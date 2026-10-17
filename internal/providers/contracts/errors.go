@@ -160,6 +160,21 @@ const VMPreviousIncarnationReason = "VM_PREVIOUS_INCARNATION"
 // it out of the per-Provider circuit breaker.
 const VMSourceRunningReason = "VM_SOURCE_RUNNING"
 
+// ReconfigureNeedsPowerOffReason is the google.rpc.ErrorInfo reason (in
+// ErrorInfoDomain) a provider attaches to the codes.FailedPrecondition status
+// of a Reconfigure it refused, before changing anything, because the VM is
+// powered on and the hypervisor cannot apply the requested CPU/memory change
+// to it while it runs, nor stage it for its next boot — on vSphere, CPU or
+// memory hot-add (or CPU hot-remove, for fewer vCPUs) is not enabled on the
+// VM, and memory is never removed from a running VM. The change is applied by
+// a Reconfigure once the VM is powered off. The manager maps it to a
+// retryable error marked ErrReconfigureNeedsPowerOff, records it as
+// Reconfiguring=False/ResizePendingPowerOff and asks again on its backoff;
+// FailedPrecondition keeps it out of the per-Provider circuit breaker. A
+// provider that can stage the change for the next boot (libvirt) answers
+// restart_required instead.
+const ReconfigureNeedsPowerOffReason = "RECONFIGURE_NEEDS_POWER_OFF"
+
 // DiskSizeExceedsLimitReason is the google.rpc.ErrorInfo reason (in
 // ErrorInfoDomain) a provider attaches to the codes.FailedPrecondition status
 // of an ImportDisk it refused because the disk it was about to land has a
@@ -398,6 +413,19 @@ var ErrVMSourceRunning = errors.New("the clone's source VM must be powered off")
 // pending until the source VM is powered off, and never fails it for this.
 func IsVMSourceRunning(err error) bool {
 	return IsRetryable(err) && errors.Is(err, ErrVMSourceRunning)
+}
+
+// ErrReconfigureNeedsPowerOff marks (in an error's chain) a provider's
+// refusal carrying ReconfigureNeedsPowerOffReason: the VM's CPU/memory change
+// can be applied only while it is powered off. The transport client wraps it
+// into the retryable error it maps that refusal to.
+var ErrReconfigureNeedsPowerOff = errors.New("the VM's CPU/memory change can be applied only while it is powered off")
+
+// IsReconfigureNeedsPowerOff reports whether err is a provider's
+// ReconfigureNeedsPowerOffReason refusal (a retryable error that says so):
+// nothing was changed, and the change is applied once the VM is powered off.
+func IsReconfigureNeedsPowerOff(err error) bool {
+	return IsRetryable(err) && errors.Is(err, ErrReconfigureNeedsPowerOff)
 }
 
 // IsInvalidSpec reports whether err is, or wraps, a provider InvalidSpec error.
