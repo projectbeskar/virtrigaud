@@ -454,6 +454,10 @@ func definitionDiskFormat(domainXML, diskPath string) string {
 func exportSourceOn(ctx context.Context, vp *VirshProvider, d domainTarget, diskID string) (string, string, error) {
 	doc, err := domainDisksOf(ctx, vp, d.handle)
 	if err != nil {
+		if virshNoDomain(err) {
+			// The domain is not on the host: the export has nothing to read.
+			return "", "", contracts.NewNotFoundError(fmt.Sprintf("source VM %q not found on the libvirt host", d.name), err)
+		}
 		return "", "", contracts.NewRetryableError(fmt.Sprintf("failed to read disks for source VM %q", d.name), err)
 	}
 	disks := doc.diskFiles()

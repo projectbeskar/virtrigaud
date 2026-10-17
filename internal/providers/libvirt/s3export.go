@@ -67,7 +67,7 @@ import (
 // whole export. This is the documented follow-up.
 func (s *Server) exportDiskToS3(ctx context.Context, req *providerv1.ExportDiskRequest) (*providerv1.ExportDiskResponse, error) {
 	if s.provider == nil {
-		return nil, nothingDone(wireExportNotPerformed, fmt.Errorf("libvirt provider not initialized"))
+		return nil, nothingDone(wireProviderNotInitialized, fmt.Errorf("libvirt provider not initialized"))
 	}
 	conn, err := s.provider.conn(ctx)
 	if err != nil {
@@ -77,7 +77,7 @@ func (s *Server) exportDiskToS3(ctx context.Context, req *providerv1.ExportDiskR
 	if !strings.Contains(conn.uri(), "ssh://") {
 		// The flatten + stream-out runs on the libvirt host over SSH. A local
 		// connection is not the Slice 2 source shape.
-		return nil, refusal(codes.FailedPrecondition, wireExportRefused,
+		return nil, refusal(codes.FailedPrecondition, wireExportNeedsSSH,
 			fmt.Errorf("s3 export requires an ssh:// libvirt transport (host-side qemu-img flatten + stream); got %q", conn.uri()))
 	}
 

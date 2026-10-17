@@ -72,7 +72,7 @@ func (s *Server) importDiskFromS3(ctx context.Context, req *providerv1.ImportDis
 // publishing step, tagged stagePublish; singleHostImportFailure reads the tag.
 func (s *Server) importDiskFromS3Steps(ctx context.Context, req *providerv1.ImportDiskRequest) (*providerv1.ImportDiskResponse, error) {
 	if s.provider == nil {
-		return nil, fmt.Errorf("libvirt provider not initialized")
+		return nil, nothingDone(wireProviderNotInitialized, fmt.Errorf("libvirt provider not initialized"))
 	}
 	conn, err := s.provider.conn(ctx)
 	if err != nil {
@@ -82,7 +82,7 @@ func (s *Server) importDiskFromS3Steps(ctx context.Context, req *providerv1.Impo
 	if !strings.Contains(conn.uri(), "ssh://") {
 		// Relay-to-host conversion needs an SSH transport to stream into the
 		// host's qemu-img. A local connection is not the Slice 1 target shape.
-		return nil, refusal(codes.FailedPrecondition, wireImportRefused,
+		return nil, refusal(codes.FailedPrecondition, wireImportNeedsSSH,
 			fmt.Errorf("s3 import requires an ssh:// libvirt transport (host-side qemu-img conversion); got %q", conn.uri()))
 	}
 

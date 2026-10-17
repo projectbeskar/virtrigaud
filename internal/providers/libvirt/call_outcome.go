@@ -127,7 +127,10 @@ func stageOf(err error) (callStage, string, bool) {
 // Constant wire texts of the single-host long calls. Each says what the
 // provider can prove and where the detail is.
 const (
-	wireSnapshotNotPerformed = "snapshot create not performed: a check or command on the libvirt host failed " +
+	wireProviderNotInitialized = "libvirt provider not initialized"
+	wireExportNeedsSSH         = "disk export not performed: it requires an ssh:// libvirt transport (host-side qemu-img)"
+	wireImportNeedsSSH         = "disk import not performed: it requires an ssh:// libvirt transport (host-side qemu-img)"
+	wireSnapshotNotPerformed   = "snapshot create not performed: a check or command on the libvirt host failed " +
 		"before the snapshot was taken (details are in the provider log)"
 	wireSnapshotNotCreated = "snapshot create failed: libvirt refused the snapshot and it was not created " +
 		"(details are in the provider log)"
