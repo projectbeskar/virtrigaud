@@ -238,7 +238,7 @@ adoption annotated `virtrigaud.io/adopted-id` without `status.id`: delete that
 
 ## About this release candidate / what to test
 
-v0.4.0 GA follows after a soak of this candidate. Please try it on a non-production
+v0.4.0 GA follows after a soak of this candidate (rc1 was the first). Please try it on a non-production
 cluster and report what you find (GitHub issues; include the Provider type, the
 `kubectl describe` of the object involved and the provider log, never a Secret).
 The most useful things to exercise:
@@ -255,12 +255,18 @@ The most useful things to exercise:
   `infra.virtrigaud.io/max-disk-size`), including clones and migrations.
 - **Deleting a `Provider`** that still has VMs (the in-use finalizer, ADR-0010),
   and VM deletes while a provider is rolling out.
+- **New in rc2:** a `VMMigration` into a namespace that already has a same-named
+  `VirtualMachine` (it must fail `TargetVMNotOwned` before touching the source);
+  the admission policy on Kubernetes 1.30+ (your restore tool and any second
+  VirtRigaud installation exempted); single-host adoption of a VM that carries a
+  stale stamp; a `VMClone` through a manager restart; and, on Proxmox, a reused
+  VMID under a managed `VirtualMachine`.
 
 **Proxmox was not validated against a real PVE cluster.** The Proxmox changes in
-this release (owner stamps, imported-disk confinement, NFS/S3 import hardening,
-idempotent power) were tested only against the test fake, not a real PVE cluster.
-If you run Proxmox, treat it as untested and try these paths on a lab cluster
-first.
+this release (owner stamps, per-VM owner checks, adoption stamping, clone
+re-binding, imported-disk confinement, NFS/S3 import hardening, idempotent power)
+were tested only against the test fake, not a real PVE cluster. If you run
+Proxmox, treat it as untested and try these paths on a lab cluster first.
 
 ## Breaking changes
 
@@ -359,8 +365,28 @@ first.
   → [Upgrade guide](docs/upgrading.md#breaking-changes),
   [`docs/vm-provider-binding.md`](docs/vm-provider-binding.md#deleting-a-provider)
 
-See the full breaking-change table, required upgrade order (CRDs → manager →
-providers), and rollback caveats in
+- **New in rc2: a `VMMigration` acts only on the target `VirtualMachine` it
+  created** (UID binding plus a claim, `status.targetVMUID` / `targetVMClaim`). A
+  same-named `VirtualMachine` that the migration did not create fails it with
+  `TargetVMNotOwned` at `Validating`, before the source is powered off or exported;
+  before, the migration took it as its own target. **A migration in `Creating` or
+  `Validating-Target` while you upgrade fails closed with `TargetVMNotOwned`** (its
+  target VM is left as it is); let migrations finish first.
+  → [Changes since v0.4.0-rc1](#a-vmmigration-accepts-only-the-target-vm-it-created-394-breaking),
+  [Upgrade guide](docs/upgrading.md#breaking-changes)
+- **New in rc2: only the manager may set the manager-owned `virtrigaud.io/*`
+  annotations and the `virtrigaud.io/adopted` label on a `VirtualMachine`**, enforced
+  by a new `ValidatingAdmissionPolicy` (Kubernetes 1.30+; chart value
+  `admissionPolicy.reservedKeys`, default on). Backup and restore tools (Velero)
+  and a second VirtRigaud installation in the cluster are rejected unless listed in
+  `exemptUsernames` / `exemptGroups`. Installing it needs create rights on
+  `validatingadmissionpolicies` and `validatingadmissionpolicybindings`. It is a
+  security control for migration, adoption and clone: do not disable it without a
+  replacement. → [`docs/admission-policy.md`](docs/admission-policy.md),
+  [Upgrade guide](docs/upgrading.md#breaking-changes)
+
+See the full breaking-change table, required upgrade order (CRDs → admission
+policy and grants → manager → providers), and rollback caveats in
 **[docs/upgrading.md](docs/upgrading.md)**.
 
 ## Highlights
