@@ -852,6 +852,13 @@ func (p *Provider) DeleteStagedDisk(_ context.Context, req *providerv1.DeleteSta
 	return nil, status.Error(codes.Unimplemented, "the mock provider stages no nfs or s3 objects (pvc only)")
 }
 
+// DeleteLandedDisk answers Unimplemented (rc2 R7): the mock's ImportDisk lands
+// nothing on a hypervisor, so there is no landed disk to remove. It does not
+// report supports_landed_disk_delete, so the manager never asks it.
+func (p *Provider) DeleteLandedDisk(_ context.Context, _ *providerv1.DeleteLandedDiskRequest) (*providerv1.DeleteLandedDiskResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "the mock provider lands no migration disks")
+}
+
 // Helper methods
 
 // generateID generates a unique ID with the given prefix. A process-wide

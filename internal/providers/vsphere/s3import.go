@@ -21,10 +21,14 @@ import (
 	stderrors "errors"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
+	"strings"
 
+	"github.com/vmware/govmomi/fault"
 	"github.com/vmware/govmomi/object"
 	"github.com/vmware/govmomi/ovf"
+	"github.com/vmware/govmomi/vim25/mo"
 	"github.com/vmware/govmomi/vim25/soap"
 	"github.com/vmware/govmomi/vim25/types"
 	"github.com/vmware/govmomi/vmdk"
@@ -378,18 +382,102 @@ func (p *Provider) nfcImportStreamOptimized(
 	}
 
 	// (b) Detach the disk (keep the file) and Unregister the transient import VM.
-	// Unregister leaves the disk — and a small leftover .vmx/.nvram in the folder,
-	// which is harmless: the subsequent Create attaches "[<ds>] <id>/<id>.vmdk".
+	// Unregister leaves the disk — and the transient VM's own small files
+	// (.vmx, .vmsd, .hlog, ...) in the folder; those are removed right after
+	// (removeImportVMStubs, rc2 R7), never the landed .vmdk. The subsequent
+	// Create attaches "[<ds>] <id>/<id>.vmdk".
 	vm := object.NewVirtualMachine(p.client.Client, info.Entity)
 	if devs, derr := vm.Device(ctx); derr == nil {
 		if disks := devs.SelectByType((*types.VirtualDisk)(nil)); len(disks) > 0 {
 			_ = vm.RemoveDevice(ctx, true, disks...)
 		}
 	}
+	stubs := p.importVMStubFiles(ctx, vm, datastore.Name(), id)
 	if err := vm.Unregister(ctx); err != nil {
 		p.logger.Warn("Failed to unregister transient import VM (leftover .vmx may remain in folder)", "vm", info.Entity.Value, "error", err)
+		return nil
 	}
+	p.removeImportVMStubs(ctx, datastore, datacenter, stubs)
 	return nil
+}
+
+// importVMStubSuffixes are the extensions of the files vCenter writes for a
+// VM next to its .vmx, named after the VM. The transient import VM is named
+// after the landing folder (<id>), so its own files are "<id><suffix>" in that
+// folder. ".vmdk" is never among them.
+var importVMStubSuffixes = []string{".vmx", ".vmsd", ".hlog", ".nvram", ".vmxf"}
+
+// importVMStubFiles returns the datastore-relative names of the transient
+// import VM's own files to remove once it is unregistered: "<id>/<id><suffix>"
+// for importVMStubSuffixes, plus every non-disk file of its layout
+// (layoutEx.file) directly in its landing folder "<id>" — and only when the
+// VM's .vmx is exactly "[<dsName>] <id>/<id>.vmx", the VM the import created.
+// It never returns a .vmdk (or any disk file) or a file outside that folder.
+// A VM whose files cannot be read yields nothing (fail-soft: the stubs stay).
+func (p *Provider) importVMStubFiles(ctx context.Context, vm *object.VirtualMachine, dsName, id string) []string {
+	var mvm mo.VirtualMachine
+	if err := vm.Properties(ctx, vm.Reference(), []string{propConfigFilesVMPathName, propLayoutExFile}, &mvm); err != nil {
+		p.logger.Warn("Cannot read the transient import VM's files; its stub files stay in the landing folder",
+			"vm", vm.Reference().Value, "error", err)
+		return nil
+	}
+	if mvm.Config == nil || mvm.Config.Files.VmPathName != fmt.Sprintf("[%s] %s/%s.vmx", dsName, id, id) {
+		p.logger.Warn("The transient import VM is not where the import placed it; its stub files stay",
+			"vm", vm.Reference().Value)
+		return nil
+	}
+	var layout []string
+	if mvm.LayoutEx != nil {
+		for _, f := range mvm.LayoutEx.File {
+			layout = append(layout, f.Name)
+		}
+	}
+	return importVMStubNames(dsName, id, layout)
+}
+
+// importVMStubNames is the pure part of importVMStubFiles: the derived stub
+// names plus the layout files that lie directly in "[<dsName>] <id>/", minus
+// any disk file, de-duplicated, as datastore-relative paths.
+func importVMStubNames(dsName, id string, layout []string) []string {
+	seen := map[string]bool{}
+	var out []string
+	add := func(rel string) {
+		lower := strings.ToLower(rel)
+		if seen[rel] || strings.HasSuffix(lower, vmdkExt) || path.Dir(rel) != id {
+			return
+		}
+		seen[rel] = true
+		out = append(out, rel)
+	}
+	for _, suffix := range importVMStubSuffixes {
+		add(id + "/" + id + suffix)
+	}
+	prefix := "[" + dsName + "] "
+	for _, name := range layout {
+		if rel, ok := strings.CutPrefix(name, prefix); ok && !strings.Contains(rel, "..") {
+			add(rel)
+		}
+	}
+	return out
+}
+
+// removeImportVMStubs deletes the transient import VM's stub files (relative
+// to datastore), each with FileManager.DeleteDatastoreFile — never the
+// virtual-disk delete. It is fail-soft: a file that is absent is skipped, and
+// any other failure is logged at Warn and never fails the import.
+func (p *Provider) removeImportVMStubs(ctx context.Context, datastore *object.Datastore, datacenter *object.Datacenter, stubs []string) {
+	if len(stubs) == 0 {
+		return
+	}
+	fm := datastore.NewFileManager(datacenter, false)
+	for _, rel := range stubs {
+		err := fm.DeleteFile(ctx, rel)
+		if err == nil || fault.Is(err, &types.FileNotFound{}) {
+			continue
+		}
+		p.logger.Warn("Could not remove a stub file of the transient import VM; it stays in the landing folder",
+			"file", datastore.Path(rel), "error", err)
+	}
 }
 
 // importTarget is where an ImportDisk lands its disk: the datastore of the
