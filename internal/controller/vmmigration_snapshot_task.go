@@ -176,6 +176,7 @@ func (r *VMMigrationReconciler) advanceToExporting(ctx context.Context, migratio
 // (Snapshotting=True/SnapshotComplete) and moves the migration to Exporting
 // with message, clearing the snapshot task reference.
 func markSnapshotCompleteForExport(m *infrav1beta1.VMMigration, message string) {
+	clearMigrationRequest(m, longOpSnapshot)
 	m.Status.Phase = infrav1beta1.MigrationPhaseExporting
 	m.Status.Message = message
 	m.Status.TaskRef = ""
