@@ -1383,7 +1383,10 @@ func (r *VMSnapshotReconciler) snapshotsForGrantChange(ctx context.Context, inde
 // requeue.
 func snapshotUpdateNeedsReconcile(oldSnap, newSnap *infrav1beta1.VMSnapshot) bool {
 	return oldSnap.Generation != newSnap.Generation ||
-		oldSnap.Annotations[forceDeleteAnnotation] != newSnap.Annotations[forceDeleteAnnotation]
+		oldSnap.Annotations[forceDeleteAnnotation] != newSnap.Annotations[forceDeleteAnnotation] ||
+		// An operator's confirmation re-drives a create held for an unknown
+		// outcome at once (vmsnapshot_request_marker.go).
+		oldSnap.Annotations[operationOutcomeAnnotation] != newSnap.Annotations[operationOutcomeAnnotation]
 }
 
 // snapshotUpdatePredicate applies snapshotUpdateNeedsReconcile to update
