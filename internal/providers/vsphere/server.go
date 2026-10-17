@@ -559,6 +559,9 @@ func (p *Provider) GetCapabilities(ctx context.Context, req *providerv1.GetCapab
 		// ADR-0011: DeleteStagedDisk removes a migration's s3 object and empties
 		// its nfs file (qemu-img over libnfs cannot unlink; staged_disk.go).
 		SupportedStagedDiskDeleteBackends: migration.StagedDiskDeleteBackendsS3AndNFS(),
+		// rc2 R7: DeleteLandedDisk removes an unused migration landing folder
+		// (landed_disk.go).
+		SupportsLandedDiskDelete: true,
 	}, nil
 }
 

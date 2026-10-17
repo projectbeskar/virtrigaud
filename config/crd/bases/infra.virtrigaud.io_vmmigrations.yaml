@@ -872,12 +872,12 @@ spec:
                     type: boolean
                   importTarget:
                     description: |-
-                      ImportTarget is the VirtualMachine an nfs / s3 migration's ImportDisk
-                      was sent for, recorded by the controller just before the import is sent
-                      (ADR-0011 D1). The staged-disk delete names only this VM, never the
-                      current spec.target (which may have been edited since), so a target
-                      provider that keeps a copy of the imported disk for that VM (the Proxmox
-                      import stage) removes only that copy. Written by the controller only.
+                      ImportTarget is the VirtualMachine a migration's ImportDisk was sent
+                      for, recorded by the controller just before the import is sent (ADR-0011
+                      D1; every backend since rc2 R7). The staged-disk delete and the
+                      landed-disk delete name only this VM, never the current spec.target
+                      (which may have been edited since), so a target provider removes only
+                      the copy it landed for that VM. Written by the controller only.
                     properties:
                       name:
                         description: Name is the target VirtualMachine's name.
@@ -886,6 +886,15 @@ spec:
                       namespace:
                         description: Namespace is the target VirtualMachine's namespace.
                         maxLength: 63
+                        type: string
+                      providerUID:
+                        description: |-
+                          ProviderUID is the UID of the target Provider the import was sent to
+                          (rc2 R7). The landed-disk delete is sent only to that Provider: after
+                          spec.target.providerRef changed, or the Provider was replaced, the
+                          landed disk is recorded as left behind instead. Empty for an import
+                          recorded by an older manager.
+                        maxLength: 36
                         type: string
                     required:
                     - name

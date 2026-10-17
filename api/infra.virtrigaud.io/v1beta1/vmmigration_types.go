@@ -673,18 +673,18 @@ type MigrationStorageInfo struct {
 	// +kubebuilder:validation:MaxLength=80
 	StagingDigest string `json:"stagingDigest,omitempty"`
 
-	// ImportTarget is the VirtualMachine an nfs / s3 migration's ImportDisk
-	// was sent for, recorded by the controller just before the import is sent
-	// (ADR-0011 D1). The staged-disk delete names only this VM, never the
-	// current spec.target (which may have been edited since), so a target
-	// provider that keeps a copy of the imported disk for that VM (the Proxmox
-	// import stage) removes only that copy. Written by the controller only.
+	// ImportTarget is the VirtualMachine a migration's ImportDisk was sent
+	// for, recorded by the controller just before the import is sent (ADR-0011
+	// D1; every backend since rc2 R7). The staged-disk delete and the
+	// landed-disk delete name only this VM, never the current spec.target
+	// (which may have been edited since), so a target provider removes only
+	// the copy it landed for that VM. Written by the controller only.
 	// +optional
 	ImportTarget *MigrationImportTarget `json:"importTarget,omitempty"`
 }
 
 // MigrationImportTarget is the namespace and name of the VirtualMachine a
-// migration's import was sent for.
+// migration's import was sent for, and the Provider it was sent to.
 type MigrationImportTarget struct {
 	// Namespace is the target VirtualMachine's namespace.
 	// +kubebuilder:validation:MaxLength=63
@@ -693,6 +693,15 @@ type MigrationImportTarget struct {
 	// Name is the target VirtualMachine's name.
 	// +kubebuilder:validation:MaxLength=253
 	Name string `json:"name"`
+
+	// ProviderUID is the UID of the target Provider the import was sent to
+	// (rc2 R7). The landed-disk delete is sent only to that Provider: after
+	// spec.target.providerRef changed, or the Provider was replaced, the
+	// landed disk is recorded as left behind instead. Empty for an import
+	// recorded by an older manager.
+	// +optional
+	// +kubebuilder:validation:MaxLength=36
+	ProviderUID string `json:"providerUID,omitempty"`
 }
 
 // ValidationResults contains results of validation checks
