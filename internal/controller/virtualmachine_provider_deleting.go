@@ -21,7 +21,6 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -93,7 +92,7 @@ func (r *VirtualMachineReconciler) holdForDeletingProvider(
 	log.FromContext(ctx).Info("Not creating the VM: its Provider is being deleted",
 		"provider", provider.Namespace+"/"+provider.Name, "retryAfter", providerDeletingRetryInterval.String())
 	metrics.RecordError(errReasonProviderDeleting, metrics.ComponentManager)
-	if persisted == nil || !equality.Semantic.DeepEqual(persisted, &vm.Status) {
+	if statusDiffers(persisted, vm) {
 		r.updateStatus(ctx, vm)
 	}
 	if isNew {

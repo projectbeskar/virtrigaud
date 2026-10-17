@@ -18,7 +18,10 @@ package controller
 
 import (
 	"context"
+	"time"
 
+	"k8s.io/apimachinery/pkg/api/equality"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -44,16 +47,28 @@ const observedPowerStateOffGraceful infravirtrigaudiov1beta1.ObservedPowerState 
 // phase Failed whether or not it has an id: each is a hold that only an
 // operator (or the removal of its cause) lifts, so the VM is not progressing.
 var holdPhaseReasons = map[string]bool{
-	k8s.ReasonVMNotOwned:                   true,
-	k8s.ReasonOwnerStampUnreadable:         true,
-	k8s.ReasonProviderUnavailable:          true,
-	k8s.ReasonVMIsImageArtifact:            true,
-	k8s.ReasonCreateOutcomeUnknown:         true,
-	k8s.ReasonDeleteBlocked:                true,
-	k8s.ReasonProviderRefMismatch:          true,
-	k8s.ReasonPlacementTopologyMismatch:    true,
-	k8s.ReasonConsumerNotAllowed:           true,
-	k8s.ReasonVMMissingOnHost:              true,
+	k8s.ReasonVMNotOwned:                true,
+	k8s.ReasonOwnerStampUnreadable:      true,
+	k8s.ReasonProviderUnavailable:       true,
+	k8s.ReasonVMIsImageArtifact:         true,
+	k8s.ReasonCreateOutcomeUnknown:      true,
+	k8s.ReasonDeleteBlocked:             true,
+	k8s.ReasonProviderRefMismatch:       true,
+	k8s.ReasonPlacementTopologyMismatch: true,
+	k8s.ReasonConsumerNotAllowed:        true,
+	k8s.ReasonVMMissingOnHost:           true,
+	k8s.ReasonRestorePending:            true,
+	k8s.ReasonOwnDomainOnAnotherHost:    true,
+}
+
+// restoreHoldPhaseReasons are the reasons of the holds a clustered VM that was
+// never placed waits in (ADR-0007 A6, R1 and R4: holdBeforePlacement,
+// holdForPreviousIncarnation). They are written to the Placed and
+// Provisioning conditions (Ready is not touched), so derivePhase looks there
+// for a VM with no id; each is lifted only by an administrator (the re-attach
+// runbook) or by the cause going away, so the VM is Failed.
+var restoreHoldPhaseReasons = map[string]bool{
+	k8s.ReasonRestorePending:               true,
 	k8s.ReasonOwnDomainOnAnotherHost:       true,
 	k8s.ReasonUniquenessCheckFailed:        true,
 	k8s.ReasonProviderLacksListOwnerFilter: true,
@@ -76,8 +91,10 @@ var createFailurePhaseReasons = map[string]bool{
 //
 //   - being deleted: Deleting (also while the delete is held; the hold is on
 //     the Ready/DeleteBlocked conditions).
-//   - Ready=False with a hold reason (holdPhaseReasons), or, with no id, a
-//     failed-Create reason (createFailurePhaseReasons): Failed.
+//   - Ready=False with a hold reason (holdPhaseReasons); with no id, also a
+//     failed-Create reason (createFailurePhaseReasons) on Ready, or a
+//     restore hold (restoreHoldPhaseReasons) on Placed or Provisioning:
+//     Failed.
 //   - no id: Provisioning once a Create was requested, a host was chosen for
 //     it, a task is recorded or the Provisioning condition is true; else
 //     Pending (waiting for dependencies, placement, an adoption).
@@ -87,7 +104,9 @@ var createFailurePhaseReasons = map[string]bool{
 //     VM's phase to its power state.
 //   - an id: by power state. On and Suspended (still active) are Running; Off
 //     and the legacy OffGraceful are Stopped; Unknown (a state the provider
-//     cannot classify) is Failed. With no power state observed yet the VM is
+//     cannot classify) is Failed for as long as the provider reports it (it
+//     is the current observation, not a sticky failure: the next reconcile
+//     that sees a classifiable state clears it). With no power state observed yet the VM is
 //     Running if Ready, else Provisioning.
 //
 // The function reads vm only.
@@ -105,6 +124,9 @@ func derivePhase(vm *infravirtrigaudiov1beta1.VirtualMachine) infravirtrigaudiov
 	}
 
 	if !bound {
+		if restoreHeld(vm) {
+			return infravirtrigaudiov1beta1.VirtualMachinePhaseFailed
+		}
 		if createRequested(vm) || pendingHost(vm) != "" || vm.Status.LastTaskRef != "" || provisioningInFlight(vm) {
 			return infravirtrigaudiov1beta1.VirtualMachinePhaseProvisioning
 		}
@@ -128,6 +150,18 @@ func derivePhase(vm *infravirtrigaudiov1beta1.VirtualMachine) infravirtrigaudiov
 		return infravirtrigaudiov1beta1.VirtualMachinePhaseRunning
 	}
 	return infravirtrigaudiov1beta1.VirtualMachinePhaseProvisioning
+}
+
+// restoreHeld reports whether vm, with no id, is held by one of the
+// restoreHoldPhaseReasons on its Placed or Provisioning condition.
+func restoreHeld(vm *infravirtrigaudiov1beta1.VirtualMachine) bool {
+	for _, condType := range []string{k8s.ConditionPlaced, k8s.ConditionProvisioning} {
+		c := meta.FindStatusCondition(vm.Status.Conditions, condType)
+		if c != nil && c.Status == metav1.ConditionFalse && restoreHoldPhaseReasons[c.Reason] {
+			return true
+		}
+	}
+	return false
 }
 
 // provisioningInFlight reports whether vm's Provisioning condition is true for
@@ -155,25 +189,49 @@ func applyDerivedPhase(vm *infravirtrigaudiov1beta1.VirtualMachine) {
 	vm.Status.Phase = derivePhase(vm)
 }
 
+// statusDiffers applies the derived phase to vm and reports whether vm's status
+// differs from persisted, the status as read (nil: unknown, so it differs).
+// The hold paths write the status only when a hold changed it; deriving the
+// phase first makes a VM that was already held before the phase was derived
+// (an upgrade) get its phase on the first reconcile instead of never.
+func statusDiffers(persisted *infravirtrigaudiov1beta1.VirtualMachineStatus, vm *infravirtrigaudiov1beta1.VirtualMachine) bool {
+	applyDerivedPhase(vm)
+	return persisted == nil || !equality.Semantic.DeepEqual(persisted, &vm.Status)
+}
+
+// deletingPhaseConflictRetry is how long handleDeletion waits before it
+// reconciles again after markDeleting lost a resourceVersion race (the cached
+// object was stale): long enough for the cache to catch up.
+const deletingPhaseConflictRetry = time.Second
+
 // markDeleting records phase Deleting on a VirtualMachine whose deletion has
 // begun, once: a VM whose delete takes a while (a held or retried delete, a
 // provider call) then shows Deleting instead of its last running phase. It is
-// a merge patch of the phase alone, so it needs no fresh resourceVersion and
-// changes nothing else; it writes only when the phase differs, and a failed
-// write is logged and not retried (the next reconcile tries again, and the
-// delete itself does not wait on it).
-func (r *VirtualMachineReconciler) markDeleting(ctx context.Context, vm *infravirtrigaudiov1beta1.VirtualMachine) {
+// a merge patch of the phase alone with an optimistic lock: the patch is
+// refused if vm is not the stored object any more, so the caller's resourceVersion
+// is never refreshed over content it has not seen (its later status and
+// finalizer updates keep their own check). It writes only when the phase
+// differs. It reports true when the write lost that race, and the caller
+// retries after deletingPhaseConflictRetry; any other failure is logged and
+// not retried (the delete does not wait on it, and the next reconcile tries
+// again).
+func (r *VirtualMachineReconciler) markDeleting(ctx context.Context, vm *infravirtrigaudiov1beta1.VirtualMachine) (conflict bool) {
 	if vm.Status.Phase == infravirtrigaudiov1beta1.VirtualMachinePhaseDeleting {
-		return
+		return false
 	}
 	patched := vm.DeepCopy()
 	patched.Status.Phase = infravirtrigaudiov1beta1.VirtualMachinePhaseDeleting
-	if err := r.Status().Patch(ctx, patched, client.MergeFrom(vm)); err != nil {
+	if err := r.Status().Patch(ctx, patched, client.MergeFromWithOptions(vm, client.MergeFromWithOptimisticLock{})); err != nil {
+		if apierrors.IsConflict(err) {
+			log.FromContext(ctx).V(1).Info("The VirtualMachine changed before phase Deleting was recorded; retrying")
+			return true
+		}
 		log.FromContext(ctx).V(1).Info("Cannot record phase Deleting on the VirtualMachine; the delete goes on", "error", err.Error())
-		return
+		return false
 	}
-	// Take over only what the patch changed, so the caller's object keeps
-	// everything else it holds, and its resourceVersion is the stored one.
+	// Take over only what the patch changed: the stored object is the one vm
+	// was read from (the lock), so its resourceVersion is vm's again.
 	vm.Status.Phase = infravirtrigaudiov1beta1.VirtualMachinePhaseDeleting
 	vm.ResourceVersion = patched.ResourceVersion
+	return false
 }

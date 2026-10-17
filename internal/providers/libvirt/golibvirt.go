@@ -635,7 +635,14 @@ func (h *golibvirtHolder) call(ctx context.Context, fn func(*golibvirt.Libvirt) 
 	if err != nil {
 		return err
 	}
+	return h.callOn(ctx, client, fn)
+}
 
+// callOn is call against a client the caller already holds (as returned by
+// ensureConnected or connect), under the same watchdog. keepaliveLoop probes
+// the very client its connect returned, so that what it drops on a failed
+// probe (forgetClient) is that client and no other.
+func (h *golibvirtHolder) callOn(ctx context.Context, client *golibvirt.Libvirt, fn func(*golibvirt.Libvirt) error) error {
 	done := make(chan error, 1)
 	go func() { done <- fn(client) }()
 
@@ -750,7 +757,7 @@ func (h *golibvirtHolder) keepaliveLoop() {
 
 		case <-ticker.C:
 			connectCtx, cancel := context.WithTimeout(h.rootCtx, h.connectTimeout)
-			_, err := h.connect(connectCtx)
+			probed, err := h.connect(connectCtx)
 			cancel()
 			if err != nil {
 				if errors.Is(err, errGolibvirtHolderClosed) {
@@ -760,9 +767,8 @@ func (h *golibvirtHolder) keepaliveLoop() {
 				continue
 			}
 
-			probed := h.currentClient()
 			probeCtx, cancel := context.WithTimeout(h.rootCtx, h.probeTimeout)
-			err = h.call(probeCtx, func(c *golibvirt.Libvirt) error {
+			err = h.callOn(probeCtx, probed, func(c *golibvirt.Libvirt) error {
 				_, err := c.ConnectGetLibVersion()
 				return err
 			})
@@ -780,7 +786,11 @@ func (h *golibvirtHolder) keepaliveLoop() {
 				// client whose IsConnected() is true, and that is not
 				// trustworthy for a dead transport after the upstream race
 				// (package doc, "Known upstream race"). The next tick dials
-				// a fresh one.
+				// a fresh one. evict and forgetClient are two steps, not one
+				// atomic one: a caller can still obtain the probed client
+				// between them (its call then fails like any call on an
+				// evicted connection), and an evict that finds nothing
+				// settled leaves forgetClient the only thing that retires it.
 				h.forgetClient(probed)
 			}
 		}

@@ -24,7 +24,6 @@ import (
 	"unicode/utf8"
 
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -459,7 +458,7 @@ func (r *VirtualMachineReconciler) holdCreateOutcomeUnknown(
 	log.FromContext(ctx).Info("A requested Create's outcome is unknown and cannot be confirmed; waiting for an operator",
 		"provider", placementProviderKey(vm).String(), "attempt", markerAttemptID(vm), "retryAfter", retry.String())
 	metrics.RecordError(errReasonCreateOutcomeUnknown, metrics.ComponentManager)
-	if persisted == nil || !equality.Semantic.DeepEqual(persisted, &vm.Status) {
+	if statusDiffers(persisted, vm) {
 		r.updateStatus(ctx, vm)
 	}
 	if isNew {

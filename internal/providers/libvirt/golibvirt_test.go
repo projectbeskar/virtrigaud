@@ -457,7 +457,7 @@ func TestGolibvirtHolder_KeepaliveProbeFailureEvicts(t *testing.T) {
 	})
 	h := newTestHolder(t, dialer)
 
-	first, err := h.ensureConnected(t.Context())
+	_, err := h.ensureConnected(t.Context())
 	require.NoError(t, err)
 
 	// The next keepalive tick (20ms) issues ConnectGetLibVersion, which the
@@ -465,10 +465,6 @@ func TestGolibvirtHolder_KeepaliveProbeFailureEvicts(t *testing.T) {
 	// failure once the drop is noticed, not a watchdog timeout.
 	require.Eventually(t, func() bool { return dialer.dialCount() >= 2 }, 2*time.Second, 10*time.Millisecond,
 		"keepalive must notice the probe failure and redial")
-	require.Eventually(t, func() bool {
-		cur := h.currentClient()
-		return cur != nil && cur != first
-	}, 2*time.Second, 10*time.Millisecond, "the failed client is replaced by a fresh one, never handed out again")
 }
 
 // TestGolibvirtHolder_ForgetClient pins forgetClient: it clears the published

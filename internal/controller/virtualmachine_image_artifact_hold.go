@@ -22,7 +22,6 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -141,7 +140,7 @@ func (r *VirtualMachineReconciler) retainForRefusedDelete(
 	persisted := vm.Status.DeepCopy()
 	transition := setHeldReady(vm, hold.reason, hold.message)
 	meta.RemoveStatusCondition(&vm.Status.Conditions, k8s.ConditionDeleteBlocked)
-	if !equality.Semantic.DeepEqual(persisted, &vm.Status) {
+	if statusDiffers(persisted, vm) {
 		r.updateStatus(ctx, vm)
 	}
 	if transition {
@@ -173,7 +172,7 @@ func (r *VirtualMachineReconciler) holdImageArtifactPower(
 	retry := blockedRetryBackoff(since)
 	log.FromContext(ctx).Info("Provider refused the power change: the object is a template or an image artifact; holding",
 		"id", vm.Status.ID, "retryAfter", retry.String(), "error", err.Error())
-	if !equality.Semantic.DeepEqual(persisted, &vm.Status) {
+	if statusDiffers(persisted, vm) {
 		r.updateStatus(ctx, vm)
 	}
 	if transition {

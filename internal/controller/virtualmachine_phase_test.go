@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -29,6 +30,7 @@ import (
 
 	infravirtrigaudiov1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
 	"github.com/projectbeskar/virtrigaud/internal/k8s"
+	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
 )
 
 // phaseVM builds a VirtualMachine with the given status, for derivePhase.
@@ -165,6 +167,21 @@ func TestDerivePhase(t *testing.T) {
 			func(vm *infravirtrigaudiov1beta1.VirtualMachine) { vm.Status.ReconfigureTaskRef = "task-2" },
 			ready(metav1.ConditionFalse, k8s.ReasonVMNotOwned)), fa},
 
+		// Restore holds (ADR-0007 A6).
+		{"restored binding held (Ready)", both(power(infravirtrigaudiov1beta1.ObservedPowerStateOn),
+			ready(metav1.ConditionFalse, k8s.ReasonRestorePending)), fa},
+		{"never-placed VM held before placement (Placed/Provisioning)", func(vm *infravirtrigaudiov1beta1.VirtualMachine) {
+			setPhaseCond(vm, k8s.ConditionPlaced, metav1.ConditionFalse, k8s.ReasonRestorePending)
+			setPhaseCond(vm, k8s.ConditionProvisioning, metav1.ConditionFalse, k8s.ReasonRestorePending)
+		}, fa},
+		{"a Placed hold reason is ignored once the VM exists", both(power(infravirtrigaudiov1beta1.ObservedPowerStateOn),
+			func(vm *infravirtrigaudiov1beta1.VirtualMachine) {
+				setPhaseCond(vm, k8s.ConditionPlaced, metav1.ConditionFalse, k8s.ReasonRestorePending)
+			}), run},
+		{"unschedulable is not a restore hold", func(vm *infravirtrigaudiov1beta1.VirtualMachine) {
+			setPhaseCond(vm, k8s.ConditionPlaced, metav1.ConditionFalse, k8s.ReasonUnschedulable)
+		}, pend},
+
 		// Deletion wins over everything.
 		{"deleting a running VM", both(power(infravirtrigaudiov1beta1.ObservedPowerStateOn),
 			func(vm *infravirtrigaudiov1beta1.VirtualMachine) { vm.DeletionTimestamp = &now }), del},
@@ -225,4 +242,104 @@ func TestUpdateStatusStoresDerivedPhase(t *testing.T) {
 	got := &infravirtrigaudiov1beta1.VirtualMachine{}
 	require.NoError(t, r.Get(context.Background(), client.ObjectKeyFromObject(vm), got))
 	assert.Equal(t, infravirtrigaudiov1beta1.VirtualMachinePhaseStopped, got.Status.Phase)
+}
+
+// TestRestoreHoldWritersGiveFailed uses the real hold writers (not synthetic
+// conditions): each of them leaves the stored VM in phase Failed.
+func TestRestoreHoldWritersGiveFailed(t *testing.T) {
+	ctx := context.Background()
+	for _, reason := range []string{k8s.ReasonRestorePending, k8s.ReasonOwnDomainOnAnotherHost,
+		k8s.ReasonUniquenessCheckFailed, k8s.ReasonProviderLacksListOwnerFilter} {
+		t.Run("holdBeforePlacement/"+reason, func(t *testing.T) {
+			vm := phaseVM(nil)
+			r := newTestReconciler(coverageTestScheme(t), nil, vm)
+			r.holdBeforePlacement(ctx, vm, reason, "held", errReasonRestorePending)
+			got := &infravirtrigaudiov1beta1.VirtualMachine{}
+			require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(vm), got))
+			assert.Equal(t, infravirtrigaudiov1beta1.VirtualMachinePhaseFailed, got.Status.Phase)
+		})
+	}
+
+	t.Run("holdRestoredBinding", func(t *testing.T) {
+		vm := phaseVM(func(vm *infravirtrigaudiov1beta1.VirtualMachine) {
+			vm.Status.ID = "vm-1"
+			vm.Status.PowerState = infravirtrigaudiov1beta1.ObservedPowerStateOn
+		})
+		r := newTestReconciler(coverageTestScheme(t), nil, vm)
+		r.holdRestoredBinding(ctx, vm, contracts.VMRef{ID: "vm-1", HostID: "host-a"})
+		got := &infravirtrigaudiov1beta1.VirtualMachine{}
+		require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(vm), got))
+		assert.Equal(t, infravirtrigaudiov1beta1.VirtualMachinePhaseFailed, got.Status.Phase)
+	})
+
+	t.Run("holdForPreviousIncarnation", func(t *testing.T) {
+		vm := phaseVM(func(vm *infravirtrigaudiov1beta1.VirtualMachine) {
+			vm.Status.Placement = &infravirtrigaudiov1beta1.PlacementStatus{PendingHost: "host-a"}
+		})
+		r := newTestReconciler(coverageTestScheme(t), nil, vm)
+		_, err := r.holdForPreviousIncarnation(ctx, vm, "host-a", errors.New("exists"))
+		require.NoError(t, err)
+		got := &infravirtrigaudiov1beta1.VirtualMachine{}
+		require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(vm), got))
+		assert.Equal(t, infravirtrigaudiov1beta1.VirtualMachinePhaseFailed, got.Status.Phase,
+			"a hold on a pending host is a restore hold, not a create in flight")
+	})
+}
+
+// TestStatusDiffersDerivesThePhaseFirst pins the upgrade case: a VM already
+// held before the phase was derived has an empty stored phase, and the hold
+// path's "did the status change" comparison must see the phase as a change so
+// it is written once; with the phase stored, the same state is no change.
+func TestStatusDiffersDerivesThePhaseFirst(t *testing.T) {
+	vm := phaseVM(func(vm *infravirtrigaudiov1beta1.VirtualMachine) {
+		vm.Status.ID = "vm-1"
+		vm.Status.PowerState = infravirtrigaudiov1beta1.ObservedPowerStateOn
+		setPhaseCond(vm, k8s.ConditionReady, metav1.ConditionFalse, k8s.ReasonVMNotOwned)
+	})
+	persisted := vm.Status.DeepCopy() // phase empty, as stored by an older manager
+	assert.True(t, statusDiffers(persisted, vm), "the derived phase is a change")
+	assert.Equal(t, infravirtrigaudiov1beta1.VirtualMachinePhaseFailed, vm.Status.Phase)
+
+	persisted = vm.Status.DeepCopy()
+	assert.False(t, statusDiffers(persisted, vm), "an unchanged held VM writes nothing")
+	assert.True(t, statusDiffers(nil, vm), "an unknown baseline always differs")
+}
+
+// TestMarkDeleting_StaleObjectIsNotPatched pins the optimistic lock: when the
+// object handled is not the stored one any more, nothing is written, the
+// caller's object (phase and resourceVersion) is untouched, and the conflict
+// is reported so handleDeletion retries on a fresh read.
+func TestMarkDeleting_StaleObjectIsNotPatched(t *testing.T) {
+	ctx := context.Background()
+	stored := phaseVM(func(vm *infravirtrigaudiov1beta1.VirtualMachine) {
+		vm.Status.ID = "vm-1"
+		vm.Status.PowerState = infravirtrigaudiov1beta1.ObservedPowerStateOn
+		vm.Status.Phase = infravirtrigaudiov1beta1.VirtualMachinePhaseRunning
+	})
+	r := newTestReconciler(coverageTestScheme(t), nil, stored)
+
+	stale := &infravirtrigaudiov1beta1.VirtualMachine{}
+	require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(stored), stale))
+	staleRV := stale.ResourceVersion
+
+	// Someone else changes the object after stale was read.
+	fresh := stale.DeepCopy()
+	fresh.Labels = map[string]string{"edited": "meanwhile"}
+	require.NoError(t, r.Update(ctx, fresh))
+
+	assert.True(t, r.markDeleting(ctx, stale), "a stale object reports the conflict")
+	assert.Equal(t, staleRV, stale.ResourceVersion, "the caller's resourceVersion is not refreshed over unseen content")
+	assert.Equal(t, infravirtrigaudiov1beta1.VirtualMachinePhaseRunning, stale.Status.Phase)
+	got := &infravirtrigaudiov1beta1.VirtualMachine{}
+	require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(stored), got))
+	assert.Equal(t, infravirtrigaudiov1beta1.VirtualMachinePhaseRunning, got.Status.Phase, "nothing was written")
+
+	// A current object is patched, and takes over only the phase and the new resourceVersion.
+	assert.False(t, r.markDeleting(ctx, got))
+	assert.Equal(t, infravirtrigaudiov1beta1.VirtualMachinePhaseDeleting, got.Status.Phase)
+	after := &infravirtrigaudiov1beta1.VirtualMachine{}
+	require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(stored), after))
+	assert.Equal(t, infravirtrigaudiov1beta1.VirtualMachinePhaseDeleting, after.Status.Phase)
+	assert.Equal(t, after.ResourceVersion, got.ResourceVersion)
+	assert.Equal(t, "meanwhile", after.Labels["edited"])
 }

@@ -21,7 +21,6 @@ import (
 	"fmt"
 
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -121,7 +120,7 @@ func (r *VirtualMachineReconciler) holdOwnerRefusal(
 	log.FromContext(ctx).Info("The provider refused the call: the VM at this id is not this VirtualMachine's, or its "+
 		"owner cannot be told; holding", "op", op, "id", ref.ID, "reason", hold.reason, "retryAfter", retry.String(),
 		"error", err.Error())
-	if !equality.Semantic.DeepEqual(persisted, &vm.Status) {
+	if statusDiffers(persisted, vm) {
 		r.updateStatus(ctx, vm)
 	}
 	if transition {

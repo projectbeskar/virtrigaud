@@ -25,7 +25,6 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -581,7 +580,7 @@ func (r *VirtualMachineReconciler) recordDeleteHold(
 	retry := blockedRetryBackoff(conditionSince(vm.Status.Conditions, k8s.ConditionDeleteBlocked))
 	log.FromContext(ctx).Info(logMsg, "id", vm.Status.ID, "host", placementHostForLog(vm), "reason", reason,
 		"retryAfter", retry.String(), "error", err.Error())
-	if !equality.Semantic.DeepEqual(persisted, &vm.Status) {
+	if statusDiffers(persisted, vm) {
 		r.updateStatus(ctx, vm)
 	}
 	if transition {
@@ -784,7 +783,7 @@ func (r *VirtualMachineReconciler) refuseConsumer(
 		log.FromContext(ctx).Info("Not calling the provider for this VM", "reason", cause.Error())
 		r.recordEvent(vm, corev1.EventTypeWarning, k8s.ReasonConsumerNotAllowed, cause.Error())
 	}
-	if persisted == nil || !equality.Semantic.DeepEqual(persisted, &vm.Status) {
+	if statusDiffers(persisted, vm) {
 		r.updateStatus(ctx, vm)
 	}
 	return ctrl.Result{RequeueAfter: consumerNotAllowedRetryInterval}, nil

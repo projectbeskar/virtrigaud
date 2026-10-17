@@ -30,7 +30,6 @@ import (
 
 	"golang.org/x/sync/singleflight"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -921,7 +920,9 @@ func (r *VirtualMachineReconciler) handleDeletion(ctx context.Context, vm *infra
 	}
 
 	// Show the deletion in status.phase for as long as it takes.
-	r.markDeleting(ctx, vm)
+	if r.markDeleting(ctx, vm) {
+		return ctrl.Result{RequeueAfter: deletingPhaseConflictRetry}, nil
+	}
 
 	// A VM being deleted is never scheduled again: drop any in-flight
 	// assumption and backoff record it has. Its durable placement record keeps
@@ -1290,7 +1291,7 @@ func (r *VirtualMachineReconciler) retainForUnavailableProvider(
 	retry := blockedRetryBackoff(since)
 	logger.Info(providerUnavailableDeleteLogMessage,
 		"id", vm.Status.ID, "reason", k8s.ReasonProviderUnavailable, "retryAfter", retry.String(), "error", err.Error())
-	if !equality.Semantic.DeepEqual(persisted, &vm.Status) {
+	if statusDiffers(persisted, vm) {
 		r.updateStatus(ctx, vm)
 	}
 	if transition {
