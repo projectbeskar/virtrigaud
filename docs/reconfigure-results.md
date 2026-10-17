@@ -10,6 +10,18 @@ a change it did not apply:
 | **Restart required** | Applied at least one change to the persistent definition only, because the running VM cannot take it; every other change was applied live too. The change takes effect at the VM's next **power cycle** (power off, then on — a reboot from inside the guest keeps the running QEMU and is not enough). | `Reconfiguring=True`, reason `RestartRequired`; `status.currentResources` holds, per resource, the larger of the running and the next-boot size (see [the invariant](#statuscurrentresources-invariant)). |
 | **Failed** | Could apply a change neither way, or could not tell (the host was unreachable). Part of the change may already be in the persistent definition, or even live. | `Reconfiguring=False`, reason `ProviderError`, with a message saying what could not be done. On a clustered Provider `status.currentResources` is recorded as for restart required (the larger size); on a single-host Provider it is untouched. The call is retried on a per-VM backoff. |
 
+One failure has its own reason: a provider that **cannot apply a CPU/memory
+change to the running VM and cannot stage it for the next boot either** (vSphere
+without hot-add — see [vSphere: changes a running VM cannot take](#vsphere-changes-a-running-vm-cannot-take))
+refuses the whole request before changing anything. The manager records
+`Reconfiguring=False`, reason **`ResizePendingPowerOff`**, with a constant
+message; `status.currentResources` is untouched, and the call is asked again on
+the same per-VM backoff as a failure, and at once after a spec change — so
+setting `spec.powerState: Off` applies it. The VM stays `Ready`. On the wire it
+is `FailedPrecondition` with the `google.rpc.ErrorInfo` reason
+`RECONFIGURE_NEEDS_POWER_OFF`, which never counts toward the Provider's circuit
+breaker.
+
 The result travels on the wire as `TaskResponse.restart_required` (an additive
 field of the `Reconfigure` response, `proto/provider/v1/provider.proto`) and
 reaches the manager as `contracts.ReconfigureResult.RestartRequired`. vSphere,
@@ -177,13 +189,77 @@ both. On a **clustered** Provider:
 A single-host Provider without either is resized as before, and the manager
 logs a warning.
 
+## Which disk a size goes to
+
+A `Reconfigure` carries two kinds of disk size, and each goes only to the disk
+it is for — the disk `Create` made for it, matched the way `Create` made it. A
+size of 0 means "leave this disk as it is" (the manager sends a growth above the
+[disk-size limit](../charts/virtrigaud/README.md#disk-size-limit) that way), and
+no provider ever adds a disk on `Reconfigure`.
+
+| Size | vSphere | libvirt | Proxmox |
+|---|---|---|---|
+| VMClass `spec.diskDefaults.size` (the root disk) | Grows the primary disk — the first disk that is not a recorded additional disk, the one `Create` grows. A floor: a larger disk (a template's) is left as it is. | Grows the primary disk (as before). A floor. | Grows the primary disk — the first disk of the VM's boot order, else the first of `virtio*`, `scsi*`, `sata*`, `ide*` — and waits for the resize before sending CPU/memory. A floor. (`Create` itself keeps the template's disk size.) |
+| `spec.disks[].sizeGiB` (additional disks) | Grows the additional disk `Create` attached for that entry. A **smaller** size is refused (`InvalidSpec`, nothing changed — the CPU/memory change in the same request included): a disk is never shrunk. | Not applied: the libvirt `Create` attaches no `spec.disks`. | Not applied: the Proxmox `Create` attaches no `spec.disks`, so no disk is the entry's — not `scsi0`, not a template's `scsi1`. |
+
+How vSphere finds an entry's disk: `Create` records each additional disk it
+attaches in the VM's `ExtraConfig` — `virtrigaud.disk.additional.<N>` (the disk
+file) and, since this release, `virtrigaud.disk.additional.<N>.name` (the
+`spec.disks` name). An entry goes to the disk recorded with its name (the second
+entry of a name to the second disk recorded with it), so reordering or removing
+`spec.disks` entries never moves a size to another disk. A disk recorded without
+a name (a VM created by an earlier release) is matched by position, as `Create`
+attached it — on such a VM, do not reorder `spec.disks` before a resize. The disk
+is found by its recorded file, or by the file's base name after a storage
+migration. An entry no disk was recorded for — added to `spec.disks` after the VM
+was created, or on a VM an earlier release created without records, or an
+adopted VM — is left alone (the provider logs it).
+
+Before this release vSphere grew the **first** disk (the root disk) to
+`spec.disks[0].sizeGiB`, ignored the VMClass size, and Proxmox sent every
+`spec.disks` size to `scsi0` and, after a disk grow, dropped the CPU/memory change
+while reporting success.
+
+Note that the manager sends a `Reconfigure` when the effective CPU or memory
+changes (or a pending/failed one is re-checked); the disk sizes travel with it. A
+disk size change alone does not trigger one.
+
+## vSphere: changes a running VM cannot take
+
+vCenter changes a powered-on VM's CPU count only with **CPU hot-add** (more
+vCPUs) or **CPU hot-remove** (fewer) enabled on the VM, and its memory only
+upwards, with **memory hot-add** enabled and within the VM's hot-plug memory
+limit. vSphere has no pending state to stage anything else for the next boot. So
+before a CPU/memory change of a VM that is not powered off (a suspended VM
+counts as running), the provider reads `config.cpuHotAddEnabled`,
+`config.cpuHotRemoveEnabled`, `config.memoryHotAddEnabled` and
+`config.hotPlugMemoryLimit`; when the change is not possible online it refuses
+the whole request — disk growth in it included — before changing anything, with
+`RECONFIGURE_NEEDS_POWER_OFF` (`Reconfiguring=False/ResizePendingPowerOff`).
+Before this release vCenter refused the task and the manager retried it on its
+backoff indefinitely, with a vCenter task failure each time.
+
+To apply such a change: set `spec.powerState: Off`; the manager powers the VM off
+and the next `Reconfigure` applies the change; then set `spec.powerState: On`. The
+manager never powers a VM off by itself. To resize running VMs in future, enable
+CPU/memory hot-add on them (VMClass `performanceProfile.cpuHotAddEnabled` /
+`memoryHotAddEnabled` for new VMs, or in vCenter while the VM is off).
+
+A change that is possible online, and a disk grow with unchanged CPU/memory, goes
+ahead on the running VM as before.
+
 ## Other providers
 
 - **vSphere** has no pending state: a CPU/memory change is applied by one
-  `ReconfigVM_Task` or the call fails. It reports `restart_required: false`, and
-  does not yet report `supports_honest_reconfigure` (a smaller disk size is
-  ignored silently).
+  `ReconfigVM_Task`, refused before anything changes when the running VM cannot
+  take it (above), or the call fails. It reports `restart_required: false`, and
+  does not yet report `supports_honest_reconfigure`: a `spec.disks` entry it finds
+  no disk for is left alone while the call succeeds, and its responses carry no
+  `honest_result` marker. `supports_reconfigure_online` stays `true` with the same
+  per-VM meaning as libvirt's (online only for VMs with hot-add enabled).
 - **Proxmox** reports `restart_required: false`, but a CPU/memory change PVE
   stores as *pending* (hot-plug not enabled for it) is currently reported as
-  applied; it does not report `supports_honest_reconfigure`. Both are fixed by a
-  follow-up change.
+  applied; it does not report `supports_honest_reconfigure`. Detecting the
+  pending change (PVE's `pending` config) and reporting it as restart required
+  is a follow-up change. The disk mapping above is validated against the
+  in-repo PVE fake only, not a real PVE.

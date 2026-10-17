@@ -5,6 +5,38 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-10-17 08:16] - Reconfigure resizes the right disk; vSphere waits for a power-off instead of retrying a change the running VM cannot take (rc2 R5)
+**Author:** @wrkode (William Rizzo)
+
+### Fixed
+- `internal/providers/vsphere/reconfigure.go` (new), `internal/providers/vsphere/server.go`: `Reconfigure` grew the FIRST disk (the root disk) to `spec.disks[0].sizeGiB` and ignored the VMClass size. It now grows the primary disk (the first disk that is not a recorded additional disk, as `Create` does) to `Class.DiskDefaults.SizeGiB` (a floor), and each `spec.disks` entry's own additional disk — found by the name recorded with it, or by position on a VM recorded without names — to its size; a smaller `spec.disks` size is refused with `InvalidArgument` before anything changes, a size of 0 (withheld by the disk-size limit) leaves the disk, and an entry with no attached disk is left alone (Reconfigure never adds a disk). CPU, memory and disk edits go in one `ReconfigVM_Task`.
+- `internal/providers/vsphere/reconfigure.go`: before a CPU/memory change of a VM that is not powered off, `Reconfigure` reads `config.cpuHotAddEnabled` / `cpuHotRemoveEnabled` / `memoryHotAddEnabled` / `hotPlugMemoryLimit` and, when vCenter cannot apply the change online (no hot-add, fewer vCPUs without hot-remove, less memory, above the hot-plug limit; a suspended VM counts as running), refuses the whole request before changing anything with `FailedPrecondition` + `RECONFIGURE_NEEDS_POWER_OFF` instead of sending a task vCenter fails (rc1 lab finding V1: retried indefinitely).
+- `internal/providers/proxmox/reconfigure.go` (new), `internal/providers/proxmox/server.go`: `Reconfigure` sent every `spec.disks` size to `scsi0` (the root disk) and, after a disk grow, returned before sending the CPU/memory change while reporting success. It now grows only the primary disk (first disk of the boot order, else the `Create` bus order) to the VMClass size (a floor), waits for the resize task, then applies CPU/memory; no `spec.disks` size changes any disk, since the Proxmox `Create` attaches none. Validated against `pvefake` only.
+
+### Added
+- `internal/providers/contracts/errors.go`: `ReconfigureNeedsPowerOffReason` (`RECONFIGURE_NEEDS_POWER_OFF`), `ErrReconfigureNeedsPowerOff`, `IsReconfigureNeedsPowerOff`.
+- `internal/transport/grpc/client.go`: maps `FailedPrecondition` + `RECONFIGURE_NEEDS_POWER_OFF` to a retryable error marked `ErrReconfigureNeedsPowerOff` (never counted toward the circuit breaker).
+- `internal/k8s/conditions.go`, `internal/controller/virtualmachine_reconfigure_result.go`, `internal/controller/virtualmachine_controller.go`: `Reconfiguring=False`, reason `ResizePendingPowerOff`, with a constant message, for that refusal; `status.currentResources` is untouched, it is re-sent on the per-VM reconfigure backoff and at once after a spec change (so `spec.powerState: Off` applies it), and it keeps the clustered memory ceiling from being lowered, like a failure.
+- `internal/providers/vsphere/post_create.go`, `internal/providers/vsphere/server.go`: an additional disk's `spec.disks` name is recorded with it (`virtrigaud.disk.additional.<N>.name`, in the same task that attaches it, cleared on create like the file record).
+- `internal/providers/proxmox/pvefake/server.go`: config keys a test seeds (`scsi1`, `boot`, ...) are served, and a resize rewrites the disk's `size=`.
+- Tests: vcsim multi-disk VM (each size to its own disk, name matching after reorder/removal, legacy positional matching, unattached entry, shrink refusal, hot-add on/off/remove, suspended VM), pvefake `scsi0`+`scsi1` (no spec.disks resize, class size grows the boot disk then CPU/memory, boot order), transport mapping, controller unit tests and an envtest spec for the persisted `ResizePendingPowerOff` condition. The vSphere and Proxmox regression tests fail on `main`.
+
+### Changed
+- `internal/providers/vsphere/disk_capacity_test.go`: `TestReconfigure_WithheldDiskSizeIsNoOp` asserted the old behaviour (a `spec.disks` size growing the root disk); it now grows the root disk through the VMClass size.
+- `internal/providers/proxmox/reconfigure_disk_test.go`: rewritten for the new mapping.
+- `internal/controller/disk_size_limit.go`: comments; the Proxmox "zero every spec.disks size once one is withheld" rule is kept for Providers still running an older image.
+- `internal/providers/vsphere/server.go`: `GetCapabilities` documents that online reconfigure is per VM (hot-add); `supports_reconfigure_online` stays true (as libvirt's, same per-VM meaning) and `supports_honest_reconfigure` stays false.
+- `docs/reconfigure-results.md` (new sections "Which disk a size goes to" and "vSphere: changes a running VM cannot take"), `docs/upgrading.md` (two rows, a rollback caveat).
+
+### Why
+A security review found that vSphere and Proxmox `Reconfigure` grew the root disk with an additional disk's size, and the rc1 lab (V1) found that a CPU/memory change of a running vSphere VM without hot-add was retried forever while reported as a plain provider failure.
+
+### Impact
+- [x] Breaking change
+- [x] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-10-17 08:30] - vSphere: a finder per call instead of one shared; libvirt: no fixed /tmp files on the host (rc2 R8, R9)
 **Author:** @wrkode (William Rizzo)
 
