@@ -966,6 +966,26 @@ message GetCapabilitiesResponse {
   // Proxmox image that ignores target_vm) it keeps the earlier behaviour and
   // never re-sends. Field 25 is taken by supports_owner_transfer (PR #392).
   bool supports_owner_rebind = 26;
+
+  // resend_safe_export_backends lists the staging backends ("pvc", "nfs",
+  // "s3") on which an ExportDisk sent again for the same destination_url,
+  // once the deadline of the earlier call has passed, replaces what the
+  // earlier call wrote and leaves nothing else behind: the destination is the
+  // only durable artifact, the earlier call's writes have stopped by its
+  // deadline (cancellation honoured, or the write is atomic), and any
+  // temporary artifact is cleaned up or uniquely named (rc2 R6). The manager
+  // re-sends an ExportDisk whose outcome it lost (a restart or leader change
+  // between the call and the write of its result) only on a backend listed
+  // here; on any other — and to a provider image that predates the field —
+  // the VMMigration waits for an operator (ExportOutcomeUnknown). Additive.
+  repeated string resend_safe_export_backends = 27;
+
+  // resend_safe_import_backends is resend_safe_export_backends for
+  // ImportDisk: on a listed backend, an ImportDisk sent again for the same
+  // target_vm, once the earlier call's deadline has passed, lands the disk at
+  // the same deterministic name (replacing what the earlier call landed, or
+  // refusing because a VM uses it) — never a second disk (rc2 R6).
+  repeated string resend_safe_import_backends = 28;
 }
 
 // DeleteStagedDisk removes the staging object a VMMigration's ExportDisk wrote

@@ -174,3 +174,25 @@ func TestClient_GetCapabilities_StagedDiskDeleteEmptyFromOlderProvider(t *testin
 	require.NoError(t, err)
 	assert.Empty(t, caps.SupportedStagedDiskDeleteBackends)
 }
+
+// TestClient_GetCapabilities_ResendSafeBackends: the rc2 R6 re-send-safe
+// backends are mapped, and are empty from a provider that predates them.
+func TestClient_GetCapabilities_ResendSafeBackends(t *testing.T) {
+	srv := &stagedDiskServer{caps: &providerv1.GetCapabilitiesResponse{
+		ResendSafeExportBackends: []string{"s3"},
+		ResendSafeImportBackends: []string{"nfs", "s3"},
+	}}
+	dialer, cleanup := startBufconnServer(t, srv)
+	defer cleanup()
+	caps, err := newTestClient(t, dialer, "libvirt").GetCapabilities(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, []string{"s3"}, caps.ResendSafeExportBackends)
+	assert.Equal(t, []string{"nfs", "s3"}, caps.ResendSafeImportBackends)
+
+	older, cleanupOlder := startBufconnServer(t, &stagedDiskServer{})
+	defer cleanupOlder()
+	caps, err = newTestClient(t, older, "libvirt").GetCapabilities(context.Background())
+	require.NoError(t, err)
+	assert.Empty(t, caps.ResendSafeExportBackends)
+	assert.Empty(t, caps.ResendSafeImportBackends)
+}

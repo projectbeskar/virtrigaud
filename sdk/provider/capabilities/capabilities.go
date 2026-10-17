@@ -142,6 +142,11 @@ type Manager struct {
 	// supportedStagedDiskDeleteBackends are the staging backends whose
 	// migration staging objects DeleteStagedDisk removes (ADR-0011 D7).
 	supportedStagedDiskDeleteBackends []string
+	// resendSafeExportBackends / resendSafeImportBackends are the staging
+	// backends on which a re-sent ExportDisk / ImportDisk replaces what an
+	// earlier call wrote and leaves nothing else behind (rc2 R6).
+	resendSafeExportBackends []string
+	resendSafeImportBackends []string
 }
 
 // NewManager creates a new capability manager.
@@ -221,6 +226,25 @@ func (m *Manager) SetSupportedStagedDiskDeleteBackends(backends []string) *Manag
 	return m
 }
 
+// SetResendSafeExportBackends sets the staging backends ("pvc", "nfs", "s3")
+// on which an ExportDisk sent again for the same destination, once the earlier
+// call's deadline has passed, replaces what the earlier call wrote and leaves
+// nothing else behind (rc2 R6). Empty means none: the manager never re-sends
+// an ExportDisk whose outcome it lost to the provider.
+func (m *Manager) SetResendSafeExportBackends(backends []string) *Manager {
+	m.resendSafeExportBackends = backends
+	return m
+}
+
+// SetResendSafeImportBackends sets the staging backends ("pvc", "nfs", "s3")
+// on which an ImportDisk sent again for the same target VM, once the earlier
+// call's deadline has passed, lands the disk at the same name and never makes
+// a second one (rc2 R6). Empty means none.
+func (m *Manager) SetResendSafeImportBackends(backends []string) *Manager {
+	m.resendSafeImportBackends = backends
+	return m
+}
+
 // GetCapabilities returns the capabilities response for gRPC.
 func (m *Manager) GetCapabilities(ctx context.Context, req *providerv1.GetCapabilitiesRequest) (*providerv1.GetCapabilitiesResponse, error) {
 	return &providerv1.GetCapabilitiesResponse{
@@ -257,6 +281,9 @@ func (m *Manager) GetCapabilities(ctx context.Context, req *providerv1.GetCapabi
 		SupportsOwnerRebind: m.HasCapability(CapabilityOwnerRebind),
 		// ADR-0011 D7: the backends DeleteStagedDisk removes staging objects from.
 		SupportedStagedDiskDeleteBackends: m.supportedStagedDiskDeleteBackends,
+		// rc2 R6: the backends on which a re-sent ExportDisk / ImportDisk is safe.
+		ResendSafeExportBackends: m.resendSafeExportBackends,
+		ResendSafeImportBackends: m.resendSafeImportBackends,
 	}, nil
 }
 
@@ -502,6 +529,22 @@ func (b *Builder) TransferModes(modes ...string) *Builder {
 // (ADR-0011 D7). Unset means none.
 func (b *Builder) StagedDiskDeleteBackends(backends ...string) *Builder {
 	b.manager.SetSupportedStagedDiskDeleteBackends(backends)
+	return b
+}
+
+// ResendSafeExportBackends sets the staging backends on which a re-sent
+// ExportDisk is safe (Manager.SetResendSafeExportBackends; rc2 R6). Unset
+// means none.
+func (b *Builder) ResendSafeExportBackends(backends ...string) *Builder {
+	b.manager.SetResendSafeExportBackends(backends)
+	return b
+}
+
+// ResendSafeImportBackends sets the staging backends on which a re-sent
+// ImportDisk is safe (Manager.SetResendSafeImportBackends; rc2 R6). Unset
+// means none.
+func (b *Builder) ResendSafeImportBackends(backends ...string) *Builder {
+	b.manager.SetResendSafeImportBackends(backends)
 	return b
 }
 

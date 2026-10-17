@@ -191,3 +191,27 @@ func TestBuilder_StagedDiskDeleteBackends(t *testing.T) {
 		t.Errorf("SupportedStagedDiskDeleteBackends = %v, want none when not advertised", resp.SupportedStagedDiskDeleteBackends)
 	}
 }
+
+// TestBuilder_ResendSafeBackends verifies the rc2 R6 re-send-safe export and
+// import backends surface on GetCapabilitiesResponse, and default to none.
+func TestBuilder_ResendSafeBackends(t *testing.T) {
+	m := NewBuilder().Core().ResendSafeExportBackends("s3").ResendSafeImportBackends("nfs", "s3").Build()
+	resp, err := m.GetCapabilities(context.Background(), &providerv1.GetCapabilitiesRequest{})
+	if err != nil {
+		t.Fatalf("GetCapabilities: %v", err)
+	}
+	if want := []string{"s3"}; !reflect.DeepEqual(resp.ResendSafeExportBackends, want) {
+		t.Errorf("ResendSafeExportBackends = %v, want %v", resp.ResendSafeExportBackends, want)
+	}
+	if want := []string{"nfs", "s3"}; !reflect.DeepEqual(resp.ResendSafeImportBackends, want) {
+		t.Errorf("ResendSafeImportBackends = %v, want %v", resp.ResendSafeImportBackends, want)
+	}
+
+	resp, err = NewBuilder().Core().Build().GetCapabilities(context.Background(), &providerv1.GetCapabilitiesRequest{})
+	if err != nil {
+		t.Fatalf("GetCapabilities: %v", err)
+	}
+	if len(resp.ResendSafeExportBackends) != 0 || len(resp.ResendSafeImportBackends) != 0 {
+		t.Error("re-send-safe backends should be empty when not set")
+	}
+}
