@@ -770,24 +770,21 @@ func (r *VMMigrationReconciler) handleSnapshottingPhase(ctx context.Context, mig
 
 	// Record durably that the snapshot is requested; nothing is sent if that
 	// write fails (vmmigration_request_marker.go).
-	resend := migrationRequested(migration, longOpSnapshot)
 	if err := r.markMigrationRequested(ctx, migration, longOpSnapshot); err != nil {
 		return ctrl.Result{}, err
 	}
 
-	logger.Info("Creating migration snapshot", "snapshot_name", snapshotName, "resend", resend)
+	logger.Info("Creating migration snapshot", "snapshot_name", snapshotName)
 	snapshotResp, err := providerInstance.SnapshotCreate(ctx, snapshotReq)
-	if err != nil && resend && contracts.IsRetryable(err) {
-		// A re-send (routed: the provider adopts the earlier call's snapshot
-		// by request token) that reached no definite outcome says nothing
-		// about the earlier call: the marker is kept and it is sent again.
-		logger.Info("The re-sent snapshot reached no definite outcome; sending it again", "error", err.Error())
-		kind := migrationRequests[longOpSnapshot]
-		return r.holdMigrationOutcomeUnknown(ctx, migration, longOpSnapshot,
-			requestMarkerAttemptID(migration.Status.Conditions, kind.condType), kind.resendMessage, requestMarkerRecheckInterval)
+	if err != nil && !providerCallOutcomeKnown(err) {
+		// No definite outcome (a deadline, a dropped connection): the snapshot
+		// may still be taken. The marker is kept and the migration is never
+		// failed for it (vmmigration_request_marker.go).
+		return r.afterUnknownMigrationCall(ctx, migration, longOpSnapshot, err)
 	}
 	if err != nil {
-		// The provider answered: its failure is the outcome.
+		// A definite answer — nothing was done, or a refusal: the failure is
+		// the outcome.
 		clearMigrationRequest(migration, longOpSnapshot)
 	}
 	if isOwnerRefusal(err) {
@@ -1086,7 +1083,14 @@ func (r *VMMigrationReconciler) handleExportingPhase(ctx context.Context, migrat
 		// reconcile (e.g. after retry/backoff) can re-attempt the export for
 		// this generation. transitionToFailed records the failure durably.
 		r.longOpInFlight.Delete(longOpKey(migration, longOpExport))
-		// The provider answered: its failure is the outcome.
+		if !providerCallOutcomeKnown(err) {
+			// No definite outcome (a deadline, a dropped connection): the
+			// export may still be writing the staged object. The marker is
+			// kept and the migration is never failed for it.
+			return r.afterUnknownMigrationCall(ctx, migration, longOpExport, err)
+		}
+		// A definite answer — nothing was done, or a refusal: the failure is
+		// the outcome.
 		clearMigrationRequest(migration, longOpExport)
 		logger.Error(err, "Failed to start disk export")
 		if isOwnerRefusal(err) {
@@ -1489,7 +1493,14 @@ func (r *VMMigrationReconciler) handleImportingPhase(ctx context.Context, migrat
 		// Release the in-memory guard so a future reconcile can re-attempt the
 		// import for this generation after the failure is recorded.
 		r.longOpInFlight.Delete(longOpKey(migration, longOpImport))
-		// The provider answered: its failure (or refusal) is the outcome.
+		if !providerCallOutcomeKnown(err) {
+			// No definite outcome (a deadline, a dropped connection): the
+			// import may still land the disk. The marker is kept and the
+			// migration is never failed for it.
+			return r.afterUnknownMigrationCall(ctx, migration, longOpImport, err)
+		}
+		// A definite answer — nothing was done, or a refusal (the disk-size
+		// limit included): the failure is the outcome.
 		clearMigrationRequest(migration, longOpImport)
 		// The target provider refused to land a disk above its disk-size
 		// limit (or one whose size it could not read): nothing was landed.

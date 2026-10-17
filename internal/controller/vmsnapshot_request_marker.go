@@ -42,11 +42,14 @@ import (
 // fails. The create's outcome — a task to poll, Ready, or Failed — is written
 // with the marker removed. A VMSnapshot still in the initial phase that
 // carries the marker (resolveSnapshotRequest) therefore had a create sent
-// whose outcome was never recorded:
+// whose outcome was never recorded — lost to a restart, or the create failed
+// without a definite answer (a deadline, a dropped connection; a definite
+// failure fails the snapshot and removes the marker):
 //
 //   - through a clustered (routed) provider the create is sent again: it
 //     adopts the snapshot an earlier call made for this VMSnapshot's uid
-//     (request_token), and answers "retry" while that call still runs;
+//     (request_token), and answers "retry" while that call still runs; at
+//     most once a minute and snapshotRoutedResendMax times, then held;
 //   - through any single-host provider it is not: vSphere would make a second
 //     snapshot of the same name, libvirt and Proxmox refuse the name without
 //     returning the earlier snapshot, the mock makes a second one. The
@@ -67,14 +70,29 @@ const (
 const snapshotRequestedMessage = "A provider SnapshotCreate was requested for this VMSnapshot (the attempt id is this " +
 	"condition's lastTransitionTime); its outcome is recorded here once the provider answers"
 
+// snapshotRoutedResendMax caps the automatic re-sends of a routed create
+// whose outcome is unknown (about ten minutes at one a minute).
+const snapshotRoutedResendMax = 10
+
+// snapshotOperatorActionFormat is the shared tail of the operator messages.
+const snapshotOperatorActionFormat = "Check the VM for the snapshot named in the %s event and remove it, then annotate " +
+	"the VMSnapshot %s=%s<attempt id>, the attempt id being the lastTransitionTime of the %s condition, to take it " +
+	"again; or delete the VMSnapshot (a snapshot the create left is then yours to remove). Re-checked every %s"
+
 // snapshotOutcomeUnknownMessage is the Ready message of a VMSnapshot held for
 // an operator. It is constant; the snapshot name and attempt id are in the
 // SnapshotOutcomeUnknown event.
 var snapshotOutcomeUnknownMessage = fmt.Sprintf("A provider SnapshotCreate was sent for this VMSnapshot but its outcome "+
-	"was never recorded (a manager restart or leader change), and this provider cannot be asked again without risking a "+
-	"second snapshot. Check the VM for the snapshot named in the %s event and remove it, then annotate the VMSnapshot "+
-	"%s=%s<attempt id>, the attempt id being the lastTransitionTime of the %s condition, to take it again; or delete "+
-	"the VMSnapshot (a snapshot the create left is then yours to remove). Re-checked every %s",
+	"is unknown (its result was lost to a manager restart or leader change, or the create failed without a definite "+
+	"answer), and this provider cannot be asked again without risking a second snapshot. "+snapshotOperatorActionFormat,
+	snapshotReasonOutcomeUnknown, operationOutcomeAnnotation, operationOutcomeNotPerformedPrefix,
+	snapshotConditionRequested, requestMarkerRecheckInterval)
+
+// snapshotResendsExhaustedMessage is the Ready message of a routed create
+// re-sent snapshotRoutedResendMax times without a recorded outcome.
+var snapshotResendsExhaustedMessage = fmt.Sprintf("The SnapshotCreate was sent again automatically %d times and none "+
+	"of them reached a recorded outcome (the provider's answers are in the manager log), so it is not sent again "+
+	"without an operator. "+snapshotOperatorActionFormat, snapshotRoutedResendMax,
 	snapshotReasonOutcomeUnknown, operationOutcomeAnnotation, operationOutcomeNotPerformedPrefix,
 	snapshotConditionRequested, requestMarkerRecheckInterval)
 
@@ -88,6 +106,12 @@ func snapshotRequested(snapshot *infrav1beta1.VMSnapshot) bool {
 // caller's status write persists it), and the Ready hold it caused.
 func clearSnapshotRequest(snapshot *infrav1beta1.VMSnapshot) {
 	meta.RemoveStatusCondition(&snapshot.Status.Conditions, snapshotConditionRequested)
+	clearSnapshotOutcomeUnknownHold(snapshot)
+}
+
+// clearSnapshotOutcomeUnknownHold removes the Ready hold of an unknown
+// outcome, keeping the marker.
+func clearSnapshotOutcomeUnknownHold(snapshot *infrav1beta1.VMSnapshot) {
 	if c := meta.FindStatusCondition(snapshot.Status.Conditions, infrav1beta1.VMSnapshotConditionReady); c != nil &&
 		c.Reason == snapshotReasonOutcomeUnknown {
 		meta.RemoveStatusCondition(&snapshot.Status.Conditions, infrav1beta1.VMSnapshotConditionReady)
@@ -95,14 +119,17 @@ func clearSnapshotRequest(snapshot *infrav1beta1.VMSnapshot) {
 }
 
 // markSnapshotRequested durably records, right before the SnapshotCreate is
-// sent, that it was requested: a new marker written over snapshot as read
-// (confirmSnapshotNotCreated has just confirmed it is the live object), with
-// the optimistic lock of its resourceVersion. An operator's
+// sent, that it was requested: a new marker (a strictly later attempt id)
+// written over snapshot as read (confirmSnapshotNotCreated has just confirmed
+// it is the live object), with the optimistic lock of its resourceVersion; an
+// automatic re-send counts itself in the marker. An operator's
 // operationOutcomeAnnotation is removed first. sent=false means the record
 // could not be written and nothing may be sent: res is the result to return.
 func (r *VMSnapshotReconciler) markSnapshotRequested(ctx context.Context, snapshot *infrav1beta1.VMSnapshot) (ctrl.Result, bool) {
 	logger := logging.FromContext(ctx)
 	retry := ctrl.Result{RequeueAfter: snapshotStaleReadRetryInterval}
+	resends := nextRequestResends(requestMarker(snapshot.Status.Conditions, snapshotConditionRequested),
+		operationOutcomeConfirmed(snapshot.Annotations, requestMarkerAttemptID(snapshot.Status.Conditions, snapshotConditionRequested)))
 	if _, ok := snapshot.Annotations[operationOutcomeAnnotation]; ok {
 		updated := snapshot.DeepCopy()
 		delete(updated.Annotations, operationOutcomeAnnotation)
@@ -114,9 +141,9 @@ func (r *VMSnapshotReconciler) markSnapshotRequested(ctx context.Context, snapsh
 		snapshot.ResourceVersion = updated.ResourceVersion
 		snapshot.Annotations = updated.Annotations
 	}
-	clearSnapshotRequest(snapshot)
+	clearSnapshotOutcomeUnknownHold(snapshot)
 	setRequestMarker(&snapshot.Status.Conditions, snapshotConditionRequested, snapshotConditionRequested,
-		snapshotRequestedMessage, snapshot.Generation, time.Now())
+		withResendCount(snapshotRequestedMessage, resends), snapshot.Generation, time.Now())
 	if err := r.Status().Update(ctx, snapshot); err != nil {
 		logger.Info("Cannot record the requested SnapshotCreate on the VMSnapshot; not creating", "error", err.Error())
 		return retry, false
@@ -130,9 +157,13 @@ func (r *VMSnapshotReconciler) markSnapshotRequested(ctx context.Context, snapsh
 //
 //   - No marker: continue. A recorded snapshot id: the marker is stale.
 //   - The cached VMSnapshot is not the live one: retry from a fresh read.
-//   - An operator confirmed this attempt: continue (Warning event, audit).
+//   - An operator confirmed this attempt: continue (Warning event, audit; the
+//     annotation's field managers are logged).
+//   - The Provider or the VM's address cannot be read yet: retried after
+//     requestMarkerRecheckInterval, with no hold and no event.
 //   - A routed (clustered) create: continue — the provider adopts the earlier
-//     call's snapshot by request token — paced from the last request.
+//     call's snapshot by request token — paced from the last request, and
+//     held after snapshotRoutedResendMax re-sends.
 //   - Otherwise: held (Ready=False/SnapshotOutcomeUnknown).
 func (r *VMSnapshotReconciler) resolveSnapshotRequest(ctx context.Context, snapshot *infrav1beta1.VMSnapshot,
 	vm *infrav1beta1.VirtualMachine) (bool, ctrl.Result, error) {
@@ -163,46 +194,50 @@ func (r *VMSnapshotReconciler) resolveSnapshotRequest(ctx context.Context, snaps
 	attempt := requestMarkerAttemptID(snapshot.Status.Conditions, snapshotConditionRequested)
 	if operationOutcomeConfirmed(snapshot.Annotations, attempt) {
 		logger.Info("An operator confirmed that the requested SnapshotCreate left nothing behind; sending it again",
-			"attempt", attempt)
+			"attempt", attempt, "annotationManagers", operationOutcomeManagers(snapshot))
 		r.Recorder.Event(snapshot, corev1.EventTypeWarning, eventReasonOperationOutcomeConfirmed,
 			fmt.Sprintf("An operator confirmed that the SnapshotCreate of attempt %s left nothing behind; it is sent again", attempt))
 		return false, ctrl.Result{}, nil
 	}
 
 	provider, err := getVMProvider(ctx, r.Client, vm)
+	var ref contracts.VMRef
 	if err == nil {
-		ref, refErr := vmRefFor(vm, provider)
-		if refErr == nil && ref.HostID != "" {
-			// Routed: the provider adopts the snapshot an earlier call made for
-			// this VMSnapshot's uid. Each re-send writes a new marker; its
-			// watch event must not re-send at once.
-			if wait := time.Until(marker.LastTransitionTime.Add(requestMarkerRecheckInterval)); wait > 0 {
-				return true, ctrl.Result{RequeueAfter: max(wait, snapshotStaleReadRetryInterval)}, nil
-			}
-			logger.Info("The requested SnapshotCreate's outcome was not recorded; sending it again (routed: the provider "+
-				"adopts the snapshot made for this request token)", "attempt", attempt)
-			return false, ctrl.Result{}, nil
-		}
-		err = refErr
+		ref, err = vmRefFor(vm, provider)
 	}
 	if err != nil {
-		logger.Info("Cannot tell whether the requested SnapshotCreate may be sent again; holding the snapshot",
-			"error", err.Error())
+		logger.Info("Cannot tell yet whether the requested SnapshotCreate may be sent again; checking again",
+			"error", err.Error(), "retryAfter", requestMarkerRecheckInterval.String())
+		return true, ctrl.Result{RequeueAfter: requestMarkerRecheckInterval}, nil
 	}
-	return true, r.holdSnapshotOutcomeUnknown(ctx, snapshot, attempt), nil
+	if ref.HostID == "" {
+		return true, r.holdSnapshotOutcomeUnknown(ctx, snapshot, attempt, snapshotOutcomeUnknownMessage), nil
+	}
+	// Routed: the provider adopts the snapshot an earlier call made for this
+	// VMSnapshot's uid. Each re-send writes a new marker; its watch event must
+	// not re-send at once, and the re-sends are capped.
+	if requestResends(marker) >= snapshotRoutedResendMax {
+		return true, r.holdSnapshotOutcomeUnknown(ctx, snapshot, attempt, snapshotResendsExhaustedMessage), nil
+	}
+	if wait := time.Until(marker.LastTransitionTime.Add(requestMarkerRecheckInterval)); wait > 0 {
+		return true, ctrl.Result{RequeueAfter: max(wait, snapshotStaleReadRetryInterval)}, nil
+	}
+	logger.Info("The requested SnapshotCreate's outcome was not recorded; sending it again (routed: the provider "+
+		"adopts the snapshot made for this request token)", "attempt", attempt)
+	return false, ctrl.Result{}, nil
 }
 
 // holdSnapshotOutcomeUnknown keeps snapshot in the initial phase with
-// Ready=False/SnapshotOutcomeUnknown (the constant
-// snapshotOutcomeUnknownMessage), records a Warning event naming the snapshot
-// and the attempt when the hold begins, and re-checks after
-// requestMarkerRecheckInterval. A repeated hold writes nothing.
+// Ready=False/SnapshotOutcomeUnknown and message (snapshotOutcomeUnknownMessage
+// or snapshotResendsExhaustedMessage, both constant), records a Warning event
+// naming the snapshot and the attempt when the hold begins, and re-checks
+// after requestMarkerRecheckInterval. A repeated hold writes nothing.
 func (r *VMSnapshotReconciler) holdSnapshotOutcomeUnknown(ctx context.Context, snapshot *infrav1beta1.VMSnapshot,
-	attempt string) ctrl.Result {
+	attempt, message string) ctrl.Result {
 	res := ctrl.Result{RequeueAfter: requestMarkerRecheckInterval}
 	prev := meta.FindStatusCondition(snapshot.Status.Conditions, infrav1beta1.VMSnapshotConditionReady)
 	if prev != nil && prev.Status == metav1.ConditionFalse && prev.Reason == snapshotReasonOutcomeUnknown &&
-		prev.Message == snapshotOutcomeUnknownMessage && snapshot.Status.Message == snapshotOutcomeUnknownMessage {
+		prev.Message == message && snapshot.Status.Message == message {
 		return res
 	}
 	logging.FromContext(ctx).Info("The requested SnapshotCreate's outcome was not recorded; holding the snapshot",
@@ -212,10 +247,10 @@ func (r *VMSnapshotReconciler) holdSnapshotOutcomeUnknown(ctx context.Context, s
 		Type:               infrav1beta1.VMSnapshotConditionReady,
 		Status:             metav1.ConditionFalse,
 		Reason:             snapshotReasonOutcomeUnknown,
-		Message:            snapshotOutcomeUnknownMessage,
+		Message:            message,
 		ObservedGeneration: snapshot.Generation,
 	})
-	snapshot.Status.Message = snapshotOutcomeUnknownMessage
+	snapshot.Status.Message = message
 	if err := r.updateStatus(ctx, snapshot); err != nil {
 		return ctrl.Result{RequeueAfter: snapshotStaleReadRetryInterval}
 	}

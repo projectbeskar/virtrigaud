@@ -17,10 +17,14 @@ limitations under the License.
 package controller
 
 import (
+	"fmt"
+	"strings"
 	"time"
 
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
 )
 
 // Durable "requested" markers for non-idempotent provider calls (rc2 R6).
@@ -43,6 +47,13 @@ import (
 // Each marker write is one attempt. Its attempt id is the marker's
 // LastTransitionTime in RFC 3339, strictly increasing from one attempt to the
 // next (setRequestMarker), so a confirmation names exactly one attempt.
+//
+// A call the provider answered without a definite outcome — a deadline, a
+// transport failure after the request was written, an error the provider did
+// not classify (providerCallOutcomeKnown) — keeps its marker and is decided
+// like a lost result, never failed: the earlier call may still be running.
+// Automatic re-sends are counted in the marker (requestResends) and capped;
+// past the cap the object is held for an operator.
 
 // operationOutcomeAnnotation, set by an operator to
 // operationOutcomeNotPerformedPrefix + the attempt id of a held object's
@@ -113,4 +124,77 @@ func requestMarkerAttemptID(conds []metav1.Condition, condType string) string {
 // confirmation (operationOutcomeAnnotation) of the attempt attemptID.
 func operationOutcomeConfirmed(annotations map[string]string, attemptID string) bool {
 	return attemptID != "" && annotations[operationOutcomeAnnotation] == operationOutcomeNotPerformedPrefix+attemptID
+}
+
+// requestResendSuffixFormat is appended to a marker's message on an
+// automatic re-send: the number of automatic re-sends since the first call
+// (or since an operator's confirmation). It is the only place the count is
+// kept (no CRD change), so it is parsed back by requestResends.
+const requestResendSuffixFormat = " (automatic re-send %d)"
+
+// requestResendSuffixPrefix starts requestResendSuffixFormat.
+const requestResendSuffixPrefix = " (automatic re-send "
+
+// withResendCount is message with the automatic re-send count n (none for 0).
+func withResendCount(message string, n int) string {
+	if n <= 0 {
+		return message
+	}
+	return message + fmt.Sprintf(requestResendSuffixFormat, n)
+}
+
+// requestResends is the automatic re-send count recorded in marker's message
+// (0 without a suffix).
+func requestResends(marker *metav1.Condition) int {
+	if marker == nil {
+		return 0
+	}
+	i := strings.LastIndex(marker.Message, requestResendSuffixPrefix)
+	if i < 0 {
+		return 0
+	}
+	var n int
+	if _, err := fmt.Sscanf(marker.Message[i:], requestResendSuffixFormat, &n); err != nil || n < 0 {
+		return 0
+	}
+	return n
+}
+
+// nextRequestResends is the re-send count of the marker about to be written
+// over prev: 0 for a first call or one an operator confirmed, else one more
+// than prev's.
+func nextRequestResends(prev *metav1.Condition, confirmed bool) int {
+	if prev == nil || confirmed {
+		return 0
+	}
+	return requestResends(prev) + 1
+}
+
+// providerCallOutcomeKnown reports whether a failed SnapshotCreate,
+// ExportDisk or ImportDisk answer proves the call's outcome, so its marker
+// is replaced by the failure: the request never reached the provider or the
+// provider did nothing (contracts.IsNothingDone), or the provider refused it
+// before doing anything (createDefinitelyRefused, an owner refusal, a
+// disk-size refusal, a disk in use, a running source). Any other failure — a
+// deadline, a transport failure after the request was written ("transport is
+// closing", a provider pod killed mid-call), an error the provider did not
+// classify — leaves the outcome unknown: the call may still be running.
+func providerCallOutcomeKnown(err error) bool {
+	return contracts.IsNothingDone(err) || createDefinitelyRefused(err) || isOwnerRefusal(err) ||
+		contracts.IsDiskSizeExceedsLimit(err) || contracts.IsDiskSizeUnverifiable(err) ||
+		contracts.IsVMDiskInUse(err) || contracts.IsVMSourceRunning(err)
+}
+
+// operationOutcomeManagers lists the field managers (with their operation)
+// that own obj's operationOutcomeAnnotation, for the confirmation's log line.
+// The API server's audit log is the authoritative record of who set it.
+func operationOutcomeManagers(obj metav1.Object) []string {
+	field := `"f:` + operationOutcomeAnnotation + `"`
+	var out []string
+	for _, mf := range obj.GetManagedFields() {
+		if mf.FieldsV1 != nil && strings.Contains(string(mf.FieldsV1.Raw), field) {
+			out = append(out, mf.Manager+"/"+string(mf.Operation))
+		}
+	}
+	return out
 }
