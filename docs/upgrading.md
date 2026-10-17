@@ -456,7 +456,11 @@ the following once after upgrading, and delete only what no `VMMigration` in fli
   in the `vmmigrations/…` tree (for example `vmmigrations` linked to another
   directory of the same PVC), or a hard link to the staged disk, now fails
   with `refused the staged file` / `refused the staged disk`; replace the link
-  with a real directory. s3 and nfs migrations are unaffected.
+  with a real directory. A staging PVC on an exotic CSI or FUSE filesystem
+  that reports a link count other than 1 for a regular file is refused the
+  same way; use a filesystem that reports link counts (or the s3 / nfs
+  backend). The libvirt pod-side import no longer accepts `file://` source
+  URLs (the manager never sent them). s3 and nfs migrations are unaffected.
 - **A libvirt clone's disk is declared qcow2** (`<driver type='qcow2'>`), the
   format it is always written in: the clone of a raw-typed source used to
   keep `type='raw'` and did not boot. Clones made earlier from raw sources
