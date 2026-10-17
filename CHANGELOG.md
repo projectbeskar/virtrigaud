@@ -5,6 +5,32 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-10-17 08:05] - Provider pods mount only the migration PVCs a live VMMigration references (rc2 R15)
+**Author:** @wrkode (William Rizzo)
+
+### Security
+- `internal/controller/provider_migration_storage.go` (new), `internal/controller/provider_controller.go`: provider pods, which hold the hypervisor credentials, no longer mount every PVC in their namespace labelled `virtrigaud.io/component=migration-storage`. `discoverMigrationStorage` mounts a PVC only into the source Provider (the source VM's own, `migrationSourceProviderRef`) and the target Provider of a `VMMigration` in the Provider's namespace that uses the pvc backend, records the PVC in `status.storagePVCName` and is in flight (not deleting, not `Ready`, not `Failed` with no retry left). The PVC must carry the label (now a necessary-but-not-sufficient consent marker) and be either the PVC the migration created (controller ownerReference with its UID) or the one `spec.storage.pvc.name` names, as long as it isn't another `VMMigration`'s (`migrationPVCReferenceError`). Before this, anyone who could create a PVC in a Provider's namespace could attach arbitrary storage read-write to every provider pod there.
+- `internal/controller/provider_migration_storage.go`: a PVC that is being deleted, `Lost`, or `Pending` is not mounted. The one exception is a `Pending` PVC on a `WaitForFirstConsumer` StorageClass, which is mounted while its migration is `Validating` (where it waits for the mount, within the mount budget). So a PVC that never binds can't stall a provider rollout, or take down a `Recreate` (vSphere, clustered) Provider. If the StorageClass can't be read (namespace-scoped install), a `Pending` PVC is mounted during `Validating` as before.
+- `internal/controller/provider_migration_storage.go`: a Provider that is only a migration's target mounts its PVC read-only (imports only read the staged disk); the source mounts it read-write.
+
+### Changed
+- `internal/controller/provider_controller.go`: discovery runs once per Deployment render, sorted by PVC name. A read error now fails the reconcile and keeps the Deployment as it is, instead of rendering it without migration storage and unmounting it mid-migration. The PVC watch maps a PVC only to the Providers of the migrations that record it, and only on phase, deletion, label or controller changes. A new `VMMigration` watch re-renders a migration's source and target Providers when the migration records its PVC, enters or leaves `Validating`, finishes or is deleted. Volume names stay `migration-<pvc>` when that is a valid DNS label; otherwise they get a hashed name, so a long or dotted PVC name no longer makes the Deployment invalid.
+- `internal/controller/vmmigration_controller.go`: `ensureMigrationPVC` fails `Validating` when the PVC can't be used (named PVC without the label or belonging to another `VMMigration`, or a `<name>-storage` PVC this migration didn't create) instead of waiting out the mount budget. The mount budget (`migrationMountWaitStart`) starts at the latest of the PVC's creation, the migration's start and its last retry, so an older named PVC, which is now mounted only once referenced, isn't timed out at once. Created PVCs use the label constants.
+- `internal/controller/provider_controller.go` (kubebuilder RBAC marker), `config/rbac/role.yaml` (regenerated), `charts/virtrigaud/templates/manager-rbac.yaml` (ClusterRole): the manager may `get` `storage.k8s.io/storageclasses`. It never lists or watches them.
+- `examples/migration/README.md` (new "PVC staging backend (legacy): what the provider pods mount" section), `examples/vmmigration-basic.yaml`, `docs/upgrading.md` (behaviour row).
+
+### Added
+- Tests: `internal/controller/provider_controller_migration_test.go` (rewritten: source rw / target ro / bystander none; labelled-but-unreferenced PVC; deleted and deleting migration; Ready, terminal and retry-pending Failed; ownership, label and named-PVC cases; cross-namespace migration and PVC; Bound / Pending WFFC / Pending Immediate / no class / missing class / Lost / deleting PVC / unreadable StorageClass; sorting and merge; read errors; volume naming; watch mappings and predicates; mount-budget start; `ensureMigrationPVC` refusals), `internal/controller/provider_migration_storage_envtest_test.go` (envtest: the Provider controller in a manager mounts the referenced PVC rw on the source and ro on the target, never the labelled rogue PVC, and drops it when the migration is Ready; foreign-namespace, unowned, unlabelled and deleted-migration PVCs; WFFC vs Immediate pending PVCs).
+
+### Why
+Security review of #394: the migration-storage label was not reserved, so any principal able to create a PVC in a Provider's namespace could have it mounted read-write into the credentialed provider pods, or stall their rollout with a PVC that never binds. A mount now needs a live `VMMigration` that references the PVC, on the Providers that migration uses.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-10-17 07:55] - ADR-0012 (Accepted): retiring the Proxmox legacy unstamped-name rule (rc2 R14)
 **Author:** @wrkode (William Rizzo)
 
