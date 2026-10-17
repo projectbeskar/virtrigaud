@@ -1726,11 +1726,15 @@ type CloneRequest struct {
 	TargetHostId string `protobuf:"bytes,9,opt,name=target_host_id,json=targetHostId,proto3" json:"target_host_id,omitempty"`
 	// source_owner identifies the VirtualMachine being cloned — the identity
 	// CreateRequest.owner stamps onto the source VM (ADR-0007 Addendum A, slice
-	// 3). AGNOSTIC. Additive and backward-compatible: single-host and thin-client
-	// providers ignore it, and the operator sends it only with a source_host_id.
-	// A clustered provider reads (and copies the disk of) a source VM ONLY when
-	// its recorded owner uid equals this uid; any other VM is reported NOT_FOUND
-	// and none of its disks or definition is read.
+	// 3). AGNOSTIC. Additive and backward-compatible. A clustered provider reads
+	// (and copies the disk of) a source VM ONLY when its recorded owner uid
+	// equals this uid; any other VM is reported NOT_FOUND and none of its disks
+	// or definition is read. The operator sends it on every clone of a source
+	// VirtualMachine with a UID, single-host included; a single-host Proxmox
+	// provider checks it as described for PowerRequest.owner, before anything is
+	// cloned (a source config it cannot read is UNAVAILABLE with
+	// CREATE_NOT_PERFORMED and VM_OPERATION_FAILED). Other single-host providers
+	// ignore it.
 	SourceOwner *ObjectIdentity `protobuf:"bytes,10,opt,name=source_owner,json=sourceOwner,proto3" json:"source_owner,omitempty"`
 }
 
@@ -2227,6 +2231,8 @@ type ExportDiskRequest struct {
 	// Addendum A, slice 3), exactly as SnapshotCreateRequest.owner. A clustered
 	// provider exports a disk ONLY of a VM whose recorded owner uid equals this
 	// uid; any other VM is reported NOT_FOUND and none of its disks is read.
+	// Sent and checked on single-host requests as SnapshotCreateRequest.owner,
+	// before any disk is read or copied.
 	Owner *ObjectIdentity `protobuf:"bytes,12,opt,name=owner,proto3" json:"owner,omitempty"`
 }
 
@@ -2676,6 +2682,7 @@ type GetDiskInfoRequest struct {
 	// Addendum A, slice 3), exactly as SnapshotCreateRequest.owner. A clustered
 	// provider describes a disk ONLY of a VM whose recorded owner uid equals
 	// this uid; any other VM is reported NOT_FOUND and none of its disks is read.
+	// Sent and checked on single-host requests as SnapshotCreateRequest.owner.
 	Owner *ObjectIdentity `protobuf:"bytes,5,opt,name=owner,proto3" json:"owner,omitempty"`
 }
 

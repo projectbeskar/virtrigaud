@@ -156,9 +156,9 @@ func placementTopologyError(vm *infravirtrigaudiov1beta1.VirtualMachine, provide
 //     the Provider that assigned it.
 //   - single-host / thin-client Provider (topology single, the default): the
 //     ref carries status.id and no host (D9), and the VM's identity as Owner
-//     (singleHostRef): the transport sends it on Describe, Delete, Power,
-//     Reconfigure and the snapshot calls, so a provider that checks it
-//     (Proxmox) never reads or acts on a VM that reused the VM's id. A VM
+//     (singleHostRef): the transport sends it on every per-VM call, so a
+//     provider that checks it (Proxmox) never reads, copies or acts on a VM
+//     that reused the VM's id. A VM
 //     that nevertheless records a clustered placement fails CLOSED with a
 //     *PlacementTopologyMismatchError (no ref).
 //   - clustered Provider (topology cluster): HostID is the confirmed binding,
@@ -212,11 +212,11 @@ func vmOwnerIdentity(vm *infravirtrigaudiov1beta1.VirtualMachine) contracts.Obje
 // (or thin-client) Provider: status.id, no host, and the VM's identity as
 // Owner. A VM with no UID (never true for a stored object) carries none.
 //
-// The transport sends the owner on Describe, Delete, Power, Reconfigure and
-// the snapshot calls, never on a clone source, ExportDisk or GetDiskInfo
-// (those carry one only when routed). A provider that checks it (Proxmox,
-// whose VMIDs are reused) answers a VM stamped with another owner, or an
-// unstamped VM named differently, VM_NOT_OWNED and never reads or changes it;
+// The transport sends the owner on every per-VM call: Describe, Delete,
+// Power, Reconfigure, the snapshot calls, GetDiskInfo, ExportDisk, and a
+// clone source (as source_owner). A provider that checks it (Proxmox, whose
+// VMIDs are reused) answers a VM stamped with another owner, or an unstamped
+// VM named differently, VM_NOT_OWNED and never reads, copies or changes it;
 // one that does not (vSphere, single-host libvirt, mock) ignores it, so their
 // single-host calls are unchanged.
 func singleHostRef(vm *infravirtrigaudiov1beta1.VirtualMachine) contracts.VMRef {

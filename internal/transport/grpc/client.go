@@ -575,7 +575,7 @@ func (c *Client) Clone(ctx context.Context, req contracts.CloneRequest) (contrac
 		// ADR-0007 Addendum A, slice 3: a routed (clustered) clone also names its
 		// landing host and the source's owner; a single-host clone carries
 		// neither, exactly as before.
-		SourceOwner:   routedOwner(req.Source),
+		SourceOwner:   vmOwner(req.Source),
 		TargetHostId:  routedTargetHost(req),
 		TargetName:    req.TargetName,
 		Linked:        req.Linked,
@@ -999,7 +999,7 @@ func (c *Client) ExportDisk(ctx context.Context, req contracts.ExportDiskRequest
 	grpcReq := &providerv1.ExportDiskRequest{
 		VmId:               req.VM.ID,
 		TargetHostId:       req.VM.HostID,
-		Owner:              routedOwner(req.VM),
+		Owner:              vmOwner(req.VM),
 		DiskId:             req.DiskId,
 		SnapshotId:         req.SnapshotId,
 		DestinationUrl:     req.DestinationURL,
@@ -1080,7 +1080,7 @@ func (c *Client) GetDiskInfo(ctx context.Context, req contracts.GetDiskInfoReque
 		DiskId:       req.DiskId,
 		SnapshotId:   req.SnapshotId,
 		TargetHostId: req.VM.HostID,
-		Owner:        routedOwner(req.VM),
+		Owner:        vmOwner(req.VM),
 	}
 
 	resp, err := c.client.GetDiskInfo(ctx, grpcReq)
@@ -1412,24 +1412,14 @@ func (c *Client) convertCreateRequest(req contracts.CreateRequest) (*providerv1.
 	return grpcReq, nil
 }
 
-// vmOwner is the owner the Describe, Power, Reconfigure and snapshot requests
-// carry on the wire: vm.Owner, routed or not (nil without a UID). A clustered
-// provider checks it against the VM's owner stamp on the bound host; the
-// single-host Proxmox provider checks it against the stamp of the VM at the
-// VMID, which PVE may have handed to an unrelated VM; the other single-host
-// providers ignore it.
+// vmOwner is the owner every per-VM request carries on the wire (Describe,
+// Delete, Power, Reconfigure, the snapshot calls, GetDiskInfo, ExportDisk, and
+// CloneRequest.source_owner): vm.Owner, routed or not (nil without a UID). A
+// clustered provider checks it against the VM's owner stamp on the bound
+// host; the single-host Proxmox provider checks it against the stamp of the
+// VM at the VMID, which PVE may have handed to an unrelated VM; the other
+// single-host providers (vSphere, libvirt, mock) ignore it.
 func vmOwner(vm contracts.VMRef) *providerv1.ObjectIdentity {
-	return objectIdentityToProto(vm.Owner)
-}
-
-// routedOwner is the owner the clone source, ExportDisk and GetDiskInfo
-// requests carry on the wire: vm.Owner for a routed (clustered) VM, which the
-// provider checks against the VM's owner stamp, and nothing for a single-host
-// VM, whose requests are unchanged.
-func routedOwner(vm contracts.VMRef) *providerv1.ObjectIdentity {
-	if !vm.Routed() {
-		return nil
-	}
 	return objectIdentityToProto(vm.Owner)
 }
 
