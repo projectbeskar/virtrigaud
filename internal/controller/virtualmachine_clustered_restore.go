@@ -426,6 +426,7 @@ func (r *VirtualMachineReconciler) moveToOwnDomain(
 	pl.Reason = p.reason
 	setPlacedCondition(vm, metav1.ConditionFalse, k8s.ReasonCreatePending,
 		"create pending on the host where this VirtualMachine's own domain was found (ADR-0007 A6, R4); the create retry binds it")
+	applyDerivedPhase(vm)
 	writeCtx, cancel := context.WithTimeout(ctx, pendingHostWriteTimeout)
 	defer cancel()
 	if err := r.Status().Update(writeCtx, vm); err != nil {

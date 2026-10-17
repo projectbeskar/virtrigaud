@@ -153,6 +153,7 @@ func expectID(id string) idTest { return idTest{check: true, id: id} }
 // replaced as a whole ("add" replaces an existing member and creates an
 // absent one).
 func vmStatusPatch(vm *infravirtrigaudiov1beta1.VirtualMachine, want idTest) (client.Patch, error) {
+	applyDerivedPhase(vm)
 	var ops []jsonPatchOp
 	if vm.UID != "" {
 		uid, err := json.Marshal(string(vm.UID))
