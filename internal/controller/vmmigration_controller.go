@@ -1750,6 +1750,15 @@ func (r *VMMigrationReconciler) handleCreatingPhase(ctx context.Context, migrati
 		return r.awaitOwnedTargetVM(ctx, migration, existingVM)
 	}
 
+	// The VM this migration created (a recorded UID) is gone — confirmed
+	// from the API server above. It is not re-created under a new identity
+	// here: the landing disk most likely went with it. The migration fails;
+	// a retry starts over from Validating with the binding released
+	// (releaseGoneTargetBinding).
+	if migration.Status.TargetVMUID != "" {
+		return r.transitionToFailedWithReason(ctx, migration, ReasonTargetVMGone, targetVMGoneMessage)
+	}
+
 	// VM doesn't exist, create it.
 	//
 	// The imported-disk info must have been recorded during the Importing phase;
@@ -1856,6 +1865,7 @@ func (r *VMMigrationReconciler) handleCreatingPhase(ctx context.Context, migrati
 		return ctrl.Result{}, err
 	}
 	migration.Status.TargetVMClaim = digest
+	migration.Status.TargetVMUID = "" // only this Create's VM may bind from here on
 	if err := r.updateStatus(ctx, migration); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -2218,6 +2228,14 @@ func (r *VMMigrationReconciler) handleFailedPhase(ctx context.Context, migration
 	// Increment retry counter
 	migration.Status.RetryCount++
 	migration.Status.LastRetryTime = &metav1.Time{Time: now}
+
+	// A binding to a target VM that no longer exists is released, so the
+	// retry creates (and binds) a new one instead of failing over a stale
+	// UID. A bound VM that still exists keeps its binding: the retry reuses
+	// it, and it stays the migration's to clean up on deletion.
+	if err := r.releaseGoneTargetBinding(ctx, migration); err != nil {
+		return ctrl.Result{}, err
+	}
 
 	// Reset to appropriate phase based on where we failed
 	// For simplicity, restart from validation phase

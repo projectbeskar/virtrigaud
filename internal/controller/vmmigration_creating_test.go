@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -398,4 +399,109 @@ func TestHandleCreatingPhase_LostUIDWriteIsRecoveredOnTheNextReconcile(t *testin
 	assert.Equal(t, "uid-created", got.Status.TargetVMUID)
 	assert.Equal(t, infrav1beta1.MigrationPhaseCreating, got.Status.Phase)
 	assert.EqualValues(t, 1, creates.Load(), "the VM is not created twice")
+}
+
+// TestHandleCreatingPhase_RecordedUIDWhoseVMIsGoneFails (review M-1): the
+// VM this migration created is gone (confirmed live); the migration fails
+// with TargetVMGone instead of re-creating its target under a new identity
+// next to a stale UID.
+func TestHandleCreatingPhase_RecordedUIDWhoseVMIsGoneFails(t *testing.T) {
+	var creates atomic.Int32
+	funcs := &interceptor.Funcs{Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+		creates.Add(1)
+		return c.Create(ctx, obj, opts...)
+	}}
+	_, migration := importRaceFixture()
+	migration.Status.Phase = infrav1beta1.MigrationPhaseCreating
+	migration.Status.ImportID = "disk-1"
+	migration.Status.TargetVMUID = "uid-v1"
+	h := newCreatingHarness(t, true, funcs, migration)
+
+	_, err := h.r.handleCreatingPhase(context.Background(), h.migration)
+	require.NoError(t, err)
+	got := h.get(t)
+	assert.Equal(t, infrav1beta1.MigrationPhaseFailed, got.Status.Phase)
+	assert.Equal(t, targetVMGoneMessage, got.Status.Message)
+	failed := readyCondition(got.Status.Conditions, infrav1beta1.VMMigrationConditionFailed)
+	require.NotNil(t, failed)
+	assert.Equal(t, ReasonTargetVMGone, failed.Reason)
+	assert.Zero(t, creates.Load(), "nothing is created")
+}
+
+// retryableFailed turns m into a Failed migration whose retry is due.
+func retryableFailed(m *infrav1beta1.VMMigration) {
+	maxRetries := int32(3)
+	m.Spec.Options = &infrav1beta1.MigrationOptions{RetryPolicy: &infrav1beta1.MigrationRetryPolicy{MaxRetries: &maxRetries}}
+	m.Status.Phase = infrav1beta1.MigrationPhaseFailed
+	m.Status.CompletionTime = &metav1.Time{Time: time.Now().Add(-2 * migrationMaxRetryDelay)}
+}
+
+// TestRetry_ReleasesABindingWhoseVMIsGone_ThenAFreshCreateBinds (review
+// M-1): a retry releases the UID and claim of a target VM that no longer
+// exists, so the retried migration creates a new VM and binds it — even when
+// that Create's UID write is lost (the claim recovers it).
+func TestRetry_ReleasesABindingWhoseVMIsGone_ThenAFreshCreateBinds(t *testing.T) {
+	ctx := context.Background()
+	var statusWrites atomic.Int32
+	failNextUIDWrite := atomic.Bool{}
+	funcs := &interceptor.Funcs{
+		Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+			if vm, ok := obj.(*infrav1beta1.VirtualMachine); ok {
+				vm.UID = "uid-v2"
+				failNextUIDWrite.Store(true)
+			}
+			return c.Create(ctx, obj, opts...)
+		},
+		SubResourceUpdate: func(ctx context.Context, c client.Client, sub string, obj client.Object, opts ...client.SubResourceUpdateOption) error {
+			statusWrites.Add(1)
+			if failNextUIDWrite.CompareAndSwap(true, false) {
+				return apierrors.NewConflict(schema.GroupResource{Group: "infra.virtrigaud.io", Resource: "vmmigrations"},
+					obj.GetName(), stderrors.New("lost"))
+			}
+			return c.SubResource(sub).Update(ctx, obj, opts...)
+		},
+	}
+	_, migration := importRaceFixture()
+	migration.Status.ImportID = "disk-1"
+	migration.Status.DiskInfo.TargetPath = "/var/lib/libvirt/images/default.target-vm-migrated.qcow2"
+	migration.Status.TargetVMUID = "uid-v1" // V1 was deleted
+	migration.Status.TargetVMClaim = migrationTargetClaimDigest("v1-token")
+	retryableFailed(migration)
+	h := newCreatingHarness(t, true, funcs, migration)
+
+	_, err := h.r.handleFailedPhase(ctx, h.migration)
+	require.NoError(t, err)
+	got := h.get(t)
+	require.Equal(t, infrav1beta1.MigrationPhasePending, got.Status.Phase)
+	assert.Empty(t, got.Status.TargetVMUID, "the stale UID is released")
+	assert.Empty(t, got.Status.TargetVMClaim, "the stale claim is released")
+
+	// The retried migration reaches Creating again (export/import elided).
+	got.Status.Phase = infrav1beta1.MigrationPhaseCreating
+	require.NoError(t, h.live.Status().Update(ctx, got))
+	_, err = h.r.handleCreatingPhase(ctx, h.get(t))
+	require.Error(t, err, "the UID write after the Create is lost")
+	_, err = h.r.handleCreatingPhase(ctx, h.get(t))
+	require.NoError(t, err)
+	got = h.get(t)
+	assert.Equal(t, "uid-v2", got.Status.TargetVMUID, "the new VM is bound by its claim")
+	assert.Equal(t, infrav1beta1.MigrationPhaseCreating, got.Status.Phase)
+}
+
+// TestRetry_KeepsTheBindingOfAnExistingOwnVM: a retry keeps the binding
+// while the bound VM still exists, so the VM stays the migration's (reused by
+// the retry, deleted with the migration if it ends failed).
+func TestRetry_KeepsTheBindingOfAnExistingOwnVM(t *testing.T) {
+	_, migration := importRaceFixture()
+	migration.Status.TargetVMUID = "uid-own"
+	retryableFailed(migration)
+	own := plantedTargetVM()
+	own.UID = "uid-own"
+	h := newCreatingHarness(t, false, nil, migration, own)
+
+	_, err := h.r.handleFailedPhase(context.Background(), h.migration)
+	require.NoError(t, err)
+	got := h.get(t)
+	assert.Equal(t, infrav1beta1.MigrationPhasePending, got.Status.Phase)
+	assert.Equal(t, "uid-own", got.Status.TargetVMUID)
 }

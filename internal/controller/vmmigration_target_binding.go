@@ -224,6 +224,38 @@ func (r *VMMigrationReconciler) classifyTargetVM(
 	return targetVMNotOwned, live, nil
 }
 
+// releaseGoneTargetBinding clears status.targetVMUID and status.targetVMClaim
+// (in memory; the caller writes the status) when the VirtualMachine they
+// bind is no longer under the target key — absent, or another object — as
+// read from the API server. A bound VM that still exists keeps its binding.
+// Without the target namespace grant nothing is read there and the binding
+// is kept (the next phase refuses anyway). A read error is returned.
+func (r *VMMigrationReconciler) releaseGoneTargetBinding(ctx context.Context, migration *infrav1beta1.VMMigration) error {
+	if migration.Status.TargetVMUID == "" && migration.Status.TargetVMClaim == "" {
+		return nil
+	}
+	key := migrationTargetVMKey(migration)
+	allowed, err := targetNamespaceAllowed(ctx, r.liveReader(), migration.Namespace, key.Namespace)
+	if err != nil {
+		return fmt.Errorf("check the target namespace grant before releasing the target VM binding: %w", err)
+	}
+	if !allowed {
+		return nil
+	}
+	vm := &infrav1beta1.VirtualMachine{}
+	switch err := r.liveReader().Get(ctx, key, vm); {
+	case errors.IsNotFound(err):
+	case err != nil:
+		return fmt.Errorf("re-read target VirtualMachine %s before releasing its binding: %w", key, err)
+	case migrationOwnsTargetVM(migration, vm):
+		return nil
+	}
+	logging.FromContext(ctx).Info("Releasing the binding to a target VM that no longer exists", "target", key.String())
+	migration.Status.TargetVMUID = ""
+	migration.Status.TargetVMClaim = ""
+	return nil
+}
+
 // failTargetVMNotOwned fails migration because a VirtualMachine under its
 // target's name was not created by it: ReasonTargetVMNotOwned with the
 // constant message (and Validating=False when it is still validating). That
