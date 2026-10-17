@@ -28,6 +28,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 
 	infravirtrigaudiov1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
 	"github.com/projectbeskar/virtrigaud/internal/k8s"
@@ -174,11 +175,16 @@ func landingMigration(name, ns string) *infravirtrigaudiov1beta1.VMMigration {
 			Target: infravirtrigaudiov1beta1.MigrationTarget{Name: "web"},
 		},
 		Status: infravirtrigaudiov1beta1.VMMigrationStatus{
-			ImportID: "web" + contracts.ImportedDiskNameSuffix,
-			DiskInfo: &infravirtrigaudiov1beta1.MigrationDiskInfo{TargetPath: importedDiskPath},
+			ImportID:    "web" + contracts.ImportedDiskNameSuffix,
+			DiskInfo:    &infravirtrigaudiov1beta1.MigrationDiskInfo{TargetPath: importedDiskPath},
+			TargetVMUID: string(landingVMUID),
 		},
 	}
 }
+
+// landingVMUID is the UID of the VirtualMachine every landingMigration
+// created (status.targetVMUID).
+const landingVMUID = types.UID("uid-web")
 
 // TestBuildCreateRequest_ImportedDiskFlag proves ImportedDisk (the provider's
 // only attach-in-place case) is set ONLY for a disk a VMMigration in the VM's
@@ -199,8 +205,22 @@ func TestBuildCreateRequest_ImportedDiskFlag(t *testing.T) {
 		if migration != "" {
 			vm.Spec.ImportedDisk.MigrationRef = &infravirtrigaudiov1beta1.LocalObjectReference{Name: migration}
 		}
+		vm.UID = landingVMUID
 		return vm
 	}
+	planted := vmFor("web", "ns-a", "m1", importedDiskPath)
+	planted.UID = "uid-planted" // the same name and a copied spec, another object
+	claimToken, claimDigest, err := newMigrationTargetClaim()
+	require.NoError(t, err)
+	claimed := landingMigration("m-claimed", "ns-a")
+	claimed.Status.TargetVMUID = "" // the Create's UID was never recorded
+	claimed.Status.TargetVMClaim = claimDigest
+	withClaim := vmFor("web", "ns-a", "m-claimed", importedDiskPath)
+	withClaim.UID = "uid-claimed"
+	withClaim.Annotations = map[string]string{migrationTargetClaimAnnotation: claimToken}
+	forgedClaim := vmFor("web", "ns-a", "m-claimed", importedDiskPath)
+	forgedClaim.UID = "uid-forged"
+	forgedClaim.Annotations = map[string]string{migrationTargetClaimAnnotation: claimDigest} // the digest is not the token
 	crossNS := landingMigration("m-cross", "ns-a")
 	crossNS.Spec.Target.Namespace = "ns-b" // targets ns-b/web, but lives in ns-a
 	otherTargetNS := landingMigration("m-other-target", "ns-b")
@@ -221,10 +241,13 @@ func TestBuildCreateRequest_ImportedDiskFlag(t *testing.T) {
 		"mismatched VM name":                             {vmFor("attacker", "ns-a", "m1", importedDiskPath), false},
 		"migration has no recorded disk":                 {vmFor("web", "ns-a", "m-no-diskinfo", importedDiskPath), false},
 		"migration does not exist":                       {vmFor("web", "ns-a", "nope", importedDiskPath), false},
+		"VM the migration did not create (another UID)":  {planted, false},
+		"VM carrying the migration's claim token":        {withClaim, true},
+		"VM carrying the claim digest, not the token":    {forgedClaim, false},
 	}
 	s := coverageTestScheme(t)
 	r := newTestReconciler(s, nil,
-		landingMigration("m1", "ns-a"), crossNS, otherTargetNS, noDiskInfo, landingMigration("m1-b", "ns-b"))
+		landingMigration("m1", "ns-a"), crossNS, otherTargetNS, noDiskInfo, landingMigration("m1-b", "ns-b"), claimed)
 	for name, tc := range cases {
 		req, err := r.buildCreateRequest(context.Background(), tc.vm, nil, vmClass, nil, nil)
 		require.NoError(t, err, name)

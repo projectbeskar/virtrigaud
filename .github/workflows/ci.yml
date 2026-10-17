@@ -597,6 +597,16 @@ jobs:
           # and that --reuse-values from v0.3.11 (fetched above) still renders.
           ./hack/verify-max-disk-size-render.sh
 
+      - name: Validate reserved-keys admission policy render
+        run: |
+          # Asserts the ValidatingAdmissionPolicy reserving the manager-owned
+          # virtrigaud.io keys renders by default on Kubernetes 1.30+ (and not
+          # below, or when disabled), exempts the chart's manager
+          # ServiceAccount plus the configured identities, keeps its CEL
+          # identical to config/admission-policy, and that --reuse-values from
+          # v0.3.11 (fetched above) still renders with the policy on.
+          ./hack/verify-admission-policy-render.sh
+
   conformance:
     name: Conformance Tests
     runs-on: ubuntu-22.04

@@ -419,6 +419,30 @@ helm template virtrigaud charts/virtrigaud \
   --set networkPolicy.enabled=true | grep -A2 'kind: NetworkPolicy'
 ```
 
+### Reserved-keys admission policy
+
+On Kubernetes 1.30 and later the chart installs a `ValidatingAdmissionPolicy`
+(and its binding) that lets only the manager's ServiceAccount add or change the
+`virtrigaud.io` annotations and labels the manager alone writes on a
+`VirtualMachine`: migration, clone and adoption provenance, the migration
+claim, and `migration-completed`. It runs in the API server, not as a webhook,
+so it works with `webhooks.enabled: false`. Updates that leave those keys
+unchanged, and the keys users set (`virtrigaud.io/orphan-on-delete`,
+`virtrigaud.io/force-delete`, ...), are not affected. On an older cluster
+nothing is rendered. The key inventory is in
+[`docs/admission-policy.md`](../../docs/admission-policy.md).
+
+| Value | Description | Default |
+|---|---|---|
+| `admissionPolicy.reservedKeys.enabled` | Install the policy (Kubernetes 1.30+) | `true` |
+| `admissionPolicy.reservedKeys.exemptUsernames` | Other identities that may set the reserved keys, e.g. a restore tool (`system:serviceaccount:velero:velero`) or another installation's manager | `[]` |
+| `admissionPolicy.reservedKeys.exemptGroups` | Groups whose members may set them (e.g. a break-glass group; `system:masters` is not exempt by default) | `[]` |
+
+Installing the policy needs rights to create `validatingadmissionpolicies` and
+`validatingadmissionpolicybindings`. `helm template` without `--kube-version`
+assumes Helm's built-in Kubernetes version; pass `--kube-version` when you
+render for a cluster older than 1.30.
+
 ### Transport TLS floor
 
 The manager pins an explicit **minimum of TLS 1.2** on its webhook and metrics

@@ -377,7 +377,7 @@ func TestVMMigrationXNS_CreatingSameNamespaceKeepsImplicitProvider(t *testing.T)
 func readyTargetVM(ns string) *infrav1beta1.VirtualMachine {
 	vm := &infrav1beta1.VirtualMachine{
 		ObjectMeta: metav1.ObjectMeta{
-			Name: "target-vm", Namespace: ns,
+			Name: "target-vm", Namespace: ns, UID: readyTargetVMUID,
 			Annotations: map[string]string{"virtrigaud.io/migration": "default/dir-migration"},
 		},
 		Spec: infrav1beta1.VirtualMachineSpec{ProviderRef: infrav1beta1.ObjectRef{Name: "target-provider", Namespace: "default"}},
@@ -389,6 +389,10 @@ func readyTargetVM(ns string) *infrav1beta1.VirtualMachine {
 	return vm
 }
 
+// readyTargetVMUID is the UID of readyTargetVM: the VirtualMachine the
+// migration created, when its status.targetVMUID records it.
+const readyTargetVMUID = "uid-target-vm"
+
 // TestVMMigrationXNS_ValidatingTargetRefusedWithoutGrant: after a revocation
 // the migration neither reads nor annotates the (already created) target VM;
 // the VM itself is kept as it is.
@@ -396,6 +400,7 @@ func TestVMMigrationXNS_ValidatingTargetRefusedWithoutGrant(t *testing.T) {
 	ctx := context.Background()
 	sourceVM, sourceProvider, targetProvider, migration := creatingFixture(xnsTarget)
 	migration.Status.Phase = infrav1beta1.MigrationPhaseValidatingTarget
+	migration.Status.TargetVMUID = readyTargetVMUID
 	target := readyTargetVM(xnsTarget)
 	ns := grantNamespace(xnsTarget, nil)
 	r, _ := directionReconciler(t, &capturingMigrationProvider{}, sourceVM, sourceProvider, targetProvider, migration, ns, target)
@@ -437,6 +442,7 @@ func TestVMMigrationXNS_DeletionCleanupNeedsGrant(t *testing.T) {
 			sourceVM, sourceProvider, targetProvider, migration := creatingFixture(xnsTarget)
 			migration.Spec.Storage = nil
 			migration.Finalizers = []string{infrav1beta1.VMMigrationFinalizer}
+			migration.Status.TargetVMUID = readyTargetVMUID
 			target := readyTargetVM(xnsTarget)
 			r, _ := directionReconciler(t, &capturingMigrationProvider{}, sourceVM, sourceProvider, targetProvider, migration,
 				grantNamespace(xnsTarget, tc.grant), target)

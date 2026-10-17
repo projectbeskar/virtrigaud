@@ -1,0 +1,122 @@
+{{- /*
+  Reserved VirtRigaud keys (security review M1, docs/admission-policy.md).
+
+  A ValidatingAdmissionPolicy (admissionregistration.k8s.io/v1, Kubernetes
+  1.30+) that lets ONLY the VirtRigaud manager's ServiceAccount (plus the
+  identities in admissionPolicy.reservedKeys.exemptUsernames / exemptGroups)
+  add or change the annotations and labels the manager alone writes on a
+  VirtualMachine: provenance, claim, completion, clone and adoption markers.
+  It is an in-process apiserver check, NOT a webhook, so it does not depend on
+  webhooks.enabled or on the manager being up. An update that leaves those
+  keys as they are, and removing one, are allowed; keys users set themselves
+  (orphan-on-delete, force-delete, create-outcome, placement-uid, ...) are not
+  listed.
+
+  It is rendered when the target cluster is Kubernetes 1.30+ (or reports the
+  admissionregistration.k8s.io/v1 ValidatingAdmissionPolicy API). `helm
+  template` without --kube-version assumes Helm's built-in version (1.30+ for
+  Helm 3.15+), so pass --kube-version when rendering for an older cluster. On
+  an older cluster nothing is rendered; the manager's own checks
+  (status.targetVMUID and the migration claim) still apply.
+
+  Keep the CEL below identical to config/admission-policy/
+  reserved_keys_policy.yaml (hack/verify-admission-policy-render.sh).
+*/}}
+{{- $vapAvailable := or (.Capabilities.APIVersions.Has "admissionregistration.k8s.io/v1/ValidatingAdmissionPolicy") (semverCompare ">=1.30.0-0" .Capabilities.KubeVersion.Version) }}
+{{- /* dig, not .Values.admissionPolicy...: `helm upgrade --reuse-values` from a
+       release whose values have no admissionPolicy block keeps working, and the
+       policy is then on (its default). */}}
+{{- $enabled := dig "admissionPolicy" "reservedKeys" "enabled" true .Values.AsMap }}
+{{- if and $enabled $vapAvailable }}
+{{- $name := printf "%s-reserved-keys" (include "virtrigaud.fullname" .) }}
+{{- $users := list (printf "system:serviceaccount:%s:%s" .Release.Namespace (include "virtrigaud.serviceAccountName" .)) }}
+{{- range (dig "admissionPolicy" "reservedKeys" "exemptUsernames" list .Values.AsMap) }}
+{{- $users = append $users . }}
+{{- end }}
+{{- $groups := dig "admissionPolicy" "reservedKeys" "exemptGroups" list .Values.AsMap }}
+{{- /* The names go into CEL (as JSON-quoted literals) under failurePolicy Fail:
+       a malformed one would break the policy and deny every VirtualMachine
+       create/update in the cluster, so anything outside a plain identity
+       alphabet fails the render instead. */}}
+{{- $identity := "^[A-Za-z0-9:._@+-]+$" }}
+{{- range $users }}
+{{- if not (regexMatch $identity (toString .)) }}
+{{- fail (printf "admissionPolicy.reservedKeys.exemptUsernames: %q is not a valid identity (letters, digits and :._@+- only); a malformed name would make the reserved-keys policy deny every VirtualMachine write" (toString .)) }}
+{{- end }}
+{{- end }}
+{{- range $groups }}
+{{- if not (regexMatch $identity (toString .)) }}
+{{- fail (printf "admissionPolicy.reservedKeys.exemptGroups: %q is not a valid group (letters, digits and :._@+- only); a malformed name would make the reserved-keys policy deny every VirtualMachine write" (toString .)) }}
+{{- end }}
+{{- end }}
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "virtrigaud.labels" . | nindent 4 }}
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["infra.virtrigaud.io"]
+        apiVersions: ["*"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["virtualmachines"]
+  matchConditions:
+    - name: not-the-virtrigaud-manager
+      expression: >-
+        !(request.userInfo.username in [{{ range $i, $u := $users }}{{ if $i }}, {{ end }}{{ toString $u | toJson }}{{ end }}])
+    {{- if $groups }}
+    - name: not-an-exempt-group
+      expression: >-
+        !(has(request.userInfo.groups) && request.userInfo.groups.exists(g, g in [{{ range $i, $g := $groups }}{{ if $i }}, {{ end }}{{ toString $g | toJson }}{{ end }}]))
+    {{- end }}
+  variables:
+    - name: reservedAnnotations
+      expression: >-
+        ['virtrigaud.io/migration', 'virtrigaud.io/migration-claim', 'virtrigaud.io/migrated-from',
+        'virtrigaud.io/imported-disk-id', 'virtrigaud.io/disk-checksum', 'virtrigaud.io/migration-completed',
+        'virtrigaud.io/migration-completed-at', 'virtrigaud.io/clone', 'virtrigaud.io/clone-uid',
+        'virtrigaud.io/cloned-from', 'virtrigaud.io/adopted-host', 'virtrigaud.io/adopted-id']
+    - name: reservedLabels
+      expression: >-
+        ['virtrigaud.io/adopted']
+    - name: setAnnotations
+      expression: >-
+        variables.reservedAnnotations.filter(k,
+        has(object.metadata.annotations) && k in object.metadata.annotations &&
+        !(oldObject != null && has(oldObject.metadata.annotations) && k in oldObject.metadata.annotations &&
+        oldObject.metadata.annotations[k] == object.metadata.annotations[k]))
+    - name: setLabels
+      expression: >-
+        variables.reservedLabels.filter(k,
+        has(object.metadata.labels) && k in object.metadata.labels &&
+        !(oldObject != null && has(oldObject.metadata.labels) && k in oldObject.metadata.labels &&
+        oldObject.metadata.labels[k] == object.metadata.labels[k]))
+  validations:
+    - expression: size(variables.setAnnotations) == 0
+      reason: Forbidden
+      message: >-
+        a reserved virtrigaud.io annotation is set by the VirtRigaud manager only and cannot be added or changed
+      messageExpression: >-
+        'annotation(s) ' + variables.setAnnotations.join(', ') +
+        ' are reserved for the VirtRigaud manager and cannot be added or changed'
+    - expression: size(variables.setLabels) == 0
+      reason: Forbidden
+      message: >-
+        a reserved virtrigaud.io label is set by the VirtRigaud manager only and cannot be added or changed
+      messageExpression: >-
+        'label(s) ' + variables.setLabels.join(', ') +
+        ' are reserved for the VirtRigaud manager and cannot be added or changed'
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "virtrigaud.labels" . | nindent 4 }}
+spec:
+  policyName: {{ $name }}
+  validationActions: ["Deny"]
+{{- end }}

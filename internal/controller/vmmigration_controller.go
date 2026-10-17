@@ -391,6 +391,20 @@ func (r *VMMigrationReconciler) handleValidatingPhase(ctx context.Context, migra
 		return res, err
 	}
 
+	// The target's name must not be taken by a VirtualMachine this migration
+	// did not create (vmmigration_target_binding.go): fail before any side
+	// effect rather than after the export. The Creating phase checks again
+	// from the API server — a VirtualMachine created there later still fails
+	// the migration then.
+	switch state, _, err := r.classifyTargetVM(ctx, migration, false); {
+	case err != nil:
+		return ctrl.Result{}, err
+	case state == targetVMUndecided:
+		return ctrl.Result{RequeueAfter: migrationPhaseAdvanceRequeue}, nil
+	case state == targetVMNotOwned:
+		return r.failTargetVMNotOwned(ctx, migration)
+	}
+
 	// Validate source VM exists
 	sourceVM, err := r.getSourceVM(ctx, migration)
 	if err != nil {
@@ -1700,7 +1714,10 @@ func (r *VMMigrationReconciler) migrationsTargetingNamespace(ctx context.Context
 	return reqs
 }
 
-// handleCreatingPhase creates the target VM
+// handleCreatingPhase creates the target VM, or waits for the one this
+// migration created (vmmigration_target_binding.go) to become ready. A
+// VirtualMachine under the target's name that this migration did not create
+// fails the migration and is not touched.
 func (r *VMMigrationReconciler) handleCreatingPhase(ctx context.Context, migration *infrav1beta1.VMMigration) (ctrl.Result, error) {
 	logger := logging.FromContext(ctx)
 	logger.Info("Handling creating phase")
@@ -1711,47 +1728,35 @@ func (r *VMMigrationReconciler) handleCreatingPhase(ctx context.Context, migrati
 		return res, err
 	}
 
-	// Check if target VM already exists. The key is the same one the import
-	// phase named the landed disk for (migrationTargetVMKey).
+	// The key is the same one the import phase named the landed disk for
+	// (migrationTargetVMKey).
 	vmKey := migrationTargetVMKey(migration)
 	targetVMName, targetNamespace := vmKey.Name, vmKey.Namespace
 
-	// Check if VM CR already exists
-	existingVM := &infrav1beta1.VirtualMachine{}
-
-	err := r.Get(ctx, vmKey, existingVM)
-	if err == nil {
-		// VM already exists, check if it's ready
-		// IMPORTANT: Check the Ready condition, NOT the Phase field
-		// VirtualMachine does not have a "Ready" phase - it uses conditions
-		readyCondition := meta.FindStatusCondition(existingVM.Status.Conditions, "Ready")
-		isReady := existingVM.Status.ID != "" && readyCondition != nil && readyCondition.Status == metav1.ConditionTrue
-
-		if isReady {
-			// VM is ready, store reference and transition to validation
-			migration.Status.TargetVMID = existingVM.Status.ID
-			migration.Status.Phase = infrav1beta1.MigrationPhaseValidatingTarget
-			migration.Status.Message = "Target VM ready, validating"
-
-			if err := r.updateStatus(ctx, migration); err != nil {
-				return ctrl.Result{}, err
-			}
-
-			return ctrl.Result{Requeue: true}, nil
-		}
-
-		// VM exists but not ready yet, wait
-		readyStatus := "not set"
-		if readyCondition != nil {
-			readyStatus = string(readyCondition.Status)
-		}
-		logger.Info("Target VM exists but not ready, waiting", "vm", targetVMName, "readyCondition", readyStatus, "phase", existingVM.Status.Phase)
-		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+	// Only the VirtualMachine this migration created is its target. A cache
+	// miss is re-read from the API server, so a Create of an earlier
+	// reconcile the cache does not show yet is found (by its UID or claim)
+	// instead of being created again.
+	state, existingVM, err := r.classifyTargetVM(ctx, migration, true)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	switch state {
+	case targetVMUndecided:
+		return ctrl.Result{RequeueAfter: migrationPhaseAdvanceRequeue}, nil
+	case targetVMNotOwned:
+		return r.failTargetVMNotOwned(ctx, migration)
+	case targetVMOwned:
+		return r.awaitOwnedTargetVM(ctx, migration, existingVM)
 	}
 
-	if client.IgnoreNotFound(err) != nil {
-		// Error other than not found
-		return r.transitionToFailed(ctx, migration, fmt.Sprintf("Failed to check target VM: %v", err))
+	// The VM this migration created (a recorded UID) is gone — confirmed
+	// from the API server above. It is not re-created under a new identity
+	// here: the landing disk most likely went with it. The migration fails;
+	// a retry starts over from Validating with the binding released
+	// (releaseGoneTargetBinding).
+	if migration.Status.TargetVMUID != "" {
+		return r.transitionToFailedWithReason(ctx, migration, ReasonTargetVMGone, targetVMGoneMessage)
 	}
 
 	// VM doesn't exist, create it.
@@ -1771,19 +1776,21 @@ func (r *VMMigrationReconciler) handleCreatingPhase(ctx context.Context, migrati
 
 	// User annotations first, without the operator's reserved virtrigaud.io
 	// keys (control annotations and provenance); the provenance below is
-	// written last so it cannot be overridden (the cleanup path trusts
-	// virtrigaud.io/migration and virtrigaud.io/migration-completed).
+	// written last so it cannot be overridden. The provenance annotations are
+	// informational: what binds the VM to this migration is its UID
+	// (status.targetVMUID) and its claim (migrationTargetClaimAnnotation).
 	targetAnnotations := userTargetAnnotations(migration.Spec.Target.Annotations)
-	targetAnnotations["virtrigaud.io/migrated-from"] = fmt.Sprintf("%s/%s", migration.Namespace, migration.Spec.Source.VMRef.Name)
+	targetAnnotations[migratedFromAnnotation] = fmt.Sprintf("%s/%s", migration.Namespace, migration.Spec.Source.VMRef.Name)
 	targetAnnotations[migrationProvenanceAnnotation] = migrationProvenance(migration)
-	targetAnnotations["virtrigaud.io/imported-disk-id"] = migration.Status.ImportID
-	targetAnnotations["virtrigaud.io/disk-checksum"] = migration.Status.DiskInfo.TargetChecksum
+	targetAnnotations[importedDiskIDAnnotation] = migration.Status.ImportID
+	targetAnnotations[diskChecksumAnnotation] = migration.Status.DiskInfo.TargetChecksum
 
+	targetLabels, droppedLabels := migrationTargetLabels(migration.Spec.Target.Labels)
 	targetVM := &infrav1beta1.VirtualMachine{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        targetVMName,
 			Namespace:   targetNamespace,
-			Labels:      migration.Spec.Target.Labels,
+			Labels:      targetLabels,
 			Annotations: targetAnnotations,
 		},
 		Spec: infrav1beta1.VirtualMachineSpec{
@@ -1850,24 +1857,55 @@ func (r *VMMigrationReconciler) handleCreatingPhase(ctx context.Context, migrati
 		return res, err
 	}
 
-	// Create the VM resource. AlreadyExists for the VM this migration created
-	// (an earlier reconcile's Create the cache did not show yet) is that VM,
-	// not a failure; any other VM of that name still fails the migration.
+	// Claim the VM before creating it: the digest of a fresh token is
+	// persisted first (optimistic lock; a failed write sends no Create), the
+	// token goes on the VM. If the Create succeeds but its UID is never
+	// recorded below, the next reconcile still recognizes this VM by it.
+	token, digest, err := newMigrationTargetClaim()
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	migration.Status.TargetVMClaim = digest
+	migration.Status.TargetVMUID = "" // only this Create's VM may bind from here on
+	if err := r.updateStatus(ctx, migration); err != nil {
+		return ctrl.Result{}, err
+	}
+	targetVM.Annotations[migrationTargetClaimAnnotation] = token
+
 	if err := r.Create(ctx, targetVM); err != nil {
-		created, checkErr := r.targetVMCreatedByMigration(ctx, migration, vmKey, err)
-		if checkErr != nil {
-			return ctrl.Result{}, checkErr
+		if errors.IsAlreadyExists(err) {
+			// The name was taken after the live read above. It cannot be
+			// this migration's (its claim token is new); decide it from the
+			// API server all the same.
+			state, other, cErr := r.classifyTargetVM(ctx, migration, true)
+			if cErr != nil {
+				return ctrl.Result{}, cErr
+			}
+			if state == targetVMNotOwned && claimedByAnotherCreate(other) {
+				// It carries a claim, which only a manager writes when the
+				// reserved-keys admission policy is on: most likely a Create
+				// of this migration by a previous leader that overlapped this
+				// one. Not failed on this answer alone (docs/admission-policy.md).
+				logger.Info("The target name was taken by a VM carrying another claim; re-checking", "name", targetVMName)
+				return ctrl.Result{RequeueAfter: migrationPhaseAdvanceRequeue}, nil
+			}
+			if state == targetVMNotOwned {
+				return r.failTargetVMNotOwned(ctx, migration)
+			}
+			return ctrl.Result{RequeueAfter: migrationPhaseAdvanceRequeue}, nil
 		}
-		if !created {
-			return r.transitionToFailed(ctx, migration, fmt.Sprintf("Failed to create target VM: %v", err))
-		}
-		logger.Info("Target VM already created by this migration", "name", targetVMName)
-		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+		return r.transitionToFailed(ctx, migration, fmt.Sprintf("Failed to create target VM: %v", err))
 	}
 
-	logger.Info("Target VM created", "name", targetVMName)
+	logger.Info("Target VM created", "name", targetVMName, "uid", targetVM.UID)
+	if len(droppedLabels) > 0 {
+		r.Recorder.Event(migration, corev1.EventTypeNormal, eventReasonTargetLabelsDropped,
+			targetLabelsDroppedMessage(droppedLabels))
+	}
 	r.Recorder.Event(migration, "Normal", "TargetVMCreated", fmt.Sprintf("Created target VM %s", targetVMName))
 
+	// The binding: from here on only the VM with this UID is the target.
+	migration.Status.TargetVMUID = string(targetVM.UID)
 	migration.Status.Message = fmt.Sprintf("Target VM %s created, waiting for provisioning", targetVMName)
 
 	if err := r.updateStatus(ctx, migration); err != nil {
@@ -1878,41 +1916,75 @@ func (r *VMMigrationReconciler) handleCreatingPhase(ctx context.Context, migrati
 	return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 }
 
+// awaitOwnedTargetVM is the Creating phase for a target VM this migration
+// created (vm, which migrationOwnsTargetVM accepted): it records the VM's UID
+// when only its claim proved it, and moves to ValidatingTarget once the VM
+// has a provider id and Ready=True. The status is written only when it
+// changes.
+func (r *VMMigrationReconciler) awaitOwnedTargetVM(ctx context.Context, migration *infrav1beta1.VMMigration,
+	vm *infrav1beta1.VirtualMachine) (ctrl.Result, error) {
+	bound := bindTargetVMUID(migration, vm)
+
+	// IMPORTANT: Check the Ready condition, NOT the Phase field
+	// VirtualMachine does not have a "Ready" phase - it uses conditions
+	readyCondition := meta.FindStatusCondition(vm.Status.Conditions, "Ready")
+	if vm.Status.ID != "" && readyCondition != nil && readyCondition.Status == metav1.ConditionTrue {
+		migration.Status.TargetVMID = vm.Status.ID
+		migration.Status.Phase = infrav1beta1.MigrationPhaseValidatingTarget
+		migration.Status.Message = "Target VM ready, validating"
+		if err := r.updateStatus(ctx, migration); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{RequeueAfter: migrationPhaseAdvanceRequeue}, nil
+	}
+
+	if bound {
+		logging.FromContext(ctx).Info("Recorded the target VM this migration created", "vm", vm.Name, "uid", vm.UID)
+		migration.Status.Message = targetVMRecordedMessage
+		if err := r.updateStatus(ctx, migration); err != nil {
+			return ctrl.Result{}, err
+		}
+	}
+
+	readyStatus := "not set"
+	if readyCondition != nil {
+		readyStatus = string(readyCondition.Status)
+	}
+	logging.FromContext(ctx).Info("Target VM exists but not ready, waiting", "vm", vm.Name,
+		"readyCondition", readyStatus, "phase", vm.Status.Phase)
+	return ctrl.Result{RequeueAfter: targetVMWaitInterval}, nil
+}
+
 // migrationProvenanceAnnotation names, on a VirtualMachine a migration
 // created, that migration as "<namespace>/<name>". It is written last, after
 // the user's target annotations, so a user cannot set it through the
-// migration.
+// migration. It is informational only: anyone who creates a VirtualMachine
+// can write it, so no decision rests on it (migrationOwnsTargetVM).
 const migrationProvenanceAnnotation = "virtrigaud.io/migration"
+
+// Informational annotations a migration writes on the target VM it creates
+// (and, for the completion pair, once it is validated). Like
+// migrationProvenanceAnnotation they are reserved for the manager by the
+// reserved-keys admission policy (config/admission-policy), but no decision
+// about which VM is the migration's rests on them. A target VM carrying
+// migrationCompletedAnnotation="true" is never deleted with the migration.
+const (
+	// migratedFromAnnotation names the source VM as "<namespace>/<name>".
+	migratedFromAnnotation = "virtrigaud.io/migrated-from"
+	// importedDiskIDAnnotation is the migration's status.importID.
+	importedDiskIDAnnotation = "virtrigaud.io/imported-disk-id"
+	// diskChecksumAnnotation is the imported disk's checksum.
+	diskChecksumAnnotation = "virtrigaud.io/disk-checksum"
+	// migrationCompletedAnnotation is "true" once the migration validated
+	// the target VM (Phase=Ready).
+	migrationCompletedAnnotation = "virtrigaud.io/migration-completed"
+	// migrationCompletedAtAnnotation is when, in RFC 3339.
+	migrationCompletedAtAnnotation = "virtrigaud.io/migration-completed-at"
+)
 
 // migrationProvenance is migrationProvenanceAnnotation's value for migration.
 func migrationProvenance(migration *infrav1beta1.VMMigration) string {
 	return fmt.Sprintf("%s/%s", migration.Namespace, migration.Name)
-}
-
-// targetVMCreatedByMigration reports whether createErr, the error of the
-// Creating phase's Create of the target VM key, is AlreadyExists for the
-// VirtualMachine this migration created: re-read from the API server, it
-// names the migration in migrationProvenanceAnnotation and attaches this
-// migration's imported disk (spec.importedDisk: source "migration", this
-// migration's name and status.importID). Any other error, or another VM of
-// that name, is false. A failed re-read is returned.
-func (r *VMMigrationReconciler) targetVMCreatedByMigration(ctx context.Context, migration *infrav1beta1.VMMigration,
-	key client.ObjectKey, createErr error) (bool, error) {
-	if !errors.IsAlreadyExists(createErr) {
-		return false, nil
-	}
-	existing := &infrav1beta1.VirtualMachine{}
-	if err := r.liveReader().Get(ctx, key, existing); err != nil {
-		if errors.IsNotFound(err) {
-			return false, nil
-		}
-		return false, fmt.Errorf("re-read target VirtualMachine %s after AlreadyExists: %w", key, err)
-	}
-	disk := existing.Spec.ImportedDisk
-	return existing.Annotations[migrationProvenanceAnnotation] == migrationProvenance(migration) &&
-		disk != nil && disk.Source == "migration" &&
-		disk.MigrationRef != nil && disk.MigrationRef.Name == migration.Name &&
-		migration.Status.ImportID != "" && disk.DiskID == migration.Status.ImportID, nil
 }
 
 // migrationTargetPowerState is the desired power state (spec.powerState) of the
@@ -1939,14 +2011,38 @@ func (r *VMMigrationReconciler) handleValidatingTargetPhase(ctx context.Context,
 		return res, err
 	}
 
-	// Get target VM
+	// Get the target VM: only the one this migration created. Its status
+	// becomes the migration's (Ready, status.targetVMID) and it is marked
+	// migration-completed below, so another VirtualMachine under the
+	// target's name fails the migration instead.
 	vmKey := migrationTargetVMKey(migration)
 	targetVMName, targetNamespace := vmKey.Name, vmKey.Namespace
-	targetVM := &infrav1beta1.VirtualMachine{}
-
-	if err := r.Get(ctx, vmKey, targetVM); err != nil {
-		return r.transitionToFailed(ctx, migration, fmt.Sprintf("Failed to get target VM: %v", err))
+	state, _, err := r.classifyTargetVM(ctx, migration, true)
+	if err != nil {
+		return ctrl.Result{}, err
 	}
+	switch state {
+	case targetVMUndecided:
+		return ctrl.Result{RequeueAfter: migrationPhaseAdvanceRequeue}, nil
+	case targetVMNotOwned:
+		return r.failTargetVMNotOwned(ctx, migration)
+	case targetVMAbsent:
+		return r.transitionToFailedWithReason(ctx, migration, ReasonTargetVMGone, targetVMGoneMessage)
+	}
+	// This is the committing step (Phase=Ready, then the source's
+	// deleteAfterMigration): decide on the live object, not the cache. A VM
+	// that is being deleted is gone.
+	targetVM, err := r.liveOwnedTargetVM(ctx, migration)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if targetVM == nil {
+		return r.transitionToFailedWithReason(ctx, migration, ReasonTargetVMGone, targetVMGoneMessage)
+	}
+	if !migrationOwnsTargetVM(migration, targetVM) {
+		return r.failTargetVMNotOwned(ctx, migration)
+	}
+	bound := bindTargetVMUID(migration, targetVM)
 
 	// Verify VM is ready by checking the Ready condition
 	readyCondition := meta.FindStatusCondition(targetVM.Status.Conditions, "Ready")
@@ -1958,13 +2054,15 @@ func (r *VMMigrationReconciler) handleValidatingTargetPhase(ctx context.Context,
 			readyStatus = string(readyCondition.Status)
 		}
 		logger.Info("Target VM not ready yet", "readyCondition", readyStatus, "phase", targetVM.Status.Phase)
-		migration.Status.Message = fmt.Sprintf("Waiting for target VM to be ready (current Ready condition: %s)", readyStatus)
-
-		if err := r.updateStatus(ctx, migration); err != nil {
-			return ctrl.Result{}, err
+		msg := fmt.Sprintf("Waiting for target VM to be ready (current Ready condition: %s)", readyStatus)
+		if bound || migration.Status.Message != msg {
+			migration.Status.Message = msg
+			if err := r.updateStatus(ctx, migration); err != nil {
+				return ctrl.Result{}, err
+			}
 		}
 
-		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+		return ctrl.Result{RequeueAfter: targetVMWaitInterval}, nil
 	}
 
 	// VM is ready, mark migration as complete
@@ -1989,8 +2087,8 @@ func (r *VMMigrationReconciler) handleValidatingTargetPhase(ctx context.Context,
 	if targetVM.Annotations == nil {
 		targetVM.Annotations = make(map[string]string)
 	}
-	targetVM.Annotations["virtrigaud.io/migration-completed"] = "true"
-	targetVM.Annotations["virtrigaud.io/migration-completed-at"] = time.Now().Format(time.RFC3339)
+	targetVM.Annotations[migrationCompletedAnnotation] = "true"
+	targetVM.Annotations[migrationCompletedAtAnnotation] = time.Now().Format(time.RFC3339)
 	if err := r.Update(ctx, targetVM); err != nil {
 		logger.Error(err, "Failed to mark VM as migration-completed")
 		// Don't fail the migration for this - the VM is already created and working
@@ -2157,6 +2255,14 @@ func (r *VMMigrationReconciler) handleFailedPhase(ctx context.Context, migration
 	migration.Status.RetryCount++
 	migration.Status.LastRetryTime = &metav1.Time{Time: now}
 
+	// A binding to a target VM that no longer exists is released, so the
+	// retry creates (and binds) a new one instead of failing over a stale
+	// UID. A bound VM that still exists keeps its binding: the retry reuses
+	// it, and it stays the migration's to clean up on deletion.
+	if err := r.releaseGoneTargetBinding(ctx, migration); err != nil {
+		return ctrl.Result{}, err
+	}
+
 	// Reset to appropriate phase based on where we failed
 	// For simplicity, restart from validation phase
 	migration.Status.Phase = infrav1beta1.MigrationPhasePending
@@ -2299,25 +2405,26 @@ func (r *VMMigrationReconciler) handleDeletion(ctx context.Context, migration *i
 			logger.V(1).Info("Skipping target VM cleanup", "vm", targetVMName)
 		} else if err := r.Get(ctx, vmKey, targetVM); err == nil {
 			// Check if VM has migration-completed marker
-			if targetVM.Annotations != nil && targetVM.Annotations["virtrigaud.io/migration-completed"] == "true" {
+			if targetVM.Annotations != nil && targetVM.Annotations[migrationCompletedAnnotation] == "true" {
 				logger.Info("Target VM has migration-completed marker, skipping deletion",
 					"vm", targetVMName,
-					"completed_at", targetVM.Annotations["virtrigaud.io/migration-completed-at"])
+					"completed_at", targetVM.Annotations[migrationCompletedAtAnnotation])
 				// VM is a successfully migrated VM, never delete it
-			} else if targetVM.Annotations != nil {
-				// Only delete if it has our migration annotation AND no completion marker
-				if migrationRef, ok := targetVM.Annotations[migrationProvenanceAnnotation]; ok {
-					expectedRef := fmt.Sprintf("%s/%s", migration.Namespace, migration.Name)
-					if migrationRef == expectedRef {
-						logger.Info("Deleting partially created target VM", "vm", targetVMName)
-						if err := r.Delete(ctx, targetVM); err != nil {
-							logger.Error(err, "Failed to delete target VM during cleanup")
-							cleanupErrors = append(cleanupErrors, fmt.Errorf("target VM cleanup: %w", err))
-						} else {
-							logger.Info("Partially created target VM deleted successfully", "vm", targetVMName)
-						}
-					}
+			} else if migrationOwnsTargetVM(migration, targetVM) {
+				// Only the VM this migration created (its UID, or its claim),
+				// and only that object (UID precondition): never another
+				// VirtualMachine under the target's name, whatever provenance
+				// annotations it carries.
+				logger.Info("Deleting partially created target VM", "vm", targetVMName)
+				if err := r.Delete(ctx, targetVM, client.Preconditions{UID: &targetVM.UID}); err != nil && !errors.IsNotFound(err) {
+					logger.Error(err, "Failed to delete target VM during cleanup")
+					cleanupErrors = append(cleanupErrors, fmt.Errorf("target VM cleanup: %w", err))
+				} else {
+					logger.Info("Partially created target VM deleted successfully", "vm", targetVMName)
 				}
+			} else {
+				logger.Info("A VirtualMachine under the target name was not created by this migration; leaving it untouched",
+					"vm", targetVMName)
 			}
 		}
 	}
@@ -2346,21 +2453,32 @@ func (r *VMMigrationReconciler) handleDeletion(ctx context.Context, migration *i
 
 // transitionToFailed transitions migration to failed state
 func (r *VMMigrationReconciler) transitionToFailed(ctx context.Context, migration *infrav1beta1.VMMigration, message string) (ctrl.Result, error) {
+	return r.transitionToFailedWithReason(ctx, migration, migrationReasonFailed, message)
+}
+
+// migrationReasonFailed is the Failed / Ready condition reason (and the
+// Warning event reason) of a failure that has no more specific one.
+const migrationReasonFailed = "MigrationFailed"
+
+// transitionToFailedWithReason transitions migration to the Failed phase with
+// reason on its Failed and Ready conditions and on the Warning event.
+func (r *VMMigrationReconciler) transitionToFailedWithReason(ctx context.Context, migration *infrav1beta1.VMMigration,
+	reason, message string) (ctrl.Result, error) {
 	logger := logging.FromContext(ctx)
-	logger.Error(nil, "Migration failed", "message", message)
+	logger.Error(nil, "Migration failed", "reason", reason, "message", message)
 
 	migration.Status.Phase = infrav1beta1.MigrationPhaseFailed
 	migration.Status.Message = message
 	migration.Status.CompletionTime = &metav1.Time{Time: time.Now()}
 
 	k8s.SetCondition(&migration.Status.Conditions, infrav1beta1.VMMigrationConditionFailed,
-		metav1.ConditionTrue, "MigrationFailed",
+		metav1.ConditionTrue, reason,
 		message, migration.Generation)
 	k8s.SetCondition(&migration.Status.Conditions, infrav1beta1.VMMigrationConditionReady,
-		metav1.ConditionFalse, "MigrationFailed",
+		metav1.ConditionFalse, reason,
 		message, migration.Generation)
 
-	r.Recorder.Event(migration, "Warning", "MigrationFailed", message)
+	r.Recorder.Event(migration, "Warning", reason, message)
 
 	if err := r.updateStatus(ctx, migration); err != nil {
 		return ctrl.Result{}, err

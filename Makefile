@@ -525,6 +525,10 @@ verify-tmp-sizelimit-render: ## Render the chart's /tmp emptyDir sizeLimits: def
 verify-max-disk-size-render: ## Render the chart's disk-size ceiling: the manager flag, the opt-in VM/VMClass webhooks (in sync with config/webhook), invalid values, --reuse-values from v0.3.11
 	@./hack/verify-max-disk-size-render.sh
 
+.PHONY: verify-admission-policy-render
+verify-admission-policy-render: ## Render the chart's reserved-keys ValidatingAdmissionPolicy: default on (1.30+), opt-out, exemptions, in sync with config/admission-policy, --reuse-values from v0.3.11
+	@./hack/verify-admission-policy-render.sh
+
 ifndef ignore-not-found
   ignore-not-found = false
 endif
