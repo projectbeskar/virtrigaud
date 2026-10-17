@@ -970,8 +970,9 @@ message GetCapabilitiesResponse {
   // disk a migration's ImportDisk landed for a target VM that does not use it
   // (rc2 R7). From a provider that does not report it (one that predates the
   // field) the manager never sends DeleteLandedDisk: it records the landed
-  // disk as left behind, with a Warning.
-  bool supports_landed_disk_delete = 27;
+  // disk as left behind, with a Warning. Fields 27 and 28 are taken by
+  // resend_safe_export_backends / resend_safe_import_backends (PR #402).
+  bool supports_landed_disk_delete = 29;
 }
 
 // DeleteStagedDisk removes the staging object a VMMigration's ExportDisk wrote
