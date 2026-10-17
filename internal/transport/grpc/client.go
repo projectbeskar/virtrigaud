@@ -1831,6 +1831,14 @@ func (c *Client) mapGRPCStatus(operation string, err error) error {
 			return contracts.NewRetryableError(fmt.Sprintf("%s: %s", operation, st.Message()),
 				fmt.Errorf("%w: %w", contracts.ErrVMSourceRunning, err))
 		}
+		// A Reconfigure refused because the running VM cannot take the
+		// CPU/memory change (vSphere: hot-add not enabled on it): retryable
+		// and marked, so the VirtualMachine controller says the change waits
+		// for a power-off instead of reporting a provider failure.
+		if failedPreconditionReason(st, contracts.ReconfigureNeedsPowerOffReason) {
+			return contracts.NewRetryableError(fmt.Sprintf("%s: %s", operation, st.Message()),
+				fmt.Errorf("%w: %w", contracts.ErrReconfigureNeedsPowerOff, err))
+		}
 		// An import refused because the disk it would land is above the
 		// target's disk-size limit, or its size could not be read: typed
 		// Conflict (non-retryable, nothing landed), marked so the migration

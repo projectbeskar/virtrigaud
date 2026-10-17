@@ -199,6 +199,18 @@ const (
 	// is applied only once the VM is powered off; until then the VM counts at
 	// its current size. The operator never powers the VM off by itself.
 	ReasonShrinkPendingPowerOff = "ShrinkPendingPowerOff"
+	// ReasonResizePendingPowerOff is Reconfiguring=False on a running VM whose
+	// change the provider refused to apply to it while it runs and cannot
+	// stage for its next boot (vSphere: CPU or memory hot-add — or CPU
+	// hot-remove, for fewer vCPUs — is not enabled on the VM, the memory is
+	// above its hot-plug limit, memory is never removed from a running VM, a
+	// shared-bus or multi-writer disk is grown only while the VM is off, and
+	// a suspended VM takes no change). Nothing was changed. The change is
+	// applied by the next Reconfigure after the VM is powered off
+	// (spec.powerState: Off); until then it is asked again on the VM's
+	// reconfigure backoff, and at once after a spec change. The operator never
+	// powers the VM off by itself.
+	ReasonResizePendingPowerOff = "ResizePendingPowerOff"
 	// ReasonDiskSizeExceedsLimit is Ready=False (and Provisioning=False) on a
 	// VirtualMachine that is not created yet — or whose hypervisor VM is gone
 	// and would be re-created — when one of the disks it asks for (VMClass

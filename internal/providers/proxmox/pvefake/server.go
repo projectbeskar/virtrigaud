@@ -1423,6 +1423,11 @@ func (s *Server) handleGetVMConfig(w http.ResponseWriter, r *http.Request) {
 
 	// Add disk config
 	config["scsi0"] = "local-lvm:vm-100-disk-0,size=32G"
+	// Raw config keys a test seeded (PutVM with Config: disks such as scsi1,
+	// a boot order) or a resize changed override the defaults above.
+	for k, v := range vm.Config {
+		config[k] = v
+	}
 
 	if vm.Description != "" {
 		config["description"] = vm.Description
@@ -1555,11 +1560,31 @@ func (s *Server) handleResizeDisk(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Store disk resize info in config
+	// Like PVE, the resize rewrites the disk's size= option in the config
+	// (an absolute size; PVE also accepts +N, which nothing here sends).
 	if vm.Config == nil {
 		vm.Config = make(map[string]string)
 	}
-	vm.Config[disk+"_size"] = size
+	current, ok := vm.Config[disk]
+	if !ok && disk == "scsi0" {
+		current = fmt.Sprintf("local-lvm:vm-%d-disk-0,size=32G", vmid)
+	}
+	if current == "" {
+		s.writeError(w, http.StatusInternalServerError, fmt.Sprintf("disk '%s' does not exist", disk))
+		return
+	}
+	parts := strings.Split(current, ",")
+	resized := false
+	for i, part := range parts {
+		if strings.HasPrefix(part, "size=") {
+			parts[i] = "size=" + size
+			resized = true
+		}
+	}
+	if !resized {
+		parts = append(parts, "size="+size)
+	}
+	vm.Config[disk] = strings.Join(parts, ",")
 
 	// Create async task
 	taskID := s.createTask(node, "qmresize", vmidStr)

@@ -122,9 +122,19 @@ func TestReconfigure_WithheldDiskSizeIsNoOp(t *testing.T) {
 	assert.Equal(t, int32(4), m.Config.Hardware.NumCPU, "the CPU change is applied")
 
 	grown := int32(before[0]>>30) + 10 // #nosec G115 -- a simulator disk size
+	// A spec.disks size is never the root disk's (this VM has no additional
+	// disk attached for "data"): before the fix it grew the first disk.
 	desired, err = json.Marshal(contracts.CreateRequest{Disks: []contracts.DiskSpec{{Name: "data", SizeGiB: grown}}})
 	require.NoError(t, err)
 	_, err = p.Reconfigure(ctx, &providerv1.ReconfigureRequest{Id: vm.Reference().Value, DesiredJson: string(desired)})
 	require.NoError(t, err)
-	assert.Equal(t, int64(grown)<<30, diskCapacitiesOf(t, vm)[0], "a positive size still grows the disk")
+	assert.Equal(t, before, diskCapacitiesOf(t, vm), "a spec.disks size never grows the root disk")
+
+	// Nor is the VMClass size: Reconfigure never touches the root disk
+	// (Create applies the class size).
+	desired, err = json.Marshal(contracts.CreateRequest{Class: contracts.VMClass{DiskDefaults: &contracts.DiskDefaults{SizeGiB: grown}}})
+	require.NoError(t, err)
+	_, err = p.Reconfigure(ctx, &providerv1.ReconfigureRequest{Id: vm.Reference().Value, DesiredJson: string(desired)})
+	require.NoError(t, err)
+	assert.Equal(t, before, diskCapacitiesOf(t, vm), "the VMClass size never grows the root disk on Reconfigure")
 }
