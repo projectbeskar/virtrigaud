@@ -122,7 +122,7 @@ func TestPrivateLocalImportCopy(t *testing.T) {
 	src := filepath.Join(staging, "disk.qcow2")
 	require.NoError(t, os.WriteFile(src, []byte("staged bytes"), 0o644))
 
-	in, _, err := openStagedImportSource("file://" + src)
+	in, _, err := openStagedImportSource(stagedPVCURL(t, src))
 	require.NoError(t, err)
 	defer func() { _ = in.Close() }()
 	path, cleanup, err := privateLocalImportCopy(in)
@@ -149,9 +149,11 @@ func TestPrivateLocalImportCopy(t *testing.T) {
 
 	link := filepath.Join(staging, "link.qcow2")
 	require.NoError(t, os.Symlink(src, link))
-	_, _, err = openStagedImportSource("file://" + link)
+	_, _, err = openStagedImportSource(stagedPVCURL(t, link))
 	assert.Equal(t, codes.FailedPrecondition, status.Code(err), "a symbolic link is not followed")
-	_, _, err = openStagedImportSource("file://" + staging)
+	sub := filepath.Join(staging, "sub")
+	require.NoError(t, os.Mkdir(sub, 0o755))
+	_, _, err = openStagedImportSource(stagedPVCURL(t, sub))
 	assert.Equal(t, codes.FailedPrecondition, status.Code(err), "a directory is not a staged disk")
 }
 

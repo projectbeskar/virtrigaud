@@ -29,6 +29,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
+	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
 	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
 )
 
@@ -58,6 +59,19 @@ func stagedPVC(t *testing.T) (mount, secret string) {
 	stagedPVCMountRoot = root
 	t.Cleanup(func() { stagedPVCMountRoot = prev })
 	return mount, secret
+}
+
+// stagedPVCURL returns the pvc:// URL of the staged file (or directory) at
+// path, pointing stagedPVCMountRoot at its grandparent for the rest of the
+// test: path's directory stands in for the PVC mount, so its name must be a
+// DNS-1123 subdomain (t.TempDir's "001" is).
+func stagedPVCURL(t *testing.T, path string) string {
+	t.Helper()
+	pvcDir := filepath.Dir(path)
+	prev := stagedPVCMountRoot
+	stagedPVCMountRoot = filepath.Dir(pvcDir)
+	t.Cleanup(func() { stagedPVCMountRoot = prev })
+	return "pvc://" + filepath.Base(pvcDir) + "/" + filepath.Base(path)
 }
 
 // assertStagedDiskRefused: FailedPrecondition with the constant message, which
@@ -140,12 +154,63 @@ func TestOpenStagedImportSource_MissingAndBadURLs(t *testing.T) {
 		"pvc://Not_A_PVC/x",
 		"pvc://" + stagedTestPVC + "/../../credentials/password",
 		"file://relative/path",
+		"file:///etc/hostname",
+		"file:///proc/self/environ",
 		"http://example.invalid/disk.qcow2",
 	} {
 		_, _, err := openStagedImportSource(u)
 		assert.Equal(t, codes.InvalidArgument, status.Code(err), u)
 		assert.Equal(t, stagedDiskBadURLMessage, status.Convert(err).Message(), u)
 	}
+}
+
+// TestOpenStagedImportSource_FileSchemeRefused: file:// is not a source, even
+// for a real regular file (the manager never sends it; it would let a caller
+// import any regular file of the pod).
+func TestOpenStagedImportSource_FileSchemeRefused(t *testing.T) {
+	mount, _ := stagedPVC(t)
+	p := filepath.Join(mount, stagedTestRel)
+	require.NoError(t, os.WriteFile(p, []byte(stagedTestDisk), 0o644))
+	_, _, err := openStagedImportSource("file://" + p)
+	assert.Equal(t, codes.InvalidArgument, status.Code(err))
+	assert.Equal(t, stagedDiskBadURLMessage, status.Convert(err).Message())
+
+	fc := &fakeSeamConn{id: "host-a"}
+	s := &Server{provider: &fakeSeamProvider{hostConn: fc}}
+	_, err = s.ImportDisk(context.Background(), &providerv1.ImportDiskRequest{SourceUrl: "file://" + p, Format: "qcow2"})
+	assert.Equal(t, codes.InvalidArgument, status.Code(err))
+	assert.Zero(t, fc.copyCalls)
+}
+
+// TestServer_ImportDisk_LocalConnectionRefusesSymlinkedStagedDisk: over a
+// local libvirt connection (the private-copy branch) a planted link to a
+// credential is refused and nothing lands in the image pool.
+func TestServer_ImportDisk_LocalConnectionRefusesSymlinkedStagedDisk(t *testing.T) {
+	c := newCreateHost(t)
+	s := c.withRegistry()
+	conn, err := s.provider.conn(context.Background())
+	require.NoError(t, err)
+	require.NotContains(t, conn.uri(), "ssh://", "the local-connection branch")
+
+	secret := c.file(c.outside, "password")
+	pvcDir := filepath.Join(t.TempDir(), "staging")
+	require.NoError(t, os.MkdirAll(pvcDir, 0o755))
+	staged := filepath.Join(pvcDir, "export.qcow2")
+	require.NoError(t, os.Symlink(secret, staged))
+	before, err := os.ReadDir(c.images)
+	require.NoError(t, err)
+
+	_, err = c.importFor(s, staged, ownerTeamA, "web"+contracts.ImportedDiskNameSuffix)
+	assertStagedDiskRefused(t, err, pvcDir, secret)
+	after, err := os.ReadDir(c.images)
+	require.NoError(t, err)
+	assert.Equal(t, len(before), len(after), "nothing lands in the image pool")
+
+	// The same staged file as a regular file imports.
+	require.NoError(t, os.Remove(staged))
+	require.NoError(t, os.WriteFile(staged, []byte("qcow2"), 0o644))
+	_, err = c.importFor(s, staged, ownerTeamA, "web"+contracts.ImportedDiskNameSuffix)
+	require.NoError(t, err)
 }
 
 // TestServer_ImportDisk_RefusesSymlinkedStagedDisk: over an SSH connection a

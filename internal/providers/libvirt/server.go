@@ -1341,10 +1341,10 @@ func (s *Server) ImportDisk(ctx context.Context, req *providerv1.ImportDiskReque
 		return nil, err
 	}
 
-	// Open the staged disk once (pvc:// beneath the PVC's mount, file:// from
-	// "/"), with no symbolic link followed in any component and only if it is
-	// a regular single-link file (staged_source.go): the staging PVC is
-	// writable by the tenant. Every later read uses this descriptor.
+	// Open the staged disk once (pvc:// only, beneath the PVC's mount), with
+	// no symbolic link followed in any component and only if it is a regular
+	// single-link file (staged_source.go): the staging PVC is writable by the
+	// tenant. Every later read uses this descriptor.
 	src, sourcePath, err := openStagedImportSource(req.SourceUrl)
 	if err != nil {
 		return nil, err
