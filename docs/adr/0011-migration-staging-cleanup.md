@@ -561,6 +561,21 @@ advertised as `supports_landed_disk_delete`, with the same shape as D1–D8:
   blocked-VM backoff, one `Warning`; a deleting `VMMigration` keeps its finalizer until it
   succeeds or `virtrigaud.io/force-delete=true` is set), and a `Failed` migration whose landed
   disk will still be deleted keeps its target `Provider`.
+- **Serialisation (security review).** vSphere holds the landing folder's lock (`landingLocks`)
+  around the check and the delete; libvirt holds a per-landing-name lock taken by `ImportDisk`
+  (land and rename), by an in-place `Create` (through `define`) and by `DeleteLandedDisk` (check,
+  scan, rm), and answers `Unavailable` while an import of the name runs; Proxmox makes an import
+  and a delete of the same stage exclusive (the delete retries). All are per provider process:
+  one replica per provider. The in-use scans see one vCenter or one libvirt host only, so the
+  landing datastore and the libvirt pool directory must not be shared with hypervisors the
+  Provider does not manage.
+- **Refusals.** A provider answers `NOT_FOUND` only after it looked; one that cannot look
+  (Proxmox without its SSH data plane) answers `FailedPrecondition`, recorded as left behind
+  ("refused"), as is anything but a regular file at the libvirt landing name. An import target
+  recorded without the Provider's UID is never sent a delete (left behind). A target namespace
+  that no longer grants the migration's namespace is left behind; a target `Provider` that no
+  longer selects it (`consumerNamespaceSelector`) holds the cleanup, retryably, as for the staged
+  disk.
 - **Older providers (as D7, but no grace window).** A provider that does not report the
   capability, or answers `Unimplemented`, records `LandedDiskLeftBehind` with one `Warning` at
   once: unlike a staged object, a landed disk is on the provider's own storage and is listed in
