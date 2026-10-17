@@ -631,6 +631,17 @@ func snapshotCreateWith(ctx context.Context, conn libvirtConn, domain string, re
 		}
 	}
 
+	// The domain's disk sources before the create: a failed create that
+	// changed them took effect, whatever it reported (singleHostSnapshotFailure).
+	var diskSources string
+	if opts.refuseExisting {
+		res, err := conn.Virsh(ctx, "domblklist", "--details", domain)
+		if err != nil {
+			return nil, atStage(stageBefore, fmt.Errorf("failed to create snapshot: %w", err))
+		}
+		diskSources = strings.TrimSpace(res.Stdout)
+	}
+
 	// Build the virsh snapshot-create-as arguments. A memory-inclusive (full
 	// system) snapshot omits --disk-only and is only possible for a RUNNING
 	// domain (there is no RAM state to capture otherwise); any other case is a
@@ -652,7 +663,7 @@ func snapshotCreateWith(ctx context.Context, conn libvirtConn, domain string, re
 	// Execute snapshot creation (control-plane exec through the seam)
 	result, err := conn.Virsh(ctx, args...)
 	if err != nil {
-		return nil, atStageOf(stageCommand, snapshotName, fmt.Errorf("failed to create snapshot: %w", err))
+		return nil, atStageDetail(stageCommand, snapshotName, diskSources, fmt.Errorf("failed to create snapshot: %w", err))
 	}
 
 	log.Printf("INFO Snapshot created successfully: %s\nOutput: %s", snapshotName, result.Stdout)
@@ -673,12 +684,15 @@ func snapshotCreateWith(ctx context.Context, conn libvirtConn, domain string, re
 //     check stays, any other failure is "not performed".
 //   - the create (stageCommand): `snapshot-create-as --atomic` rolls a failed
 //     snapshot back. The answer is "not created" only when virsh ended on its
-//     own with an exit status AND the domain's snapshot names, read again,
-//     prove the snapshot is absent; a domain that vanished is NotFound. A
-//     dropped connection, a signal, an expired request, virsh reporting that
-//     it lost libvirtd, a snapshot that exists, or a list that cannot be read
-//     leave the untyped error: the snapshot may have been (or still be being)
-//     taken.
+//     own with an exit status, libvirt's error is one of its refusals before
+//     it executes anything (snapshotRefusalMarkers), AND the domain's snapshot
+//     names and disk sources, read again, are as before the create; a domain
+//     that vanished is NotFound. A dropped connection, a signal, an expired
+//     request, virsh reporting that it lost libvirtd, any other error text (it
+//     may have come after the snapshot took effect: libvirt saves its metadata
+//     last), a snapshot that exists, changed disk sources, or a read that
+//     cannot be made leave the untyped error: the snapshot may have been (or
+//     still be being) taken.
 func singleHostSnapshotFailure(ctx context.Context, conn libvirtConn, domain string, err error) error {
 	stage, subject, ok := stageOf(err)
 	if !ok {
@@ -702,10 +716,25 @@ func singleHostSnapshotFailure(ctx context.Context, conn libvirtConn, domain str
 		if virshNoDomain(err) {
 			return refusal(codes.NotFound, wireDomainNotFound, err)
 		}
+		// Only a refusal libvirt makes before it executes anything is proof;
+		// any other failure may have come after the snapshot took effect.
+		if !snapshotRefusedBeforeExecution(err) {
+			log.Printf("WARN libvirt snapshot create outcome unknown: not a refusal before execution: %v", err)
+			return err
+		}
 		exists, listErr := conn.snapshotExists(ctx, domain, subject)
 		if listErr != nil || exists {
 			log.Printf("WARN libvirt snapshot create outcome unknown: snapshot %q exists=%t after: %v (list error: %v)",
 				subject, exists, err, listErr)
+			return err
+		}
+		// And the disks must still be the ones the domain had: a snapshot that
+		// switched them and was then rolled back from libvirt's list took
+		// effect.
+		after, blkErr := conn.Virsh(ctx, "domblklist", "--details", domain)
+		if blkErr != nil || strings.TrimSpace(after.Stdout) != stageDetailOf(err) {
+			log.Printf("WARN libvirt snapshot create outcome unknown: the domain's disk sources are not readable or changed "+
+				"(read error: %v) after: %v", blkErr, err)
 			return err
 		}
 		return notPerformed(wireSnapshotNotCreated, err)

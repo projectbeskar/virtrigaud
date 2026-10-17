@@ -547,6 +547,7 @@
       "single virsh dumpxml vrgold-web",
       "single virsh list --all --uuid",
       "single virsh snapshot-list vrgold-web --name",
+      "single virsh domblklist --details vrgold-web",
       "single virsh snapshot-create-as vrgold-web snapshot-\u003cunix\u003e --description Snapshot created by VirtRigaud at \u003ctime\u003e --atomic --disk-only"
     ],
     "resp": "{\"snapshot_id\":\"snapshot-\u003cunix\u003e\"}",
@@ -558,6 +559,7 @@
       "single virsh dumpxml vrgold-web",
       "single virsh list --all --uuid",
       "single virsh snapshot-list vrgold-web --name",
+      "single virsh domblklist --details vrgold-web",
       "single virsh snapshot-create-as vrgold-web pre-upgrade --description before the upgrade --atomic --disk-only"
     ],
     "resp": "{\"snapshot_id\":\"pre-upgrade\"}",
@@ -576,11 +578,11 @@
       "single virsh dumpxml vrgold-web",
       "single virsh list --all --uuid",
       "single virsh snapshot-list vrgold-web --name",
-      "single virsh snapshot-create-as vrgold-web x --description d --atomic --disk-only",
-      "single virsh snapshot-list vrgold-web --name"
+      "single virsh domblklist --details vrgold-web",
+      "single virsh snapshot-create-as vrgold-web x --description d --atomic --disk-only"
     ],
     "resp": "null",
-    "err": "snapshot create failed: libvirt refused the snapshot and it was not created (details are in the provider log)"
+    "err": "failed to create snapshot: virsh command 'virsh -c qemu:///single snapshot-create-as vrgold-web x --description d --atomic --disk-only' failed (exit code 1): stderr=error: scripted failure of snapshot-create-as\n, stdout="
   },
   "snapshot-create-ignores-target-host": {
     "calls": [
@@ -588,6 +590,7 @@
       "single virsh dumpxml vrgold-web",
       "single virsh list --all --uuid",
       "single virsh snapshot-list vrgold-web --name",
+      "single virsh domblklist --details vrgold-web",
       "single virsh snapshot-create-as vrgold-web h --description d --atomic --disk-only"
     ],
     "resp": "{\"snapshot_id\":\"h\"}",
@@ -599,6 +602,7 @@
       "single virsh dumpxml vrgold-web",
       "single virsh list --all --uuid",
       "single virsh snapshot-list vrgold-web --name",
+      "single virsh domblklist --details vrgold-web",
       "single virsh snapshot-create-as vrgold-web mem --description d --atomic"
     ],
     "resp": "{\"snapshot_id\":\"mem\"}",
@@ -610,6 +614,7 @@
       "single virsh dumpxml vrgold-web",
       "single virsh list --all --uuid",
       "single virsh snapshot-list vrgold-web --name",
+      "single virsh domblklist --details vrgold-web",
       "single virsh snapshot-create-as vrgold-web mem --description d --atomic --disk-only"
     ],
     "resp": "{\"snapshot_id\":\"mem\"}",
@@ -628,6 +633,7 @@
       "single virsh dumpxml vrgold-web",
       "single virsh list --all --uuid",
       "single virsh snapshot-list vrgold-web --name",
+      "single virsh domblklist --details vrgold-web",
       "single virsh snapshot-create-as vrgold-web my-snap-1- --description d --atomic --disk-only"
     ],
     "resp": "{\"snapshot_id\":\"my-snap-1-\"}",

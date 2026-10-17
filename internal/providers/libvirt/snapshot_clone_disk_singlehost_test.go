@@ -123,6 +123,11 @@ virsh)
       fail domjobinfo
       [ -f "$d/dom-$2.xml" ] || nodom "$2"
       if [ -f "$d/jobtype" ]; then printf 'Job type:         %s\n' "$(cat "$d/jobtype")"; else printf 'Job type:         None\n'; fi ;;
+    domblklist)
+      fail domblklist
+      [ -f "$d/dom-$3.xml" ] || nodom "$3"
+      if [ -f "$d/blk-after" ] && [ -f "$d/blk-seen" ]; then cat "$d/blk-after"
+      else : > "$d/blk-seen"; printf ' Type   Device   Target   Source\n------------------------------------------------\n file   disk     vda      ` + scdDiskPath + `\n'; fi ;;
     snapshot-create-as) fail snapshot-create-as; [ -f "$d/dom-$2.xml" ] || nodom "$2"; echo "Domain snapshot $3 created" ;;
     snapshot-delete) fail snapshot-delete; [ -f "$d/dom-$2.xml" ] || nodom "$2"; echo "Domain snapshot $3 deleted" ;;
     snapshot-revert) fail snapshot-revert; [ -f "$d/dom-$2.xml" ] || nodom "$2" ;;
