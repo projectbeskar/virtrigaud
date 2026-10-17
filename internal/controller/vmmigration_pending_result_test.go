@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -46,7 +47,7 @@ func failingStatusWrites(t *testing.T, failing *atomic.Bool, objs ...client.Obje
 		WithStatusSubresource(&infrav1beta1.VMMigration{}).
 		WithInterceptorFuncs(interceptor.Funcs{
 			SubResourceUpdate: func(ctx context.Context, c client.Client, sub string, obj client.Object, opts ...client.SubResourceUpdateOption) error {
-				if failing.Load() && !carriesMigrationRequestMarker(obj) {
+				if failing.Load() && !carriesMigrationRequestMarker(obj) && !isPreImportLandedDiskMark(obj) {
 					return apierrors.NewServiceUnavailable("apiserver unavailable")
 				}
 				return c.SubResource(sub).Update(ctx, obj, opts...)
@@ -215,6 +216,19 @@ func TestForgetMigrationLongOps(t *testing.T) {
 
 // carriesMigrationRequestMarker reports whether obj is a VMMigration whose
 // status carries a requested-call marker (the write before the call).
+// isPreImportLandedDiskMark reports whether obj is the status write that
+// records, before an ImportDisk is sent, that a landed disk may exist
+// (LandedDiskCleanup, rc2 R7): it carries the condition but no import result
+// yet. Like the request markers, it must go through before any import is sent.
+func isPreImportLandedDiskMark(obj client.Object) bool {
+	m, ok := obj.(*infrav1beta1.VMMigration)
+	if !ok {
+		return false
+	}
+	return m.Status.ImportID == "" &&
+		meta.FindStatusCondition(m.Status.Conditions, migrationConditionLandedDiskCleanup) != nil
+}
+
 func carriesMigrationRequestMarker(obj client.Object) bool {
 	m, ok := obj.(*infrav1beta1.VMMigration)
 	if !ok {
