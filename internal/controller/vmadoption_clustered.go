@@ -462,9 +462,13 @@ func skippedSummary(skipped []adoptionSkip) string {
 
 // skippedVMName names a skipped VM for the adoption message: a previous
 // incarnation by the VirtualMachine its stamp records (namespace/name), when
-// known, and always by its domain and Host name (never an endpoint).
+// known, and always by its domain and Host name (never an endpoint); a
+// single-host discovery's VM (no host) by its id alone.
 func skippedVMName(sk adoptionSkip) string {
-	name := fmt.Sprintf("%s on %s", sk.info.ID, sk.info.HostID)
+	name := sk.info.ID
+	if sk.info.HostID != "" {
+		name = fmt.Sprintf("%s on %s", sk.info.ID, sk.info.HostID)
+	}
 	if sk.reason == skipPreviousIncarnation && sk.info.OwnerNamespace != "" && sk.info.OwnerName != "" {
 		name = fmt.Sprintf("%s/%s (%s)", sk.info.OwnerNamespace, sk.info.OwnerName, name)
 	}
@@ -794,25 +798,9 @@ func refusedForGood(err error) bool {
 // false means it could not be removed and is left for an administrator.
 func (r *VMAdoptionReconciler) removeStrandedAdoptedVM(ctx context.Context, provider *infravirtrigaudiov1beta1.Provider,
 	vm *infravirtrigaudiov1beta1.VirtualMachine, info contracts.VMInfo) bool {
-	logger := log.FromContext(ctx).WithValues("vm", vm.Name)
-	fresh := &infravirtrigaudiov1beta1.VirtualMachine{}
-	if err := r.freshReader().Get(ctx, client.ObjectKeyFromObject(vm), fresh); err != nil {
-		if apierrors.IsNotFound(err) {
-			return true
-		}
-		logger.Error(err, "Failed to re-read the adopted VirtualMachine the provider refused")
-		return false
-	}
-	if fresh.UID != vm.UID || !isAwaitingAdoptionOf(fresh, provider, info) {
-		return true // replaced, bound or being deleted: not stranded
-	}
-	uid, rv := fresh.UID, fresh.ResourceVersion
-	if err := r.Delete(ctx, fresh, client.Preconditions{UID: &uid, ResourceVersion: &rv}); err != nil && !apierrors.IsNotFound(err) {
-		logger.Error(err, "Failed to remove the adopted VirtualMachine the provider refused")
-		return false
-	}
-	logger.Info("Removed the adopted VirtualMachine the provider refused (no provider call)")
-	return true
+	return r.removeWaitingVM(ctx, vm, func(fresh *infravirtrigaudiov1beta1.VirtualMachine) bool {
+		return isAwaitingAdoptionOf(fresh, provider, info)
+	})
 }
 
 // createClusteredAdoptedVM creates the VirtualMachine (and its VMClass) that

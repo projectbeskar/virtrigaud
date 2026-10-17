@@ -232,8 +232,34 @@ func (r *VMAdoptionReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		}
 	}
 
+	// A provider that can stamp the VMs it adopts gets them stamped with their
+	// adopting VirtualMachine (vmadoption_singlehost.go). One whose
+	// capabilities cannot be read adopts nothing this discovery: it might
+	// have been able to stamp. An older provider adopts unstamped, as before.
+	providerInstance, err := r.getProviderInstance(ctx, &provider)
+	if err != nil {
+		logger.Error(err, "Failed to discover unmanaged VMs")
+		if updateErr := r.writeAdoptionMessage(ctx, &provider, fmt.Sprintf("Discovery failed: %v", err)); updateErr != nil {
+			logger.Error(updateErr, "Failed to update adoption status")
+		}
+		metrics.RecordError(errReasonDiscoverVMs, metrics.ComponentManager)
+		return ctrl.Result{RequeueAfter: 5 * time.Minute}, nil
+	}
+	transferrer, stamping, err := singleHostTransferrer(ctx, providerInstance)
+	if err != nil {
+		logger.Error(err, "Failed to read the provider's capabilities; not adopting until they can be read")
+		if updateErr := r.writeAdoptionMessage(ctx, &provider, adoptionCapabilitiesUnknownMessage); updateErr != nil {
+			logger.Error(updateErr, "Failed to update adoption status")
+		}
+		metrics.RecordError(errReasonAdoptionCapabilities, metrics.ComponentManager)
+		return ctrl.Result{RequeueAfter: singleHostDiscoveryInterval}, nil
+	}
+	if stamping {
+		return r.reconcileStampedSingleHostAdoption(ctx, &provider, filter, providerInstance, transferrer)
+	}
+
 	// Discover unmanaged VMs
-	unmanagedVMs, foreignStamped, err := r.discoverUnmanagedVMs(ctx, &provider, filter)
+	unmanagedVMs, foreignStamped, err := r.discoverUnmanagedVMs(ctx, providerInstance, &provider, filter)
 	if err != nil {
 		logger.Error(err, "Failed to discover unmanaged VMs")
 		if updateErr := r.writeAdoptionMessage(ctx, &provider, fmt.Sprintf("Discovery failed: %v", err)); updateErr != nil {
@@ -270,6 +296,9 @@ func (r *VMAdoptionReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		provider.Status.Adoption.Message = fmt.Sprintf("Successfully adopted %d VMs", adoptedCount)
 	}
 	provider.Status.Adoption.Message += foreignStampedSummary(foreignStamped)
+	if adoptedCount > 0 {
+		provider.Status.Adoption.Message += adoptionUnstampedNote
+	}
 
 	if err := r.writeAdoptionResult(ctx, &provider, provider.Status.Adoption); err != nil {
 		logger.Error(err, "Failed to update adoption status")
@@ -286,15 +315,9 @@ func (r *VMAdoptionReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 // listed VMs left alone because their owner stamp names no VirtualMachine in
 // this cluster and the Provider does not opt in with
 // AdoptStampedVMsAnnotation.
-func (r *VMAdoptionReconciler) discoverUnmanagedVMs(ctx context.Context, provider *infravirtrigaudiov1beta1.Provider,
-	filter *VMAdoptionFilter) (unmanagedVMs []contracts.VMInfo, foreignStamped int, err error) {
+func (r *VMAdoptionReconciler) discoverUnmanagedVMs(ctx context.Context, providerInstance contracts.Provider,
+	provider *infravirtrigaudiov1beta1.Provider, filter *VMAdoptionFilter) (unmanagedVMs []contracts.VMInfo, foreignStamped int, err error) {
 	logger := log.FromContext(ctx)
-
-	// Get provider instance
-	providerInstance, err := r.getProviderInstance(ctx, provider)
-	if err != nil {
-		return nil, 0, fmt.Errorf("failed to get provider instance: %w", err)
-	}
 
 	// List all VMs from provider
 	listed, err := providerInstance.ListVMs(ctx)
@@ -575,7 +598,7 @@ func adoptedVMObject(provider *infravirtrigaudiov1beta1.Provider, vmInfo contrac
 			ImportedDisk: &infravirtrigaudiov1beta1.ImportedDiskRef{
 				DiskID: vmInfo.ID,
 				Format: "qcow2", // Default, will be updated from disk info if available
-				Source: "manual",
+				Source: adoptedDiskSource,
 			},
 			PowerState: adoptedDesiredPowerState(vmInfo.PowerState),
 		},
