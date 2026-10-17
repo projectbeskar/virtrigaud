@@ -23,6 +23,8 @@ import (
 	"crypto/subtle"
 	"encoding/hex"
 	"fmt"
+	"slices"
+	"strings"
 	"time"
 
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -300,17 +302,28 @@ func (r *VMMigrationReconciler) failTargetVMNotOwned(ctx context.Context, migrat
 	return r.transitionToFailedWithReason(ctx, migration, ReasonTargetVMNotOwned, targetVMNotOwnedMessage)
 }
 
+// reservedTargetLabels are the VirtualMachine labels only the manager sets
+// (the reserved-keys admission policy reserves exactly these).
+var reservedTargetLabels = []string{AdoptedLabel}
+
+// eventReasonTargetLabelsDropped is the Normal event reason recorded when
+// reserved labels in spec.target.labels were not copied onto the target VM.
+const eventReasonTargetLabelsDropped = "TargetLabelsDropped"
+
 // migrationTargetLabels copies spec.target.labels for the target VM without
-// keys in the reserved virtrigaud.io domain (isReservedAnnotation), such as
-// virtrigaud.io/adopted, which would make the VirtualMachine controller wait
-// for an adoption instead of creating the VM, and could let adoption bind a
-// hypervisor VM to it. The manager creates the VM, so the reserved-keys
-// admission policy would not stop a key copied through it. The result is nil
-// when no label remains.
-func migrationTargetLabels(user map[string]string) map[string]string {
+// the reserved labels (reservedTargetLabels), such as virtrigaud.io/adopted,
+// which would make the VirtualMachine controller wait for an adoption
+// instead of creating the VM and could let adoption bind a hypervisor VM to
+// it. The manager creates the VM, so the reserved-keys admission policy
+// would not stop a label copied through it. Every other label, in any
+// domain, is kept. It returns the labels (nil when none remain) and the
+// dropped keys, sorted.
+func migrationTargetLabels(user map[string]string) (map[string]string, []string) {
 	var out map[string]string
+	var dropped []string
 	for k, v := range user {
-		if isReservedAnnotation(k) {
+		if slices.Contains(reservedTargetLabels, k) {
+			dropped = append(dropped, k)
 			continue
 		}
 		if out == nil {
@@ -318,5 +331,13 @@ func migrationTargetLabels(user map[string]string) map[string]string {
 		}
 		out[k] = v
 	}
-	return out
+	slices.Sort(dropped)
+	return out, dropped
+}
+
+// targetLabelsDroppedMessage is the eventReasonTargetLabelsDropped message:
+// the dropped keys (from the migration's own spec, so nothing leaks).
+func targetLabelsDroppedMessage(dropped []string) string {
+	return "spec.target.labels not copied to the target VM (reserved for the VirtRigaud manager): " +
+		strings.Join(dropped, ", ")
 }

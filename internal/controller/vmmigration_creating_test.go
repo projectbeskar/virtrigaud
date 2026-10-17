@@ -599,3 +599,27 @@ func TestHandleCreatingPhase_AlreadyExistsWithAnotherClaimRequeues(t *testing.T)
 		})
 	}
 }
+
+// TestHandleCreatingPhase_ReservedTargetLabelIsDroppedWithAnEvent (review
+// L-6): a reserved label in spec.target.labels is not put on the target VM,
+// other labels are, and one Normal event lists what was dropped.
+func TestHandleCreatingPhase_ReservedTargetLabelIsDroppedWithAnEvent(t *testing.T) {
+	funcs := &interceptor.Funcs{Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+		obj.SetUID("uid-created")
+		return c.Create(ctx, obj, opts...)
+	}}
+	_, migration := importRaceFixture()
+	migration.Status.Phase = infrav1beta1.MigrationPhaseCreating
+	migration.Status.ImportID = "disk-1"
+	migration.Status.DiskInfo.TargetPath = "/var/lib/libvirt/images/default.target-vm-migrated.qcow2"
+	migration.Spec.Target.Labels = map[string]string{AdoptedLabel: AdoptedLabelValue, "virtrigaud.io/team": "a"}
+	h := newCreatingHarness(t, false, funcs, migration)
+
+	_, err := h.r.handleCreatingPhase(context.Background(), h.migration)
+	require.NoError(t, err)
+	vm := h.targetVM(t)
+	assert.Equal(t, map[string]string{"virtrigaud.io/team": "a"}, vm.Labels)
+	rec, ok := h.r.Recorder.(*record.FakeRecorder)
+	require.True(t, ok)
+	assert.Len(t, filterEvents(drainRecordedEvents(rec), eventReasonTargetLabelsDropped), 1)
+}

@@ -78,9 +78,12 @@ of anything.
 
 The manager creates the target VM of a `VMClone` or `VMMigration`, so the
 policy wouldn't stop a reserved key copied through it. A `VMMigration`
-therefore drops every `virtrigaud.io` key from its `spec.target.annotations`
-and `spec.target.labels`. A `VMClone` drops them from its
-`spec.target.annotations` and always sets `virtrigaud.io/adopted` itself.
+therefore drops every `virtrigaud.io` key from its `spec.target.annotations`,
+and the reserved labels (`virtrigaud.io/adopted`) from its
+`spec.target.labels`, with a Normal `TargetLabelsDropped` event that names
+them. Other labels, in any domain, are copied. A `VMClone` drops the
+`virtrigaud.io` keys from its `spec.target.annotations` and always sets
+`virtrigaud.io/adopted` itself.
 
 `internal/controller/admission_policy_test.go` keeps this classification and
 the policy in step. A new manager-owned key fails that test until it's added

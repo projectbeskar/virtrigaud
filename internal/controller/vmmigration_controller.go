@@ -1785,11 +1785,12 @@ func (r *VMMigrationReconciler) handleCreatingPhase(ctx context.Context, migrati
 	targetAnnotations[importedDiskIDAnnotation] = migration.Status.ImportID
 	targetAnnotations[diskChecksumAnnotation] = migration.Status.DiskInfo.TargetChecksum
 
+	targetLabels, droppedLabels := migrationTargetLabels(migration.Spec.Target.Labels)
 	targetVM := &infrav1beta1.VirtualMachine{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        targetVMName,
 			Namespace:   targetNamespace,
-			Labels:      migrationTargetLabels(migration.Spec.Target.Labels),
+			Labels:      targetLabels,
 			Annotations: targetAnnotations,
 		},
 		Spec: infrav1beta1.VirtualMachineSpec{
@@ -1897,6 +1898,10 @@ func (r *VMMigrationReconciler) handleCreatingPhase(ctx context.Context, migrati
 	}
 
 	logger.Info("Target VM created", "name", targetVMName, "uid", targetVM.UID)
+	if len(droppedLabels) > 0 {
+		r.Recorder.Event(migration, corev1.EventTypeNormal, eventReasonTargetLabelsDropped,
+			targetLabelsDroppedMessage(droppedLabels))
+	}
 	r.Recorder.Event(migration, "Normal", "TargetVMCreated", fmt.Sprintf("Created target VM %s", targetVMName))
 
 	// The binding: from here on only the VM with this UID is the target.

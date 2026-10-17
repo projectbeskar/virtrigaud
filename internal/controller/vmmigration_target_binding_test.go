@@ -292,12 +292,20 @@ func TestBuildCreateRequest_PlantedVMDoesNotGetTheLandingDisk(t *testing.T) {
 	assert.False(t, req.Image.ImportedDisk)
 }
 
-// TestMigrationTargetLabels: reserved virtrigaud.io labels in
-// spec.target.labels are not copied onto the target VM the manager creates.
+// TestMigrationTargetLabels (review L-6): only the reserved labels in
+// spec.target.labels are dropped; every other label, user-namespaced
+// *.virtrigaud.io keys included, is copied.
 func TestMigrationTargetLabels(t *testing.T) {
-	assert.Nil(t, migrationTargetLabels(nil))
-	assert.Nil(t, migrationTargetLabels(map[string]string{AdoptedLabel: AdoptedLabelValue}))
-	assert.Equal(t, map[string]string{"tenant": "team-a"}, migrationTargetLabels(map[string]string{
-		"tenant": "team-a", AdoptedLabel: AdoptedLabelValue, "net.virtrigaud.io/x": "y",
-	}))
+	labels, dropped := migrationTargetLabels(nil)
+	assert.Nil(t, labels)
+	assert.Empty(t, dropped)
+	labels, dropped = migrationTargetLabels(map[string]string{AdoptedLabel: AdoptedLabelValue})
+	assert.Nil(t, labels)
+	assert.Equal(t, []string{AdoptedLabel}, dropped)
+	labels, dropped = migrationTargetLabels(map[string]string{
+		"tenant": "team-a", AdoptedLabel: AdoptedLabelValue, "net.virtrigaud.io/x": "y", "virtrigaud.io/team": "a",
+	})
+	assert.Equal(t, map[string]string{"tenant": "team-a", "net.virtrigaud.io/x": "y", "virtrigaud.io/team": "a"}, labels)
+	assert.Equal(t, []string{AdoptedLabel}, dropped)
+	assert.Contains(t, targetLabelsDroppedMessage(dropped), AdoptedLabel)
 }

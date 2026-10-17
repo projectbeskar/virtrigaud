@@ -47,7 +47,7 @@ var (
 		CloneAnnotationClone, CloneAnnotationCloneUID, CloneAnnotationClonedFrom,
 		AdoptedHostAnnotation, AdoptedIDAnnotation,
 	}
-	managerOwnedVMLabels = []string{AdoptedLabel}
+	managerOwnedVMLabels = reservedTargetLabels
 	userSetVMKeys        = []string{
 		infrav1beta1.VirtualMachineOrphanOnDeleteAnnotation, forceDeleteAnnotation, createOutcomeAnnotation,
 		infrav1beta1.VirtualMachinePlacementUIDAnnotation, infrav1beta1.ProviderAllowConsumerOrphanOnDeleteAnnotation,
