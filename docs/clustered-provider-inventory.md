@@ -1612,7 +1612,9 @@ slice 4 is refused with a message and nothing is listed. For each listed VM:
    or restored from a backup with a new UID. It is skipped and named in
    `Provider.status.adoption.message` — by the namespace/name its stamp
    records, e.g. `team-a/web (team-a.web on host-a)` — with the hint to
-   re-attach it per the A6 runbook or remove it. Unlike single-host adoption,
+   re-attach it per the A6 runbook or remove it. Unlike single-host adoption
+   (which, with `adopt-stamped-vms`, replaces such a stamp; see
+   [Adoption stamps the adopted VM](vm-ownership.md#adoption-stamps-the-adopted-vm)),
    a clustered one never takes it over.
    **Cross-host duplicates are not adopted either.** A brownfield domain whose
    UUID is listed on more than one host, or one of whose disk paths a VM listed
@@ -1640,8 +1642,10 @@ slice 4 is refused with a message and nothing is listed. For each listed VM:
    *Residual risk:* one hypervisor reached under two names (a DNS alias, a
    host name and its IP address) is not recognized.
    **Do not front one hypervisor with both a single-host and a clustered
-   Provider.** A single-host provider does not stamp the domains it manages,
-   so a clustered adoption could take one of them. As a guard, an unstamped
+   Provider.** A domain a single-host provider manages may be unstamped
+   (created before owner stamps, or adopted by a release that did not stamp
+   adopted domains), so a clustered adoption could take one of them. As a
+   guard, an unstamped
    domain whose name is the `status.id` of a VirtualMachine bound through a
    non-clustered Provider is skipped and reported.
 2. **The adopting VirtualMachine** is created in the Provider's namespace, as on

@@ -5,6 +5,34 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-10-17 00:18] - Adoption stamps the adopted VM with its new owner (single-host)
+**Author:** @wrkode (William Rizzo)
+
+### Added
+- `proto/provider/v1/provider.proto`, `proto/rpc/provider/v1/*.pb.go`: additive `GetCapabilitiesResponse.supports_owner_transfer` (field 25): `TransferOwner` re-stamps a VM a single-host provider listed, addressed by `id` alone (`target_host_id` empty, refused when set). The `TransferOwner` contract is documented for single-host providers: compare-and-swap (atomic on the hypervisor where it allows it), refusals `AlreadyExists` / `NotFound` with messages that never name another owner, retryable errors otherwise.
+- `internal/providers/contracts/adoption.go`: `OwnerTransferDecision`, the compare-and-swap decision every provider's `TransferOwner` shares (unstamped, exactly the new owner's stamp, or one replaceable stale stamp; a stamp with the new owner's UID under another namespace or name is refused as edited). `internal/providers/contracts/capabilities.go`: `Capabilities.SupportsOwnerTransfer`. `internal/transport/grpc/client.go` maps it. `sdk/provider/capabilities`: `CapabilityOwnerTransfer` and `Builder.OwnerTransfer()`.
+- `internal/providers/vsphere/transfer_owner.go` (new): `TransferOwner` stamps the VM's ExtraConfig owner keys with `ReconfigVM_Task` carrying the `config.changeVersion` it decided on (vCenter refuses the write if the configuration changed since), refuses a template, an image artifact or an unreadable stamp (`listExclusionFor`), checks the instance UUID when one is sent, and reads the stamp back. Retryable failures carry `VM_OPERATION_FAILED`. Reports `supports_owner_transfer`. Replaces the `Unimplemented` stub in `hosts.go`.
+- `internal/providers/libvirt/adoption_transfer_owner.go` (new): single-host `TransferOwner` runs the clustered core (`transferOwnerOn`: domain name and UUID, both definitions of a running domain, `virsh metadata` and read-back) on the provider's one host under the per-host lock. `server.go` no longer answers `Unimplemented` on a single-host provider and reports `supports_owner_transfer` there.
+- `internal/providers/proxmox/transfer_owner.go` (new): `TransferOwner` writes the `virtrigaud.owner` description line (`phase=ready`, other notes kept) with the config `digest` it read (PVE refuses the update if the configuration changed since). Refuses a template, an unreadable or multiple stamp, a stamp whose create has not finished, and a VM whose PVE name is not the new owner's (a reused VMID; the rule an unstamped VM's `Delete` uses); a VM locked by a PVE task is retried; a VM on another node is found cluster-wide. Reports `supports_owner_transfer`. Replaces the stub in `hosts.go`.
+- `internal/providers/proxmox/pvefake/server.go`: the fake returns a config `digest` and refuses an update whose `digest` is stale, as PVE does; `Fault.PassThrough` runs a hook and serves the request normally (to change a VM between a client's read and write).
+- `internal/providers/mock/transfer_owner.go` (new): in-memory compare-and-swap `TransferOwner`; `ListVMs` reports the stamp as `owner_uid`; reports `supports_owner_transfer`.
+- `internal/controller/vmadoption_singlehost.go` (new): through a provider that reports `SupportsOwnerTransfer`, single-host adoption creates the adopting VirtualMachine without status (annotated `virtrigaud.io/adopted-id`), re-reads it uncached, stamps the VM with it (`TransferOwner`), and only then writes `status.id`/`boundProvider` (re-read, retried on conflict, only while it still waits). Stale stamps are replaced only with `adopt-stamped-vms` and after one uncached list of every VirtualMachine shows none has the UID (fail closed without an uncached reader). A VM bound by `status.id` to a VirtualMachine of another single-host Provider object of the same type and endpoint is never adopted or stamped. A stamped-but-unbound adoption is completed from the stamp; a refused transfer, or a waiting adopter whose VM can no longer be adopted, is removed again (re-read, preconditioned delete, no provider call). Constant skip reasons in `Provider.status.adoption.message`; metric reason `adoption-owner-transfer`.
+
+### Changed
+- `internal/controller/vmadoption_controller.go`: single-host discovery reads the provider's capabilities first: stamped adoption when `SupportsOwnerTransfer`, the previous flow otherwise (its message now says adopted VMs are not stamped), and no adoption at all while the capabilities cannot be read. `discoverUnmanagedVMs` takes the resolved provider.
+- `internal/controller/vmadoption_clustered.go`: `removeStrandedAdoptedVM` reuses the shared `removeWaitingVM`; a skipped VM without a host is named by its id alone. Clustered adoption is otherwise unchanged.
+- `internal/providers/libvirt/routed_transfer_owner.go`: the decision delegates to `contracts.OwnerTransferDecision`; TransferOwner validation runs before the topology dispatch.
+- `docs/vm-ownership.md`: new section "Adoption stamps the adopted VM" (which VMs, the per-provider compare-and-swap, order and every intermediate state, older providers and managers, VMs adopted before this release); the Proxmox `Delete` and "Existing VMs" text no longer says adoption leaves the stamp; vSphere privilege row. `docs/libvirt-domain-ownership.md`, `docs/clustered-provider-inventory.md`: single-host adoption now stamps. `docs/upgrading.md`: new behaviour row, privilege bullets, rollback caveat.
+
+### Why
+Adoption left the adopted VM's owner stamp as it was. A VM detached with `orphan-on-delete` and adopted again kept the deleted VirtualMachine's stamp, so its new VirtualMachine's (Proxmox) delete answered `VM_NOT_OWNED` and left it on the hypervisor (v0.4.0-rc1 known limitation), and an unstamped adopted VM could be adopted again through another Provider object. Re-stamping must never let one namespace take over a VM a live VirtualMachine owns, hence the uncached proof, the sibling-Provider guard and the compare-and-swap on the hypervisor.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-10-16 23:25] - Release notes: NFS migrations carry no checksum (known limitation)
 **Author:** @wrkode (William Rizzo)
 
