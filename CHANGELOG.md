@@ -5,6 +5,32 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-10-17 00:22] - VMMigration acts only on the target VM it created; manager-owned virtrigaud.io keys reserved by an admission policy
+**Author:** @wrkode (William Rizzo)
+
+### Security
+- `internal/controller/vmmigration_target_binding.go` (new), `internal/controller/vmmigration_controller.go`: a `VMMigration` is bound to the target `VirtualMachine` it created by the UID its own `Create` returned (`status.targetVMUID`). Before the `Create` it persists the SHA-256 digest of a fresh random claim token (`status.targetVMClaim`; the token goes only on the VM, as `virtrigaud.io/migration-claim`), so a `Create` whose UID write was lost (conflict, restart) is recognized on the next reconcile instead of being created again or mistaken for someone else's. Any other `VirtualMachine` under the target's name — whether the cache shows it (no `Create` is sent), it is found at `Validating-Target`, or it appears between the live check and the `Create` (`AlreadyExists`) — fails the migration with reason `TargetVMNotOwned` and a constant message, and is never read into the migration's status, annotated `migration-completed` or deleted. The check runs first at `Validating`, before the source is powered off, snapshotted or exported. Provenance annotations and `spec.importedDisk` (writable by whoever creates a VM) are no longer trusted anywhere: the `AlreadyExists` path (#388) and the deletion path (now a UID-precondition delete of the bound VM only) used them. A VM that is not proven fails only after the VMMigration and the VM are re-read from the API server, so a lagging cache never fails a migration over its own target.
+- `internal/controller/virtualmachine_controller.go`: `isOwnMigrationDisk` also requires the referenced migration to have created this VM (UID or claim; the claim is re-read from the API server when the cache lags). A same-named VM with a copied `spec.importedDisk` in the migration's namespace no longer gets the landing disk attached in place.
+- `charts/virtrigaud/templates/admission-policy.yaml` (new), `charts/virtrigaud/values.yaml` (`admissionPolicy.reservedKeys`, default on), `config/admission-policy/` (new, included by `config/default`): a `ValidatingAdmissionPolicy` + binding (Kubernetes 1.30+, not a webhook) that rejects creating a `VirtualMachine` with, or adding/changing on one, the manager-owned keys (`virtrigaud.io/migration`, `migration-claim`, `migrated-from`, `imported-disk-id`, `disk-checksum`, `migration-completed(-at)`, `clone`, `clone-uid`, `cloned-from`, `adopted-host`, `adopted-id`, label `virtrigaud.io/adopted`) by any identity but the manager's ServiceAccount and the configured `exemptUsernames` / `exemptGroups`. User-set keys (`orphan-on-delete`, `force-delete`, `create-outcome`, `placement-uid`) and updates that leave the reserved keys unchanged are allowed. Rendered only on 1.30+ (or when the API is reported); `--reuse-values` from releases without the block renders it on.
+
+### Added
+- `api/infra.virtrigaud.io/v1beta1/vmmigration_types.go`: `VMMigrationStatus.targetVMUID` and `targetVMClaim` (optional, additive); `config/crd/bases/infra.virtrigaud.io_vmmigrations.yaml` regenerated.
+- `hack/verify-admission-policy-render.sh` (new), `Makefile` (`verify-admission-policy-render`), `.github/workflows/ci.yml`: render guard — default on for 1.30+, nothing below 1.30 or when disabled, ServiceAccount and exemptions in the match conditions, CEL identical to `config/admission-policy`, `--reuse-values` from v0.3.11 renders.
+- Tests: `internal/controller/vmmigration_target_binding_test.go`, `vmmigration_creating_test.go` (rewritten), `vmmigration_target_binding_envtest_test.go` (planted VM seen by the cache / at Validating-Target / on `AlreadyExists`; own VM re-recognized after a restart that lost its UID), `admission_policy_test.go` (key inventory vs. policy), `admission_policy_envtest_test.go` (the shipped policy on the envtest apiserver: tenant denied, user keys and unchanged updates allowed, manager and exempt group allowed); fixtures in `vmmigration_crossnamespace_test.go`, `vmmigration_ready_cleanup_test.go`, `virtualmachine_image_path_test.go`, `vmmigration_target_vm_test.go` bind their target VM.
+- `docs/admission-policy.md` (new; key inventory), `docs/cross-namespace-targets.md` ("The target VM must be the migration's own", upgrade note), `docs/upgrading.md` (two rows, installer privileges), `docs/README.md`, `charts/virtrigaud/README.md`.
+
+### Changed
+- `internal/controller/vmmigration_controller.go`: constants for the migration's informational annotations; `transitionToFailedWithReason`; the Creating → Validating-Target transition requeues after `migrationPhaseAdvanceRequeue` instead of immediately; Validating-Target writes its waiting message only when it changes.
+
+### Why
+Security review M1 (rc1 known limitation "A cross-namespace migration adopts a same-named target VM"): anyone who could create a `VirtualMachine` in the target namespace could plant one under the target's name, with forged provenance, and the migration treated it as its own target — reported it, marked it completed, could hand it the landing disk and delete the source afterwards.
+
+### Impact
+- [x] Breaking change (behavioural: a migration whose target name is taken by a VM it did not create now fails; a migration in `Creating`/`Validating-Target` during the upgrade fails with `TargetVMNotOwned`; non-manager identities, e.g. restore tools, can no longer set the reserved keys unless exempted — see docs/upgrading.md)
+- [x] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-10-17 00:52] - Proxmox: every per-VM call is owner-checked against a reused VMID (Describe, Power, Reconfigure, snapshots, disk reads and exports, clone sources)
 **Author:** @wrkode (William Rizzo)
 
