@@ -210,8 +210,19 @@ then reported that VM's status as the migration's result, marked it
   `Creating` and `Validating-Target` check again against the API server, in
   case the VM was created during the export. With a retry policy, the
   migration retries and fails the same way until the name is free.
-- A migration whose target VM disappears while it's being validated fails
-  with reason `TargetVMGone`.
+- A migration whose own target VM disappears (or is being deleted) before it
+  completes fails with reason `TargetVMGone`. It isn't re-created under a new
+  identity, because the landing disk most likely went with it.
+  `Validating-Target`, the step that commits the migration, reads the VM from
+  the API server rather than the cache. A retry releases the binding to a VM
+  that no longer exists, so the retried migration creates and binds a new
+  one. A bound VM that still exists keeps its binding and is reused.
+- If the target name is taken at the moment of the `Create` by a VM that
+  carries another migration claim, the migration checks again instead of
+  failing at once. With the reserved-keys admission policy on, only a manager
+  can write a claim, so this is most likely an overlapping leader.
+- Reserved labels in `spec.target.labels` (`virtrigaud.io/adopted`) aren't
+  copied onto the target VM. A Normal `TargetLabelsDropped` event lists them.
 - The landing disk follows the same rule. It's attached in place only for the
   VM the migration created (its UID or its claim). A same-named VM with a
   copied `spec.importedDisk` gets it handled as a base image, like any other
