@@ -2969,6 +2969,11 @@ func (r *VMMigrationReconciler) ensureMigrationPVC(ctx context.Context, migratio
 			}
 			return "", fmt.Errorf("failed to get PVC %s: %w", pvcConfig.Name, err)
 		}
+		// Only a PVC its owner labelled as migration storage, and not another
+		// migration's, is mounted into the provider pods (discoverMigrationStorage).
+		if err := migrationPVCReferenceError(pvc, migration); err != nil {
+			return "", fmt.Errorf("PVC %s cannot be used as migration storage: %w", pvcConfig.Name, err)
+		}
 		logger.Info("Using existing PVC for migration", "pvc", pvcConfig.Name)
 		return pvcConfig.Name, nil
 	}
@@ -2984,7 +2989,11 @@ func (r *VMMigrationReconciler) ensureMigrationPVC(ctx context.Context, migratio
 	}, existingPVC)
 
 	if err == nil {
-		// PVC already exists
+		// PVC already exists: it must be the one this migration created, or
+		// the provider pods never mount it (discoverMigrationStorage).
+		if err := migrationPVCReferenceError(existingPVC, migration); err != nil {
+			return "", fmt.Errorf("PVC %s cannot be used as migration storage: %w", pvcName, err)
+		}
 		logger.Info("Migration PVC already exists", "pvc", pvcName)
 		return pvcName, nil
 	}
@@ -3015,7 +3024,7 @@ func (r *VMMigrationReconciler) ensureMigrationPVC(ctx context.Context, migratio
 			Labels: map[string]string{
 				"app.kubernetes.io/managed-by": "virtrigaud",
 				"virtrigaud.io/migration":      migration.Name,
-				"virtrigaud.io/component":      "migration-storage",
+				migrationPVCLabelKey:           migrationPVCLabelValue,
 			},
 			Annotations: map[string]string{
 				"virtrigaud.io/created-by": "vmmigration-controller",
@@ -3142,9 +3151,8 @@ func (r *VMMigrationReconciler) migrationProvidersMounted(ctx context.Context, s
 
 // providerMountReady performs a single, non-blocking check that the given
 // provider's Deployment has rolled a Running, Ready pod carrying the migration
-// PVC. The provider controller is responsible for discovering migration PVCs
-// (label virtrigaud.io/component=migration-storage) and attaching them to its
-// Deployment; this only observes the result. The returned reason explains what
+// PVC. The provider controller attaches the PVCs live VMMigrations reference
+// (discoverMigrationStorage) to its Deployment; this only observes the result. The returned reason explains what
 // is still pending when ready is false.
 func (r *VMMigrationReconciler) providerMountReady(ctx context.Context, provider *infrav1beta1.Provider, pvcName string) (bool, string, error) {
 	deploymentName := fmt.Sprintf("virtrigaud-provider-%s-%s", provider.Namespace, provider.Name)
@@ -3206,7 +3214,22 @@ func (r *VMMigrationReconciler) migrationMountDeadlineExceeded(ctx context.Conte
 	if err := r.Get(ctx, types.NamespacedName{Name: pvcName, Namespace: migration.Namespace}, pvc); err != nil {
 		return false, fmt.Errorf("get migration PVC %s: %w", pvcName, err)
 	}
-	return time.Since(pvc.CreationTimestamp.Time) > migrationMountTimeout, nil
+	return time.Since(migrationMountWaitStart(migration, pvc)) > migrationMountTimeout, nil
+}
+
+// migrationMountWaitStart is when the wait for the migration PVC mount began:
+// the latest of the PVC's creation, the migration's start and its last retry.
+// The provider pods mount a PVC only once a migration references it
+// (discoverMigrationStorage), so an older PVC named in spec.storage.pvc.name
+// gets the full budget too.
+func migrationMountWaitStart(migration *infrav1beta1.VMMigration, pvc *corev1.PersistentVolumeClaim) time.Time {
+	start := pvc.CreationTimestamp.Time
+	for _, t := range []*metav1.Time{migration.Status.StartTime, migration.Status.LastRetryTime} {
+		if t != nil && t.After(start) {
+			start = t.Time
+		}
+	}
+	return start
 }
 
 // volumesContainPVC reports whether any volume in the slice binds the named PVC.
