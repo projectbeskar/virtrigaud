@@ -2355,16 +2355,21 @@ func (r *VMMigrationReconciler) handleDeletion(ctx context.Context, migration *i
 	cleanupErrors := []error{}
 
 	// Explicitly delete PVC if it exists (in addition to owner reference
-	// cleanup): a pvc migration's staged file goes with it.
+	// cleanup): a pvc migration's staged file goes with it. Only the PVC this
+	// migration created (controller ownerReference with its UID) is deleted;
+	// a user's PVC (spec.storage.pvc.name) is left for its owner.
 	if migration.Status.StoragePVCName != "" {
 		pvc := &corev1.PersistentVolumeClaim{}
 		pvcKey := client.ObjectKey{
 			Namespace: migration.Namespace,
 			Name:      migration.Status.StoragePVCName,
 		}
-		if err := r.Get(ctx, pvcKey, pvc); err == nil {
+		if err := r.Get(ctx, pvcKey, pvc); err == nil && !metav1.IsControlledBy(pvc, migration) {
+			logger.Info("Migration PVC was not created by this migration; leaving it for its owner", "pvc_name", pvc.Name)
+			r.Recorder.Eventf(migration, corev1.EventTypeNormal, eventReasonMigrationPVCRetained, migrationPVCRetainedMessage, pvc.Name)
+		} else if err == nil {
 			logger.Info("Explicitly deleting PVC", "pvc_name", migration.Status.StoragePVCName)
-			if err := r.Delete(ctx, pvc); err != nil && !errors.IsNotFound(err) {
+			if err := r.Delete(ctx, pvc, client.Preconditions{UID: &pvc.UID}); err != nil && !errors.IsNotFound(err) {
 				logger.Error(err, "Failed to delete PVC during cleanup", "pvc_name", migration.Status.StoragePVCName)
 				cleanupErrors = append(cleanupErrors, fmt.Errorf("PVC cleanup: %w", err))
 			} else {

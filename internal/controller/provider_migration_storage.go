@@ -81,6 +81,15 @@ const (
 
 	// vmMigrationKind is the Kind of a VMMigration in an ownerReference.
 	vmMigrationKind = "VMMigration"
+
+	// eventReasonMigrationPVCRetained is the Normal event a deleted
+	// VMMigration records when its migration PVC is not one it created (a
+	// PVC named in spec.storage.pvc.name): VirtRigaud never deletes it.
+	eventReasonMigrationPVCRetained = "MigrationPVCRetained"
+	// migrationPVCRetainedMessage is that event's message, formatted with
+	// the PVC name.
+	migrationPVCRetainedMessage = "Migration PVC %s was not created by this VMMigration; " +
+		"it is no longer mounted into the provider pods and is left for its owner to delete"
 )
 
 // Reasons migrationPVCReferenceError refuses a PVC. The VMMigration controller

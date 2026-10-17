@@ -24,9 +24,11 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	storagev1 "k8s.io/api/storage/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -252,5 +254,68 @@ var _ = Describe("Provider migration-storage mount scope (envtest)", func() {
 		By("outside the mount wait an unbound PVC is not mounted, so it cannot wedge the rollout")
 		msEnvSetStatus(w, "w-storage", infravirtrigaudiov1beta1.MigrationPhaseExporting)
 		Expect(names()).To(BeEmpty())
+	})
+})
+
+var _ = Describe("VMMigration deletion leaves a user's migration PVC (envtest)", func() {
+	// deleteMigration requests the deletion of m (kept by its finalizer) and
+	// runs the VMMigration controller's deletion handling once.
+	deleteMigration := func(m *infravirtrigaudiov1beta1.VMMigration) *record.FakeRecorder {
+		Expect(k8sClient.Delete(ctx, m)).To(Succeed())
+		got := &infravirtrigaudiov1beta1.VMMigration{}
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(m), got)).To(Succeed())
+		Expect(got.DeletionTimestamp.IsZero()).To(BeFalse())
+		rec := record.NewFakeRecorder(20)
+		r := NewVMMigrationReconciler(k8sClient, k8sClient, k8sClient.Scheme(), nil, rec, false)
+		_, err := r.handleDeletion(ctx, got)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(apierrors.IsNotFound(k8sClient.Get(ctx, client.ObjectKeyFromObject(m), got))).To(BeTrue(),
+			"the finalizer is removed")
+		return rec
+	}
+	// pvcDeleted reports whether the PVC is gone or being deleted (the
+	// pvc-protection finalizer may keep it; envtest runs no controller to drop it).
+	pvcDeleted := func(pvc *corev1.PersistentVolumeClaim) bool {
+		got := &corev1.PersistentVolumeClaim{}
+		err := k8sClient.Get(ctx, client.ObjectKeyFromObject(pvc), got)
+		if apierrors.IsNotFound(err) {
+			return true
+		}
+		Expect(err).NotTo(HaveOccurred())
+		return !got.DeletionTimestamp.IsZero()
+	}
+	// finalized creates a Ready pvc migration carrying the VMMigration
+	// finalizer, as the controller would have added it.
+	finalized := func(ns, name, named string) *infravirtrigaudiov1beta1.VMMigration {
+		m := msEnvMigration(ns, name, named, "", infravirtrigaudiov1beta1.MigrationPhaseReady)
+		Expect(retry.RetryOnConflict(retry.DefaultRetry, func() error {
+			if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(m), m); err != nil {
+				return err
+			}
+			m.Finalizers = []string{infravirtrigaudiov1beta1.VMMigrationFinalizer}
+			return k8sClient.Update(ctx, m)
+		})).To(Succeed())
+		return m
+	}
+
+	It("deletes the PVC the migration created", func() {
+		ns := inUseTestNamespace("ms-del-own-")
+		m := finalized(ns, "mig", "")
+		pvc := msEnvPVC(ns, "mig-storage", "any", true, m, corev1.ClaimBound)
+		msEnvSetStatus(m, "mig-storage", infravirtrigaudiov1beta1.MigrationPhaseReady)
+		deleteMigration(m)
+		Expect(pvcDeleted(pvc)).To(BeTrue())
+	})
+
+	It("never deletes a PVC named in spec.storage.pvc.name, and says so", func() {
+		ns := inUseTestNamespace("ms-del-user-")
+		m := finalized(ns, "mig", "team-data")
+		pvc := msEnvPVC(ns, "team-data", "any", true, nil, corev1.ClaimBound)
+		msEnvSetStatus(m, "team-data", infravirtrigaudiov1beta1.MigrationPhaseReady)
+		rec := deleteMigration(m)
+		Expect(pvcDeleted(pvc)).To(BeFalse(), "a user's PVC survives the migration's deletion")
+		Expect(rec.Events).To(Receive(And(
+			ContainSubstring(corev1.EventTypeNormal+" "+eventReasonMigrationPVCRetained),
+			ContainSubstring("team-data"))))
 	})
 })
