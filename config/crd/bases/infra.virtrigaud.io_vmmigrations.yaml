@@ -935,6 +935,17 @@ spec:
                 description: StoragePVCName is the name of the PVC used for migration
                   storage
                 type: string
+              storagePVCUID:
+                description: |-
+                  StoragePVCUID is the UID of the migration PVC this migration created
+                  (pvc backend, no spec.storage.pvc.name), taken from the API server's
+                  answer to its create. Only the PVC with this UID is mounted into the
+                  provider pods and deleted with the migration: a PVC of the same name
+                  that anyone else created — even one carrying an ownerReference to this
+                  migration — is refused. Empty for a PVC named in spec.storage.pvc.name.
+                  Written by the controller only.
+                maxLength: 128
+                type: string
               targetVMClaim:
                 description: |-
                   TargetVMClaim is the hex SHA-256 digest of the one-time random token
