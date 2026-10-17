@@ -630,3 +630,53 @@ func TestEnsureMigrationPVC_RefusesUnusablePVCs(t *testing.T) {
 		assert.Equal(t, msPVC, name)
 	})
 }
+
+// TestHandleDeletion_DeletesOnlyTheMigrationsOwnPVC: deleting a VMMigration
+// deletes the PVC it created, never a user's PVC named in
+// spec.storage.pvc.name, which is left with a Normal event.
+func TestHandleDeletion_DeletesOnlyTheMigrationsOwnPVC(t *testing.T) {
+	ctx := context.Background()
+	s := migrationTestScheme(t)
+	run := func(t *testing.T, m *infravirtrigaudiov1beta1.VMMigration, pvc *corev1.PersistentVolumeClaim) (bool, *record.FakeRecorder) {
+		t.Helper()
+		m.Finalizers = []string{infravirtrigaudiov1beta1.VMMigrationFinalizer}
+		m.Status.Phase = infravirtrigaudiov1beta1.MigrationPhaseReady
+		c := fake.NewClientBuilder().WithScheme(s).WithObjects(m, pvc).
+			WithStatusSubresource(&infravirtrigaudiov1beta1.VMMigration{}).Build()
+		require.NoError(t, c.Delete(ctx, m))
+		got := &infravirtrigaudiov1beta1.VMMigration{}
+		require.NoError(t, c.Get(ctx, client.ObjectKeyFromObject(m), got))
+		rec := record.NewFakeRecorder(10)
+		r := NewVMMigrationReconciler(c, c, s, nil, rec, false)
+		_, err := r.handleDeletion(ctx, got)
+		require.NoError(t, err)
+		err = c.Get(ctx, client.ObjectKeyFromObject(pvc), &corev1.PersistentVolumeClaim{})
+		if err != nil {
+			require.True(t, apierrors.IsNotFound(err))
+			return false, rec
+		}
+		return true, rec
+	}
+
+	t.Run("controller-created PVC is deleted", func(t *testing.T) {
+		m := msMigration(msNS, msMig, msMigUID, msPVC, "")
+		exists, rec := run(t, m, msPVCObj(msNS, msPVC, true, m))
+		assert.False(t, exists)
+		assert.Empty(t, rec.Events)
+	})
+	t.Run("user-named PVC survives with a Normal event", func(t *testing.T) {
+		m := msMigration(msNS, msMig, msMigUID, "shared", "shared")
+		exists, rec := run(t, m, msPVCObj(msNS, "shared", true, nil))
+		assert.True(t, exists, "VirtRigaud never deletes a PVC it did not create")
+		require.Len(t, rec.Events, 1)
+		ev := <-rec.Events
+		assert.Contains(t, ev, corev1.EventTypeNormal+" "+eventReasonMigrationPVCRetained)
+		assert.Contains(t, ev, "shared")
+	})
+	t.Run("PVC controlled by another migration survives", func(t *testing.T) {
+		m := msMigration(msNS, msMig, msMigUID, "other-storage", "other-storage")
+		other := msMigration(msNS, "other", "other-uid", "", "")
+		exists, _ := run(t, m, msPVCObj(msNS, "other-storage", true, other))
+		assert.True(t, exists)
+	})
+}
