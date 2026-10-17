@@ -22,6 +22,7 @@ limitations under the License.
 package s3fake
 
 import (
+	"html"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -204,8 +205,8 @@ func (s *Server) serveMultipart(w http.ResponseWriter, r *http.Request, key stri
 		}
 		s.parts[key] = map[int][]byte{}
 		w.Header().Set("Content-Type", "application/xml")
-		_, _ = io.WriteString(w, `<?xml version="1.0" encoding="UTF-8"?><InitiateMultipartUploadResult><Bucket>`+s.bucket+
-			`</Bucket><Key>`+key+`</Key><UploadId>`+fakeUploadID+`</UploadId></InitiateMultipartUploadResult>`)
+		_, _ = io.WriteString(w, `<?xml version="1.0" encoding="UTF-8"?><InitiateMultipartUploadResult><Bucket>`+html.EscapeString(s.bucket)+
+			`</Bucket><Key>`+html.EscapeString(key)+`</Key><UploadId>`+fakeUploadID+`</UploadId></InitiateMultipartUploadResult>`)
 		return true
 	case r.Method == http.MethodPut && q.Get("uploadId") != "":
 		n, err := strconv.Atoi(q.Get("partNumber"))
@@ -232,8 +233,9 @@ func (s *Server) serveMultipart(w http.ResponseWriter, r *http.Request, key stri
 		s.objects[key] = data
 		delete(s.parts, key)
 		w.Header().Set("Content-Type", "application/xml")
-		_, _ = io.WriteString(w, `<?xml version="1.0" encoding="UTF-8"?><CompleteMultipartUploadResult><Location>/`+s.bucket+"/"+key+
-			`</Location><Bucket>`+s.bucket+`</Bucket><Key>`+key+`</Key><ETag>"fake"</ETag></CompleteMultipartUploadResult>`)
+		bucket, escaped := html.EscapeString(s.bucket), html.EscapeString(key)
+		_, _ = io.WriteString(w, `<?xml version="1.0" encoding="UTF-8"?><CompleteMultipartUploadResult><Location>/`+bucket+"/"+escaped+
+			`</Location><Bucket>`+bucket+`</Bucket><Key>`+escaped+`</Key><ETag>"fake"</ETag></CompleteMultipartUploadResult>`)
 		return true
 	case r.Method == http.MethodDelete && q.Get("uploadId") != "":
 		delete(s.parts, key)

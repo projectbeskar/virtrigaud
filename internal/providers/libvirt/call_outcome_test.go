@@ -143,6 +143,14 @@ func TestNothingDone(t *testing.T) {
 	assert.Contains(t, status.Convert(got).Message(), "no room")
 }
 
+// TestVirshConnectionLost: virsh's own report that libvirtd went away.
+func TestVirshConnectionLost(t *testing.T) {
+	assert.True(t, virshConnectionLost(virshFailure(1, "error: Disconnected from qemu:///system due to end of file")))
+	assert.True(t, virshConnectionLost(fmt.Errorf("x: %w", virshFailure(1, "error: End of file while reading data: Input/output error"))))
+	assert.False(t, virshConnectionLost(virshFailure(1, "error: Domain snapshot x already exists")))
+	assert.False(t, virshConnectionLost(errors.New("Disconnected")))
+}
+
 // TestEndedFailure: the command that changes state is answered "failed,
 // nothing published" only when it ended on its own.
 func TestEndedFailure(t *testing.T) {
@@ -268,7 +276,10 @@ func r21ScriptedExits(t *testing.T) {
 	r21Patch(t, `fail() { if [ -f "$d/fail-$1" ]; then echo "error: scripted failure of $1" >&2; exit 1; fi; }`,
 		`LDOM="$2"; LSNAP="$3"
 fail() {
-  if [ -f "$d/exit-$1" ]; then echo "error: scripted exit of $1" >&2; exit "$(cat "$d/exit-$1")"; fi
+  if [ -f "$d/exit-$1" ]; then
+    if [ -f "$d/stderr-$1" ]; then cat "$d/stderr-$1" >&2; else echo "error: scripted exit of $1" >&2; fi
+    exit "$(cat "$d/exit-$1")"
+  fi
   if [ -f "$d/fail-$1" ]; then
     if [ -f "$d/leaves-$1" ]; then echo "$LSNAP" >> "$d/snaps-$LDOM"; fi
     echo "error: scripted failure of $1" >&2; exit 1
@@ -280,7 +291,7 @@ fail() {
 // single-host SnapshotCreate through the gRPC Server on a fake host.
 func TestSingleHostSnapshotCreate_Outcomes(t *testing.T) {
 	const leak = "scripted"
-	run := func(t *testing.T, setup func(*scdFixture), req *providerv1.SnapshotCreateRequest) (error, []string) {
+	run := func(t *testing.T, setup func(*scdFixture), req *providerv1.SnapshotCreateRequest) ([]string, error) {
 		t.Helper()
 		fx := newSCDFixture(t, map[string]string{scdDomain: scdDomainXML(scdDomain, scdDomainOpts{})})
 		r21ScriptedExits(t)
@@ -288,7 +299,7 @@ func TestSingleHostSnapshotCreate_Outcomes(t *testing.T) {
 			setup(fx)
 		}
 		_, err := NewServer(fx.p).SnapshotCreate(context.Background(), req)
-		return err, fx.calls()
+		return fx.calls(), err
 	}
 	created := func(calls []string) bool {
 		for _, c := range calls {
@@ -300,46 +311,46 @@ func TestSingleHostSnapshotCreate_Outcomes(t *testing.T) {
 	}
 
 	t.Run("a: the domain's state cannot be read - nothing done", func(t *testing.T) {
-		err, calls := run(t, func(fx *scdFixture) { fx.script("single", "fail-domstate", "") }, scdSnapshotRequest("x"))
+		calls, err := run(t, func(fx *scdFixture) { fx.script("single", "fail-domstate", "") }, scdSnapshotRequest("x"))
 		assertNotPerformedStatus(t, err)
 		assertConstantText(t, err, leak, "virsh", "qemu:///")
 		assert.False(t, created(calls))
 	})
 	t.Run("a: the host is unreachable while the state is read - nothing done", func(t *testing.T) {
-		err, calls := run(t, func(fx *scdFixture) { fx.script("single", "exit-domstate", "255") }, scdSnapshotRequest("x"))
+		calls, err := run(t, func(fx *scdFixture) { fx.script("single", "exit-domstate", "255") }, scdSnapshotRequest("x"))
 		assertNotPerformedStatus(t, err)
 		assert.False(t, created(calls))
 	})
 	t.Run("a: the domain does not exist - NotFound", func(t *testing.T) {
-		err, calls := run(t, nil, &providerv1.SnapshotCreateRequest{VmId: "gone", NameHint: "x", Description: "d"})
+		calls, err := run(t, nil, &providerv1.SnapshotCreateRequest{VmId: "gone", NameHint: "x", Description: "d"})
 		assertRefusalStatus(t, err, codes.NotFound)
 		assert.False(t, created(calls))
 	})
 	t.Run("a: the dependency check cannot run - kept typed", func(t *testing.T) {
-		err, calls := run(t, func(fx *scdFixture) { fx.script("single", "fail-dumpxml", "") }, scdSnapshotRequest("x"))
+		calls, err := run(t, func(fx *scdFixture) { fx.script("single", "fail-dumpxml", "") }, scdSnapshotRequest("x"))
 		require.Error(t, err)
 		assert.True(t, contracts.HasErrorInfoReason(err, contracts.VMDiskCheckFailedReason), "%v", err)
 		assert.False(t, created(calls))
 	})
 	t.Run("a: the snapshot name is taken - AlreadyExists, nothing created", func(t *testing.T) {
-		err, calls := run(t, func(fx *scdFixture) { fx.script("single", "snaps-"+scdDomain, "taken\n") }, scdSnapshotRequest("taken"))
+		calls, err := run(t, func(fx *scdFixture) { fx.script("single", "snaps-"+scdDomain, "taken\n") }, scdSnapshotRequest("taken"))
 		assertRefusalStatus(t, err, codes.AlreadyExists)
 		assert.False(t, created(calls), "the existing snapshot is never touched")
 	})
 	t.Run("a: the snapshots cannot be listed - nothing done", func(t *testing.T) {
-		err, calls := run(t, func(fx *scdFixture) { fx.script("single", "fail-snapshot-list", "") }, scdSnapshotRequest("x"))
+		calls, err := run(t, func(fx *scdFixture) { fx.script("single", "fail-snapshot-list", "") }, scdSnapshotRequest("x"))
 		assertNotPerformedStatus(t, err)
 		assert.False(t, created(calls))
 	})
 	t.Run("b: the create fails and the snapshot is absent - not created", func(t *testing.T) {
-		err, calls := run(t, func(fx *scdFixture) { fx.script("single", "fail-snapshot-create-as", "") }, scdSnapshotRequest("x"))
+		calls, err := run(t, func(fx *scdFixture) { fx.script("single", "fail-snapshot-create-as", "") }, scdSnapshotRequest("x"))
 		assertNotPerformedStatus(t, err)
 		assertConstantText(t, err, leak, "virsh", "--atomic")
 		assert.Equal(t, wireSnapshotNotCreated, status.Convert(err).Message())
 		assert.Equal(t, "single virsh snapshot-list vrgold-web --name", calls[len(calls)-1], "the absence is read again")
 	})
 	t.Run("b: the domain vanished during the create - NotFound", func(t *testing.T) {
-		err, _ := run(t, func(fx *scdFixture) {
+		_, err := run(t, func(fx *scdFixture) {
 			// The create finds no domain: it was undefined after the checks.
 			r21Patch(t, `snapshot-create-as) fail snapshot-create-as; [ -f "$d/dom-$2.xml" ] || nodom "$2";`,
 				`snapshot-create-as) nodom "$2";`)
@@ -347,23 +358,31 @@ func TestSingleHostSnapshotCreate_Outcomes(t *testing.T) {
 		assertRefusalStatus(t, err, codes.NotFound)
 	})
 	t.Run("c: the create fails but the snapshot exists afterwards - unknown", func(t *testing.T) {
-		err, _ := run(t, func(fx *scdFixture) {
+		_, err := run(t, func(fx *scdFixture) {
 			fx.script("single", "fail-snapshot-create-as", "")
 			fx.script("single", "leaves-snapshot-create-as", "")
 		}, scdSnapshotRequest("x"))
 		assertUnknownOutcome(t, err)
 	})
 	t.Run("c: the create is killed (a signal) - unknown, nothing read again", func(t *testing.T) {
-		err, calls := run(t, func(fx *scdFixture) { fx.script("single", "exit-snapshot-create-as", "137") }, scdSnapshotRequest("x"))
+		calls, err := run(t, func(fx *scdFixture) { fx.script("single", "exit-snapshot-create-as", "137") }, scdSnapshotRequest("x"))
 		assertUnknownOutcome(t, err)
 		assert.Equal(t, 1, strings.Count(strings.Join(calls, "\n"), "snapshot-list"), "only the name check before the create")
 	})
+	t.Run("c: virsh lost libvirtd during the create (it exits 1) - unknown", func(t *testing.T) {
+		calls, err := run(t, func(fx *scdFixture) {
+			fx.script("single", "exit-snapshot-create-as", "1")
+			fx.script("single", "stderr-snapshot-create-as", "error: Disconnected from qemu:///system due to end of file\nerror: End of file while reading data: Input/output error\n")
+		}, scdSnapshotRequest("x"))
+		assertUnknownOutcome(t, err)
+		assert.Equal(t, 1, strings.Count(strings.Join(calls, "\n"), "snapshot-list"), "the snapshot is not trusted to be absent")
+	})
 	t.Run("c: the create loses its connection - unknown", func(t *testing.T) {
-		err, _ := run(t, func(fx *scdFixture) { fx.script("single", "exit-snapshot-create-as", "255") }, scdSnapshotRequest("x"))
+		_, err := run(t, func(fx *scdFixture) { fx.script("single", "exit-snapshot-create-as", "255") }, scdSnapshotRequest("x"))
 		assertUnknownOutcome(t, err)
 	})
 	t.Run("c: the snapshots cannot be listed after a failed create - unknown", func(t *testing.T) {
-		err, calls := run(t, func(fx *scdFixture) {
+		calls, err := run(t, func(fx *scdFixture) {
 			fx.script("single", "fail-snapshot-create-as", "")
 			// The list works once (the name check) and fails afterwards.
 			r21Patch(t, `snapshot-list)

@@ -482,7 +482,7 @@
       "local qemu-img convert -p -f qcow2 -O qcow2 -c /var/lib/libvirt/images/vrgold-web-disk.qcow2 /tmp/export-vrgold-web-\u003cunix\u003e.qcow2"
     ],
     "resp": "null",
-    "err": "disk export failed: it did not complete, and nothing is still writing; a partial file on the migration volume is replaced by the next export (details are in the provider log)"
+    "err": "disk export failed: it did not complete and nothing is still writing; any partial file on the migration volume is replaced by the next export (details are in the provider log)"
   },
   "export-pvc-ignores-target-host": {
     "calls": [
@@ -496,7 +496,7 @@
       "single virsh snapshot-list vrgold-web --name"
     ],
     "resp": "null",
-    "err": "disk export failed: it did not complete, and nothing is still writing; a partial file on the migration volume is replaced by the next export (details are in the provider log)"
+    "err": "disk export failed: it did not complete and nothing is still writing; any partial file on the migration volume is replaced by the next export (details are in the provider log)"
   },
   "export-pvc-no-conversion": {
     "calls": [
@@ -510,7 +510,7 @@
       "single virsh snapshot-list vrgold-web --name"
     ],
     "resp": "null",
-    "err": "disk export failed: it did not complete, and nothing is still writing; a partial file on the migration volume is replaced by the next export (details are in the provider log)"
+    "err": "disk export failed: it did not complete and nothing is still writing; any partial file on the migration volume is replaced by the next export (details are in the provider log)"
   },
   "export-pvc-unsupported-format": {
     "calls": [

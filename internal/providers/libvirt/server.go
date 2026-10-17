@@ -675,9 +675,10 @@ func snapshotCreateWith(ctx context.Context, conn libvirtConn, domain string, re
 //     snapshot back. The answer is "not created" only when virsh ended on its
 //     own with an exit status AND the domain's snapshot names, read again,
 //     prove the snapshot is absent; a domain that vanished is NotFound. A
-//     dropped connection, a signal, an expired request, a snapshot that
-//     exists, or a list that cannot be read leave the untyped error: the
-//     snapshot may have been (or still be being) taken.
+//     dropped connection, a signal, an expired request, virsh reporting that
+//     it lost libvirtd, a snapshot that exists, or a list that cannot be read
+//     leave the untyped error: the snapshot may have been (or still be being)
+//     taken.
 func singleHostSnapshotFailure(ctx context.Context, conn libvirtConn, domain string, err error) error {
 	stage, subject, ok := stageOf(err)
 	if !ok {
@@ -693,7 +694,8 @@ func singleHostSnapshotFailure(ctx context.Context, conn libvirtConn, domain str
 		}
 		return nothingDone(wireSnapshotNotPerformed, err)
 	case stageCommand:
-		if !hostCommandEnded(ctx, err) {
+		if !hostCommandEnded(ctx, err) || virshConnectionLost(err) {
+			// virsh may have lost libvirtd half way through the snapshot.
 			log.Printf("WARN libvirt snapshot create outcome unknown: %v", err)
 			return err
 		}

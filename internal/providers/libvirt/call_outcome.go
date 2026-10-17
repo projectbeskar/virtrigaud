@@ -21,6 +21,7 @@ import (
 	stderrors "errors"
 	"io"
 	"log"
+	"strings"
 	"sync"
 
 	"google.golang.org/grpc/codes"
@@ -272,6 +273,36 @@ func hostCommandEnded(ctx context.Context, err error) bool {
 		return false
 	}
 	return ve.ExitCode > 0 && ve.ExitCode < 128
+}
+
+// virshConnectionLostMarkers are the texts (lower case) with which virsh
+// reports that its connection to libvirtd ended while it ran. virsh then exits
+// with a status of its own, but libvirtd — which did the work — may have gone
+// on, or died half way: the outcome of the command is unknown.
+var virshConnectionLostMarkers = []string{
+	"end of file while reading data",
+	"disconnected from",
+	"cannot recv data",
+	"cannot write data",
+	"failed to connect to the hypervisor",
+	"connection reset",
+	"broken pipe",
+}
+
+// virshConnectionLost reports whether err is a virsh command whose stderr says
+// its connection to libvirtd was lost.
+func virshConnectionLost(err error) bool {
+	var ve *VirshError
+	if !stderrors.As(err, &ve) {
+		return false
+	}
+	stderr := strings.ToLower(ve.Stderr)
+	for _, m := range virshConnectionLostMarkers {
+		if strings.Contains(stderr, m) {
+			return true
+		}
+	}
+	return false
 }
 
 // endedFailure answers a failure of the one host command that changes state
