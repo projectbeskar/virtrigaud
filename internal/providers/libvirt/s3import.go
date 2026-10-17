@@ -248,7 +248,9 @@ func (s *Server) importDiskFromS3Steps(ctx context.Context, req *providerv1.Impo
 	// chmod).
 	if res, err := conn.RunHost(ctx, withUmask(vmDiskUmask, "qemu-img", "convert", "-f", stagedFormat, "-O", "qcow2",
 		stagePath, newDisk)...); err != nil {
-		return nil, fmt.Errorf("host-side qemu-img convert (%s→qcow2) failed: %w%s", stagedFormat, err, qemuImgStderr(res))
+		// The convert rewrites the whole disk: it is known to have stopped only
+		// when it ended on its own (stageCommand, singleHostImportFailure).
+		return nil, atStage(stageCommand, fmt.Errorf("host-side qemu-img convert (%s→qcow2) failed: %w%s", stagedFormat, err, qemuImgStderr(res)))
 	}
 
 	log.Printf("INFO Staged %s converted to qcow2 on host: target=%s", stagedFormat, targetPath)

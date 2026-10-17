@@ -205,7 +205,7 @@ func boundedNFSCopy(ctx context.Context, conn libvirtConn, wd *diskWriteDir, nfs
 	}
 	if res, err := conn.RunHost(ctx, withUmask(vmDiskUmask, "qemu-img", "dd", "-f", "raw", "-O", "raw", "bs=1M",
 		"count="+strconv.FormatInt(migration.StagedCopyDDCount(info.VirtualSize), 10), "if="+nfsURL, "of="+dst)...); err != nil {
-		return fmt.Errorf("host-side copy of the staged nfs object failed: %w%s", err, qemuImgStderr(res))
+		return atStage(stageCommand, fmt.Errorf("host-side copy of the staged nfs object failed: %w%s", err, qemuImgStderr(res)))
 	}
 	sz, err := runHost(ctx, h, "stat", "-c", "%s", "--", dst)
 	if err != nil {
@@ -291,7 +291,7 @@ func copyCheckConvertNFSObject(ctx context.Context, conn libvirtConn, wd *diskWr
 	newDisk := wd.file(name)
 	if res, err := conn.RunHost(ctx, withUmask(vmDiskUmask, "qemu-img", "convert", "-f", "qcow2", "-O", "qcow2",
 		stagedCopy, newDisk)...); err != nil {
-		return "", fmt.Errorf("host-side qemu-img convert of the staged nfs object failed: %w%s", err, qemuImgStderr(res))
+		return "", atStage(stageCommand, fmt.Errorf("host-side qemu-img convert of the staged nfs object failed: %w%s", err, qemuImgStderr(res)))
 	}
 	removeHostPath(ctx, h, stagedCopy, false)
 	return newDisk, nil

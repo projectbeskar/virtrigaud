@@ -109,10 +109,12 @@ func (s *Server) exportDiskToS3(ctx context.Context, req *providerv1.ExportDiskR
 //     completes; the nfs export's checks (the source chain, the destination's
 //     identity) only read. A typed refusal stays, any other failure is "not
 //     performed", whatever state the connection is in.
-//   - stageCommand: the nfs export's in-place convert. "Failed, nothing
+//   - stageCommand: the nfs export's in-place convert, and the s3 export's
+//     flatten (a full read and rewrite of the disk). "Failed, nothing
 //     exported" only when the host command ended on its own with an exit
-//     status (it no longer writes); otherwise the untyped error, because a
-//     command that outlives a cancelled call may still be writing.
+//     status (it no longer runs); otherwise the untyped error, because a
+//     command whose session dropped, or that was killed, may still be running
+//     (and writing), and a retry would start a second one.
 //
 // An untagged failure — the upload's result was lost, or the S3 service may
 // have completed it — is returned unchanged: unknown.
@@ -163,8 +165,17 @@ func exportFlattenToS3(ctx context.Context, conn libvirtConn, req *providerv1.Ex
 	if err != nil {
 		// Everything the flatten writes is in a private directory that is
 		// removed, and the upload below is the only publishing step: a failure
-		// here published nothing, whatever state the host connection is in.
-		return nil, atStage(stageBefore, err)
+		// of a check before the flatten published nothing, whatever state the
+		// host connection is in. The flatten command itself is a full read and
+		// rewrite of the disk: when its session dropped (or it was killed) it
+		// may still run on the host, and a retry would start a second one. A
+		// failure that is not a check is therefore tagged stageCommand
+		// (singleHostExportFailure: known only when the command ended on its
+		// own).
+		if _, _, tagged := stageOf(err); !tagged {
+			err = atStage(stageCommand, err)
+		}
+		return nil, err
 	}
 	defer cleanup()
 
@@ -256,7 +267,7 @@ const hostExportStageSuffix = ".qcow2"
 func flattenForExport(ctx context.Context, h hostCommandRunner, srcPath, srcFormat, vmID string, guard *hostCmdGuard) (string, func(), error) {
 	wd, err := newDiskWriteDir(ctx, h, filepath.Dir(srcPath))
 	if err != nil {
-		return "", nil, fmt.Errorf("create the export staging directory on the host: %w", err)
+		return "", nil, atStage(stageBefore, fmt.Errorf("create the export staging directory on the host: %w", err))
 	}
 	cleanupWithin := stagingCleanupTimeout
 	if guard != nil {
