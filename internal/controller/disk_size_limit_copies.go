@@ -76,8 +76,10 @@ func bytesQuantity(n int64) resource.Quantity {
 // the limit that applies there: every disk of the source VM, by the sizes its
 // provider reports (GetDiskInfo through inst, for the VM sourceRef
 // addresses), and the primary-disk size of the clone's target VMClass
-// override. It returns nil when all fit or no limit applies, and an error only
-// for a failed Kubernetes read (retried).
+// override. It returns nil when all fit or no limit applies, and an error for
+// a failed Kubernetes read (retried) or, as a *sourceOwnerRefusedError, when
+// the provider refused the source VM as not its VirtualMachine's (the caller
+// fails the clone).
 func (r *VMCloneReconciler) cloneDiskSizeRefusal(ctx context.Context, clone *infravirtrigaudiov1beta1.VMClone,
 	sourceVM *infravirtrigaudiov1beta1.VirtualMachine, sourceRef contracts.VMRef, inst contracts.Provider,
 	provider *infravirtrigaudiov1beta1.Provider) (*diskSizeRefusal, error) {
@@ -99,6 +101,9 @@ func (r *VMCloneReconciler) cloneDiskSizeRefusal(ctx context.Context, clone *inf
 		}
 	}
 	info, err := inst.GetDiskInfo(ctx, contracts.GetDiskInfoRequest{VM: sourceRef})
+	if isOwnerRefusal(err) {
+		return nil, &sourceOwnerRefusedError{err: err}
+	}
 	if err != nil || len(info.Disks) == 0 {
 		log.FromContext(ctx).Info("Cannot read the source VM's disk sizes; not cloning while a disk-size limit applies",
 			"vm", sourceVM.Name, "disks", len(info.Disks), "error", errString(err))
@@ -154,14 +159,19 @@ func (r *VMMigrationReconciler) migrationTargetLimit(targetProvider *infravirtri
 
 // readSourceDiskSize asks inst for the virtual size of the disk req names. ok
 // is false when it cannot be read (an error, or a size of 0); the cause is
-// logged, never put in status.
-func readSourceDiskSize(ctx context.Context, inst contracts.Provider, req contracts.GetDiskInfoRequest) (resource.Quantity, bool) {
+// logged, never put in status. An owner refusal (isOwnerRefusal) is returned
+// as a *sourceOwnerRefusedError instead: the source is not the source
+// VirtualMachine's VM, and the copy must fail rather than wait.
+func readSourceDiskSize(ctx context.Context, inst contracts.Provider, req contracts.GetDiskInfoRequest) (resource.Quantity, bool, error) {
 	info, err := inst.GetDiskInfo(ctx, req)
+	if isOwnerRefusal(err) {
+		return resource.Quantity{}, false, &sourceOwnerRefusedError{err: err}
+	}
 	if err != nil || info.VirtualSizeBytes <= 0 {
 		log.FromContext(ctx).Info("Cannot read the source disk's size", "vm", req.VM.ID, "error", errString(err))
-		return resource.Quantity{}, false
+		return resource.Quantity{}, false, nil
 	}
-	return bytesQuantity(info.VirtualSizeBytes), true
+	return bytesQuantity(info.VirtualSizeBytes), true, nil
 }
 
 // migrationDiskSizeRefusal is the Validating-phase check of what a migration
@@ -169,7 +179,9 @@ func readSourceDiskSize(ctx context.Context, inst contracts.Provider, req contra
 // primary disk, by the size its provider reports now (GetDiskInfo), never by
 // the source's spec — and the primary-disk size of the target VMClass (the
 // target VM's disk is grown to it). It returns nil when all fit or no limit
-// applies, and an error only for a failed read (retried). The exported disk
+// applies, and an error for a failed read (retried) or, as a
+// *sourceOwnerRefusedError, a source the provider refused as not the source
+// VirtualMachine's (the caller fails the migration). The exported disk
 // is checked again, and its size recorded, right before ExportDisk, and that
 // record is checked right before ImportDisk.
 func (r *VMMigrationReconciler) migrationDiskSizeRefusal(ctx context.Context, migration *infravirtrigaudiov1beta1.VMMigration,
@@ -194,7 +206,10 @@ func (r *VMMigrationReconciler) migrationDiskSizeRefusal(ctx context.Context, mi
 	if err != nil {
 		return nil, fmt.Errorf("resolve the source provider to read the disk size: %w", err)
 	}
-	size, ok := readSourceDiskSize(ctx, inst, contracts.GetDiskInfoRequest{VM: sourceRef})
+	size, ok, err := readSourceDiskSize(ctx, inst, contracts.GetDiskInfoRequest{VM: sourceRef})
+	if err != nil {
+		return nil, err
+	}
 	if !ok {
 		return unverifiable(migrationSourceDiskUnreadableMessage), nil
 	}
@@ -217,7 +232,9 @@ func (r *VMMigrationReconciler) migrationDiskSizeRefusal(ctx context.Context, mi
 // exportReq exports (the same VM, disk and snapshot) is read through inst and
 // checked against the target Provider's limit. It returns the size read, to be
 // recorded in status.diskInfo.sourceSize for the check before ImportDisk; no
-// size and no refusal when no limit applies (nothing changes then).
+// size and no refusal when no limit applies (nothing changes then). A source
+// the provider refused as not the source VirtualMachine's is returned as a
+// *sourceOwnerRefusedError (the caller fails the migration).
 func (r *VMMigrationReconciler) exportDiskSizeRefusal(ctx context.Context, migration *infravirtrigaudiov1beta1.VMMigration,
 	inst contracts.Provider, exportReq contracts.ExportDiskRequest) (*diskSizeRefusal, *resource.Quantity, error) {
 	targetProvider, err := r.getTargetProvider(ctx, migration)
@@ -238,9 +255,12 @@ func (r *VMMigrationReconciler) exportDiskSizeRefusal(ctx context.Context, migra
 	if refusal != nil || limit == nil {
 		return refusal, nil, nil
 	}
-	size, ok := readSourceDiskSize(ctx, inst, contracts.GetDiskInfoRequest{
+	size, ok, err := readSourceDiskSize(ctx, inst, contracts.GetDiskInfoRequest{
 		VM: exportReq.VM, DiskId: exportReq.DiskId, SnapshotId: exportReq.SnapshotId,
 	})
+	if err != nil {
+		return nil, nil, err
+	}
 	if !ok {
 		return unverifiable(migrationSourceDiskUnreadableMessage), nil, nil
 	}

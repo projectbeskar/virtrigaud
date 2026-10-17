@@ -479,6 +479,12 @@ func (r *VMMigrationReconciler) handleValidatingPhase(ctx context.Context, migra
 	// side effect (disk_size_limit_copies.go). The only provider call made
 	// for it is that read-only GetDiskInfo, and only while a limit applies.
 	refusal, err := r.migrationDiskSizeRefusal(ctx, migration, sourceVM, sourceRef, sourceProvider, targetProvider)
+	if isSourceOwnerRefused(err) {
+		// The source VM is not the source VirtualMachine's (a reused id),
+		// or its owner cannot be told: nothing is copied (copy_source_owner_refusal.go).
+		logger.Info("The source VM's provider refused it as not the source VirtualMachine's", "error", err.Error())
+		return r.transitionToFailed(ctx, migration, migrationSourceNotOwnedMessage)
+	}
 	if err != nil {
 		logger.Error(err, "Failed to check the migration's disk sizes")
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
@@ -599,6 +605,9 @@ func (r *VMMigrationReconciler) handleValidatingPhase(ctx context.Context, migra
 		}
 		if stderrors.Is(err, errSourceVMNotFound) {
 			return r.transitionToFailed(ctx, migration, sourceVMNotFoundMessage)
+		}
+		if isOwnerRefusal(err) {
+			return r.transitionToFailed(ctx, migration, migrationSourceNotOwnedMessage)
 		}
 		if err != nil {
 			logger.Error(err, "Failed to power off source VM before migration")
@@ -741,6 +750,10 @@ func (r *VMMigrationReconciler) handleSnapshottingPhase(ctx context.Context, mig
 
 	logger.Info("Creating migration snapshot", "snapshot_name", snapshotName)
 	snapshotResp, err := providerInstance.SnapshotCreate(ctx, snapshotReq)
+	if isOwnerRefusal(err) {
+		logger.Info("The source VM's provider refused the snapshot: the VM is not the source VirtualMachine's", "error", err.Error())
+		return r.transitionToFailed(ctx, migration, migrationSourceNotOwnedMessage)
+	}
 	if err != nil {
 		logger.Error(err, "Failed to create migration snapshot")
 		return r.transitionToFailed(ctx, migration, "Failed to create snapshot: "+migrationFailureDetail(err))
@@ -987,6 +1000,10 @@ func (r *VMMigrationReconciler) handleExportingPhase(ctx context.Context, migrat
 	// disk-size limit by its real size, right before the export, and that size
 	// is recorded for the check before ImportDisk (disk_size_limit_copies.go).
 	sizeRefusal, exportedSize, err := r.exportDiskSizeRefusal(ctx, migration, providerInstance, exportReq)
+	if isSourceOwnerRefused(err) {
+		logger.Info("The source VM's provider refused it as not the source VirtualMachine's", "error", err.Error())
+		return r.transitionToFailed(ctx, migration, migrationSourceNotOwnedMessage)
+	}
 	if err != nil {
 		logger.Error(err, "Failed to check the exported disk's size")
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
@@ -1014,6 +1031,11 @@ func (r *VMMigrationReconciler) handleExportingPhase(ctx context.Context, migrat
 		// this generation. transitionToFailed records the failure durably.
 		r.longOpInFlight.Delete(longOpKey(migration, longOpExport))
 		logger.Error(err, "Failed to start disk export")
+		if isOwnerRefusal(err) {
+			// Refused before any disk was read: a constant message, never
+			// the provider's answer (copy_source_owner_refusal.go).
+			return r.transitionToFailed(ctx, migration, migrationSourceNotOwnedMessage)
+		}
 		return r.transitionToFailed(ctx, migration, "Failed to start disk export: "+migrationFailureDetail(err))
 	}
 
