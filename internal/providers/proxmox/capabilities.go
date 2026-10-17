@@ -80,6 +80,9 @@ func GetProviderCapabilities() *capabilities.Manager {
 		// ADR-0011: DeleteStagedDisk removes a migration's s3 object (from the
 		// pod) and unlinks its nfs file (kernel mount on the node, staged_disk.go).
 		StagedDiskDeleteBackends(migration.StagedDiskDeleteBackendsS3AndNFS()...).
+		// rc2 R7: DeleteLandedDisk removes the node-side import stage a
+		// migration left for its target VM (landed_disk.go).
+		LandedDiskDelete().
 		DiskTypes("raw", "qcow2").
 		NetworkTypes("bridge", "vlan").
 		Build()
