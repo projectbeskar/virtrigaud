@@ -159,6 +159,56 @@ export only on a **trusted network**, keep **`root_squash` on**, give each tenan
 its **own export**, and prefer narrow per-client ACLs over broad subnets. The disk
 bytes themselves are not encrypted in transit.
 
+## PVC staging backend (legacy): what the provider pods mount
+
+With `storage.type: pvc` the staged disk lives on a PVC that is mounted into the
+source and target provider pods at `/mnt/migration-storage/<pvc-name>`. Those pods
+hold the hypervisor credentials, so the provider controller mounts a PVC into a
+provider pod **only** when all of these hold:
+
+- A `VMMigration` in the **Provider's namespace** references it in
+  `status.storagePVCName` (the migration controller records it at `Validating`).
+  A pod mounts PVCs of its own namespace only, so the migration and both
+  Providers must share one namespace.
+- That migration is in flight: not being deleted, not `Ready`, and not `Failed`
+  with no retry left. A `Failed` migration that will be retried keeps its mount.
+- The Provider is that migration's **source** (the source VM's own Provider) or
+  its **target**. Other Providers in the namespace mount nothing.
+- The PVC carries the label `virtrigaud.io/component=migration-storage` **and** is
+  either the PVC the migration created (`<migration-name>-storage`, with a
+  controller `ownerReference` to that `VMMigration`'s UID), or the existing PVC
+  `spec.storage.pvc.name` names, as long as it isn't another `VMMigration`'s.
+- The PVC isn't being deleted and is `Bound`. A `Pending` PVC is mounted only
+  while the migration waits for the mount (phase `Validating`) and only when its
+  StorageClass uses `volumeBindingMode: WaitForFirstConsumer`, because then a pod
+  has to use it before it binds. A `Pending` PVC on an `Immediate` StorageClass is
+  mounted once it binds. A PVC that never binds is never mounted, so it can't
+  stall the provider rollout (or, for vSphere and clustered Providers, which use
+  the `Recreate` strategy, take the provider down). The migration fails when its
+  5-minute mount budget runs out.
+
+The label alone mounts nothing. For an **existing PVC** (`spec.storage.pvc.name`),
+the label is how the PVC's owner agrees to its use as migration storage. Without
+it, the migration fails at `Validating` with
+`PVC <name> cannot be used as migration storage: the PVC is not labelled ...`:
+
+```bash
+kubectl -n <namespace> label pvc <name> virtrigaud.io/component=migration-storage
+```
+
+The source pod mounts the PVC read-write, because it exports into it. A Provider
+that is only the target mounts it **read-only**, because it only reads the staged disk.
+
+A provider pod is rolled when a migration's PVC is mounted (at `Validating`) and
+again when it's released: when the migration becomes `Ready`, fails with no retry
+left, or is deleted. Each roll can interrupt other migrations running through the
+same Provider, as before.
+
+The manager reads StorageClasses (`get` only) to tell `WaitForFirstConsumer` from
+`Immediate`. A namespace-scoped install (`rbac.scope: namespace`) can't grant
+that, so there a `Pending` PVC is mounted while the migration waits for it, as
+before, and the mount budget still applies.
+
 ## Reference
 
 - [VMMigration CRD source](../../api/infra.virtrigaud.io/v1beta1/vmmigration_types.go)
