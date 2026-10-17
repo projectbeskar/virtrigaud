@@ -101,7 +101,7 @@ func TestSelectTemplate(t *testing.T) {
 func cloneVMInto(t *testing.T, p *Provider, src string, folder *object.Folder, name string) string {
 	t.Helper()
 	ctx := context.Background()
-	cluster, err := p.finder.ClusterComputeResource(ctx, simCluster)
+	cluster, err := testFinder(t, p).ClusterComputeResource(ctx, simCluster)
 	require.NoError(t, err)
 	pool, err := cluster.ResourcePool(ctx)
 	require.NoError(t, err)
@@ -158,7 +158,7 @@ func createFromTemplate(p *Provider, name, templateRef string) (*providerv1.Crea
 // requireNoVMNamed asserts that no VM named name exists anywhere in DC0.
 func requireNoVMNamed(t *testing.T, p *Provider, name string) {
 	t.Helper()
-	candidates, err := p.templateCandidates(context.Background(), name)
+	candidates, err := p.templateCandidates(context.Background(), testFinder(t, p), name)
 	require.NoError(t, err)
 	assert.Empty(t, candidates, "no VM named %q may have been created", name)
 }
@@ -330,7 +330,6 @@ func TestImagePrepare_RejectsUnsafeNamesBeforeAnyLookup(t *testing.T) {
 	empty := &vim25.Client{}
 	p := &Provider{
 		client: &govmomi.Client{Client: empty},
-		finder: new(find.Finder), // zero Finder: any lookup dereferences a nil client
 		config: &Config{},
 		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
@@ -393,7 +392,7 @@ func TestTemplateSource_AbsolutePathInOtherDatacenterRejected(t *testing.T) {
 		Password:           pw,
 		InsecureSkipVerify: true,
 	}
-	client, finder, err := createVSphereClient(cfg)
+	client, err := createVSphereClient(cfg)
 	require.NoError(t, err)
 	t.Cleanup(func() {
 		_ = client.Logout(context.Background())
@@ -402,10 +401,10 @@ func TestTemplateSource_AbsolutePathInOtherDatacenterRejected(t *testing.T) {
 	})
 	ctx := context.Background()
 
-	dc0, err := finder.Datacenter(ctx, "DC0")
+	dc0, err := find.NewFinder(client.Client, true).Datacenter(ctx, "DC0")
 	require.NoError(t, err)
-	finder.SetDatacenter(dc0)
-	p := &Provider{client: client, finder: finder, config: cfg, logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	finder := find.NewFinder(client.Client, true).SetDatacenter(dc0)
+	p := &Provider{client: client, config: cfg, logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
 
 	// Mark one VM in each datacenter as a template; both are reachable by path.
 	for _, vmPath := range []string{"/DC0/vm/DC0_H0_VM0", "/DC1/vm/DC1_H0_VM0"} {
@@ -415,15 +414,15 @@ func TestTemplateSource_AbsolutePathInOtherDatacenterRejected(t *testing.T) {
 		markAsTemplate(t, p, obj.Reference().Value)
 	}
 
-	_, found, err := p.lookupTemplate(ctx, "/DC0/vm/DC0_H0_VM0")
+	_, found, err := p.lookupTemplate(ctx, finder, "/DC0/vm/DC0_H0_VM0")
 	require.NoError(t, err)
 	assert.True(t, found, "a template under the default datacenter's VM folder resolves")
 
-	_, found, err = p.lookupTemplate(ctx, "/DC1/vm/DC1_H0_VM0")
+	_, found, err = p.lookupTemplate(ctx, finder, "/DC1/vm/DC1_H0_VM0")
 	requireCode(t, err, codes.InvalidArgument)
 	assert.False(t, found, "a template in another datacenter must not be reachable by absolute path")
 
-	_, found, err = p.lookupTemplate(ctx, "DC1_H0_VM0")
+	_, found, err = p.lookupTemplate(ctx, finder, "DC1_H0_VM0")
 	require.NoError(t, err)
 	assert.False(t, found, "a bare name only searches the default datacenter")
 }
@@ -435,11 +434,12 @@ func TestTemplateLookup_TransientErrorIsGeneric(t *testing.T) {
 	p, _ := newOwnershipSim(t)
 	ctx := context.Background()
 	victim := seededVMID(t, p, simUnstamped)
+	finder := testFinder(t, p)
 
 	// Lose the session: every read now fails with NotAuthenticated.
 	require.NoError(t, p.client.Logout(ctx))
 
-	_, _, err := p.lookupTemplate(ctx, simUnstamped)
+	_, _, err := p.lookupTemplate(ctx, finder, simUnstamped)
 	require.Error(t, err)
 	assert.NotEqual(t, codes.InvalidArgument, status.Code(err), "a transient failure stays retryable")
 	assert.Contains(t, err.Error(), "details in the provider log")

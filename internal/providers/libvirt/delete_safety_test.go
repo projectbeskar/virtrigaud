@@ -446,13 +446,6 @@ func TestOwnChainMembers(t *testing.T) {
 // count is kept by domain UUID and dropped when the domain is deleted, so a
 // later domain with the same name never inherits it.
 func TestPowerOn_WarnsWhenLinkedClonesDependOnTheDisk(t *testing.T) {
-	// A local connection's Power syncs the persistent XML through
-	// /tmp/<domain>-sync.xml (syncPersistentXML), which a failed define leaves.
-	t.Cleanup(func() {
-		for _, d := range []string{"team-a.web", "team-b.copy"} {
-			_ = os.Remove(filepath.Join("/tmp", d+"-sync.xml"))
-		}
-	})
 	c := newCreateHost(t)
 	c.p.hostStagingDir = t.TempDir()
 	c.linkedPair(true)

@@ -155,7 +155,7 @@ func newOwnershipSim(t *testing.T, opts ...func(*simulator.Model)) (*Provider, *
 		DefaultCluster:     simCluster,
 		DefaultDatastore:   simDatastore,
 	}
-	client, finder, err := createVSphereClient(cfg)
+	client, err := createVSphereClient(cfg)
 	require.NoError(t, err)
 	client.RoundTripper = &vcenterCloneSemantics{RoundTripper: client.RoundTripper, c: client.Client}
 	t.Cleanup(func() {
@@ -166,7 +166,6 @@ func newOwnershipSim(t *testing.T, opts ...func(*simulator.Model)) (*Provider, *
 
 	p := &Provider{
 		client: client,
-		finder: finder,
 		config: cfg,
 		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		// The tests' image servers listen on 127.0.0.1.
@@ -219,10 +218,7 @@ func vmState(t *testing.T, p *Provider, id string) (owner contracts.ObjectIdenti
 func defaultVMFolder(t *testing.T, p *Provider) *object.Folder {
 	t.Helper()
 	ctx := context.Background()
-	dc, err := p.finder.DefaultDatacenter(ctx)
-	require.NoError(t, err)
-	p.finder.SetDatacenter(dc)
-	folder, err := p.finder.DefaultFolder(ctx)
+	folder, err := testFinder(t, p).DefaultFolder(ctx)
 	require.NoError(t, err)
 	return folder
 }
@@ -371,7 +367,7 @@ func TestGovmomiFinderResolvesMOIDShapedNames(t *testing.T) {
 	victim := seededVMID(t, p, simUnstamped)
 	require.True(t, vmMoIDPattern.MatchString(victim), "vcsim MOIDs have the vCenter shape, got %q", victim)
 
-	vm, err := p.finder.VirtualMachine(ctx, victim)
+	vm, err := testFinder(t, p).VirtualMachine(ctx, victim)
 	require.NoError(t, err, "no VM is NAMED %q, yet the finder resolves it", victim)
 	assert.Equal(t, victim, vm.Reference().Value)
 	assert.Error(t, invalidVMNameError(victim), "such a name must be rejected by Create")
@@ -557,7 +553,7 @@ func TestClone_DropsSourceOwnerStamp(t *testing.T) {
 	// Control: a plain clone (no config) inherits the source's stamp, so the
 	// assertion below can only pass because the Clone RPC clears it.
 	srcVM := object.NewVirtualMachine(p.client.Client, vmRef(src.Id))
-	cluster, err := p.finder.ClusterComputeResource(ctx, simCluster)
+	cluster, err := testFinder(t, p).ClusterComputeResource(ctx, simCluster)
 	require.NoError(t, err)
 	pool, err := cluster.ResourcePool(ctx)
 	require.NoError(t, err)

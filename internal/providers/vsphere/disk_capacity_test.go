@@ -53,21 +53,19 @@ func simVM(t *testing.T) (*Provider, *object.VirtualMachine) {
 	t.Helper()
 	cfg, cleanup := newSimConfig(t)
 	t.Cleanup(cleanup)
-	client, finder, err := createVSphereClient(cfg)
+	client, err := createVSphereClient(cfg)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = client.Logout(context.Background()) })
 	ctx := context.Background()
-	dc, err := finder.DefaultDatacenter(ctx)
-	require.NoError(t, err)
-	finder.SetDatacenter(dc)
-	vms, err := finder.VirtualMachineList(ctx, "*")
+	p := &Provider{client: client, config: cfg, logger: slog.Default()}
+	vms, err := testFinder(t, p).VirtualMachineList(ctx, "*")
 	require.NoError(t, err)
 	require.NotEmpty(t, vms)
 	vm := vms[0]
 	if task, perr := vm.PowerOff(ctx); perr == nil {
 		_, _ = task.WaitForResult(ctx, nil)
 	}
-	return &Provider{client: client, finder: finder, config: cfg, logger: slog.Default()}, vm
+	return p, vm
 }
 
 // diskCapacitiesOf returns the capacity in bytes of every disk of vm.

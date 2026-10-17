@@ -42,18 +42,14 @@ func TestReconfigure_AppliesVMClassCPUMemory(t *testing.T) {
 	cfg, cleanup := newSimConfig(t)
 	defer cleanup()
 
-	client, finder, err := createVSphereClient(cfg)
+	client, err := createVSphereClient(cfg)
 	require.NoError(t, err)
 	defer func() { _ = client.Logout(context.Background()) }()
 
-	p := &Provider{client: client, finder: finder, config: cfg, logger: slog.Default()}
+	p := &Provider{client: client, config: cfg, logger: slog.Default()}
 	ctx := context.Background()
 
-	dc, err := finder.DefaultDatacenter(ctx)
-	require.NoError(t, err)
-	finder.SetDatacenter(dc)
-
-	vms, err := finder.VirtualMachineList(ctx, "*")
+	vms, err := testFinder(t, p).VirtualMachineList(ctx, "*")
 	require.NoError(t, err)
 	require.NotEmpty(t, vms, "simulator should seed at least one VM")
 	vm := vms[0]

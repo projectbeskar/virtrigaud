@@ -23,6 +23,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/vmware/govmomi/find"
 	"github.com/vmware/govmomi/object"
 	"github.com/vmware/govmomi/ovf"
 	"github.com/vmware/govmomi/vim25/soap"
@@ -403,27 +404,26 @@ type importTarget struct {
 	host       *object.HostSystem
 }
 
-// resolveImportTarget scopes the finder to the default datacenter, then
-// resolves the landing datastore (resolveImportDatastore) and the NFC import
-// placement (resolveImportPlacement). The datacenter must be set first: the
-// finder resolves relative names such as the DefaultDatastore only inside a
-// datacenter, and a freshly started provider has none until an RPC sets it, so
+// resolveImportTarget takes a finder of its own scoped to the default datacenter
+// (dcFinder), then resolves the landing datastore (resolveImportDatastore) and
+// the NFC import placement (resolveImportPlacement). The datacenter must be set
+// first: the finder resolves relative names such as the DefaultDatastore only
+// inside a datacenter, and the old shared finder had none until an RPC set it, so
 // an ImportDisk that was the first such RPC after a provider restart failed
 // with "datastore/StoragePod not found". The returned errors are gRPC Internal
 // errors ready to return from ImportDisk.
 func (p *Provider) resolveImportTarget(ctx context.Context, storageHint string) (*importTarget, error) {
-	datacenter, err := p.finder.DefaultDatacenter(ctx)
+	finder, datacenter, err := p.dcFinder(ctx)
 	if err != nil {
 		return nil, errors.NewInternal("failed to get datacenter", err)
 	}
-	p.finder.SetDatacenter(datacenter)
 
-	datastore, err := p.resolveImportDatastore(ctx, storageHint)
+	datastore, err := p.resolveImportDatastore(ctx, finder, storageHint)
 	if err != nil {
 		return nil, errors.NewInternal("failed to resolve target datastore", err)
 	}
 
-	pool, folder, host, err := p.resolveImportPlacement(ctx, datacenter)
+	pool, folder, host, err := p.resolveImportPlacement(ctx, finder, datacenter)
 	if err != nil {
 		return nil, errors.NewInternal("failed to resolve import placement", err)
 	}
@@ -437,9 +437,10 @@ func (p *Provider) resolveImportTarget(ctx context.Context, storageHint string) 
 // any valid pool works), the folder from DefaultFolder (falling back to the
 // datacenter's default "vm" folder), and an explicit host is required by some
 // vCenter configurations for the NFC import to succeed.
-func (p *Provider) resolveImportPlacement(ctx context.Context, datacenter *object.Datacenter) (*object.ResourcePool, *object.Folder, *object.HostSystem, error) {
+func (p *Provider) resolveImportPlacement(ctx context.Context, finder *find.Finder, datacenter *object.Datacenter) (*object.ResourcePool, *object.Folder, *object.HostSystem, error) {
 	// Resource pool from the default cluster.
-	cluster, err := p.finder.ClusterComputeResource(ctx, p.config.DefaultCluster)
+	cluster, err := finder.ClusterComputeResource(ctx, p.config.DefaultCluster)
+	p.noteInventoryError(err)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("find cluster %q: %w", p.config.DefaultCluster, err)
 	}
@@ -449,9 +450,10 @@ func (p *Provider) resolveImportPlacement(ctx context.Context, datacenter *objec
 	}
 
 	// Folder: provider default, falling back to the datacenter's default VM folder.
-	folder, err := p.finder.Folder(ctx, p.config.DefaultFolder)
+	folder, err := finder.Folder(ctx, p.config.DefaultFolder)
 	if err != nil {
-		folder, err = p.finder.Folder(ctx, datacenter.Name()+"/vm")
+		folder, err = finder.Folder(ctx, datacenter.Name()+"/vm")
+		p.noteInventoryError(err)
 		if err != nil {
 			return nil, nil, nil, fmt.Errorf("find VM folder (default %q and datacenter default): %w", p.config.DefaultFolder, err)
 		}
@@ -474,7 +476,7 @@ func (p *Provider) resolveImportPlacement(ctx context.Context, datacenter *objec
 // resolveDatastoreFromStoragePod to pick the member with the most free space
 // (lightweight SDRS). The returned object.Datastore has its Name() populated for
 // building the "[<ds>] …" paths.
-func (p *Provider) resolveImportDatastore(ctx context.Context, storageHint string) (*object.Datastore, error) {
+func (p *Provider) resolveImportDatastore(ctx context.Context, finder *find.Finder, storageHint string) (*object.Datastore, error) {
 	name := storageHint
 	if name == "" {
 		name = p.config.DefaultDatastore
@@ -484,13 +486,13 @@ func (p *Provider) resolveImportDatastore(ctx context.Context, storageHint strin
 	}
 
 	// Try as a plain datastore name first (the common case).
-	if ds, err := p.finder.Datastore(ctx, name); err == nil {
+	if ds, err := finder.Datastore(ctx, name); err == nil {
 		return ds, nil
 	}
 
 	// Fall back to treating the hint as a StoragePod (Datastore Cluster) and pick
 	// the member with the most free space (lightweight SDRS), mirroring Create.
-	ds, err := p.resolveDatastoreFromStoragePod(ctx, name)
+	ds, err := p.resolveDatastoreFromStoragePod(ctx, finder, name)
 	if err != nil {
 		return nil, fmt.Errorf("datastore/StoragePod %q not found: %w", name, err)
 	}

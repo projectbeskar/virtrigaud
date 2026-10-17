@@ -49,7 +49,10 @@ import (
 // unchanged. The Reconfigure sequences, errors and restart-required
 // answers were deliberately re-captured (VIRTRIGAUD_UPDATE_CALLSEQ_GOLDEN=1)
 // when Reconfigure stopped reporting success for changes it did not apply (the
-// honest-result fix, see reconfigure.go). A change to any single-host sequence
+// honest-result fix, see reconfigure.go), and once more when the persistent-XML
+// sync after a start stopped staging the XML in the fixed host file
+// /tmp/<domain>-sync.xml (`define /tmp/…` + `rm -f`) and re-defined from stdin
+// instead (`define /dev/stdin`). A change to any single-host sequence
 // — which would restart the ADR-0008 D5 soak window — fails here.
 
 // callSeqGoldenFile is the golden single-host call sequences (see the file
@@ -61,8 +64,7 @@ const callSeqGoldenFile = "testdata/single_host_power_reconfigure.golden.json"
 const callSeqUpdateEnv = "VIRTRIGAUD_UPDATE_CALLSEQ_GOLDEN"
 
 // opsDomainName is the domain every call-sequence scenario acts on. It is
-// distinctive because single-host Power writes /tmp/<name>-sync.xml on a local
-// connection (removed again by the test).
+// distinctive so its calls stand out in the shared call log.
 const opsDomainName = "vrcallseq-web"
 
 // opsDiskPath is the primary disk the fake domblklist reports.
@@ -130,7 +132,11 @@ case "$1" in
     case "$*" in *--config*) fail "$1-config" ;; esac
     case "$*" in *--maximum*) fail "$1-maximum" ;; esac
     [ -f "$d/dom-$2.xml" ] || nodom "$2" ;;
-  vol-resize|define) fail "$1"; exit 0 ;;
+  vol-resize) fail "$1"; exit 0 ;;
+  define)
+    fail define
+    if [ "$2" = "/dev/stdin" ]; then cat > "$d/define-stdin.$$.xml"; fi
+    exit 0 ;;
   domblklist)
     fail domblklist
     case "$*" in
@@ -265,10 +271,7 @@ func singleHostCallSeqScenarios() []callSeqScenario {
 	return []callSeqScenario{
 		{name: "power-on", run: power(contracts.PowerOpOn)},
 		{name: "power-on-start-fails", setup: func(fx *routingFixture) { fx.script("single", "fail-start", "") }, run: power(contracts.PowerOpOn)},
-		{name: "power-on-define-fails", setup: func(fx *routingFixture) {
-			require.NoError(fx.t, os.MkdirAll(filepath.Join(fx.dir, "local"), 0o700))
-			fx.script("local", "fail-define", "")
-		}, run: power(contracts.PowerOpOn)},
+		{name: "power-on-define-fails", setup: func(fx *routingFixture) { fx.script("single", "fail-define", "") }, run: power(contracts.PowerOpOn)},
 		{name: "power-off", run: power(contracts.PowerOpOff)},
 		{name: "power-off-fails", setup: func(fx *routingFixture) {
 			running(fx)
@@ -347,8 +350,6 @@ func singleHostCallSeqScenarios() []callSeqScenario {
 // equivalence proof for slice 2: every scenario's virsh/host command sequence
 // and returned error equal what origin/main produced before the refactor.
 func TestSingleHost_PowerAndReconfigure_CallSequencesUnchanged(t *testing.T) {
-	t.Cleanup(func() { _ = os.Remove("/tmp/" + opsDomainName + "-sync.xml") })
-
 	got := map[string]callSeqResult{}
 	for _, sc := range singleHostCallSeqScenarios() {
 		t.Run(sc.name, func(t *testing.T) {
@@ -400,7 +401,6 @@ func TestSingleHost_PowerAndReconfigure_CallSequencesUnchanged(t *testing.T) {
 // stays manageable even for a foreign owner), and the domain is addressed by
 // its name — the same sequence as a bare-id call.
 func TestSingleHost_PowerAndReconfigure_IgnoreHostAndOwner(t *testing.T) {
-	t.Cleanup(func() { _ = os.Remove("/tmp/" + opsDomainName + "-sync.xml") })
 	run := func(vm contracts.VMRef) []string {
 		fx := newOpsFixture(t, map[string]map[string]string{
 			"single": {opsDomainName: routingDomainXML(opsDomainName, contracts.ObjectIdentity{})},

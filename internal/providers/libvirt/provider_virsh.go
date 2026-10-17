@@ -1548,23 +1548,13 @@ func syncPersistentXML(ctx context.Context, vp *VirshProvider, domainName string
 		return fmt.Errorf("failed to dump running XML: %w", err)
 	}
 
-	// Write the running XML to a temporary file (content over stdin, path as a
-	// positional parameter — no heredoc, no shell interpolation).
-	remotePath := fmt.Sprintf("/tmp/%s-sync.xml", domainName)
-	if err := vp.writeRemoteFile(ctx, remotePath, []byte(result.Stdout)); err != nil {
-		return fmt.Errorf("failed to write sync XML file: %w", err)
-	}
-
-	// Define the domain again with the running XML (this updates the persistent definition)
-	_, err = vp.runRemoteVirshCommand(ctx, "define", remotePath)
-	if err != nil {
+	// Define the domain again with the running XML (this updates the persistent
+	// definition). The XML goes over stdin (`virsh define /dev/stdin`): it used to
+	// be written to the fixed host path /tmp/<domain>-sync.xml, which concurrent
+	// syncs of one domain clobbered, anything on the host could pre-create or
+	// link elsewhere, and a failed define left behind.
+	if _, err = vp.runVirshStdin(ctx, []byte(result.Stdout), "define", "/dev/stdin"); err != nil {
 		return fmt.Errorf("failed to redefine domain: %w", err)
-	}
-
-	// Clean up temporary file
-	_, cleanupErr := vp.runVirshCommand(ctx, "!", "rm", "-f", remotePath)
-	if cleanupErr != nil {
-		log.Printf("WARN Failed to cleanup sync XML file: %v", cleanupErr)
 	}
 
 	log.Printf("INFO Successfully synced persistent XML for domain: %s", domainName)

@@ -55,7 +55,10 @@ case "$1" in
     state=running
     if [ -f "$d/pool.state" ]; then state=$(cat "$d/pool.state"); fi
     printf 'Name:           default\nState:          %s\n' "$state" ;;
-  pool-define|pool-build|pool-autostart|pool-start|pool-destroy|pool-undefine) : ;;
+  pool-define)
+    if [ "$2" = "/dev/stdin" ]; then cat > "$d/pool-define.$$.xml"; fi
+    if [ -f "$d/pool.define-fails" ]; then echo "error: failed to define pool" >&2; exit 1; fi ;;
+  pool-build|pool-autostart|pool-start|pool-destroy|pool-undefine) : ;;
   *) echo "fake virsh: unsupported: $*" >&2; exit 1 ;;
 esac
 `
