@@ -226,6 +226,14 @@ func clearCloneRequested(clone *infrav1beta1.VMClone) {
 	meta.RemoveStatusCondition(&clone.Status.Conditions, cloneConditionRequested)
 }
 
+// isCloneTarget reports whether vm is a VMClone's target VirtualMachine: it
+// carries the clone-uid marker buildTargetVM sets (CloneAnnotationCloneUID).
+// Such a VM is created before its Clone and waits, unbound, for that clone's
+// bind; adoption never binds it to a listed VM or treats it as an adopter.
+func isCloneTarget(vm *infrav1beta1.VirtualMachine) bool {
+	return vm.Annotations[CloneAnnotationCloneUID] != ""
+}
+
 // cloneRequested reports whether clone records a Clone requested from a
 // provider that re-binds, whose outcome is not recorded (the next Clone is a
 // re-send).

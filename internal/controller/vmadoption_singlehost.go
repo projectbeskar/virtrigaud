@@ -204,9 +204,10 @@ func adoptionIDOf(vm *infravirtrigaudiov1beta1.VirtualMachine) string {
 // of provider that is not bound yet and waits for VM id: labelled adopted, in
 // the Provider's namespace, referencing it, no status.id, no create requested
 // and no pending host (it never went through Create), not being deleted,
-// adoptionIDOf id.
+// adoptionIDOf id. A VMClone's target (isCloneTarget) never is: it waits for
+// its clone's bind, not for adoption.
 func awaitingSingleHostAdoptionOf(vm *infravirtrigaudiov1beta1.VirtualMachine, provider *infravirtrigaudiov1beta1.Provider, id string) bool {
-	return vmIsAdopted(vm) && vm.Status.ID == "" && vm.DeletionTimestamp.IsZero() &&
+	return vmIsAdopted(vm) && !isCloneTarget(vm) && vm.Status.ID == "" && vm.DeletionTimestamp.IsZero() &&
 		!createRequested(vm) && pendingHost(vm) == "" &&
 		vm.Namespace == provider.Namespace && vmProviderKey(vm) == client.ObjectKeyFromObject(provider) &&
 		id != "" && adoptionIDOf(vm) == id

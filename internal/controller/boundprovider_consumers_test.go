@@ -280,6 +280,36 @@ func TestAdoptVM_ExistingAdoptedVMIsBoundOnlyToItsOwnProvider(t *testing.T) {
 	})
 }
 
+// TestAdoptVM_CloneTargetIsNeverBound (rc2 R4 review L3): a VMClone's target
+// is created before its Clone and waits, unbound and labelled adopted, for its
+// clone's bind. A listed VM that merely shares its name is never bound to it,
+// in the legacy path nor as a single-host adopter.
+func TestAdoptVM_CloneTargetIsNeverBound(t *testing.T) {
+	ctx := context.Background()
+	prov := singleProviderCR("prov-a", "infra")
+	prov.UID = "uid-a"
+	target := &infrav1beta1.VirtualMachine{
+		ObjectMeta: metav1.ObjectMeta{Name: "legacy-db", Namespace: "infra",
+			Labels: map[string]string{AdoptedLabel: AdoptedLabelValue},
+			Annotations: map[string]string{CloneAnnotationCloneUID: "uid-some-clone",
+				AdoptedIDAnnotation: "101"}},
+		Spec: infrav1beta1.VirtualMachineSpec{ProviderRef: infrav1beta1.ObjectRef{Name: "prov-a"},
+			ClassRef: infrav1beta1.ObjectRef{Name: "c"}},
+	}
+	r := newBPAdoptionReconciler(t, prov, target)
+	require.NoError(t, r.adoptVM(ctx, prov, contracts.VMInfo{ID: "101", Name: "legacy-db"}))
+	vm := &infrav1beta1.VirtualMachine{}
+	require.NoError(t, r.Get(ctx, types.NamespacedName{Namespace: "infra", Name: "legacy-db"}, vm))
+	assert.Empty(t, vm.Status.ID, "the clone's target is never bound by adoption")
+	assert.Nil(t, vm.Status.BoundProvider)
+
+	assert.False(t, awaitingSingleHostAdoptionOf(target, prov, "101"),
+		"nor is it ever a single-host adopter, whatever annotations it carries")
+	plain := target.DeepCopy()
+	delete(plain.Annotations, CloneAnnotationCloneUID)
+	assert.True(t, awaitingSingleHostAdoptionOf(plain, prov, "101"), "control: without the clone marker it would be")
+}
+
 func TestUnmanagedProviderVMs_CountsVMsBoundThroughTheProvider(t *testing.T) {
 	prov := singleProviderCR("prov-a", "infra")
 	repointed := infrav1beta1.VirtualMachine{

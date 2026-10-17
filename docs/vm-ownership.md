@@ -317,6 +317,16 @@ Other rules:
   fails with `TargetConflict`, naming the cloned VM left on the provider. (Only
   a clone started by a manager older than rc2, which created its target after
   the clone, creates it at the bind.)
+- **Adoption never takes a clone's target.** The waiting target carries
+  `virtrigaud.io/adopted=true` and the clone's `virtrigaud.io/clone-uid`
+  marker. Adoption never binds it to a listed VM that shares its name, and
+  never treats it as an adopter: only its clone binds it.
+- **A source owner refusal fails only a first attempt.** A provider that
+  refuses the clone's source as not the source `VirtualMachine`'s
+  (`VM_NOT_OWNED`, `OWNER_STAMP_UNREADABLE`) fails a first attempt; answering
+  a re-send, it is held like any other answer to a re-send (the provider
+  re-binds before it checks the source). A re-send also skips the disk-size
+  check of the source's disks: the first attempt passed it.
 - **A failed clone removes its own empty target.** A single-host clone that
   fails for good deletes the unbound target it created (`TargetCleanup=True/
   TargetRemoved`), once, when the provider reported no cloned VM and no `Clone`

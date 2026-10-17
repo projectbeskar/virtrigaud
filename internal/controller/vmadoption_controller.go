@@ -488,6 +488,13 @@ func (r *VMAdoptionReconciler) adoptVM(ctx context.Context, provider *infravirtr
 	if err := r.Get(ctx, vmKey, existingVM); err == nil {
 		// VM CR exists - check if it's an adopted VM that needs Status.ID fixed
 		if existingVM.Labels != nil && existingVM.Labels[AdoptedLabel] == AdoptedLabelValue {
+			if existingVM.Status.ID == "" && isCloneTarget(existingVM) {
+				// A VMClone's target waits, unbound, for its clone's bind (it
+				// is created before the Clone, rc2 R4): never bound here to a
+				// listed VM that merely shares its name.
+				logger.Info("Not binding a VMClone's target VirtualMachine to a listed VM; its clone binds it", "vm_name", vmName)
+				return nil
+			}
 			if existingVM.Status.ID == "" {
 				// The id is this Provider's: bind it only to a VM whose
 				// spec.providerRef resolves to this Provider. Anyone who can
