@@ -115,13 +115,17 @@ func TestInspectHostImageInfoAs_ReportsVirtualSize(t *testing.T) {
 // TestPrivateLocalImportCopy (review M2): over a local connection the pvc
 // import checks and lands a private copy of the staged disk, so replacing the
 // staged file after the copy changes nothing; a symbolic link or a
-// non-regular file is refused.
+// non-regular file is refused when the staged disk is opened
+// (openStagedImportSource, staged_source_test.go).
 func TestPrivateLocalImportCopy(t *testing.T) {
 	staging := t.TempDir()
 	src := filepath.Join(staging, "disk.qcow2")
 	require.NoError(t, os.WriteFile(src, []byte("staged bytes"), 0o644))
 
-	path, cleanup, err := privateLocalImportCopy(src)
+	in, _, err := openStagedImportSource("file://" + src)
+	require.NoError(t, err)
+	defer func() { _ = in.Close() }()
+	path, cleanup, err := privateLocalImportCopy(in)
 	require.NoError(t, err)
 	got, err := os.ReadFile(path)
 	require.NoError(t, err)
@@ -145,10 +149,10 @@ func TestPrivateLocalImportCopy(t *testing.T) {
 
 	link := filepath.Join(staging, "link.qcow2")
 	require.NoError(t, os.Symlink(src, link))
-	_, _, err = privateLocalImportCopy(link)
-	assert.Error(t, err, "a symbolic link is not followed")
-	_, _, err = privateLocalImportCopy(staging)
-	assert.Error(t, err, "a directory is not a staged disk")
+	_, _, err = openStagedImportSource("file://" + link)
+	assert.Equal(t, codes.FailedPrecondition, status.Code(err), "a symbolic link is not followed")
+	_, _, err = openStagedImportSource("file://" + staging)
+	assert.Equal(t, codes.FailedPrecondition, status.Code(err), "a directory is not a staged disk")
 }
 
 // TestServer_AdvertisesImportSizeLimit: a single-host provider, whose

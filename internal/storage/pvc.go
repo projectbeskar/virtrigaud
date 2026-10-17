@@ -31,8 +31,40 @@ import (
 	"strings"
 	"time"
 
+	"k8s.io/apimachinery/pkg/util/validation"
+
 	"github.com/projectbeskar/virtrigaud/internal/storage/stagedfile"
 )
+
+// PVCMountRoot is the directory under which the provider Deployments mount
+// each migration PVC, as <PVCMountRoot>/<pvc-name>.
+const PVCMountRoot = "/mnt/migration-storage"
+
+// SplitPVCURL splits pvc://<pvc-name>/<file-path> into the PVC name and the
+// file path beneath that PVC's mount (<PVCMountRoot>/<pvc-name>). The name must
+// be a DNS-1123 subdomain (a PVC name) and the file path must be a non-empty
+// relative path with no ".." component; the file itself is then opened with
+// stagedfile beneath the mount, never by joining the two into one path.
+func SplitPVCURL(url string) (pvcName, rel string, err error) {
+	rest, ok := strings.CutPrefix(strings.TrimSpace(url), "pvc://")
+	if !ok {
+		return "", "", &StorageError{Type: ErrorTypeInvalidConfig, Message: msgStagedFileInvalidSchema}
+	}
+	pvcName, rel, ok = strings.Cut(rest, "/")
+	if !ok || len(validation.IsDNS1123Subdomain(pvcName)) > 0 {
+		return "", "", &StorageError{Type: ErrorTypeInvalidConfig, Message: msgStagedFileInvalidSchema}
+	}
+	rel = strings.TrimLeft(rel, "/")
+	if rel == "" {
+		return "", "", &StorageError{Type: ErrorTypeInvalidConfig, Message: msgStagedFileInvalidSchema}
+	}
+	for _, c := range strings.Split(rel, "/") {
+		if c == ".." {
+			return "", "", &StorageError{Type: ErrorTypeInvalidConfig, Message: "invalid path: contains '..'"}
+		}
+	}
+	return pvcName, filepath.Clean(rel), nil
+}
 
 // Constant messages of staged-file failures. They name no path: a refusal can
 // be caused by a link the tenant planted, and the message reaches the
@@ -81,7 +113,7 @@ func NewPVCStorage(config StorageConfig) (*PVCStorage, error) {
 	// Set default mount path
 	mountPath := config.MountPath
 	if mountPath == "" {
-		mountPath = "/mnt/migration-storage"
+		mountPath = PVCMountRoot
 	}
 
 	// Clean up path

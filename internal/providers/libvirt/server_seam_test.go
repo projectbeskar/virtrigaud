@@ -55,6 +55,8 @@ type fakeSeamConn struct {
 	uriVal       string // defaults to "qemu+ssh://user@host/system" via uri() below when empty
 	streamInErr  error
 	streamInArgs []string
+	copyCalls    int    // copyDiskToRemote calls
+	copied       []byte // what the last copyDiskToRemote read from its source
 }
 
 func (f *fakeSeamConn) HostID() hostconn.HostID { return f.id }
@@ -143,7 +145,13 @@ func (f *fakeSeamConn) uri() string {
 	return "qemu+ssh://user@host/system"
 }
 
-func (f *fakeSeamConn) copyDiskToRemote(_ context.Context, _, _ string) (string, error) {
+func (f *fakeSeamConn) copyDiskToRemote(_ context.Context, src io.Reader, _ string) (string, error) {
+	f.copyCalls++
+	b, err := io.ReadAll(src)
+	if err != nil {
+		return "", err
+	}
+	f.copied = b
 	return "/var/lib/libvirt/images/x.qcow2", nil
 }
 
