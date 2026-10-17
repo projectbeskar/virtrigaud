@@ -130,8 +130,7 @@ const libvirtDefaultPrimaryDiskGiB = 20
 // The class size is checked on every provider type, although only vSphere
 // and libvirt apply it (they grow the image's primary disk to it, never
 // shrink it); the Proxmox provider's Create does not apply
-// Class.DiskDefaults and keeps the template's disk as it is (its Reconfigure
-// grows the primary disk to it, which withholdDiskGrowthOverLimit bounds).
+// Class.DiskDefaults and keeps the template's disk as it is.
 //
 // Not covered: a primary disk that comes out LARGER than what is asked for,
 // because the image (a vSphere or Proxmox template, a libvirt base image) is
