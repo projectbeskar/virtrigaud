@@ -487,13 +487,13 @@ func (p *PVCStorage) Delete(ctx context.Context, url string) error {
 	// Remove the file beneath the mount without following a symbolic link in
 	// any directory on its path (a link at the name itself is removed, never
 	// followed).
-	if err := stagedfile.Remove(p.mountPath, fileRel); err != nil {
-		if !stagedfile.IsUnsafe(err) && errors.Is(err, fs.ErrNotExist) {
+	if rmErr := stagedfile.Remove(p.mountPath, fileRel); rmErr != nil {
+		if !stagedfile.IsUnsafe(rmErr) && errors.Is(rmErr, fs.ErrNotExist) {
 			// File doesn't exist, consider it deleted
 			log.Printf("WARN File already deleted: %s", filePath)
 			return nil
 		}
-		return stagedFileError(msgStagedFileRemoveFailed, err)
+		return stagedFileError(msgStagedFileRemoveFailed, rmErr)
 	}
 
 	log.Printf("INFO Successfully deleted: %s", filePath)
