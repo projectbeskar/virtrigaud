@@ -257,6 +257,16 @@ rules:
   - get
   - list
   - watch
+# StorageClasses, get only (provider_controller): a Pending migration PVC is
+# mounted into a provider pod only when its StorageClass binds on
+# WaitForFirstConsumer, so a PVC that can never bind cannot wedge the rollout.
+# Never listed or watched; read straight from the API server.
+- apiGroups:
+  - storage.k8s.io
+  resources:
+  - storageclasses
+  verbs:
+  - get
 # Namespaces, read-only: the VMClone and VMMigration controllers read a
 # cross-namespace target's Namespace for the
 # infra.virtrigaud.io/allowed-source-namespaces grant, and every controller
