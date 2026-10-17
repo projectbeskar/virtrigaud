@@ -341,9 +341,9 @@ func TestLandedDiskIsKeptForAVM(t *testing.T) {
 		provErr   error
 		wantCalls int32
 	}{
-		"succeeded":                   {phase: infrav1beta1.MigrationPhaseReady},
-		"own target VM (bound UID)":   {phase: infrav1beta1.MigrationPhaseFailed, vm: targetVM("a", false), bind: true},
-		"a VM there naming the disk":  {phase: infrav1beta1.MigrationPhaseFailed, vm: targetVM("b", true)},
+		"succeeded":                  {phase: infrav1beta1.MigrationPhaseReady},
+		"own target VM (bound UID)":  {phase: infrav1beta1.MigrationPhaseFailed, vm: targetVM("a", false), bind: true},
+		"a VM there naming the disk": {phase: infrav1beta1.MigrationPhaseFailed, vm: targetVM("b", true)},
 		"provider: a VM uses the disk": {phase: infrav1beta1.MigrationPhaseFailed, wantCalls: 1,
 			provErr: fmt.Errorf("deleteLandedDisk: %w", contracts.NewConflictError("in use", contracts.ErrVMDiskInUse))},
 	} {

@@ -119,10 +119,10 @@ var migrationLandedDiskCleanupPendingMessage = fmt.Sprintf(
 const (
 	landedDiskLeftUnsupported = "The migration's landed disk was not deleted: the target Provider does not support " +
 		"deleting landed disks (an older provider image)."
-	landedDiskLeftProviderGone = "The migration's landed disk was not deleted: the target Provider no longer exists."
+	landedDiskLeftProviderGone    = "The migration's landed disk was not deleted: the target Provider no longer exists."
 	landedDiskLeftProviderChanged = "The migration's landed disk was not deleted: spec.target.providerRef changed, or the " +
 		"Provider was replaced, since the import, so the current Provider is not the one the disk was landed on."
-	landedDiskLeftRefused = "The migration's landed disk was not deleted: the target provider refused the request."
+	landedDiskLeftRefused   = "The migration's landed disk was not deleted: the target provider refused the request."
 	landedDiskLeftNamespace = "The migration's landed disk was not deleted: the target namespace no longer grants this " +
 		"migration's namespace."
 	landedDiskLeftUnrecorded = "The migration's landed disk was not deleted: the VirtualMachine the import was sent for " +
