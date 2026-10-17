@@ -506,3 +506,88 @@ func TestLandedDiskDeletionHoldsReleasesAndForceDeletes(t *testing.T) {
 		assert.Zero(t, prov.calls.Load())
 	})
 }
+
+// TestLandedDiskCleanup_SecurityReviewCases pins the review's cases: the own
+// target VM recognised by its claim alone is kept; a VM at the target name
+// that is neither the migration's nor names an imported disk does not stop
+// the RPC (the provider's in-use check is the backstop); an import target
+// recorded without a Provider UID, and a target namespace that no longer
+// grants the migration's, are left behind without an RPC; a target Provider
+// that no longer grants this namespace holds the cleanup (retryably, like the
+// staged disk) without an RPC.
+func TestLandedDiskCleanup_SecurityReviewCases(t *testing.T) {
+	type outcome struct {
+		hold    bool
+		calls   int32
+		reason  string
+		message string
+	}
+	for name, tc := range map[string]struct {
+		setup func(m *infrav1beta1.VMMigration, objs []client.Object) []client.Object
+		want  outcome
+	}{
+		"own target VM by claim only": {
+			setup: func(m *infrav1beta1.VMMigration, objs []client.Object) []client.Object {
+				m.Status.TargetVMClaim = migrationTargetClaimDigest("claim-token")
+				return append(objs, &infrav1beta1.VirtualMachine{ObjectMeta: metav1.ObjectMeta{
+					Name: "target-vm", Namespace: "default", UID: "uid-claimed",
+					Annotations: map[string]string{migrationTargetClaimAnnotation: "claim-token"}}})
+			},
+			want: outcome{reason: migrationReasonLandedDiskInUse, message: migrationLandedDiskInUseMessage},
+		},
+		"a VM there that is not the migration's and names no imported disk": {
+			setup: func(_ *infrav1beta1.VMMigration, objs []client.Object) []client.Object {
+				return append(objs, &infrav1beta1.VirtualMachine{ObjectMeta: metav1.ObjectMeta{
+					Name: "target-vm", Namespace: "default", UID: "uid-someone-else"}})
+			},
+			want: outcome{calls: 1, reason: migrationReasonLandedDiskDeleted, message: migrationLandedDiskDeletedMessage},
+		},
+		"import target recorded without a Provider UID": {
+			setup: func(m *infrav1beta1.VMMigration, objs []client.Object) []client.Object {
+				m.Status.StorageInfo.ImportTarget.ProviderUID = ""
+				return objs
+			},
+			want: outcome{reason: migrationReasonLandedDiskLeftBehind,
+				message: landedDiskLeftUnrecorded + migrationLandedDiskLeftBehindSuffix},
+		},
+		"target namespace grant withdrawn": {
+			setup: func(m *infrav1beta1.VMMigration, objs []client.Object) []client.Object {
+				m.Spec.Target.Namespace = "team-b" // no Namespace object: no grant
+				markLandedDiskMayExist(m, migrationTargetVMKey(m), landedTargetProvider())
+				return objs
+			},
+			want: outcome{reason: migrationReasonLandedDiskLeftBehind,
+				message: landedDiskLeftNamespace + migrationLandedDiskLeftBehindSuffix},
+		},
+		"target Provider consumer grant withdrawn": {
+			setup: func(m *infrav1beta1.VMMigration, objs []client.Object) []client.Object {
+				shared := landedTargetProvider()
+				shared.Namespace = "shared-providers" // selects no consumer namespace
+				m.Spec.Target.ProviderRef = infrav1beta1.ObjectRef{Name: shared.Name, Namespace: shared.Namespace}
+				markLandedDiskMayExist(m, migrationTargetVMKey(m), shared)
+				return append(objs[:2], shared)
+			},
+			want: outcome{hold: true, reason: migrationReasonLandedDiskCleanupPending, message: migrationLandedDiskCleanupPendingMessage},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			prov := newLandedProvider()
+			m, objs := landedFixture(infrav1beta1.MigrationPhaseFailed)
+			markMigrationDeleting(m)
+			objs = tc.setup(m, objs)
+			h := newLandedHarness(t, prov, m, objs...)
+			if tc.want.hold {
+				_, cerr := h.r.cleanupLandedDisk(context.Background(), h.get(t, m))
+				assert.True(t, isConsumerNotAllowed(cerr), "held for the consumer grant: %v", cerr)
+			}
+			hold, _, err := h.r.releaseLandedDiskForDeletion(context.Background(), h.get(t, m))
+			require.NoError(t, err)
+			assert.Equal(t, tc.want.hold, hold)
+			assert.Equal(t, tc.want.calls, prov.calls.Load())
+			c := landedCondition(h.get(t, m))
+			require.NotNil(t, c)
+			assert.Equal(t, tc.want.reason, c.Reason)
+			assert.Equal(t, tc.want.message, c.Message)
+		})
+	}
+}
