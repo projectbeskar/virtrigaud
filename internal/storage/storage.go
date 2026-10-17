@@ -246,4 +246,8 @@ const (
 	ErrorTypeInvalidConfig ErrorType = "InvalidConfig"
 	// ErrorTypeOperationFailed indicates a generic operation failure
 	ErrorTypeOperationFailed ErrorType = "OperationFailed"
+	// ErrorTypeUnsafePath indicates a staged file was refused because a
+	// symbolic link, a hard link or a special file was found where a regular
+	// file beneath the staging directory was expected (stagedfile.ErrUnsafe).
+	ErrorTypeUnsafePath ErrorType = "UnsafePath"
 )

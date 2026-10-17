@@ -20,15 +20,50 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"hash"
 	"io"
+	"io/fs"
 	"log"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/projectbeskar/virtrigaud/internal/storage/stagedfile"
 )
+
+// Constant messages of staged-file failures. They name no path: a refusal can
+// be caused by a link the tenant planted, and the message reaches the
+// VMMigration's status; the detail (paths, system error) goes to the provider
+// log only.
+const (
+	msgStagedFileRefused       = "refused the staged file"
+	msgStagedFileNotFound      = "the staged file was not found"
+	msgStagedFileOpenFailed    = "failed to open the staged file"
+	msgStagedFileCreateFailed  = "failed to create the staged file"
+	msgStagedFileRemoveFailed  = "failed to remove the staged file"
+	msgStagedFileInvalidSchema = "invalid PVC URL format: expected pvc://<pvc-name>/<file-path>"
+)
+
+// stagedFileError logs the full detail of a stagedfile failure and returns
+// the StorageError the caller sees: a constant message by kind, with the
+// stagedfile error (whose text is constant too) as Cause so errors.Is still
+// matches stagedfile.ErrUnsafe and fs.ErrNotExist.
+func stagedFileError(failedMsg string, err error) error {
+	switch {
+	case stagedfile.IsUnsafe(err):
+		log.Printf("WARN Refused a staged file in the PVC: %s", stagedfile.LogDetail(err))
+		return &StorageError{Type: ErrorTypeUnsafePath, Message: msgStagedFileRefused, Cause: err}
+	case errors.Is(err, fs.ErrNotExist):
+		log.Printf("WARN Staged file not found in the PVC: %s", stagedfile.LogDetail(err))
+		return &StorageError{Type: ErrorTypeNotFound, Message: msgStagedFileNotFound, Cause: err}
+	default:
+		log.Printf("ERROR Staged-file operation failed in the PVC: %s", stagedfile.LogDetail(err))
+		return &StorageError{Type: ErrorTypeOperationFailed, Message: failedMsg, Cause: err}
+	}
+}
 
 // PVCStorage implements the Storage interface using a Kubernetes PVC
 // The PVC must be mounted to the pod at the configured MountPath
@@ -108,19 +143,9 @@ func (p *PVCStorage) Upload(ctx context.Context, req UploadRequest) (UploadRespo
 	log.Printf("INFO Uploading to PVC storage: %s", req.DestinationURL)
 
 	// Parse destination path
-	destPath, err := p.parsePath(req.DestinationURL)
+	destPath, destRel, err := p.parsePath(req.DestinationURL)
 	if err != nil {
 		return UploadResponse{}, err
-	}
-
-	// Ensure destination directory exists
-	destDir := filepath.Dir(destPath)
-	if err := os.MkdirAll(destDir, 0755); err != nil {
-		return UploadResponse{}, &StorageError{
-			Type:    ErrorTypeOperationFailed,
-			Message: fmt.Sprintf("failed to create destination directory: %s", destDir),
-			Cause:   err,
-		}
 	}
 
 	var reader io.Reader
@@ -159,14 +184,13 @@ func (p *PVCStorage) Upload(ctx context.Context, req UploadRequest) (UploadRespo
 		}
 	}
 
-	// Create destination file
-	destFile, err := os.Create(destPath)
+	// Create the destination file and its missing directories beneath the
+	// mount without following a symbolic link anywhere: the PVC is writable by
+	// the tenant, who could otherwise redirect this write to any path the
+	// provider pod can write (stagedfile).
+	destFile, err := stagedfile.Create(p.mountPath, destRel, stagedfile.DefaultDirPerm, stagedfile.DefaultFilePerm)
 	if err != nil {
-		return UploadResponse{}, &StorageError{
-			Type:    ErrorTypeOperationFailed,
-			Message: fmt.Sprintf("failed to create destination file: %s", destPath),
-			Cause:   err,
-		}
+		return UploadResponse{}, stagedFileError(msgStagedFileCreateFailed, err)
 	}
 	defer destFile.Close()
 
@@ -237,7 +261,9 @@ func (p *PVCStorage) Upload(ctx context.Context, req UploadRequest) (UploadRespo
 	// Verify checksum if provided
 	if req.Checksum != "" && req.Checksum != checksum {
 		// Remove corrupted file
-		os.Remove(destPath)
+		if rmErr := stagedfile.Remove(p.mountPath, destRel); rmErr != nil {
+			log.Printf("WARN Failed to remove the corrupted staged file: %s", stagedfile.LogDetail(rmErr))
+		}
 		return UploadResponse{}, &StorageError{
 			Type:    ErrorTypeChecksumMismatch,
 			Message: fmt.Sprintf("checksum mismatch: expected=%s actual=%s", req.Checksum, checksum),
@@ -258,26 +284,19 @@ func (p *PVCStorage) Download(ctx context.Context, req DownloadRequest) (Downloa
 	log.Printf("INFO Downloading from PVC storage: %s", req.SourceURL)
 
 	// Parse source path
-	srcPath, err := p.parsePath(req.SourceURL)
+	srcPath, srcRel, err := p.parsePath(req.SourceURL)
 	if err != nil {
 		return DownloadResponse{}, err
 	}
 
-	// Open source file
-	srcFile, err := os.Open(srcPath)
+	// Open the staged file beneath the mount with no symbolic link in any
+	// component, and only if it is a regular single-link file: the tenant can
+	// write the PVC, and a planted link would otherwise make this read — and
+	// the import that follows — return the provider pod's credentials
+	// (stagedfile).
+	srcFile, err := stagedfile.OpenRead(p.mountPath, srcRel)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return DownloadResponse{}, &StorageError{
-				Type:    ErrorTypeNotFound,
-				Message: fmt.Sprintf("source file not found: %s", srcPath),
-				Cause:   err,
-			}
-		}
-		return DownloadResponse{}, &StorageError{
-			Type:    ErrorTypeOperationFailed,
-			Message: fmt.Sprintf("failed to open source file: %s", srcPath),
-			Cause:   err,
-		}
+		return DownloadResponse{}, stagedFileError(msgStagedFileOpenFailed, err)
 	}
 	defer srcFile.Close()
 
@@ -428,25 +447,21 @@ func (p *PVCStorage) DownloadStream(ctx context.Context, req StreamDownloadReque
 func (p *PVCStorage) Delete(ctx context.Context, url string) error {
 	log.Printf("INFO Deleting from PVC storage: %s", url)
 
-	filePath, err := p.parsePath(url)
+	filePath, fileRel, err := p.parsePath(url)
 	if err != nil {
 		return err
 	}
 
-	// Check if file exists
-	if _, err := os.Stat(filePath); os.IsNotExist(err) {
-		// File doesn't exist, consider it deleted
-		log.Printf("WARN File already deleted: %s", filePath)
-		return nil
-	}
-
-	// Remove file
-	if err := os.Remove(filePath); err != nil {
-		return &StorageError{
-			Type:    ErrorTypeOperationFailed,
-			Message: fmt.Sprintf("failed to delete file: %s", filePath),
-			Cause:   err,
+	// Remove the file beneath the mount without following a symbolic link in
+	// any directory on its path (a link at the name itself is removed, never
+	// followed).
+	if err := stagedfile.Remove(p.mountPath, fileRel); err != nil {
+		if !stagedfile.IsUnsafe(err) && errors.Is(err, fs.ErrNotExist) {
+			// File doesn't exist, consider it deleted
+			log.Printf("WARN File already deleted: %s", filePath)
+			return nil
 		}
+		return stagedFileError(msgStagedFileRemoveFailed, err)
 	}
 
 	log.Printf("INFO Successfully deleted: %s", filePath)
@@ -455,38 +470,29 @@ func (p *PVCStorage) Delete(ctx context.Context, url string) error {
 
 // GetMetadata retrieves metadata about a stored file
 func (p *PVCStorage) GetMetadata(ctx context.Context, url string) (FileMetadata, error) {
-	filePath, err := p.parsePath(url)
+	_, fileRel, err := p.parsePath(url)
 	if err != nil {
 		return FileMetadata{}, err
 	}
 
-	// Get file info
-	info, err := os.Stat(filePath)
+	// Open the file beneath the mount with no symbolic link followed, then
+	// stat the open file (never the path, which the tenant can swap).
+	file, err := stagedfile.OpenRead(p.mountPath, fileRel)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return FileMetadata{}, &StorageError{
-				Type:    ErrorTypeNotFound,
-				Message: fmt.Sprintf("file not found: %s", filePath),
-				Cause:   err,
-			}
-		}
+		return FileMetadata{}, stagedFileError(msgStagedFileOpenFailed, err)
+	}
+	defer file.Close()
+
+	info, err := file.Stat()
+	if err != nil {
 		return FileMetadata{}, &StorageError{
 			Type:    ErrorTypeOperationFailed,
-			Message: fmt.Sprintf("failed to stat file: %s", filePath),
+			Message: "failed to stat the staged file",
 			Cause:   err,
 		}
 	}
 
 	// Calculate checksum
-	file, err := os.Open(filePath)
-	if err != nil {
-		return FileMetadata{}, &StorageError{
-			Type:    ErrorTypeOperationFailed,
-			Message: "failed to open file for checksum",
-			Cause:   err,
-		}
-	}
-	defer file.Close()
 
 	hasher := sha256.New()
 	if _, err := io.Copy(hasher, file); err != nil {
@@ -509,7 +515,7 @@ func (p *PVCStorage) GetMetadata(ctx context.Context, url string) (FileMetadata,
 
 // ValidateURL checks if a URL is valid for PVC storage
 func (p *PVCStorage) ValidateURL(url string) error {
-	_, err := p.parsePath(url)
+	_, _, err := p.parsePath(url)
 	return err
 }
 
@@ -520,9 +526,10 @@ func (p *PVCStorage) Close() error {
 	return nil
 }
 
-// parsePath converts a URL to an absolute PVC path
-// Supports formats: pvc://path, /path, path
-func (p *PVCStorage) parsePath(url string) (string, error) {
+// parsePath converts a URL to an absolute PVC path and the path relative to
+// the mount (rel), which every file operation resolves beneath the mount with
+// stagedfile. Supports formats: pvc://<pvc-name>/<file-path>, <pvc-name>/<file-path>.
+func (p *PVCStorage) parsePath(url string) (abs string, rel string, err error) {
 	url = strings.TrimSpace(url)
 
 	// Handle pvc:// URL format: pvc://<pvc-name>/<file-path>
@@ -530,7 +537,7 @@ func (p *PVCStorage) parsePath(url string) (string, error) {
 
 	// Ensure path doesn't try to escape the mount
 	if strings.Contains(url, "..") {
-		return "", &StorageError{
+		return "", "", &StorageError{
 			Type:    ErrorTypeInvalidConfig,
 			Message: "invalid path: contains '..'",
 		}
@@ -541,14 +548,20 @@ func (p *PVCStorage) parsePath(url string) (string, error) {
 	// Example: rbc-demo-migration-storage/vmmigrations/default/rbc-demo-migration/export.qcow2
 	parts := strings.SplitN(url, "/", 2)
 	if len(parts) < 2 {
-		return "", &StorageError{
+		return "", "", &StorageError{
 			Type:    ErrorTypeInvalidConfig,
-			Message: "invalid PVC URL format: expected pvc://<pvc-name>/<file-path>",
+			Message: msgStagedFileInvalidSchema,
 		}
 	}
 
 	pvcName := parts[0]
-	filePath := parts[1]
+	filePath := strings.TrimLeft(parts[1], "/")
+	if filePath == "" {
+		return "", "", &StorageError{
+			Type:    ErrorTypeInvalidConfig,
+			Message: msgStagedFileInvalidSchema,
+		}
+	}
 
 	// Construct the full path using the configured mount path
 	// MountPath should already include the PVC name (e.g., /mnt/migration-storage/<pvc-name>)
@@ -557,5 +570,5 @@ func (p *PVCStorage) parsePath(url string) (string, error) {
 
 	log.Printf("DEBUG Parsed PVC path: url=%s pvc=%s file=%s mount=%s abs=%s", url, pvcName, filePath, p.mountPath, absPath)
 
-	return absPath, nil
+	return absPath, filepath.Clean(filePath), nil
 }
