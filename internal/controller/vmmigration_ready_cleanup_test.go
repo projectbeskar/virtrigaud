@@ -138,6 +138,7 @@ func TestStampedReadyMigrationDeletesOnlyTheExportedSourceVM(t *testing.T) {
 func TestReadyTransitionStampsTheCleanupMarker(t *testing.T) {
 	sourceVM, sourceProvider, targetProvider, migration := creatingFixture("default")
 	migration.Status.Phase = infrav1beta1.MigrationPhaseValidatingTarget
+	migration.Status.TargetVMUID = readyTargetVMUID
 	target := readyTargetVM("default")
 	target.Annotations["virtrigaud.io/migration"] = migration.Namespace + "/" + migration.Name
 	r, _ := directionReconciler(t, &capturingMigrationProvider{}, sourceVM, sourceProvider, targetProvider, migration, target)

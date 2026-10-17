@@ -2197,7 +2197,10 @@ func (r *VirtualMachineReconciler) adjustPowerState(
 // rests on the referenced VMMigration, looked up in the VM's OWN namespace:
 // its spec must target this VM (name, and namespace — Target.Namespace or the
 // migration's own), and its status — which tenants cannot write — must record
-// diskPath as the imported disk (status.diskInfo.targetPath). A missing ref, a
+// diskPath as the imported disk (status.diskInfo.targetPath), and it must have
+// created this very VirtualMachine (status.targetVMUID, or the claim it wrote
+// before its Create: migrationOwnsTargetVM) — a VirtualMachine someone else
+// created under the target's name never gets the landing disk. A missing ref, a
 // migration that does not exist, or any mismatch yields false: the provider
 // then treats the path as a base image (confined, then copied or rejected).
 // Only an API error other than NotFound is returned, so a transient failure
@@ -2219,6 +2222,35 @@ func (r *VirtualMachineReconciler) isOwnMigrationDisk(
 		}
 		return false, fmt.Errorf("get VMMigration %s referenced by importedDisk: %w", key, err)
 	}
+	if !migrationLandsDiskFor(migration, vm, diskPath) {
+		return false, nil
+	}
+	// The migration must also have created THIS VirtualMachine (its UID or
+	// its claim, migrationOwnsTargetVM): another VirtualMachine created under
+	// the target's name — with a copied spec.importedDisk — is not given the
+	// landing disk. The claim is written before the migration's Create, so a
+	// cache that does not show it yet is answered from the API server.
+	if migrationOwnsTargetVM(migration, vm) {
+		return true, nil
+	}
+	if r.APIReader == nil {
+		return false, nil
+	}
+	live := &infravirtrigaudiov1beta1.VMMigration{}
+	if err := r.APIReader.Get(ctx, key, live); err != nil {
+		if errors.IsNotFound(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("re-read VMMigration %s referenced by importedDisk: %w", key, err)
+	}
+	return migrationLandsDiskFor(live, vm, diskPath) && migrationOwnsTargetVM(live, vm), nil
+}
+
+// migrationLandsDiskFor reports whether migration targets vm (name, and
+// namespace — Target.Namespace or the migration's own) and recorded diskPath
+// as the disk it imported (status.diskInfo.targetPath).
+func migrationLandsDiskFor(migration *infravirtrigaudiov1beta1.VMMigration, vm *infravirtrigaudiov1beta1.VirtualMachine,
+	diskPath string) bool {
 	targetNamespace := migration.Spec.Target.Namespace
 	if targetNamespace == "" {
 		targetNamespace = migration.Namespace
@@ -2226,7 +2258,7 @@ func (r *VirtualMachineReconciler) isOwnMigrationDisk(
 	di := migration.Status.DiskInfo
 	return migration.Spec.Target.Name == vm.Name &&
 		targetNamespace == vm.Namespace &&
-		di != nil && di.TargetPath != "" && di.TargetPath == diskPath, nil
+		di != nil && di.TargetPath != "" && di.TargetPath == diskPath
 }
 
 // buildCreateRequest builds a provider create request from VM spec.

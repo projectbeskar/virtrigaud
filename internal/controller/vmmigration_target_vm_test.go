@@ -105,13 +105,15 @@ func TestBuildCreateRequest_NamespacedLandingDiskIsOwn(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "m1", Namespace: "default"},
 		Spec:       infrav1beta1.VMMigrationSpec{Target: infrav1beta1.MigrationTarget{Name: "target-vm"}},
 		Status: infrav1beta1.VMMigrationStatus{
-			ImportID: "default.target-vm-migrated",
-			DiskInfo: &infrav1beta1.MigrationDiskInfo{TargetPath: namespacedLandingPath},
+			ImportID:    "default.target-vm-migrated",
+			DiskInfo:    &infrav1beta1.MigrationDiskInfo{TargetPath: namespacedLandingPath},
+			TargetVMUID: "uid-target-vm",
 		},
 	}
 	vmFor := func(ns string) *infrav1beta1.VirtualMachine {
 		vm := baseVM(ns)
 		vm.Name = "target-vm"
+		vm.UID = "uid-target-vm"
 		vm.Spec.ImportedDisk = &infrav1beta1.ImportedDiskRef{
 			DiskID:       migration.Status.ImportID,
 			Path:         namespacedLandingPath,
