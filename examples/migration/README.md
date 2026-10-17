@@ -196,6 +196,15 @@ it, the migration fails at `Validating` with
 kubectl -n <namespace> label pvc <name> virtrigaud.io/component=migration-storage
 ```
 
+**Deleting the migration.** Deleting a `VMMigration` deletes the PVC it created
+(`<migration-name>-storage`, owned by its UID), along with the staged disk on it.
+VirtRigaud **never deletes** a PVC named in `spec.storage.pvc.name`, or any other
+PVC the migration didn't create. That PVC is unmounted from the provider pods and
+left for its owner, and the migration records a Normal `MigrationPVCRetained`
+event naming it. The staged disk stays on that PVC under
+`vmmigrations/<namespace>/<migration-name>/`, so remove it yourself when you no
+longer need it.
+
 The source pod mounts the PVC read-write, because it exports into it. A Provider
 that is only the target mounts it **read-only**, because it only reads the staged disk.
 
