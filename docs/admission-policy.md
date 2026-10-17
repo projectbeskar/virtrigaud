@@ -10,9 +10,15 @@ the same keys.
 convenience.** Some controllers still decide which `VirtualMachine` a
 hypervisor VM is bound to from these keys:
 
-- **Single-host adoption** binds a hypervisor VM's id to an existing
-  `VirtualMachine` that carries the label `virtrigaud.io/adopted=true` and
-  the matching name.
+- **Single-host adoption** creates the adopting `VirtualMachine` first,
+  labelled `virtrigaud.io/adopted=true` and annotated
+  `virtrigaud.io/adopted-id` with the hypervisor VM's id, and then binds
+  that id (and stamps the VM with its new owner) only to a waiting
+  `VirtualMachine` that carries both, under the matching name. A waiting
+  adopter it can no longer bind is deleted, but only if it carries
+  `virtrigaud.io/adopted-id`. One that an older manager created and couldn't
+  bind is recognized by the label plus `spec.importedDisk` with source
+  `manual`.
 - **Clustered adoption** recognizes the `VirtualMachine` waiting for a domain
   by `virtrigaud.io/adopted-host` and `virtrigaud.io/adopted-id`.
 - **`VMClone`** binds the cloned VM only to a target that carries its
@@ -86,7 +92,7 @@ Every `virtrigaud.io` key the code base reads or writes on a
 | `virtrigaud.io/clone-uid` | annotation | `VMClone` | yes |
 | `virtrigaud.io/cloned-from` | annotation | `VMClone` | yes |
 | `virtrigaud.io/adopted-host` | annotation | clustered adoption | yes |
-| `virtrigaud.io/adopted-id` | annotation | clustered adoption | yes |
+| `virtrigaud.io/adopted-id` | annotation | single-host and clustered adoption | yes |
 | `virtrigaud.io/adopted` | label | adoption, `VMClone` | yes |
 | `virtrigaud.io/orphan-on-delete` | annotation | users | no |
 | `virtrigaud.io/force-delete` | annotation | users | no |

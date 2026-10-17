@@ -191,7 +191,10 @@ Only a `VirtualMachine` named as adoption names it (the sanitized VM name, or
 the Provider's `virtrigaud.io/adopt-filter`. A `VirtualMachine` someone creates
 in the Provider's namespace with the adopted label and an `adopted-id`
 annotation under another name gets nothing; a waiting one whose VM the filter
-now excludes is withdrawn. A libvirt domain listed without a UUID is skipped
+now excludes is withdrawn. With the reserved-keys admission policy
+(Kubernetes 1.30+, [`admission-policy.md`](admission-policy.md)), only the
+manager can set that label and annotation at all, under any name. A libvirt
+domain listed without a UUID is skipped
 (the provider needs it for the compare-and-swap), and a Proxmox VM found on a
 node outside the Provider's node selector is refused.
 
