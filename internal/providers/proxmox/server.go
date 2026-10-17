@@ -1927,7 +1927,13 @@ func (p *Provider) ExportDisk(ctx context.Context, req *providerv1.ExportDiskReq
 		VmId:       req.VmId,
 		DiskId:     req.DiskId,
 		SnapshotId: req.SnapshotId,
+		// Owner-checked on the very config that yields the volume copied
+		// below, not only by ExportDisk's pre-check (vm_owner_check.go).
+		Owner: req.GetOwner(),
 	})
+	if isOwnerRefusal(err) {
+		return nil, err
+	}
 	if err != nil {
 		return nil, errors.NewInternal("failed to get disk info", err)
 	}

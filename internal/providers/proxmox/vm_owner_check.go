@@ -21,7 +21,9 @@ import (
 	stderrors "errors"
 	"fmt"
 
+	"google.golang.org/genproto/googleapis/rpc/errdetails"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
 	"github.com/projectbeskar/virtrigaud/internal/providers/proxmox/pveapi"
@@ -137,6 +139,24 @@ func (p *Provider) checkRequestVMOwner(ctx context.Context, id string, owner con
 		return errors.NewInvalidSpec("invalid VM reference: %v", err)
 	}
 	return p.checkVMOwner(ctx, node, vmid, owner, op)
+}
+
+// isOwnerRefusal reports whether err is an owner check's refusal
+// (checkOwnerInConfig): a status carrying VM_NOT_OWNED or
+// OWNER_STAMP_UNREADABLE. A caller that wraps the errors of an inner call
+// returns such a refusal unwrapped, so its code and reason reach the manager.
+func isOwnerRefusal(err error) bool {
+	st, ok := status.FromError(err)
+	if !ok {
+		return false
+	}
+	for _, d := range st.Details() {
+		if info, ok := d.(*errdetails.ErrorInfo); ok && info.GetDomain() == contracts.ErrorInfoDomain &&
+			(info.GetReason() == contracts.VMNotOwnedReason || info.GetReason() == contracts.OwnerStampUnreadableReason) {
+			return true
+		}
+	}
+	return false
 }
 
 // checkCloneSourceOwner is the owner check of a Clone's source VM (vmid on

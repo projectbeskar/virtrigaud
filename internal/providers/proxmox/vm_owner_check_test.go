@@ -18,6 +18,7 @@ package proxmox
 
 import (
 	"context"
+	"log/slog"
 	"net/http"
 	"strings"
 	"testing"
@@ -317,5 +318,43 @@ func TestOwnerCheck_ExportDisk(t *testing.T) {
 				onlyConfigReadOfVM(t, requestsSince(srv, before))
 			})
 		}
+	}
+}
+
+// TestOwnerCheck_ExportPathsCheckTheConfigTheyCopyFrom: each export path's own
+// disk read — the config that yields the volume it copies — is owner-checked
+// too, not only ExportDisk's pre-check, so a VM that took the VMID over after
+// the pre-check is never copied. The paths are called directly here (past the
+// pre-check); nothing may run on the node.
+func TestOwnerCheck_ExportPathsCheckTheConfigTheyCopyFrom(t *testing.T) {
+	paths := map[string]func(p *Provider, req *providerv1.ExportDiskRequest) error{
+		"s3": func(p *Provider, req *providerv1.ExportDiskRequest) error {
+			_, err := p.exportDiskToS3(context.Background(), req)
+			return err
+		},
+		"nfs": func(p *Provider, req *providerv1.ExportDiskRequest) error {
+			_, err := p.exportDiskToNFS(context.Background(), req)
+			return err
+		},
+	}
+	for name, export := range paths {
+		t.Run(name, func(t *testing.T) {
+			p, srv := newOwnerCheckFixture(t, pvefake.VM{Name: "db", Description: testStamp(testOtherUID, ownerStampPhaseReady).line()})
+			p.ssh = &sshTransport{host: "pve", logger: slog.Default(),
+				runOverride: func(_ context.Context, cmd string) (string, string, error) {
+					t.Errorf("nothing may run on the node for a VM that is not the requester's: %q", cmd)
+					return "", "", nil
+				}}
+			before := len(srv.Requests())
+			err := export(p, &providerv1.ExportDiskRequest{
+				VmId: ownerCheckID, BackendType: name, TransferMode: "relay",
+				DestinationUrl:     "nfs://nfs.example/export/web.qcow2",
+				StorageOptionsJson: `{"server":"nfs.example","export":"/export"}`,
+				Owner:              ownerProto(testOwner()),
+			})
+			assert.Equal(t, codes.NotFound, status.Code(err), "error: %v", err)
+			assert.Equal(t, []string{contracts.VMNotOwnedReason}, deleteErrorReasons(err))
+			onlyConfigReadOfVM(t, requestsSince(srv, before))
+		})
 	}
 }
