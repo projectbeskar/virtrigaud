@@ -20,6 +20,7 @@ package stagedfile
 
 import (
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -32,6 +33,15 @@ import (
 // component-by-component fallback that kernels before 5.6 (or a seccomp
 // profile that denies openat2) get.
 var useOpenat2 = true
+
+// openat2Fn is the openat2 system call; tests replace it to inject ENOSYS,
+// EPERM and EAGAIN.
+var openat2Fn = unix.Openat2
+
+// openat2Attempts bounds the openat2 retries on EAGAIN, which RESOLVE_BENEATH
+// returns when a rename or mount raced the resolution; after the last one the
+// open fails closed.
+const openat2Attempts = 8
 
 // resolveStrict confines an openat2 resolution beneath its dirfd and refuses
 // every symbolic link (and /proc magic link) on the way.
@@ -64,6 +74,13 @@ const (
 // beneath root without following a symbolic link, and the result must be a
 // regular file with exactly one link. root itself is trusted (it is the pod's
 // mount point) and is opened normally.
+//
+// The final component is opened O_RDONLY|O_NONBLOCK|O_NOCTTY before its type
+// is checked (fstat on the open descriptor, so the check and the read are on
+// the same inode): a planted FIFO therefore cannot block the open, and is
+// refused right after it. Opening a device node the tenant planted is
+// possible only for one the container's device cgroup allows; it is refused
+// just the same, before any read.
 func OpenRead(root, rel string) (*os.File, error) {
 	comps, err := splitRel(OpOpen, root, rel)
 	if err != nil {
@@ -79,13 +96,13 @@ func OpenRead(root, rel string) (*os.File, error) {
 	if err != nil {
 		return nil, classify(OpOpen, root, rel, err)
 	}
-	if err := checkRegular(fd); err != nil {
+	if regErr := checkRegular(fd); regErr != nil {
 		closeFD(fd)
-		return nil, refusal(OpOpen, root, rel, err.Error(), nil)
+		return nil, refusal(OpOpen, root, rel, regErr.Error(), nil)
 	}
-	if err := unix.SetNonblock(fd, false); err != nil {
+	if nbErr := unix.SetNonblock(fd, false); nbErr != nil {
 		closeFD(fd)
-		return nil, failure(OpOpen, root, rel, err)
+		return nil, failure(OpOpen, root, rel, nbErr)
 	}
 	return os.NewFile(uintptr(fd), filepath.Join(root, rel)), nil
 }
@@ -130,8 +147,14 @@ func Create(root, rel string, dirPerm, filePerm fs.FileMode) (*os.File, error) {
 	case st.Mode&unix.S_IFMT != unix.S_IFREG:
 		return nil, refusal(OpCreate, root, rel, reasonNotRegular, nil)
 	default:
-		if err := retryEINTR(func() error { return unix.Unlinkat(dirfd, base, 0) }); err != nil && !errors.Is(err, unix.ENOENT) {
-			return nil, failure(OpCreate, root, rel, err)
+		unlinkErr := retryEINTR(func() error { return unix.Unlinkat(dirfd, base, 0) })
+		switch {
+		case unlinkErr == nil, errors.Is(unlinkErr, unix.ENOENT):
+		case errors.Is(unlinkErr, unix.EISDIR):
+			// Swapped for a directory after the fstatat.
+			return nil, refusal(OpCreate, root, rel, reasonDirAtName, unlinkErr)
+		default:
+			return nil, failure(OpCreate, root, rel, unlinkErr)
 		}
 	}
 	var fd int
@@ -169,16 +192,18 @@ func Remove(root, rel string) error {
 	}
 	defer closeFD(dirfd)
 	base := comps[len(comps)-1]
-	if err := retryEINTR(func() error { return unix.Unlinkat(dirfd, base, 0) }); err != nil {
-		if errors.Is(err, unix.EISDIR) {
-			return refusal(OpRemove, root, rel, reasonDirAtName, err)
+	if unlinkErr := retryEINTR(func() error { return unix.Unlinkat(dirfd, base, 0) }); unlinkErr != nil {
+		if errors.Is(unlinkErr, unix.EISDIR) {
+			return refusal(OpRemove, root, rel, reasonDirAtName, unlinkErr)
 		}
-		return failure(OpRemove, root, rel, err)
+		return failure(OpRemove, root, rel, unlinkErr)
 	}
 	return nil
 }
 
-// openRoot opens the trusted root directory.
+// openRoot opens the trusted root directory. A missing root is reported (in
+// Detail, for the provider log) as a missing staging mount: the PVC is not
+// mounted where the provider expects it.
 func openRoot(op, root, rel string) (int, error) {
 	var fd int
 	err := retryEINTR(func() error {
@@ -187,6 +212,9 @@ func openRoot(op, root, rel string) (int, error) {
 		return oerr
 	})
 	if err != nil {
+		if errors.Is(err, unix.ENOENT) {
+			err = fmt.Errorf("the staging mount %q is missing (is the PVC mounted into this pod?): %w", root, err)
+		}
 		return -1, failure(op, root, rel, err)
 	}
 	return fd, nil
@@ -194,18 +222,12 @@ func openRoot(op, root, rel string) (int, error) {
 
 // openBeneath opens comps beneath rootfd with readFlags: openat2 with
 // resolveStrict, or — on a kernel without openat2 (ENOSYS) or under a seccomp
-// profile that denies it (EPERM) — the equivalent O_NOFOLLOW walk.
+// profile that denies it (EPERM) — the equivalent O_NOFOLLOW walk. EAGAIN
+// (a racing rename or mount) is retried openat2Attempts times, then the open
+// fails closed.
 func openBeneath(rootfd int, comps []string) (int, error) {
 	if useOpenat2 {
-		var fd int
-		err := retryEINTR(func() error {
-			var oerr error
-			fd, oerr = unix.Openat2(rootfd, strings.Join(comps, "/"), &unix.OpenHow{
-				Flags:   uint64(readFlags),
-				Resolve: resolveStrict,
-			})
-			return oerr
-		})
+		fd, err := openat2Beneath(rootfd, strings.Join(comps, "/"))
 		if err == nil {
 			return fd, nil
 		}
@@ -230,6 +252,27 @@ func openBeneath(rootfd int, comps []string) (int, error) {
 	return fd, nil
 }
 
+// openat2Beneath runs openat2 with readFlags and resolveStrict, retrying
+// EINTR, and EAGAIN up to openat2Attempts times.
+func openat2Beneath(rootfd int, path string) (int, error) {
+	how := &unix.OpenHow{Flags: uint64(readFlags), Resolve: resolveStrict}
+	var (
+		fd  int
+		err error
+	)
+	for range openat2Attempts {
+		err = retryEINTR(func() error {
+			var oerr error
+			fd, oerr = openat2Fn(rootfd, path, how)
+			return oerr
+		})
+		if !errors.Is(err, unix.EAGAIN) {
+			return fd, err
+		}
+	}
+	return -1, err
+}
+
 // walkParent opens, one component at a time and without following a link,
 // every directory of comps but the last, beneath rootfd; with create it makes
 // the missing ones (dirPerm). It returns a new descriptor of the last
@@ -241,17 +284,17 @@ func walkParent(rootfd int, comps []string, create bool, dirPerm fs.FileMode) (i
 		return -1, err
 	}
 	for _, c := range comps[:len(comps)-1] {
-		next, err := openDirNoFollow(dirfd, c)
-		if errors.Is(err, unix.ENOENT) && create {
+		next, openErr := openDirNoFollow(dirfd, c)
+		if errors.Is(openErr, unix.ENOENT) && create {
 			if merr := retryEINTR(func() error { return unix.Mkdirat(dirfd, c, uint32(dirPerm.Perm())) }); merr != nil && !errors.Is(merr, unix.EEXIST) {
 				closeFD(dirfd)
 				return -1, merr
 			}
-			next, err = openDirNoFollow(dirfd, c)
+			next, openErr = openDirNoFollow(dirfd, c)
 		}
 		closeFD(dirfd)
-		if err != nil {
-			return -1, err
+		if openErr != nil {
+			return -1, openErr
 		}
 		dirfd = next
 	}
