@@ -2016,6 +2016,19 @@ func (r *VMMigrationReconciler) handleValidatingTargetPhase(ctx context.Context,
 	case targetVMAbsent:
 		return r.transitionToFailedWithReason(ctx, migration, ReasonTargetVMGone, targetVMGoneMessage)
 	}
+	// This is the committing step (Phase=Ready, then the source's
+	// deleteAfterMigration): decide on the live object, not the cache. A VM
+	// that is being deleted is gone.
+	targetVM, err = r.liveOwnedTargetVM(ctx, migration)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if targetVM == nil {
+		return r.transitionToFailedWithReason(ctx, migration, ReasonTargetVMGone, targetVMGoneMessage)
+	}
+	if !migrationOwnsTargetVM(migration, targetVM) {
+		return r.failTargetVMNotOwned(ctx, migration)
+	}
 	bound := bindTargetVMUID(migration, targetVM)
 
 	// Verify VM is ready by checking the Ready condition

@@ -224,6 +224,26 @@ func (r *VMMigrationReconciler) classifyTargetVM(
 	return targetVMNotOwned, live, nil
 }
 
+// liveOwnedTargetVM re-reads the VirtualMachine under the migration's target
+// key from the API server. nil (no error) means it is gone: absent, or being
+// deleted. The caller checks ownership (migrationOwnsTargetVM) of a VM it
+// returns. A read error is returned.
+func (r *VMMigrationReconciler) liveOwnedTargetVM(ctx context.Context,
+	migration *infrav1beta1.VMMigration) (*infrav1beta1.VirtualMachine, error) {
+	key := migrationTargetVMKey(migration)
+	vm := &infrav1beta1.VirtualMachine{}
+	if err := r.liveReader().Get(ctx, key, vm); err != nil {
+		if errors.IsNotFound(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("re-read target VirtualMachine %s: %w", key, err)
+	}
+	if !vm.DeletionTimestamp.IsZero() {
+		return nil, nil
+	}
+	return vm, nil
+}
+
 // releaseGoneTargetBinding clears status.targetVMUID and status.targetVMClaim
 // (in memory; the caller writes the status) when the VirtualMachine they
 // bind is no longer under the target key — absent, or another object — as

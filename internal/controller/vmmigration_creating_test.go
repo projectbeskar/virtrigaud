@@ -68,7 +68,7 @@ func TestHandleCreatingPhase_NilDiskInfoFailsCleanly(t *testing.T) {
 // client's calls (both the cached client and the APIReader go through it).
 type creatingHarness struct {
 	r         *VMMigrationReconciler
-	live      client.Client
+	live      client.WithWatch
 	migration *infrav1beta1.VMMigration
 }
 
@@ -504,4 +504,60 @@ func TestRetry_KeepsTheBindingOfAnExistingOwnVM(t *testing.T) {
 	got := h.get(t)
 	assert.Equal(t, infrav1beta1.MigrationPhasePending, got.Status.Phase)
 	assert.Equal(t, "uid-own", got.Status.TargetVMUID)
+}
+
+// TestValidatingTargetPhase_DecidesOnTheLiveVM (review L-3): the committing
+// step re-reads the target VM from the API server. A cache that still shows
+// the migration's own Ready VM does not complete the migration when the live
+// VM is gone, being deleted, or another object.
+func TestValidatingTargetPhase_DecidesOnTheLiveVM(t *testing.T) {
+	ctx := context.Background()
+	own := func() *infrav1beta1.VirtualMachine {
+		vm := readyVM(plantedTargetVM())
+		vm.UID = "uid-own"
+		return vm
+	}
+	for name, tc := range map[string]struct {
+		live       func() *infrav1beta1.VirtualMachine
+		wantReason string
+	}{
+		"deleted": {nil, ReasonTargetVMGone},
+		"being deleted": {func() *infrav1beta1.VirtualMachine {
+			vm := own()
+			vm.Finalizers = []string{infrav1beta1.VirtualMachineFinalizer}
+			vm.DeletionTimestamp = &metav1.Time{Time: time.Now()}
+			return vm
+		}, ReasonTargetVMGone},
+		"replaced":        {func() *infrav1beta1.VirtualMachine { return readyVM(plantedTargetVM()) }, ReasonTargetVMNotOwned},
+		"own (completes)": {own, "MigrationComplete"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, migration := importRaceFixture()
+			migration.Status.Phase = infrav1beta1.MigrationPhaseValidatingTarget
+			migration.Status.TargetVMUID = "uid-own"
+			objs := []client.Object{migration}
+			if tc.live != nil {
+				objs = append(objs, tc.live())
+			}
+			stale := own()
+			h := newCreatingHarness(t, false, nil, objs...)
+			// The reconciler's cache still shows the migration's own Ready VM.
+			h.r.Client = interceptor.NewClient(h.live, interceptor.Funcs{
+				Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+					if vm, ok := obj.(*infrav1beta1.VirtualMachine); ok {
+						stale.DeepCopyInto(vm)
+						return nil
+					}
+					return c.Get(ctx, key, obj, opts...)
+				},
+			})
+
+			_, err := h.r.handleValidatingTargetPhase(ctx, h.migration)
+			require.NoError(t, err)
+			got := h.get(t)
+			ready := readyCondition(got.Status.Conditions, infrav1beta1.VMMigrationConditionReady)
+			require.NotNil(t, ready)
+			assert.Equal(t, tc.wantReason, ready.Reason)
+		})
+	}
 }
