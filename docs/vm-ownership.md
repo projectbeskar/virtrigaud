@@ -223,7 +223,9 @@ Adoption stamps a VM only when it adopts it: **a VM adopted by an earlier
 release keeps the stamp it had.** On vSphere and single-host libvirt nothing
 checks that stamp on a single-host per-VM call. On Proxmox, an adopted VM that
 still carries a previous owner's stamp is answered `VM_NOT_OWNED` by its
-`VirtualMachine`'s `Delete` and left on the cluster. To find them, compare each
+`VirtualMachine`'s `Delete` and left on the cluster, and by every other per-VM
+call too: its `VirtualMachine` is held as `Ready=False/VMNotOwned` (see
+[Per-VM calls](#per-vm-calls-describe-power-reconfigure-snapshots-disks-and-clone-sources)). To find them, compare each
 adopted Proxmox `VirtualMachine`'s UID with the stamp on its VM
 (`qm config <vmid> | grep virtrigaud.owner`). To fix one, either remove the
 `virtrigaud.owner` line from the VM's Notes (the VM is then unstamped and is
@@ -956,9 +958,32 @@ To resolve `VMNotOwned`:
   `VirtualMachine`. Its `Delete` is answered `VM_NOT_OWNED`, so it is released
   and the other VM is left alone, with a `VMLeftOnHypervisor` event. Create
   the `VirtualMachine` again to get a new VM.
-- **The VM is this `VirtualMachine`'s**, but renamed in PVE (unstamped) or
-  adopted while it carried an earlier owner's stamp: rename it back in PVE, or
-  delete the `VirtualMachine` (the VM is left in place) and adopt the VM again.
+- **The VM is this `VirtualMachine`'s, renamed in PVE** (it is unstamped):
+  rename it back; the next `Describe` accepts it. Or delete the
+  `VirtualMachine` (the VM is left in place) and let adoption take the VM
+  again: through a Proxmox provider of this release (it reports
+  `supportsOwnerTransfer`), adoption stamps it with its new `VirtualMachine`
+  (see [Adoption stamps the adopted VM](#adoption-stamps-the-adopted-vm)).
+  An unstamped VM needs only `virtrigaud.io/adopt-vms` on the Provider.
+- **The VM is this `VirtualMachine`'s, adopted by an earlier release while it
+  carried an earlier owner's stamp** (see
+  [VMs adopted before this release](#vms-adopted-before-this-release)): remove
+  the `virtrigaud.owner` line from the VM's Notes in PVE; the VM is then
+  unstamped and accepted while its PVE name matches. Or delete (or detach with
+  `virtrigaud.io/orphan-on-delete: "true"`) the `VirtualMachine` and let
+  adoption take the VM again. That re-stamps it only when all of these hold:
+  the provider reports `supportsOwnerTransfer`; the Provider has
+  `virtrigaud.io/adopt-vms` **and** `virtrigaud.io/adopt-stamped-vms: "true"`;
+  no `VirtualMachine` in the cluster has the stamped UID (adoption checks this
+  uncached; the deleted `VirtualMachine`'s own UID doesn't count once it is
+  gone); and the VM's PVE name is the one adoption gives the new
+  `VirtualMachine`. Otherwise remove the stamp line by hand.
+- **`OwnerStampUnreadable`**: adoption never takes such a VM. An administrator
+  fixes or removes the `virtrigaud.owner` line(s) in the VM's Notes, or
+  removes the VM.
+
+A VM adopted by this release is stamped with its `VirtualMachine` before it
+is bound, so adoption no longer leads to this hold.
 
 The provider log names the VMID, the requester and, for a stamped VM, the
 owner recorded on it: search for `Refusing the call`.
@@ -1033,20 +1058,21 @@ that adoption bound before this release keeps the stamp it had.
   after the clone), so `VMClone` clones are unstamped. They aren't re-bound by
   a re-sent `Clone`, and a re-sent `Clone` can make a second clone.
 - The owner check and the call are two PVE requests. A VMID freed and reused
-  between them isn't caught.
+  between them isn't caught. PVE's config `digest` parameter could close this
+  for `Reconfigure` (its config `PUT` and disk `resize`), as `TransferOwner`
+  already uses it; `Reconfigure` doesn't use it yet. `Power` and the snapshot
+  calls have no such parameter.
 - **The legacy name rule can be claimed by anyone who can create a VM.** An
   unstamped VM named like the owner is treated as the owner's (see the table
-  above). So when a `VirtualMachine`'s VM is removed, anyone who can create a
-  VM with that VMID — `VM.Allocate` on a pool or path the freed VMID can be
-  created in, such as a shared pool — can make an unstamped VM with the
+  above), and the provider can't tell whether the `VirtualMachine`'s own VM
+  was stamped. So once a `VirtualMachine`'s VM is removed, anyone who can
+  create a VM at the freed VMID — `VM.Allocate` on a pool or path it can be
+  created in, such as a shared pool — can create an unstamped VM with the
   `VirtualMachine`'s name there, and the `VirtualMachine` then reads, powers,
-  resizes, snapshots and copies it as its own. A stamped `VirtualMachine`'s VM
-  is matched by its UID instead, which a new VM carries only if its creator
-  also writes a stamp into its description. Grant `VM.Allocate` on the pools
-  and paths where VirtRigaud's VMs live only as you would `VM.Config.Options`
-  (see [The owner stamp](#the-owner-stamp-1)). PVE's config `digest` parameter could close this
-  for `Reconfigure` (its config `PUT` and disk `resize`); it isn't used yet.
-  `Power` and the snapshot calls have no such parameter.
+  resizes, snapshots and copies it as its own. A VM at that VMID stamped for
+  anyone else is refused. Grant `VM.Allocate` on the pools and paths where
+  VirtRigaud's VMs live only as you would `VM.Config.Options` (see
+  [The owner stamp](#the-owner-stamp-1)).
 - **Give each Provider its own PVE API token.** The restart guard tells this
   provider's clone and create tasks from other users' by the PVE user that
   ran them. Two Provider objects, or two provider replicas, that share a token

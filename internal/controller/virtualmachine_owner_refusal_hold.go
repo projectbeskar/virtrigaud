@@ -51,8 +51,10 @@ var vmNotOwnedHoldMessage = fmt.Sprintf("The provider reports that the hyperviso
 	"was most likely reused after this VirtualMachine's VM was removed outside VirtRigaud). That VM is neither read "+
 	"nor changed, and no VM is created in its place (re-checked with a backoff of up to %s). Deleting this "+
 	"VirtualMachine leaves that VM untouched; create the VirtualMachine again to get a new VM. If that VM is this "+
-	"VirtualMachine's (renamed on the hypervisor, or adopted while carrying an earlier owner's stamp), restore its "+
-	"name, or delete this VirtualMachine (the VM is left in place) and adopt the VM again", blockedRetryMax)
+	"VirtualMachine's (renamed on the hypervisor, or adopted by an earlier release while it carried an earlier "+
+	"owner's stamp), restore its name or remove the virtrigaud.owner line from its notes; or delete this "+
+	"VirtualMachine (the VM is left in place) and let adoption take the VM again, which stamps it (a VM that "+
+	"still carries a stamp needs the Provider's virtrigaud.io/adopt-stamped-vms)", blockedRetryMax)
 
 // ownerStampUnreadableHoldMessage is the Ready message of a VirtualMachine
 // held because the provider answered a Describe, power change or reconfigure
