@@ -5,6 +5,40 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-10-17 13:28] - Single-host libvirt answers the failures of SnapshotCreate, ExportDisk and ImportDisk that its code can prove as definite (rc2 R21)
+**Author:** @wrkode (William Rizzo)
+
+### Fixed
+- `internal/providers/libvirt/call_outcome.go` (new), `internal/providers/libvirt/server.go`, `internal/providers/libvirt/s3export.go`, `internal/providers/libvirt/nfs.go`, `internal/providers/libvirt/s3import.go`, `internal/providers/libvirt/conn.go`, `internal/providers/libvirt/privileged_copy.go`, `internal/providers/libvirt/provider_virsh.go`: the manager's durable request markers (rc2 R6) hold a `VMMigration` or `VMSnapshot` for an operator on any failure that does not prove what the call did, and a single-host libvirt provider answered almost every failure as an untyped `codes.Unknown`, so ordinary failures (a `qemu-img` error, a missing source domain, a name already taken, a refusal before any side effect) were held. The single-host handlers now answer the failures their code proves, with a constant status text (host paths, commands, stderr and URLs go to the provider log only):
+  - **Not performed** (`Unavailable` with `VM_OPERATION_FAILED`, the existing answer the manager reads as `contracts.IsNothingDone` and keeps out of the circuit breaker): a failing step that only reads or validates, or writes into a private directory that the call removes, before the call's one publishing step. `SnapshotCreate`: the domain state, the disk-dependency check or the snapshot names cannot be read; `virsh snapshot-create-as --atomic` ended with an exit status of its own and the snapshot, listed again, is absent. `ExportDisk` s3: any failure of the flatten (the upload is the only publishing step), an upload the S3 service refused with an HTTP 4xx, a host stream that broke before the upload completed; nfs: any check before the convert, and a convert that ended with an exit status of its own; pvc: every failure (the export runs in the provider's own process). `ImportDisk` s3 and nfs: any failure before the rename onto the landing name, and a rename that ended with an exit status; pvc: any failure up to and including the copy to the pool directory.
+  - **Typed refusals**: an unusable storage configuration or request (`InvalidArgument`), a source domain that does not exist (`NotFound`), a snapshot name that is already taken (`AlreadyExists`; the single-host create now reads the snapshot names before it creates anything, so a snapshot found after a failed create is its own), a staged disk that is missing (`NotFound`), a local transport (`FailedPrecondition`). A contracts error from a step (`NotFound`, `InvalidSpec`, `Conflict`, `NotSupported`) is mapped to its status instead of crossing as `Unknown`.
+  - **Still unknown** (the untyped answer, so the manager still holds): a host command that lost its connection or was killed (exit status 128 or above, or none) while it may still change something, a request whose deadline passed, an upload that may have completed (HTTP 5xx, a network error), a rename whose result was lost, a snapshot that exists after a failed create, a failure after the pvc import's disk landed.
+- `internal/providers/libvirt/privileged_copy.go`: an export of a domain that is not on the host is `NotFound` instead of a retryable failure.
+- `internal/providers/libvirt/provider_virsh.go`: the pvc export's unsupported format and bad destination are `InvalidSpec` (`InvalidArgument` on the wire).
+
+### Changed
+- `internal/providers/libvirt/server.go`: the single-host `SnapshotCreate` runs one more read-only `virsh snapshot-list` before `snapshot-create-as` (and one after a failed create). The clustered create's command sequence is unchanged.
+- The error texts of these three calls are now constant (the single-host golden `internal/providers/libvirt/testdata/single_host_snapshot_clone_disk.golden.json` is regenerated: only error texts and the extra `snapshot-list` changed).
+- A host that cannot be reached during one of these three calls on a single-host libvirt provider is now "not performed", which no longer counts toward the Provider's circuit breaker (other calls to the provider still do).
+- `internal/storage/s3.go`: `IsServiceRejection` (an S3 HTTP 4xx answer) and `IsInvalidConfig`.
+
+### Added
+- Tests:
+  - `internal/providers/libvirt/call_outcome_test.go`, `call_outcome_transfer_test.go`, `call_outcome_helpers_test.go`: the helpers; every failure point of `SnapshotCreate`, `ExportDisk` (s3, nfs, pvc) and `ImportDisk` (s3, nfs, pvc) on a fake host, checked for its class (definite, typed refusal, unknown) and for a constant status text; the clustered create's command sequence.
+  - `internal/transport/grpc/client_definite_outcome_test.go`: how the manager maps these answers (`IsNothingDone`, out of the breaker).
+  - `internal/controller/provider_call_definite_outcome_test.go`: a typed definite libvirt failure fails the `VMMigration` (snapshot, export, import) or `VMSnapshot` attempt and clears the marker; an untyped one is held.
+  - `internal/storage/s3fake/s3fake.go`: multipart uploads.
+- `docs/provider-call-outcomes.md`, `docs/upgrading.md`: the classification table; the Limitations and the rc2 R6 upgrade row updated.
+
+### Why
+rc2 R6 made every failure without a definite outcome hold the object for an operator. On a single-host libvirt provider that turned ordinary, definite failures into holds because the provider never classified them. The failures whose outcome the code proves are now classified, and the rest stay held.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout (the libvirt provider image; until it is rolled, every libvirt failure of these calls stays held)
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-10-17 08:40] - pvc staging: staged files are opened beneath the PVC mount with no symbolic link followed (rc2 R17)
 **Author:** @wrkode (William Rizzo)
 

@@ -42,10 +42,11 @@ with `status: "True"`:
     not found or not owned, a name conflict, a disk-size refusal.
 
   Every other failure — a deadline, `Unavailable` after the request was written, an
-  error the provider did not classify (a single-host libvirt provider sends most of
-  its failures that way) — **keeps the marker** and is handled like a lost result,
-  below. The object is never failed for it. Through a clustered Provider, a
-  `SnapshotCreate` answered "retry" is handled the same way.
+  error the provider did not classify — **keeps the marker** and is handled like a
+  lost result, below. The object is never failed for it. Through a clustered
+  Provider, a `SnapshotCreate` answered "retry" is handled the same way. A
+  single-host libvirt provider classifies the failures it can prove (see
+  [Single-host libvirt: which failures are definite](#single-host-libvirt-which-failures-are-definite)).
 - **Attempt id.** The marker's `lastTransitionTime` (RFC 3339) identifies the
   attempt. Every new send writes a new, later one.
 
@@ -128,6 +129,34 @@ hang-up.
 A provider image older than rc2 reports neither field. An export or import whose
 outcome it lost is held.
 
+## Single-host libvirt: which failures are definite
+
+A single-host libvirt provider used to answer almost every failure as an unclassified
+`codes.Unknown`. Since rc2 (R21) it answers the failures its code can prove, with a
+constant status text (the detail is in the provider log, never in a status or event):
+
+- **Not performed** (`Unavailable` with `VM_OPERATION_FAILED`, which the manager reads as
+  "the provider did not perform the operation" and keeps out of the Provider's circuit
+  breaker). The failing step only reads or validates, or writes into a private area that
+  the call removes, and the call's one publishing step never ran.
+- **A typed refusal** (`InvalidArgument`, `NotFound`, `AlreadyExists`,
+  `FailedPrecondition`, `PermissionDenied`) for a request the provider refused before
+  doing anything.
+- **Unknown** (an untyped `Unknown`): the call may have changed something, or may still
+  be running. The marker is kept, as above.
+
+| Call | Definite (the attempt fails, the marker is cleared) | Unknown (the marker is kept) |
+|---|---|---|
+| `SnapshotCreate` | The domain's state, disk dependencies or snapshot names cannot be read (not performed); the domain does not exist (`NotFound`); the snapshot name is already taken (`AlreadyExists`, nothing is created); the disk is a linked clone's backing file (`FailedPrecondition`); `virsh snapshot-create-as --atomic` ended with an exit status of its own **and** the snapshot, listed again, is absent (not performed). | The create's connection dropped or `virsh` was killed (exit status 128 or above); the request's deadline passed; the snapshot exists after a failed create; the list after the failed create failed. |
+| `ExportDisk` `s3` | The storage configuration is unusable (`InvalidArgument`); the source domain or disk is missing or refused; **any** failure of the flatten (it writes only into a private directory that is removed, and the upload is the only publishing step); the S3 service answered the upload with an HTTP 4xx, or the host stream broke before the upload completed (it is never completed, so nothing is published). | The upload may have completed: an HTTP 5xx, a network error, or a deadline while the upload ran. |
+| `ExportDisk` `nfs` | An invalid destination (`InvalidArgument`); the source domain or disk is missing or refused; any check before the convert; the in-place `qemu-img convert` **ended with an exit status of its own** (it no longer writes; any partial staged file is replaced by the next export). | The convert was killed or its connection dropped: it may still be writing the staged file. |
+| `ExportDisk` `pvc` | Every failure. The export runs in the provider's own process: the local `qemu-img` is killed with the call, the copy is an in-process write that has finished when the call returns, and a partial file is replaced by the next export. | None. |
+| `ImportDisk` `s3` and `nfs` | The request is unusable (`InvalidArgument`, `FailedPrecondition`); **any** failure before the rename onto the landing name (the staged object and the converted disk are in a private directory that is removed, and the rename runs only in the same call); the rename ended with an exit status of its own. | The rename's connection dropped or `mv` was killed: the disk may have landed. |
+| `ImportDisk` `pvc` | The request is unusable; the staged disk is missing (`NotFound`); any failure up to and including the copy to the host's pool directory, as above. | A failure after that copy (the pool or volume step): the disk is already on the host. |
+
+A failure that already carries a typed refusal keeps it (for example the disk-size limit
+refusals, which hold the migration instead of failing it).
+
 ## Releasing a held object
 
 The hold's `Ready` message is constant and names the action. The `Warning` event of
@@ -170,11 +199,22 @@ re-drives it at once.
 
 ## Limitations
 
-- **More holds on single-host libvirt.** Most single-host libvirt failures carry no
-  classification, so they now keep the marker instead of failing the attempt:
-  - a snapshot is held for an operator;
-  - an `s3` export is re-sent after the settle time;
-  - an `nfs` or `pvc` export is held.
+- **Some single-host libvirt failures are still held.** The provider classifies the
+  failures its code can prove (see
+  [the table above](#single-host-libvirt-which-failures-are-definite)). The rest keep
+  the marker instead of failing the attempt:
+  - a snapshot create that lost its connection, was killed, or left the snapshot behind
+    is held for an operator;
+  - an `s3` export whose upload may have completed is re-sent after the settle time;
+  - an `nfs` export whose convert was killed, and an import whose rename was lost or
+    that failed after the disk landed, are held.
+  A provider image older than rc2 still answers every libvirt failure untyped, and the
+  manager holds each of them.
+- **Host-unreachable failures of these three calls no longer count toward the circuit
+  breaker.** A single-host libvirt provider whose host cannot be reached while a
+  `SnapshotCreate`, `ExportDisk` or `ImportDisk` runs now answers "not performed", which
+  is out of the breaker like every `VM_OPERATION_FAILED`. Other calls to the same
+  provider (`Describe`, `Power`, ...) still count the failure.
 - **A lost failure write is held.** A known failure whose status write itself is
   lost (a conflict on the failure write, a restart before it) leaves the marker. The
   object is then held for an operator, although the provider answered definitely.
@@ -202,6 +242,7 @@ re-drives it at once.
   additive.
 - **Roll the providers promptly after the manager.** Until a provider reports the
   fields, an export or import whose outcome was lost is held for an operator instead
-  of being re-sent.
+  of being re-sent. Until a single-host libvirt provider is rolled to the rc2 image
+  that carries R21, every libvirt failure of these calls is held.
 - **Objects in flight across the upgrade carry no marker.** A result lost in the
   upgrade itself behaves as in rc1.
