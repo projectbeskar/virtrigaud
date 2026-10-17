@@ -670,9 +670,11 @@ policy and grants → manager → providers), and rollback caveats in
   itself live (the marker is written with an optimistic lock); the id is
   written with a UID- and id-checked status patch,
   retried on transient errors (a **`VMRecordNotSaved`** event names a VM it
-  could not record). A Create whose outcome stays unknown is re-sent on
-  vSphere, libvirt and Proxmox (they re-bind the VM they stamped; roll the
-  Proxmox provider with the manager); otherwise the VM waits
+  could not record). A Create whose outcome stays unknown is re-sent only to a
+  provider that reports `supports_owner_rebind` (new in rc2: the vSphere, libvirt,
+  Proxmox and mock providers of this release, which re-bind the VM they stamped;
+  an older provider image, including an older Proxmox one, is never re-sent it);
+  otherwise the VM waits
   with `Ready=False/CreateOutcomeUnknown` until an operator records its
   `status.id` or confirms that this attempt made no VM
   (`virtrigaud.io/create-outcome=not-created@<attempt id>`, audited by a
@@ -844,7 +846,10 @@ policy and grants → manager → providers), and rollback caveats in
   perform it — an SSH or libvirtd blip) is held as `CloneRetrying` and
   retried with a backoff (15 s doubling to 5 min) instead of failing for good.
   A clone whose outcome is unknown (the connection dropped mid-call, a
-  timeout) still fails, so a retry can never make a second VM.
+  timeout) used to fail so that a retry could never make a second VM; since
+  rc2 it is held and re-sent to a provider that stamps and re-binds
+  (`supports_owner_rebind`), and still fails on any other
+  (→ [Changes since v0.4.0-rc1](#single-host-vmclone-targets-are-stamped-a-re-sent-clone-re-binds-395)).
 - **A migration's `nfs` / `s3` staged disk is deleted.** The staged object (a
   full, unencrypted copy of the source disk) was never deleted. The manager now
   asks the migration's target `Provider` to delete it, through a new provider
@@ -931,6 +936,27 @@ policy and grants → manager → providers), and rollback caveats in
   PVE name or `vm-<vmid>`). A Proxmox template is never deleted
   (`VM_IS_IMAGE_ARTIFACT`), and a delete refused for an unreadable owner stamp
   is held as `Ready=False/OwnerStampUnreadable`.
+- **New in rc2: every other single-host per-VM call carries the owner too, and
+  Proxmox checks it.** `Describe`, `Power`, `Reconfigure`, the snapshot calls,
+  `GetDiskInfo`, `ExportDisk` and a clone's source are answered `VM_NOT_OWNED`
+  (or `OWNER_STAMP_UNREADABLE`) for a reused VMID instead of acting on another
+  tenant's VM. The `VirtualMachine` is held `Ready=False/VMNotOwned`; a
+  migration or clone of a refused source fails before any side effect. Renamed
+  unstamped VMs and stale-stamped adopted VMs are held after the upgrade
+  (→ [Changes since v0.4.0-rc1](#single-host-proxmox-every-per-vm-call-is-owner-checked-393)).
+- **New in rc2: single-host adoption stamps the adopted VM** with its new
+  owner (`TransferOwner`, compare-and-swap; capability `supports_owner_transfer`),
+  and never adopts a VM bound to a `VirtualMachine` of another Provider object
+  for the same endpoint. This fixes the rc1 case where a re-adopted Proxmox VM
+  kept a previous owner's stamp and was left behind on delete. VMs adopted by
+  earlier releases are not backfilled
+  (→ [Changes since v0.4.0-rc1](#single-host-adoption-stamps-the-adopted-vm-392)).
+- **New in rc2: single-host `VMClone` targets are created first and stamped,
+  and a re-sent `Clone` re-binds** instead of making a second clone (Proxmox) or
+  failing and leaving the first clone untracked (vSphere, libvirt). New
+  `VMClone` states: `Ready=False/CloneOutcomeUnknown` (held, re-sent with a
+  backoff) and `Failed` / `ProviderConflict`
+  (→ [Changes since v0.4.0-rc1](#single-host-vmclone-targets-are-stamped-a-re-sent-clone-re-binds-395)).
 - **Nothing is created through a Provider being deleted, even before the
   manager's cache sees the deletion.** The Provider is re-read from the API
   server right before every `Create`, `Clone` and `ImportDisk`; a deleting,
