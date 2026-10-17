@@ -5,6 +5,46 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-10-17 08:19] - A provider call whose result was lost to a restart is never re-sent blindly: durable requested-call markers (rc2 R6)
+**Author:** @wrkode (William Rizzo)
+
+### Fixed
+- `internal/controller/vmmigration_request_marker.go` (new), `internal/controller/vmmigration_controller.go`, `internal/controller/vmmigration_snapshot_task.go`, `internal/controller/provider_request_marker.go` (new): before a `VMMigration`'s `SnapshotCreate`, `ExportDisk` or `ImportDisk`, the migration records `SnapshotRequested` / `ExportRequested` / `ImportRequested=True`. The marker is written with the read `resourceVersion` as precondition, and nothing is sent if that write fails. The call's result, or the provider's failure, removes it in the same status write. A phase that finds the marker without a result first re-reads the object live, so a stale cache is not taken for an unknown outcome. It then sends the call again only where that cannot duplicate anything:
+  - a routed (clustered) `SnapshotCreate` for the same migration attempt (the provider adopts the snapshot by request token), at most once a minute;
+  - an `ExportDisk` / `ImportDisk` on a staging backend the provider reports re-send safe, once 35 minutes have passed since the marker (past the manager's 30-minute call deadline).
+
+  Otherwise the migration is held in its phase with `Ready=False` and reason `SnapshotOutcomeUnknown`, `ExportOutcomeUnknown` or `ImportOutcomeUnknown`. The hold has a constant message, one `Warning` event naming the attempt (and the snapshot name), and is written only on change. The operator's `virtrigaud.io/operation-outcome=not-performed@<attempt id>` sends the call again; it is audited with an `OperationOutcomeConfirmed` event and removed before the call. A disk-size refusal of an import also persists the marker's removal. Metrics reason `provider-outcome-unknown`.
+- `internal/controller/vmsnapshot_request_marker.go` (new), `internal/controller/vmsnapshot_controller.go`: a `VMSnapshot` records `SnapshotRequested` the same way, together with its binding, before its `SnapshotCreate`; the create's outcome replaces it. A `VMSnapshot` found in the initial phase with the marker:
+  - routed: the create is re-sent (the provider adopts the snapshot made for its uid), paced;
+  - single-host: held `Ready=False/SnapshotOutcomeUnknown` until the operator's confirmation.
+
+  The confirmation annotation re-drives the snapshot through its update predicate.
+- `internal/controller/vmmigration_status_write.go`: `forgetMigrationLongOps` logs every unrecorded result it evicts at `Error`, with the provider's ids (review L1 of #388). `pendingMigrationResult` keeps them.
+
+### Added
+- `proto/provider/v1/provider.proto` (bindings regenerated), `internal/providers/contracts/capabilities.go`, `internal/transport/grpc/client.go`, `sdk/provider/capabilities/capabilities.go` (`Manager.SetResendSafeExportBackends` / `SetResendSafeImportBackends`, `Builder.ResendSafeExportBackends` / `ResendSafeImportBackends`): `GetCapabilitiesResponse.resend_safe_export_backends` (27) and `resend_safe_import_backends` (28). These are the staging backends on which a re-sent `ExportDisk` / `ImportDisk`, after the earlier call's deadline, replaces what the earlier call wrote and never makes a second artifact. They are declared only where proven (per-provider audit):
+  - `internal/providers/vsphere/server.go`: s3 and nfs both ways;
+  - `internal/providers/libvirt/server.go`: single-host export s3, import pvc+s3+nfs; clustered export s3+nfs;
+  - `internal/providers/proxmox/capabilities.go`: export s3, import s3+nfs;
+  - mock: none.
+- Tests:
+  - `internal/controller/vmmigration_request_marker_test.go`, `internal/controller/vmsnapshot_request_marker_test.go`: a failed or conflicting marker write sends nothing; restart after the call (new reconciler: in-memory state dropped) holds, or re-sends with the same token or after the settle time; operator confirmation; earlier-attempt marker; stale cache; a failure clears the marker; L1 eviction log.
+  - `internal/controller/provider_request_marker_envtest_test.go` (envtest): held export plus confirmation; settled re-send; a real `Conflict` sends nothing; held single-host `VMSnapshot` plus confirmation.
+  - Per-provider capability tests in `internal/providers/{vsphere,libvirt,proxmox,mock}/resend_safe_capabilities_test.go`, the SDK builder and the transport client.
+
+### Changed
+- `internal/controller/vmmigration_pending_result_test.go`, `internal/controller/vmmigration_update_status_test.go`: the failing-write fakes let the marker write through, so the call is still sent and its result write fails.
+- `docs/provider-call-outcomes.md` (new), `docs/README.md`, `docs/upgrading.md` (behaviour row), `examples/migration/README.md`.
+
+### Why
+This was a known limitation in rc1. Between a `SnapshotCreate`, `ExportDisk` or `ImportDisk` and the write of its result, a manager restart or leader change lost the result, and the new leader sent the call again. On vSphere and the mock that took a second snapshot of the live source VM. #388 made the result durable within one process only. This applies the `CreateRequested` / `CloneRequested` pattern (#395) to these calls, re-sending only where a per-provider audit shows the re-send replaces rather than duplicates.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-10-17 08:16] - Reconfigure never resizes the root disk for spec.disks; vSphere waits for a power-off instead of retrying a change the VM cannot take (rc2 R5)
 **Author:** @wrkode (William Rizzo)
 
