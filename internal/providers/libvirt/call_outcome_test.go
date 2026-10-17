@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -44,7 +45,13 @@ import (
 // virshFailure is a *VirshError as a host command that ended with exitCode
 // returns it.
 func virshFailure(exitCode int, stderr string) error {
-	return &VirshError{Command: "virsh x", ExitCode: exitCode, Stderr: stderr}
+	ve := &VirshError{Command: "virsh x", ExitCode: exitCode, Stderr: stderr}
+	if exitCode >= 0 {
+		// A real exit status: the process ended (exec.ExitError locally,
+		// ssh.ExitError over SSH).
+		ve.Cause = &exec.ExitError{}
+	}
+	return ve
 }
 
 // TestHostCommandEnded: only a command that exited on its own with a status of
@@ -64,8 +71,10 @@ func TestHostCommandEnded(t *testing.T) {
 		"killed by a signal (137)":  {context.Background(), virshFailure(137, ""), false},
 		"ssh error (255)":           {context.Background(), virshFailure(255, ""), false},
 		"zero status with an error": {context.Background(), virshFailure(0, ""), false},
-		"not a host command":        {context.Background(), errors.New("boom"), false},
-		"request context ended":     {cancelled, virshFailure(1, "boom"), false},
+		"stdout past its bound (completed, reported failed)": {context.Background(),
+			&VirshError{ExitCode: sshOutputOverflowExitCode, Cause: errors.New("remote command stdout exceeded its bound")}, false},
+		"not a host command":    {context.Background(), errors.New("boom"), false},
+		"request context ended": {cancelled, virshFailure(1, "boom"), false},
 	} {
 		t.Run(name, func(t *testing.T) {
 			assert.Equal(t, tc.want, hostCommandEnded(tc.ctx, tc.err))
