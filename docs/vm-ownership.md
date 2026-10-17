@@ -1233,7 +1233,8 @@ that adoption bound before this release keeps the stamp it had.
   resizes, snapshots and copies it as its own. A VM at that VMID stamped for
   anyone else is refused. Grant `VM.Allocate` on the pools and paths where
   VirtRigaud's VMs live only as you would `VM.Config.Options` (see
-  [The owner stamp](#the-owner-stamp-1)).
+  [The owner stamp](#the-owner-stamp-1)). Retiring the rule is
+  proposed in [ADR-0012](adr/0012-proxmox-legacy-unstamped-name-rule.md).
 - **Give each Provider its own PVE API token.** The restart guard tells this
   provider's clone and create tasks from other users' by the PVE user that
   ran them. Two Provider objects, or two provider replicas, that share a token

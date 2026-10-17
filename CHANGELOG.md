@@ -5,6 +5,30 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-10-17 07:55] - ADR-0012 (Proposed): retiring the Proxmox legacy unstamped-name rule (rc2 R14)
+**Author:** @wrkode (William Rizzo)
+
+### Added
+- `docs/adr/0012-proxmox-legacy-unstamped-name-rule.md`: design record (Status: Proposed) for security review finding M2 of #393. The single-host Proxmox owner check accepts an unstamped VM named like its owner (upgrade compatibility for VMs created by v0.3.11 or earlier, adopted before #392, or cloned by a pre-rc2 manager), so a PVE principal with `VM.Allocate` can plant a look-alike at a freed VMID and pass every owner check. The record states the threat, evaluates five options and proposes two of them together, followed by removal of the rule:
+  - **(A) A confirmed-stamp latch.** The manager records `status.ownerStamp.confirmedID` once `Describe` reports `owner_check=STAMPED`. From then on it sends `ObjectIdentity.require_owner_stamp`, and the provider refuses an unstamped VM.
+  - **(B) One-time stamping of legacy VMs.** Legacy VMs are stamped once through the existing compare-and-swap `TransferOwner`.
+  - **Removal.** The name rule is dropped in v0.5.0, with a one-minor escape hatch.
+  - **Rejected or deferred.** A creation-time cutoff and status quo are rejected. Binding to PVE's `meta` ctime is deferred: it is the only defence against a copied stamp and needs a lab spike.
+  - **Other providers.** vSphere and libvirt have no name rule and need no change.
+- `docs/adr/README.md`: index row for ADR-0012.
+
+### Changed
+- `docs/vm-ownership.md`: the Proxmox Limits entry on the legacy name rule links to ADR-0012.
+
+### Why
+M2 of the #393 security review needs a maintainer decision before any contract change. The fix touches both load-bearing contracts (proto and CRD status), so it is recorded as a proposal first.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [ ] Config change only
+- [x] Documentation only
+
 ## [2026-10-17 07:55] - Release notes: v0.4.0-rc2, "Changes since v0.4.0-rc1" (Wave 1)
 **Author:** @wrkode (William Rizzo)
 
