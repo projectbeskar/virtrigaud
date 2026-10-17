@@ -359,8 +359,15 @@ func (r *VMSnapshotReconciler) createSnapshot(ctx context.Context, snapshot *inf
 	// Record durably (with the binding) that the create is requested; nothing
 	// is sent if that write fails (vmsnapshot_request_marker.go).
 	// A marker already on the object means an earlier create's outcome was never
-	// recorded: this send is a re-send, and no failure answering it is definite.
-	resend := snapshotRequested(snapshot)
+	// recorded: the manager's own re-send, or one an operator confirmed
+	// (providerCallOutcomeKnownFor). A routed create is exempt: the provider
+	// adopts the earlier snapshot by request token, so its answers to a
+	// re-send are meaningful.
+	attempt := newCallAttempt(requestMarker(snapshot.Status.Conditions, snapshotConditionRequested),
+		operationOutcomeConfirmed(snapshot.Annotations, requestMarkerAttemptID(snapshot.Status.Conditions, snapshotConditionRequested)))
+	if req.VM.HostID != "" {
+		attempt = callAttempt{}
+	}
 	if res, sent := r.markSnapshotRequested(ctx, snapshot); !sent {
 		return res, nil
 	}
@@ -376,7 +383,7 @@ func (r *VMSnapshotReconciler) createSnapshot(ctx context.Context, snapshot *inf
 
 	// Call provider to create snapshot
 	resp, err := providerInstance.SnapshotCreate(ctx, req)
-	if err != nil && req.VM.HostID != "" && (contracts.IsRetryable(err) || !providerCallOutcomeKnownFor(err, resend)) {
+	if err != nil && req.VM.HostID != "" && (contracts.IsRetryable(err) || !providerCallOutcomeKnownFor(err, attempt)) {
 		// A ROUTED (clustered) create without a definite outcome — its host
 		// unavailable, its time budget run out while libvirtd may still be
 		// writing the snapshot, or another job on the VM still running — is
@@ -396,7 +403,7 @@ func (r *VMSnapshotReconciler) createSnapshot(ctx context.Context, snapshot *inf
 		}
 		return r.retrySnapshotCreate(ctx, snapshot, snapshotCreateRetryingMessage), nil
 	}
-	if err != nil && !providerCallOutcomeKnownFor(err, resend) {
+	if err != nil && !providerCallOutcomeKnownFor(err, attempt) {
 		// A single-host create without a definite outcome (a deadline, a
 		// dropped connection): the snapshot may still be taken, and this
 		// provider cannot be asked again without risking a second one. The
