@@ -3867,7 +3867,8 @@ type GetCapabilitiesResponse struct {
 	// disk a migration's ImportDisk landed for a target VM that does not use it
 	// (rc2 R7). From a provider that does not report it (one that predates the
 	// field) the manager never sends DeleteLandedDisk: it records the landed
-	// disk as left behind, with a Warning.
+	// disk as left behind, with a Warning. Fields 27 and 28 are taken by
+	// resend_safe_export_backends / resend_safe_import_backends (PR #402).
 	SupportsLandedDiskDelete bool `protobuf:"varint,29,opt,name=supports_landed_disk_delete,json=supportsLandedDiskDelete,proto3" json:"supports_landed_disk_delete,omitempty"`
 }
 
