@@ -503,7 +503,12 @@ func (p *Provider) Validate(ctx context.Context, req *providerv1.ValidateRequest
 // GetCapabilities implements the ProviderServer interface and returns a static description
 // of the features supported by this vSphere provider:
 //
-//   - Online reconfiguration of CPU and memory (hot-add must be enabled on the VM)
+//   - Online reconfiguration of CPU and memory — per VM: only with CPU/memory
+//     hot-add (CPU hot-remove for fewer vCPUs) enabled on it, and never less
+//     memory; otherwise Reconfigure refuses the change before changing
+//     anything (RECONFIGURE_NEEDS_POWER_OFF) and it is applied once the VM is
+//     powered off (reconfigure.go). The libvirt provider reports the flag
+//     with the same per-VM condition.
 //   - Online disk expansion
 //   - Snapshots (disk-only by default; RAM-inclusive snapshots are supported when
 //     the VM is powered on and the request sets IncludeMemory)
@@ -523,8 +528,11 @@ func (p *Provider) GetCapabilities(ctx context.Context, req *providerv1.GetCapab
 		// the VMImage identity and source digest, and never reuses one by bare
 		// name for an identity request (image_identity.go).
 		SupportsImageArtifactIdentity: true,
-		// Not yet: a smaller disk size is ignored silently. Flipped by the
-		// vSphere honest-Reconfigure follow-up.
+		// Not yet: Reconfigure now refuses what it cannot apply (a CPU/memory
+		// change the running VM cannot take, a spec.disks shrink), but a
+		// spec.disks entry it finds no attached disk for is still left alone
+		// while the call succeeds (reconfigure.go), and responses carry no
+		// honest_result marker. Only clustered Providers act on this flag.
 		SupportsHonestReconfigure: false,
 		// ImportDisk enforces max_virtual_size_bytes (import_size_limit.go).
 		SupportsImportSizeLimit: true,
