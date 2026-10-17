@@ -619,6 +619,19 @@ the following once after upgrading, and delete only what no `VMMigration` in fli
     the `VirtualMachine`'s name, or the name adoption gave it — the sanitized
     PVE name, or `vm-<vmid>`). They are never re-bound by a `Create` and
     can't be looked up by owner.
+- **`VirtualMachine` `status.phase` is now set on every VM** (rc2 R10,
+  [`docs/vm-status-phase.md`](vm-status-phase.md)). Before, the `PHASE` column
+  (`kubectl get vm`) was empty on most VMs, because only a few code paths wrote
+  it. The manager now derives it on every status write from the VM's state:
+  `Pending`, `Provisioning`, `Running`, `Stopped`, `Reconfiguring`, `Deleting` or
+  `Failed`. The first reconcile after the manager is rolled fills it in on every
+  existing VM (one status write each, then none unless the state changes). No CRD
+  schema change (the enum is unchanged; the field description is), so no CRD
+  ordering applies. Automation that read `status.phase` must expect every value, and
+  can drop workarounds that read `status.powerState` or the `Ready` condition
+  instead. A VM that is `Suspended` reports `Running`; one whose power state the
+  provider cannot classify (`Unknown`) reports `Failed`; a delete that is held
+  reports `Deleting` (the hold is on `Ready`).
 
 ## Post-upgrade verification checklist
 

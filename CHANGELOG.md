@@ -5,6 +5,31 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-10-17 08:05] - VirtualMachine status.phase is derived on every status write; go-libvirt upstream race documented and skipped under -race (rc2 R10, R16)
+**Author:** @wrkode (William Rizzo)
+
+### Fixed
+- `internal/controller/virtualmachine_phase.go` (new), `internal/controller/virtualmachine_controller.go`, `internal/controller/virtualmachine_reconfigure_result.go`: `VirtualMachine.status.phase` (the `PHASE` printer column) was empty on healthy running VMs, because only a few paths assigned it. It is now a pure function of the VM's state (`derivePhase`): `Deleting` (deletion timestamp, also while the delete is held), `Failed` (a `Ready=False` hold: `VMNotOwned`, `OwnerStampUnreadable`, `ProviderUnavailable`, `VMIsImageArtifact`, `CreateOutcomeUnknown`, `DeleteBlocked`, `ProviderRefMismatch`, `PlacementTopologyMismatch`, `ConsumerNotAllowed`, `VMMissingOnHost`, the restore-pending holds; for a VM with no id also a refused or backing-off create; an `Unknown` power state), `Pending` / `Provisioning` for a VM with no id (create requested, task recorded, clustered pending host, or `Provisioning=True`), `Reconfiguring` (a resize in flight; a change pending a restart is not), and `Running` / `Stopped` by `status.powerState` (`Suspended` counts as `Running`). The existing direct `Phase =` assignments are removed.
+- `internal/controller/virtualmachine_controller.go` (`updateStatus`), `virtualmachine_create_marker.go` (pre-create marker), `virtualmachine_create_record.go` (post-create record), `virtualmachine_clustered.go` (pending-host and excluded-host writes), `virtualmachine_clustered_restore.go` (re-attach): every VirtualMachine status write derives the phase from the status it writes (`applyDerivedPhase`), so it changes in the same write as the fact it summarizes and never causes a write by itself. `handleDeletion` writes `Deleting` once, with a status merge patch of the phase alone (`markDeleting`).
+- `internal/providers/libvirt/golibvirt.go`: the keepalive loop drops the client whose probe failed (`forgetClient`), after evicting it, so the next tick dials a fresh one. Reason: after the go-libvirt race below, a client can report `IsConnected()` true for a dead transport, and the holder would hand it out indefinitely. Only a client whose probe failed is dropped, and only if it is still the published one.
+
+### Added
+- `docs/vm-status-phase.md` (new): the values, the rule that derives them, the `Ready` reasons that mean `Failed`, upgrade notes. `docs/README.md` index entry; `docs/upgrading.md` behaviour-change entry.
+- Tests: `internal/controller/virtualmachine_phase_test.go` (the mapping table, no combination yields an empty phase, the central status write stores the derived phase), `internal/controller/virtualmachine_phase_envtest_test.go` (envtest: a created VM has a phase from its first status write and reaches `Running`, then `Stopped`, then `Deleting`; unchanged reconciles write nothing), `internal/providers/libvirt/golibvirt_test.go` (`forgetClient`; a failed probe replaces the client).
+
+### Changed
+- `api/infra.virtrigaud.io/v1beta1/virtualmachine_types.go`, `config/crd/bases/infra.virtrigaud.io_virtualmachines.yaml`: the `status.phase` field description documents the derivation. The enum is unchanged, so no CRD ordering applies.
+- `internal/providers/libvirt/golibvirt.go`, `golibvirt_test.go`, `golibvirt_race_test.go`, `golibvirt_norace_test.go` (new): `TestGolibvirtHolder_ConcurrentAccess_Race` is skipped when built with the race detector (`knownUpstreamRace`, a race-tagged constant). Cause: in `github.com/digitalocean/go-libvirt`, `(*Libvirt).ConnectToURI` starts `go l.waitAndDisconnect()` and then writes `l.disconnected` without synchronization, while `waitAndDisconnect` reads it; unfixed in the module's main branch (checked against `v0.0.0-20261013170128-efbbdf578ac8`, newer than the pinned `v0.0.0-20260814190004-1a83157e1858`), so no dependency bump. The package doc has a new "Known upstream race" section: what can trigger it from this package, why only an unpublished client or a transport that dies in the microseconds before the assignment is affected, and the self-heal above. The test still runs without `-race`.
+
+### Why
+`PHASE` was empty on healthy VMs, which made `kubectl get vm` useless for a quick health read and left automation reading conditions instead. The go-libvirt race is in a third-party module and made `go test -race` fail on a loaded machine; the test is skipped under `-race` until the upstream fix, and the one production consequence found is bounded.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-10-17 07:55] - ADR-0012 (Accepted): retiring the Proxmox legacy unstamped-name rule (rc2 R14)
 **Author:** @wrkode (William Rizzo)
 
