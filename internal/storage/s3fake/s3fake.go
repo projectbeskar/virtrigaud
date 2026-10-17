@@ -57,6 +57,19 @@ type Server struct {
 	failCode int
 	// parts holds the parts of the multipart uploads in flight, by key.
 	parts map[string]map[int][]byte
+	// loseComplete makes the next completing call of a multipart upload take
+	// effect and then drop the connection without answering.
+	loseComplete bool
+}
+
+// LoseNextComplete makes the next request that completes a multipart upload
+// take effect (the object is stored) and then close the connection without an
+// answer: the client retries it, and the retry is answered NoSuchUpload (404)
+// because the upload id is gone.
+func (s *Server) LoseNextComplete() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.loseComplete = true
 }
 
 // ReportSize makes HEAD report size for key while GET serves the stored
@@ -136,7 +149,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 	s.mu.Unlock()
 
 	if failCode != 0 {
-		writeError(w, failCode, "InternalError")
+		writeError(w, failCode, failureCodeName(failCode))
 		return
 	}
 	if bucket != s.bucket {
@@ -187,6 +200,20 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// failureCodeName is the S3 error code a request failed with FailWith(code)
+// carries.
+func failureCodeName(code int) string {
+	switch code {
+	case http.StatusForbidden:
+		return "AccessDenied"
+	case http.StatusNotFound:
+		return "NoSuchBucket"
+	case http.StatusBadRequest:
+		return "BadRequest"
+	}
+	return "InternalError"
+}
+
 // writeError answers an S3 XML error.
 func writeError(w http.ResponseWriter, code int, s3Code string) {
 	w.Header().Set("Content-Type", "application/xml")
@@ -232,6 +259,15 @@ func (s *Server) serveMultipart(w http.ResponseWriter, r *http.Request, key stri
 		}
 		s.objects[key] = data
 		delete(s.parts, key)
+		if s.loseComplete {
+			s.loseComplete = false
+			if hj, ok := w.(http.Hijacker); ok {
+				if conn, _, err := hj.Hijack(); err == nil {
+					_ = conn.Close()
+					return true
+				}
+			}
+		}
 		w.Header().Set("Content-Type", "application/xml")
 		bucket, escaped := html.EscapeString(s.bucket), html.EscapeString(key)
 		_, _ = io.WriteString(w, `<?xml version="1.0" encoding="UTF-8"?><CompleteMultipartUploadResult><Location>/`+bucket+"/"+escaped+
