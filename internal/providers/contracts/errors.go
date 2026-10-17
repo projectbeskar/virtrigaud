@@ -163,10 +163,12 @@ const VMSourceRunningReason = "VM_SOURCE_RUNNING"
 // ReconfigureNeedsPowerOffReason is the google.rpc.ErrorInfo reason (in
 // ErrorInfoDomain) a provider attaches to the codes.FailedPrecondition status
 // of a Reconfigure it refused, before changing anything, because the VM is
-// powered on and the hypervisor cannot apply the requested CPU/memory change
-// to it while it runs, nor stage it for its next boot — on vSphere, CPU or
-// memory hot-add (or CPU hot-remove, for fewer vCPUs) is not enabled on the
-// VM, and memory is never removed from a running VM. The change is applied by
+// not powered off and the hypervisor cannot apply the requested change to it
+// now, nor stage it for its next boot — on vSphere, CPU or memory hot-add (or
+// CPU hot-remove, for fewer vCPUs) is not enabled on the VM, the memory is
+// above its hot-plug limit, memory is never removed from a running VM, a
+// shared-bus or multi-writer disk is grown only while the VM is off, and a
+// suspended VM takes no change at all. The change is applied by
 // a Reconfigure once the VM is powered off. The manager maps it to a
 // retryable error marked ErrReconfigureNeedsPowerOff, records it as
 // Reconfiguring=False/ResizePendingPowerOff and asks again on its backoff;
@@ -416,10 +418,10 @@ func IsVMSourceRunning(err error) bool {
 }
 
 // ErrReconfigureNeedsPowerOff marks (in an error's chain) a provider's
-// refusal carrying ReconfigureNeedsPowerOffReason: the VM's CPU/memory change
+// refusal carrying ReconfigureNeedsPowerOffReason: the VM's change
 // can be applied only while it is powered off. The transport client wraps it
 // into the retryable error it maps that refusal to.
-var ErrReconfigureNeedsPowerOff = errors.New("the VM's CPU/memory change can be applied only while it is powered off")
+var ErrReconfigureNeedsPowerOff = errors.New("the VM's change can be applied only while it is powered off")
 
 // IsReconfigureNeedsPowerOff reports whether err is a provider's
 // ReconfigureNeedsPowerOffReason refusal (a retryable error that says so):

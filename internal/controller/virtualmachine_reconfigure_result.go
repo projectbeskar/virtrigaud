@@ -230,10 +230,12 @@ func (r *VirtualMachineReconciler) recordReconfigureFailure(vm *infravirtrigaudi
 // resizePendingPowerOffMessage is the Reconfiguring=False/ResizePendingPowerOff
 // message of a VM whose CPU/memory change the provider can apply only while
 // the VM is powered off (contracts.IsReconfigureNeedsPowerOff).
-const resizePendingPowerOffMessage = "The CPU/memory change cannot be applied while the VM runs: the hypervisor does not " +
-	"allow it online for this VM (on vSphere, CPU or memory hot-add, or CPU hot-remove for fewer vCPUs, is not enabled " +
-	"on the VM, and memory is never removed from a running VM). Nothing was changed. It is applied once the VM is " +
-	"powered off (spec.powerState: Off); until then status.currentResources keeps the VM's current size"
+const resizePendingPowerOffMessage = "The change cannot be applied unless the VM is powered off: the hypervisor does " +
+	"not allow it on this VM while it runs (on vSphere: CPU or memory hot-add, or CPU hot-remove for fewer vCPUs, is " +
+	"not enabled on the VM; the memory asked for is above the VM's hot-plug memory limit; memory is never removed from " +
+	"a running VM; a disk on a shared SCSI bus or with multi-writer sharing is grown only while the VM is off; a " +
+	"suspended VM takes no change). Nothing was changed. It is applied once the VM is powered off " +
+	"(spec.powerState: Off); until then status.currentResources keeps the VM's current size"
 
 // recordReconfigureSuccess forgets the VM's failed-Reconfigure backoff: the
 // provider answered (applied, or applied to the definition pending a
