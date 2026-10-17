@@ -72,7 +72,7 @@ func TestMigrationOwnsTargetVM(t *testing.T) {
 		"no UID, no claim recorded":                {m("", ""), vm("u2", token), false},
 		"nothing recorded, nothing on the VM":      {m("", ""), vm("u2", ""), false},
 		"a VM without a UID (never from a server)": {m("", digest), vm("", token), false},
-		"nil VM":                                   {m("u1", ""), nil, false},
+		"nil VM": {m("u1", ""), nil, false},
 	} {
 		t.Run(name, func(t *testing.T) {
 			assert.Equal(t, tc.want, migrationOwnsTargetVM(tc.m, tc.vm))
