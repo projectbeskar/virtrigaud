@@ -9,6 +9,8 @@ the security review of the implementation: unambiguous NFS staging names (D5), a
 staging digest (D5), bounded holds for older providers and DNS failures (D4, D7),
 waiting for a running export task (D3), the post-migration cleanup guard (D9,
 maintainer decision), and staged-image header checks on every import (D10).
+**Addendum A (rc2, 2026-10-17)** extends the same rules to the disk an import
+*landed* on the target provider ([below](#addendum-a--landed-disks-rc2)).
 
 **Author**: William Rizzo ([@wrkode](https://github.com/wrkode))
 
@@ -520,3 +522,56 @@ check any custom aggregated or tenant roles.
   `VMMigration`, and a staged file on a user-supplied PVC is left there.
 - Not validated on real NFS or S3 servers in this change. The provider tests use an
   in-process S3 fake, a recorded host command runner, and a fake `qemu-img`.
+
+## Addendum A — landed disks (rc2)
+
+**Problem (rc1 lab finding V3).** This ADR deletes the *staged* object of an `nfs` / `s3`
+migration. The disk the target provider's `ImportDisk` *lands* — vSphere
+`[<datastore>] <ns>_<vm>-migrated/<ns>_<vm>-migrated.vmdk`, libvirt
+`<default pool>/<ns>.<vm>-migrated.qcow2`, the Proxmox import stage — becomes the target VM's
+disk when the migration succeeds, but stayed on the target forever when the migration failed
+for good, or was deleted, before a target VM attached it. On every backend, `pvc` included.
+
+**Decision.** A second provider RPC, `DeleteLandedDisk` (`proto/provider/v1/provider.proto`),
+advertised as `supports_landed_disk_delete`, with the same shape as D1–D8:
+
+- **Confinement (as D5).** The request names the target VM (namespace and name), never a free
+  location; the provider derives the landed disk with the rule its `ImportDisk` names it with
+  and validates the identity first. The recorded landing path (`status.diskInfo.targetPath`),
+  when sent, must be exactly that disk; on vSphere it only chooses the datastore. Nothing else
+  is ever removed.
+- **Never a disk in use.** The provider refuses (`FailedPrecondition`, `VM_DISK_IN_USE`) a disk
+  any VM uses, failing closed when it cannot tell: vSphere scans every VM and template with
+  files on the datastore for any file of the landing folder (`ensureImportFolderUnused`, fresh,
+  under the folder's landing lock) before it deletes the folder; libvirt refuses a symbolic link
+  at the name and any domain that uses the file (`pathInUseOnHost`); a Proxmox stage is never a
+  VM disk (`qm importdisk` copies it). The manager keeps the disk without asking when the
+  migration is `Ready`, when the `VirtualMachine` the import was sent for exists and is the
+  migration's own target (`status.targetVMUID` or its claim) or names an imported disk, and
+  hands it over when another in-flight `VMMigration` targets the same VM.
+- **When (as D3).** The staged disk's `cleanupPolicy` table: `Never` keeps it; `OnSuccess`
+  deletes it when the `VMMigration` is deleted; `Always` also when it fails for good.
+- **Recorded before the import (as D1, M1).** `LandedDiskCleanup=Unknown` and
+  `status.storageInfo.importTarget` (now on every backend, with the target Provider's UID) are
+  persisted before `ImportDisk` is sent. The delete names only that VM, and is sent only to the
+  Provider with that UID; a changed or replaced Provider records the disk as left behind (as the
+  staging digest does, D5). Migrations whose import an older manager sent carry no marker and are
+  not touched.
+- **Holds (as D4, D8).** A retryable failure holds the cleanup (`LandedDiskCleanupPending`, the
+  blocked-VM backoff, one `Warning`; a deleting `VMMigration` keeps its finalizer until it
+  succeeds or `virtrigaud.io/force-delete=true` is set), and a `Failed` migration whose landed
+  disk will still be deleted keeps its target `Provider`.
+- **Older providers (as D7, but no grace window).** A provider that does not report the
+  capability, or answers `Unimplemented`, records `LandedDiskLeftBehind` with one `Warning` at
+  once: unlike a staged object, a landed disk is on the provider's own storage and is listed in
+  `docs/upgrading.md` for manual removal. The mock provider lands nothing and answers
+  `Unimplemented`; a clustered libvirt provider (whose `ImportDisk` is not routed) does too.
+
+**Also (vSphere).** The NFC import's transient VM is unregistered, not destroyed; its own files
+(`<landing name>.vmx`, `.vmsd`, `.hlog`, `.nvram`, `.vmxf` and the non-disk files of its layout
+in the landing folder) are now removed right after, best effort, never a `.vmdk`.
+
+**Consequences.** Failed and deleted migrations no longer leave multi-GB disks on the target from
+rc2 on. Landed disks of earlier migrations must still be removed by hand. Validated with vcsim
+(vSphere), a recorded host runner (libvirt), a scripted SSH node plus a real `sh` run of the
+delete script (Proxmox), and controller unit and envtest specs; not yet on real hypervisors.
