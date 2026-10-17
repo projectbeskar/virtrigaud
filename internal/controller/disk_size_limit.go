@@ -23,7 +23,6 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -206,7 +205,7 @@ func (r *VirtualMachineReconciler) holdForDiskSizeLimit(
 	log.FromContext(ctx).Info("Not creating the VM: a disk is above the disk-size limit",
 		"reason", refusal.reason, "retryAfter", diskSizeLimitRetryInterval.String())
 	metrics.RecordError(errReasonDiskSizeLimit, metrics.ComponentManager)
-	if persisted == nil || !equality.Semantic.DeepEqual(persisted, &vm.Status) {
+	if statusDiffers(persisted, vm) {
 		r.updateStatus(ctx, vm)
 	}
 	if isNew {

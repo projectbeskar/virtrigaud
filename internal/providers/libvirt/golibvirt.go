@@ -82,6 +82,47 @@ import (
 //  5. Close (VirshProvider.Cleanup, via virshConn.Close): stops the keepalive
 //     goroutine and force-closes the transport. Idempotent.
 //
+// # Known upstream race (go-libvirt ConnectToURI)
+//
+// go-libvirt's ConnectToURI starts `go l.waitAndDisconnect()` and, only after
+// the open/auth handshake succeeds, assigns `l.disconnected = make(chan
+// struct{})`. waitAndDisconnect reads `l.disconnected` once the transport
+// reports it was closed. The write and the read are not ordered, so a
+// transport that closes while ConnectToURI is finishing is a data race inside
+// the module (reported by `go test -race`; not fixed in the module's main
+// branch as of 2026-10-17, v0.0.0-20261013170128-efbbdf578ac8). It is not
+// reachable through the holder's own synchronization, and the holder only
+// ever triggers it from two places that act on an attempt nothing has
+// published: the abandoned-connect reaper (after a further connectTimeout)
+// and close (process teardown, after waiting out an in-flight attempt).
+// evict never does: it closes only a connection settle() marked established,
+// which is after ConnectToURI returned.
+//
+// What the race can do, if it lands: if the watcher reads the field BEFORE the
+// write, it sees the closed channel New* left there, takes its "ConnectToURI
+// never completed" branch and returns without closing the new channel. The
+// published client then reports IsConnected() == true for a dead transport,
+// and its Disconnected() channel never fires. In this package that means:
+//
+//   - A client that is only ever abandoned (reaper) or torn down (close) is
+//     never used again, so nothing observes it.
+//   - A published client needs the TRANSPORT to die in the microseconds
+//     between the handshake's last reply and that one assignment, with nothing
+//     of ours causing it (an SSH channel drop or a libvirtd restart at that
+//     instant). Every call on it then fails fast (the socket is closed); the
+//     consequence that would matter is that connect keeps handing it out
+//     because IsConnected() never turns false. keepaliveLoop therefore drops
+//     the client it probed when the probe fails (forgetClient), after evicting
+//     it, so the next tick dials a fresh one regardless of IsConnected(): the
+//     worst case is one keepalive interval of failing calls, not a permanent
+//     wedge. Nothing in this package reads Disconnected().
+//
+// TestGolibvirtHolder_ConcurrentAccess_Race hammers exactly this window with
+// 50 ms call deadlines under load, so it skips itself under -race
+// (skipOnKnownUpstreamRace) and still runs, and passes, without it. The
+// one-line upstream fix is to assign `disconnected` before starting the
+// watcher goroutine.
+//
 // # Why connect/close/evict never touch h.client concurrently with each other
 //
 // go-libvirt's RPC-call surface (request/requestStream and the generated
@@ -594,7 +635,14 @@ func (h *golibvirtHolder) call(ctx context.Context, fn func(*golibvirt.Libvirt) 
 	if err != nil {
 		return err
 	}
+	return h.callOn(ctx, client, fn)
+}
 
+// callOn is call against a client the caller already holds (as returned by
+// ensureConnected or connect), under the same watchdog. keepaliveLoop probes
+// the very client its connect returned, so that what it drops on a failed
+// probe (forgetClient) is that client and no other.
+func (h *golibvirtHolder) callOn(ctx context.Context, client *golibvirt.Libvirt, fn func(*golibvirt.Libvirt) error) error {
 	done := make(chan error, 1)
 	go func() { done <- fn(client) }()
 
@@ -709,7 +757,7 @@ func (h *golibvirtHolder) keepaliveLoop() {
 
 		case <-ticker.C:
 			connectCtx, cancel := context.WithTimeout(h.rootCtx, h.connectTimeout)
-			_, err := h.connect(connectCtx)
+			probed, err := h.connect(connectCtx)
 			cancel()
 			if err != nil {
 				if errors.Is(err, errGolibvirtHolderClosed) {
@@ -720,7 +768,7 @@ func (h *golibvirtHolder) keepaliveLoop() {
 			}
 
 			probeCtx, cancel := context.WithTimeout(h.rootCtx, h.probeTimeout)
-			err = h.call(probeCtx, func(c *golibvirt.Libvirt) error {
+			err = h.callOn(probeCtx, probed, func(c *golibvirt.Libvirt) error {
 				_, err := c.ConnectGetLibVersion()
 				return err
 			})
@@ -734,8 +782,31 @@ func (h *golibvirtHolder) keepaliveLoop() {
 				// than repeating the same failure against a
 				// technically-connected-but-unhealthy client.
 				h.evict()
+				// And stop handing the probed client out: connect reuses a
+				// client whose IsConnected() is true, and that is not
+				// trustworthy for a dead transport after the upstream race
+				// (package doc, "Known upstream race"). The next tick dials
+				// a fresh one. evict and forgetClient are two steps, not one
+				// atomic one: a caller can still obtain the probed client
+				// between them (its call then fails like any call on an
+				// evicted connection), and an evict that finds nothing
+				// settled leaves forgetClient the only thing that retires it.
+				h.forgetClient(probed)
 			}
 		}
+	}
+}
+
+// forgetClient clears the published client if it is still client, so the next
+// connect dials a fresh one instead of reusing it. It touches only the
+// holder's own field (under h.mu), never the go-libvirt object, which is
+// simply left to wind down: its transport has been closed by evict. A client
+// that was replaced in the meantime is left alone.
+func (h *golibvirtHolder) forgetClient(client *golibvirt.Libvirt) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if client != nil && h.client == client {
+		h.client = nil
 	}
 }
 

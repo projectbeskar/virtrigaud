@@ -25,7 +25,6 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -166,7 +165,7 @@ func (r *VirtualMachineReconciler) holdCreateBackoff(
 	log.FromContext(ctx).Info("Provider could not complete the Create; retrying with a backoff",
 		"retryAfter", retry.String(), "error", err.Error())
 	metrics.RecordError(errReasonCreateBackoff, metrics.ComponentManager)
-	if !equality.Semantic.DeepEqual(persisted, &vm.Status) {
+	if statusDiffers(persisted, vm) {
 		r.updateStatus(ctx, vm)
 	}
 	if transition {

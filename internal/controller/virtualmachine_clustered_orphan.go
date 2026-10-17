@@ -22,7 +22,6 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -170,7 +169,7 @@ func (r *VirtualMachineReconciler) forceDeleteHonoured(ctx context.Context, vm *
 	log.FromContext(ctx).Info("Not honouring force-delete of a consumer VM on a clustered Provider; the delete is retried as if it were not set",
 		"provider", key.String(), "annotation", forceDeleteAnnotation)
 	metrics.RecordError(errReasonForceDeleteNotAllowed, metrics.ComponentManager)
-	if !equality.Semantic.DeepEqual(persisted, &vm.Status) {
+	if statusDiffers(persisted, vm) {
 		r.updateStatus(ctx, vm)
 	}
 	if isNew {

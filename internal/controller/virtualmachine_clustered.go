@@ -25,7 +25,6 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -102,6 +101,7 @@ func (r *VirtualMachineReconciler) recordPendingHost(
 	setPlacedCondition(vm, metav1.ConditionFalse, k8s.ReasonCreatePending,
 		fmt.Sprintf("create pending on host %s (pool %s)", p.hostID, p.poolName))
 
+	applyDerivedPhase(vm)
 	// Bounded, so the assumption covering this write (placementAssumeTTL, twice
 	// this bound) always outlives it.
 	writeCtx, cancel := context.WithTimeout(ctx, pendingHostWriteTimeout)
@@ -580,7 +580,7 @@ func (r *VirtualMachineReconciler) recordDeleteHold(
 	retry := blockedRetryBackoff(conditionSince(vm.Status.Conditions, k8s.ConditionDeleteBlocked))
 	log.FromContext(ctx).Info(logMsg, "id", vm.Status.ID, "host", placementHostForLog(vm), "reason", reason,
 		"retryAfter", retry.String(), "error", err.Error())
-	if !equality.Semantic.DeepEqual(persisted, &vm.Status) {
+	if statusDiffers(persisted, vm) {
 		r.updateStatus(ctx, vm)
 	}
 	if transition {
@@ -682,6 +682,7 @@ func (r *VirtualMachineReconciler) handleClusteredCreateConflict(
 	log.FromContext(ctx).Info("Create refused with a name conflict on the pending host; excluding the host and re-scheduling",
 		"host", host, "excludedHosts", pl.ExcludedHosts)
 
+	applyDerivedPhase(vm)
 	if err := r.Status().Update(ctx, vm); err != nil {
 		if apierrors.IsConflict(err) {
 			log.FromContext(ctx).Info("Excluded-host write lost a resourceVersion race; requeueing (the create is retried on the same host)",
@@ -782,7 +783,7 @@ func (r *VirtualMachineReconciler) refuseConsumer(
 		log.FromContext(ctx).Info("Not calling the provider for this VM", "reason", cause.Error())
 		r.recordEvent(vm, corev1.EventTypeWarning, k8s.ReasonConsumerNotAllowed, cause.Error())
 	}
-	if persisted == nil || !equality.Semantic.DeepEqual(persisted, &vm.Status) {
+	if statusDiffers(persisted, vm) {
 		r.updateStatus(ctx, vm)
 	}
 	return ctrl.Result{RequeueAfter: consumerNotAllowedRetryInterval}, nil
