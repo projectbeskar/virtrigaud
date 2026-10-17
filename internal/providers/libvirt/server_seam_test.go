@@ -315,13 +315,16 @@ func TestServer_ImagePrepare_ThroughSeam(t *testing.T) {
 
 // TestServer_SnapshotCreate_ConnErrorSurfaces verifies a failure to resolve the
 // per-host connection is surfaced (not panicked, not swallowed) — the seam's
-// error path.
+// error path. It is answered as "not performed" (nothing was done) with a
+// constant text: the connection error itself (it can name the host) is only
+// logged (rc2 R21).
 func TestServer_SnapshotCreate_ConnErrorSurfaces(t *testing.T) {
 	s := &Server{provider: &fakeSeamProvider{connErr: errors.New("registry cold")}}
 
 	_, err := s.SnapshotCreate(context.Background(), &providerv1.SnapshotCreateRequest{VmId: "vm-1"})
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "registry cold")
+	assert.NotContains(t, err.Error(), "registry cold")
+	assertNotPerformedStatus(t, err)
 }
 
 // TestServer_SingleHostSnapshotIDIsChecked: on a single-host provider too, a

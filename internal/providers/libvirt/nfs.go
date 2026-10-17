@@ -45,14 +45,14 @@ import (
 // is the controller-built, C7'-hardened nfs:// URL.
 func (s *Server) exportDiskToNFS(ctx context.Context, req *providerv1.ExportDiskRequest) (*providerv1.ExportDiskResponse, error) {
 	if s.provider == nil {
-		return nil, nothingDone(wireExportNotPerformed, fmt.Errorf("libvirt provider not initialized"))
+		return nil, nothingDone(wireProviderNotInitialized, fmt.Errorf("libvirt provider not initialized"))
 	}
 	conn, err := s.provider.conn(ctx)
 	if err != nil {
 		return nil, nothingDone(wireExportNotPerformed, err)
 	}
 	if !strings.Contains(conn.uri(), "ssh://") {
-		return nil, refusal(codes.FailedPrecondition, wireExportRefused,
+		return nil, refusal(codes.FailedPrecondition, wireExportNeedsSSH,
 			fmt.Errorf("nfs export requires an ssh:// libvirt transport (host-side qemu-img → nfs://); got %q", conn.uri()))
 	}
 
@@ -313,14 +313,14 @@ func (s *Server) importDiskFromNFS(ctx context.Context, req *providerv1.ImportDi
 // works in a private directory that is removed whatever happens.
 func (s *Server) importDiskFromNFSSteps(ctx context.Context, req *providerv1.ImportDiskRequest) (*providerv1.ImportDiskResponse, error) {
 	if s.provider == nil {
-		return nil, fmt.Errorf("libvirt provider not initialized")
+		return nil, nothingDone(wireProviderNotInitialized, fmt.Errorf("libvirt provider not initialized"))
 	}
 	conn, err := s.provider.conn(ctx)
 	if err != nil {
 		return nil, err
 	}
 	if !strings.Contains(conn.uri(), "ssh://") {
-		return nil, refusal(codes.FailedPrecondition, wireImportRefused,
+		return nil, refusal(codes.FailedPrecondition, wireImportNeedsSSH,
 			fmt.Errorf("nfs import requires an ssh:// libvirt transport (host-side qemu-img from nfs://); got %q", conn.uri()))
 	}
 

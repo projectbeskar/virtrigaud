@@ -509,7 +509,7 @@ func (s *Server) SnapshotCreate(ctx context.Context, req *providerv1.SnapshotCre
 	// Obtain the per-host connection through the seam (ADR-0008 PR 2) instead of
 	// type-asserting the concrete *Provider.
 	if s.provider == nil {
-		return nil, nothingDone(wireSnapshotNotPerformed, fmt.Errorf("libvirt provider not initialized"))
+		return nil, nothingDone(wireProviderNotInitialized, fmt.Errorf("libvirt provider not initialized"))
 	}
 	conn, err := s.provider.conn(ctx)
 	if err != nil {
@@ -1329,7 +1329,7 @@ func (s *Server) ExportDisk(ctx context.Context, req *providerv1.ExportDiskReque
 	}
 
 	if s.provider == nil {
-		return nil, nothingDone(wireExportNotPerformed, fmt.Errorf("provider not initialized"))
+		return nil, nothingDone(wireProviderNotInitialized, fmt.Errorf("provider not initialized"))
 	}
 
 	resp, err := s.provider.ExportDisk(ctx, contracts.ExportDiskRequest{
@@ -1451,7 +1451,7 @@ func (s *Server) ImportDisk(ctx context.Context, req *providerv1.ImportDiskReque
 	// rename on, the disk is on the host and a failure keeps its historical
 	// answer.
 	if s.provider == nil {
-		return nil, nothingDone(wireImportNotPerformed, fmt.Errorf("libvirt provider not initialized"))
+		return nil, nothingDone(wireProviderNotInitialized, fmt.Errorf("libvirt provider not initialized"))
 	}
 	conn, err := s.provider.conn(ctx)
 	if err != nil {
