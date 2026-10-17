@@ -237,3 +237,24 @@ func (r *VMMigrationReconciler) failTargetVMNotOwned(ctx context.Context, migrat
 	}
 	return r.transitionToFailedWithReason(ctx, migration, ReasonTargetVMNotOwned, targetVMNotOwnedMessage)
 }
+
+// migrationTargetLabels copies spec.target.labels for the target VM without
+// keys in the reserved virtrigaud.io domain (isReservedAnnotation), such as
+// virtrigaud.io/adopted, which would make the VirtualMachine controller wait
+// for an adoption instead of creating the VM, and could let adoption bind a
+// hypervisor VM to it. The manager creates the VM, so the reserved-keys
+// admission policy would not stop a key copied through it. The result is nil
+// when no label remains.
+func migrationTargetLabels(user map[string]string) map[string]string {
+	var out map[string]string
+	for k, v := range user {
+		if isReservedAnnotation(k) {
+			continue
+		}
+		if out == nil {
+			out = make(map[string]string, len(user))
+		}
+		out[k] = v
+	}
+	return out
+}

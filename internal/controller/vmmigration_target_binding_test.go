@@ -291,3 +291,13 @@ func TestBuildCreateRequest_PlantedVMDoesNotGetTheLandingDisk(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, req.Image.ImportedDisk)
 }
+
+// TestMigrationTargetLabels: reserved virtrigaud.io labels in
+// spec.target.labels are not copied onto the target VM the manager creates.
+func TestMigrationTargetLabels(t *testing.T) {
+	assert.Nil(t, migrationTargetLabels(nil))
+	assert.Nil(t, migrationTargetLabels(map[string]string{AdoptedLabel: AdoptedLabelValue}))
+	assert.Equal(t, map[string]string{"tenant": "team-a"}, migrationTargetLabels(map[string]string{
+		"tenant": "team-a", AdoptedLabel: AdoptedLabelValue, "net.virtrigaud.io/x": "y",
+	}))
+}

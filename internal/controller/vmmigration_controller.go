@@ -1780,7 +1780,7 @@ func (r *VMMigrationReconciler) handleCreatingPhase(ctx context.Context, migrati
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        targetVMName,
 			Namespace:   targetNamespace,
-			Labels:      migration.Spec.Target.Labels,
+			Labels:      migrationTargetLabels(migration.Spec.Target.Labels),
 			Annotations: targetAnnotations,
 		},
 		Spec: infrav1beta1.VirtualMachineSpec{
