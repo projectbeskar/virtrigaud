@@ -56,6 +56,11 @@ spec:
 
   # PVC-backed intermediate storage (only supported type in v0.3.6).
   # Requires a ReadWriteMany StorageClass (NFS, CephFS, etc.).
+  # The PVC is mounted only into this migration's source (read-write) and
+  # target (read-only) provider pods, and only while the migration is in
+  # flight. To use an existing PVC instead (pvc.name), its owner must first
+  # label it virtrigaud.io/component=migration-storage. See
+  # examples/migration/README.md ("PVC staging backend").
   storage:
     type: pvc
     pvc:
