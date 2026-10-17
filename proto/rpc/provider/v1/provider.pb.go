@@ -588,13 +588,15 @@ type DeleteRequest struct {
 	// owner identifies the Kubernetes object (the VirtualMachine) this delete is
 	// performed for: the same identity CreateRequest.owner stamps onto the VM it
 	// creates (ADR-0007 Addendum A, A2). AGNOSTIC. Additive and backward-compatible:
-	// single-host and thin-client providers ignore it (their Delete behavior is
-	// unchanged, so a legacy unstamped VM stays deletable). A clustered provider
-	// deletes a VM ONLY when its recorded owner uid equals this uid; a VM whose
-	// stamp is missing or records a different owner is reported NOT_FOUND and is
-	// NEVER destroyed, so a cleanup (e.g. a finalizer after an ALREADY_EXISTS
-	// create) can never remove another tenant's VM. The operator sets it, from
-	// vm.UID/namespace/name, on every delete that carries a target_host_id.
+	// single-host and thin-client providers other than Proxmox ignore it (their
+	// Delete behavior is unchanged, so a legacy unstamped VM stays deletable). A
+	// clustered provider deletes a VM ONLY when its recorded owner uid equals
+	// this uid; a VM whose stamp is missing or records a different owner is
+	// reported NOT_FOUND and is NEVER destroyed, so a cleanup (e.g. a finalizer
+	// after an ALREADY_EXISTS create) can never remove another tenant's VM. The
+	// operator sets it, from vm.UID/namespace/name, on every delete of a
+	// VirtualMachine with a UID; a single-host Proxmox provider checks it as
+	// described for PowerRequest.owner.
 	Owner *ObjectIdentity `protobuf:"bytes,3,opt,name=owner,proto3" json:"owner,omitempty"`
 }
 
@@ -672,11 +674,18 @@ type PowerRequest struct {
 	// owner identifies the Kubernetes object (the VirtualMachine) this power
 	// operation is performed for — the identity CreateRequest.owner stamps onto
 	// the VM (ADR-0007 Addendum A, slice 2). AGNOSTIC. Additive and
-	// backward-compatible: single-host and thin-client providers ignore it, and
-	// the operator sends it only with a target_host_id. A clustered provider
-	// powers a VM ONLY when its recorded owner uid equals this uid; a VM whose
-	// stamp is missing, unreadable or records a different owner is reported
-	// NOT_FOUND and is never started, stopped or rebooted.
+	// backward-compatible. A clustered provider powers a VM ONLY when its
+	// recorded owner uid equals this uid; a VM whose stamp is missing,
+	// unreadable or records a different owner is reported NOT_FOUND and is
+	// never started, stopped or rebooted.
+	// The operator sends it on every request for a VirtualMachine with a UID,
+	// single-host included. A single-host Proxmox provider checks it the same
+	// way against the stamp of the VM at the VMID (VMIDs are reused): a VM
+	// stamped with another owner, or unstamped and not named like the owner, is
+	// NOT_FOUND with the google.rpc.ErrorInfo reason VM_NOT_OWNED, and a stamp
+	// that cannot be read is FAILED_PRECONDITION with OWNER_STAMP_UNREADABLE;
+	// an unstamped VM named like the owner (one created before owner stamps, or
+	// adopted) is acted on as before. Other single-host providers ignore it.
 	Owner *ObjectIdentity `protobuf:"bytes,5,opt,name=owner,proto3" json:"owner,omitempty"`
 }
 
@@ -767,11 +776,18 @@ type ReconfigureRequest struct {
 	// owner identifies the Kubernetes object (the VirtualMachine) this
 	// reconfigure is performed for — the identity CreateRequest.owner stamps onto
 	// the VM (ADR-0007 Addendum A, slice 2). AGNOSTIC. Additive and
-	// backward-compatible: single-host and thin-client providers ignore it, and
-	// the operator sends it only with a target_host_id. A clustered provider
-	// reconfigures a VM ONLY when its recorded owner uid equals this uid; a VM
-	// whose stamp is missing, unreadable or records a different owner is reported
-	// NOT_FOUND and none of its CPU, memory or disks is changed.
+	// backward-compatible. A clustered provider reconfigures a VM ONLY when its
+	// recorded owner uid equals this uid; a VM whose stamp is missing,
+	// unreadable or records a different owner is reported NOT_FOUND and none of
+	// its CPU, memory or disks is changed.
+	// The operator sends it on every request for a VirtualMachine with a UID,
+	// single-host included. A single-host Proxmox provider checks it the same
+	// way against the stamp of the VM at the VMID (VMIDs are reused): a VM
+	// stamped with another owner, or unstamped and not named like the owner, is
+	// NOT_FOUND with the google.rpc.ErrorInfo reason VM_NOT_OWNED, and a stamp
+	// that cannot be read is FAILED_PRECONDITION with OWNER_STAMP_UNREADABLE;
+	// an unstamped VM named like the owner (one created before owner stamps, or
+	// adopted) is acted on as before. Other single-host providers ignore it.
 	Owner *ObjectIdentity `protobuf:"bytes,4,opt,name=owner,proto3" json:"owner,omitempty"`
 }
 
@@ -1017,12 +1033,22 @@ type DescribeRequest struct {
 	TargetHostId string `protobuf:"bytes,2,opt,name=target_host_id,json=targetHostId,proto3" json:"target_host_id,omitempty"`
 	// owner identifies the Kubernetes object (the VirtualMachine) this describe
 	// is performed for — the identity CreateRequest.owner stamps onto the VM
-	// (ADR-0007 Addendum A). AGNOSTIC. Additive and backward-compatible:
-	// single-host and thin-client providers ignore it, and the operator sends it
-	// only with a target_host_id. A clustered provider reports a VM whose stamp
-	// is missing or records a different owner as exists=false and returns none of
-	// its state, so a VirtualMachine can never read another tenant's VM that took
-	// over the name on its host (the operator then applies its no-recreate rule).
+	// (ADR-0007 Addendum A). AGNOSTIC. Additive and backward-compatible. A
+	// clustered provider reports a VM whose stamp is missing or records a
+	// different owner as exists=false and returns none of its state, so a
+	// VirtualMachine can never read another tenant's VM that took over the name
+	// on its host (the operator then applies its no-recreate rule).
+	// The operator sends it on every request for a VirtualMachine with a UID,
+	// single-host included. A single-host Proxmox provider checks it the same
+	// way against the stamp of the VM at the VMID (VMIDs are reused): a VM
+	// stamped with another owner, or unstamped and not named like the owner, is
+	// NOT_FOUND with the google.rpc.ErrorInfo reason VM_NOT_OWNED, and a stamp
+	// that cannot be read is FAILED_PRECONDITION with OWNER_STAMP_UNREADABLE;
+	// an unstamped VM named like the owner (one created before owner stamps, or
+	// adopted) is acted on as before. Other single-host providers ignore it.
+	// A single-host Describe never answers exists=false for a VM that is not
+	// the owner's (the operator would create the VM again): it answers
+	// VM_NOT_OWNED and returns none of the VM's state.
 	Owner *ObjectIdentity `protobuf:"bytes,3,opt,name=owner,proto3" json:"owner,omitempty"`
 }
 
@@ -1322,12 +1348,18 @@ type SnapshotCreateRequest struct {
 	TargetHostId string `protobuf:"bytes,5,opt,name=target_host_id,json=targetHostId,proto3" json:"target_host_id,omitempty"`
 	// owner identifies the Kubernetes object (the VirtualMachine) this snapshot
 	// is taken for — the identity CreateRequest.owner stamps onto the VM
-	// (ADR-0007 Addendum A, slice 3). AGNOSTIC. Additive and backward-compatible:
-	// single-host and thin-client providers ignore it, and the operator sends it
-	// only with a target_host_id. A clustered provider snapshots a VM ONLY when
-	// its recorded owner uid equals this uid; a VM whose stamp is missing,
-	// unreadable or records a different owner is reported NOT_FOUND and is never
-	// snapshotted.
+	// (ADR-0007 Addendum A, slice 3). AGNOSTIC. Additive and backward-compatible.
+	// A clustered provider snapshots a VM ONLY when its recorded owner uid
+	// equals this uid; a VM whose stamp is missing, unreadable or records a
+	// different owner is reported NOT_FOUND and is never snapshotted.
+	// The operator sends it on every request for a VirtualMachine with a UID,
+	// single-host included. A single-host Proxmox provider checks it the same
+	// way against the stamp of the VM at the VMID (VMIDs are reused): a VM
+	// stamped with another owner, or unstamped and not named like the owner, is
+	// NOT_FOUND with the google.rpc.ErrorInfo reason VM_NOT_OWNED, and a stamp
+	// that cannot be read is FAILED_PRECONDITION with OWNER_STAMP_UNREADABLE;
+	// an unstamped VM named like the owner (one created before owner stamps, or
+	// adopted) is acted on as before. Other single-host providers ignore it.
 	Owner *ObjectIdentity `protobuf:"bytes,6,opt,name=owner,proto3" json:"owner,omitempty"`
 	// request_token identifies the request object this snapshot is created for
 	// (the VMSnapshot's uid), so a retry of the SAME request can find the
@@ -1497,7 +1529,8 @@ type SnapshotDeleteRequest struct {
 	// Addendum A, slice 3), exactly as SnapshotCreateRequest.owner. A clustered
 	// provider deletes a snapshot ONLY of a VM whose recorded owner uid equals
 	// this uid; any other VM is reported NOT_FOUND and none of its snapshots is
-	// touched.
+	// touched. Sent and checked on single-host requests as
+	// SnapshotCreateRequest.owner.
 	Owner *ObjectIdentity `protobuf:"bytes,4,opt,name=owner,proto3" json:"owner,omitempty"`
 }
 
@@ -1580,7 +1613,8 @@ type SnapshotRevertRequest struct {
 	// owner identifies the VirtualMachine being reverted (ADR-0007 Addendum A,
 	// slice 3), exactly as SnapshotCreateRequest.owner. A clustered provider
 	// reverts a VM ONLY when its recorded owner uid equals this uid; any other VM
-	// is reported NOT_FOUND and is never reverted.
+	// is reported NOT_FOUND and is never reverted. Sent and checked on
+	// single-host requests as SnapshotCreateRequest.owner.
 	Owner *ObjectIdentity `protobuf:"bytes,4,opt,name=owner,proto3" json:"owner,omitempty"`
 }
 
