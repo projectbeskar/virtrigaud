@@ -1771,10 +1771,10 @@ func (r *VMMigrationReconciler) handleCreatingPhase(ctx context.Context, migrati
 	// informational: what binds the VM to this migration is its UID
 	// (status.targetVMUID) and its claim (migrationTargetClaimAnnotation).
 	targetAnnotations := userTargetAnnotations(migration.Spec.Target.Annotations)
-	targetAnnotations["virtrigaud.io/migrated-from"] = fmt.Sprintf("%s/%s", migration.Namespace, migration.Spec.Source.VMRef.Name)
+	targetAnnotations[migratedFromAnnotation] = fmt.Sprintf("%s/%s", migration.Namespace, migration.Spec.Source.VMRef.Name)
 	targetAnnotations[migrationProvenanceAnnotation] = migrationProvenance(migration)
-	targetAnnotations["virtrigaud.io/imported-disk-id"] = migration.Status.ImportID
-	targetAnnotations["virtrigaud.io/disk-checksum"] = migration.Status.DiskInfo.TargetChecksum
+	targetAnnotations[importedDiskIDAnnotation] = migration.Status.ImportID
+	targetAnnotations[diskChecksumAnnotation] = migration.Status.DiskInfo.TargetChecksum
 
 	targetVM := &infrav1beta1.VirtualMachine{
 		ObjectMeta: metav1.ObjectMeta{
@@ -1939,6 +1939,26 @@ func (r *VMMigrationReconciler) awaitOwnedTargetVM(ctx context.Context, migratio
 // can write it, so no decision rests on it (migrationOwnsTargetVM).
 const migrationProvenanceAnnotation = "virtrigaud.io/migration"
 
+// Informational annotations a migration writes on the target VM it creates
+// (and, for the completion pair, once it is validated). Like
+// migrationProvenanceAnnotation they are reserved for the manager by the
+// reserved-keys admission policy (config/admission-policy), but no decision
+// about which VM is the migration's rests on them. A target VM carrying
+// migrationCompletedAnnotation="true" is never deleted with the migration.
+const (
+	// migratedFromAnnotation names the source VM as "<namespace>/<name>".
+	migratedFromAnnotation = "virtrigaud.io/migrated-from"
+	// importedDiskIDAnnotation is the migration's status.importID.
+	importedDiskIDAnnotation = "virtrigaud.io/imported-disk-id"
+	// diskChecksumAnnotation is the imported disk's checksum.
+	diskChecksumAnnotation = "virtrigaud.io/disk-checksum"
+	// migrationCompletedAnnotation is "true" once the migration validated
+	// the target VM (Phase=Ready).
+	migrationCompletedAnnotation = "virtrigaud.io/migration-completed"
+	// migrationCompletedAtAnnotation is when, in RFC 3339.
+	migrationCompletedAtAnnotation = "virtrigaud.io/migration-completed-at"
+)
+
 // migrationProvenance is migrationProvenanceAnnotation's value for migration.
 func migrationProvenance(migration *infrav1beta1.VMMigration) string {
 	return fmt.Sprintf("%s/%s", migration.Namespace, migration.Name)
@@ -2031,8 +2051,8 @@ func (r *VMMigrationReconciler) handleValidatingTargetPhase(ctx context.Context,
 	if targetVM.Annotations == nil {
 		targetVM.Annotations = make(map[string]string)
 	}
-	targetVM.Annotations["virtrigaud.io/migration-completed"] = "true"
-	targetVM.Annotations["virtrigaud.io/migration-completed-at"] = time.Now().Format(time.RFC3339)
+	targetVM.Annotations[migrationCompletedAnnotation] = "true"
+	targetVM.Annotations[migrationCompletedAtAnnotation] = time.Now().Format(time.RFC3339)
 	if err := r.Update(ctx, targetVM); err != nil {
 		logger.Error(err, "Failed to mark VM as migration-completed")
 		// Don't fail the migration for this - the VM is already created and working
@@ -2341,10 +2361,10 @@ func (r *VMMigrationReconciler) handleDeletion(ctx context.Context, migration *i
 			logger.V(1).Info("Skipping target VM cleanup", "vm", targetVMName)
 		} else if err := r.Get(ctx, vmKey, targetVM); err == nil {
 			// Check if VM has migration-completed marker
-			if targetVM.Annotations != nil && targetVM.Annotations["virtrigaud.io/migration-completed"] == "true" {
+			if targetVM.Annotations != nil && targetVM.Annotations[migrationCompletedAnnotation] == "true" {
 				logger.Info("Target VM has migration-completed marker, skipping deletion",
 					"vm", targetVMName,
-					"completed_at", targetVM.Annotations["virtrigaud.io/migration-completed-at"])
+					"completed_at", targetVM.Annotations[migrationCompletedAtAnnotation])
 				// VM is a successfully migrated VM, never delete it
 			} else if migrationOwnsTargetVM(migration, targetVM) {
 				// Only the VM this migration created (its UID, or its claim),
