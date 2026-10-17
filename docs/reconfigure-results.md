@@ -221,8 +221,14 @@ storage migration. vSphere leaves a disk alone, and logs why, when:
 - **the name is ambiguous**: used by more than one `spec.disks` entry, or
   recorded on more than one disk;
 - **vCenter cannot extend the disk**: a delta disk (the VM has snapshots, or it
-  is a linked clone) or a physical-mode RDM. Remove the snapshots (or
-  consolidate) and the next `Reconfigure` grows it.
+  is a linked clone) or a physical-mode RDM. Removing the snapshots (or
+  consolidating) makes the disk growable, but nothing re-sends the size by
+  itself: the next `Reconfigure` — sent only on a CPU or memory change, see
+  [below](#when-a-reconfigure-is-sent) — grows it.
+
+The disks left alone in the last two cases (and a recorded disk missing from
+the VM) are logged at `WARN` by the provider while the call succeeds; an entry
+no disk is recorded for is logged at `INFO`.
 
 A disk on a SCSI controller with a shared bus, or with multi-writer sharing, is
 grown only while the VM is powered off (see the next section).
@@ -231,9 +237,13 @@ Before this release vSphere grew the **first** disk (the root disk) to
 `spec.disks[0].sizeGiB`, and Proxmox sent every `spec.disks` size to `scsi0` and,
 after a disk grow, dropped the CPU/memory change while reporting success.
 
+### When a `Reconfigure` is sent
+
 The manager sends a `Reconfigure` when the effective CPU or memory changes (or a
-pending/failed one is re-checked); the disk sizes travel with it. A disk size
-change alone does not trigger one (a known limitation).
+pending/failed one is re-checked); the disk sizes travel with it. **A disk size
+change alone does not trigger one** (a known limitation): to apply a
+`spec.disks` size change — or a growth that was skipped earlier, e.g. while the
+disk had snapshots — the VM's CPU or memory must change too.
 
 ## vSphere: changes a running VM cannot take
 
@@ -263,9 +273,12 @@ ahead on the running VM as before.
 
 Two more refusals happen before anything is changed: a CPU count that is not a
 multiple of the VM's cores per socket (`InvalidSpec`; vCenter would fail the
-task), and a `spec.disks` shrink (above). A `ReconfigVM_Task` vCenter fails
-anyway is answered with `VM_OPERATION_FAILED` and a constant message (the fault
-is in the provider log): it shows as `Reconfiguring=False/ProviderError`, is
+task), and a `spec.disks` shrink (above). A `ReconfigVM_Task` vCenter refuses to
+start (a fault such as `TaskInProgress` during a backup snapshot,
+`InvalidState`, `InvalidPowerState`) or fails anyway is answered with
+`VM_OPERATION_FAILED` and a constant message (the fault is in the provider log;
+a failure to reach vCenter, or an expired session, is not, and still counts
+toward the breaker): it shows as `Reconfiguring=False/ProviderError`, is
 retried on the per-VM backoff, and never counts toward the Provider's circuit
 breaker, so one VM's failing reconfigure cannot fast-fail every other VM of the
 Provider.
