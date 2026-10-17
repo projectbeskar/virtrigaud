@@ -425,7 +425,13 @@ func migrationOutcomeUnknownEvent(migration *infrav1beta1.VMMigration, op migrat
 	msg := fmt.Sprintf("The result of the %s requested at %s (attempt id) was not recorded", kind.call, attempt)
 	if op == longOpSnapshot {
 		name, _ := migrationSnapshotIdentity(migration)
-		msg += fmt.Sprintf("; the snapshot it asked for is named %q", name)
+		marker := requestMarker(migration.Status.Conditions, kind.condType)
+		if marker != nil && migration.Status.LastRetryTime != nil && marker.LastTransitionTime.Before(migration.Status.LastRetryTime) {
+			msg += fmt.Sprintf("; it was requested by an earlier attempt of this migration, so the snapshot it asked for "+
+				"is named like %q with that attempt's -r<n> suffix (none for the first attempt)", name)
+		} else {
+			msg += fmt.Sprintf("; the snapshot it asked for is named %q", name)
+		}
 	}
 	return msg
 }
