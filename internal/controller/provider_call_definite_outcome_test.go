@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"sync/atomic"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -26,6 +27,8 @@ import (
 	"google.golang.org/genproto/googleapis/rpc/errdetails"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	infrav1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
@@ -217,4 +220,61 @@ func TestVMSnapshot_LibvirtDefiniteFailureFailsTheAttempt(t *testing.T) {
 			assert.True(t, snapshotRequested(got), "the marker is kept")
 		})
 	}
+}
+
+// TestVMSnapshot_FailureAnsweringAResendIsNeverDefinite: a SnapshotCreate sent
+// again after an operator's confirmation, answered with a typed refusal (the
+// snapshot the first call took has the name: AlreadyExists), keeps the marker
+// and holds - it must not fail the VMSnapshot, or the first snapshot leaks
+// (the rule of a VM Create's re-send, createOutcomeKnown).
+func TestVMSnapshot_FailureAnsweringAResendIsNeverDefinite(t *testing.T) {
+	faults := &statusWriteFaults{}
+	faults.results.Store(true)
+	r, rec, snap := markerSnapshotFixture(t, false, faults)
+	_, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(snap)})
+	require.Error(t, err, "the first create's outcome could not be written")
+	require.Len(t, rec.creates, 1)
+	faults.results.Store(false)
+
+	r2 := restartedSnapshotReconciler(r)
+	_, got := reconcileSnapshotOnce(t, r2, snap)
+	require.Len(t, rec.creates, 1, "held")
+	got.Annotations = map[string]string{operationOutcomeAnnotation: operationOutcomeNotPerformedPrefix +
+		requestMarkerAttemptID(got.Status.Conditions, snapshotConditionRequested)}
+	require.NoError(t, r2.Update(context.Background(), got))
+
+	rec.createErr = contracts.NewConflictError("snapshotCreate: a snapshot with this name already exists", nil)
+	_, got = reconcileSnapshotOnce(t, r2, snap)
+	require.Len(t, rec.creates, 2, "sent again on the confirmation")
+	assert.NotEqual(t, infrav1beta1.SnapshotPhaseFailed, got.Status.Phase, "the answer to a re-send never fails the snapshot")
+	assert.True(t, snapshotRequested(got), "the marker is kept")
+}
+
+// TestMigrationExport_FailureAnsweringAResendIsNeverDefinite: the same for an
+// ExportDisk sent again after an operator's confirmation.
+func TestMigrationExport_FailureAnsweringAResendIsNeverDefinite(t *testing.T) {
+	vm, p, m := raceMigrationFixture()
+	prov := &capsMigrationProvider{}
+	var failing atomic.Bool
+	failing.Store(true)
+	c := failingStatusWrites(t, &failing, vm, p, m)
+	r := migrationReconcilerOn(c, prov)
+	_, err := r.handleExportingPhase(context.Background(), storedMigration(t, c, m))
+	require.Error(t, err)
+	require.EqualValues(t, 1, prov.exportCalls.Load())
+	failing.Store(false)
+
+	again := &failingTransfersProvider{err: libvirtNotPerformed(t, "exportDisk")}
+	r2 := restarted(r)
+	r2.providerInstanceFn = func(context.Context, *infrav1beta1.Provider) (contracts.Provider, error) { return again, nil }
+	_, err = r2.handleExportingPhase(context.Background(), storedMigration(t, c, m))
+	require.NoError(t, err)
+	require.EqualValues(t, 0, again.exportCalls.Load(), "held first")
+	confirmAttempt(t, c, m, migrationConditionExportRequested, "")
+	_, err = r2.handleExportingPhase(context.Background(), storedMigration(t, c, m))
+	require.NoError(t, err)
+	require.EqualValues(t, 1, again.exportCalls.Load(), "sent again on the confirmation")
+	got := storedMigration(t, c, m)
+	assert.NotEqual(t, infrav1beta1.MigrationPhaseFailed, got.Status.Phase, "the answer to a re-send never fails the migration")
+	assert.True(t, migrationRequested(got, longOpExport), "the marker is kept")
 }

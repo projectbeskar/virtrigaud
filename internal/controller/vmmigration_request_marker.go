@@ -273,19 +273,22 @@ func clearingMigrationRequest(op migrationLongOp, apply func(*infrav1beta1.VMMig
 // migration as read, with the optimistic lock of its resourceVersion; an
 // automatic re-send counts itself in the marker (nextRequestResends). An
 // operator's operationOutcomeAnnotation is removed first, so it never
-// authorizes a later attempt. Any error means nothing may be sent; a Conflict
+// authorizes a later attempt. resend reports that a marker was already on the
+// object (an earlier call whose outcome was never recorded), so no failure
+// answering this send is definite (providerCallOutcomeKnownFor). Any error means nothing may be sent; a Conflict
 // is a status contention (Reconcile requeues). On success migration carries
 // the written status and resourceVersion.
-func (r *VMMigrationReconciler) markMigrationRequested(ctx context.Context, migration *infrav1beta1.VMMigration, op migrationLongOp) error {
+func (r *VMMigrationReconciler) markMigrationRequested(ctx context.Context, migration *infrav1beta1.VMMigration, op migrationLongOp) (bool, error) {
 	kind := migrationRequests[op]
 	prev := requestMarker(migration.Status.Conditions, kind.condType)
+	resend := prev != nil
 	resends := nextRequestResends(prev, operationOutcomeConfirmed(migration.Annotations,
 		requestMarkerAttemptID(migration.Status.Conditions, kind.condType)))
 	if _, ok := migration.Annotations[operationOutcomeAnnotation]; ok {
 		updated := migration.DeepCopy()
 		delete(updated.Annotations, operationOutcomeAnnotation)
 		if err := r.Update(ctx, updated); err != nil {
-			return fmt.Errorf("remove the %s annotation of VMMigration %s/%s before %s: %w", operationOutcomeAnnotation,
+			return resend, fmt.Errorf("remove the %s annotation of VMMigration %s/%s before %s: %w", operationOutcomeAnnotation,
 				migration.Namespace, migration.Name, migrationRequests[op].call, wrapMigrationStatusConflict(err))
 		}
 		migration.ResourceVersion = updated.ResourceVersion
@@ -297,9 +300,9 @@ func (r *VMMigrationReconciler) markMigrationRequested(ctx context.Context, migr
 	if err := r.updateStatus(ctx, migration); err != nil {
 		logging.FromContext(ctx).Info("Cannot record the requested provider call on the VMMigration; not sending it",
 			"call", kind.call)
-		return err
+		return resend, err
 	}
-	return nil
+	return resend, nil
 }
 
 // resolveMigrationRequest decides a phase whose call op carries its marker
