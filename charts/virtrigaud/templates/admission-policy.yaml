@@ -23,13 +23,17 @@
   reserved_keys_policy.yaml (hack/verify-admission-policy-render.sh).
 */}}
 {{- $vapAvailable := or (.Capabilities.APIVersions.Has "admissionregistration.k8s.io/v1/ValidatingAdmissionPolicy") (semverCompare ">=1.30.0-0" .Capabilities.KubeVersion.Version) }}
-{{- if and .Values.admissionPolicy.reservedKeys.enabled $vapAvailable }}
+{{- /* dig, not .Values.admissionPolicy...: `helm upgrade --reuse-values` from a
+       release whose values have no admissionPolicy block keeps working, and the
+       policy is then on (its default). */}}
+{{- $enabled := dig "admissionPolicy" "reservedKeys" "enabled" true .Values.AsMap }}
+{{- if and $enabled $vapAvailable }}
 {{- $name := printf "%s-reserved-keys" (include "virtrigaud.fullname" .) }}
 {{- $users := list (printf "system:serviceaccount:%s:%s" .Release.Namespace (include "virtrigaud.serviceAccountName" .)) }}
-{{- range .Values.admissionPolicy.reservedKeys.exemptUsernames }}
+{{- range (dig "admissionPolicy" "reservedKeys" "exemptUsernames" list .Values.AsMap) }}
 {{- $users = append $users . }}
 {{- end }}
-{{- $groups := .Values.admissionPolicy.reservedKeys.exemptGroups | default list }}
+{{- $groups := dig "admissionPolicy" "reservedKeys" "exemptGroups" list .Values.AsMap }}
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
 metadata:
