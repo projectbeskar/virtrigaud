@@ -1186,6 +1186,12 @@ func (p *Provider) Clone(ctx context.Context, req *providerv1.CloneRequest) (*pr
 		}
 		return nil, errors.NewInvalidSpec("invalid source VM reference: %v", err)
 	}
+	// A source VM that is not the requester's source VirtualMachine's (its
+	// VMID reused) is never cloned: its disks would be copied into a VM the
+	// requester owns (vm_owner_check.go).
+	if err := p.checkCloneSourceOwner(ctx, sourceNode, sourceVMID, requestOwner(req.GetSourceOwner())); err != nil {
+		return nil, err
+	}
 
 	var stamp *ownerStamp
 	if !owner.IsZero() {
@@ -1683,6 +1689,11 @@ func (p *Provider) GetDiskInfo(ctx context.Context, req *providerv1.GetDiskInfoR
 	if err != nil {
 		return nil, errors.NewInternal("failed to get VM config", err)
 	}
+	// The same config decides whether the VM is the requester's: the disks of
+	// one that is not (its VMID reused) are never described (vm_owner_check.go).
+	if err := p.checkOwnerInConfig(config, node, vmid, requestOwner(req.GetOwner()), ownerCheckOpGetDiskInfo); err != nil {
+		return nil, err
+	}
 
 	// Get VM info for additional details
 	vmInfo, err := p.client.GetVM(ctx, node, vmid)
@@ -1880,6 +1891,12 @@ func (p *Provider) ExportDisk(ctx context.Context, req *providerv1.ExportDiskReq
 		if err := migration.EnsureRelayMode(req.TransferMode); err != nil {
 			return nil, err
 		}
+	}
+
+	// The disk of a VM that is not the requester's (its VMID reused) is never
+	// read or copied (vm_owner_check.go). Checked before every backend path.
+	if err := p.checkRequestVMOwner(ctx, req.VmId, requestOwner(req.GetOwner()), ownerCheckOpExportDisk); err != nil {
+		return nil, err
 	}
 
 	// ADR-0006 Slice 4 Proxmox SOURCE path: the node's qemu-img writes the

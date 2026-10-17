@@ -88,6 +88,17 @@ func ownerCheckCalls() []ownerCheckCall {
 			_, err := p.SnapshotRevert(ctx, &providerv1.SnapshotRevertRequest{VmId: ownerCheckID, SnapshotId: ownerCheckSnapshot, Owner: o})
 			return err
 		}},
+		{"GetDiskInfo", false, func(ctx context.Context, p *Provider, o *providerv1.ObjectIdentity) error {
+			resp, err := p.GetDiskInfo(ctx, &providerv1.GetDiskInfoRequest{VmId: ownerCheckID, Owner: o})
+			if err == nil && resp.VirtualSizeBytes <= 0 {
+				return status.Error(codes.Unknown, "test: an allowed disk read must report the disk")
+			}
+			return err
+		}},
+		{"Clone", true, func(ctx context.Context, p *Provider, o *providerv1.ObjectIdentity) error {
+			_, err := p.Clone(ctx, &providerv1.CloneRequest{SourceVmId: ownerCheckID, TargetName: "copy", SourceOwner: o})
+			return err
+		}},
 	}
 }
 
@@ -206,12 +217,16 @@ func TestOwnerCheck_ConfigReadFailureHoldsTheCall(t *testing.T) {
 
 			require.Error(t, err)
 			want := codes.Unavailable
-			if call.name == "Reconfigure" {
-				// Reconfigure reads the config for its own use and keeps that
+			if call.name == "Reconfigure" || call.name == "GetDiskInfo" {
+				// Both read the config for their own use and keep that
 				// read's historical answer.
 				want = codes.Internal
 			}
 			assert.Equal(t, want, status.Code(err), "error: %v", err)
+			if call.name == "Clone" {
+				assert.ElementsMatch(t, []string{contracts.CreateNotPerformedReason, contracts.VMOperationFailedReason},
+					deleteErrorReasons(err), "a clone whose source cannot be checked made nothing: retry is safe")
+			}
 			assert.Equal(t, beforeMutating, len(srv.MutatingRequests()), "nothing is changed on an unknown owner")
 		})
 	}
@@ -262,4 +277,45 @@ func TestOwnerCheck_SnapshotDeleteChecksTheVMOnItsActualNode(t *testing.T) {
 	assert.Equal(t, codes.NotFound, status.Code(err), "error: %v", err)
 	assert.Equal(t, []string{contracts.VMNotOwnedReason}, deleteErrorReasons(err))
 	assert.Equal(t, beforeMutating, len(srv.MutatingRequests()))
+}
+
+// TestOwnerCheck_ExportDisk: the disk of a VM that is not the requester's is
+// never read or exported, on either backend; the check runs before the
+// backend path, so an allowed request goes on to it (here: no SSH data plane
+// configured, which that path reports).
+func TestOwnerCheck_ExportDisk(t *testing.T) {
+	other := testStamp(testOtherUID, ownerStampPhaseReady).line()
+	cases := []struct {
+		name       string
+		vm         pvefake.VM
+		owner      *providerv1.ObjectIdentity
+		wantCode   codes.Code
+		wantReason string
+	}{
+		{"own VM", pvefake.VM{Description: testStamp(testOwnerUID, ownerStampPhaseReady).line()}, ownerProto(testOwner()), codes.Unavailable, ""},
+		{"unstamped VM named like the VirtualMachine", pvefake.VM{}, ownerProto(testOwner()), codes.Unavailable, ""},
+		{"VMID reused by another tenant's VM", pvefake.VM{Name: "db", Description: other}, ownerProto(testOwner()), codes.NotFound, contracts.VMNotOwnedReason},
+		{"VMID reused by a VM made outside VirtRigaud", pvefake.VM{Name: "someone-else"}, ownerProto(testOwner()), codes.NotFound, contracts.VMNotOwnedReason},
+		{"unreadable stamp", pvefake.VM{Description: "virtrigaud.owner v1 tampered"}, ownerProto(testOwner()), codes.FailedPrecondition, contracts.OwnerStampUnreadableReason},
+		{"no owner on the request (older manager): unchanged", pvefake.VM{Name: "db", Description: other}, nil, codes.Unavailable, ""},
+	}
+	for _, backend := range []string{"s3", "nfs"} {
+		for _, tc := range cases {
+			t.Run(backend+"/"+tc.name, func(t *testing.T) {
+				p, srv := newOwnerCheckFixture(t, tc.vm)
+				before := len(srv.Requests())
+				_, err := p.ExportDisk(context.Background(), &providerv1.ExportDiskRequest{
+					VmId: ownerCheckID, BackendType: backend, TransferMode: "relay",
+					DestinationUrl: "nfs://nfs.example/export/x.qcow2", Owner: tc.owner,
+				})
+				assert.Equal(t, tc.wantCode, status.Code(err), "error: %v", err)
+				if tc.wantReason == "" {
+					assert.Contains(t, status.Convert(err).Message(), "SSH data plane", "an allowed export reaches the backend path")
+					return
+				}
+				assert.Equal(t, []string{tc.wantReason}, deleteErrorReasons(err))
+				onlyConfigReadOfVM(t, requestsSince(srv, before))
+			})
+		}
+	}
 }

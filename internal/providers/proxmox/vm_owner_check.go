@@ -30,7 +30,9 @@ import (
 )
 
 // Owner checks of the per-VM calls other than Delete (Describe, Power,
-// Reconfigure, SnapshotCreate, SnapshotDelete, SnapshotRevert).
+// Reconfigure, SnapshotCreate, SnapshotDelete, SnapshotRevert, GetDiskInfo,
+// ExportDisk, and the source of a Clone, checked against
+// CloneRequest.source_owner).
 //
 // Proxmox VMIDs are reused: once a VM is destroyed (outside VirtRigaud, say),
 // /cluster/nextid may hand its VMID to the next VM anyone creates. A
@@ -64,6 +66,9 @@ const (
 	ownerCheckOpSnapshotCreate = "snapshot create"
 	ownerCheckOpSnapshotDelete = "snapshot delete"
 	ownerCheckOpSnapshotRevert = "snapshot revert"
+	ownerCheckOpGetDiskInfo    = "disk read"
+	ownerCheckOpExportDisk     = "disk export"
+	ownerCheckOpCloneSource    = "clone"
 )
 
 // vmNotOwnedMessage is the constant answer (per call) to a request for a VM
@@ -115,6 +120,44 @@ func (p *Provider) checkVMOwner(ctx context.Context, node string, vmid int, owne
 			"the %s was not performed (will retry)", vmid, op), nil)
 	}
 	return p.checkOwnerInConfig(cfg, node, vmid, owner, op)
+}
+
+// checkRequestVMOwner is checkVMOwner for a call that has only the VM's
+// provider id (ExportDisk): it resolves the id to a VMID and node only when
+// the request carries an owner, so a request without one is unchanged.
+func (p *Provider) checkRequestVMOwner(ctx context.Context, id string, owner contracts.ObjectIdentity, op string) error {
+	if owner.IsZero() {
+		return nil
+	}
+	if p.client == nil {
+		return errors.NewUnavailable("PVE client not configured", nil)
+	}
+	vmid, node, err := p.parseVMReference(id)
+	if err != nil {
+		return errors.NewInvalidSpec("invalid VM reference: %v", err)
+	}
+	return p.checkVMOwner(ctx, node, vmid, owner, op)
+}
+
+// checkCloneSourceOwner is the owner check of a Clone's source VM (vmid on
+// node) against CloneRequest.source_owner, with Clone's error classes: a
+// config that cannot be read is VM_OPERATION_FAILED + CREATE_NOT_PERFORMED
+// (nothing was cloned; retry), never an outcome-unknown Unavailable. A source
+// not on node is left to Clone's own read, which reports a gone source
+// NotFound.
+func (p *Provider) checkCloneSourceOwner(ctx context.Context, node string, vmid int, owner contracts.ObjectIdentity) error {
+	if owner.IsZero() {
+		return nil
+	}
+	cfg, err := p.client.GetVMConfig(ctx, node, vmid)
+	if stderrors.Is(err, pveapi.ErrVMNotFound) {
+		return nil
+	}
+	if err != nil {
+		return p.vmCreateNotPerformed(fmt.Sprintf("cannot read clone source %d to check its owner; nothing was cloned "+
+			"(will retry)", vmid), err)
+	}
+	return p.checkOwnerInConfig(cfg, node, vmid, owner, ownerCheckOpCloneSource)
 }
 
 // checkOwnerInConfig decides from cfg, the already-read config of VM vmid on
