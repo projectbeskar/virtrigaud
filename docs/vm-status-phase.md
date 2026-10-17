@@ -30,18 +30,25 @@ First match wins:
    `OwnerStampUnreadable`, `ProviderUnavailable`, `VMIsImageArtifact`,
    `CreateOutcomeUnknown`, `DeleteBlocked`, `ProviderRefMismatch`,
    `PlacementTopologyMismatch`, `ConsumerNotAllowed`, `VMMissingOnHost`,
-   `OwnDomainOnAnotherHost`, `UniquenessCheckFailed` and
-   `ProviderLacksListOwnerFilter`. They hold whether or not the VM has an id.
+   `RestorePending` and `OwnDomainOnAnotherHost`. They hold whether or not the VM
+   has an id.
 3. No `status.id` (not created) and `Ready=False` with a failed-create reason
    (`CreateBackoff`, `CreateRefused`, `ProviderConflict`, `ValidationError`):
    `Failed`. On a VM that exists the same reasons describe a failed change to it,
    not the VM, and do not change its phase.
-4. No `status.id`: `Provisioning` if a create is requested, a clustered
+4. No `status.id` and a clustered restore hold on `Placed` or `Provisioning`
+   (`RestorePending`, `OwnDomainOnAnotherHost`, `UniquenessCheckFailed`,
+   `ProviderLacksListOwnerFilter`; these are written to those two conditions,
+   not to `Ready`, for a VM that was never placed): `Failed`.
+5. No `status.id`: `Provisioning` if a create is requested, a clustered
    `pendingHost` is set, `status.lastTaskRef` is set or `Provisioning=True` (not
    `WaitingForDependencies`); otherwise `Pending`.
-5. A resize in flight: `Reconfiguring`.
-6. By `status.powerState`: `On` and `Suspended` are `Running`; `Off` is
-   `Stopped`; `Unknown` is `Failed`. With no power state observed yet the VM is
+6. A resize in flight: `Reconfiguring`.
+7. By `status.powerState`: `On` and `Suspended` are `Running`; `Off` is
+   `Stopped`; `Unknown` is `Failed` (the current observation: it clears on the
+   next reconcile that sees a state the provider can classify, so a VM that passes
+   through an odd libvirt state shows `Failed` only for that long). With no power
+   state observed yet the VM is
    `Running` if `Ready=True`, else `Provisioning`.
 
 A transient provider error (`Ready=False/ProviderError`) on a VM that exists does
@@ -56,7 +63,15 @@ the pre-create marker, the post-create record and the clustered pending-host
 records) recomputes it from the status being written, so it changes in the same
 write as the fact it summarizes and never causes a write by itself: an unchanged
 reconcile writes nothing. When a delete begins, the controller writes `Deleting`
-once, with a status merge patch that changes nothing else.
+once, with a status merge patch that changes nothing else and is refused (and
+retried a second later on a fresh read) if the object it holds is not the stored
+one any more.
+
+Paths that write only when a hold changed the status compare the status after the
+phase is derived, so a VM that was already held when the manager was upgraded gets
+its phase on its first reconcile. A VM written by the adoption or clone
+controllers (which set `status.id` out of band) gets its phase on the next
+regular VirtualMachine reconcile, not from those writes.
 
 ## Upgrade notes
 
