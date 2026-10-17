@@ -140,6 +140,18 @@ func TestNothingDone(t *testing.T) {
 	assertNotPerformedStatus(t, nothingDone(wireExportNotPerformed, virshFailure(-1, "connection reset")))
 
 	assertRefusalStatus(t, nothingDone(wireExportNotPerformed, status.Error(codes.FailedPrecondition, "refused")), codes.FailedPrecondition)
+
+	// A typed status keeps its own text, never that of the errors that wrapped
+	// it (a host path, a command's stderr).
+	wrapped := fmt.Errorf("failed to resolve /var/lib/libvirt/images/x.qcow2: %w",
+		fmt.Errorf("qemu-img stderr: secret: %w", status.Error(codes.FailedPrecondition, "the disk cannot be copied safely")))
+	got := nothingDone(wireExportNotPerformed, wrapped)
+	assertRefusalStatus(t, got, codes.FailedPrecondition)
+	assert.Equal(t, "the disk cannot be copied safely", status.Convert(got).Message())
+	assertConstantText(t, got, "/var/lib", "secret", "qemu-img")
+	keeps := nothingDone(wireExportNotPerformed, fmt.Errorf("x /path: %w", diskCheckFailedStatus("could not verify", false).Err()))
+	assert.True(t, contracts.HasErrorInfoReason(keeps, contracts.VMDiskCheckFailedReason), "the ErrorInfo is kept")
+	assertConstantText(t, keeps, "/path")
 	assertRefusalStatus(t, nothingDone(wireExportNotPerformed, contracts.NewNotFoundError("gone", nil)), codes.NotFound)
 
 	// A hidden cause (hostCheckFailed) is retryable and constant: not performed.
@@ -147,7 +159,7 @@ func TestNothingDone(t *testing.T) {
 
 	// A staging area without room keeps its constant text.
 	noRoom := stagedCopyRefusal(errors.New("no room"))
-	got := nothingDone(wireImportNotPerformed, noRoom)
+	got = nothingDone(wireImportNotPerformed, noRoom)
 	assertNotPerformedStatus(t, got)
 	assert.Contains(t, status.Convert(got).Message(), "no room")
 }

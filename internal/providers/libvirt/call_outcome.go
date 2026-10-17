@@ -219,16 +219,19 @@ func refusal(code codes.Code, wire string, cause error) error {
 // reasons that mean the call did nothing) or a contracts.ProviderError, which
 // crosses gRPC as an untyped Unknown unless it is mapped here.
 func definiteStatusError(err error) error {
-	if st, ok := status.FromError(err); ok {
+	// The status as its own error produced it - its code, text and details -
+	// never the text of the errors that wrapped it ("failed to ...: <path>:
+	// <stderr>"): the wire text is the typed answer's own, constant by design.
+	if st := innerStatus(err); st != nil {
 		switch st.Code() {
 		case codes.InvalidArgument, codes.NotFound, codes.AlreadyExists, codes.FailedPrecondition,
 			codes.PermissionDenied, codes.Unimplemented:
-			return err
+			return st.Err()
 		case codes.Unavailable:
 			for _, reason := range []string{contracts.VMOperationFailedReason, contracts.HostUnavailableReason,
 				contracts.VMDiskCheckFailedReason} {
-				if contracts.HasErrorInfoReason(err, reason) {
-					return err
+				if contracts.HasErrorInfoReason(st.Err(), reason) {
+					return st.Err()
 				}
 			}
 		case codes.ResourceExhausted:
@@ -261,6 +264,17 @@ func definiteStatusError(err error) error {
 		log.Printf("ERROR libvirt call refused (%s): %s: %v", code, pe.Message, pe.Cause)
 	}
 	return status.Error(code, pe.Message)
+}
+
+// innerStatus returns the gRPC status of the first error in err's chain that
+// carries one (status.Error, an error with a GRPCStatus method), exactly as
+// that error renders it, or nil.
+func innerStatus(err error) *status.Status {
+	var gs interface{ GRPCStatus() *status.Status }
+	if !stderrors.As(err, &gs) {
+		return nil
+	}
+	return gs.GRPCStatus()
 }
 
 // nothingDone answers a failure of a step that changed nothing that outlives
