@@ -182,7 +182,8 @@ func TestSingleHost_Clone_RunningSourceIsRefusedBeforeAnyCopy(t *testing.T) {
 			assert.Equal(t, []string{contracts.VMSourceRunningReason}, errorInfoReasonList(st))
 			assert.Contains(t, st.Message(), `the clone's source VM is "`+state+`"`)
 			assert.Contains(t, st.Message(), "power off the source VM to clone it")
-			assert.Equal(t, []string{"single virsh domstate " + scdDomain}, fx.calls(), "nothing else runs")
+			assert.Equal(t, []string{"single virsh list --all", "single virsh domstate " + scdDomain}, fx.calls(),
+				"only the target-name check runs before: nothing else")
 		})
 	}
 }

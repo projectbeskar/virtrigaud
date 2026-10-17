@@ -91,6 +91,14 @@ const (
 	// GetCapabilitiesResponse.supports_owner_transfer. Advertise it only with a
 	// TransferOwner that does.
 	CapabilityOwnerTransfer Capability = "owner_transfer"
+	// CapabilityOwnerRebind marks a provider whose Create and Clone stamp the
+	// VM they make with its owner (CreateRequest.owner, CloneRequest.target_vm
+	// uid) and return the VM an earlier attempt made when sent again for the
+	// same owner, never a second one; reported as
+	// GetCapabilitiesResponse.supports_owner_rebind. The manager re-sends a
+	// Create or Clone whose outcome is unknown only to a provider that
+	// advertises it, so advertise it only with a Create and Clone that do.
+	CapabilityOwnerRebind Capability = "owner_rebind"
 
 	// Provider-specific capabilities
 	CapabilityVSphere     Capability = "vsphere"
@@ -245,6 +253,8 @@ func (m *Manager) GetCapabilities(ctx context.Context, req *providerv1.GetCapabi
 		SupportsImportSizeLimit: m.HasCapability(CapabilityImportSizeLimit),
 		// Single-host TransferOwner (adoption re-stamps the VM it adopts).
 		SupportsOwnerTransfer: m.HasCapability(CapabilityOwnerTransfer),
+		// rc2 R4: Create and Clone re-bind the VM stamped with their owner.
+		SupportsOwnerRebind: m.HasCapability(CapabilityOwnerRebind),
 		// ADR-0011 D7: the backends DeleteStagedDisk removes staging objects from.
 		SupportedStagedDiskDeleteBackends: m.supportedStagedDiskDeleteBackends,
 	}, nil
@@ -376,6 +386,13 @@ func (b *Builder) ImportSizeLimit() *Builder {
 // VM with the VirtualMachine that adopts it, compare-and-swap.
 func (b *Builder) OwnerTransfer() *Builder {
 	b.manager.AddCapability(CapabilityOwnerTransfer)
+	return b
+}
+
+// OwnerRebind adds CapabilityOwnerRebind: Create and Clone stamp the VM they
+// make with its owner and return that VM when sent again for the same owner.
+func (b *Builder) OwnerRebind() *Builder {
+	b.manager.AddCapability(CapabilityOwnerRebind)
 	return b
 }
 

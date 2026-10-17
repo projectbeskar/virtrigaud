@@ -191,13 +191,15 @@ func TestClone_TargetIsNamespaced(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, owners, "the clone never claims the source VM's owner")
 
-	// A second clone to the same target is refused (never binds or redefines).
+	// A second clone to the same target is refused (never binds or
+	// redefines): without the target's UID, nothing proves the domain is its.
 	_, err = c.p.Clone(ctx, contracts.CloneRequest{
 		Source:     contracts.VMRef{ID: "team-a.web"},
 		TargetName: "web-clone",
 		TargetVM:   contracts.ObjectIdentity{Namespace: "team-b", Name: "web-clone"},
 	})
-	requireInvalidSpec(t, err)
+	require.Error(t, err)
+	assert.True(t, contracts.IsConflict(err), "a Conflict, as for a Create: %v", err)
 
 	// An older manager (no TargetVM) keeps the bare name.
 	resp, err = c.p.Clone(ctx, contracts.CloneRequest{Source: contracts.VMRef{ID: "team-a.web"}, TargetName: "web-clone"})

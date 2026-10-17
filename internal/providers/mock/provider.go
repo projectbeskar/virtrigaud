@@ -85,8 +85,10 @@ type VirtualMachine struct {
 	Created     time.Time
 	LastUpdated time.Time
 	Snapshots   map[string]*Snapshot
-	// Owner is the VM's owner stamp, set by TransferOwner (zero when
-	// unstamped); ListVMs reports its UID as provider_raw "owner_uid".
+	// Owner is the VM's owner stamp: the VirtualMachine it was made for
+	// (CreateRequest.owner, CloneRequest.target_vm, when they carry a UID;
+	// rc2 R4) or set by TransferOwner (zero when unstamped); ListVMs reports
+	// its UID as provider_raw "owner_uid".
 	Owner contracts.ObjectIdentity
 }
 
@@ -126,6 +128,9 @@ func NewProvider(opts ...Option) *Provider {
 		ImageArtifactIdentity().
 		// TransferOwner stamps a VM adoption takes over (transfer_owner.go).
 		OwnerTransfer().
+		// Create and Clone stamp the VM with its owner uid and return the VM
+		// an earlier attempt made for it (rc2 R4).
+		OwnerRebind().
 		TaskStatus().
 		// ADR-0006 Slice 0: advertise the status quo honestly. The mock's
 		// migration path (like the production providers) is pod-side only —
@@ -213,6 +218,21 @@ func (p *Provider) Create(ctx context.Context, req *providerv1.CreateRequest) (*
 		return nil, errors.NewInternal("mock provider configured to fail create operations", nil)
 	}
 
+	// As on the real providers (rc2 R4, supports_owner_rebind), a Create sent
+	// again for the same owner uid returns the VM an earlier attempt made
+	// (synchronously, no task) instead of a second one; the check and the new
+	// VM happen under one lock.
+	owner := stampOf(req.GetOwner())
+	p.mu.Lock()
+	if owner.UID != "" {
+		for vmID, existing := range p.vms {
+			if existing.Name == req.Name && existing.Owner.UID == owner.UID {
+				p.mu.Unlock()
+				return &providerv1.CreateResponse{Id: vmID}, nil
+			}
+		}
+	}
+
 	// Generate VM ID
 	id := p.generateID("vm")
 
@@ -226,9 +246,8 @@ func (p *Provider) Create(ctx context.Context, req *providerv1.CreateRequest) (*
 		Created:     time.Now(),
 		LastUpdated: time.Now(),
 		Snapshots:   make(map[string]*Snapshot),
+		Owner:       owner,
 	}
-
-	p.mu.Lock()
 	p.vms[id] = vm
 	p.mu.Unlock()
 
@@ -715,7 +734,12 @@ func (p *Provider) SnapshotRevert(ctx context.Context, req *providerv1.SnapshotR
 	}, nil
 }
 
-// Clone clones a virtual machine.
+// Clone clones a virtual machine. As on the real providers (rc2 R4), a request
+// that names its target VirtualMachine's UID (target_vm.uid) stamps the clone
+// with it, and a re-sent Clone returns the clone stamped with that UID under
+// the target name (synchronously, no task) instead of making a second one; any
+// other VM of the target name is refused with AlreadyExists. A request
+// without a UID clones as before.
 func (p *Provider) Clone(ctx context.Context, req *providerv1.CloneRequest) (*providerv1.CloneResponse, error) {
 	p.simulateDelay()
 
@@ -723,12 +747,23 @@ func (p *Provider) Clone(ctx context.Context, req *providerv1.CloneRequest) (*pr
 		return nil, errors.NewInternal("mock provider configured to fail clone operations", nil)
 	}
 
-	p.mu.RLock()
-	_, exists := p.vms[req.SourceVmId]
-	p.mu.RUnlock()
+	owner := stampOf(req.GetTargetVm())
 
-	if !exists {
+	// The check, the re-bind and the new clone happen under one lock, so two
+	// attempts of one Clone never both clone.
+	p.mu.Lock()
+	if _, exists := p.vms[req.SourceVmId]; !exists {
+		p.mu.Unlock()
 		return nil, errors.NewNotFound("VirtualMachine", req.SourceVmId)
+	}
+	if owner.UID != "" {
+		if existing, err := p.cloneTargetLocked(req.TargetName, owner.UID); err != nil || existing != "" {
+			p.mu.Unlock()
+			if err != nil {
+				return nil, err
+			}
+			return &providerv1.CloneResponse{TargetVmId: existing}, nil
+		}
 	}
 
 	// Generate target VM ID
@@ -744,9 +779,8 @@ func (p *Provider) Clone(ctx context.Context, req *providerv1.CloneRequest) (*pr
 		Created:     time.Now(),
 		LastUpdated: time.Now(),
 		Snapshots:   make(map[string]*Snapshot),
+		Owner:       owner,
 	}
-
-	p.mu.Lock()
 	p.vms[targetID] = clonedVM
 	p.mu.Unlock()
 
@@ -771,6 +805,33 @@ func (p *Provider) Clone(ctx context.Context, req *providerv1.CloneRequest) (*pr
 			Id: taskID,
 		},
 	}, nil
+}
+
+// stampOf is the owner stamp a Create or Clone request asks for: o with a UID,
+// or the zero identity (no stamp) for a request without one.
+func stampOf(o *providerv1.ObjectIdentity) contracts.ObjectIdentity {
+	if o.GetUid() == "" {
+		return contracts.ObjectIdentity{}
+	}
+	return contracts.ObjectIdentity{UID: o.GetUid(), Namespace: o.GetNamespace(), Name: o.GetName()}
+}
+
+// cloneTargetLocked decides a stamped Clone's target name; p.mu is held. It
+// returns the id of the one VM named name stamped with ownerUID (a re-sent
+// Clone), "" when no VM has that name, or AlreadyExists when a VM of that
+// name is not (only) the target's.
+func (p *Provider) cloneTargetLocked(name, ownerUID string) (string, error) {
+	var owned string
+	for id, vm := range p.vms {
+		if vm.Name != name {
+			continue
+		}
+		if vm.Owner.UID != ownerUID || owned != "" {
+			return "", errors.NewAlreadyExists("VirtualMachine", name)
+		}
+		owned = id
+	}
+	return owned, nil
 }
 
 // GetCapabilities returns the provider's capabilities.

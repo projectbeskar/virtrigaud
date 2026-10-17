@@ -55,7 +55,10 @@ import (
 //   - binds the target in one status write (status.id, the host, pendingHost
 //     promoted), as on a single host (bindTargetVM).
 //
-// The single-host / thin-client flow (startClone) is unchanged.
+// The single-host / thin-client flow (startClone) creates its target before the
+// Clone RPC too, so the clone is stamped with the target's UID and a re-sent
+// Clone re-binds it (rc2 R4, vmclone_target_stamp.go); it has no host to land
+// on or record.
 
 const (
 	// cloneReasonSourceHostGone: the source VM's host is not a Host of the
@@ -119,7 +122,7 @@ func (r *VMCloneReconciler) startClusteredClone(
 
 	// 2. The target VirtualMachine, created by this clone (or by an earlier
 	// reconcile of it).
-	target, res, done, err := r.ensureClusteredCloneTarget(ctx, clone, sourceVM, provider, targetNamespace)
+	target, res, done, err := r.ensureCloneTarget(ctx, clone, sourceVM, provider, targetNamespace)
 	if done {
 		return res, err
 	}
@@ -328,12 +331,14 @@ func (r *VMCloneReconciler) waitForCloneHost(ctx context.Context, clone *infrav1
 	return res
 }
 
-// ensureClusteredCloneTarget returns the clone's target VirtualMachine,
-// creating it (after re-reading the grants live) when absent. A target that
-// this clone did not create, that is already bound to a VM, or that references
-// another Provider is never used (TargetConflict, Failed). done=true means the
-// caller returns (res, err) as is.
-func (r *VMCloneReconciler) ensureClusteredCloneTarget(
+// ensureCloneTarget returns the clone's target VirtualMachine,
+// creating it (after re-reading the grants live) when absent, BEFORE the
+// Clone RPC on every topology: the Clone carries its UID, which the provider
+// stamps on the clone (a clustered clone, ADR-0007 slice 3; a single-host one,
+// rc2 R4). A target that this clone did not create, that is already bound to a
+// VM, or that references another Provider is never used (TargetConflict,
+// Failed). done=true means the caller returns (res, err) as is.
+func (r *VMCloneReconciler) ensureCloneTarget(
 	ctx context.Context,
 	clone *infrav1beta1.VMClone,
 	sourceVM *infrav1beta1.VirtualMachine,
@@ -346,6 +351,17 @@ func (r *VMCloneReconciler) ensureClusteredCloneTarget(
 	err := r.Get(ctx, key, target)
 	switch {
 	case apierrors.IsNotFound(err):
+		// A single-host clone whose own target was deleted after a Clone was
+		// sent for it is never sent again for a new target: the provider may
+		// hold a clone stamped with the deleted target's UID, and a Clone
+		// stamped with another UID would not re-bind it (Proxmox would make a
+		// second VM). It depends on the CloneRequested record only: the
+		// target's UID may never have been recorded (a manager that stopped
+		// between creating the target and recording it).
+		if !isClusterTopology(provider) && cloneRequested(clone) {
+			return nil, r.markFailed(ctx, clone, cloneReasonTargetConflict, fmt.Sprintf(cloneTargetDeletedMessageFormat,
+				key.Namespace, key.Name)), true, nil
+		}
 		if allowed, res, liveErr := r.confirmTargetNamespaceLive(ctx, clone, targetNamespace); !allowed {
 			return nil, res, true, liveErr
 		}
@@ -369,8 +385,11 @@ func (r *VMCloneReconciler) ensureClusteredCloneTarget(
 			return nil, r.markFailed(ctx, clone, infrav1beta1.VMCloneReasonProviderError,
 				fmt.Sprintf("failed to create target VM: %v", createErr)), true, nil
 		}
-		r.Recorder.Event(clone, "Normal", infrav1beta1.VMCloneReasonCloning,
-			fmt.Sprintf("Created target VM %q before cloning onto its source's host", key.Name))
+		createdMsg := fmt.Sprintf("Created target VM %q before cloning, so the clone is stamped with its UID", key.Name)
+		if isClusterTopology(provider) {
+			createdMsg = fmt.Sprintf("Created target VM %q before cloning onto its source's host", key.Name)
+		}
+		r.Recorder.Event(clone, "Normal", infrav1beta1.VMCloneReasonCloning, createdMsg)
 		// Record WHICH object this clone created, before anything else: only
 		// it is ever used as the target or removed when the clone fails.
 		// A plain update could lose this record to a concurrent edit of the
@@ -395,6 +414,22 @@ func (r *VMCloneReconciler) ensureClusteredCloneTarget(
 	default:
 		if bindErr := cloneTargetBindable(clone, target, provider, ""); bindErr != nil {
 			return nil, r.markFailed(ctx, clone, cloneReasonTargetConflict, bindErr.Error()), true, nil
+		}
+		// A target this clone created whose UID was never recorded (the
+		// manager stopped, or the record gave up, between the target's
+		// Create and its record) is recorded now, before any Clone is sent
+		// for it: every later decision — the deleted-target guard, the bind,
+		// the failed clone's cleanup — identifies it by that UID.
+		if clone.Status.TargetUID == "" && target.UID != "" {
+			before := clone.DeepCopy()
+			clone.Status.TargetUID = string(target.UID)
+			if err := r.persistCloneStatus(ctx, clone, before); err != nil {
+				if errors.Is(err, errCloneChanged) {
+					return nil, requeueOnCloneChanged(), true, nil
+				}
+				return nil, ctrl.Result{}, true, fmt.Errorf("record the target VM %s/%s on VMClone %s/%s: %w",
+					target.Namespace, target.Name, clone.Namespace, clone.Name, err)
+			}
 		}
 	}
 	if target.UID == "" {
@@ -495,7 +530,7 @@ func (r *VMCloneReconciler) recordClonePendingHost(
 //     from when the target's placement was recorded (15 s doubling to 5 min),
 //     as a clustered create is.
 //   - anything else fails the clone. The target keeps its pendingHost, and the
-//     failed clone removes it (removeFailedClusteredTarget): its finalizer runs
+//     failed clone removes it (removeFailedCloneTarget): its finalizer runs
 //     the owner-checked cleanup on the host.
 func (r *VMCloneReconciler) handleClusteredCloneError(
 	ctx context.Context,
@@ -730,12 +765,12 @@ const (
 	cloneReasonTargetKept = "TargetKept"
 )
 
-// removeFailedClusteredTarget deletes, ONCE, after a clone has failed for good
-// (phase Failed, terminal), the target VirtualMachine a CLUSTERED clone
-// created before its Clone RPC — so a failed clone does not leave an empty VM
-// behind. The VirtualMachine's finalizer then runs the owner-checked Delete on
-// its pending host, which removes a domain the clone may have defined there
-// stamped as that VM's.
+// removeFailedCloneTarget deletes, ONCE, after a clone has failed for good
+// (phase Failed, terminal), the target VirtualMachine the clone created before
+// its Clone RPC — so a failed clone does not leave an empty VM behind. On a
+// clustered provider the VirtualMachine's finalizer then runs the
+// owner-checked Delete on its pending host, which removes a domain the clone
+// may have defined there stamped as that VM's.
 //
 // It deletes only the object the clone created — the one whose uid it
 // recorded (status.targetUID) when it created it; the clone-uid annotation
@@ -744,8 +779,12 @@ const (
 //     succeeded and bound its target (even if the clone's own status write
 //     was then lost) keeps it;
 //   - is not one the clone refused to use (TargetConflict);
-//   - is managed through a clustered Provider — a single-host clone creates
-//     its target only after the clone succeeded, and is unchanged;
+//   - on a single-host Provider, belongs to a clone for which the provider
+//     reported no cloned VM (no status.targetVMID) and that has no Clone of
+//     unknown outcome on record (CloneRequested): a target whose clone the
+//     provider made, or may have made, is kept, so an administrator can bind it (a status patch
+//     of its status.id) or delete it — a single-host target without an id has
+//     no finalizer cleanup that could remove that VM;
 //   - is in a namespace that still grants the clone's namespace (live read).
 //
 // The delete carries the recorded uid and the checked resourceVersion as
@@ -755,7 +794,7 @@ const (
 // the target name is never looked at. A failure to read or delete is retried
 // without recording anything. Retryable, Pending and blocked-host states never
 // reach here: only the terminal Failed phase does.
-func (r *VMCloneReconciler) removeFailedClusteredTarget(ctx context.Context, clone *infrav1beta1.VMClone) ctrl.Result {
+func (r *VMCloneReconciler) removeFailedCloneTarget(ctx context.Context, clone *infrav1beta1.VMClone) ctrl.Result {
 	if meta.FindStatusCondition(clone.Status.Conditions, cloneConditionTargetCleanup) != nil {
 		return ctrl.Result{}
 	}
@@ -763,8 +802,9 @@ func (r *VMCloneReconciler) removeFailedClusteredTarget(ctx context.Context, clo
 	retry := ctrl.Result{RequeueAfter: 30 * time.Second}
 	targetNamespace := cloneTargetNamespace(clone)
 	if clone.Spec.Target.Name == "" || clone.Status.TargetUID == "" {
-		// Not a clone that created its target before cloning (single-host,
-		// or it failed before creating one): nothing of its own to remove.
+		// Not a clone that created its target before cloning (a clone started
+		// by an older manager, or one that failed before creating its
+		// target): nothing of its own to remove.
 		return r.recordTargetCleanup(ctx, clone, metav1.ConditionFalse, cloneReasonTargetKept,
 			"this clone recorded no target VirtualMachine of its own")
 	}
@@ -802,9 +842,21 @@ func (r *VMCloneReconciler) removeFailedClusteredTarget(ctx context.Context, clo
 		logger.Error(err, "Failed to read the failed clone target's Provider", "vm", key.Name)
 		return retry
 	}
-	if !isClusterTopology(provider) {
-		return r.recordTargetCleanup(ctx, clone, metav1.ConditionFalse, cloneReasonTargetKept,
-			"the target is not on a clustered Provider; it is left alone")
+	clustered := isClusterTopology(provider)
+	if !clustered && cloneRequested(clone) {
+		// A Clone was sent for this target and its outcome is unknown (e.g.
+		// a re-send failed a pre-clone check): the provider may hold a clone
+		// stamped with the target's UID, which only this target can bind.
+		return r.recordTargetCleanup(ctx, clone, metav1.ConditionFalse, cloneReasonTargetKept, fmt.Sprintf(
+			"a Clone was sent for the target VirtualMachine %s/%s and its outcome is unknown; the target is kept: check the "+
+				"provider for a VM stamped with its UID and record that VM's id as its status.id, or remove that VM and "+
+				"delete the target", target.Namespace, target.Name))
+	}
+	if !clustered && clone.Status.TargetVMID != "" {
+		return r.recordTargetCleanup(ctx, clone, metav1.ConditionFalse, cloneReasonTargetKept, fmt.Sprintf(
+			"the provider reported the cloned VM %q; the target VirtualMachine %s/%s is kept: record that id as its status.id "+
+				"to manage the clone, or delete it and remove the cloned VM on the provider",
+			clone.Status.TargetVMID, target.Namespace, target.Name))
 	}
 	if allowed, err := targetNamespaceAllowed(ctx, r.liveReader(), clone.Namespace, targetNamespace); err != nil {
 		logger.Error(err, "Failed to check the target namespace grant before removing the failed clone's target")
@@ -828,8 +880,12 @@ func (r *VMCloneReconciler) removeFailedClusteredTarget(ctx context.Context, clo
 		return retry
 	}
 	logger.Info("Removed the target VM the failed clone created", "vm", key.Name)
-	msg := fmt.Sprintf("Removed target VM %s/%s: this clone created it and failed; its finalizer removes anything the clone left on host %q",
-		target.Namespace, target.Name, pendingHostOf(target))
+	msg := fmt.Sprintf("Removed target VM %s/%s: this clone created it and failed; the provider reported no cloned VM",
+		target.Namespace, target.Name)
+	if clustered {
+		msg = fmt.Sprintf("Removed target VM %s/%s: this clone created it and failed; its finalizer removes anything the clone left on host %q",
+			target.Namespace, target.Name, pendingHostOf(target))
+	}
 	r.Recorder.Event(clone, "Normal", cloneReasonTargetRemoved, msg)
 	return r.recordTargetCleanup(ctx, clone, metav1.ConditionTrue, cloneReasonTargetRemoved, msg)
 }

@@ -105,6 +105,12 @@ var (
 // clone is left powered off; the manager controls power separately, matching
 // Create's behavior.
 //
+// The target name is decided first (clone_target.go, rc2 R4): a domain of that
+// name stamped with the target VirtualMachine's UID (req.TargetVM.UID) is the
+// clone an earlier attempt made and is reported as the clone; any other
+// domain of that name is a Conflict. A clone made for a request with a UID is
+// stamped with it by the define that creates it.
+//
 // The source must be powered off: a source in any other state is refused
 // before anything is copied (FailedPrecondition + VM_SOURCE_RUNNING,
 // clone_source_state.go). The copy reads the source's disk chain as root
@@ -142,6 +148,30 @@ func (p *Provider) Clone(ctx context.Context, req contracts.CloneRequest) (contr
 		return contracts.CloneResponse{}, err
 	}
 
+	// The target name's lock, held from the target check to the define: a
+	// re-sent Clone that arrives while an earlier attempt still copies (the
+	// manager gave up waiting, the provider did not) waits for it, then finds
+	// the domain it defined, instead of copying next to it.
+	unlock, err := p.lockDomain(ctx, domainName, guardOpClone)
+	if err != nil {
+		return contracts.CloneResponse{}, err
+	}
+	defer unlock()
+
+	// 0. The target name (clone_target.go), decided before anything is read
+	//    for the copy: a domain stamped with the target VirtualMachine's UID
+	//    is the clone an earlier attempt made — reported whatever the
+	//    source's state is now — and any other domain of that name is a
+	//    Conflict. A clone NEVER binds to, or redefines, a domain it does not
+	//    own. (Should one appear between this check and the define, the
+	//    define itself fails: the clone carries a fresh random UUID and
+	//    libvirt refuses a same-named define under a different UUID.)
+	if bound, err := checkSingleHostCloneTarget(ctx, p.virshProvider, domainName, req); err != nil {
+		return contracts.CloneResponse{}, err
+	} else if bound {
+		return contracts.CloneResponse{TargetVmID: domainName}, nil
+	}
+
 	storageProvider := NewStorageProvider(p.virshProvider)
 
 	// 1. Resolve the source domain and reject if it does not exist. domstate
@@ -156,22 +186,6 @@ func (p *Provider) Clone(ctx context.Context, req contracts.CloneRequest) (contr
 	if err := cloneSourceStateError(state); err != nil {
 		log.Printf("WARN Refusing to clone %s: it is %q, and a libvirt full clone requires a powered-off source", sourceID, state)
 		return contracts.CloneResponse{}, err
-	}
-
-	// Reject a target-name collision up front rather than failing mid-define:
-	// a clone NEVER binds to, or redefines, an existing domain of the target
-	// name, whoever owns it. (Should one appear between this check and the
-	// define, the define itself fails: the clone carries a fresh random UUID and
-	// libvirt refuses a same-named define under a different UUID.)
-	domains, err := p.virshProvider.listDomains(ctx)
-	if err != nil {
-		return contracts.CloneResponse{}, contracts.NewRetryableError("failed to list domains", err)
-	}
-	for _, d := range domains {
-		if d.Name == domainName {
-			return contracts.CloneResponse{}, contracts.NewInvalidSpecError(
-				fmt.Sprintf("target VM %q already exists (libvirt domain %q)", req.TargetName, domainName), nil)
-		}
 	}
 
 	// 2. Resolve the source's primary disk path + format.
@@ -211,6 +225,11 @@ func (p *Provider) Clone(ctx context.Context, req contracts.CloneRequest) (contr
 	targetXML, srcNvramPath, targetNvramPath, err := rewriteDomainXMLForClone(srcXML.Stdout, domainName, srcDiskPath, targetDiskPath)
 	if err != nil {
 		return contracts.CloneResponse{}, contracts.NewInvalidSpecError("rewrite source domain XML for clone", err)
+	}
+	// rewriteDomainXMLForClone dropped the source's stamp; the clone carries
+	// its target VirtualMachine's, written by the define that creates it.
+	if targetXML, err = stampSingleHostClone(targetXML, req.TargetVM); err != nil {
+		return contracts.CloneResponse{}, err
 	}
 	// Never write the clone's varstore through a symlink or over another
 	// domain's varstore.

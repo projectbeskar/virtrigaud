@@ -552,6 +552,9 @@ func (c *Client) GetCapabilities(ctx context.Context) (contracts.Capabilities, e
 		SupportsImportSizeLimit: resp.GetSupportsImportSizeLimit(),
 		// False from a provider whose single-host adoption does not stamp.
 		SupportsOwnerTransfer: resp.GetSupportsOwnerTransfer(),
+		// rc2 R4: false from a provider that predates owner re-binding, which
+		// is never sent a Create or Clone again.
+		SupportsOwnerRebind: resp.GetSupportsOwnerRebind(),
 		// ADR-0011 D7: empty from a provider that predates DeleteStagedDisk.
 		SupportedStagedDiskDeleteBackends: resp.GetSupportedStagedDiskDeleteBackends(),
 	}, nil

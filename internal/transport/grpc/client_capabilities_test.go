@@ -99,3 +99,24 @@ func TestClient_GetCapabilities_RoutedClone(t *testing.T) {
 		})
 	}
 }
+
+// TestClient_GetCapabilities_OwnerRebind verifies supports_owner_rebind (rc2
+// R4) round-trips and is false from a provider that does not set it: the
+// manager never re-sends a Create or Clone to such a provider.
+func TestClient_GetCapabilities_OwnerRebind(t *testing.T) {
+	for name, advertised := range map[string]bool{"advertised": true, "absent (older provider)": false} {
+		t.Run(name, func(t *testing.T) {
+			dialer, cleanup := startBufconnServer(t, &fakeProviderServer{
+				GetCapabilitiesFn: func(ctx context.Context, req *providerv1.GetCapabilitiesRequest) (*providerv1.GetCapabilitiesResponse, error) {
+					return &providerv1.GetCapabilitiesResponse{SupportsOwnerRebind: advertised}, nil
+				},
+			})
+			defer cleanup()
+			cli := newTestClient(t, dialer, "test-caps-owner-rebind")
+
+			caps, err := cli.GetCapabilities(context.Background())
+			require.NoError(t, err)
+			assert.Equal(t, advertised, caps.SupportsOwnerRebind)
+		})
+	}
+}

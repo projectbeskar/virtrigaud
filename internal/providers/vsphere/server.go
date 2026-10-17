@@ -531,6 +531,10 @@ func (p *Provider) GetCapabilities(ctx context.Context, req *providerv1.GetCapab
 		// TransferOwner stamps a VM the manager's adoption takes over,
 		// compare-and-swap on the config changeVersion (transfer_owner.go).
 		SupportsOwnerTransfer: true,
+		// Create and Clone stamp the VM with its owner and return a VM in the
+		// target folder stamped with the same uid instead of making a second
+		// one (vm_ownership.go, clone_target.go; rc2 R4).
+		SupportsOwnerRebind:   true,
 		SupportedDiskTypes:    []string{"thin", "thick", "eager-zeroed"},
 		SupportedNetworkTypes: []string{"standard", "distributed"},
 		// Disk migration: ExportDisk and ImportDisk are implemented (issue #178).
@@ -2083,12 +2087,15 @@ func (p *Provider) findSnapshotByID(snapshots []types.VirtualMachineSnapshotTree
 // The cloned VM is left powered off. The returned CloneResponse.TargetVmId contains
 // the ManagedObjectReference value of the new VM.
 //
-// Ownership: Clone never binds to an existing VM — CloneVM_Task fails with
-// DuplicateName if the target name is taken in the folder. CloneRequest carries no
-// owner (the target VirtualMachine is created after the clone and seeded with the
-// returned ID), so the clone is left unstamped, and the owner stamp the clone would
-// otherwise inherit from the source VM's ExtraConfig is cleared. The target name is
-// validated like a Create name (invalidVMNameError).
+// Ownership (clone_target.go, rc2 R4): when CloneRequest.target_vm carries the
+// target VirtualMachine's UID, the clone is stamped with it in the same
+// CloneVM_Task, and a VM of the target name in the target folder that carries
+// that stamp is returned instead of cloning again (a re-sent Clone). Any other
+// VM of that name is refused with AlreadyExists before the source is read or
+// changed. Without a UID the clone is left unstamped, and the owner stamp the
+// clone would otherwise inherit from the source VM's ExtraConfig is cleared in
+// either case. The target name is validated like a Create name
+// (invalidVMNameError).
 func (p *Provider) Clone(ctx context.Context, req *providerv1.CloneRequest) (*providerv1.CloneResponse, error) {
 	if p.client == nil {
 		return nil, fmt.Errorf("vSphere client not configured")
@@ -2140,10 +2147,21 @@ func (p *Provider) Clone(ctx context.Context, req *providerv1.CloneRequest) (*pr
 		return nil, fmt.Errorf("failed to resolve target folder: %w", err)
 	}
 
-	// Create the clone specification. The config clears the owner stamp the
-	// clone would inherit from the source's ExtraConfig, so the clone never
-	// claims the SOURCE VirtualMachine's owner, and any prepared-image stamp
-	// (ADR-0009 D3): a clone is never an image artifact.
+	// The target name, decided before the source is read or changed: the VM
+	// an earlier attempt of this Clone made (stamped with the target's UID)
+	// is the answer; any other VM of that name is a Conflict.
+	owner := cloneTargetOwner(req)
+	if existing, err := p.existingCloneTarget(ctx, folder, req.TargetName, owner); err != nil {
+		return nil, err
+	} else if existing != "" {
+		return &providerv1.CloneResponse{TargetVmId: existing}, nil
+	}
+
+	// Create the clone specification. The config stamps the clone with its
+	// target VirtualMachine (or, without a UID, clears the owner stamp the
+	// clone would inherit from the source's ExtraConfig), so the clone never
+	// claims the SOURCE VirtualMachine's owner, and clears any prepared-image
+	// stamp (ADR-0009 D3): a clone is never an image artifact.
 	clearImage, err := p.imageStampClearing(ctx, sourceVM)
 	if err != nil {
 		return nil, err
@@ -2153,9 +2171,7 @@ func (p *Provider) Clone(ctx context.Context, req *providerv1.CloneRequest) (*pr
 			Datastore: types.NewReference(datastore.Reference()),
 			Pool:      types.NewReference(resourcePool.Reference()),
 		},
-		Config: &types.VirtualMachineConfigSpec{
-			ExtraConfig: append(ownerExtraConfig(contracts.ObjectIdentity{}), clearImage...),
-		},
+		Config:   cloneConfigSpec(owner, clearImage),
 		PowerOn:  false, // Don't power on automatically
 		Template: false,
 	}

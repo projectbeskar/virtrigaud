@@ -419,15 +419,19 @@ message CloneRequest {
 
   // target_vm names the Kubernetes VirtualMachine the clone will be bound to:
   // its namespace (VMClone spec.target.namespace, defaulted to the VMClone's
-  // namespace) and its name (== target_name). uid is empty: the VirtualMachine
-  // does not exist yet when the clone is made. A provider whose VM names are
+  // namespace) and its name (== target_name). A provider whose VM names are
   // host-global names the clone from it (the libvirt provider:
   // "<namespace>.<name>", the same rule as Create) and returns that name as
-  // target_vm_id, which the operator records as the VM's status.id. Additive
-  // and backward-compatible: other providers ignore it, and an unset value
-  // keeps the legacy target_name naming. A clustered provider requires it with
-  // the target VirtualMachine's uid (the operator creates that VirtualMachine
-  // before the clone on a clustered provider) and stamps the clone with it.
+  // target_vm_id, which the operator records as the VM's status.id; an unset
+  // value keeps the legacy target_name naming. The operator creates that
+  // VirtualMachine before the clone and sends its uid on every topology (rc2
+  // R4; a manager older than rc2 sent no uid to a single-host provider). A
+  // provider stamps the clone with a uid it receives, as Create stamps with
+  // CreateRequest.owner, and answers a Clone whose target name already holds a
+  // clone stamped with that uid with that clone (a re-sent Clone) instead of a
+  // second one; any other VM of the target name it would bind is refused with
+  // AlreadyExists. Without a uid the clone is unstamped and nothing is
+  // re-bound, as before. A clustered provider requires the uid.
   ObjectIdentity target_vm = 8;
 
   // target_host_id names the host where the clone LANDS on a clustered
@@ -953,6 +957,15 @@ message GetCapabilitiesResponse {
   // supports_routed_adoption for its (routed) TransferOwner; this field does
   // not change how a clustered Provider adopts.
   bool supports_owner_transfer = 25;
+  // supports_owner_rebind reports that Create and Clone stamp the VM they make
+  // with its owner (CreateRequest.owner, CloneRequest.target_vm with a uid) and
+  // that a Create or Clone sent again for the same owner returns the VM an
+  // earlier attempt made — never a second one (rc2 R4). The manager sends a
+  // Create or Clone whose outcome is unknown again only to a provider that
+  // reports it; from any other (one that predates the field, or an older
+  // Proxmox image that ignores target_vm) it keeps the earlier behaviour and
+  // never re-sends. Field 25 is taken by supports_owner_transfer (PR #392).
+  bool supports_owner_rebind = 26;
 }
 
 // DeleteStagedDisk removes the staging object a VMMigration's ExportDisk wrote

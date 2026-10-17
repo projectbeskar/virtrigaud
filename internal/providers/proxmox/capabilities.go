@@ -59,6 +59,11 @@ func GetProviderCapabilities() *capabilities.Manager {
 		// TransferOwner stamps a VM the manager's adoption takes over,
 		// compare-and-swap on the config digest (transfer_owner.go).
 		OwnerTransfer().
+		// Create and Clone stamp the VM with its owner and re-bind the VM an
+		// earlier attempt made for the same uid (vm_ownership.go, #380; rc2
+		// R4). A Proxmox image older than #380 does not report it, so the
+		// manager never re-sends to it (it would make a second VMID).
+		OwnerRebind().
 		// ADR-0006: two real data paths for Proxmox, both node-side. (1) The S3
 		// relay — bytes flow node ↔ provider-pod ↔ S3 over SSH (the pod is the S3
 		// client). (2) The NFS qemu-img path (Slice 4) — the node's qemu-img reads/

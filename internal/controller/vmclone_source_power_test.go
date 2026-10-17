@@ -26,7 +26,6 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -102,8 +101,10 @@ func TestVMClone_SingleHost_SourceRunningWaitsThenProceeds(t *testing.T) {
 	assert.GreaterOrEqual(t, res.RequeueAfter, blockedRetryMin, "backed off")
 	assert.LessOrEqual(t, res.RequeueAfter, blockedRetryMax)
 	assert.Equal(t, 1, powerOffWarnings(t, r), "one Warning event, on the transition only")
-	err := r.Get(context.Background(), client.ObjectKey{Namespace: "default", Name: "clone-target"}, &infrav1beta1.VirtualMachine{})
-	assert.True(t, apierrors.IsNotFound(err), "a single-host clone creates its target only after the clone")
+	waiting := &infrav1beta1.VirtualMachine{}
+	require.NoError(t, r.Get(context.Background(), client.ObjectKey{Namespace: "default", Name: "clone-target"}, waiting),
+		"the target is created before the Clone, so the clone is stamped with its UID (rc2 R4)")
+	assert.Empty(t, waiting.Status.ID, "and is not bound while the clone waits")
 	assert.Empty(t, got.Status.TargetVMID)
 
 	// The source is powered off: the next attempt clones and binds.

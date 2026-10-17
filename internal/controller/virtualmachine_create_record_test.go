@@ -93,11 +93,36 @@ func createRecordFixture(t *testing.T, providerType infravirtrigaudiov1beta1.Pro
 		return contracts.CreateResponse{ID: "vm-" + req.Name}, nil
 	}}
 	rec := record.NewFakeRecorder(16)
+	// The rc2 vSphere, libvirt and Proxmox provider images report
+	// supports_owner_rebind; any other type here stands for a provider that
+	// does not (rc2 R4).
+	var instance contracts.Provider = rp
+	switch providerType {
+	case infravirtrigaudiov1beta1.ProviderTypeVSphere, infravirtrigaudiov1beta1.ProviderTypeLibvirt,
+		infravirtrigaudiov1beta1.ProviderTypeProxmox:
+		instance = &ownerRebindingProvider{routingProvider: rp}
+	}
 	r := &VirtualMachineReconciler{
-		Client: fc, Scheme: s, RemoteResolver: &stubResolver{provider: rp}, Recorder: rec,
+		Client: fc, Scheme: s, RemoteResolver: &stubResolver{provider: instance}, Recorder: rec,
 		recordBackoff: &wait.Backoff{Steps: 3, Duration: time.Millisecond, Factor: 1},
 	}
 	return r, rp, rec
+}
+
+// ownerRebindingProvider is a routingProvider that reports
+// supports_owner_rebind, as the rc2 vSphere, libvirt and Proxmox providers do.
+type ownerRebindingProvider struct {
+	*routingProvider
+	// capsErr, when set, is GetCapabilities' answer.
+	capsErr error
+}
+
+// GetCapabilities reports supports_owner_rebind.
+func (p *ownerRebindingProvider) GetCapabilities(context.Context) (contracts.Capabilities, error) {
+	if p.capsErr != nil {
+		return contracts.Capabilities{}, p.capsErr
+	}
+	return contracts.Capabilities{SupportsOwnerRebind: true}, nil
 }
 
 // failRecordWrites fails every status patch that records an id (the record),

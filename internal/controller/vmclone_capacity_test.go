@@ -234,6 +234,9 @@ func createAndCloneFixture(t *testing.T) (*VirtualMachineReconciler, *VMCloneRec
 			Source: infrav1beta1.CloneSource{VMRef: &infrav1beta1.LocalObjectReference{Name: "src"}},
 			Target: infrav1beta1.VMCloneTarget{Name: "copy"},
 		},
+		// The clone created its target and recorded its UID (a target whose
+		// UID is not recorded yet is recorded first, in a pass of its own).
+		Status: infrav1beta1.VMCloneStatus{TargetUID: "uid-copy"},
 	}
 	objs := append(capBase(), capHost("host-a", 4), capVM("a"), src, target, clone)
 	s := cloneTestScheme(t)

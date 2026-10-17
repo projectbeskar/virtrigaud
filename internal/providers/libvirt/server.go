@@ -918,10 +918,14 @@ func (s *Server) Clone(ctx context.Context, req *providerv1.CloneRequest) (*prov
 //     answers that it did not define the clone, so the manager may send the
 //     Clone again (contracts.IsNothingDone); a dropped copy left no domain,
 //     and the next copy replaces its disk. Not counted by the breaker;
-//   - anything else keeps the historical wrapped form (codes.Unknown):
-//     terminal.
+//   - a Conflict, InvalidSpec or NotFound refusal (made before anything was
+//     copied) -> AlreadyExists, InvalidArgument or NotFound, as a Create's;
+//   - anything else keeps the historical wrapped form (codes.Unknown): an
+//     outcome the provider could not establish (e.g. a define whose session
+//     dropped). A manager that stamps its clones re-sends it; the re-send
+//     finds the domain an earlier attempt defined by its stamp.
 //
-// Only the categorized message crosses the wire for the first two; the cause
+// Only the categorized message crosses the wire for the first three; the cause
 // is logged.
 func singleHostCloneRPCError(err error) error {
 	var withStatus interface{ GRPCStatus() *status.Status }
@@ -943,6 +947,24 @@ func singleHostCloneRPCError(err error) error {
 	if stderrors.As(err, &pe) && pe.IsRetryable() && pe.Type != contracts.ErrorTypeTimeout {
 		log.Printf("WARN clone VM failed (retryable): %v", err)
 		return vmOperationStatus(codes.Unavailable, "failed to clone VM: "+pe.Message)
+	}
+	// A refusal made before anything was copied or defined carries its own
+	// status, as for a Create (createRPCError): a target name taken by a
+	// domain the clone's target VirtualMachine does not own (Conflict ->
+	// AlreadyExists), a request that can never succeed (InvalidSpec ->
+	// InvalidArgument), a source that is not on the host (NotFound). Only
+	// the categorized message crosses the wire. A manager that re-sends a
+	// Clone whose outcome is unknown tells these apart from that unknown
+	// outcome, which keeps the historical wrapped form (codes.Unknown).
+	if stderrors.As(err, &pe) {
+		switch pe.Type {
+		case contracts.ErrorTypeConflict:
+			return status.Error(codes.AlreadyExists, "failed to clone VM: "+pe.Message)
+		case contracts.ErrorTypeInvalidSpec:
+			return status.Error(codes.InvalidArgument, "failed to clone VM: "+pe.Message)
+		case contracts.ErrorTypeNotFound:
+			return status.Error(codes.NotFound, "failed to clone VM: "+pe.Message)
+		}
 	}
 	return fmt.Errorf("failed to clone VM: %w", err)
 }
@@ -1100,6 +1122,10 @@ func (s *Server) GetCapabilities(ctx context.Context, req *providerv1.GetCapabil
 		// initialized single-host provider: a clustered one reports
 		// supports_routed_adoption (clusteredCapabilities).
 		SupportsOwnerTransfer: s.provider != nil && !s.provider.clustered(),
+		// Create and Clone stamp the domain with its owner and bind a domain
+		// stamped with the same uid instead of making a second one
+		// (bindExistingDomain, clone_target.go; rc2 R4).
+		SupportsOwnerRebind: true,
 		// ADR-0011: DeleteStagedDisk removes a migration's s3 object and empties
 		// its nfs file (the host's qemu-img over libnfs cannot unlink;
 		// staged_disk.go). A clustered provider advertises none.
@@ -1152,6 +1178,9 @@ func clusteredCapabilities() *providerv1.GetCapabilitiesResponse {
 		// owner_filter_applied since A6.2 (the manager's pre-schedule
 		// uniqueness check, R4; routed_list_owner.go).
 		SupportsListOwnerFilter: true,
+		// The routed Create and Clone bind a domain on the host stamped with
+		// the same owner uid instead of making a second one (rc2 R4).
+		SupportsOwnerRebind: true,
 	}
 }
 

@@ -133,14 +133,20 @@ that `VirtualMachine` created the domain.**
 6. **A clone never inherits the source's owner.** A clone is named
    `<target namespace>.<target name>`. The provider removes the source VM's
    owner stamp from the cloned XML, so the clone doesn't claim the source's
-   owner. On a single-host provider the clone starts with no owner and never
-   binds to or redefines an existing domain with that name. On a clustered
-   provider (ADR-0007 Addendum A, slice 3) the target VirtualMachine exists
-   before the clone, and the clone is **stamped with the target's identity**
-   (uid included): an existing domain of the clone's name is reported as the
-   clone only when that stamp is the target's (a retry whose answer was lost);
-   any other is refused with `AlreadyExists`. The clustered clone also reads the
-   source only after checking the source VM's own stamp.
+   owner. The target VirtualMachine exists before the clone, on a single-host
+   provider (rc2 R4) as on a clustered one (ADR-0007 Addendum A, slice 3), and
+   the clone is **stamped with the target's identity** (uid included) by the
+   define that creates it. An existing domain of the clone's name is reported
+   as the clone only when that stamp is the target's (a re-sent `Clone` whose
+   answer or record was lost), whatever the source's state is by then; any
+   other domain of that name (unstamped, another VM's, an unreadable stamp) is
+   refused with `AlreadyExists` before anything is read for the copy, and is
+   never bound or redefined. The single-host provider holds the clone's
+   domain-name lock from that check to the define, so a re-send that arrives
+   while an earlier attempt still copies waits for it. A request without a uid
+   (a manager older than rc2) clones unstamped, and any domain of the clone's
+   name refuses it. The clustered clone also reads the source only after
+   checking the source VM's own stamp.
 7. **No disk is written over another domain's disk.** Before `qemu-img` writes
    a VM's disk (`Create` from an image, `Clone`) or a migration's landing disk
    (`ImportDisk`), the provider checks the target path. If a file is there and

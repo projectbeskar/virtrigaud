@@ -653,7 +653,7 @@ func (r *VirtualMachineReconciler) reconcileVM(ctx context.Context, vm *infravir
 		// confirmed none was made (resolveCreateMarker).
 		var attempt createAttempt
 		if !isClusterTopology(provider) && createRequested(vm) {
-			res, decided, proceed, err := r.resolveCreateMarker(ctx, vm, persisted, provider)
+			res, decided, proceed, err := r.resolveCreateMarker(ctx, vm, persisted, providerInstance)
 			if !proceed || err != nil {
 				return res, err
 			}

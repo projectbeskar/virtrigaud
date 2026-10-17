@@ -1,8 +1,8 @@
 {
   "clone-class-override": {
     "calls": [
-      "single virsh domstate vrgold-web",
       "single virsh list --all",
+      "single virsh domstate vrgold-web",
       "single virsh dumpxml vrgold-web",
       "single virsh vol-info vrgold-web-disk --pool default",
       "single virsh vol-path vrgold-web-disk --pool default",
@@ -36,8 +36,8 @@
   },
   "clone-copy-fails": {
     "calls": [
-      "single virsh domstate vrgold-web",
       "single virsh list --all",
+      "single virsh domstate vrgold-web",
       "single virsh dumpxml vrgold-web",
       "single virsh vol-info vrgold-web-disk --pool default",
       "single virsh vol-path vrgold-web-disk --pool default",
@@ -57,8 +57,8 @@
   },
   "clone-copy-sudo-refused": {
     "calls": [
-      "single virsh domstate vrgold-web",
       "single virsh list --all",
+      "single virsh domstate vrgold-web",
       "single virsh dumpxml vrgold-web",
       "single virsh vol-info vrgold-web-disk --pool default",
       "single virsh vol-path vrgold-web-disk --pool default",
@@ -93,8 +93,8 @@
   },
   "clone-customize-json-not-applied": {
     "calls": [
-      "single virsh domstate vrgold-web",
       "single virsh list --all",
+      "single virsh domstate vrgold-web",
       "single virsh dumpxml vrgold-web",
       "single virsh vol-info vrgold-web-disk --pool default",
       "single virsh vol-path vrgold-web-disk --pool default",
@@ -128,8 +128,8 @@
   },
   "clone-define-fails": {
     "calls": [
-      "single virsh domstate vrgold-web",
       "single virsh list --all",
+      "single virsh domstate vrgold-web",
       "single virsh dumpxml vrgold-web",
       "single virsh vol-info vrgold-web-disk --pool default",
       "single virsh vol-path vrgold-web-disk --pool default",
@@ -164,8 +164,8 @@
   },
   "clone-full": {
     "calls": [
-      "single virsh domstate vrgold-web",
       "single virsh list --all",
+      "single virsh domstate vrgold-web",
       "single virsh dumpxml vrgold-web",
       "single virsh vol-info vrgold-web-disk --pool default",
       "single virsh vol-path vrgold-web-disk --pool default",
@@ -199,8 +199,8 @@
   },
   "clone-ignores-source-host": {
     "calls": [
-      "single virsh domstate vrgold-web",
       "single virsh list --all",
+      "single virsh domstate vrgold-web",
       "single virsh dumpxml vrgold-web",
       "single virsh vol-info vrgold-web-disk --pool default",
       "single virsh vol-path vrgold-web-disk --pool default",
@@ -234,8 +234,8 @@
   },
   "clone-legacy-target-name": {
     "calls": [
-      "single virsh domstate vrgold-web",
       "single virsh list --all",
+      "single virsh domstate vrgold-web",
       "single virsh dumpxml vrgold-web",
       "single virsh vol-info vrgold-web-disk --pool default",
       "single virsh vol-path vrgold-web-disk --pool default",
@@ -275,17 +275,19 @@
   "clone-mismatched-target-name": {
     "calls": null,
     "resp": "null",
-    "err": "failed to clone VM: InvalidSpec: clone target name \"other\" does not match its target VM name \"copy\""
+    "err": "rpc error: code = InvalidArgument desc = failed to clone VM: clone target name \"other\" does not match its target VM name \"copy\""
   },
   "clone-source-missing": {
     "calls": [
+      "single virsh list --all",
       "single virsh domstate gone"
     ],
     "resp": "null",
-    "err": "failed to clone VM: NotFound: source VM \"gone\" not found (caused by: failed to get domain state: virsh command 'virsh -c qemu:///single domstate gone' failed (exit code 1): stderr=error: failed to get domain 'gone'\n, stdout=)"
+    "err": "rpc error: code = NotFound desc = failed to clone VM: source VM \"gone\" not found"
   },
   "clone-source-running": {
     "calls": [
+      "single virsh list --all",
       "single virsh domstate vrgold-web"
     ],
     "resp": "null",
@@ -293,8 +295,8 @@
   },
   "clone-strips-source-owner-stamp": {
     "calls": [
-      "single virsh domstate vrgold-web",
       "single virsh list --all",
+      "single virsh domstate vrgold-web",
       "single virsh dumpxml vrgold-web",
       "single virsh vol-info vrgold-web-disk --pool default",
       "single virsh vol-path vrgold-web-disk --pool default",
@@ -328,16 +330,16 @@
   },
   "clone-target-exists": {
     "calls": [
-      "single virsh domstate vrgold-web",
-      "single virsh list --all"
+      "single virsh list --all",
+      "single virsh dumpxml team-a.copy"
     ],
     "resp": "null",
-    "err": "failed to clone VM: InvalidSpec: target VM \"copy\" already exists (libvirt domain \"team-a.copy\")"
+    "err": "rpc error: code = AlreadyExists desc = failed to clone VM: libvirt domain \"team-a.copy\" already exists on the host and is not owned by the clone's target VirtualMachine; nothing was cloned. Remove or rename that domain, or clone to another target name"
   },
   "clone-uefi-nvram": {
     "calls": [
-      "single virsh domstate vrgold-web",
       "single virsh list --all",
+      "single virsh domstate vrgold-web",
       "single virsh dumpxml vrgold-web",
       "single virsh vol-info vrgold-web-disk --pool default",
       "single virsh vol-path vrgold-web-disk --pool default",

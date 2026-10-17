@@ -94,6 +94,8 @@ func TestVMClone_SingleHost_TransientCloneErrorIsHeldAndRetried(t *testing.T) {
 				}
 			}
 			require.NoError(t, r.Status().Update(context.Background(), got))
+			// The backoff has passed (cloneAttemptPacer gates every attempt).
+			r.cloneAttempts.elapse(clone.UID)
 			rv := getClone(t, r, clone).ResourceVersion
 			res = reconcileCloneOnce(t, r, clone)
 			assert.InDelta(t, time.Minute.Seconds(), res.RequeueAfter.Seconds(), 5)
@@ -101,7 +103,15 @@ func TestVMClone_SingleHost_TransientCloneErrorIsHeldAndRetried(t *testing.T) {
 			assert.Equal(t, rv, getClone(t, r, clone).ResourceVersion, "a repeated hold writes nothing")
 			assert.Empty(t, drainRecordedEvents(fakeRecorderOf(t, r.Recorder)))
 
+			// A reconcile before the backoff has passed (e.g. a spec edit)
+			// sends nothing and writes nothing.
+			res = reconcileCloneOnce(t, r, clone)
+			assert.Equal(t, 2, cp.cloneCnt, "the backoff gates every attempt")
+			assert.Positive(t, res.RequeueAfter)
+			assert.Equal(t, rv, getClone(t, r, clone).ResourceVersion)
+
 			// The provider answers again: the clone completes.
+			r.cloneAttempts.elapse(clone.UID)
 			cp.cloneErr = nil
 			cp.cloneResp = contracts.CloneResponse{TargetVmID: "vm-clone-1"}
 			reconcileTwice(t, r, client.ObjectKeyFromObject(clone))

@@ -55,8 +55,15 @@ func TestSingleHostCloneRPCError(t *testing.T) {
 		"pool read failed": {err: contracts.NewRetryableError(`could not read the clone's storage pool "default"`, errors.New("x")),
 			code: codes.Unavailable, vmOpFailed: true, wantInWire: "storage pool"},
 		"source running keeps its status": {err: &sourceRunningError{state: "running"}, code: codes.FailedPrecondition},
-		"invalid spec stays terminal":     {err: contracts.NewInvalidSpecError("target VM exists", nil), code: codes.Unknown, keepsWrapped: true},
-		"timeout stays terminal":          {err: contracts.NewTimeoutError("copy timed out", nil), code: codes.Unknown, keepsWrapped: true},
+		"invalid spec is InvalidArgument": {err: contracts.NewInvalidSpecError("bad request", nil), code: codes.InvalidArgument,
+			wantInWire: "failed to clone VM: bad request"},
+		// rc2 R4: a target name taken by a domain the target VirtualMachine
+		// does not own is a Conflict, as for a Create.
+		"conflict is AlreadyExists": {err: contracts.NewConflictError("domain taken", nil), code: codes.AlreadyExists,
+			wantInWire: "domain taken"},
+		"not found keeps its code": {err: contracts.NewNotFoundError("source VM \"gone\" not found", errors.New("virsh: raw")),
+			code: codes.NotFound, wantInWire: "not found", notInWire: "raw"},
+		"timeout stays terminal": {err: contracts.NewTimeoutError("copy timed out", nil), code: codes.Unknown, keepsWrapped: true},
 		// Security review M3: a define whose outcome is unknown wraps the
 		// VirshError of the dropped session, which isHostTransportFailure
 		// matches; the clone may exist, so it must stay terminal.
