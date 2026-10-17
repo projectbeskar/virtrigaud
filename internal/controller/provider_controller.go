@@ -39,7 +39,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
-	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	infravirtrigaudiov1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
 	"github.com/projectbeskar/virtrigaud/internal/clustered/hostsecret"
@@ -203,6 +202,7 @@ type ProviderReconciler struct {
 // +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=serviceaccounts,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;watch
+// +kubebuilder:rbac:groups=storage.k8s.io,resources=storageclasses,verbs=get
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 
 // Reconcile manages Provider resources and their runtime deployments.
@@ -835,12 +835,20 @@ func (r *ProviderReconciler) reconcileDeployment(ctx context.Context, provider *
 		strategy = appsv1.DeploymentStrategy{Type: appsv1.RecreateDeploymentStrategyType}
 	}
 
+	// The migration PVCs live VMMigrations reference (the pvc backend). A read
+	// error leaves the Deployment as it is: rendering it without them would
+	// unmount the storage of migrations in flight.
+	migrationMounts, err := r.discoverMigrationStorage(ctx, provider)
+	if err != nil {
+		return nil, fmt.Errorf("discover migration storage: %w", err)
+	}
+
 	// Build container spec
-	container, err := r.buildProviderContainer(provider)
+	container, err := r.buildProviderContainer(provider, migrationMounts)
 	if err != nil {
 		return nil, fmt.Errorf("failed to build container spec: %w", err)
 	}
-	volumes := r.buildPodVolumes(ctx, provider)
+	volumes := r.buildPodVolumes(ctx, provider, migrationMounts)
 	addTmpSizeLimitEnv(provider, container, volumes)
 
 	// Build deployment spec
@@ -942,7 +950,7 @@ func (r *ProviderReconciler) reconcileDeployment(ctx context.Context, provider *
 }
 
 // buildProviderContainer builds the container spec for the provider
-func (r *ProviderReconciler) buildProviderContainer(provider *infravirtrigaudiov1beta1.Provider) (*corev1.Container, error) {
+func (r *ProviderReconciler) buildProviderContainer(provider *infravirtrigaudiov1beta1.Provider, migrationMounts []migrationStorageMount) (*corev1.Container, error) {
 	// Use the image as-is since Runtime.Version field was removed
 	image := provider.Spec.Runtime.Image
 
@@ -1117,9 +1125,9 @@ func (r *ProviderReconciler) buildProviderContainer(provider *infravirtrigaudiov
 		})
 	}
 
-	// Auto-discover and mount migration PVCs
-	migrationMounts := r.discoverMigrationVolumeMounts(context.Background(), provider.Namespace)
-	volumeMounts = append(volumeMounts, migrationMounts...)
+	// Mount the migration PVCs live VMMigrations reference
+	// (discoverMigrationStorage): read-only where this Provider only imports.
+	volumeMounts = append(volumeMounts, migrationStorageVolumeMounts(migrationMounts)...)
 
 	// Mount temporary directory (needed for read-only root filesystem)
 	volumeMounts = append(volumeMounts, corev1.VolumeMount{
@@ -1243,7 +1251,7 @@ func addTmpSizeLimitEnv(provider *infravirtrigaudiov1beta1.Provider, container *
 }
 
 // buildPodVolumes builds the volumes for the provider pod
-func (r *ProviderReconciler) buildPodVolumes(ctx context.Context, provider *infravirtrigaudiov1beta1.Provider) []corev1.Volume {
+func (r *ProviderReconciler) buildPodVolumes(ctx context.Context, provider *infravirtrigaudiov1beta1.Provider, migrationMounts []migrationStorageMount) []corev1.Volume {
 	var volumes []corev1.Volume
 
 	// Add credentials volume
@@ -1293,10 +1301,8 @@ func (r *ProviderReconciler) buildPodVolumes(ctx context.Context, provider *infr
 		})
 	}
 
-	// Auto-discover and mount migration PVCs
-	// This allows providers to access migration storage without manual configuration
-	migrationVolumes := r.discoverMigrationPVCs(context.Background(), provider.Namespace)
-	volumes = append(volumes, migrationVolumes...)
+	// The migration PVCs live VMMigrations reference (discoverMigrationStorage).
+	volumes = append(volumes, migrationStorageVolumes(migrationMounts)...)
 
 	// Add temporary directory volume (needed for read-only root filesystem),
 	// bounded so a provider cannot fill the node's ephemeral storage. A pod
@@ -1336,142 +1342,6 @@ const (
 	sshKeyVolumeName = "libvirt-ssh-key"
 	sshKeyMountPath  = "/tmp/virtrigaud-libvirt"
 )
-
-const (
-	// migrationPVCLabelKey and migrationPVCLabelValue identify a migration scratch
-	// PVC created by the VMMigration controller. The provider controller discovers
-	// these PVCs and mounts them into provider pods so migrations can read/write
-	// the transfer disk.
-	migrationPVCLabelKey   = "virtrigaud.io/component"
-	migrationPVCLabelValue = "migration-storage"
-)
-
-// migrationPVCIsMountable reports whether a discovered migration PVC should be
-// mounted into provider pods. PVCs that are being deleted are skipped: mounting a
-// Terminating PVC into a freshly-rolled provider pod makes that pod
-// unschedulable ("persistentvolumeclaim is being deleted") and, because the
-// running provider pod keeps the PVC mounted, prevents the PVC from ever
-// finishing deletion — which wedges the provider rollout (issue #184).
-func migrationPVCIsMountable(pvc *corev1.PersistentVolumeClaim) bool {
-	return pvc.DeletionTimestamp.IsZero()
-}
-
-// discoverMigrationPVCs finds all migration PVCs in the namespace and returns volume definitions for them
-func (r *ProviderReconciler) discoverMigrationPVCs(ctx context.Context, namespace string) []corev1.Volume {
-	var volumes []corev1.Volume
-
-	// List all PVCs in the namespace with migration labels
-	pvcList := &corev1.PersistentVolumeClaimList{}
-	err := r.List(ctx, pvcList,
-		client.InNamespace(namespace),
-		client.MatchingLabels{
-			migrationPVCLabelKey: migrationPVCLabelValue,
-		},
-	)
-
-	if err != nil {
-		// Don't fail the deployment build — providers must keep running when no
-		// migration is active. But never swallow this silently: a denied List
-		// (missing RBAC) or an unsynced cache makes migration PVCs invisible, so
-		// the VMMigration controller would wait indefinitely for a mount that the
-		// provider can never apply. Surface it so the failure is diagnosable.
-		log.FromContext(ctx).Error(err, "failed to list migration PVCs; migration storage will not be mounted",
-			"namespace", namespace, "labelSelector", fmt.Sprintf("%s=%s", migrationPVCLabelKey, migrationPVCLabelValue))
-		return volumes
-	}
-
-	// Create a volume for each migration PVC
-	for i := range pvcList.Items {
-		pvc := &pvcList.Items[i]
-		if !migrationPVCIsMountable(pvc) {
-			continue // PVC is being deleted; do not mount it (issue #184)
-		}
-
-		// Generate a safe volume name from PVC name (K8s volume names must be DNS label)
-		volumeName := fmt.Sprintf("migration-%s", pvc.Name)
-
-		volumes = append(volumes, corev1.Volume{
-			Name: volumeName,
-			VolumeSource: corev1.VolumeSource{
-				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-					ClaimName: pvc.Name,
-				},
-			},
-		})
-	}
-
-	return volumes
-}
-
-// discoverMigrationVolumeMounts finds all migration PVCs and returns volume mounts for them
-func (r *ProviderReconciler) discoverMigrationVolumeMounts(ctx context.Context, namespace string) []corev1.VolumeMount {
-	var mounts []corev1.VolumeMount
-
-	// List all PVCs in the namespace with migration labels
-	pvcList := &corev1.PersistentVolumeClaimList{}
-	err := r.List(ctx, pvcList,
-		client.InNamespace(namespace),
-		client.MatchingLabels{
-			migrationPVCLabelKey: migrationPVCLabelValue,
-		},
-	)
-
-	if err != nil {
-		// See discoverMigrationPVCs: never swallow this silently — an invisible
-		// migration PVC strands the VMMigration controller waiting for a mount.
-		log.FromContext(ctx).Error(err, "failed to list migration PVCs; migration storage will not be mounted",
-			"namespace", namespace, "labelSelector", fmt.Sprintf("%s=%s", migrationPVCLabelKey, migrationPVCLabelValue))
-		return mounts
-	}
-
-	// Create a volume mount for each migration PVC
-	for i := range pvcList.Items {
-		pvc := &pvcList.Items[i]
-		if !migrationPVCIsMountable(pvc) {
-			continue // PVC is being deleted; do not mount it (issue #184)
-		}
-
-		// Generate a safe volume name (must match the volume name in buildPodVolumes)
-		volumeName := fmt.Sprintf("migration-%s", pvc.Name)
-
-		// Mount at /mnt/migration-storage/<pvc-name>
-		// This allows multiple migration PVCs to be mounted if needed
-		mountPath := fmt.Sprintf("/mnt/migration-storage/%s", pvc.Name)
-
-		mounts = append(mounts, corev1.VolumeMount{
-			Name:      volumeName,
-			MountPath: mountPath,
-			ReadOnly:  false, // Migrations need read-write access
-		})
-	}
-
-	return mounts
-}
-
-// providersForMigrationPVC maps a migration storage PVC event to reconcile
-// requests for every Provider in the PVC's namespace, so provider Deployments
-// are re-rolled promptly when a migration PVC appears or starts deleting —
-// rather than waiting for the next periodic resync (issue #184). Non-migration
-// PVCs are ignored.
-func (r *ProviderReconciler) providersForMigrationPVC(ctx context.Context, obj client.Object) []reconcile.Request {
-	if obj.GetLabels()[migrationPVCLabelKey] != migrationPVCLabelValue {
-		return nil
-	}
-
-	providerList := &infravirtrigaudiov1beta1.ProviderList{}
-	if err := r.List(ctx, providerList, client.InNamespace(obj.GetNamespace())); err != nil {
-		return nil
-	}
-
-	requests := make([]reconcile.Request, 0, len(providerList.Items))
-	for i := range providerList.Items {
-		p := &providerList.Items[i]
-		requests = append(requests, reconcile.Request{
-			NamespacedName: types.NamespacedName{Namespace: p.Namespace, Name: p.Name},
-		})
-	}
-	return requests
-}
 
 // countConnectedVMs counts the number of VirtualMachines managed by this provider
 func (r *ProviderReconciler) countConnectedVMs(ctx context.Context, provider *infravirtrigaudiov1beta1.Provider) (int32, error) {
@@ -1558,12 +1428,21 @@ func (r *ProviderReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&appsv1.Deployment{}).
 		Owns(&corev1.Service{}).
 		Owns(&corev1.ServiceAccount{}).
-		// Re-reconcile a namespace's Providers when a migration storage PVC
-		// appears or starts deleting, so provider Deployments mount/unmount it
-		// promptly instead of waiting for the next resync (issue #184).
+		// Re-reconcile a migration's source and target Providers when its
+		// migration PVC appears, binds or starts deleting, and when the
+		// migration records its PVC, finishes or is deleted, so provider
+		// Deployments mount/unmount it promptly instead of waiting for the next
+		// resync (issue #184). Only PVCs a live VMMigration references are
+		// mounted (discoverMigrationStorage).
 		Watches(
 			&corev1.PersistentVolumeClaim{},
 			handler.EnqueueRequestsFromMapFunc(r.providersForMigrationPVC),
+			builder.WithPredicates(migrationPVCChanged()),
+		).
+		Watches(
+			&infravirtrigaudiov1beta1.VMMigration{},
+			handler.EnqueueRequestsFromMapFunc(r.providersForMigration),
+			builder.WithPredicates(migrationStorageChanged()),
 		).
 		// Re-render a clustered Provider's host-inventory Secret when one of its
 		// Host or HostPool CRs changes (ADR-0007 D3), mapping each back to its
