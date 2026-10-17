@@ -89,6 +89,18 @@ func msEnvSetStatus(m *infravirtrigaudiov1beta1.VMMigration, pvcName string, pha
 	})).To(Succeed())
 }
 
+// msEnvRecordPVCUID records pvc's UID in m's status, as the migration
+// controller does from the answer to its create.
+func msEnvRecordPVCUID(m *infravirtrigaudiov1beta1.VMMigration, pvc *corev1.PersistentVolumeClaim) {
+	Expect(retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(m), m); err != nil {
+			return err
+		}
+		m.Status.StoragePVCUID = string(pvc.UID)
+		return k8sClient.Status().Update(ctx, m)
+	})).To(Succeed())
+}
+
 // msEnvPVC creates the PVC name in ns on storageClass, labelled as migration
 // storage when labelled, controlled by owner when set, in the given phase.
 func msEnvPVC(ns, name, storageClass string, labelled bool, owner *infravirtrigaudiov1beta1.VMMigration, phase corev1.PersistentVolumeClaimPhase) *corev1.PersistentVolumeClaim {
@@ -155,8 +167,9 @@ var _ = Describe("Provider migration-storage mount scope (envtest)", func() {
 
 		By("the PVC an in-flight migration created and recorded is mounted")
 		m := msEnvMigration(ns, "mig", "", "", infravirtrigaudiov1beta1.MigrationPhaseValidating)
-		msEnvPVC(ns, "mig-storage", "any", true, m, corev1.ClaimBound)
+		ownPVC := msEnvPVC(ns, "mig-storage", "any", true, m, corev1.ClaimBound)
 		msEnvSetStatus(m, "mig-storage", infravirtrigaudiov1beta1.MigrationPhaseValidating)
+		msEnvRecordPVCUID(m, ownPVC)
 		Eventually(func(g Gomega) {
 			g.Expect(msEnvDeploymentMounts(g, ns, "prov-1")).To(Equal(map[string]bool{"mig-storage": false}))
 			g.Expect(msEnvDeploymentMounts(g, ns, msEnvTarget)).To(Equal(map[string]bool{"mig-storage": true}))
@@ -210,9 +223,10 @@ var _ = Describe("Provider migration-storage mount scope (envtest)", func() {
 
 		By("a deleted migration's PVC is not mounted")
 		live := msEnvMigration(ns, "live", "", "", infravirtrigaudiov1beta1.MigrationPhaseExporting)
-		msEnvPVC(ns, "live-storage", "any", true, live, corev1.ClaimBound)
+		livePVC := msEnvPVC(ns, "live-storage", "any", true, live, corev1.ClaimBound)
 		msEnvSetStatus(live, "live-storage", infravirtrigaudiov1beta1.MigrationPhaseExporting)
-		Expect(mountsOf("prov-1")).To(Equal([]migrationStorageMount{{pvcName: "live-storage"}}))
+		msEnvRecordPVCUID(live, livePVC)
+		Expect(mountsOf("prov-1")).To(Equal([]migrationStorageMount{{pvcName: "live-storage", volumeName: "migration-live-storage"}}))
 		Expect(k8sClient.Delete(ctx, live)).To(Succeed())
 		Expect(mountsOf("prov-1")).To(BeEmpty(), "the PVC outlives its migration until garbage collection")
 	})
@@ -303,6 +317,7 @@ var _ = Describe("VMMigration deletion leaves a user's migration PVC (envtest)",
 		m := finalized(ns, "mig", "")
 		pvc := msEnvPVC(ns, "mig-storage", "any", true, m, corev1.ClaimBound)
 		msEnvSetStatus(m, "mig-storage", infravirtrigaudiov1beta1.MigrationPhaseReady)
+		msEnvRecordPVCUID(m, pvc)
 		deleteMigration(m)
 		Expect(pvcDeleted(pvc)).To(BeTrue())
 	})
@@ -317,5 +332,77 @@ var _ = Describe("VMMigration deletion leaves a user's migration PVC (envtest)",
 		Expect(rec.Events).To(Receive(And(
 			ContainSubstring(corev1.EventTypeNormal+" "+eventReasonMigrationPVCRetained),
 			ContainSubstring("team-data"))))
+	})
+
+	It("refuses a <name>-storage squat carrying a forged ownerReference; only the PVC it created is mounted and deleted", func() {
+		ns := inUseTestNamespace("ms-squat-")
+		msEnvProviders(ns)
+		m := finalized(ns, "mig", "")
+		msEnvSetStatus(m, "", infravirtrigaudiov1beta1.MigrationPhaseValidating)
+		mr := NewVMMigrationReconciler(k8sClient, k8sClient, k8sClient.Scheme(), nil, record.NewFakeRecorder(20), false)
+		pr := &ProviderReconciler{Client: k8sClient, APIReader: k8sClient, Scheme: k8sClient.Scheme()}
+		mountsOf := func(name string) []string {
+			p := &infravirtrigaudiov1beta1.Provider{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: ns, Name: name}, p)).To(Succeed())
+			mounts, err := pr.discoverMigrationStorage(ctx, p)
+			Expect(err).NotTo(HaveOccurred())
+			var out []string
+			for _, mt := range mounts {
+				out = append(out, mt.pvcName)
+			}
+			return out
+		}
+		// purge removes the PVC for good (envtest runs no pvc-protection controller).
+		purge := func(name string) {
+			key := types.NamespacedName{Namespace: ns, Name: name}
+			pvc := &corev1.PersistentVolumeClaim{}
+			Expect(k8sClient.Get(ctx, key, pvc)).To(Succeed())
+			Expect(k8sClient.Delete(ctx, pvc)).To(Succeed())
+			Eventually(func(g Gomega) {
+				got := &corev1.PersistentVolumeClaim{}
+				err := k8sClient.Get(ctx, key, got)
+				if apierrors.IsNotFound(err) {
+					return
+				}
+				g.Expect(err).NotTo(HaveOccurred())
+				got.Finalizers = nil
+				g.Expect(k8sClient.Update(ctx, got)).To(Succeed())
+				g.Expect(apierrors.IsNotFound(k8sClient.Get(ctx, key, got))).To(BeTrue())
+			}, "10s", "100ms").Should(Succeed())
+		}
+		fresh := func() *infravirtrigaudiov1beta1.VMMigration {
+			got := &infravirtrigaudiov1beta1.VMMigration{}
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(m), got)).To(Succeed())
+			return got
+		}
+
+		By("a squat created before the migration's own PVC fails Validating and records nothing")
+		msEnvPVC(ns, "mig-storage", "any", true, m, corev1.ClaimBound) // ownerRef names m's real UID
+		_, err := mr.ensureMigrationPVC(ctx, fresh())
+		Expect(err).To(MatchError(errMigrationPVCNotOwned))
+		Expect(fresh().Status.StoragePVCUID).To(BeEmpty())
+		Expect(fresh().Status.StoragePVCName).To(BeEmpty())
+
+		By("with the name free, the migration creates its PVC and records the UID the API server answered")
+		purge("mig-storage")
+		name, err := mr.ensureMigrationPVC(ctx, fresh())
+		Expect(err).NotTo(HaveOccurred())
+		Expect(name).To(Equal("mig-storage"))
+		own := &corev1.PersistentVolumeClaim{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: ns, Name: "mig-storage"}, own)).To(Succeed())
+		Expect(fresh().Status.StoragePVCUID).To(Equal(string(own.UID)))
+		own.Status.Phase = corev1.ClaimBound
+		Expect(k8sClient.Status().Update(ctx, own)).To(Succeed())
+		Expect(mountsOf("prov-1")).To(Equal([]string{"mig-storage"}))
+
+		By("a squat that replaces it under the same name, forged ownerReference and all, is never mounted or deleted")
+		purge("mig-storage")
+		squat := msEnvPVC(ns, "mig-storage", "any", true, m, corev1.ClaimBound)
+		Expect(squat.UID).NotTo(Equal(own.UID))
+		Expect(mountsOf("prov-1")).To(BeEmpty())
+		Expect(mountsOf(msEnvTarget)).To(BeEmpty())
+		rec := deleteMigration(fresh())
+		Expect(pvcDeleted(squat)).To(BeFalse())
+		Expect(rec.Events).To(Receive(ContainSubstring(eventReasonMigrationPVCRetained)))
 	})
 })
