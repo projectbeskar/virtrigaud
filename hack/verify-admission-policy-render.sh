@@ -63,12 +63,12 @@ if p["spec"].get("failurePolicy") != "Fail":
 if b["spec"].get("policyName") != p["metadata"]["name"] or b["spec"].get("validationActions") != ["Deny"]:
     sys.exit("❌ the binding must name the policy and Deny")
 conds = {c["name"]: c["expression"] for c in p["spec"].get("matchConditions", [])}
-got_users = re.findall(r"'([^']+)'", conds.get("not-the-virtrigaud-manager", ""))
+got_users = re.findall(r'"([^"]+)"', conds.get("not-the-virtrigaud-manager", ""))
 if got_users != users:
     sys.exit(f"❌ exempt usernames {got_users}, want {users}")
 if groups:
     want_expr = ("!(has(request.userInfo.groups) && request.userInfo.groups.exists(g, g in [" +
-                 ", ".join(f"'{g}'" for g in groups) + "]))")
+                 ", ".join(json.dumps(g) for g in groups) + "]))")
     if conds.get("not-an-exempt-group") != want_expr:
         sys.exit(f"❌ exempt-group condition {conds.get('not-an-exempt-group')!r}, want {want_expr!r}")
 elif "not-an-exempt-group" in conds:
@@ -120,6 +120,21 @@ helm template virtrigaud "${CHART_DIR}" --namespace tenant-ops \
   --set 'admissionPolicy.reservedKeys.exemptGroups[0]=vr-break-glass' > "${WORKDIR}/exempt.yaml"
 check "${WORKDIR}/exempt.yaml" 1 \
   '["system:serviceaccount:tenant-ops:vr-manager", "system:serviceaccount:velero:velero"]' '["vr-break-glass"]'
+
+echo "==> 4b. an exemption that would break the CEL fails the render"
+for bad in "exemptUsernames[0]=o'brien" "exemptGroups[0]=a\"b" "exemptUsernames[0]=x]) || true || (["; do
+  if helm template virtrigaud "${CHART_DIR}" --namespace "${NAMESPACE}" --kube-version 1.30.0 \
+    --set-string "admissionPolicy.reservedKeys.${bad}" > /dev/null 2> "${WORKDIR}/bad.err"; then
+    echo "❌ admissionPolicy.reservedKeys.${bad} rendered; it must fail" >&2
+    exit 1
+  fi
+  if ! grep -q "would make the reserved-keys policy deny every VirtualMachine write" "${WORKDIR}/bad.err"; then
+    echo "❌ admissionPolicy.reservedKeys.${bad} failed without the guard's message:" >&2
+    cat "${WORKDIR}/bad.err" >&2
+    exit 1
+  fi
+done
+echo "   ok: malformed exemptions are refused at render"
 
 echo "==> 6. --reuse-values from ${LEGACY_REF} still renders, with the policy on"
 if ! git -C "${REPO_ROOT}" cat-file -e "${LEGACY_REF}:charts/virtrigaud/values.yaml" 2>/dev/null; then

@@ -66,8 +66,8 @@ var _ = Describe("Reserved virtrigaud.io keys admission policy (envtest)", func(
 			kustomizeManager, managerUser)
 		policy.Spec.MatchConditions = append(policy.Spec.MatchConditions, admissionregistrationv1.MatchCondition{
 			Name: "not-an-exempt-group",
-			Expression: "!(has(request.userInfo.groups) && request.userInfo.groups.exists(g, g in ['" +
-				breakGlassGroup + "']))",
+			Expression: "!(has(request.userInfo.groups) && request.userInfo.groups.exists(g, g in [\"" +
+				breakGlassGroup + "\"]))",
 		})
 		binding.Name = policy.Name
 		binding.Spec.PolicyName = policy.Name

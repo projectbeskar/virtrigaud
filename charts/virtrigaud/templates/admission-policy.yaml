@@ -34,6 +34,21 @@
 {{- $users = append $users . }}
 {{- end }}
 {{- $groups := dig "admissionPolicy" "reservedKeys" "exemptGroups" list .Values.AsMap }}
+{{- /* The names go into CEL (as JSON-quoted literals) under failurePolicy Fail:
+       a malformed one would break the policy and deny every VirtualMachine
+       create/update in the cluster, so anything outside a plain identity
+       alphabet fails the render instead. */}}
+{{- $identity := "^[A-Za-z0-9:._@+-]+$" }}
+{{- range $users }}
+{{- if not (regexMatch $identity (toString .)) }}
+{{- fail (printf "admissionPolicy.reservedKeys.exemptUsernames: %q is not a valid identity (letters, digits and :._@+- only); a malformed name would make the reserved-keys policy deny every VirtualMachine write" (toString .)) }}
+{{- end }}
+{{- end }}
+{{- range $groups }}
+{{- if not (regexMatch $identity (toString .)) }}
+{{- fail (printf "admissionPolicy.reservedKeys.exemptGroups: %q is not a valid group (letters, digits and :._@+- only); a malformed name would make the reserved-keys policy deny every VirtualMachine write" (toString .)) }}
+{{- end }}
+{{- end }}
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
 metadata:
@@ -51,11 +66,11 @@ spec:
   matchConditions:
     - name: not-the-virtrigaud-manager
       expression: >-
-        !(request.userInfo.username in [{{ range $i, $u := $users }}{{ if $i }}, {{ end }}{{ $u | squote }}{{ end }}])
+        !(request.userInfo.username in [{{ range $i, $u := $users }}{{ if $i }}, {{ end }}{{ toString $u | toJson }}{{ end }}])
     {{- if $groups }}
     - name: not-an-exempt-group
       expression: >-
-        !(has(request.userInfo.groups) && request.userInfo.groups.exists(g, g in [{{ range $i, $g := $groups }}{{ if $i }}, {{ end }}{{ $g | squote }}{{ end }}]))
+        !(has(request.userInfo.groups) && request.userInfo.groups.exists(g, g in [{{ range $i, $g := $groups }}{{ if $i }}, {{ end }}{{ toString $g | toJson }}{{ end }}]))
     {{- end }}
   variables:
     - name: reservedAnnotations
