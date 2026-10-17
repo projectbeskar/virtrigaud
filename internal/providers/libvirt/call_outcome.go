@@ -95,7 +95,10 @@ type stageError struct {
 	// subject names what the stage worked on, where the classifier needs it
 	// (the snapshot's name).
 	subject string
-	err     error
+	// detail carries what the classifier compared against after the failure
+	// (the disk sources before a snapshot create).
+	detail string
+	err    error
 }
 
 // Error returns the wrapped error's message.
@@ -111,10 +114,24 @@ func atStage(stage callStage, err error) error {
 
 // atStageOf is atStage with the stage's subject.
 func atStageOf(stage callStage, subject string, err error) error {
+	return atStageDetail(stage, subject, "", err)
+}
+
+// atStageDetail is atStageOf with the stage's detail.
+func atStageDetail(stage callStage, subject, detail string, err error) error {
 	if err == nil {
 		return nil
 	}
-	return &stageError{stage: stage, subject: subject, err: err}
+	return &stageError{stage: stage, subject: subject, detail: detail, err: err}
+}
+
+// stageDetailOf returns the detail err's stage was tagged with.
+func stageDetailOf(err error) string {
+	var se *stageError
+	if stderrors.As(err, &se) {
+		return se.detail
+	}
+	return ""
 }
 
 // stageOf returns the stage and subject err was tagged with, and whether it
@@ -289,6 +306,8 @@ func hostCommandEnded(ctx context.Context, err error) bool {
 // with a status of its own, but libvirtd — which did the work — may have gone
 // on, or died half way: the outcome of the command is unknown.
 var virshConnectionLostMarkers = []string{
+	"keepalive timeout",
+	"client socket is closed",
 	"end of file while reading data",
 	"disconnected from",
 	"cannot recv data",
@@ -307,6 +326,39 @@ func virshConnectionLost(err error) bool {
 	}
 	stderr := strings.ToLower(ve.Stderr)
 	for _, m := range virshConnectionLostMarkers {
+		if strings.Contains(stderr, m) {
+			return true
+		}
+	}
+	return false
+}
+
+// snapshotRefusalMarkers are the texts (lower case) of the errors with which
+// libvirt refuses a snapshot create BEFORE it executes anything: the domain is
+// busy with another job, in a state the operation does not apply to, or the
+// request is not supported. A failure with any other text may have happened
+// after the snapshot took effect (libvirt saves the domain's metadata after it
+// switched the disk sources, for one, and removes the snapshot again when that
+// save fails), so it is not read as "not created".
+var snapshotRefusalMarkers = []string{
+	"cannot acquire state change lock",
+	"requested operation is not valid",
+	"unsupported configuration",
+	"already exists",
+}
+
+// snapshotRefusedBeforeExecution reports whether err is a virsh command whose
+// stderr is one of snapshotRefusalMarkers, or says the domain does not exist.
+func snapshotRefusedBeforeExecution(err error) bool {
+	if virshNoDomain(err) {
+		return true
+	}
+	var ve *VirshError
+	if !stderrors.As(err, &ve) {
+		return false
+	}
+	stderr := strings.ToLower(ve.Stderr)
+	for _, m := range snapshotRefusalMarkers {
 		if strings.Contains(stderr, m) {
 			return true
 		}

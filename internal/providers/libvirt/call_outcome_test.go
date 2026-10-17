@@ -158,6 +158,25 @@ func TestVirshConnectionLost(t *testing.T) {
 	assert.True(t, virshConnectionLost(fmt.Errorf("x: %w", virshFailure(1, "error: End of file while reading data: Input/output error"))))
 	assert.False(t, virshConnectionLost(virshFailure(1, "error: Domain snapshot x already exists")))
 	assert.False(t, virshConnectionLost(errors.New("Disconnected")))
+	assert.True(t, virshConnectionLost(virshFailure(1, "error: internal error: connection closed due to keepalive timeout")))
+	assert.True(t, virshConnectionLost(virshFailure(1, "error: Cannot write data: client socket is closed")))
+}
+
+// TestSnapshotRefusedBeforeExecution: only libvirt's refusals before it
+// executes anything prove a failed create changed nothing.
+func TestSnapshotRefusedBeforeExecution(t *testing.T) {
+	for stderr, want := range map[string]bool{
+		"error: Timed out during operation: cannot acquire state change lock (held by monitor=x)": true,
+		"error: Requested operation is not valid: domain is not running":                          true,
+		"error: unsupported configuration: external snapshots are not supported":                  true,
+		"error: failed to get domain 'x'":                                                         true,
+		"error: unable to save metadata for snapshot x":                                           false,
+		"error: internal error: unable to execute QEMU command 'blockdev-snapshot-sync'":          false,
+		"error: scripted failure":                                                                 false,
+	} {
+		assert.Equal(t, want, snapshotRefusedBeforeExecution(virshFailure(1, stderr)), stderr)
+	}
+	assert.False(t, snapshotRefusedBeforeExecution(errors.New("cannot acquire state change lock")), "not a virsh error")
 }
 
 // TestEndedFailure: the command that changes state is answered "failed,
@@ -294,7 +313,8 @@ fail() {
   fi
   if [ -f "$d/fail-$1" ]; then
     if [ -f "$d/leaves-$1" ]; then echo "$LSNAP" >> "$d/snaps-$LDOM"; fi
-    echo "error: scripted failure of $1" >&2; exit 1
+    if [ -f "$d/stderr-$1" ]; then cat "$d/stderr-$1" >&2; else echo "error: scripted failure of $1" >&2; fi
+    exit 1
   fi
 }`)
 }
@@ -354,12 +374,29 @@ func TestSingleHostSnapshotCreate_Outcomes(t *testing.T) {
 		assertNotPerformedStatus(t, err)
 		assert.False(t, created(calls))
 	})
-	t.Run("b: the create fails and the snapshot is absent - not created", func(t *testing.T) {
-		calls, err := run(t, func(fx *scdFixture) { fx.script("single", "fail-snapshot-create-as", "") }, scdSnapshotRequest("x"))
+	// libvirt's refusal before it executes anything, and its other errors.
+	const (
+		busy       = "error: Timed out during operation: cannot acquire state change lock (held by monitor=remoteDispatchDomainSnapshotCreateXML)\n"
+		saveFailed = "error: unable to save metadata for snapshot x: Input/output error\n"
+	)
+	failCreate := func(stderr string, more ...func(*scdFixture)) func(*scdFixture) {
+		return func(fx *scdFixture) {
+			fx.script("single", "fail-snapshot-create-as", "")
+			fx.script("single", "stderr-snapshot-create-as", stderr)
+			for _, m := range more {
+				m(fx)
+			}
+		}
+	}
+	count := func(calls []string, sub string) int { return strings.Count(strings.Join(calls, "\n"), sub) }
+
+	t.Run("b: libvirt refuses the create before executing (busy), nothing changed - not created", func(t *testing.T) {
+		calls, err := run(t, failCreate(busy), scdSnapshotRequest("x"))
 		assertNotPerformedStatus(t, err)
-		assertConstantText(t, err, leak, "virsh", "--atomic")
+		assertConstantText(t, err, leak, "virsh", "--atomic", "monitor")
 		assert.Equal(t, wireSnapshotNotCreated, status.Convert(err).Message())
-		assert.Equal(t, "single virsh snapshot-list vrgold-web --name", calls[len(calls)-1], "the absence is read again")
+		assert.Equal(t, 2, count(calls, "snapshot-list"), "the absence is read again")
+		assert.Equal(t, 2, count(calls, "domblklist"), "and so are the disk sources")
 	})
 	t.Run("b: the domain vanished during the create - NotFound", func(t *testing.T) {
 		_, err := run(t, func(fx *scdFixture) {
@@ -369,40 +406,69 @@ func TestSingleHostSnapshotCreate_Outcomes(t *testing.T) {
 		}, scdSnapshotRequest("x"))
 		assertRefusalStatus(t, err, codes.NotFound)
 	})
+	t.Run("c: an error that is not a refusal before execution (the metadata save) - unknown, even with the disks and list unchanged", func(t *testing.T) {
+		calls, err := run(t, failCreate(saveFailed), scdSnapshotRequest("x"))
+		assertUnknownOutcome(t, err)
+		assert.Equal(t, 1, count(calls, "snapshot-list"), "nothing is trusted to read again")
+	})
+	t.Run("c: libvirt saved its metadata last and the disk sources changed - unknown", func(t *testing.T) {
+		_, err := run(t, failCreate(saveFailed, func(fx *scdFixture) {
+			fx.script("single", "blk-after", " Type   Device   Target   Source\n---\n file   disk     vda      /var/lib/libvirt/images/vrgold-web-disk.x.qcow2\n")
+		}), scdSnapshotRequest("x"))
+		assertUnknownOutcome(t, err)
+	})
+	t.Run("c: a refusal text but the disk sources changed - unknown", func(t *testing.T) {
+		_, err := run(t, failCreate(busy, func(fx *scdFixture) {
+			fx.script("single", "blk-after", " Type   Device   Target   Source\n---\n file   disk     vda      /var/lib/libvirt/images/changed.qcow2\n")
+		}), scdSnapshotRequest("x"))
+		assertUnknownOutcome(t, err)
+	})
+	t.Run("c: the disk sources cannot be read after the failed create - unknown", func(t *testing.T) {
+		_, err := run(t, failCreate(busy, func(fx *scdFixture) {
+			r21Patch(t, "    domblklist)\n      fail domblklist", "    domblklist)\n      if [ -f \"$d/blk-seen\" ]; then echo 'error: read failed' >&2; exit 1; fi")
+		}), scdSnapshotRequest("x"))
+		assertUnknownOutcome(t, err)
+	})
 	t.Run("c: the create fails but the snapshot exists afterwards - unknown", func(t *testing.T) {
-		_, err := run(t, func(fx *scdFixture) {
-			fx.script("single", "fail-snapshot-create-as", "")
+		_, err := run(t, failCreate(busy, func(fx *scdFixture) {
 			fx.script("single", "leaves-snapshot-create-as", "")
-		}, scdSnapshotRequest("x"))
+		}), scdSnapshotRequest("x"))
 		assertUnknownOutcome(t, err)
 	})
 	t.Run("c: the create is killed (a signal) - unknown, nothing read again", func(t *testing.T) {
 		calls, err := run(t, func(fx *scdFixture) { fx.script("single", "exit-snapshot-create-as", "137") }, scdSnapshotRequest("x"))
 		assertUnknownOutcome(t, err)
-		assert.Equal(t, 1, strings.Count(strings.Join(calls, "\n"), "snapshot-list"), "only the name check before the create")
+		assert.Equal(t, 1, count(calls, "snapshot-list"), "only the name check before the create")
 	})
 	t.Run("c: virsh lost libvirtd during the create (it exits 1) - unknown", func(t *testing.T) {
-		calls, err := run(t, func(fx *scdFixture) {
-			fx.script("single", "exit-snapshot-create-as", "1")
-			fx.script("single", "stderr-snapshot-create-as", "error: Disconnected from qemu:///system due to end of file\nerror: End of file while reading data: Input/output error\n")
-		}, scdSnapshotRequest("x"))
-		assertUnknownOutcome(t, err)
-		assert.Equal(t, 1, strings.Count(strings.Join(calls, "\n"), "snapshot-list"), "the snapshot is not trusted to be absent")
+		for name, stderr := range map[string]string{
+			"end of file": "error: Disconnected from qemu:///system due to end of file\nerror: End of file while reading data: Input/output error\n",
+			"keepalive":   "error: internal error: connection closed due to keepalive timeout\n",
+			"socket":      "error: Cannot write data: client socket is closed\n",
+		} {
+			t.Run(name, func(t *testing.T) {
+				calls, err := run(t, func(fx *scdFixture) {
+					fx.script("single", "exit-snapshot-create-as", "1")
+					fx.script("single", "stderr-snapshot-create-as", stderr)
+				}, scdSnapshotRequest("x"))
+				assertUnknownOutcome(t, err)
+				assert.Equal(t, 1, count(calls, "snapshot-list"), "the snapshot is not trusted to be absent")
+			})
+		}
 	})
 	t.Run("c: the create loses its connection - unknown", func(t *testing.T) {
 		_, err := run(t, func(fx *scdFixture) { fx.script("single", "exit-snapshot-create-as", "255") }, scdSnapshotRequest("x"))
 		assertUnknownOutcome(t, err)
 	})
 	t.Run("c: the snapshots cannot be listed after a failed create - unknown", func(t *testing.T) {
-		calls, err := run(t, func(fx *scdFixture) {
-			fx.script("single", "fail-snapshot-create-as", "")
+		calls, err := run(t, failCreate(busy, func(fx *scdFixture) {
 			// The list works once (the name check) and fails afterwards.
 			r21Patch(t, `snapshot-list)
       fail snapshot-list`, `snapshot-list)
       if [ -f "$d/listed-once" ]; then echo "error: list failed" >&2; exit 1; fi; : > "$d/listed-once"`)
-		}, scdSnapshotRequest("x"))
+		}), scdSnapshotRequest("x"))
 		assertUnknownOutcome(t, err)
-		assert.Equal(t, 2, strings.Count(strings.Join(calls, "\n"), "snapshot-list"),
+		assert.Equal(t, 2, count(calls, "snapshot-list"),
 			"the name check before the create, and the read after it that failed")
 	})
 	t.Run("success is unchanged", func(t *testing.T) {
