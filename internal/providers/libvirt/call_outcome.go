@@ -358,8 +358,11 @@ func (t *errTrackingReader) failure() error {
 // uploadNotPublished reports whether a failed s3 upload provably did not
 // publish the object:
 //
-//   - the S3 service answered the request with an HTTP 4xx (it refused the
-//     request and applied nothing: access denied, no such bucket);
+//   - the S3 service refused the request for the caller's credentials or the
+//     bucket (AccessDenied, NoSuchBucket, ...; storage.IsServiceRejection). Any
+//     other 4xx is not enough: the client retries a completing call whose
+//     answer was lost, and the retry of an upload the service had already
+//     completed is answered NoSuchUpload (404);
 //   - the request was refused locally, before any call (an invalid
 //     destination);
 //   - the source stream failed (readErr, other than io.ErrUnexpectedEOF,

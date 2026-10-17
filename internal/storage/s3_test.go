@@ -21,10 +21,13 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/minio/minio-go/v7"
 )
 
 // TestParseS3Endpoint covers the endpoint/secure derivation, including the
@@ -186,5 +189,33 @@ func TestPVCStreamRoundTripChecksum(t *testing.T) {
 	}
 	if se, ok := err.(*StorageError); !ok || se.Type != ErrorTypeChecksumMismatch {
 		t.Errorf("wrong-checksum error = %v, want ErrorTypeChecksumMismatch", err)
+	}
+}
+
+// TestIsServiceRejection: only a refusal for the caller's credentials or the
+// bucket proves an upload was not applied; NoSuchUpload (404) answers the
+// retry of a completing call the service had already applied.
+func TestIsServiceRejection(t *testing.T) {
+	wrap := func(r minio.ErrorResponse) error {
+		return &StorageError{Type: ErrorTypeOperationFailed, Message: "S3 upload failed", Cause: r}
+	}
+	for name, tc := range map[string]struct {
+		err  error
+		want bool
+	}{
+		"access denied":            {wrap(minio.ErrorResponse{StatusCode: 403, Code: "AccessDenied"}), true},
+		"no such bucket":           {wrap(minio.ErrorResponse{StatusCode: 404, Code: "NoSuchBucket"}), true},
+		"bad signature":            {wrap(minio.ErrorResponse{StatusCode: 403, Code: "SignatureDoesNotMatch"}), true},
+		"no such upload (a retry)": {wrap(minio.ErrorResponse{StatusCode: 404, Code: "NoSuchUpload"}), false},
+		"no such key":              {wrap(minio.ErrorResponse{StatusCode: 404, Code: "NoSuchKey"}), false},
+		"internal error":           {wrap(minio.ErrorResponse{StatusCode: 500, Code: "InternalError"}), false},
+		"200 with an error body":   {wrap(minio.ErrorResponse{StatusCode: 200, Code: "AccessDenied"}), false},
+		"not an S3 answer":         {errors.New("connection reset"), false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := IsServiceRejection(tc.err); got != tc.want {
+				t.Errorf("IsServiceRejection = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }

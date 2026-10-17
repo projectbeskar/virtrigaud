@@ -256,6 +256,15 @@ func TestSingleHostExportS3_Outcomes(t *testing.T) {
 		}
 		assert.True(t, started, "the upload had started: it is the broken source that stopped it")
 	})
+	t.Run("c: the completing call took effect, its answer was lost and its retry got NoSuchUpload (404) - unknown", func(t *testing.T) {
+		fx := newTransferFixture(t)
+		fx.s3.LoseNextComplete()
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_, err := fx.server().ExportDisk(ctx, fx.s3ExportRequest(t))
+		assertUnknownOutcome(t, err)
+		assert.Equal(t, []string{"exports/disk.qcow2"}, fx.s3.Keys(), "the object was published although the call failed")
+	})
 	t.Run("c: the service fails the upload (5xx) - unknown", func(t *testing.T) {
 		fx := newTransferFixture(t)
 		fx.s3.FailWith(500)
