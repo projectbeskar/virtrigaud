@@ -18,6 +18,8 @@ limitations under the License.
 package pvefake
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -26,6 +28,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -126,6 +129,9 @@ type Fault struct {
 	Then func(r *http.Request)
 	// Times is how many matching requests fail; 0 means every one.
 	Times int
+	// PassThrough runs Then and then serves the request normally, answering
+	// no error: e.g. to change a VM between a client's read and its write.
+	PassThrough bool
 }
 
 // InjectFault makes the requests that match f fail (see Fault). Safe for
@@ -522,6 +528,13 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if f := s.matchFault(r); f != nil {
+		if f.PassThrough {
+			if f.Then != nil {
+				f.Then(r)
+			}
+			s.router.ServeHTTP(w, r)
+			return
+		}
 		if f.AfterApply {
 			s.router.ServeHTTP(httptest.NewRecorder(), r)
 		}
@@ -1420,8 +1433,32 @@ func (s *Server) handleGetVMConfig(w http.ResponseWriter, r *http.Request) {
 	if vm.Lock != "" {
 		config["lock"] = vm.Lock
 	}
+	config["digest"] = configDigest(vm)
 
 	s.writeResponse(w, config)
+}
+
+// modifiedConfigMessage is PVE's answer to a config update whose digest is
+// not the config's current one.
+const modifiedConfigMessage = "detected modified configuration - file changed by other user? Try again."
+
+// configDigest is the fake's config digest: like PVE's (a SHA-1 of the config
+// file), it changes whenever the VM's config does. Clients treat it as opaque.
+func configDigest(vm *VM) string {
+	h := sha256.New()
+	_, _ = fmt.Fprintf(h, "%d|%s|%d|%d|%d|%s|%q", vm.VMID, vm.Name, vm.CPUs, vm.Memory, vm.Template, vm.Lock, vm.Description)
+	keys := make([]string, 0, len(vm.Config))
+	for k := range vm.Config {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		_, _ = fmt.Fprintf(h, "|%s=%q", k, vm.Config[k])
+	}
+	for _, n := range vm.Networks {
+		_, _ = fmt.Fprintf(h, "|%+v", n)
+	}
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 // handleReconfigureVM handles VM reconfiguration
@@ -1447,6 +1484,12 @@ func (s *Server) handleReconfigureVM(w http.ResponseWriter, r *http.Request) {
 	vm, exists := s.vmOnNode(node, vmid)
 	if !exists {
 		s.writeMissingVM(w, node, vmid)
+		return
+	}
+	// PVE applies an update that carries a digest only to the config it was
+	// computed from.
+	if digest := r.FormValue("digest"); digest != "" && digest != configDigest(vm) {
+		s.writeError(w, http.StatusInternalServerError, modifiedConfigMessage)
 		return
 	}
 
