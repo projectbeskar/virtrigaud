@@ -186,3 +186,18 @@ func TestPVCStorage_ParsePathRejectsEmptyAndTraversal(t *testing.T) {
 	}
 	assert.NoError(t, p.ValidateURL(pvcTestURL))
 }
+
+func TestSplitPVCURL(t *testing.T) {
+	name, rel, err := SplitPVCURL(pvcTestURL)
+	require.NoError(t, err)
+	assert.Equal(t, "staging", name)
+	assert.Equal(t, pvcTestRel, rel)
+
+	for _, u := range []string{
+		"", "staging/x", "s3://bucket/x", "pvc://", "pvc://staging", "pvc://staging/",
+		"pvc://../x", "pvc://Bad_Name/x", "pvc://staging/a/../../x", "pvc://staging/..",
+	} {
+		_, _, err := SplitPVCURL(u)
+		assert.Error(t, err, u)
+	}
+}
