@@ -467,7 +467,7 @@
   "export-nfs-needs-ssh": {
     "calls": null,
     "resp": "null",
-    "err": "nfs export requires an ssh:// libvirt transport (host-side qemu-img → nfs://); got \"qemu:///single\""
+    "err": "rpc error: code = FailedPrecondition desc = disk export not performed: it requires an ssh:// libvirt transport (host-side qemu-img)"
   },
   "export-pvc-compressed": {
     "calls": [
@@ -482,7 +482,7 @@
       "local qemu-img convert -p -f qcow2 -O qcow2 -c /var/lib/libvirt/images/vrgold-web-disk.qcow2 /tmp/export-vrgold-web-\u003cunix\u003e.qcow2"
     ],
     "resp": "null",
-    "err": "failed to export disk: failed to create storage client: PVC mount path does not exist: /mnt/migration-storage/vrgold-pvc (PVC may not be mounted to pod): stat /mnt/migration-storage/vrgold-pvc: no such file or directory"
+    "err": "disk export failed: it did not complete and nothing is still writing; any partial file on the migration volume is replaced by the next export (details are in the provider log)"
   },
   "export-pvc-ignores-target-host": {
     "calls": [
@@ -496,7 +496,7 @@
       "single virsh snapshot-list vrgold-web --name"
     ],
     "resp": "null",
-    "err": "failed to export disk: failed to create storage client: PVC mount path does not exist: /mnt/migration-storage/vrgold-pvc (PVC may not be mounted to pod): stat /mnt/migration-storage/vrgold-pvc: no such file or directory"
+    "err": "disk export failed: it did not complete and nothing is still writing; any partial file on the migration volume is replaced by the next export (details are in the provider log)"
   },
   "export-pvc-no-conversion": {
     "calls": [
@@ -510,7 +510,7 @@
       "single virsh snapshot-list vrgold-web --name"
     ],
     "resp": "null",
-    "err": "failed to export disk: failed to create storage client: PVC mount path does not exist: /mnt/migration-storage/vrgold-pvc (PVC may not be mounted to pod): stat /mnt/migration-storage/vrgold-pvc: no such file or directory"
+    "err": "disk export failed: it did not complete and nothing is still writing; any partial file on the migration volume is replaced by the next export (details are in the provider log)"
   },
   "export-pvc-unsupported-format": {
     "calls": [
@@ -524,7 +524,7 @@
       "single virsh snapshot-list vrgold-web --name"
     ],
     "resp": "null",
-    "err": "failed to export disk: unsupported export format: vmdk (libvirt supports qcow2, raw)"
+    "err": "rpc error: code = InvalidArgument desc = unsupported export format: vmdk (libvirt supports qcow2, raw)"
   },
   "export-s3-direct-mode": {
     "calls": null,
@@ -534,7 +534,7 @@
   "export-s3-needs-ssh": {
     "calls": null,
     "resp": "null",
-    "err": "s3 export requires an ssh:// libvirt transport (host-side qemu-img flatten + stream); got \"qemu:///single\""
+    "err": "rpc error: code = FailedPrecondition desc = disk export not performed: it requires an ssh:// libvirt transport (host-side qemu-img)"
   },
   "export-unknown-backend": {
     "calls": null,
@@ -546,6 +546,8 @@
       "single virsh domstate vrgold-web",
       "single virsh dumpxml vrgold-web",
       "single virsh list --all --uuid",
+      "single virsh snapshot-list vrgold-web --name",
+      "single virsh domblklist --details vrgold-web",
       "single virsh snapshot-create-as vrgold-web snapshot-\u003cunix\u003e --description Snapshot created by VirtRigaud at \u003ctime\u003e --atomic --disk-only"
     ],
     "resp": "{\"snapshot_id\":\"snapshot-\u003cunix\u003e\"}",
@@ -556,6 +558,8 @@
       "single virsh domstate vrgold-web",
       "single virsh dumpxml vrgold-web",
       "single virsh list --all --uuid",
+      "single virsh snapshot-list vrgold-web --name",
+      "single virsh domblklist --details vrgold-web",
       "single virsh snapshot-create-as vrgold-web pre-upgrade --description before the upgrade --atomic --disk-only"
     ],
     "resp": "{\"snapshot_id\":\"pre-upgrade\"}",
@@ -566,13 +570,15 @@
       "single virsh domstate vrgold-web"
     ],
     "resp": "null",
-    "err": "failed to get domain state: failed to get domain state: virsh command 'virsh -c qemu:///single domstate vrgold-web' failed (exit code 1): stderr=error: scripted failure of domstate\n, stdout="
+    "err": "snapshot create not performed: a check or command on the libvirt host failed before the snapshot was taken (details are in the provider log)"
   },
   "snapshot-create-fails": {
     "calls": [
       "single virsh domstate vrgold-web",
       "single virsh dumpxml vrgold-web",
       "single virsh list --all --uuid",
+      "single virsh snapshot-list vrgold-web --name",
+      "single virsh domblklist --details vrgold-web",
       "single virsh snapshot-create-as vrgold-web x --description d --atomic --disk-only"
     ],
     "resp": "null",
@@ -583,6 +589,8 @@
       "single virsh domstate vrgold-web",
       "single virsh dumpxml vrgold-web",
       "single virsh list --all --uuid",
+      "single virsh snapshot-list vrgold-web --name",
+      "single virsh domblklist --details vrgold-web",
       "single virsh snapshot-create-as vrgold-web h --description d --atomic --disk-only"
     ],
     "resp": "{\"snapshot_id\":\"h\"}",
@@ -593,6 +601,8 @@
       "single virsh domstate vrgold-web",
       "single virsh dumpxml vrgold-web",
       "single virsh list --all --uuid",
+      "single virsh snapshot-list vrgold-web --name",
+      "single virsh domblklist --details vrgold-web",
       "single virsh snapshot-create-as vrgold-web mem --description d --atomic"
     ],
     "resp": "{\"snapshot_id\":\"mem\"}",
@@ -603,6 +613,8 @@
       "single virsh domstate vrgold-web",
       "single virsh dumpxml vrgold-web",
       "single virsh list --all --uuid",
+      "single virsh snapshot-list vrgold-web --name",
+      "single virsh domblklist --details vrgold-web",
       "single virsh snapshot-create-as vrgold-web mem --description d --atomic --disk-only"
     ],
     "resp": "{\"snapshot_id\":\"mem\"}",
@@ -613,13 +625,15 @@
       "single virsh domstate gone"
     ],
     "resp": "null",
-    "err": "failed to get domain state: failed to get domain state: virsh command 'virsh -c qemu:///single domstate gone' failed (exit code 1): stderr=error: failed to get domain 'gone'\n, stdout="
+    "err": "rpc error: code = NotFound desc = the libvirt domain was not found on the host"
   },
   "snapshot-create-sanitized-name": {
     "calls": [
       "single virsh domstate vrgold-web",
       "single virsh dumpxml vrgold-web",
       "single virsh list --all --uuid",
+      "single virsh snapshot-list vrgold-web --name",
+      "single virsh domblklist --details vrgold-web",
       "single virsh snapshot-create-as vrgold-web my-snap-1- --description d --atomic --disk-only"
     ],
     "resp": "{\"snapshot_id\":\"my-snap-1-\"}",

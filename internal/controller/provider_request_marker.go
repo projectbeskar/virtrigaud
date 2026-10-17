@@ -185,6 +185,49 @@ func providerCallOutcomeKnown(err error) bool {
 		contracts.IsVMDiskInUse(err) || contracts.IsVMSourceRunning(err)
 }
 
+// callAttempt says how a provider call came to be sent.
+type callAttempt struct {
+	// resend: the manager sent the call again on its own, after an earlier call
+	// whose outcome was never recorded (the marker was already on the object
+	// and no operator confirmed it).
+	resend bool
+	// confirmed: an operator confirmed that the earlier call left nothing
+	// behind (operationOutcomeAnnotation), and the call is sent on that word.
+	confirmed bool
+}
+
+// newCallAttempt is the attempt of a send that finds prev as the object's
+// marker (nil: none) and confirmed as the operator's confirmation of it.
+func newCallAttempt(prev *metav1.Condition, confirmed bool) callAttempt {
+	return callAttempt{resend: prev != nil && !confirmed, confirmed: prev != nil && confirmed}
+}
+
+// contradictsConfirmation reports whether err is an answer that disagrees with
+// an operator's confirmation that the earlier call left nothing behind: a
+// plain Conflict (a snapshot of that name exists, a disk of the landing name
+// is in use). The refusals that are Conflicts for another reason - a disk
+// above the size limit, a disk another VM depends on, a template - say
+// nothing about the earlier call and stay what they are.
+func contradictsConfirmation(err error) bool {
+	return contracts.IsConflict(err) && !contracts.IsDiskSizeExceedsLimit(err) && !contracts.IsDiskSizeUnverifiable(err) &&
+		!contracts.IsVMDiskInUse(err) && !contracts.IsVMIsImageArtifact(err) && !contracts.IsOwnerStampUnreadable(err)
+}
+
+// providerCallOutcomeKnownFor is providerCallOutcomeKnown for a call sent as
+// attempt. The manager's own automatic re-send (a.resend) is the answer to THIS
+// request only and says nothing about what the earlier call made, so no failure
+// answering it is definite: an AlreadyExists or NotFound answering a re-sent
+// SnapshotCreate may be the snapshot the first call took; the marker is kept.
+// A call sent on an operator's confirmation (a.confirmed) is a first send, as a
+// confirmed VM Create is (resolveCreateMarker), except for an answer that
+// contradicts the confirmation (contradictsConfirmation), which holds again.
+func providerCallOutcomeKnownFor(err error, a callAttempt) bool {
+	if a.resend || (a.confirmed && contradictsConfirmation(err)) {
+		return false
+	}
+	return providerCallOutcomeKnown(err)
+}
+
 // operationOutcomeManagers lists the field managers (with their operation)
 // that own obj's operationOutcomeAnnotation, for the confirmation's log line.
 // The API server's audit log is the authoritative record of who set it.

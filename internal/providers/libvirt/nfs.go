@@ -45,32 +45,38 @@ import (
 // is the controller-built, C7'-hardened nfs:// URL.
 func (s *Server) exportDiskToNFS(ctx context.Context, req *providerv1.ExportDiskRequest) (*providerv1.ExportDiskResponse, error) {
 	if s.provider == nil {
-		return nil, fmt.Errorf("libvirt provider not initialized")
+		return nil, nothingDone(wireProviderNotInitialized, fmt.Errorf("libvirt provider not initialized"))
 	}
 	conn, err := s.provider.conn(ctx)
 	if err != nil {
-		return nil, err
+		return nil, nothingDone(wireExportNotPerformed, err)
 	}
 	if !strings.Contains(conn.uri(), "ssh://") {
-		return nil, fmt.Errorf("nfs export requires an ssh:// libvirt transport (host-side qemu-img → nfs://); got %q", conn.uri())
+		return nil, refusal(codes.FailedPrecondition, wireExportNeedsSSH,
+			fmt.Errorf("nfs export requires an ssh:// libvirt transport (host-side qemu-img → nfs://); got %q", conn.uri()))
 	}
 
 	nfsURL := strings.TrimSpace(req.DestinationUrl)
 	if !strings.HasPrefix(nfsURL, "nfs://") {
-		return nil, fmt.Errorf("nfs export destination must be an nfs:// URL, got %q", nfsURL)
+		return nil, refusal(codes.InvalidArgument, wireExportRefused,
+			fmt.Errorf("nfs export destination must be an nfs:// URL, got %q", nfsURL))
 	}
 
 	// The source is one of the domain's own disks, read in the format its
 	// definition names (exportSourceOn).
 	vp, err := virshOf(conn)
 	if err != nil {
-		return nil, err
+		return nil, nothingDone(wireExportNotPerformed, err)
 	}
 	srcPath, srcFormat, err := exportSourceOn(ctx, vp, byName(req.VmId), req.DiskId)
 	if err != nil {
-		return nil, fmt.Errorf("failed to resolve the source disk: %w", err)
+		return nil, nothingDone(wireExportNotPerformed, fmt.Errorf("failed to resolve the source disk: %w", err))
 	}
-	return exportConvertToNFS(ctx, conn, req, srcPath, srcFormat, nil)
+	resp, err := exportConvertToNFS(ctx, conn, req, srcPath, srcFormat, nil)
+	if err != nil {
+		return nil, singleHostExportFailure(ctx, err)
+	}
+	return resp, nil
 }
 
 // exportConvertToNFS is the NFS export core, run on conn — the single host's
@@ -117,6 +123,12 @@ func exportConvertToNFS(ctx context.Context, conn libvirtConn, req *providerv1.E
 		var roe *routedOpError
 		if errors.As(err, &roe) {
 			return nil, err
+		}
+		// A failure of the checks before the convert is tagged stageBefore
+		// (diskCopy.run); an untagged one is the convert itself, which writes
+		// the destination in place (stageCommand).
+		if _, _, tagged := stageOf(err); !tagged {
+			err = atStage(stageCommand, err)
 		}
 		return nil, fmt.Errorf("host-side qemu-img convert to nfs failed: %w%s", err, copyStderr(res))
 	}
@@ -193,7 +205,7 @@ func boundedNFSCopy(ctx context.Context, conn libvirtConn, wd *diskWriteDir, nfs
 	}
 	if res, err := conn.RunHost(ctx, withUmask(vmDiskUmask, "qemu-img", "dd", "-f", "raw", "-O", "raw", "bs=1M",
 		"count="+strconv.FormatInt(migration.StagedCopyDDCount(info.VirtualSize), 10), "if="+nfsURL, "of="+dst)...); err != nil {
-		return fmt.Errorf("host-side copy of the staged nfs object failed: %w%s", err, qemuImgStderr(res))
+		return atStage(stageCommand, fmt.Errorf("host-side copy of the staged nfs object failed: %w%s", err, qemuImgStderr(res)))
 	}
 	sz, err := runHost(ctx, h, "stat", "-c", "%s", "--", dst)
 	if err != nil {
@@ -279,7 +291,7 @@ func copyCheckConvertNFSObject(ctx context.Context, conn libvirtConn, wd *diskWr
 	newDisk := wd.file(name)
 	if res, err := conn.RunHost(ctx, withUmask(vmDiskUmask, "qemu-img", "convert", "-f", "qcow2", "-O", "qcow2",
 		stagedCopy, newDisk)...); err != nil {
-		return "", fmt.Errorf("host-side qemu-img convert of the staged nfs object failed: %w%s", err, qemuImgStderr(res))
+		return "", atStage(stageCommand, fmt.Errorf("host-side qemu-img convert of the staged nfs object failed: %w%s", err, qemuImgStderr(res)))
 	}
 	removeHostPath(ctx, h, stagedCopy, false)
 	return newDisk, nil
@@ -289,20 +301,32 @@ func copyCheckConvertNFSObject(ctx context.Context, conn libvirtConn, wd *diskWr
 // host's qemu-img reads the staged qcow2 directly from the NFS export over libnfs
 // and writes it into the target storage pool. No download, no pod staging.
 func (s *Server) importDiskFromNFS(ctx context.Context, req *providerv1.ImportDiskRequest) (*providerv1.ImportDiskResponse, error) {
+	resp, err := s.importDiskFromNFSSteps(ctx, req)
+	if err != nil {
+		return nil, singleHostImportFailure(ctx, err)
+	}
+	return resp, nil
+}
+
+// importDiskFromNFSSteps is the NFS import. As in the S3 import, every step
+// before the rename onto the landing name (wd.publish, tagged stagePublish)
+// works in a private directory that is removed whatever happens.
+func (s *Server) importDiskFromNFSSteps(ctx context.Context, req *providerv1.ImportDiskRequest) (*providerv1.ImportDiskResponse, error) {
 	if s.provider == nil {
-		return nil, fmt.Errorf("libvirt provider not initialized")
+		return nil, nothingDone(wireProviderNotInitialized, fmt.Errorf("libvirt provider not initialized"))
 	}
 	conn, err := s.provider.conn(ctx)
 	if err != nil {
 		return nil, err
 	}
 	if !strings.Contains(conn.uri(), "ssh://") {
-		return nil, fmt.Errorf("nfs import requires an ssh:// libvirt transport (host-side qemu-img from nfs://); got %q", conn.uri())
+		return nil, refusal(codes.FailedPrecondition, wireImportNeedsSSH,
+			fmt.Errorf("nfs import requires an ssh:// libvirt transport (host-side qemu-img from nfs://); got %q", conn.uri()))
 	}
 
 	nfsURL := strings.TrimSpace(req.SourceUrl)
 	if !strings.HasPrefix(nfsURL, "nfs://") {
-		return nil, fmt.Errorf("nfs import source must be an nfs:// URL, got %q", nfsURL)
+		return nil, atStage(stageInvalid, fmt.Errorf("nfs import source must be an nfs:// URL, got %q", nfsURL))
 	}
 
 	// Resolve the target pool and its host path.
@@ -377,7 +401,7 @@ func (s *Server) importDiskFromNFS(ctx context.Context, req *providerv1.ImportDi
 		return nil, err
 	}
 	if err := wd.publish(ctx, filepath.Base(targetPath), targetPath); err != nil {
-		return nil, fmt.Errorf("nfs import: %w", err)
+		return nil, atStage(stagePublish, fmt.Errorf("nfs import: %w", err))
 	}
 
 	if _, err := conn.Virsh(ctx, "pool-refresh", poolName); err != nil {

@@ -2835,7 +2835,8 @@ func (p *Provider) ExportDisk(ctx context.Context, req contracts.ExportDiskReque
 		targetFormat = diskInfo.Format // Use source format
 	}
 	if targetFormat != "qcow2" && targetFormat != "raw" {
-		return contracts.ExportDiskResponse{}, fmt.Errorf("unsupported export format: %s (libvirt supports qcow2, raw)", targetFormat)
+		return contracts.ExportDiskResponse{}, contracts.NewInvalidSpecError(
+			fmt.Sprintf("unsupported export format: %s (libvirt supports qcow2, raw)", targetFormat), nil)
 	}
 
 	exportId := fmt.Sprintf("export-%s-%d", req.VM.ID, time.Now().Unix())
@@ -2896,7 +2897,7 @@ func (p *Provider) ExportDisk(ctx context.Context, req contracts.ExportDiskReque
 	// Extract PVC name from URL to construct the correct mount path
 	pvcName, err := extractPVCNameFromURL(req.DestinationURL)
 	if err != nil {
-		return contracts.ExportDiskResponse{}, fmt.Errorf("failed to extract PVC name from URL: %w", err)
+		return contracts.ExportDiskResponse{}, contracts.NewInvalidSpecError("failed to extract PVC name from URL", err)
 	}
 
 	// Mount path matches where the controller mounts PVCs: /mnt/migration-storage/<pvc-name>

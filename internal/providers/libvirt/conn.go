@@ -388,7 +388,8 @@ func (v *VirshProvider) copyDiskToRemote(ctx context.Context, localPath, volumeN
 		return "", fmt.Errorf("disk copy to remote host failed: %w", err)
 	}
 	if err := wd.publish(ctx, name, remotePath); err != nil {
-		return "", fmt.Errorf("disk copy to remote host: %w", err)
+		// The rename is the copy's publishing step (singleHostImportFailure).
+		return "", atStage(stagePublish, fmt.Errorf("disk copy to remote host: %w", err))
 	}
 
 	log.Printf("INFO Successfully copied disk file to remote host: %s", remotePath)
