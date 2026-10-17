@@ -287,6 +287,13 @@ func (r *VMSnapshotReconciler) createSnapshot(ctx context.Context, snapshot *inf
 
 	logger.Info("Creating VM snapshot")
 
+	// A SnapshotCreate requested before a restart whose outcome was never
+	// recorded is sent again only through a provider that adopts the earlier
+	// call's snapshot (routed), else held (vmsnapshot_request_marker.go).
+	if held, res, err := r.resolveSnapshotRequest(ctx, snapshot, vm); held {
+		return res, err
+	}
+
 	// Every failure before the SnapshotCreate RPC below (provider lookup,
 	// binding, provider client) leaves the snapshot in the initial phase, so
 	// the create is retried unchanged; the capability gate fails it. The
@@ -349,6 +356,12 @@ func (r *VMSnapshotReconciler) createSnapshot(ctx context.Context, snapshot *inf
 	// recordSnapshotBinding).
 	recordSnapshotBinding(snapshot, vm, provider)
 
+	// Record durably (with the binding) that the create is requested; nothing
+	// is sent if that write fails (vmsnapshot_request_marker.go).
+	if res, sent := r.markSnapshotRequested(ctx, snapshot); !sent {
+		return res, nil
+	}
+
 	// The create is issued now: only from here on is the snapshot Creating.
 	// The phase is persisted below together with the RPC's outcome (a task to
 	// poll, Ready, or Failed), never on its own.
@@ -382,6 +395,8 @@ func (r *VMSnapshotReconciler) createSnapshot(ctx context.Context, snapshot *inf
 	}
 	if err != nil {
 		logger.Error(err, "Failed to create snapshot")
+		// The provider answered: its failure is the outcome.
+		clearSnapshotRequest(snapshot)
 		detail := rpcFailureDetail(err)
 		snapshot.Status.Phase = infrav1beta1.SnapshotPhaseFailed
 		snapshot.Status.Message = "Failed to create snapshot: " + detail
@@ -397,7 +412,9 @@ func (r *VMSnapshotReconciler) createSnapshot(ctx context.Context, snapshot *inf
 		return ctrl.Result{RequeueAfter: snapshotFailedRecheckInterval}, nil
 	}
 
-	// Update status with snapshot information
+	// Update status with snapshot information; the outcome replaces the
+	// requested-create marker.
+	clearSnapshotRequest(snapshot)
 	snapshot.Status.SnapshotID = resp.SnapshotId
 	snapshot.Status.CreationTime = &metav1.Time{Time: time.Now()}
 
