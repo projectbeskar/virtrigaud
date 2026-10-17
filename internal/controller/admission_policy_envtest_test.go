@@ -61,9 +61,12 @@ var _ = Describe("Reserved virtrigaud.io keys admission policy (envtest)", func(
 		policy, binding := loadReservedKeysPolicy(GinkgoT())
 		policy.Name = "reserved-keys-" + ns
 		Expect(policy.Spec.MatchConditions).To(HaveLen(1))
-		Expect(policy.Spec.MatchConditions[0].Expression).To(ContainSubstring(kustomizeManager))
+		Expect(strings.ReplaceAll(policy.Spec.MatchConditions[0].Expression, "' + '", "")).
+			To(ContainSubstring(kustomizeManager))
 		policy.Spec.MatchConditions[0].Expression = strings.ReplaceAll(policy.Spec.MatchConditions[0].Expression,
-			kustomizeManager, managerUser)
+			"'system:serviceaccount:' + 'virtrigaud-system' + ':' + 'virtrigaud-controller-manager'",
+			"'system:serviceaccount:' + '"+ns+"' + ':' + 'manager'")
+		Expect(policy.Spec.MatchConditions[0].Expression).To(ContainSubstring("'" + ns + "'"))
 		policy.Spec.MatchConditions = append(policy.Spec.MatchConditions, admissionregistrationv1.MatchCondition{
 			Name: "not-an-exempt-group",
 			Expression: "!(has(request.userInfo.groups) && request.userInfo.groups.exists(g, g in [\"" +

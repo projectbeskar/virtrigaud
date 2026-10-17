@@ -59,6 +59,43 @@ patches:
 
 # [CERTMANAGER] To enable cert-manager, uncomment all sections with 'CERTMANAGER' prefix.
 # Uncomment the following replacements to add the cert-manager CA injection annotations
+# The reserved-keys admission policy exempts the manager's ServiceAccount by
+# username: fill its namespace and (prefixed) name from that ServiceAccount.
+# Replacements run after this kustomization's namespace and namePrefix, so
+# editing those here is safe. An overlay on top of config/default that
+# changes them must repeat this block (a component or a base runs before the
+# overlay's transformers), or the policy keeps exempting the old name and
+# denies the manager.
+replacements:
+- source:
+    kind: ServiceAccount
+    name: controller-manager
+    fieldPath: metadata.namespace
+  targets:
+  - select:
+      group: admissionregistration.k8s.io
+      kind: ValidatingAdmissionPolicy
+      name: reserved-keys
+    fieldPaths:
+    - spec.matchConditions.[name=not-the-virtrigaud-manager].expression
+    options:
+      delimiter: "'"
+      index: 3
+- source:
+    kind: ServiceAccount
+    name: controller-manager
+    fieldPath: metadata.name
+  targets:
+  - select:
+      group: admissionregistration.k8s.io
+      kind: ValidatingAdmissionPolicy
+      name: reserved-keys
+    fieldPaths:
+    - spec.matchConditions.[name=not-the-virtrigaud-manager].expression
+    options:
+      delimiter: "'"
+      index: 7
+
 #replacements:
 # - source: # Uncomment the following block to enable certificates for metrics
 #     kind: Service

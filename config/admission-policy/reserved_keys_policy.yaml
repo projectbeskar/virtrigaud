@@ -12,8 +12,12 @@
 #
 # The Helm chart renders the same policy (charts/virtrigaud/templates/
 # admission-policy.yaml); hack/verify-admission-policy-render.sh keeps the two
-# in step. The manager identity below is this kustomization's ServiceAccount
-# (namespace virtrigaud-system, name prefix virtrigaud-); change it with them.
+# in step. The manager identity in the match condition is written as
+# 'system:serviceaccount:' + '<namespace>' + ':' + '<name>' so that
+# config/default can fill <namespace> and <name> from the manager's
+# ServiceAccount after its namespace and namePrefix are applied (kustomize
+# replacements, delimiter ', indexes 3 and 7). An overlay that changes either
+# keeps the policy exempting the manager; the values below are the defaults.
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
 metadata:
@@ -32,7 +36,7 @@ spec:
   matchConditions:
     - name: not-the-virtrigaud-manager
       expression: >-
-        !(request.userInfo.username in ['system:serviceaccount:virtrigaud-system:virtrigaud-controller-manager'])
+        !(request.userInfo.username in ['system:serviceaccount:' + 'virtrigaud-system' + ':' + 'virtrigaud-controller-manager'])
   variables:
     - name: reservedAnnotations
       expression: >-

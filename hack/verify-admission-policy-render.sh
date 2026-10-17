@@ -89,10 +89,28 @@ if len(kconds) != 1 or kconds[0]["name"] != "not-the-virtrigaud-manager":
 kdef = yaml.safe_load(open(os.path.join(root, "config/default/kustomization.yaml")))
 sa = yaml.safe_load(open(os.path.join(root, "config/rbac/service_account.yaml")))
 kuser = f"system:serviceaccount:{kdef['namespace']}:{kdef.get('namePrefix', '')}{sa['metadata']['name']}"
-if re.findall(r"'([^']+)'", kconds[0]["expression"]) != [kuser]:
-    sys.exit(f"❌ the kustomize copy must exempt {kuser}")
+pieces = kconds[0]["expression"].split("'")
+if "".join(re.findall(r"'([^']*)'", kconds[0]["expression"])) != kuser or len(pieces) != 9:
+    sys.exit(f"❌ the kustomize copy must exempt {kuser}, written as 'system:serviceaccount:' + '<ns>' + ':' + '<name>'")
 if "../admission-policy" not in kdef.get("resources", []):
     sys.exit("❌ config/default does not include ../admission-policy")
+# config/default fills <ns> (index 3) and <name> (index 7) from the manager's
+# ServiceAccount after its namespace and namePrefix are applied.
+want = {("metadata.namespace", 3), ("metadata.name", 7)}
+got = set()
+for rep in kdef.get("replacements") or []:
+    src = rep.get("source", {})
+    if src.get("kind") != "ServiceAccount" or src.get("name") != sa["metadata"]["name"]:
+        continue
+    for tgt in rep.get("targets", []):
+        sel = tgt.get("select", {})
+        opts = tgt.get("options", {})
+        if (sel.get("kind") == "ValidatingAdmissionPolicy" and sel.get("name") == kp["metadata"]["name"]
+                and opts.get("delimiter") == "'"
+                and "spec.matchConditions.[name=not-the-virtrigaud-manager].expression" in tgt.get("fieldPaths", [])):
+            got.add((src.get("fieldPath"), opts.get("index")))
+if got != want:
+    sys.exit(f"❌ config/default must fill the policy's manager identity from the ServiceAccount (replacements {sorted(want)}), got {sorted(got)}")
 print(f"   ok: policy {p['metadata']['name']}, exempt users {got_users}, groups {groups or []}, CEL in sync with config/")
 PY
 }
@@ -135,6 +153,34 @@ for bad in "exemptUsernames[0]=o'brien" "exemptGroups[0]=a\"b" "exemptUsernames[
   fi
 done
 echo "   ok: malformed exemptions are refused at render"
+
+echo "==> 5b. kustomize: the manager identity follows config/default's namespace and namePrefix"
+KUSTOMIZE_BIN="${KUSTOMIZE:-$(command -v kustomize || true)}"
+if [[ -z "${KUSTOMIZE_BIN}" && -x "${REPO_ROOT}/bin/kustomize" ]]; then
+  KUSTOMIZE_BIN="${REPO_ROOT}/bin/kustomize"
+fi
+if [[ -z "${KUSTOMIZE_BIN}" ]]; then
+  echo "   skipped: kustomize not found (set KUSTOMIZE or run make kustomize)"
+else
+  mkdir -p "${REPO_ROOT}/config/.verify-admission-policy"
+  trap 'rm -rf "${WORKDIR}" "${REPO_ROOT}/config/.verify-admission-policy"' EXIT
+  cp "${REPO_ROOT}"/config/default/*.yaml "${REPO_ROOT}/config/.verify-admission-policy/"
+  sed -i 's/^namespace: .*/namespace: verify-ns/; s/^namePrefix: .*/namePrefix: verify-/' \
+    "${REPO_ROOT}/config/.verify-admission-policy/kustomization.yaml"
+  "${KUSTOMIZE_BIN}" build "${REPO_ROOT}/config/.verify-admission-policy" > "${WORKDIR}/kustomize.yaml"
+  python3 - "${WORKDIR}/kustomize.yaml" <<'PY'
+import re, sys, yaml
+docs = [d for d in yaml.safe_load_all(open(sys.argv[1])) if d]
+p = [d for d in docs if d.get("kind") == "ValidatingAdmissionPolicy"][0]
+sa = [d for d in docs if d.get("kind") == "ServiceAccount" and d["metadata"]["name"].endswith("controller-manager")][0]
+want = f"system:serviceaccount:{sa['metadata']['namespace']}:{sa['metadata']['name']}"
+expr = [c for c in p["spec"]["matchConditions"] if c["name"] == "not-the-virtrigaud-manager"][0]["expression"]
+got = "".join(re.findall(r"'([^']*)'", expr))
+if got != want or "verify-ns" not in want:
+    sys.exit(f"❌ kustomize build exempts {got!r}, want {want!r}")
+print(f"   ok: kustomize exempts {got}")
+PY
+fi
 
 echo "==> 6. --reuse-values from ${LEGACY_REF} still renders, with the policy on"
 if ! git -C "${REPO_ROOT}" cat-file -e "${LEGACY_REF}:charts/virtrigaud/values.yaml" 2>/dev/null; then
