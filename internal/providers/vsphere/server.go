@@ -61,9 +61,12 @@ const (
 type Provider struct {
 	providerv1.UnimplementedProviderServer
 	client *govmomi.Client
-	finder *find.Finder
-	logger *slog.Logger
-	config *Config
+	// dcCache remembers the default datacenter so the per-RPC finders (dcFinder)
+	// do not look it up on every call. There is deliberately no shared
+	// *find.Finder: a Finder is not safe for concurrent use.
+	dcCache datacenterCache
+	logger  *slog.Logger
+	config  *Config
 	// maxImageDownloadBytes is the largest image ImagePrepare downloads
 	// (VIRTRIGAUD_VSPHERE_IMAGE_MAX_DOWNLOAD_GIB; 0 = the default).
 	maxImageDownloadBytes int64
@@ -139,7 +142,7 @@ func New() *Provider {
 	}
 
 	// Create vSphere client
-	client, finder, err := createVSphereClient(config)
+	client, err := createVSphereClient(config)
 	if err != nil {
 		// Log error but continue - validation will catch connection issues
 		slog.Error("Failed to create vSphere client", "error", err)
@@ -148,7 +151,6 @@ func New() *Provider {
 	return &Provider{
 		config:                config,
 		client:                client,
-		finder:                finder,
 		logger:                slog.Default(),
 		maxImageDownloadBytes: maxImageDownloadBytesFromEnv(os.Getenv, slog.Default()),
 		imageProxy:            imageProxyFromEnv(os.Getenv, slog.Default()),
@@ -184,8 +186,8 @@ func loadCredentialsFromFiles(config *Config) error {
 const vSphereKeepAliveInterval = 5 * time.Minute
 
 // createVSphereClient establishes an authenticated govmomi session against the vCenter
-// SOAP API described by config and returns a connected govmomi.Client together with a
-// Finder configured to search the default datacenter.
+// SOAP API described by config and returns a connected govmomi.Client. Callers build a
+// finder of their own per call (Provider.dcFinder); a Finder is not safe to share.
 //
 // Credentials are passed via url.UserPassword so that special characters in passwords
 // are handled correctly and are never embedded in the URL string. TLS verification is
@@ -194,19 +196,19 @@ const vSphereKeepAliveInterval = 5 * time.Minute
 //
 // An error is returned if the endpoint URL is missing, credentials are empty, the TCP
 // connection cannot be established, or the Login call is rejected by vCenter.
-func createVSphereClient(config *Config) (*govmomi.Client, *find.Finder, error) {
+func createVSphereClient(config *Config) (*govmomi.Client, error) {
 	if config.Endpoint == "" {
-		return nil, nil, fmt.Errorf("PROVIDER_ENDPOINT environment variable is required")
+		return nil, fmt.Errorf("PROVIDER_ENDPOINT environment variable is required")
 	}
 
 	if config.Username == "" || config.Password == "" {
-		return nil, nil, fmt.Errorf("username and password are required in mounted credentials secret")
+		return nil, fmt.Errorf("username and password are required in mounted credentials secret")
 	}
 
 	// Parse the endpoint URL (without embedding credentials to avoid special character issues)
 	u, err := url.Parse(config.Endpoint)
 	if err != nil {
-		return nil, nil, fmt.Errorf("invalid vSphere endpoint URL: %w", err)
+		return nil, fmt.Errorf("invalid vSphere endpoint URL: %w", err)
 	}
 
 	// Create SOAP client without credentials in URL
@@ -222,7 +224,7 @@ func createVSphereClient(config *Config) (*govmomi.Client, *find.Finder, error) 
 	// Create vSphere client
 	vimClient, err := vim25.NewClient(context.Background(), soapClient)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to create vSphere VIM client: %w", err)
+		return nil, fmt.Errorf("failed to create vSphere VIM client: %w", err)
 	}
 
 	client := &govmomi.Client{
@@ -255,13 +257,12 @@ func createVSphereClient(config *Config) (*govmomi.Client, *find.Finder, error) 
 	// Login to vSphere with explicit credentials (proper govmomi authentication
 	// method). This also starts the keepalive ticker configured above.
 	if err := client.Login(context.Background(), userInfo); err != nil {
-		return nil, nil, fmt.Errorf("failed to login to vSphere: %w", err)
+		return nil, fmt.Errorf("failed to login to vSphere: %w", err)
 	}
 
-	// Create finder for inventory navigation
-	finder := find.NewFinder(client.Client, true)
-
-	return client, finder, nil
+	// Inventory navigation uses a finder per call (Provider.dcFinder); none is
+	// created here.
+	return client, nil
 }
 
 // resolveDatastoreFromStoragePod picks the datastore with the most free space from the
@@ -276,7 +277,7 @@ func createVSphereClient(config *Config) (*govmomi.Client, *find.Finder, error) 
 //
 // Returns an error if the StoragePod is not found, contains no accessible datastores, or
 // if any vSphere API call fails.
-func (p *Provider) resolveDatastoreFromStoragePod(ctx context.Context, storagePodName string) (*object.Datastore, error) {
+func (p *Provider) resolveDatastoreFromStoragePod(ctx context.Context, finder *find.Finder, storagePodName string) (*object.Datastore, error) {
 	viewMgr := view.NewManager(p.client.Client)
 	v, err := viewMgr.CreateContainerView(ctx, p.client.ServiceContent.RootFolder, []string{"StoragePod"}, true)
 	if err != nil {
@@ -320,7 +321,7 @@ func (p *Provider) resolveDatastoreFromStoragePod(ctx context.Context, storagePo
 	)
 
 	// Use finder to get the datastore by name so that properties like Name() are populated
-	return p.finder.Datastore(ctx, best.Name)
+	return finder.Datastore(ctx, best.Name)
 }
 
 // selectBestDatastoreByFreeSpace performs a linear scan over datastores and returns the
@@ -356,7 +357,7 @@ func (p *Provider) cloneDiskToStreamOptimized(ctx context.Context, sourcePath, d
 	}
 
 	// Get datacenter
-	datacenter, err := p.finder.DefaultDatacenter(ctx)
+	_, datacenter, err := p.dcFinder(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to get datacenter: %w", err)
 	}
@@ -483,7 +484,7 @@ func (p *Provider) Validate(ctx context.Context, req *providerv1.ValidateRequest
 	// calls Validate before operations, this real probe is the safety net that
 	// complements the keepalive handler in createVSphereClient.
 	if _, err := methods.GetCurrentTime(ctx, p.client.Client); err != nil {
-		client, finder, rerr := createVSphereClient(p.config)
+		client, rerr := createVSphereClient(p.config)
 		if rerr != nil {
 			return &providerv1.ValidateResponse{
 				Ok:      false,
@@ -491,7 +492,6 @@ func (p *Provider) Validate(ctx context.Context, req *providerv1.ValidateRequest
 			}, nil
 		}
 		p.client = client
-		p.finder = finder
 	}
 
 	return &providerv1.ValidateResponse{
@@ -648,13 +648,12 @@ func (p *Provider) Create(ctx context.Context, req *providerv1.CreateRequest) (*
 	// Resolve the datacenter and the exact folder the VM will be created in. The
 	// existing-VM check below is scoped to that folder, so both must be resolved
 	// once and shared with createVirtualMachine.
-	datacenter, err := p.finder.DefaultDatacenter(ctx)
+	finder, datacenter, err := p.dcFinder(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to find default datacenter: %w", err)
 	}
-	p.finder.SetDatacenter(datacenter)
 
-	folder, err := p.resolveVMFolder(ctx, vmSpec.Folder)
+	folder, err := p.resolveVMFolder(ctx, finder, vmSpec.Folder)
 	if err != nil {
 		return nil, fmt.Errorf("failed to resolve target folder: %w", err)
 	}
@@ -714,7 +713,7 @@ func (p *Provider) Create(ctx context.Context, req *providerv1.CreateRequest) (*
 	}
 
 	// Create the VM using govmomi
-	vmID, err := p.createVirtualMachine(ctx, vmSpec, datacenter, folder)
+	vmID, err := p.createVirtualMachine(ctx, finder, vmSpec, datacenter, folder)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create virtual machine: %w", err)
 	}
@@ -750,12 +749,14 @@ func (p *Provider) Delete(ctx context.Context, req *providerv1.DeleteRequest) (*
 
 	p.logger.Info("Deleting virtual machine", "vm_id", req.Id)
 
-	// Set datacenter context for finder
-	datacenter, err := p.finder.DefaultDatacenter(ctx)
+	// The VM is addressed by managed object ID, so the datacenter itself is not
+	// used. The lookup is kept so an unresolvable default datacenter still fails
+	// the RPC as before; it only does so when the cached datacenter is missing or
+	// expired (dcFinder), so it is not a check on every call.
+	_, _, err := p.dcFinder(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to find default datacenter: %w", err)
 	}
-	p.finder.SetDatacenter(datacenter)
 
 	// Create VM reference from ID
 	vmRef := types.ManagedObjectReference{
@@ -853,12 +854,14 @@ func (p *Provider) Power(ctx context.Context, req *providerv1.PowerRequest) (*pr
 
 	p.logger.Info("Performing power operation", "vm_id", req.Id, "operation", req.Op.String())
 
-	// Set datacenter context for finder
-	datacenter, err := p.finder.DefaultDatacenter(ctx)
+	// The VM is addressed by managed object ID, so the datacenter itself is not
+	// used. The lookup is kept so an unresolvable default datacenter still fails
+	// the RPC as before; it only does so when the cached datacenter is missing or
+	// expired (dcFinder), so it is not a check on every call.
+	_, _, err := p.dcFinder(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to find default datacenter: %w", err)
 	}
-	p.finder.SetDatacenter(datacenter)
 
 	// Create VM reference from ID
 	vmRef := types.ManagedObjectReference{
@@ -1103,12 +1106,14 @@ func (p *Provider) Reconfigure(ctx context.Context, req *providerv1.ReconfigureR
 
 	p.logger.Info("Reconfiguring virtual machine", "vm_id", req.Id)
 
-	// Set datacenter context for finder
-	datacenter, err := p.finder.DefaultDatacenter(ctx)
+	// The VM is addressed by managed object ID, so the datacenter itself is not
+	// used. The lookup is kept so an unresolvable default datacenter still fails
+	// the RPC as before; it only does so when the cached datacenter is missing or
+	// expired (dcFinder), so it is not a check on every call.
+	_, _, err := p.dcFinder(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to find default datacenter: %w", err)
 	}
-	p.finder.SetDatacenter(datacenter)
 
 	// Create VM reference from ID
 	vmRef := types.ManagedObjectReference{
@@ -1255,12 +1260,14 @@ func (p *Provider) HardwareUpgrade(ctx context.Context, req *providerv1.Hardware
 
 	p.logger.Info("Upgrading VM hardware version", "vm_id", req.Id, "target_version", req.TargetVersion)
 
-	// Set datacenter context for finder
-	datacenter, err := p.finder.DefaultDatacenter(ctx)
+	// The VM is addressed by managed object ID, so the datacenter itself is not
+	// used. The lookup is kept so an unresolvable default datacenter still fails
+	// the RPC as before; it only does so when the cached datacenter is missing or
+	// expired (dcFinder), so it is not a check on every call.
+	_, _, err := p.dcFinder(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to find default datacenter: %w", err)
 	}
-	p.finder.SetDatacenter(datacenter)
 
 	// Create VM reference from ID
 	vmRef := types.ManagedObjectReference{
@@ -1374,12 +1381,14 @@ func (p *Provider) Describe(ctx context.Context, req *providerv1.DescribeRequest
 
 	p.logger.Info("Describing virtual machine", "vm_id", req.Id)
 
-	// Set datacenter context for finder
-	datacenter, err := p.finder.DefaultDatacenter(ctx)
+	// The VM is addressed by managed object ID, so the datacenter itself is not
+	// used. The lookup is kept so an unresolvable default datacenter still fails
+	// the RPC as before; it only does so when the cached datacenter is missing or
+	// expired (dcFinder), so it is not a check on every call.
+	_, _, err := p.dcFinder(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to find default datacenter: %w", err)
 	}
-	p.finder.SetDatacenter(datacenter)
 
 	// Try to find the VM by managed object ID
 	vmRef := types.ManagedObjectReference{
@@ -1801,12 +1810,14 @@ func (p *Provider) SnapshotCreate(ctx context.Context, req *providerv1.SnapshotC
 		"name_hint", req.NameHint,
 		"include_memory", req.IncludeMemory)
 
-	// Set datacenter context for finder
-	datacenter, err := p.finder.DefaultDatacenter(ctx)
+	// The VM is addressed by managed object ID, so the datacenter itself is not
+	// used. The lookup is kept so an unresolvable default datacenter still fails
+	// the RPC as before; it only does so when the cached datacenter is missing or
+	// expired (dcFinder), so it is not a check on every call.
+	_, _, err := p.dcFinder(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to find default datacenter: %w", err)
 	}
-	p.finder.SetDatacenter(datacenter)
 
 	// Create VM reference from ID
 	vmRef := types.ManagedObjectReference{
@@ -1888,12 +1899,14 @@ func (p *Provider) SnapshotDelete(ctx context.Context, req *providerv1.SnapshotD
 
 	p.logger.Info("Deleting VM snapshot", "vm_id", req.VmId, "snapshot_id", req.SnapshotId)
 
-	// Set datacenter context for finder
-	datacenter, err := p.finder.DefaultDatacenter(ctx)
+	// The VM is addressed by managed object ID, so the datacenter itself is not
+	// used. The lookup is kept so an unresolvable default datacenter still fails
+	// the RPC as before; it only does so when the cached datacenter is missing or
+	// expired (dcFinder), so it is not a check on every call.
+	_, _, err := p.dcFinder(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to find default datacenter: %w", err)
 	}
-	p.finder.SetDatacenter(datacenter)
 
 	// Create VM reference from ID
 	vmRef := types.ManagedObjectReference{
@@ -1978,12 +1991,14 @@ func (p *Provider) SnapshotRevert(ctx context.Context, req *providerv1.SnapshotR
 
 	p.logger.Info("Reverting to VM snapshot", "vm_id", req.VmId, "snapshot_id", req.SnapshotId)
 
-	// Set datacenter context for finder
-	datacenter, err := p.finder.DefaultDatacenter(ctx)
+	// The VM is addressed by managed object ID, so the datacenter itself is not
+	// used. The lookup is kept so an unresolvable default datacenter still fails
+	// the RPC as before; it only does so when the cached datacenter is missing or
+	// expired (dcFinder), so it is not a check on every call.
+	_, _, err := p.dcFinder(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to find default datacenter: %w", err)
 	}
-	p.finder.SetDatacenter(datacenter)
 
 	// Create VM reference from ID
 	vmRef := types.ManagedObjectReference{
@@ -2107,12 +2122,11 @@ func (p *Provider) Clone(ctx context.Context, req *providerv1.CloneRequest) (*pr
 
 	p.logger.Info("Cloning virtual machine", "source_vm_id", req.SourceVmId, "target_name", req.TargetName, "linked", req.Linked)
 
-	// Set datacenter context for finder
-	datacenter, err := p.finder.DefaultDatacenter(ctx)
+	// A finder of this call's own, scoped to the default datacenter (cached).
+	finder, _, err := p.dcFinder(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to find default datacenter: %w", err)
 	}
-	p.finder.SetDatacenter(datacenter)
 
 	// Create source VM reference from ID
 	sourceVMRef := types.ManagedObjectReference{
@@ -2124,7 +2138,8 @@ func (p *Provider) Clone(ctx context.Context, req *providerv1.CloneRequest) (*pr
 
 	// Determine which cluster to use (provider default)
 	clusterName := p.config.DefaultCluster
-	cluster, err := p.finder.ClusterComputeResource(ctx, clusterName)
+	cluster, err := finder.ClusterComputeResource(ctx, clusterName)
+	p.noteInventoryError(err)
 	if err != nil {
 		return nil, fmt.Errorf("failed to find cluster '%s': %w", clusterName, err)
 	}
@@ -2136,13 +2151,14 @@ func (p *Provider) Clone(ctx context.Context, req *providerv1.CloneRequest) (*pr
 
 	// Determine which datastore to use (provider default)
 	datastoreName := p.config.DefaultDatastore
-	datastore, err := p.finder.Datastore(ctx, datastoreName)
+	datastore, err := finder.Datastore(ctx, datastoreName)
+	p.noteInventoryError(err)
 	if err != nil {
 		return nil, fmt.Errorf("failed to find datastore '%s': %w", datastoreName, err)
 	}
 
 	// Determine which folder to use (provider default)
-	folder, err := p.resolveVMFolder(ctx, "")
+	folder, err := p.resolveVMFolder(ctx, finder, "")
 	if err != nil {
 		return nil, fmt.Errorf("failed to resolve target folder: %w", err)
 	}
@@ -2622,7 +2638,7 @@ func (p *Provider) parseCreateRequest(req *providerv1.CreateRequest) (*VMSpec, e
 // powered on: the VirtualMachine controller applies spec.powerState afterwards
 // through the Power RPC, as it does for libvirt and Proxmox. datacenter must be
 // the datacenter the finder is scoped to.
-func (p *Provider) createVirtualMachine(ctx context.Context, spec *VMSpec, datacenter *object.Datacenter, folder *object.Folder) (string, error) {
+func (p *Provider) createVirtualMachine(ctx context.Context, finder *find.Finder, spec *VMSpec, datacenter *object.Datacenter, folder *object.Folder) (string, error) {
 	p.logger.Info("Creating virtual machine",
 		"name", spec.Name,
 		"cpu", spec.CPU,
@@ -2645,7 +2661,7 @@ func (p *Provider) createVirtualMachine(ctx context.Context, spec *VMSpec, datac
 		// vSphere template (template_source.go): a regular VM — another
 		// tenant's included — is never cloned.
 		var found bool
-		template, found, err = p.lookupTemplate(ctx, spec.TemplateName)
+		template, found, err = p.lookupTemplate(ctx, finder, spec.TemplateName)
 		if err != nil {
 			return "", fmt.Errorf("failed to resolve template %q: %w", spec.TemplateName, err)
 		}
@@ -2665,7 +2681,8 @@ func (p *Provider) createVirtualMachine(ctx context.Context, spec *VMSpec, datac
 	}
 
 	// Find the cluster and resource pool
-	cluster, err := p.finder.ClusterComputeResource(ctx, clusterName)
+	cluster, err := finder.ClusterComputeResource(ctx, clusterName)
+	p.noteInventoryError(err)
 	if err != nil {
 		return "", fmt.Errorf("failed to find cluster '%s': %w", clusterName, err)
 	}
@@ -2686,7 +2703,8 @@ func (p *Provider) createVirtualMachine(ctx context.Context, spec *VMSpec, datac
 
 	if spec.Datastore != "" {
 		p.logger.Info("Using placement override for datastore", "datastore", spec.Datastore)
-		datastore, err = p.finder.Datastore(ctx, spec.Datastore)
+		datastore, err = finder.Datastore(ctx, spec.Datastore)
+		p.noteInventoryError(err)
 		if err != nil {
 			return "", fmt.Errorf("failed to find datastore '%s': %w", spec.Datastore, err)
 		}
@@ -2698,7 +2716,7 @@ func (p *Provider) createVirtualMachine(ctx context.Context, spec *VMSpec, datac
 		}
 		if storagePodName != "" {
 			p.logger.Info("Resolving datastore from StoragePod", "storagePod", storagePodName)
-			datastore, err = p.resolveDatastoreFromStoragePod(ctx, storagePodName)
+			datastore, err = p.resolveDatastoreFromStoragePod(ctx, finder, storagePodName)
 			if err != nil {
 				return "", fmt.Errorf("failed to resolve datastore from StoragePod '%s': %w", storagePodName, err)
 			}
@@ -2710,7 +2728,8 @@ func (p *Provider) createVirtualMachine(ctx context.Context, spec *VMSpec, datac
 			p.logger.Info("No StoragePod specified, using default datastore",
 				"datastore", p.config.DefaultDatastore,
 				"vm_name", spec.Name)
-			datastore, err = p.finder.Datastore(ctx, p.config.DefaultDatastore)
+			datastore, err = finder.Datastore(ctx, p.config.DefaultDatastore)
+			p.noteInventoryError(err)
 			if err != nil {
 				return "", fmt.Errorf("failed to find datastore '%s': %w", p.config.DefaultDatastore, err)
 			}
@@ -2720,7 +2739,8 @@ func (p *Provider) createVirtualMachine(ctx context.Context, spec *VMSpec, datac
 	// Find the network/portgroup
 	var network object.NetworkReference
 	if spec.NetworkName != "" {
-		net, err := p.finder.Network(ctx, spec.NetworkName)
+		net, err := finder.Network(ctx, spec.NetworkName)
+		p.noteInventoryError(err)
 		if err != nil {
 			return "", fmt.Errorf("failed to find network '%s': %w", spec.NetworkName, err)
 		}
@@ -4409,15 +4429,15 @@ func (p *Provider) ListVMs(ctx context.Context, req *providerv1.ListVMsRequest) 
 
 	p.logger.Info("Listing all virtual machines")
 
-	// Set datacenter context for finder
-	datacenter, err := p.finder.DefaultDatacenter(ctx)
+	// A finder of this call's own, scoped to the default datacenter (cached).
+	finder, _, err := p.dcFinder(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to find default datacenter: %w", err)
 	}
-	p.finder.SetDatacenter(datacenter)
 
 	// Find all VMs in the datacenter
-	vms, err := p.finder.VirtualMachineList(ctx, "*")
+	vms, err := finder.VirtualMachineList(ctx, "*")
+	p.noteInventoryError(err)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list virtual machines: %w", err)
 	}

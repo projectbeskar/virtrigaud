@@ -244,7 +244,7 @@ func TestCreate_InheritedDiskRecordsAreCleared(t *testing.T) {
 	ctx := context.Background()
 	tmplID := seededVMID(t, p, simTemplate)
 	tmpl := object.NewVirtualMachine(p.client.Client, vmRef(tmplID))
-	cluster, err := p.finder.ClusterComputeResource(ctx, simCluster)
+	cluster, err := testFinder(t, p).ClusterComputeResource(ctx, simCluster)
 	require.NoError(t, err)
 	pool, err := cluster.ResourcePool(ctx)
 	require.NoError(t, err)
@@ -280,8 +280,7 @@ func TestCreate_LeftoverAdditionalDiskFileConverges(t *testing.T) {
 	first, err := p.Create(ctx, templateCreateRequest("web", "", wireOwner(ownerTeamA)))
 	require.NoError(t, err)
 	leftover := "[" + simDatastore + "] web/" + additionalDiskFileName("web", 1)
-	dc, err := p.finder.DefaultDatacenter(ctx)
-	require.NoError(t, err)
+	dc := testDatacenter(t, p)
 	task, err := object.NewVirtualDiskManager(p.client.Client).CreateVirtualDisk(ctx, leftover, dc, &types.FileBackedVirtualDiskSpec{
 		VirtualDiskSpec: types.VirtualDiskSpec{DiskType: string(types.VirtualDiskTypeThin), AdapterType: string(types.VirtualDiskAdapterTypeLsiLogic)},
 		CapacityKb:      1024,

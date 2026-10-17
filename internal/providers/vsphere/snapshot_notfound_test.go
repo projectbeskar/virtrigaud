@@ -55,20 +55,17 @@ func newSnapshotSim(t *testing.T) (*Provider, string) {
 		Password:           pw,
 		InsecureSkipVerify: true,
 	}
-	client, finder, err := createVSphereClient(cfg)
+	client, err := createVSphereClient(cfg)
 	require.NoError(t, err)
 	t.Cleanup(func() {
 		_ = client.Logout(context.Background())
 		server.Close()
 		model.Remove()
 	})
-	p := &Provider{client: client, finder: finder, config: cfg, logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	p := &Provider{client: client, config: cfg, logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
 
 	ctx := context.Background()
-	dc, err := finder.DefaultDatacenter(ctx)
-	require.NoError(t, err)
-	finder.SetDatacenter(dc)
-	vms, err := finder.VirtualMachineList(ctx, "*")
+	vms, err := testFinder(t, p).VirtualMachineList(ctx, "*")
 	require.NoError(t, err)
 	require.NotEmpty(t, vms)
 	return p, vms[0].Reference().Value

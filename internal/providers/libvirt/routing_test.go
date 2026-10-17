@@ -214,7 +214,6 @@ func TestNewClusteredProvider_PlaceholderAlwaysFails(t *testing.T) {
 // and TaskStatus (slice 3) are routed to their host; everything else is an
 // honest Unimplemented until its slice lands.
 func TestClustered_EveryPerVMRPC_NeverReachesPlaceholder(t *testing.T) {
-	t.Cleanup(func() { _ = os.Remove("/tmp/" + routingDomainUUID + "-sync.xml") })
 	fx := newOpsFixture(t, map[string]map[string]string{
 		"host-a": {"web": routingDomainXML("web", ownerTeamA)},
 		"host-b": {},

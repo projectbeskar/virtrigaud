@@ -54,8 +54,7 @@ func runtimePowerState(t *testing.T, p *Provider, id string) types.VirtualMachin
 func makeImportedDisk(t *testing.T, p *Provider, dir, diskPath string) {
 	t.Helper()
 	ctx := context.Background()
-	dc, err := p.finder.DefaultDatacenter(ctx)
-	require.NoError(t, err)
+	dc := testDatacenter(t, p)
 	require.NoError(t, object.NewFileManager(p.client.Client).MakeDirectory(ctx, dir, dc, true))
 	task, err := object.NewVirtualDiskManager(p.client.Client).CreateVirtualDisk(ctx, diskPath, dc, &types.FileBackedVirtualDiskSpec{
 		VirtualDiskSpec: types.VirtualDiskSpec{DiskType: string(types.VirtualDiskTypeThin), AdapterType: string(types.VirtualDiskAdapterTypeLsiLogic)},

@@ -288,18 +288,11 @@ func newImageTestProvider(t *testing.T) (*Provider, func()) {
 	cfg.DefaultDatastore = "LocalDS_0"
 	cfg.DefaultFolder = ""
 
-	client, finder, err := createVSphereClient(cfg)
+	client, err := createVSphereClient(cfg)
 	require.NoError(t, err)
-
-	// Pin the finder to the default datacenter so direct finder calls in tests (and
-	// the idempotency gate) resolve; ImagePrepare also does this internally.
-	dc, err := finder.DefaultDatacenter(context.Background())
-	require.NoError(t, err)
-	finder.SetDatacenter(dc)
 
 	p := &Provider{
 		client: client,
-		finder: finder,
 		config: cfg,
 		logger: slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug})),
 		// The tests' image servers listen on 127.0.0.1.
@@ -339,7 +332,7 @@ func TestImagePrepare_OVAImport_AndIdempotency(t *testing.T) {
 	assert.Empty(t, resp.GetPreparedImagePath(), "vSphere addresses templates by name, not path")
 
 	// The imported object exists and is a template.
-	vm, err := p.finder.VirtualMachine(context.Background(), targetName)
+	vm, err := testFinder(t, p).VirtualMachine(context.Background(), targetName)
 	require.NoError(t, err, "expected a VM/template named %q after import", targetName)
 	require.NotNil(t, vm)
 	isTemplate, err := vm.IsTemplate(context.Background())
@@ -385,7 +378,7 @@ func TestImagePrepare_TemplateName_VerifyOnly_Exists(t *testing.T) {
 	// Confirm the simulator VM exists, mark it as a template, then ask
 	// ImagePrepare to verify it.
 	const existing = "DC0_H0_VM0"
-	vm, err := p.finder.VirtualMachine(context.Background(), existing)
+	vm, err := testFinder(t, p).VirtualMachine(context.Background(), existing)
 	require.NoError(t, err)
 	markAsTemplate(t, p, vm.Reference().Value)
 

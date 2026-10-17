@@ -60,10 +60,9 @@ func TestCreateVSphereClient_InstallsKeepAlive(t *testing.T) {
 	cfg, cleanup := newSimConfig(t)
 	defer cleanup()
 
-	client, finder, err := createVSphereClient(cfg)
+	client, err := createVSphereClient(cfg)
 	require.NoError(t, err)
 	require.NotNil(t, client)
-	require.NotNil(t, finder)
 	defer func() { _ = client.Logout(context.Background()) }()
 
 	_, ok := client.RoundTripper.(*keepalive.HandlerSOAP)
@@ -78,10 +77,10 @@ func TestValidate_ReconnectsAfterSessionLoss(t *testing.T) {
 	cfg, cleanup := newSimConfig(t)
 	defer cleanup()
 
-	client, finder, err := createVSphereClient(cfg)
+	client, err := createVSphereClient(cfg)
 	require.NoError(t, err)
 
-	p := &Provider{client: client, finder: finder, config: cfg, logger: slog.Default()}
+	p := &Provider{client: client, config: cfg, logger: slog.Default()}
 
 	// Healthy session → Ok.
 	resp, err := p.Validate(context.Background(), &providerv1.ValidateRequest{})

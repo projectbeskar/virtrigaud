@@ -584,7 +584,7 @@ func (u *inventoryFileUsers) anyInDirUsedBy(d datastoreFile, self types.ManagedO
 // diskUUID returns the UUID of the disk at datastore path name (vCenter reads
 // it from the disk), and whether the disk exists.
 func (p *Provider) diskUUID(ctx context.Context, name string) (string, bool, error) {
-	dc, err := p.finder.DefaultDatacenter(ctx)
+	_, dc, err := p.dcFinder(ctx)
 	if err != nil {
 		return "", false, fmt.Errorf("find datacenter: %w", err)
 	}
