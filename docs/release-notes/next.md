@@ -12,9 +12,12 @@ GA release, drop the rc sections and re-title.
 This is **v0.4.0-rc2, a release candidate** (GA follows after a soak). It is a
 security-hardening release: a full codebase security review found and fixed several
 cross-tenant and privilege-escalation issues in the vSphere and libvirt providers,
-cross-namespace clone/migration targets, and VM provider binding. rc2 adds a second
-round of fixes on top of rc1 (below), about proving that the VM a migration, adoption,
-clone or per-VM call acts on is the one VirtRigaud owns. **Several fixes are breaking
+cross-namespace clone/migration targets, and VM provider binding. rc2 adds two waves
+of fixes on top of rc1 (below): one about proving that the VM a migration, adoption,
+clone or per-VM call acts on is the one VirtRigaud owns, and one about failures
+half-way through an operation (a resize that hit the wrong disk, a provider call whose
+result was lost, a failed migration's leftover disk) and about provider pods' access to
+migration storage. **Several fixes are breaking
 or change default behavior.** Read the upgrade guide before upgrading:
 **[Upgrading from v0.3.11](docs/upgrading.md)**.
 
@@ -23,11 +26,14 @@ The notes below are cumulative since v0.3.11. If you are already on v0.4.0-rc1, 
 
 ## Changes since v0.4.0-rc1
 
-<!-- Wave 2 items (R5–R10, R14–R16) to be added as they merge -->
-
-Four changes, all about ownership. One is breaking (#394); the other three change
-behaviour you can observe. Apply them in the usual order: **CRDs, then the admission
-policy and any grants, then the manager, then the providers promptly after it** (see
+Thirteen pull requests in two waves. Wave 1 (#392–#395) is about ownership: proving that the
+VM a migration, adoption, clone or per-VM call acts on is the one VirtRigaud owns. Wave
+2 (#397–#405) is about what happens when something goes wrong half-way: a resize that
+hit the wrong disk, a provider call whose result was lost, a failed migration that left
+its disk behind, storage and files a tenant could redirect, and an empty `PHASE`
+column. Two changes are breaking (#394, #401); the rest change behaviour you can
+observe. Apply them in the usual order: **CRDs, then the admission policy and any
+grants, then the manager, then the providers promptly after it** (see
 [Upgrade order for rc2](#upgrade-order-for-rc2)).
 
 | PR | What changed | Breaking |
@@ -36,6 +42,16 @@ policy and any grants, then the manager, then the providers promptly after it** 
 | #393 (R3) | Every per-VM call on single-host Proxmox is owner-checked; the manager sends the owner on all single-host calls | Behaviour change |
 | #392 (R2) | Single-host adoption stamps the adopted VM with its new owner | Behaviour change |
 | #395 (R4) | Single-host `VMClone` targets are created first and stamped; a re-sent `Clone` re-binds | Behaviour change |
+| #401 (R5) | `Reconfigure` resizes the right disk (vSphere: named additional disks only; Proxmox: no longer touches `scsi0`); vSphere reports a change a running VM cannot take as `ResizePendingPowerOff` | **Yes** |
+| #402, #405 (R6, R21) | A `SnapshotCreate`, `ExportDisk` or `ImportDisk` whose outcome is unknown is held for an operator instead of re-sent blindly; single-host libvirt answers the failures it can prove as definite | Behaviour change |
+| #403 (R7) | A failed or deleted `VMMigration` deletes the disk its import landed; vSphere imports leave no import-VM files | Behaviour change |
+| #399 (R15) | Provider pods mount only the migration PVCs a live `VMMigration` references; the target mounts read-only; a user-named PVC is never deleted | Behaviour change |
+| #404 (R17) | Staged migration files on the `pvc` backend are opened with no symbolic link followed; hard links and special files are refused | Behaviour change |
+| #398 (R10, R16) | `VirtualMachine` `status.phase` is set on every status write; the libvirt keepalive drops a dead client | Behaviour change |
+| #400 (R8, R9) | vSphere uses one finder per call (race fix); libvirt passes host XML over stdin instead of fixed `/tmp` files | No |
+| #397 (R14) | ADR-0012 (Accepted): the Proxmox legacy name rule is retired in stages from v0.4.1; ACL guidance for v0.4.0 | Documentation only |
+
+The sections below cover Wave 1 first, then Wave 2 (starting at [Reconfigure resizes the right disk](#reconfigure-resizes-the-right-disk-and-vsphere-says-when-it-needs-a-power-off-401-breaking)).
 
 ### A VMMigration accepts only the target VM it created (#394, breaking)
 
@@ -220,6 +236,257 @@ first clone untracked. Now:
 → [Clones: re-bind](docs/vm-ownership.md#clones-re-bind),
 [Upgrade guide](docs/upgrading.md#breaking-changes)
 
+### Reconfigure resizes the right disk, and vSphere says when it needs a power-off (#401, breaking)
+
+Two problems in the same call. In rc1 and v0.3.11, vSphere `Reconfigure` grew the
+**first** disk (the root disk) to `spec.disks[0].sizeGiB`, and Proxmox sent every
+`spec.disks` size to `scsi0` (the root disk) and, after a disk grow, returned before it
+sent the CPU/memory change while reporting success. And on vSphere, a CPU or memory
+change of a running VM without hot-add was sent to vCenter, failed, and was retried
+forever as a plain `ProviderError` (rc1 lab finding V1).
+
+Now:
+
+- **Neither provider's `Reconfigure` touches the root disk.** The VMClass
+  `spec.diskDefaults.size` is not applied by `Reconfigure`, as before.
+- **vSphere** grows a `spec.disks` entry's own additional disk only: the disk recorded
+  with the entry's name when `Create` attached it. A smaller `spec.disks` size is
+  refused (`InvalidSpec`, nothing changed, the CPU/memory change in the same request
+  included). A delta disk (snapshots, linked clone), a physical-mode RDM and an
+  ambiguous name are left alone and logged.
+- **Proxmox** changes no disk from `spec.disks` (its `Create` attaches none), and always
+  sends the CPU/memory change. Nothing replaces the old root-disk grow in this release:
+  grow the disk in PVE.
+- **vSphere checks first whether vCenter can apply the change now.** For a VM that is not
+  powered off it reads the hot-add settings and the disk's controller; if the change
+  cannot be applied (no CPU or memory hot-add, fewer vCPUs without hot-remove, less
+  memory, memory above the hot-plug limit, a disk on a shared bus or with multi-writer
+  sharing, any change of a suspended VM) it refuses the whole request before changing
+  anything:
+
+```text
+VirtualMachine  Reconfiguring=False  reason: ResizePendingPowerOff
+```
+
+  The VM stays `Ready`, `status.currentResources` is unchanged, and the request is sent
+  again on the per-VM backoff and at once after a spec change. To apply it, set
+  `spec.powerState: Off`, then `On`. These refusals and the faults vCenter or PVE
+  returns for a task they refuse (`VM_OPERATION_FAILED`) no longer count toward the
+  Provider's circuit breaker.
+
+**Who is affected.** Anyone who grew a Proxmox root disk through a `spec.disks` entry
+(that stops working); any vSphere VM whose `spec.disks` size is below its disk's (its
+`Reconfigure`, CPU and memory included, now fails until you raise it back); alerting on
+`Reconfiguring` (new reason). The additional disks of vSphere VMs created by rc1 or
+earlier carry no recorded name and are never resized by `Reconfigure`, as before. The
+Proxmox behaviour was tested against the PVE test fake only.
+
+→ [Which disk a size goes to](docs/reconfigure-results.md#which-disk-a-size-goes-to),
+[vSphere: changes a running VM cannot take](docs/reconfigure-results.md#vsphere-changes-a-running-vm-cannot-take),
+[Upgrade guide](docs/upgrading.md#behavior-changes-that-are-visible-but-not-breaking)
+
+### A provider call whose outcome is unknown is held, not re-sent blindly (#402, #405)
+
+In rc1, a manager restart or leader change between a `SnapshotCreate`, `ExportDisk` or
+`ImportDisk` and the write of its result sent the call again. On vSphere and the mock
+that took a **second snapshot of the live source VM**; a call that timed out failed the
+attempt and the retry policy sent it again while a copy on the hypervisor host could
+still be writing. Now:
+
+- **A durable marker is written first.** A `VMMigration` records `SnapshotRequested`,
+  `ExportRequested` or `ImportRequested` before the call, a `VMSnapshot` records
+  `SnapshotRequested` with its binding, each with a `resourceVersion` precondition: if
+  the write fails, nothing is sent. The result, or a definite failure (nothing done, or
+  a refusal), removes it.
+- **A failure without a definite answer no longer fails the attempt.** A deadline, a
+  connection dropped after the request was written, or an unclassified provider error
+  keeps the marker. The object is held in its phase:
+
+```text
+Ready=False  reason: SnapshotOutcomeUnknown | ExportOutcomeUnknown | ImportOutcomeUnknown
+```
+
+  with a constant message and one Warning event naming the attempt.
+- **The call is re-sent only where that cannot duplicate anything.** A clustered
+  `SnapshotCreate` (adopted by request token once no job runs on the domain), and an
+  `ExportDisk` / `ImportDisk` on a staging backend the provider lists in the new
+  capabilities `resend_safe_export_backends` / `resend_safe_import_backends` (fields 27
+  and 28), 35 minutes after the marker, at most 3 times (10 for the routed snapshot).
+  Everything else is held, including every single-host `SnapshotCreate` and every call
+  through a provider image older than rc2.
+- **Releasing a held object is an operator action.** Check what the call may have
+  made (the snapshot named in the event, the target's `-migrated` disk), remove it, then
+  confirm the attempt:
+
+```sh
+ATTEMPT=$(kubectl get vmmigration <name> -n <ns> \
+  -o jsonpath='{.status.conditions[?(@.type=="ExportRequested")].lastTransitionTime}')
+kubectl annotate vmmigration <name> -n <ns> virtrigaud.io/operation-outcome=not-performed@$ATTEMPT
+```
+
+  Or delete the object. A deleting migration with an unknown export waits 35 minutes
+  before it deletes the staged object.
+- **Single-host libvirt answers the failures it can prove (#405).** It used to answer
+  almost every failure of these three calls as an untyped `Unknown`, which the new
+  rule would hold: a `qemu-img` error, a missing source domain, a taken snapshot name. It
+  now answers those as "not performed" or a typed refusal (so the attempt fails), and
+  keeps `Unknown` for what it cannot prove (a killed command, an upload that may have
+  completed, a failure after a disk landed). A libvirt image older than rc2 holds all of
+  them. A host that cannot be reached during these calls no longer counts toward the
+  circuit breaker.
+- **Proxmox:** an s3 stage is published only when exactly the object's size arrived (a
+  cancelled call used to publish a truncated stage).
+
+Alert on migrations or snapshots stuck in a phase, and on the three `...OutcomeUnknown`
+reasons.
+
+→ [Provider calls whose outcome was lost](docs/provider-call-outcomes.md),
+[Upgrade guide](docs/upgrading.md#behavior-changes-that-are-visible-but-not-breaking)
+
+### A failed or deleted VMMigration deletes the disk its import landed (#403)
+
+Until rc1 the disk `ImportDisk` landed on the target (vSphere
+`[<datastore>] <namespace>_<vm>-migrated/`, libvirt
+`<default pool>/<namespace>.<vm>-migrated.qcow2`, the Proxmox import stage) stayed there
+for good when the migration failed, or was deleted, before a target VM attached it. Every
+vSphere import also left about 1.4 KB of import-VM files (`.vmx`, `.vmsd`, ...) in the
+landing folder. Now:
+
+- Before the import the migration records `LandedDiskCleanup=Unknown/LandedDiskMayExist`
+  and the import target (VM and Provider UID). The manager then asks the target provider
+  to delete the landed disk (new RPC `DeleteLandedDisk`, capability
+  `supports_landed_disk_delete`), following the staged disk's `cleanupPolicy`:
+  `OnSuccess` (default) when the `VMMigration` is deleted, `Always` also when it fails for
+  good, `Never` keeps it (`LandedDiskRetained`).
+- **Fail closed.** A successful migration's disk, a disk its target `VirtualMachine`
+  has, a disk any VM uses (`LandedDiskInUse`), and a disk another in-flight migration
+  lands under the same name (`LandedDiskHandedOver`) are kept. A delete that fails is
+  retried and holds a deleting `VMMigration` (`LandedDiskCleanupPending`;
+  `virtrigaud.io/force-delete=true` releases it). An older provider image, a gone
+  Provider, or a refused request records `LandedDiskLeftBehind` with one Warning.
+- The vSphere import removes its own transient import-VM files, never the landed `.vmdk`.
+- **Disks left by earlier releases are not touched.** Find and delete them as described
+  in [Leftovers from earlier releases](docs/upgrading.md#leftovers-from-earlier-releases).
+- The in-use checks see only the VMs of this vCenter or libvirt host. Do not share the
+  landing datastore or the libvirt `default` pool directory with hypervisors the Provider
+  does not manage.
+- Tested against vcsim, recorded host runners and the PVE test fake, not real hypervisors.
+
+→ [ADR-0011 Addendum A](docs/adr/0011-migration-staging-cleanup.md#addendum-a--landed-disks-rc2),
+[Upgrade guide](docs/upgrading.md#behavior-changes-that-are-visible-but-not-breaking)
+
+### Provider pods mount only the migration PVCs a live VMMigration references (#399)
+
+Provider pods hold the hypervisor credentials. Before, they mounted **every** PVC in
+their namespace labelled `virtrigaud.io/component=migration-storage`, read-write, so
+anyone who could create a PVC there could attach arbitrary storage to them, or stall
+their rollout with a PVC that never binds. This applies to the `pvc` staging backend.
+Now:
+
+- A PVC is mounted only into the source and target Provider of a `VMMigration` in that
+  namespace that records it in `status.storagePVCName` and is still in flight. The label
+  is necessary but not sufficient.
+- The PVC must be the one the migration created, identified by the UID its own `Create`
+  returned (new `status.storagePVCUID`; a forged `ownerReference` no longer counts), or
+  the one `spec.storage.pvc.name` names, if no other `VMMigration` has it.
+- The target Provider mounts it **read-only**; the source read-write.
+- A PVC that is `Lost`, being deleted or `Pending` is not mounted (the one exception is a
+  `Pending` PVC on a `WaitForFirstConsumer` StorageClass while its migration validates),
+  so one that never binds cannot stall a rollout.
+- **Deleting a `VMMigration` deletes only the PVC it created.** A PVC named in
+  `spec.storage.pvc.name` is unmounted and left for its owner (event
+  `MigrationPVCRetained`). Before, the manager deleted whatever PVC the migration had
+  recorded. If you relied on that, delete your PVC yourself.
+- **Extra pod rolls.** A provider pod is now also rolled when a migration becomes `Ready`
+  or fails for good, and once on the upgrade, which interrupts an export or import
+  running at that moment. Upgrade between migrations if you can.
+- The manager's ClusterRole gains `get` on `storageclasses`.
+
+→ [PVC staging backend: what the provider pods mount](examples/migration/README.md#pvc-staging-backend-legacy-what-the-provider-pods-mount),
+[Upgrade guide](docs/upgrading.md#behavior-changes-that-are-visible-but-not-breaking)
+
+### Staged migration files never follow links (#404)
+
+On the `pvc` staging backend the staging PVC is writable by the tenant and mounted into
+the credentialed provider pods. The vSphere and libvirt providers opened the staged
+file by joining a path and following links, so a symbolic link a tenant planted in the PVC
+(as the file or any parent directory) made `ImportDisk` read the pod's credentials, TLS
+key or ServiceAccount token into the tenant's disk, and made `ExportDisk` write wherever
+the pod can write. Now every staged-file path is resolved beneath the PVC mount with no
+symbolic link in any component (`openat2` with `RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS`,
+falling back to a per-component `O_NOFOLLOW` walk). Only a regular file with a link count
+of 1 is read; FIFOs, devices, directories and hard-linked files are refused. The libvirt
+pod-side `ImportDisk` accepts only `pvc://` sources (the `file://` scheme, which the
+manager never sent, is removed).
+
+- A `pvc` migration whose PVC holds a symbolic link in its `vmmigrations/...` tree, or a
+  hard link to the staged disk, now fails with `refused the staged file` /
+  `refused the staged disk`. Replace the link with a real directory.
+- **A staging PVC on a filesystem that reports a link count other than 1 for a regular
+  file is refused the same way** (some CSI and FUSE filesystems). Use one that reports
+  link counts, or the `s3` or `nfs` backend.
+- `s3` and `nfs` migrations are unaffected. The Proxmox provider rejects the `pvc`
+  backend before any file access. Linux only; other platforms fail closed.
+
+→ [Staged-file hardening](examples/migration/README.md#staged-file-hardening-pvc-backend),
+[Upgrade guide](docs/upgrading.md#behavior-changes-that-are-visible-but-not-breaking)
+
+### VirtualMachine status.phase is set on every VM (#398)
+
+`kubectl get vm` showed an empty `PHASE` on most VMs, because only a few code paths wrote
+the field. The manager now derives it on every status write from the VM's state:
+`Pending`, `Provisioning`, `Running`, `Stopped`, `Reconfiguring`, `Deleting` or `Failed`.
+A `Ready=False` hold such as `VMNotOwned`, `ProviderUnavailable` or
+`CreateOutcomeUnknown` is `Failed`; a `Suspended` VM is `Running`; an `Unknown` power
+state is `Failed`; a delete that is held is `Deleting`. The first reconcile after the
+manager rolls fills in the phase of every existing VM (one status write each, then none
+unless the state changes). No CRD schema change. Automation that read `status.phase`
+must expect every value.
+
+→ [`docs/vm-status-phase.md`](docs/vm-status-phase.md)
+
+### Smaller fixes (#398, #400)
+
+- **vSphere: one finder per call.** The provider shared one `*find.Finder` between
+  concurrent RPCs and re-scoped it on about twenty paths; a govmomi `Finder` is not safe
+  for concurrent use, so RPCs raced on it (`go test -race` reports it). Each RPC now has
+  its own finder, scoped to the default datacenter; the datacenter reference is cached
+  for 60 seconds per vCenter client. No setting changes.
+- **libvirt: no fixed `/tmp` files on the host.** Pool definition wrote `/tmp/default-pool.xml`
+  and the persistent-XML sync `/tmp/<domain>-sync.xml` (left behind by a failed define)
+  on the hypervisor; two concurrent calls overwrote each other's file. The XML now goes
+  to `virsh` over stdin.
+- **libvirt keepalive self-heals.** After a failed probe the keepalive drops the client,
+  so a client that reports connected on a dead transport is replaced on the next tick.
+- **go-libvirt upstream race.** `(*Libvirt).ConnectToURI` in the pinned
+  `github.com/digitalocean/go-libvirt` writes a field after starting a goroutine that reads
+  it; it is unfixed upstream. The one test that triggers it is skipped under `-race`
+  (`TestGolibvirtHolder_ConcurrentAccess_Race`); it still runs without `-race`. The
+  production consequence found is bounded by the self-heal above.
+
+### Proxmox legacy name rule: decision and what to do in v0.4.0 (#397)
+
+The single-host Proxmox owner check still accepts an **unstamped** VM named like its
+`VirtualMachine`, so a PVE user with `VM.Allocate` can plant a look-alike at a freed
+VMID. [ADR-0012](docs/adr/0012-proxmox-legacy-unstamped-name-rule.md) (Accepted) decides
+to retire the rule: the manager records each VM whose stamp the provider confirmed and
+then requires it (`require_owner_stamp`), legacy VMs are stamped once through
+`TransferOwner`, and the rule is dropped by default in v0.5.0. **Phase 1 is planned for
+v0.4.1, gated on validation against a real PVE cluster; it is not in v0.4.0.**
+
+For v0.4.0:
+
+- **Do not grant `VM.Allocate` on the pools and paths where VirtRigaud's VMs live** to
+  any principal other than VirtRigaud's own Provider tokens and your administrators.
+  That includes inherited grants (on `/vms` or `/`) and shared pools.
+- **Accepted risk: a stamp can be copied.** The stamp's checksum detects edits, not
+  forgery. Someone who knows a `VirtualMachine`'s UID (readable through the Kubernetes
+  API) and can set a VM's description (`VM.Config.Options`) can write that stamp on a VM
+  they plant. A binding to a PVE creation attribute would close it and is scheduled as a
+  spike.
+
+→ [`docs/vm-ownership.md`](docs/vm-ownership.md#limits)
+
 ### Upgrade order for rc2
 
 Same as the rc1 order, with the admission policy added:
@@ -235,6 +502,32 @@ provider ignores the owner), and it does not report `supports_owner_rebind`, so 
 Rolling a provider back stops adoption stamping; rolling the manager back can leave an
 adoption annotated `virtrigaud.io/adopted-id` without `status.id`: delete that
 `VirtualMachine` (no provider call is made) and let adoption take the VM again.
+
+Wave 2 adds to this:
+
+- **CRDs first, as always.** Two optional status fields are new: `status.storagePVCUID`
+  on `VMMigration` and `status.storageInfo.importTarget.providerUID`. With the old CRD the
+  API server prunes them, so the manager cannot record them (an import target recorded
+  without the Provider's UID is never sent a landed-disk delete).
+- **Roll all providers with the manager, not only Proxmox.** Three capability fields are
+  new in `GetCapabilities`: `resend_safe_export_backends` and `resend_safe_import_backends`
+  (27, 28) and `supports_landed_disk_delete` (29). A provider that predates rc2 reports
+  none of them, and the manager then takes the conservative path: a lost or timed-out
+  export or import is **held** for an operator instead of re-sent, a landed disk is
+  recorded as `LandedDiskLeftBehind` instead of deleted, and every failure of a
+  single-host libvirt `SnapshotCreate`, `ExportDisk` or `ImportDisk` is held (the old image
+  answers them all untyped). An older vSphere image shows a change a running VM cannot
+  take as `ProviderError` again, and an older manager shows the new
+  `ResizePendingPowerOff` refusal as `ProviderError`.
+- **The manager upgrade rolls each provider pod that mounts migration PVCs once** (#399:
+  unreferenced PVCs are dropped and target mounts become read-only), which interrupts an
+  export or import running at that moment. Upgrade between migrations; also let
+  migrations in `Creating` or `Validating-Target` finish (#394).
+- **Rolling a vSphere or Proxmox provider back brings back the wrong-disk resize**
+  (the root disk grown to `spec.disks[0].sizeGiB`, or every `spec.disks` size sent to
+  `scsi0`). Hold CPU and memory changes of VMs with `spec.disks` while an older image
+  runs. The disk-name records vSphere writes on VMs created by rc2 are ignored by the old
+  image and used again after you roll forward.
 
 ## About this release candidate / what to test
 
@@ -261,12 +554,32 @@ The most useful things to exercise:
   VirtRigaud installation exempted); single-host adoption of a VM that carries a
   stale stamp; a `VMClone` through a manager restart; and, on Proxmox, a reused
   VMID under a managed `VirtualMachine`.
+- **Also new in rc2 (Wave 2):**
+  - a CPU or memory change of a running vSphere VM that has no hot-add (expect
+    `Reconfiguring=False/ResizePendingPowerOff`, then power it off and on), and a
+    `spec.disks` size on a vSphere VM created by rc2 (it must grow only its own
+    additional disk);
+  - killing the manager (or the provider pod) during a migration's snapshot, export or
+    import: the migration should hold with `...OutcomeUnknown` or re-send only on a
+    backend the provider lists as re-send safe, and release with the
+    `virtrigaud.io/operation-outcome` annotation;
+  - a migration that fails or is deleted after its import: the landed disk should be
+    gone (`LandedDiskCleanup`), or recorded as left behind;
+  - a `pvc` migration: provider pods should mount only its PVC (read-only on the
+    target) and drop it when the migration finishes; a PVC named in
+    `spec.storage.pvc.name` should survive the migration's deletion;
+  - `kubectl get vm`: `PHASE` filled in on every VM after the manager rolls.
 
 **Proxmox was not validated against a real PVE cluster.** The Proxmox changes in
 this release (owner stamps, per-VM owner checks, adoption stamping, clone
-re-binding, imported-disk confinement, NFS/S3 import hardening, idempotent power)
-were tested only against the test fake, not a real PVE cluster. If you run
-Proxmox, treat it as untested and try these paths on a lab cluster first.
+re-binding, imported-disk confinement, NFS/S3 import hardening, idempotent power,
+and in Wave 2 the `Reconfigure` change that no longer touches `scsi0`, the s3 stage
+publish check and the import-stage delete of a failed migration) were tested only
+against the test fake, not a real PVE cluster. If you run Proxmox, treat it as
+untested and try these paths on a lab cluster first. The Wave 2 vSphere and libvirt
+changes were tested against vcsim and recorded host runners, not yet against real
+hypervisors; ADR-0012's Proxmox name-rule change (planned for v0.4.1) needs a real PVE
+cluster as its release gate.
 
 ## Breaking changes
 
@@ -384,6 +697,36 @@ Proxmox, treat it as untested and try these paths on a lab cluster first.
   security control for migration, adoption and clone: do not disable it without a
   replacement. → [`docs/admission-policy.md`](docs/admission-policy.md),
   [Upgrade guide](docs/upgrading.md#breaking-changes)
+- **New in rc2: vSphere and Proxmox `Reconfigure` no longer resize the root disk.**
+  Proxmox: a `spec.disks` size no longer grows `scsi0` and nothing replaces it in this
+  release (grow the disk in PVE). vSphere: a `spec.disks` entry grows only the
+  additional disk recorded under its name (VMs created by rc2 or later), and a size
+  below the disk's now fails the `Reconfigure`, CPU and memory included. A change a
+  running vSphere VM cannot take (no hot-add, a memory decrease, and others) shows
+  `Reconfiguring=False/ResizePendingPowerOff` until the VM is powered off.
+  → [Changes since v0.4.0-rc1](#reconfigure-resizes-the-right-disk-and-vsphere-says-when-it-needs-a-power-off-401-breaking),
+  [Upgrade guide](docs/upgrading.md#behavior-changes-that-are-visible-but-not-breaking)
+- **New in rc2: a `SnapshotCreate`, `ExportDisk` or `ImportDisk` whose outcome is unknown
+  holds the `VMMigration` or `VMSnapshot` for an operator** (`Ready=False`,
+  `SnapshotOutcomeUnknown`, `ExportOutcomeUnknown` or `ImportOutcomeUnknown`) instead of
+  failing the attempt and re-sending it. It is re-sent on its own only on a backend the
+  provider lists as re-send safe, 35 minutes later; otherwise you release it with the
+  annotation `virtrigaud.io/operation-outcome=not-performed@<attempt id>` after checking
+  the provider. Alerting and automation that expected a timed-out call to fail must
+  include these reasons. Roll the providers with the manager.
+  → [Changes since v0.4.0-rc1](#a-provider-call-whose-outcome-is-unknown-is-held-not-re-sent-blindly-402-405),
+  [`docs/provider-call-outcomes.md`](docs/provider-call-outcomes.md)
+- **New in rc2: provider pods mount only the migration PVCs a live `VMMigration`
+  references, and deleting a `VMMigration` deletes only the PVC it created.** If you
+  relied on a migration's deletion to remove the PVC named in `spec.storage.pvc.name`, or
+  on labelled PVCs being mounted without a migration, change that. The upgrade rolls
+  provider pods once.
+  → [Changes since v0.4.0-rc1](#provider-pods-mount-only-the-migration-pvcs-a-live-vmmigration-references-399),
+  [Upgrade guide](docs/upgrading.md#behavior-changes-that-are-visible-but-not-breaking)
+- **New in rc2: a `pvc` migration fails if the staging PVC holds a symbolic link, a hard
+  link or a special file at a staged path, or sits on a filesystem that reports a link
+  count other than 1**; the libvirt pod-side import no longer accepts `file://` sources.
+  → [Changes since v0.4.0-rc1](#staged-migration-files-never-follow-links-404)
 
 See the full breaking-change table, required upgrade order (CRDs → admission
 policy and grants → manager → providers), and rollback caveats in
@@ -518,6 +861,12 @@ policy and grants → manager → providers), and rollback caveats in
   (`networkPolicy.enabled`, default off).
 - Provider pods run under a dedicated, token-less ServiceAccount instead of the
   namespace `default` SA.
+- **New in rc2:** provider pods no longer mount every labelled PVC in their namespace,
+  only the migration PVCs a live `VMMigration` references (target read-only), and
+  staged migration files on the `pvc` backend are opened with no symbolic link followed,
+  so a link planted in the staging PVC can no longer make an import read the provider
+  pod's credentials or an export write outside the PVC
+  (→ [Changes since v0.4.0-rc1](#provider-pods-mount-only-the-migration-pvcs-a-live-vmmigration-references-399)).
 
 ### Clustered providers (experimental, opt-in)
 
@@ -604,6 +953,28 @@ policy and grants → manager → providers), and rollback caveats in
 
 ### Fixes
 
+- **New in rc2 (Wave 2):** the fixes below are described in
+  [Changes since v0.4.0-rc1](#reconfigure-resizes-the-right-disk-and-vsphere-says-when-it-needs-a-power-off-401-breaking).
+  - **Reconfigure grew the wrong disk** (affects v0.3.11 and rc1): vSphere grew the root
+    disk with an additional disk's size, Proxmox sent every `spec.disks` size to `scsi0`
+    and dropped the CPU/memory change after a disk grow while reporting success (#401,
+    breaking).
+  - **A CPU or memory change of a running vSphere VM without hot-add was retried
+    forever** as `ProviderError`; it is now
+    `Reconfiguring=False/ResizePendingPowerOff` and no longer counts toward the circuit
+    breaker (#401).
+  - **A manager restart could take a second snapshot or land a second disk**: a lost
+    `SnapshotCreate`, `ExportDisk` or `ImportDisk` result is no longer re-sent blindly
+    (#402, #405).
+  - **A failed or deleted migration left its landed disk on the target for good**, and
+    every vSphere import left about 1.4 KB of import-VM files (#403).
+  - **A Proxmox s3 stage could be published truncated** after a cancelled import (#402).
+  - **libvirt read a failed `snapshot-list` as the snapshot's absence**; it is now an
+    error (#405).
+  - **`VirtualMachine` `status.phase` was empty on healthy VMs** (#398).
+  - **vSphere RPCs raced on a shared finder** (#400); **libvirt wrote fixed `/tmp` files
+    on the hypervisor** (#400); **a libvirt client stuck connected on a dead transport
+    was reused forever** (#398).
 - **A `VMMigration` no longer fails with "import did not record disk info"
   (affects v0.3.11).** When two reconciles of a migration overlapped (the
   second started from a cache that did not yet show the first one's write),
@@ -617,7 +988,9 @@ policy and grants → manager → providers), and rollback caveats in
   written onto the live object; a result that cannot be written yet is held
   and written by the next reconcile, so the manager does not send the
   operation again. A manager restart or leader change between the operation
-  and its write can still lose the result and re-send it, as before. A result
+  and its write can still lose the result; from rc2 the call is then held or
+  re-sent only where that is proven safe (see
+  [Changes since v0.4.0-rc1](#a-provider-call-whose-outcome-is-unknown-is-held-not-re-sent-blindly-402-405)). A result
   dropped because the migration had moved on is reported with a `Warning`
   event `ProviderResultNotRecorded`. The same fix stops the `Provider` controller from
   dropping `status.adoption` written by VM adoption, and adoption from losing
@@ -1055,8 +1428,12 @@ says so. Each links to the page that documents it in full, where one exists.
   live can create an unstamped VM with that name at the freed VMID, and the
   `VirtualMachine` then reads, powers, resizes, snapshots and copies it as its own.
   A VM stamped for anyone else is refused. Grant `VM.Allocate` there as carefully as
-  `VM.Config.Options`; closing this is tracked for a later release
-  (→ [`docs/vm-ownership.md`](docs/vm-ownership.md#limits)).
+  `VM.Config.Options`, and to no one but VirtRigaud's Provider tokens and your
+  administrators. [ADR-0012](docs/adr/0012-proxmox-legacy-unstamped-name-rule.md)
+  retires the rule: phase 1 is planned for v0.4.1 behind validation on a real PVE
+  cluster, the rule is dropped by default in v0.5.0. Even then a stamp can be copied by
+  someone who knows the `VirtualMachine`'s UID and holds `VM.Config.Options`; that risk is
+  accepted for v0.4.0 (→ [`docs/vm-ownership.md`](docs/vm-ownership.md#limits)).
 - **Proxmox: the owner check and the call are two requests.** A VMID freed and reused
   between them is not caught. Do not delete VirtRigaud-managed VMs outside VirtRigaud:
   delete the `VirtualMachine`, or detach it with `orphan-on-delete`
@@ -1091,13 +1468,52 @@ says so. Each links to the page that documents it in full, where one exists.
   spec sizes and the real disk sizes of clone and migration sources, but not an
   image or template whose own disk is larger than the class
   (→ [chart README](charts/virtrigaud/README.md#disk-size-limit)).
-- **vSphere: resizing a running VM needs hot-add.** Changing the CPU or memory of
-  a powered-on VM works only if CPU/memory hot-add is enabled on that VM.
-  Otherwise vCenter refuses and VirtRigaud retries until the VM is powered off.
-  The vSphere provider reports online reconfigure as supported regardless of the
-  VM.
-- **A migration that fails after its disk was imported leaves that disk on the
-  target.** The landed disk is not removed automatically; delete it by hand.
+- **vSphere: a CPU or memory change of a running VM needs hot-add.** Without it the
+  change waits for a power-off and is shown as `Reconfiguring=False/ResizePendingPowerOff`
+  instead of being retried against vCenter. The provider still reports online reconfigure
+  as supported regardless of the VM
+  (→ [`docs/reconfigure-results.md`](docs/reconfigure-results.md#vsphere-changes-a-running-vm-cannot-take)).
+- **A disk-size change alone does not trigger a `Reconfigure`.** The manager sends one
+  when the effective CPU or memory changes, and the disk sizes travel with it. To apply a
+  `spec.disks` size change, or a growth skipped earlier (for example while the disk had
+  snapshots), change CPU or memory too
+  (→ [`docs/reconfigure-results.md`](docs/reconfigure-results.md#when-a-reconfigure-is-sent)).
+- **`Reconfigure` resizes few disks.** No provider's `Reconfigure` grows the root disk
+  from a `spec.disks` entry or adds a disk. vSphere grows only an additional disk that
+  `Create` recorded under the entry's name, so the additional disks of VMs created by
+  rc1 or earlier are not resized. Proxmox resizes none.
+- **Held calls need an operator.** A `VMMigration` or `VMSnapshot` held in
+  `SnapshotOutcomeUnknown`, `ExportOutcomeUnknown` or `ImportOutcomeUnknown` stays held
+  until you check the provider and confirm the attempt with
+  `virtrigaud.io/operation-outcome=not-performed@<attempt id>` (or delete the object),
+  except an export or import on a re-send-safe backend, which the manager sends again
+  after 35 minutes. A failure write that is itself lost holds the object too, and
+  deleting a held object does not look up the snapshot the lost call may have made
+  (→ [`docs/provider-call-outcomes.md`](docs/provider-call-outcomes.md#limitations)).
+- **Remote host commands can outlive a cancelled call, and Proxmox `nfs` is not re-send
+  safe.** A command running on the hypervisor host keeps going after the call that
+  started it is cancelled. The Proxmox `nfs` import copies to completion and publishes the
+  stage at an arbitrary later time, and its `nfs` export writes in place, so both are
+  held rather than re-sent (only `s3` is re-send safe on Proxmox).
+  Single-host libvirt's flatten, `qemu-img convert` and `dd` run without `timeout(1)`, so
+  an orphan can still be running after the 35-minute settle time
+  (→ [`docs/provider-call-outcomes.md`](docs/provider-call-outcomes.md#why-each-provider-answers-the-way-it-does)).
+- **A `pvc` migration on a filesystem that reports a link count other than 1 is
+  refused**, as is any link or special file in the staging PVC. Use `s3` or `nfs`, or a
+  filesystem that reports link counts
+  (→ [Staged-file hardening](examples/migration/README.md#staged-file-hardening-pvc-backend)).
+- **Provider locks are per process: run one replica per Provider.** The landing,
+  landed-disk delete and import serialisation live inside one provider process. vSphere
+  runtimes are rendered with one replica already; do not set `spec.runtime.replicas`
+  above 1 on libvirt or Proxmox Providers either. The landed-disk in-use checks see only
+  the VMs of one vCenter or libvirt host, so do not share the landing datastore or the
+  `default` pool directory with hypervisors the Provider does not manage
+  (→ [Upgrade guide](docs/upgrading.md#behavior-changes-that-are-visible-but-not-breaking)).
+- **Landed disks are not deleted in some cases.** A disk is kept with
+  `cleanupPolicy: Never`, when the provider reports it in use, when the provider image
+  is older than rc2, the Provider is gone, or a Proxmox Provider has no migration SSH
+  data plane (`LandedDiskLeftBehind` says so). Disks left by migrations that failed
+  before rc2 are not removed either.
 - **NFS staging cleanup does not remove the file on libvirt and vSphere targets.**
   It empties the staged file (a 0-byte file remains); Proxmox deletes it.
   Versioned or object-lock S3 buckets and NFS server snapshots keep the data:
@@ -1110,12 +1526,10 @@ says so. Each links to the page that documents it in full, where one exists.
   SHA-256 comparison
   (→ [ADR-0006](docs/adr/0006-storage-backend-agnostic-cross-hypervisor-migration.md)).
 - **Leftovers from earlier releases are not cleaned up automatically:** staged
-  migration objects, libvirt snapshot overlay files (`<domain>-disk.<snapshot>`)
+  migration objects, landed migration disks and vSphere import-VM files of migrations
+  that ran before rc2, libvirt snapshot overlay files (`<domain>-disk.<snapshot>`)
   and vSphere `virtrigaud-export-*` files. Find and remove them as described in
   [docs/upgrading.md](docs/upgrading.md#leftovers-from-earlier-releases).
-- **A manager restart or leader change can re-send a provider call.** Between a
-  `SnapshotCreate`, `ExportDisk` or `ImportDisk` RPC and the write of its result
-  to the status, the result can be lost and the RPC sent again.
 
 ## Upgrade
 
@@ -1126,6 +1540,8 @@ verification checklist. The roll order is **CRDs, then the cross-namespace grant
 the providers**, and roll the providers promptly after the manager: until a
 provider is upgraded, a Proxmox provider does not enforce the new owner checks, and
 no provider that predates rc2 is ever sent a `Create` or `Clone` again after an
-unknown outcome. The order was validated in the rc1 lab (see
+unknown outcome, a lost export or import is held for an operator instead of re-sent,
+and a failed migration's landed disk is recorded as left behind instead of deleted. The
+order was validated in the rc1 lab (see
 [Required upgrade order](docs/upgrading.md#required-upgrade-order) and
 [Changes since v0.4.0-rc1](#upgrade-order-for-rc2)).

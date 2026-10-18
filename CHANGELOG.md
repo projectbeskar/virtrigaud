@@ -5,6 +5,23 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-10-18 08:46] - Release notes: v0.4.0-rc2, "Changes since v0.4.0-rc1" (Wave 2)
+**Author:** @wrkode (William Rizzo)
+
+### Changed
+- `docs/release-notes/next.md`: the Wave 2 placeholder is replaced by the Wave 2 changes, all merged to main. New sections in "Changes since v0.4.0-rc1": #401 (`Reconfigure` resizes the right disk, vSphere `ResizePendingPowerOff`, breaking), #402 and #405 (durable requested markers, `...OutcomeUnknown` holds, re-send-safe capabilities, the operator release annotation, single-host libvirt typed answers), #403 (`DeleteLandedDisk`, `LandedDiskCleanup`, vSphere import-VM files), #399 (provider pods mount only referenced migration PVCs, `status.storagePVCUID`), #404 (staged files never follow links), #398 (`status.phase`, libvirt keepalive, go-libvirt race test skip), #400 (vSphere finder per call, libvirt host XML over stdin) and #397 (ADR-0012 and the v0.4.0 `VM.Allocate` guidance). The summary table now lists all thirteen pull requests.
+- `docs/release-notes/next.md` (upgrade order, "About this release candidate", Breaking changes, Highlights/Security, Fixes): rc2 upgrade-order notes (two new optional status fields, capability fields 27-29 and the conservative behaviour of older providers, one provider-pod roll, rollback of the wrong-disk resize), new test pointers, four new "New in rc2" breaking/behaviour bullets, a Security bullet, a Wave 2 list in Fixes, and a corrected sentence on lost provider results.
+- `docs/release-notes/next.md` (Known limitations): removed the fixed items (a failed migration leaves its landed disk; a manager restart can re-send a provider call; vSphere online resize needs hot-add, kept as a shorter note). Added: a disk-size-only change is applied with the next CPU or memory change (R19); few disks are resized, and rc1-and-earlier vSphere additional disks are not; held calls need an operator; Proxmox `nfs` is not re-send safe, remote host commands outlive a cancelled call and single-host libvirt flatten/convert have no `timeout(1)` (R20); a `pvc` filesystem reporting a link count other than 1 is refused; provider locks are per process, so one replica per Provider; landed disks kept in some cases. The Proxmox legacy-name-rule bullet links ADR-0012 and its plan. The leftovers bullet adds landed disks and vSphere import-VM files.
+
+### Why
+The published pre-release body must describe the Wave 2 fixes that change behaviour operators can see (a breaking `Reconfigure` change, held provider calls that need an operator, new pod rolls and PVC rules), and must stop listing limitations that are fixed.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [ ] Config change only
+- [x] Documentation only
+
 ## [2026-10-17 13:28] - Single-host libvirt answers the failures of SnapshotCreate, ExportDisk and ImportDisk that its code can prove as definite (rc2 R21)
 **Author:** @wrkode (William Rizzo)
 
