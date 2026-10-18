@@ -2172,6 +2172,10 @@ func (r *VMMigrationReconciler) handleValidatingTargetPhase(ctx context.Context,
 	// neither the source snapshot nor the source VM (a migration completed
 	// under an older manager, whose Ready cleanup never ran).
 	markPostMigrationCleanupPending(migration)
+	// Also in that write: the landed disk is now the target VM's disk, which
+	// the migration never deletes, so LandedDiskCleanup is closed
+	// (True/LandedDiskInUseByTarget) instead of staying Unknown (rc2 R23).
+	markLandedDiskInUseByTarget(migration)
 
 	r.Recorder.Event(migration, "Normal", "MigrationComplete", fmt.Sprintf("VM migrated successfully to %s/%s", targetNamespace, targetVMName))
 
@@ -2212,7 +2216,13 @@ func (r *VMMigrationReconciler) handleReadyPhase(ctx context.Context, migration 
 	logger := logging.FromContext(ctx)
 	logger.Info("Migration is ready")
 
-	cleanedUp := migration.Status.StorageInfo != nil && migration.Status.StorageInfo.CleanedUp
+	// A migration that reached Ready under rc2 still says its landed disk may
+	// exist: close it once (the disk is the target VM's).
+	if err := r.closeLandedDiskAtReady(ctx, migration); err != nil {
+		return ctrl.Result{}, err
+	}
+
+	cleanedUp :=migration.Status.StorageInfo != nil && migration.Status.StorageInfo.CleanedUp
 	if cleanedUp && !stagingCleanupWanted(migration, stagingTriggerReady) {
 		return ctrl.Result{}, nil
 	}

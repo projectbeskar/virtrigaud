@@ -18,6 +18,7 @@ package controller
 
 import (
 	"strings"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -160,6 +161,49 @@ var _ = Describe("VMMigration landed-disk cleanup (envtest)", func() {
 		Expect(prov.calls.Load()).To(BeZero())
 		Consistently(func() int { return countEvents(rec, migrationReasonLandedDiskLeftBehind) }, "1s", "250ms").
 			Should(BeNumerically("<=", 1))
+	})
+
+	It("closes the condition in the Ready write of a migration that completes, and its deletion keeps the disk (rc2 R23)", func() {
+		prov := newLandedProvider()
+		m := createImportedMigration(infravirtrigaudiov1beta1.MigrationPhaseCreating, infravirtrigaudiov1beta1.CleanupPolicyAlways)
+		Expect(k8sClient.Create(ctx, envtestClass(m.Namespace, "small", nil))).To(Succeed())
+		withTarget := &infravirtrigaudiov1beta1.VMMigration{}
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(m), withTarget)).To(Succeed())
+		withTarget.Spec.Target.ClassRef = &infravirtrigaudiov1beta1.LocalObjectReference{Name: "small"}
+		Expect(k8sClient.Update(ctx, withTarget)).To(Succeed())
+		withTarget.Status.StartTime = &metav1.Time{Time: withTarget.CreationTimestamp.Time}
+		withTarget.Status.ImportID = m.Namespace + ".web-migrated"
+		Expect(k8sClient.Status().Update(ctx, withTarget)).To(Succeed())
+		startLandedManager(m.Namespace, prov)
+
+		By("the migration creates its target VirtualMachine, which becomes Ready")
+		own := &infravirtrigaudiov1beta1.VirtualMachine{}
+		Eventually(func(g Gomega) {
+			g.Expect(k8sClient.Get(ctx, client.ObjectKey{Namespace: m.Namespace, Name: "web"}, own)).To(Succeed())
+		}, "20s", "200ms").Should(Succeed())
+		own.Status.ID = "vm-" + string(own.UID)
+		meta.SetStatusCondition(&own.Status.Conditions, metav1.Condition{Type: "Ready", Status: metav1.ConditionTrue,
+			Reason: "Ready", ObservedGeneration: own.Generation})
+		Expect(k8sClient.Status().Update(ctx, own)).To(Succeed())
+
+		By("Ready and LandedDiskCleanup=True/LandedDiskInUseByTarget are stored together")
+		Eventually(func(g Gomega) {
+			got := &infravirtrigaudiov1beta1.VMMigration{}
+			g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(m), got)).To(Succeed())
+			g.Expect(got.Status.Phase).To(Equal(infravirtrigaudiov1beta1.MigrationPhaseReady))
+			c := meta.FindStatusCondition(got.Status.Conditions, migrationConditionLandedDiskCleanup)
+			g.Expect(c).NotTo(BeNil())
+			g.Expect(c.Status).To(Equal(metav1.ConditionTrue), "never Unknown on a Ready migration")
+			g.Expect(c.Reason).To(Equal(migrationReasonLandedDiskInUseByTarget))
+			g.Expect(c.Message).To(Equal(migrationLandedDiskInUseByTargetMessage))
+			g.Expect(c.ObservedGeneration).To(Equal(got.Generation))
+		}, targetVMWaitInterval+20*time.Second, "200ms").Should(Succeed())
+
+		By("deleting the Ready migration sends no DeleteLandedDisk and releases it; its target VM stays")
+		Expect(k8sClient.Delete(ctx, m)).To(Succeed())
+		Eventually(gone(m), "20s", "250ms").Should(BeTrue())
+		Expect(prov.calls.Load()).To(BeZero(), "the target VM's disk is never sent for deletion")
+		Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(own), &infravirtrigaudiov1beta1.VirtualMachine{})).To(Succeed())
 	})
 
 	It("holds a deleted VMMigration while its landed disk cannot be deleted, and releases it once it is", func() {

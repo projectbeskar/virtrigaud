@@ -367,7 +367,78 @@ func TestLandedDiskIsKeptForAVM(t *testing.T) {
 			c := landedCondition(h.get(t, m))
 			require.NotNil(t, c)
 			assert.Equal(t, metav1.ConditionTrue, c.Status)
-			assert.Equal(t, migrationReasonLandedDiskInUse, c.Reason)
+			want := migrationReasonLandedDiskInUse
+			if tc.phase == infrav1beta1.MigrationPhaseReady {
+				// A Ready migration still Unknown (it reached Ready under rc2).
+				want = migrationReasonLandedDiskInUseByTarget
+			}
+			assert.Equal(t, want, c.Reason)
+		})
+	}
+}
+
+// TestMarkLandedDiskInUseByTarget (rc2 R23): Ready closes an open
+// LandedDiskCleanup condition with True/LandedDiskInUseByTarget once, with
+// ObservedGeneration; it leaves a migration without the condition, or with a
+// closed one, as it is.
+func TestMarkLandedDiskInUseByTarget(t *testing.T) {
+	m, _ := landedFixture(infrav1beta1.MigrationPhaseReady)
+	m.Generation = 3
+	require.True(t, markLandedDiskInUseByTarget(m))
+	c := landedCondition(m)
+	require.NotNil(t, c)
+	assert.Equal(t, metav1.ConditionTrue, c.Status)
+	assert.Equal(t, migrationReasonLandedDiskInUseByTarget, c.Reason)
+	assert.Equal(t, migrationLandedDiskInUseByTargetMessage, c.Message)
+	assert.EqualValues(t, 3, c.ObservedGeneration)
+	assert.False(t, markLandedDiskInUseByTarget(m), "a repeated mark writes nothing")
+	assert.False(t, landedDiskMayExist(m))
+	assert.False(t, landedDiskCleanupWanted(m, stagingTriggerDeletion), "nothing to delete once Ready")
+
+	none, _ := landedFixture(infrav1beta1.MigrationPhaseReady)
+	meta.RemoveStatusCondition(&none.Status.Conditions, migrationConditionLandedDiskCleanup)
+	assert.False(t, markLandedDiskInUseByTarget(none), "no import was sent (or an older manager sent it)")
+	assert.Nil(t, landedCondition(none))
+
+	deleted, _ := landedFixture(infrav1beta1.MigrationPhaseReady)
+	meta.SetStatusCondition(&deleted.Status.Conditions, metav1.Condition{Type: migrationConditionLandedDiskCleanup,
+		Status: metav1.ConditionTrue, Reason: migrationReasonLandedDiskDeleted, Message: migrationLandedDiskDeletedMessage})
+	assert.False(t, markLandedDiskInUseByTarget(deleted), "a closed condition is left as it is")
+	assert.Equal(t, migrationReasonLandedDiskDeleted, landedCondition(deleted).Reason)
+}
+
+// TestReadyMigrationClosesItsLandedDiskAndDeletionKeepsIt (rc2 R23): a Ready
+// migration still Unknown (it reached Ready under rc2) is closed once with
+// LandedDiskInUseByTarget; deleting it — with any cleanupPolicy — sends no
+// DeleteLandedDisk, writes nothing more and releases it.
+func TestReadyMigrationClosesItsLandedDiskAndDeletionKeepsIt(t *testing.T) {
+	for _, policy := range []string{"", infrav1beta1.CleanupPolicyAlways, infrav1beta1.CleanupPolicyNever} {
+		t.Run("policy "+policy, func(t *testing.T) {
+			prov := newLandedProvider()
+			m, objs := landedFixture(infrav1beta1.MigrationPhaseReady)
+			if policy != "" {
+				m.Spec.Options = &infrav1beta1.MigrationOptions{CleanupPolicy: policy}
+			}
+			h := newLandedHarness(t, prov, m, objs...)
+			h.reconcile(t, m)
+			got := h.get(t, m)
+			c := landedCondition(got)
+			require.NotNil(t, c)
+			assert.Equal(t, metav1.ConditionTrue, c.Status)
+			assert.Equal(t, migrationReasonLandedDiskInUseByTarget, c.Reason)
+
+			rv := got.ResourceVersion
+			h.reconcile(t, got)
+			assert.Equal(t, rv, h.get(t, m).ResourceVersion, "a closed condition writes nothing")
+
+			deleting := h.get(t, m)
+			markMigrationDeleting(deleting)
+			hold, res, err := h.r.releaseLandedDiskForDeletion(context.Background(), deleting)
+			require.NoError(t, err)
+			assert.False(t, hold, "released")
+			assert.Zero(t, res.RequeueAfter)
+			assert.Equal(t, rv, h.get(t, m).ResourceVersion, "the deletion writes nothing for the landed disk")
+			assert.Zero(t, prov.calls.Load(), "the target VM's disk is never sent for deletion")
 		})
 	}
 }
@@ -385,6 +456,31 @@ func TestLandedDiskIsHandedOverToAnotherMigration(t *testing.T) {
 	h.reconcile(t, m)
 	assert.Zero(t, prov.calls.Load())
 	assert.Nil(t, h.get(t, m), "released")
+}
+
+// TestValidatingTargetReadyClosesTheLandedDisk (rc2 R23): the status write that
+// marks a migration Ready also writes LandedDiskCleanup=True with reason
+// LandedDiskInUseByTarget at the migration's generation.
+func TestValidatingTargetReadyClosesTheLandedDisk(t *testing.T) {
+	ctx := context.Background()
+	sourceVM, sourceProvider, targetProvider, migration := creatingFixture("default")
+	migration.Status.Phase = infrav1beta1.MigrationPhaseValidatingTarget
+	migration.Status.TargetVMUID = readyTargetVMUID
+	migration.Generation = 2
+	markLandedDiskMayExist(migration, migrationTargetVMKey(migration), targetProvider)
+	r, _ := directionReconciler(t, &capturingMigrationProvider{}, sourceVM, sourceProvider, targetProvider, migration,
+		readyTargetVM("default"))
+
+	_, err := r.handleValidatingTargetPhase(ctx, migration)
+	require.NoError(t, err)
+	got := getXNSMigration(t, r, migration)
+	require.Equal(t, infrav1beta1.MigrationPhaseReady, got.Status.Phase)
+	c := landedCondition(got)
+	require.NotNil(t, c)
+	assert.Equal(t, metav1.ConditionTrue, c.Status)
+	assert.Equal(t, migrationReasonLandedDiskInUseByTarget, c.Reason)
+	assert.Equal(t, migrationLandedDiskInUseByTargetMessage, c.Message)
+	assert.Equal(t, got.Generation, c.ObservedGeneration)
 }
 
 // TestLandedDiskLeftBehind: an older provider image, a target Provider that is
