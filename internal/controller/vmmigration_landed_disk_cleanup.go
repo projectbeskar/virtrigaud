@@ -172,10 +172,10 @@ type landedDiskDone struct {
 }
 
 var (
-	landedDiskDoneDeleted    = landedDiskDone{migrationReasonLandedDiskDeleted, migrationLandedDiskDeletedMessage, corev1.EventTypeNormal}
-	landedDiskDoneInUse      = landedDiskDone{migrationReasonLandedDiskInUse, migrationLandedDiskInUseMessage, ""}
-	landedDiskDoneHandedOver = landedDiskDone{migrationReasonLandedDiskHandedOver, migrationLandedDiskHandedOverMessage, ""}
-	landedDiskDoneRetained   = landedDiskDone{migrationReasonLandedDiskRetained, migrationLandedDiskRetainedMessage, ""}
+	landedDiskDoneDeleted       = landedDiskDone{migrationReasonLandedDiskDeleted, migrationLandedDiskDeletedMessage, corev1.EventTypeNormal}
+	landedDiskDoneInUse         = landedDiskDone{migrationReasonLandedDiskInUse, migrationLandedDiskInUseMessage, ""}
+	landedDiskDoneHandedOver    = landedDiskDone{migrationReasonLandedDiskHandedOver, migrationLandedDiskHandedOverMessage, ""}
+	landedDiskDoneRetained      = landedDiskDone{migrationReasonLandedDiskRetained, migrationLandedDiskRetainedMessage, ""}
 	landedDiskDoneInUseByTarget = landedDiskDone{migrationReasonLandedDiskInUseByTarget,
 		migrationLandedDiskInUseByTargetMessage, ""}
 )

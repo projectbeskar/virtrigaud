@@ -2222,7 +2222,7 @@ func (r *VMMigrationReconciler) handleReadyPhase(ctx context.Context, migration 
 		return ctrl.Result{}, err
 	}
 
-	cleanedUp :=migration.Status.StorageInfo != nil && migration.Status.StorageInfo.CleanedUp
+	cleanedUp := migration.Status.StorageInfo != nil && migration.Status.StorageInfo.CleanedUp
 	if cleanedUp && !stagingCleanupWanted(migration, stagingTriggerReady) {
 		return ctrl.Result{}, nil
 	}
