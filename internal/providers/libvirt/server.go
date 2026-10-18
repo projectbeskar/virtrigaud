@@ -1140,6 +1140,9 @@ func (s *Server) GetCapabilities(ctx context.Context, req *providerv1.GetCapabil
 		// written in a private directory and renamed onto it (diskWriteDir);
 		// a landed disk a domain uses is refused (ensureDiskTargetFree).
 		ResendSafeImportBackends: migration.PVCS3AndNFSImportBackends(),
+		// rc2 R7: DeleteLandedDisk removes a migration's landed disk no domain
+		// uses (landed_disk.go). A clustered provider does not report it.
+		SupportsLandedDiskDelete: true,
 	}, nil
 }
 
@@ -1320,6 +1323,17 @@ func (s *Server) GetDiskInfo(ctx context.Context, req *providerv1.GetDiskInfoReq
 func (s *Server) ImportDisk(ctx context.Context, req *providerv1.ImportDiskRequest) (*providerv1.ImportDiskResponse, error) {
 	if s.clusteredProvider() {
 		return nil, notRoutedYet("ImportDisk", sliceRoutedImport)
+	}
+	// rc2 R7: the landing name is held for the whole import (check, land,
+	// rename), serialised with Create's in-place attach and DeleteLandedDisk
+	// of the same name (landing_lock.go). A request whose name is invalid is
+	// refused below, by the import path itself.
+	if name, nameErr := importVolumeName(req); nameErr == nil && name != "" {
+		unlock, err := landingLocks.lockForImport(ctx, sanitizeVolumeName(name))
+		if err != nil {
+			return nil, status.Error(codes.Unavailable, "ImportDisk: gave up waiting for other work on the landing disk")
+		}
+		defer unlock()
 	}
 	// ADR-0006: libvirt is a TARGET for the S3 relay import (Slice 1). Accept pvc
 	// and s3; reject nfs/unknown honestly. Only the relay transfer mode is

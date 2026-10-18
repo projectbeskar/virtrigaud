@@ -2017,6 +2017,17 @@ func (p *Provider) ImportDisk(ctx context.Context, req *providerv1.ImportDiskReq
 		}
 	}
 
+	// rc2 R7: an import and DeleteLandedDisk of the same stage exclude each
+	// other (landing_guard.go). A request with an invalid target is refused
+	// below, by the import path itself.
+	if tv := req.GetTargetVm(); validStageIdentity(tv.GetNamespace(), tv.GetName()) == nil {
+		release, ok := stageGuards.beginImport(importStageName(tv.GetNamespace(), tv.GetName()))
+		if !ok {
+			return nil, errors.NewUnavailable("ImportDisk: the import stage of this VM is being deleted; retry", nil)
+		}
+		defer release()
+	}
+
 	// ADR-0006 Slice 4 Proxmox TARGET path: the node's qemu-img reads the staged
 	// qcow2 from the NFS export and writes a node-local stage file for qm importdisk.
 	if req.BackendType == migration.BackendNFS {

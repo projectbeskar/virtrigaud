@@ -95,6 +95,9 @@ func GetProviderCapabilities() *capabilities.Manager {
 		// a time limit or a lock, so after a cancelled call it copies to
 		// completion and publishes the stage at an arbitrary later time.
 		ResendSafeImportBackends(migration.BackendS3).
+		// rc2 R7: DeleteLandedDisk removes the node-side import stage a
+		// migration left for its target VM (landed_disk.go).
+		LandedDiskDelete().
 		DiskTypes("raw", "qcow2").
 		NetworkTypes("bridge", "vlan").
 		Build()

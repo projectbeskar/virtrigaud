@@ -99,6 +99,13 @@ const (
 	// Create or Clone whose outcome is unknown only to a provider that
 	// advertises it, so advertise it only with a Create and Clone that do.
 	CapabilityOwnerRebind Capability = "owner_rebind"
+	// CapabilityLandedDiskDelete marks a provider whose DeleteLandedDisk
+	// removes the disk a migration's ImportDisk landed for a target VM that
+	// does not use it, confined to that VM's landing name and refused while any
+	// VM uses the disk; reported as
+	// GetCapabilitiesResponse.supports_landed_disk_delete (rc2 R7). Advertise
+	// it only with a DeleteLandedDisk that does.
+	CapabilityLandedDiskDelete Capability = "landed_disk_delete"
 
 	// Provider-specific capabilities
 	CapabilityVSphere     Capability = "vsphere"
@@ -279,6 +286,8 @@ func (m *Manager) GetCapabilities(ctx context.Context, req *providerv1.GetCapabi
 		SupportsOwnerTransfer: m.HasCapability(CapabilityOwnerTransfer),
 		// rc2 R4: Create and Clone re-bind the VM stamped with their owner.
 		SupportsOwnerRebind: m.HasCapability(CapabilityOwnerRebind),
+		// rc2 R7: DeleteLandedDisk removes a migration's unused landed disk.
+		SupportsLandedDiskDelete: m.HasCapability(CapabilityLandedDiskDelete),
 		// ADR-0011 D7: the backends DeleteStagedDisk removes staging objects from.
 		SupportedStagedDiskDeleteBackends: m.supportedStagedDiskDeleteBackends,
 		// rc2 R6: the backends on which a re-sent ExportDisk / ImportDisk is safe.
@@ -420,6 +429,13 @@ func (b *Builder) OwnerTransfer() *Builder {
 // make with its owner and return that VM when sent again for the same owner.
 func (b *Builder) OwnerRebind() *Builder {
 	b.manager.AddCapability(CapabilityOwnerRebind)
+	return b
+}
+
+// LandedDiskDelete adds CapabilityLandedDiskDelete: DeleteLandedDisk removes
+// a migration's landed disk that no VM uses, and nothing else.
+func (b *Builder) LandedDiskDelete() *Builder {
+	b.manager.AddCapability(CapabilityLandedDiskDelete)
 	return b
 }
 

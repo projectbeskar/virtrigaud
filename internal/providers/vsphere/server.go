@@ -577,6 +577,9 @@ func (p *Provider) GetCapabilities(ctx context.Context, req *providerv1.GetCapab
 		// "<ns>_<vm>-migrated" folder, replacing it, or is refused
 		// (VM_DISK_IN_USE) when a VM uses it — never a second disk.
 		ResendSafeImportBackends: []string{migration.BackendS3, migration.BackendNFS},
+		// rc2 R7: DeleteLandedDisk removes an unused migration landing folder
+		// (landed_disk.go).
+		SupportsLandedDiskDelete: true,
 	}, nil
 }
 
