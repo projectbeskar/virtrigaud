@@ -175,26 +175,29 @@ func (e *copyRefusedError) GRPCStatus() *status.Status {
 // sudo, and as the SSH user — with the same pinned source format — ONLY when
 // sudo itself refused (sudoRefused: not installed, or no passwordless rule).
 func (c diskCopy) run(ctx context.Context, h hostCommandRunner, guard *hostCmdGuard) (*VirshResult, error) {
+	// The checks before the copy command only read (or create the copy's empty
+	// output file in its private directory): their failures are tagged
+	// stageBefore, for the single-host export's outcome (call_outcome.go).
 	if err := checkCopySource(ctx, h, c.src, c.srcFormat); err != nil {
-		return nil, err
+		return nil, atStage(stageBefore, err)
 	}
 	if c.privArgs != nil && c.outDir != "" {
 		reason, wire, err := unsafeHostDirReason(ctx, h, c.outDir)
 		if err != nil {
-			return nil, err
+			return nil, atStage(stageBefore, err)
 		}
 		if reason != "" {
-			return nil, newCopyRefused(c.src, reason+"; root does not write there", wire)
+			return nil, atStage(stageBefore, newCopyRefused(c.src, reason+"; root does not write there", wire))
 		}
 	}
 	if c.privArgs != nil {
 		argv, err := guard.applyPrivileged(c.target, c.umask, append([]string{"qemu-img"}, c.privArgs...)...)
 		if err != nil {
-			return nil, err
+			return nil, atStage(stageBefore, err)
 		}
 		if c.output != "" {
 			if _, err := runHost(ctx, h, "sh", "-c", createCopyOutputScript, "sh", c.umask, c.output); err != nil {
-				return nil, fmt.Errorf("create the copy's output file: %w", err)
+				return nil, atStage(stageBefore, fmt.Errorf("create the copy's output file: %w", err))
 			}
 		}
 		res, err := runHost(ctx, h, argv...)
@@ -274,7 +277,7 @@ func (c diskCopy) runAsSSHUser(ctx context.Context, h hostCommandRunner, guard *
 	}
 	argv, err := guard.apply(c.target, cmd...)
 	if err != nil {
-		return nil, err
+		return nil, atStage(stageBefore, err)
 	}
 	return runHost(ctx, h, argv...)
 }
@@ -451,6 +454,10 @@ func definitionDiskFormat(domainXML, diskPath string) string {
 func exportSourceOn(ctx context.Context, vp *VirshProvider, d domainTarget, diskID string) (string, string, error) {
 	doc, err := domainDisksOf(ctx, vp, d.handle)
 	if err != nil {
+		if virshNoDomain(err) {
+			// The domain is not on the host: the export has nothing to read.
+			return "", "", contracts.NewNotFoundError(fmt.Sprintf("source VM %q not found on the libvirt host", d.name), err)
+		}
 		return "", "", contracts.NewRetryableError(fmt.Sprintf("failed to read disks for source VM %q", d.name), err)
 	}
 	disks := doc.diskFiles()

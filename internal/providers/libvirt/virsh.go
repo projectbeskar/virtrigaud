@@ -1306,10 +1306,8 @@ func (v *VirshProvider) snapshotExists(ctx context.Context, domainName, snapshot
 	// List all snapshots for the domain
 	result, err := v.runVirshCommand(ctx, "snapshot-list", domainName, "--name")
 	if err != nil {
-		// If domain has no snapshots, snapshot-list may fail
-		if strings.Contains(err.Error(), "no domain snapshot") {
-			return false, nil
-		}
+		// A list that failed is never an absence: a domain with no snapshots
+		// lists none and succeeds.
 		return false, fmt.Errorf("failed to list snapshots: %w", err)
 	}
 
