@@ -576,10 +576,29 @@ re-binding, imported-disk confinement, NFS/S3 import hardening, idempotent power
 and in Wave 2 the `Reconfigure` change that no longer touches `scsi0`, the s3 stage
 publish check and the import-stage delete of a failed migration) were tested only
 against the test fake, not a real PVE cluster. If you run Proxmox, treat it as
-untested and try these paths on a lab cluster first. The Wave 2 vSphere and libvirt
-changes were tested against vcsim and recorded host runners, not yet against real
-hypervisors; ADR-0012's Proxmox name-rule change (planned for v0.4.1) needs a real PVE
-cluster as its release gate.
+untested and try these paths on a lab cluster first. ADR-0012's Proxmox name-rule
+change (planned for v0.4.1) needs a real PVE cluster as its release gate.
+
+**Validated in the lab on real vSphere and libvirt** (vCenter, single-host and
+clustered libvirt 10.0, Kubernetes 1.34), on the rc2 candidate build:
+
+- Wave 1: the admission policy (enforced even for `system:masters`; the manager and
+  user keys allowed), a planted target VM failing a migration at `Validating` before
+  any side effect, adoption re-stamping a detached VM so that deleting it works, and
+  single-host clone stamping.
+- Wave 2: the `PHASE` column; libvirt definition sync via `virsh define /dev/stdin`
+  with nothing left in the host's `/tmp`; a vSphere CPU change on a running VM
+  without hot-add held as `ResizePendingPowerOff` (still `Ready`) and applied after
+  power-off, with the root disk left alone; libvirt → S3 → vSphere and a pvc-backend
+  vSphere → libvirt migration end to end, with the request markers cleared, the
+  source provider mounting the PVC read-write and the target read-only only while
+  the migration ran, the migration-created PVC deleted with the migration, the
+  landed disk kept while its target VM uses it, and the import VM's `.vmx`/`.vmsd`
+  removed from the landing folder.
+
+Paths that need a fault to trigger (held provider calls after a manager restart,
+landed-disk deletion after a failed import, staged-file link refusal) are covered
+by unit, envtest and simulator tests only.
 
 ## Breaking changes
 
