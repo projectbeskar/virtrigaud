@@ -21,6 +21,37 @@ A legacy PVC-backed model also exists for the vSphere/libvirt directions (a
 ReadWriteMany StorageClass), but it is compat-only and does not work for Proxmox
 or for host-resident libvirt disks the provider pod cannot reach.
 
+### Staged-file hardening (pvc backend)
+
+The staging PVC (`spec.storage.pvc.name`) is mounted into the credentialed
+provider pods, and anyone who can write that PVC controls what is in it. The
+providers therefore open, create and remove the staged disk
+(`vmmigrations/<namespace>/<migration>/…` beneath the mount) **strictly beneath
+the PVC mount, with no symbolic link followed in any path component** (Linux
+`openat2` with `RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS`, or an equivalent
+`O_NOFOLLOW` walk on older kernels), and accept only a **regular file with a
+single hard link**:
+
+- A symbolic link at the staged file, or in place of any directory on its path
+  (`vmmigrations`, the namespace or the migration directory), is refused: a
+  link would otherwise resolve in the provider pod's filesystem and import its
+  credentials, TLS key or ServiceAccount token into the target VM's disk, or
+  redirect the export's write.
+- FIFOs, device nodes, sockets, directories and hard-linked files at the staged
+  name are refused. (A PVC filesystem that reports a link count other than 1
+  for a regular file — some exotic CSI/FUSE drivers — is refused too.)
+- The export replaces an earlier staged file by removing its name and creating
+  a new file; a link or special file planted at the name is refused and left in
+  place.
+- The import reads the disk through the one descriptor it opened, so the file
+  cannot be swapped between the checks and the copy.
+
+A refusal fails the migration with a constant message (`refused the staged
+file` / `refused the staged disk: symbolic links, hard links and special files
+are not imported`) that names no path; the provider log has the details. Keep
+the PVC's `vmmigrations/` tree free of links — VirtRigaud creates the
+directories it needs itself.
+
 Key points before using these examples:
 
 - **S3 staging needs a credentials Secret** (`accessKeyID` / `secretAccessKey`,
