@@ -283,7 +283,7 @@ Proxmox behaviour was tested against the PVE test fake only.
 
 → [Which disk a size goes to](docs/reconfigure-results.md#which-disk-a-size-goes-to),
 [vSphere: changes a running VM cannot take](docs/reconfigure-results.md#vsphere-changes-a-running-vm-cannot-take),
-[Upgrade guide](docs/upgrading.md#behavior-changes-that-are-visible-but-not-breaking)
+[Upgrade guide](docs/upgrading.md#breaking-changes)
 
 ### A provider call whose outcome is unknown is held, not re-sent blindly (#402, #405)
 
@@ -705,7 +705,7 @@ cluster as its release gate.
   running vSphere VM cannot take (no hot-add, a memory decrease, and others) shows
   `Reconfiguring=False/ResizePendingPowerOff` until the VM is powered off.
   → [Changes since v0.4.0-rc1](#reconfigure-resizes-the-right-disk-and-vsphere-says-when-it-needs-a-power-off-401-breaking),
-  [Upgrade guide](docs/upgrading.md#behavior-changes-that-are-visible-but-not-breaking)
+  [Upgrade guide](docs/upgrading.md#breaking-changes)
 - **New in rc2: a `SnapshotCreate`, `ExportDisk` or `ImportDisk` whose outcome is unknown
   holds the `VMMigration` or `VMSnapshot` for an operator** (`Ready=False`,
   `SnapshotOutcomeUnknown`, `ExportOutcomeUnknown` or `ImportOutcomeUnknown`) instead of
