@@ -5,6 +5,31 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-10-18 12:10] - ADR-0007 Addendum B (Proposed): migration into a clustered provider (R11, design only)
+**Author:** @wrkode (William Rizzo)
+
+### Added
+- `docs/adr/0007-clustered-orchestrator-provider.md`: Addendum B (Status: Proposed), the P3 cold-path design for a `VMMigration` whose target Provider has `topology: cluster`, for the maintainer's sign-off. It covers:
+  - B1: for clustered targets only, the migration creates its target VirtualMachine (with the #394 claim) at `Validating`, before any side effect on the source. The ordinary VirtualMachine scheduling path (R1, R4, admission under the assume lock, the checked `pendingHost` write) places it, and it is held `WaitingForImport` until the import is recorded. The import's host is pinned once an import was sent. A definite name conflict releases the host (the slice 2 rule). An unbound target is deleted on failure or retry.
+  - B2: `ImportDiskRequest.target_host_id` (13) and the target VM UID, `withRoutedBudget` + `withHostConn`, the landing host's name check, A6.1's cross-host guard on the landed file, and the landing lock + `flock`. Landing on a shared pool is not required: host-local is the default.
+  - B3: `s3` and `nfs` only. `pvc` is refused, with reasons. The host-side staged-image checks are reused. With `timeout(1)` on every host command, clustered can declare `resend_safe_import_backends: [s3, nfs]`.
+  - B4: R6 markers and re-sends to the recorded host; R21-style typed outcomes on the routed path (`HOST_UNAVAILABLE` only before the first host command); a routed `DeleteLandedDisk` through a new optional `MigrationImportTarget.host` and `DeleteLandedDiskRequest.target_host_id` (4) with the cross-host in-use scan; a clustered `DeleteStagedDisk` (`target_host_id` 8 for nfs).
+  - B5: the `supports_routed_import` (30) capability, the version matrix and the rollback behaviour. The Validating refusal stays for providers without the capability.
+  - B6: four PR-sized slices with tests and a dome2/dome3 shared-NFS lab plan.
+  - B7: eight open questions.
+
+  Single-host, vSphere and Proxmox targets keep today's order and requests, so the ADR-0008 soak window is unaffected. The Status block and A1 point at the addendum.
+- `docs/adr/README.md`: the ADR-0007 index row links Addendum B (Proposed).
+
+### Why
+Rc2 roadmap item R11: a migration into a clustered libvirt Provider is refused at `Validating` because `ImportDisk` cannot reach a host. The design must compose with the scheduler (A2, A5), restore holds (A6), the target binding (#394), durable request markers (#402), typed outcomes (#405) and landed-disk cleanup (#403) before any code is written.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [ ] Config change only
+- [x] Documentation only
+
 ## [2026-10-18 08:46] - Release notes: v0.4.0-rc2, "Changes since v0.4.0-rc1" (Wave 2)
 **Author:** @wrkode (William Rizzo)
 
