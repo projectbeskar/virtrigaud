@@ -485,3 +485,19 @@ func singleHostImportFailure(ctx context.Context, err error) error {
 	}
 	return nothingDone(wireImportNotPerformed, err)
 }
+
+// stagedSourceOpenOutcome classifies a failure of openStagedImportSource for
+// the manager (rc2 R21). Its typed refusals (InvalidArgument for a bad URL,
+// FailedPrecondition for a refused link or special file, NotFound for a
+// missing staged disk) are definite as they are. Any other failure to open the
+// staged disk happened before anything was imported, so it is answered "not
+// performed" instead of the generic Internal, which the manager would hold as
+// an unknown outcome.
+func stagedSourceOpenOutcome(err error) error {
+	switch status.Code(err) {
+	case codes.InvalidArgument, codes.FailedPrecondition, codes.NotFound:
+		return err
+	default:
+		return nothingDone(wireImportNotPerformed, err)
+	}
+}

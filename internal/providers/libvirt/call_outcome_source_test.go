@@ -49,3 +49,12 @@ func TestExportSourceOn_MissingDomainIsNotFound(t *testing.T) {
 	require.Error(t, err)
 	assert.True(t, contracts.IsRetryable(err), "an unreadable definition is not a missing domain: %v", err)
 }
+
+// TestStagedSourceOpenOutcome: a staged-disk open that fails before anything
+// was imported is "not performed"; the typed refusals stay definite.
+func TestStagedSourceOpenOutcome(t *testing.T) {
+	assertNotPerformedStatus(t, stagedSourceOpenOutcome(status.Error(codes.Internal, stagedDiskOpenFailedMessage)))
+	for _, c := range []codes.Code{codes.InvalidArgument, codes.FailedPrecondition, codes.NotFound} {
+		assertRefusalStatus(t, stagedSourceOpenOutcome(status.Error(c, "refused")), c)
+	}
+}

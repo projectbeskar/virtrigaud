@@ -51,7 +51,7 @@ type transferConn struct {
 	*virshConn
 	stream       func(ctx context.Context, argv ...string) (io.ReadCloser, error)
 	streamIn     func(ctx context.Context, r io.Reader, argv ...string) error
-	copyToRemote func(ctx context.Context, localPath, volumeName string) (string, error)
+	copyToRemote func(ctx context.Context, src io.Reader, volumeName string) (string, error)
 }
 
 func (c *transferConn) uri() string { return "qemu+ssh://r21@single/system" }
@@ -67,8 +67,8 @@ func (c *transferConn) StreamIn(ctx context.Context, r io.Reader, argv ...string
 	return c.streamIn(ctx, r, argv...)
 }
 
-func (c *transferConn) copyDiskToRemote(ctx context.Context, localPath, volumeName string) (string, error) {
-	return c.copyToRemote(ctx, localPath, volumeName)
+func (c *transferConn) copyDiskToRemote(ctx context.Context, src io.Reader, volumeName string) (string, error) {
+	return c.copyToRemote(ctx, src, volumeName)
 }
 
 // transferFixture is the fake host with an ssh:// connection and a fake S3.
@@ -105,7 +105,7 @@ func newTransferFixture(t *testing.T) *transferFixture {
 		_, err := io.Copy(io.Discard, r)
 		return err
 	}
-	conn.copyToRemote = func(context.Context, string, string) (string, error) {
+	conn.copyToRemote = func(context.Context, io.Reader, string) (string, error) {
 		// A scratch path: nothing in these tests may name the real host's.
 		return filepath.Join(defaultPoolRequiredDir, "team-a.web-migrated.qcow2"), nil
 	}
@@ -611,9 +611,9 @@ func TestSingleHostImportPVC_Outcomes(t *testing.T) {
 	})
 	t.Run("a: the staged disk is missing - NotFound", func(t *testing.T) {
 		fx := newTransferFixture(t)
-		_, err := fx.server().ImportDisk(context.Background(), req("file:///no/such/staged/disk.qcow2"))
+		_, err := fx.server().ImportDisk(context.Background(), req(stagedPVCURL(t, filepath.Join(t.TempDir(), "disk.qcow2"))))
 		assertRefusalStatus(t, err, codes.NotFound)
-		assertConstantText(t, err, "/no/such")
+		assertConstantText(t, err, "disk.qcow2")
 	})
 	t.Run("a: the check of the landing name fails - nothing landed", func(t *testing.T) {
 		fx := newTransferFixture(t)
@@ -622,41 +622,41 @@ func TestSingleHostImportPVC_Outcomes(t *testing.T) {
 		r21Patch(t, "sh)\n  case \"$2\" in\n", "sh)\n  case \"$2\" in\n  "+shellQuote(targetKindScript)+") echo "+pathExistsMarker+" ;;\n")
 		r21Patch(t, "    list)\n      if [", "    list)\n      fail list\n      if [")
 		fx.script("single", "fail-list", "")
-		_, err := fx.server().ImportDisk(context.Background(), req("file://"+staged(t)))
+		_, err := fx.server().ImportDisk(context.Background(), req(stagedPVCURL(t, staged(t))))
 		assertNotPerformedStatus(t, err)
 		assert.False(t, fx.calledWith("mv"))
 	})
 	t.Run("a: the copy to the host fails before the rename - nothing landed", func(t *testing.T) {
 		fx := newTransferFixture(t)
-		fx.conn.copyToRemote = func(context.Context, string, string) (string, error) {
+		fx.conn.copyToRemote = func(context.Context, io.Reader, string) (string, error) {
 			return "", errors.New("ssh: copy failed at /var/lib/libvirt/images/.virtrigaud-write-x")
 		}
-		_, err := fx.server().ImportDisk(context.Background(), req("file://"+staged(t)))
+		_, err := fx.server().ImportDisk(context.Background(), req(stagedPVCURL(t, staged(t))))
 		assertNotPerformedStatus(t, err)
 		assertConstantText(t, err, "/var/lib", ".virtrigaud-write")
 	})
 	t.Run("b: the rename fails with an exit status - nothing landed", func(t *testing.T) {
 		fx := newTransferFixture(t)
-		fx.conn.copyToRemote = func(context.Context, string, string) (string, error) {
+		fx.conn.copyToRemote = func(context.Context, io.Reader, string) (string, error) {
 			return "", atStage(stagePublish, virshFailure(1, "mv: cannot move"))
 		}
-		_, err := fx.server().ImportDisk(context.Background(), req("file://"+staged(t)))
+		_, err := fx.server().ImportDisk(context.Background(), req(stagedPVCURL(t, staged(t))))
 		assertNotPerformedStatus(t, err)
 		assert.Equal(t, wireImportFailed, status.Convert(err).Message())
 	})
 	t.Run("c: the rename loses its connection - unknown", func(t *testing.T) {
 		fx := newTransferFixture(t)
-		fx.conn.copyToRemote = func(context.Context, string, string) (string, error) {
+		fx.conn.copyToRemote = func(context.Context, io.Reader, string) (string, error) {
 			return "", atStage(stagePublish, virshFailure(-1, "connection reset"))
 		}
-		_, err := fx.server().ImportDisk(context.Background(), req("file://"+staged(t)))
+		_, err := fx.server().ImportDisk(context.Background(), req(stagedPVCURL(t, staged(t))))
 		assertUnknownOutcome(t, err)
 	})
 	t.Run("c: a failure after the disk landed keeps its historical answer - unknown", func(t *testing.T) {
 		fx := newTransferFixture(t)
 		// The copy lands the disk; the volume step then cannot find it (the
 		// fake host has no such file), as any later failure would.
-		_, err := fx.server().ImportDisk(context.Background(), req("file://"+staged(t)))
+		_, err := fx.server().ImportDisk(context.Background(), req(stagedPVCURL(t, staged(t))))
 		assertUnknownOutcome(t, err)
 	})
 }

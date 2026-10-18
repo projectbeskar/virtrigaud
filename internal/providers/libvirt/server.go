@@ -1508,7 +1508,7 @@ func (s *Server) ImportDisk(ctx context.Context, req *providerv1.ImportDiskReque
 	// tenant. Every later read uses this descriptor.
 	src, sourcePath, err := openStagedImportSource(req.SourceUrl)
 	if err != nil {
-		return nil, err
+		return nil, stagedSourceOpenOutcome(err)
 	}
 	defer func() { _ = src.Close() }()
 
