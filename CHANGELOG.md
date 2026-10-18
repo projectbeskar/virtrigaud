@@ -5,6 +5,22 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-10-18 12:10] - Single-host libvirt Delete removes the VM's own cloud-init seed directory (rc2 R24)
+**Author:** @wrkode (William Rizzo)
+
+### Fixed
+- `internal/providers/libvirt/seed_reclaim.go` (new), `internal/providers/libvirt/provider_virsh.go`: a single-host `Delete` left the VM's seed directory `<staging>/virtrigaud-cloudinit-<domain>.<random>` (cloud-init.iso, user-data, meta-data) on the host when the VM and a clone of it were deleted at the same time. A single-host clone's CD-ROM references its source's seed, so the delete plan keeps a seed another domain still references; both deletes planned while the other domain was still defined, both kept it, and nothing removed it. After the undefine, `deleteExistingDomainChecked` (single-host only) now calls `reclaimSeedDirs`: the seed the definition referenced that the plan kept, and every seed directory named after exactly the deleted domain (`virtrigaud-cloudinit-<domain>.` plus the ten mktemp characters; `t2s3` never matches `t2s3c`), are removed once no defined domain references a file in them. A delete for a domain that is already absent (a retry) does the same via `cleanupOrphanedResources` for seeds older than five minutes, so an in-flight create's fresh seed is never taken. Only real directories directly inside the staging directory are considered (`find -type d`, a symlink is never followed), the name is matched in Go (no glob), a domain scan that fails keeps everything, and every failure is logged at `WARN` without failing the delete.
+- `internal/providers/libvirt/seed_reclaim_test.go` (new), `internal/providers/libvirt/domain_naming_create_test.go`: tests on the fake host: source and clone deleted together in both orders (fail before the fix), a seed the definition no longer names, the `t2s3` / `t2s3c` prefix pair, a symlink and a malformed-name decoy, and the absent-domain sweep (age guard, still-referenced seed kept). The fake virsh can now park an `undefine` to interleave two deletes.
+
+### Why
+Found cleaning up the lab: deleting a migration-target VM and its clone together left the seed directory (which holds the VM's user-data) on the hypervisor.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-10-21 16:30] - Go 1.26.10 (GO-2026-6809, crypto/x509)
 **Author:** @wrkode (William Rizzo)
 

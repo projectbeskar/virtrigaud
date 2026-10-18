@@ -194,6 +194,12 @@ the following once after upgrading, and delete only what no `VMMigration` in fli
   manager deletes a migration's unused landed disk (`LandedDiskCleanup`, see the
   breaking-change table); only disks recorded as `LandedDiskLeftBehind` or kept by
   `cleanupPolicy: Never` stay, and the condition says so.
+- **libvirt cloud-init seed directories** `<staging>/virtrigaud-cloudinit-<domain>.<random>`
+  (default `/tmp`) of single-host VMs deleted before rc2 together with a clone of them, or
+  whose delete was retried after the domain was undefined. They hold the VM's user-data,
+  which may carry secrets. For each, check with `virsh dumpxml <domain>` for every defined
+  domain (or `grep -l virtrigaud-cloudinit` over `virsh dumpxml`) that no domain's CD-ROM
+  names it, then remove the directory. From rc2 on a delete removes them itself.
 - **vSphere transient import-VM files** (`<landing name>.vmx`, `.vmsd`, `.hlog`, `.nvram`,
   about 1.4 KB) in the landing folders of migrations imported before rc2. They are harmless;
   remove them with the datastore browser, never the `.vmdk` files next to them. From rc2 on
@@ -664,6 +670,19 @@ the following once after upgrading, and delete only what no `VMMigration` in fli
   instead. A VM that is `Suspended` reports `Running`; one whose power state the
   provider cannot classify (`Unknown`) reports `Failed`; a delete that is held
   reports `Deleting` (the hold is on `Ready`).
+- **A single-host libvirt `Delete` removes the VM's own cloud-init seed directory
+  reliably** (rc2 R24, `internal/providers/libvirt/seed_reclaim.go`). A clone's
+  CD-ROM references its source VM's seed ISO, so the delete of either keeps the seed
+  while the other is defined; when a VM and its clone were deleted at the same time,
+  each kept it and the directory
+  `<staging>/virtrigaud-cloudinit-<domain>.<random>` (default `/tmp`) stayed on the
+  host. After undefining the domain, the delete now re-checks: it removes that
+  directory, and any seed directory named after exactly that domain, once no defined
+  domain references a file in it. A delete retried for a domain that is already gone
+  does the same for a seed older than five minutes. It never follows a symlink, never
+  touches a directory of another domain (`t2s3` and `t2s3c` are distinct), and a
+  failure is logged at `WARN` and does not fail the delete. Clustered providers are
+  unchanged.
 
 ## Post-upgrade verification checklist
 
