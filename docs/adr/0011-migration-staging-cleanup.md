@@ -557,6 +557,19 @@ advertised as `supports_landed_disk_delete`, with the same shape as D1–D8:
   Provider with that UID; a changed or replaced Provider records the disk as left behind (as the
   staging digest does, D5). Migrations whose import an older manager sent carry no marker and are
   not touched.
+- **Closed at `Ready` (rc2 lab finding R23).** The status write that marks a migration `Ready`
+  also records `LandedDiskCleanup=True` with reason `LandedDiskInUseByTarget` ("the landed disk
+  is the target VM's disk; it is never deleted by the migration"), so a successful migration
+  never stays `Unknown`/`LandedDiskMayExist`. No extra write: it is folded into the `Ready`
+  write; a migration that reached `Ready` under rc2 with the condition still `Unknown` is closed
+  the same way once, on its next reconcile. Deleting a `Ready` migration therefore has nothing
+  to delete (no `DeleteLandedDisk`, no hold, any `cleanupPolicy`).
+- **Condition reasons.** `LandedDiskCleanup` is `Unknown`/`LandedDiskMayExist` from just before
+  the import is sent; `False`/`LandedDiskCleanupPending` while a delete is held; `True` once
+  nothing is left to do: `LandedDiskInUseByTarget` (the migration is `Ready`),
+  `LandedDiskDeleted`, `LandedDiskInUse` (the migration's target `VirtualMachine`, or a VM the
+  provider reports, uses it), `LandedDiskHandedOver`, `LandedDiskRetained` (`cleanupPolicy:
+  Never`) or `LandedDiskLeftBehind` (with one `Warning`).
 - **Holds (as D4, D8).** A retryable failure holds the cleanup (`LandedDiskCleanupPending`, the
   blocked-VM backoff, one `Warning`; a deleting `VMMigration` keeps its finalizer until it
   succeeds or `virtrigaud.io/force-delete=true` is set), and a `Failed` migration whose landed
@@ -584,7 +597,11 @@ advertised as `supports_landed_disk_delete`, with the same shape as D1–D8:
 
 **Also (vSphere).** The NFC import's transient VM is unregistered, not destroyed; its own files
 (`<landing name>.vmx`, `.vmsd`, `.hlog`, `.nvram`, `.vmxf` and the non-disk files of its layout
-in the landing folder) are now removed right after, best effort, never a `.vmdk`.
+in the landing folder) are now removed right after, best effort, never a `.vmdk`. A real vCenter
+also writes a history log named `<landing name>-<hex>.hlog` with a random suffix, which is in
+neither list (rc2 lab finding R23): the landing folder is listed after the unregister and a name
+matching exactly `^<landing name>-[0-9a-f]+\.hlog$` is removed too — only in that folder, only
+when the transient VM was verified as the import's, fail-soft like the rest.
 
 **Consequences.** Failed and deleted migrations no longer leave multi-GB disks on the target from
 rc2 on. Landed disks of earlier migrations must still be removed by hand. Validated with vcsim
