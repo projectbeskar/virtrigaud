@@ -18,6 +18,7 @@ package libvirt
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"path/filepath"
 	"slices"
@@ -41,18 +42,23 @@ import (
 //
 // reclaimSeedDirs closes that gap AFTER the undefine: it removes the seed
 // directories the deleted domain left behind, each only when no defined domain
-// references a file in it any more.
+// references a file in it any more. When a clone is the last domain to
+// reference its source's seed, deleting the clone therefore removes the
+// SOURCE's seed directory: that is intended.
 
 const (
 	// seedDirNameSeparator follows the domain name in a seed directory's name:
 	// virtrigaud-cloudinit-<domain>.<random>.
 	seedDirNameSeparator = "."
 
-	// orphanSeedMinAge is how old a domain's seed directory must be before the
-	// cleanup of a domain that is ALREADY ABSENT may remove it: a create of that
-	// name that is still in flight has prepared its seed but not yet defined the
-	// domain, and its seed must not be taken from under it. (A domain that was
-	// present when the delete began has no create in flight.)
+	// orphanSeedMinAge is how old a seed directory found only by its NAME (not
+	// referenced by the deleted domain's definition) must be before it is
+	// removed: a create of that name that is still in flight has prepared its
+	// seed but not yet defined the domain, and its seed must not be taken from
+	// under it. Single-host Create and Delete of one domain name are also
+	// serialized (lockDomain); this age bound is the second line, for a create
+	// that is not in this process. A seed the deleted domain's own definition
+	// referenced (and the plan kept) is removed whatever its age.
 	orphanSeedMinAge = 5 * time.Minute
 )
 
@@ -95,11 +101,12 @@ func isSeedDirIn(dir, stagingDir string) bool {
 
 // ownSeedDirs lists, on the host behind h, the seed directories directly inside
 // stagingDir that are domainName's own (isOwnSeedDirName). Only real
-// directories are listed (`find -type d` does not follow a symlink), and with a
-// positive minAge only those not modified for that long. The name filter runs
-// here, not in find, so no part of the domain name is ever a glob.
+// directories are listed (`find -type d` does not follow a symlink; -H lets the
+// staging directory itself be one), and with a positive minAge only those not
+// modified for that long. The name filter runs here, not in find, so no part
+// of the domain name is ever a glob.
 func ownSeedDirs(ctx context.Context, h hostCommandRunner, stagingDir, domainName string, minAge time.Duration) ([]string, error) {
-	argv := []string{"find", stagingDir, "-mindepth", "1", "-maxdepth", "1", "-type", "d",
+	argv := []string{"find", "-H", stagingDir, "-mindepth", "1", "-maxdepth", "1", "-type", "d",
 		"-name", cloudInitSeedDirPrefix + "*"}
 	if minAge > 0 {
 		argv = append(argv, "-mmin", "+"+strconv.FormatInt(int64(minAge/time.Minute), 10))
@@ -118,22 +125,93 @@ func ownSeedDirs(ctx context.Context, h hostCommandRunner, stagingDir, domainNam
 	return dirs, nil
 }
 
+// isRealDir reports whether path is a directory itself, not a symlink to one
+// (`find -maxdepth 0 -type d` does not follow it). An error is returned when
+// the host command fails, so the caller can keep the path.
+func isRealDir(ctx context.Context, h hostCommandRunner, path string) (bool, error) {
+	res, err := runHost(ctx, h, "find", path, "-maxdepth", "0", "-type", "d", "-print0")
+	if err != nil {
+		return false, err
+	}
+	return len(splitNULList(res.Stdout)) == 1, nil
+}
+
+// seedDirsReferenced reports, for each of dirs (absolute, as they will be
+// removed), whether any domain defined on the host behind h references a file
+// in it — or in a directory it lies under that a domain shares in. It reads
+// each domain's PERSISTENT definition (`virsh dumpxml --inactive`: what the
+// domain starts from) and canonicalizes the candidate directories and every
+// referenced path in one `realpath` call, so a staging directory reached through
+// a symlink is compared like for like. It fails closed: any host failure is an
+// error, never "unreferenced".
+func seedDirsReferenced(ctx context.Context, h hostCommandRunner, dirs []string) (map[string]bool, error) {
+	uuids, err := listDomainUUIDs(ctx, h)
+	if err != nil {
+		return nil, err
+	}
+	var files, shared []string
+	for _, uuid := range uuids {
+		xmlRes, err := h.runVirshCommand(ctx, "dumpxml", uuid, "--inactive")
+		if err != nil {
+			gone, gerr := domainGone(ctx, h, uuid)
+			if gerr != nil {
+				return nil, gerr
+			}
+			if gone {
+				continue
+			}
+			return nil, hostCheckFailed(fmt.Sprintf("read definition of domain %s", uuid), err)
+		}
+		refs, err := parseDomainPathRefs(xmlRes.Stdout)
+		if err != nil {
+			return nil, hostCheckFailed(fmt.Sprintf("parse definition of domain %s", uuid), err)
+		}
+		files = append(files, refs.files...)
+		shared = append(shared, refs.dirs...)
+	}
+	all := append(append(append([]string(nil), dirs...), files...), shared...)
+	canon, err := canonicalizeOnHost(ctx, h, all)
+	if err != nil {
+		return nil, err
+	}
+	set := inUseSet{files: map[string]bool{}}
+	for _, f := range canon[len(dirs) : len(dirs)+len(files)] {
+		set.files[f] = true
+	}
+	set.dirs = canon[len(dirs)+len(files):]
+	used := make(map[string]bool, len(dirs))
+	for i, dir := range dirs {
+		used[dir] = set.contains(canon[i]) || otherDomains{{refs: set}}.useUnder(canon[i])
+	}
+	return used, nil
+}
+
 // reclaimSeedDirs removes the cloud-init seed directories a deleted domain left
-// behind on the host behind h: its own (ownSeedDirs; with minAge, only the old
-// ones — see orphanSeedMinAge) and extra, a seed directory its definition
-// referenced that the delete plan kept because another domain used it. A
-// directory is removed only when no domain defined on the host references a
-// file in it; when that cannot be established nothing is removed.
+// behind on the host behind h: extra, a seed directory its definition
+// referenced that the delete plan kept because another domain used it (removed
+// whatever its age), and the directories named after exactly this domain
+// (ownSeedDirs; with minAge, only the old ones — see orphanSeedMinAge). A
+// directory is removed only when it is a real directory directly inside the
+// staging directory and no domain defined on the host references a file in it
+// (seedDirsReferenced); when that cannot be established nothing is removed.
 //
 // It never fails the delete: every problem is logged at Warn and the directory
 // stays (a leaked seed directory is recoverable, a domain whose CD-ROM points
-// at a removed ISO is not). It never removes anything but a seed directory
-// directly inside the staging directory, and does not follow symlinks.
+// at a removed ISO is not). It never follows a symlink.
 func (p *Provider) reclaimSeedDirs(ctx context.Context, h hostCommandRunner, domainName, extra string, minAge time.Duration) {
 	staging := p.stagingDir()
 	var candidates []string
 	if extra != "" && isSeedDirIn(extra, staging) {
-		candidates = append(candidates, filepath.Clean(extra))
+		extra = filepath.Clean(extra)
+		real, err := isRealDir(ctx, h, extra)
+		switch {
+		case err != nil:
+			log.Printf("WARN Keeping the cloud-init seed directory %s of deleted domain %s: could not inspect it: %v", extra, domainName, err)
+		case !real:
+			log.Printf("WARN Keeping %s: it is not a directory (or is a symlink), so it is not a seed directory of deleted domain %s", extra, domainName)
+		default:
+			candidates = append(candidates, extra)
+		}
 	}
 	own, err := ownSeedDirs(ctx, h, staging, domainName, minAge)
 	if err != nil {
@@ -148,14 +226,14 @@ func (p *Provider) reclaimSeedDirs(ctx context.Context, h hostCommandRunner, dom
 		return
 	}
 
-	refs, err := domainRefsOnHost(ctx, h, "")
+	used, err := seedDirsReferenced(ctx, h, candidates)
 	if err != nil {
 		log.Printf("WARN Keeping the cloud-init seed directories %v of deleted domain %s: could not verify that no domain uses them: %v",
 			candidates, domainName, err)
 		return
 	}
 	for _, dir := range candidates {
-		if otherDomains(refs).useUnder(dir) {
+		if used[dir] {
 			log.Printf("WARN Keeping the cloud-init seed directory %s of deleted domain %s: a domain still references it", dir, domainName)
 			continue
 		}

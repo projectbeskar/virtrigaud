@@ -62,7 +62,10 @@ d="$FAKE_HOST_DIR/$host"
 printf '%s\t%s\n' "$host" "$*" >> "$FAKE_HOST_DIR/virsh.log"
 case "$1" in
   list)
-    if [ "$3" = "--uuid" ]; then cat "$d/uuids" 2>/dev/null; exit 0; fi
+    if [ "$3" = "--uuid" ]; then
+      if [ -f "$d/fail-list-uuid" ]; then echo "error: failed to connect to the hypervisor" >&2; exit 1; fi
+      cat "$d/uuids" 2>/dev/null; exit 0
+    fi
     printf ' Id   %-60s State\n' Name
     printf '%s\n' '----------------------------------------------------------------------------'
     if [ -f "$d/names" ]; then

@@ -67,6 +67,17 @@ func (p *Provider) Create(ctx context.Context, req contracts.CreateRequest) (con
 	if p.virshProvider == nil {
 		return contracts.CreateResponse{}, contracts.NewRetryableError("virsh provider not initialized", nil)
 	}
+
+	// Create, Clone and Delete of one domain name run one at a time in this
+	// process, as they do on a clustered provider: a re-sent create must not
+	// interleave with the delete of the same name (it could find the domain
+	// the delete is about to undefine, or lose the seed it just made to the
+	// delete's cleanup of leftovers; R24).
+	unlock, err := p.lockDomain(ctx, domainName, guardOpCreate)
+	if err != nil {
+		return contracts.CreateResponse{}, err
+	}
+	defer unlock()
 	return p.createVM(ctx, p.virshProvider, req, nil)
 }
 
@@ -598,6 +609,14 @@ func (p *Provider) Delete(ctx context.Context, vm contracts.VMRef) (taskRef stri
 	if p.virshProvider == nil {
 		return "", contracts.NewRetryableError("virsh provider not initialized", nil)
 	}
+	// Serialized with a Create or Clone of the same domain name (see Create).
+	// cleanupOrphanedResources and the rest of deleteOn run under this lock and
+	// take no domain lock themselves.
+	unlock, err := p.lockDomain(ctx, id, guardOpDelete)
+	if err != nil {
+		return "", err
+	}
+	defer unlock()
 	return p.deleteOn(ctx, p.singleHostConn(), id)
 }
 
@@ -853,9 +872,10 @@ func (p *Provider) deleteExistingDomainChecked(ctx context.Context, vp *VirshPro
 	// domain left behind now that it is gone (R24): a seed the plan kept
 	// because another domain — a clone, itself being deleted at the same time —
 	// still referenced it, and any seed named after this domain that its
-	// definition no longer referenced. Best-effort; never fails the delete.
+	// definition no longer referenced (only those old enough that no create of
+	// the name can still be preparing them). Best-effort; never fails the delete.
 	if check == nil {
-		p.reclaimSeedDirs(ctx, vp, plan.name, plan.keptSeedDir, 0)
+		p.reclaimSeedDirs(ctx, vp, plan.name, plan.keptSeedDir, orphanSeedMinAge)
 	}
 
 	log.Printf("INFO Successfully deleted domain and all resources: %s", id)
@@ -954,9 +974,18 @@ func (p *Provider) planDomainDeletion(ctx context.Context, vp *VirshProvider, id
 		log.Printf("WARN Refusing %s of libvirt domain %s: %d other domain(s) use its disk(s) %v", guardOpDelete, doc.Name, n, deletable)
 		return domainDeletionPlan{}, &diskDependentsError{domain: doc.Name, op: guardOpDelete, dependents: n}
 	}
-	if plan.seedDir != "" && others.useUnder(plan.seedDir) {
-		log.Printf("WARN Keeping the cloud-init seed directory %s of domain %s: another domain references it", plan.seedDir, doc.Name)
-		plan.keptSeedDir, plan.seedDir = plan.seedDir, ""
+	if plan.seedDir != "" {
+		// The other domains' references are canonical host paths: compare the
+		// directory's canonical path (the staging directory may be a symlink).
+		canon, cerr := canonicalizeOnHost(ctx, vp, []string{plan.seedDir})
+		switch {
+		case cerr != nil:
+			log.Printf("WARN Keeping the cloud-init seed directory %s of domain %s: could not resolve it: %v", plan.seedDir, doc.Name, cerr)
+			plan.keptSeedDir, plan.seedDir = plan.seedDir, ""
+		case others.useUnder(canon[0]):
+			log.Printf("WARN Keeping the cloud-init seed directory %s of domain %s: another domain references it", plan.seedDir, doc.Name)
+			plan.keptSeedDir, plan.seedDir = plan.seedDir, ""
+		}
 	}
 	plan.disks = deletable
 	formats := map[string]string{}
