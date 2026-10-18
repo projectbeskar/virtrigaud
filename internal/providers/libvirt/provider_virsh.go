@@ -849,6 +849,15 @@ func (p *Provider) deleteExistingDomainChecked(ctx context.Context, vp *VirshPro
 		}
 	}
 
+	// The single-host delete (check == nil) re-checks the seed directories the
+	// domain left behind now that it is gone (R24): a seed the plan kept
+	// because another domain — a clone, itself being deleted at the same time —
+	// still referenced it, and any seed named after this domain that its
+	// definition no longer referenced. Best-effort; never fails the delete.
+	if check == nil {
+		p.reclaimSeedDirs(ctx, vp, plan.name, plan.keptSeedDir, 0)
+	}
+
 	log.Printf("INFO Successfully deleted domain and all resources: %s", id)
 	return "", nil
 }
@@ -871,6 +880,12 @@ type domainDeletionPlan struct {
 	aliases []string
 	// seedDir is the domain's VirtRigaud cloud-init seed directory, or "".
 	seedDir string
+	// keptSeedDir is the seed directory the definition references that the
+	// plan did NOT take for removal — another domain referenced it (a clone's
+	// CD-ROM points at its source's seed), or that could not be checked — or
+	// "". A single-host delete re-checks it after the undefine
+	// (reclaimSeedDirs).
+	keptSeedDir string
 }
 
 // guardedFiles are the files a delete of plan removes, as the cluster-wide
@@ -932,7 +947,7 @@ func (p *Provider) planDomainDeletion(ctx context.Context, vp *VirshProvider, id
 	case err != nil:
 		log.Printf("WARN Keeping the cloud-init seed directory %s of domain %s: could not verify that no other domain uses it: %v",
 			plan.seedDir, doc.Name, err)
-		plan.seedDir = ""
+		plan.keptSeedDir, plan.seedDir = plan.seedDir, ""
 		return plan, nil
 	}
 	if n := others.using(doc.Name, deletable, deletable); n > 0 {
@@ -941,7 +956,7 @@ func (p *Provider) planDomainDeletion(ctx context.Context, vp *VirshProvider, id
 	}
 	if plan.seedDir != "" && others.useUnder(plan.seedDir) {
 		log.Printf("WARN Keeping the cloud-init seed directory %s of domain %s: another domain references it", plan.seedDir, doc.Name)
-		plan.seedDir = ""
+		plan.keptSeedDir, plan.seedDir = plan.seedDir, ""
 	}
 	plan.disks = deletable
 	formats := map[string]string{}
@@ -1282,6 +1297,11 @@ func (p *Provider) cleanupOrphanedResources(ctx context.Context, vp *VirshProvid
 			p.removeOrphanedDisks(ctx, vp, domainName, []string{diskPath})
 		}
 	}
+
+	// Remove the domain's own per-create seed directories a delete that already
+	// undefined it left behind (R24), once no domain references them. Only old
+	// ones: a create of this name may still be in flight.
+	p.reclaimSeedDirs(ctx, vp, domainName, "", orphanSeedMinAge)
 
 	// Try to delete the legacy per-name cloud-init directory.
 	legacyRoot := filepath.Join(p.stagingDir(), legacyCloudInitSeedRoot)
