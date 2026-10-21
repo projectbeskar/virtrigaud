@@ -5,6 +5,22 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-10-21 16:30] - Go 1.26.10 (GO-2026-6809, crypto/x509)
+**Author:** @wrkode (William Rizzo)
+
+### Security
+- `go.mod`, `proto/go.mod`, `sdk/go.mod`: Go 1.26.9 → 1.26.10, which fixes GO-2026-6809 in `crypto/x509` (reported by govulncheck as reachable through `x509.Certificate.Verify`, which every TLS path uses). CI reads the version from `go.mod`.
+- `Makefile` (`BUILDER_IMAGE`), `build/Dockerfile.manager`, `cmd/provider-{libvirt,mock,proxmox,vsphere}/Dockerfile`: builder images `golang:1.26.10` / `golang:1.26.10-bookworm`, in lockstep with `go.mod`.
+
+### Why
+govulncheck (the blocking Supply Chain Vulnerability Scan) started failing every PR and `main` on GO-2026-6809 in the Go standard library; the fix is only in the toolchain.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-10-18 12:10] - ADR-0007 Addendum B (Proposed): migration into a clustered provider (R11, design only)
 **Author:** @wrkode (William Rizzo)
 
