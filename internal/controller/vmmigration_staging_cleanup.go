@@ -116,8 +116,6 @@ const (
 	stagedDiskLeftNoCredential = "The migration's staged disk was not deleted: the S3 credentials Secret of the migration no longer exists."
 	stagedDiskLeftConfig       = "The migration's staged disk was not deleted: the migration's staging configuration is no longer " +
 		"valid or no longer allowed by the manager's storage host policy."
-	stagedDiskLeftNoHost = "The migration's staged disk was not deleted: the target Provider is clustered, and no host to " +
-		"empty it from was recorded (the import was never routed to a host, and the target VirtualMachine has none)."
 	stagedDiskLeftConfigChanged = "The migration's staged disk was not deleted: spec.storage or spec.target.providerRef changed " +
 		"since the export, so the object is not where the current spec points."
 	stagedDiskLeftUnverified = "The migration's staged disk was not found where the current spec points; the migration was " +
@@ -688,11 +686,12 @@ func (r *VMMigrationReconciler) deleteStagedDisk(ctx context.Context, m *infrav1
 	// qemu-img: the host the import was routed to (ADR-0007 Addendum B, B4).
 	targetHost := ""
 	if isClusterTopology(provider) && backend == storagemigration.BackendNFS {
-		if targetHost, err = r.stagedDiskHost(ctx, m); err != nil {
+		if targetHost, err = r.stagedDiskHost(ctx, m, provider); err != nil {
 			return "", err
 		}
 		if targetHost == "" {
-			return "", leftBehind(stagedDiskLeftNoHost, nil)
+			// Held, not left behind: a host of the Provider may be Ready again.
+			return "", errNoStagingHost
 		}
 	}
 
@@ -727,6 +726,11 @@ func (r *VMMigrationReconciler) deleteStagedDisk(ctx context.Context, m *infrav1
 		return "", fmt.Errorf("delete staged disk: %w", err)
 	}
 }
+
+// errNoStagingHost is the (logged) cause of a held nfs staged-disk delete of a
+// clustered target Provider none of whose hosts can run it yet: no recorded
+// import host, no target VM host and no Ready Host (#416 L4).
+var errNoStagingHost = stderrors.New("no host of the clustered target provider can empty the staged nfs object yet")
 
 // markImportTarget records, for an nfs / s3 migration, the VirtualMachine
 // key its ImportDisk is about to be sent for

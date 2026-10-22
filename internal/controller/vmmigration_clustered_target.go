@@ -21,6 +21,7 @@ import (
 	stderrors "errors"
 	"fmt"
 	"math"
+	"slices"
 	"strings"
 	"time"
 
@@ -1033,14 +1034,26 @@ func (r *VMMigrationReconciler) resetRoutedImport(ctx context.Context, m *infrav
 	return r.updateStatus(ctx, m)
 }
 
-// stagedDiskHost is the host of a clustered target Provider that empties an
-// nfs staged object (B4): importTarget.host, or — when the import was never
-// routed — the migration's own target VM's pending or bound host. "" when
-// none is known.
-func (r *VMMigrationReconciler) stagedDiskHost(ctx context.Context, migration *infrav1beta1.VMMigration) (string, error) {
+// stagedDiskHost is the host of clustered target Provider provider that
+// empties an nfs staged object (B4): importTarget.host; when the import was
+// never routed, the migration's own target VM's pending or bound host; and
+// when that VM is gone too, any Ready host of the Provider (#416 L4) — the
+// staged object is on the NFS export, which every host reaches, not on the
+// host. "" when none is known.
+func (r *VMMigrationReconciler) stagedDiskHost(ctx context.Context, migration *infrav1beta1.VMMigration,
+	provider *infrav1beta1.Provider) (string, error) {
 	if host := recordedImportHost(migration); host != "" {
 		return host, nil
 	}
+	if host, err := r.targetVMHost(ctx, migration); err != nil || host != "" {
+		return host, err
+	}
+	return r.anyReadyHost(ctx, provider)
+}
+
+// targetVMHost is the bound or pending host of the migration's own target
+// VM, or "" (none recorded, gone, not this migration's, or no grant).
+func (r *VMMigrationReconciler) targetVMHost(ctx context.Context, migration *infrav1beta1.VMMigration) (string, error) {
 	if migration.Status.TargetVMUID == "" && migration.Status.TargetVMClaim == "" {
 		return "", nil
 	}
@@ -1063,6 +1076,27 @@ func (r *VMMigrationReconciler) stagedDiskHost(ctx context.Context, migration *i
 		return h, nil
 	}
 	return vm.Status.Placement.PendingHost, nil
+}
+
+// anyReadyHost is the first (by name) Ready Host of clustered Provider
+// provider that is not being deleted, or "" when it has none.
+func (r *VMMigrationReconciler) anyReadyHost(ctx context.Context, provider *infrav1beta1.Provider) (string, error) {
+	hosts := &infrav1beta1.HostList{}
+	if err := r.List(ctx, hosts, client.InNamespace(provider.Namespace)); err != nil {
+		return "", fmt.Errorf("list Hosts of provider %s/%s: %w", provider.Namespace, provider.Name, err)
+	}
+	var names []string
+	for i := range hosts.Items {
+		h := &hosts.Items[i]
+		if h.Spec.ProviderRef.Name == provider.Name && h.DeletionTimestamp.IsZero() && h.Status.Health == infrav1beta1.HostHealthReady {
+			names = append(names, h.Name)
+		}
+	}
+	if len(names) == 0 {
+		return "", nil
+	}
+	slices.Sort(names)
+	return names[0], nil
 }
 
 // migrationForTargetVM maps a VirtualMachine to the VMMigration its
