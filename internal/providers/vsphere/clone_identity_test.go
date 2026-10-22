@@ -228,4 +228,3 @@ func TestEncodeGuestinfoRoundTrip(t *testing.T) {
 	_, err := encodeGuestinfo("x", "rot13")
 	assert.Error(t, err)
 }
-
