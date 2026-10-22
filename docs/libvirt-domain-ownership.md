@@ -250,11 +250,13 @@ the provider's SSH user can list, and makes every seed file private:
   `libvirt-qemu:kvm 0600`. libvirt does not hand a read-only disk back at
   shutdown, so it stays the qemu user's. With `dynamic_ownership = 0` a VM
   whose qemu runs as another user cannot open its seed: keep the default.
-- **Clones.** Once its domain has started, a seed's `cloud-init.iso` belongs to
-  the qemu user, so a clone's copy reads the SSH user's
-  `cloud-init.private.iso` next to it (a seed of an earlier release has none,
-  and its ISO kept the SSH user's umask, so the ISO itself is read). The
-  provider never reads a seed as root.
+- **Clones (reading an existing seed).** Once its domain has started, a
+  seed's `cloud-init.iso` belongs to the qemu user, so whenever the provider
+  reads an existing seed as its SSH user — a clone copying it, or reading the
+  files inside it — it reads the SSH user's `cloud-init.private.iso` next to
+  it instead (a seed of an earlier release has none, and its ISO kept the SSH
+  user's umask, so the ISO itself is read). The provider never reads a seed as
+  root, and no other local user can read either file.
 - **AppArmor (Ubuntu).** No profile change is needed. `virt-aa-helper` adds
   every disk source of a domain, CD-ROMs included, to that domain's own
   profile, and its own profile may read any `*.iso` file. It refuses only

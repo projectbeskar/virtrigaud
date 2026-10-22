@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -344,4 +345,62 @@ func TestClusteredCreateDelete_SeedInTheSeedDirectory(t *testing.T) {
 		require.NoError(t, err)
 		assert.NoDirExists(t, dir, "Delete removes the domain's seed directory")
 	}
+}
+
+// TestSeed_SSHUserReadsItBackAfterTheQemuHandover (R27 with R26): a seed built
+// under the new scheme (real genisoimage) can still be read by the provider's
+// SSH user — copied by a clone, or its files read with isoinfo as the clone
+// path does — after libvirt has given the domain's cloud-init.iso to the qemu
+// user (simulated here by taking every permission off it): the read goes
+// through seedCopySource, which picks the SSH user's private copy.
+func TestSeed_SSHUserReadsItBackAfterTheQemuHandover(t *testing.T) {
+	requireRealHostTool(t, "genisoimage")
+	if _, err := exec.LookPath("isoinfo"); err != nil {
+		t.Skip("isoinfo is not installed on this machine")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("root reads a file whatever its mode")
+	}
+	ctx := context.Background()
+	vp := localHostVP("single")
+	seeds := filepath.Join(t.TempDir(), "seeds")
+	require.NoError(t, os.Mkdir(seeds, 0o700))
+	c := NewCloudInitProvider(vp)
+	c.seedDir = seeds
+	iso, err := c.PrepareCloudInit(ctx, CloudInitConfig{
+		UserData: "#cloud-config\n# secret-of-team-a\n", InstanceID: "team-a.web", Hostname: "web",
+	})
+	require.NoError(t, err)
+	assertPrivateSeed(t, filepath.Dir(iso))
+
+	readFile := func(path, name string) (string, error) {
+		res, rerr := runHost(ctx, vp, "isoinfo", "-R", "-i", path, "-x", "/"+name)
+		if rerr != nil {
+			return "", rerr
+		}
+		return res.Stdout, nil
+	}
+	ud, err := readFile(iso, cloudInitUserDataName)
+	require.NoError(t, err, "before the domain starts the SSH user owns the ISO")
+	assert.Contains(t, ud, "secret-of-team-a")
+
+	// libvirt's handover at domain start: the ISO is now the qemu user's 0600.
+	require.NoError(t, os.Chmod(iso, 0))
+	t.Cleanup(func() { _ = os.Chmod(iso, 0o600) })
+	_, err = readFile(iso, cloudInitUserDataName)
+	require.Error(t, err, "the SSH user can no longer read the domain's ISO")
+
+	p := &Provider{hostSeedDir: seeds}
+	src := p.seedCopySource(ctx, vp, iso)
+	assert.Equal(t, filepath.Join(filepath.Dir(iso), cloudInitISOPrivateCopyName), src)
+	ud, err = readFile(src, cloudInitUserDataName)
+	require.NoError(t, err, "the SSH user reads its private copy")
+	assert.Contains(t, ud, "secret-of-team-a")
+	md, err := readFile(src, cloudInitMetaDataName)
+	require.NoError(t, err)
+	assert.Contains(t, md, "instance-id: team-a.web")
+
+	// A seed of an earlier release (no private copy) is read as it is.
+	legacy := filepath.Join(t.TempDir(), cloudInitSeedDirPrefix+"team-a.old.AbCdEfGhIj", cloudInitISOName)
+	assert.Equal(t, legacy, p.seedCopySource(ctx, vp, legacy))
 }

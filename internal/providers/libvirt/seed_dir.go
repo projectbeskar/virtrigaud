@@ -54,9 +54,10 @@ import (
 //   - user-data and meta-data, which only genisoimage needs, are removed as
 //     soon as the ISO is built;
 //   - a second copy of the ISO, cloudInitISOPrivateCopyName (0600), stays with
-//     the SSH user: once libvirt has given cloud-init.iso to the qemu user, a
-//     clone's copy of the seed (cloneSeedISO) can no longer read it, and the
-//     provider never reads a seed as root;
+//     the SSH user: once libvirt has given cloud-init.iso to the qemu user, the
+//     SSH user can no longer read it, and the provider never reads a seed as
+//     root. Every SSH-user read of an existing seed (a clone's copy, reading
+//     the files in it) goes through seedCopySource, which picks that copy;
 //   - the per-seed directory is opened to traverse-only (cloudInitSeedDirMode,
 //     0711) last, so the qemu process can reach the ISO by its exact path.
 //
@@ -325,11 +326,19 @@ func sealSeedDir(ctx context.Context, h hostCommandRunner, dir string) error {
 	return nil
 }
 
-// seedCopySource returns the file a copy of the seed ISO srcISO reads: the
-// SSH user's private copy next to it (cloudInitISOPrivateCopyName) when srcISO
-// is the ISO of a per-create seed directory in one of the seed roots and that
-// copy exists, else srcISO itself (a seed of an earlier release: its ISO kept
-// the SSH user's umask, typically 0644). A failed check falls back to srcISO.
+// seedCopySource returns the file the provider's SSH user reads to get at the
+// content of the seed ISO srcISO that a domain references: the SSH user's
+// private copy next to it (cloudInitISOPrivateCopyName) when srcISO is the ISO
+// of a per-create seed directory in one of the seed roots and that copy exists,
+// else srcISO itself (a seed of an earlier release: its ISO kept the SSH user's
+// umask, typically 0644). A failed check falls back to srcISO.
+//
+// Every read of an existing seed by the SSH user — a clone's copy of it
+// (cloneSeedISO), or reading the files inside it (isoinfo) — must go through
+// it: once the domain has started, libvirt has given srcISO to the qemu user
+// with mode 0600, and the provider never reads a seed as root (no sudo rule
+// covers seeds). Other local users can read neither file (both 0600, in
+// directories they cannot list).
 func (p *Provider) seedCopySource(ctx context.Context, h hostCommandRunner, srcISO string) string {
 	if filepath.Base(srcISO) != cloudInitISOName || !isSeedDirIn(filepath.Dir(srcISO), p.seedRoots()...) {
 		return srcISO
