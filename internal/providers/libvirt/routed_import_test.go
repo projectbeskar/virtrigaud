@@ -310,6 +310,9 @@ func newImportFixtureOf(t *testing.T, hosts []string, down ...string) *importFix
 	t.Helper()
 	p := clusterOf(t, hosts, down...)
 	p.hostStagingDir = "/var/lib/virtrigaud/staging"
+	prev := defaultPoolRequiredDir
+	defaultPoolRequiredDir = importPool
+	t.Cleanup(func() { defaultPoolRequiredDir = prev })
 	rec := newImportRecHost()
 	p.routedDiskConnFn = rec.wrap
 	srv := s3fake.New("stage")
@@ -524,6 +527,18 @@ func TestRoutedImport_RefusedBeforeAnyHost(t *testing.T) {
 		_, err := f.server().ImportDisk(callCtx(t), &providerv1.ImportDiskRequest{BackendType: "pvc", TargetHostId: "host-b", TargetVm: importTargetWire})
 		return err
 	}()).Message(), "the pvc refusal is a constant text")
+}
+
+// TestRoutedImport_PoolElsewhereIsRefused: a landing host whose default pool
+// is not where Create attaches an imported disk is refused before anything is
+// written, with Create's constant text.
+func TestRoutedImport_PoolElsewhereIsRefused(t *testing.T) {
+	f := newImportFixture(t)
+	defaultPoolRequiredDir = "/var/lib/libvirt/images"
+	_, err := f.server().ImportDisk(callCtx(t), nfsRequest("host-b"))
+	assertRefusalStatus(t, err, codes.InvalidArgument)
+	assert.Equal(t, defaultPoolMisplacedMessage, status.Convert(err).Message())
+	assert.False(t, f.rec.wrote())
 }
 
 // TestRoutedImport_HostLeaseFailureIsHostUnavailable: an unknown host, or one

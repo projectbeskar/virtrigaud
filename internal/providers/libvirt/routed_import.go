@@ -276,6 +276,11 @@ func (p *Provider) importOnHost(ctx context.Context, c libvirtConn, r routedImpo
 	if err != nil {
 		return nil, fmt.Errorf("resolve the default pool's directory: %w", err)
 	}
+	// The pool must be where Create looks for the disk it attaches in place
+	// (the routed import never creates or moves a pool).
+	if err := requireDefaultPoolDir(ctx, h, c.HostID(), poolPath); err != nil {
+		return nil, err
+	}
 	targetPath := filepath.Join(poolPath, r.volumeName+qcow2Ext)
 
 	// B2 step 2: the landing file through A6.1's cluster-wide guard.
@@ -304,6 +309,27 @@ func (p *Provider) importOnHost(ctx context.Context, c libvirtConn, r routedImpo
 		return landNFSImport(ctx, l, r.nfsURL, req)
 	}
 	return landS3Import(ctx, l, s3client, req)
+}
+
+// requireDefaultPoolDir refuses a landing host whose "default" pool is not at
+// defaultPoolRequiredDir (lexically, or once both are resolved on the host
+// behind h), with Create's constant InvalidSpec (errDefaultPoolMisplaced): a
+// disk landed elsewhere could never be attached in place by the Create that
+// follows. Nothing is changed on the host.
+func requireDefaultPoolDir(ctx context.Context, h hostCommandRunner, host hostconn.HostID, dir string) error {
+	if filepath.Clean(dir) == filepath.Clean(defaultPoolRequiredDir) {
+		return nil
+	}
+	canon, err := canonicalizeOnHost(ctx, h, []string{dir, defaultPoolRequiredDir})
+	if err != nil {
+		return err
+	}
+	if canon[0] == canon[1] {
+		return nil
+	}
+	log.Printf("ERROR The libvirt storage pool %q on host %s is at %q, not %s; the routed import refuses to land there",
+		defaultStoragePool, host, dir, defaultPoolRequiredDir)
+	return errDefaultPoolMisplaced()
 }
 
 // landingDomainCheck is the routed import's name check on the landing host
