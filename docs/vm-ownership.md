@@ -393,7 +393,22 @@ provider, unless the source was sealed (machine-id emptied, e.g. with
 `cloud-init clean --machine-id`) before it was cloned. Static network
 configuration in the source's cloud-init data is carried to the clone as is.
 Clones of VMs that do not use cloud-init are unaffected, and clones made
-before this release keep the identity they booted with.
+before this release keep the identity they booted with. Some keys in the
+user-data undo the new identity: `ssh_keys`, `ssh_deletekeys: false`,
+`preserve_hostname: true` and `manual_cache_clean: true`. The libvirt and
+vSphere providers log a `WARN` naming such keys, never their values (see
+[libvirt clones](libvirt-clones.md#a-clones-cloud-init-identity)).
+
+**Security: `create` on `VMClone` is read access to the source VM's data.**
+A clone is a full copy of its source's disk, and it boots cloud-init user-data
+as **root**. On libvirt that user-data is the `VMClone`'s
+`spec.customization.userData.cloudInit.inline` when it is set, so whoever can
+create a `VMClone` of a VM can run any command as root on a copy of that VM's
+disk and read everything on it. On every provider, a clone of a cloud-init VM
+also receives and re-runs the source's own user-data, which may carry
+secrets. Treat `create` on `vmclones` in a namespace as read access to every
+VM's data in that namespace, and grant it accordingly (cross-namespace clone
+targets also need [a grant](cross-namespace-targets.md)).
 
 **What was validated.** The provider behaviour is covered by unit tests
 against vcsim (vSphere), the libvirt fake-virsh harness and `pvefake`
@@ -597,9 +612,13 @@ gets `instance-id: virtrigaud-<target uid>` and `local-hostname`: the
 `VMClone`'s `spec.customization.hostname` (with `.domain`, the FQDN), else the
 target's name. All other keys are kept. In a `#cloud-config`
 `guestinfo.userdata`, the top-level `hostname:`/`fqdn:` keys are rewritten to
-the target's. Both are written back base64-encoded. Metadata that cannot be
-read (an unknown `guestinfo.metadata.encoding`, or not a YAML/JSON mapping)
-refuses the clone (`InvalidArgument`) before anything is cloned. A source
+the target's. The keys are matched without regard to case, as vSphere treats
+ExtraConfig keys. Each value is written back under the source's own spelling
+of its key, in the source's own encoding (none, base64, or gzip+base64), with
+the source's encoding key. Metadata that cannot be read (an unknown
+`guestinfo.metadata.encoding`, not a YAML/JSON mapping, or an anchored
+`instance-id`/hostname value) refuses the clone (`InvalidArgument`) before
+anything is cloned. A source
 without `guestinfo.metadata` is left alone: cloud-init's VMware datasource then
 takes the instance-id from the VM's BIOS UUID, which vCenter regenerates for a
 clone. Other customization fields (including inline user-data) are not

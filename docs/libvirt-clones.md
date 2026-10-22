@@ -82,6 +82,31 @@ What a new instance does **not** change:
   the libvirt provider and are logged as such. User-data given by
   `userData.cloudInit.secretRef` cannot be resolved by the provider: the clone
   keeps the source's user-data, and the provider logs it.
+- **User-data that pins the identity.** Some `#cloud-config` keys in the
+  clone's user-data (the source's, or the customization's) undo the new
+  instance, and the provider logs a `WARN` naming them (never their values):
+  - `ssh_keys` writes fixed SSH host keys on every new instance, so the
+    clone gets the source's;
+  - `ssh_deletekeys: false` keeps the host keys already on the disk;
+  - `preserve_hostname: true` never sets the hostname;
+  - `manual_cache_clean: true` makes cloud-init skip the instance-id check,
+    so no per-instance module runs again.
+
+  Remove them from the source's user-data, or give the clone its own with
+  `spec.customization.userData.cloudInit.inline`, if clones must have their
+  own host identity.
+
+> **Security: creating a `VMClone` is read access to the source VM's data.**
+> On libvirt, `spec.customization.userData.cloudInit.inline` becomes the
+> clone's user-data, and cloud-init runs it as **root** on the clone's first
+> boot. The clone's disk is a full copy of the source's disk. Anyone who can
+> `create` a `VMClone` of a VM can therefore run any command as root on a copy
+> of that VM's disk, and read everything on it: files, credentials, keys. The
+> source's own user-data, which may carry secrets, is copied into the clone's
+> seed as well. Grant `create` on `vmclones` in a namespace only to subjects
+> trusted with read access to every VM's data in that namespace. The same holds
+> for any clone of a cloud-init VM, on every provider: the clone boots the
+> source's user-data again.
 
 The source's seed is read on the host with `isoinfo` (shipped with
 `genisoimage`, which the provider already needs) **before anything is
@@ -89,8 +114,20 @@ copied**. A seed that cannot be read fails the clone with nothing written —
 retried when the read failed (an unreachable host, a missing `isoinfo`), and
 refused (`InvalidArgument`) when the ISO holds no NoCloud `user-data` or
 `meta-data`, holds a file over 1 MiB, or has meta-data that is not a YAML or
-JSON mapping. A source without a seed ISO gives a clone without one, as before
-(its hostname and user-data customization are then not applied, and logged).
+JSON mapping. A failed read never puts what was read before the failure in an
+error or a log line. The customization's inline user-data is bounded to 1 MiB
+too (`InvalidArgument`). If the clone's own seed cannot be made after the
+copy, nothing was defined and the clone is retried (`Unavailable`). A source
+without a seed ISO gives a clone without one, as before (its hostname and
+user-data customization are then not applied, and logged).
+
+The `#cloud-config` hostname rewrite only changes a line that the YAML parser
+confirms is the top-level `hostname:` or `fqdn:` key, with its whole value on
+that line. A look-alike line inside a multi-line quoted value or flow
+collection is never touched, and user-data that does not parse is left as it
+is (logged). Meta-data whose `instance-id` or hostname value carries a YAML
+anchor is refused (`InvalidArgument`): replacing it would break an alias that
+names it.
 
 ## A full clone needs a powered-off source
 

@@ -122,6 +122,12 @@ VMs created without `spec.userData` no longer get a default SSH key or sudo
 grant. Several of these are breaking — see
 **[Upgrading from v0.3.11](docs/upgrading.md)**.
 
+**Treat `create` on `VMClone` as read access to the source VM's data.** A
+clone is a full copy of its source's disk and boots cloud-init user-data as
+root. On libvirt that user-data can be the `VMClone`'s own
+(`spec.customization.userData.cloudInit.inline`). See
+[VM ownership: a clone's host identity](docs/vm-ownership.md#a-clones-host-identity).
+
 ## CRDs (10 total, all v1beta1)
 
 | CRD | Short name | Controller | Description |
