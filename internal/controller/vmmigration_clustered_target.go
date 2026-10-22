@@ -24,6 +24,8 @@ import (
 	"strings"
 	"time"
 
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -114,6 +116,9 @@ const (
 	migrationReasonTargetHostUnavailable           = "TargetHostUnavailable"
 	migrationReasonImportTargetPreviousIncarnation = "ImportTargetPreviousIncarnation"
 	migrationReasonLandingDiskInUse                = "LandingDiskInUse"
+	// migrationReasonLandingHostRefused: the landing host refused the import
+	// before writing anything (a guard refusal, FailedPrecondition).
+	migrationReasonLandingHostRefused = "LandingHostRefused"
 	// migrationReasonTargetHostMoved is the Ready=False hold of a migration
 	// whose target's pending host is no longer the host its disk landed on.
 	migrationReasonTargetHostMoved = "TargetHostMoved"
@@ -169,6 +174,9 @@ const (
 	landingDiskInUseMessage = "the landing disk name is used by a domain on a host of the clustered provider: " +
 		"nothing was landed. Re-placing the target cannot help on a shared pool; an administrator must resolve it. " +
 		"The import is retried with a backoff"
+	landingHostRefusedMessage = "the landing host refused the import before writing anything (its lock directory, " +
+		"or a file at the landing name, is not as the provider requires, or a required host tool is missing; the cause " +
+		"is in the manager log): an administrator must fix the host. The import is retried with a backoff"
 	routedImportHostMovedMessage = "The ImportDisk was sent to the target's pending host but its outcome is unknown, " +
 		"and the target VirtualMachine's pending host has changed since: the import is sent only to the host it was " +
 		"first sent to. Check that host for the disk landed for the target VirtualMachine (ending in -migrated) and " +
@@ -889,4 +897,18 @@ func targetPlacementChanged() predicate.Predicate {
 		DeleteFunc:  func(e event.DeleteEvent) bool { return created(e.Object) },
 		GenericFunc: func(event.GenericEvent) bool { return false },
 	}
+}
+
+// routedImportPreconditionRefused reports whether a routed import was
+// answered with an untyped FailedPrecondition: a pre-write refusal of the
+// landing host (a guard refusal, a missing host tool). The typed refusals
+// that travel as FailedPrecondition (VM_DISK_IN_USE, the disk-size limit)
+// are mapped to ProviderErrors by the transport and are not this.
+func routedImportPreconditionRefused(err error) bool {
+	var pe *contracts.ProviderError
+	if stderrors.As(err, &pe) {
+		return false
+	}
+	st, ok := status.FromError(err)
+	return ok && st.Code() == codes.FailedPrecondition
 }

@@ -1537,6 +1537,15 @@ func (r *VMMigrationReconciler) handleImportingPhase(ctx context.Context, migrat
 		// Release the in-memory guard so a future reconcile can re-attempt the
 		// import for this generation after the failure is recorded.
 		r.longOpInFlight.Delete(longOpKey(migration, longOpImport))
+		// A routed import the landing host refused before writing anything (a
+		// guard refusal: FailedPrecondition) is held for an operator, never a
+		// release of the host (ADR-0007 Addendum B, B2). An answer to a
+		// re-send says nothing about the earlier call and stays unknown.
+		if routedHost != "" && !importAttempt.resend && routedImportPreconditionRefused(err) {
+			clearMigrationRequest(migration, longOpImport)
+			logger.Info("Routed import refused by the landing host before anything was written", "host", routedHost, "error", err.Error())
+			return r.holdRoutedImport(ctx, migration, migrationReasonLandingHostRefused, landingHostRefusedMessage)
+		}
 		if !providerCallOutcomeKnownFor(err, importAttempt) {
 			// No definite outcome (a deadline, a dropped connection): the
 			// import may still land the disk. The marker is kept and the

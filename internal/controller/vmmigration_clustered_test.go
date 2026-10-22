@@ -91,7 +91,9 @@ type capsStub struct {
 	err  error
 }
 
-func (c *capsStub) GetCapabilities(context.Context) (contracts.Capabilities, error) { return c.caps, c.err }
+func (c *capsStub) GetCapabilities(context.Context) (contracts.Capabilities, error) {
+	return c.caps, c.err
+}
 
 // TestHandleValidatingPhase_ClusteredTargetRejected pins ADR-0007 Addendum B,
 // B5: a clustered target whose provider does not report supportsRoutedImport
@@ -103,7 +105,9 @@ func TestHandleValidatingPhase_ClusteredTargetRejected(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			r, migration := clusteredMigrationFixture(t, false, true, nil)
-			r.providerInstanceFn = func(context.Context, *infravirtrigaudiov1beta1.Provider) (contracts.Provider, error) { return inst, nil }
+			r.providerInstanceFn = func(context.Context, *infravirtrigaudiov1beta1.Provider) (contracts.Provider, error) {
+				return inst, nil
+			}
 			_, err := r.handleValidatingPhase(context.Background(), migration)
 			require.NoError(t, err)
 			got := getMigration(t, r)

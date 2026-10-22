@@ -61,8 +61,10 @@ type routedMigrationProvider struct {
 	createErr error
 	// deleteErr answers every Delete while set.
 	deleteErr error
-	// onExport runs at each ExportDisk (outside mu).
-	onExport func()
+	// exportTarget names the VM whose pending host each ExportDisk records
+	// in pendingAtExport (read outside mu).
+	exportTarget    types.NamespacedName
+	pendingAtExport []string
 
 	exports       int
 	imports       []contracts.ImportDiskRequest
@@ -100,10 +102,17 @@ func (p *routedMigrationProvider) GetDiskInfo(context.Context, contracts.GetDisk
 func (p *routedMigrationProvider) ExportDisk(context.Context, contracts.ExportDiskRequest) (contracts.ExportDiskResponse, error) {
 	p.mu.Lock()
 	p.exports++
-	hook := p.onExport
+	key := p.exportTarget
 	p.mu.Unlock()
-	if hook != nil {
-		hook()
+	if key.Name != "" {
+		host := "missing"
+		vm := &infravirtrigaudiov1beta1.VirtualMachine{}
+		if err := k8sClient.Get(ctx, key, vm); err == nil {
+			host = pendingHost(vm)
+		}
+		p.mu.Lock()
+		p.pendingAtExport = append(p.pendingAtExport, host)
+		p.mu.Unlock()
 	}
 	return contracts.ExportDiskResponse{ExportId: "exp-1"}, nil
 }
@@ -163,6 +172,13 @@ func (p *routedMigrationProvider) set(f func(p *routedMigrationProvider)) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	f(p)
+}
+
+// exportPendingHosts returns the target's pending host at each ExportDisk.
+func (p *routedMigrationProvider) exportPendingHosts() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]string(nil), p.pendingAtExport...)
 }
 
 // snapshot returns copies of the recorded calls.
@@ -419,17 +435,7 @@ var _ = Describe("Migration into a clustered provider (ADR-0007 Addendum B, envt
 			{name: "kvm-big", cpu: 64, storageBytes: storageGiB(5)},
 			{name: "kvm-01", cpu: 8, storageBytes: storageGiB(100)},
 		}})
-		var pendingAtExport []string
-		prov.set(func(p *routedMigrationProvider) {
-			p.onExport = func() {
-				vm := &infravirtrigaudiov1beta1.VirtualMachine{}
-				if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: f.ns, Name: "web"}, vm); err == nil {
-					pendingAtExport = append(pendingAtExport, pendingHost(vm))
-				} else {
-					pendingAtExport = append(pendingAtExport, "missing")
-				}
-			}
-		})
+		prov.set(func(p *routedMigrationProvider) { p.exportTarget = types.NamespacedName{Namespace: f.ns, Name: "web"} })
 
 		Eventually(func(g Gomega) {
 			m := f.getMigration(g)
@@ -440,7 +446,7 @@ var _ = Describe("Migration into a clustered provider (ADR-0007 Addendum B, envt
 		target := f.getTarget(Default)
 		exports, imports, creates, _ := prov.snapshot()
 		Expect(exports).To(Equal(1))
-		Expect(pendingAtExport).To(Equal([]string{"kvm-01"}), "placed (on the host with room) before the export")
+		Expect(prov.exportPendingHosts()).To(Equal([]string{"kvm-01"}), "placed (on the host with room) before the export")
 		Expect(target.Spec.ImportedDisk.SizeGiB).To(Equal(int32(10)), "the source disk's size drives placement")
 		Expect(imports).To(HaveLen(1))
 		Expect(imports[0].TargetHostID).To(Equal("kvm-01"))
@@ -491,14 +497,7 @@ var _ = Describe("Migration into a clustered provider (ADR-0007 Addendum B, envt
 			return false
 		}
 		f := newRoutedFixture(prov, routedFixtureOptions{hosts: []routedHost{{name: "kvm-01", cpu: 8, storageBytes: storageGiB(100)}}, loseStatus: lose})
-		var pendingAtExport []string
-		prov.set(func(p *routedMigrationProvider) {
-			p.onExport = func() {
-				vm := &infravirtrigaudiov1beta1.VirtualMachine{}
-				Expect(k8sClient.Get(ctx, types.NamespacedName{Namespace: f.ns, Name: "web"}, vm)).To(Succeed())
-				pendingAtExport = append(pendingAtExport, pendingHost(vm))
-			}
-		})
+		prov.set(func(p *routedMigrationProvider) { p.exportTarget = types.NamespacedName{Namespace: f.ns, Name: "web"} })
 
 		Eventually(func(g Gomega) {
 			g.Expect(f.getMigration(g).Status.Phase).To(Equal(infravirtrigaudiov1beta1.MigrationPhaseReady))
@@ -506,7 +505,7 @@ var _ = Describe("Migration into a clustered provider (ADR-0007 Addendum B, envt
 		mu.Lock()
 		Expect(lost).To(Equal(2))
 		mu.Unlock()
-		Expect(pendingAtExport).To(Equal([]string{"kvm-01"}), "the export waited for a durable pending host")
+		Expect(prov.exportPendingHosts()).To(Equal([]string{"kvm-01"}), "the export waited for a durable pending host")
 		exports, imports, creates, _ := prov.snapshot()
 		Expect(exports).To(Equal(1))
 		Expect(imports).To(HaveLen(1))
