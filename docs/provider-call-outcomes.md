@@ -201,22 +201,40 @@ to a clustered target until Addendum B slice 3; these answers are what it will r
 
 | Failure | Answer |
 |---|---|
-| The request is unusable: `pvc` or an empty backend, no `target_host_id`, a `target_vm` without its uid, another storage pool, a non-`nfs://` source, an `s3` configuration without its bucket or credentials | `InvalidArgument`, before any host is leased |
+| The request is unusable: `pvc` or an empty backend, no `target_host_id`, a `target_vm` without its uid, another storage pool, a non-`nfs://` source, a staged format other than `qcow2`/`raw`/`vmdk` (`nfs`: `qcow2`), an `s3` configuration without its bucket or credentials | `InvalidArgument`, before any host is leased |
 | The host is unknown, removed or draining, or cannot be dialed; or the call's first command finds the connection dead | `Unavailable` + `HOST_UNAVAILABLE` (nothing done) |
 | A domain named after the target VM is on the landing host | `AlreadyExists`: with `VM_PREVIOUS_INCARNATION` for a previous incarnation, with `VM_PREVIOUS_INCARNATION` and `incarnation: own` for the VM's own domain, plain for a foreign or unstamped one. Nothing is landed |
-| The landing file exists and a domain on any host of the Provider uses it | `AlreadyExists`. Nothing is landed |
+| The landing file exists and a domain on any host of the Provider uses it | `FailedPrecondition` + `VM_DISK_IN_USE` + `VM_OPERATION_FAILED`. Nothing is landed |
+| The landing name is a symbolic link on the landing host | `FailedPrecondition` + `VM_OPERATION_FAILED` (a host-guard refusal, counted by `virtrigaud_provider_host_guard_refusals_total`). Nothing is written |
 | A host of the Provider cannot be scanned for that file | `Unavailable` + `HOST_UNAVAILABLE` or `VM_DISK_CHECK_FAILED` (fails closed; nothing done) |
-| The default pool is not at `/var/lib/libvirt/images`; the host is not reached over `ssh://` | `InvalidArgument`; `FailedPrecondition` |
+| The default pool is not at `/var/lib/libvirt/images` | `FailedPrecondition` + `HOST_STORAGE_MISCONFIGURED` + `VM_OPERATION_FAILED`, scoped to that host |
+| The host is not reached over `ssh://` | `FailedPrecondition` |
 | Any other failure while only reads ran on the landing host (the host answered at least one command, then a read failed or its connection dropped) | Not performed (`Unavailable` + `VM_OPERATION_FAILED`) |
-| Another import of the same landing name runs in the provider for the call's whole budget | Not performed (`Unavailable` + `VM_OPERATION_FAILED`) |
+| Another import, delete or in-place create of the same landing name (through any host) runs in the provider for 2 minutes | Not performed (`Unavailable` + `VM_OPERATION_FAILED`) |
+| Less than one minute of the time budget is left when the write phase would start | Not performed (`Unavailable` + `VM_OPERATION_FAILED`) |
 | The host lock is held: a command of an earlier, cancelled call still runs | `Unavailable` + `VM_OPERATION_FAILED`, "the same import is still running" |
 | The host guard refuses the lock directory or lock file; `flock`, `timeout` or `qemu-img` is missing | `FailedPrecondition` + `VM_OPERATION_FAILED` (nothing ran) |
 | A staged-image or disk-size refusal | `InvalidArgument` / the disk-size reasons, as on a single host |
 | A write-phase command (private directory, stage, copy, checks, convert, rename) **ended with an exit status of its own** (1-127, not 124) | Not performed: nothing is still running and nothing landed (`Unavailable` + `VM_OPERATION_FAILED`) |
 | A write-phase command was stopped by `timeout(1)` (124) or killed (137), its session dropped, the routed budget ran out, or the rename's result was lost | **Unknown** (untyped `Unknown`, with `VM_OPERATION_FAILED` so the breaker does not count it): the marker is kept. Because of the time budget the earlier call has ended within the 35-minute settle time, so the manager may re-send |
 
-The removal of the call's own private directory is not counted: its failure
-leaves a private directory behind (logged), never a landed disk.
+The removals of the call's own private files run under `timeout(1)` only, never
+under the import's `flock`, and are not counted: their failure leaves a private
+directory behind (logged, and reaped by a later import once it is 65 minutes
+old), never a landed disk.
+
+The routed `DeleteLandedDisk` answers `InvalidArgument` for a request without
+`target_host_id` or target VM, a recorded path that is not the landing file, or a
+symbolic link or non-file at the landing name; `HOST_UNAVAILABLE` for a landing
+host that cannot be leased or reached; `FailedPrecondition` + `VM_DISK_IN_USE` +
+`VM_OPERATION_FAILED` when a domain on any host uses the disk; `HOST_UNAVAILABLE` /
+`VM_DISK_CHECK_FAILED` when a host cannot be scanned; `Unavailable` +
+`VM_OPERATION_FAILED` while an import of the name runs in the provider or holds the
+host lock, or when the removal fails (or is stopped by `timeout(1)`); and
+`FailedPrecondition` when the host guard refuses the removal. The routed
+`DeleteStagedDisk` (`nfs`) answers `InvalidArgument` without `target_host_id`,
+`HOST_UNAVAILABLE` for a host that cannot be leased or reached, and `Unavailable`
+when the host's `qemu-img` fails or is stopped.
 
 ## Releasing a held object
 

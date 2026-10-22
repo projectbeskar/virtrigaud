@@ -801,8 +801,10 @@ the following once after upgrading, and delete only what no `VMMigration` in fli
   `Provider.status.reportedCapabilities`. Nothing calls them yet: **the manager
   still refuses a `VMMigration` whose target Provider is clustered** until slice 3.
   A clustered `Create` that attaches an imported disk in place now takes the
-  landing lock of its host, serialised with the routed import and delete of that
-  disk. See [Migration into a clustered provider](clustered-provider-inventory.md#migration-into-a-clustered-provider-addendum-b)
+  provider-wide landing lock of its landing name, serialised with the routed
+  import and delete of that disk through any host. Do not share one pool
+  directory between two Providers (they are not serialised with each other).
+  See [Migration into a clustered provider](clustered-provider-inventory.md#migration-into-a-clustered-provider-addendum-b)
   for the host prerequisites (the `default` pool at `/var/lib/libvirt/images`,
   `flock` and `timeout`). Single-host, vSphere and Proxmox providers are unchanged
   (they ignore the new fields and do not report the capability).

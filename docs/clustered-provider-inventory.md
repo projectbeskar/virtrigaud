@@ -2039,7 +2039,8 @@ side effect, whatever the provider reports.
   on `target_host_id`, the name a single host uses. The request must carry
   `target_vm` with the VM's uid (a canonical UUID); an empty
   `target_host_id`, a missing uid, `pvc`, the empty legacy backend, a storage
-  hint other than `default`, or an `nfs` source that is not `nfs://` is
+  hint other than `default`, an `nfs` source that is not `nfs://`, or a staged
+  format other than `qcow2`, `raw` or `vmdk` (`nfs`: `qcow2` only) is
   `InvalidArgument` before any host is leased. Before anything is written:
   1. **The landing host's name check.** A domain named `<namespace>.<name>`
      on the host refuses the import with `AlreadyExists`:
@@ -2051,16 +2052,32 @@ side effect, whatever the provider reports.
   2. **The landing file, across every host.** When the landing file (or any
      other disk name of the VM) exists, every host of the Provider is
      scanned, as for a create ([the cluster-wide disk guard](#shared-storage-the-cluster-wide-disk-guard-a61)).
-     A file a domain on any host uses is refused (`AlreadyExists`), a host
-     that cannot be scanned fails the import closed (`HOST_UNAVAILABLE` or
+     A file a domain on any host uses is refused (`FailedPrecondition` +
+     `VM_DISK_IN_USE`, never the plain `AlreadyExists` of a name conflict:
+     on a shared pool every host sees the same file), a symbolic link at the
+     landing name is a host-guard refusal (`FailedPrecondition`, counted by
+     `virtrigaud_provider_host_guard_refusals_total`), a host that cannot be
+     scanned fails the import closed (`HOST_UNAVAILABLE` or
      `VM_DISK_CHECK_FAILED`), and an unused leftover is replaced.
-  3. **Serialisation.** An in-process lock on (host, landing name) is held
-     from the checks to the publish; the clustered `Create` that attaches the
-     disk in place, and the routed `DeleteLandedDisk`, take the same lock.
-     Every host command of the write phase runs under `flock -n -E 75` on
+  3. **Serialisation.** An in-process lock on the **landing name** —
+     provider-wide, whatever the host — is held from the checks to the
+     publish; the clustered `Create` that attaches the disk in place, and the
+     routed `DeleteLandedDisk`, take the same lock. On a shared pool the
+     landing name is the same file on every host, so a delete or create
+     through host A never races an import through host B. The wait for it is
+     bounded (2 minutes: "busy", retried). Every host command of the write
+     phase runs under `flock -n -E 75` on
      `<staging>/virtrigaud-locks/import-<namespace>.<name>.lock`, so a
      command left over from a cancelled call makes a re-send answer "the same
      import is still running" (`Unavailable`, retryable).
+  4. **Housekeeping.** Private write directories (`<pool>/.virtrigaud-write-*`)
+     owned by the SSH user and unchanged for more than 65 minutes (the
+     longest routed budget plus the manager's 35-minute settle time) are
+     removed: no call can still be writing into them. The import's own
+     removals run under `timeout(1)` only — never under the import's `flock`,
+     which a still-running command of an earlier call may hold.
+  5. **Budget.** With less than one minute of its time budget left after the
+     checks, the write phase is not started ("not performed", retried).
 
   The write phase is the single-host one: the private directory, the stdin
   writer (`s3`) or the bounded copy (`nfs`), the staged-image header checks,
@@ -2077,6 +2094,18 @@ side effect, whatever the provider reports.
   command holds the host lock.
 - **`DeleteStagedDisk`** removes an `s3` object from the pod and empties an
   `nfs` one with the qemu-img of `target_host_id`, under `timeout(1)`.
+- **Logs.** A staged object's location (its `nfs://` URL or `s3://` key) is
+  replaced by `<staged object>` in the routed import's and the staged-disk
+  delete's outcome lines. The transport's own `ERROR Command failed` line
+  still prints a failed host command in full.
+
+**Residual: two Providers on one pool.** The landing lock is per provider
+process; a clustered Provider runs one replica, so it covers every call of
+that Provider. Two Providers — or a clustered Provider and a single-host one —
+whose hosts mount the same pool are **not** serialised with each other: an
+import through one and a delete through the other could act on the same
+landing file. Do not share a pool directory between Providers until the A6.1
+pool ownership marker exists (follow-up).
 - **`GetCapabilities`** reports `supports_routed_import`, `supports_disk_import`
   (backends `s3`, `nfs`; the single-host source formats), `supports_import_size_limit`,
   `supports_landed_disk_delete` and staged-disk delete backends `s3`, `nfs`.
@@ -2089,8 +2118,10 @@ How each failure is answered (not performed, refused, or unknown) is in
 
 - **The `default` pool must already exist at `/var/lib/libvirt/images`** on
   every host. The routed import never creates, starts or moves a pool; a host
-  whose `default` pool is elsewhere is refused with the same constant message
-  as a create. (A first create on the host creates the pool.)
+  whose `default` pool is elsewhere is refused with `FailedPrecondition` +
+  `HOST_STORAGE_MISCONFIGURED` (scoped to that host: the manager may place the
+  target on another one) and the create's constant text, prefixed with the
+  host id. (A first create on the host creates the pool.)
 - **An `ssh://` Host endpoint**, `qemu-img`, `flock` (util-linux) and
   `timeout` (coreutils) on the host, as for a routed export. A host without
   `flock` or `timeout` refuses the import (`FailedPrecondition`) and never
