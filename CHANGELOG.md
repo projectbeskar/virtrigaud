@@ -5,6 +5,34 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-10-22 10:53] - Migration into a clustered provider: #416 review fixes (R11 slice B.3)
+**Author:** @wrkode (William Rizzo)
+
+### Fixed
+- `internal/controller/vmmigration_clustered_target.go` (H1, L1): a retry after a routed import deletes the landed disk on its recorded host and, once the provider confirms it deleted, forgets the import completely (`status.importID`, the landed path/format/checksum, `Importing`, the `ImportRequested` marker and its in-memory guard, `importTarget.host`, `TargetPlaced`; the export too when the staged object is gone), so the retry imports again instead of handing a deleted path to its fresh target. A kept landed disk (`cleanupPolicy: Never`, in use, left behind) keeps `importTarget.host`: the fresh target is placed on that host only and the disk is reused there. A retry whose target is still bound to exactly the imported disk reuses it.
+- `internal/scheduler`, `internal/controller/virtualmachine_import_wait.go` (L3): `Request.RequiredHost`; a migration target whose migration recorded an import host is scheduled onto that host only (an administrator clearing its pending host, a retry keeping its disk).
+- `internal/controller/vmmigration_clustered_target.go` (M1, L2): the B1.2 release persists the VMMigration first (marker removed, `TargetPlaced=False/TargetHostReleased`, `importTarget.host` and `LandedDiskCleanup` cleared — nothing landed), then releases the VM with in-place conflict retries; a failure between the two heals on the next import. A full `excludedHosts` list makes the next attempt wait `vmCreateConflictRetryInterval`.
+- `internal/controller/vmmigration_controller.go`, `vmmigration_clustered_target_guard.go` (M2): a routed migration completes only on a target whose `spec.importedDisk` names it with `diskID == status.importID` and `path == status.diskInfo.targetPath` (checked in Creating and, live, in Validating-Target); otherwise `Ready=False/TargetDiskMismatch` and one Warning — never Ready, never `deleteAfterMigration`.
+- `internal/controller/vmmigration_clustered_target.go` (M3): consecutive "not performed" answers to a routed import fail the attempt into `retryPolicy` after 5 minutes (about five answers on the backoff), instead of re-downloading the disk forever.
+- `internal/providers/libvirt/hostinfo.go` (M3): a libvirt host's allocatable storage is its `default` pool's free space only, not the sum of every active pool. It changes `Host.status.allocatableStorageBytes` for every libvirt host and so the placement input of a migration target and of any `VMPlacementPolicy` `minDiskSpacePerHost`.
+- `internal/controller/vmmigration_clustered_target.go` (M4): an operator's `operation-outcome=not-performed@<attempt>` confirmation of a routed import whose target's pending host moved sends it, re-recorded, to the current pending host; the hold message says so.
+- `internal/controller/vmmigration_staging_cleanup.go` (L4): an nfs staged object whose import was never routed and whose target VM is gone is emptied through any Ready host of the clustered Provider; held (not left behind) while none is Ready.
+- `internal/controller/vmmigration_clustered_target.go` (L5, L7): force-delete of a migration whose unbound target could not be deleted records an `UnboundTargetVMLeft` Warning; the B1.4 target reads run only for a migration with a target-first VM (`TargetPlaced`, now written with the claim), so single-host terminal and retry paths read nothing new.
+
+### Added
+- `internal/controller/vmmigration_routed_answers_test.go` (L6): every class of routed `ImportDisk` answer driven through the real transport client against a loopback gRPC server; `routedRefusalAction` is the single classification the controller uses.
+- `internal/controller/vmmigration_clustered_review416_envtest_test.go`, `vmmigration_routed_resend_test.go`: retry after an import with the landed disk deleted and kept, release-write conflict and crash, spec edited during the import, repeated not-performed, the moved-host re-send with and without confirmation.
+- `docs/clustered-provider-inventory.md`, `docs/upgrading.md`: the above.
+
+### Why
+Review of PR #416 (1 High, 4 Medium, 7 Low).
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout (manager and libvirt provider)
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-10-22 09:47] - VMMigration into a clustered provider: target-first flow (ADR-0007 Addendum B slice 3, R11)
 **Author:** @wrkode (William Rizzo)
 

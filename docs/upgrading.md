@@ -822,7 +822,12 @@ the following once after upgrading, and delete only what no `VMMigration` in fli
   then on. New status: `VMMigration.status.storageInfo.importTarget.host`, the
   `TargetPlaced` condition, and the VirtualMachine reasons `WaitingForImport`,
   `MigrationNotFound` and `ImportedDiskPinned`. Single-host, vSphere and Proxmox
-  targets are unchanged (import, then create). **Rolling the manager back** with a
+  targets are unchanged (import, then create). **A libvirt Host's
+  `allocatableStorageBytes` now reports its `default` pool's free space only** (it
+  summed every active pool): it is the input of the disk-space filter, and it changes
+  what `Host.status` shows for every libvirt host. Placement filters on it for a
+  migration target and, for any clustered VM, through a `VMPlacementPolicy`'s
+  `minDiskSpacePerHost`: such a policy now compares against the `default` pool. **Rolling the manager back** with a
   clustered-target migration in flight: finish or delete those migrations first; an
   older manager does not know `WaitingForImport` and would send a `Create` for the
   waiting target (which the clustered provider refuses, so nothing is destroyed).

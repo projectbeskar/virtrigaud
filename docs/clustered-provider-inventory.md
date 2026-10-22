@@ -2064,14 +2064,25 @@ proven, see below) and the `pvc` backend (only `s3` and `nfs` land on a host).
    `LandedDiskCleanup=Unknown`) **before** the `ImportRequested` marker, and
    `ImportDisk` is sent with `target_host_id` and the target VM's UID. A
    re-send goes to the recorded host only; a pending host that has changed
-   since holds the migration (`ImportOutcomeUnknown`) for an operator.
+   since holds the migration (`ImportOutcomeUnknown`) for an operator. To
+   send it to the current pending host instead, check the recorded host for a
+   landed disk, remove it, and confirm the attempt as not performed
+   (`virtrigaud.io/operation-outcome=not-performed@<attempt id>`): the import
+   is then re-recorded for, and sent to, the current pending host.
 4. **`Creating`.** No VM is created: the landed disk (`diskID`, `path`,
    `format`) is written into the existing target's `spec.importedDisk`, with
    the live object's resourceVersion as precondition. The VirtualMachine
    controller then creates the VM on its pending host with the disk attached
    in place. A target whose pending host is no longer the recorded import
    host is held (`Ready=False/TargetHostMoved`) for an operator.
-5. **`Validating-Target`, `Ready`** are unchanged.
+5. **`Validating-Target`, `Ready`** are unchanged, except that a routed
+   migration completes only on a target whose `spec.importedDisk` is still
+   exactly the disk it imported (`migrationRef`, `diskID`, `path`). One that
+   was changed — for example by someone who may edit the VM, during the
+   import — holds the migration (`Ready=False/TargetDiskMismatch`, one Warning
+   event): it never reaches `Ready`, so `spec.source.deleteAfterMigration`
+   never runs. (An admission rule reserving `spec.importedDisk` of a waiting
+   target for the manager is a follow-up.)
 
 How the manager answers the routed import's refusals (nothing was landed in
 any of them):
@@ -2080,11 +2091,22 @@ any of them):
 |---|---|
 | `AlreadyExists`, no reason (a foreign or unstamped domain with the target's name on the landing host) | **Releases the host**: one checked status write on its own target clears `pendingHost` and adds the host to `status.placement.excludedHosts` (`Placed=False/HostExcluded`); the VM is placed again and the import follows it (`TargetPlaced=False/TargetHostReleased` meanwhile) |
 | `FailedPrecondition` + `HOST_STORAGE_MISCONFIGURED` (the host's `default` pool is not at `/var/lib/libvirt/images`) | Releases and excludes the host the same way |
+
+The release persists the VMMigration first (the import marker removed,
+`TargetPlaced=False/TargetHostReleased`, `importTarget.host` cleared), then
+releases the VM in a checked status write, retried in place on a conflict. A
+failure between the two leaves the VM on the refused host; the next import is
+refused there again and the release is made then. When `excludedHosts` was
+full and its oldest entry dropped, the next attempt waits 2 minutes, as for a
+create.
+
+| Provider answer | Manager |
+|---|---|
 | `AlreadyExists` + `VM_PREVIOUS_INCARNATION` (either kind) | Holds (`Importing=False/ImportTargetPreviousIncarnation`), re-sent with a backoff |
 | `FailedPrecondition` + `VM_DISK_IN_USE` (the landing file is used by a domain on a host) | Holds (`LandingDiskInUse`); never re-placed — on a shared pool that cannot help |
 | Any other `FailedPrecondition` (a symlink at the landing name, the guard, a missing host tool, a host not reached over `ssh://`) | Holds for an operator (`LandingHostRefused`) |
 | `Unavailable` + `HOST_UNAVAILABLE` or `VM_DISK_CHECK_FAILED` | Waits (`TargetHostUnavailable`); the target is never moved off its host automatically |
-| `Unavailable` + `VM_OPERATION_FAILED` (not performed) | Re-sent on the same host with a backoff (`ImportNotPerformed`) |
+| `Unavailable` + `VM_OPERATION_FAILED` (not performed) | Re-sent on the same host with a backoff (`ImportNotPerformed`). Each re-send downloads the disk again, so after 5 minutes of consecutive "not performed" answers (about five) the attempt fails (reason `ImportNotPerformed`) and `spec.options.retryPolicy` decides: a retry deletes the unbound target and places a fresh one |
 | No definite answer | The R6 rules: held, or re-sent after 35 minutes (the clustered provider reports `resend_safe_import_backends: [s3, nfs]`) — to the recorded host only |
 | `InvalidArgument`, the disk-size refusals | As for a single-host target |
 
@@ -2104,6 +2126,11 @@ Each hold is re-sent at 15 s, doubling to 5 minutes.
   host, and A6.2's move to an own domain's host is not applied (the own-domain
   hold, `OwnDomainOnAnotherHost`, still applies). An administrator resolves
   the conflicting domain on the host.
+- **Placed only where its disk is.** A migration target whose migration
+  recorded an import to a host (`importTarget.host`) is scheduled onto that
+  host only — after an administrator cleared its pending host, or for the
+  fresh target of a retry that kept its landed disk. If that host cannot take
+  it, it stays `Unschedulable`.
 
 **Failure, retry and deletion (B1.4).** A migration that fails for good, is
 retried, or is deleted while its target is still unbound (no `status.id`)
@@ -2112,11 +2139,29 @@ VM's finalizer runs the owner-checked `Delete` on its pending host. The
 landed disk is cleaned up only once the target VM is gone — through the
 recorded host (`DeleteLandedDisk` with `target_host_id`), as the `nfs`
 staged-disk delete is (`DeleteStagedDisk` with `target_host_id`; `s3` is
-deleted from the pod). A retry also cleans up the previous attempt's landed
-disk (unless `cleanupPolicy: Never`) before it creates and places a fresh
-target. A deleting VMMigration keeps its finalizer while the target VM's
-delete is held (for example `DeleteBlocked` on an unreachable host);
-`virtrigaud.io/force-delete=true` releases it.
+deleted from the pod). An `nfs` staged object whose import was never routed,
+and whose target VM is gone, is emptied through any Ready host of the
+Provider (the object is on the NFS export, which every host reaches); while
+none is Ready the delete is held.
+
+A **retry** after a routed import first deletes the previous attempt's landed
+disk on its recorded host (unless `cleanupPolicy: Never`). Once the provider
+confirms it deleted, the import is forgotten completely — `status.importID`,
+the landed path, the `Importing` condition, the `ImportRequested` marker,
+`importTarget.host` — and the retry imports again onto its fresh target
+(and exports again, if the staged object is gone too). A landed disk that is
+**kept** (`cleanupPolicy: Never`, a VM uses it, or it was left behind) keeps
+`importTarget.host`: the fresh target is placed on that host only and the
+retry reuses the disk there, as a single-host retry does — it is never landed
+again on another host (on a shared pool that would overwrite the kept disk).
+A retry whose target is already bound to exactly the imported disk reuses it.
+
+A deleting VMMigration keeps its finalizer while the target VM's delete is
+held (for example `DeleteBlocked` on an unreachable host);
+`virtrigaud.io/force-delete=true` releases it. If the unbound target could not
+even be asked to delete, force-delete records an `UnboundTargetVMLeft`
+Warning: that VM keeps its placement and the capacity reserved on its pending
+host and is never created (`MigrationNotFound`) — delete it yourself.
 
 **What the clustered libvirt provider serves.**
 
