@@ -2529,16 +2529,26 @@ pool. Before anything is written, these checks run in order:
 2. **The landing file through A6.1's guard.** `checkDiskFree` probes the landed
    name on the landing host. If the file exists, `refuseIfUsed` scans **every**
    host of the registry, because on a shared pool another host's domain may use
-   the file. If any domain uses it, the import is refused. A host that cannot be
+   the file. If any domain uses it, the import is refused with its own reason
+   (not plain `AlreadyExists`): re-placing the target cannot help when the file
+   is on a shared pool, so it must not trigger the B1.2 release. A symlink at
+   the landing name is a guard refusal (`FailedPrecondition`), never a name
+   conflict. A host that cannot be
    scanned fails the import closed (`HOST_UNAVAILABLE` / `VM_DISK_CHECK_FAILED`,
    kept out of the breaker). An unused leftover is overwritten by the publish,
    as on single-host.
 3. **Serialisation.**
-   - The in-process landing lock (`landingLocks`), keyed on (host id, landing
-     name), is held around the check and the publish.
-   - The clustered `Create` that attaches an imported disk takes the same lock.
-     Today it takes only `lockDomain`, so this lock is new on the clustered
-     path.
+   - The in-process landing lock (`landingLocks`), keyed on the **landing name
+     only**, provider-wide, is held around the check and the publish. It is
+     not keyed per host: on a shared pool the same file is reachable from every
+     host, and a per-host key would let a `DeleteLandedDisk` routed to one host
+     remove a disk an import or `Create` on another host has just landed or
+     attached (amended 2026-10-22 after the slice B.1/B.2 security review).
+   - The clustered `Create` that attaches an imported disk, and the routed
+     `DeleteLandedDisk`, take the same lock. Today `Create` takes only
+     `lockDomain`, so this lock is new on the clustered path.
+   - Two Providers sharing one pool are not serialised by this lock; that
+     waits for the A6.1 pool ownership marker (B7.6).
    - On the host, `flock -n -E 75` on `<staging>/virtrigaud-locks/import-<domain>.lock`
      through `hostGuardScript`. Exit 75 means `Unavailable`, "the same import is
      still running".
@@ -2686,7 +2696,9 @@ pool. Before anything is written, these checks run in order:
   `Builder.RoutedImport`. A clustered provider sets it only when all of these
   work: the routed import, the routed `DeleteLandedDisk` and the clustered
   `DeleteStagedDisk`. It sets it together with `supports_disk_import`, import
-  backends `s3`/`nfs`, format `qcow2` and `supports_import_size_limit`.
+  backends `s3`/`nfs`, formats `qcow2`, `raw` and `vmdk` (a vSphere source
+  stages `vmdk` over `s3`; `nfs` accepts `qcow2` only, checked before any
+  lease) and `supports_import_size_limit`.
   `supports_landed_disk_delete` and the staged-delete backends follow from the
   same slice. The manager reads it at runtime (`GetCapabilities`), as the
   clone and adoption gates do (D7 double gate).
