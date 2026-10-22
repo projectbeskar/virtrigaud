@@ -384,9 +384,10 @@ func (p *Provider) nfcImportStreamOptimized(
 
 	// (b) Detach the disk (keep the file) and Unregister the transient import VM.
 	// Unregister leaves the disk — and the transient VM's own small files
-	// (.vmx, .vmsd, .hlog, ...) in the folder; those are removed right after
-	// (removeImportVMStubs, rc2 R7), never the landed .vmdk. The subsequent
-	// Create attaches "[<ds>] <id>/<id>.vmdk".
+	// (.vmx, .vmsd, .hlog, the "<id>-<hex>.hlog" history log, ...) in the
+	// folder; those are removed right after (removeImportVMStubs, rc2 R7/R23),
+	// never the landed .vmdk. The subsequent Create attaches
+	// "[<ds>] <id>/<id>.vmdk".
 	vm := object.NewVirtualMachine(p.client.Client, info.Entity)
 	if devs, derr := vm.Device(ctx); derr == nil {
 		if disks := devs.SelectByType((*types.VirtualDisk)(nil)); len(disks) > 0 {
@@ -398,7 +399,7 @@ func (p *Provider) nfcImportStreamOptimized(
 		p.logger.Warn("Failed to unregister transient import VM (leftover .vmx may remain in folder)", "vm", info.Entity.Value, "error", err)
 		return nil
 	}
-	p.removeImportVMStubs(ctx, datastore, datacenter, stubs)
+	p.removeImportVMStubs(ctx, datastore, datacenter, id, stubs)
 	return nil
 }
 
@@ -406,7 +407,7 @@ func (p *Provider) nfcImportStreamOptimized(
 // VM next to its .vmx, named after the VM. The transient import VM is named
 // after the landing folder (<id>), so its own files are "<id><suffix>" in that
 // folder. ".vmdk" is never among them.
-var importVMStubSuffixes = []string{".vmx", ".vmsd", ".hlog", ".nvram", ".vmxf"}
+var importVMStubSuffixes = []string{".vmx", ".vmsd", importVMHistoryLogExt, ".nvram", ".vmxf"}
 
 // importVMStubFiles returns the datastore-relative names of the transient
 // import VM's own files to remove once it is unregistered: "<id>/<id><suffix>"
@@ -462,13 +463,63 @@ func importVMStubNames(dsName, id string, layout []string) []string {
 	return out
 }
 
+// importVMHistoryLogExt is the extension of the VM history log vCenter writes
+// next to a VM's .vmx.
+const importVMHistoryLogExt = ".hlog"
+
+// isImportVMHistoryLog reports whether name (a bare file name in the landing
+// folder) is the transient import VM's history log: exactly
+// `^<QuoteMeta(id)>-[0-9a-f]+\.hlog$`. vCenter names it "<id>-<hex>.hlog" with
+// a random suffix, so it is in neither the derived stub names nor the VM's
+// layout (rc2 R23). A .vmdk, a name with a path separator, another VM's log
+// or a backup copy ("<id>-<hex>.hlog.bak") never matches.
+func isImportVMHistoryLog(id, name string) bool {
+	rest, ok := strings.CutPrefix(name, id+"-")
+	if !ok {
+		return false
+	}
+	hex, ok := strings.CutSuffix(rest, importVMHistoryLogExt)
+	if !ok || hex == "" {
+		return false
+	}
+	for _, c := range hex {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+// importVMHistoryLogNames returns, as datastore-relative paths "<id>/<name>",
+// the entries of the landing folder "<id>" that are the transient import VM's
+// history log (isImportVMHistoryLog).
+func importVMHistoryLogNames(id string, entries []string) []string {
+	var out []string
+	for _, name := range entries {
+		if isImportVMHistoryLog(id, name) {
+			out = append(out, id+"/"+name)
+		}
+	}
+	return out
+}
+
 // removeImportVMStubs deletes the transient import VM's stub files (relative
 // to datastore), each with FileManager.DeleteDatastoreFile — never the
-// virtual-disk delete. It is fail-soft: a file that is absent is skipped, and
-// any other failure is logged at Warn and never fails the import.
-func (p *Provider) removeImportVMStubs(ctx context.Context, datastore *object.Datastore, datacenter *object.Datacenter, stubs []string) {
+// virtual-disk delete — plus its "<id>-<hex>.hlog" history log, found by
+// listing the landing folder "<id>" (importVMHistoryLogNames). stubs is what
+// importVMStubFiles returned: when it is empty the import VM was not verified
+// and nothing is removed, not even a history log. It is fail-soft: a file
+// that is absent is skipped, a folder that cannot be listed keeps its history
+// log, and any other failure is logged at Warn and never fails the import.
+func (p *Provider) removeImportVMStubs(ctx context.Context, datastore *object.Datastore, datacenter *object.Datacenter, id string, stubs []string) {
 	if len(stubs) == 0 {
 		return
+	}
+	if entries, err := listDatastoreFolder(ctx, datastore, id); err != nil {
+		p.logger.Warn("Cannot list the landing folder; the transient import VM's history log stays in it",
+			"folder", datastore.Path(id), "error", err)
+	} else {
+		stubs = append(stubs, importVMHistoryLogNames(id, entries)...)
 	}
 	fm := datastore.NewFileManager(datacenter, false)
 	for _, rel := range stubs {

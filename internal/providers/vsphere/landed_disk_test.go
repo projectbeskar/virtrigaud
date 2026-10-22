@@ -18,6 +18,7 @@ package vsphere
 
 import (
 	"context"
+	"regexp"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -206,13 +207,69 @@ func TestRemoveImportVMStubs_KeepsTheLandedDisk(t *testing.T) {
 	require.Contains(t, stubs, id+"/"+id+".vmx", "the transient VM's .vmx is a stub")
 	require.True(t, datastoreFileExists(t, p, "["+simDatastore+"] "+id+"/"+id+".vmx"), "setup: vcsim wrote the .vmx")
 
+	// vCenter's "<id>-<hex>.hlog" history log (rc2 R23) is in neither the
+	// derived names nor the layout; vcsim does not write one, so plant it,
+	// next to look-alikes that must stay.
+	folder := "[" + simDatastore + "] " + id + "/"
+	hlog := folder + id + "-3fc8ea8a.hlog"
+	keep := []string{
+		folder + id + ".hlog.bak",
+		folder + "other-abc.hlog",
+		folder + id + "-zz.hlog",
+		folder + id + "-3fc8ea8a.hlog.bak",
+		folder + id + "-3fc8ea8a.vmdk",
+	}
+	makeFolderFile(t, p, hlog)
+	for _, f := range keep {
+		makeFolderFile(t, p, f)
+	}
+
 	require.NoError(t, vm.Unregister(ctx))
 	ds, err := p.datastoreByName(ctx, simDatastore)
 	require.NoError(t, err)
-	p.removeImportVMStubs(ctx, ds, testDatacenter(t, p), stubs)
+	p.removeImportVMStubs(ctx, ds, testDatacenter(t, p), id, stubs)
 
 	assert.False(t, datastoreFileExists(t, p, "["+simDatastore+"] "+id+"/"+id+".vmx"), "the stub .vmx is removed")
+	assert.False(t, datastoreFileExists(t, p, hlog), "the history log is removed")
 	assert.True(t, datastoreFileExists(t, p, landed), "the landed disk is never removed")
+	for _, f := range keep {
+		assert.True(t, datastoreFileExists(t, p, f), "an unrelated name is never removed: %s", f)
+	}
+}
+
+// TestRemoveImportVMStubs_NoStubsRemovesNothing (vcsim): when the import VM was
+// not verified (no stubs) the history log is not removed either.
+func TestRemoveImportVMStubs_NoStubsRemovesNothing(t *testing.T) {
+	p, _ := newOwnershipSim(t)
+	ctx := context.Background()
+	id := landingName(ownerTeamA.Namespace, "web")
+	hlog := "[" + simDatastore + "] " + id + "/" + id + "-3fc8ea8a.hlog"
+	makeFolderFile(t, p, hlog)
+
+	ds, err := p.datastoreByName(ctx, simDatastore)
+	require.NoError(t, err)
+	p.removeImportVMStubs(ctx, ds, testDatacenter(t, p), id, nil)
+	assert.True(t, datastoreFileExists(t, p, hlog))
+}
+
+// TestIsImportVMHistoryLog: exactly `^<QuoteMeta(id)>-[0-9a-f]+\.hlog$`.
+func TestIsImportVMHistoryLog(t *testing.T) {
+	id := "mig-s3_vs2-back-migrated"
+	pattern := regexp.MustCompile(`^` + regexp.QuoteMeta(id) + `-[0-9a-f]+\.hlog$`)
+	for _, name := range []string{
+		id + "-3fc8ea8a.hlog", id + "-0.hlog", id + "-abcdef0123456789.hlog",
+		id + ".hlog", id + "-.hlog", id + "-zz.hlog", id + "-3FC8EA8A.hlog", id + "-3fc8ea8a.hlog.bak",
+		id + "-3fc8ea8a.vmdk", id + "-3fc8ea8a-flat.vmdk", "other-abc.hlog", "x" + id + "-ab.hlog",
+		id + "-ab/../x.hlog", id + "-ab.HLOG", id + "-a b.hlog", "",
+	} {
+		assert.Equal(t, pattern.MatchString(name), isImportVMHistoryLog(id, name), name)
+	}
+	// A dot in the id is literal (QuoteMeta), not "any character".
+	assert.False(t, isImportVMHistoryLog("a.b", "axb-12.hlog"))
+	assert.True(t, isImportVMHistoryLog("a.b", "a.b-12.hlog"))
+
+	assert.Equal(t, []string{id + "/" + id + "-3fc8ea8a.hlog"},
+		importVMHistoryLogNames(id, []string{id + ".vmdk", id + "-3fc8ea8a.hlog", id + ".hlog.bak", "other-abc.hlog"}))
 }
 
 // TestImportVMStubFiles_OnlyTheImportVM (vcsim): a VM whose .vmx is not

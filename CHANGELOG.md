@@ -5,6 +5,27 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-10-18 12:06] - vSphere import removes the history log; a Ready migration closes LandedDiskCleanup (rc2 R23)
+**Author:** @wrkode (William Rizzo)
+
+### Fixed
+- `internal/providers/vsphere/s3import.go`: after an S3/NFS `ImportDisk`, the transient import VM's stub cleanup (#403) left vCenter's history log `<landing name>-<hex>.hlog` (about 300 bytes) in the landing folder: its suffix is random and it is in neither the derived stub names nor the VM's layout. `removeImportVMStubs` now lists the landing folder after the unregister and also removes a name that matches exactly `^<QuoteMeta(id)>-[0-9a-f]+\.hlog$` (`isImportVMHistoryLog`, `importVMHistoryLogNames`): only in that folder, never a `.vmdk` or a look-alike (`<id>.hlog.bak`, `<other>-abc.hlog`, `<id>-zz.hlog`), and only when the transient VM was verified as the import's (no stubs: nothing removed). Fail-soft as before: a folder that cannot be listed keeps the log, logged at `WARN`.
+- `internal/controller/vmmigration_landed_disk_cleanup.go`, `internal/controller/vmmigration_controller.go`: a migration that reached `Ready` kept `LandedDiskCleanup=Unknown`/`LandedDiskMayExist` although its landed disk is the target VM's disk and is never deleted. The status write that marks the migration `Ready` now also records `LandedDiskCleanup=True` with the new reason `LandedDiskInUseByTarget` and a constant message, at the migration's generation (`markLandedDiskInUseByTarget`; no extra write). A migration that reached `Ready` under rc2 with the condition still `Unknown` is closed once by `handleReadyPhase` (`closeLandedDiskAtReady`), and the deletion path of a `Ready` migration that an older status still marks open records the same reason. Deleting a `Ready` migration sends no `DeleteLandedDisk` and holds nothing, with any `cleanupPolicy`.
+- `internal/providers/vsphere/landed_disk_test.go`, `internal/controller/vmmigration_landed_disk_cleanup_test.go`, `internal/controller/vmmigration_landed_disk_cleanup_envtest_test.go`: vcsim test planting a `<id>-<hex>.hlog` next to look-alikes (removed vs kept, landed `.vmdk` kept), a matcher test against the anchored regular expression, a no-stubs test; controller unit tests for the Ready write, the rc2 close-once and the deletion of a `Ready` migration; an envtest spec in which a migration completes (`Ready` stored with `LandedDiskInUseByTarget`) and its deletion sends no `DeleteLandedDisk` and keeps the target VM.
+
+### Changed
+- `docs/adr/0011-migration-staging-cleanup.md` (Addendum A): "Closed at Ready" and a list of the `LandedDiskCleanup` reasons; the vSphere paragraph names the history log.
+- `docs/upgrading.md`: the landed-disk row names `LandedDiskInUseByTarget` and the history log; the leftovers bullet says rc2 imports still leave the `<landing name>-<hex>.hlog`.
+
+### Why
+Found in the rc2 lab run on real vSphere: a 281-byte `<id>-<hex>.hlog` stayed in every landing folder, and every successful migration showed `LandedDiskCleanup=Unknown` forever, which reads as an unfinished cleanup.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-10-18 12:10] - Single-host libvirt Delete removes the VM's own cloud-init seed directory (rc2 R24)
 **Author:** @wrkode (William Rizzo)
 

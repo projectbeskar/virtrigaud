@@ -43,7 +43,9 @@ import (
 // the staged disk (ADR-0011 D3): Never keeps it; OnSuccess (the default)
 // deletes it when the VMMigration is deleted; Always also deletes it when the
 // migration fails for good. A successful migration's landed disk is its target
-// VM's disk and is never deleted. Status and events never name the disk's
+// VM's disk and is never deleted: the status write that marks the migration
+// Ready also closes the condition (LandedDiskCleanup=True,
+// LandedDiskInUseByTarget; rc2 R23). Status and events never name the disk's
 // location.
 
 const (
@@ -52,9 +54,10 @@ const (
 	// Unknown (migrationReasonLandedDiskMayExist) from just before the import
 	// is sent; False (migrationReasonLandedDiskCleanupPending) while its
 	// delete is held — LastTransitionTime is when the hold began, from which
-	// the retries back off; True once nothing is left to do (deleted, kept
-	// because a VM uses it or another migration lands the same name, left
-	// behind, or retained by cleanupPolicy Never).
+	// the retries back off; True once nothing is left to do (the migration
+	// is Ready and the disk is its target VM's, deleted, kept because a VM
+	// uses it or another migration lands the same name, left behind, or
+	// retained by cleanupPolicy Never).
 	migrationConditionLandedDiskCleanup = "LandedDiskCleanup"
 
 	// migrationReasonLandedDiskMayExist: an import was sent, so a landed disk
@@ -70,6 +73,10 @@ const (
 	// uses it — the migration's target VirtualMachine, or a VM the target
 	// provider reports.
 	migrationReasonLandedDiskInUse = "LandedDiskInUse"
+	// migrationReasonLandedDiskInUseByTarget: the migration is Ready, so the
+	// landed disk is its target VirtualMachine's disk; the migration never
+	// deletes it (rc2 R23). Written in the same status write as Phase=Ready.
+	migrationReasonLandedDiskInUseByTarget = "LandedDiskInUseByTarget"
 	// migrationReasonLandedDiskHandedOver: another VMMigration in flight
 	// targets the same VirtualMachine and lands its disk under the same name.
 	migrationReasonLandedDiskHandedOver = "LandedDiskHandedOver"
@@ -97,6 +104,8 @@ const (
 		"was already gone)."
 	migrationLandedDiskInUseMessage = "The disk the migration's import landed on the target provider is kept: it is the " +
 		"disk of the migration's target VirtualMachine, or a VM on the target provider uses it."
+	migrationLandedDiskInUseByTargetMessage = "The landed disk is the target VM's disk; it is never deleted by the " +
+		"migration."
 	migrationLandedDiskHandedOverMessage = "The disk the migration's import landed on the target provider is kept: " +
 		"another VMMigration in progress targets the same VirtualMachine and lands its disk under the same name."
 	migrationLandedDiskRetainedMessage = "The disk the migration's import landed on the target provider is kept: " +
@@ -163,11 +172,45 @@ type landedDiskDone struct {
 }
 
 var (
-	landedDiskDoneDeleted    = landedDiskDone{migrationReasonLandedDiskDeleted, migrationLandedDiskDeletedMessage, corev1.EventTypeNormal}
-	landedDiskDoneInUse      = landedDiskDone{migrationReasonLandedDiskInUse, migrationLandedDiskInUseMessage, ""}
-	landedDiskDoneHandedOver = landedDiskDone{migrationReasonLandedDiskHandedOver, migrationLandedDiskHandedOverMessage, ""}
-	landedDiskDoneRetained   = landedDiskDone{migrationReasonLandedDiskRetained, migrationLandedDiskRetainedMessage, ""}
+	landedDiskDoneDeleted       = landedDiskDone{migrationReasonLandedDiskDeleted, migrationLandedDiskDeletedMessage, corev1.EventTypeNormal}
+	landedDiskDoneInUse         = landedDiskDone{migrationReasonLandedDiskInUse, migrationLandedDiskInUseMessage, ""}
+	landedDiskDoneHandedOver    = landedDiskDone{migrationReasonLandedDiskHandedOver, migrationLandedDiskHandedOverMessage, ""}
+	landedDiskDoneRetained      = landedDiskDone{migrationReasonLandedDiskRetained, migrationLandedDiskRetainedMessage, ""}
+	landedDiskDoneInUseByTarget = landedDiskDone{migrationReasonLandedDiskInUseByTarget,
+		migrationLandedDiskInUseByTargetMessage, ""}
 )
+
+// markLandedDiskInUseByTarget closes the landed-disk cleanup of a migration
+// that reached Ready: LandedDiskCleanup=True/LandedDiskInUseByTarget, the
+// disk being the target VM's disk, which the migration never deletes. It
+// changes nothing (and reports false) when no landed disk may exist — no
+// import was sent, it was sent by a manager older than rc2, or the condition
+// is already True — so the caller folds it into the status write that marks
+// Ready, and a repeated call writes nothing.
+func markLandedDiskInUseByTarget(m *infrav1beta1.VMMigration) bool {
+	if !landedDiskMayExist(m) {
+		return false
+	}
+	return meta.SetStatusCondition(&m.Status.Conditions, metav1.Condition{
+		Type:               migrationConditionLandedDiskCleanup,
+		Status:             metav1.ConditionTrue,
+		Reason:             landedDiskDoneInUseByTarget.reason,
+		Message:            landedDiskDoneInUseByTarget.message,
+		ObservedGeneration: m.Generation,
+	})
+}
+
+// closeLandedDiskAtReady records LandedDiskCleanup=True/LandedDiskInUseByTarget
+// on a Ready migration that still says a landed disk may exist — one that
+// reached Ready under rc2, before the condition was closed in the Ready
+// status write. It writes only when that changes the status (once per such
+// migration).
+func (r *VMMigrationReconciler) closeLandedDiskAtReady(ctx context.Context, m *infrav1beta1.VMMigration) error {
+	if !markLandedDiskInUseByTarget(m) {
+		return nil
+	}
+	return r.updateStatus(ctx, m)
+}
 
 // landedDiskMayExist reports whether the migration may still have a landed
 // disk to clean up: its LandedDiskCleanup condition exists and is not True.
@@ -429,8 +472,9 @@ func logLandedDiskLeftBehind(ctx context.Context, left *landedDiskLeftBehindErro
 // returns the final outcome, a landedDiskLeftBehindError when the delete can
 // never succeed, or any other error when a retry can still succeed.
 //
-// The disk is kept (landedDiskDoneInUse) when the migration succeeded (its
-// target VM owns the disk), and when a VirtualMachine exists under the name
+// The disk is kept (landedDiskDoneInUseByTarget) when the migration succeeded
+// (its target VM owns the disk), and (landedDiskDoneInUse) when a
+// VirtualMachine exists under the name
 // the import was sent for that is the migration's own target (status.
 // targetVMUID or its claim) or that names an imported disk at all — it is, or
 // is about to be, attached; its own deletion removes it. It is handed over
@@ -444,7 +488,7 @@ func logLandedDiskLeftBehind(ctx context.Context, left *landedDiskLeftBehindErro
 // on it uses; that disk is kept too.
 func (r *VMMigrationReconciler) cleanupLandedDisk(ctx context.Context, m *infrav1beta1.VMMigration) (landedDiskDone, error) {
 	if m.Status.Phase == infrav1beta1.MigrationPhaseReady {
-		return landedDiskDoneInUse, nil
+		return landedDiskDoneInUseByTarget, nil
 	}
 	if m.Status.StorageInfo == nil || m.Status.StorageInfo.ImportTarget == nil {
 		return landedDiskDone{}, landedLeftBehind(landedDiskLeftUnrecorded, nil)
