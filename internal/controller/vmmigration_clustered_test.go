@@ -18,16 +18,19 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	infravirtrigaudiov1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
+	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
 )
 
 // These tests pin the VMMigration controller's side of ADR-0007 Addendum A, A1:
@@ -81,13 +84,81 @@ func getMigration(t *testing.T, r *VMMigrationReconciler) *infravirtrigaudiov1be
 	return m
 }
 
+// capsStub is a provider that reports caps (or fails GetCapabilities with err).
+type capsStub struct {
+	stubProvider
+	caps contracts.Capabilities
+	err  error
+}
+
+func (c *capsStub) GetCapabilities(context.Context) (contracts.Capabilities, error) { return c.caps, c.err }
+
+// TestHandleValidatingPhase_ClusteredTargetRejected pins ADR-0007 Addendum B,
+// B5: a clustered target whose provider does not report supportsRoutedImport
+// still fails at Validating, before any side effect, with a constant message.
 func TestHandleValidatingPhase_ClusteredTargetRejected(t *testing.T) {
+	for name, inst := range map[string]contracts.Provider{
+		"no capability reporter":       &stubProvider{},
+		"supportsRoutedImport not set": &capsStub{caps: contracts.Capabilities{SupportsClustering: true, SupportsDiskImport: true}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			r, migration := clusteredMigrationFixture(t, false, true, nil)
+			r.providerInstanceFn = func(context.Context, *infravirtrigaudiov1beta1.Provider) (contracts.Provider, error) { return inst, nil }
+			_, err := r.handleValidatingPhase(context.Background(), migration)
+			require.NoError(t, err)
+			got := getMigration(t, r)
+			assert.Equal(t, infravirtrigaudiov1beta1.MigrationPhaseFailed, got.Status.Phase)
+			assert.Equal(t, clusteredTargetUnsupportedMessage, got.Status.Message)
+			assert.Contains(t, got.Status.Message, "topology: cluster")
+			c := meta.FindStatusCondition(got.Status.Conditions, infravirtrigaudiov1beta1.VMMigrationConditionFailed)
+			require.NotNil(t, c)
+			assert.Equal(t, ReasonClusteredTargetUnsupported, c.Reason)
+			assert.Empty(t, got.Status.TargetVMClaim, "no target VM is created")
+		})
+	}
+}
+
+// TestHandleValidatingPhase_ClusteredTargetCapabilitiesUnreadableWaits: a
+// capability query that fails is waited for, never a refusal.
+func TestHandleValidatingPhase_ClusteredTargetCapabilitiesUnreadableWaits(t *testing.T) {
 	r, migration := clusteredMigrationFixture(t, false, true, nil)
-	_, err := r.handleValidatingPhase(context.Background(), migration)
+	r.providerInstanceFn = func(context.Context, *infravirtrigaudiov1beta1.Provider) (contracts.Provider, error) {
+		return &capsStub{err: errors.New("unavailable")}, nil
+	}
+	res, err := r.handleValidatingPhase(context.Background(), migration)
 	require.NoError(t, err)
+	assert.Positive(t, res.RequeueAfter)
 	got := getMigration(t, r)
-	assert.Equal(t, infravirtrigaudiov1beta1.MigrationPhaseFailed, got.Status.Phase)
-	assert.Contains(t, got.Status.Message, "topology: cluster")
+	assert.Equal(t, infravirtrigaudiov1beta1.MigrationPhaseValidating, got.Status.Phase)
+	c := meta.FindStatusCondition(got.Status.Conditions, infravirtrigaudiov1beta1.VMMigrationConditionValidating)
+	require.NotNil(t, c)
+	assert.Equal(t, migrationReasonCapabilitiesUnknown, c.Reason)
+}
+
+// TestGateMigrationStorageBackend_ClusteredTargetRefusesPVC pins B3 / B7.5.
+func TestGateMigrationStorageBackend_ClusteredTargetRefusesPVC(t *testing.T) {
+	source := readyProvider("default", "src-prov")
+	source.Status.ReportedCapabilities = &infravirtrigaudiov1beta1.ReportedCapabilities{
+		SupportedExportBackends: []string{"pvc", "s3", "nfs"}, SupportedTransferModes: []string{"relay"},
+	}
+	target := readyProvider("default", "tgt-prov")
+	target.Spec.Topology = infravirtrigaudiov1beta1.ProviderTopologyCluster
+	target.Status.ReportedCapabilities = &infravirtrigaudiov1beta1.ReportedCapabilities{
+		SupportedImportBackends: []string{"s3", "nfs"}, SupportedTransferModes: []string{"relay"},
+	}
+	r := &VMMigrationReconciler{}
+	for _, backend := range []string{"pvc", ""} {
+		m := &infravirtrigaudiov1beta1.VMMigration{}
+		if backend != "" {
+			m.Spec.Storage = &infravirtrigaudiov1beta1.MigrationStorage{Type: backend}
+		}
+		assert.Equal(t, clusteredTargetPVCRefusedMessage, r.gateMigrationStorageBackend(m, source, target), "backend %q", backend)
+	}
+	for _, backend := range []string{"s3", "nfs"} {
+		m := &infravirtrigaudiov1beta1.VMMigration{Spec: infravirtrigaudiov1beta1.VMMigrationSpec{
+			Storage: &infravirtrigaudiov1beta1.MigrationStorage{Type: backend}}}
+		assert.Empty(t, r.gateMigrationStorageBackend(m, source, target), "backend %q", backend)
+	}
 }
 
 // TestGateMigrationStorageBackend_ClusteredSource pins ADR-0007 Addendum A
