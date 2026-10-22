@@ -19,12 +19,16 @@ package controller
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"google.golang.org/genproto/googleapis/rpc/errdetails"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -188,6 +192,18 @@ func (p *routedMigrationProvider) snapshot() (exports int, imports []contracts.I
 	defer p.mu.Unlock()
 	return p.exports, append([]contracts.ImportDiskRequest(nil), p.imports...),
 		append([]contracts.CreateRequest(nil), p.creates...), append([]contracts.LandedDiskDeleteRequest(nil), p.landedDeletes...)
+}
+
+// routedStatusErr is a provider answer as the transport hands it on when it
+// does not type it: the gRPC status (code, ErrorInfo reasons) in the chain.
+func routedStatusErr(code codes.Code, reasons ...string) error {
+	st := status.New(code, "importDisk: refused")
+	for _, r := range reasons {
+		var err error
+		st, err = st.WithDetails(&errdetails.ErrorInfo{Reason: r, Domain: contracts.ErrorInfoDomain})
+		Expect(err).NotTo(HaveOccurred())
+	}
+	return fmt.Errorf("importDisk failed: %w", st.Err())
 }
 
 // routedHost is one Host of the clustered target Provider.
@@ -512,27 +528,81 @@ var _ = Describe("Migration into a clustered provider (ADR-0007 Addendum B, envt
 		Expect(creates).To(HaveLen(1))
 	})
 
-	It("releases the pending host on a definite name conflict at import and follows the VM to its next host", func() {
-		prov := newRoutedMigrationProvider()
-		prov.set(func(p *routedMigrationProvider) {
-			p.importErrs = []error{contracts.NewConflictError("importDisk: a libvirt domain with the target's name exists", nil)}
-		})
-		f := newRoutedFixture(prov, routedFixtureOptions{hosts: []routedHost{
-			{name: "kvm-01", cpu: 16, storageBytes: storageGiB(100)},
-			{name: "kvm-02", cpu: 8, storageBytes: storageGiB(100)},
-		}})
+	for _, tc := range []struct {
+		name string
+		err  func() error
+	}{
+		{"a foreign domain with the target's name (plain AlreadyExists)", func() error {
+			return contracts.NewConflictError("importDisk: a libvirt domain with the target's name exists", nil)
+		}},
+		{"the landing host's storage misconfigured (HOST_STORAGE_MISCONFIGURED)", func() error {
+			return routedStatusErr(codes.FailedPrecondition, contracts.HostStorageMisconfiguredReason, contracts.VMOperationFailedReason)
+		}},
+	} {
+		It("releases the pending host on "+tc.name+" and follows the VM to its next host", func() {
+			prov := newRoutedMigrationProvider()
+			prov.set(func(p *routedMigrationProvider) { p.importErrs = []error{tc.err()} })
+			f := newRoutedFixture(prov, routedFixtureOptions{hosts: []routedHost{
+				{name: "kvm-01", cpu: 16, storageBytes: storageGiB(100)},
+				{name: "kvm-02", cpu: 8, storageBytes: storageGiB(100)},
+			}})
 
-		Eventually(func(g Gomega) {
-			g.Expect(f.getMigration(g).Status.Phase).To(Equal(infravirtrigaudiov1beta1.MigrationPhaseReady))
-		}, "90s", "250ms").Should(Succeed())
-		_, imports, creates, _ := prov.snapshot()
-		Expect(imports).To(HaveLen(2))
-		Expect(imports[0].TargetHostID).To(Equal("kvm-01"))
-		Expect(imports[1].TargetHostID).To(Equal("kvm-02"), "the import follows the re-placed VM")
-		Expect(creates).To(HaveLen(1))
-		Expect(creates[0].TargetHostID).To(Equal("kvm-02"))
-		Expect(f.getMigration(Default).Status.StorageInfo.ImportTarget.Host).To(Equal("kvm-02"))
-	})
+			Eventually(func(g Gomega) {
+				g.Expect(f.getMigration(g).Status.Phase).To(Equal(infravirtrigaudiov1beta1.MigrationPhaseReady))
+			}, "90s", "250ms").Should(Succeed())
+			_, imports, creates, _ := prov.snapshot()
+			Expect(imports).To(HaveLen(2))
+			Expect(imports[0].TargetHostID).To(Equal("kvm-01"))
+			Expect(imports[1].TargetHostID).To(Equal("kvm-02"), "the import follows the re-placed VM")
+			Expect(creates).To(HaveLen(1))
+			Expect(creates[0].TargetHostID).To(Equal("kvm-02"))
+			Expect(f.getMigration(Default).Status.StorageInfo.ImportTarget.Host).To(Equal("kvm-02"))
+		})
+	}
+
+	for _, tc := range []struct {
+		name, reason string
+		err          func() error
+	}{
+		{"a guard refusal on the landing host", migrationReasonLandingHostRefused, func() error {
+			return routedStatusErr(codes.FailedPrecondition, contracts.VMOperationFailedReason)
+		}},
+		{"a landing file in use on a host (VM_DISK_IN_USE)", migrationReasonLandingDiskInUse, func() error {
+			return contracts.NewConflictError("importDisk: in use", contracts.ErrVMDiskInUse)
+		}},
+		{"an unreachable landing host (HOST_UNAVAILABLE)", migrationReasonTargetHostUnavailable, func() error {
+			return contracts.NewHostUnavailableError("importDisk: host kvm-01 unavailable", nil)
+		}},
+		{"an import not performed (VM_OPERATION_FAILED)", migrationReasonImportNotPerformed, func() error {
+			return contracts.NewRetryableError("importDisk: not performed", contracts.ErrOperationNotPerformed)
+		}},
+	} {
+		It("holds the migration on its host for "+tc.name+", never releasing it", func() {
+			prov := newRoutedMigrationProvider()
+			prov.set(func(p *routedMigrationProvider) {
+				p.importErrs = []error{tc.err(), tc.err(), tc.err(), tc.err(), tc.err(), tc.err()}
+			})
+			f := newRoutedFixture(prov, routedFixtureOptions{hosts: []routedHost{
+				{name: "kvm-01", cpu: 16, storageBytes: storageGiB(100)},
+				{name: "kvm-02", cpu: 8, storageBytes: storageGiB(100)},
+			}})
+			Eventually(func(g Gomega) {
+				m := f.getMigration(g)
+				g.Expect(m.Status.Phase).To(Equal(infravirtrigaudiov1beta1.MigrationPhaseImporting))
+				g.Expect(condReason(m.Status.Conditions, infravirtrigaudiov1beta1.VMMigrationConditionImporting)).To(Equal(tc.reason))
+			}, "60s", "250ms").Should(Succeed())
+			Consistently(func(g Gomega) {
+				vm := f.getTarget(g)
+				g.Expect(pendingHost(vm)).To(Equal("kvm-01"), "%+v / %+v", vm.Status.Placement, vm.Status.Conditions)
+				g.Expect(vm.Status.Placement.ExcludedHosts).To(BeEmpty())
+				g.Expect(f.getMigration(g).Status.Phase).To(Equal(infravirtrigaudiov1beta1.MigrationPhaseImporting), "not failed")
+			}, "3s", "250ms").Should(Succeed())
+			_, imports, _, _ := prov.snapshot()
+			for _, req := range imports {
+				Expect(req.TargetHostID).To(Equal("kvm-01"))
+			}
+		})
+	}
 
 	It("pins the target to the host its disk landed on, and deletes the unbound target before the landed disk", func() {
 		prov := newRoutedMigrationProvider()

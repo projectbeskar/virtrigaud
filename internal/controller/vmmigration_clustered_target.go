@@ -119,6 +119,9 @@ const (
 	// migrationReasonLandingHostRefused: the landing host refused the import
 	// before writing anything (a guard refusal, FailedPrecondition).
 	migrationReasonLandingHostRefused = "LandingHostRefused"
+	// migrationReasonImportNotPerformed: the landing host did not perform the
+	// import (VM_OPERATION_FAILED); retried with a backoff.
+	migrationReasonImportNotPerformed = "ImportNotPerformed"
 	// migrationReasonTargetHostMoved is the Ready=False hold of a migration
 	// whose target's pending host is no longer the host its disk landed on.
 	migrationReasonTargetHostMoved = "TargetHostMoved"
@@ -144,6 +147,17 @@ const (
 	unboundTargetDeleteRequeue = 5 * time.Second
 )
 
+// Placed messages (with the host) of a target whose pending host the
+// migration released (B1.2).
+const (
+	targetPlacedNameConflictFmt = "the import of this VM's disk to host %s was refused because a same-named domain " +
+		"this VirtualMachine does not own exists there, so nothing was landed; the host is excluded for this VM and " +
+		"it will be re-scheduled onto another host"
+	targetPlacedStorageMisconfiguredFmt = "the import of this VM's disk to host %s was refused because the host's " +
+		"storage is not set up as VirtRigaud requires, so nothing was landed; the host is excluded for this VM and " +
+		"it will be re-scheduled onto another host"
+)
+
 // Constant messages. None names a host, a path or another object's state.
 const (
 	clusteredTargetUnsupportedMessage = "the target provider has topology: cluster and does not report " +
@@ -153,7 +167,7 @@ const (
 	clusteredTargetCrossNamespaceMessage = "a clustered target VirtualMachine must be in the VMMigration's own namespace " +
 		"(spec.target.namespace unset or equal to it): its landed disk is attached in place only for a VM whose " +
 		"migration is in its namespace. Run the migration from the target namespace"
-	clusteredTargetCapabilitiesMessage ="waiting for the clustered target provider's capabilities " +
+	clusteredTargetCapabilitiesMessage = "waiting for the clustered target provider's capabilities " +
 		"(GetCapabilities failed; the cause is in the manager log)"
 	clusteredTargetPVCRefusedMessage = "storage backend \"pvc\" is not supported into a clustered provider: the disk " +
 		"lands on a host, which reads it from s3 or nfs; use \"s3\" or \"nfs\" (ADR-0007 Addendum B, B3)"
@@ -177,6 +191,12 @@ const (
 	landingDiskInUseMessage = "the landing disk name is used by a domain on a host of the clustered provider: " +
 		"nothing was landed. Re-placing the target cannot help on a shared pool; an administrator must resolve it. " +
 		"The import is retried with a backoff"
+	targetHostStorageReleasedMessage = "the landing host refused the import because its storage is not set up as " +
+		"VirtRigaud requires (HOST_STORAGE_MISCONFIGURED; nothing was landed): the host was excluded for the target " +
+		"and the import follows the VM to the host it is placed on next"
+	importNotPerformedMessage = "the landing host did not perform the import (another import of the disk was running, " +
+		"there was no room, or a host command failed; the cause is in the manager log); nothing was landed and it is " +
+		"retried on the same host with a backoff"
 	landingHostRefusedMessage = "the landing host refused the import before writing anything (its lock directory, " +
 		"or a file at the landing name, is not as the provider requires, or a required host tool is missing; the cause " +
 		"is in the manager log): an administrator must fix the host. The import is retried with a backoff"
@@ -533,7 +553,7 @@ func (r *VMMigrationReconciler) routedImportTarget(ctx context.Context, migratio
 		if c := meta.FindStatusCondition(migration.Status.Conditions, migrationConditionTargetPlaced); c != nil &&
 			c.Status == metav1.ConditionFalse && c.Reason == migrationReasonTargetHostReleased {
 			return "", "", true, r.waitForTargetPlacement(ctx, migration, changed, migrationReasonTargetHostReleased,
-				targetHostReleasedMessage), nil
+				c.Message), nil
 		}
 		res, err = r.transitionToFailedWithReason(ctx, migration, ReasonTargetNotPending, targetNotPendingMessage)
 		return "", "", true, res, err
@@ -572,6 +592,12 @@ func (r *VMMigrationReconciler) routedImportTarget(ctx context.Context, migratio
 //   - A plain AlreadyExists — a foreign or unstamped domain with the target's
 //     name on the landing host: the B1.2 release of the target's pending
 //     host, and the import follows the VM to its next host.
+//   - Not performed (Unavailable + VM_OPERATION_FAILED): retried on the same
+//     host with a backoff.
+//
+// The pre-write FailedPrecondition refusals (HOST_STORAGE_MISCONFIGURED, a
+// guard refusal) are decided before the outcome is classified
+// (handleRoutedImportPrecondition).
 func (r *VMMigrationReconciler) handleRoutedImportRefusal(ctx context.Context, migration *infrav1beta1.VMMigration,
 	host string, cause error) (ctrl.Result, bool, error) {
 	logger := logging.FromContext(ctx)
@@ -591,7 +617,14 @@ func (r *VMMigrationReconciler) handleRoutedImportRefusal(ctx context.Context, m
 	case routedImportNameConflict(cause):
 		logger.Info("Routed import refused: a foreign domain with the target's name is on the landing host; releasing it",
 			"host", host, "error", cause.Error())
-		res, err := r.releaseTargetPendingHost(ctx, migration, host)
+		res, err := r.releaseTargetPendingHost(ctx, migration, host, targetPlacedNameConflictFmt, targetHostReleasedMessage)
+		return res, true, err
+	case contracts.IsNothingDone(cause):
+		// Not performed (VM_OPERATION_FAILED: the landing lock busy, the same
+		// import still running, no room, a write command that failed): retried
+		// on the same host with a backoff.
+		logger.Info("Routed import not performed on the landing host; retrying with a backoff", "host", host, "error", cause.Error())
+		res, err := r.holdRoutedImport(ctx, migration, migrationReasonImportNotPerformed, importNotPerformedMessage)
 		return res, true, err
 	}
 	return ctrl.Result{}, false, nil
@@ -608,8 +641,8 @@ func routedImportNameConflict(err error) bool {
 }
 
 // holdRoutedImport keeps the migration in Importing with Importing=False and
-// reason, msg (constant), writing only when that changes the status, and
-// retries with the blocked-VM backoff from when the hold began.
+// reason, msg (constant), and paces the next send (routedImportHold: 15 s
+// doubling to 5 min).
 func (r *VMMigrationReconciler) holdRoutedImport(ctx context.Context, migration *infrav1beta1.VMMigration, reason, msg string) (ctrl.Result, error) {
 	prev := meta.FindStatusCondition(migration.Status.Conditions, infrav1beta1.VMMigrationConditionImporting)
 	isNew := prev == nil || prev.Reason != reason
@@ -621,8 +654,8 @@ func (r *VMMigrationReconciler) holdRoutedImport(ctx context.Context, migration 
 	if isNew {
 		r.Recorder.Event(migration, corev1.EventTypeWarning, reason, msg)
 	}
-	return ctrl.Result{RequeueAfter: blockedRetryBackoff(conditionSince(migration.Status.Conditions,
-		infrav1beta1.VMMigrationConditionImporting))}, nil
+	return ctrl.Result{RequeueAfter: r.routedImportHold.nextWithin(string(migration.UID), time.Now(),
+		blockedRetryMin, blockedRetryMax)}, nil
 }
 
 // releaseTargetPendingHost is the B1.2 release on a definite import name
@@ -633,7 +666,11 @@ func (r *VMMigrationReconciler) holdRoutedImport(ctx context.Context, migration 
 // VM to be placed again (TargetPlaced=False/TargetHostReleased). A lost write
 // leaves the VM on host: the next import is refused the same way and the
 // release is retried.
-func (r *VMMigrationReconciler) releaseTargetPendingHost(ctx context.Context, migration *infrav1beta1.VMMigration, host string) (ctrl.Result, error) {
+//
+// placedFmt is the target's Placed message (with %s for the host) and msg the
+// migration's constant TargetPlaced message.
+func (r *VMMigrationReconciler) releaseTargetPendingHost(ctx context.Context, migration *infrav1beta1.VMMigration, host,
+	placedFmt, msg string) (ctrl.Result, error) {
 	vm, err := r.liveOwnedTargetVM(ctx, migration)
 	if err != nil {
 		return ctrl.Result{}, err
@@ -647,10 +684,7 @@ func (r *VMMigrationReconciler) releaseTargetPendingHost(ctx context.Context, mi
 		excludeHost(pl, host)
 		pl.PendingHost = ""
 		pl.PendingResources = nil
-		setPlacedCondition(vm, metav1.ConditionFalse, conditions.ReasonHostExcluded, fmt.Sprintf(
-			"the import of this VM's disk to host %s was refused because a same-named domain this VirtualMachine does "+
-				"not own exists there, so nothing was landed; the host is excluded for this VM and it will be "+
-				"re-scheduled onto another host", host))
+		setPlacedCondition(vm, metav1.ConditionFalse, conditions.ReasonHostExcluded, fmt.Sprintf(placedFmt, host))
 		applyDerivedPhase(vm)
 		if err := r.Status().Update(ctx, vm); err != nil {
 			if apierrors.IsConflict(err) {
@@ -660,9 +694,28 @@ func (r *VMMigrationReconciler) releaseTargetPendingHost(ctx context.Context, mi
 			}
 			return ctrl.Result{}, fmt.Errorf("release pending host %s of target VirtualMachine %s/%s: %w", host, vm.Namespace, vm.Name, err)
 		}
-		r.Recorder.Event(migration, corev1.EventTypeNormal, eventReasonTargetHostReleased, targetHostReleasedMessage)
+		r.Recorder.Event(migration, corev1.EventTypeNormal, eventReasonTargetHostReleased, msg)
 	}
-	return r.waitForTargetPlacement(ctx, migration, true, migrationReasonTargetHostReleased, targetHostReleasedMessage), nil
+	return r.waitForTargetPlacement(ctx, migration, true, migrationReasonTargetHostReleased, msg), nil
+}
+
+// handleRoutedImportPrecondition decides a routed import the landing host
+// refused before writing anything, with an untyped FailedPrecondition
+// (routedImportPreconditionRefused). The marker was removed by the caller.
+// HOST_STORAGE_MISCONFIGURED is scoped to that host (its default pool is not
+// where it must be): the target's pending host is released and the host
+// excluded, as for a name conflict. Any other (a symlink at the landing name,
+// a guard refusal, a missing host tool, a host not reachable over ssh://) is
+// held for an operator; re-placing would not fix the host.
+func (r *VMMigrationReconciler) handleRoutedImportPrecondition(ctx context.Context, migration *infrav1beta1.VMMigration,
+	host string, cause error) (ctrl.Result, error) {
+	logger := logging.FromContext(ctx)
+	if contracts.IsHostStorageMisconfigured(cause) {
+		logger.Info("Routed import refused: the landing host's storage is misconfigured; releasing it", "host", host, "error", cause.Error())
+		return r.releaseTargetPendingHost(ctx, migration, host, targetPlacedStorageMisconfiguredFmt, targetHostStorageReleasedMessage)
+	}
+	logger.Info("Routed import refused by the landing host before anything was written", "host", host, "error", cause.Error())
+	return r.holdRoutedImport(ctx, migration, migrationReasonLandingHostRefused, landingHostRefusedMessage)
 }
 
 // recordImportOnTarget is the Creating phase of a clustered target (B1 step

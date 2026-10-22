@@ -99,6 +99,14 @@ type VMMigrationReconciler struct {
 	// elected leader runs this reconciler, so in-process state is correct.
 	importUnverifiable unschedulableBackoff
 
+	// routedImportHold paces re-sending a routed import (ADR-0007 Addendum B)
+	// the landing host refused without landing anything — its host
+	// unavailable, a previous incarnation, a landing file in use, a guard
+	// refusal, not performed: the wait doubles from blockedRetryMin to
+	// blockedRetryMax. Each hold writes the status, whose watch event would
+	// otherwise re-send at once. In-process, like importUnverifiable.
+	routedImportHold unschedulableBackoff
+
 	// MaxDiskSize is the administrator's disk-size ceiling (the manager's
 	// --max-disk-size; nil for none), lowered per target Provider by its
 	// infra.virtrigaud.io/max-disk-size annotation: a migration that would
@@ -1494,6 +1502,10 @@ func (r *VMMigrationReconciler) handleImportingPhase(ctx context.Context, migrat
 		if held {
 			return res, err
 		}
+		// A held routed import is re-sent on its backoff only.
+		if wait := r.routedImportHold.remaining(string(migration.UID), time.Now()); wait > 0 {
+			return ctrl.Result{RequeueAfter: wait}, nil
+		}
 		routedHost = host
 		importReq.TargetHostID = host
 		importReq.TargetVM.UID = uid
@@ -1537,14 +1549,14 @@ func (r *VMMigrationReconciler) handleImportingPhase(ctx context.Context, migrat
 		// Release the in-memory guard so a future reconcile can re-attempt the
 		// import for this generation after the failure is recorded.
 		r.longOpInFlight.Delete(longOpKey(migration, longOpImport))
-		// A routed import the landing host refused before writing anything (a
-		// guard refusal: FailedPrecondition) is held for an operator, never a
-		// release of the host (ADR-0007 Addendum B, B2). An answer to a
-		// re-send says nothing about the earlier call and stays unknown.
+		// A routed import the landing host refused before writing anything
+		// (an untyped FailedPrecondition): a misconfigured host storage
+		// releases the host, anything else is held for an operator (ADR-0007
+		// Addendum B, B2). An answer to a re-send says nothing about the
+		// earlier call and stays unknown.
 		if routedHost != "" && !importAttempt.resend && routedImportPreconditionRefused(err) {
 			clearMigrationRequest(migration, longOpImport)
-			logger.Info("Routed import refused by the landing host before anything was written", "host", routedHost, "error", err.Error())
-			return r.holdRoutedImport(ctx, migration, migrationReasonLandingHostRefused, landingHostRefusedMessage)
+			return r.handleRoutedImportPrecondition(ctx, migration, routedHost, err)
 		}
 		if !providerCallOutcomeKnownFor(err, importAttempt) {
 			// No definite outcome (a deadline, a dropped connection): the
@@ -1588,6 +1600,7 @@ func (r *VMMigrationReconciler) handleImportingPhase(ctx context.Context, migrat
 	// The import went through: a later unverifiable refusal starts its
 	// backoff afresh.
 	r.importUnverifiable.reset(string(migration.UID))
+	r.routedImportHold.reset(string(migration.UID))
 
 	// Record the import's result (vmmigration_status_write.go): on a conflict
 	// it is applied to the live object rather than dropped by a requeue, since
