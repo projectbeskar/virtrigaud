@@ -39,6 +39,59 @@ carry it is refused with `AlreadyExists` and never redefined. See
 [VM ownership: Clones: re-bind](vm-ownership.md#clones-re-bind) and
 [`libvirt-domain-ownership.md`](libvirt-domain-ownership.md) (rule 6).
 
+## A clone's cloud-init identity
+
+A full clone copies its source's disk, and with it cloud-init's record of the
+instance it last booted as. If the clone's cloud-init seed still presented the
+source's `instance-id`, cloud-init would treat the clone's first boot as a
+reboot of the **same** instance and skip its per-instance modules: the clone
+would keep the source's **SSH host keys** and hostname — two VMs answering with
+one host key, which defeats SSH host-key verification.
+
+When the source boots from a cloud-init NoCloud seed ISO, the clone therefore
+gets a **seed of its own**, on single-host and clustered Providers alike:
+
+| | What the clone's seed holds |
+|---|---|
+| `instance-id` | `virtrigaud-<target VirtualMachine uid>` — a new instance, and the same value whenever a `Clone` for that VirtualMachine is sent again, so a retried clone writes an identical seed. (A manager older than rc2 sends no uid; the clone's domain name is used instead.) |
+| `local-hostname` | `spec.customization.hostname` of the `VMClone` when set, else the target VirtualMachine's name; with `spec.customization.domain`, the FQDN `<hostname>.<domain>` |
+| user-data | `spec.customization.userData.cloudInit.inline` when set (used as given); otherwise the **source's** user-data, with its top-level `hostname:` and `fqdn:` keys (block style, one-line values, in a `#cloud-config` document) rewritten to the clone's — cloud-init prefers those keys over `local-hostname`. Any other format (a shell script, MIME multi-part, a Jinja template) is kept unchanged. |
+| other meta-data | the source's, unchanged (network configuration included) |
+| `network-config`, `vendor-data` | the source seed's, unchanged, when it has them |
+
+On the clone's first boot cloud-init sees a new `instance-id` and runs its
+per-instance modules: the `ssh` module deletes and regenerates the host keys
+(`ssh_deletekeys` defaults to `true`), the hostname modules set the clone's
+name, and every other per-instance module of the user-data — `runcmd`,
+`packages`, `users`, `write_files` — **runs again** on the clone, as it would
+on any new instance.
+
+What a new instance does **not** change:
+
+- **`/etc/machine-id`.** cloud-init does not regenerate it. A clone of a VM
+  whose machine-id is populated keeps it — and with it anything derived from
+  it, such as systemd-networkd's DHCP client identifier. Seal the source (empty
+  `/etc/machine-id`, for example with `cloud-init clean --machine-id` before
+  the source is shut down for cloning) if clones must have their own.
+- **Static network configuration** in the source's meta-data or
+  `network-config` is carried as it is: a clone of a VM with a static address
+  claims the same address.
+- **Customization fields other than** `hostname`, `domain` and
+  `userData.cloudInit.inline` (`networks`, `timeZone`, `guestCommands`,
+  `sysprep`, `certificates`, `tags`, `userData.ignition`) are not applied by
+  the libvirt provider and are logged as such. User-data given by
+  `userData.cloudInit.secretRef` cannot be resolved by the provider: the clone
+  keeps the source's user-data, and the provider logs it.
+
+The source's seed is read on the host with `isoinfo` (shipped with
+`genisoimage`, which the provider already needs) **before anything is
+copied**. A seed that cannot be read fails the clone with nothing written —
+retried when the read failed (an unreachable host, a missing `isoinfo`), and
+refused (`InvalidArgument`) when the ISO holds no NoCloud `user-data` or
+`meta-data`, holds a file over 1 MiB, or has meta-data that is not a YAML or
+JSON mapping. A source without a seed ISO gives a clone without one, as before
+(its hostname and user-data customization are then not applied, and logged).
+
 ## A full clone needs a powered-off source
 
 A libvirt full clone copies the source VM's disk chain with `qemu-img
@@ -243,9 +296,12 @@ removes only:
   removed, and neither is a pre-snapshot disk a linked clone still reads;
 - its **VirtRigaud cloud-init seed directory** (`/tmp/virtrigaud-cloudinit-<domain>.<random>/`,
   or an earlier release's `/tmp/virtrigaud-cloudinit/<domain>/`) — unless another
-  domain still references a file in it (a clone's CD-ROM keeps pointing at its
-  source's seed ISO, and a domain whose CD-ROM file is missing no longer
-  starts).
+  domain still references a file in it (a domain whose CD-ROM file is missing
+  no longer starts). A clone has its own seed directory, named after the
+  clone's domain, so deleting a source never touches its clones' seeds; only a
+  **single-host clone made by an earlier release** still points its CD-ROM at
+  its source's seed ISO, which is then kept until the last domain referencing
+  it is deleted.
 
 It never removes any other backing file, cdrom or floppy media, or any file
 outside those directories: such a file is left in place and logged by the
@@ -287,6 +343,12 @@ clone of the vanished VM keeps its backing file. Nothing else is looked for.
 
 ## Clone files on the host
 
+- **Cloud-init seed.** A clone of a VM with a seed ISO gets its own seed
+  directory, `<staging>/virtrigaud-cloudinit-<clone domain>.<random>/`, made
+  exactly like a created VM's (see
+  [A clone's cloud-init identity](#a-clones-cloud-init-identity)), and its
+  CD-ROM points there. It is removed with the clone, or when the clone's
+  define fails and the domain provably does not exist.
 - **Disk mode.** Every VM disk VirtRigaud creates — a new VM's disk (a blank
   one too), an image copied or downloaded for it, an imported disk, and a
   clone's disk — is **created** `0640` (owner read-write, group read-only, no
