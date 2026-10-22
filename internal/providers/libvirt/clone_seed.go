@@ -18,6 +18,7 @@ package libvirt
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"path/filepath"
@@ -184,7 +185,7 @@ func readSeedISO(ctx context.Context, h hostCommandRunner, iso string) (map[stri
 		if err != nil {
 			// A Rock Ridge-only image has no Joliet tree to list: that
 			// error only matters when no listing succeeded.
-			lastErr = err
+			lastErr = seedReadFailure(err)
 			continue
 		}
 		listed = true
@@ -214,7 +215,7 @@ func readSeedISO(ctx context.Context, h hostCommandRunner, iso string) (map[stri
 		res, err := runHost(ctx, h, "sh", "-c", seedFileReadScript, "sh", iso, flag, "/"+name, strconv.Itoa(maxSeedFileBytes+1))
 		if err != nil {
 			return nil, contracts.NewRetryableError(fmt.Sprintf(
-				"could not read %s from the clone source's cloud-init seed %s on the host; nothing was copied", name, iso), err)
+				"could not read %s from the clone source's cloud-init seed %s on the host; nothing was copied", name, iso), seedReadFailure(err))
 		}
 		if len(res.Stdout) > maxSeedFileBytes {
 			return nil, contracts.NewInvalidSpecError(fmt.Sprintf(
@@ -224,6 +225,30 @@ func readSeedISO(ctx context.Context, h hostCommandRunner, iso string) (map[stri
 	}
 	return files, nil
 }
+
+// seedReadFailure is the cause a failed read of a source seed is reported
+// with: the host command's exit code and stderr only. A read that failed
+// after it started printing — the SSH session dropped, or the context was
+// cancelled, in the middle of `isoinfo | head -c` — leaves part of the
+// source's user-data (which may carry secrets) in the VirshError's Stdout,
+// which its Error() prints, and the Clone error mappers log the cause: it is
+// never kept. Any other error is reduced to a constant text.
+func seedReadFailure(err error) error {
+	var ve *VirshError
+	switch {
+	case errors.As(err, &ve):
+		return fmt.Errorf("%w (exit code %d): %s", errSeedReadFailed, ve.ExitCode, strings.TrimSpace(ve.Stderr))
+	case errors.Is(err, context.Canceled):
+		return fmt.Errorf("%w: %w", errSeedReadFailed, context.Canceled)
+	case errors.Is(err, context.DeadlineExceeded):
+		return fmt.Errorf("%w: %w", errSeedReadFailed, context.DeadlineExceeded)
+	}
+	return errSeedReadFailed
+}
+
+// errSeedReadFailed is the cause of every failed read of a source seed
+// (seedReadFailure).
+var errSeedReadFailed = errors.New("the host command reading the seed failed")
 
 // writeCloneSeed makes the clone's own seed on vp's host (PrepareCloudInit, in
 // the provider's staging directory) and re-points the clone's CD-ROM in

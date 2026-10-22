@@ -18,6 +18,8 @@ package libvirt
 
 import (
 	"context"
+	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -296,4 +298,58 @@ func TestCloneSeed_RealISORoundTrip(t *testing.T) {
 	assert.Equal(t, "web-copy", meta["local-hostname"])
 	assert.Contains(t, clone[seedFileUserData], "hostname: \"web-copy\"\n")
 	assert.Equal(t, src[seedFileNetworkConfig], clone[seedFileNetworkConfig], "network-config is carried")
+}
+
+// r26Secret is user-data content no error or log line may carry.
+const r26Secret = "password: hunter2-r26-secret"
+
+// TestReadSeedISO_PartialOutputNeverInErrorsOrLogs pins review M1: a read of
+// the source's seed that fails after it printed part of the user-data (the
+// SSH session dropped, or the context was cancelled, mid `isoinfo | head -c`)
+// leaves that output in the VirshError's Stdout, which its Error() prints.
+// Neither the Clone's error nor anything the provider logs may carry it.
+func TestReadSeedISO_PartialOutputNeverInErrorsOrLogs(t *testing.T) {
+	c := newCreateHost(t)
+	ctx := context.Background()
+	req := c.createReq(ownerTeamA, c.file(c.images, "ubuntu.qcow2"))
+	req.UserData = &contracts.UserData{CloudInitData: "#cloud-config\n" + r26Secret + "\n"}
+	_, err := c.p.Create(ctx, req)
+	require.NoError(t, err)
+	srcISO := filepath.Join(c.staging, c.seedOf("team-a.web"), cloudInitISOName)
+
+	// head prints what it read, then fails: the failed command's stdout holds
+	// the secret.
+	bin := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(bin, "head"), []byte("#!/bin/sh\ncat\nexit 255\n"), 0o700)) //nolint:gosec // test fixture must be executable
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	_, direct := runHost(ctx, c.vp, "sh", "-c", seedFileReadScript, "sh", srcISO, "-R", "/user-data", "10")
+	require.Error(t, direct)
+	require.Contains(t, direct.Error(), "hunter2", "the fixture really leaves the secret in the raw error")
+
+	var logs strings.Builder
+	log.SetOutput(&logs)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+
+	_, err = NewServer(c.p).Clone(ctx, &providerv1.CloneRequest{SourceVmId: "team-a.web", TargetName: r26Target.Name,
+		TargetVm: &providerv1.ObjectIdentity{Uid: r26Target.UID, Namespace: r26Target.Namespace, Name: r26Target.Name}})
+	require.Error(t, err)
+	assert.Equal(t, codes.Unavailable, status.Code(err), "retried: %v", err)
+	assert.NotContains(t, err.Error(), "hunter2")
+	assert.NotContains(t, logs.String(), "hunter2", "nothing logged carries the user-data")
+	assert.Contains(t, logs.String(), "exit code 255", "the cause is logged as exit code and stderr")
+
+	_, rerr := readSeedISO(ctx, c.vp, srcISO)
+	require.Error(t, rerr)
+	assert.NotContains(t, rerr.Error(), "hunter2")
+	assert.ErrorIs(t, rerr, errSeedReadFailed)
+}
+
+func TestSeedReadFailure(t *testing.T) {
+	leak := &VirshError{Command: "sh -c ...", ExitCode: -1, Stderr: "connection reset", Stdout: r26Secret}
+	got := seedReadFailure(fmt.Errorf("wrapped: %w", leak))
+	assert.NotContains(t, got.Error(), "hunter2")
+	assert.Contains(t, got.Error(), "connection reset")
+	assert.ErrorIs(t, seedReadFailure(context.Canceled), context.Canceled)
+	assert.ErrorIs(t, seedReadFailure(context.DeadlineExceeded), context.DeadlineExceeded)
+	assert.Equal(t, errSeedReadFailed, seedReadFailure(fmt.Errorf("anything %s", r26Secret)), "other errors are reduced to a constant")
 }
