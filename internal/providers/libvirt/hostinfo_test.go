@@ -343,8 +343,8 @@ func TestCollectHostInfo_FullRender(t *testing.T) {
 	assert.Equal(t, []string{"ss", "vmx", "hypervisor"}, got.CPUFeatures)
 	assert.Equal(t, []string{"pc-i440fx-7.2"}, got.MachineTypes)
 	assert.Equal(t, "/usr/bin/qemu-system-x86_64", got.EmulatorVersion)
-	// 53687091200 (default) + 21474836480 (data); iso is inactive and skipped.
-	assert.Equal(t, int64(75161927680), got.AllocatableStorage)
+	// Only the default pool counts (53687091200); data (21474836480) and the inactive iso do not.
+	assert.Equal(t, int64(53687091200), got.AllocatableStorage, "the default pool only: data and the inactive iso are not counted")
 }
 
 func TestCollectHostInfo_NodeinfoError_NotReady(t *testing.T) {
@@ -396,14 +396,14 @@ func TestCollectHostInfo_BestEffortDegrades(t *testing.T) {
 }
 
 func TestCollectHostInfo_OddPoolInfoSkipped(t *testing.T) {
-	// One active pool answers with no Available line; storage stays 0 and the
-	// host is still READY (storage is best-effort).
+	// The default pool answers with no Available line; storage stays 0 and
+	// the host is still READY (storage is best-effort).
 	script := map[string]fakeVirshResult{
-		"nodeinfo":              {stdout: nodeInfoFixture},
-		"capabilities":          {stdout: capabilitiesFixture},
-		"domcapabilities":       {stdout: domCapabilitiesFixture},
-		"pool-list --all":       {stdout: " Name    State    Autostart\n-------\n odd   active   yes\n"},
-		"pool-info --bytes odd": {stdout: "Name: odd\nState: running\n"}, // no Available
+		"nodeinfo":                  {stdout: nodeInfoFixture},
+		"capabilities":              {stdout: capabilitiesFixture},
+		"domcapabilities":           {stdout: domCapabilitiesFixture},
+		"pool-list --all":           {stdout: " Name    State    Autostart\n-------\n default   active   yes\n"},
+		"pool-info --bytes default": {stdout: "Name: default\nState: running\n"}, // no Available
 	}
 	conn := &fakeHostConn{id: "host-odd", script: script}
 
@@ -411,6 +411,26 @@ func TestCollectHostInfo_OddPoolInfoSkipped(t *testing.T) {
 
 	assert.Equal(t, contracts.HostHealthReady, got.Health)
 	assert.Zero(t, got.AllocatableStorage)
+}
+
+// TestCollectHostInfo_OnlyDefaultPoolCounts pins #416 M3: space in any other
+// pool cannot hold a disk VirtRigaud lands in "default", so a host whose
+// default pool is not active reports no allocatable storage.
+func TestCollectHostInfo_OnlyDefaultPoolCounts(t *testing.T) {
+	script := map[string]fakeVirshResult{
+		"nodeinfo":               {stdout: nodeInfoFixture},
+		"capabilities":           {stdout: capabilitiesFixture},
+		"domcapabilities":        {stdout: domCapabilitiesFixture},
+		"pool-list --all":        {stdout: " Name    State    Autostart\n-------\n default inactive no\n data   active   yes\n"},
+		"pool-info --bytes data": {stdout: "Available:      99999999999\n"},
+	}
+	conn := &fakeHostConn{id: "host-data", script: script}
+
+	got := collectHostInfo(context.Background(), conn, "host-data", "addr", nil, slog.Default())
+
+	assert.Equal(t, contracts.HostHealthReady, got.Health)
+	assert.Zero(t, got.AllocatableStorage)
+	assert.NotContains(t, conn.commands(), "pool-info --bytes data", "another pool is never read")
 }
 
 // --- Provider.ListHosts / GetHostInfo against a real ClusterRegistry ----------

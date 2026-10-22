@@ -314,7 +314,7 @@ each `HostInfo` field is fed by exactly one command:
 | `cpu_model`, `cpu_features` | `virsh capabilities` → `<host><cpu><model>` and the `<feature>` flags (parsed via typed `libvirtxml.Caps`). |
 | `machine_types` | `virsh domcapabilities` → the default `<machine>` (typed `libvirtxml.DomainCaps`). See the note below. |
 | `emulator_version` | `virsh domcapabilities` → `<path>` (the emulator binary path). See the note below. |
-| `allocatable_storage` | `virsh pool-list --all` + `virsh pool-info --bytes` on each **active** pool, summing `Available`. Best-effort. |
+| `allocatable_storage` | `virsh pool-info --bytes default`: the `Available` bytes of the **`default`** pool (where VM disks, clones and imported disks land), 0 when it is not active (`virsh pool-list --all`). Other pools are not counted. Best-effort. |
 | `health` | `nodeinfo` reachability: `Ready` when the connection and `nodeinfo` succeed, `NotReady` otherwise. |
 
 **`allocatable` = host TOTAL, not free-after-overcommit.** `allocatable_cpu` and
