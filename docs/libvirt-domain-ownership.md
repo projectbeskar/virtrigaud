@@ -225,8 +225,8 @@ the provider's SSH user can list, and makes every seed file private:
   to every host of a clustered Provider. A malformed value, or one in `/tmp`,
   `/var/tmp`, `/run`, `/dev`, `/proc` or `/sys` (emptied at boot: a VM whose
   CD-ROM file is gone no longer starts), fails provider start-up.
-- **Ownership and mode (fail closed).** Before it writes anything for a create
-  or a clustered clone, the provider checks the directory on the target host: it
+- **Ownership and mode (fail closed).** Before it writes anything for a create,
+  or for a clone (single-host or clustered) of a VM that has a seed, the provider checks the directory on the target host: it
   must exist (the provider creates it with mode `0711` when it is missing and
   the SSH user may, for example when the SSH user is root), be owned by the
   SSH user, and have **no read or write bit for its group or others**. Every
@@ -235,7 +235,7 @@ the provider's SSH user can list, and makes every seed file private:
   SSH user and **not writable by its group or others unless it is sticky**
   (another account could otherwise rename the seed directory, or a directory on
   its path, away and plant its own between the check and the write). A
-  directory that fails the check is refused: the create (or clone) fails with
+  directory that fails the check is refused: the create (or the clone of a VM that has a seed) fails with
   a retryable error, `refusing to stage cloud-init data`, and resumes once the
   host is fixed. The provider log names the directory and the problem. A
   single-host provider also checks it at startup and logs a `WARN`.

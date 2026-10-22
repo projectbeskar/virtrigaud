@@ -2823,16 +2823,19 @@ describes.*
 | B.4 | Docs: [Migration into a clustered provider](../clustered-provider-inventory.md#migration-into-a-clustered-provider-addendum-b) (prerequisites, conditions and how to clear them, limits), `docs/provider-call-outcomes.md`, `docs/upgrading.md`, the release notes. Lab: see below. |
 
 **Lab (2026-10-22, build `main-73e08e8`, a two-host clustered libvirt Provider
-with a shared NFS pool).** Run: single-host libvirt → clustered over `s3` and
-over `nfs`, both to `Ready`; a migration failed after its import, whose landed
-disk was deleted through the recorded host; a host made unreachable after the
-target was placed (the migration waited with `TargetHostUnavailable`, did not
-re-place the target, and went on when the host returned). **Not run:** vSphere →
+with a shared NFS pool; results on #416).** Run: single-host libvirt →
+clustered over `s3` and over `nfs`, both to `Ready`; the target placed before the
+source was powered off and exported; the landed disk attached in place on the
+chosen host (the domain's disk is `<namespace>.<name>-migrated.qcow2`); a
+migration failed after its import, and a routed `DeleteLandedDisk` went to the
+recorded host; a host made unreachable after the target was placed (the
+migration waited with `TargetHostUnavailable`, did not re-place the target, and
+went on when the host returned). **Not run:** vSphere → clustered, Proxmox →
 clustered, a host made unreachable after the disk landed, a manager restart in
-the middle of an import. Those are covered by unit and envtest tests only. The
-lab also found that libvirt reports a pool's `Available` as last refreshed, so
-hosts sharing an NFS pool can report different, stale free space to the
-disk-space filter (R31, tracked separately; not a change to this design).
+the middle of an import, an R4-held target, and a retry after an import. Those
+are covered by unit and envtest tests only. The lab also found that libvirt's
+cached pool `Available` could differ between hosts sharing an NFS pool; the
+host free space is now measured fresh (R31, #417).
 
 **Deviations from B1–B7, as implemented.** Manager:
 
@@ -2870,7 +2873,9 @@ disk-space filter (R31, tracked separately; not a change to this design).
    exactly the disk it imported (`TargetDiskMismatch`). `routedTargetDiskMatches`,
    `vmmigration_clustered_target_guard.go`.
 10. `Host.status.allocatableStorageBytes` of a libvirt host is its `default`
-    pool's free space, not the sum of the active pools. `collectStorageBytes`,
+    pool's free space, not the sum of the active pools (#416), measured fresh
+    with `stat -f` on the pool's directory instead of libvirt's cached
+    `pool-info` value (R31, #417). `collectStorageBytes`,
     `internal/providers/libvirt/hostinfo.go`. It changes the placement input of
     every clustered VM that uses `minDiskSpacePerHost`.
 
@@ -2879,7 +2884,11 @@ Provider:
 1. `HOST_UNAVAILABLE` is answered only when the host never answered a command
    of the call, which includes a connection that is dead at the first read
    (B4 said "before the first host command"). After the first answer, a failed
-   read is "not performed", and a failure once the write phase began is unknown.
+   read is "not performed". Once the write phase began, a command stopped by
+   `timeout(1)` or killed, a dropped session, an exhausted budget or a lost
+   rename is unknown; a command that ended with its own exit status is "not
+   performed", a held host lock is `Unavailable` (not performed), and a missing
+   tool is `FailedPrecondition`.
    `classifyRoutedImportFailure`, `routed_import.go`.
 2. A staged format must be `qcow2`, `raw` or `vmdk` (`nfs`: `qcow2` only), as
    B5 was amended to say. `parseRoutedImport`.

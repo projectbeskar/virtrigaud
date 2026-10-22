@@ -55,8 +55,9 @@ A transient provider error (`Ready=False/ProviderError`) on a VM that exists doe
 not change the phase: it keeps the last observed power state. An unschedulable
 clustered VM stays `Pending`. The target VM of a migration into a clustered Provider
 that waits for its import (`Provisioning=False/WaitingForImport`) has a pending host,
-so it shows `Provisioning`; one held as `MigrationNotFound` is not placed and shows
-`Pending` ([Migration into a clustered provider](clustered-provider-inventory.md#migration-into-a-clustered-provider-addendum-b)).
+so it shows `Provisioning`; one held as `MigrationNotFound` is not (re)placed, so it
+shows `Pending` unless it was placed earlier, in which case it keeps its placement and
+reservation and shows `Provisioning` ([Migration into a clustered provider](clustered-provider-inventory.md#migration-into-a-clustered-provider-addendum-b)).
 
 ## Why it is derived on every write
 

@@ -34,12 +34,12 @@ v0.4.0-rc1".
 
 ## Changes since v0.4.0-rc2
 
-Nine pull requests, merged 2026-10-19 to 2026-10-22. Three themes. **Cloud-init
+Ten pull requests, merged 2026-10-19 to 2026-10-22. Three themes. **Cloud-init
 seeds** (#408, #413, #414): the user-data of a libvirt VM, which can carry
 passwords and keys, was readable by any local user of the hypervisor host; a
 clone booted with its source's SSH host keys; and a delete left seeds behind.
 **Leftover disk files** (#409). **Migration into a clustered libvirt Provider**
-(#407, #412, #415, #416), an experimental capability. One change is breaking
+(#407, #412, #415, #416, #417), an experimental capability. One change is breaking
 (#414: a directory must exist on every libvirt host before the providers roll).
 Apply them in the usual order, with one addition at the front: **the seed
 directory on every libvirt host, then CRDs, then the manager, then the
@@ -47,12 +47,13 @@ providers** (see [Upgrade order for this release](#upgrade-order-for-this-releas
 
 | PR | What changed | Breaking |
 |---|---|---|
-| #414 (R27) | libvirt cloud-init seeds are built private (`0600`) in a dedicated directory, `/var/lib/libvirt/virtrigaud-seeds`, which must exist on every libvirt host and is checked before every create and clone | **Yes** |
+| #414 (R27) | libvirt cloud-init seeds are built private (`0600`) in a dedicated directory, `/var/lib/libvirt/virtrigaud-seeds`, which must exist on every libvirt host and is checked before every create, and before a clone of a VM that has a seed | **Yes** |
 | #413 (R26) | A clone gets its own cloud-init seed and a new cloud-init identity, so it no longer shares its source's SSH host keys (libvirt single-host and clustered, vSphere; Proxmox already did). `create` on `VMClone` is read access to the source's data | Behaviour change |
 | #408 (R24) | A single-host libvirt `Delete` removes the VM's cloud-init seed directory after the undefine, also when a VM and its clone are deleted together | Behaviour change |
 | #409 (R23) | vSphere removes the import VM's history log (`<id>-<hex>.hlog`); a migration that reaches `Ready` closes `LandedDiskCleanup` (`LandedDiskInUseByTarget`) | Behaviour change |
 | #415 (R11, B.1+B.2) | A clustered libvirt provider serves `ImportDisk`, `DeleteLandedDisk` and `DeleteStagedDisk` on a host the manager names (new proto fields and capability `supports_routed_import`). Nothing calls it until #416 | No |
 | #416 (R11, B.3) | A `VMMigration` can target a clustered libvirt Provider: the target VM is created and placed first, the disk lands on its host. New status field and condition, a CRD relaxation (empty `diskID`), and `allocatableStorageBytes` is now the `default` pool only | Behaviour change |
+| #417 (R31) | A libvirt Host's `allocatableStorageBytes` is measured fresh with `stat -f` on the `default` pool's directory on every sync, instead of libvirt's cached `pool-info` value; fail-closed 0 for an inactive pool, a pool type other than `dir`/`fs`/`netfs`, a pool not at `/var/lib/libvirt/images`, or a measurement that fails or takes over 15 s | Behaviour change |
 | #407, #412 (R11) | ADR-0007 Addendum B: the design, proposed, then accepted with decisions on its open questions | Documentation only |
 | #411 | Go 1.26.10 (GO-2026-6809, `crypto/x509`, reachable through `x509.Certificate.Verify`); builder images in step | No |
 
@@ -68,11 +69,13 @@ Seeds are now built in `VIRTRIGAUD_LIBVIRT_SEED_DIR` (default
 `/var/lib/libvirt/virtrigaud-seeds`). The ISO is `0600`, `user-data` and
 `meta-data` are deleted once it is built, and libvirt's `dynamic_ownership`
 (the default) hands the ISO to the qemu user when the VM starts. The provider
-**fails closed**: before it writes anything for a create or a clone it checks
-the directory on the host, and refuses one that is missing and cannot be
-created, not owned by the SSH user, readable or writable by its group or
-others, or below a directory other users can write. Every create and clone on
-that host then fails, retryably, with `refusing to stage cloud-init data`.
+**fails closed**: before it writes anything for a create, or for a clone of a VM
+that has a seed, it checks the directory on the host, and refuses one that is
+missing and cannot be created, not owned by the SSH user, readable or writable by
+its group or others, or below a directory that is not owned by root or the SSH user
+or that other users can write (unless it is sticky). Every create on that host, and
+every clone of a VM that has a seed, then fails, retryably, with
+`refusing to stage cloud-init data`.
 
 **Before rolling the libvirt providers**, on every libvirt host (single-host,
 every host of a clustered Provider, and every migration target host), as root:
@@ -90,10 +93,12 @@ install -d -m 0711 -o <ssh user> -g <ssh user> /var/lib/libvirt/virtrigaud-seeds
   private; the commands, and how to move one into the new directory, are in
   [Leftovers from earlier releases](docs/upgrading.md#leftovers-from-earlier-releases).
 
-Run in the lab on a libvirt 10.0 / Ubuntu 24.04 host with AppArmor: the
-`dynamic_ownership` hand-over, no AppArmor change needed, the seed unreadable by
-another local user, the refusal of an unusable directory, and the delete of a
-legacy `/tmp` seed. Not run: an SELinux host.
+Run in the lab on a libvirt 10.0 / Ubuntu 24.04 host with AppArmor (details under
+"Validated in the lab since rc2", results on #414): the `dynamic_ownership`
+hand-over, the guest reading its seed, no AppArmor change needed, other users denied,
+a create, a single-host clone of a started source, the refusal of a `0755`
+directory, and the delete of a legacy `/tmp` seed. Not run: a clustered clone of a
+started source, an SELinux host.
 → [`docs/libvirt-domain-ownership.md`](docs/libvirt-domain-ownership.md#cloud-init-seed-directory),
 [Upgrade guide](docs/upgrading.md#breaking-changes)
 
@@ -131,8 +136,11 @@ Existing clones keep the identity they booted with.
 > and narrow the grant where that is more than intended. It holds within one
 > namespace as much as across namespaces.
 
-Tested with unit tests, a round trip through the real `genisoimage` and
-`isoinfo`, and the vSphere simulator. Checking a real cloned guest is still open (#413).
+Tested with unit tests, a round trip through the real `genisoimage` and `isoinfo`, and
+the vSphere simulator. In the lab, a single-host libvirt clone got its own sealed seed
+with `instance-id` `virtrigaud-<target UID>` and its own hostname, and booted. **Not
+validated:** new SSH host keys in the guest, and the vSphere `guestinfo` rewrite on a
+real vCenter.
 → [`docs/vm-ownership.md`](docs/vm-ownership.md#a-clones-host-identity),
 [`docs/libvirt-clones.md`](docs/libvirt-clones.md#a-clones-cloud-init-identity),
 [Upgrade guide](docs/upgrading.md#behavior-changes-that-are-visible-but-not-breaking)
@@ -143,8 +151,8 @@ Tested with unit tests, a round trip through the real `genisoimage` and
   `<staging>/virtrigaud-cloudinit-<domain>.<random>/` on the host: each delete
   kept the seed because the other domain still referenced it. After the
   undefine, the delete now removes the seed directory its definition referenced
-  and any directory named exactly after the domain once no defined domain
-  references it. In a single-host provider, `Create` and `Delete` of one domain
+  and any directory named exactly after the domain that is at least five minutes
+  old, once no defined domain references it. In a single-host provider, `Create` and `Delete` of one domain
   name now also run one at a time (`Clone` already did). Seeds leaked by earlier
   releases are not removed (see the Leftovers list).
 - **#409.** After an S3/NFS import, vCenter left the import VM's history log
@@ -184,7 +192,7 @@ import-then-create, unchanged.
 
 What you need, and what you see:
 
-- **The target Provider must report `supportsRoutedImport`** (roll the clustered
+- **The target Provider must report `supports_routed_import`** (roll the clustered
   provider first). One that does not fails the migration at `Validating`
   (`ClusteredTargetUnsupported`) before any side effect; so does a target VM in
   another namespace than the VMMigration's.
@@ -201,14 +209,19 @@ What you need, and what you see:
   after placement is **waited for, not replaced**. Consecutive "not performed"
   answers for 5 minutes fail the attempt into `spec.options.retryPolicy`.
 - **CRDs.** `VMMigration.status.storageInfo.importTarget.host` is new, and
-  `spec.importedDisk.diskID` may now be empty while `migrationRef` is set
-  (`VirtualMachine`, `VMSet`, `VMMigration`; an additive relaxation). Apply the CRDs
-  before the manager: the readiness check does not verify these.
+  `VirtualMachine` and `VMSet` accept an empty `spec.importedDisk.diskID` while
+  `migrationRef` is set (an additive relaxation). Apply the CRDs before the manager:
+  the readiness check does not verify these.
 - **`Host.status.allocatableStorageBytes` is now the `default` pool's free space
-  only** (it summed every active pool). It is the input of the disk-space filter,
-  and it changes the figure of every libvirt host and what a
-  `VMPlacementPolicy` `minDiskSpacePerHost` compares against. Review any such
-  policy.
+  only, measured fresh** (#416, #417). Before, it summed every active pool, from
+  libvirt's `pool-info`, which is cached until a `pool-refresh`. Now every Host sync
+  runs `stat -f` on the `default` pool's directory (`f_bavail × f_frsize`, what
+  `df` shows as *Available*, so it excludes root-reserved blocks and a host may report
+  less than before). It reports 0, which placement that needs disk space treats as no
+  room, for a pool that is inactive, of a type other than `dir`, `fs` or `netfs`, not
+  at `/var/lib/libvirt/images`, or whose measurement fails or takes over 15 s. It is
+  the input of the migration target's disk-space filter and of a `VMPlacementPolicy`'s
+  `minDiskSpacePerHost`, so review any such policy.
 
 **Limits.** The disk-space check is a filter, not a reservation: two migrations
 can be placed on a host that holds only one, and growth of the source after
@@ -218,18 +231,17 @@ whoever may edit the VM; a swap is detected (`TargetDiskMismatch`) and never
 completes the migration, but not prevented. `topology: cluster` stays experimental.
 
 **Run in the lab** (two clustered libvirt hosts sharing one NFS pool, build
-`main-73e08e8`, 2026-10-22): a single-host libvirt VM migrated into the cluster
-over `s3` and over `nfs`, both to `Ready`; a failure after the import, whose
-landed disk was deleted through the recorded host; a host made unreachable after
-the target was placed (the migration waited, did not re-place, and went on when the
-host returned). **Not run:** a vSphere or Proxmox source into a clustered target,
-a host made unreachable after the disk landed, a manager restart in the middle of
-an import. These are covered by unit and envtest tests only.
-
-**Known issue (R31, being fixed).** libvirt reports a pool's `Available` as last
-refreshed, so on an NFS pool shared by several hosts, hosts can report different,
-stale free space to the disk-space filter. An administrator can refresh the figure
-with `virsh pool-refresh default` on the hosts.
+`main-73e08e8`, 2026-10-22; results are on #416): a single-host libvirt VM migrated
+into the cluster over `s3` and over `nfs`, both to `Ready`; the target placed before
+the source was powered off and exported; the landed disk attached in place on the
+chosen host (the domain's disk is `<namespace>.<name>-migrated.qcow2`); a failure after
+the import, with a routed `DeleteLandedDisk` to the recorded host; a host made
+unreachable after the target was placed (the migration waited, did not re-place, and
+went on when the host returned). **Not run:** vSphere → clustered, Proxmox →
+clustered, a host made unreachable after the disk landed, a manager restart in the
+middle of an import, an R4-held target, a retry after an import. These are covered by
+unit and envtest tests only. The lab also showed that libvirt's cached pool figure
+could differ between hosts sharing an NFS pool; #417 measures it fresh.
 → [Migration into a clustered provider](docs/clustered-provider-inventory.md#migration-into-a-clustered-provider-addendum-b)
 (prerequisites, every condition and how to clear it, limits),
 [ADR-0007 Addendum B](docs/adr/0007-clustered-orchestrator-provider.md#addendum-b-2026-10-18-migration-into-a-clustered-provider-p3-cold-path),
@@ -252,8 +264,8 @@ then the providers promptly**), with these additions:
 1. **First, on every libvirt host: create the seed directory** (command above). It
    depends on nothing else, so do it first; it must exist before any libvirt provider
    image from this release runs. Until it exists,
-   every create and clone through that host fails with `refusing to stage
-   cloud-init data`. VMs that already run are not affected.
+   every create through that host (and every clone of a VM that has a seed) fails with
+   `refusing to stage cloud-init data`. VMs that already run are not affected.
 2. **CRDs.** Three CRDs changed (`VirtualMachine`, `VMSet`, `VMMigration`). Apply
    them before the manager; the manager's readiness check does not verify the new
    schema, but a clustered-target migration does not work without it.
@@ -815,7 +827,7 @@ The most useful things to exercise:
     local non-root user cannot list or read the seed directory;
   - a clone of a cloud-init VM: new SSH host keys and the target's hostname in the guest,
     and `/var/lib/cloud/data/instance-id` equal to `virtrigaud-<uid>` (libvirt and
-    vSphere; the real-guest check is still open, #413);
+    vSphere; the SSH host keys and vSphere were not validated in the lab);
   - deleting a VM and its clone at the same time on single-host libvirt: no seed
     directory left;
   - **a migration into a clustered libvirt Provider** over `s3` and `nfs`, including the
@@ -869,23 +881,33 @@ Paths that need a fault to trigger (held provider calls after a manager restart,
 landed-disk deletion after a failed import, staged-file link refusal) are covered
 by unit, envtest and simulator tests only.
 
-**Validated in the lab since rc2** (build `main-73e08e8` for the clustered migration;
-libvirt 10.0, Ubuntu 24.04, AppArmor for the seed directory):
+**Validated in the lab since rc2** (libvirt 10.0, Ubuntu 24.04, AppArmor for the
+seed directory; build `main-71e8647` for the provider-driven R27 checks and
+`main-73e08e8` for the clustered migration; results are recorded on #414 and #416):
 
-- The seed directory (#414): the `dynamic_ownership` hand-over of the `0600` ISO to
-  the qemu user, no AppArmor change needed, the seed unreadable by another local user,
-  the refusal of an unusable directory, and the delete of a legacy `/tmp` seed. An
-  SELinux host was not tried.
-- Migration into a clustered libvirt Provider (#415, #416), a two-host Provider on a
-  shared NFS pool: a single-host libvirt VM into the cluster over `s3` and over `nfs`,
-  both to `Ready`; a failure after the import, whose landed disk was deleted through the
-  recorded host; a host made unreachable after the target was placed (the migration
-  waited, did not re-place, and recovered when the host returned).
-- **Not run in the lab:** a vSphere or Proxmox source into a clustered target, a host
-  made unreachable after the disk landed, and a manager restart in the middle of a
-  clustered import. **Not covered by the lab results recorded for this release:** a
-  clone's new identity in a real guest and the vSphere `guestinfo` rewrite on a real
-  vCenter. All of these are covered by unit, envtest and simulator tests.
+- **The seed directory (#414), host level:** a seed built as the provider builds it,
+  the `0600` ISO handed to `libvirt-qemu:kvm` at start (`dynamic_ownership`), the
+  guest's cloud-init reading the NoCloud seed from it (status `done`, hostname and
+  instance-id applied), no AppArmor denial, other users denied, and the private copy
+  readable by the SSH user. **Provider-driven:** a create (seed in the new directory,
+  the modes), a single-host clone of a started source that read only the private
+  copy, the refusal of a `0755` root-owned directory with nothing written and the
+  recovery after `0711`, and a Delete that removed the new and the legacy `/tmp`
+  seeds. **Not run:** a clustered clone of a started source, an SELinux host.
+- **Clone identity (#413), partly:** a single-host libvirt clone got its own sealed seed
+  with `instance-id` `virtrigaud-<target UID>` and its own hostname, and booted (a
+  cirros guest). **Not validated:** new SSH host keys in the guest, and the vSphere
+  `guestinfo` rewrite on a real vCenter.
+- **Migration into a clustered libvirt Provider (#415, #416),** a two-host Provider on
+  a shared NFS pool: a single-host libvirt VM into the cluster over `s3` and over
+  `nfs`, both to `Ready`; the target placed before the source was powered off and
+  exported; the landed disk attached in place on the chosen host (the domain's disk
+  is `<namespace>.<name>-migrated.qcow2`); a failure after the import, with a routed
+  `DeleteLandedDisk` to the recorded host; a host made unreachable after placement
+  (the migration waited, did not re-place, and recovered). **Not run:** vSphere →
+  clustered, Proxmox → clustered, a host made unreachable after the disk landed, a
+  manager restart in the middle of an import, an R4-held target, a retry after an
+  import. All of these are covered by unit, envtest and simulator tests.
 
 ## Breaking changes
 
@@ -1037,19 +1059,11 @@ libvirt 10.0, Ubuntu 24.04, AppArmor for the seed directory):
 - **New since rc2: libvirt cloud-init seeds are built in a dedicated directory that must
   exist on every libvirt host** (#414). Create `/var/lib/libvirt/virtrigaud-seeds` (owned
   by the provider's SSH user, mode `0711`) **before rolling the libvirt providers**;
-  otherwise every create and clone through that host fails, retryably, with
+  otherwise every create through that host, and every clone of a VM that has a seed,
+  fails, retryably, with
   `refusing to stage cloud-init data`. Seeds of existing VMs stay in `/tmp` until you
   make them private. → [Changes since v0.4.0-rc2](#libvirt-cloud-init-seeds-are-private-and-live-in-a-dedicated-directory-414-breaking),
   [Upgrade guide](docs/upgrading.md#breaking-changes)
-- **New since rc2: a clone boots as a new cloud-init instance** (#413): its SSH host keys
-  are regenerated and its user-data's per-instance modules run again (libvirt and
-  vSphere), so its host keys differ from its source's from the first boot. `create` on
-  `VMClone` is read access to the source's data; review who has it.
-  → [Changes since v0.4.0-rc2](#clones-get-their-own-seed-and-a-new-cloud-init-identity-413)
-- **New since rc2: a libvirt Host's `allocatableStorageBytes` is its `default` pool's
-  free space only** (#416; it summed every active pool). A clustered Provider's
-  `VMPlacementPolicy` `minDiskSpacePerHost` compares against it, so such a policy can
-  now reject hosts it used to accept. → [Upgrade guide](docs/upgrading.md#behavior-changes-that-are-visible-but-not-breaking)
 
 See the full breaking-change table, required upgrade order (CRDs → admission
 policy and grants → manager → providers), and rollback caveats in
@@ -1286,7 +1300,10 @@ policy and grants → manager → providers), and rollback caveats in
   first, on a host whose `default` pool has room for the source disk, and the disk is
   imported onto that host; a host that fails after placement is waited for, not
   replaced. The disk-space check is a filter, not a reservation. Run in the lab from a
-  single-host libvirt source; a vSphere or Proxmox source was not
+  single-host libvirt source; a vSphere or Proxmox source was not. **Behaviour change:**
+  a libvirt Host's `allocatableStorageBytes` is now the `default` pool's free space
+  only, measured fresh (it summed every active pool before), which changes what a
+  `VMPlacementPolicy` `minDiskSpacePerHost` compares against.
   (→ [Changes since v0.4.0-rc2](#migration-into-a-clustered-libvirt-provider-407-412-415-416-experimental),
   [`docs/clustered-provider-inventory.md`](docs/clustered-provider-inventory.md#migration-into-a-clustered-provider-addendum-b)).
 
@@ -1765,11 +1782,12 @@ says so. Each links to the page that documents it in full, where one exists.
   `spec.importedDisk` can be edited by whoever may edit the VM (a swap is detected, not
   prevented)
   (→ [`docs/clustered-provider-inventory.md`](docs/clustered-provider-inventory.md#migration-into-a-clustered-provider-addendum-b)).
-- **Known issue (R31, being fixed): a clustered libvirt host's free-space figure can be
-  stale.** libvirt reports a pool's `Available` as last refreshed, so on an NFS pool
-  shared by several hosts the hosts can report different, stale free space to the
-  disk-space filter that places a migration target. An administrator can refresh it with
-  `virsh pool-refresh default` on the hosts.
+- **A clustered libvirt host's free-space figure is up to 60 seconds old and excludes
+  root-reserved blocks** (#417). It is measured fresh on every Host sync, so the
+  disk-space filter that places a migration target can still act on a figure that
+  has changed since. If the filesystem under the pool directory is not mounted while
+  the pool stays active, the figure is that of the filesystem underneath, and nothing
+  detects it.
 - **Deleting a namespace that holds an in-use `Provider`.** Kubernetes deletes the
   provider's runtime with the namespace, and nothing can stop that. VMs whose
   deletes miss the pod's termination window are held (`ProviderUnavailable`) and
