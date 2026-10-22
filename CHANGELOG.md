@@ -5,6 +5,26 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-10-22 17:00] - libvirt Host allocatable storage measured fresh (R31)
+**Author:** @wrkode (William Rizzo)
+
+### Fixed
+- `internal/providers/libvirt/hostinfo.go`: a libvirt host's allocatable storage (`Host.status.allocatableStorageBytes`) is the free space of its active `default` pool's directory, measured on every inventory sync with `stat -f -c "%a %S"` (statvfs `f_bavail × f_frsize`, `df`'s *Available*) after reading the pool's type and target from `virsh pool-dumpxml default`. libvirt's `pool-info` *Available* is no longer used: libvirt caches it until a `pool-refresh` (two lab hosts sharing one NFS export reported 220.8 GiB and 558.5 GiB for a filesystem with ~501 GiB free), and it counts root-reserved blocks. Only `dir`, `fs` and `netfs` pools are measured; any other type, an unreadable definition, or a `stat` that fails, prints something unexpected or exceeds 15 s reports 0 (fail closed for the disk-space filter). No `pool-refresh` is run.
+- `internal/providers/libvirt/nfs.go`: the import-time free-space check (`hostFreeBytes`) shares the same format and a strict parser (exactly two non-negative integers, a positive block size, no overflow).
+
+### Added
+- `internal/providers/libvirt/hostinfo_test.go`, `hosts_test.go`: statvfs output parsing (odd outputs, overflow), pool types, fail-closed and timeout paths, the command sequence (no `pool-refresh`, no `pool-info`), and two hosts sharing one pool filesystem reporting the same value and following it when it changes.
+- `docs/clustered-provider-inventory.md`, `docs/upgrading.md`: the `allocatable_storage` source and the visible change.
+
+### Why
+The B7.4 disk-space placement filter (migration targets, `VMPlacementPolicy` `minDiskSpacePerHost`) compared requests against stale per-host values, so it could place a disk on a host without room or refuse one with room.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout (libvirt provider)
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-10-22 10:53] - Migration into a clustered provider: #416 review fixes (R11 slice B.3)
 **Author:** @wrkode (William Rizzo)
 
