@@ -791,6 +791,21 @@ the following once after upgrading, and delete only what no `VMMigration` in fli
   - A vSphere source whose `guestinfo.metadata` cannot be read (unknown encoding, not
     a YAML/JSON mapping) is refused (`InvalidArgument`). The rewritten guestinfo keys
     keep the source's key spelling and encoding.
+- **A clustered libvirt provider serves `ImportDisk`, `DeleteLandedDisk` and
+  `DeleteStagedDisk`** (R11, [ADR-0007 Addendum B](adr/0007-clustered-orchestrator-provider.md#addendum-b-2026-10-18-migration-into-a-clustered-provider-p3-cold-path)
+  slices 1 and 2, `internal/providers/libvirt/routed_import.go`,
+  `routed_migration_cleanup.go`). They are routed to the new `target_host_id`
+  fields of the requests (`s3` and `nfs` only; `pvc` is refused), and the
+  provider now reports `supports_routed_import`, disk import, resend-safe `s3` /
+  `nfs` imports, the landed-disk delete and `s3` / `nfs` staged-disk deletes in
+  `Provider.status.reportedCapabilities`. Nothing calls them yet: **the manager
+  still refuses a `VMMigration` whose target Provider is clustered** until slice 3.
+  A clustered `Create` that attaches an imported disk in place now takes the
+  landing lock of its host, serialised with the routed import and delete of that
+  disk. See [Migration into a clustered provider](clustered-provider-inventory.md#migration-into-a-clustered-provider-addendum-b)
+  for the host prerequisites (the `default` pool at `/var/lib/libvirt/images`,
+  `flock` and `timeout`). Single-host, vSphere and Proxmox providers are unchanged
+  (they ignore the new fields and do not report the capability).
 
 ## Post-upgrade verification checklist
 

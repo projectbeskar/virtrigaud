@@ -1216,7 +1216,10 @@ slice 4 runs `ListVMs` on every host and adds `TransferOwner` for adoption.
 | `TaskStatus` | **Routed** to the host encoded in the task reference (slice 3; see above) |
 | `ListVMs` | Runs on **every routable host** (slice 4; see [Listing and adoption](#listing-and-adoption-slice-4)): each `VMInfo` carries its `host_id`, and every host that could not be listed is named in `unreachable_host_ids` — never dropped, never a failed call. With an owner filter (`owner_namespace` / `owner_name`, A6.2) each host reports only that VirtualMachine's candidate domains and the answer is marked `owner_filter_applied` (the pre-schedule check, [R4](clustered-restore.md#the-pre-schedule-uniqueness-check-r4)); the provider advertises `supports_list_owner_filter` |
 | `TransferOwner` | **Routed** to `target_host_id` (slice 4): the owner re-stamp adoption uses — a serialized check-and-set with read-back (see below) |
-| `ImagePrepare`, `ImportDisk` | `Unimplemented` (host-scoped, no target host yet) |
+| `ImportDisk` | **Routed** to `target_host_id`, the target VirtualMachine's pending host (Addendum B, R11 slice 1), for `s3` and `nfs` only; `pvc` (and the empty legacy backend) is `InvalidArgument`. `target_vm` must carry the target's namespace, name **and uid**. Before anything is written: the landing host's name check, the landing file through [the cluster-wide disk guard](#shared-storage-the-cluster-wide-disk-guard-a61), the landing lock and the host `flock`. See [Migration into a clustered provider](#migration-into-a-clustered-provider-addendum-b) |
+| `DeleteLandedDisk` | **Routed** to `target_host_id`, the host the import landed the disk on (Addendum B, slice 2). The disk is removed only when no domain on **any** host of the Provider uses it; a host that cannot be scanned keeps it (retryable) |
+| `DeleteStagedDisk` | `s3` from the provider pod, as on a single host; `nfs` emptied by the qemu-img of `target_host_id`, the import's host (Addendum B, slice 2) |
+| `ImagePrepare` | `Unimplemented` (host-scoped, no target host yet) |
 
 An empty `target_host_id` is `InvalidArgument` (never a default host). An unknown,
 removed, draining or unreachable host is a retryable **host-scoped** `Unavailable`:
@@ -2020,6 +2023,88 @@ destroys the domain), and prefer backups that include VirtualMachine status
 (Velero `restoreStatus`). The automated re-attach (`VMRestoreBinding`, A6.4)
 comes after v0.4.0.
 
+### Migration into a clustered provider (Addendum B)
+
+A `VMMigration` whose **target** Provider has `topology: cluster` needs the
+disk to land on the host where the target VM will run. ADR-0007 Addendum B
+creates the target VirtualMachine first, lets the ordinary scheduler place
+it, and sends the import to its pending host. **Status: the provider side
+(slices 1 and 2) has shipped; the manager side (slice 3) has not.** Until it
+ships, the manager refuses a clustered target at `Validating`, before any
+side effect, whatever the provider reports.
+
+**What the clustered libvirt provider serves.**
+
+- **`ImportDisk`** (`s3` and `nfs`) lands `<default pool>/<namespace>.<name>-migrated.qcow2`
+  on `target_host_id`, the name a single host uses. The request must carry
+  `target_vm` with the VM's uid (a canonical UUID); an empty
+  `target_host_id`, a missing uid, `pvc`, the empty legacy backend, a storage
+  hint other than `default`, or an `nfs` source that is not `nfs://` is
+  `InvalidArgument` before any host is leased. Before anything is written:
+  1. **The landing host's name check.** A domain named `<namespace>.<name>`
+     on the host refuses the import with `AlreadyExists`:
+     `VM_PREVIOUS_INCARNATION` for one stamped for the VM's namespace and name
+     under another uid; `VM_PREVIOUS_INCARNATION` with `incarnation: own` for
+     one stamped with the VM's own uid (the VM was already created there, so
+     the import is not repeated); a plain `AlreadyExists` for a foreign or
+     unstamped one.
+  2. **The landing file, across every host.** When the landing file (or any
+     other disk name of the VM) exists, every host of the Provider is
+     scanned, as for a create ([the cluster-wide disk guard](#shared-storage-the-cluster-wide-disk-guard-a61)).
+     A file a domain on any host uses is refused (`AlreadyExists`), a host
+     that cannot be scanned fails the import closed (`HOST_UNAVAILABLE` or
+     `VM_DISK_CHECK_FAILED`), and an unused leftover is replaced.
+  3. **Serialisation.** An in-process lock on (host, landing name) is held
+     from the checks to the publish; the clustered `Create` that attaches the
+     disk in place, and the routed `DeleteLandedDisk`, take the same lock.
+     Every host command of the write phase runs under `flock -n -E 75` on
+     `<staging>/virtrigaud-locks/import-<namespace>.<name>.lock`, so a
+     command left over from a cancelled call makes a re-send answer "the same
+     import is still running" (`Unavailable`, retryable).
+
+  The write phase is the single-host one: the private directory, the stdin
+  writer (`s3`) or the bounded copy (`nfs`), the staged-image header checks,
+  `qemu-img info` / `convert` / `check`, the disk-size limit, the publish
+  (`mv -f -T`) and `pool-refresh`. On a clustered host **every one of those
+  commands runs under `timeout --kill-after=10s <budget>s`**, where the budget
+  ends 15 s before the manager's 30-minute deadline, so no host step of an
+  earlier call can still run once the manager's 35-minute settle time has
+  passed. The provider therefore reports `resend_safe_import_backends: [s3, nfs]`.
+- **`DeleteLandedDisk`** removes the landed disk on `target_host_id` only
+  when no domain on **any** host of the Provider uses it (the pool may be
+  shared). It fails closed when a host cannot be scanned, and keeps the disk
+  while an import of the same name runs in the provider or a host-side import
+  command holds the host lock.
+- **`DeleteStagedDisk`** removes an `s3` object from the pod and empties an
+  `nfs` one with the qemu-img of `target_host_id`, under `timeout(1)`.
+- **`GetCapabilities`** reports `supports_routed_import`, `supports_disk_import`
+  (backends `s3`, `nfs`; the single-host source formats), `supports_import_size_limit`,
+  `supports_landed_disk_delete` and staged-disk delete backends `s3`, `nfs`.
+
+How each failure is answered (not performed, refused, or unknown) is in
+[Provider calls whose outcome was lost](provider-call-outcomes.md#clustered-libvirt-the-routed-import).
+
+**Host prerequisites for a migration target**, in addition to
+[Host prerequisites](#host-prerequisites):
+
+- **The `default` pool must already exist at `/var/lib/libvirt/images`** on
+  every host. The routed import never creates, starts or moves a pool; a host
+  whose `default` pool is elsewhere is refused with the same constant message
+  as a create. (A first create on the host creates the pool.)
+- **An `ssh://` Host endpoint**, `qemu-img`, `flock` (util-linux) and
+  `timeout` (coreutils) on the host, as for a routed export. A host without
+  `flock` or `timeout` refuses the import (`FailedPrecondition`) and never
+  runs it unguarded.
+- **The provider's staging directory** on each host must be writable by the
+  SSH user: the import's host lock lives in its `virtrigaud-locks`
+  subdirectory (mode 0700, owned by the SSH user; anything else is refused).
+- **Room in the pool for the staged object and the converted disk** at once.
+  A pool without it is answered "not performed" (retryable), and nothing is
+  written.
+- The host prerequisites of the single-host import apply unchanged: a
+  `qemu-img` with CVE-2024-4467 fixed, and the sudoers rules of the slice 5
+  amendment.
+
 ## What "clustered" does not mean (yet)
 
 - **No automatic HA / failover.** v1 detects and surfaces host-down and supports
@@ -2033,8 +2118,11 @@ comes after v0.4.0.
   pool are protected across hosts, and a previous incarnation holds its
   VirtualMachine (A6.1); a restored or re-created VM is held before it is
   scheduled by the restore marker and the pre-schedule check (A6.2, see
-  [Backup and restore](clustered-restore.md)). Nothing can be migrated **into**
-  a clustered provider (P3).
+  [Backup and restore](clustered-restore.md)). The provider side of migration
+  **into** a clustered provider is in place (Addendum B slices 1 and 2: the
+  routed `ImportDisk` and its cleanup, `supports_routed_import`), but the
+  manager still refuses a clustered migration target at `Validating` until
+  slice 3 ships.
   The `vprovider.kb.io` validating webhook enforces the topology×type rule at
   admission (ADR-0007 D2). Until Addendum A slice 5 validates a real clustered VM
   end to end, do not run workloads on `topology: cluster`.

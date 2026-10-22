@@ -96,7 +96,7 @@ the backends where this is proven:
 |---|---|---|
 | vSphere | `s3`, `nfs` | `s3`, `nfs` |
 | libvirt, single host | `s3` | `pvc`, `s3`, `nfs` |
-| libvirt, clustered | `s3`, `nfs` | — (import is not served) |
+| libvirt, clustered | `s3`, `nfs` | `s3`, `nfs` (routed import, ADR-0007 Addendum B) |
 | Proxmox | `s3` | `s3` |
 | mock | — | — |
 
@@ -114,7 +114,11 @@ hang-up.
   - Imports: every import writes into a private directory and renames the result
     onto the landing name.
 - **libvirt, clustered:** an export runs under the per-domain export lock and the
-  routed time budget.
+  routed time budget. A routed import runs every host command under `flock` on the
+  import's host lock and `timeout(1)` ending before the routed budget, writes only
+  into a private directory, and publishes with one rename onto the landing name
+  derived from the target VM (see
+  [Clustered libvirt: the routed import](#clustered-libvirt-the-routed-import)).
 - **Proxmox:**
   - Exports: the `nfs` export copies onto the staged file in place on the node.
   - `s3` imports: the bytes are streamed from the provider pod into a private
@@ -185,6 +189,34 @@ Three things the table does not show:
 - **The s3 and nfs imports may start the default storage pool.** Before the private
   directory is made, the import ensures the `default` pool exists and is active. That is
   idempotent and leaves no disk, so a failure after it is still "nothing landed".
+
+## Clustered libvirt: the routed import
+
+A clustered libvirt provider routes `ImportDisk` to the target VM's pending host
+(ADR-0007 Addendum B). Its failures are classified like the single-host import's,
+with two differences: a host command stopped by `timeout(1)` is unknown, and
+`HOST_UNAVAILABLE` (which the manager reads as "nothing done") is answered only when
+the host never answered a command of the call. (The manager does not send an import
+to a clustered target until Addendum B slice 3; these answers are what it will read.)
+
+| Failure | Answer |
+|---|---|
+| The request is unusable: `pvc` or an empty backend, no `target_host_id`, a `target_vm` without its uid, another storage pool, a non-`nfs://` source, an `s3` configuration without its bucket or credentials | `InvalidArgument`, before any host is leased |
+| The host is unknown, removed or draining, or cannot be dialed; or the call's first command finds the connection dead | `Unavailable` + `HOST_UNAVAILABLE` (nothing done) |
+| A domain named after the target VM is on the landing host | `AlreadyExists`: with `VM_PREVIOUS_INCARNATION` for a previous incarnation, with `VM_PREVIOUS_INCARNATION` and `incarnation: own` for the VM's own domain, plain for a foreign or unstamped one. Nothing is landed |
+| The landing file exists and a domain on any host of the Provider uses it | `AlreadyExists`. Nothing is landed |
+| A host of the Provider cannot be scanned for that file | `Unavailable` + `HOST_UNAVAILABLE` or `VM_DISK_CHECK_FAILED` (fails closed; nothing done) |
+| The default pool is not at `/var/lib/libvirt/images`; the host is not reached over `ssh://` | `InvalidArgument`; `FailedPrecondition` |
+| Any other failure while only reads ran on the landing host (the host answered at least one command, then a read failed or its connection dropped) | Not performed (`Unavailable` + `VM_OPERATION_FAILED`) |
+| Another import of the same landing name runs in the provider for the call's whole budget | Not performed (`Unavailable` + `VM_OPERATION_FAILED`) |
+| The host lock is held: a command of an earlier, cancelled call still runs | `Unavailable` + `VM_OPERATION_FAILED`, "the same import is still running" |
+| The host guard refuses the lock directory or lock file; `flock`, `timeout` or `qemu-img` is missing | `FailedPrecondition` + `VM_OPERATION_FAILED` (nothing ran) |
+| A staged-image or disk-size refusal | `InvalidArgument` / the disk-size reasons, as on a single host |
+| A write-phase command (private directory, stage, copy, checks, convert, rename) **ended with an exit status of its own** (1-127, not 124) | Not performed: nothing is still running and nothing landed (`Unavailable` + `VM_OPERATION_FAILED`) |
+| A write-phase command was stopped by `timeout(1)` (124) or killed (137), its session dropped, the routed budget ran out, or the rename's result was lost | **Unknown** (untyped `Unknown`, with `VM_OPERATION_FAILED` so the breaker does not count it): the marker is kept. Because of the time budget the earlier call has ended within the 35-minute settle time, so the manager may re-send |
+
+The removal of the call's own private directory is not counted: its failure
+leaves a private directory behind (logged), never a landed disk.
 
 ## Releasing a held object
 
