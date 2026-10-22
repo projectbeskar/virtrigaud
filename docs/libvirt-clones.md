@@ -331,14 +331,16 @@ removes only:
   named like `<domain>-disk.<x>…` (another VM's disk) — meeting the same rules
   and used by no other domain. A base image or another VM's disk is never
   removed, and neither is a pre-snapshot disk a linked clone still reads;
-- its **VirtRigaud cloud-init seed directory** (`/tmp/virtrigaud-cloudinit-<domain>.<random>/`,
-  or an earlier release's `/tmp/virtrigaud-cloudinit/<domain>/`) — unless another
-  domain still references a file in it (a domain whose CD-ROM file is missing
-  no longer starts). A clone has its own seed directory, named after the
-  clone's domain, so deleting a source never touches its clones' seeds; only a
-  **single-host clone made by an earlier release** still points its CD-ROM at
-  its source's seed ISO, which is then kept until the last domain referencing
-  it is deleted.
+- its **VirtRigaud cloud-init seed directory**
+  (`<seed dir>/virtrigaud-cloudinit-<domain>.<random>/`, default seed directory
+  `/var/lib/libvirt/virtrigaud-seeds`; or an earlier release's
+  `/tmp/virtrigaud-cloudinit-<domain>.<random>/` or
+  `/tmp/virtrigaud-cloudinit/<domain>/`) — unless another domain still
+  references a file in it (a domain whose CD-ROM file is missing no longer
+  starts). A clone has its own seed directory, named after the clone's domain,
+  so deleting a source never touches its clones' seeds; only a **single-host
+  clone made by an earlier release** still points its CD-ROM at its source's
+  seed ISO, which is then kept until the last domain referencing it is deleted.
 
 It never removes any other backing file, cdrom or floppy media, or any file
 outside those directories: such a file is left in place and logged by the

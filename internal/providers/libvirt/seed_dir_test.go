@@ -271,16 +271,16 @@ func TestSeedDirFromEnv(t *testing.T) {
 
 func TestSeedRootProblem(t *testing.T) {
 	for out, wantOK := range map[string]bool{
-		"711 1001\n1001\n": true,
-		"700 1001\n1001\n": true,
-		"710 0\n0\n":       true,
-		"1711 1001\n1001":  true,
-		"755 1001\n1001\n": false, // listable by everyone
-		"751 1001\n1001\n": false, // listable by its group
-		"731 1001\n1001\n": false, // writable by its group
-		"713 1001\n1001\n": false, // writable by everyone
-		"711 0\n1001\n":    false, // root's: the SSH user cannot use it
-		"711 1002\n1001\n": false, // another user's
+		"711 1001\n1001\n":           true,
+		"700 1001\n1001\n":           true,
+		"710 0\n0\n":                 true,
+		"1711 1001\n1001":            true,
+		"755 1001\n1001\n":           false, // listable by everyone
+		"751 1001\n1001\n":           false, // listable by its group
+		"731 1001\n1001\n":           false, // writable by its group
+		"713 1001\n1001\n":           false, // writable by everyone
+		"711 0\n1001\n":              false, // root's: the SSH user cannot use it
+		"711 1002\n1001\n":           false, // another user's
 		seedRootMissingMarker + "\n": false,
 		seedRootNotDirMarker + "\n":  false,
 		"":                           false,
@@ -345,4 +345,3 @@ func TestClusteredCreateDelete_SeedInTheSeedDirectory(t *testing.T) {
 		assert.NoDirExists(t, dir, "Delete removes the domain's seed directory")
 	}
 }
-
