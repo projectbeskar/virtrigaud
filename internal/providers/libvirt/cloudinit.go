@@ -26,10 +26,20 @@ import (
 
 // CloudInitConfig represents cloud-init configuration for libvirt VMs
 type CloudInitConfig struct {
-	UserData   string // YAML cloud-init configuration
-	MetaData   string // Instance metadata (JSON)
-	InstanceID string // Unique instance identifier
+	UserData string // YAML cloud-init configuration
+	MetaData string // Instance metadata (JSON)
+	// InstanceID names the seed directory (<staging>/virtrigaud-cloudinit-
+	// <InstanceID>.<random>: always the domain name, which Delete and the
+	// seed reclaim look for) and, when MetaData is empty, is the generated
+	// meta-data's instance-id. A clone passes its own MetaData, whose
+	// instance-id is not the domain name (clone_seed.go).
+	InstanceID string
 	Hostname   string // VM hostname
+	// NetworkConfig and VendorData are the NoCloud network-config and
+	// vendor-data files, written into the seed only when non-empty (a clone
+	// carries its source seed's).
+	NetworkConfig string
+	VendorData    string
 }
 
 // CloudInitProvider manages cloud-init ISO creation and attachment for libvirt
@@ -92,6 +102,20 @@ func (c *CloudInitProvider) PrepareCloudInit(ctx context.Context, config CloudIn
 	metaDataPath := filepath.Join(remoteDir, "meta-data")
 	if err := c.writeRemoteFile(ctx, metaDataPath, config.MetaData); err != nil {
 		return "", fmt.Errorf("failed to write remote meta-data: %w", err)
+	}
+
+	// The optional NoCloud files, in a fixed order (a clone carries its
+	// source seed's).
+	for _, f := range []struct{ name, content string }{
+		{seedFileNetworkConfig, config.NetworkConfig},
+		{seedFileVendorData, config.VendorData},
+	} {
+		if f.content == "" {
+			continue
+		}
+		if err := c.writeRemoteFile(ctx, filepath.Join(remoteDir, f.name), f.content); err != nil {
+			return "", fmt.Errorf("failed to write remote %s: %w", f.name, err)
+		}
 	}
 
 	// Create cloud-init ISO using genisoimage (NoCloud datasource) on remote host

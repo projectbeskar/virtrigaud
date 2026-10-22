@@ -45,10 +45,12 @@ import (
 // write was lost, and a retried clone is an idempotent success. The source's
 // stamp is never copied.
 //
-// Unlike the single-host clone, the clustered clone gives the new domain its
-// own copy of the source's cloud-init seed ISO: sharing one seed would let the
-// clone's Delete remove the source's seed directory (and the source's Delete
-// the clone's), across VirtualMachines and possibly namespaces.
+// As the single-host clone does (R26), the clustered clone gives the new
+// domain its own cloud-init seed (clone_seed.go), with a new cloud-init
+// identity: sharing one seed would let the clone's Delete remove the source's
+// seed directory (and the source's Delete the clone's), across
+// VirtualMachines and possibly namespaces, and a byte copy would keep the
+// source's instance-id (and with it the source's SSH host keys).
 
 // linkedCloneClusteredRefusal is the InvalidArgument answer to a linked clone
 // on a clustered provider. A linked clone's overlay keeps reading its source's
@@ -253,11 +255,12 @@ func removeClonedDisk(ctx context.Context, vp *VirshProvider, lock hostLock, tar
 
 // cloneOnHost clones the owner-checked source domain d into domainName on vp's
 // host (c is the same host's connection, for its id). The command sequence
-// mirrors the single-host Clone, with three differences: an existing domain of
+// mirrors the single-host Clone, with two differences: an existing domain of
 // the target name that the target VirtualMachine owns is an idempotent
-// success (a retry) and any other is a Conflict; the definition is stamped
-// with the target VirtualMachine's identity; and the cloud-init seed ISO is
-// copied for the clone (cloneSeedISO). It keeps every protection of the
+// success (a retry) and any other is a Conflict; and the definition is
+// stamped with the target VirtualMachine's identity. As on the single host,
+// the clone gets its own cloud-init seed with a new identity, read from the
+// source's before the copy (planCloneSeed, writeCloneSeed). It keeps every protection of the
 // single-host Clone (disk_dependents.go, call-site checklist): linked clones
 // are refused before any host is touched (cloneClustered); the definition is
 // built and the disk and UEFI varstore paths checked before any file is
@@ -334,7 +337,12 @@ func (p *Provider) cloneOnHost(ctx context.Context, vp *VirshProvider, c libvirt
 	if err != nil {
 		return contracts.CloneResponse{}, contracts.NewInvalidSpecError("read source domain XML for clone", err)
 	}
-	srcSeedISO := srcDoc.cloudInitSeedISO()
+	// The clone's own cloud-init seed, with a new identity (clone_seed.go,
+	// R26), read from the source's before anything is copied.
+	seed, err := planCloneSeed(ctx, vp, srcDoc.cloudInitSeedISO(), req, domainName)
+	if err != nil {
+		return contracts.CloneResponse{}, err
+	}
 	cloneXML, err := stripBackingStores(srcXML.Stdout)
 	if err != nil {
 		return contracts.CloneResponse{}, contracts.NewInvalidSpecError("read source domain XML for clone", err)
@@ -408,7 +416,7 @@ func (p *Provider) cloneOnHost(ctx context.Context, vp *VirshProvider, c libvirt
 		return contracts.CloneResponse{}, err
 	}
 
-	targetXML, seedDir, err := p.cloneSeedISO(ctx, vp, targetXML, srcSeedISO, domainName)
+	targetXML, seedDir, err := p.writeCloneSeed(ctx, vp, targetXML, seed)
 	if err != nil {
 		return fail(err)
 	}
@@ -420,10 +428,6 @@ func (p *Provider) cloneOnHost(ctx context.Context, vp *VirshProvider, c libvirt
 		copyClonedNVRAM(ctx, vp, srcNvramPath, targetNvramPath)
 	}
 	targetXML = applyClassOverrides(targetXML, req.ClassJSON)
-	if req.CustomizeJSON != "" {
-		log.Printf("WARN Clone of %s: CustomizeJSON provided but not applied by the libvirt provider (MVP); "+
-			"the clone inherits the source's hostname/cloud-init. Tracked as a follow-up to issue #153.", req.TargetName)
-	}
 
 	if err := p.defineDomainFromXML(ctx, vp, domainName, targetXML); err != nil {
 		// The clone's own seed copy and its disk are removed unless the
@@ -442,42 +446,6 @@ func (p *Provider) cloneOnHost(ctx context.Context, vp *VirshProvider, c libvirt
 	log.Printf("INFO Successfully cloned VM %s -> %s (libvirt domain %s on host %s, linked=%t)",
 		d.name, req.TargetName, domainName, host, req.Linked)
 	return contracts.CloneResponse{TargetVmID: domainName}, nil
-}
-
-// cloneSeedISO gives a clone its own copy of the source's cloud-init seed ISO
-// (srcISO, "" when the source has none): a fresh per-clone seed directory in
-// the host staging directory — named like Create's, so the clone's Delete
-// removes it with the clone — holding cloud-init.iso, and the clone's CD-ROM
-// re-pointed at it. It returns the rewritten definition and the seed directory
-// ("" when there was nothing to copy). The copy runs as the SSH user, as the
-// seed was written.
-func (p *Provider) cloneSeedISO(ctx context.Context, vp *VirshProvider, domainXML, srcISO, domainName string) (string, string, error) {
-	if srcISO == "" {
-		return domainXML, "", nil
-	}
-	dir, err := makeHostTemp(ctx, vp, filepath.Join(p.stagingDir(), cloudInitSeedDirPrefix+domainName+"."+mktempTemplateSuffix), true)
-	if err != nil {
-		return "", "", fmt.Errorf("create the clone's cloud-init seed directory: %w", err)
-	}
-	iso := filepath.Join(dir, cloudInitISOName)
-	fail := func(step string, err error) (string, string, error) {
-		removeHostPathWithin(ctx, vp, dir, true, routedCleanupTimeout)
-		return "", "", fmt.Errorf("%s: %w", step, err)
-	}
-	if _, err := runHost(ctx, vp, "cp", "--", srcISO, iso); err != nil {
-		return fail("copy the cloud-init seed for the clone", err)
-	}
-	if _, err := runHost(ctx, vp, "chmod", cloudInitISOMode, "--", iso); err != nil {
-		return fail("set the clone's cloud-init seed mode", err)
-	}
-	if _, err := runHost(ctx, vp, "chmod", cloudInitSeedDirMode, "--", dir); err != nil {
-		return fail("set the clone's cloud-init seed directory mode", err)
-	}
-	out, ok := replaceSourceFile(domainXML, srcISO, iso)
-	if !ok {
-		return fail("re-point the clone's cloud-init CD-ROM", fmt.Errorf("seed %q not found in the clone's definition", srcISO))
-	}
-	return out, dir, nil
 }
 
 // cloudInitSeedISO returns the cloud-init seed ISO the domain's removable
@@ -578,8 +546,8 @@ type cloneSourceDisks struct {
 // would be shared by the source and the clone, and a disk whose <source>
 // names an external data file (<dataStore>) would keep reading the source's
 // data. Multi-disk clones are a later slice. Only CD-ROM media are not
-// counted: they are read-only, and the cloud-init seed among them is copied
-// for the clone.
+// counted: they are read-only, and the cloud-init seed among them is replaced
+// by the clone's own (writeCloneSeed).
 func checkCloneableSource(domainXML string) error {
 	var doc cloneSourceDisks
 	if err := xml.Unmarshal([]byte(domainXML), &doc); err != nil {
