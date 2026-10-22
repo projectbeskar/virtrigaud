@@ -5,6 +5,38 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-10-22 08:40] - Clones get their own cloud-init seed and a new cloud-init identity (rc2 R26)
+**Author:** @wrkode (William Rizzo)
+
+### Security
+- `internal/providers/cloneidentity/cloneidentity.go` (new): a clone booted with its source's cloud-init `instance-id` (its copied disk already records it), so cloud-init skipped every per-instance module: the clone kept the source's SSH host keys and hostname, and two VMs had one host identity. The shared helpers derive the clone's identity from its TARGET VirtualMachine: `InstanceID` (`virtrigaud-<uid>`, deterministic, so a re-sent Clone renders the same seed; the provider's clone name without a uid), `Hostname`/`LocalHostname` (`spec.customization.hostname`/`domain`, else the target's name), `ParseCustomization`. `RewriteMetaData` sets `instance-id`/`local-hostname` (and an existing `hostname`) in YAML or JSON meta-data, keeping every other key and the comments, and refuses a document that is not a mapping. `RewriteUserDataHostname` rewrites only the top-level block-style one-line `hostname:`/`fqdn:` keys of a `#cloud-config` document, and leaves any other format byte for byte.
+- `internal/providers/libvirt/clone_seed.go` (new), `internal/providers/libvirt/clone.go`, `internal/providers/libvirt/clone_clustered.go`, `internal/providers/libvirt/cloudinit.go`: single-host and clustered `Clone` share one implementation. `planCloneSeed` reads the source's NoCloud seed with `isoinfo` (Rock Ridge, then Joliet; each file bounded to 1 MiB by a fixed `sh -c` script with positional arguments; contents never logged) BEFORE anything is copied. A read failure is retryable and an ISO without NoCloud files or with an oversized file is `InvalidSpec`, with nothing written. `writeCloneSeed` makes the clone's own seed through `PrepareCloudInit`, the same staging helper `Create` uses (a `mktemp` directory named after the CLONE's domain, so its Delete and the R24 reclaim remove it), and re-points the clone's CD-ROM at it. The seed holds the new identity, the user-data (`spec.customization.userData.cloudInit.inline` when set, else the source's with its hostname keys rewritten), and the source's `network-config`/`vendor-data` (new optional `CloudInitConfig` fields). A single-host clone no longer references its source's seed ISO; a clustered clone no longer gets a byte copy of it (`cloneSeedISO` removed). A failed single-host define removes the clone's seed unless the domain may exist. The #153 warning that `CustomizeJSON` was ignored is replaced by a warning naming the customization fields that are not applied.
+- `internal/providers/vsphere/clone_identity.go` (new), `internal/providers/vsphere/server.go`, `internal/providers/vsphere/image_artifact.go`: `CloneVM_Task` copied the source's `guestinfo.metadata` (`instance-id: "<source name>"`) and `guestinfo.userdata`. The clone's ConfigSpec now rewrites them (decoding none, base64 and gzip+base64; written back base64). Metadata that cannot be decoded or parsed refuses the clone with `InvalidArgument` before anything is cloned. A source without `guestinfo.metadata` is unchanged: the instance-id then comes from the BIOS UUID, which vCenter regenerates. The source's ExtraConfig is read once (`sourceExtraConfig`) for this and for the image-stamp clearing.
+
+### Changed
+- `internal/providers/libvirt/seed_reclaim.go`, `internal/providers/libvirt/provider_virsh.go`, `internal/providers/libvirt/disk_dependents.go`: comments. The kept-because-a-clone-references-it seed path now matters only for single-host clones made before R26, and is kept for them.
+- `internal/providers/proxmox/server.go`: `Clone` documents why no change is needed. PVE names the clone `target_name`, gives every `netN` a new MAC and regenerates the cloud-init drive. Its NoCloud `instance-id` is the SHA-1 of the generated user-data (with `hostname:`) and network data (with MACs). The documented exceptions are an out-of-band `cicustom` meta snippet, and `configdrive2` with an unchanged name.
+- `internal/providers/libvirt/testdata/single_host_snapshot_clone_disk.golden.json`: regenerated. A single-host Clone now runs `isoinfo` before the copy and `mktemp`/`genisoimage`/`chmod` for the clone's seed, and defines the clone with its own seed; scenario `clone-customize-json-not-applied` renamed `clone-customize-hostname`.
+- `docs/libvirt-clones.md`, `docs/vm-ownership.md`, `docs/upgrading.md`, `examples/advanced/vm-reconfigure-and-snapshot.yaml`: clones' cloud-init identity per provider. Covers what the seed holds, what re-runs on first boot, what does not change (`/etc/machine-id`, static network config), the customization fields applied, and the `isoinfo` requirement. Adds a behaviour-change row; the R24 row now concerns clones made before R26.
+
+### Added
+- `internal/providers/cloneidentity/cloneidentity_test.go`, `internal/providers/libvirt/clone_seed_test.go`, `internal/providers/vsphere/clone_identity_test.go`, and updates to `routed_clone_test.go`, `routed_cleanup_test.go`, `seed_reclaim_test.go`, `clone_target_test.go`, `clone_disk_format_test.go`, `snapshot_clone_disk_singlehost_test.go`, `domain_naming_create_test.go`, `main_test.go`:
+  - Unit tests: instance-id derivation, meta-data and user-data rewrites, and customization parsing.
+  - Single-host fake host (the fake ISO is now a tar a fake `isoinfo` reads back): the clone has its own seed with the new `instance-id` and target hostname; customization; a re-sent Clone renders an identical seed; deleting the source leaves the clone's seed; an unreadable source seed copies and defines nothing (Unavailable); a failed define removes the clone's seed.
+  - Clustered: the clone's own seed and identity, read before the copy; identical seeds; an unreadable seed is retried before the copy.
+  - A round trip with the REAL `genisoimage` and `isoinfo`, and `isoinfo` refusals.
+  - vcsim: a clone of a cloud-init VM gets the new `guestinfo` identity; a source without cloud-init is unchanged. Unit tests for encodings and refusals.
+  - The R24 tests now build a pre-R26 clone that shares its source's seed.
+
+### Why
+Security review of #408 (R24): a single-host clone shared its source's seed ISO, which coupled the two VMs' lifecycles (R24's leak). Every libvirt and vSphere clone also booted with its source's cloud-init identity, so clone and source shared SSH host keys. That defeats SSH host-key authentication, a concern for regulated deployments.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-10-22 09:00] - ADR-0007 Addendum B accepted (migration into a clustered provider, R11)
 **Author:** @wrkode (William Rizzo)
 
