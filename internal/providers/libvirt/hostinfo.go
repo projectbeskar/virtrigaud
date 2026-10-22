@@ -36,14 +36,15 @@ import (
 )
 
 // This file is the ADR-0007 P1 libvirt host-inventory data plane: it turns the
-// per-host `virsh` output that ListHosts/GetHostInfo (hosts.go) need into a
-// typed contracts.HostInfo. Each HostInfo field is fed by one query:
+// per-host `virsh` (and, for storage, host command) output that
+// ListHosts/GetHostInfo (hosts.go) need into a typed contracts.HostInfo:
 //
 //	allocatable_cpu / allocatable_mem_mib  <- virsh nodeinfo        (text)
 //	cpu_model / cpu_features               <- virsh capabilities    (XML, libvirtxml.Caps)
 //	machine_types / emulator_version       <- virsh domcapabilities (XML, libvirtxml.DomainCaps)
-//	allocatable_storage                    <- virsh pool-list + pool-dumpxml, then statvfs
-//	                                          of the default pool's directory (stat -f)
+//	allocatable_storage                    <- virsh pool-list + pool-dumpxml, realpath when the
+//	                                          path is not lexically the required one, then
+//	                                          statvfs of that directory (stat -f, collectStorageBytes)
 //	health                                 <- nodeinfo reachability (the core query)
 //	id / address / labels                  <- the registry's parsed inventory (no query)
 //
