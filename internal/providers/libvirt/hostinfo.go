@@ -323,7 +323,14 @@ func parseDomCapsMachineEmulator(domCapsXML string) (machineTypes []string, emul
 //     `default`, and summing them admitted hosts whose `default` pool is full
 //     (#416 M3).
 //  2. `virsh pool-dumpxml default` (typed libvirtxml.StoragePool): the pool's
-//     type and target directory.
+//     type and target directory. The directory must be defaultPoolRequiredDir
+//     (/var/lib/libvirt/images), compared lexically after cleaning: creates
+//     and imports refuse a host whose `default` pool is elsewhere
+//     (errDefaultPoolMisplaced, requireDefaultPoolDir's
+//     HOST_STORAGE_MISCONFIGURED), so its space is not allocatable. Unlike
+//     those checks, no host command resolves symbolic links here: a pool
+//     that names the required directory through a link reports 0 (fail
+//     closed).
 //  3. For a filesystem-backed pool (filesystemPoolTypes — the only kinds whose
 //     target is a directory VirtRigaud can write disk files into): `stat -f -c
 //     "%a %S" -- <dir>` on the host, i.e. statvfs f_bavail * f_frsize — the
@@ -340,8 +347,8 @@ func parseDomCapsMachineEmulator(domCapsXML string) (machineTypes []string, emul
 // contends with the refresh routed import runs after publishing a disk.
 //
 // It never fails the caller, and it fails CLOSED: any error (pools unavailable,
-// no active `default` pool, a pool that is not filesystem-backed, an
-// unreadable definition, a stat that fails, times out or prints something
+// no active `default` pool, a pool that is not filesystem-backed or not at
+// defaultPoolRequiredDir, an unreadable definition, a stat that fails, times out or prints something
 // unexpected) yields 0, which the scheduler's disk-space filter (ADR-0007
 // Addendum B, B7.4) and a VMPlacementPolicy's minDiskSpacePerHost read as "no
 // room" — never a stale or made-up large value.
@@ -369,6 +376,12 @@ func collectStorageBytes(ctx context.Context, c hostconn.Conn, id hostconn.HostI
 	if err != nil {
 		logger.Warn("libvirt host inventory: cannot measure the default storage pool; reporting no allocatable storage",
 			"host", string(id), "pool", defaultStoragePool, "type", poolType, "error", err.Error())
+		return 0
+	}
+	if dir != filepath.Clean(defaultPoolRequiredDir) {
+		logger.Warn("libvirt host inventory: the default storage pool is not at the required directory, so creates and "+
+			"imports on this host are refused; reporting no allocatable storage",
+			"host", string(id), "pool", defaultStoragePool, "path", dir, "required", defaultPoolRequiredDir)
 		return 0
 	}
 	statRes, err := c.RunHost(ctx, "stat", "-f", "-c", statfsAvailFormat, "--", dir)

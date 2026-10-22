@@ -23,6 +23,7 @@ import (
 	"io"
 	"log/slog"
 	"math"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -125,11 +126,23 @@ const poolDumpXMLDirFixture = `<pool type='dir'>
 `
 
 // poolDirFixture is the target directory of poolDumpXMLDirFixture.
-const poolDirFixture = "/var/lib/libvirt/images"
+const poolDirFixture = DefaultImageDir
+
+// labPoolDumpXML is poolDumpXMLDirFixture with its pool at
+// defaultPoolRequiredDir — the directory the inventory requires of the
+// `default` pool, which this test binary roots in a fixture directory
+// (TestMain) rather than the real /var/lib/libvirt/images.
+func labPoolDumpXML() string {
+	return strings.Replace(poolDumpXMLDirFixture, "<path>"+poolDirFixture+"</path>",
+		"<path>"+defaultPoolRequiredDir+"</path>", 1)
+}
 
 // statfsKey is the fakeHostConn script key of the free-space measurement of
-// poolDirFixture (a host command: "!"-prefixed, like runHost).
-const statfsKey = "! stat -f -c %a %S -- " + poolDirFixture
+// the pool directory of labPoolDumpXML (a host command: "!"-prefixed, like
+// runHost).
+func statfsKey() string {
+	return "! stat -f -c %a %S -- " + filepath.Clean(defaultPoolRequiredDir)
+}
 
 // statfsFixture is `stat -f -c "%a %S" /var/lib/libvirt/images` on the same lab
 // host at the same time: 507261 blocks of 1 MiB available to non-root =
@@ -146,8 +159,8 @@ func fullHostScript() map[string]fakeVirshResult {
 		"capabilities":         {stdout: capabilitiesFixture},
 		"domcapabilities":      {stdout: domCapabilitiesFixture},
 		"pool-list --all":      {stdout: poolListFixture},
-		"pool-dumpxml default": {stdout: poolDumpXMLDirFixture},
-		statfsKey:              {stdout: statfsFixture},
+		"pool-dumpxml default": {stdout: labPoolDumpXML()},
+		statfsKey():            {stdout: statfsFixture},
 	}
 }
 
@@ -458,7 +471,7 @@ func TestCollectHostInfo_FullRender(t *testing.T) {
 	assert.Equal(t, statfsFixtureBytes, got.AllocatableStorage)
 	assert.Equal(t, []string{
 		"nodeinfo", "capabilities", "domcapabilities",
-		"pool-list --all", "pool-dumpxml default", statfsKey,
+		"pool-list --all", "pool-dumpxml default", statfsKey(),
 	}, conn.commands(), "no pool-refresh, no pool-info, and no other pool is read")
 }
 
@@ -522,17 +535,17 @@ func TestCollectStorageBytes_FailsClosed(t *testing.T) {
 		wantNoRun bool // the statvfs must not even be attempted
 	}{
 		{name: "stat fails", override: map[string]fakeVirshResult{
-			statfsKey: {err: errors.New("stat: cannot read file system information: Stale file handle")},
+			statfsKey(): {err: errors.New("stat: cannot read file system information: Stale file handle")},
 		}},
 		{name: "stat prints an error text", override: map[string]fakeVirshResult{
-			statfsKey: {stdout: "stat: cannot read file system information for '/var/lib/libvirt/images'"},
+			statfsKey(): {stdout: "stat: cannot read file system information for '/var/lib/libvirt/images'"},
 		}},
 		{name: "stat prints too many fields", override: map[string]fakeVirshResult{
-			statfsKey: {stdout: "507261 1048576 579243 1744665"},
+			statfsKey(): {stdout: "507261 1048576 579243 1744665"},
 		}},
-		{name: "stat prints nothing", override: map[string]fakeVirshResult{statfsKey: {stdout: ""}}},
+		{name: "stat prints nothing", override: map[string]fakeVirshResult{statfsKey(): {stdout: ""}}},
 		{name: "stat overflows", override: map[string]fakeVirshResult{
-			statfsKey: {stdout: "9223372036854775807 4096"},
+			statfsKey(): {stdout: "9223372036854775807 4096"},
 		}},
 		{name: "pool-dumpxml fails", wantNoRun: true, override: map[string]fakeVirshResult{
 			"pool-dumpxml default": {err: errors.New("error: failed to get pool 'default'")},
@@ -549,6 +562,19 @@ func TestCollectStorageBytes_FailsClosed(t *testing.T) {
 		}},
 		{name: "relative target path", wantNoRun: true, override: map[string]fakeVirshResult{
 			"pool-dumpxml default": {stdout: "<pool type='dir'><name>default</name><target><path>images</path></target></pool>"},
+		}},
+		// A default pool that is not at the required directory: creates and
+		// imports there are refused (errDefaultPoolMisplaced,
+		// HOST_STORAGE_MISCONFIGURED), so it has no allocatable space — even
+		// though its own directory has room, and without a host command.
+		{name: "pool misplaced", wantNoRun: true, override: map[string]fakeVirshResult{
+			"pool-dumpxml default": {stdout: strings.Replace(labPoolDumpXML(), "<path>"+defaultPoolRequiredDir+"</path>",
+				"<path>/srv/other-images</path>", 1)},
+			"! stat -f -c %a %S -- /srv/other-images": {stdout: statfsFixture},
+		}},
+		{name: "pool at a parent of the required directory", wantNoRun: true, override: map[string]fakeVirshResult{
+			"pool-dumpxml default": {stdout: strings.Replace(labPoolDumpXML(), "<path>"+defaultPoolRequiredDir+"</path>",
+				"<path>"+filepath.Dir(defaultPoolRequiredDir)+"</path>", 1)},
 		}},
 		{name: "pool-list fails", wantNoRun: true, override: map[string]fakeVirshResult{
 			"pool-list --all": {err: errors.New("boom")},
@@ -567,7 +593,7 @@ func TestCollectStorageBytes_FailsClosed(t *testing.T) {
 			assert.Equal(t, contracts.HostHealthReady, got.Health, "storage never gates health")
 			assert.Zero(t, got.AllocatableStorage, "an unmeasurable pool reports 0 (fail closed), never libvirt's cached value")
 			if tc.wantNoRun {
-				assert.NotContains(t, conn.commands(), statfsKey)
+				assert.NotContains(t, conn.commands(), statfsKey())
 			}
 		})
 	}
@@ -605,12 +631,34 @@ func TestCollectStorageBytes_NetfsAndFsPoolsMeasured(t *testing.T) {
 		t.Run(typ, func(t *testing.T) {
 			script := fullHostScript()
 			script["pool-dumpxml default"] = fakeVirshResult{stdout: "<pool type='" + typ + "'><name>default</name>" +
-				"<available unit='bytes'>1</available><target><path>" + poolDirFixture + "/</path></target></pool>"}
+				"<available unit='bytes'>1</available><target><path>" + defaultPoolRequiredDir + "/</path></target></pool>"}
 			conn := &fakeHostConn{id: "host-fs", script: script}
 
 			assert.Equal(t, statfsFixtureBytes, collectStorageBytes(context.Background(), conn, "host-fs", slog.Default()))
 		})
 	}
+}
+
+// TestCollectStorageBytes_ProductionPoolDir runs the unmodified lab capture
+// against the production required directory (DefaultImageDir, which this test
+// binary otherwise replaces with a fixture directory): a default pool at
+// /var/lib/libvirt/images is measured; one anywhere else reports 0.
+func TestCollectStorageBytes_ProductionPoolDir(t *testing.T) {
+	prev := defaultPoolRequiredDir
+	defaultPoolRequiredDir = DefaultImageDir
+	t.Cleanup(func() { defaultPoolRequiredDir = prev })
+
+	script := fullHostScript()
+	script["pool-dumpxml default"] = fakeVirshResult{stdout: poolDumpXMLDirFixture}
+	conn := &fakeHostConn{id: "dome3", script: script}
+	assert.Equal(t, statfsFixtureBytes, collectStorageBytes(context.Background(), conn, "dome3", slog.Default()))
+	assert.Contains(t, conn.commands(), "! stat -f -c %a %S -- /var/lib/libvirt/images")
+
+	script["pool-dumpxml default"] = fakeVirshResult{stdout: strings.Replace(poolDumpXMLDirFixture,
+		"<path>/var/lib/libvirt/images</path>", "<path>/var/lib/libvirt/images-nfs</path>", 1)}
+	moved := &fakeHostConn{id: "dome3", script: script}
+	assert.Zero(t, collectStorageBytes(context.Background(), moved, "dome3", slog.Default()))
+	assert.Equal(t, []string{"pool-list --all", "pool-dumpxml default"}, moved.commands())
 }
 
 // TestCollectHostInfo_OnlyDefaultPoolCounts pins #416 M3: space in any other
@@ -649,7 +697,7 @@ func (fs *sharedFilesystem) setAvailBlocks(n int64) {
 }
 
 func (fs *sharedFilesystem) statfs(_ context.Context, argv []string) (*hostconn.Result, error) {
-	if strings.Join(argv, " ") != strings.TrimPrefix(statfsKey, "! ") {
+	if strings.Join(argv, " ") != strings.TrimPrefix(statfsKey(), "! ") {
 		return nil, fmt.Errorf("sharedFilesystem: unexpected host command %q", argv)
 	}
 	fs.mu.Lock()
@@ -665,7 +713,7 @@ func (fs *sharedFilesystem) statfs(_ context.Context, argv []string) (*hostconn.
 // pool-refresh.
 func TestProvider_ListHosts_SharedPoolSameFreshValue(t *testing.T) {
 	staleDumpXML := func(availBytes int64) string {
-		return strings.Replace(poolDumpXMLDirFixture, "<available unit='bytes'>596772913152</available>",
+		return strings.Replace(labPoolDumpXML(), "<available unit='bytes'>596772913152</available>",
 			fmt.Sprintf("<available unit='bytes'>%d</available>", availBytes), 1)
 	}
 	fs := &sharedFilesystem{availBlocks: 507261}
