@@ -194,10 +194,10 @@ func newCreateHost(t *testing.T) *createHost {
 	t.Setenv("FAKE_DEFAULT_HOST", "h1")
 
 	vp := h.host("h1")
-	staging := t.TempDir()
 	// The staging directory doubles as the seed directory, which must be
-	// private to the SSH user (ensureSeedRoot): t.TempDir follows the umask.
-	require.NoError(t, os.Chmod(staging, 0o700))
+	// private to the SSH user, below directories no one else can write
+	// (ensureSeedRoot): t.TempDir follows the umask and TMPDIR.
+	staging := safeTempDir(t)
 	return &createHost{
 		fakeHost: h,
 		vp:       vp,

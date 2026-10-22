@@ -181,8 +181,8 @@ sh)
     if [ -f "$d/unsafe-dir-${4##*/}" ]; then printf '775 0\n` + scdSSHUID + `\n'; else printf '755 0\n` + scdSSHUID + `\n'; fi ;;
   ` + scdSeedRootPattern + `)
     if [ -f "$d/missing-seed-root" ]; then echo ` + seedRootMissingMarker + `
-    elif [ -f "$d/listable-seed-root" ]; then printf '755 ` + scdSSHUID + `\n` + scdSSHUID + `\n'
-    else printf '711 ` + scdSSHUID + `\n` + scdSSHUID + `\n'; fi ;;
+    elif [ -f "$d/listable-seed-root" ]; then printf 'self ` + scdSSHUID + `\nleaf 755 ` + scdSSHUID + ` %s\nanc 755 0 /\n' "$4"
+    else printf 'self ` + scdSSHUID + `\nleaf 711 ` + scdSSHUID + ` %s\nanc 755 0 /\n' "$4"; fi ;;
   esac ;;
 sudo)
   if [ "$1" = "-n" ]; then

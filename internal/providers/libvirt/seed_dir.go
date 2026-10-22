@@ -121,6 +121,25 @@ const (
 	// seed directories in it).
 	seedRootForbiddenBits = 0o066
 
+	// seedAncestorWriteBits are the permission bits no directory above the seed
+	// directory may have unless it is sticky: write for its group or others
+	// (renaming the seed directory, or a directory on its path, away and
+	// planting another).
+	seedAncestorWriteBits = 0o022
+
+	// seedDirStickyBit is the sticky bit: in a sticky directory only an entry's
+	// owner (or the directory's, or root) may rename or remove it.
+	seedDirStickyBit = 0o1000
+
+	// seedRootOtherExec is the traverse bit for others the seed directory needs
+	// when qemu runs as a user other than the SSH user (checkSeedRootAtStartup).
+	seedRootOtherExec = 0o001
+
+	// Line tags of seedRootScript's report.
+	seedRootSelfTag     = "self"
+	seedRootLeafTag     = "leaf"
+	seedRootAncestorTag = "anc"
+
 	// seedRootDoc is where the seed directory is documented.
 	seedRootDoc = "docs/libvirt-domain-ownership.md#cloud-init-seed-directory"
 )
@@ -133,20 +152,27 @@ var seedDirDefault = DefaultSeedDir
 // seedRootScript is the fixed `sh -c` script behind ensureSeedRoot. The path is
 // ALWAYS the positional parameter "$1", never interpolated into the text. It
 // first tries to create a missing directory (seedRootMode; mkdir fails, quietly,
-// when the SSH user may not create it), then prints seedRootMissingMarker,
-// seedRootNotDirMarker, or the directory's octal mode and owner uid (following
-// a symbolic link) followed by the SSH user's uid.
+// when the SSH user may not create it), then prints seedRootMissingMarker or
+// seedRootNotDirMarker, or a report: "self <SSH user's uid>", "leaf <octal mode>
+// <owner uid> <path>" for the directory (following a symbolic link), and one
+// "anc <octal mode> <owner uid> <path>" for every directory above it — up to
+// "/", both along the configured path and along its canonical path (realpath),
+// so a symbolic link on the path and the directories holding it are covered.
 const seedRootScript = `if [ ! -e "$1" ]; then mkdir -m ` + seedRootMode + ` -- "$1" 2>/dev/null; fi; ` +
-	`if [ ! -e "$1" ]; then echo ` + seedRootMissingMarker + `; ` +
-	`elif [ ! -d "$1" ]; then echo ` + seedRootNotDirMarker + `; ` +
-	`else stat -L -c '%a %u' -- "$1" && id -u; fi`
+	`if [ ! -e "$1" ]; then echo ` + seedRootMissingMarker + `; exit 0; fi; ` +
+	`if [ ! -d "$1" ]; then echo ` + seedRootNotDirMarker + `; exit 0; fi; ` +
+	`r=$(realpath -e -- "$1") || exit 1; ` +
+	`echo "` + seedRootSelfTag + ` $(id -u)"; ` +
+	`printf '` + seedRootLeafTag + ` '; stat -L -c '%a %u %n' -- "$1" || exit 1; ` +
+	`for s in "$1" "$r"; do p=$s; while [ "$p" != / ]; do p=$(dirname -- "$p"); ` +
+	`printf '` + seedRootAncestorTag + ` '; stat -L -c '%a %u %n' -- "$p" || exit 1; done; done`
 
 // errSeedRootUnusable is the cause of every refusal to build a seed in an
 // unusable seed directory. Its text is constant (it reaches the requesting
 // VirtualMachine's status); the details are logged provider-side.
 var errSeedRootUnusable = errors.New("the cloud-init seed directory on the libvirt host is missing, not a directory, " +
-	"not owned by the provider's SSH user, or readable or writable by other users; no cloud-init data was written " +
-	"(details are in the provider log; see " + seedRootDoc + ")")
+	"not owned by the provider's SSH user, readable or writable by other users, or below a directory other users " +
+	"can write; no cloud-init data was written (details are in the provider log; see " + seedRootDoc + ")")
 
 // seedRootRefusal is the message of the retryable error that carries
 // errSeedRootUnusable: the create resumes once the host is fixed.
@@ -239,50 +265,102 @@ func (p *Provider) seedRoots() []string {
 
 // ensureSeedRoot checks, on the host behind h, that root is a directory owned
 // by the SSH user that its group and others can neither read nor write
-// (seedRootForbiddenBits), creating it first (seedRootMode) when it is missing
-// and the SSH user may. An unusable directory is a retryable error carrying
-// errSeedRootUnusable (the operator fixes the host; the create then resumes);
-// a check that cannot run is a generic retryable error. It never writes
-// anything into root.
+// (seedRootForbiddenBits), below directories that only root or the SSH user own
+// and that no one else can write unless they are sticky (seedAncestorWriteBits:
+// otherwise another account could rename root, or a directory on its path,
+// away and put its own in its place between this check and the write). It
+// creates root first (seedRootMode) when it is missing and the SSH user may.
+// An unusable directory is a retryable error carrying errSeedRootUnusable (the
+// operator fixes the host; the create then resumes); a check that cannot run
+// is a generic retryable error. It never writes anything into root.
 func ensureSeedRoot(ctx context.Context, h hostCommandRunner, root string) error {
+	_, err := inspectSeedRoot(ctx, h, root)
+	return err
+}
+
+// inspectSeedRoot is ensureSeedRoot, also returning the seed directory's mode.
+func inspectSeedRoot(ctx context.Context, h hostCommandRunner, root string) (uint64, error) {
 	res, err := runHost(ctx, h, "sh", "-c", seedRootScript, "sh", root)
 	if err != nil {
 		log.Printf("ERROR Could not check the cloud-init seed directory %s on the host: %v", root, err)
-		return contracts.NewRetryableError(seedRootCheckFailed, nil)
+		return 0, contracts.NewRetryableError(seedRootCheckFailed, nil)
 	}
-	if reason := seedRootProblem(res.Stdout); reason != "" {
+	mode, reason := seedRootProblem(res.Stdout)
+	if reason != "" {
 		log.Printf("ERROR Refusing to build cloud-init seeds in %s on the host: %s. It must be a directory owned by "+
 			"the provider's SSH user with mode 0711 (or 0700 when qemu runs as that user or root), e.g. "+
-			"`install -d -m 0711 -o <ssh user> -g <ssh user> %s`; see %s", root, reason, root, seedRootDoc)
-		return contracts.NewRetryableError(seedRootRefusal, errSeedRootUnusable)
+			"`install -d -m 0711 -o <ssh user> -g <ssh user> %s`, below directories owned by root or the SSH user "+
+			"that no one else can write (or that are sticky); see %s", root, reason, root, seedRootDoc)
+		return 0, contracts.NewRetryableError(seedRootRefusal, errSeedRootUnusable)
 	}
-	return nil
+	return mode, nil
 }
 
-// seedRootProblem reads seedRootScript's output and says what makes the seed
-// directory unusable, or "" when it is usable.
-func seedRootProblem(out string) string {
-	fields := strings.Fields(out)
-	switch {
-	case len(fields) == 1 && fields[0] == seedRootMissingMarker:
-		return "it does not exist and the SSH user cannot create it"
-	case len(fields) == 1 && fields[0] == seedRootNotDirMarker:
-		return "it is not a directory"
-	case len(fields) != 3:
-		return fmt.Sprintf("unexpected check output %q", out)
+// seedRootProblem reads seedRootScript's output and returns the seed
+// directory's mode and what makes it unusable, or "" when it is usable.
+func seedRootProblem(out string) (uint64, string) {
+	if f := strings.Fields(out); len(f) == 1 {
+		switch f[0] {
+		case seedRootMissingMarker:
+			return 0, "it does not exist and the SSH user cannot create it"
+		case seedRootNotDirMarker:
+			return 0, "it is not a directory"
+		}
 	}
-	mode, err := strconv.ParseUint(fields[0], 8, 32)
-	if err != nil {
-		return fmt.Sprintf("unexpected mode %q", fields[0])
+	type entry struct {
+		mode        uint64
+		owner, path string
 	}
-	owner, self := fields[1], fields[2]
-	if owner != self {
-		return fmt.Sprintf("it is owned by uid %s, not the SSH user (uid %s)", owner, self)
+	parse := func(rest string) (entry, bool) {
+		f := strings.SplitN(rest, " ", 3)
+		if len(f) != 3 || f[1] == "" || f[2] == "" {
+			return entry{}, false
+		}
+		mode, err := strconv.ParseUint(f[0], 8, 32)
+		return entry{mode: mode, owner: f[1], path: f[2]}, err == nil
 	}
-	if mode&seedRootForbiddenBits != 0 {
-		return fmt.Sprintf("its mode %04o lets its group or others list or write it", mode)
+	var self string
+	var leaf *entry
+	var ancestors []entry
+	for _, line := range strings.Split(strings.TrimRight(out, "\n"), "\n") {
+		tag, rest, _ := strings.Cut(line, " ")
+		switch tag {
+		case seedRootSelfTag:
+			self = strings.TrimSpace(rest)
+		case seedRootLeafTag, seedRootAncestorTag:
+			e, ok := parse(rest)
+			if !ok {
+				return 0, fmt.Sprintf("unexpected check output %q", line)
+			}
+			if tag == seedRootLeafTag {
+				leaf = &e
+			} else {
+				ancestors = append(ancestors, e)
+			}
+		default:
+			return 0, fmt.Sprintf("unexpected check output %q", line)
+		}
 	}
-	return ""
+	if self == "" || leaf == nil || len(ancestors) == 0 {
+		return 0, fmt.Sprintf("unexpected check output %q", out)
+	}
+	if leaf.owner != self {
+		return 0, fmt.Sprintf("it is owned by uid %s, not the SSH user (uid %s)", leaf.owner, self)
+	}
+	if leaf.mode&seedRootForbiddenBits != 0 {
+		return 0, fmt.Sprintf("its mode %04o lets its group or others list or write it", leaf.mode)
+	}
+	for _, a := range ancestors {
+		if a.owner != "0" && a.owner != self {
+			return 0, fmt.Sprintf("the directory %s above it is owned by uid %s, neither root nor the SSH user (uid %s)",
+				a.path, a.owner, self)
+		}
+		if a.mode&seedDirStickyBit == 0 && a.mode&seedAncestorWriteBits != 0 {
+			return 0, fmt.Sprintf("the directory %s above it (mode %04o) is writable by its group or others and not sticky",
+				a.path, a.mode)
+		}
+	}
+	return leaf.mode, ""
 }
 
 // newSeedDir makes a fresh seed directory for domainName in root on the host
@@ -329,9 +407,12 @@ func sealSeedDir(ctx context.Context, h hostCommandRunner, dir string) error {
 // seedCopySource returns the file the provider's SSH user reads to get at the
 // content of the seed ISO srcISO that a domain references: the SSH user's
 // private copy next to it (cloudInitISOPrivateCopyName) when srcISO is the ISO
-// of a per-create seed directory in one of the seed roots and that copy exists,
-// else srcISO itself (a seed of an earlier release: its ISO kept the SSH user's
-// umask, typically 0644). A failed check falls back to srcISO.
+// of a VirtRigaud seed directory in one of the seed roots — a per-create one,
+// or an earlier release's per-name <root>/virtrigaud-cloudinit/<name> (an
+// operator adds the copy there when making a legacy seed private, see
+// docs/upgrading.md) — and that copy exists, else srcISO itself (a seed of an
+// earlier release: its ISO kept the SSH user's umask, typically 0644). A
+// failed check falls back to srcISO.
 //
 // Every read of an existing seed by the SSH user — a clone's copy of it
 // (cloneSeedISO), or reading the files inside it (isoinfo) — must go through
@@ -340,7 +421,8 @@ func sealSeedDir(ctx context.Context, h hostCommandRunner, dir string) error {
 // covers seeds). Other local users can read neither file (both 0600, in
 // directories they cannot list).
 func (p *Provider) seedCopySource(ctx context.Context, h hostCommandRunner, srcISO string) string {
-	if filepath.Base(srcISO) != cloudInitISOName || !isSeedDirIn(filepath.Dir(srcISO), p.seedRoots()...) {
+	dir := filepath.Dir(srcISO)
+	if filepath.Base(srcISO) != cloudInitISOName || !(isSeedDirIn(dir, p.seedRoots()...) || isLegacySeedDirIn(dir, p.seedRoots()...)) {
 		return srcISO
 	}
 	priv := filepath.Join(filepath.Dir(srcISO), cloudInitISOPrivateCopyName)
@@ -355,15 +437,30 @@ func (p *Provider) seedCopySource(ctx context.Context, h hostCommandRunner, srcI
 	return priv
 }
 
+// isLegacySeedDirIn reports whether dir is an earlier release's per-name seed
+// directory, <root>/virtrigaud-cloudinit/<name>, for one of roots.
+func isLegacySeedDirIn(dir string, roots ...string) bool {
+	dir = filepath.Clean(dir)
+	for _, root := range roots {
+		legacyRoot := filepath.Join(filepath.Clean(root), legacyCloudInitSeedRoot)
+		if filepath.Dir(dir) == legacyRoot && dir != legacyRoot {
+			return true
+		}
+	}
+	return false
+}
+
 // seedRootCheckTimeout bounds checkSeedRootAtStartup.
 const seedRootCheckTimeout = 30 * time.Second
 
 // checkSeedRootAtStartup checks, once at a single-host Provider's startup, the
 // seed directory on the host (ensureSeedRoot, which creates it when it is
 // missing and the SSH user may), so an unusable one is named in the log at
-// once rather than at the first create. Best-effort: startup goes on. A
-// clustered Provider checks each host at its first seed instead (it dials
-// hosts lazily).
+// once rather than at the first create. It also warns when others cannot
+// traverse the directory (no o+x, e.g. 0700): a VM whose qemu runs as another
+// user then cannot open its seed ISO — a warning only, as qemu may run as the
+// SSH user or root. Best-effort: startup goes on. A clustered Provider checks
+// each host at its first seed instead (it dials hosts lazily).
 func (p *Provider) checkSeedRootAtStartup(ctx context.Context) {
 	vp := p.virshProvider
 	if vp == nil {
@@ -371,8 +468,15 @@ func (p *Provider) checkSeedRootAtStartup(ctx context.Context) {
 	}
 	ctx, cancel := context.WithTimeout(ctx, seedRootCheckTimeout)
 	defer cancel()
-	if err := ensureSeedRoot(ctx, vp, p.seedDir()); err != nil {
+	mode, err := inspectSeedRoot(ctx, vp, p.seedDir())
+	if err != nil {
 		log.Printf("WARN The cloud-init seed directory %s is not usable on the host: creates fail until it is fixed (see %s)",
 			p.seedDir(), seedRootDoc)
+		return
+	}
+	if mode&seedRootOtherExec == 0 {
+		log.Printf("WARN The cloud-init seed directory %s has mode %04o: a qemu process running as another user than "+
+			"the provider's SSH user cannot reach the seed ISOs in it, and such VMs fail to start; use 0711 (see %s)",
+			p.seedDir(), mode, seedRootDoc)
 	}
 }

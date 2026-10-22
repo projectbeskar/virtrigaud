@@ -451,6 +451,15 @@ func (p *Provider) createVMWithCloudInit(ctx context.Context, vp *VirshProvider,
 	}
 	keepSeed = true
 
+	// Earlier attempts of this create (a define whose outcome was unknown, a
+	// create cancelled before its cleanup ran) may have left seed directories
+	// of this domain name — user-data in them — that nothing references: remove
+	// the old, unreferenced ones now (R27; the new domain references its own
+	// seed, which is kept). Best-effort and bounded: never fails the create.
+	rctx, cancel := context.WithTimeout(ctx, routedCleanupTimeout)
+	p.reclaimSeedDirs(rctx, vp, domainName, "", orphanSeedMinAge)
+	cancel()
+
 	log.Printf("INFO Successfully created VM with storage and cloud-init: %s (libvirt domain %s)", req.Name, domainName)
 	return domainName, nil
 }

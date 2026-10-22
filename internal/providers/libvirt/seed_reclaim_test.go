@@ -358,7 +358,7 @@ func TestReclaimSeedDirs_FailsClosed(t *testing.T) {
 // removed with the clone.
 func TestDelete_SingleHost_SymlinkedStagingDirectory(t *testing.T) {
 	c := newCreateHost(t)
-	link := filepath.Join(t.TempDir(), "staging-link")
+	link := filepath.Join(safeTempDir(t), "staging-link")
 	require.NoError(t, os.Symlink(c.staging, link))
 	c.p.hostStagingDir = link
 	c.p.hostSeedDir = link

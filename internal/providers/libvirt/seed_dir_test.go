@@ -67,7 +67,7 @@ func assertPrivateSeed(t *testing.T, seedDir string) {
 func newSeedCreateHost(t *testing.T) (*createHost, string) {
 	t.Helper()
 	c := newCreateHost(t)
-	seeds := filepath.Join(t.TempDir(), "seeds")
+	seeds := filepath.Join(safeTempDir(t), "seeds")
 	require.NoError(t, os.Mkdir(seeds, 0o700))
 	require.NoError(t, os.Chmod(seeds, 0o711)) //nolint:gosec // the seed directory's documented mode
 	c.p.hostSeedDir = seeds
@@ -271,44 +271,255 @@ func TestSeedDirFromEnv(t *testing.T) {
 }
 
 func TestSeedRootProblem(t *testing.T) {
-	for out, wantOK := range map[string]bool{
-		"711 1001\n1001\n":           true,
-		"700 1001\n1001\n":           true,
-		"710 0\n0\n":                 true,
-		"1711 1001\n1001":            true,
-		"755 1001\n1001\n":           false, // listable by everyone
-		"751 1001\n1001\n":           false, // listable by its group
-		"731 1001\n1001\n":           false, // writable by its group
-		"713 1001\n1001\n":           false, // writable by everyone
-		"711 0\n1001\n":              false, // root's: the SSH user cannot use it
-		"711 1002\n1001\n":           false, // another user's
-		seedRootMissingMarker + "\n": false,
-		seedRootNotDirMarker + "\n":  false,
-		"":                           false,
-		"711 1001":                   false,
-		"7x1 1001\n1001\n":           false,
+	report := func(leaf string, ancestors ...string) string {
+		out := "self 1001\nleaf " + leaf + " /srv/seeds\n"
+		for _, a := range ancestors {
+			out += "anc " + a + "\n"
+		}
+		return out
+	}
+	ok := []string{"755 0 /srv", "755 0 /"}
+	for name, tc := range map[string]struct {
+		out    string
+		wantOK bool
+	}{
+		"0711 owned by the SSH user":        {report("711 1001", ok...), true},
+		"0700":                              {report("700 1001", ok...), true},
+		"sticky leaf":                       {report("1711 1001", ok...), true},
+		"ancestor owned by the SSH user":    {report("711 1001", "700 1001 /srv", "755 0 /"), true},
+		"sticky world-writable ancestor":    {report("711 1001", "1777 0 /srv", "755 0 /"), true},
+		"ancestor path with a space":        {report("711 1001", "755 0 /srv/my dir", "755 0 /"), true},
+		"listable by everyone":              {report("755 1001", ok...), false},
+		"listable by its group":             {report("751 1001", ok...), false},
+		"writable by its group":             {report("731 1001", ok...), false},
+		"writable by everyone":              {report("713 1001", ok...), false},
+		"root's":                            {report("711 0", ok...), false},
+		"another user's":                    {report("711 1002", ok...), false},
+		"group-writable ancestor":           {report("711 1001", "775 1001 /srv", "755 0 /"), false},
+		"world-writable ancestor":           {report("711 1001", "757 0 /srv", "755 0 /"), false},
+		"ancestor of another user":          {report("711 1001", "755 1002 /srv", "755 0 /"), false},
+		"no ancestor reported":              {report("711 1001"), false},
+		"no self":                           {"leaf 711 1001 /srv/seeds\nanc 755 0 /\n", false},
+		"missing":                           {seedRootMissingMarker + "\n", false},
+		"not a directory":                   {seedRootNotDirMarker + "\n", false},
+		"empty":                             {"", false},
+		"old format":                        {"711 1001\n1001\n", false},
+		"bad mode":                          {report("7x1 1001", ok...), false},
+		"truncated line":                    {"self 1001\nleaf 711\nanc 755 0 /\n", false},
 	} {
-		assert.Equal(t, wantOK, seedRootProblem(out) == "", "%q: %s", out, seedRootProblem(out))
+		mode, reason := seedRootProblem(tc.out)
+		assert.Equal(t, tc.wantOK, reason == "", "%s: %q: %s", name, tc.out, reason)
+		if tc.wantOK {
+			assert.NotZero(t, mode, name)
+		}
 	}
 }
 
 func TestSeedRootScript_RealShell(t *testing.T) {
 	requireRealHostTool(t, "stat")
+	requireRealHostTool(t, "realpath")
 	h := localHostVP("single")
-	dir := filepath.Join(t.TempDir(), "seeds")
+	ctx := context.Background()
+	dir := filepath.Join(safeTempDir(t), "seeds")
 
-	require.NoError(t, ensureSeedRoot(context.Background(), h, dir), "a missing directory the user may create is created")
+	require.NoError(t, ensureSeedRoot(ctx, h, dir), "a missing directory the user may create is created")
 	st, err := os.Stat(dir)
 	require.NoError(t, err)
 	assert.Equal(t, os.FileMode(0o711), st.Mode().Perm())
 
 	require.NoError(t, os.Chmod(dir, 0o755)) //nolint:gosec // the refused mode under test
-	assert.ErrorIs(t, ensureSeedRoot(context.Background(), h, dir), errSeedRootUnusable)
-
-	link := filepath.Join(t.TempDir(), "link")
+	assert.ErrorIs(t, ensureSeedRoot(ctx, h, dir), errSeedRootUnusable)
 	require.NoError(t, os.Chmod(dir, 0o700))
+
+	link := filepath.Join(safeTempDir(t), "link")
 	require.NoError(t, os.Symlink(dir, link))
-	assert.NoError(t, ensureSeedRoot(context.Background(), h, link), "a symlink to a usable directory is followed")
+	assert.NoError(t, ensureSeedRoot(ctx, h, link), "a symlink to a usable directory, through safe directories, is followed")
+
+	// A parent another account (here: the group) can write: it could rename the
+	// seed directory away and plant its own between the check and the write.
+	weak := filepath.Join(safeTempDir(t), "weak")
+	require.NoError(t, os.Mkdir(weak, 0o700))
+	require.NoError(t, os.Chmod(weak, 0o770)) //nolint:gosec // the refused mode under test
+	inWeak := filepath.Join(weak, "seeds")
+	require.NoError(t, os.Mkdir(inWeak, 0o700))
+	assert.ErrorIs(t, ensureSeedRoot(ctx, h, inWeak), errSeedRootUnusable, "a group-writable parent is refused")
+
+	// The same, sticky: only an entry's owner may rename it. Accepted.
+	require.NoError(t, os.Chmod(weak, 0o770|os.ModeSticky)) //nolint:gosec // the accepted sticky mode under test
+	assert.NoError(t, ensureSeedRoot(ctx, h, inWeak), "a sticky group-writable parent is accepted")
+	require.NoError(t, os.Chmod(weak, 0o770)) //nolint:gosec // the refused mode under test
+
+	// A symlink in a safe directory whose TARGET lies below the weak parent.
+	viaLink := filepath.Join(safeTempDir(t), "via")
+	require.NoError(t, os.Symlink(inWeak, viaLink))
+	assert.ErrorIs(t, ensureSeedRoot(ctx, h, viaLink), errSeedRootUnusable, "the canonical path's parents are checked")
+
+	// A symlink that itself sits in the weak parent, pointing at a safe directory.
+	linkInWeak := filepath.Join(weak, "link")
+	require.NoError(t, os.Symlink(dir, linkInWeak))
+	assert.ErrorIs(t, ensureSeedRoot(ctx, h, linkInWeak), errSeedRootUnusable, "the configured path's parents are checked")
+}
+
+// TestCreate_RefusesASeedDirectoryOfAnotherUser: end to end, a seed directory
+// not owned by the SSH user (here: the SSH user's uid, as `id -u` reports it,
+// is another than the directory's owner) is refused with nothing written.
+func TestCreate_RefusesASeedDirectoryOfAnotherUser(t *testing.T) {
+	c, seeds := newSeedCreateHost(t)
+	bin := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(bin, "id"), []byte("#!/bin/sh\necho 4242\n"), 0o700)) //nolint:gosec // test shim must be executable
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	_, err := c.p.Create(context.Background(), c.createReq(ownerTeamA, c.file(c.images, "ubuntu.qcow2")))
+	assert.ErrorIs(t, err, errSeedRootUnusable)
+	assert.Empty(t, dirEntries(t, seeds), "nothing is written")
+	assert.NotContains(t, c.log("virsh"), "\tdefine ")
+}
+
+// TestClusteredCreate_RefusesAnUnusableSeedDirectory: a clustered create on a
+// host whose seed directory others can list writes nothing there and defines
+// nothing.
+func TestClusteredCreate_RefusesAnUnusableSeedDirectory(t *testing.T) {
+	s := newSharedPool(t)
+	seeds := filepath.Join(safeTempDir(t), "seeds")
+	require.NoError(t, os.Mkdir(seeds, 0o700))
+	require.NoError(t, os.Chmod(seeds, 0o755)) //nolint:gosec // the refused mode under test
+	s.p.hostSeedDir = seeds
+
+	_, err := s.createOnB()
+	require.Error(t, err)
+	assert.ErrorIs(t, err, errSeedRootUnusable)
+	assert.Empty(t, dirEntries(t, seeds))
+	assert.NotContains(t, s.log("qemu-img"), "convert", "no disk was written")
+	assert.NotContains(t, s.log("virsh"), "\tdefine ", "nothing was defined")
+}
+
+// TestCreate_SealFailureRemovesTheSeed: a failure at any step of sealing the
+// seed (or the create's context cancelled while the ISO is built) removes
+// the per-seed directory — user-data with it — and defines nothing.
+func TestCreate_SealFailureRemovesTheSeed(t *testing.T) {
+	for _, tc := range []struct{ name, tool, pattern string }{
+		// Shell case patterns: the literal parts are quoted.
+		{"the ISO's chmod", "chmod", "'0600 -- '*/" + cloudInitISOName},
+		{"the private copy", "cp", "*" + cloudInitISOPrivateCopyName},
+		{"the private copy's chmod", "chmod", "'0600 -- '*/" + cloudInitISOPrivateCopyName},
+		{"removing the inputs", "rm", "'-f -- '*/" + cloudInitUserDataName + "*"},
+		{"opening the directory", "chmod", "'0711 -- '*"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			requireRealHostTool(t, tc.tool)
+			c, seeds := newSeedCreateHost(t)
+			bin := t.TempDir()
+			shim := "#!/bin/sh\ncase \"$*\" in " + tc.pattern + ") echo \"" + tc.tool + ": scripted failure\" >&2; exit 1 ;; esac\n" +
+				"exec '" + hostGuardRealTools[tc.tool] + "' \"$@\"\n"
+			require.NoError(t, os.WriteFile(filepath.Join(bin, tc.tool), []byte(shim), 0o700)) //nolint:gosec // test shim must be executable
+			t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+			_, err := c.p.Create(context.Background(), c.createReq(ownerTeamA, c.file(c.images, "ubuntu.qcow2")))
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "scripted failure", "the scripted step is the one that failed")
+			assert.Empty(t, dirEntries(t, seeds), "the per-seed directory is removed")
+			assert.NotContains(t, c.log("virsh"), "\tdefine ")
+		})
+	}
+
+	t.Run("context cancelled while the ISO is built", func(t *testing.T) {
+		c, seeds := newSeedCreateHost(t)
+		bin := t.TempDir()
+		started := filepath.Join(bin, "started")
+		shim := "#!/bin/sh\n: > '" + started + "'\nwhile :; do sleep 0.05; done\n"
+		require.NoError(t, os.WriteFile(filepath.Join(bin, "genisoimage"), []byte(shim), 0o700)) //nolint:gosec // test shim must be executable
+		t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		done := make(chan error, 1)
+		go func() {
+			_, cerr := c.p.Create(ctx, c.createReq(ownerTeamA, c.file(c.images, "ubuntu.qcow2")))
+			done <- cerr
+		}()
+		require.Eventually(t, func() bool {
+			_, serr := os.Stat(started)
+			return serr == nil
+		}, 10*time.Second, 10*time.Millisecond, "genisoimage runs after user-data was written")
+		cancel()
+		select {
+		case cerr := <-done:
+			require.Error(t, cerr)
+		case <-time.After(30 * time.Second):
+			t.Fatal("the cancelled create did not return")
+		}
+		assert.Empty(t, dirEntries(t, seeds), "the per-seed directory, user-data with it, is removed")
+		assert.NotContains(t, c.log("virsh"), "\tdefine ")
+	})
+}
+
+// TestCreate_RemovesOlderUnreferencedSeedsOfTheDomain (R27): a successful
+// create removes the seed directories an earlier attempt of the same domain
+// name left behind once they are old enough, keeps a fresh one (a create may
+// still be preparing it), and keeps its own.
+func TestCreate_RemovesOlderUnreferencedSeedsOfTheDomain(t *testing.T) {
+	c, seeds := newSeedCreateHost(t)
+	ctx := context.Background()
+	base := c.file(c.images, "ubuntu.qcow2")
+	_, err := c.p.Create(ctx, c.createReq(ownerTeamA, base))
+	require.NoError(t, err)
+	first := dirEntries(t, seeds)
+	require.Len(t, first, 1)
+	// The domain vanishes behind the provider's back (or an earlier attempt's
+	// define never happened): its seed is left, unreferenced, and old.
+	_, err = c.vp.runVirshCommand(ctx, "undefine", "team-a.web")
+	require.NoError(t, err)
+	old := time.Now().Add(-2 * orphanSeedMinAge)
+	require.NoError(t, os.Chtimes(filepath.Join(seeds, first[0]), old, old))
+	fresh := filepath.Join(seeds, cloudInitSeedDirPrefix+"team-a.web.FrEsHfReSh")
+	require.NoError(t, os.Mkdir(fresh, 0o700))
+	other := filepath.Join(seeds, cloudInitSeedDirPrefix+"team-b.web.OlDoLdOlDo")
+	require.NoError(t, os.Mkdir(other, 0o700))
+	require.NoError(t, os.Chtimes(other, old, old))
+
+	_, err = c.p.Create(ctx, c.createReq(ownerTeamA, base))
+	require.NoError(t, err)
+	refs, err := parseDomainPathRefs(c.domainXML("team-a.web"))
+	require.NoError(t, err)
+	own := filepath.Base(filepath.Dir(refs.disks[1]))
+	assert.ElementsMatch(t, []string{own, filepath.Base(fresh), filepath.Base(other)}, dirEntries(t, seeds),
+		"the old unreferenced seed of this domain is gone; its own, a fresh one and another domain's stay")
+}
+
+// TestSeedCopySource covers how the SSH user's read of an existing seed picks
+// its file: the private copy in a per-create or a legacy per-name seed
+// directory when it exists, the ISO itself otherwise, and the ISO when the
+// existence check fails.
+func TestSeedCopySource(t *testing.T) {
+	ctx := context.Background()
+	vp := localHostVP("single")
+	staging := safeTempDir(t)
+	p := &Provider{hostSeedDir: safeTempDir(t), hostStagingDir: staging}
+
+	legacyDir := filepath.Join(staging, legacyCloudInitSeedRoot, "web")
+	require.NoError(t, os.MkdirAll(legacyDir, 0o700))
+	legacyISO := filepath.Join(legacyDir, cloudInitISOName)
+	assert.Equal(t, legacyISO, p.seedCopySource(ctx, vp, legacyISO), "no private copy yet: the ISO itself")
+	require.NoError(t, os.WriteFile(filepath.Join(legacyDir, cloudInitISOPrivateCopyName), []byte("seed"), 0o600))
+	assert.Equal(t, filepath.Join(legacyDir, cloudInitISOPrivateCopyName), p.seedCopySource(ctx, vp, legacyISO),
+		"a legacy per-name seed an operator gave a private copy is read through it")
+
+	perCreate := filepath.Join(p.seedDir(), cloudInitSeedDirPrefix+"web.AbCdEfGhIj", cloudInitISOName)
+	assert.Equal(t, perCreate, p.seedCopySource(ctx, failingRunner{}, perCreate),
+		"a failed existence check falls back to the ISO")
+	elsewhere := filepath.Join(safeTempDir(t), "web", cloudInitISOName)
+	assert.Equal(t, elsewhere, p.seedCopySource(ctx, vp, elsewhere), "outside the seed roots: never a private copy")
+
+	assert.True(t, isLegacySeedDirIn(legacyDir, p.seedRoots()...))
+	assert.False(t, isLegacySeedDirIn(filepath.Join(staging, legacyCloudInitSeedRoot), p.seedRoots()...))
+	assert.False(t, isLegacySeedDirIn(filepath.Join(staging, "other", "web"), p.seedRoots()...))
+}
+
+// failingRunner is a host whose every command fails.
+type failingRunner struct{}
+
+func (failingRunner) runVirshCommand(context.Context, ...string) (*VirshResult, error) {
+	return nil, errors.New("scripted host failure")
 }
 
 // TestClusteredCreateDelete_SeedInTheSeedDirectory (R27, clustered): the
@@ -317,7 +528,7 @@ func TestSeedRootScript_RealShell(t *testing.T) {
 // as well as one an earlier release left in the staging directory.
 func TestClusteredCreateDelete_SeedInTheSeedDirectory(t *testing.T) {
 	s := newSharedPool(t)
-	seeds := filepath.Join(t.TempDir(), "seeds")
+	seeds := filepath.Join(safeTempDir(t), "seeds")
 	require.NoError(t, os.Mkdir(seeds, 0o700))
 	s.p.hostSeedDir = seeds
 
@@ -363,7 +574,7 @@ func TestSeed_SSHUserReadsItBackAfterTheQemuHandover(t *testing.T) {
 	}
 	ctx := context.Background()
 	vp := localHostVP("single")
-	seeds := filepath.Join(t.TempDir(), "seeds")
+	seeds := filepath.Join(safeTempDir(t), "seeds")
 	require.NoError(t, os.Mkdir(seeds, 0o700))
 	c := NewCloudInitProvider(vp)
 	c.seedDir = seeds
