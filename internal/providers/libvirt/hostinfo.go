@@ -25,7 +25,9 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
+	"unicode/utf8"
 
 	"libvirt.org/go/libvirtxml"
 
@@ -80,10 +82,22 @@ const (
 	statfsAvailFormat = "%a %S"
 
 	// hostStorageProbeTimeout bounds the whole allocatable-storage measurement
-	// of one host (pool-list, pool-dumpxml and the statvfs), so a hung storage
-	// mount (statfs on a dead hard-mounted NFS export blocks) cannot stall an
-	// inventory sync; on expiry the host reports 0 (fail closed).
+	// of one host (pool-list, pool-dumpxml, the path check and the statvfs), so
+	// a hung storage mount (statfs on a dead hard-mounted NFS export blocks)
+	// cannot stall an inventory sync; on expiry the host reports 0 (fail
+	// closed). storageProbeBudget lowers it under a short caller deadline.
 	hostStorageProbeTimeout = 15 * time.Second
+
+	// statProbeRemoteTimeout / statProbeRemoteKillAfter are timeout(1)'s
+	// duration and --kill-after for the statvfs probe on the host: it ends
+	// there (SIGTERM, then SIGKILL) well inside hostStorageProbeTimeout, even
+	// when the provider's side of the call has already given up.
+	statProbeRemoteTimeout   = "10s"
+	statProbeRemoteKillAfter = "1s"
+
+	// maxLoggedHostOutputBytes caps how much host output an error or log line
+	// of the storage probe quotes (clipForLog).
+	maxLoggedHostOutputBytes = 200
 )
 
 // filesystemPoolTypes are the libvirt storage pool types whose target is a
@@ -129,7 +143,7 @@ func (p *Provider) collectOneHost(ctx context.Context, id hostconn.HostID) contr
 	// moment we return.
 	defer func() { _ = lease.Close() }()
 
-	return collectHostInfo(ctx, lease, id, address, labels, logger)
+	return collectHostInfo(ctx, lease, id, address, labels, logger, &p.hostStorage)
 }
 
 // collectHostInfo gathers one already-leased host's inventory into a
@@ -142,8 +156,10 @@ func (p *Provider) collectOneHost(ctx context.Context, id hostconn.HostID) contr
 // queries are skipped. If it succeeds the host is HOST_HEALTH_READY; the
 // remaining queries (capabilities, domcapabilities, storage pools) are
 // BEST-EFFORT — a failure there leaves the corresponding field empty/zero and
-// is logged, never flipping health or aborting.
-func collectHostInfo(ctx context.Context, c hostconn.Conn, id hostconn.HostID, address string, labels map[string]string, logger *slog.Logger) contracts.HostInfo {
+// is logged, never flipping health or aborting. probes is the provider's
+// per-host storage-probe state (collectStorageBytes; nil for none).
+func collectHostInfo(ctx context.Context, c hostconn.Conn, id hostconn.HostID, address string, labels map[string]string,
+	logger *slog.Logger, probes *hostStorageProbes) contracts.HostInfo {
 	info := contracts.HostInfo{
 		ID:      string(id),
 		Address: address,
@@ -193,8 +209,8 @@ func collectHostInfo(ctx context.Context, c hostconn.Conn, id hostconn.HostID, a
 		info.EmulatorVersion = emulator
 	}
 
-	// --- Best-effort: storage (sum of active pools' available bytes). ---
-	info.AllocatableStorage = collectStorageBytes(ctx, c, id, logger)
+	// --- Best-effort: storage (the default pool's free space, fail closed). ---
+	info.AllocatableStorage = collectStorageBytes(ctx, c, id, logger, probes)
 
 	return info
 }
@@ -316,7 +332,8 @@ func parseDomCapsMachineEmulator(domCapsXML string) (machineTypes []string, emul
 // host's `default` storage pool — the pool VM disks, clones and imported disks
 // land in (defaultStoragePool) — measured FRESH on every inventory sync (R31).
 //
-// Steps, all under one hostStorageProbeTimeout budget:
+// Steps, all under one budget (storageProbeBudget: hostStorageProbeTimeout,
+// or half of what is left of ctx's deadline when that is less):
 //
 //  1. `virsh pool-list --all`: the `default` pool must be ACTIVE. Other pools
 //     are not counted: space there cannot hold a disk VirtRigaud lands in
@@ -324,89 +341,237 @@ func parseDomCapsMachineEmulator(domCapsXML string) (machineTypes []string, emul
 //     (#416 M3).
 //  2. `virsh pool-dumpxml default` (typed libvirtxml.StoragePool): the pool's
 //     type and target directory. The directory must be defaultPoolRequiredDir
-//     (/var/lib/libvirt/images), compared lexically after cleaning: creates
-//     and imports refuse a host whose `default` pool is elsewhere
-//     (errDefaultPoolMisplaced, requireDefaultPoolDir's
-//     HOST_STORAGE_MISCONFIGURED), so its space is not allocatable. Unlike
-//     those checks, no host command resolves symbolic links here: a pool
-//     that names the required directory through a link reports 0 (fail
-//     closed).
+//     (/var/lib/libvirt/images), decided exactly as creates and imports decide
+//     it (isRequiredPoolDirOn: lexically after cleaning, else once both are
+//     resolved on the host with `realpath -m -z`), because they refuse a host
+//     whose `default` pool is elsewhere (errDefaultPoolMisplaced,
+//     requireDefaultPoolDir's HOST_STORAGE_MISCONFIGURED), so its space is not
+//     allocatable.
 //  3. For a filesystem-backed pool (filesystemPoolTypes — the only kinds whose
-//     target is a directory VirtRigaud can write disk files into): `stat -f -c
-//     "%a %S" -- <dir>` on the host, i.e. statvfs f_bavail * f_frsize — the
-//     same measurement, in the same unit (bytes), as the import-time
-//     free-space check (hostFreeBytes).
+//     target is a directory VirtRigaud can write disk files into): `timeout
+//     --kill-after=1s 10s stat -f -c "%a %S" -- <defaultPoolRequiredDir>` on
+//     the host, i.e. statvfs f_bavail * f_frsize — the same measurement, in
+//     the same unit (bytes), as the import-time free-space check
+//     (hostFreeBytes). timeout(1) ends a stat that hangs on a dead
+//     hard-mounted NFS export on the host side too, so a heartbeat does not
+//     leave one behind (a process in uninterruptible sleep cannot be killed
+//     by anything, though).
 //
 // libvirt's own pool-info Available is deliberately NOT used: libvirt caches it
-// until `virsh pool-refresh` (two hosts mounting one NFS export as their
-// `default` pool reported 220.8 GiB and 558.5 GiB for a filesystem with ~501
-// GiB free), and even right after a refresh it is f_bfree, which counts the
-// blocks reserved for root that the provider's non-root writes cannot use. A
-// pool-refresh per sync is not done either: it rescans every volume of the
-// pool (slow on a large NFS pool, on every heartbeat of every host) and
-// contends with the refresh routed import runs after publishing a disk.
+// until `virsh pool-refresh` (two lab hosts mounting one NFS export as their
+// `default` pool reported different values for it at the same time), and even
+// right after a refresh it is f_bfree, which counts the blocks reserved for
+// root that the provider's non-root writes cannot use. A pool-refresh per sync
+// is not done either: it rescans every volume of the pool (slow on a large NFS
+// pool, on every heartbeat of every host) and contends with the refresh routed
+// import runs after publishing a disk.
+//
+// probes (nil: no guard) holds the per-host state: a host whose previous probe
+// has not returned is not probed again (0), and each problem is logged at Warn
+// when it starts for a host and at Debug while it lasts.
 //
 // It never fails the caller, and it fails CLOSED: any error (pools unavailable,
 // no active `default` pool, a pool that is not filesystem-backed or not at
-// defaultPoolRequiredDir, an unreadable definition, a stat that fails, times out or prints something
-// unexpected) yields 0, which the scheduler's disk-space filter (ADR-0007
-// Addendum B, B7.4) and a VMPlacementPolicy's minDiskSpacePerHost read as "no
-// room" — never a stale or made-up large value.
-func collectStorageBytes(ctx context.Context, c hostconn.Conn, id hostconn.HostID, logger *slog.Logger) int64 {
-	ctx, cancel := context.WithTimeout(ctx, hostStorageProbeTimeout)
+// defaultPoolRequiredDir, an unreadable definition, a path that cannot be
+// resolved, a stat that fails, times out or prints something unexpected, a
+// cancelled or expired ctx, a probe still in flight) yields 0, which the
+// scheduler's disk-space filter (ADR-0007 Addendum B, B7.4) and a
+// VMPlacementPolicy's minDiskSpacePerHost read as "no room" — never a stale or
+// made-up large value.
+func collectStorageBytes(ctx context.Context, c hostconn.Conn, id hostconn.HostID, logger *slog.Logger, probes *hostStorageProbes) int64 {
+	fail := func(kind, msg string, attrs ...any) int64 {
+		attrs = append([]any{"host", string(id), "pool", defaultStoragePool}, attrs...)
+		msg = "libvirt host inventory: " + msg + "; reporting no allocatable storage"
+		if probes.noteProblem(id, kind) {
+			logger.Warn(msg, attrs...)
+		} else {
+			logger.Debug(msg, attrs...)
+		}
+		return 0
+	}
+	if !probes.begin(id) {
+		return fail(storageProblemInFlight, "the previous storage probe of this host has not returned")
+	}
+	defer probes.end(id)
+
+	ctx, cancel := context.WithTimeout(ctx, storageProbeBudget(ctx))
 	defer cancel()
 
 	listRes, err := c.Virsh(ctx, "pool-list", "--all")
 	if err != nil {
-		logger.Debug("libvirt host inventory: pool-list unavailable (best-effort)",
-			"host", string(id), "error", err.Error())
-		return 0
+		return fail(storageProblemPoolList, "pool-list failed", "error", err.Error())
 	}
 	if !slices.Contains(parseActivePoolNames(listRes.Stdout), defaultStoragePool) {
-		logger.Debug("libvirt host inventory: no active default storage pool (best-effort)", "host", string(id))
-		return 0
+		return fail(storageProblemInactive, "no active default storage pool")
 	}
 	defRes, err := c.Virsh(ctx, "pool-dumpxml", defaultStoragePool)
 	if err != nil {
-		logger.Warn("libvirt host inventory: cannot read the default storage pool; reporting no allocatable storage",
-			"host", string(id), "pool", defaultStoragePool, "error", err.Error())
-		return 0
+		return fail(storageProblemUnreadable, "cannot read the default storage pool", "error", err.Error())
 	}
 	poolType, dir, err := parseFilesystemPoolDir(defRes.Stdout)
 	if err != nil {
-		logger.Warn("libvirt host inventory: cannot measure the default storage pool; reporting no allocatable storage",
-			"host", string(id), "pool", defaultStoragePool, "type", poolType, "error", err.Error())
-		return 0
+		return fail(storageProblemUnmeasurable, "cannot measure the default storage pool",
+			"type", poolType, "error", err.Error())
 	}
-	if dir != filepath.Clean(defaultPoolRequiredDir) {
-		logger.Warn("libvirt host inventory: the default storage pool is not at the required directory, so creates and "+
-			"imports on this host are refused; reporting no allocatable storage",
-			"host", string(id), "pool", defaultStoragePool, "path", dir, "required", defaultPoolRequiredDir)
-		return 0
-	}
-	statRes, err := c.RunHost(ctx, "stat", "-f", "-c", statfsAvailFormat, "--", dir)
+	required, err := isRequiredPoolDirOn(ctx, hostConnRunner{conn: c}, dir)
 	if err != nil {
-		logger.Warn("libvirt host inventory: free-space measurement of the default storage pool failed; reporting no allocatable storage",
-			"host", string(id), "pool", defaultStoragePool, "dir", dir, "error", err.Error())
-		return 0
+		return fail(storageProblemUnresolved, "cannot resolve the default storage pool's directory",
+			"path", dir, "error", err.Error())
+	}
+	if !required {
+		return fail(storageProblemMisplaced, "the default storage pool is not at the required directory, "+
+			"so creates and imports on this host are refused", "path", dir, "required", defaultPoolRequiredDir)
+	}
+	measured := filepath.Clean(defaultPoolRequiredDir)
+	argv := append(statProbeTimeoutArgv(), "stat", "-f", "-c", statfsAvailFormat, "--", measured)
+	statRes, err := c.RunHost(ctx, argv...)
+	if err != nil {
+		return fail(storageProblemStatFailed, "free-space measurement of the default storage pool failed",
+			"dir", measured, "error", err.Error())
 	}
 	avail, err := parseStatfsAvailBytes(statRes.Stdout)
 	if err != nil {
-		logger.Warn("libvirt host inventory: unexpected free-space measurement of the default storage pool; reporting no allocatable storage",
-			"host", string(id), "pool", defaultStoragePool, "dir", dir, "error", err.Error())
-		return 0
+		return fail(storageProblemStatOdd, "unexpected free-space measurement of the default storage pool",
+			"dir", measured, "error", err.Error())
+	}
+	if probes.noteMeasured(id) {
+		logger.Info("libvirt host inventory: the default storage pool is measured again",
+			"host", string(id), "pool", defaultStoragePool)
 	}
 	return avail
 }
 
+// storageProbeBudget is the time collectStorageBytes may take:
+// hostStorageProbeTimeout, or half of what is left of ctx's deadline when that
+// is less, so the storage probe never eats the whole budget of the
+// GetHostInfo/ListHosts call it is part of.
+func storageProbeBudget(ctx context.Context) time.Duration {
+	budget := hostStorageProbeTimeout
+	if deadline, ok := ctx.Deadline(); ok {
+		if half := time.Until(deadline) / 2; half < budget {
+			budget = half
+		}
+	}
+	return budget
+}
+
+// statProbeTimeoutArgv is the timeout(1) prefix of the inventory's statvfs
+// probe: SIGTERM after statProbeRemoteTimeout, SIGKILL statProbeRemoteKillAfter
+// later. timeout(1) and stat(1) both ship in GNU coreutils, so a host that can
+// run the probe has it.
+func statProbeTimeoutArgv() []string {
+	return []string{"timeout", "--kill-after=" + statProbeRemoteKillAfter, statProbeRemoteTimeout}
+}
+
+// Kinds of storage-probe problem, for logging a problem once per change of
+// state per host (hostStorageProbes.noteProblem).
+const (
+	storageProblemInFlight     = "in-flight"
+	storageProblemPoolList     = "pool-list"
+	storageProblemInactive     = "inactive"
+	storageProblemUnreadable   = "unreadable"
+	storageProblemUnmeasurable = "unmeasurable"
+	storageProblemUnresolved   = "unresolved"
+	storageProblemMisplaced    = "misplaced"
+	storageProblemStatFailed   = "stat-failed"
+	storageProblemStatOdd      = "stat-odd"
+)
+
+// hostStorageProbes is the per-host state of the inventory's storage probe
+// (collectStorageBytes). The zero value is ready to use, and a nil
+// *hostStorageProbes is a valid "no state" (every probe runs, every problem is
+// logged at Warn). Entries are kept for every host id ever probed: a few bytes
+// each, bounded by the inventory's host ids.
+type hostStorageProbes struct {
+	mu    sync.Mutex
+	hosts map[hostconn.HostID]*hostStorageProbeState
+}
+
+// hostStorageProbeState is one host's storage-probe state.
+type hostStorageProbeState struct {
+	// inFlight is true while a probe of the host runs.
+	inFlight bool
+	// problem is the kind of the problem the last probe reported ("" after a
+	// measurement, or before any probe).
+	problem string
+}
+
+// state returns id's state, creating it. The caller holds g.mu.
+func (g *hostStorageProbes) state(id hostconn.HostID) *hostStorageProbeState {
+	if g.hosts == nil {
+		g.hosts = make(map[hostconn.HostID]*hostStorageProbeState)
+	}
+	s, ok := g.hosts[id]
+	if !ok {
+		s = &hostStorageProbeState{}
+		g.hosts[id] = s
+	}
+	return s
+}
+
+// begin marks a probe of id in flight. It returns false — and marks nothing —
+// when one already is: the caller must not probe the host again.
+func (g *hostStorageProbes) begin(id hostconn.HostID) bool {
+	if g == nil {
+		return true
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	s := g.state(id)
+	if s.inFlight {
+		return false
+	}
+	s.inFlight = true
+	return true
+}
+
+// end marks the probe of id begun by begin as returned.
+func (g *hostStorageProbes) end(id hostconn.HostID) {
+	if g == nil {
+		return
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.state(id).inFlight = false
+}
+
+// noteProblem records that the probe of id reported problem kind, and returns
+// whether that is a change (the caller then logs at Warn, else at Debug).
+func (g *hostStorageProbes) noteProblem(id hostconn.HostID, kind string) bool {
+	if g == nil {
+		return true
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	s := g.state(id)
+	changed := s.problem != kind
+	s.problem = kind
+	return changed
+}
+
+// noteMeasured records that the probe of id measured the pool, and returns
+// whether the previous probe had reported a problem.
+func (g *hostStorageProbes) noteMeasured(id hostconn.HostID) bool {
+	if g == nil {
+		return false
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	s := g.state(id)
+	recovered := s.problem != ""
+	s.problem = ""
+	return recovered
+}
+
 // parseFilesystemPoolDir parses a `virsh pool-dumpxml` document (typed
-// libvirtxml.StoragePool) and returns the pool's type and target directory
-// when the pool is filesystem-backed (filesystemPoolTypes). poolType is
+// libvirtxml.StoragePool) and returns the pool's type and target path (as
+// defined, surrounding space trimmed; isRequiredPoolDirOn cleans and resolves
+// it) when the pool is filesystem-backed (filesystemPoolTypes). poolType is
 // returned whenever the document parses, for the caller's log. It is an error
 // when the document does not parse, the pool is of another type (a logical,
 // iSCSI, RBD, ZFS, ... pool's target is not a directory VirtRigaud writes disk
 // files into, and statvfs of it would measure an unrelated filesystem), or the
-// target path is missing, relative or not lexically clean.
+// target path is missing or relative.
 func parseFilesystemPoolDir(poolXML string) (poolType, dir string, err error) {
 	def := &libvirtxml.StoragePool{}
 	if uerr := def.Unmarshal(poolXML); uerr != nil {
@@ -414,17 +579,15 @@ func parseFilesystemPoolDir(poolXML string) (poolType, dir string, err error) {
 	}
 	poolType = def.Type
 	if !slices.Contains(filesystemPoolTypes, poolType) {
-		return poolType, "", fmt.Errorf("pool type %q is not filesystem-backed (want one of %v)", poolType, filesystemPoolTypes)
+		return poolType, "", fmt.Errorf("pool type %q is not filesystem-backed (want one of %v)",
+			clipForLog(poolType), filesystemPoolTypes)
 	}
 	if def.Target == nil {
 		return poolType, "", fmt.Errorf("pool of type %q has no target", poolType)
 	}
 	dir = strings.TrimSpace(def.Target.Path)
-	if trimmed := strings.TrimRight(dir, "/"); trimmed != "" {
-		dir = trimmed
-	}
-	if dir == "" || !filepath.IsAbs(dir) || filepath.Clean(dir) != dir {
-		return poolType, "", fmt.Errorf("pool target path %q is not a usable absolute directory", def.Target.Path)
+	if dir == "" || !filepath.IsAbs(dir) {
+		return poolType, "", fmt.Errorf("pool target path %q is not an absolute directory", clipForLog(def.Target.Path))
 	}
 	return poolType, dir, nil
 }
@@ -435,23 +598,38 @@ func parseFilesystemPoolDir(poolXML string) (poolType, dir string, err error) {
 // their product in bytes. It is strict — exactly two non-negative decimal
 // integers, a positive block size, and no int64 overflow — so an odd or
 // truncated output is an error, never a misread (and possibly huge) number.
+// Host output quoted in an error is clipped (clipForLog).
 func parseStatfsAvailBytes(stdout string) (int64, error) {
 	fields := strings.Fields(stdout)
 	if len(fields) != 2 {
-		return 0, fmt.Errorf("statfs output %q: want 2 fields, got %d", stdout, len(fields))
+		return 0, fmt.Errorf("statfs output %q: want 2 fields, got %d", clipForLog(stdout), len(fields))
 	}
 	avail, err := strconv.ParseInt(fields[0], 10, 64)
 	if err != nil || avail < 0 {
-		return 0, fmt.Errorf("statfs available blocks %q is not a non-negative integer", fields[0])
+		return 0, fmt.Errorf("statfs available blocks %q is not a non-negative integer", clipForLog(fields[0]))
 	}
 	frsize, err := strconv.ParseInt(fields[1], 10, 64)
 	if err != nil || frsize <= 0 {
-		return 0, fmt.Errorf("statfs block size %q is not a positive integer", fields[1])
+		return 0, fmt.Errorf("statfs block size %q is not a positive integer", clipForLog(fields[1]))
 	}
 	if avail > math.MaxInt64/frsize {
 		return 0, fmt.Errorf("statfs free space %d x %d overflows int64", avail, frsize)
 	}
 	return avail * frsize, nil
+}
+
+// clipForLog returns s cut to its first maxLoggedHostOutputBytes bytes (on a
+// rune boundary, with "..." appended when cut), for quoting host output in an
+// error or log line without carrying an arbitrarily long one.
+func clipForLog(s string) string {
+	if len(s) <= maxLoggedHostOutputBytes {
+		return s
+	}
+	cut := maxLoggedHostOutputBytes
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut] + "..."
 }
 
 // parseActivePoolNames parses `virsh pool-list --all` tabular output for the

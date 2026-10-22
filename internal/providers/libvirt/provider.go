@@ -129,6 +129,11 @@ type Provider struct {
 	// the call's context.
 	transferLocks hostLocks
 
+	// hostStorage is the per-host state of the Host inventory's storage probe
+	// (collectStorageBytes, R31): a host whose previous probe has not returned
+	// is not probed again, and a problem is logged at Warn once per change.
+	hostStorage hostStorageProbes
+
 	// createOnHostFn runs the clustered create pipeline over a single leased host
 	// connection (ADR-0007 P1). nil means "use the default",
 	// (*Provider).createOnLeasedHost (narrow the lease to its *virshConn, then run

@@ -171,13 +171,21 @@ func (s *StorageProvider) EnsureDefaultStoragePool(ctx context.Context) error {
 // link, or the required directory is itself a link to it — once both are
 // resolved on the host. A path that cannot be resolved is a retryable error.
 func (s *StorageProvider) isRequiredPoolDir(ctx context.Context, dir string) (bool, error) {
+	return isRequiredPoolDirOn(ctx, s.virshProvider, dir)
+}
+
+// isRequiredPoolDirOn is isRequiredPoolDir on the host behind h. The Host
+// inventory's storage probe (collectStorageBytes) decides with it too, so a
+// host whose pool creates and imports accept is the host whose space the
+// inventory reports.
+func isRequiredPoolDirOn(ctx context.Context, h hostCommandRunner, dir string) (bool, error) {
 	if !strings.HasPrefix(dir, "/") {
 		return false, nil
 	}
 	if filepath.Clean(dir) == filepath.Clean(defaultPoolRequiredDir) {
 		return true, nil
 	}
-	canon, err := canonicalizeOnHost(ctx, s.virshProvider, []string{dir, defaultPoolRequiredDir})
+	canon, err := canonicalizeOnHost(ctx, h, []string{dir, defaultPoolRequiredDir})
 	if err != nil {
 		return false, err
 	}

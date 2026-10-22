@@ -17,6 +17,7 @@ limitations under the License.
 package libvirt
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -28,6 +29,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	golibvirt "github.com/digitalocean/go-libvirt"
 	"github.com/stretchr/testify/assert"
@@ -141,7 +143,7 @@ func labPoolDumpXML() string {
 // the pool directory of labPoolDumpXML (a host command: "!"-prefixed, like
 // runHost).
 func statfsKey() string {
-	return "! stat -f -c %a %S -- " + filepath.Clean(defaultPoolRequiredDir)
+	return "! timeout --kill-after=1s 10s stat -f -c %a %S -- " + filepath.Clean(defaultPoolRequiredDir)
 }
 
 // statfsFixture is `stat -f -c "%a %S" /var/lib/libvirt/images` on the same lab
@@ -189,11 +191,15 @@ type fakeHostConn struct {
 
 func (f *fakeHostConn) HostID() hostconn.HostID { return f.id }
 
-func (f *fakeHostConn) Virsh(_ context.Context, args ...string) (*hostconn.Result, error) {
+func (f *fakeHostConn) Virsh(ctx context.Context, args ...string) (*hostconn.Result, error) {
 	cmd := strings.Join(args, " ")
 	f.mu.Lock()
 	f.calls = append(f.calls, cmd)
 	f.mu.Unlock()
+	// Like the real transport, a done context fails the command.
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	r, ok := f.script[cmd]
 	if !ok {
 		return nil, fmt.Errorf("fakeHostConn: no script for %q", cmd)
@@ -211,6 +217,9 @@ func (f *fakeHostConn) RunHost(ctx context.Context, argv ...string) (*hostconn.R
 	f.mu.Unlock()
 	if f.runHost != nil {
 		return f.runHost(ctx, argv)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 	r, ok := f.script[cmd]
 	if !ok {
@@ -410,7 +419,8 @@ func TestParseFilesystemPoolDir(t *testing.T) {
 		{"lab dir pool", poolDumpXMLDirFixture, "dir", poolDirFixture},
 		{"netfs pool", poolXML("netfs", pathTarget("/var/lib/libvirt/images")), "netfs", "/var/lib/libvirt/images"},
 		{"fs pool", poolXML("fs", pathTarget("/srv/vm")), "fs", "/srv/vm"},
-		{"trailing slash trimmed", poolXML("dir", pathTarget(" /var/lib/libvirt/images/ ")), "dir", "/var/lib/libvirt/images"},
+		{"surrounding space trimmed, path kept as defined", poolXML("dir", pathTarget(" /var/lib/libvirt/images/ ")), "dir", "/var/lib/libvirt/images/"},
+		{"unclean path kept (cleaned and resolved by isRequiredPoolDirOn)", poolXML("dir", pathTarget("/var/lib/../lib/libvirt/images")), "dir", "/var/lib/../lib/libvirt/images"},
 		{"root directory", poolXML("dir", pathTarget("/")), "dir", "/"},
 	}
 	for _, tc := range ok {
@@ -433,7 +443,6 @@ func TestParseFilesystemPoolDir(t *testing.T) {
 		{"no target", poolXML("dir", ""), "dir"},
 		{"empty path", poolXML("dir", pathTarget("")), "dir"},
 		{"relative path", poolXML("dir", pathTarget("images")), "dir"},
-		{"unclean path", poolXML("dir", pathTarget("/var/lib/../lib/libvirt/images")), "dir"},
 		{"not XML", "error: failed to get pool 'default'", ""},
 	}
 	for _, tc := range bad {
@@ -453,7 +462,7 @@ func TestCollectHostInfo_FullRender(t *testing.T) {
 	labels := map[string]string{"zone": "rack-1"}
 
 	got := collectHostInfo(context.Background(), conn, "host-a",
-		"qemu+ssh://virt@host-a/system", labels, slog.Default())
+		"qemu+ssh://virt@host-a/system", labels, slog.Default(), nil)
 
 	assert.Equal(t, "host-a", got.ID)
 	assert.Equal(t, "qemu+ssh://virt@host-a/system", got.Address)
@@ -482,7 +491,7 @@ func TestCollectHostInfo_NodeinfoError_NotReady(t *testing.T) {
 	}
 	labels := map[string]string{"zone": "rack-9"}
 
-	got := collectHostInfo(context.Background(), conn, "host-down", "qemu+ssh://virt@host-down/system", labels, slog.Default())
+	got := collectHostInfo(context.Background(), conn, "host-down", "qemu+ssh://virt@host-down/system", labels, slog.Default(), nil)
 
 	assert.Equal(t, contracts.HostHealthNotReady, got.Health)
 	// Metadata the registry knows is still reported for a down host.
@@ -511,7 +520,7 @@ func TestCollectHostInfo_BestEffortDegrades(t *testing.T) {
 		},
 	}
 
-	got := collectHostInfo(context.Background(), conn, "host-partial", "addr", nil, slog.Default())
+	got := collectHostInfo(context.Background(), conn, "host-partial", "addr", nil, slog.Default(), nil)
 
 	assert.Equal(t, contracts.HostHealthReady, got.Health)
 	assert.Equal(t, int32(8), got.AllocatableCPU)
@@ -563,21 +572,29 @@ func TestCollectStorageBytes_FailsClosed(t *testing.T) {
 		{name: "relative target path", wantNoRun: true, override: map[string]fakeVirshResult{
 			"pool-dumpxml default": {stdout: "<pool type='dir'><name>default</name><target><path>images</path></target></pool>"},
 		}},
-		// A default pool that is not at the required directory: creates and
-		// imports there are refused (errDefaultPoolMisplaced,
-		// HOST_STORAGE_MISCONFIGURED), so it has no allocatable space — even
-		// though its own directory has room, and without a host command.
+		// A default pool that is not at the required directory, even once
+		// resolved on the host: creates and imports there are refused
+		// (errDefaultPoolMisplaced, HOST_STORAGE_MISCONFIGURED), so it has no
+		// allocatable space — even though its own directory has room.
 		{name: "pool misplaced", wantNoRun: true, override: map[string]fakeVirshResult{
-			"pool-dumpxml default": {stdout: strings.Replace(labPoolDumpXML(), "<path>"+defaultPoolRequiredDir+"</path>",
-				"<path>/srv/other-images</path>", 1)},
-			"! stat -f -c %a %S -- /srv/other-images": {stdout: statfsFixture},
+			"pool-dumpxml default":                      {stdout: poolDumpXMLAt("/srv/other-images")},
+			realpathKey("/srv/other-images"):            {stdout: nulList("/srv/other-images", defaultPoolRequiredDir)},
+			"! " + statProbeKeyFor("/srv/other-images"): {stdout: statfsFixture},
 		}},
 		{name: "pool at a parent of the required directory", wantNoRun: true, override: map[string]fakeVirshResult{
-			"pool-dumpxml default": {stdout: strings.Replace(labPoolDumpXML(), "<path>"+defaultPoolRequiredDir+"</path>",
-				"<path>"+filepath.Dir(defaultPoolRequiredDir)+"</path>", 1)},
+			"pool-dumpxml default": {stdout: poolDumpXMLAt(filepath.Dir(defaultPoolRequiredDir))},
+			realpathKey(filepath.Dir(defaultPoolRequiredDir)): {
+				stdout: nulList(filepath.Dir(defaultPoolRequiredDir), defaultPoolRequiredDir)},
+		}},
+		{name: "pool directory cannot be resolved", wantNoRun: true, override: map[string]fakeVirshResult{
+			"pool-dumpxml default":      {stdout: poolDumpXMLAt("/srv/vm-link")},
+			realpathKey("/srv/vm-link"): {err: errors.New("ssh: connection lost")},
 		}},
 		{name: "pool-list fails", wantNoRun: true, override: map[string]fakeVirshResult{
 			"pool-list --all": {err: errors.New("boom")},
+		}},
+		{name: "default pool inactive", wantNoRun: true, override: map[string]fakeVirshResult{
+			"pool-list --all": {stdout: " Name    State    Autostart\n-------\n default inactive no\n"},
 		}},
 	}
 	for _, tc := range cases {
@@ -588,21 +605,98 @@ func TestCollectStorageBytes_FailsClosed(t *testing.T) {
 			}
 			conn := &fakeHostConn{id: "host-x", script: script}
 
-			got := collectHostInfo(context.Background(), conn, "host-x", "addr", nil, slog.Default())
+			got := collectHostInfo(context.Background(), conn, "host-x", "addr", nil, slog.Default(), nil)
 
 			assert.Equal(t, contracts.HostHealthReady, got.Health, "storage never gates health")
 			assert.Zero(t, got.AllocatableStorage, "an unmeasurable pool reports 0 (fail closed), never libvirt's cached value")
 			if tc.wantNoRun {
-				assert.NotContains(t, conn.commands(), statfsKey())
+				for _, cmd := range conn.commands() {
+					assert.NotContains(t, cmd, "stat -f", "the free space is not measured")
+				}
 			}
 		})
 	}
 }
 
-// TestCollectStorageBytes_TimeoutFailsClosed proves the measurement runs under
-// a bounded context (hostStorageProbeTimeout at most) and that a statvfs which
-// hangs — statfs on a dead hard-mounted NFS export blocks — is abandoned when
-// that context ends, reporting 0.
+// poolDumpXMLAt is the lab capture with its pool at dir.
+func poolDumpXMLAt(dir string) string {
+	return strings.Replace(poolDumpXMLDirFixture, "<path>"+poolDirFixture+"</path>", "<path>"+dir+"</path>", 1)
+}
+
+// realpathKey is the fakeHostConn script key of isRequiredPoolDirOn's
+// resolution of the pool directory dir and the required directory.
+func realpathKey(dir string) string {
+	return "! realpath -m -z -- " + dir + " " + defaultPoolRequiredDir
+}
+
+// statProbeKeyFor is the inventory's statvfs probe of dir, without the "! ".
+func statProbeKeyFor(dir string) string {
+	return "timeout --kill-after=1s 10s stat -f -c %a %S -- " + dir
+}
+
+// nulList is realpath -z output for paths.
+func nulList(paths ...string) string {
+	return strings.Join(paths, "\x00") + "\x00"
+}
+
+// TestCollectStorageBytes_PoolDirDecidedLikeCreate pins #417 M1: the pool
+// directory is accepted exactly when creates and imports accept it
+// (isRequiredPoolDirOn) — lexically after cleaning (no host command), or once
+// resolved on the host (a symbolic link) — and the required directory is
+// what is measured.
+func TestCollectStorageBytes_PoolDirDecidedLikeCreate(t *testing.T) {
+	parent, base := filepath.Dir(defaultPoolRequiredDir), filepath.Base(defaultPoolRequiredDir)
+
+	t.Run("unclean path naming the required directory", func(t *testing.T) {
+		script := fullHostScript()
+		script["pool-dumpxml default"] = fakeVirshResult{stdout: poolDumpXMLAt(parent + "/x/../" + base + "/")}
+		conn := &fakeHostConn{id: "h", script: script}
+
+		assert.Equal(t, statfsFixtureBytes, collectStorageBytes(context.Background(), conn, "h", slog.Default(), nil))
+		assert.Equal(t, []string{"pool-list --all", "pool-dumpxml default", statfsKey()}, conn.commands(),
+			"a lexical match needs no host command")
+	})
+
+	t.Run("symbolic link resolving to the required directory", func(t *testing.T) {
+		script := fullHostScript()
+		script["pool-dumpxml default"] = fakeVirshResult{stdout: poolDumpXMLAt("/srv/vm-link")}
+		script[realpathKey("/srv/vm-link")] = fakeVirshResult{stdout: nulList(defaultPoolRequiredDir, defaultPoolRequiredDir)}
+		conn := &fakeHostConn{id: "h", script: script}
+
+		assert.Equal(t, statfsFixtureBytes, collectStorageBytes(context.Background(), conn, "h", slog.Default(), nil))
+		assert.Equal(t, []string{"pool-list --all", "pool-dumpxml default", realpathKey("/srv/vm-link"), statfsKey()},
+			conn.commands(), "resolved on the host, then the required directory is measured")
+	})
+}
+
+// TestCollectStorageBytes_BudgetIsHostStorageProbeTimeout pins #417 M2: with
+// no caller deadline the whole probe runs under exactly
+// hostStorageProbeTimeout.
+func TestCollectStorageBytes_BudgetIsHostStorageProbeTimeout(t *testing.T) {
+	conn := &fakeHostConn{id: "host-a", script: fullHostScript()}
+	var deadline time.Time
+	var hasDeadline bool
+	conn.runHost = func(ctx context.Context, _ []string) (*hostconn.Result, error) {
+		deadline, hasDeadline = ctx.Deadline()
+		return nil, errors.New("stat: interrupted")
+	}
+
+	start := time.Now()
+	got := collectStorageBytes(context.Background(), conn, "host-a", slog.Default(), nil)
+	end := time.Now()
+
+	assert.Zero(t, got)
+	require.True(t, hasDeadline, "the statvfs must run under a deadline")
+	assert.True(t, deadline.After(start.Add(hostStorageProbeTimeout-time.Second)),
+		"deadline %v is not about hostStorageProbeTimeout after %v", deadline, start)
+	assert.False(t, deadline.After(end.Add(hostStorageProbeTimeout)),
+		"deadline %v is more than hostStorageProbeTimeout after %v", deadline, end)
+}
+
+// TestCollectStorageBytes_TimeoutFailsClosed: a statvfs that hangs — statfs on
+// a dead hard-mounted NFS export blocks — is abandoned when the budget ends,
+// reporting 0. Under a short caller deadline the budget is half of it (#417
+// L4), so the probe really expires here.
 func TestCollectStorageBytes_TimeoutFailsClosed(t *testing.T) {
 	conn := &fakeHostConn{id: "host-hung", script: fullHostScript()}
 	var deadline time.Time
@@ -613,15 +707,170 @@ func TestCollectStorageBytes_TimeoutFailsClosed(t *testing.T) {
 		return nil, ctx.Err()
 	}
 
-	start := time.Now()
-	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
-	got := collectStorageBytes(ctx, conn, "host-hung", slog.Default())
+	callerDeadline, _ := ctx.Deadline()
+	got := collectStorageBytes(ctx, conn, "host-hung", slog.Default(), nil)
 
 	assert.Zero(t, got)
 	require.True(t, hasDeadline, "the statvfs must run under a deadline")
-	assert.False(t, deadline.After(start.Add(hostStorageProbeTimeout)),
-		"the probe deadline is at most hostStorageProbeTimeout away")
+	assert.True(t, deadline.Before(callerDeadline.Add(-90*time.Millisecond)),
+		"the budget is about half of the caller's remaining 200ms (probe %v, caller %v)", deadline, callerDeadline)
+	assert.NoError(t, ctx.Err(), "the probe gave up before the caller's own deadline")
+}
+
+// TestStorageProbeBudget pins #417 L4: hostStorageProbeTimeout, capped at half
+// of the caller's remaining time.
+func TestStorageProbeBudget(t *testing.T) {
+	assert.Equal(t, hostStorageProbeTimeout, storageProbeBudget(context.Background()))
+
+	long, cancelLong := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancelLong()
+	assert.Equal(t, hostStorageProbeTimeout, storageProbeBudget(long))
+
+	// GetHostInfo's 30 s client timeout: the probe takes at most half.
+	short, cancelShort := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancelShort()
+	b := storageProbeBudget(short)
+	assert.LessOrEqual(t, b, 10*time.Second)
+	assert.Greater(t, b, 9*time.Second)
+
+	expired, cancelExpired := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancelExpired()
+	assert.LessOrEqual(t, storageProbeBudget(expired), time.Duration(0))
+}
+
+// TestCollectStorageBytes_CancelledCallerFailsClosed (#417 L5): a caller that
+// gave up (cancelled, not expired) gets 0, not a measurement.
+func TestCollectStorageBytes_CancelledCallerFailsClosed(t *testing.T) {
+	conn := &fakeHostConn{id: "host-a", script: fullHostScript()}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	assert.Zero(t, collectStorageBytes(ctx, conn, "host-a", slog.Default(), nil))
+	assert.NotContains(t, conn.commands(), statfsKey())
+}
+
+// TestCollectStorageBytes_InFlightGuard pins #417 M3: while one storage probe
+// of a host has not returned, another probe of that host is not started
+// (reports 0, runs no command) — other hosts are not held up — and each
+// problem is logged at Warn when it starts for a host, at Debug while it
+// lasts.
+func TestCollectStorageBytes_InFlightGuard(t *testing.T) {
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	probes := &hostStorageProbes{}
+
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	first := &fakeHostConn{id: "h", script: fullHostScript()}
+	first.runHost = func(ctx context.Context, _ []string) (*hostconn.Result, error) {
+		close(entered)
+		select {
+		case <-release:
+			return &hostconn.Result{Stdout: statfsFixture}, nil
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	done := make(chan int64, 1)
+	go func() { done <- collectStorageBytes(context.Background(), first, "h", logger, probes) }()
+	<-entered
+
+	for range 3 {
+		second := &fakeHostConn{id: "h", script: fullHostScript()}
+		assert.Zero(t, collectStorageBytes(context.Background(), second, "h", logger, probes))
+		assert.Empty(t, second.commands(), "a host whose probe is in flight is not probed again")
+	}
+	other := &fakeHostConn{id: "h2", script: fullHostScript()}
+	assert.Equal(t, statfsFixtureBytes, collectStorageBytes(context.Background(), other, "h2", logger, probes),
+		"another host is not held up")
+
+	close(release)
+	assert.Equal(t, statfsFixtureBytes, <-done)
+
+	third := &fakeHostConn{id: "h", script: fullHostScript()}
+	assert.Equal(t, statfsFixtureBytes, collectStorageBytes(context.Background(), third, "h", logger, probes),
+		"once the probe returned, the host is probed again")
+
+	out := logs.String()
+	assert.Equal(t, 1, strings.Count(out, "level=WARN"), "one Warn for the in-flight skips:\n%s", out)
+	assert.Equal(t, 3, strings.Count(out, "has not returned"), "one Warn, then Debug:\n%s", out)
+	assert.Equal(t, 1, strings.Count(out, "measured again"), "the recovery is logged once:\n%s", out)
+}
+
+// TestCollectStorageBytes_WarnOncePerProblem (#417 L3): a problem that lasts
+// logs one Warn, a different problem another, and a measurement in between
+// re-arms it.
+func TestCollectStorageBytes_WarnOncePerProblem(t *testing.T) {
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	probes := &hostStorageProbes{}
+	probe := func(override map[string]fakeVirshResult) int64 {
+		script := fullHostScript()
+		for k, v := range override {
+			script[k] = v
+		}
+		return collectStorageBytes(context.Background(), &fakeHostConn{id: "h", script: script}, "h", logger, probes)
+	}
+	misplaced := map[string]fakeVirshResult{
+		"pool-dumpxml default":           {stdout: poolDumpXMLAt("/srv/other-images")},
+		realpathKey("/srv/other-images"): {stdout: nulList("/srv/other-images", defaultPoolRequiredDir)},
+	}
+	statFails := map[string]fakeVirshResult{statfsKey(): {err: errors.New("exit status 124")}}
+
+	for range 3 {
+		assert.Zero(t, probe(misplaced))
+	}
+	assert.Equal(t, 1, strings.Count(logs.String(), "level=WARN"))
+	for range 2 {
+		assert.Zero(t, probe(statFails))
+	}
+	assert.Equal(t, 2, strings.Count(logs.String(), "level=WARN"), "a different problem warns again")
+	assert.Equal(t, statfsFixtureBytes, probe(nil))
+	assert.Zero(t, probe(statFails))
+	assert.Equal(t, 3, strings.Count(logs.String(), "level=WARN"), "a problem after a measurement warns again")
+	assert.Equal(t, 3, strings.Count(logs.String(), "path=/srv/other-images"), "Debug repeats carry the attributes too")
+}
+
+// TestParseStatfsAvailBytes_ClipsQuotedOutput (#417 L3): host output quoted
+// in an error is clipped.
+func TestParseStatfsAvailBytes_ClipsQuotedOutput(t *testing.T) {
+	_, err := parseStatfsAvailBytes(strings.Repeat("x", 10_000) + " y z")
+	require.Error(t, err)
+	assert.Less(t, len(err.Error()), maxLoggedHostOutputBytes+100)
+	assert.Contains(t, err.Error(), "...")
+
+	assert.Equal(t, "short", clipForLog("short"))
+	clipped := clipForLog(strings.Repeat("é", maxLoggedHostOutputBytes))
+	assert.True(t, utf8.ValidString(clipped), "clipped on a rune boundary")
+}
+
+// staticRunner is a hostCommandRunner answering every command with stdout.
+type staticRunner struct{ stdout string }
+
+func (r staticRunner) runVirshCommand(_ context.Context, _ ...string) (*VirshResult, error) {
+	return &VirshResult{Stdout: r.stdout}, nil
+}
+
+// TestHostFreeBytes_Strict (#417 L5): the import-time free-space check shares
+// the strict parser — trailing junk and an overflowing product are refused.
+func TestHostFreeBytes_Strict(t *testing.T) {
+	got, err := hostFreeBytes(context.Background(), staticRunner{stdout: statfsFixture}, "/x")
+	require.NoError(t, err)
+	assert.Equal(t, statfsFixtureBytes, got)
+
+	for name, out := range map[string]string{
+		"trailing junk": "507261 1048576 junk\n",
+		"overflow":      "9223372036854775807 4096\n",
+		"negative":      "-1 4096\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			got, err := hostFreeBytes(context.Background(), staticRunner{stdout: out}, "/x")
+			require.Error(t, err)
+			assert.Zero(t, got)
+		})
+	}
 }
 
 // TestCollectStorageBytes_NetfsAndFsPoolsMeasured: every filesystem-backed pool
@@ -634,7 +883,7 @@ func TestCollectStorageBytes_NetfsAndFsPoolsMeasured(t *testing.T) {
 				"<available unit='bytes'>1</available><target><path>" + defaultPoolRequiredDir + "/</path></target></pool>"}
 			conn := &fakeHostConn{id: "host-fs", script: script}
 
-			assert.Equal(t, statfsFixtureBytes, collectStorageBytes(context.Background(), conn, "host-fs", slog.Default()))
+			assert.Equal(t, statfsFixtureBytes, collectStorageBytes(context.Background(), conn, "host-fs", slog.Default(), nil))
 		})
 	}
 }
@@ -642,7 +891,7 @@ func TestCollectStorageBytes_NetfsAndFsPoolsMeasured(t *testing.T) {
 // TestCollectStorageBytes_ProductionPoolDir runs the unmodified lab capture
 // against the production required directory (DefaultImageDir, which this test
 // binary otherwise replaces with a fixture directory): a default pool at
-// /var/lib/libvirt/images is measured; one anywhere else reports 0.
+// /var/lib/libvirt/images is measured; one that resolves elsewhere reports 0.
 func TestCollectStorageBytes_ProductionPoolDir(t *testing.T) {
 	prev := defaultPoolRequiredDir
 	defaultPoolRequiredDir = DefaultImageDir
@@ -651,14 +900,16 @@ func TestCollectStorageBytes_ProductionPoolDir(t *testing.T) {
 	script := fullHostScript()
 	script["pool-dumpxml default"] = fakeVirshResult{stdout: poolDumpXMLDirFixture}
 	conn := &fakeHostConn{id: "dome3", script: script}
-	assert.Equal(t, statfsFixtureBytes, collectStorageBytes(context.Background(), conn, "dome3", slog.Default()))
-	assert.Contains(t, conn.commands(), "! stat -f -c %a %S -- /var/lib/libvirt/images")
+	assert.Equal(t, statfsFixtureBytes, collectStorageBytes(context.Background(), conn, "dome3", slog.Default(), nil))
+	assert.Contains(t, conn.commands(), "! timeout --kill-after=1s 10s stat -f -c %a %S -- /var/lib/libvirt/images")
 
-	script["pool-dumpxml default"] = fakeVirshResult{stdout: strings.Replace(poolDumpXMLDirFixture,
-		"<path>/var/lib/libvirt/images</path>", "<path>/var/lib/libvirt/images-nfs</path>", 1)}
+	script["pool-dumpxml default"] = fakeVirshResult{stdout: poolDumpXMLAt("/var/lib/libvirt/images-nfs")}
+	script["! realpath -m -z -- /var/lib/libvirt/images-nfs /var/lib/libvirt/images"] = fakeVirshResult{
+		stdout: nulList("/var/lib/libvirt/images-nfs", "/var/lib/libvirt/images")}
 	moved := &fakeHostConn{id: "dome3", script: script}
-	assert.Zero(t, collectStorageBytes(context.Background(), moved, "dome3", slog.Default()))
-	assert.Equal(t, []string{"pool-list --all", "pool-dumpxml default"}, moved.commands())
+	assert.Zero(t, collectStorageBytes(context.Background(), moved, "dome3", slog.Default(), nil))
+	assert.Equal(t, []string{"pool-list --all", "pool-dumpxml default",
+		"! realpath -m -z -- /var/lib/libvirt/images-nfs /var/lib/libvirt/images"}, moved.commands())
 }
 
 // TestCollectHostInfo_OnlyDefaultPoolCounts pins #416 M3: space in any other
@@ -674,7 +925,7 @@ func TestCollectHostInfo_OnlyDefaultPoolCounts(t *testing.T) {
 	}
 	conn := &fakeHostConn{id: "host-data", script: script}
 
-	got := collectHostInfo(context.Background(), conn, "host-data", "addr", nil, slog.Default())
+	got := collectHostInfo(context.Background(), conn, "host-data", "addr", nil, slog.Default(), nil)
 
 	assert.Equal(t, contracts.HostHealthReady, got.Health)
 	assert.Zero(t, got.AllocatableStorage)
