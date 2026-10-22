@@ -31,6 +31,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/event"
@@ -206,8 +207,10 @@ const (
 		"is in the manager log): an administrator must fix the host. The import is retried with a backoff"
 	routedImportHostMovedMessage = "The ImportDisk was sent to the target's pending host but its outcome is unknown, " +
 		"and the target VirtualMachine's pending host has changed since: the import is sent only to the host it was " +
-		"first sent to. Check that host for the disk landed for the target VirtualMachine (ending in -migrated) and " +
-		"remove it, then set the target's pending host back or confirm the attempt as not performed"
+		"first sent to. Either set the target's pending host back, or check that host for the disk landed for the " +
+		"target VirtualMachine (ending in -migrated), remove it, and confirm the attempt as not performed (" +
+		operationOutcomeAnnotation + "=" + operationOutcomeNotPerformedPrefix + "<attempt id>, the lastTransitionTime of the " +
+		migrationConditionImportRequested + " condition): the import is then sent to the current pending host"
 	targetHostMovedMessage = "the target VirtualMachine's pending host is not the host its disk was imported to, so " +
 		"the disk is not recorded on it (a VM created there would have no disk). An administrator must set the " +
 		"target's status.placement.pendingHost back to the host recorded in status.storageInfo.importTarget.host, or " +
@@ -579,7 +582,12 @@ func (r *VMMigrationReconciler) routedImportTarget(ctx context.Context, migratio
 	}
 	// B4: a re-send goes to the host the first send was recorded for, never
 	// to a pending host that differs from it.
-	if recorded := recordedImportHost(migration); recorded != "" && recorded != host && migrationRequested(migration, longOpImport) {
+	// An operator's confirmation that the attempt left nothing behind
+	// (operationOutcomeAnnotation, #416 M4) releases that rule: the import is
+	// then sent, as a confirmed attempt, to the current pending host, which is
+	// recorded in importTarget.host before the marker.
+	if recorded := recordedImportHost(migration); recorded != "" && recorded != host && migrationRequested(migration, longOpImport) &&
+		!operationOutcomeConfirmed(migration.Annotations, requestMarkerAttemptID(migration.Status.Conditions, migrationConditionImportRequested)) {
 		attempt := requestMarkerAttemptID(migration.Status.Conditions, migrationConditionImportRequested)
 		res, err = r.holdMigrationOutcomeUnknown(ctx, migration, longOpImport, attempt, routedImportHostMovedMessage,
 			requestMarkerRecheckInterval)
@@ -677,45 +685,73 @@ func (r *VMMigrationReconciler) holdRoutedImport(ctx context.Context, migration 
 		blockedRetryMin, blockedRetryMax)}, nil
 }
 
-// releaseTargetPendingHost is the B1.2 release on a definite import name
-// conflict: in one checked status write on the migration's OWN target VM —
-// re-read live, still unbound and pending on host — pendingHost is cleared
-// and host is added to excludedHosts (A2 slice 2), with Placed=False/
-// HostExcluded. Nothing was landed there. The migration then waits for the
-// VM to be placed again (TargetPlaced=False/TargetHostReleased). A lost write
-// leaves the VM on host: the next import is refused the same way and the
-// release is retried.
+// releaseTargetPendingHost is the B1.2 release on a definite pre-write
+// refusal of the landing host (nothing was landed there).
+//
+//  1. The migration is persisted first (#416 M1): the import marker removed
+//     (by the caller), TargetPlaced=False/TargetHostReleased, and the record
+//     of this send forgotten — importTarget.host cleared (it would pin the
+//     re-placed target to host) and LandedDiskCleanup removed (nothing landed).
+//     A failed write returns the error; nothing else was changed.
+//  2. Then, in one checked status write on the migration's OWN target VM —
+//     re-read live, still unbound and pending on host, retried in place on a
+//     conflict — pendingHost is cleared and host added to excludedHosts (A2
+//     slice 2), with Placed=False/HostExcluded.
+//
+// A failure between the two leaves the VM pending on host while the
+// migration waits for re-placement: the next Importing reconcile finds the VM
+// still pending, sends the import to host again, gets the same refusal and
+// releases it again, so it heals itself. When the exclusion list was full
+// and had to drop its oldest entry, the next attempt waits
+// vmCreateConflictRetryInterval, as slice 2 does (#416 L2).
 //
 // placedFmt is the target's Placed message (with %s for the host) and msg the
 // migration's constant TargetPlaced message.
 func (r *VMMigrationReconciler) releaseTargetPendingHost(ctx context.Context, migration *infrav1beta1.VMMigration, host,
 	placedFmt, msg string) (ctrl.Result, error) {
-	vm, err := r.liveOwnedTargetVM(ctx, migration)
-	if err != nil {
+	if t := migration.Status.StorageInfo; t != nil && t.ImportTarget != nil {
+		t.ImportTarget.Host = ""
+	}
+	meta.RemoveStatusCondition(&migration.Status.Conditions, migrationConditionLandedDiskCleanup)
+	setMigrationCondition(migration, migrationConditionTargetPlaced, metav1.ConditionFalse, migrationReasonTargetHostReleased, msg)
+	migration.Status.Message = msg
+	if err := r.updateStatus(ctx, migration); err != nil {
 		return ctrl.Result{}, err
 	}
-	if vm == nil || !migrationOwnsTargetVM(migration, vm) {
-		// The next Importing reconcile decides it (gone, or not ours).
-		return ctrl.Result{RequeueAfter: migrationPhaseAdvanceRequeue}, nil
-	}
-	if vm.Status.ID == "" && pendingHost(vm) == host {
+
+	released, dropped := false, false
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		vm, err := r.liveOwnedTargetVM(ctx, migration)
+		if err != nil {
+			return err
+		}
+		if vm == nil || !migrationOwnsTargetVM(migration, vm) || vm.Status.ID != "" || pendingHost(vm) != host {
+			// Gone, not ours, bound, or already moved: nothing to release
+			// (the next Importing reconcile decides it).
+			return nil
+		}
 		pl := vm.Status.Placement
-		excludeHost(pl, host)
+		dropped = excludeHost(pl, host)
 		pl.PendingHost = ""
 		pl.PendingResources = nil
 		setPlacedCondition(vm, metav1.ConditionFalse, conditions.ReasonHostExcluded, fmt.Sprintf(placedFmt, host))
 		applyDerivedPhase(vm)
 		if err := r.Status().Update(ctx, vm); err != nil {
-			if apierrors.IsConflict(err) {
-				logging.FromContext(ctx).Info("Target pending-host release lost a resourceVersion race; the import is retried on the same host",
-					"host", host)
-				return ctrl.Result{RequeueAfter: migrationPhaseAdvanceRequeue}, nil
-			}
-			return ctrl.Result{}, fmt.Errorf("release pending host %s of target VirtualMachine %s/%s: %w", host, vm.Namespace, vm.Name, err)
+			return err
 		}
+		released = true
+		return nil
+	})
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("release pending host %s of the migration's target VirtualMachine: %w", host, err)
+	}
+	if released {
 		r.Recorder.Event(migration, corev1.EventTypeNormal, eventReasonTargetHostReleased, msg)
 	}
-	return r.waitForTargetPlacement(ctx, migration, true, migrationReasonTargetHostReleased, msg), nil
+	if dropped {
+		return ctrl.Result{RequeueAfter: vmCreateConflictRetryInterval}, nil
+	}
+	return ctrl.Result{RequeueAfter: blockedRetryMin}, nil
 }
 
 // handleRoutedImportPrecondition decides a routed import the landing host
