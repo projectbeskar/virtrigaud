@@ -648,25 +648,25 @@ func (r *VMMigrationReconciler) routedImportTarget(ctx context.Context, migratio
 func (r *VMMigrationReconciler) handleRoutedImportRefusal(ctx context.Context, migration *infrav1beta1.VMMigration,
 	host string, cause error) (ctrl.Result, bool, error) {
 	logger := logging.FromContext(ctx)
-	switch {
-	case contracts.IsHostUnavailable(cause) || contracts.IsVMDiskCheckFailed(cause):
+	switch routedRefusalAction(cause) {
+	case routedActionWaitHost:
 		logger.Info("Routed import not performed: a host could not be reached or checked; waiting", "host", host, "error", cause.Error())
 		res, err := r.holdRoutedImport(ctx, migration, migrationReasonTargetHostUnavailable, targetHostUnavailableMessage)
 		return res, true, err
-	case contracts.IsVMPreviousIncarnation(cause):
+	case routedActionHoldPreviousIncarnation:
 		logger.Info("Routed import refused: a previous incarnation of the target is on the landing host", "host", host, "error", cause.Error())
 		res, err := r.holdRoutedImport(ctx, migration, migrationReasonImportTargetPreviousIncarnation, importTargetPreviousIncarnationMessage)
 		return res, true, err
-	case contracts.IsVMDiskInUse(cause):
+	case routedActionHoldDiskInUse:
 		logger.Info("Routed import refused: the landing disk is in use on a host of the provider", "host", host, "error", cause.Error())
 		res, err := r.holdRoutedImport(ctx, migration, migrationReasonLandingDiskInUse, landingDiskInUseMessage)
 		return res, true, err
-	case routedImportNameConflict(cause):
+	case routedActionRelease:
 		logger.Info("Routed import refused: a foreign domain with the target's name is on the landing host; releasing it",
 			"host", host, "error", cause.Error())
 		res, err := r.releaseTargetPendingHost(ctx, migration, host, targetPlacedNameConflictFmt, targetHostReleasedMessage)
 		return res, true, err
-	case contracts.IsNothingDone(cause):
+	case routedActionNotPerformed:
 		// Not performed (VM_OPERATION_FAILED: the landing lock busy, the same
 		// import still running, no room, a write command that failed): retried
 		// on the same host with a backoff.
@@ -692,6 +692,42 @@ func (r *VMMigrationReconciler) handleRoutedImportRefusal(ctx context.Context, m
 		return res, true, err
 	}
 	return ctrl.Result{}, false, nil
+}
+
+// Actions on a routed import's definite refusal (routedRefusalAction).
+const (
+	// routedActionNone: not a routed-import case; the caller fails the attempt.
+	routedActionNone = ""
+	// routedActionWaitHost: HOST_UNAVAILABLE or VM_DISK_CHECK_FAILED.
+	routedActionWaitHost = "wait-host"
+	// routedActionHoldPreviousIncarnation: VM_PREVIOUS_INCARNATION.
+	routedActionHoldPreviousIncarnation = "hold-previous-incarnation"
+	// routedActionHoldDiskInUse: VM_DISK_IN_USE.
+	routedActionHoldDiskInUse = "hold-disk-in-use"
+	// routedActionRelease: a plain AlreadyExists (B1.2 release).
+	routedActionRelease = "release"
+	// routedActionNotPerformed: Unavailable + VM_OPERATION_FAILED.
+	routedActionNotPerformed = "not-performed"
+)
+
+// routedRefusalAction classifies a routed import's definite answer (one
+// providerCallOutcomeKnownFor accepted) into what handleRoutedImportRefusal
+// does with it; routedActionNone leaves it to the caller (a failure, or a
+// disk-size refusal handled before).
+func routedRefusalAction(err error) string {
+	switch {
+	case contracts.IsHostUnavailable(err) || contracts.IsVMDiskCheckFailed(err):
+		return routedActionWaitHost
+	case contracts.IsVMPreviousIncarnation(err):
+		return routedActionHoldPreviousIncarnation
+	case contracts.IsVMDiskInUse(err):
+		return routedActionHoldDiskInUse
+	case routedImportNameConflict(err):
+		return routedActionRelease
+	case contracts.IsNothingDone(err):
+		return routedActionNotPerformed
+	}
+	return routedActionNone
 }
 
 // routedImportNameConflict reports whether a routed import's refusal is the

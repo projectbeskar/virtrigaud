@@ -699,46 +699,35 @@ var _ = Describe("Migration into a clustered provider (ADR-0007 Addendum B, envt
 				To(Equal(migrationReasonImportOutcomeUnknown))
 		}, "60s", "250ms").Should(Succeed())
 
-		By("an administrator moves the target's pending host: the re-send is held")
+		By("an administrator moves the target's pending host: nothing is sent there on its own")
 		Expect(retry.RetryOnConflict(retry.DefaultRetry, func() error {
 			vm := f.getTarget(Default)
 			vm.Status.Placement.PendingHost = "kvm-02"
 			return k8sClient.Status().Update(ctx, vm)
 		})).To(Succeed())
-		confirm := func() {
-			Expect(retry.RetryOnConflict(retry.DefaultRetry, func() error {
-				m := f.getMigration(Default)
-				if m.Annotations == nil {
-					m.Annotations = map[string]string{}
-				}
-				m.Annotations[operationOutcomeAnnotation] = operationOutcomeNotPerformedPrefix +
-					requestMarkerAttemptID(m.Status.Conditions, migrationConditionImportRequested)
-				return k8sClient.Update(ctx, m)
-			})).To(Succeed())
-		}
-		confirm()
-		Eventually(func(g Gomega) {
-			m := f.getMigration(g)
-			c := meta.FindStatusCondition(m.Status.Conditions, infravirtrigaudiov1beta1.VMMigrationConditionReady)
-			g.Expect(c).NotTo(BeNil())
-			g.Expect(c.Message).To(Equal(routedImportHostMovedMessage))
-		}, "30s", "250ms").Should(Succeed())
-		_, imports, _, _ := prov.snapshot()
-		Expect(imports).To(HaveLen(1), "nothing sent to the moved host")
+		Consistently(func(g Gomega) {
+			_, imports, _, _ := prov.snapshot()
+			g.Expect(imports).To(HaveLen(1), "nothing sent to the moved host")
+		}, "3s", "250ms").Should(Succeed())
 
-		By("the pending host is set back: the re-send goes to the recorded host")
+		By("the operator confirms the attempt as not performed: the import goes to the current pending host (#416 M4)")
 		Expect(retry.RetryOnConflict(retry.DefaultRetry, func() error {
-			vm := f.getTarget(Default)
-			vm.Status.Placement.PendingHost = "kvm-01"
-			return k8sClient.Status().Update(ctx, vm)
+			m := f.getMigration(Default)
+			if m.Annotations == nil {
+				m.Annotations = map[string]string{}
+			}
+			m.Annotations[operationOutcomeAnnotation] = operationOutcomeNotPerformedPrefix +
+				requestMarkerAttemptID(m.Status.Conditions, migrationConditionImportRequested)
+			return k8sClient.Update(ctx, m)
 		})).To(Succeed())
 		Eventually(func(g Gomega) {
 			g.Expect(f.getMigration(g).Status.Phase).To(Equal(infravirtrigaudiov1beta1.MigrationPhaseReady))
 		}, "60s", "250ms").Should(Succeed())
 		_, imports, creates, _ := prov.snapshot()
 		Expect(imports).To(HaveLen(2))
-		Expect(imports[1].TargetHostID).To(Equal("kvm-01"))
-		Expect(creates[len(creates)-1].TargetHostID).To(Equal("kvm-01"))
+		Expect(imports[1].TargetHostID).To(Equal("kvm-02"))
+		Expect(f.getMigration(Default).Status.StorageInfo.ImportTarget.Host).To(Equal("kvm-02"), "re-recorded before the send")
+		Expect(creates[len(creates)-1].TargetHostID).To(Equal("kvm-02"))
 	})
 
 	It("refuses a clustered target whose provider does not route the import, before any side effect", func() {
