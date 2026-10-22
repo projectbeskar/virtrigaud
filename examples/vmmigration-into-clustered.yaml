@@ -16,11 +16,13 @@
 # "Limits" in the doc before using this against anything you care about.
 #
 # REQUIREMENTS:
-#   - The clustered provider reports supportsRoutedImport (otherwise the
+#   - The clustered provider reports supports_routed_import (otherwise the
 #     migration fails at Validating, reason ClusteredTargetUnsupported).
 #   - storage.type is s3 or nfs, set explicitly: pvc (what an unset storage
 #     means) is refused at Validating, because the disk lands on a host.
 #   - The target VM is in this VMMigration's namespace (target.namespace unset).
+#     The Provider may be in another namespace if it grants this one
+#     (spec.consumerNamespaceSelector, docs/cross-namespace-references.md).
 #   - Each host's "default" pool is active and at /var/lib/libvirt/images, with
 #     room for the disk; the host has qemu-img, flock and timeout, and the
 #     cloud-init seed directory /var/lib/libvirt/virtrigaud-seeds (see the
@@ -42,8 +44,15 @@ spec:
   target:
     name: app-on-cluster
     providerRef:
-      # A libvirt Provider with spec.topology: cluster (provider-libvirt-clustered.yaml).
+      # A libvirt Provider with spec.topology: cluster
+      # (provider-libvirt-clustered.yaml, which lives in virtrigaud-system).
+      # It is in another namespace than this migration, so its
+      # spec.consumerNamespaceSelector must select this namespace ("default");
+      # without that the migration is refused (ConsumerNotAllowed). Or run
+      # the migration in the Provider's namespace (the target VM and the
+      # classRef then live there too) and drop the namespace line.
       name: libvirt-cluster
+      namespace: virtrigaud-system
     classRef:
       name: standard-2cpu-4gb
     # Optional: steer the placement of the target VM.

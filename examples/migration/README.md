@@ -203,7 +203,7 @@ See [`../vmmigration-into-clustered.yaml`](../vmmigration-into-clustered.yaml).
 - **Only `s3` and `nfs`.** `storage.type: pvc` is refused at `Validating`, and
   `pvc` is what an unset `spec.storage` means, so set the type.
 - **The target VM must be in the migration's namespace**, and the target Provider
-  must report `supportsRoutedImport`; otherwise the migration fails at
+  must report `supports_routed_import`; otherwise the migration fails at
   `Validating` with `ClusteredTargetUnsupported`, before anything is touched.
 - **Every host** needs the `default` pool at `/var/lib/libvirt/images` (active,
   with room), `qemu-img`, `flock`, `timeout` and the cloud-init seed directory
