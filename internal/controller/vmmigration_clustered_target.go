@@ -139,6 +139,9 @@ const (
 	eventReasonTargetHostReleased = "TargetHostReleased"
 	// eventReasonUnboundTargetDeleted is the Normal event of a B1.4 delete.
 	eventReasonUnboundTargetDeleted = "UnboundTargetVMDeleted"
+	// eventReasonUnboundTargetLeft is the Warning event of a force-deleted
+	// migration whose unbound target VM could not be deleted (#416 L5).
+	eventReasonUnboundTargetLeft = "UnboundTargetVMLeft"
 	// eventReasonTargetVMImportRecorded is the Normal event of the Creating
 	// phase writing the landed disk into the target VM.
 	eventReasonTargetVMImportRecorded = "TargetVMImportRecorded"
@@ -224,6 +227,9 @@ const (
 		"the disk is not recorded on it (a VM created there would have no disk). An administrator must set the " +
 		"target's status.placement.pendingHost back to the host recorded in status.storageInfo.importTarget.host, or " +
 		"delete the VMMigration"
+	unboundTargetLeftMessage = "force-delete removes the VMMigration although its unbound target VirtualMachine could not " +
+		"be deleted: that VM keeps its placement (and the capacity reserved on its pending host) and is never created " +
+		"(MigrationNotFound). Delete the target VirtualMachine yourself"
 	targetDiskMismatchMessage = "the target VirtualMachine's spec.importedDisk is not the disk this migration imported " +
 		"(it was changed after the import): the migration is not completed, and the source is not deleted, until it is " +
 		"restored. Restore it, or delete the target VirtualMachine and the VMMigration"
@@ -516,6 +522,11 @@ func (r *VMMigrationReconciler) createClusteredTarget(ctx context.Context, migra
 	}
 	migration.Status.TargetVMClaim = digest
 	migration.Status.TargetVMUID = ""
+	// TargetPlaced is written with the claim, before the Create: it marks the
+	// migration as one with a target-first VM, which B1.4 deletes
+	// (deleteUnboundTarget).
+	setMigrationCondition(migration, migrationConditionTargetPlaced, metav1.ConditionFalse, migrationReasonWaitingForPlacement,
+		waitingForPlacementMessage)
 	if err := r.updateStatus(ctx, migration); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -895,6 +906,12 @@ func (r *VMMigrationReconciler) deleteUnboundTarget(ctx context.Context, migrati
 	if migration.Status.TargetVMUID == "" && migration.Status.TargetVMClaim == "" {
 		return true, nil
 	}
+	// Only a migration that created a target-first VM (TargetPlaced, written
+	// with its claim) has one to delete: a single-host target is created in
+	// Creating, and its migration reads nothing here (#416 L7).
+	if meta.FindStatusCondition(migration.Status.Conditions, migrationConditionTargetPlaced) == nil {
+		return true, nil
+	}
 	key := migrationTargetVMKey(migration)
 	allowed, err := targetNamespaceAllowed(ctx, r.liveReader(), migration.Namespace, key.Namespace)
 	if err != nil {
@@ -936,7 +953,11 @@ func (r *VMMigrationReconciler) releaseUnboundTargetForDeletion(ctx context.Cont
 	gone, err := r.deleteUnboundTarget(ctx, migration)
 	if err != nil {
 		if hasMigrationForceDeleteAnnotation(migration) {
+			// #416 L5: the target VM stays, unplaced-or-pending, holding its
+			// reservation, and waits for an import that never comes
+			// (MigrationNotFound once the VMMigration is gone).
 			logging.FromContext(ctx).Info("Could not delete the unbound target VM; force-delete releases the VMMigration", "error", err.Error())
+			r.Recorder.Event(migration, corev1.EventTypeWarning, eventReasonUnboundTargetLeft, unboundTargetLeftMessage)
 			return false, ctrl.Result{}, nil
 		}
 		return true, ctrl.Result{}, err
