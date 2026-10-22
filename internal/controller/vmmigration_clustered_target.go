@@ -478,7 +478,10 @@ func (r *VMMigrationReconciler) createClusteredTarget(ctx context.Context, migra
 // diskSizeGiB is bytes rounded up to whole GiB, at least 1 and at most the
 // largest int32.
 func diskSizeGiB(bytes int64) int32 {
-	gib := (bytes + bytesPerGiB - 1) / bytesPerGiB
+	gib := bytes / bytesPerGiB
+	if bytes%bytesPerGiB != 0 {
+		gib++
+	}
 	switch {
 	case gib < 1:
 		return 1
