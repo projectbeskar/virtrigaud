@@ -51,6 +51,10 @@ const (
 // (AllExcluded).
 const RejectionExcludedForVM = "host excluded for this VM"
 
+// RejectionNotRequiredHost is the rejection category of a host other than
+// Request.RequiredHost.
+const RejectionNotRequiredHost = "not the host the VM's disk was imported to"
+
 // defaultMaxVMsPerHost is the per-host VM cap applied when HostAntiAffinity is
 // enabled but MaxVMsPerHost is unset: "prevent VMs from being placed on the same
 // host" read literally is one VM per host.
@@ -70,6 +74,10 @@ func (ec *evalContext) filterHost(h *v1beta1.Host) (reason, detail string, err e
 	//    what lets AllExcluded recognise "every candidate is excluded".
 	if containsString(ec.req.ExcludedHosts, h.Name) {
 		return RejectionExcludedForVM, "", nil
+	}
+	// 0b. A VM whose disk was already imported to one host may run only there.
+	if ec.req.RequiredHost != "" && h.Name != ec.req.RequiredHost {
+		return RejectionNotRequiredHost, "", nil
 	}
 
 	// 1. Health + cordon (ADR-0007 D4/D8). A drained (cordoned) or NotReady host is

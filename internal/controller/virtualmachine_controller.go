@@ -2029,6 +2029,14 @@ func (r *VirtualMachineReconciler) resolveClusterPlacement(
 		currentBinding = vm.Status.Placement.Host
 		excludedHosts = vm.Status.Placement.ExcludedHosts
 	}
+	// A migration target whose migration already imported its disk to a host
+	// (importTarget.host) is placed on that host only (ADR-0007 Addendum B):
+	// a pending host an administrator cleared, or the target of a retry that
+	// kept its landed disk, never moves to a host without the disk.
+	requiredHost, err := r.migrationImportHost(ctx, vm)
+	if err != nil {
+		return nil, ctrl.Result{}, err
+	}
 
 	// (d) Resources: the effective size buildCreateRequest already resolved
 	// (effectiveResources: the VMClass with any spec.resources override
@@ -2052,6 +2060,7 @@ func (r *VirtualMachineReconciler) resolveClusterPlacement(
 		// A migration target needs room for its source disk on the host its
 		// import lands on (ADR-0007 Addendum B, B7.4).
 		RequiredStorageBytes: importedDiskPlacementBytes(vm),
+		RequiredHost:         requiredHost,
 		// TODO(ADR-0007 D6): wire RequiredStoragePools and RequiredMachineType once
 		// there is an unambiguous mapping. A VM's disks carry no storage-pool name
 		// (DiskSpec.StorageClass is a k8s StorageClass, not a libvirt/NFS pool) and

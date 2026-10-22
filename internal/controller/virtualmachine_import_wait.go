@@ -219,6 +219,23 @@ func (r *VirtualMachineReconciler) holdImportedDiskPinned(ctx context.Context, v
 	return ctrl.Result{RequeueAfter: blockedRetryBackoff(createHoldSince(vm))}
 }
 
+// migrationImportHost is the host vm's own migration recorded an import to
+// (status.storageInfo.importTarget.host, for this VM), or "": vm is then
+// placed on that host only, where its disk may already be landed.
+func (r *VirtualMachineReconciler) migrationImportHost(ctx context.Context, vm *infravirtrigaudiov1beta1.VirtualMachine) (string, error) {
+	if vm.Spec.ImportedDisk == nil || vm.Spec.ImportedDisk.MigrationRef == nil {
+		return "", nil
+	}
+	m, err := r.importingMigrationFor(ctx, vm)
+	if err != nil || m == nil {
+		return "", err
+	}
+	if key, ok := recordedImportTarget(m); !ok || key.Namespace != vm.Namespace || key.Name != vm.Name {
+		return "", nil
+	}
+	return recordedImportHost(m), nil
+}
+
 // importedDiskPlacementBytes is the disk space a migration target's placement
 // needs on its host (ADR-0007 Addendum B, B7.4): spec.importedDisk.sizeGiB,
 // which the migration sets from the source disk's virtual size. 0 (no filter)

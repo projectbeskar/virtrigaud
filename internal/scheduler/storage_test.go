@@ -57,3 +57,21 @@ func TestScheduleNoRequiredStorageIgnoresStorage(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "host-unknown", res.HostID, "without a disk-space need, an unreported storage figure filters nothing")
 }
+
+// TestScheduleRequiredHost pins Request.RequiredHost (ADR-0007 Addendum B): a
+// VM whose disk was imported to one host is placed only there.
+func TestScheduleRequiredHost(t *testing.T) {
+	req := baseReq(newHost("host-big", 64, 1<<20), newHost("host-a", 4, 8192))
+	req.RequiredHost = "host-a"
+	res, err := Schedule(req)
+	require.NoError(t, err)
+	assert.Equal(t, "host-a", res.HostID)
+
+	req.ExcludedHosts = []string{"host-a"}
+	_, err = Schedule(req)
+	require.Error(t, err)
+	var nfe *NoFeasibleHostError
+	require.True(t, errors.As(err, &nfe))
+	assert.Equal(t, 1, nfe.Tally()[RejectionNotRequiredHost])
+	assert.False(t, AllExcluded(err))
+}
