@@ -44,7 +44,9 @@ import (
 // ConfigSpec therefore rewrites them: guestinfo.metadata gets an instance-id
 // derived from the target VirtualMachine (cloneidentity.InstanceID) and the
 // target's local-hostname, and a #cloud-config guestinfo.userdata gets the
-// target's top-level hostname/fqdn. Both are written back base64-encoded. A
+// target's top-level hostname/fqdn. ExtraConfig keys are matched without
+// regard to case (vSphere treats them so), and each value is written back
+// under the source's own key spelling and in the source's own encoding. A
 // source without guestinfo.metadata is left alone: the VMware datasource then
 // takes the instance-id from the VM's BIOS UUID, which vCenter regenerates for
 // a clone. Guest customization specs and OVF (vApp) properties are not used
@@ -59,15 +61,27 @@ const (
 	guestinfoUserdataKey         = "guestinfo.userdata"
 	guestinfoUserdataEncodingKey = "guestinfo.userdata.encoding"
 
-	// guestinfoEncodingBase64 is the encoding a clone's rewritten keys are
-	// written in.
+	// guestinfoEncodingBase64 / B64 and guestinfoEncodingGzip / Gz are the
+	// encodings cloud-init's VMware datasource accepts besides none.
 	guestinfoEncodingBase64 = "base64"
+	guestinfoEncodingB64    = "b64"
+	guestinfoEncodingGzip   = "gzip+base64"
+	guestinfoEncodingGz     = "gz+b64"
 
 	// cloneIdentityRefusal is the InvalidArgument answer to a clone whose
 	// source's guestinfo.metadata cannot be given a new identity.
 	cloneIdentityRefusal = "the clone source's cloud-init guestinfo.metadata cannot be read (unknown encoding or not a " +
 		"YAML/JSON mapping), so the clone cannot be given a new cloud-init identity; nothing was cloned"
+
+	// maxGuestinfoBytes bounds a decompressed guestinfo value.
+	maxGuestinfoBytes = 4 << 20
 )
+
+// guestinfoEntry is one ExtraConfig key as the source spells it, with its
+// string value. A zero entry is a key the source does not have.
+type guestinfoEntry struct {
+	key, value string
+}
 
 // cloneIdentityExtraConfig returns the ExtraConfig entries that give a clone
 // of a VM with ExtraConfig source its own cloud-init identity (nil when the
@@ -83,13 +97,13 @@ func (p *Provider) cloneIdentityExtraConfig(source []types.BaseOptionValue, req 
 			"target_name", req.GetTargetName(), "unapplied", strings.Join(cust.Unapplied, ","),
 			"user_data_given", cust.InlineUserData != "" || cust.SecretUserData)
 	}
-	values := extraConfigValues(source)
+	entries := extraConfigLookup(source)
 	target := req.GetTargetVm()
 	hostname := cloneidentity.Hostname(cust, contracts.ObjectIdentity{Name: target.GetName()}, req.GetTargetName())
 
 	var out []types.BaseOptionValue
-	if raw, ok := values[guestinfoMetadataKey]; ok && strings.TrimSpace(raw) != "" {
-		meta, err := decodeGuestinfo(raw, values[guestinfoMetadataEncodingKey])
+	if md, enc := entries[guestinfoMetadataKey], entries[guestinfoMetadataEncodingKey]; strings.TrimSpace(md.value) != "" {
+		meta, err := decodeGuestinfo(md.value, enc.value)
 		if err != nil {
 			return nil, status.Error(codes.InvalidArgument, cloneIdentityRefusal)
 		}
@@ -98,10 +112,14 @@ func (p *Provider) cloneIdentityExtraConfig(source []types.BaseOptionValue, req 
 		if err != nil {
 			return nil, status.Error(codes.InvalidArgument, cloneIdentityRefusal)
 		}
-		out = append(out, guestinfoBase64(guestinfoMetadataKey, guestinfoMetadataEncodingKey, meta)...)
+		v, err := encodeGuestinfo(meta, enc.value)
+		if err != nil {
+			return nil, status.Error(codes.InvalidArgument, cloneIdentityRefusal)
+		}
+		out = append(out, guestinfoPair(md, enc, v)...)
 	}
-	if raw, ok := values[guestinfoUserdataKey]; ok && strings.TrimSpace(raw) != "" {
-		user, err := decodeGuestinfo(raw, values[guestinfoUserdataEncodingKey])
+	if ud, enc := entries[guestinfoUserdataKey], entries[guestinfoUserdataEncodingKey]; strings.TrimSpace(ud.value) != "" {
+		user, err := decodeGuestinfo(ud.value, enc.value)
 		if err != nil {
 			// The user-data is the guest's own business; only the hostname
 			// keys would be rewritten. Leave it as it is.
@@ -109,21 +127,46 @@ func (p *Provider) cloneIdentityExtraConfig(source []types.BaseOptionValue, req 
 				"target_name", req.GetTargetName())
 			return out, nil
 		}
+		if keys := cloneidentity.IdentityOverrides(user); len(keys) > 0 {
+			p.logger.Warn("The clone source's user-data keeps the source's host identity despite the clone's new instance-id",
+				"target_name", req.GetTargetName(), "keys", strings.Join(keys, ","))
+		}
 		rewritten, changed, skipped := cloneidentity.RewriteUserDataHostname(user, hostname, cust.Domain)
 		if len(skipped) > 0 {
 			p.logger.Warn("The clone source's user-data sets its hostname in a form the provider does not rewrite",
 				"target_name", req.GetTargetName(), "keys", strings.Join(skipped, ","))
 		}
 		if changed {
-			out = append(out, guestinfoBase64(guestinfoUserdataKey, guestinfoUserdataEncodingKey, rewritten)...)
+			v, err := encodeGuestinfo(rewritten, enc.value)
+			if err != nil {
+				p.logger.Warn("The clone's rewritten guestinfo.userdata cannot be encoded; it is left as the source's",
+					"target_name", req.GetTargetName())
+				return out, nil
+			}
+			out = append(out, guestinfoPair(ud, enc, v)...)
 		}
 	}
 	return out, nil
 }
 
-// extraConfigValues maps each ExtraConfig key of source to its string value.
-func extraConfigValues(source []types.BaseOptionValue) map[string]string {
-	out := make(map[string]string, len(source))
+// guestinfoPair is the ExtraConfig a rewritten guestinfo value is written
+// with: the value (encoded as the source's encoding key names) under the
+// source's key, and that encoding key again, as the source spells and sets
+// it, so the pair is consistent whether or not the clone inherits the
+// source's ExtraConfig. A source without an encoding key gets none.
+func guestinfoPair(value, encoding guestinfoEntry, encoded string) []types.BaseOptionValue {
+	out := []types.BaseOptionValue{&types.OptionValue{Key: value.key, Value: encoded}}
+	if encoding.key != "" {
+		out = append(out, &types.OptionValue{Key: encoding.key, Value: encoding.value})
+	}
+	return out
+}
+
+// extraConfigLookup indexes the string-valued ExtraConfig keys of source by
+// their lower-case form (vSphere treats ExtraConfig keys without regard to
+// case), keeping each key's own spelling; the first of two spellings wins.
+func extraConfigLookup(source []types.BaseOptionValue) map[string]guestinfoEntry {
+	out := make(map[string]guestinfoEntry, len(source))
 	for _, bov := range source {
 		if bov == nil {
 			continue
@@ -132,8 +175,12 @@ func extraConfigValues(source []types.BaseOptionValue) map[string]string {
 		if ov == nil {
 			continue
 		}
-		if s, ok := ov.Value.(string); ok {
-			out[ov.Key] = s
+		s, ok := ov.Value.(string)
+		if !ok {
+			continue
+		}
+		if lower := strings.ToLower(ov.Key); out[lower].key == "" {
+			out[lower] = guestinfoEntry{key: ov.Key, value: s}
 		}
 	}
 	return out
@@ -146,13 +193,13 @@ func decodeGuestinfo(value, encoding string) (string, error) {
 	switch strings.ToLower(strings.TrimSpace(encoding)) {
 	case "":
 		return value, nil
-	case "base64", "b64":
+	case guestinfoEncodingBase64, guestinfoEncodingB64:
 		b, err := base64.StdEncoding.DecodeString(strings.TrimSpace(value))
 		if err != nil {
 			return "", fmt.Errorf("decode base64 guestinfo: %w", err)
 		}
 		return string(b), nil
-	case "gzip+base64", "gz+b64":
+	case guestinfoEncodingGzip, guestinfoEncodingGz:
 		b, err := base64.StdEncoding.DecodeString(strings.TrimSpace(value))
 		if err != nil {
 			return "", fmt.Errorf("decode base64 guestinfo: %w", err)
@@ -175,13 +222,24 @@ func decodeGuestinfo(value, encoding string) (string, error) {
 	return "", fmt.Errorf("unknown guestinfo encoding %q", encoding)
 }
 
-// maxGuestinfoBytes bounds a decompressed guestinfo value.
-const maxGuestinfoBytes = 4 << 20
-
-// guestinfoBase64 is the ExtraConfig pair setting key to value, base64-encoded.
-func guestinfoBase64(key, encodingKey, value string) []types.BaseOptionValue {
-	return []types.BaseOptionValue{
-		&types.OptionValue{Key: key, Value: base64.StdEncoding.EncodeToString([]byte(value))},
-		&types.OptionValue{Key: encodingKey, Value: guestinfoEncodingBase64},
+// encodeGuestinfo is the inverse of decodeGuestinfo: value in encoding (the
+// source's own, so the clone's keys keep the form its encoding key names).
+func encodeGuestinfo(value, encoding string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(encoding)) {
+	case "":
+		return value, nil
+	case guestinfoEncodingBase64, guestinfoEncodingB64:
+		return base64.StdEncoding.EncodeToString([]byte(value)), nil
+	case guestinfoEncodingGzip, guestinfoEncodingGz:
+		var b bytes.Buffer
+		zw := gzip.NewWriter(&b)
+		if _, err := zw.Write([]byte(value)); err != nil {
+			return "", fmt.Errorf("encode gzip guestinfo: %w", err)
+		}
+		if err := zw.Close(); err != nil {
+			return "", fmt.Errorf("encode gzip guestinfo: %w", err)
+		}
+		return base64.StdEncoding.EncodeToString(b.Bytes()), nil
 	}
+	return "", fmt.Errorf("unknown guestinfo encoding %q", encoding)
 }
