@@ -141,8 +141,10 @@ type HostStatus struct {
 	// +optional
 	AllocatableMemoryMiB *int64 `json:"allocatableMemoryMiB,omitempty"`
 
-	// AllocatableStorageBytes is the schedulable storage in bytes the provider
-	// reports live.
+	// AllocatableStorageBytes is the free storage in bytes the provider reports
+	// live for new VM disks: for libvirt, the space available to non-root users
+	// in the default storage pool's directory (statvfs, measured on every
+	// sync), and 0 when it cannot be measured.
 	// +optional
 	AllocatableStorageBytes *int64 `json:"allocatableStorageBytes,omitempty"`
 
