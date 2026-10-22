@@ -364,6 +364,16 @@ func (s *Server) importDiskFromNFSSteps(ctx context.Context, req *providerv1.Imp
 
 	log.Printf("INFO Importing disk from NFS to libvirt host: backend=nfs pool=%s volume=%s src=%s target=%s",
 		poolName, volumeName, nfsURL, targetPath)
+	return landNFSImport(ctx, importLanding{conn: conn, poolName: poolName, poolPath: poolPath,
+		volumeName: volumeName, targetPath: targetPath}, nfsURL, req)
+}
+
+// landNFSImport is the write half of the nfs import (see importLanding): the
+// staged object is copied once into a private directory in the pool, checked
+// and converted there, and the converted disk is published onto l.targetPath
+// with one rename (tagged stagePublish).
+func landNFSImport(ctx context.Context, l importLanding, nfsURL string, req *providerv1.ImportDiskRequest) (*providerv1.ImportDiskResponse, error) {
+	conn, poolName, poolPath, volumeName, targetPath := l.conn, l.poolName, l.poolPath, l.volumeName, l.targetPath
 
 	// SECURITY: the staged object is on an NFS server the tenant controls, so
 	// it can change between two reads. It is read ONCE: copied byte for byte
@@ -380,7 +390,7 @@ func (s *Server) importDiskFromNFSSteps(ctx context.Context, req *providerv1.Imp
 	if err != nil {
 		return nil, fmt.Errorf("nfs import: %w", err)
 	}
-	defer wd.cleanup(ctx)
+	defer l.cleanup(ctx, wd)
 	// The copy is bounded by the import's disk-size limit too (#382).
 	limit, err := migration.StagedCopyLimit(req.MaxVirtualSizeBytes)
 	if err != nil {
