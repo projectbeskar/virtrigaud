@@ -125,7 +125,11 @@ const (
 	// migrationReasonTargetHostMoved is the Ready=False hold of a migration
 	// whose target's pending host is no longer the host its disk landed on.
 	migrationReasonTargetHostMoved = "TargetHostMoved"
-	// migrationReasonCapabilitiesUnknown: the target provider's capabilities
+	// migrationReasonTargetDiskMismatch is the Ready=False hold of a routed
+	// migration whose target VM's spec.importedDisk is not the disk its import
+	// landed (#416 M2).
+	migrationReasonTargetDiskMismatch = "TargetDiskMismatch"
+	// migrationReasonCapabilitiesUnknown:the target provider's capabilities
 	// cannot be read yet (Validating waits).
 	migrationReasonCapabilitiesUnknown = "TargetCapabilitiesUnknown"
 
@@ -208,6 +212,9 @@ const (
 		"the disk is not recorded on it (a VM created there would have no disk). An administrator must set the " +
 		"target's status.placement.pendingHost back to the host recorded in status.storageInfo.importTarget.host, or " +
 		"delete the VMMigration"
+	targetDiskMismatchMessage = "the target VirtualMachine's spec.importedDisk is not the disk this migration imported " +
+		"(it was changed after the import): the migration is not completed, and the source is not deleted, until it is " +
+		"restored. Restore it, or delete the target VirtualMachine and the VMMigration"
 	targetVMImportRecordedMessage = "the imported disk was recorded on the target VirtualMachine; it is created on its pending host"
 )
 
@@ -395,6 +402,18 @@ func (r *VMMigrationReconciler) ensureClusteredTargetPlaced(ctx context.Context,
 		return false, r.waitForTargetPlacement(ctx, migration, changed, migrationReasonTargetVMDeleting, targetVMDeletingMessage), nil
 	}
 	if vm.Status.ID != "" || !awaitingMigrationImport(vm) {
+		// A retry that kept its target, which carries exactly this
+		// migration's recorded import, reuses it (as a single-host retry
+		// does): nothing is imported again.
+		if migrationRoutedImport(migration) && routedTargetDiskMatches(migration, vm) {
+			if setMigrationCondition(migration, migrationConditionTargetPlaced, metav1.ConditionTrue, migrationReasonTargetPlaced,
+				targetPlacedMessage) || changed {
+				if err := r.updateStatus(ctx, migration); err != nil {
+					return false, ctrl.Result{}, err
+				}
+			}
+			return true, ctrl.Result{}, nil
+		}
 		// Created already, or given a disk by an earlier attempt: not a target
 		// an import can be routed to.
 		setMigrationCondition(migration, infrav1beta1.VMMigrationConditionValidating, metav1.ConditionFalse,
@@ -866,34 +885,91 @@ func (r *VMMigrationReconciler) releaseUnboundTargetForDeletion(ctx context.Cont
 	return false, ctrl.Result{}, nil
 }
 
-// cleanupRoutedLandedDiskForRetry runs before a retry of a migration whose
-// import was routed to a host (importTarget.host) and may have landed a disk
-// there: the retry places a fresh target, possibly on another host, and
-// records that host instead, so the earlier landed disk is cleaned up first —
-// once the unbound target is gone, with the cleanupPolicy semantics (Never
-// keeps it). held == true: the retry waits (res, err).
-func (r *VMMigrationReconciler) cleanupRoutedLandedDiskForRetry(ctx context.Context, migration *infrav1beta1.VMMigration) (bool, ctrl.Result, error) {
-	if !migrationRoutedImport(migration) || !landedDiskMayExist(migration) {
+// prepareRoutedRetry runs before a retry of a migration whose import was
+// routed to a host (importTarget.host), once its unbound target is gone
+// (#416 H1). held == true: the retry waits (res, err).
+//
+//   - The landed disk is deleted on the recorded host first (unless
+//     cleanupPolicy is Never). Once the provider confirms it gone
+//     (LandedDiskCleanup=True/LandedDiskDeleted), the import state is reset
+//     completely (resetRoutedImport): the retry imports again, onto whichever
+//     host its fresh target is placed on, and never hands a deleted path to
+//     it. The routed delete is refused while an import of the same name still
+//     runs on the provider, so nothing can land after it succeeded; the
+//     ImportRequested marker is cleared then too.
+//   - A landed disk that is KEPT (cleanupPolicy Never, a VM uses it, another
+//     migration takes it over, or it was left behind) keeps importTarget.host:
+//     the fresh target is placed on that host only (migrationImportHost), where
+//     the retry reuses the disk as a single-host retry does. A copy is never
+//     landed on another host — on a shared pool it would overwrite the kept
+//     disk, and on host-local storage the kept one would be untracked.
+func (r *VMMigrationReconciler) prepareRoutedRetry(ctx context.Context, migration *infrav1beta1.VMMigration) (bool, ctrl.Result, error) {
+	if !migrationRoutedImport(migration) {
 		return false, ctrl.Result{}, nil
 	}
-	if retained, err := r.retainLandedDiskIfNever(ctx, migration); retained || err != nil {
-		return err != nil, ctrl.Result{}, err
+	if landedDiskMayExist(migration) {
+		if retained, err := r.retainLandedDiskIfNever(ctx, migration); err != nil {
+			return true, ctrl.Result{}, err
+		} else if !retained {
+			if wait, notDue := landedDiskCleanupNotDue(migration, time.Now()); notDue {
+				return true, ctrl.Result{RequeueAfter: wait}, nil
+			}
+			done, err := r.cleanupLandedDisk(ctx, migration)
+			var left *landedDiskLeftBehindError
+			switch {
+			case err == nil:
+				if err := r.setLandedDiskDone(ctx, migration, done); err != nil {
+					return true, ctrl.Result{}, err
+				}
+			case stderrors.As(err, &left):
+				logLandedDiskLeftBehind(ctx, left)
+				if err := r.setLandedDiskDone(ctx, migration, landedDiskLeftBehindDone(left.message)); err != nil {
+					return true, ctrl.Result{}, err
+				}
+			default:
+				retry, herr := r.holdLandedDiskCleanup(ctx, migration, err)
+				return true, ctrl.Result{RequeueAfter: retry}, herr
+			}
+		}
 	}
-	if wait, notDue := landedDiskCleanupNotDue(migration, time.Now()); notDue {
-		return true, ctrl.Result{RequeueAfter: wait}, nil
+	if c := meta.FindStatusCondition(migration.Status.Conditions, migrationConditionLandedDiskCleanup); c != nil &&
+		c.Status == metav1.ConditionTrue && c.Reason == migrationReasonLandedDiskDeleted {
+		if err := r.resetRoutedImport(ctx, migration); err != nil {
+			return true, ctrl.Result{}, err
+		}
 	}
-	done, err := r.cleanupLandedDisk(ctx, migration)
-	var left *landedDiskLeftBehindError
-	switch {
-	case err == nil:
-		return false, ctrl.Result{}, r.setLandedDiskDone(ctx, migration, done)
-	case stderrors.As(err, &left):
-		logLandedDiskLeftBehind(ctx, left)
-		return false, ctrl.Result{}, r.setLandedDiskDone(ctx, migration, landedDiskLeftBehindDone(left.message))
-	default:
-		retry, herr := r.holdLandedDiskCleanup(ctx, migration, err)
-		return true, ctrl.Result{RequeueAfter: retry}, herr
+	return false, ctrl.Result{}, nil
+}
+
+// resetRoutedImport forgets a routed import whose landed disk was deleted, so
+// the retry imports again (#416 H1): the import result (status.importID, the
+// target fields of status.diskInfo), the Importing condition, the
+// ImportRequested marker and its in-memory guard, the recorded host
+// (importTarget.host, which would pin the fresh target) and TargetPlaced.
+// When the staged object is gone too (StagingCleanup=True), the export is
+// forgotten the same way, so the retry exports again. It persists the status.
+func (r *VMMigrationReconciler) resetRoutedImport(ctx context.Context, m *infrav1beta1.VMMigration) error {
+	logging.FromContext(ctx).Info("The routed import's landed disk was deleted; the retry imports again", "host", recordedImportHost(m))
+	m.Status.ImportID = ""
+	if di := m.Status.DiskInfo; di != nil {
+		di.TargetDiskID, di.TargetPath, di.TargetFormat, di.TargetChecksum = "", "", "", ""
+		di.TargetSize = nil
 	}
+	meta.RemoveStatusCondition(&m.Status.Conditions, infrav1beta1.VMMigrationConditionImporting)
+	clearMigrationRequest(m, longOpImport)
+	r.longOpInFlight.Delete(longOpKey(m, longOpImport))
+	r.routedImportHold.reset(string(m.UID))
+	if t := m.Status.StorageInfo; t != nil && t.ImportTarget != nil {
+		t.ImportTarget.Host = ""
+	}
+	meta.RemoveStatusCondition(&m.Status.Conditions, migrationConditionTargetPlaced)
+	if c := meta.FindStatusCondition(m.Status.Conditions, migrationConditionStagingCleanup); c != nil && c.Status == metav1.ConditionTrue {
+		m.Status.ExportID = ""
+		meta.RemoveStatusCondition(&m.Status.Conditions, infrav1beta1.VMMigrationConditionExporting)
+		clearMigrationRequest(m, longOpExport)
+		r.longOpInFlight.Delete(longOpKey(m, longOpExport))
+	}
+	return r.updateStatus(ctx, m)
 }
 
 // stagedDiskHost is the host of a clustered target Provider that empties an

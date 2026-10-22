@@ -2036,6 +2036,11 @@ func (r *VMMigrationReconciler) handleCreatingPhase(ctx context.Context, migrati
 // changes.
 func (r *VMMigrationReconciler) awaitOwnedTargetVM(ctx context.Context, migration *infrav1beta1.VMMigration,
 	vm *infrav1beta1.VirtualMachine) (ctrl.Result, error) {
+	// A routed import's target must still carry exactly the disk it landed
+	// (#416 M2).
+	if migrationRoutedImport(migration) && !routedTargetDiskMatches(migration, vm) {
+		return r.holdTargetDiskMismatch(ctx, migration)
+	}
 	bound := bindTargetVMUID(migration, vm)
 
 	// IMPORTANT: Check the Ready condition, NOT the Phase field
@@ -2154,6 +2159,11 @@ func (r *VMMigrationReconciler) handleValidatingTargetPhase(ctx context.Context,
 	}
 	if !migrationOwnsTargetVM(migration, targetVM) {
 		return r.failTargetVMNotOwned(ctx, migration)
+	}
+	// Never Ready (nor the source deleted) for a routed import whose target
+	// no longer carries the landed disk (#416 M2), read live here.
+	if migrationRoutedImport(migration) && !routedTargetDiskMatches(migration, targetVM) {
+		return r.holdTargetDiskMismatch(ctx, migration)
 	}
 	bound := bindTargetVMUID(migration, targetVM)
 
@@ -2377,7 +2387,7 @@ func (r *VMMigrationReconciler) handleFailedPhase(ctx context.Context, migration
 	} else if !gone {
 		return ctrl.Result{RequeueAfter: unboundTargetDeleteRequeue}, nil
 	}
-	if held, res, err := r.cleanupRoutedLandedDiskForRetry(ctx, migration); held || err != nil {
+	if held, res, err := r.prepareRoutedRetry(ctx, migration); held || err != nil {
 		return res, err
 	}
 
