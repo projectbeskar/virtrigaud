@@ -22,9 +22,11 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	golibvirt "github.com/digitalocean/go-libvirt"
 	"github.com/stretchr/testify/assert"
@@ -99,37 +101,53 @@ const poolListFixture = ` Name      State      Autostart
  iso       inactive   no
 `
 
-// poolInfoDefaultFixture / poolInfoDataFixture are `virsh pool-info --bytes`
-// output: Available is a raw byte count with --bytes.
-const poolInfoDefaultFixture = `Name:           default
-UUID:           bb1e0000-0000-0000-0000-000000000000
-State:          running
-Persistent:     yes
-Autostart:      yes
-Capacity:       107374182400
-Allocation:     53687091200
-Available:      53687091200
+// poolDumpXMLDirFixture is `virsh pool-dumpxml default` captured from a lab host
+// (dome3, 2026-10-22) whose dir pool sits on an NFS mount. Its <available> is
+// libvirt's CACHED value (as of the last pool-refresh, and f_bfree-based) —
+// 596772913152 — which the inventory must NOT report (R31).
+const poolDumpXMLDirFixture = `<pool type='dir'>
+  <name>default</name>
+  <uuid>dbcbe54c-dd10-4aed-a333-c877dbe51ec6</uuid>
+  <capacity unit='bytes'>1829413847040</capacity>
+  <allocation unit='bytes'>1232640933888</allocation>
+  <available unit='bytes'>596772913152</available>
+  <source>
+  </source>
+  <target>
+    <path>/var/lib/libvirt/images</path>
+    <permissions>
+      <mode>0755</mode>
+      <owner>1000</owner>
+      <group>1000</group>
+    </permissions>
+  </target>
+</pool>
 `
 
-const poolInfoDataFixture = `Name:           data
-UUID:           cc2f0000-0000-0000-0000-000000000000
-State:          running
-Persistent:     yes
-Autostart:      yes
-Capacity:       53687091200
-Allocation:     32212254720
-Available:      21474836480
-`
+// poolDirFixture is the target directory of poolDumpXMLDirFixture.
+const poolDirFixture = "/var/lib/libvirt/images"
 
-// fullHostScript is the scripted virsh command set for a fully-answering host.
+// statfsKey is the fakeHostConn script key of the free-space measurement of
+// poolDirFixture (a host command: "!"-prefixed, like runHost).
+const statfsKey = "! stat -f -c %a %S -- " + poolDirFixture
+
+// statfsFixture is `stat -f -c "%a %S" /var/lib/libvirt/images` on the same lab
+// host at the same time: 507261 blocks of 1 MiB available to non-root =
+// 531901710336 bytes, exactly df's "Available" column.
+const (
+	statfsFixture      = "507261 1048576\n"
+	statfsFixtureBytes = int64(531901710336)
+)
+
+// fullHostScript is the scripted command set for a fully-answering host.
 func fullHostScript() map[string]fakeVirshResult {
 	return map[string]fakeVirshResult{
-		"nodeinfo":                  {stdout: nodeInfoFixture},
-		"capabilities":              {stdout: capabilitiesFixture},
-		"domcapabilities":           {stdout: domCapabilitiesFixture},
-		"pool-list --all":           {stdout: poolListFixture},
-		"pool-info --bytes default": {stdout: poolInfoDefaultFixture},
-		"pool-info --bytes data":    {stdout: poolInfoDataFixture},
+		"nodeinfo":             {stdout: nodeInfoFixture},
+		"capabilities":         {stdout: capabilitiesFixture},
+		"domcapabilities":      {stdout: domCapabilitiesFixture},
+		"pool-list --all":      {stdout: poolListFixture},
+		"pool-dumpxml default": {stdout: poolDumpXMLDirFixture},
+		statfsKey:              {stdout: statfsFixture},
 	}
 }
 
@@ -140,13 +158,16 @@ type fakeVirshResult struct {
 	err    error
 }
 
-// fakeHostConn is a hostconn.Conn that answers Virsh from a per-command script
-// (key = the space-joined args), records the commands it was asked to run (so a
-// test can assert what was and was NOT queried), and counts Close calls (so a
-// test can prove a lease was released and the underlying conn closed).
+// fakeHostConn is a hostconn.Conn that answers Virsh and RunHost from a
+// per-command script (key = the space-joined args; a RunHost key is prefixed
+// with "! ", as runHost spells host commands), records the commands it was
+// asked to run (so a test can assert what was and was NOT queried), and counts
+// Close calls (so a test can prove a lease was released and the underlying conn
+// closed). runHost, when set, answers RunHost instead of the script.
 type fakeHostConn struct {
-	id     hostconn.HostID
-	script map[string]fakeVirshResult
+	id      hostconn.HostID
+	script  map[string]fakeVirshResult
+	runHost func(ctx context.Context, argv []string) (*hostconn.Result, error)
 
 	mu     sync.Mutex
 	calls  []string
@@ -170,8 +191,22 @@ func (f *fakeHostConn) Virsh(_ context.Context, args ...string) (*hostconn.Resul
 	return &hostconn.Result{Command: cmd, Stdout: r.stdout}, nil
 }
 
-func (f *fakeHostConn) RunHost(_ context.Context, _ ...string) (*hostconn.Result, error) {
-	return nil, errors.New("fakeHostConn: RunHost not used")
+func (f *fakeHostConn) RunHost(ctx context.Context, argv ...string) (*hostconn.Result, error) {
+	cmd := "! " + strings.Join(argv, " ")
+	f.mu.Lock()
+	f.calls = append(f.calls, cmd)
+	f.mu.Unlock()
+	if f.runHost != nil {
+		return f.runHost(ctx, argv)
+	}
+	r, ok := f.script[cmd]
+	if !ok {
+		return nil, fmt.Errorf("fakeHostConn: no script for %q", cmd)
+	}
+	if r.err != nil {
+		return nil, r.err
+	}
+	return &hostconn.Result{Command: cmd, Stdout: r.stdout}, nil
 }
 
 func (f *fakeHostConn) Stream(_ context.Context, _ ...string) (io.ReadCloser, error) {
@@ -303,25 +338,99 @@ func TestParseActivePoolNames(t *testing.T) {
 	assert.Nil(t, parseActivePoolNames(""))
 }
 
-func TestParsePoolAvailableBytes(t *testing.T) {
-	t.Run("raw bytes", func(t *testing.T) {
-		got, ok := parsePoolAvailableBytes(poolInfoDefaultFixture)
-		require.True(t, ok)
-		assert.Equal(t, int64(53687091200), got)
-	})
-	t.Run("bytes suffix tolerated", func(t *testing.T) {
-		got, ok := parsePoolAvailableBytes("Available:      12345 bytes\n")
-		require.True(t, ok)
-		assert.Equal(t, int64(12345), got)
-	})
-	t.Run("missing Available line", func(t *testing.T) {
-		_, ok := parsePoolAvailableBytes("Name: p\nState: running\n")
-		assert.False(t, ok)
-	})
-	t.Run("non-numeric Available", func(t *testing.T) {
-		_, ok := parsePoolAvailableBytes("Available:      unknown\n")
-		assert.False(t, ok)
-	})
+func TestParseStatfsAvailBytes(t *testing.T) {
+	ok := []struct {
+		name, in string
+		want     int64
+	}{
+		{"lab nfs pool", statfsFixture, statfsFixtureBytes},
+		{"4k blocks", "2621440 4096", 10737418240},
+		{"full filesystem", "0 4096\n", 0},
+		{"surrounding whitespace", "  \t12 512 \n\n", 6144},
+		{"max without overflow", fmt.Sprintf("%d 1", int64(math.MaxInt64)), math.MaxInt64},
+	}
+	for _, tc := range ok {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := parseStatfsAvailBytes(tc.in)
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, got)
+		})
+	}
+
+	// Every odd output is an error: the caller then reports 0 (fail closed),
+	// never a misread number.
+	bad := map[string]string{
+		"empty":                "",
+		"whitespace only":      " \n",
+		"one field":            "507261\n",
+		"three fields":         "507261 1048576 579243\n",
+		"a second line":        "507261 1048576\n1 1\n",
+		"non-numeric":          "? 4096",
+		"stat error text":      "stat: cannot read file system information for '/x': No such file or directory",
+		"negative blocks":      "-1 4096",
+		"zero block size":      "100 0",
+		"negative block size":  "100 -4096",
+		"hex":                  "0x10 4096",
+		"float":                "1.5 4096",
+		"overflow":             fmt.Sprintf("%d 2", int64(math.MaxInt64)),
+		"blocks beyond int64":  "99999999999999999999 4096",
+		"block size beyond 64": "1 99999999999999999999",
+	}
+	for name, in := range bad {
+		t.Run("rejects "+name, func(t *testing.T) {
+			got, err := parseStatfsAvailBytes(in)
+			require.Error(t, err)
+			assert.Zero(t, got)
+		})
+	}
+}
+
+func TestParseFilesystemPoolDir(t *testing.T) {
+	poolXML := func(typ, target string) string {
+		return fmt.Sprintf("<pool type='%s'><name>default</name>%s</pool>", typ, target)
+	}
+	pathTarget := func(p string) string { return "<target><path>" + p + "</path></target>" }
+
+	ok := []struct {
+		name, in, wantType, wantDir string
+	}{
+		{"lab dir pool", poolDumpXMLDirFixture, "dir", poolDirFixture},
+		{"netfs pool", poolXML("netfs", pathTarget("/var/lib/libvirt/images")), "netfs", "/var/lib/libvirt/images"},
+		{"fs pool", poolXML("fs", pathTarget("/srv/vm")), "fs", "/srv/vm"},
+		{"trailing slash trimmed", poolXML("dir", pathTarget(" /var/lib/libvirt/images/ ")), "dir", "/var/lib/libvirt/images"},
+		{"root directory", poolXML("dir", pathTarget("/")), "dir", "/"},
+	}
+	for _, tc := range ok {
+		t.Run(tc.name, func(t *testing.T) {
+			typ, dir, err := parseFilesystemPoolDir(tc.in)
+			require.NoError(t, err)
+			assert.Equal(t, tc.wantType, typ)
+			assert.Equal(t, tc.wantDir, dir)
+		})
+	}
+
+	bad := []struct {
+		name, in, wantType string
+	}{
+		{"logical (LVM) pool", poolXML("logical", pathTarget("/dev/vg0")), "logical"},
+		{"rbd pool", poolXML("rbd", ""), "rbd"},
+		{"iscsi pool", poolXML("iscsi", pathTarget("/dev/disk/by-path")), "iscsi"},
+		{"zfs pool", poolXML("zfs", pathTarget("/dev/zvol/tank")), "zfs"},
+		{"no type", "<pool><name>default</name>" + pathTarget("/x") + "</pool>", ""},
+		{"no target", poolXML("dir", ""), "dir"},
+		{"empty path", poolXML("dir", pathTarget("")), "dir"},
+		{"relative path", poolXML("dir", pathTarget("images")), "dir"},
+		{"unclean path", poolXML("dir", pathTarget("/var/lib/../lib/libvirt/images")), "dir"},
+		{"not XML", "error: failed to get pool 'default'", ""},
+	}
+	for _, tc := range bad {
+		t.Run("rejects "+tc.name, func(t *testing.T) {
+			typ, dir, err := parseFilesystemPoolDir(tc.in)
+			require.Error(t, err)
+			assert.Empty(t, dir)
+			assert.Equal(t, tc.wantType, typ)
+		})
+	}
 }
 
 // --- collectHostInfo: assembly + health gating + best-effort ------------------
@@ -343,8 +452,14 @@ func TestCollectHostInfo_FullRender(t *testing.T) {
 	assert.Equal(t, []string{"ss", "vmx", "hypervisor"}, got.CPUFeatures)
 	assert.Equal(t, []string{"pc-i440fx-7.2"}, got.MachineTypes)
 	assert.Equal(t, "/usr/bin/qemu-system-x86_64", got.EmulatorVersion)
-	// Only the default pool counts (53687091200); data (21474836480) and the inactive iso do not.
-	assert.Equal(t, int64(53687091200), got.AllocatableStorage, "the default pool only: data and the inactive iso are not counted")
+	// The default pool's directory, measured fresh with statvfs (f_bavail *
+	// f_frsize) — not libvirt's cached <available> (596772913152), and no other
+	// pool (data, the inactive iso) is counted.
+	assert.Equal(t, statfsFixtureBytes, got.AllocatableStorage)
+	assert.Equal(t, []string{
+		"nodeinfo", "capabilities", "domcapabilities",
+		"pool-list --all", "pool-dumpxml default", statfsKey,
+	}, conn.commands(), "no pool-refresh, no pool-info, and no other pool is read")
 }
 
 func TestCollectHostInfo_NodeinfoError_NotReady(t *testing.T) {
@@ -395,22 +510,107 @@ func TestCollectHostInfo_BestEffortDegrades(t *testing.T) {
 	assert.Zero(t, got.AllocatableStorage)
 }
 
-func TestCollectHostInfo_OddPoolInfoSkipped(t *testing.T) {
-	// The default pool answers with no Available line; storage stays 0 and
-	// the host is still READY (storage is best-effort).
-	script := map[string]fakeVirshResult{
-		"nodeinfo":                  {stdout: nodeInfoFixture},
-		"capabilities":              {stdout: capabilitiesFixture},
-		"domcapabilities":           {stdout: domCapabilitiesFixture},
-		"pool-list --all":           {stdout: " Name    State    Autostart\n-------\n default   active   yes\n"},
-		"pool-info --bytes default": {stdout: "Name: default\nState: running\n"}, // no Available
+// TestCollectStorageBytes_FailsClosed pins R31's fail-closed contract: every
+// way the default pool's free space cannot be measured reports 0 — which the
+// scheduler's disk-space filter reads as "no room" — and leaves the host
+// READY (storage never gates health). A non-filesystem pool, or one whose
+// definition cannot be read, is never stat'ed.
+func TestCollectStorageBytes_FailsClosed(t *testing.T) {
+	cases := []struct {
+		name      string
+		override  map[string]fakeVirshResult
+		wantNoRun bool // the statvfs must not even be attempted
+	}{
+		{name: "stat fails", override: map[string]fakeVirshResult{
+			statfsKey: {err: errors.New("stat: cannot read file system information: Stale file handle")},
+		}},
+		{name: "stat prints an error text", override: map[string]fakeVirshResult{
+			statfsKey: {stdout: "stat: cannot read file system information for '/var/lib/libvirt/images'"},
+		}},
+		{name: "stat prints too many fields", override: map[string]fakeVirshResult{
+			statfsKey: {stdout: "507261 1048576 579243 1744665"},
+		}},
+		{name: "stat prints nothing", override: map[string]fakeVirshResult{statfsKey: {stdout: ""}}},
+		{name: "stat overflows", override: map[string]fakeVirshResult{
+			statfsKey: {stdout: "9223372036854775807 4096"},
+		}},
+		{name: "pool-dumpxml fails", wantNoRun: true, override: map[string]fakeVirshResult{
+			"pool-dumpxml default": {err: errors.New("error: failed to get pool 'default'")},
+		}},
+		{name: "pool-dumpxml unparseable", wantNoRun: true, override: map[string]fakeVirshResult{
+			"pool-dumpxml default": {stdout: "<pool type='dir'"},
+		}},
+		{name: "logical (LVM) pool", wantNoRun: true, override: map[string]fakeVirshResult{
+			"pool-dumpxml default": {stdout: "<pool type='logical'><name>default</name><available unit='bytes'>99999999999</available>" +
+				"<target><path>/dev/vg0</path></target></pool>"},
+		}},
+		{name: "rbd pool", wantNoRun: true, override: map[string]fakeVirshResult{
+			"pool-dumpxml default": {stdout: "<pool type='rbd'><name>default</name><available unit='bytes'>99999999999</available></pool>"},
+		}},
+		{name: "relative target path", wantNoRun: true, override: map[string]fakeVirshResult{
+			"pool-dumpxml default": {stdout: "<pool type='dir'><name>default</name><target><path>images</path></target></pool>"},
+		}},
+		{name: "pool-list fails", wantNoRun: true, override: map[string]fakeVirshResult{
+			"pool-list --all": {err: errors.New("boom")},
+		}},
 	}
-	conn := &fakeHostConn{id: "host-odd", script: script}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			script := fullHostScript()
+			for k, v := range tc.override {
+				script[k] = v
+			}
+			conn := &fakeHostConn{id: "host-x", script: script}
 
-	got := collectHostInfo(context.Background(), conn, "host-odd", "addr", nil, slog.Default())
+			got := collectHostInfo(context.Background(), conn, "host-x", "addr", nil, slog.Default())
 
-	assert.Equal(t, contracts.HostHealthReady, got.Health)
-	assert.Zero(t, got.AllocatableStorage)
+			assert.Equal(t, contracts.HostHealthReady, got.Health, "storage never gates health")
+			assert.Zero(t, got.AllocatableStorage, "an unmeasurable pool reports 0 (fail closed), never libvirt's cached value")
+			if tc.wantNoRun {
+				assert.NotContains(t, conn.commands(), statfsKey)
+			}
+		})
+	}
+}
+
+// TestCollectStorageBytes_TimeoutFailsClosed proves the measurement runs under
+// a bounded context (hostStorageProbeTimeout at most) and that a statvfs which
+// hangs — statfs on a dead hard-mounted NFS export blocks — is abandoned when
+// that context ends, reporting 0.
+func TestCollectStorageBytes_TimeoutFailsClosed(t *testing.T) {
+	conn := &fakeHostConn{id: "host-hung", script: fullHostScript()}
+	var deadline time.Time
+	var hasDeadline bool
+	conn.runHost = func(ctx context.Context, _ []string) (*hostconn.Result, error) {
+		deadline, hasDeadline = ctx.Deadline()
+		<-ctx.Done() // a hung statfs: returns only when the probe is cancelled
+		return nil, ctx.Err()
+	}
+
+	start := time.Now()
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	got := collectStorageBytes(ctx, conn, "host-hung", slog.Default())
+
+	assert.Zero(t, got)
+	require.True(t, hasDeadline, "the statvfs must run under a deadline")
+	assert.False(t, deadline.After(start.Add(hostStorageProbeTimeout)),
+		"the probe deadline is at most hostStorageProbeTimeout away")
+}
+
+// TestCollectStorageBytes_NetfsAndFsPoolsMeasured: every filesystem-backed pool
+// type is measured with statvfs of its target directory.
+func TestCollectStorageBytes_NetfsAndFsPoolsMeasured(t *testing.T) {
+	for _, typ := range filesystemPoolTypes {
+		t.Run(typ, func(t *testing.T) {
+			script := fullHostScript()
+			script["pool-dumpxml default"] = fakeVirshResult{stdout: "<pool type='" + typ + "'><name>default</name>" +
+				"<available unit='bytes'>1</available><target><path>" + poolDirFixture + "/</path></target></pool>"}
+			conn := &fakeHostConn{id: "host-fs", script: script}
+
+			assert.Equal(t, statfsFixtureBytes, collectStorageBytes(context.Background(), conn, "host-fs", slog.Default()))
+		})
+	}
 }
 
 // TestCollectHostInfo_OnlyDefaultPoolCounts pins #416 M3: space in any other
@@ -418,11 +618,11 @@ func TestCollectHostInfo_OddPoolInfoSkipped(t *testing.T) {
 // default pool is not active reports no allocatable storage.
 func TestCollectHostInfo_OnlyDefaultPoolCounts(t *testing.T) {
 	script := map[string]fakeVirshResult{
-		"nodeinfo":               {stdout: nodeInfoFixture},
-		"capabilities":           {stdout: capabilitiesFixture},
-		"domcapabilities":        {stdout: domCapabilitiesFixture},
-		"pool-list --all":        {stdout: " Name    State    Autostart\n-------\n default inactive no\n data   active   yes\n"},
-		"pool-info --bytes data": {stdout: "Available:      99999999999\n"},
+		"nodeinfo":          {stdout: nodeInfoFixture},
+		"capabilities":      {stdout: capabilitiesFixture},
+		"domcapabilities":   {stdout: domCapabilitiesFixture},
+		"pool-list --all":   {stdout: " Name    State    Autostart\n-------\n default inactive no\n data   active   yes\n"},
+		"pool-dumpxml data": {stdout: poolDumpXMLDirFixture},
 	}
 	conn := &fakeHostConn{id: "host-data", script: script}
 
@@ -430,7 +630,85 @@ func TestCollectHostInfo_OnlyDefaultPoolCounts(t *testing.T) {
 
 	assert.Equal(t, contracts.HostHealthReady, got.Health)
 	assert.Zero(t, got.AllocatableStorage)
-	assert.NotContains(t, conn.commands(), "pool-info --bytes data", "another pool is never read")
+	assert.Equal(t, []string{"nodeinfo", "capabilities", "domcapabilities", "pool-list --all"}, conn.commands(),
+		"neither another pool nor an inactive default pool's directory is read")
+}
+
+// sharedFilesystem is one filesystem (an NFS export) that several fake hosts
+// mount as their default pool directory: each host's statvfs reads its CURRENT
+// free space, like the kernel does.
+type sharedFilesystem struct {
+	mu          sync.Mutex
+	availBlocks int64
+}
+
+func (fs *sharedFilesystem) setAvailBlocks(n int64) {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+	fs.availBlocks = n
+}
+
+func (fs *sharedFilesystem) statfs(_ context.Context, argv []string) (*hostconn.Result, error) {
+	if strings.Join(argv, " ") != strings.TrimPrefix(statfsKey, "! ") {
+		return nil, fmt.Errorf("sharedFilesystem: unexpected host command %q", argv)
+	}
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+	return &hostconn.Result{Stdout: fmt.Sprintf("%d 1048576\n", fs.availBlocks)}, nil
+}
+
+// TestProvider_ListHosts_SharedPoolSameFreshValue reproduces the 2026-10-22 lab
+// finding (R31): two hosts mount the same NFS export as their default pool and
+// libvirt's cached pool values disagree (220.8 GiB on one, 558.5 GiB on the
+// other, never refreshed). Both hosts must report the SAME value — the
+// filesystem's current free space — and follow it when it changes, with no
+// pool-refresh.
+func TestProvider_ListHosts_SharedPoolSameFreshValue(t *testing.T) {
+	staleDumpXML := func(availBytes int64) string {
+		return strings.Replace(poolDumpXMLDirFixture, "<available unit='bytes'>596772913152</available>",
+			fmt.Sprintf("<available unit='bytes'>%d</available>", availBytes), 1)
+	}
+	fs := &sharedFilesystem{availBlocks: 507261}
+	hostScript := func(cachedAvail int64) map[string]fakeVirshResult {
+		s := fullHostScript()
+		s["pool-dumpxml default"] = fakeVirshResult{stdout: staleDumpXML(cachedAvail)}
+		return s
+	}
+	conns := map[hostconn.HostID]*fakeHostConn{
+		"dome2": {id: "dome2", script: hostScript(237086629478), runHost: fs.statfs}, // libvirt cached 220.8 GiB
+		"dome3": {id: "dome3", script: hostScript(599684438835), runHost: fs.statfs}, // libvirt cached 558.5 GiB
+	}
+	inv := hostsecret.Inventory{
+		SchemaVersion: hostsecret.SchemaVersion,
+		Hosts: []hostsecret.Host{
+			{ID: "dome2", Endpoint: "qemu+ssh://virt@dome2/system"},
+			{ID: "dome3", Endpoint: "qemu+ssh://virt@dome3/system"},
+		},
+	}
+	p, _ := newClusteredProviderForTest(t, inv, fakeDialer(conns, nil))
+
+	hosts, err := p.ListHosts(context.Background())
+	require.NoError(t, err)
+	require.Len(t, hosts, 2)
+	assert.Equal(t, statfsFixtureBytes, hosts[0].AllocatableStorage)
+	assert.Equal(t, hosts[0].AllocatableStorage, hosts[1].AllocatableStorage,
+		"two hosts sharing one pool filesystem report the same value")
+
+	// 100 GiB is written to the export (by either host, or anything else):
+	// the next sync of both hosts sees it, without any pool-refresh.
+	fs.setAvailBlocks(507261 - 100*1024)
+	hosts, err = p.ListHosts(context.Background())
+	require.NoError(t, err)
+	want := statfsFixtureBytes - 100<<30
+	assert.Equal(t, want, hosts[0].AllocatableStorage)
+	assert.Equal(t, want, hosts[1].AllocatableStorage)
+
+	for id, c := range conns {
+		for _, cmd := range c.commands() {
+			assert.NotContains(t, cmd, "pool-refresh", "host %s: the inventory never refreshes a pool", id)
+			assert.NotContains(t, cmd, "pool-info", "host %s: libvirt's cached pool values are not read", id)
+		}
+	}
 }
 
 // --- Provider.ListHosts / GetHostInfo against a real ClusterRegistry ----------

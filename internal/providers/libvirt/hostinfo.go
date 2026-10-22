@@ -20,9 +20,12 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"math"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	"libvirt.org/go/libvirtxml"
 
@@ -32,13 +35,13 @@ import (
 
 // This file is the ADR-0007 P1 libvirt host-inventory data plane: it turns the
 // per-host `virsh` output that ListHosts/GetHostInfo (hosts.go) need into a
-// typed contracts.HostInfo. Each HostInfo field is fed by exactly one virsh
-// command:
+// typed contracts.HostInfo. Each HostInfo field is fed by one query:
 //
 //	allocatable_cpu / allocatable_mem_mib  <- virsh nodeinfo        (text)
 //	cpu_model / cpu_features               <- virsh capabilities    (XML, libvirtxml.Caps)
 //	machine_types / emulator_version       <- virsh domcapabilities (XML, libvirtxml.DomainCaps)
-//	allocatable_storage                    <- virsh pool-list/pool-info (text, best-effort)
+//	allocatable_storage                    <- virsh pool-list + pool-dumpxml, then statvfs
+//	                                          of the default pool's directory (stat -f)
 //	health                                 <- nodeinfo reachability (the core query)
 //	id / address / labels                  <- the registry's parsed inventory (no query)
 //
@@ -69,9 +72,25 @@ const (
 	// poolListHeaderName is the first column header of `virsh pool-list`, skipped
 	// when scanning rows.
 	poolListHeaderName = "Name"
-	// poolInfoKeyAvailable is the virsh pool-info label for a pool's free bytes.
-	poolInfoKeyAvailable = "Available"
+
+	// statfsAvailFormat is the `stat -f -c` format both free-space
+	// measurements use (the inventory's collectStorageBytes and the import-time
+	// hostFreeBytes): %a is statvfs f_bavail (blocks available to a non-root
+	// user) and %S is f_frsize (the fundamental block size %a counts in).
+	statfsAvailFormat = "%a %S"
+
+	// hostStorageProbeTimeout bounds the whole allocatable-storage measurement
+	// of one host (pool-list, pool-dumpxml and the statvfs), so a hung storage
+	// mount (statfs on a dead hard-mounted NFS export blocks) cannot stall an
+	// inventory sync; on expiry the host reports 0 (fail closed).
+	hostStorageProbeTimeout = 15 * time.Second
 )
+
+// filesystemPoolTypes are the libvirt storage pool types whose target is a
+// directory on a mounted filesystem (a plain directory, a local block-device
+// filesystem, a network filesystem): the only kinds whose free space statvfs
+// of the target measures.
+var filesystemPoolTypes = []string{"dir", "fs", "netfs"}
 
 // collectOneHost gathers one host's live inventory behind a briefly-held
 // connection lease and returns it as a contracts.HostInfo. It is the per-host
@@ -293,16 +312,43 @@ func parseDomCapsMachineEmulator(domCapsXML string) (machineTypes []string, emul
 	return machineTypes, dc.Path, nil
 }
 
-// collectStorageBytes best-effort reports the available bytes of the host's
-// `default` storage pool — the pool VM disks, clones and imported disks land
-// in (defaultStoragePool) — when it is ACTIVE (`virsh pool-list --all`, then
-// `virsh pool-info --bytes default`). Other pools are not counted: space there
-// cannot hold a disk VirtRigaud lands in `default`, and summing them made the
-// scheduler's disk-space filter (ADR-0007 Addendum B, B7.4) admit hosts whose
-// `default` pool is full (#416 M3). It never fails the caller: any error
-// (pools unavailable, no active `default` pool, --bytes unsupported on an old
-// virsh, an odd pool-info) yields 0 and is logged at debug.
+// collectStorageBytes reports the bytes a non-root writer can still use in the
+// host's `default` storage pool — the pool VM disks, clones and imported disks
+// land in (defaultStoragePool) — measured FRESH on every inventory sync (R31).
+//
+// Steps, all under one hostStorageProbeTimeout budget:
+//
+//  1. `virsh pool-list --all`: the `default` pool must be ACTIVE. Other pools
+//     are not counted: space there cannot hold a disk VirtRigaud lands in
+//     `default`, and summing them admitted hosts whose `default` pool is full
+//     (#416 M3).
+//  2. `virsh pool-dumpxml default` (typed libvirtxml.StoragePool): the pool's
+//     type and target directory.
+//  3. For a filesystem-backed pool (filesystemPoolTypes — the only kinds whose
+//     target is a directory VirtRigaud can write disk files into): `stat -f -c
+//     "%a %S" -- <dir>` on the host, i.e. statvfs f_bavail * f_frsize — the
+//     same measurement, in the same unit (bytes), as the import-time
+//     free-space check (hostFreeBytes).
+//
+// libvirt's own pool-info Available is deliberately NOT used: libvirt caches it
+// until `virsh pool-refresh` (two hosts mounting one NFS export as their
+// `default` pool reported 220.8 GiB and 558.5 GiB for a filesystem with ~501
+// GiB free), and even right after a refresh it is f_bfree, which counts the
+// blocks reserved for root that the provider's non-root writes cannot use. A
+// pool-refresh per sync is not done either: it rescans every volume of the
+// pool (slow on a large NFS pool, on every heartbeat of every host) and
+// contends with the refresh routed import runs after publishing a disk.
+//
+// It never fails the caller, and it fails CLOSED: any error (pools unavailable,
+// no active `default` pool, a pool that is not filesystem-backed, an
+// unreadable definition, a stat that fails, times out or prints something
+// unexpected) yields 0, which the scheduler's disk-space filter (ADR-0007
+// Addendum B, B7.4) and a VMPlacementPolicy's minDiskSpacePerHost read as "no
+// room" — never a stale or made-up large value.
 func collectStorageBytes(ctx context.Context, c hostconn.Conn, id hostconn.HostID, logger *slog.Logger) int64 {
+	ctx, cancel := context.WithTimeout(ctx, hostStorageProbeTimeout)
+	defer cancel()
+
 	listRes, err := c.Virsh(ctx, "pool-list", "--all")
 	if err != nil {
 		logger.Debug("libvirt host inventory: pool-list unavailable (best-effort)",
@@ -313,19 +359,86 @@ func collectStorageBytes(ctx context.Context, c hostconn.Conn, id hostconn.HostI
 		logger.Debug("libvirt host inventory: no active default storage pool (best-effort)", "host", string(id))
 		return 0
 	}
-	infoRes, err := c.Virsh(ctx, "pool-info", "--bytes", defaultStoragePool)
+	defRes, err := c.Virsh(ctx, "pool-dumpxml", defaultStoragePool)
 	if err != nil {
-		logger.Debug("libvirt host inventory: pool-info failed (best-effort)",
+		logger.Warn("libvirt host inventory: cannot read the default storage pool; reporting no allocatable storage",
 			"host", string(id), "pool", defaultStoragePool, "error", err.Error())
 		return 0
 	}
-	avail, ok := parsePoolAvailableBytes(infoRes.Stdout)
-	if !ok {
-		logger.Debug("libvirt host inventory: pool-info missing Available (best-effort)",
-			"host", string(id), "pool", defaultStoragePool)
+	poolType, dir, err := parseFilesystemPoolDir(defRes.Stdout)
+	if err != nil {
+		logger.Warn("libvirt host inventory: cannot measure the default storage pool; reporting no allocatable storage",
+			"host", string(id), "pool", defaultStoragePool, "type", poolType, "error", err.Error())
+		return 0
+	}
+	statRes, err := c.RunHost(ctx, "stat", "-f", "-c", statfsAvailFormat, "--", dir)
+	if err != nil {
+		logger.Warn("libvirt host inventory: free-space measurement of the default storage pool failed; reporting no allocatable storage",
+			"host", string(id), "pool", defaultStoragePool, "dir", dir, "error", err.Error())
+		return 0
+	}
+	avail, err := parseStatfsAvailBytes(statRes.Stdout)
+	if err != nil {
+		logger.Warn("libvirt host inventory: unexpected free-space measurement of the default storage pool; reporting no allocatable storage",
+			"host", string(id), "pool", defaultStoragePool, "dir", dir, "error", err.Error())
 		return 0
 	}
 	return avail
+}
+
+// parseFilesystemPoolDir parses a `virsh pool-dumpxml` document (typed
+// libvirtxml.StoragePool) and returns the pool's type and target directory
+// when the pool is filesystem-backed (filesystemPoolTypes). poolType is
+// returned whenever the document parses, for the caller's log. It is an error
+// when the document does not parse, the pool is of another type (a logical,
+// iSCSI, RBD, ZFS, ... pool's target is not a directory VirtRigaud writes disk
+// files into, and statvfs of it would measure an unrelated filesystem), or the
+// target path is missing, relative or not lexically clean.
+func parseFilesystemPoolDir(poolXML string) (poolType, dir string, err error) {
+	def := &libvirtxml.StoragePool{}
+	if uerr := def.Unmarshal(poolXML); uerr != nil {
+		return "", "", fmt.Errorf("parse pool-dumpxml: %w", uerr)
+	}
+	poolType = def.Type
+	if !slices.Contains(filesystemPoolTypes, poolType) {
+		return poolType, "", fmt.Errorf("pool type %q is not filesystem-backed (want one of %v)", poolType, filesystemPoolTypes)
+	}
+	if def.Target == nil {
+		return poolType, "", fmt.Errorf("pool of type %q has no target", poolType)
+	}
+	dir = strings.TrimSpace(def.Target.Path)
+	if trimmed := strings.TrimRight(dir, "/"); trimmed != "" {
+		dir = trimmed
+	}
+	if dir == "" || !filepath.IsAbs(dir) || filepath.Clean(dir) != dir {
+		return poolType, "", fmt.Errorf("pool target path %q is not a usable absolute directory", def.Target.Path)
+	}
+	return poolType, dir, nil
+}
+
+// parseStatfsAvailBytes parses the output of `stat -f -c "%a %S"`
+// (statfsAvailFormat): the filesystem's blocks available to a non-root user
+// (statvfs f_bavail) and its fundamental block size (f_frsize), and returns
+// their product in bytes. It is strict — exactly two non-negative decimal
+// integers, a positive block size, and no int64 overflow — so an odd or
+// truncated output is an error, never a misread (and possibly huge) number.
+func parseStatfsAvailBytes(stdout string) (int64, error) {
+	fields := strings.Fields(stdout)
+	if len(fields) != 2 {
+		return 0, fmt.Errorf("statfs output %q: want 2 fields, got %d", stdout, len(fields))
+	}
+	avail, err := strconv.ParseInt(fields[0], 10, 64)
+	if err != nil || avail < 0 {
+		return 0, fmt.Errorf("statfs available blocks %q is not a non-negative integer", fields[0])
+	}
+	frsize, err := strconv.ParseInt(fields[1], 10, 64)
+	if err != nil || frsize <= 0 {
+		return 0, fmt.Errorf("statfs block size %q is not a positive integer", fields[1])
+	}
+	if avail > math.MaxInt64/frsize {
+		return 0, fmt.Errorf("statfs free space %d x %d overflows int64", avail, frsize)
+	}
+	return avail * frsize, nil
 }
 
 // parseActivePoolNames parses `virsh pool-list --all` tabular output for the
@@ -348,29 +461,6 @@ func parseActivePoolNames(stdout string) []string {
 		}
 	}
 	return names
-}
-
-// parsePoolAvailableBytes parses `virsh pool-info --bytes` output for the pool's
-// Available bytes. With --bytes the value is a raw integer (optionally followed
-// by a "bytes" token); this reads the first integer after the "Available:"
-// label. ok is false when there is no parseable Available line.
-func parsePoolAvailableBytes(stdout string) (int64, bool) {
-	for _, line := range strings.Split(stdout, "\n") {
-		key, value, ok := splitColon(line)
-		if !ok || key != poolInfoKeyAvailable {
-			continue
-		}
-		fields := strings.Fields(value)
-		if len(fields) == 0 {
-			return 0, false
-		}
-		n, err := strconv.ParseInt(fields[0], 10, 64)
-		if err != nil {
-			return 0, false
-		}
-		return n, true
-	}
-	return 0, false
 }
 
 // splitColon splits a "Label: value" line at the FIRST colon, returning the

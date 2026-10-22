@@ -108,7 +108,7 @@ func TestServer_ListHosts_ClusteredMapsToProto(t *testing.T) {
 	assert.Equal(t, int64(16384), h.AllocatableMemMib)
 	assert.Equal(t, "Skylake-Client-IBRS", h.CpuModel)
 	assert.Equal(t, []string{"pc-i440fx-7.2"}, h.MachineTypes)
-	assert.Equal(t, int64(53687091200), h.AllocatableStorage)
+	assert.Equal(t, statfsFixtureBytes, h.AllocatableStorage, "the default pool directory's statvfs free space")
 }
 
 // TestServer_GetHostInfo_ClusteredMapsToProto verifies the single-host refresh
