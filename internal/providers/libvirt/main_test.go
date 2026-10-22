@@ -51,6 +51,14 @@ func TestMain(m *testing.M) {
 		os.Exit(1)
 	}
 	fixtureImagesDir = dir
+	// A struct-literal provider (no hostSeedDir) builds cloud-init seeds in a
+	// scratch seed directory, never the real DefaultSeedDir.
+	seedRoot, err := os.MkdirTemp("", "virtrigaud-test-seeds-")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "libvirt tests: %v\n", err)
+		os.Exit(1)
+	}
+	seedDirDefault = seedRoot
 	// The fake hosts' "default" storage pool is rooted in the fixture
 	// directory (FAKE_POOL_DIR), never the real /var/lib/libvirt/images.
 	defaultPoolRequiredDir = dir
@@ -58,6 +66,7 @@ func TestMain(m *testing.M) {
 	opsDiskPath = filepath.Join(dir, opsDomainName+"-disk.qcow2")
 	code := m.Run()
 	_ = os.RemoveAll(dir)
+	_ = os.RemoveAll(seedRoot)
 	if hits, _ := os.ReadFile(guardLog); len(hits) > 0 { //nolint:gosec // the test binary's own guard log
 		fmt.Fprintf(os.Stderr, "libvirt tests: the host guard refused commands that would have touched the real host:\n%s", hits)
 		code = 1

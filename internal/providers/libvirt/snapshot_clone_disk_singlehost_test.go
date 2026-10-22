@@ -179,6 +179,10 @@ sh)
     else printf '755 0\n` + scdSSHUID + `\n'; fi ;;
   ` + scdDirModePattern + `)
     if [ -f "$d/unsafe-dir-${4##*/}" ]; then printf '775 0\n` + scdSSHUID + `\n'; else printf '755 0\n` + scdSSHUID + `\n'; fi ;;
+  ` + scdSeedRootPattern + `)
+    if [ -f "$d/missing-seed-root" ]; then echo ` + seedRootMissingMarker + `
+    elif [ -f "$d/listable-seed-root" ]; then printf '755 ` + scdSSHUID + `\n` + scdSSHUID + `\n'
+    else printf '711 ` + scdSSHUID + `\n` + scdSSHUID + `\n'; fi ;;
   esac ;;
 sudo)
   if [ "$1" = "-n" ]; then
@@ -203,6 +207,10 @@ esac
 var (
 	scdChainMemberPattern = shellQuote(chainMemberScript)
 	scdDirModePattern     = shellQuote(diskDirModeScript)
+	// scdSeedRootPattern matches seedRootScript: the seed directory is the
+	// SSH user's 0711 directory, unless local/missing-seed-root or
+	// local/listable-seed-root scripts otherwise.
+	scdSeedRootPattern = shellQuote(seedRootScript)
 )
 
 // scdSSHUID and scdSSHGID are the SSH user's uid and gid the fake id prints.
@@ -298,7 +306,7 @@ func newSCDFixture(t *testing.T, domains map[string]string) *scdFixture {
 		t:       t,
 		dir:     dir,
 		staging: staging,
-		p:       &Provider{virshProvider: vp, registry: reg, hostID: "single", hostStagingDir: staging},
+		p:       &Provider{virshProvider: vp, registry: reg, hostID: "single", hostStagingDir: staging, hostSeedDir: staging},
 	}
 }
 

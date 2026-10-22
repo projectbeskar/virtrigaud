@@ -195,10 +195,13 @@ func newCreateHost(t *testing.T) *createHost {
 
 	vp := h.host("h1")
 	staging := t.TempDir()
+	// The staging directory doubles as the seed directory, which must be
+	// private to the SSH user (ensureSeedRoot): t.TempDir follows the umask.
+	require.NoError(t, os.Chmod(staging, 0o700))
 	return &createHost{
 		fakeHost: h,
 		vp:       vp,
-		p:        &Provider{virshProvider: vp, imageDirs: []string{h.images}, hostStagingDir: staging},
+		p:        &Provider{virshProvider: vp, imageDirs: []string{h.images}, hostStagingDir: staging, hostSeedDir: staging},
 		staging:  staging,
 	}
 }
@@ -285,9 +288,7 @@ func TestCreate_TwoNamespacesSameNameOnOneHost(t *testing.T) {
 		st, err := os.Stat(seedDir)
 		require.NoError(t, err)
 		assert.Equal(t, os.FileMode(0o711), st.Mode().Perm(), "seed dir: traverse-only for the qemu user")
-		ud, err := os.Stat(filepath.Join(seedDir, "user-data"))
-		require.NoError(t, err)
-		assert.Equal(t, os.FileMode(0o600), ud.Mode().Perm(), "user-data stays private to the SSH user")
+		assertPrivateSeed(t, seedDir)
 	}
 
 	aISO, err := parseDomainPathRefs(c.domainXML("team-a.web"))

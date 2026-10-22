@@ -361,6 +361,7 @@ func TestDelete_SingleHost_SymlinkedStagingDirectory(t *testing.T) {
 	link := filepath.Join(t.TempDir(), "staging-link")
 	require.NoError(t, os.Symlink(c.staging, link))
 	c.p.hostStagingDir = link
+	c.p.hostSeedDir = link
 	c.t2s3Pair()
 	ctx := context.Background()
 

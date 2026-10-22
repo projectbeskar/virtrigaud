@@ -97,6 +97,7 @@ func newRoutedSCD(t *testing.T, hosts map[string]map[string]string) *routedSCD {
 
 	p, reg, closes := routedCluster(t)
 	p.hostStagingDir = staging
+	p.hostSeedDir = staging
 	return &routedSCD{scdFixture: &scdFixture{t: t, dir: dir, staging: staging, p: p}, reg: reg, closes: closes}
 }
 
@@ -169,8 +170,10 @@ exec "$FAKE_SCD_TOOLS/sudo" "$@"
 // its fake. The disk/varstore target check (targetKindScript) and the
 // cluster-wide guard's disk-name probe (existingPathsScript) are logged as
 // scdFakeTool logs them, and run for real only on paths inside the test's own
-// directory (FAKE_SCD_DIR): a real host path is never inspected. Every other
-// sh call is scdFakeTool's.
+// directory (FAKE_SCD_DIR): a real host path is never inspected. So is the
+// existence probe (pathExistsScript) on a path in the staging directory (a
+// clone's look for its source seed's private copy, R27). Every other sh call
+// is scdFakeTool's.
 const routedGuardShell = `#!/bin/sh
 case "$2" in
 "` + hostGuardMarker + `"*)
@@ -185,6 +188,11 @@ case "$2" in
   exec /bin/sh -c '` + umaskExecScript + `' sh "$@" ;;
 '` + targetKindScript + `'|'` + existingPathsScript + `')
   case "$4" in "$FAKE_SCD_DIR"/*)
+    printf 'local sh %s\n' "$*" >> "$FAKE_SCD_DIR/calls.log"
+    exec /bin/sh "$@" ;;
+  esac ;;
+'` + pathExistsScript + `')
+  case "$4" in "$FAKE_SCD_STAGING"/*)
     printf 'local sh %s\n' "$*" >> "$FAKE_SCD_DIR/calls.log"
     exec /bin/sh "$@" ;;
   esac ;;

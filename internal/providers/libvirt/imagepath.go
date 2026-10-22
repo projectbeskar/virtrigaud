@@ -118,9 +118,9 @@ const (
 // that must never be used as a base image: VM disks, imported migration disks,
 // cloud-init seed ISOs, and host-side download/staging temporaries.
 var reservedImageSuffixes = []string{
-	vmDiskVolumeSuffix + qcow2Ext,               // <vm>-disk.qcow2
-	vmDiskVolumeSuffix,                          // legacy <vm>-disk
-	contracts.ImportedDiskNameSuffix + qcow2Ext, // <vm>-migrated.qcow2
+	vmDiskVolumeSuffix + qcow2Ext,                                // <vm>-disk.qcow2
+	vmDiskVolumeSuffix,                                           // legacy <vm>-disk
+	contracts.ImportedDiskNameSuffix + qcow2Ext,                  // <vm>-migrated.qcow2
 	"cloud-init.iso", "-cidata.iso", cloudInitISOPrivateCopyName, // cloud-init seeds
 	".download", "-temp.img", "-download.img", ".partial", // staging
 }

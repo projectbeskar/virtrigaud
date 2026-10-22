@@ -293,6 +293,13 @@ func (p *Provider) createVMWithCloudInit(ctx context.Context, vp *VirshProvider,
 	storageProvider := NewStorageProvider(vp)
 	storageProvider.stagingDir = p.stagingDir()
 
+	// Every create builds a cloud-init seed (the request's user-data, or the
+	// default): refuse an unusable seed directory before anything is written
+	// on the host (R27; PrepareCloudInit checks it again when it builds).
+	if err := ensureSeedRoot(ctx, vp, p.seedDir()); err != nil {
+		return "", fmt.Errorf("failed to prepare cloud-init: %w", err)
+	}
+
 	// Ensure default storage pool exists and is active
 	if err := storageProvider.EnsureDefaultStoragePool(ctx); err != nil {
 		return "", fmt.Errorf("failed to ensure storage pool: %w", err)

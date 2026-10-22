@@ -267,11 +267,12 @@ func TestCloneSeed_RealISORoundTrip(t *testing.T) {
 	h := newFakeHost(t)
 	vp := h.host("h1")
 	staging := t.TempDir()
-	p := &Provider{virshProvider: vp, hostStagingDir: staging}
+	require.NoError(t, os.Chmod(staging, 0o700)) // the seed directory must be private (R27)
+	p := &Provider{virshProvider: vp, hostStagingDir: staging, hostSeedDir: staging}
 	ctx := context.Background()
 
 	cip := NewCloudInitProvider(vp)
-	cip.stagingDir = staging
+	cip.seedDir = staging
 	srcISO, err := cip.PrepareCloudInit(ctx, CloudInitConfig{
 		UserData: p.generateDefaultCloudInit("web"), InstanceID: "team-a.web", Hostname: "web",
 		NetworkConfig: "version: 2\nethernets: {}\n",
