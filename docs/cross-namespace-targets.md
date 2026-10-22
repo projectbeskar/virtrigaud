@@ -168,12 +168,24 @@ clones are not affected.
 
 ### A clone carries the source's cloud-init seed
 
-A clone is a copy of the source VM's disk and definition, including its
-cloud-init CD-ROM. On a clustered libvirt provider the clone gets its own copy
-of the source's seed ISO; on a single-host one it references the source's.
-Either way the target VM receives the source's user-data — any provisioning
-secrets in it (passwords, keys, tokens) included. Grant a namespace only if its
-users may see the source VMs' user-data, or keep secrets out of user-data.
+A clone is a copy of the source VM's disk and definition. On libvirt (both
+topologies) the clone gets a cloud-init seed of its own. It carries a new
+identity, and the source's user-data unless the `VMClone` gives its own
+(single-host clones made before R26 still reference the source's seed). On
+vSphere the clone keeps the source's `guestinfo.userdata`. Either way the
+target VM receives the source's user-data — any provisioning secrets in it
+(passwords, keys, tokens) included. Grant a namespace only if its users may see
+the source VMs' user-data, or keep secrets out of user-data.
+
+**Creating a `VMClone` is read access to the source VM's data.** The clone's
+disk is a full copy of the source's disk. On libvirt, the `VMClone`'s
+`spec.customization.userData.cloudInit.inline` runs as **root** on the clone's
+first boot, so whoever can create the `VMClone` can read everything on that
+copy. This holds within one namespace as much as across namespaces. Grant
+`create` on `vmclones` only to subjects trusted with read access to the source
+VMs' data. Grant a target namespace only if the subjects there may have that
+access too. See
+[VM ownership: a clone's host identity](vm-ownership.md#a-clones-host-identity).
 
 ## The target VM must be the migration's own
 

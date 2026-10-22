@@ -370,6 +370,46 @@ folder, doesn't find the first attempt's clone and makes a second one there,
 exactly as a re-sent `Create` would. Don't change a vSphere Provider's
 default folder while clones or creates are held.
 
+### A clone's host identity
+
+A clone is a new VM: it must not boot with its source's cloud-init identity.
+A full clone copies the source's disk, including cloud-init's record of the
+instance it last ran as; if the clone's datasource still names the source's
+`instance-id`, cloud-init skips its per-instance modules on the clone's first
+boot and the clone keeps the source's **SSH host keys** and hostname. Each
+provider handles it as follows:
+
+| Provider | What the clone boots with | How |
+|---|---|---|
+| libvirt (single-host and clustered) | A new instance-id (`virtrigaud-<target uid>`) and the target's hostname | The clone gets its own NoCloud seed ISO; see [libvirt clones: a clone's cloud-init identity](libvirt-clones.md#a-clones-cloud-init-identity) |
+| vSphere | A new instance-id (`virtrigaud-<target uid>`) and the target's hostname | The clone's `guestinfo.metadata` (and a `#cloud-config` `guestinfo.userdata`'s `hostname:`/`fqdn:`) are rewritten in the `CloneVM_Task`; see [vSphere: Clones](#clones) |
+| Proxmox | A new instance-id and the target's name as hostname | PVE regenerates the cloud-init drive from the clone's own config; the provider changes nothing; see [Proxmox: clones' cloud-init identity](#clones-cloud-init-identity) |
+
+On the new instance cloud-init regenerates the SSH host keys (`ssh_deletekeys`
+defaults to `true`) and **re-runs every per-instance module** of the user-data
+(`runcmd`, `packages`, `users`, ...). It does **not** regenerate
+`/etc/machine-id`: a clone of a VM whose machine-id is set keeps it on every
+provider, unless the source was sealed (machine-id emptied, e.g. with
+`cloud-init clean --machine-id`) before it was cloned. Static network
+configuration in the source's cloud-init data is carried to the clone as is.
+Clones of VMs that do not use cloud-init are unaffected, and clones made
+before this release keep the identity they booted with. Some keys in the
+user-data undo the new identity: `ssh_keys`, `ssh_deletekeys: false`,
+`preserve_hostname: true` and `manual_cache_clean: true`. The libvirt and
+vSphere providers log a `WARN` naming such keys, never their values (see
+[libvirt clones](libvirt-clones.md#a-clones-cloud-init-identity)).
+
+**Security: `create` on `VMClone` is read access to the source VM's data.**
+A clone is a full copy of its source's disk, and it boots cloud-init user-data
+as **root**. On libvirt that user-data is the `VMClone`'s
+`spec.customization.userData.cloudInit.inline` when it is set, so whoever can
+create a `VMClone` of a VM can run any command as root on a copy of that VM's
+disk and read everything on it. On every provider, a clone of a cloud-init VM
+also receives and re-runs the source's own user-data, which may carry
+secrets. Treat `create` on `vmclones` in a namespace as read access to every
+VM's data in that namespace, and grant it accordingly (cross-namespace clone
+targets also need [a grant](cross-namespace-targets.md)).
+
 **What was validated.** The provider behaviour is covered by unit tests
 against vcsim (vSphere), the libvirt fake-virsh harness and `pvefake`
 (Proxmox, including a re-send while PVE is still cloning, after a provider
@@ -563,6 +603,27 @@ the same `CloneVM_Task` that makes it: the three owner keys, as a create's.
 The owner stamp it would inherit from the source VM is replaced, and any
 prepared-image stamp (`virtrigaud.image.*`) is cleared. A clone never claims
 the source `VirtualMachine`'s owner, and is never an image artifact.
+
+The same `CloneVM_Task` gives the clone its own **cloud-init identity**
+([A clone's host identity](#a-clones-host-identity)). A source created with
+cloud-init data carries `guestinfo.metadata` with `instance-id: "<source
+name>"`, which the clone would inherit. The clone's `guestinfo.metadata`
+gets `instance-id: virtrigaud-<target uid>` and `local-hostname`: the
+`VMClone`'s `spec.customization.hostname` (with `.domain`, the FQDN), else the
+target's name. All other keys are kept. In a `#cloud-config`
+`guestinfo.userdata`, the top-level `hostname:`/`fqdn:` keys are rewritten to
+the target's. The keys are matched without regard to case, as vSphere treats
+ExtraConfig keys. Each value is written back under the source's own spelling
+of its key, in the source's own encoding (none, base64, or gzip+base64), with
+the source's encoding key. Metadata that cannot be read (an unknown
+`guestinfo.metadata.encoding`, not a YAML/JSON mapping, or an anchored
+`instance-id`/hostname value) refuses the clone (`InvalidArgument`) before
+anything is cloned. A source
+without `guestinfo.metadata` is left alone: cloud-init's VMware datasource then
+takes the instance-id from the VM's BIOS UUID, which vCenter regenerates for a
+clone. Other customization fields (including inline user-data) are not
+applied by the vSphere provider, and are logged. Guest customization
+specifications and OVF (vApp) properties are not used or changed.
 
 Before cloning, the provider looks for the target name among the direct
 children of the folder it clones into (the Provider's default folder),
@@ -934,6 +995,28 @@ unstamped VM and never re-binds, as before.
 
 A VM renamed in PVE since its create isn't found. The next create makes a new
 one.
+
+### Clones' cloud-init identity
+
+The Proxmox provider does not rewrite a clone's cloud-init data
+([A clone's host identity](#a-clones-host-identity)), because PVE regenerates
+it. The clone is named `target_name`, and PVE's clone gives every `netN` a new
+MAC address. PVE rebuilds the cloud-init drive from the VM's own config each
+time the VM starts. The user-data PVE generates sets `hostname:` to the VM's
+name. Without a `cicustom` meta-data snippet (the provider never sets one), the
+NoCloud `instance-id` is the SHA-1 of that user-data and the network data,
+which lists the MAC addresses. A clone therefore boots as a new cloud-init
+instance with its own hostname, and its SSH host keys are regenerated.
+
+Limits:
+
+- A source configured out of band with a `cicustom` **meta** snippet keeps that
+  snippet's fixed `instance-id` on its clones. A `cicustom` **user** snippet
+  keeps its own `hostname:` key.
+- With `citype: configdrive2`, the network data does not list the MAC
+  addresses. A clone whose PVE name equals its source's (the same
+  `VirtualMachine` name in another namespace) then gets the source's
+  `instance-id`.
 
 ### `ListVMs`
 

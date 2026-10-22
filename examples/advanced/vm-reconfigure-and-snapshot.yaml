@@ -191,6 +191,10 @@ spec:
   options:
     type: FullClone  # libvirt refuses LinkedClone in this release (docs/libvirt-clones.md)
     powerOn: true
+  # Every clone boots as a new cloud-init instance (new SSH host keys) with the
+  # hostname below (docs/vm-ownership.md#a-clones-host-identity). libvirt also
+  # uses userData.cloudInit.inline as the clone's user-data; networks and tags
+  # are not applied by the libvirt or vSphere providers.
   customization:
     hostname: web-server-01-test
     networks:

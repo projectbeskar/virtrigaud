@@ -66,8 +66,10 @@ func (c *createHost) seedOf(domain string) string {
 	return got[0]
 }
 
-// t2s3Pair creates team-a.t2s3 and a full clone team-a.t2s3c of it — whose
-// CD-ROM, as a single-host Clone leaves it, references the SOURCE's seed.
+// t2s3Pair creates team-a.t2s3 and a full clone team-a.t2s3c of it, then
+// turns the clone into one an OLDER release made: its CD-ROM references the
+// SOURCE's seed and it has no seed of its own (a single-host Clone before R26
+// left it so). The R24 reclaim must keep handling such pairs.
 func (c *createHost) t2s3Pair() {
 	c.t.Helper()
 	ctx := context.Background()
@@ -77,8 +79,17 @@ func (c *createHost) t2s3Pair() {
 		Source: contracts.VMRef{ID: "team-a.t2s3"}, TargetName: "t2s3c", TargetVM: r24CloneID,
 	})
 	require.NoError(c.t, err)
-	require.Contains(c.t, c.domainXML("team-a.t2s3c"), c.seedOf("team-a.t2s3"), "the clone's CD-ROM names the source's seed")
-	require.Len(c.t, c.seedEntries(), 1, "a single-host clone makes no seed of its own")
+
+	own, source := c.seedOf("team-a.t2s3c"), c.seedOf("team-a.t2s3")
+	for _, f := range []string{"dom-team-a.t2s3c.xml", "dom-" + domainUUIDOf(c.t, c.domainXML("team-a.t2s3c")) + ".xml"} {
+		path := filepath.Join(c.root, "h1", f)
+		b, err := os.ReadFile(path) //nolint:gosec // test reads its own fixture
+		require.NoError(c.t, err)
+		require.NoError(c.t, os.WriteFile(path, []byte(strings.ReplaceAll(string(b), own, source)), 0o600))
+	}
+	require.NoError(c.t, os.RemoveAll(filepath.Join(c.staging, own)))
+	require.Contains(c.t, c.domainXML("team-a.t2s3c"), source, "the legacy clone's CD-ROM names the source's seed")
+	require.Len(c.t, c.seedEntries(), 1, "a legacy single-host clone has no seed of its own")
 }
 
 func TestIsOwnSeedDirName(t *testing.T) {

@@ -134,9 +134,11 @@ case "$1" in
 esac
 `
 
-// fakeGenisoimageScript packs the seed directory's user-data and meta-data into
-// the -output file (so a test can see WHICH user-data went into which ISO), or
-// fails when $FAKE_HOST_DIR/fail-genisoimage exists.
+// fakeGenisoimageScript packs the seed directory's NoCloud files into the
+// -output file — a tar archive, whose bytes hold each file's content as is (so
+// a test can see WHICH user-data went into which ISO) and which
+// fakeIsoinfoScript reads back — or fails when $FAKE_HOST_DIR/fail-genisoimage
+// exists.
 const fakeGenisoimageScript = `#!/bin/sh
 printf '%s\n' "$*" >> "$FAKE_HOST_DIR/genisoimage.log"
 if [ -f "$FAKE_HOST_DIR/fail-genisoimage" ]; then echo "genisoimage: scripted failure" >&2; exit 1; fi
@@ -145,7 +147,30 @@ for a in "$@"; do
   if [ "$prev" = "-output" ]; then out="$a"; fi
   prev="$a"; last="$a"
 done
-cat "$last/user-data" "$last/meta-data" > "$out"
+files=""
+for f in user-data meta-data network-config vendor-data; do [ -f "$last/$f" ] && files="$files $f"; done
+tar -C "$last" -cf "$out" $files
+`
+
+// fakeIsoinfoScript reads a fakeGenisoimageScript "ISO" as isoinfo reads a
+// Rock Ridge image: `isoinfo -R -f -i <iso>` lists its files as /<name>, and
+// `isoinfo -R -i <iso> -x /<name>` prints one (nothing for a missing name, as
+// isoinfo does). -J fails as for an image without Joliet. It fails when
+// $FAKE_HOST_DIR/fail-isoinfo exists.
+const fakeIsoinfoScript = `#!/bin/sh
+printf '%s\n' "$*" >> "$FAKE_HOST_DIR/isoinfo.log"
+if [ -f "$FAKE_HOST_DIR/fail-isoinfo" ]; then echo "isoinfo: scripted failure" >&2; exit 2; fi
+if [ "$1" = -J ]; then echo "isoinfo: Unable to find Joliet SVD" >&2; exit 255; fi
+iso=""; x=""; list=0; prev=""
+for a in "$@"; do
+  case "$prev" in -i) iso="$a" ;; -x) x="$a" ;; esac
+  [ "$a" = -f ] && list=1
+  prev="$a"
+done
+[ -r "$iso" ] || { echo "isoinfo: Unable to open $iso" >&2; exit 2; }
+if [ "$list" = 1 ]; then tar -tf "$iso" | sed 's:^:/:'; exit 0; fi
+tar -xOf "$iso" "${x#/}" 2>/dev/null
+exit 0
 `
 
 // createHost is a fake hypervisor host that can run a full create.
@@ -160,7 +185,9 @@ func newCreateHost(t *testing.T) *createHost {
 	t.Helper()
 	h := newFakeHost(t)
 	bin := t.TempDir()
-	for name, script := range map[string]string{"virsh": createHostVirshScript, "genisoimage": fakeGenisoimageScript} {
+	for name, script := range map[string]string{
+		"virsh": createHostVirshScript, "genisoimage": fakeGenisoimageScript, "isoinfo": fakeIsoinfoScript,
+	} {
 		require.NoError(t, os.WriteFile(filepath.Join(bin, name), []byte(script), 0o700)) //nolint:gosec // test fixture must be executable
 	}
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))

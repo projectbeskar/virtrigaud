@@ -66,7 +66,7 @@ func TestSingleHostClone_StampsTheCloneWithItsTarget(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, shCloneDomain, resp.TargetVmId)
 
-	owners, err := domainOwners(fx.definedXML(shCloneDomain))
+	owners, err := domainOwners(fx.parseableDefinedXML(shCloneDomain))
 	require.NoError(t, err)
 	assert.Equal(t, []contracts.ObjectIdentity{shCloneTarget}, owners,
 		"the clone carries its target VirtualMachine's stamp, never the source's")
@@ -77,7 +77,7 @@ func TestSingleHostClone_WithoutUIDIsUnstamped(t *testing.T) {
 
 	_, err := NewServer(fx.p).Clone(context.Background(), scdFullClone)
 	require.NoError(t, err)
-	owners, err := domainOwners(fx.definedXML(shCloneDomain))
+	owners, err := domainOwners(fx.parseableDefinedXML(shCloneDomain))
 	require.NoError(t, err)
 	assert.Empty(t, owners, "a manager older than the stamp gets today's unstamped clone")
 }

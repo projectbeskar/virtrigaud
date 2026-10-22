@@ -115,7 +115,9 @@ func TestSingleHost_Clone_RawSourceIsDefinedAsQcow2(t *testing.T) {
 	defined := fx.definedXML("team-a.copy")
 	assert.Equal(t, "<driver name='qemu' type='qcow2'/>", primaryDriverOf(t, defined, "/var/lib/libvirt/images/team-a.copy-disk.qcow2"),
 		"the clone declares the format its disk is written in")
-	assert.Equal(t, "<driver name='qemu' type='raw'/>", primaryDriverOf(t, defined, scdSeedISO))
+	assert.Equal(t, "<driver name='qemu' type='raw'/>", primaryDriverOf(t, defined, cloneSeedDir("team-a.copy")+"/"+cloudInitISOName),
+		"the clone's own seed CD-ROM stays raw")
+	assert.NotContains(t, defined, scdSeedISO)
 }
 
 func TestClustered_Clone_RawSourceIsDefinedAsQcow2(t *testing.T) {

@@ -10,6 +10,13 @@
       "single virsh pool-dumpxml default",
       "local sh -c if [ -L \"$1\" ]; then echo symlink; elif [ -e \"$1\" ]; then echo present; fi sh /var/lib/libvirt/images/team-a.copy-disk.qcow2",
       "single virsh dumpxml vrgold-web",
+      "local isoinfo -R -f -i /tmp/virtrigaud-cloudinit-vrgold-web.abcdefghij/cloud-init.iso",
+      "local sh -c isoinfo \"$2\" -i \"$1\" -x \"$3\" \u003e/dev/null \u0026\u0026 isoinfo \"$2\" -i \"$1\" -x \"$3\" | head -c \"$4\" sh /tmp/virtrigaud-cloudinit-vrgold-web.abcdefghij/cloud-init.iso -R /meta-data 1048577",
+      "local isoinfo -R -i /tmp/virtrigaud-cloudinit-vrgold-web.abcdefghij/cloud-init.iso -x /meta-data",
+      "local isoinfo -R -i /tmp/virtrigaud-cloudinit-vrgold-web.abcdefghij/cloud-init.iso -x /meta-data",
+      "local sh -c isoinfo \"$2\" -i \"$1\" -x \"$3\" \u003e/dev/null \u0026\u0026 isoinfo \"$2\" -i \"$1\" -x \"$3\" | head -c \"$4\" sh /tmp/virtrigaud-cloudinit-vrgold-web.abcdefghij/cloud-init.iso -R /user-data 1048577",
+      "local isoinfo -R -i /tmp/virtrigaud-cloudinit-vrgold-web.abcdefghij/cloud-init.iso -x /user-data",
+      "local isoinfo -R -i /tmp/virtrigaud-cloudinit-vrgold-web.abcdefghij/cloud-init.iso -x /user-data",
       "local mktemp -d /var/lib/libvirt/images/.virtrigaud-write-XXXXXXXXXX",
       "local sh -c if [ -f \"$1\" ]; then echo file; elif [ -e \"$1\" ]; then echo other; fi sh /var/lib/libvirt/images/vrgold-web-disk.qcow2",
       "local sh -c if [ -L \"$1\" ]; then echo symlink; else stat -L -c '%a %u' -- \"$2\" \u0026\u0026 id -u; fi sh /var/lib/libvirt/images/vrgold-web-disk.qcow2 /var/lib/libvirt/images",
@@ -26,13 +33,16 @@
       "local sudo restorecon /var/lib/libvirt/images/team-a.copy-disk.qcow2",
       "single virsh pool-refresh default",
       "local rm -rf -- /var/lib/libvirt/images/.virtrigaud-write-0000000000",
+      "local mktemp -d \u003cstaging\u003e/virtrigaud-cloudinit-team-a.copy.XXXXXXXXXX",
+      "local genisoimage -output \u003cstaging\u003e/virtrigaud-cloudinit-team-a.copy.0000000000/cloud-init.iso -volid cidata -joliet -rock -input-charset utf-8 \u003cstaging\u003e/virtrigaud-cloudinit-team-a.copy.0000000000",
+      "local chmod 0711 \u003cstaging\u003e/virtrigaud-cloudinit-team-a.copy.0000000000",
       "local mktemp \u003cstaging\u003e/team-a.copy-domain.xml.XXXXXXXXXX",
       "local virsh define \u003cstaging\u003e/team-a.copy-domain.xml.0000000000",
       "local rm -f -- \u003cstaging\u003e/team-a.copy-domain.xml.0000000000"
     ],
     "resp": "{\"target_vm_id\":\"team-a.copy\"}",
     "err": "",
-    "defined": "\u003cdomain type='kvm'\u003e\n  \u003cname\u003eteam-a.copy\u003c/name\u003e\n  \u003cuuid\u003eUUID\u003c/uuid\u003e\n  \u003cmemory unit='MiB'\u003e4096\u003c/memory\u003e\n  \u003ccurrentMemory unit='MiB'\u003e4096\u003c/currentMemory\u003e\n  \u003cvcpu placement='static' current='4'\u003e16\u003c/vcpu\u003e\n  \u003cos\u003e\n    \u003ctype arch='x86_64' machine='pc-q35-8.2'\u003ehvm\u003c/type\u003e\n  \u003c/os\u003e\n  \u003cdevices\u003e\n    \u003cdisk type='file' device='disk'\u003e\n      \u003cdriver name='qemu' type='qcow2'/\u003e\n      \u003csource file='/var/lib/libvirt/images/team-a.copy-disk.qcow2'/\u003e\n      \u003ctarget dev='vda' bus='virtio'/\u003e\n    \u003c/disk\u003e\n    \u003cdisk type='file' device='cdrom'\u003e\n      \u003cdriver name='qemu' type='raw'/\u003e\n      \u003csource file='/tmp/virtrigaud-cloudinit-vrgold-web.abcdefghij/cloud-init.iso'/\u003e\n      \u003ctarget dev='sda' bus='sata'/\u003e\n      \u003creadonly/\u003e\n    \u003c/disk\u003e\n    \u003cinterface type='network'\u003e\n      \u003cmac address='MAC'/\u003e\n      \u003csource network='default'/\u003e\n      \u003cmodel type='virtio'/\u003e\n    \u003c/interface\u003e\n  \u003c/devices\u003e\n\u003c/domain\u003e\n"
+    "defined": "\u003cdomain type='kvm'\u003e\n  \u003cname\u003eteam-a.copy\u003c/name\u003e\n  \u003cuuid\u003eUUID\u003c/uuid\u003e\n  \u003cmemory unit='MiB'\u003e4096\u003c/memory\u003e\n  \u003ccurrentMemory unit='MiB'\u003e4096\u003c/currentMemory\u003e\n  \u003cvcpu placement='static' current='4'\u003e16\u003c/vcpu\u003e\n  \u003cos\u003e\n    \u003ctype arch='x86_64' machine='pc-q35-8.2'\u003ehvm\u003c/type\u003e\n  \u003c/os\u003e\n  \u003cdevices\u003e\n    \u003cdisk type='file' device='disk'\u003e\n      \u003cdriver name='qemu' type='qcow2'/\u003e\n      \u003csource file='/var/lib/libvirt/images/team-a.copy-disk.qcow2'/\u003e\n      \u003ctarget dev='vda' bus='virtio'/\u003e\n    \u003c/disk\u003e\n    \u003cdisk type='file' device='cdrom'\u003e\n      \u003cdriver name='qemu' type='raw'/\u003e\n      \u003csource file='\u003cstaging\u003e/virtrigaud-cloudinit-team-a.copy.0000000000/cloud-init.iso'/\u003e\n      \u003ctarget dev='sda' bus='sata'/\u003e\n      \u003creadonly/\u003e\n    \u003c/disk\u003e\n    \u003cinterface type='network'\u003e\n      \u003cmac address='MAC'/\u003e\n      \u003csource network='default'/\u003e\n      \u003cmodel type='virtio'/\u003e\n    \u003c/interface\u003e\n  \u003c/devices\u003e\n\u003c/domain\u003e\n"
   },
   "clone-copy-fails": {
     "calls": [
@@ -45,6 +55,13 @@
       "single virsh pool-dumpxml default",
       "local sh -c if [ -L \"$1\" ]; then echo symlink; elif [ -e \"$1\" ]; then echo present; fi sh /var/lib/libvirt/images/team-a.copy-disk.qcow2",
       "single virsh dumpxml vrgold-web",
+      "local isoinfo -R -f -i /tmp/virtrigaud-cloudinit-vrgold-web.abcdefghij/cloud-init.iso",
+      "local sh -c isoinfo \"$2\" -i \"$1\" -x \"$3\" \u003e/dev/null \u0026\u0026 isoinfo \"$2\" -i \"$1\" -x \"$3\" | head -c \"$4\" sh /tmp/virtrigaud-cloudinit-vrgold-web.abcdefghij/cloud-init.iso -R /meta-data 1048577",
+      "local isoinfo -R -i /tmp/virtrigaud-cloudinit-vrgold-web.abcdefghij/cloud-init.iso -x /meta-data",
+      "local isoinfo -R -i /tmp/virtrigaud-cloudinit-vrgold-web.abcdefghij/cloud-init.iso -x /meta-data",
+      "local sh -c isoinfo \"$2\" -i \"$1\" -x \"$3\" \u003e/dev/null \u0026\u0026 isoinfo \"$2\" -i \"$1\" -x \"$3\" | head -c \"$4\" sh /tmp/virtrigaud-cloudinit-vrgold-web.abcdefghij/cloud-init.iso -R /user-data 1048577",
+      "local isoinfo -R -i /tmp/virtrigaud-cloudinit-vrgold-web.abcdefghij/cloud-init.iso -x /user-data",
+      "local isoinfo -R -i /tmp/virtrigaud-cloudinit-vrgold-web.abcdefghij/cloud-init.iso -x /user-data",
       "local mktemp -d /var/lib/libvirt/images/.virtrigaud-write-XXXXXXXXXX",
       "local sh -c if [ -f \"$1\" ]; then echo file; elif [ -e \"$1\" ]; then echo other; fi sh /var/lib/libvirt/images/vrgold-web-disk.qcow2",
       "local sh -c if [ -L \"$1\" ]; then echo symlink; else stat -L -c '%a %u' -- \"$2\" \u0026\u0026 id -u; fi sh /var/lib/libvirt/images/vrgold-web-disk.qcow2 /var/lib/libvirt/images",
@@ -66,6 +83,13 @@
       "single virsh pool-dumpxml default",
       "local sh -c if [ -L \"$1\" ]; then echo symlink; elif [ -e \"$1\" ]; then echo present; fi sh /var/lib/libvirt/images/team-a.copy-disk.qcow2",
       "single virsh dumpxml vrgold-web",
+      "local isoinfo -R -f -i /tmp/virtrigaud-cloudinit-vrgold-web.abcdefghij/cloud-init.iso",
+      "local sh -c isoinfo \"$2\" -i \"$1\" -x \"$3\" \u003e/dev/null \u0026\u0026 isoinfo \"$2\" -i \"$1\" -x \"$3\" | head -c \"$4\" sh /tmp/virtrigaud-cloudinit-vrgold-web.abcdefghij/cloud-init.iso -R /meta-data 1048577",
+      "local isoinfo -R -i /tmp/virtrigaud-cloudinit-vrgold-web.abcdefghij/cloud-init.iso -x /meta-data",
+      "local isoinfo -R -i /tmp/virtrigaud-cloudinit-vrgold-web.abcdefghij/cloud-init.iso -x /meta-data",
+      "local sh -c isoinfo \"$2\" -i \"$1\" -x \"$3\" \u003e/dev/null \u0026\u0026 isoinfo \"$2\" -i \"$1\" -x \"$3\" | head -c \"$4\" sh /tmp/virtrigaud-cloudinit-vrgold-web.abcdefghij/cloud-init.iso -R /user-data 1048577",
+      "local isoinfo -R -i /tmp/virtrigaud-cloudinit-vrgold-web.abcdefghij/cloud-init.iso -x /user-data",
+      "local isoinfo -R -i /tmp/virtrigaud-cloudinit-vrgold-web.abcdefghij/cloud-init.iso -x /user-data",
       "local mktemp -d /var/lib/libvirt/images/.virtrigaud-write-XXXXXXXXXX",
       "local sh -c if [ -f \"$1\" ]; then echo file; elif [ -e \"$1\" ]; then echo other; fi sh /var/lib/libvirt/images/vrgold-web-disk.qcow2",
       "local sh -c if [ -L \"$1\" ]; then echo symlink; else stat -L -c '%a %u' -- \"$2\" \u0026\u0026 id -u; fi sh /var/lib/libvirt/images/vrgold-web-disk.qcow2 /var/lib/libvirt/images",
@@ -83,15 +107,18 @@
       "local sudo restorecon /var/lib/libvirt/images/team-a.copy-disk.qcow2",
       "single virsh pool-refresh default",
       "local rm -rf -- /var/lib/libvirt/images/.virtrigaud-write-0000000000",
+      "local mktemp -d \u003cstaging\u003e/virtrigaud-cloudinit-team-a.copy.XXXXXXXXXX",
+      "local genisoimage -output \u003cstaging\u003e/virtrigaud-cloudinit-team-a.copy.0000000000/cloud-init.iso -volid cidata -joliet -rock -input-charset utf-8 \u003cstaging\u003e/virtrigaud-cloudinit-team-a.copy.0000000000",
+      "local chmod 0711 \u003cstaging\u003e/virtrigaud-cloudinit-team-a.copy.0000000000",
       "local mktemp \u003cstaging\u003e/team-a.copy-domain.xml.XXXXXXXXXX",
       "local virsh define \u003cstaging\u003e/team-a.copy-domain.xml.0000000000",
       "local rm -f -- \u003cstaging\u003e/team-a.copy-domain.xml.0000000000"
     ],
     "resp": "{\"target_vm_id\":\"team-a.copy\"}",
     "err": "",
-    "defined": "\u003cdomain type='kvm'\u003e\n  \u003cname\u003eteam-a.copy\u003c/name\u003e\n  \u003cuuid\u003eUUID\u003c/uuid\u003e\n  \u003cmemory unit='KiB'\u003e2097152\u003c/memory\u003e\n  \u003ccurrentMemory unit='KiB'\u003e2097152\u003c/currentMemory\u003e\n  \u003cvcpu placement='static'\u003e2\u003c/vcpu\u003e\n  \u003cos\u003e\n    \u003ctype arch='x86_64' machine='pc-q35-8.2'\u003ehvm\u003c/type\u003e\n  \u003c/os\u003e\n  \u003cdevices\u003e\n    \u003cdisk type='file' device='disk'\u003e\n      \u003cdriver name='qemu' type='qcow2'/\u003e\n      \u003csource file='/var/lib/libvirt/images/team-a.copy-disk.qcow2'/\u003e\n      \u003ctarget dev='vda' bus='virtio'/\u003e\n    \u003c/disk\u003e\n    \u003cdisk type='file' device='cdrom'\u003e\n      \u003cdriver name='qemu' type='raw'/\u003e\n      \u003csource file='/tmp/virtrigaud-cloudinit-vrgold-web.abcdefghij/cloud-init.iso'/\u003e\n      \u003ctarget dev='sda' bus='sata'/\u003e\n      \u003creadonly/\u003e\n    \u003c/disk\u003e\n    \u003cinterface type='network'\u003e\n      \u003cmac address='MAC'/\u003e\n      \u003csource network='default'/\u003e\n      \u003cmodel type='virtio'/\u003e\n    \u003c/interface\u003e\n  \u003c/devices\u003e\n\u003c/domain\u003e\n"
+    "defined": "\u003cdomain type='kvm'\u003e\n  \u003cname\u003eteam-a.copy\u003c/name\u003e\n  \u003cuuid\u003eUUID\u003c/uuid\u003e\n  \u003cmemory unit='KiB'\u003e2097152\u003c/memory\u003e\n  \u003ccurrentMemory unit='KiB'\u003e2097152\u003c/currentMemory\u003e\n  \u003cvcpu placement='static'\u003e2\u003c/vcpu\u003e\n  \u003cos\u003e\n    \u003ctype arch='x86_64' machine='pc-q35-8.2'\u003ehvm\u003c/type\u003e\n  \u003c/os\u003e\n  \u003cdevices\u003e\n    \u003cdisk type='file' device='disk'\u003e\n      \u003cdriver name='qemu' type='qcow2'/\u003e\n      \u003csource file='/var/lib/libvirt/images/team-a.copy-disk.qcow2'/\u003e\n      \u003ctarget dev='vda' bus='virtio'/\u003e\n    \u003c/disk\u003e\n    \u003cdisk type='file' device='cdrom'\u003e\n      \u003cdriver name='qemu' type='raw'/\u003e\n      \u003csource file='\u003cstaging\u003e/virtrigaud-cloudinit-team-a.copy.0000000000/cloud-init.iso'/\u003e\n      \u003ctarget dev='sda' bus='sata'/\u003e\n      \u003creadonly/\u003e\n    \u003c/disk\u003e\n    \u003cinterface type='network'\u003e\n      \u003cmac address='MAC'/\u003e\n      \u003csource network='default'/\u003e\n      \u003cmodel type='virtio'/\u003e\n    \u003c/interface\u003e\n  \u003c/devices\u003e\n\u003c/domain\u003e\n"
   },
-  "clone-customize-json-not-applied": {
+  "clone-customize-hostname": {
     "calls": [
       "single virsh list --all",
       "single virsh domstate vrgold-web",
@@ -102,6 +129,13 @@
       "single virsh pool-dumpxml default",
       "local sh -c if [ -L \"$1\" ]; then echo symlink; elif [ -e \"$1\" ]; then echo present; fi sh /var/lib/libvirt/images/team-a.copy-disk.qcow2",
       "single virsh dumpxml vrgold-web",
+      "local isoinfo -R -f -i /tmp/virtrigaud-cloudinit-vrgold-web.abcdefghij/cloud-init.iso",
+      "local sh -c isoinfo \"$2\" -i \"$1\" -x \"$3\" \u003e/dev/null \u0026\u0026 isoinfo \"$2\" -i \"$1\" -x \"$3\" | head -c \"$4\" sh /tmp/virtrigaud-cloudinit-vrgold-web.abcdefghij/cloud-init.iso -R /meta-data 1048577",
+      "local isoinfo -R -i /tmp/virtrigaud-cloudinit-vrgold-web.abcdefghij/cloud-init.iso -x /meta-data",
+      "local isoinfo -R -i /tmp/virtrigaud-cloudinit-vrgold-web.abcdefghij/cloud-init.iso -x /meta-data",
+      "local sh -c isoinfo \"$2\" -i \"$1\" -x \"$3\" \u003e/dev/null \u0026\u0026 isoinfo \"$2\" -i \"$1\" -x \"$3\" | head -c \"$4\" sh /tmp/virtrigaud-cloudinit-vrgold-web.abcdefghij/cloud-init.iso -R /user-data 1048577",
+      "local isoinfo -R -i /tmp/virtrigaud-cloudinit-vrgold-web.abcdefghij/cloud-init.iso -x /user-data",
+      "local isoinfo -R -i /tmp/virtrigaud-cloudinit-vrgold-web.abcdefghij/cloud-init.iso -x /user-data",
       "local mktemp -d /var/lib/libvirt/images/.virtrigaud-write-XXXXXXXXXX",
       "local sh -c if [ -f \"$1\" ]; then echo file; elif [ -e \"$1\" ]; then echo other; fi sh /var/lib/libvirt/images/vrgold-web-disk.qcow2",
       "local sh -c if [ -L \"$1\" ]; then echo symlink; else stat -L -c '%a %u' -- \"$2\" \u0026\u0026 id -u; fi sh /var/lib/libvirt/images/vrgold-web-disk.qcow2 /var/lib/libvirt/images",
@@ -118,13 +152,16 @@
       "local sudo restorecon /var/lib/libvirt/images/team-a.copy-disk.qcow2",
       "single virsh pool-refresh default",
       "local rm -rf -- /var/lib/libvirt/images/.virtrigaud-write-0000000000",
+      "local mktemp -d \u003cstaging\u003e/virtrigaud-cloudinit-team-a.copy.XXXXXXXXXX",
+      "local genisoimage -output \u003cstaging\u003e/virtrigaud-cloudinit-team-a.copy.0000000000/cloud-init.iso -volid cidata -joliet -rock -input-charset utf-8 \u003cstaging\u003e/virtrigaud-cloudinit-team-a.copy.0000000000",
+      "local chmod 0711 \u003cstaging\u003e/virtrigaud-cloudinit-team-a.copy.0000000000",
       "local mktemp \u003cstaging\u003e/team-a.copy-domain.xml.XXXXXXXXXX",
       "local virsh define \u003cstaging\u003e/team-a.copy-domain.xml.0000000000",
       "local rm -f -- \u003cstaging\u003e/team-a.copy-domain.xml.0000000000"
     ],
     "resp": "{\"target_vm_id\":\"team-a.copy\"}",
     "err": "",
-    "defined": "\u003cdomain type='kvm'\u003e\n  \u003cname\u003eteam-a.copy\u003c/name\u003e\n  \u003cuuid\u003eUUID\u003c/uuid\u003e\n  \u003cmemory unit='KiB'\u003e2097152\u003c/memory\u003e\n  \u003ccurrentMemory unit='KiB'\u003e2097152\u003c/currentMemory\u003e\n  \u003cvcpu placement='static'\u003e2\u003c/vcpu\u003e\n  \u003cos\u003e\n    \u003ctype arch='x86_64' machine='pc-q35-8.2'\u003ehvm\u003c/type\u003e\n  \u003c/os\u003e\n  \u003cdevices\u003e\n    \u003cdisk type='file' device='disk'\u003e\n      \u003cdriver name='qemu' type='qcow2'/\u003e\n      \u003csource file='/var/lib/libvirt/images/team-a.copy-disk.qcow2'/\u003e\n      \u003ctarget dev='vda' bus='virtio'/\u003e\n    \u003c/disk\u003e\n    \u003cdisk type='file' device='cdrom'\u003e\n      \u003cdriver name='qemu' type='raw'/\u003e\n      \u003csource file='/tmp/virtrigaud-cloudinit-vrgold-web.abcdefghij/cloud-init.iso'/\u003e\n      \u003ctarget dev='sda' bus='sata'/\u003e\n      \u003creadonly/\u003e\n    \u003c/disk\u003e\n    \u003cinterface type='network'\u003e\n      \u003cmac address='MAC'/\u003e\n      \u003csource network='default'/\u003e\n      \u003cmodel type='virtio'/\u003e\n    \u003c/interface\u003e\n  \u003c/devices\u003e\n\u003c/domain\u003e\n"
+    "defined": "\u003cdomain type='kvm'\u003e\n  \u003cname\u003eteam-a.copy\u003c/name\u003e\n  \u003cuuid\u003eUUID\u003c/uuid\u003e\n  \u003cmemory unit='KiB'\u003e2097152\u003c/memory\u003e\n  \u003ccurrentMemory unit='KiB'\u003e2097152\u003c/currentMemory\u003e\n  \u003cvcpu placement='static'\u003e2\u003c/vcpu\u003e\n  \u003cos\u003e\n    \u003ctype arch='x86_64' machine='pc-q35-8.2'\u003ehvm\u003c/type\u003e\n  \u003c/os\u003e\n  \u003cdevices\u003e\n    \u003cdisk type='file' device='disk'\u003e\n      \u003cdriver name='qemu' type='qcow2'/\u003e\n      \u003csource file='/var/lib/libvirt/images/team-a.copy-disk.qcow2'/\u003e\n      \u003ctarget dev='vda' bus='virtio'/\u003e\n    \u003c/disk\u003e\n    \u003cdisk type='file' device='cdrom'\u003e\n      \u003cdriver name='qemu' type='raw'/\u003e\n      \u003csource file='\u003cstaging\u003e/virtrigaud-cloudinit-team-a.copy.0000000000/cloud-init.iso'/\u003e\n      \u003ctarget dev='sda' bus='sata'/\u003e\n      \u003creadonly/\u003e\n    \u003c/disk\u003e\n    \u003cinterface type='network'\u003e\n      \u003cmac address='MAC'/\u003e\n      \u003csource network='default'/\u003e\n      \u003cmodel type='virtio'/\u003e\n    \u003c/interface\u003e\n  \u003c/devices\u003e\n\u003c/domain\u003e\n"
   },
   "clone-define-fails": {
     "calls": [
@@ -137,6 +174,13 @@
       "single virsh pool-dumpxml default",
       "local sh -c if [ -L \"$1\" ]; then echo symlink; elif [ -e \"$1\" ]; then echo present; fi sh /var/lib/libvirt/images/team-a.copy-disk.qcow2",
       "single virsh dumpxml vrgold-web",
+      "local isoinfo -R -f -i /tmp/virtrigaud-cloudinit-vrgold-web.abcdefghij/cloud-init.iso",
+      "local sh -c isoinfo \"$2\" -i \"$1\" -x \"$3\" \u003e/dev/null \u0026\u0026 isoinfo \"$2\" -i \"$1\" -x \"$3\" | head -c \"$4\" sh /tmp/virtrigaud-cloudinit-vrgold-web.abcdefghij/cloud-init.iso -R /meta-data 1048577",
+      "local isoinfo -R -i /tmp/virtrigaud-cloudinit-vrgold-web.abcdefghij/cloud-init.iso -x /meta-data",
+      "local isoinfo -R -i /tmp/virtrigaud-cloudinit-vrgold-web.abcdefghij/cloud-init.iso -x /meta-data",
+      "local sh -c isoinfo \"$2\" -i \"$1\" -x \"$3\" \u003e/dev/null \u0026\u0026 isoinfo \"$2\" -i \"$1\" -x \"$3\" | head -c \"$4\" sh /tmp/virtrigaud-cloudinit-vrgold-web.abcdefghij/cloud-init.iso -R /user-data 1048577",
+      "local isoinfo -R -i /tmp/virtrigaud-cloudinit-vrgold-web.abcdefghij/cloud-init.iso -x /user-data",
+      "local isoinfo -R -i /tmp/virtrigaud-cloudinit-vrgold-web.abcdefghij/cloud-init.iso -x /user-data",
       "local mktemp -d /var/lib/libvirt/images/.virtrigaud-write-XXXXXXXXXX",
       "local sh -c if [ -f \"$1\" ]; then echo file; elif [ -e \"$1\" ]; then echo other; fi sh /var/lib/libvirt/images/vrgold-web-disk.qcow2",
       "local sh -c if [ -L \"$1\" ]; then echo symlink; else stat -L -c '%a %u' -- \"$2\" \u0026\u0026 id -u; fi sh /var/lib/libvirt/images/vrgold-web-disk.qcow2 /var/lib/libvirt/images",
@@ -153,6 +197,9 @@
       "local sudo restorecon /var/lib/libvirt/images/team-a.copy-disk.qcow2",
       "single virsh pool-refresh default",
       "local rm -rf -- /var/lib/libvirt/images/.virtrigaud-write-0000000000",
+      "local mktemp -d \u003cstaging\u003e/virtrigaud-cloudinit-team-a.copy.XXXXXXXXXX",
+      "local genisoimage -output \u003cstaging\u003e/virtrigaud-cloudinit-team-a.copy.0000000000/cloud-init.iso -volid cidata -joliet -rock -input-charset utf-8 \u003cstaging\u003e/virtrigaud-cloudinit-team-a.copy.0000000000",
+      "local chmod 0711 \u003cstaging\u003e/virtrigaud-cloudinit-team-a.copy.0000000000",
       "local mktemp \u003cstaging\u003e/team-a.copy-domain.xml.XXXXXXXXXX",
       "local virsh define \u003cstaging\u003e/team-a.copy-domain.xml.0000000000",
       "single virsh domuuid team-a.copy",
@@ -160,7 +207,7 @@
     ],
     "resp": "null",
     "err": "failed to clone VM: define target domain: could not establish whether the domain was defined: failed to define domain: virsh command 'virsh define \u003cstaging\u003e/team-a.copy-domain.xml.0000000000' failed (exit code 1): stderr=error: scripted failure of define\n, stdout=, output: error: scripted failure of define\n",
-    "defined": "\u003cdomain type='kvm'\u003e\n  \u003cname\u003eteam-a.copy\u003c/name\u003e\n  \u003cuuid\u003eUUID\u003c/uuid\u003e\n  \u003cmemory unit='KiB'\u003e2097152\u003c/memory\u003e\n  \u003ccurrentMemory unit='KiB'\u003e2097152\u003c/currentMemory\u003e\n  \u003cvcpu placement='static'\u003e2\u003c/vcpu\u003e\n  \u003cos\u003e\n    \u003ctype arch='x86_64' machine='pc-q35-8.2'\u003ehvm\u003c/type\u003e\n  \u003c/os\u003e\n  \u003cdevices\u003e\n    \u003cdisk type='file' device='disk'\u003e\n      \u003cdriver name='qemu' type='qcow2'/\u003e\n      \u003csource file='/var/lib/libvirt/images/team-a.copy-disk.qcow2'/\u003e\n      \u003ctarget dev='vda' bus='virtio'/\u003e\n    \u003c/disk\u003e\n    \u003cdisk type='file' device='cdrom'\u003e\n      \u003cdriver name='qemu' type='raw'/\u003e\n      \u003csource file='/tmp/virtrigaud-cloudinit-vrgold-web.abcdefghij/cloud-init.iso'/\u003e\n      \u003ctarget dev='sda' bus='sata'/\u003e\n      \u003creadonly/\u003e\n    \u003c/disk\u003e\n    \u003cinterface type='network'\u003e\n      \u003cmac address='MAC'/\u003e\n      \u003csource network='default'/\u003e\n      \u003cmodel type='virtio'/\u003e\n    \u003c/interface\u003e\n  \u003c/devices\u003e\n\u003c/domain\u003e\n"
+    "defined": "\u003cdomain type='kvm'\u003e\n  \u003cname\u003eteam-a.copy\u003c/name\u003e\n  \u003cuuid\u003eUUID\u003c/uuid\u003e\n  \u003cmemory unit='KiB'\u003e2097152\u003c/memory\u003e\n  \u003ccurrentMemory unit='KiB'\u003e2097152\u003c/currentMemory\u003e\n  \u003cvcpu placement='static'\u003e2\u003c/vcpu\u003e\n  \u003cos\u003e\n    \u003ctype arch='x86_64' machine='pc-q35-8.2'\u003ehvm\u003c/type\u003e\n  \u003c/os\u003e\n  \u003cdevices\u003e\n    \u003cdisk type='file' device='disk'\u003e\n      \u003cdriver name='qemu' type='qcow2'/\u003e\n      \u003csource file='/var/lib/libvirt/images/team-a.copy-disk.qcow2'/\u003e\n      \u003ctarget dev='vda' bus='virtio'/\u003e\n    \u003c/disk\u003e\n    \u003cdisk type='file' device='cdrom'\u003e\n      \u003cdriver name='qemu' type='raw'/\u003e\n      \u003csource file='\u003cstaging\u003e/virtrigaud-cloudinit-team-a.copy.0000000000/cloud-init.iso'/\u003e\n      \u003ctarget dev='sda' bus='sata'/\u003e\n      \u003creadonly/\u003e\n    \u003c/disk\u003e\n    \u003cinterface type='network'\u003e\n      \u003cmac address='MAC'/\u003e\n      \u003csource network='default'/\u003e\n      \u003cmodel type='virtio'/\u003e\n    \u003c/interface\u003e\n  \u003c/devices\u003e\n\u003c/domain\u003e\n"
   },
   "clone-full": {
     "calls": [
@@ -173,6 +220,13 @@
       "single virsh pool-dumpxml default",
       "local sh -c if [ -L \"$1\" ]; then echo symlink; elif [ -e \"$1\" ]; then echo present; fi sh /var/lib/libvirt/images/team-a.copy-disk.qcow2",
       "single virsh dumpxml vrgold-web",
+      "local isoinfo -R -f -i /tmp/virtrigaud-cloudinit-vrgold-web.abcdefghij/cloud-init.iso",
+      "local sh -c isoinfo \"$2\" -i \"$1\" -x \"$3\" \u003e/dev/null \u0026\u0026 isoinfo \"$2\" -i \"$1\" -x \"$3\" | head -c \"$4\" sh /tmp/virtrigaud-cloudinit-vrgold-web.abcdefghij/cloud-init.iso -R /meta-data 1048577",
+      "local isoinfo -R -i /tmp/virtrigaud-cloudinit-vrgold-web.abcdefghij/cloud-init.iso -x /meta-data",
+      "local isoinfo -R -i /tmp/virtrigaud-cloudinit-vrgold-web.abcdefghij/cloud-init.iso -x /meta-data",
+      "local sh -c isoinfo \"$2\" -i \"$1\" -x \"$3\" \u003e/dev/null \u0026\u0026 isoinfo \"$2\" -i \"$1\" -x \"$3\" | head -c \"$4\" sh /tmp/virtrigaud-cloudinit-vrgold-web.abcdefghij/cloud-init.iso -R /user-data 1048577",
+      "local isoinfo -R -i /tmp/virtrigaud-cloudinit-vrgold-web.abcdefghij/cloud-init.iso -x /user-data",
+      "local isoinfo -R -i /tmp/virtrigaud-cloudinit-vrgold-web.abcdefghij/cloud-init.iso -x /user-data",
       "local mktemp -d /var/lib/libvirt/images/.virtrigaud-write-XXXXXXXXXX",
       "local sh -c if [ -f \"$1\" ]; then echo file; elif [ -e \"$1\" ]; then echo other; fi sh /var/lib/libvirt/images/vrgold-web-disk.qcow2",
       "local sh -c if [ -L \"$1\" ]; then echo symlink; else stat -L -c '%a %u' -- \"$2\" \u0026\u0026 id -u; fi sh /var/lib/libvirt/images/vrgold-web-disk.qcow2 /var/lib/libvirt/images",
@@ -189,13 +243,16 @@
       "local sudo restorecon /var/lib/libvirt/images/team-a.copy-disk.qcow2",
       "single virsh pool-refresh default",
       "local rm -rf -- /var/lib/libvirt/images/.virtrigaud-write-0000000000",
+      "local mktemp -d \u003cstaging\u003e/virtrigaud-cloudinit-team-a.copy.XXXXXXXXXX",
+      "local genisoimage -output \u003cstaging\u003e/virtrigaud-cloudinit-team-a.copy.0000000000/cloud-init.iso -volid cidata -joliet -rock -input-charset utf-8 \u003cstaging\u003e/virtrigaud-cloudinit-team-a.copy.0000000000",
+      "local chmod 0711 \u003cstaging\u003e/virtrigaud-cloudinit-team-a.copy.0000000000",
       "local mktemp \u003cstaging\u003e/team-a.copy-domain.xml.XXXXXXXXXX",
       "local virsh define \u003cstaging\u003e/team-a.copy-domain.xml.0000000000",
       "local rm -f -- \u003cstaging\u003e/team-a.copy-domain.xml.0000000000"
     ],
     "resp": "{\"target_vm_id\":\"team-a.copy\"}",
     "err": "",
-    "defined": "\u003cdomain type='kvm'\u003e\n  \u003cname\u003eteam-a.copy\u003c/name\u003e\n  \u003cuuid\u003eUUID\u003c/uuid\u003e\n  \u003cmemory unit='KiB'\u003e2097152\u003c/memory\u003e\n  \u003ccurrentMemory unit='KiB'\u003e2097152\u003c/currentMemory\u003e\n  \u003cvcpu placement='static'\u003e2\u003c/vcpu\u003e\n  \u003cos\u003e\n    \u003ctype arch='x86_64' machine='pc-q35-8.2'\u003ehvm\u003c/type\u003e\n  \u003c/os\u003e\n  \u003cdevices\u003e\n    \u003cdisk type='file' device='disk'\u003e\n      \u003cdriver name='qemu' type='qcow2'/\u003e\n      \u003csource file='/var/lib/libvirt/images/team-a.copy-disk.qcow2'/\u003e\n      \u003ctarget dev='vda' bus='virtio'/\u003e\n    \u003c/disk\u003e\n    \u003cdisk type='file' device='cdrom'\u003e\n      \u003cdriver name='qemu' type='raw'/\u003e\n      \u003csource file='/tmp/virtrigaud-cloudinit-vrgold-web.abcdefghij/cloud-init.iso'/\u003e\n      \u003ctarget dev='sda' bus='sata'/\u003e\n      \u003creadonly/\u003e\n    \u003c/disk\u003e\n    \u003cinterface type='network'\u003e\n      \u003cmac address='MAC'/\u003e\n      \u003csource network='default'/\u003e\n      \u003cmodel type='virtio'/\u003e\n    \u003c/interface\u003e\n  \u003c/devices\u003e\n\u003c/domain\u003e\n"
+    "defined": "\u003cdomain type='kvm'\u003e\n  \u003cname\u003eteam-a.copy\u003c/name\u003e\n  \u003cuuid\u003eUUID\u003c/uuid\u003e\n  \u003cmemory unit='KiB'\u003e2097152\u003c/memory\u003e\n  \u003ccurrentMemory unit='KiB'\u003e2097152\u003c/currentMemory\u003e\n  \u003cvcpu placement='static'\u003e2\u003c/vcpu\u003e\n  \u003cos\u003e\n    \u003ctype arch='x86_64' machine='pc-q35-8.2'\u003ehvm\u003c/type\u003e\n  \u003c/os\u003e\n  \u003cdevices\u003e\n    \u003cdisk type='file' device='disk'\u003e\n      \u003cdriver name='qemu' type='qcow2'/\u003e\n      \u003csource file='/var/lib/libvirt/images/team-a.copy-disk.qcow2'/\u003e\n      \u003ctarget dev='vda' bus='virtio'/\u003e\n    \u003c/disk\u003e\n    \u003cdisk type='file' device='cdrom'\u003e\n      \u003cdriver name='qemu' type='raw'/\u003e\n      \u003csource file='\u003cstaging\u003e/virtrigaud-cloudinit-team-a.copy.0000000000/cloud-init.iso'/\u003e\n      \u003ctarget dev='sda' bus='sata'/\u003e\n      \u003creadonly/\u003e\n    \u003c/disk\u003e\n    \u003cinterface type='network'\u003e\n      \u003cmac address='MAC'/\u003e\n      \u003csource network='default'/\u003e\n      \u003cmodel type='virtio'/\u003e\n    \u003c/interface\u003e\n  \u003c/devices\u003e\n\u003c/domain\u003e\n"
   },
   "clone-ignores-source-host": {
     "calls": [
@@ -208,6 +265,13 @@
       "single virsh pool-dumpxml default",
       "local sh -c if [ -L \"$1\" ]; then echo symlink; elif [ -e \"$1\" ]; then echo present; fi sh /var/lib/libvirt/images/team-a.copy-disk.qcow2",
       "single virsh dumpxml vrgold-web",
+      "local isoinfo -R -f -i /tmp/virtrigaud-cloudinit-vrgold-web.abcdefghij/cloud-init.iso",
+      "local sh -c isoinfo \"$2\" -i \"$1\" -x \"$3\" \u003e/dev/null \u0026\u0026 isoinfo \"$2\" -i \"$1\" -x \"$3\" | head -c \"$4\" sh /tmp/virtrigaud-cloudinit-vrgold-web.abcdefghij/cloud-init.iso -R /meta-data 1048577",
+      "local isoinfo -R -i /tmp/virtrigaud-cloudinit-vrgold-web.abcdefghij/cloud-init.iso -x /meta-data",
+      "local isoinfo -R -i /tmp/virtrigaud-cloudinit-vrgold-web.abcdefghij/cloud-init.iso -x /meta-data",
+      "local sh -c isoinfo \"$2\" -i \"$1\" -x \"$3\" \u003e/dev/null \u0026\u0026 isoinfo \"$2\" -i \"$1\" -x \"$3\" | head -c \"$4\" sh /tmp/virtrigaud-cloudinit-vrgold-web.abcdefghij/cloud-init.iso -R /user-data 1048577",
+      "local isoinfo -R -i /tmp/virtrigaud-cloudinit-vrgold-web.abcdefghij/cloud-init.iso -x /user-data",
+      "local isoinfo -R -i /tmp/virtrigaud-cloudinit-vrgold-web.abcdefghij/cloud-init.iso -x /user-data",
       "local mktemp -d /var/lib/libvirt/images/.virtrigaud-write-XXXXXXXXXX",
       "local sh -c if [ -f \"$1\" ]; then echo file; elif [ -e \"$1\" ]; then echo other; fi sh /var/lib/libvirt/images/vrgold-web-disk.qcow2",
       "local sh -c if [ -L \"$1\" ]; then echo symlink; else stat -L -c '%a %u' -- \"$2\" \u0026\u0026 id -u; fi sh /var/lib/libvirt/images/vrgold-web-disk.qcow2 /var/lib/libvirt/images",
@@ -224,13 +288,16 @@
       "local sudo restorecon /var/lib/libvirt/images/team-a.copy-disk.qcow2",
       "single virsh pool-refresh default",
       "local rm -rf -- /var/lib/libvirt/images/.virtrigaud-write-0000000000",
+      "local mktemp -d \u003cstaging\u003e/virtrigaud-cloudinit-team-a.copy.XXXXXXXXXX",
+      "local genisoimage -output \u003cstaging\u003e/virtrigaud-cloudinit-team-a.copy.0000000000/cloud-init.iso -volid cidata -joliet -rock -input-charset utf-8 \u003cstaging\u003e/virtrigaud-cloudinit-team-a.copy.0000000000",
+      "local chmod 0711 \u003cstaging\u003e/virtrigaud-cloudinit-team-a.copy.0000000000",
       "local mktemp \u003cstaging\u003e/team-a.copy-domain.xml.XXXXXXXXXX",
       "local virsh define \u003cstaging\u003e/team-a.copy-domain.xml.0000000000",
       "local rm -f -- \u003cstaging\u003e/team-a.copy-domain.xml.0000000000"
     ],
     "resp": "{\"target_vm_id\":\"team-a.copy\"}",
     "err": "",
-    "defined": "\u003cdomain type='kvm'\u003e\n  \u003cname\u003eteam-a.copy\u003c/name\u003e\n  \u003cuuid\u003eUUID\u003c/uuid\u003e\n  \u003cmemory unit='KiB'\u003e2097152\u003c/memory\u003e\n  \u003ccurrentMemory unit='KiB'\u003e2097152\u003c/currentMemory\u003e\n  \u003cvcpu placement='static'\u003e2\u003c/vcpu\u003e\n  \u003cos\u003e\n    \u003ctype arch='x86_64' machine='pc-q35-8.2'\u003ehvm\u003c/type\u003e\n  \u003c/os\u003e\n  \u003cdevices\u003e\n    \u003cdisk type='file' device='disk'\u003e\n      \u003cdriver name='qemu' type='qcow2'/\u003e\n      \u003csource file='/var/lib/libvirt/images/team-a.copy-disk.qcow2'/\u003e\n      \u003ctarget dev='vda' bus='virtio'/\u003e\n    \u003c/disk\u003e\n    \u003cdisk type='file' device='cdrom'\u003e\n      \u003cdriver name='qemu' type='raw'/\u003e\n      \u003csource file='/tmp/virtrigaud-cloudinit-vrgold-web.abcdefghij/cloud-init.iso'/\u003e\n      \u003ctarget dev='sda' bus='sata'/\u003e\n      \u003creadonly/\u003e\n    \u003c/disk\u003e\n    \u003cinterface type='network'\u003e\n      \u003cmac address='MAC'/\u003e\n      \u003csource network='default'/\u003e\n      \u003cmodel type='virtio'/\u003e\n    \u003c/interface\u003e\n  \u003c/devices\u003e\n\u003c/domain\u003e\n"
+    "defined": "\u003cdomain type='kvm'\u003e\n  \u003cname\u003eteam-a.copy\u003c/name\u003e\n  \u003cuuid\u003eUUID\u003c/uuid\u003e\n  \u003cmemory unit='KiB'\u003e2097152\u003c/memory\u003e\n  \u003ccurrentMemory unit='KiB'\u003e2097152\u003c/currentMemory\u003e\n  \u003cvcpu placement='static'\u003e2\u003c/vcpu\u003e\n  \u003cos\u003e\n    \u003ctype arch='x86_64' machine='pc-q35-8.2'\u003ehvm\u003c/type\u003e\n  \u003c/os\u003e\n  \u003cdevices\u003e\n    \u003cdisk type='file' device='disk'\u003e\n      \u003cdriver name='qemu' type='qcow2'/\u003e\n      \u003csource file='/var/lib/libvirt/images/team-a.copy-disk.qcow2'/\u003e\n      \u003ctarget dev='vda' bus='virtio'/\u003e\n    \u003c/disk\u003e\n    \u003cdisk type='file' device='cdrom'\u003e\n      \u003cdriver name='qemu' type='raw'/\u003e\n      \u003csource file='\u003cstaging\u003e/virtrigaud-cloudinit-team-a.copy.0000000000/cloud-init.iso'/\u003e\n      \u003ctarget dev='sda' bus='sata'/\u003e\n      \u003creadonly/\u003e\n    \u003c/disk\u003e\n    \u003cinterface type='network'\u003e\n      \u003cmac address='MAC'/\u003e\n      \u003csource network='default'/\u003e\n      \u003cmodel type='virtio'/\u003e\n    \u003c/interface\u003e\n  \u003c/devices\u003e\n\u003c/domain\u003e\n"
   },
   "clone-legacy-target-name": {
     "calls": [
@@ -243,6 +310,13 @@
       "single virsh pool-dumpxml default",
       "local sh -c if [ -L \"$1\" ]; then echo symlink; elif [ -e \"$1\" ]; then echo present; fi sh /var/lib/libvirt/images/copy-disk.qcow2",
       "single virsh dumpxml vrgold-web",
+      "local isoinfo -R -f -i /tmp/virtrigaud-cloudinit-vrgold-web.abcdefghij/cloud-init.iso",
+      "local sh -c isoinfo \"$2\" -i \"$1\" -x \"$3\" \u003e/dev/null \u0026\u0026 isoinfo \"$2\" -i \"$1\" -x \"$3\" | head -c \"$4\" sh /tmp/virtrigaud-cloudinit-vrgold-web.abcdefghij/cloud-init.iso -R /meta-data 1048577",
+      "local isoinfo -R -i /tmp/virtrigaud-cloudinit-vrgold-web.abcdefghij/cloud-init.iso -x /meta-data",
+      "local isoinfo -R -i /tmp/virtrigaud-cloudinit-vrgold-web.abcdefghij/cloud-init.iso -x /meta-data",
+      "local sh -c isoinfo \"$2\" -i \"$1\" -x \"$3\" \u003e/dev/null \u0026\u0026 isoinfo \"$2\" -i \"$1\" -x \"$3\" | head -c \"$4\" sh /tmp/virtrigaud-cloudinit-vrgold-web.abcdefghij/cloud-init.iso -R /user-data 1048577",
+      "local isoinfo -R -i /tmp/virtrigaud-cloudinit-vrgold-web.abcdefghij/cloud-init.iso -x /user-data",
+      "local isoinfo -R -i /tmp/virtrigaud-cloudinit-vrgold-web.abcdefghij/cloud-init.iso -x /user-data",
       "local mktemp -d /var/lib/libvirt/images/.virtrigaud-write-XXXXXXXXXX",
       "local sh -c if [ -f \"$1\" ]; then echo file; elif [ -e \"$1\" ]; then echo other; fi sh /var/lib/libvirt/images/vrgold-web-disk.qcow2",
       "local sh -c if [ -L \"$1\" ]; then echo symlink; else stat -L -c '%a %u' -- \"$2\" \u0026\u0026 id -u; fi sh /var/lib/libvirt/images/vrgold-web-disk.qcow2 /var/lib/libvirt/images",
@@ -259,13 +333,16 @@
       "local sudo restorecon /var/lib/libvirt/images/copy-disk.qcow2",
       "single virsh pool-refresh default",
       "local rm -rf -- /var/lib/libvirt/images/.virtrigaud-write-0000000000",
+      "local mktemp -d \u003cstaging\u003e/virtrigaud-cloudinit-copy.XXXXXXXXXX",
+      "local genisoimage -output \u003cstaging\u003e/virtrigaud-cloudinit-copy.0000000000/cloud-init.iso -volid cidata -joliet -rock -input-charset utf-8 \u003cstaging\u003e/virtrigaud-cloudinit-copy.0000000000",
+      "local chmod 0711 \u003cstaging\u003e/virtrigaud-cloudinit-copy.0000000000",
       "local mktemp \u003cstaging\u003e/copy-domain.xml.XXXXXXXXXX",
       "local virsh define \u003cstaging\u003e/copy-domain.xml.0000000000",
       "local rm -f -- \u003cstaging\u003e/copy-domain.xml.0000000000"
     ],
     "resp": "{\"target_vm_id\":\"copy\"}",
     "err": "",
-    "defined": "\u003cdomain type='kvm'\u003e\n  \u003cname\u003ecopy\u003c/name\u003e\n  \u003cuuid\u003eUUID\u003c/uuid\u003e\n  \u003cmemory unit='KiB'\u003e2097152\u003c/memory\u003e\n  \u003ccurrentMemory unit='KiB'\u003e2097152\u003c/currentMemory\u003e\n  \u003cvcpu placement='static'\u003e2\u003c/vcpu\u003e\n  \u003cos\u003e\n    \u003ctype arch='x86_64' machine='pc-q35-8.2'\u003ehvm\u003c/type\u003e\n  \u003c/os\u003e\n  \u003cdevices\u003e\n    \u003cdisk type='file' device='disk'\u003e\n      \u003cdriver name='qemu' type='qcow2'/\u003e\n      \u003csource file='/var/lib/libvirt/images/copy-disk.qcow2'/\u003e\n      \u003ctarget dev='vda' bus='virtio'/\u003e\n    \u003c/disk\u003e\n    \u003cdisk type='file' device='cdrom'\u003e\n      \u003cdriver name='qemu' type='raw'/\u003e\n      \u003csource file='/tmp/virtrigaud-cloudinit-vrgold-web.abcdefghij/cloud-init.iso'/\u003e\n      \u003ctarget dev='sda' bus='sata'/\u003e\n      \u003creadonly/\u003e\n    \u003c/disk\u003e\n    \u003cinterface type='network'\u003e\n      \u003cmac address='MAC'/\u003e\n      \u003csource network='default'/\u003e\n      \u003cmodel type='virtio'/\u003e\n    \u003c/interface\u003e\n  \u003c/devices\u003e\n\u003c/domain\u003e\n"
+    "defined": "\u003cdomain type='kvm'\u003e\n  \u003cname\u003ecopy\u003c/name\u003e\n  \u003cuuid\u003eUUID\u003c/uuid\u003e\n  \u003cmemory unit='KiB'\u003e2097152\u003c/memory\u003e\n  \u003ccurrentMemory unit='KiB'\u003e2097152\u003c/currentMemory\u003e\n  \u003cvcpu placement='static'\u003e2\u003c/vcpu\u003e\n  \u003cos\u003e\n    \u003ctype arch='x86_64' machine='pc-q35-8.2'\u003ehvm\u003c/type\u003e\n  \u003c/os\u003e\n  \u003cdevices\u003e\n    \u003cdisk type='file' device='disk'\u003e\n      \u003cdriver name='qemu' type='qcow2'/\u003e\n      \u003csource file='/var/lib/libvirt/images/copy-disk.qcow2'/\u003e\n      \u003ctarget dev='vda' bus='virtio'/\u003e\n    \u003c/disk\u003e\n    \u003cdisk type='file' device='cdrom'\u003e\n      \u003cdriver name='qemu' type='raw'/\u003e\n      \u003csource file='\u003cstaging\u003e/virtrigaud-cloudinit-copy.0000000000/cloud-init.iso'/\u003e\n      \u003ctarget dev='sda' bus='sata'/\u003e\n      \u003creadonly/\u003e\n    \u003c/disk\u003e\n    \u003cinterface type='network'\u003e\n      \u003cmac address='MAC'/\u003e\n      \u003csource network='default'/\u003e\n      \u003cmodel type='virtio'/\u003e\n    \u003c/interface\u003e\n  \u003c/devices\u003e\n\u003c/domain\u003e\n"
   },
   "clone-linked": {
     "calls": null,
@@ -304,6 +381,13 @@
       "single virsh pool-dumpxml default",
       "local sh -c if [ -L \"$1\" ]; then echo symlink; elif [ -e \"$1\" ]; then echo present; fi sh /var/lib/libvirt/images/team-a.copy-disk.qcow2",
       "single virsh dumpxml vrgold-web",
+      "local isoinfo -R -f -i /tmp/virtrigaud-cloudinit-vrgold-web.abcdefghij/cloud-init.iso",
+      "local sh -c isoinfo \"$2\" -i \"$1\" -x \"$3\" \u003e/dev/null \u0026\u0026 isoinfo \"$2\" -i \"$1\" -x \"$3\" | head -c \"$4\" sh /tmp/virtrigaud-cloudinit-vrgold-web.abcdefghij/cloud-init.iso -R /meta-data 1048577",
+      "local isoinfo -R -i /tmp/virtrigaud-cloudinit-vrgold-web.abcdefghij/cloud-init.iso -x /meta-data",
+      "local isoinfo -R -i /tmp/virtrigaud-cloudinit-vrgold-web.abcdefghij/cloud-init.iso -x /meta-data",
+      "local sh -c isoinfo \"$2\" -i \"$1\" -x \"$3\" \u003e/dev/null \u0026\u0026 isoinfo \"$2\" -i \"$1\" -x \"$3\" | head -c \"$4\" sh /tmp/virtrigaud-cloudinit-vrgold-web.abcdefghij/cloud-init.iso -R /user-data 1048577",
+      "local isoinfo -R -i /tmp/virtrigaud-cloudinit-vrgold-web.abcdefghij/cloud-init.iso -x /user-data",
+      "local isoinfo -R -i /tmp/virtrigaud-cloudinit-vrgold-web.abcdefghij/cloud-init.iso -x /user-data",
       "local mktemp -d /var/lib/libvirt/images/.virtrigaud-write-XXXXXXXXXX",
       "local sh -c if [ -f \"$1\" ]; then echo file; elif [ -e \"$1\" ]; then echo other; fi sh /var/lib/libvirt/images/vrgold-web-disk.qcow2",
       "local sh -c if [ -L \"$1\" ]; then echo symlink; else stat -L -c '%a %u' -- \"$2\" \u0026\u0026 id -u; fi sh /var/lib/libvirt/images/vrgold-web-disk.qcow2 /var/lib/libvirt/images",
@@ -320,13 +404,16 @@
       "local sudo restorecon /var/lib/libvirt/images/team-a.copy-disk.qcow2",
       "single virsh pool-refresh default",
       "local rm -rf -- /var/lib/libvirt/images/.virtrigaud-write-0000000000",
+      "local mktemp -d \u003cstaging\u003e/virtrigaud-cloudinit-team-a.copy.XXXXXXXXXX",
+      "local genisoimage -output \u003cstaging\u003e/virtrigaud-cloudinit-team-a.copy.0000000000/cloud-init.iso -volid cidata -joliet -rock -input-charset utf-8 \u003cstaging\u003e/virtrigaud-cloudinit-team-a.copy.0000000000",
+      "local chmod 0711 \u003cstaging\u003e/virtrigaud-cloudinit-team-a.copy.0000000000",
       "local mktemp \u003cstaging\u003e/team-a.copy-domain.xml.XXXXXXXXXX",
       "local virsh define \u003cstaging\u003e/team-a.copy-domain.xml.0000000000",
       "local rm -f -- \u003cstaging\u003e/team-a.copy-domain.xml.0000000000"
     ],
     "resp": "{\"target_vm_id\":\"team-a.copy\"}",
     "err": "",
-    "defined": "\u003cdomain type='kvm'\u003e\n  \u003cname\u003eteam-a.copy\u003c/name\u003e\n  \u003cuuid\u003eUUID\u003c/uuid\u003e\n  \u003cmetadata\u003e\n    \n  \u003c/metadata\u003e\n  \u003cmemory unit='KiB'\u003e2097152\u003c/memory\u003e\n  \u003ccurrentMemory unit='KiB'\u003e2097152\u003c/currentMemory\u003e\n  \u003cvcpu placement='static'\u003e2\u003c/vcpu\u003e\n  \u003cos\u003e\n    \u003ctype arch='x86_64' machine='pc-q35-8.2'\u003ehvm\u003c/type\u003e\n  \u003c/os\u003e\n  \u003cdevices\u003e\n    \u003cdisk type='file' device='disk'\u003e\n      \u003cdriver name='qemu' type='qcow2'/\u003e\n      \u003csource file='/var/lib/libvirt/images/team-a.copy-disk.qcow2'/\u003e\n      \u003ctarget dev='vda' bus='virtio'/\u003e\n    \u003c/disk\u003e\n    \u003cdisk type='file' device='cdrom'\u003e\n      \u003cdriver name='qemu' type='raw'/\u003e\n      \u003csource file='/tmp/virtrigaud-cloudinit-vrgold-web.abcdefghij/cloud-init.iso'/\u003e\n      \u003ctarget dev='sda' bus='sata'/\u003e\n      \u003creadonly/\u003e\n    \u003c/disk\u003e\n    \u003cinterface type='network'\u003e\n      \u003cmac address='MAC'/\u003e\n      \u003csource network='default'/\u003e\n      \u003cmodel type='virtio'/\u003e\n    \u003c/interface\u003e\n  \u003c/devices\u003e\n\u003c/domain\u003e\n"
+    "defined": "\u003cdomain type='kvm'\u003e\n  \u003cname\u003eteam-a.copy\u003c/name\u003e\n  \u003cuuid\u003eUUID\u003c/uuid\u003e\n  \u003cmetadata\u003e\n    \n  \u003c/metadata\u003e\n  \u003cmemory unit='KiB'\u003e2097152\u003c/memory\u003e\n  \u003ccurrentMemory unit='KiB'\u003e2097152\u003c/currentMemory\u003e\n  \u003cvcpu placement='static'\u003e2\u003c/vcpu\u003e\n  \u003cos\u003e\n    \u003ctype arch='x86_64' machine='pc-q35-8.2'\u003ehvm\u003c/type\u003e\n  \u003c/os\u003e\n  \u003cdevices\u003e\n    \u003cdisk type='file' device='disk'\u003e\n      \u003cdriver name='qemu' type='qcow2'/\u003e\n      \u003csource file='/var/lib/libvirt/images/team-a.copy-disk.qcow2'/\u003e\n      \u003ctarget dev='vda' bus='virtio'/\u003e\n    \u003c/disk\u003e\n    \u003cdisk type='file' device='cdrom'\u003e\n      \u003cdriver name='qemu' type='raw'/\u003e\n      \u003csource file='\u003cstaging\u003e/virtrigaud-cloudinit-team-a.copy.0000000000/cloud-init.iso'/\u003e\n      \u003ctarget dev='sda' bus='sata'/\u003e\n      \u003creadonly/\u003e\n    \u003c/disk\u003e\n    \u003cinterface type='network'\u003e\n      \u003cmac address='MAC'/\u003e\n      \u003csource network='default'/\u003e\n      \u003cmodel type='virtio'/\u003e\n    \u003c/interface\u003e\n  \u003c/devices\u003e\n\u003c/domain\u003e\n"
   },
   "clone-target-exists": {
     "calls": [
@@ -348,6 +435,13 @@
       "local sh -c if [ -L \"$1\" ]; then echo symlink; elif [ -e \"$1\" ]; then echo present; fi sh /var/lib/libvirt/images/team-a.copy-disk.qcow2",
       "single virsh dumpxml vrgold-web",
       "local sh -c if [ -L \"$1\" ]; then echo symlink; elif [ -e \"$1\" ]; then echo present; fi sh /var/lib/libvirt/qemu/nvram/team-a.copy_VARS.fd",
+      "local isoinfo -R -f -i /tmp/virtrigaud-cloudinit-vrgold-web.abcdefghij/cloud-init.iso",
+      "local sh -c isoinfo \"$2\" -i \"$1\" -x \"$3\" \u003e/dev/null \u0026\u0026 isoinfo \"$2\" -i \"$1\" -x \"$3\" | head -c \"$4\" sh /tmp/virtrigaud-cloudinit-vrgold-web.abcdefghij/cloud-init.iso -R /meta-data 1048577",
+      "local isoinfo -R -i /tmp/virtrigaud-cloudinit-vrgold-web.abcdefghij/cloud-init.iso -x /meta-data",
+      "local isoinfo -R -i /tmp/virtrigaud-cloudinit-vrgold-web.abcdefghij/cloud-init.iso -x /meta-data",
+      "local sh -c isoinfo \"$2\" -i \"$1\" -x \"$3\" \u003e/dev/null \u0026\u0026 isoinfo \"$2\" -i \"$1\" -x \"$3\" | head -c \"$4\" sh /tmp/virtrigaud-cloudinit-vrgold-web.abcdefghij/cloud-init.iso -R /user-data 1048577",
+      "local isoinfo -R -i /tmp/virtrigaud-cloudinit-vrgold-web.abcdefghij/cloud-init.iso -x /user-data",
+      "local isoinfo -R -i /tmp/virtrigaud-cloudinit-vrgold-web.abcdefghij/cloud-init.iso -x /user-data",
       "local mktemp -d /var/lib/libvirt/images/.virtrigaud-write-XXXXXXXXXX",
       "local sh -c if [ -f \"$1\" ]; then echo file; elif [ -e \"$1\" ]; then echo other; fi sh /var/lib/libvirt/images/vrgold-web-disk.qcow2",
       "local sh -c if [ -L \"$1\" ]; then echo symlink; else stat -L -c '%a %u' -- \"$2\" \u0026\u0026 id -u; fi sh /var/lib/libvirt/images/vrgold-web-disk.qcow2 /var/lib/libvirt/images",
@@ -370,13 +464,16 @@
       "local sh -c stat -L -c '%a %u' -- \"$1\" \u0026\u0026 id -u sh /var/lib/libvirt/qemu/nvram",
       "local sudo chown -h libvirt-qemu:kvm -- /var/lib/libvirt/qemu/nvram/team-a.copy_VARS.fd",
       "local sudo restorecon /var/lib/libvirt/qemu/nvram/team-a.copy_VARS.fd",
+      "local mktemp -d \u003cstaging\u003e/virtrigaud-cloudinit-team-a.copy.XXXXXXXXXX",
+      "local genisoimage -output \u003cstaging\u003e/virtrigaud-cloudinit-team-a.copy.0000000000/cloud-init.iso -volid cidata -joliet -rock -input-charset utf-8 \u003cstaging\u003e/virtrigaud-cloudinit-team-a.copy.0000000000",
+      "local chmod 0711 \u003cstaging\u003e/virtrigaud-cloudinit-team-a.copy.0000000000",
       "local mktemp \u003cstaging\u003e/team-a.copy-domain.xml.XXXXXXXXXX",
       "local virsh define \u003cstaging\u003e/team-a.copy-domain.xml.0000000000",
       "local rm -f -- \u003cstaging\u003e/team-a.copy-domain.xml.0000000000"
     ],
     "resp": "{\"target_vm_id\":\"team-a.copy\"}",
     "err": "",
-    "defined": "\u003cdomain type='kvm'\u003e\n  \u003cname\u003eteam-a.copy\u003c/name\u003e\n  \u003cuuid\u003eUUID\u003c/uuid\u003e\n  \u003cmemory unit='KiB'\u003e2097152\u003c/memory\u003e\n  \u003ccurrentMemory unit='KiB'\u003e2097152\u003c/currentMemory\u003e\n  \u003cvcpu placement='static'\u003e2\u003c/vcpu\u003e\n  \u003cos\u003e\n    \u003ctype arch='x86_64' machine='pc-q35-8.2'\u003ehvm\u003c/type\u003e\n    \u003cloader readonly='yes' type='pflash'\u003e/usr/share/OVMF/OVMF_CODE.fd\u003c/loader\u003e\n    \u003cnvram\u003e/var/lib/libvirt/qemu/nvram/team-a.copy_VARS.fd\u003c/nvram\u003e\n  \u003c/os\u003e\n  \u003cdevices\u003e\n    \u003cdisk type='file' device='disk'\u003e\n      \u003cdriver name='qemu' type='qcow2'/\u003e\n      \u003csource file='/var/lib/libvirt/images/team-a.copy-disk.qcow2'/\u003e\n      \u003ctarget dev='vda' bus='virtio'/\u003e\n    \u003c/disk\u003e\n    \u003cdisk type='file' device='cdrom'\u003e\n      \u003cdriver name='qemu' type='raw'/\u003e\n      \u003csource file='/tmp/virtrigaud-cloudinit-vrgold-web.abcdefghij/cloud-init.iso'/\u003e\n      \u003ctarget dev='sda' bus='sata'/\u003e\n      \u003creadonly/\u003e\n    \u003c/disk\u003e\n    \u003cinterface type='network'\u003e\n      \u003cmac address='MAC'/\u003e\n      \u003csource network='default'/\u003e\n      \u003cmodel type='virtio'/\u003e\n    \u003c/interface\u003e\n  \u003c/devices\u003e\n\u003c/domain\u003e\n"
+    "defined": "\u003cdomain type='kvm'\u003e\n  \u003cname\u003eteam-a.copy\u003c/name\u003e\n  \u003cuuid\u003eUUID\u003c/uuid\u003e\n  \u003cmemory unit='KiB'\u003e2097152\u003c/memory\u003e\n  \u003ccurrentMemory unit='KiB'\u003e2097152\u003c/currentMemory\u003e\n  \u003cvcpu placement='static'\u003e2\u003c/vcpu\u003e\n  \u003cos\u003e\n    \u003ctype arch='x86_64' machine='pc-q35-8.2'\u003ehvm\u003c/type\u003e\n    \u003cloader readonly='yes' type='pflash'\u003e/usr/share/OVMF/OVMF_CODE.fd\u003c/loader\u003e\n    \u003cnvram\u003e/var/lib/libvirt/qemu/nvram/team-a.copy_VARS.fd\u003c/nvram\u003e\n  \u003c/os\u003e\n  \u003cdevices\u003e\n    \u003cdisk type='file' device='disk'\u003e\n      \u003cdriver name='qemu' type='qcow2'/\u003e\n      \u003csource file='/var/lib/libvirt/images/team-a.copy-disk.qcow2'/\u003e\n      \u003ctarget dev='vda' bus='virtio'/\u003e\n    \u003c/disk\u003e\n    \u003cdisk type='file' device='cdrom'\u003e\n      \u003cdriver name='qemu' type='raw'/\u003e\n      \u003csource file='\u003cstaging\u003e/virtrigaud-cloudinit-team-a.copy.0000000000/cloud-init.iso'/\u003e\n      \u003ctarget dev='sda' bus='sata'/\u003e\n      \u003creadonly/\u003e\n    \u003c/disk\u003e\n    \u003cinterface type='network'\u003e\n      \u003cmac address='MAC'/\u003e\n      \u003csource network='default'/\u003e\n      \u003cmodel type='virtio'/\u003e\n    \u003c/interface\u003e\n  \u003c/devices\u003e\n\u003c/domain\u003e\n"
   },
   "diskinfo-explicit-path": {
     "calls": [

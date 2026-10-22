@@ -931,7 +931,7 @@ func (plan domainDeletionPlan) guardedFiles() []string {
 // refused (diskDependentsError); when that cannot be established, it fails
 // with a retryable error. Either way the domain is left untouched. The seed
 // directory is kept (and logged) while another domain still references a file
-// in it — a clone's CD-ROM points at its source VM's seed ISO, and a domain
+// in it — a clone made before R26 points its CD-ROM at its source VM's seed ISO, and a domain
 // whose CD-ROM file is gone no longer starts.
 func (p *Provider) planDomainDeletion(ctx context.Context, vp *VirshProvider, id string) (domainDeletionPlan, error) {
 	res, err := vp.runVirshCommand(ctx, "dumpxml", id)

@@ -20,6 +20,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"path/filepath"
@@ -104,6 +105,13 @@ var (
 // rewriting the source domain's XML, so the two domains never collide. The
 // clone is left powered off; the manager controls power separately, matching
 // Create's behavior.
+//
+// A source with a cloud-init seed ISO gives the clone a seed of its own
+// (clone_seed.go, R26): owned and removed with the clone, and carrying a new
+// cloud-init instance-id and the target's hostname, so the clone's first boot
+// runs cloud-init's per-instance modules (new SSH host keys) instead of
+// keeping the source's identity. The source's seed is read before anything
+// is copied.
 //
 // The target name is decided first (clone_target.go, rc2 R4): a domain of that
 // name stamped with the target VirtualMachine's UID (req.TargetVM.UID) is the
@@ -238,6 +246,17 @@ func (p *Provider) Clone(ctx context.Context, req contracts.CloneRequest) (contr
 			return contracts.CloneResponse{}, err
 		}
 	}
+	// The clone's own cloud-init seed, with a new identity (clone_seed.go,
+	// R26), is read from the source's before anything is copied: a seed that
+	// cannot be read fails the clone with nothing written.
+	srcDoc, err := parseDomainDisks(srcXML.Stdout)
+	if err != nil {
+		return contracts.CloneResponse{}, contracts.NewInvalidSpecError("read source domain XML for clone", err)
+	}
+	seed, err := planCloneSeed(ctx, p.virshProvider, srcDoc.cloudInitSeedISO(), req, domainName)
+	if err != nil {
+		return contracts.CloneResponse{}, err
+	}
 
 	if req.Linked {
 		if err := createLinkedOverlay(ctx, p.virshProvider, srcDiskPath, srcDiskFormat, targetDiskPath); err != nil {
@@ -265,19 +284,29 @@ func (p *Provider) Clone(ctx context.Context, req contracts.CloneRequest) (contr
 	// Apply best-effort CPU/memory overrides from ClassJSON.
 	targetXML = applyClassOverrides(targetXML, req.ClassJSON)
 
-	// CustomizeJSON (hostname / cloud-init) is intentionally NOT applied in this
-	// MVP: a faithful implementation requires regenerating the nocloud ISO and
-	// re-pointing the CD-ROM, which is a follow-up. Log loudly so callers do not
-	// mistake a clone for a customized VM (issue #153).
-	if req.CustomizeJSON != "" {
-		log.Printf("WARN Clone of %s: CustomizeJSON provided but not applied by the libvirt provider (MVP); "+
-			"the clone inherits the source's hostname/cloud-init. Tracked as a follow-up to issue #153.",
-			req.TargetName)
+	// The clone's own seed (its hostname and user-data customization
+	// included), in a seed directory named after the clone's domain, so the
+	// clone's Delete removes it and the source's Delete never touches it.
+	targetXML, seedDir, err := p.writeCloneSeed(ctx, p.virshProvider, targetXML, seed)
+	if err != nil {
+		// Nothing was defined (writeCloneSeed left no seed behind): a
+		// retryable failure, never an unknown outcome. The copied disk is
+		// replaced by the retry (ensureDiskTargetFree: no domain uses it).
+		return contracts.CloneResponse{}, contracts.NewRetryableError(
+			"could not make the clone's cloud-init seed on the libvirt host; nothing was defined", err)
 	}
 
 	// Clone stays single-host in this slice (no CloneRequest.target_host_id yet,
 	// ADR-0007 P1): define on the provider's own host.
 	if err := p.defineDomainFromXML(ctx, p.virshProvider, domainName, targetXML); err != nil {
+		// The clone's seed is removed unless the domain may exist after all
+		// (it would reference it, and its Delete removes it), as Create does.
+		// removeHostPath runs detached from the request (context.WithoutCancel)
+		// and bounded (stagingCleanupTimeout): the seed holds the source's
+		// user-data and is removed even when the call's context is gone.
+		if seedDir != "" && !errors.Is(err, errDefineOutcomeUnknown) {
+			removeHostPath(ctx, p.virshProvider, seedDir, true)
+		}
 		return contracts.CloneResponse{}, fmt.Errorf("define target domain: %w", err)
 	}
 
@@ -579,7 +608,8 @@ func refuseNVRAMInUseOnHost(ctx context.Context, h hostCommandRunner, domainName
 //     unicast address (so the clone gets new NICs on the same L2 segment).
 //   - the primary disk <source file='<srcDiskPath>'/> is re-pointed at
 //     targetDiskPath (the cloned/overlay volume). Only the matching source path
-//     is rewritten, so a cloud-init CD-ROM source is left untouched. That
+//     is rewritten, so a cloud-init CD-ROM source is left untouched here (the
+//     caller re-points it at the clone's own seed: writeCloneSeed). That
 //     disk's <driver type> is set to qcow2, the format every clone disk is
 //     written in (setDiskDriverType): a raw source's clone is not raw.
 //   - for a UEFI source, the per-VM <nvram>...</nvram> varstore path is
