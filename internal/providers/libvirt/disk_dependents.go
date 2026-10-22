@@ -292,7 +292,7 @@ func (o otherDomains) using(self string, files, canon []string) int {
 }
 
 // useUnder reports whether any of the domains references a file inside dir
-// (e.g. a clone whose CD-ROM still points at its source VM's cloud-init seed).
+// (e.g. a clone made before R26, whose CD-ROM points at its source VM's cloud-init seed).
 func (o otherDomains) useUnder(dir string) bool {
 	prefix := strings.TrimSuffix(dir, "/") + "/"
 	for _, d := range o {

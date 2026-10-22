@@ -169,14 +169,24 @@ func (p *Provider) imageStampClearing(ctx context.Context, src *object.VirtualMa
 	if src == nil {
 		return clearedImageStampExtraConfig(nil), nil
 	}
+	extra, err := p.sourceExtraConfig(ctx, src, "clear its image stamp")
+	if err != nil {
+		return nil, err
+	}
+	return clearedImageStampExtraConfig(extra), nil
+}
+
+// sourceExtraConfig reads the ExtraConfig of src, a clone's or a create's
+// source VM; why names the purpose in the error.
+func (p *Provider) sourceExtraConfig(ctx context.Context, src *object.VirtualMachine, why string) ([]types.BaseOptionValue, error) {
 	var vm mo.VirtualMachine
 	if err := src.Properties(ctx, src.Reference(), []string{propConfigExtraConfig}, &vm); err != nil {
-		return nil, fmt.Errorf("read the source's configuration to clear its image stamp: %w", err)
+		return nil, fmt.Errorf("read the source's configuration to %s: %w", why, err)
 	}
 	if vm.Config == nil {
-		return nil, fmt.Errorf("read the source's configuration to clear its image stamp: no configuration")
+		return nil, fmt.Errorf("read the source's configuration to %s: no configuration", why)
 	}
-	return clearedImageStampExtraConfig(vm.Config.ExtraConfig), nil
+	return vm.Config.ExtraConfig, nil
 }
 
 // legacyImportMarker is the one image-stamp key a legacy (identity-less) OVA

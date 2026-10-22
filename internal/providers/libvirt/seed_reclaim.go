@@ -29,9 +29,11 @@ import (
 
 // Reclaiming a deleted domain's cloud-init seed directory (R24).
 //
-// A single-host Clone does not make the clone a seed of its own: its CD-ROM
-// keeps pointing at the SOURCE VM's seed ISO (rewriteDomainXMLForClone). The
-// delete plan therefore keeps a seed directory while another domain still
+// Before R26 a single-host Clone did not make the clone a seed of its own:
+// its CD-ROM kept pointing at the SOURCE VM's seed ISO. Clones made since
+// have their own seed (clone_seed.go), but clones made by those older
+// releases still share their source's, and are handled here. The delete plan
+// therefore keeps a seed directory while another domain still
 // references a file in it (planDomainDeletion) — a domain whose CD-ROM file is
 // gone no longer starts. That decision is made BEFORE the domain is undefined,
 // and each of two deletes that run side by side (a source VM and its clone, as

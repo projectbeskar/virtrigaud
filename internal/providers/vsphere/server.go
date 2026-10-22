@@ -2086,7 +2086,14 @@ func (p *Provider) Clone(ctx context.Context, req *providerv1.CloneRequest) (*pr
 	// clone would inherit from the source's ExtraConfig), so the clone never
 	// claims the SOURCE VirtualMachine's owner, and clears any prepared-image
 	// stamp (ADR-0009 D3): a clone is never an image artifact.
-	clearImage, err := p.imageStampClearing(ctx, sourceVM)
+	// It also gives the clone its own cloud-init identity (clone_identity.go,
+	// R26): the guestinfo keys the clone would copy name the source's
+	// instance.
+	srcExtra, err := p.sourceExtraConfig(ctx, sourceVM, "clone it")
+	if err != nil {
+		return nil, err
+	}
+	identity, err := p.cloneIdentityExtraConfig(srcExtra, req)
 	if err != nil {
 		return nil, err
 	}
@@ -2095,7 +2102,7 @@ func (p *Provider) Clone(ctx context.Context, req *providerv1.CloneRequest) (*pr
 			Datastore: types.NewReference(datastore.Reference()),
 			Pool:      types.NewReference(resourcePool.Reference()),
 		},
-		Config:   cloneConfigSpec(owner, clearImage),
+		Config:   cloneConfigSpec(owner, append(clearedImageStampExtraConfig(srcExtra), identity...)),
 		PowerOn:  false, // Don't power on automatically
 		Template: false,
 	}
