@@ -60,9 +60,18 @@ spec:
     # symlinks cannot escape). Comma- or colon-separated; the default when unset
     # is /var/lib/libvirt/images. List the pool directory ImagePrepare writes
     # into too if you use URL-sourced images. See docs/image-preparation.md.
+    #
+    # Host directory VMs' cloud-init seeds (user-data, which may carry secrets)
+    # are built in, private. It must exist on every libvirt host, owned by the
+    # provider's SSH user, mode 0711 (creates are refused otherwise):
+    #   install -d -m 0711 -o <ssh user> -g <ssh user> /var/lib/libvirt/virtrigaud-seeds
+    # The default when unset is /var/lib/libvirt/virtrigaud-seeds. See
+    # docs/libvirt-domain-ownership.md#cloud-init-seed-directory.
     # env:
     #   - name: VIRTRIGAUD_LIBVIRT_IMAGE_DIRS
     #     value: "/var/lib/libvirt/images,/srv/golden-images"
+    #   - name: VIRTRIGAUD_LIBVIRT_SEED_DIR
+    #     value: "/var/lib/libvirt/virtrigaud-seeds"
 
 ---
 # Define a VM class for KVM

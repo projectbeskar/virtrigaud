@@ -33,8 +33,8 @@ import (
 // A clone's own cloud-init seed (R26), on both topologies.
 //
 // A clone of a VM that boots from a NoCloud seed ISO gets a seed of its own,
-// made like Create's (PrepareCloudInit: a fresh per-domain directory in the
-// host staging directory, named after the CLONE's domain, so the clone's
+// made like Create's (PrepareCloudInit: a fresh, private per-domain directory
+// in the host seed directory, seed_dir.go, named after the CLONE's domain, so the clone's
 // Delete and the seed reclaim remove it with the clone) — never the source's
 // ISO (single-host clones used to keep pointing at it, coupling the two VMs'
 // lifecycles, R24) nor a byte copy of it (clustered clones used to copy it,
@@ -108,8 +108,14 @@ type cloneSeedPlan struct {
 
 // planCloneSeed decides the clone's own seed: nil when the source has none
 // (srcISO ""), else the source seed's files on the host behind h with the
-// clone's identity. A seed that cannot be read is an error.
-func planCloneSeed(ctx context.Context, h hostCommandRunner, srcISO string, req contracts.CloneRequest, domainName string) (*cloneSeedPlan, error) {
+// clone's identity. A seed that cannot be read is an error. When the source
+// has a seed, the host's seed directory is checked first (ensureSeedRoot,
+// R27): an unusable one fails the clone, retryably and with the constant
+// message, before anything is read or copied. The seed is read as the SSH
+// user through seedCopySource: once the source has started, its
+// cloud-init.iso belongs to the qemu user and the SSH user's private copy is
+// read instead.
+func (p *Provider) planCloneSeed(ctx context.Context, h hostCommandRunner, srcISO string, req contracts.CloneRequest, domainName string) (*cloneSeedPlan, error) {
 	cust, err := cloneidentity.ParseCustomization(req.CustomizeJSON)
 	if err != nil {
 		return nil, contracts.NewInvalidSpecError("the clone's customization is not valid JSON", err)
@@ -131,7 +137,10 @@ func planCloneSeed(ctx context.Context, h hostCommandRunner, srcISO string, req 
 		}
 		return nil, nil
 	}
-	files, err := readSeedISO(ctx, h, srcISO)
+	if err := ensureSeedRoot(ctx, h, p.seedDir()); err != nil {
+		return nil, err
+	}
+	files, err := readSeedISO(ctx, h, srcISO, p.seedCopySource(ctx, h, srcISO))
 	if err != nil {
 		return nil, err
 	}
@@ -185,13 +194,14 @@ func planCloneSeed(ctx context.Context, h hostCommandRunner, srcISO string, req 
 }
 
 // readSeedISO reads the NoCloud files (seedFileNames) of the seed ISO iso on
-// the host behind h, as the SSH user. It lists the ISO with each name mode
+// the host behind h, as the SSH user, from the file from (iso, or the SSH
+// user's private copy of it: Provider.seedCopySource); messages name iso. It lists the ISO with each name mode
 // (isoNameFlags) and reads the files of the first that shows a user-data or
 // meta-data file. A failure to read the ISO is retryable (a host that could
 // not be reached, a missing isoinfo); an ISO without NoCloud files, or a file
 // over maxSeedFileBytes, is an InvalidSpec. The files' contents (user-data may
 // carry secrets) are never logged.
-func readSeedISO(ctx context.Context, h hostCommandRunner, iso string) (map[string]string, error) {
+func readSeedISO(ctx context.Context, h hostCommandRunner, iso, from string) (map[string]string, error) {
 	var (
 		flag    string
 		present []string
@@ -199,7 +209,7 @@ func readSeedISO(ctx context.Context, h hostCommandRunner, iso string) (map[stri
 		listed  bool
 	)
 	for _, f := range isoNameFlags {
-		res, err := runHost(ctx, h, isoinfoTool, f, "-f", "-i", iso)
+		res, err := runHost(ctx, h, isoinfoTool, f, "-f", "-i", from)
 		if err != nil {
 			// A Rock Ridge-only image has no Joliet tree to list: that
 			// error only matters when no listing succeeded.
@@ -230,7 +240,7 @@ func readSeedISO(ctx context.Context, h hostCommandRunner, iso string) (map[stri
 
 	files := make(map[string]string, len(present))
 	for _, name := range present {
-		res, err := runHost(ctx, h, "sh", "-c", seedFileReadScript, "sh", iso, flag, "/"+name, strconv.Itoa(maxSeedFileBytes+1))
+		res, err := runHost(ctx, h, "sh", "-c", seedFileReadScript, "sh", from, flag, "/"+name, strconv.Itoa(maxSeedFileBytes+1))
 		if err != nil {
 			return nil, contracts.NewRetryableError(fmt.Sprintf(
 				"could not read %s from the clone source's cloud-init seed %s on the host; nothing was copied", name, iso), seedReadFailure(err))
@@ -269,7 +279,7 @@ func seedReadFailure(err error) error {
 var errSeedReadFailed = errors.New("the host command reading the seed failed")
 
 // writeCloneSeed makes the clone's own seed on vp's host (PrepareCloudInit, in
-// the provider's staging directory) and re-points the clone's CD-ROM in
+// the provider's seed directory, sealed private like Create's) and re-points the clone's CD-ROM in
 // domainXML from the source's seed at it. It returns the rewritten definition
 // and the seed directory ("" and domainXML unchanged when plan is nil). On a
 // failure nothing of the seed is left behind.
@@ -278,7 +288,7 @@ func (p *Provider) writeCloneSeed(ctx context.Context, vp *VirshProvider, domain
 		return domainXML, "", nil
 	}
 	cip := NewCloudInitProvider(vp)
-	cip.stagingDir = p.stagingDir()
+	cip.seedDir = p.seedDir()
 	iso, err := cip.PrepareCloudInit(ctx, plan.config)
 	if err != nil {
 		return "", "", fmt.Errorf("make the clone's cloud-init seed: %w", err)

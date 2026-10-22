@@ -22,6 +22,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -51,6 +52,19 @@ func TestMain(m *testing.M) {
 		os.Exit(1)
 	}
 	fixtureImagesDir = dir
+	// A struct-literal provider (no hostSeedDir) builds cloud-init seeds in a
+	// scratch seed directory, never the real DefaultSeedDir.
+	seedRoot, err := newSeedTestBase()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "libvirt tests: %v\n", err)
+		os.Exit(1)
+	}
+	seedTestBase = seedRoot
+	seedDirDefault = filepath.Join(seedRoot, "default")
+	if err := os.Mkdir(seedDirDefault, 0o700); err != nil {
+		fmt.Fprintf(os.Stderr, "libvirt tests: %v\n", err)
+		os.Exit(1)
+	}
 	// The fake hosts' "default" storage pool is rooted in the fixture
 	// directory (FAKE_POOL_DIR), never the real /var/lib/libvirt/images.
 	defaultPoolRequiredDir = dir
@@ -58,12 +72,72 @@ func TestMain(m *testing.M) {
 	opsDiskPath = filepath.Join(dir, opsDomainName+"-disk.qcow2")
 	code := m.Run()
 	_ = os.RemoveAll(dir)
+	_ = os.RemoveAll(seedRoot)
 	if hits, _ := os.ReadFile(guardLog); len(hits) > 0 { //nolint:gosec // the test binary's own guard log
 		fmt.Fprintf(os.Stderr, "libvirt tests: the host guard refused commands that would have touched the real host:\n%s", hits)
 		code = 1
 	}
 	_ = os.RemoveAll(guardDir)
 	os.Exit(code)
+}
+
+// seedTestBase is a scratch directory every directory above which passes the
+// seed directory's ancestor rule (ensureSeedRoot: owned by root or this user,
+// not writable by group or others unless sticky), whatever TMPDIR and the umask
+// are: seed directories the tests use live below it (safeTempDir).
+var seedTestBase string
+
+// newSeedTestBase makes seedTestBase in the first of TMPDIR and /tmp whose
+// ancestors pass the rule (a 0775 TMPDIR made under umask 002 does not).
+func newSeedTestBase() (string, error) {
+	for _, parent := range []string{os.TempDir(), "/tmp"} {
+		if !ancestorsPassSeedRule(parent) {
+			continue
+		}
+		dir, err := os.MkdirTemp(parent, "virtrigaud-test-seeds-")
+		if err == nil {
+			return dir, nil
+		}
+	}
+	return "", fmt.Errorf("no scratch directory whose ancestors only root or this user can write")
+}
+
+// ancestorsPassSeedRule reports whether dir and every directory above it (its
+// canonical path) are owned by root or this user and not writable by group or
+// others unless sticky.
+func ancestorsPassSeedRule(dir string) bool {
+	canon, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		return false
+	}
+	for p := canon; ; p = filepath.Dir(p) {
+		fi, err := os.Stat(p)
+		if err != nil {
+			return false
+		}
+		st, ok := fi.Sys().(*syscall.Stat_t)
+		if !ok || (st.Uid != 0 && int(st.Uid) != os.Getuid()) {
+			return false
+		}
+		if fi.Mode()&os.ModeSticky == 0 && fi.Mode().Perm()&0o022 != 0 {
+			return false
+		}
+		if p == "/" {
+			return true
+		}
+	}
+}
+
+// safeTempDir is t.TempDir below seedTestBase: mode 0700, its ancestors pass
+// the seed directory's ancestor rule, removed after the test.
+func safeTempDir(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp(seedTestBase, "t-")
+	if err != nil {
+		t.Fatalf("make a scratch directory: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	return dir
 }
 
 // hostGuardEnvLog names the file the host guard's shims record refused

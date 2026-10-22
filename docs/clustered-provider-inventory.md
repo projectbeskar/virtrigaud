@@ -199,8 +199,7 @@ Every libvirt host — of a single-host Provider or a `topology: cluster` one �
 needs:
 
 - **libvirt's `default` storage pool at `/var/lib/libvirt/images`.** VM disks,
-  cloud-init seeds (`/var/lib/libvirt/images/cloud-init`), imported migration
-  disks and prepared images are created there. If the host has no `default`
+  imported migration disks and prepared images are created there. If the host has no `default`
   pool, the provider creates one at that path on the first create or disk
   import. If it has one at that path, the provider only starts it when it is
   inactive. **A `default` pool at any other directory is never changed**: the
@@ -221,6 +220,24 @@ needs:
 - **A separate image catalog.** Keep `VIRTRIGAUD_LIBVIRT_IMAGE_DIRS` (where
   tenants may name base images) apart from the pool when the pool is shared:
   see "Keep the image catalog apart from a shared pool" in the same section.
+- **The cloud-init seed directory** (`VIRTRIGAUD_LIBVIRT_SEED_DIR`, default
+  `/var/lib/libvirt/virtrigaud-seeds`), owned by the provider's SSH user, mode
+  `0711`, on every host:
+  `install -d -m 0711 -o <ssh user> -g <ssh user> /var/lib/libvirt/virtrigaud-seeds`.
+  Each VM's seed (its user-data, which may carry secrets) is built there,
+  private (`0600`). A host whose seed directory is missing (and cannot be
+  created by the SSH user), not owned by the SSH user, or readable or writable
+  by its group or others — or below a directory not owned by root or the SSH
+  user, or writable by group or others without the sticky bit — is refused:
+  every create and clone on it fails, retryably, with
+  `refusing to stage cloud-init data`. Providers with different SSH users on
+  one host each need their own directory (`VIRTRIGAUD_LIBVIRT_SEED_DIR` in each
+  Provider's `spec.runtime.env`). Keep libvirt's
+  `dynamic_ownership = 1` (the default) so the qemu user can open the `0600`
+  ISO; no AppArmor change is needed. Keep it on a local filesystem, not on
+  shared storage: libvirt hands the ISO to the qemu user with `chown`, which a
+  root-squashed NFS export refuses. See
+  [Cloud-init seed directory](libvirt-domain-ownership.md#cloud-init-seed-directory).
 
 ## First VM checklist
 

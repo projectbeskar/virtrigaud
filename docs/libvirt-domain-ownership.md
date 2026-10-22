@@ -178,20 +178,13 @@ XML, and the cloud-init seed (user-data, which may carry secrets, meta-data and
 the seed ISO). Each create gets its own:
 
 - The domain XML goes to `/tmp/<domain>-domain.xml.<random>` and the seed to a
-  directory `/tmp/virtrigaud-cloudinit-<domain>.<random>/`. Both are made by
+  directory `<seed dir>/virtrigaud-cloudinit-<domain>.<random>/` in the
+  [cloud-init seed directory](#cloud-init-seed-directory). Both are made by
   `mktemp` on the host: created exclusively, with an unpredictable suffix, mode
-  `0600`/`0700`, directly in the sticky `/tmp`. Nothing else on the host can
-  pre-create, predict, replace or rename them, and two concurrent creates never
-  share one.
-- `user-data` and `meta-data` stay private to the SSH user. Once the ISO is
-  built, the seed directory is set to `0711`, so the qemu process can open the
-  ISO by its exact path but nobody can list the directory. **The ISO itself is
-  not private:** it is created with the SSH user's umask (typically `0644`), and
-  its path is visible in the domain XML and in qemu's command line, so a local
-  user of the hypervisor host who learns the path can read the user-data it
-  carries. Building it with umask `077` (and relying on libvirt's
-  `dynamic_ownership` to hand it to qemu) is tracked; it needs lab verification
-  first.
+  `0600`/`0700`. Nothing else on the host can pre-create, predict, replace or
+  rename them, and two concurrent creates never share one.
+- The seed is private to the SSH user and then to the VM's qemu process; see
+  [Cloud-init seed directory](#cloud-init-seed-directory).
 - A URL image is downloaded to a per-download `mktemp` file in the same staging
   directory (`<domain>-disk-temp.img.<random>`), which is removed after the
   convert, so nothing can swap it between the header check and the convert.
@@ -202,24 +195,120 @@ the seed ISO). Each create gets its own:
   UUID (the define succeeded and only its reply was lost), the create succeeds;
   if the check itself fails, the seed is kept, because the domain may reference
   it. A created domain keeps its seed (its CD-ROM references the ISO), and
-  `Delete` removes it. Domains created before this change keep their seed under
-  `/tmp/virtrigaud-cloudinit/<name>/`, which `Delete` still finds from the domain
-  XML.
-- **Clones and the seed.** A clone's CD-ROM is the source's cloud-init seed. On a
-  **clustered** provider (slice 3) the clone gets its own copy: the source's ISO
-  is copied into a fresh per-clone seed directory
-  (`/tmp/virtrigaud-cloudinit-<clone domain>.<random>/cloud-init.iso`, same
-  modes as a create's) and the clone's CD-ROM is re-pointed at it, so deleting
-  either VM never removes the other's seed. The copy is removed if the clone's
-  define fails and the domain is known not to exist. On a **single-host**
-  provider the clone still references the source's seed (the known shared-seed
-  issue): deleting the clone removes the source's seed directory, and deleting
-  the source leaves the clone's CD-ROM pointing at a missing ISO. That path is
-  unchanged in this release, to keep single-host behaviour stable while the
-  ADR-0008 soak runs. Either way the clone boots with the **source's
-  user-data**, provisioning secrets included; a cross-namespace clone hands
+  `Delete` removes it. Domains created by earlier releases keep their seed where
+  it is (`/tmp/virtrigaud-cloudinit-<domain>.<random>/`, or
+  `/tmp/virtrigaud-cloudinit/<name>/` before that), which `Delete` still finds
+  from the domain XML.
+- **Clones and the seed.** A clone (single-host and clustered, R26) gets a seed
+  of its own: the source's seed files are read (through the SSH user's private
+  copy once the source has started) and a new seed is built from them with the
+  clone's identity, in a fresh seed directory in the seed directory
+  (`<seed dir>/virtrigaud-cloudinit-<clone domain>.<random>/cloud-init.iso`,
+  private exactly like a create's), and the clone's CD-ROM is re-pointed at it,
+  so deleting either VM never removes the other's seed. The new seed is removed
+  if the clone's define fails and the domain is known not to exist. Only a
+  single-host clone made before R26 still references its source's seed. The
+  clone boots with the **source's user-data** unless its `VMClone` gives its
+  own, provisioning secrets included; a cross-namespace clone hands
   them to the target namespace (see
   [`cross-namespace-targets.md`](cross-namespace-targets.md#a-clone-carries-the-sources-cloud-init-seed)).
+
+### Cloud-init seed directory
+
+A seed ISO carries the VM's user-data, which may hold passwords, keys and
+tokens. Since R27 the provider builds seeds in a dedicated directory that only
+the provider's SSH user can list, and makes every seed file private:
+
+- **Where.** `VIRTRIGAUD_LIBVIRT_SEED_DIR` on the provider pod (set it through
+  the Provider's `spec.runtime.env`), default
+  **`/var/lib/libvirt/virtrigaud-seeds`**. One absolute directory; it applies
+  to every host of a clustered Provider. A malformed value, or one in `/tmp`,
+  `/var/tmp`, `/run`, `/dev`, `/proc` or `/sys` (emptied at boot: a VM whose
+  CD-ROM file is gone no longer starts), fails provider start-up.
+- **Ownership and mode (fail closed).** Before it writes anything for a create
+  or a clustered clone, the provider checks the directory on the target host: it
+  must exist (the provider creates it with mode `0711` when it is missing and
+  the SSH user may, for example when the SSH user is root), be owned by the
+  SSH user, and have **no read or write bit for its group or others**. Every
+  directory above it — along the configured path and along its canonical path,
+  so a symbolic link on the way is covered too — must be owned by root or the
+  SSH user and **not writable by its group or others unless it is sticky**
+  (another account could otherwise rename the seed directory, or a directory on
+  its path, away and plant its own between the check and the write). A
+  directory that fails the check is refused: the create (or clone) fails with
+  a retryable error, `refusing to stage cloud-init data`, and resumes once the
+  host is fixed. The provider log names the directory and the problem. A
+  single-host provider also checks it at startup and logs a `WARN`.
+- **Mode `0711`, not `0700`,** unless qemu runs as the SSH user or root: the
+  qemu user must traverse the directory to open the ISO by its exact path. A
+  single-host provider logs a `WARN` at startup when others cannot traverse
+  it (no `o+x`); it does not refuse it.
+- **Host-local, one per SSH user.** Keep the seed directory on a local
+  filesystem, never on NFS or other shared storage: libvirt hands the ISO to the
+  qemu user with `chown`, which a root-squashed export refuses, and the
+  cleanup's check that no domain references a seed only sees the domains of
+  its own host. On a host shared by several Providers with **different SSH
+  users**, give each its own directory — the default is owned by one SSH user,
+  and every other Provider's creates fail closed on it. Set
+  `VIRTRIGAUD_LIBVIRT_SEED_DIR` per Provider in its `spec.runtime.env`, for
+  example `/var/lib/libvirt/virtrigaud-seeds-<ssh user>`, and create each one
+  owned by its SSH user. Providers that use the same SSH user may share one.
+- **Every host that creates VMs needs it,** including the target host of a
+  `VMMigration` into libvirt (the migrated VM's create builds its seed there) and
+  every host of a clustered Provider.
+- **Inside each seed directory** (`mktemp -d`, `0700` while it is built): the
+  ISO is created under umask `0077` and then set to `0600` explicitly;
+  `user-data` and `meta-data` are removed as soon as the ISO is built; a second
+  copy of the ISO, `cloud-init.private.iso` (`0600`), stays with the SSH user
+  (see clones below); only then is the directory opened to `0711`. No domain
+  ever references the private copy, and `Delete` removes it with the directory.
+  A failure at any of these steps, or a create cancelled while the ISO is
+  built, removes the seed's directory again. After a successful create the
+  provider also removes older seed directories of the same domain name that no
+  domain references (left by an earlier attempt), once they are more than five
+  minutes old.
+- **How qemu reads a `0600` ISO.** At domain start, libvirt's DAC driver gives
+  every disk source to the qemu user (`dynamic_ownership = 1` in
+  `/etc/libvirt/qemu.conf`, libvirt's default and Ubuntu's): the ISO becomes
+  `libvirt-qemu:kvm 0600`. libvirt does not hand a read-only disk back at
+  shutdown, so it stays the qemu user's. With `dynamic_ownership = 0` a VM
+  whose qemu runs as another user cannot open its seed: keep the default.
+- **Clones (reading an existing seed).** Once its domain has started, a
+  seed's `cloud-init.iso` belongs to the qemu user, so whenever the provider
+  reads an existing seed as its SSH user — a clone copying it, or reading the
+  files inside it — it reads the SSH user's `cloud-init.private.iso` next to
+  it instead — in a per-create seed directory, and in an earlier release's
+  per-name `/tmp/virtrigaud-cloudinit/<name>/` too. A seed of an earlier release
+  has no private copy until you add one ([upgrading](upgrading.md#leftovers-from-earlier-releases));
+  until then its ISO, which kept the SSH user's umask, is read itself. The
+  provider never reads a seed as root, and no other local user can read either
+  file.
+- **AppArmor (Ubuntu).** No profile change is needed. `virt-aa-helper` adds
+  every disk source of a domain, CD-ROMs included, to that domain's own
+  profile, and its own profile may read any `*.iso` file. It refuses only
+  system paths (`/etc`, `/usr`, `/boot`, `/dev`, ...). The default lives under
+  `/var/lib/libvirt`, next to the rest of the host's VM state, on a persistent
+  filesystem.
+- **It holds secret material.** Every seed carries its VM's user-data in
+  plaintext (inside the ISO) for as long as the VM exists. Exclude the seed
+  directory from host backups, or make sure those backups are encrypted and
+  access-controlled like the secrets themselves, and prefer short-lived
+  bootstrap credentials in user-data (a one-time token that fetches the real
+  secrets) over long-lived ones.
+- **SELinux.** libvirt relabels the ISO at domain start like any disk source; no
+  `restorecon` is needed.
+
+Prepare each libvirt host once, as root (replace `virtrigaud` with the
+provider's SSH user):
+
+```bash
+install -d -m 0711 -o virtrigaud -g virtrigaud /var/lib/libvirt/virtrigaud-seeds
+```
+
+`Delete` finds a domain's seed in the seed directory and in `/tmp` (where
+earlier releases built them). If you change `VIRTRIGAUD_LIBVIRT_SEED_DIR`
+later, existing VMs keep their seed in the old directory and `Delete` no longer
+removes it there: remove those directories by hand once their VMs are gone.
 
 ## Adoption
 

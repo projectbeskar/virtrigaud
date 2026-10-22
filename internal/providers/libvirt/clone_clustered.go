@@ -339,7 +339,7 @@ func (p *Provider) cloneOnHost(ctx context.Context, vp *VirshProvider, c libvirt
 	}
 	// The clone's own cloud-init seed, with a new identity (clone_seed.go,
 	// R26), read from the source's before anything is copied.
-	seed, err := planCloneSeed(ctx, vp, srcDoc.cloudInitSeedISO(), req, domainName)
+	seed, err := p.planCloneSeed(ctx, vp, srcDoc.cloudInitSeedISO(), req, domainName)
 	if err != nil {
 		return contracts.CloneResponse{}, err
 	}

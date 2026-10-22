@@ -17,8 +17,11 @@ limitations under the License.
 package libvirt
 
 import (
+	"archive/tar"
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/exec"
@@ -51,15 +54,24 @@ func r26CloneReq(customize string) contracts.CloneRequest {
 }
 
 // seedFiles returns the NoCloud files packed in the seed directory dir (a
-// staging entry name).
+// staging entry name): read from its ISO (the fake genisoimage's tar), since
+// the sealed seed directory keeps no input files (R27).
 func (c *createHost) seedFiles(dir string) map[string]string {
 	c.t.Helper()
+	f, err := os.Open(filepath.Join(c.staging, dir, cloudInitISOName)) //nolint:gosec // test reads its own fixture
+	require.NoError(c.t, err)
+	defer func() { _ = f.Close() }()
 	out := map[string]string{}
-	for _, n := range seedFileNames {
-		b, err := os.ReadFile(filepath.Join(c.staging, dir, n)) //nolint:gosec // test reads its own fixture
-		if err == nil {
-			out[n] = string(b)
+	tr := tar.NewReader(f)
+	for {
+		hdr, err := tr.Next()
+		if errors.Is(err, io.EOF) {
+			break
 		}
+		require.NoError(c.t, err)
+		b, err := io.ReadAll(tr)
+		require.NoError(c.t, err)
+		out[hdr.Name] = string(b)
 	}
 	return out
 }
@@ -233,7 +245,7 @@ func TestReadSeedISO_Refusals(t *testing.T) {
 		dir := t.TempDir()
 		require.NoError(t, os.WriteFile(filepath.Join(dir, "README"), []byte("x"), 0o600))
 		writeTar(t, iso, dir, "README")
-		_, err := readSeedISO(context.Background(), c.vp, iso)
+		_, err := readSeedISO(context.Background(), c.vp, iso, iso)
 		require.Error(t, err)
 		assert.False(t, contracts.IsRetryable(err), "a permanent refusal: %v", err)
 		assert.Contains(t, err.Error(), "holds no NoCloud user-data or meta-data")
@@ -244,7 +256,7 @@ func TestReadSeedISO_Refusals(t *testing.T) {
 		dir := t.TempDir()
 		require.NoError(t, os.WriteFile(filepath.Join(dir, seedFileUserData), []byte(strings.Repeat("x", maxSeedFileBytes+1)), 0o600))
 		writeTar(t, iso, dir, seedFileUserData)
-		_, err := readSeedISO(context.Background(), c.vp, iso)
+		_, err := readSeedISO(context.Background(), c.vp, iso, iso)
 		require.Error(t, err)
 		assert.False(t, contracts.IsRetryable(err), "%v", err)
 		assert.Contains(t, err.Error(), "larger than")
@@ -266,23 +278,24 @@ func TestCloneSeed_RealISORoundTrip(t *testing.T) {
 	requireRealHostTool(t, isoinfoTool)
 	h := newFakeHost(t)
 	vp := h.host("h1")
-	staging := t.TempDir()
-	p := &Provider{virshProvider: vp, hostStagingDir: staging}
+	// The seed directory must be private, below safe directories (R27).
+	staging := safeTempDir(t)
+	p := &Provider{virshProvider: vp, hostStagingDir: staging, hostSeedDir: staging}
 	ctx := context.Background()
 
 	cip := NewCloudInitProvider(vp)
-	cip.stagingDir = staging
+	cip.seedDir = staging
 	srcISO, err := cip.PrepareCloudInit(ctx, CloudInitConfig{
 		UserData: p.generateDefaultCloudInit("web"), InstanceID: "team-a.web", Hostname: "web",
 		NetworkConfig: "version: 2\nethernets: {}\n",
 	})
 	require.NoError(t, err)
-	src, err := readSeedISO(ctx, vp, srcISO)
+	src, err := readSeedISO(ctx, vp, srcISO, srcISO)
 	require.NoError(t, err)
 	assert.Contains(t, src[seedFileMetaData], "instance-id: team-a.web")
 	assert.Equal(t, "version: 2\nethernets: {}\n", src[seedFileNetworkConfig])
 
-	plan, err := planCloneSeed(ctx, vp, srcISO, r26CloneReq(""), "team-a.web-copy")
+	plan, err := p.planCloneSeed(ctx, vp, srcISO, r26CloneReq(""), "team-a.web-copy")
 	require.NoError(t, err)
 	domainXML := "<domain><devices><disk type='file' device='cdrom'><source file='" + srcISO + "'/></disk></devices></domain>"
 	out, seedDir, err := p.writeCloneSeed(ctx, vp, domainXML, plan)
@@ -291,7 +304,7 @@ func TestCloneSeed_RealISORoundTrip(t *testing.T) {
 	assert.Contains(t, out, cloneISO)
 	assert.True(t, isOwnSeedDirName(filepath.Base(seedDir), "team-a.web-copy"), "named after the clone's domain: %s", seedDir)
 
-	clone, err := readSeedISO(ctx, vp, cloneISO)
+	clone, err := readSeedISO(ctx, vp, cloneISO, cloneISO)
 	require.NoError(t, err)
 	meta := metaOf(t, clone[seedFileMetaData])
 	assert.Equal(t, "virtrigaud-"+r26Target.UID, meta["instance-id"])
@@ -343,7 +356,7 @@ func userDataOnlySeed(t *testing.T, c *createHost, userData string) string {
 func TestPlanCloneSeed_NoSourceMetaDataIsBuiltByTheEncoder(t *testing.T) {
 	c := newCreateHost(t)
 	iso := userDataOnlySeed(t, c, "#cloud-config\n")
-	plan, err := planCloneSeed(context.Background(), c.vp, iso,
+	plan, err := c.p.planCloneSeed(context.Background(), c.vp, iso,
 		r26CloneReq(`{"domain":"lab\nruncmd: [reboot]\ninstance-id: evil"}`), "team-a.web-copy")
 	require.NoError(t, err)
 	meta := metaOf(t, plan.config.MetaData)
@@ -359,7 +372,7 @@ func TestPlanCloneSeed_InlineUserDataIsBounded(t *testing.T) {
 	c := newCreateHost(t)
 	iso := userDataOnlySeed(t, c, "#cloud-config\n")
 	big := "#cloud-config\n# " + strings.Repeat("x", maxSeedFileBytes)
-	_, err := planCloneSeed(context.Background(), c.vp, iso, r26CloneReq(`{"userData":{"cloudInit":{"inline":`+jsonString(big)+`}}}`),
+	_, err := c.p.planCloneSeed(context.Background(), c.vp, iso, r26CloneReq(`{"userData":{"cloudInit":{"inline":`+jsonString(big)+`}}}`),
 		"team-a.web-copy")
 	require.Error(t, err)
 	assert.True(t, contracts.IsInvalidSpec(err), "InvalidArgument on the wire: %v", err)
@@ -375,7 +388,7 @@ func TestPlanCloneSeed_WarnsAboutIdentityOverrides(t *testing.T) {
 	var logs strings.Builder
 	log.SetOutput(&logs)
 	t.Cleanup(func() { log.SetOutput(os.Stderr) })
-	_, err := planCloneSeed(context.Background(), c.vp, iso, r26CloneReq(""), "team-a.web-copy")
+	_, err := c.p.planCloneSeed(context.Background(), c.vp, iso, r26CloneReq(""), "team-a.web-copy")
 	require.NoError(t, err)
 	assert.Contains(t, logs.String(), "ssh_deletekeys, ssh_keys")
 	assert.NotContains(t, logs.String(), "SECRETKEY")
@@ -419,7 +432,7 @@ func TestReadSeedISO_PartialOutputNeverInErrorsOrLogs(t *testing.T) {
 	assert.NotContains(t, logs.String(), "hunter2", "nothing logged carries the user-data")
 	assert.Contains(t, logs.String(), "exit code 255", "the cause is logged as exit code and stderr")
 
-	_, rerr := readSeedISO(ctx, c.vp, srcISO)
+	_, rerr := readSeedISO(ctx, c.vp, srcISO, srcISO)
 	require.Error(t, rerr)
 	assert.NotContains(t, rerr.Error(), "hunter2")
 	assert.ErrorIs(t, rerr, errSeedReadFailed)

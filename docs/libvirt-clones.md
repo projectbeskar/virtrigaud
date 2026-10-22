@@ -110,7 +110,16 @@ What a new instance does **not** change:
 
 The source's seed is read on the host with `isoinfo` (shipped with
 `genisoimage`, which the provider already needs) **before anything is
-copied**. A seed that cannot be read fails the clone with nothing written —
+copied**, as the provider's SSH user. Once the source has started, libvirt has
+given its `cloud-init.iso` (`0600`) to the qemu user, so the read goes to the SSH
+user's private copy next to it, `cloud-init.private.iso` (R27; see
+[Cloud-init seed directory](libvirt-domain-ownership.md#cloud-init-seed-directory));
+the provider never reads a seed as root. The host's seed directory is checked
+before that read: an unusable one fails the clone, retryably, with
+`refusing to stage cloud-init data`, before anything is read or copied. The
+clone's own seed is built in that seed directory and sealed like a create's
+(ISO and private copy `0600`, no `user-data`, `meta-data`, `network-config` or
+`vendor-data` left next to them, directory `0711`). A seed that cannot be read fails the clone with nothing written —
 retried when the read failed (an unreachable host, a missing `isoinfo`), and
 refused (`InvalidArgument`) when the ISO holds no NoCloud `user-data` or
 `meta-data`, holds a file over 1 MiB, or has meta-data that is not a YAML or
@@ -331,14 +340,16 @@ removes only:
   named like `<domain>-disk.<x>…` (another VM's disk) — meeting the same rules
   and used by no other domain. A base image or another VM's disk is never
   removed, and neither is a pre-snapshot disk a linked clone still reads;
-- its **VirtRigaud cloud-init seed directory** (`/tmp/virtrigaud-cloudinit-<domain>.<random>/`,
-  or an earlier release's `/tmp/virtrigaud-cloudinit/<domain>/`) — unless another
-  domain still references a file in it (a domain whose CD-ROM file is missing
-  no longer starts). A clone has its own seed directory, named after the
-  clone's domain, so deleting a source never touches its clones' seeds; only a
-  **single-host clone made by an earlier release** still points its CD-ROM at
-  its source's seed ISO, which is then kept until the last domain referencing
-  it is deleted.
+- its **VirtRigaud cloud-init seed directory**
+  (`<seed dir>/virtrigaud-cloudinit-<domain>.<random>/`, default seed directory
+  `/var/lib/libvirt/virtrigaud-seeds`; or an earlier release's
+  `/tmp/virtrigaud-cloudinit-<domain>.<random>/` or
+  `/tmp/virtrigaud-cloudinit/<domain>/`) — unless another domain still
+  references a file in it (a domain whose CD-ROM file is missing no longer
+  starts). A clone has its own seed directory, named after the clone's domain,
+  so deleting a source never touches its clones' seeds; only a **single-host
+  clone made by an earlier release** still points its CD-ROM at its source's
+  seed ISO, which is then kept until the last domain referencing it is deleted.
 
 It never removes any other backing file, cdrom or floppy media, or any file
 outside those directories: such a file is left in place and logged by the

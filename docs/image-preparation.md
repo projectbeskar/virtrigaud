@@ -650,7 +650,8 @@ Set `VIRTRIGAUD_LIBVIRT_IMAGE_DIRS` on the provider pod through the Provider's
 unset or blank it defaults to `/var/lib/libvirt/images` (the `default` storage pool, where
 `ImagePrepare` also writes prepared images). System locations (`/`, `/etc`, `/dev`,
 `/proc`, `/sys`, `/boot`, `/root`, `/run`, `/tmp`, `/var/tmp`, `/usr`, `/var/log`,
-`/var/lib/libvirt/qemu`, `/var/lib/libvirt/images/cloud-init`, kubelet/container runtime
+`/var/lib/libvirt/qemu`, `/var/lib/libvirt/images/cloud-init`, the cloud-init seed directory
+`/var/lib/libvirt/virtrigaud-seeds`, kubelet/container runtime
 state, ...) are refused, and the provider does not start with a malformed value.
 
 ```yaml

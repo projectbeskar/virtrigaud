@@ -93,7 +93,7 @@ func TestParseDomainDisks_RejectsNonDomain(t *testing.T) {
 }
 
 func TestCloudInitSeedDir(t *testing.T) {
-	const staging = "/tmp"
+	const staging, seedRoot = "/tmp", DefaultSeedDir
 	cdrom := func(name, src string) string {
 		return "<domain><name>" + name + "</name><devices><disk type='file' device='disk'><source file='/pool/" + name +
 			"-disk.qcow2'/></disk><disk type='file' device='cdrom'><source file='" + src + "'/></disk></devices></domain>"
@@ -105,6 +105,12 @@ func TestCloudInitSeedDir(t *testing.T) {
 	}{
 		{"per-create seed directory", cdrom("team-a.web", "/tmp/virtrigaud-cloudinit-team-a.web.AbCdEfGhIj/cloud-init.iso"),
 			"/tmp/virtrigaud-cloudinit-team-a.web.AbCdEfGhIj"},
+		{"per-create seed directory in the seed directory (R27)",
+			cdrom("team-a.web", DefaultSeedDir+"/virtrigaud-cloudinit-team-a.web.AbCdEfGhIj/cloud-init.iso"),
+			DefaultSeedDir + "/virtrigaud-cloudinit-team-a.web.AbCdEfGhIj"},
+		{"per-create seed directory in another directory", cdrom("team-a.web", "/srv/virtrigaud-cloudinit-team-a.web.AbCdEfGhIj/cloud-init.iso"), ""},
+		{"nested below the seed directory", cdrom("web", DefaultSeedDir+"/x/virtrigaud-cloudinit-web.AbCdEfGhIj/cloud-init.iso"), ""},
+		{"the private copy is never a domain's seed", cdrom("web", DefaultSeedDir+"/virtrigaud-cloudinit-web.AbCdEfGhIj/"+cloudInitISOPrivateCopyName), ""},
 		{"legacy per-name seed directory", cdrom("web", "/tmp/virtrigaud-cloudinit/web/cloud-init.iso"), "/tmp/virtrigaud-cloudinit/web"},
 		{"legacy directory of another domain", cdrom("web", "/tmp/virtrigaud-cloudinit/other/cloud-init.iso"), ""},
 		{"seed in a shared pool directory", cdrom("web", "/var/lib/libvirt/images/cloud-init/web-cloud-init.iso"), ""},
@@ -123,7 +129,7 @@ func TestCloudInitSeedDir(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			doc, err := parseDomainDisks(tc.xml)
 			require.NoError(t, err)
-			assert.Equal(t, tc.want, doc.cloudInitSeedDir(staging))
+			assert.Equal(t, tc.want, doc.cloudInitSeedDir(seedRoot, staging))
 		})
 	}
 }

@@ -112,6 +112,7 @@ func newSharedPoolOf(t *testing.T, live []string, dead ...string) *sharedPool {
 	p.virshProvider = newUnroutableVirshProvider()
 	p.imageDirs = []string{c.images}
 	p.hostStagingDir = c.staging
+	p.hostSeedDir = c.staging
 	s.p = p
 	return s
 }

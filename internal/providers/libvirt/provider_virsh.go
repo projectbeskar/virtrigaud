@@ -289,9 +289,16 @@ func (p *Provider) createVMWithCloudInit(ctx context.Context, vp *VirshProvider,
 
 	// Initialize providers
 	cloudInitProvider := NewCloudInitProvider(vp)
-	cloudInitProvider.stagingDir = p.stagingDir()
+	cloudInitProvider.seedDir = p.seedDir()
 	storageProvider := NewStorageProvider(vp)
 	storageProvider.stagingDir = p.stagingDir()
+
+	// Every create builds a cloud-init seed (the request's user-data, or the
+	// default): refuse an unusable seed directory before anything is written
+	// on the host (R27; PrepareCloudInit checks it again when it builds).
+	if err := ensureSeedRoot(ctx, vp, p.seedDir()); err != nil {
+		return "", fmt.Errorf("failed to prepare cloud-init: %w", err)
+	}
 
 	// Ensure default storage pool exists and is active
 	if err := storageProvider.EnsureDefaultStoragePool(ctx); err != nil {
@@ -417,6 +424,12 @@ func (p *Provider) createVMWithCloudInit(ctx context.Context, vp *VirshProvider,
 		}
 
 		isoPath, err := cloudInitProvider.PrepareCloudInit(ctx, cloudInitConfig)
+		if errors.Is(err, errSeedRootUnusable) {
+			// A host whose seed directory is unusable is a configuration error
+			// the operator must see (and fix), not a VM silently created
+			// without its hostname and guest agent.
+			return "", fmt.Errorf("failed to prepare default cloud-init: %w", err)
+		}
 		if err != nil {
 			log.Printf("WARN Failed to prepare default cloud-init: %v", err)
 			// Continue without cloud-init
@@ -437,6 +450,15 @@ func (p *Provider) createVMWithCloudInit(ctx context.Context, vp *VirshProvider,
 		return "", err
 	}
 	keepSeed = true
+
+	// Earlier attempts of this create (a define whose outcome was unknown, a
+	// create cancelled before its cleanup ran) may have left seed directories
+	// of this domain name — user-data in them — that nothing references: remove
+	// the old, unreferenced ones now (R27; the new domain references its own
+	// seed, which is kept). Best-effort and bounded: never fails the create.
+	rctx, cancel := context.WithTimeout(ctx, routedCleanupTimeout)
+	p.reclaimSeedDirs(rctx, vp, domainName, "", orphanSeedMinAge)
+	cancel()
 
 	log.Printf("INFO Successfully created VM with storage and cloud-init: %s (libvirt domain %s)", req.Name, domainName)
 	return domainName, nil
@@ -945,7 +967,7 @@ func (p *Provider) planDomainDeletion(ctx context.Context, vp *VirshProvider, id
 	if doc.Name == "" {
 		doc.Name = id
 	}
-	plan := domainDeletionPlan{uuid: doc.UUID, name: doc.Name, seedDir: doc.cloudInitSeedDir(p.stagingDir())}
+	plan := domainDeletionPlan{uuid: doc.UUID, name: doc.Name, seedDir: doc.cloudInitSeedDir(p.seedRoots()...)}
 
 	var deletable []string
 	// origin maps each deletable (canonical) disk to the path its definition
@@ -1304,8 +1326,9 @@ func deleteCloudInitResources(ctx context.Context, vp *VirshProvider, domainName
 // cleanupOrphanedResources attempts to clean up any resources that might be
 // left behind on vp's host by a domain that no longer exists (single-host
 // delete only): the disk VirtRigaud names after it, <pool directory>/<name>-
-// disk.qcow2 in the default storage pool, and its legacy per-name cloud-init
-// seed directory.
+// disk.qcow2 in the default storage pool, its per-create seed directories in
+// every seed root (reclaimSeedDirs), and its legacy per-name cloud-init seed
+// directory in the staging directory.
 //
 // The disk file is removed only when it exists, lies directly inside a
 // directory Delete may remove disks from (deletableDiskFiles), and no defined

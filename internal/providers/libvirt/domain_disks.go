@@ -191,15 +191,16 @@ func (d *domainDisksDoc) diskFiles() []string {
 // directory of a top-level cdrom/floppy source named cloud-init.iso that is
 // either
 //
-//   - a per-create seed directory directly inside stagingDir
-//     (<staging>/virtrigaud-cloudinit-<domain>.<random>, PrepareCloudInit), or
+//   - a per-create seed directory directly inside one of roots
+//     (<root>/virtrigaud-cloudinit-<domain>.<random>, PrepareCloudInit; the
+//     roots are the seed directory and the staging directory earlier releases
+//     built seeds in, Provider.seedRoots), or
 //   - the per-name seed directory of an earlier release,
-//     <staging>/virtrigaud-cloudinit/<this domain's name>.
+//     <root>/virtrigaud-cloudinit/<this domain's name>.
 //
 // Any other ISO — a seed elsewhere, an installer image — is not VirtRigaud's to
 // remove, and neither is a directory named after another domain.
-func (d *domainDisksDoc) cloudInitSeedDir(stagingDir string) string {
-	staging := filepath.Clean(stagingDir)
+func (d *domainDisksDoc) cloudInitSeedDir(roots ...string) string {
 	for _, e := range d.Devices.Disks {
 		f := e.file()
 		if !e.isMedia() || f == "" || !strings.HasPrefix(f, "/") {
@@ -210,12 +211,14 @@ func (d *domainDisksDoc) cloudInitSeedDir(stagingDir string) string {
 			continue
 		}
 		dir := filepath.Dir(f)
+		if isSeedDirIn(dir, roots...) {
+			return dir
+		}
 		parent, base := filepath.Dir(dir), filepath.Base(dir)
-		switch {
-		case parent == staging && strings.HasPrefix(base, cloudInitSeedDirPrefix) && len(base) > len(cloudInitSeedDirPrefix):
-			return dir
-		case parent == filepath.Join(staging, legacyCloudInitSeedRoot) && d.Name != "" && base == d.Name:
-			return dir
+		for _, root := range roots {
+			if parent == filepath.Join(filepath.Clean(root), legacyCloudInitSeedRoot) && d.Name != "" && base == d.Name {
+				return dir
+			}
 		}
 	}
 	return ""

@@ -18,6 +18,11 @@ env:
   # (or be starved by them). Default 2 (ADR-0008 PR 1).
   # - name: VIRTRIGAUD_LIBVIRT_MAX_CONCURRENT_STREAM
   #   value: "2"
+  # Host directory cloud-init seeds are built in, private (R27). It must exist
+  # on the libvirt host, owned by the SSH user, mode 0711; default
+  # /var/lib/libvirt/virtrigaud-seeds (docs/libvirt-domain-ownership.md).
+  # - name: VIRTRIGAUD_LIBVIRT_SEED_DIR
+  #   value: "/var/lib/libvirt/virtrigaud-seeds"
 
 resources:
   limits:
