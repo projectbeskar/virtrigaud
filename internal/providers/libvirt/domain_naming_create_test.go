@@ -47,7 +47,10 @@ import (
 // extension; it refuses a name whose file already exists. `vol-path <name>
 // --pool <pool>` answers from vol-<pool>-<name>. `vol-delete <name> --pool
 // <pool>` removes <pool directory>/<name> (fail-vol-delete makes it fail).
-// `domstate <domain>` answers "shut off" for a defined domain (none is ever
+// `undefine <domain>` first parks, once hold-undefine-<domain> exists, until
+// release-undefine-<domain> does (and creates held-undefine-<domain> when it
+// parks), so a test can run another delete between a delete's plan and its
+// undefine. `domstate <domain>` answers "shut off" for a defined domain (none is ever
 // started here) unless state-<domain> holds another state. With no -c URI
 // (runRemoteVirshCommand on a non-system URI) the host is $FAKE_DEFAULT_HOST.
 const createHostVirshScript = `#!/bin/sh
@@ -59,7 +62,10 @@ d="$FAKE_HOST_DIR/$host"
 printf '%s\t%s\n' "$host" "$*" >> "$FAKE_HOST_DIR/virsh.log"
 case "$1" in
   list)
-    if [ "$3" = "--uuid" ]; then cat "$d/uuids" 2>/dev/null; exit 0; fi
+    if [ "$3" = "--uuid" ]; then
+      if [ -f "$d/fail-list-uuid" ]; then echo "error: failed to connect to the hypervisor" >&2; exit 1; fi
+      cat "$d/uuids" 2>/dev/null; exit 0
+    fi
     printf ' Id   %-60s State\n' Name
     printf '%s\n' '----------------------------------------------------------------------------'
     if [ -f "$d/names" ]; then
@@ -83,6 +89,10 @@ case "$1" in
     if [ -f "$d/define-reply-lost" ]; then echo "error: Disconnected from the hypervisor due to end of file" >&2; exit 1; fi
     echo "Domain '$name' defined from $2" ;;
   undefine)
+    if [ -f "$d/hold-undefine-$2" ]; then
+      : > "$d/held-undefine-$2"
+      while [ ! -f "$d/release-undefine-$2" ]; do sleep 0.02; done
+    fi
     f="$d/dom-$2.xml"
     if [ ! -f "$f" ]; then echo "error: failed to get domain '$2'" >&2; exit 1; fi
     name=$(sed -n 's:.*<name>\(.*\)</name>.*:\1:p' "$f" | head -n 1)

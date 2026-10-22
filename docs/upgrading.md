@@ -194,6 +194,13 @@ the following once after upgrading, and delete only what no `VMMigration` in fli
   manager deletes a migration's unused landed disk (`LandedDiskCleanup`, see the
   breaking-change table); only disks recorded as `LandedDiskLeftBehind` or kept by
   `cleanupPolicy: Never` stay, and the condition says so.
+- **libvirt cloud-init seed directories** `<staging>/virtrigaud-cloudinit-<domain>.<random>`
+  (default `/tmp`) of single-host VMs deleted before rc2 together with a clone of them, or
+  whose delete was retried after the domain was undefined. They hold the VM's user-data,
+  which may carry secrets. List the domains with `virsh list --all`, check with
+  `virsh dumpxml --inactive <domain>` for each that no domain's CD-ROM names the
+  directory (for example `virsh dumpxml --inactive <domain> | grep virtrigaud-cloudinit`),
+  then remove the directory. From rc2 on a delete removes them itself.
 - **vSphere transient import-VM files** (`<landing name>.vmx`, `.vmsd`, `.hlog`, `.nvram`,
   about 1.4 KB) in the landing folders of migrations imported before rc2. They are harmless;
   remove them with the datastore browser, never the `.vmdk` files next to them. From rc2 on
@@ -664,6 +671,26 @@ the following once after upgrading, and delete only what no `VMMigration` in fli
   instead. A VM that is `Suspended` reports `Running`; one whose power state the
   provider cannot classify (`Unknown`) reports `Failed`; a delete that is held
   reports `Deleting` (the hold is on `Ready`).
+- **A single-host libvirt `Delete` removes the VM's own cloud-init seed directory
+  reliably** (rc2 R24, `internal/providers/libvirt/seed_reclaim.go`). A clone's
+  CD-ROM references its source VM's seed ISO, so the delete of either keeps the seed
+  while the other is defined; when a VM and its clone were deleted at the same time,
+  each kept it and the directory
+  `<staging>/virtrigaud-cloudinit-<domain>.<random>` (default `/tmp`) stayed on the
+  host. After undefining the domain, the delete now re-checks: it removes the seed
+  directory its definition referenced that the delete kept, and any seed directory
+  named after exactly that domain that is at least five minutes old (an exact name
+  match: `t2s3` and `t2s3c` are distinct), once no defined domain's persistent
+  definition references a file in it. A delete retried for a domain that is already
+  gone does the same. When a clone is the last domain to reference its source VM's seed,
+  deleting the clone therefore removes the SOURCE's seed directory; that is intended.
+  The directories it considers are real directories directly inside the staging
+  directory (a symlink is never followed or removed); references are compared as
+  canonical paths, and anything that cannot be checked is kept. A failure is logged
+  at `WARN` and does not fail the delete. In a single-host provider, `Create`, `Clone`
+  and `Delete` of one domain name now run one at a time (a retried `Create` waits for
+  the delete of the same name, or is answered `domain busy` and retried). Clustered
+  providers are unchanged.
 
 ## Post-upgrade verification checklist
 
