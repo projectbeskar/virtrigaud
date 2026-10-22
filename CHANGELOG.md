@@ -5,6 +5,33 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-10-22 08:44] - libvirt cloud-init seeds are private, in a dedicated seed directory (R27)
+**Author:** @wrkode (William Rizzo)
+
+### Security
+- `internal/providers/libvirt/seed_dir.go` (new), `cloudinit.go`, `clone_clustered.go`, `staging.go`: a VM's cloud-init seed (its user-data, which may carry passwords, keys and tokens) was built in a per-create directory under the world-listable `/tmp`, so its random name was discoverable, with the ISO at the SSH user's umask (typically `0644`, and `0644` explicitly for a clustered clone's copy) and `user-data`/`meta-data` left next to it: any local user of a shared hypervisor host could read it. Seeds are now built in a dedicated seed directory, `VIRTRIGAUD_LIBVIRT_SEED_DIR` (default `/var/lib/libvirt/virtrigaud-seeds`, validated at startup: absolute, a safe character set, never under `/tmp`, `/var/tmp`, `/run`, `/dev`, `/proc`, `/sys`). Before it writes anything, the provider checks the directory on the target host (`ensureSeedRoot`): it creates a missing one with mode `0711` when the SSH user may, and refuses (fails closed, retryable, constant message `refusing to stage cloud-init data`, details in the provider log) one that is missing, not a directory, not owned by the SSH user, or readable or writable by its group or others. Inside a per-seed `mktemp -d` directory the ISO is created under umask `0077` and set to `0600` explicitly, the SSH user keeps a private copy (`cloud-init.private.iso`, `0600`) that a clone's copy reads (libvirt's `dynamic_ownership` gives the domain's ISO to the qemu user at start), `user-data` and `meta-data` are removed as soon as the ISO is built, and only then is the directory opened to `0711` (`sealSeedDir`, shared by Create and the clustered clone's `cloneSeedISO`). A create checks the seed directory before it writes the VM's disk, and a create without `spec.userData` now fails on an unusable seed directory instead of silently creating the VM without its seed. The meta-data content is no longer logged.
+- `internal/providers/libvirt/domain_disks.go`, `seed_reclaim.go`, `provider_virsh.go`: a domain's seed directory is recognised, removed by `Delete` and swept by the R24 reclaim in every seed root (`Provider.seedRoots`: the seed directory and the staging directory earlier releases built seeds in), single-host and clustered; seeds of existing VMs are never moved.
+- `internal/providers/libvirt/imagepath.go`: the seed directory and the private seed copy's name are refused as image directory / base image.
+- `internal/providers/libvirt/provider.go`: the constructors load `VIRTRIGAUD_LIBVIRT_SEED_DIR` (a malformed value fails start-up); a single-host provider checks the seed directory at startup and logs a `WARN` naming the problem.
+
+### Removed
+- `internal/providers/libvirt/cloudinit.go`: the unused `AttachCloudInitISO`/`copyISOToRemote` (copied seeds `0644` into `/var/lib/libvirt/images/cloud-init`).
+
+### Added
+- `internal/providers/libvirt/seed_dir_test.go` (new), `routed_clone_test.go`, `domain_disks_test.go`, and the fixtures in `main_test.go`, `domain_naming_create_test.go`, `snapshot_clone_disk_singlehost_test.go`, `routed_snapshot_test.go`, `cluster_disk_guard_test.go`, `seed_reclaim_test.go`: a create builds a `0600` ISO plus private copy in the seed directory with no `user-data`/`meta-data` left and nothing in the staging directory; a listable, group-readable, other-writable, non-directory or uncreatable seed directory is refused with nothing written and no domain defined (with and without user-data); a missing creatable one is created `0711`; seeds left in the staging directory by an earlier release are found and removed by `Delete` and by the leftover sweep; the clustered create builds its seed in the seed directory and the owner-checked Delete removes new and legacy seeds; the clustered clone runs the seed-root check, builds its copy private in order, reads the source's private copy, and is refused (copied disk removed, nothing defined) on an unusable seed directory; lexical validation, env loading and the check's output parsing.
+
+### Changed
+- `docs/libvirt-domain-ownership.md` (new section "Cloud-init seed directory": location, ownership and mode, the fail-closed check, `dynamic_ownership`, clones, AppArmor, SELinux, host preparation), `docs/clustered-provider-inventory.md` (host prerequisite; the stale `/var/lib/libvirt/images/cloud-init` seed path removed), `docs/upgrading.md` (breaking-change row; leftovers: make `/tmp` seeds of existing VMs private, and the boot-time `/tmp` cleaning), `docs/libvirt-clones.md`, `docs/image-preparation.md`, `examples/libvirt-complete-example.yaml`, `charts/virtrigaud-provider-runtime/examples/values-libvirt.yaml`.
+
+### Why
+Security review of #408: cloud-init seeds were readable by any unprivileged local user of the (shared) libvirt host. Also, `/tmp` is emptied at boot and cleaned of old files, after which a VM whose seed lived there no longer starts.
+
+### Impact
+- [x] Breaking change
+- [x] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-10-22 08:40] - Clones get their own cloud-init seed and a new cloud-init identity (rc2 R26)
 **Author:** @wrkode (William Rizzo)
 
