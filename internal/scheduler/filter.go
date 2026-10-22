@@ -36,10 +36,13 @@ const (
 	rejMinResources      = "host below a required minimum-per-host resource"
 	rejInsufficientCPU   = "insufficient CPU capacity"
 	rejInsufficientMem   = "insufficient memory capacity"
-	rejHostAffinity      = "host not in the strict host-affinity set"
-	rejHostAntiAffinity  = "host at the strict host-anti-affinity VM cap"
-	rejReqVMAffinity     = "host does not satisfy a required VM-affinity term"
-	rejReqVMAntiAffinity = "host runs a strict anti-affine VM"
+	// rejInsufficientStorage: the host's reported allocatable storage cannot
+	// hold Request.RequiredStorageBytes (or it reports none).
+	rejInsufficientStorage = "insufficient storage for the VM's disk"
+	rejHostAffinity        = "host not in the strict host-affinity set"
+	rejHostAntiAffinity    = "host at the strict host-anti-affinity VM cap"
+	rejReqVMAffinity       = "host does not satisfy a required VM-affinity term"
+	rejReqVMAntiAffinity   = "host runs a strict anti-affine VM"
 )
 
 // RejectionExcludedForVM is the rejection category of a host the caller listed
@@ -127,6 +130,15 @@ func (ec *evalContext) filterHost(h *v1beta1.Host) (reason, detail string, err e
 	//    checked against the host's raw (pre-overcommit) allocatable size.
 	if r, d, ok := ec.filterMinResources(h); !ok {
 		return r, d, nil
+	}
+
+	// 9b. Disk space for the VM's disk (ADR-0007 Addendum B, B7.4): a host
+	//     whose inventory reports less allocatable storage than the request
+	//     needs — or none at all, which cannot prove the space — is out.
+	if need := ec.req.RequiredStorageBytes; need > 0 {
+		if have := h.Status.AllocatableStorageBytes; have == nil || *have < need {
+			return rejInsufficientStorage, "", nil
+		}
 	}
 
 	// 10. Capacity fit (ADR-0007 D4): the request must fit in what is FREE —
