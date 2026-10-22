@@ -879,6 +879,16 @@ spec:
                       (which may have been edited since), so a target provider removes only
                       the copy it landed for that VM. Written by the controller only.
                     properties:
+                      host:
+                        description: |-
+                          Host is the Host of a clustered target Provider the import was routed
+                          to: the target VirtualMachine's pending host, recorded with ProviderUID
+                          before the import is sent (ADR-0007 Addendum B, B4). A re-sent import
+                          and the landed-disk and nfs staged-disk deletes go to this host only.
+                          Empty for a single-host or thin-client target. Written by the
+                          controller only.
+                        maxLength: 253
+                        type: string
                       name:
                         description: Name is the target VirtualMachine's name.
                         maxLength: 253
