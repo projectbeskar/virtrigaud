@@ -278,9 +278,16 @@ func (p *Provider) createVMWithCloudInit(ctx context.Context, vp *VirshProvider,
 	// rc2 R7: a single-host create that may attach the VM's migration landing
 	// disk in place holds that landing name from its confinement and in-use
 	// check through the define, serialised with ImportDisk and
-	// DeleteLandedDisk of the same name (landing_lock.go).
-	if req.Image.ImportedDisk && g == nil {
-		unlock, err := landingLocks.lock(ctx, domainName+contracts.ImportedDiskNameSuffix)
+	// DeleteLandedDisk of the same name (landing_lock.go). A clustered create
+	// takes the same lock keyed on its landing host (routedLandingKey, ADR-0007
+	// Addendum B, B2 step 3), serialised with the routed import and the
+	// routed DeleteLandedDisk of that host.
+	if req.Image.ImportedDisk {
+		key := domainName + contracts.ImportedDiskNameSuffix
+		if g != nil {
+			key = routedLandingKey(g.host, key)
+		}
+		unlock, err := landingLocks.lock(ctx, key)
 		if err != nil {
 			return "", contracts.NewRetryableError("gave up waiting for other work on the migration landing disk", err)
 		}

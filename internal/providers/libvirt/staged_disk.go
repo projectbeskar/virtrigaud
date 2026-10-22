@@ -39,15 +39,10 @@ import (
 // location is not logged at all (this provider logs with log.Printf, which has
 // no debug level).
 //
-// A clustered provider answers Unimplemented and advertises no backend: it is
-// never a migration target (its ImportDisk is not routed yet), so it never
-// read a staged object, and an nfs delete would need a host it has no binding
-// for.
+// A clustered provider removes s3 objects from the pod as well, and empties an
+// nfs object with the qemu-img of req.target_host_id, the host its routed
+// import was sent to (deleteStagedDiskRouted, ADR-0007 Addendum B).
 func (s *Server) DeleteStagedDisk(ctx context.Context, req *providerv1.DeleteStagedDiskRequest) (*providerv1.DeleteStagedDiskResponse, error) {
-	if s.clusteredProvider() {
-		return nil, status.Error(codes.Unimplemented,
-			"DeleteStagedDisk is not served by a clustered libvirt provider (it is never a migration target)")
-	}
 	disk, err := migration.ResolveStagedDisk(req)
 	if err != nil {
 		return nil, err
@@ -55,10 +50,12 @@ func (s *Server) DeleteStagedDisk(ctx context.Context, req *providerv1.DeleteSta
 	migrationRef := req.GetMigration().GetNamespace() + "/" + req.GetMigration().GetName()
 
 	var outcome providerv1.StagedDiskDeleteOutcome
-	switch disk.Backend {
-	case migration.BackendS3:
+	switch {
+	case s.clusteredProvider():
+		outcome, err = s.provider.deleteStagedDiskRouted(ctx, req, disk)
+	case disk.Backend == migration.BackendS3:
 		outcome, err = migration.DeleteS3StagedDisk(ctx, disk, req.GetCredentials())
-	default: // migration.BackendNFS: ResolveStagedDisk accepts nothing else.
+	default: // single-host migration.BackendNFS: ResolveStagedDisk accepts nothing else.
 		outcome, err = s.emptyNFSStagedDisk(ctx, disk)
 	}
 	if err != nil {

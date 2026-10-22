@@ -134,17 +134,19 @@ func TestServer_DeleteStagedDisk_S3(t *testing.T) {
 // TestCapabilities_StagedDiskDeleteIsSingleHostOnly: a single-host provider
 // advertises nfs and s3; a clustered provider advertises none and answers
 // Unimplemented.
-func TestCapabilities_StagedDiskDeleteIsSingleHostOnly(t *testing.T) {
+func TestCapabilities_StagedDiskDeleteBackends(t *testing.T) {
 	single := &Provider{virshProvider: localHostVP("single")}
 	caps, err := NewServer(single).GetCapabilities(context.Background(), &providerv1.GetCapabilitiesRequest{})
 	require.NoError(t, err)
 	assert.ElementsMatch(t, []string{migration.BackendNFS, migration.BackendS3}, caps.GetSupportedStagedDiskDeleteBackends())
 
+	// ADR-0007 Addendum B: a clustered provider removes s3 objects from the
+	// pod and empties nfs ones on the import's host.
 	clustered := NewServer(clusterOf(t, []string{"host-a"}))
 	caps, err = clustered.GetCapabilities(context.Background(), &providerv1.GetCapabilitiesRequest{})
 	require.NoError(t, err)
-	assert.Empty(t, caps.GetSupportedStagedDiskDeleteBackends())
-	_, err = clustered.DeleteStagedDisk(context.Background(), stagedDeleteRequest(t, migration.BackendS3,
-		migration.StorageOptions{Backend: migration.BackendS3, Bucket: "b"}, nil))
-	assert.Equal(t, codes.Unimplemented, status.Code(err))
+	assert.ElementsMatch(t, []string{migration.BackendNFS, migration.BackendS3}, caps.GetSupportedStagedDiskDeleteBackends())
+	_, err = clustered.DeleteStagedDisk(context.Background(), stagedDeleteRequest(t, migration.BackendNFS,
+		migration.StorageOptions{Backend: migration.BackendNFS, Server: "nfs.example", Export: "/exports"}, nil))
+	assert.Equal(t, codes.InvalidArgument, status.Code(err), "an nfs delete needs the import's host: %v", err)
 }

@@ -855,10 +855,19 @@ type previousIncarnationError struct {
 	// own domain, elsewhere (VMPreviousIncarnationKindOwn), not a previous
 	// incarnation under another UID.
 	own bool
+	// onLandingHost marks an own domain found on the host the operation
+	// runs on (a routed import's name check, ADR-0007 Addendum B, B2): the
+	// VirtualMachine was already created there.
+	onLandingHost bool
 }
 
 // Error is the refusal, safe for the requesting VM's status.
 func (e *previousIncarnationError) Error() string {
+	if e.own && e.onLandingHost {
+		return fmt.Sprintf("%s of libvirt domain %q refused: a domain of this VirtualMachine — stamped with its own UID — "+
+			"already exists on the landing host, so the VirtualMachine was already created there; nothing was imported "+
+			"and the import is not repeated (ADR-0007 Addendum B)", e.op, e.domain)
+	}
 	if e.own {
 		return fmt.Sprintf("%s of libvirt domain %q refused: a domain of this VirtualMachine — stamped with its own UID — "+
 			"already exists on another host of this Provider (its placement record was lost); nothing was created. An "+

@@ -29,6 +29,7 @@ import (
 	"github.com/projectbeskar/virtrigaud/internal/imageartifact"
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
 	"github.com/projectbeskar/virtrigaud/internal/providers/libvirt/hostconn"
+	"github.com/projectbeskar/virtrigaud/internal/storage/migration"
 	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
 )
 
@@ -79,6 +80,23 @@ type providerBackend interface {
 	// of an owner-checked domain's disk, run on its bound host (ADR-0007
 	// Addendum A, slice 3; routed_export.go). It returns wire errors.
 	exportDiskRouted(ctx context.Context, req *providerv1.ExportDiskRequest) (*providerv1.ExportDiskResponse, error)
+
+	// importDiskRouted is a CLUSTERED provider's ImportDisk: the s3 / nfs
+	// import landed on target_host_id for the target VirtualMachine named
+	// (with its uid) in target_vm (ADR-0007 Addendum B; routed_import.go). It
+	// returns wire errors.
+	importDiskRouted(ctx context.Context, req *providerv1.ImportDiskRequest) (*providerv1.ImportDiskResponse, error)
+
+	// deleteLandedDiskRouted is a CLUSTERED provider's DeleteLandedDisk: the
+	// landed disk removed on target_host_id after an in-use scan of every host
+	// (ADR-0007 Addendum B, B4; routed_migration_cleanup.go). It returns wire
+	// errors.
+	deleteLandedDiskRouted(ctx context.Context, req *providerv1.DeleteLandedDiskRequest) (*providerv1.DeleteLandedDiskResponse, error)
+
+	// deleteStagedDiskRouted is a CLUSTERED provider's DeleteStagedDisk: s3
+	// from the pod, nfs through target_host_id's qemu-img (ADR-0007 Addendum
+	// B, B4; routed_migration_cleanup.go).
+	deleteStagedDiskRouted(ctx context.Context, req *providerv1.DeleteStagedDiskRequest, disk migration.StagedDisk) (providerv1.StagedDiskDeleteOutcome, error)
 
 	// TransferOwner re-stamps a VM with the VirtualMachine that takes it over,
 	// compare-and-swap: on a CLUSTERED provider's host (ADR-0007 Addendum A,

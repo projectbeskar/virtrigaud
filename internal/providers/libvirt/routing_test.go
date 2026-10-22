@@ -211,8 +211,9 @@ func TestNewClusteredProvider_PlaceholderAlwaysFails(t *testing.T) {
 // provider and proves none of them reaches the single-host placeholder:
 // Describe, Delete (slice 1), Power in every op and Reconfigure in every branch
 // (slice 2), the snapshot family, GetDiskInfo, Clone, the s3 / nfs ExportDisk
-// and TaskStatus (slice 3) are routed to their host; everything else is an
-// honest Unimplemented until its slice lands.
+// and TaskStatus (slice 3), and the s3 / nfs ImportDisk, DeleteLandedDisk and
+// the nfs DeleteStagedDisk (Addendum B) are routed to their host; everything
+// else is an honest Unimplemented until its slice lands.
 func TestClustered_EveryPerVMRPC_NeverReachesPlaceholder(t *testing.T) {
 	fx := newOpsFixture(t, map[string]map[string]string{
 		"host-a": {"web": routingDomainXML("web", ownerTeamA)},
@@ -286,6 +287,34 @@ func TestClustered_EveryPerVMRPC_NeverReachesPlaceholder(t *testing.T) {
 		assert.NotEqual(t, codes.Unimplemented, status.Code(call()), "%s is routed since slice 3", name)
 	}
 
+	// Addendum B: the import and its cleanup are routed to the import's host.
+	// The local per-host fakes are no ssh:// transport, so the import is
+	// refused on its leased host before any command (FailedPrecondition); the
+	// nfs staged delete without the import's host is InvalidArgument.
+	target := &providerv1.ObjectIdentity{Uid: "0b9c3a52-1f4e-4c55-9d1e-7b2f7f0e5a11", Namespace: "team-a", Name: "moved"}
+	routedImport := map[string]func() error{
+		"ImportDisk(nfs)": func() error {
+			_, e := s.ImportDisk(ctx, &providerv1.ImportDiskRequest{BackendType: "nfs", SourceUrl: "nfs://nas/e/x.qcow2",
+				TargetHostId: "host-b", TargetVm: target})
+			return e
+		},
+		"DeleteLandedDisk": func() error {
+			_, e := s.DeleteLandedDisk(ctx, &providerv1.DeleteLandedDiskRequest{TargetHostId: "host-a", TargetVm: target})
+			return e
+		},
+		"DeleteStagedDisk(nfs)": func() error {
+			_, e := s.DeleteStagedDisk(ctx, &providerv1.DeleteStagedDiskRequest{
+				Migration: &providerv1.ObjectIdentity{Namespace: "team-a", Name: "mig"}, Stage: "export", BackendType: "nfs",
+				StorageOptionsJson: `{"backend":"nfs","server":"nas","export":"/e"}`})
+			return e
+		},
+	}
+	for name, call := range routedImport {
+		assert.NotEqual(t, codes.Unimplemented, status.Code(call()), "%s is routed since Addendum B", name)
+	}
+	_, err = s.ImportDisk(ctx, &providerv1.ImportDiskRequest{SourceUrl: "pvc://p/x.qcow2", TargetHostId: "host-b", TargetVm: target})
+	assert.Equal(t, codes.InvalidArgument, status.Code(err), "pvc is never imported into a clustered provider")
+
 	_, err = s.Delete(ctx, &providerv1.DeleteRequest{Id: "web", TargetHostId: "host-a", Owner: owner})
 	require.NoError(t, err)
 
@@ -298,10 +327,6 @@ func TestClustered_EveryPerVMRPC_NeverReachesPlaceholder(t *testing.T) {
 		// never serves it (its disks live on its hosts).
 		"ExportDisk(pvc)": func() error {
 			_, e := s.ExportDisk(ctx, &providerv1.ExportDiskRequest{VmId: "web", TargetHostId: "host-a", BackendType: "pvc", Owner: owner})
-			return e
-		},
-		"ImportDisk": func() error {
-			_, e := s.ImportDisk(ctx, &providerv1.ImportDiskRequest{SourceUrl: "file:///tmp/x.qcow2"})
 			return e
 		},
 		"ImagePrepare": func() error {
@@ -606,10 +631,14 @@ func TestClustered_GetCapabilities_HidesUnroutedPerVMCapabilities(t *testing.T) 
 	assert.Equal(t, []string{"qcow2"}, caps.SupportedExportFormats)
 	assert.False(t, caps.SupportsExportCompression, "neither host-side export transport compresses")
 
-	// Still hidden: import has no target host until P3.
-	assert.False(t, caps.SupportsDiskImport, "disk import is not routed")
-	assert.Empty(t, caps.SupportedImportBackends)
-	assert.Empty(t, caps.SupportedImportFormats)
+	// Routed since Addendum B: the s3 / nfs import to the target VM's pending
+	// host, with its cleanup (never the pod-side pvc import).
+	assert.True(t, caps.SupportsDiskImport, "disk import is routed since Addendum B")
+	assert.Equal(t, []string{"s3", "nfs"}, caps.SupportedImportBackends)
+	assert.Equal(t, single.SupportedImportFormats, caps.SupportedImportFormats, "the same staged-image core as single-host")
+	assert.True(t, caps.SupportsRoutedImport)
+	assert.True(t, caps.SupportsLandedDiskDelete)
+	assert.False(t, single.SupportsRoutedImport, "a single-host provider never routes its import")
 	assert.False(t, caps.SupportsImageArtifactIdentity)
 	assert.True(t, caps.SupportsRoutedClone, "Clone is routed to the source's host (slice 3)")
 }

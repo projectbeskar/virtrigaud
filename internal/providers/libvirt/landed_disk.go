@@ -79,12 +79,12 @@ const (
 // DeleteLandedDisk removes the disk a migration's ImportDisk landed for
 // req.target_vm (see above). A disk that does not exist is NOT_FOUND; one a
 // domain uses is refused with VM_DISK_IN_USE and kept. A clustered provider
-// answers Unimplemented and does not report the capability: its ImportDisk is
-// not routed, so it never lands a disk.
+// removes it on req.target_host_id, the host the routed import landed it on,
+// after scanning every host of the Provider for a domain that uses it
+// (deleteLandedDiskRouted, ADR-0007 Addendum B).
 func (s *Server) DeleteLandedDisk(ctx context.Context, req *providerv1.DeleteLandedDiskRequest) (*providerv1.DeleteLandedDiskResponse, error) {
 	if s.clusteredProvider() {
-		return nil, status.Error(codes.Unimplemented,
-			"DeleteLandedDisk is not served by a clustered libvirt provider (it is never a migration target)")
+		return s.provider.deleteLandedDiskRouted(ctx, req)
 	}
 	target := ownerFromProto(req.GetTargetVm())
 	if !hasNamingIdentity(target) {

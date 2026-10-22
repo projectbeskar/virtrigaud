@@ -44,5 +44,6 @@ func TestCapabilities_ResendSafeBackends(t *testing.T) {
 	caps, err = NewServer(clusterOf(t, []string{"host-a"})).GetCapabilities(context.Background(), &providerv1.GetCapabilitiesRequest{})
 	require.NoError(t, err)
 	assert.ElementsMatch(t, []string{migration.BackendNFS, migration.BackendS3}, caps.GetResendSafeExportBackends())
-	assert.Empty(t, caps.GetResendSafeImportBackends())
+	assert.ElementsMatch(t, []string{migration.BackendNFS, migration.BackendS3}, caps.GetResendSafeImportBackends(),
+		"every host command of the routed import is under timeout(1) within the budget (ADR-0007 Addendum B, B3)")
 }
