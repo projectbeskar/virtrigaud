@@ -293,7 +293,7 @@ func copyCheckConvertNFSObject(ctx context.Context, conn libvirtConn, wd *diskWr
 		stagedCopy, newDisk)...); err != nil {
 		return "", atStage(stageCommand, fmt.Errorf("host-side qemu-img convert of the staged nfs object failed: %w%s", err, qemuImgStderr(res)))
 	}
-	removeHostPath(ctx, h, stagedCopy, false)
+	wd.removeFile(ctx, stagedCopy)
 	return newDisk, nil
 }
 
@@ -373,7 +373,7 @@ func (s *Server) importDiskFromNFSSteps(ctx context.Context, req *providerv1.Imp
 // and converted there, and the converted disk is published onto l.targetPath
 // with one rename (tagged stagePublish).
 func landNFSImport(ctx context.Context, l importLanding, nfsURL string, req *providerv1.ImportDiskRequest) (*providerv1.ImportDiskResponse, error) {
-	conn, poolName, poolPath, volumeName, targetPath := l.conn, l.poolName, l.poolPath, l.volumeName, l.targetPath
+	conn, poolName, volumeName, targetPath := l.conn, l.poolName, l.volumeName, l.targetPath
 
 	// SECURITY: the staged object is on an NFS server the tenant controls, so
 	// it can change between two reads. It is read ONCE: copied byte for byte
@@ -385,8 +385,7 @@ func landNFSImport(ctx context.Context, l importLanding, nfsURL string, req *pro
 	// Create adopts it without a chmod) in the same private directory, checked
 	// there and then renamed into place (diskWriteDir). Raw values: RunHost
 	// shell-quotes every argv element itself.
-	h := hostConnRunner{conn: conn}
-	wd, err := newDiskWriteDir(ctx, h, poolPath)
+	wd, err := l.writeDir(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("nfs import: %w", err)
 	}

@@ -119,7 +119,7 @@ func (p *Provider) deleteLandedDiskRouted(ctx context.Context, req *providerv1.D
 	defer cancel()
 	// The routed import's landing lock: an import of the same name in flight
 	// in this provider is answered retryably, never with NOT_FOUND.
-	unlock, err := landingLocks.lockUnlessImporting(bctx, routedLandingKey(host, volumeName))
+	unlock, err := landingLocks.lockUnlessImporting(bctx, routedLandingKey(volumeName))
 	if stderrors.Is(err, errLandingImportInFlight) {
 		// Retryable, and kept out of the manager's circuit breaker.
 		return nil, vmOperationStatus(codes.Unavailable, landedDiskImportInFlightMessage)
@@ -319,7 +319,11 @@ func (p *Provider) deleteStagedDiskRouted(ctx context.Context, req *providerv1.D
 		return unspecified, se
 	}
 	if contracts.IsHostUnavailable(err) || isHostTransportFailure(err) {
-		return unspecified, hostUnavailableStatus(contracts.NewHostUnavailableError(fmt.Sprintf(stagedDiskHostDownFmt, host), err))
+		// The cause names the staged object's nfs:// URL: logged redacted,
+		// never passed on (#415).
+		log.Printf("WARN DeleteStagedDisk on host %s: the host could not be reached: %v", host,
+			redactLocations(err, disk.NFSURL, disk.Key))
+		return unspecified, hostUnavailableStatus(contracts.NewHostUnavailableError(fmt.Sprintf(stagedDiskHostDownFmt, host), nil))
 	}
 	return unspecified, &migration.StagedDiskError{Code: codes.Unavailable, Msg: stagedDiskHostFailedMessage, Cause: err}
 }

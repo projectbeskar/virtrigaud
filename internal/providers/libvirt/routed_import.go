@@ -24,13 +24,16 @@ import (
 	"log"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"golang.org/x/crypto/ssh"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
+	obsmetrics "github.com/projectbeskar/virtrigaud/internal/obs/metrics"
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
 	"github.com/projectbeskar/virtrigaud/internal/providers/libvirt/hostconn"
 	"github.com/projectbeskar/virtrigaud/internal/storage"
@@ -126,7 +129,56 @@ const (
 	// for other work on the same landing name in this provider.
 	wireRoutedImportLandingBusy = "disk import not performed: other work on the landing disk is still running in " +
 		"the provider; it is retried"
+	// wireRoutedImportBudgetShort answers an import whose checks left too
+	// little of its time budget for the write phase.
+	wireRoutedImportBudgetShort = "disk import not performed: too little of the call's time budget was left to " +
+		"start writing the disk; it is retried"
+	// wireRoutedImportFormat refuses a staged format the import cannot read.
+	wireRoutedImportFormat = "disk import not performed: the staged disk format must be qcow2, raw or vmdk " +
+		"(qcow2 only from nfs)"
+	// wireRoutedImportLandingSymlinkFmt answers a symbolic link at the
+	// landing name: a host-guard refusal (never written through).
+	wireRoutedImportLandingSymlinkFmt = "disk import on host %q was refused: the landing name is a symbolic link on " +
+		"the host; nothing was written"
+	// wireRoutedImportPoolMisplacedFmt answers a landing host whose default
+	// pool is not where Create attaches an imported disk.
+	wireRoutedImportPoolMisplacedFmt = "disk import on host %q not performed: " + defaultPoolMisplacedMessage
 )
+
+const (
+	// routedImportLandingWait bounds the wait for the landing lock (another
+	// import, delete or in-place create of the same landing name).
+	routedImportLandingWait = 2 * time.Minute
+
+	// routedImportMinWriteBudget is the least time budget the write phase is
+	// started with.
+	routedImportMinWriteBudget = time.Minute
+
+	// routedImportReapAge is the age after which a private write directory
+	// in the pool can belong to no call still running: the longest routed
+	// budget plus the manager's re-send settle time (35 minutes).
+	routedImportReapAge = defaultRoutedBudget + 35*time.Minute
+)
+
+// reapWriteDirsScript is the fixed `sh -c` script of reapStaleWriteDirs. "$1"
+// is the pool directory, "$2" the private directories' name prefix, "$3" the
+// minimum age in minutes. Only directories (never a symbolic link: find does
+// not follow them), directly in the pool, owned by the SSH user and unchanged
+// for longer than the age are removed.
+const reapWriteDirsScript = `find "$1" -mindepth 1 -maxdepth 1 -type d -name "$2*" -uid "$(id -u)" ` +
+	`-mmin +"$3" -exec rm -rf -- {} +`
+
+// reapStaleWriteDirs removes, best-effort, the private write directories
+// (vmDiskWriteDirPrefix) in poolDir on the landing host behind h that are
+// older than routedImportReapAge: left by a call whose cleanup was stopped,
+// failed or never ran. A failure is logged and changes nothing else.
+func reapStaleWriteDirs(ctx context.Context, h hostCommandRunner, host hostconn.HostID, poolDir string) {
+	minutes := strconv.Itoa(int(routedImportReapAge / time.Minute))
+	if _, err := runHost(ctx, h, "sh", "-c", reapWriteDirsScript, "sh", poolDir, vmDiskWriteDirPrefix, minutes); err != nil {
+		log.Printf("WARN Could not reap stale private write directories in the default pool on host %s (they are "+
+			"reaped by the next import): exit %d", host, guardExitCode(err))
+	}
+}
 
 // Formats of the routed import's host-scoped wire texts (they name the host
 // id, never its endpoint or a path).
@@ -142,12 +194,19 @@ const (
 	wireRoutedImportHostDownFmt = "disk import: host %q is unreachable"
 )
 
-// routedLandingKey is the landing-lock key of a clustered provider: the host
-// and the landing volume name (ADR-0007 Addendum B, B2 step 3). On a shared
-// pool the same file has one key per host; the cross-host in-use scan covers
-// that.
-func routedLandingKey(host hostconn.HostID, volumeName string) string {
-	return string(host) + "/" + volumeName
+// routedLandingKey is the landing-lock key of a clustered provider: the
+// landing volume name ALONE, provider-wide, whatever the host (ADR-0007
+// Addendum B, B2 step 3; #415 security review). On a shared pool the same
+// file is the same landing name on every host, so the routed ImportDisk, the
+// routed DeleteLandedDisk and the clustered in-place Create of one name are
+// serialised across hosts: a delete through host A can never remove a disk an
+// import or create through host B is landing or attaching, and an import
+// through host A never renames over a disk a create through host B attaches.
+// A clustered Provider runs one replica, so the in-process lock covers every
+// caller of that Provider; two Providers fronting one pool are not
+// serialised (docs/clustered-provider-inventory.md).
+func routedLandingKey(volumeName string) string {
+	return volumeName
 }
 
 // routedImport is a routed ImportDisk request, checked before any host is
@@ -165,19 +224,30 @@ type routedImport struct {
 	nfsURL string
 }
 
+// routedImportS3Formats are the staged formats a routed s3 import reads ("" is
+// the legacy vmdk default of the shared s3 core).
+var routedImportS3Formats = map[string]bool{"": true, "qcow2": true, "raw": true, "vmdk": true}
+
 // parseRoutedImport checks a clustered ImportDisk request before any host is
 // leased. Every refusal is InvalidArgument with a constant text.
 func parseRoutedImport(req *providerv1.ImportDiskRequest) (routedImport, error) {
 	r := routedImport{backend: req.GetBackendType()}
+	format := strings.ToLower(strings.TrimSpace(req.GetFormat()))
 	switch r.backend {
 	case migration.BackendS3:
 		if err := migration.EnsureRelayMode(req.GetTransferMode()); err != nil {
 			return routedImport{}, err
 		}
+		if !routedImportS3Formats[format] {
+			return routedImport{}, status.Error(codes.InvalidArgument, wireRoutedImportFormat)
+		}
 	case migration.BackendNFS:
 		r.nfsURL = strings.TrimSpace(req.GetSourceUrl())
 		if !strings.HasPrefix(r.nfsURL, "nfs://") {
 			return routedImport{}, status.Error(codes.InvalidArgument, wireRoutedImportNFSURL)
+		}
+		if format != "" && format != migration.StagedFormatQCOW2 {
+			return routedImport{}, status.Error(codes.InvalidArgument, wireRoutedImportFormat)
 		}
 	default:
 		return routedImport{}, status.Error(codes.InvalidArgument, wireRoutedImportBackend)
@@ -229,9 +299,11 @@ func (p *Provider) importDiskRouted(ctx context.Context, req *providerv1.ImportD
 	bctx, cancel := withRoutedBudget(ctx)
 	defer cancel()
 	// The landing lock is held from the checks to the publish. Its wait is
-	// bounded so the answer still fits the call.
-	lctx, lcancel := budgetWithMargin(bctx, clusterDiskGuardMargin)
-	unlock, err := landingLocks.lockForImport(lctx, routedLandingKey(r.host, r.volumeName))
+	// bounded (routedImportLandingWait), so an import queued behind another
+	// one of the same name answers "busy" with most of its budget unspent
+	// instead of starting late and running out of it.
+	lctx, lcancel := context.WithTimeout(bctx, routedImportLandingWait)
+	unlock, err := landingLocks.lockForImport(lctx, routedLandingKey(r.volumeName))
 	lcancel()
 	if err != nil {
 		log.Printf("WARN routed disk import of %s on host %s: gave up waiting for other work on the landing disk: %v",
@@ -248,7 +320,7 @@ func (p *Provider) importDiskRouted(ctx context.Context, req *providerv1.ImportD
 		return err
 	})
 	if err != nil {
-		return nil, classifyRoutedImportFailure(string(r.host), ctx, bctx, prog, err)
+		return nil, classifyRoutedImportFailure(string(r.host), ctx, bctx, prog, err, req.GetSourceUrl(), r.nfsURL)
 	}
 	log.Printf("INFO Routed disk import landed %s on host %s for %s/%s", resp.GetPath(), r.host, r.owner.Namespace, r.owner.Name)
 	return resp, nil
@@ -289,6 +361,24 @@ func (p *Provider) importOnHost(ctx context.Context, c libvirtConn, r routedImpo
 		return nil, err
 	}
 
+	// Removals of the import's own private files run under timeout(1) only:
+	// never under the import's flock, which a still-running command of an
+	// earlier, cancelled call may hold (its directory would be leaked), and
+	// never counted as a command that may still be landing a disk.
+	cleanup := &routedImportConn{libvirtConn: c, progress: prog, cleanup: true}
+	// Private write directories that outlived every call that could still
+	// write into them (a cleanup that was stopped or failed) are reaped
+	// first, under the landing lock (#415).
+	reapStaleWriteDirs(ctx, hostConnRunner{conn: cleanup}, c.HostID(), poolPath)
+
+	// The write phase needs room in the budget; with too little left it is
+	// not started at all (not performed), rather than cut short (unknown).
+	if deadline, ok := ctx.Deadline(); ok && time.Until(deadline) < routedImportMinWriteBudget {
+		log.Printf("WARN Routed disk import of %s on host %s not started: %v of its budget left (less than %v)",
+			r.volumeName, c.HostID(), time.Until(deadline).Round(time.Second), routedImportMinWriteBudget)
+		return nil, vmOperationStatus(codes.Unavailable, wireRoutedImportBudgetShort)
+	}
+
 	// B2 step 3 + B3: from here every host command runs under flock(1) on the
 	// import's host lock and timeout(1) within the budget.
 	lock, err := p.hostLockFor(importLockKind, r.domain)
@@ -297,12 +387,13 @@ func (p *Provider) importOnHost(ctx context.Context, c libvirtConn, r routedImpo
 	}
 	prog.beginWrites()
 	l := importLanding{
-		conn:       &routedImportConn{libvirtConn: c, progress: prog, lock: &lock},
-		poolName:   defaultStoragePool,
-		poolPath:   poolPath,
-		volumeName: r.volumeName,
-		targetPath: targetPath,
-		routed:     true,
+		conn:          &routedImportConn{libvirtConn: c, progress: prog, lock: &lock},
+		cleanupRunner: hostConnRunner{conn: cleanup},
+		poolName:      defaultStoragePool,
+		poolPath:      poolPath,
+		volumeName:    r.volumeName,
+		targetPath:    targetPath,
+		routed:        true,
 	}
 	log.Printf("INFO Routed disk import: backend=%s host=%s volume=%s target=%s", r.backend, c.HostID(), r.volumeName, targetPath)
 	if r.backend == migration.BackendNFS {
@@ -317,6 +408,9 @@ func (p *Provider) importOnHost(ctx context.Context, c libvirtConn, r routedImpo
 // disk landed elsewhere could never be attached in place by the Create that
 // follows. Nothing is changed on the host.
 func requireDefaultPoolDir(ctx context.Context, h hostCommandRunner, host hostconn.HostID, dir string) error {
+	// #415: the refusal is scoped to the host (FailedPrecondition +
+	// HOST_STORAGE_MISCONFIGURED + VM_OPERATION_FAILED), so the manager can
+	// place the target elsewhere instead of failing the migration for good.
 	if filepath.Clean(dir) == filepath.Clean(defaultPoolRequiredDir) {
 		return nil
 	}
@@ -329,7 +423,44 @@ func requireDefaultPoolDir(ctx context.Context, h hostCommandRunner, host hostco
 	}
 	log.Printf("ERROR The libvirt storage pool %q on host %s is at %q, not %s; the routed import refuses to land there",
 		defaultStoragePool, host, dir, defaultPoolRequiredDir)
-	return errDefaultPoolMisplaced()
+	return statusWithReasons(codes.FailedPrecondition, fmt.Sprintf(wireRoutedImportPoolMisplacedFmt, host),
+		contracts.HostStorageMisconfiguredReason, contracts.VMOperationFailedReason).Err()
+}
+
+// redactedCause is an error whose text has the staged object's locations
+// replaced (redactLocations); its chain is the original error's.
+type redactedCause struct {
+	text string
+	err  error
+}
+
+// Error returns the redacted text.
+func (e *redactedCause) Error() string { return e.text }
+
+// Unwrap returns the original error.
+func (e *redactedCause) Unwrap() error { return e.err }
+
+// stagedLocationMarker replaces a staged object's location in a logged text.
+const stagedLocationMarker = "<staged object>"
+
+// redactLocations returns err with every non-empty location in its text
+// replaced by stagedLocationMarker, for the provider log: a staged object's
+// nfs:// URL or s3:// key names the tenant's staging export or bucket.
+func redactLocations(err error, locations ...string) error {
+	if err == nil {
+		return nil
+	}
+	return &redactedCause{text: redactText(err.Error(), locations...), err: err}
+}
+
+// redactText is redactLocations on a text.
+func redactText(text string, locations ...string) string {
+	for _, l := range locations {
+		if l = strings.TrimSpace(l); l != "" {
+			text = strings.ReplaceAll(text, l, stagedLocationMarker)
+		}
+	}
+	return text
 }
 
 // landingDomainCheck is the routed import's name check on the landing host
@@ -390,8 +521,9 @@ type importProgress struct {
 	writes bool
 	// lost: a write-phase command did not end on its own — stopped by
 	// timeout(1), killed, its session dropped or its call cancelled — and may
-	// still run. Removals (rm) are not counted: they only clean the private
-	// directory.
+	// still run. Commands of the cleanup connection (routedImportConn.cleanup:
+	// removals of the import's own private files, the reaper) are never
+	// counted: they cannot land a disk.
 	lost bool
 }
 
@@ -402,15 +534,15 @@ func (p *importProgress) beginWrites() {
 	p.writes = true
 }
 
-// record notes the result err of host command argv (the command as the import
-// asked for it, before any guard), run in the write phase when write is set.
-func (p *importProgress) record(ctx context.Context, write bool, argv []string, err error) {
+// record notes the result err of a host command, run in the write phase (by
+// the guarded connection) when write is set.
+func (p *importProgress) record(ctx context.Context, write bool, err error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if err == nil || hostAnswered(err) {
 		p.answered = true
 	}
-	if write && err != nil && (len(argv) == 0 || argv[0] != "rm") && !endedOnItsOwn(ctx, err) {
+	if write && err != nil && !endedOnItsOwn(ctx, err) {
 		p.lost = true
 	}
 }
@@ -442,34 +574,51 @@ func endedOnItsOwn(ctx context.Context, err error) bool {
 // write phase) every command runs through the host guard: hostGuardScript,
 // flock(1) -n on lock and timeout(1) ending hostCommandSlack before the
 // command's context deadline (guardedHostCommand). A virsh command then runs
-// as a host command (`virsh -c <uri> ...`) so it is guarded too.
+// as a host command (`virsh -c <uri> ...`) so it is guarded too. With cleanup
+// set (the import's own removals and the reaper) every command runs under
+// timeout(1) only — never under the import's flock, which a still-running
+// command of an earlier call may hold — and is never counted as lost.
 type routedImportConn struct {
 	libvirtConn
 	progress *importProgress
 	lock     *hostLock
+	cleanup  bool
+}
+
+// wrap returns the argv the host runs for argv: guarded (write phase), under
+// timeout(1) only (cleanup), or unchanged (read phase).
+func (c *routedImportConn) wrap(ctx context.Context, argv []string) ([]string, error) {
+	switch {
+	case c.lock != nil:
+		return guardedHostCommand(ctx, *c.lock, "", argv...)
+	case c.cleanup:
+		timeout, err := hostCommandTimeout(ctx)
+		if err != nil {
+			return nil, err
+		}
+		return append(timeout, argv...), nil
+	}
+	return argv, nil
 }
 
 // RunHost runs argv on the host, guarded in the write phase.
 func (c *routedImportConn) RunHost(ctx context.Context, argv ...string) (*hostconn.Result, error) {
-	run := argv
-	if c.lock != nil {
-		guarded, err := guardedHostCommand(ctx, *c.lock, "", argv...)
-		if err != nil {
-			return nil, err
-		}
-		run = guarded
+	run, err := c.wrap(ctx, argv)
+	if err != nil {
+		return nil, err
 	}
 	res, err := c.libvirtConn.RunHost(ctx, run...)
-	c.progress.record(ctx, c.lock != nil, argv, err)
+	c.progress.record(ctx, c.lock != nil, err)
 	return res, err
 }
 
-// Virsh runs a virsh command on the host; in the write phase it runs as a
-// guarded host command against the same libvirtd (remoteVirshConnectURI).
+// Virsh runs a virsh command on the host; in the write phase (and for the
+// cleanup connection) it runs as a host command against the same libvirtd
+// (remoteVirshConnectURI), so it is wrapped too.
 func (c *routedImportConn) Virsh(ctx context.Context, args ...string) (*hostconn.Result, error) {
-	if c.lock == nil {
+	if c.lock == nil && !c.cleanup {
 		res, err := c.libvirtConn.Virsh(ctx, args...)
-		c.progress.record(ctx, false, nil, err)
+		c.progress.record(ctx, false, err)
 		return res, err
 	}
 	argv := []string{"virsh"}
@@ -483,16 +632,12 @@ func (c *routedImportConn) Virsh(ctx context.Context, args ...string) (*hostconn
 // phase. Its failure is reported as a *VirshError carrying the command's exit
 // status (or -1 when the session failed), as RunHost's are.
 func (c *routedImportConn) StreamIn(ctx context.Context, r io.Reader, argv ...string) error {
-	run := argv
-	if c.lock != nil {
-		guarded, err := guardedHostCommand(ctx, *c.lock, "", argv...)
-		if err != nil {
-			return err
-		}
-		run = guarded
+	run, err := c.wrap(ctx, argv)
+	if err != nil {
+		return err
 	}
-	err := streamInError(c.libvirtConn.StreamIn(ctx, r, run...))
-	c.progress.record(ctx, c.lock != nil, argv, err)
+	err = streamInError(c.libvirtConn.StreamIn(ctx, r, run...))
+	c.progress.record(ctx, c.lock != nil, err)
 	return err
 }
 
@@ -523,12 +668,25 @@ func streamInError(err error) error {
 // classifyRoutedImportFailure turns the failure of a routed import on host
 // into the answer the manager reads (ADR-0007 Addendum B, B4; see the file
 // comment). parent is the call's context, budget the routed budget, prog what
-// the import recorded.
-func classifyRoutedImportFailure(host string, parent, budget context.Context, prog *importProgress, err error) error {
+// the import recorded. locations are the staged object's locations (the
+// source URL): they are never logged (#415), the cause is logged with them
+// replaced.
+func classifyRoutedImportFailure(host string, parent, budget context.Context, prog *importProgress, err error,
+	locations ...string) error {
 	if err == nil {
 		return nil
 	}
-	log.Printf("WARN routed disk import on host %s failed: %v", host, err)
+	cause := redactLocations(err, locations...)
+	log.Printf("WARN routed disk import on host %s failed: %v", host, cause)
+	// A symbolic link at the landing name: a host-guard refusal, never
+	// written through (#415: not the plain AlreadyExists of a name conflict).
+	var se *symlinkTargetError
+	if stderrors.As(err, &se) {
+		obsmetrics.RecordHostGuardRefusal(libvirtProviderType, obsmetrics.HostGuardReasonTargetSymlink)
+		log.Printf("ERROR ALERT host guard refused disk import on host %q (%s): the landing name is a symbolic link; "+
+			"check the default pool on that host", host, obsmetrics.HostGuardReasonTargetSymlink)
+		return vmOperationStatus(codes.FailedPrecondition, fmt.Sprintf(wireRoutedImportLandingSymlinkFmt, host))
+	}
 	// The cluster-wide guard's answers: a previous incarnation, a host that
 	// could not be checked, the domain busy.
 	if st := clusterGuardStatus(err); st != nil {
@@ -546,7 +704,7 @@ func classifyRoutedImportFailure(host string, parent, budget context.Context, pr
 		if contracts.IsHostUnavailable(err) || (!answered && isHostTransportFailure(err)) {
 			return hostUnavailableStatus(contracts.NewHostUnavailableError(fmt.Sprintf(wireRoutedImportHostDownFmt, host), nil))
 		}
-		return notPerformed(wireImportNotPerformed, err)
+		return notPerformed(wireImportNotPerformed, cause)
 	}
 	switch guardExitCode(err) {
 	case flockBusyExit:
@@ -567,7 +725,7 @@ func classifyRoutedImportFailure(host string, parent, budget context.Context, pr
 	// running, and the only publishing step either did not run or ended
 	// without renaming.
 	if stage, _, _ := stageOf(err); stage == stagePublish {
-		return notPerformed(wireImportFailed, err)
+		return notPerformed(wireImportFailed, cause)
 	}
-	return notPerformed(wireImportNotPerformed, err)
+	return notPerformed(wireImportNotPerformed, cause)
 }

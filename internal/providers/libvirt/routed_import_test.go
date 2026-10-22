@@ -21,7 +21,12 @@ import (
 	"encoding/base64"
 	"fmt"
 	"io"
+	"log"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -74,6 +79,9 @@ type importRecCall struct {
 	argv []string
 	// guarded reports that argv runs through hostGuardScript.
 	guarded bool
+	// timed reports that argv runs under timeout(1) only (the import's
+	// cleanup connection: its own removals and the reaper).
+	timed bool
 	// cmd is the command the guard (and withUmask) wraps: what the host runs.
 	cmd []string
 }
@@ -108,6 +116,10 @@ func (c importRecCall) key() string {
 			return "sh target"
 		case existingPathsScript:
 			return "sh exists"
+		case reapWriteDirsScript:
+			return "sh reap"
+		case diskKindScript:
+			return "sh kind"
 		}
 	}
 	return cmd[0]
@@ -125,10 +137,14 @@ type importRecHost struct {
 	seen   map[string]int    // key -> occurrences so far
 	doms   map[string]string // landing host domains: name -> dumpxml
 	target string            // targetKindScript answer for the landing file
+	kind   string            // diskKindScript answer (a landed-disk delete)
+	pool   string            // the default pool's directory
+	hooks  map[string]func() // key -> run when such a call arrives (outside the lock)
 }
 
 func newImportRecHost() *importRecHost {
-	return &importRecHost{fail: map[string]error{}, failN: map[string]int{}, seen: map[string]int{}, doms: map[string]string{}}
+	return &importRecHost{fail: map[string]error{}, failN: map[string]int{}, seen: map[string]int{}, doms: map[string]string{},
+		hooks: map[string]func(){}, pool: importPool, kind: diskKindFile}
 }
 
 // wrap is the routedDiskConnFn that hands the import this host instead of the
@@ -140,17 +156,21 @@ func (h *importRecHost) wrap(c libvirtConn) libvirtConn {
 
 func (h *importRecHost) uri() string { return "qemu+ssh://virt@" + string(h.HostID()) + "/system" }
 
-// unguard returns the command the guard wraps, and whether argv is guarded.
-func unguard(argv []string) ([]string, bool) {
+// unguard returns the command the guard (or a bare timeout(1)) wraps, and
+// whether argv is guarded, or under timeout(1) only.
+func unguard(argv []string) (cmd []string, guarded, timed bool) {
+	if len(argv) > 3 && argv[0] == "timeout" {
+		return argv[3:], false, true
+	}
 	if len(argv) < 3 || argv[0] != "sh" || argv[1] != "-c" || argv[2] != hostGuardScript {
-		return argv, false
+		return argv, false, false
 	}
 	for i := 3; i < len(argv); i++ {
 		if argv[i] == "timeout" {
-			return argv[i+3:], true
+			return argv[i+3:], true, false
 		}
 	}
-	return nil, true
+	return nil, true, false
 }
 
 // unumask strips withUmask's wrapper.
@@ -164,17 +184,22 @@ func unumask(argv []string) []string {
 // record logs a call and returns its scripted failure, if any.
 func (h *importRecHost) record(kind string, argv []string) (importRecCall, error) {
 	h.mu.Lock()
-	defer h.mu.Unlock()
-	cmd, guarded := unguard(argv)
-	c := importRecCall{kind: kind, argv: append([]string(nil), argv...), guarded: guarded, cmd: unumask(cmd)}
+	cmd, guarded, timed := unguard(argv)
+	c := importRecCall{kind: kind, argv: append([]string(nil), argv...), guarded: guarded, timed: timed, cmd: unumask(cmd)}
 	h.calls = append(h.calls, c)
 	k := c.key()
 	n := h.seen[k]
 	h.seen[k] = n + 1
-	if err, ok := h.fail[k]; ok && h.failN[k] == n {
-		return c, err
+	hook := h.hooks[k]
+	var err error
+	if e, ok := h.fail[k]; ok && h.failN[k] == n {
+		err = e
 	}
-	return c, nil
+	h.mu.Unlock()
+	if hook != nil {
+		hook()
+	}
+	return c, err
 }
 
 func (h *importRecHost) Virsh(_ context.Context, args ...string) (*hostconn.Result, error) {
@@ -236,9 +261,11 @@ func (h *importRecHost) answer(c importRecCall) *hostconn.Result {
 	case "virsh dumpxml":
 		out = h.doms[last]
 	case "virsh pool-dumpxml":
-		out = "<pool type='dir'><name>default</name><target><path>" + importPool + "</path></target></pool>"
+		out = "<pool type='dir'><name>default</name><target><path>" + h.pool + "</path></target></pool>"
+	case "sh kind":
+		out = h.kind
 	case "sh target":
-		if last == importLanded {
+		if last == h.pool+"/"+importVolume+qcow2Ext {
 			out = h.target
 		}
 	case "realpath":
@@ -352,11 +379,16 @@ func callCtx(t *testing.T) context.Context {
 const importLockPath = "/var/lib/virtrigaud/staging/" + hostLockDirName + "/import-" + importDomain + ".lock"
 
 // readPhaseKeys are the only commands a routed import runs on the landing
-// host before its write phase: read-only.
+// host before its write phase: read-only — and the reaper of stale private
+// directories (under timeout(1), outside the import's flock).
 var readPhaseKeys = map[string]bool{
 	"virsh list": true, "virsh dumpxml": true, "virsh pool-dumpxml": true,
-	"sh target": true, "sh exists": true, "realpath": true,
+	"sh target": true, "sh exists": true, "realpath": true, "sh reap": true,
 }
+
+// cleanupSecs is the most timeout(1) a cleanup removal gets: routedCleanupTimeout
+// less hostCommandSlack.
+var cleanupSecs = int((routedCleanupTimeout - hostCommandSlack) / time.Second)
 
 // timeoutSecsRE matches timeout(1)'s duration argument.
 var timeoutSecsRE = regexp.MustCompile(`^([0-9]+)s$`)
@@ -371,7 +403,34 @@ func requireGuardedWithinBudget(t *testing.T, calls []importRecCall) [][]string 
 	maxSecs := int((30*time.Minute - routedBudgetMargin - hostCommandSlack) / time.Second)
 	var writes [][]string
 	writing := false
+	timeoutSecs := func(argv []string, i int) int {
+		m := timeoutSecsRE.FindStringSubmatch(argv[i])
+		require.Len(t, m, 2, "timeout(1)'s duration: %q", argv)
+		secs, err := strconv.Atoi(m[1])
+		require.NoError(t, err)
+		assert.Positive(t, secs, "%q", argv)
+		assert.LessOrEqual(t, secs, maxSecs, "timeout(1) ends within the routed budget: %q", argv)
+		return secs
+	}
 	for _, c := range calls {
+		if c.timed {
+			// The cleanup connection: under timeout(1), never under the
+			// import's flock (a still-running earlier command may hold it).
+			assert.NotContains(t, c.argv, "flock", "%q", c.argv)
+			assert.Equal(t, []string{"timeout", "--kill-after=" + hostCommandKillAfter}, c.argv[:2], "%q", c.argv)
+			secs := timeoutSecs(c.argv, 2)
+			switch c.key() {
+			case "rm":
+				require.True(t, writing, "a removal of the import's own files runs in the write phase: %q", c.argv)
+				assert.LessOrEqual(t, secs, cleanupSecs, "a removal is bounded by the routed cleanup bound: %q", c.argv)
+				writes = append(writes, c.cmd)
+			case "sh reap":
+				require.False(t, writing, "the reaper runs before the write phase: %q", c.argv)
+			default:
+				require.Failf(t, "unexpected cleanup command", "%q", c.argv)
+			}
+			continue
+		}
 		if !c.guarded {
 			require.False(t, writing, "every host command of the write phase runs under the guard: %q", c.argv)
 			require.True(t, readPhaseKeys[c.key()], "only reads run before the write phase: %q", c.argv)
@@ -384,17 +443,9 @@ func requireGuardedWithinBudget(t *testing.T, calls []importRecCall) [][]string 
 			importLockPath, "", "flock", "-n", "-E", strconv.Itoa(flockBusyExit), importLockPath}, argv[:12],
 			"guard script, then flock -n on the import's host lock: %q", argv)
 		assert.Equal(t, []string{"timeout", "--kill-after=" + hostCommandKillAfter}, argv[12:14], "%q", argv)
-		m := timeoutSecsRE.FindStringSubmatch(argv[14])
-		require.Len(t, m, 2, "timeout(1)'s duration: %q", argv)
-		secs, err := strconv.Atoi(m[1])
-		require.NoError(t, err)
-		assert.LessOrEqual(t, secs, maxSecs, "timeout(1) ends within the routed budget: %q", argv)
-		assert.Positive(t, secs, "%q", argv)
-		if c.cmd[0] != "rm" {
-			// A removal runs on its own short cleanup bound (it survives a
-			// cancelled call); every other command uses the budget it has.
-			assert.Greater(t, secs, maxSecs-60, "timeout(1) uses the budget it has: %q", argv)
-		}
+		secs := timeoutSecs(argv, 14)
+		assert.NotEqual(t, "rm", c.cmd[0], "no removal runs under the import's flock: %q", argv)
+		assert.Greater(t, secs, maxSecs-60, "timeout(1) uses the budget it has: %q", argv)
 		writes = append(writes, c.cmd)
 	}
 	require.True(t, writing, "the import wrote")
@@ -438,14 +489,15 @@ func TestRoutedImport_NFS_EveryHostCommandGuardedWithinBudget(t *testing.T) {
 		"rm -rf -- " + wd,
 	}, got, "the single-host nfs landing, every step guarded: copy once, check, convert, check, one rename")
 
-	// The read phase: the name check, the pool, and the landing file probes.
+	// The read phase: the name check, the pool, the landing file probes, then
+	// the reaper of stale private directories.
 	var reads []string
 	for _, c := range calls {
-		if !c.guarded {
+		if !c.guarded && c.key() != "rm" {
 			reads = append(reads, c.key())
 		}
 	}
-	assert.Equal(t, []string{"virsh list", "virsh pool-dumpxml", "sh target", "sh exists"}, reads,
+	assert.Equal(t, []string{"virsh list", "virsh pool-dumpxml", "sh target", "sh exists", "sh reap"}, reads,
 		"no domain of the name, nothing at the landing names: no other host is scanned")
 }
 
@@ -531,15 +583,204 @@ func TestRoutedImport_RefusedBeforeAnyHost(t *testing.T) {
 
 // TestRoutedImport_PoolElsewhereIsRefused: a landing host whose default pool
 // is not where Create attaches an imported disk is refused before anything is
-// written, with Create's constant text.
+// written: FailedPrecondition scoped to the host (HOST_STORAGE_MISCONFIGURED),
+// so the manager can place the target elsewhere (#415).
 func TestRoutedImport_PoolElsewhereIsRefused(t *testing.T) {
 	f := newImportFixture(t)
 	defaultPoolRequiredDir = "/var/lib/libvirt/images"
 	_, err := f.server().ImportDisk(callCtx(t), nfsRequest("host-b"))
-	assertRefusalStatus(t, err, codes.InvalidArgument)
-	assert.Equal(t, defaultPoolMisplacedMessage, status.Convert(err).Message())
+	st := status.Convert(err)
+	assert.Equal(t, codes.FailedPrecondition, st.Code(), "%v", err)
+	reasons := errorInfoReasons(st)
+	assert.True(t, reasons[contracts.HostStorageMisconfiguredReason], "%v", st.Details())
+	assert.True(t, reasons[contracts.VMOperationFailedReason], "out of the breaker")
+	assert.True(t, contracts.IsHostStorageMisconfigured(err))
+	assert.Equal(t, fmt.Sprintf(wireRoutedImportPoolMisplacedFmt, "host-b"), st.Message())
+	assert.NotContains(t, st.Message(), importPool, "the pool's path is never named")
 	assert.False(t, f.rec.wrote())
 }
+
+// TestRoutedImport_StagedFormatIsChecked: a staged format the import cannot
+// read is InvalidArgument before any host is leased (#415).
+func TestRoutedImport_StagedFormatIsChecked(t *testing.T) {
+	f := newImportFixture(t)
+	for _, tc := range []struct {
+		s3     bool
+		format string
+		ok     bool
+	}{
+		{s3: true, format: "", ok: true}, {s3: true, format: "QCOW2", ok: true}, {s3: true, format: "raw", ok: true},
+		{s3: true, format: "vmdk", ok: true}, {s3: true, format: "vhdx"}, {s3: true, format: "qcow2 -o x"},
+		{format: "", ok: true}, {format: "qcow2", ok: true}, {format: "raw"}, {format: "vmdk"},
+	} {
+		req := nfsRequest("host-b")
+		if tc.s3 {
+			req = f.s3Request(t, "host-b")
+		}
+		req.Format = tc.format
+		err := parseErr(req)
+		if tc.ok {
+			assert.NoError(t, err, "s3=%v %q", tc.s3, tc.format)
+			continue
+		}
+		assert.Equal(t, codes.InvalidArgument, status.Code(err), "s3=%v %q", tc.s3, tc.format)
+		assert.Equal(t, wireRoutedImportFormat, status.Convert(err).Message())
+	}
+	_, err := f.server().ImportDisk(callCtx(t), func() *providerv1.ImportDiskRequest {
+		r := nfsRequest("host-b")
+		r.Format = "vmdk"
+		return r
+	}())
+	assert.Equal(t, codes.InvalidArgument, status.Code(err))
+	assert.Empty(t, f.rec.snapshot(), "refused before any host")
+}
+
+// parseErr is parseRoutedImport's error.
+func parseErr(req *providerv1.ImportDiskRequest) error {
+	_, err := parseRoutedImport(req)
+	return err
+}
+
+// TestRoutedImport_TooLittleBudgetIsNotStarted: when the checks leave less
+// than routedImportMinWriteBudget, the write phase is not started and the
+// answer is "not performed", never an unknown outcome (#415).
+func TestRoutedImport_TooLittleBudgetIsNotStarted(t *testing.T) {
+	f := newImportFixture(t)
+	ctx, cancel := context.WithTimeout(context.Background(), routedBudgetMargin+30*time.Second)
+	defer cancel()
+	_, err := f.server().ImportDisk(ctx, nfsRequest("host-b"))
+	assertNotPerformedStatus(t, err)
+	assert.Equal(t, wireRoutedImportBudgetShort, status.Convert(err).Message())
+	assert.False(t, f.rec.wrote(), "nothing was written")
+}
+
+// TestRoutedImport_ReaperAndCleanupNeverTakeTheImportLock: the reaper of
+// stale private directories runs before the write phase and every removal of
+// the import's own files runs under timeout(1) only — never under the
+// import's flock, which a still-running command of an earlier call may hold
+// (#415: the directory was leaked with exit 75). A removal that fails is
+// logged and changes no answer.
+func TestRoutedImport_ReaperAndCleanupNeverTakeTheImportLock(t *testing.T) {
+	f := newImportFixture(t)
+	f.rec.failOn("qemu-img convert", 0, virshFailure(1, "x"))
+	f.rec.failOn("rm", 0, virshFailure(flockBusyExit, "x"))
+	_, err := f.server().ImportDisk(callCtx(t), nfsRequest("host-b"))
+	assertNotPerformedStatus(t, err)
+	assert.NotContains(t, status.Convert(err).Message(), "still running", "a removal's status is not the import's")
+
+	var reaper, removal *importRecCall
+	for _, c := range f.rec.snapshot() {
+		switch c.key() {
+		case "sh reap":
+			reaper = &c
+		case "rm":
+			removal = &c
+		}
+	}
+	require.NotNil(t, reaper)
+	require.NotNil(t, removal)
+	assert.Equal(t, []string{"sh", "-c", reapWriteDirsScript, "sh", importPool, vmDiskWriteDirPrefix,
+		strconv.Itoa(int(routedImportReapAge / time.Minute))}, reaper.cmd)
+	assert.Equal(t, 65, int(routedImportReapAge/time.Minute), "the longest budget plus the 35-minute settle time")
+	for _, c := range []*importRecCall{reaper, removal} {
+		assert.True(t, c.timed, "%q", c.argv)
+		assert.NotContains(t, c.argv, "flock", "%q", c.argv)
+	}
+	assert.Equal(t, []string{"rm", "-rf", "--", importPool + "/" + vmDiskWriteDirPrefix + "0000000000"}, removal.cmd)
+}
+
+// TestReapWriteDirsScript runs the reaper's script for real: only directories
+// with the prefix, directly in the pool, owned by the user and older than the
+// age are removed — never a symbolic link (or what it points at), a file, a
+// younger directory, or anything deeper.
+func TestReapWriteDirsScript(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell")
+	}
+	pool, outside := t.TempDir(), t.TempDir()
+	old := time.Now().Add(-2 * time.Hour)
+	mk := func(name string, aged bool) string {
+		p := filepath.Join(pool, name)
+		require.NoError(t, os.MkdirAll(filepath.Join(p, "sub"), 0o700))
+		require.NoError(t, os.WriteFile(filepath.Join(p, "sub", "disk"), []byte("x"), 0o600))
+		if aged {
+			require.NoError(t, os.Chtimes(p, old, old))
+		}
+		return p
+	}
+	stale := mk(vmDiskWriteDirPrefix+"aaaaaaaaaa", true)
+	young := mk(vmDiskWriteDirPrefix+"bbbbbbbbbb", false)
+	other := mk("team-a.web-disk", true)
+	target := filepath.Join(outside, "victim")
+	require.NoError(t, os.MkdirAll(target, 0o700))
+	link := filepath.Join(pool, vmDiskWriteDirPrefix+"cccccccccc")
+	require.NoError(t, os.Symlink(target, link))
+	file := filepath.Join(pool, vmDiskWriteDirPrefix+"dddddddddd")
+	require.NoError(t, os.WriteFile(file, []byte("x"), 0o600))
+	require.NoError(t, os.Chtimes(file, old, old))
+
+	out, err := exec.Command("sh", "-c", reapWriteDirsScript, "sh", pool, vmDiskWriteDirPrefix, "65").CombinedOutput() //nolint:gosec // fixed test script
+	require.NoError(t, err, "%s", out)
+	assert.NoDirExists(t, stale, "a stale private directory is reaped")
+	assert.DirExists(t, young, "a directory a call may still use is kept")
+	assert.DirExists(t, other)
+	assert.DirExists(t, target, "a link is never followed")
+	_, lerr := os.Lstat(link)
+	assert.NoError(t, lerr, "a link is not a directory: kept")
+	assert.FileExists(t, file)
+}
+
+// TestRoutedImport_CallCancelledMidConvert: the manager gives up while the
+// convert runs (the call's context is cancelled). The outcome is unknown —
+// the convert may still run on the host — and the private directory is still
+// removed (the cleanup survives the cancellation).
+func TestRoutedImport_CallCancelledMidConvert(t *testing.T) {
+	f := newImportFixture(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+	defer cancel()
+	f.rec.hooks["qemu-img convert"] = cancel
+	f.rec.failOn("qemu-img convert", 0, context.Canceled)
+	_, err := f.server().ImportDisk(ctx, nfsRequest("host-b"))
+	assertUnknownOutcome(t, err)
+	calls := f.rec.snapshot()
+	last := calls[len(calls)-1]
+	assert.Equal(t, "rm", last.key(), "the private directory is removed after the cancellation")
+	assert.True(t, last.timed)
+}
+
+// TestRoutedImport_NoStagedLocationAtWarn: the routed import's WARN lines
+// never carry the staged object's nfs:// URL (#415).
+func TestRoutedImport_NoStagedLocationAtWarn(t *testing.T) {
+	var buf strings.Builder
+	var mu sync.Mutex
+	prev := log.Writer()
+	log.SetOutput(writerFunc(func(p []byte) (int, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		return buf.Write(p)
+	}))
+	t.Cleanup(func() { log.SetOutput(prev) })
+
+	f := newImportFixture(t)
+	f.rec.failOn("qemu-img dd", 0, &VirshError{Command: "qemu-img dd if=" + importNFSURL, ExitCode: 1,
+		Stderr: "qemu-img: Could not open '" + importNFSURL + "'", Cause: &exec.ExitError{}})
+	_, err := f.server().ImportDisk(callCtx(t), nfsRequest("host-b"))
+	assertNotPerformedStatus(t, err)
+	mu.Lock()
+	out := buf.String()
+	mu.Unlock()
+	for _, l := range strings.Split(out, "\n") {
+		if strings.Contains(l, "WARN") || strings.Contains(l, "not performed") {
+			assert.NotContains(t, l, "nfs://", "a staged location in a WARN/ERROR outcome line: %s", l)
+		}
+	}
+	assert.Contains(t, out, stagedLocationMarker, "the cause is still logged, with the location replaced")
+}
+
+// writerFunc adapts a function to io.Writer.
+type writerFunc func(p []byte) (int, error)
+
+func (f writerFunc) Write(p []byte) (int, error) { return f(p) }
 
 // TestRoutedImport_HostLeaseFailureIsHostUnavailable: an unknown host, or one
 // whose dial fails, is HOST_UNAVAILABLE before anything runs.
@@ -661,6 +902,7 @@ func TestRoutedImport_Outcomes(t *testing.T) {
 		"the bounded copy fails: not performed":                     {key: "qemu-img dd", err: ended(1), assert: assertNotPerformedStatus},
 		"the convert fails: not performed":                          {key: "qemu-img convert", err: ended(1), assert: assertNotPerformedStatus},
 		"the converted disk does not check: not performed":          {key: "qemu-img check", err: ended(3), assert: assertNotPerformedStatus},
+		"the cleanup's removal exits 75: still not performed":       {key: "qemu-img convert", err: ended(1), assert: assertNotPerformedStatus},
 		"the rename fails on its own: failed, nothing landed":       {key: "mv", err: ended(1), assert: assertNotPerformedStatus},
 		"the s3 stdin writer fails on its own: not performed":       {key: "stream", err: ended(1), s3: true, assert: assertNotPerformedStatus},
 		"the cleanup's session drops: still not performed":          {key: "qemu-img convert", err: ended(1), assert: assertNotPerformedStatus},
@@ -678,8 +920,11 @@ func TestRoutedImport_Outcomes(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			f := newImportFixture(t)
 			f.rec.failOn(tc.key, tc.n, tc.err)
-			if strings.HasPrefix(name, "the cleanup's session drops") {
+			switch {
+			case strings.HasPrefix(name, "the cleanup's session drops"):
 				f.rec.failOn("rm", 0, dropped) // the private directory's removal
+			case strings.HasPrefix(name, "the cleanup's removal exits 75"):
+				f.rec.failOn("rm", 0, ended(flockBusyExit))
 			}
 			req := nfsRequest("host-b")
 			if tc.s3 {
@@ -724,7 +969,7 @@ func TestRoutedImport_ReadPhaseFailuresAreDefinite(t *testing.T) {
 	assert.True(t, hasHostUnavailableInfo(st), "the host never answered")
 
 	answered := &importProgress{}
-	answered.record(ctx, false, nil, nil)
+	answered.record(ctx, false, nil)
 	assertNotPerformedStatus(t, classifyRoutedImportFailure("host-b", ctx, ctx, answered, virshFailure(-1, "reset")))
 	assertNotPerformedStatus(t, classifyRoutedImportFailure("host-b", ctx, ctx, answered, fmt.Errorf("parse: %w", ended1())))
 
@@ -734,25 +979,43 @@ func TestRoutedImport_ReadPhaseFailuresAreDefinite(t *testing.T) {
 	assert.True(t, hasHostUnavailableInfo(st))
 }
 
-// TestImportProgress_RemovalsAreNotLost: a cleanup removal whose session drops
-// does not make the outcome unknown (it only cleans the private directory);
-// any other write-phase command that did not end on its own does.
-func TestImportProgress_RemovalsAreNotLost(t *testing.T) {
+// TestImportProgress_CleanupIsNeverLost: a command of the cleanup connection
+// (tagged routedImportConn.cleanup, never by the command's name) whose session
+// drops does not make the outcome unknown; any write-phase command that did
+// not end on its own does — an "rm" too.
+func TestImportProgress_CleanupIsNeverLost(t *testing.T) {
 	ctx := context.Background()
+	rec := newImportRecHost()
+	rec.libvirtConn = &fakeSeamConn{id: "host-b"}
+	rec.failOn("rm", 0, virshFailure(-1, "reset"))
 	p := &importProgress{}
 	p.beginWrites()
-	p.record(ctx, true, []string{"rm", "-rf", "--", "/pool/.virtrigaud-write-x"}, virshFailure(-1, "reset"))
+	cleanup := &routedImportConn{libvirtConn: rec, progress: p, cleanup: true}
+	_, err := cleanup.RunHost(ctx, "rm", "-rf", "--", "/pool/.virtrigaud-write-x")
+	require.Error(t, err)
 	_, _, lost := p.snapshot()
-	assert.False(t, lost)
-	p.record(ctx, true, []string{"qemu-img", "convert"}, virshFailure(1, "x"))
+	assert.False(t, lost, "the cleanup connection's commands cannot land a disk")
+
+	lock := hostLock{dir: "/s/" + hostLockDirName, name: "import-x.lock"}
+	writer := &routedImportConn{libvirtConn: rec, progress: p, lock: &lock}
+	rec.fail["rm"] = virshFailure(-1, "reset")
+	rec.failN["rm"] = 1
+	_, err = writer.RunHost(ctx, "rm", "-f", "--", "/pool/x")
+	require.Error(t, err)
 	_, _, lost = p.snapshot()
+	assert.True(t, lost, "a guarded write-phase command is never exempt by its name")
+
+	q := &importProgress{}
+	q.beginWrites()
+	q.record(ctx, true, virshFailure(1, "x"))
+	_, _, lost = q.snapshot()
 	assert.False(t, lost, "ended on its own")
-	p.record(ctx, true, []string{"qemu-img", "convert"}, virshFailure(timeoutExpiredExit, ""))
-	_, _, lost = p.snapshot()
+	q.record(ctx, true, virshFailure(timeoutExpiredExit, ""))
+	_, _, lost = q.snapshot()
 	assert.True(t, lost, "stopped by timeout(1): B4 counts it as unknown")
-	p2 := &importProgress{}
-	p2.record(ctx, false, []string{"qemu-img", "info"}, virshFailure(-1, "reset"))
-	_, _, lost = p2.snapshot()
+	r := &importProgress{}
+	r.record(ctx, false, virshFailure(-1, "reset"))
+	_, _, lost = r.snapshot()
 	assert.False(t, lost, "reads are never lost")
 }
 
@@ -770,13 +1033,14 @@ func TestStreamInError(t *testing.T) {
 }
 
 // TestRoutedImport_LandingLock: the routed import holds the landing lock of
-// (host, landing name): a second import of the same name on the same host
-// waits (and gives up within its budget, retryably, having run nothing); the
-// same name on another host is a different lock; a DeleteLandedDisk of the
-// name is answered "import in flight", never NOT_FOUND.
+// the landing name, provider-wide (#415): a second import of the same name —
+// on the same host or ANOTHER (a shared pool makes it the same file) — waits
+// and gives up within its budget, retryably, having run nothing; a
+// DeleteLandedDisk of the name through any host is answered "import in
+// flight", never NOT_FOUND.
 func TestRoutedImport_LandingLock(t *testing.T) {
 	f := newImportFixture(t)
-	unlock, err := landingLocks.lockForImport(context.Background(), routedLandingKey("host-b", importVolume))
+	unlock, err := landingLocks.lockForImport(context.Background(), routedLandingKey(importVolume))
 	require.NoError(t, err)
 	defer unlock()
 
@@ -789,14 +1053,20 @@ func TestRoutedImport_LandingLock(t *testing.T) {
 	assert.Equal(t, wireRoutedImportLandingBusy, st.Message())
 	assert.Empty(t, f.rec.snapshot(), "nothing ran while another import of the name holds it")
 
-	_, err = f.server().DeleteLandedDisk(context.Background(), &providerv1.DeleteLandedDiskRequest{
-		TargetHostId: "host-b", TargetVm: importTargetWire})
-	assert.Equal(t, codes.Unavailable, status.Code(err))
-	assert.Equal(t, landedDiskImportInFlightMessage, status.Convert(err).Message())
+	for _, host := range []string{"host-a", "host-b"} {
+		_, err = f.server().DeleteLandedDisk(context.Background(), &providerv1.DeleteLandedDiskRequest{
+			TargetHostId: host, TargetVm: importTargetWire})
+		assert.Equal(t, codes.Unavailable, status.Code(err), host)
+		assert.Equal(t, landedDiskImportInFlightMessage, status.Convert(err).Message(), host)
 
-	assert.NotEqual(t, routedLandingKey("host-a", importVolume), routedLandingKey("host-b", importVolume))
-	_, err = f.server().ImportDisk(callCtx(t), nfsRequest("host-a"))
-	require.NoError(t, err, "the same name on another host is not held")
+		ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+		_, err = f.server().ImportDisk(ctx, nfsRequest(host))
+		cancel()
+		assert.Equal(t, wireRoutedImportLandingBusy, status.Convert(err).Message(),
+			"the same landing name through %s is the same lock (a shared pool makes it the same file)", host)
+	}
+	assert.Equal(t, routedLandingKey(importVolume), importVolume, "the landing name alone, never the host")
+	assert.Empty(t, f.rec.snapshot(), "nothing ran on any host")
 }
 
 // TestRoutedImport_ResendReplacesNeverAdds: a re-sent import (the manager

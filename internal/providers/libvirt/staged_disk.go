@@ -59,11 +59,13 @@ func (s *Server) DeleteStagedDisk(ctx context.Context, req *providerv1.DeleteSta
 		outcome, err = s.emptyNFSStagedDisk(ctx, disk)
 	}
 	if err != nil {
-		// The status message names no location; the cause (stderr, host,
-		// path) goes to the DEBUG line only.
+		// The status message names no location; the cause (stderr, host)
+		// goes to the DEBUG line only, with the staged object's location
+		// (nfs URL, s3 key) replaced (#415).
 		log.Printf("WARN Could not delete the staged disk of migration %s (backend %s): %s", migrationRef, disk.Backend,
 			status.Convert(err).Message())
-		log.Printf("DEBUG Staged disk delete failure cause for migration %s: %v", migrationRef, err)
+		log.Printf("DEBUG Staged disk delete failure cause for migration %s: %v", migrationRef,
+			redactLocations(err, disk.NFSURL, disk.Key))
 		return nil, err
 	}
 	log.Printf("INFO Removed the staged disk of migration %s (backend %s): %s", migrationRef, disk.Backend, outcome)

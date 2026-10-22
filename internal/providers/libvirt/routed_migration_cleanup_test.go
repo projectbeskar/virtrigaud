@@ -90,8 +90,10 @@ func TestRoutedImport_SharedPool_LandingFileUsedOnAnotherHostIsRefused(t *testin
 			s.defineOn("host-a", "legacy-moved", uuidForeign, guardDomainXML("legacy-moved", uuidForeign, landed, ownerForeign, running))
 
 			_, err := NewServer(s.p).ImportDisk(callCtx(t), sharedImportRequest())
+			// #415: VM_DISK_IN_USE, never the plain AlreadyExists of a name
+			// conflict (another host would see the same file).
+			requireDiskInUseStatus(t, err, true)
 			st := status.Convert(err)
-			assert.Equal(t, codes.AlreadyExists, st.Code(), "%v", err)
 			assert.Contains(t, st.Message(), "in use by another domain on a host of this Provider")
 			requireWireSafe(t, st.Message(), s.images, "legacy-moved", uuidForeign, "team-z")
 			requireUnchanged(t, landed, "live-disk")
@@ -273,7 +275,7 @@ func TestRoutedDeleteLandedDisk_ImportCommandStillRunning(t *testing.T) {
 func TestRoutedImport_ClusteredCreateTakesTheLandingLock(t *testing.T) {
 	s := newSharedPool(t)
 	landed := s.disk("team-a.web-migrated.qcow2", "imported")
-	unlock, err := landingLocks.lockForImport(context.Background(), routedLandingKey("host-b", "team-a.web-migrated"))
+	unlock, err := landingLocks.lockForImport(context.Background(), routedLandingKey("team-a.web-migrated"))
 	require.NoError(t, err)
 	defer unlock()
 
