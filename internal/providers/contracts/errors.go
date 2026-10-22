@@ -130,6 +130,24 @@ const VMDiskInUseReason = "VM_DISK_IN_USE"
 // circuit breaker.
 const VMDiskCheckFailedReason = "VM_DISK_CHECK_FAILED"
 
+// HostStorageMisconfiguredReason is the google.rpc.ErrorInfo reason (in
+// ErrorInfoDomain) a clustered provider attaches to the
+// codes.FailedPrecondition status of an operation it did not perform because
+// the storage of the ONE host it was routed to is not set up as VirtRigaud
+// requires (e.g. a libvirt host whose "default" storage pool is not at the
+// required directory; ADR-0007 Addendum B, #415). Nothing was changed. It is
+// scoped to that host: the manager may place the work on another host, but
+// retrying on the same host fails the same way until an administrator fixes
+// it. It is sent together with VMOperationFailedReason, which keeps it out of
+// the per-Provider circuit breaker.
+const HostStorageMisconfiguredReason = "HOST_STORAGE_MISCONFIGURED"
+
+// IsHostStorageMisconfigured reports whether err is a provider answer carrying
+// HostStorageMisconfiguredReason.
+func IsHostStorageMisconfigured(err error) bool {
+	return HasErrorInfoReason(err, HostStorageMisconfiguredReason)
+}
+
 // VMPreviousIncarnationReason is the google.rpc.ErrorInfo reason (in
 // ErrorInfoDomain) a clustered provider attaches to the codes.AlreadyExists
 // status of a Create or Clone it refused because a domain VirtRigaud created

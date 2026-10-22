@@ -50,15 +50,11 @@ import (
 // (routed_tasks.go); slice 4 runs ListVMs across every host (routed_list.go)
 // and routes TransferOwner (routed_transfer_owner.go). Every routed call except Create checks
 // the domain's owner stamp before it reads or changes anything
-// (withOwnedDomain; TransferOwner checks it before it stamps). ImportDisk is refused
-// with an honest Unimplemented until its phase lands (see notRoutedYet), and
-// the clustered GetCapabilities hides it.
-
-// sliceRoutedImport is the ADR-0007 delivery step that routes the one RPC a
-// clustered provider still refuses: import is not per-VM, and routing it into
-// a clustered provider needs a target-host design (phase P3). It only appears
-// in the refusal message.
-const sliceRoutedImport = "phase P3"
+// (withOwnedDomain; TransferOwner checks it before it stamps). ImportDisk,
+// DeleteLandedDisk and the nfs DeleteStagedDisk are routed to the target
+// VirtualMachine's pending host since ADR-0007 Addendum B (routed_import.go,
+// routed_migration_cleanup.go); the import runs the name and cross-host disk
+// checks instead of an owner check, as a Create does.
 
 // emptyTargetHostMessage is the InvalidArgument message for a routed call on a
 // clustered provider that names no host. It never defaults to one (D9).
@@ -255,16 +251,6 @@ func virshOf(c libvirtConn) (*VirshProvider, error) {
 		return nil, contracts.NewRetryableError("virsh provider not initialized", nil)
 	}
 	return vc.virsh, nil
-}
-
-// notRoutedYet is the honest refusal of a per-VM (or host-scoped) RPC that a
-// clustered provider does not route to a host yet: codes.Unimplemented, which
-// the manager maps to a non-retryable NotSupported and backs off on. It never
-// reaches any host — least of all the unroutable placeholder.
-func notRoutedYet(rpc, routedIn string) error {
-	return status.Errorf(codes.Unimplemented,
-		"%s is not yet routed to a host on a clustered libvirt provider (ADR-0007 %s); "+
-			"topology: cluster is experimental", rpc, routedIn)
 }
 
 // Routed wire errors are SANITIZED (security review of slice 3): they land in

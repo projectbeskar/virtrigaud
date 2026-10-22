@@ -60,6 +60,7 @@ func TestDeleteLandedDisk_UnimplementedAndNotAdvertised(t *testing.T) {
 	caps, err := p.GetCapabilities(context.Background(), &providerv1.GetCapabilitiesRequest{})
 	require.NoError(t, err)
 	assert.False(t, caps.GetSupportsLandedDiskDelete())
+	assert.False(t, caps.GetSupportsRoutedImport(), "the mock routes no import (ADR-0007 Addendum B)")
 
 	_, err = p.DeleteLandedDisk(context.Background(), &providerv1.DeleteLandedDiskRequest{
 		TargetVm: &providerv1.ObjectIdentity{Namespace: "team-a", Name: "web"},

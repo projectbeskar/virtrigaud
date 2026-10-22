@@ -130,6 +130,62 @@ func (s *Server) importDiskFromS3Steps(ctx context.Context, req *providerv1.Impo
 	if err := ensureDiskTargetFree(ctx, hostConnRunner{conn: conn}, importedDiskSubject(volumeName), targetPath); err != nil {
 		return nil, err
 	}
+	return landS3Import(ctx, importLanding{conn: conn, poolName: poolName, poolPath: poolPath,
+		volumeName: volumeName, targetPath: targetPath}, s3client, req)
+}
+
+// importLanding is where, and over which connection, an s3 or nfs import
+// lands its disk: the write half shared by the single-host import and the
+// routed import of a clustered provider (ADR-0007 Addendum B, B2). Every
+// check of the landing name has already run when it is used.
+type importLanding struct {
+	// conn runs every host command of the landing. On a clustered provider it
+	// is the landing host's guarded connection (routedImportConn): each
+	// command runs under flock(1) and timeout(1) within the routed budget.
+	conn libvirtConn
+	// poolName and poolPath are the storage pool the disk lands in and its
+	// directory on the host.
+	poolName, poolPath string
+	// volumeName is the landing volume ("<namespace>.<name>-migrated"), and
+	// targetPath its file, <poolPath>/<volumeName>.qcow2.
+	volumeName, targetPath string
+	// routed bounds the removal of the private directory by
+	// routedCleanupTimeout, so a routed call's answer still reaches the
+	// manager before its deadline.
+	routed bool
+	// cleanupRunner, when set (routed), runs the removals of the landing's
+	// own private files: under timeout(1) only, never under the import's
+	// flock, which a still-running command of an earlier call may hold
+	// (#415). nil: the removals run on conn, as they always have.
+	cleanupRunner hostCommandRunner
+}
+
+// writeDir makes the landing's private directory in its pool, with the
+// landing's cleanup runner.
+func (l importLanding) writeDir(ctx context.Context) (*diskWriteDir, error) {
+	wd, err := newDiskWriteDir(ctx, hostConnRunner{conn: l.conn}, l.poolPath)
+	if err != nil {
+		return nil, err
+	}
+	wd.remover = l.cleanupRunner
+	return wd, nil
+}
+
+// cleanup removes wd, the landing's private directory, whatever happens.
+func (l importLanding) cleanup(ctx context.Context, wd *diskWriteDir) {
+	if l.routed {
+		wd.cleanupWithin(ctx, routedCleanupTimeout)
+		return
+	}
+	wd.cleanup(ctx)
+}
+
+// landS3Import is the write half of the s3 import: it stages the object in a
+// private directory in the pool, checks and converts it there, and publishes
+// the converted disk onto l.targetPath with one rename. Only that rename
+// (tagged stagePublish) can change anything outside the private directory.
+func landS3Import(ctx context.Context, l importLanding, s3client storage.Storage, req *providerv1.ImportDiskRequest) (*providerv1.ImportDiskResponse, error) {
+	conn, poolName, volumeName, targetPath := l.conn, l.poolName, l.volumeName, l.targetPath
 
 	// The staged S3 object is in the SOURCE provider's native flattened format,
 	// threaded by the controller as req.Format (vmdk from a vSphere source, qcow2
@@ -145,11 +201,11 @@ func (s *Server) importDiskFromS3Steps(ctx context.Context, req *providerv1.Impo
 	// at, or swap, the staged object or the converted disk. The converted disk
 	// is renamed onto targetPath once checked; the directory — with the
 	// staged object — is removed whatever the outcome, even on cancellation.
-	wd, err := newDiskWriteDir(ctx, hostConnRunner{conn: conn}, poolPath)
+	wd, err := l.writeDir(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("s3 import: %w", err)
 	}
-	defer wd.cleanup(ctx)
+	defer l.cleanup(ctx, wd)
 	stagePath := hostStagePath(wd.dir, volumeName, stagedFormat)
 	newDisk := wd.file(volumeName + qcow2Ext)
 

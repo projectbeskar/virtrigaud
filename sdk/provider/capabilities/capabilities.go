@@ -106,6 +106,16 @@ const (
 	// GetCapabilitiesResponse.supports_landed_disk_delete (rc2 R7). Advertise
 	// it only with a DeleteLandedDisk that does.
 	CapabilityLandedDiskDelete Capability = "landed_disk_delete"
+	// CapabilityRoutedImport marks a CLUSTERED provider whose ImportDisk is
+	// routed to ImportDiskRequest.target_host_id (target_vm carrying the
+	// target VirtualMachine's uid), whose DeleteLandedDisk is routed to
+	// DeleteLandedDiskRequest.target_host_id with an in-use scan of every
+	// host, and whose nfs DeleteStagedDisk is routed to
+	// DeleteStagedDiskRequest.target_host_id; reported as
+	// GetCapabilitiesResponse.supports_routed_import (ADR-0007 Addendum B,
+	// B5). Advertise it only when all three are implemented; a single-host or
+	// thin-client provider never advertises it.
+	CapabilityRoutedImport Capability = "routed_import"
 
 	// Provider-specific capabilities
 	CapabilityVSphere     Capability = "vsphere"
@@ -288,6 +298,9 @@ func (m *Manager) GetCapabilities(ctx context.Context, req *providerv1.GetCapabi
 		SupportsOwnerRebind: m.HasCapability(CapabilityOwnerRebind),
 		// rc2 R7: DeleteLandedDisk removes a migration's unused landed disk.
 		SupportsLandedDiskDelete: m.HasCapability(CapabilityLandedDiskDelete),
+		// ADR-0007 Addendum B: routed ImportDisk / DeleteLandedDisk /
+		// DeleteStagedDisk on a clustered provider.
+		SupportsRoutedImport: m.HasCapability(CapabilityRoutedImport),
 		// ADR-0011 D7: the backends DeleteStagedDisk removes staging objects from.
 		SupportedStagedDiskDeleteBackends: m.supportedStagedDiskDeleteBackends,
 		// rc2 R6: the backends on which a re-sent ExportDisk / ImportDisk is safe.
@@ -436,6 +449,15 @@ func (b *Builder) OwnerRebind() *Builder {
 // a migration's landed disk that no VM uses, and nothing else.
 func (b *Builder) LandedDiskDelete() *Builder {
 	b.manager.AddCapability(CapabilityLandedDiskDelete)
+	return b
+}
+
+// RoutedImport adds CapabilityRoutedImport: a clustered provider routes
+// ImportDisk, DeleteLandedDisk and the nfs DeleteStagedDisk to their
+// target_host_id (ADR-0007 Addendum B). Advertise it only from a clustered
+// provider that implements all three.
+func (b *Builder) RoutedImport() *Builder {
+	b.manager.AddCapability(CapabilityRoutedImport)
 	return b
 }
 

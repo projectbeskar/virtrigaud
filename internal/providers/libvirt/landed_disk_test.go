@@ -334,7 +334,8 @@ func TestImportDiskAndCreateHoldTheLandingName(t *testing.T) {
 // TestDeleteLandedDisk_CapabilityAndClustered: a single-host provider reports
 // the landed-disk delete; a clustered one neither reports nor serves it.
 func TestDeleteLandedDisk_CapabilityAndClustered(t *testing.T) {
-	assert.False(t, clusteredCapabilities().GetSupportsLandedDiskDelete())
+	assert.True(t, clusteredCapabilities().GetSupportsLandedDiskDelete(),
+		"routed to the import's host with a cross-host in-use scan (ADR-0007 Addendum B)")
 	caps, err := landedServer(&landedHost{}).GetCapabilities(context.Background(), &providerv1.GetCapabilitiesRequest{})
 	require.NoError(t, err)
 	assert.True(t, caps.GetSupportsLandedDiskDelete())

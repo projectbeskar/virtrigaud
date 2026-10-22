@@ -63,7 +63,8 @@ func NewServer(provider providerBackend) *Server {
 // (ADR-0007 D3). Per-VM RPCs then need a routed host (ADR-0007 Addendum A):
 // Describe, Delete, Power, Reconfigure, the snapshot family, Clone,
 // GetDiskInfo, ExportDisk, TaskStatus and TransferOwner are routed, and ListVMs runs
-// across every host (slice 4); ImportDisk is refused until its phase lands.
+// across every host (slice 4); ImportDisk, DeleteLandedDisk and the nfs
+// DeleteStagedDisk are routed to the import's host (ADR-0007 Addendum B).
 func (s *Server) clusteredProvider() bool {
 	return s.provider != nil && s.provider.clustered()
 }
@@ -1282,9 +1283,17 @@ func (s *Server) GetCapabilities(ctx context.Context, req *providerv1.GetCapabil
 // Slice 4 lists VMs across every host and implements TransferOwner, so the manager
 // may adopt from a clustered provider (supports_routed_adoption).
 //
-// Still hidden: linked clones (refused on a clustered provider for v0.4.0),
-// disk import (no target host until P3) and image import (host-scoped, no
-// target_host_id yet), with their format and backend lists empty.
+// ADR-0007 Addendum B (R11) routes ImportDisk to the target VirtualMachine's
+// pending host (target_host_id, s3 and nfs only), DeleteLandedDisk to the
+// import's host with an in-use scan of every host, and the nfs
+// DeleteStagedDisk to the import's host; supports_routed_import says all three
+// are served, so the manager may accept the Provider as a migration target.
+// Every host command of the routed import runs under flock(1) and timeout(1)
+// within the routed budget and writes only into a private directory published
+// by one rename, so a re-sent import is safe on s3 and nfs.
+//
+// Still hidden: linked clones (refused on a clustered provider for v0.4.0) and
+// image import (host-scoped, no target_host_id yet).
 func clusteredCapabilities() *providerv1.GetCapabilitiesResponse {
 	return &providerv1.GetCapabilitiesResponse{
 		SupportsReconfigureOnline:   true, // routed + owner-checked since Addendum A slice 2; same setvcpus/setmem --live core as single-host (#203)
@@ -1316,8 +1325,26 @@ func clusteredCapabilities() *providerv1.GetCapabilitiesResponse {
 		// rc2 R6: the routed export runs under the per-domain export lock and
 		// the routed time budget (routed_budget.go), so a re-send never
 		// overlaps an earlier copy; it replaces the s3 object or nfs file.
-		// Disk import is not served by a clustered provider.
 		ResendSafeExportBackends: migration.S3AndNFSExportBackends(),
+		// ADR-0007 Addendum B: the routed import (routed_import.go) lands
+		// s3 / nfs on the target VM's pending host with the single-host
+		// staged-image checks (the same formats) and the import size limit.
+		SupportsDiskImport:      true,
+		SupportedImportFormats:  []string{"qcow2", "raw", "vmdk"},
+		SupportedImportBackends: migration.S3AndNFSImportBackends(),
+		SupportsImportSizeLimit: true,
+		// B3: every host command of the routed import runs under flock(1)
+		// and timeout(1) ending before the routed budget, writes only into a
+		// private directory, and publishes with one rename onto the landing
+		// name derived from target_vm — a re-send replaces, never adds.
+		ResendSafeImportBackends: migration.S3AndNFSImportBackends(),
+		// B4: DeleteLandedDisk on the import's host with an in-use scan of
+		// every host; DeleteStagedDisk from the pod (s3) and on the import's
+		// host (nfs).
+		SupportsLandedDiskDelete:          true,
+		SupportedStagedDiskDeleteBackends: migration.StagedDiskDeleteBackendsS3AndNFS(),
+		// B5: all of the above are served.
+		SupportsRoutedImport: true,
 	}
 }
 
@@ -1445,9 +1472,13 @@ func (s *Server) GetDiskInfo(ctx context.Context, req *providerv1.GetDiskInfoReq
 }
 
 // ImportDisk imports a disk from an external source (for VM migration)
+//
+// On a clustered provider the s3 / nfs import lands on target_host_id, the
+// target VirtualMachine's pending host (importDiskRouted, ADR-0007 Addendum B);
+// pvc is refused.
 func (s *Server) ImportDisk(ctx context.Context, req *providerv1.ImportDiskRequest) (*providerv1.ImportDiskResponse, error) {
 	if s.clusteredProvider() {
-		return nil, notRoutedYet("ImportDisk", sliceRoutedImport)
+		return s.provider.importDiskRouted(ctx, req)
 	}
 	// rc2 R7: the landing name is held for the whole import (check, land,
 	// rename), serialised with Create's in-place attach and DeleteLandedDisk

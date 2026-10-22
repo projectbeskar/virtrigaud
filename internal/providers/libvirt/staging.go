@@ -328,14 +328,29 @@ func checkWriteTarget(ctx context.Context, h hostCommandRunner, subject, target 
 	switch strings.TrimSpace(res.Stdout) {
 	case targetKindSymlink:
 		log.Printf("WARN Refusing to write %s: %s is a symbolic link", subject, target)
-		return false, contracts.NewConflictError(fmt.Sprintf(
-			"%s is a symbolic link on the host; refusing to write through it", subject), nil)
+		return false, &symlinkTargetError{pe: contracts.NewConflictError(fmt.Sprintf(
+			"%s is a symbolic link on the host; refusing to write through it", subject), nil)}
 	case pathExistsMarker:
 		return true, nil
 	default:
 		return false, nil
 	}
 }
+
+// symlinkTargetError is checkWriteTarget's refusal of a symbolic link at a
+// file VirtRigaud is about to write. It reads, and unwraps, as the Conflict
+// it always was, so Create, Clone and the single-host import answer it
+// unchanged; the routed import (classifyRoutedImportFailure) answers it as a
+// host-guard refusal instead of a name conflict (#415).
+type symlinkTargetError struct {
+	pe *contracts.ProviderError
+}
+
+// Error returns the Conflict's message.
+func (e *symlinkTargetError) Error() string { return e.pe.Error() }
+
+// Unwrap returns the Conflict.
+func (e *symlinkTargetError) Unwrap() error { return e.pe }
 
 // targetKindScript is the fixed `sh -c` script behind ensureDiskTargetFree and
 // ensureNVRAMTargetFree. The path is ALWAYS the positional parameter "$1",

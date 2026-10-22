@@ -264,10 +264,12 @@ type ImportDiskRequest struct {
 	// Slice 0: always empty).
 	StorageOptionsJSON string
 	// TargetVM identifies the VirtualMachine the disk is imported for (a
-	// VMMigration's target): namespace and name; no UID, as it does not exist
-	// yet. A provider that attaches an imported disk in place only when it
-	// carries the VM's own name derives the landing name from it with its
-	// Create naming rule (libvirt: "<namespace>.<name>" + ImportedDiskNameSuffix)
+	// VMMigration's target): namespace and name. Its UID is empty for a
+	// single-host or thin-client target (the VM does not exist yet) and
+	// required by a clustered one, whose migration creates the target VM
+	// first (ADR-0007 Addendum B, B1/B2). A provider that attaches an
+	// imported disk in place only when it carries the VM's own name derives
+	// the landing name from it with its Create naming rule (libvirt: "<namespace>.<name>" + ImportedDiskNameSuffix)
 	// and returns the landing path in ImportDiskResponse.Path. Providers that do
 	// not need it ignore it; left empty, the legacy TargetName naming applies.
 	TargetVM ObjectIdentity
@@ -277,6 +279,12 @@ type ImportDiskRequest struct {
 	// (DiskSizeExceedsLimitReason), or one whose size it cannot read
 	// (DiskSizeUnverifiableReason); nothing is landed.
 	MaxVirtualSizeBytes int64
+	// TargetHostID is the host of a CLUSTERED target provider the disk lands
+	// on: the target VirtualMachine's pending host (wire: target_host_id,
+	// ADR-0007 Addendum B, B2). Empty for single-host and thin-client
+	// providers, which never receive it; a clustered provider refuses an
+	// empty value.
+	TargetHostID string
 }
 
 // ImportDiskResponse contains the result of a disk import operation

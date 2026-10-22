@@ -129,6 +129,29 @@ const vmDiskWriteDirPrefix = ".virtrigaud-write-"
 type diskWriteDir struct {
 	h   hostCommandRunner
 	dir string
+	// remover, when set, runs the removals of the directory and of files in
+	// it (a routed import: under timeout(1) only, never under the import's
+	// flock, routedCleanupTimeout-bounded); nil runs them on h.
+	remover hostCommandRunner
+}
+
+// removalRunner is the runner the directory's removals use.
+func (d *diskWriteDir) removalRunner() hostCommandRunner {
+	if d.remover != nil {
+		return d.remover
+	}
+	return d.h
+}
+
+// removeFile removes path (a file in the directory) best-effort: on h with
+// the staging cleanup bound, or — with a remover — on it within
+// routedCleanupTimeout.
+func (d *diskWriteDir) removeFile(ctx context.Context, path string) {
+	if d.remover != nil {
+		removeHostPathWithin(ctx, d.remover, path, false, routedCleanupTimeout)
+		return
+	}
+	removeHostPath(ctx, d.h, path, false)
 }
 
 // newDiskWriteDir makes a diskWriteDir in parent on the host behind h.
@@ -158,14 +181,14 @@ func (d *diskWriteDir) publish(ctx context.Context, name, final string) error {
 // cleanup removes the directory and anything left in it (a failed write, a
 // staged input), even when ctx is cancelled (removeHostPath).
 func (d *diskWriteDir) cleanup(ctx context.Context) {
-	removeHostPath(ctx, d.h, d.dir, true)
+	removeHostPath(ctx, d.removalRunner(), d.dir, true)
 }
 
 // cleanupWithin is cleanup bounded by within instead of the staging default:
 // a routed call's cleanup must end before the manager's deadline
 // (routedCleanupTimeout).
 func (d *diskWriteDir) cleanupWithin(ctx context.Context, within time.Duration) {
-	removeHostPathWithin(ctx, d.h, d.dir, true, within)
+	removeHostPathWithin(ctx, d.removalRunner(), d.dir, true, within)
 }
 
 // diskDirModeScript is the fixed `sh -c` script behind warnIfDiskDirUnsafe: it

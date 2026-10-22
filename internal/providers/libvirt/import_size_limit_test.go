@@ -164,5 +164,6 @@ func TestServer_AdvertisesImportSizeLimit(t *testing.T) {
 	caps, err := (&Server{}).GetCapabilities(context.Background(), &providerv1.GetCapabilitiesRequest{})
 	require.NoError(t, err)
 	assert.True(t, caps.GetSupportsImportSizeLimit())
-	assert.False(t, clusteredCapabilities().GetSupportsImportSizeLimit())
+	assert.True(t, clusteredCapabilities().GetSupportsImportSizeLimit(),
+		"the routed import enforces the limit with the single-host checks (ADR-0007 Addendum B)")
 }

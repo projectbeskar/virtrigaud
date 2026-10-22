@@ -167,6 +167,7 @@ func TestCapabilities_LandedDiskDelete(t *testing.T) {
 	caps, err := p.GetCapabilities(context.Background(), &providerv1.GetCapabilitiesRequest{})
 	require.NoError(t, err)
 	assert.True(t, caps.GetSupportsLandedDiskDelete())
+	assert.False(t, caps.GetSupportsRoutedImport(), "vSphere is never a clustered provider (ADR-0007 Addendum B)")
 }
 
 // --- transient import VM stubs (Part B) ---------------------------------------

@@ -143,6 +143,12 @@ type Provider struct {
 	// can drive the routed export over local per-host fakes.
 	hostDiskTransportFn func(c libvirtConn) error
 
+	// routedDiskConnFn, when set, wraps the leased connection the routed
+	// ImportDisk, DeleteLandedDisk and nfs DeleteStagedDisk of a clustered
+	// provider run on (ADR-0007 Addendum B). nil in production; tests use it
+	// to script the byte streams (StreamIn) of a local per-host fake.
+	routedDiskConnFn func(c libvirtConn) libvirtConn
+
 	// shadowWG tracks in-flight detached shadow goroutines so tests (and a future
 	// graceful shutdown) can drain them; each is independently time-bounded.
 	shadowWG sync.WaitGroup

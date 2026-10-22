@@ -98,6 +98,9 @@ func GetProviderCapabilities() *capabilities.Manager {
 		// rc2 R7: DeleteLandedDisk removes the node-side import stage a
 		// migration left for its target VM (landed_disk.go).
 		LandedDiskDelete().
+		// No RoutedImport (ADR-0007 Addendum B): Proxmox is not a clustered
+		// VirtRigaud provider, so ImportDisk, DeleteLandedDisk and
+		// DeleteStagedDisk ignore target_host_id.
 		DiskTypes("raw", "qcow2").
 		NetworkTypes("bridge", "vlan").
 		Build()
