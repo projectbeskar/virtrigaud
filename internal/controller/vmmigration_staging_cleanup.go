@@ -116,6 +116,8 @@ const (
 	stagedDiskLeftNoCredential = "The migration's staged disk was not deleted: the S3 credentials Secret of the migration no longer exists."
 	stagedDiskLeftConfig       = "The migration's staged disk was not deleted: the migration's staging configuration is no longer " +
 		"valid or no longer allowed by the manager's storage host policy."
+	stagedDiskLeftNoHost = "The migration's staged disk was not deleted: the target Provider is clustered, and no host to " +
+		"empty it from was recorded (the import was never routed to a host, and the target VirtualMachine has none)."
 	stagedDiskLeftConfigChanged = "The migration's staged disk was not deleted: spec.storage or spec.target.providerRef changed " +
 		"since the export, so the object is not where the current spec points."
 	stagedDiskLeftUnverified = "The migration's staged disk was not found where the current spec points; the migration was " +
@@ -682,6 +684,17 @@ func (r *VMMigrationReconciler) deleteStagedDisk(ctx context.Context, m *infrav1
 	if err != nil {
 		return "", err
 	}
+	// A clustered Provider empties an nfs staged object with a host's
+	// qemu-img: the host the import was routed to (ADR-0007 Addendum B, B4).
+	targetHost := ""
+	if isClusterTopology(provider) && backend == storagemigration.BackendNFS {
+		if targetHost, err = r.stagedDiskHost(ctx, m); err != nil {
+			return "", err
+		}
+		if targetHost == "" {
+			return "", leftBehind(stagedDiskLeftNoHost, nil)
+		}
+	}
 
 	outcome, err := deleter.DeleteStagedDisk(ctx, contracts.StagedDiskDeleteRequest{
 		Migration:          contracts.ObjectIdentity{UID: string(m.UID), Namespace: m.Namespace, Name: m.Name},
@@ -691,6 +704,7 @@ func (r *VMMigrationReconciler) deleteStagedDisk(ctx context.Context, m *infrav1
 		Credentials:        creds,
 		Layout:             migrationStagingLayout(m),
 		TargetVM:           targetVM,
+		TargetHostID:       targetHost,
 	})
 	if err == nil && outcome == contracts.StagedDiskNotFound && recorded == "" {
 		// Exported by an older manager that recorded no digest: "not found"
