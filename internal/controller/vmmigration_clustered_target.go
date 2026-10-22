@@ -146,6 +146,11 @@ const (
 	// migration created.
 	importedDiskSourceMigration = "migration"
 
+	// routedImportNotPerformedBudget bounds a series of consecutive "not
+	// performed" answers to a routed import (#416 M3): about five answers on
+	// the 15 s doubling backoff.
+	routedImportNotPerformedBudget = 5 * time.Minute
+
 	// unboundTargetDeleteRequeue re-checks a target VM whose deletion was
 	// requested (its finalizer runs an owner-checked Delete on its pending
 	// host).
@@ -202,6 +207,9 @@ const (
 	importNotPerformedMessage = "the landing host did not perform the import (another import of the disk was running, " +
 		"there was no room, or a host command failed; the cause is in the manager log); nothing was landed and it is " +
 		"retried on the same host with a backoff"
+	importNotPerformedFailedMessage = "the landing host did not perform the import for several consecutive attempts " +
+		"(nothing was landed; the causes are in the manager log): the attempt failed, and spec.options.retryPolicy decides " +
+		"whether the migration places its target again and retries"
 	landingHostRefusedMessage = "the landing host refused the import before writing anything (its lock directory, " +
 		"or a file at the landing name, is not as the provider requires, or a required host tool is missing; the cause " +
 		"is in the manager log): an administrator must fix the host. The import is retried with a backoff"
@@ -650,6 +658,23 @@ func (r *VMMigrationReconciler) handleRoutedImportRefusal(ctx context.Context, m
 		// Not performed (VM_OPERATION_FAILED: the landing lock busy, the same
 		// import still running, no room, a write command that failed): retried
 		// on the same host with a backoff.
+		// Each re-send downloads the whole disk again, so the series is
+		// bounded (#416 M3): once the landing host has answered "not
+		// performed" for routedImportNotPerformedBudget in a row (about five
+		// answers on the backoff), the attempt fails into the migration's
+		// retryPolicy, whose retry deletes the unbound target and places a
+		// fresh one. The series starts at the condition's lastTransitionTime,
+		// which is persisted (the hold's backoff itself is in memory).
+		prev := meta.FindStatusCondition(migration.Status.Conditions, infrav1beta1.VMMigrationConditionImporting)
+		if prev == nil || prev.Status != metav1.ConditionFalse || prev.Reason != migrationReasonImportNotPerformed {
+			meta.RemoveStatusCondition(&migration.Status.Conditions, infrav1beta1.VMMigrationConditionImporting)
+		} else if time.Since(prev.LastTransitionTime.Time) >= r.notPerformedBudget() {
+			logger.Info("Routed import not performed for too long on the landing host; failing the attempt", "host", host,
+				"error", cause.Error())
+			r.routedImportHold.reset(string(migration.UID))
+			res, err := r.transitionToFailedWithReason(ctx, migration, migrationReasonImportNotPerformed, importNotPerformedFailedMessage)
+			return res, true, err
+		}
 		logger.Info("Routed import not performed on the landing host; retrying with a backoff", "host", host, "error", cause.Error())
 		res, err := r.holdRoutedImport(ctx, migration, migrationReasonImportNotPerformed, importNotPerformedMessage)
 		return res, true, err

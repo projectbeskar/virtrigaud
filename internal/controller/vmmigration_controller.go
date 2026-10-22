@@ -107,6 +107,10 @@ type VMMigrationReconciler struct {
 	// otherwise re-send at once. In-process, like importUnverifiable.
 	routedImportHold unschedulableBackoff
 
+	// routedImportNotPerformedLimit overrides routedImportNotPerformedBudget
+	// when positive (tests only; production leaves it zero).
+	routedImportNotPerformedLimit time.Duration
+
 	// MaxDiskSize is the administrator's disk-size ceiling (the manager's
 	// --max-disk-size; nil for none), lowered per target Provider by its
 	// infra.virtrigaud.io/max-disk-size annotation: a migration that would
