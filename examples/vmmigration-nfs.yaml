@@ -63,7 +63,7 @@ spec:
     nfs:
       # NFS server exporting the staging share (IP or hostname; a hostname is
       # resolved and SSRF-checked by the controller).
-      server: 172.16.56.13
+      server: nfs.example.com
       # Absolute exported path on the server. The staged object is a single flat
       # file in this export root: vmmigrations-<ns>-<name>-<stage>.qcow2 (NFS
       # cannot auto-create directories the way S3 keys do).

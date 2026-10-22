@@ -38,8 +38,8 @@ First match wins:
    not the VM, and do not change its phase.
 4. No `status.id` and a clustered restore hold on `Placed` or `Provisioning`
    (`RestorePending`, `OwnDomainOnAnotherHost`, `UniquenessCheckFailed`,
-   `ProviderLacksListOwnerFilter`; these are written to those two conditions,
-   not to `Ready`, for a VM that was never placed): `Failed`.
+   `ProviderLacksListOwnerFilter`, `ImportedDiskPinned`; these are written to those
+   two conditions, not to `Ready`, for a VM that was never placed): `Failed`.
 5. No `status.id`: `Provisioning` if a create is requested, a clustered
    `pendingHost` is set, `status.lastTaskRef` is set or `Provisioning=True` (not
    `WaitingForDependencies`); otherwise `Pending`.
@@ -53,7 +53,10 @@ First match wins:
 
 A transient provider error (`Ready=False/ProviderError`) on a VM that exists does
 not change the phase: it keeps the last observed power state. An unschedulable
-clustered VM stays `Pending`.
+clustered VM stays `Pending`. The target VM of a migration into a clustered Provider
+that waits for its import (`Provisioning=False/WaitingForImport`) has a pending host,
+so it shows `Provisioning`; one held as `MigrationNotFound` is not placed and shows
+`Pending` ([Migration into a clustered provider](clustered-provider-inventory.md#migration-into-a-clustered-provider-addendum-b)).
 
 ## Why it is derived on every write
 

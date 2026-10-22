@@ -72,6 +72,7 @@ Key points before using these examples:
 | [vsphere-to-proxmox.yaml](./vsphere-to-proxmox.yaml) | vSphere → Proxmox VE | S3 | **Tested** (ADR-0006 Slice 3) |
 | [proxmox-to-libvirt.yaml](./proxmox-to-libvirt.yaml) | Proxmox VE → Libvirt/KVM | S3 | **Tested** (ADR-0006 Slice 3) |
 | [`../vmmigration-nfs.yaml`](../vmmigration-nfs.yaml) | Any ↔ Any | NFS | **Tested** (ADR-0006 Slice 4) |
+| [`../vmmigration-into-clustered.yaml`](../vmmigration-into-clustered.yaml) | Single-host Libvirt/KVM → clustered Libvirt (`topology: cluster`) | S3 or NFS | **Experimental**: run in a two-host lab over S3 and NFS; see [below](#migrating-into-a-clustered-libvirt-provider-experimental) |
 
 ## Quick start (S3, vSphere ↔ libvirt)
 
@@ -189,6 +190,35 @@ requirements below):**
 export only on a **trusted network**, keep **`root_squash` on**, give each tenant
 its **own export**, and prefer narrow per-client ACLs over broad subnets. The disk
 bytes themselves are not encrypted in transit.
+
+## Migrating into a clustered libvirt Provider (experimental)
+
+A `VMMigration` whose target Provider has `topology: cluster` works differently
+from the other directions: the migration creates its **target VirtualMachine
+first**, lets the clustered scheduler place it on a host whose `default` pool has
+room for the disk, and only then powers off, exports and imports. The import
+lands on that host and the VM is created there with the disk attached in place.
+See [`../vmmigration-into-clustered.yaml`](../vmmigration-into-clustered.yaml).
+
+- **Only `s3` and `nfs`.** `storage.type: pvc` is refused at `Validating`, and
+  `pvc` is what an unset `spec.storage` means, so set the type.
+- **The target VM must be in the migration's namespace**, and the target Provider
+  must report `supportsRoutedImport`; otherwise the migration fails at
+  `Validating` with `ClusteredTargetUnsupported`, before anything is touched.
+- **Every host** needs the `default` pool at `/var/lib/libvirt/images` (active,
+  with room), `qemu-img`, `flock`, `timeout` and the cloud-init seed directory
+  `/var/lib/libvirt/virtrigaud-seeds`.
+- **What it does not do:** the disk-space check is a filter, not a reservation;
+  a host that fails after placement is waited for, not replaced; two Providers on
+  one pool are not serialised. A vSphere or Proxmox source into a clustered
+  target has not been run in the lab.
+- **While it runs**, `kubectl get vmmigration <name> -o yaml` shows the
+  `TargetPlaced` condition and `status.storageInfo.importTarget.host`, the host
+  the disk was sent to.
+
+The conditions you can meet, what each means and how to clear it, the host
+prerequisites and the limits are in
+[Migration into a clustered provider](../../docs/clustered-provider-inventory.md#migration-into-a-clustered-provider-addendum-b).
 
 ## PVC staging backend (legacy): what the provider pods mount
 

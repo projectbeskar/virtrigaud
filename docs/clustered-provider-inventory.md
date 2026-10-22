@@ -336,7 +336,10 @@ non-clustered provider errors (with `Unimplemented`).
 it fails the host is `NotReady` and the richer queries are skipped. `capabilities`,
 `domcapabilities`, and the storage pools are **best-effort**: a failure there
 leaves that field empty/`0` and is logged, never flipping health. Storage is
-whole-host today because the inventory file carries no per-pool configuration yet.
+the `default` pool only: releases up to v0.4.0-rc2 summed every active pool, which
+let the disk-space filter admit a host whose `default` pool was full. libvirt
+reports a pool's `Available` as last refreshed, so the figure can be stale (see
+[Limits of migration into a clustered provider](#limits-of-migration-into-a-clustered-provider)).
 
 **Two documented judgment calls (deviations from a naive reading):**
 
@@ -2028,11 +2031,118 @@ comes after v0.4.0.
 ### Migration into a clustered provider (Addendum B)
 
 A `VMMigration` whose **target** Provider has `topology: cluster` needs the
-disk to land on the host where the target VM will run. ADR-0007 Addendum B
+disk to land on the host where the target VM will run. [ADR-0007 Addendum B](adr/0007-clustered-orchestrator-provider.md#addendum-b-2026-10-18-migration-into-a-clustered-provider-p3-cold-path)
 creates the target VirtualMachine first, lets the ordinary scheduler place
-it, and sends the import to its pending host. Slices 1 and 2 (provider) and
-slice 3 (manager) have shipped. Single-host, vSphere and Proxmox targets keep
-import-then-create, unchanged.
+it, and sends the import to its pending host. Single-host, vSphere and
+Proxmox targets keep import-then-create, unchanged.
+
+**Status: implemented, experimental.** The provider side (#415) and the
+manager side (#416) are merged. Like everything on `topology: cluster`, it is
+experimental (see [What "clustered" does not mean](#what-clustered-does-not-mean-yet)).
+It was run in a two-host lab (a clustered libvirt Provider whose hosts share
+one NFS pool, build `main-73e08e8`, 2026-10-22):
+
+- a single-host libvirt VM migrated into the cluster over `s3` and over `nfs`,
+  to `Ready`;
+- a migration failed after its import: the landed disk was deleted through
+  the host recorded for it;
+- a host made unreachable after the target was placed: the migration waited
+  (`TargetHostUnavailable`), did not re-place the target, and went on when the
+  host came back.
+
+It was **not** run in the lab: a vSphere or Proxmox source into a clustered
+target, a host made unreachable after the disk landed, and a manager restart
+in the middle of an import. Those paths are covered by unit and envtest tests
+only.
+
+#### Before you start
+
+| Requirement | Why, and what happens without it |
+|---|---|
+| The target Provider is libvirt with `spec.topology: cluster`, and its provider build reports `supportsRoutedImport` | The manager reads the capability from the provider at `Validating` (`GetCapabilities`). It is not a field of `Provider.status.reportedCapabilities`, so there is nothing to `kubectl get`: a Provider without it fails the migration at `Validating` with reason `ClusteredTargetUnsupported`, before any side effect. Upgrade the provider image and run the migration again |
+| `spec.storage.type` is `s3` or `nfs`, set explicitly | `pvc` is refused, and `pvc` is what an unset `spec.storage` means: the migration fails at `Validating` (`MigrationFailed`, message "storage backend "pvc" is not supported into a clustered provider ...") |
+| The target VM is in the VMMigration's own namespace (`spec.target.namespace` unset or equal to it) | The target VM proves its landed disk through a VMMigration in its own namespace. Another namespace fails at `Validating` with `ClusteredTargetUnsupported` |
+| Every host that may be chosen: the `default` pool exists, is active, and is at `/var/lib/libvirt/images`, with room for the staged object and the converted disk | The import never creates, starts or moves a pool. A host whose `default` pool is elsewhere is refused for the VM and excluded (`HOST_STORAGE_MISCONFIGURED`). A host whose `default` pool is missing or not active reports `allocatableStorageBytes` 0 and is never chosen for a migration target: create the pool on it first |
+| Every such host: an `ssh://` `Host` endpoint, `qemu-img` (with CVE-2024-4467 fixed), `flock` (util-linux) and `timeout` (coreutils), and the provider's staging directory writable by the SSH user | A host without them refuses the import before writing anything (`LandingHostRefused`, held for an administrator). See [Host prerequisites for a migration target](#host-prerequisites-for-a-migration-target) |
+| Every such host: the cloud-init seed directory `/var/lib/libvirt/virtrigaud-seeds` ([host prerequisites](#host-prerequisites)) | The import does not check it, but the create of the target VM that follows does. On a host without it the create fails, retryably, with `refusing to stage cloud-init data`, **after** the disk has landed; the VM stays uncreated until the host is fixed |
+| The target Provider runs one replica, and no other Provider mounts the same pool | The landing lock is per provider process. See [Residual: two Providers on one pool](#residual-two-providers-on-one-pool) |
+| The hosts are `Ready`, schedulable, and report `status.allocatableStorageBytes` at least the source disk's virtual size | The target is placed only on such a host. Without one the migration waits at `Validating` (`TargetPlaced=False`, usually `Unschedulable`) and the source is not touched |
+
+Check a host's figure with
+`kubectl get host <name> -n <provider namespace> -o jsonpath='{.status.allocatableStorageBytes}'`.
+It is the free space of the host's `default` pool, as the Host sync last read
+it (every 60 seconds).
+
+#### What you see, and what to do about it
+
+Read the migration's conditions with
+`kubectl get vmmigration <name> -o jsonpath='{range .status.conditions[*]}{.type}={.status}/{.reason}{"\n"}{end}'`
+and the target VM's with `kubectl describe virtualmachine <target name>`.
+Every hold below is re-checked by the manager on a backoff, so it is lifted
+by the cause going away; the last column says where an administrator must act.
+
+| Where | Condition / reason | What it means | What to do |
+|---|---|---|---|
+| Migration | `TargetPlaced=False`, reason `WaitingForPlacement`, or the target's `Placed` reason (`Unschedulable`, `RestorePending`, `AllHostsExcluded`, ...) | The target VM exists but has no pending host. The source has not been powered off, snapshotted or exported | `kubectl describe virtualmachine <target name>`: the `Placed` message names the filter category that rejected the hosts (for example "insufficient storage for the VM's disk"). Add a host, free pool space, or fix the labels. To give up, delete the VMMigration: the unbound target is deleted and nothing else needs undoing |
+| Migration | `TargetPlaced=False/SourceDiskSizeUnknown` | The source disk's virtual size could not be read (`GetDiskInfo`), so no target was created: placement needs it | Check the source Provider and the source VM; the cause is in the manager log. It is retried; it never fails the migration on its own |
+| Migration | `TargetPlaced=False/TargetVMDeleting` | A target VM from an earlier attempt is being deleted | Wait |
+| Migration | `TargetPlaced=False/TargetHostReleased` | The landing host refused the import before writing anything (a foreign or unstamped domain with the target's name, or a `default` pool not at `/var/lib/libvirt/images`). The host is excluded for this target (`status.placement.excludedHosts` of the target VM), the target is placed again, and the import follows it | Nothing, unless every host refuses. Fix the refused host for the next migration |
+| Migration | `Validating=False/TargetCapabilitiesUnknown` | The provider's capabilities could not be read | Check the provider pod; retried every 30 seconds |
+| Migration | `Failed`, reason `ClusteredTargetUnsupported` or `MigrationFailed` | The Provider lacks the capability, the target is in another namespace, or the backend is `pvc` (see above) | Fix the cause and run the migration again |
+| Migration | `Failed/TargetNotPending` | At `Importing`, the target VM has a provider id or no pending host (for example, someone cleared it, or it was created some other way) | Delete the target VirtualMachine and run the migration again |
+| Migration | `Importing=False/TargetHostUnavailable` | The landing host could not be reached, or another host the import must check could not be checked. Nothing was landed. The target is **never** moved off its host automatically | Restore the host. It is retried at 15 seconds, doubling to 5 minutes. If the host is gone for good, delete the VMMigration; if the target VM's own delete is then held (`DeleteBlocked`), set `virtrigaud.io/force-delete: "true"` on the target VirtualMachine (it was never created on that host) |
+| Migration | `Importing=False/ImportTargetPreviousIncarnation` | The landing host holds a domain of a previous incarnation of the target VM (or of this very VM) | An administrator re-attaches or removes that domain ([Backup and restore](clustered-restore.md)); retried with a backoff |
+| Migration | `Importing=False/LandingDiskInUse` | The landing file `<default pool>/<namespace>.<name>-migrated.qcow2` is used by a domain on a host of the Provider. The target is not re-placed: on a shared pool that cannot help | An administrator resolves it; retried with a backoff |
+| Migration | `Importing=False/LandingHostRefused` | The landing host refused before writing: its lock directory or the landing name is not as the provider requires, a host tool is missing, or the host is not `ssh://` | An administrator fixes the host (the cause is in the manager and provider logs); retried with a backoff |
+| Migration | `Importing=False/ImportNotPerformed` | The host did not perform the import (another import of the disk was running, no room, a host command failed). Nothing was landed. Retried on the same host | If it lasts 5 minutes the attempt fails (reason `ImportNotPerformed`) into `spec.options.retryPolicy`; with none, the migration stays `Failed`. A retry deletes the unbound target and places a fresh one |
+| Migration | `Ready=False/ImportOutcomeUnknown` | The import's outcome is not known (the manager restarted, a deadline passed, the connection dropped). It is re-sent to the **recorded** host after 35 minutes. If the target's pending host changed since, it is held and not re-sent | Check the recorded host (`status.storageInfo.importTarget.host`) for `<default pool>/<namespace>.<name>-migrated.qcow2` and remove it if it is there. Then `kubectl annotate vmmigration <name> virtrigaud.io/operation-outcome=not-performed@<attempt id>` (the attempt id is the `lastTransitionTime` of the `ImportRequested` condition): the import is sent again, to the target's current pending host ([Provider calls whose outcome was lost](provider-call-outcomes.md)) |
+| Migration | `Ready=False/TargetHostMoved` | The target's pending host is not the host the disk was imported to, so the disk is not recorded on it | An administrator sets the target's `status.placement.pendingHost` back to `status.storageInfo.importTarget.host`, or deletes the VMMigration |
+| Migration | `Ready=False/TargetDiskMismatch` | The target's `spec.importedDisk` is not the disk this migration imported (someone changed it). The migration is not completed, and `deleteAfterMigration` never runs | Restore `spec.importedDisk` (`diskID` equal to `status.importID`, `path` equal to `status.diskInfo.targetPath`), or delete the target VM and the VMMigration |
+| Target VM | `Provisioning=False/WaitingForImport` | Normal. The VM is placed, its host reserves its capacity, and no create is sent until its migration records the landed disk | Nothing |
+| Target VM | `Provisioning=False/MigrationNotFound` | `spec.importedDisk` has an empty `diskID` and a `migrationRef` that names a migration that does not exist in the VM's namespace or did not create this VM. The VM is not placed or created | Delete the VM, or let the migration that created it import the disk |
+| Target VM | `Placed=False/ImportedDiskPinned` (`status.phase` `Failed`) | After the import, the create on the pending host was refused with a name conflict. The host is pinned, not excluded: the disk exists only there | An administrator resolves the conflicting domain on that host; the create is re-checked with a backoff |
+| Target VM | create fails with `refusing to stage cloud-init data` | The host's seed directory is unusable | Fix the seed directory on that host ([host prerequisites](#host-prerequisites)); the create resumes |
+| Event on the migration | `UnboundTargetVMLeft` (Warning) | A force-deleted migration could not delete its unbound target | Delete the target VirtualMachine yourself |
+
+**Deleting or retrying a migration.** The unbound target VM is deleted first
+(`UnboundTargetVMDeleted`), then the landed disk is cleaned up according to
+`spec.options.cleanupPolicy` ([ADR-0011](adr/0011-migration-staging-cleanup.md)),
+through the recorded host. Once the target VM has been created and the
+migration is `Ready`, the landed disk is that VM's disk: deleting the
+VMMigration leaves the target VM and its disk in place, and the source VM is
+kept unless `spec.source.deleteAfterMigration` is set. To remove the migrated
+VM, delete the target VirtualMachine.
+
+#### Limits of migration into a clustered provider
+
+- **The disk-space check is a filter, not a reservation.** Placement keeps
+  only hosts whose reported free space holds the source disk. It does not
+  subtract the disks of other migrations in flight, so two migrations placed
+  on one host can together exceed it; a pool that fills answers the import
+  "not performed" and the migration fails into `retryPolicy` after 5 minutes.
+- **The source disk's size is read once**, when the target VM is created
+  (rounded up to whole GiB into `spec.importedDisk.sizeGiB`). Growth after
+  that is not checked against the host's space.
+- **The free-space figure can be stale.** The Host sync reads it every 60
+  seconds, and libvirt reports a pool's `Available` as last refreshed, so on a
+  pool shared by several hosts (NFS) the hosts can report different, stale
+  figures. This is a known issue, tracked as R31 and being fixed. Until then,
+  an administrator can refresh the figure with `virsh pool-refresh default`
+  on the hosts.
+- **`allocatableStorageBytes` is the `default` pool only.** Releases up to
+  v0.4.0-rc2 summed every active pool. The change shows in `Host.status` of
+  every libvirt host and in every `VMPlacementPolicy` `minDiskSpacePerHost`.
+- **A host that fails after placement is waited for, not replaced.** There is
+  no automatic release of an unreachable pending host (ADR-0007 B7.3).
+- **Two Providers on one pool are not serialised** (see
+  [Residual: two Providers on one pool](#residual-two-providers-on-one-pool)).
+- **The target's `spec.importedDisk` is writable by anyone who may edit the
+  VM.** The manager detects a swap (`TargetDiskMismatch`) but does not prevent
+  it; an admission rule reserving it is a follow-up.
+- **The landed disk carries no sidecar stamp yet** (ADR-0007 B7.7).
+- **`topology: cluster` is experimental** and may still change.
+
+#### How it works
 
 **What the manager does (slice 3).** Only for a target Provider with
 `topology: cluster` that reports `supportsRoutedImport` (read at runtime with
@@ -2040,7 +2150,9 @@ import-then-create, unchanged.
 the migration at `Validating` with reason `ClusteredTargetUnsupported` and a
 constant message, before any side effect; so does a target VirtualMachine in
 another namespace than the VMMigration's (its landed disk could never be
-proven, see below) and the `pvc` backend (only `s3` and `nfs` land on a host).
+proven, see below). A `pvc` backend (only `s3` and `nfs` land on a host) is
+refused at `Validating` too, by the storage-backend check that runs after the
+capability gate, with reason `MigrationFailed`.
 
 1. **`Validating`, before the source is powered off, snapshotted or
    exported.** The migration reads the source disk's virtual size
@@ -2231,22 +2343,27 @@ host and is never created (`MigrationNotFound`) — delete it yourself.
   delete's outcome lines. The transport's own `ERROR Command failed` line
   still prints a failed host command in full.
 
-**Residual: two Providers on one pool.** The landing lock is per provider
+- **`GetCapabilities`** reports `supports_routed_import`, `supports_disk_import`
+  (backends `s3`, `nfs`; staged formats `qcow2`, `raw`, `vmdk`),
+  `supports_import_size_limit`, `resend_safe_import_backends: [s3, nfs]`,
+  `supports_landed_disk_delete` and staged-disk delete backends `s3`, `nfs`.
+
+How each failure is answered (not performed, refused, or unknown) is in
+[Provider calls whose outcome was lost](provider-call-outcomes.md#clustered-libvirt-the-routed-import).
+
+#### Residual: two Providers on one pool
+
+The landing lock is per provider
 process; a clustered Provider runs one replica, so it covers every call of
 that Provider. Two Providers — or a clustered Provider and a single-host one —
 whose hosts mount the same pool are **not** serialised with each other: an
 import through one and a delete through the other could act on the same
 landing file. Do not share a pool directory between Providers until the A6.1
 pool ownership marker exists (follow-up).
-- **`GetCapabilities`** reports `supports_routed_import`, `supports_disk_import`
-  (backends `s3`, `nfs`; the single-host source formats), `supports_import_size_limit`,
-  `supports_landed_disk_delete` and staged-disk delete backends `s3`, `nfs`.
 
-How each failure is answered (not performed, refused, or unknown) is in
-[Provider calls whose outcome was lost](provider-call-outcomes.md#clustered-libvirt-the-routed-import).
+#### Host prerequisites for a migration target
 
-**Host prerequisites for a migration target**, in addition to
-[Host prerequisites](#host-prerequisites):
+In addition to [Host prerequisites](#host-prerequisites):
 
 - **The `default` pool must already exist at `/var/lib/libvirt/images`** on
   every host. The routed import never creates, starts or moves a pool; a host
@@ -2261,6 +2378,10 @@ How each failure is answered (not performed, refused, or unknown) is in
 - **The provider's staging directory** on each host must be writable by the
   SSH user: the import's host lock lives in its `virtrigaud-locks`
   subdirectory (mode 0700, owned by the SSH user; anything else is refused).
+- **The cloud-init seed directory** (`/var/lib/libvirt/virtrigaud-seeds`, see
+  [Host prerequisites](#host-prerequisites)). The import does not use it, but the
+  create of the target VM that follows does: on a host without it the create is
+  refused (`refusing to stage cloud-init data`, retried) after the disk has landed.
 - **Room in the pool for the staged object and the converted disk** at once.
   A pool without it is answered "not performed" (retryable), and nothing is
   written.

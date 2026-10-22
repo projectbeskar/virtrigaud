@@ -12,13 +12,20 @@
 # disk on the target VM, which is then created there with the disk attached
 # in place.
 #
+# Experimental: topology: cluster may still change. Read "Before you start" and
+# "Limits" in the doc before using this against anything you care about.
+#
 # REQUIREMENTS:
 #   - The clustered provider reports supportsRoutedImport (otherwise the
 #     migration fails at Validating, reason ClusteredTargetUnsupported).
-#   - storage.type is s3 or nfs (pvc is refused: the disk lands on a host).
+#   - storage.type is s3 or nfs, set explicitly: pvc (what an unset storage
+#     means) is refused at Validating, because the disk lands on a host.
 #   - The target VM is in this VMMigration's namespace (target.namespace unset).
-#   - Each host's "default" pool is at /var/lib/libvirt/images, and the host
-#     has qemu-img, flock and timeout (see the host prerequisites in the doc).
+#   - Each host's "default" pool is active and at /var/lib/libvirt/images, with
+#     room for the disk; the host has qemu-img, flock and timeout, and the
+#     cloud-init seed directory /var/lib/libvirt/virtrigaud-seeds (see the
+#     host prerequisites in the doc).
+#   - Replace the NFS server below (a placeholder) with your own.
 apiVersion: infra.virtrigaud.io/v1beta1
 kind: VMMigration
 metadata:
@@ -26,8 +33,11 @@ metadata:
   namespace: default
 spec:
   source:
+    # A VirtualMachine on a single-host libvirt Provider: the direction that
+    # was run in the lab. Other source providers have not been run into a
+    # clustered target.
     vmRef:
-      name: app-on-vsphere
+      name: app-on-libvirt
     powerOffBeforeMigration: true
   target:
     name: app-on-cluster
@@ -43,7 +53,7 @@ spec:
   storage:
     type: nfs
     nfs:
-      server: 172.16.56.13
+      server: nfs.example.com
       export: /export/virtrigaud
       uid: 1000
       gid: 1000
