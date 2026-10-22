@@ -45,6 +45,12 @@ type StagedDiskDeleteRequest struct {
 	// copy of the imported disk until Create (Proxmox's import stage) removes
 	// it too. Zero: only the staged object is removed.
 	TargetVM ObjectIdentity
+	// TargetHostID is the host of a CLUSTERED target provider the migration's
+	// import was sent to (wire: target_host_id, ADR-0007 Addendum B, B4): its
+	// qemu-img empties an nfs staged object. Empty for single-host and
+	// thin-client providers and for s3; a clustered provider refuses an nfs
+	// request without it.
+	TargetHostID string
 }
 
 // StagedDiskDeleteOutcome is what a DeleteStagedDisk did.

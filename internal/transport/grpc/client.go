@@ -563,6 +563,9 @@ func (c *Client) GetCapabilities(ctx context.Context) (contracts.Capabilities, e
 		ResendSafeImportBackends: resp.GetResendSafeImportBackends(),
 		// rc2 R7: false from a provider that predates DeleteLandedDisk.
 		SupportsLandedDiskDelete: resp.GetSupportsLandedDiskDelete(),
+		// ADR-0007 Addendum B: false from single-host and thin-client
+		// providers and from a clustered provider that predates it.
+		SupportsRoutedImport: resp.GetSupportsRoutedImport(),
 	}, nil
 }
 
@@ -1057,6 +1060,9 @@ func (c *Client) ImportDisk(ctx context.Context, req contracts.ImportDiskRequest
 		StorageOptionsJson:  req.StorageOptionsJSON,
 		TargetVm:            targetIdentityToProto(req.TargetVM),
 		MaxVirtualSizeBytes: req.MaxVirtualSizeBytes,
+		// ADR-0007 Addendum B: set only for a clustered target (its pending
+		// host); empty — and so absent on the wire — otherwise.
+		TargetHostId: req.TargetHostID,
 	}
 
 	resp, err := c.client.ImportDisk(ctx, grpcReq)
@@ -1275,6 +1281,8 @@ func (c *Client) DeleteStagedDisk(ctx context.Context, req contracts.StagedDiskD
 		Credentials:        req.Credentials,
 		Layout:             req.Layout,
 		TargetVm:           targetIdentityToProto(req.TargetVM),
+		// ADR-0007 Addendum B: the recorded import host of a clustered target.
+		TargetHostId: req.TargetHostID,
 	})
 	if err != nil {
 		return "", c.mapGRPCError("deleteStagedDisk", err)
@@ -1313,6 +1321,8 @@ func (c *Client) DeleteLandedDisk(ctx context.Context, req contracts.LandedDiskD
 		},
 		TargetVm: targetIdentityToProto(req.TargetVM),
 		Path:     req.Path,
+		// ADR-0007 Addendum B: the recorded import host of a clustered target.
+		TargetHostId: req.TargetHostID,
 	})
 	if err != nil {
 		// A FailedPrecondition other than VM_DISK_IN_USE is a provider that

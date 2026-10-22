@@ -177,4 +177,5 @@ func TestCapabilities_LandedDiskDelete(t *testing.T) {
 	resp, err := GetProviderCapabilities().GetCapabilities(context.Background(), &providerv1.GetCapabilitiesRequest{})
 	require.NoError(t, err)
 	assert.True(t, resp.GetSupportsLandedDiskDelete())
+	assert.False(t, resp.GetSupportsRoutedImport(), "Proxmox is never a clustered provider (ADR-0007 Addendum B)")
 }

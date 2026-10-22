@@ -854,7 +854,9 @@ func (p *Provider) DeleteStagedDisk(_ context.Context, req *providerv1.DeleteSta
 
 // DeleteLandedDisk answers Unimplemented (rc2 R7): the mock's ImportDisk lands
 // nothing on a hypervisor, so there is no landed disk to remove. It does not
-// report supports_landed_disk_delete, so the manager never asks it.
+// report supports_landed_disk_delete, so the manager never asks it. Nor does
+// it report supports_routed_import (ADR-0007 Addendum B): ImportDisk and the
+// deletes ignore target_host_id.
 func (p *Provider) DeleteLandedDisk(_ context.Context, _ *providerv1.DeleteLandedDiskRequest) (*providerv1.DeleteLandedDiskResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "the mock provider lands no migration disks")
 }

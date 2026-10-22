@@ -146,6 +146,16 @@ type Capabilities struct {
 	// predates it — means the VMMigration controller never asks it and
 	// records the landed disk as left behind.
 	SupportsLandedDiskDelete bool
+	// SupportsRoutedImport reports that a CLUSTERED provider routes ImportDisk
+	// to ImportDiskRequest.TargetHostID (with TargetVM carrying the target
+	// VirtualMachine's UID), DeleteLandedDisk to
+	// LandedDiskDeleteRequest.TargetHostID with a cross-host in-use scan, and
+	// the nfs DeleteStagedDisk to StagedDiskDeleteRequest.TargetHostID
+	// (GetCapabilitiesResponse.supports_routed_import, ADR-0007 Addendum B,
+	// B5). The VMMigration controller accepts a clustered Provider as a
+	// migration target only when it is reported; false from single-host and
+	// thin-client providers and from a clustered provider that predates it.
+	SupportsRoutedImport bool
 }
 
 // CapabilityReporter is an optional capability of a Provider: it reports the

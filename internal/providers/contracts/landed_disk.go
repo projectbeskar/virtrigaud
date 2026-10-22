@@ -33,6 +33,11 @@ type LandedDiskDeleteRequest struct {
 	// Path is the landing path the import returned (status.diskInfo.
 	// targetPath), or empty when no import result was recorded.
 	Path string
+	// TargetHostID is the host of a CLUSTERED target provider the import
+	// landed the disk on (the recorded import target host; wire:
+	// target_host_id, ADR-0007 Addendum B, B4). Empty for single-host and
+	// thin-client providers; a clustered provider refuses an empty value.
+	TargetHostID string
 }
 
 // LandedDiskDeleteOutcome is what a DeleteLandedDisk did.

@@ -580,6 +580,9 @@ func (p *Provider) GetCapabilities(ctx context.Context, req *providerv1.GetCapab
 		// rc2 R7: DeleteLandedDisk removes an unused migration landing folder
 		// (landed_disk.go).
 		SupportsLandedDiskDelete: true,
+		// SupportsRoutedImport stays false (ADR-0007 Addendum B): vCenter
+		// places the VM itself, so ImportDisk, DeleteLandedDisk and
+		// DeleteStagedDisk ignore target_host_id.
 	}, nil
 }
 
