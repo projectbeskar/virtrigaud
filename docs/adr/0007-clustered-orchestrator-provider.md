@@ -2874,8 +2874,9 @@ host free space is now measured fresh (R31, #417).
    `vmmigration_clustered_target_guard.go`.
 10. `Host.status.allocatableStorageBytes` of a libvirt host is its `default`
     pool's free space, not the sum of the active pools (#416), measured fresh
-    with `stat -f` on the pool's directory instead of libvirt's cached
-    `pool-info` value (R31, #417). `collectStorageBytes`,
+    with `stat -f` instead of libvirt's cached `pool-info` value, after a path
+    check made as creates and imports make it, under a budget of at most 15 s
+    (R31, #417). `collectStorageBytes`,
     `internal/providers/libvirt/hostinfo.go`. It changes the placement input of
     every clustered VM that uses `minDiskSpacePerHost`.
 

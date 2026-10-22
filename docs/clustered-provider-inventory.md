@@ -2075,7 +2075,7 @@ in Go); this page and the other docs use the wire name.
 | The target Provider is libvirt with `spec.topology: cluster`, and its provider build reports `supports_routed_import` | The manager reads the capability from the provider at `Validating` (`GetCapabilities`). It is not a field of `Provider.status.reportedCapabilities`, so there is nothing to `kubectl get`: a Provider without it fails the migration at `Validating` with reason `ClusteredTargetUnsupported`, before any side effect. Upgrade the provider image and run the migration again |
 | `spec.storage.type` is `s3` or `nfs`, set explicitly | `pvc` is refused, and `pvc` is what an unset `spec.storage` means: the migration fails at `Validating` (`MigrationFailed`, message "storage backend "pvc" is not supported into a clustered provider ...") |
 | The target VM is in the VMMigration's own namespace (`spec.target.namespace` unset or equal to it) | The target VM proves its landed disk through a VMMigration in its own namespace. Another namespace fails at `Validating` with `ClusteredTargetUnsupported`. The **Provider** may be in another namespace (`providerRef.namespace`) if its `spec.consumerNamespaceSelector` selects the migration's namespace; otherwise the migration is refused as `ConsumerNotAllowed` ([cross-namespace references](cross-namespace-references.md)) |
-| Every host that may be chosen: the `default` pool exists, is active, and is at `/var/lib/libvirt/images`, with room for the staged object and the converted disk | The import never creates, starts or moves a pool. A host whose `default` pool is elsewhere is refused for the VM and excluded (`HOST_STORAGE_MISCONFIGURED`). A host whose `default` pool is missing or not active reports `allocatableStorageBytes` 0 and is never chosen for a migration target: create the pool on it first |
+| Every host that may be chosen: the `default` pool exists, is active, and is at `/var/lib/libvirt/images`, with room for the staged object and the converted disk | The import never creates, starts or moves a pool. A host whose `default` pool is elsewhere is refused for the VM and excluded (`HOST_STORAGE_MISCONFIGURED`). A host whose `default` pool is missing, inactive or unmeasurable reports `allocatableStorageBytes` 0 and is never chosen for a migration target: create the pool on it first |
 | Every such host: an `ssh://` `Host` endpoint, `qemu-img` (with CVE-2024-4467 fixed), `flock` (util-linux) and `timeout` (coreutils), and the provider's staging directory writable by the SSH user | A host without them refuses the import before writing anything (`LandingHostRefused`, held for an administrator). See [Host prerequisites for a migration target](#host-prerequisites-for-a-migration-target) |
 | Every such host: the cloud-init seed directory `/var/lib/libvirt/virtrigaud-seeds` ([host prerequisites](#host-prerequisites)) | The import does not check it, but every create does (a clone checks it only when its source has a seed). On a host without it the target VM's create fails, retryably, with `refusing to stage cloud-init data`, **after** the disk has landed; the VM stays uncreated until the host is fixed |
 | The sudoers rules the host already needs for clones, exports and `qemu-img info -U` ([What the copies run as root](libvirt-clones.md#what-the-copies-run-as-root), with the `timeout` lines that a clustered Provider needs) | The routed import's own commands run as the SSH user, without `sudo`; these rules are the unchanged host prerequisites of the slice 5 amendment |
@@ -2137,14 +2137,18 @@ VM, delete the target VirtualMachine.
 - **The source disk's size is read once**, when the target VM is created
   (rounded up to whole GiB into `spec.importedDisk.sizeGiB`). Growth after
   that is not checked against the host's space.
-- **The free-space figure is up to 60 seconds old and excludes root-reserved
-  blocks.** The Host sync measures it fresh with `stat -f` on every sync (R31,
+- **The free-space figure is up to one Host sync (60 seconds) old, and excludes
+  root-reserved blocks.** It is measured fresh with `stat -f` on every sync (R31,
   #417; before that it was libvirt's cached `pool-info` value, which hosts
   sharing one NFS export could report differently), so a host can report less
-  than `virsh pool-info` showed. A pool that is inactive, not `dir`/`fs`/`netfs`,
-  or not at `/var/lib/libvirt/images` reports 0 and is never chosen. If the
-  filesystem under the pool directory is not mounted while the pool stays
-  active, the figure is that of the filesystem underneath.
+  than `virsh pool-info` showed. Every case that reports 0 (an inactive pool, a
+  type other than `dir`/`fs`/`netfs`, a directory that does not resolve to
+  `/var/lib/libvirt/images`, an unreadable definition, a failing `stat`, an
+  expired budget, a probe still in flight) means the host is never chosen. If
+  the filesystem behind an active pool is not mounted, the figure is that of the
+  filesystem underneath. A `stat` stuck on a dead hard-mounted NFS export cannot
+  be killed and may accumulate until the mount recovers. See the
+  [`allocatable_storage` row](#what-listhosts-reports-per-host-libvirt).
 - **`allocatableStorageBytes` is the `default` pool only.** Releases up to
   v0.4.0-rc2 summed every active pool. The change shows in `Host.status` of
   every libvirt host and in every `VMPlacementPolicy` `minDiskSpacePerHost`.

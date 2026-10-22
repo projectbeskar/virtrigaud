@@ -53,7 +53,7 @@ providers** (see [Upgrade order for this release](#upgrade-order-for-this-releas
 | #409 (R23) | vSphere removes the import VM's history log (`<id>-<hex>.hlog`); a migration that reaches `Ready` closes `LandedDiskCleanup` (`LandedDiskInUseByTarget`) | Behaviour change |
 | #415 (R11, B.1+B.2) | A clustered libvirt provider serves `ImportDisk`, `DeleteLandedDisk` and `DeleteStagedDisk` on a host the manager names (new proto fields and capability `supports_routed_import`). Nothing calls it until #416 | No |
 | #416 (R11, B.3) | A `VMMigration` can target a clustered libvirt Provider: the target VM is created and placed first, the disk lands on its host. New status field and condition, a CRD relaxation (empty `diskID`), and `allocatableStorageBytes` is now the `default` pool only | Behaviour change |
-| #417 (R31) | A libvirt Host's `allocatableStorageBytes` is measured fresh with `stat -f` on the `default` pool's directory on every sync, instead of libvirt's cached `pool-info` value; fail-closed 0 for an inactive pool, a pool type other than `dir`/`fs`/`netfs`, a pool not at `/var/lib/libvirt/images`, or a measurement that fails or takes over 15 s | Behaviour change |
+| #417 (R31) | A libvirt Host's `allocatableStorageBytes` is measured fresh with `stat -f` on every sync, instead of libvirt's cached `pool-info` value, and fails closed to 0 (details in the [inventory](docs/clustered-provider-inventory.md#what-listhosts-reports-per-host-libvirt)) | Behaviour change |
 | #407, #412 (R11) | ADR-0007 Addendum B: the design, proposed, then accepted with decisions on its open questions | Documentation only |
 | #411 | Go 1.26.10 (GO-2026-6809, `crypto/x509`, reachable through `x509.Certificate.Verify`); builder images in step | No |
 
@@ -215,13 +215,14 @@ What you need, and what you see:
 - **`Host.status.allocatableStorageBytes` is now the `default` pool's free space
   only, measured fresh** (#416, #417). Before, it summed every active pool, from
   libvirt's `pool-info`, which is cached until a `pool-refresh`. Now every Host sync
-  runs `stat -f` on the `default` pool's directory (`f_bavail × f_frsize`, what
-  `df` shows as *Available*, so it excludes root-reserved blocks and a host may report
-  less than before). It reports 0, which placement that needs disk space treats as no
-  room, for a pool that is inactive, of a type other than `dir`, `fs` or `netfs`, not
-  at `/var/lib/libvirt/images`, or whose measurement fails or takes over 15 s. It is
-  the input of the migration target's disk-space filter and of a `VMPlacementPolicy`'s
-  `minDiskSpacePerHost`, so review any such policy.
+  measures it with `stat -f` (`f_bavail × f_frsize`, what `df` shows as *Available*, so
+  it excludes root-reserved blocks and a host may report less than before). A host
+  reports 0, which placement that needs disk space treats as no room, when the pool
+  is inactive, of an unsuitable type or not at `/var/lib/libvirt/images`, or when it
+  cannot be measured in time; the cases are in the
+  [inventory](docs/clustered-provider-inventory.md#what-listhosts-reports-per-host-libvirt).
+  It is the input of the migration target's disk-space filter and of a
+  `VMPlacementPolicy`'s `minDiskSpacePerHost`, so review any such policy.
 
 **Limits.** The disk-space check is a filter, not a reservation: two migrations
 can be placed on a host that holds only one, and growth of the source after
@@ -1782,12 +1783,13 @@ says so. Each links to the page that documents it in full, where one exists.
   `spec.importedDisk` can be edited by whoever may edit the VM (a swap is detected, not
   prevented)
   (→ [`docs/clustered-provider-inventory.md`](docs/clustered-provider-inventory.md#migration-into-a-clustered-provider-addendum-b)).
-- **A clustered libvirt host's free-space figure is up to 60 seconds old and excludes
-  root-reserved blocks** (#417). It is measured fresh on every Host sync, so the
-  disk-space filter that places a migration target can still act on a figure that
-  has changed since. If the filesystem under the pool directory is not mounted while
-  the pool stays active, the figure is that of the filesystem underneath, and nothing
-  detects it.
+- **A clustered libvirt host's free-space figure is up to one Host sync (60 seconds)
+  old** (#417), so the disk-space filter that places a migration target can act on a
+  figure that has changed since. If the filesystem behind an active pool is not
+  mounted, the figure is that of the filesystem underneath, and a `stat` stuck on a
+  dead hard-mounted NFS export cannot be killed and may accumulate until the mount
+  recovers
+  (→ [`docs/clustered-provider-inventory.md`](docs/clustered-provider-inventory.md#what-listhosts-reports-per-host-libvirt)).
 - **Deleting a namespace that holds an in-use `Provider`.** Kubernetes deletes the
   provider's runtime with the namespace, and nothing can stop that. VMs whose
   deletes miss the pod's termination window are held (`ProviderUnavailable`) and
