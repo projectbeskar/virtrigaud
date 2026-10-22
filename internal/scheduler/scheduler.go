@@ -215,6 +215,20 @@ type Request struct {
 	// carries no machine-type vocabulary, so this is a Request input, not a policy
 	// field.
 	RequiredMachineType string
+
+	// RequiredStorageBytes, when positive, is the disk space the VM's disk
+	// needs on the host's storage: a migration target's source disk virtual
+	// size (ADR-0007 Addendum B, B7.4). A host whose
+	// status.allocatableStorageBytes is lower — or not reported, so the space
+	// cannot be proven — is filtered out. It is a filter only: the free space
+	// the inventory reports is not reduced by other VMs' pending disks.
+	RequiredStorageBytes int64
+
+	// RequiredHost, when non-empty, is the only host the VM may be placed on:
+	// the host its migration already imported its disk to (ADR-0007
+	// Addendum B), which exists nowhere else on host-local storage. Every
+	// other candidate is filtered out (RejectionNotRequiredHost).
+	RequiredHost string
 }
 
 // Result is the scheduler's decision for a feasible placement.

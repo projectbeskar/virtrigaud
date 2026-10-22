@@ -1611,6 +1611,26 @@ func (r *VirtualMachineReconciler) createVMOn(
 		return ctrl.Result{}, err
 	}
 
+	// A migration's target waiting for its import (an empty diskID with a
+	// migrationRef, ADR-0007 Addendum B) is never created. One whose migration
+	// is gone, or did not create it, is not even placed (fail closed); a
+	// single-host or thin-client target never waits this way (its migration
+	// imports first), so it is held too.
+	clustered := isClusterTopology(providerCR)
+	waitingForImport := awaitingMigrationImport(vm)
+	if waitingForImport {
+		migration, merr := r.importingMigrationFor(ctx, vm)
+		if merr != nil {
+			return ctrl.Result{}, merr
+		}
+		if migration == nil {
+			return r.holdForImport(ctx, vm, k8s.ReasonMigrationNotFound, migrationNotFoundMessage), nil
+		}
+		if !clustered {
+			return r.holdForImport(ctx, vm, k8s.ReasonWaitingForImport, waitingForImportMessage), nil
+		}
+	}
+
 	// Build create request
 	req, err := r.buildCreateRequest(ctx, vm, providerCR, vmClass, vmImage, networks)
 	if err != nil {
@@ -1634,7 +1654,6 @@ func (r *VirtualMachineReconciler) createVMOn(
 	// req.TargetHostID here; a single-host / thin-client provider skips this
 	// entirely (topology defaults to single), leaving TargetHostID empty and
 	// status.placement untouched — today's path, unchanged.
-	clustered := isClusterTopology(providerCR)
 	if clustered {
 		host := pendingHost(vm)
 		if host == "" {
@@ -1695,6 +1714,12 @@ func (r *VirtualMachineReconciler) createVMOn(
 			logger.Info("Retrying clustered create on its pending host (not re-scheduling)", "host", host)
 		}
 		req.TargetHostID = host
+		// Placed, with its capacity reserved on host: a migration target waits
+		// there, without a Create, until its migration has imported the disk
+		// to host and recorded it (ADR-0007 Addendum B, B1).
+		if waitingForImport {
+			return r.holdForImport(ctx, vm, k8s.ReasonWaitingForImport, waitingForImportMessage), nil
+		}
 	} else {
 		// A single-host Create is sent only once its marker is recorded.
 		res, ok := r.requestCreate(ctx, vm, providerCR, attempt)
@@ -1716,11 +1741,23 @@ func (r *VirtualMachineReconciler) createVMOn(
 	// Create VM
 	resp, err := provider.Create(ctx, req)
 	if err != nil && clustered {
+		// A migration target whose disk was imported to its pending host is
+		// pinned there (ADR-0007 Addendum B, B1.2): no slice-2 exclusion and no
+		// A6.2 move. A name conflict holds it for an operator; its own domain
+		// elsewhere takes the own-domain hold below (which keeps its delete
+		// from leaving that domain running), never the move.
+		pinned, perr := r.importedDiskPinned(ctx, vm)
+		if perr != nil {
+			return ctrl.Result{}, perr
+		}
+		if pinned && contracts.IsConflict(err) && !contracts.IsVMPreviousIncarnation(err) {
+			return r.holdImportedDiskPinned(ctx, vm, req.TargetHostID, err), nil
+		}
 		// The VM's own domain is on another host than its pending host
 		// (ADR-0007 A6.2): R4's lookup moves the pending host there when it
 		// finds exactly that domain, so no administrator edits status;
 		// otherwise the own-domain hold below applies.
-		if contracts.IsVMOwnDomainElsewhere(err) {
+		if contracts.IsVMOwnDomainElsewhere(err) && !pinned {
 			if res, moved, merr := r.moveToOwnDomain(ctx, vm, providerCR, provider, req, req.TargetHostID); moved || merr != nil {
 				return res, merr
 			}
@@ -1992,6 +2029,14 @@ func (r *VirtualMachineReconciler) resolveClusterPlacement(
 		currentBinding = vm.Status.Placement.Host
 		excludedHosts = vm.Status.Placement.ExcludedHosts
 	}
+	// A migration target whose migration already imported its disk to a host
+	// (importTarget.host) is placed on that host only (ADR-0007 Addendum B):
+	// a pending host an administrator cleared, or the target of a retry that
+	// kept its landed disk, never moves to a host without the disk.
+	requiredHost, err := r.migrationImportHost(ctx, vm)
+	if err != nil {
+		return nil, ctrl.Result{}, err
+	}
 
 	// (d) Resources: the effective size buildCreateRequest already resolved
 	// (effectiveResources: the VMClass with any spec.resources override
@@ -2012,6 +2057,10 @@ func (r *VirtualMachineReconciler) resolveClusterPlacement(
 		CurrentBinding:   currentBinding,
 		ExcludedHosts:    excludedHosts,
 		RequiredNetworks: requiredNetworksForScheduling(networks),
+		// A migration target needs room for its source disk on the host its
+		// import lands on (ADR-0007 Addendum B, B7.4).
+		RequiredStorageBytes: importedDiskPlacementBytes(vm),
+		RequiredHost:         requiredHost,
 		// TODO(ADR-0007 D6): wire RequiredStoragePools and RequiredMachineType once
 		// there is an unambiguous mapping. A VM's disks carry no storage-pool name
 		// (DiskSpec.StorageClass is a k8s StorageClass, not a libvirt/NFS pool) and
@@ -2396,7 +2445,12 @@ func (r *VirtualMachineReconciler) buildCreateRequest(
 	// Convert VMImage - handle both imported disk and template cases
 	var image contracts.VMImage
 
-	if usingImportedDisk {
+	if usingImportedDisk && awaitingMigrationImport(vm) {
+		// A migration target waiting for its import (ADR-0007 Addendum B):
+		// the request only places the VM and is never sent, so there is no
+		// disk to resolve or prove.
+		image = contracts.VMImage{Format: vm.Spec.ImportedDisk.Format}
+	} else if usingImportedDisk {
 		// VM uses an imported disk (e.g., from migration)
 		disk := vm.Spec.ImportedDisk
 
@@ -3060,6 +3114,13 @@ func vmUpdateNeedsReconcile(oldVM, newVM *infravirtrigaudiov1beta1.VirtualMachin
 		return true
 	}
 	if newVM.DeletionTimestamp.IsZero() {
+		// A migration target waiting for its import whose pending host its
+		// migration released (B1.2, ADR-0007 Addendum B; this controller never
+		// clears it for such a VM, which it never sends a Create) is re-placed
+		// at once.
+		if awaitingMigrationImport(newVM) && pendingHost(oldVM) != "" && pendingHost(newVM) == "" {
+			return true
+		}
 		// An operator resolving a create held for an unknown outcome.
 		return oldVM.Annotations[createOutcomeAnnotation] != newVM.Annotations[createOutcomeAnnotation]
 	}

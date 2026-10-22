@@ -798,8 +798,8 @@ the following once after upgrading, and delete only what no `VMMigration` in fli
   fields of the requests (`s3` and `nfs` only; `pvc` is refused), and the
   provider now reports `supports_routed_import`, disk import, resend-safe `s3` /
   `nfs` imports, the landed-disk delete and `s3` / `nfs` staged-disk deletes in
-  `Provider.status.reportedCapabilities`. Nothing calls them yet: **the manager
-  still refuses a `VMMigration` whose target Provider is clustered** until slice 3.
+  `Provider.status.reportedCapabilities`. The manager calls them since slice 3
+  (next row).
   A clustered `Create` that attaches an imported disk in place now takes the
   provider-wide landing lock of its landing name, serialised with the routed
   import and delete of that disk through any host. Do not share one pool
@@ -808,6 +808,29 @@ the following once after upgrading, and delete only what no `VMMigration` in fli
   for the host prerequisites (the `default` pool at `/var/lib/libvirt/images`,
   `flock` and `timeout`). Single-host, vSphere and Proxmox providers are unchanged
   (they ignore the new fields and do not report the capability).
+- **A `VMMigration` can target a clustered Provider** (R11, ADR-0007 Addendum B
+  slice 3; [Migration into a clustered provider](clustered-provider-inventory.md#migration-into-a-clustered-provider-addendum-b)).
+  The target Provider must report `supportsRoutedImport` (upgrade the clustered
+  provider first; an older one is refused at `Validating` with reason
+  `ClusteredTargetUnsupported`, before any side effect), the backend must be `s3` or
+  `nfs`, and the target VM must be in the VMMigration's namespace. The target
+  VirtualMachine is created at `Validating`, with an **empty
+  `spec.importedDisk.diskID`** naming the migration (the CRD now accepts an empty
+  `diskID` only while `migrationRef` is set — an additive relaxation; regenerate and
+  apply the CRDs with the manager), and is placed before the source is touched, on a
+  host whose `allocatableStorageBytes` holds the source disk; its capacity counts from
+  then on. New status: `VMMigration.status.storageInfo.importTarget.host`, the
+  `TargetPlaced` condition, and the VirtualMachine reasons `WaitingForImport`,
+  `MigrationNotFound` and `ImportedDiskPinned`. Single-host, vSphere and Proxmox
+  targets are unchanged (import, then create). **A libvirt Host's
+  `allocatableStorageBytes` now reports its `default` pool's free space only** (it
+  summed every active pool): it is the input of the disk-space filter, and it changes
+  what `Host.status` shows for every libvirt host. Placement filters on it for a
+  migration target and, for any clustered VM, through a `VMPlacementPolicy`'s
+  `minDiskSpacePerHost`: such a policy now compares against the `default` pool. **Rolling the manager back** with a
+  clustered-target migration in flight: finish or delete those migrations first; an
+  older manager does not know `WaitingForImport` and would send a `Create` for the
+  waiting target (which the clustered provider refuses, so nothing is destroyed).
 
 ## Post-upgrade verification checklist
 

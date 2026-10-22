@@ -305,9 +305,10 @@ spec:
                           diskID:
                             description: |-
                               DiskID is the provider-specific disk identifier.
-                              For libvirt, this is typically the volume name.
+                              For libvirt, this is typically the volume name. Empty only on a
+                              migration's target VirtualMachine that waits for its import
+                              (MigrationRef set, ADR-0007 Addendum B).
                             maxLength: 253
-                            minLength: 1
                             type: string
                           format:
                             default: qcow2
@@ -357,6 +358,10 @@ spec:
                         required:
                         - diskID
                         type: object
+                        x-kubernetes-validations:
+                        - message: importedDisk.diskID may be empty only while importedDisk.migrationRef
+                            names the VMMigration that imports the disk
+                          rule: size(self.diskID) > 0 || has(self.migrationRef)
                       lifecycle:
                         description: Lifecycle defines VM lifecycle configuration
                         properties:

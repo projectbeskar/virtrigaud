@@ -656,11 +656,19 @@ type SCSIControllerSpec struct {
 
 // ImportedDiskRef references a disk that was imported via migration or other means.
 // This allows VMs to be created from pre-existing disk images rather than templates.
+//
+// DiskID may be empty only while MigrationRef is set: the target
+// VirtualMachine a VMMigration into a clustered Provider creates BEFORE its
+// import (ADR-0007 Addendum B, B1/B7.1). Such a VM is placed but never
+// created ("waiting for import") until the migration records the landed disk
+// in DiskID, Path and Format.
+// +kubebuilder:validation:XValidation:rule="size(self.diskID) > 0 || has(self.migrationRef)",message="importedDisk.diskID may be empty only while importedDisk.migrationRef names the VMMigration that imports the disk"
 type ImportedDiskRef struct {
 	// DiskID is the provider-specific disk identifier.
-	// For libvirt, this is typically the volume name.
+	// For libvirt, this is typically the volume name. Empty only on a
+	// migration's target VirtualMachine that waits for its import
+	// (MigrationRef set, ADR-0007 Addendum B).
 	// +kubebuilder:validation:Required
-	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=253
 	DiskID string `json:"diskID"`
 

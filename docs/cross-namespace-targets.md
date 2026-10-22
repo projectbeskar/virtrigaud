@@ -152,8 +152,12 @@ the disk to be copied (libvirt), or the target VM's create to be refused (vSpher
 A migration into another namespace through a **Proxmox** target Provider is
 refused up front: it fails at `Validating` (`Phase=Failed`, `Validating=False`,
 reason `ProxmoxCrossNamespaceTarget`) before anything is exported or imported,
-because its target VM's create would be refused. A migration into its own
-namespace is unaffected. See
+because its target VM's create would be refused. So is a migration into
+another namespace through a **clustered** (`topology: cluster`) target Provider
+(reason `ClusteredTargetUnsupported`): its target VM is created first and waits
+for its import, which it could never prove from another namespace
+([Migration into a clustered provider](clustered-provider-inventory.md#migration-into-a-clustered-provider-addendum-b)).
+A migration into its own namespace is unaffected. See
 [`image-preparation.md`](image-preparation.md) for the base-image rules.
 
 ### No libvirt linked clone into another namespace

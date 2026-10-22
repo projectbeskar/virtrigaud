@@ -146,9 +146,18 @@ func (r *VMMigrationReconciler) handleTerminalFailure(ctx context.Context, migra
 	if err != nil {
 		return ctrl.Result{}, err
 	}
-	landedRetry, err := r.reconcileLandedDiskCleanup(ctx, migration, stagingTriggerTerminalFailure)
+	// A clustered target created before the import and still unbound is
+	// deleted first (ADR-0007 Addendum B, B1.4); the landed disk is cleaned
+	// up only once it is gone.
+	gone, err := r.deleteUnboundTarget(ctx, migration)
 	if err != nil {
 		return ctrl.Result{}, err
+	}
+	landedRetry := unboundTargetDeleteRequeue
+	if gone {
+		if landedRetry, err = r.reconcileLandedDiskCleanup(ctx, migration, stagingTriggerTerminalFailure); err != nil {
+			return ctrl.Result{}, err
+		}
 	}
 	res, err := r.terminalSnapshotCleanup(ctx, migration)
 	return stagingCleanupRequeue(stagingCleanupRequeue(res, stagingRetry), landedRetry), err

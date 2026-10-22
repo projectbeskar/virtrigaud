@@ -682,6 +682,18 @@ func (r *VMMigrationReconciler) deleteStagedDisk(ctx context.Context, m *infrav1
 	if err != nil {
 		return "", err
 	}
+	// A clustered Provider empties an nfs staged object with a host's
+	// qemu-img: the host the import was routed to (ADR-0007 Addendum B, B4).
+	targetHost := ""
+	if isClusterTopology(provider) && backend == storagemigration.BackendNFS {
+		if targetHost, err = r.stagedDiskHost(ctx, m, provider); err != nil {
+			return "", err
+		}
+		if targetHost == "" {
+			// Held, not left behind: a host of the Provider may be Ready again.
+			return "", errNoStagingHost
+		}
+	}
 
 	outcome, err := deleter.DeleteStagedDisk(ctx, contracts.StagedDiskDeleteRequest{
 		Migration:          contracts.ObjectIdentity{UID: string(m.UID), Namespace: m.Namespace, Name: m.Name},
@@ -691,6 +703,7 @@ func (r *VMMigrationReconciler) deleteStagedDisk(ctx context.Context, m *infrav1
 		Credentials:        creds,
 		Layout:             migrationStagingLayout(m),
 		TargetVM:           targetVM,
+		TargetHostID:       targetHost,
 	})
 	if err == nil && outcome == contracts.StagedDiskNotFound && recorded == "" {
 		// Exported by an older manager that recorded no digest: "not found"
@@ -713,6 +726,11 @@ func (r *VMMigrationReconciler) deleteStagedDisk(ctx context.Context, m *infrav1
 		return "", fmt.Errorf("delete staged disk: %w", err)
 	}
 }
+
+// errNoStagingHost is the (logged) cause of a held nfs staged-disk delete of a
+// clustered target Provider none of whose hosts can run it yet: no recorded
+// import host, no target VM host and no Ready Host (#416 L4).
+var errNoStagingHost = stderrors.New("no host of the clustered target provider can empty the staged nfs object yet")
 
 // markImportTarget records, for an nfs / s3 migration, the VirtualMachine
 // key its ImportDisk is about to be sent for

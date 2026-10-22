@@ -99,6 +99,18 @@ type VMMigrationReconciler struct {
 	// elected leader runs this reconciler, so in-process state is correct.
 	importUnverifiable unschedulableBackoff
 
+	// routedImportHold paces re-sending a routed import (ADR-0007 Addendum B)
+	// the landing host refused without landing anything — its host
+	// unavailable, a previous incarnation, a landing file in use, a guard
+	// refusal, not performed: the wait doubles from blockedRetryMin to
+	// blockedRetryMax. Each hold writes the status, whose watch event would
+	// otherwise re-send at once. In-process, like importUnverifiable.
+	routedImportHold unschedulableBackoff
+
+	// routedImportNotPerformedLimit overrides routedImportNotPerformedBudget
+	// when positive (tests only; production leaves it zero).
+	routedImportNotPerformedLimit time.Duration
+
 	// MaxDiskSize is the administrator's disk-size ceiling (the manager's
 	// --max-disk-size; nil for none), lowered per target Provider by its
 	// infra.virtrigaud.io/max-disk-size annotation: a migration that would
@@ -201,7 +213,8 @@ func NewVMMigrationReconciler(
 //+kubebuilder:rbac:groups=infra.virtrigaud.io,resources=vmmigrations,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=infra.virtrigaud.io,resources=vmmigrations/status,verbs=get;update;patch
 //+kubebuilder:rbac:groups=infra.virtrigaud.io,resources=vmmigrations/finalizers,verbs=update
-//+kubebuilder:rbac:groups=infra.virtrigaud.io,resources=virtualmachines,verbs=get;list;watch;create;update;patch
+//+kubebuilder:rbac:groups=infra.virtrigaud.io,resources=virtualmachines,verbs=get;list;watch;create;update;patch;delete
+//+kubebuilder:rbac:groups=infra.virtrigaud.io,resources=virtualmachines/status,verbs=get;update;patch
 //+kubebuilder:rbac:groups=infra.virtrigaud.io,resources=vmsnapshots,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=infra.virtrigaud.io,resources=providers,verbs=get;list;watch
 //+kubebuilder:rbac:groups="",resources=events,verbs=create;patch
@@ -469,13 +482,14 @@ func (r *VMMigrationReconciler) handleValidatingPhase(ctx context.Context, migra
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
 
-	// A clustered ("brain-in-operator") TARGET is rejected until ImportDisk can
-	// be routed to a host (ADR-0007 Addendum A, A1: until P3). Importing into it
-	// today would reach no host — fail fast with an honest message instead.
+	// A clustered ("brain-in-operator") TARGET is accepted only when its
+	// provider routes the import to a host (supports_routed_import, ADR-0007
+	// Addendum B, B5): otherwise the migration fails here, before any side
+	// effect, with a constant message.
 	if isClusterTopology(targetProvider) {
-		return r.transitionToFailed(ctx, migration, fmt.Sprintf(
-			"target provider %s/%s has topology: cluster; migrating into a clustered provider is not supported yet "+
-				"(disk import is not routed to a host until ADR-0007 P3)", targetProvider.Namespace, targetProvider.Name))
+		if proceed, res, err := r.gateRoutedImport(ctx, migration, targetProvider); !proceed {
+			return res, err
+		}
 	}
 
 	// A clustered SOURCE VM is addressed by its confirmed host binding. One with
@@ -598,6 +612,17 @@ func (r *VMMigrationReconciler) handleValidatingPhase(ctx context.Context, migra
 			}
 
 			logger.Info("Migration storage PVC mounted on both providers", "pvc", pvcName)
+		}
+	}
+
+	// A clustered target is created first and placed by the VirtualMachine
+	// controller before anything touches the source (ADR-0007 Addendum B,
+	// B1): the migration waits here (TargetPlaced) until the target has a
+	// pending host, so a target that cannot be placed costs the source
+	// nothing.
+	if isClusterTopology(targetProvider) {
+		if placed, res, err := r.ensureClusteredTargetPlaced(ctx, migration, sourceVM, sourceRef, sourceProvider, targetProvider); !placed {
+			return res, err
 		}
 	}
 
@@ -1471,12 +1496,33 @@ func (r *VMMigrationReconciler) handleImportingPhase(ctx context.Context, migrat
 		}
 	}
 
+	// A clustered target: the import lands on the target VM's pending host,
+	// read live, for the VM's UID (ADR-0007 Addendum B, B1 step 4). A target
+	// that is not pending fails the attempt; one whose host was released for a
+	// name conflict is waited for.
+	routedHost := ""
+	if isClusterTopology(targetProvider) {
+		host, uid, held, res, err := r.routedImportTarget(ctx, migration)
+		if held {
+			return res, err
+		}
+		// A held routed import is re-sent on its backoff only.
+		if wait := r.routedImportHold.remaining(string(migration.UID), time.Now()); wait > 0 {
+			return ctrl.Result{RequeueAfter: wait}, nil
+		}
+		routedHost = host
+		importReq.TargetHostID = host
+		importReq.TargetVM.UID = uid
+	}
+
 	// ADR-0011 D1 (review M1): record the VM this import is sent for before
 	// it is sent; the staged-disk delete names only this recorded VM, never a
 	// spec.target edited afterwards. rc2 R7: the landed-disk cleanup records
-	// that a disk may be landed, for this VM on this Provider, at the same time.
+	// that a disk may be landed, for this VM on this Provider — and, for a
+	// clustered Provider, on this host — at the same time, before the import
+	// marker.
 	importMarked := markImportTarget(migration, targetVM)
-	if markLandedDiskMayExist(migration, targetVM, targetProvider) || importMarked {
+	if markLandedDiskMayExistOn(migration, targetVM, targetProvider, routedHost) || importMarked {
 		if err := r.updateStatus(ctx, migration); err != nil {
 			return ctrl.Result{}, err
 		}
@@ -1507,6 +1553,15 @@ func (r *VMMigrationReconciler) handleImportingPhase(ctx context.Context, migrat
 		// Release the in-memory guard so a future reconcile can re-attempt the
 		// import for this generation after the failure is recorded.
 		r.longOpInFlight.Delete(longOpKey(migration, longOpImport))
+		// A routed import the landing host refused before writing anything
+		// (an untyped FailedPrecondition): a misconfigured host storage
+		// releases the host, anything else is held for an operator (ADR-0007
+		// Addendum B, B2). An answer to a re-send says nothing about the
+		// earlier call and stays unknown.
+		if routedHost != "" && !importAttempt.resend && routedImportPreconditionRefused(err) {
+			clearMigrationRequest(migration, longOpImport)
+			return r.handleRoutedImportPrecondition(ctx, migration, routedHost, err)
+		}
 		if !providerCallOutcomeKnownFor(err, importAttempt) {
 			// No definite outcome (a deadline, a dropped connection): the
 			// import may still land the disk. The marker is kept and the
@@ -1533,6 +1588,15 @@ func (r *VMMigrationReconciler) handleImportingPhase(ctx context.Context, migrat
 			}
 			return res, holdErr
 		}
+		// A routed import's definite refusals that are not failures
+		// (ADR-0007 Addendum B, B1.2): its host unavailable (waits), a
+		// previous incarnation of the target (holds), a foreign domain with
+		// the target's name on the host (releases the pending host).
+		if routedHost != "" {
+			if res, handled, rerr := r.handleRoutedImportRefusal(ctx, migration, routedHost, err); handled {
+				return res, rerr
+			}
+		}
 		logger.Error(err, "Failed to start disk import")
 		return r.transitionToFailed(ctx, migration, "Failed to start disk import: "+migrationFailureDetail(err))
 	}
@@ -1540,6 +1604,7 @@ func (r *VMMigrationReconciler) handleImportingPhase(ctx context.Context, migrat
 	// The import went through: a later unverifiable refusal starts its
 	// backoff afresh.
 	r.importUnverifiable.reset(string(migration.UID))
+	r.routedImportHold.reset(string(migration.UID))
 
 	// Record the import's result (vmmigration_status_write.go): on a conflict
 	// it is applied to the live object rather than dropped by a requeue, since
@@ -1823,8 +1888,7 @@ func (r *VMMigrationReconciler) handleCreatingPhase(ctx context.Context, migrati
 
 	// The key is the same one the import phase named the landed disk for
 	// (migrationTargetVMKey).
-	vmKey := migrationTargetVMKey(migration)
-	targetVMName, targetNamespace := vmKey.Name, vmKey.Namespace
+	targetVMName := migrationTargetVMKey(migration).Name
 
 	// Only the VirtualMachine this migration created is its target. A cache
 	// miss is re-read from the API server, so a Create of an earlier
@@ -1840,6 +1904,11 @@ func (r *VMMigrationReconciler) handleCreatingPhase(ctx context.Context, migrati
 	case targetVMNotOwned:
 		return r.failTargetVMNotOwned(ctx, migration)
 	case targetVMOwned:
+		// A clustered target was created first and waits for its import
+		// (ADR-0007 Addendum B, B1): record the landed disk on it.
+		if awaitingMigrationImport(existingVM) {
+			return r.recordImportOnTarget(ctx, migration)
+		}
 		return r.awaitOwnedTargetVM(ctx, migration, existingVM)
 	}
 
@@ -1847,8 +1916,10 @@ func (r *VMMigrationReconciler) handleCreatingPhase(ctx context.Context, migrati
 	// from the API server above. It is not re-created under a new identity
 	// here: the landing disk most likely went with it. The migration fails;
 	// a retry starts over from Validating with the binding released
-	// (releaseGoneTargetBinding).
-	if migration.Status.TargetVMUID != "" {
+	// (releaseGoneTargetBinding). A routed import's target is never created
+	// here either: it was created and placed before the import, and a new VM
+	// would not be on the host the disk landed on.
+	if migration.Status.TargetVMUID != "" || migrationRoutedImport(migration) {
 		return r.transitionToFailedWithReason(ctx, migration, ReasonTargetVMGone, targetVMGoneMessage)
 	}
 
@@ -1867,50 +1938,6 @@ func (r *VMMigrationReconciler) handleCreatingPhase(ctx context.Context, migrati
 
 	logger.Info("Creating target VM", "name", targetVMName)
 
-	// User annotations first, without the operator's reserved virtrigaud.io
-	// keys (control annotations and provenance); the provenance below is
-	// written last so it cannot be overridden. The provenance annotations are
-	// informational: what binds the VM to this migration is its UID
-	// (status.targetVMUID) and its claim (migrationTargetClaimAnnotation).
-	targetAnnotations := userTargetAnnotations(migration.Spec.Target.Annotations)
-	targetAnnotations[migratedFromAnnotation] = fmt.Sprintf("%s/%s", migration.Namespace, migration.Spec.Source.VMRef.Name)
-	targetAnnotations[migrationProvenanceAnnotation] = migrationProvenance(migration)
-	targetAnnotations[importedDiskIDAnnotation] = migration.Status.ImportID
-	targetAnnotations[diskChecksumAnnotation] = migration.Status.DiskInfo.TargetChecksum
-
-	targetLabels, droppedLabels := migrationTargetLabels(migration.Spec.Target.Labels)
-	targetVM := &infrav1beta1.VirtualMachine{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:        targetVMName,
-			Namespace:   targetNamespace,
-			Labels:      targetLabels,
-			Annotations: targetAnnotations,
-		},
-		Spec: infrav1beta1.VirtualMachineSpec{
-			ProviderRef: migration.Spec.Target.ProviderRef,
-			PowerState:  migrationTargetPowerState(migration),
-		},
-	}
-	if targetNamespace != migration.Namespace && targetVM.Spec.ProviderRef.Namespace == "" {
-		// The disk was imported through the target Provider resolved in the
-		// MIGRATION's namespace (getProvider). A VM in another namespace would
-		// resolve an unqualified reference there instead — pin it.
-		targetVM.Spec.ProviderRef.Namespace = migration.Namespace
-	}
-
-	// Set class ref if provided
-	if migration.Spec.Target.ClassRef != nil {
-		targetVM.Spec.ClassRef = infrav1beta1.ObjectRef{
-			Name:      migration.Spec.Target.ClassRef.Name,
-			Namespace: migration.Namespace,
-		}
-	}
-
-	// Set networks if provided
-	if len(migration.Spec.Target.Networks) > 0 {
-		targetVM.Spec.Networks = migration.Spec.Target.Networks
-	}
-
 	// Set imported disk reference.
 	// This references the disk that was imported during the migration. Path is
 	// the authoritative provider-native location returned by ImportDisk and
@@ -1920,26 +1947,23 @@ func (r *VMMigrationReconciler) handleCreatingPhase(ctx context.Context, migrati
 	// target. When TargetPath is empty (older imports, or a provider that does
 	// not return one), Path stays empty and the VM controller falls back to its
 	// provider-default synthesis.
-	targetVM.Spec.ImportedDisk = &infrav1beta1.ImportedDiskRef{
+	targetVM, droppedLabels := newMigrationTargetVM(migration, &infrav1beta1.ImportedDiskRef{
 		DiskID: migration.Status.ImportID,
 		Path:   migration.Status.DiskInfo.TargetPath,
 		Format: migration.Status.DiskInfo.TargetFormat,
-		Source: "migration",
+		Source: importedDiskSourceMigration,
 		MigrationRef: &infrav1beta1.LocalObjectReference{
 			Name: migration.Name,
 		},
-	}
+	})
+	targetVM.Annotations[importedDiskIDAnnotation] = migration.Status.ImportID
+	targetVM.Annotations[diskChecksumAnnotation] = migration.Status.DiskInfo.TargetChecksum
 
 	logger.Info("Target VM configured with imported disk",
 		"disk_id", migration.Status.ImportID,
 		"path", migration.Status.DiskInfo.TargetPath,
 		"format", migration.Status.DiskInfo.TargetFormat,
 		"checksum", migration.Status.DiskInfo.TargetChecksum)
-
-	// Set placement if provided
-	if migration.Spec.Target.PlacementRef != nil {
-		targetVM.Spec.PlacementRef = migration.Spec.Target.PlacementRef
-	}
 
 	// Re-read the grants from the API server (not the cache) right before the
 	// Create in the target namespace.
@@ -2016,6 +2040,11 @@ func (r *VMMigrationReconciler) handleCreatingPhase(ctx context.Context, migrati
 // changes.
 func (r *VMMigrationReconciler) awaitOwnedTargetVM(ctx context.Context, migration *infrav1beta1.VMMigration,
 	vm *infrav1beta1.VirtualMachine) (ctrl.Result, error) {
+	// A routed import's target must still carry exactly the disk it landed
+	// (#416 M2).
+	if migrationRoutedImport(migration) && !routedTargetDiskMatches(migration, vm) {
+		return r.holdTargetDiskMismatch(ctx, migration)
+	}
 	bound := bindTargetVMUID(migration, vm)
 
 	// IMPORTANT: Check the Ready condition, NOT the Phase field
@@ -2134,6 +2163,11 @@ func (r *VMMigrationReconciler) handleValidatingTargetPhase(ctx context.Context,
 	}
 	if !migrationOwnsTargetVM(migration, targetVM) {
 		return r.failTargetVMNotOwned(ctx, migration)
+	}
+	// Never Ready (nor the source deleted) for a routed import whose target
+	// no longer carries the landed disk (#416 M2), read live here.
+	if migrationRoutedImport(migration) && !routedTargetDiskMatches(migration, targetVM) {
+		return r.holdTargetDiskMismatch(ctx, migration)
 	}
 	bound := bindTargetVMUID(migration, targetVM)
 
@@ -2348,6 +2382,19 @@ func (r *VMMigrationReconciler) handleFailedPhase(ctx context.Context, migration
 		return ctrl.Result{RequeueAfter: remainingWait}, nil
 	}
 
+	// A clustered target created before the import and still unbound is
+	// deleted before the retry (ADR-0007 Addendum B, B1.4): the retry creates
+	// and places a fresh one. A disk the earlier attempt's import may have
+	// landed on its host is cleaned up once that target is gone.
+	if gone, err := r.deleteUnboundTarget(ctx, migration); err != nil {
+		return ctrl.Result{}, err
+	} else if !gone {
+		return ctrl.Result{RequeueAfter: unboundTargetDeleteRequeue}, nil
+	}
+	if held, res, err := r.prepareRoutedRetry(ctx, migration); held || err != nil {
+		return res, err
+	}
+
 	// Perform retry
 	logger.Info("Retrying migration",
 		"retry_count", migration.Status.RetryCount+1,
@@ -2451,6 +2498,13 @@ func (r *VMMigrationReconciler) handleDeletion(ctx context.Context, migration *i
 	// way: the finalizer is kept while its delete can still succeed, and
 	// force-delete releases it with a StagedDiskLeftBehind Warning.
 	if hold, res, err := r.releaseStagedDiskForDeletion(ctx, migration); hold {
+		return res, err
+	}
+
+	// A clustered target created before the import and still unbound is
+	// deleted first, and waited for (ADR-0007 Addendum B, B1.4): the landed
+	// disk below is cleaned up only once that VM is gone.
+	if hold, res, err := r.releaseUnboundTargetForDeletion(ctx, migration); hold {
 		return res, err
 	}
 
@@ -3688,6 +3742,13 @@ func (r *VMMigrationReconciler) gateMigrationStorageBackend(
 			backend, sourceProvider.Name, storagemigration.BackendS3, storagemigration.BackendNFS)
 	}
 
+	// A clustered target lands the disk on a host, from a source the host
+	// reads itself: s3 or nfs only. pvc would be read in the provider pod
+	// (ADR-0007 Addendum B, B3, B7.5).
+	if isClusterTopology(targetProvider) && backend == storagemigration.BackendPVC {
+		return clusteredTargetPVCRefusedMessage
+	}
+
 	exportBackends := reportedExportBackends(sourceProvider)
 	if !containsString(exportBackends, backend) {
 		return fmt.Sprintf(
@@ -4097,7 +4158,12 @@ func (r *VMMigrationReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		For(&infrav1beta1.VMMigration{}).
 		Watches(&corev1.Namespace{},
 			handler.EnqueueRequestsFromMapFunc(r.migrationsTargetingNamespace),
-			builder.WithPredicates(allowedSourceNamespacesChanged()))
+			builder.WithPredicates(allowedSourceNamespacesChanged())).
+		// A clustered target's placement (ADR-0007 Addendum B, B1) re-drives
+		// the migration that created it as soon as its pending host changes.
+		Watches(&infrav1beta1.VirtualMachine{},
+			handler.EnqueueRequestsFromMapFunc(migrationForTargetVM),
+			builder.WithPredicates(targetPlacementChanged()))
 	return withConsumerGrantWatches(b, r.migrationsForGrantChange).
 		WithOptions(controller.Options{
 			MaxConcurrentReconciles: 3, // Limit concurrent reconciliations to prevent API server overload

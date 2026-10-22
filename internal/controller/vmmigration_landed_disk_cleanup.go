@@ -135,7 +135,7 @@ const (
 	landedDiskLeftNamespace = "The migration's landed disk was not deleted: the target namespace no longer grants this " +
 		"migration's namespace."
 	landedDiskLeftUnrecorded = "The migration's landed disk was not deleted: the VirtualMachine the import was sent for, " +
-		"or the Provider it was sent to, was not recorded."
+		"or the Provider (or, on a clustered Provider, the host) it was sent to, was not recorded."
 )
 
 // landedDiskLeftBehindError is a landed-disk delete that can never succeed:
@@ -248,11 +248,20 @@ func landedDiskCleanupWanted(m *infrav1beta1.VMMigration, trigger stagingCleanup
 // landing part of the disk is still cleaned up — for that VM, on that
 // Provider only.
 func markLandedDiskMayExist(m *infrav1beta1.VMMigration, key client.ObjectKey, provider *infrav1beta1.Provider) bool {
+	return markLandedDiskMayExistOn(m, key, provider, "")
+}
+
+// markLandedDiskMayExistOn is markLandedDiskMayExist for an import routed to
+// host, a Host of a clustered target Provider (ADR-0007 Addendum B, B4): the
+// host is recorded with the Provider's UID (importTarget.host), so a re-sent
+// import and the landed-disk and nfs staged-disk deletes go to that host
+// only. host is empty for a single-host or thin-client target.
+func markLandedDiskMayExistOn(m *infrav1beta1.VMMigration, key client.ObjectKey, provider *infrav1beta1.Provider, host string) bool {
 	changed := false
 	if m.Status.StorageInfo == nil {
 		m.Status.StorageInfo = &infrav1beta1.MigrationStorageInfo{}
 	}
-	want := infrav1beta1.MigrationImportTarget{Namespace: key.Namespace, Name: key.Name, ProviderUID: string(provider.UID)}
+	want := infrav1beta1.MigrationImportTarget{Namespace: key.Namespace, Name: key.Name, ProviderUID: string(provider.UID), Host: host}
 	if t := m.Status.StorageInfo.ImportTarget; t == nil || *t != want {
 		m.Status.StorageInfo.ImportTarget = &want
 		changed = true
@@ -547,6 +556,16 @@ func (r *VMMigrationReconciler) cleanupLandedDisk(ctx context.Context, m *infrav
 	if string(provider.UID) != recorded.ProviderUID {
 		return landedDiskDone{}, landedLeftBehind(landedDiskLeftProviderChanged, nil)
 	}
+	// A clustered Provider's landed disk is on the host the import was routed
+	// to (ADR-0007 Addendum B, B4); the delete goes there only. Without a
+	// recorded host (an impossible state) it is never sent.
+	targetHost := ""
+	if isClusterTopology(provider) {
+		if recorded.Host == "" {
+			return landedDiskDone{}, landedLeftBehind(landedDiskLeftUnrecorded, nil)
+		}
+		targetHost = recorded.Host
+	}
 	instance, err := r.getProviderInstance(ctx, provider)
 	if err != nil {
 		return landedDiskDone{}, fmt.Errorf("get target provider instance: %w", err)
@@ -572,9 +591,10 @@ func (r *VMMigrationReconciler) cleanupLandedDisk(ctx context.Context, m *infrav
 		path = m.Status.DiskInfo.TargetPath
 	}
 	_, err = deleter.DeleteLandedDisk(ctx, contracts.LandedDiskDeleteRequest{
-		Migration: contracts.ObjectIdentity{UID: string(m.UID), Namespace: m.Namespace, Name: m.Name},
-		TargetVM:  contracts.ObjectIdentity{Namespace: key.Namespace, Name: key.Name},
-		Path:      path,
+		Migration:    contracts.ObjectIdentity{UID: string(m.UID), Namespace: m.Namespace, Name: m.Name},
+		TargetVM:     contracts.ObjectIdentity{Namespace: key.Namespace, Name: key.Name},
+		Path:         path,
+		TargetHostID: targetHost,
 	})
 	switch {
 	case err == nil:

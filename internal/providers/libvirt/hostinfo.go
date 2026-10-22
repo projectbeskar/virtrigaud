@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -292,13 +293,15 @@ func parseDomCapsMachineEmulator(domCapsXML string) (machineTypes []string, emul
 	return machineTypes, dc.Path, nil
 }
 
-// collectStorageBytes best-effort sums the available bytes of every ACTIVE
-// storage pool the host reports (`virsh pool-list --all`, then `virsh pool-info
-// --bytes` per active pool). It never fails the caller: any error (pools
-// unavailable, --bytes unsupported on an old virsh, an odd pool-info) yields 0
-// for that pool and is logged at debug. The host-inventory file carries no pool
-// configuration yet, so this is a whole-host best-effort until per-pool
-// scheduling constraints land (ADR-0007).
+// collectStorageBytes best-effort reports the available bytes of the host's
+// `default` storage pool — the pool VM disks, clones and imported disks land
+// in (defaultStoragePool) — when it is ACTIVE (`virsh pool-list --all`, then
+// `virsh pool-info --bytes default`). Other pools are not counted: space there
+// cannot hold a disk VirtRigaud lands in `default`, and summing them made the
+// scheduler's disk-space filter (ADR-0007 Addendum B, B7.4) admit hosts whose
+// `default` pool is full (#416 M3). It never fails the caller: any error
+// (pools unavailable, no active `default` pool, --bytes unsupported on an old
+// virsh, an odd pool-info) yields 0 and is logged at debug.
 func collectStorageBytes(ctx context.Context, c hostconn.Conn, id hostconn.HostID, logger *slog.Logger) int64 {
 	listRes, err := c.Virsh(ctx, "pool-list", "--all")
 	if err != nil {
@@ -306,23 +309,23 @@ func collectStorageBytes(ctx context.Context, c hostconn.Conn, id hostconn.HostI
 			"host", string(id), "error", err.Error())
 		return 0
 	}
-	var total int64
-	for _, pool := range parseActivePoolNames(listRes.Stdout) {
-		infoRes, ierr := c.Virsh(ctx, "pool-info", "--bytes", pool)
-		if ierr != nil {
-			logger.Debug("libvirt host inventory: pool-info failed (best-effort)",
-				"host", string(id), "pool", pool, "error", ierr.Error())
-			continue
-		}
-		avail, ok := parsePoolAvailableBytes(infoRes.Stdout)
-		if !ok {
-			logger.Debug("libvirt host inventory: pool-info missing Available (best-effort)",
-				"host", string(id), "pool", pool)
-			continue
-		}
-		total += avail
+	if !slices.Contains(parseActivePoolNames(listRes.Stdout), defaultStoragePool) {
+		logger.Debug("libvirt host inventory: no active default storage pool (best-effort)", "host", string(id))
+		return 0
 	}
-	return total
+	infoRes, err := c.Virsh(ctx, "pool-info", "--bytes", defaultStoragePool)
+	if err != nil {
+		logger.Debug("libvirt host inventory: pool-info failed (best-effort)",
+			"host", string(id), "pool", defaultStoragePool, "error", err.Error())
+		return 0
+	}
+	avail, ok := parsePoolAvailableBytes(infoRes.Stdout)
+	if !ok {
+		logger.Debug("libvirt host inventory: pool-info missing Available (best-effort)",
+			"host", string(id), "pool", defaultStoragePool)
+		return 0
+	}
+	return avail
 }
 
 // parseActivePoolNames parses `virsh pool-list --all` tabular output for the

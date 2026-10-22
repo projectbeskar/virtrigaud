@@ -314,7 +314,7 @@ each `HostInfo` field is fed by exactly one command:
 | `cpu_model`, `cpu_features` | `virsh capabilities` → `<host><cpu><model>` and the `<feature>` flags (parsed via typed `libvirtxml.Caps`). |
 | `machine_types` | `virsh domcapabilities` → the default `<machine>` (typed `libvirtxml.DomainCaps`). See the note below. |
 | `emulator_version` | `virsh domcapabilities` → `<path>` (the emulator binary path). See the note below. |
-| `allocatable_storage` | `virsh pool-list --all` + `virsh pool-info --bytes` on each **active** pool, summing `Available`. Best-effort. |
+| `allocatable_storage` | `virsh pool-info --bytes default`: the `Available` bytes of the **`default`** pool (where VM disks, clones and imported disks land), 0 when it is not active (`virsh pool-list --all`). Other pools are not counted. Best-effort. |
 | `health` | `nodeinfo` reachability: `Ready` when the connection and `nodeinfo` succeed, `NotReady` otherwise. |
 
 **`allocatable` = host TOTAL, not free-after-overcommit.** `allocatable_cpu` and
@@ -2028,10 +2028,140 @@ comes after v0.4.0.
 A `VMMigration` whose **target** Provider has `topology: cluster` needs the
 disk to land on the host where the target VM will run. ADR-0007 Addendum B
 creates the target VirtualMachine first, lets the ordinary scheduler place
-it, and sends the import to its pending host. **Status: the provider side
-(slices 1 and 2) has shipped; the manager side (slice 3) has not.** Until it
-ships, the manager refuses a clustered target at `Validating`, before any
-side effect, whatever the provider reports.
+it, and sends the import to its pending host. Slices 1 and 2 (provider) and
+slice 3 (manager) have shipped. Single-host, vSphere and Proxmox targets keep
+import-then-create, unchanged.
+
+**What the manager does (slice 3).** Only for a target Provider with
+`topology: cluster` that reports `supportsRoutedImport` (read at runtime with
+`GetCapabilities`). One that does not — an older clustered provider — fails
+the migration at `Validating` with reason `ClusteredTargetUnsupported` and a
+constant message, before any side effect; so does a target VirtualMachine in
+another namespace than the VMMigration's (its landed disk could never be
+proven, see below) and the `pvc` backend (only `s3` and `nfs` land on a host).
+
+1. **`Validating`, before the source is powered off, snapshotted or
+   exported.** The migration reads the source disk's virtual size
+   (`GetDiskInfo`) and creates the target VirtualMachine with the usual claim
+   (#394): `spec.importedDisk` names the migration (`migrationRef`, `source:
+   migration`) but no disk yet — an **empty `diskID`**, which the CRD accepts
+   only while `migrationRef` is set — and carries the disk size in
+   `sizeGiB`. The VirtualMachine controller places it like any clustered
+   create (R1, R4, the admission under the per-Provider assume lock, the
+   `pendingHost` checked write, any `VMPlacementPolicy`), **filtering out the
+   hosts whose `status.allocatableStorageBytes` cannot hold the disk** (or that
+   report none). Its capacity is reserved from here on. It then holds the VM
+   with `Provisioning=False/WaitingForImport` and sends no `Create`. The
+   migration waits with condition **`TargetPlaced`** (False, with the target's
+   `Placed` reason — `Unschedulable`, `RestorePending`, ... — or
+   `WaitingForPlacement`) until the target has a pending host; it never fails
+   for that on its own. Delete the VMMigration to give up.
+2. **`Exporting`** is unchanged.
+3. **`Importing`.** The target VM is re-read from the API server. One that
+   already has a `status.id`, or no pending host, fails the attempt with
+   reason `TargetNotPending`. Its pending host is recorded in
+   `status.storageInfo.importTarget.host` (with the Provider's UID and
+   `LandedDiskCleanup=Unknown`) **before** the `ImportRequested` marker, and
+   `ImportDisk` is sent with `target_host_id` and the target VM's UID. A
+   re-send goes to the recorded host only; a pending host that has changed
+   since holds the migration (`ImportOutcomeUnknown`) for an operator. To
+   send it to the current pending host instead, check the recorded host for a
+   landed disk, remove it, and confirm the attempt as not performed
+   (`virtrigaud.io/operation-outcome=not-performed@<attempt id>`): the import
+   is then re-recorded for, and sent to, the current pending host.
+4. **`Creating`.** No VM is created: the landed disk (`diskID`, `path`,
+   `format`) is written into the existing target's `spec.importedDisk`, with
+   the live object's resourceVersion as precondition. The VirtualMachine
+   controller then creates the VM on its pending host with the disk attached
+   in place. A target whose pending host is no longer the recorded import
+   host is held (`Ready=False/TargetHostMoved`) for an operator.
+5. **`Validating-Target`, `Ready`** are unchanged, except that a routed
+   migration completes only on a target whose `spec.importedDisk` is still
+   exactly the disk it imported (`migrationRef`, `diskID`, `path`). One that
+   was changed — for example by someone who may edit the VM, during the
+   import — holds the migration (`Ready=False/TargetDiskMismatch`, one Warning
+   event): it never reaches `Ready`, so `spec.source.deleteAfterMigration`
+   never runs. (An admission rule reserving `spec.importedDisk` of a waiting
+   target for the manager is a follow-up.)
+
+How the manager answers the routed import's refusals (nothing was landed in
+any of them):
+
+| Provider answer | Manager |
+|---|---|
+| `AlreadyExists`, no reason (a foreign or unstamped domain with the target's name on the landing host) | **Releases the host**: one checked status write on its own target clears `pendingHost` and adds the host to `status.placement.excludedHosts` (`Placed=False/HostExcluded`); the VM is placed again and the import follows it (`TargetPlaced=False/TargetHostReleased` meanwhile) |
+| `FailedPrecondition` + `HOST_STORAGE_MISCONFIGURED` (the host's `default` pool is not at `/var/lib/libvirt/images`) | Releases and excludes the host the same way |
+
+The release persists the VMMigration first (the import marker removed,
+`TargetPlaced=False/TargetHostReleased`, `importTarget.host` cleared), then
+releases the VM in a checked status write, retried in place on a conflict. A
+failure between the two leaves the VM on the refused host; the next import is
+refused there again and the release is made then. When `excludedHosts` was
+full and its oldest entry dropped, the next attempt waits 2 minutes, as for a
+create.
+
+| Provider answer | Manager |
+|---|---|
+| `AlreadyExists` + `VM_PREVIOUS_INCARNATION` (either kind) | Holds (`Importing=False/ImportTargetPreviousIncarnation`), re-sent with a backoff |
+| `FailedPrecondition` + `VM_DISK_IN_USE` (the landing file is used by a domain on a host) | Holds (`LandingDiskInUse`); never re-placed — on a shared pool that cannot help |
+| Any other `FailedPrecondition` (a symlink at the landing name, the guard, a missing host tool, a host not reached over `ssh://`) | Holds for an operator (`LandingHostRefused`) |
+| `Unavailable` + `HOST_UNAVAILABLE` or `VM_DISK_CHECK_FAILED` | Waits (`TargetHostUnavailable`); the target is never moved off its host automatically |
+| `Unavailable` + `VM_OPERATION_FAILED` (not performed) | Re-sent on the same host with a backoff (`ImportNotPerformed`). Each re-send downloads the disk again, so after 5 minutes of consecutive "not performed" answers (about five) the attempt fails (reason `ImportNotPerformed`) and `spec.options.retryPolicy` decides: a retry deletes the unbound target and places a fresh one |
+| No definite answer | The R6 rules: held, or re-sent after 35 minutes (the clustered provider reports `resend_safe_import_backends: [s3, nfs]`) — to the recorded host only |
+| `InvalidArgument`, the disk-size refusals | As for a single-host target |
+
+Each hold is re-sent at 15 s, doubling to 5 minutes.
+
+**The VM's side.**
+
+- A VM with an empty `diskID` and a `migrationRef` is **never created**. Its
+  hold is decided from the referenced VMMigration's status (tenants cannot
+  write it): a migration in the VM's namespace that created this VM (its
+  recorded UID or claim). One whose migration is gone, or did not create it,
+  is held as `Provisioning=False/MigrationNotFound` and is not even placed —
+  a forged `spec.importedDisk` only holds its own VM.
+- **The pin.** Once the disk landed, the VM is pinned to its pending host: a
+  `Create` refused there with a name conflict holds it
+  (`Placed=False/ImportedDiskPinned`, phase `Failed`) instead of excluding the
+  host, and A6.2's move to an own domain's host is not applied (the own-domain
+  hold, `OwnDomainOnAnotherHost`, still applies). An administrator resolves
+  the conflicting domain on the host.
+- **Placed only where its disk is.** A migration target whose migration
+  recorded an import to a host (`importTarget.host`) is scheduled onto that
+  host only — after an administrator cleared its pending host, or for the
+  fresh target of a retry that kept its landed disk. If that host cannot take
+  it, it stays `Unschedulable`.
+
+**Failure, retry and deletion (B1.4).** A migration that fails for good, is
+retried, or is deleted while its target is still unbound (no `status.id`)
+**deletes that target VM first** (UID precondition), freeing its capacity; the
+VM's finalizer runs the owner-checked `Delete` on its pending host. The
+landed disk is cleaned up only once the target VM is gone — through the
+recorded host (`DeleteLandedDisk` with `target_host_id`), as the `nfs`
+staged-disk delete is (`DeleteStagedDisk` with `target_host_id`; `s3` is
+deleted from the pod). An `nfs` staged object whose import was never routed,
+and whose target VM is gone, is emptied through any Ready host of the
+Provider (the object is on the NFS export, which every host reaches); while
+none is Ready the delete is held.
+
+A **retry** after a routed import first deletes the previous attempt's landed
+disk on its recorded host (unless `cleanupPolicy: Never`). Once the provider
+confirms it deleted, the import is forgotten completely — `status.importID`,
+the landed path, the `Importing` condition, the `ImportRequested` marker,
+`importTarget.host` — and the retry imports again onto its fresh target
+(and exports again, if the staged object is gone too). A landed disk that is
+**kept** (`cleanupPolicy: Never`, a VM uses it, or it was left behind) keeps
+`importTarget.host`: the fresh target is placed on that host only and the
+retry reuses the disk there, as a single-host retry does — it is never landed
+again on another host (on a shared pool that would overwrite the kept disk).
+A retry whose target is already bound to exactly the imported disk reuses it.
+
+A deleting VMMigration keeps its finalizer while the target VM's delete is
+held (for example `DeleteBlocked` on an unreachable host);
+`virtrigaud.io/force-delete=true` releases it. If the unbound target could not
+even be asked to delete, force-delete records an `UnboundTargetVMLeft`
+Warning: that VM keeps its placement and the capacity reserved on its pending
+host and is never created (`MigrationNotFound`) — delete it yourself.
 
 **What the clustered libvirt provider serves.**
 
@@ -2149,11 +2279,9 @@ How each failure is answered (not performed, refused, or unknown) is in
   pool are protected across hosts, and a previous incarnation holds its
   VirtualMachine (A6.1); a restored or re-created VM is held before it is
   scheduled by the restore marker and the pre-schedule check (A6.2, see
-  [Backup and restore](clustered-restore.md)). The provider side of migration
-  **into** a clustered provider is in place (Addendum B slices 1 and 2: the
-  routed `ImportDisk` and its cleanup, `supports_routed_import`), but the
-  manager still refuses a clustered migration target at `Validating` until
-  slice 3 ships.
+  [Backup and restore](clustered-restore.md)). A clustered provider can be
+  a migration **target** (Addendum B: the target is placed first and the
+  disk lands on its host; [Migration into a clustered provider](#migration-into-a-clustered-provider-addendum-b)).
   The `vprovider.kb.io` validating webhook enforces the topology×type rule at
   admission (ADR-0007 D2). Until Addendum A slice 5 validates a real clustered VM
   end to end, do not run workloads on `topology: cluster`.

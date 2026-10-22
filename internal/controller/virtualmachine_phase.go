@@ -72,6 +72,7 @@ var restoreHoldPhaseReasons = map[string]bool{
 	k8s.ReasonOwnDomainOnAnotherHost:       true,
 	k8s.ReasonUniquenessCheckFailed:        true,
 	k8s.ReasonProviderLacksListOwnerFilter: true,
+	k8s.ReasonImportedDiskPinned:           true,
 }
 
 // createFailurePhaseReasons are the Ready=False reasons that put a

@@ -713,6 +713,16 @@ type MigrationImportTarget struct {
 	// +optional
 	// +kubebuilder:validation:MaxLength=36
 	ProviderUID string `json:"providerUID,omitempty"`
+
+	// Host is the Host of a clustered target Provider the import was routed
+	// to: the target VirtualMachine's pending host, recorded with ProviderUID
+	// before the import is sent (ADR-0007 Addendum B, B4). A re-sent import
+	// and the landed-disk and nfs staged-disk deletes go to this host only.
+	// Empty for a single-host or thin-client target. Written by the
+	// controller only.
+	// +optional
+	// +kubebuilder:validation:MaxLength=253
+	Host string `json:"host,omitempty"`
 }
 
 // ValidationResults contains results of validation checks

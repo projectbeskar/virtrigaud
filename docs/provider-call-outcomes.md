@@ -196,8 +196,9 @@ A clustered libvirt provider routes `ImportDisk` to the target VM's pending host
 (ADR-0007 Addendum B). Its failures are classified like the single-host import's,
 with two differences: a host command stopped by `timeout(1)` is unknown, and
 `HOST_UNAVAILABLE` (which the manager reads as "nothing done") is answered only when
-the host never answered a command of the call. (The manager does not send an import
-to a clustered target until Addendum B slice 3; these answers are what it will read.)
+the host never answered a command of the call. How the manager acts on each answer
+(release the target's host, hold, wait, re-send) is in
+[Migration into a clustered provider](clustered-provider-inventory.md#migration-into-a-clustered-provider-addendum-b).
 
 | Failure | Answer |
 |---|---|
