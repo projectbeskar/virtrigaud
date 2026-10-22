@@ -3105,6 +3105,12 @@ func vmUpdateNeedsReconcile(oldVM, newVM *infravirtrigaudiov1beta1.VirtualMachin
 		return true
 	}
 	if newVM.DeletionTimestamp.IsZero() {
+		// A pending host released by another writer (a migration's B1.2
+		// release, ADR-0007 Addendum B, or an administrator) re-places the
+		// unbound VM at once.
+		if newVM.Status.ID == "" && pendingHost(oldVM) != "" && pendingHost(newVM) == "" {
+			return true
+		}
 		// An operator resolving a create held for an unknown outcome.
 		return oldVM.Annotations[createOutcomeAnnotation] != newVM.Annotations[createOutcomeAnnotation]
 	}

@@ -4122,7 +4122,12 @@ func (r *VMMigrationReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		For(&infrav1beta1.VMMigration{}).
 		Watches(&corev1.Namespace{},
 			handler.EnqueueRequestsFromMapFunc(r.migrationsTargetingNamespace),
-			builder.WithPredicates(allowedSourceNamespacesChanged()))
+			builder.WithPredicates(allowedSourceNamespacesChanged())).
+		// A clustered target's placement (ADR-0007 Addendum B, B1) re-drives
+		// the migration that created it as soon as its pending host changes.
+		Watches(&infrav1beta1.VirtualMachine{},
+			handler.EnqueueRequestsFromMapFunc(migrationForTargetVM),
+			builder.WithPredicates(targetPlacementChanged()))
 	return withConsumerGrantWatches(b, r.migrationsForGrantChange).
 		WithOptions(controller.Options{
 			MaxConcurrentReconciles: 3, // Limit concurrent reconciliations to prevent API server overload

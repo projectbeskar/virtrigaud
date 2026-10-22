@@ -21,14 +21,19 @@ import (
 	stderrors "errors"
 	"fmt"
 	"math"
+	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/event"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	infrav1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
 	conditions "github.com/projectbeskar/virtrigaud/internal/k8s"
@@ -845,4 +850,43 @@ func (r *VMMigrationReconciler) stagedDiskHost(ctx context.Context, migration *i
 		return h, nil
 	}
 	return vm.Status.Placement.PendingHost, nil
+}
+
+// migrationForTargetVM maps a VirtualMachine to the VMMigration its
+// provenance annotation names ("<namespace>/<name>", written by the
+// migration that created it). The annotation is only a trigger: the
+// reconcile decides everything from the migration's status (its UID or claim).
+func migrationForTargetVM(_ context.Context, obj client.Object) []reconcile.Request {
+	ns, name, ok := strings.Cut(obj.GetAnnotations()[migrationProvenanceAnnotation], "/")
+	if !ok || ns == "" || name == "" {
+		return nil
+	}
+	return []reconcile.Request{{NamespacedName: types.NamespacedName{Namespace: ns, Name: name}}}
+}
+
+// targetPlacementChanged passes a VirtualMachine update whose pending host,
+// bound host or deletion changed, for a VM a migration created (it carries
+// the provenance annotation).
+func targetPlacementChanged() predicate.Predicate {
+	hosts := func(o client.Object) (string, string) {
+		vm, ok := o.(*infrav1beta1.VirtualMachine)
+		if !ok || vm.Status.Placement == nil {
+			return "", ""
+		}
+		return vm.Status.Placement.PendingHost, vm.Status.Placement.Host
+	}
+	created := func(o client.Object) bool { return o.GetAnnotations()[migrationProvenanceAnnotation] != "" }
+	return predicate.Funcs{
+		CreateFunc: func(event.CreateEvent) bool { return false },
+		UpdateFunc: func(e event.UpdateEvent) bool {
+			if !created(e.ObjectNew) {
+				return false
+			}
+			op, oh := hosts(e.ObjectOld)
+			np, nh := hosts(e.ObjectNew)
+			return op != np || oh != nh || e.ObjectOld.GetDeletionTimestamp().IsZero() != e.ObjectNew.GetDeletionTimestamp().IsZero()
+		},
+		DeleteFunc:  func(e event.DeleteEvent) bool { return created(e.Object) },
+		GenericFunc: func(event.GenericEvent) bool { return false },
+	}
 }
