@@ -5,6 +5,32 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-10-22 09:47] - VMMigration into a clustered provider: target-first flow (ADR-0007 Addendum B slice 3, R11)
+**Author:** @wrkode (William Rizzo)
+
+### Added
+- `api/infra.virtrigaud.io/v1beta1/vmmigration_types.go`: `MigrationImportTarget.host` (status): the clustered host the import was routed to; re-sends and the landed / nfs staged-disk deletes go there only.
+- `internal/controller/vmmigration_clustered_target.go`: the migration's half of a clustered target. Validating gates on the runtime `supportsRoutedImport` (constant `ClusteredTargetUnsupported` refusal; also for a target in another namespace and for `pvc`), reads the source disk size, creates the target VM first (claim, empty `diskID`, `sizeGiB`) and waits with the new `TargetPlaced` condition until it has a pending host — before the source is powered off or exported. Importing re-reads the target live (`TargetNotPending` otherwise), records `importTarget.host` before the `ImportRequested` marker and sends `ImportDisk` with `target_host_id` and the VM's UID; a re-send goes only to the recorded host. Creating writes the landed disk into the target's `spec.importedDisk` (resourceVersion precondition) instead of creating a VM. A plain `AlreadyExists` or `HOST_STORAGE_MISCONFIGURED` from the landing host releases the target's pending host (checked status write: `pendingHost` cleared, host added to `excludedHosts`); a previous incarnation, `VM_DISK_IN_USE`, any other pre-write `FailedPrecondition`, `HOST_UNAVAILABLE` / `VM_DISK_CHECK_FAILED` and not-performed answers hold on a paced backoff. A migration that fails for good, is retried or is deleted deletes its unbound target VM first (UID precondition) and cleans up the landed disk only once it is gone; a retry also cleans up the previous attempt's landed disk.
+- `internal/controller/virtualmachine_import_wait.go`: the VirtualMachine controller places a migration target and holds it (`Provisioning=False/WaitingForImport`) without a `Create` while its `diskID` is empty; a `migrationRef` naming a migration that is gone or did not create the VM is held unplaced (`MigrationNotFound`). After the import the host is pinned: a `Create` name conflict holds `Placed=False/ImportedDiskPinned` (no slice-2 exclusion, no A6.2 move).
+- `internal/scheduler`: `Request.RequiredStorageBytes` filters hosts whose `allocatableStorageBytes` cannot hold a migration target's disk (or report none).
+- `internal/k8s/conditions.go`: reasons `WaitingForImport`, `MigrationNotFound`, `ImportedDiskPinned`.
+- `examples/vmmigration-into-clustered.yaml`; envtest (`vmmigration_clustered_target_envtest_test.go`) and unit tests.
+
+### Changed
+- `api/infra.virtrigaud.io/v1beta1/virtualmachine_types.go`: `ImportedDiskRef.diskID` may be empty while `migrationRef` is set (CEL rule replacing `MinLength=1`; an additive relaxation). CRDs regenerated.
+- `internal/controller/vmmigration_landed_disk_cleanup.go`, `vmmigration_staging_cleanup.go`: routed `DeleteLandedDisk` / nfs `DeleteStagedDisk` carry `target_host_id`; a clustered import target without a recorded host is left behind, never sent.
+- `internal/controller/vmmigration_controller.go`: the clustered-target refusal at Validating is replaced by the gate above; the VMMigration controller watches its target VMs' placement; RBAC markers for `virtualmachines` delete and `virtualmachines/status`.
+- `docs/clustered-provider-inventory.md`, `docs/upgrading.md`, `docs/provider-call-outcomes.md`, `docs/cross-namespace-targets.md`, `examples/README.md`.
+
+### Why
+ADR-0007 Addendum B (accepted 2026-10-22, decisions B7): a clustered Provider becomes a migration target without a second scheduler — the target is placed (and its capacity reserved) before the source is touched, and the disk lands on the host the VM will run on. Single-host, vSphere and Proxmox targets keep import-then-create, unchanged.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout (CRDs: `VirtualMachine`, `VMSet`, `VMMigration`)
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-10-22 08:52] - Clustered libvirt provider routes ImportDisk and its cleanup (ADR-0007 Addendum B slices 1-2, R11)
 **Author:** @wrkode (William Rizzo)
 
