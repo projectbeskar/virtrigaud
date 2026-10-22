@@ -642,12 +642,16 @@ message ImportDiskRequest {
   string storage_options_json = 10; // JSON-encoded backend-specific options (ADR-0006; empty in Slice 0)
 
   // target_vm names the Kubernetes VirtualMachine the disk is imported for (a
-  // VMMigration's target): its namespace and name; uid is empty, as the
-  // VirtualMachine does not exist yet. A provider that attaches an imported
-  // disk in place only when it carries the VM's own name derives the landing
-  // name from it with the same rule its Create uses (the libvirt provider:
-  // "<namespace>.<name>-migrated"), so the naming rule has one owner, the
-  // provider. The landing path is returned in path, which the operator hands
+  // VMMigration's target): its namespace and name. On a single-host or
+  // thin-client provider uid is empty (the VirtualMachine does not exist yet)
+  // and ignored. A CLUSTERED provider requires uid (a canonical UUID; ADR-0007
+  // Addendum B, B2): the migration creates its target VirtualMachine first,
+  // and the uid classifies a domain of the same name already on the landing
+  // host; it never authorizes writing over a file in use. A provider that
+  // attaches an imported disk in place only when it carries the VM's own name
+  // derives the landing name from it with the same rule its Create uses (the
+  // libvirt provider: "<namespace>.<name>-migrated"), so the naming rule has
+  // one owner, the provider. The landing path is returned in path, which the operator hands
   // back to the VM unchanged. Additive and backward-compatible: other providers
   // ignore it, and an unset value keeps the legacy target_name naming.
   ObjectIdentity target_vm = 11;
@@ -663,6 +667,17 @@ message ImportDiskRequest {
   // cannot read that size. Nothing is landed either way. Additive and
   // backward-compatible: a provider that predates it ignores it.
   int64 max_virtual_size_bytes = 12;
+
+  // target_host_id names the host of a CLUSTERED provider the disk lands on:
+  // the target VirtualMachine's status.placement.pendingHost, which the
+  // ordinary scheduler chose (ADR-0007 Addendum B, B1/B2). It carries A1's
+  // rules: the value is agnostic to the provider; the manager never sends it
+  // to a single-host or thin-client provider (they ignore it); a clustered
+  // provider requires it and answers an empty value with InvalidArgument; it
+  // never picks a host itself. An unknown, removed or draining host is
+  // Unavailable + HOST_UNAVAILABLE before anything runs. Sent only to a
+  // provider that reports supports_routed_import. Additive.
+  string target_host_id = 13;
 }
 
 message ImportDiskResponse {
@@ -994,6 +1009,17 @@ message GetCapabilitiesResponse {
   // disk as left behind, with a Warning. Fields 27 and 28 are taken by
   // resend_safe_export_backends / resend_safe_import_backends (PR #402).
   bool supports_landed_disk_delete = 29;
+
+  // supports_routed_import reports that a CLUSTERED provider routes ImportDisk
+  // to ImportDiskRequest.target_host_id (with target_vm carrying the target
+  // VirtualMachine's uid), DeleteLandedDisk to
+  // DeleteLandedDiskRequest.target_host_id with a cross-host in-use scan, and
+  // the nfs DeleteStagedDisk to DeleteStagedDiskRequest.target_host_id
+  // (ADR-0007 Addendum B, B5). The manager accepts a clustered Provider as a
+  // VMMigration target only when it reports it (read at runtime, the D7 double
+  // gate). False on single-host and thin-client providers (their import is not
+  // routed) and on a clustered provider older than Addendum B. Additive.
+  bool supports_routed_import = 30;
 }
 
 // DeleteStagedDisk removes the staging object a VMMigration's ExportDisk wrote
@@ -1048,6 +1074,15 @@ message DeleteStagedDiskRequest {
   // stage location. Unset: only the staged object is removed. Providers that
   // keep no such copy ignore it.
   ObjectIdentity target_vm = 7;
+  // target_host_id is the host of a CLUSTERED target provider the
+  // migration's import was sent to (the recorded import target host; ADR-0007
+  // Addendum B, B4). An nfs staged object is emptied by that host's qemu-img,
+  // so a clustered provider requires it for backend "nfs" (InvalidArgument
+  // when empty) and answers an unknown, removed or draining host with
+  // Unavailable + HOST_UNAVAILABLE. s3 objects are removed from the provider
+  // pod and ignore it. Single-host and thin-client providers ignore it.
+  // Additive.
+  string target_host_id = 8;
 }
 
 // StagedDiskDeleteOutcome is what DeleteStagedDisk did.
@@ -1108,6 +1143,14 @@ message DeleteLandedDiskRequest {
   // path is the landing path ImportDisk returned (ImportDiskResponse.path), as
   // the manager recorded it, or empty when no import result was recorded.
   string path = 3;
+  // target_host_id is the host of a CLUSTERED target provider the import
+  // landed the disk on (the recorded import target host; ADR-0007 Addendum B,
+  // B4). A clustered provider requires it (InvalidArgument when empty), removes
+  // the disk on that host only, and scans EVERY host of the Provider for a
+  // domain that uses the file (the pool may be shared), failing closed when a
+  // host cannot be scanned. Single-host and thin-client providers ignore it.
+  // Additive.
+  string target_host_id = 4;
 }
 
 // LandedDiskDeleteOutcome is what DeleteLandedDisk did.
