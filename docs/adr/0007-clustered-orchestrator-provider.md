@@ -36,12 +36,12 @@ now pinned by a test over a real gRPC hop). See the *Slice 5 (lab, 2026-09-30)* 
 the full list and for what a single-`Host` lab cannot exercise: multi-host
 placement, the unreachable-host path, and snapshot revert.
 
-**Addendum B (Proposed, 2026-10-18): migration into a clustered provider.**
+**Addendum B (Accepted, 2026-10-22): migration into a clustered provider.**
 A `VMMigration` whose target is a clustered Provider is still refused at
 `Validating`. [Addendum B](#addendum-b-2026-10-18-migration-into-a-clustered-provider-p3-cold-path)
-proposes routing `ImportDisk` to a host that the ordinary scheduler chose for a
-target VirtualMachine created first, for clustered targets only (P3, cold
-path), and awaits the maintainer's sign-off.
+routes `ImportDisk` to a host that the ordinary scheduler chose for a target
+VirtualMachine created first, for clustered targets only (P3, cold path).
+Accepted 2026-10-22; implementation in progress (R11).
 
 `topology: cluster` remains **experimental**. The Slice 5 lab amendment
 recommends keeping it that way until a multi-host lab run covers the three
@@ -795,7 +795,7 @@ disks are host-local and a linked clone depends on its source disk. It returns
 - `ImportDisk` and `ListVMs` are not per-VM. `ImportDisk` gets a target host only
   when migration *into* a clustered provider is designed.
 - Until P3, the VMMigration controller rejects a clustered **target** provider.
-  *(Addendum B proposes the design that lifts this refusal.)*
+  *(Addendum B, accepted, lifts this refusal for providers that report `supports_routed_import`.)*
 
 **Operator side:**
 
@@ -2309,7 +2309,8 @@ no explicit answer, the proposal's recommendation stands, marked *by default*.
 
 ## Addendum B (2026-10-18): migration into a clustered provider (P3, cold path)
 
-**Status: Proposed (2026-10-18), for the maintainer's (William Rizzo) sign-off.**
+**Status: Accepted (2026-10-22, decided by William Rizzo).** Proposed 2026-10-18
+(#407); the decisions on its open questions are recorded in B7.
 It extends A1, A2, A5 and A6 and changes none of them. It also extends ADR-0006
 (the cold export, stage and import pipeline), ADR-0011 and its Addendum A (staged
 and landed disk cleanup), and the rc2 contracts #394, #402, #403 and #405. It was
@@ -2734,38 +2735,28 @@ B.1 and B.2 can merge before B.3: nothing calls them until the manager does,
 and the capability is what opens the gate. `topology: cluster` stays
 experimental (A5, slice 5) whatever B.4 shows.
 
-### B7: open questions for the maintainer
+### B7: decisions on the open questions (2026-10-22, William Rizzo)
 
-1. **The placeholder `diskID`.** `pending-import` needs no CRD change but puts a
-   magic value in a tenant-visible spec. The alternatives are: relax
-   `diskID`'s `MinLength` to allow an empty value when `migrationRef` is set (a
-   CEL rule, additive in effect, but it loosens v1beta1 validation); or add an
-   optional `spec.importedDisk.pending: true`.
-2. **Reserving capacity from `Validating`.** This is the recommendation. The
-   alternative is placing the target at the start of `Importing`, which
-   reserves capacity for less time but may find no host only after the source
-   was powered off and exported.
-3. **Releasing an unreachable pending host when no `ImportDisk` was ever sent to
-   it** (B1.2, first case). It is provably safe, because nothing of the VM's is
-   on that host yet. The recommendation is to stay report-only (D8) in P3 and
-   revisit this with P5.
-4. **Disk space in placement.** The scheduler uses `allocatableStorageBytes`
-   only for the `MinDiskSpacePerHost` floor. Should a migration target's
-   request carry the source disk's virtual size (known since `Validating` /
-   `Exporting`), so a host whose pool cannot hold it is filtered out? Without
-   it, the import fails with `ResourceExhausted` ("not performed") and the
-   migration waits on that host.
-5. **`pvc` into a cluster.** Out of P3 (B3). Is it out for good, or a follow-up
-   on demand?
-6. **Shared-pool re-placement.** After the A6.1 pool ownership marker exists, may
-   a target whose disk landed on a pool the marker proves shared be re-placed to
-   another host of that pool (lifting B1.2's pin)?
-7. **A sidecar stamp on the landed disk** (target VM UID, migration UID), so
-   that `Create` and `DeleteLandedDisk` can check identity on the host and not
-   only by name. It is not required for P3; is it wanted before v0.5.0?
-8. **Unify the order for every target later?** The recommendation is no
-   (B1, *What changes for single-host targets*). Confirm that single-host,
-   vSphere and Proxmox keep import-then-create for good.
+1. **The pending `diskID`.** Relax `diskID`'s validation so it may be empty while
+   the source is a migration (`migrationRef` set), with a CEL rule — an additive
+   relaxation, preferred over a magic `pending-import` value in a tenant-visible
+   spec. The VirtualMachine controller treats an empty `diskID` with a
+   `migrationRef` as "waiting for import".
+2. **Capacity is reserved from `Validating`** (the target is placed before the
+   source is powered off or exported).
+3. **No automatic release of an unreachable pending host** in P3, even when no
+   `ImportDisk` was sent: report-only (D8); revisit with P5.
+4. **Disk space in placement: yes.** The inventory already reports
+   `allocatableStorageBytes`, so a migration target's placement request carries
+   the source disk's virtual size and a host whose pool cannot hold it is
+   filtered out.
+5. **`pvc` into a cluster** is out of P3; a follow-up only on demand.
+6. **Shared-pool re-placement** is deferred until the A6.1 pool ownership marker
+   exists; the B1.2 pin stays until then.
+7. **A sidecar stamp on the landed disk** is a follow-up after P3, wanted before
+   v0.5.0.
+8. **Single-host, vSphere and Proxmox targets keep import-then-create** for good
+   (B1, *What changes for single-host targets*).
 
 ### B8: consequences
 

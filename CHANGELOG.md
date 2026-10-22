@@ -5,6 +5,22 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-10-22 09:00] - ADR-0007 Addendum B accepted (migration into a clustered provider, R11)
+**Author:** @wrkode (William Rizzo)
+
+### Changed
+- `docs/adr/0007-clustered-orchestrator-provider.md`: Addendum B status Proposed → Accepted (2026-10-22); B7 records the decisions on its eight open questions (empty `diskID` allowed while the source is a migration via a CEL rule; capacity reserved from `Validating`; no automatic release of an unreachable pending host in P3; placement filters on the source disk's virtual size; `pvc` into a cluster out of P3; shared-pool re-placement deferred to the pool ownership marker; landed-disk sidecar stamp before v0.5.0; single-host/vSphere/Proxmox keep import-then-create).
+- `docs/adr/README.md`: index row status.
+
+### Why
+Maintainer sign-off on the R11 design, so its implementation slices can start.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [ ] Config change only
+- [x] Documentation only
+
 ## [2026-10-18 12:06] - vSphere import removes the history log; a Ready migration closes LandedDiskCleanup (rc2 R23)
 **Author:** @wrkode (William Rizzo)
 
