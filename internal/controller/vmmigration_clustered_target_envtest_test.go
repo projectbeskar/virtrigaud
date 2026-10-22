@@ -61,6 +61,8 @@ type routedMigrationProvider struct {
 	diskBytes int64
 	// importErrs answer the next ImportDisk calls, in order (nil: success).
 	importErrs []error
+	// onImport runs at each ImportDisk, before it is answered (outside mu).
+	onImport func(req contracts.ImportDiskRequest)
 	// createErr answers every Create while set.
 	createErr error
 	// deleteErr answers every Delete while set.
@@ -122,6 +124,12 @@ func (p *routedMigrationProvider) ExportDisk(context.Context, contracts.ExportDi
 }
 
 func (p *routedMigrationProvider) ImportDisk(_ context.Context, req contracts.ImportDiskRequest) (contracts.ImportDiskResponse, error) {
+	p.mu.Lock()
+	hook := p.onImport
+	p.mu.Unlock()
+	if hook != nil {
+		hook(req)
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.imports = append(p.imports, req)
@@ -229,6 +237,36 @@ type routedFixtureOptions struct {
 	// loseStatus, when set, makes the VirtualMachine controller's status
 	// writes it returns true for fail without reaching the apiserver.
 	loseStatus func(client.Object) bool
+	// migStatusErr, when set, makes the VMMigration controller's status
+	// writes it returns an error for fail with that error, unsent.
+	migStatusErr func(client.Object) error
+	// cleanupNever sets spec.options.cleanupPolicy: Never.
+	cleanupNever bool
+	// notPerformedBudget overrides the routed import's not-performed budget.
+	notPerformedBudget time.Duration
+}
+
+// failingStatusClient is a client whose status writes fail with what fail
+// returns (nil: written).
+type failingStatusClient struct {
+	client.Client
+	fail func(client.Object) error
+}
+
+func (c *failingStatusClient) Status() client.SubResourceWriter {
+	return &failingStatusWriter{SubResourceWriter: c.Client.Status(), fail: c.fail}
+}
+
+type failingStatusWriter struct {
+	client.SubResourceWriter
+	fail func(client.Object) error
+}
+
+func (w *failingStatusWriter) Update(ctx context.Context, obj client.Object, opts ...client.SubResourceUpdateOption) error {
+	if err := w.fail(obj); err != nil {
+		return err
+	}
+	return w.SubResourceWriter.Update(ctx, obj, opts...)
 }
 
 // lossyStatusClient is a client whose status writes selected by lose are
@@ -348,11 +386,17 @@ func newRoutedFixture(prov *routedMigrationProvider, opts routedFixtureOptions) 
 			},
 		},
 	}
+	if opts.retry || opts.cleanupNever {
+		m.Spec.Options = &infravirtrigaudiov1beta1.MigrationOptions{}
+	}
 	if opts.retry {
 		maxRetries := int32(1)
-		m.Spec.Options = &infravirtrigaudiov1beta1.MigrationOptions{RetryPolicy: &infravirtrigaudiov1beta1.MigrationRetryPolicy{
+		m.Spec.Options.RetryPolicy = &infravirtrigaudiov1beta1.MigrationRetryPolicy{
 			MaxRetries: &maxRetries, RetryDelay: &metav1.Duration{Duration: time.Second},
-		}}
+		}
+	}
+	if opts.cleanupNever {
+		m.Spec.Options.CleanupPolicy = infravirtrigaudiov1beta1.CleanupPolicyNever
 	}
 
 	rec := record.NewFakeRecorder(1000)
@@ -373,8 +417,13 @@ func newRoutedFixture(prov *routedMigrationProvider, opts routedFixtureOptions) 
 		Client: vmClient, Scheme: mgr.GetScheme(), APIReader: mgr.GetAPIReader(),
 		RemoteResolver: &atomicResolver{provider: prov, namespace: ns}, Recorder: rec,
 	}).SetupWithManager(mgr)).To(Succeed())
-	r := NewVMMigrationReconciler(mgr.GetClient(), mgr.GetAPIReader(), mgr.GetScheme(), nil, rec, false)
+	var migClient client.Client = mgr.GetClient()
+	if opts.migStatusErr != nil {
+		migClient = &failingStatusClient{Client: mgr.GetClient(), fail: opts.migStatusErr}
+	}
+	r := NewVMMigrationReconciler(migClient, mgr.GetAPIReader(), mgr.GetScheme(), nil, rec, false)
 	r.providerInstanceFn = onlyProviderIn(ns, prov)
+	r.routedImportNotPerformedLimit = opts.notPerformedBudget
 	Expect(r.SetupWithManager(mgr)).To(Succeed())
 	done := make(chan struct{})
 	go func() {
