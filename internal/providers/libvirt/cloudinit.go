@@ -45,37 +45,38 @@ type CloudInitConfig struct {
 // CloudInitProvider manages cloud-init ISO creation and attachment for libvirt
 type CloudInitProvider struct {
 	virshProvider *VirshProvider
-	// stagingDir is the host directory each create's seed directory is made
-	// in (defaultHostStagingDir unless the caller points it elsewhere).
-	stagingDir string
+	// seedDir is the host directory each create's seed directory is made in
+	// (seedDirDefault unless the caller points it elsewhere; seed_dir.go).
+	seedDir string
 }
 
 // NewCloudInitProvider creates a new cloud-init provider for libvirt
 func NewCloudInitProvider(virshProvider *VirshProvider) *CloudInitProvider {
 	return &CloudInitProvider{
 		virshProvider: virshProvider,
-		stagingDir:    defaultHostStagingDir,
+		seedDir:       seedDirDefault,
 	}
 }
 
 // PrepareCloudInit builds the NoCloud seed ISO for one create on the libvirt
 // host and returns the ISO's path.
 //
-// The seed lives in a directory made for this create alone:
-// <staging>/virtrigaud-cloudinit-<instance ID>.<random>, created by `mktemp -d`
-// (exclusively, mode 0700), so a concurrent create — of any VM — can never
-// overwrite this VM's user-data (which may carry secrets), and nothing else on
-// the host can pre-create or predict it. user-data and meta-data are written
-// private to the SSH user; once the ISO is built the directory is opened to
-// traverse-only (cloudInitSeedDirMode) so the qemu process can open the ISO by
-// its exact path without anyone being able to list the directory. Any failure
-// removes the directory again.
+// The seed lives in a directory made for this create alone, inside the seed
+// directory (seed_dir.go, checked by ensureSeedRoot: owned by the SSH user, not
+// listable by anyone else): <seed dir>/virtrigaud-cloudinit-<instance ID>.<random>,
+// created by `mktemp -d` (exclusively, mode 0700), so a concurrent create — of
+// any VM — can never overwrite this VM's user-data (which may carry secrets),
+// and nothing else on the host can pre-create or predict it. user-data and
+// meta-data are written private to the SSH user, the ISO is built under umask
+// 0077, and sealSeedDir then sets it to 0600 explicitly, keeps the SSH user's
+// private copy of it, removes user-data and meta-data, and opens the directory
+// to traverse-only (cloudInitSeedDirMode) so the qemu process can open the ISO
+// by its exact path. Any failure removes the directory again.
 func (c *CloudInitProvider) PrepareCloudInit(ctx context.Context, config CloudInitConfig) (string, error) {
 	log.Printf("INFO Preparing cloud-init configuration for instance: %s", config.InstanceID)
 
 	// Work remotely on the libvirt host to avoid read-only filesystem issues.
-	remoteDir, err := makeHostTemp(ctx, c.virshProvider,
-		filepath.Join(c.stagingDir, cloudInitSeedDirPrefix+config.InstanceID+"."+mktempTemplateSuffix), true)
+	remoteDir, err := newSeedDir(ctx, c.virshProvider, c.seedDir, config.InstanceID)
 	if err != nil {
 		return "", fmt.Errorf("failed to create remote cloud-init directory: %w", err)
 	}
@@ -93,13 +94,13 @@ func (c *CloudInitProvider) PrepareCloudInit(ctx context.Context, config CloudIn
 	log.Printf("DEBUG Cloud-init meta-data ready (length=%d)", len(config.MetaData))
 
 	// Write user-data file remotely
-	userDataPath := filepath.Join(remoteDir, "user-data")
+	userDataPath := filepath.Join(remoteDir, cloudInitUserDataName)
 	if err := c.writeRemoteFile(ctx, userDataPath, config.UserData); err != nil {
 		return "", fmt.Errorf("failed to write remote user-data: %w", err)
 	}
 
 	// Write meta-data file remotely
-	metaDataPath := filepath.Join(remoteDir, "meta-data")
+	metaDataPath := filepath.Join(remoteDir, cloudInitMetaDataName)
 	if err := c.writeRemoteFile(ctx, metaDataPath, config.MetaData); err != nil {
 		return "", fmt.Errorf("failed to write remote meta-data: %w", err)
 	}
@@ -124,10 +125,10 @@ func (c *CloudInitProvider) PrepareCloudInit(ctx context.Context, config CloudIn
 		return "", fmt.Errorf("failed to create remote cloud-init ISO: %w", err)
 	}
 
-	// The domain's qemu process runs as another user: let it reach the ISO by
-	// its exact path, without being able to list the directory.
-	if _, err := c.virshProvider.runVirshCommand(ctx, "!", "chmod", cloudInitSeedDirMode, remoteDir); err != nil {
-		return "", fmt.Errorf("failed to set cloud-init directory permissions: %w", err)
+	// The ISO private (0600), user-data and meta-data gone, and the directory
+	// traverse-only for the domain's qemu process.
+	if err := sealSeedDir(ctx, c.virshProvider, remoteDir); err != nil {
+		return "", fmt.Errorf("failed to seal the cloud-init seed directory: %w", err)
 	}
 
 	prepared = true
@@ -149,20 +150,27 @@ func (c *CloudInitProvider) writeRemoteFile(ctx context.Context, remotePath, con
 	return nil
 }
 
-// createRemoteCloudInitISO creates an ISO9660 filesystem with cloud-init files on remote host
+// createRemoteCloudInitISO creates an ISO9660 filesystem with cloud-init files
+// on the remote host, under umask seedFileUmask so the ISO is private to the
+// SSH user from the moment it exists (sealSeedDir then sets its mode
+// explicitly).
 func (c *CloudInitProvider) createRemoteCloudInitISO(ctx context.Context, sourceDir, isoPath string) error {
 	// Use genisoimage to create NoCloud datasource ISO on remote host
 	// The ISO must contain user-data and meta-data files at the root
-	result, err := c.virshProvider.runVirshCommand(ctx, "!", "genisoimage",
+	result, err := runHost(ctx, c.virshProvider, withUmask(seedFileUmask, "genisoimage",
 		"-output", isoPath,
 		"-volid", "cidata", // Volume ID for NoCloud datasource
 		"-joliet", // Enable Joliet extensions
 		"-rock",   // Enable Rock Ridge extensions
 		"-input-charset", "utf-8",
-		sourceDir)
+		sourceDir)...)
 
 	if err != nil {
-		return fmt.Errorf("genisoimage failed on remote host: %w, output: %s", err, result.Stderr)
+		stderr := ""
+		if result != nil {
+			stderr = result.Stderr
+		}
+		return fmt.Errorf("genisoimage failed on remote host: %w, output: %s", err, stderr)
 	}
 
 	log.Printf("DEBUG Created remote cloud-init ISO with genisoimage: %s", isoPath)
@@ -225,51 +233,6 @@ network:
 	return metadata
 }
 
-// AttachCloudInitISO attaches the cloud-init ISO to a domain as a CD-ROM device
-func (c *CloudInitProvider) AttachCloudInitISO(ctx context.Context, domainName, isoPath string) error {
-	log.Printf("INFO Attaching cloud-init ISO to domain: %s", domainName)
-
-	// Copy ISO to remote libvirt server if needed
-	remoteISOPath, err := c.copyISOToRemote(ctx, isoPath, domainName)
-	if err != nil {
-		return fmt.Errorf("failed to copy ISO to remote server: %w", err)
-	}
-
-	// Attach ISO as CD-ROM device using virsh attach-disk
-	result, err := c.virshProvider.runVirshCommand(ctx, "attach-disk", domainName,
-		remoteISOPath, "hdc", "--type", "cdrom", "--config")
-
-	if err != nil {
-		return fmt.Errorf("failed to attach cloud-init ISO: %w, output: %s", err, result.Stderr)
-	}
-
-	log.Printf("INFO Successfully attached cloud-init ISO to domain %s", domainName)
-	return nil
-}
-
-// copyISOToRemote copies the cloud-init ISO to the remote libvirt server
-func (c *CloudInitProvider) copyISOToRemote(ctx context.Context, localPath, domainName string) (string, error) {
-	// Remote path for cloud-init ISOs
-	remoteDir := "/var/lib/libvirt/images/cloud-init"
-	remotePath := fmt.Sprintf("%s/%s-cloud-init.iso", remoteDir, domainName)
-
-	// Create remote directory
-	if _, err := c.virshProvider.runVirshCommand(ctx, "!", "mkdir", "-p", remoteDir); err != nil {
-		return "", fmt.Errorf("failed to create remote cloud-init directory: %w", err)
-	}
-
-	result, err := c.virshProvider.runVirshCommand(ctx, "!", "cp", "-f", localPath, remotePath)
-	if err != nil {
-		return "", fmt.Errorf("failed to copy cloud-init ISO on remote host: %w, output: %s", err, result.Stderr)
-	}
-	if _, err := c.virshProvider.runVirshCommand(ctx, "!", "chmod", cloudInitISOMode, remotePath); err != nil {
-		return "", fmt.Errorf("failed to chmod remote cloud-init ISO: %w", err)
-	}
-
-	log.Printf("INFO Copied cloud-init ISO on remote server: %s", remotePath)
-	return remotePath, nil
-}
-
 // ExtractHostnameFromCloudInit extracts hostname from cloud-init YAML (like vSphere)
 func (c *CloudInitProvider) ExtractHostnameFromCloudInit(cloudInitData string) string {
 	lines := strings.Split(cloudInitData, "\n")
@@ -290,7 +253,7 @@ func (c *CloudInitProvider) ExtractHostnameFromCloudInit(cloudInitData string) s
 // CleanupCloudInit removes, on the libvirt host, the seed directory
 // PrepareCloudInit made for isoPath — used when the create that prepared it
 // fails. It is best-effort (failures are logged) and refuses any path that is
-// not a seed directory directly inside the staging directory, so it can never
+// not a seed directory directly inside the seed directory, so it can never
 // remove anything else.
 //
 // (It replaces a cleanup that ran os.RemoveAll on the PROVIDER's filesystem:
@@ -298,7 +261,7 @@ func (c *CloudInitProvider) ExtractHostnameFromCloudInit(cloudInitData string) s
 // just-defined domain still referenced.)
 func (c *CloudInitProvider) CleanupCloudInit(ctx context.Context, isoPath string) {
 	dir := filepath.Dir(isoPath)
-	if filepath.Dir(dir) != filepath.Clean(c.stagingDir) || !strings.HasPrefix(filepath.Base(dir), cloudInitSeedDirPrefix) {
+	if !isSeedDirIn(dir, c.seedDir) {
 		log.Printf("WARN Not removing %s: it is not a cloud-init seed directory", dir)
 		return
 	}

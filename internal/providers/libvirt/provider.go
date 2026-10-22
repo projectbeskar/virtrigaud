@@ -161,6 +161,11 @@ type Provider struct {
 	// tests point it at a scratch directory (see staging.go).
 	hostStagingDir string
 
+	// hostSeedDir is the host directory cloud-init seeds are built in
+	// (EnvSeedDir, validated at construction; seed_dir.go). Empty means
+	// seedDirDefault; tests point it at a scratch directory.
+	hostSeedDir string
+
 	// linkedDeps records, per domain UUID, how many other domains
 	// depended on the domain's disk at its last start, for Describe
 	// (linked_clone_warning.go).
@@ -296,6 +301,9 @@ func New() (*Provider, error) {
 	if err := p.loadImageDirs(); err != nil {
 		return nil, err
 	}
+	if err := p.loadSeedDir(); err != nil {
+		return nil, err
+	}
 
 	// Try to establish libvirt connection
 	slog.Info("Libvirt provider configuration loaded",
@@ -350,6 +358,9 @@ func New() (*Provider, error) {
 	// Name, at startup, a VM storage directory where clones and exports are
 	// refused because other accounts can write it.
 	p.warnUnsafeVMStorageDirs(ctx)
+	// Name, at startup, a cloud-init seed directory creates cannot use (or
+	// create it, when the SSH user may).
+	p.checkSeedRootAtStartup(ctx)
 
 	log.Printf("INFO Successfully initialized virsh provider")
 	return p, nil
@@ -401,6 +412,9 @@ func newClusteredProvider(hostsFile string) (*Provider, error) {
 	// value. The one policy is enforced on every host against that host's
 	// filesystem (the confinement runs over the leased target-host connection).
 	if err := p.loadImageDirs(); err != nil {
+		return nil, err
+	}
+	if err := p.loadSeedDir(); err != nil {
 		return nil, err
 	}
 	p.initShadow(logger)
@@ -471,6 +485,9 @@ func NewProvider(ctx context.Context, k8sClient client.Client, provider *v1beta1
 	if err := p.loadImageDirs(); err != nil {
 		return nil, contracts.NewInvalidSpecError("load image directory policy", err)
 	}
+	if err := p.loadSeedDir(); err != nil {
+		return nil, contracts.NewInvalidSpecError("load cloud-init seed directory", err)
+	}
 
 	// Build the per-host connection seam (ADR-0008 PR 2), keyed off the
 	// provider's endpoint, so this path is consistent with New().
@@ -490,6 +507,7 @@ func NewProvider(ctx context.Context, k8sClient client.Client, provider *v1beta1
 	// Wire the ADR-0008 PR 4b shadow-compare reads (D4/D6), consistent with New().
 	p.initShadow(slog.Default())
 	p.warnUnsafeVMStorageDirs(ctx)
+	p.checkSeedRootAtStartup(ctx)
 
 	log.Printf("INFO Successfully created virsh-based provider via K8s API")
 	return p, nil

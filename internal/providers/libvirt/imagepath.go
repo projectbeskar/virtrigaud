@@ -121,7 +121,7 @@ var reservedImageSuffixes = []string{
 	vmDiskVolumeSuffix + qcow2Ext,               // <vm>-disk.qcow2
 	vmDiskVolumeSuffix,                          // legacy <vm>-disk
 	contracts.ImportedDiskNameSuffix + qcow2Ext, // <vm>-migrated.qcow2
-	"cloud-init.iso", "-cidata.iso",             // cloud-init seeds
+	"cloud-init.iso", "-cidata.iso", cloudInitISOPrivateCopyName, // cloud-init seeds
 	".download", "-temp.img", "-download.img", ".partial", // staging
 }
 
@@ -129,13 +129,13 @@ var reservedImageSuffixes = []string{
 // allowed image directory, whether configured via EnvImageDirs or reached by a
 // configured directory that is a symlink: system configuration and secrets,
 // pseudo-filesystems and devices, binaries, logs, libvirt's own per-domain state
-// (NVRAM, saves, channels), VirtRigaud's cloud-init seed directory, temporary
+// (NVRAM, saves, channels), VirtRigaud's cloud-init seed directories, temporary
 // directories (VirtRigaud stages domain XML and cloud-init data under /tmp), and
 // container/kubelet state on hosts that are also Kubernetes nodes.
 var forbiddenImageDirRoots = []string{
 	"/etc", "/proc", "/sys", "/dev", "/boot", "/root", "/run", "/var/run",
 	"/tmp", "/var/tmp", "/usr", "/bin", "/sbin", "/lib", "/lib32", "/lib64", "/libx32",
-	"/var/log", "/var/lib/libvirt/qemu", DefaultImageDir + "/cloud-init",
+	"/var/log", "/var/lib/libvirt/qemu", DefaultImageDir + "/cloud-init", DefaultSeedDir,
 	"/var/lib/kubelet", "/var/lib/k0s", "/var/lib/rancher", "/var/lib/containerd", "/var/lib/docker",
 }
 

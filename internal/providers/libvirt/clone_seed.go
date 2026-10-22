@@ -278,7 +278,7 @@ func (p *Provider) writeCloneSeed(ctx context.Context, vp *VirshProvider, domain
 		return domainXML, "", nil
 	}
 	cip := NewCloudInitProvider(vp)
-	cip.stagingDir = p.stagingDir()
+	cip.seedDir = p.seedDir()
 	iso, err := cip.PrepareCloudInit(ctx, plan.config)
 	if err != nil {
 		return "", "", fmt.Errorf("make the clone's cloud-init seed: %w", err)

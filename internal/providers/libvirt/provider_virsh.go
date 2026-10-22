@@ -289,7 +289,7 @@ func (p *Provider) createVMWithCloudInit(ctx context.Context, vp *VirshProvider,
 
 	// Initialize providers
 	cloudInitProvider := NewCloudInitProvider(vp)
-	cloudInitProvider.stagingDir = p.stagingDir()
+	cloudInitProvider.seedDir = p.seedDir()
 	storageProvider := NewStorageProvider(vp)
 	storageProvider.stagingDir = p.stagingDir()
 
@@ -417,6 +417,12 @@ func (p *Provider) createVMWithCloudInit(ctx context.Context, vp *VirshProvider,
 		}
 
 		isoPath, err := cloudInitProvider.PrepareCloudInit(ctx, cloudInitConfig)
+		if errors.Is(err, errSeedRootUnusable) {
+			// A host whose seed directory is unusable is a configuration error
+			// the operator must see (and fix), not a VM silently created
+			// without its hostname and guest agent.
+			return "", fmt.Errorf("failed to prepare default cloud-init: %w", err)
+		}
 		if err != nil {
 			log.Printf("WARN Failed to prepare default cloud-init: %v", err)
 			// Continue without cloud-init
@@ -945,7 +951,7 @@ func (p *Provider) planDomainDeletion(ctx context.Context, vp *VirshProvider, id
 	if doc.Name == "" {
 		doc.Name = id
 	}
-	plan := domainDeletionPlan{uuid: doc.UUID, name: doc.Name, seedDir: doc.cloudInitSeedDir(p.stagingDir())}
+	plan := domainDeletionPlan{uuid: doc.UUID, name: doc.Name, seedDir: doc.cloudInitSeedDir(p.seedRoots()...)}
 
 	var deletable []string
 	// origin maps each deletable (canonical) disk to the path its definition
@@ -1304,8 +1310,9 @@ func deleteCloudInitResources(ctx context.Context, vp *VirshProvider, domainName
 // cleanupOrphanedResources attempts to clean up any resources that might be
 // left behind on vp's host by a domain that no longer exists (single-host
 // delete only): the disk VirtRigaud names after it, <pool directory>/<name>-
-// disk.qcow2 in the default storage pool, and its legacy per-name cloud-init
-// seed directory.
+// disk.qcow2 in the default storage pool, its per-create seed directories in
+// every seed root (reclaimSeedDirs), and its legacy per-name cloud-init seed
+// directory in the staging directory.
 //
 // The disk file is removed only when it exists, lies directly inside a
 // directory Delete may remove disks from (deletableDiskFiles), and no defined

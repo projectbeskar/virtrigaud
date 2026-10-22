@@ -31,8 +31,10 @@ import (
 // Per-create staging on the hypervisor host.
 //
 // Create and Clone stage files on the host before `virsh define`: the domain
-// XML, and (Create) the cloud-init NoCloud seed (user-data, which may carry
-// secrets, meta-data and the seed ISO). These used to live at paths derived
+// XML in the staging directory, and the cloud-init NoCloud seed (user-data,
+// which may carry secrets, meta-data and the seed ISO) in the seed directory
+// (seed_dir.go; earlier releases built it in the staging directory too). These
+// used to live at paths derived
 // only from the domain name (/tmp/<name>-domain.xml,
 // /tmp/virtrigaud-cloudinit/<name>/), so two concurrent creates of the same
 // name overwrote each other's files — including another tenant's user-data —
@@ -43,8 +45,8 @@ import (
 //
 //   - it is made by `mktemp` on the host: created exclusively (O_EXCL), with an
 //     unpredictable suffix, mode 0600 (file) / 0700 (directory), directly under
-//     the sticky staging directory, so no other user can pre-create, replace or
-//     rename it;
+//     the sticky staging directory (or the SSH user's own seed directory), so
+//     no other user can pre-create, replace or rename it;
 //   - its name still starts with the domain name, so an operator can tell whose
 //     it is;
 //   - it is removed when the create no longer needs it (the domain XML after
@@ -67,19 +69,17 @@ const (
 	domainXMLStagingInfix = "-domain.xml."
 
 	// cloudInitSeedDirPrefix starts a per-create cloud-init seed directory name:
-	// <staging>/virtrigaud-cloudinit-<domain>.<random>. The seed ISO inside it
-	// (cloudInitISOName) is what a created domain's CD-ROM references;
-	// domainDisksDoc.cloudInitSeedDir recognizes it by this prefix, and Delete
-	// removes the directory.
+	// <seed root>/virtrigaud-cloudinit-<domain>.<random> (seed_dir.go). The
+	// seed ISO inside it (cloudInitISOName) is what a created domain's CD-ROM
+	// references; domainDisksDoc.cloudInitSeedDir recognizes it by this prefix,
+	// and Delete removes the directory.
 	cloudInitSeedDirPrefix = "virtrigaud-cloudinit-"
 
 	// cloudInitSeedDirMode is applied to a seed directory once its ISO is
-	// built: the qemu process (another user) can reach the ISO by its exact
-	// path, but nobody else can list the directory to discover it.
+	// built (sealSeedDir): the qemu process (another user) can reach the ISO
+	// by its exact path, but nobody else can list the directory. The ISO
+	// itself is private (seedFileMode).
 	cloudInitSeedDirMode = "0711"
-
-	// cloudInitISOMode is the seed ISO's mode: readable by the qemu process.
-	cloudInitISOMode = "0644"
 
 	// stagingCleanupTimeout bounds a best-effort cleanup command, which runs
 	// even after the request context is cancelled.

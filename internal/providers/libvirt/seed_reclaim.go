@@ -93,12 +93,20 @@ func isOwnSeedDirName(name, domainName string) bool {
 }
 
 // isSeedDirIn reports whether dir is a per-create seed directory directly
-// inside stagingDir: the only kind of directory the seed cleanup may remove.
-func isSeedDirIn(dir, stagingDir string) bool {
+// inside one of roots (Provider.seedRoots): the only kind of directory the seed
+// cleanup may remove.
+func isSeedDirIn(dir string, roots ...string) bool {
 	dir = filepath.Clean(dir)
-	return filepath.Dir(dir) == filepath.Clean(stagingDir) &&
-		strings.HasPrefix(filepath.Base(dir), cloudInitSeedDirPrefix) &&
-		len(filepath.Base(dir)) > len(cloudInitSeedDirPrefix)
+	base := filepath.Base(dir)
+	if !strings.HasPrefix(base, cloudInitSeedDirPrefix) || len(base) <= len(cloudInitSeedDirPrefix) {
+		return false
+	}
+	for _, root := range roots {
+		if filepath.Dir(dir) == filepath.Clean(root) {
+			return true
+		}
+	}
+	return false
 }
 
 // ownSeedDirs lists, on the host behind h, the seed directories directly inside
@@ -191,19 +199,21 @@ func seedDirsReferenced(ctx context.Context, h hostCommandRunner, dirs []string)
 // reclaimSeedDirs removes the cloud-init seed directories a deleted domain left
 // behind on the host behind h: extra, a seed directory its definition
 // referenced that the delete plan kept because another domain used it (removed
-// whatever its age), and the directories named after exactly this domain
-// (ownSeedDirs; with minAge, only the old ones — see orphanSeedMinAge). A
-// directory is removed only when it is a real directory directly inside the
-// staging directory and no domain defined on the host references a file in it
-// (seedDirsReferenced); when that cannot be established nothing is removed.
+// whatever its age), and the directories named after exactly this domain in
+// every seed root (ownSeedDirs over Provider.seedRoots: the seed directory, and
+// the staging directory earlier releases built seeds in; with minAge, only the
+// old ones — see orphanSeedMinAge). A directory is removed only when it is a
+// real directory directly inside a seed root and no domain defined on the host
+// references a file in it (seedDirsReferenced); when that cannot be
+// established nothing is removed.
 //
 // It never fails the delete: every problem is logged at Warn and the directory
 // stays (a leaked seed directory is recoverable, a domain whose CD-ROM points
 // at a removed ISO is not). It never follows a symlink.
 func (p *Provider) reclaimSeedDirs(ctx context.Context, h hostCommandRunner, domainName, extra string, minAge time.Duration) {
-	staging := p.stagingDir()
+	roots := p.seedRoots()
 	var candidates []string
-	if extra != "" && isSeedDirIn(extra, staging) {
+	if extra != "" && isSeedDirIn(extra, roots...) {
 		extra = filepath.Clean(extra)
 		real, err := isRealDir(ctx, h, extra)
 		switch {
@@ -215,13 +225,15 @@ func (p *Provider) reclaimSeedDirs(ctx context.Context, h hostCommandRunner, dom
 			candidates = append(candidates, extra)
 		}
 	}
-	own, err := ownSeedDirs(ctx, h, staging, domainName, minAge)
-	if err != nil {
-		log.Printf("WARN Could not look for leftover cloud-init seed directories of %s: %v", domainName, err)
-	}
-	for _, d := range own {
-		if !slices.Contains(candidates, d) {
-			candidates = append(candidates, d)
+	for _, root := range roots {
+		own, err := ownSeedDirs(ctx, h, root, domainName, minAge)
+		if err != nil {
+			log.Printf("WARN Could not look for leftover cloud-init seed directories of %s in %s: %v", domainName, root, err)
+		}
+		for _, d := range own {
+			if !slices.Contains(candidates, d) {
+				candidates = append(candidates, d)
+			}
 		}
 	}
 	if len(candidates) == 0 {
