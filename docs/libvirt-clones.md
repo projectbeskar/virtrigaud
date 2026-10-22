@@ -110,7 +110,16 @@ What a new instance does **not** change:
 
 The source's seed is read on the host with `isoinfo` (shipped with
 `genisoimage`, which the provider already needs) **before anything is
-copied**. A seed that cannot be read fails the clone with nothing written —
+copied**, as the provider's SSH user. Once the source has started, libvirt has
+given its `cloud-init.iso` (`0600`) to the qemu user, so the read goes to the SSH
+user's private copy next to it, `cloud-init.private.iso` (R27; see
+[Cloud-init seed directory](libvirt-domain-ownership.md#cloud-init-seed-directory));
+the provider never reads a seed as root. The host's seed directory is checked
+before that read: an unusable one fails the clone, retryably, with
+`refusing to stage cloud-init data`, before anything is read or copied. The
+clone's own seed is built in that seed directory and sealed like a create's
+(ISO and private copy `0600`, no `user-data`, `meta-data`, `network-config` or
+`vendor-data` left next to them, directory `0711`). A seed that cannot be read fails the clone with nothing written —
 retried when the read failed (an unreachable host, a missing `isoinfo`), and
 refused (`InvalidArgument`) when the ISO holds no NoCloud `user-data` or
 `meta-data`, holds a file over 1 MiB, or has meta-data that is not a YAML or

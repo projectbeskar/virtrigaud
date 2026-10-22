@@ -199,19 +199,17 @@ the seed ISO). Each create gets its own:
   it is (`/tmp/virtrigaud-cloudinit-<domain>.<random>/`, or
   `/tmp/virtrigaud-cloudinit/<name>/` before that), which `Delete` still finds
   from the domain XML.
-- **Clones and the seed.** A clone's CD-ROM is the source's cloud-init seed. On a
-  **clustered** provider (slice 3) the clone gets its own copy: the source's ISO
-  is copied into a fresh per-clone seed directory in the seed directory
+- **Clones and the seed.** A clone (single-host and clustered, R26) gets a seed
+  of its own: the source's seed files are read (through the SSH user's private
+  copy once the source has started) and a new seed is built from them with the
+  clone's identity, in a fresh seed directory in the seed directory
   (`<seed dir>/virtrigaud-cloudinit-<clone domain>.<random>/cloud-init.iso`,
-  private exactly like a create's) and the clone's CD-ROM is re-pointed at it,
-  so deleting either VM never removes the other's seed. The copy is removed if the clone's
-  define fails and the domain is known not to exist. On a **single-host**
-  provider the clone still references the source's seed (the known shared-seed
-  issue): deleting the clone removes the source's seed directory, and deleting
-  the source leaves the clone's CD-ROM pointing at a missing ISO. That path is
-  unchanged in this release, to keep single-host behaviour stable while the
-  ADR-0008 soak runs. Either way the clone boots with the **source's
-  user-data**, provisioning secrets included; a cross-namespace clone hands
+  private exactly like a create's), and the clone's CD-ROM is re-pointed at it,
+  so deleting either VM never removes the other's seed. The new seed is removed
+  if the clone's define fails and the domain is known not to exist. Only a
+  single-host clone made before R26 still references its source's seed. The
+  clone boots with the **source's user-data** unless its `VMClone` gives its
+  own, provisioning secrets included; a cross-namespace clone hands
   them to the target namespace (see
   [`cross-namespace-targets.md`](cross-namespace-targets.md#a-clone-carries-the-sources-cloud-init-seed)).
 
