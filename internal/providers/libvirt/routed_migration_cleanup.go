@@ -121,7 +121,8 @@ func (p *Provider) deleteLandedDiskRouted(ctx context.Context, req *providerv1.D
 	// in this provider is answered retryably, never with NOT_FOUND.
 	unlock, err := landingLocks.lockUnlessImporting(bctx, routedLandingKey(host, volumeName))
 	if stderrors.Is(err, errLandingImportInFlight) {
-		return nil, status.Error(codes.Unavailable, landedDiskImportInFlightMessage)
+		// Retryable, and kept out of the manager's circuit breaker.
+		return nil, vmOperationStatus(codes.Unavailable, landedDiskImportInFlightMessage)
 	}
 	if err != nil {
 		return nil, routedLandedDiskFailed(host, "wait for other work on the landing disk", err)
