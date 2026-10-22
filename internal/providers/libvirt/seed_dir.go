@@ -422,7 +422,9 @@ func sealSeedDir(ctx context.Context, h hostCommandRunner, dir string) error {
 // directories they cannot list).
 func (p *Provider) seedCopySource(ctx context.Context, h hostCommandRunner, srcISO string) string {
 	dir := filepath.Dir(srcISO)
-	if filepath.Base(srcISO) != cloudInitISOName || !(isSeedDirIn(dir, p.seedRoots()...) || isLegacySeedDirIn(dir, p.seedRoots()...)) {
+	roots := p.seedRoots()
+	inSeedRoot := isSeedDirIn(dir, roots...) || isLegacySeedDirIn(dir, roots...)
+	if filepath.Base(srcISO) != cloudInitISOName || !inSeedRoot {
 		return srcISO
 	}
 	priv := filepath.Join(filepath.Dir(srcISO), cloudInitISOPrivateCopyName)
