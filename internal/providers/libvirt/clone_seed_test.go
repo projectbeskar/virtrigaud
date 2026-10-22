@@ -300,6 +300,62 @@ func TestCloneSeed_RealISORoundTrip(t *testing.T) {
 	assert.Equal(t, src[seedFileNetworkConfig], clone[seedFileNetworkConfig], "network-config is carried")
 }
 
+// userDataOnlySeed packs a seed holding only user-data (another tool's seed,
+// or a hand-made one) and returns its path.
+func userDataOnlySeed(t *testing.T, c *createHost, userData string) string {
+	t.Helper()
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, seedFileUserData), []byte(userData), 0o600))
+	iso := filepath.Join(c.base, "ud-only.iso")
+	writeTar(t, iso, dir, seedFileUserData)
+	return iso
+}
+
+// TestPlanCloneSeed_NoSourceMetaDataIsBuiltByTheEncoder pins review L1: for a
+// source seed without meta-data the provider's template is filled through the
+// YAML encoder, so a customization domain carrying newlines and YAML syntax
+// stays one value and adds no key.
+func TestPlanCloneSeed_NoSourceMetaDataIsBuiltByTheEncoder(t *testing.T) {
+	c := newCreateHost(t)
+	iso := userDataOnlySeed(t, c, "#cloud-config\n")
+	plan, err := planCloneSeed(context.Background(), c.vp, iso,
+		r26CloneReq(`{"domain":"lab\nruncmd: [reboot]\ninstance-id: evil"}`), "team-a.web-copy")
+	require.NoError(t, err)
+	meta := metaOf(t, plan.config.MetaData)
+	assert.Equal(t, "virtrigaud-"+r26Target.UID, meta["instance-id"])
+	assert.Equal(t, "web-copy.lab\nruncmd: [reboot]\ninstance-id: evil", meta["local-hostname"])
+	assert.NotContains(t, meta, "runcmd")
+	assert.NotNil(t, meta["network"], "the provider's DHCP network config, as Create writes it")
+	assert.NotContains(t, plan.config.MetaData, cloneMetaDataPlaceholder)
+}
+
+// TestPlanCloneSeed_InlineUserDataIsBounded pins review L9.
+func TestPlanCloneSeed_InlineUserDataIsBounded(t *testing.T) {
+	c := newCreateHost(t)
+	iso := userDataOnlySeed(t, c, "#cloud-config\n")
+	big := "#cloud-config\n# " + strings.Repeat("x", maxSeedFileBytes)
+	_, err := planCloneSeed(context.Background(), c.vp, iso, r26CloneReq(`{"userData":{"cloudInit":{"inline":`+jsonString(big)+`}}}`),
+		"team-a.web-copy")
+	require.Error(t, err)
+	assert.True(t, contracts.IsInvalidSpec(err), "InvalidArgument on the wire: %v", err)
+	assert.NotContains(t, err.Error(), "xxxx", "the user-data is never echoed")
+}
+
+// TestPlanCloneSeed_WarnsAboutIdentityOverrides covers review L4: user-data
+// keys that keep the source's identity are named in a warning — never their
+// values.
+func TestPlanCloneSeed_WarnsAboutIdentityOverrides(t *testing.T) {
+	c := newCreateHost(t)
+	iso := userDataOnlySeed(t, c, "#cloud-config\nssh_deletekeys: false\nssh_keys:\n  rsa_private: SECRETKEY\n")
+	var logs strings.Builder
+	log.SetOutput(&logs)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+	_, err := planCloneSeed(context.Background(), c.vp, iso, r26CloneReq(""), "team-a.web-copy")
+	require.NoError(t, err)
+	assert.Contains(t, logs.String(), "ssh_deletekeys, ssh_keys")
+	assert.NotContains(t, logs.String(), "SECRETKEY")
+}
+
 // r26Secret is user-data content no error or log line may carry.
 const r26Secret = "password: hunter2-r26-secret"
 

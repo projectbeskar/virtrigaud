@@ -180,4 +180,70 @@ func TestRewriteUserDataHostname(t *testing.T) {
 		assert.Equal(t, "a\"b", m["hostname"])
 		assert.Equal(t, "a\"b.x", m["fqdn"])
 	})
+	// Review L3: a line that looks like a top-level key but continues a
+	// multi-line quoted scalar or flow collection is never rewritten — the
+	// document must neither break nor silently change another key's value.
+	t.Run("a look-alike line inside a multi-line value", func(t *testing.T) {
+		for name, src := range map[string]string{
+			"flow sequence":        "#cloud-config\nruncmd: [ \"a\",\nhostname: x ]\n",
+			"double-quoted scalar": "#cloud-config\nruncmd: \"echo a\nhostname: b\"\n",
+			"single-quoted, ends":  "#cloud-config\nbootcmd: 'one\nhostname: two'\n",
+			"single-quoted, mid":   "#cloud-config\nbootcmd: 'one\nhostname: two\nthree'\n",
+			"flow mapping":         "#cloud-config\nx: {a: 1,\nhostname: b}\n",
+			"in a flow list":       "#cloud-config\nwrite_files: [{path: /x, content: 'a\nhostname: b'}]\n",
+		} {
+			out, changed, skipped := RewriteUserDataHostname(src, "copy", "")
+			assert.False(t, changed, name)
+			assert.Equal(t, src, out, name)
+			assert.Equal(t, []string{"hostname"}, skipped, name)
+		}
+		// A real top-level key next to such a value is still rewritten.
+		out, changed, _ := RewriteUserDataHostname("#cloud-config\nbootcmd: 'one\nhostname: two'\nhostname: web\n", "copy", "")
+		assert.True(t, changed)
+		assert.Equal(t, "#cloud-config\nbootcmd: 'one\nhostname: two'\nhostname: \"copy\"\n", out)
+	})
+	t.Run("a document that does not parse is not rewritten", func(t *testing.T) {
+		src := "#cloud-config\nhostname: web\nusers: [unclosed\n"
+		out, changed, skipped := RewriteUserDataHostname(src, "copy", "")
+		assert.False(t, changed)
+		assert.Equal(t, src, out)
+		assert.Equal(t, []string{"hostname"}, skipped)
+	})
+}
+
+// TestRewriteMetaData_Anchors pins review L2: replacing a value that carries
+// an anchor a later alias names would make the document unparseable, so it
+// is refused; an anchor elsewhere is kept.
+func TestRewriteMetaData_Anchors(t *testing.T) {
+	_, err := RewriteMetaData("instance-id: &id web\nother: *id\n", "virtrigaud-uid", "copy")
+	assert.Error(t, err)
+	_, err = RewriteMetaData("local-hostname: &h web\nhostname: *h\n", "virtrigaud-uid", "copy")
+	assert.Error(t, err)
+
+	out, err := RewriteMetaData("base: &n {version: 1}\nnetwork: *n\ninstance-id: web\n", "virtrigaud-uid", "copy")
+	require.NoError(t, err)
+	m := metaMap(t, out)
+	assert.Equal(t, "virtrigaud-uid", m["instance-id"])
+	assert.Equal(t, m["base"], m["network"], "an alias to an untouched anchor still resolves")
+}
+
+// TestRewriteMetaData_NoInjection: a value with newlines or YAML syntax (a
+// customization domain is not pattern-validated) stays one string value.
+func TestRewriteMetaData_NoInjection(t *testing.T) {
+	out, err := RewriteMetaData("", "virtrigaud-uid", "copy.evil\nruncmd: [reboot]\ninstance-id: x")
+	require.NoError(t, err)
+	m := metaMap(t, out)
+	assert.Len(t, m, 2)
+	assert.Equal(t, "virtrigaud-uid", m["instance-id"])
+	assert.Equal(t, "copy.evil\nruncmd: [reboot]\ninstance-id: x", m["local-hostname"])
+}
+
+// TestIdentityOverrides covers review L4: user-data keys that undo a clone's
+// new identity are reported by name.
+func TestIdentityOverrides(t *testing.T) {
+	assert.Equal(t, []string{"manual_cache_clean", "preserve_hostname", "ssh_deletekeys", "ssh_keys"},
+		IdentityOverrides("#cloud-config\nssh_keys:\n  rsa_private: x\nssh_deletekeys: false\npreserve_hostname: true\nmanual_cache_clean: true\n"))
+	assert.Empty(t, IdentityOverrides("#cloud-config\nssh_deletekeys: true\npreserve_hostname: false\nmanual_cache_clean: false\n"))
+	assert.Empty(t, IdentityOverrides("#!/bin/sh\nssh_keys: x\n"), "not #cloud-config")
+	assert.Empty(t, IdentityOverrides("#cloud-config\nssh_keys: [unclosed\n"), "does not parse")
 }

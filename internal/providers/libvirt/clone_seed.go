@@ -75,6 +75,11 @@ const (
 	// whole seed at 3 MiB; cloud-init user-data is typically a few KiB.
 	maxSeedFileBytes = 1 << 20
 
+	// cloneMetaDataPlaceholder fills the provider's meta-data template for a
+	// clone whose source seed has none; RewriteMetaData then sets the real
+	// instance-id and local-hostname.
+	cloneMetaDataPlaceholder = "placeholder"
+
 	// seedFileReadScript extracts one file ($3) of the ISO $1 with the name
 	// flag $2 (-R or -J), at most $4 bytes. The extraction runs once to
 	// /dev/null first, so a failing isoinfo fails the script (a POSIX
@@ -113,6 +118,12 @@ func planCloneSeed(ctx context.Context, h hostCommandRunner, srcISO string, req 
 		log.Printf("WARN Clone %s: the libvirt provider does not apply these customization fields: %s",
 			domainName, strings.Join(cust.Unapplied, ", "))
 	}
+	// The inline user-data is bounded like a source seed's file (it is
+	// written into the clone's seed as is).
+	if len(cust.InlineUserData) > maxSeedFileBytes {
+		return nil, contracts.NewInvalidSpecError(fmt.Sprintf(
+			"the clone's customization user-data is larger than %d bytes", maxSeedFileBytes), nil)
+	}
 	if srcISO == "" {
 		if cust.Hostname != "" || cust.Domain != "" || cust.InlineUserData != "" || cust.SecretUserData {
 			log.Printf("WARN Clone %s: the source has no cloud-init seed, so the hostname and user-data customization "+
@@ -145,12 +156,19 @@ func planCloneSeed(ctx context.Context, h hostCommandRunner, srcISO string, req 
 				"cloud-init prefers it over the clone's meta-data hostname", domainName, strings.Join(skipped, ", "))
 		}
 	}
+	if keys := cloneidentity.IdentityOverrides(userData); len(keys) > 0 {
+		log.Printf("WARN Clone %s: the clone's user-data sets %s, which keeps the source's host identity "+
+			"(SSH host keys, hostname or instance check) despite the clone's new instance-id", domainName, strings.Join(keys, ", "))
+	}
 
 	metaData := files[seedFileMetaData]
 	if strings.TrimSpace(metaData) == "" {
-		// The provider's own meta-data, as Create writes it.
-		metaData = (&CloudInitProvider{}).generateMetaData(instanceID, localHostname)
-	} else if metaData, err = cloneidentity.RewriteMetaData(metaData, instanceID, localHostname); err != nil {
+		// The provider's own meta-data, as Create writes it, with the
+		// identity set through the YAML encoder (never interpolated: the
+		// customization domain is not pattern-validated).
+		metaData = (&CloudInitProvider{}).generateMetaData(cloneMetaDataPlaceholder, cloneMetaDataPlaceholder)
+	}
+	if metaData, err = cloneidentity.RewriteMetaData(metaData, instanceID, localHostname); err != nil {
 		return nil, contracts.NewInvalidSpecError(fmt.Sprintf(
 			"the clone source's cloud-init seed %s has meta-data the provider cannot give a new identity", srcISO), err)
 	}

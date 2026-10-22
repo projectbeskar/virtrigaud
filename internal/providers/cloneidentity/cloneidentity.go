@@ -40,7 +40,10 @@ package cloneidentity
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
+	"slices"
 	"sort"
 	"strings"
 
@@ -210,26 +213,51 @@ func RewriteMetaData(src, instanceID, localHostname string) (string, error) {
 		return "", fmt.Errorf("cloud-init meta-data is not a mapping")
 	}
 	m := doc.Content[0]
-	setMappingKey(m, metaKeyInstanceID, instanceID, true)
-	setMappingKey(m, metaKeyLocalHostname, localHostname, true)
-	setMappingKey(m, metaKeyHostname, localHostname, false)
+	for _, k := range []struct {
+		key string
+		add bool
+	}{{metaKeyInstanceID, true}, {metaKeyLocalHostname, true}, {metaKeyHostname, false}} {
+		if err := setMappingKey(m, k.key, metaValueFor(k.key, instanceID, localHostname), k.add); err != nil {
+			return "", err
+		}
+	}
 	out, err := yaml.Marshal(&doc)
 	if err != nil {
 		return "", fmt.Errorf("render cloud-init meta-data: %w", err)
 	}
+	// Whatever the source held, the rendered document must read back as a
+	// mapping (cloud-init would otherwise ignore the whole seed).
+	var check yaml.Node
+	if err := yaml.Unmarshal(out, &check); err != nil || len(check.Content) != 1 || check.Content[0].Kind != yaml.MappingNode {
+		return "", fmt.Errorf("the rewritten cloud-init meta-data does not parse as a mapping")
+	}
 	return string(out), nil
+}
+
+// metaValueFor is the value RewriteMetaData writes for key: the instance-id
+// for instance-id, the local hostname for the hostname keys.
+func metaValueFor(key, instanceID, localHostname string) string {
+	if key == metaKeyInstanceID {
+		return instanceID
+	}
+	return localHostname
 }
 
 // setMappingKey sets every top-level key of mapping m to the string value,
 // keeping a quoted style the source used; with add, a key m lacks is
-// appended.
-func setMappingKey(m *yaml.Node, key, value string, add bool) {
+// appended. A value that carries an anchor is refused: replacing it would
+// drop the anchor a later alias may name, and the document would no longer
+// parse.
+func setMappingKey(m *yaml.Node, key, value string, add bool) error {
 	found := false
 	for i := 0; i+1 < len(m.Content); i += 2 {
 		if m.Content[i].Value != key {
 			continue
 		}
 		found = true
+		if m.Content[i+1].Anchor != "" {
+			return fmt.Errorf("cloud-init meta-data key %q carries a YAML anchor", key)
+		}
 		style := m.Content[i+1].Style & (yaml.DoubleQuotedStyle | yaml.SingleQuotedStyle)
 		m.Content[i+1] = &yaml.Node{Kind: yaml.ScalarNode, Tag: yamlStrTag, Value: value, Style: style}
 	}
@@ -238,6 +266,7 @@ func setMappingKey(m *yaml.Node, key, value string, add bool) {
 			&yaml.Node{Kind: yaml.ScalarNode, Tag: yamlStrTag, Value: key},
 			&yaml.Node{Kind: yaml.ScalarNode, Tag: yamlStrTag, Value: value})
 	}
+	return nil
 }
 
 // RewriteUserDataHostname rewrites, in a #cloud-config user-data document,
@@ -248,13 +277,29 @@ func setMappingKey(m *yaml.Node, key, value string, add bool) {
 // boot with the source's name. Every other line is kept byte for byte. A
 // document of any other kind (a shell script, MIME multi-part, a Jinja
 // template) or a key whose value is not a plain one-line scalar is left
-// untouched. changed reports whether a key was rewritten; skipped lists the
-// keys found but left untouched.
+// untouched. Only a line the YAML parser confirms is that top-level key, with
+// its whole value on the line, is rewritten — never a look-alike line inside
+// a multi-line quoted scalar or flow collection — and a document that does
+// not parse is not rewritten at all (cloud-init could not read it either).
+// changed reports whether a key was rewritten; skipped lists the keys found
+// but left untouched (key names only: user-data may carry secrets).
 func RewriteUserDataHostname(userData, hostname, domain string) (out string, changed bool, skipped []string) {
 	if !strings.HasPrefix(userData, cloudConfigHeader) {
 		return userData, false, nil
 	}
 	lines := strings.SplitAfter(userData, "\n")
+	keyLines, ok := topLevelScalarKeyLines(userData, userKeyHostname, userKeyFQDN)
+	if !ok {
+		for _, line := range lines {
+			for _, key := range []string{userKeyHostname, userKeyFQDN} {
+				if strings.HasPrefix(line, key+":") {
+					skipped = append(skipped, key)
+				}
+			}
+		}
+		return userData, false, skipped
+	}
+	var rewritten []string
 	for i, line := range lines {
 		content := strings.TrimRight(line, "\r\n")
 		eol := line[len(content):]
@@ -263,8 +308,9 @@ func RewriteUserDataHostname(userData, hostname, domain string) (out string, cha
 			if !ok {
 				continue
 			}
-			old, ok := plainScalar(rest)
-			if !ok {
+			want, isKey := keyLines[i+1]
+			old, plain := plainScalar(rest)
+			if !isKey || want.key != key || !plain || old != want.value {
 				skipped = append(skipped, key)
 				continue
 			}
@@ -273,10 +319,96 @@ func RewriteUserDataHostname(userData, hostname, domain string) (out string, cha
 				value = fqdnFor(hostname, domain, old)
 			}
 			lines[i] = key + ": " + quoteYAML(value) + eol
-			changed = true
+			rewritten = append(rewritten, key)
 		}
 	}
-	return strings.Join(lines, ""), changed, skipped
+	out = strings.Join(lines, "")
+	// The rewrite is line-based: a line that looks like a top-level key may
+	// be the continuation of a multi-line flow scalar or collection. A
+	// document that parsed before and does not after is left as it was, its
+	// keys reported as skipped.
+	if len(rewritten) > 0 && yamlParses(userData) && !yamlParses(out) {
+		return userData, false, append(skipped, rewritten...)
+	}
+	return out, len(rewritten) > 0, skipped
+}
+
+// scalarKey is a top-level key of a document and its scalar value.
+type scalarKey struct{ key, value string }
+
+// topLevelScalarKeyLines parses the first document of s and returns, by
+// 1-based line, its top-level mapping keys among keys that start in column 1
+// and whose value is a scalar starting on the same line (no anchor, alias,
+// tag or block scalar). ok is false when s does not parse as a mapping.
+func topLevelScalarKeyLines(s string, keys ...string) (map[int]scalarKey, bool) {
+	var doc yaml.Node
+	if err := yaml.Unmarshal([]byte(s), &doc); err != nil || len(doc.Content) != 1 || doc.Content[0].Kind != yaml.MappingNode {
+		return nil, false
+	}
+	m := doc.Content[0]
+	out := map[int]scalarKey{}
+	for i := 0; i+1 < len(m.Content); i += 2 {
+		k, v := m.Content[i], m.Content[i+1]
+		if !slices.Contains(keys, k.Value) || k.Column != 1 || v.Kind != yaml.ScalarNode || v.Line != k.Line ||
+			v.Anchor != "" || v.Style&(yaml.LiteralStyle|yaml.FoldedStyle|yaml.TaggedStyle) != 0 {
+			continue
+		}
+		out[k.Line] = scalarKey{key: k.Value, value: v.Value}
+	}
+	return out, true
+}
+
+// yamlParses reports whether every document of s parses as YAML.
+func yamlParses(s string) bool {
+	dec := yaml.NewDecoder(strings.NewReader(s))
+	for {
+		var n yaml.Node
+		err := dec.Decode(&n)
+		if errors.Is(err, io.EOF) {
+			return true
+		}
+		if err != nil {
+			return false
+		}
+	}
+}
+
+// identityKeys are the top-level #cloud-config keys that keep a clone's
+// source identity whatever its instance-id, with the value that does it ("" =
+// any value).
+var identityKeys = []struct{ key, value string }{
+	{"ssh_keys", ""},               // fixed SSH host keys, written on every new instance
+	{"ssh_deletekeys", "false"},    // the source's host keys are kept
+	{"preserve_hostname", "true"},  // the hostname is never set
+	{"manual_cache_clean", "true"}, // cloud-init never checks the instance-id
+}
+
+// IdentityOverrides returns, sorted, the top-level keys of a #cloud-config
+// user-data document that undo a clone's new identity (identityKeys): fixed
+// SSH host keys, host keys kept, the hostname preserved, or the instance-id
+// never checked. The caller warns with the key names only (user-data may
+// carry secrets). A document that is not #cloud-config, or does not parse,
+// yields nil.
+func IdentityOverrides(userData string) []string {
+	if !strings.HasPrefix(userData, cloudConfigHeader) {
+		return nil
+	}
+	var doc map[string]any
+	if err := yaml.Unmarshal([]byte(userData), &doc); err != nil {
+		return nil
+	}
+	var out []string
+	for _, k := range identityKeys {
+		v, ok := doc[k.key]
+		if !ok {
+			continue
+		}
+		if k.value == "" || strings.EqualFold(fmt.Sprint(v), k.value) {
+			out = append(out, k.key)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 // plainScalar returns the one-line scalar after a key's colon — unquoted, a
