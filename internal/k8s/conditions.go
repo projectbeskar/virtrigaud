@@ -232,6 +232,29 @@ const (
 	// VMClass whose size counts is missing. VirtRigaud fails closed: nothing is
 	// created, cloned, migrated or grown until it can be checked.
 	ReasonDiskSizeLimitUnverifiable = "DiskSizeLimitUnverifiable"
+	// ReasonWaitingForImport is Provisioning=False (and Ready=False) on the
+	// target VirtualMachine of a VMMigration into a clustered Provider
+	// (ADR-0007 Addendum B, B1): spec.importedDisk names the migration
+	// (migrationRef) but no disk yet (an empty diskID). The VM is placed — its
+	// pending host reserves its capacity — but no Create is sent until the
+	// migration has imported its disk to that host and recorded it in
+	// spec.importedDisk.
+	ReasonWaitingForImport = "WaitingForImport"
+	// ReasonMigrationNotFound is Provisioning=False (and Ready=False) on a
+	// VirtualMachine waiting for its import whose spec.importedDisk.migrationRef
+	// names a VMMigration that does not exist in its namespace, or that did
+	// not create this VirtualMachine (its recorded UID or claim). It is never
+	// placed or created from a disk it cannot prove (fail closed); deleting
+	// the VirtualMachine, or a migration that owns it, lifts the hold.
+	ReasonMigrationNotFound = "MigrationNotFound"
+	// ReasonImportedDiskPinned is Placed=False (and Provisioning=False) on a
+	// clustered migration target whose Create on its pending host was refused
+	// with a name conflict after its migration imported the disk to that host
+	// (ADR-0007 Addendum B, B1.2): the host is pinned — the VM is neither
+	// excluded from it nor re-scheduled, because the landed disk exists only
+	// there. An operator resolves the conflict on the host; the Create is
+	// re-checked with a backoff.
+	ReasonImportedDiskPinned = "ImportedDiskPinned"
 )
 
 // ConditionPlaced is the single positive placement condition of a VirtualMachine
