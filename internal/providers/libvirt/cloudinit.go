@@ -90,7 +90,7 @@ func (c *CloudInitProvider) PrepareCloudInit(ctx context.Context, config CloudIn
 	if config.MetaData == "" {
 		config.MetaData = c.generateMetaData(config.InstanceID, config.Hostname)
 	}
-	log.Printf("DEBUG Generated meta-data (length=%d): %s", len(config.MetaData), config.MetaData)
+	log.Printf("DEBUG Cloud-init meta-data ready (length=%d)", len(config.MetaData))
 
 	// Write user-data file remotely
 	userDataPath := filepath.Join(remoteDir, "user-data")

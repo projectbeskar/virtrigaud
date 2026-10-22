@@ -300,6 +300,31 @@ func TestCloneSeed_RealISORoundTrip(t *testing.T) {
 	assert.Equal(t, src[seedFileNetworkConfig], clone[seedFileNetworkConfig], "network-config is carried")
 }
 
+// TestSingleHostClone_SeedFailureIsRetryable pins review L7: a clone whose
+// own seed cannot be made defined nothing, so it is answered retryably
+// (Unavailable), never as an unknown outcome, and leaves no seed behind.
+func TestSingleHostClone_SeedFailureIsRetryable(t *testing.T) {
+	c := newCreateHost(t)
+	ctx := context.Background()
+	_, err := c.p.Create(ctx, c.createReq(ownerTeamA, c.file(c.images, "ubuntu.qcow2")))
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(c.root, "fail-genisoimage"), nil, 0o600))
+	defines := strings.Count(c.log("virsh"), "\tdefine ")
+
+	_, err = NewServer(c.p).Clone(ctx, &providerv1.CloneRequest{SourceVmId: "team-a.web", TargetName: r26Target.Name,
+		TargetVm: &providerv1.ObjectIdentity{Uid: r26Target.UID, Namespace: r26Target.Namespace, Name: r26Target.Name}})
+	assert.Equal(t, codes.Unavailable, status.Code(err), "got %v", err)
+	assert.Contains(t, err.Error(), "nothing was defined")
+	assert.Len(t, c.seedEntries(), 1, "only the source's seed remains")
+	assert.Equal(t, defines, strings.Count(c.log("virsh"), "\tdefine "), "nothing was defined")
+
+	// The retry, once the host is fixed, makes the clone.
+	require.NoError(t, os.Remove(filepath.Join(c.root, "fail-genisoimage")))
+	resp, err := c.p.Clone(ctx, r26CloneReq(""))
+	require.NoError(t, err)
+	assert.Equal(t, "team-a.web-copy", resp.TargetVmID)
+}
+
 // userDataOnlySeed packs a seed holding only user-data (another tool's seed,
 // or a hand-made one) and returns its path.
 func userDataOnlySeed(t *testing.T, c *createHost, userData string) string {

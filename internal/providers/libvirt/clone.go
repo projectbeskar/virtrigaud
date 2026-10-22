@@ -289,7 +289,11 @@ func (p *Provider) Clone(ctx context.Context, req contracts.CloneRequest) (contr
 	// clone's Delete removes it and the source's Delete never touches it.
 	targetXML, seedDir, err := p.writeCloneSeed(ctx, p.virshProvider, targetXML, seed)
 	if err != nil {
-		return contracts.CloneResponse{}, err
+		// Nothing was defined (writeCloneSeed left no seed behind): a
+		// retryable failure, never an unknown outcome. The copied disk is
+		// replaced by the retry (ensureDiskTargetFree: no domain uses it).
+		return contracts.CloneResponse{}, contracts.NewRetryableError(
+			"could not make the clone's cloud-init seed on the libvirt host; nothing was defined", err)
 	}
 
 	// Clone stays single-host in this slice (no CloneRequest.target_host_id yet,
@@ -297,6 +301,9 @@ func (p *Provider) Clone(ctx context.Context, req contracts.CloneRequest) (contr
 	if err := p.defineDomainFromXML(ctx, p.virshProvider, domainName, targetXML); err != nil {
 		// The clone's seed is removed unless the domain may exist after all
 		// (it would reference it, and its Delete removes it), as Create does.
+		// removeHostPath runs detached from the request (context.WithoutCancel)
+		// and bounded (stagingCleanupTimeout): the seed holds the source's
+		// user-data and is removed even when the call's context is gone.
 		if seedDir != "" && !errors.Is(err, errDefineOutcomeUnknown) {
 			removeHostPath(ctx, p.virshProvider, seedDir, true)
 		}
