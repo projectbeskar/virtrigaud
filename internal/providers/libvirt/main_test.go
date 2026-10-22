@@ -83,7 +83,7 @@ var guardedHostTools = []string{
 	"sh", "bash", "dash", "qemu-img", "mktemp", "mv", "rm", "cp", "chmod", "chown", "cat", "stat", "realpath",
 	"readlink", "ls", "mkdir", "rmdir", "touch", "ln", "dd", "test", "flock", "timeout", "id", "sha256sum",
 	"restorecon", "genisoimage", "mkisofs", "xorriso", "cloud-localds", "wget", "curl", "du", "df", "truncate",
-	"tee", "find", "install",
+	"tee", "find", "install", "isoinfo",
 }
 
 // neverRunHostTools are refused whatever their arguments: they would act as

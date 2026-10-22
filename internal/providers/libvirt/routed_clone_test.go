@@ -122,31 +122,70 @@ func TestClustered_Clone_LandsOnTheSourceHostStampedWithItsTarget(t *testing.T) 
 }
 
 // TestClustered_Clone_GetsItsOwnCloudInitSeed: the clone's CD-ROM points at a
-// copy of the source's seed in a per-clone seed directory (which the clone's
-// Delete removes), so deleting either VM can never remove the other's seed.
+// seed of its own in a per-clone seed directory (which the clone's Delete
+// removes), so deleting either VM can never remove the other's seed — and the
+// seed carries a new cloud-init identity (R26): an instance-id derived from
+// the target VirtualMachine's UID and the target's hostname, so the clone's
+// first boot regenerates its SSH host keys instead of keeping the source's.
 func TestClustered_Clone_GetsItsOwnCloudInitSeed(t *testing.T) {
 	fx := sourceWeb(t, nil)
 	_, err := NewServer(fx.p).Clone(context.Background(), routedCloneReq())
 	require.NoError(t, err)
 
-	seedDir := "<staging>/" + cloudInitSeedDirPrefix + cloneTargetDomain + ".0000000000"
+	seedDir := cloneSeedDir(cloneTargetDomain)
 	iso := seedDir + "/" + cloudInitISOName
 	calls := fx.calls()
+	assert.Contains(t, calls, "local isoinfo -R -f -i "+scdSeedISO, "the source's seed is read")
 	assert.Contains(t, calls, "local mktemp -d <staging>/"+cloudInitSeedDirPrefix+cloneTargetDomain+".XXXXXXXXXX")
-	assert.Contains(t, calls, "local cp -- "+scdSeedISO+" "+iso)
-	assert.Contains(t, calls, "local chmod "+cloudInitISOMode+" -- "+iso)
-	assert.Contains(t, calls, "local chmod "+cloudInitSeedDirMode+" -- "+seedDir)
+	assert.Contains(t, calls, "local chmod "+cloudInitSeedDirMode+" "+seedDir)
+	for _, c := range calls {
+		assert.NotContains(t, c, "local cp ", "the source's seed is never copied byte for byte: %q", c)
+	}
+	assertReadBeforeCopy(t, calls)
 
 	defined := fx.definedXML(cloneTargetDomain)
 	assert.Contains(t, defined, "file='"+iso+"'", "the clone's CD-ROM is its own seed")
 	assert.NotContains(t, defined, scdSeedISO, "the source's seed is not shared")
-	doc, err := parseDomainDisks(strings.ReplaceAll(defined, "<staging>", fx.staging))
+	doc, err := parseDomainDisks(fx.parseableDefinedXML(cloneTargetDomain))
 	require.NoError(t, err)
 	assert.Equal(t, strings.ReplaceAll(seedDir, "<staging>", fx.staging), doc.cloudInitSeedDir(fx.staging),
 		"Delete of the clone finds (and removes) its own seed directory")
 	for _, c := range calls {
 		assert.NotContains(t, c, "rm -rf -- "+scdSeedISO[:strings.LastIndex(scdSeedISO, "/")], "the source's seed is never removed")
 	}
+
+	assertCloneIdentity(t, fx.scdFixture, cloneTargetDomain, "virtrigaud-"+cloneTarget.UID, "copy")
+}
+
+// assertReadBeforeCopy fails unless the source's seed was read before the
+// disk copy started.
+func assertReadBeforeCopy(t *testing.T, calls []string) {
+	t.Helper()
+	read, copied := -1, -1
+	for i, c := range calls {
+		if read < 0 && strings.Contains(c, "isoinfo") {
+			read = i
+		}
+		if copied < 0 && strings.Contains(c, "qemu-img convert") {
+			copied = i
+		}
+	}
+	require.GreaterOrEqual(t, read, 0, "the source's seed was read")
+	require.GreaterOrEqual(t, copied, 0, "the disk was copied")
+	assert.Less(t, read, copied, "the source's seed is read before anything is copied")
+}
+
+// assertCloneIdentity checks the seed a clone of domain got: its meta-data
+// names the new instance-id and hostname (never the source's), it keeps the
+// meta-data's other keys, and the user-data's hostname is the clone's.
+func assertCloneIdentity(t *testing.T, fx *scdFixture, domain, instanceID, hostname string) {
+	t.Helper()
+	meta := fx.seedFile(domain, "meta-data")
+	assert.Contains(t, meta, "instance-id: "+instanceID)
+	assert.Contains(t, meta, "local-hostname: "+hostname)
+	assert.NotContains(t, meta, scdDomain, "never the source's instance-id")
+	user := fx.seedFile(domain, "user-data")
+	assert.Equal(t, "#cloud-config\nhostname: \""+hostname+"\"\n", user, "the source's user-data, renamed")
 }
 
 // TestClustered_Clone_DefineFailureAndTheClonesSeed: when the define failed

@@ -127,9 +127,9 @@ func TestClustered_Clone_FailedCopyNeverReachesTheDisk(t *testing.T) {
 // define whose outcome is unknown keeps it (the domain may exist and use it,
 // and its owner-checked Delete removes it with it).
 func TestClustered_Clone_FailureAfterTheCopyRemovesTheDisk(t *testing.T) {
-	t.Run("copying the cloud-init seed failed", func(t *testing.T) {
+	t.Run("making the clone's cloud-init seed failed", func(t *testing.T) {
 		fx := sourceWeb(t, nil)
-		failHostTool(t, "cp")
+		failHostTool(t, "genisoimage")
 		_, err := NewServer(fx.p).Clone(context.Background(), routedCloneReq())
 		require.Error(t, err)
 		assert.Contains(t, fx.calls(), clonedDiskRemoval)
@@ -182,7 +182,7 @@ func TestClustered_Clone_DiskInUseIsNeverRemoved(t *testing.T) {
 	user = strings.Replace(user, routingDomainUUID, "33333333-4444-4555-8666-777777777777", 1)
 	t.Run("in use", func(t *testing.T) {
 		fx := sourceWeb(t, map[string]string{"other": user})
-		failHostTool(t, "cp") // fails after the copy: the disk would be removed
+		failHostTool(t, "genisoimage") // fails after the copy: the disk would be removed
 		_, err := NewServer(fx.p).Clone(context.Background(), routedCloneReq())
 		require.Error(t, err)
 		calls := fx.calls()
@@ -193,7 +193,7 @@ func TestClustered_Clone_DiskInUseIsNeverRemoved(t *testing.T) {
 	})
 	t.Run("the check fails", func(t *testing.T) {
 		fx := sourceWeb(t, nil)
-		failHostTool(t, "cp")
+		failHostTool(t, "genisoimage")
 		failHostTool(t, "realpath")
 		_, err := NewServer(fx.p).Clone(context.Background(), routedCloneReq())
 		require.Error(t, err)

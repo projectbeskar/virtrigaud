@@ -51,7 +51,9 @@ import (
 // historical copy when sudo refuses; B2: a source that is not shut off is
 // refused), and for the v0.4.0-rc1 F2 overlay cleanup (SnapshotDelete reads
 // the snapshot's definition, `snapshot-dumpxml`, before deleting it; this fake
-// has none, so nothing is cleaned up after) — with
+// has none, so nothing is cleaned up after), and for R26 (a Clone reads the
+// source's cloud-init seed with isoinfo before the copy and gives the clone
+// its own seed — mktemp, genisoimage, chmod — re-pointing its CD-ROM there) — with
 // VIRTRIGAUD_UPDATE_CALLSEQ_GOLDEN=1; the slice 3 branch
 // reproduces it byte for byte. A change to any of them — which would restart
 // the ADR-0008 D5 soak window — fails here.
@@ -154,12 +156,23 @@ mktemp)
   if [ -n "$FAKE_SCD_STAGING" ]; then case "$p" in "$FAKE_SCD_STAGING"/*) mk=1 ;; esac; fi
   if [ "$mk" = 1 ]; then if [ "$isdir" = 1 ]; then mkdir -p "$p"; else : > "$p"; fi; fi
   echo "$p" ;;
+isoinfo)
+  fail isoinfo
+  case "$*" in
+    *" -f "*) printf '/meta-data\n/user-data\n' ;;
+    *) for a in "$@"; do x="$a"; done
+       case "$x" in
+         /user-data) printf '#cloud-config\nhostname: web\n' ;;
+         /meta-data) printf 'instance-id: ` + scdDomain + `\nlocal-hostname: web\n' ;;
+       esac ;;
+  esac ;;
 qemu-img)
   fail qemu-img
   if [ "$1" = info ]; then printf '{"virtual-size": 10737418240, "actual-size": 1073741824, "format": "qcow2"}\n'; fi ;;
 sh)
   case "$2" in
   '` + umaskExecScript + `') exec /bin/sh "$@" ;;
+  '` + seedFileReadScript + `') exec /bin/sh "$@" ;;
   ` + scdChainMemberPattern + `)
     if [ -f "$d/symlink-${4##*/}" ]; then echo ` + chainMemberSymlink + `
     elif [ -f "$d/unsafe-dir-${5##*/}" ]; then printf '775 0\n` + scdSSHUID + `\n'
@@ -199,7 +212,7 @@ const (
 )
 
 // scdTools are the names scdFakeTool is installed under.
-var scdTools = []string{"virsh", "mktemp", "qemu-img", "sh", "sudo", "cp", "mv", "chmod", "chown", "rm", "restorecon", "stat", "sha256sum", "id"}
+var scdTools = []string{"virsh", "mktemp", "qemu-img", "isoinfo", "genisoimage", "sh", "sudo", "cp", "mv", "chmod", "chown", "rm", "restorecon", "stat", "sha256sum", "id"}
 
 // scdFixture is one scenario's fake host: a single-host Provider (with the
 // registry seam the Server's snapshot RPCs use) on qemu:///single.
@@ -326,6 +339,27 @@ func (f *scdFixture) definedXML(domain string) string {
 	return f.normalize(out)
 }
 
+// parseableDefinedXML is definedXML with the staging directory's real path
+// back in place of "<staging>" (which an XML parser refuses inside an
+// attribute).
+func (f *scdFixture) parseableDefinedXML(domain string) string {
+	return strings.ReplaceAll(f.definedXML(domain), "<staging>", f.staging)
+}
+
+// cloneSeedDir is the seed directory a clone of domain gets (mktemp is
+// deterministic here), "<staging>"-normalized as definedXML is.
+func cloneSeedDir(domain string) string {
+	return "<staging>/" + cloudInitSeedDirPrefix + domain + ".0000000000"
+}
+
+// seedFile returns the file name of the seed a clone of domain got.
+func (f *scdFixture) seedFile(domain, name string) string {
+	f.t.Helper()
+	b, err := os.ReadFile(filepath.Join(strings.Replace(cloneSeedDir(domain), "<staging>", f.staging, 1), name)) //nolint:gosec // test reads its fixture
+	require.NoError(f.t, err, "the clone's seed has %s", name)
+	return string(b)
+}
+
 var (
 	// scdUnixRE matches a unix-seconds timestamp (snapshot names, export ids).
 	scdUnixRE = regexp.MustCompile(`\b1[0-9]{9}\b`)
@@ -449,7 +483,7 @@ func singleHostSCDScenarios() []scdScenario {
 		{name: "clone-uefi-nvram", domains: uefi, run: cloneCall(fullClone), defined: "team-a.copy"},
 		{name: "clone-class-override", run: cloneCall(&providerv1.CloneRequest{SourceVmId: scdDomain, TargetName: "copy", TargetVm: scdTargetVM,
 			ClassJson: `{"cpu":4,"memory":"4Gi","performanceProfile":{"cpuHotAddEnabled":true}}`}), defined: "team-a.copy"},
-		{name: "clone-customize-json-not-applied", run: cloneCall(&providerv1.CloneRequest{SourceVmId: scdDomain, TargetName: "copy", TargetVm: scdTargetVM,
+		{name: "clone-customize-hostname", run: cloneCall(&providerv1.CloneRequest{SourceVmId: scdDomain, TargetName: "copy", TargetVm: scdTargetVM,
 			CustomizeJson: `{"hostname":"x"}`}), defined: "team-a.copy"},
 		{name: "clone-target-exists", domains: targetTaken, run: cloneCall(fullClone), defined: "team-a.copy"},
 		{name: "clone-source-missing", run: cloneCall(&providerv1.CloneRequest{SourceVmId: "gone", TargetName: "copy", TargetVm: scdTargetVM}), defined: "team-a.copy"},
