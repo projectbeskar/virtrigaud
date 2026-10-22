@@ -70,10 +70,11 @@ import (
 //     domain on another host may use it. A use refuses the import, and a host
 //     that cannot be scanned fails it closed (HOST_UNAVAILABLE or
 //     VM_DISK_CHECK_FAILED); an unused leftover is replaced by the publish;
-//  3. serialisation: the in-process landing lock keyed on (host, landing
-//     name) is held around the checks and the publish (the clustered Create
-//     that attaches the disk in place takes it too), and every write-phase
-//     host command runs under flock(1) on the host lock
+//  3. serialisation: the in-process landing lock, keyed on the landing name
+//     alone and so provider-wide across every host (routedLandingKey), is
+//     held around the checks and the publish (the routed DeleteLandedDisk
+//     and the clustered Create that attaches the disk in place take it too),
+//     and every write-phase host command runs under flock(1) on the host lock
 //     "<staging>/virtrigaud-locks/import-<domain>.lock" (a command left over
 //     from a cancelled call makes the re-send answer "still running").
 //
