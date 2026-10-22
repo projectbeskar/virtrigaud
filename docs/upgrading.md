@@ -755,10 +755,10 @@ the following once after upgrading, and delete only what no `VMMigration` in fli
   The directories it considers are real directories directly inside the staging
   directory (a symlink is never followed or removed); references are compared as
   canonical paths, and anything that cannot be checked is kept. A failure is logged
-  at `WARN` and does not fail the delete. In a single-host provider, `Create`, `Clone`
-  and `Delete` of one domain name now run one at a time (a retried `Create` waits for
-  the delete of the same name, or is answered `domain busy` and retried). Clustered
-  providers are unchanged.
+  at `WARN` and does not fail the delete. In a single-host provider, `Create` and
+  `Delete` of one domain name now also run one at a time (`Clone` already did): a
+  retried `Create` waits for the delete of the same name, or is answered `domain busy`
+  and retried. Clustered providers are unchanged.
 - **Clones now boot as a new cloud-init instance: their SSH host keys are
   regenerated** (R26, after v0.4.0-rc2, [`docs/vm-ownership.md`](vm-ownership.md#a-clones-host-identity),
   [`docs/libvirt-clones.md`](libvirt-clones.md#a-clones-cloud-init-identity)). Before,

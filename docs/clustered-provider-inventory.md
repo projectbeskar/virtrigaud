@@ -1551,16 +1551,20 @@ for a clustered provider.
     from its address, can therefore read or write the export: use a dedicated
     export per trust domain, restrict it to the pool hosts' addresses, and keep
     the storage network isolated (ADR-0006 C6).
-- **A clone carries the source's cloud-init seed.** Every clone is a copy of
-  the source's disk and definition, cloud-init CD-ROM included: the clustered
-  clone gets its own copy of the source's seed ISO, so its user-data — and any
-  provisioning secrets in it (passwords, SSH keys, tokens) — is the source's.
-  A cross-namespace clone (#340 grant) therefore hands the source's user-data
-  to the target namespace. See
+- **A clone carries the source's user-data.** Every clone is a copy of the
+  source's disk and definition. The clustered clone gets a seed of its own
+  (R26: a new cloud-init identity, built in the
+  [seed directory](libvirt-domain-ownership.md#cloud-init-seed-directory)), but
+  its user-data is the `VMClone`'s `spec.customization.userData.cloudInit.inline`
+  when set, and otherwise the source's — with any provisioning secrets in it
+  (passwords, SSH keys, tokens). A cross-namespace clone (#340 grant) therefore
+  hands the source's user-data to the target namespace, and `create` on `VMClone`
+  is read access to the source's data. See
   [`cross-namespace-targets.md`](cross-namespace-targets.md#a-clone-carries-the-sources-cloud-init-seed).
 - **Adoption** works on a clustered provider since slice 4, keyed on
   (host, id); see [Listing and adoption](#listing-and-adoption-slice-4). A
-  **VMMigration into** a clustered provider fails validation until P3.
+  **VMMigration into** a clustered provider is served since Addendum B
+  ([Migration into a clustered provider](#migration-into-a-clustered-provider-addendum-b)).
 
 ### Listing and adoption (slice 4)
 
@@ -2327,8 +2331,9 @@ host and is never created (`MigrationNotFound`) — delete it yourself.
   writer (`s3`) or the bounded copy (`nfs`), the staged-image header checks,
   `qemu-img info` / `convert` / `check`, the disk-size limit, the publish
   (`mv -f -T`) and `pool-refresh`. On a clustered host **every one of those
-  commands runs under `timeout --kill-after=10s <budget>s`**, where the budget
-  ends 15 s before the manager's 30-minute deadline, so no host step of an
+  commands runs under `timeout --kill-after=10s <N>s`**, where `timeout` ends 5 s
+  before the call's budget and the budget ends 15 s before the manager's
+  30-minute deadline, so no host step of an
   earlier call can still run once the manager's 35-minute settle time has
   passed. The provider therefore reports `resend_safe_import_backends: [s3, nfs]`.
 - **`DeleteLandedDisk`** removes the landed disk on `target_host_id` only

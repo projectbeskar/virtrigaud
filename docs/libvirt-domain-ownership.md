@@ -295,8 +295,11 @@ the provider's SSH user can list, and makes every seed file private:
   access-controlled like the secrets themselves, and prefer short-lived
   bootstrap credentials in user-data (a one-time token that fetches the real
   secrets) over long-lived ones.
-- **SELinux.** libvirt relabels the ISO at domain start like any disk source; no
-  `restorecon` is needed.
+- **SELinux: not tested.** The seed directory was run on Ubuntu 24.04 with AppArmor
+  (libvirt 10.0). On an SELinux host libvirt relabels a domain's disk sources at
+  start, and a directory made below `/var/lib/libvirt` takes that directory's
+  label, but VirtRigaud has not been run there; if a seeded VM does not start,
+  look for AVC denials on the seed directory.
 
 Prepare each libvirt host once, as root (replace `virtrigaud` with the
 provider's SSH user):
