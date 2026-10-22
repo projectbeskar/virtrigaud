@@ -22,6 +22,9 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/genproto/googleapis/rpc/errdetails"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
 	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
@@ -110,6 +113,55 @@ func TestClient_DeleteStagedDisk_RoutedHostOnTheWire(t *testing.T) {
 			defer srv.mu.Unlock()
 			require.Len(t, srv.calls, 1)
 			assert.Equal(t, host, srv.calls[0].GetTargetHostId())
+		})
+	}
+}
+
+// failingImportServer answers ImportDisk with a fixed error.
+type failingImportServer struct {
+	providerv1.UnimplementedProviderServer
+	err error
+}
+
+func (s *failingImportServer) ImportDisk(context.Context, *providerv1.ImportDiskRequest) (*providerv1.ImportDiskResponse, error) {
+	return nil, s.err
+}
+
+// TestClient_ImportDisk_RoutedRefusalReasonsSurvive (#415): the reasons the
+// manager's migration slice branches on reach it through the client mapping —
+// a landing file in use (VM_DISK_IN_USE, a Conflict), and a landing host whose
+// storage is misconfigured (HOST_STORAGE_MISCONFIGURED).
+func TestClient_ImportDisk_RoutedRefusalReasonsSurvive(t *testing.T) {
+	withReasons := func(code codes.Code, reasons ...string) error {
+		st := status.New(code, "refused")
+		for _, r := range reasons {
+			next, err := st.WithDetails(&errdetails.ErrorInfo{Reason: r, Domain: contracts.ErrorInfoDomain})
+			require.NoError(t, err)
+			st = next
+		}
+		return st.Err()
+	}
+	for name, tc := range map[string]struct {
+		err   error
+		check func(t *testing.T, err error)
+	}{
+		"landing file in use": {withReasons(codes.FailedPrecondition, contracts.VMDiskInUseReason, contracts.VMOperationFailedReason),
+			func(t *testing.T, err error) {
+				assert.True(t, contracts.IsVMDiskInUse(err), "%v", err)
+				assert.True(t, contracts.IsConflict(err), "%v", err)
+			}},
+		"host storage misconfigured": {withReasons(codes.FailedPrecondition, contracts.HostStorageMisconfiguredReason, contracts.VMOperationFailedReason),
+			func(t *testing.T, err error) {
+				assert.True(t, contracts.IsHostStorageMisconfigured(err), "%v", err)
+				assert.False(t, contracts.IsNothingDone(err), "not retried on the same host")
+			}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			cli := newTestClientForVMOps(t, &failingImportServer{err: tc.err}, "libvirt", "routed-import-refusal")
+			_, err := cli.ImportDisk(context.Background(), contracts.ImportDiskRequest{SourceURL: "nfs://n/e/o", BackendType: "nfs",
+				TargetHostID: "host-b", TargetVM: contracts.ObjectIdentity{UID: routedImportUID, Namespace: "team-a", Name: "web"}})
+			require.Error(t, err)
+			tc.check(t, err)
 		})
 	}
 }

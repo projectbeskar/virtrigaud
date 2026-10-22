@@ -299,12 +299,17 @@ type stripTimeoutConn struct {
 	*nfsObjectHost
 	host hostconn.HostID
 	sent [][]string
+	// failWith, when set, fails every command, as a host command would.
+	failWith error
 }
 
 func (c *stripTimeoutConn) HostID() hostconn.HostID { return c.host }
 
 func (c *stripTimeoutConn) RunHost(ctx context.Context, argv ...string) (*hostconn.Result, error) {
 	c.sent = append(c.sent, argv)
+	if c.failWith != nil {
+		return &hostconn.Result{ExitCode: timeoutExpiredExit}, c.failWith
+	}
 	if len(argv) > 3 && argv[0] == "timeout" {
 		argv = argv[3:]
 	}
