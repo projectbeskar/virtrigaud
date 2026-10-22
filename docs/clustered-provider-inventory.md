@@ -227,8 +227,12 @@ needs:
   Each VM's seed (its user-data, which may carry secrets) is built there,
   private (`0600`). A host whose seed directory is missing (and cannot be
   created by the SSH user), not owned by the SSH user, or readable or writable
-  by its group or others is refused: every create and clone on it fails,
-  retryably, with `refusing to stage cloud-init data`. Keep libvirt's
+  by its group or others — or below a directory not owned by root or the SSH
+  user, or writable by group or others without the sticky bit — is refused:
+  every create and clone on it fails, retryably, with
+  `refusing to stage cloud-init data`. Providers with different SSH users on
+  one host each need their own directory (`VIRTRIGAUD_LIBVIRT_SEED_DIR` in each
+  Provider's `spec.runtime.env`). Keep libvirt's
   `dynamic_ownership = 1` (the default) so the qemu user can open the `0600`
   ISO; no AppArmor change is needed. Keep it on a local filesystem, not on
   shared storage: libvirt hands the ISO to the qemu user with `chown`, which a
