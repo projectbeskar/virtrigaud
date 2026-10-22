@@ -150,7 +150,10 @@ const (
 		"supportsRoutedImport (a clustered provider older than ADR-0007 Addendum B), so the disk import cannot be " +
 		"routed to a host: migrating into it is refused before any side effect. Upgrade the provider and run the " +
 		"migration again"
-	clusteredTargetCapabilitiesMessage = "waiting for the clustered target provider's capabilities " +
+	clusteredTargetCrossNamespaceMessage = "a clustered target VirtualMachine must be in the VMMigration's own namespace " +
+		"(spec.target.namespace unset or equal to it): its landed disk is attached in place only for a VM whose " +
+		"migration is in its namespace. Run the migration from the target namespace"
+	clusteredTargetCapabilitiesMessage ="waiting for the clustered target provider's capabilities " +
 		"(GetCapabilities failed; the cause is in the manager log)"
 	clusteredTargetPVCRefusedMessage = "storage backend \"pvc\" is not supported into a clustered provider: the disk " +
 		"lands on a host, which reads it from s3 or nfs; use \"s3\" or \"nfs\" (ADR-0007 Addendum B, B3)"
@@ -195,6 +198,15 @@ const (
 // for (the provider client error goes to the log only).
 func (r *VMMigrationReconciler) gateRoutedImport(ctx context.Context, migration *infrav1beta1.VMMigration,
 	targetProvider *infrav1beta1.Provider) (bool, ctrl.Result, error) {
+	// The target VM proves its landed disk through a VMMigration in its OWN
+	// namespace (isOwnMigrationDisk); one in another namespace could never be
+	// created on its host from the landed disk.
+	if migrationTargetVMKey(migration).Namespace != migration.Namespace {
+		setMigrationCondition(migration, infrav1beta1.VMMigrationConditionValidating, metav1.ConditionFalse,
+			ReasonClusteredTargetUnsupported, clusteredTargetCrossNamespaceMessage)
+		res, err := r.transitionToFailedWithReason(ctx, migration, ReasonClusteredTargetUnsupported, clusteredTargetCrossNamespaceMessage)
+		return false, res, err
+	}
 	instance, err := r.getProviderInstance(ctx, targetProvider)
 	var caps contracts.Capabilities
 	if err == nil {

@@ -226,3 +226,23 @@ func TestHandleValidatingPhase_ClusteredUnboundSourceWaits(t *testing.T) {
 	assert.Equal(t, infravirtrigaudiov1beta1.MigrationPhaseValidating, got.Status.Phase, "not failed, not advanced")
 	assert.Contains(t, got.Status.Message, "host binding")
 }
+
+// TestGateRoutedImport_CrossNamespaceTargetRefused: a clustered target VM in
+// another namespace could never prove its landed disk (isOwnMigrationDisk
+// looks the migration up in the VM's namespace), so it is refused up front.
+func TestGateRoutedImport_CrossNamespaceTargetRefused(t *testing.T) {
+	r, migration := clusteredMigrationFixture(t, false, true, nil)
+	migration.Spec.Target.Namespace = "team-b"
+	called := false
+	r.providerInstanceFn = func(context.Context, *infravirtrigaudiov1beta1.Provider) (contracts.Provider, error) {
+		called = true
+		return &capsStub{caps: contracts.Capabilities{SupportsRoutedImport: true}}, nil
+	}
+	proceed, _, err := r.gateRoutedImport(context.Background(), migration, readyProvider("default", "tgt-prov"))
+	require.NoError(t, err)
+	assert.False(t, proceed)
+	assert.False(t, called, "refused before any provider call")
+	got := getMigration(t, r)
+	assert.Equal(t, infravirtrigaudiov1beta1.MigrationPhaseFailed, got.Status.Phase)
+	assert.Equal(t, clusteredTargetCrossNamespaceMessage, got.Status.Message)
+}
