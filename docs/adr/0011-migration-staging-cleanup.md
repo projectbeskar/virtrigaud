@@ -329,7 +329,7 @@ export per tenant, as ADR-0006 C6 already recommends. Proxmox mounts the export
 | libvirt (single host) | stat, then remove the object (pod is the S3 client) | **empty**: `qemu-img create -f raw <nfs-url> 0` on the host, as the SSH user, with the migration's `uid`/`gid` in the URL, the same identity as the import |
 | vSphere | stat, then remove the object | **empty**: the same `qemu-img` command in the provider pod |
 | Proxmox | stat, then remove the object | **delete**: kernel mount on the node, then `rm -f` as the migration's `uid`/`gid` (`setpriv`) |
-| libvirt (clustered) | `Unimplemented`: a clustered provider is never a migration target (its `ImportDisk` is not routed yet) | `Unimplemented` |
+| libvirt (clustered) | stat, then remove the object (pod is the S3 client) | **empty**, with the `qemu-img` of the host named in `target_host_id` (the host the import was routed to), under `timeout(1)`. Since [ADR-0007 Addendum B](0007-clustered-orchestrator-provider.md#addendum-b-2026-10-18-migration-into-a-clustered-provider-p3-cold-path); before it a clustered provider answered `Unimplemented` (it was never a migration target) |
 | mock | `Unimplemented`: the mock stages only to `pvc` | `Unimplemented` |
 
 libvirt and vSphere reach NFS only through qemu-img's libnfs driver, and qemu-img
@@ -593,7 +593,8 @@ advertised as `supports_landed_disk_delete`, with the same shape as D1–D8:
   capability, or answers `Unimplemented`, records `LandedDiskLeftBehind` with one `Warning` at
   once: unlike a staged object, a landed disk is on the provider's own storage and is listed in
   `docs/upgrading.md` for manual removal. The mock provider lands nothing and answers
-  `Unimplemented`; a clustered libvirt provider (whose `ImportDisk` is not routed) does too.
+  `Unimplemented`; a clustered libvirt provider did too until ADR-0007 Addendum B, which serves
+  `DeleteLandedDisk` on `target_host_id` (the host the import was routed to).
 
 **Also (vSphere).** The NFC import's transient VM is unregistered, not destroyed; its own files
 (`<landing name>.vmx`, `.vmsd`, `.hlog`, `.nvram`, `.vmxf` and the non-disk files of its layout

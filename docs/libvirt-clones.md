@@ -744,8 +744,9 @@ Check with `stat -c '%a %U:%G' <dir>`. A sticky directory (for example mode
   domain's chain comes from its definition). Delete skips it
   when it has no files to remove, and nothing is cached, so on a host with many
   shut-off domains Delete and snapshot operations take longer.
-- On a clustered Provider, snapshots are not routed to hosts yet; when they
-  are, the same dependency check applies on the VM's host.
+- On a clustered Provider, snapshots are routed to the VM's host (ADR-0007
+  Addendum A, slice 3), and the routed calls keep the same dependency check on
+  that host.
 
 ## Upgrade notes
 
