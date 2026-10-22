@@ -94,13 +94,13 @@ func (c *CloudInitProvider) PrepareCloudInit(ctx context.Context, config CloudIn
 	log.Printf("DEBUG Cloud-init meta-data ready (length=%d)", len(config.MetaData))
 
 	// Write user-data file remotely
-	userDataPath := filepath.Join(remoteDir, cloudInitUserDataName)
+	userDataPath := filepath.Join(remoteDir, seedFileUserData)
 	if err := c.writeRemoteFile(ctx, userDataPath, config.UserData); err != nil {
 		return "", fmt.Errorf("failed to write remote user-data: %w", err)
 	}
 
 	// Write meta-data file remotely
-	metaDataPath := filepath.Join(remoteDir, cloudInitMetaDataName)
+	metaDataPath := filepath.Join(remoteDir, seedFileMetaData)
 	if err := c.writeRemoteFile(ctx, metaDataPath, config.MetaData); err != nil {
 		return "", fmt.Errorf("failed to write remote meta-data: %w", err)
 	}

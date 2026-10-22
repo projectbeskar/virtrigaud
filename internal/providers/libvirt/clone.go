@@ -253,7 +253,7 @@ func (p *Provider) Clone(ctx context.Context, req contracts.CloneRequest) (contr
 	if err != nil {
 		return contracts.CloneResponse{}, contracts.NewInvalidSpecError("read source domain XML for clone", err)
 	}
-	seed, err := planCloneSeed(ctx, p.virshProvider, srcDoc.cloudInitSeedISO(), req, domainName)
+	seed, err := p.planCloneSeed(ctx, p.virshProvider, srcDoc.cloudInitSeedISO(), req, domainName)
 	if err != nil {
 		return contracts.CloneResponse{}, err
 	}

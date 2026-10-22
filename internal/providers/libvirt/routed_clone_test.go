@@ -137,9 +137,15 @@ func TestClustered_Clone_GetsItsOwnCloudInitSeed(t *testing.T) {
 	calls := fx.calls()
 	assert.Contains(t, calls, "local isoinfo -R -f -i "+scdSeedISO, "the source's seed is read")
 	assert.Contains(t, calls, "local mktemp -d <staging>/"+cloudInitSeedDirPrefix+cloneTargetDomain+".XXXXXXXXXX")
-	assert.Contains(t, calls, "local chmod "+cloudInitSeedDirMode+" "+seedDir)
+	// R27: the seed directory is checked before the source's seed is read,
+	// and the clone's seed is sealed private (sealSeedDir).
+	assert.Contains(t, calls, "local sh -c "+seedRootScript+" sh <staging>")
+	assert.Contains(t, calls, "local chmod "+seedFileMode+" -- "+iso)
+	assert.Contains(t, calls, "local chmod "+cloudInitSeedDirMode+" -- "+seedDir)
 	for _, c := range calls {
-		assert.NotContains(t, c, "local cp ", "the source's seed is never copied byte for byte: %q", c)
+		// The only copy is the SSH user's private copy of the clone's OWN
+		// new ISO (R27); the source's seed is never copied byte for byte.
+		assert.NotContains(t, c, "cp -- "+scdSeedISO, "the source's seed is never copied byte for byte: %q", c)
 	}
 	assertReadBeforeCopy(t, calls)
 
@@ -186,6 +192,57 @@ func assertCloneIdentity(t *testing.T, fx *scdFixture, domain, instanceID, hostn
 	assert.NotContains(t, meta, scdDomain, "never the source's instance-id")
 	user := fx.seedFile(domain, "user-data")
 	assert.Equal(t, "#cloud-config\nhostname: \""+hostname+"\"\n", user, "the source's user-data, renamed")
+}
+
+// TestClustered_Clone_ReadsAStartedSourcesSeedThroughItsPrivateCopy (R27):
+// once the source domain has started, libvirt has given its cloud-init.iso
+// (0600) to the qemu user, so the clone reads the seed — isoinfo, as the SSH
+// user — from the SSH user's private copy next to it.
+func TestClustered_Clone_ReadsAStartedSourcesSeedThroughItsPrivateCopy(t *testing.T) {
+	fx := sourceWeb(t, nil)
+	srcSeedDir := filepath.Join(fx.staging, cloudInitSeedDirPrefix+"team-a.web.AbCdEfGhIj")
+	require.NoError(t, os.Mkdir(srcSeedDir, 0o711)) //nolint:gosec // a sealed seed directory's mode
+	srcISO := filepath.Join(srcSeedDir, cloudInitISOName)
+	require.NoError(t, os.WriteFile(filepath.Join(srcSeedDir, cloudInitISOPrivateCopyName), []byte("seed"), 0o600))
+	files, err := filepath.Glob(filepath.Join(fx.dir, "host-b", "dom-*.xml"))
+	require.NoError(t, err)
+	for _, f := range files {
+		b, rerr := os.ReadFile(f) //nolint:gosec // test reads its own fixture
+		require.NoError(t, rerr)
+		require.NoError(t, os.WriteFile(f, []byte(strings.ReplaceAll(string(b), scdSeedISO, srcISO)), 0o600))
+	}
+
+	_, err = NewServer(fx.p).Clone(context.Background(), routedCloneReq())
+	require.NoError(t, err)
+	priv := "<staging>/" + cloudInitSeedDirPrefix + "team-a.web.AbCdEfGhIj/" + cloudInitISOPrivateCopyName
+	calls := fx.calls()
+	assert.Contains(t, calls, "local isoinfo -R -f -i "+priv, "the seed is listed from the SSH user's private copy")
+	for _, c := range calls {
+		if strings.Contains(c, "isoinfo") {
+			assert.NotContains(t, c, "team-a.web.AbCdEfGhIj/"+cloudInitISOName, "the qemu user's ISO is never read: %q", c)
+		}
+	}
+	defined := fx.definedXML(cloneTargetDomain)
+	assert.Contains(t, defined, "file='"+cloneSeedDir(cloneTargetDomain)+"/"+cloudInitISOName+"'", "the clone has its own seed")
+}
+
+// TestClustered_Clone_RefusesAnUnusableSeedDirectory (R27): a seed directory
+// others can list, or that is missing, is refused before the source's seed is
+// read or anything is copied; nothing is defined.
+func TestClustered_Clone_RefusesAnUnusableSeedDirectory(t *testing.T) {
+	for _, script := range []string{"listable-seed-root", "missing-seed-root"} {
+		t.Run(script, func(t *testing.T) {
+			fx := sourceWeb(t, nil)
+			fx.script("local", script, "")
+			_, err := NewServer(fx.p).Clone(context.Background(), routedCloneReq())
+			require.Error(t, err, "the clone fails (the wire message is the host-scoped generic one)")
+			for _, c := range fx.calls() {
+				for _, verb := range []string{"isoinfo", "qemu-img convert", "mktemp", "genisoimage", "virsh define"} {
+					assert.NotContains(t, c, verb, "nothing is read, copied, made or defined: %q", c)
+				}
+			}
+		})
+	}
 }
 
 // TestClustered_Clone_DefineFailureAndTheClonesSeed: when the define failed

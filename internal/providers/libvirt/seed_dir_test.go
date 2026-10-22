@@ -57,7 +57,7 @@ func assertPrivateSeed(t *testing.T, seedDir string) {
 	privBytes, err := os.ReadFile(priv) //nolint:gosec // test reads its own fixture
 	require.NoError(t, err)
 	assert.Equal(t, isoBytes, privBytes, "the private copy is the ISO")
-	for _, name := range []string{cloudInitUserDataName, cloudInitMetaDataName} {
+	for _, name := range seedFileNames {
 		assert.NoFileExists(t, filepath.Join(seedDir, name), "%s is removed once the ISO is built", name)
 	}
 }
@@ -402,7 +402,7 @@ func TestCreate_SealFailureRemovesTheSeed(t *testing.T) {
 		{"the ISO's chmod", "chmod", "'0600 -- '*/" + cloudInitISOName},
 		{"the private copy", "cp", "*" + cloudInitISOPrivateCopyName},
 		{"the private copy's chmod", "chmod", "'0600 -- '*/" + cloudInitISOPrivateCopyName},
-		{"removing the inputs", "rm", "'-f -- '*/" + cloudInitUserDataName + "*"},
+		{"removing the inputs", "rm", "'-f -- '*/" + seedFileUserData + "*"},
 		{"opening the directory", "chmod", "'0711 -- '*"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -591,27 +591,112 @@ func TestSeed_SSHUserReadsItBackAfterTheQemuHandover(t *testing.T) {
 		}
 		return res.Stdout, nil
 	}
-	ud, err := readFile(iso, cloudInitUserDataName)
+	ud, err := readFile(iso, seedFileUserData)
 	require.NoError(t, err, "before the domain starts the SSH user owns the ISO")
 	assert.Contains(t, ud, "secret-of-team-a")
 
 	// libvirt's handover at domain start: the ISO is now the qemu user's 0600.
 	require.NoError(t, os.Chmod(iso, 0))
 	t.Cleanup(func() { _ = os.Chmod(iso, 0o600) })
-	_, err = readFile(iso, cloudInitUserDataName)
+	_, err = readFile(iso, seedFileUserData)
 	require.Error(t, err, "the SSH user can no longer read the domain's ISO")
 
 	p := &Provider{hostSeedDir: seeds}
 	src := p.seedCopySource(ctx, vp, iso)
 	assert.Equal(t, filepath.Join(filepath.Dir(iso), cloudInitISOPrivateCopyName), src)
-	ud, err = readFile(src, cloudInitUserDataName)
+	ud, err = readFile(src, seedFileUserData)
 	require.NoError(t, err, "the SSH user reads its private copy")
 	assert.Contains(t, ud, "secret-of-team-a")
-	md, err := readFile(src, cloudInitMetaDataName)
+	md, err := readFile(src, seedFileMetaData)
 	require.NoError(t, err)
 	assert.Contains(t, md, "instance-id: team-a.web")
 
 	// A seed of an earlier release (no private copy) is read as it is.
 	legacy := filepath.Join(t.TempDir(), cloudInitSeedDirPrefix+"team-a.old.AbCdEfGhIj", cloudInitISOName)
 	assert.Equal(t, legacy, p.seedCopySource(ctx, vp, legacy))
+}
+
+// TestSingleHostClone_SeedInTheSeedDirectory (R27 with R26): a single-host
+// clone of a source that has STARTED (libvirt gave the source's cloud-init.iso
+// to the qemu user: simulated by taking every permission off it) reads the
+// source's seed through the SSH user's private copy, gets its own sealed seed
+// in the seed directory, and Delete removes each VM's own seed.
+func TestSingleHostClone_SeedInTheSeedDirectory(t *testing.T) {
+	c, seeds := newSeedCreateHost(t)
+	ctx := context.Background()
+	_, err := c.p.Create(ctx, c.createReq(ownerTeamA, c.file(c.images, "ubuntu.qcow2")))
+	require.NoError(t, err)
+	srcDirs := dirEntries(t, seeds)
+	require.Len(t, srcDirs, 1)
+	srcISO := filepath.Join(seeds, srcDirs[0], cloudInitISOName)
+	require.NoError(t, os.Chmod(srcISO, 0))
+	t.Cleanup(func() { _ = os.Chmod(srcISO, 0o600) })
+
+	resp, err := c.p.Clone(ctx, r26CloneReq(""))
+	require.NoError(t, err)
+	require.Equal(t, "team-a.web-copy", resp.TargetVmID)
+
+	reads := c.log("isoinfo")
+	assert.Contains(t, reads, filepath.Join(seeds, srcDirs[0], cloudInitISOPrivateCopyName), "read through the private copy")
+	assert.NotContains(t, reads, srcISO+"\n", "the qemu user's ISO is never read")
+	assert.NotContains(t, reads, srcISO+" ", "the qemu user's ISO is never read")
+
+	refs, err := parseDomainPathRefs(c.domainXML("team-a.web-copy"))
+	require.NoError(t, err)
+	require.Len(t, refs.disks, 2)
+	cloneSeedDir := filepath.Dir(refs.disks[1])
+	assert.Equal(t, seeds, filepath.Dir(cloneSeedDir), "the clone's seed is in the seed directory")
+	assert.True(t, isOwnSeedDirName(filepath.Base(cloneSeedDir), "team-a.web-copy"))
+	assertPrivateSeed(t, cloneSeedDir)
+	assert.Empty(t, c.stagingEntries(), "nothing of either seed is in the staging directory")
+
+	_, err = c.p.Delete(ctx, contracts.VMRef{ID: "team-a.web-copy"})
+	require.NoError(t, err)
+	assert.NoDirExists(t, cloneSeedDir, "the clone's Delete removes its own seed")
+	assert.FileExists(t, filepath.Join(seeds, srcDirs[0], cloudInitISOPrivateCopyName), "and never the source's")
+	_, err = c.p.Delete(ctx, contracts.VMRef{ID: "team-a.web"})
+	require.NoError(t, err)
+	assert.Empty(t, dirEntries(t, seeds))
+}
+
+// TestSingleHostClone_RefusesAnUnusableSeedDirectory (R27 with R26): the
+// clone is refused, with the constant message, before the source's seed is
+// read or its disk copied; nothing is defined.
+func TestSingleHostClone_RefusesAnUnusableSeedDirectory(t *testing.T) {
+	c, seeds := newSeedCreateHost(t)
+	ctx := context.Background()
+	_, err := c.p.Create(ctx, c.createReq(ownerTeamA, c.file(c.images, "ubuntu.qcow2")))
+	require.NoError(t, err)
+	before := dirEntries(t, seeds)
+	readsBefore, convertsBefore := c.log("isoinfo"), strings.Count(c.log("qemu-img"), "convert")
+	require.NoError(t, os.Chmod(seeds, 0o755)) //nolint:gosec // the refused mode under test
+
+	_, err = c.p.Clone(ctx, r26CloneReq(""))
+	require.Error(t, err)
+	assert.ErrorIs(t, err, errSeedRootUnusable)
+	assert.Equal(t, readsBefore, c.log("isoinfo"), "the source's seed is not read")
+	assert.Equal(t, convertsBefore, strings.Count(c.log("qemu-img"), "convert"), "nothing is copied")
+	assert.NoFileExists(t, filepath.Join(c.images, "team-a.web-copy-disk.qcow2"))
+	assert.Equal(t, before, dirEntries(t, seeds), "no seed is made")
+	assert.NotContains(t, c.log("virsh"), "\tdefine "+filepath.Join(c.staging, "team-a.web-copy"), "nothing is defined")
+}
+
+// TestCloneSeed_SealedWithoutAnyInputFile (R27 with R26): a clone's seed that
+// carries network-config and vendor-data is sealed like Create's — those
+// inputs are removed too — while the ISO keeps them.
+func TestCloneSeed_SealedWithoutAnyInputFile(t *testing.T) {
+	c, seeds := newSeedCreateHost(t)
+	plan := &cloneSeedPlan{srcISO: "/src/" + cloudInitISOName, config: CloudInitConfig{
+		UserData: "#cloud-config\n", MetaData: "instance-id: x\n", InstanceID: "team-a.web-copy", Hostname: "web-copy",
+		NetworkConfig: "version: 2\n", VendorData: "#cloud-config\n",
+	}}
+	domainXML := "<domain><devices><disk type='file' device='cdrom'><source file='/src/" + cloudInitISOName + "'/></disk></devices></domain>"
+	_, seedDir, err := c.p.writeCloneSeed(context.Background(), c.vp, domainXML, plan)
+	require.NoError(t, err)
+	assert.Equal(t, seeds, filepath.Dir(seedDir))
+	assertPrivateSeed(t, seedDir)
+	c.staging = seeds // seedFiles reads below the createHost's staging directory
+	files := c.seedFiles(filepath.Base(seedDir))
+	assert.Equal(t, "version: 2\n", files[seedFileNetworkConfig], "the ISO keeps network-config")
+	assert.Equal(t, "#cloud-config\n", files[seedFileVendorData], "the ISO keeps vendor-data")
 }
