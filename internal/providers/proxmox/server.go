@@ -1054,8 +1054,11 @@ func (p *Provider) applyVMClassSizing(ctx context.Context, node string, vmid, cp
 // `cicustom` meta snippet (the provider never sets one), its meta-data
 // instance-id is the SHA-1 of that user-data and the network data — which
 // includes the MAC addresses — so a clone boots as a new cloud-init instance
-// with its own hostname. A source configured out of band with a `cicustom`
-// meta-data snippet keeps that snippet's fixed instance-id on its clones.
+// with its own hostname. Exceptions: a source configured out of band with a
+// `cicustom` meta-data snippet keeps that snippet's fixed instance-id on its
+// clones; and with `citype: configdrive2` the network data (ENI) lists no MAC
+// addresses, so a clone whose PVE name equals its source's (the same
+// VirtualMachine name in another namespace) gets the source's instance-id.
 func (p *Provider) Clone(ctx context.Context, req *providerv1.CloneRequest) (*providerv1.CloneResponse, error) {
 	if p.client == nil {
 		return nil, p.createNotPerformed("PVE client not configured; nothing was cloned", nil)
