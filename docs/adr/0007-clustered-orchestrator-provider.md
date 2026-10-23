@@ -1181,8 +1181,9 @@ follows; A2's `pendingHost` is its prerequisite.
 > `internal/providers/libvirt/hostinfo.go`), with no reserve and nothing
 > subtracted for running domains, so they do not move when a VM starts or
 > stops. `allocatableStorageBytes` is different: it is live free space (the
-> `Available` bytes of the active pools), and the scheduler uses it only for
-> the `MinDiskSpacePerHost` floor, never for fit.
+> `default` pool's directory, measured with statvfs on every sync; R31), and
+> the scheduler uses it only for the `MinDiskSpacePerHost` floor and, since
+> Addendum B (B7 decision 4), the disk-space filter, never for CPU/memory fit.
 >
 > **Accounting model: capacity-based.** Because allocatable is a total, the
 > operator subtracts what it has committed, and nothing is counted twice:

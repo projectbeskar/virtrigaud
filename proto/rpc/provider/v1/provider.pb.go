@@ -3549,7 +3549,8 @@ func (x *ListHostsResponse) GetHosts() []*HostInfo {
 
 // HostInfo describes one hypervisor host in a clustered provider's inventory.
 // The shape is hypervisor-AGNOSTIC; the SOURCE of each value is per-hypervisor
-// (e.g. libvirt reads `virsh nodeinfo` / `pool-info` / `domcapabilities`). See
+// (e.g. libvirt reads `virsh nodeinfo` / `domcapabilities`, and statvfs of the
+// `default` pool's directory via `virsh pool-dumpxml` + `stat -f`). See
 // ADR-0007 for the full agnostic-vs-per-hypervisor breakdown.
 type HostInfo struct {
 	state         protoimpl.MessageState

@@ -5,6 +5,29 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-10-22 17:00] - libvirt Host allocatable storage measured fresh (R31)
+**Author:** @wrkode (William Rizzo)
+
+### Fixed
+- `internal/providers/libvirt/hostinfo.go`: a libvirt host's allocatable storage (`Host.status.allocatableStorageBytes`) is the free space available to non-root users in its active `default` pool's directory — statvfs `f_bavail × f_frsize`, what `df` shows as *Available*, which excludes root-reserved blocks, so a host may report less than before — measured on every inventory sync with `timeout --kill-after=1s 10s stat -f -c "%a %S"` after reading the pool's type and target from `virsh pool-dumpxml default`. libvirt's `pool-info` *Available* is no longer used: libvirt caches it until a `pool-refresh` and counts root-reserved blocks. On two lab hosts sharing one NFS export it differed between the hosts (220.8 GiB and 558.5 GiB earlier in the day; 596,642,889,728 and 596,772,913,152 bytes, about 555.7 and 555.8 GiB, at review time), while `stat -f` gave 507261 × 1048576 = 531,901,710,336 bytes (about 495.4 GiB, `df`'s *Available*) on both. No `pool-refresh` is run.
+- `internal/providers/libvirt/hostinfo.go`, `storage.go`: the pool directory is accepted exactly as creates and imports accept it (`isRequiredPoolDirOn`, now shared with `EnsureDefaultStoragePool`: `/var/lib/libvirt/images` lexically after cleaning, else once resolved on the host with `realpath`), and that directory is what is measured. The host reports 0 (fail closed for the disk-space filter; the provider log says why, at Warn when a problem starts for a host and at Debug while it lasts) when the `default` pool is not of type `dir`, `fs` or `netfs`, or is not at `/var/lib/libvirt/images`; also when it is inactive, its definition or directory cannot be read or resolved, `stat` fails or prints something unexpected (quoted host output is clipped to 200 bytes), the probe runs out of its budget (15 s, or half of the caller's remaining deadline when that is less), or a previous probe of the same host has not returned.
+- `internal/providers/libvirt/nfs.go`: the import-time free-space check (`hostFreeBytes`) shares the same format and a strict parser (exactly two non-negative integers, a positive block size, no overflow).
+- `internal/providers/libvirt/routed_import.go`: the file comment says the routed landing lock is keyed on the landing name alone, provider-wide (`routedLandingKey`), not on (host, landing name).
+- `api/infra.virtrigaud.io/v1beta1/host_types.go`, `proto/provider/v1/provider.proto` (regenerated CRD and Go bindings: comments only), `docs/adr/0007-clustered-orchestrator-provider.md`: the description of the storage figure.
+
+### Added
+- `internal/providers/libvirt/hostinfo_test.go`, `hosts_test.go`: statvfs output parsing (odd outputs, overflow, clipping), pool types, unclean, symbolic-link, misplaced and unresolvable pool directories, the budget (15 s, half of a short caller deadline, real expiry, a cancelled caller), the per-host in-flight guard and Warn-once logging, the command sequence (no `pool-refresh`, no `pool-info`), `hostFreeBytes` strictness, and two hosts sharing one pool filesystem reporting the same value and following it when it changes.
+- `docs/clustered-provider-inventory.md`, `docs/upgrading.md`: the `allocatable_storage` source, its fail-closed cases and limitations (an unmounted filesystem behind an active pool; a `stat` in uninterruptible sleep on a dead hard mount cannot be killed), and the visible change.
+
+### Why
+The B7.4 disk-space placement filter (migration targets, `VMPlacementPolicy` `minDiskSpacePerHost`) compared requests against stale per-host values, so it could place a disk on a host without room or refuse one with room.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout (libvirt provider)
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-10-22 10:53] - Migration into a clustered provider: #416 review fixes (R11 slice B.3)
 **Author:** @wrkode (William Rizzo)
 

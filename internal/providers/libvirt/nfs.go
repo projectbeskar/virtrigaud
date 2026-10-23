@@ -221,18 +221,20 @@ func boundedNFSCopy(ctx context.Context, conn libvirtConn, wd *diskWriteDir, nfs
 	return nil
 }
 
-// hostFreeBytes is the free space (available blocks x fragment size) of the
-// host filesystem holding dir.
+// hostFreeBytes is the free space (blocks available to a non-root user x
+// fragment size, statvfs f_bavail * f_frsize) of the host filesystem holding
+// dir — the same measurement, and parser, as the Host inventory's allocatable
+// storage (collectStorageBytes, hostinfo.go).
 func hostFreeBytes(ctx context.Context, h hostCommandRunner, dir string) (int64, error) {
-	fs, err := runHost(ctx, h, "stat", "-f", "-c", "%a %S", "--", dir)
+	fs, err := runHost(ctx, h, "stat", "-f", "-c", statfsAvailFormat, "--", dir)
 	if err != nil {
 		return 0, hostCheckFailed("read the free space for the staged copy", err)
 	}
-	var avail, frsize int64
-	if _, err := fmt.Sscanf(strings.TrimSpace(fs.Stdout), "%d %d", &avail, &frsize); err != nil {
+	free, err := parseStatfsAvailBytes(fs.Stdout)
+	if err != nil {
 		return 0, hostCheckFailed("parse the free space for the staged copy", err)
 	}
-	return avail * frsize, nil
+	return free, nil
 }
 
 // stagedDownloadBound is the most bytes an S3 staged object may be downloaded

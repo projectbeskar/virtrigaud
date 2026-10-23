@@ -831,6 +831,19 @@ the following once after upgrading, and delete only what no `VMMigration` in fli
   clustered-target migration in flight: finish or delete those migrations first; an
   older manager does not know `WaitingForImport` and would send a `Create` for the
   waiting target (which the clustered provider refuses, so nothing is destroyed).
+- **A libvirt Host's `allocatableStorageBytes` is measured fresh** (R31): it is
+  the free space available to non-root users in the `default` pool's directory
+  (statvfs `f_bavail × f_frsize`, what `df` shows as *Available*), read on every
+  inventory sync with `stat -f` under `timeout` (both GNU coreutils), instead of
+  libvirt's `pool-info` value, which went stale until a `virsh pool-refresh`.
+  The new value excludes root-reserved blocks, so a host may report less than
+  before; it follows the filesystem and is the same on hosts that share one pool
+  export. A host now reports `0` (the provider log says why), and placement that
+  needs disk space avoids it, when its `default` pool is not of type `dir`, `fs`
+  or `netfs`, or is not at `/var/lib/libvirt/images` once symbolic links are
+  resolved (where creates and imports already refuse it); also when the pool is
+  inactive or cannot be measured within its budget (15 s at most). See
+  [What `ListHosts` reports per host](clustered-provider-inventory.md#what-listhosts-reports-per-host-libvirt).
 
 ## Post-upgrade verification checklist
 
