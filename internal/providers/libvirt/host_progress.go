@@ -119,6 +119,9 @@ func (p *hostProgress) stage() hostDownStage {
 // and returns the function that records its result. It does nothing on a nil
 // receiver.
 func (p *hostProgress) begin(args []string) func(error) {
+	if p == nil {
+		return func(error) {}
+	}
 	return p.beginCommand(commandMayWrite(args))
 }
 
