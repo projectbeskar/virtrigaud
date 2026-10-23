@@ -125,10 +125,13 @@ spec:
 #
 # A VMNetworkAttachment describes one network. For several NICs, create one
 # attachment per bridge/VLAN and list each in the VirtualMachine's
-# spec.networks (see web-server-01). A fixed MAC address is per interface, so
-# it is set there too (spec.networks[].macAddress).
+# spec.networks (see web-server-01). The bridge, VLAN tag and model of each
+# attachment, and the ipAddress/prefix/gateway/dns of each spec.networks entry,
+# are applied to the Proxmox VM (docs/proxmox-networks.md). A static IP is set on
+# the VirtualMachine's entry, not on the attachment. A fixed MAC address
+# (spec.networks[].macAddress) is not forwarded to the Proxmox provider yet.
 
-# Primary LAN interface with static IP (vmbr0)
+# Primary LAN interface (vmbr0); its static IP is on web-server-01's entry
 apiVersion: infra.virtrigaud.io/v1beta1
 kind: VMNetworkAttachment
 metadata:
@@ -138,13 +141,6 @@ spec:
   network:
     proxmox:
       bridge: "vmbr0"
-  ipAllocation:
-    type: Static
-    staticConfig:
-      address: "192.168.1.100/24"
-      gateway: "192.168.1.1"
-    dnsConfig:
-      servers: ["8.8.8.8", "1.1.1.1"]
 
 ---
 # DMZ interface on a VLAN (vmbr1)
@@ -160,7 +156,7 @@ spec:
       vlanTag: 100
 
 ---
-# Management interface (vmbr2); MAC address is set per-VM, see web-server-01
+# Management interface (vmbr2); web-server-01 also sets a MAC address on its entry
 apiVersion: infra.virtrigaud.io/v1beta1
 kind: VMNetworkAttachment
 metadata:
@@ -230,6 +226,10 @@ spec:
     - name: lan
       networkRef:
         name: multi-nic-lan
+      ipAddress: "192.168.1.100"
+      prefix: 24
+      gateway: "192.168.1.1"
+      dns: "8.8.8.8,1.1.1.1"
     - name: dmz
       networkRef:
         name: multi-nic-dmz

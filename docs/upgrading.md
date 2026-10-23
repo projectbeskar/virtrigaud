@@ -885,6 +885,22 @@ the following once after upgrading, and delete only what no `VMMigration` in fli
   Roll the manager with the libvirt providers: an older manager reads the new answers
   as before (retryable). Single-host libvirt is unchanged. See
   [Clustered libvirt: a host that stops answering](provider-call-outcomes.md#clustered-libvirt-a-host-that-stops-answering).
+- **Proxmox VMs now land on the bridge, VLAN and static IP their spec names** (R36,
+  ADR-0014 Slice 0a, [`docs/proxmox-networks.md`](proxmox-networks.md)). The provider
+  used to read none of a VM's networks: every Proxmox VM got `virtio` on `vmbr0` with
+  no static IP, and a VM cloned from a template with user-data had its template's
+  NICs overwritten with that default. Now the bridge, VLAN tag and model of each
+  `VMNetworkAttachment` and the `ipAddress`/`prefix`/`gateway`/`dns` of each
+  `spec.networks` entry are applied, a clone keeps its template's NICs (bridge, VLAN,
+  options and the MAC PVE gave it) where the spec names none, and an invalid static IP,
+  bridge, model or VLAN is refused as `InvalidSpec` before a VM is made. **VMs that
+  relied on the accidental `vmbr0` default change on their next create or clone; VMs
+  already created are not modified.** Check each `VMNetworkAttachment` before you
+  create or recreate a Proxmox VM: an attachment's `bridge` is now used (it was ignored),
+  and its `model` (the CRD defaults it to `virtio`) replaces the model of a cloned
+  template's NIC. `firewall`, `rateLimit`, `mtu`, `ipAllocation` and
+  `spec.networks[].macAddress` are still not applied to a Proxmox VM. Roll the Proxmox
+  provider; the manager is unchanged.
 
 ## Post-upgrade verification checklist
 
@@ -1082,6 +1098,10 @@ the following once after upgrading, and delete only what no `VMMigration` in fli
   `Delete`. Stamps already written stay in the VMs' descriptions and are used
   again when the provider rolls forward. Don't edit or copy those lines in the
   meantime.
+- **Rolling the Proxmox provider back stops applying a VM's networks.** An older provider
+  goes back to `virtio` on `vmbr0` with no static IP for every NIC, and to overwriting a
+  clone's NICs when the request has user-data. VMs created while the newer provider
+  ran keep the NICs and IP settings they were given.
 - If you do need a full rollback during a maintenance window, go in reverse order
   (providers → manager → CRDs) and expect the caveats above; a partial rollback
   (providers only, or manager only) is safer and sufficient for most of the issues
