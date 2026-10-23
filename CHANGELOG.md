@@ -5,6 +5,30 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-10-23 23:30] - HostPool.status is written from its member Hosts (V1)
+**Author:** @wrkode (William Rizzo)
+
+### Fixed
+- `internal/controller/hostpool_controller.go`, `cmd/manager/main.go`: `HostPool.status` was never written by any controller (every pool showed `status: null`). A new `HostPoolReconciler` counts the pool's member Hosts (in the pool's namespace, `spec.poolRef.name` naming the pool) into `totalHosts`, `readyHosts` (`status.health` Ready) and `schedulableHosts` (Ready, `spec.schedulable` true, not being deleted, and `spec.providerRef` equal to the pool's: the per-host test placement applies), stamps `observedGeneration`, and sets a `Ready` condition with `observedGeneration`: `True`/`HostsAvailable` when `schedulableHosts` > 0, `False`/`NoMemberHosts` for an empty pool, `False`/`NoSchedulableHosts` when no member is schedulable. The message states counts only. Host events are mapped to the pool their `spec.poolRef` names (an update maps both the old and the new object, so a Host moving pools recounts both; a delete recounts its pool); a Host update is passed only when its poolRef, providerRef, schedulable flag, health or deletion state changes, so heartbeats do not recount. An unchanged status is not written; a changed one is sent whole as a merge patch on the status subresource (single writer, no conflict). No periodic requeue.
+
+### Changed
+- `api/infra.virtrigaud.io/v1beta1/hostpool_types.go`, `config/crd/bases/infra.virtrigaud.io_hostpools.yaml`: printer columns `Total`, `Ready`, `Schedulable`; the three counts are written even when 0 (no `omitempty`, still optional in the schema); field descriptions say exactly what is counted. The schema is otherwise unchanged.
+- `config/rbac/role.yaml` (regenerated), `charts/virtrigaud/templates/manager-rbac.yaml` (ClusterRole and namespaced Role): the manager may `get`/`patch`/`update` `hostpools/status`. `hostpools` and `hosts` reads were already granted.
+- `docs/clustered-provider-inventory.md`: new "`HostPool.status`" section (members, counts, condition and reasons, when it is written, example `kubectl get hostpools`); the First VM checklist points at it. `docs/release-notes/next.md`: "Changes since v0.4.0-rc5".
+
+### Added
+- `internal/controller/hostpool_controller_test.go`: counts (Ready / NotReady / Unknown / unschedulable / deleting / other Provider / other pool / other namespace), condition reasons, observedGeneration, no write when unchanged or on a heartbeat, the Host mapping and update predicate, and the chart and generated RBAC.
+- `internal/controller/hostpool_status_envtest_test.go`: the controller in a manager against a real apiserver: counts, a foreign-namespace Host not counted, an empty pool, a Host moving from one pool to another updating both, a health change, a deleted Host, no pool write on Host heartbeats, observedGeneration after a spec change, and the printer columns (0 shown for an empty pool).
+
+### Why
+rc5 lab validation finding V1: a pool with two Ready, schedulable Hosts showed `status: null`, while the documentation said the status aggregated member-host counts and readiness. Operators had no pool-level view of whether a clustered Provider could place a VM.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-10-23 19:00] - Release notes for v0.4.0-rc5
 **Author:** @wrkode (William Rizzo)
 
