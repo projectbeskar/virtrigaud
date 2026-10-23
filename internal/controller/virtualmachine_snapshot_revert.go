@@ -116,6 +116,11 @@ const (
 // SnapshotRevert call or task.
 const errReasonProviderSnapshotRevert = "provider-snapshot-revert"
 
+// snapshotRevertCRDTooOldMessage is the SnapshotReverted message (reason
+// Unsupported) when the API server does not store status.snapshotRevert.
+const snapshotRevertCRDTooOldMessage = "the installed VirtualMachine CRD does not store status.snapshotRevert, " +
+	"so the revert could not be recorded before it is sent; nothing is sent. Upgrade the CRDs to this manager's version"
+
 // snapshotRevertRetryHint ends the message of a failed revert.
 const snapshotRevertRetryHint = "remove spec.snapshot.revertToRef and set it again to retry"
 
@@ -501,7 +506,16 @@ func (r *VirtualMachineReconciler) sendSnapshotRevert(
 		return ctrl.Result{RequeueAfter: providerErrorRetryInterval}, true, nil
 	}
 	// The write decoded the stored object into vm: take the record from it.
+	// An API server whose VirtualMachine CRD predates status.snapshotRevert
+	// prunes it: nothing could stop the revert from being sent again on
+	// every reconcile, so none is sent.
 	rec = vm.Status.SnapshotRevert
+	if rec == nil {
+		logger.Info("The installed VirtualMachine CRD does not store status.snapshotRevert; not sending the revert")
+		setSnapshotRevertCondition(vm, infravirtrigaudiov1beta1.SnapshotRevertReasonUnsupported, snapshotRevertCRDTooOldMessage)
+		r.updateStatus(ctx, vm)
+		return ctrl.Result{RequeueAfter: snapshotRevertRecheckInterval}, true, nil
+	}
 	logger.Info("Sending SnapshotRevert", "snapshot", snap.Name, "snapshot_id", snap.Status.SnapshotID,
 		"attempt", rec.Attempts, "host", ref.HostID)
 	r.recordEvent(vm, corev1.EventTypeNormal, eventReasonSnapshotRevertStarted,

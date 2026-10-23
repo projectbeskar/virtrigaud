@@ -752,3 +752,41 @@ func TestSnapshotRevertResendDue(t *testing.T) {
 	assert.Equal(t, time.Duration(0), snapshotRevertResendDue(rec, at.Add(snapshotRevertResendMaxWait)))
 	assert.Equal(t, time.Duration(0), snapshotRevertResendDue(&infravirtrigaudiov1beta1.SnapshotRevertStatus{}, at))
 }
+
+// pruningStatusClient stands for an API server whose VirtualMachine CRD
+// predates status.snapshotRevert: the field is dropped from every status
+// write, as structural pruning does.
+type pruningStatusClient struct {
+	client.Client
+}
+
+func (c *pruningStatusClient) Status() client.SubResourceWriter {
+	return &pruningStatusWriter{SubResourceWriter: c.Client.Status()}
+}
+
+type pruningStatusWriter struct {
+	client.SubResourceWriter
+}
+
+func (w *pruningStatusWriter) Update(ctx context.Context, obj client.Object, opts ...client.SubResourceUpdateOption) error {
+	if vm, ok := obj.(*infravirtrigaudiov1beta1.VirtualMachine); ok {
+		vm.Status.SnapshotRevert = nil
+	}
+	return w.SubResourceWriter.Update(ctx, obj, opts...)
+}
+
+// TestSnapshotRevert_OldCRDSendsNothing: when the API server does not store
+// status.snapshotRevert, the attempt cannot be recorded, so no revert is sent
+// (it would be sent again on every reconcile).
+func TestSnapshotRevert_OldCRDSendsNothing(t *testing.T) {
+	r, prov, _, _ := revertFixture(t, infravirtrigaudiov1beta1.PowerStateOff, contracts.PowerStateOff, nil,
+		revertSnapshotOf(revertSnapName, revertSnapUID))
+	r.Client = &pruningStatusClient{Client: r.Client}
+	for i := 0; i < 3; i++ {
+		got := reconcileStored(t, r)
+		assert.Nil(t, got.Status.SnapshotRevert)
+		requireRevertCondition(t, got, metav1.ConditionFalse, infravirtrigaudiov1beta1.SnapshotRevertReasonUnsupported)
+		assert.Equal(t, snapshotRevertCRDTooOldMessage, revertCondition(got).Message)
+	}
+	assert.Empty(t, prov.reverts)
+}
