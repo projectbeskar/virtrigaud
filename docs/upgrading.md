@@ -872,6 +872,19 @@ the following once after upgrading, and delete only what no `VMMigration` in fli
   resolved (where creates and imports already refuse it); also when the pool is
   inactive or cannot be measured within its budget (15 s at most). See
   [What `ListHosts` reports per host](clustered-provider-inventory.md#what-listhosts-reports-per-host-libvirt).
+- **A clustered libvirt host that stops answering is not always "nothing done"** (R25,
+  #422): a routed call whose host is lost mid-call is `HOST_UNAVAILABLE` only when
+  nothing ran on the host; after reads only it is not performed, and after a command
+  that may change the host was sent it is outcome unknown (for `Clone`, a named
+  `SnapshotCreate` with a request token, and a landed-disk removal: the retryable
+  reason `VM_OUTCOME_UNKNOWN_RETRY`). A clustered `Delete`, `Power`, `Reconfigure` or
+  `Create` whose host drops mid-call therefore shows a retryable provider error
+  instead of `HostUnavailable`, and `Power`/`Reconfigure` answered this way are
+  re-checked every 30 seconds. A clustered `Delete` whose `destroy` loses the host
+  stops and is retried instead of undefining a domain that may still be running.
+  Roll the manager with the libvirt providers: an older manager reads the new answers
+  as before (retryable). Single-host libvirt is unchanged. See
+  [Clustered libvirt: a host that stops answering](provider-call-outcomes.md#clustered-libvirt-a-host-that-stops-answering).
 
 ## Post-upgrade verification checklist
 

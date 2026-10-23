@@ -1,6 +1,7 @@
 <!--
-Draft release notes for VirtRigaud v0.4.0-rc3, the third release candidate for
-v0.4.0 (GA follows after a soak). rc1 and rc2 were published from earlier
+Draft release notes for VirtRigaud v0.4.0-rc4, the fourth release candidate for
+v0.4.0 (GA follows after a soak). v0.4.0-rc3 was tagged, but its release run was
+stopped by the image scan (CVE-2026-63209) and no rc3 release was published. rc1 and rc2 were published from earlier
 versions of this file; rc1 followed v0.3.11. Paste everything below this comment
 into the GitHub pre-release. The notes are cumulative since v0.3.11: a user going
 from v0.3.11 needs all of them, while "Changes since v0.4.0-rc2" is the short
@@ -10,7 +11,7 @@ link to, and CHANGELOG.md for the complete, dated changelog. For the GA
 release, drop the rc sections and re-title.
 -->
 
-This is **v0.4.0-rc3, a release candidate** (GA follows after a soak). It is a
+This is **v0.4.0-rc4, a release candidate** (GA follows after a soak). It is a
 security-hardening release: a full codebase security review found and fixed several
 cross-tenant and privilege-escalation issues in the vSphere and libvirt providers,
 cross-namespace clone/migration targets, and VM provider binding. rc2 added two waves
@@ -18,7 +19,7 @@ of fixes on top of rc1 (below): one about proving that the VM a migration, adopt
 clone or per-VM call acts on is the one VirtRigaud owns, and one about failures
 half-way through an operation (a resize that hit the wrong disk, a provider call whose
 result was lost, a failed migration's leftover disk) and about provider pods' access to
-migration storage. rc3 adds a third, on top of rc2: libvirt cloud-init seeds
+migration storage. rc4 adds a third, on top of rc2: libvirt cloud-init seeds
 (private, and a clone's own identity), leftover files, and migration into a clustered
 libvirt Provider (experimental). **Several fixes are breaking
 or change default behavior.** Read the upgrade guide before upgrading:
@@ -30,7 +31,7 @@ v0.4.0-rc1".
 
 ## Changes since v0.4.0-rc2
 
-Twelve pull requests, merged 2026-10-19 to 2026-10-23. Three themes, plus a clean-up (#419) and a CI dependency update (#410). **Cloud-init
+Seventeen pull requests, merged 2026-10-19 to 2026-10-23. Three themes, plus host-loss answers on clustered libvirt (#422), a dependency security fix (#423), a clean-up (#419), documentation (#418, #420, #421) and a CI dependency update (#410). v0.4.0-rc3 was tagged at #420 but not released: its release run was stopped by the image scan, which found CVE-2026-63209 (#423); rc4 is rc3 plus #421, #422 and #423. **Cloud-init
 seeds** (#408, #413, #414): the user-data of a libvirt VM, which can carry
 passwords and keys, was readable by any local user of the hypervisor host; a
 clone booted with its source's SSH host keys; and a delete left seeds behind.
@@ -51,6 +52,9 @@ providers** (see [Upgrade order for this release](#upgrade-order-for-this-releas
 | #416 (R11, B.3) | A `VMMigration` can target a clustered libvirt Provider: the target VM is created and placed first, the disk lands on its host. New status field and condition, a CRD relaxation (empty `diskID`), and `allocatableStorageBytes` is now the `default` pool only | Behaviour change |
 | #417 (R31) | A libvirt Host's `allocatableStorageBytes` is measured fresh with `stat -f` on every sync, instead of libvirt's cached `pool-info` value, and fails closed to 0 (details in the [inventory](docs/clustered-provider-inventory.md#what-listhosts-reports-per-host-libvirt)) | Behaviour change |
 | #407, #412 (R11) | ADR-0007 Addendum B: the design, proposed, then accepted with decisions on its open questions | Documentation only |
+| #422 (R25) | On a clustered libvirt provider, a call whose host stops answering is `HOST_UNAVAILABLE` ("nothing done") only if nothing ran on the host; otherwise "not performed" or "outcome unknown". A clustered `Delete` whose `destroy` loses the host stops and is retried | Behaviour change |
+| #423 | `github.com/klauspost/compress` 1.18.7 (CVE-2026-63209, HIGH, denial of service) | No |
+| #418, #420, #421 | Documentation: the clustered-migration guide and these notes; ADR-0013 (Proposed, design only) for disk resize | Documentation only |
 | #419 | Internal lab host names and addresses are removed from tracked files (docs, examples, tests); a CI check keeps them out | No |
 | #410 | CI: `github/codeql-action/upload-sarif` 4.38.3 → 4.39.0 | No |
 | #411 | Go 1.26.10 (GO-2026-6809, `crypto/x509`, reachable through `x509.Certificate.Verify`); builder images in step | No |
@@ -246,6 +250,36 @@ could differ between hosts sharing an NFS pool; #417 measures it fresh.
 [ADR-0007 Addendum B](docs/adr/0007-clustered-orchestrator-provider.md#addendum-b-2026-10-18-migration-into-a-clustered-provider-p3-cold-path),
 [`examples/vmmigration-into-clustered.yaml`](examples/vmmigration-into-clustered.yaml),
 [Upgrade guide](docs/upgrading.md#behavior-changes-that-are-visible-but-not-breaking)
+
+### A clustered host that stops answering (#422)
+
+On a clustered libvirt provider, every routed call now records how far it got on
+its host. When the host stops answering mid-call (a lost SSH session, a command
+ended without an exit status of its own), the answer depends on that:
+
+- nothing ran on the host: `HOST_UNAVAILABLE`, as before ("nothing was done");
+- only reads ran: not performed (`Unavailable` + `VM_OPERATION_FAILED`);
+- a command that may change the host was sent: outcome unknown. For `Clone` and
+  `SnapshotCreate` (with a name and request token) and a landed-disk removal, the
+  answer is "outcome unknown, safe to retry" (new reason `VM_OUTCOME_UNKNOWN_RETRY`),
+  which the manager retries without treating it as "nothing done".
+
+Before, every such loss was `HOST_UNAVAILABLE`, which the manager trusts as proof
+that nothing happened (for a routed export it cleared the marker that guards against
+a second export). What you will notice: a clustered `Delete`, `Power`, `Reconfigure`
+or `Create` whose host drops mid-call shows a retryable provider error instead of
+`HostUnavailable`; `Power` and `Reconfigure` answered this way are re-checked every
+30 seconds. A clustered `Delete` whose `destroy` loses the host now stops and is
+retried, instead of going on to undefine a domain that may still be running. Single-host
+libvirt answers are unchanged. Details:
+[Clustered libvirt: a host that stops answering](docs/provider-call-outcomes.md#clustered-libvirt-a-host-that-stops-answering).
+
+### klauspost/compress 1.18.7 (#423, security)
+
+The release image scan reported CVE-2026-63209 (HIGH, denial of service) in
+`github.com/klauspost/compress` 1.18.6, an indirect dependency through the S3
+client (`minio-go`) used by migration storage. It moves to 1.18.7. This finding
+stopped the v0.4.0-rc3 release run; do not use `v0.4.0-rc3` images.
 
 ### Go 1.26.10 (#411)
 
@@ -796,7 +830,7 @@ Wave 2 adds to this:
 
 ## About this release candidate / what to test
 
-v0.4.0 GA follows after a soak of this candidate (rc1 and rc2 came before it). Please try it on a non-production
+v0.4.0 GA follows after a soak of this candidate (rc1 and rc2 came before it; rc3 was tagged but not released). Please try it on a non-production
 cluster and report what you find (GitHub issues; include the Provider type, the
 `kubectl describe` of the object involved and the provider log, never a Secret).
 The most useful things to exercise:
@@ -1071,6 +1105,8 @@ policy and grants → manager → providers), and rollback caveats in
 
 ### Security
 
+- `github.com/klauspost/compress` 1.18.7 fixes CVE-2026-63209 (HIGH, denial of
+  service), reached through the S3 client used by migration storage (#423).
 - Every pod's writable `/tmp` emptyDir now has a `sizeLimit`; a pod that writes
   past it is evicted. The limit bounds the pod's `/tmp`, but does not reserve
   node storage: a node with less free ephemeral storage than the limit can still

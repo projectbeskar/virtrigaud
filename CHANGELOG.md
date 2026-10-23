@@ -5,6 +5,22 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-10-23 14:00] - Release notes: v0.4.0-rc4
+**Author:** @wrkode (William Rizzo)
+
+### Changed
+- `docs/release-notes/next.md`: the release is v0.4.0-rc4. v0.4.0-rc3 was tagged at #420 but not released: its release run was stopped by the image scan (CVE-2026-63209). "Changes since v0.4.0-rc2" adds #422 (host-loss answers on clustered libvirt), #423 (`klauspost/compress` 1.18.7) and the documentation PRs #418, #420, #421 (seventeen PRs), with sections for #422 and #423; the cumulative Security list names the CVE fix.
+- `docs/upgrading.md`: "Behavior changes that are visible but not breaking" gains the #422 entry (host-loss answers, the 30-second re-check, a clustered `Delete` that stops when `destroy` loses the host).
+
+### Why
+The fixed build ships as a new candidate instead of moving the already-pushed v0.4.0-rc3 tag, whose images were signed and published before the scan stopped the release.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [ ] Config change only
+- [x] Documentation only
+
 ## [2026-10-23 13:00] - klauspost/compress 1.18.7 (CVE-2026-63209)
 **Author:** @wrkode (William Rizzo)
 
