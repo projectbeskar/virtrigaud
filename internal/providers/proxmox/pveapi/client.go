@@ -26,6 +26,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -1382,11 +1383,28 @@ func (c *Client) ReconfigureVMRaw(ctx context.Context, node string, vmid int, va
 // DetectPrimaryDisk detects the primary boot disk from VM configuration
 // Returns the disk identifier (e.g., "scsi0", "virtio0", "sata0", "ide0")
 func (c *Client) DetectPrimaryDisk(ctx context.Context, node string, vmid int) (string, error) {
+	key, _, err := c.DetectPrimaryDiskVolume(ctx, node, vmid)
+	return key, err
+}
+
+// DetectPrimaryDiskVolume is DetectPrimaryDisk that also returns the disk's
+// config value (e.g. "local-lvm:vm-100-disk-0,size=32G"), from the same read of
+// the VM's config, so a caller can tell which storage the boot disk lives on
+// (see DiskStorage). The value is empty when the config has no disk and the
+// "scsi0" fallback key is returned.
+func (c *Client) DetectPrimaryDiskVolume(ctx context.Context, node string, vmid int) (key, value string, err error) {
 	config, err := c.GetVMConfig(ctx, node, vmid)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
+	key, value = primaryDiskFromConfig(config)
+	return key, value, nil
+}
 
+// primaryDiskFromConfig picks the primary boot disk of a VM config: the first
+// non-cdrom disk in the order virtio, scsi, sata, ide, or "scsi0" (with an
+// empty value) when the config has none.
+func primaryDiskFromConfig(config map[string]interface{}) (key, value string) {
 	// Check for disks in order of preference: virtio, scsi, sata, ide
 	diskPrefixes := []string{"virtio", "scsi", "sata", "ide"}
 
@@ -1398,7 +1416,7 @@ func (c *Client) DetectPrimaryDisk(ctx context.Context, node string, vmid int) (
 				if diskStr, ok := diskValue.(string); ok && diskStr != "" {
 					// Make sure it's not a cdrom
 					if !strings.Contains(strings.ToLower(diskStr), "media=cdrom") {
-						return diskKey, nil
+						return diskKey, diskStr
 					}
 				}
 			}
@@ -1406,7 +1424,24 @@ func (c *Client) DetectPrimaryDisk(ctx context.Context, node string, vmid int) (
 	}
 
 	// Fallback to scsi0 if nothing found
-	return "scsi0", nil
+	return "scsi0", ""
+}
+
+// storageIDPattern is what PVE accepts as a storage ID.
+var storageIDPattern = regexp.MustCompile(`^(?i:[a-z][a-z0-9\-_.]*[a-z0-9])$`)
+
+// DiskStorage returns the storage ID a VM disk's config value lives on: the
+// part before the first ':' of the "storage:volume,option=..." form (e.g.
+// "local-lvm" for "local-lvm:vm-100-disk-0,size=32G"). It returns "" for a
+// value that names no storage (a passthrough device path such as "/dev/sdb",
+// "none", or an empty string) or whose prefix is not a valid PVE storage ID.
+func DiskStorage(diskValue string) string {
+	first, _, _ := strings.Cut(strings.TrimSpace(diskValue), ",")
+	storage, volume, found := strings.Cut(first, ":")
+	if !found || volume == "" || !storageIDPattern.MatchString(storage) {
+		return ""
+	}
+	return storage
 }
 
 // GuestNetworkInterface represents a network interface from the guest agent
