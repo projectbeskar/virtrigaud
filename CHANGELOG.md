@@ -5,6 +5,22 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-10-23 16:00] - ADR-0014 (Proposed): a migrated guest keeps its identity and gets working network (R36)
+**Author:** @wrkode (William Rizzo)
+
+### Added
+- `docs/adr/0014-migrated-guest-network.md`: design for R36 (maintainer decision "option 1"). Researches cloud-init 24.4/25.1 semantics (instance-id comparison, datasource change between boots, update events, `manual_cache_clean`) and PVE's instance-id derivation, with source citations. Finds that a same-instance-id seed with a network-config does not re-render the network on the first target boot. Recommends carrying the source NIC MACs to the target and presenting the same instance-id (or no datasource when it is unknown), captured once by a new `DescribeGuestIdentity` RPC. Proposes `spec.options.guestIdentity: Preserve|Fresh`, eight slices and ten open questions. Also records two latent bugs: `spec.networks[].macAddress` is dropped before every provider, and the Proxmox provider parses `networks_json` with keys the manager never sends (bridge, VLAN and MAC are ignored).
+- `docs/adr/README.md`: index row for ADR-0014.
+
+### Why
+v0.4.0-rc4 lab runs showed migrated Ubuntu guests without network on vSphere and Proxmox targets, and with a new cloud-init identity (hostname, SSH host keys) on libvirt targets.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [ ] Config change only
+- [x] Documentation only
+
 ## [2026-10-23 16:00] - Proxmox cloud-init drive storage (R33) and the stuck "Adjusting power state" phase (R34)
 **Author:** @wrkode (William Rizzo)
 
