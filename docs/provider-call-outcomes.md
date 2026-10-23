@@ -321,9 +321,10 @@ Three things stay as they were:
 - A failure of the **operation** (the host answered, and the command failed) is
   `Unknown` + `VM_OPERATION_FAILED` with the historical message, whether or not it
   came after a read. Only a lost connection is classified by how far the call got.
-- The disk-dependency guard runs before anything is changed. When it cannot reach
-  the host it is `HOST_UNAVAILABLE` (fails closed), even after the owner check
-  read the host.
+- The disk-dependency guard runs before the VM's disks or domain are changed (it can
+  follow the idempotent setup writes described under **Shared setup writes**). When it
+  cannot reach the host it is `HOST_UNAVAILABLE` (fails closed), even after the owner
+  check read the host.
 - A single-host libvirt provider answers as before: it keeps no such record.
 
 None of these answers counts toward the Provider's circuit breaker, except the plain
