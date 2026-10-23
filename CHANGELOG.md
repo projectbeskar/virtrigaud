@@ -14,7 +14,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `CHANGELOG.md`: lab host names in earlier entries are replaced minimally (a lab host name becomes "a lab host", others become `esxi-1.example.internal` and `s3.example.com`); no entry's meaning changes.
 - `internal/providers/proxmox/ssh.go`, `internal/providers/vsphere/s3import.go`: comments use `pve.example.internal` and `esxi-1.example.internal`.
 - Go tests (`internal/storage`, `internal/storage/migration`, `internal/controller`, `internal/providers/{proxmox,libvirt}`, `internal/obs/logging`): lab hosts and addresses are replaced with `example.com` / `example.internal` names, RFC 5737 addresses, or, where a test needs a private address, RFC 1918 ones (`172.20.x.x`). The redaction test no longer carries a real-looking password and user name.
-- `hack/verify-no-lab-names.sh` (new), `Makefile` (`verify-no-lab-names`), `.github/workflows/ci.yml`: a guard that fails when a tracked file (except `fieldTesting/`) matches the lab host and address patterns.
+- `fieldTesting/`: no longer tracked. It is a local scratch workspace, already listed in `.gitignore`, and is never published; its three previously tracked files are removed from the repository (local copies stay ignored).
+- `hack/verify-no-lab-names.sh` (new), `Makefile` (`verify-no-lab-names`), `.github/workflows/ci.yml`: a guard that fails when a tracked file matches the lab host and address patterns, or when anything under `fieldTesting/` is tracked.
 
 ### Why
 The project is used in regulated environments and must not publish internal lab topology. The names stay in the commit history; this change removes them from the current tree and keeps them out.
