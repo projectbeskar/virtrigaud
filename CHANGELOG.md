@@ -5,6 +5,26 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-10-23 10:00] - Remove internal lab hostnames and addresses from tracked files
+**Author:** @wrkode (William Rizzo)
+
+### Security
+- `examples/vmmigration-s3.yaml`, `examples/vmmigration-proxmox-s3.yaml`, `examples/migration/*.yaml`: the S3 endpoint is the placeholder `http://s3.example.com:9000`.
+- `docs/adr/0004-libvirt-ssh-host-key-verification.md`, `docs/adr/0006-storage-backend-agnostic-cross-hypervisor-migration.md`: lab host names and an address are replaced with `hypervisor-1.example.internal`, `192.0.2.10` (RFC 5737) and "a lab Proxmox host".
+- `CHANGELOG.md`: lab host names in earlier entries are replaced minimally (a lab host name becomes "a lab host", others become `esxi-1.example.internal` and `s3.example.com`); no entry's meaning changes.
+- `internal/providers/proxmox/ssh.go`, `internal/providers/vsphere/s3import.go`: comments use `pve.example.internal` and `esxi-1.example.internal`.
+- Go tests (`internal/storage`, `internal/storage/migration`, `internal/controller`, `internal/providers/{proxmox,libvirt}`, `internal/obs/logging`): lab hosts and addresses are replaced with `example.com` / `example.internal` names, RFC 5737 addresses, or, where a test needs a private address, RFC 1918 ones (`172.20.x.x`). The redaction test no longer carries a real-looking password and user name.
+- `hack/verify-no-lab-names.sh` (new), `Makefile` (`verify-no-lab-names`), `.github/workflows/ci.yml`: a guard that fails when a tracked file (except `fieldTesting/`) matches the lab host and address patterns.
+
+### Why
+The project is used in regulated environments and must not publish internal lab topology. The names stay in the commit history; this change removes them from the current tree and keeps them out.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [ ] Config change only
+- [x] Documentation only
+
 ## [2026-10-22 17:00] - libvirt Host allocatable storage measured fresh (R31)
 **Author:** @wrkode (William Rizzo)
 
