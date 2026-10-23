@@ -349,6 +349,13 @@ vSphere ⇄ Libvirt/KVM ⇄ Proxmox VE (ADR-0006 Slices 1–4). The Proxmox prov
 participates as a full source and target and advertises **s3 and nfs** (not PVC: its
 disks live on the node, which a pod-mounted PVC can never reach).
 
+**Into a clustered libvirt Provider (experimental)**: a `VMMigration` may target a
+libvirt Provider with `topology: cluster` (`s3` or `nfs`, target VM in the
+migration's namespace). The target VM is created and placed first, and the disk is
+imported onto the host it was placed on. A single-host libvirt VM migrated into a
+two-host cluster over S3 and NFS was run in the lab; other sources were not. See
+[Migration into a clustered provider](docs/clustered-provider-inventory.md#migration-into-a-clustered-provider-addendum-b).
+
 ```yaml
 apiVersion: infra.virtrigaud.io/v1beta1
 kind: VMMigration

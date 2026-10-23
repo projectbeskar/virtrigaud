@@ -37,11 +37,13 @@ the full list and for what a single-`Host` lab cannot exercise: multi-host
 placement, the unreachable-host path, and snapshot revert.
 
 **Addendum B (Accepted, 2026-10-22): migration into a clustered provider.**
-A `VMMigration` whose target is a clustered Provider is still refused at
-`Validating`. [Addendum B](#addendum-b-2026-10-18-migration-into-a-clustered-provider-p3-cold-path)
+[Addendum B](#addendum-b-2026-10-18-migration-into-a-clustered-provider-p3-cold-path)
 routes `ImportDisk` to a host that the ordinary scheduler chose for a target
 VirtualMachine created first, for clustered targets only (P3, cold path).
-Accepted 2026-10-22; implementation in progress (R11).
+Accepted 2026-10-22. Slices B.1–B.3 are implemented (#415, #416): a
+`VMMigration` into a clustered Provider that reports `supports_routed_import`
+is accepted, and one whose Provider does not is still refused at `Validating`.
+B.4 (docs and the lab run) is recorded in [B9](#b9-implementation-status-and-recorded-deviations).
 
 `topology: cluster` remains **experimental**. The Slice 5 lab amendment
 recommends keeping it that way until a multi-host lab run covers the three
@@ -795,7 +797,7 @@ disks are host-local and a linked clone depends on its source disk. It returns
 - `ImportDisk` and `ListVMs` are not per-VM. `ImportDisk` gets a target host only
   when migration *into* a clustered provider is designed.
 - Until P3, the VMMigration controller rejects a clustered **target** provider.
-  *(Addendum B, accepted, lifts this refusal for providers that report `supports_routed_import`.)*
+  *(Addendum B, implemented, lifts this refusal for providers that report `supports_routed_import`.)*
 
 **Operator side:**
 
@@ -2315,8 +2317,8 @@ no explicit answer, the proposal's recommendation stands, marked *by default*.
 It extends A1, A2, A5 and A6 and changes none of them. It also extends ADR-0006
 (the cold export, stage and import pipeline), ADR-0011 and its Addendum A (staged
 and landed disk cleanup), and the rc2 contracts #394, #402, #403 and #405. It was
-reviewed against `main` 2f396b1 (v0.4.0-rc2). This is a design only: no code,
-CRD or proto change ships with it.
+reviewed against `main` 2f396b1 (v0.4.0-rc2). The addendum itself changed no
+code, CRD or proto; its slices B.1–B.3 did (see [B9](#b9-implementation-status-and-recorded-deviations)).
 
 **Scope.** This addendum is the *into-a-cluster* half of P3's cold path: a
 `VMMigration` (ADR-0006) whose **target** Provider has `topology: cluster`. It
@@ -2656,7 +2658,8 @@ pool. Before anything is written, these checks run in order:
   - Unknown (untyped): a command killed by `timeout` (124/137), a session
     dropped mid-command, an exceeded budget, a lost rename.
   - **`HOST_UNAVAILABLE` is answered only when the lease or dial failed before
-    any host command ran.** Today `hostOpRPCError` maps any host transport
+    any host command ran** (as implemented, also when the connection is dead at
+    the first read: see B9, provider deviation 1). Today `hostOpRPCError` maps any host transport
     failure to `HOST_UNAVAILABLE`, and the manager reads that as definite. For a
     routed import (and, as a follow-up, the routed export) a transport failure
     after the first host command must be unknown instead, because the command
@@ -2742,7 +2745,7 @@ pool. Before anything is written, these checks run in order:
 | B.1 | **Provider, routed import.** Proto `ImportDiskRequest.target_host_id` (13); clustered `ImportDisk` for `s3`/`nfs` (B2 order: name check, A6.1 guard on the landed name, landing lock + `flock`, budget + `timeout(1)`, header checks, size limit, private directory + rename); R21 classification on the routed path, with `HOST_UNAVAILABLE` only before the first host command; the landing lock on the clustered in-place `Create`. No capability yet. | Recording host runner: every host command under `timeout` and the budget; a name conflict, an own domain and a previous incarnation land nothing; a file in use on another host is refused, and an unreachable host fails closed; the single-host goldens unchanged byte for byte. |
 | B.2 | **Provider, routed cleanup + capability.** `DeleteLandedDiskRequest.target_host_id` (4) with the cross-host in-use scan; `DeleteStagedDiskRequest.target_host_id` (8) for `nfs`, and `s3` from the pod; `supports_routed_import` (30) + import capabilities; `resend_safe_import_backends: [s3, nfs]` for clustered, after the B3 audit. | Capability test per provider (vSphere, Proxmox, mock and single-host unchanged); in use on another host means kept; the cleanup waits while a host is unreachable. |
 | B.3 | **Manager.** CRD `MigrationImportTarget.host`; the target-first flow (B1) for clustered targets only; `TargetPlaced`; `WaitingForImport`, the placeholder and the pin in the VM controller; the B1.2 release on a definite import conflict; target deletion before the landed-disk cleanup (B1.4); routed `DeleteLandedDisk`/`DeleteStagedDisk`; the gate and the constant refusal (B5). | envtest: placement before export, unschedulable waits without touching the source, a lost `pendingHost` write, the pin, a retry deleting the unbound target, a re-send routed to the recorded host, a held cleanup; the fake client is not sufficient for the status logic. Single-host migration tests unchanged. |
-| B.4 | **Docs + lab.** `docs/clustered-provider-inventory.md`, the migration guide, `docs/provider-call-outcomes.md` (libvirt clustered `resend_safe_import_backends`), `docs/upgrading.md` rows, release notes. Lab on dome2/dome3 with the shared NFS pool. | Lab: single-host libvirt → clustered and vSphere → clustered, over `s3` and over `nfs`; the target counted from `Validating`; the landed disk attached in place on the chosen host; a migration failed after the import, whose landed disk is deleted through the recorded host after both hosts were scanned; a host made unreachable after placement (waits) and after the import (pinned); a manager restart mid-import (re-sent after 35 min only with the capability); an R4-held target. |
+| B.4 | **Docs + lab.** `docs/clustered-provider-inventory.md`, the migration guide, `docs/provider-call-outcomes.md` (libvirt clustered `resend_safe_import_backends`), `docs/upgrading.md` rows, release notes. Lab on two clustered hosts with a shared NFS pool (results in B9). | Lab: single-host libvirt → clustered and vSphere → clustered, over `s3` and over `nfs`; the target counted from `Validating`; the landed disk attached in place on the chosen host; a migration failed after the import, whose landed disk is deleted through the recorded host after both hosts were scanned; a host made unreachable after placement (waits) and after the import (pinned); a manager restart mid-import (re-sent after 35 min only with the capability); an R4-held target. |
 
 B.1 and B.2 can merge before B.3: nothing calls them until the manager does,
 and the capability is what opens the gate. `topology: cluster` stays
@@ -2805,6 +2808,107 @@ experimental (A5, slice 5) whatever B.4 shows.
 - `security-architect`: review of B2's write path on a shared pool and of B4's
   cleanup scan.
 - `tech-writer`: B.4's docs.
+
+### B9: implementation status and recorded deviations
+
+*Recorded 2026-10-22 against `main` 73e08e8c; every item names the code it
+describes.*
+
+**Status.**
+
+| Slice | State |
+|---|---|
+| B.1, B.2 | Implemented in #415 (provider): proto fields 13, 4, 8 and 30; `routed_import.go`, `routed_migration_cleanup.go`; capability `supports_routed_import`. |
+| B.3 | Implemented in #416 (manager): `MigrationImportTarget.host`; `vmmigration_clustered_target.go`, `virtualmachine_import_wait.go`; the `ImportedDiskRef.diskID` CEL rule. |
+| B.4 | Docs: [Migration into a clustered provider](../clustered-provider-inventory.md#migration-into-a-clustered-provider-addendum-b) (prerequisites, conditions and how to clear them, limits), `docs/provider-call-outcomes.md`, `docs/upgrading.md`, the release notes. Lab: see below. |
+
+**Lab (2026-10-22, build `main-73e08e8`, a two-host clustered libvirt Provider
+with a shared NFS pool; results on #416).** Run: single-host libvirt →
+clustered over `s3` and over `nfs`, both to `Ready`; the target placed before the
+source was powered off and exported; the landed disk attached in place on the
+chosen host (the domain's disk is `<namespace>.<name>-migrated.qcow2`); a
+migration failed after its import, and a routed `DeleteLandedDisk` went to the
+recorded host; a host made unreachable after the target was placed (the
+migration waited with `TargetHostUnavailable`, did not re-place the target, and
+went on when the host returned). **Not run:** vSphere → clustered, Proxmox →
+clustered, a host made unreachable after the disk landed, a manager restart in
+the middle of an import, an R4-held target, and a retry after an import. Those
+are covered by unit and envtest tests only. The lab also found that libvirt's
+cached pool `Available` could differ between hosts sharing an NFS pool; the
+host free space is now measured fresh (R31, #417).
+
+**Deviations from B1–B7, as implemented.** Manager:
+
+1. A clustered target VirtualMachine in another namespace than the
+   VMMigration's is refused at `Validating` with `ClusteredTargetUnsupported`:
+   its landed disk could never be proven (`isOwnMigrationDisk` needs a
+   migration in the VM's own namespace). `gateRoutedImport`,
+   `vmmigration_clustered_target.go`.
+2. A migration target pinned to its host (B1.2) still takes the own-domain hold
+   (`OwnDomainOnAnotherHost`) when its own domain turns up on another host: the
+   deletion-safety invariant depends on it. Only A6.2's move to that host is
+   skipped. `virtualmachine_controller.go` (`IsVMOwnDomainElsewhere(err) && !pinned`).
+3. The pin also applies when the referenced VMMigration no longer exists (it
+   fails closed: the landed disk may be on the host). `importedDiskPinned`,
+   `virtualmachine_import_wait.go`.
+4. A retry deletes the previous attempt's landed disk on its recorded host and,
+   once the provider confirms, forgets the import so the retry imports again. A
+   landed disk that is kept (`cleanupPolicy: Never`, in use, left behind) keeps
+   `importTarget.host`, and the fresh target is scheduled onto that host only
+   (`Request.RequiredHost`). `prepareRoutedRetry`, `resetRoutedImport`,
+   `migrationImportHost`, `internal/scheduler/filter.go`.
+5. A hold's backoff (15 s doubling to 5 min) is kept in memory: a manager
+   restart resets it. `routedImportHold`, `vmmigration_controller.go`.
+6. A source disk whose size cannot be read holds the migration
+   (`TargetPlaced=False/SourceDiskSizeUnknown`); a host that reports no
+   `allocatableStorageBytes` is filtered out when a disk space is required.
+   `createClusteredTarget`, `filterHost` (`rejInsufficientStorage`).
+7. The B1.2 release also answers `HOST_STORAGE_MISCONFIGURED` (a host whose
+   `default` pool is not at `/var/lib/libvirt/images`), not only a plain name
+   conflict. `handleRoutedImportPrecondition`.
+8. Consecutive "not performed" answers to a routed import fail the attempt into
+   `retryPolicy` after 5 minutes (`routedImportNotPerformedBudget`), instead of
+   re-downloading the disk forever.
+9. A routed migration completes only on a target whose `spec.importedDisk` is
+   exactly the disk it imported (`TargetDiskMismatch`). `routedTargetDiskMatches`,
+   `vmmigration_clustered_target_guard.go`.
+10. `Host.status.allocatableStorageBytes` of a libvirt host is its `default`
+    pool's free space, not the sum of the active pools (#416), measured fresh
+    with `stat -f` instead of libvirt's cached `pool-info` value, after a path
+    check made as creates and imports make it, under a budget of at most 15 s
+    (R31, #417). `collectStorageBytes`,
+    `internal/providers/libvirt/hostinfo.go`. It changes the placement input of
+    every clustered VM that uses `minDiskSpacePerHost`.
+
+Provider:
+
+1. `HOST_UNAVAILABLE` is answered only when the host never answered a command
+   of the call, which includes a connection that is dead at the first read
+   (B4 said "before the first host command"). After the first answer, a failed
+   read is "not performed". Once the write phase began, a command stopped by
+   `timeout(1)` or killed, a dropped session, an exhausted budget or a lost
+   rename is unknown; a command that ended with its own exit status is "not
+   performed", a held host lock is `Unavailable` (not performed), and a missing
+   tool is `FailedPrecondition`.
+   `classifyRoutedImportFailure`, `routed_import.go`.
+2. A staged format must be `qcow2`, `raw` or `vmdk` (`nfs`: `qcow2` only), as
+   B5 was amended to say. `parseRoutedImport`.
+3. A landing host whose `default` pool is not at `/var/lib/libvirt/images` is
+   refused with `FailedPrecondition` + `HOST_STORAGE_MISCONFIGURED`, scoped to
+   that host so the manager can place the target elsewhere.
+   `requireDefaultPoolDir`.
+4. The cross-host guard answers `VM_DISK_IN_USE` for an import, not a plain
+   `AlreadyExists`, so that no host is released for it (B2 step 2).
+   `cluster_disk_guard.go`.
+5. Private write directories older than 65 minutes are reaped at the start of
+   an import, and the write phase is not started with less than one minute of
+   budget left. `reapStaleWriteDirs`, `routedImportMinWriteBudget`.
+
+**Open after P3:** the sidecar stamp on the landed disk (B7.7, wanted before
+v0.5.0), an admission rule reserving a waiting target's `spec.importedDisk` for
+the manager, serialisation of two Providers on one pool (the A6.1 pool
+ownership marker), and the routed export's `HOST_UNAVAILABLE` mapping after the
+first host command (the `hostOpRPCError` gap).
 
 ---
 

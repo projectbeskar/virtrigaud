@@ -28,6 +28,33 @@ The B7.4 disk-space placement filter (migration targets, `VMPlacementPolicy` `mi
 - [ ] Config change only
 - [ ] Documentation only
 
+## [2026-10-22 17:30] - Docs and release notes for migration into a clustered provider and the changes since v0.4.0-rc2 (R11 slice B.4)
+**Author:** @wrkode (William Rizzo)
+
+### Added
+- `docs/clustered-provider-inventory.md` (Migration into a clustered provider): a "Before you start" table (capability, `s3`/`nfs` only, same-namespace target, every host's `default` pool, `ssh://`, `qemu-img`/`flock`/`timeout`, the seed directory, one replica), a table of the conditions and reasons specific to a clustered target (`TargetPlaced`, `WaitingForImport`, `MigrationNotFound`, `ImportedDiskPinned`, `TargetHostReleased`, `TargetHostUnavailable`, `TargetNotPending`, `TargetHostMoved`, `TargetDiskMismatch`, `SourceDiskSizeUnknown`, `ClusteredTargetUnsupported`, `ImportNotPerformed`, ...; not the generic ones such as `TargetVMGone`, `TargetVMNotOwned` or the disk-size-limit holds) with what to do about each, deleting and rolling back a migration, the limits (filter not a reservation, size read once, stale free space R31, two Providers on one pool, experimental topology), and the lab results of 2026-10-22 (run and not run).
+- `docs/adr/0007-clustered-orchestrator-provider.md`: B9, the implementation status of Addendum B (B.1-B.3 implemented in #415 and #416), the deviations from B1-B7 with the code each describes (manager: cross-namespace refusal, `OwnDomainOnAnotherHost` kept for a pinned target, pin when the migration is gone, retry deletes or keeps the landed disk and `RequiredHost`, in-memory hold pacing, `SourceDiskSizeUnknown`, release on `HOST_STORAGE_MISCONFIGURED`, the not-performed budget, `TargetDiskMismatch`, `allocatableStorageBytes` is the `default` pool; provider: `HOST_UNAVAILABLE` on a dead first-read connection, formats `qcow2`/`raw`/`vmdk`, misplaced-pool refusal, `VM_DISK_IN_USE` for an import, the 65-minute reaper) and the lab results.
+- `docs/release-notes/next.md`: "Changes since v0.4.0-rc2" (ten PRs, #407-#417 without the open #410; #417 is R31), the upgrade order for this release (seed directory on every libvirt host first, then CRDs, manager, providers), rollback notes, the R26 `VMClone` security note, the R11 limits and the R31 known issue; folded into the breaking changes, security and clustered highlights, fixes, what to test, lab validation, known limitations and upgrade sections. The version label (rc3 or GA) is left to the maintainer, marked with HTML comments.
+- `examples/migration/README.md`, `README.md`, `examples/README.md`: a section and links for migration into a clustered libvirt Provider.
+
+### Changed
+- `docs/upgrading.md`: the clustered-migration rows say that `supports_routed_import` is read from the provider at `Validating` and is not a field of `Provider.status.reportedCapabilities`; the CRDs must be applied before the manager for clustered-target migration (the readiness check does not verify them); R27's seed directory is a step before rolling the libvirt providers; new rollback caveats (manager back with a clustered-target migration in flight, a clustered provider back, a libvirt provider back to before R26/R27) and post-upgrade checks (seed directory, `allocatableStorageBytes`); R24 and R26 are labelled as after v0.4.0-rc2 (they said "rc2"); the single-host `Create`/`Delete` locking sentence says `Clone` already had it.
+- `docs/clustered-provider-inventory.md`: `pvc` is refused with `MigrationFailed` after the capability gate (it said `ClusteredTargetUnsupported`); "Storage is whole-host today" is now the `default` pool only; "a clone carries the source's cloud-init seed" and "VMMigration into a clustered provider fails validation until P3" no longer describe the code; the provider's capabilities list `resend_safe_import_backends`; "Residual: two Providers on one pool" and "Host prerequisites for a migration target" are headings (their anchors did not exist) and the seed directory is a prerequisite; the `timeout` wording matches the budget code.
+- `docs/adr/0011-migration-staging-cleanup.md`, `docs/libvirt-clones.md`, `docs/vm-status-phase.md`, `docs/adr/README.md`: a clustered provider is no longer "never a migration target"; clustered snapshots are routed; `ImportedDiskPinned` is a restore-style hold (phase `Failed`) and `WaitingForImport`/`MigrationNotFound` phases; the ADR-0007 index row.
+- `docs/libvirt-domain-ownership.md`: the SELinux paragraph says it was not tested (the seed directory was run on Ubuntu 24.04 with AppArmor).
+- `examples/vmmigration-into-clustered.yaml`, `examples/vmmigration-nfs.yaml`: the NFS server is the placeholder `nfs.example.com` (a lab address was there); the clustered example's source is a single-host libvirt VM (the direction that was run) and its requirements name `pvc`, the seed directory and the experimental status.
+- `CHANGELOG.md`: exactly two internal lab references in earlier entries are replaced: the lab host names in the #407 entry (now "a two-host shared-NFS lab plan") and a lab IP address in the old SSH-retry entry (now "a lab host"). No other entry was touched.
+- Review round: rebased on #417 (R31, host free space measured fresh; the "known issue" text and the `virsh pool-refresh` workaround are gone), `#413` and the allocatable-storage change moved out of the release notes' breaking changes (only #414 is breaking), the clustered `MigrationNotFound` and `TargetNotPending` and `ImportOutcomeUnknown` rows, the rollback caveat, the seed-check scope (every create; a clone only when its source has a seed), the lab results (run and not run, identical in B9, the inventory and the release notes), the example's Provider namespace and consumer grant, `supports_routed_import` as the one capability name, and the nits the review listed.
+
+### Why
+R11 slice B.4: the operator-facing documentation and release notes for migration into a clustered libvirt provider (#415, #416) and for everything merged since v0.4.0-rc2, with the behavioural claims in the new text checked against the code on `main` 73e08e8c and re-checked in a review. The pre-existing text of the touched docs was not re-verified line by line.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [ ] Config change only
+- [x] Documentation only
+
 ## [2026-10-22 10:53] - Migration into a clustered provider: #416 review fixes (R11 slice B.3)
 **Author:** @wrkode (William Rizzo)
 
@@ -285,7 +312,7 @@ govulncheck (the blocking Supply Chain Vulnerability Scan) started failing every
   - B3: `s3` and `nfs` only. `pvc` is refused, with reasons. The host-side staged-image checks are reused. With `timeout(1)` on every host command, clustered can declare `resend_safe_import_backends: [s3, nfs]`.
   - B4: R6 markers and re-sends to the recorded host; R21-style typed outcomes on the routed path (`HOST_UNAVAILABLE` only before the first host command); a routed `DeleteLandedDisk` through a new optional `MigrationImportTarget.host` and `DeleteLandedDiskRequest.target_host_id` (4) with the cross-host in-use scan; a clustered `DeleteStagedDisk` (`target_host_id` 8 for nfs).
   - B5: the `supports_routed_import` (30) capability, the version matrix and the rollback behaviour. The Validating refusal stays for providers without the capability.
-  - B6: four PR-sized slices with tests and a dome2/dome3 shared-NFS lab plan.
+  - B6: four PR-sized slices with tests and a two-host shared-NFS lab plan.
   - B7: eight open questions.
 
   Single-host, vSphere and Proxmox targets keep today's order and requests, so the ADR-0008 soak window is unaffected. The Status block and A1 point at the addendum.
@@ -5961,7 +5988,7 @@ Follow-up to #191 (which added client-side retry/backoff). Multiplexing removes 
 - `internal/providers/libvirt/virsh_retry_test.go`: tests for the transient-error classifier (transient connect errors vs. real virsh errors) and the retry loop (retries-then-succeeds, real-error-no-retry, attempt exhaustion, context-cancel).
 
 ### Why
-Recurring on the lab (`I1`): host `172.16.56.8` repeatedly closed SSH connections during migration/clone E2E windows, making managed VMs appear unreachable. This makes a momentary host-side refusal recoverable instead of fatal. **The root cause is partly host-side** — operators must still tune `MaxStartups`/fail2ban on the libvirt host; connection multiplexing (ControlMaster) is tracked as a follow-up.
+Recurring on the lab (`I1`): a lab host repeatedly closed SSH connections during migration/clone E2E windows, making managed VMs appear unreachable. This makes a momentary host-side refusal recoverable instead of fatal. **The root cause is partly host-side** — operators must still tune `MaxStartups`/fail2ban on the libvirt host; connection multiplexing (ControlMaster) is tracked as a follow-up.
 
 ### Impact
 - [ ] Breaking change
