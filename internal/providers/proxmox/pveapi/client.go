@@ -656,7 +656,7 @@ func (c *Client) GetTaskStatus(ctx context.Context, node, taskID string) (*Task,
 	defer resp.Body.Close() //nolint:errcheck // Response body close in defer is not critical
 
 	if resp.StatusCode != 200 {
-		return nil, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
+		return nil, newAPIError("get task status", resp)
 	}
 
 	var apiResp APIResponse
@@ -1380,31 +1380,14 @@ func (c *Client) ReconfigureVMRaw(ctx context.Context, node string, vmid int, va
 	return "", nil // Synchronous operation completed
 }
 
-// DetectPrimaryDisk detects the primary boot disk from VM configuration
-// Returns the disk identifier (e.g., "scsi0", "virtio0", "sata0", "ide0")
-func (c *Client) DetectPrimaryDisk(ctx context.Context, node string, vmid int) (string, error) {
-	key, _, err := c.DetectPrimaryDiskVolume(ctx, node, vmid)
-	return key, err
-}
-
-// DetectPrimaryDiskVolume is DetectPrimaryDisk that also returns the disk's
-// config value (e.g. "local-lvm:vm-100-disk-0,size=32G"), from the same read of
-// the VM's config, so a caller can tell which storage the boot disk lives on
-// (see DiskStorage). The value is empty when the config has no disk and the
-// "scsi0" fallback key is returned.
-func (c *Client) DetectPrimaryDiskVolume(ctx context.Context, node string, vmid int) (key, value string, err error) {
-	config, err := c.GetVMConfig(ctx, node, vmid)
-	if err != nil {
-		return "", "", err
-	}
-	key, value = primaryDiskFromConfig(config)
-	return key, value, nil
-}
-
-// primaryDiskFromConfig picks the primary boot disk of a VM config: the first
-// non-cdrom disk in the order virtio, scsi, sata, ide, or "scsi0" (with an
-// empty value) when the config has none.
-func primaryDiskFromConfig(config map[string]interface{}) (key, value string) {
+// PrimaryDiskFromConfig picks the primary disk of a VM config: the first
+// non-cdrom disk in the order virtio, scsi, sata, ide (device numbers 0-15 of
+// each). The provider starts the cloned VM's boot order with it and follows
+// its storage for the cloud-init drive. It can be a data disk when the VM has
+// one on an earlier bus than its boot disk. It returns the disk's key
+// and config value (e.g. "local-lvm:vm-100-disk-0,size=32G"; see DiskStorage),
+// or "scsi0" and an empty value when the config has no such disk.
+func PrimaryDiskFromConfig(config map[string]interface{}) (key, value string) {
 	// Check for disks in order of preference: virtio, scsi, sata, ide
 	diskPrefixes := []string{"virtio", "scsi", "sata", "ide"}
 
@@ -1427,8 +1410,47 @@ func primaryDiskFromConfig(config map[string]interface{}) (key, value string) {
 	return "scsi0", ""
 }
 
+// cloudInitVolumePattern matches the volume name of a cloud-init drive, after
+// the "<storage>:" of a config value and before its options: vm-<vmid>-cloudinit,
+// with a <vmid>/ directory and a disk-image extension on file-based storages.
+var cloudInitVolumePattern = regexp.MustCompile(`(?:^|/)vm-\d+-cloudinit(?:\.(?:raw|qcow2|vmdk))?$`)
+
+// CloudInitDrive finds the cloud-init drive of a VM config: the slot (ide,
+// sata or scsi device) whose volume is a cloud-init volume, e.g. slot "ide2"
+// with value "local-lvm:vm-199-cloudinit,media=cdrom". PVE names such a
+// volume vm-<vmid>-cloudinit (on a directory or file storage it is a file
+// <vmid>/vm-<vmid>-cloudinit.raw, .qcow2 or .vmdk), and a full clone of a
+// template that has one carries its own (renamed to the clone's VMID). Other
+// volumes whose name merely contains "cloudinit" (an ISO) are not one. ok is
+// false when the config has none.
+func CloudInitDrive(config map[string]interface{}) (slot, value string, ok bool) {
+	for _, bus := range []struct {
+		prefix string
+		count  int
+	}{{"ide", 4}, {"sata", 6}, {"scsi", 31}} {
+		for i := 0; i < bus.count; i++ {
+			key := fmt.Sprintf("%s%d", bus.prefix, i)
+			v, isString := config[key].(string)
+			if !isString {
+				continue
+			}
+			first, _, _ := strings.Cut(strings.TrimSpace(v), ",")
+			if storage, volume, found := strings.Cut(first, ":"); found && ValidStorageID(storage) && cloudInitVolumePattern.MatchString(volume) {
+				return key, v, true
+			}
+		}
+	}
+	return "", "", false
+}
+
 // storageIDPattern is what PVE accepts as a storage ID.
 var storageIDPattern = regexp.MustCompile(`^(?i:[a-z][a-z0-9\-_.]*[a-z0-9])$`)
+
+// ValidStorageID reports whether s has the syntax of a PVE storage ID, which
+// is also what makes it safe to put in a "<storage>:<volume>" config value.
+func ValidStorageID(s string) bool {
+	return storageIDPattern.MatchString(s)
+}
 
 // DiskStorage returns the storage ID a VM disk's config value lives on: the
 // part before the first ':' of the "storage:volume,option=..." form (e.g.
@@ -1438,7 +1460,7 @@ var storageIDPattern = regexp.MustCompile(`^(?i:[a-z][a-z0-9\-_.]*[a-z0-9])$`)
 func DiskStorage(diskValue string) string {
 	first, _, _ := strings.Cut(strings.TrimSpace(diskValue), ",")
 	storage, volume, found := strings.Cut(first, ":")
-	if !found || volume == "" || !storageIDPattern.MatchString(storage) {
+	if !found || volume == "" || !ValidStorageID(storage) {
 		return ""
 	}
 	return storage
@@ -1492,4 +1514,34 @@ func (c *Client) GetGuestNetworkInterfaces(ctx context.Context, node string, vmi
 	}
 
 	return result.Result, nil
+}
+
+// IsTerminalTaskQueryError reports whether err, from a task-status query
+// (GetTaskStatus), says that PVE will never report the task: it answered the
+// query with an error of the request itself, so asking again gets the same
+// answer. That is any 4xx answer except 401, 403 and 429 (a malformed or
+// unknown UPID, a node that does not exist), and a 5xx answer whose text says
+// there is no such task or the UPID cannot be parsed. Everything else is
+// transient and leaves the task's outcome unknown: a transport error or a
+// timeout (no answer), 401/403 (the token), 429 and the other 5xx answers.
+//
+// The answer PVE gives for a well-formed UPID whose task it no longer knows is
+// not verified against a real node here; PVE is expected to answer either a
+// stopped task whose exit status is not OK (handled as a failed task by the
+// caller) or one of the errors above.
+func IsTerminalTaskQueryError(err error) bool {
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		return false
+	}
+	switch {
+	case apiErr.StatusCode == http.StatusUnauthorized, apiErr.StatusCode == http.StatusForbidden, apiErr.StatusCode == http.StatusTooManyRequests:
+		return false
+	case apiErr.StatusCode >= 400 && apiErr.StatusCode < 500:
+		return true
+	case apiErr.StatusCode >= 500:
+		text := strings.ToLower(apiErr.Text())
+		return strings.Contains(text, "no such task") || strings.Contains(text, "unable to parse worker upid")
+	}
+	return false
 }

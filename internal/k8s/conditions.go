@@ -63,6 +63,12 @@ const (
 	ReasonWaitingForDependencies = "WaitingForDependencies"
 	// ReasonTaskInProgress indicates async task in progress
 	ReasonTaskInProgress = "TaskInProgress"
+	// ReasonPowerTaskFailed is the reason of the Reconfiguring=False condition
+	// that settles the "Adjusting power state" marker after the power task
+	// ended in failure. It is not a failed Reconfigure (that is ProviderError,
+	// which makes the manager send the Reconfigure again): the failure is on
+	// Ready.
+	ReasonPowerTaskFailed = "PowerTaskFailed"
 	// ReasonProviderConflict indicates the provider refused to create the
 	// resource because one with the same provider-side identity (e.g. a libvirt
 	// domain name) already exists and is NOT owned by this object. It is never

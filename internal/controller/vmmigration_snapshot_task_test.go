@@ -20,6 +20,7 @@ import (
 	"context"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -202,6 +203,29 @@ func TestMigrationSnapshot_TransientPollErrorIsRetried(t *testing.T) {
 	assert.Equal(t, infrav1beta1.MigrationPhaseSnapshotting, got.Status.Phase)
 	assert.Equal(t, "task-snap", got.Status.TaskRef)
 	assert.Equal(t, migrationSnapshotTaskPollInterval, res.RequeueAfter)
+}
+
+// TestMigrationSnapshot_PollErrorsEndAtTheWaitLimit: a task whose polls keep
+// failing is not polled for ever: once the task's wait limit has passed since
+// the Snapshotting=True/SnapshotInProgress transition, the snapshot fails as if
+// the task had not finished in time.
+func TestMigrationSnapshot_PollErrorsEndAtTheWaitLimit(t *testing.T) {
+	vm, p, m := snapshottingMigration()
+	m.Status.SnapshotID = "snap-t"
+	m.Status.TaskRef = "task-snap"
+	started := metav1.NewTime(time.Now().Add(-migrationDefaultSnapshotWait - time.Minute))
+	m.Status.Conditions = []metav1.Condition{{
+		Type: infrav1beta1.VMMigrationConditionSnapshotting, Status: metav1.ConditionTrue,
+		Reason: migrationReasonSnapshotInProgress, Message: migrationSnapshotInProgressMessage, LastTransitionTime: started,
+	}}
+	prov := &snapshotTaskProvider{statusErr: contracts.NewRetryableError("taskStatus: unavailable", nil)}
+	r := newSnapshotTaskReconciler(t, prov, vm, p, m)
+
+	_, got := reconcileSnapshotStep(t, r, m)
+	assert.Equal(t, infrav1beta1.MigrationPhaseFailed, got.Status.Phase)
+	assert.Contains(t, got.Status.Message, "did not finish within")
+	assert.Empty(t, got.Status.TaskRef)
+	assert.Equal(t, migrationReasonSnapshotFailed, snapshottingCondition(got).Reason)
 }
 
 // TestMigrationSnapshot_RetryDiscardsAnUnconfirmedSnapshot: a retried

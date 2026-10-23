@@ -285,6 +285,16 @@ type VirtualMachineReconciler struct {
 	// providerErrorRetryInterval doubling to reconfigureRetryMaxInterval
 	// (review H2). A Reconfigure that succeeds resets it.
 	reconfigureRetry unschedulableBackoff
+	// powerRetry paces re-sending a power operation whose task ended in
+	// failure, per VM: from providerErrorRetryInterval doubling to
+	// reconfigureRetryMaxInterval. A power operation that succeeds resets it.
+	powerRetry unschedulableBackoff
+	// powerTasks maps a VM UID to the task its last power operation returned,
+	// so a power task that ended in failure is recognised even when the
+	// "Adjusting power state" marker is not on the VM (a real reconfigure's
+	// condition was kept instead). In-process state, as the elected leader is
+	// the only reconciler; after a restart only the marker identifies it.
+	powerTasks sync.Map
 	// preScheduleClean remembers, per VM UID and generation, a recent clean
 	// answer of the pre-schedule uniqueness check (ADR-0007 A6.2, R4), so a
 	// VM re-scheduled on its own backoff does not ask every host each time.
@@ -559,7 +569,7 @@ func (r *VirtualMachineReconciler) reconcileVM(ctx context.Context, vm *infravir
 	// Check if we have an active task
 	if vm.Status.LastTaskRef != "" {
 		done, err := providerInstance.IsTaskComplete(ctx, vm.Status.LastTaskRef)
-		if err != nil && done && powerAdjusting(vm) {
+		if err != nil && done && (powerAdjusting(vm) || r.isPowerTask(vm)) {
 			// The power task ended in failure (a failed task is answered
 			// done together with its error): surface it and settle the
 			// marker, or the VM would poll the dead task for ever.
@@ -580,8 +590,11 @@ func (r *VirtualMachineReconciler) reconcileVM(ctx context.Context, vm *infravir
 			return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 		}
 
-		// Task completed, clear it
+		// Task completed, clear it. A power task that ended well also ends
+		// the VM's power-retry backoff.
 		vm.Status.LastTaskRef = ""
+		r.powerTasks.Delete(vmSchedulingUID(vm))
+		r.powerRetry.reset(vmSchedulingUID(vm))
 	}
 
 	// The "Adjusting power state" marker lives exactly as long as the power
@@ -858,6 +871,10 @@ func (r *VirtualMachineReconciler) reconcileVM(ctx context.Context, vm *infravir
 		return r.adjustPowerState(ctx, vm, providerInstance, ref, string(desiredPowerState))
 	}
 
+	// The desired power state is reached: a power task that failed earlier is
+	// over, and its Reconfiguring=False/PowerTaskFailed is settled.
+	settlePowerTaskFailed(vm)
+
 	// Reconciling the VM to its class reads the class: a class the VM's
 	// namespace may no longer use is refused here (describe and power above
 	// are unaffected). A revoked image never stops a bound VM; it is simply not
@@ -945,6 +962,7 @@ func (r *VirtualMachineReconciler) handleDeletion(ctx context.Context, vm *infra
 	// assumption and backoff record it has. Its durable placement record keeps
 	// counting as committed until the finalizer is gone.
 	r.forgetPlacement(vm)
+	r.forgetPowerState(vm)
 
 	// A VM the provider created whose record was not saved is deleted
 	// through the provider like any bound VM, never released as if nothing
@@ -2225,6 +2243,14 @@ func (r *VirtualMachineReconciler) adjustPowerState(
 		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 	}
 
+	// A power task that ended in failure is not asked again at once: the
+	// operation waits out the VM's power-retry backoff (5 s doubling to
+	// 5 min), or goes at once when the spec changed since the failure.
+	if wait := r.powerRetryWait(vm); wait > 0 {
+		logger.V(1).Info("Waiting before sending the power operation again", "wait", wait)
+		return ctrl.Result{RequeueAfter: wait}, nil
+	}
+
 	taskRef, err := provider.Power(ctx, ref, powerOp)
 	if err != nil {
 		// A clustered VM's host-scoped unavailability or not-found (including a
@@ -2250,7 +2276,17 @@ func (r *VirtualMachineReconciler) adjustPowerState(
 
 	if taskRef != "" {
 		vm.Status.LastTaskRef = taskRef
-		k8s.SetReconfiguringCondition(&vm.Status.Conditions, metav1.ConditionTrue, k8s.ReasonUpdating, powerAdjustingMessage, vm.Generation)
+		r.powerTasks.Store(vmSchedulingUID(vm), taskRef)
+		// The marker takes the place of a settled Reconfiguring condition
+		// only: the condition of a real reconfigure (a recorded task, a
+		// change pending a restart or a power-off, a failed Reconfigure to be
+		// sent again) is kept (mayMarkPowerAdjusting).
+		if mayMarkPowerAdjusting(vm) {
+			k8s.SetReconfiguringCondition(&vm.Status.Conditions, metav1.ConditionTrue, k8s.ReasonUpdating, powerAdjustingMessage, vm.Generation)
+		}
+	} else {
+		// The operation was done when the provider answered.
+		r.powerRetry.reset(vmSchedulingUID(vm))
 	}
 
 	r.updateStatus(ctx, vm)
@@ -2277,20 +2313,102 @@ func powerAdjusting(vm *infravirtrigaudiov1beta1.VirtualMachine) bool {
 	return c != nil && c.Status == metav1.ConditionTrue && c.Reason == k8s.ReasonUpdating && c.Message == powerAdjustingMessage
 }
 
+// mayMarkPowerAdjusting reports whether adjustPowerState may put the
+// "Adjusting power state" marker on vm's Reconfiguring condition: only when
+// that condition is absent, already the marker, or settled (False with
+// ReconcileSuccess or PowerTaskFailed), and no reconfigure task is recorded.
+// The condition of a real reconfigure is kept: Reconfiguring=True (a
+// reconfigure in flight, RestartRequired) and Reconfiguring=False with a
+// reason the next Reconfigure depends on (ProviderError, ResizePendingPowerOff,
+// ProviderLacksHonestReconfigure, ...; see pendingReconfigureRecheck).
+func mayMarkPowerAdjusting(vm *infravirtrigaudiov1beta1.VirtualMachine) bool {
+	if vm.Status.ReconfigureTaskRef != "" {
+		return false
+	}
+	c := meta.FindStatusCondition(vm.Status.Conditions, k8s.ConditionReconfiguring)
+	if c == nil {
+		return true
+	}
+	if c.Status == metav1.ConditionTrue {
+		return powerAdjusting(vm)
+	}
+	return c.Reason == k8s.ReasonReconcileSuccess || c.Reason == k8s.ReasonPowerTaskFailed
+}
+
+// settlePowerTaskFailed turns the Reconfiguring=False/PowerTaskFailed
+// condition (powerTaskFailed) into the settled Reconfiguring=False/
+// ReconcileSuccess once the VM is observed in the power state its spec asks
+// for, so the failure does not stay on the VM after the state was reached by
+// another way. Any other Reconfiguring condition is left as it is.
+func settlePowerTaskFailed(vm *infravirtrigaudiov1beta1.VirtualMachine) {
+	c := meta.FindStatusCondition(vm.Status.Conditions, k8s.ConditionReconfiguring)
+	if c != nil && c.Status == metav1.ConditionFalse && c.Reason == k8s.ReasonPowerTaskFailed {
+		k8s.SetReconfiguringCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonReconcileSuccess, powerAdjustedMessage, vm.Generation)
+	}
+}
+
+// isPowerTask reports whether vm's recorded task is the one its last power
+// operation returned (this manager process remembers it, see powerTasks).
+func (r *VirtualMachineReconciler) isPowerTask(vm *infravirtrigaudiov1beta1.VirtualMachine) bool {
+	v, ok := r.powerTasks.Load(vmSchedulingUID(vm))
+	if !ok {
+		return false
+	}
+	taskRef, _ := v.(string)
+	return taskRef != "" && taskRef == vm.Status.LastTaskRef
+}
+
+// forgetPowerState drops the in-process power records of a VM that is being
+// deleted: the task its last power operation returned, and the backoffs of its
+// power operation and of its Reconfigure.
+func (r *VirtualMachineReconciler) forgetPowerState(vm *infravirtrigaudiov1beta1.VirtualMachine) {
+	uid := vmSchedulingUID(vm)
+	r.powerTasks.Delete(uid)
+	r.powerRetry.reset(uid)
+	r.reconfigureRetry.reset(uid)
+}
+
+// powerRetryWait returns how long the power operation of vm must still wait
+// after a power task that ended in failure; 0 when it may be sent now: there
+// was no failure, the wait is over, or the spec changed since the failure.
+// A spec change is seen only through Ready's observedGeneration (the
+// generation of the status write that recorded the failure on Ready): it is
+// behind vm.Generation once the spec changed, and then the backoff ends. The
+// backoff entry itself holds no generation.
+func (r *VirtualMachineReconciler) powerRetryWait(vm *infravirtrigaudiov1beta1.VirtualMachine) time.Duration {
+	uid := vmSchedulingUID(vm)
+	wait := r.powerRetry.remaining(uid, r.now())
+	if wait <= 0 {
+		return 0
+	}
+	if ready := meta.FindStatusCondition(vm.Status.Conditions, k8s.ConditionReady); ready != nil && ready.ObservedGeneration != vm.Generation {
+		r.powerRetry.reset(uid)
+		return 0
+	}
+	return wait
+}
+
 // powerTaskFailed handles a power task that ended in failure with taskErr: the
-// task is forgotten, the power marker settled (the failure is not a reconfigure
-// in flight), and the failure surfaced on Ready and Reconfiguring. The next
-// reconcile compares the VM's power state with the spec again and, if it still
-// differs, sends the power operation again.
+// task is forgotten, the failure is shown on Ready (ProviderError), and the
+// "Adjusting power state" marker, if it is on the VM, is settled with its own
+// reason (PowerTaskFailed): the failure is not a failed Reconfigure, whose
+// reason (ProviderError) would make the manager send a Reconfigure. Another
+// Reconfiguring condition is not touched. The power operation is sent again on
+// the VM's power-retry backoff (5 s doubling to 5 min), if the power state
+// still differs from spec.powerState then.
 func (r *VirtualMachineReconciler) powerTaskFailed(ctx context.Context, vm *infravirtrigaudiov1beta1.VirtualMachine, taskErr error) (ctrl.Result, error) {
 	log.FromContext(ctx).Error(taskErr, "Power task failed", "taskRef", vm.Status.LastTaskRef)
 	msg := "Power state change failed: " + providerFailureDetail(taskErr)
 	vm.Status.LastTaskRef = ""
-	k8s.SetReconfiguringCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonProviderError, msg, vm.Generation)
+	r.powerTasks.Delete(vmSchedulingUID(vm))
+	if powerAdjusting(vm) {
+		k8s.SetReconfiguringCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonPowerTaskFailed, msg, vm.Generation)
+	}
 	k8s.SetReadyCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonProviderError, msg, vm.Generation)
 	metrics.RecordError(errReasonProviderTask, metrics.ComponentManager)
+	retryAfter := r.powerRetry.nextWithin(vmSchedulingUID(vm), r.now(), providerErrorRetryInterval, reconfigureRetryMaxInterval)
 	r.updateStatus(ctx, vm)
-	return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+	return ctrl.Result{RequeueAfter: retryAfter}, nil
 }
 
 // isOwnMigrationDisk reports whether diskPath is verifiably the landing disk a

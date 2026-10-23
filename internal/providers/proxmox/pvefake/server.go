@@ -27,7 +27,9 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -62,6 +64,8 @@ type Server struct {
 	hidden map[int]bool
 	// offline are the nodes that are down (SetNodeOffline).
 	offline map[string]bool
+	// dirStorages are the directory/file based storages (SetDirStorages).
+	dirStorages map[string]bool
 	// emptyResourceNames lists a guest without a name with no name in
 	// /cluster/resources, instead of PVE's "VM <vmid>"
 	// (SetEmptyResourceNames).
@@ -650,8 +654,11 @@ func (s *Server) handleCreateVM(w http.ResponseWriter, r *http.Request) {
 	final.Lock = ""
 	final.Name = r.FormValue("name")
 	final.Description = r.FormValue("description")
-	if ide2 := r.FormValue("ide2"); ide2 != "" {
-		final.Config = map[string]string{"ide2": ide2}
+	for slot, storage := range cloudInitRequest(r.Form) {
+		if final.Config == nil {
+			final.Config = map[string]string{}
+		}
+		final.Config[slot] = s.cloudInitVolume(vmid, storage)
 	}
 	if cpus := r.FormValue("cores"); cpus != "" {
 		if c, err := strconv.Atoi(cpus); err == nil {
@@ -1043,7 +1050,12 @@ func (s *Server) handleCloneVM(w http.ResponseWriter, r *http.Request) {
 	final.CPUs = sourceVM.CPUs
 	final.Memory = sourceVM.Memory
 	final.Description = description
-	final.Config = cloneConfig(sourceVM.Config, r.FormValue("storage"))
+	// Without `full`, PVE clones a template linked and any other VM in full.
+	full := sourceVM.Template != 1
+	if f := r.FormValue("full"); f != "" {
+		full = f != "0"
+	}
+	final.Config = s.cloneConfig(sourceVM.Config, targetVMID, r.FormValue("storage"), full)
 
 	s.vms[targetVMID] = temp
 
@@ -1052,32 +1064,121 @@ func (s *Server) handleCloneVM(w http.ResponseWriter, r *http.Request) {
 	s.writeResponse(w, taskID)
 }
 
-// handlePowerOp creates a handler for power operations
-// cloneConfig is the raw config a clone gets from its source's: a copy, with
-// the disks moved to storage when the clone request names one (PVE's `storage`
-// parameter of a full clone). Cdrom drives (the cloud-init drive too) stay
-// where they are.
-func cloneConfig(source map[string]string, storage string) map[string]string {
+// ownedVolumePrefix matches the volume name of a disk-like volume a VM owns
+// (vm-<vmid>-disk-0, vm-<vmid>-cloudinit, vm-<vmid>-efidisk0, ...) or a
+// template's base volume (base-<vmid>-disk-0), with the <vmid>/ directory a
+// directory or file storage puts it in. Submatch 1 is that directory's VMID.
+var ownedVolumePrefix = regexp.MustCompile(`^(?:(\d+)/)?(?:vm|base)-\d+-`)
+
+// SetDirStorages declares the storages that are directory or file based (a
+// PVE "dir" or "nfs" storage), whose volumes are files named
+// <vmid>/vm-<vmid>-<name>.<format>; any other storage is block based
+// (LVM, RBD, ...), whose volumes are named vm-<vmid>-<name>. Safe for
+// concurrent use.
+func (s *Server) SetDirStorages(names ...string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.dirStorages = make(map[string]bool, len(names))
+	for _, n := range names {
+		s.dirStorages[n] = true
+	}
+}
+
+// cloneConfig is the raw config a clone (VMID newID) gets from its source's: a
+// copy, in which every volume the source owns (its disks, cloud-init drive,
+// efidisk and tpmstate) is a volume of the clone, named vm-<newID>-... as PVE
+// makes them; volumes of other VMs (an ISO) stay as they are. A full clone
+// that names a target storage (PVE's `storage` parameter) puts those volumes
+// on it. A cloud-init drive is made again on the target, as PVE does: a raw
+// file <newID>/vm-<newID>-cloudinit.raw on a directory storage, a volume
+// vm-<newID>-cloudinit on a block storage. The caller holds s.mu.
+func (s *Server) cloneConfig(source map[string]string, newID int, storage string, full bool) map[string]string {
 	if len(source) == 0 {
 		return nil
 	}
 	out := make(map[string]string, len(source))
 	for k, v := range source {
 		out[k] = v
-		if storage == "" || strings.Contains(v, "media=cdrom") {
+		head, tail, hasTail := strings.Cut(v, ",")
+		st, volume, found := strings.Cut(head, ":")
+		if !found {
 			continue
 		}
-		for _, bus := range []string{"scsi", "virtio", "sata", "ide"} {
-			if strings.HasPrefix(k, bus) {
-				if _, rest, found := strings.Cut(v, ":"); found {
-					out[k] = storage + ":" + rest
-				}
+		m := ownedVolumePrefix.FindStringSubmatch(volume)
+		if m == nil {
+			continue
+		}
+		if storage != "" && full {
+			st = storage
+		}
+		rest := ownedVolumePrefix.ReplaceAllString(volume, "")
+		var name string
+		switch {
+		case strings.HasPrefix(rest, "cloudinit"):
+			if s.dirStorages[st] {
+				name = fmt.Sprintf("%d/vm-%d-cloudinit.raw", newID, newID)
+			} else {
+				name = fmt.Sprintf("vm-%d-cloudinit", newID)
 			}
+		case m[1] != "":
+			name = fmt.Sprintf("%d/vm-%d-%s", newID, newID, rest)
+		default:
+			name = fmt.Sprintf("vm-%d-%s", newID, rest)
+		}
+		out[k] = st + ":" + name
+		if hasTail {
+			out[k] += "," + tail
 		}
 	}
 	return out
 }
 
+// cloudInitSlotPattern matches the config keys a cloud-init drive can be on.
+var cloudInitSlotPattern = regexp.MustCompile(`^(?:ide\d+|sata\d+|scsi\d+)$`)
+
+// cloudInitRequest returns, for a config update or create form, the
+// cloud-init drives it asks for: slot -> storage, from values of the form
+// "<storage>:cloudinit".
+func cloudInitRequest(form url.Values) map[string]string {
+	asked := map[string]string{}
+	for key := range form {
+		if !cloudInitSlotPattern.MatchString(key) {
+			continue
+		}
+		head, _, _ := strings.Cut(form.Get(key), ",")
+		if st, volume, found := strings.Cut(head, ":"); found && volume == "cloudinit" {
+			asked[key] = st
+		}
+	}
+	return asked
+}
+
+// cloudInitVolume is the config value PVE stores for a cloud-init drive
+// allocated for VM vmid on storage by a config update: a qcow2 file
+// <vmid>/vm-<vmid>-cloudinit.qcow2 on a directory storage, a volume
+// vm-<vmid>-cloudinit on a block storage. The caller holds s.mu.
+func (s *Server) cloudInitVolume(vmid int, storage string) string {
+	if s.dirStorages[storage] {
+		return fmt.Sprintf("%s:%d/vm-%d-cloudinit.qcow2,media=cdrom", storage, vmid, vmid)
+	}
+	return fmt.Sprintf("%s:vm-%d-cloudinit,media=cdrom", storage, vmid)
+}
+
+// cloudInitExists reports whether the config already holds VM vmid's cloud-init
+// volume on storage (in either naming), which PVE cannot allocate a second time
+// ("Logical Volume ... already exists").
+func cloudInitExists(config map[string]string, vmid int, storage string) bool {
+	block := fmt.Sprintf("%s:vm-%d-cloudinit", storage, vmid)
+	file := fmt.Sprintf("%s:%d/vm-%d-cloudinit", storage, vmid, vmid)
+	for _, v := range config {
+		if strings.HasPrefix(v, block) || strings.HasPrefix(v, file) {
+			return true
+		}
+	}
+	return false
+}
+
+// handlePowerOp creates a handler for power operations
 func (s *Server) handlePowerOp(operation string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		vars := mux.Vars(r)
@@ -1540,12 +1641,23 @@ func (s *Server) handleReconfigureVM(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// The cloud-init drive, so a test can read which storage it was put on.
-	if ide2 := r.FormValue("ide2"); ide2 != "" {
+	// A cloud-init drive is allocated as vm-<vmid>-cloudinit on the storage,
+	// replacing the drive in that slot. PVE cannot allocate the volume when
+	// the storage already holds it (a full clone of a template with a
+	// cloud-init drive owns one): the update fails and changes nothing.
+	asked := cloudInitRequest(r.Form)
+	for _, storage := range asked {
+		if cloudInitExists(vm.Config, vmid, storage) {
+			s.writeError(w, http.StatusInternalServerError, fmt.Sprintf(
+				"lvcreate 'pve/vm-%d-cloudinit' error:   Logical Volume \"vm-%d-cloudinit\" already exists in volume group \"pve\"", vmid, vmid))
+			return
+		}
+	}
+	for slot, storage := range asked {
 		if vm.Config == nil {
 			vm.Config = map[string]string{}
 		}
-		vm.Config["ide2"] = ide2
+		vm.Config[slot] = s.cloudInitVolume(vmid, storage)
 	}
 
 	if _, ok := r.Form["description"]; ok {

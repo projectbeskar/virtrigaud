@@ -138,6 +138,12 @@ func New() *Provider {
 		defaultStorage = os.Getenv("PVE_DEFAULT_STORAGE")
 	}
 	config.DefaultStorage = strings.TrimSpace(defaultStorage)
+	if config.DefaultStorage != "" && !pveapi.ValidStorageID(config.DefaultStorage) {
+		// Not fatal here (the control plane does not need it): Validate
+		// fails with a clear message, and a Create that would use it is
+		// refused. The value is not logged: it is not a storage ID.
+		slog.Error("PROVIDER_DEFAULT_STORAGE / PVE_DEFAULT_STORAGE is not a valid PVE storage ID; Validate will fail until it is fixed")
+	}
 
 	// Parse node selector
 	nodeSelector := os.Getenv("PROVIDER_NODE_SELECTOR")
@@ -190,6 +196,16 @@ func (p *Provider) Validate(ctx context.Context, req *providerv1.ValidateRequest
 		return &providerv1.ValidateResponse{
 			Ok:      false,
 			Message: "PVE client not configured",
+		}, nil
+	}
+
+	// A default storage that is not a PVE storage ID would refuse every Create
+	// that uses it: say so now, not at the first Create.
+	if _, err := p.defaultStorage(); err != nil {
+		p.logger.Error(invalidDefaultStorageMessage)
+		return &providerv1.ValidateResponse{
+			Ok:      false,
+			Message: invalidDefaultStorageMessage,
 		}, nil
 	}
 
@@ -281,9 +297,9 @@ func (p *Provider) Create(ctx context.Context, req *providerv1.CreateRequest) (*
 		if len(req.UserData) > 0 {
 			// No template, so no boot disk to follow: the request's or the
 			// operator's storage, else the last resort (R33).
-			storage := p.configuredCloudInitStorage(vmConfig.Storage)
-			if storage == "" {
-				storage = cloudInitLastResortStorage
+			storage, err := p.disklessCloudInitStorage(vmConfig.Storage)
+			if err != nil {
+				return nil, err
 			}
 			vmConfig.IDE2 = cloudInitDrive(storage)
 		}
@@ -373,22 +389,35 @@ func (p *Provider) configureClonedVM(ctx context.Context, req *providerv1.Create
 	}
 	p.logger.Info("Reconfiguring cloned VM with cloud-init", "vmid", vmConfig.VMID)
 
-	// Auto-detect primary boot disk from cloned VM
-	primaryDisk, err := p.client.DetectPrimaryDisk(ctx, node, vmConfig.VMID)
+	// Read the clone's config once: its primary disk, and its cloud-init drive
+	// and storage. A failed read is an error (the caller rolls back or retries):
+	// choosing the drive's storage without it could put the drive on `local`
+	// again (R33).
+	cfg, err := p.client.GetVMConfig(ctx, node, vmConfig.VMID)
 	if err != nil {
-		p.logger.Warn("Failed to detect primary disk, using scsi0 as fallback", "error", err)
-		primaryDisk = "scsi0"
+		return fmt.Errorf("read the config of cloned VM %d: %w", vmConfig.VMID, err)
 	}
+	primaryDisk, _ := pveapi.PrimaryDiskFromConfig(cfg)
 	p.logger.Info("Detected primary boot disk", "vmid", vmConfig.VMID, "disk", primaryDisk)
 
 	// Build reconfiguration values for cloud-init. Sizing (cores/memory) is
 	// already applied above for every clone, so it is not repeated here.
 	reconfigValues := url.Values{}
+	cloudInitSlot := cloudInitDefaultSlot
 	if len(req.UserData) > 0 {
-		// The request's or operator's storage, else the boot disk's (R33).
-		storage := p.cloudInitStorage(ctx, node, vmConfig.VMID, p.configuredCloudInitStorage(vmConfig.Storage))
-		reconfigValues.Set("ide2", cloudInitDrive(storage))
-		p.logger.Info("Attaching the cloud-init drive", "vmid", vmConfig.VMID, "storage", storage)
+		// The request's storage, else the primary disk's, else the operator's
+		// (R33); then what the clone's own cloud-init drive, if the template
+		// had one, needs (cloudInitChange).
+		storage, err := p.diskfulCloudInitStorage(vmConfig.Storage, cfg, vmConfig.VMID)
+		if err != nil {
+			return err
+		}
+		slot, value, set := cloudInitChange(cfg, storage)
+		cloudInitSlot = slot
+		if set {
+			reconfigValues.Set(slot, value)
+		}
+		p.logger.Info("Cloud-init drive", "vmid", vmConfig.VMID, "storage", storage, "slot", slot, "set", set)
 	}
 	if vmConfig.SSHKeys != "" {
 		reconfigValues.Set("sshkeys", vmConfig.SSHKeys)
@@ -397,7 +426,7 @@ func (p *Provider) configureClonedVM(ctx context.Context, req *providerv1.Create
 		reconfigValues.Set("ciuser", vmConfig.CIUser)
 	}
 	// Set boot order: detected primary disk first, then cloud-init drive
-	bootOrder := fmt.Sprintf("order=%s;ide2", primaryDisk)
+	bootOrder := fmt.Sprintf("order=%s;%s", primaryDisk, cloudInitSlot)
 	reconfigValues.Set("boot", bootOrder)
 	p.logger.Info("Setting boot order", "vmid", vmConfig.VMID, "boot", bootOrder)
 
@@ -823,10 +852,21 @@ func (p *Provider) TaskStatus(ctx context.Context, req *providerv1.TaskStatusReq
 	node := parts[1]
 	task, err := p.client.GetTaskStatus(ctx, node, taskID)
 	if err != nil {
-		return &providerv1.TaskStatusResponse{
-			Done:  true,
-			Error: fmt.Sprintf("failed to get task status: %v", err),
-		}, nil
+		// PVE answered the query with an error of the request itself (a
+		// malformed or unknown UPID): it will never report this task, so the
+		// task is over, with an error, and the manager stops asking.
+		if pveapi.IsTerminalTaskQueryError(err) {
+			return &providerv1.TaskStatusResponse{
+				Done:  true,
+				Error: fmt.Sprintf("PVE does not report this task: %v", err),
+			}, nil
+		}
+		// Any other failure (an API blip, a timeout, the token, a 5xx): the
+		// task's outcome is unknown, not failed. Answering Done with an error
+		// here made the manager forget a task that was still running. A
+		// transport-level answer keeps the task recorded, and the manager asks
+		// again.
+		return nil, errors.NewUnavailable("Proxmox task status query", err)
 	}
 
 	done := task.Status == "stopped"
@@ -1477,10 +1517,19 @@ func (p *Provider) parseCreateRequest(ctx context.Context, req *providerv1.Creat
 	if len(req.UserData) > 0 {
 		// The cloud-init drive (ide2) needs a "<storage>:cloudinit" value, and
 		// the storage must hold VM images. It is chosen where the VM exists to
-		// ask (cloudInitStorage for a template clone, whose boot disk's storage
-		// it can follow; Create's diskless branch otherwise), never defaulted
-		// to PVE's `local` here: on a stock install that storage has no
-		// `images` content and PVE refuses to start the VM (R33).
+		// ask (diskfulCloudInitStorage for a template clone, whose primary
+		// disk's storage it can follow; Create's diskless branch otherwise),
+		// never defaulted to PVE's `local` here: on a stock install that
+		// storage has no `images` content and PVE refuses to start the VM
+		// (R33). The storages named for the VM are checked now, before
+		// anything is created, as PVE storage IDs: they end up in a config
+		// value.
+		if err := checkRequestStorage(config.Storage); err != nil {
+			return nil, "", err
+		}
+		if _, err := p.defaultStorage(); err != nil {
+			return nil, "", err
+		}
 
 		// Extract SSH keys and user from cloud-init data if possible
 		userData := string(req.UserData)

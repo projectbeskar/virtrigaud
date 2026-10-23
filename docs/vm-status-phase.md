@@ -94,16 +94,43 @@ sets that condition `False` (reason `ReconcileSuccess`, message `Power state
 adjusted`) and the phase follows the power state again: `Running` or `Stopped`.
 Providers whose power operations are synchronous (vSphere, libvirt) never set it.
 
-- A `Reconfiguring` condition of a real resize is never settled by a power task: only
-  the exact reason and message above are, and only when no `status.reconfigureTaskRef`
-  is recorded. `RestartRequired`, `ResizePendingPowerOff`, `ShrinkPendingPowerOff`,
-  `InsufficientHostCapacity` and the reconfigure's own `Updating` and
-  `TaskInProgress` conditions are left as they are.
-- A power task that ends in failure is forgotten (`status.lastTaskRef` is cleared),
-  and the failure is shown on `Ready=False/ProviderError` and
-  `Reconfiguring=False/ProviderError` with the message `Power state change failed: ...`. The
-  phase follows the power state. The next reconcile compares the power state with
-  `spec.powerState` again and sends the power operation again if they still differ.
+- **A real reconfigure's condition is kept.** The marker is set only when
+  `Reconfiguring` is absent or settled (`False` with `ReconcileSuccess` or
+  `PowerTaskFailed`) and no `status.reconfigureTaskRef` is recorded. A power
+  operation sent while `Reconfiguring` is `True` (a reconfigure in flight,
+  `RestartRequired`) or `False` with any reason other than `ReconcileSuccess` and
+  `PowerTaskFailed` (`ProviderError`, `ResizePendingPowerOff`,
+  `ProviderLacksHonestReconfigure`, `ValidationError`, `ShrinkPendingPowerOff`,
+  `InsufficientHostCapacity`, ...) leaves that condition as it is, and the
+  completion of the power task does not settle it: only the exact reason and
+  message above are settled, and only when no `status.reconfigureTaskRef` is
+  recorded.
+- **A power task that ends in failure** is forgotten (`status.lastTaskRef` is
+  cleared) and shown on `Ready=False/ProviderError` with the message `Power state
+  change failed: ...`. The marker, if it is on the VM, is settled as
+  `Reconfiguring=False/PowerTaskFailed`, not `ProviderError`: a failed power task
+  is not a failed Reconfigure, and `ProviderError` on `Reconfiguring` makes the
+  manager send a Reconfigure again. The phase follows the power state.
+  `Reconfiguring=False/PowerTaskFailed` is settled to `ReconcileSuccess` once the
+  VM is observed in the power state its spec asks for.
+- **A task the provider cannot report on.** A task-status query that fails for a
+  transient reason (a transport error, a timeout, a 5xx, the token, rate limiting)
+  keeps the task recorded and is asked again. For Proxmox, a query PVE rejects as a
+  request (a malformed or unknown UPID: any 4xx other than 401/403/429, or a 5xx
+  that says there is no such task) ends the task with an error, so the manager
+  stops asking; a `VMMigration` whose snapshot task cannot be polled fails the
+  snapshot once the task's wait limit has passed.
+- **The power operation is sent again on a backoff**, per VM: after 5 seconds, then
+  10, doubling to at most 5 minutes while its task keeps failing. A power
+  operation that completes resets the backoff, and so does a change to `spec`
+  since the failure (the operation then goes at once). While the VM waits, nothing is
+  sent and the status does not change. The backoff is held by the manager process:
+  after a manager restart the first retry goes at once.
+- A task that ends in failure is recognised as a power task by the marker, or, when
+  the marker was not set, by the manager process remembering the task its last
+  power operation returned. After a restart of the manager, a failed power task
+  without the marker is handled like any other failed task: `Provisioning=False/
+  ProviderError` ("Failed to check task: ...") with the task still recorded.
 - An earlier manager (v0.4.0-rc4 and before) never settled the condition, so every
   Proxmox VM whose power was changed stayed in phase `Reconfiguring` with `Ready=True`.
   The first reconcile after the upgrade settles such a VM; no manual step is needed.

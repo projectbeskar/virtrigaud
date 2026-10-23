@@ -205,7 +205,9 @@ func (r *VMMigrationReconciler) recordSnapshotCompleteEvent(migration *infrav1be
 //     it), and the migration fails — then retried per its retry policy;
 //   - the provider no longer knows the task (NotFound, e.g. after a provider
 //     restart): the outcome cannot be learned, handled like a failure;
-//   - any other poll error: transient, polled again (nothing is written).
+//   - any other poll error: transient, polled again (nothing is written) until
+//     the task's wait limit (migrationSnapshotWaitExceeded) has passed, then
+//     the snapshot fails as if the task had not finished in time.
 func (r *VMMigrationReconciler) pollMigrationSnapshotTask(
 	ctx context.Context,
 	migration *infrav1beta1.VMMigration,
@@ -220,6 +222,14 @@ func (r *VMMigrationReconciler) pollMigrationSnapshotTask(
 		return r.failMigrationSnapshot(ctx, migration, "Snapshot creation failed: the provider no longer knows its task, "+
 			"so the snapshot's outcome cannot be confirmed")
 	case err != nil:
+		// A transient poll error is polled again, but not for ever: the
+		// task's wait limit applies as it does while the task answers.
+		if waited, over := migrationSnapshotWaitExceeded(migration, time.Now()); over {
+			logger.Info("Could not poll the snapshot task within its wait limit; failing the snapshot", "task_id", taskRef,
+				"waited", waited.String(), "limit", migrationSnapshotWaitLimit(migration).String(), "error", err.Error())
+			return r.failMigrationSnapshot(ctx, migration, fmt.Sprintf(
+				"Snapshot creation failed: its task did not finish within %s", migrationSnapshotWaitLimit(migration)))
+		}
 		logger.Info("Could not poll the snapshot task; polling again", "task_id", taskRef, "error", err.Error())
 		return ctrl.Result{RequeueAfter: migrationSnapshotTaskPollInterval}, nil
 	case taskStatus.Error != "":

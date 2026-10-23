@@ -31,10 +31,11 @@ env:
     value: "pve-node-1,pve-node-2,pve-node-3"
   - name: PVE_INSECURE_SKIP_VERIFY
     value: "false"
-  # Optional: the PVE storage (with the "images" content type) for a VM's
-  # cloud-init drive and for a migration's imported disk, when the request names
-  # none. Without it a cloned VM's cloud-init drive follows its boot disk's storage.
-  # See docs/proxmox-cloud-init-storage.md.
+  # Optional: a PVE storage (with the "images" content type) used as a fallback:
+  # the target of a migration's imported disk, and the cloud-init drive's
+  # storage for a VM made without a template or whose cloned disk shows no
+  # storage. A cloned VM's cloud-init drive goes to its primary disk's storage
+  # first, so this does not move it. See docs/proxmox-cloud-init-storage.md.
   # - name: PVE_DEFAULT_STORAGE
   #   value: "local-lvm"
 
