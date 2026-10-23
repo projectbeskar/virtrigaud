@@ -210,6 +210,11 @@ func TestRoutedHostOutcomes_SnapshotCloneExport(t *testing.T) {
 	ctx := context.Background()
 	snapshotCreate := func(fx *routedSCD) error {
 		_, e := NewServer(fx.p).SnapshotCreate(ctx, &providerv1.SnapshotCreateRequest{
+			VmId: "web", TargetHostId: "host-b", Owner: teamAOwner, NameHint: "pre", Description: "d", RequestToken: "uid-snap-1"})
+		return e
+	}
+	snapshotCreateNoToken := func(fx *routedSCD) error {
+		_, e := NewServer(fx.p).SnapshotCreate(ctx, &providerv1.SnapshotCreateRequest{
 			VmId: "web", TargetHostId: "host-b", Owner: teamAOwner, NameHint: "pre", Description: "d"})
 		return e
 	}
@@ -254,6 +259,9 @@ func TestRoutedHostOutcomes_SnapshotCloneExport(t *testing.T) {
 			{name: "the owner check drops after the list", host: []string{"dead-dumpxml"}, want: outcomeNotPerformed},
 			{name: "the name lookup drops: only reads ran", host: []string{"dead-snapshot-list"}, want: outcomeNotPerformed},
 			{name: "snapshot-create-as is sent and its session drops: retried by request token", host: []string{"dead-snapshot-create-as"}, want: outcomeUnknownRetry},
+		}},
+		{"SnapshotCreate without a request token", snapshotCreateNoToken, []hostOutcomeCase{
+			{name: "snapshot-create-as is sent and its session drops: a retry could take a second snapshot", host: []string{"dead-snapshot-create-as"}, want: outcomeUnknown},
 		}},
 		{"SnapshotDelete", snapshotDelete, []hostOutcomeCase{
 			{name: "every call dies", host: []string{"dead"}, want: outcomeHostUnavailable},
