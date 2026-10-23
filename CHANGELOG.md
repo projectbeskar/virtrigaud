@@ -25,15 +25,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `docs/proxmox-networks.md` (listed in `docs/README.md`): how networks reach PVE; `docs/upgrading.md`: the behavior change and the rollback caveat.
 
 ### Why
-rc4 validation finding R36 (ADR-0014 Slice 0a): the Proxmox provider ignored the bridge, VLAN, model and static IP of every VM, migrated or not, so VMs landed on the wrong network. This is the standalone first slice; MAC forwarding and its tenant policy are Slice 0b.
+rc4 validation finding R36 (ADR-0014 Slice 0a): the Proxmox provider ignored the bridge, VLAN, model and static IP of every VM, migrated or not, so VMs landed on the wrong network. This is the standalone first slice; MAC forwarding and its tenant policy are Slice 0b. It needs a Proxmox provider rollout: VMs that relied on the accidental `vmbr0` default change on their next create or clone, and existing VMs are not modified.
 
 ### Impact
 - [ ] Breaking change
 - [x] Requires cluster rollout
 - [ ] Config change only
 - [ ] Documentation only
-
-Requires a Proxmox provider rollout. VMs that relied on the accidental `vmbr0` default change on their next create or clone; existing VMs are not modified.
 
 ## [2026-10-23 17:00] - Proxmox cloud-init drive: never collide with the clone's own drive; power-task fixes (R33/R34 review)
 **Author:** @wrkode (William Rizzo)
