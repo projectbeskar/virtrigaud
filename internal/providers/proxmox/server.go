@@ -836,10 +836,20 @@ func (p *Provider) TaskStatus(ctx context.Context, req *providerv1.TaskStatusReq
 	node := parts[1]
 	task, err := p.client.GetTaskStatus(ctx, node, taskID)
 	if err != nil {
-		// The query failed (an API blip, a timeout): the task's outcome is
-		// unknown, not failed. Answering Done with an error here made the
-		// manager forget a task that was still running. A transport-level
-		// answer keeps the task recorded, and the manager asks again.
+		// PVE answered the query with an error of the request itself (a
+		// malformed or unknown UPID): it will never report this task, so the
+		// task is over, with an error, and the manager stops asking.
+		if pveapi.IsTerminalTaskQueryError(err) {
+			return &providerv1.TaskStatusResponse{
+				Done:  true,
+				Error: fmt.Sprintf("PVE does not report this task: %v", err),
+			}, nil
+		}
+		// Any other failure (an API blip, a timeout, the token, a 5xx): the
+		// task's outcome is unknown, not failed. Answering Done with an error
+		// here made the manager forget a task that was still running. A
+		// transport-level answer keeps the task recorded, and the manager asks
+		// again.
 		return nil, errors.NewUnavailable("Proxmox task status query", err)
 	}
 

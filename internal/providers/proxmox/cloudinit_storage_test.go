@@ -250,6 +250,47 @@ func TestCloudInitStorage_ExplicitStorageMovesTemplateDriveWithTheClone(t *testi
 	assertDrive(t, vm.Config["ide2"], "nfs-vm")
 }
 
+// TestCloudInitStorage_DirectoryStorageNames (verified on PVE 9.2): on a
+// directory storage the cloud-init volume is a file <id>/vm-<id>-cloudinit.raw
+// when a full clone made it, and .qcow2 when a config update replaced it; the
+// provider's check of the clone's own drive sees both.
+func TestCloudInitStorage_DirectoryStorageNames(t *testing.T) {
+	t.Run("full clone to a directory storage keeps the cloned drive", func(t *testing.T) {
+		provider, srv := ciProviderWith(t, "", map[string]string{
+			"scsi0": ciTemplateBootDisk,
+			"ide2":  "tank-ssd:vm-100-cloudinit,media=cdrom",
+		})
+		srv.SetDirStorages("dirst")
+		vm := createCIVM(t, provider, srv, ciRequest(`{"TemplateName": "100", "storage": "dirst"}`))
+		id := strconv.Itoa(vm.VMID)
+		assert.Equal(t, "dirst:"+id+"/vm-"+id+"-cloudinit.raw,media=cdrom", vm.Config["ide2"])
+	})
+
+	t.Run("a directory storage's own drive on the chosen storage is kept", func(t *testing.T) {
+		provider, srv := ciProviderWith(t, "", map[string]string{
+			"scsi0": "dirst:100/vm-100-disk-0.qcow2,size=32G",
+			"ide2":  "dirst:100/vm-100-cloudinit.raw,media=cdrom",
+		})
+		srv.SetDirStorages("dirst")
+		vm := createCIVM(t, provider, srv, ciRequest(`{"TemplateName": "100"}`))
+		id := strconv.Itoa(vm.VMID)
+		assert.Equal(t, "dirst:"+id+"/vm-"+id+"-cloudinit.raw,media=cdrom", vm.Config["ide2"])
+		assert.Equal(t, "dirst:"+id+"/vm-"+id+"-disk-0.qcow2,size=32G", vm.Config["scsi0"])
+	})
+
+	t.Run("a drive on another storage is replaced by a qcow2 file", func(t *testing.T) {
+		provider, srv := ciProviderWith(t, "", map[string]string{
+			"scsi0": "dirst:100/vm-100-disk-0.qcow2,size=32G",
+			"sata1": "tank-ssd:vm-100-cloudinit,media=cdrom",
+		})
+		srv.SetDirStorages("dirst")
+		vm := createCIVM(t, provider, srv, ciRequest(`{"TemplateName": "100"}`))
+		id := strconv.Itoa(vm.VMID)
+		assert.Equal(t, "dirst:"+id+"/vm-"+id+"-cloudinit.qcow2,media=cdrom", vm.Config["sata1"])
+		assert.Empty(t, vm.Config["ide2"])
+	})
+}
+
 // TestCloudInitStorage_ConfigureClonedVMIsIdempotent (PR #425 H1): a re-sent
 // Create that finds its VM interrupted runs configureClonedVM again; with the
 // drive in place it sets nothing, and the fake would reject a second
@@ -346,6 +387,47 @@ func TestTaskStatus_QueryFailureIsUnavailableNotFailed(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, resp.Done)
 	assert.Contains(t, resp.Error, "task failed")
+}
+
+// TestTaskStatus_UnknownTaskEndsTransientErrorsDoNot (M-1): an error of the
+// query itself (a malformed or unknown UPID: 4xx, or a 5xx that says "no such
+// task") ends the task with an error, so no manager polls it for ever; the
+// answers that say nothing about the task (the token, rate limiting, other
+// 5xx) stay Unavailable.
+func TestTaskStatus_UnknownTaskEndsTransientErrorsDoNot(t *testing.T) {
+	for name, tc := range map[string]struct {
+		status   int
+		body     string
+		terminal bool
+	}{
+		"400 bad UPID":      {http.StatusBadRequest, "unable to parse worker upid", true},
+		"404":               {http.StatusNotFound, "not found", true},
+		"500 no such task":  {http.StatusInternalServerError, "no such task", true},
+		"500 other":         {http.StatusInternalServerError, "blip", false},
+		"502":               {http.StatusBadGateway, "bad gateway", false},
+		"401":               {http.StatusUnauthorized, "no ticket", false},
+		"403":               {http.StatusForbidden, "permission check failed", false},
+		"429":               {http.StatusTooManyRequests, "slow down", false},
+		"595 node down":     {595, "no route to host", false},
+		"500 unparsed UPID": {http.StatusInternalServerError, "unable to parse worker upid 'x'", true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			provider, srv := ciProvider(t, "")
+			running := srv.StartTask("pve", "qmstart", "100", testTokenID)
+			srv.InjectFault(pvefake.Fault{Method: http.MethodGet, PathContains: "/tasks/", Status: tc.status, Body: tc.body})
+			resp, err := provider.TaskStatus(context.Background(), &providerv1.TaskStatusRequest{Task: &providerv1.TaskRef{Id: running}})
+			if tc.terminal {
+				require.NoError(t, err)
+				assert.True(t, resp.Done)
+				assert.NotEmpty(t, resp.Error)
+				return
+			}
+			require.Error(t, err)
+			var perr *errors.ProviderError
+			require.True(t, stderrors.As(err, &perr))
+			assert.Equal(t, codes.Unavailable, perr.Code)
+		})
+	}
 }
 
 // TestCloudInitDriveChange: what the clone's config update does about the drive.

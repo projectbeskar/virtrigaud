@@ -656,7 +656,7 @@ func (c *Client) GetTaskStatus(ctx context.Context, node, taskID string) (*Task,
 	defer resp.Body.Close() //nolint:errcheck // Response body close in defer is not critical
 
 	if resp.StatusCode != 200 {
-		return nil, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
+		return nil, newAPIError("get task status", resp)
 	}
 
 	var apiResp APIResponse
@@ -1420,12 +1420,19 @@ func PrimaryDiskFromConfig(config map[string]interface{}) (key, value string) {
 	return "scsi0", ""
 }
 
+// cloudInitVolumePattern matches the volume name of a cloud-init drive, after
+// the "<storage>:" of a config value and before its options: vm-<vmid>-cloudinit,
+// with a <vmid>/ directory and a disk-image extension on file-based storages.
+var cloudInitVolumePattern = regexp.MustCompile(`(?:^|/)vm-\d+-cloudinit(?:\.(?:raw|qcow2|vmdk))?$`)
+
 // CloudInitDrive finds the cloud-init drive of a VM config: the slot (ide,
 // sata or scsi device) whose volume is a cloud-init volume, e.g. slot "ide2"
 // with value "local-lvm:vm-199-cloudinit,media=cdrom". PVE names such a
-// volume vm-<vmid>-cloudinit, and a full clone of a template that has one
-// carries its own (renamed to the clone's VMID). ok is false when the config
-// has none.
+// volume vm-<vmid>-cloudinit (on a directory or file storage it is a file
+// <vmid>/vm-<vmid>-cloudinit.raw, .qcow2 or .vmdk), and a full clone of a
+// template that has one carries its own (renamed to the clone's VMID). Other
+// volumes whose name merely contains "cloudinit" (an ISO) are not one. ok is
+// false when the config has none.
 func CloudInitDrive(config map[string]interface{}) (slot, value string, ok bool) {
 	for _, bus := range []struct {
 		prefix string
@@ -1438,7 +1445,7 @@ func CloudInitDrive(config map[string]interface{}) (slot, value string, ok bool)
 				continue
 			}
 			first, _, _ := strings.Cut(strings.TrimSpace(v), ",")
-			if _, volume, found := strings.Cut(first, ":"); found && strings.Contains(volume, "cloudinit") {
+			if storage, volume, found := strings.Cut(first, ":"); found && ValidStorageID(storage) && cloudInitVolumePattern.MatchString(volume) {
 				return key, v, true
 			}
 		}
@@ -1517,4 +1524,34 @@ func (c *Client) GetGuestNetworkInterfaces(ctx context.Context, node string, vmi
 	}
 
 	return result.Result, nil
+}
+
+// IsTerminalTaskQueryError reports whether err, from a task-status query
+// (GetTaskStatus), says that PVE will never report the task: it answered the
+// query with an error of the request itself, so asking again gets the same
+// answer. That is any 4xx answer except 401, 403 and 429 (a malformed or
+// unknown UPID, a node that does not exist), and a 5xx answer whose text says
+// there is no such task or the UPID cannot be parsed. Everything else is
+// transient and leaves the task's outcome unknown: a transport error or a
+// timeout (no answer), 401/403 (the token), 429 and the other 5xx answers.
+//
+// The answer PVE gives for a well-formed UPID whose task it no longer knows is
+// not verified against a real node here; PVE is expected to answer either a
+// stopped task whose exit status is not OK (handled as a failed task by the
+// caller) or one of the errors above.
+func IsTerminalTaskQueryError(err error) bool {
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		return false
+	}
+	switch {
+	case apiErr.StatusCode == http.StatusUnauthorized, apiErr.StatusCode == http.StatusForbidden, apiErr.StatusCode == http.StatusTooManyRequests:
+		return false
+	case apiErr.StatusCode >= 400 && apiErr.StatusCode < 500:
+		return true
+	case apiErr.StatusCode >= 500:
+		text := strings.ToLower(apiErr.Text())
+		return strings.Contains(text, "no such task") || strings.Contains(text, "unable to parse worker upid")
+	}
+	return false
 }
