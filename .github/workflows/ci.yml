@@ -765,6 +765,10 @@ jobs:
           echo "🔍 Verifying every CRD base is referenced in kustomization..."
           ./hack/verify-crd-kustomization.sh
 
+      - name: Verify no internal lab names in tracked files
+        run: |
+          ./hack/verify-no-lab-names.sh
+
       - name: Verify CRD generation
         run: |
           echo "🔍 Verifying CRD generation..."
