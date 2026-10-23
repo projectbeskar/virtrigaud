@@ -68,7 +68,7 @@ spec:
     transferMode: relay          # relay (implemented) | auto→relay; direct is rejected (Slice 2)
     s3:
       bucket: virtrigaud
-      endpoint: http://rustfs.lab.k8:9000   # http:// ⇒ plaintext; omit for AWS
+      endpoint: http://s3.example.com:9000   # http:// ⇒ plaintext; omit for AWS
       region: us-east-1
       prefix: prod-app-server/    # object key prefix under the bucket
       usePathStyle: true          # true for rustfs/MinIO/Ceph RGW; false for AWS

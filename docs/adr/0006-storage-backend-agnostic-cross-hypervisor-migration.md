@@ -311,7 +311,7 @@ the planned libvirt→libvirt and `direct`-mode slices. As shipped:
 - **Slice 3 — Proxmox VE, both directions, all pairs, validated 2026-06-18.**
   Proxmox joins as a full source **and** target over S3 (`relay`), completing the
   any-direction matrix across all three hypervisors. Validated end-to-end on real
-  hardware (`pve.lab.k8`): **Proxmox → libvirt**, **libvirt → Proxmox**,
+  hardware (a lab Proxmox host): **Proxmox → libvirt**, **libvirt → Proxmox**,
   **Proxmox → vSphere**, and **vSphere → Proxmox** all reach `Ready`. Combined
   with Slices 1–2 (vSphere ⇄ libvirt) this closes the **complete 3-hypervisor S3
   matrix** for #236; only the NFS backend and the `direct` mode remain.
