@@ -145,18 +145,32 @@ func setSnapshotRevertCondition(vm *infravirtrigaudiov1beta1.VirtualMachine, rea
 		status, reason, message, vm.Generation)
 }
 
+// snapshotRevertReadyReasons are the reasons Ready takes from a False
+// SnapshotReverted condition.
+var snapshotRevertReadyReasons = map[string]bool{
+	infravirtrigaudiov1beta1.SnapshotRevertReasonWaitingForPowerOff:   true,
+	infravirtrigaudiov1beta1.SnapshotRevertReasonSnapshotNotFound:     true,
+	infravirtrigaudiov1beta1.SnapshotRevertReasonSnapshotNotReady:     true,
+	infravirtrigaudiov1beta1.SnapshotRevertReasonSnapshotForAnotherVM: true,
+	infravirtrigaudiov1beta1.SnapshotRevertReasonUnsupported:          true,
+	infravirtrigaudiov1beta1.SnapshotRevertReasonReverting:            true,
+	infravirtrigaudiov1beta1.SnapshotRevertReasonRevertFailed:         true,
+}
+
 // applySnapshotRevertReadiness keeps Ready from claiming success while a
 // requested revert is pending, in flight or failed: when the SnapshotReverted
-// condition is False and Ready is True (or unset), Ready is set False with the
-// revert's reason and message. A Ready that is already False for another
-// reason keeps that reason. It runs on every VirtualMachine status write of
-// this controller (updateStatus), so no path that sets Ready=True can skip it.
+// condition is False and Ready is True, unset, or False for an earlier step
+// of the revert, Ready is set False with the revert's reason and message. A
+// Ready that is False for another reason keeps that reason. It runs on every
+// VirtualMachine status write of this controller (updateStatus), so no path
+// that sets Ready=True can skip it.
 func applySnapshotRevertReadiness(vm *infravirtrigaudiov1beta1.VirtualMachine) {
 	c := meta.FindStatusCondition(vm.Status.Conditions, infravirtrigaudiov1beta1.VirtualMachineConditionSnapshotReverted)
 	if c == nil || c.Status == metav1.ConditionTrue {
 		return
 	}
-	if ready := meta.FindStatusCondition(vm.Status.Conditions, k8s.ConditionReady); ready != nil && ready.Status == metav1.ConditionFalse {
+	if ready := meta.FindStatusCondition(vm.Status.Conditions, k8s.ConditionReady); ready != nil &&
+		ready.Status == metav1.ConditionFalse && !snapshotRevertReadyReasons[ready.Reason] {
 		return
 	}
 	k8s.SetReadyCondition(&vm.Status.Conditions, metav1.ConditionFalse, c.Reason, "Snapshot revert: "+c.Message, vm.Generation)
@@ -313,11 +327,13 @@ func (r *VirtualMachineReconciler) reconcileSnapshotRevert(
 	}
 
 	// An attempt whose outcome is unknown (Reverting, no task): sent again
-	// below, only for the same VMSnapshot.
+	// below, only to the same VMSnapshot (same UID). A VMSnapshot re-created
+	// under the name meanwhile is a new request, decided as any other; one
+	// that is gone ends the request.
 	resend := sameRequest && rec.Phase == infravirtrigaudiov1beta1.SnapshotRevertPhaseReverting && rec.SnapshotUID != ""
-	if resend && (!found || rec.SnapshotUID != string(snap.UID)) {
+	if resend && !found {
 		return r.failSnapshotRevert(ctx, vm, infravirtrigaudiov1beta1.SnapshotRevertReasonRevertFailed, fmt.Sprintf(
-			"VMSnapshot %s was deleted or replaced while the outcome of the revert to it was not known: the VM may or may not "+
+			"VMSnapshot %s was deleted while the outcome of the revert to it was not known: the VM may or may not "+
 				"have been reverted; %s", want.Name, snapshotRevertRetryHint))
 	}
 
@@ -352,6 +368,8 @@ func (r *VirtualMachineReconciler) reconcileSnapshotRevert(
 					"reverted; %s", rec.Attempts, want.Name, snapshotRevertRetryHint))
 		}
 		if wait := snapshotRevertResendDue(rec, r.now()); wait > 0 {
+			setSnapshotRevertCondition(vm, infravirtrigaudiov1beta1.SnapshotRevertReasonReverting, rec.Message)
+			r.updateStatus(ctx, vm)
 			return ctrl.Result{RequeueAfter: wait}, true, nil
 		}
 	}
@@ -430,6 +448,12 @@ func (r *VirtualMachineReconciler) succeedSnapshotRevert(ctx context.Context, vm
 		"remove spec.snapshot.revertToRef, then set it again", rec.SnapshotName)
 	log.FromContext(ctx).Info("Snapshot revert succeeded", "snapshot", rec.SnapshotName, "attempts", rec.Attempts)
 	setSnapshotRevertCondition(vm, infravirtrigaudiov1beta1.SnapshotRevertReasonReverted, rec.Message)
+	// Ready was False only for the revert: the VM was just described, and
+	// the revert is done.
+	if ready := meta.FindStatusCondition(vm.Status.Conditions, k8s.ConditionReady); ready != nil &&
+		ready.Status == metav1.ConditionFalse && snapshotRevertReadyReasons[ready.Reason] {
+		setVMReady(vm)
+	}
 	r.recordEvent(vm, corev1.EventTypeNormal, eventReasonSnapshotRevertSucceeded, "Reverted to VMSnapshot "+rec.SnapshotName)
 	r.updateStatus(ctx, vm)
 	return ctrl.Result{RequeueAfter: snapshotRevertSettleInterval}, nil
@@ -476,6 +500,8 @@ func (r *VirtualMachineReconciler) sendSnapshotRevert(
 			"conflict", apierrors.IsConflict(err))
 		return ctrl.Result{RequeueAfter: providerErrorRetryInterval}, true, nil
 	}
+	// The write decoded the stored object into vm: take the record from it.
+	rec = vm.Status.SnapshotRevert
 	logger.Info("Sending SnapshotRevert", "snapshot", snap.Name, "snapshot_id", snap.Status.SnapshotID,
 		"attempt", rec.Attempts, "host", ref.HostID)
 	r.recordEvent(vm, corev1.EventTypeNormal, eventReasonSnapshotRevertStarted,
