@@ -1048,6 +1048,17 @@ v0.4.0 documents the R36 limitation. Slice 6 when `Fresh` becomes the default.
   scope" note with a link.
 - Option D (offline disk edit) as an opt-in, if name-bound guests matter in
   practice.
+- Slice 0a follow-ups (from its review):
+  - A Provider-level `allowedBridges` / `allowedVLANs` policy for Proxmox,
+    next to Slice 0b's MAC policy. Until then the PVE token's `SDN.Use` ACLs
+    are the enforcement point for which bridges and VLANs a tenant's VM can
+    reach.
+  - Relax the `VMNetworkAttachment` Proxmox `bridge` pattern from
+    `^vmbr[0-9]+$` to the provider's regex (`^[A-Za-z0-9][A-Za-z0-9_.-]{0,14}$`),
+    so an SDN VNet is reachable. It is non-breaking.
+  - `Describe` still reports no NICs (`DescribeResponse` has no field for
+    them); only `ListVMs` reports a NIC's bridge and MAC. Slice 1's
+    `DescribeGuestIdentity` is the place for the MACs.
 
 ## References
 
