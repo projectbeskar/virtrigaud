@@ -182,10 +182,19 @@ func networkConfigFromForm(form url.Values) (map[string]string, error) {
 	return out, nil
 }
 
+// CloneMAC is the MAC address the fake gives NIC index of the VM it clones to
+// vmid: PVE draws a new one for every netN of a clone, and the fake derives it
+// from the clone's VMID and the NIC's index, so it is stable, distinct from
+// the source's, and a test can name it.
+func CloneMAC(vmid, index int) string {
+	mac := net.HardwareAddr{0xBC, 0x24, 0x11, byte(vmid >> 16), byte(vmid >> 8), byte(vmid)}
+	mac[5] ^= byte(index)
+	return strings.ToUpper(mac.String())
+}
+
 // cloneNetworkMACs gives the clone of a VM config new MAC addresses, as PVE
-// does for every netN of a clone: the model stays, the MAC is a new one (the
-// clone's VMID and the NIC's index make it, so it is stable and distinct from
-// the source's).
+// does for every netN of a clone: the model and the other options stay, the
+// MAC is CloneMAC's.
 func cloneNetworkMACs(config map[string]string, vmid int) {
 	for key, value := range config {
 		m := netKeyPattern.FindStringSubmatch(key)
@@ -193,17 +202,16 @@ func cloneNetworkMACs(config map[string]string, vmid int) {
 			continue
 		}
 		index, _ := strconv.Atoi(m[1])
-		mac := net.HardwareAddr{0xBC, 0x24, 0x11, byte(vmid >> 16), byte(vmid >> 8), byte(vmid)}
-		mac[5] ^= byte(index)
+		mac := CloneMAC(vmid, index)
 
 		parts := strings.Split(value, ",")
 		for i, part := range parts {
 			name, _, _ := strings.Cut(strings.TrimSpace(part), "=")
 			switch {
 			case nicModels[name]:
-				parts[i] = name + "=" + strings.ToUpper(mac.String())
+				parts[i] = name + "=" + mac
 			case name == "macaddr":
-				parts[i] = "macaddr=" + strings.ToUpper(mac.String())
+				parts[i] = "macaddr=" + mac
 			}
 		}
 		config[m[0]] = strings.Join(parts, ",")

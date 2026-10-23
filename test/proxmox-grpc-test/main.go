@@ -64,14 +64,14 @@ func main() {
 	}
 	imageJSON, _ := json.Marshal(vmImage)
 
-	// Prepare Network JSON
+	// Prepare Network JSON the way the manager does: a marshalled list of
+	// contracts.NetworkAttachment, which has no JSON tags, so the keys are its
+	// Go field names (this module cannot import the internal package).
 	networks := []map[string]interface{}{
 		{
-			"name": "eth0",
-			"config": map[string]interface{}{
-				"bridge": "vmbr0",
-				"model":  "virtio",
-			},
+			"Name":   "eth0",
+			"Bridge": "vmbr0",
+			"Model":  "virtio",
 		},
 	}
 	networksJSON, _ := json.Marshal(networks)
