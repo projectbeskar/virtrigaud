@@ -262,15 +262,45 @@ call got:
 | How far the call got | Answer | The manager reads |
 |---|---|---|
 | The host is unknown, removed or draining, or cannot be dialed; or no command of the call was answered and none that may change the host was sent (the first command finds the connection dead) | `Unavailable` + `HOST_UNAVAILABLE` | Nothing done |
-| The host answered at least one command, and no command that may change it was sent (only reads ran) | `Unavailable` + `VM_OPERATION_FAILED`, "the host stopped answering before the operation changed anything; nothing was done" | Not performed |
-| A command that may change the host was sent. It is recorded when it is **sent**: when its session drops it may have completed, or still be running | `Unknown` + `VM_OPERATION_FAILED`, "the host stopped answering while the operation ran; its outcome is unknown" | Unknown |
+| The host answered at least one command, and no command that may change it was sent (only reads ran) | `Unavailable` + `VM_OPERATION_FAILED` + `HOST_CONNECTION_LOST`, "the host stopped answering before the operation changed anything; nothing was done" | Not performed |
+| A command that may change the host was sent. It counts as sent once its SSH session is open (or, for a local connection, once its process starts), and before its result: when the session drops it may have completed, or still be running. A dial or session-open failure ran nothing and does not count | `Unknown` + `VM_OPERATION_FAILED` + `HOST_CONNECTION_LOST`, "the host stopped answering while the operation ran; its outcome is unknown" | Unknown |
+| The same, for an RPC that is idempotent per request and that the manager retries on the same host (`SnapshotCreate` with a name and a request token, `Clone`; see below) | `Unavailable` + `VM_OUTCOME_UNKNOWN_RETRY` + `VM_OPERATION_FAILED` + `HOST_CONNECTION_LOST`, "its outcome is unknown and it may still complete on the host: retry" | Retry, outcome unknown: **not** nothing done |
 
 A command **may change the host** unless it is on a short, fixed list of reads: the
 `virsh` subcommands that only read (`list`, `dumpxml`, `domstate`, `snapshot-list`,
-`pool-dumpxml`, ...), `qemu-img info`, `test`, `stat`, and the provider's own
-path and disk probes. Every other command counts, and so does any data
-streamed to or from the host. A command missing from the list therefore makes an
-answer less specific (unknown instead of "not performed"), never wrong.
+`pool-dumpxml`, ...; not `snapshot-current`, which can set the current snapshot, and
+`dommemstat` only without `--period`, `--config`, `--live` or `--current`),
+`qemu-img info`, `test`, `stat`, and the provider's own path and disk probes. Every
+other command counts, and so does any data streamed to or from the host. A command
+missing from the list therefore makes an answer less specific (unknown instead of
+"not performed"), never wrong. (The `isoinfo` read of a clone's source seed is one such
+command.)
+
+**The "retry" form.** `VM_OUTCOME_UNKNOWN_RETRY` is for a call that may have changed the
+host, whose outcome the provider cannot tell, and that is safe to send again. The
+manager's transport client maps it to a retryable error that is **not** "nothing done"
+(`IsNothingDone` is false), so no marker is cleared, no host is re-placed and the answer
+is never a definite outcome; it is also kept out of the circuit breaker. The provider
+sends `VM_OPERATION_FAILED` with it. A manager that predates the new reason therefore
+maps the answer as it did before R25: retryable, out of the breaker, and read as "not
+performed" by `IsNothingDone`; the controllers of these calls check "retryable" first
+(`VMSnapshot` and `VMMigration` `SnapshotCreate`, the clustered `VMClone`, the landed-disk
+cleanup), so an older manager retries it and never fails on it. The same form is used by:
+the time-budget answer of a `SnapshotCreate` (the abandoned `virsh` client leaves
+libvirtd's job running), the answer "the snapshot made for this request is still being
+taken" (the request's snapshot exists, so the call is not "nothing done"), and the
+`DeleteLandedDisk` answer after the `rm` was sent. The answers "another operation on this
+VM is still running" and "the same copy is still running" stay "not performed": this
+call did nothing. `HOST_CONNECTION_LOST` is added to the three host-loss answers above,
+and changes nothing else about them: a `VirtualMachine` whose `Power` or `Reconfigure`
+is answered with it is re-checked every 30 seconds, as for an unavailable host, instead
+of every 5 seconds.
+
+**Shared setup writes.** The cluster-wide disk guard's `HOST_UNAVAILABLE` concerns
+**another** host of the Provider, and it can follow idempotent setup writes on the leased
+host (the seed directory and the default storage pool of a `Create`, the varstore check of
+a `Clone`). Those leave nothing a retry does not redo, and the guard says that nothing was
+created, so the answer stays `HOST_UNAVAILABLE`.
 
 Each routed RPC applies the rule, with these differences:
 
@@ -279,10 +309,11 @@ Each routed RPC applies the rule, with these differences:
 | `Describe`, `GetDiskInfo`, `TaskStatus` | Always `HOST_UNAVAILABLE`. These calls only read, so a lost connection cannot leave anything half done. | `Describe`: `Ready=False/HostUnavailable`, re-checked. |
 | `ListVMs` | Unchanged: the host is named in `unreachable_host_ids`; the call does not fail. | |
 | `ExportDisk` (`s3`, `nfs`) | The table above. A flatten or convert that is sent and whose session drops, that `timeout(1)` stops (124), that is killed (137), or that runs past the routed budget is unknown: the `ExportRequested` marker is kept, and the export is re-sent only as described [above](#what-happens-to-a-call-whose-outcome-is-unknown). | |
-| `SnapshotCreate` | Before the `snapshot-create-as` is sent: `HOST_UNAVAILABLE` or not performed. After: **`Unavailable` + `VM_OPERATION_FAILED`**, "its outcome is unknown and it may still complete on the host: retry" (the form of its time-budget answer), not `Unknown`. The routed create is idempotent per request token: the retry finds the snapshot by name and token, or is refused by libvirt's job lock while the job runs. | Retried, never failed; the `VMSnapshot` or `VMMigration` marker rules above apply. |
-| `Clone` | Before the copy is sent: `HOST_UNAVAILABLE` or not performed. After: the same "outcome is unknown ... retry" `Unavailable` + `VM_OPERATION_FAILED`, not `Unknown`: the clone is stamped with its target, so the retry finds a clone that completed, or is told that the earlier copy still runs (`flock`). An `Unknown` would fail the `VMClone` and remove its target. | Retried on the same host with the backoff (`CloneRetrying`). |
-| `Create`, `Delete`, `Power`, `Reconfigure`, `SnapshotDelete`, `SnapshotRevert`, `TransferOwner` | The table above. | `Delete`: finalizer kept, retried. `SnapshotDelete` of a `VMSnapshot`: finalizer kept, retried with a backoff of 15 s doubling to 5 min. `Power`, `Reconfigure` and `Create`: a provider error, retried; a failed `Reconfigure` counts the larger size on a clustered Provider. `TransferOwner`: the adoption fails and is retried. The manager's controllers do not call `SnapshotRevert` today. Each call can be repeated: a second attempt finds the domain, snapshot or stamp already in its final state (a `Create` binds the domain the first attempt made, which carries the VM's owner stamp). |
-| `DeleteLandedDisk` | `HOST_UNAVAILABLE` only before the host answered a command. After reads were answered: `Unavailable` + `VM_OPERATION_FAILED`, "could not be checked or removed". After the `rm` was sent: `Unavailable` + `VM_OPERATION_FAILED`, "it is not known whether it was removed". | Retried. A retry that finds the disk gone is `NOT_FOUND`. |
+| `SnapshotCreate` | Before the `snapshot-create-as` is sent: `HOST_UNAVAILABLE` or not performed. After: the **retry form** ("its outcome is unknown and it may still complete on the host: retry"), not `Unknown`, **when the request names its snapshot and carries a request token** (the manager always sends both). The routed create is then idempotent: the retry finds the snapshot by name and token, or is refused by libvirt's job lock while the job runs. A request without both (a direct caller) gets `Unknown`, for its time-budget answer too, because its retry could take a second snapshot. | Retried, never failed, outcome unknown; the `VMSnapshot` or `VMMigration` marker rules above apply (the marker is kept). |
+| `Clone` | Before the copy is sent, only reads: `HOST_UNAVAILABLE` or not performed. Any command not on the read list sent earlier (the `isoinfo` read of the source's seed, the varstore check, the copy's private write directory) already gives the retry form. After the copy is sent: the retry form, not `Unknown`: the clone is stamped with its target, so the retry finds a clone that completed, or is told that the earlier copy still runs (`flock`). An `Unknown` would fail the `VMClone` and remove its target. | Retried on the same host with the backoff (`CloneRetrying`). |
+| `Power` | The table above. `on`, `off` and `shutdown` can be repeated: a second attempt finds the domain already in the state asked for. `reboot` cannot: an unknown `reboot` that is retried may reboot the VM twice. | A provider error, retried every 30 s (`HOST_CONNECTION_LOST`). |
+| `Create`, `Delete`, `Reconfigure`, `SnapshotDelete`, `SnapshotRevert`, `TransferOwner` | The table above. A clustered `Delete` stops at a `destroy` whose session dropped, instead of going on to `undefine` a domain that may still run; it is retried. Any other failed `destroy` is ignored, as before. | `Delete`: finalizer kept, retried. `SnapshotDelete` of a `VMSnapshot`: finalizer kept, retried with a backoff of 15 s doubling to 5 min. `Reconfigure` and `Create`: a provider error, retried (a `Reconfigure` every 30 s); a failed `Reconfigure` counts the larger size on a clustered Provider. `TransferOwner`: the adoption fails and is retried. The manager's controllers do not call `SnapshotRevert` today. Each call can be repeated: a second attempt finds the domain, snapshot or stamp already in its final state (a `Create` binds the domain the first attempt made, which carries the VM's owner stamp). |
+| `DeleteLandedDisk` | `HOST_UNAVAILABLE` only before the host answered a command. After reads were answered: `Unavailable` + `VM_OPERATION_FAILED`, "could not be checked or removed". After the `rm` was sent: the retry form, "it is not known whether it was removed". | Retried. A retry that finds the disk gone is `NOT_FOUND`. |
 | `DeleteStagedDisk` (`nfs`) | `HOST_UNAVAILABLE` only for a host that cannot be leased. Every `qemu-img` failure, a dropped session included, is a plain `Unavailable` with a constant message (never `HOST_UNAVAILABLE`); this path is unchanged by R25. | The cleanup is retried. |
 
 Three things stay as they were:
