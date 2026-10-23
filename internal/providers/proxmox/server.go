@@ -384,11 +384,26 @@ func (p *Provider) configureClonedVM(ctx context.Context, req *providerv1.Create
 		return fmt.Errorf("apply VMClass sizing to cloned VM %d: %w", vmConfig.VMID, err)
 	}
 
+	// Read the clone's config once: the NICs the request names are merged into
+	// the clone's own, and the cloud-init step needs its primary disk and its
+	// cloud-init drive and storage. A failed read is an error (the caller rolls
+	// back or retries): choosing the drive's storage without it could put the
+	// drive on `local` again (R33), and a NIC merged without it would lose the
+	// clone's MAC.
+	cloudInit := len(req.UserData) > 0 || vmConfig.SSHKeys != ""
+	var cfg map[string]interface{}
+	if cloudInit || anyNICSpecified(vmConfig.Networks) {
+		var err error
+		cfg, err = p.client.GetVMConfig(ctx, node, vmConfig.VMID)
+		if err != nil {
+			return fmt.Errorf("read the config of cloned VM %d: %w", vmConfig.VMID, err)
+		}
+	}
+
 	// The NICs and IP settings the request names. A NIC it does not name keeps
 	// what the template made (bridge, VLAN and the MAC PVE gave the clone); this
 	// also runs for a clone with no cloud-init data (R36).
-	cloudInit := len(req.UserData) > 0 || vmConfig.SSHKeys != ""
-	if err := p.applyCloneNetworks(ctx, node, vmConfig, cloudInit); err != nil {
+	if err := p.applyCloneNetworks(ctx, node, vmConfig, cfg, cloudInit); err != nil {
 		return err
 	}
 
@@ -398,14 +413,6 @@ func (p *Provider) configureClonedVM(ctx context.Context, req *providerv1.Create
 	}
 	p.logger.Info("Reconfiguring cloned VM with cloud-init", "vmid", vmConfig.VMID)
 
-	// Read the clone's config once: its primary disk, and its cloud-init drive
-	// and storage. A failed read is an error (the caller rolls back or retries):
-	// choosing the drive's storage without it could put the drive on `local`
-	// again (R33).
-	cfg, err := p.client.GetVMConfig(ctx, node, vmConfig.VMID)
-	if err != nil {
-		return fmt.Errorf("read the config of cloned VM %d: %w", vmConfig.VMID, err)
-	}
 	primaryDisk, _ := pveapi.PrimaryDiskFromConfig(cfg)
 	p.logger.Info("Detected primary boot disk", "vmid", vmConfig.VMID, "disk", primaryDisk)
 

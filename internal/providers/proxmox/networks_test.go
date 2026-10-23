@@ -19,6 +19,7 @@ package proxmox
 import (
 	"context"
 	"encoding/json"
+	"net/http"
 	"strconv"
 	"strings"
 	"testing"
@@ -217,6 +218,30 @@ func TestCreate_Clone_AppliesTheNamedNICKeepingItsMAC(t *testing.T) {
 				"the NIC the spec does not name is as cloned")
 		})
 	}
+}
+
+// TestCreate_Clone_UnreadableConfigFailsClosed: when the clone's config cannot
+// be read, a NIC the spec names is not merged blind (that would lose the
+// clone's MAC and options): the call fails and writes no network key.
+func TestCreate_Clone_UnreadableConfigFailsClosed(t *testing.T) {
+	p, srv := netTestProvider(t)
+	vm := createNet(t, p, srv, `{"TemplateName": "9000"}`, "", nil)
+	before := len(srv.MutatingRequests())
+
+	srv.InjectFault(pvefake.Fault{Method: http.MethodGet, PathContains: "/qemu/" + strconv.Itoa(vm.VMID) + "/config",
+		Status: http.StatusInternalServerError, Body: "boom"})
+	networks, err := parseNetworksForTest(t, contracts.NetworkAttachment{Bridge: "vmbr9"})
+	require.NoError(t, err)
+	err = p.configureClonedVM(context.Background(), &providerv1.CreateRequest{}, &pveapi.VMConfig{VMID: vm.VMID, Networks: networks}, "pve")
+	require.Error(t, err)
+	assert.Equal(t, before, len(srv.MutatingRequests()), "nothing was changed")
+}
+
+// parseNetworksForTest parses attachments for a template clone.
+func parseNetworksForTest(t *testing.T, attachments ...contracts.NetworkAttachment) ([]pveapi.NetworkConfig, error) {
+	t.Helper()
+	nets, _, err := parseNetworks(networksJSON(t, attachments...), true)
+	return nets, err
 }
 
 // TestCreate_Clone_BridgeWithoutVLANDropsTheTemplateTag: a spec that names a

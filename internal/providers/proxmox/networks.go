@@ -287,6 +287,17 @@ func usableUnicast(addr netip.Addr) bool {
 		!addr.IsUnspecified() && !addr.IsLoopback() && !addr.IsMulticast()
 }
 
+// anyNICSpecified reports whether the request names anything about at least
+// one NIC (see netSpecified).
+func anyNICSpecified(nics []pveapi.NetworkConfig) bool {
+	for i := range nics {
+		if netSpecified(&nics[i]) {
+			return true
+		}
+	}
+	return false
+}
+
 // netSpecified reports whether the request names anything about the NIC: the
 // bridge, the model, the VLAN tag or the MAC. A NIC it names nothing about is
 // left as the template made it.
@@ -442,7 +453,8 @@ func vlanOpt(vlan int) string {
 
 // applyCloneNetworks applies, to a VM cloned from a template, the network
 // settings the request names: for each NIC it names (a bridge, model, VLAN
-// or MAC), the clone's netN is read and merged with the request (see
+// or MAC), the clone's netN is taken from current, the clone's config the
+// caller read (nil when no NIC is named), and merged with the request (see
 // mergeNetValue), so the template's bridge, VLAN and options survive where
 // the request is silent and the clone keeps the MAC PVE gave it. A NIC the
 // request does not name is not touched. Each attachment's static IP becomes
@@ -450,21 +462,13 @@ func vlanOpt(vlan int) string {
 // is set only when cloudInit says the VM is given a cloud-init configuration
 // by this request. It sets what it sets in one idempotent config update, so a
 // re-sent Create that finds its VM interrupted runs it again.
-func (p *Provider) applyCloneNetworks(ctx context.Context, node string, vmConfig *pveapi.VMConfig, cloudInit bool) error {
+func (p *Provider) applyCloneNetworks(ctx context.Context, node string, vmConfig *pveapi.VMConfig, current map[string]interface{}, cloudInit bool) error {
 	values := url.Values{}
 
-	var current map[string]interface{}
 	for i := range vmConfig.Networks {
 		nic := &vmConfig.Networks[i]
 		if !netSpecified(nic) {
 			continue
-		}
-		if current == nil {
-			config, err := p.client.GetVMConfig(ctx, node, vmConfig.VMID)
-			if err != nil {
-				return fmt.Errorf("read the network config of cloned VM %d: %w", vmConfig.VMID, err)
-			}
-			current = config
 		}
 		key := fmt.Sprintf("%s%d", pveNetKeyPrefix, nic.Index)
 		existing, _ := current[key].(string)
