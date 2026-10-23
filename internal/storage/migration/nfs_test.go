@@ -24,25 +24,25 @@ import (
 func i64(v int64) *int64 { return &v }
 
 func TestNFSURL_HappyPath(t *testing.T) {
-	got, err := NFSURL(StorageOptions{Server: "172.16.56.13", Export: "/export/virtrigaud"}, "mig-abc/disk.qcow2")
+	got, err := NFSURL(StorageOptions{Server: "192.0.2.13", Export: "/export/virtrigaud"}, "mig-abc/disk.qcow2")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := "nfs://172.16.56.13/export/virtrigaud/mig-abc/disk.qcow2"; got != want {
+	if want := "nfs://192.0.2.13/export/virtrigaud/mig-abc/disk.qcow2"; got != want {
 		t.Errorf("got %q want %q", got, want)
 	}
 }
 
 func TestNFSURL_SubpathAndUIDGID(t *testing.T) {
 	got, err := NFSURL(StorageOptions{
-		Server: "omv.lab", Export: "/export/virtrigaud", Path: "sub/dir",
+		Server: "nfs.example.com", Export: "/export/virtrigaud", Path: "sub/dir",
 		UID: i64(65532), GID: i64(65532),
 	}, "disk.qcow2")
 	if err != nil {
 		t.Fatal(err)
 	}
 	// url.Values.Encode sorts keys: gid before uid.
-	if want := "nfs://omv.lab/export/virtrigaud/sub/dir/disk.qcow2?gid=65532&uid=65532"; got != want {
+	if want := "nfs://nfs.example.com/export/virtrigaud/sub/dir/disk.qcow2?gid=65532&uid=65532"; got != want {
 		t.Errorf("got %q want %q", got, want)
 	}
 }
@@ -131,7 +131,7 @@ func TestNFSRootIdentityRefused(t *testing.T) {
 // TestStorageOptions_NFSRoundTrip ensures the NFS coordinates survive the JSON
 // round-trip carried in storage_options_json.
 func TestStorageOptions_NFSRoundTrip(t *testing.T) {
-	in := StorageOptions{Backend: BackendNFS, Server: "omv.lab", Export: "/export/virtrigaud", Path: "p", UID: i64(65532)}
+	in := StorageOptions{Backend: BackendNFS, Server: "nfs.example.com", Export: "/export/virtrigaud", Path: "p", UID: i64(65532)}
 	raw, err := MarshalStorageOptions(in)
 	if err != nil {
 		t.Fatal(err)

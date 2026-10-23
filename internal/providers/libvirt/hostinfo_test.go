@@ -105,7 +105,7 @@ const poolListFixture = ` Name      State      Autostart
 `
 
 // poolDumpXMLDirFixture is `virsh pool-dumpxml default` captured from a lab host
-// (dome3, 2026-10-22) whose dir pool sits on an NFS mount. Its <available> is
+// (2026-10-22) whose dir pool sits on an NFS mount. Its <available> is
 // libvirt's CACHED value (as of the last pool-refresh, and f_bfree-based) —
 // 596772913152 — which the inventory must NOT report (R31).
 const poolDumpXMLDirFixture = `<pool type='dir'>
@@ -899,15 +899,15 @@ func TestCollectStorageBytes_ProductionPoolDir(t *testing.T) {
 
 	script := fullHostScript()
 	script["pool-dumpxml default"] = fakeVirshResult{stdout: poolDumpXMLDirFixture}
-	conn := &fakeHostConn{id: "dome3", script: script}
-	assert.Equal(t, statfsFixtureBytes, collectStorageBytes(context.Background(), conn, "dome3", slog.Default(), nil))
+	conn := &fakeHostConn{id: "hypervisor-3", script: script}
+	assert.Equal(t, statfsFixtureBytes, collectStorageBytes(context.Background(), conn, "hypervisor-3", slog.Default(), nil))
 	assert.Contains(t, conn.commands(), "! timeout --kill-after=1s 10s stat -f -c %a %S -- /var/lib/libvirt/images")
 
 	script["pool-dumpxml default"] = fakeVirshResult{stdout: poolDumpXMLAt("/var/lib/libvirt/images-nfs")}
 	script["! realpath -m -z -- /var/lib/libvirt/images-nfs /var/lib/libvirt/images"] = fakeVirshResult{
 		stdout: nulList("/var/lib/libvirt/images-nfs", "/var/lib/libvirt/images")}
-	moved := &fakeHostConn{id: "dome3", script: script}
-	assert.Zero(t, collectStorageBytes(context.Background(), moved, "dome3", slog.Default(), nil))
+	moved := &fakeHostConn{id: "hypervisor-3", script: script}
+	assert.Zero(t, collectStorageBytes(context.Background(), moved, "hypervisor-3", slog.Default(), nil))
 	assert.Equal(t, []string{"pool-list --all", "pool-dumpxml default",
 		"! realpath -m -z -- /var/lib/libvirt/images-nfs /var/lib/libvirt/images"}, moved.commands())
 }
@@ -974,14 +974,14 @@ func TestProvider_ListHosts_SharedPoolSameFreshValue(t *testing.T) {
 		return s
 	}
 	conns := map[hostconn.HostID]*fakeHostConn{
-		"dome2": {id: "dome2", script: hostScript(237086629478), runHost: fs.statfs}, // libvirt cached 220.8 GiB
-		"dome3": {id: "dome3", script: hostScript(599684438835), runHost: fs.statfs}, // libvirt cached 558.5 GiB
+		"hypervisor-2": {id: "hypervisor-2", script: hostScript(237086629478), runHost: fs.statfs}, // libvirt cached 220.8 GiB
+		"hypervisor-3": {id: "hypervisor-3", script: hostScript(599684438835), runHost: fs.statfs}, // libvirt cached 558.5 GiB
 	}
 	inv := hostsecret.Inventory{
 		SchemaVersion: hostsecret.SchemaVersion,
 		Hosts: []hostsecret.Host{
-			{ID: "dome2", Endpoint: "qemu+ssh://virt@dome2/system"},
-			{ID: "dome3", Endpoint: "qemu+ssh://virt@dome3/system"},
+			{ID: "hypervisor-2", Endpoint: "qemu+ssh://virt@hypervisor-2/system"},
+			{ID: "hypervisor-3", Endpoint: "qemu+ssh://virt@hypervisor-3/system"},
 		},
 	}
 	p, _ := newClusteredProviderForTest(t, inv, fakeDialer(conns, nil))

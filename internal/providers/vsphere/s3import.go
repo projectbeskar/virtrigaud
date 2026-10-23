@@ -254,7 +254,7 @@ func (p *Provider) importDiskFromS3(ctx context.Context, req *providerv1.ImportD
 	// We drive the HttpNfcLease manually rather than calling vmdk.Import for two
 	// reasons specific to this remote-provider topology:
 	//   (a) the lease's device URL points at the ESXi host by FQDN (e.g.
-	//       esxi.lab.k8); the provider pod often cannot resolve that name via
+	//       esxi-1.example.internal); the provider pod often cannot resolve that name via
 	//       cluster DNS, so we rewrite the host to the vCenter host, which proxies
 	//       NFC and is always reachable from the pod (it is PROVIDER_ENDPOINT);
 	//   (b) we Unregister (not Destroy) the transient import VM — vCenter 8 faults

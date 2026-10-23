@@ -35,7 +35,7 @@ import (
 
 // ADR-0007 Slice 5 lab, B3: a routed clone that failed on its host reached the
 // manager as `rpc error: code = Unknown desc = failed to clone VM on host
-// "dome"`. codes.Unknown alone would count toward the manager's per-Provider
+// "hypervisor-1"`. codes.Unknown alone would count toward the manager's per-Provider
 // circuit breaker — one tenant's failing clone, recreated, could then open it
 // for every VM of the Provider. These tests drive the REAL libvirt Server
 // (clustered, on the routed fake hosts) through a real gRPC hop — a loopback

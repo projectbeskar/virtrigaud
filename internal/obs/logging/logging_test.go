@@ -112,9 +112,9 @@ func TestRedactStringValuesNotKeys(t *testing.T) {
 		},
 		{
 			name:           "qemu+ssh URL with password",
-			input:          "qemu+ssh://wrkode:KUb34us!@172.16.56.8/system",
-			mustNotContain: []string{"KUb34us!"},
-			mustContain:    []string{"qemu+ssh://wrkode:", "@172.16.56.8/system", "[REDACTED]"},
+			input:          "qemu+ssh://admin:Sup3rS3cret!@192.0.2.10/system",
+			mustNotContain: []string{"Sup3rS3cret!"},
+			mustContain:    []string{"qemu+ssh://admin:", "@192.0.2.10/system", "[REDACTED]"},
 		},
 	}
 
@@ -174,7 +174,7 @@ func TestRedactStringNonSensitiveInputUntouched(t *testing.T) {
 func TestRedactMap(t *testing.T) {
 	input := map[string]string{
 		"password":    "hunter2",
-		"username":    "wrkode",
+		"username":    "alice",
 		"api_key":     "sk-abcd1234567890",
 		"description": "harmless field",
 		"connection":  "password=secret-in-value",
@@ -186,7 +186,7 @@ func TestRedactMap(t *testing.T) {
 		"sensitive key 'password' should have entire value redacted")
 	assert.Equal(t, "[REDACTED]", got["api_key"],
 		"sensitive key 'api_key' should have entire value redacted")
-	assert.Equal(t, "wrkode", got["username"],
+	assert.Equal(t, "alice", got["username"],
 		"non-sensitive key 'username' should not be redacted (it's not in isSensitiveKey list)")
 	assert.Equal(t, "harmless field", got["description"],
 		"non-sensitive key with non-sensitive value should pass through unchanged")
@@ -198,7 +198,7 @@ func TestRedactMap(t *testing.T) {
 
 // TestRedactStringSSHPublicKey verifies SSH public keys are scrubbed.
 func TestRedactStringSSHPublicKey(t *testing.T) {
-	input := "authorized: ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIN7lHIuo2QJBkdVDL79bl wrkode@laptop\nnext line"
+	input := "authorized: ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIN7lHIuo2QJBkdVDL79bl alice@laptop\nnext line"
 	got := RedactString(input)
 	assert.NotContains(t, got, "AAAAC3NzaC1lZDI1NTE5AAAAIN7lHIuo2QJBkdVDL79bl",
 		"SSH public key body must be redacted (got %q)", got)

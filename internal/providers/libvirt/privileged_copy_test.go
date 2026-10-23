@@ -503,8 +503,8 @@ func TestSudoRefused_OnlySudosOwnAnswer(t *testing.T) {
 	refused := map[string]*VirshResult{
 		"password required": {ExitCode: 1, Stderr: "sudo: a password is required\n"},
 		"not allowed": {ExitCode: 1, Stderr: "Sorry, user virtrigaud is not allowed to execute " +
-			"'/usr/bin/qemu-img convert -f qcow2 -O qcow2 /p/a /p/b' as root on dome.\n"},
-		"may not run sudo":        {ExitCode: 1, Stderr: "Sorry, user virtrigaud may not run sudo on dome.\n"},
+			"'/usr/bin/qemu-img convert -f qcow2 -O qcow2 /p/a /p/b' as root on hypervisor-1.\n"},
+		"may not run sudo":        {ExitCode: 1, Stderr: "Sorry, user virtrigaud may not run sudo on hypervisor-1.\n"},
 		"not in sudoers":          {ExitCode: 1, Stderr: "virtrigaud is not in the sudoers file.\n"},
 		"not in sudoers reported": {ExitCode: 1, Stderr: "virtrigaud is not in the sudoers file.  This incident will be reported.\n"},
 		"tty required":            {ExitCode: 1, Stderr: "sudo: sorry, you must have a tty to run sudo\n"},

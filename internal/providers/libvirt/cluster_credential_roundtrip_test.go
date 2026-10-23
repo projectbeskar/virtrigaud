@@ -70,15 +70,15 @@ func TestClusteredCredentialRoundTrip(t *testing.T) {
 			keyPEM := tc.gen(t)
 			// A distinctive, non-secret placeholder known_hosts line so the leak
 			// assertion has a concrete token to look for.
-			knownHostsLine := "dome ssh-ed25519 AAAADO-NOT-LOG-cluster-known-hosts-token\n"
+			knownHostsLine := "hypervisor-1 ssh-ed25519 AAAADO-NOT-LOG-cluster-known-hosts-token\n"
 
 			// --- Render EXACTLY as the controller does (#316): raw bytes in, the
 			// []byte field becomes base64 in JSON. ---
 			data, err := hostsecret.Marshal(hostsecret.Inventory{
 				SchemaVersion: hostsecret.SchemaVersion,
 				Hosts: []hostsecret.Host{{
-					ID:       "dome",
-					Endpoint: "qemu+ssh://virt@dome/system",
+					ID:       "hypervisor-1",
+					Endpoint: "qemu+ssh://virt@hypervisor-1/system",
 					Credentials: hostsecret.Credentials{
 						SSHPrivateKey: []byte(keyPEM),
 						KnownHosts:    []byte(knownHostsLine),
@@ -167,7 +167,7 @@ func TestClusteredProvider_SSHKeyAuthenticatesEndToEnd(t *testing.T) {
 	data, err := hostsecret.Marshal(hostsecret.Inventory{
 		SchemaVersion: hostsecret.SchemaVersion,
 		Hosts: []hostsecret.Host{{
-			ID:       "dome",
+			ID:       "hypervisor-1",
 			Endpoint: "qemu+ssh://virtrigaud@" + addr + "/system",
 			Credentials: hostsecret.Credentials{
 				SSHPrivateKey: []byte(clientKeyPEM),
@@ -188,7 +188,7 @@ func TestClusteredProvider_SSHKeyAuthenticatesEndToEnd(t *testing.T) {
 	defer func() { _ = reg.Close() }()
 
 	// ConnFor builds the per-host connection lazily (no dial yet).
-	lease, err := reg.ConnFor(context.Background(), hostconn.HostID("dome"))
+	lease, err := reg.ConnFor(context.Background(), hostconn.HostID("hypervisor-1"))
 	require.NoError(t, err)
 	defer func() { _ = lease.Close() }()
 

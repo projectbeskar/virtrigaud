@@ -32,7 +32,7 @@ func int64Ptr(v int64) *int64 { return &v }
 
 func TestNFSRootIdentityRefusal(t *testing.T) {
 	withIDs := func(uid, gid *int64) *infrav1beta1.VMMigration {
-		m := nfsMigration("172.16.56.13", "/export/virtrigaud", "")
+		m := nfsMigration("192.0.2.13", "/export/virtrigaud", "")
 		m.Spec.Storage.NFS.UID, m.Spec.Storage.NFS.GID = uid, gid
 		return m
 	}
@@ -84,7 +84,7 @@ func TestVMMigration_NFSRootIdentityFailsAtValidating(t *testing.T) {
 				migration.Status.Phase = infrav1beta1.MigrationPhaseValidating
 				migration.Spec.Storage = &infrav1beta1.MigrationStorage{
 					Type: storagemigration.BackendNFS,
-					NFS: &infrav1beta1.NFSStorageConfig{Server: "172.16.56.13", Export: "/export/virtrigaud",
+					NFS: &infrav1beta1.NFSStorageConfig{Server: "192.0.2.13", Export: "/export/virtrigaud",
 						UID: int64Ptr(1000), GID: int64Ptr(0)},
 				}
 				for _, o := range objs {
@@ -128,7 +128,7 @@ func TestVMMigration_NFSRootIdentityIsCheckedFromTheSpecAlone(t *testing.T) {
 	migration.Status.Phase = infrav1beta1.MigrationPhaseValidating
 	migration.Spec.Storage = &infrav1beta1.MigrationStorage{
 		Type: storagemigration.BackendNFS,
-		NFS:  &infrav1beta1.NFSStorageConfig{Server: "172.16.56.13", Export: "/export/virtrigaud", UID: int64Ptr(0)},
+		NFS:  &infrav1beta1.NFSStorageConfig{Server: "192.0.2.13", Export: "/export/virtrigaud", UID: int64Ptr(0)},
 	}
 	r, _ := newXNSMigrationReconciler(t, capGatingScheme(t), &migrationSpy{}, migration)
 

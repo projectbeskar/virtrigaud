@@ -83,7 +83,7 @@ func TestBuildExportFlattenCommand(t *testing.T) {
 // controller-built nfs:// URL by stripping the export prefix, tolerating query
 // params, and rejecting traversal / out-of-export paths.
 func TestNFSInMountRel(t *testing.T) {
-	rel, err := nfsInMountRel("nfs://172.16.56.13/export/virtrigaud/vmmigrations-ns-m1-export.qcow2", "/export/virtrigaud")
+	rel, err := nfsInMountRel("nfs://192.0.2.13/export/virtrigaud/vmmigrations-ns-m1-export.qcow2", "/export/virtrigaud")
 	require.NoError(t, err)
 	assert.Equal(t, "vmmigrations-ns-m1-export.qcow2", rel)
 
@@ -112,9 +112,9 @@ func TestNFSSetprivPrefix(t *testing.T) {
 // temp mount point, vers=3 NFS mount of <server>:<export> quoted as one argument,
 // a trap that unmounts + removes the dir on exit, then the inner command.
 func TestBuildNFSKernelMountScript(t *testing.T) {
-	s := buildNFSKernelMountScript("172.16.56.13", "/export/virtrigaud", "INNER_CMD", "")
+	s := buildNFSKernelMountScript("192.0.2.13", "/export/virtrigaud", "INNER_CMD", "")
 	assert.Contains(t, s, "MNT=$(mktemp -d /var/tmp/.virtrigaud-nfsmnt-XXXXXX)")
-	assert.Contains(t, s, "mount -t nfs -o vers=3,nosymfollow,nosuid,nodev,noexec '172.16.56.13:/export/virtrigaud' \"$MNT\"")
+	assert.Contains(t, s, "mount -t nfs -o vers=3,nosymfollow,nosuid,nodev,noexec '192.0.2.13:/export/virtrigaud' \"$MNT\"")
 	assert.Contains(t, s, "trap 'umount \"$MNT\" 2>/dev/null || true; rmdir \"$MNT\" 2>/dev/null || true' EXIT")
 	assert.True(t, strings.HasSuffix(s, "INNER_CMD"), "inner command runs after the mount")
 
@@ -129,7 +129,7 @@ func TestBuildNFSKernelMountScript(t *testing.T) {
 // trap unmounts AND removes the temp on exit.
 func TestBuildNFSKernelExportScript(t *testing.T) {
 	u, g := int64(1000), int64(1000)
-	s := buildNFSKernelExportScript("172.16.56.13", "/export/virtrigaud",
+	s := buildNFSKernelExportScript("192.0.2.13", "/export/virtrigaud",
 		"vmmigrations-ns-m1-export.qcow2", "qcow2", "/mnt/pve/dir/images/101/vm-101-disk-1.qcow2",
 		"/var/tmp/.virtrigaud-export-101.qcow2", &u, &g)
 	// stage 1: root flatten to local temp, then world-readable
@@ -137,7 +137,7 @@ func TestBuildNFSKernelExportScript(t *testing.T) {
 	assert.Contains(t, s, "qemu-img convert -U -f 'qcow2' -O qcow2 '/mnt/pve/dir/images/101/vm-101-disk-1.qcow2' \"$TMP\"")
 	assert.Contains(t, s, `chmod 0644 "$TMP"`)
 	// stage 2: dropped-privilege copy onto the export
-	assert.Contains(t, s, "mount -t nfs -o vers=3,nosymfollow,nosuid,nodev,noexec '172.16.56.13:/export/virtrigaud' \"$MNT\"")
+	assert.Contains(t, s, "mount -t nfs -o vers=3,nosymfollow,nosuid,nodev,noexec '192.0.2.13:/export/virtrigaud' \"$MNT\"")
 	assert.Contains(t, s, `setpriv --reuid 1000 --regid 1000 --clear-groups cp "$TMP" "$MNT"/'vmmigrations-ns-m1-export.qcow2'`)
 	// the temp is removed on exit
 	assert.Contains(t, s, `rm -f "$TMP" 2>/dev/null || true`)
@@ -251,7 +251,7 @@ func TestExportDisk_NFSBackendPassesGate(t *testing.T) {
 	_, err = provider.ExportDisk(context.Background(), &providerv1.ExportDiskRequest{
 		VmId:           "100",
 		BackendType:    "nfs",
-		DestinationUrl: "nfs://172.16.56.13/export/virtrigaud/vmmigrations/ns/web/export.qcow2",
+		DestinationUrl: "nfs://192.0.2.13/export/virtrigaud/vmmigrations/ns/web/export.qcow2",
 	})
 	assert.NotEqual(t, codes.Unimplemented, s3GRPCCode(t, err),
 		"nfs export backend is implemented and must pass the gate")
@@ -269,7 +269,7 @@ func TestImportDisk_NFSBackendPassesGate(t *testing.T) {
 	_, err = provider.ImportDisk(context.Background(), &providerv1.ImportDiskRequest{
 		BackendType: "nfs",
 		TargetName:  "web-migrated",
-		SourceUrl:   "nfs://172.16.56.13/export/virtrigaud/vmmigrations/ns/web/import.qcow2",
+		SourceUrl:   "nfs://192.0.2.13/export/virtrigaud/vmmigrations/ns/web/import.qcow2",
 	})
 	assert.NotEqual(t, codes.Unimplemented, s3GRPCCode(t, err),
 		"nfs import backend is implemented and must pass the gate")

@@ -132,8 +132,8 @@ func TestKnownHostsHasEntry_MissingFile(t *testing.T) {
 func TestHostPort(t *testing.T) {
 	cases := []struct{ in, want string }{
 		{"", ""},
-		{"172.16.56.8", "172.16.56.8:22"},
-		{"172.16.56.8:2222", "172.16.56.8:2222"},
+		{"192.0.2.10", "192.0.2.10:22"},
+		{"192.0.2.10:2222", "192.0.2.10:2222"},
 		{"host.example.com", "host.example.com:22"},
 		{"[::1]", "[::1]:22"},
 		{"[::1]:2222", "[::1]:2222"},
@@ -149,18 +149,18 @@ func TestHostPort(t *testing.T) {
 // including the #291 B6 specific-host strengthening.
 func TestHostKeyPolicy_VerifyKnownHostsPresent(t *testing.T) {
 	t.Run("insecure path is a no-op", func(t *testing.T) {
-		err := hostKeyPolicy{insecure: true}.verifyKnownHostsPresent("172.16.56.8")
+		err := hostKeyPolicy{insecure: true}.verifyKnownHostsPresent("192.0.2.10")
 		assert.NoError(t, err)
 	})
 
 	t.Run("verifying + missing known_hosts -> actionable error", func(t *testing.T) {
 		// KnownHostsFile points at /etc/virtrigaud/credentials/known_hosts,
 		// which does not exist in the test environment.
-		err := hostKeyPolicy{insecure: false}.verifyKnownHostsPresent("172.16.56.8")
+		err := hostKeyPolicy{insecure: false}.verifyKnownHostsPresent("192.0.2.10")
 		require.Error(t, err)
 		msg := err.Error()
 		// (a) names the host
-		assert.Contains(t, msg, "172.16.56.8")
+		assert.Contains(t, msg, "192.0.2.10")
 		// (b) names the expected file path
 		assert.Contains(t, msg, KnownHostsFile)
 		// (c) gives the ssh-keyscan recipe
@@ -177,7 +177,7 @@ func TestHostKeyPolicy_LogVerificationMode_WARN(t *testing.T) {
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
-	hostKeyPolicy{insecure: true}.logVerificationMode(logger, "172.16.56.8")
+	hostKeyPolicy{insecure: true}.logVerificationMode(logger, "192.0.2.10")
 
 	out := buf.String()
 	assert.Contains(t, out, "level=WARN")
@@ -185,7 +185,7 @@ func TestHostKeyPolicy_LogVerificationMode_WARN(t *testing.T) {
 	assert.Contains(t, out, "MITM")
 	assert.Contains(t, out, "audit-flagged")
 	assert.Contains(t, out, "provider=libvirt")
-	assert.Contains(t, out, "host=172.16.56.8")
+	assert.Contains(t, out, "host=192.0.2.10")
 	assert.Contains(t, out, EnvInsecureSkipHostKeyVerification)
 }
 
@@ -195,7 +195,7 @@ func TestHostKeyPolicy_LogVerificationMode_INFO(t *testing.T) {
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
-	hostKeyPolicy{insecure: false}.logVerificationMode(logger, "172.16.56.8")
+	hostKeyPolicy{insecure: false}.logVerificationMode(logger, "192.0.2.10")
 
 	out := buf.String()
 	assert.Contains(t, out, "level=INFO")
@@ -222,7 +222,7 @@ func TestSetupConnection_VerifyingMissingKnownHosts_HardFails(t *testing.T) {
 
 	v := &VirshProvider{
 		config: &ProviderConfig{
-			Spec: ProviderSpec{Endpoint: "qemu+ssh://virtrigaud@172.16.56.8/system"},
+			Spec: ProviderSpec{Endpoint: "qemu+ssh://virtrigaud@192.0.2.10/system"},
 		},
 		credentials: &Credentials{Username: "virtrigaud"},
 	}
@@ -246,7 +246,7 @@ func TestSetupConnection_EscapeHatch_SetsNoVerify(t *testing.T) {
 
 	v := &VirshProvider{
 		config: &ProviderConfig{
-			Spec: ProviderSpec{Endpoint: "qemu+ssh://virtrigaud@172.16.56.8/system"},
+			Spec: ProviderSpec{Endpoint: "qemu+ssh://virtrigaud@192.0.2.10/system"},
 		},
 		credentials: &Credentials{Username: "virtrigaud"},
 	}
