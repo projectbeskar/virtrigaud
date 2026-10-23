@@ -20,6 +20,7 @@ import (
 	"context"
 	"strconv"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -56,8 +57,10 @@ func ciProvider(t *testing.T, defaultStorage string) (*Provider, *pvefake.Server
 	require.True(t, ok)
 	tmpl.Config = map[string]string{"scsi0": ciTemplateBootDisk}
 	srv.PutVM(tmpl)
+	srv.SetTaskDelay(time.Millisecond)
 	provider := createTestProvider(endpoint)
 	provider.client.Config().DefaultStorage = defaultStorage
+	provider.client.Config().TaskPollInterval = 5 * time.Millisecond
 	return provider, srv
 }
 
@@ -163,7 +166,9 @@ func TestCloudInitStorage_UnreadableBootDiskFallsBackToLocal(t *testing.T) {
 	require.True(t, ok)
 	tmpl.Config = map[string]string{"scsi0": "/dev/disk/by-id/foo"}
 	srv.PutVM(tmpl)
+	srv.SetTaskDelay(time.Millisecond)
 	provider := createTestProvider(endpoint)
+	provider.client.Config().TaskPollInterval = 5 * time.Millisecond
 
 	assert.Equal(t, "local:cloudinit", createCI(t, provider, srv, `{"TemplateName": "100"}`))
 }
