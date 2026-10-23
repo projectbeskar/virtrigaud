@@ -120,7 +120,7 @@ func TestProxmoxVerifyKnownHostsPresent(t *testing.T) {
 		err := proxmoxHostKeyPolicy{insecure: false}.verifyKnownHostsPresent("pve.example.internal")
 		require.Error(t, err)
 		msg := err.Error()
-		assert.Contains(t, msg, "pve.example.internal")                              // (a) host
+		assert.Contains(t, msg, "pve.example.internal")                    // (a) host
 		assert.Contains(t, msg, proxmoxKnownHostsFile)                     // (b) file path
 		assert.Contains(t, msg, "ssh-keyscan")                             // (c) recipe
 		assert.Contains(t, msg, EnvProxmoxInsecureSkipHostKeyVerification) // (d) escape hatch
