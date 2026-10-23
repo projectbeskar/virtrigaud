@@ -129,7 +129,7 @@ func TestReconcileVM_FailedPowerTask_BackoffEndsWhenSpecChanges(t *testing.T) {
 
 	got.Generation++
 	require.NoError(t, r.Update(context.Background(), got))
-	got = reconcileOnce(t, r, got)
+	_ = reconcileOnce(t, r, got)
 	assert.Equal(t, 2, prov.powers, "the spec changed since the failure: sent at once")
 }
 
