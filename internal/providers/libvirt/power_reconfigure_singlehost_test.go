@@ -94,12 +94,9 @@ host=local
 if [ "$1" = "-c" ]; then host="${2##*/}"; shift 2; fi
 printf '%s %s\n' "$host" "$*" >> "$FAKE_VIRSH_DIR/calls.log"
 d="$FAKE_VIRSH_DIR/$host"
-fail() {
-  if [ -f "$d/dead-$1" ]; then kill -9 $$; fi
-  if [ -f "$d/fail-$1" ]; then echo "error: scripted failure of $1" >&2; exit 1; fi
-}
+fail() { if [ -f "$d/fail-$1" ]; then echo "error: scripted failure of $1" >&2; exit 1; fi; }
 nodom() { echo "error: failed to get domain '$1'" >&2; exit 1; }
-if [ -f "$d/dead" ]; then kill -9 $$; fi
+if [ -f "$d/dead" ] || [ -f "$d/dead-$1" ]; then kill -9 $$; fi
 if [ -f "$d/nolibvirtd" ]; then echo "error: failed to connect to the hypervisor" >&2; exit 1; fi
 if [ "$1" = "dumpxml" ] && [ "$3" = "--inactive" ]; then
   fail inactive
@@ -115,7 +112,7 @@ fi
 case "$1" in
   list) if [ "$3" = "--uuid" ]; then cat "$d/uuids.txt" 2>/dev/null; else cat "$d/list.txt"; fi ;;
   pool-dumpxml) printf "<pool type='dir'><name>default</name><target><path>%s</path></target></pool>\n" "$FAKE_POOL_DIR" ;;
-  dumpxml) fail dumpxml; if [ -f "$d/dom-$2.xml" ]; then cat "$d/dom-$2.xml"; else nodom "$2"; fi ;;
+  dumpxml) if [ -f "$d/dom-$2.xml" ]; then cat "$d/dom-$2.xml"; else nodom "$2"; fi ;;
   dominfo)
     [ -f "$d/dom-$2.xml" ] || nodom "$2"
     uuid=11111111-2222-4333-8444-555555555555

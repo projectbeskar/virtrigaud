@@ -69,11 +69,8 @@ host=local
 if [ "$1" = "-c" ]; then host="${2##*/}"; shift 2; fi
 printf '%s %s\n' "$host" "$*" >> "$FAKE_LIST_DIR/calls.log"
 d="$FAKE_LIST_DIR/$host"
-if [ -f "$d/dead" ]; then kill -9 $$; fi
-fail() {
-  if [ -f "$d/dead-$1" ]; then kill -9 $$; fi
-  if [ -f "$d/fail-$1" ]; then echo "error: scripted failure of $1" >&2; exit 1; fi
-}
+if [ -f "$d/dead" ] || [ -f "$d/dead-$1" ]; then kill -9 $$; fi
+fail() { if [ -f "$d/fail-$1" ]; then echo "error: scripted failure of $1" >&2; exit 1; fi; }
 case "$1" in
   list)
     if [ -f "$d/hang-list" ]; then exec sleep 30; fi
