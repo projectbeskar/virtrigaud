@@ -559,6 +559,12 @@ func (r *VirtualMachineReconciler) reconcileVM(ctx context.Context, vm *infravir
 	// Check if we have an active task
 	if vm.Status.LastTaskRef != "" {
 		done, err := providerInstance.IsTaskComplete(ctx, vm.Status.LastTaskRef)
+		if err != nil && done && powerAdjusting(vm) {
+			// The power task ended in failure (a failed task is answered
+			// done together with its error): surface it and settle the
+			// marker, or the VM would poll the dead task for ever.
+			return r.powerTaskFailed(ctx, vm, err)
+		}
 		if err != nil {
 			logger.Error(err, "Failed to check task status")
 			k8s.SetProvisioningCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonProviderError, "Failed to check task: "+providerFailureDetail(err), vm.Generation)
@@ -576,6 +582,17 @@ func (r *VirtualMachineReconciler) reconcileVM(ctx context.Context, vm *infravir
 
 		// Task completed, clear it
 		vm.Status.LastTaskRef = ""
+	}
+
+	// The "Adjusting power state" marker lives exactly as long as the power
+	// task it was set for (adjustPowerState). With the task done, or never
+	// recorded (a status written by a version that never cleared the marker),
+	// it is settled here, or the VM would stay in phase Reconfiguring for ever
+	// with Ready=True (R34). A Reconfiguring condition of a real reconfigure
+	// (any other reason or message, or a recorded reconfigure task) is left alone.
+	if vm.Status.LastTaskRef == "" && vm.Status.ReconfigureTaskRef == "" && powerAdjusting(vm) {
+		k8s.SetReconfiguringCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonReconcileSuccess,
+			powerAdjustedMessage, vm.Generation)
 	}
 
 	// Check if we have an active reconfigure task
@@ -2233,9 +2250,45 @@ func (r *VirtualMachineReconciler) adjustPowerState(
 
 	if taskRef != "" {
 		vm.Status.LastTaskRef = taskRef
-		k8s.SetReconfiguringCondition(&vm.Status.Conditions, metav1.ConditionTrue, k8s.ReasonUpdating, "Adjusting power state", vm.Generation)
+		k8s.SetReconfiguringCondition(&vm.Status.Conditions, metav1.ConditionTrue, k8s.ReasonUpdating, powerAdjustingMessage, vm.Generation)
 	}
 
+	r.updateStatus(ctx, vm)
+	return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+}
+
+const (
+	// powerAdjustingMessage is the message of the Reconfiguring=True/Updating
+	// condition adjustPowerState sets while a power task it started runs. It is
+	// what tells that condition from a real reconfigure's (powerAdjusting).
+	powerAdjustingMessage = "Adjusting power state"
+	// powerAdjustedMessage is the message of the Reconfiguring=False condition
+	// that settles the power marker once its task has ended.
+	powerAdjustedMessage = "Power state adjusted"
+)
+
+// powerAdjusting reports whether vm's Reconfiguring condition is the marker
+// adjustPowerState sets for a power task, rather than that of a real
+// reconfigure (reason Updating with the reconfigure messages, TaskInProgress,
+// RestartRequired, ResizePendingPowerOff, InsufficientHostCapacity,
+// ShrinkPendingPowerOff, ...).
+func powerAdjusting(vm *infravirtrigaudiov1beta1.VirtualMachine) bool {
+	c := meta.FindStatusCondition(vm.Status.Conditions, k8s.ConditionReconfiguring)
+	return c != nil && c.Status == metav1.ConditionTrue && c.Reason == k8s.ReasonUpdating && c.Message == powerAdjustingMessage
+}
+
+// powerTaskFailed handles a power task that ended in failure with taskErr: the
+// task is forgotten, the power marker settled (the failure is not a reconfigure
+// in flight), and the failure surfaced on Ready and Reconfiguring. The next
+// reconcile compares the VM's power state with the spec again and, if it still
+// differs, sends the power operation again.
+func (r *VirtualMachineReconciler) powerTaskFailed(ctx context.Context, vm *infravirtrigaudiov1beta1.VirtualMachine, taskErr error) (ctrl.Result, error) {
+	log.FromContext(ctx).Error(taskErr, "Power task failed", "taskRef", vm.Status.LastTaskRef)
+	msg := "Power state change failed: " + providerFailureDetail(taskErr)
+	vm.Status.LastTaskRef = ""
+	k8s.SetReconfiguringCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonProviderError, msg, vm.Generation)
+	k8s.SetReadyCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonProviderError, msg, vm.Generation)
+	metrics.RecordError(errReasonProviderTask, metrics.ComponentManager)
 	r.updateStatus(ctx, vm)
 	return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 }
