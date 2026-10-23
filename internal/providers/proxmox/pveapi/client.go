@@ -1380,21 +1380,11 @@ func (c *Client) ReconfigureVMRaw(ctx context.Context, node string, vmid int, va
 	return "", nil // Synchronous operation completed
 }
 
-// DetectPrimaryDisk detects the primary boot disk from VM configuration
-// Returns the disk identifier (e.g., "scsi0", "virtio0", "sata0", "ide0")
-func (c *Client) DetectPrimaryDisk(ctx context.Context, node string, vmid int) (string, error) {
-	config, err := c.GetVMConfig(ctx, node, vmid)
-	if err != nil {
-		return "", err
-	}
-	key, _ := PrimaryDiskFromConfig(config)
-	return key, nil
-}
-
-// PrimaryDiskFromConfig picks the primary disk of a VM config as
-// DetectPrimaryDisk does: the first non-cdrom disk in the order virtio, scsi,
-// sata, ide (device numbers 0-15 of each), which can be a data disk when the
-// VM has one on an earlier bus than its boot disk. It returns the disk's key
+// PrimaryDiskFromConfig picks the primary disk of a VM config: the first
+// non-cdrom disk in the order virtio, scsi, sata, ide (device numbers 0-15 of
+// each). The provider starts the cloned VM's boot order with it and follows
+// its storage for the cloud-init drive. It can be a data disk when the VM has
+// one on an earlier bus than its boot disk. It returns the disk's key
 // and config value (e.g. "local-lvm:vm-100-disk-0,size=32G"; see DiskStorage),
 // or "scsi0" and an empty value when the config has no such disk.
 func PrimaryDiskFromConfig(config map[string]interface{}) (key, value string) {

@@ -871,6 +871,10 @@ func (r *VirtualMachineReconciler) reconcileVM(ctx context.Context, vm *infravir
 		return r.adjustPowerState(ctx, vm, providerInstance, ref, string(desiredPowerState))
 	}
 
+	// The desired power state is reached: a power task that failed earlier is
+	// over, and its Reconfiguring=False/PowerTaskFailed is settled.
+	settlePowerTaskFailed(vm)
+
 	// Reconciling the VM to its class reads the class: a class the VM's
 	// namespace may no longer use is refused here (describe and power above
 	// are unaffected). A revoked image never stops a bound VM; it is simply not
@@ -958,6 +962,7 @@ func (r *VirtualMachineReconciler) handleDeletion(ctx context.Context, vm *infra
 	// assumption and backoff record it has. Its durable placement record keeps
 	// counting as committed until the finalizer is gone.
 	r.forgetPlacement(vm)
+	r.forgetPowerState(vm)
 
 	// A VM the provider created whose record was not saved is deleted
 	// through the provider like any bound VM, never released as if nothing
@@ -2330,6 +2335,18 @@ func mayMarkPowerAdjusting(vm *infravirtrigaudiov1beta1.VirtualMachine) bool {
 	return c.Reason == k8s.ReasonReconcileSuccess || c.Reason == k8s.ReasonPowerTaskFailed
 }
 
+// settlePowerTaskFailed turns the Reconfiguring=False/PowerTaskFailed
+// condition (powerTaskFailed) into the settled Reconfiguring=False/
+// ReconcileSuccess once the VM is observed in the power state its spec asks
+// for, so the failure does not stay on the VM after the state was reached by
+// another way. Any other Reconfiguring condition is left as it is.
+func settlePowerTaskFailed(vm *infravirtrigaudiov1beta1.VirtualMachine) {
+	c := meta.FindStatusCondition(vm.Status.Conditions, k8s.ConditionReconfiguring)
+	if c != nil && c.Status == metav1.ConditionFalse && c.Reason == k8s.ReasonPowerTaskFailed {
+		k8s.SetReconfiguringCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonReconcileSuccess, powerAdjustedMessage, vm.Generation)
+	}
+}
+
 // isPowerTask reports whether vm's recorded task is the one its last power
 // operation returned (this manager process remembers it, see powerTasks).
 func (r *VirtualMachineReconciler) isPowerTask(vm *infravirtrigaudiov1beta1.VirtualMachine) bool {
@@ -2341,10 +2358,23 @@ func (r *VirtualMachineReconciler) isPowerTask(vm *infravirtrigaudiov1beta1.Virt
 	return taskRef != "" && taskRef == vm.Status.LastTaskRef
 }
 
+// forgetPowerState drops the in-process power records of a VM that is being
+// deleted: the task its last power operation returned, and the backoffs of its
+// power operation and of its Reconfigure.
+func (r *VirtualMachineReconciler) forgetPowerState(vm *infravirtrigaudiov1beta1.VirtualMachine) {
+	uid := vmSchedulingUID(vm)
+	r.powerTasks.Delete(uid)
+	r.powerRetry.reset(uid)
+	r.reconfigureRetry.reset(uid)
+}
+
 // powerRetryWait returns how long the power operation of vm must still wait
 // after a power task that ended in failure; 0 when it may be sent now: there
-// was no failure, the wait is over, or the spec changed since the failure
-// (Ready's observedGeneration is behind), which also ends the backoff.
+// was no failure, the wait is over, or the spec changed since the failure.
+// A spec change is seen only through Ready's observedGeneration (the
+// generation of the status write that recorded the failure on Ready): it is
+// behind vm.Generation once the spec changed, and then the backoff ends. The
+// backoff entry itself holds no generation.
 func (r *VirtualMachineReconciler) powerRetryWait(vm *infravirtrigaudiov1beta1.VirtualMachine) time.Duration {
 	uid := vmSchedulingUID(vm)
 	wait := r.powerRetry.remaining(uid, r.now())

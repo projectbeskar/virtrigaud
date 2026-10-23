@@ -26,6 +26,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	infravirtrigaudiov1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
 	"github.com/projectbeskar/virtrigaud/internal/k8s"
@@ -71,6 +72,39 @@ func TestReconcileVM_FailedPowerTask_NoReconfigureIsSent(t *testing.T) {
 	got = reconcileOnce(t, r, got)
 	assert.Zero(t, prov.reconfigures, "a failed power task never makes the manager send a Reconfigure")
 	assert.NotEqual(t, infravirtrigaudiov1beta1.VirtualMachinePhaseReconfiguring, got.Status.Phase)
+	c = reconfiguringOf(got)
+	require.NotNil(t, c)
+	assert.Equal(t, metav1.ConditionFalse, c.Status)
+	assert.Equal(t, k8s.ReasonReconcileSuccess, c.Reason, "the failure is settled once the power state is reached")
+}
+
+// TestHandleDeletion_ForgetsPowerRecords: a VM being deleted leaves no power
+// task, power backoff or reconfigure backoff behind in the manager.
+func TestHandleDeletion_ForgetsPowerRecords(t *testing.T) {
+	ctx := context.Background()
+	r, prov, vm := asyncPowerFixture(t, infravirtrigaudiov1beta1.PowerStateOn, contracts.PowerStateOff)
+	got := reconcileOnce(t, r, vm)
+	got = failPowerTask(t, r, prov, got)
+	uid := vmSchedulingUID(got)
+	now := r.now()
+	r.reconfigureRetry.nextWithin(uid, now, providerErrorRetryInterval, reconfigureRetryMaxInterval)
+	_, remembered := r.powerTasks.Load(uid)
+	require.False(t, remembered, "a failed task is already forgotten; start another")
+	got = reconcileOnce(t, r, got) // the backoff holds the power operation
+	require.Positive(t, r.powerRetry.remaining(uid, now))
+	r.powerTasks.Store(uid, powerTaskRef)
+	require.Positive(t, r.reconfigureRetry.remaining(uid, now))
+
+	require.NoError(t, r.Delete(ctx, got))
+	require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(got), got))
+	require.False(t, got.DeletionTimestamp.IsZero())
+	_, err := r.handleDeletion(ctx, got)
+	require.NoError(t, err)
+
+	_, remembered = r.powerTasks.Load(uid)
+	assert.False(t, remembered)
+	assert.Zero(t, r.powerRetry.remaining(uid, now))
+	assert.Zero(t, r.reconfigureRetry.remaining(uid, now))
 }
 
 // TestReconcileVM_FailedPowerTask_Backoff (M2): a power operation whose task

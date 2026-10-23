@@ -481,6 +481,17 @@ func TestDefaultStorageValidation(t *testing.T) {
 	_, err = provider.defaultStorage()
 	require.Error(t, err)
 
+	// Validate fails with a clear message, not repeating the value (L-e).
+	resp, vErr := provider.Validate(context.Background(), &providerv1.ValidateRequest{})
+	require.NoError(t, vErr)
+	assert.False(t, resp.Ok)
+	assert.Contains(t, resp.Message, "PVE_DEFAULT_STORAGE")
+	assert.NotContains(t, resp.Message, "a b")
+	provider.client.Config().DefaultStorage = "vmstore"
+	resp, vErr = provider.Validate(context.Background(), &providerv1.ValidateRequest{})
+	require.NoError(t, vErr)
+	assert.True(t, resp.Ok, resp.Message)
+
 	require.NoError(t, checkRequestStorage(""))
 	require.NoError(t, checkRequestStorage("nfs-vm"))
 	require.Error(t, checkRequestStorage("../x"))

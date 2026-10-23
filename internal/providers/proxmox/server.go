@@ -138,6 +138,12 @@ func New() *Provider {
 		defaultStorage = os.Getenv("PVE_DEFAULT_STORAGE")
 	}
 	config.DefaultStorage = strings.TrimSpace(defaultStorage)
+	if config.DefaultStorage != "" && !pveapi.ValidStorageID(config.DefaultStorage) {
+		// Not fatal here (the control plane does not need it): Validate
+		// fails with a clear message, and a Create that would use it is
+		// refused. The value is not logged: it is not a storage ID.
+		slog.Error("PROVIDER_DEFAULT_STORAGE / PVE_DEFAULT_STORAGE is not a valid PVE storage ID; Validate will fail until it is fixed")
+	}
 
 	// Parse node selector
 	nodeSelector := os.Getenv("PROVIDER_NODE_SELECTOR")
@@ -190,6 +196,16 @@ func (p *Provider) Validate(ctx context.Context, req *providerv1.ValidateRequest
 		return &providerv1.ValidateResponse{
 			Ok:      false,
 			Message: "PVE client not configured",
+		}, nil
+	}
+
+	// A default storage that is not a PVE storage ID would refuse every Create
+	// that uses it: say so now, not at the first Create.
+	if _, err := p.defaultStorage(); err != nil {
+		p.logger.Error(invalidDefaultStorageMessage)
+		return &providerv1.ValidateResponse{
+			Ok:      false,
+			Message: invalidDefaultStorageMessage,
 		}, nil
 	}
 
