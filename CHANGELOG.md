@@ -5,6 +5,38 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-10-23 17:00] - Proxmox cloud-init drive: never collide with the clone's own drive; power-task fixes (R33/R34 review)
+**Author:** @wrkode (William Rizzo)
+
+### Fixed
+- `internal/providers/proxmox/server.go`, `internal/providers/proxmox/cloudinit_storage.go`: a full clone of a template that already has a cloud-init drive owns a `vm-<id>-cloudinit` volume, and PVE cannot allocate it a second time on the same storage (confirmed on PVE 9.2: `Logical Volume ... already exists`, the drive left unchanged). With the storage chosen by #425 (usually the drive's own), every Create of such a template failed and was retried. The provider now sets no drive when the clone's is already on the chosen storage, replaces it in its own slot when it is on another one, and handles a template whose cloud-init drive is not `ide2` (the boot order follows the slot). A re-sent Create changes nothing the second time.
+- `internal/providers/proxmox/server.go`: the clone's config is read once, and if it cannot be read the Create fails and is retried; #425 fell back to `local`, which recreates R33 silently. `local` is only used when the config reads fine and shows no storage-backed disk (and no default storage is set).
+- `internal/providers/proxmox/cloudinit_storage.go`: the order is now the request's or image's storage, then the storage the clone's primary disk lives on, then `PROVIDER_DEFAULT_STORAGE` / `PVE_DEFAULT_STORAGE`, then `local` (#425 had the default before the disk). The drive goes where the VM's disk is; the default stays the target for imports, VMs without a template and clones whose disk is not storage-backed.
+- `internal/providers/proxmox/cloudinit_storage.go`, `internal/providers/proxmox/server.go`: a storage named for the VM (request, image) and the provider's default storage must be a valid PVE storage ID; otherwise the Create is refused as an invalid spec before anything is created, with a message that does not repeat the value, so it cannot add parameters to the `<storage>:cloudinit` config value.
+- `internal/providers/proxmox/server.go`: `TaskStatus` answered "done, with an error" when its own query of PVE failed (an API blip, a timeout), which made the manager forget a task that was still running. It now answers Unavailable, so the manager keeps the task and asks again; "done with an error" is only for a task that ended with a non-OK exit status.
+- `internal/controller/virtualmachine_controller.go`, `internal/k8s/conditions.go`: a failed power task was settled as `Reconfiguring=False/ProviderError`, which the manager reads as a failed Reconfigure and answers with a Reconfigure (and which blocked lowering a clustered VM's memory ceiling). The failure is now on `Ready=False/ProviderError` only, and the marker is settled as `Reconfiguring=False/PowerTaskFailed` (new reason).
+- `internal/controller/virtualmachine_controller.go`: a power task that keeps failing no longer re-sends the power operation about every 10 seconds (thousands of PVE start tasks per VM per day): it goes on a per-VM backoff, 5 s doubling to 5 min, reset when a power operation completes or the spec changes.
+- `internal/controller/virtualmachine_controller.go`: the "Adjusting power state" marker is only set over an absent or settled `Reconfiguring` condition. #425 overwrote the condition of a real reconfigure (a reconfigure in flight, `RestartRequired`, `ResizePendingPowerOff`, a failed Reconfigure to be sent again); it is now kept, and a power task that fails is still recognised (the manager remembers the task its last power operation returned).
+- `internal/providers/proxmox/pvefake/server.go`: the fake models what a clone owns (disks, cloud-init drive, efidisk and tpmstate are renamed `vm-<newid>-*` and, for a full clone with a target storage, moved to it), refuses to allocate a cloud-init volume that already exists on the storage, and records the drives a create or config update sets; `handlePowerOp` has its doc comment back.
+- `internal/providers/proxmox/pveapi/client.go`: `PrimaryDiskFromConfig`, `CloudInitDrive` and `ValidStorageID` (pure helpers on a VM config); `DetectPrimaryDiskVolume` is gone.
+
+### Added
+- `internal/providers/proxmox/cloudinit_storage_test.go`, `internal/controller/virtualmachine_power_task_marker_test.go`, `internal/controller/virtualmachine_power_task_retry_test.go`: tests for the fixes.
+
+### Changed
+- `docs/proxmox-cloud-init-storage.md`: the order, the clone's own cloud-init drive, the storage-ID check, what "primary disk" means (the first non-cdrom drive in the order virtio, scsi, sata, ide, which can be a data disk).
+- `docs/vm-status-phase.md`: "A power change that returns a task" (the kept conditions, `PowerTaskFailed`, the backoff).
+- `CHANGELOG.md` (entry of #425, not edited): `source.proxmox.storage` is honoured by the provider, but the manager does not send it today, so for a `VirtualMachine` the image's storage has no effect yet.
+
+### Why
+Review of #425, merged before its findings were fixed: the cloud-init drive of a clone of a template with its own drive failed on a real PVE 9.2 node, a failed power task was read as a failed Reconfigure and retried without a pause, and a task-status query failure made the manager forget a running task.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-10-23 16:30] - ADR-0014 (Accepted): a migrated guest keeps its identity and gets working network (R36)
 **Author:** @wrkode (William Rizzo)
 
@@ -26,23 +58,19 @@ v0.4.0-rc4 lab runs showed migrated Ubuntu guests without network on vSphere and
 **Author:** @wrkode (William Rizzo)
 
 ### Fixed
-- `internal/providers/proxmox/server.go`, `internal/providers/proxmox/cloudinit_storage.go`: the cloud-init drive of a VM with user-data was `local:cloudinit` for every VM cloned from a template, because the clone path carried no storage, and PVE's stock `local` has no `images` content type, so every such VM failed to start. The storage is now, in order: the request's or image's (`storage` key, or `source.proxmox.storage` of a `VMImageSpec`, read even when the template is named; the provider honours it but the manager does not send it today), else the storage the cloned VM's primary disk lives on (read from the clone's config), else `PROVIDER_DEFAULT_STORAGE` / `PVE_DEFAULT_STORAGE`, and `local` only when none of those exist (a warning is logged). A VM created without a template uses the request's storage, then the default, then `local`. The clone's config is read once; if it cannot be read the Create fails and is retried instead of guessing `local`.
-- `internal/providers/proxmox/server.go`: a full clone of a template that already has a cloud-init drive owns a `vm-<id>-cloudinit` volume, which PVE cannot allocate a second time on the same storage (confirmed on PVE 9.2: `Logical Volume ... already exists`, the drive left unchanged), so every Create of such a template failed and was retried. The provider now sets no drive when the clone's is already on the chosen storage, replaces it in its own slot when it is on another one, and handles a template whose cloud-init drive is not `ide2` (the boot order follows the slot).
-- `internal/providers/proxmox/cloudinit_storage.go`, `internal/providers/proxmox/server.go`: a storage named for the VM (request, image) and the provider's default storage must be a valid PVE storage ID; otherwise the Create is refused as an invalid spec before anything is created, with a message that does not repeat the value, so it cannot add parameters to the `<storage>:cloudinit` config value.
-- `internal/providers/proxmox/server.go`: `TaskStatus` answered "done, with an error" when its own query of PVE failed (an API blip, a timeout), which made the manager forget a task that was still running. It now answers Unavailable, so the manager keeps the task and asks again; "done with an error" is only for a task that ended with a non-OK exit status.
-- `internal/providers/proxmox/pveapi/client.go`: `PrimaryDiskFromConfig`, `CloudInitDrive`, `ValidStorageID` and `DiskStorage` (pure helpers on a VM config).
-- `internal/controller/virtualmachine_controller.go`: a power operation that returns a task (Proxmox) set `Reconfiguring=True` "Adjusting power state" and `status.lastTaskRef`; when the task ended only `lastTaskRef` was cleared, so every Proxmox VM stayed in phase `Reconfiguring` with `Ready=True`. The condition is now set to `False` (`ReconcileSuccess`, "Power state adjusted") when the task ends, and also on the first reconcile of a VM an earlier manager left with the marker and no task. The marker is only set over an absent or settled `Reconfiguring` condition: a real reconfigure's condition (a reconfigure in flight, `RestartRequired`, `ResizePendingPowerOff`, a failed Reconfigure to be sent again, ...) is kept, and a recorded `reconfigureTaskRef` is never overridden.
-- `internal/controller/virtualmachine_controller.go`, `internal/k8s/conditions.go`: a power task that ends in failure was polled for ever. It is now forgotten and shown on `Ready=False/ProviderError` ("Power state change failed: ..."); the marker is settled as `Reconfiguring=False/PowerTaskFailed` (new reason), not `ProviderError`, which would make the manager send a Reconfigure. The power operation is sent again on a per-VM backoff (5 s doubling to 5 min, reset when a power operation completes or the spec changes).
-- `internal/providers/proxmox/pvefake/server.go`: the fake models what a clone owns (disks, cloud-init drive, efidisk and tpmstate are renamed `vm-<newid>-*` and, for a full clone with a target storage, moved to it), refuses to allocate a cloud-init volume that already exists on the storage, records the drives a create or config update sets, and `handlePowerOp` has its doc comment back.
+- `internal/providers/proxmox/server.go`, `internal/providers/proxmox/cloudinit_storage.go`: the cloud-init drive (`ide2`) of a VM with user-data was `local:cloudinit` for every VM cloned from a template, because the clone path carried no storage, and PVE's stock `local` has no `images` content type, so every such VM failed to start. The storage is now the request's or image's (`storage` key, or `source.proxmox.storage` of a `VMImageSpec`, read even when the template is named), else `PROVIDER_DEFAULT_STORAGE` / `PVE_DEFAULT_STORAGE`, else the storage the cloned VM's boot disk lives on (read from its config), and `local` only when none of those exist (a warning is logged). A VM created without a template uses the first two, then `local`.
+- `internal/providers/proxmox/pveapi/client.go`: `DetectPrimaryDiskVolume` (the boot disk's key and config value from one config read; `DetectPrimaryDisk` uses it) and `DiskStorage` (the storage ID of a disk value, validated against PVE's storage-ID syntax).
+- `internal/controller/virtualmachine_controller.go`: a power operation that returns a task (Proxmox) set `Reconfiguring=True` "Adjusting power state" and `status.lastTaskRef`; when the task ended only `lastTaskRef` was cleared, so every Proxmox VM stayed in phase `Reconfiguring` with `Ready=True`. The condition is now set to `False` (`ReconcileSuccess`, "Power state adjusted") when the task ends, and also on the first reconcile of a VM an earlier manager left with the marker and no task. A real reconfigure's condition (another reason or message, or a recorded `reconfigureTaskRef`) is never touched. A power task that ends in failure is forgotten (it was polled for ever before) and shown on `Ready` and `Reconfiguring` as `ProviderError` "Power state change failed: ...".
+- `internal/providers/proxmox/pvefake/server.go`: the fake records `ide2` on create and config updates, and a clone copies its source's raw config (disks moved to the clone request's `storage`).
 
 ### Added
-- `internal/providers/proxmox/cloudinit_storage_test.go`, `internal/controller/virtualmachine_power_task_marker_test.go`, `internal/controller/virtualmachine_power_task_retry_test.go`: tests for the fixes.
+- `internal/providers/proxmox/cloudinit_storage_test.go`, `internal/controller/virtualmachine_power_task_marker_test.go`: tests for both fixes.
 - `docs/proxmox-cloud-init-storage.md`: how the drive's storage is chosen; `docs/README.md` lists it.
 - `docs/vm-status-phase.md`: "A power change that returns a task".
 - `charts/virtrigaud-provider-runtime/examples/values-proxmox.yaml`: a commented `PVE_DEFAULT_STORAGE` example.
 
 ### Why
-rc4 validation on a real PVE 9.2 node (R33, R34): every Proxmox VM with user-data failed to start on `local`, and every Proxmox VM showed phase `Reconfiguring` after a power change although it was Ready. The review of #425 added the cloned cloud-init volume (H1) and the retry, status and fail-closed findings above. A cloned VM's cloud-init drive follows its primary disk's storage, ahead of `PVE_DEFAULT_STORAGE`, which stays the target for imports, VMs without a template and clones whose disk is not storage-backed.
+rc4 validation on a real PVE 9.2 node (R33, R34): every Proxmox VM with user-data failed to start on `local`, and every Proxmox VM showed phase `Reconfiguring` after a power change although it was Ready.
 
 ### Impact
 - [ ] Breaking change
