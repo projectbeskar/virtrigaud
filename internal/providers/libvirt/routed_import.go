@@ -98,7 +98,7 @@ import (
 // answered a command of this call (the lease, the dial, or the first read
 // failed): a transport failure after that is "not performed" while only reads
 // ran, and unknown once a write began — never HOST_UNAVAILABLE, which the
-// manager reads as definite (the hostOpRPCError gap the addendum records).
+// manager reads as definite (hostOpRPCError, now answered by hostProgress too, R25).
 
 const (
 	// importLockKind names the host lock of a routed import:

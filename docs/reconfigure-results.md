@@ -79,8 +79,12 @@ Errors say what could not be done ("could not set 4 vCPUs in the VM's
 persistent definition") and never carry the virsh command line, its output, a
 host path or an SSH endpoint; the provider log has the detail. On a clustered
 (routed) Provider they are `VM_OPERATION_FAILED`, which the manager keeps out
-of the Provider's circuit breaker; an unreachable host stays
-`HOST_UNAVAILABLE`. On a single-host Provider a failure of the operation on the
+of the Provider's circuit breaker; a host that stops answering before any
+command of the call ran is `HOST_UNAVAILABLE`, and one that stops answering
+after a command that may change the VM was sent is `Unknown` +
+`VM_OPERATION_FAILED` (its outcome is unknown; see
+[a host that stops answering](provider-call-outcomes.md#clustered-libvirt-a-host-that-stops-answering)).
+On a single-host Provider a failure of the operation on the
 VM also carries `VM_OPERATION_FAILED` (historical code and message kept); a host
 that could not be reached keeps the plain error, which the breaker counts.
 
@@ -129,9 +133,10 @@ boots with next.
   VM that may run with its grown size is never counted below it, even if its
   owner reverts the spec. On a single-host Provider (no capacity accounting)
   `status.currentResources` is untouched.
-  - This includes a clustered **grow** that failed because its host was
-    unreachable (`HostUnavailable`): nobody can tell whether the host applied
-    it, so the VM is counted at the grown size. If the owner then reverts the
+  - This includes a clustered **grow** that failed because its host stopped
+    answering (`HostUnavailable`, or an unknown outcome once the grow was
+    sent): the manager does not tell the two apart, and nobody can tell whether
+    the host applied it, so the VM is counted at the grown size. If the owner then reverts the
     spec, that is a shrink — and a running clustered VM's shrink waits for a
     power-off (`ShrinkPendingPowerOff`) — so the count comes back down only
     after the VM is powered off (`spec.powerState: Off`) and the shrink is

@@ -139,7 +139,8 @@ func (s *Server) Create(ctx context.Context, req *providerv1.CreateRequest) (*pr
 // (ADR-0007 Addendum A, A2). Only the clustered routing produces that class.
 //
 // Any other failure of a clustered create on its target host (hostOpError) is
-// host-scoped too: a host that could not be reached is HOST_UNAVAILABLE, and
+// host-scoped too: a host that stopped answering is answered by how far the
+// create got (HOST_UNAVAILABLE only before any command ran, hostOpRPCErrorFor), and
 // anything else keeps the historical code and message plus a
 // VM_OPERATION_FAILED ErrorInfo, so neither counts toward the manager's
 // per-Provider circuit breaker (ADR-0007 Addendum A, slice 2; hostOpRPCError).

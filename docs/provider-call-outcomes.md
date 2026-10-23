@@ -227,15 +227,76 @@ old), never a landed disk.
 The routed `DeleteLandedDisk` answers `InvalidArgument` for a request without
 `target_host_id` or target VM, a recorded path that is not the landing file, or a
 symbolic link or non-file at the landing name; `HOST_UNAVAILABLE` for a landing
-host that cannot be leased or reached; `FailedPrecondition` + `VM_DISK_IN_USE` +
+host that cannot be leased, or that stops answering before it answered a command (see
+[a host that stops answering](#clustered-libvirt-a-host-that-stops-answering)); `FailedPrecondition` + `VM_DISK_IN_USE` +
 `VM_OPERATION_FAILED` when a domain on any host uses the disk; `HOST_UNAVAILABLE` /
 `VM_DISK_CHECK_FAILED` when a host cannot be scanned; `Unavailable` +
 `VM_OPERATION_FAILED` while an import of the name runs in the provider or holds the
-host lock, or when the removal fails (or is stopped by `timeout(1)`); and
+host lock, or when the removal fails, is stopped by `timeout(1)` or loses its session
+(the last says that it is not known whether the disk was removed); and
 `FailedPrecondition` when the host guard refuses the removal. The routed
 `DeleteStagedDisk` (`nfs`) answers `InvalidArgument` without `target_host_id`,
-`HOST_UNAVAILABLE` for a host that cannot be leased or reached, and `Unavailable`
-when the host's `qemu-img` fails or is stopped.
+`HOST_UNAVAILABLE` for a host that cannot be leased, and `Unavailable` when the
+host's `qemu-img` fails, is stopped, or its session drops (never
+`HOST_UNAVAILABLE` once a command ran).
+
+## Clustered libvirt: a host that stops answering
+
+The manager reads `HOST_UNAVAILABLE` as "nothing was done": it re-places, re-sends
+and clears markers on it. A clustered libvirt provider runs every routed call on one
+leased host, and a host that stops answering part-way through a call is not always
+"nothing done" (R25). Before R25 the provider answered `HOST_UNAVAILABLE` for **any**
+such failure, so an `ExportDisk` whose SSH session dropped while `qemu-img convert`
+ran was reported as definite although the copy may have completed or still be
+running. The routed `ImportDisk` already used the model below (see
+[the routed import](#clustered-libvirt-the-routed-import)); it now applies to every
+routed call.
+
+A host has stopped answering when a command of the call ended with no exit status
+of its own (the SSH dial, the handshake or the session failed, or the connection
+dropped mid-command), or `virsh` could not connect to the host's libvirtd. The
+provider records, for each routed call, whether the host answered a command of it
+and whether it sent a command that may change the host, and answers by how far the
+call got:
+
+| How far the call got | Answer | The manager reads |
+|---|---|---|
+| The host is unknown, removed or draining, or cannot be dialed; or no command of the call was answered and none that may change the host was sent (the first command finds the connection dead) | `Unavailable` + `HOST_UNAVAILABLE` | Nothing done |
+| The host answered at least one command, and no command that may change it was sent (only reads ran) | `Unavailable` + `VM_OPERATION_FAILED`, "the host stopped answering before the operation changed anything; nothing was done" | Not performed |
+| A command that may change the host was sent. It is recorded when it is **sent**: when its session drops it may have completed, or still be running | `Unknown` + `VM_OPERATION_FAILED`, "the host stopped answering while the operation ran; its outcome is unknown" | Unknown |
+
+A command **may change the host** unless it is on a short, fixed list of reads: the
+`virsh` subcommands that only read (`list`, `dumpxml`, `domstate`, `snapshot-list`,
+`pool-dumpxml`, ...), `qemu-img info`, `test`, `stat`, and the provider's own
+path and disk probes. Every other command counts, and so does any data
+streamed to or from the host. A command missing from the list therefore makes an
+answer less specific (unknown instead of "not performed"), never wrong.
+
+Each routed RPC applies the rule, with these differences:
+
+| RPC | When the host stops answering | What the manager does with it |
+|---|---|---|
+| `Describe`, `GetDiskInfo`, `TaskStatus` | Always `HOST_UNAVAILABLE`. These calls only read, so a lost connection cannot leave anything half done. | `Describe`: `Ready=False/HostUnavailable`, re-checked. |
+| `ListVMs` | Unchanged: the host is named in `unreachable_host_ids`; the call does not fail. | |
+| `ExportDisk` (`s3`, `nfs`) | The table above. A flatten or convert that is sent and whose session drops, that `timeout(1)` stops (124), that is killed (137), or that runs past the routed budget is unknown: the `ExportRequested` marker is kept, and the export is re-sent only as described [above](#what-happens-to-a-call-whose-outcome-is-unknown). | |
+| `SnapshotCreate` | Before the `snapshot-create-as` is sent: `HOST_UNAVAILABLE` or not performed. After: **`Unavailable` + `VM_OPERATION_FAILED`**, "its outcome is unknown and it may still complete on the host: retry" (the form of its time-budget answer), not `Unknown`. The routed create is idempotent per request token: the retry finds the snapshot by name and token, or is refused by libvirt's job lock while the job runs. | Retried, never failed; the `VMSnapshot` or `VMMigration` marker rules above apply. |
+| `Clone` | Before the copy is sent: `HOST_UNAVAILABLE` or not performed. After: the same "outcome is unknown ... retry" `Unavailable` + `VM_OPERATION_FAILED`, not `Unknown`: the clone is stamped with its target, so the retry finds a clone that completed, or is told that the earlier copy still runs (`flock`). An `Unknown` would fail the `VMClone` and remove its target. | Retried on the same host with the backoff (`CloneRetrying`). |
+| `Create`, `Delete`, `Power`, `Reconfigure`, `SnapshotDelete`, `SnapshotRevert`, `TransferOwner` | The table above. | `Delete`: finalizer kept, retried. `SnapshotDelete` of a `VMSnapshot`: finalizer kept, retried with a backoff of 15 s doubling to 5 min. `Power`, `Reconfigure` and `Create`: a provider error, retried; a failed `Reconfigure` counts the larger size on a clustered Provider. `TransferOwner`: the adoption fails and is retried. The manager's controllers do not call `SnapshotRevert` today. Each call can be repeated: a second attempt finds the domain, snapshot or stamp already in its final state (a `Create` binds the domain the first attempt made, which carries the VM's owner stamp). |
+| `DeleteLandedDisk` | `HOST_UNAVAILABLE` only before the host answered a command. After reads were answered: `Unavailable` + `VM_OPERATION_FAILED`, "could not be checked or removed". After the `rm` was sent: `Unavailable` + `VM_OPERATION_FAILED`, "it is not known whether it was removed". | Retried. A retry that finds the disk gone is `NOT_FOUND`. |
+| `DeleteStagedDisk` (`nfs`) | `HOST_UNAVAILABLE` only for a host that cannot be leased. Every `qemu-img` failure, a dropped session included, is a plain `Unavailable` with a constant message (never `HOST_UNAVAILABLE`); this path is unchanged by R25. | The cleanup is retried. |
+
+Three things stay as they were:
+
+- A failure of the **operation** (the host answered, and the command failed) is
+  `Unknown` + `VM_OPERATION_FAILED` with the historical message, whether or not it
+  came after a read. Only a lost connection is classified by how far the call got.
+- The disk-dependency guard runs before anything is changed. When it cannot reach
+  the host it is `HOST_UNAVAILABLE` (fails closed), even after the owner check
+  read the host.
+- A single-host libvirt provider answers as before: it keeps no such record.
+
+None of these answers counts toward the Provider's circuit breaker, except the plain
+`Unavailable` of `DeleteStagedDisk`.
 
 ## Releasing a held object
 

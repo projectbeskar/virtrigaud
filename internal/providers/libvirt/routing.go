@@ -469,8 +469,9 @@ func requesterFacingMessage(err error) string {
 //     a host tool missing) -> its own code and categorized message with a
 //     VM_OPERATION_FAILED ErrorInfo;
 //   - any other failure that arose on the leased host (hostOpError): a host
-//     that could not be reached (isHostTransportFailure) is HOST_UNAVAILABLE,
-//     and anything else is VM_OPERATION_FAILED (codes.Unknown). Neither is
+//     that stopped answering (isHostTransportFailure) is answered by how far
+//     the call got (hostOpRPCErrorFor), and anything else is
+//     VM_OPERATION_FAILED (codes.Unknown). None is
 //     counted by the manager's circuit breaker, so neither a dead host nor one
 //     tenant's failing VM can open it for the whole Provider;
 //   - a provider-level Unavailable (the provider itself is not ready, e.g. its

@@ -66,7 +66,9 @@ func (p *Provider) checkHostDiskTransport(c libvirtConn) error {
 // req.TargetHostId: the owner check, the transport check, the disk resolved
 // from the checked domain's definition (diskInfoOn), and the shared s3 / nfs
 // core. Errors are mapped by routedRPCError: a domain this VM does not own is
-// NotFound; a failure on the host is VM_OPERATION_FAILED or HOST_UNAVAILABLE,
+// NotFound; a failure on the host is VM_OPERATION_FAILED, or, for a host that
+// stopped answering, HOST_UNAVAILABLE before any command ran, "not performed"
+// while only reads ran and an unknown outcome once the export started (R25),
 // neither of which counts toward the manager's circuit breaker.
 func (p *Provider) exportDiskRouted(ctx context.Context, req *providerv1.ExportDiskRequest) (*providerv1.ExportDiskResponse, error) {
 	// Only the host-side transports: the pvc backend (and the legacy empty

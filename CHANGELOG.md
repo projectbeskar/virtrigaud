@@ -5,6 +5,32 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-10-23 12:00] - Clustered libvirt: a host that stops answering is not always "nothing done" (R25)
+**Author:** @wrkode (William Rizzo)
+
+### Fixed
+- `internal/providers/libvirt/routing.go` (`hostOpRPCErrorFor`, `routedRPCErrorFor`, `routedReadRPCError`, `routedIdempotentRPCError`): a routed call on a clustered provider whose host stopped answering (a command that ended with no exit status of its own, or a virsh that could not reach libvirtd) was always answered `Unavailable` + `HOST_UNAVAILABLE`, which the manager reads as definite ("nothing was done"). It is now answered by how far the call got: `HOST_UNAVAILABLE` only while the host answered no command and none that may change it was sent; "not performed" (`Unavailable` + `VM_OPERATION_FAILED`) while only reads ran; an unknown outcome (`Unknown` + `VM_OPERATION_FAILED`) once a command that may change the host was sent. `SnapshotCreate` and `Clone` answer the retryable form of the unknown outcome (`Unavailable` + `VM_OPERATION_FAILED`, "its outcome is unknown ... retry"), because the manager retries them on the same host (request token; stamped target and `flock`) and an `Unknown` would fail the `VMClone`. `Describe`, `GetDiskInfo` and `TaskStatus` only read and stay `HOST_UNAVAILABLE`. The routed `ExportDisk` is the case that mattered: a session that dropped while `qemu-img` flattened or converted was reported as nothing done, so the migration cleared its `ExportRequested` marker, failed the attempt, and its retry policy could send the export again while the first one still ran (the export's `flock` then answers "still running").
+- `internal/providers/libvirt/host_progress.go` (new), `routing.go` (`withHostConn`, `withOwnedDomain`, `hostOpError`), `virsh.go`, `hoststdin.go`, `sshclient.go`, `provider_virsh.go` (`createClustered`): each routed call carries a `hostProgress` in its context (`withHostConn` and the clustered create make it, and pass the context to the call's closure); `runVirshCommand`, `runHostStdin`, `runSSHStdin` and `runSSHStdout` record into it when it is present, and do nothing otherwise (single-host calls are unchanged). A command is recorded when it is **sent**. Only a fixed list of reads (read-only `virsh` subcommands, `qemu-img info`, `test`/`stat`, the provider's path and disk probes) does not count as a write.
+- `internal/providers/libvirt/routed_migration_cleanup.go`: the routed `DeleteLandedDisk` was `HOST_UNAVAILABLE` for a dropped session even after its `rm` was sent. It is now `HOST_UNAVAILABLE` only before the host answered a command, `Unavailable` + `VM_OPERATION_FAILED` ("could not be checked or removed") after reads, and `Unavailable` + `VM_OPERATION_FAILED` ("not known whether it was removed; will retry") after the `rm` was sent. The manager retries any error, and a retry that finds the disk gone is `NOT_FOUND`. The routed `DeleteStagedDisk` (`nfs`) already answered a failed `qemu-img` as a plain `Unavailable` and is unchanged.
+- The disk-dependency guard's "host unreachable" answer (`guardHostUnreachableError`, nothing changed by construction) stays `HOST_UNAVAILABLE`, as do the cluster-wide guard's answers.
+
+### Added
+- `internal/providers/libvirt/host_progress_test.go`, `routed_host_outcomes_test.go`, `routed_host_outcomes_transport_test.go`: tables per routed RPC (Power, Reconfigure, Delete, Describe, SnapshotCreate, SnapshotDelete, SnapshotRevert, Clone, ExportDisk `nfs` and `s3`, TransferOwner, Create, DeleteLandedDisk, GetDiskInfo) for a host that never answers (also a dial failure), one that drops after answering reads, and one whose write is sent and whose session drops, is killed (137) or is stopped by `timeout(1)` (124); the answer matrix by RPC kind and stage; the classification of commands as reads or writes; and a routed `ExportDisk` through a real gRPC hop and the transport client's `mapGRPCError` (`IsNothingDone`, `IsHostUnavailable`, circuit breaker closed). The shell-shim fakes learned `dead` / `dead-<command>` (a call that dies without an exit status) and `exit-qemu-img-<subcommand>`.
+- `internal/controller/vmmigration_routed_export_answers_test.go`: the three answers of a routed `ExportDisk` through the transport client, and whether the migration controller reads them as a definite outcome (`providerCallOutcomeKnownFor`).
+
+### Changed
+- `internal/providers/libvirt/routed_review415_test.go`: "the rm's session drops" is now the removal-unknown answer, not `HOST_UNAVAILABLE`. The existing tests that built a `hostOpError` by hand carry a `hostProgress`; one built without it assumes a write was sent.
+- `docs/provider-call-outcomes.md` (new section "Clustered libvirt: a host that stops answering"), `docs/clustered-provider-inventory.md`, `docs/reconfigure-results.md`, `docs/adr/0007-clustered-orchestrator-provider.md`: the answers by RPC, how the manager reads each, and what stays as it was. The ADR's "hostOpRPCError gap" is closed.
+
+### Why
+The manager treats `HOST_UNAVAILABLE` as proof that nothing was done, and acts on it (clears the `ExportRequested` marker, re-places, retries). A dropped SSH session after a mutating command started proves nothing, so answering it that way could start a second export, or a second copy, while the first still ran on the host. The routed `ImportDisk` already used the model (#415); this extends it to every routed call.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout (libvirt provider)
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-10-23 11:00] - ADR-0013 (Proposed): disk resize as its own, honest flow (R19)
 **Author:** @wrkode (William Rizzo)
 
