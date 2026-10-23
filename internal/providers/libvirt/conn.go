@@ -74,7 +74,7 @@ type providerBackend interface {
 	// by its UUID (ADR-0007 Addendum A, slice 3; routing.go). The Server's
 	// routed snapshot and export RPCs, whose cores live on the Server, reach
 	// the host through it.
-	withOwnedDomain(ctx context.Context, vm contracts.VMRef, op string, fn func(c libvirtConn, d domainTarget) error) error
+	withOwnedDomain(ctx context.Context, vm contracts.VMRef, op string, fn func(ctx context.Context, c libvirtConn, d domainTarget) error) error
 
 	// exportDiskRouted is a CLUSTERED provider's ExportDisk: the s3 / nfs export
 	// of an owner-checked domain's disk, run on its bound host (ADR-0007

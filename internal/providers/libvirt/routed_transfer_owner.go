@@ -172,7 +172,7 @@ func (p *Provider) TransferOwner(ctx context.Context, req contracts.TransferOwne
 		return contracts.NewRetryableError("wait for another owner transfer on the host", err)
 	}
 	defer unlock()
-	return p.withHostConn(ctx, req.VM.HostID, func(c libvirtConn) error {
+	return p.withHostConn(ctx, req.VM.HostID, func(ctx context.Context, c libvirtConn) error {
 		vp, err := virshOf(c)
 		if err != nil {
 			return err

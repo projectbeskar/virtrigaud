@@ -296,7 +296,7 @@ func (s *Server) Describe(ctx context.Context, req *providerv1.DescribeRequest) 
 	resp, err := s.provider.Describe(ctx, contracts.VMRef{ID: req.Id, HostID: req.TargetHostId, Owner: ownerFromProto(req.GetOwner())})
 	if err != nil {
 		if s.clusteredProvider() {
-			return nil, routedRPCError("describe VM", err)
+			return nil, routedReadRPCError("describe VM", err)
 		}
 		// A domain that does not exist is a definite NotFound on the wire
 		// (the manager's delete-time confirmation relies on it).
@@ -351,7 +351,7 @@ func (s *Server) TaskStatus(ctx context.Context, req *providerv1.TaskStatusReque
 	if s.clusteredProvider() {
 		done, err := s.provider.IsTaskComplete(ctx, req.GetTask().GetId())
 		if err != nil {
-			return nil, routedRPCError("check task status", err)
+			return nil, routedReadRPCError("check task status", err)
 		}
 		return &providerv1.TaskStatusResponse{Done: done}, nil
 	}
@@ -479,7 +479,7 @@ func (s *Server) SnapshotCreate(ctx context.Context, req *providerv1.SnapshotCre
 		defer cancel()
 		var resp *providerv1.SnapshotCreateResponse
 		err := s.provider.withOwnedDomain(bctx, snapshotVMRef(req.GetVmId(), req.GetTargetHostId(), req.GetOwner()), "snapshot create",
-			func(c libvirtConn, d domainTarget) error {
+			func(bctx context.Context, c libvirtConn, d domainTarget) error {
 				// Idempotent per request: a snapshot of this name already on
 				// the owner-checked domain is this request's earlier attempt's
 				// only when it records this request's token
@@ -499,7 +499,7 @@ func (s *Server) SnapshotCreate(ctx context.Context, req *providerv1.SnapshotCre
 				return nil
 			})
 		if err != nil {
-			return nil, routedRPCError("create snapshot",
+			return nil, routedIdempotentRPCError("create snapshot",
 				classifySnapshotCreateFailure(strings.TrimSpace(req.GetTargetHostId()), ctx, bctx, err))
 		}
 		return resp, nil
@@ -807,7 +807,7 @@ func (s *Server) SnapshotDelete(ctx context.Context, req *providerv1.SnapshotDel
 		}
 		var resp *providerv1.TaskResponse
 		err := s.provider.withOwnedDomain(ctx, snapshotVMRef(req.GetVmId(), req.GetTargetHostId(), req.GetOwner()), "snapshot delete",
-			func(c libvirtConn, d domainTarget) error {
+			func(ctx context.Context, c libvirtConn, d domainTarget) error {
 				r, err := snapshotDeleteOn(ctx, s.provider, c, d.handle, req.SnapshotId)
 				resp = routedTaskResponse(c.HostID(), r)
 				return err
@@ -901,7 +901,7 @@ func (s *Server) SnapshotRevert(ctx context.Context, req *providerv1.SnapshotRev
 		}
 		var resp *providerv1.TaskResponse
 		err := s.provider.withOwnedDomain(ctx, snapshotVMRef(req.GetVmId(), req.GetTargetHostId(), req.GetOwner()), "snapshot revert",
-			func(c libvirtConn, d domainTarget) error {
+			func(ctx context.Context, c libvirtConn, d domainTarget) error {
 				r, err := snapshotRevertOn(ctx, c, d.handle, req.SnapshotId)
 				resp = routedTaskResponse(c.HostID(), r)
 				return err
@@ -1009,7 +1009,7 @@ func (s *Server) Clone(ctx context.Context, req *providerv1.CloneRequest) (*prov
 	resp, err := s.provider.Clone(ctx, cloneReq)
 	if err != nil {
 		if s.clusteredProvider() {
-			return nil, routedRPCError("clone VM", err)
+			return nil, routedIdempotentRPCError("clone VM", err)
 		}
 		return nil, singleHostCloneRPCError(err)
 	}
@@ -1447,7 +1447,7 @@ func (s *Server) GetDiskInfo(ctx context.Context, req *providerv1.GetDiskInfoReq
 	})
 	if err != nil {
 		if s.clusteredProvider() {
-			return nil, routedRPCError("get disk info", err)
+			return nil, routedReadRPCError("get disk info", err)
 		}
 		return nil, fmt.Errorf("failed to get disk info: %w", err)
 	}
@@ -1716,7 +1716,7 @@ func (s *Server) ListVMs(ctx context.Context, req *providerv1.ListVMsRequest) (*
 			if stderrors.Is(err, errOwnerListBusy) {
 				return nil, status.Error(codes.ResourceExhausted, "list VMs: "+errOwnerListBusy.Error()+"; retry later")
 			}
-			return nil, routedRPCError("list VMs", err)
+			return nil, routedReadRPCError("list VMs", err)
 		}
 		return nil, fmt.Errorf("failed to list VMs: %w", err)
 	}

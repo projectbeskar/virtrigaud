@@ -649,10 +649,16 @@ func classifyNonTransientSSH(err error) (nonTransient bool, reason string) {
 //
 // Special case: if the first arg is "!", the remaining args run as a direct
 // command (not through virsh).
+//
+// On a routed call's context (withHostConn) the command is recorded in the
+// call's hostProgress (host_progress.go), whatever its result.
 func (v *VirshProvider) runVirshCommand(ctx context.Context, args ...string) (*VirshResult, error) {
-	return retryOnTransientSSH(ctx, func() (*VirshResult, error) {
+	done := hostProgressFrom(ctx).begin(args)
+	res, err := retryOnTransientSSH(ctx, func() (*VirshResult, error) {
 		return v.runVirshCommandOnce(ctx, args...)
 	})
+	done(err)
+	return res, err
 }
 
 // retryOnTransientSSH invokes attempt up to sshConnectMaxAttempts times, retrying

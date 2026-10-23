@@ -117,7 +117,7 @@ func (p *Provider) routedTaskComplete(ctx context.Context, ref string) (bool, er
 			"task host %q is not in this clustered provider's host registry; the task reference was not issued by it", host), nil)
 	}
 	var done bool
-	err = p.withHostConn(ctx, string(host), func(c libvirtConn) error {
+	err = p.withHostConn(ctx, string(host), func(ctx context.Context, c libvirtConn) error {
 		var terr error
 		done, terr = hostTaskComplete(ctx, c, inner)
 		return terr

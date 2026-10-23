@@ -101,7 +101,7 @@ func (p *Provider) cloneClustered(ctx context.Context, req contracts.CloneReques
 	defer cancel()
 	var resp contracts.CloneResponse
 	copyStarted := false
-	err = p.withOwnedDomain(bctx, req.Source, "clone", func(c libvirtConn, d domainTarget) error {
+	err = p.withOwnedDomain(bctx, req.Source, "clone", func(bctx context.Context, c libvirtConn, d domainTarget) error {
 		vp, err := virshOf(c)
 		if err != nil {
 			return err

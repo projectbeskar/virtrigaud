@@ -35,6 +35,14 @@ import (
 // like any other host command (shellJoin); stdin is never interpreted by a
 // shell.
 func (v *VirshProvider) runHostStdin(ctx context.Context, stdin []byte, argv ...string) (*VirshResult, error) {
+	done := hostProgressFrom(ctx).begin(append([]string{"!"}, argv...))
+	res, err := v.runHostStdinOnce(ctx, stdin, argv...)
+	done(err)
+	return res, err
+}
+
+// runHostStdinOnce is runHostStdin without the call's progress record.
+func (v *VirshProvider) runHostStdinOnce(ctx context.Context, stdin []byte, argv ...string) (*VirshResult, error) {
 	if err := v.refuseIfUnroutable(); err != nil {
 		return nil, err
 	}

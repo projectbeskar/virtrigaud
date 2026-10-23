@@ -450,7 +450,11 @@ func sshExitCode(err error) int {
 // to w, so a multi-GB disk streams OUT of the host without being buffered in
 // the pod. Used by virshConn.Stream (the hostconn.Conn seam method) and by
 // exportDiskToS3's ADR-0006 S3 export path.
-func runSSHStdout(ctx context.Context, vp *VirshProvider, w io.Writer, remoteCmd string) error {
+func runSSHStdout(ctx context.Context, vp *VirshProvider, w io.Writer, remoteCmd string) (retErr error) {
+	// A stream is part of a call's data plane: recorded as a write
+	// (host_progress.go), whatever the command reads.
+	done := hostProgressFrom(ctx).beginStream()
+	defer func() { done(retErr) }()
 	release, err := vp.acquireStreamSlot(ctx)
 	if err != nil {
 		return err
@@ -505,7 +509,10 @@ func runSSHStdout(ctx context.Context, vp *VirshProvider, w io.Writer, remoteCmd
 // virshConn.StreamIn (the libvirtConn extension) for the ADR-0006 S3 import
 // path's host-side stage step, and by copyDiskToRemote (disk create/clone's
 // scp replacement: `cat > remotePath`).
-func runSSHStdin(ctx context.Context, vp *VirshProvider, r io.Reader, remoteCmd string) error {
+func runSSHStdin(ctx context.Context, vp *VirshProvider, r io.Reader, remoteCmd string) (retErr error) {
+	// Input to a host command is a write (host_progress.go).
+	done := hostProgressFrom(ctx).beginStream()
+	defer func() { done(retErr) }()
 	release, err := vp.acquireStreamSlot(ctx)
 	if err != nil {
 		return err

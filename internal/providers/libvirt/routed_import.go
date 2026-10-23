@@ -315,7 +315,7 @@ func (p *Provider) importDiskRouted(ctx context.Context, req *providerv1.ImportD
 
 	prog := &importProgress{}
 	var resp *providerv1.ImportDiskResponse
-	err = p.withHostConn(bctx, string(r.host), func(c libvirtConn) error {
+	err = p.withHostConn(bctx, string(r.host), func(bctx context.Context, c libvirtConn) error {
 		out, err := p.importOnHost(bctx, c, r, prog, s3client, req)
 		resp = out
 		return err

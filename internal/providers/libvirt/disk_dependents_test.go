@@ -337,7 +337,7 @@ func TestGuardCheckFailed_WireFormAndBreaker(t *testing.T) {
 		routed bool
 	}{
 		{fmt.Errorf("failed to delete VM: %w", err), false},
-		{routedRPCError("delete VM", &hostOpError{host: "host-a", err: err}), true},
+		{routedRPCError("delete VM", &hostOpError{host: "host-a", err: err, progress: &hostProgress{}}), true},
 	} {
 		st, ok := status.FromError(tc.err)
 		require.True(t, ok)
@@ -394,7 +394,7 @@ func TestGuardCheckFailed_HostUnreachableIsAHostFailure(t *testing.T) {
 			assert.Empty(t, errorInfoReasons(st), "no VM_DISK_CHECK_FAILED: the breaker counts it")
 			assert.NotContains(t, st.Message(), "10.0.0.1")
 
-			st, ok = status.FromError(routedRPCError("delete VM", &hostOpError{host: "host-a", err: err}))
+			st, ok = status.FromError(routedRPCError("delete VM", &hostOpError{host: "host-a", err: err, progress: &hostProgress{}}))
 			require.True(t, ok)
 			assert.Equal(t, codes.Unavailable, st.Code())
 			reasons := errorInfoReasons(st)

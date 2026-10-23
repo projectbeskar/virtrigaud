@@ -90,7 +90,7 @@ func (p *Provider) exportDiskRouted(ctx context.Context, req *providerv1.ExportD
 	bctx, cancel := withRoutedBudget(ctx)
 	defer cancel()
 	var resp *providerv1.ExportDiskResponse
-	err := p.withOwnedDomain(bctx, vm, "disk export", func(c libvirtConn, d domainTarget) error {
+	err := p.withOwnedDomain(bctx, vm, "disk export", func(bctx context.Context, c libvirtConn, d domainTarget) error {
 		if err := p.checkHostDiskTransport(c); err != nil {
 			return err
 		}

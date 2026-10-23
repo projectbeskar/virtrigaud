@@ -77,6 +77,11 @@ const (
 		"not a directory owned by its SSH user, or the landing name is a symbolic link); it is not removed"
 	// landedDiskHostDownFmt is the HOST_UNAVAILABLE text of a routed delete.
 	landedDiskHostDownFmt = "DeleteLandedDisk: host %q is unreachable; will retry"
+	// landedDiskRemovalUnknownMessage is the retryable answer of a routed
+	// delete whose host stopped answering after the removal was sent: the
+	// disk may be gone. Retried (the removal is idempotent).
+	landedDiskRemovalUnknownMessage = "DeleteLandedDisk: the host stopped answering while the landed disk was being " +
+		"removed, so it is not known whether it was removed; will retry"
 
 	// stagedDiskNoHostMessage refuses a clustered nfs DeleteStagedDisk
 	// without the recorded import host.
@@ -125,12 +130,12 @@ func (p *Provider) deleteLandedDiskRouted(ctx context.Context, req *providerv1.D
 		return nil, vmOperationStatus(codes.Unavailable, landedDiskImportInFlightMessage)
 	}
 	if err != nil {
-		return nil, routedLandedDiskFailed(host, "wait for other work on the landing disk", err)
+		return nil, routedLandedDiskFailed(host, nil, "wait for other work on the landing disk", err)
 	}
 	defer unlock()
 
 	var outcome providerv1.LandedDiskDeleteOutcome
-	err = p.withHostConn(bctx, string(host), func(c libvirtConn) error {
+	err = p.withHostConn(bctx, string(host), func(bctx context.Context, c libvirtConn) error {
 		if p.routedDiskConnFn != nil {
 			c = p.routedDiskConnFn(c)
 		}
@@ -153,7 +158,7 @@ func (p *Provider) deleteLandedOnHost(ctx context.Context, c libvirtConn, path, 
 	h := hostConnRunner{conn: c}
 	poolPath, err := defaultPoolPath(ctx, c)
 	if err != nil {
-		return unspecified, routedLandedDiskFailed(host, "resolve the default pool's directory", err)
+		return unspecified, routedLandedDiskFailed(host, hostProgressFrom(ctx), "resolve the default pool's directory", err)
 	}
 	landed := filepath.Join(poolPath, volumeName+qcow2Ext)
 	if path != "" && path != landed {
@@ -161,7 +166,7 @@ func (p *Provider) deleteLandedOnHost(ctx context.Context, c libvirtConn, path, 
 	}
 	kind, err := hostDiskKind(ctx, h, landed)
 	if err != nil {
-		return unspecified, routedLandedDiskFailed(host, "check the landed disk", err)
+		return unspecified, routedLandedDiskFailed(host, hostProgressFrom(ctx), "check the landed disk", err)
 	}
 	switch kind {
 	case diskKindAbsent:
@@ -187,11 +192,11 @@ func (p *Provider) deleteLandedOnHost(ctx context.Context, c libvirtConn, path, 
 	// which refuses a landing name that became a symbolic link.
 	lock, err := p.hostLockFor(importLockKind, domain)
 	if err != nil {
-		return unspecified, routedLandedDiskFailed(host, "name the host lock", err)
+		return unspecified, routedLandedDiskFailed(host, hostProgressFrom(ctx), "name the host lock", err)
 	}
 	argv, err := guardedHostCommand(ctx, lock, landed, "rm", "-f", "--", landed)
 	if err != nil {
-		return unspecified, routedLandedDiskFailed(host, "bound the removal", err)
+		return unspecified, routedLandedDiskFailed(host, hostProgressFrom(ctx), "bound the removal", err)
 	}
 	if _, err := runHost(ctx, h, argv...); err != nil {
 		switch guardExitCode(err) {
@@ -201,7 +206,7 @@ func (p *Provider) deleteLandedOnHost(ctx context.Context, c libvirtConn, path, 
 			reportHostGuardRefusal("landed disk delete", string(host), err)
 			return unspecified, status.Error(codes.FailedPrecondition, landedDiskGuardRefusedMessage)
 		}
-		return unspecified, routedLandedDiskFailed(host, "remove the landed disk", err)
+		return unspecified, routedLandedDiskFailed(host, hostProgressFrom(ctx), "remove the landed disk", err)
 	}
 	if _, err := c.Virsh(ctx, "pool-refresh", defaultStoragePool); err != nil {
 		log.Printf("WARN pool-refresh on host %s after removing a landed disk failed (harmless): %v", host, err)
@@ -219,7 +224,7 @@ func (p *Provider) deleteLandedOnHost(ctx context.Context, c libvirtConn, path, 
 func (p *Provider) landedDiskUsedOnAnyHost(ctx context.Context, host hostconn.HostID, h hostCommandRunner, landed, domain string) (bool, error) {
 	canon, err := canonicalizeOnHost(ctx, h, []string{landed})
 	if err != nil {
-		return false, routedLandedDiskFailed(host, "resolve the landed disk", err)
+		return false, routedLandedDiskFailed(host, hostProgressFrom(ctx), "resolve the landed disk", err)
 	}
 	files := []string{landed}
 	if canon[0] != landed {
@@ -238,20 +243,30 @@ func (p *Provider) landedDiskUsedOnAnyHost(ctx context.Context, host hostconn.Ho
 		if stderrors.As(err, &ie) {
 			return false, ie.with(guardOpLandedDiskDelete, domain)
 		}
-		return false, routedLandedDiskFailed(host, "scan the Provider's hosts", err)
+		return false, routedLandedDiskFailed(host, hostProgressFrom(ctx), "scan the Provider's hosts", err)
 	}
 	return false, nil
 }
 
 // routedLandedDiskFailed logs a failed host step of a routed landed-disk
-// delete and returns its retryable answer: HOST_UNAVAILABLE when the host
-// could not be reached, otherwise the constant landedDiskFailedMessage with
-// VM_OPERATION_FAILED (kept out of the manager's circuit breaker). The cause
-// goes to the provider log only.
-func routedLandedDiskFailed(host hostconn.HostID, step string, err error) error {
+// delete and returns its retryable answer. progress is what the call ran on
+// the host so far (host_progress.go). A host that could not be reached is
+// HOST_UNAVAILABLE only while nothing of the call ran on it; once the host
+// answered, or the removal itself was sent, it is the constant
+// landedDiskFailedMessage or landedDiskRemovalUnknownMessage, both
+// codes.Unavailable with VM_OPERATION_FAILED (kept out of the manager's
+// circuit breaker, and retried: the removal is idempotent, and a retry that
+// finds the disk gone is NOT_FOUND). Any other failure is
+// landedDiskFailedMessage. The cause goes to the provider log only.
+func routedLandedDiskFailed(host hostconn.HostID, progress *hostProgress, step string, err error) error {
 	log.Printf("ERROR DeleteLandedDisk on host %s: %s: %v", host, step, err)
 	if isHostTransportFailure(err) {
-		return hostUnavailableStatus(contracts.NewHostUnavailableError(fmt.Sprintf(landedDiskHostDownFmt, host), nil))
+		switch progress.stage() {
+		case hostDownNothingRan:
+			return hostUnavailableStatus(contracts.NewHostUnavailableError(fmt.Sprintf(landedDiskHostDownFmt, host), nil))
+		case hostDownWriteSent:
+			return vmOperationStatus(codes.Unavailable, landedDiskRemovalUnknownMessage)
+		}
 	}
 	return vmOperationStatus(codes.Unavailable, landedDiskFailedMessage)
 }
@@ -269,7 +284,11 @@ func routedLandedDiskError(host hostconn.HostID, err error) error {
 	if contracts.IsHostUnavailable(err) {
 		return hostUnavailableStatus(contracts.NewHostUnavailableError(fmt.Sprintf(landedDiskHostDownFmt, host), err))
 	}
-	return routedLandedDiskFailed(host, "delete the landed disk", err)
+	var ho *hostOpError
+	if stderrors.As(err, &ho) {
+		return routedLandedDiskFailed(host, ho.progress, "delete the landed disk", err)
+	}
+	return routedLandedDiskFailed(host, nil, "delete the landed disk", err)
 }
 
 // deleteStagedDiskRouted is the CLUSTERED DeleteStagedDisk of the resolved
@@ -287,7 +306,7 @@ func (p *Provider) deleteStagedDiskRouted(ctx context.Context, req *providerv1.D
 	bctx, cancel := withRoutedBudget(ctx)
 	defer cancel()
 	var outcome providerv1.StagedDiskDeleteOutcome
-	err := p.withHostConn(bctx, host, func(c libvirtConn) error {
+	err := p.withHostConn(bctx, host, func(bctx context.Context, c libvirtConn) error {
 		if p.routedDiskConnFn != nil {
 			c = p.routedDiskConnFn(c)
 		}

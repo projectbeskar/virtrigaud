@@ -235,7 +235,7 @@ func (p *Provider) onHostWithin(ctx context.Context, id hostconn.HostID, fn func
 	if err := hctx.Err(); err != nil {
 		return err
 	}
-	if err := p.withHostConn(hctx, string(id), func(c libvirtConn) error { return fn(hctx, c) }); err != nil {
+	if err := p.withHostConn(hctx, string(id), func(hctx context.Context, c libvirtConn) error { return fn(hctx, c) }); err != nil {
 		return err
 	}
 	return hctx.Err()
