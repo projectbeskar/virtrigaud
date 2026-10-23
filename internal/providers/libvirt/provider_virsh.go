@@ -871,6 +871,14 @@ func (p *Provider) deleteExistingDomainChecked(ctx context.Context, vp *VirshPro
 	// Stop the domain if running
 	if err := vp.destroyDomain(ctx, id); err != nil {
 		log.Printf("WARN Failed to destroy domain %s: %v", id, err)
+		// A clustered delete stops when the host stopped answering during the
+		// destroy (R25): the domain may still be running, and undefining a
+		// running domain would leave it running as a transient one whose disks
+		// are then removed. The delete is retried; the single-host path keeps
+		// its historical behaviour.
+		if check != nil && isHostTransportFailure(err) {
+			return "", contracts.NewRetryableError("failed to stop domain", err)
+		}
 		// Continue with undefine even if destroy fails
 	}
 
