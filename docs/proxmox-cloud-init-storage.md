@@ -33,8 +33,8 @@ that applies wins:
    `local-lvm:vm-101-disk-0,size=32G`. The provider takes the first drive that
    is not a cdrom, scanning virtio0-15, then scsi0-15, sata0-15, ide0-15. That is
    the first such drive, not necessarily the boot disk: a data disk on an earlier
-   bus wins (`DetectPrimaryDisk`, which also fills the boot order). A storage that
-   holds the VM's disk holds its cloud-init drive.
+   bus wins (`PrimaryDiskFromConfig`, whose disk also starts the boot order). A
+   storage that holds the VM's disk holds its cloud-init drive.
 3. **The provider's default storage**: the environment variable
    `PROVIDER_DEFAULT_STORAGE`, else `PVE_DEFAULT_STORAGE`, on the Proxmox provider
    pod. Set it with `spec.runtime.env` of the `Provider`:
@@ -76,6 +76,12 @@ is. So, once the storage is chosen as above:
   one on the chosen storage, in the slot it is in (PVE removes the old volume).
 - The clone has no cloud-init drive: the provider sets `ide2`.
 
+A cloud-init drive is recognised by PVE's volume name, `vm-<vmid>-cloudinit`; on
+a directory or file storage it is a file `<vmid>/vm-<vmid>-cloudinit.raw` (made
+by a full clone), `.qcow2` (made by a config update that replaces the drive) or
+`.vmdk`. A volume that only has "cloudinit" in its name, such as an ISO, is not a
+cloud-init drive.
+
 The template's drive can be in any `ide`, `sata` or `scsi` slot; the boot order
 (`order=<primary disk>;<that slot>`) follows it. A re-sent Create that finds its
 half-made VM runs the same step again and changes nothing.
@@ -87,7 +93,11 @@ default storage must have the syntax of a PVE storage ID (letters, digits, `-`,
 `_`, `.`; starting with a letter, ending with a letter or digit). Otherwise the
 Create is refused as an invalid spec before anything is created, with a message
 that does not repeat the value: it ends up in a config value (`<storage>:cloudinit`)
-and must not be able to add parameters to it.
+and must not be able to add parameters to it. The default storage is also checked
+when the provider starts (an error is logged, without the value) and by
+`Validate`, which then fails with a message naming `PVE_DEFAULT_STORAGE` /
+`PROVIDER_DEFAULT_STORAGE`, so the problem shows when the provider is checked,
+not at the first Create that uses the value.
 
 The provider does not ask PVE whether the chosen storage allows `images`. A
 storage named by step 1 or 3 is the operator's explicit choice, and if PVE

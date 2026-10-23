@@ -98,17 +98,28 @@ Providers whose power operations are synchronous (vSphere, libvirt) never set it
   `Reconfiguring` is absent or settled (`False` with `ReconcileSuccess` or
   `PowerTaskFailed`) and no `status.reconfigureTaskRef` is recorded. A power
   operation sent while `Reconfiguring` is `True` (a reconfigure in flight,
-  `RestartRequired`) or `False` with a reason the next Reconfigure depends on
-  (`ProviderError`, `ResizePendingPowerOff`, `ProviderLacksHonestReconfigure`)
-  leaves that condition as it is, and the completion of the power task does not
-  settle it: only the exact reason and message above are settled, and only when no
-  `status.reconfigureTaskRef` is recorded.
+  `RestartRequired`) or `False` with any reason other than `ReconcileSuccess` and
+  `PowerTaskFailed` (`ProviderError`, `ResizePendingPowerOff`,
+  `ProviderLacksHonestReconfigure`, `ValidationError`, `ShrinkPendingPowerOff`,
+  `InsufficientHostCapacity`, ...) leaves that condition as it is, and the
+  completion of the power task does not settle it: only the exact reason and
+  message above are settled, and only when no `status.reconfigureTaskRef` is
+  recorded.
 - **A power task that ends in failure** is forgotten (`status.lastTaskRef` is
   cleared) and shown on `Ready=False/ProviderError` with the message `Power state
   change failed: ...`. The marker, if it is on the VM, is settled as
   `Reconfiguring=False/PowerTaskFailed`, not `ProviderError`: a failed power task
   is not a failed Reconfigure, and `ProviderError` on `Reconfiguring` makes the
   manager send a Reconfigure again. The phase follows the power state.
+  `Reconfiguring=False/PowerTaskFailed` is settled to `ReconcileSuccess` once the
+  VM is observed in the power state its spec asks for.
+- **A task the provider cannot report on.** A task-status query that fails for a
+  transient reason (a transport error, a timeout, a 5xx, the token, rate limiting)
+  keeps the task recorded and is asked again. For Proxmox, a query PVE rejects as a
+  request (a malformed or unknown UPID: any 4xx other than 401/403/429, or a 5xx
+  that says there is no such task) ends the task with an error, so the manager
+  stops asking; a `VMMigration` whose snapshot task cannot be polled fails the
+  snapshot once the task's wait limit has passed.
 - **The power operation is sent again on a backoff**, per VM: after 5 seconds, then
   10, doubling to at most 5 minutes while its task keeps failing. A power
   operation that completes resets the backoff, and so does a change to `spec`
