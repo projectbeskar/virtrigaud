@@ -5,6 +5,30 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-10-23 16:00] - Proxmox cloud-init drive storage (R33) and the stuck "Adjusting power state" phase (R34)
+**Author:** @wrkode (William Rizzo)
+
+### Fixed
+- `internal/providers/proxmox/server.go`, `internal/providers/proxmox/cloudinit_storage.go`: the cloud-init drive (`ide2`) of a VM with user-data was `local:cloudinit` for every VM cloned from a template, because the clone path carried no storage, and PVE's stock `local` has no `images` content type, so every such VM failed to start. The storage is now the request's or image's (`storage` key, or `source.proxmox.storage` of a `VMImageSpec`, read even when the template is named), else `PROVIDER_DEFAULT_STORAGE` / `PVE_DEFAULT_STORAGE`, else the storage the cloned VM's boot disk lives on (read from its config), and `local` only when none of those exist (a warning is logged). A VM created without a template uses the first two, then `local`.
+- `internal/providers/proxmox/pveapi/client.go`: `DetectPrimaryDiskVolume` (the boot disk's key and config value from one config read; `DetectPrimaryDisk` uses it) and `DiskStorage` (the storage ID of a disk value, validated against PVE's storage-ID syntax).
+- `internal/controller/virtualmachine_controller.go`: a power operation that returns a task (Proxmox) set `Reconfiguring=True` "Adjusting power state" and `status.lastTaskRef`; when the task ended only `lastTaskRef` was cleared, so every Proxmox VM stayed in phase `Reconfiguring` with `Ready=True`. The condition is now set to `False` (`ReconcileSuccess`, "Power state adjusted") when the task ends, and also on the first reconcile of a VM an earlier manager left with the marker and no task. A real reconfigure's condition (another reason or message, or a recorded `reconfigureTaskRef`) is never touched. A power task that ends in failure is forgotten (it was polled for ever before) and shown on `Ready` and `Reconfiguring` as `ProviderError` "Power state change failed: ...".
+- `internal/providers/proxmox/pvefake/server.go`: the fake records `ide2` on create and config updates, and a clone copies its source's raw config (disks moved to the clone request's `storage`).
+
+### Added
+- `internal/providers/proxmox/cloudinit_storage_test.go`, `internal/controller/virtualmachine_power_task_marker_test.go`: tests for both fixes.
+- `docs/proxmox-cloud-init-storage.md`: how the drive's storage is chosen; `docs/README.md` lists it.
+- `docs/vm-status-phase.md`: "A power change that returns a task".
+- `charts/virtrigaud-provider-runtime/examples/values-proxmox.yaml`: a commented `PVE_DEFAULT_STORAGE` example.
+
+### Why
+rc4 validation on a real PVE 9.2 node (R33, R34): every Proxmox VM with user-data failed to start on `local`, and every Proxmox VM showed phase `Reconfiguring` after a power change although it was Ready.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-10-23 14:00] - Release notes: v0.4.0-rc4
 **Author:** @wrkode (William Rizzo)
 
