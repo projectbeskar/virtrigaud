@@ -23,6 +23,18 @@ spec:
     - jsonPath: .spec.providerRef.name
       name: Provider
       type: string
+    - description: Member Hosts (spec.poolRef names this pool)
+      jsonPath: .status.totalHosts
+      name: Total
+      type: integer
+    - description: Member Hosts reporting Health=Ready
+      jsonPath: .status.readyHosts
+      name: Ready
+      type: integer
+    - description: Member Hosts the scheduler can place a new VM on
+      jsonPath: .status.schedulableHosts
+      name: Schedulable
+      type: integer
     - jsonPath: .metadata.creationTimestamp
       name: Age
       type: date
@@ -193,7 +205,10 @@ spec:
             type: object
           status:
             description: |-
-              HostPoolStatus aggregates member-host counts and readiness for the pool.
+              HostPoolStatus aggregates member-host counts and readiness for the pool. The
+              HostPool controller writes it whenever a member Host joins, leaves, or
+              changes health, schedulability, providerRef or deletion state. Its Ready
+              condition is True when SchedulableHosts > 0.
 
               ADR-0007 specifies HostPool.status only in prose ("aggregates host counts +
               readiness"). These fields are the smallest additive shape consistent with that
@@ -271,12 +286,16 @@ spec:
               schedulableHosts:
                 description: |-
                   SchedulableHosts is the number of member Hosts that are both Health=Ready
-                  and spec.schedulable=true.
+                  and spec.schedulable=true, and that the scheduler can therefore place a
+                  new VM on: a Host being deleted, or one whose spec.providerRef is not the
+                  pool's Provider, is never a placement target and is not counted.
                 format: int32
                 type: integer
               totalHosts:
-                description: TotalHosts is the number of Hosts whose spec.poolRef
-                  points at this pool.
+                description: |-
+                  TotalHosts is the number of Hosts whose spec.poolRef points at this pool.
+                  Only Hosts in the pool's own namespace are members (the same-namespace
+                  model); a Host being deleted is counted until it is gone.
                 format: int32
                 type: integer
             type: object

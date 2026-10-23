@@ -165,7 +165,10 @@ type HostPoolSpec struct {
 	Migration *PoolMigrationPolicy `json:"migration,omitempty"`
 }
 
-// HostPoolStatus aggregates member-host counts and readiness for the pool.
+// HostPoolStatus aggregates member-host counts and readiness for the pool. The
+// HostPool controller writes it whenever a member Host joins, leaves, or
+// changes health, schedulability, providerRef or deletion state. Its Ready
+// condition is True when SchedulableHosts > 0.
 //
 // ADR-0007 specifies HostPool.status only in prose ("aggregates host counts +
 // readiness"). These fields are the smallest additive shape consistent with that
@@ -173,6 +176,8 @@ type HostPoolSpec struct {
 // Conditions).
 type HostPoolStatus struct {
 	// TotalHosts is the number of Hosts whose spec.poolRef points at this pool.
+	// Only Hosts in the pool's own namespace are members (the same-namespace
+	// model); a Host being deleted is counted until it is gone.
 	// +optional
 	TotalHosts int32 `json:"totalHosts,omitempty"`
 
@@ -181,7 +186,9 @@ type HostPoolStatus struct {
 	ReadyHosts int32 `json:"readyHosts,omitempty"`
 
 	// SchedulableHosts is the number of member Hosts that are both Health=Ready
-	// and spec.schedulable=true.
+	// and spec.schedulable=true, and that the scheduler can therefore place a
+	// new VM on: a Host being deleted, or one whose spec.providerRef is not the
+	// pool's Provider, is never a placement target and is not counted.
 	// +optional
 	SchedulableHosts int32 `json:"schedulableHosts,omitempty"`
 
@@ -200,6 +207,9 @@ type HostPoolStatus struct {
 //+kubebuilder:resource:shortName=hp
 //+kubebuilder:printcolumn:name="Strategy",type=string,JSONPath=`.spec.strategy`
 //+kubebuilder:printcolumn:name="Provider",type=string,JSONPath=`.spec.providerRef.name`
+//+kubebuilder:printcolumn:name="Total",type=integer,JSONPath=`.status.totalHosts`,description="Member Hosts (spec.poolRef names this pool)"
+//+kubebuilder:printcolumn:name="Ready",type=integer,JSONPath=`.status.readyHosts`,description="Member Hosts reporting Health=Ready"
+//+kubebuilder:printcolumn:name="Schedulable",type=integer,JSONPath=`.status.schedulableHosts`,description="Member Hosts the scheduler can place a new VM on"
 //+kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 
 // HostPool is the Schema for the hostpools API: a named group of Hosts under one
