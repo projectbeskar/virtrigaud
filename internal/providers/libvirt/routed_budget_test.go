@@ -303,17 +303,18 @@ func TestClustered_BudgetEndsBeforeTheCallersDeadline(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), routedBudgetMargin/2)
 			defer cancel()
 			err := call(ctx)
-			if op == "create snapshot" {
+			switch op {
+			case "create snapshot":
 				// Closing the session does not stop libvirtd's snapshot job:
 				// the outcome is unknown, and the answer says retry.
 				assertRoutedOp(t, err, codes.Unavailable, `create snapshot on host "host-b" did not answer within its time budget; its outcome is unknown`)
 				assert.True(t, contracts.HasErrorInfoReason(err, contracts.OutcomeUnknownRetryReason), "retryable, and not nothing done")
-			} else if op == "create snapshot without a request token" {
+			case "create snapshot without a request token":
 				// A retry of a create that cannot be recognised could take a
 				// second snapshot: Unknown, not a retry.
 				assertRoutedOp(t, err, codes.Unknown, `create snapshot on host "host-b" did not answer within its time budget; its outcome is unknown`)
 				assert.False(t, contracts.HasErrorInfoReason(err, contracts.OutcomeUnknownRetryReason))
-			} else {
+			default:
 				assertRoutedOp(t, err, codes.Unknown, op+` on host "host-b" did not finish within its time budget`)
 			}
 			assert.NoError(t, ctx.Err(), "answered before the caller's deadline")
