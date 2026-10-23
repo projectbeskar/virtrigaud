@@ -5,6 +5,23 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-10-23 19:00] - Release notes for v0.4.0-rc5
+**Author:** @wrkode (William Rizzo)
+
+### Changed
+- `docs/release-notes/next.md`: retitled for v0.4.0-rc5 (header comment, opening paragraph, "About this release candidate": rc1, rc2 and rc4 came before; rc3 was tagged but not released). New top section "Changes since v0.4.0-rc4" for the four pull requests merged after the rc4 tag: #425 and #427 (R33 the Proxmox cloud-init drive's storage, R34 the phase stuck at `Reconfiguring` after an asynchronous power task, the power-task backoff and the task-status query), #426 (ADR-0014 accepted) and #428 (R36 slice 0a, Proxmox networks and the manager's network-block selection), each with what changes, the behaviour changes and the PVE token privileges, plus "Upgrade order for rc5" (no CRD change since rc4; manager and Proxmox provider together, token privileges first) and its rollback. The new items are folded into "Breaking changes" (a note: nothing is breaking, three behaviour changes), "Highlights" (the bridge/VLAN choice and the token's `SDN.Use` ACLs), "Fixes", "Known limitations" and "Upgrade".
+- `docs/release-notes/next.md`: "Known limitations" gains R36 (a migrated guest can boot without network on a vSphere or Proxmox target, or with a new cloud-init identity on a libvirt target; the fix is designed in ADR-0014 and planned after GA; a workaround), R35 (Proxmox applies only `ssh_authorized_keys` block lists and a user name from `spec.userData`) and the Proxmox network fields that are not applied.
+- `docs/release-notes/next.md`: "Validated in the lab since rc4" records the 2026-10-23 runs by build. On v0.4.0-rc4, a single Proxmox VE 9.2 node: lifecycle (the phase still stuck, R34), S3 migrations vSphere ↔ Proxmox (guests without network, R36), single-host libvirt ↔ Proxmox and Proxmox → clustered libvirt (guests reachable), NFS import and export. On main at f90a871: the cloud-init drive without the `local` workaround, the phase settling after a power cycle, two NICs with a VLAN and a static IP, and a libvirt → Proxmox migration landing on its target's bridge and VLAN. Earlier on rc4: R26 in the guest on vSphere, vSphere → clustered libvirt, a clustered clone of a booted VM, R23. It lists what was not run (Proxmox adoption, VMID reuse and the ADR-0012 name rule, a Proxmox `Reconfigure`, a failed migration's import-stage delete, a multi-node PVE cluster, SSH host keys in a libvirt clone, an SELinux host). "Proxmox was not validated against a real PVE cluster" now says what was validated, and the earlier "not run" lists point at it. The ADR-0012 gate still needs a PVE cluster.
+
+### Why
+rc4 validation on a real PVE node found three Proxmox defects, fixed in #425, #427 and #428, and the migrated-guest network design (#426) needs to be visible to people who will test rc5. The notes have to say what was and was not validated.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [ ] Config change only
+- [x] Documentation only
+
 ## [2026-10-23 18:00] - Proxmox VMs get the bridge, VLAN, model and static IP their networks name (R36, ADR-0014 Slice 0a)
 **Author:** @wrkode (William Rizzo)
 

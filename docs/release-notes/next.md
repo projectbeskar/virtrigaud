@@ -1,17 +1,21 @@
 <!--
-Draft release notes for VirtRigaud v0.4.0-rc4, the fourth release candidate for
+Draft release notes for VirtRigaud v0.4.0-rc5, the fifth release candidate for
 v0.4.0 (GA follows after a soak). v0.4.0-rc3 was tagged, but its release run was
-stopped by the image scan (CVE-2026-63209) and no rc3 release was published. rc1 and rc2 were published from earlier
-versions of this file; rc1 followed v0.3.11. Paste everything below this comment
-into the GitHub pre-release. The notes are cumulative since v0.3.11: a user going
-from v0.3.11 needs all of them, while "Changes since v0.4.0-rc2" is the short
-list for someone already on rc2 and "Changes since v0.4.0-rc1" the one for
-someone on rc1. See docs/upgrading.md for the full upgrade guide these notes
-link to, and CHANGELOG.md for the complete, dated changelog. For the GA
-release, drop the rc sections and re-title.
+stopped by the image scan (CVE-2026-63209) and no rc3 release was published. rc1,
+rc2 and rc4 were published from earlier versions of this file; rc1 followed v0.3.11.
+Paste everything below this comment into the GitHub pre-release. The notes are
+cumulative since v0.3.11: a user going from v0.3.11 needs all of them, while "Changes
+since v0.4.0-rc4" is the short list for someone already on rc4, "Changes since
+v0.4.0-rc2" the one for someone on rc2 and "Changes since v0.4.0-rc1" the one for
+someone on rc1. See docs/upgrading.md for the full upgrade guide these notes link to,
+and CHANGELOG.md for the complete, dated changelog. The published release body is a
+trimmed version of this file (GitHub's limit is 125,000 characters): the preamble, the
+newest "Changes since" section, "About this release candidate", "Breaking changes",
+"Known limitations" and "Upgrade". For the GA release, drop the rc sections and
+re-title.
 -->
 
-This is **v0.4.0-rc4, a release candidate** (GA follows after a soak). It is a
+This is **v0.4.0-rc5, a release candidate** (GA follows after a soak). It is a
 security-hardening release: a full codebase security review found and fixed several
 cross-tenant and privilege-escalation issues in the vSphere and libvirt providers,
 cross-namespace clone/migration targets, and VM provider binding. rc2 added two waves
@@ -19,15 +23,262 @@ of fixes on top of rc1 (below): one about proving that the VM a migration, adopt
 clone or per-VM call acts on is the one VirtRigaud owns, and one about failures
 half-way through an operation (a resize that hit the wrong disk, a provider call whose
 result was lost, a failed migration's leftover disk) and about provider pods' access to
-migration storage. rc4 adds a third, on top of rc2: libvirt cloud-init seeds
+migration storage. rc4 added a third, on top of rc2: libvirt cloud-init seeds
 (private, and a clone's own identity), leftover files, and migration into a clustered
-libvirt Provider (experimental). **Several fixes are breaking
+libvirt Provider (experimental). rc5 adds a fourth, on top of rc4: three fixes found by
+validating rc4 on a real Proxmox VE 9.2 node (the storage of a VM's cloud-init drive, a
+VM phase stuck at `Reconfiguring` after a power change, and the bridge, VLAN, model and
+static IP of a Proxmox VM's networks), and the accepted design for migrated guests'
+network (ADR-0014). **Several fixes are breaking
 or change default behavior.** Read the upgrade guide before upgrading:
 **[Upgrading from v0.3.11](docs/upgrading.md)**.
 
-The notes below are cumulative since v0.3.11. If you are already on v0.4.0-rc2, read
-"Changes since v0.4.0-rc2" first; on v0.4.0-rc1, read it and then "Changes since
-v0.4.0-rc1".
+The notes below are cumulative since v0.3.11. If you are already on v0.4.0-rc4, read
+"Changes since v0.4.0-rc4" first; on v0.4.0-rc2, read it and then "Changes since
+v0.4.0-rc2"; on v0.4.0-rc1, also "Changes since v0.4.0-rc1".
+
+## Changes since v0.4.0-rc4
+
+Four pull requests, all merged 2026-10-23. Three of them fix what validating rc4 on a
+real Proxmox VE 9.2 node found: the cloud-init drive of a VM with user-data was put on
+a storage PVE refuses to start from (R33), a Proxmox VM stayed in phase `Reconfiguring`
+after a power change (R34), and a Proxmox VM got none of the bridge, VLAN, model or
+static IP its networks name (R36, slice 0a of ADR-0014). The fourth records the design
+for the rest of R36, a migrated guest's network.
+**Nothing is breaking and no CRD changed.** Three changes are behaviour changes you
+should read before you roll (marked below), and the manager and the Proxmox provider
+roll together, with the PVE token privileges first (see
+[Upgrade order for rc5](#upgrade-order-for-rc5)).
+
+| PR | What changed | Breaking |
+|---|---|---|
+| #425 (R33, R34) | Proxmox: the cloud-init drive of a VM cloned from a template goes on a storage that holds VM disks, not on `local`. The manager settles the `Reconfiguring` marker after an asynchronous power task, so the phase is `Running` or `Stopped` again, and a failed power task is shown on `Ready` instead of being polled for ever | Behaviour change |
+| #427 (review of #425) | A clone keeps its own cloud-init drive instead of failing on it (a template that has one, as the usual PVE cloud-image recipe does). The clone's disk storage comes before `PVE_DEFAULT_STORAGE`. Storage IDs are validated. A failed power task goes on a 5 s to 5 min backoff and is not read as a failed Reconfigure (new reason `PowerTaskFailed`). A task-status query that PVE rejects ends the task; a transient failure does not. CI `test` job timeout 30 minutes | Behaviour change |
+| #426 | ADR-0014 accepted: a migrated guest keeps its identity and gets working network (R36). Design only; of its slices only slice 0a (#428) is implemented | Documentation only |
+| #428 (R36, ADR-0014 slice 0a) | Proxmox VMs get the bridge, VLAN tag, model and static IP their networks name. DNS goes to the VM-wide `nameserver`. A clone keeps its template's NICs and MACs where the spec is silent. The manager sends only the network block that matches the target Provider's type. An `ipAddress` without `prefix` and a `dns` entry that is not an IP are refused on Proxmox | Behaviour change |
+
+### Proxmox: the cloud-init drive goes where the VM's disk is (#425, #427; R33)
+
+On Proxmox, a `VirtualMachine` with `spec.userData` gets a cloud-init drive (`ide2`).
+For a VM cloned from a template the provider put that drive on storage `local`, and
+PVE's stock `local` has no `images` content type, so the VM did not start (`storage
+'local' does not support content-type 'images'`). The only way out was to allow
+`images` content on `local`. Now the drive goes on the first of these that applies:
+
+1. A storage named for the VM in the request or the image (the image JSON's `storage`
+   key, or `source.proxmox.storage`). The manager's own `Create` request carries
+   neither today, so for a `VirtualMachine` this step has no effect yet.
+2. The storage of the clone's first non-cdrom disk (the first found scanning virtio,
+   scsi, sata, ide, device 0 to 15 of each), when that disk is on a storage. If it is
+   not (a passthrough device), the provider does not look at the next disk and goes to
+   step 3. For a `VirtualMachine` this is the step that usually decides.
+3. `PROVIDER_DEFAULT_STORAGE`, else `PVE_DEFAULT_STORAGE`, on the Proxmox provider pod.
+4. `local`, only when step 2 found no storage and no default is set. The provider logs
+   a warning.
+
+```yaml
+# Needed only for a clone whose disk is not on a storage (a passthrough device),
+# a VM made without a template, and as the target of a migration's disk import.
+spec:
+  type: proxmox
+  runtime:
+    env:
+      - name: PVE_DEFAULT_STORAGE
+        value: local-lvm   # a storage with the "images" content type
+```
+
+- **A template that has a cloud-init drive of its own** (the usual
+  `qm set <template> --ide2 <storage>:cloudinit`): a full clone owns its own
+  `vm-<id>-cloudinit` volume, and asking PVE for a second one on the same storage
+  fails. The provider keeps the clone's drive when it is already on the chosen storage
+  (PVE builds its contents again at every start), replaces it in its own slot when it
+  is on another storage, and sets `ide2` only when there is none.
+- **It fails closed.** If the clone's config cannot be read, the Create fails and is
+  retried; the provider does not guess a storage, because a guess is how the VM got
+  `local` again. A storage named for the VM, or set as the default, that is not a valid
+  PVE storage ID is refused as `InvalidSpec` before anything is created, with a message
+  that does not repeat the value. An invalid `PVE_DEFAULT_STORAGE` is also logged when
+  the provider starts, and fails `Validate`.
+- **Existing VMs** keep a drive that is already on `local`: the drive is set only while a
+  VM is created. Move it with `qm set <vmid> --ide2 <storage>:cloudinit` on the node, or
+  delete the VM and let the `VirtualMachine` create it again.
+- The provider does not ask PVE whether the chosen storage allows `images`. A storage
+  you name (step 1 or 3) that does not fails the VM's start with PVE's own message.
+
+→ [`docs/proxmox-cloud-init-storage.md`](docs/proxmox-cloud-init-storage.md)
+
+### Proxmox: the phase after a power change, and a power task that fails (#425, #427; R34)
+
+A Proxmox power operation returns an asynchronous task. The manager recorded it
+(`status.lastTaskRef`) and set `Reconfiguring=True`, reason `Updating`, message
+`Adjusting power state`. When the task ended it cleared only the task reference, so
+every Proxmox VM whose power was changed stayed in phase `Reconfiguring` with
+`Ready=True`. vSphere and libvirt power is synchronous and was never affected.
+
+- **The marker is settled** (`Reconfiguring=False/ReconcileSuccess`, `Power state
+  adjusted`) and the phase follows the power state again. A VM that rc4 left stuck is
+  settled by its next reconcile; there is no manual step.
+- **A real reconfigure's condition is never touched.** The marker is set only over an
+  absent or settled `Reconfiguring` condition, and only the exact marker is settled.
+- **A failed power task** is shown on `Ready=False/ProviderError` (`Power state change
+  failed: ...`) and forgotten; before, it was polled for ever. The marker is settled as
+  `Reconfiguring=False/PowerTaskFailed` (a new reason), not `ProviderError`, which the
+  manager would read as a failed Reconfigure and answer with one. The power operation is
+  sent again after 5 seconds, then 10, doubling to 5 minutes, per VM; a completed power
+  operation or a change to `spec` resets the wait. The wait is held by the manager
+  process: after a restart the first retry goes at once.
+- **A task-status query that fails** no longer makes the manager forget a running task.
+  A transient failure (a transport error, a timeout, a 5xx, 401/403, 429) is
+  `Unavailable` and the task is asked about again. A query PVE rejects as a request (any
+  other 4xx, or a 5xx that says there is no such task or the UPID cannot be parsed) ends
+  the task with an error. Checked on the real node for an unknown and a malformed UPID
+  (both `HTTP 400`); not checked for a well-formed UPID whose task PVE has forgotten. A
+  `VMMigration` whose snapshot task cannot be polled fails the snapshot once the task's
+  wait limit has passed.
+- **Not fixed:** after a manager restart, a failed power task whose marker is not on the
+  VM is handled like any other failed task (`Provisioning=False/ProviderError`, the task
+  still recorded), and a failed task that is not a power task, such as a failed
+  diskless create, is still polled.
+
+→ [`docs/vm-status-phase.md`](docs/vm-status-phase.md#a-power-change-that-returns-a-task)
+
+### Proxmox: a VM gets the bridge, VLAN, model and static IP its networks name (#428; R36)
+
+The manager sends a VM's networks under the Go field names of the provider contract
+(`Bridge`, `VLAN`, `Model`, `StaticIP`, ...). The Proxmox provider read lower-case keys
+and never read a bridge or a model at all, so **every Proxmox VM**, migrated or not,
+got `virtio` on `vmbr0` with no static IP, and a clone with user-data had its
+template's NICs overwritten with that default. The provider also wrote a `mac=`
+option PVE rejects, and put `nameserver=` inside `ipconfigN`, which PVE rejects.
+
+```yaml
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: VMNetworkAttachment
+metadata:
+  name: lab-vlan-10
+  namespace: virtrigaud-system
+spec:
+  network:
+    proxmox:
+      bridge: "vmbr1"    # the CRD allows vmbrN only
+      model: virtio
+      vlanTag: 10
+---
+apiVersion: infra.virtrigaud.io/v1beta1
+kind: VirtualMachine
+metadata:
+  name: web-1
+  namespace: virtrigaud-system
+spec:
+  # providerRef, classRef, imageRef as for any Proxmox VM
+  networks:
+    - name: front
+      networkRef:
+        name: lab-vlan-10
+      ipAddress: "192.0.2.20"
+      prefix: 24
+      gateway: "192.0.2.1"
+      dns: "192.0.2.53"
+```
+
+A new VM gets `net0: virtio,bridge=vmbr1,tag=10`, `ipconfig0: ip=192.0.2.20/24,gw=192.0.2.1`
+and the VM-wide `nameserver` `192.0.2.53`.
+
+- **A new VM** gets one NIC per entry of `spec.networks`, `net0`, `net1`, ..., with
+  `virtio` on `vmbr0` for what an entry leaves empty.
+- **A clone** keeps its template's bridge, VLAN, options and the MAC PVE gave it for
+  every NIC the spec does not name. A NIC the spec names (a bridge, a model or a VLAN
+  tag) is merged into the clone's NIC at the same index: the spec's model, bridge and
+  VLAN, the clone's own MAC. Entries are matched to NICs by index. The CRD defaults
+  `model` to `virtio`, so an attachment that names only a bridge turns a template NIC of
+  another model (`e1000`) into `virtio`: set `model` to the template's. This now runs for
+  a clone with or without user-data.
+- **The manager sends only the network block that matches the target Provider's type**
+  (`vsphere`, `libvirt` or `proxmox`). A Proxmox VM no longer takes a VLAN from a
+  vSphere block or a bridge from a libvirt block, and a Proxmox VM whose attachment has
+  no `proxmox` block gets no bridge, model or VLAN from it (the provider's default
+  applies). The same rule holds for vSphere and libvirt VMs: before, when an attachment
+  had several blocks, the last one present won a field they share, such as the network
+  name. A Provider type with no block of its own (`qemu`, `firecracker`) reads all
+  blocks, as before.
+- **Refused as `InvalidSpec` before a VM is made** (terminal on a new create and on a
+  re-send): a bridge, model, VLAN tag, static IP, prefix, gateway or DNS server PVE
+  cannot take, and more than 32 networks. Two inputs that were silently ignored before
+  are now refused: an **`ipAddress` without `prefix`** (the CRD and vSphere accept it;
+  PVE's `ip=` needs one) and a **`dns` entry that is not an IP address** (a hostname, or
+  a space-separated list; the list is comma-separated). The message names the entry,
+  never the value.
+- **PVE token privileges.** Writing `netN`, `ipconfigN` and `nameserver` needs
+  `VM.Config.Network` and `VM.Config.Cloudinit`, and, for any token that is not root,
+  `SDN.Use` on `/sdn/zones/<zone>/<bridge>[/<tag>]` of every bridge a VM is put on (a
+  plain Linux bridge such as `vmbr0` is in the `localnetwork` zone). A token that worked
+  before may now get a 403 while the provider configures a clone, and the clone is
+  rolled back. Grant them **before** you roll the Proxmox provider.
+- **The bridge is the author's choice, and the token's ACL is the limit.** The provider
+  applies whatever bridge and tag the manager sends, as the token allows; it has no
+  allow-list of its own yet (a Provider-level `allowedBridges`/`allowedVLANs` is a
+  slice 0a follow-up in ADR-0014, next to slice 0b's MAC policy). Use `SDN.Use` ACLs to decide which bridges and VLANs the
+  authors of `VirtualMachine`s in a namespace can reach.
+- **Existing VMs are not modified.** A VM that relied on the accidental `vmbr0` default
+  changes on its next create or clone: check each `VMNetworkAttachment` before you
+  create or recreate a Proxmox VM.
+- **Still not applied to a Proxmox VM:** `firewall`, `rateLimit` and `mtu`;
+  `VMNetworkAttachment.spec.ipAllocation` (a static IP is set on the `VirtualMachine`'s
+  entry); and `spec.networks[].macAddress`, which the manager drops before every
+  provider (ADR-0014 slice 0b). IPv6 does not reach the provider through the CRD yet.
+  `Describe` reports no NICs; `ListVMs` reports each NIC's bridge and MAC.
+
+→ [`docs/proxmox-networks.md`](docs/proxmox-networks.md),
+[Upgrade guide](docs/upgrading.md#behavior-changes-that-are-visible-but-not-breaking),
+[`examples/proxmox-complete-example.yaml`](examples/proxmox-complete-example.yaml)
+
+### ADR-0014: a migrated guest keeps its identity and gets working network (#426; R36)
+
+Design only; see Known limitations for what it means today. The ADR records why a
+migrated Ubuntu cloud-image guest can boot without network on a vSphere or Proxmox
+target (its netplan matches the source NIC's MAC, the target NIC has a new MAC, and
+cloud-init does not run again), and why a libvirt target works only because the guest
+gets a new cloud-init identity. The accepted decision is to carry each source NIC's MAC
+to the target and present the source's cloud-init instance-id (or no datasource when it
+is not known), switchable with a planned `VMMigration` `spec.options.guestIdentity:
+Preserve|Fresh`, and to guard tenant-set MACs with a default-deny Provider policy.
+Slice 0a is #428 above; the other slices are planned after GA.
+→ [ADR-0014](docs/adr/0014-migrated-guest-network.md)
+
+### Upgrade order for rc5
+
+**No CRD changed since rc4** (checked: no difference under `config/crd`,
+`charts/virtrigaud/crds` or `api`), so there is nothing to apply first. The code
+changes are in the manager and the Proxmox provider; the vSphere, libvirt and mock
+providers have none. From rc4:
+
+1. **Grant the PVE token `VM.Config.Network`, `VM.Config.Cloudinit` and `SDN.Use`** on
+   the bridges your VMs use, before you roll the Proxmox provider (above). Skip it for a
+   token with the `Administrator` role or the root user.
+2. **Roll the manager and the Proxmox provider together.** The network-block selection
+   is in the manager and the reading of networks is in the provider. An old provider
+   behind the new manager still ignores a VM's networks. A new provider behind an old
+   manager applies what the old manager sends, which is the fields of every block of an
+   attachment, so a VLAN or a bridge can come from another hypervisor's block. The phase
+   fix is in the manager alone.
+3. Optionally set `PVE_DEFAULT_STORAGE` on Proxmox Providers whose clones can have no
+   storage-backed disk (above).
+4. Review each `VMNetworkAttachment` a Proxmox VM uses, and who may create
+   `VirtualMachine`s that use a Proxmox Provider, because the bridge and VLAN they name
+   are now applied.
+
+From rc2, apply this on top of rc4's order ([Upgrade order for this
+release](#upgrade-order-for-this-release): the seed directory on every libvirt host
+first, then CRDs, manager and providers); from rc1, also [Upgrade order for
+rc2](#upgrade-order-for-rc2).
+
+**Rollback.** Rolling the Proxmox provider back stops applying a VM's networks: an
+older provider goes back to `virtio` on `vmbr0` with no static IP for every NIC, and to
+overwriting a clone's NICs when the request has user-data. VMs created while the newer
+provider ran keep the NICs and IP settings they were given. Rolling the manager back
+brings back the stuck `Reconfiguring` phase for Proxmox VMs, and sends every network
+block again.
+→ [Rollback caveats](docs/upgrading.md#rollback-caveats)
 
 ## Changes since v0.4.0-rc2
 
@@ -99,8 +350,9 @@ Run in the lab on a libvirt 10.0 / Ubuntu 24.04 host with AppArmor (details unde
 "Validated in the lab since rc2", results on #414): the `dynamic_ownership`
 hand-over, the guest reading its seed, no AppArmor change needed, other users denied,
 a create, a single-host clone of a started source, the refusal of a `0755`
-directory, and the delete of a legacy `/tmp` seed. Not run: a clustered clone of a
-started source, an SELinux host.
+directory, and the delete of a legacy `/tmp` seed. A clustered clone of a started
+source was run later, in the lab since rc4 (see [Validated in the lab since
+rc4](#about-this-release-candidate--what-to-test)). Not run: an SELinux host.
 → [`docs/libvirt-domain-ownership.md`](docs/libvirt-domain-ownership.md#cloud-init-seed-directory),
 [Upgrade guide](docs/upgrading.md#breaking-changes)
 
@@ -140,9 +392,10 @@ Existing clones keep the identity they booted with.
 
 Tested with unit tests, a round trip through the real `genisoimage` and `isoinfo`, and
 the vSphere simulator. In the lab, a single-host libvirt clone got its own sealed seed
-with `instance-id` `virtrigaud-<target UID>` and its own hostname, and booted. **Not
-validated:** new SSH host keys in the guest, and the vSphere `guestinfo` rewrite on a
-real vCenter.
+with `instance-id` `virtrigaud-<target UID>` and its own hostname, and booted. In the
+lab since rc4 (on v0.4.0-rc4), a clone on a real vSphere showed a new `instance-id`,
+hostname and SSH host key in the guest (the `guestinfo` rewrite on a real vCenter). **Not validated:** new SSH host
+keys in a libvirt guest.
 → [`docs/vm-ownership.md`](docs/vm-ownership.md#a-clones-host-identity),
 [`docs/libvirt-clones.md`](docs/libvirt-clones.md#a-clones-cloud-init-identity),
 [Upgrade guide](docs/upgrading.md#behavior-changes-that-are-visible-but-not-breaking)
@@ -240,10 +493,11 @@ the source was powered off and exported; the landed disk attached in place on th
 chosen host (the domain's disk is `<namespace>.<name>-migrated.qcow2`); a failure after
 the import, with a routed `DeleteLandedDisk` to the recorded host; a host made
 unreachable after the target was placed (the migration waited, did not re-place, and
-went on when the host returned). **Not run:** vSphere → clustered, Proxmox →
-clustered, a host made unreachable after the disk landed, a manager restart in the
-middle of an import, an R4-held target, a retry after an import. These are covered by
-unit and envtest tests only. The lab also showed that libvirt's cached pool figure
+went on when the host returned). **Not run in that lab:** vSphere → clustered and
+Proxmox → clustered (both were run later, in the lab since rc4), a host made unreachable
+after the disk landed, a manager restart in the middle of an import, an R4-held
+target, a retry after an import. The ones that remain are covered by unit and envtest
+tests only. The lab also showed that libvirt's cached pool figure
 could differ between hosts sharing an NFS pool; #417 measures it fresh.
 → [Migration into a clustered provider](docs/clustered-provider-inventory.md#migration-into-a-clustered-provider-addendum-b)
 (prerequisites, every condition and how to clear it, limits),
@@ -461,7 +715,7 @@ have done nothing; both halves changed.
 After the upgrade, search for `Ready` reason `VMNotOwned`, for failed `VMMigration`s and
 `VMClone`s whose message says the source VM was refused, and for `Refusing the call` in
 the Proxmox provider log. The check needs **both** the rc2 manager and the rc2 Proxmox
-provider. It was tested against the Proxmox test fake only, not a real PVE cluster.
+provider. It was tested against the Proxmox test fake only, not a real PVE cluster (a single real PVE node ran other Proxmox paths later, see "Validated in the lab since rc4").
 
 → [Per-VM calls](docs/vm-ownership.md#per-vm-calls-describe-power-reconfigure-snapshots-disks-and-clone-sources),
 [Upgrade guide](docs/upgrading.md#breaking-changes)
@@ -530,7 +784,7 @@ first clone untracked. Now:
   with its `status.targetUID`, then delete the `VMClone` **and** its target
   `VirtualMachine` (deleting the `VMClone` never touches the target).
 - Clones made before rc2 are unstamped and are not re-bound.
-- Proxmox re-bind is tested against the test fake only.
+- Proxmox re-bind is tested against the test fake only (see "Validated in the lab since rc4" for what later ran on a real PVE node).
 
 → [Clones: re-bind](docs/vm-ownership.md#clones-re-bind),
 [Upgrade guide](docs/upgrading.md#breaking-changes)
@@ -578,7 +832,8 @@ VirtualMachine  Reconfiguring=False  reason: ResizePendingPowerOff
 `Reconfigure`, CPU and memory included, now fails until you raise it back); alerting on
 `Reconfiguring` (new reason). The additional disks of vSphere VMs created by rc1 or
 earlier carry no recorded name and are never resized by `Reconfigure`, as before. The
-Proxmox behaviour was tested against the PVE test fake only.
+Proxmox behaviour was tested against the PVE test fake only when this was written (see
+"Validated in the lab since rc4" for what later ran on a real PVE node).
 
 → [Which disk a size goes to](docs/reconfigure-results.md#which-disk-a-size-goes-to),
 [vSphere: changes a running VM cannot take](docs/reconfigure-results.md#vsphere-changes-a-running-vm-cannot-take),
@@ -669,7 +924,7 @@ landing folder. Now:
 - The in-use checks see only the VMs of this vCenter or libvirt host. Do not share the
   landing datastore or the libvirt `default` pool directory with hypervisors the Provider
   does not manage.
-- Tested against vcsim, recorded host runners and the PVE test fake, not real hypervisors.
+- Tested against vcsim, recorded host runners and the PVE test fake, not real hypervisors (the rc2 and rc4 labs, and "Validated in the lab since rc4", ran real ones later).
 
 → [ADR-0011 Addendum A](docs/adr/0011-migration-staging-cleanup.md#addendum-a--landed-disks-rc2),
 [Upgrade guide](docs/upgrading.md#behavior-changes-that-are-visible-but-not-breaking)
@@ -830,7 +1085,7 @@ Wave 2 adds to this:
 
 ## About this release candidate / what to test
 
-v0.4.0 GA follows after a soak of this candidate (rc1 and rc2 came before it; rc3 was tagged but not released). Please try it on a non-production
+v0.4.0 GA follows after a soak of this candidate (rc1, rc2 and rc4 came before it; rc3 was tagged but not released). Please try it on a non-production
 cluster and report what you find (GitHub issues; include the Provider type, the
 `kubectl describe` of the object involved and the provider log, never a Secret).
 The most useful things to exercise:
@@ -867,6 +1122,21 @@ The most useful things to exercise:
     a same-named domain, a pool without room), a retry after a failure, and deleting the
     migration while it waits for placement;
   - a vSphere S3/NFS import: only the `.vmdk` is left in the landing folder.
+- **New since rc4 (Proxmox):**
+  - a `VirtualMachine` with `spec.userData` cloned from a template, with and without a
+    cloud-init drive of its own on the template: it starts, the drive is on the storage
+    of the VM's disk (not `local`), and `PVE_DEFAULT_STORAGE` only matters for a clone
+    with no storage-backed disk;
+  - `kubectl get vm` after powering a Proxmox VM off and on: `Running` or `Stopped`,
+    not `Reconfiguring`;
+  - a VM with two networks on different bridges, one with a VLAN tag and a static IP:
+    `qm config <vmid>` shows `net0`/`net1`, `ipconfig0`/`ipconfig1` and the VM-wide
+    `nameserver`, and the guest has the address; a clone keeps its template's NICs and
+    MACs where the spec names none; a PVE token with only `VM.Config.Network`,
+    `VM.Config.Cloudinit` and `SDN.Use` on its bridges is enough;
+  - a migration onto Proxmox: the VM lands on the bridge and VLAN its target names, and
+    whether the migrated guest has network (see Known limitations, R36); tell us which
+    guest image you used.
 - **Also new in rc2 (Wave 2):**
   - a CPU or memory change of a running vSphere VM that has no hot-add (expect
     `Reconfiguring=False/ResizePendingPowerOff`, then power it off and on), and a
@@ -883,14 +1153,18 @@ The most useful things to exercise:
     `spec.storage.pvc.name` should survive the migration's deletion;
   - `kubectl get vm`: `PHASE` filled in on every VM after the manager rolls.
 
-**Proxmox was not validated against a real PVE cluster.** The Proxmox changes in
-this release (owner stamps, per-VM owner checks, adoption stamping, clone
-re-binding, imported-disk confinement, NFS/S3 import hardening, idempotent power,
-and in Wave 2 the `Reconfigure` change that no longer touches `scsi0`, the s3 stage
-publish check and the import-stage delete of a failed migration) were tested only
-against the test fake, not a real PVE cluster. If you run Proxmox, treat it as
-untested and try these paths on a lab cluster first. ADR-0012's Proxmox name-rule
-change (planned for v0.4.1) needs a real PVE cluster as its release gate.
+**Proxmox was validated on a single real PVE node, not on a PVE cluster.** The Proxmox
+changes since rc1 (owner stamps, per-VM owner checks, adoption stamping, clone
+re-binding, imported-disk confinement, NFS/S3 import hardening, idempotent power, the
+`Reconfigure` change that no longer touches `scsi0`, the s3 stage publish check, the
+import-stage delete of a failed migration) were tested only against the test fake until
+rc4. The lab since rc4 ("Validated in the lab since rc4", below) ran the paths it lists
+on a real PVE 9.2 node, and found the three defects fixed in rc5 (R33, R34, R36). A Proxmox
+path that is not on that list, for example adoption of a Proxmox VM, a reused VMID under
+a managed `VirtualMachine`, a `Reconfigure`, or the import-stage delete of a failed
+migration, is still tested only against the fake: try it on a lab node first. ADR-0012's
+Proxmox name-rule change (planned for v0.4.1) needs a PVE cluster, not one node, as its
+release gate.
 
 **Validated in the lab on real vSphere and libvirt** (vCenter, single-host and
 clustered libvirt 10.0, Kubernetes 1.34), on the rc2 candidate build:
@@ -925,11 +1199,13 @@ seed directory; build `main-71e8647` for the provider-driven R27 checks and
   the modes), a single-host clone of a started source that read only the private
   copy, the refusal of a `0755` root-owned directory with nothing written and the
   recovery after `0711`, and a Delete that removed the new and the legacy `/tmp`
-  seeds. **Not run:** a clustered clone of a started source, an SELinux host.
+  seeds. **Not run in that lab:** a clustered clone of a started source (run later, on
+  v0.4.0-rc4, see "Validated in the lab since rc4" below), an SELinux host.
 - **Clone identity (#413), partly:** a single-host libvirt clone got its own sealed seed
   with `instance-id` `virtrigaud-<target UID>` and its own hostname, and booted (a
-  cirros guest). **Not validated:** new SSH host keys in the guest, and the vSphere
-  `guestinfo` rewrite on a real vCenter.
+  cirros guest). **Not validated in that lab:** new SSH host keys in the guest, and the
+  vSphere `guestinfo` rewrite on a real vCenter. The vSphere one was validated later, on
+  v0.4.0-rc4 (below); new SSH host keys in a libvirt guest are still not validated.
 - **Migration into a clustered libvirt Provider (#415, #416),** a two-host Provider on
   a shared NFS pool: a single-host libvirt VM into the cluster over `s3` and over
   `nfs`, both to `Ready`; the target placed before the source was powered off and
@@ -939,7 +1215,43 @@ seed directory; build `main-71e8647` for the provider-driven R27 checks and
   (the migration waited, did not re-place, and recovered). **Not run:** vSphere →
   clustered, Proxmox → clustered, a host made unreachable after the disk landed, a
   manager restart in the middle of an import, an R4-held target, a retry after an
-  import. All of these are covered by unit, envtest and simulator tests.
+  import. All of these are covered by unit, envtest and simulator tests. Of these,
+  vSphere → clustered and Proxmox → clustered were run later, on v0.4.0-rc4 (below).
+
+**Validated in the lab since rc4**, 2026-10-23, in three runs: two on a single Proxmox VE
+9.2 node (no PVE cluster), one on vSphere and libvirt 10.0 (single-host and clustered).
+
+*On v0.4.0-rc4, single Proxmox VE 9.2 node* (this run found R33, R34 and R36):
+
+- **Proxmox lifecycle:** a create from a template with user-data, a power off and on
+  (the phase still stuck at `Reconfiguring`, which is R34 on rc4), a `VMSnapshot` create
+  and delete, a `VMClone` with a new identity, and a delete.
+- **Migrations over S3**, all to `Ready`: vSphere → Proxmox and Proxmox → vSphere (the
+  guests had **no network**, which is R36); single-host libvirt → Proxmox and Proxmox →
+  single-host libvirt (the guests were reachable); and Proxmox → clustered libvirt (the
+  guest was reachable on the host the scheduler chose).
+- **Migrations over NFS:** an import into Proxmox from a single-host libvirt VM, and an
+  export from Proxmox to a single-host libvirt VM.
+
+*On main at f90a871 (manager and providers), single Proxmox VE 9.2 node:*
+
+- **The cloud-init drive (R33):** a clone of a template with user-data, with the `local`
+  `images`-content workaround removed; the drive stayed on the template's storage.
+- **The phase (R34):** a power cycle, with the phase settling to `Stopped` and then
+  `Running`.
+- **Networks (R36, slice 0a):** a VM with two NICs, one on an isolated VLAN-aware bridge
+  with a VLAN tag and a static IP, applied in the guest; and a single-host libvirt →
+  Proxmox migration over S3 that landed on the bridge and VLAN its target names.
+
+*Earlier, on v0.4.0-rc4, vSphere and libvirt:* the clone identity (R26) in the guest on a
+real vSphere (new `instance-id`, hostname and SSH host key); vSphere → clustered libvirt
+over S3; a clustered clone of a booted VM, which exercises the seed directory (R27,
+#414); and no `.hlog` left by a vSphere import (R23, #409).
+
+**Not run:** Proxmox adoption; a reused VMID and the ADR-0012 name rule (which needs a
+PVE cluster); a Proxmox `Reconfigure` (resize); the Proxmox import-stage delete of a
+failed migration; a PVE cluster of more than one node; SSH host keys in a libvirt clone;
+an SELinux libvirt host; and the paths named above that need a fault to trigger.
 
 ## Breaking changes
 
@@ -1097,6 +1409,29 @@ seed directory; build `main-71e8647` for the provider-driven R27 checks and
   make them private. → [Changes since v0.4.0-rc2](#libvirt-cloud-init-seeds-are-private-and-live-in-a-dedicated-directory-414-breaking),
   [Upgrade guide](docs/upgrading.md#breaking-changes)
 
+**New since rc4: nothing is breaking.** Behaviour changes that need a look before you
+roll (all on Proxmox, and in the manager):
+
+- The cloud-init drive of a VM cloned from a template moves from `local` to the storage
+  of the VM's disk (#425, #427). A drive already on `local` stays there.
+- A failed Proxmox power task now shows `Ready=False/ProviderError`, settles the
+  `Reconfiguring` marker as `PowerTaskFailed` (a new reason; alerting that matches on
+  reasons should know it) and is re-sent on a 5 s to 5 min backoff instead of being
+  polled for ever (#425, #427). The phase of a VM left at `Reconfiguring` by rc4 is
+  settled by the next reconcile.
+- The PVE token needs `VM.Config.Network`, `VM.Config.Cloudinit` and, if it is not root,
+  `SDN.Use` on the bridges in use, or a clone that sets a NIC fails with a 403 and is
+  rolled back (#428).
+- A Proxmox VM now lands on the bridge, VLAN and static IP its networks name, so a VM
+  that relied on the old `vmbr0` default changes on its next create or clone, and an
+  `ipAddress` without `prefix` or a `dns` entry that is not an IP is now refused (#428).
+- The manager sends only the network block that matches the target Provider's type,
+  which also changes which shared field a vSphere or libvirt VM reads when its
+  attachment has several blocks (#428).
+
+→ [Changes since v0.4.0-rc4](#changes-since-v040-rc4),
+[Upgrade guide](docs/upgrading.md#behavior-changes-that-are-visible-but-not-breaking)
+
 See the full breaking-change table, required upgrade order (CRDs → admission
 policy and grants → manager → providers), and rollback caveats in
 **[docs/upgrading.md](docs/upgrading.md)**.
@@ -1107,6 +1442,11 @@ policy and grants → manager → providers), and rollback caveats in
 
 - `github.com/klauspost/compress` 1.18.7 fixes CVE-2026-63209 (HIGH, denial of
   service), reached through the S3 client used by migration storage (#423).
+- **New since rc4:** the Proxmox provider now applies the bridge and VLAN tag a
+  `VirtualMachine`'s network names, so the PVE token's `SDN.Use` ACLs are what decide
+  which bridges and VLANs the authors of `VirtualMachine`s in a namespace can reach; the
+  provider has no allow-list of its own yet (a slice 0a follow-up in ADR-0014)
+  (#428, → [Changes since v0.4.0-rc4](#changes-since-v040-rc4)).
 - Every pod's writable `/tmp` emptyDir now has a `sizeLimit`; a pod that writes
   past it is evicted. The limit bounds the pod's `/tmp`, but does not reserve
   node storage: a node with less free ephemeral storage than the limit can still
@@ -1334,7 +1674,8 @@ policy and grants → manager → providers), and rollback caveats in
   first, on a host whose `default` pool has room for the source disk, and the disk is
   imported onto that host; a host that fails after placement is waited for, not
   replaced. The disk-space check is a filter, not a reservation. Run in the lab from a
-  single-host libvirt source; a vSphere or Proxmox source was not. **Behaviour change:**
+  single-host libvirt source, and in the lab since rc4 from a vSphere source and a
+  Proxmox source (over S3). **Behaviour change:**
   a libvirt Host's `allocatableStorageBytes` is now the `default` pool's free space
   only, measured fresh (it summed every active pool before), which changes what a
   `VMPlacementPolicy` `minDiskSpacePerHost` compares against.
@@ -1342,6 +1683,14 @@ policy and grants → manager → providers), and rollback caveats in
   [`docs/clustered-provider-inventory.md`](docs/clustered-provider-inventory.md#migration-into-a-clustered-provider-addendum-b)).
 
 ### Fixes
+
+- **New since rc4** (→ [Changes since v0.4.0-rc4](#changes-since-v040-rc4)):
+  - **A Proxmox VM with user-data failed to start on a stock PVE**: the cloud-init drive
+    was put on `local`, which has no `images` content (#425, #427; R33).
+  - **A Proxmox VM stayed in phase `Reconfiguring` after a power change**, and a failed
+    power task was polled for ever (#425, #427; R34).
+  - **Every Proxmox VM got `virtio` on `vmbr0` with no static IP**, whatever its networks
+    named, and a clone with user-data lost its template's NICs (#428; R36).
 
 - **New since rc2** (→ [Changes since v0.4.0-rc2](#changes-since-v040-rc2)):
   - **A single-host libvirt delete of a VM and its clone together left the VM's seed
@@ -1809,7 +2158,8 @@ says so. Each links to the page that documents it in full, where one exists.
 - **Clustered libvirt providers are experimental.** `topology: cluster` is opt-in
   and may still change. Host-to-host migration is not implemented. Migration into a
   clustered provider is new and experimental: `s3` and `nfs` only, the target VM in the
-  migration's namespace; run in the lab only from a single-host libvirt source; the
+  migration's namespace; run in the lab from a single-host libvirt source, a vSphere
+  source (over S3) and a Proxmox source; the
   disk-space check is a filter, not a reservation; the source disk's size is read once;
   a host that fails after placement is waited for, not replaced; two Providers whose
   hosts mount one pool are not serialised with each other; and a waiting target's
@@ -1823,6 +2173,36 @@ says so. Each links to the page that documents it in full, where one exists.
   dead hard-mounted NFS export cannot be killed and may accumulate until the mount
   recovers
   (→ [`docs/clustered-provider-inventory.md`](docs/clustered-provider-inventory.md#what-listhosts-reports-per-host-libvirt)).
+- **A migrated guest can boot without network, or with a new identity (R36).** The fix
+  is designed, not built. A Linux cloud-image guest whose netplan matches its NIC by
+  MAC address (Ubuntu cloud images do) can boot **without network** on a vSphere or
+  Proxmox target: the target NIC has a new MAC and cloud-init does not run again. On a
+  libvirt target the network works only because the guest gets a new cloud-init
+  identity, so its instance-id, hostname and SSH host keys change. The fix, which
+  carries the source NICs' MACs to the target and presents the source's instance-id, is
+  accepted in [ADR-0014](docs/adr/0014-migrated-guest-network.md) and planned after GA;
+  of its slices only the Proxmox network plumbing (#428) is in this release. Windows
+  guests are outside the design beyond carrying the MAC. Until then: make the guest's
+  netplan match its NIC by name or driver instead of `macaddress` before you migrate,
+  or use a guest image that already does, and after a migrated guest comes up without
+  network, fix its network configuration from the console
+  (→ [ADR-0014](docs/adr/0014-migrated-guest-network.md)).
+- **Proxmox applies only two things from `spec.userData` (R35).** The provider does not
+  pass the user-data to the guest: PVE builds the cloud-init drive from settings the
+  provider sets. From the user-data it reads the `ssh_authorized_keys:` entries written
+  as a block list of `- key` lines (a flow list such as `[a, b]` is not read), which
+  become the VM's `sshkeys`, and the value on the first line that contains `name:` but
+  not `hostname:`, which becomes `ciuser`. It sets no password and no custom user-data
+  snippet (`cicustom`), so `packages`, `runcmd`, `write_files` and the rest of the
+  user-data do not run on a Proxmox guest
+  (`internal/providers/proxmox/server.go`, `parseCreateRequest`).
+- **Proxmox networks: part of an attachment is not applied.** `firewall`, `rateLimit` and
+  `mtu` of the `proxmox` block, `VMNetworkAttachment.spec.ipAllocation` and
+  `spec.networks[].macAddress` have no effect on a Proxmox VM (the manager drops the MAC
+  before every provider until ADR-0014 slice 0b); the CRD allows only `vmbrN` bridges
+  and IPv4 addresses; and `Describe` reports no NICs. A static IP takes effect only
+  when the VM has a cloud-init drive
+  (→ [`docs/proxmox-networks.md`](docs/proxmox-networks.md)).
 - **Deleting a namespace that holds an in-use `Provider`.** Kubernetes deletes the
   provider's runtime with the namespace, and nothing can stop that. VMs whose
   deletes miss the pod's termination window are held (`ProviderUnavailable`) and
@@ -1945,6 +2325,10 @@ says so. Each links to the page that documents it in full, where one exists.
   [docs/upgrading.md](docs/upgrading.md#leftovers-from-earlier-releases).
 
 ## Upgrade
+
+Since rc4: **no CRD changed.** Grant the PVE token `VM.Config.Network`,
+`VM.Config.Cloudinit` and `SDN.Use` on its bridges, then roll the manager and the
+Proxmox provider together; see [Upgrade order for rc5](#upgrade-order-for-rc5).
 
 Since rc2: **create the seed directory on every libvirt host first**, then CRDs, then
 the manager, then the providers (the clustered libvirt provider before you migrate into
