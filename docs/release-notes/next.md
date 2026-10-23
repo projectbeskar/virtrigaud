@@ -1,10 +1,8 @@
 <!--
-Draft release notes for the VirtRigaud release after v0.4.0-rc2. The version
-label is not decided: it is v0.4.0-rc3 or v0.4.0 GA (rc3 or GA - maintainer's
-call). rc1 and rc2 were published from earlier versions of this file; rc1
-followed v0.3.11. Paste everything below this comment into the GitHub release
-once the label is chosen: search this file for "maintainer's call" for the
-sentences that depend on it. The notes are cumulative since v0.3.11: a user going
+Draft release notes for VirtRigaud v0.4.0-rc3, the third release candidate for
+v0.4.0 (GA follows after a soak). rc1 and rc2 were published from earlier
+versions of this file; rc1 followed v0.3.11. Paste everything below this comment
+into the GitHub pre-release. The notes are cumulative since v0.3.11: a user going
 from v0.3.11 needs all of them, while "Changes since v0.4.0-rc2" is the short
 list for someone already on rc2 and "Changes since v0.4.0-rc1" the one for
 someone on rc1. See docs/upgrading.md for the full upgrade guide these notes
@@ -12,9 +10,7 @@ link to, and CHANGELOG.md for the complete, dated changelog. For the GA
 release, drop the rc sections and re-title.
 -->
 
-This is the release after **v0.4.0-rc2** <!-- rc3 or GA - maintainer's call: name the
-release here, and keep or drop the release-candidate wording in this paragraph and in
-"About this release candidate / what to test" -->. It is a
+This is **v0.4.0-rc3, a release candidate** (GA follows after a soak). It is a
 security-hardening release: a full codebase security review found and fixed several
 cross-tenant and privilege-escalation issues in the vSphere and libvirt providers,
 cross-namespace clone/migration targets, and VM provider binding. rc2 added two waves
@@ -22,7 +18,7 @@ of fixes on top of rc1 (below): one about proving that the VM a migration, adopt
 clone or per-VM call acts on is the one VirtRigaud owns, and one about failures
 half-way through an operation (a resize that hit the wrong disk, a provider call whose
 result was lost, a failed migration's leftover disk) and about provider pods' access to
-migration storage. This release adds a third, on top of rc2: libvirt cloud-init seeds
+migration storage. rc3 adds a third, on top of rc2: libvirt cloud-init seeds
 (private, and a clone's own identity), leftover files, and migration into a clustered
 libvirt Provider (experimental). **Several fixes are breaking
 or change default behavior.** Read the upgrade guide before upgrading:
@@ -34,7 +30,7 @@ v0.4.0-rc1".
 
 ## Changes since v0.4.0-rc2
 
-Ten pull requests, merged 2026-10-19 to 2026-10-22. Three themes. **Cloud-init
+Twelve pull requests, merged 2026-10-19 to 2026-10-23. Three themes, plus a clean-up (#419) and a CI dependency update (#410). **Cloud-init
 seeds** (#408, #413, #414): the user-data of a libvirt VM, which can carry
 passwords and keys, was readable by any local user of the hypervisor host; a
 clone booted with its source's SSH host keys; and a delete left seeds behind.
@@ -55,6 +51,8 @@ providers** (see [Upgrade order for this release](#upgrade-order-for-this-releas
 | #416 (R11, B.3) | A `VMMigration` can target a clustered libvirt Provider: the target VM is created and placed first, the disk lands on its host. New status field and condition, a CRD relaxation (empty `diskID`), and `allocatableStorageBytes` is now the `default` pool only | Behaviour change |
 | #417 (R31) | A libvirt Host's `allocatableStorageBytes` is measured fresh with `stat -f` on every sync, instead of libvirt's cached `pool-info` value, and fails closed to 0 (details in the [inventory](docs/clustered-provider-inventory.md#what-listhosts-reports-per-host-libvirt)) | Behaviour change |
 | #407, #412 (R11) | ADR-0007 Addendum B: the design, proposed, then accepted with decisions on its open questions | Documentation only |
+| #419 | Internal lab host names and addresses are removed from tracked files (docs, examples, tests); a CI check keeps them out | No |
+| #410 | CI: `github/codeql-action/upload-sarif` 4.38.3 → 4.39.0 | No |
 | #411 | Go 1.26.10 (GO-2026-6809, `crypto/x509`, reachable through `x509.Certificate.Verify`); builder images in step | No |
 
 ### libvirt cloud-init seeds are private and live in a dedicated directory (#414, breaking)
@@ -798,8 +796,7 @@ Wave 2 adds to this:
 
 ## About this release candidate / what to test
 
-<!-- rc3 or GA - maintainer's call: if this release is GA, drop this section's candidate wording. -->
-v0.4.0 GA follows after a soak of the release candidates (rc1 and rc2 were the first). Please try it on a non-production
+v0.4.0 GA follows after a soak of this candidate (rc1 and rc2 came before it). Please try it on a non-production
 cluster and report what you find (GitHub issues; include the Provider type, the
 `kubectl describe` of the object involved and the provider log, never a Secret).
 The most useful things to exercise:
