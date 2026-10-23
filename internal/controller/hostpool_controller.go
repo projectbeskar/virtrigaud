@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 
 	"k8s.io/apimachinery/pkg/api/equality"
@@ -136,12 +137,11 @@ func (r *HostPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (r
 		return ctrl.Result{}, nil
 	}
 
-	// HostPool status has a single writer (this controller), and every field
-	// is recomputed from the live member Hosts on each reconcile, so a merge
-	// patch (no resourceVersion precondition) cannot drop another writer's
-	// field and never fails on a conflict. A count computed from a cache that
-	// lags behind is corrected by the Host event that follows it.
-	if err := r.Status().Patch(ctx, pool, client.MergeFrom(base)); err != nil {
+	patch, err := hostPoolStatusPatch(pool)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if err := r.Status().Patch(ctx, pool, patch); err != nil {
 		if apierrors.IsNotFound(err) {
 			return ctrl.Result{}, nil
 		}
@@ -154,6 +154,24 @@ func (r *HostPoolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (r
 		"readyHosts", pool.Status.ReadyHosts,
 		"schedulableHosts", pool.Status.SchedulableHosts)
 	return ctrl.Result{}, nil
+}
+
+// hostPoolStatusPatch is a JSON merge patch that sets the whole of pool.Status.
+//
+// HostPool status has a single writer (this controller), and every field is
+// recomputed from the live member Hosts on each reconcile, so a patch without
+// a resourceVersion precondition cannot drop another writer's field and never
+// fails on a conflict; a count computed from a cache that lags behind is
+// corrected by the Host event that follows it. The whole status is sent,
+// rather than a diff against the object read, so a count of 0 is always
+// written: a diff would leave out a 0 the object read already "had" as an
+// absent field (the first write of an empty pool).
+func hostPoolStatusPatch(pool *infravirtrigaudiov1beta1.HostPool) (client.Patch, error) {
+	data, err := json.Marshal(map[string]infravirtrigaudiov1beta1.HostPoolStatus{"status": pool.Status})
+	if err != nil {
+		return nil, fmt.Errorf("encode HostPool %s/%s status patch: %w", pool.Namespace, pool.Name, err)
+	}
+	return client.RawPatch(types.MergePatchType, data), nil
 }
 
 // isHostPoolMember reports whether host is a member of pool: in the pool's

@@ -170,6 +170,9 @@ type HostPoolSpec struct {
 // changes health, schedulability, providerRef or deletion state. Its Ready
 // condition is True when SchedulableHosts > 0.
 //
+// A count of 0 (an empty pool, or no schedulable host) is written as 0 rather
+// than omitted, so it shows in the status and in the kubectl get columns.
+//
 // ADR-0007 specifies HostPool.status only in prose ("aggregates host counts +
 // readiness"). These fields are the smallest additive shape consistent with that
 // description and with the other kinds' status conventions (ObservedGeneration +
@@ -179,18 +182,18 @@ type HostPoolStatus struct {
 	// Only Hosts in the pool's own namespace are members (the same-namespace
 	// model); a Host being deleted is counted until it is gone.
 	// +optional
-	TotalHosts int32 `json:"totalHosts,omitempty"`
+	TotalHosts int32 `json:"totalHosts"`
 
 	// ReadyHosts is the number of member Hosts reporting Health=Ready.
 	// +optional
-	ReadyHosts int32 `json:"readyHosts,omitempty"`
+	ReadyHosts int32 `json:"readyHosts"`
 
 	// SchedulableHosts is the number of member Hosts that are both Health=Ready
 	// and spec.schedulable=true, and that the scheduler can therefore place a
 	// new VM on: a Host being deleted, or one whose spec.providerRef is not the
 	// pool's Provider, is never a placement target and is not counted.
 	// +optional
-	SchedulableHosts int32 `json:"schedulableHosts,omitempty"`
+	SchedulableHosts int32 `json:"schedulableHosts"`
 
 	// ObservedGeneration reflects the generation of the HostPool spec observed by
 	// the controller.

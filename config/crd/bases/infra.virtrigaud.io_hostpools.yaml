@@ -210,6 +210,9 @@ spec:
               changes health, schedulability, providerRef or deletion state. Its Ready
               condition is True when SchedulableHosts > 0.
 
+              A count of 0 (an empty pool, or no schedulable host) is written as 0 rather
+              than omitted, so it shows in the status and in the kubectl get columns.
+
               ADR-0007 specifies HostPool.status only in prose ("aggregates host counts +
               readiness"). These fields are the smallest additive shape consistent with that
               description and with the other kinds' status conventions (ObservedGeneration +
