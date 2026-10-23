@@ -50,6 +50,14 @@ type asyncPowerProvider struct {
 	taskErr  error
 	// asked holds the task refs IsTaskComplete was asked about.
 	asked []string
+	// powers counts the Power calls, reconfigures the Reconfigure calls.
+	powers       int
+	reconfigures int
+}
+
+func (p *asyncPowerProvider) Reconfigure(_ context.Context, _ contracts.VMRef, _ contracts.CreateRequest) (contracts.ReconfigureResult, error) {
+	p.reconfigures++
+	return contracts.ReconfigureResult{}, nil
 }
 
 func (p *asyncPowerProvider) Describe(_ context.Context, _ contracts.VMRef) (contracts.DescribeResponse, error) {
@@ -57,6 +65,7 @@ func (p *asyncPowerProvider) Describe(_ context.Context, _ contracts.VMRef) (con
 }
 
 func (p *asyncPowerProvider) Power(_ context.Context, _ contracts.VMRef, _ contracts.PowerOp) (string, error) {
+	p.powers++
 	return powerTaskRef, nil
 }
 
@@ -162,7 +171,7 @@ func TestReconcileVM_AsyncPowerTask_FailedTaskSurfacedAndSettled(t *testing.T) {
 	c := reconfiguringOf(got)
 	require.NotNil(t, c)
 	assert.Equal(t, metav1.ConditionFalse, c.Status)
-	assert.Equal(t, k8s.ReasonProviderError, c.Reason)
+	assert.Equal(t, k8s.ReasonPowerTaskFailed, c.Reason)
 	assert.Equal(t, got.Generation, c.ObservedGeneration)
 	ready := meta.FindStatusCondition(got.Status.Conditions, k8s.ConditionReady)
 	require.NotNil(t, ready)
