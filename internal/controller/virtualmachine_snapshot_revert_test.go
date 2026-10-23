@@ -790,3 +790,20 @@ func TestSnapshotRevert_OldCRDSendsNothing(t *testing.T) {
 	}
 	assert.Empty(t, prov.reverts)
 }
+
+// TestBoundSnapshotRevertMessage: the record's message never exceeds the
+// CRD's bound, so a long one (object names are up to 253 characters) never
+// makes the status write fail.
+func TestBoundSnapshotRevertMessage(t *testing.T) {
+	vm := baseVM("default")
+	boundSnapshotRevertMessage(vm) // no record: nothing to do
+	vm.Status.SnapshotRevert = &infravirtrigaudiov1beta1.SnapshotRevertStatus{
+		Message: strings.Repeat("é", maxSnapshotRevertMessageBytes)}
+	boundSnapshotRevertMessage(vm)
+	assert.LessOrEqual(t, len(vm.Status.SnapshotRevert.Message), maxSnapshotRevertMessageBytes)
+	assert.True(t, strings.HasSuffix(vm.Status.SnapshotRevert.Message, providerDetailEllipsis))
+	short := "reverting"
+	vm.Status.SnapshotRevert.Message = short
+	boundSnapshotRevertMessage(vm)
+	assert.Equal(t, short, vm.Status.SnapshotRevert.Message)
+}

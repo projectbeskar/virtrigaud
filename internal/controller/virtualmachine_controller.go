@@ -2972,6 +2972,7 @@ func overrideImageWithPreparedLocation(
 // and Ready never True while a requested snapshot revert is pending, in flight
 // or failed (applySnapshotRevertReadiness).
 func (r *VirtualMachineReconciler) updateStatus(ctx context.Context, vm *infravirtrigaudiov1beta1.VirtualMachine) {
+	boundSnapshotRevertMessage(vm)
 	applySnapshotRevertReadiness(vm)
 	applyDerivedPhase(vm)
 	if err := r.Status().Update(ctx, vm); err != nil {

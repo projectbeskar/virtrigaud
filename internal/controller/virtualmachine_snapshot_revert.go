@@ -604,10 +604,24 @@ func (r *VirtualMachineReconciler) pollSnapshotRevertTask(ctx context.Context, v
 	return r.succeedSnapshotRevert(ctx, vm)
 }
 
+// maxSnapshotRevertMessageBytes is the CRD's bound on
+// status.snapshotRevert.message.
+const maxSnapshotRevertMessageBytes = 1024
+
+// boundSnapshotRevertMessage cuts status.snapshotRevert.message to the CRD's
+// bound (on a rune boundary, with an ellipsis), so a long message — object
+// names are up to 253 characters — never makes the status write fail.
+func boundSnapshotRevertMessage(vm *infravirtrigaudiov1beta1.VirtualMachine) {
+	if rec := vm.Status.SnapshotRevert; rec != nil {
+		rec.Message = truncateForLog(rec.Message, maxSnapshotRevertMessageBytes-len(providerDetailEllipsis))
+	}
+}
+
 // writeStatusChecked writes vm's status like updateStatus, with the optimistic
 // lock of vm's resourceVersion, and returns the error: nothing that must be on
 // record before a provider call is sent unless it is.
 func (r *VirtualMachineReconciler) writeStatusChecked(ctx context.Context, vm *infravirtrigaudiov1beta1.VirtualMachine) error {
+	boundSnapshotRevertMessage(vm)
 	applySnapshotRevertReadiness(vm)
 	applyDerivedPhase(vm)
 	if err := r.Status().Update(ctx, vm); err != nil {
