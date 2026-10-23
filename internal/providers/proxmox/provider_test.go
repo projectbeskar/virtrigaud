@@ -18,7 +18,9 @@ package proxmox
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"strconv"
 	"testing"
 	"time"
 
@@ -27,6 +29,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
+	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
 	"github.com/projectbeskar/virtrigaud/internal/providers/proxmox/pveapi"
 	"github.com/projectbeskar/virtrigaud/internal/providers/proxmox/pvefake"
 	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
@@ -586,9 +589,12 @@ func TestProxmoxProvider_ImagePrepare_EmptySource(t *testing.T) {
 	assert.Nil(t, server.LastDownloadRequest())
 }
 
+// TestProxmoxProvider_MultiNIC creates a VM with three NICs from the networks
+// the manager sends (the real contracts.NetworkAttachment, marshalled as
+// internal/transport/grpc does) and checks each lands as specified (R36).
 func TestProxmoxProvider_MultiNIC(t *testing.T) {
 	// Start fake PVE server
-	_, endpoint, err := pvefake.StartFakeServer()
+	srv, endpoint, err := pvefake.StartFakeServer()
 	require.NoError(t, err)
 
 	// Create provider with fake server
@@ -596,29 +602,19 @@ func TestProxmoxProvider_MultiNIC(t *testing.T) {
 
 	ctx := context.Background()
 
+	networks, err := json.Marshal([]contracts.NetworkAttachment{
+		{Name: "lan", Bridge: "vmbr0", StaticIP: "192.168.1.100", Prefix: 24, Gateway: "192.168.1.1", DNS: "8.8.8.8,1.1.1.1"},
+		{Name: "dmz", Bridge: "vmbr1", VLAN: 100, Model: "e1000"},
+		{Name: "mgmt", Bridge: "vmbr2"},
+	})
+	require.NoError(t, err)
+
 	// Test VM creation with multiple network interfaces
 	createReq := &providerv1.CreateRequest{
-		Name:      "test-vm-multi-nic",
-		ClassJson: `{"cpus": 2, "memory": "4Gi"}`,
-		ImageJson: `{"source": "ubuntu-22-template"}`,
-		NetworksJson: `[
-			{
-				"name": "lan",
-				"static_ip": {
-					"address": "192.168.1.100/24",
-					"gateway": "192.168.1.1",
-					"dns": ["8.8.8.8", "1.1.1.1"]
-				}
-			},
-			{
-				"name": "dmz",
-				"vlan": 100
-			},
-			{
-				"name": "vmbr2",
-				"mac": "02:00:00:aa:bb:cc"
-			}
-		]`,
+		Name:         "test-vm-multi-nic",
+		ClassJson:    `{"cpus": 2, "memory": "4Gi"}`,
+		ImageJson:    `{"source": "ubuntu-22-template"}`,
+		NetworksJson: string(networks),
 		UserData: []byte(`#cloud-config
 hostname: test-vm-multi-nic
 users:
@@ -642,6 +638,16 @@ users:
 	describeResp, err := provider.Describe(ctx, &providerv1.DescribeRequest{Id: createResp.Id})
 	require.NoError(t, err)
 	assert.True(t, describeResp.Exists)
+
+	vmid, err := strconv.Atoi(createResp.Id)
+	require.NoError(t, err)
+	vm, ok := srv.GetVM(vmid)
+	require.True(t, ok)
+	assert.Equal(t, "virtio,bridge=vmbr0", vm.Config["net0"])
+	assert.Equal(t, "e1000,bridge=vmbr1,tag=100", vm.Config["net1"])
+	assert.Equal(t, "virtio,bridge=vmbr2", vm.Config["net2"])
+	assert.Equal(t, "ip=192.168.1.100/24,gw=192.168.1.1", vm.Config["ipconfig0"])
+	assert.Equal(t, "8.8.8.8 1.1.1.1", vm.Config["nameserver"])
 }
 
 func TestProxmoxProvider_UpdatedCapabilities(t *testing.T) {

@@ -760,10 +760,14 @@ func (c *Client) configToValues(config *VMConfig) url.Values {
 
 	// Configure IP settings
 	for _, ipConfig := range config.IPConfigs {
-		ipString := c.buildIPConfigString(ipConfig)
+		ipString := IPConfigString(ipConfig)
 		if ipString != "" {
 			values.Set(fmt.Sprintf("ipconfig%d", ipConfig.Index), ipString)
 		}
+	}
+	// DNS servers are a VM-wide setting in PVE, not part of an ipconfigN.
+	if nameserver := NameserverValue(config.IPConfigs); nameserver != "" {
+		values.Set("nameserver", nameserver)
 	}
 
 	// Add custom parameters
@@ -815,35 +819,50 @@ func (c *Client) buildNetworkString(netConfig NetworkConfig) string {
 	return strings.Join(parts, ",")
 }
 
-// buildIPConfigString constructs the IP configuration string for PVE
-func (c *Client) buildIPConfigString(ipConfig IPConfig) string {
+// IPConfigString builds the value of a PVE ipconfigN key from ipConfig. A DHCP
+// config is "ip=dhcp". A static one is "ip=<addr>/<prefix>[,gw=<gateway>]", or
+// "ip6=<addr>/<prefix>[,gw6=<gateway>]" when the address is IPv6. The DNS
+// servers are not part of it: PVE keeps them in the VM's own nameserver key
+// (see NameserverValue), and rejects a nameserver inside an ipconfigN. It
+// returns "" for a config with neither DHCP nor an address.
+func IPConfigString(ipConfig IPConfig) string {
 	if ipConfig.DHCP {
 		// Proxmox expects "ip=dhcp" not "dhcp=1"
 		return "ip=dhcp"
 	}
-
-	var parts []string
-
-	// IP address
-	if ipConfig.IP != "" {
-		parts = append(parts, fmt.Sprintf("ip=%s", ipConfig.IP))
-	}
-
-	// Gateway
-	if ipConfig.Gateway != "" {
-		parts = append(parts, fmt.Sprintf("gw=%s", ipConfig.Gateway))
-	}
-
-	// DNS servers
-	if ipConfig.DNS != "" {
-		parts = append(parts, fmt.Sprintf("nameserver=%s", ipConfig.DNS))
-	}
-
-	if len(parts) == 0 {
+	if ipConfig.IP == "" {
 		return ""
 	}
 
+	ipKey, gwKey := "ip", "gw"
+	if strings.Contains(ipConfig.IP, ":") {
+		ipKey, gwKey = "ip6", "gw6"
+	}
+	parts := []string{fmt.Sprintf("%s=%s", ipKey, ipConfig.IP)}
+	if ipConfig.Gateway != "" {
+		parts = append(parts, fmt.Sprintf("%s=%s", gwKey, ipConfig.Gateway))
+	}
 	return strings.Join(parts, ",")
+}
+
+// NameserverValue builds the value of the VM's PVE nameserver key from the
+// DNS servers of ipConfigs (each a comma-separated list): the servers in
+// order, each once, separated by spaces as PVE expects. It returns "" when no
+// config names a server.
+func NameserverValue(ipConfigs []IPConfig) string {
+	var servers []string
+	seen := map[string]bool{}
+	for _, ipConfig := range ipConfigs {
+		for _, server := range strings.Split(ipConfig.DNS, ",") {
+			server = strings.TrimSpace(server)
+			if server == "" || seen[server] {
+				continue
+			}
+			seen[server] = true
+			servers = append(servers, server)
+		}
+	}
+	return strings.Join(servers, " ")
 }
 
 // FindNode selects an appropriate node for VM placement

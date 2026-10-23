@@ -2765,34 +2765,7 @@ func (r *VirtualMachineReconciler) buildCreateRequest(
 
 		// Only look up VMNetworkAttachment if networkRef is specified
 		if netRef.NetworkRef != nil && i < len(networks) && networks[i] != nil {
-			net := networks[i]
-
-			if net.Spec.Network.VSphere != nil {
-				attachment.NetworkName = net.Spec.Network.VSphere.Portgroup
-				if net.Spec.Network.VSphere.VLAN != nil && net.Spec.Network.VSphere.VLAN.VlanID != nil {
-					attachment.VLAN = *net.Spec.Network.VSphere.VLAN.VlanID
-				}
-				// Pass PCI slot number for predictable interface naming (e.g., ens192)
-				if net.Spec.Network.VSphere.PCISlotNumber != nil {
-					attachment.PCISlotNumber = net.Spec.Network.VSphere.PCISlotNumber
-				}
-			}
-
-			if net.Spec.Network.Libvirt != nil {
-				attachment.NetworkName = net.Spec.Network.Libvirt.NetworkName
-				if net.Spec.Network.Libvirt.Bridge != nil {
-					attachment.Bridge = net.Spec.Network.Libvirt.Bridge.Name
-				}
-				attachment.Model = net.Spec.Network.Libvirt.Model
-			}
-
-			if net.Spec.Network.Proxmox != nil {
-				attachment.Bridge = net.Spec.Network.Proxmox.Bridge
-				attachment.Model = net.Spec.Network.Proxmox.Model
-				if net.Spec.Network.Proxmox.VLANTag != nil {
-					attachment.VLAN = *net.Spec.Network.Proxmox.VLANTag
-				}
-			}
+			applyNetworkBlocks(&attachment, networks[i], providerType(providerCR))
 		} else if netRef.NetworkRef == nil {
 			log.V(1).Info("NetworkRef not specified, using template's pre-configured NIC with guestinfo for IP config",
 				"network", netRef.Name,

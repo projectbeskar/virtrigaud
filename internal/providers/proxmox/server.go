@@ -369,7 +369,8 @@ func (p *Provider) Create(ctx context.Context, req *providerv1.CreateRequest) (*
 }
 
 // configureClonedVM applies, to a VM cloned from a template, what the clone
-// does not carry: the VMClass sizing and the cloud-init settings. Every value
+// does not carry: the VMClass sizing, the network settings the request names
+// (applyCloneNetworks) and the cloud-init settings. Every value
 // is set with an idempotent config update, so a re-sent Create that finds its
 // VM interrupted runs it again.
 func (p *Provider) configureClonedVM(ctx context.Context, req *providerv1.CreateRequest, vmConfig *pveapi.VMConfig, node string) error {
@@ -383,20 +384,35 @@ func (p *Provider) configureClonedVM(ctx context.Context, req *providerv1.Create
 		return fmt.Errorf("apply VMClass sizing to cloned VM %d: %w", vmConfig.VMID, err)
 	}
 
+	// Read the clone's config once: the NICs the request names are merged into
+	// the clone's own, and the cloud-init step needs its primary disk and its
+	// cloud-init drive and storage. A failed read is an error (the caller rolls
+	// back or retries): choosing the drive's storage without it could put the
+	// drive on `local` again (R33), and a NIC merged without it would lose the
+	// clone's MAC.
+	cloudInit := len(req.UserData) > 0 || vmConfig.SSHKeys != ""
+	var cfg map[string]interface{}
+	if cloudInit || anyNICSpecified(vmConfig.Networks) {
+		var err error
+		cfg, err = p.client.GetVMConfig(ctx, node, vmConfig.VMID)
+		if err != nil {
+			return fmt.Errorf("read the config of cloned VM %d: %w", vmConfig.VMID, err)
+		}
+	}
+
+	// The NICs and IP settings the request names. A NIC it does not name keeps
+	// what the template made (bridge, VLAN and the MAC PVE gave the clone); this
+	// also runs for a clone with no cloud-init data (R36).
+	if err := p.applyCloneNetworks(ctx, node, vmConfig, cfg, cloudInit); err != nil {
+		return err
+	}
+
 	// After cloning, reconfigure the VM with the cloud-init settings.
-	if len(req.UserData) == 0 && vmConfig.SSHKeys == "" {
+	if !cloudInit {
 		return nil
 	}
 	p.logger.Info("Reconfiguring cloned VM with cloud-init", "vmid", vmConfig.VMID)
 
-	// Read the clone's config once: its primary disk, and its cloud-init drive
-	// and storage. A failed read is an error (the caller rolls back or retries):
-	// choosing the drive's storage without it could put the drive on `local`
-	// again (R33).
-	cfg, err := p.client.GetVMConfig(ctx, node, vmConfig.VMID)
-	if err != nil {
-		return fmt.Errorf("read the config of cloned VM %d: %w", vmConfig.VMID, err)
-	}
 	primaryDisk, _ := pveapi.PrimaryDiskFromConfig(cfg)
 	p.logger.Info("Detected primary boot disk", "vmid", vmConfig.VMID, "disk", primaryDisk)
 
@@ -429,21 +445,6 @@ func (p *Provider) configureClonedVM(ctx context.Context, req *providerv1.Create
 	bootOrder := fmt.Sprintf("order=%s;%s", primaryDisk, cloudInitSlot)
 	reconfigValues.Set("boot", bootOrder)
 	p.logger.Info("Setting boot order", "vmid", vmConfig.VMID, "boot", bootOrder)
-
-	// Add network config (these should already be in the cloned VM, but just to be safe)
-	for _, netConfig := range vmConfig.Networks {
-		netString := p.buildNetworkString(netConfig)
-		if netString != "" {
-			reconfigValues.Set(fmt.Sprintf("net%d", netConfig.Index), netString)
-		}
-	}
-	// Add IP config
-	for _, ipConfig := range vmConfig.IPConfigs {
-		ipString := p.buildIPConfigString(ipConfig)
-		if ipString != "" {
-			reconfigValues.Set(fmt.Sprintf("ipconfig%d", ipConfig.Index), ipString)
-		}
-	}
 
 	taskID, err := p.client.ReconfigureVMRaw(ctx, node, vmConfig.VMID, reconfigValues)
 	if err != nil {
@@ -1423,95 +1424,14 @@ func (p *Provider) parseCreateRequest(ctx context.Context, req *providerv1.Creat
 		}
 	}
 
-	// Parse Networks configuration
-	if req.NetworksJson != "" {
-		var networksData []interface{}
-		if err := json.Unmarshal([]byte(req.NetworksJson), &networksData); err == nil {
-			config.Networks = make([]pveapi.NetworkConfig, 0, len(networksData))
-			config.IPConfigs = make([]pveapi.IPConfig, 0, len(networksData))
-
-			for i, netData := range networksData {
-				if network, ok := netData.(map[string]interface{}); ok {
-					netConfig := pveapi.NetworkConfig{
-						Index:  i,
-						Model:  "virtio", // Default model
-						Bridge: "vmbr0",  // Default bridge
-					}
-
-					ipConfig := pveapi.IPConfig{
-						Index: i,
-						DHCP:  true, // Default to DHCP
-					}
-
-					// Extract network name and map to bridge
-					if name, ok := network["name"].(string); ok {
-						// Map network names to bridges
-						switch name {
-						case "lan", "default":
-							netConfig.Bridge = "vmbr0"
-						case "dmz":
-							netConfig.Bridge = "vmbr1"
-						case "management", "mgmt":
-							netConfig.Bridge = "vmbr2"
-						default:
-							// Use the name as bridge if it looks like a bridge name
-							if strings.HasPrefix(name, "vmbr") {
-								netConfig.Bridge = name
-							}
-						}
-					}
-
-					// Check for VLAN configuration
-					if vlan, ok := network["vlan"].(float64); ok {
-						netConfig.VLAN = int(vlan)
-					}
-
-					// Check for static IP configuration
-					if staticIP, ok := network["static_ip"].(map[string]interface{}); ok {
-						if ip, ok := staticIP["address"].(string); ok {
-							ipConfig.IP = ip
-							ipConfig.DHCP = false
-						}
-						if gw, ok := staticIP["gateway"].(string); ok {
-							ipConfig.Gateway = gw
-						}
-						if dns, ok := staticIP["dns"].([]interface{}); ok {
-							var dnsServers []string
-							for _, d := range dns {
-								if dnsStr, ok := d.(string); ok {
-									dnsServers = append(dnsServers, dnsStr)
-								}
-							}
-							if len(dnsServers) > 0 {
-								ipConfig.DNS = strings.Join(dnsServers, ",")
-							}
-						}
-					}
-
-					// Check for MAC address
-					if mac, ok := network["mac"].(string); ok {
-						netConfig.MAC = mac
-					}
-
-					config.Networks = append(config.Networks, netConfig)
-					config.IPConfigs = append(config.IPConfigs, ipConfig)
-				}
-			}
-		}
+	// Parse Networks configuration (networks.go). A bad attachment is refused
+	// before anything is created.
+	networks, ipConfigs, err := parseNetworks(req.NetworksJson, config.Template != "")
+	if err != nil {
+		return nil, "", err
 	}
-
-	// Default network if none specified
-	if len(config.Networks) == 0 {
-		config.Networks = []pveapi.NetworkConfig{{
-			Index:  0,
-			Model:  "virtio",
-			Bridge: "vmbr0",
-		}}
-		config.IPConfigs = []pveapi.IPConfig{{
-			Index: 0,
-			DHCP:  true,
-		}}
-	}
+	config.Networks = networks
+	config.IPConfigs = ipConfigs
 
 	// Configure cloud-init if user data provided
 	if len(req.UserData) > 0 {
@@ -1613,34 +1533,6 @@ func (p *Provider) parseVMReference(ref string) (int, string, error) {
 	}
 
 	return 0, "", fmt.Errorf("invalid VM reference format: %s", ref)
-}
-
-// buildNetworkString constructs network configuration string for Proxmox
-func (p *Provider) buildNetworkString(netConfig pveapi.NetworkConfig) string {
-	// Format: virtio,bridge=vmbr0[,tag=100][,firewall=1]
-	result := fmt.Sprintf("%s,bridge=%s", netConfig.Model, netConfig.Bridge)
-	if netConfig.VLAN > 0 {
-		result += fmt.Sprintf(",tag=%d", netConfig.VLAN)
-	}
-	if netConfig.MAC != "" {
-		result += fmt.Sprintf(",mac=%s", netConfig.MAC)
-	}
-	if netConfig.Firewall {
-		result += ",firewall=1"
-	}
-	return result
-}
-
-// buildIPConfigString constructs IP configuration string for Proxmox
-func (p *Provider) buildIPConfigString(ipConfig pveapi.IPConfig) string {
-	if ipConfig.DHCP {
-		return "ip=dhcp"
-	}
-	result := fmt.Sprintf("ip=%s", ipConfig.IP)
-	if ipConfig.Gateway != "" {
-		result += fmt.Sprintf(",gw=%s", ipConfig.Gateway)
-	}
-	return result
 }
 
 // GetDiskInfo retrieves detailed information about a VM's disk
@@ -2446,25 +2338,9 @@ func (p *Provider) ListVMs(ctx context.Context, req *providerv1.ListVMsRequest) 
 			}
 		}
 
-		// Extract network information
-		var networks []*providerv1.NetworkInfo
-		for key, value := range config {
-			if strings.HasPrefix(key, "net") {
-				if netStr, ok := value.(string); ok && netStr != "" {
-					// Parse network string: model=...,mac=...,bridge=...
-					networkInfo := &providerv1.NetworkInfo{}
-					parts := strings.Split(netStr, ",")
-					for _, part := range parts {
-						if strings.HasPrefix(part, "mac=") {
-							networkInfo.Mac = strings.TrimPrefix(part, "mac=")
-						} else if strings.HasPrefix(part, "bridge=") {
-							networkInfo.Name = strings.TrimPrefix(part, "bridge=")
-						}
-					}
-					networks = append(networks, networkInfo)
-				}
-			}
-		}
+		// Extract network information (networks.go): the bridge and the MAC
+		// of each NIC, ordered by NIC index.
+		networks := networkInfosFromConfig(config)
 
 		// Build provider raw metadata
 		providerRaw := make(map[string]string)

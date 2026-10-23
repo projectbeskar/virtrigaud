@@ -654,11 +654,18 @@ func (s *Server) handleCreateVM(w http.ResponseWriter, r *http.Request) {
 	final.Lock = ""
 	final.Name = r.FormValue("name")
 	final.Description = r.FormValue("description")
+	// The network keys are checked like PVE does, and kept in the config
+	// beside the cloud-init drives.
+	config, err := networkConfigFromForm(r.PostForm)
+	if err != nil {
+		s.writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	for slot, storage := range cloudInitRequest(r.Form) {
-		if final.Config == nil {
-			final.Config = map[string]string{}
-		}
-		final.Config[slot] = s.cloudInitVolume(vmid, storage)
+		config[slot] = s.cloudInitVolume(vmid, storage)
+	}
+	if len(config) > 0 {
+		final.Config = config
 	}
 	if cpus := r.FormValue("cores"); cpus != "" {
 		if c, err := strconv.Atoi(cpus); err == nil {
@@ -1056,6 +1063,7 @@ func (s *Server) handleCloneVM(w http.ResponseWriter, r *http.Request) {
 		full = f != "0"
 	}
 	final.Config = s.cloneConfig(sourceVM.Config, targetVMID, r.FormValue("storage"), full)
+	cloneNetworkMACs(final.Config, targetVMID)
 
 	s.vms[targetVMID] = temp
 
@@ -1628,6 +1636,13 @@ func (s *Server) handleReconfigureVM(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// PVE checks every parameter before it changes any.
+	netConfig, err := networkConfigFromForm(r.PostForm)
+	if err != nil {
+		s.writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
 	// Update VM configuration
 	if cores := r.FormValue("cores"); cores != "" {
 		if c, err := strconv.Atoi(cores); err == nil {
@@ -1658,6 +1673,15 @@ func (s *Server) handleReconfigureVM(w http.ResponseWriter, r *http.Request) {
 			vm.Config = map[string]string{}
 		}
 		vm.Config[slot] = s.cloudInitVolume(vmid, storage)
+	}
+
+	// The network keys (netN, ipconfigN, nameserver), so a test can read what
+	// the provider wrote.
+	if len(netConfig) > 0 && vm.Config == nil {
+		vm.Config = map[string]string{}
+	}
+	for key, value := range netConfig {
+		vm.Config[key] = value
 	}
 
 	if _, ok := r.Form["description"]; ok {

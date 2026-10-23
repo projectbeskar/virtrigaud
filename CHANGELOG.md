@@ -5,6 +5,36 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-10-23 18:00] - Proxmox VMs get the bridge, VLAN, model and static IP their networks name (R36, ADR-0014 Slice 0a)
+**Author:** @wrkode (William Rizzo)
+
+### Fixed
+- `internal/providers/proxmox/networks.go`, `internal/providers/proxmox/server.go`: the provider read `networks_json` into a `map[string]interface{}` with lower-case keys (`name`, `vlan`, `mac`, a nested `static_ip`), but the manager sends `json.Marshal([]contracts.NetworkAttachment)`, whose keys are the Go field names (`Bridge`, `VLAN`, `Model`, `StaticIP`, ...). No field of a Proxmox network was applied: every NIC was `virtio` on `vmbr0` with no static IP. `networks_json` is now decoded into `[]contracts.NetworkAttachment` (no JSON tags added to the contract, so other providers' wire keys are unchanged) and each attachment's bridge, model, VLAN tag, MAC (when one arrives) and flat `StaticIP`/`Prefix`/`Gateway`/`DNS` are applied. A static IP becomes `ipconfigN` (`ip=<addr>/<prefix>[,gw=<gateway>]`, `ip6=`/`gw6=` for IPv6) and the DNS servers the VM's `nameserver`. An invalid bridge, model, VLAN, MAC, static IP, prefix, gateway or DNS server, more than 32 attachments, or malformed `networks_json` is refused as `InvalidSpec` (the message names the entry, never the value) before any VM is made.
+- `internal/providers/proxmox/server.go`: the dead name-to-bridge heuristic (`dmz` to `vmbr1`, `mgmt` to `vmbr2`) is removed; an attachment's name is a label.
+- `internal/providers/proxmox/server.go`, `internal/providers/proxmox/networks.go`: `configureClonedVM` overwrote every `netN` of a clone that had user-data or SSH keys with `virtio,bridge=vmbr0` (the template's bridge and VLAN lost, a new MAC). It now writes only the NICs the spec names (a bridge, model, VLAN or MAC), merged into the clone's own NIC: the clone's PVE-assigned MAC and other options are kept, a named bridge replaces the template's placement (VLAN included), and a NIC the spec does not name is untouched. It runs for clones without user-data too. The provider's `,mac=` writer (not a PVE key) is gone; the merge writes PVE's `<model>=<MAC>` form.
+- `internal/providers/proxmox/pveapi/client.go`: an `ipconfigN` carried `nameserver=`, which PVE rejects; DNS is now the VM's own `nameserver` key (`IPConfigString`, `NameserverValue`).
+- `internal/providers/proxmox/server.go`: `ListVMs` reads a NIC's MAC from PVE's `<model>=<MAC>` (and `macaddr=`) form and reports NICs in index order (it read `mac=`, so it never reported a MAC, and listed NICs in map order).
+- `internal/controller/network_attachment_blocks.go`, `internal/controller/virtualmachine_controller.go`: the manager filled a network's VLAN from a `VMNetworkAttachment`'s vSphere block and its bridge and model from the libvirt block whatever the target Provider's type, so an attachment with several blocks put a vSphere VLAN on a Proxmox NIC and a libvirt-only attachment gave a Proxmox VM `bridge=br0`. Only the block of the target Provider's type (`vsphere`, `libvirt`, `proxmox`) is read now; a Proxmox VM whose attachment has no `proxmox` block sends no bridge, model or VLAN. A Provider type with no block of its own (`qemu`, `firecracker`) or no Provider reads all blocks, as before.
+- `internal/providers/proxmox/networks.go`: the DNS servers of a DHCP entry are applied (PVE's `nameserver` is VM-wide) and validated; a model change away from `virtio` drops the virtio-only NIC options (`mtu`, `queues`, `host-tunnel`); the bridge refusal says the CRD currently allows `vmbrN` only.
+
+### Changed
+- `internal/providers/proxmox/pvefake/netconfig.go`, `internal/providers/proxmox/pvefake/server.go`: the fake validates `netN`, `ipconfigN` and `nameserver` on create and config updates the way PVE does (unknown keys such as `mac=`, multicast MACs, a bad bridge ID and a gateway without its address are refused; `host-tunnel` is a known option), keeps them in the VM's config, and gives each NIC of a clone a new MAC (`pvefake.CloneMAC`).
+- `examples/proxmox-complete-example.yaml`: the static IP is on the `VirtualMachine`'s entry (the attachment's `ipAllocation` was never forwarded); a comment says `macAddress` is not forwarded to the Proxmox provider yet.
+- `test/proxmox-grpc-test/main.go`: its networks use the manager's key spelling.
+
+### Added
+- `internal/providers/proxmox/networks_test.go`, `internal/providers/proxmox/pvefake/netconfig_test.go`, `internal/providers/proxmox/pveapi/ipconfig_test.go`, `internal/transport/grpc/client_create_proxmox_networks_test.go`: tests that marshal the real `contracts.NetworkAttachment` (the last one through `convertCreateRequest` into the real provider on the fake), cover new-VM and clone NICs, MAC preservation, IP settings, refusals and reporting; `TestProxmoxProvider_MultiNIC` no longer sends hand-written lower-case JSON.
+- `docs/proxmox-networks.md` (listed in `docs/README.md`): how networks reach PVE; `docs/upgrading.md`: the behavior change and the rollback caveat.
+
+### Why
+rc4 validation finding R36 (ADR-0014 Slice 0a): the Proxmox provider ignored the bridge, VLAN, model and static IP of every VM, migrated or not, so VMs landed on the wrong network. This is the standalone first slice; MAC forwarding and its tenant policy are Slice 0b. It needs a Proxmox provider rollout and a manager rollout (the manager now sends only the target Provider type's network block), and a PVE token that holds `VM.Config.Network`, `VM.Config.Cloudinit` and `SDN.Use` on its bridges (documented in `docs/proxmox-networks.md`). Refused now that were silently ignored: an `ipAddress` without `prefix`, and a `dns` entry that is not an IP. VMs that relied on the accidental `vmbr0` default change on their next create or clone, and existing VMs are not modified.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-10-23 17:00] - Proxmox cloud-init drive: never collide with the clone's own drive; power-task fixes (R33/R34 review)
 **Author:** @wrkode (William Rizzo)
 

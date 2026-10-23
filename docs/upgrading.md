@@ -885,6 +885,41 @@ the following once after upgrading, and delete only what no `VMMigration` in fli
   Roll the manager with the libvirt providers: an older manager reads the new answers
   as before (retryable). Single-host libvirt is unchanged. See
   [Clustered libvirt: a host that stops answering](provider-call-outcomes.md#clustered-libvirt-a-host-that-stops-answering).
+- **Proxmox VMs now land on the bridge, VLAN and static IP their spec names** (R36,
+  ADR-0014 Slice 0a, [`docs/proxmox-networks.md`](proxmox-networks.md)). The provider
+  used to read none of a VM's networks: every Proxmox VM got `virtio` on `vmbr0` with
+  no static IP, and a VM cloned from a template with user-data had its template's
+  NICs overwritten with that default. Now the bridge, VLAN tag and model of each
+  `VMNetworkAttachment` and the `ipAddress`/`prefix`/`gateway`/`dns` of each
+  `spec.networks` entry are applied, a clone keeps its template's NICs (bridge, VLAN,
+  options and the MAC PVE gave it) where the spec names none, and an invalid network is
+  refused as `InvalidSpec` before a VM is made. **VMs that relied on the accidental
+  `vmbr0` default change on their next create or clone; VMs already created are not
+  modified.** Check each `VMNetworkAttachment` before you create or recreate a Proxmox
+  VM: an attachment's `bridge` is now used (it was ignored), and its `model` (the CRD
+  defaults it to `virtio`) replaces the model of a cloned template's NIC.
+  - **Newly refused, terminal on a new or re-sent create** (both were silently ignored
+    on Proxmox before): an `ipAddress` **without `prefix`** (the CRD allows it and
+    vSphere accepts it; PVE's `ip=` needs a prefix), and a **`dns` entry that is not an
+    IP address** (a hostname, or a space-separated list; the list is comma-separated).
+    Also refused: a bridge, model, VLAN or gateway PVE cannot take.
+  - **The manager now sends only the target `Provider`'s block of a
+    `VMNetworkAttachment`.** A Proxmox VM reads the attachment's `proxmox` block only: a
+    vSphere VLAN or a libvirt bridge in the same attachment no longer reaches the NIC,
+    and an attachment with no `proxmox` block sends no bridge, model or VLAN (the VM gets the
+    provider's default, `vmbr0` for a new VM). vSphere and libvirt VMs read their own block
+    too; before, the last block present won a field several blocks share, such as the
+    network name. Roll the manager with the Proxmox provider.
+  - **PVE token privileges.** Writing a VM's `netN`, `ipconfigN` and `nameserver` needs
+    `VM.Config.Network` and `VM.Config.Cloudinit`, and, for any token that is not root,
+    `SDN.Use` on `/sdn/zones/<zone>/<bridge>[/<tag>]` of every bridge a VM is put on. A
+    narrowly scoped token that worked before may now get a 403 while the provider
+    configures a clone, and the clone is rolled back. Grant them before you roll the
+    provider, and use `SDN.Use` ACLs to decide which bridges and VLANs tenants can reach
+    ([`docs/proxmox-networks.md`](proxmox-networks.md#permissions-of-the-pve-token)).
+  - `firewall`, `rateLimit`, `mtu`, `ipAllocation` and `spec.networks[].macAddress` are
+    still not applied to a Proxmox VM, and IPv6 is not reachable through the CRD yet.
+    `Describe` still reports no NICs (`ListVMs` reports bridge and MAC).
 
 ## Post-upgrade verification checklist
 
@@ -1082,6 +1117,10 @@ the following once after upgrading, and delete only what no `VMMigration` in fli
   `Delete`. Stamps already written stay in the VMs' descriptions and are used
   again when the provider rolls forward. Don't edit or copy those lines in the
   meantime.
+- **Rolling the Proxmox provider back stops applying a VM's networks.** An older provider
+  goes back to `virtio` on `vmbr0` with no static IP for every NIC, and to overwriting a
+  clone's NICs when the request has user-data. VMs created while the newer provider
+  ran keep the NICs and IP settings they were given.
 - If you do need a full rollback during a maintenance window, go in reverse order
   (providers → manager → CRDs) and expect the caveats above; a partial rollback
   (providers only, or manager only) is safer and sufficient for most of the issues
