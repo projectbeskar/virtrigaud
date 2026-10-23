@@ -1383,28 +1383,21 @@ func (c *Client) ReconfigureVMRaw(ctx context.Context, node string, vmid int, va
 // DetectPrimaryDisk detects the primary boot disk from VM configuration
 // Returns the disk identifier (e.g., "scsi0", "virtio0", "sata0", "ide0")
 func (c *Client) DetectPrimaryDisk(ctx context.Context, node string, vmid int) (string, error) {
-	key, _, err := c.DetectPrimaryDiskVolume(ctx, node, vmid)
-	return key, err
-}
-
-// DetectPrimaryDiskVolume is DetectPrimaryDisk that also returns the disk's
-// config value (e.g. "local-lvm:vm-100-disk-0,size=32G"), from the same read of
-// the VM's config, so a caller can tell which storage the boot disk lives on
-// (see DiskStorage). The value is empty when the config has no disk and the
-// "scsi0" fallback key is returned.
-func (c *Client) DetectPrimaryDiskVolume(ctx context.Context, node string, vmid int) (key, value string, err error) {
 	config, err := c.GetVMConfig(ctx, node, vmid)
 	if err != nil {
-		return "", "", err
+		return "", err
 	}
-	key, value = primaryDiskFromConfig(config)
-	return key, value, nil
+	key, _ := PrimaryDiskFromConfig(config)
+	return key, nil
 }
 
-// primaryDiskFromConfig picks the primary boot disk of a VM config: the first
-// non-cdrom disk in the order virtio, scsi, sata, ide, or "scsi0" (with an
-// empty value) when the config has none.
-func primaryDiskFromConfig(config map[string]interface{}) (key, value string) {
+// PrimaryDiskFromConfig picks the primary disk of a VM config as
+// DetectPrimaryDisk does: the first non-cdrom disk in the order virtio, scsi,
+// sata, ide (device numbers 0-15 of each), which can be a data disk when the
+// VM has one on an earlier bus than its boot disk. It returns the disk's key
+// and config value (e.g. "local-lvm:vm-100-disk-0,size=32G"; see DiskStorage),
+// or "scsi0" and an empty value when the config has no such disk.
+func PrimaryDiskFromConfig(config map[string]interface{}) (key, value string) {
 	// Check for disks in order of preference: virtio, scsi, sata, ide
 	diskPrefixes := []string{"virtio", "scsi", "sata", "ide"}
 
@@ -1427,8 +1420,40 @@ func primaryDiskFromConfig(config map[string]interface{}) (key, value string) {
 	return "scsi0", ""
 }
 
+// CloudInitDrive finds the cloud-init drive of a VM config: the slot (ide,
+// sata or scsi device) whose volume is a cloud-init volume, e.g. slot "ide2"
+// with value "local-lvm:vm-199-cloudinit,media=cdrom". PVE names such a
+// volume vm-<vmid>-cloudinit, and a full clone of a template that has one
+// carries its own (renamed to the clone's VMID). ok is false when the config
+// has none.
+func CloudInitDrive(config map[string]interface{}) (slot, value string, ok bool) {
+	for _, bus := range []struct {
+		prefix string
+		count  int
+	}{{"ide", 4}, {"sata", 6}, {"scsi", 31}} {
+		for i := 0; i < bus.count; i++ {
+			key := fmt.Sprintf("%s%d", bus.prefix, i)
+			v, isString := config[key].(string)
+			if !isString {
+				continue
+			}
+			first, _, _ := strings.Cut(strings.TrimSpace(v), ",")
+			if _, volume, found := strings.Cut(first, ":"); found && strings.Contains(volume, "cloudinit") {
+				return key, v, true
+			}
+		}
+	}
+	return "", "", false
+}
+
 // storageIDPattern is what PVE accepts as a storage ID.
 var storageIDPattern = regexp.MustCompile(`^(?i:[a-z][a-z0-9\-_.]*[a-z0-9])$`)
+
+// ValidStorageID reports whether s has the syntax of a PVE storage ID, which
+// is also what makes it safe to put in a "<storage>:<volume>" config value.
+func ValidStorageID(s string) bool {
+	return storageIDPattern.MatchString(s)
+}
 
 // DiskStorage returns the storage ID a VM disk's config value lives on: the
 // part before the first ':' of the "storage:volume,option=..." form (e.g.
@@ -1438,7 +1463,7 @@ var storageIDPattern = regexp.MustCompile(`^(?i:[a-z][a-z0-9\-_.]*[a-z0-9])$`)
 func DiskStorage(diskValue string) string {
 	first, _, _ := strings.Cut(strings.TrimSpace(diskValue), ",")
 	storage, volume, found := strings.Cut(first, ":")
-	if !found || volume == "" || !storageIDPattern.MatchString(storage) {
+	if !found || volume == "" || !ValidStorageID(storage) {
 		return ""
 	}
 	return storage
