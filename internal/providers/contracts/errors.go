@@ -130,6 +130,19 @@ const VMDiskInUseReason = "VM_DISK_IN_USE"
 // circuit breaker.
 const VMDiskCheckFailedReason = "VM_DISK_CHECK_FAILED"
 
+// OutcomeUnknownRetryReason is the google.rpc.ErrorInfo reason (in
+// ErrorInfoDomain) a clustered provider attaches to the codes.Unavailable
+// status of a call that may have changed its host and whose outcome it cannot
+// tell (R25): a command that may change the host was sent and the host stopped
+// answering, or the call's time budget ran out while the host's job may still
+// complete. The call is safe to repeat (idempotent per request), so it is
+// retryable — but it is NOT "nothing was done": the manager must not clear a
+// marker, re-place, or count it as a definite outcome on it
+// (contracts.IsNothingDone is false). The provider always sends it together
+// with VMOperationFailedReason, so a manager that predates this reason maps
+// the answer as before (retryable, kept out of the circuit breaker).
+const OutcomeUnknownRetryReason = "VM_OUTCOME_UNKNOWN_RETRY"
+
 // HostStorageMisconfiguredReason is the google.rpc.ErrorInfo reason (in
 // ErrorInfoDomain) a clustered provider attaches to the
 // codes.FailedPrecondition status of an operation it did not perform because
@@ -382,6 +395,20 @@ var ErrVMDiskCheckFailed = errors.New("the provider could not verify that no oth
 // VMDiskCheckFailedReason answer (a retryable error that says so).
 func IsVMDiskCheckFailed(err error) bool {
 	return IsRetryable(err) && errors.Is(err, ErrVMDiskCheckFailed)
+}
+
+// ErrOutcomeUnknownRetry marks (in an error's chain) a provider's answer
+// carrying OutcomeUnknownRetryReason: the call may have changed the host, its
+// outcome is unknown, and it is safe to send again. The transport client wraps
+// it into the retryable error it maps that answer to. It is deliberately not
+// ErrOperationNotPerformed.
+var ErrOutcomeUnknownRetry = errors.New("the provider cannot tell whether the call changed its host; it is safe to retry")
+
+// IsOutcomeUnknownRetry reports whether err is a provider's
+// OutcomeUnknownRetryReason answer (a retryable error that says so). Such an
+// answer is retried, and proves nothing about what the call did.
+func IsOutcomeUnknownRetry(err error) bool {
+	return IsRetryable(err) && errors.Is(err, ErrOutcomeUnknownRetry)
 }
 
 // ErrVMPreviousIncarnation marks (in an error's chain) a provider's refusal

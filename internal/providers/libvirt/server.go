@@ -500,8 +500,16 @@ func (s *Server) SnapshotCreate(ctx context.Context, req *providerv1.SnapshotCre
 				return nil
 			})
 		if err != nil {
-			return nil, routedIdempotentRPCError("create snapshot",
-				classifySnapshotCreateFailure(strings.TrimSpace(req.GetTargetHostId()), ctx, bctx, err))
+			// Only a create that names its snapshot AND carries a request token
+			// is idempotent (existingRoutedSnapshot adopts the earlier
+			// attempt's snapshot by name and token); without both a retry
+			// could take a second snapshot, so an unknown outcome stays Unknown.
+			idempotent := req.GetNameHint() != "" && req.GetRequestToken() != ""
+			failure := classifySnapshotCreateFailure(strings.TrimSpace(req.GetTargetHostId()), idempotent, ctx, bctx, err)
+			if idempotent {
+				return nil, routedIdempotentRPCError("create snapshot", failure)
+			}
+			return nil, routedRPCError("create snapshot", failure)
 		}
 		return resp, nil
 	}
@@ -535,17 +543,26 @@ const libvirtJobBusyMarker = "cannot acquire state change lock"
 // client's session leaves libvirtd's snapshot job running, so the snapshot
 // may still complete on the host (a memory snapshot writing the guest's RAM).
 // The outcome is unknown, and the answer says so: retryable
-// (codes.Unavailable, VM_OPERATION_FAILED, out of the breaker). A retry while
+// (codes.Unavailable with OUTCOME_UNKNOWN_RETRY and VM_OPERATION_FAILED, out
+// of the breaker; not "nothing done"). A retry while
 // that job still runs is refused by libvirt's job lock and is answered
 // retryable too; once the job is done the retry finds the snapshot by name
-// (existingRoutedSnapshot) rather than making a second one. Any other failure
-// is returned unchanged.
-func classifySnapshotCreateFailure(host string, parent, budget context.Context, err error) error {
+// (existingRoutedSnapshot) rather than making a second one. That holds only
+// for a request that names its snapshot and carries a request token
+// (idempotent); any other request's budget answer is a plain Unknown, because
+// its retry could take a second snapshot. Any other failure is returned
+// unchanged.
+func classifySnapshotCreateFailure(host string, idempotent bool, parent, budget context.Context, err error) error {
 	if err == nil {
 		return nil
 	}
+	if budgetRanOut(parent, budget) && !idempotent {
+		return &routedOpError{code: codes.Unknown, cause: err, wire: fmt.Sprintf(
+			"create snapshot on host %q did not answer within its time budget; its outcome is unknown "+
+				"and it may still complete on the host", host)}
+	}
 	if budgetRanOut(parent, budget) {
-		return &routedOpError{code: codes.Unavailable, cause: err, wire: fmt.Sprintf(
+		return &routedOpError{code: codes.Unavailable, cause: err, outcomeUnknown: true, wire: fmt.Sprintf(
 			"create snapshot on host %q did not answer within its time budget; its outcome is unknown "+
 				"and it may still complete on the host: retry", host)}
 	}

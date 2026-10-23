@@ -812,7 +812,9 @@ func (r *VMMigrationReconciler) handleSnapshottingPhase(ctx context.Context, mig
 		// No definite outcome (a deadline, a dropped connection): the snapshot
 		// may still be taken. A routed create's retryable answer is one too:
 		// the clustered provider answers "retry" while the snapshot it may
-		// still complete runs (and adopts it by request token once done). The
+		// still complete runs (and adopts it by request token once done), and so
+		// is its outcome-unknown answer (contracts.IsOutcomeUnknownRetry, which
+		// providerCallOutcomeKnown never reads as definite). The
 		// marker is kept and the migration is never failed for it
 		// (vmmigration_request_marker.go).
 		return r.afterUnknownMigrationCall(ctx, migration, longOpSnapshot, err)

@@ -609,6 +609,12 @@ func (r *VMCloneReconciler) handleClusteredCloneError(
 				"the clone's disk file; it is retried on the same host with a backoff of up to %s; the provider's answer is in "+
 				"the %s event", host, blockedRetryMax, cloneReasonRetrying), retry), nil
 	case contracts.IsRetryable(err):
+		// An outcome-unknown answer (contracts.IsOutcomeUnknownRetry, R25: the
+		// host stopped answering after the copy was sent) lands here too, and
+		// is deliberately retried rather than failed: the target is stamped, so
+		// the retry finds a clone that completed, or is told the copy still
+		// runs. It is never read as "nothing done".
+		//
 		// E.g. the provider answered that an earlier attempt's copy is still
 		// running on the host (slice 3 review), that a read on the host failed
 		// before anything was copied (Slice 5 lab), or the provider is briefly

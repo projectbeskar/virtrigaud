@@ -313,6 +313,18 @@ func vmOperationStatus(code codes.Code, msg string) error {
 	return withInfo.Err()
 }
 
+// outcomeUnknownRetryStatus renders a call that may have changed its host, whose
+// outcome is unknown and that is safe to repeat: codes.Unavailable with a
+// google.rpc.ErrorInfo{Reason: OUTCOME_UNKNOWN_RETRY} that the manager maps to a
+// retryable error that is NOT "nothing done" (contracts.IsOutcomeUnknownRetry),
+// plus VM_OPERATION_FAILED. The second reason is for a manager that predates
+// the first: it maps the answer as it always did (retryable, out of its circuit
+// breaker, and every consumer of these calls retries a retryable answer
+// first), never as a definite failure.
+func outcomeUnknownRetryStatus(msg string) error {
+	return statusWithReasons(codes.Unavailable, msg, contracts.OutcomeUnknownRetryReason, contracts.VMOperationFailedReason).Err()
+}
+
 // routedOpError is a failure of a routed operation that carries its own
 // categorized, tenant-safe wire message and code: a time budget that ran out,
 // a copy of the same disk already running, a host tool missing
@@ -325,6 +337,12 @@ type routedOpError struct {
 	wire string
 	// cause is logged, never sent.
 	cause error
+	// outcomeUnknown marks a codes.Unavailable answer for a call that may have
+	// changed the host and whose outcome is unknown (the routed budget ran out
+	// while the host's job may still complete; the request's snapshot is still
+	// being taken): it is sent with OutcomeUnknownRetryReason, so that the
+	// manager retries it but never reads it as "nothing was done" (R25).
+	outcomeUnknown bool
 }
 
 // Error returns the wire message and the cause, for the provider's log.
@@ -416,7 +434,7 @@ func hostOpRPCErrorFor(kind hostOpKind, op string, ho *hostOpError, err error) e
 			return vmOperationStatus(codes.Unavailable, fmt.Sprintf(wireHostNotPerformedFmt, op, ho.host))
 		case kind == hostOpWriteRetry:
 			log.Printf("WARN %s on host %s: outcome unknown (a command that may change the host was sent)", op, ho.host)
-			return vmOperationStatus(codes.Unavailable, fmt.Sprintf(wireHostUnknownRetryFmt, op, ho.host))
+			return outcomeUnknownRetryStatus(fmt.Sprintf(wireHostUnknownRetryFmt, op, ho.host))
 		default:
 			log.Printf("WARN %s on host %s: outcome unknown (a command that may change the host was sent)", op, ho.host)
 			return vmOperationStatus(codes.Unknown, fmt.Sprintf(wireHostUnknownFmt, op, ho.host))
@@ -553,6 +571,9 @@ func routedRPCErrorFor(kind hostOpKind, op string, err error) error {
 	var roe *routedOpError
 	if stderrors.As(err, &roe) {
 		log.Printf("WARN %s failed: %v", op, err)
+		if roe.outcomeUnknown {
+			return outcomeUnknownRetryStatus(roe.wire)
+		}
 		return vmOperationStatus(roe.code, roe.wire)
 	}
 	var pe *contracts.ProviderError

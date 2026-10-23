@@ -265,7 +265,7 @@ func routedLandedDiskFailed(host hostconn.HostID, progress *hostProgress, step s
 		case hostDownNothingRan:
 			return hostUnavailableStatus(contracts.NewHostUnavailableError(fmt.Sprintf(landedDiskHostDownFmt, host), nil))
 		case hostDownWriteSent:
-			return vmOperationStatus(codes.Unavailable, landedDiskRemovalUnknownMessage)
+			return outcomeUnknownRetryStatus(landedDiskRemovalUnknownMessage)
 		}
 	}
 	return vmOperationStatus(codes.Unavailable, landedDiskFailedMessage)

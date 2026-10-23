@@ -351,6 +351,12 @@ func isInfraFailure(err error) bool {
 	if st, ok := status.FromError(err); ok && isVMDiskCheckFailedStatus(st) {
 		return false
 	}
+	// Nor does a call whose outcome the provider could not tell after its
+	// host stopped answering (OUTCOME_UNKNOWN_RETRY, R25): a host-scoped
+	// fact, retried by the manager.
+	if st, ok := status.FromError(err); ok && isOutcomeUnknownRetryStatus(st) {
+		return false
+	}
 	switch status.Code(err) {
 	case codes.Unavailable,
 		codes.DeadlineExceeded,
@@ -1670,6 +1676,25 @@ func isVMDiskCheckFailedStatus(st *status.Status) bool {
 	return false
 }
 
+// isOutcomeUnknownRetryStatus reports whether a gRPC status is a provider's
+// "the call may have changed its host and its outcome is unknown; it is safe
+// to retry" (R25: codes.Unavailable carrying a google.rpc.ErrorInfo with
+// contracts.OutcomeUnknownRetryReason in VirtRigaud's domain). It is retryable
+// but proves nothing was done; the provider answered, so it is healthy.
+func isOutcomeUnknownRetryStatus(st *status.Status) bool {
+	if st == nil || st.Code() != codes.Unavailable {
+		return false
+	}
+	for _, d := range st.Details() {
+		if info, ok := d.(*errdetails.ErrorInfo); ok &&
+			info.GetReason() == contracts.OutcomeUnknownRetryReason &&
+			info.GetDomain() == contracts.ErrorInfoDomain {
+			return true
+		}
+	}
+	return false
+}
+
 // isImageArtifactInProgressStatus reports whether a gRPC status is an
 // ImagePrepare's "the artifact is still being prepared for this VMImage by
 // another request" (ADR-0009 D4): codes.Unavailable carrying a
@@ -1926,6 +1951,15 @@ func (c *Client) mapGRPCStatus(operation string, err error) error {
 			// off and say why instead of retrying on the transient cadence.
 			return contracts.NewRetryableError(fmt.Sprintf("%s: %s", operation, st.Message()),
 				fmt.Errorf("%w: %w", contracts.ErrVMDiskCheckFailed, err))
+		}
+		// The provider answered, retryably, that the call may have changed its
+		// host and that it cannot tell (R25): retryable, and marked so that it
+		// is NOT read as "nothing was done" (contracts.IsNothingDone is false;
+		// checked before VM_OPERATION_FAILED, which the provider sends with it
+		// so that an older manager keeps mapping it as before).
+		if isOutcomeUnknownRetryStatus(st) {
+			return contracts.NewRetryableError(fmt.Sprintf("%s: %s", operation, st.Message()),
+				fmt.Errorf("%w: %w", contracts.ErrOutcomeUnknownRetry, err))
 		}
 		// The provider answered, retryably, that it did not perform the
 		// operation (VM_OPERATION_FAILED with Unavailable): marked, so a
