@@ -5,10 +5,11 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [2026-10-23 16:00] - ADR-0014 (Proposed): a migrated guest keeps its identity and gets working network (R36)
+## [2026-10-23 16:30] - ADR-0014 (Accepted): a migrated guest keeps its identity and gets working network (R36)
 **Author:** @wrkode (William Rizzo)
 
 ### Added
+- `docs/adr/0014-migrated-guest-network.md`: accepted with the maintainer's decisions on its twelve open questions (keep the MAC as identity; `guestIdentity: Preserve|Fresh`, default `Preserve`; wait for the source to be off; never copy user-data; no datasource when the instance-id is unknown; a VM-owned Proxmox seed volume; no synthesized target networks; Slice 0 split into 0a (Proxmox network plumbing, now) and 0b (MAC forwarding with a default-deny tenant MAC policy); Windows out of scope; `DataSourceNone` guests documented with a warning).
 - `docs/adr/0014-migrated-guest-network.md`: design for R36 (maintainer decision "option 1"). Researches cloud-init 24.4/25.1 semantics (instance-id comparison, datasource change between boots, update events, `manual_cache_clean`) and PVE's instance-id derivation, with source citations. Finds that a same-instance-id seed with a network-config does not re-render the network on the first target boot. Recommends carrying the source NIC MACs to the target and presenting the same instance-id (or no datasource when it is unknown), captured once by a new `DescribeGuestIdentity` RPC. Proposes `spec.options.guestIdentity: Preserve|Fresh`, eight slices and twelve open questions. Also records two latent bugs. First, `spec.networks[].macAddress` is dropped before every provider; forwarding it comes with a default-deny tenant MAC policy, because an arbitrary MAC on a shared bridge allows ARP and DHCP hijacking. Second, the Proxmox provider parses `networks_json` with keys the manager never sends, so bridge, VLAN, MAC and static IP are ignored and cloned NICs are reset to `vmbr0`.
 - `docs/adr/README.md`: index row for ADR-0014.
 

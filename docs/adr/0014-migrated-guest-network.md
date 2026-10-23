@@ -2,9 +2,10 @@
 
 ## Status
 
-**Proposed (2026-10-23).** Nothing in this record is implemented. William Rizzo
-reviews it before any slice starts. The questions he needs to answer are in
-[Open questions](#open-questions).
+**Accepted (2026-10-23, decided by William Rizzo).** Nothing in this record is
+implemented yet. The answers to the open questions are recorded in
+[Decisions on the open questions](#decisions-on-the-open-questions-2026-10-23-william-rizzo);
+where the body text below offered alternatives, those decisions apply.
 
 **Author**: William Rizzo ([@wrkode](https://github.com/wrkode))
 
@@ -139,12 +140,12 @@ It is dropped on the way to every provider:
 
 The Proxmox bridge, VLAN and static-IP loss is a correctness bug for every
 Proxmox VM, whether or not it was migrated. It should be fixed on its own
-(Slice 0). Once it is fixed, VMs will land on the bridge, VLAN and static IP
+(Slice 0a). Once it is fixed, VMs will land on the bridge, VLAN and static IP
 their spec names, which is a visible change and needs a release-note item.
 
 Forwarding `macAddress` is not only plumbing; it has a security side. A
 tenant who can set an arbitrary MAC on a shared bridge can take another VM's
-MAC, or the gateway's, and with it ARP traffic and DHCP reservations. Slice 0
+MAC, or the gateway's, and with it ARP traffic and DHCP reservations. Slice 0b
 therefore comes with a policy whose default is safe
 ([D7](#d7-security)).
 
@@ -512,7 +513,7 @@ The MACs travel in the existing `spec.networks[i].macAddress`
 `status.guestIdentity.nics[i]`, for every `i` that has a `target.networks`
 entry. Source NICs with no target network are reported (`MACNotCarried`,
 reason `NoTargetNetwork`) and dropped. They are not invented, and the user's
-network list is not extended (Open question 8).
+network list is not extended (decision 8).
 
 The instance-id pattern excludes `/` and control characters. cloud-init uses
 the value as a directory name. A captured value that fails the pattern is
@@ -607,7 +608,7 @@ manager therefore sends it only to a provider that declares
      there is no hostname. `status.guestIdentity.hostname` stays as an
      informational record.
 4. **VirtualMachine controller.** It forwards `spec.networks[].macAddress`
-   into the attachment (`virtualmachine_controller.go:2587-2593`, the Slice 0
+   into the attachment (`virtualmachine_controller.go:2587-2593`, the Slice 0b
    fix). It maps `spec.importedDisk.guestIdentity` to
    `CreateRequest.guest_identity`, only when the target Provider declares
    `supports_guest_identity_seed`.
@@ -654,7 +655,7 @@ its own first NIC), which is what a clone needs.
 |--------|-------------------|---------------------|-----|
 | **libvirt** (both topologies) | A seed made by `PrepareCloudInit` with that meta-data, in the R27 per-create seed directory named after the domain. Delete and reclaim work unchanged. It replaces the default seed `createVMWithCloudInit` builds today (`provider_virsh.go:398-447`) | **No seed.** Use the existing "continue without cloud-init" path (`:443-447`) on purpose, not as a fallback after a failure | `<mac address=.../>` (`provider_virsh.go:2292-2296`) |
 | **vSphere** | `guestinfo.metadata` (base64) and `guestinfo.metadata.encoding` in the imported-disk branch, even with no user-data (today it is gated at `server.go:2922`). No `guestinfo.userdata`. `ds-identify` accepts metadata alone (`tools/ds-identify:1689-1692`) when the guest has `open-vm-tools`. Without them the guest usually has no datasource, with the caveat in the next column | No guestinfo keys. **Caveat:** RHEL-family images set `disable_vmware_customization: false` (`config/cloud.cfg.tmpl:109`, under `is_rhel`). On a vSphere target with open-vm-tools' deployPkg plugin, `ds-identify` reports VMware as found without any guestinfo (`tools/ds-identify:1076-1110`, `:1697`) and appends `None` (`:1906-1909`). cloud-init then ends on `DataSourceNone`, whose instance-id is `iid-datasource-none` (`DataSourceNone.py:32-33`): a **new** instance unless the source already ran that way | `VirtualEthernetCard.AddressType = "manual"`, `MacAddress` on the NIC built at `server.go:2847-2884`. vSphere create consumes only `networks[0]` (`:2409-2425`), so only NIC 0 is carried until multi-NIC create exists |
-| **Proxmox** | Build the NoCloud ISO on the node with `genisoimage` (always installed: a `qemu-server` dependency, see C4). `qm importdisk <vmid> <iso> <storage> --format raw` it into the VM's own storage, as the import already does for the boot disk (`s3import.go:370-389`). `--format raw` keeps a file-backed storage from turning the ISO into qcow2, which the guest could not read as ISO9660. Then `qm set --ide2 <volid>,media=cdrom` over the existing SSH session (`s3import.go:287`). PVE accepts an `images` volume as a CD-ROM (`API2/Qemu.pm:190-200`). The volume is VM-owned, so `qm destroy` removes it: no leak, unlike a `cicustom` snippet or an ISO under `iso/`. It must not be named `vm-<id>-cloudinit`, because PVE rewrites that one | Nothing attached | `netN: virtio=<MAC>,bridge=...`, or `macaddr=` (`Network.pm:49`, `:66`). This depends on the Slice 0 fix |
+| **Proxmox** | Build the NoCloud ISO on the node with `genisoimage` (always installed: a `qemu-server` dependency, see C4). `qm importdisk <vmid> <iso> <storage> --format raw` it into the VM's own storage, as the import already does for the boot disk (`s3import.go:370-389`). `--format raw` keeps a file-backed storage from turning the ISO into qcow2, which the guest could not read as ISO9660. Then `qm set --ide2 <volid>,media=cdrom` over the existing SSH session (`s3import.go:287`). PVE accepts an `images` volume as a CD-ROM (`API2/Qemu.pm:190-200`). The volume is VM-owned, so `qm destroy` removes it: no leak, unlike a `cicustom` snippet or an ISO under `iso/`. It must not be named `vm-<id>-cloudinit`, because PVE rewrites that one | Nothing attached | `netN: virtio=<MAC>,bridge=...`, or `macaddr=` (`Network.pm:49`, `:66`). This depends on the Slice 0a fix |
 
 **"No datasource" is identity-safe only when cloud-init then disables
 itself.** That is the outcome when `ds-identify` reaches `notfound=disabled`
@@ -729,8 +730,10 @@ DHCP collides. The rules:
 
 - Under `Preserve`, the target is powered on only once the source is
   confirmed `Off`. The existing `ensureSourcePoweredOff` check
-  (`vmmigration_source_power.go:131`) is reused; Open question 4 asks whether
-  to power it off or to wait. With `deleteAfterMigration: false` the source
+  (`vmmigration_source_power.go:131`) is reused. The controller **waits**
+  (decision 4): while the source is still `On`, the target is created powered
+  off and held with reason `WaitingForSourceOff`; the migration never powers
+  the source off beyond `powerOffBeforeMigration`. With `deleteAfterMigration: false` the source
   stays defined but off, and the docs say not to start both.
 - libvirt (single-host and clustered) refuses a carried MAC that another
   domain on the same host (clustered: any host) already uses. This is
@@ -765,7 +768,7 @@ DHCP collides. The rules:
   tenant could already set through `spec.metaData`. Reads are bounded (as
   `readSeedISO`, `maxSeedFileBytes`). Values are validated by pattern. File
   contents are never logged.
-- **MAC policy (Slice 0, applies to every VM, not only migrations).**
+- **MAC policy (Slice 0b, applies to every VM, not only migrations).**
   Forwarding `spec.networks[].macAddress` would let any tenant put an
   arbitrary MAC on a shared bridge or portgroup, for example another VM's or
   the gateway's, and hijack ARP traffic or a DHCP reservation. For a regulated
@@ -788,7 +791,7 @@ DHCP collides. The rules:
     With `Deny`, a tenant-set `macAddress` is not sent. The VM gets
     `MACAddressApplied=False/PolicyDenied` and is created with a
     provider-generated MAC, which is no regression: the field is ignored
-    today. Open question 11 asks whether to refuse the create instead.
+    today (decision 11: create without the MAC, do not refuse).
   - **Migration-carried MACs are manager-originated**, so they are not
     tenant-set. The VirtualMachine controller treats a MAC as migration-carried
     only when all of these hold; otherwise it is a tenant MAC under the
@@ -828,7 +831,7 @@ DHCP collides. The rules:
   condition reason is `SourceUnsupported`. No MACs are carried and no seed is
   presented. On a libvirt target that is a regression for this pair, because
   today's fresh seed gave network. The condition says so and names
-  `guestIdentity: Fresh` as the remedy (Open question 3).
+  `guestIdentity: Fresh` as the remedy (decision 3).
 - **An older target provider**:
   - without `supports_nic_mac`, the reason is `MACNotCarried`
     (`TargetUnsupported`), which is today's outcome;
@@ -841,12 +844,8 @@ DHCP collides. The rules:
 
 ### D9. Slices (smallest first; each one a PR)
 
-- **Slice 0: MAC policy and Proxmox network plumbing (a bug fix that stands
-  alone; can merge before this ADR is accepted).**
-  - The MAC policy (D7): normalisation, the unicast and non-zero checks, the
-    Provider field `tenantMACAddresses` (default `Deny`), the prefix
-    allow-list, the best-effort duplicate check and the `MACAddressApplied`
-    condition. Then forward `spec.networks[].macAddress` (C3).
+- **Slice 0a: Proxmox network plumbing (a bug fix that stands alone; ships
+  first, decision 9).**
   - Proxmox `networks_json`:
     - Unmarshal it into `contracts.NetworkAttachment`. Go's case-insensitive
       key matching accepts the manager's keys.
@@ -857,16 +856,23 @@ DHCP collides. The rules:
     - Apply the bridge, VLAN, MAC and flat static-IP fields.
     - Delete the dead name-to-bridge heuristic (`server.go:1382-1397`).
   - Proxmox writes:
-    - `macaddr=` or `<model>=<MAC>` instead of `,mac=` (`server.go:1551-1552`);
+    - `<model>=<MAC>` instead of the rejected `,mac=` (`server.go:1551-1552`),
+      used only once Slice 0b forwards a MAC;
     - `configureClonedVM` stops overwriting a clone's `netN` with the default
       (`:392-397`); it writes only the NICs the spec names;
     - Describe and List parse `<model>=<MAC>` (`:2384-2385`).
-  - vSphere: a manual MAC on `networks[0]`.
-  - Add `supports_nic_mac`.
   - Unit tests that marshal the real `contracts` struct.
   - Release note: Proxmox VMs now land on the bridge, VLAN and static IP their
     spec names. VMs that relied on the accidental `vmbr0` default change on
     their next create.
+- **Slice 0b: the tenant MAC policy and MAC forwarding (decisions 9, 11).**
+  - The MAC policy (D7): normalisation, the unicast and non-zero checks, the
+    Provider field `tenantMACAddresses` (default `Deny`), the prefix
+    allow-list, the duplicate check inside the Provider's inventory (refuse),
+    and the `MACAddressApplied` condition. Then forward
+    `spec.networks[].macAddress` (C3).
+  - vSphere: a manual MAC on `networks[0]`.
+  - Add `supports_nic_mac`.
 - **Slice 1: capture.**
   - The `DescribeGuestIdentity` RPC in libvirt (domain XML MACs and the seed
     ISO meta-data, single-host and routed), vSphere (NIC MACs and
@@ -875,7 +881,7 @@ DHCP collides. The rules:
   - `spec.options.guestIdentity`, `status.guestIdentity`, the condition.
   - Carry the MACs to the target VM.
 
-  With Slice 0, this alone fixes the reported vSphere and Proxmox targets for
+  With Slices 0a and 0b, this alone fixes the reported vSphere and Proxmox targets for
   MAC-matched guests.
 - **Slice 2: libvirt target.** `CreateRequest.guest_identity`,
   `ImportedDiskRef.guestIdentity`, a same-instance-id seed or no seed,
@@ -989,56 +995,51 @@ On the source before export and on the target after its first boot, compare:
 - The instance-id is often unknown for a VM we did not create. Such guests
   then run without cloud-init on the target, so `growpart` does not run there.
   Guests that fall to `DataSourceNone` instead become a new instance (D5).
-- A new Provider field and a default-deny change for tenant MACs (Slice 0).
+- A new Provider field and a default-deny change for tenant MACs (Slice 0b).
 - libvirt changes behaviour by default (D8).
 
-## Open questions
+## Decisions on the open questions (2026-10-23, William Rizzo)
 
-1. **Is the MAC part of the identity we preserve?** Recommended: yes, as a
-   hypervisor's own cross-host move does. This is the only mechanism that
-   gives a same-instance guest working network without touching its disk
-   (R3–R6).
-2. **Add the `guestIdentity` knob now?** Recommended: yes, default
-   `Preserve`. `Fresh` is today's libvirt behaviour; vSphere and Proxmox
-   refuse it at `Validating` until Slice 6. It is the escape hatch for the
-   libvirt behaviour change and for guests whose MAC cannot be carried.
-3. **What if no MAC can be carried under `Preserve`?** Recommended: proceed
-   with `GuestIdentity=False/MACNotCarried` and an Event. That is no
-   regression on vSphere or Proxmox, and the identity is never changed unless
-   asked. The alternative is to refuse at `Validating` and point to `Fresh`.
-   For libvirt targets with an older source provider, should the controller
-   fall back to `Fresh` automatically? Recommended: no.
-4. **Require the source to be off before the target powers on** (D6)? If so,
-   should the controller power it off itself, or wait for an `Off` source?
-5. **Never copy user-data** (D7)? An opt-in copy of a VirtRigaud-owned seed's
-   user-data could be allowed within one namespace.
-6. **With the instance-id unknown, present no datasource** (recommended), or
-   keep today's fresh libvirt seed?
-7. **Proxmox seed:** a VM-owned importdisk'd ISO volume (recommended), or a
-   `cicustom` snippet (needs `snippets` storage and leaks on destroy)?
-8. **More source NICs than target networks:** drop them and report
-   (recommended), or refuse? Should an empty `target.networks` get one
-   synthesized entry per source NIC?
-9. **Slice 0 now:** the Proxmox `networks_json` key mismatch drops the bridge
-   and VLAN of every Proxmox VM today (C3). Ship it as a separate fix ahead of
-   this ADR?
-10. **Windows and cloudbase-init:** out of scope beyond MAC carry and the docs
-    guidance (inbox `e1000e` or pre-installed drivers)? The Windows
-    adapter-binding behaviour (R9) is unverified and needs a lab check first.
-11. **Tenant MAC policy (D7, Slice 0).**
-    - Is a Provider-level `tenantMACAddresses: Deny|Allow` with an optional
-      prefix allow-list the right control?
-    - Alternatives: namespace-level, through the consumer grant; or a
-      cluster-wide flag.
-    - Under `Deny`, create the VM without the MAC and set
-      `MACAddressApplied=False/PolicyDenied` (recommended: no regression from
-      today's silent drop), or refuse the create?
-    - Should a duplicate inside the Provider's inventory be refused
-      (recommended), or only warned about?
-12. **Unknown instance-id on guests that fall to `DataSourceNone`** (D5):
-    accept and document with the warning (recommended for now), or require
-    `Fresh` (or Slice 7's guest-agent read) whenever the instance-id is unknown
-    and the target is vSphere?
+1. **The MAC is part of the identity we preserve.** It is the only mechanism
+   that gives a same-instance guest working network without editing its disk.
+2. **Add `spec.options.guestIdentity: Preserve|Fresh` now, default
+   `Preserve`.** vSphere and Proxmox refuse `Fresh` at `Validating` until
+   Slice 6. It keeps option 2 open and is the escape hatch for the libvirt
+   behaviour change.
+3. **No MAC can be carried under `Preserve`: proceed** with
+   `GuestIdentity=False/MACNotCarried` and an Event. There is **no** automatic
+   fallback to `Fresh`; the identity changes only when asked.
+4. **The source must be off before the target powers on, and the controller
+   waits** (D6): the target is created powered off and held with
+   `WaitingForSourceOff` while the source is `On`. The migration never powers
+   the source off beyond `powerOffBeforeMigration`.
+5. **User-data is never copied** (D7). No opt-in for now.
+6. **Instance-id unknown: present no datasource**, with the caveat of decision
+   12 documented.
+7. **Proxmox seed: a VM-owned ISO volume** imported with `--format raw`, not a
+   `cicustom` snippet.
+8. **Source NICs without a target network are dropped and reported per NIC**
+   (`MACNotCarried`, `NoTargetNetwork`). An empty `target.networks` is **not**
+   filled in; the docs tell users to list one target network per source NIC.
+9. **Slice 0 is split.** Slice 0a (Proxmox network plumbing: bridge, VLAN,
+   model, static IP, the dead name-to-bridge heuristic, the clone `netN`
+   overwrite) ships now as a standalone fix. Slice 0b (MAC forwarding) ships
+   together with the tenant MAC policy of decision 11.
+10. **Windows and cloudbase-init are out of scope** beyond carrying the MAC and
+    the docs guidance. Any Windows claim needs a lab check first.
+11. **Tenant MAC policy:** a Provider-level `tenantMACAddresses: Deny|Allow`,
+    default `Deny`, with an optional `allowedMACPrefixes` allow-list. Under
+    `Deny` the VM is created without the MAC and gets
+    `MACAddressApplied=False/PolicyDenied`. A MAC that duplicates one in the
+    Provider's inventory is **refused**. A namespace-level control through the
+    consumer grant may follow if needed.
+12. **Unknown instance-id on guests that fall to `DataSourceNone`: accept and
+    document it** for v0.4.x, with a warning condition when the instance-id is
+    unknown and the target is vSphere. The proper fix is Slice 7's guest-agent
+    read, not forcing `Fresh`.
+
+**Scheduling.** Slice 0a before v0.4.0 GA. Slices 0b and 1–5 after GA (v0.4.1);
+v0.4.0 documents the R36 limitation. Slice 6 when `Fresh` becomes the default.
 
 ## Follow-ups
 
