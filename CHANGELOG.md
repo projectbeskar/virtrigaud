@@ -28,6 +28,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `docs/vm-status-phase.md`: "A power change that returns a task" (the kept conditions, `PowerTaskFailed`, the backoff).
 - `CHANGELOG.md` (entry of #425, not edited): `source.proxmox.storage` is honoured by the provider, but the manager does not send it today, so for a `VirtualMachine` the image's storage has no effect yet.
 
+- `Makefile` (`test`): `go test` runs with `-timeout 20m`. The `internal/controller` envtest suite takes about 585 s when packages run in parallel, close to Go's default 10-minute per-package timeout.
+
 ### Why
 Review of #425, merged before its findings were fixed: the cloud-init drive of a clone of a template with its own drive failed on a real PVE 9.2 node, a failed power task was read as a failed Reconfigure and retried without a pause, and a task-status query failure made the manager forget a running task.
 

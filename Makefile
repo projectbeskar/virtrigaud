@@ -154,7 +154,7 @@ test: gen-crds generate fmt vet setup-envtest ## Run tests.
 	@echo "Running tests..."
 	@KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path)" \
 	go list ./... | grep -v '/test/e2e' | grep -v '/test/integration' | \
-	xargs go test -coverprofile cover.out
+	xargs go test -timeout 20m -coverprofile cover.out
 
 .PHONY: test-integration
 test-integration: ## Run integration tests under test/integration/ (cross-package observability + future controller integration). Distinct from make test (unit) and make test-e2e (kind cluster + ginkgo).
