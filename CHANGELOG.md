@@ -5,6 +5,21 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-10-23 13:00] - klauspost/compress 1.18.7 (CVE-2026-63209)
+**Author:** @wrkode (William Rizzo)
+
+### Security
+- `go.mod`, `go.sum`: `github.com/klauspost/compress` v1.18.6 → v1.18.7 (indirect, through `github.com/minio/minio-go/v7`, used by the S3 migration storage in `internal/storage`). Fixes CVE-2026-63209 (HIGH, denial of service), which the release image scan (Trivy) reported on the v0.4.0-rc3 provider images.
+
+### Why
+The release workflow's image scan blocks a release on HIGH or CRITICAL findings; the advisory was published after main's last green CI, so the v0.4.0-rc3 release run stopped at the scan.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-10-23 12:00] - Clustered libvirt: a host that stops answering is not always "nothing done" (R25)
 **Author:** @wrkode (William Rizzo)
 
