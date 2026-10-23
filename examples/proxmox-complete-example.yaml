@@ -3,7 +3,8 @@
 #
 # ⚠️  IMPORTANT: Requires Active Proxmox VE Server
 # The Proxmox provider needs environment variables to connect to a real Proxmox VE server.
-# See docs/providers/proxmox.md for deployment configuration examples.
+# See charts/virtrigaud-provider-runtime/examples/values-proxmox.yaml for the provider
+# runtime settings, docs/proxmox-networks.md and docs/proxmox-cloud-init-storage.md.
 #
 # NOTE on user-data: the Proxmox provider maps cloud-init user-data to PVE's own
 # cloud-init settings. It applies the user name (`ciuser`) and the SSH keys of an
