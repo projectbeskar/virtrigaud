@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 **Author:** @wrkode (William Rizzo)
 
 ### Changed
-- `docs/release-notes/next.md`: the release after v0.4.0-rc2 is named v0.4.0-rc3, a release candidate (GA follows after a soak); the three label-dependent passages are resolved; "Changes since v0.4.0-rc2" lists #419 (lab names removed from tracked files) and counts eleven pull requests merged 2026-10-19 to 2026-10-23.
+- `docs/release-notes/next.md`: the release after v0.4.0-rc2 is named v0.4.0-rc3, a release candidate (GA follows after a soak); the three label-dependent passages are resolved; "Changes since v0.4.0-rc2" lists #419 (lab names removed from tracked files) and #410 (CI dependency update) and counts twelve pull requests merged 2026-10-19 to 2026-10-23.
 
 ### Why
 The maintainer chose an rc3 before v0.4.0 GA, because the changes since rc2 include a breaking change (#414) and a new experimental capability (migration into a clustered libvirt Provider).

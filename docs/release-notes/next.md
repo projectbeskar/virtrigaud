@@ -30,7 +30,7 @@ v0.4.0-rc1".
 
 ## Changes since v0.4.0-rc2
 
-Eleven pull requests, merged 2026-10-19 to 2026-10-23. Three themes, plus a clean-up (#419). **Cloud-init
+Twelve pull requests, merged 2026-10-19 to 2026-10-23. Three themes, plus a clean-up (#419) and a CI dependency update (#410). **Cloud-init
 seeds** (#408, #413, #414): the user-data of a libvirt VM, which can carry
 passwords and keys, was readable by any local user of the hypervisor host; a
 clone booted with its source's SSH host keys; and a delete left seeds behind.
@@ -52,6 +52,7 @@ providers** (see [Upgrade order for this release](#upgrade-order-for-this-releas
 | #417 (R31) | A libvirt Host's `allocatableStorageBytes` is measured fresh with `stat -f` on every sync, instead of libvirt's cached `pool-info` value, and fails closed to 0 (details in the [inventory](docs/clustered-provider-inventory.md#what-listhosts-reports-per-host-libvirt)) | Behaviour change |
 | #407, #412 (R11) | ADR-0007 Addendum B: the design, proposed, then accepted with decisions on its open questions | Documentation only |
 | #419 | Internal lab host names and addresses are removed from tracked files (docs, examples, tests); a CI check keeps them out | No |
+| #410 | CI: `github/codeql-action/upload-sarif` 4.38.3 → 4.39.0 | No |
 | #411 | Go 1.26.10 (GO-2026-6809, `crypto/x509`, reachable through `x509.Certificate.Verify`); builder images in step | No |
 
 ### libvirt cloud-init seeds are private and live in a dedicated directory (#414, breaking)
