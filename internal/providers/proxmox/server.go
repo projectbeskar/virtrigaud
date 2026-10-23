@@ -278,6 +278,15 @@ func (p *Provider) Create(ctx context.Context, req *providerv1.CreateRequest) (*
 			ready := stamp.withPhase(ownerStampPhaseReady)
 			vmConfig.Custom[pveConfigKeyDescription] = composeDescription("", &ready)
 		}
+		if len(req.UserData) > 0 {
+			// No template, so no boot disk to follow: the request's or the
+			// operator's storage, else the last resort (R33).
+			storage := p.configuredCloudInitStorage(vmConfig.Storage)
+			if storage == "" {
+				storage = cloudInitLastResortStorage
+			}
+			vmConfig.IDE2 = cloudInitDrive(storage)
+		}
 		p.logger.Info("Creating new VM", "vmid", vmConfig.VMID)
 		p.trackTask(stamp, node, vmConfig.VMID, "")
 		taskID, err := p.client.CreateVM(ctx, node, vmConfig)
@@ -375,8 +384,11 @@ func (p *Provider) configureClonedVM(ctx context.Context, req *providerv1.Create
 	// Build reconfiguration values for cloud-init. Sizing (cores/memory) is
 	// already applied above for every clone, so it is not repeated here.
 	reconfigValues := url.Values{}
-	if vmConfig.IDE2 != "" {
-		reconfigValues.Set("ide2", vmConfig.IDE2)
+	if len(req.UserData) > 0 {
+		// The request's or operator's storage, else the boot disk's (R33).
+		storage := p.cloudInitStorage(ctx, node, vmConfig.VMID, p.configuredCloudInitStorage(vmConfig.Storage))
+		reconfigValues.Set("ide2", cloudInitDrive(storage))
+		p.logger.Info("Attaching the cloud-init drive", "vmid", vmConfig.VMID, "storage", storage)
 	}
 	if vmConfig.SSHKeys != "" {
 		reconfigValues.Set("sshkeys", vmConfig.SSHKeys)
@@ -1317,6 +1329,19 @@ func (p *Provider) parseCreateRequest(ctx context.Context, req *providerv1.Creat
 			}
 		}
 
+		// A VMImageSpec's source.proxmox.storage is a storage hint even when the
+		// template is already named (R33): it picks the cloud-init drive's
+		// storage, and is the full clone's target storage, as documented
+		// ("the Proxmox storage for cloning"). A hint from the contracts.VMImage
+		// above ("storage") wins. The block below reads it for the no-template
+		// case, along with the template.
+		if config.Template != "" && config.Storage == "" {
+			var imageSpec v1beta1.VMImageSpec
+			if err := json.Unmarshal([]byte(req.ImageJson), &imageSpec); err == nil && imageSpec.Source.Proxmox != nil {
+				config.Storage = imageSpec.Source.Proxmox.Storage
+			}
+		}
+
 		// Fallback: try to parse as VMImageSpec for backwards compatibility
 		if config.Template == "" {
 			var imageSpec v1beta1.VMImageSpec
@@ -1450,12 +1475,12 @@ func (p *Provider) parseCreateRequest(ctx context.Context, req *providerv1.Creat
 
 	// Configure cloud-init if user data provided
 	if len(req.UserData) > 0 {
-		// IDE2 needs storage pool prefix, use the configured storage or default to 'local'
-		storage := config.Storage
-		if storage == "" {
-			storage = "local"
-		}
-		config.IDE2 = fmt.Sprintf("%s:cloudinit", storage)
+		// The cloud-init drive (ide2) needs a "<storage>:cloudinit" value, and
+		// the storage must hold VM images. It is chosen where the VM exists to
+		// ask (cloudInitStorage for a template clone, whose boot disk's storage
+		// it can follow; Create's diskless branch otherwise), never defaulted
+		// to PVE's `local` here: on a stock install that storage has no
+		// `images` content and PVE refuses to start the VM (R33).
 
 		// Extract SSH keys and user from cloud-init data if possible
 		userData := string(req.UserData)

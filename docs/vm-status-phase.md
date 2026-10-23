@@ -17,7 +17,7 @@ as the provider reports it.
 | `Provisioning` | Being created: a `Create` is requested (the create marker is on `Provisioning`), a task is recorded, a clustered host was chosen for it, or it was created and has not been described yet. |
 | `Running` | Created, and the provider reports it `On`. A `Suspended` VM (paused, or suspended to RAM) is still active and reports `Running`; `Ready=False/PowerStateUnmanaged` says it is not managed until resumed. |
 | `Stopped` | Created, and the provider reports it `Off`. |
-| `Reconfiguring` | A resize is in flight: `Reconfiguring=True` (other than `RestartRequired`) or `status.reconfigureTaskRef` is set. A resize applied to the persistent definition only (`RestartRequired`) leaves the phase to the power state. |
+| `Reconfiguring` | A resize is in flight: `Reconfiguring=True` (other than `RestartRequired`) or `status.reconfigureTaskRef` is set. A resize applied to the persistent definition only (`RestartRequired`) leaves the phase to the power state. Also while an asynchronous power task runs (see [A power change that returns a task](#a-power-change-that-returns-a-task)). |
 | `Deleting` | The VM has a deletion timestamp, including while the delete is held (`Ready`/`DeleteBlocked` say why). |
 | `Failed` | A hold that needs an operator, a create that was refused, or a power state the provider cannot classify. See below. |
 
@@ -83,3 +83,27 @@ The first reconcile after the manager is rolled fills in the phase of every
 existing VM (one status write per VM that changes). There is no CRD schema change
 (the `phase` enum is unchanged), so no CRD ordering applies. Tooling that read
 `status.phase` must expect every value above.
+
+## A power change that returns a task
+
+A provider whose power operations are asynchronous (Proxmox answers a task id) makes
+the manager record the task in `status.lastTaskRef` and set `Reconfiguring=True`
+with reason `Updating` and the message `Adjusting power state`, so the VM shows
+`Reconfiguring` while the power task runs. When the task has ended, the manager
+sets that condition `False` (reason `ReconcileSuccess`, message `Power state
+adjusted`) and the phase follows the power state again: `Running` or `Stopped`.
+Providers whose power operations are synchronous (vSphere, libvirt) never set it.
+
+- A `Reconfiguring` condition of a real resize is never settled by a power task: only
+  the exact reason and message above are, and only when no `status.reconfigureTaskRef`
+  is recorded. `RestartRequired`, `ResizePendingPowerOff`, `ShrinkPendingPowerOff`,
+  `InsufficientHostCapacity` and the reconfigure's own `Updating` and
+  `TaskInProgress` conditions are left as they are.
+- A power task that ends in failure is forgotten (`status.lastTaskRef` is cleared),
+  and the failure is shown on `Ready=False/ProviderError` and
+  `Reconfiguring=False/ProviderError` with the message `Power state change failed: ...`. The
+  phase follows the power state. The next reconcile compares the power state with
+  `spec.powerState` again and sends the power operation again if they still differ.
+- An earlier manager (v0.4.0-rc4 and before) never settled the condition, so every
+  Proxmox VM whose power was changed stayed in phase `Reconfiguring` with `Ready=True`.
+  The first reconcile after the upgrade settles such a VM; no manual step is needed.

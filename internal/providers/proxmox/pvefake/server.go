@@ -650,6 +650,9 @@ func (s *Server) handleCreateVM(w http.ResponseWriter, r *http.Request) {
 	final.Lock = ""
 	final.Name = r.FormValue("name")
 	final.Description = r.FormValue("description")
+	if ide2 := r.FormValue("ide2"); ide2 != "" {
+		final.Config = map[string]string{"ide2": ide2}
+	}
 	if cpus := r.FormValue("cores"); cpus != "" {
 		if c, err := strconv.Atoi(cpus); err == nil {
 			final.CPUs = c
@@ -1040,6 +1043,7 @@ func (s *Server) handleCloneVM(w http.ResponseWriter, r *http.Request) {
 	final.CPUs = sourceVM.CPUs
 	final.Memory = sourceVM.Memory
 	final.Description = description
+	final.Config = cloneConfig(sourceVM.Config, r.FormValue("storage"))
 
 	s.vms[targetVMID] = temp
 
@@ -1049,6 +1053,31 @@ func (s *Server) handleCloneVM(w http.ResponseWriter, r *http.Request) {
 }
 
 // handlePowerOp creates a handler for power operations
+// cloneConfig is the raw config a clone gets from its source's: a copy, with
+// the disks moved to storage when the clone request names one (PVE's `storage`
+// parameter of a full clone). Cdrom drives (the cloud-init drive too) stay
+// where they are.
+func cloneConfig(source map[string]string, storage string) map[string]string {
+	if len(source) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(source))
+	for k, v := range source {
+		out[k] = v
+		if storage == "" || strings.Contains(v, "media=cdrom") {
+			continue
+		}
+		for _, bus := range []string{"scsi", "virtio", "sata", "ide"} {
+			if strings.HasPrefix(k, bus) {
+				if _, rest, found := strings.Cut(v, ":"); found {
+					out[k] = storage + ":" + rest
+				}
+			}
+		}
+	}
+	return out
+}
+
 func (s *Server) handlePowerOp(operation string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		vars := mux.Vars(r)
@@ -1509,6 +1538,14 @@ func (s *Server) handleReconfigureVM(w http.ResponseWriter, r *http.Request) {
 		if m, err := strconv.ParseInt(memory, 10, 64); err == nil {
 			vm.Memory = m * 1024 * 1024 // Convert MB to bytes
 		}
+	}
+
+	// The cloud-init drive, so a test can read which storage it was put on.
+	if ide2 := r.FormValue("ide2"); ide2 != "" {
+		if vm.Config == nil {
+			vm.Config = map[string]string{}
+		}
+		vm.Config["ide2"] = ide2
 	}
 
 	if _, ok := r.Form["description"]; ok {
