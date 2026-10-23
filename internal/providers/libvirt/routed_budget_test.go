@@ -285,6 +285,10 @@ func TestClustered_BudgetEndsBeforeTheCallersDeadline(t *testing.T) {
 			return err
 		},
 		"create snapshot": func(ctx context.Context) error {
+			_, err := s.SnapshotCreate(ctx, &providerv1.SnapshotCreateRequest{VmId: "web", TargetHostId: "host-b", Owner: teamAOwner, NameHint: "x", RequestToken: "tok-1"})
+			return err
+		},
+		"create snapshot without a request token": func(ctx context.Context) error {
 			_, err := s.SnapshotCreate(ctx, &providerv1.SnapshotCreateRequest{VmId: "web", TargetHostId: "host-b", Owner: teamAOwner, NameHint: "x"})
 			return err
 		},
@@ -303,6 +307,12 @@ func TestClustered_BudgetEndsBeforeTheCallersDeadline(t *testing.T) {
 				// Closing the session does not stop libvirtd's snapshot job:
 				// the outcome is unknown, and the answer says retry.
 				assertRoutedOp(t, err, codes.Unavailable, `create snapshot on host "host-b" did not answer within its time budget; its outcome is unknown`)
+				assert.True(t, contracts.HasErrorInfoReason(err, contracts.OutcomeUnknownRetryReason), "retryable, and not nothing done")
+			} else if op == "create snapshot without a request token" {
+				// A retry of a create that cannot be recognised could take a
+				// second snapshot: Unknown, not a retry.
+				assertRoutedOp(t, err, codes.Unknown, `create snapshot on host "host-b" did not answer within its time budget; its outcome is unknown`)
+				assert.False(t, contracts.HasErrorInfoReason(err, contracts.OutcomeUnknownRetryReason))
 			} else {
 				assertRoutedOp(t, err, codes.Unknown, op+` on host "host-b" did not finish within its time budget`)
 			}
@@ -318,7 +328,7 @@ func assertRoutedOp(t *testing.T, err error, code codes.Code, want string) {
 	st, ok := status.FromError(err)
 	require.True(t, ok, "got %v", err)
 	assert.Equal(t, code, st.Code(), "got %v", err)
-	assert.Equal(t, contracts.VMOperationFailedReason, errorInfoReason(st), "kept out of the manager's breaker")
+	assert.True(t, contracts.HasErrorInfoReason(err, contracts.VMOperationFailedReason), "kept out of the manager's breaker")
 	assert.Contains(t, st.Message(), want)
 	assert.NotContains(t, st.Message(), "/var/lib", "no host path on the wire")
 }

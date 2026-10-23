@@ -188,6 +188,10 @@ func (v *VirshProvider) withSession(ctx context.Context, fn func(*ssh.Session) e
 		}
 	}
 	defer func() { _ = sess.Close() }()
+	// A session is open: a command run on it may now be running, so a write
+	// pending in the call's progress record counts as sent (host_progress.go).
+	// A dial or session-open failure above ran nothing.
+	hostProgressFrom(ctx).opened()
 	return fn(sess)
 }
 

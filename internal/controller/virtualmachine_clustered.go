@@ -864,6 +864,12 @@ func routedCallRetryAfter(ref contracts.VMRef, err error) time.Duration {
 	if ref.Routed() && contracts.IsNotSupported(err) {
 		return routedOpNotSupportedRetryInterval
 	}
+	// A call whose host stopped answering part-way (R25: not performed, or an
+	// unknown outcome, with VM_OPERATION_FAILED) is paced as an unavailable
+	// host is: a dead host must not turn every VM on it into a 5 s poll.
+	if ref.Routed() && contracts.IsHostConnectionLost(err) {
+		return boundHostUnavailableRetryInterval
+	}
 	return providerErrorRetryInterval
 }
 

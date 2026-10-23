@@ -67,7 +67,7 @@ func hostOutcomeOf(t *testing.T, err error) hostOutcome {
 	t.Helper()
 	require.Error(t, err)
 	st := status.Convert(err)
-	vmOpFailed := errorInfoReason(st) == contracts.VMOperationFailedReason
+	vmOpFailed := contracts.HasErrorInfoReason(st.Err(), contracts.VMOperationFailedReason)
 	switch {
 	case hasHostUnavailableInfo(st):
 		require.Equal(t, codes.Unavailable, st.Code())

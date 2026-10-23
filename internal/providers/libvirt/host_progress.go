@@ -40,8 +40,10 @@ import (
 //     own (it succeeded, or ended with an exit status), so the host was
 //     reached;
 //   - wrote: a command that may change the host (anything not on the read-only
-//     lists below) was SENT. It is recorded when the command starts, not when
-//     it ends: a command whose session dropped may still be running.
+//     lists below) was SENT: its session was opened (opened), or it ended with
+//     an answer. It is recorded when the command starts, not when it ends: a
+//     command whose session dropped may still be running. A command whose SSH
+//     dial or session open failed ran nothing and is not a write.
 //
 // hostOpRPCError turns a transport failure into the answer the record
 // supports: nothing answered and nothing written -> HOST_UNAVAILABLE; only
@@ -60,6 +62,9 @@ type hostProgress struct {
 	mu       sync.Mutex
 	answered bool
 	wrote    bool
+	// pendingWrites counts the commands that may change the host that were
+	// begun and have not ended; opened promotes them to wrote.
+	pendingWrites int
 }
 
 // hostProgressKey is the context key of the call's hostProgress.
@@ -131,23 +136,45 @@ func (p *hostProgress) beginStream() func(error) {
 	return p.beginCommand(true)
 }
 
-// beginCommand is begin for a command already classified.
+// beginCommand is begin for a command already classified. A write is pending
+// until its session is opened (opened) or it ends with an answer; a write whose
+// dial or session open failed never ran anything and leaves wrote unset.
 func (p *hostProgress) beginCommand(write bool) func(error) {
 	if p == nil {
 		return func(error) {}
 	}
 	if write {
 		p.mu.Lock()
-		p.wrote = true
+		p.pendingWrites++
 		p.mu.Unlock()
 	}
 	return func(err error) {
-		if err != nil && !hostAnswered(err) && !sshExited(err) {
-			return
-		}
+		answer := err == nil || hostAnswered(err) || sshExited(err)
 		p.mu.Lock()
-		p.answered = true
-		p.mu.Unlock()
+		defer p.mu.Unlock()
+		if write {
+			p.pendingWrites--
+			if answer {
+				p.wrote = true
+			}
+		}
+		if answer {
+			p.answered = true
+		}
+	}
+}
+
+// opened records that a session to the host was opened (or, for a local
+// connection, that a process is about to start): a pending command that may
+// change the host may now be running. It does nothing on a nil receiver.
+func (p *hostProgress) opened() {
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.pendingWrites > 0 {
+		p.wrote = true
 	}
 }
 
@@ -171,28 +198,41 @@ func commandMayWrite(args []string) bool {
 	return !virshReadOnly(args)
 }
 
-// virshReadOnlySubcommands are the virsh subcommands that only read: none can
-// change a domain, a pool, a volume or the host.
+// virshReadOnlySubcommands are the virsh subcommands that only read when they
+// are run without arguments that set something (see virshReadOnly).
 var virshReadOnlySubcommands = map[string]bool{
 	"list": true, "dominfo": true, "domstate": true, "dumpxml": true, "domblklist": true, "domblkinfo": true,
 	"domblkstat": true, "domiflist": true, "domifaddr": true, "domuuid": true, "domid": true, "domname": true,
 	"dommemstat": true, "domjobinfo": true, "domstats": true, "guestinfo": true, "cpu-stats": true,
 	"vcpucount": true, "vcpuinfo": true, "snapshot-list": true, "snapshot-dumpxml": true, "snapshot-info": true,
-	"snapshot-parent": true, "snapshot-current": true, "pool-list": true, "pool-info": true, "pool-dumpxml": true,
+	"snapshot-parent": true, "pool-list": true, "pool-info": true, "pool-dumpxml": true,
 	"vol-list": true, "vol-info": true, "vol-dumpxml": true, "vol-path": true, "vol-name": true, "vol-key": true,
 	"net-list": true, "net-info": true, "net-dumpxml": true, "nodeinfo": true, "version": true, "uri": true,
 	"hostname": true, "capabilities": true, "domcapabilities": true, "sysinfo": true,
 }
 
 // virshReadOnly reports whether the virsh command args (a subcommand, after any
-// "-c <uri>" pair) is a read-only subcommand.
+// "-c <uri>" pair) is a read-only subcommand. snapshot-current is not on the
+// list: it can set the current snapshot. dommemstat reads unless it is asked to
+// set the balloon statistics period (--period, with --config, --live or
+// --current).
 func virshReadOnly(args []string) bool {
 	for i := 0; i < len(args); i++ {
 		if args[i] == "-c" || args[i] == "--connect" {
 			i++
 			continue
 		}
-		return virshReadOnlySubcommands[args[i]]
+		if !virshReadOnlySubcommands[args[i]] {
+			return false
+		}
+		if args[i] == "dommemstat" {
+			for _, a := range args[i+1:] {
+				if strings.HasPrefix(a, "--period") || a == "--config" || a == "--live" || a == "--current" {
+					return false
+				}
+			}
+		}
+		return true
 	}
 	return false
 }

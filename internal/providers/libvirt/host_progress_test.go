@@ -48,6 +48,12 @@ func TestCommandMayWrite(t *testing.T) {
 		"virsh pool-refresh":                  {[]string{"pool-refresh", "default"}, true},
 		"virsh qemu-agent-command":            {[]string{"qemu-agent-command", "web", "{}"}, true},
 		"an unknown virsh subcommand":         {[]string{"frobnicate"}, true},
+		"virsh snapshot-current can set":      {[]string{"snapshot-current", "web", "--name"}, true},
+		"virsh dommemstat":                    {[]string{"dommemstat", "web"}, false},
+		"virsh dommemstat --period --live":    {[]string{"dommemstat", "web", "--period", "5", "--live"}, true},
+		"virsh dommemstat --period=5":         {[]string{"dommemstat", "web", "--period=5"}, true},
+		"virsh dommemstat --config":           {[]string{"dommemstat", "web", "--config"}, true},
+		"virsh dommemstat --live":             {[]string{"dommemstat", "web", "--live"}, true},
 		"no command":                          {nil, true},
 		"host test":                           {[]string{"!", "test", "-r", "/dev/kvm"}, false},
 		"host stat":                           {[]string{"!", "stat", "-c", "%s", "/p"}, false},
@@ -111,11 +117,30 @@ func TestHostProgress_Stages(t *testing.T) {
 		p.begin([]string{"list", "--all"})(&VirshError{ExitCode: -1, Cause: context.Canceled})
 		assert.Equal(t, hostDownNothingRan, p.stage())
 	})
-	t.Run("a write is recorded when it is sent, before its result", func(t *testing.T) {
+	t.Run("a write is recorded once its session is open, before its result", func(t *testing.T) {
 		p := &hostProgress{}
 		done := p.begin([]string{"destroy", "web"})
+		assert.Equal(t, hostDownNothingRan, p.stage(), "nothing can run before a session is open")
+		p.opened()
 		assert.Equal(t, hostDownWriteSent, p.stage(), "the session may drop with the command still running")
 		done(transport)
+		assert.Equal(t, hostDownWriteSent, p.stage())
+	})
+	t.Run("a write whose dial or session open failed ran nothing (L2)", func(t *testing.T) {
+		p := &hostProgress{}
+		p.begin([]string{"destroy", "web"})(transport)
+		assert.Equal(t, hostDownNothingRan, p.stage())
+	})
+	t.Run("an open session does not make a read a write", func(t *testing.T) {
+		p := &hostProgress{}
+		done := p.begin([]string{"list", "--all"})
+		p.opened()
+		done(nil)
+		assert.Equal(t, hostDownReadsOnly, p.stage())
+	})
+	t.Run("a write that ended with an answer was sent", func(t *testing.T) {
+		p := &hostProgress{}
+		p.begin([]string{"destroy", "web"})(rejected)
 		assert.Equal(t, hostDownWriteSent, p.stage())
 	})
 	t.Run("reads after a write stay a write stage", func(t *testing.T) {
@@ -126,7 +151,9 @@ func TestHostProgress_Stages(t *testing.T) {
 	})
 	t.Run("a stream is a write", func(t *testing.T) {
 		p := &hostProgress{}
-		p.beginStream()(errors.New("broken pipe"))
+		done := p.beginStream()
+		p.opened()
+		done(errors.New("broken pipe"))
 		assert.Equal(t, hostDownWriteSent, p.stage())
 	})
 	t.Run("an untracked call assumes a write", func(t *testing.T) {

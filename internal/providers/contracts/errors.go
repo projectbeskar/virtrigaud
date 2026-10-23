@@ -397,6 +397,23 @@ func IsVMDiskCheckFailed(err error) bool {
 	return IsRetryable(err) && errors.Is(err, ErrVMDiskCheckFailed)
 }
 
+// HostConnectionLostReason is the google.rpc.ErrorInfo reason (in
+// ErrorInfoDomain) a clustered provider adds to its answer of a routed call
+// whose host stopped answering part-way (R25: not performed, unknown, or
+// unknown-retry), always together with VMOperationFailedReason. The answer says
+// how far the call got; this reason says why, so that the manager paces its
+// retries as it does for an unavailable host (a dead host must not turn every
+// VM on it into a 5 s poll). It changes no other reading of the answer, and a
+// manager that predates it ignores it.
+const HostConnectionLostReason = "HOST_CONNECTION_LOST"
+
+// IsHostConnectionLost reports whether err is a routed provider call's answer
+// that carries HostConnectionLostReason: the host stopped answering during the
+// call.
+func IsHostConnectionLost(err error) bool {
+	return HasErrorInfoReason(err, HostConnectionLostReason)
+}
+
 // ErrOutcomeUnknownRetry marks (in an error's chain) a provider's answer
 // carrying OutcomeUnknownRetryReason: the call may have changed the host, its
 // outcome is unknown, and it is safe to send again. The transport client wraps

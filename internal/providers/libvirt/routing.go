@@ -321,8 +321,16 @@ func vmOperationStatus(code codes.Code, msg string) error {
 // the first: it maps the answer as it always did (retryable, out of its circuit
 // breaker, and every consumer of these calls retries a retryable answer
 // first), never as a definite failure.
-func outcomeUnknownRetryStatus(msg string) error {
-	return statusWithReasons(codes.Unavailable, msg, contracts.OutcomeUnknownRetryReason, contracts.VMOperationFailedReason).Err()
+func outcomeUnknownRetryStatus(msg string, extra ...string) error {
+	return statusWithReasons(codes.Unavailable, msg, append([]string{contracts.OutcomeUnknownRetryReason, contracts.VMOperationFailedReason}, extra...)...).Err()
+}
+
+// hostLostStatus renders the answer of a routed call whose host stopped
+// answering part-way: code and msg as hostOpRPCErrorFor chose them, with
+// VM_OPERATION_FAILED and HOST_CONNECTION_LOST, the reason the manager paces
+// its retries by (contracts.IsHostConnectionLost).
+func hostLostStatus(code codes.Code, msg string) error {
+	return statusWithReasons(code, msg, contracts.VMOperationFailedReason, contracts.HostConnectionLostReason).Err()
 }
 
 // routedOpError is a failure of a routed operation that carries its own
@@ -431,13 +439,13 @@ func hostOpRPCErrorFor(kind hostOpKind, op string, ho *hostOpError, err error) e
 			return hostUnavailableStatus(contracts.NewHostUnavailableError(
 				fmt.Sprintf("%s: host %q is unreachable", op, ho.host), nil))
 		case stage == hostDownReadsOnly:
-			return vmOperationStatus(codes.Unavailable, fmt.Sprintf(wireHostNotPerformedFmt, op, ho.host))
+			return hostLostStatus(codes.Unavailable, fmt.Sprintf(wireHostNotPerformedFmt, op, ho.host))
 		case kind == hostOpWriteRetry:
 			log.Printf("WARN %s on host %s: outcome unknown (a command that may change the host was sent)", op, ho.host)
-			return outcomeUnknownRetryStatus(fmt.Sprintf(wireHostUnknownRetryFmt, op, ho.host))
+			return outcomeUnknownRetryStatus(fmt.Sprintf(wireHostUnknownRetryFmt, op, ho.host), contracts.HostConnectionLostReason)
 		default:
 			log.Printf("WARN %s on host %s: outcome unknown (a command that may change the host was sent)", op, ho.host)
-			return vmOperationStatus(codes.Unknown, fmt.Sprintf(wireHostUnknownFmt, op, ho.host))
+			return hostLostStatus(codes.Unknown, fmt.Sprintf(wireHostUnknownFmt, op, ho.host))
 		}
 	}
 	msg := fmt.Sprintf("failed to %s on host %q", op, ho.host)
