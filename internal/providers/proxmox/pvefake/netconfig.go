@@ -187,8 +187,8 @@ func networkConfigFromForm(form url.Values) (map[string]string, error) {
 // from the clone's VMID and the NIC's index, so it is stable, distinct from
 // the source's, and a test can name it.
 func CloneMAC(vmid, index int) string {
-	mac := net.HardwareAddr{0xBC, 0x24, 0x11, byte(vmid >> 16), byte(vmid >> 8), byte(vmid)}
-	mac[5] ^= byte(index)
+	mac := net.HardwareAddr{0xBC, 0x24, 0x11, byte((vmid >> 16) & 0xFF), byte((vmid >> 8) & 0xFF), byte(vmid & 0xFF)}
+	mac[5] ^= byte(index & 0xFF)
 	return strings.ToUpper(mac.String())
 }
 
