@@ -34,6 +34,7 @@ func TestValidateNetValue(t *testing.T) {
 		"e1000=bc:24:11:00:00:01,bridge=vmbr1",
 		"model=virtio,macaddr=BC:24:11:00:00:01,bridge=vmbr0,rate=10,mtu=1500",
 		"virtio,bridge=vmbr0,macaddr=BC:24:11:00:00:01,link_down=1",
+		"virtio,bridge=vnet_1.a-b,host-tunnel=1,queues=4",
 	}
 	for _, v := range valid {
 		assert.NoError(t, validateNetValue(v), v)
@@ -50,6 +51,9 @@ func TestValidateNetValue(t *testing.T) {
 		"tag zero":               "virtio,bridge=vmbr0,tag=0",
 		"tag not a number":       "virtio,bridge=vmbr0,tag=x",
 		"empty bridge":           "virtio,bridge=",
+		"bridge with a space":    "virtio,bridge=vmbr 1",
+		"multicast MAC":          "virtio=01:00:5E:00:00:01,bridge=vmbr0",
+		"multicast macaddr":      "virtio,bridge=vmbr0,macaddr=03:00:00:00:00:01",
 		"option without a value": "virtio,bridge",
 		"unknown option":         "virtio,bridge=vmbr0,evil=1",
 	}
@@ -64,7 +68,7 @@ func TestValidateIPConfig(t *testing.T) {
 	for _, v := range []string{"ip=dhcp", "ip=10.0.0.5/24", "ip=10.0.0.5/24,gw=10.0.0.1", "ip6=fd00::5/64,gw6=fd00::1", "ip6=auto", "ip=manual"} {
 		assert.NoError(t, validateIPConfig(v), v)
 	}
-	for _, v := range []string{"ip=10.0.0.5", "ip=10.0.0.5/24,nameserver=10.0.0.2", "ip=10.0.0.5/24,gw=fd00::1", "ip6=10.0.0.5/24", "gw=nope", "dns=10.0.0.2"} {
+	for _, v := range []string{"ip=10.0.0.5", "ip=10.0.0.5/24,nameserver=10.0.0.2", "ip=10.0.0.5/24,gw=fd00::1", "ip6=10.0.0.5/24", "gw=nope", "dns=10.0.0.2", "gw=10.0.0.1", "ip=dhcp,gw6=fd00::1", "ip6=fd00::5/64,gw=10.0.0.1"} {
 		assert.Error(t, validateIPConfig(v), v)
 	}
 }

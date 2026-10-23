@@ -48,9 +48,21 @@ var (
 	netOptions = map[string]bool{
 		"bridge": true, "firewall": true, "link_down": true, "macaddr": true,
 		"model": true, "mtu": true, "queues": true, "rate": true, "tag": true,
-		"trunks": true,
+		"trunks": true, "host-tunnel": true,
 	}
+	// bridgeIDPattern is PVE's pve-bridge-id format.
+	bridgeIDPattern = regexp.MustCompile(`^[-_.\w]+$`)
 )
+
+// validMAC reports whether mac is a unicast MAC address in PVE's format: PVE
+// refuses a multicast one (first octet odd).
+func validMAC(mac string) bool {
+	if !macPattern.MatchString(mac) {
+		return false
+	}
+	first, err := strconv.ParseUint(mac[:2], 16, 8)
+	return err == nil && first&1 == 0
+}
 
 // maxNICs is the number of NICs of a PVE VM (net0 to net31).
 const maxNICs = 32
@@ -68,7 +80,7 @@ func validateNetValue(value string) error {
 				return fmt.Errorf("duplicate model %q", key)
 			}
 			hasModel = true
-			if hasVal && !macPattern.MatchString(val) {
+			if hasVal && !validMAC(val) {
 				return fmt.Errorf("invalid MAC address %q for model %q", val, key)
 			}
 		case !netOptions[key]:
@@ -83,14 +95,14 @@ func validateNetValue(value string) error {
 				return fmt.Errorf("invalid model %q", val)
 			}
 			hasModel = true
-		case key == "macaddr" && !macPattern.MatchString(val):
+		case key == "macaddr" && !validMAC(val):
 			return fmt.Errorf("invalid MAC address %q", val)
 		case key == "tag":
 			if n, err := strconv.Atoi(val); err != nil || n < 1 || n > 4094 {
 				return fmt.Errorf("invalid VLAN tag %q", val)
 			}
-		case key == "bridge" && val == "":
-			return fmt.Errorf("empty bridge")
+		case key == "bridge" && !bridgeIDPattern.MatchString(val):
+			return fmt.Errorf("invalid bridge ID %q", val)
 		}
 	}
 	if !hasModel {
@@ -101,10 +113,13 @@ func validateNetValue(value string) error {
 
 // validateIPConfig checks an ipconfigN value: only ip, gw, ip6 and gw6, with
 // ip and ip6 as an address with its prefix length (or dhcp/manual, auto/dhcp
-// for ip6).
+// for ip6), and a gateway only beside an address of its family (PVE's
+// ipconfig format makes gw require ip, and gw6 require ip6).
 func validateIPConfig(value string) error {
+	seen := map[string]bool{}
 	for _, part := range strings.Split(value, ",") {
 		key, val, _ := strings.Cut(strings.TrimSpace(part), "=")
+		seen[key] = true
 		switch key {
 		case "ip":
 			if val == "dhcp" || val == "manual" {
@@ -133,6 +148,12 @@ func validateIPConfig(value string) error {
 		default:
 			return fmt.Errorf("unknown key %q", key)
 		}
+	}
+	if seen["gw"] && !seen["ip"] {
+		return fmt.Errorf("gw requires ip")
+	}
+	if seen["gw6"] && !seen["ip6"] {
+		return fmt.Errorf("gw6 requires ip6")
 	}
 	return nil
 }

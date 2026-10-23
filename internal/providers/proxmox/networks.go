@@ -69,7 +69,7 @@ const (
 const (
 	networksJSONInvalidMessage    = "networks_json is not a valid list of network attachments"
 	networksTooManyMessage        = "the VM names more network attachments than a Proxmox VM has NICs"
-	networkBridgeInvalidMessage   = "network %d: the bridge must be a Linux bridge or SDN VNet name (letters, digits, '.', '_' or '-', at most 15 characters)"
+	networkBridgeInvalidMessage   = "network %d: the bridge must be a Linux bridge name (letters, digits, '.', '_' or '-', at most 15 characters; the VMNetworkAttachment CRD currently allows vmbr0, vmbr1, ... only)"
 	networkModelInvalidMessage    = "network %d: the NIC model is not one Proxmox VE supports"
 	networkVLANInvalidMessage     = "network %d: the VLAN tag must be between 1 and 4094"
 	networkMACInvalidMessage      = "network %d: the MAC address must be a unicast, non-zero 48-bit address"
@@ -91,6 +91,9 @@ var (
 		"ne2k_isa": true, "ne2k_pci": true, "pcnet": true, "rtl8139": true,
 		"virtio": true, "vmxnet3": true,
 	}
+
+	// pveVirtioOnlyOpts are the netN options PVE accepts on a virtio NIC only.
+	pveVirtioOnlyOpts = []string{"mtu", "queues", "host-tunnel"}
 )
 
 // parseNetworks turns a Create's networks_json into the NICs and the IP
@@ -197,13 +200,38 @@ func normaliseMAC(mac string) (string, bool) {
 	return strings.ToUpper(hw.String()), true
 }
 
-// ipConfigFromAttachment validates attachment i's static IP settings and
-// returns its IP config: DHCP when the attachment has no StaticIP, otherwise
-// the address with its prefix, the gateway and the DNS servers. The prefix
-// comes from Prefix, or from the address itself when it is written in CIDR
-// form (then Prefix, if also set, must agree).
+// parseDNSServers validates attachment i's comma-separated DNS servers and
+// returns them as a normalised comma-separated list.
+func parseDNSServers(i int, dns string) (string, error) {
+	var servers []string
+	for _, server := range strings.Split(dns, ",") {
+		server = strings.TrimSpace(server)
+		if server == "" {
+			continue
+		}
+		serverAddr, err := netip.ParseAddr(server)
+		if err != nil || !usableUnicast(serverAddr) {
+			return "", errors.NewInvalidSpec(networkDNSInvalidMessage, i)
+		}
+		servers = append(servers, serverAddr.String())
+	}
+	return strings.Join(servers, ","), nil
+}
+
+// ipConfigFromAttachment validates attachment i's IP settings and returns its
+// IP config: DHCP when the attachment has no StaticIP, otherwise the address
+// with its prefix and the gateway. The prefix comes from Prefix, or from the
+// address itself when it is written in CIDR form (then Prefix, if also set,
+// must agree). The DNS servers are kept for both: PVE's nameserver is
+// VM-wide, so a DHCP entry's servers are applied too. The prefix and gateway
+// of a DHCP entry are ignored.
 func ipConfigFromAttachment(i int, a *contracts.NetworkAttachment) (pveapi.IPConfig, error) {
 	ipc := pveapi.IPConfig{Index: i, DHCP: true}
+	dns, dnsErr := parseDNSServers(i, a.DNS)
+	if dnsErr != nil {
+		return ipc, dnsErr
+	}
+	ipc.DNS = dns
 	raw := strings.TrimSpace(a.StaticIP)
 	if raw == "" {
 		return ipc, nil
@@ -248,19 +276,6 @@ func ipConfigFromAttachment(i int, a *contracts.NetworkAttachment) (pveapi.IPCon
 		ipc.Gateway = gwAddr.String()
 	}
 
-	var servers []string
-	for _, server := range strings.Split(a.DNS, ",") {
-		server = strings.TrimSpace(server)
-		if server == "" {
-			continue
-		}
-		serverAddr, err := netip.ParseAddr(server)
-		if err != nil || !usableUnicast(serverAddr) {
-			return ipc, errors.NewInvalidSpec(networkDNSInvalidMessage, i)
-		}
-		servers = append(servers, serverAddr.String())
-	}
-	ipc.DNS = strings.Join(servers, ",")
 	return ipc, nil
 }
 
@@ -395,6 +410,12 @@ func mergeNetValue(current string, nic *pveapi.NetworkConfig) string {
 	merged := parseNetValue(current)
 	if nic.Model != "" {
 		merged.model = nic.Model
+	}
+	if merged.model != "" && merged.model != pveDefaultNICModel {
+		// PVE refuses these options on a model other than virtio.
+		for _, key := range pveVirtioOnlyOpts {
+			merged.setOpt(key, "")
+		}
 	}
 	if nic.MAC != "" {
 		merged.mac = nic.MAC

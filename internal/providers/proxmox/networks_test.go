@@ -256,6 +256,41 @@ func TestCreate_Clone_NICBeyondTheTemplateIsAdded(t *testing.T) {
 	assert.Contains(t, vm.Config["net0"], "bridge=vmbr3", "an empty attachment leaves the template's NIC")
 }
 
+// TestCreate_NewVM_DNSOnADHCPEntryIsApplied: PVE's nameserver is VM-wide, so a
+// DHCP entry's DNS servers are applied too; its prefix and gateway are not.
+func TestCreate_NewVM_DNSOnADHCPEntryIsApplied(t *testing.T) {
+	p, srv := netTestProvider(t)
+	vm := createNet(t, p, srv, "", networksJSON(t,
+		contracts.NetworkAttachment{Bridge: "vmbr1", DNS: "10.1.2.53", Prefix: 24, Gateway: "10.1.2.1"},
+	), nil)
+	assert.Equal(t, "ip=dhcp", vm.Config["ipconfig0"])
+	assert.Equal(t, "10.1.2.53", vm.Config["nameserver"])
+}
+
+// TestCreate_Clone_NICsAreMatchedByIndex: the spec's entries are matched to the
+// template's NICs by index. With net0 and net2 in the template and two
+// entries, entry 1 adds net1, and net2 is kept: the clone has three NICs.
+func TestCreate_Clone_NICsAreMatchedByIndex(t *testing.T) {
+	p, srv := netTestProvider(t)
+	tmpl, ok := srv.GetVM(seededTemplateID)
+	require.True(t, ok)
+	tmpl.Config = map[string]string{
+		"scsi0": "tank-ssd:vm-9000-disk-0,size=32G",
+		"net0":  templateNet0,
+		"net2":  "virtio=AA:BB:CC:00:00:03,bridge=vmbr5",
+	}
+	srv.PutVM(tmpl)
+
+	vm := createNet(t, p, srv, `{"TemplateName": "9000"}`, networksJSON(t,
+		contracts.NetworkAttachment{Bridge: "vmbr9"},
+		contracts.NetworkAttachment{Bridge: "vmbr6", VLAN: 7},
+	), nil)
+
+	assert.Equal(t, "virtio="+pvefake.CloneMAC(vm.VMID, 0)+",bridge=vmbr9,firewall=1", vm.Config["net0"])
+	assert.Equal(t, "virtio,bridge=vmbr6,tag=7", vm.Config["net1"], "a new NIC: the template has no net1")
+	assert.Equal(t, "virtio="+pvefake.CloneMAC(vm.VMID, 2)+",bridge=vmbr5", vm.Config["net2"], "a template NIC beyond the spec is kept")
+}
+
 // TestCreate_RefusesAnInvalidAttachment: every invalid attachment is refused
 // as InvalidSpec before a VM is made, and the message does not echo the
 // tenant's value.
@@ -288,6 +323,8 @@ func TestCreate_RefusesAnInvalidAttachment(t *testing.T) {
 		{"invalid gateway", networksJSON(t, contracts.NetworkAttachment{StaticIP: "10.0.0.5", Prefix: 24, Gateway: secret})},
 		{"IPv6 gateway for an IPv4 address", networksJSON(t, contracts.NetworkAttachment{StaticIP: "10.0.0.5", Prefix: 24, Gateway: "fd00::1"})},
 		{"invalid DNS", networksJSON(t, contracts.NetworkAttachment{StaticIP: "10.0.0.5", Prefix: 24, DNS: "10.0.0.2," + secret})},
+		{"invalid DNS on a DHCP entry", networksJSON(t, contracts.NetworkAttachment{DNS: secret + ".example.com"})},
+		{"DNS as a space-separated list", networksJSON(t, contracts.NetworkAttachment{DNS: "10.0.0.2 10.0.0.3"})},
 		{"too many attachments", networksJSON(t, tooMany...)},
 		{"not JSON", secret},
 		{"wrong JSON shape", `{"Bridge": "vmbr1"}`},
@@ -376,6 +413,14 @@ func TestMergeNetValue(t *testing.T) {
 		{"the macaddr and model= spellings are read",
 			"model=e1000,macaddr=AA:BB:CC:00:00:01,bridge=vmbr3", pveapi.NetworkConfig{Bridge: "vmbr3"},
 			"e1000=AA:BB:CC:00:00:01,bridge=vmbr3"},
+		{"a model change away from virtio drops the virtio-only options",
+			"virtio=AA:BB:CC:00:00:01,bridge=vmbr3,mtu=1400,queues=4,host-tunnel=1,firewall=1", pveapi.NetworkConfig{Model: "e1000"},
+			"e1000=AA:BB:CC:00:00:01,bridge=vmbr3,firewall=1"},
+		{"virtio keeps them",
+			"virtio=AA:BB:CC:00:00:01,bridge=vmbr3,mtu=1400,queues=4", pveapi.NetworkConfig{Model: "virtio"},
+			"virtio=AA:BB:CC:00:00:01,bridge=vmbr3,mtu=1400,queues=4"},
+		{"a bridgeless NIC named only by model gets vmbr0", "virtio=AA:BB:CC:00:00:01", pveapi.NetworkConfig{Model: "virtio"},
+			"virtio=AA:BB:CC:00:00:01,bridge=vmbr0"},
 		{"a bare model has no MAC", "rtl8139,bridge=vmbr2", pveapi.NetworkConfig{VLAN: 9}, "rtl8139,bridge=vmbr2,tag=9"},
 	}
 	for _, tc := range tests {
