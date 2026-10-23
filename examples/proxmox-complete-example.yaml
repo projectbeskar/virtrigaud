@@ -4,6 +4,12 @@
 # ⚠️  IMPORTANT: Requires Active Proxmox VE Server
 # The Proxmox provider needs environment variables to connect to a real Proxmox VE server.
 # See docs/providers/proxmox.md for deployment configuration examples.
+#
+# NOTE on user-data: the Proxmox provider maps cloud-init user-data to PVE's own
+# cloud-init settings. It applies the user name (`ciuser`) and the SSH keys of an
+# `ssh_authorized_keys:` block list (`- key` items) only. Other keys in the
+# examples below (`packages`, `runcmd`, `sudo`, ...) are NOT applied on Proxmox
+# today; see "Known limitations" in docs/release-notes/next.md.
 
 ---
 # Secret for Proxmox VE API credentials
