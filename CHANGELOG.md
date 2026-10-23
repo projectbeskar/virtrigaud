@@ -5,6 +5,22 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-10-23 11:00] - ADR-0013 (Proposed): disk resize as its own, honest flow (R19)
+**Author:** @wrkode (William Rizzo)
+
+### Added
+- `docs/adr/0013-disk-resize-flow.md`: Proposed design for R19 (from the #401 review). It records with file:line citations that a disk size change alone never reaches a provider (`needsReconfigure` compares CPU and memory only), what each provider does with disk sizes today, the missing stable disk identity and observed per-disk sizes, the capabilities that overstate disk support, and the missing disk dimension in clustered capacity. It proposes additive per-disk observation in `Describe` (`disks`, `disks_reported`) recorded in a new `status.disks`, a typed grow-only `ResizeDisks` RPC with per-disk outcomes behind a `supports_disk_resize` capability, a `DiskSizeApplied` condition, stable identities per provider (vSphere backing UUID and boot-order root, libvirt target dev, Proxmox bus key), clustered storage admission against `allocatableStorageBytes`, the upgrade and rollback matrix, security constraints, a test and lab plan, seven slices, and eight open questions.
+- `docs/adr/README.md`: index row for ADR-0013.
+
+### Why
+A user's disk resize (`spec.disks[].sizeGiB`, VMClass `diskDefaults.size`) is silently ignored unless a CPU or memory change carries it, Proxmox never applies the class disk size, and the manager cannot see which disk sizes are applied. The design must be reviewed before implementation.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [ ] Config change only
+- [x] Documentation only
+
 ## [2026-10-23 10:30] - Release notes: v0.4.0-rc3
 **Author:** @wrkode (William Rizzo)
 
