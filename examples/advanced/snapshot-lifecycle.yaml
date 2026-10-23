@@ -1,7 +1,7 @@
 # Snapshot Lifecycle Management Example
 # This demonstrates the complete snapshot lifecycle:
 # 1. Create snapshots for backup/rollback
-# 2. Revert to a previous snapshot
+# 2. Revert to a previous snapshot (power off, set spec.snapshot.revertToRef)
 # 3. Clean up old snapshots
 
 ---
@@ -65,24 +65,57 @@ spec:
     deleteOnVMDelete: false  # Keep backups even if VM is deleted
 
 ---
-# To revert to a snapshot, patch the VM with a snapshot reference:
-# 
-# apiVersion: infra.virtrigaud.io/v1beta1
-# kind: VirtualMachine
-# metadata:
-#   name: web-server-01
-#   namespace: default
-# spec:
-#   snapshot:
-#     revertToRef:
-#       name: web-server-01-maintenance-backup
+# To revert web-server-01 to one of the snapshots above
+# (docs/vm-snapshot-revert.md):
 #
-# The controller will:
-# 1. Power off the VM if running
-# 2. Call provider's SnapshotRevert RPC
-# 3. Power on the VM
-# 4. Clear the revertToRef field when complete
-# 5. Update conditions and emit events
+# 1. Power the VM off. VirtRigaud never powers a VM off for a revert: until the
+#    provider reports the VM Off AND spec.powerState is Off (or OffGraceful),
+#    nothing is sent and the VM shows SnapshotReverted=False/WaitingForPowerOff.
+#
+#      kubectl patch vm web-server-01 --type merge -p '{"spec":{"powerState":"Off"}}'
+#
+# 2. Name the VMSnapshot. It must be Ready and taken of this VM (its
+#    spec.vmRef and status.vmUID), through the VM's Provider:
+#
+#      kubectl patch vm web-server-01 --type merge \
+#        -p '{"spec":{"snapshot":{"revertToRef":{"name":"web-server-01-pre-update"}}}}'
+#
+#    The same, in the VM's manifest:
+#
+#      apiVersion: infra.virtrigaud.io/v1beta1
+#      kind: VirtualMachine
+#      metadata:
+#        name: web-server-01
+#        namespace: default
+#      spec:
+#        # ...the rest of the VM's spec...
+#        powerState: "Off"
+#        snapshot:
+#          revertToRef:
+#            name: web-server-01-pre-update
+#
+# 3. Watch the outcome: status.snapshotRevert.phase goes Reverting, then
+#    Succeeded (SnapshotReverted=True, reason Reverted) or Failed
+#    (SnapshotReverted=False, reason RevertFailed). Until it succeeds, Ready
+#    is False with the same reason. Events: SnapshotRevertStarted,
+#    SnapshotRevertSucceeded, SnapshotRevertFailed.
+#
+#      kubectl get vm web-server-01 -o jsonpath='{.status.snapshotRevert.phase}{"\n"}'
+#
+# 4. Power the VM on again if you want it running; the revert does not.
+#    (Reverting to a snapshot taken with memory, like
+#    web-server-01-maintenance-backup, can leave the VM running on vSphere;
+#    a VM whose spec still says Off is then powered off again.)
+#
+#      kubectl patch vm web-server-01 --type merge -p '{"spec":{"powerState":"On"}}'
+#
+# The revert is sent at most once per request: leaving revertToRef set (or
+# re-applying the same manifest) does nothing more. To revert to the same
+# snapshot again, remove the field, wait for status.snapshotRevert to be
+# cleared, then set it again; naming another VMSnapshot is a new request.
+#
+#      kubectl patch vm web-server-01 --type json \
+#        -p '[{"op":"remove","path":"/spec/snapshot/revertToRef"}]'
 
 ---
 # Example CronJob for automated snapshot cleanup

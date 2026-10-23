@@ -61,6 +61,55 @@ updated field descriptions; its schema is unchanged) and roll the manager. The
 manager's role gains `hostpools/status` `get`/`patch`/`update` (the Helm chart
 and `config/rbac` both carry it). Nothing is breaking.
 
+### `spec.snapshot.revertToRef` reverts the VM (fix of a silent no-op; V2)
+
+Found by the rc5 lab validation: `VirtualMachine.spec.snapshot.revertToRef` was
+accepted by the CRD, and `examples/advanced/snapshot-lifecycle.yaml` documented it as
+the way to revert, but no controller ever sent the provider's `SnapshotRevert`. The VM
+stayed `Ready` with no condition and no event, so the user believed it had been
+reverted. Every provider already implemented the RPC. The `VirtualMachine` controller
+now acts on the field:
+
+- **Only while the VM is off.** The revert is sent only when the provider reports the
+  VM `Off` and `spec.powerState` is `Off` or `OffGraceful`. VirtRigaud never powers a
+  VM off for a revert, and does not power it on afterwards: `spec.powerState` decides.
+  Otherwise `SnapshotReverted=False/WaitingForPowerOff` asks for `spec.powerState: Off`.
+- **The snapshot is resolved fail-closed.** The `VMSnapshot` must exist in the VM's
+  namespace, be `Ready` with a provider snapshot id, not be deleting, and be taken of
+  this VM (`spec.vmRef`, `status.vmUID`) through its Provider; otherwise
+  `SnapshotNotFound`, `SnapshotNotReady` or `SnapshotForAnotherVM`, and nothing is
+  sent. A Provider that reports `supportsSnapshots: false` gets `Unsupported`.
+- **At most once per request.** The new `status.snapshotRevert` records the
+  `VMSnapshot` (name and UID), the phase (`Pending`, `Reverting`, `Succeeded`,
+  `Failed`), the attempts and the outcome. While it records `Succeeded` or `Failed` for
+  the `VMSnapshot` the field names, nothing is sent again, so a GitOps re-apply or any
+  other spec change is safe. To revert again, remove the field, then set it again; a
+  ref to another `VMSnapshot` (another UID) is a new request. A failed revert is not
+  retried on its own.
+- **Recorded before it is sent.** The attempt is written with the optimistic lock of the
+  `resourceVersion` the reconcile read; nothing is sent if the write fails. A provider
+  task (Proxmox) is recorded and polled, and nothing else is done to the VM while it
+  runs. A call whose outcome is unknown (deadline, lost connection, manager restart) is
+  sent again only while a fresh `Describe` shows the VM still off: at least 6 minutes
+  apart, at most 5 calls.
+- **Conditions and events.** New condition `SnapshotReverted` (reasons
+  `WaitingForPowerOff`, `SnapshotNotFound`, `SnapshotNotReady`,
+  `SnapshotForAnotherVM`, `Unsupported`, `Reverting`, `Reverted`, `RevertFailed`).
+  While it is `False`, `Ready` is `False` with the same reason. Events
+  `SnapshotRevertStarted`, `SnapshotRevertSucceeded`, `SnapshotRevertFailed`.
+
+**Additive CRD change** (`status.snapshotRevert`): upgrade the CRDs before the manager;
+a manager whose CRD prunes the field sends no revert. A VM that already carries
+`spec.snapshot.revertToRef` is acted on by the first reconcile after the upgrade:
+remove the field first from VMs you do not want reverted.
+
+**Not validated on a real hypervisor yet.** It is covered by unit and envtest tests
+against the mock provider only. On libvirt, a snapshot of a VM that is off, or taken
+without memory, is an external disk-only snapshot; whether the host's libvirt can
+revert it depends on its version (a refusal is reported as `RevertFailed`).
+
+→ [`docs/vm-snapshot-revert.md`](docs/vm-snapshot-revert.md)
+
 ## Changes since v0.4.0-rc4
 
 Four pull requests, all merged 2026-10-23. Three of them fix what validating rc4 on a
