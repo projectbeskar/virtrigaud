@@ -31,7 +31,7 @@ func TestStorageOptionsRoundTrip(t *testing.T) {
 	in := StorageOptions{
 		Backend:      BackendS3,
 		Bucket:       "virtrigaud",
-		Endpoint:     "http://rustfs.lab.k8:9000",
+		Endpoint:     "http://s3.example.com:9000",
 		Region:       "us-east-1",
 		Prefix:       "prod/",
 		UsePathStyle: true,
@@ -64,7 +64,7 @@ func TestStorageOptionsRoundTrip(t *testing.T) {
 // fields and asserts credential keys land where the S3 client expects them.
 func TestS3StorageConfigFromRequest(t *testing.T) {
 	opts, _ := MarshalStorageOptions(StorageOptions{
-		Backend: BackendS3, Bucket: "virtrigaud", Endpoint: "http://rustfs.lab.k8:9000", UsePathStyle: true,
+		Backend: BackendS3, Bucket: "virtrigaud", Endpoint: "http://s3.example.com:9000", UsePathStyle: true,
 	})
 	creds := map[string]string{
 		CredKeyAccessKeyID:     "AKIA",
@@ -78,7 +78,7 @@ func TestS3StorageConfigFromRequest(t *testing.T) {
 	if cfg.Type != BackendS3 || cfg.S3 == nil {
 		t.Fatalf("unexpected config: %+v", cfg)
 	}
-	if cfg.S3.Bucket != "virtrigaud" || cfg.S3.Endpoint != "http://rustfs.lab.k8:9000" || !cfg.S3.UsePathStyle {
+	if cfg.S3.Bucket != "virtrigaud" || cfg.S3.Endpoint != "http://s3.example.com:9000" || !cfg.S3.UsePathStyle {
 		t.Errorf("options not propagated: %+v", cfg.S3)
 	}
 	if cfg.S3.AccessKeyID != "AKIA" || cfg.S3.SecretAccessKey != "secret" || cfg.S3.SessionToken != "tok" {

@@ -38,7 +38,7 @@ func TestParseS3Endpoint(t *testing.T) {
 		wantErr    bool
 	}{
 		{name: "empty = AWS default secure", endpoint: "", wantHost: "s3.amazonaws.com", wantSecure: true},
-		{name: "http selects plaintext", endpoint: "http://rustfs.lab.k8:9000", wantHost: "rustfs.lab.k8:9000", wantSecure: false},
+		{name: "http selects plaintext", endpoint: "http://s3.example.com:9000", wantHost: "s3.example.com:9000", wantSecure: false},
 		{name: "https selects TLS", endpoint: "https://minio.example.com", wantHost: "minio.example.com", wantSecure: true},
 		{name: "bare host defaults to TLS", endpoint: "minio.example.com:9000", wantHost: "minio.example.com:9000", wantSecure: true},
 		{name: "unsupported scheme errors", endpoint: "ftp://x", wantErr: true},
@@ -106,7 +106,7 @@ func TestNewS3StorageValidation(t *testing.T) {
 	}
 	// A complete (lab-shaped) config constructs a client without dialing.
 	if _, err := NewS3Storage(StorageConfig{Type: "s3", S3: &S3Config{
-		Endpoint: "http://rustfs.lab.k8:9000", Bucket: "virtrigaud", UsePathStyle: true,
+		Endpoint: "http://s3.example.com:9000", Bucket: "virtrigaud", UsePathStyle: true,
 		AccessKeyID: "ak", SecretAccessKey: "sk",
 	}}); err != nil {
 		t.Errorf("NewS3Storage with valid config errored: %v", err)

@@ -60,7 +60,7 @@ func TestValidateStorageConfig_S3EndpointSSRF(t *testing.T) {
 	}
 
 	// A private storage endpoint passes the gate.
-	if err := r.validateStorageConfig(ctx, s3StorageWithEndpoint("http://172.16.56.13:9000")); err != nil {
+	if err := r.validateStorageConfig(ctx, s3StorageWithEndpoint("http://172.20.0.13:9000")); err != nil {
 		t.Errorf("private endpoint rejected: %v", err)
 	}
 }

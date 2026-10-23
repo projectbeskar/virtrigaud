@@ -43,12 +43,12 @@ func TestSSHHostFromEndpoint(t *testing.T) {
 		in   string
 		want string
 	}{
-		{"https with port", "https://pve.lab.k8:8006", "pve.lab.k8"},
-		{"https no port", "https://pve.lab.k8", "pve.lab.k8"},
-		{"bare host with port", "pve.lab.k8:8006", "pve.lab.k8"},
-		{"bare host", "pve.lab.k8", "pve.lab.k8"},
+		{"https with port", "https://pve.example.internal:8006", "pve.example.internal"},
+		{"https no port", "https://pve.example.internal", "pve.example.internal"},
+		{"bare host with port", "pve.example.internal:8006", "pve.example.internal"},
+		{"bare host", "pve.example.internal", "pve.example.internal"},
 		{"ip with port", "https://10.0.0.5:8006", "10.0.0.5"},
-		{"trailing path", "https://pve.lab.k8:8006/api2/json", "pve.lab.k8"},
+		{"trailing path", "https://pve.example.internal:8006/api2/json", "pve.example.internal"},
 		{"empty", "", ""},
 		{"whitespace", "   ", ""},
 	}
@@ -113,14 +113,14 @@ func TestProxmoxHostKeyOptions_Insecure(t *testing.T) {
 // no-op; verifying with no known_hosts on disk yields the actionable error.
 func TestProxmoxVerifyKnownHostsPresent(t *testing.T) {
 	t.Run("insecure path is a no-op", func(t *testing.T) {
-		assert.NoError(t, proxmoxHostKeyPolicy{insecure: true}.verifyKnownHostsPresent("pve.lab.k8"))
+		assert.NoError(t, proxmoxHostKeyPolicy{insecure: true}.verifyKnownHostsPresent("pve.example.internal"))
 	})
 
 	t.Run("verifying + missing known_hosts -> actionable error", func(t *testing.T) {
-		err := proxmoxHostKeyPolicy{insecure: false}.verifyKnownHostsPresent("pve.lab.k8")
+		err := proxmoxHostKeyPolicy{insecure: false}.verifyKnownHostsPresent("pve.example.internal")
 		require.Error(t, err)
 		msg := err.Error()
-		assert.Contains(t, msg, "pve.lab.k8")                              // (a) host
+		assert.Contains(t, msg, "pve.example.internal")                    // (a) host
 		assert.Contains(t, msg, proxmoxKnownHostsFile)                     // (b) file path
 		assert.Contains(t, msg, "ssh-keyscan")                             // (c) recipe
 		assert.Contains(t, msg, EnvProxmoxInsecureSkipHostKeyVerification) // (d) escape hatch
@@ -133,7 +133,7 @@ func TestProxmoxLogVerificationMode_WARN(t *testing.T) {
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
-	proxmoxHostKeyPolicy{insecure: true}.logVerificationMode(logger, "pve.lab.k8")
+	proxmoxHostKeyPolicy{insecure: true}.logVerificationMode(logger, "pve.example.internal")
 
 	out := buf.String()
 	assert.Contains(t, out, "level=WARN")
@@ -141,7 +141,7 @@ func TestProxmoxLogVerificationMode_WARN(t *testing.T) {
 	assert.Contains(t, out, "MITM")
 	assert.Contains(t, out, "audit-flagged")
 	assert.Contains(t, out, "provider=proxmox")
-	assert.Contains(t, out, "host=pve.lab.k8")
+	assert.Contains(t, out, "host=pve.example.internal")
 	assert.Contains(t, out, EnvProxmoxInsecureSkipHostKeyVerification)
 }
 
@@ -151,7 +151,7 @@ func TestProxmoxLogVerificationMode_INFO(t *testing.T) {
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
-	proxmoxHostKeyPolicy{insecure: false}.logVerificationMode(logger, "pve.lab.k8")
+	proxmoxHostKeyPolicy{insecure: false}.logVerificationMode(logger, "pve.example.internal")
 
 	out := buf.String()
 	assert.Contains(t, out, "level=INFO")
@@ -211,7 +211,7 @@ func TestBuildSSHCommand_PasswordBranch(t *testing.T) {
 	t.Setenv(EnvProxmoxDisableSSHMultiplexing, "")
 
 	tr := &sshTransport{
-		host:    "pve.lab.k8",
+		host:    "pve.example.internal",
 		creds:   sshCredentials{User: "root", Password: "s3cr3t"},
 		hostKey: proxmoxHostKeyPolicy{insecure: true},
 		logger:  slog.Default(),
@@ -228,7 +228,7 @@ func TestBuildSSHCommand_PasswordBranch(t *testing.T) {
 	assert.Contains(t, argv, "PubkeyAuthentication=no")
 	assert.Contains(t, argv, "StrictHostKeyChecking=accept-new") // insecure policy
 	assert.Contains(t, argv, "ControlMaster=auto")
-	assert.Contains(t, argv, "root@pve.lab.k8")
+	assert.Contains(t, argv, "root@pve.example.internal")
 	assert.Contains(t, argv, "pvesm path local-lvm:vm-100-disk-0")
 
 	// The password MUST NOT be in argv; it must be in SSHPASS env.
@@ -253,7 +253,7 @@ func TestBuildSSHCommand_KeyBranch(t *testing.T) {
 
 	const pem = "-----BEGIN OPENSSH PRIVATE KEY-----\nabc123\n-----END OPENSSH PRIVATE KEY-----"
 	tr := &sshTransport{
-		host:    "pve.lab.k8",
+		host:    "pve.example.internal",
 		creds:   sshCredentials{User: "root", PrivateKey: pem},
 		hostKey: proxmoxHostKeyPolicy{insecure: true},
 		logger:  slog.Default(),
@@ -269,7 +269,7 @@ func TestBuildSSHCommand_KeyBranch(t *testing.T) {
 	assert.Contains(t, argv, "PubkeyAuthentication=yes")
 	assert.Contains(t, argv, "PasswordAuthentication=no")
 	assert.Contains(t, argv, "StrictHostKeyChecking=accept-new")
-	assert.Contains(t, argv, "root@pve.lab.k8")
+	assert.Contains(t, argv, "root@pve.example.internal")
 	assert.Contains(t, argv, "qemu-img check /var/tmp/x.qcow2")
 
 	// The key file must exist with 0600 perms in a 0700 dir, and never appear as
@@ -293,7 +293,7 @@ func TestBuildSSHCommand_NoCredentials(t *testing.T) {
 	t.Setenv(EnvProxmoxInsecureSkipHostKeyVerification, "true")
 
 	tr := &sshTransport{
-		host:    "pve.lab.k8",
+		host:    "pve.example.internal",
 		creds:   sshCredentials{User: "root"},
 		hostKey: proxmoxHostKeyPolicy{insecure: true},
 		logger:  slog.Default(),
@@ -313,7 +313,7 @@ func TestBuildSSHCommand_VerifyingMissingKnownHosts_HardFails(t *testing.T) {
 	t.Setenv(EnvProxmoxInsecureSkipHostKeyVerification, "") // verification ON
 
 	tr := &sshTransport{
-		host:    "pve.lab.k8",
+		host:    "pve.example.internal",
 		creds:   sshCredentials{User: "root", Password: "x"},
 		hostKey: proxmoxHostKeyPolicy{insecure: false},
 		logger:  slog.Default(),

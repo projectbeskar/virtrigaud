@@ -33,7 +33,7 @@ import (
 // (Create/Delete/GetDiskInfo). That API has no streaming disk-transfer endpoint
 // suitable for cross-hypervisor migration, so the migration DATA plane runs over
 // SSH to the PVE node — the SAME host as the API endpoint
-// (PROVIDER_ENDPOINT=https://pve.lab.k8:8006 → ssh host pve.lab.k8). `root@pam`
+// (PROVIDER_ENDPOINT=https://pve.example.internal:8006 → ssh host pve.example.internal). `root@pam`
 // maps to the node's Linux root, so an SSH user/password (or private key) reaches
 // a shell that can run qemu-img / qm / pvesm against the node's storage.
 //
@@ -291,7 +291,7 @@ func proxmoxSSHKeyAuthOptions(keyFile string) []string {
 }
 
 // sshHostFromEndpoint derives the SSH host from the PVE API endpoint
-// (PROVIDER_ENDPOINT=https://pve.lab.k8:8006 → pve.lab.k8). The API port (8006)
+// (PROVIDER_ENDPOINT=https://pve.example.internal:8006 → pve.example.internal). The API port (8006)
 // is stripped: SSH uses port 22. An empty or unparseable endpoint yields "".
 func sshHostFromEndpoint(endpoint string) string {
 	endpoint = strings.TrimSpace(endpoint)

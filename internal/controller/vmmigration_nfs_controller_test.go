@@ -42,7 +42,7 @@ func nfsMigration(server, export, path string) *infrav1beta1.VMMigration {
 // TestStorageOptionsJSON_NFS verifies the controller ships the NFS coordinates
 // (not S3 fields) in storage_options_json for an nfs migration.
 func TestStorageOptionsJSON_NFS(t *testing.T) {
-	raw, err := storageOptionsJSON(nfsMigration("omv.lab", "/export/virtrigaud", "sub"))
+	raw, err := storageOptionsJSON(nfsMigration("nfs.example.com", "/export/virtrigaud", "sub"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -50,7 +50,7 @@ func TestStorageOptionsJSON_NFS(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if opts.Backend != storagemigration.BackendNFS || opts.Server != "omv.lab" ||
+	if opts.Backend != storagemigration.BackendNFS || opts.Server != "nfs.example.com" ||
 		opts.Export != "/export/virtrigaud" || opts.Path != "sub" {
 		t.Errorf("unexpected nfs storage options: %+v", opts)
 	}
@@ -64,16 +64,16 @@ func TestStorageOptionsJSON_NFS(t *testing.T) {
 // the single filename.
 func TestGenerateStorageURL_NFS(t *testing.T) {
 	r := &VMMigrationReconciler{}
-	got, err := r.generateStorageURL(context.Background(), nfsMigration("172.16.56.13", "/export/virtrigaud", ""), "export")
+	got, err := r.generateStorageURL(context.Background(), nfsMigration("192.0.2.13", "/export/virtrigaud", ""), "export")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := "nfs://172.16.56.13/export/virtrigaud/vmmigrations-mig-m1-export.qcow2"; got != want {
+	if want := "nfs://192.0.2.13/export/virtrigaud/vmmigrations-mig-m1-export.qcow2"; got != want {
 		t.Errorf("got %q want %q", got, want)
 	}
 	// The staged object must be a single path segment under the export — no '/'
 	// after the export root — or NFS cannot create it without a pre-made directory.
-	if strings.Count(strings.TrimPrefix(got, "nfs://172.16.56.13/export/virtrigaud/"), "/") != 0 {
+	if strings.Count(strings.TrimPrefix(got, "nfs://192.0.2.13/export/virtrigaud/"), "/") != 0 {
 		t.Errorf("nfs staging key must be flat (no nested dirs), got %q", got)
 	}
 }
@@ -84,10 +84,10 @@ func TestValidateStorageConfig_NFS(t *testing.T) {
 	r := &VMMigrationReconciler{} // nil StorageHostPolicy → deny-dangerous default
 	ctx := context.Background()
 
-	if err := r.validateStorageConfig(ctx, nfsMigration("172.16.56.13", "/export/virtrigaud", "").Spec.Storage); err != nil {
+	if err := r.validateStorageConfig(ctx, nfsMigration("192.0.2.13", "/export/virtrigaud", "").Spec.Storage); err != nil {
 		t.Errorf("valid nfs config rejected: %v", err)
 	}
-	if err := r.validateStorageConfig(ctx, nfsMigration("172.16.56.13", "", "").Spec.Storage); err == nil {
+	if err := r.validateStorageConfig(ctx, nfsMigration("192.0.2.13", "", "").Spec.Storage); err == nil {
 		t.Error("nfs config missing export accepted, want rejection")
 	}
 	err := r.validateStorageConfig(ctx, nfsMigration("169.254.169.254", "/export/virtrigaud", "").Spec.Storage)

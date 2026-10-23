@@ -388,8 +388,8 @@ func TestImportDisk_RequiresTargetVM(t *testing.T) {
 	for name, req := range map[string]*providerv1.ImportDiskRequest{
 		"s3": {BackendType: "s3", TargetName: "web-migrated", SourceUrl: "s3://bucket/web.qcow2"},
 		"nfs": {BackendType: "nfs", TargetName: "web-migrated",
-			SourceUrl:          "nfs://172.16.56.13/export/virtrigaud/web.qcow2",
-			StorageOptionsJson: `{"server":"172.16.56.13","export":"/export/virtrigaud"}`},
+			SourceUrl:          "nfs://192.0.2.13/export/virtrigaud/web.qcow2",
+			StorageOptionsJson: `{"server":"192.0.2.13","export":"/export/virtrigaud"}`},
 	} {
 		t.Run(name, func(t *testing.T) {
 			p, _, node := newConfinementProvider(t)

@@ -15,7 +15,7 @@ and v0.3.7 is unreleased at promotion time), mirroring ADR-0003.
 
 **Related issues**:
 - [#149](https://github.com/projectbeskar/virtrigaud/issues/149) — libvirt SSH skips host-key verification (`no_verify=1`)
-- `I1` (PROJECT_CONTEXT, no GitHub issue) — libvirt SSH connectivity to `172.16.56.8` on `vr1.lab.k8` fails with `kex_exchange_identification: Connection closed by remote host`. **Related but distinct** — I1 is the cluster-specific data-plane symptom; #149 is the codebase-level host-key-verification fix. Their interaction is covered in "Interaction with I1" below.
+- `I1` (PROJECT_CONTEXT, no GitHub issue) — libvirt SSH connectivity to `192.0.2.10` on `hypervisor-1.example.internal` fails with `kex_exchange_identification: Connection closed by remote host`. **Related but distinct** — I1 is the cluster-specific data-plane symptom; #149 is the codebase-level host-key-verification fix. Their interaction is covered in "Interaction with I1" below.
 
 **Companion ADRs**: [ADR-0001](./0001-transport-grpc-and-capi-integration.md) (gRPC transport), [ADR-0003](./0003-mtls-and-provider-grpc-auth.md) (mTLS + provider gRPC auth). ADR-0004 is the **provider→hypervisor** transport-trust sibling of ADR-0003's **manager→provider** transport-trust decision; it deliberately reuses ADR-0003's patterns (secure-by-default + named escape hatch, trust material co-located in the provider's existing Secret, loud-failure-on-missing-material).
 
@@ -184,7 +184,7 @@ argument:
    (#149) are the two transport-trust boundaries in the system. Having one default-on
    and the other default-off would be incoherent for an auditor.
 2. **The I1 reality argues *for* the escape hatch, not against secure-default.** On
-   `vr1.lab.k8` the libvirt data plane is currently broken (I1). An operator
+   `hypervisor-1.example.internal` the libvirt data plane is currently broken (I1). An operator
    mid-migration, or debugging I1, genuinely needs a way to connect without first
    nailing down `known_hosts` — Option A would make I1 strictly harder to diagnose by
    adding a second failure mode on top of the connectivity failure. The escape hatch
@@ -246,8 +246,8 @@ Tied to the two transport paths found in the code:
 one host per line:
 
 ```
-172.16.56.8 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA...
-vr1.lab.k8,172.16.56.8 ecdsa-sha2-nistp256 AAAAE2VjZHNh...
+192.0.2.10 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA...
+hypervisor-1.example.internal,192.0.2.10 ecdsa-sha2-nistp256 AAAAE2VjZHNh...
 ```
 
 Multiple lines / multiple key types per host are fine (it is just the standard file).
@@ -291,7 +291,7 @@ seeds the Secret. The runbook shape (pointer-quality, like ADR-0003's openssl re
 pod — the whole point is an out-of-band trust anchor):
 
 ```bash
-ssh-keyscan -t ed25519,ecdsa,rsa 172.16.56.8 > known_hosts
+ssh-keyscan -t ed25519,ecdsa,rsa 192.0.2.10 > known_hosts
 # Verify the fingerprint against what the libvirt host's admin reports:
 ssh-keygen -lf known_hosts
 ```
@@ -399,7 +399,7 @@ avoid that and stay single-PR.
 ## Out of scope
 
 - **The I1 data-plane investigation itself.** I1 is host-side sshd/fail2ban/firewall on
-  `172.16.56.8`, not VirtRigaud code. Tracked separately in PROJECT_CONTEXT. #149 only
+  `192.0.2.10`, not VirtRigaud code. Tracked separately in PROJECT_CONTEXT. #149 only
   notes how its failure signature changes post-fix (above).
 - **mTLS / provider-gRPC-auth** (#147/#148, ADR-0003, done) — a different transport
   boundary (manager→provider, not provider→hypervisor).

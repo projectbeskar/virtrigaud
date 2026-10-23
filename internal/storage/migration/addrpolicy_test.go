@@ -49,7 +49,7 @@ func TestHostPolicy_AlwaysDenied(t *testing.T) {
 // public and RFC1918 addresses are permitted (so on-prem/lab storage works).
 func TestHostPolicy_PermissiveDefault(t *testing.T) {
 	p, _ := NewHostPolicy(nil)
-	for _, h := range []string{"172.16.56.13", "10.0.0.5", "192.168.1.1", "8.8.8.8"} {
+	for _, h := range []string{"172.20.0.13", "10.0.0.5", "192.168.1.1", "8.8.8.8"} {
 		if err := p.ValidateHost(h); err != nil {
 			t.Errorf("ValidateHost(%q) = %v, want allowed (no allowlist)", h, err)
 		}
@@ -59,16 +59,16 @@ func TestHostPolicy_PermissiveDefault(t *testing.T) {
 // TestHostPolicy_Allowlist verifies that a configured allowlist permits only its
 // members, and that the always-denied set still wins inside the allowlist.
 func TestHostPolicy_Allowlist(t *testing.T) {
-	p, err := NewHostPolicy([]string{"172.16.56.0/24", "10.1.2.3"})
+	p, err := NewHostPolicy([]string{"172.20.30.0/24", "10.1.2.3"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, h := range []string{"172.16.56.13", "172.16.56.1", "10.1.2.3"} {
+	for _, h := range []string{"172.20.30.13", "172.20.30.1", "10.1.2.3"} {
 		if err := p.ValidateHost(h); err != nil {
 			t.Errorf("ValidateHost(%q) = %v, want allowed", h, err)
 		}
 	}
-	for _, h := range []string{"10.0.0.5", "8.8.8.8", "172.16.57.1"} {
+	for _, h := range []string{"10.0.0.5", "8.8.8.8", "172.20.31.1"} {
 		if err := p.ValidateHost(h); err == nil {
 			t.Errorf("ValidateHost(%q) = nil, want denied (outside allowlist)", h)
 		}
@@ -95,10 +95,10 @@ func TestValidateS3Endpoint(t *testing.T) {
 	if err := p.ValidateS3Endpoint("http://127.0.0.1:9000"); err == nil {
 		t.Error("localhost S3 endpoint allowed, want denied")
 	}
-	if err := p.ValidateS3Endpoint("172.16.56.13:9000"); err != nil {
+	if err := p.ValidateS3Endpoint("172.20.0.13:9000"); err != nil {
 		t.Errorf("private S3 endpoint denied: %v", err)
 	}
-	if err := p.ValidateS3Endpoint("https://172.16.56.13"); err != nil {
+	if err := p.ValidateS3Endpoint("https://172.20.0.13"); err != nil {
 		t.Errorf("private https S3 endpoint denied: %v", err)
 	}
 }
@@ -111,23 +111,23 @@ func TestValidateHost_HostnameResolution(t *testing.T) {
 	defer func() { lookupIP = orig }()
 	lookupIP = func(host string) ([]net.IP, error) {
 		switch host {
-		case "evil.lab":
+		case "evil.example.test":
 			return []net.IP{net.ParseIP("169.254.169.254")}, nil
-		case "good.lab":
-			return []net.IP{net.ParseIP("172.16.56.13")}, nil
-		case "mixed.lab":
-			return []net.IP{net.ParseIP("172.16.56.13"), net.ParseIP("127.0.0.1")}, nil
+		case "good.example.test":
+			return []net.IP{net.ParseIP("172.20.0.13")}, nil
+		case "mixed.example.test":
+			return []net.IP{net.ParseIP("172.20.0.13"), net.ParseIP("127.0.0.1")}, nil
 		}
 		return nil, &net.DNSError{Err: "no such host", Name: host}
 	}
 	p, _ := NewHostPolicy(nil)
-	if err := p.ValidateHost("evil.lab"); err == nil {
+	if err := p.ValidateHost("evil.example.test"); err == nil {
 		t.Error("hostname resolving to metadata IP allowed, want denied")
 	}
-	if err := p.ValidateHost("good.lab"); err != nil {
+	if err := p.ValidateHost("good.example.test"); err != nil {
 		t.Errorf("hostname resolving to private IP denied: %v", err)
 	}
-	if err := p.ValidateHost("mixed.lab"); err == nil {
+	if err := p.ValidateHost("mixed.example.test"); err == nil {
 		t.Error("hostname resolving to a forbidden IP allowed, want denied")
 	}
 	if err := p.ValidateHost("nope.lab"); err == nil {

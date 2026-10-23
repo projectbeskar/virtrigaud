@@ -39,7 +39,7 @@ func s3Migration(ns, name, mode string) *infrav1beta1.VMMigration {
 				TransferMode: mode,
 				S3: &infrav1beta1.S3StorageConfig{
 					Bucket:               "virtrigaud",
-					Endpoint:             "http://rustfs.lab.k8:9000",
+					Endpoint:             "http://s3.example.com:9000",
 					Region:               "us-east-1",
 					Prefix:               "prod/",
 					UsePathStyle:         true,
@@ -152,7 +152,7 @@ func TestS3StorageOptionsJSON(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
-	if opts.Bucket != "virtrigaud" || opts.Endpoint != "http://rustfs.lab.k8:9000" ||
+	if opts.Bucket != "virtrigaud" || opts.Endpoint != "http://s3.example.com:9000" ||
 		opts.Region != "us-east-1" || opts.Prefix != "prod/" || !opts.UsePathStyle {
 		t.Errorf("options not built correctly: %+v", opts)
 	}

@@ -5,6 +5,27 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-10-23 10:00] - Remove internal lab hostnames and addresses from tracked files
+**Author:** @wrkode (William Rizzo)
+
+### Security
+- `examples/vmmigration-s3.yaml`, `examples/vmmigration-proxmox-s3.yaml`, `examples/migration/*.yaml`: the S3 endpoint is the placeholder `http://s3.example.com:9000`.
+- `docs/adr/0004-libvirt-ssh-host-key-verification.md`, `docs/adr/0006-storage-backend-agnostic-cross-hypervisor-migration.md`: lab host names and an address are replaced with `hypervisor-1.example.internal`, `192.0.2.10` (RFC 5737) and "a lab Proxmox host".
+- `CHANGELOG.md`: lab host names in earlier entries are replaced minimally (a lab host name becomes "a lab host", others become `esxi-1.example.internal` and `s3.example.com`); no entry's meaning changes.
+- `internal/providers/proxmox/ssh.go`, `internal/providers/vsphere/s3import.go`: comments use `pve.example.internal` and `esxi-1.example.internal`.
+- Go tests (`internal/storage`, `internal/storage/migration`, `internal/controller`, `internal/providers/{proxmox,libvirt}`, `internal/obs/logging`): lab hosts and addresses are replaced with `example.com` / `example.internal` names, RFC 5737 addresses, or, where a test needs a private address, RFC 1918 ones (`172.20.x.x`). The redaction test no longer carries a real-looking password and user name.
+- `fieldTesting/`: no longer tracked. It is a local scratch workspace, already listed in `.gitignore`, and is never published; its three previously tracked files are removed from the repository (local copies stay ignored).
+- `hack/verify-no-lab-names.sh` (new), `Makefile` (`verify-no-lab-names`), `.github/workflows/ci.yml`: a guard that fails when a tracked file matches the lab host and address patterns, or when anything under `fieldTesting/` is tracked.
+
+### Why
+The project is used in regulated environments and must not publish internal lab topology. The names stay in the commit history; this change removes them from the current tree and keeps them out.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [ ] Config change only
+- [x] Documentation only
+
 ## [2026-10-22 17:00] - libvirt Host allocatable storage measured fresh (R31)
 **Author:** @wrkode (William Rizzo)
 
@@ -5260,7 +5281,7 @@ Found while validating the ADR-0006 Slice 2 reverse migration: a libvirt→vSphe
 **Author:** @wrkode (William Rizzo)
 
 ### Fixed
-- `internal/providers/vsphere/s3import.go` (`ImportDisk`): replaced the `vmdk.Import` call with a hand-driven `HttpNfcLease` import (`nfcImportStreamOptimized`). `vmdk.Import` uploads to the lease's device URL, which vCenter populates with the **ESXi host FQDN** (e.g. `esxi.lab.k8`); a remote provider pod reaches vCenter by IP (`PROVIDER_ENDPOINT`) and typically cannot resolve that ESXi name via cluster DNS, so the streamOptimized upload failed with `lookup esxi.lab.k8 … no such host`. The new path rewrites each lease device URL host to the vCenter host (which proxies NFC and is always reachable from the pod), and `Unregister`s — rather than `Destroy`s — the transient import VM (vCenter 8 faults `Destroy` of a freshly imported VM with `file … is attached to vm`). Net result is identical: `[<ds>] <id>/<id>.vmdk` left as a native thin disk.
+- `internal/providers/vsphere/s3import.go` (`ImportDisk`): replaced the `vmdk.Import` call with a hand-driven `HttpNfcLease` import (`nfcImportStreamOptimized`). `vmdk.Import` uploads to the lease's device URL, which vCenter populates with the **ESXi host FQDN** (e.g. `esxi-1.example.internal`); a remote provider pod reaches vCenter by IP (`PROVIDER_ENDPOINT`) and typically cannot resolve that ESXi name via cluster DNS, so the streamOptimized upload failed with `lookup esxi-1.example.internal … no such host`. The new path rewrites each lease device URL host to the vCenter host (which proxies NFC and is always reachable from the pod), and `Unregister`s — rather than `Destroy`s — the transient import VM (vCenter 8 faults `Destroy` of a freshly imported VM with `file … is attached to vm`). Net result is identical: `[<ds>] <id>/<id>.vmdk` left as a native thin disk.
 
 ### Why
 ADR-0006 Slice 2's vSphere import target could acquire the NFC lease but never complete the upload from an in-cluster provider pod, because the lease's device URL is unresolvable there. This is the final data-path blocker for the reverse (libvirt→vSphere) migration. Refs #236.
@@ -5446,7 +5467,7 @@ In a live lab migration (ADR-0006 Slice 1, vSphere→S3→libvirt), vCenter pres
 - `internal/providers/libvirt/server.go`: `ImportDisk` accepts `backend_type=s3` (TARGET) via `importDiskFromS3`; `GetCapabilities` advertises import `[pvc,s3]` (export stays `[pvc]`).
 - `internal/controller/vmmigration_controller.go`: resolves `transferMode auto→relay` (rejects explicit `direct`); builds the `s3://bucket/prefix/<key>` URL; loads creds from `S3StorageConfig.credentialsSecretRef` into the gRPC `credentials` map; passes `storage_options_json`; per-direction gate now ALLOWS vSphere(export=s3)→libvirt(import=s3) in relay while the reverse direction still fails fast; skips PVC creation + the cross-namespace PVC check for the s3 backend.
 - `internal/obs/logging/logging.go`: redactor explicitly lists the S3 credential keys.
-- `examples/vmmigration-s3.yaml`: rewritten into a real vSphere→libvirt rustfs example (`http://rustfs.lab.k8:9000`, `usePathStyle: true`, `credentialsSecretRef`, sample Secret with placeholder keys).
+- `examples/vmmigration-s3.yaml`: rewritten into a real vSphere→libvirt rustfs example (`http://s3.example.com:9000`, `usePathStyle: true`, `credentialsSecretRef`, sample Secret with placeholder keys).
 - `go.mod`/`go.sum`: add `github.com/minio/minio-go/v7`.
 
 ### Why
@@ -5482,7 +5503,7 @@ spec:
     transferMode: relay
     s3:
       bucket: virtrigaud
-      endpoint: http://rustfs.lab.k8:9000
+      endpoint: http://s3.example.com:9000
       usePathStyle: true
       credentialsSecretRef: { name: s3-migration-credentials }
 ```
@@ -6516,7 +6537,7 @@ The v0.3.6 documentation audit (close commit `7b539ae`) confirmed manager↔prov
 
 ## [0.3.6] - 2026-05-25
 
-Headline observability + supply-chain release. v0.3.6-rc1 was deployed on `vr1.lab.k8`, smoke-tested, then tagged as v0.3.6 from the same commit.
+Headline observability + supply-chain release. v0.3.6-rc1 was deployed on a lab host, smoke-tested, then tagged as v0.3.6 from the same commit.
 
 ### Added (operator-visible)
 - **G6 CircuitBreaker on the provider gRPC RPC path** (#112). One CB per Provider CR allocated lazily from a shared `resilience.Registry`. The `virtrigaud_circuit_breaker_state{provider_type, provider}` gauge and `_failures_total` counter activate after this deploy and immediately surfaced the existing libvirt-SSH issue (#I1) on the v0.3.6-rc1 smoke — exactly the value the CB was supposed to provide.
@@ -6541,7 +6562,7 @@ Headline observability + supply-chain release. v0.3.6-rc1 was deployed on `vr1.l
 - **#113 (latent)**: `make docker-build` and `make run` now produce a complete manager binary (emits `virtrigaud_build_info`, registers VMSnapshot + VMMigration controllers). Fix-by-construction in H1 PR-3 (#119).
 
 ### Metric coverage after v0.3.6
-**11 of 12 `virtrigaud_*` families wired in code; the 12th explicitly deprecated.** Live on `vr1.lab.k8` post-deploy: 9 of those 11 emit immediately (G6 CB pair + G7.3 inflight + the 6 from v0.3.5); G7.1 (`vm_operations_total`) and G7.2 (`ip_discovery_duration_seconds`) start emitting on the first VM RPC and the first no-IPs → has-IPs transition respectively.
+**11 of 12 `virtrigaud_*` families wired in code; the 12th explicitly deprecated.** Live on a lab host post-deploy: 9 of those 11 emit immediately (G6 CB pair + G7.3 inflight + the 6 from v0.3.5); G7.1 (`vm_operations_total`) and G7.2 (`ip_discovery_duration_seconds`) start emitting on the first VM RPC and the first no-IPs → has-IPs transition respectively.
 
 ### Process
 - **Release process followed `rc1 → smoke → final`** for the third consecutive release (v0.3.3 took 4 RCs; v0.3.5 and v0.3.6 each took 1). Trivy on the manager image caught a real CVE before promotion (otel CVEs above); the v0.3.6-rc1 attempt from commit `d1e08d0` was deleted and re-cut from `d707c02` after the security fix landed.
@@ -6655,7 +6676,7 @@ First attempt to cut `v0.3.6-rc1` from main (commit `d1e08d0`, tag `f537176`, de
 **Author:** @wrkode (William Rizzo)
 
 ### Audit finding
-Fourth and final sub-issue of the G7 umbrella (#123). Smoke test on `vr1.lab.k8` post-G7.3 (PR #130) confirmed that controller-runtime's standard workqueue metric family is **already exposed on `/metrics`** and has been since v0.3.0:
+Fourth and final sub-issue of the G7 umbrella (#123). Smoke test on a lab host post-G7.3 (PR #130) confirmed that controller-runtime's standard workqueue metric family is **already exposed on `/metrics`** and has been since v0.3.0:
 
 ```
 workqueue_adds_total
@@ -6710,8 +6731,8 @@ You also get 8 sibling metrics for free with the migration: `workqueue_adds_tota
 - [x] Documentation only (this is the bulk of the change)
 
 ### Notes
-- After this lands, **11 of 12 `virtrigaud_*` families are wired** (G7.1 + G7.2 + G7.3 added 3, leaving only the 2 `virtrigaud_circuit_breaker_*` gaps that activate on `vr1.lab.k8` only after a v0.3.6-rc1 deploy — code already in main since G6 / PR #112). The 12th (`virtrigaud_queue_depth`) is explicitly deprecated in favor of the canonical controller-runtime equivalent.
-- v0.3.6 candidate work is now **complete**: G6 #112 + C2-B #94 + H1 #92 + Go-bump #122 + G7 umbrella #123 all closed. Next checkpoint: **cut v0.3.6-rc1**, deploy to `vr1.lab.k8`, run smoke (CB lifecycle + 3 new G7 families on `/metrics`).
+- After this lands, **11 of 12 `virtrigaud_*` families are wired** (G7.1 + G7.2 + G7.3 added 3, leaving only the 2 `virtrigaud_circuit_breaker_*` gaps that activate on a lab host only after a v0.3.6-rc1 deploy — code already in main since G6 / PR #112). The 12th (`virtrigaud_queue_depth`) is explicitly deprecated in favor of the canonical controller-runtime equivalent.
+- v0.3.6 candidate work is now **complete**: G6 #112 + C2-B #94 + H1 #92 + Go-bump #122 + G7 umbrella #123 all closed. Next checkpoint: **cut v0.3.6-rc1**, deploy to a lab host, run smoke (CB lifecycle + 3 new G7 families on `/metrics`).
 - Concurrent CHANGELOG hygiene change: previous entries' author-line GitHub handle updated from `@williamrizzo` to `@wrkode` to match the maintainer's actual handle (21 occurrences). Per-instruction: no separate commit ceremony.
 
 ---
@@ -6758,7 +6779,7 @@ Pre-PR: operators dashboarding "how many tasks is the manager currently tracking
 - 9 task-creating sites is the full set verified in the audit on `main` post-#128 (Create / Delete / Power / Reconfigure / SnapshotCreate / SnapshotDelete / SnapshotRevert / ExportDisk / ImportDisk). All return `*providerv1.TaskResponse` (or have a Task field on a richer response struct). Any future RPC that returns a TaskRef must add a `trackTaskStart` call — would surface in code review since the pattern is uniform.
 - Both `IsTaskComplete` and `TaskStatus` instrument `trackTaskDone`. They wrap the same underlying gRPC RPC; the per-Client mutex serialises updates so calling both for the same task only decrements the gauge once (because the second call sees the ID already removed from the set and no-ops).
 - Pre-merge verification: `make fmt` clean; `go vet ./...` clean; `make test` 12/12 packages with 0 FAIL; new test file 7/7 sub-cases green; `go test -race ./internal/transport/grpc/...` clean; `make build` produces working `bin/manager` with `--version` exit 0.
-- After this lands, **10 of 12 expected `virtrigaud_*` families are wired in code**. The remaining gap is G7.4 (`virtrigaud_queue_depth`) plus the two `virtrigaud_circuit_breaker_*` families that emit on `vr1.lab.k8` only after a v0.3.6-rc1 deploy (code already in main since G6 / PR #112).
+- After this lands, **10 of 12 expected `virtrigaud_*` families are wired in code**. The remaining gap is G7.4 (`virtrigaud_queue_depth`) plus the two `virtrigaud_circuit_breaker_*` families that emit on a lab host only after a v0.3.6-rc1 deploy (code already in main since G6 / PR #112).
 - Next in G7: G7.4 (file sub-issue when starting) — wire `virtrigaud_queue_depth` (per-reconciler workqueue depth). Closes G7 umbrella #123.
 
 ---
@@ -6795,7 +6816,7 @@ Second sub-PR of the G7 umbrella (#123). `virtrigaud_ip_discovery_duration_secon
 ### Notes
 - The helper is **package-private** intentionally: it has no callers outside the reconciler today. If a different reconciler ever needs the same semantics it can be promoted to a shared helper at that point.
 - The histogram buckets (100ms-51.2s exponential) fit the expected operator-VM SLO range. Outliers above 51.2s land in the `+Inf` bucket — visible but not bucketed in detail. Acceptable for v0.3.6; can revisit if operators ask for finer resolution above 1 minute.
-- This is now **9 of 12** `virtrigaud_*` families wired (with G6 + G7.1 + G7.2 stacked). Remaining gaps: `virtrigaud_provider_tasks_inflight` (G7.3), `virtrigaud_queue_depth` (G7.4), plus the two `virtrigaud_circuit_breaker_*` families that emit on `vr1.lab.k8` only after a v0.3.6-rc1 deploy (the CB code is in main already since G6 / PR #112).
+- This is now **9 of 12** `virtrigaud_*` families wired (with G6 + G7.1 + G7.2 stacked). Remaining gaps: `virtrigaud_provider_tasks_inflight` (G7.3), `virtrigaud_queue_depth` (G7.4), plus the two `virtrigaud_circuit_breaker_*` families that emit on a lab host only after a v0.3.6-rc1 deploy (the CB code is in main already since G6 / PR #112).
 - Pre-merge verification: `make fmt` clean; `go vet ./...` clean; `make test` 12/12 packages pass with 0 FAIL; new test file 4/4 sub-cases green; `make build` produces a working `bin/manager` with `--version` exit 0.
 - Next in G7: G7.3 (file sub-issue when starting) — wire `virtrigaud_provider_tasks_inflight` (per-Provider async task tracker).
 
@@ -7066,7 +7087,7 @@ By keeping `--metrics-secure=false` as the default in this PR, every existing de
 **Author:** @wrkode (William Rizzo)
 
 ### Audit finding
-v0.3.5 release smoke on `vr1.lab.k8` confirmed that `virtrigaud_circuit_breaker_state` and `virtrigaud_circuit_breaker_failures_total` emit zero samples in production despite G5 (PR #108) wiring all metric emission paths correctly. Root cause: **the CircuitBreaker code in `internal/resilience/` was never instantiated by any production caller**. The gRPC client in `internal/transport/grpc/client.go` had a G4 metrics interceptor but no resilience layer. Net effect: no real circuit-breaker protection on the manager→provider RPC path, AND no breaker metrics ever emitted. The package was correct but dead.
+v0.3.5 release smoke on a lab host confirmed that `virtrigaud_circuit_breaker_state` and `virtrigaud_circuit_breaker_failures_total` emit zero samples in production despite G5 (PR #108) wiring all metric emission paths correctly. Root cause: **the CircuitBreaker code in `internal/resilience/` was never instantiated by any production caller**. The gRPC client in `internal/transport/grpc/client.go` had a G4 metrics interceptor but no resilience layer. Net effect: no real circuit-breaker protection on the manager→provider RPC path, AND no breaker metrics ever emitted. The package was correct but dead.
 
 ### Added
 - `internal/transport/grpc/client.go`: New `providerCircuitBreakerInterceptor` — a `grpc.UnaryClientInterceptor` that wraps every outbound RPC with `CircuitBreaker.Call`. Chained AFTER the existing G4 metrics interceptor via `grpc.WithChainUnaryInterceptor`, so circuit-breaker rejections still show up in `virtrigaud_provider_rpc_requests_total{code="Unavailable"}` (no silent drops).
@@ -7155,7 +7176,7 @@ make test-integration  # still green
 Per the release process established for v0.3.5:
 1. Tag `v0.3.5-rc1` from the merge commit
 2. Release workflow produces images + chart
-3. `helm upgrade --version v0.3.5-rc1 --reset-values` on `vr1.lab.k8`
+3. `helm upgrade --version v0.3.5-rc1 --reset-values` on a lab host
 4. Smoke: `curl /metrics | grep '^virtrigaud_'` should now show 12+ families with samples (vs the 1 family that v0.3.4 ships)
 5. If smoke passes, tag `v0.3.5` final from the same commit
 
@@ -7548,7 +7569,7 @@ Affects CI only. Future PRs gain integration-test gating; the 3 skipped tests ar
 - `.github/workflows/release.yml`: Added `build-args: VERSION / GIT_SHA` to the `docker/build-push-action` step so the release tag and commit SHA are passed into the container build. Dockerfiles that don't declare these ARGs (kubectl image, current provider images) silently ignore them — no impact.
 
 ### Why
-v0.3.3-rc3 smoke test on `vr1.lab.k8` showed `virtrigaud_build_info{component="manager",git_sha="unknown",go_version="go1.25.10",version="dev"} 1` on `/metrics` instead of `version="v0.3.3-rc3"` and the real SHA. The metrics pipeline (registry binding from PR #83 + SetupMetrics call from PR #84) was working — the binary itself had never been built with ldflags to populate `internal/version`. Latent bug since the project's inception, but only became visible once `virtrigaud_build_info` was actually exposed. `virtrigaud_build_info` is the canonical way for operators to know which manager version is running; reporting `version="dev"` to Prometheus dashboards is actively misleading during incident response, which matters for the project's banking-grade operational posture.
+v0.3.3-rc3 smoke test on a lab host showed `virtrigaud_build_info{component="manager",git_sha="unknown",go_version="go1.25.10",version="dev"} 1` on `/metrics` instead of `version="v0.3.3-rc3"` and the real SHA. The metrics pipeline (registry binding from PR #83 + SetupMetrics call from PR #84) was working — the binary itself had never been built with ldflags to populate `internal/version`. Latent bug since the project's inception, but only became visible once `virtrigaud_build_info` was actually exposed. `virtrigaud_build_info` is the canonical way for operators to know which manager version is running; reporting `version="dev"` to Prometheus dashboards is actively misleading during incident response, which matters for the project's banking-grade operational posture.
 
 ### Impact
 - [ ] Breaking change
@@ -7584,7 +7605,7 @@ strings /tmp/manager | grep -E 'v0\.3\.3-rc4-sanity|abc1234'
 - `cmd/manager/main.go`: Call `metrics.SetupMetrics(version.Version, version.GitSHA, metrics.ComponentManager)` immediately after logger setup. Without this call the build_info `GaugeVec` from `internal/obs/metrics` stays empty after package init, and the `virtrigaud_build_info` family does NOT appear in the manager's `/metrics` output even with the PR #83 registry-binding fix correctly applied.
 
 ### Why
-v0.3.3-rc2 deploy + smoke test on `vr1.lab.k8` exposed that PR #83 was a necessary-but-not-sufficient fix. The registry binding is structurally correct (verified by `internal/obs/metrics/metrics_test.go`) but Prometheus Vec metrics with zero observations do not appear in `/metrics` output. The only metric that wouldn't depend on reconcile activity is `virtrigaud_build_info`, which is populated by `SetupMetrics`. Nothing in production called `SetupMetrics`, so the family stayed empty and the smoke test continued to report `0 virtrigaud_* metric families` after upgrading to rc2 — same as rc1.
+v0.3.3-rc2 deploy + smoke test on a lab host exposed that PR #83 was a necessary-but-not-sufficient fix. The registry binding is structurally correct (verified by `internal/obs/metrics/metrics_test.go`) but Prometheus Vec metrics with zero observations do not appear in `/metrics` output. The only metric that wouldn't depend on reconcile activity is `virtrigaud_build_info`, which is populated by `SetupMetrics`. Nothing in production called `SetupMetrics`, so the family stayed empty and the smoke test continued to report `0 virtrigaud_* metric families` after upgrading to rc2 — same as rc1.
 
 This change makes the manager emit a `virtrigaud_build_info{version,git_sha,go_version,component}` sample on startup, providing the canary metric that release smoke tests can rely on, and serving as proof end-to-end that the registry binding works in production. Per-reconciler instrumentation (VirtualMachineReconciler, ProviderReconciler) for full operational visibility is deferred to v0.3.4.
 
@@ -7617,7 +7638,7 @@ curl -s http://<manager>:8080/metrics | grep '^virtrigaud_build_info'
 - `test/integration/observability_test.go`: Added missing `metrics.SetupMetrics(...)` call at the top of `TestMetricsIntegration` so the test is self-contained rather than relying on side effects from other tests. The integration test now passes when run directly (`go test ./test/integration/...`), though `make test` continues to exclude that path.
 
 ### Why
-v0.3.3-rc1 smoke test on `vr1.lab.k8` confirmed that scraping `/metrics:8080` returned 41 metric families — all controller-runtime/workqueue/certwatcher/go_/process_ — with zero `virtrigaud_*` series. Root cause: `promauto.NewGaugeVec(...)` etc. bind to `prometheus.DefaultRegisterer`, which the manager does not serve. The bug shipped in v0.3.0 through v0.3.2 (originally introduced in commit `a849271 implement observability extensions`) and would have shipped in v0.3.3 without this fix. Observability is load-bearing for the project's banking-compliance posture; releasing without exposed metrics is a regression on every downstream operator that relies on Prometheus scraping. This change blocks v0.3.3 release until merged (cut v0.3.3-rc2 from this commit).
+v0.3.3-rc1 smoke test on a lab host confirmed that scraping `/metrics:8080` returned 41 metric families — all controller-runtime/workqueue/certwatcher/go_/process_ — with zero `virtrigaud_*` series. Root cause: `promauto.NewGaugeVec(...)` etc. bind to `prometheus.DefaultRegisterer`, which the manager does not serve. The bug shipped in v0.3.0 through v0.3.2 (originally introduced in commit `a849271 implement observability extensions`) and would have shipped in v0.3.3 without this fix. Observability is load-bearing for the project's banking-compliance posture; releasing without exposed metrics is a regression on every downstream operator that relies on Prometheus scraping. This change blocks v0.3.3 release until merged (cut v0.3.3-rc2 from this commit).
 
 ### Impact
 - [ ] Breaking change (no public API change; vector variables are unexported and callers use the helper structs)

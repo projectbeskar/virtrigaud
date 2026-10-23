@@ -529,6 +529,10 @@ verify-max-disk-size-render: ## Render the chart's disk-size ceiling: the manage
 verify-admission-policy-render: ## Render the chart's reserved-keys ValidatingAdmissionPolicy: default on (1.30+), opt-out, exemptions, in sync with config/admission-policy, --reuse-values from v0.3.11
 	@./hack/verify-admission-policy-render.sh
 
+.PHONY: verify-no-lab-names
+verify-no-lab-names: ## Fail if a tracked file names an internal lab host or address (fieldTesting/ excluded)
+	@./hack/verify-no-lab-names.sh
+
 ifndef ignore-not-found
   ignore-not-found = false
 endif
