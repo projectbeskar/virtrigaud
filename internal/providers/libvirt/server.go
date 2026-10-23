@@ -139,7 +139,8 @@ func (s *Server) Create(ctx context.Context, req *providerv1.CreateRequest) (*pr
 // (ADR-0007 Addendum A, A2). Only the clustered routing produces that class.
 //
 // Any other failure of a clustered create on its target host (hostOpError) is
-// host-scoped too: a host that could not be reached is HOST_UNAVAILABLE, and
+// host-scoped too: a host that stopped answering is answered by how far the
+// create got (HOST_UNAVAILABLE only before any command ran, hostOpRPCErrorFor), and
 // anything else keeps the historical code and message plus a
 // VM_OPERATION_FAILED ErrorInfo, so neither counts toward the manager's
 // per-Provider circuit breaker (ADR-0007 Addendum A, slice 2; hostOpRPCError).
@@ -296,7 +297,7 @@ func (s *Server) Describe(ctx context.Context, req *providerv1.DescribeRequest) 
 	resp, err := s.provider.Describe(ctx, contracts.VMRef{ID: req.Id, HostID: req.TargetHostId, Owner: ownerFromProto(req.GetOwner())})
 	if err != nil {
 		if s.clusteredProvider() {
-			return nil, routedRPCError("describe VM", err)
+			return nil, routedReadRPCError("describe VM", err)
 		}
 		// A domain that does not exist is a definite NotFound on the wire
 		// (the manager's delete-time confirmation relies on it).
@@ -351,7 +352,7 @@ func (s *Server) TaskStatus(ctx context.Context, req *providerv1.TaskStatusReque
 	if s.clusteredProvider() {
 		done, err := s.provider.IsTaskComplete(ctx, req.GetTask().GetId())
 		if err != nil {
-			return nil, routedRPCError("check task status", err)
+			return nil, routedReadRPCError("check task status", err)
 		}
 		return &providerv1.TaskStatusResponse{Done: done}, nil
 	}
@@ -479,7 +480,7 @@ func (s *Server) SnapshotCreate(ctx context.Context, req *providerv1.SnapshotCre
 		defer cancel()
 		var resp *providerv1.SnapshotCreateResponse
 		err := s.provider.withOwnedDomain(bctx, snapshotVMRef(req.GetVmId(), req.GetTargetHostId(), req.GetOwner()), "snapshot create",
-			func(c libvirtConn, d domainTarget) error {
+			func(bctx context.Context, c libvirtConn, d domainTarget) error {
 				// Idempotent per request: a snapshot of this name already on
 				// the owner-checked domain is this request's earlier attempt's
 				// only when it records this request's token
@@ -499,8 +500,16 @@ func (s *Server) SnapshotCreate(ctx context.Context, req *providerv1.SnapshotCre
 				return nil
 			})
 		if err != nil {
-			return nil, routedRPCError("create snapshot",
-				classifySnapshotCreateFailure(strings.TrimSpace(req.GetTargetHostId()), ctx, bctx, err))
+			// Only a create that names its snapshot AND carries a request token
+			// is idempotent (existingRoutedSnapshot adopts the earlier
+			// attempt's snapshot by name and token); without both a retry
+			// could take a second snapshot, so an unknown outcome stays Unknown.
+			idempotent := req.GetNameHint() != "" && req.GetRequestToken() != ""
+			failure := classifySnapshotCreateFailure(strings.TrimSpace(req.GetTargetHostId()), idempotent, ctx, bctx, err)
+			if idempotent {
+				return nil, routedIdempotentRPCError("create snapshot", failure)
+			}
+			return nil, routedRPCError("create snapshot", failure)
 		}
 		return resp, nil
 	}
@@ -534,17 +543,26 @@ const libvirtJobBusyMarker = "cannot acquire state change lock"
 // client's session leaves libvirtd's snapshot job running, so the snapshot
 // may still complete on the host (a memory snapshot writing the guest's RAM).
 // The outcome is unknown, and the answer says so: retryable
-// (codes.Unavailable, VM_OPERATION_FAILED, out of the breaker). A retry while
+// (codes.Unavailable with OUTCOME_UNKNOWN_RETRY and VM_OPERATION_FAILED, out
+// of the breaker; not "nothing done"). A retry while
 // that job still runs is refused by libvirt's job lock and is answered
 // retryable too; once the job is done the retry finds the snapshot by name
-// (existingRoutedSnapshot) rather than making a second one. Any other failure
-// is returned unchanged.
-func classifySnapshotCreateFailure(host string, parent, budget context.Context, err error) error {
+// (existingRoutedSnapshot) rather than making a second one. That holds only
+// for a request that names its snapshot and carries a request token
+// (idempotent); any other request's budget answer is a plain Unknown, because
+// its retry could take a second snapshot. Any other failure is returned
+// unchanged.
+func classifySnapshotCreateFailure(host string, idempotent bool, parent, budget context.Context, err error) error {
 	if err == nil {
 		return nil
 	}
+	if budgetRanOut(parent, budget) && !idempotent {
+		return &routedOpError{code: codes.Unknown, cause: err, wire: fmt.Sprintf(
+			"create snapshot on host %q did not answer within its time budget; its outcome is unknown "+
+				"and it may still complete on the host", host)}
+	}
 	if budgetRanOut(parent, budget) {
-		return &routedOpError{code: codes.Unavailable, cause: err, wire: fmt.Sprintf(
+		return &routedOpError{code: codes.Unavailable, cause: err, outcomeUnknown: true, wire: fmt.Sprintf(
 			"create snapshot on host %q did not answer within its time budget; its outcome is unknown "+
 				"and it may still complete on the host: retry", host)}
 	}
@@ -807,7 +825,7 @@ func (s *Server) SnapshotDelete(ctx context.Context, req *providerv1.SnapshotDel
 		}
 		var resp *providerv1.TaskResponse
 		err := s.provider.withOwnedDomain(ctx, snapshotVMRef(req.GetVmId(), req.GetTargetHostId(), req.GetOwner()), "snapshot delete",
-			func(c libvirtConn, d domainTarget) error {
+			func(ctx context.Context, c libvirtConn, d domainTarget) error {
 				r, err := snapshotDeleteOn(ctx, s.provider, c, d.handle, req.SnapshotId)
 				resp = routedTaskResponse(c.HostID(), r)
 				return err
@@ -901,7 +919,7 @@ func (s *Server) SnapshotRevert(ctx context.Context, req *providerv1.SnapshotRev
 		}
 		var resp *providerv1.TaskResponse
 		err := s.provider.withOwnedDomain(ctx, snapshotVMRef(req.GetVmId(), req.GetTargetHostId(), req.GetOwner()), "snapshot revert",
-			func(c libvirtConn, d domainTarget) error {
+			func(ctx context.Context, c libvirtConn, d domainTarget) error {
 				r, err := snapshotRevertOn(ctx, c, d.handle, req.SnapshotId)
 				resp = routedTaskResponse(c.HostID(), r)
 				return err
@@ -1009,7 +1027,7 @@ func (s *Server) Clone(ctx context.Context, req *providerv1.CloneRequest) (*prov
 	resp, err := s.provider.Clone(ctx, cloneReq)
 	if err != nil {
 		if s.clusteredProvider() {
-			return nil, routedRPCError("clone VM", err)
+			return nil, routedIdempotentRPCError("clone VM", err)
 		}
 		return nil, singleHostCloneRPCError(err)
 	}
@@ -1447,7 +1465,7 @@ func (s *Server) GetDiskInfo(ctx context.Context, req *providerv1.GetDiskInfoReq
 	})
 	if err != nil {
 		if s.clusteredProvider() {
-			return nil, routedRPCError("get disk info", err)
+			return nil, routedReadRPCError("get disk info", err)
 		}
 		return nil, fmt.Errorf("failed to get disk info: %w", err)
 	}
@@ -1716,7 +1734,7 @@ func (s *Server) ListVMs(ctx context.Context, req *providerv1.ListVMsRequest) (*
 			if stderrors.Is(err, errOwnerListBusy) {
 				return nil, status.Error(codes.ResourceExhausted, "list VMs: "+errOwnerListBusy.Error()+"; retry later")
 			}
-			return nil, routedRPCError("list VMs", err)
+			return nil, routedReadRPCError("list VMs", err)
 		}
 		return nil, fmt.Errorf("failed to list VMs: %w", err)
 	}

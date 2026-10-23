@@ -202,16 +202,23 @@ func (h *importRecHost) record(kind string, argv []string) (importRecCall, error
 	return c, err
 }
 
-func (h *importRecHost) Virsh(_ context.Context, args ...string) (*hostconn.Result, error) {
+func (h *importRecHost) Virsh(ctx context.Context, args ...string) (*hostconn.Result, error) {
+	// Like virshConn, the host feeds the call's progress record (host_progress.go).
+	done := hostProgressFrom(ctx).begin(args)
+	hostProgressFrom(ctx).opened()
 	c, err := h.record("virsh", append([]string{"virsh"}, args...))
+	done(err)
 	if err != nil {
 		return failedResult(err), err
 	}
 	return h.answer(c), nil
 }
 
-func (h *importRecHost) RunHost(_ context.Context, argv ...string) (*hostconn.Result, error) {
+func (h *importRecHost) RunHost(ctx context.Context, argv ...string) (*hostconn.Result, error) {
+	done := hostProgressFrom(ctx).begin(append([]string{"!"}, argv...))
+	hostProgressFrom(ctx).opened()
 	c, err := h.record("run", argv)
+	done(err)
 	if err != nil {
 		return failedResult(err), err
 	}
@@ -227,8 +234,11 @@ func failedResult(err error) *hostconn.Result {
 	return &hostconn.Result{ExitCode: code, Stderr: err.Error()}
 }
 
-func (h *importRecHost) StreamIn(_ context.Context, r io.Reader, argv ...string) error {
+func (h *importRecHost) StreamIn(ctx context.Context, r io.Reader, argv ...string) error {
+	done := hostProgressFrom(ctx).beginStream()
+	hostProgressFrom(ctx).opened()
 	_, err := h.record("stream", argv)
+	done(err)
 	b, rerr := io.ReadAll(r)
 	h.mu.Lock()
 	h.stdin = b

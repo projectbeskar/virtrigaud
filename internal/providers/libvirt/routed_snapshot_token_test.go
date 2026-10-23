@@ -87,7 +87,8 @@ func TestClustered_SnapshotCreate_AdoptsOnlyAFinishedSnapshot(t *testing.T) {
 			}
 			if tc.wantCode == codes.Unavailable {
 				st, _ := status.FromError(err)
-				assert.Equal(t, contracts.VMOperationFailedReason, errorInfoReason(st), "retryable, out of the breaker")
+				assert.True(t, contracts.HasErrorInfoReason(err, contracts.VMOperationFailedReason), "retryable, out of the breaker")
+				assert.True(t, contracts.HasErrorInfoReason(err, contracts.OutcomeUnknownRetryReason), "the request's snapshot is being taken: not nothing done")
 				assert.Contains(t, st.Message(), "still being taken")
 			}
 			for _, c := range fx.calls() {

@@ -196,10 +196,13 @@ func (p *Provider) createClustered(ctx context.Context, req contracts.CreateRequ
 	if fn == nil {
 		fn = p.createOnLeasedHost
 	}
-	resp, err := fn(ctx, lease, req)
+	// The create's host commands record how far it got (host_progress.go), so
+	// a host that stops answering is not always HOST_UNAVAILABLE (R25).
+	hctx, progress := withHostProgress(ctx)
+	resp, err := fn(hctx, lease, req)
 	if err != nil {
 		// Scoped to this host / this VM, not the provider (createRPCError).
-		return resp, &hostOpError{host: hostconn.HostID(hostID), err: err}
+		return resp, &hostOpError{host: hostconn.HostID(hostID), err: err, progress: progress}
 	}
 	return resp, nil
 }
@@ -631,7 +634,7 @@ func (p *Provider) Delete(ctx context.Context, vm contracts.VMRef) (taskRef stri
 	log.Printf("INFO Deleting VM and all associated resources: %s", id)
 
 	if p.clustered() {
-		return "", p.withHostConn(ctx, vm.HostID, func(c libvirtConn) error {
+		return "", p.withHostConn(ctx, vm.HostID, func(ctx context.Context, c libvirtConn) error {
 			return p.deleteClustered(ctx, c, id, vm.Owner)
 		})
 	}
@@ -868,6 +871,14 @@ func (p *Provider) deleteExistingDomainChecked(ctx context.Context, vp *VirshPro
 	// Stop the domain if running
 	if err := vp.destroyDomain(ctx, id); err != nil {
 		log.Printf("WARN Failed to destroy domain %s: %v", id, err)
+		// A clustered delete stops when the host stopped answering during the
+		// destroy (R25): the domain may still be running, and undefining a
+		// running domain would leave it running as a transient one whose disks
+		// are then removed. The delete is retried; the single-host path keeps
+		// its historical behaviour.
+		if check != nil && isHostTransportFailure(err) {
+			return "", contracts.NewRetryableError("failed to stop domain", err)
+		}
 		// Continue with undefine even if destroy fails
 	}
 
@@ -1509,7 +1520,7 @@ func (p *Provider) Power(ctx context.Context, vm contracts.VMRef, op contracts.P
 		if !knownPowerOp(op) {
 			return "", unsupportedPowerOpError(op)
 		}
-		return "", p.withHostConn(ctx, vm.HostID, func(c libvirtConn) error {
+		return "", p.withHostConn(ctx, vm.HostID, func(ctx context.Context, c libvirtConn) error {
 			return p.powerClustered(ctx, c, id, vm.Owner, op)
 		})
 	}
@@ -1671,7 +1682,7 @@ func (p *Provider) Reconfigure(ctx context.Context, vm contracts.VMRef, desired 
 
 	if p.clustered() {
 		var restart bool
-		err := p.withHostConn(ctx, vm.HostID, func(c libvirtConn) error {
+		err := p.withHostConn(ctx, vm.HostID, func(ctx context.Context, c libvirtConn) error {
 			var rerr error
 			restart, rerr = p.reconfigureClustered(ctx, c, id, vm.Owner, desired)
 			return rerr
@@ -1771,7 +1782,7 @@ func (p *Provider) Describe(ctx context.Context, vm contracts.VMRef) (contracts.
 
 	if p.clustered() {
 		var resp contracts.DescribeResponse
-		err := p.withHostConn(ctx, vm.HostID, func(c libvirtConn) error {
+		err := p.withHostConn(ctx, vm.HostID, func(ctx context.Context, c libvirtConn) error {
 			var derr error
 			resp, derr = p.describeClustered(ctx, c, id, vm.Owner)
 			return derr
@@ -2782,7 +2793,7 @@ func (p *Provider) GetDiskInfo(ctx context.Context, req contracts.GetDiskInfoReq
 
 	if p.clustered() {
 		var resp contracts.GetDiskInfoResponse
-		err := p.withOwnedDomain(ctx, req.VM, "disk info", func(c libvirtConn, d domainTarget) error {
+		err := p.withOwnedDomain(ctx, req.VM, "disk info", func(ctx context.Context, c libvirtConn, d domainTarget) error {
 			vp, err := virshOf(c)
 			if err != nil {
 				return err

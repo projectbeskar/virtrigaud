@@ -385,7 +385,9 @@ func (r *VMSnapshotReconciler) createSnapshot(ctx context.Context, snapshot *inf
 	resp, err := providerInstance.SnapshotCreate(ctx, req)
 	if err != nil && req.VM.HostID != "" && (contracts.IsRetryable(err) || !providerCallOutcomeKnownFor(err, attempt)) {
 		// A ROUTED (clustered) create without a definite outcome — its host
-		// unavailable, its time budget run out while libvirtd may still be
+		// unavailable, its host stopped answering after the snapshot command
+		// was sent (contracts.IsOutcomeUnknownRetry), its time budget run out
+		// while libvirtd may still be
 		// writing the snapshot, or another job on the VM still running — is
 		// retried, never failed: a failed VMSnapshot would leave a snapshot
 		// that completes afterwards untracked on the host. The provider's

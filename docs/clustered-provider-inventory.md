@@ -1233,10 +1233,19 @@ the manager maps to its own error class and keeps **out of the per-Provider
 circuit breaker** — one dead host must not fast-fail every VM on every other host
 of the Provider (a provider-level `Unavailable` still trips the breaker). This
 includes a host that dies **after** its connection was first used — the
-registry reuses a dialed connection without probing it — because a call that
-never gets an exit status back from the host (SSH dial, handshake or session
-failure, a connection dropped mid-command), or a virsh that cannot reach the
-host's libvirtd, is classified as host-scoped. Any other failure of a routed
+registry reuses a dialed connection without probing it. A call that never gets
+an exit status back from the host (SSH dial, handshake or session failure, a
+connection dropped mid-command), or a virsh that cannot reach the host's
+libvirtd, is classified as host-scoped, and is answered by how far the call got
+(R25): `HOST_UNAVAILABLE` only while the host answered no command and none that
+may change it was sent (and always for a call that only reads); "not performed"
+(`Unavailable` + `VM_OPERATION_FAILED`) while only reads ran; an unknown outcome
+(`Unknown` + `VM_OPERATION_FAILED`) once a command that may change the host was
+sent — for `SnapshotCreate` and `Clone` the retryable form of it. The manager
+reads `HOST_UNAVAILABLE` as "nothing was done", which is why a dropped session
+during an export is not answered with it. See
+[a host that stops answering](provider-call-outcomes.md#clustered-libvirt-a-host-that-stops-answering).
+Any other failure of a routed
 call on its host (the host answered, but the operation on that one VM failed —
 for example a disk grow the host cannot satisfy) keeps its historical code and
 carries an `ErrorInfo` with reason `VM_OPERATION_FAILED`, which the
@@ -1504,7 +1513,11 @@ for a clustered provider.
     with an error **before** anything was copied — the owner check, the
     source's state or definition, the pool (`Unavailable` +
     `VM_OPERATION_FAILED`, reason `CloneRetrying`) — and a clone whose earlier
-    attempt's copy still runs; all of these are re-checked with a backoff from
+    attempt's copy still runs, or whose connection to the host dropped after
+    the host answered a read, or after its copy was sent (also `Unavailable` +
+    `VM_OPERATION_FAILED`; for a copy that was sent the outcome is unknown, and
+    the retry finds the clone by its stamp, or is told the copy still runs);
+    all of these are re-checked with a backoff from
     15 s doubling to 5 minutes, and never counted toward the circuit breaker.
     A source that is not powered off waits (`SourceMustBePoweredOff`, see
     [`docs/libvirt-clones.md`](libvirt-clones.md#a-full-clone-needs-a-powered-off-source)).

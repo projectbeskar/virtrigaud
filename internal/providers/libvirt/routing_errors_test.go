@@ -161,7 +161,7 @@ func TestRequesterFacingMessage(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			assert.Equal(t, tc.want, requesterFacingMessage(tc.err))
-			st, ok := status.FromError(hostOpRPCError("reconfigure VM", &hostOpError{host: "host-b", err: tc.err}, tc.err))
+			st, ok := status.FromError(hostOpRPCError("reconfigure VM", &hostOpError{host: "host-b", err: tc.err, progress: &hostProgress{}}, tc.err))
 			require.True(t, ok)
 			for _, leak := range []string{"10.0.0.1", "/var/lib", "blockresize", "qemu+ssh"} {
 				assert.NotContains(t, st.Message(), leak)
@@ -223,7 +223,7 @@ func TestClustered_HostUnavailableSendsNoDialAddress(t *testing.T) {
 }
 
 func TestRoutedRPCError_Classification(t *testing.T) {
-	onHost := func(err error) error { return &hostOpError{host: "host-b", err: err} }
+	onHost := func(err error) error { return &hostOpError{host: "host-b", err: err, progress: &hostProgress{}} }
 	cases := []struct {
 		name   string
 		err    error

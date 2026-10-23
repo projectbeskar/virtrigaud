@@ -180,6 +180,12 @@ func nextRequestResends(prev *metav1.Condition, confirmed bool) int {
 // closing", a provider pod killed mid-call), an error the provider did not
 // classify — leaves the outcome unknown: the call may still be running.
 func providerCallOutcomeKnown(err error) bool {
+	// "The call may have changed the host and its outcome is unknown; retry"
+	// (a clustered provider whose host stopped answering after a write was
+	// sent, R25) is retryable but proves nothing: the marker is kept.
+	if contracts.IsOutcomeUnknownRetry(err) {
+		return false
+	}
 	return contracts.IsNothingDone(err) || createDefinitelyRefused(err) || isOwnerRefusal(err) ||
 		contracts.IsDiskSizeExceedsLimit(err) || contracts.IsDiskSizeUnverifiable(err) ||
 		contracts.IsVMDiskInUse(err) || contracts.IsVMSourceRunning(err)

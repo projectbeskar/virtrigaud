@@ -68,8 +68,15 @@ func TestRoutedDeleteLandedDisk_RemovalOutcomes(t *testing.T) {
 		check func(t *testing.T, err error)
 	}{
 		"removed": {check: func(t *testing.T, err error) { require.NoError(t, err) }},
-		"the rm's session drops: HOST_UNAVAILABLE, retried": {err: virshFailure(-1, "reset"), check: func(t *testing.T, err error) {
-			assert.True(t, hasHostUnavailableInfo(status.Convert(err)), "%v", err)
+		// R25: the rm was sent, so it may have removed the disk: never
+		// HOST_UNAVAILABLE ("nothing done"). Retried all the same (the
+		// removal is idempotent: a retry that finds the disk gone is NOT_FOUND).
+		"the rm's session drops: removal unknown, retried": {err: virshFailure(-1, "reset"), check: func(t *testing.T, err error) {
+			st := status.Convert(err)
+			assert.False(t, hasHostUnavailableInfo(st), "%v", err)
+			assert.Equal(t, codes.Unavailable, st.Code())
+			assert.True(t, contracts.HasErrorInfoReason(err, contracts.VMOperationFailedReason))
+			assert.Equal(t, landedDiskRemovalUnknownMessage, st.Message())
 		}},
 		"the rm is stopped by timeout(1): retried, out of the breaker": {err: virshFailure(timeoutExpiredExit, ""), check: func(t *testing.T, err error) {
 			st := status.Convert(err)

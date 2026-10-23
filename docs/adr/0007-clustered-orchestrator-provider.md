@@ -2659,11 +2659,17 @@ pool. Before anything is written, these checks run in order:
     dropped mid-command, an exceeded budget, a lost rename.
   - **`HOST_UNAVAILABLE` is answered only when the lease or dial failed before
     any host command ran** (as implemented, also when the connection is dead at
-    the first read: see B9, provider deviation 1). Today `hostOpRPCError` maps any host transport
+    the first read: see B9, provider deviation 1). `hostOpRPCError` used to map any host transport
     failure to `HOST_UNAVAILABLE`, and the manager reads that as definite. For a
-    routed import (and, as a follow-up, the routed export) a transport failure
+    routed import (and the routed export) a transport failure
     after the first host command must be unknown instead, because the command
-    may still be running.
+    may still be running. **Closed by R25** for every routed call: the call
+    records whether the host answered a command and whether a command that may
+    change the host was sent (`host_progress.go`), and a lost connection is
+    `HOST_UNAVAILABLE` before any command ran, "not performed" while only
+    reads ran, and unknown once a write was sent (the retryable form for the
+    idempotent `SnapshotCreate` and `Clone`); see
+    [`docs/provider-call-outcomes.md`](../provider-call-outcomes.md#clustered-libvirt-a-host-that-stops-answering).
 - **R7 `DeleteLandedDisk`, routed.**
   - Recommended: record the host in `MigrationImportTarget` as a new optional
     field `host` (MaxLength 253, the `Host` name). It is written with
@@ -2907,8 +2913,9 @@ Provider:
 **Open after P3:** the sidecar stamp on the landed disk (B7.7, wanted before
 v0.5.0), an admission rule reserving a waiting target's `spec.importedDisk` for
 the manager, serialisation of two Providers on one pool (the A6.1 pool
-ownership marker), and the routed export's `HOST_UNAVAILABLE` mapping after the
-first host command (the `hostOpRPCError` gap).
+ownership marker). The routed export's `HOST_UNAVAILABLE` mapping after the
+first host command (the `hostOpRPCError` gap) was closed by R25 for every
+routed call.
 
 ---
 

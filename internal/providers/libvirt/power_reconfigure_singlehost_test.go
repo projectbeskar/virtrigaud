@@ -84,7 +84,8 @@ var opsDiskPath string // inside fixtureImagesDir (set by TestMain)
 // "disktype" / "disksource"
 // override the primary disk `domblklist --details` reports (default: a file
 // disk at $FAKE_DISK_PATH), "dead" makes every call die without an exit status
-// (the host dropped the connection), "nolibvirtd" makes every call fail as
+// (the host dropped the connection), dead-<subcommand> only the calls that run
+// fail <subcommand>, "nolibvirtd" makes every call fail as
 // virsh does when the host's libvirtd is down, and dom-<name>.xml marks a
 // domain (by name or UUID) as present; a domain command on anything else fails
 // like libvirt's "failed to get domain".
@@ -95,7 +96,7 @@ printf '%s %s\n' "$host" "$*" >> "$FAKE_VIRSH_DIR/calls.log"
 d="$FAKE_VIRSH_DIR/$host"
 fail() { if [ -f "$d/fail-$1" ]; then echo "error: scripted failure of $1" >&2; exit 1; fi; }
 nodom() { echo "error: failed to get domain '$1'" >&2; exit 1; }
-if [ -f "$d/dead" ]; then kill -9 $$; fi
+if [ -f "$d/dead" ] || [ -f "$d/dead-$1" ]; then kill -9 $$; fi
 if [ -f "$d/nolibvirtd" ]; then echo "error: failed to connect to the hypervisor" >&2; exit 1; fi
 if [ "$1" = "dumpxml" ] && [ "$3" = "--inactive" ]; then
   fail inactive

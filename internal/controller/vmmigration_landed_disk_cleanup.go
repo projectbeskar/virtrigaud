@@ -606,6 +606,10 @@ func (r *VMMigrationReconciler) cleanupLandedDisk(ctx context.Context, m *infrav
 	case contracts.IsInvalidSpec(err):
 		return landedDiskDone{}, landedLeftBehind(landedDiskLeftRefused, err)
 	default:
+		// Any other answer is retried, an outcome-unknown one included
+		// (contracts.IsOutcomeUnknownRetry: the removal was sent and the host
+		// stopped answering): the removal is idempotent, and a retry that
+		// finds the disk gone is NOT_FOUND.
 		return landedDiskDone{}, fmt.Errorf("delete landed disk: %w", err)
 	}
 }

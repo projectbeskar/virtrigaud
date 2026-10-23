@@ -60,13 +60,16 @@ import (
 // host directory: list.txt (`virsh list --all`), dom-<name|uuid>.xml
 // (dumpxml, with or without --inactive), uuid-<name> (dominfo's UUID),
 // stamped-<uuid>.xml + name-<uuid> (what `virsh metadata ... --set` turns the
-// domain into), fail-<cmd> (fail that command), hang-list (list never
-// answers: exec sleep, so killing it closes its pipes).
+// domain into), fail-<cmd> (fail that command), dead-<cmd> (that command dies
+// without an exit status, as a dropped SSH session does), dead (every call
+// does), hang-list (list never answers: exec sleep, so killing it closes its
+// pipes).
 const listFakeVirsh = `#!/bin/sh
 host=local
 if [ "$1" = "-c" ]; then host="${2##*/}"; shift 2; fi
 printf '%s %s\n' "$host" "$*" >> "$FAKE_LIST_DIR/calls.log"
 d="$FAKE_LIST_DIR/$host"
+if [ -f "$d/dead" ] || [ -f "$d/dead-$1" ]; then kill -9 $$; fi
 fail() { if [ -f "$d/fail-$1" ]; then echo "error: scripted failure of $1" >&2; exit 1; fi; }
 case "$1" in
   list)

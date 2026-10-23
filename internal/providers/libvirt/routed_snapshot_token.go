@@ -169,7 +169,7 @@ func existingRoutedSnapshot(ctx context.Context, c libvirtConn, domain string, r
 		}
 		if running {
 			log.Printf("INFO Snapshot %s on domain %s was made for this request but a job still runs on the domain; retry", name, domain)
-			return nil, &routedOpError{code: codes.Unavailable, cause: errSnapshotJobRunning, wire: fmt.Sprintf(
+			return nil, &routedOpError{code: codes.Unavailable, cause: errSnapshotJobRunning, outcomeUnknown: true, wire: fmt.Sprintf(
 				"create snapshot: the snapshot %q made for this request is still being taken on the host; retry", name)}
 		}
 		log.Printf("INFO Snapshot %s on domain %s was made for this request; treating the create as done", name, domain)

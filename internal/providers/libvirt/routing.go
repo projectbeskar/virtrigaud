@@ -77,7 +77,13 @@ const emptyTargetHostMessage = "clustered libvirt provider requires target_host_
 // unless fn retains it (see hostLease.retain) for work that outlives the call —
 // the detached shadow-compare read does exactly that, so it runs on the same
 // lease as the virsh read it shadows.
-func (p *Provider) withHostConn(ctx context.Context, hostID string, fn func(libvirtConn) error) error {
+//
+// fn also receives the context its host commands must run with: ctx carrying
+// the call's hostProgress (host_progress.go), which records whether the host
+// answered a command and whether a command that may change it was sent. A
+// failure of fn is returned as a hostOpError carrying that record, so the wire
+// answer says how far the call got (hostOpRPCError, R25).
+func (p *Provider) withHostConn(ctx context.Context, hostID string, fn func(ctx context.Context, c libvirtConn) error) error {
 	id := strings.TrimSpace(hostID)
 	if id == "" {
 		return contracts.NewInvalidSpecError(emptyTargetHostMessage, nil)
@@ -96,8 +102,9 @@ func (p *Provider) withHostConn(ctx context.Context, hostID string, fn func(libv
 	}
 	h := newHostLease(vc, lease)
 	defer h.release()
-	if err := fn(h); err != nil {
-		return &hostOpError{host: hostconn.HostID(id), err: err}
+	hctx, progress := withHostProgress(ctx)
+	if err := fn(hctx, h); err != nil {
+		return &hostOpError{host: hostconn.HostID(id), err: err, progress: progress}
 	}
 	return nil
 }
@@ -109,17 +116,17 @@ func (p *Provider) withHostConn(ctx context.Context, hostID string, fn func(libv
 // fails closed and answers NotFound for a domain this VM does not own), and
 // runs fn with the leased connection and the checked domain, addressed by its
 // UUID. op names the call for the refusal message and the operator log.
-func (p *Provider) withOwnedDomain(ctx context.Context, vm contracts.VMRef, op string, fn func(c libvirtConn, d domainTarget) error) error {
-	return p.withHostConn(ctx, vm.HostID, func(c libvirtConn) error {
+func (p *Provider) withOwnedDomain(ctx context.Context, vm contracts.VMRef, op string, fn func(ctx context.Context, c libvirtConn, d domainTarget) error) error {
+	return p.withHostConn(ctx, vm.HostID, func(hctx context.Context, c libvirtConn) error {
 		vp, err := virshOf(c)
 		if err != nil {
 			return err
 		}
-		d, err := ownedDomainTarget(ctx, vp, c.HostID(), vm.ID, vm.Owner, op)
+		d, err := ownedDomainTarget(hctx, vp, c.HostID(), vm.ID, vm.Owner, op)
 		if err != nil {
 			return err
 		}
-		return fn(c, d)
+		return fn(hctx, c, d)
 	})
 }
 
@@ -132,6 +139,11 @@ func (p *Provider) withOwnedDomain(ctx context.Context, vm contracts.VMRef, op s
 type hostOpError struct {
 	host hostconn.HostID
 	err  error
+	// progress records how far the call got on the host before it failed
+	// (host_progress.go). nil when the error was not made by a tracked call;
+	// hostOpRPCError then assumes the worst (a command that changes the host
+	// may have run).
+	progress *hostProgress
 }
 
 // Error returns the wrapped error's message, unchanged.
@@ -301,6 +313,26 @@ func vmOperationStatus(code codes.Code, msg string) error {
 	return withInfo.Err()
 }
 
+// outcomeUnknownRetryStatus renders a call that may have changed its host, whose
+// outcome is unknown and that is safe to repeat: codes.Unavailable with a
+// google.rpc.ErrorInfo{Reason: OUTCOME_UNKNOWN_RETRY} that the manager maps to a
+// retryable error that is NOT "nothing done" (contracts.IsOutcomeUnknownRetry),
+// plus VM_OPERATION_FAILED. The second reason is for a manager that predates
+// the first: it maps the answer as it always did (retryable, out of its circuit
+// breaker, and every consumer of these calls retries a retryable answer
+// first), never as a definite failure.
+func outcomeUnknownRetryStatus(msg string, extra ...string) error {
+	return statusWithReasons(codes.Unavailable, msg, append([]string{contracts.OutcomeUnknownRetryReason, contracts.VMOperationFailedReason}, extra...)...).Err()
+}
+
+// hostLostStatus renders the answer of a routed call whose host stopped
+// answering part-way: code and msg as hostOpRPCErrorFor chose them, with
+// VM_OPERATION_FAILED and HOST_CONNECTION_LOST, the reason the manager paces
+// its retries by (contracts.IsHostConnectionLost).
+func hostLostStatus(code codes.Code, msg string) error {
+	return statusWithReasons(code, msg, contracts.VMOperationFailedReason, contracts.HostConnectionLostReason).Err()
+}
+
 // routedOpError is a failure of a routed operation that carries its own
 // categorized, tenant-safe wire message and code: a time budget that ran out,
 // a copy of the same disk already running, a host tool missing
@@ -313,6 +345,12 @@ type routedOpError struct {
 	wire string
 	// cause is logged, never sent.
 	cause error
+	// outcomeUnknown marks a codes.Unavailable answer for a call that may have
+	// changed the host and whose outcome is unknown (the routed budget ran out
+	// while the host's job may still complete; the request's snapshot is still
+	// being taken): it is sent with OutcomeUnknownRetryReason, so that the
+	// manager retries it but never reads it as "nothing was done" (R25).
+	outcomeUnknown bool
 }
 
 // Error returns the wire message and the cause, for the provider's log.
@@ -326,19 +364,89 @@ func (e *routedOpError) Error() string {
 // Unwrap exposes the cause.
 func (e *routedOpError) Unwrap() error { return e.cause }
 
-// hostOpRPCError is the wire form of an error that arose on a leased host
-// (hostOpError) and is not one of the categorized classes: a host that could
-// not be reached is a host-scoped Unavailable (HOST_UNAVAILABLE); anything
-// else is a failure of the operation on that one VM (VM_OPERATION_FAILED,
-// codes.Unknown). Neither counts toward the manager's per-Provider circuit
-// breaker. Only "<op> ... host <id>" crosses the wire — followed by the
-// provider's own requester-facing account of the failure when it wrote one
-// (requesterFacingMessage) — and the error is logged.
+// hostOpKind says how a routed RPC answers a host that stops answering
+// (hostOpRPCErrorFor).
+type hostOpKind int
+
+const (
+	// hostOpWrite is an RPC that changes the host. A transport failure is
+	// HOST_UNAVAILABLE only while no command of the call was answered and none
+	// that may change the host was sent, "not performed" while only reads ran,
+	// and an unknown outcome (codes.Unknown) once a command that may change the
+	// host was sent.
+	hostOpWrite hostOpKind = iota
+	// hostOpRead is an RPC that only reads (Describe, GetDiskInfo, TaskStatus):
+	// it cannot half-do anything, so a host that stops answering at any point
+	// is HOST_UNAVAILABLE.
+	hostOpRead
+	// hostOpWriteRetry is a hostOpWrite whose unknown outcome is answered
+	// "retry" (codes.Unavailable with VM_OPERATION_FAILED, the text saying the
+	// outcome is unknown) instead of codes.Unknown: the RPC is idempotent per
+	// request and the manager retries it on the same host — a SnapshotCreate
+	// (adopted by request token) and a Clone (stamped, and its copy under
+	// flock). A codes.Unknown would fail the clone and remove its target.
+	hostOpWriteRetry
+)
+
+// Wire texts of a transport failure of a routed write RPC. They name the
+// operation and the host only.
+const (
+	wireHostNotPerformedFmt = "failed to %s on host %q: the host stopped answering before the operation changed " +
+		"anything; nothing was done"
+	wireHostUnknownFmt = "failed to %s on host %q: the host stopped answering while the operation ran; " +
+		"its outcome is unknown"
+	wireHostUnknownRetryFmt = "failed to %s on host %q: the host stopped answering while the operation ran; " +
+		"its outcome is unknown and it may still complete on the host: retry"
+)
+
+// hostOpRPCError is hostOpRPCErrorFor for an RPC that changes the host.
 func hostOpRPCError(op string, ho *hostOpError, err error) error {
+	return hostOpRPCErrorFor(hostOpWrite, op, ho, err)
+}
+
+// hostOpRPCErrorFor is the wire form of an error that arose on a leased host
+// (hostOpError) and is not one of the categorized classes. A failure of the
+// operation on that one VM (the host answered and the operation failed) is
+// VM_OPERATION_FAILED, codes.Unknown. A host that stopped answering
+// (isHostTransportFailure) is answered by how far the call got on it
+// (hostProgress, R25), because the manager reads HOST_UNAVAILABLE as definite
+// ("nothing was done"):
+//
+//   - no command of the call was answered and none that may change the host
+//     was sent (the lease, the dial, or the very first command found the
+//     connection dead), or the RPC only reads (kind hostOpRead):
+//     HOST_UNAVAILABLE;
+//   - only reads ran: "not performed" (codes.Unavailable, VM_OPERATION_FAILED);
+//   - a command that may change the host was sent (it may have completed, or
+//     still be running): an unknown outcome — codes.Unknown with
+//     VM_OPERATION_FAILED, or, for kind hostOpWriteRetry, the "retry" form of
+//     it.
+//
+// None counts toward the manager's per-Provider circuit breaker. Only
+// "<op> ... host <id>" crosses the wire — for a failure of the operation
+// itself followed by the provider's own requester-facing account of it when it
+// wrote one (requesterFacingMessage) — and the error is logged.
+func hostOpRPCErrorFor(kind hostOpKind, op string, ho *hostOpError, err error) error {
 	log.Printf("WARN %s on host %s failed: %v", op, ho.host, err)
 	if isHostTransportFailure(err) {
-		return hostUnavailableStatus(contracts.NewHostUnavailableError(
-			fmt.Sprintf("%s: host %q is unreachable", op, ho.host), nil))
+		stage := ho.progress.stage()
+		// The dependency guard runs before anything is changed and says so
+		// (guardHostUnreachableError: "nothing was changed"): its host failure
+		// is the fail-closed HOST_UNAVAILABLE whatever the call read before.
+		var gh *guardHostUnreachableError
+		switch {
+		case kind == hostOpRead || stderrors.As(err, &gh) || stage == hostDownNothingRan:
+			return hostUnavailableStatus(contracts.NewHostUnavailableError(
+				fmt.Sprintf("%s: host %q is unreachable", op, ho.host), nil))
+		case stage == hostDownReadsOnly:
+			return hostLostStatus(codes.Unavailable, fmt.Sprintf(wireHostNotPerformedFmt, op, ho.host))
+		case kind == hostOpWriteRetry:
+			log.Printf("WARN %s on host %s: outcome unknown (a command that may change the host was sent)", op, ho.host)
+			return outcomeUnknownRetryStatus(fmt.Sprintf(wireHostUnknownRetryFmt, op, ho.host), contracts.HostConnectionLostReason)
+		default:
+			log.Printf("WARN %s on host %s: outcome unknown (a command that may change the host was sent)", op, ho.host)
+			return hostLostStatus(codes.Unknown, fmt.Sprintf(wireHostUnknownFmt, op, ho.host))
+		}
 	}
 	msg := fmt.Sprintf("failed to %s on host %q", op, ho.host)
 	if detail := requesterFacingMessage(err); detail != "" {
@@ -387,8 +495,9 @@ func requesterFacingMessage(err error) string {
 //     a host tool missing) -> its own code and categorized message with a
 //     VM_OPERATION_FAILED ErrorInfo;
 //   - any other failure that arose on the leased host (hostOpError): a host
-//     that could not be reached (isHostTransportFailure) is HOST_UNAVAILABLE,
-//     and anything else is VM_OPERATION_FAILED (codes.Unknown). Neither is
+//     that stopped answering (isHostTransportFailure) is answered by how far
+//     the call got (hostOpRPCErrorFor), and anything else is
+//     VM_OPERATION_FAILED (codes.Unknown). None is
 //     counted by the manager's circuit breaker, so neither a dead host nor one
 //     tenant's failing VM can open it for the whole Provider;
 //   - a provider-level Unavailable (the provider itself is not ready, e.g. its
@@ -419,9 +528,34 @@ func requesterFacingMessage(err error) string {
 // none of them names another host. A Delete refused because a domain on
 // another host uses its disk is the disk-dependents refusal below.
 //
+// A host that stops answering (isHostTransportFailure) is answered by how far
+// the call got on it, not always HOST_UNAVAILABLE (R25): see hostOpRPCErrorFor.
+// routedRPCError is for an RPC that changes the host; routedReadRPCError for
+// one that only reads, and routedIdempotentRPCError for one the manager retries
+// by design (SnapshotCreate, Clone).
+//
 // Only the categorized message crosses the wire; causes are logged. It is
 // never used on the single-host path, whose wire errors are unchanged.
 func routedRPCError(op string, err error) error {
+	return routedRPCErrorFor(hostOpWrite, op, err)
+}
+
+// routedReadRPCError is routedRPCError for an RPC that only reads (Describe,
+// GetDiskInfo, TaskStatus, ListVMs): a host that stops answering is always
+// HOST_UNAVAILABLE, because a read cannot half-do anything.
+func routedReadRPCError(op string, err error) error {
+	return routedRPCErrorFor(hostOpRead, op, err)
+}
+
+// routedIdempotentRPCError is routedRPCError for an RPC that is idempotent per
+// request and that the manager retries on the same host (SnapshotCreate,
+// Clone): its unknown outcome is answered "retry" (hostOpWriteRetry).
+func routedIdempotentRPCError(op string, err error) error {
+	return routedRPCErrorFor(hostOpWriteRetry, op, err)
+}
+
+// routedRPCErrorFor is routedRPCError for an RPC of kind.
+func routedRPCErrorFor(kind hostOpKind, op string, err error) error {
 	if st := clusterGuardStatus(err); st != nil {
 		return st.Err()
 	}
@@ -445,6 +579,9 @@ func routedRPCError(op string, err error) error {
 	var roe *routedOpError
 	if stderrors.As(err, &roe) {
 		log.Printf("WARN %s failed: %v", op, err)
+		if roe.outcomeUnknown {
+			return outcomeUnknownRetryStatus(roe.wire)
+		}
 		return vmOperationStatus(roe.code, roe.wire)
 	}
 	var pe *contracts.ProviderError
@@ -462,7 +599,7 @@ func routedRPCError(op string, err error) error {
 	}
 	var ho *hostOpError
 	if stderrors.As(err, &ho) {
-		return hostOpRPCError(op, ho, err)
+		return hostOpRPCErrorFor(kind, op, ho, err)
 	}
 	log.Printf("WARN %s failed: %v", op, err)
 	if pe != nil && pe.Type == contracts.ErrorTypeUnavailable {
