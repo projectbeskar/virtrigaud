@@ -1,13 +1,13 @@
 <!--
-Draft release notes for VirtRigaud v0.4.0-rc5, the fifth release candidate for
+Draft release notes for VirtRigaud v0.4.0-rc6, the sixth release candidate for
 v0.4.0 (GA follows after a soak). v0.4.0-rc3 was tagged, but its release run was
 stopped by the image scan (CVE-2026-63209) and no rc3 release was published. rc1,
-rc2 and rc4 were published from earlier versions of this file; rc1 followed v0.3.11.
-Paste everything below this comment into the GitHub pre-release. The notes are
-cumulative since v0.3.11: a user going from v0.3.11 needs all of them, while "Changes
-since v0.4.0-rc4" is the short list for someone already on rc4, "Changes since
-v0.4.0-rc2" the one for someone on rc2 and "Changes since v0.4.0-rc1" the one for
-someone on rc1. See docs/upgrading.md for the full upgrade guide these notes link to,
+rc2, rc4 and rc5 were published from earlier versions of this file; rc1 followed
+v0.3.11. Paste everything below this comment into the GitHub pre-release. The notes
+are cumulative since v0.3.11: a user going from v0.3.11 needs all of them, while
+"Changes since v0.4.0-rc5" is the short list for someone already on rc5, "Changes
+since v0.4.0-rc4" the one for someone on rc4, "Changes since v0.4.0-rc2" the one for
+someone on rc2 and "Changes since v0.4.0-rc1" the one for someone on rc1. See docs/upgrading.md for the full upgrade guide these notes link to,
 and CHANGELOG.md for the complete, dated changelog. The published release body is a
 trimmed version of this file (GitHub's limit is 125,000 characters): the preamble, the
 newest "Changes since" section, "About this release candidate", "Breaking changes",
@@ -15,7 +15,7 @@ newest "Changes since" section, "About this release candidate", "Breaking change
 re-title.
 -->
 
-This is **v0.4.0-rc5, a release candidate** (GA follows after a soak). It is a
+This is **v0.4.0-rc6, a release candidate** (GA follows after a soak). It is a
 security-hardening release: a full codebase security review found and fixed several
 cross-tenant and privilege-escalation issues in the vSphere and libvirt providers,
 cross-namespace clone/migration targets, and VM provider binding. rc2 added two waves
@@ -29,13 +29,20 @@ libvirt Provider (experimental). rc5 adds a fourth, on top of rc4: three fixes f
 validating rc4 on a real Proxmox VE 9.2 node (the storage of a VM's cloud-init drive, a
 VM phase stuck at `Reconfiguring` after a power change, and the bridge, VLAN, model and
 static IP of a Proxmox VM's networks), and the accepted design for migrated guests'
-network (ADR-0014). **Several fixes are breaking
+network (ADR-0014). rc6 adds a fifth, on top of rc5: four findings (V1 to V4) from
+validating rc5 on a two-host clustered libvirt Provider, a Proxmox VE 9.2 node and a
+vCenter: `HostPool.status` was never written, `spec.snapshot.revertToRef` was accepted
+and ignored (it now reverts the VM), a clustered host that stopped answering was
+reported inconsistently and a delete held for it did not say so, a VM held by a
+clustered restore guard showed `Failed`, and `spec.disks` on libvirt and Proxmox was
+silently dropped. **Several fixes are breaking
 or change default behavior.** Read the upgrade guide before upgrading:
 **[Upgrading from v0.3.11](docs/upgrading.md)**.
 
-The notes below are cumulative since v0.3.11. If you are already on v0.4.0-rc4, read
-"Changes since v0.4.0-rc4" first; on v0.4.0-rc2, read it and then "Changes since
-v0.4.0-rc2"; on v0.4.0-rc1, also "Changes since v0.4.0-rc1".
+The notes below are cumulative since v0.3.11. If you are already on v0.4.0-rc5, read
+"Changes since v0.4.0-rc5" first; on v0.4.0-rc4, read it and then "Changes since
+v0.4.0-rc4"; on v0.4.0-rc2, also "Changes since v0.4.0-rc2"; on v0.4.0-rc1, also
+"Changes since v0.4.0-rc1".
 
 ## Changes since v0.4.0-rc5
 
