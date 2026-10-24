@@ -522,7 +522,7 @@ func (r *VMAdoptionReconciler) adoptVM(ctx context.Context, provider *infravirtr
 				existingVM.Status.ID = vmInfo.ID
 				recordBoundProvider(existingVM, provider)
 				existingVM.Status.PowerState = observedPowerState(vmInfo.PowerState)
-				existingVM.Status.IPs = vmInfo.IPs
+				existingVM.Status.IPs = contracts.RoutableIPs(vmInfo.IPs)
 				existingVM.Status.Provider = adoptedProviderRaw(vmInfo.ProviderRaw)
 				if err := r.Status().Update(ctx, existingVM); err != nil {
 					logger.Error(err, "Failed to update Status.ID for existing adopted VM", "vm_name", vmName)
@@ -564,7 +564,7 @@ func (r *VMAdoptionReconciler) adoptVM(ctx context.Context, provider *infravirtr
 	vm.Status.ID = vmInfo.ID
 	recordBoundProvider(vm, provider)
 	vm.Status.PowerState = observedPowerState(vmInfo.PowerState)
-	vm.Status.IPs = vmInfo.IPs
+	vm.Status.IPs = contracts.RoutableIPs(vmInfo.IPs)
 	vm.Status.Provider = adoptedProviderRaw(vmInfo.ProviderRaw)
 	if err := r.Status().Update(ctx, vm); err != nil {
 		// If status update fails, log error but don't fail adoption

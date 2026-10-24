@@ -371,7 +371,13 @@ type VirtualMachineStatus struct {
 	// +optional
 	PowerState ObservedPowerState `json:"powerState,omitempty"`
 
-	// IPs contains the IP addresses assigned to the VM
+	// IPs lists the addresses a user can reach the VM on, in the order the
+	// provider reported them, without duplicates: private, IPv6 unique-local
+	// and global addresses, IPv4 and IPv6. Loopback (127.0.0.0/8, ::1),
+	// unspecified (0.0.0.0, ::), link-local (169.254.0.0/16, fe80::/10) and
+	// multicast addresses are never listed. It is empty while the provider
+	// cannot see an address, for example while the guest tools (VMware Tools,
+	// the QEMU guest agent) are not running in the guest.
 	// +optional
 	IPs []string `json:"ips,omitempty"`
 

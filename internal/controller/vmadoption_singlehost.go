@@ -658,7 +658,7 @@ func (r *VMAdoptionReconciler) writeSingleHostBinding(ctx context.Context, provi
 		latest.Status.ID = info.ID
 		recordBoundProvider(latest, provider)
 		latest.Status.PowerState = observedPowerState(info.PowerState)
-		latest.Status.IPs = info.IPs
+		latest.Status.IPs = contracts.RoutableIPs(info.IPs)
 		latest.Status.Provider = adoptedProviderRaw(info.ProviderRaw)
 		if err := r.Status().Update(ctx, latest); err != nil {
 			return err
