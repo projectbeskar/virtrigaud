@@ -295,6 +295,11 @@ the following once after upgrading, and delete only what no `VMMigration` in fli
      CRDs before the manager, as above; with an older CRD such a migration does not
      work (see the clustered-migration bullet of "Behavior changes that are visible but
      not breaking").
+   - **Snapshot revert needs one more schema change, which the readiness check does not
+     verify:** `VirtualMachine` `status.snapshotRevert`. With an older CRD the manager
+     sends no revert (`SnapshotReverted=False/Unsupported`). The `HostPool` CRD also
+     gains printer columns, so `kubectl get hostpools` shows the member-host counts
+     once it is applied.
 2. **Then grant cross-namespace consumers**, before the new manager runs. If any
    VirtualMachine, VMClone or VMMigration references a `Provider`, `VMClass` or
    `VMImage` in another namespace, set `spec.consumerNamespaceSelector` on those
@@ -318,7 +323,8 @@ the following once after upgrading, and delete only what no `VMMigration` in fli
    check.
    - The manager's RBAC changed: `get` on the `virtualmachines`, `providers`,
      `vmclasses` and `vmimages` `.infra.virtrigaud.io` CRDs (#341, consumer grant),
-     `get;list;watch` on `namespaces` (#340). The Helm chart applies these with the
+     `get;list;watch` on `namespaces` (#340), and `get;patch;update` on
+     `hostpools/status` (the HostPool controller). The Helm chart applies these with the
      manager; a manual/kustomize install must reapply `config/rbac/role.yaml`.
 4. **Then the providers**, in any order across hypervisor types, and promptly: until a
    provider reports `supportsImageArtifactIdentity` (ADR-0009), the new manager sends it
@@ -352,6 +358,11 @@ the following once after upgrading, and delete only what no `VMMigration` in fli
      with an older provider is safe but holds every resize of a VM on a
      clustered Provider (`ProviderLacksHonestReconfigure`) until the provider
      reports `supportsHonestReconfigure`, so roll the libvirt providers promptly.
+   - **Clustered libvirt: roll the provider after the manager for a host that stops
+     answering.** A new provider ends its waits on a host that does not answer before the
+     call's deadline and names the host in its `HOST_UNAVAILABLE` answers. An older
+     provider behind the new manager is safe: a held delete's message then names no host,
+     and a `Describe` to such a host can still end with `ProviderError` after 30 seconds.
    - **Clustered libvirt: roll the provider right after the manager (ADR-0007
      A6.2).** The new manager creates a clustered VM only after an
      owner-filtered `ListVMs` through a provider that reports
