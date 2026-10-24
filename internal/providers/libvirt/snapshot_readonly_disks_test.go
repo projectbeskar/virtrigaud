@@ -252,11 +252,14 @@ func requireRevertRefused(t *testing.T, err error, calls []string, revertPrefix 
 	st, ok := status.FromError(err)
 	require.True(t, ok, "a gRPC status: %v", err)
 	assert.Equal(t, codes.FailedPrecondition, st.Code())
-	for _, want := range []string{"refused", "earlier VirtRigaud release", "unable to start", "Nothing was changed",
-		"Take a new snapshot", "deleting its VMSnapshot"} {
+	for _, want := range []string{"revert refused", "earlier release", "read-only disk", "unable to start", "Nothing changed",
+		"Take a new snapshot; delete this VMSnapshot"} {
 		assert.Contains(t, st.Message(), want)
 	}
 	assert.NotContains(t, st.Message(), "/", "no host path crosses the wire")
+	// The manager keeps 256 bytes of the answer ("snapshotRevert failed: "
+	// + the message) in the VM's status: the guidance must fit.
+	assert.LessOrEqual(t, len("snapshotRevert failed: "+st.Message()), 256, "fits the status detail: %q", st.Message())
 	assert.False(t, called(calls, revertPrefix), "no snapshot-revert is sent: %v", calls)
 }
 
@@ -299,9 +302,9 @@ func TestSingleHost_SnapshotRevert_RewrittenSeedIsAFailure(t *testing.T) {
 	st, ok := status.FromError(err)
 	require.True(t, ok)
 	assert.Equal(t, codes.FailedPrecondition, st.Code())
-	assert.Contains(t, st.Message(), "was reverted")
-	assert.Contains(t, st.Message(), "hda")
+	assert.Contains(t, st.Message(), `reverted to snapshot "s1", but libvirt moved read-only disk hda`)
 	assert.NotContains(t, st.Message(), "/", "no host path crosses the wire")
+	assert.LessOrEqual(t, len("snapshotRevert failed: "+st.Message()), 256, "fits the status detail")
 
 	// The snapshot recorded another seed (e.g. the VM's seed changed since):
 	// the revert restoring it is not a rewrite.

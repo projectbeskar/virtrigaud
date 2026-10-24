@@ -245,24 +245,23 @@ func parseSnapshotDiskModes(snapshotXML string) (*snapshotDiskModes, error) {
 // read-only disk or removable media of the domain as an external snapshot
 // disk (a snapshot taken by v0.4.0-rc6 or earlier): libvirt would rewrite
 // that disk to a new overlay the VM cannot open. Nothing was changed. Its
-// message names only the domain, the snapshot and the disks' target names
-// (never a host path).
+// message names only the snapshot and the disks' target names (never a host
+// path).
 type snapshotRevertUnsafeError struct {
-	// domain is the requesting VM's domain (name or UUID as addressed).
-	domain string
 	// snapshot is the refused snapshot's name.
 	snapshot string
 	// disks are the read-only disks the snapshot records as external.
 	disks []string
 }
 
-// Error is the refusal, safe for the requesting VM's status.
+// Error is the refusal, safe for the requesting VM's status. It is short on
+// purpose: the manager keeps 256 bytes of a provider's answer in the VM's
+// status, so the guidance comes first and the domain (known from the
+// VirtualMachine) is left to the provider log.
 func (e *snapshotRevertUnsafeError) Error() string {
-	return fmt.Sprintf("revert of libvirt domain %q to snapshot %q refused: the snapshot was taken by an earlier "+
-		"VirtRigaud release (v0.4.0-rc6 or earlier) and records the VM's read-only disk(s) %s (such as its cloud-init "+
-		"CD-ROM) as snapshot disks; reverting it with libvirt would leave the VM unable to start. Nothing was changed. "+
-		"Take a new snapshot instead, and delete this one by deleting its VMSnapshot",
-		e.domain, e.snapshot, strings.Join(e.disks, ", "))
+	return fmt.Sprintf("revert refused: snapshot %q (taken by an earlier release) includes read-only disk %s; "+
+		"libvirt would leave the VM unable to start. Nothing changed. Take a new snapshot; delete this VMSnapshot",
+		e.snapshot, strings.Join(e.disks, ","))
 }
 
 // GRPCStatus renders the refusal as codes.FailedPrecondition (no ErrorInfo):
@@ -276,22 +275,20 @@ func (e *snapshotRevertUnsafeError) GRPCStatus() *status.Status {
 // snapshotRevertBrokeDisksError reports a revert that libvirt performed but
 // that left one of the domain's read-only disks or removable media on a
 // source neither the domain nor the snapshot had for it: the VM was reverted,
-// and may not start. Its message names only the domain, the snapshot and the
-// disks' target names.
+// and may not start. Its message names only the snapshot and the disks'
+// target names.
 type snapshotRevertBrokeDisksError struct {
-	// domain is the requesting VM's domain (name or UUID as addressed).
-	domain string
 	// snapshot is the snapshot reverted to.
 	snapshot string
 	// disks are the rewritten disks' targets.
 	disks []string
 }
 
-// Error is the failure, safe for the requesting VM's status.
+// Error is the failure, safe for the requesting VM's status (short, as
+// snapshotRevertUnsafeError's).
 func (e *snapshotRevertBrokeDisksError) Error() string {
-	return fmt.Sprintf("libvirt domain %q was reverted to snapshot %q, but libvirt rewrote its read-only disk(s) %s "+
-		"(such as its cloud-init CD-ROM) to a new file; the VM may be unable to start until the disk is pointed back at "+
-		"its original source (see the snapshot revert documentation)", e.domain, e.snapshot, strings.Join(e.disks, ", "))
+	return fmt.Sprintf("reverted to snapshot %q, but libvirt moved read-only disk %s to a new file; the VM may not "+
+		"start until it is repaired (see the snapshot revert documentation)", e.snapshot, strings.Join(e.disks, ","))
 }
 
 // GRPCStatus renders the failure as codes.FailedPrecondition (no ErrorInfo):
@@ -331,8 +328,10 @@ func checkSnapshotRevertSafe(ctx context.Context, h hostCommandRunner, domain, s
 		return nil, fmt.Errorf("failed to revert to snapshot: %w", err)
 	}
 	if unsafe := snap.externalReadOnlyDisks(doc); len(unsafe) > 0 {
-		e := &snapshotRevertUnsafeError{domain: domain, snapshot: snapshotID, disks: unsafe}
-		log.Printf("WARN %v", e)
+		e := &snapshotRevertUnsafeError{snapshot: snapshotID, disks: unsafe}
+		log.Printf("WARN Revert of libvirt domain %s refused: snapshot %s records its read-only disk(s) %v as external "+
+			"snapshot disks (taken by v0.4.0-rc6 or earlier); libvirt would rewrite them to new overlays the VM cannot open",
+			domain, snapshotID, unsafe)
 		return nil, e
 	}
 	return &revertReadOnlyBaseline{before: doc.readOnlyDiskSources(), recorded: snap.recordedReadOnlySources()}, nil
@@ -373,8 +372,9 @@ func checkRevertKeptReadOnlyDisks(ctx context.Context, h hostCommandRunner, doma
 		return nil
 	}
 	sort.Strings(rewritten)
-	e := &snapshotRevertBrokeDisksError{domain: domain, snapshot: snapshotID, disks: rewritten}
-	log.Printf("ERROR %v", e)
+	e := &snapshotRevertBrokeDisksError{snapshot: snapshotID, disks: rewritten}
+	log.Printf("ERROR Libvirt domain %s was reverted to snapshot %s, but its read-only disk(s) %v are no longer on a "+
+		"source the domain or the snapshot had for them: %v", domain, snapshotID, rewritten, doc.readOnlyDiskSources())
 	return e
 }
 
