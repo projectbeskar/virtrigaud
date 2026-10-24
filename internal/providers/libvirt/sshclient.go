@@ -113,15 +113,29 @@ func (v *VirshProvider) dialSSH(ctx context.Context) (*ssh.Client, error) {
 	}
 
 	addr := hostPort(host)
+	// On a clustered host connection the dial and the handshake end before
+	// the call's deadline (host_answer.go); ssh.ClientConfig.Timeout bounds
+	// only ssh.Dial's TCP connect, not NewClientConn, so the handshake is
+	// bounded by the socket's deadline.
+	dctx, cancel := v.hostWaitContext(ctx)
+	defer cancel()
+	waitUntil, bounded := dctx.Deadline()
 	var d net.Dialer
-	conn, err := d.DialContext(ctx, "tcp", addr)
+	conn, err := d.DialContext(dctx, "tcp", addr)
 	if err != nil {
-		return nil, fmt.Errorf("dial ssh host %s: %w", addr, err)
+		return nil, fmt.Errorf("dial ssh host %s: %w", addr, v.dialWaitError(ctx, waitUntil, bounded, err))
+	}
+	hsDeadline, hsBounded := v.handshakeDeadline(dctx)
+	if hsBounded {
+		_ = conn.SetDeadline(hsDeadline)
 	}
 	sshConn, chans, reqs, err := ssh.NewClientConn(conn, addr, config)
 	if err != nil {
 		_ = conn.Close()
-		return nil, fmt.Errorf("ssh handshake with %s failed: %w", addr, err)
+		return nil, fmt.Errorf("ssh handshake with %s failed: %w", addr, v.dialWaitError(ctx, hsDeadline, hsBounded, err))
+	}
+	if hsBounded {
+		_ = conn.SetDeadline(time.Time{})
 	}
 	log.Printf("INFO Established SSH connection to libvirt host %s", addr)
 	return ssh.NewClient(sshConn, chans, reqs), nil
@@ -171,8 +185,15 @@ func (v *VirshProvider) withSession(ctx context.Context, fn func(*ssh.Session) e
 	if err != nil {
 		return err
 	}
-	sess, err := client.NewSession()
+	sess, err := v.openSession(ctx, client)
 	if err != nil {
+		// A clustered host that did not confirm the session in the call's
+		// time (host_answer.go), or a call that ended meanwhile: there is no
+		// time left to redial, and the connection is left to the calls that
+		// still use it.
+		if isHostNotAnswering(err) || ctx.Err() != nil {
+			return fmt.Errorf("open ssh session: %w", err)
+		}
 		// The cached client is likely dead (e.g. the remote end dropped the
 		// TCP connection); discard it and try exactly once more against a
 		// fresh dial. A second failure here is a real, current connectivity
@@ -182,7 +203,7 @@ func (v *VirshProvider) withSession(ctx context.Context, fn func(*ssh.Session) e
 		if err != nil {
 			return fmt.Errorf("reconnect ssh client: %w", err)
 		}
-		sess, err = client.NewSession()
+		sess, err = v.openSession(ctx, client)
 		if err != nil {
 			return fmt.Errorf("open ssh session: %w", err)
 		}

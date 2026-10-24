@@ -93,12 +93,14 @@ func (p *Provider) withHostConn(ctx context.Context, hostID string, fn func(ctx 
 	}
 	lease, err := p.clusterReg.ConnFor(ctx, hostconn.HostID(id))
 	if err != nil {
-		return contracts.NewHostUnavailableError(fmt.Sprintf("connect to host %q", id), err)
+		return &routedHostUnavailableError{host: hostconn.HostID(id),
+			pe: contracts.NewHostUnavailableError(fmt.Sprintf("connect to host %q", id), err)}
 	}
 	vc, err := virshConnFrom(lease)
 	if err != nil {
 		_ = lease.Close()
-		return contracts.NewHostUnavailableError(fmt.Sprintf("resolve connection of host %q", id), err)
+		return &routedHostUnavailableError{host: hostconn.HostID(id),
+			pe: contracts.NewHostUnavailableError(fmt.Sprintf("resolve connection of host %q", id), err)}
 	}
 	h := newHostLease(vc, lease)
 	defer h.release()
@@ -129,6 +131,23 @@ func (p *Provider) withOwnedDomain(ctx context.Context, vm contracts.VMRef, op s
 		return fn(hctx, c, d)
 	})
 }
+
+// routedHostUnavailableError is the host-scoped unavailability of the very
+// host a routed call leases (withHostConn: an unknown, removed or draining
+// host, or one whose connection cannot be resolved). It is transparent — Error
+// and Unwrap are pe's, so contracts.IsHostUnavailable and every message are
+// unchanged — and only tells routedRPCError which host to name in the
+// answer's ErrorInfo (hostUnavailableStatusFor).
+type routedHostUnavailableError struct {
+	host hostconn.HostID
+	pe   *contracts.ProviderError
+}
+
+// Error returns pe's message.
+func (e *routedHostUnavailableError) Error() string { return e.pe.Error() }
+
+// Unwrap exposes pe.
+func (e *routedHostUnavailableError) Unwrap() error { return e.pe }
 
 // hostOpError marks an error as having arisen while a routed call ran on a
 // leased host — i.e. AFTER the provider itself resolved and leased the host,
@@ -165,10 +184,18 @@ var hostDownStderrMarkers = []string{"failed to connect to the hypervisor"}
 //     or session failed, or the connection dropped mid-command. This also
 //     covers an already-dialed connection to a host that has since died (the
 //     registry reuses it without a health probe);
-//   - a virsh error saying it cannot connect to the host's libvirtd.
+//   - a virsh error saying it cannot connect to the host's libvirtd;
+//   - a wait on the host — a command slot, the SSH dial and handshake, an SSH
+//     session — that ran out before the call's deadline
+//     (hostNotAnsweringError, host_answer.go).
 //
 // A cancelled or expired call context is not a host failure.
 func isHostTransportFailure(err error) bool {
+	// A wait on the host that ran out before the call's deadline
+	// (host_answer.go): the host did not answer in the call's time.
+	if isHostNotAnswering(err) {
+		return true
+	}
 	if stderrors.Is(err, context.Canceled) || stderrors.Is(err, context.DeadlineExceeded) {
 		return false
 	}
@@ -279,14 +306,27 @@ func virshOf(c libvirtConn) (*VirshProvider, error) {
 // its circuit breaker. Only pe.Message (which names the host id) crosses the
 // wire; the cause is logged.
 func hostUnavailableStatus(pe *contracts.ProviderError) error {
+	return hostUnavailableStatusFor(pe, "")
+}
+
+// hostUnavailableStatusFor is hostUnavailableStatus for an unavailability of
+// the host the call was routed to, host (its target_host_id): the ErrorInfo
+// names it under contracts.HostUnavailableHostKey, so the manager can say in
+// the VM's status that its own host could not be reached. An empty host sets
+// no metadata (the host that could not be reached may be another one).
+func hostUnavailableStatusFor(pe *contracts.ProviderError, host hostconn.HostID) error {
 	if pe.Cause != nil {
 		log.Printf("WARN %s: %v", pe.Message, pe.Cause)
 	}
 	st := status.New(codes.Unavailable, pe.Message)
-	withInfo, err := st.WithDetails(&errdetails.ErrorInfo{
+	info := &errdetails.ErrorInfo{
 		Reason: contracts.HostUnavailableReason,
 		Domain: contracts.HostUnavailableErrorDomain,
-	})
+	}
+	if host != "" {
+		info.Metadata = map[string]string{contracts.HostUnavailableHostKey: string(host)}
+	}
+	withInfo, err := st.WithDetails(info)
 	if err != nil {
 		// Unreachable in practice (ErrorInfo always marshals); a plain
 		// Unavailable is still a correct, if breaker-counted, answer.
@@ -436,8 +476,8 @@ func hostOpRPCErrorFor(kind hostOpKind, op string, ho *hostOpError, err error) e
 		var gh *guardHostUnreachableError
 		switch {
 		case kind == hostOpRead || stderrors.As(err, &gh) || stage == hostDownNothingRan:
-			return hostUnavailableStatus(contracts.NewHostUnavailableError(
-				fmt.Sprintf("%s: host %q is unreachable", op, ho.host), nil))
+			return hostUnavailableStatusFor(contracts.NewHostUnavailableError(
+				fmt.Sprintf("%s: host %q is unreachable", op, ho.host), nil), ho.host)
 		case stage == hostDownReadsOnly:
 			return hostLostStatus(codes.Unavailable, fmt.Sprintf(wireHostNotPerformedFmt, op, ho.host))
 		case kind == hostOpWriteRetry:
@@ -583,6 +623,10 @@ func routedRPCErrorFor(kind hostOpKind, op string, err error) error {
 			return outcomeUnknownRetryStatus(roe.wire)
 		}
 		return vmOperationStatus(roe.code, roe.wire)
+	}
+	var rh *routedHostUnavailableError
+	if stderrors.As(err, &rh) {
+		return hostUnavailableStatusFor(rh.pe, rh.host)
 	}
 	var pe *contracts.ProviderError
 	if stderrors.As(err, &pe) {
