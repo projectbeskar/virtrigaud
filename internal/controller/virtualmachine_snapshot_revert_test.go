@@ -19,12 +19,14 @@ package controller
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/genproto/googleapis/rpc/errdetails"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -67,6 +69,16 @@ type revertProvider struct {
 	taskDone bool
 	taskErr  error
 	powers   int
+	// onRevert runs inside SnapshotRevert, before it answers (a change made
+	// while the call runs).
+	onRevert func()
+	// reconfigures counts the Reconfigure calls.
+	reconfigures int
+}
+
+func (p *revertProvider) Reconfigure(_ context.Context, _ contracts.VMRef, _ contracts.CreateRequest) (contracts.ReconfigureResult, error) {
+	p.reconfigures++
+	return contracts.ReconfigureResult{}, nil
 }
 
 // revertAnswer is one scripted SnapshotRevert answer.
@@ -92,6 +104,9 @@ func (p *revertProvider) Power(_ context.Context, _ contracts.VMRef, op contract
 func (p *revertProvider) SnapshotRevert(_ context.Context, vm contracts.VMRef, snapshotID string) (string, error) {
 	p.reverts = append(p.reverts, snapshotID)
 	p.revertRefs = append(p.revertRefs, vm)
+	if p.onRevert != nil {
+		p.onRevert()
+	}
 	if len(p.revertAnswers) == 0 {
 		return "", nil
 	}
@@ -593,19 +608,59 @@ func TestSnapshotRevert_ManagerRestartMidCall(t *testing.T) {
 		_ = reconcileStored(t, r)
 		assert.Len(t, prov.reverts, 1)
 	})
-	t.Run("VM powered on meanwhile: not re-sent", func(t *testing.T) {
+	t.Run("VM seen on meanwhile: Failed, never re-sent", func(t *testing.T) {
+		// The VM may have run (and written data) since the attempt: a revert
+		// sent after it powers off again would roll that back.
 		r, prov, now := setup(t, contracts.PowerStateOn)
 		*now = now.Add(snapshotRevertResendWait)
 		got := reconcileStored(t, r)
 		assert.Empty(t, prov.reverts)
-		assert.Equal(t, infravirtrigaudiov1beta1.SnapshotRevertPhaseReverting, got.Status.SnapshotRevert.Phase,
-			"the earlier attempt's outcome stays unknown")
-		requireRevertCondition(t, got, metav1.ConditionFalse, infravirtrigaudiov1beta1.SnapshotRevertReasonWaitingForPowerOff)
-		assert.Equal(t, 1, prov.powers, "powered off because spec.powerState is Off, not for the revert")
+		assert.Equal(t, infravirtrigaudiov1beta1.SnapshotRevertPhaseFailed, got.Status.SnapshotRevert.Phase)
+		requireRevertCondition(t, got, metav1.ConditionFalse, infravirtrigaudiov1beta1.SnapshotRevertReasonRevertFailed)
+		assert.Contains(t, got.Status.SnapshotRevert.Message, "may or may not have been reverted")
 
+		// spec.powerState Off powers it off as usual; it is not reverted again.
+		for i := 0; i < 3; i++ {
+			_ = reconcileStored(t, r)
+		}
+		assert.Equal(t, 1, prov.powers, "powered off because spec.powerState is Off, not for the revert")
+		assert.Empty(t, prov.reverts, "never re-sent after the VM was seen on")
+	})
+	t.Run("spec set to On meanwhile: Failed, never re-sent", func(t *testing.T) {
+		r, prov, now := setup(t, contracts.PowerStateOff)
+		vm := revertStoredVM(t, r)
+		vm.Spec.PowerState = infravirtrigaudiov1beta1.PowerStateOn
+		require.NoError(t, r.Update(context.Background(), vm))
+		*now = now.Add(snapshotRevertResendWait)
+		got := reconcileStored(t, r)
+		assert.Empty(t, prov.reverts)
+		assert.Equal(t, infravirtrigaudiov1beta1.SnapshotRevertPhaseFailed, got.Status.SnapshotRevert.Phase)
+
+		// The user powers it off again: still not re-sent.
 		got = reconcileStored(t, r)
-		assert.Len(t, prov.reverts, 1, "re-sent once the VM is observed off")
-		assert.Equal(t, infravirtrigaudiov1beta1.SnapshotRevertPhaseSucceeded, got.Status.SnapshotRevert.Phase)
+		got.Spec.PowerState = infravirtrigaudiov1beta1.PowerStateOff
+		require.NoError(t, r.Update(context.Background(), got))
+		for i := 0; i < 3; i++ {
+			_ = reconcileStored(t, r)
+		}
+		assert.Empty(t, prov.reverts)
+	})
+	t.Run("capability withdrawn meanwhile: Failed, never re-sent", func(t *testing.T) {
+		r, prov, now := setup(t, contracts.PowerStateOff)
+		providerCR := &infravirtrigaudiov1beta1.Provider{}
+		require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "test-prov"}, providerCR))
+		providerCR.Status.ReportedCapabilities = &infravirtrigaudiov1beta1.ReportedCapabilities{SupportsSnapshots: false}
+		require.NoError(t, r.Update(context.Background(), providerCR))
+		*now = now.Add(snapshotRevertResendWait)
+		got := reconcileStored(t, r)
+		assert.Empty(t, prov.reverts)
+		assert.Equal(t, infravirtrigaudiov1beta1.SnapshotRevertPhaseFailed, got.Status.SnapshotRevert.Phase)
+		assert.Equal(t, int32(1), got.Status.SnapshotRevert.Attempts, "the attempt count is kept")
+
+		providerCR.Status.ReportedCapabilities.SupportsSnapshots = true
+		require.NoError(t, r.Update(context.Background(), providerCR))
+		_ = reconcileStored(t, r)
+		assert.Empty(t, prov.reverts, "not sent as a fresh attempt when the capability returns")
 	})
 	t.Run("VMSnapshot deleted meanwhile: Failed, not re-sent", func(t *testing.T) {
 		r, prov, now := setup(t, contracts.PowerStateOff)
@@ -806,4 +861,143 @@ func TestBoundSnapshotRevertMessage(t *testing.T) {
 	vm.Status.SnapshotRevert.Message = short
 	boundSnapshotRevertMessage(vm)
 	assert.Equal(t, short, vm.Status.SnapshotRevert.Message)
+}
+
+// TestSnapshotRevert_OutcomeKeptAcrossSpecChangeDuringCall: the spec changes
+// while the revert runs (the user powers the VM on right after setting
+// revertToRef), so the write of the answer loses its resourceVersion race;
+// the answer is written over the stored status anyway, never lost.
+func TestSnapshotRevert_OutcomeKeptAcrossSpecChangeDuringCall(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		answer revertAnswer
+		phase  infravirtrigaudiov1beta1.SnapshotRevertPhase
+		task   string
+	}{
+		{"synchronous success", revertAnswer{}, infravirtrigaudiov1beta1.SnapshotRevertPhaseSucceeded, ""},
+		{"task", revertAnswer{taskRef: revertTaskRef}, infravirtrigaudiov1beta1.SnapshotRevertPhaseReverting, revertTaskRef},
+		{"definite failure", revertAnswer{err: errors.New("revert failed")}, infravirtrigaudiov1beta1.SnapshotRevertPhaseFailed, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r, prov, _, _ := revertFixture(t, infravirtrigaudiov1beta1.PowerStateOff, contracts.PowerStateOff, nil,
+				revertSnapshotOf(revertSnapName, revertSnapUID))
+			prov.revertAnswers = []revertAnswer{tc.answer}
+			prov.onRevert = func() {
+				vm := revertStoredVM(t, r)
+				vm.Spec.PowerState = infravirtrigaudiov1beta1.PowerStateOn
+				require.NoError(t, r.Update(context.Background(), vm))
+			}
+			got := reconcileStored(t, r)
+			require.Len(t, prov.reverts, 1)
+			require.NotNil(t, got.Status.SnapshotRevert)
+			assert.Equal(t, tc.phase, got.Status.SnapshotRevert.Phase, "the answer is on record")
+			assert.Equal(t, tc.task, got.Status.SnapshotRevert.TaskRef)
+			assert.Equal(t, infravirtrigaudiov1beta1.PowerStateOn, got.Spec.PowerState, "the user's spec change is kept")
+		})
+	}
+}
+
+// TestSnapshotRevert_HostConnectionLostIsUnknown: a clustered host that
+// stopped answering after the revert was sent (codes.Unknown with
+// HOST_CONNECTION_LOST, the transport's untyped form) is an unknown outcome,
+// not a failure.
+func TestSnapshotRevert_HostConnectionLostIsUnknown(t *testing.T) {
+	st, err := status.New(codes.Unknown, "the host stopped answering").WithDetails(&errdetails.ErrorInfo{
+		Reason: contracts.HostConnectionLostReason, Domain: contracts.ErrorInfoDomain})
+	require.NoError(t, err)
+	lost := fmt.Errorf("snapshotRevert failed: %w", st.Err())
+	require.True(t, contracts.IsHostConnectionLost(lost))
+	require.False(t, contracts.IsRetryable(lost))
+
+	r, prov, _, _ := revertFixture(t, infravirtrigaudiov1beta1.PowerStateOff, contracts.PowerStateOff, nil,
+		revertSnapshotOf(revertSnapName, revertSnapUID))
+	prov.revertAnswers = []revertAnswer{{err: lost}}
+	got := reconcileStored(t, r)
+	assert.Equal(t, infravirtrigaudiov1beta1.SnapshotRevertPhaseReverting, got.Status.SnapshotRevert.Phase)
+	assert.Empty(t, got.Status.SnapshotRevert.TaskRef)
+	requireRevertCondition(t, got, metav1.ConditionFalse, infravirtrigaudiov1beta1.SnapshotRevertReasonReverting)
+}
+
+// TestSnapshotRevert_TaskReportedUnknownInBandFails: a provider that answers
+// in-band that it does not know the task (Proxmox, mock: done with an error)
+// ends the revert Failed — fail-closed, never re-sent.
+func TestSnapshotRevert_TaskReportedUnknownInBandFails(t *testing.T) {
+	r, prov, _, _ := revertFixture(t, infravirtrigaudiov1beta1.PowerStateOff, contracts.PowerStateOff, nil,
+		revertSnapshotOf(revertSnapName, revertSnapUID))
+	prov.revertAnswers = []revertAnswer{{taskRef: revertTaskRef}}
+	_ = reconcileStored(t, r)
+	prov.taskDone, prov.taskErr = true, errors.New("task failed: task not found")
+	got := reconcileStored(t, r)
+	assert.Equal(t, infravirtrigaudiov1beta1.SnapshotRevertPhaseFailed, got.Status.SnapshotRevert.Phase)
+	_ = reconcileStored(t, r)
+	assert.Len(t, prov.reverts, 1)
+}
+
+// TestSnapshotRevert_TaskOverdueReleasesVM: a task that does not complete (or
+// cannot be polled) within snapshotRevertTaskMaxWait ends Failed, and the VM
+// is managed again.
+func TestSnapshotRevert_TaskOverdueReleasesVM(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		taskErr error
+	}{
+		{"still running", nil},
+		{"status unreadable", contracts.NewRetryableError("taskStatus: unavailable", nil)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r, prov, _, now := revertFixture(t, infravirtrigaudiov1beta1.PowerStateOff, contracts.PowerStateOff, nil,
+				revertSnapshotOf(revertSnapName, revertSnapUID))
+			prov.revertAnswers = []revertAnswer{{taskRef: revertTaskRef}}
+			_ = reconcileStored(t, r)
+			prov.taskErr = tc.taskErr
+			*now = now.Add(snapshotRevertTaskMaxWait - time.Second)
+			got := reconcileStored(t, r)
+			assert.Equal(t, infravirtrigaudiov1beta1.SnapshotRevertPhaseReverting, got.Status.SnapshotRevert.Phase)
+
+			*now = now.Add(time.Second)
+			got = reconcileStored(t, r)
+			assert.Equal(t, infravirtrigaudiov1beta1.SnapshotRevertPhaseFailed, got.Status.SnapshotRevert.Phase)
+			assert.Empty(t, got.Status.SnapshotRevert.TaskRef)
+			assert.Contains(t, got.Status.SnapshotRevert.Message, "may or may not have been reverted")
+			assert.Len(t, prov.reverts, 1)
+		})
+	}
+}
+
+// TestSnapshotRevert_FieldRemovedWhileTaskRuns: the task is followed to its
+// end; only then is the record cleared.
+func TestSnapshotRevert_FieldRemovedWhileTaskRuns(t *testing.T) {
+	r, prov, _, _ := revertFixture(t, infravirtrigaudiov1beta1.PowerStateOff, contracts.PowerStateOff, nil,
+		revertSnapshotOf(revertSnapName, revertSnapUID))
+	prov.revertAnswers = []revertAnswer{{taskRef: revertTaskRef}}
+	got := reconcileStored(t, r)
+	got.Spec.Snapshot = nil
+	require.NoError(t, r.Update(context.Background(), got))
+
+	got = reconcileStored(t, r)
+	require.NotNil(t, got.Status.SnapshotRevert, "kept while the task runs")
+	assert.Equal(t, revertTaskRef, got.Status.SnapshotRevert.TaskRef)
+
+	prov.taskDone = true
+	got = reconcileStored(t, r)
+	assert.Equal(t, infravirtrigaudiov1beta1.SnapshotRevertPhaseSucceeded, got.Status.SnapshotRevert.Phase)
+	got = reconcileStored(t, r)
+	assert.Nil(t, got.Status.SnapshotRevert, "cleared once the task ended")
+	assert.Nil(t, revertCondition(got))
+	assert.Len(t, prov.reverts, 1)
+}
+
+// TestSnapshotRevert_ReadyFalseThroughReconfigure: a synchronous Reconfigure
+// sets Ready through setVMReady, which keeps Ready False while a revert waits.
+func TestSnapshotRevert_ReadyFalseThroughReconfigure(t *testing.T) {
+	r, prov, _, _ := revertFixture(t, infravirtrigaudiov1beta1.PowerStateOn, contracts.PowerStateOn, nil,
+		revertSnapshotOf(revertSnapName, revertSnapUID))
+	vm := revertStoredVM(t, r)
+	cpu := int32(2)
+	vm.Status.CurrentResources.CPU = &cpu // the class says 4: a resize is due
+	require.NoError(t, r.Status().Update(context.Background(), vm))
+
+	got := reconcileStored(t, r)
+	assert.Equal(t, 1, prov.reconfigures)
+	requireRevertCondition(t, got, metav1.ConditionFalse, infravirtrigaudiov1beta1.SnapshotRevertReasonWaitingForPowerOff)
 }

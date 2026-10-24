@@ -25,6 +25,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -79,6 +80,12 @@ const snapshotRevertRecheckInterval = 30 * time.Second
 
 // snapshotRevertTaskPollInterval polls a revert the provider runs as a task.
 const snapshotRevertTaskPollInterval = 10 * time.Second
+
+// snapshotRevertTaskMaxWait bounds how long a revert task is followed after
+// its attempt: one that has not completed by then (or whose status cannot be
+// read for that long) is Failed with its outcome unknown, so the VM it holds
+// (no power change, resize or other revert while it runs) is released.
+const snapshotRevertTaskMaxWait = 2 * time.Hour
 
 // snapshotRevertSettleInterval re-describes the VM shortly after a revert
 // ends, so its new power state (a revert to a snapshot with memory state can
@@ -354,15 +361,24 @@ func (r *VirtualMachineReconciler) reconcileSnapshotRevert(
 		return r.pendSnapshotRevert(vm, want.Name, string(snap.UID), reason, msg)
 	}
 	if caps := provider.Status.ReportedCapabilities; caps != nil && !caps.SupportsSnapshots {
-		return r.pendSnapshotRevert(vm, want.Name, string(snap.UID), infravirtrigaudiov1beta1.SnapshotRevertReasonUnsupported,
-			fmt.Sprintf("Provider %s reports no snapshot support (status.reportedCapabilities.supportsSnapshots is false)", provider.Name))
+		msg := fmt.Sprintf("Provider %s reports no snapshot support (status.reportedCapabilities.supportsSnapshots is false)", provider.Name)
+		if resend {
+			return r.failSnapshotRevert(ctx, vm, infravirtrigaudiov1beta1.SnapshotRevertReasonUnsupported,
+				"the outcome of the revert is not known and it cannot be sent again: "+msg+"; the VM may or may not have been reverted; "+
+					snapshotRevertRetryHint)
+		}
+		return r.pendSnapshotRevert(vm, want.Name, string(snap.UID), infravirtrigaudiov1beta1.SnapshotRevertReasonUnsupported, msg)
 	}
 	if msg := snapshotRevertPowerRefusal(vm, want.Name, desc); msg != "" {
 		if resend {
-			// The earlier attempt's outcome stays unknown; it is sent again
-			// once the VM is off again.
-			setSnapshotRevertCondition(vm, infravirtrigaudiov1beta1.SnapshotRevertReasonWaitingForPowerOff, msg)
-			return ctrl.Result{}, false, nil
+			// A re-send is safe only because nothing changed the disks of the
+			// VM since the earlier attempt: a VM that is not off now (it may
+			// have run, or the revert itself may have powered it on), or whose
+			// spec asks for it to run, is never reverted again for it.
+			return r.failSnapshotRevert(ctx, vm, infravirtrigaudiov1beta1.SnapshotRevertReasonRevertFailed, fmt.Sprintf(
+				"the outcome of revert attempt %d to VMSnapshot %s is not known, and the VM is no longer powered off with "+
+					"spec.powerState Off, so it is not sent again: the VM may have run since. The VM may or may not have been "+
+					"reverted; %s", rec.Attempts, want.Name, snapshotRevertRetryHint))
 		}
 		return r.pendSnapshotRevert(vm, want.Name, string(snap.UID), infravirtrigaudiov1beta1.SnapshotRevertReasonWaitingForPowerOff, msg)
 	}
@@ -437,7 +453,7 @@ func (r *VirtualMachineReconciler) failSnapshotRevert(ctx context.Context, vm *i
 	rec.Message = msg
 	setSnapshotRevertCondition(vm, reason, msg)
 	r.recordEvent(vm, corev1.EventTypeWarning, eventReasonSnapshotRevertFailed, msg)
-	r.updateStatus(ctx, vm)
+	r.persistSnapshotRevert(ctx, vm)
 	return ctrl.Result{RequeueAfter: snapshotRevertSettleInterval}, true, nil
 }
 
@@ -460,7 +476,7 @@ func (r *VirtualMachineReconciler) succeedSnapshotRevert(ctx context.Context, vm
 		setVMReady(vm)
 	}
 	r.recordEvent(vm, corev1.EventTypeNormal, eventReasonSnapshotRevertSucceeded, "Reverted to VMSnapshot "+rec.SnapshotName)
-	r.updateStatus(ctx, vm)
+	r.persistSnapshotRevert(ctx, vm)
 	return ctrl.Result{RequeueAfter: snapshotRevertSettleInterval}, nil
 }
 
@@ -529,7 +545,7 @@ func (r *VirtualMachineReconciler) sendSnapshotRevert(
 		rec.TaskRef = taskRef
 		rec.Message = fmt.Sprintf("reverting to VMSnapshot %s (provider snapshot %s, task %s)", snap.Name, snap.Status.SnapshotID, taskRef)
 		setSnapshotRevertCondition(vm, infravirtrigaudiov1beta1.SnapshotRevertReasonReverting, rec.Message)
-		r.updateStatus(ctx, vm)
+		r.persistSnapshotRevert(ctx, vm)
 		return ctrl.Result{RequeueAfter: snapshotRevertTaskPollInterval}, true, nil
 	}
 	res, err := r.succeedSnapshotRevert(ctx, vm)
@@ -551,14 +567,17 @@ func (r *VirtualMachineReconciler) snapshotRevertCallFailed(ctx context.Context,
 		logger.Error(err, "The provider does not implement SnapshotRevert")
 		return r.failSnapshotRevert(ctx, vm, infravirtrigaudiov1beta1.SnapshotRevertReasonUnsupported, fmt.Sprintf(
 			"the provider does not support reverting to a snapshot: %s", detail))
-	case contracts.IsRetryable(err) || isProviderTransportFailure(err) || contracts.IsOutcomeUnknownRetry(err):
+	case contracts.IsRetryable(err) || isProviderTransportFailure(err) || contracts.IsOutcomeUnknownRetry(err) ||
+		contracts.IsHostConnectionLost(err):
+		// A clustered host that stopped answering after the revert command
+		// was sent (HOST_CONNECTION_LOST) is an unknown outcome too.
 		logger.Error(err, "SnapshotRevert did not reach a definite outcome; it is sent again while the VM stays off",
 			"attempt", rec.Attempts)
 		metrics.RecordError(errReasonProviderSnapshotRevert, metrics.ComponentManager)
 		rec.Message = fmt.Sprintf("the outcome of revert attempt %d to VMSnapshot %s is not known (%s); it is sent again "+
 			"while the VM stays powered off", rec.Attempts, rec.SnapshotName, detail)
 		setSnapshotRevertCondition(vm, infravirtrigaudiov1beta1.SnapshotRevertReasonReverting, rec.Message)
-		r.updateStatus(ctx, vm)
+		r.persistSnapshotRevert(ctx, vm)
 		return ctrl.Result{RequeueAfter: snapshotRevertResendDue(rec, r.now())}, true, nil
 	default:
 		logger.Error(err, "SnapshotRevert failed")
@@ -569,14 +588,19 @@ func (r *VirtualMachineReconciler) snapshotRevertCallFailed(ctx context.Context,
 
 // pollSnapshotRevertTask polls the revert task recorded in
 // status.snapshotRevert.taskRef: Succeeded once it completed, Failed when it
-// ended in failure. A task the provider no longer knows (NotFound) leaves the
-// outcome unknown: the task is forgotten and the revert is sent again, as
-// for any unknown outcome, while the VM stays off.
+// ended in failure (a provider that reports in-band that it does not know
+// the task — Proxmox, mock — ends it that way too, fail-closed). A NotFound
+// error leaves the outcome unknown: the task is forgotten and the revert is
+// sent again, as for any unknown outcome, only while the VM stays off. A task
+// that has not completed snapshotRevertTaskMaxWait after the attempt (or
+// whose status cannot be read for that long) is Failed with its outcome
+// unknown, so a VM is never held for ever.
 func (r *VirtualMachineReconciler) pollSnapshotRevertTask(ctx context.Context, vm *infravirtrigaudiov1beta1.VirtualMachine,
 	providerInstance contracts.Provider) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 	rec := vm.Status.SnapshotRevert
 	done, err := providerInstance.IsTaskComplete(ctx, rec.TaskRef)
+	overdue := rec.AttemptTime != nil && !r.now().Before(rec.AttemptTime.Add(snapshotRevertTaskMaxWait))
 	switch {
 	case err != nil && done:
 		res, _, ferr := r.failSnapshotRevert(ctx, vm, infravirtrigaudiov1beta1.SnapshotRevertReasonRevertFailed, fmt.Sprintf(
@@ -586,11 +610,17 @@ func (r *VirtualMachineReconciler) pollSnapshotRevertTask(ctx context.Context, v
 	case err != nil && contracts.IsNotFound(err):
 		logger.Info("The provider no longer knows the revert task; its outcome is not known", "taskRef", rec.TaskRef)
 		rec.Message = fmt.Sprintf("the provider no longer knows revert task %s, so its outcome is not known; the revert to "+
-			"VMSnapshot %s is sent again while the VM stays powered off", rec.TaskRef, rec.SnapshotName)
+			"VMSnapshot %s is sent again only while the VM stays powered off", rec.TaskRef, rec.SnapshotName)
 		rec.TaskRef = ""
 		setSnapshotRevertCondition(vm, infravirtrigaudiov1beta1.SnapshotRevertReasonReverting, rec.Message)
-		r.updateStatus(ctx, vm)
+		r.persistSnapshotRevert(ctx, vm)
 		return ctrl.Result{RequeueAfter: snapshotRevertTaskPollInterval}, nil
+	case (err != nil || !done) && overdue:
+		res, _, ferr := r.failSnapshotRevert(ctx, vm, infravirtrigaudiov1beta1.SnapshotRevertReasonRevertFailed, fmt.Sprintf(
+			"revert task %s for VMSnapshot %s has not completed within %s of the attempt, so its outcome is not known; it is "+
+				"no longer followed. The VM may or may not have been reverted; %s",
+			rec.TaskRef, rec.SnapshotName, snapshotRevertTaskMaxWait, snapshotRevertRetryHint))
+		return res, ferr
 	case err != nil:
 		logger.Error(err, "Cannot check the snapshot revert task; checked again", "taskRef", rec.TaskRef)
 		metrics.RecordError(errReasonProviderTask, metrics.ComponentManager)
@@ -602,6 +632,63 @@ func (r *VirtualMachineReconciler) pollSnapshotRevertTask(ctx context.Context, v
 		return ctrl.Result{RequeueAfter: snapshotRevertTaskPollInterval}, nil
 	}
 	return r.succeedSnapshotRevert(ctx, vm)
+}
+
+// persistSnapshotRevert writes vm's status after a provider call, like
+// updateStatus. The answer must not be lost to a write that loses a
+// resourceVersion race (the spec changed during the call: a user powering
+// the VM on right after setting revertToRef, say): on a Conflict the VM is
+// re-read live and its status.snapshotRevert and SnapshotReverted condition
+// (and Ready, derived from them) are written over the stored status — as long
+// as the stored record is still this request's attempt (same VMSnapshot UID
+// and attempt count). Any other failure is logged; the record written before
+// the call then stands, and its outcome is read as unknown.
+func (r *VirtualMachineReconciler) persistSnapshotRevert(ctx context.Context, vm *infravirtrigaudiov1beta1.VirtualMachine) {
+	logger := log.FromContext(ctx)
+	err := r.writeStatusChecked(ctx, vm)
+	if err == nil || !apierrors.IsConflict(err) {
+		if err != nil {
+			logger.Error(err, "Failed to record the snapshot revert outcome")
+		}
+		return
+	}
+	rec := vm.Status.SnapshotRevert.DeepCopy()
+	cond := meta.FindStatusCondition(vm.Status.Conditions, infravirtrigaudiov1beta1.VirtualMachineConditionSnapshotReverted)
+	if rec == nil || cond == nil {
+		return
+	}
+	cond = cond.DeepCopy()
+	var written *infravirtrigaudiov1beta1.VirtualMachine
+	err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		live, gone, err := r.readLiveVM(ctx, vm)
+		if err != nil || gone {
+			return err
+		}
+		stored := live.Status.SnapshotRevert
+		if stored == nil || stored.SnapshotUID != rec.SnapshotUID || stored.Attempts != rec.Attempts {
+			logger.Info("The stored snapshot revert record is not this attempt's; not overwriting it")
+			return nil
+		}
+		live.Status.SnapshotRevert = rec.DeepCopy()
+		meta.SetStatusCondition(&live.Status.Conditions, *cond)
+		if ready := meta.FindStatusCondition(live.Status.Conditions, k8s.ConditionReady); rec.Phase == infravirtrigaudiov1beta1.SnapshotRevertPhaseSucceeded &&
+			ready != nil && ready.Status == metav1.ConditionFalse && snapshotRevertReadyReasons[ready.Reason] {
+			setVMReady(live)
+		}
+		if err := r.writeStatusChecked(ctx, live); err != nil {
+			return err
+		}
+		written = live
+		return nil
+	})
+	if err != nil {
+		logger.Error(err, "Failed to record the snapshot revert outcome after a conflict")
+		return
+	}
+	if written != nil {
+		vm.ResourceVersion = written.ResourceVersion
+		vm.Status = written.Status
+	}
 }
 
 // maxSnapshotRevertMessageBytes is the CRD's bound on
