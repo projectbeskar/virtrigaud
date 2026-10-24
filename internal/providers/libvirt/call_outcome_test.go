@@ -502,7 +502,7 @@ func TestSingleHostSnapshotCreate_Outcomes(t *testing.T) {
 // answers differently.
 func TestClusteredSnapshotCreate_CommandSequenceUnchanged(t *testing.T) {
 	conn := &fakeSeamConn{id: "single", domainState: "shut off"}
-	_, err := snapshotCreateOn(context.Background(), conn, scdDomain, scdSnapshotRequest("x"))
+	_, err := snapshotCreateOn(context.Background(), conn, scdDomain, scdSnapshotRequest("x"), nil)
 	require.NoError(t, err)
 	for _, args := range conn.virshCalls {
 		assert.NotEqual(t, "snapshot-list", args[0], "no name pre-check on the shared core")

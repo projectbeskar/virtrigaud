@@ -82,7 +82,10 @@ const (
 // holds the domstate answer (default "shut off"), "jobtype" the domjobinfo
 // "Job type" (default None), snaps-<domain> the snapshot
 // list, snapxml-<snapshot> a snapshot's `snapshot-dumpxml` (default: a
-// snapshot with no disk list), revert-rewrites the domain XML a
+// snapshot whose stored definition has an empty CD-ROM), `metadata` and
+// `change-media` only log (fail-<subcommand> makes them fail; the domain XML
+// does not change unless after-change-media holds the XML a change-media
+// leaves), `start` succeeds, revert-rewrites the domain XML a
 // snapshot-revert leaves behind (default: unchanged), and dom-<name>.xml marks
 // a domain as present (`list --all --uuid`
 // prints the UUID of every domain seeded under its UUID, as #358's disk
@@ -149,7 +152,10 @@ virsh)
     snapshot-dumpxml)
       fail snapshot-dumpxml
       [ -f "$d/dom-$2.xml" ] || nodom "$2"
-      if [ -f "$d/snapxml-$3" ]; then cat "$d/snapxml-$3"; else printf '<domainsnapshot><name>%s</name></domainsnapshot>\n' "$3"; fi ;;
+      if [ -f "$d/snapxml-$3" ]; then cat "$d/snapxml-$3"; else printf "<domainsnapshot><name>%s</name><domain><devices><disk type='file' device='cdrom'><target dev='sda'/><readonly/></disk></devices></domain></domainsnapshot>\n" "$3"; fi ;;
+    metadata) fail metadata; [ -f "$d/dom-$3.xml" ] || nodom "$3" ;;
+    change-media) fail change-media; [ -f "$d/dom-$2.xml" ] || nodom "$2"; if [ -f "$d/after-change-media" ]; then cat "$d/after-change-media" > "$d/dom-$2.xml"; fi ;;
+    start) fail start; [ -f "$d/dom-$2.xml" ] || nodom "$2"; echo "Domain '$2' started" ;;
     vol-info) fail vol-info; printf 'Name:           %s\nType:           file\nCapacity:       10.00 GiB\nAllocation:     1.00 GiB\n' "$2" ;;
     vol-path) echo "/var/lib/libvirt/images/$2.qcow2" ;;
     pool-info) fail pool-info; printf 'Name:           default\nState:          running\nAutostart:      yes\n' ;;

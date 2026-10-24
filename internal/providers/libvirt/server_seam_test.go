@@ -85,7 +85,7 @@ func (f *fakeSeamConn) Virsh(_ context.Context, args ...string) (*hostconn.Resul
 			// of the one disk.
 			return &hostconn.Result{Stdout: fmt.Sprintf("<domainsnapshot><name>%s</name><disks>"+
 				"<disk name='vda' snapshot='external' type='file'><source file='/var/lib/libvirt/images/%s-disk.%s'/></disk>"+
-				"</disks></domainsnapshot>", args[2], args[1], args[2])}, nil
+				"</disks><domain><devices/></domain></domainsnapshot>", args[2], args[1], args[2])}, nil
 		}
 	}
 	return &hostconn.Result{Stdout: "ok"}, nil
