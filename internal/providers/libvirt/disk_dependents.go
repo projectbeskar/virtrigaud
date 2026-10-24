@@ -164,6 +164,12 @@ func guardCheckFailed(op, domain string, err error) error {
 	if isHostTransportFailure(err) {
 		return &guardHostUnreachableError{op: op, domain: domain, cause: err}
 	}
+	if isUnreadableImage(err) {
+		log.Printf("ERROR libvirt disk dependency check for %s of domain %s: a disk image on the host cannot be read "+
+			"by the provider (permission denied; the image is named above). Give it the mode and owner of a VM disk, "+
+			"or allow the provider's sudo rule for its directory: see %s", op, domain, unreadableImageDoc)
+		return &diskCheckFailedError{op: op, domain: domain, unreadable: true}
+	}
 	return &diskCheckFailedError{op: op, domain: domain}
 }
 
@@ -213,12 +219,30 @@ type diskCheckFailedError struct {
 	op string
 	// domain names the requesting VM's domain.
 	domain string
+	// unreadable reports that the check failed because a disk image on the
+	// host cannot be read (unreadableImageError): an operator must fix the
+	// image's owner and mode, or the sudo rule, before it can succeed.
+	unreadable bool
 }
 
-// Error is the refusal, safe for the requesting VM's status.
+// Error is the refusal, safe for the requesting VM's status. It never names
+// the image that could not be read: it may be another tenant's VM's (the
+// provider log names it).
 func (e *diskCheckFailedError) Error() string {
+	if e.unreadable {
+		return unreadableImageMessage(e.op, e.domain, "its host")
+	}
 	return fmt.Sprintf("%s of libvirt domain %q not performed: could not verify that no other domain uses its disks "+
 		"(transient host error; details are in the provider log)", e.op, e.domain)
+}
+
+// unreadableImageMessage is the answer of a dependency guard that could not
+// read a disk image on where ("its host", "a host of this Provider"): the
+// guidance comes first, as the manager keeps only the start of a long answer.
+func unreadableImageMessage(op, domain, where string) string {
+	return fmt.Sprintf("%s of libvirt domain %q not performed: permission denied reading a disk image on %s (see %s; "+
+		"the provider log names it), so no other domain's use of its disks can be ruled out; retried", op, domain,
+		where, unreadableImageDoc)
 }
 
 // Unwrap exposes the equivalent retryable contracts error.

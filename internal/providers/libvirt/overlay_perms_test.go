@@ -18,13 +18,20 @@ package libvirt
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+
+	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
+	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
 )
 
 // These tests pin V7 (v0.4.0-rc7 lab validation): the overlays libvirt
@@ -114,4 +121,90 @@ func TestDiskInUseScan_UncoveredNestedSourceIsStillProbed(t *testing.T) {
 	require.NoError(t, os.Remove(s1+".rootonly"))
 	_, err = diskDependents(context.Background(), vp, uuidOther, []string{other})
 	require.NoError(t, err)
+}
+
+// TestGuard_UnreadableImageSaysWhatToFix: a guard that fails because a disk
+// image on the host cannot be read says so — permission denied, and where the
+// repair is documented — instead of a generic transient host error, without
+// naming the image (another tenant's VM's). It stays fail-closed and
+// retryable: Unavailable + VM_DISK_CHECK_FAILED, which the manager retries
+// with a backoff (an operator's fix on the host needs no change to the
+// Kubernetes object).
+func TestGuard_UnreadableImageSaysWhatToFix(t *testing.T) {
+	h, vp, disk, s1, s2, _ := snapshottedHost(t)
+	h.qcow2Overlay(s2, disk) // s1 is reached by no chain: probed, unreadable
+
+	err := refuseIfDiskHasDependents(context.Background(), vp, "team-b.other", guardOpSnapshotCreate)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `snapshot create of libvirt domain "team-b.other" not performed: `+
+		`permission denied reading a disk image on its host`)
+	assert.Contains(t, err.Error(), unreadableImageDoc)
+	assert.NotContains(t, err.Error(), "transient")
+	assert.NotContains(t, err.Error(), "team-a", "another VM's image is never named")
+	assert.NotContains(t, err.Error(), s1)
+	assert.True(t, contracts.IsRetryable(err), "fail closed, retried")
+
+	st, ok := status.FromError(err)
+	require.True(t, ok)
+	assert.Equal(t, codes.Unavailable, st.Code())
+	assert.True(t, errorInfoReasons(st)[contracts.VMDiskCheckFailedReason])
+
+	routed, ok := status.FromError(routedRPCError("create snapshot",
+		&hostOpError{host: "host-a", err: err, progress: &hostProgress{}}))
+	require.True(t, ok)
+	assert.Equal(t, codes.Unavailable, routed.Code())
+	assert.True(t, errorInfoReasons(routed)[contracts.VMDiskCheckFailedReason])
+	assert.True(t, errorInfoReasons(routed)[contracts.VMOperationFailedReason])
+	assert.Contains(t, routed.Message(), unreadableImageDoc)
+
+	// Any other failure keeps the generic message.
+	generic := guardCheckFailed(guardOpDelete, "team-b.other", errors.New("boom"))
+	assert.Contains(t, generic.Error(), "transient host error")
+}
+
+// TestClusteredDelete_UnreadableImageOnAnotherHost: through the cluster-wide
+// guard's fan-out, a host whose shut-off domain's disk the provider cannot
+// read (no sudo rule, a 0600 image) fails the delete closed with the
+// operator-actionable answer — naming no host, path or other domain — and
+// nothing is removed.
+func TestClusteredDelete_UnreadableImageOnAnotherHost(t *testing.T) {
+	s := newSharedPool(t)
+	disk := s.disk("team-a.web-disk.qcow2", "live-disk")
+	s.defineOn("host-b", "team-a.web", uuidVMOnB, guardDomainXML("team-a.web", uuidVMOnB, disk, ownerTeamA, false))
+	other := s.disk("other-vm-disk.qcow2", "x")
+	require.NoError(t, os.WriteFile(other+".rootonly", nil, 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(s.root, "sudo-refuses"), nil, 0o600))
+	s.defineOn("host-a", "other-vm", uuidForeign, guardDomainXML("other-vm", uuidForeign, other, ownerForeign, false))
+
+	_, err := NewServer(s.p).Delete(context.Background(), &providerv1.DeleteRequest{
+		Id: "team-a.web", TargetHostId: "host-b", Owner: teamAOwner,
+	})
+	st, ok := status.FromError(err)
+	require.True(t, ok, "%v", err)
+	assert.Equal(t, codes.Unavailable, st.Code())
+	assert.True(t, errorInfoReasons(st)[contracts.VMDiskCheckFailedReason], "got %v", st)
+	assert.Contains(t, st.Message(), "permission denied reading a disk image on a host of this Provider")
+	assert.Contains(t, st.Message(), unreadableImageDoc)
+	requireWireSafe(t, st.Message(), s.images, "other-vm")
+	s.requireUntouched("host-b", "team-a.web")
+	assert.FileExists(t, disk)
+}
+
+// TestClusterGuard_UnreadableImageSaysWhatToFix: the cluster-wide guard says
+// the same when a host answered but one of its images cannot be read.
+func TestClusterGuard_UnreadableImageSaysWhatToFix(t *testing.T) {
+	e := (&clusterGuardIncompleteError{unreadable: true}).with(guardOpDelete, "team-b.other")
+	assert.Contains(t, e.Error(), "permission denied reading a disk image on a host of this Provider")
+	assert.Contains(t, e.Error(), unreadableImageDoc)
+	assert.True(t, contracts.IsRetryable(e))
+	st := e.GRPCStatus()
+	assert.Equal(t, codes.Unavailable, st.Code())
+	assert.True(t, errorInfoReasons(st)[contracts.VMDiskCheckFailedReason])
+
+	unreachable := (&clusterGuardIncompleteError{unreachable: true, unreadable: true}).with(guardOpDelete, "x")
+	assert.Contains(t, unreachable.Error(), "could not be reached", "an unreachable host wins")
+
+	wrapped := hostCheckFailed("read backing chain", &unreadableImageError{path: "/p/x", cause: errors.New("exit 1")})
+	assert.True(t, isUnreadableImage(wrapped), "found through hostCheckFailed")
+	assert.NotContains(t, wrapped.Error(), "/p/x", "the path stays in the provider log")
 }

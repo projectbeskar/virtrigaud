@@ -846,6 +846,41 @@ const maxBackingChainDepth = 32
 // qemuImgMissingFile is the qemu-img error text for a file that does not exist.
 const qemuImgMissingFile = "No such file or directory"
 
+// qemuImgPermissionDenied is the qemu-img error text for a file the reading
+// account may not open.
+const qemuImgPermissionDenied = "Permission denied"
+
+// unreadableImageDoc is where the repair of a disk image the disk in-use
+// check cannot read is documented.
+const unreadableImageDoc = "docs/libvirt-clones.md#unreadable-disk-images"
+
+// unreadableImageError reports an image of a chain that the account reading
+// it may not open (qemu-img answered "Permission denied"): the SSH user, or
+// root through sudo on a root-squashed export. It is a host check failure
+// (hostCheckFailed keeps it, and its path, provider-side); the dependency
+// guard finds it (isUnreadableImage) to tell the operator what to fix
+// instead of answering a generic transient host error (V7).
+type unreadableImageError struct {
+	// path is the image as the chain names it (provider log only).
+	path string
+	// cause is the failed qemu-img.
+	cause error
+}
+
+// Error names the image: it only ever reaches the provider log.
+func (e *unreadableImageError) Error() string {
+	return fmt.Sprintf("permission denied reading disk image %s (see %s): %v", e.path, unreadableImageDoc, e.cause)
+}
+
+// Unwrap exposes the failed command.
+func (e *unreadableImageError) Unwrap() error { return e.cause }
+
+// isUnreadableImage reports whether err is, or wraps, an unreadableImageError.
+func isUnreadableImage(err error) bool {
+	var u *unreadableImageError
+	return errors.As(err, &u)
+}
+
 // backingFormatRE matches a qemu block-driver name as a header's
 // backing-filename-format, passed to qemu-img as -f.
 var backingFormatRE = regexp.MustCompile(`^[a-z0-9]+$`)
@@ -1001,6 +1036,9 @@ func walkChainChecked(ctx context.Context, h hostCommandRunner, disk, format str
 		if err != nil {
 			if res != nil && res.ExitCode == qemuImgFailureExitCode && strings.Contains(res.Stderr, qemuImgMissingFile) {
 				return levels, nil // the chain ends at a file that no longer exists
+			}
+			if res != nil && res.ExitCode == qemuImgFailureExitCode && strings.Contains(res.Stderr, qemuImgPermissionDenied) {
+				return nil, hostCheckFailed("read backing chain", &unreadableImageError{path: cur, cause: err})
 			}
 			return nil, hostCheckFailed("read backing chain", err)
 		}
