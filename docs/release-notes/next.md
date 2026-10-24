@@ -46,7 +46,29 @@ v0.4.0-rc4"; on v0.4.0-rc2, also "Changes since v0.4.0-rc2"; on v0.4.0-rc1, also
 
 ## Changes since v0.4.0-rc5
 
-### `HostPool.status` is written (V1)
+Three pull requests, #430, #431 and #432. They fix what validating rc5 on a two-host
+clustered libvirt Provider, a Proxmox VE 9.2 node and a vCenter found (findings V1 to
+V4; see [Validated in the lab since
+rc5](#about-this-release-candidate--what-to-test)): a `HostPool` whose status was never
+written (V1), a `spec.snapshot.revertToRef` that was accepted and did nothing (V2), a
+clustered host that stopped answering and was reported two ways, with a held delete
+that did not say why (V3a, V3c), a VM held by a restore guard that showed `Failed`
+(V3b), and `spec.disks` on libvirt and Proxmox that was dropped without a word (V4).
+**Nothing is breaking.** Four changes are behaviour changes you may alert on (marked
+below). Two CRDs change (`VirtualMachine` gains `status.snapshotRevert`; `HostPool`
+gains printer columns) and the manager's role gains `hostpools/status`, so the CRDs go
+first (see [Upgrade order for rc6](#upgrade-order-for-rc6)).
+
+| PR | What changed | Breaking |
+|---|---|---|
+| #430 (V1) | A new HostPool controller writes `HostPool.status` (member-host counts and a `Ready` condition); `kubectl get hostpools` gains `TOTAL`, `READY`, `SCHEDULABLE` columns | No |
+| #431 (V2) | `spec.snapshot.revertToRef` reverts the VM, once per request and only while it is powered off. New `status.snapshotRevert`, condition `SnapshotReverted`, three events | Behaviour change |
+| #432 (V3c) | Clustered libvirt: a host that stops answering is `HOST_UNAVAILABLE` before the call's deadline, and the answer names the host the call was routed to | No |
+| #432 (V3a) | A clustered delete held for an unreachable host sets `DeleteBlocked=True/HostUnreachable` with a message naming the VM's host; a host lost during the delete is held the same way | Behaviour change |
+| #432 (V3b) | A VM held by a clustered restore guard is `status.phase: Pending`, not `Failed` | Behaviour change |
+| #432 (V4) | `spec.disks` on a libvirt or Proxmox Provider sets `DisksApplied=False/NotSupportedByProvider`, a `Warning` event and, with the chart's VM webhook, an admission warning | Behaviour change (new condition and event) |
+
+### `HostPool.status` is written (#430; V1)
 
 `HostPool.status` (`totalHosts`, `readyHosts`, `schedulableHosts`,
 `observedGeneration`, `conditions`) was never written: every pool showed
@@ -63,12 +85,12 @@ status is not written. `kubectl get hostpools` gains `TOTAL`, `READY` and
 `SCHEDULABLE` columns. See
 [`HostPool.status`](docs/clustered-provider-inventory.md#hostpoolstatus).
 
-Upgrade: apply the CRDs (the HostPool CRD gains the printer columns and
-updated field descriptions; its schema is unchanged) and roll the manager. The
-manager's role gains `hostpools/status` `get`/`patch`/`update` (the Helm chart
-and `config/rbac` both carry it). Nothing is breaking.
+The HostPool CRD gains the printer columns and updated field descriptions (its schema
+is unchanged), and the manager's role gains `hostpools/status` `get`/`patch`/`update`
+(the Helm chart and `config/rbac` both carry it); see [Upgrade order for
+rc6](#upgrade-order-for-rc6). Nothing is breaking.
 
-### `spec.snapshot.revertToRef` reverts the VM (fix of a silent no-op; V2)
+### `spec.snapshot.revertToRef` reverts the VM (#431; V2)
 
 Found by the rc5 lab validation: `VirtualMachine.spec.snapshot.revertToRef` was
 accepted by the CRD, and `examples/advanced/snapshot-lifecycle.yaml` documented it as
@@ -109,19 +131,22 @@ now acts on the field:
   `SnapshotRevertStarted`, `SnapshotRevertSucceeded`, `SnapshotRevertFailed`.
 
 **Additive CRD change** (`status.snapshotRevert`): upgrade the CRDs before the manager;
-a manager whose CRD prunes the field sends no revert. A VM that already carries
+a manager whose CRD prunes the field sends no revert (`SnapshotReverted=False/Unsupported`,
+and the manager's readiness check does not verify the field). A VM that already carries
 `spec.snapshot.revertToRef` is acted on by the first reconcile after the upgrade:
 remove the field first from VMs you do not want reverted.
 
 **Not validated on a real hypervisor yet.** It is covered by the controller's unit and
 envtest tests only, which drive a scripted provider fake (not the mock provider binary,
 nor the gRPC transport). On libvirt, a snapshot of a VM that is off, or taken
-without memory, is an external disk-only snapshot; whether the host's libvirt can
-revert it depends on its version (a refusal is reported as `RevertFailed`).
+without memory, is an external disk-only snapshot; libvirt can revert one only from
+9.9 (its release notes: "QEMU: implement reverting external snapshots", v9.9.0), and the
+provider's refusal is reported as `RevertFailed`. The libvirt provider removes no
+overlay file on a revert (see Known limitations).
 
 → [`docs/vm-snapshot-revert.md`](docs/vm-snapshot-revert.md)
 
-### A clustered host that stops answering: one answer, in time (V3c)
+### A clustered host that stops answering: one answer, in time (#432; V3c)
 
 On a clustered libvirt Provider, a `Describe` to a host that had stopped answering
 was answered two ways: `Unavailable` + `HOST_UNAVAILABLE` ("describe VM: host ... is
@@ -129,14 +154,14 @@ unreachable") or, after the full 30 seconds, `Unknown` ("failed to describe VM o
 host ..."), which the manager showed as `Ready=False/ProviderError`. The calls
 waited on the dead SSH connection and held the host's command slots until their own
 deadline. The waits before a command runs on a host (a command slot, the SSH dial and
-handshake, an SSH session) now end 5 seconds before the call's deadline, and a wait
-that ends there is a host that stopped answering: `Describe` is always
+handshake, an SSH session) now end 5 seconds before the call's deadline (a quarter of
+the time left, when that is shorter), and a wait that ends there is a host that stopped answering: `Describe` is always
 `HOST_UNAVAILABLE` (`Ready=False/HostUnavailable`, naming the bound host), and other
 calls are answered by how far they got, as since R25. A `HOST_UNAVAILABLE` about the
 host the call was routed to now names it in its `ErrorInfo` metadata (`host`). See
 [A host that stops answering](docs/provider-call-outcomes.md#clustered-libvirt-a-host-that-stops-answering).
 
-### A delete held for an unreachable host says so (V3a)
+### A delete held for an unreachable host says so (#432; V3a)
 
 Deleting a clustered VM whose host does not answer kept the finalizer (unchanged),
 but the VM showed only `phase: Deleting` and a stale `Ready` message. Now it shows
@@ -153,7 +178,7 @@ doubling to 5 min) instead of every 15 seconds, and the `HostUnreachable` messag
 now contain the VM's host name. See
 [A delete held for an unreachable host](docs/provider-call-outcomes.md#a-delete-held-for-an-unreachable-host).
 
-### A VM held by a restore guard is `Pending`, not `Failed` (V3b)
+### A VM held by a restore guard is `Pending`, not `Failed` (#432; V3b)
 
 A clustered VM held by the restore guards (R1, R4: `RestorePending`,
 `OwnDomainOnAnotherHost`, `UniquenessCheckFailed`, `ProviderLacksListOwnerFilter`)
@@ -165,7 +190,7 @@ condition (or `Ready=False/RestorePending` on a restored binding) instead.
 `ImportedDiskPinned` and the other holds that need an operator stay `Failed`. See
 [`status.phase`](docs/vm-status-phase.md#the-rule).
 
-### `spec.disks` on libvirt and Proxmox is reported (V4)
+### `spec.disks` on libvirt and Proxmox is reported (#432; V4)
 
 The libvirt and Proxmox providers attach no `spec.disks` (documented, unchanged),
 but adding one to a VM changed nothing visible: `Reconfiguring` even said "VM
@@ -178,10 +203,55 @@ Nothing is refused. **New condition and reason you may alert on:** `DisksApplied
 `NotSupportedByProvider`. See
 [`spec.disks` on libvirt and Proxmox](docs/reconfigure-results.md#which-disk-a-size-goes-to).
 
-Upgrade for V3 and V4: roll the manager and the clustered libvirt provider. No CRD
-changed. A manager with an older provider still works: the delete hold then keeps
-its message that names no host, and the waits are not bounded until the provider
-is rolled. Nothing is breaking.
+V3 and V4 change no CRD: roll the manager, and the clustered libvirt provider for V3c
+([Upgrade order for rc6](#upgrade-order-for-rc6)). Nothing is breaking.
+
+### Upgrade order for rc6
+
+**Three CRDs changed since rc5** (checked: the difference under `config/crd/bases`
+between rc5 and this release). `VirtualMachine` gains `status.snapshotRevert` (and a
+longer description of `spec.snapshot.revertToRef`), `HostPool` gains the `TOTAL`,
+`READY` and `SCHEDULABLE` printer columns and longer field descriptions, and `VMSet`
+only has the `revertToRef` description of its template. No spec field changed. From rc5:
+
+1. **Before the manager rolls, remove `spec.snapshot.revertToRef` from every
+   `VirtualMachine` you do not want reverted.** The field did nothing up to rc5; the
+   first reconcile of the new manager acts on it (the command that lists them is in the
+   [Upgrade guide](docs/upgrading.md#behavior-changes-that-are-visible-but-not-breaking)).
+2. **CRDs.** The chart's pre-upgrade hook applies them; otherwise
+   `kubectl apply --server-side --force-conflicts -f config/crd/bases` (see [Required
+   upgrade order](docs/upgrading.md#required-upgrade-order)). Do this before the
+   manager: a manager whose `VirtualMachine` CRD prunes `status.snapshotRevert` sends no
+   revert (`SnapshotReverted=False/Unsupported`), and the manager's readiness check does
+   not verify that field, so nothing else tells you.
+3. **The manager.** Its role gains `hostpools/status` (`get`, `patch`, `update`). The
+   Helm chart (cluster and namespace scope) and `config/rbac/role.yaml` carry it; a
+   kustomize install must reapply the role. The new revert reads `vmsnapshots`, which
+   the role already grants (`get`, `list`, `watch`, and more), so there is no other
+   RBAC change. The new HostPool controller starts with the manager and fills in
+   every pool's status on its first reconcile of the pool.
+4. **The providers.** Only the clustered libvirt provider changed (V3c). Roll it
+   promptly after the manager, but nothing breaks in between: an older clustered
+   provider behind the new manager still works, the held-delete message then names no
+   host (the older provider does not send the host in its answer), and a `Describe` to
+   a host that stopped answering can still take the full 30 seconds and show
+   `ProviderError`. A newer provider behind an older manager is also safe. The vSphere,
+   Proxmox, mock and single-host libvirt providers have no functional change, and the
+   revert uses the `SnapshotRevert` call they already implement.
+
+From rc4, apply [Upgrade order for rc5](#upgrade-order-for-rc5) first (the PVE token
+privileges, then the manager and the Proxmox provider together); from rc2, rc4's order
+([Upgrade order for this release](#upgrade-order-for-this-release): the seed directory
+on every libvirt host first); from rc1, also [Upgrade order for
+rc2](#upgrade-order-for-rc2).
+
+**Rollback.** Rolling the manager back leaves `HostPool.status` at its last values
+(nothing updates it), makes `spec.snapshot.revertToRef` a no-op again, and stops
+maintaining the `DisksApplied` and `SnapshotReverted` conditions: an older manager
+neither sets nor removes them, so they go stale on the VMs that carry them. A VM that
+carried `status.snapshotRevert` keeps it. Rolling the clustered libvirt provider back brings
+back the unbounded waits on a dead host and the second answer (`Unknown`).
+→ [Rollback caveats](docs/upgrading.md#rollback-caveats)
 
 ## Changes since v0.4.0-rc4
 
