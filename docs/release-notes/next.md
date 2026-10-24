@@ -2180,7 +2180,32 @@ above that need a fault to trigger.
   make them private. → [Changes since v0.4.0-rc2](#libvirt-cloud-init-seeds-are-private-and-live-in-a-dedicated-directory-414-breaking),
   [Upgrade guide](docs/upgrading.md#breaking-changes)
 
-**New since rc6: nothing is breaking in the API and no CRD changed.** Behaviour changes to
+**New since rc7: nothing is breaking in the API and no CRD schema changed.** Behaviour
+changes to check, and one operator action:
+
+- **Action on libvirt hosts that lack it:** grant the provider's SSH user the existing
+  `VR_DISK_READ` sudo rule over the pool directory (or repair the overlays by hand), so the
+  disk in-use check can read libvirt's `0600` snapshot and revert overlays. See [Unreadable
+  disk images](docs/libvirt-clones.md#unreadable-disk-images) (#437; V7).
+- **A clustered `VMSnapshot` create the provider answers it did not perform no longer ends
+  in the operator hold.** It shows `Ready=False/ProviderError`, a `SnapshotCreateRetrying`
+  event, and is sent again after 1, 2, 4, 8, then every 10 minutes. Alerting that watched
+  for `SnapshotOutcomeUnknown` after such an answer no longer fires; a create whose outcome
+  is really unknown is still held (#437; V8).
+- **`status.ips` has fewer entries on every provider:** loopback, unspecified, link-local
+  and multicast addresses, entries that are not an IP address and duplicates are gone. A
+  script that read `status.ips[0]`, or looked for such an entry, must change (#438; V9).
+- **A libvirt NAT guest without the guest agent now shows its DHCP lease, and a guest
+  interface that does not start with `e` is no longer dropped by name** (#438; V10).
+- **The `RevertFailed` message of a revert the provider refuses for good** (libvirt: a
+  snapshot it cannot revert safely) no longer ends with "remove
+  `spec.snapshot.revertToRef` and set it again to retry". Match on the reason, not the
+  message (#437).
+
+→ [Changes since v0.4.0-rc7](#changes-since-v040-rc7),
+[`docs/vm-status-ips.md`](docs/vm-status-ips.md)
+
+**Since rc6: nothing is breaking in the API and no CRD changed.** Behaviour changes to
 check (all on libvirt, in the provider, except the last):
 
 - **A revert of a libvirt snapshot is refused (`SnapshotReverted=False/RevertFailed`,
@@ -2502,6 +2527,17 @@ policy and grants → manager → providers), and rollback caveats in
   [`docs/clustered-provider-inventory.md`](docs/clustered-provider-inventory.md#migration-into-a-clustered-provider-addendum-b)).
 
 ### Fixes
+
+- **New since rc7** (→ [Changes since v0.4.0-rc7](#changes-since-v040-rc7)):
+  - **After an offline snapshot or a revert on libvirt, the snapshot, clone and delete of
+    every other VM on the host were refused** ("could not verify that no other domain uses
+    its disks"), because the disk check re-read a nested backing store as the SSH user
+    (#437; V7).
+  - **A clustered `VMSnapshot` create the provider had not performed ended in an operator
+    hold** after ten re-sends (#437; V8).
+  - **A revert refused for good said "set it again to retry"** (#437).
+  - **`status.ips` listed loopback and link-local addresses** (#438; V9).
+  - **A libvirt NAT guest without the guest agent never showed its DHCP lease** (#438; V10).
 
 - **New since rc6** (→ [Changes since v0.4.0-rc6](#changes-since-v040-rc6)):
   - **A libvirt snapshot revert was reported `Succeeded` and left the VM unable to start**
@@ -3139,8 +3175,35 @@ says so. Each links to the page that documents it in full, where one exists.
   (`<pool>/*-disk*` files that are not `.qcow2`) after a revert or a snapshot delete
   (→ [`docs/vm-snapshot-revert.md`](docs/vm-snapshot-revert.md#libvirt),
   [`docs/libvirt-clones.md`](docs/libvirt-clones.md#what-snapshotdelete-removes)).
-  The libvirt revert was validated in the lab only up to rc6, where it failed (V6); rc7's
-  fix has not run on a real host yet.
+  The libvirt revert was validated in the lab on rc7 (single-host and clustered, libvirt
+  10.0, AppArmor, an NFS pool); on rc6 it failed (V6).
+- **libvirt: snapshot and revert overlays are `0600`, and the disk check needs to read
+  them.** libvirt creates `<domain>-disk.<snapshot>` and `<domain>-disk.<epoch>` mode `0600`,
+  owned by root while the VM is off, and VirtRigaud does not change them. A snapshot
+  create, revert or delete, and a delete (on a clustered Provider also a create and a
+  clone), of any VM on the host reads the disk chain of every domain on the host first. The provider's SSH user must be able to read those overlays: grant `VR_DISK_READ`
+  over the pool directory (an NFS export must not squash root, and must then be dedicated
+  to the Provider's hosts), or repair each new overlay by hand (`chown -h libvirt-qemu:kvm`,
+  `chmod 0640`). Without either, those operations are refused with "permission denied
+  reading a disk image" and retried
+  (→ [`docs/libvirt-clones.md`](docs/libvirt-clones.md#unreadable-disk-images)).
+- **A libvirt guest on a host bridge needs the QEMU guest agent to show `status.ips`.**
+  libvirt holds no DHCP lease for a bridged guest (the LAN's DHCP server answers); the
+  host's ARP table is a last resort that depends on recent traffic, and a guest on a
+  libvirt-managed network such as `default` shows its lease without the agent
+  (→ [`docs/vm-status-ips.md`](docs/vm-status-ips.md#libvirt)).
+- **A revert the provider definitely did not perform is still counted as an unknown
+  outcome.** An answer such as "not performed: could not verify that no other domain uses
+  its disks" is retryable, so the revert is sent again (6 minutes after the last attempt,
+  doubling up to 30 minutes) and, after 5 attempts, ends `Failed` with "the VM may or may
+  not have been reverted" although nothing was changed. Check the VM, then remove
+  `spec.snapshot.revertToRef` and set it again
+  (→ [`docs/vm-snapshot-revert.md`](docs/vm-snapshot-revert.md#asynchronous-reverts-and-unknown-outcomes)).
+- **A single-host `VMSnapshot` create the provider did not perform fails instead of
+  being retried.** On a single-host Provider the same "not performed" answer that a
+  clustered Provider retries with a backoff (V8) ends the `VMSnapshot` in `Failed`
+  (`ProviderError`); delete it and create a new one once the cause (for example the
+  unreadable overlay above) is fixed.
 - **Held calls need an operator.** A `VMMigration` or `VMSnapshot` held in
   `SnapshotOutcomeUnknown`, `ExportOutcomeUnknown` or `ImportOutcomeUnknown` stays held
   until you check the provider and confirm the attempt with
@@ -3193,6 +3256,12 @@ says so. Each links to the page that documents it in full, where one exists.
   [docs/upgrading.md](docs/upgrading.md#leftovers-from-earlier-releases).
 
 ## Upgrade
+
+Since rc7: **no CRD schema changed** (only the description of `status.ips`). On libvirt
+hosts where the provider's SSH user cannot read libvirt's `0600` overlays, grant it
+`VR_DISK_READ` over the pool directory ([Unreadable disk
+images](docs/libvirt-clones.md#unreadable-disk-images)), then roll the manager and the
+libvirt providers; see [Upgrade order for rc8](#upgrade-order-for-rc8).
 
 Since rc6: **no CRD changed.** If you reverted a libvirt VM to a snapshot on rc6, repair
 it first ([runbook](docs/vm-snapshot-revert.md#repairing-a-vm-broken-by-a-v040-rc6-revert)),
