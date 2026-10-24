@@ -283,13 +283,15 @@ and the manager's readiness check does not verify the field). A VM that already 
 `spec.snapshot.revertToRef` is acted on by the first reconcile after the upgrade:
 remove the field first from VMs you do not want reverted.
 
-**Not validated on a real hypervisor yet.** It is covered by the controller's unit and
-envtest tests only, which drive a scripted provider fake (not the mock provider binary,
-nor the gRPC transport). On libvirt, a snapshot of a VM that is off, or taken
-without memory, is an external disk-only snapshot; libvirt can revert one only from
-9.9 (its release notes: "QEMU: implement reverting external snapshots", v9.9.0), and the
-provider's refusal is reported as `RevertFailed`. The libvirt provider removes no
-overlay file on a revert (see Known limitations).
+**Validation.** The controller's unit and envtest tests drive a scripted provider fake
+(not the mock provider binary, nor the gRPC transport). The lab since rc6 ran it on
+vSphere and on Proxmox, and found V6 on libvirt: the revert was reported `Succeeded` and
+the VM of a snapshot taken by rc6 could not start. It is fixed in rc7 (see [Changes
+since v0.4.0-rc6](#libvirt-reverting-a-snapshot-no-longer-breaks-the-vms-cloud-init-cd-rom-435-v6)).
+On libvirt, a snapshot of a VM that is off, or taken without memory, is an external
+disk-only snapshot; libvirt can revert one only from 9.9 (its release notes: "QEMU:
+implement reverting external snapshots", v9.9.0), and the provider's refusal is reported
+as `RevertFailed`.
 
 → [`docs/vm-snapshot-revert.md`](docs/vm-snapshot-revert.md)
 
@@ -1905,6 +1907,33 @@ host; and the paths named above that need a fault to trigger.
   make them private. → [Changes since v0.4.0-rc2](#libvirt-cloud-init-seeds-are-private-and-live-in-a-dedicated-directory-414-breaking),
   [Upgrade guide](docs/upgrading.md#breaking-changes)
 
+**New since rc6: nothing is breaking in the API and no CRD changed.** Behaviour changes to
+check (all on libvirt, in the provider, except the last):
+
+- **A revert of a libvirt snapshot is refused (`SnapshotReverted=False/RevertFailed`,
+  terminal, nothing changed) when the snapshot stored a CD-ROM or read-only disk with
+  media:** every snapshot rc6 or earlier took of a VM with a cloud-init seed, and any
+  disk-only snapshot of a running VM that has a seed or another read-only disk. Take a new
+  snapshot with the VM powered off (#435). A VM that an rc6 revert already broke needs the
+  [repair runbook](docs/vm-snapshot-revert.md#repairing-a-vm-broken-by-a-v040-rc6-revert)
+  first.
+- **A snapshot of a powered-off libvirt VM briefly ejects its CD-ROMs and floppies from the
+  VM's persistent definition** and inserts them again; the domain's metadata carries a
+  record of them meanwhile. A snapshot interrupted in that window is repaired by the next
+  snapshot create, revert, start or reboot of the VM (#435).
+- **A power-on or reboot of a libvirt VM issues one extra read of the domain definition,
+  and is not attempted while a cloud-init seed an interrupted snapshot ejected cannot be
+  inserted again.** A definition that cannot be read is logged and the start proceeds
+  (#435).
+- **A `Describe` to a clustered host that stopped answering, queued behind another call's
+  dial, is `HOST_UNAVAILABLE` (`Ready=False/HostUnavailable`) within its deadline** instead
+  of `Unknown` (`Ready=False/ProviderError`) after the other call's deadline (#434).
+- The sentence of the `DeleteBlocked` message that tells how to release the VM starts with a
+  capital letter (#434). Match on the reason, not on the message.
+
+→ [Changes since v0.4.0-rc6](#changes-since-v040-rc6),
+[`docs/vm-snapshot-revert.md`](docs/vm-snapshot-revert.md#libvirt)
+
 **New since rc5: one change needs action before you roll the manager**; the others are
 behaviour changes to check:
 
@@ -2200,6 +2229,14 @@ policy and grants → manager → providers), and rollback caveats in
   [`docs/clustered-provider-inventory.md`](docs/clustered-provider-inventory.md#migration-into-a-clustered-provider-addendum-b)).
 
 ### Fixes
+
+- **New since rc6** (→ [Changes since v0.4.0-rc6](#changes-since-v040-rc6)):
+  - **A libvirt snapshot revert was reported `Succeeded` and left the VM unable to start**
+    when the VM had a cloud-init seed: libvirt 9.9 or later made an overlay of the seed
+    CD-ROM that AppArmor does not let QEMU open (#435; V6).
+  - **A clustered call that waited for another call's SSH dial to an unreachable host was
+    answered late, and some as `Unknown`**, after 1m28s with a 30-second deadline (#434;
+    V3c, follow-up).
 
 - **New since rc5** (→ [Changes since v0.4.0-rc5](#changes-since-v040-rc5)):
   - **`HostPool.status` was never written**; every pool showed `status: null` (#430; V1).
@@ -2812,15 +2849,25 @@ says so. Each links to the page that documents it in full, where one exists.
   created, with no condition and no event (the provider logs it at `INFO`); nothing
   refuses either case
   (→ [`docs/reconfigure-results.md`](docs/reconfigure-results.md#which-disk-a-size-goes-to)).
-- **Snapshot revert (`spec.snapshot.revertToRef`) has not run on a real hypervisor,
-  and a libvirt revert of a disk-only snapshot needs libvirt 9.9 or later.** A snapshot
-  the libvirt provider takes of a VM that is off, or without memory, is an external
-  disk-only snapshot; older libvirt cannot revert one and the provider reports
-  `RevertFailed`. A revert removes no overlay file, and the cleanup that
-  `SnapshotDelete` runs recognises only the primary disk's `<domain>-disk.<snapshot>`
-  overlay, so a revert may leave overlay files that nothing removes: check the pool
-  (`<pool>/*-disk.*` that are not `.qcow2`) after a revert, and tell us what you find
-  (→ [`docs/vm-snapshot-revert.md`](docs/vm-snapshot-revert.md#providers)).
+- **Snapshot revert on libvirt needs a snapshot taken with the VM powered off, and
+  libvirt 9.9 or later.** A snapshot of a VM that is off, or taken without memory, is an
+  external disk-only snapshot; older libvirt cannot revert one and the provider reports
+  `RevertFailed`. A disk-only snapshot that stores a CD-ROM or read-only disk with media
+  (rc6 or earlier, or taken while the VM ran) is refused on revert, and so is one whose
+  stored definition cannot be read. A snapshot of a powered-off VM ejects the seed
+  CD-ROM for its duration; if the provider or the host fails in that window the CD-ROM
+  stays empty until VirtRigaud's next snapshot create, revert, start or reboot of that VM
+  inserts the seed again, and a VM someone starts by hand (`virsh start`) meanwhile boots
+  without its seed. A medium other than the VM's own cloud-init seed (an installer ISO you
+  attached) that an interrupted ejection left out is never inserted automatically: the
+  provider logs it and you insert it by hand. `SnapshotDelete` removes the primary
+  disk's overlays, `<domain>-disk.<snapshot>` and the `<domain>-disk.<epoch>` a revert
+  makes, and not those of additional data disks, so check the pool
+  (`<pool>/*-disk*` files that are not `.qcow2`) after a revert or a snapshot delete
+  (→ [`docs/vm-snapshot-revert.md`](docs/vm-snapshot-revert.md#libvirt),
+  [`docs/libvirt-clones.md`](docs/libvirt-clones.md#what-snapshotdelete-removes)).
+  The libvirt revert was validated in the lab only up to rc6, where it failed (V6); rc7's
+  fix has not run on a real host yet.
 - **Held calls need an operator.** A `VMMigration` or `VMSnapshot` held in
   `SnapshotOutcomeUnknown`, `ExportOutcomeUnknown` or `ImportOutcomeUnknown` stays held
   until you check the provider and confirm the attempt with
@@ -2873,6 +2920,12 @@ says so. Each links to the page that documents it in full, where one exists.
   [docs/upgrading.md](docs/upgrading.md#leftovers-from-earlier-releases).
 
 ## Upgrade
+
+Since rc6: **no CRD changed.** If you reverted a libvirt VM to a snapshot on rc6, repair
+it first ([runbook](docs/vm-snapshot-revert.md#repairing-a-vm-broken-by-a-v040-rc6-revert)),
+then roll the libvirt providers (single-host and clustered; the manager changes only a
+message) and take new snapshots, with the VM powered off, of the VMs you want to be able to
+revert; see [Upgrade order for rc7](#upgrade-order-for-rc7).
 
 Since rc5: **three CRDs changed** (`VirtualMachine` gains `status.snapshotRevert`,
 `HostPool` gains printer columns, `VMSet` a description). Remove
