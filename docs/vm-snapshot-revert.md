@@ -243,7 +243,7 @@ clustered Provider, its bound host and owner) and the `VMSnapshot`'s
 | Provider | What the revert does (as implemented) |
 |---|---|
 | vSphere | Finds the snapshot in the VM's snapshot tree by managed-object id (what `SnapshotCreate` answers) or name, refuses templates and image artifacts, and runs `RevertToSnapshot_Task` with `suppressPowerOn=false`, waiting for it in the call (no task is returned). A snapshot taken with memory powers the VM on; the controller then applies `spec.powerState` |
-| libvirt (single host) | Checks that the snapshot exists, refuses while another domain depends on the VM's disk (a linked clone: `VM_DISK_IN_USE`, a `RevertFailed`; a check that cannot run is retried as an unknown outcome), refuses a snapshot that records the VM's read-only cloud-init CD-ROM ([below](#libvirt)), then runs `virsh snapshot-revert <domain> <snapshot> --force` (no `--running`, as the VM is off) and checks that the CD-ROM still points at its seed. Synchronous |
+| libvirt (single host) | Checks that the snapshot exists, refuses while another domain depends on the VM's disk (a linked clone: `VM_DISK_IN_USE`, a `RevertFailed`; a check that cannot run is retried as an unknown outcome), refuses a snapshot that records the VM's read-only cloud-init CD-ROM ([below](#libvirt)), then runs `virsh snapshot-revert <domain> <snapshot> --force` (no `--running`, as the VM is off) and checks that the VM's read-only disks (its CD-ROM) were not moved to new files. Synchronous |
 | libvirt (clustered) | The same, routed to the VM's bound host and owner-checked: a domain this VM does not own is `NotFound` and is never reverted. A snapshot id the provider could not have created is refused before any host is touched ([`clustered-provider-inventory.md`](clustered-provider-inventory.md)) |
 | Proxmox | Owner-checks the VM, then `POST .../qemu/<vmid>/snapshot/<name>/rollback`; the answer is a task, which the manager polls |
 | mock | Answers a task |
@@ -270,23 +270,30 @@ revert was reported `Succeeded`. Now:
 
 - `SnapshotCreate` reads the domain and passes `--diskspec <target>,snapshot=no` for
   every CD-ROM, floppy and disk marked `<readonly/>` — for disk-only and memory
-  snapshots alike. The VM's writable disks keep libvirt's defaults (external, with the
-  overlay named `<domain>-disk.<snapshot>`). A read-only disk whose target name the
-  provider cannot pass safely (anything but lower-case letters and digits) means no
-  snapshot is taken.
+  snapshots alike. In a disk-only snapshot the VM's writable disks keep libvirt's
+  defaults (external, with the overlay named `<domain>-disk.<snapshot>`); in a memory
+  snapshot they stay internal. A read-only disk without a target, or whose target is not
+  a plain libvirt target name (a lower-case letter, then lower-case letters and digits,
+  at most 32), means no snapshot is taken.
 - `SnapshotRevert` reads the snapshot (`virsh snapshot-dumpxml`) and the domain first,
   and **refuses** a snapshot that records a read-only disk or CD-ROM as an external
   snapshot disk — one taken by v0.4.0-rc6 or earlier — before anything changes on the
-  host. The VM gets `SnapshotReverted=False/RevertFailed` (terminal, not retried) with a
-  message such as `revert refused: snapshot "s1" (taken by an earlier release) includes
-  read-only disk hda; libvirt would leave the VM unable to start. Nothing changed. Take a
-  new snapshot; delete this VMSnapshot`. A snapshot or domain definition that cannot be
-  read means no revert either.
-- After a revert, the provider checks that each read-only disk still has a source the
-  domain or the snapshot had for it. A revert that moved one anyway is reported as
-  `RevertFailed` (`reverted to snapshot "s1", but libvirt moved read-only disk hda to a
-  new file; ...`) instead of `Succeeded`: the VM was reverted, but may not start, and the
-  revert must not be sent again. Repair it as below.
+  host. The VM gets `SnapshotReverted=False/RevertFailed` (terminal, not retried); the
+  provider's part of the message reads `revert refused, nothing changed: take a new
+  snapshot and delete this VMSnapshot. Snapshot "s1" is from an earlier release and
+  includes read-only disk hda (the VM would not start)`. The manager keeps the first 256
+  bytes of a provider's answer, so a long snapshot name may cut the end; the guidance
+  comes first. The manager's generic "remove `spec.snapshot.revertToRef` and set it again
+  to retry" hint does not help here: the same snapshot is refused again. A snapshot or
+  domain definition that cannot be read means no revert either.
+- After a revert, the provider reads the domain again and checks that each read-only
+  disk, CD-ROM and floppy (empty media aside) still has the source it had before the
+  revert or the one the snapshot recorded. A revert that moved one anyway is reported
+  as `RevertFailed` (`reverted, but the VM may not start: libvirt moved read-only disk
+  hda to a new file; ...`) instead of `Succeeded`: the VM was reverted, but may not
+  start. Repair it as below before you request another revert. If the domain cannot be
+  read after the revert, the provider logs it and reports the revert as `Succeeded`
+  (the snapshot was checked before the revert).
 
 To replace a snapshot taken by v0.4.0-rc6 or earlier: delete its `VMSnapshot` (deleting
 one that was never reverted merges it cleanly on libvirt 10), then create a new one. The

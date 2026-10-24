@@ -55,10 +55,10 @@ snapshot disk too. Reverting such a snapshot (libvirt 9.9 and later revert exter
 snapshots by making a new overlay of every external disk) rewrote the CD-ROM to a qcow2
 overlay of the seed ISO in the VM's private seed directory, which AppArmor does not let
 QEMU open: the revert was reported `Succeeded`, and the VM no longer started
-(`Ready=False`, "power failed"). Every libvirt VM with a seed was affected.
+(`Ready=False`, "power failed"). Every libvirt VM with a seed reverted that way (libvirt 9.9 or later, with AppArmor) was affected.
 
 - **Snapshot create** excludes every CD-ROM, floppy and `<readonly/>` disk with
-  `--diskspec <target>,snapshot=no`, for disk-only and memory snapshots. Writable disks
+  `--diskspec <target>,snapshot=no`, for disk-only and memory snapshots. In a disk-only snapshot writable disks
   keep libvirt's defaults (overlay `<domain>-disk.<snapshot>`).
 - **Snapshot revert** refuses, before anything changes on the host, a snapshot that
   records a read-only disk as external (one taken by rc6 or earlier):

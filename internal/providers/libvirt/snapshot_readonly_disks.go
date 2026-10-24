@@ -256,11 +256,12 @@ type snapshotRevertUnsafeError struct {
 
 // Error is the refusal, safe for the requesting VM's status. It is short on
 // purpose: the manager keeps 256 bytes of a provider's answer in the VM's
-// status, so the guidance comes first and the domain (known from the
-// VirtualMachine) is left to the provider log.
+// status, so the guidance comes first (a long snapshot name only cuts the
+// tail) and the domain (known from the VirtualMachine) is left to the
+// provider log.
 func (e *snapshotRevertUnsafeError) Error() string {
-	return fmt.Sprintf("revert refused: snapshot %q (taken by an earlier release) includes read-only disk %s; "+
-		"libvirt would leave the VM unable to start. Nothing changed. Take a new snapshot; delete this VMSnapshot",
+	return fmt.Sprintf("revert refused, nothing changed: take a new snapshot and delete this VMSnapshot. "+
+		"Snapshot %q is from an earlier release and includes read-only disk %s (the VM would not start)",
 		e.snapshot, strings.Join(e.disks, ","))
 }
 
@@ -287,8 +288,8 @@ type snapshotRevertBrokeDisksError struct {
 // Error is the failure, safe for the requesting VM's status (short, as
 // snapshotRevertUnsafeError's).
 func (e *snapshotRevertBrokeDisksError) Error() string {
-	return fmt.Sprintf("reverted to snapshot %q, but libvirt moved read-only disk %s to a new file; the VM may not "+
-		"start until it is repaired (see the snapshot revert documentation)", e.snapshot, strings.Join(e.disks, ","))
+	return fmt.Sprintf("reverted, but the VM may not start: libvirt moved read-only disk %s to a new file; repair it "+
+		"before another revert (see the snapshot revert documentation). Snapshot %q", strings.Join(e.disks, ","), e.snapshot)
 }
 
 // GRPCStatus renders the failure as codes.FailedPrecondition (no ErrorInfo):

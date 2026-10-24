@@ -252,15 +252,45 @@ func requireRevertRefused(t *testing.T, err error, calls []string, revertPrefix 
 	st, ok := status.FromError(err)
 	require.True(t, ok, "a gRPC status: %v", err)
 	assert.Equal(t, codes.FailedPrecondition, st.Code())
-	for _, want := range []string{"revert refused", "earlier release", "read-only disk", "unable to start", "Nothing changed",
-		"Take a new snapshot; delete this VMSnapshot"} {
+	for _, want := range []string{"revert refused, nothing changed", "earlier release", "read-only disk", "would not start",
+		"take a new snapshot and delete this VMSnapshot"} {
 		assert.Contains(t, st.Message(), want)
 	}
 	assert.NotContains(t, st.Message(), "/", "no host path crosses the wire")
-	// The manager keeps 256 bytes of the answer ("snapshotRevert failed: "
-	// + the message) in the VM's status: the guidance must fit.
-	assert.LessOrEqual(t, len("snapshotRevert failed: "+st.Message()), 256, "fits the status detail: %q", st.Message())
 	assert.False(t, called(calls, revertPrefix), "no snapshot-revert is sent: %v", calls)
+}
+
+// managerDetailBytes is how much of a provider's answer the manager keeps in
+// a VM's status ("snapshotRevert failed: " + the message; maxProviderDetailBytes).
+const managerDetailBytes = 256
+
+// TestSnapshotRevertMessages_GuidanceSurvivesTheStatusCap: the manager keeps
+// 256 bytes of the answer, behind "snapshotRevert failed: " and, routed,
+// "failed to revert to snapshot: ". The guidance comes first, so it survives
+// even with the longest snapshot name the provider creates; short names fit
+// whole.
+func TestSnapshotRevertMessages_GuidanceSurvivesTheStatusCap(t *testing.T) {
+	const prefix = "snapshotRevert failed: failed to revert to snapshot: "
+	long := strings.Repeat("s", 64)
+	for _, tc := range []struct {
+		err   error
+		guide string
+	}{
+		{&snapshotRevertUnsafeError{snapshot: long, disks: []string{"hda", "hdc"}}, "take a new snapshot and delete this VMSnapshot"},
+		{&snapshotRevertBrokeDisksError{snapshot: long, disks: []string{"hda", "hdc"}}, "repair it before another revert"},
+	} {
+		kept := prefix + tc.err.Error()
+		if len(kept) > managerDetailBytes {
+			kept = kept[:managerDetailBytes]
+		}
+		assert.Contains(t, kept, tc.guide)
+	}
+	for _, err := range []error{
+		&snapshotRevertUnsafeError{snapshot: "snapshot-1792831471", disks: []string{"hda"}},
+		&snapshotRevertBrokeDisksError{snapshot: "snapshot-1792831471", disks: []string{"hda"}},
+	} {
+		assert.LessOrEqual(t, len(prefix+err.Error()), managerDetailBytes, "a default-named snapshot's message fits whole: %q", err.Error())
+	}
 }
 
 func TestSingleHost_SnapshotRevert_RefusesASnapshotRecordingTheSeed(t *testing.T) {
@@ -302,9 +332,9 @@ func TestSingleHost_SnapshotRevert_RewrittenSeedIsAFailure(t *testing.T) {
 	st, ok := status.FromError(err)
 	require.True(t, ok)
 	assert.Equal(t, codes.FailedPrecondition, st.Code())
-	assert.Contains(t, st.Message(), `reverted to snapshot "s1", but libvirt moved read-only disk hda`)
+	assert.Contains(t, st.Message(), "reverted, but the VM may not start: libvirt moved read-only disk hda")
+	assert.Contains(t, st.Message(), `Snapshot "s1"`)
 	assert.NotContains(t, st.Message(), "/", "no host path crosses the wire")
-	assert.LessOrEqual(t, len("snapshotRevert failed: "+st.Message()), 256, "fits the status detail")
 
 	// The snapshot recorded another seed (e.g. the VM's seed changed since):
 	// the revert restoring it is not a rewrite.
