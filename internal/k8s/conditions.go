@@ -351,7 +351,10 @@ const (
 // it is removed when a later delete attempt fails for another reason (Ready
 // then says ReasonProviderError). Ready is False with ReasonDeleteBlocked
 // meanwhile. Its LastTransitionTime is when the hold began, which paces the
-// retries (15 s doubling to 5 min). Its message never names a host.
+// retries (15 s doubling to 5 min). Its message never names another host: a
+// HostUnreachable hold names the VM's own host (status.placement.host) when
+// the provider said that host could not be reached or stopped answering, and
+// no host otherwise.
 const ConditionDeleteBlocked = "DeleteBlocked"
 
 // ConditionForceDeleteRefused is True, with ReasonForceDeleteNotAllowed, on a
@@ -369,7 +372,11 @@ const ConditionForceDeleteRefused = "ForceDeleteRefused"
 const (
 	// ReasonHostUnreachable: a host the delete needs — the VM's own, or
 	// another host of the Provider that must be checked before the VM's disk
-	// is removed — could not be reached. Nothing was deleted.
+	// is removed — could not be reached, or the VM's own host stopped
+	// answering during the delete. The message says which (naming the VM's
+	// own host when the provider said it is that host) and whether anything
+	// may have been deleted. The delete is retried and completes once the host
+	// answers.
 	ReasonHostUnreachable = "HostUnreachable"
 	// ReasonDiskCheckFailed: the provider could not verify that no VM on
 	// another host of the Provider uses the VM's disk. Nothing was deleted.
