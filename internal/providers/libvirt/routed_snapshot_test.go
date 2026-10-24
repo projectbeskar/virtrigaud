@@ -296,12 +296,9 @@ func TestClustered_Snapshots_RoutedOwnerCheckedByUUID(t *testing.T) {
 			"host-b virsh snapshot-create-as "+uuid+" pre --description d --atomic --disk-only",
 			"host-b virsh change-media "+uuid+" sda "+scdSeedISO+" --insert --config",
 			"host-b virsh dumpxml "+uuid,
-			"host-b virsh metadata --domain "+uuid+" --uri "+mediaMarkerURI+" --remove --config",
-			// V7: the definition is read again to normalise the domain's own
-			// overlays (none in this fixture).
-			"host-b virsh dumpxml "+uuid), fx.calls(),
+			"host-b virsh metadata --domain "+uuid+" --uri "+mediaMarkerURI+" --remove --config"), fx.calls(),
 			"the name is looked up first (idempotent create), the disk-dependents guard runs, then the snapshot is "+
-				"made with the seed CD-ROM ejected, the seed is inserted again, and the own overlays are normalised")
+				"made with the seed CD-ROM ejected, and the seed is inserted again")
 	})
 
 	t.Run("create of a name this request already made is the earlier attempt's snapshot", func(t *testing.T) {
@@ -375,11 +372,8 @@ func TestClustered_Snapshots_RoutedOwnerCheckedByUUID(t *testing.T) {
 			"host-b virsh dumpxml "+uuid,
 			"host-b virsh snapshot-dumpxml "+uuid+" s2",
 			"host-b virsh snapshot-revert "+uuid+" s2 --force --running",
-			"host-b virsh dumpxml "+uuid,
-			// V7: the definition is read again to normalise the domain's own
-			// overlays (none in this fixture).
 			"host-b virsh dumpxml "+uuid), fx.calls(),
-			"the domain and the snapshot are read before the revert, and the domain's media and own overlays after it")
+			"the domain and the snapshot are read before the revert, and the domain's media after it")
 	})
 
 	t.Run("lease released and the other host never dialed", func(t *testing.T) {

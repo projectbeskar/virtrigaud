@@ -1101,14 +1101,6 @@ func (p *Provider) ownChainFiles(ctx context.Context, vp *VirshProvider, domain 
 // default storage pool, where Create and Clone put VM disks. A pool whose
 // directory cannot be read contributes nothing.
 func (p *Provider) deletionDirs(ctx context.Context, vp *VirshProvider) []string {
-	return p.storageDirsOn(ctx, vp)
-}
-
-// storageDirsOn is deletionDirs on the host behind h (any host command
-// runner): the directories a VM's own files live in — the allowed image
-// directories and the default storage pool's directory on that host.
-func (p *Provider) storageDirsOn(ctx context.Context, h hostCommandRunner) []string {
-	vp := h
 	var dirs []string
 	if pol, err := p.imagePolicy(); err == nil {
 		dirs = append(dirs, pol.dirs...)
@@ -1124,7 +1116,7 @@ func (p *Provider) storageDirsOn(ctx context.Context, h hostCommandRunner) []str
 // storagePoolDir returns the target directory of storage pool pool on vp's
 // host (`virsh pool-dumpxml`, read structurally), or "" when it has none or
 // cannot be read.
-func storagePoolDir(ctx context.Context, vp hostCommandRunner, pool string) string {
+func storagePoolDir(ctx context.Context, vp *VirshProvider, pool string) string {
 	res, err := vp.runVirshCommand(ctx, "pool-dumpxml", pool)
 	if err != nil {
 		log.Printf("WARN Could not read storage pool %q: %v", pool, err)
@@ -2648,7 +2640,7 @@ func (p *Provider) SnapshotCreate(ctx context.Context, req contracts.SnapshotCre
 		NameHint:      req.NameHint,
 		Description:   req.Description,
 		IncludeMemory: req.IncludeMemory,
-	}, snapshotCreateOptions{seedRoots: p.seedRoots(), overlayDirs: p.storageDirsOn})
+	}, snapshotCreateOptions{seedRoots: p.seedRoots()})
 	if err != nil {
 		return contracts.SnapshotCreateResponse{}, err
 	}
@@ -2685,7 +2677,7 @@ func (p *Provider) SnapshotRevert(ctx context.Context, vm contracts.VMRef, snaps
 	if p.virshProvider == nil {
 		return "", contracts.NewRetryableError("virsh provider not initialized", nil)
 	}
-	if _, err := snapshotRevertOn(ctx, p.singleHostConn(), vm.ID, snapshotId, p.seedRoots(), p.storageDirsOn); err != nil {
+	if _, err := snapshotRevertOn(ctx, p.singleHostConn(), vm.ID, snapshotId, p.seedRoots()); err != nil {
 		return "", err
 	}
 	return "", nil
