@@ -58,15 +58,16 @@ revert of a snapshot of a VM with a cloud-init seed was reported `Succeeded` and
 VM unable to start (V6), and a clustered call that waited for another call's SSH dial was
 answered late, and sometimes as `Unknown` (V3c, follow-up to #432). **Nothing is
 breaking in the API and no CRD changed.** One change needs action if you use snapshot
-revert on libvirt: snapshots taken by rc6 or earlier, and disk-only snapshots taken while
-the VM was running, are now refused on revert, and a VM that an rc6 revert already broke
-needs the manual repair first (see [Upgrade order for rc7](#upgrade-order-for-rc7)). Both
+revert on libvirt: disk-only snapshots taken by rc6 or earlier of a VM with a cloud-init
+seed (or another CD-ROM or read-only disk with media), and disk-only snapshots taken while
+such a VM was running, are now refused on revert (a memory snapshot is not), and a VM that
+an rc6 revert already broke needs the manual repair first (see [Upgrade order for rc7](#upgrade-order-for-rc7)). Both
 fixes are in the libvirt provider, so that is what you roll.
 
 | PR | What changed | Breaking |
 |---|---|---|
-| #435 (V6) | libvirt: a disk-only snapshot of a powered-off VM is taken with its CD-ROMs and floppies ejected from the persistent definition and inserted again afterwards, so the snapshot can be reverted. `SnapshotRevert` refuses a snapshot libvirt cannot revert safely (`RevertFailed`, nothing changed), inserts the seed again after a revert, and reports a seed it cannot insert as `RevertFailed` instead of `Succeeded`. An interrupted ejection is repaired by the next snapshot create, revert, start or reboot. `SnapshotDelete` also removes the `<domain>-disk.<epoch>` overlay a revert makes | **Behaviour change**: snapshots taken by rc6 or earlier of a VM with a cloud-init seed, and disk-only snapshots of a running VM that has one, can no longer be reverted; powering on a libvirt VM issues one extra read and is refused while an ejected seed cannot be re-inserted |
-| #434 (V3c, follow-up) | Clustered libvirt: a call that waits for another call's SSH dial ends on its own bound (5 seconds before its deadline) and is answered `HOST_UNAVAILABLE` for a read; one dial at a time, holding no lock; the TCP connect stops after 30 seconds at the latest. The sentence that tells how to release a held delete starts with a capital letter | No (the message change is cosmetic) |
+| #435 (V6) | libvirt: a disk-only snapshot of a powered-off VM is taken with its CD-ROMs and floppies ejected from the persistent definition and inserted again afterwards, so the snapshot can be reverted. `SnapshotRevert` refuses a snapshot libvirt cannot revert safely (`RevertFailed`, nothing changed), inserts the VM's CD-ROMs and floppies (the seed included) again after a revert, and reports a medium it cannot insert as `RevertFailed` instead of `Succeeded`. An interrupted ejection is repaired by the next snapshot create, revert, start or reboot. `SnapshotDelete` also removes the `<domain>-disk.<epoch>` overlay a revert makes | **Behaviour change**: disk-only snapshots taken by rc6 or earlier of a VM with a cloud-init seed, and disk-only snapshots of a running VM that has one, can no longer be reverted; powering on a libvirt VM issues one extra read and is refused while an ejected seed cannot be re-inserted |
+| #434 (V3c, follow-up) | Clustered libvirt: a call that waits for another call's SSH dial ends on its own bound (5 seconds before its deadline, a quarter of the time left when that is shorter) and is answered `HOST_UNAVAILABLE` for a read; one dial at a time, holding no lock; the TCP connect stops after 30 seconds at the latest. The sentence that tells how to release a held delete starts with a capital letter | No (the message change is cosmetic) |
 
 ### libvirt: reverting a snapshot no longer breaks the VM's cloud-init CD-ROM (#435; V6)
 
@@ -94,8 +95,8 @@ AppArmor was affected.
   and earlier took of a VM with cloud-init, and any disk-only snapshot of such a VM taken while the
   VM was running: `SnapshotReverted=False/RevertFailed`, terminal, with a message to take
   a new snapshot with the VM powered off. Memory snapshots (internal) are not affected.
-  After a revert the provider inserts the seed again into the CD-ROM the revert left
-  empty; a seed it cannot insert, or a read-only disk libvirt moved anyway, is reported
+  After a revert the provider inserts the CD-ROMs and floppies the VM had before the
+  revert (the seed included) again into the drives the revert left empty; a medium it cannot insert, or a read-only disk libvirt moved anyway, is reported
   as `RevertFailed` instead of `Succeeded`.
 - **An interrupted ejection is repaired**: the next snapshot create or revert, or start or reboot, of the VM
   inserts the recorded file again, only when it is provably the VM's own cloud-init seed.
@@ -105,7 +106,7 @@ AppArmor was affected.
   with the same safety checks as before; VM delete removes the whole chain.
 
 **Behaviour changes.** On libvirt, take snapshots with the VM powered off to be able to
-revert to them. Snapshots taken by rc6 or earlier of a VM with a cloud-init seed can no
+revert to them. Disk-only snapshots taken by rc6 or earlier of a VM with a cloud-init seed can no
 longer be reverted: delete their `VMSnapshot`s and take new ones, with the VM powered
 off, after upgrading the libvirt provider. The same holds for a disk-only snapshot of a
 running VM that has a cloud-init seed or another read-only disk or CD-ROM with media. A
@@ -131,7 +132,7 @@ was dialing waited for that dial, and was answered `Unknown` ("failed to describ
 host ...") after 1m28s in the lab; a held `Delete` took 1m55s to answer
 `HOST_UNAVAILABLE`. Now one dial runs at a time and holds no lock; a call that needs
 the connection waits for the dial's result or for its own bound (5 seconds before its
-deadline, as in rc6), and a wait that ends on its bound is a host that stopped
+deadline, or a quarter of the time left when that is shorter, as in rc6), and a wait that ends on its bound is a host that stopped
 answering, answered by how far the call got (`Describe`: `HOST_UNAVAILABLE`). The TCP
 connect of a dial stops after 30 seconds at the latest, and a call cancelled during
 the SSH handshake ends it at once. The single-host provider is unchanged. See
@@ -167,14 +168,14 @@ templates, `config/rbac` and the proto did not change either). From rc6:
    fixes are in the provider). An older libvirt provider behind the new manager still
    works, with the rc6 behaviour: a revert of a disk-only snapshot of a VM with a seed
    is sent and bricks the VM again (V6), the refusal is not applied, and a clustered
-   call queued behind another call's dial can still wait up to the other call's
-   deadline. A newer provider behind an rc6 manager is safe: its refusal is a definite
+   call queued behind another call's dial can still wait for that whole dial (up to
+   the other call's deadline, or for minutes if it has none). A newer provider behind an rc6 manager is safe: its refusal is a definite
    `FailedPrecondition`, which the rc6 manager already ends as `RevertFailed`. The
    vSphere, Proxmox and mock providers have no functional change.
 5. **Snapshots.** After the libvirt providers roll, take new snapshots of the VMs you
    want to be able to revert, with the VM powered off, and delete the old ones. Until
-   you do, a revert to an old snapshot is refused with `RevertFailed` and nothing
-   changes.
+   you do, a revert to an old snapshot of a VM with a seed is refused with `RevertFailed`
+   and the revert changes nothing.
 
 From rc5, apply [Upgrade order for rc6](#upgrade-order-for-rc6) (the CRDs, the stale
 `revertToRef`, the manager) and then steps 4 and 5 above; from rc4, apply [Upgrade order
@@ -183,8 +184,8 @@ release](#upgrade-order-for-this-release): the seed directory on every libvirt h
 first); from rc1, also [Upgrade order for rc2](#upgrade-order-for-rc2).
 
 **Rollback.** Rolling a libvirt provider back to rc6 brings back V6 (a revert of a
-disk-only snapshot of a VM with a seed bricks it again) and the wait for another call's
-dial. A snapshot rc7 took has an empty CD-ROM in its stored definition, and an rc6
+disk-only snapshot of a VM with a seed bricks it again, on libvirt 9.9 or later with
+AppArmor) and the wait for another call's dial. A snapshot rc7 took has an empty CD-ROM in its stored definition, and an rc6
 provider does not insert the seed again after a revert to it, so the guest would boot
 without its cloud-init datasource. Rolling the manager back changes only a message.
 → [Rollback caveats](docs/upgrading.md#rollback-caveats)
@@ -1510,16 +1511,17 @@ The most useful things to exercise:
     guest image you used.
 - **New since rc6 (libvirt, single-host and clustered):**
   - **a revert to a snapshot taken with the VM powered off** (create the `VMSnapshot` with
-    the VM off, change something in the guest, keep `spec.powerState: Off`, name the
-    snapshot in `spec.snapshot.revertToRef`, then power it on): the revert ends
-    `Succeeded`, the guest boots, cloud-init reports `done` (`cloud-init status`), the
-    seed CD-ROM is back as the raw ISO (`virsh domblklist --details <domain>` shows the
-    `cloud-init.iso` of the seed directory with driver type `raw`), and there is no
-    `cloud-init.<digits>` or other `<file>.<epoch>` overlay in the seed directory;
+    the VM off, power it on, change something in the guest, set `spec.powerState: Off`,
+    name the snapshot in `spec.snapshot.revertToRef`, then power it on again): the revert
+    ends `Succeeded`, the guest boots, cloud-init reports `done` (`cloud-init status`),
+    the seed CD-ROM is back on the raw ISO (`virsh domblklist --details <domain>` shows
+    the `cloud-init.iso` of the seed directory, and `virsh dumpxml <domain>` shows
+    `<driver ... type='raw'/>` for it), and there is no `cloud-init.<digits>` or other
+    `<file>.<epoch>` overlay in the seed directory;
   - **the refusal:** a revert to a snapshot taken by rc6, and to a disk-only snapshot of a
     running VM that has a seed, ends `SnapshotReverted=False/RevertFailed` with the
-    message to take a new snapshot with the VM powered off, and nothing on the host
-    changes (the domain definition and the disks are as before);
+    message to take a new snapshot with the VM powered off, and the revert changes
+    nothing (only the repair of an interrupted ejection, if there is one, runs first);
   - **a memory snapshot of a seeded VM** (a running VM, `includeMemory: true`) and its
     revert: libvirt reverts it in place, without new overlays, and the seed stays where
     it was;
@@ -1529,7 +1531,8 @@ The most useful things to exercise:
     the calls recover when the host answers.
 - **New since rc5:**
   - **snapshot revert** (`spec.snapshot.revertToRef`; validated in the lab on vSphere
-    and Proxmox since rc6, and on libvirt not yet: see the rc7 items above): take a
+    and Proxmox since rc6; on libvirt it failed on rc6 (V6) and rc7's fix is not
+    validated yet: see the rc7 items above): take a
     `VMSnapshot`, change something in the guest, set `spec.powerState: Off`,
     name the snapshot, and check `status.snapshotRevert.phase`, the `SnapshotReverted`
     condition and that the guest is back. Try it on vSphere, on single-host and
@@ -1911,7 +1914,7 @@ host; and the paths named above that need a fault to trigger.
 check (all on libvirt, in the provider, except the last):
 
 - **A revert of a libvirt snapshot is refused (`SnapshotReverted=False/RevertFailed`,
-  terminal, nothing changed) when the snapshot stored a CD-ROM or read-only disk with
+  terminal, nothing changed but a repair of an interrupted ejection that may run first) when the snapshot stored a CD-ROM or read-only disk with
   media:** every snapshot rc6 or earlier took of a VM with a cloud-init seed, and any
   disk-only snapshot of a running VM that has a seed or another read-only disk. Take a new
   snapshot with the VM powered off (#435). A VM that an rc6 revert already broke needs the
