@@ -145,7 +145,7 @@ virsh)
       else : > "$d/blk-seen"; printf ' Type   Device   Target   Source\n------------------------------------------------\n file   disk     vda      ` + scdDiskPath + `\n'; fi ;;
     snapshot-create-as) fail snapshot-create-as; [ -f "$d/dom-$2.xml" ] || nodom "$2"; echo "Domain snapshot $3 created" ;;
     snapshot-delete) fail snapshot-delete; [ -f "$d/dom-$2.xml" ] || nodom "$2"; echo "Domain snapshot $3 deleted" ;;
-    snapshot-revert) fail snapshot-revert; [ -f "$d/dom-$2.xml" ] || nodom "$2"; if [ -f "$d/revert-rewrites" ]; then cp "$d/revert-rewrites" "$d/dom-$2.xml"; fi ;;
+    snapshot-revert) fail snapshot-revert; [ -f "$d/dom-$2.xml" ] || nodom "$2"; if [ -f "$d/revert-rewrites" ]; then cat "$d/revert-rewrites" > "$d/dom-$2.xml"; fi ;;
     snapshot-dumpxml)
       fail snapshot-dumpxml
       [ -f "$d/dom-$2.xml" ] || nodom "$2"
