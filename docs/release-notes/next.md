@@ -1,13 +1,14 @@
 <!--
-Draft release notes for VirtRigaud v0.4.0-rc6, the sixth release candidate for
+Draft release notes for VirtRigaud v0.4.0-rc7, the seventh release candidate for
 v0.4.0 (GA follows after a soak). v0.4.0-rc3 was tagged, but its release run was
 stopped by the image scan (CVE-2026-63209) and no rc3 release was published. rc1,
-rc2, rc4 and rc5 were published from earlier versions of this file; rc1 followed
+rc2, rc4, rc5 and rc6 were published from earlier versions of this file; rc1 followed
 v0.3.11. Paste everything below this comment into the GitHub pre-release. The notes
 are cumulative since v0.3.11: a user going from v0.3.11 needs all of them, while
-"Changes since v0.4.0-rc5" is the short list for someone already on rc5, "Changes
-since v0.4.0-rc4" the one for someone on rc4, "Changes since v0.4.0-rc2" the one for
-someone on rc2 and "Changes since v0.4.0-rc1" the one for someone on rc1. See docs/upgrading.md for the full upgrade guide these notes link to,
+"Changes since v0.4.0-rc6" is the short list for someone already on rc6, "Changes
+since v0.4.0-rc5" the one for someone on rc5, "Changes since v0.4.0-rc4" the one for
+someone on rc4, "Changes since v0.4.0-rc2" the one for someone on rc2 and "Changes
+since v0.4.0-rc1" the one for someone on rc1. See docs/upgrading.md for the full upgrade guide these notes link to,
 and CHANGELOG.md for the complete, dated changelog. The published release body is a
 trimmed version of this file (GitHub's limit is 125,000 characters): the preamble, the
 newest "Changes since" section, "About this release candidate", "Breaking changes",
@@ -15,7 +16,7 @@ newest "Changes since" section, "About this release candidate", "Breaking change
 re-title.
 -->
 
-This is **v0.4.0-rc6, a release candidate** (GA follows after a soak). It is a
+This is **v0.4.0-rc7, a release candidate** (GA follows after a soak). It is a
 security-hardening release: a full codebase security review found and fixed several
 cross-tenant and privilege-escalation issues in the vSphere and libvirt providers,
 cross-namespace clone/migration targets, and VM provider binding. rc2 added two waves
@@ -35,14 +36,18 @@ vCenter: `HostPool.status` was never written, `spec.snapshot.revertToRef` was ac
 and ignored (it now reverts the VM), a clustered host that stopped answering was
 reported inconsistently and a delete held for it did not say so, a VM held by a
 clustered restore guard showed `Failed`, and `spec.disks` on libvirt and Proxmox was
-silently dropped. **Several fixes are breaking
+silently dropped. rc7 adds a sixth, on top of rc6: two fixes found by validating rc6 on
+real libvirt 10.0 hosts, single-host and a two-host clustered Provider. Reverting a
+snapshot of a VM with a cloud-init seed left the VM unable to start while the revert was
+reported `Succeeded` (V6), and a clustered call that waited for another call's SSH dial
+was answered late and sometimes as `Unknown` (V3c, follow-up). **Several fixes are breaking
 or change default behavior.** Read the upgrade guide before upgrading:
 **[Upgrading from v0.3.11](docs/upgrading.md)**.
 
-The notes below are cumulative since v0.3.11. If you are already on v0.4.0-rc5, read
-"Changes since v0.4.0-rc5" first; on v0.4.0-rc4, read it and then "Changes since
-v0.4.0-rc4"; on v0.4.0-rc2, also "Changes since v0.4.0-rc2"; on v0.4.0-rc1, also
-"Changes since v0.4.0-rc1".
+The notes below are cumulative since v0.3.11. If you are already on v0.4.0-rc6, read
+"Changes since v0.4.0-rc6" first; on v0.4.0-rc5, read it and then "Changes since
+v0.4.0-rc5"; on v0.4.0-rc4, also "Changes since v0.4.0-rc4"; on v0.4.0-rc2, also
+"Changes since v0.4.0-rc2"; on v0.4.0-rc1, also "Changes since v0.4.0-rc1".
 
 ## Changes since v0.4.0-rc6
 
