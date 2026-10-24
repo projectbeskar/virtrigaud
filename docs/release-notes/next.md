@@ -164,6 +164,25 @@ read the first reachable address instead. The next reconcile of each VM rewrites
   address unless the QEMU guest agent runs in the guest: libvirt holds no DHCP lease for it.
   Details in [`docs/vm-status-ips.md`](docs/vm-status-ips.md).
 
+### libvirt: a NAT guest without the guest agent shows its DHCP lease (V10)
+
+Found while checking V9 in the lab. A pre-existing bug: on libvirt's NAT `default` network,
+a guest that did not run the QEMU guest agent never showed an address in `status.ips`,
+although `virsh domifaddr --source lease` listed it. The provider kept only the rows of
+`virsh domifaddr` whose interface name starts with `e` (a guest interface such as `eth0`),
+and the `lease` and `arp` sources name their rows after the NIC's host-side device
+(`vnet194`), so every lease and ARP row was dropped. Now every row counts and the
+address, not the name, decides what is kept (the V9 rules; the prefix length, `/24` from
+`lease` and `/0` from `arp`, is removed). The order of the sources is unchanged: the
+agent, then the lease, then the ARP table, and the first with an address wins.
+
+- A guest with several NICs shows the addresses of all of them, including the second
+  address of a NIC, which `virsh` prints on a row whose name is `-` and which was skipped.
+- The name filter is gone for the agent source too: a guest interface that does not start
+  with `e` (`br0`, `docker0`) is no longer dropped by name; only the address rules apply.
+- On a host bridge there is still no lease. The address shows if the guest agent runs, or,
+  as a last resort, if the host has an ARP entry for the guest's MAC.
+
 ## Changes since v0.4.0-rc6
 
 Two pull requests, #435 and #434, both merged 2026-10-24. They fix what validating rc6

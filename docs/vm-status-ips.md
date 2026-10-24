@@ -65,35 +65,46 @@ Where the manager also writes the field (VM adoption), the same filter applies.
 
 ### libvirt
 
-The provider asks for addresses in two steps (`getDomainIPAddresses` in
-`internal/providers/libvirt/virsh.go` and `describeOn` in
+The provider asks for addresses in two steps (`getDomainIPAddresses` and
+`parseDomifaddr` in `internal/providers/libvirt/virsh.go`, `describeOn` in
 `internal/providers/libvirt/provider_virsh.go`).
 
 1. `virsh domifaddr <domain> --source agent`, then `--source lease` (libvirt's DHCP
-   leases) and `--source arp`, in that order. The first source that yields a row
-   ends the search. Only rows whose interface name starts with `e` (`eth0`,
-   `ens3`, `enp1s0`) are kept; `lo`, `127.0.0.1`, `::1` and `fe80:` rows are skipped.
+   leases) and `--source arp` (the host's ARP table entries for the domain's MAC
+   addresses), in that order. The first source that yields a reachable address
+   ends the search, and a source that fails (no agent in the guest) is skipped.
+   Every row of the table counts, whatever its interface name: the agent names
+   rows after the guest's interfaces (`eth0`, `lo`), while `lease` and `arp` name
+   them after the NIC's host-side device (`vnet7`); a NIC with several addresses
+   prints the others on rows whose name is `-`. The prefix length (`/24`, and
+   `/0` from `arp`) is removed, and the rules above decide by address what is
+   kept, so `lo` and link-local addresses never show.
 2. While the domain is running, the provider also queries the guest agent
    (`guest-network-get-interfaces`, at most 16 interfaces and 16 addresses per
-   interface, bounded by a few seconds). If that yields an address, it **replaces**
-   the list from step 1. Its addresses are filtered with the rules above, which is
-   what removes loopback and link-local addresses the agent reports for `lo` and
-   for every interface.
+   interface, bounded by a few seconds). If that yields a reachable address, it
+   **replaces** the list from step 1.
+
+Which network the guest is on decides what is visible without the guest agent:
+
+- **libvirt's NAT `default` network (or any libvirt-managed network):** libvirt runs
+  the DHCP server, so the DHCP lease is shown without the agent. A guest with
+  several NICs on such networks shows the lease of each.
+- **A host bridge (`VMNetworkAttachment` `spec.network.libvirt.bridge`):** the guest
+  gets a `<interface type='bridge'>` and the LAN's DHCP server answers, not
+  libvirt, so there is **no lease**. The address is shown if the QEMU guest agent
+  runs in the guest. Without it, `status.ips` is empty unless the host happens to
+  have an ARP entry for the guest's MAC address (the `arp` source, a last resort
+  that depends on recent traffic between the host and the guest).
+- **No network attachment at all:** the VM gets a user-mode (`type='user'`)
+  interface; libvirt holds no lease for it either, so it needs the agent too.
 
 So the QEMU guest agent is the source that works on every network type. The
-default cloud-init the provider injects starts `qemu-guest-agent`
-(see the README); an image or a `spec.userData` that does not install and start it
+default cloud-init the provider injects installs and starts `qemu-guest-agent`
+(see the README), and the provider adds the agent channel to every domain it
+defines; an image or a `spec.userData` that does not install and start the agent
 has none.
 
-**A guest on a bridge shows no address unless the guest agent runs in the guest.**
-A VM attached through a `VMNetworkAttachment` with `spec.network.libvirt.bridge`
-gets a `<interface type='bridge'>`. libvirt does not run the DHCP server on a
-host bridge (the LAN's does), so it holds no lease for the guest and `--source
-lease` has nothing to report. A VM created with no network attachment at all gets a user-mode
-(`type='user'`) interface, which has no libvirt lease either. In both cases a guest
-without a running agent has an empty `status.ips`, although it may well have an
-address; install and start `qemu-guest-agent` in the guest (the cloud-init
-package `qemu-guest-agent`, the service `qemu-guest-agent`).
-
-The guest agent also needs the VM's agent channel, which the provider adds to every
-domain it defines.
+Up to v0.4.0-rc7 the rows of the `lease` and `arp` sources were all dropped
+(the provider kept only rows whose interface name started with `e`, and these
+sources name the rows `vnetN`), so a guest on the NAT `default` network without the
+guest agent showed no address even though libvirt had its lease.

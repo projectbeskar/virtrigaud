@@ -33,6 +33,30 @@ Validating v0.4.0-rc7 on real libvirt 10.0 hosts (AppArmor, a shared NFS pool us
 - [ ] Config change only
 - [ ] Documentation only
 
+## [2026-10-24 17:30] - A NAT guest without the guest agent shows its DHCP lease in status.ips (V10)
+**Author:** @wrkode (William Rizzo)
+
+### Fixed
+- `internal/providers/libvirt/virsh.go`: `getDomainIPAddresses` kept only the rows of `virsh domifaddr` whose interface name started with `e`. That fits the agent source (guest interface names) but the `lease` and `arp` sources name rows after the NIC's host-side device (`vnetN`), so every lease and ARP row was dropped and a guest on libvirt's NAT `default` network without the QEMU guest agent had an empty `status.ips` while libvirt held its lease. The parsing is now `parseDomifaddr`: every row counts, the prefix length (`/24`, `/0` for `arp`) is removed, and `contracts.RoutableIPs` decides by address (V9 rules) instead of the interface name. The order of the sources (agent, lease, arp) and first-source-wins are unchanged. Also fixed: the second address of a NIC, printed by virsh on a row whose name is `-`, was skipped, so a multi-address NIC lost addresses.
+
+### Changed
+- `internal/providers/libvirt/virsh.go`: the interface-name filter is gone for the agent source too (`br0`, `docker0` in the guest are no longer dropped by name); the address rules apply. Behaviour change: the `arp` source now yields addresses, so a guest on a host bridge without the agent shows one if the host has an ARP entry for its MAC (before, such rows were dropped).
+- `docs/vm-status-ips.md`, `docs/upgrading.md`, `docs/release-notes/next.md` ("V10"): NAT shows the lease without the agent, a host bridge has no lease so the agent is needed, the ARP last resort.
+
+### Tests
+- `internal/providers/libvirt/virsh_domifaddr_test.go`: `parseDomifaddr` on the real libvirt 10.0 output shapes (empty agent output, a `vnetN` lease row with `/24`, an `arp` row with `/0`, an agent answer with `lo` and `eth0`, two NICs with a continuation row, N/A and repeated rows), and `getDomainIPAddresses` against a stub `virsh` on `PATH`: NAT guest without the agent, a failing agent, agent first-wins, loopback-only agent falling through, multi-NIC lease, arp last resort, and the order of the sources asked.
+
+### Why
+V10, pre-existing: found while checking V9 in the lab, a NAT guest without the guest agent never showed an address although `virsh domifaddr --source lease` listed it.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
+Roll the libvirt provider.
+
 ## [2026-10-24 16:30] - `status.ips` lists only addresses a user can reach the VM on (V9)
 **Author:** @wrkode (William Rizzo)
 
