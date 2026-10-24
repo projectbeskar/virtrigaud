@@ -465,7 +465,7 @@ type snapshotDeleteStaleInternalError struct {
 
 // Error is the refusal, safe for the requesting VM's status (guidance first).
 func (e *snapshotDeleteStaleInternalError) Error() string {
-	return fmt.Sprintf("delete refused, nothing changed: power the VM off and delete it again (see the snapshot documentation); "+
+	return fmt.Sprintf("delete refused, nothing changed: power the VM off and delete it again; "+
 		"libvirt cannot delete snapshot %s while the VM runs on a disk file other than the one it is stored in",
 		quoteSnapshotName(e.snapshot))
 }
@@ -509,16 +509,23 @@ func quotedSnapshotNames(names []string) string {
 }
 
 // isStaleInternalSnapshotRefusal reports whether err is a virsh snapshot-delete
-// that ended with an exit status of its own and whose first "error:" line is
-// libvirt's refusal to delete an internal snapshot of a running domain whose
-// disk is no longer the file the snapshot was taken on
-// (staleInternalSnapshotMarker).
+// that ended with an exit status of its own and one of whose "error:" lines
+// is libvirt's refusal to delete an internal snapshot of a running domain
+// whose disk is no longer the file the snapshot was taken on
+// (staleInternalSnapshotMarker). virsh prints its own "error: Failed to delete
+// snapshot <name>" first and libvirt's error after it.
 func isStaleInternalSnapshotRefusal(err error) bool {
 	var ve *VirshError
 	if !errors.As(err, &ve) || ve.ExitCode <= 0 || ve.ExitCode >= 128 {
 		return false
 	}
-	return strings.Contains(firstErrorLine(ve.Stderr), staleInternalSnapshotMarker)
+	for _, l := range strings.Split(ve.Stderr, "\n") {
+		l = strings.ToLower(strings.TrimSpace(l))
+		if strings.HasPrefix(l, "error:") && strings.Contains(l, staleInternalSnapshotMarker) {
+			return true
+		}
+	}
+	return false
 }
 
 // staleInternalSnapshotGone reports whether the provider can prove that
