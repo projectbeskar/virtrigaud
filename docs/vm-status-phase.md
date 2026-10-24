@@ -52,7 +52,12 @@ First match wins:
    `Running` if `Ready=True`, else `Provisioning`.
 
 A transient provider error (`Ready=False/ProviderError`) on a VM that exists does
-not change the phase: it keeps the last observed power state. An unschedulable
+not change the phase: it keeps the last observed power state. Neither does a
+snapshot revert that is pending, running or failed (`Ready=False` with a reason of
+the `SnapshotReverted` condition, such as `WaitingForPowerOff`, `Reverting` or
+`RevertFailed`; see [`vm-snapshot-revert.md`](vm-snapshot-revert.md)): the phase
+follows the power state, so a VM whose revert runs (it is off) shows `Stopped`, and one
+that waits to be powered off shows `Running`. An unschedulable
 clustered VM stays `Pending`. The target VM of a migration into a clustered Provider
 that waits for its import (`Provisioning=False/WaitingForImport`) has a pending host,
 so it shows `Provisioning`; one held as `MigrationNotFound` is not (re)placed, so it

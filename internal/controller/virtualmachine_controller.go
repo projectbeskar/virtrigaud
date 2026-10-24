@@ -376,6 +376,7 @@ func (r *VirtualMachineReconciler) reconcileBoundProvider(
 // +kubebuilder:rbac:groups=infra.virtrigaud.io,resources=vmimages/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=infra.virtrigaud.io,resources=vmnetworkattachments,verbs=get;list;watch
 // +kubebuilder:rbac:groups=infra.virtrigaud.io,resources=vmmigrations,verbs=get;list;watch
+// +kubebuilder:rbac:groups=infra.virtrigaud.io,resources=vmsnapshots,verbs=get;list;watch
 // +kubebuilder:rbac:groups=infra.virtrigaud.io,resources=hostpools,verbs=get;list;watch
 // +kubebuilder:rbac:groups=infra.virtrigaud.io,resources=hosts,verbs=get;list;watch
 // +kubebuilder:rbac:groups=infra.virtrigaud.io,resources=vmplacementpolicies,verbs=get;list;watch
@@ -822,6 +823,18 @@ func (r *VirtualMachineReconciler) reconcileVM(ctx context.Context, vm *infravir
 	r.syncMemoryCeiling(ctx, vm, ref, desc)
 	r.syncRecordedCPU(ctx, vm, ref, desc)
 
+	// A snapshot revert spec.snapshot.revertToRef requests is sent only to a
+	// VM this Describe just reported powered off, at most once per request
+	// (virtualmachine_snapshot_revert.go). A revert task in flight holds every
+	// other change to the VM until it ends.
+	revertRes, revertHandled, err := r.reconcileSnapshotRevert(ctx, vm, providerInstance, provider, ref, desc)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if revertHandled {
+		return revertRes, nil
+	}
+
 	// Check desired power state
 	desiredPowerState := vm.Spec.PowerState
 	if desiredPowerState == "" {
@@ -928,7 +941,7 @@ func (r *VirtualMachineReconciler) reconcileVM(ctx context.Context, vm *infravir
 	}
 
 	// VM is ready
-	k8s.SetReadyCondition(&vm.Status.Conditions, metav1.ConditionTrue, k8s.ReasonReconcileSuccess, "VM is ready", vm.Generation)
+	setVMReady(vm)
 	k8s.SetProvisioningCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonReconcileSuccess, "VM provisioned", vm.Generation)
 	// A withheld disk growth stops being reported once the spec's sizes fit
 	// the limit again (lowered, or the limit raised): nothing would be
@@ -941,6 +954,9 @@ func (r *VirtualMachineReconciler) reconcileVM(ctx context.Context, vm *infravir
 	requeue := r.getRequeueInterval(vm, desc)
 	if recheckIn > 0 && recheckIn < requeue {
 		requeue = recheckIn
+	}
+	if revertRes.RequeueAfter > 0 && revertRes.RequeueAfter < requeue {
+		requeue = revertRes.RequeueAfter
 	}
 	return ctrl.Result{RequeueAfter: requeue}, nil
 }
@@ -2952,8 +2968,12 @@ func overrideImageWithPreparedLocation(
 }
 
 // updateStatus updates the VM status, with status.phase derived from the state
-// it carries (derivePhase), so the phase is the same whichever path wrote it.
+// it carries (derivePhase), so the phase is the same whichever path wrote it,
+// and Ready never True while a requested snapshot revert is pending, in flight
+// or failed (applySnapshotRevertReadiness).
 func (r *VirtualMachineReconciler) updateStatus(ctx context.Context, vm *infravirtrigaudiov1beta1.VirtualMachine) {
+	boundSnapshotRevertMessage(vm)
+	applySnapshotRevertReadiness(vm)
 	applyDerivedPhase(vm)
 	if err := r.Status().Update(ctx, vm); err != nil {
 		log.FromContext(ctx).Error(err, "Failed to update VirtualMachine status")
@@ -3102,7 +3122,7 @@ func (r *VirtualMachineReconciler) reconfigureVM(
 		// Reconfigure completed synchronously, update current resources
 		r.updateCurrentResources(vm, vmClass)
 		k8s.SetReconfiguringCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonReconcileSuccess, "VM reconfigured successfully", vm.Generation)
-		k8s.SetReadyCondition(&vm.Status.Conditions, metav1.ConditionTrue, k8s.ReasonReconcileSuccess, "VM is ready", vm.Generation)
+		setVMReady(vm)
 	}
 
 	r.updateStatus(ctx, vm)

@@ -270,9 +270,89 @@ type GPUConfig struct {
 
 // VMSnapshotOperation defines snapshot operations in VM spec
 type VMSnapshotOperation struct {
-	// RevertToRef specifies a snapshot to revert to
+	// RevertToRef names a VMSnapshot, in the VM's namespace, to revert the VM
+	// to. The snapshot must have been taken of this VM (its spec.vmRef and
+	// status.vmUID) and be Ready. The revert is sent only while the VM is
+	// powered off and spec.powerState is Off or OffGraceful: the controller
+	// never powers a VM off for a revert, and does not power it on afterwards
+	// (spec.powerState decides that). It is sent at most once per request:
+	// status.snapshotRevert records the outcome, and while the field stays set
+	// to the same VMSnapshot nothing is sent again (a GitOps re-apply is a
+	// no-op). To revert to the same snapshot again, remove the field, then set
+	// it again; naming another VMSnapshot (another UID) is a new request.
+	// The SnapshotReverted condition reports the progress.
 	// +optional
 	RevertToRef *LocalObjectReference `json:"revertToRef,omitempty"`
+}
+
+// SnapshotRevertPhase is the phase of the revert spec.snapshot.revertToRef
+// requests (status.snapshotRevert.phase).
+// +kubebuilder:validation:Enum=Pending;Reverting;Succeeded;Failed
+type SnapshotRevertPhase string
+
+const (
+	// SnapshotRevertPhasePending: the revert is requested but not sent; the
+	// SnapshotReverted condition's reason says what it waits for.
+	SnapshotRevertPhasePending SnapshotRevertPhase = "Pending"
+	// SnapshotRevertPhaseReverting: the revert was sent (recorded before the
+	// call) and its outcome is not known yet.
+	SnapshotRevertPhaseReverting SnapshotRevertPhase = "Reverting"
+	// SnapshotRevertPhaseSucceeded: the provider confirmed the revert.
+	SnapshotRevertPhaseSucceeded SnapshotRevertPhase = "Succeeded"
+	// SnapshotRevertPhaseFailed: the revert failed; it is not retried until
+	// spec.snapshot.revertToRef is removed and set again.
+	SnapshotRevertPhaseFailed SnapshotRevertPhase = "Failed"
+)
+
+// SnapshotRevertStatus records the revert spec.snapshot.revertToRef requests
+// (status.snapshotRevert). It is written only by the operator, and cleared
+// when spec.snapshot.revertToRef is removed.
+type SnapshotRevertStatus struct {
+	// SnapshotName is the VMSnapshot the revert is for (spec.snapshot.
+	// revertToRef.name when it was recorded).
+	// +kubebuilder:validation:MaxLength=253
+	SnapshotName string `json:"snapshotName"`
+
+	// SnapshotUID is the UID of that VMSnapshot. A VMSnapshot of the same
+	// name with another UID is a new request. Empty while the VMSnapshot was
+	// not found.
+	// +optional
+	// +kubebuilder:validation:MaxLength=128
+	SnapshotUID string `json:"snapshotUID,omitempty"`
+
+	// Phase is Pending, Reverting, Succeeded or Failed.
+	Phase SnapshotRevertPhase `json:"phase"`
+
+	// TaskRef is the provider task of a revert the provider runs
+	// asynchronously, polled until it completes.
+	// +optional
+	// +kubebuilder:validation:MaxLength=512
+	TaskRef string `json:"taskRef,omitempty"`
+
+	// Attempts counts the SnapshotRevert calls sent for this request: more
+	// than one only when an earlier call's outcome was not known (a lost
+	// answer, a deadline) and the call was sent again on the powered-off VM.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	Attempts int32 `json:"attempts,omitempty"`
+
+	// RequestedAt is when the operator first recorded this request.
+	// +optional
+	RequestedAt *metav1.Time `json:"requestedAt,omitempty"`
+
+	// AttemptTime is when the last SnapshotRevert call was recorded, just
+	// before it was sent.
+	// +optional
+	AttemptTime *metav1.Time `json:"attemptTime,omitempty"`
+
+	// CompletionTime is when the revert succeeded or failed.
+	// +optional
+	CompletionTime *metav1.Time `json:"completionTime,omitempty"`
+
+	// Message says what the revert waits for, or how it ended.
+	// +optional
+	// +kubebuilder:validation:MaxLength=1024
+	Message string `json:"message,omitempty"`
 }
 
 // VirtualMachineStatus defines the observed state of VirtualMachine.
@@ -373,6 +453,14 @@ type VirtualMachineStatus struct {
 	// administrator clearing this field through the status subresource.
 	// +optional
 	BoundProvider *BoundProviderRef `json:"boundProvider,omitempty"`
+
+	// SnapshotRevert records the revert spec.snapshot.revertToRef requests:
+	// the VMSnapshot it is for (name and UID), its phase and outcome. While
+	// it records Succeeded or Failed for the VMSnapshot the field names,
+	// nothing is sent again. Cleared when spec.snapshot.revertToRef is
+	// removed. Written only by the operator.
+	// +optional
+	SnapshotRevert *SnapshotRevertStatus `json:"snapshotRevert,omitempty"`
 }
 
 // BoundProviderRef identifies the Provider object a VirtualMachine is bound
@@ -791,6 +879,40 @@ const (
 	VirtualMachineConditionReconfiguring = "Reconfiguring"
 	// VirtualMachineConditionDeleting indicates whether the VM is being deleted
 	VirtualMachineConditionDeleting = "Deleting"
+	// VirtualMachineConditionSnapshotReverted reports the revert
+	// spec.snapshot.revertToRef requests: True (reason Reverted) once the
+	// provider confirmed it, False with the reason it waits or failed
+	// otherwise. Absent while spec.snapshot.revertToRef is unset. While it is
+	// False, Ready is False with the same reason.
+	VirtualMachineConditionSnapshotReverted = "SnapshotReverted"
+)
+
+// SnapshotReverted condition reasons.
+const (
+	// SnapshotRevertReasonWaitingForPowerOff: the VM is not powered off, or
+	// spec.powerState is On; set spec.powerState: Off.
+	SnapshotRevertReasonWaitingForPowerOff = "WaitingForPowerOff"
+	// SnapshotRevertReasonSnapshotNotFound: no VMSnapshot of that name in the
+	// VM's namespace.
+	SnapshotRevertReasonSnapshotNotFound = "SnapshotNotFound"
+	// SnapshotRevertReasonSnapshotNotReady: the VMSnapshot is not Ready, has
+	// no provider snapshot id, or is being deleted.
+	SnapshotRevertReasonSnapshotNotReady = "SnapshotNotReady"
+	// SnapshotRevertReasonSnapshotForAnotherVM: the VMSnapshot was not taken
+	// of this VM (another spec.vmRef, another VM UID or Provider), or that
+	// cannot be proven.
+	SnapshotRevertReasonSnapshotForAnotherVM = "SnapshotForAnotherVM"
+	// SnapshotRevertReasonUnsupported: the Provider reports no snapshot
+	// support, or does not implement SnapshotRevert.
+	SnapshotRevertReasonUnsupported = VMSnapshotReasonUnsupported
+	// SnapshotRevertReasonReverting: the revert was sent and its outcome is
+	// not known yet.
+	SnapshotRevertReasonReverting = "Reverting"
+	// SnapshotRevertReasonReverted: the provider confirmed the revert.
+	SnapshotRevertReasonReverted = "Reverted"
+	// SnapshotRevertReasonRevertFailed: the provider refused or failed the
+	// revert; remove spec.snapshot.revertToRef and set it again to retry.
+	SnapshotRevertReasonRevertFailed = "RevertFailed"
 )
 
 //+kubebuilder:object:root=true

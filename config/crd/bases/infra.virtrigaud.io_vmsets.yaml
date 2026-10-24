@@ -694,8 +694,18 @@ spec:
                         description: Snapshot defines snapshot-related operations
                         properties:
                           revertToRef:
-                            description: RevertToRef specifies a snapshot to revert
-                              to
+                            description: |-
+                              RevertToRef names a VMSnapshot, in the VM's namespace, to revert the VM
+                              to. The snapshot must have been taken of this VM (its spec.vmRef and
+                              status.vmUID) and be Ready. The revert is sent only while the VM is
+                              powered off and spec.powerState is Off or OffGraceful: the controller
+                              never powers a VM off for a revert, and does not power it on afterwards
+                              (spec.powerState decides that). It is sent at most once per request:
+                              status.snapshotRevert records the outcome, and while the field stays set
+                              to the same VMSnapshot nothing is sent again (a GitOps re-apply is a
+                              no-op). To revert to the same snapshot again, remove the field, then set
+                              it again; naming another VMSnapshot (another UID) is a new request.
+                              The SnapshotReverted condition reports the progress.
                             properties:
                               name:
                                 description: Name of the referenced object

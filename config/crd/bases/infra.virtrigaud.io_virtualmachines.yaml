@@ -575,7 +575,18 @@ spec:
                 description: Snapshot defines snapshot-related operations
                 properties:
                   revertToRef:
-                    description: RevertToRef specifies a snapshot to revert to
+                    description: |-
+                      RevertToRef names a VMSnapshot, in the VM's namespace, to revert the VM
+                      to. The snapshot must have been taken of this VM (its spec.vmRef and
+                      status.vmUID) and be Ready. The revert is sent only while the VM is
+                      powered off and spec.powerState is Off or OffGraceful: the controller
+                      never powers a VM off for a revert, and does not power it on afterwards
+                      (spec.powerState decides that). It is sent at most once per request:
+                      status.snapshotRevert records the outcome, and while the field stays set
+                      to the same VMSnapshot nothing is sent again (a GitOps re-apply is a
+                      no-op). To revert to the same snapshot again, remove the field, then set
+                      it again; naming another VMSnapshot (another UID) is a new request.
+                      The SnapshotReverted condition reports the progress.
                     properties:
                       name:
                         description: Name of the referenced object
@@ -953,6 +964,73 @@ spec:
               reconfigureTaskRef:
                 description: ReconfigureTaskRef tracks reconfiguration operations
                 type: string
+              snapshotRevert:
+                description: |-
+                  SnapshotRevert records the revert spec.snapshot.revertToRef requests:
+                  the VMSnapshot it is for (name and UID), its phase and outcome. While
+                  it records Succeeded or Failed for the VMSnapshot the field names,
+                  nothing is sent again. Cleared when spec.snapshot.revertToRef is
+                  removed. Written only by the operator.
+                properties:
+                  attemptTime:
+                    description: |-
+                      AttemptTime is when the last SnapshotRevert call was recorded, just
+                      before it was sent.
+                    format: date-time
+                    type: string
+                  attempts:
+                    description: |-
+                      Attempts counts the SnapshotRevert calls sent for this request: more
+                      than one only when an earlier call's outcome was not known (a lost
+                      answer, a deadline) and the call was sent again on the powered-off VM.
+                    format: int32
+                    minimum: 0
+                    type: integer
+                  completionTime:
+                    description: CompletionTime is when the revert succeeded or failed.
+                    format: date-time
+                    type: string
+                  message:
+                    description: Message says what the revert waits for, or how it
+                      ended.
+                    maxLength: 1024
+                    type: string
+                  phase:
+                    description: Phase is Pending, Reverting, Succeeded or Failed.
+                    enum:
+                    - Pending
+                    - Reverting
+                    - Succeeded
+                    - Failed
+                    type: string
+                  requestedAt:
+                    description: RequestedAt is when the operator first recorded this
+                      request.
+                    format: date-time
+                    type: string
+                  snapshotName:
+                    description: |-
+                      SnapshotName is the VMSnapshot the revert is for (spec.snapshot.
+                      revertToRef.name when it was recorded).
+                    maxLength: 253
+                    type: string
+                  snapshotUID:
+                    description: |-
+                      SnapshotUID is the UID of that VMSnapshot. A VMSnapshot of the same
+                      name with another UID is a new request. Empty while the VMSnapshot was
+                      not found.
+                    maxLength: 128
+                    type: string
+                  taskRef:
+                    description: |-
+                      TaskRef is the provider task of a revert the provider runs
+                      asynchronously, polled until it completes.
+                    maxLength: 512
+                    type: string
+                required:
+                - phase
+                - snapshotName
+                type: object
               snapshots:
                 description: Snapshots lists available snapshots for this VM
                 items:
