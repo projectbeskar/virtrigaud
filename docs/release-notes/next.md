@@ -1,14 +1,15 @@
 <!--
-Draft release notes for VirtRigaud v0.4.0-rc7, the seventh release candidate for
+Draft release notes for VirtRigaud v0.4.0-rc8, the eighth release candidate for
 v0.4.0 (GA follows after a soak). v0.4.0-rc3 was tagged, but its release run was
 stopped by the image scan (CVE-2026-63209) and no rc3 release was published. rc1,
-rc2, rc4, rc5 and rc6 were published from earlier versions of this file; rc1 followed
-v0.3.11. Paste everything below this comment into the GitHub pre-release. The notes
-are cumulative since v0.3.11: a user going from v0.3.11 needs all of them, while
-"Changes since v0.4.0-rc6" is the short list for someone already on rc6, "Changes
-since v0.4.0-rc5" the one for someone on rc5, "Changes since v0.4.0-rc4" the one for
-someone on rc4, "Changes since v0.4.0-rc2" the one for someone on rc2 and "Changes
-since v0.4.0-rc1" the one for someone on rc1. See docs/upgrading.md for the full upgrade guide these notes link to,
+rc2, rc4, rc5, rc6 and rc7 were published from earlier versions of this file; rc1
+followed v0.3.11. Paste everything below this comment into the GitHub pre-release. The
+notes are cumulative since v0.3.11: a user going from v0.3.11 needs all of them, while
+"Changes since v0.4.0-rc7" is the short list for someone already on rc7, "Changes
+since v0.4.0-rc6" the one for someone on rc6, "Changes since v0.4.0-rc5" the one for
+someone on rc5, "Changes since v0.4.0-rc4" the one for someone on rc4, "Changes since
+v0.4.0-rc2" the one for someone on rc2 and "Changes since v0.4.0-rc1" the one for
+someone on rc1. See docs/upgrading.md for the full upgrade guide these notes link to,
 and CHANGELOG.md for the complete, dated changelog. The published release body is a
 trimmed version of this file (GitHub's limit is 125,000 characters): the preamble, the
 newest "Changes since" section, "About this release candidate", "Breaking changes",
@@ -16,7 +17,7 @@ newest "Changes since" section, "About this release candidate", "Breaking change
 re-title.
 -->
 
-This is **v0.4.0-rc7, a release candidate** (GA follows after a soak). It is a
+This is **v0.4.0-rc8, a release candidate** (GA follows after a soak). It is a
 security-hardening release: a full codebase security review found and fixed several
 cross-tenant and privilege-escalation issues in the vSphere and libvirt providers,
 cross-namespace clone/migration targets, and VM provider binding. rc2 added two waves
@@ -40,33 +41,51 @@ silently dropped. rc7 adds a sixth, on top of rc6: two fixes found by validating
 real libvirt 10.0 hosts, single-host and a two-host clustered Provider. Reverting a
 snapshot of a VM with a cloud-init seed left the VM unable to start while the revert was
 reported `Succeeded` (V6), and a clustered call that waited for another call's SSH dial
-was answered late and sometimes as `Unknown` (V3c, follow-up). **Several fixes are breaking
+was answered late and sometimes as `Unknown` (V3c, follow-up). rc8 adds a seventh, on top
+of rc7: fixes found by validating rc7 on real libvirt 10.0 hosts and on a newly bridged lab
+network. After an offline snapshot or a revert, every other VM's snapshot, clone and
+delete on the same host was refused (V7); a snapshot create the provider had not
+performed ended in an operator hold (V8); a revert refused for good told you to retry it;
+`status.ips` listed loopback and link-local addresses (V9); and a libvirt guest on the NAT
+network without the guest agent never showed its address (V10). **Several fixes are breaking
 or change default behavior.** Read the upgrade guide before upgrading:
 **[Upgrading from v0.3.11](docs/upgrading.md)**.
 
-The notes below are cumulative since v0.3.11. If you are already on v0.4.0-rc6, read
-"Changes since v0.4.0-rc6" first; on v0.4.0-rc5, read it and then "Changes since
-v0.4.0-rc5"; on v0.4.0-rc4, also "Changes since v0.4.0-rc4"; on v0.4.0-rc2, also
-"Changes since v0.4.0-rc2"; on v0.4.0-rc1, also "Changes since v0.4.0-rc1".
+The notes below are cumulative since v0.3.11. If you are already on v0.4.0-rc7, read
+"Changes since v0.4.0-rc7" first; on v0.4.0-rc6, read it and then "Changes since
+v0.4.0-rc6"; on v0.4.0-rc5, also "Changes since v0.4.0-rc5"; on v0.4.0-rc4, also "Changes
+since v0.4.0-rc4"; on v0.4.0-rc2, also "Changes since v0.4.0-rc2"; on v0.4.0-rc1, also
+"Changes since v0.4.0-rc1".
 
 ## Changes since v0.4.0-rc7
 
-These fix what validating rc7 on real libvirt 10.0 hosts found (Ubuntu 24.04, AppArmor; a
-shared NFS pool used by a single-host and a clustered Provider): after an offline
-snapshot or a revert, the snapshot, revert and delete of **other** VMs on the same host
-were answered "not performed" for good (V7); a routed snapshot create answered "not
-performed" ended in an operator hold (V8); and a revert refused for good told the user to
-retry. **Nothing is breaking and no CRD, RBAC, chart or proto changed.** Roll the manager
-(V8, the hint) and the libvirt providers (V7). On libvirt hosts, grant the existing
-`VR_DISK_READ` sudo rule over the pool directory if you have not (see below).
+Two pull requests, #437 and #438, both merged 2026-10-24. They fix what validating rc7 on
+real libvirt 10.0 hosts (Ubuntu 24.04, AppArmor; a shared NFS pool used by a single-host
+and a clustered Provider) and on a newly bridged lab network found (see [Validated in the
+lab since rc7](#about-this-release-candidate--what-to-test)): after an offline snapshot or
+a revert, the snapshot, revert and delete of **other** VMs on the same host were refused,
+every time, with "not performed ... (transient host error)" (V7); a routed snapshot create answered "not performed" ended in
+an operator hold (V8); a revert refused for good told the user to retry; `status.ips`
+listed loopback and link-local addresses (V9); and a libvirt guest on the NAT network
+without the QEMU guest agent never showed its DHCP lease (V10). **Nothing is breaking in
+the API, and no CRD schema, RBAC, chart or proto changed** (the only CRD difference is the
+description text of `status.ips`; see [Upgrade order for rc8](#upgrade-order-for-rc8)).
+Behaviour changes to know about: a held create becomes a backoff (V8), `status.ips` has
+fewer entries on every provider (V9), and a NAT guest now shows its lease (V10). **One
+change needs action on libvirt hosts that lack it:** the provider's SSH user needs the
+existing `VR_DISK_READ` sudo rule over the pool directory (or the overlays repaired by
+hand) to read libvirt's `0600` snapshot overlays; where it cannot read one, the check still
+refuses, now with a message that says why and where the fix is. Roll the manager (V8, the revert hint, V9) and the libvirt providers (V7, V9, V10).
 
-| Finding | What changed | Breaking |
+| PR | What changed | Breaking |
 |---|---|---|
-| V7 | libvirt: the disk in-use check no longer opens, as the SSH user, a shut-off VM's backing store that its disk's chain already read; a check that cannot read an image says "permission denied" and where the fix is documented | No. The single-host command sequences are those of rc7 |
-| V8 | Manager: a `VMSnapshot` create that a clustered Provider answers it did not perform is retried as a new attempt with an exponential backoff (1 minute, doubling, up to 10 minutes) instead of ending in `SnapshotOutcomeUnknown` | No |
-| Revert hint | Manager: a revert the provider refuses for good no longer ends with "remove `spec.snapshot.revertToRef` and set it again to retry" | No (message only) |
+| #437 (V7) | libvirt: the disk in-use check no longer opens, as the SSH user, a shut-off VM's backing store that its disk's chain already read; a check that cannot read an image answers "permission denied reading a disk image" and points to the fix, still `Unavailable` + `VM_DISK_CHECK_FAILED` (retried, fail-closed) | No. Operator action: `VR_DISK_READ` over the pool directory on every libvirt host |
+| #437 (V8) | Manager: a `VMSnapshot` create that a clustered Provider answers it did not perform is retried as a new attempt with an exponential backoff (1 minute, doubling, up to 10 minutes) instead of ending in `SnapshotOutcomeUnknown` | No. Behaviour change: no operator hold for these answers |
+| #437 (revert hint) | Manager: a revert the provider refuses for good (`FailedPrecondition`, other than a disk another VM depends on) no longer ends with "remove `spec.snapshot.revertToRef` and set it again to retry" | No (message only) |
+| #438 (V9) | `status.ips` lists only addresses a user can reach the VM on, for every provider: the manager drops loopback, unspecified, link-local and multicast addresses, entries that are not an IP address and duplicates; the libvirt provider applies the same rule to the guest agent's answer | **Behaviour change** for anything that parses `status.ips` |
+| #438 (V10) | libvirt: `virsh domifaddr` rows of the `lease` and `arp` sources are no longer dropped by interface name, so a NAT guest without the guest agent shows its DHCP lease; a NIC's second address is no longer skipped | No. Behaviour change: addresses that were missing now show |
 
-### libvirt: other VMs' disk checks no longer fail on a snapshot overlay (V7)
+### libvirt: other VMs' disk checks no longer fail on a snapshot overlay (#437; V7)
 
 Found by validating rc7. libvirt creates the overlay of a disk-only snapshot
 (`<pool dir>/<domain>-disk.<snapshot>`) and the new overlay of a revert
@@ -97,8 +116,10 @@ the VM powered off, every snapshot and every revert left such a file.
   `0600`, owned by root while the VM is off. The check reads their metadata as root
   only through the existing `VR_DISK_READ` sudo rule.
 
-**Action.** Grant the provider's SSH user `VR_DISK_READ` over the pool directory (and
-every other directory VM disks live in): see
+**Action, on a host where the provider's SSH user cannot already read the overlays.**
+The check reads each overlay that is a disk of a domain itself (not only the nested ones
+above), as root through `VR_DISK_READ` or else as the SSH user. Grant the provider's SSH
+user `VR_DISK_READ` over the pool directory (and every other directory VM disks live in): see
 [Unreadable disk images](docs/libvirt-clones.md#unreadable-disk-images). On an NFS pool,
 root reads only when the export does not squash root; such an export must be dedicated
 to the Provider's hosts. Where the rule cannot be granted, the same section describes
@@ -107,7 +128,7 @@ every new snapshot or revert needs again.
 
 → [`docs/libvirt-clones.md`](docs/libvirt-clones.md#unreadable-disk-images)
 
-### A snapshot create the provider did not perform is retried, not held (V8)
+### A snapshot create the provider did not perform is retried, not held (#437; V8)
 
 Found by validating rc7. A clustered `SnapshotCreate` answered `Unavailable` + "not
 performed" (above: `VM_DISK_CHECK_FAILED`) went down the routed retry path but kept its
@@ -129,7 +150,7 @@ re-send count and the hold, as before. Roll the manager.
 
 → [`docs/provider-call-outcomes.md`](docs/provider-call-outcomes.md)
 
-### A revert refused for good no longer says "set it again to retry"
+### A revert refused for good no longer says "set it again to retry" (#437)
 
 A revert the provider answers with `FailedPrecondition` (on libvirt: a snapshot taken
 while the VM ran or by an earlier release, which libvirt cannot revert safely, or a
@@ -141,7 +162,7 @@ VM depends on the disk (`VM_DISK_IN_USE`) and any other failure keep the retry h
 
 → [`docs/vm-snapshot-revert.md`](docs/vm-snapshot-revert.md#libvirt)
 
-### `status.ips` lists only addresses a user can reach the VM on (V9)
+### `status.ips` lists only addresses a user can reach the VM on (#438; V9)
 
 Found by validating rc7 in the lab: on a libvirt VM with a running QEMU guest agent,
 `status.ips` listed every address of every guest interface, loopback and IPv6
@@ -156,15 +177,18 @@ unique-local and global addresses stay. The example above now reads `["192.0.2.3
 A script that took `status.ips[0]`, or looked for a loopback or link-local entry, must
 read the first reachable address instead. The next reconcile of each VM rewrites the field.
 
-- The libvirt provider applies the same rule to the guest agent's answer, so
-  `primary_ip` in `status.provider` is no longer `127.0.0.1`, and an agent that reports
-  only unreachable addresses falls back to the `virsh domifaddr` list.
+- The libvirt provider applies the same rule to the guest agent's answer, so (with the new
+  provider) `primary_ip` in `status.provider` is no longer `127.0.0.1`, and an agent that
+  reports only unreachable addresses falls back to the `virsh domifaddr` list.
+- The same rule applies to the addresses copied into a `VirtualMachine` that a
+  `VMAdoption` adopts, and an address that is dropped no longer counts as "has an IP" for
+  the IP-discovery metric or the "waiting for an IP" poll interval.
 - No CRD schema change; only the description of `status.ips` in the CRD changed.
 - A libvirt guest on a bridge (`VMNetworkAttachment` `spec.network.libvirt.bridge`) shows no
   address unless the QEMU guest agent runs in the guest: libvirt holds no DHCP lease for it.
   Details in [`docs/vm-status-ips.md`](docs/vm-status-ips.md).
 
-### libvirt: a NAT guest without the guest agent shows its DHCP lease (V10)
+### libvirt: a NAT guest without the guest agent shows its DHCP lease (#438; V10)
 
 Found while checking V9 in the lab. A pre-existing bug: on libvirt's NAT `default` network,
 a guest that did not run the QEMU guest agent never showed an address in `status.ips`,
@@ -182,6 +206,57 @@ agent, then the lease, then the ARP table, and the first with an address wins.
   with `e` (`br0`, `docker0`) is no longer dropped by name; only the address rules apply.
 - On a host bridge there is still no lease. The address shows if the guest agent runs, or,
   as a last resort, if the host has an ARP entry for the guest's MAC.
+
+### Upgrade order for rc8
+
+**No CRD schema changed since rc7** (checked: the difference between the rc7 commit and
+this release under `config/crd/bases` is one hunk, the description text of
+`VirtualMachine.status.ips`; the chart's CRDs under `charts/virtrigaud/crds` are generated
+from the same Go types, and the chart templates, `config/rbac` and the proto did not
+change). From rc7:
+
+1. **CRDs.** Apply them as usual ([docs/upgrading.md](docs/upgrading.md)): only the
+   description of `status.ips` changes, so nothing depends on this step happening before
+   or after the others.
+2. **On every libvirt host: make the overlays readable by the provider** (the one operator
+   action in this release; skip it where the provider's SSH user already reads
+   libvirt's `0600` snapshot overlays). Grant the SSH user the existing `VR_DISK_READ`
+   sudo rule over the pool directory, and every other directory VM disks live in, as
+   described in [Unreadable disk
+   images](docs/libvirt-clones.md#unreadable-disk-images); on an NFS pool, root reads only
+   when the export does not squash root. Where the rule cannot be granted, repair the
+   overlays by hand (`chown -h libvirt-qemu:kvm` and `chmod 0640`, with the VM off, from
+   the same section), which every new snapshot or revert needs again. Check the grant with
+   `sudo -l -U <ssh user> /usr/bin/qemu-img info -U -f qcow2 --output=json -- <file>`.
+3. **The manager.** It carries V8 (the backoff), the revert hint and V9 (the `status.ips`
+   filter). It rolls with the chart as usual. An rc7 manager behind rc8 providers is safe:
+   the new provider's answers are the same codes with a different message, but a routed
+   snapshot create the provider did not perform still ends in the operator hold (V8) and
+   `status.ips` is not filtered for vSphere and Proxmox. An rc8 manager behind rc7
+   providers works, with the rc7 behaviour of V7 and V10 and, for
+   V9, a `status.ips` the manager already filters (a libvirt `primary_ip` in
+   `status.provider` can still read `127.0.0.1`).
+4. **The libvirt providers** (every libvirt Provider, single-host and clustered). They
+   carry V7 (the guard no longer re-probes a nested backing store), the clearer
+   "permission denied" answer, V10 (lease and ARP rows) and V9's filter of the guest
+   agent's addresses. An older libvirt provider behind the new manager still works with
+   its old behaviour: other VMs' snapshot, clone and delete are still refused after an
+   offline snapshot or a revert (V7, with the vague "transient host error" message), and a
+   NAT guest without the guest agent still shows no address (V10). The vSphere, Proxmox and
+   mock providers have no change.
+
+From rc6, apply [Upgrade order for rc7](#upgrade-order-for-rc7) first (the repair of VMs an
+rc6 revert broke, then the libvirt providers); from rc5, [Upgrade order for
+rc6](#upgrade-order-for-rc6) first; from rc4, [Upgrade order for
+rc5](#upgrade-order-for-rc5); from rc2, rc4's order ([Upgrade order for this
+release](#upgrade-order-for-this-release): the seed directory on every libvirt host
+first); from rc1, also [Upgrade order for rc2](#upgrade-order-for-rc2).
+
+**Rollback.** Rolling the manager back to rc7 brings back the operator hold of V8 (ten
+re-sends, then `SnapshotOutcomeUnknown`), the "set it again to retry" hint and the
+unfiltered `status.ips`. Rolling a libvirt provider back to rc7 brings back V7 and V10.
+rc8 writes no new record or file format, so nothing needs converting.
+→ [Rollback caveats](docs/upgrading.md#rollback-caveats)
 
 ## Changes since v0.4.0-rc6
 
