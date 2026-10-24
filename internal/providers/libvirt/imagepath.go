@@ -897,12 +897,18 @@ func backingChainFiles(ctx context.Context, h hostCommandRunner, disk, format st
 	if err != nil {
 		return nil, err
 	}
+	return chainLevelFiles(levels), nil
+}
+
+// chainLevelFiles flattens a walked chain (walkBackingChainFrom) into every
+// host file it consists of: each level's path, then the files it references.
+func chainLevelFiles(levels []backingLevel) []string {
 	var refs []string
 	for _, l := range levels {
 		refs = append(refs, l.path)
 		refs = append(refs, l.refs...)
 	}
-	return refs, nil
+	return refs
 }
 
 // backingLevel is one image of a backing chain (walkBackingChainFrom): its path
@@ -1303,20 +1309,58 @@ func domainRefsOnHostBounded(ctx context.Context, h hostCommandRunner, skipUUID 
 	}
 
 	// Each disk's chain is walked from the format its definition names (a raw
-	// disk not at all): the scan never probes a guest-written image.
+	// disk not at all): the scan never probes a guest-written image. The
+	// top-level disks go first (formats names each of them); a source nested
+	// in a <backingStore> of a shut-off domain's definition — libvirt keeps
+	// one there after an offline external snapshot or a revert — has no entry
+	// in formats and would be probed, as the SSH user only. It is not walked
+	// again when a top-level walk already read it as a level of its chain
+	// (in the format its parent's header names, through sudo when allowed):
+	// that walk read it and everything below it, and the probe would only
+	// fail on an image the SSH user cannot read (a 0600 overlay libvirt
+	// created) — failing every guarded operation on the host (V7). below
+	// holds, for every image a walk read, the files of its chain from that
+	// image down: what a nested source that is not walked again references.
 	type chainKey struct{ disk, format string }
 	chains := map[chainKey][]string{}
+	below := map[string][]string{}
+	walk := func(disk, format string) error {
+		key := chainKey{disk, format}
+		if _, walked := chains[key]; walked {
+			return nil
+		}
+		levels, err := walkBackingChainFrom(ctx, h, disk, format)
+		if err != nil {
+			return err
+		}
+		chains[key] = chainLevelFiles(levels)
+		for i, l := range levels {
+			if _, seen := below[l.path]; !seen {
+				below[l.path] = chainLevelFiles(levels[i:])
+			}
+		}
+		return nil
+	}
 	for _, d := range doms {
 		for _, disk := range d.disks {
-			key := chainKey{disk, d.formats[disk]}
-			if _, walked := chains[key]; walked {
+			if _, top := d.formats[disk]; top {
+				if err := walk(disk, d.formats[disk]); err != nil {
+					return nil, err
+				}
+			}
+		}
+	}
+	for _, d := range doms {
+		for _, disk := range d.disks {
+			if _, top := d.formats[disk]; top {
 				continue
 			}
-			chain, err := backingChainFiles(ctx, h, disk, key.format)
-			if err != nil {
+			if _, read := below[disk]; read {
+				continue
+			}
+			if err := walk(disk, ""); err != nil {
 				return nil, err
 			}
-			chains[key] = chain
 		}
 	}
 
@@ -1329,7 +1373,12 @@ func domainRefsOnHostBounded(ctx context.Context, h hostCommandRunner, skipUUID 
 		start := len(all)
 		all = append(all, d.files...)
 		for _, disk := range d.disks {
-			all = append(all, chains[chainKey{disk, d.formats[disk]}]...)
+			if chain, walked := chains[chainKey{disk, d.formats[disk]}]; walked {
+				all = append(all, chain...)
+				continue
+			}
+			// A nested source read as part of a top-level disk's chain.
+			all = append(all, below[disk]...)
 		}
 		spans[i].files = [2]int{start, len(all)}
 	}
