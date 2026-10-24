@@ -361,8 +361,9 @@ the following once after upgrading, and delete only what no `VMMigration` in fli
    - **Clustered libvirt: roll the provider after the manager for a host that stops
      answering.** A new provider ends its waits on a host that does not answer before the
      call's deadline and names the host in its `HOST_UNAVAILABLE` answers. An older
-     provider behind the new manager is safe: a held delete's message then names no host,
-     and a `Describe` to such a host can still end with `ProviderError` after 30 seconds.
+     provider behind the new manager is safe: a delete held because its host was
+     unreachable before anything ran then names no host in its message (a host lost
+     during the delete is still named), and a `Describe` to such a host can still end with `ProviderError` after 30 seconds.
    - **Clustered libvirt: roll the provider right after the manager (ADR-0007
      A6.2).** The new manager creates a clustered VM only after an
      owner-filtered `ListVMs` through a provider that reports

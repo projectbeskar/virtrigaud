@@ -55,8 +55,8 @@ clustered host that stopped answering and was reported two ways, with a held del
 that did not say why (V3a, V3c), a VM held by a restore guard that showed `Failed`
 (V3b), and `spec.disks` on libvirt and Proxmox that was dropped without a word (V4).
 **Nothing is breaking.** Four changes are behaviour changes you may alert on (marked
-below). Two CRDs change (`VirtualMachine` gains `status.snapshotRevert`; `HostPool`
-gains printer columns) and the manager's role gains `hostpools/status`, so the CRDs go
+below). Three CRDs change (`VirtualMachine` gains `status.snapshotRevert`; `HostPool`
+gains printer columns; `VMSet` only a description) and the manager's role gains `hostpools/status`, so the CRDs go
 first (see [Upgrade order for rc6](#upgrade-order-for-rc6)).
 
 | PR | What changed | Breaking |
@@ -232,10 +232,11 @@ only has the `revertToRef` description of its template. No spec field changed. F
    every pool's status on its first reconcile of the pool.
 4. **The providers.** Only the clustered libvirt provider changed (V3c). Roll it
    promptly after the manager, but nothing breaks in between: an older clustered
-   provider behind the new manager still works, the held-delete message then names no
-   host (the older provider does not send the host in its answer), and a `Describe` to
-   a host that stopped answering can still take the full 30 seconds and show
-   `ProviderError`. A newer provider behind an older manager is also safe. The vSphere,
+   provider behind the new manager still works. A delete held because its host was
+   unreachable before anything ran then names no host (the older provider does not send
+   the host in its `HOST_UNAVAILABLE` answer; a host lost during the delete is still
+   named), and a `Describe` to a host that stopped answering can still take the full 30
+   seconds and show `ProviderError`. A newer provider behind an older manager is also safe. The vSphere,
    Proxmox, mock and single-host libvirt providers have no functional change, and the
    revert uses the `SnapshotRevert` call they already implement.
 
@@ -2597,8 +2598,9 @@ says so. Each links to the page that documents it in full, where one exists.
 - **`spec.disks` is reported on libvirt and Proxmox, but only in some places.** The
   `DisksApplied=False` condition and the `Warning` event are always there. The
   admission warning is given only where the `VirtualMachine` validating webhook is
-  rendered, which the chart does only with `webhooks.enabled=true` **and**
-  `manager.maxDiskSize` set; without a disk-size limit there is no admission warning.
+  rendered, which the chart does only with `webhooks.enabled=true` (and
+  `webhooks.validating.enabled`, on by default) **and** `manager.maxDiskSize` set;
+  without a disk-size limit there is no admission warning.
   vSphere attaches `spec.disks` at create but ignores an entry added after the VM was
   created, with no condition and no event (the provider logs it at `INFO`); nothing
   refuses either case
