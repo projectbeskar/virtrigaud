@@ -68,11 +68,72 @@ rationale, and phasing.
 | `spec.networks[]` | Named networks (bridge/VLAN/overlay) available in the pool. |
 | `spec.migration` | Default migration policy: `defaultLive` (default `true`), `defaultStorageMode` (`shared`\|`block_all`\|`block_inc`\|`stage_copy`, default `shared`), `requireTLS` (default `false`), and optional `bandwidthMbps` / `maxDowntimeMs` caps. |
 
-`status` aggregates member-host counts and readiness (`totalHosts`, `readyHosts`,
-`schedulableHosts`).
+`status` aggregates member-host counts and readiness — see
+[`HostPool.status`](#hostpoolstatus) below.
 
 VirtRigaud **consumes** pre-set-up storage and networking; it does not deploy
 them (ADR-0007 D6).
+
+### `HostPool.status`
+
+The **`HostPool` controller** (`internal/controller/hostpool_controller.go`)
+writes `HostPool.status` from the pool's **member Hosts**. A `Host` is a member
+when it is in the pool's namespace and its `spec.poolRef.name` is the pool's
+name (the [same-namespace model](#same-namespace-model-security)): a `Host` in
+another namespace that names a same-named pool is never counted.
+
+| `status` field | What it counts |
+|----------------|----------------|
+| `totalHosts` | Every member `Host`, including one being deleted (until it is gone). |
+| `readyHosts` | Member `Host`s whose `status.health` is `Ready`. |
+| `schedulableHosts` | Member `Host`s the scheduler can place a new VM on: `status.health` is `Ready`, `spec.schedulable` is `true`, the `Host` is not being deleted, and its `spec.providerRef` is the pool's `spec.providerRef`. This is the same per-host test the VirtualMachine controller and the scheduler apply before any per-VM check. |
+| `observedGeneration` | The pool `metadata.generation` the status was computed for. |
+| `conditions` | One `Ready` condition (below), which carries its own `observedGeneration`. |
+
+A count of `0` is written as `0`, not left out.
+
+The `Ready` condition:
+
+| `Ready` | Reason | When |
+|---------|--------|------|
+| `True` | `HostsAvailable` | `schedulableHosts` > 0. |
+| `False` | `NoMemberHosts` | No `Host` in the pool's namespace names the pool in `spec.poolRef`. |
+| `False` | `NoSchedulableHosts` | The pool has member `Host`s, but none is schedulable (all `NotReady` / `Unknown`, cordoned, being deleted, or fronted by another Provider). |
+
+The message states the counts (for example
+`1 of 2 member host(s) are schedulable (2 Ready)`); it never names a host, a
+host endpoint or a credential.
+
+`Ready=True` means at least one host passes the per-host test. It does not
+mean a given VM fits: free capacity, network labels and a `VMPlacementPolicy`
+are checked per VM (see the [First VM checklist](#first-vm-checklist)).
+
+**When it is written.** The pool is recounted when the pool is created or its
+spec changes, and when one of its member `Host`s is created or deleted, or
+changes `spec.poolRef`, `spec.providerRef`, `spec.schedulable`,
+`status.health`, or starts deleting. A `Host` that moves to another pool
+recounts both the pool it left and the pool it joined. A `Host` heartbeat that
+changes none of these (the 60 s `lastHeartbeatTime` / capacity refresh, see
+[Heartbeat cadence](#heartbeat-cadence)) does not trigger a recount, and a
+recount whose result equals the current status writes nothing. There is no
+periodic requeue. When the manager starts, it recounts every `HostPool`, so a
+pool created before this controller existed gets its status on the first start
+of an upgraded manager.
+
+The controller writes only the status subresource (`hostpools/status`) and
+reads `HostPool`s and `Host`s (`get`/`list`/`watch`). It never changes a
+`HostPool` or `Host` spec, and never writes a `Host`.
+
+```
+$ kubectl get hostpools
+NAME     STRATEGY   PROVIDER          TOTAL   READY   SCHEDULABLE   AGE
+pool-a   Spread     libvirt-cluster   2       2       1             3d
+pool-b   Spread     libvirt-cluster   0       0       0             1h
+```
+
+Here `pool-a` has two Ready member hosts, one of them cordoned
+(`spec.schedulable: false`), so `Ready=True/HostsAvailable`; `pool-b` has no
+member hosts, so `Ready=False/NoMemberHosts`.
 
 ## `Host` — one bare hypervisor host
 
@@ -256,7 +317,9 @@ run before the score and no candidate gets a foothold to explain why:
 2. **`Host.status.health == Ready` and `Host.spec.schedulable == true`** (the
    default). A `NotReady` or cordoned `Host` is filtered out before any label
    or capacity check runs — `kubectl get hosts` shows the `HEALTH` and
-   `SCHEDULABLE` columns.
+   `SCHEDULABLE` columns, and `kubectl get hostpools` shows how many of the
+   pool's hosts pass this test (`SCHEDULABLE`, see
+   [`HostPool.status`](#hostpoolstatus)).
 3. **A `net.virtrigaud.io/<network>: "true"` label on `Host.spec.labels` for
    every network the VM uses.** `<network>` is each `VMNetworkAttachment`'s
    `spec.network.libvirt.networkName`, or, when that is empty,

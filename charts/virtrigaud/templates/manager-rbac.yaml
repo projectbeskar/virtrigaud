@@ -121,12 +121,14 @@ rules:
   - patch
   - update
 # Host and HostPool are the clustered-provider inventory (ADR-0007 P1). The
-# provider_controller and host_controller READ them (get;list;watch): the
-# provider_controller renders a clustered Provider's host set into its projected
-# host-inventory Secret; the inventory-sync host_controller reconciles each Host
-# by calling the provider's GetHostInfo. Neither writes the Host/HostPool spec
-# (the admin authors them) — Host STATUS is written (see hosts/status below),
-# and the host_controller's in-use finalizer is the one metadata write (below).
+# provider_controller, host_controller and hostpool_controller READ them
+# (get;list;watch): the provider_controller renders a clustered Provider's host
+# set into its projected host-inventory Secret; the inventory-sync
+# host_controller reconciles each Host by calling the provider's GetHostInfo;
+# the hostpool_controller counts each pool's member Hosts. None writes the
+# Host/HostPool spec (the admin authors them) — Host and HostPool STATUS are
+# written (see hosts/status and hostpools/status below), and the
+# host_controller's in-use finalizer is the one metadata write (below).
 - apiGroups:
   - infra.virtrigaud.io
   resources:
@@ -173,6 +175,17 @@ rules:
   - infra.virtrigaud.io
   resources:
   - hosts/status
+  verbs:
+  - get
+  - patch
+  - update
+# hostpools/status: the hostpool_controller writes the member-host counts
+# (totalHosts / readyHosts / schedulableHosts) and the Ready condition into
+# HostPool.status. Status subresource only — never the HostPool spec.
+- apiGroups:
+  - infra.virtrigaud.io
+  resources:
+  - hostpools/status
   verbs:
   - get
   - patch
@@ -455,12 +468,14 @@ rules:
   - patch
   - update
 # Host and HostPool are the clustered-provider inventory (ADR-0007 P1). The
-# provider_controller and host_controller READ them (get;list;watch): the
-# provider_controller renders a clustered Provider's host set into its projected
-# host-inventory Secret; the inventory-sync host_controller reconciles each Host
-# by calling the provider's GetHostInfo. Neither writes the Host/HostPool spec
-# (the admin authors them) — Host STATUS is written (see hosts/status below),
-# and the host_controller's in-use finalizer is the one metadata write (below).
+# provider_controller, host_controller and hostpool_controller READ them
+# (get;list;watch): the provider_controller renders a clustered Provider's host
+# set into its projected host-inventory Secret; the inventory-sync
+# host_controller reconciles each Host by calling the provider's GetHostInfo;
+# the hostpool_controller counts each pool's member Hosts. None writes the
+# Host/HostPool spec (the admin authors them) — Host and HostPool STATUS are
+# written (see hosts/status and hostpools/status below), and the
+# host_controller's in-use finalizer is the one metadata write (below).
 - apiGroups:
   - infra.virtrigaud.io
   resources:
@@ -507,6 +522,17 @@ rules:
   - infra.virtrigaud.io
   resources:
   - hosts/status
+  verbs:
+  - get
+  - patch
+  - update
+# hostpools/status: the hostpool_controller writes the member-host counts
+# (totalHosts / readyHosts / schedulableHosts) and the Ready condition into
+# HostPool.status. Status subresource only — never the HostPool spec.
+- apiGroups:
+  - infra.virtrigaud.io
+  resources:
+  - hostpools/status
   verbs:
   - get
   - patch

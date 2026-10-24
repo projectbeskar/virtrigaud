@@ -37,6 +37,30 @@ The notes below are cumulative since v0.3.11. If you are already on v0.4.0-rc4, 
 "Changes since v0.4.0-rc4" first; on v0.4.0-rc2, read it and then "Changes since
 v0.4.0-rc2"; on v0.4.0-rc1, also "Changes since v0.4.0-rc1".
 
+## Changes since v0.4.0-rc5
+
+### `HostPool.status` is written (V1)
+
+`HostPool.status` (`totalHosts`, `readyHosts`, `schedulableHosts`,
+`observedGeneration`, `conditions`) was never written: every pool showed
+`status: null`, although the documentation said it aggregated its hosts. A new
+HostPool controller in the manager now counts each pool's member `Host`s (same
+namespace, `spec.poolRef` naming the pool) and sets a `Ready` condition: `True`
+(`HostsAvailable`) when at least one member host is schedulable, `False`
+(`NoMemberHosts` or `NoSchedulableHosts`) otherwise. A host counts as
+schedulable when it is `Ready`, `spec.schedulable` is `true`, it is not being
+deleted and its `spec.providerRef` is the pool's, the same per-host test the
+scheduler applies. The pool is recounted when a member host joins, leaves or
+changes health or schedulability, not on every host heartbeat, and an unchanged
+status is not written. `kubectl get hostpools` gains `TOTAL`, `READY` and
+`SCHEDULABLE` columns. See
+[`HostPool.status`](docs/clustered-provider-inventory.md#hostpoolstatus).
+
+Upgrade: apply the CRDs (the HostPool CRD gains the printer columns and
+updated field descriptions; its schema is unchanged) and roll the manager. The
+manager's role gains `hostpools/status` `get`/`patch`/`update` (the Helm chart
+and `config/rbac` both carry it). Nothing is breaking.
+
 ## Changes since v0.4.0-rc4
 
 Four pull requests, all merged 2026-10-23. Three of them fix what validating rc4 on a

@@ -522,6 +522,17 @@ func main() {
 		setupLog.Error(err, "unable to create controller", "controller", "Host")
 		os.Exit(1)
 	}
+
+	// Register HostPool controller (ADR-0007 D3): writes HostPool.status
+	// (totalHosts / readyHosts / schedulableHosts and the Ready condition) from
+	// the pool's member Hosts. Status-only; never writes a Host.
+	if err = (&controller.HostPoolReconciler{
+		Client: mgr.GetClient(),
+		Scheme: mgr.GetScheme(),
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "unable to create controller", "controller", "HostPool")
+		os.Exit(1)
+	}
 	//+kubebuilder:scaffold:builder
 
 	// Register the Provider validating webhook (ADR-0007 D2): reject
