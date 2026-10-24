@@ -36,6 +36,8 @@ import (
 
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/knownhosts"
+
+	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
 )
 
 const (
@@ -1164,83 +1166,76 @@ func (v *VirshProvider) getDomainNetworkInfo(ctx context.Context, domainName str
 	return info, nil
 }
 
-// getDomainIPAddresses attempts to get IP addresses via multiple sources
+// domifaddrSources are the `virsh domifaddr --source` values getDomainIPAddresses
+// asks, in order of preference; the first one that yields an address wins.
+//
+//  1. agent: the QEMU guest agent (most reliable; needs qemu-guest-agent in the
+//     guest, and works on every network type).
+//  2. lease: libvirt's DHCP leases. Only a libvirt-managed network (the NAT
+//     "default" network) has them; a guest on a host bridge has none, because
+//     the LAN's DHCP server hands out its address.
+//  3. arp: the host's ARP table entries for the domain's MACs.
+var domifaddrSources = []string{"agent", "lease", "arp"}
+
+// getDomainIPAddresses returns the domain's reachable IP addresses, comma
+// separated, from the first of domifaddrSources that has one (empty when none
+// does). The error is always nil: a source that fails (no agent in the guest,
+// say) is skipped.
 func (v *VirshProvider) getDomainIPAddresses(ctx context.Context, domainName string) (string, error) {
-	ips := []string{}
-
-	// Try multiple sources in order of preference:
-	// 1. Guest agent (most reliable, requires qemu-guest-agent installed)
-	// 2. DHCP lease (default, may be empty if network is bridged)
-	// 3. ARP table (fallback, may not work in all network configurations)
-
-	sources := []string{"agent", "lease", "arp"}
-
-	for _, source := range sources {
+	for _, source := range domifaddrSources {
 		var result *VirshResult
 		var err error
 
 		if source == "lease" {
-			// Default source, no need to specify
+			// The default source of domifaddr, no need to specify it.
 			result, err = v.runVirshCommand(ctx, "domifaddr", domainName)
 		} else {
 			result, err = v.runVirshCommand(ctx, "domifaddr", domainName, "--source", source)
 		}
-
 		if err != nil {
 			log.Printf("DEBUG Failed to get IPs from source '%s' for %s: %v", source, domainName, err)
 			continue
 		}
 
-		// Parse the output
-		lines := strings.Split(strings.TrimSpace(result.Stdout), "\n")
-		for i, line := range lines {
-			if i == 0 || strings.HasPrefix(line, "-") || strings.TrimSpace(line) == "" {
-				continue // Skip header lines and empty lines
-			}
-			parts := strings.Fields(line)
-			if len(parts) >= 4 {
-				// Format: Name MAC address Protocol Address
-				interfaceName := parts[0]
-				ip := parts[3]
-
-				// Skip loopback interface and invalid entries
-				if interfaceName == "lo" || interfaceName == "-" || ip == "N/A" || ip == "-" {
-					continue
-				}
-
-				// Remove CIDR notation if present (must be done before IP filtering)
-				if strings.Contains(ip, "/") {
-					ip = strings.Split(ip, "/")[0]
-				}
-
-				// Filter out unwanted IPs:
-				// - Loopback addresses (127.0.0.1, ::1)
-				// - IPv6 link-local addresses (fe80::)
-				if ip == "127.0.0.1" || ip == "::1" || strings.HasPrefix(ip, "fe80:") {
-					continue
-				}
-
-				// Only include IPs from interfaces starting with 'e' (eth*, ens*, enp*, etc.)
-				// This excludes docker, virbr, and other virtual interfaces
-				if strings.HasPrefix(interfaceName, "e") {
-					ips = append(ips, ip)
-				}
-			}
-		}
-
-		// If we found IPs from this source, stop trying other sources
-		if len(ips) > 0 {
+		// If we found IPs from this source, stop trying other sources.
+		if ips := parseDomifaddr(result.Stdout); len(ips) > 0 {
 			log.Printf("DEBUG Successfully retrieved %d IP(s) from source '%s' for %s", len(ips), source, domainName)
-			break
+			return strings.Join(ips, ","), nil
 		}
 	}
 
-	if len(ips) == 0 {
-		log.Printf("DEBUG No IP addresses found for domain %s from any source", domainName)
-		return "", nil
-	}
+	log.Printf("DEBUG No IP addresses found for domain %s from any source", domainName)
+	return "", nil
+}
 
-	return strings.Join(ips, ","), nil
+// parseDomifaddr returns the reachable addresses in the output of `virsh
+// domifaddr`, in the order virsh printed them.
+//
+// The output is a table of Name, MAC address, Protocol and Address columns. For
+// the agent source Name is the guest's interface name (eth0, lo); for the lease
+// and arp sources it is the host-side device of the NIC (vnetN). The name is
+// never used to decide anything: a NIC with several addresses prints the first
+// on a row of its own and the others on rows whose Name and MAC are "-", and
+// every row is an address of the domain. The Address column carries a prefix
+// length (192.0.2.5/24; the arp source prints /0), which is removed. Which
+// addresses are reachable is decided by contracts.RoutableIPs, by address:
+// loopback, link-local, multicast and unparsable entries (N/A, -) are dropped
+// and duplicates are removed.
+func parseDomifaddr(output string) []string {
+	var addrs []string
+	for _, line := range strings.Split(output, "\n") {
+		parts := strings.Fields(line)
+		// The separator line has one field, an empty table none.
+		if len(parts) < 4 {
+			continue
+		}
+		if parts[0] == "Name" && parts[1] == "MAC" {
+			continue // the header
+		}
+		addr, _, _ := strings.Cut(parts[3], "/")
+		addrs = append(addrs, addr)
+	}
+	return contracts.RoutableIPs(addrs)
 }
 
 // getDomainBlockStats retrieves storage device statistics
