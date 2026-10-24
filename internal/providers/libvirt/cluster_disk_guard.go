@@ -675,11 +675,17 @@ func (p *Provider) scanClusterDiskUse(ctx context.Context, s clusterScan) (clust
 				hosts[i], listFailureClass(errs[i]), errs[i])
 			failed = true
 			incomplete.unreachable = incomplete.unreachable || guardHostUnreachable(errs[i])
+			incomplete.unreadable = incomplete.unreadable || isUnreadableImage(errs[i])
 		default:
 			out.add(scans[i])
 		}
 	}
 	if failed {
+		if incomplete.unreadable {
+			log.Printf("ERROR cluster disk guard: a disk image on a host of the Provider cannot be read by the provider "+
+				"(permission denied; the image is named above). Give it the mode and owner of a VM disk, or allow the "+
+				"provider's sudo rule for its directory: see %s", unreadableImageDoc)
+		}
 		return out, incomplete
 	}
 	return out, nil
@@ -925,12 +931,16 @@ type clusterGuardIncompleteError struct {
 	// busy reports that the scan never started: the provider's scan slots
 	// (clusterGuardConcurrency) stayed taken for the call's whole budget.
 	busy bool
+	// unreadable reports that a host answered but a disk image on it cannot
+	// be read (unreadableImageError), and no host was unreachable.
+	unreadable bool
 }
 
 // with returns e for op of domain (a scan's answer, given to the operation
 // that asked for it).
 func (e *clusterGuardIncompleteError) with(op, domain string) *clusterGuardIncompleteError {
-	return &clusterGuardIncompleteError{op: op, domain: domain, unreachable: e.unreachable, busy: e.busy}
+	return &clusterGuardIncompleteError{op: op, domain: domain, unreachable: e.unreachable, busy: e.busy,
+		unreadable: e.unreadable}
 }
 
 // Error is the refusal, safe for the requesting VM's status.
@@ -942,6 +952,8 @@ func (e *clusterGuardIncompleteError) Error() string {
 	case e.busy:
 		return fmt.Sprintf("%s of libvirt domain %q not performed: the provider is busy with other cross-host disk checks "+
 			"and could not verify in time that no other domain uses the VM's disk file; it is retried", e.op, e.domain)
+	case e.unreadable:
+		return unreadableImageMessage(e.op, e.domain, "a host of this Provider")
 	}
 	return fmt.Sprintf("%s of libvirt domain %q not performed: could not verify on every host of this Provider that no other "+
 		"domain uses the VM's disk file (transient host error; details are in the provider log)", e.op, e.domain)

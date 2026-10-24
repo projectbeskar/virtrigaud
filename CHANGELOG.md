@@ -5,6 +5,34 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-10-24 18:00] - libvirt snapshot overlays no longer block other VMs' disk checks; a routed snapshot create that was not performed is retried with a backoff, not held (V7, V8)
+**Author:** @wrkode (William Rizzo)
+
+### Fixed
+- `internal/providers/libvirt/imagepath.go`: the disk in-use scan (`domainRefsOnHostBounded`) walked every `<source>` nested in a shut-off domain's `<backingStore>` again with no format, so it was probed as the SSH user only (`qemu-img info -U --output=json -- <file>`, no sudo, by design: a probed header may be a guest's forgery). libvirt keeps such nested backing stores after an offline external snapshot or a revert, and the overlays it creates are `0600`: the read failed with "Permission denied" and every guarded operation (snapshot create/revert/delete, delete; clustered create/clone) of every OTHER VM on the host was answered "not performed ... (transient host error)" for ever (V7, v0.4.0-rc7 lab). Top-level disks are now walked first; a nested source a walk already read as a level of its chain is not walked again (its sub-chain is taken from that walk); one no walk reached is still probed as the SSH user and fails closed. No read runs as root that did not before.
+- `internal/providers/libvirt/imagepath.go`, `disk_dependents.go`, `cluster_disk_guard.go`: a chain read that `qemu-img` answers "Permission denied" is an `unreadableImageError`; the single-host guard (`diskCheckFailedError`) and the cluster-wide guard (`clusterGuardIncompleteError`) then answer "... not performed: permission denied reading a disk image on its host / on a host of this Provider (see docs/libvirt-clones.md#unreadable-disk-images; the provider log names it) ...; retried" instead of the generic transient host error, and log the file and the fix. The answer names no image, host or other domain, and stays `Unavailable` + `VM_DISK_CHECK_FAILED` (fail-closed, retried, out of the circuit breaker).
+- `internal/controller/vmsnapshot_controller.go`, `vmsnapshot_request_marker.go`: a routed `SnapshotCreate` answered with a definite "not performed" (`contracts.IsNothingDone` and not `IsOutcomeUnknownRetry`: `VM_DISK_CHECK_FAILED`, `HOST_UNAVAILABLE`, `VM_OPERATION_FAILED` not performed, request not sent) kept its `SnapshotRequested` marker, so each retry counted as a re-send of an unknown outcome and after ten the `VMSnapshot` was held `Ready=False/SnapshotOutcomeUnknown` for an operator annotation (V8). It now closes the attempt (`routedCreateNotPerformed`: the marker is removed), sets `Ready=False/ProviderError` with `snapshotCreateNotPerformedMessage`, and is sent again as a new attempt with the same request token after an exponential backoff per VMSnapshot UID (`notPerformedBackoff`, reusing `unschedulableBackoff`: 1 minute doubling up to `snapshotNotPerformedRetryMax`, 10 minutes; a reconcile before the wait has passed sends nothing; any other answer resets it; in memory). Unknown outcomes keep the marker, the re-send cap and the hold.
+- `internal/controller/virtualmachine_snapshot_revert.go`: a revert the provider answers with `FailedPrecondition` (other than `VM_DISK_IN_USE`) no longer ends its `RevertFailed` message with "remove spec.snapshot.revertToRef and set it again to retry" (`snapshotRevertFailureHint`): the same revert is refused every time, and the provider's message says what to do (libvirt: take a new snapshot with the VM powered off).
+
+### Removed
+- `internal/providers/libvirt/overlay_perms.go` and the normalisation of a VM's own snapshot overlays after a snapshot or revert (`sudo -n chown -h` / `sudo -n chmod g+r`), with its `VR_OVERLAY_MODE` sudo rule, before release (revert of 414c5ef0, security review of #437): the rule's `[^/ ]+` also matches `.`, `..` and symbolic links and a root `chmod` follows links; the stat-then-chown/chmod sequence races in sticky directories; the on-by-default sudo attempts add policy-violation noise to auth.log; and it widened kvm-group read of live guest data. The single-host snapshot command-sequence golden is back to its rc7 sequences.
+
+### Changed
+- `docs/libvirt-clones.md`: new "Unreadable disk images" troubleshooting section (symptom, cause: libvirt's `0600` snapshot and revert overlays; fix: grant the existing `VR_DISK_READ` rule over the pool directory; an NFS pool export that does not squash root must be dedicated to the Provider's hosts; the manual `chown -h` / `chmod 0640` repair as an alternative); nested backing stores in "How the dependency is found"; snapshot overlays under "Clone files on the host". `docs/vm-snapshot-revert.md`: overlay permissions; the retry hint is not appended to a `FailedPrecondition` refusal. `docs/provider-call-outcomes.md`: a routed `VMSnapshot` create answered "not performed" closes its attempt and backs off. `docs/release-notes/next.md`: "Changes since v0.4.0-rc7".
+
+### Added
+- `internal/providers/libvirt/overlay_perms_test.go`: the lab's nested-chain scan no longer probes the root-only overlay (fails on the previous code), an uncovered nested source is still probed and fails closed, the single-host, routed and cluster-wide guard answers for an unreadable image (wire-safe, retryable, `VM_DISK_CHECK_FAILED`).
+- `internal/controller/vmsnapshot_request_marker_test.go`, `internal/transport/grpc/client_definite_outcome_test.go`, `internal/controller/virtualmachine_snapshot_revert_test.go`: a routed create answered not performed is retried as a new attempt past the re-send cap and never held; its backoff grows 1, 2, 4, 8, 10, 10 minutes, paces reconciles in between and is reset by any other answer; unknown outcomes keep the marker and the hold; the transport's mapping of the routed answers; the revert hint only where a retry can help.
+
+### Why
+Validating v0.4.0-rc7 on real libvirt 10.0 hosts (AppArmor, a shared NFS pool used by a single-host and a clustered Provider): with rc7's advice to snapshot powered-off VMs, every offline snapshot and every revert left a `0600` overlay that made every other VM's snapshot, revert and delete on the host fail for good, and the resulting "not performed" answers exhausted a `VMSnapshot` into an operator hold.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-10-24 15:00] - Release notes for v0.4.0-rc7
 **Author:** @wrkode (William Rizzo)
 

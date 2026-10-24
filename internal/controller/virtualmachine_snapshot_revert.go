@@ -21,6 +21,8 @@ import (
 	"fmt"
 	"time"
 
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -582,8 +584,24 @@ func (r *VirtualMachineReconciler) snapshotRevertCallFailed(ctx context.Context,
 	default:
 		logger.Error(err, "SnapshotRevert failed")
 		return r.failSnapshotRevert(ctx, vm, infravirtrigaudiov1beta1.SnapshotRevertReasonRevertFailed, fmt.Sprintf(
-			"revert to VMSnapshot %s failed: %s; %s", rec.SnapshotName, detail, snapshotRevertRetryHint))
+			"revert to VMSnapshot %s failed: %s%s", rec.SnapshotName, detail, snapshotRevertFailureHint(err)))
 	}
+}
+
+// snapshotRevertFailureHint ends the message of a revert the provider
+// answered with a definite failure: the retry hint when sending the same
+// revert again can help, and nothing for a provider's FailedPrecondition
+// (other than a disk another VM depends on, which a retry can pass once that
+// VM is gone). Such an answer is a refusal the same revert always gets (the
+// libvirt provider refuses a snapshot it cannot revert safely: take a new
+// one), or a revert that happened but left something to repair; either way
+// the provider's own message says what to do, and "set it again to retry"
+// would only repeat it.
+func snapshotRevertFailureHint(err error) string {
+	if st, ok := status.FromError(err); ok && st.Code() == codes.FailedPrecondition && !contracts.IsVMDiskInUse(err) {
+		return ""
+	}
+	return "; " + snapshotRevertRetryHint
 }
 
 // pollSnapshotRevertTask polls the revert task recorded in

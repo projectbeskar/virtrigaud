@@ -18,6 +18,9 @@ package controller
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"slices"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -228,6 +231,150 @@ func TestVMSnapshotRequest_RoutedResendsAreCapped(t *testing.T) {
 	_, got = reconcileSnapshotOnce(t, r, snap)
 	require.Len(t, rec.creates, 1)
 	assert.Equal(t, snapshotRoutedResendMax-1, requestResends(requestMarker(got.Status.Conditions, snapshotConditionRequested)))
+}
+
+// routedNotPerformedAnswers are the transport's forms (mapGRPCError) of a
+// routed SnapshotCreate the provider answered it did not perform.
+func routedNotPerformedAnswers() map[string]error {
+	rpc := errors.New("rpc error")
+	return map[string]error{
+		// The lab's V8 answer: the disk in-use check could not run.
+		"VM_DISK_CHECK_FAILED": contracts.NewRetryableError(`create snapshot: failed to create snapshot: snapshot create of `+
+			`libvirt domain "web" not performed: could not verify that no other domain uses its disks`,
+			fmt.Errorf("%w: %w", contracts.ErrVMDiskCheckFailed, rpc)),
+		"HOST_UNAVAILABLE": contracts.NewHostUnavailableError("create snapshot: host unavailable", rpc),
+		"VM_OPERATION_FAILED not performed": contracts.NewRetryableError("create snapshot: not performed",
+			fmt.Errorf("%w: %w", contracts.ErrOperationNotPerformed, rpc)),
+		"request not sent": contracts.NewRetryableError("create snapshot: dial", fmt.Errorf("%w: %w", contracts.ErrRequestNotSent, rpc)),
+	}
+}
+
+// TestVMSnapshotRequest_RoutedNotPerformedClosesTheAttempt (V8): a routed
+// create the provider answers it did NOT perform is recorded as such — the
+// attempt is closed (marker removed), the create is retried after a backoff
+// as a new attempt — however often it is answered so, and is never held for
+// an operator as an unknown outcome. The re-send carries the same request
+// token.
+func TestVMSnapshotRequest_RoutedNotPerformedClosesTheAttempt(t *testing.T) {
+	for name, answer := range routedNotPerformedAnswers() {
+		t.Run(name, func(t *testing.T) {
+			r, rec, snap := markerSnapshotFixture(t, true, &statusWriteFaults{})
+			// An earlier attempt one re-send short of the cap.
+			presetSnapshotMarker(t, r, snap, snapshotRoutedResendMax-1, time.Hour)
+			rec.createErr = answer
+			for i := 1; i <= snapshotRoutedResendMax+2; i++ {
+				expireNotPerformedBackoff(r, snap)
+				res, got := reconcileSnapshotOnce(t, r, snap)
+				require.Len(t, rec.creates, i, "sent again once its backoff has passed: a new attempt")
+				assert.False(t, snapshotRequested(got), "the attempt is closed")
+				assert.Empty(t, got.Status.Phase)
+				assert.GreaterOrEqual(t, res.RequeueAfter, requestMarkerRecheckInterval, "retried after a backoff")
+				ready := meta.FindStatusCondition(got.Status.Conditions, infrav1beta1.VMSnapshotConditionReady)
+				require.NotNil(t, ready)
+				assert.NotEqual(t, snapshotReasonOutcomeUnknown, ready.Reason, "never held for an operator")
+				assert.Equal(t, snapshotCreateNotPerformedMessage, ready.Message)
+			}
+			for _, c := range rec.creates {
+				assert.Equal(t, "uid-snap-c", c.RequestToken)
+			}
+
+			// Once the provider performs it, the snapshot is Ready.
+			rec.createErr = nil
+			expireNotPerformedBackoff(r, snap)
+			_, got := reconcileSnapshotOnce(t, r, snap)
+			assert.Equal(t, infrav1beta1.SnapshotPhaseReady, got.Status.Phase)
+		})
+	}
+}
+
+// expireNotPerformedBackoff ends the current wait of snap's not-performed
+// backoff, keeping its count of consecutive answers: the next reconcile
+// sends the create as if the wait had passed.
+func expireNotPerformedBackoff(r *VMSnapshotReconciler, snap *infrav1beta1.VMSnapshot) {
+	b := &r.notPerformedBackoff
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if e, ok := b.entries[string(snap.UID)]; ok {
+		e.until = time.Time{}
+	}
+}
+
+// TestVMSnapshotRequest_RoutedNotPerformedBacksOff (V8 security review): the
+// re-sends of a routed create the provider keeps answering it did not perform
+// back off exponentially (1 minute, doubling, capped at 10 minutes), and a
+// reconcile triggered before the wait has passed sends nothing. Any other
+// answer resets the backoff.
+func TestVMSnapshotRequest_RoutedNotPerformedBacksOff(t *testing.T) {
+	r, rec, snap := markerSnapshotFixture(t, true, &statusWriteFaults{})
+	rec.createErr = routedNotPerformedAnswers()["VM_DISK_CHECK_FAILED"]
+	want := []time.Duration{time.Minute, 2 * time.Minute, 4 * time.Minute, 8 * time.Minute,
+		snapshotNotPerformedRetryMax, snapshotNotPerformedRetryMax}
+	for i, w := range want {
+		expireNotPerformedBackoff(r, snap)
+		res, _ := reconcileSnapshotOnce(t, r, snap)
+		require.Len(t, rec.creates, i+1)
+		assert.Equal(t, w, res.RequeueAfter, "answer %d", i+1)
+
+		// An event before the wait has passed sends nothing.
+		res, _ = reconcileSnapshotOnce(t, r, snap)
+		require.Len(t, rec.creates, i+1, "paced: not sent before its backoff passed")
+		assert.Positive(t, res.RequeueAfter)
+		assert.LessOrEqual(t, res.RequeueAfter, w)
+	}
+
+	// An unknown outcome resets the backoff and is handled as before (marker
+	// kept, re-sent at the marker's one-minute pacing).
+	rec.createErr = contracts.NewRetryableError("create snapshot: unavailable", nil)
+	expireNotPerformedBackoff(r, snap)
+	_, got := reconcileSnapshotOnce(t, r, snap)
+	require.Len(t, rec.creates, len(want)+1)
+	assert.True(t, snapshotRequested(got), "an unknown outcome keeps its marker")
+	assert.Zero(t, r.notPerformedBackoff.remaining(string(snap.UID), time.Now()), "reset")
+
+	// A not-performed answer after it starts again at one minute.
+	rec.createErr = routedNotPerformedAnswers()["HOST_UNAVAILABLE"]
+	// The marker's own pacing has passed: replace it with one an hour old.
+	got.Status.Conditions = slices.DeleteFunc(got.Status.Conditions,
+		func(c metav1.Condition) bool { return c.Type == snapshotConditionRequested })
+	require.NoError(t, r.Status().Update(context.Background(), got))
+	presetSnapshotMarker(t, r, snap, 1, time.Hour)
+	res, _ := reconcileSnapshotOnce(t, r, snap)
+	require.Len(t, rec.creates, len(want)+2)
+	assert.Equal(t, time.Minute, res.RequeueAfter)
+}
+
+// TestVMSnapshotRequest_RoutedUnknownOutcomeKeepsTheMarker: an answer that
+// leaves the outcome unknown (OUTCOME_UNKNOWN_RETRY: the host stopped
+// answering after the snapshot command was sent; a bare Unavailable) keeps
+// the marker and counts the re-send, so the cap still holds it for an
+// operator.
+func TestVMSnapshotRequest_RoutedUnknownOutcomeKeepsTheMarker(t *testing.T) {
+	for name, answer := range map[string]error{
+		"OUTCOME_UNKNOWN_RETRY": contracts.NewRetryableError("create snapshot: outcome unknown: retry",
+			fmt.Errorf("%w: %w", contracts.ErrOutcomeUnknownRetry, contracts.ErrOperationNotPerformed)),
+		"bare Unavailable": contracts.NewRetryableError("create snapshot: unavailable", nil),
+	} {
+		t.Run(name, func(t *testing.T) {
+			r, rec, snap := markerSnapshotFixture(t, true, &statusWriteFaults{})
+			presetSnapshotMarker(t, r, snap, snapshotRoutedResendMax-1, time.Hour)
+			rec.createErr = answer
+			_, got := reconcileSnapshotOnce(t, r, snap)
+			require.Len(t, rec.creates, 1)
+			require.True(t, snapshotRequested(got), "the outcome is unknown: the marker stays")
+			assert.Equal(t, snapshotRoutedResendMax, requestResends(requestMarker(got.Status.Conditions, snapshotConditionRequested)))
+			ready := meta.FindStatusCondition(got.Status.Conditions, infrav1beta1.VMSnapshotConditionReady)
+			require.NotNil(t, ready)
+			assert.Equal(t, snapshotCreateRetryingMessage, ready.Message)
+
+			// The next reconcile (once paced) reaches the cap: held.
+			presetSnapshotMarker(t, r, snap, snapshotRoutedResendMax, time.Hour)
+			_, got = reconcileSnapshotOnce(t, r, snap)
+			require.Len(t, rec.creates, 1, "not sent again")
+			ready = meta.FindStatusCondition(got.Status.Conditions, infrav1beta1.VMSnapshotConditionReady)
+			require.NotNil(t, ready)
+			assert.Equal(t, snapshotReasonOutcomeUnknown, ready.Reason)
+		})
+	}
 }
 
 // TestVMSnapshotRequest_UndecidableIsRetriedQuietly (review L7): a marker

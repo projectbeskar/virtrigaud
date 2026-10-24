@@ -44,7 +44,9 @@ import (
 // carries the marker (resolveSnapshotRequest) therefore had a create sent
 // whose outcome was never recorded — lost to a restart, or the create failed
 // without a definite answer (a deadline, a dropped connection; a definite
-// failure fails the snapshot and removes the marker):
+// failure fails the snapshot and removes the marker; a routed create the
+// provider answers it did not perform removes it too, and is retried as a new
+// attempt after a backoff: routedCreateNotPerformed):
 //
 //   - through a clustered (routed) provider the create is sent again: it
 //     adopts the snapshot an earlier call made for this VMSnapshot's uid
@@ -225,6 +227,22 @@ func (r *VMSnapshotReconciler) resolveSnapshotRequest(ctx context.Context, snaps
 	logger.Info("The requested SnapshotCreate's outcome was not recorded; sending it again (routed: the provider "+
 		"adopts the snapshot made for this request token)", "attempt", attempt)
 	return false, ctrl.Result{}, nil
+}
+
+// routedCreateNotPerformed reports whether a failed ROUTED SnapshotCreate is
+// the provider's definite answer that it did nothing for this request
+// (contracts.IsNothingDone: the request never reached it, its host was
+// unavailable, the disk in-use check could not run (VM_DISK_CHECK_FAILED), or
+// VM_OPERATION_FAILED "not performed"), as opposed to an answer that leaves
+// the outcome unknown (OUTCOME_UNKNOWN_RETRY, a deadline, a dropped
+// connection, any unclassified failure). Such an answer closes the attempt
+// (V8): its marker is removed, so the next send is a new attempt and never
+// counts toward snapshotRoutedResendMax. Nothing is lost by closing it: every
+// routed send carries the VMSnapshot's uid as its request token, and the
+// provider adopts a snapshot an earlier call made for it before it does
+// anything else.
+func routedCreateNotPerformed(err error) bool {
+	return contracts.IsNothingDone(err) && !contracts.IsOutcomeUnknownRetry(err)
 }
 
 // holdSnapshotOutcomeUnknown keeps snapshot in the initial phase with

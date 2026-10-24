@@ -504,6 +504,44 @@ func TestSnapshotRevert_TerminalFailure(t *testing.T) {
 	assert.Len(t, prov.reverts, 1, "a terminal failure is not retried")
 }
 
+// TestSnapshotRevert_RetryHintOnlyWhereARetryCanHelp (rc7 nit): a provider's
+// definite refusal (FailedPrecondition — the libvirt provider refuses a
+// snapshot it cannot revert safely, every time) ends with the provider's own
+// guidance, not with "set it again to retry"; a refusal a retry can pass
+// once its cause is gone (VM_DISK_IN_USE: delete the linked clones first)
+// and an untyped failure keep the retry hint.
+func TestSnapshotRevert_RetryHintOnlyWhereARetryCanHelp(t *testing.T) {
+	const refusal = `revert refused, nothing changed: take a new snapshot with the VM powered off. Snapshot "x" was ` +
+		`taken while it ran or by an earlier release; libvirt cannot revert it safely (disk hda)`
+	const inUse = `snapshot revert of libvirt domain "web" refused: its disk is the backing file (or a disk) of 1 ` +
+		`other domain(s) on this host, such as a linked clone of this VM; delete the linked clones first`
+	for name, tc := range map[string]struct {
+		err      error
+		wantHint bool
+	}{
+		"FailedPrecondition refusal": {fmt.Errorf("snapshotRevert failed: %w",
+			status.Error(codes.FailedPrecondition, refusal)), false},
+		"disk in use": {contracts.NewConflictError("snapshotRevert: "+inUse,
+			fmt.Errorf("%w: %w", contracts.ErrVMDiskInUse, status.Error(codes.FailedPrecondition, inUse))), true},
+		"untyped failure": {errors.New("snapshotRevert failed: failed to revert to snapshot: boom"), true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			r, prov, _, _ := revertFixture(t, infravirtrigaudiov1beta1.PowerStateOff, contracts.PowerStateOff, nil,
+				revertSnapshotOf(revertSnapName, revertSnapUID))
+			prov.revertAnswers = []revertAnswer{{err: tc.err}}
+
+			got := reconcileStored(t, r)
+			require.NotNil(t, got.Status.SnapshotRevert)
+			assert.Equal(t, infravirtrigaudiov1beta1.SnapshotRevertPhaseFailed, got.Status.SnapshotRevert.Phase)
+			msg := got.Status.SnapshotRevert.Message
+			assert.Equal(t, tc.wantHint, strings.Contains(msg, snapshotRevertRetryHint), msg)
+			if !tc.wantHint {
+				assert.Contains(t, msg, "take a new snapshot with the VM powered off")
+			}
+		})
+	}
+}
+
 // TestSnapshotRevert_RemovedClearsRecord: removing revertToRef clears the
 // record and the condition, and Ready is True again.
 func TestSnapshotRevert_RemovedClearsRecord(t *testing.T) {

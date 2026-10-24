@@ -49,6 +49,98 @@ The notes below are cumulative since v0.3.11. If you are already on v0.4.0-rc6, 
 v0.4.0-rc5"; on v0.4.0-rc4, also "Changes since v0.4.0-rc4"; on v0.4.0-rc2, also
 "Changes since v0.4.0-rc2"; on v0.4.0-rc1, also "Changes since v0.4.0-rc1".
 
+## Changes since v0.4.0-rc7
+
+These fix what validating rc7 on real libvirt 10.0 hosts found (Ubuntu 24.04, AppArmor; a
+shared NFS pool used by a single-host and a clustered Provider): after an offline
+snapshot or a revert, the snapshot, revert and delete of **other** VMs on the same host
+were answered "not performed" for good (V7); a routed snapshot create answered "not
+performed" ended in an operator hold (V8); and a revert refused for good told the user to
+retry. **Nothing is breaking and no CRD, RBAC, chart or proto changed.** Roll the manager
+(V8, the hint) and the libvirt providers (V7). On libvirt hosts, grant the existing
+`VR_DISK_READ` sudo rule over the pool directory if you have not (see below).
+
+| Finding | What changed | Breaking |
+|---|---|---|
+| V7 | libvirt: the disk in-use check no longer opens, as the SSH user, a shut-off VM's backing store that its disk's chain already read; a check that cannot read an image says "permission denied" and where the fix is documented | No. The single-host command sequences are those of rc7 |
+| V8 | Manager: a `VMSnapshot` create that a clustered Provider answers it did not perform is retried as a new attempt with an exponential backoff (1 minute, doubling, up to 10 minutes) instead of ending in `SnapshotOutcomeUnknown` | No |
+| Revert hint | Manager: a revert the provider refuses for good no longer ends with "remove `spec.snapshot.revertToRef` and set it again to retry" | No (message only) |
+
+### libvirt: other VMs' disk checks no longer fail on a snapshot overlay (V7)
+
+Found by validating rc7. libvirt creates the overlay of a disk-only snapshot
+(`<pool dir>/<domain>-disk.<snapshot>`) and the new overlay of a revert
+(`<pool dir>/<domain>-disk.<epoch>`) with mode `0600`, owned by root while the VM is off.
+The disk in-use check that guards a snapshot create, revert or delete, and a delete
+(on a clustered Provider also a create and a clone), reads the disk chain of every
+domain on the host. A shut-off domain's definition keeps its chain in nested
+`<backingStore>` elements after such a snapshot or revert, and the check opened each of
+them a second time, with no format named, as the SSH user only (a format that nothing
+names is never read as root). On the `0600` overlay that read failed with
+`Permission denied`, and every guarded operation of every other VM on the host was
+answered `not performed: could not verify that no other domain uses its disks
+(transient host error ...)`, retried for ever. After rc7's advice to take snapshots with
+the VM powered off, every snapshot and every revert left such a file.
+
+- **The check reads such a chain once.** A backing store that its disk's chain already
+  read (in the format its parent's header names, through `sudo -n` where
+  `VR_DISK_READ` allows it) is not opened again. One that no chain reached is still
+  probed by the SSH user only, and an image nobody can read still fails the check
+  closed.
+- **A check that cannot read an image says so.** The answer is now `... not performed:
+  permission denied reading a disk image on its host (see
+  docs/libvirt-clones.md#unreadable-disk-images; the provider log names it) ...;
+  retried` (`on a host of this Provider` for the cluster-wide check). It names no image,
+  host or other VM, and is still `Unavailable` + `VM_DISK_CHECK_FAILED`: fail-closed,
+  retried, never counted by the circuit breaker. The provider log names the file.
+- **The provider does not change the overlays.** They stay as libvirt makes them:
+  `0600`, owned by root while the VM is off. The check reads their metadata as root
+  only through the existing `VR_DISK_READ` sudo rule.
+
+**Action.** Grant the provider's SSH user `VR_DISK_READ` over the pool directory (and
+every other directory VM disks live in): see
+[Unreadable disk images](docs/libvirt-clones.md#unreadable-disk-images). On an NFS pool,
+root reads only when the export does not squash root; such an export must be dedicated
+to the Provider's hosts. Where the rule cannot be granted, the same section describes
+the manual repair (`chown -h libvirt-qemu:kvm` and `chmod 0640`, with the VM off), which
+every new snapshot or revert needs again.
+
+→ [`docs/libvirt-clones.md`](docs/libvirt-clones.md#unreadable-disk-images)
+
+### A snapshot create the provider did not perform is retried, not held (V8)
+
+Found by validating rc7. A clustered `SnapshotCreate` answered `Unavailable` + "not
+performed" (above: `VM_DISK_CHECK_FAILED`) went down the routed retry path but kept its
+`SnapshotRequested` marker. Every retry counted as a re-send of an unknown outcome, and
+after ten the `VMSnapshot` was held `Ready=False/SnapshotOutcomeUnknown` for an operator
+annotation (`virtrigaud.io/operation-outcome=not-performed@<attempt id>`), although the
+provider had said that nothing was done.
+
+A routed create the provider answers it did not perform (`VM_DISK_CHECK_FAILED`,
+`HOST_UNAVAILABLE`, `VM_OPERATION_FAILED` "not performed", a request that was not sent)
+now closes its attempt: the marker is removed, the `VMSnapshot` shows
+`Ready=False/ProviderError` ("The provider did not perform the snapshot creation ..."),
+with the answer in its `SnapshotCreateRetrying` event, and the create is sent again as
+a new attempt, with the same request token, after 1 minute, doubling for each
+consecutive such answer up to 10 minutes (per `VMSnapshot`, in the manager's memory;
+any other answer resets it). A reconcile before the wait has passed sends nothing. An
+answer that leaves the outcome unknown (`VM_OUTCOME_UNKNOWN_RETRY`, a bare `Unavailable`) keeps the marker, the
+re-send count and the hold, as before. Roll the manager.
+
+→ [`docs/provider-call-outcomes.md`](docs/provider-call-outcomes.md)
+
+### A revert refused for good no longer says "set it again to retry"
+
+A revert the provider answers with `FailedPrecondition` (on libvirt: a snapshot taken
+while the VM ran or by an earlier release, which libvirt cannot revert safely, or a
+revert that happened but left something to repair) ended with "remove
+`spec.snapshot.revertToRef` and set it again to retry", but the same revert is refused
+every time. The `RevertFailed` message now ends with the provider's own guidance (for
+libvirt: take a new snapshot with the VM powered off). A revert refused because another
+VM depends on the disk (`VM_DISK_IN_USE`) and any other failure keep the retry hint.
+
+→ [`docs/vm-snapshot-revert.md`](docs/vm-snapshot-revert.md#libvirt)
+
 ## Changes since v0.4.0-rc6
 
 Two pull requests, #435 and #434, both merged 2026-10-24. They fix what validating rc6

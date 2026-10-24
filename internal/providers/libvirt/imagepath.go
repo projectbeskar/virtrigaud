@@ -846,6 +846,41 @@ const maxBackingChainDepth = 32
 // qemuImgMissingFile is the qemu-img error text for a file that does not exist.
 const qemuImgMissingFile = "No such file or directory"
 
+// qemuImgPermissionDenied is the qemu-img error text for a file the reading
+// account may not open.
+const qemuImgPermissionDenied = "Permission denied"
+
+// unreadableImageDoc is where the repair of a disk image the disk in-use
+// check cannot read is documented.
+const unreadableImageDoc = "docs/libvirt-clones.md#unreadable-disk-images"
+
+// unreadableImageError reports an image of a chain that the account reading
+// it may not open (qemu-img answered "Permission denied"): the SSH user, or
+// root through sudo on a root-squashed export. It is a host check failure
+// (hostCheckFailed keeps it, and its path, provider-side); the dependency
+// guard finds it (isUnreadableImage) to tell the operator what to fix
+// instead of answering a generic transient host error (V7).
+type unreadableImageError struct {
+	// path is the image as the chain names it (provider log only).
+	path string
+	// cause is the failed qemu-img.
+	cause error
+}
+
+// Error names the image: it only ever reaches the provider log.
+func (e *unreadableImageError) Error() string {
+	return fmt.Sprintf("permission denied reading disk image %s (see %s): %v", e.path, unreadableImageDoc, e.cause)
+}
+
+// Unwrap exposes the failed command.
+func (e *unreadableImageError) Unwrap() error { return e.cause }
+
+// isUnreadableImage reports whether err is, or wraps, an unreadableImageError.
+func isUnreadableImage(err error) bool {
+	var u *unreadableImageError
+	return errors.As(err, &u)
+}
+
 // backingFormatRE matches a qemu block-driver name as a header's
 // backing-filename-format, passed to qemu-img as -f.
 var backingFormatRE = regexp.MustCompile(`^[a-z0-9]+$`)
@@ -889,7 +924,8 @@ const backingKindScript = `if [ -f "$1" ]; then echo ` + backingKindFile + `; el
 // (walkBackingChainFrom): never probed, so a guest cannot make its raw disk
 // read as a qcow2 image naming another file as its backing file — and a raw
 // disk's chain is not walked at all. An empty format (a source the
-// definition gives none for, such as a nested backing store) is probed — by
+// definition gives none for, such as a nested backing store that no
+// top-level disk's chain reached: domainRefsOnHostBounded) is probed — by
 // the SSH user only (walkBackingChainFrom: root opens only a qcow2 or raw
 // image in a format a trusted header or the definition names).
 func backingChainFiles(ctx context.Context, h hostCommandRunner, disk, format string) ([]string, error) {
@@ -897,12 +933,18 @@ func backingChainFiles(ctx context.Context, h hostCommandRunner, disk, format st
 	if err != nil {
 		return nil, err
 	}
+	return chainLevelFiles(levels), nil
+}
+
+// chainLevelFiles flattens a walked chain (walkBackingChainFrom) into every
+// host file it consists of: each level's path, then the files it references.
+func chainLevelFiles(levels []backingLevel) []string {
 	var refs []string
 	for _, l := range levels {
 		refs = append(refs, l.path)
 		refs = append(refs, l.refs...)
 	}
-	return refs, nil
+	return refs
 }
 
 // backingLevel is one image of a backing chain (walkBackingChainFrom): its path
@@ -994,6 +1036,9 @@ func walkChainChecked(ctx context.Context, h hostCommandRunner, disk, format str
 		if err != nil {
 			if res != nil && res.ExitCode == qemuImgFailureExitCode && strings.Contains(res.Stderr, qemuImgMissingFile) {
 				return levels, nil // the chain ends at a file that no longer exists
+			}
+			if res != nil && res.ExitCode == qemuImgFailureExitCode && strings.Contains(res.Stderr, qemuImgPermissionDenied) {
+				return nil, hostCheckFailed("read backing chain", &unreadableImageError{path: cur, cause: err})
 			}
 			return nil, hostCheckFailed("read backing chain", err)
 		}
@@ -1303,20 +1348,58 @@ func domainRefsOnHostBounded(ctx context.Context, h hostCommandRunner, skipUUID 
 	}
 
 	// Each disk's chain is walked from the format its definition names (a raw
-	// disk not at all): the scan never probes a guest-written image.
+	// disk not at all): the scan never probes a guest-written image. The
+	// top-level disks go first (formats names each of them); a source nested
+	// in a <backingStore> of a shut-off domain's definition — libvirt keeps
+	// one there after an offline external snapshot or a revert — has no entry
+	// in formats and would be probed, as the SSH user only. It is not walked
+	// again when a top-level walk already read it as a level of its chain
+	// (in the format its parent's header names, through sudo when allowed):
+	// that walk read it and everything below it, and the probe would only
+	// fail on an image the SSH user cannot read (a 0600 overlay libvirt
+	// created) — failing every guarded operation on the host (V7). below
+	// holds, for every image a walk read, the files of its chain from that
+	// image down: what a nested source that is not walked again references.
 	type chainKey struct{ disk, format string }
 	chains := map[chainKey][]string{}
+	below := map[string][]string{}
+	walk := func(disk, format string) error {
+		key := chainKey{disk, format}
+		if _, walked := chains[key]; walked {
+			return nil
+		}
+		levels, err := walkBackingChainFrom(ctx, h, disk, format)
+		if err != nil {
+			return err
+		}
+		chains[key] = chainLevelFiles(levels)
+		for i, l := range levels {
+			if _, seen := below[l.path]; !seen {
+				below[l.path] = chainLevelFiles(levels[i:])
+			}
+		}
+		return nil
+	}
 	for _, d := range doms {
 		for _, disk := range d.disks {
-			key := chainKey{disk, d.formats[disk]}
-			if _, walked := chains[key]; walked {
+			if _, top := d.formats[disk]; top {
+				if err := walk(disk, d.formats[disk]); err != nil {
+					return nil, err
+				}
+			}
+		}
+	}
+	for _, d := range doms {
+		for _, disk := range d.disks {
+			if _, top := d.formats[disk]; top {
 				continue
 			}
-			chain, err := backingChainFiles(ctx, h, disk, key.format)
-			if err != nil {
+			if _, read := below[disk]; read {
+				continue
+			}
+			if err := walk(disk, ""); err != nil {
 				return nil, err
 			}
-			chains[key] = chain
 		}
 	}
 
@@ -1329,7 +1412,12 @@ func domainRefsOnHostBounded(ctx context.Context, h hostCommandRunner, skipUUID 
 		start := len(all)
 		all = append(all, d.files...)
 		for _, disk := range d.disks {
-			all = append(all, chains[chainKey{disk, d.formats[disk]}]...)
+			if chain, walked := chains[chainKey{disk, d.formats[disk]}]; walked {
+				all = append(all, chain...)
+				continue
+			}
+			// A nested source read as part of a top-level disk's chain.
+			all = append(all, below[disk]...)
 		}
 		spans[i].files = [2]int{start, len(all)}
 	}
