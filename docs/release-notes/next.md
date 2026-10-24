@@ -215,9 +215,12 @@ longer description of `spec.snapshot.revertToRef`), `HostPool` gains the `TOTAL`
 only has the `revertToRef` description of its template. No spec field changed. From rc5:
 
 1. **Before the manager rolls, remove `spec.snapshot.revertToRef` from every
-   `VirtualMachine` you do not want reverted.** The field did nothing up to rc5; the
-   first reconcile of the new manager acts on it (the command that lists them is in the
-   [Upgrade guide](docs/upgrading.md#behavior-changes-that-are-visible-but-not-breaking)).
+   `VirtualMachine` (and `VMSet` template) you do not want reverted.** The field did
+   nothing up to rc5; the first reconcile of the new manager acts on it, and a VM that is
+   powered off is reverted at once, discarding what was written to its disks since the
+   snapshot. List them with
+   `kubectl get virtualmachines.infra.virtrigaud.io -A -o jsonpath='{range .items[?(@.spec.snapshot.revertToRef)]}{.metadata.namespace}/{.metadata.name}{"\n"}{end}'`
+   ([Upgrade guide](docs/upgrading.md#breaking-changes)).
 2. **CRDs.** The chart's pre-upgrade hook applies them; otherwise
    `kubectl apply --server-side --force-conflicts -f config/crd/bases` (see [Required
    upgrade order](docs/upgrading.md#required-upgrade-order)). Do this before the
@@ -1700,12 +1703,14 @@ trigger.
   make them private. → [Changes since v0.4.0-rc2](#libvirt-cloud-init-seeds-are-private-and-live-in-a-dedicated-directory-414-breaking),
   [Upgrade guide](docs/upgrading.md#breaking-changes)
 
-**New since rc5: nothing is breaking.** Behaviour changes that need a look before you
-roll (in the manager):
+**New since rc5: one change needs action before you roll the manager**; the others are
+behaviour changes to check:
 
-- `spec.snapshot.revertToRef` now reverts the VM; it did nothing before. A VM that
-  carries the field is acted on by the first reconcile of the new manager: remove the
-  field from VMs you do not want reverted first (#431).
+- **Action required:** `spec.snapshot.revertToRef` now reverts the VM; it did nothing
+  before. A VM that carries the field is acted on by the first reconcile of the new
+  manager, and one that is powered off is reverted at once, discarding what was written
+  to its disks since the snapshot. Remove the field from every VM and `VMSet` template
+  you do not want reverted first ([Upgrade order for rc6](#upgrade-order-for-rc6), #431).
 - A VM held by a clustered restore guard (`RestorePending`, `OwnDomainOnAnotherHost`,
   `UniquenessCheckFailed`, `ProviderLacksListOwnerFilter`) is `status.phase: Pending`,
   not `Failed`; alerts that count `Failed` VMs no longer see them (#432).
