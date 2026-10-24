@@ -1503,7 +1503,7 @@ Proxmox VE 9.2 (the PVE node) and a vCenter, on Kubernetes 1.34. This run found 
   `Reconfiguring=True/RestartRequired` and applied after a power cycle.
 - **Snapshots on a clustered VM.** Create and delete of a disk-only snapshot; the delete
   merged the overlay back and no file was left. **Revert was not exercised on rc5:** it
-  was a no-op then (V2, fixed in [#431](#spec-snapshot-reverttoref-reverts-the-vm-431-v2)).
+  was a no-op then (V2, fixed in [#431](#specsnapshotreverttoref-reverts-the-vm-431-v2)).
 - **A clustered clone of an Ubuntu cloud-image VM,** source powered off (a started
   source is held with `SourceMustBePoweredOff`). The clone got the new `instance-id`
   `virtrigaud-<uid>`, the target's hostname and a **new SSH host key** in the guest, and
