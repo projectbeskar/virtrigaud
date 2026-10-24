@@ -46,6 +46,35 @@ v0.4.0-rc4"; on v0.4.0-rc2, also "Changes since v0.4.0-rc2"; on v0.4.0-rc1, also
 
 ## Changes since v0.4.0-rc6
 
+### libvirt: snapshots no longer include the cloud-init CD-ROM, and older ones are refused on revert (V6)
+
+Found by validating rc6 on real libvirt 10 hosts (Ubuntu 24.04, AppArmor), single-host
+and clustered. A VM with cloud-init has a read-only seed CD-ROM. rc6 and earlier took
+disk-only snapshots without a disk list, so libvirt recorded the CD-ROM as an external
+snapshot disk too. Reverting such a snapshot (libvirt 9.9 and later revert external
+snapshots by making a new overlay of every external disk) rewrote the CD-ROM to a qcow2
+overlay of the seed ISO in the VM's private seed directory, which AppArmor does not let
+QEMU open: the revert was reported `Succeeded`, and the VM no longer started
+(`Ready=False`, "power failed"). Every libvirt VM with a seed was affected.
+
+- **Snapshot create** excludes every CD-ROM, floppy and `<readonly/>` disk with
+  `--diskspec <target>,snapshot=no`, for disk-only and memory snapshots. Writable disks
+  keep libvirt's defaults (overlay `<domain>-disk.<snapshot>`).
+- **Snapshot revert** refuses, before anything changes on the host, a snapshot that
+  records a read-only disk as external (one taken by rc6 or earlier):
+  `SnapshotReverted=False/RevertFailed`, terminal, with a message saying the snapshot is
+  from an earlier release and to take a new one. After a revert, a read-only disk libvirt
+  moved anyway is reported as `RevertFailed` instead of `Succeeded`.
+- **Snapshot delete** after a revert removes libvirt's `<domain>-disk.<epoch>` overlay
+  with the same safety checks as before; VM delete removes the whole chain.
+
+**Behaviour change.** Snapshots taken by rc6 or earlier of a VM with a cloud-init seed
+can no longer be reverted: delete their `VMSnapshot`s and take new ones after upgrading
+the libvirt provider. A VM already reverted by rc6 to such a snapshot needs a manual
+repair: see [Repairing a VM broken by a v0.4.0-rc6
+revert](docs/vm-snapshot-revert.md#repairing-a-vm-broken-by-a-v040-rc6-revert). No CRD,
+RBAC or proto change; roll the libvirt provider.
+
 ### A call that waits for another call's dial is answered in time (V3c, follow-up)
 
 rc6 bounded the waits a clustered libvirt call makes for the dial it runs itself,

@@ -23,6 +23,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Why
 The rc6 lab validation showed that bounding the waits a call runs itself (#432) was not enough: a wait for a lock another call held across a dial still lasted as long as that call's deadline, and ended as a failure of the operation.
 
+## [2026-10-24 10:05] - libvirt: snapshots exclude the cloud-init CD-ROM; reverts of older snapshots refused (V6)
+**Author:** @wrkode (William Rizzo)
+
+### Fixed
+- `internal/providers/libvirt/snapshot_readonly_disks.go`, `server.go`, `provider_virsh.go`, `domain_disks.go`: a disk-only snapshot recorded every non-empty disk as external, the read-only cloud-init seed CD-ROM included (libvirt's default when no disk list is given). Reverting it on libvirt >= 9.9 rewrote the CD-ROM to a new qcow2 overlay of the ISO (`cloud-init.<epoch>`) in the VM's private seed directory, which AppArmor's `virt-aa-helper` profile does not let QEMU open: the revert answered success and the VM no longer started, on single-host and clustered Providers (V6, found validating v0.4.0-rc6 on libvirt 10 hosts). `SnapshotCreate` (gRPC and `contracts.Provider`, disk-only and memory) now reads the domain and passes `--diskspec <target>,snapshot=no` for every CD-ROM, floppy and `<readonly/>` disk (`buildSnapshotCreateArgs`, `snapshotExcludedTargets`); writable disks keep libvirt's default external mode and `<domain>-disk.<snapshot>` overlay name. A read-only disk whose target is not a plain libvirt target name means no snapshot is taken (on a single host it is answered "not performed"). For a memory snapshot the exclusion is what lets libvirt take it: an internal snapshot of a raw disk is refused, and a read-only disk with `snapshot=no` does not count as an excluded writable disk.
+- `internal/providers/libvirt/snapshot_readonly_disks.go`, `server.go`, `provider_virsh.go`, `routing.go`: `SnapshotRevert` reads `virsh snapshot-dumpxml` and the domain before reverting and refuses, before anything changes, a snapshot that records a read-only disk or removable media as external (`snapshotRevertUnsafeError`: `FailedPrecondition`; routed, `FailedPrecondition` + `VM_OPERATION_FAILED`) — the manager ends the request `SnapshotReverted=False/RevertFailed`, terminal. An unreadable snapshot or domain definition means no revert. After a revert, a read-only disk on a source neither the domain nor the snapshot had for it is answered `FailedPrecondition` (`snapshotRevertBrokeDisksError`) instead of success. Messages name only the snapshot and disk targets and fit the manager's 256-byte status detail.
+- `internal/providers/libvirt/snapshot_overlay_cleanup.go`: the `SnapshotDelete` overlay cleanup also recognises the overlay a revert made, `<domain>-disk.<epoch>`, which libvirt records as the snapshot's (and reads `<revertDisks>`), under the existing checks (out of the domain's chains, no other snapshot references it, a regular file in the pool, no other domain on any host uses it).
+
+### Changed
+- `internal/providers/libvirt/testdata/single_host_snapshot_clone_disk.golden.json`: regenerated: single-host `SnapshotCreate` gains a `dumpxml` and `--diskspec sda,snapshot=no`; `SnapshotRevert` gains `snapshot-dumpxml` and `dumpxml` before and a `dumpxml` after the revert.
+- `docs/vm-snapshot-revert.md`: libvirt section (external revert, the exclusion, the refusal, the post-revert check) and a runbook to repair a VM broken by a v0.4.0-rc6 revert; upgrade note. `docs/libvirt-clones.md`: the `<domain>-disk.<epoch>` overlay. `docs/release-notes/next.md`: "Changes since v0.4.0-rc6" (V6).
+
+### Added
+- `internal/providers/libvirt/snapshot_readonly_disks_test.go`: diskspecs (a CD-ROM, none, several read-only disks, an unusable target), the refusal of a snapshot recording the seed (single-host, `contracts.Provider`, clustered routed; no `snapshot-revert` sent), a safe snapshot reverted, an unreadable snapshot not reverted, the post-revert check, `<domain>-disk.<epoch>` cleanup after a revert (removed, kept in chain, kept when another snapshot references it), VM delete of a reverted chain. Test fakes answer `snapshot-dumpxml`.
+
+### Why
+Every libvirt VM with cloud-init that was reverted to a snapshot became unable to start, while the revert reported success. Maintainer decision: fix for rc7.
+
 ### Impact
 - [ ] Breaking change
 - [x] Requires cluster rollout
