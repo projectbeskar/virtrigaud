@@ -44,6 +44,31 @@ The notes below are cumulative since v0.3.11. If you are already on v0.4.0-rc5, 
 v0.4.0-rc4"; on v0.4.0-rc2, also "Changes since v0.4.0-rc2"; on v0.4.0-rc1, also
 "Changes since v0.4.0-rc1".
 
+## Changes since v0.4.0-rc6
+
+### A call that waits for another call's dial is answered in time (V3c, follow-up)
+
+rc6 bounded the waits a clustered libvirt call makes for the dial it runs itself,
+but not the wait for a dial that another call has in flight. The host's one SSH
+connection was dialed under a lock, and a call that arrived meanwhile waited for the
+lock without regard to its own deadline. On a host that stopped answering (its
+packets dropped), a `Describe` with a 30-second deadline that arrived while a call
+with a longer deadline (a `Delete`, or a cleanup that runs detached from its request)
+was dialing waited for that dial, and was answered `Unknown` ("failed to describe VM on
+host ...") after 1m28s in the lab; a held `Delete` took 1m55s to answer
+`HOST_UNAVAILABLE`. Now one dial runs at a time and holds no lock; a call that needs
+the connection waits for the dial's result or for its own bound (5 seconds before its
+deadline, as in rc6), and a wait that ends on its bound is a host that stopped
+answering, answered by how far the call got (`Describe`: `HOST_UNAVAILABLE`). The TCP
+connect of a dial stops after 30 seconds at the latest, and a call cancelled during
+the SSH handshake ends it at once. The single-host provider is unchanged. See
+[A host that stops answering](docs/provider-call-outcomes.md#clustered-libvirt-a-host-that-stops-answering).
+
+The message of a held delete (`DeleteBlocked=True`) now starts the sentence that
+tells how to release the VirtualMachine without deleting its domain with a capital
+letter ("... completes once the host answers. To release the VirtualMachine without
+deleting its domain, set ..."); only the capitalisation changed.
+
 ## Changes since v0.4.0-rc5
 
 Three pull requests, #430, #431 and #432. They fix what validating rc5 on a two-host

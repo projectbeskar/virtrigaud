@@ -48,6 +48,16 @@ import (
 // or a call that ran nothing — early enough to reach the manager. A call whose
 // own context ends first keeps the context error, as before. The single-host
 // provider is unchanged.
+//
+// The fourth wait is for the dial of another call (follow-up, rc6 lab): the
+// persistent client was dialed under a mutex that was held for the whole dial
+// and waited for without any bound, so a call that arrived while another call's
+// dial was in flight (a call with a longer deadline, such as a Delete or a
+// detached cleanup, or one with none, whose dial runs until the TCP stack gives
+// up) waited for that dial however short its own deadline was, and ended with
+// the call's context error — codes.Unknown — once it got the lock. The dial is
+// now a single flight (ensureClusteredSSHClient) that holds no lock while it
+// runs, and a waiter ends with the other waits above.
 
 // hostAnswerMargin is how long before a call's deadline its waits for a
 // clustered host end (at most a quarter of the time the call has left), so the
@@ -187,4 +197,87 @@ func (v *VirshProvider) dialWaitError(ctx context.Context, until time.Time, boun
 		return fmt.Errorf("%w: %w", &hostNotAnsweringError{wait: hostWaitDial}, err)
 	}
 	return err
+}
+
+// sshDial is the one SSH dial in flight on a clustered host connection
+// (ensureClusteredSSHClient): done is closed when it ends, after which client
+// and err — the dialing call's result — are read-only.
+type sshDial struct {
+	done   chan struct{}
+	client *ssh.Client
+	err    error
+}
+
+// ensureClusteredSSHClient is ensureSSHClient for a clustered host connection
+// (boundHostWaits): the persistent client, dialed on first use by a single
+// flight.
+//
+// The call that finds no client and no dial in flight dials, in its own
+// goroutine and under its own bounded context (dialSSH); every other call that
+// needs the client meanwhile waits for that dial's end or for its own wait
+// bound (hostWaitContext), whichever comes first, and a wait that ends on the
+// bound is a hostNotAnsweringError (hostWaitError) — never a context error of
+// a call that has time left. No lock is held while the dial runs (sshMu only
+// guards the two fields), so there is no goroutine to cancel.
+//
+// A dial that failed for a reason of its own — refused, a failed handshake, an
+// authentication or host-key failure — is the answer of every call that waited
+// for it: the host was just tried. A dial that ended on the dialing call's own
+// time (its wait bound or its context) says nothing about the time the other
+// calls have left, so a waiter then dials, or waits for the next dial, itself.
+func (v *VirshProvider) ensureClusteredSSHClient(ctx context.Context) (*ssh.Client, error) {
+	wctx, cancel := v.hostWaitContext(ctx)
+	defer cancel()
+	for {
+		v.sshMu.Lock()
+		if v.sshClient != nil {
+			client := v.sshClient
+			v.sshMu.Unlock()
+			return client, nil
+		}
+		flight := v.sshDialing
+		if flight == nil {
+			flight = &sshDial{done: make(chan struct{})}
+			v.sshDialing = flight
+			v.sshMu.Unlock()
+			return v.runSSHDial(ctx, flight)
+		}
+		v.sshMu.Unlock()
+
+		select {
+		case <-flight.done:
+			if flight.err != nil && !endedOnItsOwnTime(flight.err) {
+				return nil, flight.err
+			}
+			// Connected (the cached client is read at the top), or the dial
+			// ran out of its own time: look again.
+		case <-wctx.Done():
+			return nil, v.hostWaitError(ctx, wctx, hostWaitDial)
+		}
+	}
+}
+
+// runSSHDial dials for flight (registered as v.sshDialing by the caller),
+// publishes the client on success, and ends the flight whatever happens
+// (including a panic of the dial), so no waiter is left behind.
+func (v *VirshProvider) runSSHDial(ctx context.Context, flight *sshDial) (client *ssh.Client, err error) {
+	defer func() {
+		v.sshMu.Lock()
+		if err == nil {
+			v.sshClient = client
+		}
+		v.sshDialing = nil
+		v.sshMu.Unlock()
+		flight.client, flight.err = client, err
+		close(flight.done)
+	}()
+	return v.dialSSH(ctx)
+}
+
+// endedOnItsOwnTime reports whether a dial's error is that of the dialing
+// call's own time running out (its wait bound or its context), as opposed to a
+// failure of the host or of the credentials.
+func endedOnItsOwnTime(err error) bool {
+	return isHostNotAnswering(err) ||
+		stderrors.Is(err, context.Canceled) || stderrors.Is(err, context.DeadlineExceeded)
 }

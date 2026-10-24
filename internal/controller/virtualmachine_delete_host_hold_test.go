@@ -179,3 +179,31 @@ func TestDeleteHostHold_PendingHostIsTheVMsHost(t *testing.T) {
 	assert.Equal(t, k8s.ReasonHostUnreachable, reason)
 	assert.Contains(t, msg, "host host-alpha")
 }
+
+// TestDeleteBlockedMessages_EscapeHatchIsASentenceOfItsOwn pins that the
+// escape hatch appended to a DeleteBlocked message starts a new sentence: the
+// text before it ends with a period, so it begins with a capital letter.
+func TestDeleteBlockedMessages_EscapeHatchIsASentenceOfItsOwn(t *testing.T) {
+	const sentence = "To release the VirtualMachine without deleting its domain, set "
+	vm := boundClusterVMForDelete()
+	_, held := deleteHostHold(vm, hostUnavailableAnswer(t, `delete VM: host "host-alpha" is unreachable`, "host-alpha"))
+	_, lost := deleteHostHold(vm, hostLostAnswer(t, false))
+
+	messages := map[string]string{
+		"host held":    held,
+		"host lost":    lost,
+		"own domain":   ownDomainDeleteMessage,
+		"unplaced":     ownDomainUnplacedDeleteMessage,
+		"disk in use":  deleteBlockedMessages[k8s.ReasonDiskInUse],
+		"disk check":   deleteBlockedMessages[k8s.ReasonDiskCheckFailed],
+		"host generic": deleteBlockedMessages[k8s.ReasonHostUnreachable],
+	}
+	for name, msg := range messages {
+		t.Run(name, func(t *testing.T) {
+			assert.Contains(t, msg, ". "+sentence)
+			assert.NotContains(t, msg, ". to release")
+		})
+	}
+	assert.Contains(t, held, "completes once the host answers. "+sentence)
+	assert.Contains(t, lost, "completes once the host answers. "+sentence)
+}

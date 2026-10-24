@@ -477,8 +477,10 @@ func (r *VirtualMachineReconciler) holdForPreviousIncarnation(
 }
 
 // deleteBlockedEscape is the part of every DeleteBlocked message that says how
-// to release the VirtualMachine without the provider's delete.
-var deleteBlockedEscape = fmt.Sprintf("to release the VirtualMachine without deleting its domain, set %s=true (or %s=true); "+
+// to release the VirtualMachine without the provider's delete. It is a
+// sentence of its own, appended after the sentence before it ends with a
+// period.
+var deleteBlockedEscape = fmt.Sprintf("To release the VirtualMachine without deleting its domain, set %s=true (or %s=true); "+
 	"the domain and its disks are then left for manual removal",
 	infravirtrigaudiov1beta1.VirtualMachineOrphanOnDeleteAnnotation, forceDeleteAnnotation)
 

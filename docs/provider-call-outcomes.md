@@ -291,6 +291,25 @@ A call whose own context ends first keeps its context error, as before. A comman
 that was already running when the host stopped answering is not cut short by this;
 it ends at the call's deadline, as before. The single-host provider is unchanged.
 
+The wait for the SSH dial also covers a dial that **another call** has in flight:
+v0.4.0-rc6 bounded only the dial a call ran itself. The host's one SSH connection
+was dialed under a lock, and a call that arrived meanwhile waited for that lock
+without regard to its own deadline. A `Describe` (30 seconds) that arrived while a
+call with a longer deadline (a `Delete`, or a cleanup that runs detached from its
+request) was dialing a host that did not answer therefore waited for that dial, up
+to the other call's deadline, and ended with its context error, `Unknown` + "failed
+to describe VM on host ..." (in the lab, durations of 1m28s, with a 30-second
+deadline). Now one dial runs at a time and holds no lock: a call that needs the
+connection waits for that dial's result or for its own bound (5 seconds before its
+deadline), whichever comes first, and a wait that ends on its bound is a host that
+stopped answering, as above. A dial that failed for its own reason (refused, a
+failed handshake, a host key or authentication failure) is the answer of the calls
+that waited for it; a dial that ended on its own caller's time says nothing about
+the time the others have left, so they dial again. The TCP connect of a dial
+stops after 30 seconds at the latest (before, a call without a deadline waited for the
+TCP stack to give up, minutes), and a call cancelled during the SSH handshake ends it
+at once.
+
 **Which host.** A `HOST_UNAVAILABLE` answer about the host the call was routed to
 (its `target_host_id`: the lease failed, or that host stopped answering) carries
 that host's id in its `ErrorInfo` metadata, under the key `host`

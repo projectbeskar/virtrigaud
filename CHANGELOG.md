@@ -5,6 +5,30 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-10-24 12:00] - A clustered call waiting for another call's SSH dial is answered in time (V3c follow-up)
+**Author:** @wrkode (William Rizzo)
+
+### Fixed
+- `internal/providers/libvirt/host_answer.go`, `sshclient.go`, `virsh.go`: on a clustered libvirt provider, a call that arrived while another call was dialing an unreachable host waited for that dial without regard to its own deadline, and was answered `codes.Unknown` + `VM_OPERATION_FAILED` ("failed to describe VM on host ...", 1m28s with a 30 s deadline; a held delete took 1m55s) in the rc6 lab. Cause: `ensureSSHClient` held `sshMu` across the whole `dialSSH`, and a waiter's `sshMu.Lock()` honoured no context, so a `Describe` queued behind a call with a longer deadline (a `Delete`, a detached cleanup) or none. On a clustered host connection (`boundHostWaits`) the dial is now a single flight (`ensureClusteredSSHClient`, `sshDial`): `sshMu` only guards the cached client and the flight and is never held across network I/O; a waiter waits for the flight's end or its own `hostWaitContext` bound and a wait that ends on the bound is a `hostNotAnsweringError` (HOST_UNAVAILABLE for a read, by how far the call got otherwise), never the call's context error. A dial that failed for its own reason is the answer of the calls that waited for it; a dial that ended on its caller's time makes the waiters dial again. No goroutine is added.
+- `internal/providers/libvirt/sshclient.go`: the TCP connect of a clustered dial is capped at `sshHandshakeTimeout` (a call without a deadline waited for the TCP stack, minutes), and a call cancelled during the SSH handshake expires the socket's deadline (`context.AfterFunc`) instead of waiting for it. The single-host provider is unchanged (it still dials under `sshMu`).
+- `internal/controller/virtualmachine_clustered.go`: `deleteBlockedEscape` starts with "To release ..." — every `DeleteBlocked` message appended it after a period, so the sentence began in lower case ("... completes once the host answers. to release ..."). Only the capitalisation changed.
+
+### Added
+- `internal/providers/libvirt/host_answer_dial_test.go`: callers arriving while a long-deadline call dials a host that never completes the handshake, and staggered concurrent callers to such a host, are all answered `HOST_UNAVAILABLE` before their 3 s deadline (the first fails on the previous code with 15 s); callers share one successful dial; a refused dial is the answer of the calls that waited for it; the single-host dial is unchanged.
+- `internal/controller/virtualmachine_delete_host_hold_test.go`: the escape-hatch sentence of every `DeleteBlocked` message starts a new sentence.
+
+### Changed
+- `docs/provider-call-outcomes.md`, `docs/release-notes/next.md`: describe what rc6 left unbounded and what is bounded now ("Changes since v0.4.0-rc6").
+
+### Why
+The rc6 lab validation showed that bounding the waits a call runs itself (#432) was not enough: a wait for a lock another call held across a dial still lasted as long as that call's deadline, and ended as a failure of the operation.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-10-24 06:00] - Release notes for v0.4.0-rc6
 **Author:** @wrkode (William Rizzo)
 

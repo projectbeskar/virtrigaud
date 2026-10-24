@@ -121,18 +121,35 @@ func (v *VirshProvider) dialSSH(ctx context.Context) (*ssh.Client, error) {
 	defer cancel()
 	waitUntil, bounded := dctx.Deadline()
 	var d net.Dialer
+	if v.boundHostWaits {
+		// A call without a deadline must not dial for as long as the TCP stack
+		// retries a SYN that nobody answers (minutes): the dial is bounded
+		// like the handshake that follows it.
+		d.Timeout = sshHandshakeTimeout
+	}
 	conn, err := d.DialContext(dctx, "tcp", addr)
 	if err != nil {
 		return nil, fmt.Errorf("dial ssh host %s: %w", addr, v.dialWaitError(ctx, waitUntil, bounded, err))
 	}
 	hsDeadline, hsBounded := v.handshakeDeadline(dctx)
+	stopHandshakeWatch := func() bool { return true }
 	if hsBounded {
 		_ = conn.SetDeadline(hsDeadline)
+		// ssh.NewClientConn takes no context: a call that ends (is cancelled)
+		// during the handshake ends it by expiring the socket's deadline.
+		stopHandshakeWatch = context.AfterFunc(dctx, func() { _ = conn.SetDeadline(time.Unix(1, 0)) })
 	}
 	sshConn, chans, reqs, err := ssh.NewClientConn(conn, addr, config)
 	if err != nil {
+		stopHandshakeWatch()
 		_ = conn.Close()
 		return nil, fmt.Errorf("ssh handshake with %s failed: %w", addr, v.dialWaitError(ctx, hsDeadline, hsBounded, err))
+	}
+	if !stopHandshakeWatch() {
+		// The call's time ran out as the handshake ended: the socket's
+		// deadline is expired, so the connection is of no use.
+		_ = sshConn.Close()
+		return nil, fmt.Errorf("ssh handshake with %s failed: %w", addr, v.dialWaitError(ctx, hsDeadline, hsBounded, dctx.Err()))
 	}
 	if hsBounded {
 		_ = conn.SetDeadline(time.Time{})
@@ -145,9 +162,17 @@ func (v *VirshProvider) dialSSH(ctx context.Context) (*ssh.Client, error) {
 // first use. Subsequent calls return the SAME client (no reconnect) — reuse is
 // the entire point of this PR, replacing a fork+handshake per virsh/shell
 // command with one connection multiplexing many sessions.
+//
+// On a clustered host connection (boundHostWaits) the dial is a bounded
+// single-flight (ensureClusteredSSHClient): no lock is held across the network
+// I/O and a caller that waits for another caller's dial ends, with a
+// hostNotAnsweringError, hostAnswerMargin before its own deadline.
 func (v *VirshProvider) ensureSSHClient(ctx context.Context) (*ssh.Client, error) {
 	if err := v.refuseIfUnroutable(); err != nil {
 		return nil, err
+	}
+	if v.boundHostWaits {
+		return v.ensureClusteredSSHClient(ctx)
 	}
 	v.sshMu.Lock()
 	defer v.sshMu.Unlock()
