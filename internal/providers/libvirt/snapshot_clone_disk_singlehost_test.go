@@ -53,7 +53,11 @@ import (
 // the snapshot's definition, `snapshot-dumpxml`, before deleting it; this fake
 // has none, so nothing is cleaned up after), and for R26 (a Clone reads the
 // source's cloud-init seed with isoinfo before the copy and gives the clone
-// its own seed — mktemp, genisoimage, chmod — re-pointing its CD-ROM there) — with
+// its own seed — mktemp, genisoimage, chmod — re-pointing its CD-ROM there),
+// and for V6 (SnapshotCreate reads the domain and excludes its read-only
+// CD-ROM with --diskspec sda,snapshot=no; SnapshotRevert reads the snapshot
+// and the domain before the revert and the domain after it,
+// snapshot_readonly_disks.go) — with
 // VIRTRIGAUD_UPDATE_CALLSEQ_GOLDEN=1; the slice 3 branch
 // reproduces it byte for byte. A change to any of them — which would restart
 // the ADR-0008 D5 soak window — fails here.
@@ -77,7 +81,10 @@ const (
 // "local" otherwise. Per host, fail-<subcommand or tool> makes it fail, "state"
 // holds the domstate answer (default "shut off"), "jobtype" the domjobinfo
 // "Job type" (default None), snaps-<domain> the snapshot
-// list, and dom-<name>.xml marks a domain as present (`list --all --uuid`
+// list, snapxml-<snapshot> a snapshot's `snapshot-dumpxml` (default: a
+// snapshot with no disk list), revert-rewrites the domain XML a
+// snapshot-revert leaves behind (default: unchanged), and dom-<name>.xml marks
+// a domain as present (`list --all --uuid`
 // prints the UUID of every domain seeded under its UUID, as #358's disk
 // guards read the host). mktemp is deterministic
 // (the X run becomes 0000000000) and creates what it names only inside the
@@ -138,7 +145,11 @@ virsh)
       else : > "$d/blk-seen"; printf ' Type   Device   Target   Source\n------------------------------------------------\n file   disk     vda      ` + scdDiskPath + `\n'; fi ;;
     snapshot-create-as) fail snapshot-create-as; [ -f "$d/dom-$2.xml" ] || nodom "$2"; echo "Domain snapshot $3 created" ;;
     snapshot-delete) fail snapshot-delete; [ -f "$d/dom-$2.xml" ] || nodom "$2"; echo "Domain snapshot $3 deleted" ;;
-    snapshot-revert) fail snapshot-revert; [ -f "$d/dom-$2.xml" ] || nodom "$2" ;;
+    snapshot-revert) fail snapshot-revert; [ -f "$d/dom-$2.xml" ] || nodom "$2"; if [ -f "$d/revert-rewrites" ]; then cp "$d/revert-rewrites" "$d/dom-$2.xml"; fi ;;
+    snapshot-dumpxml)
+      fail snapshot-dumpxml
+      [ -f "$d/dom-$2.xml" ] || nodom "$2"
+      if [ -f "$d/snapxml-$3" ]; then cat "$d/snapxml-$3"; else printf '<domainsnapshot><name>%s</name></domainsnapshot>\n' "$3"; fi ;;
     vol-info) fail vol-info; printf 'Name:           %s\nType:           file\nCapacity:       10.00 GiB\nAllocation:     1.00 GiB\n' "$2" ;;
     vol-path) echo "/var/lib/libvirt/images/$2.qcow2" ;;
     pool-info) fail pool-info; printf 'Name:           default\nState:          running\nAutostart:      yes\n' ;;

@@ -147,7 +147,7 @@ func TestClustered_SnapshotCreate_RecordsTheRequestToken(t *testing.T) {
 	})
 	require.NoError(t, err)
 	assert.Contains(t, fx.calls(), "host-b virsh snapshot-create-as "+uuid+" pre --description before upgrade "+
-		tokenMarker("uid-snap-1")+" --atomic --disk-only")
+		tokenMarker("uid-snap-1")+" --atomic --disk-only --diskspec sda,snapshot=no")
 
 	fx2 := ownedWebOnB(t, scdDomainXML("web", scdDomainOpts{owner: ownerTeamA}))
 	_, err = NewServer(fx2.p).SnapshotCreate(context.Background(), &providerv1.SnapshotCreateRequest{

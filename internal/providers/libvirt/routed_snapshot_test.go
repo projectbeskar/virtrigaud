@@ -288,8 +288,10 @@ func TestClustered_Snapshots_RoutedOwnerCheckedByUUID(t *testing.T) {
 			"host-b virsh snapshot-list "+uuid+" --name",
 			"host-b virsh domstate "+uuid),
 			snapshotDependentsGuard...),
-			"host-b virsh snapshot-create-as "+uuid+" pre --description d --atomic --disk-only"), fx.calls(),
-			"the name is looked up first (idempotent create), the disk-dependents guard runs, then the snapshot is made")
+			"host-b virsh dumpxml "+uuid,
+			"host-b virsh snapshot-create-as "+uuid+" pre --description d --atomic --disk-only --diskspec sda,snapshot=no"), fx.calls(),
+			"the name is looked up first (idempotent create), the disk-dependents guard runs, the read-only disks are "+
+				"read, then the snapshot is made without them")
 	})
 
 	t.Run("create of a name this request already made is the earlier attempt's snapshot", func(t *testing.T) {
@@ -325,7 +327,8 @@ func TestClustered_Snapshots_RoutedOwnerCheckedByUUID(t *testing.T) {
 			VmId: "web", TargetHostId: "host-b", Owner: teamAOwner, NameHint: "mem", Description: "d", IncludeMemory: true,
 		})
 		require.NoError(t, err)
-		assert.Contains(t, fx.calls(), "host-b virsh snapshot-create-as "+uuid+" mem --description d --atomic")
+		assert.Contains(t, fx.calls(), "host-b virsh snapshot-create-as "+uuid+" mem --description d --atomic --diskspec sda,snapshot=no",
+			"a memory snapshot excludes the read-only seed CD-ROM too")
 	})
 
 	t.Run("delete", func(t *testing.T) {
@@ -355,7 +358,11 @@ func TestClustered_Snapshots_RoutedOwnerCheckedByUUID(t *testing.T) {
 			"host-b virsh snapshot-list "+uuid+" --name",
 			"host-b virsh domstate "+uuid),
 			snapshotDependentsGuard...),
-			"host-b virsh snapshot-revert "+uuid+" s2 --force --running"), fx.calls())
+			"host-b virsh snapshot-dumpxml "+uuid+" s2",
+			"host-b virsh dumpxml "+uuid,
+			"host-b virsh snapshot-revert "+uuid+" s2 --force --running",
+			"host-b virsh dumpxml "+uuid), fx.calls(),
+			"the snapshot and the domain are read before the revert, and the domain's read-only disks after it")
 	})
 
 	t.Run("lease released and the other host never dialed", func(t *testing.T) {
