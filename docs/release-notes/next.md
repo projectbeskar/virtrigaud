@@ -57,13 +57,13 @@ snapshot or a revert, the snapshot, revert and delete of **other** VMs on the sa
 were answered "not performed" for good (V7); a routed snapshot create answered "not
 performed" ended in an operator hold (V8); and a revert refused for good told the user to
 retry. **Nothing is breaking and no CRD, RBAC, chart or proto changed.** Roll the manager
-(V8, the hint) and the libvirt providers (V7). One libvirt change adds an optional sudo
-rule.
+(V8, the hint) and the libvirt providers (V7). On libvirt hosts, grant the existing
+`VR_DISK_READ` sudo rule over the pool directory if you have not (see below).
 
 | Finding | What changed | Breaking |
 |---|---|---|
-| V7 | libvirt: the disk in-use check no longer opens, as the SSH user, a shut-off VM's backing store that its disk's chain already read; a check that cannot read an image says "permission denied" and where the fix is documented; after every snapshot and revert, the VM's own snapshot overlays get the owner and mode of a VM disk | No. A libvirt snapshot create or revert reads the domain definition once more afterwards, and runs `sudo -n chown -h` / `sudo -n chmod g+r` on the VM's own overlays when needed |
-| V8 | Manager: a `VMSnapshot` create that a clustered Provider answers it did not perform is retried every minute as a new attempt instead of ending in `SnapshotOutcomeUnknown` | No |
+| V7 | libvirt: the disk in-use check no longer opens, as the SSH user, a shut-off VM's backing store that its disk's chain already read; a check that cannot read an image says "permission denied" and where the fix is documented | No. The single-host command sequences are those of rc7 |
+| V8 | Manager: a `VMSnapshot` create that a clustered Provider answers it did not perform is retried as a new attempt with an exponential backoff (1 minute, doubling, up to 10 minutes) instead of ending in `SnapshotOutcomeUnknown` | No |
 | Revert hint | Manager: a revert the provider refuses for good no longer ends with "remove `spec.snapshot.revertToRef` and set it again to retry" | No (message only) |
 
 ### libvirt: other VMs' disk checks no longer fail on a snapshot overlay (V7)
@@ -93,24 +93,17 @@ the VM powered off, every snapshot and every revert left such a file.
   retried` (`on a host of this Provider` for the cluster-wide check). It names no image,
   host or other VM, and is still `Unavailable` + `VM_DISK_CHECK_FAILED`: fail-closed,
   retried, never counted by the circuit breaker. The provider log names the file.
-- **The VM's own overlays get the mode of a VM disk.** After every successful snapshot
-  create and revert, the provider reads the definition again and gives each of the VM's
-  own overlays (`<domain>-disk.<snapshot>` or `<domain>-disk.<epoch>`, above the VM's
-  own disk; never that disk or anything below it) the owner `libvirt-qemu:kvm` and group
-  read, as the disks VirtRigaud creates. Only a regular file (not a symbolic link)
-  directly inside the pool or an allowed image directory, in a directory no other account
-  can write, is changed (`sudo -n chown -h`, then `sudo -n chmod g+r`). A running VM's
-  overlay only gets group read, and only when it already belongs to `libvirt-qemu:kvm`.
-  Overlays left `0600` by an earlier snapshot, revert or release are repaired by the
-  VM's next snapshot or revert. A file that cannot be changed is logged
-  (`WARN Not normalising snapshot overlay ...`) and never fails the snapshot or revert.
+- **The provider does not change the overlays.** They stay as libvirt makes them:
+  `0600`, owned by root while the VM is off. The check reads their metadata as root
+  only through the existing `VR_DISK_READ` sudo rule.
 
-**Action.** To let the provider change the overlays, give its SSH user the
-`VR_OVERLAY_MODE` sudo rule ([Unreadable disk images](docs/libvirt-clones.md#unreadable-disk-images));
-without it, `VR_DISK_READ` must cover the pool directory. Overlays rc7 or earlier left
-`0600` stay so until their VM's next snapshot or revert; to fix them now, follow the
-manual repair in the same section (`chown -h libvirt-qemu:kvm` and `chmod 0640`, with
-the VM off).
+**Action.** Grant the provider's SSH user `VR_DISK_READ` over the pool directory (and
+every other directory VM disks live in): see
+[Unreadable disk images](docs/libvirt-clones.md#unreadable-disk-images). On an NFS pool,
+root reads only when the export does not squash root; such an export must be dedicated
+to the Provider's hosts. Where the rule cannot be granted, the same section describes
+the manual repair (`chown -h libvirt-qemu:kvm` and `chmod 0640`, with the VM off), which
+every new snapshot or revert needs again.
 
 → [`docs/libvirt-clones.md`](docs/libvirt-clones.md#unreadable-disk-images)
 
@@ -127,9 +120,11 @@ A routed create the provider answers it did not perform (`VM_DISK_CHECK_FAILED`,
 `HOST_UNAVAILABLE`, `VM_OPERATION_FAILED` "not performed", a request that was not sent)
 now closes its attempt: the marker is removed, the `VMSnapshot` shows
 `Ready=False/ProviderError` ("The provider did not perform the snapshot creation ..."),
-with the answer in its `SnapshotCreateRetrying` event, and the create is sent again
-after a minute as a new attempt, with the same request token. An answer that leaves the
-outcome unknown (`VM_OUTCOME_UNKNOWN_RETRY`, a bare `Unavailable`) keeps the marker, the
+with the answer in its `SnapshotCreateRetrying` event, and the create is sent again as
+a new attempt, with the same request token, after 1 minute, doubling for each
+consecutive such answer up to 10 minutes (per `VMSnapshot`, in the manager's memory;
+any other answer resets it). A reconcile before the wait has passed sends nothing. An
+answer that leaves the outcome unknown (`VM_OUTCOME_UNKNOWN_RETRY`, a bare `Unavailable`) keeps the marker, the
 re-send count and the hold, as before. Roll the manager.
 
 → [`docs/provider-call-outcomes.md`](docs/provider-call-outcomes.md)

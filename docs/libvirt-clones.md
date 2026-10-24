@@ -767,7 +767,8 @@ manager never counts toward the Provider's circuit breaker and handles as
 for any check that could not run ([How the dependency is found](#how-the-dependency-is-found)):
 a VM delete is retried, and a `VMSnapshot` on a clustered Provider shows
 `Ready=False/ProviderError` with the answer in its `SnapshotCreateRetrying`
-event and is sent again every minute until the image is fixed. The answer
+event and is sent again (after 1 minute, doubling up to 10 minutes) until
+the image is fixed. The answer
 never names the image: it can be another tenant's VM's. The provider log
 does:
 
