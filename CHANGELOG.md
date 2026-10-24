@@ -5,6 +5,23 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-10-24 21:00] - Release notes for v0.4.0-rc8
+**Author:** @wrkode (William Rizzo)
+
+### Changed
+- `docs/release-notes/next.md`: retitled for v0.4.0-rc8 (header comment, opening paragraph, "About this release candidate": rc1, rc2, rc4, rc5, rc6 and rc7 came before; rc3 was tagged but not released). "Changes since v0.4.0-rc7" gets a rewritten intro, a table covering all five items and PR numbers in the headings: #437 (V7, V8, the revert hint) and #438 (V9, V10). New "Upgrade order for rc8": the only CRD difference since rc7 is the description of `status.ips` (checked on `config/crd/bases`; the chart templates, `config/rbac` and the proto did not change), the `VR_DISK_READ` grant over the pool directory (or the manual `chown`/`chmod` repair) on libvirt hosts that cannot read libvirt's `0600` overlays, then the manager (V8, the hint, V9), then the libvirt providers (V7, V9, V10), what an older provider or manager means, and the rollback.
+- `docs/release-notes/next.md`: "About this release candidate" gains a "New since rc7" test list (other VMs after an offline snapshot and a revert, the backoff of an unreadable image, `status.ips` on every provider, a NAT guest without the agent, a bridged guest) and "Validated in the lab since rc7" (v0.4.0-rc7 on Kubernetes 1.34, a vCenter, a single-node PVE 9.2 and libvirt 10.0, single-host and a two-host clustered Provider on an NFS pool: the libvirt revert, the refusals, a memory snapshot, V3c follow-up, the rc6 to rc7 upgrade, V7 to V10 found, and the bridged lab network). The "Not run" list drops the libvirt revert and names everything new in rc8. "Breaking changes" (nothing breaking, four behaviour changes and one operator action), "Fixes", "Known limitations" (libvirt overlays are `0600` and need `VR_DISK_READ`; a bridged guest needs the guest agent for `status.ips`; a revert the provider did not perform is still counted as unknown; a single-host `VMSnapshot` create not performed fails instead of retrying) and "Upgrade" carry the rc8 items.
+- `docs/upgrading.md`: a row in the behaviour-change table (the disk check reads libvirt's `0600` overlays, the `VR_DISK_READ` grant, the routed snapshot create backoff) and a provider-order bullet for rc8 (what an older provider or manager means).
+
+### Why
+rc7 validation on real libvirt 10.0 hosts and on a bridged lab network found V7 to V10 and a revert-message nit, now fixed on main (#437, #438). People who test rc8 need to know the one operator action, the upgrade order, the `status.ips` change, and what was and was not validated.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [ ] Config change only
+- [x] Documentation only
+
 ## [2026-10-24 18:00] - libvirt snapshot overlays no longer block other VMs' disk checks; a routed snapshot create that was not performed is retried with a backoff, not held (V7, V8)
 **Author:** @wrkode (William Rizzo)
 
