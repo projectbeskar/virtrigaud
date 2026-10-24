@@ -6,8 +6,9 @@ provider's `SnapshotRevert`, the VM stayed `Ready`, and no condition or event sa
 nothing happened. Since the release after rc5 the `VirtualMachine` controller acts on it,
 under the rules below.
 
-> This flow is covered by unit and envtest tests against the mock provider. It has not
-> been validated on a real vSphere, libvirt or Proxmox host yet.
+> This flow is covered by the controller's unit and envtest tests, which drive a
+> scripted provider fake (not the mock provider binary, nor the gRPC transport). It has
+> not been validated on a real vSphere, libvirt or Proxmox host yet.
 
 ## How to revert
 
@@ -63,15 +64,18 @@ happens to be off, too: the controller would power it on.
   still running is powered off because its spec says so, as for any VM, and is reverted
   on a later reconcile, once a fresh `Describe` reports it `Off`.
 - After the revert, the VM's power follows `spec.powerState` as usual. Reverting to a
-  snapshot that includes memory can leave the VM running on some hypervisors (vSphere
-  does this, see [Providers](#providers)); a VM whose spec still says `Off` is then
-  powered off again.
+  snapshot that includes memory can leave the VM running: the vSphere provider asks
+  vCenter for that explicitly (see [Providers](#providers)), and other hypervisors can
+  restore a memory snapshot's running state too. A VM whose spec still says `Off` is
+  then powered off again.
 - A VM the provider reports `Suspended` or `Unknown` is not `Off`: it waits.
 
 Why: a revert discards the VM's current disk state. Requiring it to be off keeps the
 rule that VirtRigaud never powers off a VM nobody asked to power off, and it makes a
 revert that is sent again (after a lost answer) safe: nothing changes the disks of a VM
-that is off between the two attempts.
+that stays off between the two attempts. A VM seen running, or whose spec asks for it to
+run, after an attempt whose outcome is unknown is therefore never reverted again for
+that request (see [Asynchronous reverts and unknown outcomes](#asynchronous-reverts-and-unknown-outcomes)).
 
 ### The VMSnapshot is resolved fail-closed
 
@@ -86,7 +90,7 @@ when all of these hold; otherwise nothing is sent and the condition says why:
 | Its `status.phase` is `Ready` | `SnapshotNotReady` |
 | It carries the provider's snapshot id (`status.snapshotID`, the id the provider's `SnapshotCreate` answered) | `SnapshotNotReady` |
 | It was taken of this VM: its `status.vmUID` is this VM's UID. A `VMSnapshot` taken by an older manager (no `status.vmUID`) counts only when its timestamps prove it, as for its delete | `SnapshotForAnotherVM` |
-| It was taken through this VM's Provider (`status.boundProvider`) | `SnapshotForAnotherVM` |
+| It was taken through this VM's Provider (`status.boundProvider`: namespace and name, and UID when both are recorded). A `VMSnapshot` that records no Provider (some taken by an older manager) is not refused on this check; the VM UID check above still applies | `SnapshotForAnotherVM` |
 | The Provider does not report `supportsSnapshots: false` (`status.reportedCapabilities`); a Provider that has not reported capabilities is not refused here | `Unsupported` |
 
 These are re-checked every 30 seconds (the `VirtualMachine` controller does not watch
@@ -119,26 +123,41 @@ so a stale cache never sends a second revert. If the installed `VirtualMachine` 
 does not store `status.snapshotRevert` (CRDs older than the manager), nothing is sent
 and the condition is `Unsupported` with a message asking for the CRD upgrade.
 
+The provider's answer is written the same way. If that write loses a `resourceVersion`
+race (the VM's spec or metadata changed while the call ran, for example
+`spec.powerState: On` patched right after `revertToRef`), the controller re-reads the VM
+and writes the record and the condition over the stored status, as long as the stored
+record is still the same attempt. Only if that also fails does the answer stay
+unrecorded, and the outcome is then treated as unknown (below).
+
 ### Asynchronous reverts and unknown outcomes
 
 - **A task.** A provider that answers with a task (Proxmox, the mock provider) has it
   recorded in `status.snapshotRevert.taskRef` and polled every 10 seconds. While it
   runs, nothing else is done to the VM: it is not powered on, resized or reverted again,
-  even if its spec changes. A task that ends in failure fails the revert. A task the
-  provider no longer knows (`NotFound`) is forgotten and its outcome treated as unknown.
+  even if its spec changes, and removing `revertToRef` clears the record only once the
+  task has ended. A task that ends in failure fails the revert. So does a task the
+  provider reports, in its task-status answer, that it does not know (Proxmox and the
+  mock provider answer that way): fail-closed, never re-sent. A task-status call that
+  fails with `NotFound` forgets the task and treats its outcome as unknown. A task that
+  has not completed 2 hours after the attempt, or whose status cannot be read for that
+  long, is `Failed` with its outcome unknown, so the VM is managed again.
 - **An unknown outcome.** A call that fails without a definite answer (the provider
-  not reached or not answering in time, a retryable answer, a manager restart between
-  the call and the write of its answer) leaves the record `Reverting` with no task. The
-  revert is then sent again, because the VM is off and a second revert reaches the same
-  state as the first:
+  not reached or not answering in time, a retryable answer, a clustered host that
+  stopped answering after the command was sent — `HOST_CONNECTION_LOST` —, or a manager
+  restart between the call and the write of its answer) leaves the record `Reverting`
+  with no task. The revert is then sent again, because a VM that stayed off reaches the
+  same state with a second revert:
   - no sooner than 6 minutes after the last attempt, doubling with each attempt up to 30
     minutes (the manager's own deadline on `SnapshotRevert` is 5 minutes, so the earlier
     call has ended, on the manager's side at least);
   - only if a fresh `Describe` reports the VM `Off` and `spec.powerState` is still `Off`
-    or `OffGraceful`; otherwise the condition says `WaitingForPowerOff` and the attempt
-    waits;
-  - only to the same `VMSnapshot` (same UID). If it was deleted meanwhile, the revert is
-    `Failed` with a message saying the VM may or may not have been reverted;
+    or `OffGraceful`. If the VM is seen in any other state, or its spec asks for it to
+    run, it may have run since the attempt: the revert is `Failed` (`RevertFailed`, the
+    VM may or may not have been reverted) and is never sent again for that request;
+  - only to the same `VMSnapshot` (same UID), and only while the Provider still reports
+    snapshot support. If it was deleted meanwhile, or the Provider now reports
+    `supportsSnapshots: false`, the revert is `Failed` with the same warning;
   - at most 5 calls for one request; after that the revert is `Failed`, with the same
     warning.
 - **A definite failure** (a refusal, an error the provider reported, an unimplemented
@@ -178,7 +197,7 @@ generation.
 | `False` | `SnapshotNotFound` | No `VMSnapshot` of that name in the namespace |
 | `False` | `SnapshotNotReady` | The `VMSnapshot` is not `Ready`, has no `status.snapshotID`, or is being deleted |
 | `False` | `SnapshotForAnotherVM` | The `VMSnapshot` was not taken of this VM (another `spec.vmRef`, VM UID or Provider), or that cannot be proven |
-| `False` | `Unsupported` | The Provider reports no snapshot support, answers that it does not implement `SnapshotRevert`, or the installed CRD cannot record the request |
+| `False` | `Unsupported` | The Provider reports no snapshot support (before the revert is sent; after an attempt whose outcome is unknown this ends the request as `Failed`), answers that it does not implement `SnapshotRevert`, or the installed CRD cannot record the request |
 | `False` | `Reverting` | Sent; the outcome is not known yet (a task runs, or the call is sent again after an unknown outcome) |
 | `True` | `Reverted` | The provider confirmed the revert |
 | `False` | `RevertFailed` | The provider failed or refused it, or its outcome stayed unknown. Remove the field and set it again to retry |
@@ -187,7 +206,9 @@ While `SnapshotReverted` is `False`, **`Ready` is `False`** with the same reason
 message prefixed `Snapshot revert: `, unless `Ready` is already `False` for another
 reason, which it keeps. A VM whose revert failed therefore stays `Ready=False` until the
 field is removed. `status.phase` is not changed by a revert: it follows the power state
-(`Stopped` while the VM is off; see [`vm-status-phase.md`](vm-status-phase.md)).
+(`Stopped` while the VM is off, as it is while a revert runs; `Running` while a revert
+waits for a running VM to be powered off, or after a failed revert of a VM that runs;
+see [`vm-status-phase.md`](vm-status-phase.md)).
 
 ### Events
 
@@ -195,7 +216,7 @@ field is removed. `status.phase` is not changed by a revert: it follows the powe
 |---|---|---|
 | `Normal` | `SnapshotRevertStarted` | A `SnapshotRevert` call is sent (with the attempt number) |
 | `Normal` | `SnapshotRevertSucceeded` | The provider confirmed the revert |
-| `Warning` | `SnapshotRevertFailed` | The revert failed, or its outcome stayed unknown after every allowed attempt |
+| `Warning` | `SnapshotRevertFailed` | The revert failed, or was given up with its outcome unknown |
 
 ## GitOps
 
@@ -237,8 +258,12 @@ error is reported as `RevertFailed`. `SnapshotRevert` does not remove overlay fi
   different CPU or memory size with the snapshot, the manager does not notice it.
 - A `VMSet` whose template sets `revertToRef` gives every member the same `VMSnapshot`
   name; each member accepts only a snapshot of itself.
-- There is no operator confirmation for an unknown outcome; after 5 attempts the revert
-  is `Failed` and has to be requested again.
+- There is no operator confirmation for an unknown outcome. A revert whose outcome stays
+  unknown — after 5 attempts, a VM seen running in between, or a task not completed
+  within 2 hours — is `Failed` with a message saying the VM may or may not have been
+  reverted: check the VM, and request the revert again if it was not.
+- While a revert task runs (up to 2 hours), the VM is not powered on or resized, even if
+  `revertToRef` is removed.
 
 ## Upgrade notes
 

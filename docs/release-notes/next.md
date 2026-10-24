@@ -88,10 +88,13 @@ now acts on the field:
   retried on its own.
 - **Recorded before it is sent.** The attempt is written with the optimistic lock of the
   `resourceVersion` the reconcile read; nothing is sent if the write fails. A provider
-  task (Proxmox) is recorded and polled, and nothing else is done to the VM while it
-  runs. A call whose outcome is unknown (deadline, lost connection, manager restart) is
-  sent again only while a fresh `Describe` shows the VM still off: at least 6 minutes
-  apart, at most 5 calls.
+  task (Proxmox) is recorded and polled (for at most 2 hours), and nothing else is done
+  to the VM while it runs. The answer is kept even when the VM's spec changed during the
+  call. A call whose outcome is unknown (deadline, lost connection, manager restart) is
+  sent again only while a fresh `Describe` shows the VM still off with
+  `spec.powerState` still off: at least 6 minutes apart, at most 5 calls. A VM seen
+  running in between is never reverted again for that request (`RevertFailed`, the VM
+  may or may not have been reverted).
 - **Conditions and events.** New condition `SnapshotReverted` (reasons
   `WaitingForPowerOff`, `SnapshotNotFound`, `SnapshotNotReady`,
   `SnapshotForAnotherVM`, `Unsupported`, `Reverting`, `Reverted`, `RevertFailed`).
@@ -103,8 +106,9 @@ a manager whose CRD prunes the field sends no revert. A VM that already carries
 `spec.snapshot.revertToRef` is acted on by the first reconcile after the upgrade:
 remove the field first from VMs you do not want reverted.
 
-**Not validated on a real hypervisor yet.** It is covered by unit and envtest tests
-against the mock provider only. On libvirt, a snapshot of a VM that is off, or taken
+**Not validated on a real hypervisor yet.** It is covered by the controller's unit and
+envtest tests only, which drive a scripted provider fake (not the mock provider binary,
+nor the gRPC transport). On libvirt, a snapshot of a VM that is off, or taken
 without memory, is an external disk-only snapshot; whether the host's libvirt can
 revert it depends on its version (a refusal is reported as `RevertFailed`).
 

@@ -104,8 +104,8 @@ spec:
 #
 # 4. Power the VM on again if you want it running; the revert does not.
 #    (Reverting to a snapshot taken with memory, like
-#    web-server-01-maintenance-backup, can leave the VM running on vSphere;
-#    a VM whose spec still says Off is then powered off again.)
+#    web-server-01-maintenance-backup, can leave the VM running; a VM whose
+#    spec still says Off is then powered off again.)
 #
 #      kubectl patch vm web-server-01 --type merge -p '{"spec":{"powerState":"On"}}'
 #
