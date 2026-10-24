@@ -610,8 +610,9 @@ Tested with unit tests, a round trip through the real `genisoimage` and `isoinfo
 the vSphere simulator. In the lab, a single-host libvirt clone got its own sealed seed
 with `instance-id` `virtrigaud-<target UID>` and its own hostname, and booted. In the
 lab since rc4 (on v0.4.0-rc4), a clone on a real vSphere showed a new `instance-id`,
-hostname and SSH host key in the guest (the `guestinfo` rewrite on a real vCenter). **Not validated:** new SSH host
-keys in a libvirt guest.
+hostname and SSH host key in the guest (the `guestinfo` rewrite on a real vCenter). In
+the lab since rc5 (on v0.4.0-rc5), a clustered libvirt clone of an Ubuntu cloud-image VM
+got a new `instance-id`, the target's hostname and a new SSH host key.
 → [`docs/vm-ownership.md`](docs/vm-ownership.md#a-clones-host-identity),
 [`docs/libvirt-clones.md`](docs/libvirt-clones.md#a-clones-cloud-init-identity),
 [Upgrade guide](docs/upgrading.md#behavior-changes-that-are-visible-but-not-breaking)
@@ -1301,7 +1302,7 @@ Wave 2 adds to this:
 
 ## About this release candidate / what to test
 
-v0.4.0 GA follows after a soak of this candidate (rc1, rc2 and rc4 came before it; rc3 was tagged but not released). Please try it on a non-production
+v0.4.0 GA follows after a soak of this candidate (rc1, rc2, rc4 and rc5 came before it; rc3 was tagged but not released). Please try it on a non-production
 cluster and report what you find (GitHub issues; include the Provider type, the
 `kubectl describe` of the object involved and the provider log, never a Secret).
 The most useful things to exercise:
@@ -1330,7 +1331,8 @@ The most useful things to exercise:
     local non-root user cannot list or read the seed directory;
   - a clone of a cloud-init VM: new SSH host keys and the target's hostname in the guest,
     and `/var/lib/cloud/data/instance-id` equal to `virtrigaud-<uid>` (libvirt and
-    vSphere; the SSH host keys and vSphere were not validated in the lab);
+    vSphere; validated in the lab for vSphere since rc4 and for a clustered libvirt clone
+    since rc5);
   - deleting a VM and its clone at the same time on single-host libvirt: no seed
     directory left;
   - **a migration into a clustered libvirt Provider** over `s3` and `nfs`, including the
@@ -1353,6 +1355,29 @@ The most useful things to exercise:
   - a migration onto Proxmox: the VM lands on the bridge and VLAN its target names, and
     whether the migrated guest has network (see Known limitations, R36); tell us which
     guest image you used.
+- **New since rc5:**
+  - **snapshot revert** (`spec.snapshot.revertToRef`, not validated on any hypervisor
+    yet): take a `VMSnapshot`, change something in the guest, set `spec.powerState: Off`,
+    name the snapshot, and check `status.snapshotRevert.phase`, the `SnapshotReverted`
+    condition and that the guest is back. Try it on vSphere, on single-host and
+    clustered libvirt, and on Proxmox. On libvirt include a disk-only snapshot of a VM
+    that was powered off when it was taken, and look for overlay files left in the pool
+    afterwards (`<pool>/*-disk.*` that are not `.qcow2`); say which libvirt version the
+    host runs (a revert of an external snapshot needs 9.9 or later). Also: a revert
+    requested while the VM runs waits (`WaitingForPowerOff`), and a re-applied manifest
+    reverts only once;
+  - `kubectl get hostpools`: `TOTAL`, `READY` and `SCHEDULABLE` follow the member
+    hosts, including a cordoned host (`spec.schedulable: false`) and a host that stops
+    answering;
+  - a delete of a clustered VM whose host is unreachable: `DeleteBlocked=True/
+    HostUnreachable` with a message that names the host, and the delete completing
+    once the host answers; `Ready=False/HostUnavailable` on a `Describe` to a host that
+    stopped answering, within the call's deadline and not after 30 seconds;
+  - a VM re-created after `orphan-on-delete` (`Placed=False/RestorePending`): phase
+    `Pending`, not `Failed`;
+  - a VM with `spec.disks` on a libvirt or Proxmox Provider: `DisksApplied=False/
+    NotSupportedByProvider`, the `Warning` event, and the admission warning if you run
+    the chart's VM webhook (`webhooks.enabled` and `manager.maxDiskSize`).
 - **Also new in rc2 (Wave 2):**
   - a CPU or memory change of a running vSphere VM that has no hot-add (expect
     `Reconfiguring=False/ResizePendingPowerOff`, then power it off and on), and a
@@ -1375,7 +1400,8 @@ re-binding, imported-disk confinement, NFS/S3 import hardening, idempotent power
 `Reconfigure` change that no longer touches `scsi0`, the s3 stage publish check, the
 import-stage delete of a failed migration) were tested only against the test fake until
 rc4. The lab since rc4 ("Validated in the lab since rc4", below) ran the paths it lists
-on a real PVE 9.2 node, and found the three defects fixed in rc5 (R33, R34, R36). A Proxmox
+on a real PVE 9.2 node, and found the three defects fixed in rc5 (R33, R34, R36); the lab
+since rc5 added migrations between a Proxmox node and a clustered libvirt Provider. A Proxmox
 path that is not on that list, for example adoption of a Proxmox VM, a reused VMID under
 a managed `VirtualMachine`, a `Reconfigure`, or the import-stage delete of a failed
 migration, is still tested only against the fake: try it on a lab node first. ADR-0012's
@@ -1421,7 +1447,8 @@ seed directory; build `main-71e8647` for the provider-driven R27 checks and
   with `instance-id` `virtrigaud-<target UID>` and its own hostname, and booted (a
   cirros guest). **Not validated in that lab:** new SSH host keys in the guest, and the
   vSphere `guestinfo` rewrite on a real vCenter. The vSphere one was validated later, on
-  v0.4.0-rc4 (below); new SSH host keys in a libvirt guest are still not validated.
+  v0.4.0-rc4, and new SSH host keys in a clustered libvirt guest on v0.4.0-rc5 (both
+below).
 - **Migration into a clustered libvirt Provider (#415, #416),** a two-host Provider on
   a shared NFS pool: a single-host libvirt VM into the cluster over `s3` and over
   `nfs`, both to `Ready`; the target placed before the source was powered off and
@@ -1464,10 +1491,57 @@ real vSphere (new `instance-id`, hostname and SSH host key); vSphere → cluster
 over S3; a clustered clone of a booted VM, which exercises the seed directory (R27,
 #414); and no `.hlog` left by a vSphere import (R23, #409).
 
+**Validated in the lab since rc5**, on v0.4.0-rc5 (the released images): a two-host
+clustered libvirt 10.0 Provider on a shared NFS pool (host A and host B), a single-node
+Proxmox VE 9.2 (the PVE node) and a vCenter, on Kubernetes 1.34. This run found V1 to V4
+(fixed in rc6, see [Changes since v0.4.0-rc5](#changes-since-v040-rc5)) and V5.
+
+- **Placement.** `Spread` put VMs on both hosts, the host with the most free capacity
+  first. The committed CPU and memory metrics counted each VM once.
+- **Routed lifecycle on a clustered VM.** Power off and on. An offline CPU or memory
+  change was applied. An online change beyond the domain's live maximum was reported
+  `Reconfiguring=True/RestartRequired` and applied after a power cycle.
+- **Snapshots on a clustered VM.** Create and delete of a disk-only snapshot; the delete
+  merged the overlay back and no file was left. **Revert was not exercised on rc5:** it
+  was a no-op then (V2, fixed in [#431](#spec-snapshot-reverttoref-reverts-the-vm-431-v2)).
+- **A clustered clone of an Ubuntu cloud-image VM,** source powered off (a started
+  source is held with `SourceMustBePoweredOff`). The clone got the new `instance-id`
+  `virtrigaud-<uid>`, the target's hostname and a **new SSH host key** in the guest, and
+  the source's data was carried over. That closes the "SSH host keys in a libvirt clone"
+  item of the earlier Not run list.
+- **Cordon.** A cordoned host was skipped. With both hosts cordoned the VM was
+  `Placed=False/Unschedulable` with the filter breakdown. After the uncordon it was placed
+  within about 40 seconds, without intervention.
+- **A host made unreachable from the provider.** Its `Host` went `Ready=False`. A
+  `Describe`, a power change and a delete of its VMs were held (the delete kept its
+  finalizer and the domain), and all of them converged within seconds once the host
+  answered. No domain, disk or seed was left. The inconsistent answers and the silent
+  delete hold seen here are V3c and V3a.
+- **`orphan-on-delete`, then a re-create of the same name.** The new VM was held with
+  `RestorePending`, shown as phase `Failed` on rc5 (V3b, fixed in
+  [#432](#a-vm-held-by-a-restore-guard-is-pending-not-failed-432-v3b)). The re-attach
+  runbook in [`docs/clustered-restore.md`](docs/clustered-restore.md#re-attach-runbook)
+  worked as written and bound the running domain without a restart.
+- **Deleting a Provider that still had a VM:** `DeleteBlocked=True/ProviderInUse`, the
+  runtime kept, and released after the VM was deleted.
+- **Migrations,** all to `Ready`. Clustered libvirt → Proxmox over S3, the first export
+  out of a clustered Provider; the guest had no network (R36, see Known limitations).
+  Proxmox → clustered libvirt over NFS and vSphere → clustered libvirt over NFS; both
+  guests were reachable. A manager restart during the import held two migrations as
+  `ImportOutcomeUnknown` and re-sent them 35 minutes after the request, as documented;
+  no duplicate disk was left (V5, below).
+- **Findings.** V1 to V4 are fixed in rc6 (the "Changes since v0.4.0-rc5" subsections
+  above). **V5:** a manager restart in the middle of an import costs 35 minutes before
+  the import is re-sent. This is the documented behaviour of an import whose outcome is
+  not known ([`docs/provider-call-outcomes.md`](docs/provider-call-outcomes.md)) and is
+  unchanged.
+- **Not run on rc6 yet:** everything new in rc6. It will be validated on this candidate.
+
 **Not run:** Proxmox adoption; a reused VMID and the ADR-0012 name rule (which needs a
 PVE cluster); a Proxmox `Reconfigure` (resize); the Proxmox import-stage delete of a
-failed migration; a PVE cluster of more than one node; SSH host keys in a libvirt clone;
-an SELinux libvirt host; and the paths named above that need a fault to trigger.
+failed migration; a PVE cluster of more than one node; a snapshot revert on any
+hypervisor; an SELinux libvirt host; and the paths named above that need a fault to
+trigger.
 
 ## Breaking changes
 
@@ -2489,6 +2563,24 @@ says so. Each links to the page that documents it in full, where one exists.
   from a `spec.disks` entry or adds a disk. vSphere grows only an additional disk that
   `Create` recorded under the entry's name, so the additional disks of VMs created by
   rc1 or earlier are not resized. Proxmox resizes none.
+- **`spec.disks` is reported on libvirt and Proxmox, but only in some places.** The
+  `DisksApplied=False` condition and the `Warning` event are always there. The
+  admission warning is given only where the `VirtualMachine` validating webhook is
+  rendered, which the chart does only with `webhooks.enabled=true` **and**
+  `manager.maxDiskSize` set; without a disk-size limit there is no admission warning.
+  vSphere attaches `spec.disks` at create but ignores an entry added after the VM was
+  created, with no condition and no event (the provider logs it at `INFO`); nothing
+  refuses either case
+  (→ [`docs/reconfigure-results.md`](docs/reconfigure-results.md#which-disk-a-size-goes-to)).
+- **Snapshot revert (`spec.snapshot.revertToRef`) has not run on a real hypervisor,
+  and a libvirt revert of a disk-only snapshot needs libvirt 9.9 or later.** A snapshot
+  the libvirt provider takes of a VM that is off, or without memory, is an external
+  disk-only snapshot; older libvirt cannot revert one and the provider reports
+  `RevertFailed`. A revert removes no overlay file, and the cleanup that
+  `SnapshotDelete` runs recognises only the primary disk's `<domain>-disk.<snapshot>`
+  overlay, so a revert may leave overlay files that nothing removes: check the pool
+  (`<pool>/*-disk.*` that are not `.qcow2`) after a revert, and tell us what you find
+  (→ [`docs/vm-snapshot-revert.md`](docs/vm-snapshot-revert.md#providers)).
 - **Held calls need an operator.** A `VMMigration` or `VMSnapshot` held in
   `SnapshotOutcomeUnknown`, `ExportOutcomeUnknown` or `ImportOutcomeUnknown` stays held
   until you check the provider and confirm the attempt with
