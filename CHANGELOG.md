@@ -33,6 +33,33 @@ Validating v0.4.0-rc7 on real libvirt 10.0 hosts (AppArmor, a shared NFS pool us
 - [ ] Config change only
 - [ ] Documentation only
 
+## [2026-10-24 16:30] - `status.ips` lists only addresses a user can reach the VM on (V9)
+**Author:** @wrkode (William Rizzo)
+
+### Changed
+- `internal/providers/contracts/routable_ips.go`: new `RoutableIPs`, the one normaliser for VM addresses. Entries are parsed with `net/netip`; loopback, unspecified, IPv4 and IPv6 link-local and multicast addresses and entries that do not parse (including `addr/prefix`) are dropped; an IPv4-mapped IPv6 address becomes the IPv4 address, an IPv6 zone is removed, duplicates (also differently spelled IPv6) are dropped, the provider's order is kept. Private, IPv6 unique-local and global addresses stay. The result is `nil` when nothing is left.
+- `internal/controller/virtualmachine_controller.go`: the `Describe` answer is normalised once (`desc.IPs = contracts.RoutableIPs(desc.IPs)`) before the IP-discovery metric, `status.ips` and the requeue interval read it, so every provider (vSphere, libvirt, Proxmox, mock) behaves the same. `vmadoption_controller.go`, `vmadoption_singlehost.go` and `vmadoption_clustered.go` normalise the addresses they copy into an adopted VM's status.
+- `api/infra.virtrigaud.io/v1beta1/virtualmachine_types.go`, `config/crd/bases/infra.virtrigaud.io_virtualmachines.yaml`: the description of `status.ips` says what is listed (regenerated with `make generate manifests`; the schema is unchanged).
+- `docs/vm-status-ips.md` (new), `docs/README.md`, `docs/upgrading.md`, `docs/release-notes/next.md` ("Changes since v0.4.0-rc7"): what is listed, the behaviour change for anything that parses `status.ips`, where each provider gets its addresses, and that a libvirt guest on a bridge shows no address unless the QEMU guest agent runs in the guest.
+
+### Fixed
+- `internal/providers/libvirt/provider_virsh.go`: `describeOn` appended every address the guest agent reported for every guest interface, loopback and IPv6 link-local included, so `status.ips` read `["127.0.0.1","::1","192.0.2.31","fe80::..."]` and `primary_ip` in `status.provider` could be `127.0.0.1`. The agent's addresses go through `contracts.RoutableIPs` first; an agent that reports only unreachable addresses falls back to the `virsh domifaddr` list.
+
+### Tests
+- `internal/providers/contracts/routable_ips_test.go`: table test of every rule (IPv4 and IPv6 loopback, unspecified, link-local with and without a zone, multicast, boundary addresses just outside each range, private, ULA, global), de-duplication and IPv6 spellings, IPv4-mapped addresses, order, whitespace, garbage, and that the input is not modified.
+- `internal/controller/virtualmachine_status_ips_test.go`: `reconcileVM` writes `status.ips` normalised for a provider answer with loopback and link-local addresses, rewrites a status that already holds them, and leaves it empty when nothing is reachable; a VM with only unreachable addresses is still "waiting for an IP" in `getRequeueInterval`.
+
+### Why
+Rc7 lab validation (V9): `status.ips` of a libvirt VM with the guest agent listed loopback and link-local addresses. The field is for reaching the VM, and every provider should answer the same way, so the filter is applied once in the manager rather than per provider.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
+Behaviour change for anything that parses `status.ips` (the loopback and link-local entries are gone). Roll the manager; roll the libvirt provider for the `primary_ip` fix. No CRD schema change.
+
 ## [2026-10-24 15:00] - Release notes for v0.4.0-rc7
 **Author:** @wrkode (William Rizzo)
 

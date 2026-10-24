@@ -141,6 +141,29 @@ VM depends on the disk (`VM_DISK_IN_USE`) and any other failure keep the retry h
 
 → [`docs/vm-snapshot-revert.md`](docs/vm-snapshot-revert.md#libvirt)
 
+### `status.ips` lists only addresses a user can reach the VM on (V9)
+
+Found by validating rc7 in the lab: on a libvirt VM with a running QEMU guest agent,
+`status.ips` listed every address of every guest interface, loopback and IPv6
+link-local addresses included (for example `["127.0.0.1","::1","192.0.2.31","fe80::5054:ff:fe88:d0c1"]`).
+
+**Behaviour change for anyone who parses `status.ips`.** The manager now filters every
+provider's answer before it writes the field, so the list means the same on every
+provider: loopback (`127.0.0.0/8`, `::1`), unspecified (`0.0.0.0`, `::`), IPv4 link-local
+(`169.254.0.0/16`), IPv6 link-local (`fe80::/10`) and multicast addresses, and anything
+that is not an IP address, are dropped; duplicates are removed; the provider's order is kept; private, IPv6
+unique-local and global addresses stay. The example above now reads `["192.0.2.31"]`.
+A script that took `status.ips[0]`, or looked for a loopback or link-local entry, must
+read the first reachable address instead. The next reconcile of each VM rewrites the field.
+
+- The libvirt provider applies the same rule to the guest agent's answer, so
+  `primary_ip` in `status.provider` is no longer `127.0.0.1`, and an agent that reports
+  only unreachable addresses falls back to the `virsh domifaddr` list.
+- No CRD schema change; only the description of `status.ips` in the CRD changed.
+- A libvirt guest on a bridge (`VMNetworkAttachment` `spec.network.libvirt.bridge`) shows no
+  address unless the QEMU guest agent runs in the guest: libvirt holds no DHCP lease for it.
+  Details in [`docs/vm-status-ips.md`](docs/vm-status-ips.md).
+
 ## Changes since v0.4.0-rc6
 
 Two pull requests, #435 and #434, both merged 2026-10-24. They fix what validating rc6
