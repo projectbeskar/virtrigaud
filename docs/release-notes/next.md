@@ -1699,6 +1699,25 @@ trigger.
   make them private. → [Changes since v0.4.0-rc2](#libvirt-cloud-init-seeds-are-private-and-live-in-a-dedicated-directory-414-breaking),
   [Upgrade guide](docs/upgrading.md#breaking-changes)
 
+**New since rc5: nothing is breaking.** Behaviour changes that need a look before you
+roll (in the manager):
+
+- `spec.snapshot.revertToRef` now reverts the VM; it did nothing before. A VM that
+  carries the field is acted on by the first reconcile of the new manager: remove the
+  field from VMs you do not want reverted first (#431).
+- A VM held by a clustered restore guard (`RestorePending`, `OwnDomainOnAnotherHost`,
+  `UniquenessCheckFailed`, `ProviderLacksListOwnerFilter`) is `status.phase: Pending`,
+  not `Failed`; alerts that count `Failed` VMs no longer see them (#432).
+- A clustered delete whose host stopped answering during the call is held with
+  `DeleteBlocked=True/HostUnreachable` (a `Warning` event `DeleteBlocked`) and retried
+  with the 15 s to 5 min backoff; its message can now contain the VM's `Host` name
+  (#432).
+- A VM with `spec.disks` on a libvirt or Proxmox Provider gets the new condition
+  `DisksApplied=False/NotSupportedByProvider` and a `Warning` event; `Ready` is not
+  affected (#432).
+
+→ [Changes since v0.4.0-rc5](#changes-since-v040-rc5)
+
 **New since rc4: nothing is breaking.** Behaviour changes that need a look before you
 roll (all on Proxmox, and in the manager):
 
@@ -1973,6 +1992,18 @@ policy and grants → manager → providers), and rollback caveats in
   [`docs/clustered-provider-inventory.md`](docs/clustered-provider-inventory.md#migration-into-a-clustered-provider-addendum-b)).
 
 ### Fixes
+
+- **New since rc5** (→ [Changes since v0.4.0-rc5](#changes-since-v040-rc5)):
+  - **`HostPool.status` was never written**; every pool showed `status: null` (#430; V1).
+  - **`spec.snapshot.revertToRef` was accepted and ignored**: the VM stayed `Ready` with
+    no condition or event (#431; V2).
+  - **A clustered host that stopped answering was reported as `HOST_UNAVAILABLE` or,
+    after 30 seconds, as `Unknown`**, and a delete held for it said nothing about why
+    (#432; V3c, V3a).
+  - **A VM held by a clustered restore guard showed `Failed`** although it proceeds once
+    the cause is gone (#432; V3b).
+  - **`spec.disks` on libvirt and Proxmox was dropped without any sign**, and
+    `Reconfiguring` said "VM reconfigured successfully" (#432; V4).
 
 - **New since rc4** (→ [Changes since v0.4.0-rc4](#changes-since-v040-rc4)):
   - **A Proxmox VM with user-data failed to start on a stock PVE**: the cloud-init drive
@@ -2633,6 +2664,12 @@ says so. Each links to the page that documents it in full, where one exists.
   [docs/upgrading.md](docs/upgrading.md#leftovers-from-earlier-releases).
 
 ## Upgrade
+
+Since rc5: **three CRDs changed** (`VirtualMachine` gains `status.snapshotRevert`,
+`HostPool` gains printer columns, `VMSet` a description). Remove
+`spec.snapshot.revertToRef` from VMs you do not want reverted, apply the CRDs, then roll
+the manager (its role gains `hostpools/status`) and the clustered libvirt provider; see
+[Upgrade order for rc6](#upgrade-order-for-rc6).
 
 Since rc4: **no CRD changed.** Grant the PVE token `VM.Config.Network`,
 `VM.Config.Cloudinit` and `SDN.Use` on its bridges, then roll the manager and the
