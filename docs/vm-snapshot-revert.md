@@ -325,14 +325,12 @@ cloud-init stored its seed. Since v0.4.0-rc7:
 
 **Overlay permissions.** libvirt creates the overlay of a disk-only snapshot, and the
 new `<domain>-disk.<epoch>` overlay of a revert, with mode `0600` (owned by root while
-the VM is off). The disk in-use check every other VM's snapshot, revert or delete runs
-reads every domain's disk chain on the host, and fails on such a file when the
-provider's SSH user can read it neither directly nor through its `VR_DISK_READ` sudo
-rule. After every snapshot and every revert, the provider therefore gives the VM's own
-overlays the mode and owner of a VirtRigaud disk (`libvirt-qemu:kvm`, group read), and
-repairs the ones an earlier snapshot, revert or release left `0600`. It never fails the
-snapshot or revert for it. The rules, the sudo rule it needs and the manual repair are in
-[Unreadable disk images](libvirt-clones.md#unreadable-disk-images).
+the VM is off). The disk in-use check that every other VM's snapshot, revert or delete
+runs reads every domain's disk chain on the host. It fails on such a file ("permission
+denied reading a disk image") when the provider's SSH user cannot read it and its
+`VR_DISK_READ` sudo rule does not cover the file's directory. Grant `VR_DISK_READ` over
+the pool directory: see [Unreadable disk images](libvirt-clones.md#unreadable-disk-images),
+which also describes the manual repair.
 
 **Interrupted ejections are repaired.** If the provider, its connection or the host
 fails between the eject and the re-insert, the VM is left with an empty CD-ROM and the
