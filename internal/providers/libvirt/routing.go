@@ -611,6 +611,17 @@ func routedRPCErrorFor(kind hostOpKind, op string, err error) error {
 	if stderrors.As(err, &sr) {
 		return sourceRunningStatus(fmt.Sprintf("failed to %s: %v", op, sr), true).Err()
 	}
+	// A revert refused because the snapshot records a read-only disk as
+	// external, or one that libvirt made but that rewrote a read-only disk
+	// (snapshot_readonly_disks.go): a definite, terminal answer.
+	var ru *snapshotRevertUnsafeError
+	if stderrors.As(err, &ru) {
+		return vmOperationStatus(codes.FailedPrecondition, fmt.Sprintf("failed to %s: %s", op, ru.Error()))
+	}
+	var rb *snapshotRevertBrokeDisksError
+	if stderrors.As(err, &rb) {
+		return vmOperationStatus(codes.FailedPrecondition, fmt.Sprintf("failed to %s: %s", op, rb.Error()))
+	}
 	var cr *copyRefusedError
 	if stderrors.As(err, &cr) {
 		log.Printf("WARN %s refused: %v", op, cr)

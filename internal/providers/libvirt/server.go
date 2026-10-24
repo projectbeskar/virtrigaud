@@ -660,11 +660,18 @@ func snapshotCreateWith(ctx context.Context, conn libvirtConn, domain string, re
 		diskSources = strings.TrimSpace(res.Stdout)
 	}
 
+	// The domain's read-only disks and removable media (its cloud-init seed
+	// CD-ROM): never part of a snapshot (snapshot_readonly_disks.go).
+	excluded, err := snapshotExcludedTargetsOf(ctx, hostConnRunner{conn: conn}, domain)
+	if err != nil {
+		return nil, atStage(stageBefore, fmt.Errorf("failed to create snapshot: %w", err))
+	}
+
 	// Build the virsh snapshot-create-as arguments. A memory-inclusive (full
 	// system) snapshot omits --disk-only and is only possible for a RUNNING
 	// domain (there is no RAM state to capture otherwise); any other case is a
 	// disk-only snapshot.
-	args, memorySnapshot := buildSnapshotCreateArgs(domain, snapshotName, description, req.IncludeMemory, domainState == "running")
+	args, memorySnapshot := buildSnapshotCreateArgs(domain, snapshotName, description, req.IncludeMemory, domainState == "running", excluded)
 	switch {
 	case memorySnapshot:
 		log.Printf("INFO Creating memory snapshot (full system checkpoint including RAM) for domain %s", domain)
@@ -768,7 +775,14 @@ func singleHostSnapshotFailure(ctx context.Context, conn libvirtConn, domain str
 // for a RUNNING domain (a stopped domain has no RAM state). In every other case
 // (includeMemory false, or the domain not running) a --disk-only snapshot is
 // taken. The boolean lets the caller log/report honestly which kind was made.
-func buildSnapshotCreateArgs(vmID, name, description string, includeMemory, running bool) (args []string, memorySnapshot bool) {
+//
+// Every target in excluded (the domain's read-only disks, CD-ROMs and
+// floppies: domainDisksDoc.snapshotExcludedTargets) gets `--diskspec
+// <target>,snapshot=no`, in both kinds, so that no snapshot ever records the
+// cloud-init seed as a snapshot disk (snapshot_readonly_disks.go). Disks
+// without a diskspec keep libvirt's defaults (external, default overlay name,
+// for --disk-only).
+func buildSnapshotCreateArgs(vmID, name, description string, includeMemory, running bool, excluded []string) (args []string, memorySnapshot bool) {
 	args = []string{
 		"snapshot-create-as",
 		vmID,
@@ -778,9 +792,10 @@ func buildSnapshotCreateArgs(vmID, name, description string, includeMemory, runn
 	}
 	if includeMemory && running {
 		// No --disk-only flag → full snapshot including memory.
-		return args, true
+		return append(args, snapshotDiskspecArgs(excluded)...), true
 	}
-	return append(args, "--disk-only"), false
+	args = append(args, "--disk-only")
+	return append(args, snapshotDiskspecArgs(excluded)...), false
 }
 
 // routedSnapshotIDRE is the shape of every snapshot name this provider creates
@@ -943,8 +958,10 @@ func (s *Server) SnapshotRevert(ctx context.Context, req *providerv1.SnapshotRev
 }
 
 // snapshotRevertOn is the SnapshotRevert core, run on connection conn against
-// domain (see snapshotCreateOn). The virsh command sequence is the historical
-// one, unchanged.
+// domain (see snapshotCreateOn). Before the revert it refuses a snapshot that
+// records a read-only disk as external (checkSnapshotRevertSafe); after it, a
+// read-only disk libvirt rewrote fails the call
+// (checkRevertKeptReadOnlyDisks).
 func snapshotRevertOn(ctx context.Context, conn libvirtConn, domain, snapshotID string) (*providerv1.TaskResponse, error) {
 	if err := checkSnapshotIDArgument(snapshotID); err != nil {
 		return nil, err
@@ -973,29 +990,46 @@ func snapshotRevertOn(ctx context.Context, conn libvirtConn, domain, snapshotID 
 		return nil, fmt.Errorf("failed to revert to snapshot: %w", err)
 	}
 
-	// Revert to snapshot
-	// Format: virsh snapshot-revert DOMAIN SNAPSHOT --running|--paused
-	args := []string{
-		"snapshot-revert",
-		domain,
-		snapshotID,
-		"--force", // Force revert even if domain is running
+	// A snapshot that records the domain's read-only seed CD-ROM as an
+	// external disk (taken by v0.4.0-rc6 or earlier) is refused before
+	// anything changes: libvirt would rewrite the CD-ROM to an overlay the VM
+	// cannot open (snapshot_readonly_disks.go).
+	baseline, err := checkSnapshotRevertSafe(ctx, hostConnRunner{conn: conn}, domain, snapshotID)
+	if err != nil {
+		return nil, err
 	}
 
-	// If domain was running, keep it running after revert
-	if domainState == "running" {
-		args = append(args, "--running")
-	}
-
-	result, err := conn.Virsh(ctx, args...)
+	result, err := conn.Virsh(ctx, buildSnapshotRevertArgs(domain, snapshotID, domainState)...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to revert to snapshot: %w", err)
 	}
 
 	log.Printf("INFO Successfully reverted to snapshot: %s\nOutput: %s", snapshotID, result.Stdout)
 
+	// The revert happened: a read-only disk libvirt rewrote anyway is
+	// answered as a failure, not a success (the VM may not start).
+	if err := checkRevertKeptReadOnlyDisks(ctx, hostConnRunner{conn: conn}, domain, snapshotID, baseline); err != nil {
+		return nil, err
+	}
+
 	// Return empty response (synchronous operation)
 	return &providerv1.TaskResponse{}, nil
+}
+
+// buildSnapshotRevertArgs builds `virsh snapshot-revert DOMAIN SNAPSHOT
+// --force [--running]`: --force reverts even a running domain, and a domain
+// that was running is kept running.
+func buildSnapshotRevertArgs(domain, snapshotID, domainState string) []string {
+	args := []string{
+		"snapshot-revert",
+		domain,
+		snapshotID,
+		"--force", // Force revert even if domain is running
+	}
+	if domainState == "running" {
+		args = append(args, "--running")
+	}
+	return args
 }
 
 // Clone creates a VM clone. It delegates to the libvirt Provider

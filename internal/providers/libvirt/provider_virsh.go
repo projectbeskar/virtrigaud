@@ -2652,24 +2652,21 @@ func (p *Provider) SnapshotCreate(ctx context.Context, req contracts.SnapshotCre
 		return contracts.SnapshotCreateResponse{}, fmt.Errorf("failed to create snapshot: %w", err)
 	}
 
-	// Build virsh snapshot-create-as command
-	args := []string{
-		"snapshot-create-as",
-		vmID,
-		snapshotName,
-		"--description", description,
-		"--atomic", // Ensure atomic operation
+	// The domain's read-only disks and removable media (its cloud-init seed
+	// CD-ROM) are never part of a snapshot (snapshot_readonly_disks.go).
+	excluded, err := snapshotExcludedTargetsOf(ctx, p.virshProvider, vmID)
+	if err != nil {
+		return contracts.SnapshotCreateResponse{}, fmt.Errorf("failed to create snapshot: %w", err)
 	}
 
-	// Determine snapshot type based on domain state and request
-	if req.IncludeMemory && domainState == "running" {
-		// Memory snapshot (full system checkpoint including RAM)
+	// Build virsh snapshot-create-as command: a memory snapshot (full system
+	// checkpoint including RAM) for a running domain that asked for one, a
+	// disk-only snapshot otherwise.
+	args, memorySnapshot := buildSnapshotCreateArgs(vmID, snapshotName, description, req.IncludeMemory, domainState == "running", excluded)
+	if memorySnapshot {
 		log.Printf("INFO Creating memory snapshot (includes RAM state)")
-		// No --disk-only flag = full snapshot with memory
 	} else {
-		// Disk-only snapshot (faster, no memory state)
 		log.Printf("INFO Creating disk-only snapshot")
-		args = append(args, "--disk-only")
 	}
 
 	// Execute snapshot creation
@@ -2736,25 +2733,23 @@ func (p *Provider) SnapshotRevert(ctx context.Context, vm contracts.VMRef, snaps
 		return "", fmt.Errorf("failed to revert to snapshot: %w", err)
 	}
 
-	// Revert to snapshot
-	args := []string{
-		"snapshot-revert",
-		vmId,
-		snapshotId,
-		"--force", // Force revert even if domain is running
+	// Refuse a snapshot that records the read-only seed CD-ROM as external
+	// (snapshot_readonly_disks.go) before anything changes.
+	baseline, err := checkSnapshotRevertSafe(ctx, p.virshProvider, vmId, snapshotId)
+	if err != nil {
+		return "", err
 	}
 
-	// If domain was running, keep it running after revert
-	if domainState == "running" {
-		args = append(args, "--running")
-	}
-
-	result, err := p.virshProvider.runVirshCommand(ctx, args...)
+	result, err := p.virshProvider.runVirshCommand(ctx, buildSnapshotRevertArgs(vmId, snapshotId, domainState)...)
 	if err != nil {
 		return "", fmt.Errorf("failed to revert to snapshot: %w", err)
 	}
 
 	log.Printf("INFO Successfully reverted to snapshot: %s\nOutput: %s", snapshotId, result.Stdout)
+
+	if err := checkRevertKeptReadOnlyDisks(ctx, p.virshProvider, vmId, snapshotId, baseline); err != nil {
+		return "", err
+	}
 
 	// Return empty task reference (synchronous operation)
 	return "", nil

@@ -83,6 +83,13 @@ type domainDiskElem struct {
 		Pool   string `xml:"pool,attr"`
 		Volume string `xml:"volume,attr"`
 	} `xml:"source"`
+	// Target is the element's own <target dev=...>: the disk's name in
+	// libvirt's snapshot disk lists (snapshot_readonly_disks.go).
+	Target *struct {
+		Dev string `xml:"dev,attr"`
+	} `xml:"target"`
+	// ReadOnly is the element's own <readonly/> marker.
+	ReadOnly *struct{} `xml:"readonly"`
 }
 
 // diskSourceFormats returns the format (domainDiskElem.format) of every
