@@ -66,6 +66,11 @@ type domainDisksDoc struct {
 	Devices struct {
 		Disks []domainDiskElem `xml:"disk"`
 	} `xml:"devices"`
+	// Metadata is the part of /domain/metadata the snapshot media handling
+	// reads: the record of media ejected for a snapshot (snapshot_media.go).
+	Metadata struct {
+		Ejected []mediaMarkerElem `xml:"https://virtrigaud.io/xmlns/libvirt/media/v1 ejected"`
+	} `xml:"metadata"`
 }
 
 // domainDiskElem is one top-level <devices><disk> element. Source is its OWN
@@ -82,6 +87,9 @@ type domainDiskElem struct {
 		Dev    string `xml:"dev,attr"`
 		Pool   string `xml:"pool,attr"`
 		Volume string `xml:"volume,attr"`
+		// Protocol and Name are a network disk's source.
+		Protocol string `xml:"protocol,attr"`
+		Name     string `xml:"name,attr"`
 	} `xml:"source"`
 	// Target is the element's own <target dev=...>: the disk's name in
 	// libvirt's snapshot disk lists (snapshot_readonly_disks.go).

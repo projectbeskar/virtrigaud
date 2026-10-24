@@ -622,6 +622,11 @@ func routedRPCErrorFor(kind hostOpKind, op string, err error) error {
 	if stderrors.As(err, &rb) {
 		return vmOperationStatus(codes.FailedPrecondition, fmt.Sprintf("failed to %s: %s", op, rb.Error()))
 	}
+	var rm *snapshotRevertMediaError
+	if stderrors.As(err, &rm) {
+		log.Printf("WARN %s: %v: %v", op, rm, rm.cause)
+		return vmOperationStatus(codes.FailedPrecondition, fmt.Sprintf("failed to %s: %s", op, rm.Error()))
+	}
 	var cr *copyRefusedError
 	if stderrors.As(err, &cr) {
 		log.Printf("WARN %s refused: %v", op, cr)
