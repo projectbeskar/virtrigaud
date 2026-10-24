@@ -691,15 +691,16 @@ func snapshotCreateWith(ctx context.Context, conn libvirtConn, domain string, re
 	// diskspec (snapshot_media.go, snapshot_readonly_disks.go). Everything
 	// that can refuse runs before anything is ejected.
 	running := domainState == "running"
+	diskOnly := !req.IncludeMemory || !running
 	var toEject []removableMedium
-	if !(req.IncludeMemory && running) && domainState == domStateShutOff {
+	if diskOnly && domainState == domStateShutOff {
 		toEject = doc.ejectableMedia()
 	}
 	excluded, err := doc.snapshotExcludedTargets(toEject)
 	if err != nil {
 		return nil, atStage(stageBefore, fmt.Errorf("failed to create snapshot: %w", err))
 	}
-	if len(excluded) > 0 && !(req.IncludeMemory && running) {
+	if len(excluded) > 0 && diskOnly {
 		log.Printf("WARN Snapshot %s of domain %s keeps the media of read-only disk(s) %v in its stored definition "+
 			"(the domain is not shut off, or they cannot be ejected): libvirt cannot revert it safely, and a revert to it is refused",
 			snapshotName, domain, excluded)
