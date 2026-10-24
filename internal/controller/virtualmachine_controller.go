@@ -507,6 +507,9 @@ func (r *VirtualMachineReconciler) reconcileVM(ctx context.Context, vm *infravir
 	}
 	logger.V(1).Info("Dependencies resolved successfully")
 	provider, vmClass, vmImage, networks := deps.provider, deps.class, deps.image, deps.networks
+	// spec.disks on a Provider that does not attach them (V4): said on
+	// DisksApplied and a Warning event; nothing is refused.
+	r.noteUnattachedDisks(vm, provider)
 
 	// Bind the VM to the Provider it resolved to, or refuse it. A VM bound
 	// before status.boundProvider existed is backfilled from its current

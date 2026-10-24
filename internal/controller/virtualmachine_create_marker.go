@@ -371,6 +371,7 @@ func (r *VirtualMachineReconciler) requestCreate(
 	toWrite.Status.ID = ""
 	toWrite.Status.ObservedGeneration = toWrite.Generation
 	setCreateRequested(toWrite, r.now())
+	carryDisksApplied(vm, toWrite)
 	recordBoundProvider(toWrite, providerCR)
 	applyDerivedPhase(toWrite)
 	writeCtx, cancel := context.WithTimeout(ctx, createRecordAttemptTimeout)

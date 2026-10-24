@@ -100,6 +100,20 @@ const (
 	ReasonProviderLacksHonestReconfigure = "ProviderLacksHonestReconfigure"
 )
 
+// ConditionDisksApplied is False (reason ReasonNotSupportedByProvider) on a
+// VirtualMachine whose spec.disks is not empty while its Provider's type does
+// not attach additional disks (libvirt, Proxmox: v1beta1.
+// ProviderIgnoresAdditionalDisks): neither its Create nor its Reconfigure
+// creates or attaches them. It is removed when spec.disks is emptied or the
+// Provider attaches them. It is never set True, and it never changes Ready:
+// the VM itself is fine.
+const ConditionDisksApplied = "DisksApplied"
+
+// ReasonNotSupportedByProvider is DisksApplied=False: the VM's Provider does
+// not attach spec.disks. It is also the reason of the Warning event recorded
+// once per generation of such a VM.
+const ReasonNotSupportedByProvider = "NotSupportedByProvider"
+
 // ConditionLinkedClonesDependOnDisk is True on a VirtualMachine whose disk other
 // VMs on its hypervisor use as their backing file (libvirt linked clones made
 // by an earlier release) — as the provider counted when the VM was last
