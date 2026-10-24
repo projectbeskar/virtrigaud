@@ -61,8 +61,8 @@ since v0.4.0-rc4"; on v0.4.0-rc2, also "Changes since v0.4.0-rc2"; on v0.4.0-rc1
 
 Two pull requests, #437 and #438, both merged 2026-10-24. They fix what validating rc7 on
 real libvirt 10.0 hosts (Ubuntu 24.04, AppArmor; a shared NFS pool used by a single-host
-and a clustered Provider) and on a newly bridged lab network found (see [Validated in the
-lab since rc7](#about-this-release-candidate--what-to-test)): after an offline snapshot or
+and a clustered Provider) and on a newly bridged lab network found (see [About this release candidate](#about-this-release-candidate--what-to-test), "Validated in
+the lab since rc7"): after an offline snapshot or
 a revert, the snapshot, revert and delete of **other** VMs on the same host were refused,
 every time, with "not performed ... (transient host error)" (V7); a routed snapshot create answered "not performed" ended in
 an operator hold (V8); a revert refused for good told the user to retry; `status.ips`
@@ -79,10 +79,10 @@ refuses, now with a message that says why and where the fix is. Roll the manager
 
 | PR | What changed | Breaking |
 |---|---|---|
-| #437 (V7) | libvirt: the disk in-use check no longer opens, as the SSH user, a shut-off VM's backing store that its disk's chain already read; a check that cannot read an image answers "permission denied reading a disk image" and points to the fix, still `Unavailable` + `VM_DISK_CHECK_FAILED` (retried, fail-closed) | No. Operator action: `VR_DISK_READ` over the pool directory on every libvirt host |
+| #437 (V7) | libvirt: the disk in-use check no longer opens, as the SSH user, a shut-off VM's backing store that its disk's chain already read; a check that cannot read an image answers "permission denied reading a disk image" and points to the fix, still `Unavailable` + `VM_DISK_CHECK_FAILED` (fail-closed; a VM delete, a snapshot delete and a clustered snapshot create are retried, a single-host snapshot create fails and a revert is re-sent up to 5 times: see Known limitations) | No. Operator action: `VR_DISK_READ` over the pool directory on libvirt hosts whose SSH user cannot read the `0600` overlays |
 | #437 (V8) | Manager: a `VMSnapshot` create that a clustered Provider answers it did not perform is retried as a new attempt with an exponential backoff (1 minute, doubling, up to 10 minutes) instead of ending in `SnapshotOutcomeUnknown` | No. Behaviour change: no operator hold for these answers |
 | #437 (revert hint) | Manager: a revert the provider refuses for good (`FailedPrecondition`, other than a disk another VM depends on) no longer ends with "remove `spec.snapshot.revertToRef` and set it again to retry" | No (message only) |
-| #438 (V9) | `status.ips` lists only addresses a user can reach the VM on, for every provider: the manager drops loopback, unspecified, link-local and multicast addresses, entries that are not an IP address and duplicates; the libvirt provider applies the same rule to the guest agent's answer | **Behaviour change** for anything that parses `status.ips` |
+| #438 (V9) | `status.ips` no longer lists loopback, link-local and other unreachable addresses, for every provider: the manager drops loopback, unspecified, link-local and multicast addresses, entries that are not an IP address and duplicates; the libvirt provider applies the same rule to the guest agent's answer | **Behaviour change** for anything that parses `status.ips` |
 | #438 (V10) | libvirt: `virsh domifaddr` rows of the `lease` and `arp` sources are no longer dropped by interface name, so a NAT guest without the guest agent shows its DHCP lease; a NIC's second address is no longer skipped | No. Behaviour change: addresses that were missing now show |
 
 ### libvirt: other VMs' disk checks no longer fail on a snapshot overlay (#437; V7)
@@ -90,7 +90,7 @@ refuses, now with a message that says why and where the fix is. Roll the manager
 Found by validating rc7. libvirt creates the overlay of a disk-only snapshot
 (`<pool dir>/<domain>-disk.<snapshot>`) and the new overlay of a revert
 (`<pool dir>/<domain>-disk.<epoch>`) with mode `0600`, owned by root while the VM is off.
-The disk in-use check that guards a snapshot create, revert or delete, and a delete
+The disk in-use check that guards a snapshot create, revert or delete, and a VM delete
 (on a clustered Provider also a create and a clone), reads the disk chain of every
 domain on the host. A shut-off domain's definition keeps its chain in nested
 `<backingStore>` elements after such a snapshot or revert, and the check opened each of
@@ -162,7 +162,7 @@ VM depends on the disk (`VM_DISK_IN_USE`) and any other failure keep the retry h
 
 → [`docs/vm-snapshot-revert.md`](docs/vm-snapshot-revert.md#libvirt)
 
-### `status.ips` lists only addresses a user can reach the VM on (#438; V9)
+### `status.ips` drops loopback, link-local and other unreachable addresses (#438; V9)
 
 Found by validating rc7 in the lab: on a libvirt VM with a running QEMU guest agent,
 `status.ips` listed every address of every guest interface, loopback and IPv6
@@ -253,8 +253,9 @@ release](#upgrade-order-for-this-release): the seed directory on every libvirt h
 first); from rc1, also [Upgrade order for rc2](#upgrade-order-for-rc2).
 
 **Rollback.** Rolling the manager back to rc7 brings back the operator hold of V8 (ten
-re-sends, then `SnapshotOutcomeUnknown`), the "set it again to retry" hint and the
-unfiltered `status.ips`. Rolling a libvirt provider back to rc7 brings back V7 and V10.
+re-sends, then `SnapshotOutcomeUnknown`), the "set it again to retry" hint and an
+unfiltered `status.ips` for vSphere, Proxmox and the mock provider. Rolling a libvirt
+provider back to rc7 brings back V7, V10 and the unfiltered `primary_ip`.
 rc8 writes no new record or file format, so nothing needs converting.
 → [Rollback caveats](docs/upgrading.md#rollback-caveats)
 
@@ -1733,7 +1734,7 @@ The most useful things to exercise:
     is sent again after 1, 2, 4 and 8 minutes, then every 10 minutes; it never becomes
     `SnapshotOutcomeUnknown`, and it is created once the image is readable;
   - **`status.ips` on any provider** (vSphere, Proxmox, libvirt): no loopback, link-local
-    or multicast entry, and the first entry is an address you can reach the VM on;
+    or multicast entry (private addresses of guest-internal interfaces, such as `docker0`, can still appear);
   - **a libvirt guest on the NAT `default` network without the guest agent:** `status.ips`
     shows its DHCP lease (compare `virsh domifaddr <domain> --source lease` on the host);
   - **a libvirt guest on a host bridge** (`spec.network.libvirt.bridge`): with the QEMU
@@ -1975,13 +1976,13 @@ fixed in rc7, see [Changes since v0.4.0-rc6](#changes-since-v040-rc6)).
 - **V4, `spec.disks` (#432).** A clustered libvirt VM with `spec.disks` showed
   `DisksApplied=False/NotSupportedByProvider` and one `Warning` event, `Ready` unaffected.
   The admission warning was not exercised: the lab's VM webhook is not rendered.
-- **Not run on rc6:** everything new in rc7 (the libvirt revert with its snapshot
+- **Not run in the rc6 validation:** everything new in rc7 (the libvirt revert with its snapshot
   ejection and refusal, and the bounded wait for another call's dial). It was validated
   on rc7, below.
 
-**Validated in the lab since rc7**, on v0.4.0-rc7 (the released images): Kubernetes 1.34, a
-vCenter, a single-node Proxmox VE 9.2, and libvirt 10.0 as a single host and as a two-host
-clustered Provider (host A and host B) sharing an NFS pool. This run found V7 to V10 (fixed
+**Validated in the lab since rc7**, on v0.4.0-rc7 (the released images): Kubernetes 1.34,
+libvirt 10.0 as a single host and as a two-host clustered Provider (host A and host B)
+sharing an NFS pool, and a vCenter as the source of one migration. This run found V7 to V10 (fixed
 in rc8, see [Changes since v0.4.0-rc7](#changes-since-v040-rc7)).
 
 - **V6, the libvirt revert (#435).** A revert of a snapshot taken with the VM powered off,
@@ -2193,7 +2194,8 @@ changes to check, and one operator action:
   for `SnapshotOutcomeUnknown` after such an answer no longer fires; a create whose outcome
   is really unknown is still held (#437; V8).
 - **`status.ips` has fewer entries on every provider:** loopback, unspecified, link-local
-  and multicast addresses, entries that are not an IP address and duplicates are gone. A
+  and multicast addresses, entries that are not an IP address (an entry with a prefix length too) and duplicates are gone, and kept addresses are
+  written in canonical form (IPv4-mapped IPv6 as IPv4, IPv6 lower-case and compressed). A
   script that read `status.ips[0]`, or looked for such an entry, must change (#438; V9).
 - **A libvirt NAT guest without the guest agent now shows its DHCP lease, and a guest
   interface that does not start with `e` is no longer dropped by name** (#438; V10).
@@ -2205,7 +2207,7 @@ changes to check, and one operator action:
 → [Changes since v0.4.0-rc7](#changes-since-v040-rc7),
 [`docs/vm-status-ips.md`](docs/vm-status-ips.md)
 
-**Since rc6: nothing is breaking in the API and no CRD changed.** Behaviour changes to
+**New since rc6: nothing is breaking in the API and no CRD changed.** Behaviour changes to
 check (all on libvirt, in the provider, except the last):
 
 - **A revert of a libvirt snapshot is refused (`SnapshotReverted=False/RevertFailed`,
@@ -3180,12 +3182,14 @@ says so. Each links to the page that documents it in full, where one exists.
 - **libvirt: snapshot and revert overlays are `0600`, and the disk check needs to read
   them.** libvirt creates `<domain>-disk.<snapshot>` and `<domain>-disk.<epoch>` mode `0600`,
   owned by root while the VM is off, and VirtRigaud does not change them. A snapshot
-  create, revert or delete, and a delete (on a clustered Provider also a create and a
+  create, revert or delete, and a VM delete (on a clustered Provider also a create and a
   clone), of any VM on the host reads the disk chain of every domain on the host first. The provider's SSH user must be able to read those overlays: grant `VR_DISK_READ`
   over the pool directory (an NFS export must not squash root, and must then be dedicated
   to the Provider's hosts), or repair each new overlay by hand (`chown -h libvirt-qemu:kvm`,
   `chmod 0640`). Without either, those operations are refused with "permission denied
-  reading a disk image" and retried
+  reading a disk image" (fail-closed: a VM delete, a snapshot delete and a clustered
+  snapshot create are retried; a single-host snapshot create fails and a revert is re-sent
+  up to 5 times, see the next two limitations)
   (→ [`docs/libvirt-clones.md`](docs/libvirt-clones.md#unreadable-disk-images)).
 - **A libvirt guest on a host bridge needs the QEMU guest agent to show `status.ips`.**
   libvirt holds no DHCP lease for a bridged guest (the LAN's DHCP server answers); the
