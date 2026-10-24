@@ -1453,7 +1453,7 @@ Wave 2 adds to this:
 
 ## About this release candidate / what to test
 
-v0.4.0 GA follows after a soak of this candidate (rc1, rc2, rc4 and rc5 came before it; rc3 was tagged but not released). Please try it on a non-production
+v0.4.0 GA follows after a soak of this candidate (rc1, rc2, rc4, rc5 and rc6 came before it; rc3 was tagged but not released). Please try it on a non-production
 cluster and report what you find (GitHub issues; include the Provider type, the
 `kubectl describe` of the object involved and the provider log, never a Secret).
 The most useful things to exercise:
@@ -1506,14 +1506,34 @@ The most useful things to exercise:
   - a migration onto Proxmox: the VM lands on the bridge and VLAN its target names, and
     whether the migrated guest has network (see Known limitations, R36); tell us which
     guest image you used.
+- **New since rc6 (libvirt, single-host and clustered):**
+  - **a revert to a snapshot taken with the VM powered off** (create the `VMSnapshot` with
+    the VM off, change something in the guest, keep `spec.powerState: Off`, name the
+    snapshot in `spec.snapshot.revertToRef`, then power it on): the revert ends
+    `Succeeded`, the guest boots, cloud-init reports `done` (`cloud-init status`), the
+    seed CD-ROM is back as the raw ISO (`virsh domblklist --details <domain>` shows the
+    `cloud-init.iso` of the seed directory with driver type `raw`), and there is no
+    `cloud-init.<digits>` or other `<file>.<epoch>` overlay in the seed directory;
+  - **the refusal:** a revert to a snapshot taken by rc6, and to a disk-only snapshot of a
+    running VM that has a seed, ends `SnapshotReverted=False/RevertFailed` with the
+    message to take a new snapshot with the VM powered off, and nothing on the host
+    changes (the domain definition and the disks are as before);
+  - **a memory snapshot of a seeded VM** (a running VM, `includeMemory: true`) and its
+    revert: libvirt reverts it in place, without new overlays, and the seed stays where
+    it was;
+  - **a clustered host made unreachable with many concurrent calls** (for example a
+    `Describe` of several VMs while a `Delete` of another is held): every call is answered
+    `HOST_UNAVAILABLE` within its own deadline, none after 30 seconds as `Unknown`, and
+    the calls recover when the host answers.
 - **New since rc5:**
-  - **snapshot revert** (`spec.snapshot.revertToRef`, not validated on any hypervisor
-    yet): take a `VMSnapshot`, change something in the guest, set `spec.powerState: Off`,
+  - **snapshot revert** (`spec.snapshot.revertToRef`; validated in the lab on vSphere
+    and Proxmox since rc6, and on libvirt not yet: see the rc7 items above): take a
+    `VMSnapshot`, change something in the guest, set `spec.powerState: Off`,
     name the snapshot, and check `status.snapshotRevert.phase`, the `SnapshotReverted`
     condition and that the guest is back. Try it on vSphere, on single-host and
-    clustered libvirt, and on Proxmox. On libvirt include a disk-only snapshot of a VM
-    that was powered off when it was taken, and look for overlay files left in the pool
-    afterwards (`<pool>/*-disk.*` that are not `.qcow2`); say which libvirt version the
+    clustered libvirt, and on Proxmox. On libvirt use a snapshot taken with the VM
+    powered off, and look for overlay files left in the pool afterwards
+    (`<pool>/*-disk.*` that are not `.qcow2`); say which libvirt version the
     host runs (a revert of an external snapshot needs 9.9 or later). Also: a revert
     requested while the VM runs waits (`WaitingForPowerOff`), and a re-applied manifest
     reverts only once;
@@ -1552,7 +1572,8 @@ re-binding, imported-disk confinement, NFS/S3 import hardening, idempotent power
 import-stage delete of a failed migration) were tested only against the test fake until
 rc4. The lab since rc4 ("Validated in the lab since rc4", below) ran the paths it lists
 on a real PVE 9.2 node, and found the three defects fixed in rc5 (R33, R34, R36); the lab
-since rc5 added migrations between a Proxmox node and a clustered libvirt Provider. A Proxmox
+since rc5 added migrations between a Proxmox node and a clustered libvirt Provider, and the lab
+since rc6 a snapshot revert (an asynchronous PVE task). A Proxmox
 path that is not on that list, for example adoption of a Proxmox VM, a reused VMID under
 a managed `VirtualMachine`, a `Reconfigure`, or the import-stage delete of a failed
 migration, is still tested only against the fake: try it on a lab node first. ADR-0012's
@@ -1686,13 +1707,47 @@ Proxmox VE 9.2 (the PVE node) and a vCenter, on Kubernetes 1.34. This run found 
   the import is re-sent. This is the documented behaviour of an import whose outcome is
   not known ([`docs/provider-call-outcomes.md`](docs/provider-call-outcomes.md)) and is
   unchanged.
-- **Not run on rc6 yet:** everything new in rc6. It will be validated on this candidate.
+
+**Validated in the lab since rc6**, on v0.4.0-rc6 (the released images): Kubernetes 1.34, a
+vCenter, a single-node Proxmox VE 9.2, and libvirt 10.0 as a single host and as a two-host
+clustered Provider on a shared NFS pool. This run found V6 and the follow-up to V3c (both
+fixed in rc7, see [Changes since v0.4.0-rc6](#changes-since-v040-rc6)).
+
+- **V1, `HostPool.status` (#430).** `kubectl get hostpools` showed `TOTAL`, `READY` and
+  `SCHEDULABLE` as 2/2/2 on the real pool, dropped to 1 while a host was unreachable, and
+  went back within seconds of the host's heartbeat.
+- **V2, snapshot revert (#431).** On vSphere and on Proxmox (an asynchronous PVE task) a
+  guest file written after the snapshot was gone and the one written before it was kept;
+  the record stayed at one attempt (no second revert). **On libvirt the revert reported
+  `Succeeded` but the VM could not start: finding V6, fixed in rc7 (#435).** The root
+  cause, from the lab: libvirt 10's external revert creates `<file>.<epoch>` overlays for
+  every disk with media in the snapshot's stored definition, the read-only cloud-init seed
+  included even when it is recorded `snapshot='no'`, and AppArmor's `virt-aa-helper`
+  denies the overlay in the private seed directory. Two VMs were repaired with the
+  runbook steps ([Repairing a VM broken by a v0.4.0-rc6
+  revert](docs/vm-snapshot-revert.md#repairing-a-vm-broken-by-a-v040-rc6-revert)); their
+  reverted data was correct.
+- **V3a, a held delete (#432).** A delete held for an unreachable host showed
+  `DeleteBlocked=True/HostUnreachable` naming the Host, kept its finalizer, raised one
+  `Warning` event, and completed seconds after the host answered, with nothing left
+  behind.
+- **V3b, the restore hold (#432).** A re-created VM held by the restore guard showed phase
+  `Pending`; the [re-attach runbook](docs/clustered-restore.md#re-attach-runbook) bound it.
+- **V3c, a host that stops answering (#432).** Most calls were answered `HOST_UNAVAILABLE`
+  in time, but calls queued behind another call's SSH dial took up to about 2 minutes and
+  some ended `Unknown`: **fixed in rc7 (#434).**
+- **V4, `spec.disks` (#432).** A clustered libvirt VM with `spec.disks` showed
+  `DisksApplied=False/NotSupportedByProvider` and one `Warning` event, `Ready` unaffected.
+  The admission warning was not exercised: the lab's VM webhook is not rendered.
+- **Not run on rc7 yet:** everything new in rc7 (the libvirt revert with its snapshot
+  ejection and refusal, and the bounded wait for another call's dial). It will be
+  validated on this candidate.
 
 **Not run:** Proxmox adoption; a reused VMID and the ADR-0012 name rule (which needs a
 PVE cluster); a Proxmox `Reconfigure` (resize); the Proxmox import-stage delete of a
-failed migration; a PVE cluster of more than one node; a snapshot revert on any
-hypervisor; an SELinux libvirt host; and the paths named above that need a fault to
-trigger.
+failed migration; a PVE cluster of more than one node; a snapshot revert on libvirt with
+the rc7 provider (single-host and clustered; on rc6 it failed, V6); an SELinux libvirt
+host; and the paths named above that need a fault to trigger.
 
 ## Breaking changes
 
