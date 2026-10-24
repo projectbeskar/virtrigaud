@@ -309,7 +309,7 @@ overlay.
    ```sh
    virsh -c "$CONN" domblklist --details <domain>
    # e.g.  file  cdrom  hda  /var/lib/libvirt/virtrigaud-seeds/virtrigaud-cloudinit-<domain>.<random>/cloud-init.1792831471
-   qemu-img info <that file>    # backing file: .../cloud-init.iso, in the same directory
+   sudo qemu-img info -U <that file>   # optional: backing file: .../cloud-init.iso, same directory
    ```
 
 2. Stop the domain, if it is not shut off: `virsh -c "$CONN" destroy <domain>`.
