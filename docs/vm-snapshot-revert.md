@@ -267,7 +267,7 @@ The stored definition includes the VM's read-only cloud-init seed CD-ROM. A reve
 snapshot that stored the CD-ROM with its seed rewrites the CD-ROM to a qcow2 overlay of
 the seed ISO inside the VM's private seed directory, owned by root, which the host's
 AppArmor profile for the VM does not let QEMU open: the VM no longer starts (`paused
-(starting up)` or `shut off (failed)`, `Ready=False` "power failed"). libvirt does this
+(starting up)` or `shut off (failed)`, the power-on fails: `Ready=False/ProviderError`). libvirt does this
 whatever the CD-ROM's mode in the snapshot's disk list — it records a read-only CD-ROM
 `snapshot='no'` by itself, and excluding it with `--diskspec <target>,snapshot=no` does
 not help — and it then rewrites the snapshot's metadata to record the overlay as an
@@ -291,12 +291,16 @@ cloud-init stored its seed. Since v0.4.0-rc7:
   Read-only disks that are not removable media, and media that are not plain files (a
   block device, a network source), are never ejected either; they are excluded with a
   diskspec, and a disk-only snapshot that stores them cannot be reverted.
-- **`SnapshotRevert` refuses**, before anything changes on the host, an external
-  snapshot whose stored definition has a CD-ROM, floppy or read-only disk with a source,
-  and a snapshot that records one as an external snapshot disk: one taken while the VM
-  was running, or by v0.4.0-rc6 or earlier. The VM gets
-  `SnapshotReverted=False/RevertFailed` (terminal, not retried); the provider's part of
-  the message reads `revert refused, nothing changed: take a new snapshot with the VM
+- **`SnapshotRevert` refuses**, before the revert changes anything (only the repair of
+  an interrupted ejection, below, may run first), an external snapshot whose stored
+  definition has a CD-ROM, floppy or read-only disk with a source, and a snapshot whose
+  disk lists record one as an external snapshot disk. That is a disk-only snapshot of a
+  VM with a cloud-init CD-ROM (or another read-only disk) taken while the VM was
+  running, and every such snapshot v0.4.0-rc6 or earlier took — as created (the stored
+  definition has the seed) and after libvirt rewrote its metadata on a revert (the
+  CD-ROM recorded external). The VM gets `SnapshotReverted=False/RevertFailed`
+  (terminal, not retried); the provider's part of the message (on a clustered Provider
+  after `failed to revert to snapshot: `) reads `revert refused, nothing changed: take a new snapshot with the VM
   powered off. Snapshot "s1" was taken while it ran or by an earlier release; libvirt
   cannot revert it safely (disk hda)`. The manager keeps the first 256 bytes of a
   provider's answer, so a long snapshot name may cut the end; the guidance comes first.
@@ -309,7 +313,7 @@ cloud-init stored its seed. Since v0.4.0-rc7:
   (with `--live` too when the revert kept the VM running), checks it, and removes the
   record. A file that cannot be inserted again is reported as `RevertFailed`
   (`reverted, but CD-ROM hda could not be re-inserted; ...`): the VM was reverted, and
-  its seed stays recorded for the repair below. The provider also checks that no
+  its seed stays recorded for the repair below. The provider also checks (when the domain can be read after the revert) that no
   read-only disk was moved to a new file; one that was is reported as `RevertFailed`
   (`reverted, but the VM may not start: libvirt moved read-only disk hda to a new file;
   ...`) instead of `Succeeded`. Repair it as below before you request another revert.
@@ -318,8 +322,9 @@ cloud-init stored its seed. Since v0.4.0-rc7:
 fails between the eject and the re-insert, the VM is left with an empty CD-ROM and the
 record in its metadata. A disk-only snapshot that was made but whose seed could not be
 inserted again is reported as made; the record stays. The next `SnapshotCreate`,
-`SnapshotRevert` or start (`spec.powerState: On`, or a reboot) of that VM first inserts
-the recorded file again — **only when it is provably the VM's own cloud-init seed**
+`SnapshotRevert` or start (`spec.powerState: On`, or a reboot) of that VM inserts the
+recorded file again before it changes anything else (after its read-only checks; not
+`SnapshotDelete`) — **only when it is provably the VM's own cloud-init seed**
 (`cloud-init.iso` in `<seed root>/virtrigaud-cloudinit-<domain>.<random>/`, or an
 earlier release's `<seed root>/virtrigaud-cloudinit/<domain>/`, in the provider's seed or
 staging directory) — and removes the record. A recorded file that is anything else (an
