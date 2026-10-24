@@ -23,7 +23,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Why
 The rc6 lab validation showed that bounding the waits a call runs itself (#432) was not enough: a wait for a lock another call held across a dial still lasted as long as that call's deadline, and ended as a failure of the operation.
 
-## [2026-10-24 10:05] - libvirt: snapshots exclude the cloud-init CD-ROM; reverts of older snapshots refused (V6)
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
 
 ## [2026-10-24 10:05] - libvirt: snapshot revert no longer breaks the cloud-init CD-ROM (V6)
 **Author:** @wrkode (William Rizzo)
