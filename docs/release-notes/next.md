@@ -54,15 +54,17 @@ written (V1), a `spec.snapshot.revertToRef` that was accepted and did nothing (V
 clustered host that stopped answering and was reported two ways, with a held delete
 that did not say why (V3a, V3c), a VM held by a restore guard that showed `Failed`
 (V3b), and `spec.disks` on libvirt and Proxmox that was dropped without a word (V4).
-**Nothing is breaking.** Four changes are behaviour changes you may alert on (marked
-below). Three CRDs change (`VirtualMachine` gains `status.snapshotRevert`; `HostPool`
+**One change needs action before the manager rolls:** a `spec.snapshot.revertToRef`
+left on a VM from earlier releases, where it did nothing, is now acted on (V2, step 1 of
+the [Upgrade order for rc6](#upgrade-order-for-rc6)). The other changes are behaviour
+changes you may alert on (marked below). Three CRDs change (`VirtualMachine` gains `status.snapshotRevert`; `HostPool`
 gains printer columns; `VMSet` only a description) and the manager's role gains `hostpools/status`, so the CRDs go
 first (see [Upgrade order for rc6](#upgrade-order-for-rc6)).
 
 | PR | What changed | Breaking |
 |---|---|---|
 | #430 (V1) | A new HostPool controller writes `HostPool.status` (member-host counts and a `Ready` condition); `kubectl get hostpools` gains `TOTAL`, `READY`, `SCHEDULABLE` columns | No |
-| #431 (V2) | `spec.snapshot.revertToRef` reverts the VM, once per request and only while it is powered off. New `status.snapshotRevert`, condition `SnapshotReverted`, three events | Behaviour change |
+| #431 (V2) | `spec.snapshot.revertToRef` reverts the VM, once per request and only while it is powered off. New `status.snapshotRevert`, condition `SnapshotReverted`, three events | **Action required**: remove a stale `revertToRef` first (it was a no-op before) |
 | #432 (V3c) | Clustered libvirt: a host that stops answering is `HOST_UNAVAILABLE` before the call's deadline, and the answer names the host the call was routed to | No |
 | #432 (V3a) | A clustered delete held for an unreachable host sets `DeleteBlocked=True/HostUnreachable` with a message naming the VM's host; a host lost during the delete is held the same way | Behaviour change |
 | #432 (V3b) | A VM held by a clustered restore guard is `status.phase: Pending`, not `Failed` | Behaviour change |
