@@ -889,7 +889,8 @@ const backingKindScript = `if [ -f "$1" ]; then echo ` + backingKindFile + `; el
 // (walkBackingChainFrom): never probed, so a guest cannot make its raw disk
 // read as a qcow2 image naming another file as its backing file — and a raw
 // disk's chain is not walked at all. An empty format (a source the
-// definition gives none for, such as a nested backing store) is probed — by
+// definition gives none for, such as a nested backing store that no
+// top-level disk's chain reached: domainRefsOnHostBounded) is probed — by
 // the SSH user only (walkBackingChainFrom: root opens only a qcow2 or raw
 // image in a format a trusted header or the definition names).
 func backingChainFiles(ctx context.Context, h hostCommandRunner, disk, format string) ([]string, error) {
