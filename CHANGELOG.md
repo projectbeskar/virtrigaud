@@ -5,6 +5,24 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-10-24 06:00] - Release notes for v0.4.0-rc6
+**Author:** @wrkode (William Rizzo)
+
+### Changed
+- `docs/release-notes/next.md`: retitled for v0.4.0-rc6 (header comment, opening paragraph, "About this release candidate": rc1, rc2, rc4 and rc5 came before; rc3 was tagged but not released). "Changes since v0.4.0-rc5" gets an intro and a table and PR numbers in the headings: #430 (V1, `HostPool.status`), #431 (V2, `spec.snapshot.revertToRef` reverts the VM) and #432 (V3c host waits, V3a held delete, V3b restore-hold phase, V4 `DisksApplied`). New "Upgrade order for rc6": CRDs first (`VirtualMachine` `status.snapshotRevert`, `HostPool` printer columns, `VMSet` description), remove `revertToRef` from VMs that must not be reverted, then the manager (role gains `hostpools/status`; `vmsnapshots` read was already granted), then the clustered libvirt provider (V3c; an older one is safe and only loses the host name in the message of a delete held for a host that was unreachable before anything ran, and the early answer), with a rollback note.
+- `docs/release-notes/next.md`: "About this release candidate" gains a "New since rc5" test list (snapshot revert on vSphere, libvirt single-host and clustered including a disk-only snapshot of a powered-off VM and leftover overlay files, and Proxmox; HostPool columns; a held delete's message; `DisksApplied`) and "Validated in the lab since rc5" (v0.4.0-rc5 on a two-host clustered libvirt 10.0 Provider, a PVE 9.2 node and a vCenter: placement, routed lifecycle, snapshots, a clustered clone with a new SSH host key, cordon, an unreachable host, `orphan-on-delete`, Provider in-use, three migration directions; findings V1 to V5). The SSH-host-keys-in-a-libvirt-clone item leaves the "Not run" list; a snapshot revert on a hypervisor joins it. "Breaking changes" (nothing breaking, four behaviour changes), "Fixes", "Known limitations" (the libvirt revert of a disk-only snapshot needs libvirt 9.9 or later and may leave overlay files; the `spec.disks` admission warning exists only with the chart's VM webhook, that is `webhooks.enabled` and `manager.maxDiskSize`; vSphere ignores a `spec.disks` entry added after create, with no condition) and "Upgrade" carry the rc6 items.
+- `docs/upgrading.md`: required upgrade order lists `VirtualMachine` `status.snapshotRevert` among the schema changes the readiness check does not verify, the manager's new `hostpools/status` grant, and the clustered libvirt provider's V3c.
+- `docs/vm-snapshot-revert.md`: says the field acts since v0.4.0-rc6 instead of "the release after rc5".
+
+### Why
+rc5 validation on a two-host clustered libvirt Provider, a PVE node and a vCenter found V1 to V4, now fixed on main (#430, #431, #432). People who test rc6 need to know the upgrade order, what changed in behaviour, and what was and was not validated.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [ ] Config change only
+- [x] Documentation only
+
 ## [2026-10-24 00:55] - Honest VirtualMachine status: unreachable hosts, restore holds, unattached spec.disks (V3, V4)
 **Author:** @wrkode (William Rizzo)
 

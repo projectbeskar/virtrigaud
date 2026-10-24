@@ -1,13 +1,13 @@
 <!--
-Draft release notes for VirtRigaud v0.4.0-rc5, the fifth release candidate for
+Draft release notes for VirtRigaud v0.4.0-rc6, the sixth release candidate for
 v0.4.0 (GA follows after a soak). v0.4.0-rc3 was tagged, but its release run was
 stopped by the image scan (CVE-2026-63209) and no rc3 release was published. rc1,
-rc2 and rc4 were published from earlier versions of this file; rc1 followed v0.3.11.
-Paste everything below this comment into the GitHub pre-release. The notes are
-cumulative since v0.3.11: a user going from v0.3.11 needs all of them, while "Changes
-since v0.4.0-rc4" is the short list for someone already on rc4, "Changes since
-v0.4.0-rc2" the one for someone on rc2 and "Changes since v0.4.0-rc1" the one for
-someone on rc1. See docs/upgrading.md for the full upgrade guide these notes link to,
+rc2, rc4 and rc5 were published from earlier versions of this file; rc1 followed
+v0.3.11. Paste everything below this comment into the GitHub pre-release. The notes
+are cumulative since v0.3.11: a user going from v0.3.11 needs all of them, while
+"Changes since v0.4.0-rc5" is the short list for someone already on rc5, "Changes
+since v0.4.0-rc4" the one for someone on rc4, "Changes since v0.4.0-rc2" the one for
+someone on rc2 and "Changes since v0.4.0-rc1" the one for someone on rc1. See docs/upgrading.md for the full upgrade guide these notes link to,
 and CHANGELOG.md for the complete, dated changelog. The published release body is a
 trimmed version of this file (GitHub's limit is 125,000 characters): the preamble, the
 newest "Changes since" section, "About this release candidate", "Breaking changes",
@@ -15,7 +15,7 @@ newest "Changes since" section, "About this release candidate", "Breaking change
 re-title.
 -->
 
-This is **v0.4.0-rc5, a release candidate** (GA follows after a soak). It is a
+This is **v0.4.0-rc6, a release candidate** (GA follows after a soak). It is a
 security-hardening release: a full codebase security review found and fixed several
 cross-tenant and privilege-escalation issues in the vSphere and libvirt providers,
 cross-namespace clone/migration targets, and VM provider binding. rc2 added two waves
@@ -29,17 +29,48 @@ libvirt Provider (experimental). rc5 adds a fourth, on top of rc4: three fixes f
 validating rc4 on a real Proxmox VE 9.2 node (the storage of a VM's cloud-init drive, a
 VM phase stuck at `Reconfiguring` after a power change, and the bridge, VLAN, model and
 static IP of a Proxmox VM's networks), and the accepted design for migrated guests'
-network (ADR-0014). **Several fixes are breaking
+network (ADR-0014). rc6 adds a fifth, on top of rc5: four findings (V1 to V4) from
+validating rc5 on a two-host clustered libvirt Provider, a Proxmox VE 9.2 node and a
+vCenter: `HostPool.status` was never written, `spec.snapshot.revertToRef` was accepted
+and ignored (it now reverts the VM), a clustered host that stopped answering was
+reported inconsistently and a delete held for it did not say so, a VM held by a
+clustered restore guard showed `Failed`, and `spec.disks` on libvirt and Proxmox was
+silently dropped. **Several fixes are breaking
 or change default behavior.** Read the upgrade guide before upgrading:
 **[Upgrading from v0.3.11](docs/upgrading.md)**.
 
-The notes below are cumulative since v0.3.11. If you are already on v0.4.0-rc4, read
-"Changes since v0.4.0-rc4" first; on v0.4.0-rc2, read it and then "Changes since
-v0.4.0-rc2"; on v0.4.0-rc1, also "Changes since v0.4.0-rc1".
+The notes below are cumulative since v0.3.11. If you are already on v0.4.0-rc5, read
+"Changes since v0.4.0-rc5" first; on v0.4.0-rc4, read it and then "Changes since
+v0.4.0-rc4"; on v0.4.0-rc2, also "Changes since v0.4.0-rc2"; on v0.4.0-rc1, also
+"Changes since v0.4.0-rc1".
 
 ## Changes since v0.4.0-rc5
 
-### `HostPool.status` is written (V1)
+Three pull requests, #430, #431 and #432. They fix what validating rc5 on a two-host
+clustered libvirt Provider, a Proxmox VE 9.2 node and a vCenter found (findings V1 to
+V4; see [Validated in the lab since
+rc5](#about-this-release-candidate--what-to-test)): a `HostPool` whose status was never
+written (V1), a `spec.snapshot.revertToRef` that was accepted and did nothing (V2), a
+clustered host that stopped answering and was reported two ways, with a held delete
+that did not say why (V3a, V3c), a VM held by a restore guard that showed `Failed`
+(V3b), and `spec.disks` on libvirt and Proxmox that was dropped without a word (V4).
+**One change needs action before the manager rolls:** a `spec.snapshot.revertToRef`
+left on a VM from earlier releases, where it did nothing, is now acted on (V2, step 1 of
+the [Upgrade order for rc6](#upgrade-order-for-rc6)). The other changes are behaviour
+changes you may alert on (marked below). Three CRDs change (`VirtualMachine` gains `status.snapshotRevert`; `HostPool`
+gains printer columns; `VMSet` only a description) and the manager's role gains `hostpools/status`, so the CRDs go
+first (see [Upgrade order for rc6](#upgrade-order-for-rc6)).
+
+| PR | What changed | Breaking |
+|---|---|---|
+| #430 (V1) | A new HostPool controller writes `HostPool.status` (member-host counts and a `Ready` condition); `kubectl get hostpools` gains `TOTAL`, `READY`, `SCHEDULABLE` columns | No |
+| #431 (V2) | `spec.snapshot.revertToRef` reverts the VM, once per request and only while it is powered off. New `status.snapshotRevert`, condition `SnapshotReverted`, three events | **Action required**: remove a stale `revertToRef` first (it was a no-op before) |
+| #432 (V3c) | Clustered libvirt: a host that stops answering is `HOST_UNAVAILABLE` before the call's deadline, and the answer names the host the call was routed to | No |
+| #432 (V3a) | A clustered delete held for an unreachable host sets `DeleteBlocked=True/HostUnreachable` with a message naming the VM's host; a host lost during the delete is held the same way | Behaviour change |
+| #432 (V3b) | A VM held by a clustered restore guard is `status.phase: Pending`, not `Failed` | Behaviour change |
+| #432 (V4) | `spec.disks` on a libvirt or Proxmox Provider sets `DisksApplied=False/NotSupportedByProvider`, a `Warning` event and, with the chart's VM webhook, an admission warning | Behaviour change (new condition and event) |
+
+### `HostPool.status` is written (#430; V1)
 
 `HostPool.status` (`totalHosts`, `readyHosts`, `schedulableHosts`,
 `observedGeneration`, `conditions`) was never written: every pool showed
@@ -56,12 +87,12 @@ status is not written. `kubectl get hostpools` gains `TOTAL`, `READY` and
 `SCHEDULABLE` columns. See
 [`HostPool.status`](docs/clustered-provider-inventory.md#hostpoolstatus).
 
-Upgrade: apply the CRDs (the HostPool CRD gains the printer columns and
-updated field descriptions; its schema is unchanged) and roll the manager. The
-manager's role gains `hostpools/status` `get`/`patch`/`update` (the Helm chart
-and `config/rbac` both carry it). Nothing is breaking.
+The HostPool CRD gains the printer columns and updated field descriptions (its schema
+is unchanged), and the manager's role gains `hostpools/status` `get`/`patch`/`update`
+(the Helm chart and `config/rbac` both carry it); see [Upgrade order for
+rc6](#upgrade-order-for-rc6). Nothing is breaking.
 
-### `spec.snapshot.revertToRef` reverts the VM (fix of a silent no-op; V2)
+### `spec.snapshot.revertToRef` reverts the VM (#431; V2)
 
 Found by the rc5 lab validation: `VirtualMachine.spec.snapshot.revertToRef` was
 accepted by the CRD, and `examples/advanced/snapshot-lifecycle.yaml` documented it as
@@ -102,19 +133,22 @@ now acts on the field:
   `SnapshotRevertStarted`, `SnapshotRevertSucceeded`, `SnapshotRevertFailed`.
 
 **Additive CRD change** (`status.snapshotRevert`): upgrade the CRDs before the manager;
-a manager whose CRD prunes the field sends no revert. A VM that already carries
+a manager whose CRD prunes the field sends no revert (`SnapshotReverted=False/Unsupported`,
+and the manager's readiness check does not verify the field). A VM that already carries
 `spec.snapshot.revertToRef` is acted on by the first reconcile after the upgrade:
 remove the field first from VMs you do not want reverted.
 
 **Not validated on a real hypervisor yet.** It is covered by the controller's unit and
 envtest tests only, which drive a scripted provider fake (not the mock provider binary,
 nor the gRPC transport). On libvirt, a snapshot of a VM that is off, or taken
-without memory, is an external disk-only snapshot; whether the host's libvirt can
-revert it depends on its version (a refusal is reported as `RevertFailed`).
+without memory, is an external disk-only snapshot; libvirt can revert one only from
+9.9 (its release notes: "QEMU: implement reverting external snapshots", v9.9.0), and the
+provider's refusal is reported as `RevertFailed`. The libvirt provider removes no
+overlay file on a revert (see Known limitations).
 
 → [`docs/vm-snapshot-revert.md`](docs/vm-snapshot-revert.md)
 
-### A clustered host that stops answering: one answer, in time (V3c)
+### A clustered host that stops answering: one answer, in time (#432; V3c)
 
 On a clustered libvirt Provider, a `Describe` to a host that had stopped answering
 was answered two ways: `Unavailable` + `HOST_UNAVAILABLE` ("describe VM: host ... is
@@ -122,14 +156,14 @@ unreachable") or, after the full 30 seconds, `Unknown` ("failed to describe VM o
 host ..."), which the manager showed as `Ready=False/ProviderError`. The calls
 waited on the dead SSH connection and held the host's command slots until their own
 deadline. The waits before a command runs on a host (a command slot, the SSH dial and
-handshake, an SSH session) now end 5 seconds before the call's deadline, and a wait
-that ends there is a host that stopped answering: `Describe` is always
+handshake, an SSH session) now end 5 seconds before the call's deadline (a quarter of
+the time left, when that is shorter), and a wait that ends there is a host that stopped answering: `Describe` is always
 `HOST_UNAVAILABLE` (`Ready=False/HostUnavailable`, naming the bound host), and other
 calls are answered by how far they got, as since R25. A `HOST_UNAVAILABLE` about the
 host the call was routed to now names it in its `ErrorInfo` metadata (`host`). See
 [A host that stops answering](docs/provider-call-outcomes.md#clustered-libvirt-a-host-that-stops-answering).
 
-### A delete held for an unreachable host says so (V3a)
+### A delete held for an unreachable host says so (#432; V3a)
 
 Deleting a clustered VM whose host does not answer kept the finalizer (unchanged),
 but the VM showed only `phase: Deleting` and a stale `Ready` message. Now it shows
@@ -146,7 +180,7 @@ doubling to 5 min) instead of every 15 seconds, and the `HostUnreachable` messag
 now contain the VM's host name. See
 [A delete held for an unreachable host](docs/provider-call-outcomes.md#a-delete-held-for-an-unreachable-host).
 
-### A VM held by a restore guard is `Pending`, not `Failed` (V3b)
+### A VM held by a restore guard is `Pending`, not `Failed` (#432; V3b)
 
 A clustered VM held by the restore guards (R1, R4: `RestorePending`,
 `OwnDomainOnAnotherHost`, `UniquenessCheckFailed`, `ProviderLacksListOwnerFilter`)
@@ -158,7 +192,7 @@ condition (or `Ready=False/RestorePending` on a restored binding) instead.
 `ImportedDiskPinned` and the other holds that need an operator stay `Failed`. See
 [`status.phase`](docs/vm-status-phase.md#the-rule).
 
-### `spec.disks` on libvirt and Proxmox is reported (V4)
+### `spec.disks` on libvirt and Proxmox is reported (#432; V4)
 
 The libvirt and Proxmox providers attach no `spec.disks` (documented, unchanged),
 but adding one to a VM changed nothing visible: `Reconfiguring` even said "VM
@@ -171,10 +205,59 @@ Nothing is refused. **New condition and reason you may alert on:** `DisksApplied
 `NotSupportedByProvider`. See
 [`spec.disks` on libvirt and Proxmox](docs/reconfigure-results.md#which-disk-a-size-goes-to).
 
-Upgrade for V3 and V4: roll the manager and the clustered libvirt provider. No CRD
-changed. A manager with an older provider still works: the delete hold then keeps
-its message that names no host, and the waits are not bounded until the provider
-is rolled. Nothing is breaking.
+V3 and V4 change no CRD: roll the manager, and the clustered libvirt provider for V3c
+([Upgrade order for rc6](#upgrade-order-for-rc6)). Nothing is breaking.
+
+### Upgrade order for rc6
+
+**Three CRDs changed since rc5** (checked: the difference under `config/crd/bases`
+between rc5 and this release). `VirtualMachine` gains `status.snapshotRevert` (and a
+longer description of `spec.snapshot.revertToRef`), `HostPool` gains the `TOTAL`,
+`READY` and `SCHEDULABLE` printer columns and longer field descriptions, and `VMSet`
+only has the `revertToRef` description of its template. No spec field changed. From rc5:
+
+1. **Before the manager rolls, remove `spec.snapshot.revertToRef` from every
+   `VirtualMachine` (and `VMSet` template) you do not want reverted.** The field did
+   nothing up to rc5; the first reconcile of the new manager acts on it, and a VM that is
+   powered off is reverted at once, discarding what was written to its disks since the
+   snapshot. List them with
+   `kubectl get virtualmachines.infra.virtrigaud.io -A -o jsonpath='{range .items[?(@.spec.snapshot.revertToRef)]}{.metadata.namespace}/{.metadata.name}{"\n"}{end}'`
+   ([Upgrade guide](docs/upgrading.md#breaking-changes)).
+2. **CRDs.** The chart's pre-upgrade hook applies them; otherwise
+   `kubectl apply --server-side --force-conflicts -f config/crd/bases` (see [Required
+   upgrade order](docs/upgrading.md#required-upgrade-order)). Do this before the
+   manager: a manager whose `VirtualMachine` CRD prunes `status.snapshotRevert` sends no
+   revert (`SnapshotReverted=False/Unsupported`), and the manager's readiness check does
+   not verify that field, so nothing else tells you.
+3. **The manager.** Its role gains `hostpools/status` (`get`, `patch`, `update`). The
+   Helm chart (cluster and namespace scope) and `config/rbac/role.yaml` carry it; a
+   kustomize install must reapply the role. The new revert reads `vmsnapshots`, which
+   the role already grants (`get`, `list`, `watch`, and more), so there is no other
+   RBAC change. The new HostPool controller starts with the manager and fills in
+   every pool's status on its first reconcile of the pool.
+4. **The providers.** Only the clustered libvirt provider changed (V3c). Roll it
+   promptly after the manager, but nothing breaks in between: an older clustered
+   provider behind the new manager still works. A delete held because its host was
+   unreachable before anything ran then names no host (the older provider does not send
+   the host in its `HOST_UNAVAILABLE` answer; a host lost during the delete is still
+   named), and a `Describe` to a host that stopped answering can still take the full 30
+   seconds and show `ProviderError`. A newer provider behind an older manager is also safe. The vSphere,
+   Proxmox, mock and single-host libvirt providers have no functional change, and the
+   revert uses the `SnapshotRevert` call they already implement.
+
+From rc4, apply [Upgrade order for rc5](#upgrade-order-for-rc5) first (the PVE token
+privileges, then the manager and the Proxmox provider together); from rc2, rc4's order
+([Upgrade order for this release](#upgrade-order-for-this-release): the seed directory
+on every libvirt host first); from rc1, also [Upgrade order for
+rc2](#upgrade-order-for-rc2).
+
+**Rollback.** Rolling the manager back leaves `HostPool.status` at its last values
+(nothing updates it), makes `spec.snapshot.revertToRef` a no-op again, and stops
+maintaining the `DisksApplied` and `SnapshotReverted` conditions: an older manager
+neither sets nor removes them, so they go stale on the VMs that carry them. A VM that
+carried `status.snapshotRevert` keeps it. Rolling the clustered libvirt provider back brings
+back the unbounded waits on a dead host and the second answer (`Unknown`).
+→ [Rollback caveats](docs/upgrading.md#rollback-caveats)
 
 ## Changes since v0.4.0-rc4
 
@@ -533,8 +616,9 @@ Tested with unit tests, a round trip through the real `genisoimage` and `isoinfo
 the vSphere simulator. In the lab, a single-host libvirt clone got its own sealed seed
 with `instance-id` `virtrigaud-<target UID>` and its own hostname, and booted. In the
 lab since rc4 (on v0.4.0-rc4), a clone on a real vSphere showed a new `instance-id`,
-hostname and SSH host key in the guest (the `guestinfo` rewrite on a real vCenter). **Not validated:** new SSH host
-keys in a libvirt guest.
+hostname and SSH host key in the guest (the `guestinfo` rewrite on a real vCenter). In
+the lab since rc5 (on v0.4.0-rc5), a clustered libvirt clone of an Ubuntu cloud-image VM
+got a new `instance-id`, the target's hostname and a new SSH host key.
 → [`docs/vm-ownership.md`](docs/vm-ownership.md#a-clones-host-identity),
 [`docs/libvirt-clones.md`](docs/libvirt-clones.md#a-clones-cloud-init-identity),
 [Upgrade guide](docs/upgrading.md#behavior-changes-that-are-visible-but-not-breaking)
@@ -1224,7 +1308,7 @@ Wave 2 adds to this:
 
 ## About this release candidate / what to test
 
-v0.4.0 GA follows after a soak of this candidate (rc1, rc2 and rc4 came before it; rc3 was tagged but not released). Please try it on a non-production
+v0.4.0 GA follows after a soak of this candidate (rc1, rc2, rc4 and rc5 came before it; rc3 was tagged but not released). Please try it on a non-production
 cluster and report what you find (GitHub issues; include the Provider type, the
 `kubectl describe` of the object involved and the provider log, never a Secret).
 The most useful things to exercise:
@@ -1253,7 +1337,8 @@ The most useful things to exercise:
     local non-root user cannot list or read the seed directory;
   - a clone of a cloud-init VM: new SSH host keys and the target's hostname in the guest,
     and `/var/lib/cloud/data/instance-id` equal to `virtrigaud-<uid>` (libvirt and
-    vSphere; the SSH host keys and vSphere were not validated in the lab);
+    vSphere; validated in the lab for vSphere since rc4 and for a clustered libvirt clone
+    since rc5);
   - deleting a VM and its clone at the same time on single-host libvirt: no seed
     directory left;
   - **a migration into a clustered libvirt Provider** over `s3` and `nfs`, including the
@@ -1276,6 +1361,29 @@ The most useful things to exercise:
   - a migration onto Proxmox: the VM lands on the bridge and VLAN its target names, and
     whether the migrated guest has network (see Known limitations, R36); tell us which
     guest image you used.
+- **New since rc5:**
+  - **snapshot revert** (`spec.snapshot.revertToRef`, not validated on any hypervisor
+    yet): take a `VMSnapshot`, change something in the guest, set `spec.powerState: Off`,
+    name the snapshot, and check `status.snapshotRevert.phase`, the `SnapshotReverted`
+    condition and that the guest is back. Try it on vSphere, on single-host and
+    clustered libvirt, and on Proxmox. On libvirt include a disk-only snapshot of a VM
+    that was powered off when it was taken, and look for overlay files left in the pool
+    afterwards (`<pool>/*-disk.*` that are not `.qcow2`); say which libvirt version the
+    host runs (a revert of an external snapshot needs 9.9 or later). Also: a revert
+    requested while the VM runs waits (`WaitingForPowerOff`), and a re-applied manifest
+    reverts only once;
+  - `kubectl get hostpools`: `TOTAL`, `READY` and `SCHEDULABLE` follow the member
+    hosts, including a cordoned host (`spec.schedulable: false`) and a host that stops
+    answering;
+  - a delete of a clustered VM whose host is unreachable: `DeleteBlocked=True/
+    HostUnreachable` with a message that names the host, and the delete completing
+    once the host answers; `Ready=False/HostUnavailable` on a `Describe` to a host that
+    stopped answering, within the call's deadline and not after 30 seconds;
+  - a VM re-created after `orphan-on-delete` (`Placed=False/RestorePending`): phase
+    `Pending`, not `Failed`;
+  - a VM with `spec.disks` on a libvirt or Proxmox Provider: `DisksApplied=False/
+    NotSupportedByProvider`, the `Warning` event, and the admission warning if you run
+    the chart's VM webhook (`webhooks.enabled` and `manager.maxDiskSize`).
 - **Also new in rc2 (Wave 2):**
   - a CPU or memory change of a running vSphere VM that has no hot-add (expect
     `Reconfiguring=False/ResizePendingPowerOff`, then power it off and on), and a
@@ -1298,7 +1406,8 @@ re-binding, imported-disk confinement, NFS/S3 import hardening, idempotent power
 `Reconfigure` change that no longer touches `scsi0`, the s3 stage publish check, the
 import-stage delete of a failed migration) were tested only against the test fake until
 rc4. The lab since rc4 ("Validated in the lab since rc4", below) ran the paths it lists
-on a real PVE 9.2 node, and found the three defects fixed in rc5 (R33, R34, R36). A Proxmox
+on a real PVE 9.2 node, and found the three defects fixed in rc5 (R33, R34, R36); the lab
+since rc5 added migrations between a Proxmox node and a clustered libvirt Provider. A Proxmox
 path that is not on that list, for example adoption of a Proxmox VM, a reused VMID under
 a managed `VirtualMachine`, a `Reconfigure`, or the import-stage delete of a failed
 migration, is still tested only against the fake: try it on a lab node first. ADR-0012's
@@ -1344,7 +1453,8 @@ seed directory; build `main-71e8647` for the provider-driven R27 checks and
   with `instance-id` `virtrigaud-<target UID>` and its own hostname, and booted (a
   cirros guest). **Not validated in that lab:** new SSH host keys in the guest, and the
   vSphere `guestinfo` rewrite on a real vCenter. The vSphere one was validated later, on
-  v0.4.0-rc4 (below); new SSH host keys in a libvirt guest are still not validated.
+  v0.4.0-rc4, and new SSH host keys in a clustered libvirt guest on v0.4.0-rc5 (both
+below).
 - **Migration into a clustered libvirt Provider (#415, #416),** a two-host Provider on
   a shared NFS pool: a single-host libvirt VM into the cluster over `s3` and over
   `nfs`, both to `Ready`; the target placed before the source was powered off and
@@ -1387,10 +1497,57 @@ real vSphere (new `instance-id`, hostname and SSH host key); vSphere → cluster
 over S3; a clustered clone of a booted VM, which exercises the seed directory (R27,
 #414); and no `.hlog` left by a vSphere import (R23, #409).
 
+**Validated in the lab since rc5**, on v0.4.0-rc5 (the released images): a two-host
+clustered libvirt 10.0 Provider on a shared NFS pool (host A and host B), a single-node
+Proxmox VE 9.2 (the PVE node) and a vCenter, on Kubernetes 1.34. This run found V1 to V4
+(fixed in rc6, see [Changes since v0.4.0-rc5](#changes-since-v040-rc5)) and V5.
+
+- **Placement.** `Spread` put VMs on both hosts, the host with the most free capacity
+  first. The committed CPU and memory metrics counted each VM once.
+- **Routed lifecycle on a clustered VM.** Power off and on. An offline CPU or memory
+  change was applied. An online change beyond the domain's live maximum was reported
+  `Reconfiguring=True/RestartRequired` and applied after a power cycle.
+- **Snapshots on a clustered VM.** Create and delete of a disk-only snapshot; the delete
+  merged the overlay back and no file was left. **Revert was not exercised on rc5:** it
+  was a no-op then (V2, fixed in [#431](#specsnapshotreverttoref-reverts-the-vm-431-v2)).
+- **A clustered clone of an Ubuntu cloud-image VM,** source powered off (a started
+  source is held with `SourceMustBePoweredOff`). The clone got the new `instance-id`
+  `virtrigaud-<uid>`, the target's hostname and a **new SSH host key** in the guest, and
+  the source's data was carried over. That closes the "SSH host keys in a libvirt clone"
+  item of the earlier Not run list.
+- **Cordon.** A cordoned host was skipped. With both hosts cordoned the VM was
+  `Placed=False/Unschedulable` with the filter breakdown. After the uncordon it was placed
+  within about 40 seconds, without intervention.
+- **A host made unreachable from the provider.** Its `Host` went `Ready=False`. A
+  `Describe`, a power change and a delete of its VMs were held (the delete kept its
+  finalizer and the domain), and all of them converged within seconds once the host
+  answered. No domain, disk or seed was left. The inconsistent answers and the silent
+  delete hold seen here are V3c and V3a.
+- **`orphan-on-delete`, then a re-create of the same name.** The new VM was held with
+  `RestorePending`, shown as phase `Failed` on rc5 (V3b, fixed in
+  [#432](#a-vm-held-by-a-restore-guard-is-pending-not-failed-432-v3b)). The re-attach
+  runbook in [`docs/clustered-restore.md`](docs/clustered-restore.md#re-attach-runbook)
+  worked as written and bound the running domain without a restart.
+- **Deleting a Provider that still had a VM:** `DeleteBlocked=True/ProviderInUse`, the
+  runtime kept, and released after the VM was deleted.
+- **Migrations,** all to `Ready`. Clustered libvirt → Proxmox over S3, the first export
+  out of a clustered Provider; the guest had no network (R36, see Known limitations).
+  Proxmox → clustered libvirt over NFS and vSphere → clustered libvirt over NFS; both
+  guests were reachable. A manager restart during the import held two migrations as
+  `ImportOutcomeUnknown` and re-sent them 35 minutes after the request, as documented;
+  no duplicate disk was left (V5, below).
+- **Findings.** V1 to V4 are fixed in rc6 (the "Changes since v0.4.0-rc5" subsections
+  above). **V5:** a manager restart in the middle of an import costs 35 minutes before
+  the import is re-sent. This is the documented behaviour of an import whose outcome is
+  not known ([`docs/provider-call-outcomes.md`](docs/provider-call-outcomes.md)) and is
+  unchanged.
+- **Not run on rc6 yet:** everything new in rc6. It will be validated on this candidate.
+
 **Not run:** Proxmox adoption; a reused VMID and the ADR-0012 name rule (which needs a
 PVE cluster); a Proxmox `Reconfigure` (resize); the Proxmox import-stage delete of a
-failed migration; a PVE cluster of more than one node; SSH host keys in a libvirt clone;
-an SELinux libvirt host; and the paths named above that need a fault to trigger.
+failed migration; a PVE cluster of more than one node; a snapshot revert on any
+hypervisor; an SELinux libvirt host; and the paths named above that need a fault to
+trigger.
 
 ## Breaking changes
 
@@ -1547,6 +1704,27 @@ an SELinux libvirt host; and the paths named above that need a fault to trigger.
   `refusing to stage cloud-init data`. Seeds of existing VMs stay in `/tmp` until you
   make them private. → [Changes since v0.4.0-rc2](#libvirt-cloud-init-seeds-are-private-and-live-in-a-dedicated-directory-414-breaking),
   [Upgrade guide](docs/upgrading.md#breaking-changes)
+
+**New since rc5: one change needs action before you roll the manager**; the others are
+behaviour changes to check:
+
+- **Action required:** `spec.snapshot.revertToRef` now reverts the VM; it did nothing
+  before. A VM that carries the field is acted on by the first reconcile of the new
+  manager, and one that is powered off is reverted at once, discarding what was written
+  to its disks since the snapshot. Remove the field from every VM and `VMSet` template
+  you do not want reverted first ([Upgrade order for rc6](#upgrade-order-for-rc6), #431).
+- A VM held by a clustered restore guard (`RestorePending`, `OwnDomainOnAnotherHost`,
+  `UniquenessCheckFailed`, `ProviderLacksListOwnerFilter`) is `status.phase: Pending`,
+  not `Failed`; alerts that count `Failed` VMs no longer see them (#432).
+- A clustered delete whose host stopped answering during the call is held with
+  `DeleteBlocked=True/HostUnreachable` (a `Warning` event `DeleteBlocked`) and retried
+  with the 15 s to 5 min backoff; its message can now contain the VM's `Host` name
+  (#432).
+- A VM with `spec.disks` on a libvirt or Proxmox Provider gets the new condition
+  `DisksApplied=False/NotSupportedByProvider` and a `Warning` event; `Ready` is not
+  affected (#432).
+
+→ [Changes since v0.4.0-rc5](#changes-since-v040-rc5)
 
 **New since rc4: nothing is breaking.** Behaviour changes that need a look before you
 roll (all on Proxmox, and in the manager):
@@ -1822,6 +2000,18 @@ policy and grants → manager → providers), and rollback caveats in
   [`docs/clustered-provider-inventory.md`](docs/clustered-provider-inventory.md#migration-into-a-clustered-provider-addendum-b)).
 
 ### Fixes
+
+- **New since rc5** (→ [Changes since v0.4.0-rc5](#changes-since-v040-rc5)):
+  - **`HostPool.status` was never written**; every pool showed `status: null` (#430; V1).
+  - **`spec.snapshot.revertToRef` was accepted and ignored**: the VM stayed `Ready` with
+    no condition or event (#431; V2).
+  - **A clustered host that stopped answering was reported as `HOST_UNAVAILABLE` or,
+    after 30 seconds, as `Unknown`**, and a delete held for it said nothing about why
+    (#432; V3c, V3a).
+  - **A VM held by a clustered restore guard showed `Failed`** although it proceeds once
+    the cause is gone (#432; V3b).
+  - **`spec.disks` on libvirt and Proxmox was dropped without any sign**, and
+    `Reconfiguring` said "VM reconfigured successfully" (#432; V4).
 
 - **New since rc4** (→ [Changes since v0.4.0-rc4](#changes-since-v040-rc4)):
   - **A Proxmox VM with user-data failed to start on a stock PVE**: the cloud-init drive
@@ -2412,6 +2602,25 @@ says so. Each links to the page that documents it in full, where one exists.
   from a `spec.disks` entry or adds a disk. vSphere grows only an additional disk that
   `Create` recorded under the entry's name, so the additional disks of VMs created by
   rc1 or earlier are not resized. Proxmox resizes none.
+- **`spec.disks` is reported on libvirt and Proxmox, but only in some places.** The
+  `DisksApplied=False` condition and the `Warning` event are always there. The
+  admission warning is given only where the `VirtualMachine` validating webhook is
+  rendered, which the chart does only with `webhooks.enabled=true` (and
+  `webhooks.validating.enabled`, on by default) **and** `manager.maxDiskSize` set;
+  without a disk-size limit there is no admission warning.
+  vSphere attaches `spec.disks` at create but ignores an entry added after the VM was
+  created, with no condition and no event (the provider logs it at `INFO`); nothing
+  refuses either case
+  (→ [`docs/reconfigure-results.md`](docs/reconfigure-results.md#which-disk-a-size-goes-to)).
+- **Snapshot revert (`spec.snapshot.revertToRef`) has not run on a real hypervisor,
+  and a libvirt revert of a disk-only snapshot needs libvirt 9.9 or later.** A snapshot
+  the libvirt provider takes of a VM that is off, or without memory, is an external
+  disk-only snapshot; older libvirt cannot revert one and the provider reports
+  `RevertFailed`. A revert removes no overlay file, and the cleanup that
+  `SnapshotDelete` runs recognises only the primary disk's `<domain>-disk.<snapshot>`
+  overlay, so a revert may leave overlay files that nothing removes: check the pool
+  (`<pool>/*-disk.*` that are not `.qcow2`) after a revert, and tell us what you find
+  (→ [`docs/vm-snapshot-revert.md`](docs/vm-snapshot-revert.md#providers)).
 - **Held calls need an operator.** A `VMMigration` or `VMSnapshot` held in
   `SnapshotOutcomeUnknown`, `ExportOutcomeUnknown` or `ImportOutcomeUnknown` stays held
   until you check the provider and confirm the attempt with
@@ -2464,6 +2673,12 @@ says so. Each links to the page that documents it in full, where one exists.
   [docs/upgrading.md](docs/upgrading.md#leftovers-from-earlier-releases).
 
 ## Upgrade
+
+Since rc5: **three CRDs changed** (`VirtualMachine` gains `status.snapshotRevert`,
+`HostPool` gains printer columns, `VMSet` a description). Remove
+`spec.snapshot.revertToRef` from VMs you do not want reverted, apply the CRDs, then roll
+the manager (its role gains `hostpools/status`) and the clustered libvirt provider; see
+[Upgrade order for rc6](#upgrade-order-for-rc6).
 
 Since rc4: **no CRD changed.** Grant the PVE token `VM.Config.Network`,
 `VM.Config.Cloudinit` and `SDN.Use` on its bridges, then roll the manager and the

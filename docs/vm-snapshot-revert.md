@@ -3,7 +3,7 @@
 `spec.snapshot.revertToRef` on a `VirtualMachine` names a `VMSnapshot` to revert the
 VM to. Up to v0.4.0-rc5 the field was accepted and **ignored**: no controller sent the
 provider's `SnapshotRevert`, the VM stayed `Ready`, and no condition or event said that
-nothing happened. Since the release after rc5 the `VirtualMachine` controller acts on it,
+nothing happened. Since v0.4.0-rc6 the `VirtualMachine` controller acts on it,
 under the rules below.
 
 > This flow is covered by the controller's unit and envtest tests, which drive a
