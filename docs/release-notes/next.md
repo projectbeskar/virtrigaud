@@ -1665,7 +1665,7 @@ Wave 2 adds to this:
 
 ## About this release candidate / what to test
 
-v0.4.0 GA follows after a soak of this candidate (rc1, rc2, rc4, rc5 and rc6 came before it; rc3 was tagged but not released). Please try it on a non-production
+v0.4.0 GA follows after a soak of this candidate (rc1, rc2, rc4, rc5, rc6 and rc7 came before it; rc3 was tagged but not released). Please try it on a non-production
 cluster and report what you find (GitHub issues; include the Provider type, the
 `kubectl describe` of the object involved and the provider log, never a Secret).
 The most useful things to exercise:
@@ -1718,6 +1718,28 @@ The most useful things to exercise:
   - a migration onto Proxmox: the VM lands on the bridge and VLAN its target names, and
     whether the migrated guest has network (see Known limitations, R36); tell us which
     guest image you used.
+- **New since rc7 (libvirt, single-host and clustered, unless noted):**
+  - **other VMs after an offline snapshot or a revert:** take a `VMSnapshot` of one VM with
+    the VM powered off, revert that VM to it, then take a snapshot of, clone and delete
+    ANOTHER VM on the same pool. None is refused with "could not verify that no other
+    domain uses its disks". On a host where the provider's SSH user has no `VR_DISK_READ`
+    rule over the pool directory, expect instead "permission denied reading a disk image"
+    with a pointer to [Unreadable disk
+    images](docs/libvirt-clones.md#unreadable-disk-images), and the operation done once
+    the rule or the manual repair is in place;
+  - **a persistently unreadable image backs off without an operator hold** (clustered
+    Provider): with an overlay the provider cannot read, a `VMSnapshot` shows
+    `Ready=False/ProviderError` ("The provider did not perform the snapshot creation") and
+    is sent again after 1, 2, 4 and 8 minutes, then every 10 minutes; it never becomes
+    `SnapshotOutcomeUnknown`, and it is created once the image is readable;
+  - **`status.ips` on any provider** (vSphere, Proxmox, libvirt): no loopback, link-local
+    or multicast entry, and the first entry is an address you can reach the VM on;
+  - **a libvirt guest on the NAT `default` network without the guest agent:** `status.ips`
+    shows its DHCP lease (compare `virsh domifaddr <domain> --source lease` on the host);
+  - **a libvirt guest on a host bridge** (`spec.network.libvirt.bridge`): with the QEMU
+    guest agent running, `status.ips` shows its address; without the agent it is empty
+    unless the host has an ARP entry for the guest. On a clustered Provider the VM is
+    placed only on a host labelled `net.virtrigaud.io/<bridge>: "true"`.
 - **New since rc6 (libvirt, single-host and clustered):**
   - **a revert to a snapshot taken with the VM powered off** (create the `VMSnapshot` with
     the VM off, power it on, change something in the guest, set `spec.powerState: Off`,
@@ -1740,8 +1762,8 @@ The most useful things to exercise:
     the calls recover when the host answers.
 - **New since rc5:**
   - **snapshot revert** (`spec.snapshot.revertToRef`; validated in the lab on vSphere
-    and Proxmox since rc6; on libvirt it failed on rc6 (V6) and rc7's fix is not
-    validated yet: see the rc7 items above): take a
+    and Proxmox since rc6, and on libvirt since rc7; on libvirt it failed on rc6 (V6): see
+    the rc7 items above): take a
     `VMSnapshot`, change something in the guest, set `spec.powerState: Off`,
     name the snapshot, and check `status.snapshotRevert.phase`, the `SnapshotReverted`
     condition and that the guest is back. Try it on vSphere, on single-host and
@@ -1953,15 +1975,54 @@ fixed in rc7, see [Changes since v0.4.0-rc6](#changes-since-v040-rc6)).
 - **V4, `spec.disks` (#432).** A clustered libvirt VM with `spec.disks` showed
   `DisksApplied=False/NotSupportedByProvider` and one `Warning` event, `Ready` unaffected.
   The admission warning was not exercised: the lab's VM webhook is not rendered.
-- **Not run on rc7 yet:** everything new in rc7 (the libvirt revert with its snapshot
-  ejection and refusal, and the bounded wait for another call's dial). It will be
-  validated on this candidate.
+- **Not run on rc6:** everything new in rc7 (the libvirt revert with its snapshot
+  ejection and refusal, and the bounded wait for another call's dial). It was validated
+  on rc7, below.
+
+**Validated in the lab since rc7**, on v0.4.0-rc7 (the released images): Kubernetes 1.34, a
+vCenter, a single-node Proxmox VE 9.2, and libvirt 10.0 as a single host and as a two-host
+clustered Provider (host A and host B) sharing an NFS pool. This run found V7 to V10 (fixed
+in rc8, see [Changes since v0.4.0-rc7](#changes-since-v040-rc7)).
+
+- **V6, the libvirt revert (#435).** A revert of a snapshot taken with the VM powered off,
+  on the clustered Provider and on the single host: the guest file written after the
+  snapshot was gone and the earlier one kept, the seed CD-ROM was back as the read-only
+  raw ISO, no overlay was left in the seed directory, and the record stayed at one
+  attempt.
+- **The refusals.** A revert to a snapshot taken by the rc6 provider was refused with
+  nothing changed on the host; so was a revert to a disk-only snapshot taken while the VM
+  ran.
+- **A memory snapshot** of a running seeded VM was created and reverted; the VM booted with
+  cloud-init `done` and its seed present.
+- **V3c, follow-up (#434).** A clustered host made unreachable while VMs on it were
+  reconciled: every failed call (12 `Describe`s) was answered `Unavailable` within its
+  deadline, none `Unknown` or slow.
+- **The upgrade from rc6 to rc7.** The manager rolled with three VMs still carrying a
+  completed `spec.snapshot.revertToRef`; none was reverted again (the once-per-request
+  record held across the upgrade).
+- **Found, fixed in rc8:** V7 (after an offline snapshot or a revert, other VMs'
+  snapshot, clone and delete were answered "could not verify that no other domain uses
+  its disks": the guard re-probed a shut-off VM's nested `<backingStore>` files as the
+  SSH user; fixed in #437), V8 (a routed snapshot create answered "not performed" ended in
+  an operator hold; #437) and the revert hint (a revert refused for good said to retry;
+  #437).
+- **A bridged lab network** (the libvirt hosts' uplink put into a Linux bridge). A VM
+  attached with `spec.network.libvirt.bridge` was placed only on the host labelled
+  `net.virtrigaud.io/<bridge>` ("1 feasible of 2"), and on either once both were
+  labelled; the guests got addresses from the lab's DHCP and were reachable directly. A
+  single-host Provider VM on the bridge likewise. A vSphere → clustered libvirt migration
+  over S3 landed on the bridge, and the guest was reachable with its data. Found, fixed in
+  #438: V9 (`status.ips` listed loopback and link-local addresses) and V10 (NAT guests
+  without the agent never showed an address).
+- **Not run on rc8 yet:** everything new in rc8 (the disk check over nested backing
+  stores and the "permission denied" answer, the snapshot-create backoff, the revert hint,
+  the `status.ips` filter and the NAT lease). It will be validated on this candidate.
 
 **Not run:** Proxmox adoption; a reused VMID and the ADR-0012 name rule (which needs a
 PVE cluster); a Proxmox `Reconfigure` (resize); the Proxmox import-stage delete of a
-failed migration; a PVE cluster of more than one node; a snapshot revert on libvirt with
-the rc7 provider (single-host and clustered; on rc6 it failed, V6); an SELinux libvirt
-host; and the paths named above that need a fault to trigger.
+failed migration; a PVE cluster of more than one node; everything new in rc8 (the last
+item of "Validated in the lab since rc7"); an SELinux libvirt host; and the paths named
+above that need a fault to trigger.
 
 ## Breaking changes
 
