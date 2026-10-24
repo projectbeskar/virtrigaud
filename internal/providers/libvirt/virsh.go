@@ -104,8 +104,13 @@ type VirshProvider struct {
 	// ssh/sshpass subprocess per call — this is the "strategic fix" #255/#256
 	// named. Redial-on-broken is handled per-call (withSession); the full
 	// keepalive/liveness-probe/watchdog lifecycle is ADR-0008 PR 4.
-	sshMu     sync.Mutex
-	sshClient *ssh.Client
+	//
+	// sshDialing is the dial in flight on a clustered host connection, if any
+	// (ensureClusteredSSHClient); it is guarded by sshMu, which is never held
+	// across a dial there. A single-host connection dials under sshMu.
+	sshMu      sync.Mutex
+	sshClient  *ssh.Client
+	sshDialing *sshDial
 
 	// golibvirtMu guards the lazy construction of golibvirt below (ADR-0008 PR
 	// 4a). golibvirt stays nil — meaning go-libvirt is fully dormant: no dial,
