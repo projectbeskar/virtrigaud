@@ -93,10 +93,13 @@ func TestClustered_Power_RoutedToLeasedHostOnTheCheckedDomain(t *testing.T) {
 		"host-b dumpxml " + uuid,
 		"host-b list --all --uuid",
 	}
+	// Before a start: an ejected cloud-init seed is checked for (V6,
+	// snapshot_media.go) — read-only when there is none.
+	seedCheck := "host-b dumpxml " + uuid
 	cases := map[contracts.PowerOp][]string{
-		contracts.PowerOpOn:               append([]string{"host-b start " + uuid}, sync...),
+		contracts.PowerOpOn:               append([]string{seedCheck, "host-b start " + uuid}, sync...),
 		contracts.PowerOpOff:              {"host-b destroy " + uuid},
-		contracts.PowerOpReboot:           append([]string{"host-b destroy " + uuid, "host-b start " + uuid}, sync...),
+		contracts.PowerOpReboot:           append([]string{seedCheck, "host-b destroy " + uuid, "host-b start " + uuid}, sync...),
 		contracts.PowerOpShutdownGraceful: {"host-b shutdown " + uuid},
 	}
 	for op, want := range cases {

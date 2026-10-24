@@ -285,13 +285,20 @@ func TestClustered_Snapshots_RoutedOwnerCheckedByUUID(t *testing.T) {
 		assert.Equal(t, "pre", resp.SnapshotId)
 		assert.Nil(t, resp.Task, "libvirt snapshots are synchronous")
 		assert.Equal(t, append(append(append(append([]string{}, snapshotOwnerCheck...),
+			"host-b virsh dumpxml "+uuid, // an interrupted ejection is repaired first
 			"host-b virsh snapshot-list "+uuid+" --name",
 			"host-b virsh domstate "+uuid),
 			snapshotDependentsGuard...),
 			"host-b virsh dumpxml "+uuid,
-			"host-b virsh snapshot-create-as "+uuid+" pre --description d --atomic --disk-only --diskspec sda,snapshot=no"), fx.calls(),
-			"the name is looked up first (idempotent create), the disk-dependents guard runs, the read-only disks are "+
-				"read, then the snapshot is made without them")
+			"host-b virsh metadata --domain "+uuid+" --uri "+mediaMarkerURI+" --key virtrigaud --set <ejected><media target='sda' source='"+
+				scdSeedISO+"' driver='raw'/></ejected> --config",
+			"host-b virsh change-media "+uuid+" sda --eject --config",
+			"host-b virsh snapshot-create-as "+uuid+" pre --description d --atomic --disk-only",
+			"host-b virsh change-media "+uuid+" sda "+scdSeedISO+" --insert --config",
+			"host-b virsh dumpxml "+uuid,
+			"host-b virsh metadata --domain "+uuid+" --uri "+mediaMarkerURI+" --remove --config"), fx.calls(),
+			"the name is looked up first (idempotent create), the disk-dependents guard runs, then the snapshot is "+
+				"made with the seed CD-ROM ejected, and the seed is inserted again")
 	})
 
 	t.Run("create of a name this request already made is the earlier attempt's snapshot", func(t *testing.T) {
@@ -303,6 +310,7 @@ func TestClustered_Snapshots_RoutedOwnerCheckedByUUID(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, "s2", resp.SnapshotId)
 		assert.Equal(t, append(append([]string{}, snapshotOwnerCheck...),
+			"host-b virsh dumpxml "+uuid, // an interrupted ejection is repaired first
 			"host-b virsh snapshot-list "+uuid+" --name",
 			"host-b virsh snapshot-dumpxml "+uuid+" s2",
 			"host-b virsh domjobinfo "+uuid), fx.calls(), "no second snapshot is made; it is adopted once no job runs")
@@ -328,7 +336,10 @@ func TestClustered_Snapshots_RoutedOwnerCheckedByUUID(t *testing.T) {
 		})
 		require.NoError(t, err)
 		assert.Contains(t, fx.calls(), "host-b virsh snapshot-create-as "+uuid+" mem --description d --atomic --diskspec sda,snapshot=no",
-			"a memory snapshot excludes the read-only seed CD-ROM too")
+			"a memory snapshot of a running VM excludes the read-only seed CD-ROM, never ejects it")
+		for _, c := range fx.calls() {
+			assert.NotContains(t, c, "change-media", "a running domain is never ejected")
+		}
 	})
 
 	t.Run("delete", func(t *testing.T) {
@@ -358,11 +369,11 @@ func TestClustered_Snapshots_RoutedOwnerCheckedByUUID(t *testing.T) {
 			"host-b virsh snapshot-list "+uuid+" --name",
 			"host-b virsh domstate "+uuid),
 			snapshotDependentsGuard...),
-			"host-b virsh snapshot-dumpxml "+uuid+" s2",
 			"host-b virsh dumpxml "+uuid,
+			"host-b virsh snapshot-dumpxml "+uuid+" s2",
 			"host-b virsh snapshot-revert "+uuid+" s2 --force --running",
 			"host-b virsh dumpxml "+uuid), fx.calls(),
-			"the snapshot and the domain are read before the revert, and the domain's read-only disks after it")
+			"the domain and the snapshot are read before the revert, and the domain's media after it")
 	})
 
 	t.Run("lease released and the other host never dialed", func(t *testing.T) {

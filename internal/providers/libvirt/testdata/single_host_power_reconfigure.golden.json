@@ -32,6 +32,7 @@
   },
   "power-on": {
     "calls": [
+      "single dumpxml vrcallseq-web",
       "single start vrcallseq-web",
       "single dumpxml vrcallseq-web",
       "single define /dev/stdin",
@@ -42,6 +43,7 @@
   },
   "power-on-already-running": {
     "calls": [
+      "single dumpxml vrcallseq-web",
       "single start vrcallseq-web",
       "single domstate vrcallseq-web"
     ],
@@ -49,6 +51,7 @@
   },
   "power-on-define-fails": {
     "calls": [
+      "single dumpxml vrcallseq-web",
       "single start vrcallseq-web",
       "single dumpxml vrcallseq-web",
       "single define /dev/stdin",
@@ -59,6 +62,7 @@
   },
   "power-on-start-fails": {
     "calls": [
+      "single dumpxml vrcallseq-web",
       "single start vrcallseq-web",
       "single domstate vrcallseq-web"
     ],
@@ -66,6 +70,7 @@
   },
   "power-reboot": {
     "calls": [
+      "single dumpxml vrcallseq-web",
       "single destroy vrcallseq-web",
       "single start vrcallseq-web",
       "single dumpxml vrcallseq-web",
@@ -77,6 +82,7 @@
   },
   "power-reboot-stop-fails": {
     "calls": [
+      "single dumpxml vrcallseq-web",
       "single destroy vrcallseq-web",
       "single start vrcallseq-web",
       "single dumpxml vrcallseq-web",
