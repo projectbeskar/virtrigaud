@@ -59,7 +59,9 @@ func TestNoteUnattachedDisks(t *testing.T) {
 	vm.Generation = 1
 	vm.Spec.Disks = []infravirtrigaudiov1beta1.DiskSpec{{Name: "data", SizeGiB: 1}}
 
-	cond := func() *metav1.Condition { return meta.FindStatusCondition(vm.Status.Conditions, k8s.ConditionDisksApplied) }
+	cond := func() *metav1.Condition {
+		return meta.FindStatusCondition(vm.Status.Conditions, k8s.ConditionDisksApplied)
+	}
 
 	r.noteUnattachedDisks(vm, libvirt)
 	require.NotNil(t, cond())
