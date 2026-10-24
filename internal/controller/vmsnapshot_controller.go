@@ -112,7 +112,18 @@ type VMSnapshotReconciler struct {
 	// RemoteResolver; tests inject a fake provider here to exercise the create
 	// path without standing up a gRPC server.
 	providerInstanceFn func(ctx context.Context, provider *infrav1beta1.Provider) (contracts.Provider, error)
+
+	// notPerformedBackoff paces, per VMSnapshot UID, the re-sends of a routed
+	// SnapshotCreate the provider answered it did not perform
+	// (routedCreateNotPerformed): requestMarkerRecheckInterval, doubling for
+	// each consecutive such answer, up to snapshotNotPerformedRetryMax. Any
+	// other answer resets it. In memory: a manager restart starts it again.
+	notPerformedBackoff unschedulableBackoff
 }
+
+// snapshotNotPerformedRetryMax caps the backoff of a routed SnapshotCreate
+// the provider keeps answering it did not perform (notPerformedBackoff).
+const snapshotNotPerformedRetryMax = 10 * time.Minute
 
 // NewVMSnapshotReconciler creates a new VMSnapshot reconciler.
 //
@@ -301,6 +312,13 @@ func (r *VMSnapshotReconciler) createSnapshot(ctx context.Context, snapshot *inf
 		return res, err
 	}
 
+	// A routed create the provider answered it did not perform is sent again
+	// only once its backoff has passed (routedCreateNotPerformed), whatever
+	// event triggered this reconcile.
+	if wait := r.notPerformedBackoff.remaining(string(snapshot.UID), time.Now()); wait > 0 {
+		return ctrl.Result{RequeueAfter: wait}, nil
+	}
+
 	// Every failure before the SnapshotCreate RPC below (provider lookup,
 	// binding, provider client) leaves the snapshot in the initial phase, so
 	// the create is retried unchanged; the capability gate fails it. The
@@ -390,6 +408,11 @@ func (r *VMSnapshotReconciler) createSnapshot(ctx context.Context, snapshot *inf
 
 	// Call provider to create snapshot
 	resp, err := providerInstance.SnapshotCreate(ctx, req)
+	notPerformed := err != nil && req.VM.HostID != "" && routedCreateNotPerformed(err)
+	if !notPerformed {
+		// Any other answer ends a run of "not performed" answers.
+		r.notPerformedBackoff.reset(string(snapshot.UID))
+	}
 	if err != nil && req.VM.HostID != "" && (contracts.IsRetryable(err) || !providerCallOutcomeKnownFor(err, attempt)) {
 		// A ROUTED (clustered) create without a definite outcome — its host
 		// unavailable, its host stopped answering after the snapshot command
@@ -404,7 +427,6 @@ func (r *VMSnapshotReconciler) createSnapshot(ctx context.Context, snapshot *inf
 		// (VM_DISK_CHECK_FAILED, #358) is retried here too; a refusal because
 		// another VM depends on the disk (VM_DISK_IN_USE, a Conflict) fails the
 		// create, as on a single host. Single-host failures are unchanged.
-		notPerformed := routedCreateNotPerformed(err)
 		message := snapshotCreateRetryingMessage
 		if notPerformed {
 			message = snapshotCreateNotPerformedMessage
@@ -418,12 +440,17 @@ func (r *VMSnapshotReconciler) createSnapshot(ctx context.Context, snapshot *inf
 			// A definite "nothing was done" (V8): the attempt is closed —
 			// its marker removed, so the next send is a new attempt, never
 			// counted as a re-send of an unknown outcome toward the
-			// operator hold — and retried after a backoff.
+			// operator hold — and retried after an exponential backoff
+			// (requestMarkerRecheckInterval doubling up to
+			// snapshotNotPerformedRetryMax): a host whose check keeps failing
+			// is not scanned every minute for ever.
+			wait := r.notPerformedBackoff.nextWithin(string(snapshot.UID), time.Now(),
+				requestMarkerRecheckInterval, snapshotNotPerformedRetryMax)
 			logger.Info("The provider did not perform the snapshot creation; retrying after a backoff",
-				"error", err.Error(), "retryAfter", requestMarkerRecheckInterval.String())
+				"error", err.Error(), "retryAfter", wait.String())
 			clearSnapshotRequest(snapshot)
 			res := r.retrySnapshotCreate(ctx, snapshot, message)
-			res.RequeueAfter = max(res.RequeueAfter, requestMarkerRecheckInterval)
+			res.RequeueAfter = wait
 			return res, nil
 		}
 		logger.Info("Snapshot creation did not reach a definite outcome; retrying", "error", err.Error())
