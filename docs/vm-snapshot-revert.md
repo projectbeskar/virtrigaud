@@ -69,6 +69,9 @@ happens to be off, too: the controller would power it on.
   restore a memory snapshot's running state too. A VM whose spec still says `Off` is
   then powered off again.
 - A VM the provider reports `Suspended` or `Unknown` is not `Off`: it waits.
+- A revert requested while the VM runs stays requested. It is sent the next time the
+  VM is powered off with `spec.powerState: Off`, however much later that is. To cancel
+  it, remove `spec.snapshot.revertToRef`.
 
 Why: a revert discards the VM's current disk state. Requiring it to be off keeps the
 rule that VirtRigaud never powers off a VM nobody asked to power off, and it makes a
