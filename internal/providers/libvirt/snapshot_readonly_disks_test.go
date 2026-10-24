@@ -309,7 +309,7 @@ func createSnap(t *testing.T, h *mediaHost, name string, memory bool, roots []st
 
 func revertSnap(t *testing.T, h *mediaHost, name string, roots []string) error {
 	t.Helper()
-	_, err := snapshotRevertOn(context.Background(), newMediaConn(h), v6Domain, name, roots)
+	_, err := snapshotRevertOn(context.Background(), newMediaConn(h), v6Domain, name, roots, nil)
 	return err
 }
 

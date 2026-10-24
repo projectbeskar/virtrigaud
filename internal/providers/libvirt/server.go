@@ -496,7 +496,7 @@ func (s *Server) SnapshotCreate(ctx context.Context, req *providerv1.SnapshotCre
 					resp = existing
 					return err
 				}
-				r, err := snapshotCreateOn(bctx, c, d.handle, withSnapshotRequestToken(req), roots)
+				r, err := snapshotCreateOn(bctx, c, d.handle, withSnapshotRequestToken(req), roots, overlayDirsOf(s.provider))
 				if err != nil {
 					return err
 				}
@@ -533,7 +533,8 @@ func (s *Server) SnapshotCreate(ctx context.Context, req *providerv1.SnapshotCre
 	}
 	// A single host's failures are answered with the outcome the provider
 	// can prove (call_outcome.go, singleHostSnapshotFailure).
-	resp, err := snapshotCreateWith(ctx, conn, req.VmId, req, snapshotCreateOptions{refuseExisting: true, seedRoots: seedRootsOf(s.provider)})
+	resp, err := snapshotCreateWith(ctx, conn, req.VmId, req, snapshotCreateOptions{refuseExisting: true,
+		seedRoots: seedRootsOf(s.provider), overlayDirs: overlayDirsOf(s.provider)})
 	if err != nil {
 		return nil, singleHostSnapshotFailure(ctx, conn, req.VmId, err)
 	}
@@ -592,8 +593,8 @@ func snapshotVMRef(vmID, hostID string, owner *providerv1.ObjectIdentity) contra
 // the provider's seed roots, for the repair of an interrupted ejection
 // (restoreEjectedMedia).
 func snapshotCreateOn(ctx context.Context, conn libvirtConn, domain string, req *providerv1.SnapshotCreateRequest,
-	seedRoots []string) (*providerv1.SnapshotCreateResponse, error) {
-	return snapshotCreateWith(ctx, conn, domain, req, snapshotCreateOptions{seedRoots: seedRoots})
+	seedRoots []string, overlayDirs overlayDirsFunc) (*providerv1.SnapshotCreateResponse, error) {
+	return snapshotCreateWith(ctx, conn, domain, req, snapshotCreateOptions{seedRoots: seedRoots, overlayDirs: overlayDirs})
 }
 
 // snapshotCreateOptions shapes snapshotCreateWith.
@@ -609,6 +610,10 @@ type snapshotCreateOptions struct {
 	// proves a recorded ejected medium is the domain's own cloud-init seed
 	// (isOwnSeedISO). None: nothing is re-inserted from a record.
 	seedRoots []string
+	// overlayDirs names the directories the domain's own snapshot overlays
+	// are normalised in after the snapshot (normalizeOwnOverlays,
+	// overlay_perms.go); nil normalises nothing.
+	overlayDirs overlayDirsFunc
 }
 
 // errSnapshotExists is the refusal of a snapshot create whose name is already
@@ -755,6 +760,12 @@ func snapshotCreateWith(ctx context.Context, conn libvirtConn, domain string, re
 	}
 
 	log.Printf("INFO Snapshot created successfully: %s\nOutput: %s", snapshotName, result.Stdout)
+
+	// The overlay libvirt just made (and any own overlay an earlier snapshot
+	// or release left 0600) gets the mode and owner of a VM disk, so the disk
+	// in-use checks of other VMs can read it. Best-effort: never fails the
+	// snapshot (overlay_perms.go).
+	normalizeOwnOverlays(ctx, h, domain, opts.overlayDirs)
 
 	// Return snapshot ID (synchronous operation for libvirt)
 	return &providerv1.SnapshotCreateResponse{
@@ -998,7 +1009,7 @@ func (s *Server) SnapshotRevert(ctx context.Context, req *providerv1.SnapshotRev
 		var resp *providerv1.TaskResponse
 		err := s.provider.withOwnedDomain(ctx, snapshotVMRef(req.GetVmId(), req.GetTargetHostId(), req.GetOwner()), "snapshot revert",
 			func(ctx context.Context, c libvirtConn, d domainTarget) error {
-				r, err := snapshotRevertOn(ctx, c, d.handle, req.SnapshotId, seedRootsOf(s.provider))
+				r, err := snapshotRevertOn(ctx, c, d.handle, req.SnapshotId, seedRootsOf(s.provider), overlayDirsOf(s.provider))
 				resp = routedTaskResponse(c.HostID(), r)
 				return err
 			})
@@ -1017,7 +1028,7 @@ func (s *Server) SnapshotRevert(ctx context.Context, req *providerv1.SnapshotRev
 	if err != nil {
 		return nil, err
 	}
-	return snapshotRevertOn(ctx, conn, req.VmId, req.SnapshotId, seedRootsOf(s.provider))
+	return snapshotRevertOn(ctx, conn, req.VmId, req.SnapshotId, seedRootsOf(s.provider), overlayDirsOf(s.provider))
 }
 
 // snapshotRevertOn is the SnapshotRevert core, run on connection conn against
@@ -1026,7 +1037,8 @@ func (s *Server) SnapshotRevert(ctx context.Context, req *providerv1.SnapshotRev
 // (prepareSnapshotRevert); after it, it re-inserts the media the revert left
 // out and fails the call for a read-only disk libvirt rewrote
 // (finishSnapshotRevert). seedRoots are the provider's seed roots.
-func snapshotRevertOn(ctx context.Context, conn libvirtConn, domain, snapshotID string, seedRoots []string) (*providerv1.TaskResponse, error) {
+func snapshotRevertOn(ctx context.Context, conn libvirtConn, domain, snapshotID string, seedRoots []string,
+	overlayDirs overlayDirsFunc) (*providerv1.TaskResponse, error) {
 	if err := checkSnapshotIDArgument(snapshotID); err != nil {
 		return nil, err
 	}
@@ -1076,8 +1088,14 @@ func snapshotRevertOn(ctx context.Context, conn libvirtConn, domain, snapshotID 
 	// read-only disk libvirt rewrote anyway, or a medium that cannot be
 	// inserted again, is answered as a failure, not a success (the VM may
 	// not start).
-	if err := finishSnapshotRevert(ctx, h, domain, snapshotID, plan, domainState == "running"); err != nil {
-		return nil, err
+	finishErr := finishSnapshotRevert(ctx, h, domain, snapshotID, plan, domainState == "running")
+
+	// The overlay the revert made (and any own overlay left 0600 before) gets
+	// the mode and owner of a VM disk, whatever finishSnapshotRevert found.
+	// Best-effort: never fails the revert (overlay_perms.go).
+	normalizeOwnOverlays(ctx, h, domain, overlayDirs)
+	if finishErr != nil {
+		return nil, finishErr
 	}
 
 	// Return empty response (synchronous operation)
