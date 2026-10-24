@@ -273,6 +273,35 @@ call got:
 | A command that may change the host was sent. It counts as sent once its SSH session is open (or, for a local connection, once its process starts), and before its result: when the session drops it may have completed, or still be running. A dial or session-open failure ran nothing and does not count | `Unknown` + `VM_OPERATION_FAILED` + `HOST_CONNECTION_LOST`, "the host stopped answering while the operation ran; its outcome is unknown" | Unknown |
 | The same, for an RPC that is idempotent per request and that the manager retries on the same host (`SnapshotCreate` with a name and a request token, `Clone`; see below) | `Unavailable` + `VM_OUTCOME_UNKNOWN_RETRY` + `VM_OPERATION_FAILED` + `HOST_CONNECTION_LOST`, "its outcome is unknown and it may still complete on the host: retry" | Retry, outcome unknown: **not** nothing done |
 
+**A host that does not answer in time.** Before a command of a routed call runs, the
+call waits for the host: for one of the host's command slots, for the SSH dial and
+handshake when there is no connection, and for an SSH session on the connection. A
+host that stops answering without closing the connection made these waits last
+until the call's own deadline: the session open waited on the dead connection, the
+calls stuck there held the host's command slots, and every later call waited for a
+slot. Such a call then ended with its context error, which is not a host failure,
+and was answered `Unknown` + `VM_OPERATION_FAILED`, "failed to describe VM on host
+...", just as the manager's 30-second `Describe` deadline ran out; a call that found
+the dead connection at once was answered `HOST_UNAVAILABLE` (v0.4.0-rc5 and
+earlier). Now these three waits end 5 seconds before the call's deadline (or a quarter of the time the
+call has left, when that is shorter), and a wait that ends there counts as a host
+that stopped answering: it ran nothing, so the table above applies (for `Describe`,
+always `HOST_UNAVAILABLE`), and the answer reaches the manager before its deadline.
+A call whose own context ends first keeps its context error, as before. A command
+that was already running when the host stopped answering is not cut short by this;
+it ends at the call's deadline, as before. The single-host provider is unchanged.
+
+**Which host.** A `HOST_UNAVAILABLE` answer about the host the call was routed to
+(its `target_host_id`: the lease failed, or that host stopped answering) carries
+that host's id in its `ErrorInfo` metadata, under the key `host`
+(`contracts.HostUnavailableHostKey`). The manager already sent that id; the key
+only tells it that the host that could not be reached is the VM's own. The
+cluster-wide disk guard's `HOST_UNAVAILABLE` (a host that could not be checked
+may be another one) carries no `host` key, and neither does an answer from an
+older provider. The manager names a host in a `VirtualMachine` condition only
+when the key is the VM's own host (below); it never names an endpoint, a URI or
+an address.
+
 A command **may change the host** unless it is on a short, fixed list of reads: the
 `virsh` subcommands that only read (`list`, `dumpxml`, `domstate`, `snapshot-list`,
 `pool-dumpxml`, ...; not `snapshot-current`, which can set the current snapshot, and
@@ -319,7 +348,7 @@ Each routed RPC applies the rule, with these differences:
 | `SnapshotCreate` | Before the `snapshot-create-as` is sent: `HOST_UNAVAILABLE` or not performed. After: the **retry form** ("its outcome is unknown and it may still complete on the host: retry"), not `Unknown`, **when the request names its snapshot and carries a request token** (the manager always sends both). The routed create is then idempotent: the retry finds the snapshot by name and token, or is refused by libvirt's job lock while the job runs. A request without both (a direct caller) gets `Unknown`, for its time-budget answer too, because its retry could take a second snapshot. | Retried, never failed, outcome unknown; the `VMSnapshot` or `VMMigration` marker rules above apply (the marker is kept). |
 | `Clone` | Before the copy is sent, only reads: `HOST_UNAVAILABLE` or not performed. Any command not on the read list sent earlier (the `isoinfo` read of the source's seed, the varstore check, the copy's private write directory) already gives the retry form. After the copy is sent: the retry form, not `Unknown`: the clone is stamped with its target, so the retry finds a clone that completed, or is told that the earlier copy still runs (`flock`). An `Unknown` would fail the `VMClone` and remove its target. | Retried on the same host with the backoff (`CloneRetrying`). |
 | `Power` | The table above. `on`, `off` and `shutdown` can be repeated: a second attempt finds the domain already in the state asked for. `reboot` cannot: an unknown `reboot` that is retried may reboot the VM twice. | A provider error, retried every 30 s (`HOST_CONNECTION_LOST`). |
-| `Create`, `Delete`, `Reconfigure`, `SnapshotDelete`, `SnapshotRevert`, `TransferOwner` | The table above. A clustered `Delete` stops at a `destroy` whose session dropped, instead of going on to `undefine` a domain that may still run; it is retried. Any other failed `destroy` is ignored, as before. | `Delete`: finalizer kept, retried. `SnapshotDelete` of a `VMSnapshot`: finalizer kept, retried with a backoff of 15 s doubling to 5 min. `Reconfigure` and `Create`: a provider error, retried (a `Reconfigure` every 30 s); a failed `Reconfigure` counts the larger size on a clustered Provider. `TransferOwner`: the adoption fails and is retried. `SnapshotRevert` of a `VirtualMachine` (`spec.snapshot.revertToRef`): `status.snapshotRevert` stays `Reverting`, and the revert is sent again only while the VM is still powered off ([above](#what-happens-to-a-call-whose-outcome-is-unknown)). Each call can be repeated: a second attempt finds the domain, snapshot or stamp already in its final state (a `Create` binds the domain the first attempt made, which carries the VM's owner stamp). |
+| `Create`, `Delete`, `Reconfigure`, `SnapshotDelete`, `SnapshotRevert`, `TransferOwner` | The table above. A clustered `Delete` stops at a `destroy` whose session dropped, instead of going on to `undefine` a domain that may still run; it is retried. Any other failed `destroy` is ignored, as before. | `Delete`: finalizer kept, `DeleteBlocked=True/HostUnreachable` and `Ready=False/DeleteBlocked`, retried with a backoff (15 s doubling to 5 min) until the host answers; see [A delete held for an unreachable host](#a-delete-held-for-an-unreachable-host). `SnapshotDelete` of a `VMSnapshot`: finalizer kept, retried with a backoff of 15 s doubling to 5 min. `Reconfigure` and `Create`: a provider error, retried (a `Reconfigure` every 30 s); a failed `Reconfigure` counts the larger size on a clustered Provider. `TransferOwner`: the adoption fails and is retried. `SnapshotRevert` of a `VirtualMachine` (`spec.snapshot.revertToRef`): `status.snapshotRevert` stays `Reverting`, and the revert is sent again only while the VM is still powered off ([above](#what-happens-to-a-call-whose-outcome-is-unknown)). Each call can be repeated: a second attempt finds the domain, snapshot or stamp already in its final state (a `Create` binds the domain the first attempt made, which carries the VM's owner stamp). |
 | `DeleteLandedDisk` | `HOST_UNAVAILABLE` only before the host answered a command. After reads were answered: `Unavailable` + `VM_OPERATION_FAILED`, "could not be checked or removed". After the `rm` was sent: the retry form, "it is not known whether it was removed". | Retried. A retry that finds the disk gone is `NOT_FOUND`. |
 | `DeleteStagedDisk` (`nfs`) | `HOST_UNAVAILABLE` only for a host that cannot be leased. Every `qemu-img` failure, a dropped session included, is a plain `Unavailable` with a constant message (never `HOST_UNAVAILABLE`); this path is unchanged by R25. | The cleanup is retried. |
 
@@ -336,6 +365,34 @@ Three things stay as they were:
 
 None of these answers counts toward the Provider's circuit breaker, except the plain
 `Unavailable` of `DeleteStagedDisk`.
+
+### A delete held for an unreachable host
+
+A clustered `Delete` answered `HOST_UNAVAILABLE` whose `host` key is the VM's own
+host (`status.placement.host`, or the pending host of a create in flight), or
+answered with `HOST_CONNECTION_LOST`, is held: the finalizer is kept and the VM
+shows `DeleteBlocked=True` with reason `HostUnreachable`, the same message on
+`Ready=False/DeleteBlocked`, and one `Warning` event `DeleteBlocked`. The message
+names the host by its `Host` name and says whether anything may have been
+deleted:
+
+- `HOST_UNAVAILABLE`, or `HOST_CONNECTION_LOST` that is "not performed": "Delete held:
+  this VirtualMachine's host host-a could not be reached, so nothing was deleted. The
+  finalizer is kept; the delete is retried with a backoff of up to 5m0s and completes
+  once the host answers. ..."
+- `HOST_CONNECTION_LOST` with an unknown outcome: "Delete held: this VirtualMachine's
+  host host-a stopped answering during the delete, so it is not known how far the
+  delete got. ..."
+
+Both end with how to release the VM without the provider's delete
+(`virtrigaud.io/orphan-on-delete` or `virtrigaud.io/force-delete`). A
+`HOST_UNAVAILABLE` without the VM's own host in its `host` key (the cluster-wide
+disk guard, an older provider) keeps the constant message that names no host. The
+delete is retried with the blocked-VM backoff (15 s doubling to 5 min); when the
+host answers again the delete completes and the finalizer is removed, and a later
+attempt that fails for another reason removes `DeleteBlocked` (`Ready` then says
+`ProviderError`). Up to v0.4.0-rc5 a `HOST_CONNECTION_LOST` delete set no condition
+(`Ready` kept its last message), and the hold's message never named the host.
 
 ## Releasing a held object
 

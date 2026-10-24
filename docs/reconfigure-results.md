@@ -209,6 +209,35 @@ means "leave this disk as it is" (the manager sends a growth above the
 | VMClass `spec.diskDefaults.size` (the root disk) | Not applied by `Reconfigure` (`Create` applies it). | Grows the primary disk, a floor (unchanged by this release). | Not applied (and the Proxmox `Create` does not apply it yet either). |
 | `spec.disks[].sizeGiB` (additional disks) | Grows the additional disk `Create` attached for that entry, found by the name recorded with it (below). A **smaller** size is refused (`InvalidSpec`, nothing changed — the CPU/memory change in the same request included): a disk is never shrunk. | Not applied: the libvirt `Create` attaches no `spec.disks`. | Not applied: the Proxmox `Create` attaches no `spec.disks`, so no disk is the entry's — not `scsi0`, not a template's `scsi1`. |
 
+**`spec.disks` on libvirt and Proxmox is reported, not refused.** Because the
+libvirt and Proxmox providers attach no `spec.disks` at all, a `VirtualMachine`
+with a non-empty `spec.disks` on a `Provider` of type `libvirt` or `proxmox` gets:
+
+- the condition `DisksApplied=False`, reason `NotSupportedByProvider`, with a
+  message that gives the number of entries and the `Provider`'s type and says that
+  they are not created or attached, at create or later. It is set at create and
+  after every later change, and removed when `spec.disks` is emptied (or the VM's
+  `Provider` is one that attaches them). It is never set `True`, and it does not
+  change `Ready`: the VM itself runs without the disks;
+- one `Warning` event with the reason `NotSupportedByProvider` when the condition
+  is first set, and again once per new `metadata.generation` (a spec change), not
+  per reconcile;
+- an admission warning from the `VirtualMachine` validating webhook ("spec.disks:
+  Provider ... is of type libvirt, which does not attach additional disks; ..."),
+  on create and update. The spec is admitted. The warning needs the webhook to read
+  the `Provider`: it is not given when the `Provider` is missing or cannot be read,
+  or is in another namespace than the `VirtualMachine` (the condition still covers
+  that case once the manager has checked the grant). The `VirtualMachine` webhook is
+  configured only where the chart renders it, that is with `webhooks.enabled=true`
+  and a disk-size limit set
+  ([`manager.maxDiskSize`](../charts/virtrigaud/README.md#disk-size-limit)); without
+  it there is no admission warning, only the condition and the event.
+
+The manager decides which `Provider` types do not attach `spec.disks` from a fixed
+table (`libvirt`, `proxmox`), not from the provider's reported capabilities: no
+capability says it yet. `vsphere` attaches them at create and gets no condition (an
+entry added after the VM was created is not attached there either; see below).
+
 How vSphere finds an entry's disk: `Create` records each additional disk it
 attaches in the VM's `ExtraConfig` — `virtrigaud.disk.additional.<N>` (the disk
 file) and, since this release, `virtrigaud.disk.additional.<N>.name` (the

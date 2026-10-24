@@ -114,6 +114,68 @@ revert it depends on its version (a refusal is reported as `RevertFailed`).
 
 → [`docs/vm-snapshot-revert.md`](docs/vm-snapshot-revert.md)
 
+### A clustered host that stops answering: one answer, in time (V3c)
+
+On a clustered libvirt Provider, a `Describe` to a host that had stopped answering
+was answered two ways: `Unavailable` + `HOST_UNAVAILABLE` ("describe VM: host ... is
+unreachable") or, after the full 30 seconds, `Unknown` ("failed to describe VM on
+host ..."), which the manager showed as `Ready=False/ProviderError`. The calls
+waited on the dead SSH connection and held the host's command slots until their own
+deadline. The waits before a command runs on a host (a command slot, the SSH dial and
+handshake, an SSH session) now end 5 seconds before the call's deadline, and a wait
+that ends there is a host that stopped answering: `Describe` is always
+`HOST_UNAVAILABLE` (`Ready=False/HostUnavailable`, naming the bound host), and other
+calls are answered by how far they got, as since R25. A `HOST_UNAVAILABLE` about the
+host the call was routed to now names it in its `ErrorInfo` metadata (`host`). See
+[A host that stops answering](docs/provider-call-outcomes.md#clustered-libvirt-a-host-that-stops-answering).
+
+### A delete held for an unreachable host says so (V3a)
+
+Deleting a clustered VM whose host does not answer kept the finalizer (unchanged),
+but the VM showed only `phase: Deleting` and a stale `Ready` message. Now it shows
+`DeleteBlocked=True` with reason `HostUnreachable` and `Ready=False/DeleteBlocked`,
+with a message that names the VM's `Host` (`status.placement.host`, never an
+endpoint or address), says whether anything may have been deleted, and that the
+delete is retried and completes once the host answers. The message names the host
+only when the provider says the host it could not reach is the VM's own; a
+cluster-wide check that could not reach a host keeps the message that names no
+host. **Behaviour change you may alert on:** a delete whose host stopped answering
+during the call (`HOST_CONNECTION_LOST`) now sets `DeleteBlocked=True/HostUnreachable`
+with a `Warning` event `DeleteBlocked` and is retried with the blocked-VM backoff (15 s
+doubling to 5 min) instead of every 15 seconds, and the `HostUnreachable` message can
+now contain the VM's host name. See
+[A delete held for an unreachable host](docs/provider-call-outcomes.md#a-delete-held-for-an-unreachable-host).
+
+### A VM held by a restore guard is `Pending`, not `Failed` (V3b)
+
+A clustered VM held by the restore guards (R1, R4: `RestorePending`,
+`OwnDomainOnAnotherHost`, `UniquenessCheckFailed`, `ProviderLacksListOwnerFilter`)
+showed `status.phase: Failed`, although it is only held and proceeds once the cause
+is gone, for example after the runbook for "orphan-on-delete, then a re-create of
+the same name". It now shows `Pending`. **Behaviour change you may alert on:**
+alerts or tooling that counted `Failed` VMs no longer see these; read the `Placed`
+condition (or `Ready=False/RestorePending` on a restored binding) instead.
+`ImportedDiskPinned` and the other holds that need an operator stay `Failed`. See
+[`status.phase`](docs/vm-status-phase.md#the-rule).
+
+### `spec.disks` on libvirt and Proxmox is reported (V4)
+
+The libvirt and Proxmox providers attach no `spec.disks` (documented, unchanged),
+but adding one to a VM changed nothing visible: `Reconfiguring` even said "VM
+reconfigured successfully". A VM with `spec.disks` on a `libvirt` or `proxmox`
+Provider now gets `DisksApplied=False` with reason `NotSupportedByProvider` (removed
+when `spec.disks` is emptied; `Ready` is not affected), one `Warning` event
+`NotSupportedByProvider` per generation, and, where the `VirtualMachine` webhook is
+configured (`webhooks.enabled` and `manager.maxDiskSize` set), an admission warning.
+Nothing is refused. **New condition and reason you may alert on:** `DisksApplied`,
+`NotSupportedByProvider`. See
+[`spec.disks` on libvirt and Proxmox](docs/reconfigure-results.md#which-disk-a-size-goes-to).
+
+Upgrade for V3 and V4: roll the manager and the clustered libvirt provider. No CRD
+changed. A manager with an older provider still works: the delete hold then keeps
+its message that names no host, and the waits are not bounded until the provider
+is rolled. Nothing is breaking.
+
 ## Changes since v0.4.0-rc4
 
 Four pull requests, all merged 2026-10-23. Three of them fix what validating rc4 on a

@@ -141,11 +141,11 @@ func derivePhase(vm *infravirtrigaudiov1beta1.VirtualMachine) infravirtrigaudiov
 	}
 
 	if !bound {
-		if placementHeld(vm, placementHoldPhaseReasons) {
-			return infravirtrigaudiov1beta1.VirtualMachinePhaseFailed
-		}
 		if placementHeld(vm, restoreHoldPhaseReasons) {
 			return infravirtrigaudiov1beta1.VirtualMachinePhasePending
+		}
+		if placementHeld(vm, placementHoldPhaseReasons) {
+			return infravirtrigaudiov1beta1.VirtualMachinePhaseFailed
 		}
 		if createRequested(vm) || pendingHost(vm) != "" || vm.Status.LastTaskRef != "" || provisioningInFlight(vm) {
 			return infravirtrigaudiov1beta1.VirtualMachinePhaseProvisioning

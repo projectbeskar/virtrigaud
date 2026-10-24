@@ -5,6 +5,32 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-10-24 00:55] - Honest VirtualMachine status: unreachable hosts, restore holds, unattached spec.disks (V3, V4)
+**Author:** @wrkode (William Rizzo)
+
+### Fixed
+- `internal/providers/libvirt/host_answer.go`, `sshclient.go`, `virsh.go`, `routing.go`, `cluster_dialer.go`: on a clustered libvirt provider a call to a host that stopped answering could end `codes.Unknown` + `VM_OPERATION_FAILED` ("failed to describe VM on host ...") after 30 s instead of `HOST_UNAVAILABLE` (V3c). The SSH session open waited on the dead connection without regard to the call's context (`withSession`, `client.NewSession`), the calls stuck there held the host's command slots, and later calls waited for a slot until their own deadline; the context error was not a host failure (`isHostTransportFailure`), so `hostOpRPCErrorFor` answered it as a failure of the operation. On a clustered provider's host connections (`VirshProvider.boundHostWaits`) the command-slot wait, the SSH dial and handshake (the handshake was unbounded: `ssh.ClientConfig.Timeout` covers only `ssh.Dial`) and the session open now end 5 s before the call's deadline (at most a quarter of the time left) with `hostNotAnsweringError`, a host failure that ran nothing, classified by R25 as before (`Describe`: always `HOST_UNAVAILABLE`), and answered before the manager gives up; it is not retried as a transient SSH error. The single-host provider is unchanged.
+- `internal/providers/libvirt/routing.go`, `internal/providers/contracts/host_unavailable.go`: a `HOST_UNAVAILABLE` about the host the call was routed to (its lease failed, or it stopped answering) carries the host id in its `ErrorInfo` metadata under `host` (`contracts.HostUnavailableHostKey`, read with `contracts.UnreachableHost`). The cluster-wide disk guard's answer, which may concern another host, carries none.
+- `internal/controller/virtualmachine_delete_host_hold.go`, `virtualmachine_clustered.go`, `virtualmachine_controller.go`, `internal/k8s/conditions.go`: a clustered delete held because the VM's own host does not answer (V3a) now says so: `DeleteBlocked=True/HostUnreachable` (and `Ready=False/DeleteBlocked`) names the VM's `Host` (`status.placement.host`, or the pending host), says whether anything may have been deleted and that the delete completes once the host answers. It applies to a `HOST_UNAVAILABLE` naming the VM's host and, new, to `HOST_CONNECTION_LOST` (R25), which before set no condition. A `HOST_UNAVAILABLE` that does not name the VM's host keeps the constant message naming no host. No endpoint, URI or address is ever named. The finalizer is kept exactly as before.
+- `internal/controller/virtualmachine_phase.go`: a VM held by a clustered restore guard (R1/R4: `RestorePending`, `OwnDomainOnAnotherHost`, `UniquenessCheckFailed`, `ProviderLacksListOwnerFilter` on `Placed`/`Provisioning`, and `Ready=False/RestorePending` of a restored binding) is phase `Pending`, not `Failed` (V3b): it is held and proceeds once the cause is gone. `ImportedDiskPinned` and the other operator holds stay `Failed`.
+
+### Added
+- `api/infra.virtrigaud.io/v1beta1/provider_disks.go`, `internal/controller/virtualmachine_disks_applied.go`, `virtualmachine_create_marker.go`, `internal/k8s/conditions.go`: `spec.disks` on a `libvirt` or `proxmox` Provider, which attach none of them (V4), is reported: condition `DisksApplied=False/NotSupportedByProvider` (set at create and after later changes, removed when `spec.disks` is emptied, never `True`, `Ready` untouched) and one `Warning` event `NotSupportedByProvider` per generation. Which types do not attach them is a manager-side table (`ProviderIgnoresAdditionalDisks`); a provider capability bit is the long-term fix. The create marker write carries the condition.
+- `api/infra.virtrigaud.io/v1beta1/disk_attach_warning.go`, `disk_size_webhook.go`: the `VirtualMachine` validating webhook returns an admission warning (never a refusal) for the same case when it can read the VM's Provider in the VM's namespace; no warning when the Provider is missing, unreadable or in another namespace.
+- Tests: `internal/providers/libvirt/host_answer_test.go` (the wait bounds, a session that is never confirmed, a handshake that never starts, a clustered `Describe` with every command slot held answered `HOST_UNAVAILABLE` naming the host before its deadline, and the unbounded case reproducing the old `Unknown`, the `host` metadata only for the routed host); `internal/controller/virtualmachine_delete_host_hold_test.go`; `virtualmachine_phase_test.go` (restore holds `Pending`, `ImportedDiskPinned` `Failed`); `virtualmachine_disks_applied_test.go` (condition at create and on a running VM, event once per generation, cleared); `api/infra.virtrigaud.io/v1beta1/disk_attach_warning_test.go` (warning for libvirt and Proxmox, none for vSphere, a missing Provider, another namespace, no reader).
+
+### Changed
+- `docs/provider-call-outcomes.md` (a host that does not answer in time; which host; new section "A delete held for an unreachable host"), `docs/clustered-restore.md` and `docs/vm-status-phase.md` (restore holds are `Pending`), `docs/clustered-provider-inventory.md`, `docs/reconfigure-results.md` (`spec.disks` on libvirt and Proxmox), `docs/release-notes/next.md`.
+
+### Why
+rc5 lab validation findings V3 and V4: a delete held for an unreachable host showed only a stale `ProviderError`; a VM held by the restore guard showed `Failed`; a clustered `Describe` to an unreachable host answered two different codes; and `spec.disks` on a libvirt VM was ignored while `Reconfiguring` said "VM reconfigured successfully".
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-10-23 23:35] - spec.snapshot.revertToRef reverts the VM: once per request, only while it is powered off (V2)
 **Author:** @wrkode (William Rizzo)
 
