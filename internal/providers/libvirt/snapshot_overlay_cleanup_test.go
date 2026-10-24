@@ -26,7 +26,10 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
+	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
 	"github.com/projectbeskar/virtrigaud/internal/providers/libvirt/hostconn"
 	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
 )
@@ -211,11 +214,6 @@ func TestSnapshotDelete_KeepsAnOverlayItCannotProveFree(t *testing.T) {
 			require.NoError(t, os.Symlink(target, c.overlay))
 			return c
 		},
-		"the snapshot definition cannot be read": func(t *testing.T) *overlayCase {
-			c := newOverlayCase(t, nil)
-			require.NoError(t, os.Remove(filepath.Join(c.fx.dir, c.host, "snapxml-s1")))
-			return c
-		},
 		"outside the storage directories": func(t *testing.T) *overlayCase {
 			c := newOverlayCase(t, nil)
 			outside := filepath.Join(t.TempDir(), "web-disk.s1")
@@ -235,6 +233,27 @@ func TestSnapshotDelete_KeepsAnOverlayItCannotProveFree(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestSnapshotDelete_UnreadableSnapshotIsNotDeleted: a snapshot whose
+// definition cannot be read is not deleted (V11): what its delete would merge
+// away cannot be checked. The refusal is retryable (VM_DISK_CHECK_FAILED) and
+// nothing is sent or removed.
+func TestSnapshotDelete_UnreadableSnapshotIsNotDeleted(t *testing.T) {
+	c := newOverlayCase(t, nil)
+	require.NoError(t, os.Remove(filepath.Join(c.fx.dir, c.host, "snapxml-s1")))
+	vp := localHostVP(c.host)
+	reg, err := hostconn.NewRegistry(newVirshConn(hostconn.HostID(c.host), vp))
+	require.NoError(t, err)
+	p := &Provider{virshProvider: vp, registry: reg, hostID: hostconn.HostID(c.host)}
+	_, err = NewServer(p).SnapshotDelete(context.Background(), &providerv1.SnapshotDeleteRequest{VmId: "web", SnapshotId: "s1"})
+	require.Error(t, err)
+	st, ok := status.FromError(err)
+	require.True(t, ok, "%v", err)
+	assert.Equal(t, codes.Unavailable, st.Code())
+	assert.True(t, errorInfoReasons(st)[contracts.VMDiskCheckFailedReason], "retryable, kept out of the breaker: %v", st)
+	assert.NotContains(t, c.fx.calls(), c.host+" snapshot-delete web s1", "nothing is deleted")
+	assert.False(t, c.removed())
 }
 
 // TestParseSnapshotOverlays reads only the external overlays of the

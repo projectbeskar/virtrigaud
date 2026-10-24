@@ -134,18 +134,12 @@ func sourceFilesIn(doc string) ([]string, error) {
 	}
 }
 
-// snapshotOverlaysOf reads the overlay files snapshot snapshotID of domain
-// (a name or UUID) names on conn's host, before it is deleted. A snapshot
-// that cannot be read yields none: the delete proceeds, and nothing is
-// cleaned up after it.
-func snapshotOverlaysOf(ctx context.Context, conn libvirtConn, domain, snapshotID string) []string {
-	res, err := conn.Virsh(ctx, "snapshot-dumpxml", domain, snapshotID)
-	if err != nil {
-		log.Printf("WARN Could not read snapshot %s of domain %s; its overlay files are left in place after the delete: %v",
-			snapshotID, domain, err)
-		return nil
-	}
-	overlays, err := parseSnapshotOverlays(res.Stdout)
+// snapshotOverlaysIn returns the overlay files snapshot snapshotID of domain
+// (a name or UUID) names in its XML (`virsh snapshot-dumpxml`, read before it
+// is deleted). A document that does not parse yields none: nothing is cleaned
+// up after the delete.
+func snapshotOverlaysIn(domain, snapshotID, snapshotXML string) []string {
+	overlays, err := parseSnapshotOverlays(snapshotXML)
 	if err != nil {
 		log.Printf("WARN Could not parse snapshot %s of domain %s; its overlay files are left in place after the delete: %v",
 			snapshotID, domain, err)

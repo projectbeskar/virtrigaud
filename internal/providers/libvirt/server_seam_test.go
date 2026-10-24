@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"slices"
 	"strings"
 	"testing"
 
@@ -107,6 +108,11 @@ func (f *fakeSeamConn) RunHost(_ context.Context, argv ...string) (*hostconn.Res
 			}
 		}
 		return &hostconn.Result{Stdout: out.String()}, nil
+	}
+	if f.runHostOut == "" && slices.Contains(argv, "qemu-img") && slices.Contains(argv, "info") {
+		// A SnapshotDelete reads the snapshot's overlay header for internal
+		// snapshots (snapshot_delete_guard.go): a plain qcow2 here.
+		return &hostconn.Result{Stdout: `{"format":"qcow2"}`}, nil
 	}
 	return &hostconn.Result{Stdout: f.runHostOut}, nil
 }

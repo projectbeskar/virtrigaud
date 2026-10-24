@@ -620,7 +620,13 @@ type qemuImgInfo struct {
 	// BackingFilenameFormat is the backing file's format as the header
 	// names it (empty: probed).
 	BackingFilenameFormat string `json:"backing-filename-format"`
-	FormatSpecific        *struct {
+	// Snapshots are the image's internal (qcow2) snapshots: a memory
+	// snapshot libvirt takes of a running VM is stored inside the disk image
+	// the VM is using (snapshot_delete_guard.go).
+	Snapshots []struct {
+		Name string `json:"name"`
+	} `json:"snapshots"`
+	FormatSpecific *struct {
 		Data struct {
 			DataFile string `json:"data-file"`
 			Extents  []struct {
@@ -628,6 +634,16 @@ type qemuImgInfo struct {
 			} `json:"extents"`
 		} `json:"data"`
 	} `json:"format-specific"`
+}
+
+// snapshotNames returns the names of the image's internal snapshots, in the
+// order qemu-img lists them (nil when it lists none).
+func (i qemuImgInfo) snapshotNames() []string {
+	var out []string
+	for _, s := range i.Snapshots {
+		out = append(out, s.Name)
+	}
+	return out
 }
 
 // referencedFiles returns every host file this image consists of or points at:
@@ -952,12 +968,14 @@ func chainLevelFiles(levels []backingLevel) []string {
 // consists of or points at (qemuImgInfo.referencedFiles), and the format it
 // was opened as — the one its parent's header names (the caller's for the
 // disk itself), or "" when qemu-img had to probe it — and the external data
-// file its header names, if any.
+// file its header names, if any — and the internal snapshots its header lists
+// (qemuImgInfo.snapshotNames).
 type backingLevel struct {
-	path     string
-	refs     []string
-	format   string
-	dataFile string
+	path      string
+	refs      []string
+	format    string
+	dataFile  string
+	snapshots []string
 }
 
 // rawDiskFormat is qemu's raw format: no header, so no backing chain.
@@ -1054,7 +1072,8 @@ func walkChainChecked(ctx context.Context, h hostCommandRunner, disk, format str
 					fmt.Errorf("%s: external data file %q is not a local file path", cur, dataFile))
 			}
 		}
-		levels = append(levels, backingLevel{path: cur, refs: info.referencedFiles(), format: format, dataFile: dataFile})
+		levels = append(levels, backingLevel{path: cur, refs: info.referencedFiles(), format: format, dataFile: dataFile,
+			snapshots: info.snapshotNames()})
 		if info.BackingFilename == "" && info.FullBackingFilename == "" {
 			return levels, nil
 		}

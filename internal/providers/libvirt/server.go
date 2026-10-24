@@ -937,11 +937,15 @@ func routedTaskResponse(host hostconn.HostID, r *providerv1.TaskResponse) *provi
 }
 
 // snapshotDeleteOn is the SnapshotDelete core, run on connection conn against
-// domain (see snapshotCreateOn). Before the delete it records the snapshot's
-// external overlay files (`virsh snapshot-dumpxml`); after a successful delete
-// backend removes those that are safe to remove (removeSnapshotOverlays,
-// snapshot_overlay_cleanup.go — libvirt leaves them in the pool), which never
-// fails the RPC.
+// domain (see snapshotCreateOn). Before the delete it reads the snapshot
+// (`virsh snapshot-dumpxml`; one that cannot be read is not deleted), refuses
+// an external snapshot whose delete would lose another snapshot
+// (refuseIfDeleteLosesSnapshots, snapshot_delete_guard.go) and records its
+// external overlay files; after a successful delete backend removes those that
+// are safe to remove (removeSnapshotOverlays, snapshot_overlay_cleanup.go),
+// which never fails the RPC. A memory snapshot whose data an earlier delete
+// already destroyed has only its metadata deleted, when that is provably all
+// that is left (deleteStaleInternalSnapshot).
 func snapshotDeleteOn(ctx context.Context, backend providerBackend, conn libvirtConn, domain, snapshotID string) (*providerv1.TaskResponse, error) {
 	if err := checkSnapshotIDArgument(snapshotID); err != nil {
 		return nil, err
@@ -963,12 +967,24 @@ func snapshotDeleteOn(ctx context.Context, backend providerBackend, conn libvirt
 		return nil, fmt.Errorf("failed to delete snapshot: %w", err)
 	}
 
-	// The overlay files the snapshot added, read before it is deleted.
-	overlays := snapshotOverlaysOf(ctx, conn, domain, snapshotID)
+	// The snapshot, read before it is deleted (V11, snapshot_delete_guard.go):
+	// an external snapshot is refused while another snapshot — a memory
+	// snapshot taken on its overlay — is stored in a file the delete would
+	// merge away. A snapshot that cannot be read is not deleted (retried).
+	h := hostConnRunner{conn: conn}
+	snap, snapXML, err := readSnapshotTree(ctx, h, domain, snapshotID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to delete snapshot: %w", snapshotDeleteCheckFailed(domain, err))
+	}
+	if err := refuseIfDeleteLosesSnapshots(ctx, h, domain, snapshotID, snap); err != nil {
+		return nil, fmt.Errorf("failed to delete snapshot: %w", err)
+	}
+
+	// The overlay files the snapshot added (snapshot_overlay_cleanup.go).
+	overlays := snapshotOverlaysIn(domain, snapshotID, snapXML)
 
 	// Delete the snapshot. For an external (disk-only) snapshot libvirt
-	// commits the overlay back into its base and pivots the domain onto it,
-	// but leaves the overlay file behind.
+	// commits the overlay back into its base and pivots the domain onto it.
 	args := []string{
 		"snapshot-delete",
 		domain,
@@ -977,6 +993,12 @@ func snapshotDeleteOn(ctx context.Context, backend providerBackend, conn libvirt
 
 	result, err := conn.Virsh(ctx, args...)
 	if err != nil {
+		// A memory snapshot an earlier release let a disk-only snapshot's
+		// delete destroy (V11): libvirt refuses it, before changing
+		// anything, while the VM runs.
+		if isStaleInternalSnapshotRefusal(err) {
+			return deleteStaleInternalSnapshot(ctx, conn, domain, snapshotID, snap, err)
+		}
 		return nil, fmt.Errorf("failed to delete snapshot: %w", err)
 	}
 
