@@ -51,7 +51,7 @@ V10, pre-existing: found while checking V9 in the lab, a NAT guest without the g
 
 ### Impact
 - [ ] Breaking change
-- [ ] Requires cluster rollout
+- [x] Requires cluster rollout
 - [ ] Config change only
 - [ ] Documentation only
 
@@ -78,7 +78,7 @@ Rc7 lab validation (V9): `status.ips` of a libvirt VM with the guest agent liste
 
 ### Impact
 - [ ] Breaking change
-- [ ] Requires cluster rollout
+- [x] Requires cluster rollout
 - [ ] Config change only
 - [ ] Documentation only
 
