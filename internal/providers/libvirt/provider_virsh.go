@@ -36,6 +36,7 @@ import (
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
 	"github.com/projectbeskar/virtrigaud/internal/providers/libvirt/hostconn"
 	"github.com/projectbeskar/virtrigaud/internal/storage"
+	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
 )
 
 // Clean provider implementation using only virsh
@@ -1557,6 +1558,15 @@ func (p *Provider) runPowerOp(ctx context.Context, c libvirtConn, d domainTarget
 	}
 	id := d.handle
 
+	// A start (or reboot) first re-inserts a cloud-init seed an interrupted
+	// snapshot left ejected (snapshot_media.go), so the guest never boots
+	// without it.
+	if op == contracts.PowerOpOn || op == contracts.PowerOpReboot {
+		if err := p.restoreEjectedSeedBeforeStart(ctx, vp, id); err != nil {
+			return err
+		}
+	}
+
 	switch op {
 	case contracts.PowerOpOn:
 		err = vp.startDomain(ctx, id)
@@ -2616,75 +2626,26 @@ func domainTypeFromProbe(readable, exists bool) string {
 	return "qemu"
 }
 
-// SnapshotCreate creates a VM snapshot using virsh
+// SnapshotCreate creates a VM snapshot using virsh: the gRPC SnapshotCreate's
+// core on the single host (snapshotCreateWith) — including the ejection of a
+// shut-off domain's removable media for the snapshot (snapshot_media.go).
 func (p *Provider) SnapshotCreate(ctx context.Context, req contracts.SnapshotCreateRequest) (contracts.SnapshotCreateResponse, error) {
-	vmID := req.VM.ID
-	log.Printf("INFO Creating snapshot for VM: %s", vmID)
+	log.Printf("INFO Creating snapshot for VM: %s", req.VM.ID)
 
 	if p.virshProvider == nil {
 		return contracts.SnapshotCreateResponse{}, contracts.NewRetryableError("virsh provider not initialized", nil)
 	}
-
-	// Generate snapshot name if not provided
-	snapshotName := req.NameHint
-	if snapshotName == "" {
-		snapshotName = fmt.Sprintf("snapshot-%d", time.Now().Unix())
-	}
-
-	// Sanitize snapshot name for virsh
-	snapshotName = sanitizeSnapshotName(snapshotName)
-
-	// Prepare snapshot description
-	description := req.Description
-	if description == "" {
-		description = fmt.Sprintf("Snapshot created by VirtRigaud at %s", time.Now().Format(time.RFC3339))
-	}
-
-	// Check if domain exists and get its state
-	domainState, err := p.virshProvider.getDomainState(ctx, vmID)
+	resp, err := snapshotCreateWith(ctx, p.singleHostConn(), req.VM.ID, &providerv1.SnapshotCreateRequest{
+		VmId:          req.VM.ID,
+		NameHint:      req.NameHint,
+		Description:   req.Description,
+		IncludeMemory: req.IncludeMemory,
+	}, snapshotCreateOptions{seedRoots: p.seedRoots()})
 	if err != nil {
-		return contracts.SnapshotCreateResponse{}, contracts.NewRetryableError("failed to get domain state", err)
+		return contracts.SnapshotCreateResponse{}, err
 	}
-
-	log.Printf("INFO Domain %s is in state: %s", vmID, domainState)
-
-	if err := refuseIfDiskHasDependents(ctx, p.virshProvider, vmID, guardOpSnapshotCreate); err != nil {
-		return contracts.SnapshotCreateResponse{}, fmt.Errorf("failed to create snapshot: %w", err)
-	}
-
-	// Build virsh snapshot-create-as command
-	args := []string{
-		"snapshot-create-as",
-		vmID,
-		snapshotName,
-		"--description", description,
-		"--atomic", // Ensure atomic operation
-	}
-
-	// Determine snapshot type based on domain state and request
-	if req.IncludeMemory && domainState == "running" {
-		// Memory snapshot (full system checkpoint including RAM)
-		log.Printf("INFO Creating memory snapshot (includes RAM state)")
-		// No --disk-only flag = full snapshot with memory
-	} else {
-		// Disk-only snapshot (faster, no memory state)
-		log.Printf("INFO Creating disk-only snapshot")
-		args = append(args, "--disk-only")
-	}
-
-	// Execute snapshot creation
-	result, err := p.virshProvider.runVirshCommand(ctx, args...)
-	if err != nil {
-		return contracts.SnapshotCreateResponse{}, fmt.Errorf("failed to create snapshot: %w", err)
-	}
-
-	log.Printf("INFO Snapshot created successfully: %s\nOutput: %s", snapshotName, result.Stdout)
-
-	// Return snapshot ID (synchronous operation for libvirt)
-	return contracts.SnapshotCreateResponse{
-		SnapshotId: snapshotName,
-		// No task reference - libvirt snapshots are synchronous
-	}, nil
+	// Synchronous: no task reference.
+	return contracts.SnapshotCreateResponse{SnapshotId: resp.SnapshotId}, nil
 }
 
 // SnapshotDelete deletes a VM snapshot using virsh
@@ -2705,58 +2666,20 @@ func (p *Provider) SnapshotDelete(ctx context.Context, vm contracts.VMRef, snaps
 	return "", nil
 }
 
-// SnapshotRevert reverts a VM to a snapshot using virsh
+// SnapshotRevert reverts a VM to a snapshot using virsh: the gRPC
+// SnapshotRevert's core on the single host (snapshotRevertOn) — the existence
+// and dependents checks, the refusal of a snapshot libvirt cannot revert
+// safely, the revert, and the re-insertion of the media it leaves out
+// (snapshot_readonly_disks.go). Synchronous: no task reference.
 func (p *Provider) SnapshotRevert(ctx context.Context, vm contracts.VMRef, snapshotId string) (taskRef string, err error) {
-	vmId := vm.ID
-	log.Printf("INFO Reverting VM %s to snapshot: %s", vmId, snapshotId)
+	log.Printf("INFO Reverting VM %s to snapshot: %s", vm.ID, snapshotId)
 
 	if p.virshProvider == nil {
 		return "", contracts.NewRetryableError("virsh provider not initialized", nil)
 	}
-
-	// Check if snapshot exists
-	exists, err := p.virshProvider.snapshotExists(ctx, vmId, snapshotId)
-	if err != nil {
-		return "", fmt.Errorf("failed to check snapshot existence: %w", err)
+	if _, err := snapshotRevertOn(ctx, p.singleHostConn(), vm.ID, snapshotId, p.seedRoots()); err != nil {
+		return "", err
 	}
-
-	if !exists {
-		return "", fmt.Errorf("snapshot %s does not exist", snapshotId)
-	}
-
-	// Get current domain state
-	domainState, err := p.virshProvider.getDomainState(ctx, vmId)
-	if err != nil {
-		return "", fmt.Errorf("failed to get domain state: %w", err)
-	}
-
-	log.Printf("INFO Domain %s current state: %s", vmId, domainState)
-
-	if err := refuseIfDiskHasDependents(ctx, p.virshProvider, vmId, guardOpSnapshotRevert); err != nil {
-		return "", fmt.Errorf("failed to revert to snapshot: %w", err)
-	}
-
-	// Revert to snapshot
-	args := []string{
-		"snapshot-revert",
-		vmId,
-		snapshotId,
-		"--force", // Force revert even if domain is running
-	}
-
-	// If domain was running, keep it running after revert
-	if domainState == "running" {
-		args = append(args, "--running")
-	}
-
-	result, err := p.virshProvider.runVirshCommand(ctx, args...)
-	if err != nil {
-		return "", fmt.Errorf("failed to revert to snapshot: %w", err)
-	}
-
-	log.Printf("INFO Successfully reverted to snapshot: %s\nOutput: %s", snapshotId, result.Stdout)
-
-	// Return empty task reference (synchronous operation)
 	return "", nil
 }
 

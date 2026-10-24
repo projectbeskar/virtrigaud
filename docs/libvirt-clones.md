@@ -366,7 +366,12 @@ the snapshot's overlay files (`virsh snapshot-dumpxml`) before deleting it and,
 once the delete succeeded, removes each one only when **all** of these hold:
 
 - it is the domain's own primary-disk overlay, `<domain>-disk.<snapshot name>`,
-  exactly as the snapshot names it;
+  exactly as the snapshot names it — or, after a revert to that snapshot,
+  `<domain>-disk.<epoch>`: libvirt (9.9 and later) reverts an external
+  snapshot by creating a new overlay named after the disk with its extension
+  replaced by the revert's time in Unix seconds, and records that overlay as
+  the snapshot's from then on (a snapshot with child snapshots records it in
+  `<revertDisks>`, which is read too);
 - it is in no backing chain of the domain's current disks (read with
   `qemu-img info`; a chain that cannot be read keeps the file);
 - no other snapshot of the domain references it, in its disk list or in the
@@ -382,7 +387,10 @@ logged by the provider (no path reaches a status) and never fails the
 `SnapshotDelete`: the snapshot itself is gone. Overlays of additional data
 disks (`<domain>-disk-<n>.<snapshot name>`) and overlays left by snapshots
 deleted before this release are not removed. `SnapshotRevert` does not remove
-files.
+files itself; libvirt's revert removes the overlay it replaces. A revert's
+`<domain>-disk.<epoch>` overlay that is still the VM's disk (or in its chain)
+is removed with the VM, as any other own overlay
+([Reverting a VirtualMachine to a VMSnapshot](vm-snapshot-revert.md#libvirt)).
 
 A single-host Provider deleting a VM whose domain no longer exists still cleans
 up the disk VirtRigaud named after it, `<name>-disk.qcow2` in the default pool's

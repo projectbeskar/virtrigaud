@@ -243,17 +243,156 @@ clustered Provider, its bound host and owner) and the `VMSnapshot`'s
 | Provider | What the revert does (as implemented) |
 |---|---|
 | vSphere | Finds the snapshot in the VM's snapshot tree by managed-object id (what `SnapshotCreate` answers) or name, refuses templates and image artifacts, and runs `RevertToSnapshot_Task` with `suppressPowerOn=false`, waiting for it in the call (no task is returned). A snapshot taken with memory powers the VM on; the controller then applies `spec.powerState` |
-| libvirt (single host) | Checks that the snapshot exists, refuses while another domain depends on the VM's disk (a linked clone: `VM_DISK_IN_USE`, a `RevertFailed`; a check that cannot run is retried as an unknown outcome), then runs `virsh snapshot-revert <domain> <snapshot> --force` (no `--running`, as the VM is off). Synchronous |
+| libvirt (single host) | Checks that the snapshot exists, refuses while another domain depends on the VM's disk (a linked clone: `VM_DISK_IN_USE`, a `RevertFailed`; a check that cannot run is retried as an unknown outcome), refuses a snapshot libvirt cannot revert without breaking the VM's cloud-init CD-ROM — one that stored the CD-ROM with its seed ([below](#libvirt)) — then runs `virsh snapshot-revert <domain> <snapshot> --force` (no `--running`, as the VM is off), inserts the seed again into the CD-ROM the revert left empty, and checks that no read-only disk was moved to a new file. Synchronous |
 | libvirt (clustered) | The same, routed to the VM's bound host and owner-checked: a domain this VM does not own is `NotFound` and is never reverted. A snapshot id the provider could not have created is refused before any host is touched ([`clustered-provider-inventory.md`](clustered-provider-inventory.md)) |
 | Proxmox | Owner-checks the VM, then `POST .../qemu/<vmid>/snapshot/<name>/rollback`; the answer is a task, which the manager polls |
 | mock | Answers a task |
 
-Not validated on a real host. In particular, a snapshot the libvirt provider takes of a
-VM that is off, or without memory, is an external disk-only snapshot
-(`snapshot-create-as --disk-only`). Whether `virsh snapshot-revert` can revert such a
-snapshot depends on the libvirt version on the host; when it cannot, the provider's
-error is reported as `RevertFailed`. `SnapshotRevert` does not remove overlay files
-([`libvirt-clones.md`](libvirt-clones.md)).
+### libvirt
+
+A snapshot the libvirt provider takes of a VM that is off, or without memory, is an
+external disk-only snapshot (`snapshot-create-as --disk-only`); a memory snapshot of a
+running VM is an internal one. libvirt reverts external snapshots from 9.9 on; an older
+libvirt refuses, and the provider's error is reported as `RevertFailed`.
+
+libvirt reverts an external snapshot by rebuilding the VM's disks from the domain
+definition the snapshot **stored**, and creating a **new** qcow2 overlay for every disk
+of that definition that has media — named after the disk's file with its extension
+replaced by the revert's time in Unix seconds (`<domain>-disk.<epoch>` for the VM's
+disk) — and it removes the overlay it replaces. `SnapshotDelete` and VM delete recognise
+the `<domain>-disk.<epoch>` overlay as the VM's own
+([`libvirt-clones.md`](libvirt-clones.md#what-snapshotdelete-removes)).
+
+The stored definition includes the VM's read-only cloud-init seed CD-ROM. A revert of a
+snapshot that stored the CD-ROM with its seed rewrites the CD-ROM to a qcow2 overlay of
+the seed ISO inside the VM's private seed directory, owned by root, which the host's
+AppArmor profile for the VM does not let QEMU open: the VM no longer starts (`paused
+(starting up)` or `shut off (failed)`, the power-on fails: `Ready=False/ProviderError`). libvirt does this
+whatever the CD-ROM's mode in the snapshot's disk list — it records a read-only CD-ROM
+`snapshot='no'` by itself, and excluding it with `--diskspec <target>,snapshot=no` does
+not help — and it then rewrites the snapshot's metadata to record the overlay as an
+external snapshot disk. Every snapshot v0.4.0-rc6 and earlier took of a VM with
+cloud-init stored its seed. Since v0.4.0-rc7:
+
+- **`SnapshotCreate` of a powered-off VM takes the snapshot with the VM's CD-ROMs and
+  floppies ejected**, so the stored definition's drives are empty. For each drive that
+  holds a file, in this order: the provider records the drives and their files in the
+  domain's metadata (namespace `https://virtrigaud.io/xmlns/libvirt/media/v1`), ejects
+  each one (`virsh change-media <domain> <target> --eject --config`), takes the snapshot,
+  inserts each file again (`virsh change-media <domain> <target> <file> --insert
+  --config`, also when the snapshot failed), checks that the domain shows each file
+  again with its driver type, and removes the record. Only the VM's persistent
+  definition changes; it is off.
+- **A running VM is never ejected** (the guest would see it). A disk-only snapshot of a
+  running VM excludes the CD-ROM with `--diskspec <target>,snapshot=no` but stores its
+  seed, so it **cannot be reverted** (see the next point): on libvirt, take the snapshot
+  with the VM powered off to be able to revert to it. A memory snapshot of a running VM
+  is internal: libvirt reverts it in place, without new overlays, and it is not refused.
+  Read-only disks that are not removable media, and media that are not plain files (a
+  block device, a network source), are never ejected either; they are excluded with a
+  diskspec, and a disk-only snapshot that stores them cannot be reverted.
+- **`SnapshotRevert` refuses**, before the revert changes anything (only the repair of
+  an interrupted ejection, below, may run first), an external snapshot whose stored
+  definition has a CD-ROM, floppy or read-only disk with a source, and a snapshot whose
+  disk lists record one as an external snapshot disk. That is a disk-only snapshot of a
+  VM with a cloud-init CD-ROM (or another read-only disk) taken while the VM was
+  running, and every such snapshot v0.4.0-rc6 or earlier took — as created (the stored
+  definition has the seed) and after libvirt rewrote its metadata on a revert (the
+  CD-ROM recorded external). The VM gets `SnapshotReverted=False/RevertFailed`
+  (terminal, not retried); the provider's part of the message (on a clustered Provider
+  after `failed to revert to snapshot: `) reads `revert refused, nothing changed: take a new snapshot with the VM
+  powered off. Snapshot "s1" was taken while it ran or by an earlier release; libvirt
+  cannot revert it safely (disk hda)`. The manager keeps the first 256 bytes of a
+  provider's answer, so a long snapshot name may cut the end; the guidance comes first.
+  The manager's generic "remove `spec.snapshot.revertToRef` and set it again to retry"
+  hint does not help here: the same snapshot is refused again. A snapshot or domain
+  definition that cannot be read means no revert either.
+- **After a revert**, the revert leaves the CD-ROM empty (the stored definition had it
+  empty). The provider reads the domain again and, for each CD-ROM or floppy that held a
+  file before the revert and is now empty, records it, inserts the same file again
+  (with `--live` too when the revert kept the VM running), checks it, and removes the
+  record. A file that cannot be inserted again is reported as `RevertFailed`
+  (`reverted, but CD-ROM hda could not be re-inserted; ...`): the VM was reverted, and
+  its seed stays recorded for the repair below. The provider also checks (when the domain can be read after the revert) that no
+  read-only disk was moved to a new file; one that was is reported as `RevertFailed`
+  (`reverted, but the VM may not start: libvirt moved read-only disk hda to a new file;
+  ...`) instead of `Succeeded`. Repair it as below before you request another revert.
+
+**Interrupted ejections are repaired.** If the provider, its connection or the host
+fails between the eject and the re-insert, the VM is left with an empty CD-ROM and the
+record in its metadata. A disk-only snapshot that was made but whose seed could not be
+inserted again is reported as made; the record stays. The next `SnapshotCreate`,
+`SnapshotRevert` or start (`spec.powerState: On`, or a reboot) of that VM inserts the
+recorded file again before it changes anything else (after its read-only checks; not
+`SnapshotDelete`) — **only when it is provably the VM's own cloud-init seed**
+(`cloud-init.iso` in `<seed root>/virtrigaud-cloudinit-<domain>.<random>/`, or an
+earlier release's `<seed root>/virtrigaud-cloudinit/<domain>/`, in the provider's seed or
+staging directory) — and removes the record. A recorded file that is anything else (an
+installer ISO you attached) is never inserted from the record: the provider logs it,
+keeps the record, and leaves it to you (`virsh -c "$CONN" change-media <domain> <target>
+<file> --insert --config`, then `virsh -c "$CONN" metadata <domain> --uri
+https://virtrigaud.io/xmlns/libvirt/media/v1 --remove --config`). A start whose seed
+cannot be inserted again is not attempted (the guest would boot without its cloud-init
+datasource). Until one of those calls, the VM's CD-ROM stays empty; a VM that is powered
+on by hand (`virsh start`) in that window boots without its seed.
+
+To replace a snapshot taken by v0.4.0-rc6 or earlier, or while the VM was running:
+delete its `VMSnapshot` (deleting a snapshot that was never reverted merges it on
+libvirt 10), power the VM off, and create a new one. The same applies on single-host
+and clustered Providers.
+
+#### Repairing a VM broken by a v0.4.0-rc6 revert
+
+A VM reverted by v0.4.0-rc6 shows its CD-ROM on a `cloud-init.<digits>` file in its
+seed directory and does not start. The snapshot itself recorded the CD-ROM
+`snapshot='no'` when it was taken; the broken state comes from libvirt's revert, which
+also rewrote the snapshot's metadata to record that overlay as an external snapshot
+disk. The VM's disk is reverted correctly; only the CD-ROM needs repair. The steps need
+the provider's SSH user (or root) on the VM's host. Name the connection explicitly, as in
+the [re-attach runbook](clustered-restore.md#re-attach-runbook): `export
+CONN=qemu:///system` on the host itself, or the Provider's (single host) or Host's
+(clustered) endpoint, e.g. `qemu+ssh://virtrigaud@host-a.example.com/system`. Do the
+steps in this order, and do **not** delete the `VMSnapshot` before step 4: its metadata
+still names the CD-ROM's overlay.
+
+1. Find the domain and the overlay. The CD-ROM's source ends in `cloud-init.<digits>`:
+
+   ```sh
+   virsh -c "$CONN" domblklist --details <domain>
+   # e.g.  file  cdrom  hda  /var/lib/libvirt/virtrigaud-seeds/virtrigaud-cloudinit-<domain>.<random>/cloud-init.1792831471
+   sudo qemu-img info -U <that file>   # optional: backing file: .../cloud-init.iso, same directory
+   ```
+
+2. Stop the domain, if it is not shut off: `virsh -c "$CONN" destroy <domain>`.
+
+3. Point the CD-ROM back at the seed ISO. Dump the inactive definition, edit the CD-ROM's
+   `<disk device='cdrom'>`: `<driver name='qemu' type='raw'/>`, `<source
+   file='<seed directory>/cloud-init.iso'/>`, and remove any `<backingStore>` inside it;
+   then define it again (the owner stamp in `<metadata>` is kept):
+
+   ```sh
+   virsh -c "$CONN" dumpxml --inactive <domain> > <domain>.xml
+   # edit the cdrom <disk> as above
+   virsh -c "$CONN" define <domain>.xml
+   ```
+
+4. Drop the reverted snapshot's metadata only — not its files; the VM's disk
+   (`<domain>-disk.<digits>`) is its live disk now:
+   `virsh -c "$CONN" snapshot-delete <domain> <snapshot> --metadata`.
+
+5. Remove the CD-ROM's overlay, and only it (never `cloud-init.iso`):
+   `rm -- <seed directory>/cloud-init.<digits>` (it is owned by root; the seed directory
+   is the SSH user's, so the SSH user can remove it).
+
+6. Start the VM: set its `spec.powerState: On` (the controller starts it), or
+   `virsh -c "$CONN" start <domain>`. Remove `spec.snapshot.revertToRef`, delete the
+   `VMSnapshot` (the provider finds no snapshot and reports it gone), and take a new
+   snapshot with the VM powered off.
+
+Deleting the VM afterwards removes the domain, its whole disk chain (the
+`<domain>-disk.<digits>` overlay included) and its seed directory. Other snapshots of the
+VM taken by v0.4.0-rc6 or earlier are refused on revert as above; delete and re-take
+them.
 
 ## Limitations
 
@@ -281,3 +420,12 @@ error is reported as `RevertFailed`. `SnapshotRevert` does not remove overlay fi
   before you upgrade the manager.
 - The manager needs `get`, `list` and `watch` on `vmsnapshots`, which its role already
   grants.
+- libvirt: a disk-only `VMSnapshot` of a VM with a cloud-init CD-ROM (or any read-only
+  disk) taken by v0.4.0-rc6 or earlier, or taken while the VM was running, is refused on
+  revert (`RevertFailed`, nothing changed); delete it and take a new one with the VM
+  powered off after upgrading the libvirt provider. A VM already reverted by v0.4.0-rc6
+  to such a snapshot needs the [repair](#repairing-a-vm-broken-by-a-v040-rc6-revert)
+  above. Snapshots of powered-off VMs now briefly eject the CD-ROM from the VM's
+  persistent definition; a VM started by hand (`virsh start`) while an interrupted
+  snapshot left it ejected boots without its seed ([Interrupted ejections are
+  repaired](#libvirt)).

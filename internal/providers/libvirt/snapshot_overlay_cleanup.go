@@ -24,6 +24,7 @@ import (
 	"io"
 	"log"
 	"path/filepath"
+	"regexp"
 	"strings"
 )
 
@@ -40,7 +41,10 @@ import (
 // delete and, once the delete succeeded, removes each one only if ALL hold:
 //
 //   - the snapshot names it as an external overlay, and its name is the
-//     domain's own primary-disk overlay name, <domain>-disk.<snapshot>;
+//     domain's own primary-disk overlay name, <domain>-disk.<snapshot> — or,
+//     once the domain was reverted to the snapshot (libvirt >= 9.9 replaces
+//     the snapshot's overlay with a new one and records that instead),
+//     <domain>-disk.<epoch> (isOwnOverlayName);
 //   - it is no longer in any backing chain of the domain's current disks;
 //   - no other snapshot of the domain references it (in its disk list or the
 //     domain definition it recorded);
@@ -56,35 +60,52 @@ import (
 // no snapshot left to clean up after.
 
 // snapshotDisksDoc is the part of `virsh snapshot-dumpxml` the cleanup reads:
-// the snapshot's own disk list (not the domain definition it embeds).
+// the snapshot's own disk list and the disks a revert recorded for a snapshot
+// with children (<revertDisks>, libvirt >= 9.9) — not the domain definition it
+// embeds.
 type snapshotDisksDoc struct {
-	XMLName xml.Name `xml:"domainsnapshot"`
-	Disks   []struct {
-		Snapshot string `xml:"snapshot,attr"`
-		Source   struct {
-			File string `xml:"file,attr"`
-		} `xml:"source"`
-	} `xml:"disks>disk"`
+	XMLName     xml.Name           `xml:"domainsnapshot"`
+	Disks       []snapshotDiskMode `xml:"disks>disk"`
+	RevertDisks []snapshotDiskMode `xml:"revertDisks>disk"`
 }
 
 // snapshotExternalOverlay is the snapshot-disk mode of an external snapshot.
 const snapshotExternalOverlay = "external"
 
 // parseSnapshotOverlays returns the overlay files an external snapshot's XML
-// (`virsh snapshot-dumpxml`) names: the source files of its disks whose
-// snapshot mode is external.
+// (`virsh snapshot-dumpxml`) names: the source files of its disks, and of
+// its revert disks, whose snapshot mode is external.
 func parseSnapshotOverlays(snapshotXML string) ([]string, error) {
 	var doc snapshotDisksDoc
 	if err := xml.Unmarshal([]byte(snapshotXML), &doc); err != nil {
 		return nil, err
 	}
 	var out []string
-	for _, d := range doc.Disks {
+	for _, d := range append(append([]snapshotDiskMode(nil), doc.Disks...), doc.RevertDisks...) {
 		if d.Snapshot == snapshotExternalOverlay && strings.TrimSpace(d.Source.File) != "" {
 			out = append(out, strings.TrimSpace(d.Source.File))
 		}
 	}
 	return out, nil
+}
+
+// revertOverlaySuffixRE is the suffix libvirt (>= 9.9) gives the overlay a
+// revert to an external snapshot creates: the disk's source file without its
+// extension, then "." and the revert's creation time in Unix seconds
+// (<domain>-disk.<epoch> for the primary disk).
+var revertOverlaySuffixRE = regexp.MustCompile(`^\.[1-9][0-9]{8,11}$`)
+
+// isOwnOverlayName reports whether base (a file name) is one of the names an
+// overlay of the domain's own primary disk (named diskVolume) gets for
+// snapshot snapshotID: <diskVolume>.<snapshotID> (snapshot-create-as
+// --disk-only), or <diskVolume>.<epoch> (a later revert to the snapshot
+// replaced its overlay with a new one, which the snapshot now records).
+func isOwnOverlayName(base, diskVolume, snapshotID string) bool {
+	if base == diskVolume+"."+snapshotID {
+		return true
+	}
+	rest, ok := strings.CutPrefix(base, diskVolume)
+	return ok && revertOverlaySuffixRE.MatchString(rest)
 }
 
 // sourceFilesIn returns every <source file='...'> anywhere in an XML
@@ -175,7 +196,8 @@ func (p *Provider) removeSnapshotOverlays(ctx context.Context, c libvirtConn, do
 
 // removableSnapshotOverlays returns the canonical host paths among overlays
 // that removeSnapshotOverlays may remove on vp's host: named
-// <domain>-disk.<snapshotID>, out of the domain's current chains, referenced
+// <domain>-disk.<snapshotID> or <domain>-disk.<epoch> (isOwnOverlayName),
+// out of the domain's current chains, referenced
 // by no other snapshot of the domain, regular files inside the storage
 // directories, and used by no other domain on the host. An error means the
 // answer could not be established; nothing may be removed then.
@@ -188,12 +210,12 @@ func (p *Provider) removableSnapshotOverlays(ctx context.Context, vp *VirshProvi
 	if name == "" {
 		name = domain
 	}
-	want := vmDiskVolumeName(name) + "." + snapshotID
+	diskVolume := vmDiskVolumeName(name)
 	var candidates []string
 	for _, o := range overlays {
-		if filepath.Base(o) != want {
-			log.Printf("WARN Keeping overlay file %s of deleted snapshot %s of domain %s: it is not the domain's own overlay %s",
-				o, snapshotID, name, want)
+		if !isOwnOverlayName(filepath.Base(o), diskVolume, snapshotID) {
+			log.Printf("WARN Keeping overlay file %s of deleted snapshot %s of domain %s: it is not the domain's own overlay %s.%s (or %s.<revert time>)",
+				o, snapshotID, name, diskVolume, snapshotID, diskVolume)
 			continue
 		}
 		candidates = append(candidates, o)

@@ -46,6 +46,44 @@ v0.4.0-rc4"; on v0.4.0-rc2, also "Changes since v0.4.0-rc2"; on v0.4.0-rc1, also
 
 ## Changes since v0.4.0-rc6
 
+### libvirt: reverting a snapshot no longer breaks the VM's cloud-init CD-ROM (V6)
+
+Found by validating rc6 on real libvirt 10 hosts (Ubuntu 24.04, AppArmor), single-host
+and clustered. libvirt (9.9 and later) reverts an external (disk-only) snapshot by
+rebuilding the VM's disks from the domain definition the snapshot stored, and makes a
+new qcow2 overlay of every disk there that has media — including the VM's read-only
+cloud-init seed CD-ROM, whatever its mode in the snapshot. The CD-ROM became a qcow2
+overlay of the seed ISO in the VM's private seed directory, which AppArmor does not let
+QEMU open: the revert was reported `Succeeded`, and the VM no longer started
+(the power-on failed: `Ready=False/ProviderError`). Every revert of a disk-only snapshot of a VM with a seed
+on libvirt 9.9 or later with AppArmor was affected.
+
+- **Snapshot create** of a powered-off VM takes the snapshot with its CD-ROMs and
+  floppies ejected from the persistent definition (recorded in the domain's metadata
+  first, then `change-media --eject --config`, the snapshot, `change-media --insert
+  --config` with the same file, also when the snapshot failed), so the stored definition
+  has empty drives. A running VM is never ejected.
+- **Snapshot revert** refuses, before the revert changes anything, a disk-only snapshot
+  whose stored definition has a CD-ROM or read-only disk with media — every snapshot rc6
+  and earlier took of a VM with cloud-init, and any disk-only snapshot of such a VM taken while the
+  VM was running: `SnapshotReverted=False/RevertFailed`, terminal, with a message to take
+  a new snapshot with the VM powered off. Memory snapshots (internal) are not affected.
+  After a revert the provider inserts the seed again into the CD-ROM the revert left
+  empty; a seed it cannot insert, or a read-only disk libvirt moved anyway, is reported
+  as `RevertFailed` instead of `Succeeded`.
+- **An interrupted ejection is repaired**: the next snapshot create or revert, or start or reboot, of the VM
+  inserts the recorded file again, only when it is provably the VM's own cloud-init seed.
+- **Snapshot delete** after a revert removes libvirt's `<domain>-disk.<epoch>` overlay
+  with the same safety checks as before; VM delete removes the whole chain.
+
+**Behaviour change.** On libvirt, take snapshots with the VM powered off to be able to
+revert to them. Snapshots taken by rc6 or earlier of a VM with a cloud-init seed can no
+longer be reverted: delete their `VMSnapshot`s and take new ones after upgrading the
+libvirt provider. A VM already reverted by rc6 to such a snapshot needs a manual repair:
+see [Repairing a VM broken by a v0.4.0-rc6
+revert](docs/vm-snapshot-revert.md#repairing-a-vm-broken-by-a-v040-rc6-revert). No CRD,
+RBAC or proto change; roll the libvirt provider.
+
 ### A call that waits for another call's dial is answered in time (V3c, follow-up)
 
 rc6 bounded the waits a clustered libvirt call makes for the dial it runs itself,

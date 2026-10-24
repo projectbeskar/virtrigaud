@@ -79,6 +79,13 @@ func (f *fakeSeamConn) Virsh(_ context.Context, args ...string) (*hostconn.Resul
 				"</devices></domain>", args[1], seamDomainUUID, args[1])}, nil
 		case "list":
 			return &hostconn.Result{Stdout: seamDomainUUID + "\n"}, nil
+		case "snapshot-dumpxml":
+			// SnapshotRevert reads the snapshot before reverting it
+			// (snapshot_readonly_disks.go): an external disk-only snapshot
+			// of the one disk.
+			return &hostconn.Result{Stdout: fmt.Sprintf("<domainsnapshot><name>%s</name><disks>"+
+				"<disk name='vda' snapshot='external' type='file'><source file='/var/lib/libvirt/images/%s-disk.%s'/></disk>"+
+				"</disks><domain><devices/></domain></domainsnapshot>", args[2], args[1], args[2])}, nil
 		}
 	}
 	return &hostconn.Result{Stdout: "ok"}, nil

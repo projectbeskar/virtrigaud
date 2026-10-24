@@ -271,6 +271,7 @@ func TestRoutedHostOutcomes_SnapshotCloneExport(t *testing.T) {
 		{"SnapshotRevert", snapshotRevert, []hostOutcomeCase{
 			{name: "every call dies", host: []string{"dead"}, want: outcomeHostUnavailable},
 			{name: "the owner check drops after the list", host: []string{"dead-dumpxml"}, want: outcomeNotPerformed},
+			{name: "the snapshot read drops: before the revert", host: []string{"dead-snapshot-dumpxml"}, want: outcomeNotPerformed},
 			{name: "snapshot-revert is sent and its session drops", host: []string{"dead-snapshot-revert"}, want: outcomeUnknown},
 		}},
 		{"Clone", clone, []hostOutcomeCase{

@@ -103,6 +103,10 @@ case "$1" in
     done
     echo "Domain '$2' has been undefined" ;;
   snapshot-list) if [ -f "$d/snapshots" ]; then cat "$d/snapshots"; fi ;;
+  snapshot-dumpxml)
+    if [ -f "$d/snapxml-$3" ]; then exec cat "$d/snapxml-$3"; fi
+    printf "<domainsnapshot><name>%s</name><disks><disk name='vda' snapshot='external' type='file'/></disks><domain><devices/></domain></domainsnapshot>\n" "$3" ;;
+  metadata|change-media) exit 0 ;;
   domstate)
     if [ -f "$d/state-$2" ]; then exec cat "$d/state-$2"; fi
     if [ -f "$d/dom-$2.xml" ]; then echo "shut off"; exit 0; fi

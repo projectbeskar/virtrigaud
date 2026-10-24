@@ -478,9 +478,16 @@ func (s *Server) SnapshotCreate(ctx context.Context, req *providerv1.SnapshotCre
 		// deadline (routed_budget.go).
 		bctx, cancel := withRoutedBudget(ctx)
 		defer cancel()
+		roots := seedRootsOf(s.provider)
 		var resp *providerv1.SnapshotCreateResponse
 		err := s.provider.withOwnedDomain(bctx, snapshotVMRef(req.GetVmId(), req.GetTargetHostId(), req.GetOwner()), "snapshot create",
 			func(bctx context.Context, c libvirtConn, d domainTarget) error {
+				// An earlier attempt interrupted while the domain's media
+				// were ejected is repaired before anything else, also when
+				// that attempt's snapshot is adopted below (snapshot_media.go).
+				if _, err := repairEjectedMediaOf(bctx, hostConnRunner{conn: c}, d.handle, roots); err != nil {
+					return fmt.Errorf("failed to create snapshot: %w", err)
+				}
 				// Idempotent per request: a snapshot of this name already on
 				// the owner-checked domain is this request's earlier attempt's
 				// only when it records this request's token
@@ -489,7 +496,7 @@ func (s *Server) SnapshotCreate(ctx context.Context, req *providerv1.SnapshotCre
 					resp = existing
 					return err
 				}
-				r, err := snapshotCreateOn(bctx, c, d.handle, withSnapshotRequestToken(req))
+				r, err := snapshotCreateOn(bctx, c, d.handle, withSnapshotRequestToken(req), roots)
 				if err != nil {
 					return err
 				}
@@ -526,7 +533,7 @@ func (s *Server) SnapshotCreate(ctx context.Context, req *providerv1.SnapshotCre
 	}
 	// A single host's failures are answered with the outcome the provider
 	// can prove (call_outcome.go, singleHostSnapshotFailure).
-	resp, err := snapshotCreateWith(ctx, conn, req.VmId, req, snapshotCreateOptions{refuseExisting: true})
+	resp, err := snapshotCreateWith(ctx, conn, req.VmId, req, snapshotCreateOptions{refuseExisting: true, seedRoots: seedRootsOf(s.provider)})
 	if err != nil {
 		return nil, singleHostSnapshotFailure(ctx, conn, req.VmId, err)
 	}
@@ -581,10 +588,12 @@ func snapshotVMRef(vmID, hostID string, owner *providerv1.ObjectIdentity) contra
 
 // snapshotCreateOn is the SnapshotCreate core, run on connection conn against
 // domain — the single host's connection and the requested name, or a clustered
-// host's leased connection and the owner-checked domain's UUID. The virsh
-// command sequence is the historical one, unchanged.
-func snapshotCreateOn(ctx context.Context, conn libvirtConn, domain string, req *providerv1.SnapshotCreateRequest) (*providerv1.SnapshotCreateResponse, error) {
-	return snapshotCreateWith(ctx, conn, domain, req, snapshotCreateOptions{})
+// host's leased connection and the owner-checked domain's UUID. seedRoots are
+// the provider's seed roots, for the repair of an interrupted ejection
+// (restoreEjectedMedia).
+func snapshotCreateOn(ctx context.Context, conn libvirtConn, domain string, req *providerv1.SnapshotCreateRequest,
+	seedRoots []string) (*providerv1.SnapshotCreateResponse, error) {
+	return snapshotCreateWith(ctx, conn, domain, req, snapshotCreateOptions{seedRoots: seedRoots})
 }
 
 // snapshotCreateOptions shapes snapshotCreateWith.
@@ -596,6 +605,10 @@ type snapshotCreateOptions struct {
 	// create finds an earlier attempt's snapshot by its request token
 	// instead, so its command sequence stays as it was).
 	refuseExisting bool
+	// seedRoots are the provider's seed roots (Provider.seedRoots): what
+	// proves a recorded ejected medium is the domain's own cloud-init seed
+	// (isOwnSeedISO). None: nothing is re-inserted from a record.
+	seedRoots []string
 }
 
 // errSnapshotExists is the refusal of a snapshot create whose name is already
@@ -635,7 +648,19 @@ func snapshotCreateWith(ctx context.Context, conn libvirtConn, domain string, re
 
 	// No snapshot of a VM whose disk another domain depends on (a linked
 	// clone): see the disk dependency guard (disk_dependents.go).
-	if err := refuseIfDiskHasDependents(ctx, hostConnRunner{conn: conn}, domain, guardOpSnapshotCreate); err != nil {
+	h := hostConnRunner{conn: conn}
+	if err := refuseIfDiskHasDependents(ctx, h, domain, guardOpSnapshotCreate); err != nil {
+		return nil, atStage(stageBefore, fmt.Errorf("failed to create snapshot: %w", err))
+	}
+
+	// An earlier snapshot of the domain interrupted while its media were
+	// ejected is repaired first (snapshot_media.go); doc is the domain's
+	// definition afterwards.
+	doc, err := repairEjectedMediaOf(ctx, h, domain, opts.seedRoots)
+	if err != nil {
+		if stderrors.Is(err, errMediaNotRestored) {
+			return nil, fmt.Errorf("failed to create snapshot: %w", err)
+		}
 		return nil, atStage(stageBefore, fmt.Errorf("failed to create snapshot: %w", err))
 	}
 
@@ -660,11 +685,32 @@ func snapshotCreateWith(ctx context.Context, conn libvirtConn, domain string, re
 		diskSources = strings.TrimSpace(res.Stdout)
 	}
 
+	// A disk-only snapshot of a shut-off domain is taken with its removable
+	// media (its cloud-init seed CD-ROM) ejected, so that libvirt can revert
+	// it; any other read-only disk or drive with a source is excluded with a
+	// diskspec (snapshot_media.go, snapshot_readonly_disks.go). Everything
+	// that can refuse runs before anything is ejected.
+	running := domainState == "running"
+	diskOnly := !req.IncludeMemory || !running
+	var toEject []removableMedium
+	if diskOnly && domainState == domStateShutOff {
+		toEject = doc.ejectableMedia()
+	}
+	excluded, err := doc.snapshotExcludedTargets(toEject)
+	if err != nil {
+		return nil, atStage(stageBefore, fmt.Errorf("failed to create snapshot: %w", err))
+	}
+	if len(excluded) > 0 && diskOnly {
+		log.Printf("WARN Snapshot %s of domain %s keeps the media of read-only disk(s) %v in its stored definition "+
+			"(the domain is not shut off, or they cannot be ejected): libvirt cannot revert it safely, and a revert to it is refused",
+			snapshotName, domain, excluded)
+	}
+
 	// Build the virsh snapshot-create-as arguments. A memory-inclusive (full
 	// system) snapshot omits --disk-only and is only possible for a RUNNING
 	// domain (there is no RAM state to capture otherwise); any other case is a
 	// disk-only snapshot.
-	args, memorySnapshot := buildSnapshotCreateArgs(domain, snapshotName, description, req.IncludeMemory, domainState == "running")
+	args, memorySnapshot := buildSnapshotCreateArgs(domain, snapshotName, description, req.IncludeMemory, running, excluded)
 	switch {
 	case memorySnapshot:
 		log.Printf("INFO Creating memory snapshot (full system checkpoint including RAM) for domain %s", domain)
@@ -678,10 +724,34 @@ func snapshotCreateWith(ctx context.Context, conn libvirtConn, domain string, re
 		log.Printf("INFO Creating disk-only snapshot for domain %s", domain)
 	}
 
-	// Execute snapshot creation (control-plane exec through the seam)
-	result, err := conn.Virsh(ctx, args...)
+	// Eject (recorded first, so an interruption is repaired later). A failure
+	// that may have left a drive empty is not "nothing done": unstaged.
+	ejected, err := ejectMediaForSnapshot(ctx, h, domain, toEject)
 	if err != nil {
+		if stderrors.Is(err, errMediaNotRestored) {
+			return nil, fmt.Errorf("failed to create snapshot: %w", err)
+		}
+		return nil, atStage(stageBefore, fmt.Errorf("failed to create snapshot: %w", err))
+	}
+
+	// Execute snapshot creation (control-plane exec through the seam), then
+	// re-insert the ejected media whatever its outcome.
+	result, err := conn.Virsh(ctx, args...)
+	restoreErr := reinsertMedia(ctx, h, domain, ejected, false)
+	if err != nil {
+		if restoreErr != nil {
+			// The domain was changed (its media are still out): never read
+			// as "not created".
+			return nil, fmt.Errorf("failed to create snapshot: %w; %w", err, restoreErr)
+		}
 		return nil, atStageDetail(stageCommand, snapshotName, diskSources, fmt.Errorf("failed to create snapshot: %w", err))
+	}
+	if restoreErr != nil {
+		// The snapshot exists; the media stay recorded as ejected, and the
+		// next power-on or snapshot call of the domain re-inserts a
+		// cloud-init seed (restoreEjectedMedia).
+		log.Printf("ERROR Snapshot %s of domain %s was created, but its removable media could not be re-inserted: %v",
+			snapshotName, domain, restoreErr)
 	}
 
 	log.Printf("INFO Snapshot created successfully: %s\nOutput: %s", snapshotName, result.Stdout)
@@ -768,7 +838,14 @@ func singleHostSnapshotFailure(ctx context.Context, conn libvirtConn, domain str
 // for a RUNNING domain (a stopped domain has no RAM state). In every other case
 // (includeMemory false, or the domain not running) a --disk-only snapshot is
 // taken. The boolean lets the caller log/report honestly which kind was made.
-func buildSnapshotCreateArgs(vmID, name, description string, includeMemory, running bool) (args []string, memorySnapshot bool) {
+//
+// Every target in excluded (the domain's read-only disks, CD-ROMs and
+// floppies: domainDisksDoc.snapshotExcludedTargets) gets `--diskspec
+// <target>,snapshot=no`, in both kinds, so that no snapshot ever records the
+// cloud-init seed as a snapshot disk (snapshot_readonly_disks.go). Disks
+// without a diskspec keep libvirt's defaults (external, default overlay name,
+// for --disk-only).
+func buildSnapshotCreateArgs(vmID, name, description string, includeMemory, running bool, excluded []string) (args []string, memorySnapshot bool) {
 	args = []string{
 		"snapshot-create-as",
 		vmID,
@@ -778,9 +855,10 @@ func buildSnapshotCreateArgs(vmID, name, description string, includeMemory, runn
 	}
 	if includeMemory && running {
 		// No --disk-only flag → full snapshot including memory.
-		return args, true
+		return append(args, snapshotDiskspecArgs(excluded)...), true
 	}
-	return append(args, "--disk-only"), false
+	args = append(args, "--disk-only")
+	return append(args, snapshotDiskspecArgs(excluded)...), false
 }
 
 // routedSnapshotIDRE is the shape of every snapshot name this provider creates
@@ -920,7 +998,7 @@ func (s *Server) SnapshotRevert(ctx context.Context, req *providerv1.SnapshotRev
 		var resp *providerv1.TaskResponse
 		err := s.provider.withOwnedDomain(ctx, snapshotVMRef(req.GetVmId(), req.GetTargetHostId(), req.GetOwner()), "snapshot revert",
 			func(ctx context.Context, c libvirtConn, d domainTarget) error {
-				r, err := snapshotRevertOn(ctx, c, d.handle, req.SnapshotId)
+				r, err := snapshotRevertOn(ctx, c, d.handle, req.SnapshotId, seedRootsOf(s.provider))
 				resp = routedTaskResponse(c.HostID(), r)
 				return err
 			})
@@ -939,13 +1017,16 @@ func (s *Server) SnapshotRevert(ctx context.Context, req *providerv1.SnapshotRev
 	if err != nil {
 		return nil, err
 	}
-	return snapshotRevertOn(ctx, conn, req.VmId, req.SnapshotId)
+	return snapshotRevertOn(ctx, conn, req.VmId, req.SnapshotId, seedRootsOf(s.provider))
 }
 
 // snapshotRevertOn is the SnapshotRevert core, run on connection conn against
-// domain (see snapshotCreateOn). The virsh command sequence is the historical
-// one, unchanged.
-func snapshotRevertOn(ctx context.Context, conn libvirtConn, domain, snapshotID string) (*providerv1.TaskResponse, error) {
+// domain (see snapshotCreateOn). Before the revert it repairs an interrupted
+// ejection and refuses a snapshot libvirt cannot revert safely
+// (prepareSnapshotRevert); after it, it re-inserts the media the revert left
+// out and fails the call for a read-only disk libvirt rewrote
+// (finishSnapshotRevert). seedRoots are the provider's seed roots.
+func snapshotRevertOn(ctx context.Context, conn libvirtConn, domain, snapshotID string, seedRoots []string) (*providerv1.TaskResponse, error) {
 	if err := checkSnapshotIDArgument(snapshotID); err != nil {
 		return nil, err
 	}
@@ -973,29 +1054,50 @@ func snapshotRevertOn(ctx context.Context, conn libvirtConn, domain, snapshotID 
 		return nil, fmt.Errorf("failed to revert to snapshot: %w", err)
 	}
 
-	// Revert to snapshot
-	// Format: virsh snapshot-revert DOMAIN SNAPSHOT --running|--paused
-	args := []string{
-		"snapshot-revert",
-		domain,
-		snapshotID,
-		"--force", // Force revert even if domain is running
+	// A snapshot whose stored definition has the domain's read-only seed
+	// CD-ROM with its medium (taken while the VM ran, or by v0.4.0-rc6 or
+	// earlier) is refused before anything changes: libvirt would rewrite the
+	// CD-ROM to an overlay the VM cannot open (snapshot_readonly_disks.go).
+	// An interrupted ejection is repaired first.
+	h := hostConnRunner{conn: conn}
+	plan, err := prepareSnapshotRevert(ctx, h, domain, snapshotID, seedRoots)
+	if err != nil {
+		return nil, err
 	}
 
-	// If domain was running, keep it running after revert
-	if domainState == "running" {
-		args = append(args, "--running")
-	}
-
-	result, err := conn.Virsh(ctx, args...)
+	result, err := conn.Virsh(ctx, buildSnapshotRevertArgs(domain, snapshotID, domainState)...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to revert to snapshot: %w", err)
 	}
 
 	log.Printf("INFO Successfully reverted to snapshot: %s\nOutput: %s", snapshotID, result.Stdout)
 
+	// The revert happened: the media it left out are inserted again, and a
+	// read-only disk libvirt rewrote anyway, or a medium that cannot be
+	// inserted again, is answered as a failure, not a success (the VM may
+	// not start).
+	if err := finishSnapshotRevert(ctx, h, domain, snapshotID, plan, domainState == "running"); err != nil {
+		return nil, err
+	}
+
 	// Return empty response (synchronous operation)
 	return &providerv1.TaskResponse{}, nil
+}
+
+// buildSnapshotRevertArgs builds `virsh snapshot-revert DOMAIN SNAPSHOT
+// --force [--running]`: --force reverts even a running domain, and a domain
+// that was running is kept running.
+func buildSnapshotRevertArgs(domain, snapshotID, domainState string) []string {
+	args := []string{
+		"snapshot-revert",
+		domain,
+		snapshotID,
+		"--force", // Force revert even if domain is running
+	}
+	if domainState == "running" {
+		args = append(args, "--running")
+	}
+	return args
 }
 
 // Clone creates a VM clone. It delegates to the libvirt Provider

@@ -716,9 +716,15 @@
       "single virsh domstate vrgold-web",
       "single virsh dumpxml vrgold-web",
       "single virsh list --all --uuid",
+      "single virsh dumpxml vrgold-web",
       "single virsh snapshot-list vrgold-web --name",
       "single virsh domblklist --details vrgold-web",
-      "single virsh snapshot-create-as vrgold-web snapshot-\u003cunix\u003e --description Snapshot created by VirtRigaud at \u003ctime\u003e --atomic --disk-only"
+      "single virsh metadata --domain vrgold-web --uri https://virtrigaud.io/xmlns/libvirt/media/v1 --key virtrigaud --set \u003cejected\u003e\u003cmedia target='sda' source='/tmp/virtrigaud-cloudinit-vrgold-web.abcdefghij/cloud-init.iso' driver='raw'/\u003e\u003c/ejected\u003e --config",
+      "single virsh change-media vrgold-web sda --eject --config",
+      "single virsh snapshot-create-as vrgold-web snapshot-\u003cunix\u003e --description Snapshot created by VirtRigaud at \u003ctime\u003e --atomic --disk-only",
+      "single virsh change-media vrgold-web sda /tmp/virtrigaud-cloudinit-vrgold-web.abcdefghij/cloud-init.iso --insert --config",
+      "single virsh dumpxml vrgold-web",
+      "single virsh metadata --domain vrgold-web --uri https://virtrigaud.io/xmlns/libvirt/media/v1 --remove --config"
     ],
     "resp": "{\"snapshot_id\":\"snapshot-\u003cunix\u003e\"}",
     "err": ""
@@ -728,9 +734,15 @@
       "single virsh domstate vrgold-web",
       "single virsh dumpxml vrgold-web",
       "single virsh list --all --uuid",
+      "single virsh dumpxml vrgold-web",
       "single virsh snapshot-list vrgold-web --name",
       "single virsh domblklist --details vrgold-web",
-      "single virsh snapshot-create-as vrgold-web pre-upgrade --description before the upgrade --atomic --disk-only"
+      "single virsh metadata --domain vrgold-web --uri https://virtrigaud.io/xmlns/libvirt/media/v1 --key virtrigaud --set \u003cejected\u003e\u003cmedia target='sda' source='/tmp/virtrigaud-cloudinit-vrgold-web.abcdefghij/cloud-init.iso' driver='raw'/\u003e\u003c/ejected\u003e --config",
+      "single virsh change-media vrgold-web sda --eject --config",
+      "single virsh snapshot-create-as vrgold-web pre-upgrade --description before the upgrade --atomic --disk-only",
+      "single virsh change-media vrgold-web sda /tmp/virtrigaud-cloudinit-vrgold-web.abcdefghij/cloud-init.iso --insert --config",
+      "single virsh dumpxml vrgold-web",
+      "single virsh metadata --domain vrgold-web --uri https://virtrigaud.io/xmlns/libvirt/media/v1 --remove --config"
     ],
     "resp": "{\"snapshot_id\":\"pre-upgrade\"}",
     "err": ""
@@ -747,9 +759,15 @@
       "single virsh domstate vrgold-web",
       "single virsh dumpxml vrgold-web",
       "single virsh list --all --uuid",
+      "single virsh dumpxml vrgold-web",
       "single virsh snapshot-list vrgold-web --name",
       "single virsh domblklist --details vrgold-web",
-      "single virsh snapshot-create-as vrgold-web x --description d --atomic --disk-only"
+      "single virsh metadata --domain vrgold-web --uri https://virtrigaud.io/xmlns/libvirt/media/v1 --key virtrigaud --set \u003cejected\u003e\u003cmedia target='sda' source='/tmp/virtrigaud-cloudinit-vrgold-web.abcdefghij/cloud-init.iso' driver='raw'/\u003e\u003c/ejected\u003e --config",
+      "single virsh change-media vrgold-web sda --eject --config",
+      "single virsh snapshot-create-as vrgold-web x --description d --atomic --disk-only",
+      "single virsh change-media vrgold-web sda /tmp/virtrigaud-cloudinit-vrgold-web.abcdefghij/cloud-init.iso --insert --config",
+      "single virsh dumpxml vrgold-web",
+      "single virsh metadata --domain vrgold-web --uri https://virtrigaud.io/xmlns/libvirt/media/v1 --remove --config"
     ],
     "resp": "null",
     "err": "failed to create snapshot: virsh command 'virsh -c qemu:///single snapshot-create-as vrgold-web x --description d --atomic --disk-only' failed (exit code 1): stderr=error: scripted failure of snapshot-create-as\n, stdout="
@@ -759,9 +777,15 @@
       "single virsh domstate vrgold-web",
       "single virsh dumpxml vrgold-web",
       "single virsh list --all --uuid",
+      "single virsh dumpxml vrgold-web",
       "single virsh snapshot-list vrgold-web --name",
       "single virsh domblklist --details vrgold-web",
-      "single virsh snapshot-create-as vrgold-web h --description d --atomic --disk-only"
+      "single virsh metadata --domain vrgold-web --uri https://virtrigaud.io/xmlns/libvirt/media/v1 --key virtrigaud --set \u003cejected\u003e\u003cmedia target='sda' source='/tmp/virtrigaud-cloudinit-vrgold-web.abcdefghij/cloud-init.iso' driver='raw'/\u003e\u003c/ejected\u003e --config",
+      "single virsh change-media vrgold-web sda --eject --config",
+      "single virsh snapshot-create-as vrgold-web h --description d --atomic --disk-only",
+      "single virsh change-media vrgold-web sda /tmp/virtrigaud-cloudinit-vrgold-web.abcdefghij/cloud-init.iso --insert --config",
+      "single virsh dumpxml vrgold-web",
+      "single virsh metadata --domain vrgold-web --uri https://virtrigaud.io/xmlns/libvirt/media/v1 --remove --config"
     ],
     "resp": "{\"snapshot_id\":\"h\"}",
     "err": ""
@@ -771,9 +795,10 @@
       "single virsh domstate vrgold-web",
       "single virsh dumpxml vrgold-web",
       "single virsh list --all --uuid",
+      "single virsh dumpxml vrgold-web",
       "single virsh snapshot-list vrgold-web --name",
       "single virsh domblklist --details vrgold-web",
-      "single virsh snapshot-create-as vrgold-web mem --description d --atomic"
+      "single virsh snapshot-create-as vrgold-web mem --description d --atomic --diskspec sda,snapshot=no"
     ],
     "resp": "{\"snapshot_id\":\"mem\"}",
     "err": ""
@@ -783,9 +808,15 @@
       "single virsh domstate vrgold-web",
       "single virsh dumpxml vrgold-web",
       "single virsh list --all --uuid",
+      "single virsh dumpxml vrgold-web",
       "single virsh snapshot-list vrgold-web --name",
       "single virsh domblklist --details vrgold-web",
-      "single virsh snapshot-create-as vrgold-web mem --description d --atomic --disk-only"
+      "single virsh metadata --domain vrgold-web --uri https://virtrigaud.io/xmlns/libvirt/media/v1 --key virtrigaud --set \u003cejected\u003e\u003cmedia target='sda' source='/tmp/virtrigaud-cloudinit-vrgold-web.abcdefghij/cloud-init.iso' driver='raw'/\u003e\u003c/ejected\u003e --config",
+      "single virsh change-media vrgold-web sda --eject --config",
+      "single virsh snapshot-create-as vrgold-web mem --description d --atomic --disk-only",
+      "single virsh change-media vrgold-web sda /tmp/virtrigaud-cloudinit-vrgold-web.abcdefghij/cloud-init.iso --insert --config",
+      "single virsh dumpxml vrgold-web",
+      "single virsh metadata --domain vrgold-web --uri https://virtrigaud.io/xmlns/libvirt/media/v1 --remove --config"
     ],
     "resp": "{\"snapshot_id\":\"mem\"}",
     "err": ""
@@ -802,9 +833,15 @@
       "single virsh domstate vrgold-web",
       "single virsh dumpxml vrgold-web",
       "single virsh list --all --uuid",
+      "single virsh dumpxml vrgold-web",
       "single virsh snapshot-list vrgold-web --name",
       "single virsh domblklist --details vrgold-web",
-      "single virsh snapshot-create-as vrgold-web my-snap-1- --description d --atomic --disk-only"
+      "single virsh metadata --domain vrgold-web --uri https://virtrigaud.io/xmlns/libvirt/media/v1 --key virtrigaud --set \u003cejected\u003e\u003cmedia target='sda' source='/tmp/virtrigaud-cloudinit-vrgold-web.abcdefghij/cloud-init.iso' driver='raw'/\u003e\u003c/ejected\u003e --config",
+      "single virsh change-media vrgold-web sda --eject --config",
+      "single virsh snapshot-create-as vrgold-web my-snap-1- --description d --atomic --disk-only",
+      "single virsh change-media vrgold-web sda /tmp/virtrigaud-cloudinit-vrgold-web.abcdefghij/cloud-init.iso --insert --config",
+      "single virsh dumpxml vrgold-web",
+      "single virsh metadata --domain vrgold-web --uri https://virtrigaud.io/xmlns/libvirt/media/v1 --remove --config"
     ],
     "resp": "{\"snapshot_id\":\"my-snap-1-\"}",
     "err": ""
@@ -877,6 +914,8 @@
       "single virsh domstate vrgold-web",
       "single virsh dumpxml vrgold-web",
       "single virsh list --all --uuid",
+      "single virsh dumpxml vrgold-web",
+      "single virsh snapshot-dumpxml vrgold-web s1",
       "single virsh snapshot-revert vrgold-web s1 --force"
     ],
     "resp": "null",
@@ -895,7 +934,10 @@
       "single virsh domstate vrgold-web",
       "single virsh dumpxml vrgold-web",
       "single virsh list --all --uuid",
-      "single virsh snapshot-revert vrgold-web s1 --force --running"
+      "single virsh dumpxml vrgold-web",
+      "single virsh snapshot-dumpxml vrgold-web s1",
+      "single virsh snapshot-revert vrgold-web s1 --force --running",
+      "single virsh dumpxml vrgold-web"
     ],
     "resp": "{}",
     "err": ""
@@ -906,7 +948,10 @@
       "single virsh domstate vrgold-web",
       "single virsh dumpxml vrgold-web",
       "single virsh list --all --uuid",
-      "single virsh snapshot-revert vrgold-web s1 --force"
+      "single virsh dumpxml vrgold-web",
+      "single virsh snapshot-dumpxml vrgold-web s1",
+      "single virsh snapshot-revert vrgold-web s1 --force",
+      "single virsh dumpxml vrgold-web"
     ],
     "resp": "{}",
     "err": ""
