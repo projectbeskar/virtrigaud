@@ -74,6 +74,13 @@ const snapshotCreateNotIssuedMessage = "Snapshot create was not issued to the pr
 const snapshotCreateRetryingMessage = "Snapshot creation did not reach a definite outcome on the provider and will be retried; " +
 	"the provider's answer is in the SnapshotCreateRetrying event"
 
+// snapshotCreateNotPerformedMessage is the status message and Ready condition
+// message of a routed snapshot create the provider answered it did not
+// perform (routedCreateNotPerformed): the attempt is closed and the create is
+// sent again after a backoff. Constant, as snapshotCreateRetryingMessage.
+const snapshotCreateNotPerformedMessage = "The provider did not perform the snapshot creation (nothing was changed) and " +
+	"it will be retried; the provider's answer, and what may need fixing, is in the SnapshotCreateRetrying event"
+
 // snapshotReasonCreateRetrying is the Warning event reason recorded when a
 // routed snapshot create starts being retried.
 const snapshotReasonCreateRetrying = "SnapshotCreateRetrying"
@@ -397,13 +404,30 @@ func (r *VMSnapshotReconciler) createSnapshot(ctx context.Context, snapshot *inf
 		// (VM_DISK_CHECK_FAILED, #358) is retried here too; a refusal because
 		// another VM depends on the disk (VM_DISK_IN_USE, a Conflict) fails the
 		// create, as on a single host. Single-host failures are unchanged.
-		logger.Info("Snapshot creation did not reach a definite outcome; retrying", "error", err.Error())
+		notPerformed := routedCreateNotPerformed(err)
+		message := snapshotCreateRetryingMessage
+		if notPerformed {
+			message = snapshotCreateNotPerformedMessage
+		}
 		if c := meta.FindStatusCondition(snapshot.Status.Conditions, infrav1beta1.VMSnapshotConditionReady); c == nil ||
-			c.Message != snapshotCreateRetryingMessage {
+			c.Message != message {
 			r.Recorder.Event(snapshot, corev1.EventTypeWarning, snapshotReasonCreateRetrying,
 				"Snapshot creation will be retried: "+rpcFailureDetail(err))
 		}
-		return r.retrySnapshotCreate(ctx, snapshot, snapshotCreateRetryingMessage), nil
+		if notPerformed {
+			// A definite "nothing was done" (V8): the attempt is closed —
+			// its marker removed, so the next send is a new attempt, never
+			// counted as a re-send of an unknown outcome toward the
+			// operator hold — and retried after a backoff.
+			logger.Info("The provider did not perform the snapshot creation; retrying after a backoff",
+				"error", err.Error(), "retryAfter", requestMarkerRecheckInterval.String())
+			clearSnapshotRequest(snapshot)
+			res := r.retrySnapshotCreate(ctx, snapshot, message)
+			res.RequeueAfter = max(res.RequeueAfter, requestMarkerRecheckInterval)
+			return res, nil
+		}
+		logger.Info("Snapshot creation did not reach a definite outcome; retrying", "error", err.Error())
+		return r.retrySnapshotCreate(ctx, snapshot, message), nil
 	}
 	if err != nil && !providerCallOutcomeKnownFor(err, attempt) {
 		// A single-host create without a definite outcome (a deadline, a

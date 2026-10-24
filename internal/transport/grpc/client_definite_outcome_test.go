@@ -65,3 +65,28 @@ func TestMapGRPCError_SingleHostLibvirtDefiniteAnswers(t *testing.T) {
 	assert.False(t, contracts.IsNotFound(untyped) || contracts.IsInvalidSpec(untyped) || contracts.IsConflict(untyped))
 	assert.True(t, isInfraFailure(status.Error(codes.Unknown, "host command failed")), "an untyped failure still counts")
 }
+
+// TestMapGRPCError_RoutedSnapshotCreateAnswers (V8) pins how the manager reads
+// a clustered libvirt provider's answers to a routed SnapshotCreate: a disk
+// in-use check that could not run (VM_DISK_CHECK_FAILED with
+// VM_OPERATION_FAILED, the rc7 lab's answer) and a host that was unavailable
+// prove nothing was done; an OUTCOME_UNKNOWN_RETRY (sent with
+// VM_OPERATION_FAILED) proves nothing.
+func TestMapGRPCError_RoutedSnapshotCreateAnswers(t *testing.T) {
+	c := &Client{}
+	const op = "snapshotCreate"
+	for name, tc := range map[string]struct {
+		reasons      []string
+		nothingDone  bool
+		unknownRetry bool
+	}{
+		"disk check failed": {[]string{contracts.VMDiskCheckFailedReason, contracts.VMOperationFailedReason}, true, false},
+		"host unavailable":  {[]string{contracts.HostUnavailableReason}, true, false},
+		"outcome unknown":   {[]string{contracts.OutcomeUnknownRetryReason, contracts.VMOperationFailedReason}, false, true},
+	} {
+		mapped := c.mapGRPCError(op, createNotPerformedErr(t, tc.reasons...))
+		assert.True(t, contracts.IsRetryable(mapped), name)
+		assert.Equal(t, tc.nothingDone, contracts.IsNothingDone(mapped), name)
+		assert.Equal(t, tc.unknownRetry, contracts.IsOutcomeUnknownRetry(mapped), name)
+	}
+}
