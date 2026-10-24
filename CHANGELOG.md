@@ -5,6 +5,23 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-10-24 15:00] - Release notes for v0.4.0-rc7
+**Author:** @wrkode (William Rizzo)
+
+### Changed
+- `docs/release-notes/next.md`: retitled for v0.4.0-rc7 (header comment, opening paragraph, "About this release candidate": rc1, rc2, rc4, rc5 and rc6 came before; rc3 was tagged but not released). "Changes since v0.4.0-rc6" gets an intro, a table and PR numbers in the headings: #435 (V6, libvirt snapshot revert and the cloud-init CD-ROM) and #434 (V3c follow-up, a call waiting for another call's SSH dial). New "Upgrade order for rc7": no CRD, RBAC, chart or proto change (the diff of `config/crd/bases` and `charts/virtrigaud/crds` between rc6 and this release is empty), the repair runbook for VMs an rc6 revert broke first, the manager only changes a message, then the libvirt providers (what an older libvirt provider means), then new snapshots taken with the VM powered off, with a rollback note.
+- `docs/release-notes/next.md`: "About this release candidate" gains a "New since rc6" test list (revert to a snapshot of a powered-off VM, the refusal, a memory snapshot of a seeded VM, many concurrent calls to an unreachable clustered host) and "Validated in the lab since rc6" (v0.4.0-rc6 on Kubernetes 1.34, a vCenter, a single-node PVE 9.2 and libvirt 10.0, single-host and a two-host clustered Provider: V1 to V4 results, snapshot revert on vSphere and Proxmox, V6 and the V3c follow-up found). The "Not run" list now names the libvirt revert on the rc7 provider instead of a revert on any hypervisor. "Breaking changes" (nothing breaking, five behaviour changes), "Fixes", "Known limitations" (the libvirt revert needs a snapshot taken with the VM powered off; the eject window; non-seed media; overlays of additional data disks) and "Upgrade" carry the rc7 items; the revert paragraph of "Changes since v0.4.0-rc5" no longer says the revert is unvalidated.
+- `docs/upgrading.md`: a row in the behaviour-change table (libvirt snapshots eject the seed CD-ROM, a revert to a snapshot that stored it is refused, one extra `dumpxml` on a libvirt power-on) and a provider-order bullet (roll the libvirt providers; what an older one means; repair VMs an rc6 revert broke first).
+
+### Why
+rc6 validation on real libvirt 10.0 hosts found V6 and the V3c follow-up, now fixed on main (#435, #434). People who test rc7 need to know the upgrade order, that snapshots taken by rc6 can no longer be reverted, and what was and was not validated.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [ ] Config change only
+- [x] Documentation only
+
 ## [2026-10-24 12:00] - A clustered call waiting for another call's SSH dial is answered in time (V3c follow-up)
 **Author:** @wrkode (William Rizzo)
 
