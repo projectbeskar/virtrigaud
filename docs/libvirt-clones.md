@@ -293,7 +293,11 @@ with the CVE-2024-4467 fix is a prerequisite, see
 opened in the format its domain definition names (a raw disk, whose bytes are
 the guest's, is never opened at all), and a backing file in the format its
 parent's header names. A backing file whose format nothing names is probed by
-the SSH user only, and so is everything below it. A
+the SSH user only, and so is everything below it. A shut-off domain's
+definition can list its chain in nested `<backingStore>` elements (libvirt
+keeps them there after an offline external snapshot or a revert): such a
+backing store is not opened again when its disk's chain already reached it,
+and only one that no chain reached is probed, by the SSH user only. A
 VM "has dependents" when any other domain references one of its disk files as
 a disk, a backing file, a data file, or any other file. Delete only runs the
 check when it has files to remove.
@@ -304,7 +308,10 @@ The check fails closed: if a definition or a disk's image chain cannot be read
 is not performed and returns a retryable error (`Unavailable` with
 `google.rpc.ErrorInfo` reason `VM_DISK_CHECK_FAILED`, which the manager retries
 and never counts toward the Provider's circuit breaker), with the details in
-the provider log. A host that cannot be reached at all during the check (the
+the provider log. When it failed because an image cannot be read at all
+(`Permission denied`), the answer says so instead of "transient host error",
+and the provider log names the image: see
+[Unreadable disk images](#unreadable-disk-images). A host that cannot be reached at all during the check (the
 SSH connection or its libvirtd fails) is a host failure instead: `Unavailable`
 with `HOST_UNAVAILABLE` on a clustered Provider, and a plain `Unavailable` —
 which the circuit breaker counts — on a single-host one. Give the provider's
@@ -426,6 +433,11 @@ clone of the vanished VM keeps its backing file. Nothing else is looked for.
   `sudo chown -h libvirt-qemu:kvm -- <disk>` and `sudo chmod 0640 -- <disk>`.
   Least privilege (`0600 libvirt-qemu`, with every read through `sudo -n`) is
   a tracked follow-up.
+- **Snapshot overlays.** The overlays libvirt itself creates for an external
+  snapshot (`<domain>-disk.<snapshot>`) and for a revert
+  (`<domain>-disk.<epoch>`) are `0600`. After every snapshot and revert the
+  provider gives the VM's own overlays the owner and group read of a VM disk,
+  under the checks in [Unreadable disk images](#unreadable-disk-images).
 - **How a disk is written.** A disk (and, for an s3 import, the staged object)
   is written inside a private directory made next to its final name
   (`mktemp -d`: an unpredictable `.virtrigaud-write-*` name, mode `0700`,
@@ -719,7 +731,7 @@ on a line that starts with `WARN Refusing to copy <disk>:`.
 | an image of its chain has an external data file | A qcow2 in the chain stores its data in a separate file | Flatten the image (`qemu-img convert`) with the VM off |
 | its disk format "…" is not qcow2 or raw | The domain's `<driver type>` is another format | Convert the disk to qcow2 and update the definition |
 | its image chain names a backing file without its format | A header names its backing file with no format | `qemu-img rebase -u -F <format> -b <backing> <image>`, with the VM off |
-| its image chain could not be read and verified | The chain could not be read, for example a `0600` overlay without the sudo rule | Add `VR_DISK_READ` ([The sudoers rule](#what-the-copies-run-as-root)) |
+| its image chain could not be read and verified | The chain could not be read, for example a `0600` overlay without the sudo rule | Add `VR_DISK_READ` ([The sudoers rule](#what-the-copies-run-as-root)); see also [Unreadable disk images](#unreadable-disk-images) |
 
 **A directory others can write is named at startup.** Every refusal is
 logged, and the directory is also named before any copy is attempted:
@@ -737,6 +749,102 @@ WARN /var/lib/libvirt/images, where VM disks are created, is writable by its gro
 
 Check with `stat -c '%a %U:%G' <dir>`. A sticky directory (for example mode
 `1777` or `3777`) is accepted.
+
+### Unreadable disk images
+
+**Symptom.** A snapshot create, revert or delete, or a delete of a VM (on a
+clustered Provider also a create or clone), is not performed, and its answer
+reads:
+
+```
+snapshot create of libvirt domain "<namespace>.<name>" not performed: permission denied reading a disk image on its host (see docs/libvirt-clones.md#unreadable-disk-images; the provider log names it), so no other domain's use of its disks can be ruled out; retried
+```
+
+(`on a host of this Provider` when the cluster-wide check failed on another
+host.) It is `Unavailable` with the `VM_DISK_CHECK_FAILED` reason, which the
+manager never counts toward the Provider's circuit breaker and handles as
+for any check that could not run ([How the dependency is found](#how-the-dependency-is-found)):
+a VM delete is retried, and a `VMSnapshot` on a clustered Provider shows
+`Ready=False/ProviderError` with the answer in its `SnapshotCreateRetrying`
+event and is sent again every minute until the image is fixed. The answer
+never names the image: it can be another tenant's VM's. The provider log
+does:
+
+```
+ERROR libvirt image confinement: read backing chain: permission denied reading disk image <path> (see docs/libvirt-clones.md#unreadable-disk-images): ...
+```
+
+**Cause.** The disk in-use check reads the disk chain of every domain on the
+host, the VM's own and every other one, one image at a time. It reads an
+image through `sudo -n qemu-img info` where `VR_DISK_READ`
+([the sudoers rule](#what-the-copies-run-as-root)) allows it, and as the SSH
+user otherwise. Neither could read this one. That is usually an overlay
+libvirt created for an external snapshot (`<pool dir>/<domain>-disk.<snapshot>`)
+or for a revert (`<pool dir>/<domain>-disk.<epoch>`), which libvirt makes
+`0600`, owned by root while its VM is off. Either the host has no
+`VR_DISK_READ` rule for the image's directory, or the directory is a
+root-squashed NFS export, where root reads nothing it does not own.
+
+**What the provider does.** After every successful snapshot and revert, the
+provider reads the VM's definition again and gives each of the VM's **own**
+overlays the owner and mode of a VM disk. "Own" means named
+`<domain>-disk.<snapshot>` or `<domain>-disk.<epoch>`, from the top of each
+disk's chain down to, and not including, the VM's own disk. An overlay an
+earlier snapshot, revert or release left `0600` is therefore repaired by the
+VM's next snapshot or revert. The file must also pass every one of these
+checks, or it is left as it is and logged
+(`WARN Not normalising snapshot overlay <file> of domain <domain>: ...`):
+
+- it is a regular file, not a symbolic link;
+- it lies directly inside the default pool's directory or an allowed image
+  directory (`VIRTRIGAUD_LIBVIRT_IMAGE_DIRS`), canonicalized on the host;
+- its directory can be written by no account other than root and the SSH
+  user, or is sticky (the rule the root copies follow): `chmod` follows a
+  symbolic link, so no other account may be able to swap one in.
+
+A VM that is off has its overlays given to `libvirt-qemu:kvm`
+(`sudo -n chown -h`, which never follows a link), then group read
+(`sudo -n chmod g+r`). A running VM's overlay only gets group read, and only
+when it already belongs to `libvirt-qemu:kvm`: the running VM keeps its
+access, and nothing is taken from the owner. When that VM stops, libvirt
+gives the overlay back to the owner it had before (root); its next snapshot
+or revert taken while it is off normalises it again. A file that cannot be
+changed never fails the snapshot or revert: the next check that cannot read
+it answers as above. The two commands need their own sudo rule (sudo
+1.9.10 or later, for the regular expressions; adjust the directory and the
+SSH user as for the other rules):
+
+```
+Cmnd_Alias VR_OVERLAY_MODE = /usr/bin/chown ^-h libvirt-qemu:kvm -- /var/lib/libvirt/images/[^/ ]+$, \
+    /usr/bin/chmod ^g\+r -- /var/lib/libvirt/images/[^/ ]+$
+virtrigaud ALL=(root) NOPASSWD: VR_OVERLAY_MODE
+```
+
+Without it, the overlays stay as libvirt made them. The checks then need
+`VR_DISK_READ` for the pool directory, which reads them as root.
+
+**Repair by hand.** Overlays created by v0.4.0-rc7 or earlier stay `0600`
+until their VM's next snapshot or revert. To fix them now, find the files
+the provider log names, or list the VM overlays without group read, as
+root on each host:
+
+```
+find /var/lib/libvirt/images -maxdepth 1 -type f -name '*-disk.*' ! -name '*.qcow2' ! -perm -g=r -printf '%m %u:%g %p\n'
+```
+
+Then, for each file whose VM is **off**, run:
+
+```
+sudo chown -h libvirt-qemu:kvm -- <file>
+sudo chmod 0640 -- <file>
+stat -c '%a %U:%G %n' -- <file>    # 640 libvirt-qemu:kvm <file>
+```
+
+For a VM that is running, only run `sudo chmod g+r -- <file>`, and only when
+the file already belongs to `libvirt-qemu:kvm`. Check first that `<file>` is
+a regular file (`stat -c %F`), not a symbolic link. Run the commands on the
+host where the file is: on shared storage, run them once. Alternatively, add
+the image's directory to `VR_DISK_READ`.
 
 ## Known limitations
 

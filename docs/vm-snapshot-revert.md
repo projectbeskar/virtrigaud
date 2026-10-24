@@ -115,7 +115,10 @@ phase, and the outcome.
 - Naming another `VMSnapshot`, or a `VMSnapshot` deleted and re-created under the same
   name (another UID), is a new request. The record keeps only the latest request: naming
   snapshot A, then B, then A again reverts to A twice.
-- A `Failed` revert is not retried on its own. Remove the field and set it again.
+- A `Failed` revert is not retried on its own. Remove the field and set it again —
+  unless the provider refused it for good (`FailedPrecondition`, for example libvirt's
+  refusal of a snapshot it cannot revert safely): the same revert is refused again, so
+  the message ends with the provider's guidance instead of the retry hint.
 
 ### Recorded before it is sent
 
@@ -203,7 +206,7 @@ generation.
 | `False` | `Unsupported` | The Provider reports no snapshot support (before the revert is sent; after an attempt whose outcome is unknown this ends the request as `Failed`), answers that it does not implement `SnapshotRevert`, or the installed CRD cannot record the request |
 | `False` | `Reverting` | Sent; the outcome is not known yet (a task runs, or the call is sent again after an unknown outcome) |
 | `True` | `Reverted` | The provider confirmed the revert |
-| `False` | `RevertFailed` | The provider failed or refused it, or its outcome stayed unknown. Remove the field and set it again to retry |
+| `False` | `RevertFailed` | The provider failed or refused it, or its outcome stayed unknown. Remove the field and set it again to retry — except after a refusal the provider gives every time (`FailedPrecondition`), whose message says what to do instead (for libvirt: take a new snapshot with the VM powered off) |
 
 While `SnapshotReverted` is `False`, **`Ready` is `False`** with the same reason and the
 message prefixed `Snapshot revert: `, unless `Ready` is already `False` for another
@@ -304,9 +307,11 @@ cloud-init stored its seed. Since v0.4.0-rc7:
   powered off. Snapshot "s1" was taken while it ran or by an earlier release; libvirt
   cannot revert it safely (disk hda)`. The manager keeps the first 256 bytes of a
   provider's answer, so a long snapshot name may cut the end; the guidance comes first.
-  The manager's generic "remove `spec.snapshot.revertToRef` and set it again to retry"
-  hint does not help here: the same snapshot is refused again. A snapshot or domain
-  definition that cannot be read means no revert either.
+  The manager does not append its "remove `spec.snapshot.revertToRef` and set it again
+  to retry" hint to this answer, or to any other `FailedPrecondition` answer to a revert
+  (it keeps it for a disk another VM depends on, `VM_DISK_IN_USE`): the same snapshot is
+  refused again. A snapshot or domain definition that cannot be read means no revert
+  either.
 - **After a revert**, the revert leaves the CD-ROM empty (the stored definition had it
   empty). The provider reads the domain again and, for each CD-ROM or floppy that held a
   file before the revert and is now empty, records it, inserts the same file again
@@ -317,6 +322,17 @@ cloud-init stored its seed. Since v0.4.0-rc7:
   read-only disk was moved to a new file; one that was is reported as `RevertFailed`
   (`reverted, but the VM may not start: libvirt moved read-only disk hda to a new file;
   ...`) instead of `Succeeded`. Repair it as below before you request another revert.
+
+**Overlay permissions.** libvirt creates the overlay of a disk-only snapshot, and the
+new `<domain>-disk.<epoch>` overlay of a revert, with mode `0600` (owned by root while
+the VM is off). The disk in-use check every other VM's snapshot, revert or delete runs
+reads every domain's disk chain on the host, and fails on such a file when the
+provider's SSH user can read it neither directly nor through its `VR_DISK_READ` sudo
+rule. After every snapshot and every revert, the provider therefore gives the VM's own
+overlays the mode and owner of a VirtRigaud disk (`libvirt-qemu:kvm`, group read), and
+repairs the ones an earlier snapshot, revert or release left `0600`. It never fails the
+snapshot or revert for it. The rules, the sudo rule it needs and the manual repair are in
+[Unreadable disk images](libvirt-clones.md#unreadable-disk-images).
 
 **Interrupted ejections are repaired.** If the provider, its connection or the host
 fails between the eject and the re-insert, the VM is left with an empty CD-ROM and the
