@@ -57,6 +57,67 @@ v0.4.0-rc6"; on v0.4.0-rc5, also "Changes since v0.4.0-rc5"; on v0.4.0-rc4, also
 since v0.4.0-rc4"; on v0.4.0-rc2, also "Changes since v0.4.0-rc2"; on v0.4.0-rc1, also
 "Changes since v0.4.0-rc1".
 
+## Changes since v0.4.0-rc8
+
+One fix, found by validating rc8 on a real libvirt 10.0 host (Ubuntu 24.04): deleting a
+disk-only snapshot silently destroyed a memory snapshot stored in its overlay, and the
+memory snapshot's `VMSnapshot` then stayed `Deleting` for ever (V11). **Nothing is
+breaking in the API, and no CRD schema, RBAC, chart or proto changed.** Behaviour
+change: such a delete is now refused until the memory snapshot is deleted first. Roll
+the libvirt providers (the refusal and the cleanup) and the manager (how a refused
+snapshot delete is shown).
+
+| What changed | Breaking |
+|---|---|
+| libvirt: `SnapshotDelete` of a disk-only snapshot is refused, before anything changes, while another snapshot of the VM is stored in a file the delete would merge away or remove; an orphaned memory snapshot's metadata is deleted when its data is provably gone (V11) | No. Behaviour change: delete memory snapshots before the disk-only snapshot they were taken on |
+| Manager: a snapshot delete the provider refuses with `FailedPrecondition` (other than a disk another VM depends on) shows the provider's answer in `Ready=False/DeleteBlocked` and is re-checked with a backoff of up to 5 minutes | No. Behaviour change: such a refusal was `ProviderError` with a constant message; the answer was only in the event |
+
+### libvirt: deleting a disk-only snapshot no longer destroys a memory snapshot (V11)
+
+A `VMSnapshot` with `includeMemory: true` of a running VM is an internal libvirt
+snapshot, stored inside the qcow2 file the VM's disk is using. When the VM already has a
+disk-only snapshot, that file is the disk-only snapshot's overlay. Deleting the
+disk-only snapshot makes libvirt commit the overlay into its base and move the VM off it;
+in the lab, libvirt also removed the overlay file. libvirt does not check for an
+internal snapshot stored in that file, so the memory snapshot's data was lost while
+success was reported. libvirt kept its metadata, and every later delete of it failed
+while the VM ran (`disk image 'vda' for internal snapshot 'mem' is not the same as disk
+image currently used by VM`). The `VMSnapshot` stayed `Deleting`; `virtrigaud.io/force-delete`
+was the only way out.
+
+Now:
+
+- **The delete is refused, and nothing changes**, while another snapshot of the VM is
+  stored in a file the delete may merge away or remove. The provider checks both
+  libvirt's snapshot metadata and the files' own headers (`qemu-img info -U -f qcow2
+  --output=json`, the same root read as the disk in-use check). The answer is a definite
+  `FailedPrecondition` that names the snapshots to delete first, for example `delete
+  refused, nothing changed: delete snapshot "mem" first; it is stored in a disk file
+  that deleting snapshot "live" would merge away, and would be lost`. **Delete the memory
+  snapshot first, then the disk-only snapshot.** A check that cannot be completed
+  refuses the delete too, retryably (`VM_DISK_CHECK_FAILED`).
+- **A memory snapshot that rc8 or earlier already lost** has only its metadata deleted
+  (`virsh snapshot-delete <domain> <snapshot> --metadata`) when libvirt refuses its
+  delete with the error above and the provider proves the data is gone: every file it
+  was taken on no longer exists, and no image in the VM's current disk chains lists it.
+  Otherwise the answer is `delete refused, nothing changed: power the VM off and delete
+  it again; ...`. A manual cleanup for a VM still on rc8, or a `VMSnapshot` already
+  removed with force-delete, is documented.
+- **The manager shows the refusal.** The `VMSnapshot` keeps its finalizer, gets
+  `Ready=False/DeleteBlocked` with the provider's answer (sanitised, first 256 bytes)
+  and a `SnapshotDeleteFailed` Warning event, and is re-checked with a backoff from
+  15 seconds up to 5 minutes. A re-check of the same refusal writes nothing.
+  `virtrigaud.io/force-delete=true` still removes it, leaving the snapshot on the
+  hypervisor.
+
+Single-host and clustered Providers behave the same; on a clustered Provider the
+refusal also carries `VM_OPERATION_FAILED`. See [Deleting memory and disk-only snapshots
+of the same VM](docs/libvirt-clones.md#deleting-memory-and-disk-only-snapshots-of-the-same-vm).
+
+**Upgrade order.** No CRD, RBAC or chart change. Roll the libvirt providers first: they
+stop the data loss. An rc8 manager shows a refused delete as before (`ProviderError`, the
+answer only in the event) and still retries it. Then roll the manager.
+
 ## Changes since v0.4.0-rc7
 
 Two pull requests, #437 and #438, both merged 2026-10-24. They fix what validating rc7 on
