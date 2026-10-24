@@ -1,8 +1,8 @@
 # VirtualMachine `status.ips`
 
-`kubectl get vm` shows `status.ips` in its `IPs` column. It lists the addresses a
-user can reach the VM on, and nothing else. Every provider's answer goes through
-the same filter in the manager before it is written, so the list means the same on
+`kubectl get vm` shows `status.ips` in its `IPs` column. It lists the VM's addresses
+except loopback, unspecified, link-local and multicast ones. Every provider's answer goes
+through the same filter in the manager before it is written, so the list means the same on
 vSphere, libvirt, Proxmox and the mock provider.
 
 ## What is listed
