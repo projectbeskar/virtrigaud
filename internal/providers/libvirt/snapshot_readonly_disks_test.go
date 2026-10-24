@@ -78,6 +78,8 @@ type mediaSnapshot struct {
 	marker []removableMedium
 	// xml, when set, is answered by snapshot-dumpxml instead of the render.
 	xml string
+	// internal marks a memory (internal) snapshot: reverted in place.
+	internal bool
 }
 
 // mediaHost is an in-memory libvirt host with one domain that models what
@@ -217,7 +219,8 @@ func (h *mediaHost) virsh(args []string) (*hostconn.Result, error) {
 		h.disks[i].source = args[3]
 		return ok("Successfully inserted media.")
 	case "snapshot-create-as":
-		h.snaps[args[2]] = &mediaSnapshot{disks: append([]mediaDisk{}, h.disks...), marker: h.marker}
+		h.snaps[args[2]] = &mediaSnapshot{disks: append([]mediaDisk{}, h.disks...), marker: h.marker,
+			internal: !strings.Contains(line, "--disk-only")}
 		return ok("Domain snapshot " + args[2] + " created")
 	case "snapshot-dumpxml":
 		s, found := h.snaps[args[2]]
@@ -228,20 +231,26 @@ func (h *mediaHost) virsh(args []string) (*hostconn.Result, error) {
 			return ok(s.xml)
 		}
 		var list strings.Builder
+		memory, written := "no", "external"
+		if s.internal {
+			memory, written = "internal", "internal"
+		}
 		for _, d := range s.disks {
 			mode := "no"
 			if !d.readonly && d.source != "" {
-				mode = "external"
+				mode = written
 			}
 			fmt.Fprintf(&list, "<disk name='%s' snapshot='%s'/>", d.target, mode)
 		}
-		return ok("<domainsnapshot><name>" + args[2] + "</name><disks>" + list.String() + "</disks>" +
+		return ok("<domainsnapshot><name>" + args[2] + "</name><memory snapshot='" + memory + "'/><disks>" + list.String() + "</disks>" +
 			renderMediaDomain(s.disks, s.marker) + "</domainsnapshot>")
 	case "snapshot-revert":
 		s := h.snaps[args[2]]
 		h.disks = nil
 		for _, d := range s.disks {
-			if d.source != "" {
+			if d.source != "" && !s.internal {
+				// libvirt's external revert: a new overlay of every disk
+				// of the stored definition that has media.
 				d.source, d.driver = overlayName(d.source, v6Epoch), "qcow2"
 			}
 			h.disks = append(h.disks, d)
@@ -574,10 +583,11 @@ func TestSnapshotRevertGate(t *testing.T) {
 		want    []string
 		wantErr bool
 	}{
-		"rc6, as created":      {xml: rc6AsCreated, want: []string{"hda"}},
-		"rc6, after a revert":  {xml: rc6AfterRevert, want: []string{"hda"}},
-		"this release's":       {xml: newStyle},
-		"no stored definition": {xml: "<domainsnapshot><name>s1</name></domainsnapshot>", wantErr: true},
+		"rc6, as created":               {xml: rc6AsCreated, want: []string{"hda"}},
+		"rc6, after a revert":           {xml: rc6AfterRevert, want: []string{"hda"}},
+		"this release's":                {xml: newStyle},
+		"no stored definition":          {xml: "<domainsnapshot><name>s1</name><disks><disk name='vda' snapshot='external'/></disks></domainsnapshot>", wantErr: true},
+		"an internal (memory) snapshot": {xml: "<domainsnapshot><name>s1</name><memory snapshot='internal'/><disks><disk name='vda' snapshot='internal'/><disk name='hda' snapshot='no'/></disks>" + renderMediaDomain(newMediaHost().disks, nil) + "</domainsnapshot>"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			s, err := parseSnapshotDiskModes(tc.xml)
@@ -638,12 +648,27 @@ func TestSnapshotRevert_RefusesUnsafeSnapshotsBeforeTouchingTheHost(t *testing.T
 	}
 }
 
+// TestSnapshotRevert_MemorySnapshotOfARunningVMIsReverted: a memory snapshot
+// is internal — libvirt reverts it in place, with no new overlay — so its
+// stored seed does not make it unsafe; the seed stays.
+func TestSnapshotRevert_MemorySnapshotOfARunningVMIsReverted(t *testing.T) {
+	h := newMediaHost()
+	h.state = "running"
+	require.NoError(t, createSnap(t, h, "mem", true, v6Roots))
+	require.NoError(t, revertSnap(t, h, "mem", v6Roots))
+	assert.True(t, h.called("snapshot-revert "+v6Domain+" mem --force --running"))
+	assert.Equal(t, v6SeedISO, h.source("hda"))
+	assert.False(t, h.called("change-media"), "nothing to re-insert")
+}
+
 // TestSnapshotRevert_UnreadableSnapshotIsNotReverted: fail closed.
 func TestSnapshotRevert_UnreadableSnapshotIsNotReverted(t *testing.T) {
 	for name, setup := range map[string]func(h *mediaHost){
-		"the read fails":       func(h *mediaHost) { h.fail["snapshot-dumpxml"] = exited("scripted") },
-		"it does not parse":    func(h *mediaHost) { h.snaps["s1"] = &mediaSnapshot{xml: "<domainsnapshot><disks>"} },
-		"no stored definition": func(h *mediaHost) { h.snaps["s1"] = &mediaSnapshot{xml: "<domainsnapshot/>"} },
+		"the read fails":    func(h *mediaHost) { h.fail["snapshot-dumpxml"] = exited("scripted") },
+		"it does not parse": func(h *mediaHost) { h.snaps["s1"] = &mediaSnapshot{xml: "<domainsnapshot><disks>"} },
+		"no stored definition": func(h *mediaHost) {
+			h.snaps["s1"] = &mediaSnapshot{xml: "<domainsnapshot><disks><disk name='vda' snapshot='external'/></disks></domainsnapshot>"}
+		},
 		"the domain read fails": func(h *mediaHost) {
 			h.fail["dumpxml"] = exited("scripted")
 		},

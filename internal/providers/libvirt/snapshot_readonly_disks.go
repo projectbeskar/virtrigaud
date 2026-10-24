@@ -56,11 +56,13 @@ import (
 //     as an excluded writable disk. Writable disks get no diskspec and keep
 //     libvirt's defaults (for --disk-only: external, named
 //     <domain>-disk.<snapshot>, which the overlay cleanup relies on).
-//   - SnapshotRevert refuses, before it changes anything, a snapshot whose
-//     stored definition has a read-only disk or drive with a source, or that
-//     records one as an external snapshot disk (snapshotRevertGate,
-//     snapshotRevertUnsafeError, codes.FailedPrecondition): one taken while
-//     the VM ran, or by v0.4.0-rc6 or earlier.
+//   - SnapshotRevert refuses, before it changes anything, an external
+//     snapshot whose stored definition has a read-only disk or drive with a
+//     source, or a snapshot that records one as an external snapshot disk
+//     (snapshotRevertGate, snapshotRevertUnsafeError,
+//     codes.FailedPrecondition): a disk-only one taken while the VM ran, or by
+//     v0.4.0-rc6 or earlier. An internal (memory) snapshot is reverted in
+//     place by libvirt, without overlays, and is not refused for its media.
 //   - After a revert it re-inserts each medium the domain had before it into
 //     its now empty drive (finishSnapshotRevert), and checks that no read-only
 //     disk was moved to a new file (snapshotRevertBrokeDisksError).
@@ -186,7 +188,11 @@ func readDomainDisks(ctx context.Context, h hostCommandRunner, domain string) (*
 // (<revertDisks>, libvirt >= 9.9), and the domain definition the snapshot
 // stored.
 type snapshotDiskModes struct {
-	XMLName     xml.Name           `xml:"domainsnapshot"`
+	XMLName xml.Name `xml:"domainsnapshot"`
+	// Memory is the snapshot's <memory snapshot=...> mode.
+	Memory *struct {
+		Snapshot string `xml:"snapshot,attr"`
+	} `xml:"memory"`
 	Disks       []snapshotDiskMode `xml:"disks>disk"`
 	RevertDisks []snapshotDiskMode `xml:"revertDisks>disk"`
 	Domain      *domainDisksDoc    `xml:"domain"`
@@ -238,18 +244,37 @@ func (s *snapshotDiskModes) externalReadOnlyDisks(domain *domainDisksDoc) []stri
 	return out
 }
 
-// snapshotRevertGate returns, sorted and without duplicates, the read-only
-// disks and drives that make the snapshot unsafe to revert with libvirt: those
-// its stored definition shows with a source (libvirt would make an overlay of
-// each), and those its disk lists record as external snapshot disks. A
-// snapshot without a stored definition cannot be checked: an error.
-func (s *snapshotDiskModes) snapshotRevertGate(domain *domainDisksDoc) ([]string, error) {
-	if s.Domain == nil {
-		return nil, fmt.Errorf("the snapshot's stored domain definition cannot be read")
+// external reports whether libvirt reverts the snapshot as an external one
+// (virDomainSnapshotIsExternal): its memory, or any disk of its disk lists, is
+// external. An internal snapshot (a memory snapshot of a running VM) is
+// reverted in place, without new overlays.
+func (s *snapshotDiskModes) external() bool {
+	if s.Memory != nil && s.Memory.Snapshot == snapshotExternalOverlay {
+		return true
 	}
+	for _, d := range append(append([]snapshotDiskMode(nil), s.Disks...), s.RevertDisks...) {
+		if d.Snapshot == snapshotExternalOverlay {
+			return true
+		}
+	}
+	return false
+}
+
+// snapshotRevertGate returns, sorted and without duplicates, the read-only
+// disks and drives that make the snapshot unsafe to revert with libvirt: for
+// an external snapshot, those its stored definition shows with a source
+// (libvirt would make an overlay of each); and those its disk lists record as
+// external snapshot disks. An external snapshot without a stored definition
+// cannot be checked: an error.
+func (s *snapshotDiskModes) snapshotRevertGate(domain *domainDisksDoc) ([]string, error) {
 	set := map[string]bool{}
-	for _, n := range s.Domain.loadedReadOnlyDisks() {
-		set[n] = true
+	if s.external() {
+		if s.Domain == nil {
+			return nil, fmt.Errorf("the snapshot's stored domain definition cannot be read")
+		}
+		for _, n := range s.Domain.loadedReadOnlyDisks() {
+			set[n] = true
+		}
 	}
 	for _, n := range s.externalReadOnlyDisks(domain) {
 		set[n] = true
