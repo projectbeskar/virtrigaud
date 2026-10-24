@@ -805,6 +805,12 @@ func (r *VirtualMachineReconciler) reconcileVM(ctx context.Context, vm *infravir
 		}
 	}
 
+	// status.ips lists only addresses a user can reach the VM on (V9): every
+	// provider's answer is normalised here, once, so loopback, link-local,
+	// unspecified and multicast addresses never reach the status, the
+	// IP-discovery metric below, or the "waiting for an IP" poll interval.
+	desc.IPs = contracts.RoutableIPs(desc.IPs)
+
 	// G7.2 (#127): record virtrigaud_ip_discovery_duration_seconds on
 	// the first reconcile that observes the no-IPs → has-IPs transition
 	// for this VM. Must be called BEFORE the vm.Status.IPs = desc.IPs

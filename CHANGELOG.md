@@ -33,6 +33,57 @@ Validating v0.4.0-rc7 on real libvirt 10.0 hosts (AppArmor, a shared NFS pool us
 - [ ] Config change only
 - [ ] Documentation only
 
+## [2026-10-24 17:30] - A NAT guest without the guest agent shows its DHCP lease in status.ips (V10)
+**Author:** @wrkode (William Rizzo)
+
+### Fixed
+- `internal/providers/libvirt/virsh.go`: `getDomainIPAddresses` kept only the rows of `virsh domifaddr` whose interface name started with `e`. That fits the agent source (guest interface names) but the `lease` and `arp` sources name rows after the NIC's host-side device (`vnetN`), so every lease and ARP row was dropped and a guest on libvirt's NAT `default` network without the QEMU guest agent had an empty `status.ips` while libvirt held its lease. The parsing is now `parseDomifaddr`: every row counts, the prefix length (`/24`, `/0` for `arp`) is removed, and `contracts.RoutableIPs` decides by address (V9 rules) instead of the interface name. The order of the sources (agent, lease, arp) and first-source-wins are unchanged. Also fixed: the second address of a NIC, printed by virsh on a row whose name is `-`, was skipped, so a multi-address NIC lost addresses.
+
+### Changed
+- `internal/providers/libvirt/virsh.go`: the interface-name filter is gone for the agent source too (`br0`, `docker0` in the guest are no longer dropped by name); the address rules apply. Behaviour change: the `arp` source now yields addresses, so a guest on a host bridge without the agent shows one if the host has an ARP entry for its MAC (before, such rows were dropped).
+- `docs/vm-status-ips.md`, `docs/upgrading.md`, `docs/release-notes/next.md` ("V10"): NAT shows the lease without the agent, a host bridge has no lease so the agent is needed, the ARP last resort.
+
+### Tests
+- `internal/providers/libvirt/virsh_domifaddr_test.go`: `parseDomifaddr` on the real libvirt 10.0 output shapes (empty agent output, a `vnetN` lease row with `/24`, an `arp` row with `/0`, an agent answer with `lo` and `eth0`, two NICs with a continuation row, N/A and repeated rows), and `getDomainIPAddresses` against a stub `virsh` on `PATH`: NAT guest without the agent, a failing agent, agent first-wins, loopback-only agent falling through, multi-NIC lease, arp last resort, and the order of the sources asked.
+
+### Why
+V10, pre-existing: found while checking V9 in the lab, a NAT guest without the guest agent never showed an address although `virsh domifaddr --source lease` listed it.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
+Roll the libvirt provider.
+
+## [2026-10-24 16:30] - `status.ips` lists only addresses a user can reach the VM on (V9)
+**Author:** @wrkode (William Rizzo)
+
+### Changed
+- `internal/providers/contracts/routable_ips.go`: new `RoutableIPs`, the one normaliser for VM addresses. Entries are parsed with `net/netip`; loopback, unspecified, IPv4 and IPv6 link-local and multicast addresses and entries that do not parse (including `addr/prefix`) are dropped; an IPv4-mapped IPv6 address becomes the IPv4 address, an IPv6 zone is removed, duplicates (also differently spelled IPv6) are dropped, the provider's order is kept. Private, IPv6 unique-local and global addresses stay. The result is `nil` when nothing is left.
+- `internal/controller/virtualmachine_controller.go`: the `Describe` answer is normalised once (`desc.IPs = contracts.RoutableIPs(desc.IPs)`) before the IP-discovery metric, `status.ips` and the requeue interval read it, so every provider (vSphere, libvirt, Proxmox, mock) behaves the same. `vmadoption_controller.go`, `vmadoption_singlehost.go` and `vmadoption_clustered.go` normalise the addresses they copy into an adopted VM's status.
+- `api/infra.virtrigaud.io/v1beta1/virtualmachine_types.go`, `config/crd/bases/infra.virtrigaud.io_virtualmachines.yaml`: the description of `status.ips` says what is listed (regenerated with `make generate manifests`; the schema is unchanged).
+- `docs/vm-status-ips.md` (new), `docs/README.md`, `docs/upgrading.md`, `docs/release-notes/next.md` ("Changes since v0.4.0-rc7"): what is listed, the behaviour change for anything that parses `status.ips`, where each provider gets its addresses, and that a libvirt guest on a bridge shows no address unless the QEMU guest agent runs in the guest.
+
+### Fixed
+- `internal/providers/libvirt/provider_virsh.go`: `describeOn` appended every address the guest agent reported for every guest interface, loopback and IPv6 link-local included, so `status.ips` read `["127.0.0.1","::1","192.0.2.31","fe80::..."]` and `primary_ip` in `status.provider` could be `127.0.0.1`. The agent's addresses go through `contracts.RoutableIPs` first; an agent that reports only unreachable addresses falls back to the `virsh domifaddr` list.
+
+### Tests
+- `internal/providers/contracts/routable_ips_test.go`: table test of every rule (IPv4 and IPv6 loopback, unspecified, link-local with and without a zone, multicast, boundary addresses just outside each range, private, ULA, global), de-duplication and IPv6 spellings, IPv4-mapped addresses, order, whitespace, garbage, and that the input is not modified.
+- `internal/controller/virtualmachine_status_ips_test.go`: `reconcileVM` writes `status.ips` normalised for a provider answer with loopback and link-local addresses, rewrites a status that already holds them, and leaves it empty when nothing is reachable; a VM with only unreachable addresses is still "waiting for an IP" in `getRequeueInterval`.
+
+### Why
+Rc7 lab validation (V9): `status.ips` of a libvirt VM with the guest agent listed loopback and link-local addresses. The field is for reaching the VM, and every provider should answer the same way, so the filter is applied once in the manager rather than per provider.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
+Behaviour change for anything that parses `status.ips` (the loopback and link-local entries are gone). Roll the manager; roll the libvirt provider for the `primary_ip` fix. No CRD schema change.
+
 ## [2026-10-24 15:00] - Release notes for v0.4.0-rc7
 **Author:** @wrkode (William Rizzo)
 

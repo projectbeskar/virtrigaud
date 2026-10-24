@@ -1941,6 +1941,11 @@ func (p *Provider) describeOn(ctx context.Context, c libvirtConn, id string) (co
 					domainInfo[fmt.Sprintf("net_%s_mac", iface.Name)] = iface.HardwareAddr
 				}
 
+				// The agent reports every address of every guest interface,
+				// loopback and link-local included; only the reachable ones
+				// are the VM's addresses (and primary_ip), V9.
+				guestIPs = contracts.RoutableIPs(guestIPs)
+
 				// Use guest agent IPs if available (more accurate than virsh)
 				if len(guestIPs) > 0 {
 					ips = guestIPs

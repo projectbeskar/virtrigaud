@@ -1000,7 +1000,7 @@ func (r *VMAdoptionReconciler) writeAdoptionBinding(ctx context.Context, provide
 		}
 		latest.Status.CurrentResources = &infravirtrigaudiov1beta1.VirtualMachineResources{CPU: &cpu, MemoryMiB: &mem}
 		latest.Status.PowerState = observedPowerState(b.desc.PowerState)
-		latest.Status.IPs = b.desc.IPs
+		latest.Status.IPs = contracts.RoutableIPs(b.desc.IPs)
 		latest.Status.Provider = adoptedProviderRaw(info.ProviderRaw)
 		setPlacedCondition(latest, metav1.ConditionTrue, k8s.ReasonBound, fmt.Sprintf("VM is bound to host %s", info.HostID))
 		if err := r.Status().Update(ctx, latest); err != nil {

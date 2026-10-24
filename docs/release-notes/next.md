@@ -141,6 +141,48 @@ VM depends on the disk (`VM_DISK_IN_USE`) and any other failure keep the retry h
 
 → [`docs/vm-snapshot-revert.md`](docs/vm-snapshot-revert.md#libvirt)
 
+### `status.ips` lists only addresses a user can reach the VM on (V9)
+
+Found by validating rc7 in the lab: on a libvirt VM with a running QEMU guest agent,
+`status.ips` listed every address of every guest interface, loopback and IPv6
+link-local addresses included (for example `["127.0.0.1","::1","192.0.2.31","fe80::5054:ff:fe88:d0c1"]`).
+
+**Behaviour change for anyone who parses `status.ips`.** The manager now filters every
+provider's answer before it writes the field, so the list means the same on every
+provider: loopback (`127.0.0.0/8`, `::1`), unspecified (`0.0.0.0`, `::`), IPv4 link-local
+(`169.254.0.0/16`), IPv6 link-local (`fe80::/10`) and multicast addresses, and anything
+that is not an IP address, are dropped; duplicates are removed; the provider's order is kept; private, IPv6
+unique-local and global addresses stay. The example above now reads `["192.0.2.31"]`.
+A script that took `status.ips[0]`, or looked for a loopback or link-local entry, must
+read the first reachable address instead. The next reconcile of each VM rewrites the field.
+
+- The libvirt provider applies the same rule to the guest agent's answer, so
+  `primary_ip` in `status.provider` is no longer `127.0.0.1`, and an agent that reports
+  only unreachable addresses falls back to the `virsh domifaddr` list.
+- No CRD schema change; only the description of `status.ips` in the CRD changed.
+- A libvirt guest on a bridge (`VMNetworkAttachment` `spec.network.libvirt.bridge`) shows no
+  address unless the QEMU guest agent runs in the guest: libvirt holds no DHCP lease for it.
+  Details in [`docs/vm-status-ips.md`](docs/vm-status-ips.md).
+
+### libvirt: a NAT guest without the guest agent shows its DHCP lease (V10)
+
+Found while checking V9 in the lab. A pre-existing bug: on libvirt's NAT `default` network,
+a guest that did not run the QEMU guest agent never showed an address in `status.ips`,
+although `virsh domifaddr --source lease` listed it. The provider kept only the rows of
+`virsh domifaddr` whose interface name starts with `e` (a guest interface such as `eth0`),
+and the `lease` and `arp` sources name their rows after the NIC's host-side device
+(`vnet194`), so every lease and ARP row was dropped. Now every row counts and the
+address, not the name, decides what is kept (the V9 rules; the prefix length, `/24` from
+`lease` and `/0` from `arp`, is removed). The order of the sources is unchanged: the
+agent, then the lease, then the ARP table, and the first with an address wins.
+
+- A guest with several NICs shows the addresses of all of them, including the second
+  address of a NIC, which `virsh` prints on a row whose name is `-` and which was skipped.
+- The name filter is gone for the agent source too: a guest interface that does not start
+  with `e` (`br0`, `docker0`) is no longer dropped by name; only the address rules apply.
+- On a host bridge there is still no lease. The address shows if the guest agent runs, or,
+  as a last resort, if the host has an ARP entry for the guest's MAC.
+
 ## Changes since v0.4.0-rc6
 
 Two pull requests, #435 and #434, both merged 2026-10-24. They fix what validating rc6
