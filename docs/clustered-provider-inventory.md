@@ -1926,7 +1926,10 @@ clustered Delete, however, always has files to remove, so while any host of
 the Provider cannot be reached (or is tombstoned), deleting a clustered VM is
 held**: the finalizer stays, the VM shows `DeleteBlocked=True` (reason
 `HostUnreachable` or `DiskCheckFailed`) and `Ready=False` (`DeleteBlocked`)
-with a message that names no host, one `Warning` event is emitted per change,
+with a message that names no host (when the host that could not be reached is
+the VM's own and the provider says so, the message names that host instead; see
+[A delete held for an unreachable host](provider-call-outcomes.md#a-delete-held-for-an-unreachable-host)),
+one `Warning` event is emitted per change,
 and the delete is retried with a backoff per VM — 15 seconds, doubling up to
 5 minutes. To get out of it: bring the host back (the next retry succeeds);
 detach the VM with `virtrigaud.io/orphan-on-delete=true` (the domain and its

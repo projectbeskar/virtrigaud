@@ -129,6 +129,14 @@ type VirshProvider struct {
 	// value is a routing bug; tests assert it stays zero.
 	unroutableHits atomic.Int64
 
+	// boundHostWaits makes the waits before a command runs on this host — a
+	// command slot, the SSH dial and handshake, an SSH session — end
+	// hostAnswerMargin before the call's deadline with a hostNotAnsweringError
+	// (host_answer.go). Set on a clustered provider's per-host connections
+	// only (buildClusteredVirshProvider); the single-host provider keeps its
+	// unbounded waits.
+	boundHostWaits bool
+
 	// checkedDiskDirs records the directories on this host whose permissions
 	// warnIfDiskDirUnsafe has already checked (key: directory path), so each
 	// is checked — and warned about — once per provider process.
@@ -239,11 +247,17 @@ func (v *VirshProvider) acquireExecSlot(ctx context.Context) (release func(), er
 	if v.execSem == nil {
 		return func() {}, nil
 	}
+	// On a clustered host connection the wait ends before the call's
+	// deadline (host_answer.go): slots held by commands that hang on a host
+	// that stopped answering must not turn every later call into a wait for
+	// the manager's own deadline.
+	wctx, cancel := v.hostWaitContext(ctx)
+	defer cancel()
 	select {
 	case v.execSem <- struct{}{}:
 		return func() { <-v.execSem }, nil
-	case <-ctx.Done():
-		return nil, ctx.Err()
+	case <-wctx.Done():
+		return nil, v.hostWaitError(ctx, wctx, hostWaitExecSlot)
 	}
 }
 
@@ -654,7 +668,11 @@ func classifyNonTransientSSH(err error) (nonTransient bool, reason string) {
 // call's hostProgress (host_progress.go), whatever its result.
 func (v *VirshProvider) runVirshCommand(ctx context.Context, args ...string) (*VirshResult, error) {
 	done := hostProgressFrom(ctx).begin(args)
-	res, err := retryOnTransientSSH(ctx, func() (*VirshResult, error) {
+	// The backoff between attempts ends where the waits on the host end
+	// (hostWaitContext): a clustered call is answered before its deadline.
+	rctx, cancel := v.hostWaitContext(ctx)
+	defer cancel()
+	res, err := retryOnTransientSSH(rctx, func() (*VirshResult, error) {
 		return v.runVirshCommandOnce(ctx, args...)
 	})
 	done(err)
@@ -680,6 +698,12 @@ func retryOnTransientSSH(ctx context.Context, attempt func() (*VirshResult, erro
 		result, err = attempt()
 		if err == nil {
 			return result, nil
+		}
+
+		// A clustered host that did not answer within the call's time
+		// (host_answer.go) is not retried: there is no time left for it.
+		if isHostNotAnswering(err) {
+			return result, err
 		}
 
 		if nonTransient, reason := classifyNonTransientSSH(err); nonTransient {

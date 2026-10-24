@@ -484,7 +484,9 @@ var deleteBlockedEscape = fmt.Sprintf("to release the VirtualMachine without del
 
 // deleteBlockedMessages are the DeleteBlocked messages, by reason. They are
 // constant (a changing message would make every status write an update event,
-// and a deleting VM is reconciled on each one) and name no host.
+// and a deleting VM is reconciled on each one) and name no host. A
+// HostUnreachable hold whose host the provider named gets a message that names
+// the VM's own host instead (deleteHostHold), constant for that host.
 var deleteBlockedMessages = map[string]string{
 	k8s.ReasonHostUnreachable: fmt.Sprintf("Delete blocked: a host of this VirtualMachine's Provider could not be reached "+
 		"(its own host, or another host that must be checked before its disk is removed), so nothing was deleted; "+
@@ -508,24 +510,23 @@ var deleteBlockedMessages = map[string]string{
 // retainForUncheckedDelete keeps the finalizer of a clustered VirtualMachine
 // whose provider Delete was not performed because a host it needs could not
 // be reached (HOST_UNAVAILABLE) or checked (VM_DISK_CHECK_FAILED) — the
-// cluster-wide disk guard fails closed (ADR-0007 A6.1). It sets
-// DeleteBlocked=True with the reason (HostUnreachable, DiskCheckFailed) and
-// Ready=False/DeleteBlocked, with a constant message that names no host, emits
-// one Warning event per transition (a new reason included), and retries with
-// the blocked-VM backoff from when the hold began (15 s doubling to 5 min). A
-// force-delete or orphan-on-delete set meanwhile is acted on at once: a
-// deleting VM is reconciled when its annotations change
-// (vmUpdateNeedsReconcile).
+// cluster-wide disk guard fails closed (ADR-0007 A6.1) — or whose host stopped
+// answering during it (HOST_CONNECTION_LOST, R25; heldForUnreachableHost). It
+// sets DeleteBlocked=True with the reason (HostUnreachable, DiskCheckFailed)
+// and Ready=False/DeleteBlocked, with the message of deleteHostHold — which
+// names the VM's own host when the provider said that is the host it could
+// not reach, and no host otherwise — emits one Warning event per transition
+// (a new reason included), and retries with the blocked-VM backoff from when
+// the hold began (15 s doubling to 5 min). A force-delete or orphan-on-delete
+// set meanwhile is acted on at once: a deleting VM is reconciled when its
+// annotations change (vmUpdateNeedsReconcile).
 func (r *VirtualMachineReconciler) retainForUncheckedDelete(
 	ctx context.Context,
 	vm *infravirtrigaudiov1beta1.VirtualMachine,
 	err error,
 ) ctrl.Result {
-	reason := k8s.ReasonDiskCheckFailed
-	if contracts.IsHostUnavailable(err) {
-		reason = k8s.ReasonHostUnreachable
-	}
-	return r.holdDelete(ctx, vm, reason, deleteBlockedMessages[reason], err)
+	reason, msg := deleteHostHold(vm, err)
+	return r.holdDelete(ctx, vm, reason, msg, err)
 }
 
 // holdDelete records a held delete of vm (see retainForUncheckedDelete) with

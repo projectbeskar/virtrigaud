@@ -13,13 +13,13 @@ as the provider reports it.
 
 | Phase | Meaning |
 |---|---|
-| `Pending` | Not created. The VM waits for its `Provider`, class, image, a placement or (adoption) the controller that binds it. |
+| `Pending` | Not created. The VM waits for its `Provider`, class, image, a placement or (adoption) the controller that binds it. Also a clustered VM held by a restore guard (R1/R4: `RestorePending`, `OwnDomainOnAnotherHost`, `UniquenessCheckFailed`, `ProviderLacksListOwnerFilter`), created or not: it waits and proceeds once the cause is gone. |
 | `Provisioning` | Being created: a `Create` is requested (the create marker is on `Provisioning`), a task is recorded, a clustered host was chosen for it, or it was created and has not been described yet. |
 | `Running` | Created, and the provider reports it `On`. A `Suspended` VM (paused, or suspended to RAM) is still active and reports `Running`; `Ready=False/PowerStateUnmanaged` says it is not managed until resumed. |
 | `Stopped` | Created, and the provider reports it `Off`. |
 | `Reconfiguring` | A resize is in flight: `Reconfiguring=True` (other than `RestartRequired`) or `status.reconfigureTaskRef` is set. A resize applied to the persistent definition only (`RestartRequired`) leaves the phase to the power state. Also while an asynchronous power task runs (see [A power change that returns a task](#a-power-change-that-returns-a-task)). |
 | `Deleting` | The VM has a deletion timestamp, including while the delete is held (`Ready`/`DeleteBlocked` say why). |
-| `Failed` | A hold that needs an operator, a create that was refused, or a power state the provider cannot classify. See below. |
+| `Failed` | A hold that needs an operator (other than a restore guard's), a create that was refused, or a power state the provider cannot classify. See below. |
 
 ## The rule
 
@@ -29,22 +29,29 @@ First match wins:
 2. `Ready=False` with a hold reason: `Failed`. The reasons are `VMNotOwned`,
    `OwnerStampUnreadable`, `ProviderUnavailable`, `VMIsImageArtifact`,
    `CreateOutcomeUnknown`, `DeleteBlocked`, `ProviderRefMismatch`,
-   `PlacementTopologyMismatch`, `ConsumerNotAllowed`, `VMMissingOnHost`,
-   `RestorePending` and `OwnDomainOnAnotherHost`. They hold whether or not the VM
-   has an id.
+   `PlacementTopologyMismatch`, `ConsumerNotAllowed` and `VMMissingOnHost`. They
+   hold whether or not the VM has an id.
 3. No `status.id` (not created) and `Ready=False` with a failed-create reason
    (`CreateBackoff`, `CreateRefused`, `ProviderConflict`, `ValidationError`):
    `Failed`. On a VM that exists the same reasons describe a failed change to it,
    not the VM, and do not change its phase.
-4. No `status.id` and a clustered restore hold on `Placed` or `Provisioning`
-   (`RestorePending`, `OwnDomainOnAnotherHost`, `UniquenessCheckFailed`,
-   `ProviderLacksListOwnerFilter`, `ImportedDiskPinned`; these are written to those
-   two conditions, not to `Ready`, for a VM that was never placed): `Failed`.
-5. No `status.id`: `Provisioning` if a create is requested, a clustered
+4. A clustered restore guard's hold (ADR-0007 A6, R1/R4): `Pending`. It is
+   `Ready=False/RestorePending` (a bound VM whose restore marker names another
+   UID), or, with no `status.id`, `Placed=False` or `Provisioning=False` with
+   `RestorePending`, `OwnDomainOnAnotherHost`, `UniquenessCheckFailed` or
+   `ProviderLacksListOwnerFilter` (written to those two conditions, not to
+   `Ready`, for a VM that was never placed). The VM is held, not failed: it
+   proceeds once the cause is gone ([Backup and restore of clustered
+   VirtualMachines](clustered-restore.md#conditions)). Up to v0.4.0-rc5 these holds
+   showed `Failed`.
+5. No `status.id` and `Placed=False` or `Provisioning=False` with
+   `ImportedDiskPinned` (a migration target whose create on the host its disk
+   landed on met a name conflict an operator must resolve): `Failed`.
+6. No `status.id`: `Provisioning` if a create is requested, a clustered
    `pendingHost` is set, `status.lastTaskRef` is set or `Provisioning=True` (not
    `WaitingForDependencies`); otherwise `Pending`.
-6. A resize in flight: `Reconfiguring`.
-7. By `status.powerState`: `On` and `Suspended` are `Running`; `Off` is
+7. A resize in flight: `Reconfiguring`.
+8. By `status.powerState`: `On` and `Suspended` are `Running`; `Off` is
    `Stopped`; `Unknown` is `Failed` (the current observation: it clears on the
    next reconcile that sees a state the provider can classify, so a VM that passes
    through an odd libvirt state shows `Failed` only for that long). With no power

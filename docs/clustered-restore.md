@@ -184,6 +184,12 @@ Each hold emits one `Warning` event when it starts, and the manager counts it
 under the error reason `restore-pending` (or `preschedule-check`). No message
 names a host, a domain, another UID or another tenant's object.
 
+**Phase.** Every hold in this table leaves the VM in `status.phase: Pending`, not
+`Failed`: the VM is held, nothing about it failed, and it proceeds by itself
+once the cause is gone (the runbook, a released marker, an upgraded provider, a
+check that can run again). Earlier releases (up to v0.4.0-rc5) showed `Failed`
+for these holds. See [`docs/vm-status-phase.md`](vm-status-phase.md#the-rule).
+
 ## Backing up clustered VirtualMachines
 
 - **Restore the VirtualMachine status** (A6, decision 6). With Velero, list the
@@ -291,6 +297,9 @@ is the accepted side effect of the one-domain rule. Decide which you want:
 - **keep the running domain** and manage it again: re-attach it (runbook steps
   1 and 2). R4 then records its host and the create binds it;
 - **start fresh**: [discard the old domain](#discarding-the-previous-domain).
+
+While it waits, the re-created VM shows `Placed=False/RestorePending` and
+`status.phase: Pending` (it is held, not failed).
 
 On a shared pool, R3 also refuses to write over the old domain's disk.
 

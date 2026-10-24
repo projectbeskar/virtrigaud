@@ -100,6 +100,20 @@ const (
 	ReasonProviderLacksHonestReconfigure = "ProviderLacksHonestReconfigure"
 )
 
+// ConditionDisksApplied is False (reason ReasonNotSupportedByProvider) on a
+// VirtualMachine whose spec.disks is not empty while its Provider's type does
+// not attach additional disks (libvirt, Proxmox: v1beta1.
+// ProviderIgnoresAdditionalDisks): neither its Create nor its Reconfigure
+// creates or attaches them. It is removed when spec.disks is emptied or the
+// Provider attaches them. It is never set True, and it never changes Ready:
+// the VM itself is fine.
+const ConditionDisksApplied = "DisksApplied"
+
+// ReasonNotSupportedByProvider is DisksApplied=False: the VM's Provider does
+// not attach spec.disks. It is also the reason of the Warning event recorded
+// once per generation of such a VM.
+const ReasonNotSupportedByProvider = "NotSupportedByProvider"
+
 // ConditionLinkedClonesDependOnDisk is True on a VirtualMachine whose disk other
 // VMs on its hypervisor use as their backing file (libvirt linked clones made
 // by an earlier release) — as the provider counted when the VM was last
@@ -351,7 +365,10 @@ const (
 // it is removed when a later delete attempt fails for another reason (Ready
 // then says ReasonProviderError). Ready is False with ReasonDeleteBlocked
 // meanwhile. Its LastTransitionTime is when the hold began, which paces the
-// retries (15 s doubling to 5 min). Its message never names a host.
+// retries (15 s doubling to 5 min). Its message never names another host: a
+// HostUnreachable hold names the VM's own host (status.placement.host) when
+// the provider said that host could not be reached or stopped answering, and
+// no host otherwise.
 const ConditionDeleteBlocked = "DeleteBlocked"
 
 // ConditionForceDeleteRefused is True, with ReasonForceDeleteNotAllowed, on a
@@ -369,7 +386,11 @@ const ConditionForceDeleteRefused = "ForceDeleteRefused"
 const (
 	// ReasonHostUnreachable: a host the delete needs — the VM's own, or
 	// another host of the Provider that must be checked before the VM's disk
-	// is removed — could not be reached. Nothing was deleted.
+	// is removed — could not be reached, or the VM's own host stopped
+	// answering during the delete. The message says which (naming the VM's
+	// own host when the provider said it is that host) and whether anything
+	// may have been deleted. The delete is retried and completes once the host
+	// answers.
 	ReasonHostUnreachable = "HostUnreachable"
 	// ReasonDiskCheckFailed: the provider could not verify that no VM on
 	// another host of the Provider uses the VM's disk. Nothing was deleted.

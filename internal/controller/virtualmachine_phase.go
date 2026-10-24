@@ -57,22 +57,32 @@ var holdPhaseReasons = map[string]bool{
 	k8s.ReasonPlacementTopologyMismatch: true,
 	k8s.ReasonConsumerNotAllowed:        true,
 	k8s.ReasonVMMissingOnHost:           true,
-	k8s.ReasonRestorePending:            true,
-	k8s.ReasonOwnDomainOnAnotherHost:    true,
 }
 
-// restoreHoldPhaseReasons are the reasons of the holds a clustered VM that was
-// never placed waits in (ADR-0007 A6, R1 and R4: holdBeforePlacement,
-// holdForPreviousIncarnation). They are written to the Placed and
-// Provisioning conditions (Ready is not touched), so derivePhase looks there
-// for a VM with no id; each is lifted only by an administrator (the re-attach
-// runbook) or by the cause going away, so the VM is Failed.
+// restoreHoldPhaseReasons are the reasons of the clustered restore guards'
+// holds (ADR-0007 A6, R1 and R4: holdBeforePlacement,
+// holdForPreviousIncarnation, holdRestoredBinding). The VM is held, not
+// failed: it proceeds by itself once the cause is gone — the runbook
+// re-attached or removed the previous domain, the marker names the VM's own
+// UID, the pre-schedule check can run — and nothing about it is lost or
+// refused, so derivePhase reports Pending (V3b; earlier releases reported
+// Failed). They are written to the Placed and Provisioning conditions of a
+// VM that was never placed, and RestorePending to Ready of a bound VM whose
+// restore marker names another UID; derivePhase looks at both.
 var restoreHoldPhaseReasons = map[string]bool{
 	k8s.ReasonRestorePending:               true,
 	k8s.ReasonOwnDomainOnAnotherHost:       true,
 	k8s.ReasonUniquenessCheckFailed:        true,
 	k8s.ReasonProviderLacksListOwnerFilter: true,
-	k8s.ReasonImportedDiskPinned:           true,
+}
+
+// placementHoldPhaseReasons are the Placed/Provisioning reasons of a
+// clustered VM that was never placed and whose hold needs an operator to
+// resolve a conflict on the host (ImportedDiskPinned: a migration target whose
+// Create on the host its disk landed on was refused with a name conflict), so
+// the VM is Failed.
+var placementHoldPhaseReasons = map[string]bool{
+	k8s.ReasonImportedDiskPinned: true,
 }
 
 // createFailurePhaseReasons are the Ready=False reasons that put a
@@ -93,9 +103,12 @@ var createFailurePhaseReasons = map[string]bool{
 //   - being deleted: Deleting (also while the delete is held; the hold is on
 //     the Ready/DeleteBlocked conditions).
 //   - Ready=False with a hold reason (holdPhaseReasons); with no id, also a
-//     failed-Create reason (createFailurePhaseReasons) on Ready, or a
-//     restore hold (restoreHoldPhaseReasons) on Placed or Provisioning:
+//     failed-Create reason (createFailurePhaseReasons) on Ready, or an
+//     operator hold (placementHoldPhaseReasons) on Placed or Provisioning:
 //     Failed.
+//   - a clustered restore guard's hold (restoreHoldPhaseReasons) on Ready, or,
+//     with no id, on Placed or Provisioning: Pending — the VM waits, and
+//     proceeds once the cause is gone.
 //   - no id: Provisioning once a Create was requested, a host was chosen for
 //     it, a task is recorded or the Provisioning condition is true; else
 //     Pending (waiting for dependencies, placement, an adoption).
@@ -122,10 +135,16 @@ func derivePhase(vm *infravirtrigaudiov1beta1.VirtualMachine) infravirtrigaudiov
 		if holdPhaseReasons[ready.Reason] || (!bound && createFailurePhaseReasons[ready.Reason]) {
 			return infravirtrigaudiov1beta1.VirtualMachinePhaseFailed
 		}
+		if restoreHoldPhaseReasons[ready.Reason] {
+			return infravirtrigaudiov1beta1.VirtualMachinePhasePending
+		}
 	}
 
 	if !bound {
-		if restoreHeld(vm) {
+		if placementHeld(vm, restoreHoldPhaseReasons) {
+			return infravirtrigaudiov1beta1.VirtualMachinePhasePending
+		}
+		if placementHeld(vm, placementHoldPhaseReasons) {
 			return infravirtrigaudiov1beta1.VirtualMachinePhaseFailed
 		}
 		if createRequested(vm) || pendingHost(vm) != "" || vm.Status.LastTaskRef != "" || provisioningInFlight(vm) {
@@ -153,12 +172,12 @@ func derivePhase(vm *infravirtrigaudiov1beta1.VirtualMachine) infravirtrigaudiov
 	return infravirtrigaudiov1beta1.VirtualMachinePhaseProvisioning
 }
 
-// restoreHeld reports whether vm, with no id, is held by one of the
-// restoreHoldPhaseReasons on its Placed or Provisioning condition.
-func restoreHeld(vm *infravirtrigaudiov1beta1.VirtualMachine) bool {
+// placementHeld reports whether vm is held by one of reasons on its Placed or
+// Provisioning condition (False).
+func placementHeld(vm *infravirtrigaudiov1beta1.VirtualMachine, reasons map[string]bool) bool {
 	for _, condType := range []string{k8s.ConditionPlaced, k8s.ConditionProvisioning} {
 		c := meta.FindStatusCondition(vm.Status.Conditions, condType)
-		if c != nil && c.Status == metav1.ConditionFalse && restoreHoldPhaseReasons[c.Reason] {
+		if c != nil && c.Status == metav1.ConditionFalse && reasons[c.Reason] {
 			return true
 		}
 	}

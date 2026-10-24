@@ -167,12 +167,29 @@ func TestDerivePhase(t *testing.T) {
 			func(vm *infravirtrigaudiov1beta1.VirtualMachine) { vm.Status.ReconfigureTaskRef = "task-2" },
 			ready(metav1.ConditionFalse, k8s.ReasonVMNotOwned)), fa},
 
-		// Restore holds (ADR-0007 A6).
+		// Restore holds (ADR-0007 A6): held, not failed (V3b).
 		{"restored binding held (Ready)", both(power(infravirtrigaudiov1beta1.ObservedPowerStateOn),
-			ready(metav1.ConditionFalse, k8s.ReasonRestorePending)), fa},
+			ready(metav1.ConditionFalse, k8s.ReasonRestorePending)), pend},
 		{"never-placed VM held before placement (Placed/Provisioning)", func(vm *infravirtrigaudiov1beta1.VirtualMachine) {
 			setPhaseCond(vm, k8s.ConditionPlaced, metav1.ConditionFalse, k8s.ReasonRestorePending)
 			setPhaseCond(vm, k8s.ConditionProvisioning, metav1.ConditionFalse, k8s.ReasonRestorePending)
+		}, pend},
+		{"own domain on another host, held on its pending host", func(vm *infravirtrigaudiov1beta1.VirtualMachine) {
+			vm.Status.Placement = &infravirtrigaudiov1beta1.PlacementStatus{PendingHost: "host-a"}
+			setPhaseCond(vm, k8s.ConditionPlaced, metav1.ConditionFalse, k8s.ReasonOwnDomainOnAnotherHost)
+		}, pend},
+		{"uniqueness check could not run", func(vm *infravirtrigaudiov1beta1.VirtualMachine) {
+			setPhaseCond(vm, k8s.ConditionPlaced, metav1.ConditionFalse, k8s.ReasonUniquenessCheckFailed)
+		}, pend},
+		{"provider lacks the owner filter", func(vm *infravirtrigaudiov1beta1.VirtualMachine) {
+			setPhaseCond(vm, k8s.ConditionPlaced, metav1.ConditionFalse, k8s.ReasonProviderLacksListOwnerFilter)
+		}, pend},
+		{"an imported disk pinned to a conflicting host still needs an operator", func(vm *infravirtrigaudiov1beta1.VirtualMachine) {
+			setPhaseCond(vm, k8s.ConditionPlaced, metav1.ConditionFalse, k8s.ReasonImportedDiskPinned)
+		}, fa},
+		{"a failing hold on Ready still wins over a restore hold", func(vm *infravirtrigaudiov1beta1.VirtualMachine) {
+			setPhaseCond(vm, k8s.ConditionReady, metav1.ConditionFalse, k8s.ReasonConsumerNotAllowed)
+			setPhaseCond(vm, k8s.ConditionPlaced, metav1.ConditionFalse, k8s.ReasonRestorePending)
 		}, fa},
 		{"a Placed hold reason is ignored once the VM exists", both(power(infravirtrigaudiov1beta1.ObservedPowerStateOn),
 			func(vm *infravirtrigaudiov1beta1.VirtualMachine) {
@@ -244,9 +261,10 @@ func TestUpdateStatusStoresDerivedPhase(t *testing.T) {
 	assert.Equal(t, infravirtrigaudiov1beta1.VirtualMachinePhaseStopped, got.Status.Phase)
 }
 
-// TestRestoreHoldWritersGiveFailed uses the real hold writers (not synthetic
-// conditions): each of them leaves the stored VM in phase Failed.
-func TestRestoreHoldWritersGiveFailed(t *testing.T) {
+// TestRestoreHoldWritersGivePending uses the real hold writers (not synthetic
+// conditions): each of them leaves the stored VM in phase Pending — held, not
+// failed (V3b; earlier releases stored Failed).
+func TestRestoreHoldWritersGivePending(t *testing.T) {
 	ctx := context.Background()
 	for _, reason := range []string{k8s.ReasonRestorePending, k8s.ReasonOwnDomainOnAnotherHost,
 		k8s.ReasonUniquenessCheckFailed, k8s.ReasonProviderLacksListOwnerFilter} {
@@ -256,7 +274,7 @@ func TestRestoreHoldWritersGiveFailed(t *testing.T) {
 			r.holdBeforePlacement(ctx, vm, reason, "held", errReasonRestorePending)
 			got := &infravirtrigaudiov1beta1.VirtualMachine{}
 			require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(vm), got))
-			assert.Equal(t, infravirtrigaudiov1beta1.VirtualMachinePhaseFailed, got.Status.Phase)
+			assert.Equal(t, infravirtrigaudiov1beta1.VirtualMachinePhasePending, got.Status.Phase)
 		})
 	}
 
@@ -269,7 +287,7 @@ func TestRestoreHoldWritersGiveFailed(t *testing.T) {
 		r.holdRestoredBinding(ctx, vm, contracts.VMRef{ID: "vm-1", HostID: "host-a"})
 		got := &infravirtrigaudiov1beta1.VirtualMachine{}
 		require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(vm), got))
-		assert.Equal(t, infravirtrigaudiov1beta1.VirtualMachinePhaseFailed, got.Status.Phase)
+		assert.Equal(t, infravirtrigaudiov1beta1.VirtualMachinePhasePending, got.Status.Phase)
 	})
 
 	t.Run("holdForPreviousIncarnation", func(t *testing.T) {
@@ -281,8 +299,8 @@ func TestRestoreHoldWritersGiveFailed(t *testing.T) {
 		require.NoError(t, err)
 		got := &infravirtrigaudiov1beta1.VirtualMachine{}
 		require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(vm), got))
-		assert.Equal(t, infravirtrigaudiov1beta1.VirtualMachinePhaseFailed, got.Status.Phase,
-			"a hold on a pending host is a restore hold, not a create in flight")
+		assert.Equal(t, infravirtrigaudiov1beta1.VirtualMachinePhasePending, got.Status.Phase,
+			"a hold on a pending host is a restore hold, neither a create in flight nor a failure")
 	})
 }
 

@@ -25,6 +25,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 )
@@ -51,13 +52,18 @@ import (
 // +kubebuilder:webhook:path=/validate-infra-virtrigaud-io-v1beta1-vmclass,mutating=false,failurePolicy=fail,sideEffects=None,groups=infra.virtrigaud.io,resources=vmclasses,verbs=create;update,versions=v1beta1,name=vvmclass-disksize.kb.io,admissionReviewVersions=v1
 
 // VirtualMachineDiskSizeValidator refuses a VirtualMachine whose spec.disks
-// asks for a disk above MaxDiskSize, or grows one beyond it. It never mutates
-// and returns no warnings.
+// asks for a disk above MaxDiskSize, or grows one beyond it. It never mutates.
+// It returns an admission warning (never a refusal) when spec.disks is set and
+// the VM's Provider is of a type that does not attach additional disks
+// (unattachedDisksWarnings).
 // +kubebuilder:object:generate=false
 type VirtualMachineDiskSizeValidator struct {
 	// MaxDiskSize is the manager-wide disk-size ceiling (--max-disk-size);
 	// nil admits every size.
 	MaxDiskSize *resource.Quantity
+	// Reader reads the VM's Provider for the spec.disks warning; nil gives no
+	// warning.
+	Reader client.Reader
 }
 
 // VMClassDiskSizeValidator refuses a VMClass whose spec.diskDefaults.size is
@@ -83,7 +89,7 @@ var (
 func SetupDiskSizeWebhooksWithManager(mgr ctrl.Manager, maxDiskSize *resource.Quantity) error {
 	if err := ctrl.NewWebhookManagedBy(mgr).
 		For(&VirtualMachine{}).
-		WithValidator(&VirtualMachineDiskSizeValidator{MaxDiskSize: maxDiskSize}).
+		WithValidator(&VirtualMachineDiskSizeValidator{MaxDiskSize: maxDiskSize, Reader: mgr.GetClient()}).
 		Complete(); err != nil {
 		return fmt.Errorf("register the VirtualMachine disk-size webhook: %w", err)
 	}
@@ -103,19 +109,20 @@ func diskSizeLimitDetail(limit resource.Quantity) string {
 }
 
 // ValidateCreate refuses a VirtualMachine with a spec.disks entry above the
-// ceiling.
-func (v *VirtualMachineDiskSizeValidator) ValidateCreate(_ context.Context, obj runtime.Object) (admission.Warnings, error) {
+// ceiling, and warns when its Provider does not attach spec.disks.
+func (v *VirtualMachineDiskSizeValidator) ValidateCreate(ctx context.Context, obj runtime.Object) (admission.Warnings, error) {
 	vm, ok := obj.(*VirtualMachine)
 	if !ok {
 		return nil, fmt.Errorf("expected a VirtualMachine object but got %T", obj)
 	}
-	return nil, v.validate(nil, vm)
+	return v.unattachedDisksWarnings(ctx, vm), v.validate(nil, vm)
 }
 
 // ValidateUpdate refuses a VirtualMachine update that adds a spec.disks entry
 // above the ceiling, or grows one to a size above it. A disk already above it
-// that keeps (or lowers) its size is admitted.
-func (v *VirtualMachineDiskSizeValidator) ValidateUpdate(_ context.Context, oldObj, newObj runtime.Object) (admission.Warnings, error) {
+// that keeps (or lowers) its size is admitted. It warns when the VM's Provider
+// does not attach spec.disks.
+func (v *VirtualMachineDiskSizeValidator) ValidateUpdate(ctx context.Context, oldObj, newObj runtime.Object) (admission.Warnings, error) {
 	vm, ok := newObj.(*VirtualMachine)
 	if !ok {
 		return nil, fmt.Errorf("expected a VirtualMachine object but got %T", newObj)
@@ -124,7 +131,7 @@ func (v *VirtualMachineDiskSizeValidator) ValidateUpdate(_ context.Context, oldO
 	if !ok {
 		return nil, fmt.Errorf("expected a VirtualMachine object but got %T", oldObj)
 	}
-	return nil, v.validate(old, vm)
+	return v.unattachedDisksWarnings(ctx, vm), v.validate(old, vm)
 }
 
 // ValidateDelete always admits.

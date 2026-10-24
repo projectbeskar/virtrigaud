@@ -160,6 +160,9 @@ func buildClusteredVirshProvider(h hostsecret.Host, knownHostsDir string, logger
 	vp.credentials = &Credentials{SSHPrivateKey: string(h.Credentials.SSHPrivateKey)}
 	vp.hostKey = policy
 	vp.logger = logger
+	// A host that stops answering is answered before the call's deadline
+	// (host_answer.go).
+	vp.boundHostWaits = true
 	return vp, cleanup, nil
 }
 

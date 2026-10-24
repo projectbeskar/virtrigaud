@@ -507,6 +507,9 @@ func (r *VirtualMachineReconciler) reconcileVM(ctx context.Context, vm *infravir
 	}
 	logger.V(1).Info("Dependencies resolved successfully")
 	provider, vmClass, vmImage, networks := deps.provider, deps.class, deps.image, deps.networks
+	// spec.disks on a Provider that does not attach them (V4): said on
+	// DisksApplied and a Warning event; nothing is refused.
+	r.noteUnattachedDisks(vm, provider)
 
 	// Bind the VM to the Provider it resolved to, or refuse it. A VM bound
 	// before status.boundProvider existed is backfilled from its current
@@ -1154,11 +1157,13 @@ func (r *VirtualMachineReconciler) handleDeletion(ctx context.Context, vm *infra
 					// Held like the image-artifact refusal until an
 					// administrator fixes the stamp or removes the VM.
 					return r.retainForRefusedDelete(ctx, vm, ref.Routed(), ownerStampUnreadableDeleteHold, err), nil
-				case ref.Routed() && (contracts.IsHostUnavailable(err) || contracts.IsVMDiskCheckFailed(err)):
+				case ref.Routed() && heldForUnreachableHost(err):
 					// A clustered delete the provider did not perform because a
 					// host it needs could not be reached or checked (ADR-0007
-					// A6.1: it fails closed). Keep the finalizer, say why without
-					// naming a host, and back off.
+					// A6.1: it fails closed), or whose host stopped answering
+					// during it (R25). Keep the finalizer, say why — naming the
+					// VM's own host only when the provider said it is that host
+					// (deleteHostHold) — and back off.
 					return r.retainForUncheckedDelete(ctx, vm, err), nil
 				default:
 					// Real failure (e.g. PVE "VM is running - destroy failed"). Do
