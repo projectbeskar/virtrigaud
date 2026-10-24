@@ -5,6 +5,33 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-10-24 23:30] - libvirt: deleting a disk-only snapshot no longer destroys a memory snapshot stored in its overlay (V11)
+**Author:** @wrkode (William Rizzo)
+
+### Fixed
+- `internal/providers/libvirt/snapshot_delete_guard.go`, `server.go`: libvirt (>= 9.0, checked against v10.0.0 `qemu_snapshot.c`) deletes an external snapshot by block-committing the file it merges away (the first child's recorded disk source, or the domain's current one) into its backing file with `VIR_DOMAIN_BLOCK_COMMIT_DELETE`; it refuses an internal *parent* but not an internal snapshot stored *in* that file, and updates only external snapshots' recorded sources. A memory snapshot taken on a disk-only snapshot's overlay was therefore destroyed by the disk-only snapshot's delete, success was reported, and the memory snapshot's metadata could never be deleted while the VM ran (V11, v0.4.0-rc8 lab). `SnapshotDelete` (single-host and routed/owner-checked, gRPC server and `contracts.Provider` paths, one core `snapshotDeleteOn`) now reads the snapshot strictly and, for an external snapshot, refuses (`snapshotDeleteLosesSnapshotsError`: `FailedPrecondition`, plus `VM_OPERATION_FAILED` when routed; nothing sent) while any other snapshot is stored in a file the delete may merge away or remove — the snapshot's `<disks>`/`<revertDisks>` overlays, its children's recorded sources and its own recorded source — by libvirt's metadata (another snapshot's internal disk recorded on such a file) or by the file's header (`qemu-img info -U -f qcow2 --output=json`, the existing `VR_DISK_READ` root read; a missing file holds nothing). The message names the blocking snapshots only (up to three, guidance first within the 256-byte status budget). A check that cannot be completed (snapshot, list or header unreadable, an external overlay that is not a file) refuses retryably (`diskCheckFailedError`, `VM_DISK_CHECK_FAILED`, new `check` wording; host unreachable stays a host failure).
+- `internal/providers/libvirt/snapshot_delete_guard.go`: when libvirt refuses to delete an internal snapshot with "is not the same as disk image currently used by VM" (validated before anything changes), the provider deletes only its metadata (`virsh snapshot-delete <domain> <snapshot> --metadata`) if it proves the data is gone — every file the snapshot recorded for its internal disks no longer exists, and no image of the domain's current disk chains lists the name — and otherwise answers a definite `snapshotDeleteStaleInternalError` ("power the VM off and delete it again"), or a retryable check failure.
+- `internal/controller/vmsnapshot_controller.go`: a `SnapshotDelete` answered with `FailedPrecondition` other than `VM_DISK_IN_USE` (the V11 refusal; also a vSphere image-artifact or an owner-stamp refusal) keeps the finalizer with `Ready=False`/`Deleting=False` reason `DeleteBlocked` and the provider's sanitized, capped answer in the status (`retainForRefusedSnapshotDelete`), a `SnapshotDeleteFailed` Warning when it changes, and re-checks with the failed-delete backoff (15 s up to 5 min). Before, it was `ProviderError` with a constant message and the answer only in the event.
+
+### Changed
+- `internal/providers/libvirt/server.go`, `snapshot_overlay_cleanup.go`: a snapshot whose definition cannot be read is no longer deleted without its overlay cleanup; the delete is refused retryably. `snapshotOverlaysOf` is replaced by `snapshotOverlaysIn` (parses the XML read once).
+- `internal/providers/libvirt/imagepath.go`: `qemuImgInfo` decodes the image's internal `snapshots`; a walked chain level records them.
+- `internal/providers/libvirt/routing.go`: routed answers for the two new refusals (`FailedPrecondition` + `VM_OPERATION_FAILED`).
+- `docs/libvirt-clones.md`: new "Deleting memory and disk-only snapshots of the same VM" (the refusal, the delete order, what is checked, fail-closed answers, force-delete) and "A memory snapshot whose data was already lost" (the provable metadata-only delete and the manual cleanup: `snapshot-dumpxml`, `qemu-img snapshot -l -U` of each recorded file, `qemu-img info -U --backing-chain` of the current disks, then `virsh snapshot-delete --metadata`). `docs/vm-snapshot-revert.md`: pointer in the libvirt section. `docs/upgrading.md`: behaviour-change row and provider-order bullet for rc9. `docs/release-notes/next.md`: "Changes since v0.4.0-rc8".
+
+### Added
+- `internal/providers/libvirt/snapshot_delete_guard_test.go` (and the opt-in V11 model in `snapshot_readonly_disks_test.go`'s in-memory host: image files, backing files, internal snapshots stored in files, the snapshot tree, libvirt 10's external delete commit and its stale-internal refusal): the model reproduces the lab; the lab sequence (refused, then memory snapshot first, then disk-only); only external descendants (allowed) and a memory snapshot in a later overlay (blocks only the snapshot whose overlay holds it); a header-only internal snapshot; fail-closed checks; the orphaned memory snapshot (metadata-only when proven; definite refusal when its file exists or the current chain lists it; retryable when the proof cannot run); single-host, `contracts.Provider` and routed wire forms; the 256-byte message budget. `internal/controller/vmsnapshot_delete_refused_test.go`: a refused delete keeps the finalizer, shows the answer, backs off, writes nothing new on a re-check, and is released by success or force-delete.
+- Test fixtures: the createHost fake's default external snapshot records its overlay file; the seam fake answers `qemu-img info`; the snapshot fake can refuse `snapshot-delete` with a scripted stderr. The single-host command-sequence golden is unchanged (a snapshot with no external disk sends the same commands).
+
+### Why
+Validating v0.4.0-rc8 on libvirt 10.0: deleting a disk-only snapshot silently destroyed a memory snapshot of the same VM and left a `VMSnapshot` that could never be deleted. Maintainer decision: fail closed, small, for rc9.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-10-24 21:00] - Release notes for v0.4.0-rc8
 **Author:** @wrkode (William Rizzo)
 

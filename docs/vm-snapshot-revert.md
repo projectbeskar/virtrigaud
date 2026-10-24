@@ -258,6 +258,13 @@ external disk-only snapshot (`snapshot-create-as --disk-only`); a memory snapsho
 running VM is an internal one. libvirt reverts external snapshots from 9.9 on; an older
 libvirt refuses, and the provider's error is reported as `RevertFailed`.
 
+A memory snapshot taken after a disk-only one is stored inside the disk-only snapshot's
+overlay. Delete the memory snapshot first: since v0.4.0-rc9 the provider refuses to
+delete the disk-only snapshot while it would destroy the memory snapshot. It deletes the
+leftover metadata of a memory snapshot that v0.4.0-rc8 or earlier already lost this way
+when it can prove the data is gone
+([Deleting memory and disk-only snapshots of the same VM](libvirt-clones.md#deleting-memory-and-disk-only-snapshots-of-the-same-vm)).
+
 libvirt reverts an external snapshot by rebuilding the VM's disks from the domain
 definition the snapshot **stored**, and creating a **new** qcow2 overlay for every disk
 of that definition that has media — named after the disk's file with its extension

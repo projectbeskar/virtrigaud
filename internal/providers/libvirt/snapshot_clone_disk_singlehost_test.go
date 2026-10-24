@@ -82,7 +82,8 @@ const (
 // holds the domstate answer (default "shut off"), "jobtype" the domjobinfo
 // "Job type" (default None), snaps-<domain> the snapshot
 // list, snapxml-<snapshot> a snapshot's `snapshot-dumpxml` (default: a
-// snapshot whose stored definition has an empty CD-ROM), `metadata` and
+// snapshot whose stored definition has an empty CD-ROM), refuse-snapshot-delete
+// the stderr a snapshot-delete without --metadata fails with (exit status 1), `metadata` and
 // `change-media` only log (fail-<subcommand> makes them fail; the domain XML
 // does not change unless after-change-media holds the XML a change-media
 // leaves), `start` succeeds, revert-rewrites the domain XML a
@@ -147,7 +148,10 @@ virsh)
       if [ -f "$d/blk-after" ] && [ -f "$d/blk-seen" ]; then cat "$d/blk-after"
       else : > "$d/blk-seen"; printf ' Type   Device   Target   Source\n------------------------------------------------\n file   disk     vda      ` + scdDiskPath + `\n'; fi ;;
     snapshot-create-as) fail snapshot-create-as; [ -f "$d/dom-$2.xml" ] || nodom "$2"; echo "Domain snapshot $3 created" ;;
-    snapshot-delete) fail snapshot-delete; [ -f "$d/dom-$2.xml" ] || nodom "$2"; echo "Domain snapshot $3 deleted" ;;
+    snapshot-delete)
+      fail snapshot-delete; [ -f "$d/dom-$2.xml" ] || nodom "$2"
+      if [ -f "$d/refuse-snapshot-delete" ] && [ "$4" != "--metadata" ]; then cat "$d/refuse-snapshot-delete" >&2; exit 1; fi
+      echo "Domain snapshot $3 deleted" ;;
     snapshot-revert) fail snapshot-revert; [ -f "$d/dom-$2.xml" ] || nodom "$2"; if [ -f "$d/revert-rewrites" ]; then cat "$d/revert-rewrites" > "$d/dom-$2.xml"; fi ;;
     snapshot-dumpxml)
       fail snapshot-dumpxml

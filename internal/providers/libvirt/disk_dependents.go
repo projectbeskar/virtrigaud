@@ -223,12 +223,25 @@ type diskCheckFailedError struct {
 	// host cannot be read (unreadableImageError): an operator must fix the
 	// image's owner and mode, or the sudo rule, before it can succeed.
 	unreadable bool
+	// check, when set, is what could not be verified, phrased to follow
+	// "could not verify" (snapshot_delete_guard.go); empty is the dependency
+	// guard's own check, that no other domain uses the VM's disks.
+	check string
 }
 
 // Error is the refusal, safe for the requesting VM's status. It never names
 // the image that could not be read: it may be another tenant's VM's (the
 // provider log names it).
 func (e *diskCheckFailedError) Error() string {
+	if e.check != "" {
+		if e.unreadable {
+			return fmt.Sprintf("%s of libvirt domain %q not performed: permission denied reading a disk image on its host "+
+				"(see %s; the provider log names it), so the provider could not verify %s; retried", e.op, e.domain,
+				unreadableImageDoc, e.check)
+		}
+		return fmt.Sprintf("%s of libvirt domain %q not performed: could not verify %s "+
+			"(transient host error; details are in the provider log)", e.op, e.domain, e.check)
+	}
 	if e.unreadable {
 		return unreadableImageMessage(e.op, e.domain, "its host")
 	}

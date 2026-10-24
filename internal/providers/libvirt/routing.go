@@ -622,6 +622,17 @@ func routedRPCErrorFor(kind hostOpKind, op string, err error) error {
 	if stderrors.As(err, &rb) {
 		return vmOperationStatus(codes.FailedPrecondition, fmt.Sprintf("failed to %s: %s", op, rb.Error()))
 	}
+	// A snapshot delete refused because it would lose another snapshot of
+	// the VM, or because libvirt cannot delete a memory snapshot while the VM
+	// runs (snapshot_delete_guard.go): definite, nothing changed.
+	var dl *snapshotDeleteLosesSnapshotsError
+	if stderrors.As(err, &dl) {
+		return vmOperationStatus(codes.FailedPrecondition, fmt.Sprintf("failed to %s: %s", op, dl.Error()))
+	}
+	var ds *snapshotDeleteStaleInternalError
+	if stderrors.As(err, &ds) {
+		return vmOperationStatus(codes.FailedPrecondition, fmt.Sprintf("failed to %s: %s", op, ds.Error()))
+	}
 	var rm *snapshotRevertMediaError
 	if stderrors.As(err, &rm) {
 		log.Printf("WARN %s: %v: %v", op, rm, rm.cause)

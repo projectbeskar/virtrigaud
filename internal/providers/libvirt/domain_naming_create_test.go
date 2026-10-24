@@ -105,7 +105,7 @@ case "$1" in
   snapshot-list) if [ -f "$d/snapshots" ]; then cat "$d/snapshots"; fi ;;
   snapshot-dumpxml)
     if [ -f "$d/snapxml-$3" ]; then exec cat "$d/snapxml-$3"; fi
-    printf "<domainsnapshot><name>%s</name><disks><disk name='vda' snapshot='external' type='file'/></disks><domain><devices/></domain></domainsnapshot>\n" "$3" ;;
+    printf "<domainsnapshot><name>%s</name><disks><disk name='vda' snapshot='external' type='file'><source file='%s/%s-disk.%s'/></disk></disks><domain><devices/></domain></domainsnapshot>\n" "$3" "$(cat "$d/pooldir")" "$2" "$3" ;;
   metadata|change-media) exit 0 ;;
   domstate)
     if [ -f "$d/state-$2" ]; then exec cat "$d/state-$2"; fi

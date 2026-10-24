@@ -404,6 +404,136 @@ up the disk VirtRigaud named after it, `<name>-disk.qcow2` in the default pool's
 directory, but only if it exists and no remaining domain uses it — a linked
 clone of the vanished VM keeps its backing file. Nothing else is looked for.
 
+### Deleting memory and disk-only snapshots of the same VM
+
+A `VMSnapshot` with `includeMemory: true` of a running VM is an **internal** libvirt
+snapshot: libvirt stores the guest's memory and the disks' state inside the qcow2 file
+each disk is using at that moment. A VM that already has a disk-only snapshot runs on
+that snapshot's overlay (`<domain>-disk.<snapshot name>`), so a memory snapshot taken
+after it is stored **inside that overlay**. Deleting the disk-only snapshot makes libvirt
+commit the overlay into its base and move the VM off it. In the lab where this was found
+(libvirt 10, a running VM), libvirt also removed the overlay file, and the memory
+snapshot's data went with it. libvirt (checked against 10.0) does not refuse this
+delete: it refuses an internal snapshot that is the disk-only snapshot's *parent*, but
+not one stored in the file the delete merges away, and it keeps the memory snapshot's
+metadata, which still names the removed file. v0.4.0-rc8 and earlier sent that delete
+and reported success.
+
+**The delete is refused before anything changes.** Since v0.4.0-rc9, `SnapshotDelete`
+of a disk-only snapshot is refused while another snapshot of the VM is stored in a file
+the delete may merge away or remove. For each of the snapshot's disks these files are
+the snapshot's overlay (and, after a revert to it, the revert's overlay), the disk file
+each child snapshot recorded, and the disk file the snapshot itself recorded. A snapshot
+is stored in such a file when either:
+
+- libvirt's metadata says so: another snapshot of the domain recorded one of its
+  internal disks on that file; or
+- the file's own header says so: `qemu-img info -U -f qcow2 --output=json` of the file
+  lists an internal snapshot. This is the same read, through the `VR_DISK_READ` sudo
+  rule, as the disk in-use check ([What the copies run as root](#what-the-copies-run-as-root)).
+  A file that does not exist holds nothing.
+
+The `VMSnapshot` keeps its finalizer and stays `Deleting`, with
+`Ready=False/DeleteBlocked` and a `SnapshotDeleteFailed` Warning event. The message
+carries the provider's answer, which names the snapshots to delete first by name, for
+example:
+
+```text
+Provider refused to delete the snapshot: snapshotDelete failed: failed to delete snapshot: delete refused, nothing changed: delete snapshot "mem" first; it is stored in a disk file that deleting snapshot "live" would merge away, and would be lost. The VMSnapshot is kept and the delete is re-checked with a backoff of up to 5m0s; ...
+```
+
+The manager keeps the first 256 bytes of the provider's answer, so the snapshot names
+come first; it names up to three and counts the rest. The delete is re-checked with a
+backoff from 15 seconds up to 5 minutes. A re-check of the same refusal writes nothing.
+
+**Delete in this order:** first the memory snapshots taken after the disk-only one, then
+the disk-only snapshot. libvirt deletes a memory snapshot of a running VM only while the
+VM still runs on the file the snapshot is stored in, as it does in this case. A snapshot
+whose delete does not touch a file holding another snapshot is deleted as before. For
+example, a disk-only snapshot followed by a second disk-only snapshot and then a memory
+snapshot: the first disk-only snapshot can be deleted, because the memory snapshot is
+in the second one's overlay. The second disk-only snapshot is refused until the memory
+snapshot is deleted.
+
+When the check cannot be completed (a snapshot, the snapshot list or a file's header
+cannot be read, or a disk-only snapshot's overlay is not a file), nothing is deleted.
+The answer is retryable (`VM_DISK_CHECK_FAILED`): `snapshot delete of libvirt domain
+"<domain>" not performed: could not verify that deleting the snapshot keeps the VM's
+other snapshots`. A header the provider may not read gives "permission denied reading a
+disk image": see [Unreadable disk images](#unreadable-disk-images).
+
+`virtrigaud.io/force-delete=true` on the `VMSnapshot` still removes it. Nothing is
+deleted on the host; the snapshot stays on the hypervisor.
+
+#### A memory snapshot whose data was already lost
+
+On a VM where v0.4.0-rc8 or earlier deleted the disk-only snapshot first, the memory
+snapshot's metadata remains and records a file that no longer exists. While the VM
+runs, libvirt refuses to delete the snapshot (`disk image 'vda' for internal snapshot
+'mem' is not the same as disk image currently used by VM`), and its `VMSnapshot` stayed
+`Deleting`.
+
+Since v0.4.0-rc9, when libvirt refuses a delete with that error, the provider deletes
+only the snapshot's metadata (`virsh snapshot-delete <domain> <snapshot> --metadata`,
+which touches no disk file), but only when it can prove that the data is gone. Both of
+these must hold:
+
+- every file the snapshot recorded for its internal disks no longer exists (`qemu-img`
+  answers "No such file or directory"); and
+- no image in the backing chains of the VM's current disks lists a snapshot of that
+  name.
+
+Otherwise it refuses, and nothing changes:
+
+```text
+delete refused, nothing changed: power the VM off and delete it again; libvirt cannot delete snapshot "mem" while the VM runs on a disk file other than the one it is stored in
+```
+
+With the VM powered off, libvirt deletes an internal snapshot from the files it
+recorded (`qemu-img snapshot -d`), without comparing them with the VM's current disk.
+
+**Manual cleanup.** If a VM is still on v0.4.0-rc8 or earlier, or its `VMSnapshot` was
+already removed with force-delete, clear the leftover metadata by hand. You need the
+provider's SSH user (or root) on the VM's host. Set the connection as in the
+[re-attach runbook](clustered-restore.md#re-attach-runbook). Delete only the metadata,
+and only after you have checked that the data is gone:
+
+1. Read the snapshot. It must show `<memory snapshot='internal'/>`. Note the
+   `<source file=...>` of each disk in its recorded `<domain>` whose entry in `<disks>`
+   is `snapshot='internal'`:
+
+   ```sh
+   virsh -c "$CONN" snapshot-dumpxml <domain> <snapshot>
+   ```
+
+2. Check each of those files. The data is gone only if `qemu-img` reports that the file
+   does not exist:
+
+   ```sh
+   sudo qemu-img snapshot -l -U <recorded file>
+   # qemu-img: Could not open '<recorded file>': ... No such file or directory
+   ```
+
+   If it lists the snapshot, stop here: the data is still there. Power the VM off and
+   delete the `VMSnapshot` again.
+
+3. Check that none of the VM's current disk images lists the snapshot. The output must
+   not show `<snapshot>` under any image's "Snapshot list":
+
+   ```sh
+   virsh -c "$CONN" domblklist --details <domain>
+   sudo qemu-img info -U --backing-chain <each disk file>
+   ```
+
+4. Only then delete the metadata:
+
+   ```sh
+   virsh -c "$CONN" snapshot-delete <domain> <snapshot> --metadata
+   ```
+
+5. If the `VMSnapshot` still exists, its next re-check finds no snapshot on the host
+   and removes the finalizer.
+
 ## Clone files on the host
 
 - **Cloud-init seed.** A clone of a VM with a seed ISO gets its own seed

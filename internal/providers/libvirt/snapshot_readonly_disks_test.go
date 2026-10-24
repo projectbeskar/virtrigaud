@@ -80,6 +80,10 @@ type mediaSnapshot struct {
 	xml string
 	// internal marks a memory (internal) snapshot: reverted in place.
 	internal bool
+	// parent and overlays (target -> overlay file it created) are kept by
+	// the V11 model (v11Virsh, snapshot_delete_guard_test.go).
+	parent   string
+	overlays map[string]string
 }
 
 // mediaHost is an in-memory libvirt host with one domain that models what
@@ -96,6 +100,17 @@ type mediaHost struct {
 	calls  []string
 	// fail maps a call prefix to the error it fails with.
 	fail map[string]error
+	// files, when set, turns on the V11 model (snapshot_delete_guard_test.go):
+	// the host's image files, external overlays, internal snapshots stored in
+	// files, the snapshot tree, and libvirt 10's snapshot delete.
+	files map[string]*v11Image
+	// order is the snapshot names in creation order, current the current
+	// snapshot (V11 model).
+	order   []string
+	current string
+	// hostStderr maps a host-command prefix to the stderr it fails with,
+	// exit status 1 (V11 model).
+	hostStderr map[string]string
 }
 
 // newMediaHost is a shut-off ns.vm with vda and the seed CD-ROM hda.
@@ -179,6 +194,11 @@ func (h *mediaHost) virsh(args []string) (*hostconn.Result, error) {
 		}
 	}
 	ok := func(s string) (*hostconn.Result, error) { return &hostconn.Result{Stdout: s}, nil }
+	if h.files != nil {
+		if res, handled, err := h.v11Virsh(args, line); handled {
+			return res, err
+		}
+	}
 	switch args[0] {
 	case "dumpxml":
 		return ok(renderMediaDomain(h.disks, h.marker))

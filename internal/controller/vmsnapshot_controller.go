@@ -22,6 +22,8 @@ import (
 	"fmt"
 	"time"
 
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -990,6 +992,12 @@ func (r *VMSnapshotReconciler) handleDeletion(ctx context.Context, snapshot *inf
 				// snapshot on the hypervisor with nothing tracking it —
 				// say why, and re-check.
 				return r.retainForBlockedSnapshotDelete(ctx, snapshot, err), nil
+			case isSnapshotDeleteRefusal(err):
+				// The provider refused BEFORE changing anything, with an
+				// answer that says what to do (e.g. libvirt: delete the
+				// memory snapshot stored in this snapshot's overlay first).
+				// Keep the finalizer, show the answer, and re-check.
+				return r.retainForRefusedSnapshotDelete(ctx, snapshot, err), nil
 			default:
 				// Any other failure (a host or provider error, an open
 				// breaker, a check that could not run): the snapshot may
@@ -1240,6 +1248,41 @@ func (r *VMSnapshotReconciler) retainForBlockedSnapshotDelete(ctx context.Contex
 		_ = r.updateStatus(ctx, snapshot)
 	}
 	return ctrl.Result{RequeueAfter: vmDeleteBlockedRetryInterval}
+}
+
+// isSnapshotDeleteRefusal reports whether err is a provider's definite refusal
+// of a SnapshotDelete: a gRPC FailedPrecondition (the provider refused before
+// changing anything, docs/provider-call-outcomes.md) other than VM_DISK_IN_USE,
+// which retainForBlockedSnapshotDelete answers.
+func isSnapshotDeleteRefusal(err error) bool {
+	st, ok := status.FromError(err)
+	return ok && st.Code() == codes.FailedPrecondition && !contracts.IsVMDiskInUse(err)
+}
+
+// retainForRefusedSnapshotDelete keeps the finalizer of a VMSnapshot whose
+// provider SnapshotDelete was refused (isSnapshotDeleteRefusal) — e.g. the
+// libvirt provider's refusal to delete a disk-only snapshot while a memory
+// snapshot of the same VM is stored in its overlay, which the delete would
+// destroy. Nothing was changed, so the snapshot is still on the hypervisor and
+// stays tracked. Unlike a failure (retainForFailedSnapshotDelete), the
+// provider's answer says what to do, so it is kept in the status — sanitized
+// and capped (rpcFailureDetail), and the same on every re-check of the same
+// refusal, so a re-check writes nothing. It records Ready=False and
+// Deleting=False with reason DeleteBlocked, a SnapshotDeleteFailed Warning
+// when the refusal is new or different, and re-checks with the failed-delete
+// backoff (snapshotDeleteRetryAfter, up to snapshotDeleteRetryMax) until the
+// provider allows the delete or the force-delete annotation is set.
+func (r *VMSnapshotReconciler) retainForRefusedSnapshotDelete(ctx context.Context, snapshot *infrav1beta1.VMSnapshot, err error) ctrl.Result {
+	retryAfter := snapshotDeleteRetryAfter(snapshot, time.Now())
+	logging.FromContext(ctx).Info("Provider refused to delete the snapshot; retaining the VMSnapshot finalizer and re-checking",
+		"snapshot_id", snapshot.Status.SnapshotID, "retryAfter", retryAfter.String(), "error", err.Error())
+	metrics.RecordError(errReasonProviderDelete, metrics.ComponentManager)
+
+	msg := fmt.Sprintf("Provider refused to delete the snapshot: %s. The VMSnapshot is kept and the delete is re-checked with a "+
+		"backoff of up to %s; do what the provider asks, or set %s=true to remove this VMSnapshot and leave the snapshot on "+
+		"the hypervisor.", rpcFailureDetail(err), snapshotDeleteRetryMax, forceDeleteAnnotation)
+	r.holdSnapshotDelete(ctx, snapshot, conditions.ReasonDeleteBlocked, msg, msg)
+	return ctrl.Result{RequeueAfter: retryAfter}
 }
 
 // updateStatus updates the snapshot status
