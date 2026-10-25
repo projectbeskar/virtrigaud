@@ -510,6 +510,7 @@ func (r *VMCloneReconciler) startClone(
 	}
 
 	r.cloneAttempts.forget(clone.UID)
+	r.recordCustomizationNotSent(clone)
 	before := clone.DeepCopy()
 	markCloneStarted(clone, linked, started, cloneStartedMessage)
 	clone.Status.TargetVMID = resp.TargetVmID

@@ -41,8 +41,13 @@ import (
 // field (providerCustomization), never the object as written: the applied
 // fields as they are, the non-secret fields providers only report, and of the
 // fields that may hold a secret only their non-secret parts, so a provider
-// still sees (and reports) that sysprep, certificates or guest commands were
-// asked for. Left out — nothing reads them, and they may hold a credential:
+// still sees (and reports) that certificates or guest commands were asked
+// for, and sysprep or userData.ignition when they set a non-secret part. A
+// sysprep that sets only productKey or customCommands, or an ignition that
+// sets only inline, is sent as an empty object, which the providers do not
+// report as not applied (cloneidentity treats "{}" as unset); nothing is ever
+// sent in place of a stripped value. Left out — nothing reads them, and they
+// may hold a credential:
 // sysprep.productKey, sysprep.adminPassword.value, sysprep.joinDomain.password.value,
 // sysprep.customCommands, certificates[].data, guestCommands[].command and
 // .arguments, and userData.ignition.inline. A field added to the API is not
@@ -133,21 +138,29 @@ func passwordReference(p *infrav1beta1.PasswordSpec) *infrav1beta1.PasswordSpec 
 
 // customizeJSON returns the CustomizeJSON of a Clone request for clone: the
 // allow-listed customization (providerCustomization), or "" when the clone
-// has none or it cannot be marshalled. When spec.customization sets a field
-// that may hold a secret value and is not acted on
-// (VMCustomization.UnusedSecretFields), it records a Warning event naming the
-// fields — never their values.
+// has none or it cannot be marshalled. It has no side effect: the request it
+// is built for may still be held before it is sent.
 func (r *VMCloneReconciler) customizeJSON(_ context.Context, clone *infrav1beta1.VMClone) string {
 	if clone.Spec.Customization == nil {
 		return ""
-	}
-	if fields := clone.Spec.Customization.UnusedSecretFields(); len(fields) > 0 && r.Recorder != nil {
-		r.Recorder.Event(clone, corev1.EventTypeWarning, customizationNotSentReason,
-			fmt.Sprintf(customizationNotSentMessageFmt, strings.Join(fields, ", ")))
 	}
 	data, err := json.Marshal(providerCustomization(clone.Spec.Customization))
 	if err != nil {
 		return ""
 	}
 	return string(data)
+}
+
+// recordCustomizationNotSent records, once the provider has accepted clone's
+// Clone request, a Warning event naming the fields of its spec.customization
+// that may hold a secret value, are not acted on and were not sent
+// (VMCustomization.UnusedSecretFields) — never their values. Nothing is
+// recorded when there are none.
+func (r *VMCloneReconciler) recordCustomizationNotSent(clone *infrav1beta1.VMClone) {
+	fields := clone.Spec.Customization.UnusedSecretFields()
+	if len(fields) == 0 || r.Recorder == nil {
+		return
+	}
+	r.Recorder.Event(clone, corev1.EventTypeWarning, customizationNotSentReason,
+		fmt.Sprintf(customizationNotSentMessageFmt, strings.Join(fields, ", ")))
 }

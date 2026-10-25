@@ -79,7 +79,10 @@ What a new instance does **not** change:
 - **Customization fields other than** `hostname`, `domain` and
   `userData.cloudInit.inline` (`networks`, `timeZone`, `guestCommands`,
   `sysprep`, `certificates`, `tags`, `userData.ignition`) are not applied by
-  the libvirt provider and are logged as such. User-data given by
+  the libvirt provider and are logged as such — except a `sysprep` that sets
+  only `productKey` or `customCommands`, and a `userData.ignition` that sets
+  only `inline`: those values are not sent (see below), so the provider does
+  not see them. User-data given by
   `userData.cloudInit.secretRef` cannot be resolved by the provider: the clone
   keeps the source's user-data, and the provider logs it.
 - **Secret values in the customization are never sent to the provider.** The
@@ -88,10 +91,10 @@ What a new instance does **not** change:
   `sysprep.joinDomain.password.value`, `certificates[].data`,
   `sysprep.customCommands`, `guestCommands[].command`/`.arguments` and
   `userData.ignition.inline` stay in the `VMClone`. They are still **stored in
-  plaintext** in the object, so do not put real credentials there; the
-  manager's `Warning` event `CustomizationSecretNotSent` and, with webhooks
-  enabled, an admission warning name each of these fields that is set (never
-  its value).
+  plaintext** in the object, so do not put real credentials there. With
+  webhooks enabled, an admission warning names each of these fields that is
+  set (never its value), and once the provider accepts the clone the manager
+  records a `Warning` event `CustomizationSecretNotSent` naming them.
 - **User-data that pins the identity.** Some `#cloud-config` keys in the
   clone's user-data (the source's, or the customization's) undo the new
   instance, and the provider logs a `WARN` naming them (never their values):

@@ -38,7 +38,8 @@ to v0.4.1, note:
   field does not remove copies elsewhere: etcd backups, API-server audit logs (at `Request`
   level or above), the `kubectl.kubernetes.io/last-applied-configuration` annotation and your
   GitOps sources. When one of these fields is set, the manager records a `Warning` event
-  (reason `CustomizationSecretNotSent`) that names the fields, never their values. With
+  (reason `CustomizationSecretNotSent`) once the provider accepts the clone; it names the
+  fields, never their values. With
   `webhooks.enabled=true` the chart also renders a new validating webhook,
   `vvmclone-customization.kb.io`, which only returns an admission **warning** per such field
   (`kubectl` prints it). It never refuses a write, and its `failurePolicy` is always `Ignore`

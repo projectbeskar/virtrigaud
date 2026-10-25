@@ -120,11 +120,14 @@ func assertNoCustomizationSecret(t *testing.T, where, text string) {
 
 // TestVMClone_CustomizeJSONCarriesNoUnusedSecret drives a VMClone whose
 // customization sets every field through to the Clone request: the request's
-// CustomizeJSON carries none of the secret values, and the providers'
-// customization parser reads exactly what it read from the whole
-// spec.customization (the applied fields unchanged, the same fields reported
-// as not applied). No secret reaches the VMClone's status, its events or the
-// manager's log, which names the fields in a Warning event instead.
+// CustomizeJSON carries none of the secret values, and — every subtree also
+// setting a non-secret part — the providers' customization parser reads
+// exactly what it read from the whole spec.customization (the applied fields
+// unchanged, the same fields reported as not applied; see
+// TestProviderCustomization_PartialUnapplied for the subtrees that are not).
+// No secret reaches the VMClone's status, its events or the manager's log;
+// exactly one Warning event, once the provider accepted the Clone, names the
+// fields instead.
 func TestVMClone_CustomizeJSONCarriesNoUnusedSecret(t *testing.T) {
 	s := cloneTestScheme(t)
 	ns := "default"
@@ -184,9 +187,14 @@ func TestVMClone_CustomizeJSONCarriesNoUnusedSecret(t *testing.T) {
 	// One Warning event names the unused secret fields, never their values.
 	close(rec.Events)
 	var events []string
+	notSent := 0
 	for e := range rec.Events {
 		events = append(events, e)
+		if strings.Contains(e, customizationNotSentReason) {
+			notSent++
+		}
 	}
+	assert.Equal(t, 1, notSent, "one event, for the one accepted Clone: %v", events)
 	all := strings.Join(events, "\n")
 	assertNoCustomizationSecret(t, "events", all)
 	assert.Contains(t, all, "Warning "+customizationNotSentReason+" spec.customization.sysprep.productKey, "+
@@ -326,4 +334,92 @@ func compareClassified(t *testing.T, path string, in, out reflect.Value) {
 		return
 	}
 	assert.Equal(t, in.Interface(), out.Interface(), "%s is sent as it is", path)
+}
+
+// TestVMClone_CustomizationNotSentEventOnlyWhenAccepted: a Clone the provider
+// refuses (and that is held and retried) records no CustomizationSecretNotSent
+// event, however often the request is built; nothing was sent.
+func TestVMClone_CustomizationNotSentEventOnlyWhenAccepted(t *testing.T) {
+	s := cloneTestScheme(t)
+	ns := "default"
+	prov := runningProvider(ns, "prov-1")
+	src := sourceVMWithID(ns, "src-vm", "prov-1", "vm-source-123")
+	clone := &infrav1beta1.VMClone{
+		ObjectMeta: metav1.ObjectMeta{Name: "clone-held", Namespace: ns},
+		Spec: infrav1beta1.VMCloneSpec{
+			Source:        infrav1beta1.CloneSource{VMRef: &infrav1beta1.LocalObjectReference{Name: "src-vm"}},
+			Target:        infrav1beta1.VMCloneTarget{Name: "clone-target"},
+			Customization: fullCustomization(),
+		},
+	}
+	cp := &clonerProvider{cloneErr: contracts.NewRetryableError("clone: host unreachable", nil)}
+	r := newCloneReconciler(s, &stubResolver{provider: cp}, prov, src, clone)
+	rec := record.NewFakeRecorder(100)
+	r.Recorder = rec
+	reconcileTwice(t, r, client.ObjectKeyFromObject(clone))
+	require.GreaterOrEqual(t, cp.cloneCnt, 1)
+
+	close(rec.Events)
+	for e := range rec.Events {
+		assert.NotContains(t, e, customizationNotSentReason)
+		assertNoCustomizationSecret(t, "events", e)
+	}
+}
+
+// TestProviderCustomization_PartialUnapplied pins what the providers report
+// as not applied for customizations that set a secret-capable subtree only
+// partly. A sysprep that sets only productKey or customCommands, or an
+// ignition that sets only inline, is sent as an empty object, which the
+// providers no longer report (nothing is sent in place of a stripped value);
+// a subtree that also sets a non-secret part is still reported.
+func TestProviderCustomization_PartialUnapplied(t *testing.T) {
+	for name, tc := range map[string]struct {
+		in          infrav1beta1.VMCustomization
+		before      []string
+		after       []string
+		wantPayload string
+	}{
+		"sysprep.productKey only": {
+			in:     infrav1beta1.VMCustomization{Sysprep: &infrav1beta1.SysprepCustomization{ProductKey: "PRODUCT-KEY-XXXXX"}},
+			before: []string{"sysprep"}, after: nil, wantPayload: `{"sysprep":{}}`,
+		},
+		"sysprep.customCommands only": {
+			in:     infrav1beta1.VMCustomization{Sysprep: &infrav1beta1.SysprepCustomization{CustomCommands: []string{"CUSTOM-CMD-pw=hunter2"}}},
+			before: []string{"sysprep"}, after: nil, wantPayload: `{"sysprep":{}}`,
+		},
+		"userData.ignition.inline only": {
+			in: infrav1beta1.VMCustomization{UserData: &infrav1beta1.UserData{
+				Ignition: &infrav1beta1.Ignition{Inline: "IGNITION-INLINE-secret"}}},
+			before: []string{"userData.ignition"}, after: nil, wantPayload: `{"userData":{"ignition":{}}}`,
+		},
+		"sysprep.adminPassword.value only": {
+			in: infrav1beta1.VMCustomization{Sysprep: &infrav1beta1.SysprepCustomization{
+				AdminPassword: &infrav1beta1.PasswordSpec{Value: "ADMIN-PW-s3cr3t"}}},
+			before: []string{"sysprep"}, after: []string{"sysprep"}, wantPayload: `{"sysprep":{"adminPassword":{}}}`,
+		},
+		"certificates[].data only": {
+			in:     infrav1beta1.VMCustomization{Certificates: []infrav1beta1.CertificateSpec{{Data: "CERTKEY"}}},
+			before: []string{"certificates"}, after: []string{"certificates"}, wantPayload: `{"certificates":[{"name":""}]}`,
+		},
+		"guestCommands[].command only": {
+			in:     infrav1beta1.VMCustomization{GuestCommands: []infrav1beta1.GuestCommand{{Command: "GUEST-CMD-token"}}},
+			before: []string{"guestCommands"}, after: []string{"guestCommands"}, wantPayload: `{"guestCommands":[{"command":""}]}`,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			whole, err := json.Marshal(&tc.in)
+			require.NoError(t, err)
+			b, err := cloneidentity.ParseCustomization(string(whole))
+			require.NoError(t, err)
+			assert.Equal(t, tc.before, b.Unapplied, "reported before (the whole customization was sent)")
+
+			sent, err := json.Marshal(providerCustomization(&tc.in))
+			require.NoError(t, err)
+			assert.JSONEq(t, tc.wantPayload, string(sent))
+			assertNoCustomizationSecret(t, "CustomizeJSON", string(sent))
+			a, err := cloneidentity.ParseCustomization(string(sent))
+			require.NoError(t, err)
+			assert.Equal(t, tc.after, a.Unapplied, "reported now")
+		})
+	}
 }
