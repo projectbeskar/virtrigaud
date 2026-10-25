@@ -15,7 +15,7 @@ vcts run --provider <name> -n <namespace> --set IMAGE=<vmimage>
 A file is a YAML list of tests. A key the format does not define is an error.
 
 ```yaml
-- name: vm-power-cycle               # lower-case letters, digits and '-'; unique across the files
+- name: vm-power-cycle               # lower-case letters, digits and '-', at most 63; unique across the files
   description: What the test checks  # required
   requiredCapabilities: [vm-create, vm-power, vm-delete]
   timeout: 20m                       # bounds the steps (default 15m)
@@ -39,7 +39,7 @@ resource:
 | Type | What it does |
 |------|--------------|
 | `create` | Creates the resource, adding the labels `vcts.virtrigaud.io/run`, `vcts.virtrigaud.io/test` and `app.kubernetes.io/managed-by: vcts`. Its `metadata.name` must contain `${RUN}`. The object is deleted by the cleanup. |
-| `update` | JSON-merge-patches the named object with the resource's other fields (`spec`, `metadata.labels`, `metadata.annotations`). |
+| `update` | JSON-merge-patches the named object with the resource's other fields (`spec`, `metadata.labels`, `metadata.annotations`); the run labels cannot be changed. |
 | `delete` | Deletes the named object (it does not wait: follow it with a `wait` for `Deleted`). |
 | `wait` | Reads the object every 2 seconds until `waitFor.condition` holds **and** every `validate` entry passes (at least one of the two is required), or until the timeout. |
 | `validate` | Reads the object once and checks every `validate` entry. |
@@ -62,8 +62,9 @@ is not optional fails, the remaining steps are reported as skipped.
 | `Failed` | `status.phase` is `Failed` |
 | `Deleted` | The object does not exist |
 
-While waiting for anything but `Failed`, an object whose `status.phase` becomes `Failed` fails the
-step at once. An object that does not exist yet is waited for (it may be one the operator creates,
+While waiting for anything but `Failed` or `Deleted`, an object whose `status.phase` stays `Failed`
+for 30 seconds fails the step (the operator retries some failed phases, such as a create in
+backoff). An object that does not exist yet is waited for (it may be one the operator creates,
 such as a clone's target). On a timeout the error says what was last seen.
 
 ### Assertions
@@ -106,7 +107,9 @@ always offered. `vm-snapshot`, `vm-snapshot-memory`, `vm-reconfigure-online`, `v
 
 After the steps, `vcts` runs the test's `cleanup` steps (a `delete` of an object that is already gone
 is not an error there), then deletes the objects labelled with the run and test that it did not
-create itself, then everything it created, newest first, waiting until each is gone. To have an
+create itself, then everything it created, newest first, waiting until each is gone. A `VMClone`
+with a provider clone still in flight is waited for first and, if it does not settle, left in
+place with its source and target VMs. To have an
 object the operator creates on the test's behalf cleaned up, give it both labels; for a clone's
 target VM:
 

@@ -23,10 +23,11 @@ each for `amd64` and `arm64`; `.exe` on Windows). From a checkout, build one wit
 | `--kubeconfig` | none | Path of the kubeconfig to use. Without it the usual resolution applies: `KUBECONFIG`, the in-cluster configuration, then `~/.kube/config`. A path that cannot be loaded is an error; the tool does not fall back to another cluster. |
 | `-n`, `--namespace` | `default` | Namespace to read from or create in |
 
-The tools need the VirtRigaud CRDs installed in the cluster. `vrtg` only reads. `vcts run` and
-`virtrigaud-loadgen` create, patch and delete `VirtualMachine`s, `VMSnapshot`s and `VMClone`s in the
-namespace (`vcts run` also `VMClass`es) and read the `Provider`; `vcts validate` and `vcts list`
-need no cluster, nor does `virtrigaud-loadgen --dry-run`.
+The tools need the VirtRigaud CRDs installed in the cluster. `vrtg` only reads (get, list).
+`vcts run` and `virtrigaud-loadgen` need get, list, create, patch and delete on `VirtualMachine`s,
+`VMSnapshot`s and `VMClone`s in the namespace (`vcts run` also on `VMClass`es and whatever other
+VirtRigaud kinds a specification creates) and get on the `Provider` (`vcts run`); `vcts validate`
+and `vcts list` need no cluster, nor does `virtrigaud-loadgen --dry-run`.
 
 ## vrtg
 
@@ -68,7 +69,7 @@ vcts validate [spec-dir]                                     # default spec-dir:
 vcts list [--spec-dir <dir>]
 vcts run --provider <name> [-n <namespace>] --set IMAGE=<vmimage> [--set NAME=value ...]
          [--spec-dir <dir>] [--output-dir ./conformance-results] [--skip <test>,...]
-         [--timeout 30m] [--parallel 1] [--keep] [--cleanup-timeout 10m] [-v]
+         [--timeout 3h] [--parallel 1] [--keep] [--cleanup-timeout 10m] [-v]
 ```
 
 - **`vcts validate`** checks every `*.yaml` file in the directory and exits **non-zero** when a
@@ -120,15 +121,22 @@ vcts run --provider libvirt-lab -n vcts --set IMAGE=ubuntu-22 -v
   `disk-export` (`supportsDiskExport`) and `disk-import` (`supportsDiskImport`). A test needing a
   capability the Provider does not offer is reported as **skipped**, with the reason, not failed.
   So is a test named with `--skip`.
-- **Timeouts.** `--timeout` bounds the whole run. A test's `timeout` (default 15m) bounds its
-  steps; a wait step's `waitFor.timeout` or `timeout` (default 5m) bounds the wait; other steps
-  default to 1m. Waiting polls every 2 seconds. A wait stops at once, as a failure, when the object
-  reaches `status.phase: Failed`.
+- **Timeouts.** `--timeout` (default 3h) bounds the whole run: a test still running when it ends
+  fails, and a test not started yet counts as **failed** ("not run"), so an interrupted or
+  timed-out run never exits 0. A test's `timeout` (default 15m) bounds its steps; a wait step's
+  `waitFor.timeout` or `timeout` (default 5m) bounds the wait; other steps default to 1m. Waiting
+  polls every 2 seconds. A wait (for anything but `Failed` or `Deleted`) fails when the object's
+  `status.phase` has stayed `Failed` for 30 seconds; the operator retries some failed phases, such
+  as a create in backoff.
 - **Cleanup.** After its steps, whether they passed or not, each test runs its `cleanup` steps,
   then deletes the objects labelled with its run and test that it did not create itself (such as a
   clone's target VM), then the objects it created, newest first, and waits until each is gone.
-  Cleanup also runs after `--timeout` or an interrupt (Ctrl-C; a second Ctrl-C exits at once),
-  bounded by `--cleanup-timeout` per test. A cleanup that fails fails the test. `--keep` skips the
+  A `VMClone` whose provider clone may still be in flight is waited for first; one that does not
+  settle is left in place with its source and target VMs (deleting them could leave the cloned VM
+  on the hypervisor with nothing recording it) and the test fails. Cleanup also runs after
+  `--timeout` or an interrupt (Ctrl-C; a second Ctrl-C exits at once), bounded by
+  `--cleanup-timeout` per test; objects reached after that time still get their delete call, but
+  are not waited for. A cleanup that fails fails the test. `--keep` skips the
   cleanup and lists what was left; remove it with
   `kubectl delete virtualmachines,vmsnapshots,vmclones,vmclasses -n <namespace> -l vcts.virtrigaud.io/run=<run id>`.
 - **Results.** `results.json`, `junit.xml` (one test case per test, the step results in
@@ -196,7 +204,7 @@ later under the same name. With no such VM available the operation is recorded a
 | `power` | Patches `spec.powerState` of a VM of the run to `Off`, or back to `On` |
 | `reconfigure` | Patches `spec.resources.cpu` (and `spec.resources.memoryMiB` when `memoryRange` is set) of a VM of the run to a value from the range that differs from the one the run last set: the change the VirtualMachine controller sends to the provider as a Reconfigure |
 | `snapshot` | Creates a `VMSnapshot` `loadgen-snap-<run>-<n>` of a VM of the run with `retentionPolicy.deleteOnVMDelete: true`, so the snapshot is deleted when its VM is |
-| `clone` | Creates a `VMClone` `loadgen-clone-<run>-<n>` (full clone, target powered off) of a VM of the run; its target VM, `loadgen-vm-<run>-clone-<n>`, is created by the operator with the run's labels |
+| `clone` | Creates a `VMClone` `loadgen-clone-<run>-<n>` (full clone, target powered off) of a VM of the run, preferring one the run powered off (some providers, libvirt among them, hold a clone of a running source until it is powered off); its target VM, `loadgen-vm-<run>-clone-<n>`, is created by the operator with the run's labels |
 
 **What is measured.** `Duration` is the time of the API call alone: from sending the request until
 the apiserver answered (accepted or refused it). It does not include the provider's work. The
@@ -210,7 +218,7 @@ and records `ObservedDuration`, from sending the request until then:
 | `create` | `status.id` is set and `status.powerState` is `On` |
 | `delete` | the VM is gone |
 | `power` | `status.powerState` equals the requested state |
-| `reconfigure` | `status.currentResources` holds the requested CPU (and memory) |
+| `reconfigure` | `status.currentResources` holds the requested CPU (and memory), or the VM reports `Reconfiguring=True`, reason `RestartRequired`, for the patched generation (a change applied to the next boot only, such as a running VM's shrink, which `status.currentResources` does not show) |
 | `snapshot` | the `VMSnapshot`'s `status.phase` is `Ready` |
 | `clone` | the `VMClone`'s `status.phase` is `Ready` |
 
@@ -224,9 +232,11 @@ run's duration for operations still in flight; an interrupt stops it.
   `kubectl delete vmsnapshots,vmclones,virtualmachines -n <namespace> -l loadgen.virtrigaud.io/run=<run>`.
   With **`--cleanup`** the tool deletes, at the end (also after an interrupt), the run's
   `VMSnapshot`s and waits until they are gone, then its `VMClone`s, the clone target VMs that carry
-  the run's label, and its VMs, and waits until they are gone, up to `--cleanup-timeout`. It exits
-  non-zero, naming what is left, when that time runs out. A `VMClone` is only an operation record:
-  deleting it leaves its target VM, which is why the targets are deleted as well.
+  the run's label, its VMs and the VMs whose delete it issued during the run, and waits until they
+  are gone, up to `--cleanup-timeout`. A `VMClone` is only an operation record: deleting it leaves
+  its target VM, which is why the targets are deleted as well. A `VMClone` whose provider clone may
+  still be in flight is waited for first; one that does not settle in time is left in place with
+  its source and target VMs. The tool exits non-zero, naming what is left, when anything remains.
 - **`--dry-run`** makes no API call at all (it needs no kubeconfig): operations are recorded as
   successful with phase `DryRun`, and nothing is observed or cleaned up.
 - **Results.** `results.csv` (one row per operation: `Operation`, `Provider`, `VMName`,
