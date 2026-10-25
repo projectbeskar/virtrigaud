@@ -41,6 +41,7 @@ import (
 	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
 	"github.com/projectbeskar/virtrigaud/sdk/provider/capabilities"
 	"github.com/projectbeskar/virtrigaud/sdk/provider/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 )
 
 // Provider implements the Proxmox VE provider
@@ -1049,22 +1050,38 @@ func (p *Provider) nextVMID(ctx context.Context) int {
 	return id
 }
 
-// parseClassSizing extracts the CPU count and memory (MiB) from a marshaled
-// contracts.VMClass (keys "CPU"/"MemoryMiB"; no json tags). Returns zeros when
-// the JSON is empty or unparseable.
+// parseClassSizing extracts the CPU count and memory (MiB) of a Clone's
+// VMClass override. The VMClone controller sends a marshaled v1beta1
+// VMClassSpec (VMCloneReconciler.classJSON, clonePlacementAdmission.
+// cloneClassJSON): `cpu` and `memory`, a resource.Quantity such as "8Gi" —
+// not the contracts.VMClass "MemoryMiB" a Create carries. Reading only
+// "MemoryMiB" applied the class's CPU (encoding/json matches "cpu" to "CPU"
+// case-insensitively) and silently dropped its memory. A contracts.VMClass
+// body ("CPU", "MemoryMiB") is still read, so either encoding sizes the clone.
+// Returns zeros when the JSON is empty or unparseable (the clone keeps the
+// source's size).
 func parseClassSizing(classJSON string) (cpus int, memoryMiB int64) {
 	if classJSON == "" {
 		return 0, 0
 	}
 	var class struct {
-		CPU       int32 `json:"CPU"`
-		MemoryMiB int32 `json:"MemoryMiB"`
+		CPU       int32              `json:"cpu"`
+		Memory    *resource.Quantity `json:"memory"`
+		MemoryMiB int32              `json:"MemoryMiB"`
 	}
 	if err := json.Unmarshal([]byte(classJSON), &class); err != nil {
 		return 0, 0
 	}
-	return int(class.CPU), int64(class.MemoryMiB)
+	memoryMiB = int64(class.MemoryMiB)
+	if class.Memory != nil && class.Memory.Value() > 0 {
+		memoryMiB = class.Memory.Value() / bytesPerMiB
+	}
+	return int(class.CPU), memoryMiB
 }
+
+// bytesPerMiB converts a resource.Quantity's bytes to MiB, the unit of the
+// PVE `memory` setting.
+const bytesPerMiB = 1024 * 1024
 
 // applyVMClassSizing reconfigures a VM to the VMClass CPU/memory. It is used
 // after a clone (which inherits the source/template hardware): the VMClass CPU
