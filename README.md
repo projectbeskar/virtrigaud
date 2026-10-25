@@ -24,7 +24,7 @@ The manager reconciles Kubernetes custom resources; each hypervisor runs as a se
 - **Cross-Provider VM Migration**: Storage-backend-agnostic disk migration between any two hypervisors — **S3** and **NFS** staging backends, validated across vSphere ⇄ Libvirt/KVM ⇄ Proxmox VE in **both directions** (ADR-0006). The disk is staged through object storage or an NFS export and moved with `qemu-img`; it never traverses a CSI PVC (PVC is compat-only). NFS uses qemu-img's native libnfs transport (kernel-mount on Proxmox). (v0.3.11)
 - **VM Cloning (VMClone)**: Full and linked clones, MVP — `source.vmRef`, same-provider (vSphere/Proxmox/Libvirt; libvirt: qcow2 overlay for linked, full copy for full)
 - **VMSet CRD defined; controller not yet active**: Multi-VM replica set is defined but the controller is a stub that reports `Ready=False / ControllerNotImplemented`; rolling updates and replica management are roadmap
-- **VMPlacementPolicy (reference-only)**: Placement rules (affinity, anti-affinity, resource constraints) expressed as a policy object referenced by `VirtualMachine.spec.placementRef`; no standalone enforcement controller
+- **VMPlacementPolicy (reference-only)**: Placement rules (affinity, anti-affinity, resource constraints) expressed as a policy object referenced by `VirtualMachine.spec.placementRef`; no standalone enforcement controller; only the scheduler of a clustered Provider (`topology: cluster`) reads it
 - **Declarative v1beta1 API**: Stable CRDs with OpenAPI validation
 - **Cloud-Init Support**: Cross-provider VM initialisation via cloud-init
 - **Power Management**: On/Off/Reboot/Graceful-Shutdown uniformly
@@ -136,15 +136,15 @@ root. On libvirt that user-data can be the `VMClone`'s own
 | CRD | Short name | Controller | Description |
 |-----|-----------|------------|-------------|
 | VirtualMachine | vm | active | A virtual machine instance |
-| VMClass | vmc | active | Resource profile (CPU, memory, disk) |
-| VMImage | vmi | active | Base template or image reference |
-| VMNetworkAttachment | vmna | active | Network configuration |
+| VMClass | vmclass | active | Resource profile (CPU, memory, disk) |
+| VMImage | vmimg | active | Base template or image reference |
+| VMNetworkAttachment | vmnet | reference-only | Network configuration referenced by `VirtualMachine.spec.networks[].networkRef`; no controller acts on it or writes its status |
 | Provider | prov | active | Hypervisor connection + runtime config |
 | VMMigration | vmmig | active | Cross-provider VM migration |
-| VMSnapshot | — | active | Snapshot lifecycle management |
+| VMSnapshot | vmsnap | active | Snapshot lifecycle management |
 | VMClone | vmclone | active (MVP) | Cloning operations — MVP: `source.vmRef` source, same-provider, full & linked clones |
 | VMSet | vmset | not yet active | Multi-VM replica set — controller is a stub that reports `Ready=False / ControllerNotImplemented` |
-| VMPlacementPolicy | — | reference-only | Placement rules (affinity, resources) — a policy object referenced by `VirtualMachine.spec.placementRef`; no standalone controller |
+| VMPlacementPolicy | vmpp | reference-only | Placement rules (affinity, resources) — a policy object referenced by `VirtualMachine.spec.placementRef`; no standalone controller; only the scheduler of a clustered Provider reads it |
 
 Note: VMAdoption is a **controller** built into the manager, not a CRD.
 

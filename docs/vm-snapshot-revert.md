@@ -422,8 +422,8 @@ them.
 
 - `status.currentResources` is not changed by a revert. If the hypervisor restores a
   different CPU or memory size with the snapshot, the manager does not notice it.
-- A `VMSet` whose template sets `revertToRef` gives every member the same `VMSnapshot`
-  name; each member accepts only a snapshot of itself.
+- The `VMSet` kind has no active controller in this release (it creates no VMs), so a
+  `VMSet` template that sets `revertToRef` has no effect.
 - There is no operator confirmation for an unknown outcome. A revert whose outcome stays
   unknown — after 5 attempts, a VM seen running in between, or a task not completed
   within 2 hours — is `Failed` with a message saying the VM may or may not have been
