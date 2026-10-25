@@ -5,6 +5,26 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-10-25 12:50] - Accurate, user-facing comments on the CRD types and the provider proto
+**Author:** @wrkode (William Rizzo)
+
+### Changed
+- `api/infra.virtrigaud.io/v1beta1/*_types.go`: the doc comments that become the CRD `description`s (`kubectl explain`) and the generated CRD reference no longer carry internal tracking references (ADR sections, release-candidate and issue numbers) or roadmap wording, and say what each field does today. The `Host.spec.endpoint` comment no longer mentions a future host agent: only `qemu+ssh://` hosts can be connected to, a `grpc://host:port` value passes validation but the libvirt provider refuses it. `ProviderSpec.insecureSkipVerify` (read by the vSphere and Proxmox provider pods, for the hypervisor endpoint) and `spec.runtime.service.tls.insecureSkipVerify` (read by the manager, for the provider's gRPC server certificate) are now described as the two separate insecure escape hatches they are; the first was wrongly described as deprecated in favour of the second. The `VMMigration` comments now match the controller (nfs, s3 and pvc backends, `transferMode`, the phases a migration enters, `cleanupPolicy`, `options.timeout`, `retryPolicy`).
+- `api/infra.virtrigaud.io/v1beta1/*_types.go`: fields the schema accepts but no code acts on now say "Accepted but not acted on in this release.", and status fields no controller writes say "Not populated in this release." Examples: `VirtualMachine.spec.lifecycle`, `spec.resources.gpu`, `spec.userData.ignition`, `spec.disks[].scsi`; `Provider.spec.healthCheck`, `connectionPooling`, `rateLimit`, `runtime.imagePullSecrets`, `runtime.livenessProbe`, `runtime.readinessProbe`; `HostPool.spec.migration`, `storagePools`, `networks`; `VMSnapshot` `quiesce`, `retentionPolicy.maxCount`/`preservePinned`/`gracePeriod`, `schedule`; most of `VMClone` `customization` and `options`; `VMImage` `source.http`/`registry` and `prepare` options; `VMNetworkAttachment` `ipAllocation`, `security`, `qos`; `VMPlacementPolicy` constraints the clustered scheduler does not evaluate; every `VMSet` field (its controller is a stub).
+- `proto/provider/v1/provider.proto`, `proto/rpc/provider/v1/provider.pb.go`, `proto/rpc/provider/v1/provider_grpc.pb.go`: comments rewritten the same way (no field, number, RPC or option changed; the generated Go differs only in comments). The disk export/import contract comment is now attached to `ExportDiskRequest`, and corrects the old statement that `transfer_mode` `auto` is chosen from the providers' capabilities (the manager resolves it to `relay`; no provider implements `direct`).
+- `api/infra.virtrigaud.io/v1beta1/provider_webhook.go`: comment only; no longer names a specific future hypervisor type.
+- `config/crd/bases/*.yaml`: regenerated; only `description` text differs from the previous files.
+- `docs/clustered-provider-inventory.md`, `docs/vm-snapshot-revert.md`, `examples/hostpool-clustered.yaml`, `README.md`: the `grpc://` endpoint, the unused `HardwareUpgrade` `target_host_id`, `VMSet` and the resource short names and status table are described as the code behaves.
+
+### Why
+The comments on the API types and in the proto are published as the CRD descriptions and the generated API references, so a user reads them as the contract. Several carried internal tags, described behaviour that no longer matches the controllers, or implied that fields work which no code reads.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [ ] Config change only
+- [x] Documentation only
+
 ## [2026-10-25 12:40] - CLI and build-tooling hygiene
 **Author:** @wrkode (William Rizzo)
 
