@@ -55,8 +55,16 @@ const cloneTemplateID = 100
 const ciTemplateBootDisk = "tank-ssd:vm-100-disk-0,size=32G"
 
 // ciProviderWith returns a provider on a fake PVE whose template (VMID 100) has
-// the raw config tmplConfig, with defaultStorage as the operator's default.
+// the raw config tmplConfig, with defaultStorage as the operator's default,
+// and an SSH data plane to a fake node that builds seeds (seedNode).
 func ciProviderWith(t *testing.T, defaultStorage string, tmplConfig map[string]string) (*Provider, *pvefake.Server) {
+	t.Helper()
+	provider, srv, _ := ciProviderNode(t, defaultStorage, tmplConfig)
+	return provider, srv
+}
+
+// ciProviderNode is ciProviderWith, also returning the fake node.
+func ciProviderNode(t *testing.T, defaultStorage string, tmplConfig map[string]string) (*Provider, *pvefake.Server, *seedNode) {
 	t.Helper()
 	srv, endpoint, err := pvefake.StartFakeServer()
 	require.NoError(t, err)
@@ -68,7 +76,18 @@ func ciProviderWith(t *testing.T, defaultStorage string, tmplConfig map[string]s
 	provider := createTestProvider(endpoint)
 	provider.client.Config().DefaultStorage = defaultStorage
 	provider.client.Config().TaskPollInterval = 5 * time.Millisecond
-	return provider, srv
+	node := newSeedNode(t, srv)
+	provider.ssh = node.transport()
+	return provider, srv, node
+}
+
+// assertSeed asserts that value is a seed CD-ROM (a VM's disk volume as
+// media=cdrom) on storage.
+func assertSeed(t *testing.T, value, storage string) {
+	t.Helper()
+	assert.Equal(t, storage, pveapi.DiskStorage(value), "storage of %q", value)
+	_, ok := seedDrive(value)
+	assert.True(t, ok, "a seed CD-ROM: %q", value)
 }
 
 // ciProvider is ciProviderWith a template whose only drive is its boot disk.
@@ -124,7 +143,7 @@ func assertDrive(t *testing.T, value, storage string) {
 func TestCloudInitStorage_CloneNoHintFollowsPrimaryDisk(t *testing.T) {
 	for _, def := range []string{"", "vmstore"} {
 		provider, srv := ciProvider(t, def)
-		assertDrive(t, createCI(t, provider, srv, `{"TemplateName": "100"}`), "tank-ssd")
+		assertSeed(t, createCI(t, provider, srv, `{"TemplateName": "100"}`), "tank-ssd")
 	}
 }
 
@@ -133,14 +152,14 @@ func TestCloudInitStorage_CloneNoHintFollowsPrimaryDisk(t *testing.T) {
 // disk.
 func TestCloudInitStorage_CloneNoStorageBackedDiskUsesDefaultStorage(t *testing.T) {
 	provider, srv := ciProviderWith(t, "vmstore", map[string]string{"scsi0": "/dev/disk/by-id/foo"})
-	assertDrive(t, createCI(t, provider, srv, `{"TemplateName": "100"}`), "vmstore")
+	assertSeed(t, createCI(t, provider, srv, `{"TemplateName": "100"}`), "vmstore")
 }
 
 // TestCloudInitStorage_ExplicitContractsStorageWins: the contracts.VMImage
 // "storage" hint beats the primary disk and the operator default.
 func TestCloudInitStorage_ExplicitContractsStorageWins(t *testing.T) {
 	provider, srv := ciProvider(t, "vmstore")
-	assertDrive(t, createCI(t, provider, srv, `{"TemplateName": "100", "storage": "nfs-vm"}`), "nfs-vm")
+	assertSeed(t, createCI(t, provider, srv, `{"TemplateName": "100", "storage": "nfs-vm"}`), "nfs-vm")
 }
 
 // TestCloudInitStorage_ImageSpecStorageReadWithTemplate: source.proxmox.storage
@@ -148,7 +167,7 @@ func TestCloudInitStorage_ExplicitContractsStorageWins(t *testing.T) {
 // primary disk and the operator default.
 func TestCloudInitStorage_ImageSpecStorageReadWithTemplate(t *testing.T) {
 	provider, srv := ciProvider(t, "vmstore")
-	assertDrive(t, createCI(t, provider, srv,
+	assertSeed(t, createCI(t, provider, srv,
 		`{"TemplateName": "100", "source": {"proxmox": {"templateID": 100, "storage": "nfs-vm"}}}`), "nfs-vm")
 }
 
@@ -178,13 +197,13 @@ func TestCloudInitStorage_NeverLocalWhenDiskElsewhere(t *testing.T) {
 // names a storage.
 func TestCloudInitStorage_DisklessCreate(t *testing.T) {
 	provider, srv := ciProvider(t, "vmstore")
-	assertDrive(t, createCI(t, provider, srv, ""), "vmstore")
+	assertSeed(t, createCI(t, provider, srv, ""), "vmstore")
 
 	provider, srv = ciProvider(t, "")
-	assertDrive(t, createCI(t, provider, srv, ""), "local")
+	assertSeed(t, createCI(t, provider, srv, ""), "local")
 
 	provider, srv = ciProvider(t, "vmstore")
-	assertDrive(t, createCI(t, provider, srv, `{"storage": "nfs-vm"}`), "nfs-vm")
+	assertSeed(t, createCI(t, provider, srv, `{"storage": "nfs-vm"}`), "nfs-vm")
 }
 
 // TestCloudInitStorage_NoStorageBackedDiskNoDefaultFallsBackToLocal: a clone
@@ -192,120 +211,80 @@ func TestCloudInitStorage_DisklessCreate(t *testing.T) {
 // storage, goes to the last resort.
 func TestCloudInitStorage_NoStorageBackedDiskNoDefaultFallsBackToLocal(t *testing.T) {
 	provider, srv := ciProviderWith(t, "", map[string]string{"scsi0": "/dev/disk/by-id/foo"})
-	assertDrive(t, createCI(t, provider, srv, `{"TemplateName": "100"}`), "local")
+	assertSeed(t, createCI(t, provider, srv, `{"TemplateName": "100"}`), "local")
 }
 
-// TestCloudInitStorage_TemplateDriveSameStorageIsKept (PR #425 H1): a full
-// clone of a template that has a cloud-init drive owns a vm-<id>-cloudinit
-// volume on the same storage as its disk. PVE cannot allocate it a second
-// time, so the provider sets nothing (the fake rejects the allocation, as PVE
-// does), and the Create succeeds with the drive in place. It also holds for a
-// drive in a slot other than ide2.
-func TestCloudInitStorage_TemplateDriveSameStorageIsKept(t *testing.T) {
-	for _, slot := range []string{"ide2", "ide3", "sata1", "scsi5"} {
-		t.Run(slot, func(t *testing.T) {
+// TestSeed_ReplacesTheTemplateCloudInitDrive (R35): a clone of a template
+// that has a PVE cloud-init drive gets its seed in that drive's slot, which
+// replaces the drive (PVE frees its volume): two cidata sources would be
+// undefined behaviour. No second CD-ROM goes to ide2.
+func TestSeed_ReplacesTheTemplateCloudInitDrive(t *testing.T) {
+	for _, tc := range []struct{ slot, storage string }{
+		{"ide2", "tank-ssd"}, {"ide3", "tank-ssd"}, {"sata1", "tank-ssd"}, {"scsi5", "tank-ssd"}, {"ide2", "other-st"},
+	} {
+		t.Run(tc.slot+" on "+tc.storage, func(t *testing.T) {
 			provider, srv := ciProviderWith(t, "", map[string]string{
 				"scsi0": ciTemplateBootDisk,
-				slot:    "tank-ssd:vm-100-cloudinit,media=cdrom",
+				tc.slot: tc.storage + ":vm-100-cloudinit,media=cdrom",
 			})
 			vm := createCIVM(t, provider, srv, ciRequest(`{"TemplateName": "100"}`))
-			drive := vm.Config[slot]
-			assertDrive(t, drive, "tank-ssd")
-			assert.Contains(t, drive, "vm-"+strconv.Itoa(vm.VMID)+"-cloudinit", "the clone's own volume")
-			if slot != "ide2" {
-				assert.Empty(t, vm.Config["ide2"], "no second drive in ide2")
+			assertSeed(t, vm.Config[tc.slot], "tank-ssd")
+			_, _, hasDrive := pveapi.CloudInitDrive(configOf(t, provider, vm.VMID))
+			assert.False(t, hasDrive, "no PVE cloud-init drive beside the seed")
+			if tc.slot != "ide2" {
+				assert.Empty(t, vm.Config["ide2"], "no second CD-ROM in ide2")
 			}
 		})
 	}
 }
 
-// TestCloudInitStorage_TemplateDriveOtherStorageIsReplaced (PR #425 H1): the
-// clone's drive is on another storage than the chosen one, so it is replaced
-// in its slot by one on the chosen storage.
-func TestCloudInitStorage_TemplateDriveOtherStorageIsReplaced(t *testing.T) {
-	for _, slot := range []string{"ide2", "ide3"} {
-		t.Run(slot, func(t *testing.T) {
-			provider, srv := ciProviderWith(t, "", map[string]string{
-				"scsi0": ciTemplateBootDisk,
-				slot:    "other-st:vm-100-cloudinit,media=cdrom",
-			})
-			vm := createCIVM(t, provider, srv, ciRequest(`{"TemplateName": "100"}`))
-			assertDrive(t, vm.Config[slot], "tank-ssd")
-			if slot != "ide2" {
-				assert.Empty(t, vm.Config["ide2"], "no second drive in ide2")
-			}
-		})
-	}
+// configOf reads VM vmid's config through the provider's client.
+func configOf(t *testing.T, provider *Provider, vmid int) map[string]interface{} {
+	t.Helper()
+	cfg, err := provider.client.GetVMConfig(context.Background(), "pve", vmid)
+	require.NoError(t, err)
+	return cfg
 }
 
-// TestCloudInitStorage_ExplicitStorageMovesTemplateDriveWithTheClone: a full
-// clone with a target storage takes the cloud-init volume along, so the drive
-// is already where the request wants it.
-func TestCloudInitStorage_ExplicitStorageMovesTemplateDriveWithTheClone(t *testing.T) {
+// TestSeed_ExplicitStorageWinsOverTheTemplateDrive: the request's storage
+// holds the seed, also when the template has a cloud-init drive.
+func TestSeed_ExplicitStorageWinsOverTheTemplateDrive(t *testing.T) {
 	provider, srv := ciProviderWith(t, "", map[string]string{
 		"scsi0": ciTemplateBootDisk,
 		"ide2":  "tank-ssd:vm-100-cloudinit,media=cdrom",
 	})
 	vm := createCIVM(t, provider, srv, ciRequest(`{"TemplateName": "100", "storage": "nfs-vm"}`))
-	assertDrive(t, vm.Config["ide2"], "nfs-vm")
+	assertSeed(t, vm.Config["ide2"], "nfs-vm")
 }
 
-// TestCloudInitStorage_DirectoryStorageNames (verified on PVE 9.2): on a
-// directory storage the cloud-init volume is a file <id>/vm-<id>-cloudinit.raw
-// when a full clone made it, and .qcow2 when a config update replaced it; the
-// provider's check of the clone's own drive sees both.
-func TestCloudInitStorage_DirectoryStorageNames(t *testing.T) {
-	t.Run("full clone to a directory storage keeps the cloned drive", func(t *testing.T) {
-		provider, srv := ciProviderWith(t, "", map[string]string{
-			"scsi0": ciTemplateBootDisk,
-			"ide2":  "tank-ssd:vm-100-cloudinit,media=cdrom",
-		})
-		srv.SetDirStorages("dirst")
-		vm := createCIVM(t, provider, srv, ciRequest(`{"TemplateName": "100", "storage": "dirst"}`))
-		id := strconv.Itoa(vm.VMID)
-		assert.Equal(t, "dirst:"+id+"/vm-"+id+"-cloudinit.raw,media=cdrom", vm.Config["ide2"])
+// TestSeed_DirectoryStorageName: on a directory storage the seed `qm
+// importdisk --format raw` lays down is a raw file <id>/vm-<id>-disk-N.raw.
+func TestSeed_DirectoryStorageName(t *testing.T) {
+	provider, srv := ciProviderWith(t, "", map[string]string{
+		"scsi0": "dirst:100/vm-100-disk-0.qcow2,size=32G",
+		"ide2":  "dirst:100/vm-100-cloudinit.raw,media=cdrom",
 	})
-
-	t.Run("a directory storage's own drive on the chosen storage is kept", func(t *testing.T) {
-		provider, srv := ciProviderWith(t, "", map[string]string{
-			"scsi0": "dirst:100/vm-100-disk-0.qcow2,size=32G",
-			"ide2":  "dirst:100/vm-100-cloudinit.raw,media=cdrom",
-		})
-		srv.SetDirStorages("dirst")
-		vm := createCIVM(t, provider, srv, ciRequest(`{"TemplateName": "100"}`))
-		id := strconv.Itoa(vm.VMID)
-		assert.Equal(t, "dirst:"+id+"/vm-"+id+"-cloudinit.raw,media=cdrom", vm.Config["ide2"])
-		assert.Equal(t, "dirst:"+id+"/vm-"+id+"-disk-0.qcow2,size=32G", vm.Config["scsi0"])
-	})
-
-	t.Run("a drive on another storage is replaced by a qcow2 file", func(t *testing.T) {
-		provider, srv := ciProviderWith(t, "", map[string]string{
-			"scsi0": "dirst:100/vm-100-disk-0.qcow2,size=32G",
-			"sata1": "tank-ssd:vm-100-cloudinit,media=cdrom",
-		})
-		srv.SetDirStorages("dirst")
-		vm := createCIVM(t, provider, srv, ciRequest(`{"TemplateName": "100"}`))
-		id := strconv.Itoa(vm.VMID)
-		assert.Equal(t, "dirst:"+id+"/vm-"+id+"-cloudinit.qcow2,media=cdrom", vm.Config["sata1"])
-		assert.Empty(t, vm.Config["ide2"])
-	})
+	srv.SetDirStorages("dirst")
+	vm := createCIVM(t, provider, srv, ciRequest(`{"TemplateName": "100"}`))
+	id := strconv.Itoa(vm.VMID)
+	assert.Equal(t, "dirst:"+id+"/vm-"+id+"-disk-1.raw,media=cdrom", vm.Config["ide2"])
+	assert.Equal(t, "dirst:"+id+"/vm-"+id+"-disk-0.qcow2,size=32G", vm.Config["scsi0"])
 }
 
-// TestCloudInitStorage_ConfigureClonedVMIsIdempotent (PR #425 H1): a re-sent
-// Create that finds its VM interrupted runs configureClonedVM again; with the
-// drive in place it sets nothing, and the fake would reject a second
-// allocation.
-func TestCloudInitStorage_ConfigureClonedVMIsIdempotent(t *testing.T) {
+// TestSeed_ConfigureClonedVMIsIdempotent: a re-sent Create that finds its VM
+// interrupted runs configureClonedVM again; the VM already has its seed, so
+// no second one is built or attached.
+func TestSeed_ConfigureClonedVMIsIdempotent(t *testing.T) {
 	for name, tmpl := range map[string]map[string]string{
 		"template without a drive": {"scsi0": ciTemplateBootDisk},
 		"template with a drive":    {"scsi0": ciTemplateBootDisk, "ide2": "tank-ssd:vm-100-cloudinit,media=cdrom"},
 	} {
 		t.Run(name, func(t *testing.T) {
-			provider, srv := ciProviderWith(t, "", tmpl)
+			provider, srv, node := ciProviderNode(t, "", tmpl)
 			req := ciRequest(`{"TemplateName": "100"}`)
 			vm := createCIVM(t, provider, srv, req)
 			before := vm.Config["ide2"]
-			assertDrive(t, before, "tank-ssd")
+			assertSeed(t, before, "tank-ssd")
 
 			for i := 0; i < 2; i++ {
 				require.NoError(t, provider.configureClonedVM(context.Background(), req, &pveapi.VMConfig{VMID: vm.VMID}, "pve"))
@@ -313,6 +292,8 @@ func TestCloudInitStorage_ConfigureClonedVMIsIdempotent(t *testing.T) {
 			after, ok := srv.GetVM(vm.VMID)
 			require.True(t, ok)
 			assert.Equal(t, before, after.Config["ide2"])
+			assert.Len(t, node.seedsOf(vm.VMID), 1, "one seed only")
+			assert.Len(t, srv.Volumes(), 1)
 		})
 	}
 }

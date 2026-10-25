@@ -182,7 +182,8 @@ target VM receives the source's user-data — any provisioning secrets in it
 the source VMs' user-data, or keep secrets out of user-data.
 
 **Creating a `VMClone` is read access to the source VM's data.** The clone's
-disk is a full copy of the source's disk. On libvirt, the `VMClone`'s
+disk is a full copy of the source's disk. On libvirt, and on Proxmox for a source
+created with user-data, the `VMClone`'s
 `spec.customization.userData.cloudInit.inline` runs as **root** on the clone's
 first boot, so whoever can create the `VMClone` can read everything on that
 copy. This holds within one namespace as much as across namespaces. Grant

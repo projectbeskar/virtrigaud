@@ -9,11 +9,13 @@
 # environment (for example PVE_DEFAULT_STORAGE) go in the Provider's
 # spec.runtime.env.
 #
-# NOTE on user-data: the Proxmox provider maps cloud-init user-data to PVE's own
-# cloud-init settings. It applies the user name (`ciuser`) and the SSH keys of an
-# `ssh_authorized_keys:` block list (`- key` items) only. Other keys in the
-# examples below (`packages`, `runcmd`, `sudo`, ...) are NOT applied on Proxmox
-# today; see "Known limitations" in docs/release-notes/next.md.
+# NOTE on user-data: the Proxmox provider applies the whole cloud-init user-data
+# (users, sudo, packages, runcmd, write_files, ...) through a NoCloud seed CD-ROM
+# it builds on the PVE node over SSH, with a meta-data and a network-config (from
+# spec.networks) it renders. A Provider whose VMs carry user-data therefore needs
+# the SSH keys in its Secret below; without them such a VM is refused
+# (InvalidSpec), never created without its user-data. See
+# docs/proxmox-cloud-init-storage.md.
 
 ---
 # Secret for Proxmox VE API credentials
@@ -28,8 +30,14 @@ stringData:
   token_id: "virtrigaud@pve!vrtg-token"
   token_secret: "xxxxxxxx-xxxx-4xxx-xxxx-xxxxxxxxxxxx"
 
-  # Only for VMMigration to or from this provider (its disk data plane runs on the
-  # PVE node over SSH): ssh_user, ssh_privatekey (or ssh_password) and known_hosts.
+  # For VMs with user-data (every VirtualMachine below), and for VMMigration to or
+  # from this provider: the SSH data plane to the PVE node (the API endpoint's
+  # host), as root. The seed is built and the migration disks are moved there.
+  #   ssh_user: "root"
+  #   ssh_privatekey: |
+  #     -----BEGIN OPENSSH PRIVATE KEY-----
+  #     ...
+  #   known_hosts: "pve.example.com ssh-ed25519 AAAA..."   # ssh-keyscan from a trusted host
   # See migration/vsphere-to-proxmox.yaml.
 
 ---
@@ -79,7 +87,8 @@ spec:
 # Medium VM class for production workloads
 #
 # A VMClass only sets root-disk defaults (spec.diskDefaults); additional
-# disks are attached per VM (see the db-server-01 data disk below).
+# disks are listed per VM (spec.disks). The Proxmox provider does not attach
+# spec.disks in this release (add the disk in PVE); see db-server-01 below.
 apiVersion: infra.virtrigaud.io/v1beta1
 kind: VMClass
 metadata:
@@ -274,8 +283,11 @@ spec:
         runcmd:
           - systemctl enable nginx
           - systemctl start nginx
+          # Allow SSH before enabling the firewall; --force skips ufw's
+          # interactive prompt (runcmd has no terminal).
+          - ufw allow OpenSSH
           - ufw allow 'Nginx Full'
-          - ufw enable
+          - ufw --force enable
 
 ---
 # VM Snapshot for the web server
@@ -312,6 +324,8 @@ spec:
     - name: lan
       networkRef:
         name: lan-network
+  # Not attached by the Proxmox provider in this release (its Create attaches no
+  # spec.disks entry): add the data disk in PVE, e.g. qm set <vmid> --scsi1 <storage>:100.
   disks:
     - name: data
       sizeGiB: 100
@@ -384,5 +398,7 @@ spec:
               - "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI... test@example.com"
         packages:
           - epel-release
-          - htop
           - tmux
+        runcmd:
+          # htop is in EPEL, which the packages step above only just enabled.
+          - dnf install -y htop

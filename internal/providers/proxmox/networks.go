@@ -457,12 +457,15 @@ func vlanOpt(vlan int) string {
 // caller read (nil when no NIC is named), and merged with the request (see
 // mergeNetValue), so the template's bridge, VLAN and options survive where
 // the request is silent and the clone keeps the MAC PVE gave it. A NIC the
-// request does not name is not touched. Each attachment's static IP becomes
-// an ipconfigN, and the DNS servers the VM-wide nameserver; a DHCP ipconfigN
-// is set only when cloudInit says the VM is given a cloud-init configuration
-// by this request. It sets what it sets in one idempotent config update, so a
-// re-sent Create that finds its VM interrupted runs it again.
-func (p *Provider) applyCloneNetworks(ctx context.Context, node string, vmConfig *pveapi.VMConfig, current map[string]interface{}, cloudInit bool) error {
+// request does not name is not touched. What becomes of each attachment's IP
+// settings depends on ipMode: with pveIPStaticOnly (no cloud-init data) a
+// static IP becomes an ipconfigN and the DNS servers the VM-wide nameserver;
+// with pveIPAll (PVE's own cloud-init drive) a DHCP ipconfigN is set too; with
+// pveIPNone (the VM gets a NoCloud seed, which carries its network-config,
+// seed.go) none of PVE's cloud-init keys is set. It sets what it sets in one
+// idempotent config update, so a re-sent Create that finds its VM interrupted
+// runs it again.
+func (p *Provider) applyCloneNetworks(ctx context.Context, node string, vmConfig *pveapi.VMConfig, current map[string]interface{}, ipMode pveIPMode) error {
 	values := url.Values{}
 
 	for i := range vmConfig.Networks {
@@ -475,16 +478,18 @@ func (p *Provider) applyCloneNetworks(ctx context.Context, node string, vmConfig
 		values.Set(key, mergeNetValue(existing, nic))
 	}
 
-	for _, ipConfig := range vmConfig.IPConfigs {
-		if ipConfig.DHCP && !cloudInit {
-			continue
+	if ipMode != pveIPNone {
+		for _, ipConfig := range vmConfig.IPConfigs {
+			if ipConfig.DHCP && ipMode != pveIPAll {
+				continue
+			}
+			if value := pveapi.IPConfigString(ipConfig); value != "" {
+				values.Set(fmt.Sprintf("ipconfig%d", ipConfig.Index), value)
+			}
 		}
-		if value := pveapi.IPConfigString(ipConfig); value != "" {
-			values.Set(fmt.Sprintf("ipconfig%d", ipConfig.Index), value)
+		if nameserver := pveapi.NameserverValue(vmConfig.IPConfigs); nameserver != "" {
+			values.Set(pveConfigKeyNameserver, nameserver)
 		}
-	}
-	if nameserver := pveapi.NameserverValue(vmConfig.IPConfigs); nameserver != "" {
-		values.Set(pveConfigKeyNameserver, nameserver)
 	}
 
 	if len(values) == 0 {
@@ -500,6 +505,22 @@ func (p *Provider) applyCloneNetworks(ctx context.Context, node string, vmConfig
 	}
 	return nil
 }
+
+// pveIPMode says which of PVE's cloud-init IP keys (ipconfigN, nameserver)
+// applyCloneNetworks sets for a clone.
+type pveIPMode int
+
+const (
+	// pveIPStaticOnly: the clone gets no cloud-init data from the request;
+	// static addresses and DNS servers are set (inert without a cloud-init
+	// drive), DHCP is left to the template.
+	pveIPStaticOnly pveIPMode = iota
+	// pveIPAll: the clone uses PVE's own cloud-init drive; DHCP is set too.
+	pveIPAll
+	// pveIPNone: the clone gets a NoCloud seed, whose network-config carries
+	// the IP settings; none of PVE's cloud-init keys is set.
+	pveIPNone
+)
 
 // netKeyIndex returns N of a config key "netN" and whether key is one.
 func netKeyIndex(key string) (int, bool) {

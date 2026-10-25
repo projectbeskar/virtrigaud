@@ -64,7 +64,17 @@ func networksJSON(t *testing.T, attachments ...contracts.NetworkAttachment) stri
 // two NICs.
 func netTestProvider(t *testing.T) (*Provider, *pvefake.Server) {
 	t.Helper()
+	p, srv, _ := netTestProviderNode(t)
+	return p, srv
+}
+
+// netTestProviderNode is netTestProvider, with the fake node behind the SSH
+// data plane that builds cloud-init seeds.
+func netTestProviderNode(t *testing.T) (*Provider, *pvefake.Server, *seedNode) {
+	t.Helper()
 	p, srv := newStampTestProvider(t)
+	node := newSeedNode(t, srv)
+	p.ssh = node.transport()
 	tmpl, ok := srv.GetVM(seededTemplateID)
 	require.True(t, ok)
 	tmpl.Config = map[string]string{
@@ -73,7 +83,7 @@ func netTestProvider(t *testing.T) (*Provider, *pvefake.Server) {
 		"net1":  templateNet1,
 	}
 	srv.PutVM(tmpl)
-	return p, srv
+	return p, srv, node
 }
 
 // createNet creates a VM named name with the given image, networks and user
@@ -166,7 +176,9 @@ func TestCreate_NewVM_AppliesAForwardedMAC(t *testing.T) {
 // TestCreate_Clone_KeepsTheTemplateNICsWhenTheSpecNamesNone: the clone of a
 // template with user data and SSH keys used to get every netN overwritten with
 // virtio on vmbr0. A spec that names no NIC (only a static IP) leaves the
-// template's bridge, VLAN and options, and the MAC PVE gave the clone.
+// template's bridge, VLAN and options, and the MAC PVE gave the clone. With
+// user-data (R35) the IP settings go into the seed's network-config, matched
+// by that MAC, never into ipconfigN or nameserver.
 func TestCreate_Clone_KeepsTheTemplateNICsWhenTheSpecNamesNone(t *testing.T) {
 	userData := []byte("#cloud-config\nssh_authorized_keys:\n  - ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIexample key@example\n")
 	for name, networks := range map[string]string{
@@ -175,7 +187,7 @@ func TestCreate_Clone_KeepsTheTemplateNICsWhenTheSpecNamesNone(t *testing.T) {
 			contracts.NetworkAttachment{Name: "lan", StaticIP: "10.1.2.3", Prefix: 24, Gateway: "10.1.2.1", DNS: "10.1.2.53"}),
 	} {
 		t.Run(name, func(t *testing.T) {
-			p, srv := netTestProvider(t)
+			p, srv, node := netTestProviderNode(t)
 			vm := createNet(t, p, srv, `{"TemplateName": "9000"}`, networks, userData)
 
 			clone0 := pvefake.CloneMAC(vm.VMID, 0)
@@ -183,14 +195,23 @@ func TestCreate_Clone_KeepsTheTemplateNICsWhenTheSpecNamesNone(t *testing.T) {
 				"the template's bridge, VLAN and options, the clone's own MAC")
 			assert.NotEqual(t, templateMAC0, clone0)
 			assert.Equal(t, "e1000="+pvefake.CloneMAC(vm.VMID, 1)+",bridge=vmbr4", vm.Config["net1"])
-			assert.Contains(t, vm.Config, "ide2", "the cloud-init drive is still attached")
+			assertSeed(t, vm.Config["ide2"], "tank-ssd")
+			assert.NotContains(t, vm.Config, "ipconfig0", "no PVE cloud-init key beside the seed")
+			assert.NotContains(t, vm.Config, "nameserver")
 
+			seeds := node.seedsOf(vm.VMID)
+			require.Len(t, seeds, 1)
+			network := string(seeds[0].files[seedFileNetworkConfig])
+			assert.Contains(t, network, "macaddress: "+strings.ToLower(clone0))
+			assert.Contains(t, network, "set-name: eth0")
 			if networks == "" {
-				assert.Equal(t, "ip=dhcp", vm.Config["ipconfig0"])
-				assert.NotContains(t, vm.Config, "nameserver")
+				assert.Contains(t, network, "dhcp4: true")
+				assert.NotContains(t, network, "nameservers")
 			} else {
-				assert.Equal(t, "ip=10.1.2.3/24,gw=10.1.2.1", vm.Config["ipconfig0"])
-				assert.Equal(t, "10.1.2.53", vm.Config["nameserver"])
+				assert.Contains(t, network, "- 10.1.2.3/24")
+				assert.Contains(t, network, "via: 10.1.2.1")
+				assert.Contains(t, network, "- 10.1.2.53")
+				assert.NotContains(t, network, "dhcp4")
 			}
 		})
 	}

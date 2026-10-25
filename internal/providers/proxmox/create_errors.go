@@ -358,12 +358,17 @@ func importdiskRunningPattern(vmid int) string {
 	return fmt.Sprintf("(^|[/ ])[q]m importdisk %d( |$)", vmid)
 }
 
-// importdiskIdle checks over SSH that no `qm importdisk <vmid>` is still
+// importdiskIdle checks over SSH that no `qm importdisk <vmid>`, and no seed
+// build of the VM (its lock held), is still
 // running on the node (an earlier, interrupted Create's). Any doubt — the
 // check cannot run, or such a process exists — is an error, in words fit for
 // a wire message.
 func (p *Provider) importdiskIdle(ctx context.Context, vmid int) error {
-	_, _, err := p.ssh.runSSH(ctx, "pgrep -f -- "+proxmoxShellQuote(importdiskRunningPattern(vmid)))
+	// A seed build of the VM (seed.go) holds its lock for its whole run, also
+	// before and after its `qm importdisk`: a held lock answers "running".
+	lock := proxmoxShellQuote(seedLockPath(vmid))
+	_, _, err := p.ssh.runSSH(ctx, "if [ -e "+lock+" ] && ! flock -n "+lock+" true; then exit 0; fi; "+
+		"pgrep -f -- "+proxmoxShellQuote(importdiskRunningPattern(vmid)))
 	if err == nil {
 		return fmt.Errorf("a qm importdisk for it is still running on the node")
 	}

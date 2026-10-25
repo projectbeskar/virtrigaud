@@ -174,13 +174,14 @@ func TestCloneBootOrder_SSHKeysWithoutUserData(t *testing.T) {
 }
 
 // TestCloneBootOrder_UserData: a clone with user-data boots from its boot disk
-// only, wherever its cloud-init drive is.
+// only, wherever its cloud-init seed CD-ROM is (the seed takes the slot of a
+// cloud-init drive the template had, R35).
 func TestCloneBootOrder_UserData(t *testing.T) {
 	t.Run("normal: drive added in ide2", func(t *testing.T) {
 		provider, srv := ciProvider(t, "")
 		vm := createCIVM(t, provider, srv, ciRequest(`{"TemplateName": "100"}`))
 		assert.Equal(t, "order=scsi0", vm.Config[pveConfigKeyBoot])
-		assertDrive(t, vm.Config["ide2"], "tank-ssd")
+		assertSeed(t, vm.Config["ide2"], "tank-ssd")
 	})
 
 	t.Run("drive in sata1, disk on virtio0", func(t *testing.T) {
@@ -191,7 +192,7 @@ func TestCloneBootOrder_UserData(t *testing.T) {
 		})
 		vm := createCIVM(t, provider, srv, ciRequest(`{"TemplateName": "100"}`))
 		assert.Equal(t, "order=virtio0", vm.Config[pveConfigKeyBoot])
-		assertDrive(t, vm.Config["sata1"], "tank-ssd")
+		assertSeed(t, vm.Config["sata1"], "tank-ssd")
 		assert.Empty(t, vm.Config["ide2"])
 	})
 
@@ -213,7 +214,7 @@ func TestCloneBootOrder_UserData(t *testing.T) {
 		})
 		vm := createCIVM(t, provider, srv, ciRequest(`{"TemplateName": "100"}`))
 		assert.Equal(t, bootTemplateBootOrder, vm.Config[pveConfigKeyBoot])
-		assertDrive(t, vm.Config["ide2"], "vmstore")
+		assertSeed(t, vm.Config["ide2"], "vmstore")
 	})
 
 	t.Run("re-run is idempotent", func(t *testing.T) {

@@ -26,7 +26,6 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
-	"github.com/projectbeskar/virtrigaud/internal/providers/proxmox/pveapi"
 	"github.com/projectbeskar/virtrigaud/internal/providers/proxmox/pvefake"
 	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
 )
@@ -185,7 +184,7 @@ func TestImportedDiskVolume(t *testing.T) {
 
 // TestBuildImportedDiskSetCommand covers the disk-attach `qm set` command: it
 // sets ONLY the virtio-scsi boot disk + boot order (encoding-safe values);
-// cloud-init is handled separately via the API.
+// cloud-init is a seed attached separately (seed.go).
 func TestBuildImportedDiskSetCommand(t *testing.T) {
 	cmd := buildImportedDiskSetCommand(110001, "local-lvm:vm-110001-disk-0")
 	assert.Contains(t, cmd, "qm set 110001")
@@ -196,29 +195,6 @@ func TestBuildImportedDiskSetCommand(t *testing.T) {
 	// the API to avoid command-line encoding pitfalls).
 	assert.NotContains(t, cmd, "--sshkeys")
 	assert.NotContains(t, cmd, "cloudinit")
-}
-
-// TestBuildImportedDiskCloudInitValues covers the API cloud-init values: a
-// cloud-init drive is always set; ciuser/sshkeys only when present. url.Values
-// handles the encoding (notably multi-line SSH keys).
-func TestBuildImportedDiskCloudInitValues(t *testing.T) {
-	t.Run("drive only when no ciuser/keys", func(t *testing.T) {
-		v := buildImportedDiskCloudInitValues("local-lvm", &pveapi.VMConfig{})
-		assert.Equal(t, "local-lvm:cloudinit", v.Get("ide2"))
-		assert.Empty(t, v.Get("ciuser"))
-		assert.Empty(t, v.Get("sshkeys"))
-	})
-
-	t.Run("ciuser + multi-line sshkeys", func(t *testing.T) {
-		multiKey := "ssh-ed25519 AAAA...one\nssh-ed25519 BBBB...two"
-		v := buildImportedDiskCloudInitValues("local-lvm", &pveapi.VMConfig{
-			CIUser:  "ubuntu",
-			SSHKeys: multiKey + "\n", // trailing newline must be trimmed
-		})
-		assert.Equal(t, "local-lvm:cloudinit", v.Get("ide2"))
-		assert.Equal(t, "ubuntu", v.Get("ciuser"))
-		assert.Equal(t, multiKey, v.Get("sshkeys"), "multi-line keys preserved, trailing newline trimmed")
-	})
 }
 
 // TestSanitizeProxmoxName guards the path-escape defense.

@@ -32,6 +32,8 @@ import (
 	"strings"
 	"time"
 
+	"k8s.io/apimachinery/pkg/api/resource"
+
 	v1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
 	"github.com/projectbeskar/virtrigaud/internal/diskutil"
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
@@ -274,6 +276,14 @@ func (p *Provider) Create(ctx context.Context, req *providerv1.CreateRequest) (*
 		stamp = &ownerStamp{owner: owner, phase: ownerStampPhaseCreating}
 	}
 
+	// A Create with user-data builds a NoCloud seed on the PVE node
+	// (seed.go): the node must be able to, before anything is made.
+	if len(req.UserData) > 0 {
+		if err := p.seedPreflight(ctx, node); err != nil {
+			return nil, err
+		}
+	}
+
 	// ADR-0006 Proxmox TARGET: when the request carries a pre-staged imported
 	// disk (from a migration's ImportDisk), the create path builds a bare VM shell
 	// and attaches the staged disk via `qm importdisk` instead of cloning a
@@ -287,21 +297,17 @@ func (p *Provider) Create(ctx context.Context, req *providerv1.CreateRequest) (*
 	}
 
 	if vmConfig.Template == "" {
+		// A new VM with user-data gets a NoCloud seed after it is made
+		// (seed_create.go).
+		if len(req.UserData) > 0 {
+			return p.createDisklessWithSeed(ctx, req, vmConfig, node, stamp)
+		}
 		// A new VM (not from a template): the whole configuration, the owner
 		// stamp included (already "ready": nothing follows), is in the one
 		// create request.
 		if stamp != nil {
 			ready := stamp.withPhase(ownerStampPhaseReady)
 			vmConfig.Custom[pveConfigKeyDescription] = composeDescription("", &ready)
-		}
-		if len(req.UserData) > 0 {
-			// No template, so no boot disk to follow: the request's or the
-			// operator's storage, else the last resort (R33).
-			storage, err := p.disklessCloudInitStorage(vmConfig.Storage)
-			if err != nil {
-				return nil, err
-			}
-			vmConfig.IDE2 = cloudInitDrive(storage)
 		}
 		p.logger.Info("Creating new VM", "vmid", vmConfig.VMID)
 		p.trackTask(stamp, node, vmConfig.VMID, "")
@@ -326,7 +332,7 @@ func (p *Provider) Create(ctx context.Context, req *providerv1.CreateRequest) (*
 	}
 	// The clone inherits the template's description: keep it, minus any owner
 	// stamp, and add this VM's own.
-	base, sourceHas, err := p.inheritedDescription(ctx, node, templateID)
+	base, sourceHas, templateCfg, err := p.inheritedDescription(ctx, node, templateID)
 	if stderrors.Is(err, pveapi.ErrVMNotFound) {
 		return nil, errors.NewInvalidSpec("template %d not found on node %s", templateID, node)
 	}
@@ -357,7 +363,15 @@ func (p *Provider) Create(ctx context.Context, req *providerv1.CreateRequest) (*
 		return nil, p.failAfterSubmit(ctx, node, vmConfig.VMID, req.Name, stamp, true, "stamping the cloned VM with its owner failed", err)
 	}
 	if err := p.configureClonedVM(ctx, req, vmConfig, node); err != nil {
-		return nil, p.failAfterSubmit(ctx, node, vmConfig.VMID, req.Name, stamp, true, "configuring the cloned VM failed", err)
+		return nil, p.failSeedOrStep(ctx, node, vmConfig.VMID, req.Name, stamp, "configuring the cloned VM failed", err)
+	}
+	// A template converted from a VM with a seed gives its clones a CD-ROM
+	// that references the template's seed; a clone without user-data must not
+	// boot with it (seed_create.go detachForeignSeeds).
+	if len(req.UserData) == 0 && sourceHasSeed(templateCfg, templateID) {
+		if err := p.detachForeignSeeds(ctx, node, vmConfig.VMID); err != nil {
+			return nil, p.failAfterSubmit(ctx, node, vmConfig.VMID, req.Name, stamp, true, "detaching the template's cloud-init seed failed", err)
+		}
 	}
 	if stamp != nil {
 		ready := stamp.withPhase(ownerStampPhaseReady)
@@ -370,9 +384,10 @@ func (p *Provider) Create(ctx context.Context, req *providerv1.CreateRequest) (*
 
 // configureClonedVM applies, to a VM cloned from a template, what the clone
 // does not carry: the VMClass sizing, the network settings the request names
-// (applyCloneNetworks) and the cloud-init settings. Every value
-// is set with an idempotent config update, so a re-sent Create that finds its
-// VM interrupted runs it again.
+// (applyCloneNetworks) and the cloud-init settings: a request with user-data
+// gets a NoCloud seed (configureCloneSeed). Every step is idempotent (a config
+// update, or a seed attached only when the VM has none of its own), so a
+// re-sent Create that finds its VM interrupted runs it again.
 func (p *Provider) configureClonedVM(ctx context.Context, req *providerv1.CreateRequest, vmConfig *pveapi.VMConfig, node string) error {
 	// Apply the VMClass sizing on top of the cloned template. A PVE clone
 	// inherits the template's cores/memory, so they MUST be set explicitly or
@@ -390,9 +405,15 @@ func (p *Provider) configureClonedVM(ctx context.Context, req *providerv1.Create
 	// back or retries): choosing the drive's storage without it could put the
 	// drive on `local` again (R33), and a NIC merged without it would lose the
 	// clone's MAC.
-	cloudInit := len(req.UserData) > 0 || vmConfig.SSHKeys != ""
+	//
+	// A request with user-data gets a NoCloud seed (seed.go), which carries
+	// the user-data, meta-data and network-config: none of PVE's cloud-init
+	// keys is set. PVE's own cloud-init drive is used only for SSH keys set
+	// without user-data (vmConfig.SSHKeys; no request sets them since R35).
+	seed := len(req.UserData) > 0
+	cloudInit := !seed && vmConfig.SSHKeys != ""
 	var cfg map[string]interface{}
-	if cloudInit || anyNICSpecified(vmConfig.Networks) {
+	if seed || cloudInit || anyNICSpecified(vmConfig.Networks) {
 		var err error
 		cfg, err = p.client.GetVMConfig(ctx, node, vmConfig.VMID)
 		if err != nil {
@@ -403,8 +424,19 @@ func (p *Provider) configureClonedVM(ctx context.Context, req *providerv1.Create
 	// The NICs and IP settings the request names. A NIC it does not name keeps
 	// what the template made (bridge, VLAN and the MAC PVE gave the clone); this
 	// also runs for a clone with no cloud-init data (R36).
-	if err := p.applyCloneNetworks(ctx, node, vmConfig, cfg, cloudInit); err != nil {
+	ipMode := pveIPStaticOnly
+	switch {
+	case seed:
+		ipMode = pveIPNone
+	case cloudInit:
+		ipMode = pveIPAll
+	}
+	if err := p.applyCloneNetworks(ctx, node, vmConfig, cfg, ipMode); err != nil {
 		return err
+	}
+
+	if seed {
+		return p.configureCloneSeed(ctx, req, vmConfig, node)
 	}
 
 	// After cloning, reconfigure the VM with the cloud-init settings.
@@ -416,9 +448,9 @@ func (p *Provider) configureClonedVM(ctx context.Context, req *providerv1.Create
 	// Build reconfiguration values for cloud-init. Sizing (cores/memory) is
 	// already applied above for every clone, so it is not repeated here.
 	//
-	// The cloud-init settings (user-data, SSH keys) reach the guest only
-	// through a cloud-init drive, so the clone gets one whenever user-data or
-	// SSH keys are set: on the request's storage, else the primary disk's, else the
+	// SSH keys set without user-data reach the guest only through PVE's
+	// cloud-init drive, so the clone gets one: on the request's storage, else
+	// the primary disk's, else the
 	// operator's (R33); then what the clone's own cloud-init drive, if the
 	// template had one, needs (cloudInitChange keeps the slot the drive is
 	// really in).
@@ -460,8 +492,9 @@ func (p *Provider) configureClonedVM(ctx context.Context, req *providerv1.Create
 // rebindCreate answers a Create that found the VM vm, stamped with this
 // request's owner, which an earlier Create for the same VirtualMachine made.
 // A "ready" VM is returned as it is. A "creating" one was interrupted: it is
-// finished (a template clone: sizing and cloud-init applied again; a plain
-// create: nothing to add) and marked ready, or — for a migration's
+// finished (a template clone: sizing, networks and cloud-init applied again;
+// a plain create: its cloud-init seed when it has user-data and none yet) and
+// marked ready, or — for a migration's
 // imported-disk create, whose steps cannot be re-run on the half-built VM —
 // removed (recreate=true), so the caller builds it again from the staged
 // disk. A VM a PVE task is still working on (locked) is not touched: the
@@ -500,11 +533,22 @@ func (p *Provider) rebindCreate(ctx context.Context, req *providerv1.CreateReque
 		return nil, true, nil
 	}
 	p.logger.Info("A VM stamped with this VirtualMachine's UID was left half-created; finishing it", logArgs...)
-	if vmConfig.Template != "" {
+	switch {
+	case vmConfig.Template != "":
 		finishing := *vmConfig
 		finishing.VMID = vm.vmid
 		if err := p.configureClonedVM(ctx, req, &finishing, vm.node); err != nil {
-			return nil, false, p.outcomeUnknown(fmt.Sprintf("finishing Proxmox VM %d failed", vm.vmid), err)
+			return nil, false, p.outcomeUnknown(fmt.Sprintf(finishingVMFailedMessage, vm.vmid), err)
+		}
+		if len(req.UserData) == 0 {
+			if err := p.detachForeignSeeds(ctx, vm.node, vm.vmid); err != nil {
+				return nil, false, p.outcomeUnknown(fmt.Sprintf(finishingVMFailedMessage, vm.vmid), err)
+			}
+		}
+	case len(req.UserData) > 0:
+		// A new VM with user-data: its seed (attached only if it has none).
+		if err := p.finishDisklessSeed(ctx, req, vmConfig, vm.node, vm.vmid); err != nil {
+			return nil, false, p.outcomeUnknown(fmt.Sprintf(finishingVMFailedMessage, vm.vmid), err)
 		}
 	}
 	ready := vm.stamp.withPhase(ownerStampPhaseReady)
@@ -554,7 +598,10 @@ func (p *Provider) Delete(ctx context.Context, req *providerv1.DeleteRequest) (*
 	}
 
 	// Destroy with purge=1 so the config, disk volumes, and any backup/replication
-	// references are reclaimed (a bare DELETE leaves disks behind). Wait for the
+	// references are reclaimed (a bare DELETE leaves disks behind), and with
+	// destroy-unreferenced-disks=1 (pveapi DeleteVM), which also frees the VM's
+	// cloud-init seed: `qm destroy` never frees a CD-ROM's volume by itself
+	// (seed.go). Wait for the
 	// destroy task so a successful Delete RPC means the VM is actually gone — the
 	// controller removes the finalizer on success, so returning success while the
 	// VM still exists would orphan it.
@@ -1049,22 +1096,38 @@ func (p *Provider) nextVMID(ctx context.Context) int {
 	return id
 }
 
-// parseClassSizing extracts the CPU count and memory (MiB) from a marshaled
-// contracts.VMClass (keys "CPU"/"MemoryMiB"; no json tags). Returns zeros when
-// the JSON is empty or unparseable.
+// parseClassSizing extracts the CPU count and memory (MiB) of a Clone's
+// VMClass override. The VMClone controller sends a marshaled v1beta1
+// VMClassSpec (VMCloneReconciler.classJSON, clonePlacementAdmission.
+// cloneClassJSON): `cpu` and `memory`, a resource.Quantity such as "8Gi" —
+// not the contracts.VMClass "MemoryMiB" a Create carries. Reading only
+// "MemoryMiB" applied the class's CPU (encoding/json matches "cpu" to "CPU"
+// case-insensitively) and silently dropped its memory. A contracts.VMClass
+// body ("CPU", "MemoryMiB") is still read, so either encoding sizes the clone.
+// Returns zeros when the JSON is empty or unparseable (the clone keeps the
+// source's size).
 func parseClassSizing(classJSON string) (cpus int, memoryMiB int64) {
 	if classJSON == "" {
 		return 0, 0
 	}
 	var class struct {
-		CPU       int32 `json:"CPU"`
-		MemoryMiB int32 `json:"MemoryMiB"`
+		CPU       int32              `json:"cpu"`
+		Memory    *resource.Quantity `json:"memory"`
+		MemoryMiB int32              `json:"MemoryMiB"`
 	}
 	if err := json.Unmarshal([]byte(classJSON), &class); err != nil {
 		return 0, 0
 	}
-	return int(class.CPU), int64(class.MemoryMiB)
+	memoryMiB = int64(class.MemoryMiB)
+	if class.Memory != nil && class.Memory.Value() > 0 {
+		memoryMiB = class.Memory.Value() / bytesPerMiB
+	}
+	return int(class.CPU), memoryMiB
 }
+
+// bytesPerMiB converts a resource.Quantity's bytes to MiB, the unit of the
+// PVE `memory` setting.
+const bytesPerMiB = 1024 * 1024
 
 // applyVMClassSizing reconfigures a VM to the VMClass CPU/memory. It is used
 // after a clone (which inherits the source/template hardware): the VMClass CPU
@@ -1113,9 +1176,23 @@ func (p *Provider) applyVMClassSizing(ctx context.Context, node string, vmid, cp
 // clones; and with `citype: configdrive2` the network data (ENI) lists no MAC
 // addresses, so a clone whose PVE name equals its source's (the same
 // VirtualMachine name in another namespace) gets the source's instance-id.
+//
+// A source created with user-data has a NoCloud seed CD-ROM instead (R35,
+// seed.go), which PVE's clone copies by reference. The clone gets a seed of
+// its own with its own identity (cloneSeed); the source's seed is never
+// shared, and its user-data is not carried. A VMClone's inline user-data
+// (spec.customization) also gives the clone a seed, whatever its source.
+//
+// Every clone is a full clone: linked clones are refused (req.Linked).
 func (p *Provider) Clone(ctx context.Context, req *providerv1.CloneRequest) (*providerv1.CloneResponse, error) {
 	if p.client == nil {
 		return nil, p.createNotPerformed("PVE client not configured; nothing was cloned", nil)
+	}
+	// Linked clones are not supported, nor advertised (capabilities.go): the
+	// VMClone controller refuses one before it calls. One that still arrives
+	// is refused, never made as a full clone in silence.
+	if req.Linked {
+		return nil, errors.NewInvalidSpec("%s", linkedCloneUnsupportedMessage)
 	}
 
 	owner, err := cloneTargetOwner(req)
@@ -1170,37 +1247,23 @@ func (p *Provider) Clone(ctx context.Context, req *providerv1.CloneRequest) (*pr
 	config := &pveapi.VMConfig{
 		VMID:   targetVMID,
 		Name:   req.TargetName,
-		Custom: map[string]string{},
-	}
-	if req.Linked {
-		config.Custom["full"] = "0"
-	} else {
-		config.Custom["full"] = "1"
+		Custom: map[string]string{"full": "1"},
 	}
 
 	// Honor placement overrides (#261 P1-2): the target node and storage. The
 	// clone request is issued to the source node; PVE's `target` parameter places
 	// the result on another node, so the post-clone sizing must use that node.
 	targetNode := sourceNode
-	if req.PlacementJson != "" {
-		var placement struct {
-			Host      string `json:"Host"`
-			Datastore string `json:"Datastore"`
-		}
-		if err := json.Unmarshal([]byte(req.PlacementJson), &placement); err == nil {
-			if placement.Host != "" {
-				config.Custom["target"] = placement.Host
-				targetNode = placement.Host
-			}
-			if placement.Datastore != "" {
-				config.Storage = placement.Datastore
-			}
-		}
+	host, datastore := clonePlacement(req)
+	if host != "" {
+		config.Custom["target"] = host
+		targetNode = host
 	}
+	config.Storage = datastore
 
 	// The clone inherits the source's description: keep it, minus the source's
 	// owner stamp, plus the clone's own (none without a target UID).
-	base, sourceHas, err := p.inheritedDescription(ctx, sourceNode, sourceVMID)
+	base, sourceHas, sourceCfg, err := p.inheritedDescription(ctx, sourceNode, sourceVMID)
 	if stderrors.Is(err, pveapi.ErrVMNotFound) {
 		if gone, goneErr := p.vmGone(ctx, sourceVMID); goneErr == nil && gone {
 			return nil, errors.NewNotFound("VM", req.SourceVmId)
@@ -1209,6 +1272,13 @@ func (p *Provider) Clone(ctx context.Context, req *providerv1.CloneRequest) (*pr
 	}
 	if err != nil {
 		return nil, p.vmCreateNotPerformed(fmt.Sprintf("cannot read clone source %d; nothing was cloned (will retry)", sourceVMID), err)
+	}
+	// A source with a cloud-init seed, or a VMClone with inline user-data:
+	// the clone gets a seed of its own, which needs the SSH data plane
+	// (checked before anything is cloned).
+	needSeed, err := p.checkCloneSeedRequest(ctx, req, sourceCfg, sourceVMID, targetNode)
+	if err != nil {
+		return nil, err
 	}
 	p.warnIfTruncated(targetVMID, base, stamp)
 	if desc := cloneRequestDescription(base, sourceHas, stamp); desc != "" {
@@ -1239,6 +1309,13 @@ func (p *Provider) Clone(ctx context.Context, req *providerv1.CloneRequest) (*pr
 	if err := p.applyVMClassSizing(ctx, targetNode, targetVMID, cpus, memMiB); err != nil {
 		return nil, p.failAfterSubmit(ctx, targetNode, targetVMID, req.TargetName, stamp, true, "applying VMClass sizing to the clone failed", err)
 	}
+	// PVE's clone references its source's seed CD-ROM: the clone gets its own
+	// (seed_create.go cloneSeed).
+	if needSeed {
+		if err := p.cloneSeed(ctx, req, targetNode, targetVMID, config.Storage); err != nil {
+			return nil, p.failSeedOrStep(ctx, targetNode, targetVMID, req.TargetName, stamp, "giving the clone its cloud-init seed failed", err)
+		}
+	}
 	if stamp != nil {
 		ready := stamp.withPhase(ownerStampPhaseReady)
 		if err := p.writeOwnerStamp(ctx, targetNode, targetVMID, base, &ready); err != nil {
@@ -1254,7 +1331,8 @@ func (p *Provider) Clone(ctx context.Context, req *providerv1.CloneRequest) (*pr
 // rebindClone answers a Clone that found vm, a VM named target_name stamped
 // with the target VirtualMachine's UID, which an earlier Clone for it made: a
 // "ready" clone is returned; an interrupted ("creating") one gets the VMClass
-// sizing again and is marked ready; a locked one is left alone (retryable,
+// sizing again and its own cloud-init seed when it still references its
+// source's (cloneSeed), and is marked ready; a locked one is left alone (retryable,
 // outcome unknown).
 func (p *Provider) rebindClone(ctx context.Context, req *providerv1.CloneRequest, vm *ownedVM) (*providerv1.CloneResponse, error) {
 	id := p.vmIDOn(ctx, vm.node, vm.vmid)
@@ -1269,7 +1347,11 @@ func (p *Provider) rebindClone(ctx context.Context, req *providerv1.CloneRequest
 	}
 	cpus, memMiB := parseClassSizing(req.ClassJson)
 	if err := p.applyVMClassSizing(ctx, vm.node, vm.vmid, cpus, memMiB); err != nil {
-		return nil, p.outcomeUnknown(fmt.Sprintf("finishing clone %d failed", vm.vmid), err)
+		return nil, p.outcomeUnknown(fmt.Sprintf(finishingCloneFailedMessage, vm.vmid), err)
+	}
+	_, datastore := clonePlacement(req)
+	if err := p.cloneSeed(ctx, req, vm.node, vm.vmid, datastore); err != nil {
+		return nil, p.outcomeUnknown(fmt.Sprintf(finishingCloneFailedMessage, vm.vmid), err)
 	}
 	ready := vm.stamp.withPhase(ownerStampPhaseReady)
 	if err := p.writeOwnerStamp(ctx, vm.node, vm.vmid, vm.description, &ready); err != nil {
@@ -1413,12 +1495,12 @@ func (p *Provider) parseCreateRequest(ctx context.Context, req *providerv1.Creat
 						config.Custom["template_node"] = proxmoxSource.Node
 					}
 
-					// Set clone type (full vs linked)
+					// The provider makes every VM from a template as a full
+					// clone (Create sets full=1): a linked clone is not
+					// supported, and fullClone: false is not honoured.
 					if proxmoxSource.FullClone != nil && !*proxmoxSource.FullClone {
-						if config.Custom == nil {
-							config.Custom = make(map[string]string)
-						}
-						config.Custom["full_clone"] = "0" // Linked clone
+						p.logger.Warn("The image asks for a linked clone (fullClone: false); the Proxmox provider makes a full clone",
+							"vmid", vmid)
 					}
 				}
 			}
@@ -1434,71 +1516,27 @@ func (p *Provider) parseCreateRequest(ctx context.Context, req *providerv1.Creat
 	config.Networks = networks
 	config.IPConfigs = ipConfigs
 
-	// Configure cloud-init if user data provided
+	// User-data reaches the guest whole, through a NoCloud seed the provider
+	// builds on the PVE node over SSH (seed.go); nothing is read out of it. A
+	// request the provider cannot honour is refused before anything is
+	// created, never answered with a VM that silently lacks its user-data: a
+	// user-data or meta-data too large or not renderable, no SSH data plane,
+	// no SSH credentials or no known_hosts (all InvalidSpec, naming the
+	// missing configuration). The seed's storage follows the rules of a
+	// cloud-init drive (R33): the storages named for the VM are checked now,
+	// as PVE storage IDs, because they end up in a command.
 	if len(req.UserData) > 0 {
-		// The cloud-init drive (ide2) needs a "<storage>:cloudinit" value, and
-		// the storage must hold VM images. It is chosen where the VM exists to
-		// ask (diskfulCloudInitStorage for a template clone, whose primary
-		// disk's storage it can follow; Create's diskless branch otherwise),
-		// never defaulted to PVE's `local` here: on a stock install that
-		// storage has no `images` content and PVE refuses to start the VM
-		// (R33). The storages named for the VM are checked now, before
-		// anything is created, as PVE storage IDs: they end up in a config
-		// value.
 		if err := checkRequestStorage(config.Storage); err != nil {
 			return nil, "", err
 		}
 		if _, err := p.defaultStorage(); err != nil {
 			return nil, "", err
 		}
-
-		// Extract SSH keys and user from cloud-init data if possible
-		userData := string(req.UserData)
-		if strings.Contains(userData, "ssh_authorized_keys:") {
-			// Try to extract SSH keys from YAML
-			lines := strings.Split(userData, "\n")
-			var sshKeys []string
-			inKeys := false
-			for _, line := range lines {
-				if strings.Contains(line, "ssh_authorized_keys:") {
-					inKeys = true
-					continue
-				}
-				if inKeys && strings.HasPrefix(strings.TrimSpace(line), "- ") {
-					key := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(line), "- "))
-					key = strings.Trim(key, "\"'")
-					// Extra safety: ensure no trailing/leading whitespace including newlines
-					key = strings.TrimSpace(key)
-					if key != "" {
-						sshKeys = append(sshKeys, key)
-					}
-				} else if inKeys && !strings.HasPrefix(strings.TrimSpace(line), " ") {
-					inKeys = false
-				}
-			}
-			if len(sshKeys) > 0 {
-				// Join multiple keys with newline separator (no trailing newline)
-				// Then trim again to be absolutely sure
-				config.SSHKeys = strings.TrimSpace(strings.Join(sshKeys, "\n"))
-			}
+		if err := checkCreateSeedRequest(req, vmid); err != nil {
+			return nil, "", err
 		}
-
-		// Extract username
-		if strings.Contains(userData, "name:") {
-			lines := strings.Split(userData, "\n")
-			for _, line := range lines {
-				if strings.Contains(line, "name:") && !strings.Contains(line, "hostname:") {
-					parts := strings.Split(line, ":")
-					if len(parts) >= 2 {
-						username := strings.TrimSpace(parts[1])
-						username = strings.Trim(username, "\"' ")
-						if username != "" {
-							config.CIUser = username
-						}
-					}
-					break
-				}
-			}
+		if err := p.checkSeedPrerequisites(); err != nil {
+			return nil, "", err
 		}
 	}
 

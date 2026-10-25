@@ -21,7 +21,7 @@ The manager reconciles Kubernetes custom resources; each hypervisor runs as a se
 ## Features
 
 - **Multi-Hypervisor Support**: vSphere, Libvirt/KVM, and Proxmox VE simultaneously
-- **Cross-Provider VM Migration**: Storage-backend-agnostic disk migration between any two hypervisors — **S3** and **NFS** staging backends, validated across vSphere ⇄ Libvirt/KVM ⇄ Proxmox VE in **both directions** (ADR-0006). The disk is staged through object storage or an NFS export and moved with `qemu-img`; it never traverses a CSI PVC (PVC is compat-only). NFS uses qemu-img's native libnfs transport (kernel-mount on Proxmox). (v0.3.11)
+- **VM Cloning (VMClone)**: Full clones on vSphere, Proxmox and Libvirt, linked clones on vSphere only (libvirt linked clones are disabled in this release; Proxmox makes full clones only), MVP — `source.vmRef`, same-provider
 - **VM Cloning (VMClone)**: Full and linked clones, MVP — `source.vmRef`, same-provider (vSphere/Proxmox/Libvirt; libvirt: qcow2 overlay for linked, full copy for full)
 - **VMSet CRD defined; controller not yet active**: Multi-VM replica set is defined but the controller is a stub that reports `Ready=False / ControllerNotImplemented`; rolling updates and replica management are roadmap
 - **VMPlacementPolicy (reference-only)**: Placement rules (affinity, anti-affinity, resource constraints) expressed as a policy object referenced by `VirtualMachine.spec.placementRef`; no standalone enforcement controller; only the scheduler of a clustered Provider (`topology: cluster`) reads it
@@ -127,7 +127,8 @@ experimental clustered libvirt Provider; see the
 
 **Treat `create` on `VMClone` as read access to the source VM's data.** A
 clone is a full copy of its source's disk and boots cloud-init user-data as
-root. On libvirt that user-data can be the `VMClone`'s own
+root. On libvirt, and on Proxmox for a source created with user-data, that
+user-data can be the `VMClone`'s own
 (`spec.customization.userData.cloudInit.inline`). See
 [VM ownership: a clone's host identity](docs/vm-ownership.md#a-clones-host-identity).
 
@@ -160,7 +161,7 @@ Per the [canonical capabilities matrix](https://projectbeskar.github.io/virtriga
 | **Snapshots** | ✅ | ✅ | ✅ | Point-in-time captures |
 | **Memory Snapshots** | ✅ | ✅ | ✅ | RAM-inclusive checkpoints for a **running** VM. vSphere: `CreateSnapshot(memory=true)`. Libvirt: `snapshot-create-as` without `--disk-only`; a stopped VM is honestly downgraded to disk-only with a WARN ([#202]). |
 | **Cloning (full)** | ✅ | ✅ | ✅ | Libvirt: full copy of resolved disk path (qemu-img convert / vol-clone), same-provider ([#153]) |
-| **Linked Clones** | ✅ | ✅ | ✅ | Libvirt: qcow2 overlay (backing-file COW), same-provider ([#153]). UEFI/secure-boot nvram re-point is a deferred follow-up (#208). |
+| **Linked Clones** | ✅ | ✅ | ❌ | Proxmox: every clone is a full clone; a `LinkedClone` VMClone is refused (`LinkedCloneUnsupported`). Libvirt: qcow2 overlay (backing-file COW), same-provider ([#153]). UEFI/secure-boot nvram re-point is a deferred follow-up (#208). |
 | **Clone RPC** | ✅ | ✅ | ✅ | Libvirt Clone implemented: linked (qcow2 overlay) + full copy, `source.vmRef`, same-provider ([#153]) |
 | **ImagePrepare RPC** | ✅ | ✅ | ✅ | Libvirt: import/convert image into a storage pool ([#154]) |
 | **Task Tracking** | ✅ | N/A | ✅ | Async operation monitoring |

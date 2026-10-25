@@ -27,7 +27,9 @@ func GetProviderCapabilities() *capabilities.Manager {
 		Core().
 		Snapshots().
 		MemorySnapshots().
-		LinkedClones().
+		// No LinkedClones: every Create from a template and every Clone is a
+		// full clone (a VMClone source is a VM, which PVE clones linked only
+		// when it is a template), and Clone refuses a linked request.
 		OnlineReconfigure().
 		OnlineDiskExpansion().
 		// ImageImport routes import-style VMImage sources (source.http) to

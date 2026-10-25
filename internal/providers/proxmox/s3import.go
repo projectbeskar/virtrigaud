@@ -21,7 +21,6 @@ import (
 	stderrors "errors"
 	"fmt"
 	"io"
-	"net/url"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -268,9 +267,9 @@ const proxmoxImportedDiskInterface = "scsi0"
 //     probes the stage's own format, whatever its file extension says).
 //  3. `qm set <vmid> --scsihw virtio-scsi-pci --scsi0 <storage>:<imported-volume>
 //     --boot order=scsi0` — wires the imported disk as the boot disk; then, when
-//     the request carries user-data, a PVE API config update attaches the
-//     cloud-init drive (ide2) with ciuser/sshkeys (buildImportedDiskCloudInitValues).
-//     The cloud-init drive is not in the boot order.
+//     the request carries user-data, the VM gets its NoCloud seed CD-ROM
+//     (seed.go) on the same storage. The seed is not in the boot order, and
+//     none of PVE's cloud-init keys (ipconfigN, nameserver) is set then.
 //  4. Remove the node-side stage (best-effort).
 //
 // The shell carries the owner stamp from step 1 ("creating"), and "ready" once
@@ -323,6 +322,12 @@ func (p *Provider) createFromImportedDisk(
 	// the create request, so the shell is never unowned.
 	vmConfig.Template = ""
 	vmConfig.Clone = ""
+	// With user-data, the IP settings go into the seed's network-config, not
+	// into PVE's cloud-init keys (ipconfigN, nameserver).
+	ipConfigs := vmConfig.IPConfigs
+	if len(req.UserData) > 0 {
+		vmConfig.IPConfigs = nil
+	}
 	if stamp != nil {
 		if vmConfig.Custom == nil {
 			vmConfig.Custom = make(map[string]string)
@@ -392,22 +397,22 @@ func (p *Provider) createFromImportedDisk(
 		return nil, failSSH("qm set (attach imported disk) failed", err)
 	}
 
-	// 3b. Wire cloud-init via the PVE API (ReconfigureVMRaw url-encodes the values
-	// — notably multi-line SSH keys — the SAME way the clone+cloud-init Create
-	// path does). Doing this over the API rather than `qm set --sshkeys` avoids
-	// the shell/PVE encoding pitfalls of passing a multi-line key on a command
-	// line. Only attached when the migration delivered user-data, so a migrated
-	// VM that brings its own configured guest is not forced onto cloud-init.
+	// 3b. The VirtualMachine's user-data, when it has one, reaches the guest
+	// through a NoCloud seed (seed.go) on the same storage as the imported
+	// disk, attached after the disk (so the disk's unusedN entry is gone by
+	// then). A migrated VM without user-data gets no cloud-init source, so a
+	// guest that brings its own configuration is not forced onto cloud-init.
 	if len(req.UserData) > 0 {
-		ciValues := buildImportedDiskCloudInitValues(storageName, vmConfig)
-		if len(ciValues) > 0 {
-			ciTask, ciErr := p.client.ReconfigureVMRaw(ctx, node, vmConfig.VMID, ciValues)
-			if ciErr != nil {
-				return nil, fail(fmt.Sprintf("failed to attach cloud-init to imported-disk VM %d", vmConfig.VMID), ciErr)
-			}
-			if err := p.client.WaitForTask(ctx, node, ciTask); err != nil {
-				return nil, fail("cloud-init reconfigure task failed", err)
-			}
+		cfg, cfgErr := p.client.GetVMConfig(ctx, node, vmConfig.VMID)
+		if cfgErr != nil {
+			return nil, fail(fmt.Sprintf("reading the config of imported-disk VM %d failed", vmConfig.VMID), cfgErr)
+		}
+		err := p.applyCreateSeed(ctx, req, node, vmConfig.VMID, ipConfigs, cfg, func(map[string]interface{}) (string, error) {
+			return storageName, nil
+		})
+		if err != nil {
+			return nil, p.failSeedOrStep(ctx, node, vmConfig.VMID, req.Name, stamp,
+				fmt.Sprintf("attaching the cloud-init seed of imported-disk VM %d failed", vmConfig.VMID), err)
 		}
 	}
 
@@ -521,10 +526,9 @@ func buildImportDiskCommand(vmid int, stagePath, storage, format string) string 
 
 // buildImportedDiskSetCommand builds the `qm set` command that attaches the
 // imported volume as the virtio-scsi boot disk. It sets ONLY simple,
-// encoding-safe values (the disk volid and the boot order); cloud-init is wired
-// separately via the API (buildImportedDiskCloudInitValues) so multi-line SSH
-// keys are url-encoded correctly. It is a free function so the exact argv is
-// unit-testable without SSH.
+// encoding-safe values (the disk volid and the boot order); cloud-init is a
+// seed attached separately (seed.go), whose content never reaches a command
+// line. It is a free function so the exact argv is unit-testable without SSH.
 func buildImportedDiskSetCommand(vmid int, importedVolume string) string {
 	parts := []string{
 		fmt.Sprintf("qm set %d", vmid),
@@ -533,23 +537,4 @@ func buildImportedDiskSetCommand(vmid int, importedVolume string) string {
 		fmt.Sprintf("--boot order=%s", proxmoxImportedDiskInterface),
 	}
 	return strings.Join(parts, " ")
-}
-
-// buildImportedDiskCloudInitValues builds the url.Values for the API
-// ReconfigureVMRaw call that attaches a cloud-init drive and propagates the SSH
-// keys / user already parsed into vmConfig. Using url.Values (the same path the
-// clone+cloud-init Create flow uses) means PVE receives correctly-encoded values,
-// notably multi-line SSH keys, with none of the shell/command-line pitfalls of
-// `qm set --sshkeys`. Returns an empty map when there is nothing to attach. It is
-// a free function so the exact values are unit-testable without a live PVE.
-func buildImportedDiskCloudInitValues(storage string, vmConfig *pveapi.VMConfig) url.Values {
-	values := url.Values{}
-	values.Set("ide2", storage+":cloudinit")
-	if vmConfig.CIUser != "" {
-		values.Set("ciuser", vmConfig.CIUser)
-	}
-	if vmConfig.SSHKeys != "" {
-		values.Set("sshkeys", strings.TrimSpace(vmConfig.SSHKeys))
-	}
-	return values
 }

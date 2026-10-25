@@ -17,6 +17,7 @@ limitations under the License.
 package proxmox
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -153,6 +154,9 @@ type sshTransport struct {
 	// runOverride, when set (tests only), runs remote commands for runSSH
 	// instead of ssh.
 	runOverride func(ctx context.Context, remoteCmd string) (stdout, stderr string, err error)
+	// runInputOverride, when set (tests only), runs remote commands for
+	// runSSHInput instead of ssh.
+	runInputOverride func(ctx context.Context, stdin []byte, remoteCmd string) (stdout, stderr string, err error)
 }
 
 // proxmoxHostKeyPolicy captures the resolved SSH host-key verification posture.
@@ -483,6 +487,33 @@ func (t *sshTransport) runSSH(ctx context.Context, remoteCmd string) (stdout, st
 	cmd.Stdout = &outBuf
 	cmd.Stderr = &errBuf
 	cmd.Stdin = nil
+	runErr := cmd.Run()
+	stdout = outBuf.String()
+	stderr = errBuf.String()
+	if runErr != nil {
+		return stdout, stderr, fmt.Errorf("ssh %s: %w (stderr: %s)", t.host, runErr, strings.TrimSpace(stderr))
+	}
+	return stdout, stderr, nil
+}
+
+// runSSHInput runs remoteCmd on the PVE node with stdin as its standard input
+// and returns its captured stdout and stderr, like runSSH. It is for small
+// inputs that must never be part of a command line (the cloud-init seed's
+// files, which may carry secrets): the bytes travel only over the SSH
+// session's stdin, and neither they nor the command's output are logged
+// here.
+func (t *sshTransport) runSSHInput(ctx context.Context, stdin []byte, remoteCmd string) (stdout, stderr string, err error) {
+	if t.runInputOverride != nil {
+		return t.runInputOverride(ctx, stdin, remoteCmd)
+	}
+	cmd, err := t.buildSSHCommand(ctx, remoteCmd)
+	if err != nil {
+		return "", "", err
+	}
+	var outBuf, errBuf strings.Builder
+	cmd.Stdin = bytes.NewReader(stdin)
+	cmd.Stdout = &outBuf
+	cmd.Stderr = &errBuf
 	runErr := cmd.Run()
 	stdout = outBuf.String()
 	stderr = errBuf.String()

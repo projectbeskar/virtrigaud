@@ -104,15 +104,24 @@ happened only for clones with user-data or SSH keys).
 
 ## IP settings
 
-Each entry becomes the VM's `ipconfigN`, the cloud-init network setting of NIC `N`:
+**A VM with user-data** (`spec.userData`) gets a NoCloud seed CD-ROM that
+carries its user-data, and the IP settings travel in the seed's
+`network-config`, not in PVE's cloud-init keys: the provider sets no
+`ipconfigN` and no `nameserver` on such a VM. Each entry becomes an entry of
+the network-config (version 2) for NIC `N`, matched by the MAC address PVE
+gave that NIC and named `eth<N>`, as PVE's own cloud-init network data names
+it: `dhcp4: true` without a static IP, else the address with its prefix and a
+default route through the gateway. The DNS servers of all entries are given to
+every NIC. See
+[`docs/proxmox-cloud-init-storage.md`](proxmox-cloud-init-storage.md#network-config).
 
-- With a static IP: `ip=<address>/<prefix>[,gw=<gateway>]`. This is written for
-  a clone with or without user-data. It takes effect when the VM has a
-  cloud-init drive.
-- Without one: `ip=dhcp`. A new VM gets it on every NIC. A clone gets it only when
-  the request carries user-data or SSH keys (the provider then configures the VM's
-  cloud-init), as before this change. The prefix and gateway of such an entry are
-  ignored.
+**A VM without user-data** gets each entry as its `ipconfigN`, PVE's cloud-init
+network setting of NIC `N`, as before:
+
+- With a static IP: `ip=<address>/<prefix>[,gw=<gateway>]`. It takes effect only
+  when the VM has a PVE cloud-init drive (one its template has).
+- Without one: `ip=dhcp` on every NIC of a new VM; a clone gets none (it keeps
+  the template's). The prefix and gateway of such an entry are ignored.
 
 The DNS servers of all entries, static or DHCP, become the VM's single
 `nameserver` setting (PVE has no per-NIC DNS), each server once, in order. The
@@ -158,7 +167,8 @@ unaffected. A narrowly scoped token needs, on the VM and its bridges:
 
 - `VM.Config.Network` to set a `netN` (a new VM's NICs, and a clone's named NICs);
 - `VM.Config.Cloudinit` to set `ipconfigN` and `nameserver` (static IP and DNS
-  on a clone, and the DHCP `ipconfigN` of a clone with user-data);
+  on a VM without user-data; a VM with user-data gets them through its seed,
+  which the provider attaches over SSH);
 - `SDN.Use` on `/sdn/zones/<zone>/<bridge>` (and
   `/sdn/zones/<zone>/<bridge>/<tag>` for a VLAN tag) for every bridge a VM is put
   on, for any token that is not root. PVE checks it for each `netN` it writes

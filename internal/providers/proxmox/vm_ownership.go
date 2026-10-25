@@ -553,17 +553,17 @@ func (p *Provider) vmIDOn(ctx context.Context, node string, vmid int) string {
 //
 // It also reports whether the source has a description at all: PVE copies it
 // to the clone whenever the clone request's own description is empty, so
-// cloneRequestDescription then sends an explicit one.
-func (p *Provider) inheritedDescription(ctx context.Context, node string, vmid int) (base string, sourceHas bool, err error) {
-	cfg, err := p.client.GetVMConfig(ctx, node, vmid)
+// cloneRequestDescription then sends an explicit one. cfg is the source's config.
+func (p *Provider) inheritedDescription(ctx context.Context, node string, vmid int) (base string, sourceHas bool, cfg map[string]interface{}, err error) {
+	cfg, err = p.client.GetVMConfig(ctx, node, vmid)
 	if err != nil {
-		return "", false, err
+		return "", false, nil, err
 	}
 	desc := configString(cfg, pveConfigKeyDescription)
 	if isOwnerStampLine(desc) {
 		p.logger.Info("The clone source carries an owner stamp; the clone does not inherit it", "source_vmid", vmid)
 	}
-	return stripOwnerStamp(desc), strings.TrimSpace(desc) != "", nil
+	return stripOwnerStamp(desc), strings.TrimSpace(desc) != "", cfg, nil
 }
 
 // unstampedCloneNote is the description sent for a clone that has neither

@@ -45,7 +45,7 @@ func (n *fakeNode) run(t *testing.T) func(ctx context.Context, cmd string) (stri
 		defer n.mu.Unlock()
 		n.commands = append(n.commands, cmd)
 		switch {
-		case strings.HasPrefix(cmd, "pgrep "):
+		case strings.Contains(cmd, "pgrep -f -- "):
 			if n.pgrepExit == 0 {
 				return "4242\n", "", nil
 			}

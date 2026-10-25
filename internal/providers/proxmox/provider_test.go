@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -28,6 +29,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"sigs.k8s.io/yaml"
 
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
 	"github.com/projectbeskar/virtrigaud/internal/providers/proxmox/pveapi"
@@ -53,11 +55,13 @@ func TestProxmoxProvider_Validate(t *testing.T) {
 
 func TestProxmoxProvider_CreateAndDescribe(t *testing.T) {
 	// Start fake PVE server
-	_, endpoint, err := pvefake.StartFakeServer()
+	srv, endpoint, err := pvefake.StartFakeServer()
 	require.NoError(t, err)
 
-	// Create provider with fake server
+	// Create provider with fake server (and a node that builds the
+	// user-data's seed)
 	provider := createTestProvider(endpoint)
+	provider.ssh = newSeedNode(t, srv).transport()
 
 	ctx := context.Background()
 
@@ -151,11 +155,11 @@ func TestProxmoxProvider_Clone(t *testing.T) {
 
 	ctx := context.Background()
 
-	// Use template VM (ID 9000 from fake server seed data)
+	// Use template VM (ID 9000 from fake server seed data). The clone is
+	// full: a linked one is refused (TestClone_LinkedIsRefused).
 	cloneReq := &providerv1.CloneRequest{
 		SourceVmId: "9000",
 		TargetName: "test-clone",
-		Linked:     true,
 	}
 
 	cloneResp, err := provider.Clone(ctx, cloneReq)
@@ -269,7 +273,7 @@ func TestProxmoxProvider_GetCapabilities(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.True(t, resp.SupportsSnapshots)
-	assert.True(t, resp.SupportsLinkedClones)
+	assert.False(t, resp.SupportsLinkedClones, "every Proxmox clone is a full clone")
 	assert.True(t, resp.SupportsImageImport)
 	assert.Contains(t, resp.SupportedDiskTypes, "raw")
 	assert.Contains(t, resp.SupportedDiskTypes, "qcow2")
@@ -591,14 +595,19 @@ func TestProxmoxProvider_ImagePrepare_EmptySource(t *testing.T) {
 
 // TestProxmoxProvider_MultiNIC creates a VM with three NICs from the networks
 // the manager sends (the real contracts.NetworkAttachment, marshalled as
-// internal/transport/grpc does) and checks each lands as specified (R36).
+// internal/transport/grpc does) and checks each lands as specified (R36). The
+// VM has user-data, so the IP settings travel in its seed's network-config,
+// one entry per NIC matched by the MAC PVE gave it (R35).
 func TestProxmoxProvider_MultiNIC(t *testing.T) {
 	// Start fake PVE server
 	srv, endpoint, err := pvefake.StartFakeServer()
 	require.NoError(t, err)
+	srv.SetAssignCreateMACs(true)
 
 	// Create provider with fake server
 	provider := createTestProvider(endpoint)
+	node := newSeedNode(t, srv)
+	provider.ssh = node.transport()
 
 	ctx := context.Background()
 
@@ -643,11 +652,25 @@ users:
 	require.NoError(t, err)
 	vm, ok := srv.GetVM(vmid)
 	require.True(t, ok)
-	assert.Equal(t, "virtio,bridge=vmbr0", vm.Config["net0"])
-	assert.Equal(t, "e1000,bridge=vmbr1,tag=100", vm.Config["net1"])
-	assert.Equal(t, "virtio,bridge=vmbr2", vm.Config["net2"])
-	assert.Equal(t, "ip=192.168.1.100/24,gw=192.168.1.1", vm.Config["ipconfig0"])
-	assert.Equal(t, "8.8.8.8 1.1.1.1", vm.Config["nameserver"])
+	mac := func(i int) string { return pvefake.CloneMAC(vmid, i) }
+	assert.Equal(t, "virtio="+mac(0)+",bridge=vmbr0", vm.Config["net0"])
+	assert.Equal(t, "e1000="+mac(1)+",bridge=vmbr1,tag=100", vm.Config["net1"])
+	assert.Equal(t, "virtio="+mac(2)+",bridge=vmbr2", vm.Config["net2"])
+	assert.NotContains(t, vm.Config, "ipconfig0")
+	assert.NotContains(t, vm.Config, "nameserver")
+
+	seeds := node.seedsOf(vmid)
+	require.Len(t, seeds, 1)
+	var network nocloudNetwork
+	require.NoError(t, yaml.Unmarshal(seeds[0].files[seedFileNetworkConfig], &network))
+	assert.Equal(t, 2, network.Version)
+	dns := &nocloudNameservers{Addresses: []string{"8.8.8.8", "1.1.1.1"}}
+	assert.Equal(t, map[string]nocloudEthernet{
+		"eth0": {Match: nocloudMatch{MACAddress: strings.ToLower(mac(0))}, SetName: "eth0",
+			Addresses: []string{"192.168.1.100/24"}, Routes: []nocloudRoute{{To: "0.0.0.0/0", Via: "192.168.1.1"}}, Nameservers: dns},
+		"eth1": {Match: nocloudMatch{MACAddress: strings.ToLower(mac(1))}, SetName: "eth1", DHCP4: true, Nameservers: dns},
+		"eth2": {Match: nocloudMatch{MACAddress: strings.ToLower(mac(2))}, SetName: "eth2", DHCP4: true, Nameservers: dns},
+	}, network.Ethernets)
 }
 
 func TestProxmoxProvider_UpdatedCapabilities(t *testing.T) {
@@ -663,7 +686,7 @@ func TestProxmoxProvider_UpdatedCapabilities(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.True(t, resp.SupportsSnapshots)
-	assert.True(t, resp.SupportsLinkedClones)
+	assert.False(t, resp.SupportsLinkedClones, "every Proxmox clone is a full clone")
 	assert.True(t, resp.SupportsImageImport)
 	assert.True(t, resp.SupportsReconfigureOnline) // Enhanced for hot-plug
 	assert.True(t, resp.SupportsDiskExpansionOnline)
