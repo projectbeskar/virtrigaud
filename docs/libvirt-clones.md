@@ -92,9 +92,10 @@ What a new instance does **not** change:
   `sysprep.customCommands`, `guestCommands[].command`/`.arguments` and
   `userData.ignition.inline` stay in the `VMClone`. They are still **stored in
   plaintext** in the object, so do not put real credentials there. With
-  webhooks enabled, an admission warning names each of these fields that is
-  set (never its value), and once the provider accepts the clone the manager
-  records a `Warning` event `CustomizationSecretNotSent` naming them.
+  webhooks enabled, an admission warning names the ones that are set (never
+  their values) when the customization is created or changed, and once the
+  provider accepts the clone the manager records a `Warning` event
+  `CustomizationSecretNotSent` naming them.
 - **User-data that pins the identity.** Some `#cloud-config` keys in the
   clone's user-data (the source's, or the customization's) undo the new
   instance, and the provider logs a `WARN` naming them (never their values):

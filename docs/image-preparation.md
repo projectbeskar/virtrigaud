@@ -748,13 +748,19 @@ host's clock.
    process list or in a file, and the SSH user's `~/.curlrc` is not read. It is exactly
    **one** transfer (URL globbing is off, so `[1-9]` or `{a,b}` in a URL is literal), limited
    to `http`, `https` and `ftp` (redirects included), with a 30-second connect timeout, a
-   total time limit of `spec.prepare.timeout` (default 30m), and a size limit of
-   `VIRTRIGAUD_LIBVIRT_IMAGE_MAX_DOWNLOAD_GIB` GiB (provider pod environment, default `256`;
-   curl enforces it on the announced size, and recent curl versions also stop a transfer
-   that grows past it). Its checksum is verified when `checksum` is set, and its header must
-   not reference other files. A create that carries an image URL instead of a prepared
-   image (the legacy create-from-URL path) downloads the same way, with a time limit of 30m or
-   the time left of the `Create` call, whichever is shorter.
+   size limit of `VIRTRIGAUD_LIBVIRT_IMAGE_MAX_DOWNLOAD_GIB` GiB (provider pod environment,
+   default `256`; curl enforces it on the announced size, and recent curl versions also stop
+   a transfer that grows past it), and a total time limit of `spec.prepare.timeout` (default
+   30m) **or the time left in the `ImagePrepare` call, whichever is shorter**, less a tenth of
+   that time (at most a minute) kept for the convert and publish. The manager gives an
+   `ImagePrepare` call 5 minutes, so today a download is cut off after about 4.5 minutes
+   whatever `spec.prepare.timeout` says; curl never runs on after the call has ended. A call
+   with less than a second left runs no download and is retried. Its checksum is verified
+   when `checksum` is set, and its header must not reference other files. A create that
+   carries an image URL instead of a prepared image (the legacy create-from-URL path)
+   downloads the same way, with 30m in place of `spec.prepare.timeout` (the manager gives a
+   `Create` 5 minutes as well). If curl is not installed on the host, the provider log says
+   so.
 3. The converted image is **finalized read-only**: `chmod 0444`, `restorecon` (only when
    `selinuxenabled` reports SELinux on; through non-interactive `sudo -n`, best-effort),
    `sync`. It is **not** chowned — it stays owned by the provider's SSH user, which is what
