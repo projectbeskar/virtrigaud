@@ -68,8 +68,11 @@ Examples:
   # Create with remote runtime configuration
   vrtg-provider init myprovider --remote
 
-  # Create in a specific directory
-  vrtg-provider init myprovider --output ./providers/`,
+  # Create under a specific directory (the project goes in <dir>/providers/myprovider)
+  vrtg-provider init myprovider --output ./work
+
+  # Resolve the SDK and proto modules from a VirtRigaud checkout elsewhere
+  vrtg-provider init myprovider --virtrigaud-path ~/src/virtrigaud`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			opts.providerName = args[0]
