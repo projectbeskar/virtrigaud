@@ -25,6 +25,38 @@ The comments on the API types and in the proto are published as the CRD descript
 - [ ] Config change only
 - [x] Documentation only
 
+## [2026-10-25 12:28] - SDK and proto modules published per release; provider-runtime chart deprecated
+**Author:** @wrkode (William Rizzo)
+
+### Added
+- `hack/module-versions.sh`: keeps the three Go modules in lockstep and tags a release's modules. `validate` accepts only release versions (`vX.Y.Z`, `-rcN`/`-alphaN`/`-betaN`, major 0 or 1); `set` rewrites the in-repo requires of `go.mod` and `sdk/go.mod`; `check [<commit>]` fails unless every in-repo require names the version and `proto/go.mod` requires no VirtRigaud module; `tag [--push]` creates annotated `sdk/<v>` and `proto/<v>` tags on the commit of the release tag `<v>`, keeps one already on that commit, refuses one on another commit (locally or on the remote) and pushes with `--atomic` and without `--force`.
+- `Makefile`: `set-module-versions`, `check-module-versions` and `release-go-modules` targets.
+- `.github/workflows/release.yml`: the `prepare` job checks out the release tag and fails the release, before anything is built, unless `go.mod` and `sdk/go.mod` require the in-repo modules at the tag; the new `tag-go-modules` job (only `contents: write`, after `create-release`) tags `sdk/<tag>` and `proto/<tag>` on the release commit, release candidates included.
+- `internal/scaffold/scaffold.go`: `Config.ModuleVersion` and `IsReleaseVersion`. With a release version and no checkout, the generated `go.mod` requires the VirtRigaud, SDK and proto modules at that version with no `replace` directives, and its `go` directive is the Go version the binary was built with. A generated `Dockerfile` of a project with `replace` directives says that the checkout is not in its build context.
+- `charts/virtrigaud-provider-runtime/templates/NOTES.txt`, `charts/virtrigaud-provider-runtime/README.md`: the deprecation warning on install, and the migration to a `Provider` resource (chart values mapped to `Provider` fields).
+- `docs/go-modules.md`, `sdk/README.md`, `proto/README.md`: the modules and their tags, the lockstep rule, the release steps, tag immutability and how to verify a release's module tags.
+- `cmd/vrtg-provider/main_test.go`, `internal/scaffold/scaffold_test.go`: tests for the pinned `go.mod` (parsed with `go mod edit -json`), the checkout override of a release, a release build inside a checkout, `IsReleaseVersion` and the toolchain version.
+
+### Changed
+- `go.mod`, `sdk/go.mod`: the in-repo requires name `v0.4.1-rc1` (they named `proto v0.1.0`, which was never tagged, the root module at `v0.1.0` and a placeholder SDK pseudo-version); the `replace` directives still resolve them from the working tree.
+- `cmd/vrtg-provider/init.go`, `cmd/vrtg-provider/main.go`: a release build of `vrtg-provider` (`main.version` set to a release version) pins the published modules of its own release and no longer detects the checkout the project is created in; `--virtrigaud-path` still switches to `replace` directives, keeping the release version in the requires; a development build behaves as before, with `v0.0.0` placeholder requires instead of `v0.1.0`.
+- `Makefile`: `release-proto` and `release-sdk` require an explicit `VERSION` (the `git describe` default no longer satisfies the check, which never failed before) that is a release version, tag only the commit of the existing release tag, and no longer run `go mod tidy`, `buf push` or write `docs/sdk/README.md` after tagging.
+- `.github/workflows/release.yml`: the `prepare` job passes the tag to the shell through `env` and rejects a tag with characters outside `[A-Za-z0-9._-]`.
+- `charts/virtrigaud-provider-runtime/Chart.yaml`: `deprecated: true`, version `0.1.2`, description says it is deprecated and to use a `Provider` resource.
+- `.github/workflows/runtime-chart.yml`: the `package` job (which uploaded the packaged chart as an artifact on every push to `main`) is removed; lint, template and the kind install test stay until the chart is removed.
+- `examples/proxmox-complete-example.yaml`: points at `spec.runtime.env` instead of the runtime chart's values for provider settings.
+- `docs/cli-tools.md`, `docs/upgrading.md` (new v0.4.1 section), `docs/README.md`, `CONTRIBUTING.md` (release process).
+- `charts/virtrigaud-provider-runtime/`: **deprecated** in v0.4.1 and removed in the next minor release. It runs a provider outside a `Provider` resource, which the manager never connects to, bypassing the TLS/mTLS settings, credential mount, dedicated ServiceAccount and hardened security context the manager sets up for a provider.
+
+### Why
+The SDK and proto modules were not consumable: they had no tags, and their `require` lines pointed at versions that do not exist, so a provider written outside this repository needed a local checkout and `replace` directives, and its generated `Dockerfile` could not build. The runtime chart was undocumented, unreleased and deploys providers around the manager-managed runtime.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-10-25 12:40] - CLI and build-tooling hygiene
 **Author:** @wrkode (William Rizzo)
 
