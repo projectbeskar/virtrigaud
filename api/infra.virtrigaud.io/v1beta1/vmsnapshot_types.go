@@ -534,7 +534,11 @@ const (
 //+kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 //+kubebuilder:resource:shortName=vmsnap
 
-// VMSnapshot is the Schema for the vmsnapshots API
+// VMSnapshot takes one snapshot of a VirtualMachine, through the VM's Provider,
+// and records the result. Deleting the VMSnapshot deletes the provider
+// snapshot. The VM must be in the VMSnapshot's namespace. To revert a VM to a
+// snapshot, set spec.snapshot.revertToRef on the VirtualMachine (see
+// docs/vm-snapshot-revert.md).
 // +kubebuilder:storageversion
 type VMSnapshot struct {
 	metav1.TypeMeta   `json:",inline"`

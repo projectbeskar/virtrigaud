@@ -22,81 +22,98 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 )
 
-// VMSetSpec defines the desired state of VMSet
+// VMSetSpec defines the desired state of VMSet. VMSet has no active
+// controller in this release, so every field is accepted but not acted on: no
+// VMs are created from the template.
 type VMSetSpec struct {
-	// Replicas is the desired number of VMs in the set
+	// Replicas is the desired number of VMs in the set. Accepted but not acted
+	// on in this release.
 	// +optional
 	// +kubebuilder:default=1
 	// +kubebuilder:validation:Minimum=0
 	// +kubebuilder:validation:Maximum=1000
 	Replicas *int32 `json:"replicas,omitempty"`
 
-	// Selector is a label query over VMs that should match the replica count
+	// Selector is a label query over VMs that should match the replica count.
+	// Accepted but not acted on in this release.
 	Selector *metav1.LabelSelector `json:"selector"`
 
-	// Template is the object that describes the VM that will be created
+	// Template is the object that describes the VM that will be created.
+	// Accepted but not acted on in this release.
 	Template VMSetTemplate `json:"template"`
 
-	// UpdateStrategy defines how to replace existing VMs with new ones
+	// UpdateStrategy defines how to replace existing VMs with new ones. Accepted
+	// but not acted on in this release.
 	// +optional
 	UpdateStrategy VMSetUpdateStrategy `json:"updateStrategy,omitempty"`
 
-	// MinReadySeconds is the minimum number of seconds for which a newly created VM
-	// should be ready without any of its containers crashing
+	// MinReadySeconds is the minimum number of seconds for which a newly created
+	// VM should be ready before it is considered available. Accepted but not
+	// acted on in this release.
 	// +optional
 	// +kubebuilder:validation:Minimum=0
 	// +kubebuilder:validation:Maximum=3600
 	MinReadySeconds int32 `json:"minReadySeconds,omitempty"`
 
-	// RevisionHistoryLimit is the number of old VMSets to retain
+	// RevisionHistoryLimit is the number of old VMSets to retain. Accepted but
+	// not acted on in this release.
 	// +optional
 	// +kubebuilder:default=10
 	// +kubebuilder:validation:Minimum=0
 	// +kubebuilder:validation:Maximum=100
 	RevisionHistoryLimit *int32 `json:"revisionHistoryLimit,omitempty"`
 
-	// PersistentVolumeClaimRetentionPolicy defines the retention policy for PVCs
+	// PersistentVolumeClaimRetentionPolicy defines the retention policy for
+	// PVCs. Accepted but not acted on in this release.
 	// +optional
 	PersistentVolumeClaimRetentionPolicy *VMSetPersistentVolumeClaimRetentionPolicy `json:"persistentVolumeClaimRetentionPolicy,omitempty"`
 
-	// Ordinals configures the sequential ordering of VM indices
+	// Ordinals configures the sequential ordering of VM indices. Accepted but
+	// not acted on in this release.
 	// +optional
 	Ordinals *VMSetOrdinals `json:"ordinals,omitempty"`
 
-	// ServiceName is the name of the service that governs this VMSet
+	// ServiceName is the name of the service that governs this VMSet. Accepted
+	// but not acted on in this release.
 	// +optional
 	// +kubebuilder:validation:MaxLength=253
 	ServiceName string `json:"serviceName,omitempty"`
 
-	// VolumeClaimTemplates defines a list of claims that VMs are allowed to reference
+	// VolumeClaimTemplates defines a list of claims that VMs are allowed to
+	// reference. Accepted but not acted on in this release.
 	// +optional
 	// +kubebuilder:validation:MaxItems=20
 	VolumeClaimTemplates []PersistentVolumeClaimTemplate `json:"volumeClaimTemplates,omitempty"`
 }
 
-// VMSetTemplate defines the template for VMs in a VMSet
+// VMSetTemplate defines the template for VMs in a VMSet. Accepted but not
+// acted on in this release.
 type VMSetTemplate struct {
 	// ObjectMeta is metadata for VMs created from this template
 	// +optional
 	metav1.ObjectMeta `json:"metadata,omitempty"`
 
-	// Spec is the VM specification
+	// Spec is the VM specification. Accepted but not acted on in this release.
 	Spec VirtualMachineSpec `json:"spec"`
 }
 
-// VMSetUpdateStrategy defines the update strategy for a VMSet
+// VMSetUpdateStrategy defines the update strategy for a VMSet. Accepted but
+// not acted on in this release.
 type VMSetUpdateStrategy struct {
-	// Type can be "RollingUpdate" or "OnDelete"
+	// Type can be "RollingUpdate", "OnDelete" or "Recreate". Accepted but not
+	// acted on in this release.
 	// +optional
 	// +kubebuilder:default="RollingUpdate"
 	Type VMSetUpdateStrategyType `json:"type,omitempty"`
 
-	// RollingUpdate is used when Type is RollingUpdate
+	// RollingUpdate is used when Type is RollingUpdate. Accepted but not acted
+	// on in this release.
 	// +optional
 	RollingUpdate *RollingUpdateVMSetStrategy `json:"rollingUpdate,omitempty"`
 }
 
-// VMSetUpdateStrategyType defines the type of update strategy
+// VMSetUpdateStrategyType defines the type of update strategy. Accepted but
+// not acted on in this release.
 // +kubebuilder:validation:Enum=RollingUpdate;OnDelete;Recreate
 type VMSetUpdateStrategyType string
 
@@ -109,32 +126,38 @@ const (
 	RecreateVMSetStrategyType VMSetUpdateStrategyType = "Recreate"
 )
 
-// RollingUpdateVMSetStrategy defines parameters for rolling updates
+// RollingUpdateVMSetStrategy defines parameters for rolling updates. Accepted
+// but not acted on in this release.
 type RollingUpdateVMSetStrategy struct {
-	// MaxUnavailable is the maximum number of VMs that can be unavailable during update
+	// MaxUnavailable is the maximum number of VMs that can be unavailable during
+	// update. Accepted but not acted on in this release.
 	// +optional
 	// +kubebuilder:default="25%"
 	MaxUnavailable *intstr.IntOrString `json:"maxUnavailable,omitempty"`
 
-	// MaxSurge is the maximum number of VMs that can be created above desired replica count
+	// MaxSurge is the maximum number of VMs that can be created above desired
+	// replica count. Accepted but not acted on in this release.
 	// +optional
 	// +kubebuilder:default="25%"
 	MaxSurge *intstr.IntOrString `json:"maxSurge,omitempty"`
 
-	// Partition indicates the ordinal at which the VMSet should be partitioned for updates
+	// Partition indicates the ordinal at which the VMSet should be partitioned
+	// for updates. Accepted but not acted on in this release.
 	// +optional
 	// +kubebuilder:validation:Minimum=0
 	Partition *int32 `json:"partition,omitempty"`
 
 	// PodManagementPolicy controls how VMs are created during initial scale up,
-	// when replacing VMs on nodes, or when scaling down
+	// when replacing VMs on nodes, or when scaling down. Accepted but not acted
+	// on in this release.
 	// +optional
 	// +kubebuilder:default="OrderedReady"
 	// +kubebuilder:validation:Enum=OrderedReady;Parallel
 	PodManagementPolicy VMSetPodManagementPolicyType `json:"podManagementPolicy,omitempty"`
 }
 
-// VMSetPodManagementPolicyType defines the policy for creating VMs
+// VMSetPodManagementPolicyType defines the policy for creating VMs. Accepted
+// but not acted on in this release.
 // +kubebuilder:validation:Enum=OrderedReady;Parallel
 type VMSetPodManagementPolicyType string
 
@@ -145,22 +168,28 @@ const (
 	ParallelVMSetPodManagementPolicy VMSetPodManagementPolicyType = "Parallel"
 )
 
-// VMSetPersistentVolumeClaimRetentionPolicy defines the retention policy for PVCs
+// VMSetPersistentVolumeClaimRetentionPolicy defines the retention policy for
+// PVCs. Accepted but not acted on in this release.
 type VMSetPersistentVolumeClaimRetentionPolicy struct {
-	// WhenDeleted specifies what happens to PVCs created from VMSet VolumeClaimTemplates when the VMSet is deleted
+	// WhenDeleted specifies what happens to PVCs created from VMSet
+	// VolumeClaimTemplates when the VMSet is deleted. Accepted but not acted on
+	// in this release.
 	// +optional
 	// +kubebuilder:default="Retain"
 	// +kubebuilder:validation:Enum=Retain;Delete
 	WhenDeleted PersistentVolumeClaimRetentionPolicyType `json:"whenDeleted,omitempty"`
 
-	// WhenScaled specifies what happens to PVCs created from VMSet VolumeClaimTemplates when the VMSet is scaled down
+	// WhenScaled specifies what happens to PVCs created from VMSet
+	// VolumeClaimTemplates when the VMSet is scaled down. Accepted but not acted
+	// on in this release.
 	// +optional
 	// +kubebuilder:default="Retain"
 	// +kubebuilder:validation:Enum=Retain;Delete
 	WhenScaled PersistentVolumeClaimRetentionPolicyType `json:"whenScaled,omitempty"`
 }
 
-// PersistentVolumeClaimRetentionPolicyType defines the retention policy type
+// PersistentVolumeClaimRetentionPolicyType defines the retention policy type.
+// Accepted but not acted on in this release.
 // +kubebuilder:validation:Enum=Retain;Delete
 type PersistentVolumeClaimRetentionPolicyType string
 
@@ -171,9 +200,11 @@ const (
 	DeletePersistentVolumeClaimRetentionPolicyType PersistentVolumeClaimRetentionPolicyType = "Delete"
 )
 
-// VMSetOrdinals configures the sequential ordering of VM indices
+// VMSetOrdinals configures the sequential ordering of VM indices. Accepted
+// but not acted on in this release.
 type VMSetOrdinals struct {
-	// Start is the number representing the first replica's index
+	// Start is the number representing the first replica's index. Accepted but
+	// not acted on in this release.
 	// +optional
 	// +kubebuilder:default=0
 	// +kubebuilder:validation:Minimum=0
@@ -181,13 +212,15 @@ type VMSetOrdinals struct {
 	Start int32 `json:"start,omitempty"`
 }
 
-// PersistentVolumeClaimTemplate describes a PVC template for VMSet VMs
+// PersistentVolumeClaimTemplate describes a PVC template for VMSet VMs.
+// Accepted but not acted on in this release.
 type PersistentVolumeClaimTemplate struct {
 	// ObjectMeta is the standard object metadata
 	// +optional
 	metav1.ObjectMeta `json:"metadata,omitempty"`
 
-	// Spec is the desired characteristics of the volume
+	// Spec is the desired characteristics of the volume. Accepted but not acted
+	// on in this release.
 	Spec PersistentVolumeClaimSpec `json:"spec"`
 }
 
@@ -200,93 +233,114 @@ type TypedLocalObjectReference = corev1.TypedLocalObjectReference
 // TypedObjectReference represents a typed object reference
 type TypedObjectReference = corev1.TypedObjectReference
 
-// VMSetStatus defines the observed state of VMSet
+// VMSetStatus defines the observed state of VMSet. Only observedGeneration
+// and the Ready condition are written in this release; every other field is
+// not populated.
 type VMSetStatus struct {
-	// ObservedGeneration is the most recent generation observed by the controller
+	// ObservedGeneration is the most recent generation observed by the
+	// controller.
 	// +optional
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
 
-	// Replicas is the number of VMs created by the VMSet controller
+	// Replicas is the number of VMs created by the VMSet controller. Not
+	// populated in this release.
 	// +optional
 	Replicas int32 `json:"replicas,omitempty"`
 
-	// ReadyReplicas is the number of VMs that are ready
+	// ReadyReplicas is the number of VMs that are ready. Not populated in this
+	// release.
 	// +optional
 	ReadyReplicas int32 `json:"readyReplicas,omitempty"`
 
-	// AvailableReplicas is the number of VMs that are available
+	// AvailableReplicas is the number of VMs that are available. Not populated
+	// in this release.
 	// +optional
 	AvailableReplicas int32 `json:"availableReplicas,omitempty"`
 
-	// UpdatedReplicas is the number of VMs that have been updated
+	// UpdatedReplicas is the number of VMs that have been updated. Not populated
+	// in this release.
 	// +optional
 	UpdatedReplicas int32 `json:"updatedReplicas,omitempty"`
 
-	// CurrentRevision is the revision of the current VMSet
+	// CurrentRevision is the revision of the current VMSet. Not populated in
+	// this release.
 	// +optional
 	CurrentRevision string `json:"currentRevision,omitempty"`
 
-	// UpdateRevision is the revision of the updated VMSet
+	// UpdateRevision is the revision of the updated VMSet. Not populated in this
+	// release.
 	// +optional
 	UpdateRevision string `json:"updateRevision,omitempty"`
 
-	// CollisionCount is the count of hash collisions for the VMSet
+	// CollisionCount is the count of hash collisions for the VMSet. Not
+	// populated in this release.
 	// +optional
 	CollisionCount *int32 `json:"collisionCount,omitempty"`
 
-	// Conditions represent the current service state
+	// Conditions represent the current service state. In this release the only
+	// condition is Ready=False with the reason ControllerNotImplemented.
 	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 
-	// CurrentReplicas is the number of VMs currently running
+	// CurrentReplicas is the number of VMs currently running. Not populated in
+	// this release.
 	// +optional
 	CurrentReplicas int32 `json:"currentReplicas,omitempty"`
 
-	// UpdateStatus provides detailed update operation status
+	// UpdateStatus provides detailed update operation status. Not populated in
+	// this release.
 	// +optional
 	UpdateStatus *VMSetUpdateStatus `json:"updateStatus,omitempty"`
 
-	// VMStatus provides per-VM status information
+	// VMStatus provides per-VM status information. Not populated in this
+	// release.
 	// +optional
 	// +kubebuilder:validation:MaxItems=1000
 	VMStatus []VMSetVMStatus `json:"vmStatus,omitempty"`
 }
 
-// VMSetUpdateStatus provides detailed update operation status
+// VMSetUpdateStatus provides detailed update operation status. Not populated
+// in this release.
 type VMSetUpdateStatus struct {
-	// Phase represents the current phase of the update
+	// Phase represents the current phase of the update. Not populated in this
+	// release.
 	// +optional
 	Phase VMSetUpdatePhase `json:"phase,omitempty"`
 
-	// Message provides additional details about the update
+	// Message provides additional details about the update. Not populated in
+	// this release.
 	// +optional
 	Message string `json:"message,omitempty"`
 
-	// StartTime is when the update started
+	// StartTime is when the update started. Not populated in this release.
 	// +optional
 	StartTime *metav1.Time `json:"startTime,omitempty"`
 
-	// CompletionTime is when the update completed
+	// CompletionTime is when the update completed. Not populated in this
+	// release.
 	// +optional
 	CompletionTime *metav1.Time `json:"completionTime,omitempty"`
 
-	// UpdatedVMs lists VMs that have been updated
+	// UpdatedVMs lists VMs that have been updated. Not populated in this
+	// release.
 	// +optional
 	// +kubebuilder:validation:MaxItems=1000
 	UpdatedVMs []string `json:"updatedVMs,omitempty"`
 
-	// PendingVMs lists VMs that are pending update
+	// PendingVMs lists VMs that are pending update. Not populated in this
+	// release.
 	// +optional
 	// +kubebuilder:validation:MaxItems=1000
 	PendingVMs []string `json:"pendingVMs,omitempty"`
 
-	// FailedVMs lists VMs that failed to update
+	// FailedVMs lists VMs that failed to update. Not populated in this release.
 	// +optional
 	// +kubebuilder:validation:MaxItems=1000
 	FailedVMs []VMSetFailedVM `json:"failedVMs,omitempty"`
 }
 
-// VMSetUpdatePhase represents the phase of a VMSet update
+// VMSetUpdatePhase represents the phase of a VMSet update. Not populated in
+// this release.
 // +kubebuilder:validation:Enum=Pending;InProgress;Paused;Completed;Failed
 type VMSetUpdatePhase string
 
@@ -303,59 +357,66 @@ const (
 	VMSetUpdatePhaseFailed VMSetUpdatePhase = "Failed"
 )
 
-// VMSetFailedVM represents a VM that failed to update
+// VMSetFailedVM represents a VM that failed to update. Not populated in this
+// release.
 type VMSetFailedVM struct {
-	// Name is the name of the failed VM
+	// Name is the name of the failed VM. Not populated in this release.
 	Name string `json:"name"`
 
-	// Reason provides the reason for failure
+	// Reason provides the reason for failure. Not populated in this release.
 	// +optional
 	Reason string `json:"reason,omitempty"`
 
-	// Message provides additional details about the failure
+	// Message provides additional details about the failure. Not populated in
+	// this release.
 	// +optional
 	Message string `json:"message,omitempty"`
 
-	// LastAttempt is when the last update attempt was made
+	// LastAttempt is when the last update attempt was made. Not populated in
+	// this release.
 	// +optional
 	LastAttempt *metav1.Time `json:"lastAttempt,omitempty"`
 
-	// RetryCount is the number of retry attempts
+	// RetryCount is the number of retry attempts. Not populated in this release.
 	// +optional
 	RetryCount int32 `json:"retryCount,omitempty"`
 }
 
-// VMSetVMStatus provides per-VM status information
+// VMSetVMStatus provides per-VM status information. Not populated in this
+// release.
 type VMSetVMStatus struct {
-	// Name is the VM name
+	// Name is the VM name. Not populated in this release.
 	Name string `json:"name"`
 
-	// Phase is the VM phase
+	// Phase is the VM phase. Not populated in this release.
 	// +optional
 	Phase VirtualMachinePhase `json:"phase,omitempty"`
 
-	// Ready indicates if the VM is ready
+	// Ready indicates if the VM is ready. Not populated in this release.
 	// +optional
 	Ready bool `json:"ready,omitempty"`
 
-	// Revision is the VM revision
+	// Revision is the VM revision. Not populated in this release.
 	// +optional
 	Revision string `json:"revision,omitempty"`
 
-	// CreationTime is when the VM was created
+	// CreationTime is when the VM was created. Not populated in this release.
 	// +optional
 	CreationTime *metav1.Time `json:"creationTime,omitempty"`
 
-	// LastUpdateTime is when the VM was last updated
+	// LastUpdateTime is when the VM was last updated. Not populated in this
+	// release.
 	// +optional
 	LastUpdateTime *metav1.Time `json:"lastUpdateTime,omitempty"`
 
-	// Message provides additional VM status information
+	// Message provides additional VM status information. Not populated in this
+	// release.
 	// +optional
 	Message string `json:"message,omitempty"`
 }
 
-// VMSet condition types
+// VMSet condition types. In this release the only condition set is Ready=False
+// with the reason ControllerNotImplemented.
 const (
 	// VMSetConditionReady indicates whether the VMSet is ready
 	VMSetConditionReady = "Ready"
@@ -369,7 +430,7 @@ const (
 	VMSetConditionScaling = "Scaling"
 )
 
-// VMSet condition reasons
+// VMSet condition reasons. None of these is set in this release.
 const (
 	// VMSetReasonAllReplicasReady indicates all replicas are ready
 	VMSetReasonAllReplicasReady = "AllReplicasReady"
@@ -399,7 +460,11 @@ const (
 //+kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 //+kubebuilder:resource:shortName=vmset
 
-// VMSet is the Schema for the vmsets API
+// VMSet is the Schema for the vmsets API. It has no active controller in this
+// release: the controller only sets the condition Ready=False with the reason
+// ControllerNotImplemented on each VMSet, and creates, scales and updates no
+// VMs. Every spec field is accepted but not acted on in this release, and
+// status is not populated apart from that condition and observedGeneration.
 // +kubebuilder:storageversion
 type VMSet struct {
 	metav1.TypeMeta   `json:",inline"`

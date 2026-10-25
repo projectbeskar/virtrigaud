@@ -35,7 +35,12 @@ spec:
     name: v1beta1
     schema:
       openAPIV3Schema:
-        description: VMSet is the Schema for the vmsets API
+        description: |-
+          VMSet is the Schema for the vmsets API. It has no active controller in this
+          release: the controller only sets the condition Ready=False with the reason
+          ControllerNotImplemented on each VMSet, and creates, scales and updates no
+          VMs. Every spec field is accepted but not acted on in this release, and
+          status is not populated apart from that condition and observedGeneration.
         properties:
           apiVersion:
             description: |-
@@ -55,31 +60,39 @@ spec:
           metadata:
             type: object
           spec:
-            description: VMSetSpec defines the desired state of VMSet
+            description: |-
+              VMSetSpec defines the desired state of VMSet. VMSet has no active
+              controller in this release, so every field is accepted but not acted on: no
+              VMs are created from the template.
             properties:
               minReadySeconds:
                 description: |-
-                  MinReadySeconds is the minimum number of seconds for which a newly created VM
-                  should be ready without any of its containers crashing
+                  MinReadySeconds is the minimum number of seconds for which a newly created
+                  VM should be ready before it is considered available. Accepted but not
+                  acted on in this release.
                 format: int32
                 maximum: 3600
                 minimum: 0
                 type: integer
               ordinals:
-                description: Ordinals configures the sequential ordering of VM indices
+                description: |-
+                  Ordinals configures the sequential ordering of VM indices. Accepted but
+                  not acted on in this release.
                 properties:
                   start:
                     default: 0
-                    description: Start is the number representing the first replica's
-                      index
+                    description: |-
+                      Start is the number representing the first replica's index. Accepted but
+                      not acted on in this release.
                     format: int32
                     maximum: 999999
                     minimum: 0
                     type: integer
                 type: object
               persistentVolumeClaimRetentionPolicy:
-                description: PersistentVolumeClaimRetentionPolicy defines the retention
-                  policy for PVCs
+                description: |-
+                  PersistentVolumeClaimRetentionPolicy defines the retention policy for
+                  PVCs. Accepted but not acted on in this release.
                 properties:
                   whenDeleted:
                     allOf:
@@ -90,8 +103,10 @@ spec:
                       - Retain
                       - Delete
                     default: Retain
-                    description: WhenDeleted specifies what happens to PVCs created
-                      from VMSet VolumeClaimTemplates when the VMSet is deleted
+                    description: |-
+                      WhenDeleted specifies what happens to PVCs created from VMSet
+                      VolumeClaimTemplates when the VMSet is deleted. Accepted but not acted on
+                      in this release.
                     type: string
                   whenScaled:
                     allOf:
@@ -102,27 +117,34 @@ spec:
                       - Retain
                       - Delete
                     default: Retain
-                    description: WhenScaled specifies what happens to PVCs created
-                      from VMSet VolumeClaimTemplates when the VMSet is scaled down
+                    description: |-
+                      WhenScaled specifies what happens to PVCs created from VMSet
+                      VolumeClaimTemplates when the VMSet is scaled down. Accepted but not acted
+                      on in this release.
                     type: string
                 type: object
               replicas:
                 default: 1
-                description: Replicas is the desired number of VMs in the set
+                description: |-
+                  Replicas is the desired number of VMs in the set. Accepted but not acted
+                  on in this release.
                 format: int32
                 maximum: 1000
                 minimum: 0
                 type: integer
               revisionHistoryLimit:
                 default: 10
-                description: RevisionHistoryLimit is the number of old VMSets to retain
+                description: |-
+                  RevisionHistoryLimit is the number of old VMSets to retain. Accepted but
+                  not acted on in this release.
                 format: int32
                 maximum: 100
                 minimum: 0
                 type: integer
               selector:
-                description: Selector is a label query over VMs that should match
-                  the replica count
+                description: |-
+                  Selector is a label query over VMs that should match the replica count.
+                  Accepted but not acted on in this release.
                 properties:
                   matchExpressions:
                     description: matchExpressions is a list of label selector requirements.
@@ -168,20 +190,23 @@ spec:
                 type: object
                 x-kubernetes-map-type: atomic
               serviceName:
-                description: ServiceName is the name of the service that governs this
-                  VMSet
+                description: |-
+                  ServiceName is the name of the service that governs this VMSet. Accepted
+                  but not acted on in this release.
                 maxLength: 253
                 type: string
               template:
-                description: Template is the object that describes the VM that will
-                  be created
+                description: |-
+                  Template is the object that describes the VM that will be created.
+                  Accepted but not acted on in this release.
                 properties:
                   metadata:
                     description: ObjectMeta is metadata for VMs created from this
                       template
                     type: object
                   spec:
-                    description: Spec is the VM specification
+                    description: Spec is the VM specification. Accepted but not acted
+                      on in this release.
                     properties:
                       classRef:
                         description: ClassRef references the VMClass that defines
@@ -202,15 +227,19 @@ spec:
                         - name
                         type: object
                       disks:
-                        description: Disks specifies additional disks beyond the root
-                          disk
+                        description: |-
+                          Disks specifies additional disks beyond the root disk. The vSphere provider
+                          attaches them at create. The libvirt and Proxmox providers attach none: a VM
+                          on such a Provider reports DisksApplied=False (reason
+                          NotSupportedByProvider), and the spec is not refused.
                         items:
                           description: DiskSpec defines a disk configuration
                           properties:
                             expandPolicy:
                               default: Offline
-                              description: ExpandPolicy defines how the disk can be
-                                expanded
+                              description: |-
+                                ExpandPolicy defines how the disk can be expanded. Accepted but not acted on
+                                in this release: it is not sent to the provider.
                               enum:
                               - Online
                               - Offline
@@ -221,8 +250,10 @@ spec:
                               pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                               type: string
                             scsi:
-                              description: SCSI specifies SCSI controller configuration
-                                (vSphere only)
+                              description: |-
+                                SCSI specifies SCSI controller configuration (vSphere only). Accepted but not
+                                acted on in this release: the manager sends only the disk's name, sizeGiB
+                                and type to the provider.
                               properties:
                                 controller:
                                   description: |-
@@ -259,8 +290,9 @@ spec:
                               minimum: 1
                               type: integer
                             storageClass:
-                              description: StorageClass specifies the storage class
-                                (optional)
+                              description: |-
+                                StorageClass specifies the storage class (optional). Accepted but not acted
+                                on in this release: it is not sent to the provider.
                               type: string
                             type:
                               default: thin
@@ -307,7 +339,7 @@ spec:
                               DiskID is the provider-specific disk identifier.
                               For libvirt, this is typically the volume name. Empty only on a
                               migration's target VirtualMachine that waits for its import
-                              (MigrationRef set, ADR-0007 Addendum B).
+                              (MigrationRef set).
                             maxLength: 253
                             type: string
                           format:
@@ -363,16 +395,21 @@ spec:
                             names the VMMigration that imports the disk
                           rule: size(self.diskID) > 0 || has(self.migrationRef)
                       lifecycle:
-                        description: Lifecycle defines VM lifecycle configuration
+                        description: |-
+                          Lifecycle defines VM lifecycle configuration. Accepted but not acted on in
+                          this release: no preStop or postStart handler runs and
+                          gracefulShutdownTimeout is not used.
                         properties:
                           gracefulShutdownTimeout:
                             default: 60s
-                            description: GracefulShutdownTimeout defines how long
-                              to wait for graceful shutdown
+                            description: |-
+                              GracefulShutdownTimeout defines how long to wait for graceful shutdown.
+                              Accepted but not acted on in this release.
                             type: string
                           postStart:
-                            description: PostStart defines actions to take after starting
-                              the VM
+                            description: |-
+                              PostStart defines actions to take after starting the VM. Accepted but not
+                              acted on in this release.
                             properties:
                               exec:
                                 description: Exec specifies a command to execute
@@ -432,8 +469,9 @@ spec:
                                 type: object
                             type: object
                           preStop:
-                            description: PreStop defines actions to take before stopping
-                              the VM
+                            description: |-
+                              PreStop defines actions to take before stopping the VM. Accepted but not
+                              acted on in this release.
                             properties:
                               exec:
                                 description: Exec specifies a command to execute
@@ -538,8 +576,9 @@ spec:
                               pattern: ^((25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$
                               type: string
                             macAddress:
-                              description: MACAddress specifies a static MAC address
-                                (optional)
+                              description: |-
+                                MACAddress specifies a static MAC address (optional). Accepted but not acted
+                                on in this release: it is not sent to the provider.
                               pattern: ^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$
                               type: string
                             name:
@@ -579,7 +618,13 @@ spec:
                         maxItems: 10
                         type: array
                       placement:
-                        description: Placement provides hints for VM placement
+                        description: |-
+                          Placement provides hints for VM placement. Cluster, datastore, storagePod
+                          and folder are sent to the provider with the create request and are used by
+                          the vSphere provider only; the libvirt and Proxmox providers do not use
+                          them when creating a VM. host and resourcePool are accepted but not acted
+                          on in this release. On a clustered Provider the scheduler chooses the host
+                          (see status.placement and spec.placementRef).
                         properties:
                           cluster:
                             description: Cluster specifies the target cluster
@@ -593,11 +638,13 @@ spec:
                             description: Folder specifies the target folder
                             type: string
                           host:
-                            description: Host specifies the target host
+                            description: Host specifies the target host. Accepted
+                              but not acted on in this release.
                             type: string
                           resourcePool:
-                            description: ResourcePool specifies the target resource
-                              pool
+                            description: |-
+                              ResourcePool specifies the target resource pool. Accepted but not acted on
+                              in this release.
                             type: string
                           storagePod:
                             description: |-
@@ -661,7 +708,9 @@ spec:
                             minimum: 1
                             type: integer
                           gpu:
-                            description: GPU specifies GPU configuration
+                            description: |-
+                              GPU specifies GPU configuration. Accepted but not acted on in this release:
+                              no GPU is requested from the provider.
                             properties:
                               count:
                                 description: Count specifies the number of GPUs to
@@ -717,7 +766,9 @@ spec:
                             type: object
                         type: object
                       tags:
-                        description: Tags are applied to the VM for organization
+                        description: |-
+                          Tags are sent to the provider with the create request. No provider applies
+                          them to the hypervisor VM in this release.
                         items:
                           type: string
                         maxItems: 50
@@ -745,8 +796,9 @@ spec:
                                 type: object
                             type: object
                           ignition:
-                            description: Ignition contains Ignition configuration
-                              for CoreOS/RHEL
+                            description: |-
+                              Ignition contains Ignition configuration for CoreOS/RHEL. Accepted but not
+                              acted on in this release: only cloudInit is sent to the provider.
                             properties:
                               inline:
                                 description: Inline contains inline Ignition data
@@ -773,31 +825,37 @@ spec:
                 - spec
                 type: object
               updateStrategy:
-                description: UpdateStrategy defines how to replace existing VMs with
-                  new ones
+                description: |-
+                  UpdateStrategy defines how to replace existing VMs with new ones. Accepted
+                  but not acted on in this release.
                 properties:
                   rollingUpdate:
-                    description: RollingUpdate is used when Type is RollingUpdate
+                    description: |-
+                      RollingUpdate is used when Type is RollingUpdate. Accepted but not acted
+                      on in this release.
                     properties:
                       maxSurge:
                         anyOf:
                         - type: integer
                         - type: string
                         default: 25%
-                        description: MaxSurge is the maximum number of VMs that can
-                          be created above desired replica count
+                        description: |-
+                          MaxSurge is the maximum number of VMs that can be created above desired
+                          replica count. Accepted but not acted on in this release.
                         x-kubernetes-int-or-string: true
                       maxUnavailable:
                         anyOf:
                         - type: integer
                         - type: string
                         default: 25%
-                        description: MaxUnavailable is the maximum number of VMs that
-                          can be unavailable during update
+                        description: |-
+                          MaxUnavailable is the maximum number of VMs that can be unavailable during
+                          update. Accepted but not acted on in this release.
                         x-kubernetes-int-or-string: true
                       partition:
-                        description: Partition indicates the ordinal at which the
-                          VMSet should be partitioned for updates
+                        description: |-
+                          Partition indicates the ordinal at which the VMSet should be partitioned
+                          for updates. Accepted but not acted on in this release.
                         format: int32
                         minimum: 0
                         type: integer
@@ -812,12 +870,15 @@ spec:
                         default: OrderedReady
                         description: |-
                           PodManagementPolicy controls how VMs are created during initial scale up,
-                          when replacing VMs on nodes, or when scaling down
+                          when replacing VMs on nodes, or when scaling down. Accepted but not acted
+                          on in this release.
                         type: string
                     type: object
                   type:
                     default: RollingUpdate
-                    description: Type can be "RollingUpdate" or "OnDelete"
+                    description: |-
+                      Type can be "RollingUpdate", "OnDelete" or "Recreate". Accepted but not
+                      acted on in this release.
                     enum:
                     - RollingUpdate
                     - OnDelete
@@ -825,17 +886,21 @@ spec:
                     type: string
                 type: object
               volumeClaimTemplates:
-                description: VolumeClaimTemplates defines a list of claims that VMs
-                  are allowed to reference
+                description: |-
+                  VolumeClaimTemplates defines a list of claims that VMs are allowed to
+                  reference. Accepted but not acted on in this release.
                 items:
-                  description: PersistentVolumeClaimTemplate describes a PVC template
-                    for VMSet VMs
+                  description: |-
+                    PersistentVolumeClaimTemplate describes a PVC template for VMSet VMs.
+                    Accepted but not acted on in this release.
                   properties:
                     metadata:
                       description: ObjectMeta is the standard object metadata
                       type: object
                     spec:
-                      description: Spec is the desired characteristics of the volume
+                      description: |-
+                        Spec is the desired characteristics of the volume. Accepted but not acted
+                        on in this release.
                       properties:
                         accessModes:
                           description: |-
@@ -1041,19 +1106,27 @@ spec:
             - template
             type: object
           status:
-            description: VMSetStatus defines the observed state of VMSet
+            description: |-
+              VMSetStatus defines the observed state of VMSet. Only observedGeneration
+              and the Ready condition are written in this release; every other field is
+              not populated.
             properties:
               availableReplicas:
-                description: AvailableReplicas is the number of VMs that are available
+                description: |-
+                  AvailableReplicas is the number of VMs that are available. Not populated
+                  in this release.
                 format: int32
                 type: integer
               collisionCount:
-                description: CollisionCount is the count of hash collisions for the
-                  VMSet
+                description: |-
+                  CollisionCount is the count of hash collisions for the VMSet. Not
+                  populated in this release.
                 format: int32
                 type: integer
               conditions:
-                description: Conditions represent the current service state
+                description: |-
+                  Conditions represent the current service state. In this release the only
+                  condition is Ready=False with the reason ControllerNotImplemented.
                 items:
                   description: Condition contains details for one aspect of the current
                     state of this API Resource.
@@ -1110,57 +1183,80 @@ spec:
                   type: object
                 type: array
               currentReplicas:
-                description: CurrentReplicas is the number of VMs currently running
+                description: |-
+                  CurrentReplicas is the number of VMs currently running. Not populated in
+                  this release.
                 format: int32
                 type: integer
               currentRevision:
-                description: CurrentRevision is the revision of the current VMSet
+                description: |-
+                  CurrentRevision is the revision of the current VMSet. Not populated in
+                  this release.
                 type: string
               observedGeneration:
-                description: ObservedGeneration is the most recent generation observed
-                  by the controller
+                description: |-
+                  ObservedGeneration is the most recent generation observed by the
+                  controller.
                 format: int64
                 type: integer
               readyReplicas:
-                description: ReadyReplicas is the number of VMs that are ready
+                description: |-
+                  ReadyReplicas is the number of VMs that are ready. Not populated in this
+                  release.
                 format: int32
                 type: integer
               replicas:
-                description: Replicas is the number of VMs created by the VMSet controller
+                description: |-
+                  Replicas is the number of VMs created by the VMSet controller. Not
+                  populated in this release.
                 format: int32
                 type: integer
               updateRevision:
-                description: UpdateRevision is the revision of the updated VMSet
+                description: |-
+                  UpdateRevision is the revision of the updated VMSet. Not populated in this
+                  release.
                 type: string
               updateStatus:
-                description: UpdateStatus provides detailed update operation status
+                description: |-
+                  UpdateStatus provides detailed update operation status. Not populated in
+                  this release.
                 properties:
                   completionTime:
-                    description: CompletionTime is when the update completed
+                    description: |-
+                      CompletionTime is when the update completed. Not populated in this
+                      release.
                     format: date-time
                     type: string
                   failedVMs:
-                    description: FailedVMs lists VMs that failed to update
+                    description: FailedVMs lists VMs that failed to update. Not populated
+                      in this release.
                     items:
-                      description: VMSetFailedVM represents a VM that failed to update
+                      description: |-
+                        VMSetFailedVM represents a VM that failed to update. Not populated in this
+                        release.
                       properties:
                         lastAttempt:
-                          description: LastAttempt is when the last update attempt
-                            was made
+                          description: |-
+                            LastAttempt is when the last update attempt was made. Not populated in
+                            this release.
                           format: date-time
                           type: string
                         message:
-                          description: Message provides additional details about the
-                            failure
+                          description: |-
+                            Message provides additional details about the failure. Not populated in
+                            this release.
                           type: string
                         name:
-                          description: Name is the name of the failed VM
+                          description: Name is the name of the failed VM. Not populated
+                            in this release.
                           type: string
                         reason:
-                          description: Reason provides the reason for failure
+                          description: Reason provides the reason for failure. Not
+                            populated in this release.
                           type: string
                         retryCount:
-                          description: RetryCount is the number of retry attempts
+                          description: RetryCount is the number of retry attempts.
+                            Not populated in this release.
                           format: int32
                           type: integer
                       required:
@@ -1169,16 +1265,22 @@ spec:
                     maxItems: 1000
                     type: array
                   message:
-                    description: Message provides additional details about the update
+                    description: |-
+                      Message provides additional details about the update. Not populated in
+                      this release.
                     type: string
                   pendingVMs:
-                    description: PendingVMs lists VMs that are pending update
+                    description: |-
+                      PendingVMs lists VMs that are pending update. Not populated in this
+                      release.
                     items:
                       type: string
                     maxItems: 1000
                     type: array
                   phase:
-                    description: Phase represents the current phase of the update
+                    description: |-
+                      Phase represents the current phase of the update. Not populated in this
+                      release.
                     enum:
                     - Pending
                     - InProgress
@@ -1187,41 +1289,55 @@ spec:
                     - Failed
                     type: string
                   startTime:
-                    description: StartTime is when the update started
+                    description: StartTime is when the update started. Not populated
+                      in this release.
                     format: date-time
                     type: string
                   updatedVMs:
-                    description: UpdatedVMs lists VMs that have been updated
+                    description: |-
+                      UpdatedVMs lists VMs that have been updated. Not populated in this
+                      release.
                     items:
                       type: string
                     maxItems: 1000
                     type: array
                 type: object
               updatedReplicas:
-                description: UpdatedReplicas is the number of VMs that have been updated
+                description: |-
+                  UpdatedReplicas is the number of VMs that have been updated. Not populated
+                  in this release.
                 format: int32
                 type: integer
               vmStatus:
-                description: VMStatus provides per-VM status information
+                description: |-
+                  VMStatus provides per-VM status information. Not populated in this
+                  release.
                 items:
-                  description: VMSetVMStatus provides per-VM status information
+                  description: |-
+                    VMSetVMStatus provides per-VM status information. Not populated in this
+                    release.
                   properties:
                     creationTime:
-                      description: CreationTime is when the VM was created
+                      description: CreationTime is when the VM was created. Not populated
+                        in this release.
                       format: date-time
                       type: string
                     lastUpdateTime:
-                      description: LastUpdateTime is when the VM was last updated
+                      description: |-
+                        LastUpdateTime is when the VM was last updated. Not populated in this
+                        release.
                       format: date-time
                       type: string
                     message:
-                      description: Message provides additional VM status information
+                      description: |-
+                        Message provides additional VM status information. Not populated in this
+                        release.
                       type: string
                     name:
-                      description: Name is the VM name
+                      description: Name is the VM name. Not populated in this release.
                       type: string
                     phase:
-                      description: Phase is the VM phase
+                      description: Phase is the VM phase. Not populated in this release.
                       enum:
                       - Pending
                       - Provisioning
@@ -1232,10 +1348,12 @@ spec:
                       - Failed
                       type: string
                     ready:
-                      description: Ready indicates if the VM is ready
+                      description: Ready indicates if the VM is ready. Not populated
+                        in this release.
                       type: boolean
                     revision:
-                      description: Revision is the VM revision
+                      description: Revision is the VM revision. Not populated in this
+                        release.
                       type: string
                   required:
                   - name

@@ -76,8 +76,9 @@ func (PowerOp) EnumDescriptor() ([]byte, []int) {
 	return file_provider_v1_provider_proto_rawDescGZIP(), []int{0}
 }
 
-// HostHealth is the AGNOSTIC health enum for a host; the probe that produces it
-// is per-hypervisor (e.g. libvirtd reachability).
+// HostHealth is the health of a host as reported by a clustered provider. How
+// it is probed depends on the hypervisor (libvirt: whether `virsh nodeinfo`
+// answers).
 type HostHealth int32
 
 const (
@@ -434,26 +435,25 @@ type CreateRequest struct {
 	DisksJson     string   `protobuf:"bytes,6,opt,name=disks_json,json=disksJson,proto3" json:"disks_json,omitempty"`             // []DiskSpec
 	PlacementJson string   `protobuf:"bytes,7,opt,name=placement_json,json=placementJson,proto3" json:"placement_json,omitempty"` // Placement
 	Tags          []string `protobuf:"bytes,8,rep,name=tags,proto3" json:"tags,omitempty"`                                        // Tags
-	// target_host_id names the specific host a clustered ("brain-in-operator")
-	// provider must create this VM on (ADR-0007 P1, D4). It is the operator
-	// scheduler's binding on the wire — an EXPLICIT field, deliberately NOT buried
-	// in placement_json (which stays for external-orchestrator hints such as
-	// vSphere cluster/datastore/folder). AGNOSTIC. Additive and backward-compatible:
-	// single-host and thin-client providers ignore it, and never receive it; a
-	// clustered provider REQUIRES it and rejects an empty value rather than
-	// silently defaulting to some host (honesty-first, D9). The operator sets it
-	// only when creating a VM whose Provider has topology: cluster.
+	// target_host_id is the host a clustered provider (Provider topology:
+	// cluster) must create this VM on: the host chosen by the manager's
+	// scheduler. It is a field of its own and is not carried in placement_json,
+	// which holds hints for hypervisors that place VMs themselves (for example
+	// the vSphere cluster, datastore and folder). A clustered provider requires
+	// it and rejects an empty value instead of picking a host. Single-host and
+	// thin-client providers ignore it and the manager never sends it to them.
+	// Additive and backward-compatible.
 	TargetHostId string `protobuf:"bytes,10,opt,name=target_host_id,json=targetHostId,proto3" json:"target_host_id,omitempty"`
-	// owner identifies the Kubernetes object (the VirtualMachine) this create is
-	// performed for. A provider that keys hypervisor VMs by a name that is NOT
-	// unique across tenants (libvirt: the bare VirtualMachine name, no namespace)
-	// stamps it onto the VM it creates and, when a VM of the requested name
-	// already exists, treats the create as an idempotent success ONLY if that VM
-	// carries this owner's uid — otherwise it fails closed with ALREADY_EXISTS
-	// rather than silently binding to another tenant's VM. AGNOSTIC. Additive and
-	// backward-compatible: providers that do not key by a shared name ignore it;
-	// an unset owner (an older manager) never authorizes binding to an existing
-	// VM. The operator sets it on every create from vm.UID/namespace/name.
+	// owner identifies the Kubernetes VirtualMachine this create is performed
+	// for (uid, namespace and name). The libvirt, vSphere, Proxmox and mock
+	// providers stamp the owner on the VM they create. When a VM of the
+	// requested name already exists, the create is an idempotent success only if
+	// that VM carries this owner's uid; otherwise the provider fails with
+	// ALREADY_EXISTS instead of binding to another tenant's VM. A provider that
+	// does not stamp ignores it. An unset owner (a manager that predates the
+	// field) never authorizes binding to an existing VM. The manager sets it on
+	// every create from the VirtualMachine's uid, namespace and name. Additive
+	// and backward-compatible.
 	Owner *ObjectIdentity `protobuf:"bytes,11,opt,name=owner,proto3" json:"owner,omitempty"`
 }
 
@@ -628,27 +628,24 @@ type DeleteRequest struct {
 	unknownFields protoimpl.UnknownFields
 
 	Id string `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
-	// target_host_id names the host a clustered ("brain-in-operator") provider
-	// must run this delete on (ADR-0007 Addendum A, A1): the operator's confirmed
-	// binding (VirtualMachine status.placement.host), threaded on the wire exactly
-	// like CreateRequest.target_host_id. AGNOSTIC. Additive and backward-compatible:
-	// single-host and thin-client providers ignore it, and the operator never sends
-	// it to them; a clustered provider REQUIRES it and rejects an empty value with
-	// InvalidArgument rather than defaulting to some host (honesty-first, D9). The
-	// provider never looks a VM's host up by itself (D1).
+	// target_host_id is the host a clustered provider (Provider topology:
+	// cluster) must run this delete on: the host the VirtualMachine is bound to
+	// (status.placement.host), the same host CreateRequest.target_host_id
+	// named. A clustered provider requires it, answers an empty value with
+	// InvalidArgument and never looks up a VM's host itself. Single-host and
+	// thin-client providers ignore it and the manager never sends it to them.
+	// Additive and backward-compatible.
 	TargetHostId string `protobuf:"bytes,2,opt,name=target_host_id,json=targetHostId,proto3" json:"target_host_id,omitempty"`
-	// owner identifies the Kubernetes object (the VirtualMachine) this delete is
-	// performed for: the same identity CreateRequest.owner stamps onto the VM it
-	// creates (ADR-0007 Addendum A, A2). AGNOSTIC. Additive and backward-compatible:
-	// single-host and thin-client providers other than Proxmox ignore it (their
-	// Delete behavior is unchanged, so a legacy unstamped VM stays deletable). A
-	// clustered provider deletes a VM ONLY when its recorded owner uid equals
-	// this uid; a VM whose stamp is missing or records a different owner is
-	// reported NOT_FOUND and is NEVER destroyed, so a cleanup (e.g. a finalizer
-	// after an ALREADY_EXISTS create) can never remove another tenant's VM. The
-	// operator sets it, from vm.UID/namespace/name, on every delete of a
-	// VirtualMachine with a UID; a single-host Proxmox provider checks it as
-	// described for PowerRequest.owner.
+	// owner identifies the Kubernetes VirtualMachine this delete is performed
+	// for: the identity CreateRequest.owner stamped on the VM. A clustered
+	// provider deletes a VM only when its recorded owner uid equals this uid; a
+	// VM whose stamp is missing or records another owner is reported NOT_FOUND
+	// and is never destroyed, so a cleanup (for example a finalizer after an
+	// ALREADY_EXISTS create) can never remove another tenant's VM. The Proxmox
+	// provider checks it as described for PowerRequest.owner. The other
+	// single-host and thin-client providers ignore it, so a VM created before
+	// owner stamps existed stays deletable. The manager sets it on every delete
+	// of a VirtualMachine that has a uid. Additive and backward-compatible.
 	Owner *ObjectIdentity `protobuf:"bytes,3,opt,name=owner,proto3" json:"owner,omitempty"`
 }
 
@@ -714,30 +711,28 @@ type PowerRequest struct {
 	Id                     string  `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
 	Op                     PowerOp `protobuf:"varint,2,opt,name=op,proto3,enum=provider.v1.PowerOp" json:"op,omitempty"`
 	GracefulTimeoutSeconds int32   `protobuf:"varint,3,opt,name=graceful_timeout_seconds,json=gracefulTimeoutSeconds,proto3" json:"graceful_timeout_seconds,omitempty"` // Timeout for graceful operations (shutdown/reboot)
-	// target_host_id names the host a clustered ("brain-in-operator") provider
-	// must run this power operation on (ADR-0007 Addendum A, A1): the operator's confirmed
-	// binding (VirtualMachine status.placement.host), threaded on the wire exactly
-	// like CreateRequest.target_host_id. AGNOSTIC. Additive and backward-compatible:
-	// single-host and thin-client providers ignore it, and the operator never sends
-	// it to them; a clustered provider REQUIRES it and rejects an empty value with
-	// InvalidArgument rather than defaulting to some host (honesty-first, D9). The
-	// provider never looks a VM's host up by itself (D1).
+	// target_host_id is the host a clustered provider (Provider topology:
+	// cluster) must run this power operation on: the host the VirtualMachine is bound to
+	// (status.placement.host), the same host CreateRequest.target_host_id
+	// named. A clustered provider requires it, answers an empty value with
+	// InvalidArgument and never looks up a VM's host itself. Single-host and
+	// thin-client providers ignore it and the manager never sends it to them.
+	// Additive and backward-compatible.
 	TargetHostId string `protobuf:"bytes,4,opt,name=target_host_id,json=targetHostId,proto3" json:"target_host_id,omitempty"`
-	// owner identifies the Kubernetes object (the VirtualMachine) this power
-	// operation is performed for — the identity CreateRequest.owner stamps onto
-	// the VM (ADR-0007 Addendum A, slice 2). AGNOSTIC. Additive and
-	// backward-compatible. A clustered provider powers a VM ONLY when its
-	// recorded owner uid equals this uid; a VM whose stamp is missing,
-	// unreadable or records a different owner is reported NOT_FOUND and is
-	// never started, stopped or rebooted.
-	// The operator sends it on every request for a VirtualMachine with a UID,
-	// single-host included. A single-host Proxmox provider checks it the same
-	// way against the stamp of the VM at the VMID (VMIDs are reused): a VM
-	// stamped with another owner, or unstamped and not named like the owner, is
-	// NOT_FOUND with the google.rpc.ErrorInfo reason VM_NOT_OWNED, and a stamp
-	// that cannot be read is FAILED_PRECONDITION with OWNER_STAMP_UNREADABLE;
-	// an unstamped VM named like the owner (one created before owner stamps, or
-	// adopted) is acted on as before. Other single-host providers ignore it.
+	// owner identifies the Kubernetes VirtualMachine this power operation is
+	// performed for: the identity CreateRequest.owner stamped on the VM. A
+	// clustered provider acts on a VM only when its recorded owner uid equals
+	// this uid; a VM whose stamp is missing, unreadable or records another owner
+	// is reported NOT_FOUND and is never started, stopped or rebooted.
+	// The Proxmox provider checks it against the stamp of the VM at the VMID
+	// (VMIDs are reused): a VM stamped with another owner, or unstamped and not
+	// named like the owner, is NOT_FOUND with the google.rpc.ErrorInfo reason
+	// VM_NOT_OWNED, and a stamp that cannot be read is FAILED_PRECONDITION with
+	// OWNER_STAMP_UNREADABLE; an unstamped VM named like the owner (one created
+	// before owner stamps existed, or adopted) is acted on. The other
+	// single-host and thin-client providers ignore it. The manager sets it on
+	// every request for a VirtualMachine that has a uid, single-host included.
+	// Additive and backward-compatible.
 	Owner *ObjectIdentity `protobuf:"bytes,5,opt,name=owner,proto3" json:"owner,omitempty"`
 }
 
@@ -816,30 +811,23 @@ type ReconfigureRequest struct {
 
 	Id          string `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
 	DesiredJson string `protobuf:"bytes,2,opt,name=desired_json,json=desiredJson,proto3" json:"desired_json,omitempty"` // JSON-encoded desired state
-	// target_host_id names the host a clustered ("brain-in-operator") provider
-	// must run this reconfigure on (ADR-0007 Addendum A, A1): the operator's confirmed
-	// binding (VirtualMachine status.placement.host), threaded on the wire exactly
-	// like CreateRequest.target_host_id. AGNOSTIC. Additive and backward-compatible:
-	// single-host and thin-client providers ignore it, and the operator never sends
-	// it to them; a clustered provider REQUIRES it and rejects an empty value with
-	// InvalidArgument rather than defaulting to some host (honesty-first, D9). The
-	// provider never looks a VM's host up by itself (D1).
+	// target_host_id is the host a clustered provider (Provider topology:
+	// cluster) must run this reconfigure on: the host the VirtualMachine is bound to
+	// (status.placement.host), the same host CreateRequest.target_host_id
+	// named. A clustered provider requires it, answers an empty value with
+	// InvalidArgument and never looks up a VM's host itself. Single-host and
+	// thin-client providers ignore it and the manager never sends it to them.
+	// Additive and backward-compatible.
 	TargetHostId string `protobuf:"bytes,3,opt,name=target_host_id,json=targetHostId,proto3" json:"target_host_id,omitempty"`
-	// owner identifies the Kubernetes object (the VirtualMachine) this
-	// reconfigure is performed for — the identity CreateRequest.owner stamps onto
-	// the VM (ADR-0007 Addendum A, slice 2). AGNOSTIC. Additive and
-	// backward-compatible. A clustered provider reconfigures a VM ONLY when its
-	// recorded owner uid equals this uid; a VM whose stamp is missing,
-	// unreadable or records a different owner is reported NOT_FOUND and none of
-	// its CPU, memory or disks is changed.
-	// The operator sends it on every request for a VirtualMachine with a UID,
-	// single-host included. A single-host Proxmox provider checks it the same
-	// way against the stamp of the VM at the VMID (VMIDs are reused): a VM
-	// stamped with another owner, or unstamped and not named like the owner, is
-	// NOT_FOUND with the google.rpc.ErrorInfo reason VM_NOT_OWNED, and a stamp
-	// that cannot be read is FAILED_PRECONDITION with OWNER_STAMP_UNREADABLE;
-	// an unstamped VM named like the owner (one created before owner stamps, or
-	// adopted) is acted on as before. Other single-host providers ignore it.
+	// owner identifies the Kubernetes VirtualMachine this reconfigure is
+	// performed for: the identity CreateRequest.owner stamped on the VM. A
+	// clustered provider reconfigures a VM only when its recorded owner uid
+	// equals this uid; a VM whose stamp is missing, unreadable or records
+	// another owner is reported NOT_FOUND and none of its CPU, memory or disks
+	// is changed. The Proxmox provider checks it as described for
+	// PowerRequest.owner. The other single-host and thin-client providers ignore
+	// it. The manager sets it on every request for a VirtualMachine that has a
+	// uid, single-host included. Additive and backward-compatible.
 	Owner *ObjectIdentity `protobuf:"bytes,4,opt,name=owner,proto3" json:"owner,omitempty"`
 }
 
@@ -903,7 +891,8 @@ func (x *ReconfigureRequest) GetOwner() *ObjectIdentity {
 	return nil
 }
 
-// Upgrade VM hardware version
+// Upgrade VM hardware version. Only the vSphere provider implements this RPC;
+// the other providers answer Unimplemented. The manager does not call it.
 type HardwareUpgradeRequest struct {
 	state         protoimpl.MessageState
 	sizeCache     protoimpl.SizeCache
@@ -911,16 +900,10 @@ type HardwareUpgradeRequest struct {
 
 	Id            string `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
 	TargetVersion int32  `protobuf:"varint,2,opt,name=target_version,json=targetVersion,proto3" json:"target_version,omitempty"` // Target hardware version (e.g., 21)
-	// target_host_id names the host a clustered ("brain-in-operator") provider
-	// must run this hardware upgrade on (ADR-0007 Addendum A, A1): the operator's confirmed
-	// binding (VirtualMachine status.placement.host), threaded on the wire exactly
-	// like CreateRequest.target_host_id. AGNOSTIC. Additive and backward-compatible:
-	// single-host and thin-client providers ignore it, and the operator never sends
-	// it to them; a clustered provider REQUIRES it and rejects an empty value with
-	// InvalidArgument rather than defaulting to some host (honesty-first, D9). The
-	// provider never looks a VM's host up by itself (D1).
-	// HardwareUpgrade has no manager-side caller today; the field is reserved on
-	// the wire so a later slice can route it without another proto change.
+	// target_host_id is the host a clustered provider would run this hardware
+	// upgrade on. The field is not used: the manager never calls
+	// HardwareUpgrade and the clustered libvirt provider answers it with
+	// Unimplemented. Single-host and thin-client providers ignore it.
 	TargetHostId string `protobuf:"bytes,3,opt,name=target_host_id,json=targetHostId,proto3" json:"target_host_id,omitempty"`
 }
 
@@ -986,31 +969,33 @@ type TaskResponse struct {
 	Task *TaskRef `protobuf:"bytes,1,opt,name=task,proto3" json:"task,omitempty"`
 	// restart_required is set by a Reconfigure (and only by a Reconfigure) that
 	// applied at least one requested change to the VM's persistent definition
-	// only: the change takes effect at the VM's next power cycle (power off, then
-	// on — a reboot from inside the guest does not apply it), and until then the
-	// running VM keeps its previous size. Every other requested change was
-	// applied to the running VM as well. A Reconfigure that could apply a
-	// requested change neither way fails instead; it never reports success for a
-	// change in none of these states. Additive and backward-compatible: false
-	// (the default) is what every provider that applies all changes live, or
-	// fails, returns; a provider that answers with a task reports false and the
-	// task's outcome decides. The manager records a restart-pending change as
-	// Reconfiguring=True with reason RestartRequired.
+	// only: that change takes effect at the VM's next power cycle (power off,
+	// then on; a reboot from inside the guest does not apply it), and until
+	// then the running VM keeps its previous size. Every other requested change
+	// was applied to the running VM as well. A Reconfigure that could apply a
+	// requested change in neither way fails instead; it never reports success
+	// for a change it did not apply. false (the default) is what a provider
+	// that applies all changes live, or fails, returns; a provider that answers
+	// with a task reports false and the task's outcome decides. Of the built-in
+	// providers only libvirt sets it. The manager records a restart-pending
+	// change as Reconfiguring=True with reason RestartRequired. Additive and
+	// backward-compatible.
 	RestartRequired bool `protobuf:"varint,2,opt,name=restart_required,json=restartRequired,proto3" json:"restart_required,omitempty"`
-	// honest_result is set by a provider on EVERY Reconfigure response it gives
-	// under the honest result contract (the contract GetCapabilitiesResponse.
-	// supports_honest_reconfigure advertises): each requested change was applied
-	// to the running VM and its persistent definition, or applied to the
-	// definition only and reported with restart_required — a success is never
-	// returned for a change it did not apply. It is the per-response proof of
-	// that contract: the capability is a snapshot the manager may hold after a
-	// provider was rolled back, the marker is not. Additive and
-	// backward-compatible: false (unset) from a provider that predates or does
-	// not implement the contract. The manager treats a successful Reconfigure
-	// of a VM on a clustered Provider without it as not honest: it counts the
-	// VM at the larger of its recorded and requested size and holds further
-	// resizes (Reconfiguring=False/ProviderLacksHonestReconfigure). Set only on
-	// Reconfigure responses.
+	// honest_result is set by a provider on every Reconfigure response it gives
+	// under the honest result contract that
+	// GetCapabilitiesResponse.supports_honest_reconfigure advertises: each
+	// requested change was applied to the running VM and its persistent
+	// definition, or applied to the definition only and reported with
+	// restart_required; a success is never returned for a change that was not
+	// applied. It is the per-response proof of that contract (the capability is
+	// a snapshot the manager may keep after a provider was rolled back; this
+	// marker is not). false (unset) from a provider that does not implement the
+	// contract. Of the built-in providers only libvirt sets it. For a VM on a
+	// clustered Provider the manager treats a successful Reconfigure without it
+	// as not honest: it counts the VM at the larger of its recorded and
+	// requested size and holds further resizes
+	// (Reconfiguring=False, reason ProviderLacksHonestReconfigure). Set only on
+	// Reconfigure responses. Additive and backward-compatible.
 	HonestResult bool `protobuf:"varint,3,opt,name=honest_result,json=honestResult,proto3" json:"honest_result,omitempty"`
 }
 
@@ -1074,33 +1059,32 @@ type DescribeRequest struct {
 	unknownFields protoimpl.UnknownFields
 
 	Id string `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
-	// target_host_id names the host a clustered ("brain-in-operator") provider
-	// must run this describe on (ADR-0007 Addendum A, A1): the operator's confirmed
-	// binding (VirtualMachine status.placement.host), threaded on the wire exactly
-	// like CreateRequest.target_host_id. AGNOSTIC. Additive and backward-compatible:
-	// single-host and thin-client providers ignore it, and the operator never sends
-	// it to them; a clustered provider REQUIRES it and rejects an empty value with
-	// InvalidArgument rather than defaulting to some host (honesty-first, D9). The
-	// provider never looks a VM's host up by itself (D1).
+	// target_host_id is the host a clustered provider (Provider topology:
+	// cluster) must run this describe on: the host the VirtualMachine is bound to
+	// (status.placement.host), the same host CreateRequest.target_host_id
+	// named. A clustered provider requires it, answers an empty value with
+	// InvalidArgument and never looks up a VM's host itself. Single-host and
+	// thin-client providers ignore it and the manager never sends it to them.
+	// Additive and backward-compatible.
 	TargetHostId string `protobuf:"bytes,2,opt,name=target_host_id,json=targetHostId,proto3" json:"target_host_id,omitempty"`
-	// owner identifies the Kubernetes object (the VirtualMachine) this describe
-	// is performed for — the identity CreateRequest.owner stamps onto the VM
-	// (ADR-0007 Addendum A). AGNOSTIC. Additive and backward-compatible. A
-	// clustered provider reports a VM whose stamp is missing or records a
-	// different owner as exists=false and returns none of its state, so a
-	// VirtualMachine can never read another tenant's VM that took over the name
-	// on its host (the operator then applies its no-recreate rule).
-	// The operator sends it on every request for a VirtualMachine with a UID,
-	// single-host included. A single-host Proxmox provider checks it the same
-	// way against the stamp of the VM at the VMID (VMIDs are reused): a VM
-	// stamped with another owner, or unstamped and not named like the owner, is
-	// NOT_FOUND with the google.rpc.ErrorInfo reason VM_NOT_OWNED, and a stamp
-	// that cannot be read is FAILED_PRECONDITION with OWNER_STAMP_UNREADABLE;
-	// an unstamped VM named like the owner (one created before owner stamps, or
-	// adopted) is acted on as before. Other single-host providers ignore it.
-	// A single-host Describe never answers exists=false for a VM that is not
-	// the owner's (the operator would create the VM again): it answers
-	// VM_NOT_OWNED and returns none of the VM's state.
+	// owner identifies the Kubernetes VirtualMachine this describe is performed
+	// for: the identity CreateRequest.owner stamped on the VM. A clustered
+	// provider reports a VM whose stamp is missing or records another owner as
+	// exists=false and returns none of its state, so a VirtualMachine can never
+	// read another tenant's VM that took over the name on its host (the manager
+	// then reports the VM as missing on its host and does not re-create it).
+	// The Proxmox provider checks it against the stamp of the VM at the VMID
+	// (VMIDs are reused): a VM stamped with another owner, or unstamped and not
+	// named like the owner, is NOT_FOUND with the google.rpc.ErrorInfo reason
+	// VM_NOT_OWNED, and a stamp that cannot be read is FAILED_PRECONDITION with
+	// OWNER_STAMP_UNREADABLE; an unstamped VM named like the owner (one created
+	// before owner stamps existed, or adopted) is described as before. A Proxmox
+	// Describe never answers exists=false for a VM that is not the owner's (the
+	// manager would create the VM again): it answers VM_NOT_OWNED and returns
+	// none of the VM's state. The other single-host and thin-client providers
+	// ignore the owner. The manager sets it on every request for a
+	// VirtualMachine that has a uid, single-host included. Additive and
+	// backward-compatible.
 	Owner *ObjectIdentity `protobuf:"bytes,3,opt,name=owner,proto3" json:"owner,omitempty"`
 }
 
@@ -1170,19 +1154,20 @@ type DescribeResponse struct {
 	// max_memory_mib is the most memory, in MiB, the VM's guest can use without
 	// any action on the host: the memory it was started with, including any
 	// balloon headroom above its current allocation (libvirt's <memory>, the
-	// balloon maximum). 0 means the provider does not report it. Additive and
-	// backward-compatible. The clustered scheduler records it once as
-	// status.placement.memoryCeilingMiB for a VM scheduled before that field
-	// existed, raises a recorded ceiling to it when it is higher, and lowers a
-	// recorded ceiling to it once the provider reports less (ADR-0007 Addendum A,
-	// scheduler-accuracy amendment).
+	// balloon maximum). 0 means the provider does not report it. Only the
+	// libvirt provider reports it. For a VM on a clustered Provider the manager
+	// records it as status.placement.memoryCeilingMiB when none is recorded yet,
+	// raises the recorded ceiling to it when it is higher, and lowers the
+	// recorded ceiling to it when the provider reports less (not while a
+	// Reconfigure is in flight or pending a restart). Additive and
+	// backward-compatible.
 	MaxMemoryMib int64 `protobuf:"varint,6,opt,name=max_memory_mib,json=maxMemoryMib,proto3" json:"max_memory_mib,omitempty"`
 	// vcpus is the number of vCPUs the VM has online now: the running VM's
 	// count, or, for a VM that is off, the count it boots with. 0 means the
-	// provider does not report it. Additive and backward-compatible. The
-	// clustered scheduler raises a VM's recorded CPU (status.currentResources)
-	// to it when it is higher, so a VM is never counted below the vCPUs it has
-	// (ADR-0007 Addendum A, scheduler-accuracy amendment).
+	// provider does not report it. Only the libvirt provider reports it. For a
+	// VM on a clustered Provider the manager raises the VM's recorded CPU
+	// (status.currentResources) to it when it is higher, so a VM is never
+	// counted below the vCPUs it has. Additive and backward-compatible.
 	Vcpus int32 `protobuf:"varint,7,opt,name=vcpus,proto3" json:"vcpus,omitempty"`
 }
 
@@ -1269,14 +1254,13 @@ func (x *DescribeResponse) GetVcpus() int32 {
 
 // Check async task status.
 //
-// TaskStatus is not per-VM, so it carries no target_host_id. A clustered
-// ("brain-in-operator") provider therefore encodes the host into every task
-// reference a routed call returns, and routes TaskStatus by it (ADR-0007
-// Addendum A, A1, slice 3); the reference stays opaque to the operator. A
-// clustered provider refuses a reference it did not issue: one that is not
-// host-encoded, or that names a host not in its own host registry, is
-// rejected and never dialed. Single-host and thin-client providers' task
-// references are unchanged.
+// TaskStatus is not per-VM, so the request carries no target_host_id. A
+// clustered provider therefore encodes the host into every task reference a
+// routed call returns, and routes TaskStatus by it; the reference stays opaque
+// to the manager. A clustered provider refuses a reference it did not issue:
+// one that is not host-encoded, or that names a host that is not in its own
+// host registry, is rejected with an error and its host is never contacted.
+// The task references of single-host and thin-client providers are unchanged.
 type TaskStatusRequest struct {
 	state         protoimpl.MessageState
 	sizeCache     protoimpl.SizeCache
@@ -1389,39 +1373,33 @@ type SnapshotCreateRequest struct {
 	NameHint      string `protobuf:"bytes,2,opt,name=name_hint,json=nameHint,proto3" json:"name_hint,omitempty"`
 	IncludeMemory bool   `protobuf:"varint,3,opt,name=include_memory,json=includeMemory,proto3" json:"include_memory,omitempty"` // Include memory state if supported
 	Description   string `protobuf:"bytes,4,opt,name=description,proto3" json:"description,omitempty"`
-	// target_host_id names the host a clustered ("brain-in-operator") provider
-	// must run this snapshot create on (ADR-0007 Addendum A, A1): the operator's confirmed
-	// binding (VirtualMachine status.placement.host), threaded on the wire exactly
-	// like CreateRequest.target_host_id. AGNOSTIC. Additive and backward-compatible:
-	// single-host and thin-client providers ignore it, and the operator never sends
-	// it to them; a clustered provider REQUIRES it and rejects an empty value with
-	// InvalidArgument rather than defaulting to some host (honesty-first, D9). The
-	// provider never looks a VM's host up by itself (D1).
+	// target_host_id is the host a clustered provider (Provider topology:
+	// cluster) must run this snapshot create on: the host the VirtualMachine is bound to
+	// (status.placement.host), the same host CreateRequest.target_host_id
+	// named. A clustered provider requires it, answers an empty value with
+	// InvalidArgument and never looks up a VM's host itself. Single-host and
+	// thin-client providers ignore it and the manager never sends it to them.
+	// Additive and backward-compatible.
 	TargetHostId string `protobuf:"bytes,5,opt,name=target_host_id,json=targetHostId,proto3" json:"target_host_id,omitempty"`
-	// owner identifies the Kubernetes object (the VirtualMachine) this snapshot
-	// is taken for — the identity CreateRequest.owner stamps onto the VM
-	// (ADR-0007 Addendum A, slice 3). AGNOSTIC. Additive and backward-compatible.
-	// A clustered provider snapshots a VM ONLY when its recorded owner uid
-	// equals this uid; a VM whose stamp is missing, unreadable or records a
-	// different owner is reported NOT_FOUND and is never snapshotted.
-	// The operator sends it on every request for a VirtualMachine with a UID,
-	// single-host included. A single-host Proxmox provider checks it the same
-	// way against the stamp of the VM at the VMID (VMIDs are reused): a VM
-	// stamped with another owner, or unstamped and not named like the owner, is
-	// NOT_FOUND with the google.rpc.ErrorInfo reason VM_NOT_OWNED, and a stamp
-	// that cannot be read is FAILED_PRECONDITION with OWNER_STAMP_UNREADABLE;
-	// an unstamped VM named like the owner (one created before owner stamps, or
-	// adopted) is acted on as before. Other single-host providers ignore it.
+	// owner identifies the Kubernetes VirtualMachine this snapshot is taken for:
+	// the identity CreateRequest.owner stamped on the VM. A clustered provider
+	// snapshots a VM only when its recorded owner uid equals this uid; a VM
+	// whose stamp is missing, unreadable or records another owner is reported
+	// NOT_FOUND and is never snapshotted. The Proxmox provider checks it as
+	// described for PowerRequest.owner. The other single-host and thin-client
+	// providers ignore it. The manager sets it on every request for a
+	// VirtualMachine that has a uid, single-host included. Additive and
+	// backward-compatible.
 	Owner *ObjectIdentity `protobuf:"bytes,6,opt,name=owner,proto3" json:"owner,omitempty"`
 	// request_token identifies the request object this snapshot is created for
-	// (the VMSnapshot's uid), so a retry of the SAME request can find the
+	// (the VMSnapshot's uid), so a retry of the same request can find the
 	// snapshot an earlier attempt made instead of making a second one, and a
-	// snapshot of the same name left by ANOTHER request (an earlier VMSnapshot
-	// of that name) is never taken for it. AGNOSTIC. Additive and
-	// backward-compatible: providers that do not retry snapshots by name ignore
-	// it. A clustered libvirt provider records it with the snapshot it creates
-	// and treats an existing snapshot of the requested name as this request's
-	// only when it records the same token; any other is ALREADY_EXISTS.
+	// snapshot of the same name left by another request (an earlier VMSnapshot
+	// of that name) is never taken for it. Providers that do not retry
+	// snapshots by name ignore it. A clustered libvirt provider records it with
+	// the snapshot it creates and treats an existing snapshot of the requested
+	// name as this request's only when it records the same token; any other is
+	// ALREADY_EXISTS. Additive and backward-compatible.
 	RequestToken string `protobuf:"bytes,7,opt,name=request_token,json=requestToken,proto3" json:"request_token,omitempty"`
 }
 
@@ -1568,21 +1546,19 @@ type SnapshotDeleteRequest struct {
 
 	VmId       string `protobuf:"bytes,1,opt,name=vm_id,json=vmId,proto3" json:"vm_id,omitempty"`
 	SnapshotId string `protobuf:"bytes,2,opt,name=snapshot_id,json=snapshotId,proto3" json:"snapshot_id,omitempty"`
-	// target_host_id names the host a clustered ("brain-in-operator") provider
-	// must run this snapshot delete on (ADR-0007 Addendum A, A1): the operator's confirmed
-	// binding (VirtualMachine status.placement.host), threaded on the wire exactly
-	// like CreateRequest.target_host_id. AGNOSTIC. Additive and backward-compatible:
-	// single-host and thin-client providers ignore it, and the operator never sends
-	// it to them; a clustered provider REQUIRES it and rejects an empty value with
-	// InvalidArgument rather than defaulting to some host (honesty-first, D9). The
-	// provider never looks a VM's host up by itself (D1).
+	// target_host_id is the host a clustered provider (Provider topology:
+	// cluster) must run this snapshot delete on: the host the VirtualMachine is bound to
+	// (status.placement.host), the same host CreateRequest.target_host_id
+	// named. A clustered provider requires it, answers an empty value with
+	// InvalidArgument and never looks up a VM's host itself. Single-host and
+	// thin-client providers ignore it and the manager never sends it to them.
+	// Additive and backward-compatible.
 	TargetHostId string `protobuf:"bytes,3,opt,name=target_host_id,json=targetHostId,proto3" json:"target_host_id,omitempty"`
-	// owner identifies the VirtualMachine the snapshot belongs to (ADR-0007
-	// Addendum A, slice 3), exactly as SnapshotCreateRequest.owner. A clustered
-	// provider deletes a snapshot ONLY of a VM whose recorded owner uid equals
-	// this uid; any other VM is reported NOT_FOUND and none of its snapshots is
-	// touched. Sent and checked on single-host requests as
-	// SnapshotCreateRequest.owner.
+	// owner identifies the VirtualMachine the snapshot belongs to, exactly as
+	// SnapshotCreateRequest.owner. A clustered provider deletes a snapshot only
+	// of a VM whose recorded owner uid equals this uid; any other VM is
+	// reported NOT_FOUND and none of its snapshots is touched. Sent and checked
+	// on single-host requests as described for SnapshotCreateRequest.owner.
 	Owner *ObjectIdentity `protobuf:"bytes,4,opt,name=owner,proto3" json:"owner,omitempty"`
 }
 
@@ -1653,20 +1629,19 @@ type SnapshotRevertRequest struct {
 
 	VmId       string `protobuf:"bytes,1,opt,name=vm_id,json=vmId,proto3" json:"vm_id,omitempty"`
 	SnapshotId string `protobuf:"bytes,2,opt,name=snapshot_id,json=snapshotId,proto3" json:"snapshot_id,omitempty"`
-	// target_host_id names the host a clustered ("brain-in-operator") provider
-	// must run this snapshot revert on (ADR-0007 Addendum A, A1): the operator's confirmed
-	// binding (VirtualMachine status.placement.host), threaded on the wire exactly
-	// like CreateRequest.target_host_id. AGNOSTIC. Additive and backward-compatible:
-	// single-host and thin-client providers ignore it, and the operator never sends
-	// it to them; a clustered provider REQUIRES it and rejects an empty value with
-	// InvalidArgument rather than defaulting to some host (honesty-first, D9). The
-	// provider never looks a VM's host up by itself (D1).
+	// target_host_id is the host a clustered provider (Provider topology:
+	// cluster) must run this snapshot revert on: the host the VirtualMachine is bound to
+	// (status.placement.host), the same host CreateRequest.target_host_id
+	// named. A clustered provider requires it, answers an empty value with
+	// InvalidArgument and never looks up a VM's host itself. Single-host and
+	// thin-client providers ignore it and the manager never sends it to them.
+	// Additive and backward-compatible.
 	TargetHostId string `protobuf:"bytes,3,opt,name=target_host_id,json=targetHostId,proto3" json:"target_host_id,omitempty"`
-	// owner identifies the VirtualMachine being reverted (ADR-0007 Addendum A,
-	// slice 3), exactly as SnapshotCreateRequest.owner. A clustered provider
-	// reverts a VM ONLY when its recorded owner uid equals this uid; any other VM
-	// is reported NOT_FOUND and is never reverted. Sent and checked on
-	// single-host requests as SnapshotCreateRequest.owner.
+	// owner identifies the VirtualMachine being reverted, exactly as
+	// SnapshotCreateRequest.owner. A clustered provider reverts a VM only when
+	// its recorded owner uid equals this uid; any other VM is reported
+	// NOT_FOUND and is never reverted. Sent and checked on single-host requests
+	// as described for SnapshotCreateRequest.owner.
 	Owner *ObjectIdentity `protobuf:"bytes,4,opt,name=owner,proto3" json:"owner,omitempty"`
 }
 
@@ -1738,59 +1713,56 @@ type CloneRequest struct {
 
 	SourceVmId string `protobuf:"bytes,1,opt,name=source_vm_id,json=sourceVmId,proto3" json:"source_vm_id,omitempty"`
 	TargetName string `protobuf:"bytes,2,opt,name=target_name,json=targetName,proto3" json:"target_name,omitempty"`
-	Linked     bool   `protobuf:"varint,3,opt,name=linked,proto3" json:"linked,omitempty"` // Best-effort linked clone
+	Linked     bool   `protobuf:"varint,3,opt,name=linked,proto3" json:"linked,omitempty"` // Linked clone requested; honoured only by providers that report supports_linked_clones (the libvirt provider refuses it)
 	// JSON-encoded specifications for customization
 	ClassJson     string `protobuf:"bytes,4,opt,name=class_json,json=classJson,proto3" json:"class_json,omitempty"`             // VMClass overrides
 	PlacementJson string `protobuf:"bytes,5,opt,name=placement_json,json=placementJson,proto3" json:"placement_json,omitempty"` // Placement hints
 	CustomizeJson string `protobuf:"bytes,6,opt,name=customize_json,json=customizeJson,proto3" json:"customize_json,omitempty"` // Customization spec
-	// source_host_id names the host the SOURCE VM runs on for a clustered
-	// ("brain-in-operator") provider (ADR-0007 Addendum A, A1): the source VM's
-	// confirmed binding (status.placement.host). It is the routing field for the
-	// clone. It is deliberately NOT target_host_id, which keeps the meaning the
-	// main ADR gives it: the host where the clone lands. In v1 a clustered provider
-	// requires the two to be equal (disks are host-local and a linked clone depends
-	// on its source disk). AGNOSTIC. Additive and backward-compatible: single-host
-	// and thin-client providers ignore it, and the operator never sends it to them;
-	// a clustered provider REQUIRES it and rejects an empty value with
-	// InvalidArgument rather than defaulting to some host.
+	// source_host_id is the host the source VM runs on for a clustered provider
+	// (Provider topology: cluster): the source VM's bound host
+	// (status.placement.host). It is the routing field for the clone. It is
+	// deliberately not target_host_id, which is the host where the clone lands.
+	// A clustered provider requires the two to be equal (disks are host-local
+	// and a linked clone depends on its source disk). A clustered provider
+	// requires source_host_id and rejects an empty value with InvalidArgument
+	// instead of picking a host. Single-host and thin-client providers ignore it
+	// and the manager never sends it to them. Additive and backward-compatible.
 	SourceHostId string `protobuf:"bytes,7,opt,name=source_host_id,json=sourceHostId,proto3" json:"source_host_id,omitempty"`
 	// target_vm names the Kubernetes VirtualMachine the clone will be bound to:
 	// its namespace (VMClone spec.target.namespace, defaulted to the VMClone's
-	// namespace) and its name (== target_name). A provider whose VM names are
-	// host-global names the clone from it (the libvirt provider:
+	// namespace), its name (the same as target_name) and its uid. A provider
+	// whose VM names are host-global derives the clone's name from it (libvirt:
 	// "<namespace>.<name>", the same rule as Create) and returns that name as
-	// target_vm_id, which the operator records as the VM's status.id; an unset
-	// value keeps the legacy target_name naming. The operator creates that
-	// VirtualMachine before the clone and sends its uid on every topology (rc2
-	// R4; a manager older than rc2 sent no uid to a single-host provider). A
-	// provider stamps the clone with a uid it receives, as Create stamps with
+	// target_vm_id, which the manager records as the VM's status.id; with
+	// target_vm unset the clone is named target_name. The manager creates that
+	// VirtualMachine before the clone and sends its uid to every provider. A
+	// provider stamps the clone with the uid it receives, as Create stamps with
 	// CreateRequest.owner, and answers a Clone whose target name already holds a
 	// clone stamped with that uid with that clone (a re-sent Clone) instead of a
 	// second one; any other VM of the target name it would bind is refused with
 	// AlreadyExists. Without a uid the clone is unstamped and nothing is
-	// re-bound, as before. A clustered provider requires the uid.
+	// re-bound. A clustered provider requires the uid. A provider that does this
+	// reports GetCapabilitiesResponse.supports_owner_rebind.
 	TargetVm *ObjectIdentity `protobuf:"bytes,8,opt,name=target_vm,json=targetVm,proto3" json:"target_vm,omitempty"`
-	// target_host_id names the host where the clone LANDS on a clustered
-	// ("brain-in-operator") provider (ADR-0007 Addendum A, A1, slice 3): the
-	// target VirtualMachine's status.placement.pendingHost, recorded before the
-	// clone is sent. AGNOSTIC. Additive and backward-compatible: single-host and
-	// thin-client providers ignore it, and the operator never sends it to them.
-	// In v1 a clustered provider REQUIRES it to equal source_host_id (disks are
-	// host-local and a linked clone depends on its source disk) and rejects an
-	// empty or different value with InvalidArgument; it never lands a clone on a
-	// host it chose itself.
+	// target_host_id is the host where the clone lands on a clustered provider:
+	// the target VirtualMachine's status.placement.pendingHost, recorded before
+	// the clone is sent. A clustered provider requires it to equal
+	// source_host_id (disks are host-local and a linked clone depends on its
+	// source disk) and rejects an empty or different value with
+	// InvalidArgument; it never lands a clone on a host it chose itself.
+	// Single-host and thin-client providers ignore it and the manager never
+	// sends it to them. Additive and backward-compatible.
 	TargetHostId string `protobuf:"bytes,9,opt,name=target_host_id,json=targetHostId,proto3" json:"target_host_id,omitempty"`
-	// source_owner identifies the VirtualMachine being cloned — the identity
-	// CreateRequest.owner stamps onto the source VM (ADR-0007 Addendum A, slice
-	// 3). AGNOSTIC. Additive and backward-compatible. A clustered provider reads
-	// (and copies the disk of) a source VM ONLY when its recorded owner uid
+	// source_owner identifies the VirtualMachine being cloned: the identity
+	// CreateRequest.owner stamped on the source VM. A clustered provider reads
+	// (and copies the disk of) a source VM only when its recorded owner uid
 	// equals this uid; any other VM is reported NOT_FOUND and none of its disks
-	// or definition is read. The operator sends it on every clone of a source
-	// VirtualMachine with a UID, single-host included; a single-host Proxmox
-	// provider checks it as described for PowerRequest.owner, before anything is
-	// cloned (a source config it cannot read is UNAVAILABLE with
-	// CREATE_NOT_PERFORMED and VM_OPERATION_FAILED). Other single-host providers
-	// ignore it.
+	// or definition is read. The Proxmox provider checks it as described for
+	// PowerRequest.owner, before anything is cloned (a source config it cannot
+	// read is UNAVAILABLE with CREATE_NOT_PERFORMED and VM_OPERATION_FAILED).
+	// The other single-host and thin-client providers ignore it. The manager
+	// sets it on every clone of a source VirtualMachine that has a uid,
+	// single-host included. Additive and backward-compatible.
 	SourceOwner *ObjectIdentity `protobuf:"bytes,10,opt,name=source_owner,json=sourceOwner,proto3" json:"source_owner,omitempty"`
 }
 
@@ -1953,27 +1925,22 @@ func (x *CloneResponse) GetTask() *TaskRef {
 
 // Image preparation operations
 //
-// Prepared-image artifact identity (ADR-0009). A manager that knows the
-// VMImage's identity sets image, source_digest and provider, and sends an EMPTY
+// Prepared-image artifact identity. A manager that knows the VMImage's
+// identity sets image, source_digest and provider, and sends an empty
 // target_name. The provider derives the hypervisor-side artifact name from
-// image.uid and source_digest (ADR-0009 D1; the naming rule belongs to the
-// provider), stamps every artifact it prepares with that identity (D3), and
-// reuses an existing artifact only when its stamp carries the same image.uid
-// and source_digest; anything else at the derived name is refused with
-// AlreadyExists and is never overwritten or adopted (D4).
+// image.uid and source_digest (the naming rule belongs to the provider),
+// stamps every artifact it prepares with that identity, and reuses an
+// existing artifact only when its stamp carries the same image.uid and
+// source_digest; anything else at the derived name is refused with
+// AlreadyExists and is never overwritten or adopted.
 //
-// A request with no image is a request from an older manager. It must carry
-// target_name and is served in deprecated legacy mode (bare-name naming and
-// reuse by name, no artifact echo) for one release only; the provider logs a
-// warning and increments
-// virtrigaud_provider_image_prepare_legacy_requests_total{provider_type}. The
-// next release refuses it with FailedPrecondition. A request with neither
-// image nor target_name, or with an image that has no uid, is InvalidArgument.
-//
-// A provider advertises that it implements this contract with
-// GetCapabilitiesResponse.supports_image_artifact_identity. Every provider
-// that predates it rejects an empty target_name, so a new manager whose request
-// reaches an old provider is refused rather than served under a bare name.
+// A request with no image is a legacy request from a manager that predates
+// this contract. It must carry target_name. It is deprecated: a provider may
+// serve it with bare-name naming and reuse by name and no artifact echo (the
+// built-in providers log a warning and increment
+// virtrigaud_provider_image_prepare_legacy_requests_total{provider_type}), or
+// refuse it. A request with neither image nor target_name, or with an image
+// that has no uid, is InvalidArgument.
 type ImagePrepareRequest struct {
 	state         protoimpl.MessageState
 	sizeCache     protoimpl.SizeCache
@@ -1981,27 +1948,27 @@ type ImagePrepareRequest struct {
 
 	ImageJson string `protobuf:"bytes,1,opt,name=image_json,json=imageJson,proto3" json:"image_json,omitempty"` // JSON-encoded VMImage spec
 	// target_name is the bare template/image name of a legacy (identity-less)
-	// request. EMPTY when image is set: the provider derives the name (ADR-0009
-	// D1, D7), and an identity request with a target_name is InvalidArgument.
+	// request. Empty when image is set: the provider derives the name, and an
+	// identity request with a target_name is InvalidArgument.
 	TargetName  string `protobuf:"bytes,2,opt,name=target_name,json=targetName,proto3" json:"target_name,omitempty"`
 	StorageHint string `protobuf:"bytes,3,opt,name=storage_hint,json=storageHint,proto3" json:"storage_hint,omitempty"` // Storage location hint (datastore, pool, etc.)
 	// image names the VMImage being prepared. uid is authoritative: it is part of
 	// the artifact's derived name and of its stamp, and reuse requires a stamp
-	// with the same uid (ADR-0009 D1, D4). namespace and name are informational:
-	// they form the readable prefix of the artifact name and are recorded in the
-	// stamp for audit, but never authorize a reuse. Additive and
-	// backward-compatible: an older provider ignores it (and then rejects the
-	// empty target_name).
+	// with the same uid. namespace and name are informational: they form the
+	// readable prefix of the artifact name and are recorded in the stamp for
+	// audit, but never authorize a reuse. Additive and backward-compatible: a
+	// provider that predates the contract ignores it (and then rejects the empty
+	// target_name).
 	Image *ObjectIdentity `protobuf:"bytes,4,opt,name=image,proto3" json:"image,omitempty"`
 	// source_digest is "sha256:" followed by 64 lowercase hex digits: the
-	// manager's digest of the VMImage's canonical spec.source (ADR-0009 D2). The
-	// provider checks only its syntax and uses it verbatim, in the derived name
-	// and in the stamp; a changed spec.source therefore gets a new artifact.
-	// Required when image is set.
+	// manager's digest of the VMImage's canonical spec.source. The provider
+	// checks only its syntax and uses it verbatim, in the derived name and in
+	// the stamp; a changed spec.source therefore gets a new artifact. Required
+	// when image is set.
 	SourceDigest string `protobuf:"bytes,5,opt,name=source_digest,json=sourceDigest,proto3" json:"source_digest,omitempty"`
 	// provider names the Provider object the prepare runs through. Informational
 	// only: it is recorded in the stamp as preparedBy and is never part of the
-	// reuse rule (ADR-0009 D3, D5).
+	// reuse rule.
 	Provider *ObjectIdentity `protobuf:"bytes,6,opt,name=provider,proto3" json:"provider,omitempty"`
 }
 
@@ -2080,15 +2047,13 @@ func (x *ImagePrepareRequest) GetProvider() *ObjectIdentity {
 }
 
 // ImagePrepareResponse reports where the provider placed the prepared image so
-// the manager can later create VMs from that prepared location instead of
-// re-resolving (and possibly re-downloading) the original source (issue #154,
-// PR-6 / #214).
+// the manager can create VMs from that prepared location instead of
+// re-resolving (and possibly re-downloading) the original source.
 //
-// It mirrors the CloneResponse precedent: `task` stays at field 1 so this
-// message is wire-compatible with the TaskResponse it replaces — a manager that
-// still decodes a TaskResponse reads field 1 (the TaskRef) unchanged, and the
-// new id/path fields are simply ignored by older decoders. The change is
-// therefore additive and non-breaking.
+// task stays at field 1, identical to TaskResponse.task, so the message is
+// wire-compatible with TaskResponse: a decoder that still expects a
+// TaskResponse reads field 1 (the TaskRef) unchanged and ignores the other
+// fields.
 type ImagePrepareResponse struct {
 	state         protoimpl.MessageState
 	sizeCache     protoimpl.SizeCache
@@ -2099,18 +2064,19 @@ type ImagePrepareResponse struct {
 	// TaskResponse.task for wire compatibility.
 	Task *TaskRef `protobuf:"bytes,1,opt,name=task,proto3" json:"task,omitempty"`
 	// prepared_image_id is the provider-specific identifier of the prepared image
-	// — e.g. a vSphere template name / MoRef value, or a Proxmox template
-	// name/VMID. The manager stamps this onto VMImage.status and uses it as the
-	// template ref at create time. Known at trigger time even for async prepares.
+	// (for example a vSphere template name or inventory path, or the name or VMID
+	// of an existing Proxmox template). The manager records it on VMImage.status
+	// and uses it as the template reference when it creates VMs. Known when the
+	// call returns, even for an asynchronous prepare.
 	PreparedImageId string `protobuf:"bytes,2,opt,name=prepared_image_id,json=preparedImageId,proto3" json:"prepared_image_id,omitempty"`
-	// prepared_image_path is the provider-specific path of the prepared image —
-	// e.g. a libvirt pool path (<poolPath>/<target>.qcow2). Empty for providers
-	// that address prepared images by id/name only (vSphere, Proxmox). Known at
-	// trigger time even for async prepares.
+	// prepared_image_path is the provider-specific path of the prepared image
+	// (for example a libvirt pool path, <poolPath>/<target>.qcow2). Empty for
+	// providers that address prepared images by id or name only (vSphere,
+	// Proxmox). Known when the call returns, even for an asynchronous prepare.
 	PreparedImagePath string `protobuf:"bytes,3,opt,name=prepared_image_path,json=preparedImagePath,proto3" json:"prepared_image_path,omitempty"`
 	// artifact is the provenance stamp of the artifact the provider verified
-	// (reused) or wrote (prepared) for an identity request (ADR-0009 D3, D7).
-	// Unset from an older provider and in deprecated legacy mode. The manager
+	// (reused) or wrote (prepared) for an identity request. Unset in legacy mode
+	// and from a provider that predates the identity contract. The manager
 	// records a prepare only when artifact is set and its image.uid and
 	// source_digest equal the request's. Additive and backward-compatible: an
 	// older manager ignores it.
@@ -2177,15 +2143,15 @@ func (x *ImagePrepareResponse) GetArtifact() *PreparedArtifact {
 	return nil
 }
 
-// PreparedArtifact echoes the provenance stamp of a prepared-image artifact
-// (ADR-0009 D3, D7). Only image.uid and source_digest are authoritative.
+// PreparedArtifact echoes the provenance stamp of a prepared-image artifact.
+// Only image.uid and source_digest are authoritative.
 type PreparedArtifact struct {
 	state         protoimpl.MessageState
 	sizeCache     protoimpl.SizeCache
 	unknownFields protoimpl.UnknownFields
 
-	// name is the hypervisor-side artifact name the provider derived (ADR-0009
-	// D1): "<namespace>.<name>" (shortened to the hypervisor's budget), a
+	// name is the hypervisor-side artifact name the provider derived:
+	// "<namespace>.<name>" (shortened to the hypervisor's length limit), a
 	// separator, and 16 hex digits of a hash over the image uid and source
 	// digest.
 	Name string `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
@@ -2258,7 +2224,29 @@ func (x *PreparedArtifact) GetReused() bool {
 	return false
 }
 
-// Disk export operations for migration
+// Disk export operations for migration.
+//
+// Disk bytes never traverse this gRPC channel. ExportDisk and ImportDisk move
+// bytes between the hypervisor host and the staging backend outside the RPC;
+// the RPC only orchestrates and returns identifiers and checksums.
+//
+// transfer_mode selects who touches the bytes:
+//   - "relay":  host -> provider pod -> backend (the provider pod stages the
+//     bytes through a mounted PVC or streams them to S3).
+//   - "direct": host -> backend, with no provider-pod hop. No built-in
+//     provider implements it; a provider rejects a mode it does not
+//     support with InvalidArgument.
+//   - "auto":   the manager resolves it to "relay" before it sends the
+//     request.
+//
+// An empty value is treated as "relay".
+//
+// backend_type names the staging backend ("pvc" | "nfs" | "s3"); an empty value
+// means the pvc path, for wire compatibility with callers that predate the
+// field. The backends a provider supports are listed in
+// GetCapabilitiesResponse.supported_export_backends and
+// supported_import_backends. The destination_url the manager sends starts with
+// pvc://, s3:// or nfs:// to match.
 type ExportDiskRequest struct {
 	state         protoimpl.MessageState
 	sizeCache     protoimpl.SizeCache
@@ -2270,25 +2258,24 @@ type ExportDiskRequest struct {
 	DestinationUrl     string            `protobuf:"bytes,4,opt,name=destination_url,json=destinationUrl,proto3" json:"destination_url,omitempty"`                                                             // Where to upload the disk (S3, HTTP, etc.)
 	Format             string            `protobuf:"bytes,5,opt,name=format,proto3" json:"format,omitempty"`                                                                                                   // Desired export format (qcow2, vmdk, raw)
 	Compress           bool              `protobuf:"varint,6,opt,name=compress,proto3" json:"compress,omitempty"`                                                                                              // Enable compression during export
-	Credentials        map[string]string `protobuf:"bytes,7,rep,name=credentials,proto3" json:"credentials,omitempty" protobuf_key:"bytes,1,opt,name=key,proto3" protobuf_val:"bytes,2,opt,name=value,proto3"` // Credentials for destination (access keys, tokens)
-	BackendType        string            `protobuf:"bytes,8,opt,name=backend_type,json=backendType,proto3" json:"backend_type,omitempty"`                                                                      // Staging backend: "pvc" | "nfs" | "s3"; empty == legacy pvc (ADR-0006)
-	TransferMode       string            `protobuf:"bytes,9,opt,name=transfer_mode,json=transferMode,proto3" json:"transfer_mode,omitempty"`                                                                   // Transfer mode: "auto" | "relay" | "direct" (ADR-0006)
-	StorageOptionsJson string            `protobuf:"bytes,10,opt,name=storage_options_json,json=storageOptionsJson,proto3" json:"storage_options_json,omitempty"`                                              // JSON-encoded backend-specific options (ADR-0006; empty in Slice 0)
-	// target_host_id names the host a clustered ("brain-in-operator") provider
-	// must run this disk export on (ADR-0007 Addendum A, A1): the operator's confirmed
-	// binding (VirtualMachine status.placement.host), threaded on the wire exactly
-	// like CreateRequest.target_host_id. AGNOSTIC. Additive and backward-compatible:
-	// single-host and thin-client providers ignore it, and the operator never sends
-	// it to them; a clustered provider REQUIRES it and rejects an empty value with
-	// InvalidArgument rather than defaulting to some host (honesty-first, D9). The
-	// provider never looks a VM's host up by itself (D1).
+	Credentials        map[string]string `protobuf:"bytes,7,rep,name=credentials,proto3" json:"credentials,omitempty" protobuf_key:"bytes,1,opt,name=key,proto3" protobuf_val:"bytes,2,opt,name=value,proto3"` // Credentials for destination: for s3 the keys accessKeyID, secretAccessKey and optionally sessionToken. Secret material, never logged.
+	BackendType        string            `protobuf:"bytes,8,opt,name=backend_type,json=backendType,proto3" json:"backend_type,omitempty"`                                                                      // Staging backend: "pvc" | "nfs" | "s3"; empty means pvc
+	TransferMode       string            `protobuf:"bytes,9,opt,name=transfer_mode,json=transferMode,proto3" json:"transfer_mode,omitempty"`                                                                   // Transfer mode: "relay" (the manager resolves "auto" to "relay")
+	StorageOptionsJson string            `protobuf:"bytes,10,opt,name=storage_options_json,json=storageOptionsJson,proto3" json:"storage_options_json,omitempty"`                                              // JSON-encoded, non-secret backend options (s3: bucket, endpoint, region, prefix, usePathStyle; nfs: server, export, path, uid, gid); empty for pvc
+	// target_host_id is the host a clustered provider (Provider topology:
+	// cluster) must run this disk export on: the host the VirtualMachine is bound to
+	// (status.placement.host), the same host CreateRequest.target_host_id
+	// named. A clustered provider requires it, answers an empty value with
+	// InvalidArgument and never looks up a VM's host itself. Single-host and
+	// thin-client providers ignore it and the manager never sends it to them.
+	// Additive and backward-compatible.
 	TargetHostId string `protobuf:"bytes,11,opt,name=target_host_id,json=targetHostId,proto3" json:"target_host_id,omitempty"`
-	// owner identifies the VirtualMachine whose disk is exported (ADR-0007
-	// Addendum A, slice 3), exactly as SnapshotCreateRequest.owner. A clustered
-	// provider exports a disk ONLY of a VM whose recorded owner uid equals this
-	// uid; any other VM is reported NOT_FOUND and none of its disks is read.
-	// Sent and checked on single-host requests as SnapshotCreateRequest.owner,
-	// before any disk is read or copied.
+	// owner identifies the VirtualMachine whose disk is exported, exactly as
+	// SnapshotCreateRequest.owner. A clustered provider exports a disk only of a
+	// VM whose recorded owner uid equals this uid; any other VM is reported
+	// NOT_FOUND and none of its disks is read. Sent and checked on single-host
+	// requests as described for SnapshotCreateRequest.owner, before any disk is
+	// read or copied.
 	Owner *ObjectIdentity `protobuf:"bytes,12,opt,name=owner,proto3" json:"owner,omitempty"`
 }
 
@@ -2480,9 +2467,9 @@ func (x *ExportDiskResponse) GetChecksum() string {
 }
 
 // Disk import operations for migration.
-// See the ExportDiskRequest host-vs-pod execution contract above: disk bytes
-// never traverse the gRPC channel; backend_type/transfer_mode carry the same
-// meaning for the import (target) side (ADR-0006).
+// See the ExportDiskRequest comment: disk bytes never traverse the gRPC
+// channel; backend_type and transfer_mode carry the same meaning for the
+// import (target) side.
 type ImportDiskRequest struct {
 	state         protoimpl.MessageState
 	sizeCache     protoimpl.SizeCache
@@ -2494,23 +2481,23 @@ type ImportDiskRequest struct {
 	TargetName         string            `protobuf:"bytes,4,opt,name=target_name,json=targetName,proto3" json:"target_name,omitempty"`                                                                         // Name for the imported disk
 	VerifyChecksum     bool              `protobuf:"varint,5,opt,name=verify_checksum,json=verifyChecksum,proto3" json:"verify_checksum,omitempty"`                                                            // Verify checksum after import
 	ExpectedChecksum   string            `protobuf:"bytes,6,opt,name=expected_checksum,json=expectedChecksum,proto3" json:"expected_checksum,omitempty"`                                                       // Expected checksum (SHA256)
-	Credentials        map[string]string `protobuf:"bytes,7,rep,name=credentials,proto3" json:"credentials,omitempty" protobuf_key:"bytes,1,opt,name=key,proto3" protobuf_val:"bytes,2,opt,name=value,proto3"` // Credentials for source (access keys, tokens)
-	BackendType        string            `protobuf:"bytes,8,opt,name=backend_type,json=backendType,proto3" json:"backend_type,omitempty"`                                                                      // Staging backend: "pvc" | "nfs" | "s3"; empty == legacy pvc (ADR-0006)
-	TransferMode       string            `protobuf:"bytes,9,opt,name=transfer_mode,json=transferMode,proto3" json:"transfer_mode,omitempty"`                                                                   // Transfer mode: "auto" | "relay" | "direct" (ADR-0006)
-	StorageOptionsJson string            `protobuf:"bytes,10,opt,name=storage_options_json,json=storageOptionsJson,proto3" json:"storage_options_json,omitempty"`                                              // JSON-encoded backend-specific options (ADR-0006; empty in Slice 0)
+	Credentials        map[string]string `protobuf:"bytes,7,rep,name=credentials,proto3" json:"credentials,omitempty" protobuf_key:"bytes,1,opt,name=key,proto3" protobuf_val:"bytes,2,opt,name=value,proto3"` // Credentials for source: for s3 the keys accessKeyID, secretAccessKey and optionally sessionToken. Secret material, never logged.
+	BackendType        string            `protobuf:"bytes,8,opt,name=backend_type,json=backendType,proto3" json:"backend_type,omitempty"`                                                                      // Staging backend: "pvc" | "nfs" | "s3"; empty means pvc
+	TransferMode       string            `protobuf:"bytes,9,opt,name=transfer_mode,json=transferMode,proto3" json:"transfer_mode,omitempty"`                                                                   // Transfer mode: "relay" (the manager resolves "auto" to "relay")
+	StorageOptionsJson string            `protobuf:"bytes,10,opt,name=storage_options_json,json=storageOptionsJson,proto3" json:"storage_options_json,omitempty"`                                              // JSON-encoded, non-secret backend options (s3: bucket, endpoint, region, prefix, usePathStyle; nfs: server, export, path, uid, gid); empty for pvc
 	// target_vm names the Kubernetes VirtualMachine the disk is imported for (a
-	// VMMigration's target): its namespace and name. On a single-host or
-	// thin-client provider uid is empty (the VirtualMachine does not exist yet)
-	// and ignored. A CLUSTERED provider requires uid (a canonical UUID; ADR-0007
-	// Addendum B, B2): the migration creates its target VirtualMachine first,
+	// VMMigration's target): its namespace, name and uid. A single-host or
+	// thin-client provider ignores the uid, which is empty because the
+	// VirtualMachine does not exist yet. A clustered provider requires uid (a
+	// canonical UUID): the migration creates its target VirtualMachine first,
 	// and the uid classifies a domain of the same name already on the landing
 	// host; it never authorizes writing over a file in use. A provider that
 	// attaches an imported disk in place only when it carries the VM's own name
-	// derives the landing name from it with the same rule its Create uses (the
-	// libvirt provider: "<namespace>.<name>-migrated"), so the naming rule has
-	// one owner, the provider. The landing path is returned in path, which the operator hands
-	// back to the VM unchanged. Additive and backward-compatible: other providers
-	// ignore it, and an unset value keeps the legacy target_name naming.
+	// derives the landing name from it with the same rule its Create uses
+	// (libvirt: "<namespace>.<name>-migrated"), so the provider owns the naming
+	// rule. The landing path is returned in path, which the manager hands back
+	// to the VM unchanged. Other providers ignore it, and an unset value keeps
+	// the target_name naming. Additive and backward-compatible.
 	TargetVm *ObjectIdentity `protobuf:"bytes,11,opt,name=target_vm,json=targetVm,proto3" json:"target_vm,omitempty"`
 	// max_virtual_size_bytes is the disk-size limit of the target Provider for
 	// this import (the manager's --max-disk-size, lowered by the Provider's
@@ -2523,15 +2510,15 @@ type ImportDiskRequest struct {
 	// cannot read that size. Nothing is landed either way. Additive and
 	// backward-compatible: a provider that predates it ignores it.
 	MaxVirtualSizeBytes int64 `protobuf:"varint,12,opt,name=max_virtual_size_bytes,json=maxVirtualSizeBytes,proto3" json:"max_virtual_size_bytes,omitempty"`
-	// target_host_id names the host of a CLUSTERED provider the disk lands on:
-	// the target VirtualMachine's status.placement.pendingHost, which the
-	// ordinary scheduler chose (ADR-0007 Addendum B, B1/B2). It carries A1's
-	// rules: the value is agnostic to the provider; the manager never sends it
-	// to a single-host or thin-client provider (they ignore it); a clustered
-	// provider requires it and answers an empty value with InvalidArgument; it
+	// target_host_id is the host of a clustered provider the disk lands on: the
+	// target VirtualMachine's status.placement.pendingHost, which the scheduler
+	// chose. The value is not specific to a hypervisor; the manager never sends
+	// it to a single-host or thin-client provider (they ignore it); a clustered
+	// provider requires it, answers an empty value with InvalidArgument and
 	// never picks a host itself. An unknown, removed or draining host is
-	// Unavailable + HOST_UNAVAILABLE before anything runs. Sent only to a
-	// provider that reports supports_routed_import. Additive.
+	// Unavailable with the ErrorInfo reason HOST_UNAVAILABLE before anything
+	// runs. Sent only to a provider that reports supports_routed_import.
+	// Additive.
 	TargetHostId string `protobuf:"bytes,13,opt,name=target_host_id,json=targetHostId,proto3" json:"target_host_id,omitempty"`
 }
 
@@ -2746,20 +2733,19 @@ type GetDiskInfoRequest struct {
 	VmId       string `protobuf:"bytes,1,opt,name=vm_id,json=vmId,proto3" json:"vm_id,omitempty"`                   // VM identifier
 	DiskId     string `protobuf:"bytes,2,opt,name=disk_id,json=diskId,proto3" json:"disk_id,omitempty"`             // Disk identifier (optional, defaults to primary disk)
 	SnapshotId string `protobuf:"bytes,3,opt,name=snapshot_id,json=snapshotId,proto3" json:"snapshot_id,omitempty"` // Get info for specific snapshot (optional)
-	// target_host_id names the host a clustered ("brain-in-operator") provider
-	// must run this disk-info read on (ADR-0007 Addendum A, A1): the operator's confirmed
-	// binding (VirtualMachine status.placement.host), threaded on the wire exactly
-	// like CreateRequest.target_host_id. AGNOSTIC. Additive and backward-compatible:
-	// single-host and thin-client providers ignore it, and the operator never sends
-	// it to them; a clustered provider REQUIRES it and rejects an empty value with
-	// InvalidArgument rather than defaulting to some host (honesty-first, D9). The
-	// provider never looks a VM's host up by itself (D1).
+	// target_host_id is the host a clustered provider (Provider topology:
+	// cluster) must run this disk-info read on: the host the VirtualMachine is bound to
+	// (status.placement.host), the same host CreateRequest.target_host_id
+	// named. A clustered provider requires it, answers an empty value with
+	// InvalidArgument and never looks up a VM's host itself. Single-host and
+	// thin-client providers ignore it and the manager never sends it to them.
+	// Additive and backward-compatible.
 	TargetHostId string `protobuf:"bytes,4,opt,name=target_host_id,json=targetHostId,proto3" json:"target_host_id,omitempty"`
-	// owner identifies the VirtualMachine whose disk is described (ADR-0007
-	// Addendum A, slice 3), exactly as SnapshotCreateRequest.owner. A clustered
-	// provider describes a disk ONLY of a VM whose recorded owner uid equals
-	// this uid; any other VM is reported NOT_FOUND and none of its disks is read.
-	// Sent and checked on single-host requests as SnapshotCreateRequest.owner.
+	// owner identifies the VirtualMachine whose disk is described, exactly as
+	// SnapshotCreateRequest.owner. A clustered provider describes a disk only of
+	// a VM whose recorded owner uid equals this uid; any other VM is reported
+	// NOT_FOUND and none of its disks is read. Sent and checked on single-host
+	// requests as described for SnapshotCreateRequest.owner.
 	Owner *ObjectIdentity `protobuf:"bytes,5,opt,name=owner,proto3" json:"owner,omitempty"`
 }
 
@@ -2844,14 +2830,13 @@ type GetDiskInfoResponse struct {
 	Snapshots        []string          `protobuf:"bytes,7,rep,name=snapshots,proto3" json:"snapshots,omitempty"`                                                                                       // Available snapshots
 	BackingFile      string            `protobuf:"bytes,8,opt,name=backing_file,json=backingFile,proto3" json:"backing_file,omitempty"`                                                                // Backing file (for linked clones)
 	Metadata         map[string]string `protobuf:"bytes,9,rep,name=metadata,proto3" json:"metadata,omitempty" protobuf_key:"bytes,1,opt,name=key,proto3" protobuf_val:"bytes,2,opt,name=value,proto3"` // Additional provider-specific metadata
-	// disks lists EVERY disk of the VM as it is now — its data disks, not CD-ROM
-	// or cloud-init media — each with its current virtual size, whatever
-	// disk_id and snapshot_id asked for. The manager checks them against the
+	// disks lists every disk of the VM as it is now (its data disks, not CD-ROM
+	// or cloud-init media), each with its current virtual size, whatever disk_id
+	// and snapshot_id asked for. The manager checks them against the
 	// administrator's disk-size limit before a clone copies them. A size the
 	// provider could not read is 0, which the manager treats as unknown. A
-	// provider that predates the field leaves it empty, and the manager then
-	// fails closed (it clones nothing through it while a limit applies).
-	// Additive and backward-compatible.
+	// provider that leaves the list empty makes the manager fail closed: it
+	// clones nothing while a limit applies. Additive and backward-compatible.
 	Disks []*DiskCapacity `protobuf:"bytes,10,rep,name=disks,proto3" json:"disks,omitempty"`
 }
 
@@ -3027,30 +3012,30 @@ type ListVMsRequest struct {
 	sizeCache     protoimpl.SizeCache
 	unknownFields protoimpl.UnknownFields
 
-	// owner_namespace and owner_name, when both are set, ask for the VMs of ONE
-	// VirtualMachine only (ADR-0007 A6, R4: the pre-schedule uniqueness check).
-	// A provider that honours the filter advertises
-	// GetCapabilitiesResponse.supports_list_owner_filter and looks up the
-	// CANDIDATE NAMES of that VirtualMachine only — the names it would give it
-	// (libvirt: "<namespace>.<name>", returned whatever its owner stamp, and the
-	// legacy bare "<name>", returned only when its owner stamp records that
-	// namespace and name). A VM named otherwise is NOT looked at, even when its
-	// owner stamp records that namespace and name: an adopted VM keeps the name
-	// it had and is not found by the filter. Each VM found is reported as in an
-	// unfiltered listing (host_id, owner_namespace/owner_name, provider_raw
-	// "owner_uid" / "owner_stamp_state"; a clustered libvirt provider also
-	// reports each VM's current size as provider_raw "current_vcpus" and
-	// "current_memory_mib", cpu and memory_mib being its maxima), and the
-	// answer sets ListVMsResponse.owner_filter_applied. Hosts that could not be checked are
-	// in unreachable_host_ids, exactly as for an unfiltered listing.
+	// owner_namespace and owner_name, when both are set, ask for the VMs of one
+	// VirtualMachine only (the manager's check, before a clustered VM is
+	// scheduled, that no VM already exists for it). A provider that honours the
+	// filter advertises GetCapabilitiesResponse.supports_list_owner_filter and
+	// looks up the candidate names of that VirtualMachine only: the names it
+	// would give it (libvirt: "<namespace>.<name>", returned whatever its owner
+	// stamp, and the legacy bare "<name>", returned only when its owner stamp
+	// records that namespace and name). A VM named otherwise is not looked at,
+	// even when its owner stamp records that namespace and name: an adopted VM
+	// keeps the name it had and is not found by the filter. Each VM found is
+	// reported as in an unfiltered listing (host_id, owner_namespace and
+	// owner_name, provider_raw "owner_uid" and "owner_stamp_state"; a clustered
+	// libvirt provider also reports each VM's current size as provider_raw
+	// "current_vcpus" and "current_memory_mib", cpu and memory_mib being its
+	// maxima), and the answer sets ListVMsResponse.owner_filter_applied. Hosts
+	// that could not be checked are listed in unreachable_host_ids, exactly as
+	// for an unfiltered listing.
 	//
 	// Setting only one of the two is invalid (INVALID_ARGUMENT from a provider
 	// that honours the filter). A provider that does not honour it (single-host
-	// and thin-client providers, and a clustered provider older than ADR-0007
-	// A6.2) ignores both fields and answers the unfiltered listing WITHOUT
+	// and thin-client providers, and a clustered provider that predates the
+	// filter) ignores both fields and answers the unfiltered listing without
 	// owner_filter_applied, so a caller never mistakes an unfiltered answer for
-	// a filtered one. AGNOSTIC. Informational identity only: the filter selects,
-	// it never authorizes anything.
+	// a filtered one. The filter only selects VMs; it never authorizes anything.
 	OwnerNamespace string `protobuf:"bytes,1,opt,name=owner_namespace,json=ownerNamespace,proto3" json:"owner_namespace,omitempty"`
 	OwnerName      string `protobuf:"bytes,2,opt,name=owner_name,json=ownerName,proto3" json:"owner_name,omitempty"`
 }
@@ -3107,21 +3092,19 @@ type ListVMsResponse struct {
 	unknownFields protoimpl.UnknownFields
 
 	Vms []*VMInfo `protobuf:"bytes,1,rep,name=vms,proto3" json:"vms,omitempty"`
-	// unreachable_host_ids names every host of a clustered ("brain-in-operator")
-	// provider whose VMs could not be listed in this call — the host could not
-	// be reached, did not answer within its per-host deadline, or failed the
-	// listing (ADR-0007 Addendum A, A3 / slice 4). A caller must treat each such
-	// host as UNKNOWN, never as empty: a VM it knows on that host is not gone.
-	// A clustered provider never silently drops a host from the result. AGNOSTIC.
-	// Always empty from single-host and thin-client providers, whose ListVMs
-	// either answers for their one endpoint or fails as a whole.
+	// unreachable_host_ids names every host of a clustered provider whose VMs
+	// could not be listed in this call: the host could not be reached, did not
+	// answer within its per-host deadline, or failed the listing. A caller must
+	// treat each such host as unknown, never as empty: a VM it knows on that
+	// host is not gone. A clustered provider never silently drops a host from the
+	// result. Always empty from single-host and thin-client providers, whose
+	// ListVMs either answers for their one endpoint or fails as a whole.
 	UnreachableHostIds []string `protobuf:"bytes,2,rep,name=unreachable_host_ids,json=unreachableHostIds,proto3" json:"unreachable_host_ids,omitempty"`
-	// owner_filter_applied is true when the provider applied the request's
-	// owner filter (ListVMsRequest.owner_namespace / owner_name): vms holds only
-	// that VirtualMachine's candidates. False on every unfiltered listing, and
-	// from any provider that ignored the filter — which a caller that asked for
-	// it must treat as "the filter is not supported" (ADR-0007 A6.2), never as
-	// a filtered answer. AGNOSTIC.
+	// owner_filter_applied is true when the provider applied the request's owner
+	// filter (ListVMsRequest.owner_namespace and owner_name): vms holds only that
+	// VirtualMachine's candidates. False on every unfiltered listing, and from
+	// any provider that ignored the filter, which a caller that asked for it
+	// must treat as "the filter is not supported", never as a filtered answer.
 	OwnerFilterApplied bool `protobuf:"varint,3,opt,name=owner_filter_applied,json=ownerFilterApplied,proto3" json:"owner_filter_applied,omitempty"`
 }
 
@@ -3192,21 +3175,20 @@ type VMInfo struct {
 	Disks       []*DiskInfo       `protobuf:"bytes,7,rep,name=disks,proto3" json:"disks,omitempty"`                                                                                                                        // Disk information
 	Networks    []*NetworkInfo    `protobuf:"bytes,8,rep,name=networks,proto3" json:"networks,omitempty"`                                                                                                                  // Network information
 	ProviderRaw map[string]string `protobuf:"bytes,9,rep,name=provider_raw,json=providerRaw,proto3" json:"provider_raw,omitempty" protobuf_key:"bytes,1,opt,name=key,proto3" protobuf_val:"bytes,2,opt,name=value,proto3"` // Provider-specific metadata
-	// host_id is the host (the Host CR name, as in HostInfo.id) a clustered
-	// ("brain-in-operator") provider found this VM on (ADR-0007 Addendum A, A3 /
-	// slice 4). On a clustered provider a VM is identified by (host_id, id),
-	// never by id or name alone: two hosts may each have a VM of the same name.
-	// Set on every VMInfo a clustered provider lists; empty from single-host and
-	// thin-client providers. AGNOSTIC.
+	// host_id is the host (the Host resource name, as in HostInfo.id) a
+	// clustered provider found this VM on. On a clustered provider a VM is
+	// identified by (host_id, id), never by id or name alone: two hosts may each
+	// have a VM of the same name. Set on every VMInfo a clustered provider
+	// lists; empty from single-host and thin-client providers.
 	HostId string `protobuf:"bytes,10,opt,name=host_id,json=hostId,proto3" json:"host_id,omitempty"`
 	// owner_namespace and owner_name are the namespace and name recorded in the
 	// VM's VirtRigaud owner stamp (the VirtualMachine it was created or adopted
-	// for; its uid is in provider_raw "owner_uid"), read from the same definition
-	// the listing reads (ADR-0007 Addendum A, slice 4; A6's R4 uniqueness check
-	// looks previous incarnations up by them). Informational: never an
-	// authorization on their own (only the uid identifies an owner). Empty when
-	// the VM carries no stamp, or more than one (ambiguous). Set by a clustered
-	// provider; single-host and thin-client providers leave them empty.
+	// for; its uid is in provider_raw "owner_uid"), read from the same
+	// definition the listing reads. The manager uses them to look up previous
+	// incarnations of a VirtualMachine. Informational: never an authorization on
+	// their own (only the uid identifies an owner). Empty when the VM carries
+	// no stamp, or more than one (ambiguous). Set by a clustered provider;
+	// single-host and thin-client providers leave them empty.
 	OwnerNamespace string `protobuf:"bytes,11,opt,name=owner_namespace,json=ownerNamespace,proto3" json:"owner_namespace,omitempty"`
 	OwnerName      string `protobuf:"bytes,12,opt,name=owner_name,json=ownerName,proto3" json:"owner_name,omitempty"`
 }
@@ -3548,26 +3530,27 @@ func (x *ListHostsResponse) GetHosts() []*HostInfo {
 }
 
 // HostInfo describes one hypervisor host in a clustered provider's inventory.
-// The shape is hypervisor-AGNOSTIC; the SOURCE of each value is per-hypervisor
-// (e.g. libvirt reads `virsh nodeinfo` / `domcapabilities`, and statvfs of the
-// `default` pool's directory via `virsh pool-dumpxml` + `stat -f`). See
-// ADR-0007 for the full agnostic-vs-per-hypervisor breakdown.
+// Each field has the same meaning on every hypervisor; how the value is
+// obtained depends on the hypervisor. The libvirt provider reads
+// `virsh nodeinfo` and `virsh domcapabilities`, and measures the free space of
+// the file system behind the `default` storage pool's directory with
+// `virsh pool-dumpxml` and `stat -f`.
 type HostInfo struct {
 	state         protoimpl.MessageState
 	sizeCache     protoimpl.SizeCache
 	unknownFields protoimpl.UnknownFields
 
-	Id                 string            `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`                                                                                                 // Operator-assigned host id (== Host CR name). AGNOSTIC.
-	Address            string            `protobuf:"bytes,2,opt,name=address,proto3" json:"address,omitempty"`                                                                                       // SSH endpoint / agent address. AGNOSTIC.
-	AllocatableCpu     int32             `protobuf:"varint,3,opt,name=allocatable_cpu,json=allocatableCpu,proto3" json:"allocatable_cpu,omitempty"`                                                  // Allocatable vCPUs. AGNOSTIC shape; per-HV source.
-	AllocatableMemMib  int64             `protobuf:"varint,4,opt,name=allocatable_mem_mib,json=allocatableMemMib,proto3" json:"allocatable_mem_mib,omitempty"`                                       // Allocatable memory in MiB. AGNOSTIC shape; per-HV source.
-	AllocatableStorage int64             `protobuf:"varint,5,opt,name=allocatable_storage,json=allocatableStorage,proto3" json:"allocatable_storage,omitempty"`                                      // Allocatable storage in bytes. Per-HV (per-pool vs host-fs).
-	Health             HostHealth        `protobuf:"varint,6,opt,name=health,proto3,enum=provider.v1.HostHealth" json:"health,omitempty"`                                                            // Health probe result. AGNOSTIC enum; per-HV probe.
-	Labels             map[string]string `protobuf:"bytes,7,rep,name=labels,proto3" json:"labels,omitempty" protobuf_key:"bytes,1,opt,name=key,proto3" protobuf_val:"bytes,2,opt,name=value,proto3"` // Scheduling constraints (storage-pool/network visibility, zone/rack). AGNOSTIC.
-	CpuModel           string            `protobuf:"bytes,8,opt,name=cpu_model,json=cpuModel,proto3" json:"cpu_model,omitempty"`                                                                     // Baseline CPU model. Per-HV interpretation.
-	CpuFeatures        []string          `protobuf:"bytes,9,rep,name=cpu_features,json=cpuFeatures,proto3" json:"cpu_features,omitempty"`                                                            // CPU feature flags. Per-HV.
-	MachineTypes       []string          `protobuf:"bytes,10,rep,name=machine_types,json=machineTypes,proto3" json:"machine_types,omitempty"`                                                        // Supported machine types. Per-HV.
-	EmulatorVersion    string            `protobuf:"bytes,11,opt,name=emulator_version,json=emulatorVersion,proto3" json:"emulator_version,omitempty"`                                               // Emulator/hypervisor version. Per-HV.
+	Id                 string            `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`                                                                                                 // Host identifier: the name of the Host resource.
+	Address            string            `protobuf:"bytes,2,opt,name=address,proto3" json:"address,omitempty"`                                                                                       // Address of the host (the libvirt provider reports its SSH endpoint).
+	AllocatableCpu     int32             `protobuf:"varint,3,opt,name=allocatable_cpu,json=allocatableCpu,proto3" json:"allocatable_cpu,omitempty"`                                                  // Schedulable vCPUs: the host's total logical CPUs, before overcommit and before subtracting VMs.
+	AllocatableMemMib  int64             `protobuf:"varint,4,opt,name=allocatable_mem_mib,json=allocatableMemMib,proto3" json:"allocatable_mem_mib,omitempty"`                                       // Schedulable memory in MiB: the host's total memory, before overcommit and before subtracting VMs.
+	AllocatableStorage int64             `protobuf:"varint,5,opt,name=allocatable_storage,json=allocatableStorage,proto3" json:"allocatable_storage,omitempty"`                                      // Storage available for VM disks, in bytes (libvirt: free space of the default pool's directory).
+	Health             HostHealth        `protobuf:"varint,6,opt,name=health,proto3,enum=provider.v1.HostHealth" json:"health,omitempty"`                                                            // Result of the health probe.
+	Labels             map[string]string `protobuf:"bytes,7,rep,name=labels,proto3" json:"labels,omitempty" protobuf_key:"bytes,1,opt,name=key,proto3" protobuf_val:"bytes,2,opt,name=value,proto3"` // Scheduling constraints from the host's inventory (storage-pool and network visibility, zone, rack).
+	CpuModel           string            `protobuf:"bytes,8,opt,name=cpu_model,json=cpuModel,proto3" json:"cpu_model,omitempty"`                                                                     // Baseline CPU model.
+	CpuFeatures        []string          `protobuf:"bytes,9,rep,name=cpu_features,json=cpuFeatures,proto3" json:"cpu_features,omitempty"`                                                            // CPU feature flags.
+	MachineTypes       []string          `protobuf:"bytes,10,rep,name=machine_types,json=machineTypes,proto3" json:"machine_types,omitempty"`                                                        // Supported machine types.
+	EmulatorVersion    string            `protobuf:"bytes,11,opt,name=emulator_version,json=emulatorVersion,proto3" json:"emulator_version,omitempty"`                                               // Emulator/hypervisor version.
 }
 
 func (x *HostInfo) Reset() {
@@ -3679,8 +3662,8 @@ func (x *HostInfo) GetEmulatorVersion() string {
 	return ""
 }
 
-// Refresh a single host's inventory — cheaper than a full ListHosts poll when
-// reconciling one Host CR. Returns a HostInfo.
+// Refresh a single host's inventory. Cheaper than a full ListHosts poll when
+// reconciling one Host resource. Returns a HostInfo.
 type GetHostInfoRequest struct {
 	state         protoimpl.MessageState
 	sizeCache     protoimpl.SizeCache
@@ -3785,12 +3768,12 @@ type GetCapabilitiesResponse struct {
 	SupportedExportFormats      []string `protobuf:"bytes,11,rep,name=supported_export_formats,json=supportedExportFormats,proto3" json:"supported_export_formats,omitempty"`           // Supported export formats (qcow2, vmdk, raw)
 	SupportedImportFormats      []string `protobuf:"bytes,12,rep,name=supported_import_formats,json=supportedImportFormats,proto3" json:"supported_import_formats,omitempty"`           // Supported import formats
 	SupportsExportCompression   bool     `protobuf:"varint,13,opt,name=supports_export_compression,json=supportsExportCompression,proto3" json:"supports_export_compression,omitempty"` // Supports compression during export
-	SupportedExportBackends     []string `protobuf:"bytes,14,rep,name=supported_export_backends,json=supportedExportBackends,proto3" json:"supported_export_backends,omitempty"`        // Export staging backends: "pvc"|"nfs"|"s3" (ADR-0006; empty == pvc-only)
-	SupportedImportBackends     []string `protobuf:"bytes,15,rep,name=supported_import_backends,json=supportedImportBackends,proto3" json:"supported_import_backends,omitempty"`        // Import staging backends: "pvc"|"nfs"|"s3" (ADR-0006; empty == pvc-only)
-	SupportedTransferModes      []string `protobuf:"bytes,16,rep,name=supported_transfer_modes,json=supportedTransferModes,proto3" json:"supported_transfer_modes,omitempty"`           // Transfer modes: "relay"|"direct" (ADR-0006; empty == relay-only)
-	SupportsClustering          bool     `protobuf:"varint,17,opt,name=supports_clustering,json=supportsClustering,proto3" json:"supports_clustering,omitempty"`                        // Provider fronts multiple hosts and implements host inventory (ListHosts/GetHostInfo) + host-targeted placement (ADR-0007 P1, D7). The remaining clustering flags (live/block migration, host evacuation, storage modes) are added by the migration slice.
+	SupportedExportBackends     []string `protobuf:"bytes,14,rep,name=supported_export_backends,json=supportedExportBackends,proto3" json:"supported_export_backends,omitempty"`        // Export staging backends: "pvc"|"nfs"|"s3"; empty means pvc only
+	SupportedImportBackends     []string `protobuf:"bytes,15,rep,name=supported_import_backends,json=supportedImportBackends,proto3" json:"supported_import_backends,omitempty"`        // Import staging backends: "pvc"|"nfs"|"s3"; empty means pvc only
+	SupportedTransferModes      []string `protobuf:"bytes,16,rep,name=supported_transfer_modes,json=supportedTransferModes,proto3" json:"supported_transfer_modes,omitempty"`           // Transfer modes: "relay"|"direct"; empty means relay only. No built-in provider implements "direct".
+	SupportsClustering          bool     `protobuf:"varint,17,opt,name=supports_clustering,json=supportsClustering,proto3" json:"supports_clustering,omitempty"`                        // Provider fronts several hosts and implements host inventory (ListHosts/GetHostInfo) and host-targeted placement. Reported only by the libvirt provider, and only when it runs with Provider topology: cluster.
 	// supports_image_artifact_identity reports that ImagePrepare implements the
-	// prepared-image artifact identity contract (ADR-0009 D7): it accepts
+	// prepared-image artifact identity contract: it accepts
 	// ImagePrepareRequest.image/source_digest/provider with an empty
 	// target_name, names and stamps artifacts from that identity, never reuses an
 	// artifact by bare name, and echoes the stamp in
@@ -3800,46 +3783,45 @@ type GetCapabilitiesResponse struct {
 	// supports_honest_reconfigure reports that Reconfigure implements the honest
 	// result contract: every requested change is applied to the running VM and
 	// its persistent definition, or applied to the definition only and reported
-	// with TaskResponse.restart_required, or the call fails — it never reports
-	// success for a change it did not apply. Additive and backward-compatible:
-	// false (the default) from a provider that predates it or does not
-	// implement it. A manager holds resizes of VMs on a clustered Provider that
-	// does not advertise it (its committed-capacity accounting trusts the
-	// result); single-host Providers are resized as before.
+	// with TaskResponse.restart_required, or the call fails; it never reports
+	// success for a change it did not apply. false (the default) from a provider
+	// that predates it or does not implement it. A manager holds resizes of VMs
+	// on a clustered Provider that does not advertise it (its committed-capacity
+	// accounting trusts the result); single-host Providers are resized as
+	// before. Of the built-in providers only libvirt reports it. Additive and
+	// backward-compatible.
 	SupportsHonestReconfigure bool `protobuf:"varint,19,opt,name=supports_honest_reconfigure,json=supportsHonestReconfigure,proto3" json:"supports_honest_reconfigure,omitempty"`
-	// supports_routed_clone reports that a clustered ("brain-in-operator")
-	// provider routes Clone to the source VM's bound host (ADR-0007 Addendum A,
-	// slice 3): it honours source_host_id, target_host_id and source_owner and
-	// stamps the clone with target_vm's uid. The manager checks it BEFORE it
-	// creates a clustered clone's target VirtualMachine. False on single-host and
-	// thin-client providers, which do not route clones (their Clone is
-	// unaffected), and on a clustered provider older than slice 3.
+	// supports_routed_clone reports that a clustered provider routes Clone to
+	// the source VM's bound host: it honours source_host_id, target_host_id and
+	// source_owner and stamps the clone with target_vm's uid. The manager
+	// checks it before it creates a clustered clone's target VirtualMachine.
+	// False on single-host and thin-client providers, which do not route clones
+	// (their Clone is unaffected), and on an older clustered provider.
 	SupportsRoutedClone bool `protobuf:"varint,20,opt,name=supports_routed_clone,json=supportsRoutedClone,proto3" json:"supports_routed_clone,omitempty"`
-	// supports_routed_adoption reports that a clustered ("brain-in-operator")
-	// provider lists VMs across all of its hosts — every VMInfo carries its
-	// host_id and ListVMsResponse.unreachable_host_ids names every host that
-	// could not be listed — and implements TransferOwner, which re-stamps a VM
-	// on its host with the VirtualMachine that takes it over (ADR-0007
-	// Addendum A, A3 / slice 4). The manager adopts from a clustered provider
-	// only when it reports it. False on single-host and thin-client providers
-	// (their ListVMs and adoption do not depend on it) and on a clustered
-	// provider older than slice 4.
+	// supports_routed_adoption reports that a clustered provider lists VMs
+	// across all of its hosts (every VMInfo carries its host_id and
+	// ListVMsResponse.unreachable_host_ids names every host that could not be
+	// listed) and implements TransferOwner, which re-stamps a VM on its host
+	// with the VirtualMachine that takes it over. The manager adopts from a
+	// clustered provider only when it reports it. False on single-host and
+	// thin-client providers (their ListVMs and adoption do not depend on it)
+	// and on an older clustered provider.
 	SupportsRoutedAdoption bool `protobuf:"varint,21,opt,name=supports_routed_adoption,json=supportsRoutedAdoption,proto3" json:"supports_routed_adoption,omitempty"`
 	// supports_list_owner_filter reports that ListVMs honours the owner filter
 	// (ListVMsRequest.owner_namespace / owner_name): it returns only the VMs of
-	// that VirtualMachine — the ones the provider would name for it, or whose
-	// owner stamp records its namespace and name — and marks the answer with
-	// ListVMsResponse.owner_filter_applied (ADR-0007 A6.2, R4). The manager runs
-	// its pre-schedule uniqueness check only through a clustered provider that
-	// reports it, and holds a clustered VM's first placement otherwise. False on
-	// single-host and thin-client providers (they never schedule, and ignore the
-	// filter) and on a clustered provider older than A6.2.
+	// that VirtualMachine (the ones the provider would name for it, or whose
+	// owner stamp records its namespace and name) and marks the answer with
+	// ListVMsResponse.owner_filter_applied. The manager runs its pre-schedule
+	// uniqueness check only through a clustered provider that reports it, and
+	// holds a clustered VM's first placement otherwise. False on single-host and
+	// thin-client providers (they never schedule, and ignore the filter) and on
+	// an older clustered provider.
 	SupportsListOwnerFilter bool `protobuf:"varint,22,opt,name=supports_list_owner_filter,json=supportsListOwnerFilter,proto3" json:"supports_list_owner_filter,omitempty"`
 	// supported_staged_disk_delete_backends lists the staging backends ("nfs",
-	// "s3") whose migration staging objects DeleteStagedDisk can remove
-	// (ADR-0011 D7). Empty — a provider that predates it, or one that stages
-	// nothing outside the cluster — means the manager never sends
-	// DeleteStagedDisk and records the staged object as left behind.
+	// "s3") whose migration staging objects DeleteStagedDisk can remove. Empty
+	// (a provider that predates the RPC, or one that stages nothing outside the
+	// cluster) means the manager never sends DeleteStagedDisk and records the
+	// staged object as left behind.
 	SupportedStagedDiskDeleteBackends []string `protobuf:"bytes,23,rep,name=supported_staged_disk_delete_backends,json=supportedStagedDiskDeleteBackends,proto3" json:"supported_staged_disk_delete_backends,omitempty"`
 	// supports_import_size_limit reports that ImportDisk enforces
 	// ImportDiskRequest.max_virtual_size_bytes on the disk it lands (refusing a
@@ -3853,54 +3835,54 @@ type GetCapabilitiesResponse struct {
 	// compare-and-swap, in the provider's own topology: a single-host provider
 	// addresses the VM by VMInfo.id alone (target_host_id empty). The manager's
 	// single-host adoption stamps the VMs it adopts only through a provider that
-	// reports it; through an older one it adopts them unstamped, as before, and
-	// says so in the Provider's adoption status. A clustered provider reports
+	// reports it; through an older one it adopts them unstamped and says so in
+	// the Provider's adoption status. A clustered provider reports
 	// supports_routed_adoption for its (routed) TransferOwner; this field does
 	// not change how a clustered Provider adopts.
 	SupportsOwnerTransfer bool `protobuf:"varint,25,opt,name=supports_owner_transfer,json=supportsOwnerTransfer,proto3" json:"supports_owner_transfer,omitempty"`
 	// supports_owner_rebind reports that Create and Clone stamp the VM they make
 	// with its owner (CreateRequest.owner, CloneRequest.target_vm with a uid) and
 	// that a Create or Clone sent again for the same owner returns the VM an
-	// earlier attempt made — never a second one (rc2 R4). The manager sends a
-	// Create or Clone whose outcome is unknown again only to a provider that
-	// reports it; from any other (one that predates the field, or an older
-	// Proxmox image that ignores target_vm) it keeps the earlier behaviour and
-	// never re-sends. Field 25 is taken by supports_owner_transfer (PR #392).
+	// earlier attempt made, never a second one. The manager sends a Create or
+	// Clone whose outcome is unknown again only to a provider that reports it;
+	// from any other (one that predates the field, or an older Proxmox image
+	// that ignores target_vm) it keeps the earlier behaviour and never re-sends.
+	// Field 25 is supports_owner_transfer.
 	SupportsOwnerRebind bool `protobuf:"varint,26,opt,name=supports_owner_rebind,json=supportsOwnerRebind,proto3" json:"supports_owner_rebind,omitempty"`
 	// resend_safe_export_backends lists the staging backends ("pvc", "nfs",
-	// "s3") on which an ExportDisk sent again for the same destination_url,
-	// once the deadline of the earlier call has passed, replaces what the
-	// earlier call wrote and leaves nothing else behind: the destination is the
-	// only durable artifact, the earlier call's writes have stopped by its
-	// deadline (cancellation honoured, or the write is atomic), and any
-	// temporary artifact is cleaned up or uniquely named (rc2 R6). The manager
-	// re-sends an ExportDisk whose outcome it lost (a restart or leader change
-	// between the call and the write of its result) only on a backend listed
-	// here; on any other — and to a provider image that predates the field —
-	// the VMMigration waits for an operator (ExportOutcomeUnknown). Additive.
+	// "s3") on which an ExportDisk sent again for the same destination_url, once
+	// the deadline of the earlier call has passed, replaces what the earlier
+	// call wrote and leaves nothing else behind: the destination is the only
+	// durable artifact, the earlier call's writes have stopped by its deadline
+	// (cancellation honoured, or the write is atomic), and any temporary
+	// artifact is cleaned up or uniquely named. The manager re-sends an
+	// ExportDisk whose outcome it lost (a restart or leader change between the
+	// call and the write of its result) only on a backend listed here; on any
+	// other, and to a provider image that predates the field, the VMMigration
+	// waits for an operator (reason ExportOutcomeUnknown). Additive.
 	ResendSafeExportBackends []string `protobuf:"bytes,27,rep,name=resend_safe_export_backends,json=resendSafeExportBackends,proto3" json:"resend_safe_export_backends,omitempty"`
-	// resend_safe_import_backends is resend_safe_export_backends for
-	// ImportDisk: on a listed backend, an ImportDisk sent again for the same
-	// target_vm, once the earlier call's deadline has passed, lands the disk at
-	// the same deterministic name (replacing what the earlier call landed, or
-	// refusing because a VM uses it) — never a second disk (rc2 R6).
+	// resend_safe_import_backends is resend_safe_export_backends for ImportDisk:
+	// on a listed backend, an ImportDisk sent again for the same target_vm, once
+	// the earlier call's deadline has passed, lands the disk at the same
+	// deterministic name (replacing what the earlier call landed, or refusing
+	// because a VM uses it), never a second disk.
 	ResendSafeImportBackends []string `protobuf:"bytes,28,rep,name=resend_safe_import_backends,json=resendSafeImportBackends,proto3" json:"resend_safe_import_backends,omitempty"`
-	// supports_landed_disk_delete reports that DeleteLandedDisk removes the
-	// disk a migration's ImportDisk landed for a target VM that does not use it
-	// (rc2 R7). From a provider that does not report it (one that predates the
-	// field) the manager never sends DeleteLandedDisk: it records the landed
-	// disk as left behind, with a Warning. Fields 27 and 28 are taken by
-	// resend_safe_export_backends / resend_safe_import_backends (PR #402).
+	// supports_landed_disk_delete reports that DeleteLandedDisk removes the disk
+	// a migration's ImportDisk landed for a target VM that does not use it. From
+	// a provider that does not report it (one that predates the RPC) the manager
+	// never sends DeleteLandedDisk: it records the landed disk as left behind,
+	// with a Warning. Fields 27 and 28 are resend_safe_export_backends and
+	// resend_safe_import_backends.
 	SupportsLandedDiskDelete bool `protobuf:"varint,29,opt,name=supports_landed_disk_delete,json=supportsLandedDiskDelete,proto3" json:"supports_landed_disk_delete,omitempty"`
-	// supports_routed_import reports that a CLUSTERED provider routes ImportDisk
+	// supports_routed_import reports that a clustered provider routes ImportDisk
 	// to ImportDiskRequest.target_host_id (with target_vm carrying the target
 	// VirtualMachine's uid), DeleteLandedDisk to
 	// DeleteLandedDiskRequest.target_host_id with a cross-host in-use scan, and
-	// the nfs DeleteStagedDisk to DeleteStagedDiskRequest.target_host_id
-	// (ADR-0007 Addendum B, B5). The manager accepts a clustered Provider as a
-	// VMMigration target only when it reports it (read at runtime, the D7 double
-	// gate). False on single-host and thin-client providers (their import is not
-	// routed) and on a clustered provider older than Addendum B. Additive.
+	// the nfs DeleteStagedDisk to DeleteStagedDiskRequest.target_host_id. The
+	// manager accepts a clustered Provider as a VMMigration target only when it
+	// reports it (read from the provider at run time). False on single-host and
+	// thin-client providers (their import is not routed) and on an older
+	// clustered provider. Additive.
 	SupportsRoutedImport bool `protobuf:"varint,30,opt,name=supports_routed_import,json=supportsRoutedImport,proto3" json:"supports_routed_import,omitempty"`
 }
 
@@ -4147,11 +4129,11 @@ func (x *GetCapabilitiesResponse) GetSupportsRoutedImport() bool {
 }
 
 // DeleteStagedDisk removes the staging object a VMMigration's ExportDisk wrote
-// to an nfs or s3 backend — a full, unencrypted copy of a tenant's disk —
-// once the migration no longer needs it (ADR-0011). The manager sends it to the
-// migration's TARGET provider.
+// to an nfs or s3 backend (a full, unencrypted copy of a tenant's disk) once
+// the migration no longer needs it. The manager sends it to the migration's
+// target provider.
 //
-// CONFINEMENT (security-critical). The request carries no key, path or URL.
+// Confinement (security-critical). The request carries no key, path or URL.
 // The provider derives the object from migration.namespace, migration.name and
 // stage with the same layout function the manager uses to build the
 // ExportDisk/ImportDisk URLs, and validates them (namespace a DNS-1123 label,
@@ -4180,18 +4162,18 @@ type DeleteStagedDiskRequest struct {
 	// backend_type is the staging backend: "nfs" or "s3".
 	BackendType string `protobuf:"bytes,3,opt,name=backend_type,json=backendType,proto3" json:"backend_type,omitempty"`
 	// storage_options_json is the same JSON-encoded, non-secret backend options
-	// the manager sends with ExportDisk / ImportDisk (ADR-0006).
+	// the manager sends with ExportDisk / ImportDisk.
 	StorageOptionsJson string `protobuf:"bytes,4,opt,name=storage_options_json,json=storageOptionsJson,proto3" json:"storage_options_json,omitempty"`
 	// credentials are the backend credentials (s3: the same keys as
 	// ExportDiskRequest.credentials). Secret material: never logged.
 	Credentials map[string]string `protobuf:"bytes,5,rep,name=credentials,proto3" json:"credentials,omitempty" protobuf_key:"bytes,1,opt,name=key,proto3" protobuf_val:"bytes,2,opt,name=value,proto3"`
 	// layout is the naming layout the migration's staged object was written
-	// with (ADR-0011 D5), recorded by the manager when the export was sent:
-	// "v2" — the nfs file "vmmigrations_<namespace>_<name>_<stage>.qcow2"
-	// ('_' appears in no namespace or name, so it is unambiguous); "v1" or empty
-	// — the legacy nfs file "vmmigrations-<namespace>-<name>-<stage>.qcow2" of a
-	// migration exported before v2. The s3 key is the same in both layouts. Any
-	// other value is InvalidArgument.
+	// with, recorded by the manager when the export was sent: "v2" is the nfs
+	// file "vmmigrations_<namespace>_<name>_<stage>.qcow2" ('_' appears in no
+	// namespace or name, so it is unambiguous); "v1" or empty is the legacy nfs
+	// file "vmmigrations-<namespace>-<name>-<stage>.qcow2" of a migration
+	// exported before v2. The s3 key is the same in both layouts. Any other
+	// value is InvalidArgument.
 	Layout string `protobuf:"bytes,6,opt,name=layout,proto3" json:"layout,omitempty"`
 	// target_vm is the VirtualMachine the migration's import landed a disk for
 	// (namespace and name; the same identity as ImportDiskRequest.target_vm),
@@ -4202,14 +4184,13 @@ type DeleteStagedDiskRequest struct {
 	// stage location. Unset: only the staged object is removed. Providers that
 	// keep no such copy ignore it.
 	TargetVm *ObjectIdentity `protobuf:"bytes,7,opt,name=target_vm,json=targetVm,proto3" json:"target_vm,omitempty"`
-	// target_host_id is the host of a CLUSTERED target provider the
-	// migration's import was sent to (the recorded import target host; ADR-0007
-	// Addendum B, B4). An nfs staged object is emptied by that host's qemu-img,
-	// so a clustered provider requires it for backend "nfs" (InvalidArgument
-	// when empty) and answers an unknown, removed or draining host with
-	// Unavailable + HOST_UNAVAILABLE. s3 objects are removed from the provider
-	// pod and ignore it. Single-host and thin-client providers ignore it.
-	// Additive.
+	// target_host_id is the host of a clustered target provider the migration's
+	// import was sent to (the recorded import target host). An nfs staged object
+	// is emptied by that host's qemu-img, so a clustered provider requires it for
+	// backend "nfs" (InvalidArgument when empty) and answers an unknown, removed
+	// or draining host with Unavailable and HOST_UNAVAILABLE. s3 objects are
+	// removed from the provider pod and ignore it. Single-host and thin-client
+	// providers ignore it. Additive.
 	TargetHostId string `protobuf:"bytes,8,opt,name=target_host_id,json=targetHostId,proto3" json:"target_host_id,omitempty"`
 }
 
@@ -4351,21 +4332,21 @@ func (x *DeleteStagedDiskResponse) GetOutcome() StagedDiskDeleteOutcome {
 // DeleteLandedDisk removes the disk a VMMigration's ImportDisk landed on this
 // (target) provider for target_vm, when the migration ended without a VM that
 // uses it: it failed for good, or the VMMigration was deleted before (or
-// without) a target VM that attached the disk (rc2 R7). The manager sends it to
-// the migration's TARGET provider, the one the import was sent to.
+// without) a target VM that attached the disk. The manager sends it to the
+// migration's target provider, the one the import was sent to.
 //
-// CONFINEMENT (security-critical). The provider derives the landed disk from
+// Confinement (security-critical). The provider derives the landed disk from
 // target_vm (namespace and name) with exactly the rule its ImportDisk names it
-// with — vSphere: the landing folder "[<datastore>] <ns>_<vm>-migrated";
+// with (vSphere: the landing folder "[<datastore>] <ns>_<vm>-migrated";
 // libvirt: "<default pool>/<ns>.<vm>-migrated.qcow2"; Proxmox: the node-side
-// import stage "<stage dir>/<ns>_<vm>-migrated.<ext>" — and validates the
+// import stage "<stage dir>/<ns>_<vm>-migrated.<ext>") and validates the
 // identity (namespace a DNS-1123 label, name a DNS-1123 subdomain) before it
 // touches anything. path, when set, must be exactly that landed disk (it
 // chooses the vSphere datastore); any other path is InvalidArgument. Nothing
 // else is ever removed.
 //
-// It refuses — FailedPrecondition with the ErrorInfo reason VM_DISK_IN_USE,
-// leaving the disk — when any VM or template on the target uses the disk (or,
+// It refuses (FailedPrecondition with the ErrorInfo reason VM_DISK_IN_USE,
+// leaving the disk) when any VM or template on the target uses the disk (or,
 // on vSphere, any file of its landing folder), and fails closed (a retryable
 // error, VM_DISK_CHECK_FAILED where it applies) when that cannot be
 // established.
@@ -4393,13 +4374,12 @@ type DeleteLandedDiskRequest struct {
 	// path is the landing path ImportDisk returned (ImportDiskResponse.path), as
 	// the manager recorded it, or empty when no import result was recorded.
 	Path string `protobuf:"bytes,3,opt,name=path,proto3" json:"path,omitempty"`
-	// target_host_id is the host of a CLUSTERED target provider the import
-	// landed the disk on (the recorded import target host; ADR-0007 Addendum B,
-	// B4). A clustered provider requires it (InvalidArgument when empty), removes
-	// the disk on that host only, and scans EVERY host of the Provider for a
-	// domain that uses the file (the pool may be shared), failing closed when a
-	// host cannot be scanned. Single-host and thin-client providers ignore it.
-	// Additive.
+	// target_host_id is the host of a clustered target provider the import
+	// landed the disk on (the recorded import target host). A clustered provider
+	// requires it (InvalidArgument when empty), removes the disk on that host
+	// only, and scans every host of the Provider for a domain that uses the file
+	// (the pool may be shared), failing closed when a host cannot be scanned.
+	// Single-host and thin-client providers ignore it. Additive.
 	TargetHostId string `protobuf:"bytes,4,opt,name=target_host_id,json=targetHostId,proto3" json:"target_host_id,omitempty"`
 }
 
@@ -4512,20 +4492,18 @@ func (x *DeleteLandedDiskResponse) GetOutcome() LandedDiskDeleteOutcome {
 
 // TransferOwner hands one VM to a VirtualMachine: it re-stamps the VM with
 // that VirtualMachine's identity (owner), after which the provider's
-// owner-checked per-VM calls accept it. On a clustered ("brain-in-operator")
-// provider the VM is on target_host_id and the call is routed there (ADR-0007
-// Addendum A, slice 4); on a single-host provider that reports
-// supports_owner_transfer the VM is addressed by id alone. The adoption flow
-// uses it for a VM it listed; restoring a VirtualMachine from a backup, which
-// gives it a new uid, can use it the same way (A6). It changes the owner stamp
-// only: it never creates, moves, starts or otherwise changes the VM.
+// owner-checked per-VM calls accept it. On a clustered provider the VM is on
+// target_host_id and the call is routed there; on a single-host provider that
+// reports supports_owner_transfer the VM is addressed by id alone. The
+// manager's adoption flow uses it for a VM it listed. It changes the owner
+// stamp only: it never creates, moves, starts or otherwise changes the VM.
 //
-// It is a compare-and-swap. The provider stamps the VM ONLY when:
+// It is a compare-and-swap. The provider stamps the VM only when:
 //   - the VM named id (on target_host_id) is still the VM the manager listed:
 //     it carries expected_uuid when one is sent (required by a libvirt
 //     provider), and
 //   - every owner stamped on it is either owner itself (an idempotent retry,
-//     which succeeds) or listed in replaceable_owner_uids — the stamps of
+//     which succeeds) or listed in replaceable_owner_uids, the stamps of
 //     VirtualMachines the manager has verified no longer exist. An unstamped
 //     VM may be taken over.
 //
@@ -4537,9 +4515,9 @@ func (x *DeleteLandedDiskResponse) GetOutcome() LandedDiskDeleteOutcome {
 // or was replaced since it was listed is NOT_FOUND; a concurrent change is a
 // retryable error. The stamp is read back before the call succeeds. Refusal
 // messages never name another owner. A clustered provider's failures are
-// routed errors (HOST_UNAVAILABLE, VM_OPERATION_FAILED). Providers that do not
-// stamp return Unimplemented and report neither supports_owner_transfer nor
-// supports_routed_adoption.
+// routed errors (HOST_UNAVAILABLE, VM_OPERATION_FAILED). A provider that does
+// not stamp returns Unimplemented and reports neither supports_owner_transfer
+// nor supports_routed_adoption.
 type TransferOwnerRequest struct {
 	state         protoimpl.MessageState
 	sizeCache     protoimpl.SizeCache
@@ -4550,7 +4528,7 @@ type TransferOwnerRequest struct {
 	// target_host_id is the host the VM is on (VMInfo.host_id, or the
 	// VirtualMachine's recorded binding). Required by a clustered provider,
 	// which never looks a VM's host up by itself; empty for a single-host
-	// provider, which refuses one. AGNOSTIC.
+	// provider, which refuses one.
 	TargetHostId string `protobuf:"bytes,2,opt,name=target_host_id,json=targetHostId,proto3" json:"target_host_id,omitempty"`
 	// owner is the identity of the VirtualMachine that takes the VM over; uid is
 	// required, and the provider stamps uid, namespace and name
@@ -4677,13 +4655,14 @@ func (*TransferOwnerResponse) Descriptor() ([]byte, []int) {
 	return file_provider_v1_provider_proto_rawDescGZIP(), []int{47}
 }
 
-// ObjectIdentity names a Kubernetes object on the wire (CreateRequest.owner,
-// the owner of the routed per-VM requests, CloneRequest.target_vm and
+// ObjectIdentity names a Kubernetes object on the wire: the owner of
+// CreateRequest and of the per-VM requests, CloneRequest.target_vm and
 // .source_owner, ImportDiskRequest.target_vm, ImagePrepareRequest.image and
-// .provider, PreparedArtifact.image, TransferOwnerRequest.owner).
+// .provider, PreparedArtifact.image, TransferOwnerRequest.owner, and the
+// migration and target_vm of the staged and landed disk deletes.
 // uid is the authoritative identity (unique for the object's whole lifetime,
 // never reused after deletion); namespace and name are informational (audit,
-// operator diagnostics, and naming the hypervisor-side object — e.g. the
+// manager diagnostics, and naming the hypervisor-side object, for example the
 // libvirt provider names a new domain "<namespace>.<name>") and must never be
 // used for authorization on their own.
 type ObjectIdentity struct {

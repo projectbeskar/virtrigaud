@@ -38,7 +38,12 @@ spec:
     name: v1beta1
     schema:
       openAPIV3Schema:
-        description: VMSnapshot is the Schema for the vmsnapshots API
+        description: |-
+          VMSnapshot takes one snapshot of a VirtualMachine, through the VM's Provider,
+          and records the result. Deleting the VMSnapshot deletes the provider
+          snapshot. The VM must be in the VMSnapshot's namespace. To revert a VM to a
+          snapshot, set spec.snapshot.revertToRef on the VirtualMachine (see
+          docs/vm-snapshot-revert.md).
         properties:
           apiVersion:
             description: |-
@@ -58,18 +63,29 @@ spec:
           metadata:
             type: object
           spec:
-            description: VMSnapshotSpec defines the desired state of VMSnapshot
+            description: |-
+              VMSnapshotSpec defines the desired state of VMSnapshot. A VMSnapshot takes
+              one snapshot of one VirtualMachine, through the VM's Provider. Of the spec,
+              vmRef, snapshotConfig (name, description, includeMemory) and retentionPolicy
+              (maxAge, deleteOnVMDelete) are acted on; schedule and metadata are accepted
+              but not acted on in this release.
             properties:
               metadata:
-                description: Metadata contains snapshot metadata
+                description: |-
+                  Metadata contains snapshot metadata. Accepted but not acted on in this
+                  release: no controller or provider reads it, and it is not sent to the
+                  provider.
                 properties:
                   application:
-                    description: Application specifies the application that created
-                      the snapshot
+                    description: |-
+                      Application specifies the application that created the snapshot.
+                      Descriptive: no controller reads it.
                     maxLength: 255
                     type: string
                   environment:
-                    description: Environment specifies the environment
+                    description: |-
+                      Environment specifies the environment the snapshot belongs to.
+                      Descriptive: no controller reads it.
                     enum:
                     - dev
                     - staging
@@ -80,11 +96,15 @@ spec:
                     type: string
                   pinned:
                     default: false
-                    description: Pinned indicates whether the snapshot is pinned (protected
-                      from automatic deletion)
+                    description: |-
+                      Pinned indicates whether the snapshot is pinned (protected from automatic
+                      deletion). Accepted but not acted on in this release: a pinned snapshot is
+                      still deleted by retentionPolicy.maxAge or deleteOnVMDelete.
                     type: boolean
                   purpose:
-                    description: Purpose describes the purpose of the snapshot
+                    description: |-
+                      Purpose describes the purpose of the snapshot. Descriptive: no controller
+                      reads it.
                     enum:
                     - backup
                     - testing
@@ -96,119 +116,169 @@ spec:
                   tags:
                     additionalProperties:
                       type: string
-                    description: Tags are key-value pairs for categorizing the snapshot
+                    description: |-
+                      Tags are key-value pairs for categorizing the snapshot. Descriptive: no
+                      controller reads them.
                     maxProperties: 50
                     type: object
                 type: object
               retentionPolicy:
-                description: RetentionPolicy defines how long to keep this snapshot
+                description: |-
+                  RetentionPolicy defines when the VMSnapshot, and with it the provider
+                  snapshot, is deleted automatically. Only maxAge and deleteOnVMDelete are
+                  acted on; the other fields are accepted but not acted on in this release.
+                  With no retentionPolicy a snapshot is kept until the VMSnapshot is deleted.
                 properties:
                   deleteOnVMDelete:
                     default: true
-                    description: DeleteOnVMDelete indicates whether to delete snapshot
-                      when VM is deleted
+                    description: |-
+                      DeleteOnVMDelete indicates whether to delete the snapshot when its
+                      VirtualMachine is deleted (or no longer exists, or exists only as another VM
+                      of the same name). It defaults to true when retentionPolicy is set. A VM
+                      deleted with the annotation virtrigaud.io/orphan-on-delete=true is left
+                      running on the hypervisor and its snapshots are not deleted with it.
                     type: boolean
                   gracePeriod:
                     default: 24h
-                    description: GracePeriod is the grace period before deletion
+                    description: |-
+                      GracePeriod is the grace period before deletion. Accepted but not acted on
+                      in this release: a snapshot is deleted as soon as maxAge or deleteOnVMDelete
+                      applies.
                     type: string
                   maxAge:
-                    description: MaxAge is the maximum age before snapshot should
-                      be deleted
+                    description: |-
+                      MaxAge is the maximum age of a Ready snapshot, counted from
+                      status.creationTime. Once the snapshot is older (checked about once an
+                      hour), the VMSnapshot is deleted, whatever the state of its VM.
                     type: string
                   maxCount:
-                    description: MaxCount is the maximum number of snapshots to retain
+                    description: |-
+                      MaxCount is the maximum number of snapshots to retain. Accepted but not
+                      acted on in this release: no snapshots are removed because of a count.
                     format: int32
                     maximum: 100
                     minimum: 1
                     type: integer
                   preservePinned:
                     default: true
-                    description: PreservePinned indicates whether to preserve pinned
-                      snapshots
+                    description: |-
+                      PreservePinned indicates whether to preserve pinned snapshots. Accepted
+                      but not acted on in this release (see also metadata.pinned).
                     type: boolean
                 type: object
               schedule:
-                description: Schedule defines automated snapshot scheduling
+                description: |-
+                  Schedule defines automated snapshot scheduling. Accepted but not acted on
+                  in this release: no controller reads it, and no snapshot is taken on a
+                  schedule. Create VMSnapshot objects yourself (for example from a CronJob).
                 properties:
                   concurrencyPolicy:
                     default: Forbid
-                    description: ConcurrencyPolicy specifies how to handle concurrent
-                      snapshot jobs
+                    description: |-
+                      ConcurrencyPolicy specifies how to handle concurrent snapshot jobs.
+                      Accepted but not acted on in this release.
                     enum:
                     - Allow
                     - Forbid
                     - Replace
                     type: string
                   cronSpec:
-                    description: CronSpec defines the schedule in cron format
+                    description: |-
+                      CronSpec defines the schedule in cron format. Accepted but not acted on in
+                      this release.
                     pattern: ^(@(annually|yearly|monthly|weekly|daily|hourly|reboot))|(@every
                       (\d+(ns|us|µs|ms|s|m|h))+)|((((\d+,)+\d+|(\d+(\/|-)\d+)|\d+|\*)
                       ?){5,7})$
                     type: string
                   enabled:
                     default: false
-                    description: Enabled indicates if scheduled snapshots are enabled
+                    description: |-
+                      Enabled indicates if scheduled snapshots are enabled. Accepted but not
+                      acted on in this release.
                     type: boolean
                   failedJobsHistoryLimit:
                     default: 1
-                    description: FailedJobsHistoryLimit limits retained failed jobs
+                    description: |-
+                      FailedJobsHistoryLimit limits retained failed jobs. Accepted but not acted
+                      on in this release.
                     format: int32
                     maximum: 100
                     minimum: 0
                     type: integer
                   successfulJobsHistoryLimit:
                     default: 3
-                    description: SuccessfulJobsHistoryLimit limits retained successful
-                      jobs
+                    description: |-
+                      SuccessfulJobsHistoryLimit limits retained successful jobs. Accepted but
+                      not acted on in this release.
                     format: int32
                     maximum: 100
                     minimum: 0
                     type: integer
                   suspend:
                     default: false
-                    description: Suspend indicates whether to suspend scheduled snapshots
+                    description: |-
+                      Suspend indicates whether to suspend scheduled snapshots. Accepted but not
+                      acted on in this release.
                     type: boolean
                   timezone:
                     default: UTC
-                    description: Timezone specifies the timezone for the schedule
+                    description: |-
+                      Timezone specifies the timezone for the schedule. Accepted but not acted
+                      on in this release.
                     type: string
                 type: object
               snapshotConfig:
-                description: SnapshotConfig defines snapshot configuration options
+                description: |-
+                  SnapshotConfig defines snapshot configuration options. When it is
+                  omitted, the snapshot is named after the VMSnapshot and has no description
+                  and no memory state.
                 properties:
                   compression:
                     default: false
-                    description: Compression enables snapshot compression
+                    description: |-
+                      Compression enables snapshot compression. Accepted but not acted on in
+                      this release.
                     type: boolean
                   consistencyLevel:
                     default: FilesystemConsistent
-                    description: ConsistencyLevel defines the consistency level required
+                    description: |-
+                      ConsistencyLevel defines the consistency level required. Accepted but not
+                      acted on in this release.
                     enum:
                     - CrashConsistent
                     - FilesystemConsistent
                     - ApplicationConsistent
                     type: string
                   description:
-                    description: Description provides additional context for the snapshot
+                    description: |-
+                      Description is a free-text description stored with the snapshot by the
+                      vSphere, libvirt and Proxmox providers.
                     maxLength: 1024
                     type: string
                   encryption:
-                    description: Encryption enables snapshot encryption
+                    description: |-
+                      Encryption enables snapshot encryption. Accepted but not acted on in this
+                      release: no snapshot is encrypted, whatever this block says.
                     properties:
                       enabled:
                         default: false
-                        description: Enabled indicates if encryption should be used
+                        description: |-
+                          Enabled indicates if encryption should be used. Accepted but not acted on
+                          in this release.
                         type: boolean
                       keyProvider:
-                        description: KeyProvider specifies the encryption key provider
+                        description: |-
+                          KeyProvider specifies the encryption key provider. Accepted but not acted
+                          on in this release.
                         enum:
                         - standard
                         - hardware
                         - external
                         type: string
                       keyRef:
-                        description: KeyRef references encryption keys
+                        description: |-
+                          KeyRef references encryption keys. Accepted but not acted on in this
+                          release: the referenced object is never read.
                         properties:
                           name:
                             description: Name of the referenced object
@@ -221,19 +291,33 @@ spec:
                     type: object
                   includeMemory:
                     default: false
-                    description: IncludeMemory indicates whether to include memory
-                      state in the snapshot
+                    description: |-
+                      IncludeMemory indicates whether to include the VM's memory state in the
+                      snapshot. vSphere captures it only for a powered-on VM; libvirt takes a
+                      memory snapshot of a running domain and falls back to a disk-only snapshot
+                      when the domain is not running; Proxmox saves the VM state. When the manager
+                      runs with --enforce-provider-capabilities and the Provider does not report
+                      memory snapshots, the VMSnapshot goes Failed with reason
+                      UnsupportedByProvider and no provider call is made.
                     type: boolean
                   name:
-                    description: Name provides a name hint for the snapshot (provider
-                      may modify)
+                    description: |-
+                      Name provides a name hint for the snapshot. It defaults to the
+                      VMSnapshot's name. The provider may change it: the libvirt provider
+                      replaces characters other than letters, digits, "_", "." and "-" with "-"
+                      and truncates the name to 64 characters; the vSphere and Proxmox providers
+                      use it as given. The provider's own identifier for the snapshot is in
+                      status.snapshotID.
                     maxLength: 255
                     pattern: ^[a-zA-Z0-9]([a-zA-Z0-9\-_]*[a-zA-Z0-9])?$
                     type: string
                   quiesce:
                     default: true
-                    description: Quiesce indicates whether to quiesce the file system
-                      before snapshotting
+                    description: |-
+                      Quiesce indicates whether to quiesce the file system before snapshotting.
+                      Accepted but not acted on in this release: the setting is not sent to any
+                      provider. The vSphere provider never quiesces; the libvirt and Proxmox
+                      providers take the snapshot without a guest quiesce step.
                     type: boolean
                   type:
                     allOf:
@@ -246,11 +330,15 @@ spec:
                       - Crash
                       - Application
                     default: Standard
-                    description: Type specifies the snapshot type
+                    description: |-
+                      Type specifies the snapshot type. Accepted but not acted on in this
+                      release.
                     type: string
                 type: object
               vmRef:
-                description: VMRef references the virtual machine to snapshot
+                description: |-
+                  VMRef references the VirtualMachine to snapshot, by name, in the
+                  VMSnapshot's own namespace.
                 properties:
                   name:
                     description: Name of the referenced object
@@ -264,7 +352,12 @@ spec:
             - vmRef
             type: object
           status:
-            description: VMSnapshotStatus defines the observed state of VMSnapshot
+            description: |-
+              VMSnapshotStatus defines the observed state of VMSnapshot. The controller
+              writes snapshotID, phase, message, creationTime, taskRef, vmUID,
+              boundProvider and conditions. completionTime, size, virtualSize, progress,
+              providerStatus, children, parent and expiryTime are not populated in this
+              release.
             properties:
               boundProvider:
                 description: |-
@@ -294,9 +387,13 @@ spec:
                 - namespace
                 type: object
               children:
-                description: Children lists child snapshots (for snapshot trees)
+                description: |-
+                  Children lists child snapshots (for snapshot trees). Not populated in this
+                  release.
                 items:
-                  description: SnapshotRef references a snapshot
+                  description: |-
+                    SnapshotRef references a snapshot. It is used by status.parent and
+                    status.children, which are not populated in this release.
                   properties:
                     name:
                       description: Name is the snapshot name
@@ -312,11 +409,16 @@ spec:
                   type: object
                 type: array
               completionTime:
-                description: CompletionTime is when the snapshot creation completed
+                description: |-
+                  CompletionTime is when the snapshot creation completed. Not populated in
+                  this release.
                 format: date-time
                 type: string
               conditions:
-                description: Conditions represent the current service state
+                description: |-
+                  Conditions represent the latest observations of the snapshot. Ready is
+                  True once the snapshot exists; Creating and Deleting are True while a
+                  create or a delete is in progress.
                 items:
                   description: Condition contains details for one aspect of the current
                     state of this API Resource.
@@ -373,12 +475,16 @@ spec:
                   type: object
                 type: array
               creationTime:
-                description: CreationTime is when the snapshot was created
+                description: |-
+                  CreationTime is when the controller received the provider's answer to the
+                  create. It is the start of the age counted by retentionPolicy.maxAge.
                 format: date-time
                 type: string
               expiryTime:
-                description: ExpiryTime is when the snapshot will expire (based on
-                  retention policy)
+                description: |-
+                  ExpiryTime is when the snapshot will expire. Not populated in this
+                  release, so the Expires column of kubectl get is empty; a snapshot is
+                  deleted when retentionPolicy.maxAge has passed since status.creationTime.
                 format: date-time
                 type: string
               message:
@@ -386,12 +492,17 @@ spec:
                   state
                 type: string
               observedGeneration:
-                description: ObservedGeneration reflects the generation observed by
-                  the controller
+                description: |-
+                  ObservedGeneration is the generation the controller recorded when it
+                  refused the snapshot because its VM uses a Provider in another namespace
+                  that does not allow it; it is not populated otherwise. Each condition
+                  carries its own observedGeneration.
                 format: int64
                 type: integer
               parent:
-                description: Parent references the parent snapshot (for snapshot trees)
+                description: |-
+                  Parent references the parent snapshot (for snapshot trees). Not populated
+                  in this release.
                 properties:
                   name:
                     description: Name is the snapshot name
@@ -406,7 +517,10 @@ spec:
                 - name
                 type: object
               phase:
-                description: Phase represents the current phase of the snapshot
+                description: |-
+                  Phase represents the current phase of the snapshot. It is empty until the
+                  controller issues the create, then Creating, then Ready or Failed; it is
+                  Deleting while the VMSnapshot is being deleted.
                 enum:
                 - Pending
                 - Creating
@@ -416,7 +530,9 @@ spec:
                 - Expired
                 type: string
               progress:
-                description: Progress shows the snapshot creation progress
+                description: |-
+                  Progress shows the snapshot creation progress. Not populated in this
+                  release.
                 properties:
                   completedBytes:
                     description: CompletedBytes is the number of bytes completed
@@ -442,8 +558,9 @@ spec:
                 type: object
               providerStatus:
                 additionalProperties:
-                  description: ProviderSnapshotStatus contains provider-specific snapshot
-                    status
+                  description: |-
+                    ProviderSnapshotStatus contains provider-specific snapshot status. Not
+                    populated in this release.
                   properties:
                     available:
                       description: Available indicates if the snapshot is available
@@ -468,27 +585,37 @@ spec:
                   required:
                   - available
                   type: object
-                description: ProviderStatus contains provider-specific status information
+                description: |-
+                  ProviderStatus contains provider-specific status information. Not
+                  populated in this release.
                 type: object
               size:
                 anyOf:
                 - type: integer
                 - type: string
-                description: Size is the size of the snapshot
+                description: Size is the size of the snapshot. Not populated in this
+                  release.
                 pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
                 x-kubernetes-int-or-string: true
               snapshotID:
-                description: SnapshotID is the provider-specific identifier for the
-                  snapshot
+                description: |-
+                  SnapshotID is the provider-specific identifier for the snapshot, as
+                  returned by the provider when the snapshot is created. On libvirt and
+                  Proxmox it is the snapshot's name; on vSphere it is the snapshot's
+                  managed object ID.
                 type: string
               taskRef:
-                description: TaskRef tracks any ongoing async operations
+                description: |-
+                  TaskRef is the provider task of an in-flight asynchronous snapshot create.
+                  The controller polls it until the task completes, then clears it.
                 type: string
               virtualSize:
                 anyOf:
                 - type: integer
                 - type: string
-                description: VirtualSize is the virtual size of the snapshot
+                description: |-
+                  VirtualSize is the virtual size of the snapshot. Not populated in this
+                  release.
                 pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
                 x-kubernetes-int-or-string: true
               vmUID:
@@ -498,7 +625,7 @@ spec:
                   re-created under the same name has another UID: the snapshot is never
                   deleted or retained through it (no provider call is made), because on a
                   provider whose snapshot ids are names the call could reach another
-                  VM's snapshot. Empty for a snapshot taken by an older manager, which is
+                  VM's snapshot. Empty for a snapshot taken by an earlier release, which is
                   bound on first reconcile when its VM was created before the snapshot.
                   Written only by the operator.
                 maxLength: 128

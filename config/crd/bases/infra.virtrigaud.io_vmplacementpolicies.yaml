@@ -36,7 +36,17 @@ spec:
     name: v1beta1
     schema:
       openAPIV3Schema:
-        description: VMPlacementPolicy is the Schema for the vmplacementpolicies API
+        description: |-
+          VMPlacementPolicy holds rules for choosing the Host of a VirtualMachine. A
+          VirtualMachine references it with spec.placementRef, in its own namespace.
+          Only the scheduler of a clustered Provider (spec.topology: cluster) reads
+          it, when it places a VM on a Host; there, a VM whose placementRef names a
+          policy that does not exist is not scheduled. On any other Provider the
+          reference is not read. Within the policy, hard, soft, affinity,
+          antiAffinity and resourceConstraints are acted on as described on each
+          field; securityConstraints, priority and weight are accepted but not acted
+          on in this release. Status is not populated in this release, so the Used By
+          VMs, Successful and Failed columns are empty.
         properties:
           apiVersion:
             description: |-
@@ -56,26 +66,38 @@ spec:
           metadata:
             type: object
           spec:
-            description: VMPlacementPolicySpec defines the desired state of VMPlacementPolicy
+            description: |-
+              VMPlacementPolicySpec defines the desired state of VMPlacementPolicy. Only
+              the scheduler of a clustered Provider reads it (see VMPlacementPolicy).
+              securityConstraints, priority and weight are accepted but not acted on in
+              this release.
             properties:
               affinity:
-                description: Affinity defines affinity rules for VMs
+                description: |-
+                  Affinity defines affinity rules. The scheduler acts on hostAffinity and
+                  vmAffinity; the cluster, datastore, zone and application rules are
+                  accepted but not acted on in this release.
                 properties:
                   applicationAffinity:
-                    description: ApplicationAffinity encourages VMs from the same
-                      application to be co-located
+                    description: |-
+                      ApplicationAffinity encourages VMs from the same application to be
+                      co-located. Accepted but not acted on in this release.
                     properties:
                       applicationLabel:
                         default: app
-                        description: ApplicationLabel specifies the label key used
-                          to identify applications
+                        description: |-
+                          ApplicationLabel specifies the label key used to identify applications.
+                          Accepted but not acted on in this release.
                         type: string
                       enabled:
-                        description: Enabled indicates if application affinity is
-                          enabled
+                        description: |-
+                          Enabled indicates if application affinity is enabled. Accepted but not
+                          acted on in this release.
                         type: boolean
                       scope:
-                        description: Scope defines the scope of the affinity rule
+                        description: |-
+                          Scope defines the scope of the affinity rule. Accepted but not acted on in
+                          this release.
                         enum:
                         - strict
                         - preferred
@@ -84,20 +106,27 @@ spec:
                     - enabled
                     type: object
                   clusterAffinity:
-                    description: ClusterAffinity encourages VMs to be placed in the
-                      same cluster
+                    description: |-
+                      ClusterAffinity encourages VMs to be placed in the same cluster. Accepted
+                      but not acted on in this release.
                     properties:
                       enabled:
-                        description: Enabled indicates if cluster affinity is enabled
+                        description: |-
+                          Enabled indicates if cluster affinity is enabled. Accepted but not acted
+                          on in this release.
                         type: boolean
                       preferredClusters:
-                        description: PreferredClusters lists preferred clusters
+                        description: |-
+                          PreferredClusters lists preferred clusters. Accepted but not acted on in
+                          this release.
                         items:
                           type: string
                         maxItems: 20
                         type: array
                       scope:
-                        description: Scope defines the scope of the affinity rule
+                        description: |-
+                          Scope defines the scope of the affinity rule. Accepted but not acted on in
+                          this release.
                         enum:
                         - strict
                         - preferred
@@ -106,20 +135,27 @@ spec:
                     - enabled
                     type: object
                   datastoreAffinity:
-                    description: DatastoreAffinity encourages VMs to be placed on
-                      the same datastore
+                    description: |-
+                      DatastoreAffinity encourages VMs to be placed on the same datastore.
+                      Accepted but not acted on in this release.
                     properties:
                       enabled:
-                        description: Enabled indicates if datastore affinity is enabled
+                        description: |-
+                          Enabled indicates if datastore affinity is enabled. Accepted but not acted
+                          on in this release.
                         type: boolean
                       preferredDatastores:
-                        description: PreferredDatastores lists preferred datastores
+                        description: |-
+                          PreferredDatastores lists preferred datastores. Accepted but not acted on
+                          in this release.
                         items:
                           type: string
                         maxItems: 50
                         type: array
                       scope:
-                        description: Scope defines the scope of the affinity rule
+                        description: |-
+                          Scope defines the scope of the affinity rule. Accepted but not acted on in
+                          this release.
                         enum:
                         - strict
                         - preferred
@@ -128,20 +164,22 @@ spec:
                     - enabled
                     type: object
                   hostAffinity:
-                    description: HostAffinity encourages VMs to be placed on the same
-                      host
+                    description: HostAffinity prefers, or requires, the listed Hosts.
                     properties:
                       enabled:
-                        description: Enabled indicates if host affinity is enabled
+                        description: Enabled turns the rule on. A rule that is not
+                          enabled is ignored.
                         type: boolean
                       preferredHosts:
-                        description: PreferredHosts lists preferred hosts
+                        description: PreferredHosts lists Hosts by resource name.
                         items:
                           type: string
                         maxItems: 50
                         type: array
                       scope:
-                        description: Scope defines the scope of the affinity rule
+                        description: |-
+                          Scope defines how the rule is applied. With strict, only the listed Hosts
+                          are candidates. With preferred or no value, a listed Host ranks higher.
                         enum:
                         - strict
                         - preferred
@@ -150,22 +188,23 @@ spec:
                     - enabled
                     type: object
                   vmAffinity:
-                    description: VMAffinity defines affinity rules between VMs
+                    description: VMAffinity defines affinity rules between VMs.
                     properties:
                       preferredDuringScheduling:
-                        description: PreferredDuringScheduling specifies soft affinity
-                          rules
+                        description: |-
+                          PreferredDuringScheduling specifies soft affinity rules: a Host that runs
+                          a VM matching a term ranks higher by that term's weight.
                         items:
                           description: WeightedVMAffinityTerm defines a weighted VM
-                            affinity term
+                            affinity term.
                           properties:
                             vmAffinityTerm:
                               description: VMAffinityTerm defines the VM affinity
                                 term
                               properties:
                                 labelSelector:
-                                  description: LabelSelector selects VMs for affinity
-                                    rules
+                                  description: LabelSelector selects VMs by their
+                                    labels.
                                   properties:
                                     matchExpressions:
                                       description: matchExpressions is a list of label
@@ -212,15 +251,16 @@ spec:
                                   type: object
                                   x-kubernetes-map-type: atomic
                                 matchExpressions:
-                                  description: MatchExpressions is a list of VM selector
-                                    requirements
+                                  description: |-
+                                    MatchExpressions is a list of VM selector requirements on the VM's labels.
+                                    All of them must hold, together with labelSelector.
                                   items:
-                                    description: VMSelectorRequirement defines a VM
-                                      selector requirement
+                                    description: VMSelectorRequirement defines a requirement
+                                      on the labels of a VM.
                                     properties:
                                       key:
                                         description: Key is the label key that the
-                                          selector applies to
+                                          requirement applies to.
                                         maxLength: 253
                                         type: string
                                       operator:
@@ -235,12 +275,14 @@ spec:
                                           - NotIn
                                           - Exists
                                           - DoesNotExist
-                                        description: Operator represents a key's relationship
-                                          to a set of values
+                                        description: |-
+                                          Operator represents the relationship between the label and Values: In,
+                                          NotIn, Exists or DoesNotExist.
                                         type: string
                                       values:
-                                        description: Values is an array of string
-                                          values
+                                        description: |-
+                                          Values is the list of label values used by In and NotIn. It is ignored by
+                                          Exists and DoesNotExist.
                                         items:
                                           type: string
                                         maxItems: 50
@@ -252,8 +294,9 @@ spec:
                                   maxItems: 20
                                   type: array
                                 namespaceSelector:
-                                  description: NamespaceSelector selects namespaces
-                                    using label selectors
+                                  description: |-
+                                    NamespaceSelector selects namespaces using label selectors. Accepted but
+                                    not acted on in this release.
                                   properties:
                                     matchExpressions:
                                       description: matchExpressions is a list of label
@@ -300,23 +343,26 @@ spec:
                                   type: object
                                   x-kubernetes-map-type: atomic
                                 namespaces:
-                                  description: Namespaces specifies which namespaces
-                                    to consider
+                                  description: |-
+                                    Namespaces specifies which namespaces to consider. Accepted but not acted
+                                    on in this release.
                                   items:
                                     type: string
                                   maxItems: 20
                                   type: array
                                 topologyKey:
-                                  description: TopologyKey specifies the topology
-                                    domain for the rule
+                                  description: |-
+                                    TopologyKey specifies the topology domain for the rule. It is required but
+                                    not acted on in this release: every term is evaluated per Host.
                                   maxLength: 253
                                   type: string
                               required:
                               - topologyKey
                               type: object
                             weight:
-                              description: Weight associated with matching the corresponding
-                                VMAffinityTerm
+                              description: |-
+                                Weight is added to (affinity) or subtracted from (anti-affinity) the rank
+                                of a Host that runs a VM matching the term.
                               format: int32
                               maximum: 100
                               minimum: 1
@@ -328,14 +374,19 @@ spec:
                         maxItems: 20
                         type: array
                       requiredDuringScheduling:
-                        description: RequiredDuringScheduling specifies hard affinity
-                          rules
+                        description: |-
+                          RequiredDuringScheduling specifies hard affinity rules: a Host is a
+                          candidate only if, for every term, it runs a VM that matches the term.
                         items:
-                          description: VMAffinityTerm defines a VM affinity term
+                          description: |-
+                            VMAffinityTerm defines a VM affinity term. A VM matches the term when its
+                            labels satisfy both labelSelector and matchExpressions; a term with neither
+                            matches every VM. The scheduler treats every term as host-level:
+                            topologyKey, namespaces and namespaceSelector are not acted on in this
+                            release.
                           properties:
                             labelSelector:
-                              description: LabelSelector selects VMs for affinity
-                                rules
+                              description: LabelSelector selects VMs by their labels.
                               properties:
                                 matchExpressions:
                                   description: matchExpressions is a list of label
@@ -381,15 +432,16 @@ spec:
                               type: object
                               x-kubernetes-map-type: atomic
                             matchExpressions:
-                              description: MatchExpressions is a list of VM selector
-                                requirements
+                              description: |-
+                                MatchExpressions is a list of VM selector requirements on the VM's labels.
+                                All of them must hold, together with labelSelector.
                               items:
-                                description: VMSelectorRequirement defines a VM selector
-                                  requirement
+                                description: VMSelectorRequirement defines a requirement
+                                  on the labels of a VM.
                                 properties:
                                   key:
-                                    description: Key is the label key that the selector
-                                      applies to
+                                    description: Key is the label key that the requirement
+                                      applies to.
                                     maxLength: 253
                                     type: string
                                   operator:
@@ -404,11 +456,14 @@ spec:
                                       - NotIn
                                       - Exists
                                       - DoesNotExist
-                                    description: Operator represents a key's relationship
-                                      to a set of values
+                                    description: |-
+                                      Operator represents the relationship between the label and Values: In,
+                                      NotIn, Exists or DoesNotExist.
                                     type: string
                                   values:
-                                    description: Values is an array of string values
+                                    description: |-
+                                      Values is the list of label values used by In and NotIn. It is ignored by
+                                      Exists and DoesNotExist.
                                     items:
                                       type: string
                                     maxItems: 50
@@ -420,8 +475,9 @@ spec:
                               maxItems: 20
                               type: array
                             namespaceSelector:
-                              description: NamespaceSelector selects namespaces using
-                                label selectors
+                              description: |-
+                                NamespaceSelector selects namespaces using label selectors. Accepted but
+                                not acted on in this release.
                               properties:
                                 matchExpressions:
                                   description: matchExpressions is a list of label
@@ -467,15 +523,17 @@ spec:
                               type: object
                               x-kubernetes-map-type: atomic
                             namespaces:
-                              description: Namespaces specifies which namespaces to
-                                consider
+                              description: |-
+                                Namespaces specifies which namespaces to consider. Accepted but not acted
+                                on in this release.
                               items:
                                 type: string
                               maxItems: 20
                               type: array
                             topologyKey:
-                              description: TopologyKey specifies the topology domain
-                                for the rule
+                              description: |-
+                                TopologyKey specifies the topology domain for the rule. It is required but
+                                not acted on in this release: every term is evaluated per Host.
                               maxLength: 253
                               type: string
                           required:
@@ -485,20 +543,27 @@ spec:
                         type: array
                     type: object
                   zoneAffinity:
-                    description: ZoneAffinity encourages VMs to be placed in the same
-                      zone
+                    description: |-
+                      ZoneAffinity encourages VMs to be placed in the same zone. Accepted but
+                      not acted on in this release.
                     properties:
                       enabled:
-                        description: Enabled indicates if zone affinity is enabled
+                        description: |-
+                          Enabled indicates if zone affinity is enabled. Accepted but not acted on
+                          in this release.
                         type: boolean
                       preferredZones:
-                        description: PreferredZones lists preferred zones
+                        description: |-
+                          PreferredZones lists preferred zones. Accepted but not acted on in this
+                          release.
                         items:
                           type: string
                         maxItems: 10
                         type: array
                       scope:
-                        description: Scope defines the scope of the affinity rule
+                        description: |-
+                          Scope defines the scope of the affinity rule. Accepted but not acted on in
+                          this release.
                         enum:
                         - strict
                         - preferred
@@ -508,24 +573,31 @@ spec:
                     type: object
                 type: object
               antiAffinity:
-                description: AntiAffinity defines anti-affinity rules for VMs
+                description: |-
+                  AntiAffinity defines anti-affinity rules. The scheduler acts on
+                  hostAntiAffinity and vmAntiAffinity; the cluster, datastore, zone and
+                  application rules are accepted but not acted on in this release.
                 properties:
                   applicationAntiAffinity:
-                    description: ApplicationAntiAffinity prevents VMs from different
-                      applications being co-located
+                    description: |-
+                      ApplicationAntiAffinity prevents VMs from different applications being
+                      co-located. Accepted but not acted on in this release.
                     properties:
                       applicationLabel:
                         default: app
-                        description: ApplicationLabel specifies the label key used
-                          to identify applications
+                        description: |-
+                          ApplicationLabel specifies the label key used to identify applications.
+                          Accepted but not acted on in this release.
                         type: string
                       enabled:
-                        description: Enabled indicates if application anti-affinity
-                          is enabled
+                        description: |-
+                          Enabled indicates if application anti-affinity is enabled. Accepted but
+                          not acted on in this release.
                         type: boolean
                       scope:
-                        description: Scope defines the scope of the anti-affinity
-                          rule
+                        description: |-
+                          Scope defines the scope of the anti-affinity rule. Accepted but not acted
+                          on in this release.
                         enum:
                         - strict
                         - preferred
@@ -534,23 +606,27 @@ spec:
                     - enabled
                     type: object
                   clusterAntiAffinity:
-                    description: ClusterAntiAffinity prevents VMs from being placed
-                      in the same cluster
+                    description: |-
+                      ClusterAntiAffinity prevents VMs from being placed in the same cluster.
+                      Accepted but not acted on in this release.
                     properties:
                       enabled:
-                        description: Enabled indicates if cluster anti-affinity is
-                          enabled
+                        description: |-
+                          Enabled indicates if cluster anti-affinity is enabled. Accepted but not
+                          acted on in this release.
                         type: boolean
                       maxVMsPerCluster:
-                        description: MaxVMsPerCluster limits the number of VMs per
-                          cluster
+                        description: |-
+                          MaxVMsPerCluster limits the number of VMs per cluster. Accepted but not
+                          acted on in this release.
                         format: int32
                         maximum: 10000
                         minimum: 1
                         type: integer
                       scope:
-                        description: Scope defines the scope of the anti-affinity
-                          rule
+                        description: |-
+                          Scope defines the scope of the anti-affinity rule. Accepted but not acted
+                          on in this release.
                         enum:
                         - strict
                         - preferred
@@ -559,23 +635,27 @@ spec:
                     - enabled
                     type: object
                   datastoreAntiAffinity:
-                    description: DatastoreAntiAffinity prevents VMs from being placed
-                      on the same datastore
+                    description: |-
+                      DatastoreAntiAffinity prevents VMs from being placed on the same
+                      datastore. Accepted but not acted on in this release.
                     properties:
                       enabled:
-                        description: Enabled indicates if datastore anti-affinity
-                          is enabled
+                        description: |-
+                          Enabled indicates if datastore anti-affinity is enabled. Accepted but not
+                          acted on in this release.
                         type: boolean
                       maxVMsPerDatastore:
-                        description: MaxVMsPerDatastore limits the number of VMs per
-                          datastore
+                        description: |-
+                          MaxVMsPerDatastore limits the number of VMs per datastore. Accepted but
+                          not acted on in this release.
                         format: int32
                         maximum: 10000
                         minimum: 1
                         type: integer
                       scope:
-                        description: Scope defines the scope of the anti-affinity
-                          rule
+                        description: |-
+                          Scope defines the scope of the anti-affinity rule. Accepted but not acted
+                          on in this release.
                         enum:
                         - strict
                         - preferred
@@ -584,21 +664,27 @@ spec:
                     - enabled
                     type: object
                   hostAntiAffinity:
-                    description: HostAntiAffinity prevents VMs from being placed on
-                      the same host
+                    description: HostAntiAffinity limits the number of VMs on one
+                      Host.
                     properties:
                       enabled:
-                        description: Enabled indicates if host anti-affinity is enabled
+                        description: Enabled turns the rule on. A rule that is not
+                          enabled is ignored.
                         type: boolean
                       maxVMsPerHost:
-                        description: MaxVMsPerHost limits the number of VMs per host
+                        description: |-
+                          MaxVMsPerHost is the number of VMs a Host may run under the rule. A Host
+                          that already runs this many is at the limit. The scheduler uses 1 when it
+                          is not set.
                         format: int32
                         maximum: 1000
                         minimum: 1
                         type: integer
                       scope:
-                        description: Scope defines the scope of the anti-affinity
-                          rule
+                        description: |-
+                          Scope defines how the rule is applied. With strict, a Host at the limit is
+                          not a candidate. With preferred or no value, a Host at the limit ranks
+                          lower.
                         enum:
                         - strict
                         - preferred
@@ -608,22 +694,23 @@ spec:
                     type: object
                   vmAntiAffinity:
                     description: VMAntiAffinity defines anti-affinity rules between
-                      VMs
+                      VMs.
                     properties:
                       preferredDuringScheduling:
-                        description: PreferredDuringScheduling specifies soft anti-affinity
-                          rules
+                        description: |-
+                          PreferredDuringScheduling specifies soft anti-affinity rules: a Host that
+                          runs a VM matching a term ranks lower by that term's weight.
                         items:
                           description: WeightedVMAffinityTerm defines a weighted VM
-                            affinity term
+                            affinity term.
                           properties:
                             vmAffinityTerm:
                               description: VMAffinityTerm defines the VM affinity
                                 term
                               properties:
                                 labelSelector:
-                                  description: LabelSelector selects VMs for affinity
-                                    rules
+                                  description: LabelSelector selects VMs by their
+                                    labels.
                                   properties:
                                     matchExpressions:
                                       description: matchExpressions is a list of label
@@ -670,15 +757,16 @@ spec:
                                   type: object
                                   x-kubernetes-map-type: atomic
                                 matchExpressions:
-                                  description: MatchExpressions is a list of VM selector
-                                    requirements
+                                  description: |-
+                                    MatchExpressions is a list of VM selector requirements on the VM's labels.
+                                    All of them must hold, together with labelSelector.
                                   items:
-                                    description: VMSelectorRequirement defines a VM
-                                      selector requirement
+                                    description: VMSelectorRequirement defines a requirement
+                                      on the labels of a VM.
                                     properties:
                                       key:
                                         description: Key is the label key that the
-                                          selector applies to
+                                          requirement applies to.
                                         maxLength: 253
                                         type: string
                                       operator:
@@ -693,12 +781,14 @@ spec:
                                           - NotIn
                                           - Exists
                                           - DoesNotExist
-                                        description: Operator represents a key's relationship
-                                          to a set of values
+                                        description: |-
+                                          Operator represents the relationship between the label and Values: In,
+                                          NotIn, Exists or DoesNotExist.
                                         type: string
                                       values:
-                                        description: Values is an array of string
-                                          values
+                                        description: |-
+                                          Values is the list of label values used by In and NotIn. It is ignored by
+                                          Exists and DoesNotExist.
                                         items:
                                           type: string
                                         maxItems: 50
@@ -710,8 +800,9 @@ spec:
                                   maxItems: 20
                                   type: array
                                 namespaceSelector:
-                                  description: NamespaceSelector selects namespaces
-                                    using label selectors
+                                  description: |-
+                                    NamespaceSelector selects namespaces using label selectors. Accepted but
+                                    not acted on in this release.
                                   properties:
                                     matchExpressions:
                                       description: matchExpressions is a list of label
@@ -758,23 +849,26 @@ spec:
                                   type: object
                                   x-kubernetes-map-type: atomic
                                 namespaces:
-                                  description: Namespaces specifies which namespaces
-                                    to consider
+                                  description: |-
+                                    Namespaces specifies which namespaces to consider. Accepted but not acted
+                                    on in this release.
                                   items:
                                     type: string
                                   maxItems: 20
                                   type: array
                                 topologyKey:
-                                  description: TopologyKey specifies the topology
-                                    domain for the rule
+                                  description: |-
+                                    TopologyKey specifies the topology domain for the rule. It is required but
+                                    not acted on in this release: every term is evaluated per Host.
                                   maxLength: 253
                                   type: string
                               required:
                               - topologyKey
                               type: object
                             weight:
-                              description: Weight associated with matching the corresponding
-                                VMAffinityTerm
+                              description: |-
+                                Weight is added to (affinity) or subtracted from (anti-affinity) the rank
+                                of a Host that runs a VM matching the term.
                               format: int32
                               maximum: 100
                               minimum: 1
@@ -786,14 +880,19 @@ spec:
                         maxItems: 20
                         type: array
                       requiredDuringScheduling:
-                        description: RequiredDuringScheduling specifies hard anti-affinity
-                          rules
+                        description: |-
+                          RequiredDuringScheduling specifies hard anti-affinity rules: a Host that
+                          runs a VM matching any term is not a candidate.
                         items:
-                          description: VMAffinityTerm defines a VM affinity term
+                          description: |-
+                            VMAffinityTerm defines a VM affinity term. A VM matches the term when its
+                            labels satisfy both labelSelector and matchExpressions; a term with neither
+                            matches every VM. The scheduler treats every term as host-level:
+                            topologyKey, namespaces and namespaceSelector are not acted on in this
+                            release.
                           properties:
                             labelSelector:
-                              description: LabelSelector selects VMs for affinity
-                                rules
+                              description: LabelSelector selects VMs by their labels.
                               properties:
                                 matchExpressions:
                                   description: matchExpressions is a list of label
@@ -839,15 +938,16 @@ spec:
                               type: object
                               x-kubernetes-map-type: atomic
                             matchExpressions:
-                              description: MatchExpressions is a list of VM selector
-                                requirements
+                              description: |-
+                                MatchExpressions is a list of VM selector requirements on the VM's labels.
+                                All of them must hold, together with labelSelector.
                               items:
-                                description: VMSelectorRequirement defines a VM selector
-                                  requirement
+                                description: VMSelectorRequirement defines a requirement
+                                  on the labels of a VM.
                                 properties:
                                   key:
-                                    description: Key is the label key that the selector
-                                      applies to
+                                    description: Key is the label key that the requirement
+                                      applies to.
                                     maxLength: 253
                                     type: string
                                   operator:
@@ -862,11 +962,14 @@ spec:
                                       - NotIn
                                       - Exists
                                       - DoesNotExist
-                                    description: Operator represents a key's relationship
-                                      to a set of values
+                                    description: |-
+                                      Operator represents the relationship between the label and Values: In,
+                                      NotIn, Exists or DoesNotExist.
                                     type: string
                                   values:
-                                    description: Values is an array of string values
+                                    description: |-
+                                      Values is the list of label values used by In and NotIn. It is ignored by
+                                      Exists and DoesNotExist.
                                     items:
                                       type: string
                                     maxItems: 50
@@ -878,8 +981,9 @@ spec:
                               maxItems: 20
                               type: array
                             namespaceSelector:
-                              description: NamespaceSelector selects namespaces using
-                                label selectors
+                              description: |-
+                                NamespaceSelector selects namespaces using label selectors. Accepted but
+                                not acted on in this release.
                               properties:
                                 matchExpressions:
                                   description: matchExpressions is a list of label
@@ -925,15 +1029,17 @@ spec:
                               type: object
                               x-kubernetes-map-type: atomic
                             namespaces:
-                              description: Namespaces specifies which namespaces to
-                                consider
+                              description: |-
+                                Namespaces specifies which namespaces to consider. Accepted but not acted
+                                on in this release.
                               items:
                                 type: string
                               maxItems: 20
                               type: array
                             topologyKey:
-                              description: TopologyKey specifies the topology domain
-                                for the rule
+                              description: |-
+                                TopologyKey specifies the topology domain for the rule. It is required but
+                                not acted on in this release: every term is evaluated per Host.
                               maxLength: 253
                               type: string
                           required:
@@ -943,21 +1049,27 @@ spec:
                         type: array
                     type: object
                   zoneAntiAffinity:
-                    description: ZoneAntiAffinity prevents VMs from being placed in
-                      the same zone
+                    description: |-
+                      ZoneAntiAffinity prevents VMs from being placed in the same zone. Accepted
+                      but not acted on in this release.
                     properties:
                       enabled:
-                        description: Enabled indicates if zone anti-affinity is enabled
+                        description: |-
+                          Enabled indicates if zone anti-affinity is enabled. Accepted but not acted
+                          on in this release.
                         type: boolean
                       maxVMsPerZone:
-                        description: MaxVMsPerZone limits the number of VMs per zone
+                        description: |-
+                          MaxVMsPerZone limits the number of VMs per zone. Accepted but not acted on
+                          in this release.
                         format: int32
                         maximum: 10000
                         minimum: 1
                         type: integer
                       scope:
-                        description: Scope defines the scope of the anti-affinity
-                          rule
+                        description: |-
+                          Scope defines the scope of the anti-affinity rule. Accepted but not acted
+                          on in this release.
                         enum:
                         - strict
                         - preferred
@@ -967,54 +1079,71 @@ spec:
                     type: object
                 type: object
               hard:
-                description: Hard constraints that must be satisfied for VM placement
+                description: |-
+                  Hard constraints that a Host must satisfy to be a candidate for the VM.
+                  The scheduler acts on hosts, excludedHosts and nodeSelector; the other
+                  fields are accepted but not acted on in this release.
                 properties:
                   clusters:
-                    description: Clusters specifies allowed clusters for VM placement
+                    description: |-
+                      Clusters specifies allowed clusters for VM placement. Accepted but not
+                      acted on in this release.
                     items:
                       type: string
                     maxItems: 50
                     type: array
                   datastores:
-                    description: Datastores specifies allowed datastores for VM placement
+                    description: |-
+                      Datastores specifies allowed datastores for VM placement. Accepted but not
+                      acted on in this release.
                     items:
                       type: string
                     maxItems: 100
                     type: array
                   excludedClusters:
-                    description: ExcludedClusters specifies clusters to exclude from
-                      placement
+                    description: |-
+                      ExcludedClusters specifies clusters to exclude from placement. Accepted
+                      but not acted on in this release.
                     items:
                       type: string
                     maxItems: 50
                     type: array
                   excludedDatastores:
-                    description: ExcludedDatastores specifies datastores to exclude
-                      from placement
+                    description: |-
+                      ExcludedDatastores specifies datastores to exclude from placement.
+                      Accepted but not acted on in this release.
                     items:
                       type: string
                     maxItems: 100
                     type: array
                   excludedHosts:
-                    description: ExcludedHosts specifies hosts to exclude from placement
+                    description: |-
+                      ExcludedHosts lists Hosts by resource name. In hard, a listed Host is not
+                      a candidate. In soft, a listed Host ranks lower.
                     items:
                       type: string
                     maxItems: 200
                     type: array
                   folders:
-                    description: Folders specifies allowed folders for VM placement
+                    description: |-
+                      Folders specifies allowed folders for VM placement. Accepted but not acted
+                      on in this release.
                     items:
                       type: string
                     maxItems: 50
                     type: array
                   hosts:
-                    description: Hosts specifies allowed hosts for VM placement
+                    description: |-
+                      Hosts lists Hosts by resource name. In hard, only the listed Hosts are
+                      candidates. In soft, a listed Host ranks higher.
                     items:
                       type: string
                     maxItems: 200
                     type: array
                   networks:
-                    description: Networks specifies allowed networks for VM placement
+                    description: |-
+                      Networks specifies allowed networks for VM placement. Accepted but not
+                      acted on in this release.
                     items:
                       type: string
                     maxItems: 50
@@ -1022,38 +1151,50 @@ spec:
                   nodeSelector:
                     additionalProperties:
                       type: string
-                    description: NodeSelector specifies node selection criteria for
-                      libvirt provider
+                    description: |-
+                      NodeSelector is a set of label key/value pairs matched against the labels
+                      in Host.spec.labels. In hard, a Host must carry every pair. In soft, a
+                      Host ranks higher for each pair it carries.
                     maxProperties: 20
                     type: object
                   regions:
-                    description: Regions specifies allowed regions
+                    description: |-
+                      Regions specifies allowed regions. Accepted but not acted on in this
+                      release.
                     items:
                       type: string
                     maxItems: 20
                     type: array
                   resourcePools:
-                    description: ResourcePools specifies allowed resource pools for
-                      VM placement
+                    description: |-
+                      ResourcePools specifies allowed resource pools for VM placement. Accepted
+                      but not acted on in this release.
                     items:
                       type: string
                     maxItems: 100
                     type: array
                   tolerations:
-                    description: Tolerations specifies tolerations for node placement
+                    description: |-
+                      Tolerations specifies tolerations for node placement. Accepted but not
+                      acted on in this release.
                     items:
-                      description: VMToleration represents a toleration for VM placement
+                      description: |-
+                        VMToleration represents a toleration for VM placement. Accepted but not
+                        acted on in this release.
                       properties:
                         effect:
-                          description: Effect indicates the taint effect to match
+                          description: |-
+                            Effect indicates the taint effect to match. Accepted but not acted on in
+                            this release.
                           enum:
                           - NoSchedule
                           - PreferNoSchedule
                           - NoExecute
                           type: string
                         key:
-                          description: Key is the taint key that the toleration applies
-                            to
+                          description: |-
+                            Key is the taint key that the toleration applies to. Accepted but not
+                            acted on in this release.
                           maxLength: 253
                           type: string
                         operator:
@@ -1065,63 +1206,79 @@ spec:
                             - Exists
                             - Equal
                           default: Equal
-                          description: Operator represents the relationship between
-                            the key and value
+                          description: |-
+                            Operator represents the relationship between the key and value. Accepted
+                            but not acted on in this release.
                           type: string
                         tolerationSeconds:
-                          description: TolerationSeconds represents the period of
-                            time the toleration tolerates the taint
+                          description: |-
+                            TolerationSeconds represents the period of time the toleration tolerates
+                            the taint. Accepted but not acted on in this release.
                           format: int64
                           minimum: 0
                           type: integer
                         value:
-                          description: Value is the taint value the toleration matches
-                            to
+                          description: |-
+                            Value is the taint value the toleration matches to. Accepted but not acted
+                            on in this release.
                           maxLength: 253
                           type: string
                       type: object
                     maxItems: 20
                     type: array
                   zones:
-                    description: Zones specifies allowed availability zones
+                    description: |-
+                      Zones specifies allowed availability zones. Accepted but not acted on in
+                      this release.
                     items:
                       type: string
                     maxItems: 20
                     type: array
                 type: object
               priority:
-                description: Priority defines the priority of this placement policy
+                description: |-
+                  Priority defines the priority of this placement policy. Accepted but not
+                  acted on in this release.
                 format: int32
                 maximum: 1000
                 minimum: 0
                 type: integer
               resourceConstraints:
-                description: ResourceConstraints defines resource-based placement
-                  constraints
+                description: |-
+                  ResourceConstraints defines placement constraints on the resources and CPU
+                  features of a Host. The scheduler acts on minCPUPerHost, minMemoryPerHost,
+                  minDiskSpacePerHost, requiredFeatures and preferredFeatures; the
+                  utilization limits are accepted but not acted on in this release.
                 properties:
                   maxCPUUtilization:
-                    description: MaxCPUUtilization specifies maximum allowed CPU utilization
+                    description: |-
+                      MaxCPUUtilization specifies maximum allowed CPU utilization. Accepted but
+                      not acted on in this release.
                     format: int32
                     maximum: 100
                     minimum: 0
                     type: integer
                   maxDiskUtilization:
-                    description: MaxDiskUtilization specifies maximum allowed disk
-                      utilization
+                    description: |-
+                      MaxDiskUtilization specifies maximum allowed disk utilization. Accepted
+                      but not acted on in this release.
                     format: int32
                     maximum: 100
                     minimum: 0
                     type: integer
                   maxMemoryUtilization:
-                    description: MaxMemoryUtilization specifies maximum allowed memory
-                      utilization
+                    description: |-
+                      MaxMemoryUtilization specifies maximum allowed memory utilization.
+                      Accepted but not acted on in this release.
                     format: int32
                     maximum: 100
                     minimum: 0
                     type: integer
                   minCPUPerHost:
-                    description: MinCPUPerHost specifies minimum CPU available per
-                      host
+                    description: |-
+                      MinCPUPerHost is the minimum number of CPUs a Host must have
+                      (Host.status.allocatableCPU, before overcommit). A Host below it is not a
+                      candidate.
                     format: int32
                     minimum: 1
                     type: integer
@@ -1129,49 +1286,66 @@ spec:
                     anyOf:
                     - type: integer
                     - type: string
-                    description: MinDiskSpacePerHost specifies minimum disk space
-                      available per host
+                    description: |-
+                      MinDiskSpacePerHost is the minimum allocatable storage a Host must report
+                      (Host.status.allocatableStorageBytes). A Host below it, or one that
+                      reports none, is not a candidate.
                     pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
                     x-kubernetes-int-or-string: true
                   minMemoryPerHost:
                     anyOf:
                     - type: integer
                     - type: string
-                    description: MinMemoryPerHost specifies minimum memory available
-                      per host
+                    description: |-
+                      MinMemoryPerHost is the minimum memory a Host must have
+                      (Host.status.allocatableMemoryMiB, before overcommit). A Host below it is
+                      not a candidate.
                     pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
                     x-kubernetes-int-or-string: true
                   preferredFeatures:
-                    description: PreferredFeatures lists preferred hardware features
+                    description: |-
+                      PreferredFeatures lists CPU features that rank a Host higher when it
+                      reports them in Host.status.cpuFeatures.
                     items:
                       type: string
                     maxItems: 20
                     type: array
                   requiredFeatures:
-                    description: RequiredFeatures lists required hardware features
+                    description: |-
+                      RequiredFeatures lists CPU features that a Host must report in
+                      Host.status.cpuFeatures. A Host that lacks one is not a candidate.
                     items:
                       type: string
                     maxItems: 20
                     type: array
                 type: object
               securityConstraints:
-                description: SecurityConstraints defines security-based placement
-                  constraints
+                description: |-
+                  SecurityConstraints defines security-based placement constraints. Accepted
+                  but not acted on in this release. This applies to every field below it: no
+                  Host status field carries this information. Label the Hosts and use
+                  nodeSelector instead.
                 properties:
                   allowedSecurityGroups:
-                    description: AllowedSecurityGroups lists allowed security groups
+                    description: |-
+                      AllowedSecurityGroups lists allowed security groups. Accepted but not
+                      acted on in this release.
                     items:
                       type: string
                     maxItems: 20
                     type: array
                   deniedSecurityGroups:
-                    description: DeniedSecurityGroups lists denied security groups
+                    description: |-
+                      DeniedSecurityGroups lists denied security groups. Accepted but not acted
+                      on in this release.
                     items:
                       type: string
                     maxItems: 20
                     type: array
                   isolationLevel:
-                    description: IsolationLevel specifies the required isolation level
+                    description: |-
+                      IsolationLevel specifies the required isolation level. Accepted but not
+                      acted on in this release.
                     enum:
                     - none
                     - basic
@@ -1179,22 +1353,29 @@ spec:
                     - maximum
                     type: string
                   requireEncryptedStorage:
-                    description: RequireEncryptedStorage requires hosts that support
-                      encrypted storage
+                    description: |-
+                      RequireEncryptedStorage requires hosts that support encrypted storage.
+                      Accepted but not acted on in this release.
                     type: boolean
                   requireNUMATopology:
-                    description: RequireNUMATopology requires hosts that support NUMA
-                      topology
+                    description: |-
+                      RequireNUMATopology requires hosts that support NUMA topology. Accepted
+                      but not acted on in this release.
                     type: boolean
                   requireSecureBoot:
-                    description: RequireSecureBoot requires hosts that support secure
-                      boot
+                    description: |-
+                      RequireSecureBoot requires hosts that support secure boot. Accepted but
+                      not acted on in this release.
                     type: boolean
                   requireTPM:
-                    description: RequireTPM requires hosts that support TPM
+                    description: |-
+                      RequireTPM requires hosts that support TPM. Accepted but not acted on in
+                      this release.
                     type: boolean
                   trustLevel:
-                    description: TrustLevel specifies the required trust level
+                    description: |-
+                      TrustLevel specifies the required trust level. Accepted but not acted on
+                      in this release.
                     enum:
                     - untrusted
                     - basic
@@ -1203,54 +1384,71 @@ spec:
                     type: string
                 type: object
               soft:
-                description: Soft constraints that should be satisfied if possible
+                description: |-
+                  Soft constraints that rank the candidate Hosts without removing any. The
+                  scheduler acts on hosts, excludedHosts and nodeSelector; the other fields
+                  are accepted but not acted on in this release.
                 properties:
                   clusters:
-                    description: Clusters specifies allowed clusters for VM placement
+                    description: |-
+                      Clusters specifies allowed clusters for VM placement. Accepted but not
+                      acted on in this release.
                     items:
                       type: string
                     maxItems: 50
                     type: array
                   datastores:
-                    description: Datastores specifies allowed datastores for VM placement
+                    description: |-
+                      Datastores specifies allowed datastores for VM placement. Accepted but not
+                      acted on in this release.
                     items:
                       type: string
                     maxItems: 100
                     type: array
                   excludedClusters:
-                    description: ExcludedClusters specifies clusters to exclude from
-                      placement
+                    description: |-
+                      ExcludedClusters specifies clusters to exclude from placement. Accepted
+                      but not acted on in this release.
                     items:
                       type: string
                     maxItems: 50
                     type: array
                   excludedDatastores:
-                    description: ExcludedDatastores specifies datastores to exclude
-                      from placement
+                    description: |-
+                      ExcludedDatastores specifies datastores to exclude from placement.
+                      Accepted but not acted on in this release.
                     items:
                       type: string
                     maxItems: 100
                     type: array
                   excludedHosts:
-                    description: ExcludedHosts specifies hosts to exclude from placement
+                    description: |-
+                      ExcludedHosts lists Hosts by resource name. In hard, a listed Host is not
+                      a candidate. In soft, a listed Host ranks lower.
                     items:
                       type: string
                     maxItems: 200
                     type: array
                   folders:
-                    description: Folders specifies allowed folders for VM placement
+                    description: |-
+                      Folders specifies allowed folders for VM placement. Accepted but not acted
+                      on in this release.
                     items:
                       type: string
                     maxItems: 50
                     type: array
                   hosts:
-                    description: Hosts specifies allowed hosts for VM placement
+                    description: |-
+                      Hosts lists Hosts by resource name. In hard, only the listed Hosts are
+                      candidates. In soft, a listed Host ranks higher.
                     items:
                       type: string
                     maxItems: 200
                     type: array
                   networks:
-                    description: Networks specifies allowed networks for VM placement
+                    description: |-
+                      Networks specifies allowed networks for VM placement. Accepted but not
+                      acted on in this release.
                     items:
                       type: string
                     maxItems: 50
@@ -1258,38 +1456,50 @@ spec:
                   nodeSelector:
                     additionalProperties:
                       type: string
-                    description: NodeSelector specifies node selection criteria for
-                      libvirt provider
+                    description: |-
+                      NodeSelector is a set of label key/value pairs matched against the labels
+                      in Host.spec.labels. In hard, a Host must carry every pair. In soft, a
+                      Host ranks higher for each pair it carries.
                     maxProperties: 20
                     type: object
                   regions:
-                    description: Regions specifies allowed regions
+                    description: |-
+                      Regions specifies allowed regions. Accepted but not acted on in this
+                      release.
                     items:
                       type: string
                     maxItems: 20
                     type: array
                   resourcePools:
-                    description: ResourcePools specifies allowed resource pools for
-                      VM placement
+                    description: |-
+                      ResourcePools specifies allowed resource pools for VM placement. Accepted
+                      but not acted on in this release.
                     items:
                       type: string
                     maxItems: 100
                     type: array
                   tolerations:
-                    description: Tolerations specifies tolerations for node placement
+                    description: |-
+                      Tolerations specifies tolerations for node placement. Accepted but not
+                      acted on in this release.
                     items:
-                      description: VMToleration represents a toleration for VM placement
+                      description: |-
+                        VMToleration represents a toleration for VM placement. Accepted but not
+                        acted on in this release.
                       properties:
                         effect:
-                          description: Effect indicates the taint effect to match
+                          description: |-
+                            Effect indicates the taint effect to match. Accepted but not acted on in
+                            this release.
                           enum:
                           - NoSchedule
                           - PreferNoSchedule
                           - NoExecute
                           type: string
                         key:
-                          description: Key is the taint key that the toleration applies
-                            to
+                          description: |-
+                            Key is the taint key that the toleration applies to. Accepted but not
+                            acted on in this release.
                           maxLength: 253
                           type: string
                         operator:
@@ -1301,42 +1511,53 @@ spec:
                             - Exists
                             - Equal
                           default: Equal
-                          description: Operator represents the relationship between
-                            the key and value
+                          description: |-
+                            Operator represents the relationship between the key and value. Accepted
+                            but not acted on in this release.
                           type: string
                         tolerationSeconds:
-                          description: TolerationSeconds represents the period of
-                            time the toleration tolerates the taint
+                          description: |-
+                            TolerationSeconds represents the period of time the toleration tolerates
+                            the taint. Accepted but not acted on in this release.
                           format: int64
                           minimum: 0
                           type: integer
                         value:
-                          description: Value is the taint value the toleration matches
-                            to
+                          description: |-
+                            Value is the taint value the toleration matches to. Accepted but not acted
+                            on in this release.
                           maxLength: 253
                           type: string
                       type: object
                     maxItems: 20
                     type: array
                   zones:
-                    description: Zones specifies allowed availability zones
+                    description: |-
+                      Zones specifies allowed availability zones. Accepted but not acted on in
+                      this release.
                     items:
                       type: string
                     maxItems: 20
                     type: array
                 type: object
               weight:
-                description: Weight defines the weight of this placement policy
+                description: |-
+                  Weight defines the weight of this placement policy. Accepted but not acted
+                  on in this release.
                 format: int32
                 maximum: 100
                 minimum: 1
                 type: integer
             type: object
           status:
-            description: VMPlacementPolicyStatus defines the observed state of VMPlacementPolicy
+            description: |-
+              VMPlacementPolicyStatus defines the observed state of VMPlacementPolicy.
+              Not populated in this release: no controller writes it.
             properties:
               conditions:
-                description: Conditions represent the current service state
+                description: |-
+                  Conditions represent the current service state. Not populated in this
+                  release.
                 items:
                   description: Condition contains details for one aspect of the current
                     state of this API Resource.
@@ -1393,13 +1614,18 @@ spec:
                   type: object
                 type: array
               conflictingPolicies:
-                description: ConflictingPolicies lists policies that conflict with
-                  this policy
+                description: |-
+                  ConflictingPolicies lists policies that conflict with this policy. Not
+                  populated in this release.
                 items:
-                  description: PolicyConflict represents a conflict between policies
+                  description: |-
+                    PolicyConflict represents a conflict between policies. Not populated in
+                    this release.
                   properties:
                     conflictType:
-                      description: ConflictType describes the type of conflict
+                      description: |-
+                        ConflictType describes the type of conflict. Not populated in this
+                        release.
                       enum:
                       - hard
                       - soft
@@ -1408,17 +1634,24 @@ spec:
                       - affinity
                       type: string
                     description:
-                      description: Description provides details about the conflict
+                      description: |-
+                        Description provides details about the conflict. Not populated in this
+                        release.
                       type: string
                     policyName:
-                      description: PolicyName is the name of the conflicting policy
+                      description: |-
+                        PolicyName is the name of the conflicting policy. Not populated in this
+                        release.
                       type: string
                     resolutionSuggestion:
-                      description: ResolutionSuggestion provides suggestions for resolving
-                        the conflict
+                      description: |-
+                        ResolutionSuggestion provides suggestions for resolving the conflict. Not
+                        populated in this release.
                       type: string
                     severity:
-                      description: Severity indicates the severity of the conflict
+                      description: |-
+                        Severity indicates the severity of the conflict. Not populated in this
+                        release.
                       enum:
                       - low
                       - medium
@@ -1432,51 +1665,64 @@ spec:
                 maxItems: 50
                 type: array
               observedGeneration:
-                description: ObservedGeneration is the most recent generation observed
-                  by the controller
+                description: |-
+                  ObservedGeneration is the most recent generation observed by the
+                  controller. Not populated in this release.
                 format: int64
                 type: integer
               placementStats:
-                description: PlacementStats provides statistics about VM placements
-                  using this policy
+                description: |-
+                  PlacementStats provides statistics about VM placements using this policy.
+                  Not populated in this release.
                 properties:
                   averagePlacementTime:
-                    description: AveragePlacementTime is the average time for VM placement
+                    description: |-
+                      AveragePlacementTime is the average time for VM placement. Not populated
+                      in this release.
                     type: string
                   constraintViolations:
-                    description: ConstraintViolations is the number of constraint
-                      violations
+                    description: |-
+                      ConstraintViolations is the number of constraint violations. Not populated
+                      in this release.
                     format: int32
                     type: integer
                   failedPlacements:
-                    description: FailedPlacements is the number of failed placements
+                    description: |-
+                      FailedPlacements is the number of failed placements. Not populated in this
+                      release.
                     format: int32
                     type: integer
                   lastPlacementTime:
-                    description: LastPlacementTime is when the last VM was placed
-                      using this policy
+                    description: |-
+                      LastPlacementTime is when the last VM was placed using this policy. Not
+                      populated in this release.
                     format: date-time
                     type: string
                   placementDistribution:
                     additionalProperties:
                       format: int32
                       type: integer
-                    description: PlacementDistribution shows how VMs are distributed
-                      across hosts/clusters
+                    description: |-
+                      PlacementDistribution shows how VMs are distributed across hosts/clusters.
+                      Not populated in this release.
                     type: object
                   successfulPlacements:
-                    description: SuccessfulPlacements is the number of successful
-                      placements
+                    description: |-
+                      SuccessfulPlacements is the number of successful placements. Not populated
+                      in this release.
                     format: int32
                     type: integer
                   totalPlacements:
-                    description: TotalPlacements is the total number of VM placements
-                      using this policy
+                    description: |-
+                      TotalPlacements is the total number of VM placements using this policy.
+                      Not populated in this release.
                     format: int32
                     type: integer
                 type: object
               usedByVMs:
-                description: UsedByVMs lists VMs currently using this policy
+                description: |-
+                  UsedByVMs lists VMs currently using this policy. Not populated in this
+                  release.
                 items:
                   description: LocalObjectReference represents a reference to an object
                     in the same namespace
@@ -1493,43 +1739,52 @@ spec:
                 type: array
               validationResults:
                 additionalProperties:
-                  description: PolicyValidationResult represents a validation result
-                    for a provider
+                  description: |-
+                    PolicyValidationResult represents a validation result for a provider. Not
+                    populated in this release.
                   properties:
                     errors:
-                      description: Errors lists any validation errors
+                      description: Errors lists any validation errors. Not populated
+                        in this release.
                       items:
                         type: string
                       maxItems: 20
                       type: array
                     lastValidated:
-                      description: LastValidated is when this validation was last
-                        performed
+                      description: |-
+                        LastValidated is when this validation was last performed. Not populated in
+                        this release.
                       format: date-time
                       type: string
                     message:
-                      description: Message provides details about the validation result
+                      description: |-
+                        Message provides details about the validation result. Not populated in
+                        this release.
                       type: string
                     supportedFeatures:
-                      description: SupportedFeatures lists features supported by the
-                        provider
+                      description: |-
+                        SupportedFeatures lists features supported by the provider. Not populated
+                        in this release.
                       items:
                         type: string
                       maxItems: 50
                       type: array
                     unsupportedFeatures:
-                      description: UnsupportedFeatures lists features not supported
-                        by the provider
+                      description: |-
+                        UnsupportedFeatures lists features not supported by the provider. Not
+                        populated in this release.
                       items:
                         type: string
                       maxItems: 50
                       type: array
                     valid:
-                      description: Valid indicates if the policy is valid for the
-                        provider
+                      description: |-
+                        Valid indicates if the policy is valid for the provider. Not populated in
+                        this release.
                       type: boolean
                     warnings:
-                      description: Warnings lists any validation warnings
+                      description: Warnings lists any validation warnings. Not populated
+                        in this release.
                       items:
                         type: string
                       maxItems: 20
@@ -1537,8 +1792,9 @@ spec:
                   required:
                   - valid
                   type: object
-                description: ValidationResults contains validation results for different
-                  providers
+                description: |-
+                  ValidationResults contains validation results for different providers. Not
+                  populated in this release.
                 type: object
             type: object
         type: object

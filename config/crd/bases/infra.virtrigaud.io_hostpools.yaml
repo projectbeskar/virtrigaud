@@ -43,9 +43,8 @@ spec:
       openAPIV3Schema:
         description: |-
           HostPool is the Schema for the hostpools API: a named group of Hosts under one
-          clustered Provider, carrying cluster scheduling and migration policy (ADR-0007
-          P1 inventory foundation). It is additive and does not affect single-host
-          (spec.topology=single) providers (ADR-0007 D9).
+          clustered Provider, carrying cluster scheduling and migration policy. It does
+          not affect single-host (spec.topology=single) providers.
         properties:
           apiVersion:
             description: |-
@@ -67,20 +66,23 @@ spec:
           spec:
             description: |-
               HostPoolSpec is admin-authored cluster policy for a named group of Hosts under
-              one clustered Provider (ADR-0007 D3): scheduling strategy, overcommit,
-              storage/network references, and the default migration policy.
+              one clustered Provider: scheduling strategy, overcommit, storage/network
+              references, and the default migration policy. Only strategy and overcommit
+              affect placement in this release.
 
               Same-namespace model (security): a HostPool lives in its clustered Provider's
               namespace, alongside that Provider's Hosts, so ProviderRef is a
               LocalObjectReference (see HostSpec).
             properties:
               migration:
-                description: Migration is the default migration policy for VMs in
-                  this pool.
+                description: |-
+                  Migration is the default migration policy for VMs in this pool. Accepted but
+                  not acted on in this release.
                 properties:
                   bandwidthMbps:
-                    description: BandwidthMbps optionally caps migration bandwidth
-                      in Mbps.
+                    description: |-
+                      BandwidthMbps optionally caps migration bandwidth in Mbps. Accepted but not
+                      acted on in this release.
                     format: int32
                     minimum: 1
                     type: integer
@@ -89,18 +91,13 @@ spec:
                     description: |-
                       DefaultLive requests live (RAM-transfer) migration by default. When false,
                       migrations tolerate downtime and may fall back to stage_copy. Defaults
-                      true.
-
-                      This is a defaulted bool and deliberately carries NO omitempty (the
-                      defaulted-bool footgun, ADR-0006/PR#235): with omitempty an explicit false
-                      would be dropped on marshal and the apiserver would re-apply the true
-                      default.
+                      true. Accepted but not acted on in this release.
                     type: boolean
                   defaultStorageMode:
                     default: shared
                     description: |-
-                      DefaultStorageMode selects the intra-cluster data path (ADR-0007 D5).
-                      Defaults to shared.
+                      DefaultStorageMode selects the intra-cluster data path. Defaults to shared.
+                      Accepted but not acted on in this release.
                     enum:
                     - shared
                     - block_all
@@ -110,25 +107,27 @@ spec:
                   maxDowntimeMs:
                     description: |-
                       MaxDowntimeMs optionally caps the tolerated switchover downtime in
-                      milliseconds.
+                      milliseconds. Accepted but not acted on in this release.
                     format: int32
                     minimum: 1
                     type: integer
                   requireTLS:
                     default: false
                     description: |-
-                      RequireTLS forces QEMU-native --tls on the migration data path (required in
-                      regulated/banking deployments). Defaults false.
+                      RequireTLS would force QEMU-native --tls on the migration data path.
+                      Defaults false. Accepted but not acted on in this release.
                     type: boolean
                 type: object
               networks:
                 description: |-
                   Networks are the named networks (bridge/VLAN/overlay) available in this
-                  pool; per-host presence is asserted via Host.spec.labels (ADR-0007 D6).
+                  pool; per-host presence is asserted via Host.spec.labels. Descriptive: no
+                  controller reads this list.
                 items:
                   description: |-
                     PoolNetworkRef names a network (bridge / VLAN / overlay) available in a
-                    HostPool. Per-host presence is asserted via Host.spec.labels (ADR-0007 D6).
+                    HostPool. Per-host presence is asserted via Host.spec.labels. The list is
+                    descriptive in this release: no controller reads it.
                   properties:
                     name:
                       description: |-
@@ -142,8 +141,9 @@ spec:
                   type: object
                 type: array
               overcommit:
-                description: Overcommit ratios applied when computing allocatable
-                  capacity.
+                description: |-
+                  Overcommit ratios the scheduler applies to each host's CPU and memory when
+                  it checks whether a new VM fits.
                 properties:
                   cpu:
                     description: |-
@@ -172,13 +172,14 @@ spec:
               storagePools:
                 description: |-
                   StoragePools are the named shared/local storage pools available in this
-                  pool. Per-host visibility is asserted via Host.spec.labels (ADR-0007 D6).
-                  Consumed, not deployed, by VirtRigaud.
+                  pool. Per-host visibility is asserted via Host.spec.labels. Consumed, not
+                  deployed, by VirtRigaud. Descriptive: no controller reads this list.
                 items:
                   description: |-
                     StoragePoolRef names a shared or local storage pool available in a HostPool.
-                    Per-host visibility is asserted via Host.spec.labels (ADR-0007 D6). VirtRigaud
-                    consumes pre-set-up storage; it does not deploy it.
+                    Per-host visibility is asserted via Host.spec.labels. VirtRigaud consumes
+                    pre-set-up storage; it does not deploy it. The list is descriptive in this
+                    release: no controller reads it.
                   properties:
                     name:
                       description: |-
@@ -194,7 +195,8 @@ spec:
               strategy:
                 default: Spread
                 description: |-
-                  Strategy is the default scheduling strategy for VMs placed in this pool.
+                  Strategy is the scheduling strategy for VMs placed in this pool: Spread
+                  balances VMs across the hosts, BinPack fills the fewest hosts first.
                   Defaults to Spread.
                 enum:
                 - Spread
@@ -212,11 +214,6 @@ spec:
 
               A count of 0 (an empty pool, or no schedulable host) is written as 0 rather
               than omitted, so it shows in the status and in the kubectl get columns.
-
-              ADR-0007 specifies HostPool.status only in prose ("aggregates host counts +
-              readiness"). These fields are the smallest additive shape consistent with that
-              description and with the other kinds' status conventions (ObservedGeneration +
-              Conditions).
             properties:
               conditions:
                 description: Conditions represent the latest available observations

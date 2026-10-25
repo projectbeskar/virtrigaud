@@ -35,7 +35,13 @@ spec:
     name: v1beta1
     schema:
       openAPIV3Schema:
-        description: VMImage is the Schema for the vmimages API
+        description: |-
+          VMImage describes where a VM image comes from and records where it has been
+          prepared. VirtualMachines use it through spec.imageRef. An image that must be
+          imported (a vSphere ovaURL, a libvirt url) is prepared on a Provider when the
+          first VM that uses it on that Provider is created; an image that names
+          something already on the hypervisor (a template, a libvirt path) is used as
+          written.
         properties:
           apiVersion:
             description: |-
@@ -55,7 +61,11 @@ spec:
           metadata:
             type: object
           spec:
-            description: VMImageSpec defines the desired state of VMImage
+            description: |-
+              VMImageSpec defines the desired state of VMImage. Source says where the image
+              comes from; prepare.onMissing and prepare.timeout steer how it is prepared on a
+              Provider. metadata and distribution are descriptive. Several other fields are
+              accepted but not acted on in this release; each says so.
             properties:
               consumerNamespaceSelector:
                 description: |-
@@ -121,10 +131,13 @@ spec:
                 type: object
                 x-kubernetes-map-type: atomic
               distribution:
-                description: Distribution contains OS distribution information
+                description: |-
+                  Distribution contains OS distribution information. Descriptive: no
+                  controller or provider reads it.
                 properties:
                   family:
-                    description: Family is the OS family
+                    description: 'Family is the OS family. Descriptive: no controller
+                      reads it.'
                     enum:
                     - linux
                     - windows
@@ -132,10 +145,12 @@ spec:
                     - other
                     type: string
                   kernel:
-                    description: Kernel specifies kernel information
+                    description: 'Kernel specifies kernel information. Descriptive:
+                      no controller reads it.'
                     properties:
                       type:
-                        description: Type is the kernel type
+                        description: 'Type is the kernel type. Descriptive: no controller
+                          reads it.'
                         enum:
                         - linux
                         - windows
@@ -143,11 +158,13 @@ spec:
                         - other
                         type: string
                       version:
-                        description: Version is the kernel version
+                        description: 'Version is the kernel version. Descriptive:
+                          no controller reads it.'
                         type: string
                     type: object
                   name:
-                    description: Name is the OS distribution name
+                    description: 'Name is the OS distribution name. Descriptive: no
+                      controller reads it.'
                     enum:
                     - ubuntu
                     - centos
@@ -161,27 +178,36 @@ spec:
                     - other
                     type: string
                   variant:
-                    description: Variant is the distribution variant (e.g., server,
-                      desktop)
+                    description: |-
+                      Variant is the distribution variant (e.g., server, desktop). Descriptive:
+                      no controller reads it.
                     maxLength: 100
                     type: string
                   version:
-                    description: Version is the distribution version
+                    description: 'Version is the distribution version. Descriptive:
+                      no controller reads it.'
                     maxLength: 100
                     type: string
                 type: object
               metadata:
-                description: Metadata contains image metadata and annotations
+                description: |-
+                  Metadata contains image metadata and annotations. Descriptive: no
+                  controller or provider reads it.
                 properties:
                   annotations:
                     additionalProperties:
                       type: string
-                    description: Annotations are additional metadata annotations
+                    description: |-
+                      Annotations are additional metadata annotations. Descriptive: no
+                      controller reads them, and they are not copied to the image on the
+                      hypervisor.
                     maxProperties: 50
                     type: object
                   architecture:
                     default: amd64
-                    description: Architecture specifies the CPU architecture
+                    description: |-
+                      Architecture specifies the CPU architecture. Descriptive: no controller or
+                      provider checks it against the hypervisor.
                     enum:
                     - amd64
                     - arm64
@@ -189,45 +215,68 @@ spec:
                     - aarch64
                     type: string
                   description:
-                    description: Description provides a description of the image
+                    description: |-
+                      Description provides a description of the image. Descriptive: no
+                      controller reads it.
                     maxLength: 1024
                     type: string
                   displayName:
-                    description: DisplayName is a human-readable name for the image
+                    description: |-
+                      DisplayName is a human-readable name for the image. Descriptive: no
+                      controller reads it.
                     maxLength: 255
                     type: string
                   tags:
                     additionalProperties:
                       type: string
-                    description: Tags are key-value pairs for categorizing the image
+                    description: |-
+                      Tags are key-value pairs for categorizing the image. Descriptive: no
+                      controller reads them.
                     maxProperties: 50
                     type: object
                   version:
-                    description: Version specifies the image version
+                    description: 'Version specifies the image version. Descriptive:
+                      no controller reads it.'
                     maxLength: 100
                     type: string
                 type: object
               prepare:
-                description: Prepare contains optional image preparation steps
+                description: |-
+                  Prepare contains optional image preparation steps. Only onMissing and
+                  timeout are acted on; the other fields are accepted but not acted on in
+                  this release. Preparation applies only to sources that must be imported (a
+                  vSphere ovaURL, a libvirt url); an image that names something already on
+                  the hypervisor (a template, a libvirt path) is never prepared.
                 properties:
                   force:
-                    description: Force forces re-import even if image exists
+                    description: |-
+                      Force forces re-import even if image exists. Accepted but not acted on in
+                      this release: an existing prepared image for the same source is reused.
                     type: boolean
                   onMissing:
                     default: Import
-                    description: OnMissing defines the action to take when image is
-                      missing
+                    description: |-
+                      OnMissing defines the action to take when the image is not yet prepared
+                      on the Provider of the VM being created. Import (the default) prepares
+                      it, then creates the VM. Fail and Wait never prepare: the VM is held, and
+                      the VMImage is marked Failed or Pending. It applies only to a source that
+                      must be imported (a vSphere ovaURL, a libvirt url); an image that names
+                      something already on the hypervisor is used as written whatever this says.
+                      See docs/image-preparation.md.
                     enum:
                     - Import
                     - Fail
                     - Wait
                     type: string
                   optimization:
-                    description: Optimization defines image optimization options
+                    description: |-
+                      Optimization defines image optimization options. Accepted but not acted on
+                      in this release.
                     properties:
                       convertFormat:
-                        description: ConvertFormat converts the image to a more optimal
-                          format
+                        description: |-
+                          ConvertFormat converts the image to a more optimal format. Accepted but not
+                          acted on in this release.
                         enum:
                         - qcow2
                         - raw
@@ -240,45 +289,62 @@ spec:
                         type: string
                       enableCompression:
                         default: false
-                        description: EnableCompression enables image compression
+                        description: |-
+                          EnableCompression enables image compression. Accepted but not acted on in
+                          this release.
                         type: boolean
                       enableDeltaSync:
                         default: false
-                        description: EnableDeltaSync enables delta synchronization
-                          for updates
+                        description: |-
+                          EnableDeltaSync enables delta synchronization for updates. Accepted but
+                          not acted on in this release.
                         type: boolean
                       removeUnusedSpace:
                         default: false
-                        description: RemoveUnusedSpace removes unused space from the
-                          image
+                        description: |-
+                          RemoveUnusedSpace removes unused space from the image. Accepted but not
+                          acted on in this release.
                         type: boolean
                     type: object
                   retries:
                     default: 3
-                    description: Retries defines the number of retry attempts for
-                      failed operations
+                    description: |-
+                      Retries defines the number of retry attempts for failed operations.
+                      Accepted but not acted on in this release: the manager retries a failed
+                      prepare on its own schedule.
                     format: int32
                     maximum: 10
                     minimum: 0
                     type: integer
                   storage:
-                    description: Storage defines storage-specific preparation options
+                    description: |-
+                      Storage defines storage-specific preparation options. Accepted but not
+                      acted on in this release: the libvirt storage pool comes from
+                      source.libvirt.storagePool, and the vSphere import folder from the
+                      Provider's spec.defaults.folder.
                     properties:
                       compression:
                         default: false
-                        description: Compression enables compression during import
+                        description: |-
+                          Compression enables compression during import. Accepted but not acted on
+                          in this release.
                         type: boolean
                       libvirt:
-                        description: Libvirt storage options
+                        description: Libvirt storage options. Accepted but not acted
+                          on in this release.
                         properties:
                           allocationPolicy:
-                            description: AllocationPolicy defines how storage is allocated
+                            description: |-
+                              AllocationPolicy defines how storage is allocated. Accepted but not acted
+                              on in this release.
                             enum:
                             - eager
                             - lazy
                             type: string
                           preallocation:
-                            description: Preallocation specifies preallocation mode
+                            description: |-
+                              Preallocation specifies preallocation mode. Accepted but not acted on in
+                              this release.
                             enum:
                             - "off"
                             - metadata
@@ -286,14 +352,16 @@ spec:
                             - full
                             type: string
                           storagePool:
-                            description: StoragePool specifies the target storage
-                              pool for import
+                            description: |-
+                              StoragePool specifies the target storage pool for import. Accepted but not
+                              acted on in this release: use source.libvirt.storagePool.
                             maxLength: 255
                             type: string
                         type: object
                       preferredFormat:
-                        description: PreferredFormat specifies the preferred target
-                          format
+                        description: |-
+                          PreferredFormat specifies the preferred target format. Accepted but not
+                          acted on in this release.
                         enum:
                         - qcow2
                         - raw
@@ -305,54 +373,77 @@ spec:
                         - ovf
                         type: string
                       vsphere:
-                        description: VSphere storage options
+                        description: VSphere storage options. Accepted but not acted
+                          on in this release.
                         properties:
                           datastore:
-                            description: Datastore specifies the target datastore
-                              for import
+                            description: |-
+                              Datastore specifies the target datastore for import. Accepted but not
+                              acted on in this release.
                             maxLength: 255
                             type: string
                           diskType:
-                            description: DiskType specifies the disk provisioning
-                              type
+                            description: |-
+                              DiskType specifies the disk provisioning type. Accepted but not acted on
+                              in this release.
                             enum:
                             - thin
                             - thick
                             - eagerzeroedthick
                             type: string
                           folder:
-                            description: Folder specifies the target folder for import
+                            description: |-
+                              Folder specifies the target folder for import. Accepted but not acted on
+                              in this release: an OVA is imported into the Provider's spec.defaults.folder.
                             maxLength: 255
                             type: string
                           thinProvisioned:
-                            description: ThinProvisioned indicates whether to use
-                              thin provisioning
+                            description: |-
+                              ThinProvisioned indicates whether to use thin provisioning. Accepted but
+                              not acted on in this release.
                             type: boolean
                         type: object
                     type: object
                   timeout:
                     default: 30m
-                    description: Timeout defines the maximum time to wait for preparation
+                    description: |-
+                      Timeout defines the maximum time to wait for preparation. The libvirt
+                      provider uses it as the time limit of the download. The manager and the
+                      vSphere and libvirt providers also use twice this value, with a floor of
+                      two hours, as the time after which a prepare started by another request
+                      that has not finished is treated as abandoned (stalled).
                     type: string
                   validateChecksum:
                     default: true
-                    description: ValidateChecksum validates the image checksum
+                    description: |-
+                      ValidateChecksum validates the image checksum. Accepted but not acted on
+                      in this release: the vSphere and libvirt providers verify the checksum of
+                      an image they prepare whenever source.*.checksum is set.
                     type: boolean
                 type: object
               source:
-                description: Source defines the image source configuration
+                description: |-
+                  Source defines where the image comes from. Set the block for one kind of
+                  source: vsphere, libvirt and proxmox are acted on; http, registry and
+                  dataVolume are accepted but not acted on in this release. Nothing checks
+                  that only one block is set.
                 properties:
                   dataVolume:
-                    description: DataVolume contains DataVolume-based image configuration
+                    description: |-
+                      DataVolume contains DataVolume-based image configuration. Accepted but
+                      not acted on in this release.
                     properties:
                       name:
-                        description: Name is the name of the DataVolume
+                        description: |-
+                          Name is the name of the DataVolume. Accepted but not acted on in this
+                          release.
                         maxLength: 253
                         pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                         type: string
                       namespace:
-                        description: Namespace is the namespace of the DataVolume
-                          (defaults to image namespace)
+                        description: |-
+                          Namespace is the namespace of the DataVolume (defaults to the image's
+                          namespace). Accepted but not acted on in this release.
                         maxLength: 63
                         pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                         type: string
@@ -360,22 +451,31 @@ spec:
                     - name
                     type: object
                   http:
-                    description: HTTP contains HTTP/HTTPS download configuration
+                    description: |-
+                      HTTP contains HTTP/HTTPS download configuration. Accepted but not acted
+                      on in this release: no provider downloads from an http source. (The
+                      Proxmox provider reads http.url only to refuse it.)
                     properties:
                       authentication:
-                        description: Authentication contains authentication configuration
+                        description: |-
+                          Authentication contains authentication configuration. Accepted but not
+                          acted on in this release: no credentials are read or sent.
                         properties:
                           basicAuth:
-                            description: BasicAuth contains basic authentication configuration
+                            description: |-
+                              BasicAuth contains basic authentication configuration. Accepted but not
+                              acted on in this release.
                             properties:
                               passwordKey:
                                 default: password
-                                description: 'PasswordKey is the key in the secret
-                                  containing the password (default: password)'
+                                description: |-
+                                  PasswordKey is the key in the secret containing the password (default:
+                                  password). Accepted but not acted on in this release.
                                 type: string
                               secretRef:
-                                description: SecretRef references a secret containing
-                                  username and password
+                                description: |-
+                                  SecretRef references a secret containing username and password. Accepted
+                                  but not acted on in this release.
                                 properties:
                                   name:
                                     description: Name of the referenced object
@@ -387,18 +487,22 @@ spec:
                                 type: object
                               usernameKey:
                                 default: username
-                                description: 'UsernameKey is the key in the secret
-                                  containing the username (default: username)'
+                                description: |-
+                                  UsernameKey is the key in the secret containing the username (default:
+                                  username). Accepted but not acted on in this release.
                                 type: string
                             required:
                             - secretRef
                             type: object
                           bearer:
-                            description: Bearer contains bearer token authentication
+                            description: |-
+                              Bearer contains bearer token authentication. Accepted but not acted on in
+                              this release.
                             properties:
                               secretRef:
-                                description: SecretRef references a secret containing
-                                  the bearer token
+                                description: |-
+                                  SecretRef references a secret containing the bearer token. Accepted but
+                                  not acted on in this release.
                                 properties:
                                   name:
                                     description: Name of the referenced object
@@ -410,28 +514,34 @@ spec:
                                 type: object
                               tokenKey:
                                 default: token
-                                description: 'TokenKey is the key in the secret containing
-                                  the token (default: token)'
+                                description: |-
+                                  TokenKey is the key in the secret containing the token (default: token).
+                                  Accepted but not acted on in this release.
                                 type: string
                             required:
                             - secretRef
                             type: object
                           clientCert:
-                            description: ClientCert contains client certificate authentication
+                            description: |-
+                              ClientCert contains client certificate authentication. Accepted but not
+                              acted on in this release.
                             properties:
                               certKey:
                                 default: tls.crt
-                                description: 'CertKey is the key in the secret containing
-                                  the certificate (default: tls.crt)'
+                                description: |-
+                                  CertKey is the key in the secret containing the certificate (default:
+                                  tls.crt). Accepted but not acted on in this release.
                                 type: string
                               keyKey:
                                 default: tls.key
-                                description: 'KeyKey is the key in the secret containing
-                                  the private key (default: tls.key)'
+                                description: |-
+                                  KeyKey is the key in the secret containing the private key (default:
+                                  tls.key). Accepted but not acted on in this release.
                                 type: string
                               secretRef:
-                                description: SecretRef references a secret containing
-                                  the client certificate and key
+                                description: |-
+                                  SecretRef references a secret containing the client certificate and key.
+                                  Accepted but not acted on in this release.
                                 properties:
                                   name:
                                     description: Name of the referenced object
@@ -446,11 +556,15 @@ spec:
                             type: object
                         type: object
                       checksum:
-                        description: Checksum provides expected checksum for verification
+                        description: |-
+                          Checksum provides expected checksum for verification. Accepted but not
+                          acted on in this release.
                         type: string
                       checksumType:
                         default: sha256
-                        description: ChecksumType specifies the checksum algorithm
+                        description: |-
+                          ChecksumType specifies the checksum algorithm. Accepted but not acted on
+                          in this release.
                         enum:
                         - md5
                         - sha1
@@ -460,30 +574,42 @@ spec:
                       headers:
                         additionalProperties:
                           type: string
-                        description: Headers contains HTTP headers to include in the
-                          request
+                        description: |-
+                          Headers contains HTTP headers to include in the request. Accepted but not
+                          acted on in this release.
                         maxProperties: 20
                         type: object
                       timeout:
                         default: 30m
-                        description: Timeout specifies the download timeout
+                        description: |-
+                          Timeout specifies the download timeout. Accepted but not acted on in this
+                          release.
                         type: string
                       url:
-                        description: URL is the HTTP/HTTPS URL to download the image
+                        description: |-
+                          URL is the HTTP/HTTPS URL to download the image. Accepted but not acted on
+                          in this release.
                         pattern: ^https?://.*
                         type: string
                     required:
                     - url
                     type: object
                   libvirt:
-                    description: Libvirt contains Libvirt-specific image configuration
+                    description: |-
+                      Libvirt contains Libvirt-specific image configuration. It is acted on by
+                      the libvirt provider.
                     properties:
                       checksum:
-                        description: Checksum provides expected checksum for verification
+                        description: |-
+                          Checksum is the expected checksum of the downloaded image: the hex digest
+                          only, without an algorithm prefix, compared case-insensitively. It is
+                          checked when a url image is prepared and a mismatch fails the prepare. It
+                          is not checked for a path. Empty disables the check.
                         type: string
                       checksumType:
                         default: sha256
-                        description: ChecksumType specifies the checksum algorithm
+                        description: 'ChecksumType specifies the checksum algorithm:
+                          md5, sha1, sha256 or sha512.'
                         enum:
                         - md5
                         - sha1
@@ -492,7 +618,10 @@ spec:
                         type: string
                       format:
                         default: qcow2
-                        description: Format specifies the image format
+                        description: |-
+                          Format specifies the image format. Accepted but not acted on in this
+                          release: the provider detects the format of the file itself, and converts
+                          a downloaded image to qcow2.
                         enum:
                         - qcow2
                         - raw
@@ -506,8 +635,9 @@ spec:
                       path:
                         description: |-
                           Path is the absolute path of an existing base image file on the libvirt
-                          host. The provider copies it into the VM's own disk; it is never attached
-                          in place. For security the provider resolves the path on the host
+                          host. It is used by reference: it is never downloaded or prepared, so
+                          checksum is not checked for it. The provider copies it into the VM's own
+                          disk; it is never attached in place. For security the provider resolves the path on the host
                           (following symlinks) and accepts it only if the result is a regular file
                           directly inside one of the provider's allowed image directories
                           (VIRTRIGAUD_LIBVIRT_IMAGE_DIRS, default /var/lib/libvirt/images), is not
@@ -518,20 +648,33 @@ spec:
                         pattern: ^(/+([^/.\x00-\x1f\x7f-\x9f-][^/\x00-\x1f\x7f-\x9f]*|\.([^/.\x00-\x1f\x7f-\x9f][^/\x00-\x1f\x7f-\x9f]*)?|\.\.[^/\x00-\x1f\x7f-\x9f]+))+$
                         type: string
                       storagePool:
-                        description: StoragePool specifies the libvirt storage pool
+                        description: |-
+                          StoragePool is the libvirt storage pool a prepared (url) image is
+                          published in. When empty the pool "default" is used. The pool must exist
+                          and its directory must be one of the provider's allowed image directories.
+                          It is not used for a path image.
                         maxLength: 255
                         type: string
                       url:
-                        description: URL provides a URL to download the image
+                        description: |-
+                          URL is the location of an image the libvirt provider downloads, on the
+                          hypervisor host, when the first VM that uses the image is created (scheme
+                          http, https or ftp). The provider converts it to qcow2 and publishes it in
+                          the storage pool; every VM created from it gets its own copy. Keep
+                          credentials out of the URL. Set url or path, not both.
                         pattern: ^(https?|ftp)://.*
                         type: string
                     type: object
                   proxmox:
-                    description: Proxmox contains Proxmox VE-specific image configuration
+                    description: |-
+                      Proxmox contains Proxmox VE-specific image configuration. It is acted on
+                      by the Proxmox provider.
                     properties:
                       format:
                         default: qcow2
-                        description: Format specifies the disk format
+                        description: |-
+                          Format specifies the disk format. Accepted but not acted on in this
+                          release.
                         enum:
                         - raw
                         - qcow2
@@ -539,38 +682,48 @@ spec:
                         type: string
                       fullClone:
                         default: true
-                        description: FullClone determines if this should be a full
-                          clone (default) or linked clone
+                        description: |-
+                          FullClone determines if this should be a full clone (default) or linked
+                          clone. Accepted but not acted on in this release: the provider always makes
+                          a full clone.
                         type: boolean
                       node:
-                        description: Node specifies the Proxmox node where the template
-                          exists
+                        description: |-
+                          Node specifies the Proxmox node where the template exists. Accepted but not
+                          acted on in this release.
                         maxLength: 255
                         type: string
                       storage:
                         description: |-
-                          Storage specifies the Proxmox storage for cloning
-                          Examples: "local-lvm", "vms", "nfs-storage"
+                          Storage specifies the Proxmox storage for cloning, for example "local-lvm".
+                          Accepted but not acted on in this release.
                         maxLength: 255
                         type: string
                       templateID:
-                        description: TemplateID specifies an existing Proxmox template
-                          VMID
+                        description: |-
+                          TemplateID specifies an existing Proxmox template VMID. A VM is cloned from
+                          it with a full clone. Nothing is prepared for this source.
                         maximum: 999999999
                         minimum: 100
                         type: integer
                       templateName:
-                        description: TemplateName specifies an existing Proxmox template
-                          name
+                        description: |-
+                          TemplateName specifies an existing Proxmox template. The clone is made by
+                          VMID only, so the value must be the template's VMID as a number; any other
+                          name makes the VM create fail with InvalidSpec. Use templateID.
                         maxLength: 255
                         type: string
                     type: object
                   registry:
-                    description: Registry contains container registry image configuration
+                    description: |-
+                      Registry contains container registry image configuration. Accepted but
+                      not acted on in this release.
                     properties:
                       format:
                         default: qcow2
-                        description: Format specifies the expected image format
+                        description: |-
+                          Format specifies the expected image format. Accepted but not acted on in
+                          this release.
                         enum:
                         - qcow2
                         - raw
@@ -582,12 +735,15 @@ spec:
                         - ovf
                         type: string
                       image:
-                        description: Image is the container image reference
+                        description: |-
+                          Image is the container image reference. Accepted but not acted on in this
+                          release.
                         pattern: ^[a-zA-Z0-9._/-]+:[a-zA-Z0-9._-]+$
                         type: string
                       pullSecretRef:
-                        description: PullSecretRef references a secret for pulling
-                          the image
+                        description: |-
+                          PullSecretRef references a secret for pulling the image. Accepted but not
+                          acted on in this release: the Secret is never read.
                         properties:
                           name:
                             description: Name of the referenced object
@@ -601,14 +757,21 @@ spec:
                     - image
                     type: object
                   vsphere:
-                    description: VSphere contains vSphere-specific image configuration
+                    description: |-
+                      VSphere contains vSphere-specific image configuration. It is acted on by
+                      the vSphere provider.
                     properties:
                       checksum:
-                        description: Checksum provides expected checksum for verification
+                        description: |-
+                          Checksum is the expected checksum of the downloaded OVA: the hex digest
+                          only, without an algorithm prefix, compared case-insensitively. It is
+                          checked when the OVA is imported (ovaURL) and a mismatch fails the prepare;
+                          it is not used with templateName. Empty disables the check.
                         type: string
                       checksumType:
                         default: sha256
-                        description: ChecksumType specifies the checksum algorithm
+                        description: 'ChecksumType specifies the checksum algorithm:
+                          md5, sha1, sha256 or sha512.'
                         enum:
                         - md5
                         - sha1
@@ -616,31 +779,50 @@ spec:
                         - sha512
                         type: string
                       contentLibrary:
-                        description: ContentLibrary references a vSphere content library
-                          item
+                        description: |-
+                          ContentLibrary references a vSphere content library item. Accepted but not
+                          acted on in this release: the provider does not resolve content library
+                          items, so a VM cannot be created from an image that has only this source.
+                          Use templateName or ovaURL.
                         properties:
                           item:
-                            description: Item is the name of the library item
+                            description: |-
+                              Item is the name of the library item. Accepted but not acted on in this
+                              release.
                             maxLength: 255
                             type: string
                           library:
-                            description: Library is the name of the content library
+                            description: |-
+                              Library is the name of the content library. Accepted but not acted on in
+                              this release.
                             maxLength: 255
                             type: string
                           version:
-                            description: Version specifies the item version (optional)
+                            description: |-
+                              Version specifies the item version (optional). Accepted but not acted on
+                              in this release.
                             type: string
                         required:
                         - item
                         - library
                         type: object
                       ovaURL:
-                        description: OVAURL provides a URL to an OVA file to import
+                        description: |-
+                          OVAURL is the URL of an OVA file to import as a vSphere template. The
+                          vSphere provider downloads it and imports it when the first VM that uses the
+                          image is created; the template is named after the VMImage's namespace, name
+                          and UID and is reused by later VMs. The scheme must be http or https, and a
+                          bare .ovf is refused when the image is prepared (publish an .ova). The
+                          provider refuses addresses such as loopback and link-local ones. Keep
+                          credentials out of the URL: it is part of the VMImage, which other
+                          namespaces may be able to read (see docs/image-preparation.md).
                         pattern: ^https?://.*\.(ova|ovf)$
                         type: string
                       providerRef:
-                        description: ProviderRef references the vSphere provider for
-                          importing
+                        description: |-
+                          ProviderRef references the vSphere provider for importing. Accepted but not
+                          acted on in this release: an image is prepared through the Provider of the
+                          VirtualMachine that uses it.
                         properties:
                           name:
                             description: Name of the referenced object
@@ -670,7 +852,12 @@ spec:
             - source
             type: object
           status:
-            description: VMImageStatus defines the observed state of VMImage
+            description: |-
+              VMImageStatus defines the observed state of VMImage. It is written only by the
+              operator's VirtualMachine controller, when it prepares the image for a VM, so
+              an image that needs no preparation (it names a template or a libvirt path
+              already on the hypervisor) has no status. size, checksum, format and
+              importProgress are not populated in this release.
             properties:
               availableOn:
                 description: |-
@@ -681,10 +868,15 @@ spec:
                   type: string
                 type: array
               checksum:
-                description: Checksum is the actual checksum of the prepared image
+                description: |-
+                  Checksum is the actual checksum of the prepared image. Not populated in
+                  this release.
                 type: string
               conditions:
-                description: Conditions represent the latest available observations
+                description: |-
+                  Conditions represent the latest available observations. The Ready and
+                  Importing conditions are set; Downloading and Validated are never set in
+                  this release.
                 items:
                   description: Condition contains details for one aspect of the current
                     state of this API Resource.
@@ -741,7 +933,9 @@ spec:
                   type: object
                 type: array
               format:
-                description: Format is the actual format of the prepared image
+                description: |-
+                  Format is the actual format of the prepared image. Not populated in this
+                  release.
                 enum:
                 - qcow2
                 - raw
@@ -753,51 +947,68 @@ spec:
                 - ovf
                 type: string
               importProgress:
-                description: ImportProgress shows the progress of image import operations
+                description: |-
+                  ImportProgress shows the progress of image import operations. Not
+                  populated in this release.
                 properties:
                   eta:
-                    description: ETA is the estimated time to completion
+                    description: ETA is the estimated time to completion. Not populated
+                      in this release.
                     type: string
                   percentage:
-                    description: Percentage is the completion percentage (0-100)
+                    description: |-
+                      Percentage is the completion percentage (0-100). Not populated in this
+                      release.
                     format: int32
                     maximum: 100
                     minimum: 0
                     type: integer
                   startTime:
-                    description: StartTime is when the import started
+                    description: StartTime is when the import started. Not populated
+                      in this release.
                     format: date-time
                     type: string
                   totalBytes:
-                    description: TotalBytes is the total size of the image being imported
+                    description: |-
+                      TotalBytes is the total size of the image being imported. Not populated in
+                      this release.
                     format: int64
                     type: integer
                   transferRate:
-                    description: TransferRate is the current transfer rate in bytes
-                      per second
+                    description: |-
+                      TransferRate is the current transfer rate in bytes per second. Not
+                      populated in this release.
                     format: int64
                     type: integer
                   transferredBytes:
-                    description: TransferredBytes is the number of bytes transferred
-                      so far
+                    description: |-
+                      TransferredBytes is the number of bytes transferred so far. Not populated
+                      in this release.
                     format: int64
                     type: integer
                 type: object
               lastPrepareTime:
-                description: LastPrepareTime records when the image was last prepared
+                description: |-
+                  LastPrepareTime records when a prepare was last started (an asynchronous
+                  prepare in flight) or completed.
                 format: date-time
                 type: string
               message:
-                description: Message provides additional details about the current
-                  state
+                description: |-
+                  Message provides additional details about the current state, for example
+                  why a prepare is held or failed.
                 type: string
               observedGeneration:
-                description: ObservedGeneration reflects the generation observed by
-                  the controller
+                description: |-
+                  ObservedGeneration is not populated in this release; each condition
+                  carries its own observedGeneration.
                 format: int64
                 type: integer
               phase:
-                description: Phase represents the current phase of image preparation
+                description: |-
+                  Phase represents the current phase of image preparation: Pending,
+                  Importing, Ready or Failed. Downloading, Converting and Optimizing are
+                  never set in this release.
                 enum:
                 - Pending
                 - Downloading
@@ -827,17 +1038,23 @@ spec:
                         this provider
                       type: boolean
                     id:
-                      description: ID is the provider-specific image identifier
+                      description: |-
+                        ID is the provider-specific identifier of the prepared image (on vSphere,
+                        the template's absolute inventory path).
                       type: string
                     lastUpdated:
-                      description: LastUpdated is when the status was last updated
+                      description: LastUpdated is when this entry was last updated
                       format: date-time
                       type: string
                     message:
-                      description: Message provides provider-specific status information
+                      description: |-
+                        Message provides provider-specific status information, for example why
+                        the image was held or refused on this Provider
                       type: string
                     path:
-                      description: Path is the provider-specific image path
+                      description: |-
+                        Path is the provider-specific location of the prepared image (on libvirt,
+                        the file in the storage pool).
                       type: string
                     providerUID:
                       description: |-
@@ -859,14 +1076,15 @@ spec:
                       anyOf:
                       - type: integer
                       - type: string
-                      description: Size is the image size on this provider
+                      description: Size is the image size on this provider. Not populated
+                        in this release.
                       pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
                       x-kubernetes-int-or-string: true
                     sourceDigest:
                       description: |-
                         SourceDigest is the digest of the spec.source this entry was prepared
                         for ("sha256:" and 64 lowercase hex digits), as confirmed by the
-                        provider's stamp on the prepared artifact (ADR-0009). A VirtualMachine is
+                        provider's stamp on the prepared artifact. A VirtualMachine is
                         created from the entry only while it equals the digest of the current
                         spec.source; an entry without it (recorded by an earlier release) or with
                         another digest is not used, and the image is prepared again for the
@@ -899,13 +1117,17 @@ spec:
                   re-validated through its Provider before a VM is created from it.
                 type: object
               ready:
-                description: Ready indicates if the image is ready for use
+                description: |-
+                  Ready is true once the image is prepared on at least one Provider (see
+                  providerStatus for the state on each).
                 type: boolean
               size:
                 anyOf:
                 - type: integer
                 - type: string
-                description: Size is the size of the prepared image
+                description: |-
+                  Size is the size of the prepared image. Not populated in this release, so
+                  the Size column of kubectl get is empty.
                 pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
                 x-kubernetes-int-or-string: true
             type: object

@@ -58,7 +58,9 @@ spec:
             description: ProviderSpec defines the desired state of Provider
             properties:
               connectionPooling:
-                description: ConnectionPooling defines connection pooling settings
+                description: |-
+                  ConnectionPooling defines connection pooling settings. Accepted but not
+                  acted on in this release.
                 properties:
                   connectionTimeout:
                     default: 30s
@@ -149,8 +151,10 @@ spec:
                 type: object
                 x-kubernetes-map-type: atomic
               credentialSecretRef:
-                description: CredentialSecretRef references the Secret containing
-                  credentials
+                description: |-
+                  CredentialSecretRef references the Secret containing the credentials the
+                  provider uses to reach the hypervisor. The manager mounts it into the
+                  provider pod; the provider reads it from the mounted files.
                 properties:
                   name:
                     description: Name of the referenced object
@@ -167,7 +171,12 @@ spec:
                 - name
                 type: object
               defaults:
-                description: Defaults provides default placement settings
+                description: |-
+                  Defaults provides default placement settings. Only the vSphere provider
+                  uses them, and only datastore, storagePod, cluster and folder are passed to
+                  it (as PROVIDER_DEFAULT_* environment variables); resourcePool and network
+                  are accepted but not acted on in this release. libvirt and Proxmox ignore
+                  this block.
                 properties:
                   cluster:
                     description: Cluster specifies the default cluster
@@ -200,22 +209,26 @@ spec:
                 type: object
               endpoint:
                 description: |-
-                  Endpoint is the provider endpoint URI
-                  Supports multiple protocols: HTTP(S), TCP, gRPC for general providers
-                  and LibVirt-specific schemes: qemu://, qemu+ssh://, qemu+tcp://, qemu+tls://
+                  Endpoint is the URI of the hypervisor the provider manages: for vSphere the
+                  vCenter SDK URL (https://vcenter.example.com/sdk), for Proxmox the API URL
+                  (https://pve.example.com:8006), for libvirt a connection URI (qemu://,
+                  qemu+ssh://, qemu+tcp:// or qemu+tls://). The schema also accepts
+                  http(s)://, tcp:// and grpc:// URIs. The manager passes it to the provider
+                  pod as PROVIDER_ENDPOINT. For a clustered libvirt Provider (topology:
+                  cluster) the hosts are given by Host.spec.endpoint instead.
                 pattern: ^((https?://[a-zA-Z0-9.-]+(:[0-9]+)?(/.*)?|(tcp|grpc)://[a-zA-Z0-9.-]+:[0-9]+(/.*)?)|qemu(\+ssh|\+tcp|\+tls)?://([a-zA-Z0-9@.-]+(:[0-9]+)?)?(/.*))$
                 type: string
               healthCheck:
-                description: HealthCheck defines health checking configuration
+                description: |-
+                  HealthCheck defines health checking configuration. Accepted but not acted
+                  on in this release: status.healthy is true while the provider Deployment
+                  has a ready replica, whatever these settings say.
                 properties:
                   enabled:
                     default: true
                     description: |-
-                      Enabled indicates whether health checking is enabled.
-
-                      Defaults to true. Deliberately NOT `omitempty` — a defaulted bool with
-                      omitempty has its explicit `false` dropped and re-defaulted to true on
-                      the next write (see ProviderTLSSpec.Enabled for the full rationale).
+                      Enabled indicates whether health checking is enabled. Defaults to true.
+                      Accepted but not acted on in this release.
                     type: boolean
                   failureThreshold:
                     default: 3
@@ -244,11 +257,26 @@ spec:
                 type: object
               insecureSkipVerify:
                 default: false
-                description: InsecureSkipVerify disables TLS verification (deprecated,
-                  use runtime.service.tls.insecureSkipVerify)
+                description: |-
+                  InsecureSkipVerify makes the provider pod skip verification of the TLS
+                  certificate of the hypervisor management endpoint (vCenter for vSphere, the
+                  Proxmox VE API for Proxmox). The manager passes it to the provider pod as
+                  the TLS_INSECURE_SKIP_VERIFY environment variable
+                  (internal/controller/provider_controller.go), and only the vSphere and
+                  Proxmox providers read it; the libvirt provider ignores it (for libvirt SSH
+                  hosts see the LIBVIRT_INSECURE_SKIP_HOST_KEY_VERIFICATION environment
+                  variable). Defaults to false.
+
+                  It is not the same setting as spec.runtime.service.tls.insecureSkipVerify,
+                  which controls the manager's verification of the provider's own gRPC server
+                  certificate; setting one does not affect the other. It is an insecure
+                  escape hatch: with it set, a network attacker can impersonate the
+                  hypervisor endpoint and capture the credentials the provider sends to it.
                 type: boolean
               rateLimit:
-                description: RateLimit configures API rate limiting
+                description: |-
+                  RateLimit configures API rate limiting. Accepted but not acted on in this
+                  release.
                 properties:
                   burst:
                     default: 20
@@ -1330,8 +1358,10 @@ spec:
                     - IfNotPresent
                     type: string
                   imagePullSecrets:
-                    description: ImagePullSecrets are references to secrets for pulling
-                      images
+                    description: |-
+                      ImagePullSecrets are references to secrets for pulling images. Accepted but
+                      not acted on in this release: the manager does not add them to the provider
+                      pod.
                     items:
                       description: |-
                         LocalObjectReference contains enough information to let you locate the
@@ -1351,8 +1381,10 @@ spec:
                     maxItems: 10
                     type: array
                   livenessProbe:
-                    description: LivenessProbe defines the liveness probe for provider
-                      pods
+                    description: |-
+                      LivenessProbe defines the liveness probe for provider pods. Accepted but not
+                      acted on in this release: the manager always uses its built-in probe (HTTP
+                      GET /healthz on port 8080).
                     properties:
                       exec:
                         description: Exec specifies a command to execute in the container.
@@ -1533,8 +1565,10 @@ spec:
                       the pod to fit on a node
                     type: object
                   readinessProbe:
-                    description: ReadinessProbe defines the readiness probe for provider
-                      pods
+                    description: |-
+                      ReadinessProbe defines the readiness probe for provider pods. Accepted but
+                      not acted on in this release: the manager always uses its built-in probe
+                      (HTTP GET /healthz on port 8080).
                     properties:
                       exec:
                         description: Exec specifies a command to execute in the container.
@@ -1959,28 +1993,45 @@ spec:
                         minimum: 1024
                         type: integer
                       tls:
-                        description: TLS defines TLS configuration for the service
+                        description: |-
+                          TLS defines TLS configuration for the service. Leaving it unset is not an
+                          implicit plaintext choice: a Provider without a tls block is not deployed
+                          (condition TLSConfigured=False, reason TLSBlockMissing). Set tls.enabled to
+                          false to opt out of TLS explicitly.
                         properties:
                           enabled:
                             default: true
                             description: |-
-                              Enabled determines if TLS is enabled for provider communication.
-
-                              Defaults to true. Deliberately NOT `omitempty`: this field has a default
-                              of true, so omitempty drops an explicit `false` when the object is
-                              re-serialized (e.g. by a controller Update), letting the apiserver
-                              re-apply the default and silently flip tls.enabled false→true — which
-                              then trips the TLS posture gate (enabled=true + no secretRef → runtime
-                              Failed). Always serializing it keeps an explicit plaintext opt-out durable.
+                              Enabled determines if TLS is enabled for the connection between the
+                              manager and the provider pod. Defaults to true. With true, secretRef is
+                              required: a Provider with tls.enabled=true and no secretRef is not
+                              deployed (condition TLSConfigured=False, reason SecretRefMissing). Setting
+                              it to false is an explicit opt-out that runs the provider gRPC server
+                              without TLS, recorded as TLSConfigured=False, reason ExplicitlyDisabled.
                             type: boolean
                           insecureSkipVerify:
                             default: false
-                            description: InsecureSkipVerify disables TLS certificate
-                              verification
+                            description: |-
+                              InsecureSkipVerify makes the manager skip verification of the provider's
+                              gRPC server certificate when it connects to the provider pod (the manager
+                              still presents its client certificate). It is read only by the manager,
+                              when it builds its TLS client config for this Provider from SecretRef
+                              (internal/runtime/remote/resolver.go), and only while tls.enabled is true.
+                              It does not change anything on the provider pod and has no effect on the
+                              connection from the provider to the hypervisor; that is the separate
+                              spec.insecureSkipVerify. Defaults to false.
+
+                              This is an insecure escape hatch for first bootstrap and labs: with it the
+                              manager cannot tell the real provider from an impostor, which defeats the
+                              server-authentication half of mutual TLS. The manager logs a warning on
+                              every reconcile while it is true.
                             type: boolean
                           secretRef:
-                            description: SecretRef references a secret containing
-                              tls.crt, tls.key, and ca.crt
+                            description: |-
+                              SecretRef references a Secret in the Provider's namespace containing
+                              tls.crt, tls.key and ca.crt. The manager presents tls.crt/tls.key as its
+                              client certificate and verifies the provider's server certificate against
+                              ca.crt; the provider pod mounts the same Secret.
                             properties:
                               name:
                                 default: ""
@@ -2042,23 +2093,18 @@ spec:
               topology:
                 default: single
                 description: |-
-                  Topology selects the provider's deployment topology (ADR-0007 D9). It is a
-                  string enum, not a bool, so a future third topology mode is a purely
-                  additive enum value (settled 2026-09-21):
-                    - "single" (default): one gRPC process bound to one host. This is today's
-                      behavior and stays byte-for-byte unchanged — no scheduler, no host
-                      inventory, no projected host Secret.
+                  Topology selects the provider's deployment topology:
+                    - "single" (default): one gRPC process bound to one host. There is no
+                      scheduler, no host inventory and no projected host Secret.
                     - "cluster": the provider fronts N bare hosts registered as Host CRs under
-                      a HostPool. The operator owns inventory/placement/migration and renders
-                      the pool's Host CRs into a versioned-schema Secret mounted into the
-                      provider pod (ADR-0007 D1/D3); the provider reads that mounted file,
-                      never the Kubernetes API (the #297 no-API-access invariant).
-                  Only meaningful for hypervisors with no native cluster manager (libvirt
-                  first); a validating webhook (a later ADR-0007 P1 PR) rejects "cluster" on
-                  type: vsphere|proxmox (ADR-0007 D2). Defaulting "" to "single" keeps every
-                  existing single-host Provider byte-for-byte unchanged.
+                      a HostPool. The operator owns inventory and placement, and renders the
+                      pool's Host CRs into a Secret mounted into the provider pod; the
+                      provider reads that mounted file, never the Kubernetes API.
+                  Only meaningful for hypervisors with no native cluster manager: the
+                  validating webhook accepts "cluster" for type libvirt only and rejects it
+                  for the other types. An empty value is defaulted to "single".
 
-                  Topology is IMMUTABLE once set (ADR-0007 Addendum A): VMs record where they
+                  Topology is IMMUTABLE once set: VMs record where they
                   run (status.placement) under one topology, and every per-VM call is routed
                   and owner-checked by it, so flipping it would send a placed VM's calls down
                   the wrong path. To change it, create a new Provider. The apiserver compares
@@ -2125,7 +2171,9 @@ spec:
                     type: string
                 type: object
               capabilities:
-                description: Capabilities lists the provider's supported capabilities
+                description: |-
+                  Capabilities lists the provider's supported capabilities. Not populated in
+                  this release; see reportedCapabilities.
                 items:
                   description: ProviderCapability represents a provider capability
                   enum:
@@ -2200,15 +2248,20 @@ spec:
                   type: object
                 type: array
               connectedVMs:
-                description: ConnectedVMs is the number of VMs currently managed by
-                  this provider
+                description: |-
+                  ConnectedVMs is the number of VirtualMachines, in any namespace, whose
+                  spec.providerRef names this Provider.
                 format: int32
                 type: integer
               healthy:
-                description: Healthy indicates if the provider is healthy
+                description: |-
+                  Healthy is true while the provider Deployment has at least one ready
+                  replica (the ProviderAvailable condition is True).
                 type: boolean
               lastHealthCheck:
-                description: LastHealthCheck records the last health check time
+                description: |-
+                  LastHealthCheck is the time of the last reconcile that found the provider
+                  healthy.
                 format: date-time
                 type: string
               observedGeneration:
@@ -2219,10 +2272,10 @@ spec:
               reportedCapabilities:
                 description: |-
                   ReportedCapabilities is the provider's self-reported capability set,
-                  fetched from the provider GetCapabilities RPC (issue #176). It reflects
-                  what the running provider advertises and is consumed by the manager to
-                  surface features and (when capability enforcement is enabled) to gate
-                  capability-dependent operations.
+                  fetched from the provider GetCapabilities RPC. It reflects what the running
+                  provider advertises and is consumed by the manager to surface features and
+                  (when capability enforcement is enabled) to gate capability-dependent
+                  operations.
                 properties:
                   supportedDiskTypes:
                     description: SupportedDiskTypes lists supported disk formats.
@@ -2233,7 +2286,7 @@ spec:
                     description: |-
                       SupportedExportBackends lists the storage backends the provider can export
                       disks to (e.g. "pvc", "nfs", "s3"). Empty/absent means pvc-only, the
-                      pre-ADR-0006 default (ADR-0006 Slice 0).
+                      behavior of a provider that predates the other backends.
                     items:
                       type: string
                     type: array
@@ -2245,8 +2298,7 @@ spec:
                   supportedImportBackends:
                     description: |-
                       SupportedImportBackends lists the storage backends the provider can import
-                      disks from (e.g. "pvc", "nfs", "s3"). Empty/absent means pvc-only
-                      (ADR-0006 Slice 0).
+                      disks from (e.g. "pvc", "nfs", "s3"). Empty/absent means pvc-only.
                     items:
                       type: string
                     type: array
@@ -2264,7 +2316,7 @@ spec:
                     description: |-
                       SupportedTransferModes lists the disk-transfer modes the provider supports
                       (e.g. "relay", "direct"). Empty/absent means relay-only, the pod-side path
-                      that predates ADR-0006 (ADR-0006 Slice 0).
+                      through the provider pod.
                     items:
                       type: string
                     type: array
@@ -2298,8 +2350,8 @@ spec:
                     description: |-
                       SupportsImageArtifactIdentity reports that the provider's image prepare
                       names, stamps and verifies each prepared-image artifact by the VMImage's
-                      UID and source digest, and never reuses an artifact by bare name
-                      (ADR-0009). Import-style images are not prepared through a provider that
+                      UID and source digest, and never reuses an artifact by bare name.
+                      Import-style images are not prepared through a provider that
                       supports image import but does not report this: VM creates wait until
                       the provider is upgraded.
                     type: boolean
@@ -2324,7 +2376,9 @@ spec:
                     type: boolean
                 type: object
               resourceUsage:
-                description: ResourceUsage provides resource usage statistics
+                description: |-
+                  ResourceUsage provides resource usage statistics. Not populated in this
+                  release.
                 properties:
                   cpu:
                     description: CPU usage statistics
@@ -2411,8 +2465,9 @@ spec:
                 description: Runtime provides runtime status information
                 properties:
                   availableReplicas:
-                    description: AvailableReplicas is the number of available provider
-                      replicas
+                    description: |-
+                      AvailableReplicas is the number of available provider replicas. Not
+                      populated in this release; see the provider Deployment's status instead.
                     format: int32
                     type: integer
                   endpoint:
@@ -2438,7 +2493,9 @@ spec:
                     - Failed
                     type: string
                   readyReplicas:
-                    description: ReadyReplicas is the number of ready provider replicas
+                    description: |-
+                      ReadyReplicas is the number of ready provider replicas. Not populated in
+                      this release; see the provider Deployment's status instead.
                     format: int32
                     type: integer
                   serviceRef:
@@ -2458,7 +2515,8 @@ spec:
                     x-kubernetes-map-type: atomic
                 type: object
               version:
-                description: Version reports the provider version
+                description: Version reports the provider version. Not populated in
+                  this release.
                 type: string
             type: object
         type: object

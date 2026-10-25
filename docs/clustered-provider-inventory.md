@@ -152,7 +152,7 @@ right now*.
 |-------|---------|
 | `providerRef` | The clustered `Provider` that executes on this host. **Namespace-local** (`name` only): the Host must be in the Provider's namespace. |
 | `poolRef` | The `HostPool` this host joins (membership is declared by the host, ADR-0007 D3). |
-| `endpoint` | Connection URI, validated at admission (see below). Only `qemu+ssh://[user@]host[:port]/system`, `qemu+ssh://[user@]host[:port]/session`, or (future host agent) `grpc://host:port`. |
+| `endpoint` | Connection URI, validated at admission (see below). Only `qemu+ssh://[user@]host[:port]/system`, `qemu+ssh://[user@]host[:port]/session`, or `grpc://host:port` (passes validation, but the libvirt provider connects with `qemu+ssh://` only, so such a host never becomes `Ready`). |
 | `credentialSecretRef` | Optional per-host credential override; defaults to the Provider's. **Namespace-local**: the Secret must be in the Host's (= the Provider's) namespace. |
 | `labels` | Placement facts consumed as **hard scheduling constraints** (ADR-0007 D6): storage-pool visibility, network/bridge visibility, zone/rack. |
 | `schedulable` | Defaults `true`; set `false` to cordon (no new placement, existing VMs stay). |
@@ -200,8 +200,13 @@ cannot bypass admission. Accepted:
 ```
 qemu+ssh://[user@]host[:port]/system
 qemu+ssh://[user@]host[:port]/session
-grpc://host:port                          # reserved for a future host agent
+grpc://host:port                          # passes validation; not connectable by the libvirt provider
 ```
+
+The libvirt provider, the only clustered provider type, connects to a host over
+SSH and accepts the `qemu+ssh://` form only. A `grpc://` endpoint satisfies the
+schema, but the provider refuses to connect to it, so that `Host` never becomes
+`Ready` and is never a placement target; use `qemu+ssh://`.
 
 `user` is `[A-Za-z0-9._-]+`; `host` is a DNS name, an IPv4 address, or a
 bracketed IPv6 address (`[2001:db8::1]`). Query strings, fragments,
