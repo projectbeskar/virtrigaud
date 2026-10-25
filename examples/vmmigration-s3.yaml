@@ -9,9 +9,9 @@
 # Direction scope: all three hypervisors (vSphere, libvirt, Proxmox VE) are now
 # validated as both SOURCE and TARGET over S3 in any direction (ADR-0006 Slices
 # 1–3). This example shows vSphere → libvirt; see vmmigration-proxmox-s3.yaml for
-# a Proxmox direction. The NFS backend and the `direct` transfer mode are later
-# slices and are rejected with an actionable, ADR-referencing message at the
-# Validating phase.
+# a Proxmox direction and vmmigration-nfs.yaml for the NFS staging backend. The
+# `direct` transfer mode is not implemented and is rejected with an actionable
+# message at the Validating phase.
 #
 # Transfer mode: relay (the universal floor — the provider pod is the S3 client,
 # so backend credentials never leave the pod). `auto` resolves to `relay` here.
@@ -60,8 +60,9 @@ spec:
     networks:
       - name: production-network
 
-  # S3-compatible object storage staging. The lab target here is rustfs over
-  # plaintext HTTP with path-style addressing; swap for AWS S3 / MinIO / Ceph RGW
+  # S3-compatible object storage staging. This example uses
+  # plaintext HTTP with path-style addressing (typical of a self-hosted endpoint);
+  # swap in AWS S3 / MinIO / Ceph RGW
   # as needed. The provider pods must be able to reach this endpoint.
   storage:
     type: s3
@@ -71,7 +72,7 @@ spec:
       endpoint: http://s3.example.com:9000   # http:// ⇒ plaintext; omit for AWS
       region: us-east-1
       prefix: prod-app-server/    # object key prefix under the bucket
-      usePathStyle: true          # true for rustfs/MinIO/Ceph RGW; false for AWS
+      usePathStyle: true          # true for MinIO/Ceph RGW; false for AWS
       credentialsSecretRef:
         name: s3-migration-credentials
 

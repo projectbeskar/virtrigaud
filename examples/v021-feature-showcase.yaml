@@ -16,10 +16,18 @@ spec:
   insecureSkipVerify: false
   runtime:
     mode: Remote
-    image: "ghcr.io/projectbeskar/virtrigaud/provider-vsphere:v0.2.1"
+    image: "ghcr.io/projectbeskar/virtrigaud/provider-vsphere:v0.4.0"
     replicas: 1
     service:
       port: 9090
+      # A Provider with no tls block is not deployed (TLSConfigured=False, reason
+      # TLSBlockMissing). The Secret holds tls.crt, tls.key and ca.crt:
+      #   kubectl create secret generic vsphere-v021-demo-tls --from-file=tls.crt --from-file=tls.key --from-file=ca.crt
+      # For a plaintext lab only, use `enabled: false` and drop secretRef.
+      tls:
+        enabled: true
+        secretRef:
+          name: vsphere-v021-demo-tls
   defaults:
     datastore: nvme-datastore
     cluster: prod-cluster
@@ -171,44 +179,6 @@ spec:
   
   powerState: "On"
   
-  # v0.2.1: Enhanced lifecycle management with graceful shutdown
-  lifecycle:
-    gracefulShutdownTimeout: "180s"  # 3 minutes for complex applications
-    
-    postStart:
-      exec:
-        command:
-        - "/bin/bash"
-        - "-c"
-        - |
-          # v0.2.1 post-start initialization
-          echo "$(date): VM started with v0.2.1 features" >> /var/log/virtrigaud.log
-          echo "Hardware Version: $(vmware-toolbox-cmd stat raw text session)" >> /var/log/virtrigaud.log
-    
-    preStop:
-      exec:
-        command:
-        - "/bin/bash"
-        - "-c"
-        - |
-          # v0.2.1 graceful shutdown sequence
-          echo "$(date): Starting graceful shutdown with v0.2.1" >> /var/log/virtrigaud.log
-          
-          # Stop application services gracefully
-          systemctl stop nginx || true
-          systemctl stop postgresql || true
-          systemctl stop redis || true
-          
-          # Sync filesystems
-          sync
-          
-          # Wait for processes to finish
-          sleep 10
-          
-          # Final sync
-          sync
-          echo "$(date): Graceful shutdown sequence complete" >> /var/log/virtrigaud.log
-  
   userData:
     cloudInit:
       inline: |
@@ -278,11 +248,10 @@ spec:
 ---
 # Example commands for testing v0.2.1 features:
 
-# 1. Check VM hardware version (should be 21):
-# kubectl exec -it v021-feature-demo -- vmware-toolbox-cmd stat raw text session
+# 1. Check VM hardware version (should be 21): in vCenter, VM > Compatibility; or,
+#    from a shell on the guest, `vmware-toolbox-cmd stat raw text session`.
 
-# 2. Verify disk sizes are correct:
-# kubectl exec -it v021-feature-demo -- df -h
+# 2. Verify disk sizes are correct: from a shell on the guest, `df -h`.
 
 # 3. Test graceful shutdown (v0.2.1 feature):
 # kubectl patch virtualmachine v021-feature-demo --type='merge' -p='{"spec":{"powerState":"OffGraceful"}}'
@@ -290,11 +259,8 @@ spec:
 # 4. Monitor shutdown process:
 # kubectl logs -f deployment/virtrigaud-provider-default-vsphere-v021-demo
 
-# 5. Check shutdown logs in VM:
-# kubectl exec -it v021-feature-demo -- tail -f /var/log/virtrigaud.log
-
-# 6. Restart VM:
+# 5. Restart VM:
 # kubectl patch virtualmachine v021-feature-demo --type='merge' -p='{"spec":{"powerState":"On"}}'
 
-# 7. Verify all v0.2.1 features working:
+# 6. Verify all v0.2.1 features working:
 # kubectl describe virtualmachine v021-feature-demo

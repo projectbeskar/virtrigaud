@@ -23,19 +23,6 @@ spec:
       sizeGiB: 50
       type: thin
   
-  # v0.2.1: Enhanced lifecycle management
-  lifecycle:
-    gracefulShutdownTimeout: "60s"  # 1 minute for simple applications
-    preStop:
-      exec:
-        command:
-        - "/bin/bash"
-        - "-c"
-        - |
-          # Simple graceful shutdown
-          systemctl stop nginx || true
-          sync
-  
   userData:
     cloudInit:
       inline: |

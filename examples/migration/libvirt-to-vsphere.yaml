@@ -98,8 +98,9 @@ spec:
         networkRef:
           name: vm-network
 
-  # S3-compatible object storage staging. The lab target here is rustfs over
-  # plaintext HTTP with path-style addressing; swap for AWS S3 / MinIO / Ceph RGW
+  # S3-compatible object storage staging. This example uses
+  # plaintext HTTP with path-style addressing (typical of a self-hosted endpoint);
+  # swap in AWS S3 / MinIO / Ceph RGW
   # as needed. Both provider pods must be able to reach this endpoint.
   storage:
     type: s3
@@ -109,7 +110,7 @@ spec:
       endpoint: http://s3.example.com:9000   # http:// ⇒ plaintext; omit for AWS
       region: us-east-1
       prefix: ubuntu-server/        # object key prefix under the bucket
-      usePathStyle: true            # true for rustfs/MinIO/Ceph RGW; false for AWS
+      usePathStyle: true            # true for MinIO/Ceph RGW; false for AWS
       credentialsSecretRef:
         name: s3-migration-credentials
 

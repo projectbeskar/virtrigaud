@@ -69,7 +69,7 @@ spec:
     networks:
       - name: production-network
 
-  # S3-compatible object storage staging. Swap rustfs for AWS S3 / MinIO / Ceph
+  # S3-compatible object storage staging. Swap in AWS S3 / MinIO / Ceph
   # RGW as needed; the provider pods must be able to reach this endpoint.
   storage:
     type: s3
@@ -79,7 +79,7 @@ spec:
       endpoint: http://s3.example.com:9000   # http:// ⇒ plaintext; omit for AWS
       region: us-east-1
       prefix: prod-app-server/
-      usePathStyle: true              # true for rustfs/MinIO/Ceph RGW; false for AWS
+      usePathStyle: true              # true for MinIO/Ceph RGW; false for AWS
       credentialsSecretRef:
         name: s3-migration-credentials
 

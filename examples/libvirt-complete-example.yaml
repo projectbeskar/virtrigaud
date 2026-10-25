@@ -52,9 +52,17 @@ spec:
     burst: 10
   runtime:
     mode: Remote
-    image: "ghcr.io/projectbeskar/virtrigaud/provider-libvirt:v0.2.3"
+    image: "ghcr.io/projectbeskar/virtrigaud/provider-libvirt:v0.4.0"
     service:
       port: 9090
+      # A Provider with no tls block is not deployed (TLSConfigured=False, reason
+      # TLSBlockMissing). The Secret holds tls.crt, tls.key and ca.crt:
+      #   kubectl create secret generic libvirt-local-tls --from-file=tls.crt --from-file=tls.key --from-file=ca.crt
+      # For a plaintext lab only, use `enabled: false` and drop secretRef.
+      tls:
+        enabled: true
+        secretRef:
+          name: libvirt-local-tls
     # Directories a VMImage `source.libvirt.path` may point into (image files
     # must sit DIRECTLY in one of them; the path is resolved on the host, so
     # symlinks cannot escape). Comma- or colon-separated; the default when unset
