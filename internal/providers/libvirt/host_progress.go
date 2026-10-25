@@ -257,6 +257,8 @@ var readOnlyHostScripts = map[string]bool{
 	pathPresentScript:   true,
 	diskDirModeScript:   true,
 	stagedHeadScript:    true,
+	// The V12 overlay probe of a snapshot create (snapshot_overlay_collision.go).
+	overlayCollisionScript: true,
 }
 
 // hostArgvMayWrite reports whether the host command argv may change the host.

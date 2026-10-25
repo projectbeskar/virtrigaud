@@ -196,11 +196,20 @@ type VirshError struct {
 	// classifyNonTransientSSH. May be nil (e.g. a plain non-zero remote exit
 	// has no more specific cause than the VirshError itself).
 	Cause error
+	// redactions are the literal texts the command's context carried
+	// (withLogRedactions): Error never shows them.
+	redactions []string
 }
 
+// Error renders the failure with every URL in the command line and its output
+// redacted, and the literal texts its command's context named
+// (redactCommandText, withLogRedactions, R28): the text reaches the provider
+// log through every caller that logs the error. The fields keep the original
+// text.
 func (e *VirshError) Error() string {
+	r := func(text string) string { return redactText(redactCommandText(text), e.redactions...) }
 	return fmt.Sprintf("virsh command '%s' failed (exit code %d): stderr=%s, stdout=%s",
-		e.Command, e.ExitCode, e.Stderr, e.Stdout)
+		r(e.Command), e.ExitCode, r(e.Stderr), r(e.Stdout))
 }
 
 // Unwrap returns the original error behind this VirshError, if any, so
@@ -826,7 +835,7 @@ func (v *VirshProvider) runLocalStdin(ctx context.Context, argv []string, stdin 
 	cmd.Stderr = &stderr
 
 	command := strings.Join(argv, " ")
-	log.Printf("DEBUG Executing: %s", command)
+	log.Printf("DEBUG Executing: %s", redactForLog(ctx, command))
 
 	// A local process starts next: a pending write counts as sent
 	// (host_progress.go).
@@ -845,15 +854,16 @@ func (v *VirshProvider) runLocalStdin(ctx context.Context, argv []string, stdin 
 	if runErr != nil {
 		logCommandFailure(ctx, command, result.ExitCode, duration, result.Stderr)
 		return result, &VirshError{
-			Command:  command,
-			ExitCode: result.ExitCode,
-			Stderr:   result.Stderr,
-			Stdout:   result.Stdout,
-			Cause:    runErr,
+			Command:    command,
+			ExitCode:   result.ExitCode,
+			Stderr:     result.Stderr,
+			Stdout:     result.Stdout,
+			Cause:      runErr,
+			redactions: logRedactionsOf(ctx),
 		}
 	}
 
-	log.Printf("DEBUG Command successful: %s (duration: %v)", command, duration)
+	log.Printf("DEBUG Command successful: %s (duration: %v)", redactForLog(ctx, command), duration)
 	return result, nil
 }
 

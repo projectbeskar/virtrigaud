@@ -308,7 +308,9 @@ type VMSnapshotOperation struct {
 type SnapshotRevertPhase string
 
 const (
-	// SnapshotRevertPhasePending: the revert is requested but not sent; the
+	// SnapshotRevertPhasePending: the revert is requested and not done: not
+	// sent yet, or sent and answered by the provider that it did not perform
+	// it (reason RevertNotPerformed: it is sent again after a backoff). The
 	// SnapshotReverted condition's reason says what it waits for.
 	SnapshotRevertPhasePending SnapshotRevertPhase = "Pending"
 	// SnapshotRevertPhaseReverting: the revert was sent (recorded before the
@@ -346,9 +348,10 @@ type SnapshotRevertStatus struct {
 	// +kubebuilder:validation:MaxLength=512
 	TaskRef string `json:"taskRef,omitempty"`
 
-	// Attempts counts the SnapshotRevert calls sent for this request: more
-	// than one only when an earlier call's outcome was not known (a lost
-	// answer, a deadline) and the call was sent again on the powered-off VM.
+	// Attempts counts the SnapshotRevert calls sent for this request since
+	// the provider last answered that it did not perform one: more than one
+	// only when an earlier call's outcome was not known (a lost answer, a
+	// deadline) and the call was sent again on the powered-off VM.
 	// +optional
 	// +kubebuilder:validation:Minimum=0
 	Attempts int32 `json:"attempts,omitempty"`
@@ -947,6 +950,11 @@ const (
 	// SnapshotRevertReasonRevertFailed: the provider refused or failed the
 	// revert; remove spec.snapshot.revertToRef and set it again to retry.
 	SnapshotRevertReasonRevertFailed = "RevertFailed"
+	// SnapshotRevertReasonNotPerformed: the provider answered that it did not
+	// perform the revert (nothing was changed, e.g. a check on the host could
+	// not run); it is sent again after a backoff while the VM stays powered
+	// off.
+	SnapshotRevertReasonNotPerformed = "RevertNotPerformed"
 )
 
 //+kubebuilder:object:root=true

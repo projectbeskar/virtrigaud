@@ -51,12 +51,13 @@ Reverting`, `attempts` and `attemptTime`. See
   error the provider did not classify — **keeps the marker** and is handled like a
   lost result, below. The object is never failed for it. Through a clustered
   Provider, a `SnapshotCreate` answered "retry" is handled the same way. A
-  `VMSnapshot`'s `SnapshotCreate` that a clustered Provider answers it did not
+  `VMSnapshot`'s `SnapshotCreate` that the provider answers it did not
   perform (`HOST_UNAVAILABLE`, `VM_DISK_CHECK_FAILED`, `VM_OPERATION_FAILED`
-  "not performed") is not failed either: its marker is removed (the attempt is
+  "not performed", or a request that never reached it; a clustered Provider since
+  v0.4.0, a single-host one too since v0.4.1) is not failed either: its marker is removed (the attempt is
   closed, so it never counts toward the re-send cap below), the `VMSnapshot`
   shows `Ready=False/ProviderError`, and the create is sent again as a new
-  attempt, with the same request token, after 1 minute, doubling for each consecutive such answer up to 10 minutes
+  attempt (with the same request token), after 1 minute, doubling for each consecutive such answer up to 10 minutes
   (in the manager's memory per `VMSnapshot`; any other answer, or a manager
   restart, starts it again at 1 minute). A reconcile before that wait has
   passed sends nothing. A
@@ -88,7 +89,7 @@ it first re-reads the object from the API server.
 | `SnapshotCreate` (`VMMigration` and `VMSnapshot`) | The VM is on a **clustered** Provider (`topology: cluster`). The routed create records the request token (the `VMSnapshot` UID, or the migration UID and attempt) with the snapshot. A re-send returns that snapshot, but only once no job runs on the domain. libvirt lists a snapshot as soon as its job starts, before memory and disks are written, so until then the answer is "retry". For a `VMMigration`, the marker must belong to the current attempt. Re-sends are at least one minute apart. | Held: `Ready=False`, reason `SnapshotOutcomeUnknown` |
 | `ExportDisk` | The source Provider lists the migration's staging backend in the capability `resend_safe_export_backends`, **and** 35 minutes have passed since the marker. The manager's deadline on an export is 30 minutes, so the earlier call has ended by then. Until then, the migration waits with `Ready=False/ExportOutcomeUnknown` and a message saying it will be re-sent. | Held: `Ready=False/ExportOutcomeUnknown` |
 | `ImportDisk` | The target Provider lists the backend in `resend_safe_import_backends`, and 35 minutes have passed. | Held: `Ready=False/ImportOutcomeUnknown` |
-| `SnapshotRevert` (`VirtualMachine`) | On any provider, because a VM that stayed off reaches the same state with a second revert: a fresh `Describe` reports the VM `Off`, `spec.powerState` is still `Off` or `OffGraceful`, the `VMSnapshot` is the same one (same UID), the Provider still reports snapshot support, and 6 minutes have passed since the last attempt, doubling to 30 (the manager's deadline on `SnapshotRevert` is 5 minutes). At most 5 calls. An unknown outcome includes a clustered `HOST_CONNECTION_LOST`. No operator confirmation is needed or read. | `status.snapshotRevert.phase: Failed` (`RevertFailed`, or `Unsupported` when the Provider stopped reporting snapshot support), never sent again for the request: when the VM is seen in any other power state or its spec asks for it to run (it may have run since the attempt), when the `VMSnapshot` was deleted, or after 5 calls |
+| `SnapshotRevert` (`VirtualMachine`) | On any provider, because a VM that stayed off reaches the same state with a second revert: a fresh `Describe` reports the VM `Off`, `spec.powerState` is still `Off` or `OffGraceful`, the `VMSnapshot` is the same one (same UID), the Provider still reports snapshot support, and 6 minutes have passed since the last attempt, doubling to 30 (the manager's deadline on `SnapshotRevert` is 5 minutes). At most 5 calls. An unknown outcome includes a clustered `HOST_CONNECTION_LOST`. An answer that the provider did not perform the revert (`contracts.IsNothingDone`) is not an unknown outcome: from v0.4.1 the request goes back to `Pending` (`RevertNotPerformed`) and is sent again after 1 minute, doubling to 10, without counting toward the 5 calls ([`vm-snapshot-revert.md`](vm-snapshot-revert.md#asynchronous-reverts-and-unknown-outcomes)). No operator confirmation is needed or read. | `status.snapshotRevert.phase: Failed` (`RevertFailed`, or `Unsupported` when the Provider stopped reporting snapshot support), never sent again for the request: when the VM is seen in any other power state or its spec asks for it to run (it may have run since the attempt), when the `VMSnapshot` was deleted, or after 5 calls |
 
 ### Why each provider answers the way it does
 
@@ -167,7 +168,7 @@ constant status text (the detail is in the provider log, never in a status or ev
 
 | Call | Definite (the attempt fails, the marker is cleared) | Unknown (the marker is kept) |
 |---|---|---|
-| `SnapshotCreate` | The domain's state, disk dependencies, snapshot names or disk sources cannot be read (not performed); the domain does not exist (`NotFound`); the snapshot name is already taken (`AlreadyExists`, nothing is created); the disk is a linked clone's backing file (`FailedPrecondition`); `virsh snapshot-create-as --atomic` ended with an exit status of its own and its first `error:` line is one of libvirt's **refusals before it executes anything** (`cannot acquire state change lock`, `Requested operation is not valid`, `unsupported configuration`, `already exists`) **and** the snapshot names and `domblklist --details` sources, read again, are as before (not performed). | The create's connection dropped, `virsh` was killed (exit status 128 or above), reported that it lost libvirtd or timed out its keepalive; the request's deadline passed; **any other error text** (libvirt saves a snapshot's metadata last and drops the snapshot from its list when that fails, after the disk sources were switched); the snapshot exists, the disk sources changed, or either could not be read after the failed create. |
+| `SnapshotCreate` | The domain's state, disk dependencies, snapshot names or disk sources cannot be read (not performed); the domain does not exist (`NotFound`); the snapshot name is already taken (`AlreadyExists`, nothing is created); a disk-only snapshot's overlay file is already on the host (`AlreadyExists`, v0.4.1, [V12](libvirt-clones.md#a-snapshot-name-whose-overlay-file-is-still-on-the-host)); the disk is a linked clone's backing file (`FailedPrecondition`); `virsh snapshot-create-as --atomic` ended with an exit status of its own, its first `error:` line is one of libvirt's **refusals before it executes anything**, **and** the snapshot names and `domblklist --details` sources, read again, are as before. A busy domain or one in the wrong state (`cannot acquire state change lock`, `Requested operation is not valid`, `already exists`) is not performed. An existing overlay file is `AlreadyExists` (V12). A snapshot the VM's configuration does not support (an error of class `unsupported configuration`, `Operation not supported`, `argument unsupported` or `invalid argument`, v0.4.1) is `InvalidArgument`: sending it again cannot help. | The create's connection dropped, `virsh` was killed (exit status 128 or above), reported that it lost libvirtd or timed out its keepalive; the request's deadline passed; **any other error text** (libvirt saves a snapshot's metadata last and drops the snapshot from its list when that fails, after the disk sources were switched); the snapshot exists, the disk sources changed, or either could not be read after the failed create. |
 | `ExportDisk` `s3` | The storage configuration is unusable (`InvalidArgument`); the source domain or disk is missing or refused; a check before the flatten, or the flatten **ended with an exit status of its own** (it writes only into a private directory that is removed, and the upload is the only publishing step); **any upload error before the flattened disk was read to its end** - a credentials or bucket refusal, a 5xx, an unreachable service, a broken host stream - because the S3 client sends an upload's completing call only after it has read its source to the end. | The flatten's session dropped or the command was killed (it may still run, and a retry would start a second one); **any upload error once the source was read to its end**, whatever the error: the completing call may have been applied, and the client retries it when its answer is lost (the retry of an applied upload is answered `NoSuchUpload`, or even `AccessDenied`). |
 | `ExportDisk` `nfs` | An invalid destination (`InvalidArgument`); the source domain or disk is missing or refused; any check before the convert; the in-place `qemu-img convert` **ended with an exit status of its own** (it no longer writes; any partial staged file is replaced by the next export). | The convert was killed or its connection dropped: it may still be writing the staged file. |
 | `ExportDisk` `pvc` | Every failure. The export runs in the provider's own process: the local `qemu-img` is killed with the call, the copy is an in-process write that has finished when the call returns, and a partial file is replaced by the next export. | None. |
@@ -191,6 +192,27 @@ disk-in-use or template `Conflict` says nothing about the earlier call and stays
 A failure that already carries a typed refusal keeps it (for example the disk-size limit
 refusals, which hold the migration instead of failing it), with the refusal's own text.
 
+**A `VMSnapshot` create that was not performed is sent again (v0.4.1).** On a single host,
+as on a clustered Provider since v0.4.0 (V8), a `VMSnapshot` create answered "not
+performed" (`contracts.IsNothingDone` and not "outcome unknown: retry") is no longer
+`Failed`. The attempt is closed (its marker removed, so it never counts toward a hold),
+the `VMSnapshot` shows `Ready=False/ProviderError` ("The provider did not perform the
+snapshot creation (nothing was changed) and it will be retried; ..."), the provider's
+answer is in the `SnapshotCreateRetrying` event, and the create is sent again after 1
+minute, doubling to 10 minutes (in the manager's memory). This includes a request that
+never reached the provider and an unreachable host. An answer to the manager's own re-send
+still proves nothing and keeps the hold. A cause that does not go away (libvirt refusing a
+domain in the wrong state for good, an image that stays unreadable) is retried every 10
+minutes for as long as the `VMSnapshot` exists, with the same condition and the
+`SnapshotCreateRetrying` event: fix the cause or delete the `VMSnapshot`. The source snapshot of a single-host
+`VMMigration` is unchanged: "not performed" fails the attempt, and the retry policy
+decides.
+
+**`SnapshotRevert`** carries no marker, but the libvirt provider answers it the same way
+from v0.4.1 (single-host and clustered): "not performed" before the revert ran, a terminal
+answer when libvirt refused or failed it, and "outcome unknown: retry" when it may have
+run. See [`vm-snapshot-revert.md`](vm-snapshot-revert.md#libvirt).
+
 Three things the table does not show:
 
 - **A single-host libvirt command can outlive the settle time.** The flatten,
@@ -200,8 +222,8 @@ Three things the table does not show:
 - **A host that cannot be reached fails the attempt.** The reads and checks before a
   call's first change are "not performed" whatever state the connection is in, so a
   `VMMigration` whose libvirt host is down fails the attempt (as in rc1) and its retry
-  policy decides; it is not held. A snapshot create of an unreachable host is
-  `Failed`.
+  policy decides; it is not held. A `VMSnapshot` create of an unreachable host is sent
+  again after a backoff (below).
 - **The s3 and nfs imports may start the default storage pool.** Before the private
   directory is made, the import ensures the `default` pool exists and is active. That is
   idempotent and leaves no disk, so a failure after it is still "nothing landed".

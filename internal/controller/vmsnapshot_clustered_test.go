@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -120,20 +121,21 @@ func TestVMSnapshot_Clustered_SendsItsUIDAsRequestToken(t *testing.T) {
 	assert.Empty(t, got.Status.SnapshotID)
 }
 
-// TestVMSnapshot_SingleHost_RetryableFailure pins that the retry applies to
-// routed (clustered) creates only. A single-host create answered "nothing
-// done" (the request never reached the provider, its host unreachable) fails
-// the snapshot, as before; one answered without a definite outcome (a bare
-// Unavailable: the connection dropped after the request was written) is held
+// TestVMSnapshot_SingleHost_RetryableFailure pins the single-host answers
+// that are not failures. A create answered "nothing done" (the request never
+// reached the provider, its host unreachable) closes the attempt and is sent
+// again after a backoff, as a routed one is (V8, single-host since v0.4.1);
+// one answered without a definite outcome (a bare Unavailable: the
+// connection dropped after the request was written) is held
 // SnapshotOutcomeUnknown with its marker, never failed (rc2 R6 review M1).
 func TestVMSnapshot_SingleHost_RetryableFailure(t *testing.T) {
 	for name, tc := range map[string]struct {
-		err       error
-		wantPhase infrav1beta1.SnapshotPhase
+		err          error
+		notPerformed bool
 	}{
-		"nothing done (host unavailable)":    {contracts.NewHostUnavailableError("create snapshot: host unavailable", nil), infrav1beta1.SnapshotPhaseFailed},
-		"nothing done (request not sent)":    {fmt.Errorf("%w: dial", contracts.ErrRequestNotSent), infrav1beta1.SnapshotPhaseFailed},
-		"outcome unknown (bare Unavailable)": {contracts.NewRetryableError("create snapshot: unavailable", nil), ""},
+		"nothing done (host unavailable)":    {contracts.NewHostUnavailableError("create snapshot: host unavailable", nil), true},
+		"nothing done (request not sent)":    {fmt.Errorf("%w: dial", contracts.ErrRequestNotSent), true},
+		"outcome unknown (bare Unavailable)": {contracts.NewRetryableError("create snapshot: unavailable", nil), false},
 	} {
 		t.Run(name, func(t *testing.T) {
 			vm := boundSource()
@@ -148,13 +150,17 @@ func TestVMSnapshot_SingleHost_RetryableFailure(t *testing.T) {
 			got := reconcileClusteredSnapshot(t, r, snap)
 			require.Len(t, rec.creates, 1)
 			assert.Empty(t, rec.creates[0].VM.HostID, "a single-host request carries no host")
-			assert.Equal(t, tc.wantPhase, got.Status.Phase)
-			assert.Equal(t, tc.wantPhase == "", snapshotRequested(got), "the marker is kept only for an unknown outcome")
-			if tc.wantPhase == "" {
-				ready := meta.FindStatusCondition(got.Status.Conditions, infrav1beta1.VMSnapshotConditionReady)
-				require.NotNil(t, ready)
-				assert.Equal(t, snapshotReasonOutcomeUnknown, ready.Reason)
+			assert.Empty(t, got.Status.Phase, "never failed")
+			assert.Equal(t, !tc.notPerformed, snapshotRequested(got), "the marker is kept only for an unknown outcome")
+			ready := meta.FindStatusCondition(got.Status.Conditions, infrav1beta1.VMSnapshotConditionReady)
+			require.NotNil(t, ready)
+			if tc.notPerformed {
+				assert.Equal(t, infrav1beta1.VMSnapshotReasonProviderError, ready.Reason)
+				assert.Equal(t, snapshotCreateNotPerformedMessage, ready.Message)
+				assert.Positive(t, r.notPerformedBackoff.remaining(string(got.UID), time.Now()), "sent again after a backoff")
+				return
 			}
+			assert.Equal(t, snapshotReasonOutcomeUnknown, ready.Reason)
 		})
 	}
 }

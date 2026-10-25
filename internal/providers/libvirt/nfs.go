@@ -58,9 +58,12 @@ func (s *Server) exportDiskToNFS(ctx context.Context, req *providerv1.ExportDisk
 
 	nfsURL := strings.TrimSpace(req.DestinationUrl)
 	if !strings.HasPrefix(nfsURL, "nfs://") {
+		// The value is not echoed: it is the tenant's location (R28).
 		return nil, refusal(codes.InvalidArgument, wireExportRefused,
-			fmt.Errorf("nfs export destination must be an nfs:// URL, got %q", nfsURL))
+			fmt.Errorf("nfs export destination is not an nfs:// URL"))
 	}
+	// The staged object's server, export and path never reach the log (R28).
+	ctx = withNFSLogRedactions(ctx, nfsURL)
 
 	// The source is one of the domain's own disks, read in the format its
 	// definition names (exportSourceOn).
@@ -74,7 +77,7 @@ func (s *Server) exportDiskToNFS(ctx context.Context, req *providerv1.ExportDisk
 	}
 	resp, err := exportConvertToNFS(ctx, conn, req, srcPath, srcFormat, nil)
 	if err != nil {
-		return nil, singleHostExportFailure(ctx, err)
+		return nil, singleHostExportFailure(ctx, redactLocations(err, nfsURLLocations(nfsURL)...))
 	}
 	return resp, nil
 }
@@ -97,9 +100,10 @@ func (s *Server) exportDiskToNFS(ctx context.Context, req *providerv1.ExportDisk
 func exportConvertToNFS(ctx context.Context, conn libvirtConn, req *providerv1.ExportDiskRequest, srcPath, srcFormat string,
 	guard *hostCmdGuard) (*providerv1.ExportDiskResponse, error) {
 	nfsURL := strings.TrimSpace(req.DestinationUrl)
+	ctx = withNFSLogRedactions(ctx, nfsURL)
 
 	log.Printf("INFO Exporting disk from libvirt host to NFS: backend=nfs vm=%s src=%s dest=%s",
-		req.VmId, srcPath, nfsURL)
+		req.VmId, srcPath, redactCommandText(nfsURL))
 
 	// Flatten + write straight to the NFS export. -U reads a possibly-running
 	// source (crash-consistent; a consistent copy still needs power-off/snapshot
@@ -133,7 +137,7 @@ func exportConvertToNFS(ctx context.Context, conn libvirtConn, req *providerv1.E
 		return nil, fmt.Errorf("host-side qemu-img convert to nfs failed: %w%s", err, copyStderr(res))
 	}
 
-	log.Printf("INFO Source disk written to NFS export: dest=%s", nfsURL)
+	log.Printf("INFO Source disk written to NFS export: dest=%s", redactCommandText(nfsURL))
 
 	return &providerv1.ExportDiskResponse{
 		ExportId: fmt.Sprintf("export-libvirt-nfs-%s-%d", req.VmId, time.Now().Unix()),
@@ -305,7 +309,7 @@ func copyCheckConvertNFSObject(ctx context.Context, conn libvirtConn, wd *diskWr
 func (s *Server) importDiskFromNFS(ctx context.Context, req *providerv1.ImportDiskRequest) (*providerv1.ImportDiskResponse, error) {
 	resp, err := s.importDiskFromNFSSteps(ctx, req)
 	if err != nil {
-		return nil, singleHostImportFailure(ctx, err)
+		return nil, singleHostImportFailure(ctx, redactLocations(err, nfsURLLocations(req.SourceUrl)...))
 	}
 	return resp, nil
 }
@@ -328,8 +332,11 @@ func (s *Server) importDiskFromNFSSteps(ctx context.Context, req *providerv1.Imp
 
 	nfsURL := strings.TrimSpace(req.SourceUrl)
 	if !strings.HasPrefix(nfsURL, "nfs://") {
-		return nil, atStage(stageInvalid, fmt.Errorf("nfs import source must be an nfs:// URL, got %q", nfsURL))
+		// The value is not echoed: it is the tenant's location (R28).
+		return nil, atStage(stageInvalid, fmt.Errorf("nfs import source is not an nfs:// URL"))
 	}
+	// The staged object's server, export and path never reach the log (R28).
+	ctx = withNFSLogRedactions(ctx, nfsURL)
 
 	// Resolve the target pool and its host path.
 	poolName := "default"
@@ -365,7 +372,7 @@ func (s *Server) importDiskFromNFSSteps(ctx context.Context, req *providerv1.Imp
 	}
 
 	log.Printf("INFO Importing disk from NFS to libvirt host: backend=nfs pool=%s volume=%s src=%s target=%s",
-		poolName, volumeName, nfsURL, targetPath)
+		poolName, volumeName, redactCommandText(nfsURL), targetPath)
 	return landNFSImport(ctx, importLanding{conn: conn, poolName: poolName, poolPath: poolPath,
 		volumeName: volumeName, targetPath: targetPath}, nfsURL, req)
 }
@@ -375,6 +382,7 @@ func (s *Server) importDiskFromNFSSteps(ctx context.Context, req *providerv1.Imp
 // and converted there, and the converted disk is published onto l.targetPath
 // with one rename (tagged stagePublish).
 func landNFSImport(ctx context.Context, l importLanding, nfsURL string, req *providerv1.ImportDiskRequest) (*providerv1.ImportDiskResponse, error) {
+	ctx = withNFSLogRedactions(ctx, nfsURL)
 	conn, poolName, volumeName, targetPath := l.conn, l.poolName, l.volumeName, l.targetPath
 
 	// SECURITY: the staged object is on an NFS server the tenant controls, so

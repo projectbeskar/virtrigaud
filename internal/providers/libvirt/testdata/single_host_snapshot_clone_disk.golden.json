@@ -719,6 +719,7 @@
       "single virsh dumpxml vrgold-web",
       "single virsh snapshot-list vrgold-web --name",
       "single virsh domblklist --details vrgold-web",
+      "local sh -c i=0; for f in \"$@\"; do i=$((i+1)); if [ -s \"$f\" ] \u0026\u0026 [ ! -b \"$f\" ]; then echo \"$i\"; fi; done sh /var/lib/libvirt/images/vrgold-web-disk.snapshot-\u003cunix\u003e",
       "single virsh metadata --domain vrgold-web --uri https://virtrigaud.io/xmlns/libvirt/media/v1 --key virtrigaud --set \u003cejected\u003e\u003cmedia target='sda' source='/tmp/virtrigaud-cloudinit-vrgold-web.abcdefghij/cloud-init.iso' driver='raw'/\u003e\u003c/ejected\u003e --config",
       "single virsh change-media vrgold-web sda --eject --config",
       "single virsh snapshot-create-as vrgold-web snapshot-\u003cunix\u003e --description Snapshot created by VirtRigaud at \u003ctime\u003e --atomic --disk-only",
@@ -737,6 +738,7 @@
       "single virsh dumpxml vrgold-web",
       "single virsh snapshot-list vrgold-web --name",
       "single virsh domblklist --details vrgold-web",
+      "local sh -c i=0; for f in \"$@\"; do i=$((i+1)); if [ -s \"$f\" ] \u0026\u0026 [ ! -b \"$f\" ]; then echo \"$i\"; fi; done sh /var/lib/libvirt/images/vrgold-web-disk.pre-upgrade",
       "single virsh metadata --domain vrgold-web --uri https://virtrigaud.io/xmlns/libvirt/media/v1 --key virtrigaud --set \u003cejected\u003e\u003cmedia target='sda' source='/tmp/virtrigaud-cloudinit-vrgold-web.abcdefghij/cloud-init.iso' driver='raw'/\u003e\u003c/ejected\u003e --config",
       "single virsh change-media vrgold-web sda --eject --config",
       "single virsh snapshot-create-as vrgold-web pre-upgrade --description before the upgrade --atomic --disk-only",
@@ -762,6 +764,7 @@
       "single virsh dumpxml vrgold-web",
       "single virsh snapshot-list vrgold-web --name",
       "single virsh domblklist --details vrgold-web",
+      "local sh -c i=0; for f in \"$@\"; do i=$((i+1)); if [ -s \"$f\" ] \u0026\u0026 [ ! -b \"$f\" ]; then echo \"$i\"; fi; done sh /var/lib/libvirt/images/vrgold-web-disk.x",
       "single virsh metadata --domain vrgold-web --uri https://virtrigaud.io/xmlns/libvirt/media/v1 --key virtrigaud --set \u003cejected\u003e\u003cmedia target='sda' source='/tmp/virtrigaud-cloudinit-vrgold-web.abcdefghij/cloud-init.iso' driver='raw'/\u003e\u003c/ejected\u003e --config",
       "single virsh change-media vrgold-web sda --eject --config",
       "single virsh snapshot-create-as vrgold-web x --description d --atomic --disk-only",
@@ -780,6 +783,7 @@
       "single virsh dumpxml vrgold-web",
       "single virsh snapshot-list vrgold-web --name",
       "single virsh domblklist --details vrgold-web",
+      "local sh -c i=0; for f in \"$@\"; do i=$((i+1)); if [ -s \"$f\" ] \u0026\u0026 [ ! -b \"$f\" ]; then echo \"$i\"; fi; done sh /var/lib/libvirt/images/vrgold-web-disk.h",
       "single virsh metadata --domain vrgold-web --uri https://virtrigaud.io/xmlns/libvirt/media/v1 --key virtrigaud --set \u003cejected\u003e\u003cmedia target='sda' source='/tmp/virtrigaud-cloudinit-vrgold-web.abcdefghij/cloud-init.iso' driver='raw'/\u003e\u003c/ejected\u003e --config",
       "single virsh change-media vrgold-web sda --eject --config",
       "single virsh snapshot-create-as vrgold-web h --description d --atomic --disk-only",
@@ -811,6 +815,7 @@
       "single virsh dumpxml vrgold-web",
       "single virsh snapshot-list vrgold-web --name",
       "single virsh domblklist --details vrgold-web",
+      "local sh -c i=0; for f in \"$@\"; do i=$((i+1)); if [ -s \"$f\" ] \u0026\u0026 [ ! -b \"$f\" ]; then echo \"$i\"; fi; done sh /var/lib/libvirt/images/vrgold-web-disk.mem",
       "single virsh metadata --domain vrgold-web --uri https://virtrigaud.io/xmlns/libvirt/media/v1 --key virtrigaud --set \u003cejected\u003e\u003cmedia target='sda' source='/tmp/virtrigaud-cloudinit-vrgold-web.abcdefghij/cloud-init.iso' driver='raw'/\u003e\u003c/ejected\u003e --config",
       "single virsh change-media vrgold-web sda --eject --config",
       "single virsh snapshot-create-as vrgold-web mem --description d --atomic --disk-only",
@@ -836,6 +841,7 @@
       "single virsh dumpxml vrgold-web",
       "single virsh snapshot-list vrgold-web --name",
       "single virsh domblklist --details vrgold-web",
+      "local sh -c i=0; for f in \"$@\"; do i=$((i+1)); if [ -s \"$f\" ] \u0026\u0026 [ ! -b \"$f\" ]; then echo \"$i\"; fi; done sh /var/lib/libvirt/images/vrgold-web-disk.my-snap-1-",
       "single virsh metadata --domain vrgold-web --uri https://virtrigaud.io/xmlns/libvirt/media/v1 --key virtrigaud --set \u003cejected\u003e\u003cmedia target='sda' source='/tmp/virtrigaud-cloudinit-vrgold-web.abcdefghij/cloud-init.iso' driver='raw'/\u003e\u003c/ejected\u003e --config",
       "single virsh change-media vrgold-web sda --eject --config",
       "single virsh snapshot-create-as vrgold-web my-snap-1- --description d --atomic --disk-only",
@@ -898,7 +904,7 @@
       "single virsh snapshot-list vrgold-web --name"
     ],
     "resp": "null",
-    "err": "snapshot s9 does not exist"
+    "err": "rpc error: code = NotFound desc = snapshot s9 does not exist"
   },
   "snapshot-revert-domstate-fails": {
     "calls": [
@@ -906,7 +912,7 @@
       "single virsh domstate vrgold-web"
     ],
     "resp": "null",
-    "err": "failed to get domain state: failed to get domain state: virsh command 'virsh -c qemu:///single domstate vrgold-web' failed (exit code 1): stderr=error: scripted failure of domstate\n, stdout="
+    "err": "snapshot revert not performed: a check or command on the libvirt host failed before the revert ran; nothing was changed (details are in the provider log)"
   },
   "snapshot-revert-fails": {
     "calls": [
@@ -919,14 +925,14 @@
       "single virsh snapshot-revert vrgold-web s1 --force"
     ],
     "resp": "null",
-    "err": "failed to revert to snapshot: virsh command 'virsh -c qemu:///single snapshot-revert vrgold-web s1 --force' failed (exit code 1): stderr=error: scripted failure of snapshot-revert\n, stdout="
+    "err": "rpc error: code = Unknown desc = snapshot revert failed: libvirt reported an error while reverting; the VM's disks may have been changed (details are in the provider log)"
   },
   "snapshot-revert-list-fails": {
     "calls": [
       "single virsh snapshot-list vrgold-web --name"
     ],
     "resp": "null",
-    "err": "failed to check snapshot existence: failed to list snapshots: virsh command 'virsh -c qemu:///single snapshot-list vrgold-web --name' failed (exit code 1): stderr=error: scripted failure of snapshot-list\n, stdout="
+    "err": "snapshot revert not performed: a check or command on the libvirt host failed before the revert ran; nothing was changed (details are in the provider log)"
   },
   "snapshot-revert-running": {
     "calls": [

@@ -458,6 +458,8 @@ func TestClustered_Delete_OwnerChecked(t *testing.T) {
 					"host-a destroy " + routingDomainUUID,
 					"host-a undefine " + routingDomainUUID,
 					"local sudo rm -f -- " + routingDiskPath,
+					// R37: the default pool forgets the removed disk.
+					"host-a pool-refresh default",
 				}, calls)
 				return
 			}
@@ -693,6 +695,8 @@ func TestSingleHost_DescribeAndDelete_UnchangedOnVirshProvider(t *testing.T) {
 				"single destroy web",
 				"single undefine web",
 				"local sudo rm -f -- " + routingDiskPath,
+				// R37: the default pool forgets the removed disk.
+				"single pool-refresh default",
 			}, fx.calls()[len(describeCalls):], "the delete sequence, with the dependency guard before destroy")
 		})
 	}

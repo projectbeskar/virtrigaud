@@ -498,6 +498,14 @@ func (s *Server) SnapshotCreate(ctx context.Context, req *providerv1.SnapshotCre
 				}
 				r, err := snapshotCreateOn(bctx, c, d.handle, withSnapshotRequestToken(req), roots)
 				if err != nil {
+					// libvirt's own refusal of an overlay file that already
+					// exists, when the probe before the create could not see
+					// it (V12): a definite Conflict.
+					if name := req.GetNameHint(); name != "" {
+						if refusal := overlayExistsRefusal(bctx, c, d.handle, sanitizeSnapshotName(name), err); refusal != nil {
+							return refusal
+						}
+					}
 					return err
 				}
 				if r.Task != nil {
@@ -706,6 +714,15 @@ func snapshotCreateWith(ctx context.Context, conn libvirtConn, domain string, re
 			snapshotName, domain, excluded)
 	}
 
+	// A disk-only snapshot whose overlay file is already on the host (left by
+	// an earlier snapshot of the same name) is refused before anything
+	// changes, as a definite Conflict (V12, snapshot_overlay_collision.go).
+	if diskOnly {
+		if err := refuseSnapshotOverlayCollision(ctx, h, domain, snapshotName, doc); err != nil {
+			return nil, atStage(stageBefore, fmt.Errorf("failed to create snapshot: %w", err))
+		}
+	}
+
 	// Build the virsh snapshot-create-as arguments. A memory-inclusive (full
 	// system) snapshot omits --disk-only and is only possible for a RUNNING
 	// domain (there is no RAM state to capture otherwise); any other case is a
@@ -775,7 +792,11 @@ func snapshotCreateWith(ctx context.Context, conn libvirtConn, domain string, re
 //     own with an exit status, libvirt's error is one of its refusals before
 //     it executes anything (snapshotRefusalMarkers), AND the domain's snapshot
 //     names and disk sources, read again, are as before the create; a domain
-//     that vanished is NotFound. A dropped connection, a signal, an expired
+//     that vanished is NotFound. Such a refusal of an overlay file that
+//     already exists is the V12 Conflict (AlreadyExists), and one of a
+//     snapshot the VM's configuration does not support
+//     (snapshotConfigRefusalMarkers) is InvalidArgument: the same request
+//     cannot succeed. A dropped connection, a signal, an expired
 //     request, virsh reporting that it lost libvirtd, any other error text (it
 //     may have come after the snapshot took effect: libvirt saves its metadata
 //     last), a snapshot that exists, changed disk sources, or a read that
@@ -824,6 +845,21 @@ func singleHostSnapshotFailure(ctx context.Context, conn libvirtConn, domain str
 			log.Printf("WARN libvirt snapshot create outcome unknown: the domain's disk sources are not readable or changed "+
 				"(read error: %v) after: %v", blkErr, err)
 			return err
+		}
+		// libvirt's refusal of an overlay file that already exists (V12; the
+		// probe before the create could not see it): the same request can
+		// never succeed, a definite Conflict rather than "not created".
+		if isOverlayExistsRefusal(err) {
+			log.Printf("ERROR libvirt refused snapshot %s of domain %s: an overlay file it would create already exists: %v",
+				subject, domain, err)
+			return status.Error(codes.AlreadyExists, wireSnapshotOverlayExists)
+		}
+		// A snapshot libvirt does not support for this VM's configuration
+		// (snapshotConfigRefusalMarkers) fails for good: sending it again
+		// cannot help. A busy domain, or one in the wrong state, is "not
+		// created", and the manager may send it again.
+		if snapshotRefusedForConfig(err) {
+			return refusal(codes.InvalidArgument, wireSnapshotRefusedForConfig, err)
 		}
 		return notPerformed(wireSnapshotNotCreated, err)
 	}
@@ -1021,8 +1057,12 @@ func (s *Server) SnapshotRevert(ctx context.Context, req *providerv1.SnapshotRev
 		err := s.provider.withOwnedDomain(ctx, snapshotVMRef(req.GetVmId(), req.GetTargetHostId(), req.GetOwner()), "snapshot revert",
 			func(ctx context.Context, c libvirtConn, d domainTarget) error {
 				r, err := snapshotRevertOn(ctx, c, d.handle, req.SnapshotId, seedRootsOf(s.provider))
+				if err != nil {
+					// Answered by what it proves (snapshot_revert_outcome.go).
+					return routedRevertFailure(ctx, c, d.handle, err)
+				}
 				resp = routedTaskResponse(c.HostID(), r)
-				return err
+				return nil
 			})
 		if err != nil {
 			return nil, routedRPCError("revert to snapshot", err)
@@ -1033,13 +1073,19 @@ func (s *Server) SnapshotRevert(ctx context.Context, req *providerv1.SnapshotRev
 
 	// Obtain the per-host connection through the seam (ADR-0008 PR 2).
 	if s.provider == nil {
-		return nil, fmt.Errorf("libvirt provider not initialized")
+		return nil, nothingDone(wireProviderNotInitialized, fmt.Errorf("libvirt provider not initialized"))
 	}
 	conn, err := s.provider.conn(ctx)
 	if err != nil {
-		return nil, err
+		return nil, nothingDone(wireRevertNotPerformed, err)
 	}
-	return snapshotRevertOn(ctx, conn, req.VmId, req.SnapshotId, seedRootsOf(s.provider))
+	// A failure is answered with the outcome the provider can prove
+	// (snapshot_revert_outcome.go).
+	resp, err := snapshotRevertOn(ctx, conn, req.VmId, req.SnapshotId, seedRootsOf(s.provider))
+	if err != nil {
+		return nil, singleHostRevertFailure(ctx, conn, req.VmId, err)
+	}
+	return resp, nil
 }
 
 // snapshotRevertOn is the SnapshotRevert core, run on connection conn against
@@ -1052,20 +1098,23 @@ func snapshotRevertOn(ctx context.Context, conn libvirtConn, domain, snapshotID 
 	if err := checkSnapshotIDArgument(snapshotID); err != nil {
 		return nil, err
 	}
-	// Check if snapshot exists
+	// Every failure up to the revert command changed nothing that outlives
+	// the call (stageBefore); the revert command is stageCommand (its detail:
+	// the domain's disk sources before it). The single-host and routed RPCs
+	// answer them by what they prove (snapshot_revert_outcome.go).
 	exists, err := conn.snapshotExists(ctx, domain, snapshotID)
 	if err != nil {
-		return nil, fmt.Errorf("failed to check snapshot existence: %w", err)
+		return nil, atStage(stageBefore, fmt.Errorf("failed to check snapshot existence: %w", err))
 	}
 
 	if !exists {
-		return nil, fmt.Errorf("snapshot %s does not exist", snapshotID)
+		return nil, contracts.NewNotFoundError(fmt.Sprintf("snapshot %s does not exist", snapshotID), nil)
 	}
 
 	// Get current domain state
 	domainState, err := conn.getDomainState(ctx, domain)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get domain state: %w", err)
+		return nil, atStage(stageBefore, fmt.Errorf("failed to get domain state: %w", err))
 	}
 
 	log.Printf("INFO Domain %s current state: %s", domain, domainState)
@@ -1073,23 +1122,28 @@ func snapshotRevertOn(ctx context.Context, conn libvirtConn, domain, snapshotID 
 	// A revert rewrites the disk another domain may use as its backing file
 	// (disk_dependents.go).
 	if err := refuseIfDiskHasDependents(ctx, hostConnRunner{conn: conn}, domain, guardOpSnapshotRevert); err != nil {
-		return nil, fmt.Errorf("failed to revert to snapshot: %w", err)
+		return nil, atStage(stageBefore, fmt.Errorf("failed to revert to snapshot: %w", err))
 	}
 
 	// A snapshot whose stored definition has the domain's read-only seed
 	// CD-ROM with its medium (taken while the VM ran, or by v0.4.0-rc6 or
 	// earlier) is refused before anything changes: libvirt would rewrite the
 	// CD-ROM to an overlay the VM cannot open (snapshot_readonly_disks.go).
-	// An interrupted ejection is repaired first.
+	// An interrupted ejection is repaired first; a repair that could not put
+	// the media back (errMediaNotRestored) is not tagged: its outcome is
+	// unknown.
 	h := hostConnRunner{conn: conn}
 	plan, err := prepareSnapshotRevert(ctx, h, domain, snapshotID, seedRoots)
 	if err != nil {
-		return nil, err
+		if stderrors.Is(err, errMediaNotRestored) {
+			return nil, err
+		}
+		return nil, atStage(stageBefore, err)
 	}
 
 	result, err := conn.Virsh(ctx, buildSnapshotRevertArgs(domain, snapshotID, domainState)...)
 	if err != nil {
-		return nil, fmt.Errorf("failed to revert to snapshot: %w", err)
+		return nil, atStageDetail(stageCommand, revertSubject(plan), plan.sources, fmt.Errorf("failed to revert to snapshot: %w", err))
 	}
 
 	log.Printf("INFO Successfully reverted to snapshot: %s\nOutput: %s", snapshotID, result.Stdout)
@@ -1657,7 +1711,7 @@ func (s *Server) ImportDisk(ctx context.Context, req *providerv1.ImportDiskReque
 		return s.importDiskFromS3(ctx, req)
 	}
 
-	log.Printf("INFO Starting disk import from %s", req.SourceUrl)
+	log.Printf("INFO Starting disk import from %s", redactCommandText(req.SourceUrl))
 
 	// Obtain the per-host connection through the seam (ADR-0008 PR 2) instead of
 	// type-asserting the concrete *Provider.

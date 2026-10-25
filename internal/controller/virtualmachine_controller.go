@@ -289,6 +289,13 @@ type VirtualMachineReconciler struct {
 	// failure, per VM: from providerErrorRetryInterval doubling to
 	// reconfigureRetryMaxInterval. A power operation that succeeds resets it.
 	powerRetry unschedulableBackoff
+	// revertNotPerformed paces re-sending a snapshot revert the provider
+	// answered it did not perform, per VM and VMSnapshot
+	// (snapshotRevertNotPerformedKey): from snapshotRevertNotPerformedRetryBase
+	// doubling to snapshotRevertNotPerformedRetryMax. Any other answer resets
+	// it. In memory: after a manager restart the persisted attempt time keeps
+	// at least the base wait.
+	revertNotPerformed unschedulableBackoff
 	// powerTasks maps a VM UID to the task its last power operation returned,
 	// so a power task that ended in failure is recognised even when the
 	// "Adjusting power state" marker is not on the VM (a real reconfigure's

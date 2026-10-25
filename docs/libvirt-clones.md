@@ -542,6 +542,79 @@ and only after you have checked that the data is gone:
 5. If the `VMSnapshot` still exists, its next re-check finds no snapshot on the host
    and removes the finalizer.
 
+### A snapshot name whose overlay file is still on the host
+
+A disk-only snapshot gives each of the VM's writable file-backed disks a new overlay file
+next to it, named after the disk's current file with its extension replaced by the
+snapshot's name: `<domain>-disk.<snapshot name>` for the VM's own disk,
+`<domain>-disk-<n>.<snapshot name>` for an additional disk. The snapshot's name is
+`spec.snapshotConfig.name` of the `VMSnapshot`, or the `VMSnapshot`'s own name. If a
+file of that name is already there, libvirt refuses the snapshot before it changes
+anything (`unsupported configuration: external snapshot file for disk vda already
+exists and is not a block device`).
+
+Such a file is left by an earlier snapshot of the **same name** whose overlay was not
+removed when it was deleted:
+
+- the overlay of an additional disk, which [SnapshotDelete](#what-snapshotdelete-removes)
+  never removes;
+- an overlay that could not be proven safe to remove, for example the merged overlay
+  that still holds a memory snapshot an earlier release orphaned
+  ([above](#a-memory-snapshot-that-was-already-orphaned));
+- an overlay of a snapshot deleted by a release before v0.4.0, or by hand.
+
+**From v0.4.1 the snapshot is refused as a definite failure.** Before it creates
+anything, the provider checks, as its SSH user, whether the overlay file of each disk
+already exists, and refuses the snapshot when one does. If the SSH user cannot see the
+file, libvirt's own refusal is answered the same way. Nothing is created, ejected or
+recorded, and the leftover file is **never removed or overwritten**: it may still hold
+another snapshot's data. The `VMSnapshot` is `Failed` with `Ready=False/ProviderError`
+and a `SnapshotFailed` Warning event, on single-host and clustered Providers alike:
+
+```text
+Failed to create snapshot: snapshotCreate: snapshot create refused: an overlay file this disk-only snapshot would create already exists on the libvirt host, left by an earlier snapshot of the same name; nothing was created. Use another snapshot name
+```
+
+The message names no host path. The provider log names the disk and the file, on a line
+that starts with `ERROR Refusing snapshot <name> of domain <domain>: the overlay file(s)
+it would create already exist`. In v0.4.0 a clustered Provider answered this with a
+generic error, and the manager sent the create again about once a minute until it held
+the `VMSnapshot` `SnapshotOutcomeUnknown`. A single-host Provider answered "not created",
+and the `VMSnapshot` failed with no hint.
+
+A `Failed` `VMSnapshot` is not retried. To take the snapshot, either:
+
+- **Use another name.** Create a new `VMSnapshot` with another name (or another
+  `spec.snapshotConfig.name`). This is always safe; or
+- **Remove the leftover file, after you have checked it.** You need the provider's SSH
+  user (or root) on the VM's host. Set the connection as in the
+  [re-attach runbook](clustered-restore.md#re-attach-runbook).
+
+  1. Find the file: take the provider log line above, or the VM's disk files from
+     `virsh -c "$CONN" domblklist --details <domain>` with each extension replaced by
+     the snapshot name.
+  2. Check that no domain uses it. On **every host that mounts the pool** (every host
+     of a clustered Provider on shared storage), run `virsh -c "$CONN" dumpxml
+     --inactive <domain>` for every domain. The file must appear in no `<source
+     file=...>`, including the nested `<backingStore>` entries.
+  3. Check that no snapshot references it: run `virsh -c "$CONN" snapshot-dumpxml
+     <domain> <snapshot>` for every snapshot of every domain on those hosts
+     (`virsh -c "$CONN" snapshot-list <domain> --name` lists them).
+  4. Check that it holds no snapshot you need: `sudo qemu-img snapshot -l -U <file>`
+     must list nothing. If it lists a memory snapshot, it is the orphaned data
+     described [above](#a-memory-snapshot-that-was-already-orphaned): decide about that
+     snapshot first.
+  5. Remove it: `sudo rm -- <file>` (libvirt creates overlays `0600`, owned by root while
+     the VM is off).
+  6. Delete the `Failed` `VMSnapshot` and create it again.
+
+**A `VMSnapshot` that v0.4.0 held for this reason.** On a clustered Provider, v0.4.0 held
+such a `VMSnapshot` `Ready=False/SnapshotOutcomeUnknown` after ten re-sends. It stays held
+after the upgrade. Either delete it and create one under another name, or confirm the
+attempt with the `virtrigaud.io/operation-outcome` annotation its message names. The
+confirmed create is then refused as above and the `VMSnapshot` is `Failed` (or, if you
+removed the leftover file first, the snapshot is taken).
+
 ## Clone files on the host
 
 - **Cloud-init seed.** A clone of a VM with a seed ISO gets its own seed
@@ -889,6 +962,13 @@ WARN /var/lib/libvirt/images, where VM disks are created, is writable by its gro
 Check with `stat -c '%a %U:%G' <dir>`. A sticky directory (for example mode
 `1777` or `3777`) is accepted.
 
+### A VMSnapshot fails: "an overlay file this disk-only snapshot would create already exists"
+
+A disk-only snapshot's overlay file is still on the host from an earlier snapshot of the
+same name. Use another snapshot name, or remove the file once you have checked that
+nothing references it: see
+[A snapshot name whose overlay file is still on the host](#a-snapshot-name-whose-overlay-file-is-still-on-the-host).
+
 ### Unreadable disk images
 
 **Symptom.** A snapshot create, revert or delete, or a delete of a VM (on a
@@ -903,10 +983,12 @@ snapshot create of libvirt domain "<namespace>.<name>" not performed: permission
 host.) It is `Unavailable` with the `VM_DISK_CHECK_FAILED` reason, which the
 manager never counts toward the Provider's circuit breaker and handles as
 for any check that could not run ([How the dependency is found](#how-the-dependency-is-found)):
-a VM delete is retried, and a `VMSnapshot` on a clustered Provider shows
+a VM delete is retried, and a `VMSnapshot` shows
 `Ready=False/ProviderError` with the answer in its `SnapshotCreateRetrying`
 event and is sent again (after 1 minute, doubling up to 10 minutes) until
-the image is fixed. The answer
+the image is fixed (a clustered Provider since v0.4.0, a single-host one
+since v0.4.1). A snapshot revert is `Pending/RevertNotPerformed` and is sent
+again with the same backoff (v0.4.1). The answer
 never names the image: it can be another tenant's VM's. The provider log
 does:
 

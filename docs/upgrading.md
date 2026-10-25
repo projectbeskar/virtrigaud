@@ -206,7 +206,11 @@ the following once after upgrading, and delete only what no `VMMigration` in fli
 - **libvirt snapshot overlay files** `<domain>-disk.<snapshot>` in the storage pool, left
   by snapshots deleted before this release. List the pool's `*-disk.*` files that are not
   `.qcow2`, check with `virsh domblklist --all` and `qemu-img info --backing-chain` that no
-  domain uses them, then remove them.
+  domain uses them, then remove them. Until then, a new disk-only snapshot with the same
+  name as one of them cannot be taken; from v0.4.1 it is refused and its `VMSnapshot` is
+  `Failed` (see [A snapshot name whose overlay file is still on the
+  host](libvirt-clones.md#a-snapshot-name-whose-overlay-file-is-still-on-the-host), which
+  also covers a `VMSnapshot` v0.4.0 held for this reason).
 - **vSphere `virtrigaud-export-*` files** in the VM folders of migration-source datastores:
   see [Leftover `virtrigaud-export-*` files on vSphere
   datastores](#leftover-virtrigaud-export--files-on-vsphere-datastores).

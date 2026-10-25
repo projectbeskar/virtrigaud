@@ -645,7 +645,7 @@ func routedRPCErrorFor(kind hostOpKind, op string, err error) error {
 	}
 	var roe *routedOpError
 	if stderrors.As(err, &roe) {
-		log.Printf("WARN %s failed: %v", op, err)
+		log.Printf("WARN %s failed: %s", op, redactCause(err))
 		if roe.outcomeUnknown {
 			return outcomeUnknownRetryStatus(roe.wire)
 		}
@@ -672,7 +672,7 @@ func routedRPCErrorFor(kind hostOpKind, op string, err error) error {
 	if stderrors.As(err, &ho) {
 		return hostOpRPCErrorFor(kind, op, ho, err)
 	}
-	log.Printf("WARN %s failed: %v", op, err)
+	log.Printf("WARN %s failed: %s", op, redactCause(err))
 	if pe != nil && pe.Type == contracts.ErrorTypeUnavailable {
 		return status.Error(codes.Unavailable, pe.Message)
 	}

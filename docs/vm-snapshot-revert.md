@@ -150,11 +150,33 @@ unrecorded, and the outcome is then treated as unknown (below).
   fails with `NotFound` forgets the task and treats its outcome as unknown. A task that
   has not completed 2 hours after the attempt, or whose status cannot be read for that
   long, is `Failed` with its outcome unknown, so the VM is managed again.
-- **An unknown outcome.** A call that fails without a definite answer (the provider
-  not reached or not answering in time, a retryable answer, a clustered host that
-  stopped answering after the command was sent — `HOST_CONNECTION_LOST` —, or a manager
-  restart between the call and the write of its answer) leaves the record `Reverting`
-  with no task. The revert is then sent again, because a VM that stayed off reaches the
+- **Not performed.** From v0.4.1, an answer that proves the provider did not perform
+  the revert, so that nothing was changed, is neither an unknown outcome nor a
+  failure. Such answers are: the request never reached the provider; its host was
+  unavailable (`HOST_UNAVAILABLE`); a check could not run (`VM_DISK_CHECK_FAILED`);
+  or the provider answered `VM_OPERATION_FAILED` "not performed", for example because
+  libvirt refused the revert before running it while the VM was busy. The record goes
+  back to `Pending` with reason `RevertNotPerformed`, keeping that call's `attempts` and
+  `attemptTime`, and a `SnapshotRevertNotPerformed` Warning event carries the
+  provider's answer. The revert is sent again as a new attempt (`attempts` counts from 1
+  again): 1 minute after the answer, then doubling with each consecutive "not performed"
+  answer up to 10 minutes (the wait is kept in the manager's memory; after a manager
+  restart it is at least 1 minute after `attemptTime`). It is sent only under the same
+  conditions as a first send: the VM reported `Off` with `spec.powerState` `Off` or
+  `OffGraceful`, the same Ready `VMSnapshot`, and a Provider that reports snapshot
+  support. Otherwise the record waits with that reason instead (for example
+  `WaitingForPowerOff`). These answers never count toward the 5-attempt limit below,
+  and they never end the request with "the VM may or may not have been reverted". Up to
+  v0.4.0 they were re-sent as unknown outcomes. The exception is a "not performed"
+  answer to the manager's own re-send of an attempt whose outcome is unknown: it proves
+  only that the re-send did nothing, not the earlier attempt, so the outcome stays
+  unknown (below).
+- **An unknown outcome.** A call that fails without a definite answer leaves the
+  record `Reverting` with no task. That is a provider that did not answer in time, a
+  retryable answer that does not prove that nothing was done (for example the
+  provider's "outcome unknown: retry", `VM_OUTCOME_UNKNOWN_RETRY`), a clustered host
+  that stopped answering after the command was sent (`HOST_CONNECTION_LOST`), or a
+  manager restart between the call and the write of its answer. The revert is then sent again, because a VM that stayed off reaches the
   same state with a second revert:
   - no sooner than 6 minutes after the last attempt, doubling with each attempt up to 30
     minutes (the manager's own deadline on `SnapshotRevert` is 5 minutes, so the earlier
@@ -184,9 +206,9 @@ revert of a powered-off VM cannot duplicate anything.
 |---|---|
 | `snapshotName` | The `VMSnapshot` the request is for |
 | `snapshotUID` | Its UID; empty while it was not found |
-| `phase` | `Pending` (waiting; the condition says for what), `Reverting` (sent, outcome not known yet), `Succeeded`, `Failed` |
+| `phase` | `Pending` (waiting; the condition says for what — not sent yet, or sent and answered "not performed"), `Reverting` (sent, outcome not known yet), `Succeeded`, `Failed` |
 | `taskRef` | The provider task of an asynchronous revert, while it runs |
-| `attempts` | `SnapshotRevert` calls sent for this request (more than 1 only after unknown outcomes) |
+| `attempts` | `SnapshotRevert` calls sent for this request since the provider last answered "not performed" (more than 1 only after unknown outcomes) |
 | `requestedAt` | When the request was first recorded |
 | `attemptTime` | When the last call was recorded, just before it was sent |
 | `completionTime` | When the revert succeeded or failed |
@@ -207,6 +229,7 @@ generation.
 | `False` | `SnapshotForAnotherVM` | The `VMSnapshot` was not taken of this VM (another `spec.vmRef`, VM UID or Provider), or that cannot be proven |
 | `False` | `Unsupported` | The Provider reports no snapshot support (before the revert is sent; after an attempt whose outcome is unknown this ends the request as `Failed`), answers that it does not implement `SnapshotRevert`, or the installed CRD cannot record the request |
 | `False` | `Reverting` | Sent; the outcome is not known yet (a task runs, or the call is sent again after an unknown outcome) |
+| `False` | `RevertNotPerformed` | The provider answered that it did not perform the revert; nothing was changed. It is sent again after a backoff while the VM stays powered off (v0.4.1 and later) |
 | `True` | `Reverted` | The provider confirmed the revert |
 | `False` | `RevertFailed` | The provider failed or refused it, or its outcome stayed unknown. Remove the field and set it again to retry — except after a refusal the provider gives every time (`FailedPrecondition`), whose message says what to do instead (for libvirt: take a new snapshot with the VM powered off) |
 
@@ -225,6 +248,7 @@ see [`vm-status-phase.md`](vm-status-phase.md)).
 | `Normal` | `SnapshotRevertStarted` | A `SnapshotRevert` call is sent (with the attempt number) |
 | `Normal` | `SnapshotRevertSucceeded` | The provider confirmed the revert |
 | `Warning` | `SnapshotRevertFailed` | The revert failed, or was given up with its outcome unknown |
+| `Warning` | `SnapshotRevertNotPerformed` | The provider answered that it did not perform the revert; it is sent again after a backoff |
 
 ## GitOps
 
@@ -248,7 +272,7 @@ clustered Provider, its bound host and owner) and the `VMSnapshot`'s
 | Provider | What the revert does (as implemented) |
 |---|---|
 | vSphere | Finds the snapshot in the VM's snapshot tree by managed-object id (what `SnapshotCreate` answers) or name, refuses templates and image artifacts, and runs `RevertToSnapshot_Task` with `suppressPowerOn=false`, waiting for it in the call (no task is returned). A snapshot taken with memory powers the VM on; the controller then applies `spec.powerState` |
-| libvirt (single host) | Checks that the snapshot exists, refuses while another domain depends on the VM's disk (a linked clone: `VM_DISK_IN_USE`, a `RevertFailed`; a check that cannot run is retried as an unknown outcome), refuses a snapshot libvirt cannot revert without breaking the VM's cloud-init CD-ROM — one that stored the CD-ROM with its seed ([below](#libvirt)) — then runs `virsh snapshot-revert <domain> <snapshot> --force` (no `--running`, as the VM is off), inserts the seed again into the CD-ROM the revert left empty, and checks that no read-only disk was moved to a new file. Synchronous |
+| libvirt (single host) | Checks that the snapshot exists, refuses while another domain depends on the VM's disk (a linked clone: `VM_DISK_IN_USE`, a `RevertFailed`; a check that cannot run is answered "not performed" and sent again after a backoff), refuses a snapshot libvirt cannot revert without breaking the VM's cloud-init CD-ROM — one that stored the CD-ROM with its seed ([below](#libvirt)) — then runs `virsh snapshot-revert <domain> <snapshot> --force` (no `--running`, as the VM is off), inserts the seed again into the CD-ROM the revert left empty, and checks that no read-only disk was moved to a new file. Synchronous |
 | libvirt (clustered) | The same, routed to the VM's bound host and owner-checked: a domain this VM does not own is `NotFound` and is never reverted. A snapshot id the provider could not have created is refused before any host is touched ([`clustered-provider-inventory.md`](clustered-provider-inventory.md)) |
 | Proxmox | Owner-checks the VM, then `POST .../qemu/<vmid>/snapshot/<name>/rollback`; the answer is a task, which the manager polls |
 | mock | Answers a task |
@@ -332,6 +356,39 @@ cloud-init stored its seed. Since v0.4.0-rc7:
   read-only disk was moved to a new file; one that was is reported as `RevertFailed`
   (`reverted, but the VM may not start: libvirt moved read-only disk hda to a new file;
   ...`) instead of `Succeeded`. Repair it as below before you request another revert.
+
+**How a failed libvirt revert is answered** (v0.4.1 and later, single-host and
+clustered). The provider answers by what it can prove:
+
+- A failure before `virsh snapshot-revert` ran (a read or check that failed, the
+  snapshot's definition not readable) is "not performed": nothing was changed, and the
+  manager sends the revert again after a backoff (`RevertNotPerformed`). A typed refusal
+  keeps its answer: `VM_DISK_IN_USE` and the refusal above are terminal, and
+  `VM_DISK_CHECK_FAILED` is "not performed". A snapshot or domain that does not exist is
+  `NotFound` (`RevertFailed`).
+- libvirt refused the revert before it ran it, and the VM's disk sources, read again,
+  are unchanged. When the VM was busy or not in a state it can be reverted in, the
+  answer is "not performed" (`snapshot revert not performed: libvirt refused the revert
+  before running it ...`). For an internal (memory) snapshot, which libvirt reverts in
+  place, one disk at a time, without changing the disk sources, only the busy answer
+  (`cannot acquire state change lock`) proves that; any other error is a failure
+  (below). A revert that libvirt does not support for this VM (an error
+  of class `unsupported configuration`, `Operation not supported`, `argument
+  unsupported` or `invalid argument`) is refused for good: `FailedPrecondition`,
+  `RevertFailed` with no retry hint (`snapshot revert refused: libvirt does not support
+  reverting this VM to this snapshot; nothing was changed`).
+- libvirt reported any other error while it reverted: `RevertFailed` (`snapshot revert
+  failed: libvirt reported an error while reverting; the VM's disks may have been
+  changed`). Check the VM before you request the revert again.
+- `virsh` lost its connection to libvirtd, the command was killed, the connection to the
+  host dropped while the revert ran, or the disks changed although libvirt reported a
+  refusal: the outcome is unknown ("outcome unknown: retry"), and the manager sends the
+  revert again as described under [unknown outcomes](#asynchronous-reverts-and-unknown-outcomes).
+  On a clustered Provider, a host that stops answering is answered by how far the call
+  got, as for every routed call.
+
+The provider's messages name no host path or command; the details are in the provider's
+log.
 
 **Overlay permissions.** libvirt creates the overlay of a disk-only snapshot, and the
 new `<domain>-disk.<epoch>` overlay of a revert, with mode `0600` (owned by root while
@@ -428,6 +485,11 @@ them.
   unknown — after 5 attempts, a VM seen running in between, or a task not completed
   within 2 hours — is `Failed` with a message saying the VM may or may not have been
   reverted: check the VM, and request the revert again if it was not.
+- A revert the provider keeps answering "not performed" is sent again for as long as the
+  request stands (every 10 minutes at most once the backoff is at its cap), with
+  `SnapshotReverted=False/RevertNotPerformed` and the provider's answer in the message.
+  Fix the cause the answer names (for example an unreadable disk image), or remove
+  `spec.snapshot.revertToRef` to give up.
 - While a revert task runs (up to 2 hours), the VM is not powered on or resized, even if
   `revertToRef` is removed.
 
@@ -444,6 +506,16 @@ them.
   before you upgrade the manager.
 - The manager needs `get`, `list` and `watch` on `vmsnapshots`, which its role already
   grants.
+- v0.4.1: a revert the provider answers "not performed" is `Pending/RevertNotPerformed`
+  and sent again after a backoff, instead of being re-sent as an unknown outcome and
+  `Failed` after 5 attempts. The libvirt provider answers a failed revert by what it
+  proves (above). The CRD change is the description of `status.snapshotRevert.attempts`
+  only. A v0.4.0 manager reads the new libvirt answers as before: "not performed" as an
+  unknown outcome, the "outcome unknown: retry" answer as an unknown outcome, the
+  others as a failure. A v0.4.1 manager reads a v0.4.0 libvirt provider's answers as
+  they are: a single-host failure as a failure (that provider's answers are untyped),
+  and a clustered host that could not be reached, or that stopped answering before the
+  revert ran, as "not performed".
 - libvirt: a disk-only `VMSnapshot` of a VM with a cloud-init CD-ROM (or any read-only
   disk) taken by v0.4.0-rc6 or earlier, or taken while the VM was running, is refused on
   revert (`RevertFailed`, nothing changed); delete it and take a new one with the VM

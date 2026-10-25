@@ -83,7 +83,8 @@ func (p *Provider) exportDiskRouted(ctx context.Context, req *providerv1.ExportD
 			return nil, err
 		}
 	} else if !strings.HasPrefix(strings.TrimSpace(req.DestinationUrl), "nfs://") {
-		return nil, status.Errorf(codes.InvalidArgument, "nfs export destination must be an nfs:// URL, got %q", req.DestinationUrl)
+		// The value is not echoed: it is the tenant's location (R28).
+		return nil, status.Error(codes.InvalidArgument, "nfs export destination must be an nfs:// URL")
 	}
 
 	vm := contracts.VMRef{ID: req.VmId, HostID: req.TargetHostId, Owner: ownerFromProto(req.GetOwner())}

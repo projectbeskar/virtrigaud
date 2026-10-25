@@ -784,7 +784,9 @@ func TestRoutedImport_NoStagedLocationAtWarn(t *testing.T) {
 			assert.NotContains(t, l, "nfs://", "a staged location in a WARN/ERROR outcome line: %s", l)
 		}
 	}
-	assert.Contains(t, out, stagedLocationMarker, "the cause is still logged, with the location replaced")
+	// The failed command's own text redacts the URL first (R28,
+	// redactCommandText); redactLocations then has nothing left to replace.
+	assert.Contains(t, out, "<redacted nfs URL>", "the cause is still logged, with the location replaced")
 }
 
 // writerFunc adapts a function to io.Writer.

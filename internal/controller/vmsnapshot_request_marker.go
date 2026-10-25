@@ -229,18 +229,19 @@ func (r *VMSnapshotReconciler) resolveSnapshotRequest(ctx context.Context, snaps
 	return false, ctrl.Result{}, nil
 }
 
-// routedCreateNotPerformed reports whether a failed ROUTED SnapshotCreate is
-// the provider's definite answer that it did nothing for this request
-// (contracts.IsNothingDone: the request never reached it, its host was
-// unavailable, the disk in-use check could not run (VM_DISK_CHECK_FAILED), or
-// VM_OPERATION_FAILED "not performed"), as opposed to an answer that leaves
-// the outcome unknown (OUTCOME_UNKNOWN_RETRY, a deadline, a dropped
-// connection, any unclassified failure). Such an answer closes the attempt
-// (V8): its marker is removed, so the next send is a new attempt and never
-// counts toward snapshotRoutedResendMax. Nothing is lost by closing it: every
-// routed send carries the VMSnapshot's uid as its request token, and the
-// provider adopts a snapshot an earlier call made for it before it does
-// anything else.
+// routedCreateNotPerformed reports whether a failed SnapshotCreate — routed,
+// and since v0.4.1 single-host too — is the provider's definite answer that
+// it did nothing for this request (contracts.IsNothingDone: the request never
+// reached it, its host was unavailable, the disk in-use check could not run
+// (VM_DISK_CHECK_FAILED), or VM_OPERATION_FAILED "not performed"), as opposed
+// to an answer that leaves the outcome unknown (OUTCOME_UNKNOWN_RETRY, a
+// deadline, a dropped connection, any unclassified failure). Such an answer
+// closes the attempt (V8): its marker is removed, so the next send is a new
+// attempt and never counts toward snapshotRoutedResendMax. Nothing is lost by
+// closing it: every routed send carries the VMSnapshot's uid as its request
+// token, and the provider adopts a snapshot an earlier call made for it before
+// it does anything else; a single-host provider proved by this answer that it
+// made nothing, and refuses a name that is already taken.
 func routedCreateNotPerformed(err error) bool {
 	return contracts.IsNothingDone(err) && !contracts.IsOutcomeUnknownRetry(err)
 }
