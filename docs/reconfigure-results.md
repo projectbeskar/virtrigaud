@@ -1,7 +1,7 @@
 # Reconfigure results: applied, restart required, or failed
 
-A `Reconfigure` changes a VirtualMachine's CPU, memory and disk size. Since this
-release it has exactly three outcomes, and a provider never reports success for
+A `Reconfigure` changes a VirtualMachine's CPU, memory and disk size. Since v0.4.0
+it has exactly three outcomes, and a provider never reports success for
 a change it did not apply:
 
 | Outcome | What the provider did | What the manager records |
@@ -43,7 +43,7 @@ The libvirt provider grows the disk first — the step a request can make fail
 memory changes. It then reads the domain's persistent definition
 (`virsh dumpxml --inactive`) and changes it **first** (`--config`), then the
 running domain (`--live`). A live change is therefore never left unpersisted —
-before this release a live change was never written to the definition and was
+before v0.4.0 a live change was never written to the definition and was
 silently undone at the next power cycle.
 
 - **vCPUs.** A count above the definition's vCPU maximum raises the maximum
@@ -108,7 +108,7 @@ gracefully. An `Unknown` VM is left alone entirely — including one a
 third-party provider reports in a state outside the enum. An adopted VM that is not powered off is adopted with
 `spec.powerState: On`. New domains on a clustered Provider are created with
 guest suspend to RAM and to disk disabled (`<pm>`). Clustered domains created
-before this release keep their definition and can still suspend to RAM; they are
+before v0.4.0 keep their definition and can still suspend to RAM; they are
 then reported `Suspended` and left alone. Adding `<pm>` to them on a later
 offline reconfigure is a follow-up (it means rewriting the domain definition).
 
@@ -206,7 +206,7 @@ means "leave this disk as it is" (the manager sends a growth above the
 
 | Size | vSphere | libvirt | Proxmox |
 |---|---|---|---|
-| VMClass `spec.diskDefaults.size` (the root disk) | Not applied by `Reconfigure` (`Create` applies it). | Grows the primary disk, a floor (unchanged by this release). | Not applied (and the Proxmox `Create` does not apply it yet either). |
+| VMClass `spec.diskDefaults.size` (the root disk) | Not applied by `Reconfigure` (`Create` applies it). | Grows the primary disk, a floor (unchanged in v0.4.0). | Not applied (and the Proxmox `Create` does not apply it yet either). |
 | `spec.disks[].sizeGiB` (additional disks) | Grows the additional disk `Create` attached for that entry, found by the name recorded with it (below). A **smaller** size is refused (`InvalidSpec`, nothing changed — the CPU/memory change in the same request included): a disk is never shrunk. | Not applied: the libvirt `Create` attaches no `spec.disks`. | Not applied: the Proxmox `Create` attaches no `spec.disks`, so no disk is the entry's — not `scsi0`, not a template's `scsi1`. |
 
 **`spec.disks` on libvirt and Proxmox is reported, not refused.** Because the
@@ -240,7 +240,7 @@ entry added after the VM was created is not attached there either; see below).
 
 How vSphere finds an entry's disk: `Create` records each additional disk it
 attaches in the VM's `ExtraConfig` — `virtrigaud.disk.additional.<N>` (the disk
-file) and, since this release, `virtrigaud.disk.additional.<N>.name` (the
+file) and, since v0.4.0, `virtrigaud.disk.additional.<N>.name` (the
 `spec.disks` name). An entry goes to the one disk recorded with its name, so
 reordering or removing `spec.disks` entries never moves a size to another disk.
 The disk is found by its recorded file, or by the file's base name after a
@@ -267,7 +267,7 @@ no disk is recorded for is logged at `INFO`.
 A disk on a SCSI controller with a shared bus, or with multi-writer sharing, is
 grown only while the VM is powered off (see the next section).
 
-Before this release vSphere grew the **first** disk (the root disk) to
+Before v0.4.0 vSphere grew the **first** disk (the root disk) to
 `spec.disks[0].sizeGiB`, and Proxmox sent every `spec.disks` size to `scsi0` and,
 after a disk grow, dropped the CPU/memory change while reporting success.
 
@@ -293,7 +293,7 @@ change of a VM that is not powered off, the provider reads
 controller and sharing; when the change is not possible now it refuses the whole
 request — everything in it — before changing anything, with
 `RECONFIGURE_NEEDS_POWER_OFF` (`Reconfiguring=False/ResizePendingPowerOff`).
-Before this release vCenter refused the task and the manager retried it on its
+Before v0.4.0 vCenter refused the task and the manager retried it on its
 backoff indefinitely, with a vCenter task failure each time.
 
 To apply such a change: set `spec.powerState: Off`; the manager powers the VM off

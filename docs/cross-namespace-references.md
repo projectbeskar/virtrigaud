@@ -302,10 +302,11 @@ so no grant can be set and every cross-namespace reference is refused. The
 manager's existing CRD check (see
 [`vm-provider-binding.md`](vm-provider-binding.md#3-the-manager-checks-the-installed-crd))
 therefore also requires `spec.consumerNamespaceSelector` in those three CRDs,
-and `status.providerStatus[].providerUID` and `taskRef` in the `VMImage` CRD
-(an older one prunes them, so no prepared image is trusted and no asynchronous
-prepare is tracked): while one lacks a field, the state is `missing` and
-readiness fails. The state is on
+and `status.providerStatus[].providerUID`, `taskRef` and `sourceDigest` in the
+`VMImage` CRD (an older one prunes them, so no prepared image is trusted and no
+asynchronous prepare is tracked): while one lacks a field, the state is `missing`
+and readiness fails. (It checks further fields of other features too; the
+complete list is in [`vm-provider-binding.md`](vm-provider-binding.md#3-the-manager-checks-the-installed-crd).) The state is on
 `virtrigaud_manager_vm_crd_security_features`.
 
 ## RBAC
@@ -316,8 +317,9 @@ readiness fails. The state is on
   never writes `Namespace` objects.
 - `customresourcedefinitions`: `get` on `providers.infra.virtrigaud.io`,
   `vmclasses.infra.virtrigaud.io` and `vmimages.infra.virtrigaud.io`, next to
-  the existing `virtualmachines.infra.virtrigaud.io`, for the CRD check. Only
-  those four objects (`resourceNames`), in the chart's ClusterRole.
+  the existing `virtualmachines.infra.virtrigaud.io` and
+  `vmsnapshots.infra.virtrigaud.io`, for the CRD check. Only those five
+  objects (`resourceNames`), in the chart's ClusterRole.
 
 ## Upgrade notes
 

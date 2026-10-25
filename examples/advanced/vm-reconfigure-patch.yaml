@@ -2,18 +2,22 @@
 # This patch demonstrates how to modify a VM's resources after creation
 # Apply this after the initial VM is running to trigger reconfiguration
 #
-# NOTE — Libvirt online reconfigure:
-#   For CPU/memory changes to apply WITHOUT a power cycle on Libvirt/KVM, the VM
-#   must have been CREATED from a VMClass with cpuHotAddEnabled: true and/or
-#   memoryHotAddEnabled: true. The new values must also fall within the ~4×
-#   ceiling provisioned at create time (vCPU ceiling is hard-capped at 64).
-#   If either condition is not met, the provider logs a WARN and the controller
-#   orchestrates a graceful power cycle instead.
-#   For disk expansion: Libvirt grows the primary disk live via virsh blockresize
-#   (grow-only). A best-effort in-guest FS grow runs via the guest agent; if the
-#   guest agent is absent the block device is enlarged but the filesystem must be
-#   extended manually or via cloud-init.
-#   vSphere and Proxmox support online reconfigure and disk expansion unconditionally.
+# NOTE — what a reconfigure does on each provider (docs/reconfigure-results.md):
+#   Libvirt: the change is written to the VM's persistent definition and, on a
+#   running VM, applied live where libvirt allows it. A grow that needs CPU or
+#   memory hot-add (the VM must have been created from a VMClass with
+#   cpuHotAddEnabled / memoryHotAddEnabled), and any memory shrink on a running
+#   VM, is "restart required": it takes effect at the next power cycle
+#   (Reconfiguring=True, reason RestartRequired). The controller does not
+#   power-cycle the VM for you.
+#   Disks grow only (the VMClass disk size is a floor); a running VM's disk is
+#   grown live and the filesystem inside the guest is grown on a best-effort basis.
+#   vSphere: applied by one reconfigure task. A powered-on VM that cannot take
+#   the change now (no CPU/memory hot-add, a disk on a shared SCSI bus, ...) is
+#   refused before anything changes (Reconfiguring=False, reason
+#   ResizePendingPowerOff); set spec.powerState: Off and it is applied.
+#   Proxmox: applied through the PVE API; a CPU/memory change PVE keeps pending
+#   because hot-plug is off is currently reported as applied.
 
 ---
 # Upgrade web-server-01 resources.

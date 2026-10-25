@@ -6,13 +6,13 @@
 # 4. Using placement policies for advanced placement rules
 #
 # NOTE — Libvirt online reconfigure:
-#   For the reconfiguration step to work WITHOUT a power cycle on Libvirt/KVM,
-#   the VMClass MUST have cpuHotAddEnabled and/or memoryHotAddEnabled set to
-#   true, and the VM must have been CREATED with that class (headroom is
-#   provisioned at create time only). See the VMClass below and the Libvirt
-#   provider guide at https://projectbeskar.github.io/virtrigaud/providers/libvirt/
-#   for details.
-#   vSphere and Proxmox support online reconfigure unconditionally.
+#   For a CPU/memory grow to apply WITHOUT a power cycle on Libvirt/KVM, the
+#   VMClass MUST have cpuHotAddEnabled and/or memoryHotAddEnabled set to true,
+#   and the VM must have been CREATED with that class (headroom is provisioned
+#   at create time only). Otherwise the change is "restart required": it takes
+#   effect at the next power cycle. See the VMClass below and
+#   docs/reconfigure-results.md. A vSphere VM that cannot take a change while
+#   powered on is refused (ResizePendingPowerOff) until it is powered off.
 
 ---
 # Placement policy for production workloads
@@ -62,7 +62,7 @@ spec:
 #   When true, the Libvirt provider provisions hotplug headroom at VM create time
 #   so that CPU and memory can be raised live (no power cycle) up to ~4× the
 #   initial values (vCPU ceiling capped at 64). These flags are ignored by the
-#   vSphere and Proxmox providers, which support online reconfigure unconditionally.
+#   vSphere and Proxmox providers; vSphere hot-add is a setting of the VM itself.
 #   VMs created without these flags (including all VMs created before v0.3.9) still
 #   require a power cycle for any reconfiguration on Libvirt.
 apiVersion: infra.virtrigaud.io/v1beta1
@@ -165,7 +165,7 @@ spec:
     name: web-server-01
   snapshotConfig:
     name: "pre-upgrade-snapshot"
-    includeMemory: true  # Include memory state (Libvirt/Proxmox only; see comment above)
+    includeMemory: true  # Include memory state (see the comment above)
     description: "Snapshot before CPU/memory upgrade"
   retentionPolicy:
     maxAge: "168h"  # Keep for 7 days
@@ -189,7 +189,7 @@ spec:
     placementRef:
       name: production-policy
   options:
-    type: FullClone  # libvirt refuses LinkedClone in this release (docs/libvirt-clones.md)
+    type: FullClone  # libvirt refuses LinkedClone in v0.4.0 (docs/libvirt-clones.md)
     powerOn: true
   # Every clone boots as a new cloud-init instance (new SSH host keys) with the
   # hostname below (docs/vm-ownership.md#a-clones-host-identity). libvirt also

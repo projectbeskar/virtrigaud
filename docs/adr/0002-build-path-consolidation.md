@@ -2,7 +2,7 @@
 
 > **Location**: `docs/adr/0002-build-path-consolidation.md`
 > Promoted from `fieldTesting/` on 2026-05-27.
-> **H1 PRs 1–4 shipped in v0.3.6. PR-5 (HTTPS-by-default metrics) is deferred to v0.4.0.**
+> **H1 PRs 1–4 shipped in v0.3.6. PR-5 (HTTPS-by-default metrics) did not ship in v0.4.0 and remains deferred.**
 
 ## Status
 
@@ -76,6 +76,10 @@ Removed `cmd/main.go` and root `Dockerfile`. All Makefile targets that previousl
 **Shipped**: v0.3.6 (#121).
 
 ### PR-5: Flip metrics-secure default to `true` (v0.4.0) — deferred
+
+> **Update (v0.4.0):** PR-5 did not ship in v0.4.0. `--metrics-secure` still defaults to
+> `false` (`cmd/manager/main.go`), so `/metrics` is served over plain HTTP unless the
+> operator passes `--metrics-secure=true`. The default flip remains deferred.
 
 Changes `--metrics-secure` default from `false` to `true`. Breaking: operators with HTTP-scrape Prometheus configurations will stop receiving metrics on upgrade unless they update their scrape config or explicitly set `--metrics-secure=false`. Held for v0.4.0 with loud release-note callout.
 

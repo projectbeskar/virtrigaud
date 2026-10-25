@@ -38,8 +38,12 @@
 > **Slice 4** lists VMs across every host (`VMInfo.host_id`,
 > `ListVMsResponse.unreachable_host_ids`) and adopts from a clustered provider,
 > keyed on (host, id) — see [Listing and adoption](#listing-and-adoption-slice-4).
-> `topology: cluster` stays **experimental** until Addendum A slice 5. Still to
-> come: host→host migration (P2).
+> **Addendum B** adds migration into a clustered provider — see
+> [Migration into a clustered provider](#migration-into-a-clustered-provider-addendum-b).
+> `topology: cluster` is **experimental** in v0.4.0: ADR-0007 slice 5 ran a
+> single-`Host` lab validation only (multi-host placement, the unreachable-host
+> path and snapshot revert have not been run on a real multi-host pool). Not
+> implemented: host→host migration (P2).
 
 VirtRigaud is adding a new *class* of provider — a **clustered / orchestrator**
 provider — that makes VirtRigaud itself the cluster manager for hypervisors that
@@ -437,8 +441,7 @@ meaningful for hypervisors with no native cluster manager (libvirt first).
 **This is now enforced at admission (ADR-0007 D2).** The `vprovider.kb.io`
 validating webhook (`api/infra.virtrigaud.io/v1beta1/provider_webhook.go`) rejects
 `spec.topology: cluster` on any provider type **except** the allow-listed ones.
-The allow-list is **`libvirt` only** today; `cloudhypervisor` joins it when that
-type is added (ADR-0007 P4). `topology: single` and the empty/unset value (which
+The allow-list is **`libvirt` only**. `topology: single` and the empty/unset value (which
 the apiserver defaults to `single`, D9) are accepted for **all** types, so today's
 providers are byte-for-byte unaffected. A rejected write returns a field-scoped
 `spec.topology` invalid error that names the offending type and the allowed
@@ -928,9 +931,10 @@ free = allocatable × overcommit ratio − committed
     turning hot-add off in the VMClass later does not lower it. A VM scheduled
     before that field existed gets it recorded once from its provider (the
     domain's actual memory maximum, reported by `Describe`), after which the
-    VMClass flag no longer matters. A recorded ceiling is lowered, never
-    raised, when the provider reports less — after a memory shrink, which
-    lowers the domain's maximum with it. CPU hot-add is not counted at its ceiling,
+    VMClass flag no longer matters. A recorded ceiling is raised when the
+    provider reports a larger maximum, and lowered when it reports less — after
+    a confirmed memory shrink, which lowers the domain's maximum with it (never
+    while a reconfigure is in flight, pending a restart or failed). CPU hot-add is not counted at its ceiling,
     because extra vCPUs stay offline until a resize (which is checked) brings
     them online;
   - a VMClass in another namespace that the VM's namespace may not use
@@ -1169,11 +1173,14 @@ requesting VirtualMachine's UID) applies on the chosen host too; see
 
 ```go
 type PlacementStatus struct {
-    Host              string       // the bound Host (CR name) — the durable truth
-    PendingHost       string       // the Host an unconfirmed Create is aimed at (Addendum A, A2)
-    Pool              string       // the HostPool it was scheduled into
-    LastScheduledTime *metav1.Time // when the scheduler last (re)bound it
-    Reason            string       // the scheduler's decision trace
+    Host              string              // the bound Host (CR name) — the durable truth
+    PendingHost       string              // the Host an unconfirmed Create is aimed at (Addendum A, A2)
+    ExcludedHosts     []string            // Hosts that refused a create with a name conflict (at most 16)
+    PendingResources  *PlacementResources // the size a pending create was admitted at
+    MemoryCeilingMiB  *int64              // the balloon maximum recorded at scheduling (0 for none)
+    Pool              string              // the HostPool it was scheduled into
+    LastScheduledTime *metav1.Time        // when the scheduler last (re)bound it
+    Reason            string              // the scheduler's decision trace
 }
 ```
 
@@ -1452,7 +1459,11 @@ Clustered `GetCapabilities` is honest about this (D7): it advertises
 expansion, exactly as a single-host provider does; and since slice 3,
 snapshots, memory snapshots and disk export — the export exactly
 as served: backends `s3` and `nfs` only, relay mode, `qcow2` only, no
-compression — and `supportsRoutedClone` (it routes `Clone` to the source's host). It still hides linked clones and disk import, and reports
+compression — and `supportsRoutedClone` (it routes `Clone` to the source's host).
+Since slice 4 it advertises `supportsRoutedAdoption`, and since Addendum B disk
+import (backends `s3` and `nfs`, formats `qcow2`, `raw` and `vmdk`) with
+`supportsRoutedImport`, `supportsLandedDiskDelete` and the staged-disk delete
+for `s3` and `nfs`. It still hides linked clones, and reports
 `supports_image_import=false`. The operator therefore skips image preparation
 for a clustered provider.
 
@@ -1603,8 +1614,10 @@ for a clustered provider.
     `TargetCleanup` (`True/TargetRemoved`, or `False/TargetKept` with why); a
     failed VMClone never acts on its target name again. A clone that is only retrying or waiting (`Pending`,
     including a blocked or excluded host) never removes its target. Single-host
-    clones are unchanged: their target is created only after the clone
-    succeeded.
+    clones also create their target before the Clone call, and remove it when
+    they fail for good unless the provider reported a cloned VM
+    (`status.targetVMID`) or a Clone of unknown outcome is on record, when the
+    target is kept (see [Clones: re-bind](vm-ownership.md#clones-re-bind)).
   - On success the target is bound in one status write: `status.id`, the host,
     and the pending host cleared (`Placed=True`, `Bound`), with
     `status.currentResources` at the size actually cloned (the admitted size
@@ -2508,8 +2521,10 @@ In addition to [Host prerequisites](#host-prerequisites):
   a migration **target** (Addendum B: the target is placed first and the
   disk lands on its host; [Migration into a clustered provider](#migration-into-a-clustered-provider-addendum-b)).
   The `vprovider.kb.io` validating webhook enforces the topology×type rule at
-  admission (ADR-0007 D2). Until Addendum A slice 5 validates a real clustered VM
-  end to end, do not run workloads on `topology: cluster`.
+  admission (ADR-0007 D2). ADR-0007 slice 5 validated a clustered VM on a single
+  `Host` only; until a multi-host run covers multi-host placement, the
+  unreachable-host path and snapshot revert, do not run workloads you cannot
+  afford to lose on `topology: cluster`.
 - **No rescheduling or migration yet.** Moving an *already-created* VM is not wired:
   neither rescheduling a bound VM to a different host, nor host→host `Migrate` /
   `VMHostMigration`. These land in later ADR-0007 phases.

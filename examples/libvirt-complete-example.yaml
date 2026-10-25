@@ -1,15 +1,17 @@
 # Complete LibVirt/KVM Provider Example
 # This example demonstrates VM creation using the LibVirt provider
 #
-# 📝 NOTE: Requires LibVirt Daemon Access
-# The LibVirt provider connects to libvirtd (local or remote). For local development,
-# install libvirt-daemon-system. See docs/providers/libvirt.md for setup details.
+# NOTE: Requires SSH access to a libvirt/KVM host
+# The libvirt provider runs in a pod and connects to the host over SSH
+# (qemu+ssh://). It runs virsh and qemu-img on the host, so the SSH user must be
+# able to manage libvirt there. See docs/libvirt-domain-ownership.md ("Staging on
+# the host") and docs/clustered-provider-inventory.md#host-prerequisites.
 #
 # ⚠️  SCHEMA UPDATE: This example has been updated to match the current v1beta1 CRD schema.
 # Key changes: endpoint format, memory/disk sizes use resource.Quantity, 
 # nested structure for source/network configs, and proper field naming.
 
-# First, create the credentials secret (for remote connections)
+# First, create the credentials secret
 apiVersion: v1
 kind: Secret
 metadata:
@@ -18,16 +20,15 @@ metadata:
 type: Opaque
 stringData:
   username: "virtrigaud"
-  password: "your-password-here"
-  # For TLS connections (optional):
-  # tls.crt: |
-  #   -----BEGIN CERTIFICATE-----
-  #   ...
-  #   -----END CERTIFICATE-----
-  # tls.key: |
-  #   -----BEGIN PRIVATE KEY-----
-  #   ...
-  #   -----END PRIVATE KEY-----
+  ssh-privatekey: |
+    -----BEGIN OPENSSH PRIVATE KEY-----
+    REDACTED
+    -----END OPENSSH PRIVATE KEY-----
+  # The host's public key, in known_hosts format (for example `ssh-keyscan -t ed25519
+  # kvm-host.example.com`, checked against the host's own fingerprint). Required:
+  # the provider does not trust a host key on first use (ADR-0004).
+  known_hosts: |
+    kvm-host.example.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIREPLACE_WITH_HOST_KEY
 
 ---
 # Define the Libvirt provider
@@ -38,11 +39,7 @@ metadata:
   namespace: default
 spec:
   type: libvirt
-  endpoint: qemu:///system  # Local connection
-  # For remote connections:
-  # endpoint: qemu+ssh://user@kvm-host.example.com/system
-  # endpoint: qemu+tcp://kvm-host.example.com:16509/system
-  # endpoint: qemu+tls://kvm-host.example.com:16514/system
+  endpoint: qemu+ssh://virtrigaud@kvm-host.example.com/system
   credentialSecretRef:
     name: libvirt-creds
   defaults:

@@ -43,6 +43,12 @@ end-to-end over S3).
 
 ### The current model, traced through the live code
 
+> *This section describes the code as of v0.3.9, when the ADR was written, and is kept as
+> the decision's context. In v0.4.0 the PVC discovery and mount live in
+> `internal/controller/provider_migration_storage.go` (`discoverMigrationPVCs` no longer
+> exists), `NewStorage` also accepts `s3`, and `MigrationStorage.Type` is
+> `Enum=pvc;nfs;s3` (`api/infra.virtrigaud.io/v1beta1/vmmigration_types.go`).*
+
 Migration today is **PVC-only and structurally broken for libvirt and Proxmox**:
 
 1. `VMMigration` reconcile creates an RWX PVC, labels it

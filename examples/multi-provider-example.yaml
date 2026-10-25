@@ -38,7 +38,7 @@ metadata:
   namespace: default
 spec:
   type: libvirt
-  endpoint: qemu+tcp://edge-kvm.example.com/system
+  endpoint: qemu+ssh://virtrigaud@edge-kvm.example.com/system
   credentialSecretRef:
     name: libvirt-creds
   runtime:

@@ -3,7 +3,8 @@
 #
 # ⚠️  IMPORTANT: Requires Active vSphere Environment  
 # The vSphere provider needs access to vCenter Server or ESXi hosts.
-# See docs/providers/vsphere.md for setup instructions and configuration details.
+# The credentialSecretRef Secret needs `username` and `password`; see
+# secrets/vsphere-creds.yaml.
 #
 # Required vCenter privilege: the account in credentialSecretRef needs
 # "Virtual machine > Change Configuration > Advanced configuration"

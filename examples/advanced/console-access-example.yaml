@@ -45,7 +45,7 @@ metadata:
   namespace: default
 spec:
   type: libvirt
-  endpoint: "qemu:///system"
+  endpoint: "qemu+ssh://virtrigaud@kvm-host.example.com/system"
   credentialSecretRef:
     name: libvirt-credentials
   runtime:

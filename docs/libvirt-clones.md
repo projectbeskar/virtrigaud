@@ -1,7 +1,7 @@
 # libvirt clones and the linked-clone dependency
 
 This page describes how the libvirt provider clones a VM (`VMClone`), why
-**linked** clones are disabled in this release, how an existing linked clone
+**linked** clones are disabled in v0.4.0, how an existing linked clone
 depends on its source VM, and what the provider refuses to do while that
 dependency exists. It applies to single-host libvirt Providers and to
 clustered (`topology: cluster`) ones, which clone onto the source VM's own
@@ -12,7 +12,7 @@ host and serve full clones only (see
 
 | | Full clone (`spec.options.type: FullClone`, the default) | Linked clone (`spec.options.type: LinkedClone`) |
 |---|---|---|
-| Status on libvirt | **Supported** | **Disabled in this release** (see below); linked clones made by an earlier release keep working |
+| Status on libvirt | **Supported** | **Disabled in v0.4.0** (see below); linked clones made by an earlier release keep working |
 | Disk | An independent copy of the source's primary disk (`qemu-img convert`, flattening any backing chain) | A thin qcow2 overlay whose **backing file is the source VM's disk** (`qemu-img create -f qcow2 -b <source disk>`) |
 | Speed and space | Slow, full size | Fast, only the clone's own writes |
 | Dependency | None: deleting either VM never touches the other's disk | The clone reads every block it has not written from the source's disk, for as long as it exists |
@@ -992,7 +992,7 @@ stops; the `VR_DISK_READ` rule avoids both.
 
 ## Upgrade notes
 
-This behavior ships in the release that follows v0.3.11 and fixes a data-loss
+This behavior ships in v0.4.0, the release that follows v0.3.11, and fixes a data-loss
 bug: **deleting a running linked clone deleted its source VM's disk**, because
 Delete removed every file its definition listed, including the backing file.
 After upgrading:

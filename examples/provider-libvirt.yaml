@@ -3,7 +3,10 @@
 #
 # ⚠️  IMPORTANT: Requires LibVirt Host Access
 # The LibVirt provider needs access to a LibVirt daemon (qemu:///system or remote)
-# See docs/providers/libvirt.md for setup instructions and configuration details.
+# The provider connects over SSH (qemu+ssh://) and runs virsh and qemu-img on the
+# host. The credentialSecretRef Secret needs `username`, `ssh-privatekey` (or
+# `password`) and `known_hosts`: the provider verifies the host key and does not
+# trust on first use (ADR-0004). See secrets/libvirt-creds.yaml.
 
 apiVersion: infra.virtrigaud.io/v1beta1
 kind: Provider
@@ -12,7 +15,7 @@ metadata:
   namespace: default
 spec:
   type: libvirt
-  endpoint: qemu+tcp://libvirt.example.com/system
+  endpoint: qemu+ssh://virtrigaud@libvirt.example.com/system
   credentialSecretRef:
     name: libvirt-creds
   runtime:
