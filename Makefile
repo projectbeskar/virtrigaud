@@ -216,6 +216,10 @@ ci: test lint proto-lint generate gen-crds vet ## Run all CI checks locally
 
 # Protocol buffer definitions
 PROTO_DIR = proto
+# What `make proto-breaking` compares the proto module with (a buf input; the
+# git path is relative to $(PROTO_DIR)). Override with e.g.
+# PROTO_BREAKING_AGAINST="../.git#tag=v0.4.0,subdir=proto".
+PROTO_BREAKING_AGAINST ?= ../.git\#ref=origin/main,subdir=proto
 
 .PHONY: proto
 proto: buf ## Generate gRPC stubs from protocol buffer definitions using buf
@@ -227,7 +231,7 @@ proto-lint: buf ## Lint protocol buffer definitions
 
 .PHONY: proto-breaking
 proto-breaking: buf ## Check for breaking changes in protocol buffer definitions
-	cd $(PROTO_DIR) && $(BUF) breaking --against '.git#branch=main'
+	cd $(PROTO_DIR) && $(BUF) breaking --against '$(PROTO_BREAKING_AGAINST)'
 
 .PHONY: build
 build: gen-crds generate fmt vet ## Build manager binary.

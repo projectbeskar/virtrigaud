@@ -740,6 +740,36 @@ jobs:
           print('✅ Catalog schema validation passed')
           "
 
+  proto-breaking:
+    name: Proto Breaking Changes
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    # A pull request is compared with the branch it targets. v1beta1 and the
+    # provider gRPC contract are additive-only: a deleted or retyped field, a
+    # removed RPC or a removed enum value fails here (proto/buf.yaml).
+    if: github.event_name == 'pull_request'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install buf
+        run: ./hack/retry.sh go install github.com/bufbuild/buf/cmd/buf@v1.46.0
+
+      - name: Check for breaking changes against the target branch
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          cd proto
+          "$(go env GOPATH)/bin/buf" breaking --against "../.git#ref=origin/${BASE_REF},subdir=proto"
+
   api-conversion-tests:
     name: API Conversion Tests
     runs-on: ubuntu-22.04
@@ -782,7 +812,7 @@ jobs:
   ci:
     name: CI Summary
     runs-on: ubuntu-22.04
-    needs: [test, lint, security, govulncheck, generate, build, build-tools, build-images-pr, helm, conformance, integration, catalog-validation, api-conversion-tests]
+    needs: [test, lint, security, govulncheck, generate, build, build-tools, build-images-pr, helm, conformance, integration, catalog-validation, api-conversion-tests, proto-breaking]
     if: always()
     steps:
       - name: Check CI Results
@@ -801,6 +831,7 @@ jobs:
           echo "- Integration: ${{ needs.integration.result }}"
           echo "- Catalog Validation: ${{ needs.catalog-validation.result }}"
           echo "- API Conversion Tests: ${{ needs.api-conversion-tests.result }}"
+          echo "- Proto Breaking Changes: ${{ needs.proto-breaking.result }}"
 
           # Fail if any required job failed
           if [[ "${{ needs.test.result }}" != "success" ]] || \
@@ -814,7 +845,8 @@ jobs:
              [[ "${{ needs.helm.result }}" != "success" ]] || \
              [[ "${{ needs.conformance.result }}" != "success" ]] || \
              ([[ "${{ needs.catalog-validation.result }}" != "success" ]] && [[ "${{ needs.catalog-validation.result }}" != "skipped" ]]) || \
-             ([[ "${{ needs.api-conversion-tests.result }}" != "success" ]] && [[ "${{ needs.api-conversion-tests.result }}" != "skipped" ]]); then
+             ([[ "${{ needs.api-conversion-tests.result }}" != "success" ]] && [[ "${{ needs.api-conversion-tests.result }}" != "skipped" ]]) || \
+             ([[ "${{ needs.proto-breaking.result }}" != "success" ]] && [[ "${{ needs.proto-breaking.result }}" != "skipped" ]]); then
             echo "❌ CI failed"
             exit 1
           fi
