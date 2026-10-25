@@ -212,6 +212,7 @@ func (r *VMCloneReconciler) startClusteredClone(
 	if err != nil {
 		return r.handleClusteredCloneError(ctx, clone, target, host, err)
 	}
+	r.recordCustomizationNotSent(clone)
 
 	before := clone.DeepCopy()
 	markCloneStarted(clone, linked, started, fmt.Sprintf("Clone operation initiated on host %s", host))

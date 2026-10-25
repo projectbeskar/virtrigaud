@@ -48,6 +48,7 @@ import (
 
 	infravirtrigaudiov1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
 	"github.com/projectbeskar/virtrigaud/internal/k8s"
+	"github.com/projectbeskar/virtrigaud/internal/obs/logging"
 	"github.com/projectbeskar/virtrigaud/internal/obs/metrics"
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
 	"github.com/projectbeskar/virtrigaud/internal/scheduler"
@@ -2531,7 +2532,7 @@ func (r *VirtualMachineReconciler) buildCreateRequest(
 	vmImage *infravirtrigaudiov1beta1.VMImage,
 	networks []*infravirtrigaudiov1beta1.VMNetworkAttachment,
 ) (contracts.CreateRequest, error) {
-	log := ctrl.Log.WithName("buildCreateRequest")
+	log := ctrl.LoggerFrom(ctx).WithName("buildCreateRequest")
 
 	// Check if using imported disk or template
 	usingImportedDisk := vm.Spec.ImportedDisk != nil
@@ -2730,7 +2731,7 @@ func (r *VirtualMachineReconciler) buildCreateRequest(
 		if vmImage.Spec.Source.Libvirt != nil {
 			log.V(1).Info("Libvirt image source found",
 				"path", vmImage.Spec.Source.Libvirt.Path,
-				"url", vmImage.Spec.Source.Libvirt.URL,
+				"url", logging.RedactURL(vmImage.Spec.Source.Libvirt.URL),
 				"format", vmImage.Spec.Source.Libvirt.Format)
 			image.Path = vmImage.Spec.Source.Libvirt.Path
 			image.URL = vmImage.Spec.Source.Libvirt.URL
@@ -2743,7 +2744,7 @@ func (r *VirtualMachineReconciler) buildCreateRequest(
 			}
 			log.V(1).Info("Set image from Libvirt source",
 				"image.Path", image.Path,
-				"image.URL", image.URL,
+				"image.URL", logging.RedactURL(image.URL),
 				"image.Format", image.Format)
 		} else {
 			log.V(1).Info("Libvirt image source is nil")

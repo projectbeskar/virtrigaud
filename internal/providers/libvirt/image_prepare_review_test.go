@@ -26,6 +26,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -442,7 +443,12 @@ func TestImagePrepare_ManagerRequestShapes(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, wantName, resp.PreparedImageID)
 	assert.Equal(t, filepath.Join(h.images, wantName+qcow2Ext), resp.PreparedImagePath)
-	assert.Contains(t, h.log("curl"), "--max-time 2700", "spec.prepare.timeout bounds the download")
+	// spec.prepare.timeout (45m) bounds the download, and so does the call:
+	// the manager gives ImagePrepare 5 minutes, and curl stops in time for
+	// the rest of the prepare (downloadMaxTime).
+	maxTime := curlMaxTimeSeconds(t, h.log("curl"))
+	assert.LessOrEqual(t, maxTime, 270, "capped by the ImagePrepare call's deadline, less the reserve")
+	assert.Greater(t, maxTime, 200)
 	assert.Equal(t, legacyBefore, libvirtLegacyCount(t), "an identity request is not legacy")
 
 	legacy := contracts.ImagePrepareRequest{ImageJSON: string(specJSON), TargetName: image.Name}
@@ -452,4 +458,19 @@ func TestImagePrepare_ManagerRequestShapes(t *testing.T) {
 	assert.Equal(t, image.Name, lresp.PreparedImageID)
 	assert.Equal(t, filepath.Join(h.images, image.Name+qcow2Ext), lresp.PreparedImagePath)
 	assert.Equal(t, legacyBefore+1, libvirtLegacyCount(t))
+}
+
+// curlMaxTimeSeconds returns the --max-time of the one curl call in curlLog.
+func curlMaxTimeSeconds(t *testing.T, curlLog string) int {
+	t.Helper()
+	args := strings.Fields(curlLog)
+	for i, a := range args {
+		if a == "--max-time" && i+1 < len(args) {
+			n, err := strconv.Atoi(args[i+1])
+			require.NoError(t, err)
+			return n
+		}
+	}
+	require.Failf(t, "no --max-time in the curl call", "%q", curlLog)
+	return 0
 }

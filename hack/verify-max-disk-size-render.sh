@@ -6,13 +6,15 @@
 #
 #   1. Default values: the manager gets no --max-disk-size flag, and with
 #      webhooks.enabled=true the ValidatingWebhookConfiguration holds only
-#      vprovider.kb.io (no admission dependency on VM / VMClass writes).
+#      vprovider.kb.io and the warning-only vvmclone-customization.kb.io (no
+#      admission dependency on VM / VMClass writes).
 #   2. manager.maxDiskSize=500Gi becomes --max-disk-size=500Gi; with webhooks
 #      off no webhook configuration is rendered.
 #   3. With webhooks on as well, the VirtualMachine and VMClass disk-size
 #      webhooks are rendered, each with the same caBundle as the serving
-#      Secret's ca.crt, and their name, path, rules and failurePolicy match
-#      config/webhook/manifests.yaml (generated from the Go markers).
+#      Secret's ca.crt, and their name, path, rules, failurePolicy and
+#      timeoutSeconds match config/webhook/manifests.yaml (generated from the
+#      Go markers).
 #   4. An invalid value fails the render, naming manager.maxDiskSize.
 #   5. `helm upgrade --reuse-values` from v0.3.11 (whose values.yaml has no
 #      such key) still renders, with no flag.
@@ -82,17 +84,18 @@ for h in hooks:
         sys.exit(f"❌ {h['name']} is not in config/webhook/manifests.yaml (no Go marker backs it)")
     if h["clientConfig"]["service"]["path"] != g["clientConfig"]["service"]["path"]:
         sys.exit(f"❌ {h['name']}: path {h['clientConfig']['service']['path']} != generated {g['clientConfig']['service']['path']}")
-    if h["rules"] != g["rules"] or h["sideEffects"] != g["sideEffects"] or h["failurePolicy"] != g["failurePolicy"]:
-        sys.exit(f"❌ {h['name']}: rules/sideEffects/failurePolicy differ from config/webhook/manifests.yaml")
+    if (h["rules"] != g["rules"] or h["sideEffects"] != g["sideEffects"] or h["failurePolicy"] != g["failurePolicy"]
+            or h.get("timeoutSeconds") != g.get("timeoutSeconds")):
+        sys.exit(f"❌ {h['name']}: rules/sideEffects/failurePolicy/timeoutSeconds differ from config/webhook/manifests.yaml")
 print(f"   ok: flag={want_flag} hooks={names}, caBundle coherent, in sync with config/webhook/manifests.yaml")
 PY
 }
 
-echo "==> 1. defaults: no flag, only the Provider webhook"
+echo "==> 1. defaults: no flag, only the Provider and VMClone webhooks"
 helm template virtrigaud "${CHART_DIR}" --namespace "${NAMESPACE}" > "${WORKDIR}/default.yaml"
 check "${WORKDIR}/default.yaml" - -
 helm template virtrigaud "${CHART_DIR}" --namespace "${NAMESPACE}" --set webhooks.enabled=true > "${WORKDIR}/default-hooks.yaml"
-check "${WORKDIR}/default-hooks.yaml" - vprovider.kb.io
+check "${WORKDIR}/default-hooks.yaml" - vprovider.kb.io,vvmclone-customization.kb.io
 
 echo "==> 2. manager.maxDiskSize becomes the manager flag"
 helm template virtrigaud "${CHART_DIR}" --namespace "${NAMESPACE}" --set manager.maxDiskSize=500Gi > "${WORKDIR}/max.yaml"
@@ -101,7 +104,7 @@ check "${WORKDIR}/max.yaml" 500Gi -
 echo "==> 3. with webhooks on, the disk-size webhooks are rendered and coherent"
 helm template virtrigaud "${CHART_DIR}" --namespace "${NAMESPACE}" --set manager.maxDiskSize=2Ti \
   --set webhooks.enabled=true > "${WORKDIR}/max-hooks.yaml"
-check "${WORKDIR}/max-hooks.yaml" 2Ti vprovider.kb.io,vvirtualmachine-disksize.kb.io,vvmclass-disksize.kb.io
+check "${WORKDIR}/max-hooks.yaml" 2Ti vprovider.kb.io,vvmclone-customization.kb.io,vvirtualmachine-disksize.kb.io,vvmclass-disksize.kb.io
 
 echo "==> 4. invalid values (and anything below 1Gi, which the manager refuses) fail the render"
 for ok in "1Gi" "1.5Gi" "1.1G" "2T" "64Pi"; do

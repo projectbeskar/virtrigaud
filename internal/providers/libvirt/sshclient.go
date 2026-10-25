@@ -319,10 +319,11 @@ func (v *VirshProvider) runOverSSHStdin(ctx context.Context, remoteCmd string, s
 	duration := time.Since(start)
 	// Only a stdout overflow fails the command: stdout is what callers parse,
 	// and a truncated document must never be read as complete. stderr is
-	// diagnostic — a command may write a lot of it and still succeed (wget's
-	// progress dots, about 156 KB per 100 MiB downloaded) — so its middle is
-	// dropped (headTailBuffer keeps the start and the end, where the error
-	// text is) and the command's own exit status stands.
+	// diagnostic — a command may write a lot of it and still succeed (a
+	// progress meter such as wget's dots writes about 156 KB per 100 MiB
+	// downloaded) — so its middle is dropped (headTailBuffer keeps the start
+	// and the end, where the error text is) and the command's own exit status
+	// stands.
 	overflow := runErr == nil && stdout.exceeded
 	if overflow {
 		runErr = fmt.Errorf("remote command stdout exceeded its bound of %d bytes", sshMaxStdoutBytes)

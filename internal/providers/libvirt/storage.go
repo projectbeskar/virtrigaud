@@ -340,9 +340,23 @@ func (s *StorageProvider) GetVolumeInfo(ctx context.Context, poolName, volumeNam
 	return volume, nil
 }
 
-// DownloadCloudImage downloads a cloud image and creates a bootable volume
+// createDownloadLogPrefix prefixes the download log lines of Create's legacy
+// create-from-URL path (DownloadCloudImage).
+const createDownloadLogPrefix = "Create"
+
+// DownloadCloudImage downloads a cloud image and creates a bootable volume.
+// The download is bounded by defaultImagePrepareTimeout and the provider's
+// download size limit (EnvImageMaxDownloadGiB), like an ImagePrepare's.
+//
+// The URL may carry credentials (user-info) or a presigned token (query): it
+// is validated like ImagePrepare's (validateImageSourceURL) and downloaded the
+// same way (downloadToHostFile), so it is never on a command line, never
+// logged unredacted and never in an error.
 func (s *StorageProvider) DownloadCloudImage(ctx context.Context, imageURL, volumeName, poolName string, sizeGB int) (*StorageVolume, error) {
-	log.Printf("INFO Downloading cloud image from %s to volume %s", imageURL, volumeName)
+	log.Printf("INFO Downloading cloud image from %s to volume %s", redactURL(imageURL), volumeName)
+	if err := validateImageSourceURL(imageURL); err != nil {
+		return nil, err
+	}
 
 	// Ensure pool is active
 	if err := s.ensurePoolActive(ctx, poolName); err != nil {
@@ -367,9 +381,9 @@ func (s *StorageProvider) DownloadCloudImage(ctx context.Context, imageURL, volu
 	defer removeHostPath(ctx, s.virshProvider, tempImage, false)
 	log.Printf("INFO Downloading image to temporary location: %s", tempImage)
 
-	result, err := s.virshProvider.runVirshCommand(ctx, "!", "wget", "-O", tempImage, imageURL)
-	if err != nil {
-		return nil, fmt.Errorf("failed to download image: %w, output: %s", err, redactCommandText(result.Stderr))
+	if err := downloadToHostFile(ctx, s.virshProvider, createDownloadLogPrefix, imageURL, tempImage,
+		defaultImagePrepareTimeout); err != nil {
+		return nil, fmt.Errorf("failed to download image: %w", err)
 	}
 
 	// SECURITY: the downloaded file is untrusted. Refuse it if its header
@@ -392,6 +406,7 @@ func (s *StorageProvider) DownloadCloudImage(ctx context.Context, imageURL, volu
 	newDisk := wd.file(filepath.Base(targetPath))
 
 	// Convert and resize image if needed
+	var result *VirshResult
 	if sizeGB > 0 {
 		log.Printf("INFO Converting and resizing image to %dGB", sizeGB)
 

@@ -510,6 +510,7 @@ func (r *VMCloneReconciler) startClone(
 	}
 
 	r.cloneAttempts.forget(clone.UID)
+	r.recordCustomizationNotSent(clone)
 	before := clone.DeepCopy()
 	markCloneStarted(clone, linked, started, cloneStartedMessage)
 	clone.Status.TargetVMID = resp.TargetVmID
@@ -1297,19 +1298,6 @@ func (r *VMCloneReconciler) placementJSON(_ context.Context, clone *infrav1beta1
 		return ""
 	}
 	data, err := json.Marshal(clone.Spec.Target.PlacementRef)
-	if err != nil {
-		return ""
-	}
-	return string(data)
-}
-
-// customizeJSON best-effort marshals the spec.customization to JSON, or
-// returns "" when no customization is present or marshal fails.
-func (r *VMCloneReconciler) customizeJSON(_ context.Context, clone *infrav1beta1.VMClone) string {
-	if clone.Spec.Customization == nil {
-		return ""
-	}
-	data, err := json.Marshal(clone.Spec.Customization)
 	if err != nil {
 		return ""
 	}
