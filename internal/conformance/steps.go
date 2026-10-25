@@ -339,7 +339,9 @@ func (t *testRun) waitFor(ctx context.Context, gvk schema.GroupVersionKind, name
 			return cond == CondDeleted, nil
 		}
 		if err != nil {
-			last = fmt.Sprintf("read failed: %v", err)
+			if ctx.Err() == nil { // keep what was last seen when the read failed because time ran out
+				last = fmt.Sprintf("read failed: %v", err)
+			}
 			return false, nil // transient API errors are retried until the timeout
 		}
 		if cond == CondDeleted {
@@ -380,8 +382,12 @@ func (t *testRun) waitFor(ctx context.Context, gvk schema.GroupVersionKind, name
 		if what == "" {
 			what = "the assertions"
 		}
-		return fmt.Errorf("timed out after %v waiting for %s on %s/%s; last seen: %s",
-			time.Since(start).Round(time.Second), what, gvk.Kind, name, last)
+		verb := "timed out"
+		if !errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			verb = "interrupted"
+		}
+		return fmt.Errorf("%s after %v waiting for %s on %s/%s; last seen: %s",
+			verb, time.Since(start).Round(time.Second), what, gvk.Kind, name, last)
 	}
 	return err
 }
