@@ -5,6 +5,27 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-10-25 20:09] - Release notes for v0.4.1-rc1; v0.4.0 notes archived
+**Author:** @wrkode (William Rizzo)
+
+### Added
+- `docs/release-notes/v0.4.0.md`: the v0.4.0 (GA) release notes, moved from `next.md` with their content unchanged; the header comment now says it is the archived file.
+- `docs/release-notes/next.md`: the release notes for v0.4.1, cumulative since v0.4.0 (breaking changes, highlights, known limitations, validation placeholder, upgrade, changelog pointer). The "Security fixes" subsection lists what is merged and says that the security pull request still in review will be listed when merged; "Validation" is a placeholder until the rc1 lab validation.
+
+### Changed
+- `docs/upgrading.md`: "Upgrading from v0.4.0 to v0.4.1" is complete: the Proxmox SSH data plane for user-data (Secret keys, node checks, `PVE_NODE_SELECTOR`, token privileges, what happens without them, the clone, local-storage migration and linked-clone differences, rollback), the libvirt snapshot and revert answers (V12, single-host "not performed" retries, `RevertNotPerformed`, R28, R37), the stricter `vcts` and `virtrigaud-loadgen` validation, the published module tags, the deprecated runtime chart and how to verify; the older note about single-host snapshot creates and reverts points to it.
+- `docs/README.md`: index rows for `next.md` (v0.4.1) and `v0.4.0.md`.
+- `docs/clustered-provider-inventory.md`, `docs/vm-snapshot-revert.md`, `docs/adr/0013-disk-resize-flow.md`: links to the v0.4.0 notes point at `release-notes/v0.4.0.md`.
+
+### Why
+`next.md` held the v0.4.0 notes, which the v0.4.1 release candidate must not overwrite; the operators upgrading from v0.4.0 need the notes and the upgrade guide to say what breaks (Proxmox user-data now needs SSH credentials) and what changes in behaviour.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [ ] Config change only
+- [x] Documentation only
+
 ## [2026-10-25 19:47] - VMClone customization secrets never sent to providers; libvirt create-from-URL keeps the URL off the host command line
 **Author:** @wrkode (William Rizzo)
 

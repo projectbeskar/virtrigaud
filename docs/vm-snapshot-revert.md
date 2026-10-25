@@ -10,7 +10,7 @@ or event said that nothing happened. Since v0.4.0-rc6, and in v0.4.0, the
 > provider binary, nor the gRPC transport). The flow was also run in the lab on a real
 > vSphere, on Proxmox (an asynchronous PVE task) and on libvirt, single-host and
 > clustered; see "Snapshot revert" under "Validation" in the
-> [v0.4.0 release notes](release-notes/next.md#validation).
+> [v0.4.0 release notes](release-notes/v0.4.0.md#validation).
 
 ## How to revert
 
