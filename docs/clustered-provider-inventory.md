@@ -491,7 +491,7 @@ helm upgrade --install virtrigaud oci://.../virtrigaud \
 With `webhooks.enabled=true` the chart renders (for the default `self-signed`
 source): a `kubernetes.io/tls` **Secret** (`virtrigaud-webhook-certs`), the webhook
 **Service** (`<release>-webhook`), and the **`ValidatingWebhookConfiguration`**
-(`vprovider.kb.io` only — there are no mutating or conversion webhooks). The
+(`vprovider.kb.io`, the warning-only `vvmclone-customization.kb.io`, and with `manager.maxDiskSize` set the two disk-size webhooks — there are no mutating or conversion webhooks). The
 manager Deployment gains the `--webhook-cert-path` flag, the cert volume mount, and
 the `9443` container port.
 
@@ -2165,7 +2165,7 @@ one NFS pool, build `main-73e08e8`, 2026-10-22). **Run:**
   over `nfs`, and a Proxmox source into the cluster over `s3` and over `nfs`,
   and a manager restart in the middle of an import (two migrations were held as
   `ImportOutcomeUnknown` and re-sent after 35 minutes; no duplicate disk was
-  left). See "Validation" in the [v0.4.0 release notes](release-notes/next.md#validation).
+  left). See "Validation" in the [v0.4.0 release notes](release-notes/v0.4.0.md#validation).
 
 **Not recorded as run:** a host made unreachable after the disk landed, an
 R4-held target (a previous incarnation on a host), and a retry after an import.

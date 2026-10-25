@@ -161,8 +161,8 @@ Per the [canonical capabilities matrix](https://projectbeskar.github.io/virtriga
 | **Snapshots** | ✅ | ✅ | ✅ | Point-in-time captures |
 | **Memory Snapshots** | ✅ | ✅ | ✅ | RAM-inclusive checkpoints for a **running** VM. vSphere: `CreateSnapshot(memory=true)`. Libvirt: `snapshot-create-as` without `--disk-only`; a stopped VM is honestly downgraded to disk-only with a WARN ([#202]). |
 | **Cloning (full)** | ✅ | ✅ | ✅ | Libvirt: full copy of resolved disk path (qemu-img convert / vol-clone), same-provider ([#153]) |
-| **Linked Clones** | ✅ | ✅ | ❌ | Proxmox: every clone is a full clone; a `LinkedClone` VMClone is refused (`LinkedCloneUnsupported`). Libvirt: qcow2 overlay (backing-file COW), same-provider ([#153]). UEFI/secure-boot nvram re-point is a deferred follow-up (#208). |
-| **Clone RPC** | ✅ | ✅ | ✅ | Libvirt Clone implemented: linked (qcow2 overlay) + full copy, `source.vmRef`, same-provider ([#153]) |
+| **Linked Clones** | ✅ | ❌ | ❌ | Proxmox: every clone is a full clone; a `LinkedClone` VMClone is refused (`LinkedCloneUnsupported`). Libvirt: disabled (`SupportsLinkedClones=false`, so a `LinkedClone` VMClone is refused): the source disk is not frozen at clone time, so its writes would corrupt the clone. |
+| **Clone RPC** | ✅ | ✅ | ✅ | Libvirt Clone implemented: full copy (a linked request is refused), `source.vmRef`, same-provider ([#153]) |
 | **ImagePrepare RPC** | ✅ | ✅ | ✅ | Libvirt: import/convert image into a storage pool ([#154]) |
 | **Task Tracking** | ✅ | N/A | ✅ | Async operation monitoring |
 | **Console URLs** | ✅ | ✅ | ⚠️ | Proxmox console URL: planned |

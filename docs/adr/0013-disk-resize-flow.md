@@ -677,7 +677,7 @@ controller and conformance tests.
   Rolling the CRD back drops `status.disks` (pruned). No stored object
   becomes invalid.
 - **Rollout order:** CRDs, then manager, then providers. This is the existing
-  order (`docs/release-notes/next.md`).
+  order (`docs/release-notes/v0.4.0.md`).
 
 ### D9. Security
 

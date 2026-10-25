@@ -18,15 +18,35 @@ is the index and the sequencing, not a duplicate of that detail.
 
 ## Upgrading from v0.4.0 to v0.4.1
 
-The rest of this guide covers the upgrade from v0.3.11 to v0.4.0. When you upgrade from v0.4.0
-to v0.4.1, note:
+The rest of this guide covers the upgrade from v0.3.11 to v0.4.0. v0.4.1 is a patch release of
+v0.4.0; from v0.4.0 (GA) the roll order is the same, **CRDs, then the manager, then the
+providers**, and:
+
+- **The CRDs have no schema change.** Only their `description` texts differ (`kubectl explain`
+  shows the corrected text), and one new condition reason, `RevertNotPerformed`, is a constant in
+  the Go API with no schema effect. Apply them as usual; the `virtrigaud` chart's CRD hook does.
+- **The `virtrigaud` chart has no RBAC or values change** (only comments in `values.yaml`). Its
+  webhook template gains the warning-only `vvmclone-customization.kb.io` entry, rendered only with
+  `webhooks.enabled=true` (see [Security fixes](#security-fixes)). `helm upgrade` re-tags the
+  images, and the CRD hook uses a newer `kubectl` image (1.35.9, was 1.32.0).
+- **The gRPC contract has no field, number or RPC change** (comments only), so providers of the
+  two versions interoperate. Roll the libvirt providers promptly after the manager: a v0.4.1
+  manager reads a v0.4.0 libvirt provider's answers as they are (a single-host failed revert as
+  a failure) and retries every "not performed" snapshot create, so until the provider is rolled a
+  single-host overlay collision (V12) or a refusal libvirt will never accept is retried every 10
+  minutes instead of failing; only a v0.4.1 provider answers them for good, as described below.
+
+If you are upgrading from v0.3.11 or from a v0.4.0 release candidate, do the steps of the
+sections below it as well, in the order the rest of this guide gives.
+
+### Security fixes
 
 - **Security: a `VMClone`'s unused customization secrets are no longer sent to the provider.**
   Before, the manager sent all of `spec.customization` in the `Clone` request, including
   `sysprep.productKey`, `sysprep.adminPassword.value`, `sysprep.joinDomain.password.value`,
   `sysprep.customCommands`, `certificates[].data`, `guestCommands[].command`/`.arguments` and
   `userData.ignition.inline`, which no provider acts on. From v0.4.1 the request carries only the
-  fields a provider applies or reports, and those are never sent. Nothing changes in what a
+  fields a provider applies or reports; the fields above are never sent. Nothing changes in what a
   clone gets: `hostname`, `domain` and (libvirt) `userData.cloudInit.inline` are sent and
   applied as before, and the libvirt and vSphere providers still log the other fields that are
   set as not applied (except a `sysprep` that holds only `productKey` or `customCommands`, and
@@ -58,12 +78,12 @@ to v0.4.1, note:
   ([`docs/image-preparation.md`](image-preparation.md#how-an-image-is-published)): `curl -q -K -`
   with the URL on **stdin**, exactly one transfer, `http`/`https`/`ftp` only (redirects
   included), a 30-second connect timeout and the `VIRTRIGAUD_LIBVIRT_IMAGE_MAX_DOWNLOAD_GIB`
-  size limit. Its total time is 30 minutes or the time left of the `Create` call, whichever is
-  shorter, less a tenth of that time (at most a minute) kept for the convert; the manager
-  gives a `Create` 5 minutes, so a download is cut off after about 4.5 minutes (`wget` had no
+  size limit. Its total time is 30 minutes or, when the `Create` call's deadline comes sooner,
+  the time left until it less a tenth of that time (at most a minute) kept for the convert; the
+  manager gives a `Create` 5 minutes, so a download is cut off after at most about 4.5 minutes (`wget` had no
   limit, but the call failed after 5 minutes anyway while `wget` ran on). The same cap now
-  applies to `ImagePrepare` downloads, whose `spec.prepare.timeout` above about 4.5 minutes
-  therefore has no effect. The provider log shows the URL without its user-info and query,
+  applies to `ImagePrepare` downloads, which are therefore cut off after about 4.5 minutes,
+  whatever `spec.prepare.timeout` says (the 30-minute default included). The provider log shows the URL without its user-info and query,
   and errors never contain it. Every image URL takes this path, whatever its scheme: an
   `ftp://` URL is now downloaded (before, it was looked up as a template name, which logged
   it and returned it in the error), and any other scheme is refused (`InvalidSpec`). A URL
@@ -80,21 +100,240 @@ to v0.4.1, note:
   `VMCustomization` type: the fields that hold or commonly hold secret values (listed above)
   are never included, and a `sysprep` or `userData.ignition` that set only such fields
   arrives as an empty object. Do not rely on receiving them.
-- **Deprecated: the `virtrigaud-provider-runtime` chart** (`charts/virtrigaud-provider-runtime/`).
-  It is removed in the next minor release. It was never published to the Helm repository or
-  released with the `virtrigaud` chart. It runs a provider `Deployment` outside a `Provider`
-  resource, which the manager never connects to (the manager talks only to the provider it runs for
-  a `Provider`, at `status.runtime.endpoint`), and it bypasses what the manager sets up for that
-  provider: the gRPC TLS/mTLS settings, the credential `Secret` mount, a dedicated ServiceAccount and
-  the hardened security context. If you installed it, create a `Provider` resource for each provider
-  instead, wait until it is `Ready`, then `helm uninstall` the chart's release. The chart's
-  [README](../charts/virtrigaud-provider-runtime/README.md) maps its values to `Provider` fields.
-- **Provider authors: the SDK and proto Go modules are published.** From v0.4.1 on, each release
-  tags `sdk/vX.Y.Z` and `proto/vX.Y.Z` next to `vX.Y.Z`, and `vrtg-provider init` from a release
-  writes a `go.mod` that requires them at its own version instead of `replace` directives to a
-  checkout. An existing project can drop its `replace` directives and require all three modules
-  (`github.com/projectbeskar/virtrigaud`, `.../sdk`, `.../proto`) at the same release. See
-  [`docs/go-modules.md`](go-modules.md).
+
+### Proxmox: user-data needs the SSH data plane
+
+**Who is affected.** A Proxmox `Provider` whose `VirtualMachine`s carry `spec.userData`, or whose
+`VMClone`s carry `spec.customization.userData.cloudInit.inline` (or clone a VM that has a seed).
+A `VirtualMachine` without `spec.userData` needs nothing new. To list the VMs on Proxmox Providers
+that carry user-data:
+
+```bash
+kubectl get virtualmachines -A -o json | jq -r '.items[]
+  | select(.spec.userData != null)
+  | "\(.metadata.namespace)/\(.metadata.name) provider=\(.spec.providerRef.name)"'
+```
+
+**What changed.** Up to v0.4.0 the provider read two things out of the user-data with a line scan
+(the first `name:` as the user, and the `ssh_authorized_keys:` block-list items as that user's
+keys) and dropped the rest silently, so `runcmd`, `write_files`, `packages` and a second user
+never reached the guest. From v0.4.1 the provider builds a NoCloud seed CD-ROM on the PVE node
+over SSH, and the **whole** user-data reaches cloud-init, as on libvirt and vSphere. The seed is
+used for a new VM (from a template or without one), for a clone that needs one and for a
+migration's imported disk, and not for a VM that already exists: **existing VMs keep their PVE
+cloud-init drive and are not converted.**
+→ [`docs/proxmox-cloud-init-storage.md`](proxmox-cloud-init-storage.md)
+
+**What you must do before you roll the Proxmox provider.**
+
+1. **Add the SSH keys to the Provider's credentials Secret** (the one `spec.credentialSecretRef`
+   names, which already holds `token_id` and `token_secret`, or `username` and `password`):
+
+   | Key | Value |
+   |---|---|
+   | `ssh_user` | `root` (also the default). The seed script runs `qm importdisk` and `qm set` and owns a root-only build directory, so a non-root user does not work. |
+   | `ssh_privatekey` | The PEM private key of `root` on the PVE node. Use a key only the provider uses. |
+   | `ssh_password` | Instead of a key. If both are set, the password is used. |
+   | `known_hosts` | The node's host key line(s): `ssh-keyscan -H <node host> > known_hosts` from a trusted machine, and compare the fingerprint with the node's. Host-key verification is on by default and has no trust-on-first-use. |
+
+   The SSH host is the host of the Provider's `spec.endpoint`. The same keys are what a
+   `VMMigration` to or from this Provider already needs; see
+   [`examples/migration/vsphere-to-proxmox.yaml`](../examples/migration/vsphere-to-proxmox.yaml).
+   Setting `PROXMOX_INSECURE_SKIP_HOST_KEY_VERIFICATION=true` in the Provider's
+   `spec.runtime.env` skips host-key verification instead of `known_hosts`; it is flagged in the
+   provider log and is not recommended.
+2. **Check the node.** `genisoimage` and `flock` must be installed on the PVE node SSH reaches
+   (`command -v genisoimage flock`; both are on every stock PVE node), and the storage the seed
+   goes to must have the `images` content type
+   ([how the storage is chosen](proxmox-cloud-init-storage.md#how-the-storage-is-chosen)).
+3. **In a PVE cluster, set `PVE_NODE_SELECTOR`** in the Provider's `spec.runtime.env` to the node
+   of the API endpoint's host. The VM must be on the node SSH reaches (the node check compares it
+   with `uname -n` there); an `endpoint` that is a load balancer in front of several nodes does not
+   work for VMs with user-data. The selector applies to every new VM of the Provider, with or
+   without user-data: its templates (and clone sources) must be on that node, or a template
+   `Create` is refused (`template ... not found on node ...`).
+4. **Token privileges.** The seed itself is imported and attached by `root` over SSH. A VM made
+   **without a template** with user-data is now created first and marked ready afterwards, so the
+   token also needs `VM.Audit` and `VM.Config.Options` on it, as it already does for clones.
+
+**What happens without them.** A `Create` or `Clone` that needs a seed and cannot get one is
+refused **before anything is created** (`InvalidSpec`), with a message that names what is
+missing (the SSH data plane, `ssh_password` or `ssh_privatekey`, `known_hosts`, `genisoimage`, or
+`PVE_NODE_SELECTOR`). The user-data is never dropped in silence any more. A `VirtualMachine`
+shows `ValidationError` and is rechecked every 30 seconds; it needs no cleanup, and is created
+on a recheck once the keys are there. A `VMClone` ends `Failed` (`ProviderError`, "clone
+failed: ...") and is not retried: re-create it. The provider reads the SSH keys when it starts,
+so roll or restart it after you change the Secret. A node without `flock` is not refused: the
+seed script cannot take its lock, the VM is kept with an unknown outcome and every re-send
+repeats it, so check `flock` on the node first.
+
+**Security.** The Provider now holds a root SSH credential to the PVE node. Its changes to the
+node's config and storage are attributed to `root@pam`, outside the API token's permissions.
+Restrict who can read the Secret. The user-data is stored in plaintext in the seed volume for
+the VM's whole life; keep long-lived secrets out of it.
+→ [Security posture](proxmox-cloud-init-storage.md#security-posture)
+
+**Behaviour you will see on the new VMs.**
+
+- **A seed on node-local storage blocks `qm migrate`.** qemu-server refuses to migrate a VM with a
+  local CD-ROM image other than its own PVE cloud-init drive, online or offline: HA and node
+  evacuation cannot move such a VM. Put the VM on a shared storage with `images`, or detach and
+  free the seed before moving it (`pvesm free <volume>`; removing only the CD-ROM leaves the
+  volume on the storage).
+  → [Known limitations](proxmox-cloud-init-storage.md#known-limitations)
+- **A clone does not carry its source's user-data.** A clone of a VM that has a seed, and any
+  `VMClone` that gives inline user-data, gets a seed of its own: `instance-id`
+  `virtrigaud-<UID of the target VirtualMachine>`, its own hostname, the `VMClone`'s inline
+  user-data (else an empty `#cloud-config`) and DHCP on its own MACs. libvirt and vSphere clones
+  re-run the source's user-data; a Proxmox clone does not, because its disk already holds what
+  the user-data applied. Its first boot is a new cloud-init instance: new SSH host keys, and
+  per-instance modules run again with the distribution's defaults where the user-data is empty
+  (on most cloud images `disable_root: true`, `ssh_pwauth` back to the image default, and the
+  default user created). Give the `VMClone` inline user-data that sets what the clone must keep.
+  A clone of a VM without a seed and without inline user-data is unchanged.
+  → [Lifecycle](proxmox-cloud-init-storage.md#lifecycle)
+- **Linked clones.** A `VMClone` with `spec.options.type: LinkedClone` for a Proxmox Provider is
+  refused with reason `LinkedCloneUnsupported`, before the provider is called. The provider never
+  made linked clones and no longer advertises them. Use `FullClone`.
+- **A clone gets the class's memory** (it kept the source's memory before, whatever the class
+  said), so a clone's memory can differ from v0.4.0's for the same `VMClone`.
+- **The boot order of a VM cloned from a template with user-data** names only its boot disk (the
+  template's first boot disk, else its `bootdisk`, else the first disk) and no longer the
+  cloud-init slot. A `VMClone` and a template `Create` without user-data keep the template's or
+  source's order. Prepare templates with `qm set <vmid> --boot order=<boot disk>` (for example
+  `scsi0`).
+  → [Boot order](proxmox-cloud-init-storage.md#boot-order)
+- **A cloud-init drive left on `local` by v0.4.0** can be moved with
+  `qm set <vmid> --ide2 <storage>:cloudinit` on the node.
+
+**Rolling back.** The v0.4.0 Proxmox provider knows nothing about a seed. A VM with a seed keeps
+working, but do not clone a VM that has a seed with a v0.4.0 provider: PVE's clone copies the
+source's CD-ROM line, so the clone would point at its source's seed volume (same identity, and a
+volume it does not own).
+
+### libvirt: snapshot and revert answers
+
+These change what an operator sees; no action is required before the upgrade.
+
+- **A new disk-only snapshot is refused when its overlay file is already on the host (V12).**
+  The overlay of a disk-only snapshot is `<disk file without its extension>.<snapshot name>`
+  (for the VM's own disk `<domain>-disk.<snapshot name>`). In v0.4.0 a clustered Provider
+  answered libvirt's refusal with a generic error, so the create was re-sent about once a
+  minute and the `VMSnapshot` was held in `SnapshotOutcomeUnknown` after ten re-sends; a
+  single-host Provider failed it with no hint. Now the provider probes the paths before it
+  changes anything and refuses: the `VMSnapshot` is `Failed` (`Ready=False/ProviderError`, a
+  `SnapshotFailed` event), on single-host and clustered Providers, and the leftover file is
+  never removed or overwritten. Use another snapshot name, or remove the file after you have
+  checked that no domain, snapshot or internal snapshot on any host that mounts the pool
+  references it. A `VMSnapshot` that v0.4.0 held for this reason **stays held** after the
+  upgrade: delete it and create one under another name, or confirm the attempt with the
+  `virtrigaud.io/operation-outcome` annotation its message names (the confirmed create is then
+  refused as above, or taken if you removed the file first).
+  → [`docs/libvirt-clones.md`](libvirt-clones.md#a-snapshot-name-whose-overlay-file-is-still-on-the-host)
+- **A `VMSnapshot` create the provider did not perform is retried on a single-host Provider too
+  (behaviour change; the controller change applies to every provider type).** v0.4.0 ended it `Failed` and you deleted it and created a new one; a
+  clustered Provider already retried it. Now the `VMSnapshot` shows `Ready=False/ProviderError`
+  with the provider's answer in a `SnapshotCreateRetrying` event, and the create is sent again
+  after 1 minute, doubling to 10 minutes, for as long as the object exists. This includes a
+  request that never reached the provider and an unreachable host. A cause that does not go
+  away (for example an unreadable disk image: grant `VR_DISK_READ`) is retried every 10 minutes
+  until you fix it or delete the `VMSnapshot`. The source snapshot of a `VMMigration` is
+  unchanged: "not performed" fails the attempt and the retry policy decides.
+  → [`docs/provider-call-outcomes.md`](provider-call-outcomes.md)
+- **A revert the provider did not perform is retried, not counted as an unknown outcome.** The
+  `VirtualMachine`'s `status.snapshotRevert` goes back to `Pending` with
+  `SnapshotReverted=False/RevertNotPerformed` and a `SnapshotRevertNotPerformed` Warning event,
+  and the revert is sent again as a new attempt after 1 minute, doubling to 10 minutes. These
+  answers do not count toward the 5-attempt limit and no longer end `Failed` with "the VM may or
+  may not have been reverted" (the exception is a "not performed" answer to the manager's own
+  re-send of an attempt whose outcome is unknown: it stays an unknown outcome and is counted). If you keep a script or alert on that message or on
+  `status.snapshotRevert.attempts`, note that `attempts` counts since the last "not performed"
+  answer. A revert that keeps being refused is sent again until you fix the cause or remove
+  `spec.snapshot.revertToRef`.
+  → [`docs/vm-snapshot-revert.md`](vm-snapshot-revert.md#asynchronous-reverts-and-unknown-outcomes)
+- **A failed libvirt revert is answered by what the provider proves**: not performed, refused
+  for good (`FailedPrecondition` for a revert libvirt does not support for the VM), `NotFound`,
+  a terminal failure, or "outcome unknown: retry". Single-host messages are constant texts
+  that name no host path or command; the details are in the provider log. A single-host lost
+  connection mid-revert is no longer reported as a terminal failure.
+- **On a single-host Provider, a snapshot libvirt cannot take for this VM fails for good**
+  (`InvalidArgument`) when libvirt refuses it before executing because the VM's configuration does not support it; a busy domain
+  or one in the wrong state is still "not performed".
+- **Host-command logs are redacted (R28).** URLs (a staged disk's `nfs://` server, export and
+  path, an S3 endpoint) are replaced by `<redacted <scheme> URL>` in the libvirt provider's log
+  and errors, except the libvirt connection URI and `pvc://`. If you collected libvirt provider
+  logs from v0.4.0 for support or audit, they still hold the URLs; treat them as sensitive.
+- **A VM delete refreshes the `default` pool (R37)** so `virsh vol-list default` stops listing the
+  deleted disk files (best effort; a VM whose disks are in another pool leaves that pool stale
+  until its next refresh).
+
+### Command-line tools
+
+- **`vcts` is stricter.** A custom conformance specification that `vcts validate` accepted before
+  may be rejected: unknown keys, a step resource that is not an `infra.virtrigaud.io/v1beta1`
+  kind or names a namespace, a created object's name without `${RUN}`, a `wait` step without a
+  resource and a condition or `validate` entries, unknown capabilities, malformed paths,
+  variables or regular expressions, duplicate test names, test names over 63 characters, and a step that creates,
+  updates or deletes a `Provider`. Run
+  `vcts validate <dir>` on your specifications before you rely on them in CI.
+  `vcts run` now executes the steps (it reported every step as "not implemented" before) and
+  creates real objects in the namespace you pass with `-n` (`default` if omitted): run it against a non-production
+  cluster. The default `--timeout` is 3 hours (was 30 minutes).
+- **`virtrigaud-loadgen` validates ranges and does real work.** A configuration whose
+  `vmTemplate.resources` ranges are outside the `VirtualMachine` `spec.resources` bounds, accepted
+  before because the ranges were unused, is rejected. `power`, `reconfigure`, `snapshot` and
+  `clone` now act on VMs the run created. `--dry-run` makes no API call and needs no kubeconfig.
+  Without `--cleanup` the command prints how to remove what the run left.
+  `test/performance/proxmox-loadtest.yaml` is rewritten in the tool's configuration format.
+  → [`docs/cli-tools.md`](cli-tools.md)
+- **`vrtg-provider init --type proxmox`** is new.
+
+### Provider authors: the SDK and proto Go modules are published
+
+From v0.4.1 on, each release tags `sdk/vX.Y.Z` and `proto/vX.Y.Z` next to `vX.Y.Z` (release
+candidates too), and `vrtg-provider init` from a release writes a `go.mod` that requires them at
+its own version instead of `replace` directives to a checkout. An existing project can drop its
+`replace` directives and require all three modules (`github.com/projectbeskar/virtrigaud`,
+`.../sdk`, `.../proto`) at the same release. Releases up to v0.4.0 have no `sdk/` or `proto/`
+tags. `go install github.com/projectbeskar/virtrigaud/cmd/<tool>@vX.Y.Z` does not work (the root
+`go.mod` has `replace` directives, which `go install <package>@<version>` refuses): download the
+CLI binaries from the GitHub release. See [`docs/go-modules.md`](go-modules.md).
+
+### Deprecated: the `virtrigaud-provider-runtime` chart
+
+`charts/virtrigaud-provider-runtime/` is removed in the next minor release. It was never
+published to the Helm repository or released with the `virtrigaud` chart. It runs a provider
+`Deployment` outside a `Provider` resource, which the manager never connects to (the manager talks
+only to the provider it runs for a `Provider`, at `status.runtime.endpoint`), and it bypasses what
+the manager sets up for that provider: the gRPC TLS/mTLS settings, the credential `Secret` mount,
+a dedicated ServiceAccount and the hardened security context. If you installed it, create a
+`Provider` resource for each provider instead, wait until it is `Ready`, then `helm uninstall`
+the chart's release. The chart's [README](../charts/virtrigaud-provider-runtime/README.md) maps
+its values to `Provider` fields.
+
+### Other changes
+
+- **API and proto comments.** The descriptions in the CRDs and `provider.proto` are corrected
+  (fields that nothing acts on say so; the two `insecureSkipVerify` switches are described as
+  separate). No field, number, RPC or option changed.
+- **`providers/catalog.yaml`** now lists `v0.4.0` tags and `skip` (not run) for every conformance
+  profile, instead of 0.1.x tags and passes nobody had run. It still lists the `clone` profile for
+  Proxmox, which no longer advertises linked clones.
+- **CI** checks proto compatibility with `buf breaking` on pull requests.
+
+### Verifying the upgrade
+
+- Proxmox, a VM with user-data created after the upgrade: `qm config <vmid>` shows a CD-ROM
+  (`ide2: <storage>:vm-<vmid>-disk-<N>,media=cdrom`, on a directory storage
+  `<storage>:<vmid>/vm-<vmid>-disk-<N>.raw`, and another slot if the VM's drive was in one),
+  and in the guest `cloud-init status --long` reports `done` with the `runcmd` and `write_files`
+  of your user-data applied.
+- libvirt: create a `VMSnapshot` whose name matches an existing overlay (for a test VM) and check
+  it ends `Failed` with the "overlay file ... already exists" message and the file is untouched.
+- A `VMClone` with `LinkedClone` for a Proxmox Provider fails with `LinkedCloneUnsupported`.
+- With webhooks enabled, `kubectl apply` of a test `VMClone` with `sysprep.productKey` set prints
+  one admission warning naming the field, and once the clone starts the `VMClone` has one
+  `CustomizationSecretNotSent` event; neither shows the value.
 
 ## Breaking changes
 
@@ -184,7 +423,7 @@ schema break, and existing bound VMs are unaffected), but change what a *new*
 | **`spec.snapshot.revertToRef` now reverts the VM** (fix of a silent no-op, `internal/controller/virtualmachine_snapshot_revert.go`, [`docs/vm-snapshot-revert.md`](vm-snapshot-revert.md)) | Every `VirtualMachine` that sets `spec.snapshot.revertToRef`. **Before:** the field was accepted and ignored; the VM stayed `Ready` with no condition or event. **Now:** the `VirtualMachine` controller sends `SnapshotRevert` once per request, only while the provider reports the VM `Off` and `spec.powerState` is `Off` or `OffGraceful` (it never powers a VM off for it), only to a `Ready` `VMSnapshot` taken of this VM through its Provider, and records the outcome in the new `status.snapshotRevert` and the `SnapshotReverted` condition. While the revert waits, runs or has failed, `Ready` is `False` with the condition's reason. A VM that already carries the field is acted on by the first reconcile after the upgrade. | Upgrade the CRDs before the manager (a CRD that prunes `status.snapshotRevert` makes the manager send nothing, `SnapshotReverted=False/Unsupported`). Before upgrading the manager, remove `spec.snapshot.revertToRef` from every VM you do not want reverted: `kubectl get virtualmachines.infra.virtrigaud.io -A -o jsonpath='{range .items[?(@.spec.snapshot.revertToRef)]}{.metadata.namespace}/{.metadata.name}{"\n"}{end}'` lists them (use the full resource name: `vm` can resolve to another project's `VirtualMachine`). Check `VMSet` templates too (`spec.template.spec.snapshot.revertToRef`): VMs a `VMSet` creates carry the field. |
 | **libvirt: snapshots of a powered-off VM are taken with the cloud-init CD-ROM ejected, and a revert to a snapshot that stored the CD-ROM is refused** (`internal/providers/libvirt/snapshot_media.go`, `snapshot_readonly_disks.go`, [`docs/vm-snapshot-revert.md`](vm-snapshot-revert.md#libvirt)) | Every libvirt VM with a cloud-init seed (or another CD-ROM or read-only disk with media) that has, or will have, a `VMSnapshot`. **Before:** `spec.snapshot.revertToRef` did nothing (see the row above), and a revert of a disk-only snapshot of such a VM through the provider, on libvirt 9.9 or later with AppArmor, made libvirt turn the seed CD-ROM into an overlay QEMU cannot open; the revert was reported `Succeeded` and the VM no longer started. **Now:** `SnapshotCreate` of a shut-off VM ejects its CD-ROMs and floppies from the persistent definition for the duration of the snapshot (recorded in the domain's metadata first, inserted again afterwards, also when the snapshot failed), so the stored definition has empty drives; `SnapshotRevert` refuses, before changing anything, a snapshot that stored a CD-ROM or read-only disk with media (`SnapshotReverted=False/RevertFailed`), inserts the VM's CD-ROMs and floppies (the seed included) again after a revert, and reports a medium it cannot insert as a failure. An interrupted ejection is repaired by the next snapshot create, revert, start or reboot of the VM, and a power-on or reboot of a libvirt VM issues one extra `dumpxml`. `SnapshotDelete` also removes the `<domain>-disk.<epoch>` overlay a revert makes. | Roll the libvirt providers (single-host and clustered). Disk-only snapshots taken by v0.3.11 or by a v0.4.0 candidate before rc7 of a VM with a cloud-init seed, and disk-only snapshots of a running VM that has one, can no longer be reverted: delete their `VMSnapshot`s and take new ones with the VM powered off. A VM that a v0.4.0-rc6 revert already broke (its CD-ROM is on a `cloud-init.<digits>` file and it does not start) needs the manual [repair](vm-snapshot-revert.md#repairing-a-vm-broken-by-a-v040-rc6-revert) first. |
 | **`status.ips` no longer lists loopback, link-local and other unreachable addresses** (behaviour change for anything that parses it, `internal/providers/contracts/routable_ips.go`, [`docs/vm-status-ips.md`](vm-status-ips.md)) | Every `VirtualMachine`, and anything that reads `status.ips` (scripts, `kubectl get vm -o jsonpath`, `vrtg`). **Before (seen on libvirt in the v0.4.0 candidates):** a libvirt VM with a running QEMU guest agent listed every address of every guest interface, so `status.ips` could read `["127.0.0.1","::1","192.0.2.31","fe80::5054:ff:fe88:d0c1"]`. **Now:** the manager filters every provider's answer before it writes the field: loopback, unspecified, IPv4 and IPv6 link-local and multicast addresses and anything that is not an IP address are dropped, duplicates removed, the provider's order kept; private, IPv6 unique-local and global addresses stay. The libvirt provider applies the same rule to the agent's answer, so the `primary_ip` in `status.provider` is no longer `127.0.0.1`. An address that is dropped no longer counts as "has an IP" for `virtrigaud_ip_discovery_duration_seconds` either. No CRD schema change (the field's description changed). A libvirt guest on libvirt's NAT `default` network now also shows its DHCP lease without the guest agent (V10: those rows were all dropped before); a guest on a host bridge, or with no network attachment, has no lease and shows an address only if the QEMU guest agent runs in the guest (or, as a last resort, the host has an ARP entry for its MAC). | If a script took `status.ips[0]` or matched a loopback or link-local entry, read the first reachable address instead. Nothing to roll back or migrate: the next reconcile of each VM rewrites the field. |
-| **libvirt: the disk in-use check must be able to read libvirt's `0600` snapshot overlays; a routed snapshot create that was not performed is retried with a backoff** (`internal/providers/libvirt/imagepath.go`, `internal/controller/vmsnapshot_controller.go`, [`docs/libvirt-clones.md`](libvirt-clones.md#unreadable-disk-images)) | Every libvirt host where a `VMSnapshot` is created or reverted with the VM powered off, and every clustered Provider that creates `VMSnapshot`s. The disk in-use check is new since v0.3.11. **Before (v0.4.0 candidates up to rc7):** after an offline snapshot or a revert, the check that guards a snapshot create/revert/delete and a delete (clustered: also create and clone) re-read a shut-off VM's nested backing stores as the SSH user, which cannot open the `0600` overlay libvirt makes, so those operations of every other VM on the host were refused ("could not verify that no other domain uses its disks"), and a clustered `VMSnapshot` create so refused was held `SnapshotOutcomeUnknown` after ten re-sends. **Now:** a backing store that a disk's chain already read is not read again; an image nobody can read gives "permission denied reading a disk image" with a pointer to the fix, still fail-closed (a VM delete, a snapshot delete and a clustered snapshot create are retried; a single-host snapshot create fails and a revert is re-sent up to 5 times); and a routed create the provider says it did not perform is sent again as a new attempt after 1 minute, doubling up to 10 minutes, with no operator hold. | On each libvirt host where the provider's SSH user cannot already read the overlays, grant `VR_DISK_READ` over the pool directory ([Unreadable disk images](libvirt-clones.md#unreadable-disk-images); on NFS the export must not squash root) or repair each new overlay by hand (`chown -h libvirt-qemu:kvm`, `chmod 0640`, VM off). Roll the libvirt providers and the manager. A `VMSnapshot` held `SnapshotOutcomeUnknown` by v0.4.0-rc7 for this cause stays held until you release it with the `virtrigaud.io/operation-outcome` annotation. |
+| **libvirt: the disk in-use check must be able to read libvirt's `0600` snapshot overlays; a routed snapshot create that was not performed is retried with a backoff** (`internal/providers/libvirt/imagepath.go`, `internal/controller/vmsnapshot_controller.go`, [`docs/libvirt-clones.md`](libvirt-clones.md#unreadable-disk-images)) | Every libvirt host where a `VMSnapshot` is created or reverted with the VM powered off, and every clustered Provider that creates `VMSnapshot`s. The disk in-use check is new since v0.3.11. **Before (v0.4.0 candidates up to rc7):** after an offline snapshot or a revert, the check that guards a snapshot create/revert/delete and a delete (clustered: also create and clone) re-read a shut-off VM's nested backing stores as the SSH user, which cannot open the `0600` overlay libvirt makes, so those operations of every other VM on the host were refused ("could not verify that no other domain uses its disks"), and a clustered `VMSnapshot` create so refused was held `SnapshotOutcomeUnknown` after ten re-sends. **Now:** a backing store that a disk's chain already read is not read again; an image nobody can read gives "permission denied reading a disk image" with a pointer to the fix, still fail-closed (a VM delete, a snapshot delete and a clustered snapshot create are retried; a single-host snapshot create fails and a revert is re-sent up to 5 times; from v0.4.1 both are retried, see [Upgrading from v0.4.0 to v0.4.1](#libvirt-snapshot-and-revert-answers)); and a routed create the provider says it did not perform is sent again as a new attempt after 1 minute, doubling up to 10 minutes, with no operator hold. | On each libvirt host where the provider's SSH user cannot already read the overlays, grant `VR_DISK_READ` over the pool directory ([Unreadable disk images](libvirt-clones.md#unreadable-disk-images); on NFS the export must not squash root) or repair each new overlay by hand (`chown -h libvirt-qemu:kvm`, `chmod 0640`, VM off). Roll the libvirt providers and the manager. A `VMSnapshot` held `SnapshotOutcomeUnknown` by v0.4.0-rc7 for this cause stays held until you release it with the `virtrigaud.io/operation-outcome` annotation. |
 | **libvirt: a disk-only snapshot is not deleted while a memory snapshot is stored in its overlay; a refused snapshot delete shows the provider's answer** (`internal/providers/libvirt/snapshot_delete_guard.go`, `internal/controller/vmsnapshot_controller.go`, [`docs/libvirt-clones.md`](libvirt-clones.md#deleting-memory-and-disk-only-snapshots-of-the-same-vm)) | Every libvirt VM with both a disk-only `VMSnapshot` and a memory `VMSnapshot` (`includeMemory: true`) taken after it, and anything that watches `VMSnapshot` conditions. **Before (v0.3.11 and v0.4.0-rc8 and earlier):** deleting the disk-only snapshot orphaned the memory snapshot stored in its overlay (its data stayed in the leftover overlay file, unusable, because the VM no longer runs on it) and reported success; the memory snapshot's `VMSnapshot` then stayed `Deleting`. A snapshot delete a provider refused with `FailedPrecondition` was `Ready=False/ProviderError` with a constant message. **Now:** that delete is refused, nothing changed, naming the snapshots to delete first; a check that cannot run refuses it retryably; a memory snapshot an earlier release already orphaned has only its metadata deleted when its data is provably gone. A snapshot delete refused with `FailedPrecondition` (other than a disk another VM depends on) is `Ready=False/DeleteBlocked` with the provider's answer, re-checked with a backoff of up to 5 minutes. | Roll the libvirt providers, then the manager. Delete memory snapshots before the disk-only snapshot they were taken on. For a VM still on v0.3.11 or v0.4.0-rc8 or earlier, or a `VMSnapshot` already force-deleted, see the [manual cleanup](libvirt-clones.md#a-memory-snapshot-that-was-already-orphaned). |
 
 **Experimental clustered providers** (`Provider.spec.topology: cluster`, the `Host`/
