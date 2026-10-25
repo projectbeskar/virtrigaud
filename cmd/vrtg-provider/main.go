@@ -27,6 +27,16 @@ import (
 )
 
 func main() {
+	if err := newRootCmd().Execute(); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+// newRootCmd builds the vrtg-provider command tree. Every call returns an
+// independent tree with its own flag values, so it can be run repeatedly in
+// one process.
+func newRootCmd() *cobra.Command {
 	rootCmd := &cobra.Command{
 		Use:   "vrtg-provider",
 		Short: "VirtRigaud Provider Development CLI",
@@ -34,7 +44,9 @@ func main() {
 
 It provides scaffolding for new providers, code generation, and verification tools
 to help developers build reliable and conformant provider implementations.`,
-		Version: version.String(),
+		Version:       version.String(),
+		SilenceUsage:  true,
+		SilenceErrors: true,
 	}
 
 	// Global flags
@@ -50,10 +62,7 @@ to help developers build reliable and conformant provider implementations.`,
 		newVersionCommand(),
 	)
 
-	if err := rootCmd.Execute(); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
-	}
+	return rootCmd
 }
 
 // newVersionCommand creates the version command.

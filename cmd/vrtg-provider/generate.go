@@ -17,12 +17,30 @@ limitations under the License.
 package main
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"regexp"
+	"strings"
 
 	"github.com/spf13/cobra"
 )
+
+// virtrigaudModulePrefix is the module path every VirtRigaud module (the
+// repository itself, its SDK and its proto bindings) starts with. A provider
+// project's go.mod requires at least one of them.
+const virtrigaudModulePrefix = "github.com/projectbeskar/virtrigaud"
+
+// generatedRPCDir is the directory of a provider project that holds generated
+// protocol buffer bindings, if it has any.
+const generatedRPCDir = "internal/rpc"
+
+// errNoMakeTarget is returned by runMakeTarget when the project's Makefile
+// does not define the target.
+var errNoMakeTarget = errors.New("make target not found")
 
 // generateOptions holds options for the generate command.
 type generateOptions struct {
@@ -40,12 +58,14 @@ func newGenerateCommand() *cobra.Command {
 		Long: `Generate protocol buffer bindings and other generated code for the provider.
 
 This command regenerates:
-- Protocol buffer Go bindings from .proto files
-- gRPC service stubs
-- Any other generated code dependencies
+- Protocol buffer Go bindings from .proto files (the "proto" make target or
+  "buf generate" in proto/; a project that has neither has nothing to generate)
+- Any other generated code ("go generate ./..." and the "generate" and
+  "deepcopy" make targets, when the project defines them)
 
 The command must be run from within a provider project directory.`,
-		RunE: func(cmd *cobra.Command, args []string) error {
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
 			return runGenerate(opts)
 		},
 	}
@@ -90,7 +110,9 @@ func runGenerate(opts *generateOptions) error {
 	return nil
 }
 
-// checkProviderProject checks if the current directory is a provider project.
+// checkProviderProject checks if the current directory is a provider project:
+// it has a go.mod that requires a VirtRigaud module (the repository, its SDK
+// or its proto bindings) and a Makefile.
 func checkProviderProject() error {
 	// Look for key files that indicate a provider project
 	requiredFiles := []string{"go.mod", "Makefile"}
@@ -100,29 +122,76 @@ func checkProviderProject() error {
 		}
 	}
 
-	// Check if go.mod contains virtrigaud SDK dependency
+	// Check if go.mod requires a VirtRigaud module
 	content, err := os.ReadFile("go.mod")
 	if err != nil {
 		return fmt.Errorf("failed to read go.mod: %w", err)
 	}
 
-	if !contains([]string{string(content)}, "github.com/projectbeskar/virtrigaud") {
-		return fmt.Errorf("go.mod does not contain virtrigaud dependency")
+	if !strings.Contains(string(content), virtrigaudModulePrefix) {
+		return fmt.Errorf("go.mod does not require a %s module", virtrigaudModulePrefix)
 	}
 
 	return nil
 }
 
-// cleanGeneratedFiles removes generated files.
+// cleanGeneratedFiles removes the generated protocol buffer bindings
+// (*.pb.go) under internal/rpc.
 func cleanGeneratedFiles() error {
-	// Remove common generated files
-	filesToRemove := []string{
-		"internal/rpc/**/*.pb.go",
-		"internal/rpc/**/*_grpc.pb.go",
+	if _, err := os.Stat(generatedRPCDir); os.IsNotExist(err) {
+		fmt.Printf("ℹ️  No %s directory, nothing to clean\n", generatedRPCDir)
+		return nil
 	}
 
-	for _, pattern := range filesToRemove {
-		if err := removeFilesByPattern(pattern); err != nil {
+	return filepath.WalkDir(generatedRPCDir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() || !strings.HasSuffix(d.Name(), ".pb.go") {
+			return nil
+		}
+		fmt.Printf("🗑️  Removing %s\n", path)
+		if err := os.Remove(path); err != nil {
+			return fmt.Errorf("remove %s: %w", path, err)
+		}
+		return nil
+	})
+}
+
+// generateProto generates protocol buffer bindings. A provider project that
+// defines no "proto" make target and has no proto/ directory imports its
+// bindings from the VirtRigaud proto module, so there is nothing to generate.
+func generateProto() error {
+	err := runMakeTarget("proto")
+	if err == nil {
+		return nil
+	}
+	if !errors.Is(err, errNoMakeTarget) {
+		return err
+	}
+
+	// Fall back to direct buf command
+	if _, statErr := os.Stat("proto"); os.IsNotExist(statErr) {
+		fmt.Println("ℹ️  No proto make target and no proto/ directory: nothing to generate " +
+			"(the project uses the bindings of the VirtRigaud proto module)")
+		return nil
+	}
+	fmt.Println("⚠️  Makefile proto target not found, trying buf directly...")
+	return runBufGenerate()
+}
+
+// generateAdditionalCode generates other code artifacts: go generate and the
+// "generate" and "deepcopy" make targets the project defines.
+func generateAdditionalCode() error {
+	if err := runCommand("go", "generate", "./..."); err != nil {
+		return fmt.Errorf("go generate: %w", err)
+	}
+
+	for _, target := range []string{"generate", "deepcopy"} {
+		if err := runMakeTarget(target); err != nil {
+			if errors.Is(err, errNoMakeTarget) {
+				continue
+			}
 			return err
 		}
 	}
@@ -130,66 +199,41 @@ func cleanGeneratedFiles() error {
 	return nil
 }
 
-// generateProto generates protocol buffer bindings.
-func generateProto() error {
-	// Check if Makefile has proto target
-	if err := runMakeTarget("proto"); err != nil {
-		// Fall back to direct buf command
-		fmt.Println("⚠️  Makefile proto target not found, trying buf directly...")
-		return runBufGenerate()
+// hasMakeTarget reports whether the Makefile in the current directory defines
+// target.
+func hasMakeTarget(target string) bool {
+	data, err := os.ReadFile("Makefile")
+	if err != nil {
+		return false
 	}
-	return nil
+	return regexp.MustCompile(`(?m)^` + regexp.QuoteMeta(target) + `\s*:`).Match(data)
 }
 
-// generateAdditionalCode generates other code artifacts.
-func generateAdditionalCode() error {
-	// Run go generate
-	if err := runCommand("go", "generate", "./..."); err != nil {
-		fmt.Printf("⚠️  go generate failed: %v\n", err)
-		// Continue anyway as this might not be critical
-	}
-
-	// Run other generation targets if they exist
-	makeTargets := []string{"generate", "deepcopy"}
-	for _, target := range makeTargets {
-		if err := runMakeTarget(target); err != nil {
-			fmt.Printf("⚠️  make %s failed: %v\n", target, err)
-			// Continue anyway
-		}
-	}
-
-	return nil
-}
-
-// runMakeTarget runs a make target if it exists.
+// runMakeTarget runs a make target of the project's Makefile. It returns an
+// error wrapping errNoMakeTarget when the Makefile does not define the target.
 func runMakeTarget(target string) error {
-	// Check if target exists in Makefile
-	cmd := exec.Command("make", "-n", target)
-	cmd.Stdout = nil
-	cmd.Stderr = nil
-
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("make target %s not found", target)
+	if !hasMakeTarget(target) {
+		return fmt.Errorf("%w: %s", errNoMakeTarget, target)
 	}
 
-	// Run the target
-	return runCommand("make", target)
+	if err := runCommand("make", target); err != nil {
+		return fmt.Errorf("make %s: %w", target, err)
+	}
+	return nil
 }
 
 // runBufGenerate runs buf generate directly.
 func runBufGenerate() error {
-	// Look for proto directory
-	if _, err := os.Stat("proto"); os.IsNotExist(err) {
-		return fmt.Errorf("proto directory not found")
-	}
-
 	// Run buf generate
 	cmd := exec.Command("buf", "generate")
 	cmd.Dir = "proto"
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 
-	return cmd.Run()
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("buf generate: %w", err)
+	}
+	return nil
 }
 
 // runCommand runs a command and returns any error.
@@ -198,12 +242,4 @@ func runCommand(name string, args ...string) error {
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
-}
-
-// removeFilesByPattern removes files matching a pattern.
-func removeFilesByPattern(pattern string) error {
-	// This is a simplified implementation
-	// In a real implementation, you'd use filepath.Glob or similar
-	fmt.Printf("🗑️  Would remove files matching: %s\n", pattern)
-	return nil
 }

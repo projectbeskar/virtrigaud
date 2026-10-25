@@ -17,8 +17,9 @@ limitations under the License.
 package main
 
 import (
+	"errors"
 	"fmt"
-	"os"
+	"os/exec"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -39,26 +40,26 @@ func newVerifyCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "verify",
 		Short: "Verify provider implementation",
-		Long: `Verify the provider implementation by running a comprehensive test suite.
+		Long: `Verify the provider implementation by running the project's own checks.
 
 This command performs the following checks:
-- Code compilation and build verification
-- Unit tests for provider implementation
-- Linting and code quality checks
-- VCTS conformance tests (if applicable)
-- Integration tests with mock hypervisor
+- Code compilation and build verification (the "build" make target, else go build)
+- Formatting, go vet and, when installed, golangci-lint (reported, not fatal)
+- Unit tests (the "test" make target, else go test)
 
-The verification helps ensure the provider follows VirtRigaud best practices
-and implements the required functionality correctly.`,
-		RunE: func(cmd *cobra.Command, args []string) error {
+It does not run the VCTS conformance suite: that needs the provider deployed in
+a cluster. Deploy it, then run "vcts run --provider <name>".`,
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
 			return runVerify(opts)
 		},
 	}
 
 	cmd.Flags().BoolVar(&opts.skipBuild, "skip-build", false, "Skip build verification")
 	cmd.Flags().BoolVar(&opts.skipTests, "skip-tests", false, "Skip unit tests")
-	cmd.Flags().BoolVar(&opts.skipConformance, "skip-conformance", false, "Skip conformance tests")
+	cmd.Flags().BoolVar(&opts.skipConformance, "skip-conformance", false, "Skip the conformance reminder")
 	cmd.Flags().StringVar(&opts.profile, "profile", "core", "Conformance test profile (core, snapshot, clone, advanced)")
+	_ = cmd.Flags().MarkDeprecated("profile", "verify does not run conformance tests; use \"vcts run\" against a deployed provider")
 
 	return cmd
 }
@@ -99,41 +100,32 @@ func runVerify(opts *verifyOptions) error {
 		fmt.Println("✅ Unit tests passed")
 	}
 
-	// Step 4: Conformance tests
-	if !opts.skipConformance {
-		fmt.Println("\n🎯 Running conformance tests...")
-		if err := verifyConformance(opts.profile); err != nil {
-			fmt.Printf("⚠️  Conformance tests failed: %v\n", err)
-			fmt.Println("💡 This may be expected if the provider doesn't support all features")
-		} else {
-			fmt.Println("✅ Conformance tests passed")
-		}
-	}
-
-	// Step 5: Final verification summary
+	// Step 4: Final verification summary
 	fmt.Println("\n📊 Verification Summary:")
-	fmt.Println("✅ Provider builds successfully")
+	if !opts.skipBuild {
+		fmt.Println("✅ Provider builds successfully")
+	}
 	if !opts.skipTests {
 		fmt.Println("✅ Unit tests pass")
 	}
 	if !opts.skipConformance {
-		fmt.Printf("🎯 Conformance profile '%s' verified\n", opts.profile)
+		fmt.Println("ℹ️  Conformance was not run: deploy the provider and run \"vcts run --provider <name>\"")
 	}
 
 	fmt.Println("\n🎉 Provider verification completed!")
 	fmt.Println("\nNext steps:")
 	fmt.Println("  - Build container image: make docker-build")
-	fmt.Println("  - Deploy to cluster: make deploy")
-	fmt.Println("  - Run full integration tests: make test-e2e")
+	fmt.Println("  - Deploy the provider and run: vcts run --provider <name>")
 
 	return nil
 }
 
 // verifyBuild checks that the provider builds successfully.
 func verifyBuild() error {
-	// Try make build first
-	if err := runMakeTarget("build"); err == nil {
-		return nil
+	// Prefer the project's own build target
+	err := runMakeTarget("build")
+	if err == nil || !errors.Is(err, errNoMakeTarget) {
+		return err
 	}
 
 	// Fall back to go build
@@ -143,29 +135,31 @@ func verifyBuild() error {
 
 // verifyCodeQuality runs linting and code quality checks.
 func verifyCodeQuality() error {
-	var errors []string
+	var issues []string
 
-	// Run go fmt check
-	if err := runCommand("gofmt", "-l", "."); err != nil {
-		errors = append(errors, "gofmt issues found")
+	// Run the gofmt check: it lists the files that need formatting
+	out, err := exec.Command("gofmt", "-l", ".").Output()
+	switch {
+	case err != nil:
+		issues = append(issues, fmt.Sprintf("gofmt failed: %v", err))
+	case strings.TrimSpace(string(out)) != "":
+		issues = append(issues, "gofmt: files need formatting:\n"+strings.TrimSpace(string(out)))
 	}
 
 	// Run go vet
 	if err := runCommand("go", "vet", "./..."); err != nil {
-		errors = append(errors, "go vet issues found")
+		issues = append(issues, "go vet issues found")
 	}
 
-	// Try to run golangci-lint if available
-	if err := runCommand("golangci-lint", "run"); err != nil {
-		errors = append(errors, "golangci-lint issues found")
+	// Run golangci-lint when it is installed
+	if _, err := exec.LookPath("golangci-lint"); err != nil {
+		fmt.Println("ℹ️  golangci-lint is not installed, skipping it")
+	} else if err := runCommand("golangci-lint", "run"); err != nil {
+		issues = append(issues, "golangci-lint issues found")
 	}
 
-	// Try make lint if available
-	// Run linting if available - errors are ignored for compatibility with older providers
-	_ = runMakeTarget("lint") // intentionally ignore: not all providers have lint configured
-
-	if len(errors) > 0 {
-		return fmt.Errorf("code quality issues: %s", strings.Join(errors, ", "))
+	if len(issues) > 0 {
+		return fmt.Errorf("code quality issues: %s", strings.Join(issues, ", "))
 	}
 
 	return nil
@@ -173,55 +167,13 @@ func verifyCodeQuality() error {
 
 // verifyUnitTests runs unit tests.
 func verifyUnitTests() error {
-	// Try make test first
-	if err := runMakeTarget("test"); err == nil {
-		return nil
+	// Prefer the project's own test target
+	err := runMakeTarget("test")
+	if err == nil || !errors.Is(err, errNoMakeTarget) {
+		return err
 	}
 
 	// Fall back to go test
 	fmt.Println("⚠️  Makefile test target not found, trying go test...")
 	return runCommand("go", "test", "-v", "./...")
-}
-
-// verifyConformance runs conformance tests.
-func verifyConformance(profile string) error {
-	// Check if VCTS is available
-	if err := runCommand("vcts", "version"); err != nil {
-		return fmt.Errorf("VCTS not found (install with: go install github.com/projectbeskar/virtrigaud/cmd/vcts)")
-	}
-
-	// Check if there's a mock provider to test against
-	if err := checkMockProvider(); err != nil {
-		return fmt.Errorf("mock provider not available: %w", err)
-	}
-
-	// Run VCTS with the specified profile
-	args := []string{"run", "--profile", profile, "--provider", "mock"}
-	if err := runCommand("vcts", args...); err != nil {
-		return fmt.Errorf("conformance tests failed for profile %s", profile)
-	}
-
-	return nil
-}
-
-// checkMockProvider checks if a mock provider is available for testing.
-func checkMockProvider() error {
-	// Look for mock provider binary or Docker image
-	mockSources := []string{
-		"./bin/provider-mock",
-		"provider-mock",
-	}
-
-	for _, source := range mockSources {
-		if _, err := os.Stat(source); err == nil {
-			return nil
-		}
-	}
-
-	// Check if we can build mock provider
-	if err := runCommand("go", "build", "-o", "bin/provider-mock", "./cmd/provider-mock"); err == nil {
-		return nil
-	}
-
-	return fmt.Errorf("mock provider not found and cannot be built")
 }
