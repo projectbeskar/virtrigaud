@@ -180,7 +180,7 @@ func (s *Scaffolder) generateFile(relativePath, tmplContent string, ctx map[stri
 		return fmt.Errorf("failed to parse template: %w", err)
 	}
 
-	file, err := os.Create(targetPath) // #nosec G304 -- targetPath is the output directory joined with a built-in template path; the provider name in it is validated to lowercase alphanumerics and hyphens
+	file, err := os.Create(targetPath) // #nosec G304 -- targetPath is the output directory joined with a built-in template path; vrtg-provider init validates the provider name in it to lowercase alphanumerics and hyphens
 	if err != nil {
 		return fmt.Errorf("failed to create file: %w", err)
 	}
@@ -558,14 +558,14 @@ export LIBVIRT_URI=qemu:///system
 Configure the Proxmox VE API endpoint and an API token via environment variables:
 
 '''bash
-export PVE_ENDPOINT=https://pve.example.com:8006/api2/json
-export PVE_TOKEN_ID=user@pve!token-name
-export PVE_TOKEN_SECRET=<token secret>
+export PVE_ENDPOINT='https://pve.example.com:8006'
+export PVE_TOKEN_ID='user@pve!token-name'
+export PVE_TOKEN_SECRET='<token secret>'
 '''
 
 An API token is preferred over a password. When the provider runs in a cluster,
-the credentials come from a Kubernetes Secret (see the Deployment in k8s/), never
-from the image.
+the credentials come from a Kubernetes Secret (see config/deployment.yaml, which
+is generated with --remote), never from the image.
 {{end}}
 
 ## Development
@@ -1040,7 +1040,8 @@ func GetProviderCapabilities() *capabilities.Manager {
 	{{if eq .ProviderType "proxmox"}}// Proxmox VE capabilities. Only the core profile and the disk and network
 	// types are declared: every operation is still unimplemented, so add the
 	// optional capabilities (Snapshots, LinkedClones, OnlineReconfigure, ...)
-	// as you implement the operations behind them.
+	// as you implement the operations behind them. The provider advertises what
+	// New() in provider.go builds; keep the two in step.
 	builder = builder.
 		DiskTypes("raw", "qcow2").
 		NetworkTypes("bridge", "vlan"){{end}}
@@ -1138,7 +1139,9 @@ func TestProvider_GetCapabilities(t *testing.T) {
 	{{if eq .ProviderType "proxmox"}}// Every operation is unimplemented in the scaffold, so no optional
 	// capability may be advertised yet. Remove the assertions for the ones you
 	// implement.
-	if resp.SupportsSnapshots || resp.SupportsLinkedClones || resp.SupportsReconfigureOnline {
+	if resp.SupportsSnapshots || resp.SupportsMemorySnapshots || resp.SupportsLinkedClones ||
+		resp.SupportsReconfigureOnline || resp.SupportsDiskExpansionOnline || resp.SupportsImageImport ||
+		resp.SupportsDiskExport || resp.SupportsDiskImport {
 		t.Error("Expected the scaffold to advertise no optional capability until it is implemented")
 	}{{end}}
 

@@ -154,10 +154,10 @@ capabilities and a test), `go.mod`, `Makefile`, `Dockerfile`, `README.md`, a CI 
 credentials its remote Deployment reads and the capabilities it declares. The `proxmox` type declares
 only the core profile and the `raw`/`qcow2` disk and `bridge`/`vlan` network types, and its test
 asserts that no optional capability (snapshots, linked clones, online reconfigure) is advertised; add
-each one as you implement the operation behind it. The other types still declare optional
-capabilities (for example snapshots for `vsphere`, `libvirt` and `qemu`) although every operation of
-a fresh scaffold returns `Unimplemented`; review `internal/provider/capabilities.go` before you
-deploy one.
+each one as you implement the operation behind it. The `vsphere`, `libvirt` and `qemu` types still
+declare optional capabilities (snapshots, and for `vsphere` and `libvirt` also linked clones) although
+every operation of a fresh scaffold returns `Unimplemented`; the capabilities a scaffold advertises are
+the ones `New()` builds in `internal/provider/provider.go`, so review them before you deploy one.
 
 The SDK (`github.com/projectbeskar/virtrigaud/sdk`) and the protobuf bindings
 (`github.com/projectbeskar/virtrigaud/proto`) are separate Go modules that are **not published under

@@ -4,9 +4,11 @@
 # Reading this file:
 # - `tag` is the VirtRigaud release the in-tree provider ships in.
 # - `capabilities` lists the capability profiles (core, snapshot, clone,
-#   image-prepare, advanced) whose GetCapabilities flags the provider
-#   advertises (sdk/provider/capabilities). It is a statement about the
-#   provider, not about a test run.
+#   image-prepare, advanced) the provider serves, from the flags in its
+#   GetCapabilities (sdk/provider/capabilities). The Proxmox provider sets the
+#   image-import flag only so that ImagePrepare can refuse an import-style
+#   image with a clear reason, so image-prepare is not listed for it. It is a
+#   statement about the provider, not about a test run.
 # - `conformance` records "skip" (not run) for every profile and carries no
 #   report or date: the conformance suite (`vcts run`) is not run against these
 #   providers by CI, which only validates the specs (`vcts validate`). A profile
@@ -116,7 +118,7 @@ providers:
   # Official libvirt provider
   - name: libvirt
     displayName: "Libvirt Provider"
-    description: "Libvirt/KVM provider for VirtRigaud. Clone makes full copies; linked clones are not supported, so the clone profile is not listed."
+    description: "Libvirt/KVM provider for VirtRigaud. Clone makes full copies; linked clones are not supported, so the clone profile is not listed. The image-prepare profile is for a single-host Provider; a clustered libvirt Provider does not advertise it."
     repo: "https://github.com/projectbeskar/virtrigaud"
     image: "ghcr.io/projectbeskar/virtrigaud/provider-libvirt"
     tag: "v0.4.0"

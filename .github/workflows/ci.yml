@@ -744,9 +744,9 @@ jobs:
     name: Proto Breaking Changes
     runs-on: ubuntu-22.04
     timeout-minutes: 10
-    # A pull request is compared with the branch it targets. v1beta1 and the
-    # provider gRPC contract are additive-only: a deleted or retyped field, a
-    # removed RPC or a removed enum value fails here (proto/buf.yaml).
+    # A pull request is compared with the branch it targets. The provider gRPC
+    # contract (proto/provider/v1) is additive-only: a deleted or retyped
+    # field, a removed RPC or a removed enum value fails here (proto/buf.yaml).
     if: github.event_name == 'pull_request'
     steps:
       - name: Checkout

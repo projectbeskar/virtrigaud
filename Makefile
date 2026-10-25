@@ -217,7 +217,8 @@ ci: test lint proto-lint generate gen-crds vet ## Run all CI checks locally
 # Protocol buffer definitions
 PROTO_DIR = proto
 # What `make proto-breaking` compares the proto module with (a buf input; the
-# git path is relative to $(PROTO_DIR)). Override with e.g.
+# git path is relative to $(PROTO_DIR); run `git fetch origin` first so origin/main
+# is current). Override with e.g.
 # PROTO_BREAKING_AGAINST="../.git#tag=v0.4.0,subdir=proto".
 PROTO_BREAKING_AGAINST ?= ../.git\#ref=origin/main,subdir=proto
 

@@ -136,7 +136,7 @@ func TestProxmoxScaffoldAdvertisesNoOptionalCapability(t *testing.T) {
 		data, err := os.ReadFile(filepath.Join(dir, file))
 		require.NoError(t, err)
 		src := string(data)
-		for _, optional := range []string{".Snapshots()", ".LinkedClones()", ".OnlineReconfigure()", ".ImageImport()", ".VSphere()", ".Libvirt()"} {
+		for _, optional := range []string{".Snapshots()", ".MemorySnapshots()", ".LinkedClones()", ".OnlineReconfigure()", ".OnlineDiskExpansion()", ".ImageImport()", ".DiskExport(", ".DiskImport(", ".VSphere()", ".Libvirt()"} {
 			assert.NotContains(t, src, optional, file)
 		}
 	}
