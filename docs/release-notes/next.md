@@ -84,7 +84,26 @@ v0.4.0 release candidate](../upgrading.md#upgrading-from-a-v040-release-candidat
   after its seed is attached (its config is read and its description written), as a clone
   already was.
 
+- **If you set a secret in a `VMClone`'s `spec.customization` on v0.4.0 or earlier, rotate it.**
+  The values of `sysprep.productKey`, `sysprep.adminPassword.value`,
+  `sysprep.joinDomain.password.value`, `sysprep.customCommands`, `certificates[].data`,
+  `guestCommands` and `userData.ignition.inline` were sent to the provider (and, without gRPC
+  TLS, over the network between the manager and the provider), and they stay in plaintext in the
+  object, in etcd backups, API-server audit logs, the `last-applied-configuration` annotation and
+  your GitOps sources.
+  → [Upgrade guide](../upgrading.md#security-fixes)
+- **libvirt hosts need `curl` for create-from-URL.** A create that carries an image URL instead
+  of a prepared image now downloads with `curl` on the libvirt host (as `ImagePrepare` already
+  did); `wget` is no longer used. If `curl` is missing, the provider log says so.
+
 ### Behaviour changes
+
+- **A libvirt create-from-URL download is classified and time-limited.** An HTTP 4xx answer
+  (except 408, 425 and 429) and a permanent `curl` failure are reported as `InvalidArgument`:
+  the `VirtualMachine` shows `Ready=False/ValidationError` and is rechecked every 30 seconds,
+  instead of the generic provider error retried before. The download is cut off after about
+  4.5 minutes (the manager gives a `Create` 5 minutes, less a reserve for the conversion);
+  in v0.4.0 the call failed after 5 minutes while `wget` kept running on the host.
 
 - **A new Proxmox VM with user-data on node-local storage cannot be moved to another node
   while its seed is attached.** `qm migrate` refuses a VM with a local CD-ROM image other than
@@ -152,10 +171,28 @@ v0.4.0 release candidate](../upgrading.md#upgrading-from-a-v040-release-candidat
 
 ### Security fixes
 
-> **To be filled in by the release coordinator.** A security fix is still in review and will be
-> listed here when it is merged. This subsection lists what is merged at the time of each
-> candidate; the item below is merged.
-
+- **A `VMClone`'s unused customization secrets are no longer sent to the provider.** The manager
+  sent all of `spec.customization` in the `Clone` request, including plaintext values no provider
+  acts on: `sysprep.productKey`, `sysprep.adminPassword.value`, `sysprep.joinDomain.password.value`,
+  `sysprep.customCommands`, `certificates[].data`, `guestCommands[].command`/`.arguments` and
+  `userData.ignition.inline`. The request now carries only an allow-list of what providers apply
+  (`hostname`, `domain`, `userData.cloudInit.inline`) or report as not applied; nothing changes in
+  what a clone gets. When one of these fields is set, the manager records a `Warning` event
+  (`CustomizationSecretNotSent`) once the provider accepts the clone, and with
+  `webhooks.enabled=true` a new warning-only webhook (`vvmclone-customization.kb.io`, failure
+  policy always `Ignore`) returns one admission warning; both name the fields, never their values.
+  The values are still **stored in plaintext in the `VMClone`** (the v1beta1 API keeps the fields):
+  do not put a real credential in them, and **rotate any value you set on v0.4.0 or earlier**.
+  → [Upgrade guide](../upgrading.md#security-fixes)
+- **libvirt create-from-URL no longer puts the image URL on the host's command line.** The
+  legacy create-from-URL path ran `wget <URL>` on the libvirt host, so a URL's user-info or
+  presigned query string was visible in the host's process list and audit log, and in the
+  provider log. It now downloads like `ImagePrepare`: `curl -q -K -` with the URL on standard
+  input, `http`/`https`/`ftp` only, the size limit and a time limit bounded by the call's
+  deadline. Every image URL takes this path (an `ftp://` URL used to fall into the template
+  lookup, which logged it and returned it in the error), the URL is redacted in the provider and
+  manager logs, and errors never contain it.
+  → [Upgrade guide](../upgrading.md#security-fixes)
 - **libvirt host commands no longer log staged-disk URLs (R28).** The shared host-command log
   (the `ERROR Command failed` line and its stderr, the `DEBUG` command lines, the SSH stream
   errors, qemu-img stderr in copy errors and the migration `INFO` lines) printed full command
@@ -305,8 +342,10 @@ v0.4.0 release candidate](../upgrading.md#upgrading-from-a-v040-release-candidat
   security context the manager sets up for a provider. Create a `Provider` resource instead; the
   chart's README maps its values to `Provider` fields.
   → [Upgrade guide](../upgrading.md#deprecated-the-virtrigaud-provider-runtime-chart)
-- **The `virtrigaud` chart has no template, RBAC or values change.** `helm upgrade` re-tags
-  the images and the CRD hook uses the new `kubectl` image.
+- **The `virtrigaud` chart gains one webhook and has no RBAC or values change.** With
+  `webhooks.enabled=true` it renders the warning-only `vvmclone-customization.kb.io` entry (failure
+  policy always `Ignore`, timeout 5s); `values.yaml` changes only in comments. `helm upgrade`
+  re-tags the images and the CRD hook uses the new `kubectl` image.
 
 ## Known limitations
 
@@ -317,6 +356,14 @@ proto module tags) are removed; the ones that still apply are carried forward an
 against the code.
 
 ### New or changed in v0.4.1
+
+- **`spec.prepare.timeout` above about 4.5 minutes has no effect on a libvirt `ImagePrepare`
+  download.** The manager gives the `ImagePrepare` call 5 minutes, and the download is now cut off
+  within that call (before, `curl` kept running on the host after the call had failed). Prepare
+  large images from a source close to the libvirt host.
+- **The `VMClone` customization secret fields are only warned about.** The admission warning is
+  advisory and appears only with webhooks enabled; to forbid these fields, add your own admission
+  policy.
 
 - **Proxmox: a VM with user-data is tied to one node and its seed to its storage.** The VM must
   be on the node SSH reaches (the API endpoint's host); the seed is written once, at `Create`,
