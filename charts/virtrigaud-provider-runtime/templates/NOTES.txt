@@ -8,7 +8,7 @@ settings, its credential Secret mounted, a dedicated ServiceAccount and a
 hardened security context.
 
 Use a Provider resource instead and let the manager run the provider:
-  https://github.com/projectbeskar/virtrigaud/blob/main/charts/virtrigaud-provider-runtime/README.md
+  https://github.com/projectbeskar/virtrigaud/blob/main/docs/upgrading.md#upgrading-from-v040-to-v041
 
 Then remove this release:
   helm uninstall {{ .Release.Name }} --namespace {{ .Release.Namespace }}

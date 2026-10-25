@@ -255,6 +255,10 @@ go test ./internal/providers/proxmox/...
    git push origin v0.4.1
    ```
 
+   To re-run a release by hand (`workflow_dispatch`), start the workflow from
+   the tag ("Use workflow from: v0.4.1"), not from a branch: the run refuses
+   to build a commit other than the tag's.
+
 3. **CI handles**:
    - Checking the Go module versions at the tag (the release stops before
      building anything if they do not match)

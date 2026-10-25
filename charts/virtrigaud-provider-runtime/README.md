@@ -41,12 +41,13 @@ provider it runs:
    | `credentials.secretName` | `spec.credentialSecretRef` (see the example for the provider's `Secret` keys) |
    | `tls.enabled`, `tls.secretName` | `spec.runtime.service.tls.enabled`, `spec.runtime.service.tls.secretRef` (a `Provider` with no `tls` block is not deployed) |
    | `resources`, `nodeSelector`, `tolerations`, `affinity` | `spec.runtime.resources`, `spec.runtime.nodeSelector`, `spec.runtime.tolerations`, `spec.runtime.affinity` |
-   | `securityContext` | `spec.runtime.securityContext` (the default is already hardened) |
+   | `securityContext` | Leave `spec.runtime.securityContext` unset to keep the hardened default. If you set it, it replaces the default entirely (it is not merged): include `runAsNonRoot: true`, `readOnlyRootFilesystem: true`, `allowPrivilegeEscalation: false` and `capabilities.drop: [ALL]` |
    | `livenessProbe`, `readinessProbe` | `spec.runtime.livenessProbe`, `spec.runtime.readinessProbe` |
 
    The chart's HPA, PDB and extra RBAC rules have no `Provider` field. For
    network policy, use the opt-in `networkPolicy` values of the `virtrigaud`
-   chart, which select the provider pods the manager runs.
+   chart, which select the provider pods the manager runs (in the release
+   namespace only: NetworkPolicy is namespaced).
 3. Wait until the `Provider` reports `Ready`
    (`kubectl get providers.infra.virtrigaud.io -A`).
 4. Remove the chart's release: `helm uninstall <release> --namespace <namespace>`.

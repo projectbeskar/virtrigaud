@@ -31,7 +31,8 @@ GOBIN=$(shell go env GOBIN)
 endif
 
 # Version information
-VERSION ?= $(shell git describe --tags --always --dirty)
+# --match: the release tags only, not the sdk/ and proto/ module tags on the same commit
+VERSION ?= $(shell git describe --tags --match 'v[0-9]*' --always --dirty)
 GIT_SHA ?= $(shell git rev-parse HEAD)
 LDFLAGS := -X github.com/projectbeskar/virtrigaud/internal/version.Version=$(VERSION) -X github.com/projectbeskar/virtrigaud/internal/version.GitSHA=$(GIT_SHA)
 

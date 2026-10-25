@@ -70,28 +70,45 @@ of that version must be what the release was built and tested with.
 
 At the commit a release tag points at:
 
-- `go.mod` requires `.../sdk` and `.../proto` at the release version;
-- `sdk/go.mod` requires the root module and `.../proto` at the release version;
+- `go.mod` requires `.../sdk` and `.../proto` at the release version and
+  replaces them with `./sdk` and `./proto`, nothing else;
+- `sdk/go.mod` requires the root module and `.../proto` at the release version
+  and replaces them with `../` and `../proto`, nothing else;
 - `proto/go.mod` requires no VirtRigaud module.
 
 All three tags point at that commit, so every version a consumer resolves
-exists and is the released code. No commit is made at release time: the
-versions are set in the release preparation, before the tag is pushed, and
-the `replace` directives make the not-yet-existing versions irrelevant inside
-the repository in the meantime. Between releases the in-repo requires on
-`main` name the release being prepared.
+exists and is the code the release was built from. No commit is made at
+release time: the versions are set in the release preparation, before the tag
+is pushed, and the `replace` directives make the not-yet-existing versions
+irrelevant inside the repository in the meantime. Once a release preparation
+is merged, the in-repo requires on `main` name that release; until then they
+name the previous one.
 
-`hack/module-versions.sh` implements the rule:
+Only release tags are supported versions of the SDK and proto modules. A
+pseudo-version of an arbitrary commit (`go get .../sdk@<commit>`) resolves the
+root and proto modules at whatever release that commit's `sdk/go.mod` names,
+not at the same commit.
+
+`hack/module-versions.sh` implements the rule
+(`internal/scaffold/moduleversions_test.go` tests it, and checks on every
+`go test ./...` that the repository's own `go.mod` files name one release
+version):
 
 | Command | Make target | What it does |
 |---|---|---|
-| `validate <v>` | | Exit 0 when `<v>` is a release version: `vX.Y.Z`, optionally `-rcN`, `-alphaN` or `-betaN`, major 0 or 1 (a major version of 2 or more would need a `/vN` module path). `dev` and `git describe` output are not. |
+| `validate <v>` | | Exit 0 when `<v>` is a release version: `vX.Y.Z`, optionally `-rcN` (or `-rc.N`), `-alphaN` or `-betaN`, major 0 or 1 (a major version of 2 or more would need a `/vN` module path). `dev` and `git describe` output are not. |
 | `set <v>` | `make set-module-versions VERSION=<v>` | Rewrites the in-repo requires of `go.mod` and `sdk/go.mod` to `<v>` (`go mod edit`; no network) |
 | `check <v> [<commit>]` | `make check-module-versions VERSION=<v>` | Fails unless the three `go.mod` files of the working tree (or `<commit>`) follow the rule for `<v>` |
-| `tag <v> [--push] [sdk] [proto]` | `make release-go-modules VERSION=<v>` (`release-sdk`, `release-proto` for one) | Runs `check` against the commit of the existing tag `<v>`, then creates annotated tags `sdk/<v>` and `proto/<v>` on that commit; `--push` pushes them |
+| `consistent` | | Fails unless the working tree's `go.mod` files follow the rule for one release version; prints it |
+| `preflight <v> [--expect-commit <sha>]` | | Read-only: `check` against the commit of the existing tag `<v>` (which must be `<sha>`), and fails when the remote already has `sdk/<v>` or `proto/<v>` on another commit |
+| `tag <v> [--push] [--expect-commit <sha>] [sdk] [proto]` | `make release-go-modules VERSION=<v>` (`release-sdk`, `release-proto` for one) | Runs `check` against the commit of the existing tag `<v>` (which must be `<sha>`), then creates annotated tags `sdk/<v>` and `proto/<v>` on that commit; `--push` pushes them |
 
 The make targets refuse to run without an explicit `VERSION` (the Makefile's
-`git describe` default is not a release).
+`git describe` default is not a release), and only create local tags.
+
+Go compares prerelease identifiers as text, so `-rc10` sorts before `-rc2`. A
+release that may need ten or more candidates should use `-rc.N` (`-rc.2`,
+`-rc.10`), which sorts numerically.
 
 ## Releasing
 
@@ -110,43 +127,63 @@ The make targets refuse to run without an explicit `VERSION` (the Makefile's
    ```
 
 3. Push the release tag as usual (`git tag v0.4.1-rc1 && git push origin v0.4.1-rc1`).
+   To re-run a release by hand (`workflow_dispatch`), start the workflow from
+   the tag ("Use workflow from: v0.4.1-rc1"), not from a branch: the run
+   refuses to build a commit other than the tag's.
 
 The release workflow (`.github/workflows/release.yml`) then:
 
-- in `prepare`, checks out the tag and runs `hack/module-versions.sh check`.
-  A tag whose `go.mod` files do not follow the rule, or that is not a release
-  version, fails the release before anything is built or published;
+- in `prepare` (`contents: read` only), checks out the tag, checks that the run
+  builds the tag's commit, and runs `hack/module-versions.sh preflight`. A tag
+  whose `go.mod` files do not follow the rule, that is not a release version,
+  or whose module tags already exist on another commit, fails the release
+  before anything is built or published;
 - after the GitHub Release is created, runs the `tag-go-modules` job:
-  `hack/module-versions.sh tag <tag> --push` creates `sdk/<tag>` and
-  `proto/<tag>` on the commit of `<tag>` and pushes them. The job has only
-  `contents: write`. The tags are pushed with `GITHUB_TOKEN`, which starts no
-  workflow run, and neither `sdk/...` nor `proto/...` matches the workflow's
-  `v*` trigger.
+  `hack/module-versions.sh tag <tag> --push --expect-commit <commit>` creates
+  `sdk/<tag>` and `proto/<tag>` on the commit of `<tag>`, the one every job of
+  the run built, and pushes them. The job has only `contents: write`. The tags
+  are pushed with `GITHUB_TOKEN`, which starts no workflow run, and neither
+  `sdk/...` nor `proto/...` matches the workflow's `v*` trigger. The tag
+  annotation names the release commit and the workflow run.
 
-If `check` fails in `prepare`, the release tag was pushed with the wrong
-`go.mod` files. Nothing has been published; delete the tag, fix the versions in
-a pull request and tag the new commit.
+If `prepare` fails on the module check, nothing has been built or published,
+but the release tag itself is public, and it is a version of the root module:
+the Go proxy may already have fetched it. **Do not reuse the version.** Leave
+the tag, fix the `go.mod` files in a pull request, and release the next
+version (for example `-rc2`). Delete and re-create the tag only if you are
+certain nothing fetched it.
+
+If `tag-go-modules` fails, the GitHub Release and its `vrtg-provider` binaries
+are already public, and a project that binary scaffolds does not resolve until
+the module tags exist. Re-run the failed job: it is idempotent and pushes only
+the tags that are missing. Or, from a checkout with the release tag, run
+`make release-go-modules VERSION=<tag>` and push the two tags without
+`--force` (`git push --atomic origin refs/tags/sdk/<tag> refs/tags/proto/<tag>`).
 
 ## Tags are never moved
 
 The Go checksum database (`sum.golang.org`) records the content of a module
 version the first time anyone fetches it, and every later download is checked
-against that record. A moved or re-created `sdk/` or `proto/` tag would make the
-version fail verification for everyone. So:
+against that record. A moved or re-created `vX.Y.Z`, `sdk/` or `proto/` tag
+would make that version fail verification for everyone. So:
 
 - `hack/module-versions.sh tag` keeps a module tag that already points at the
   release commit (a re-run of the job does nothing) and fails, without
   changing anything, when one points at another commit, locally or on the
-  remote;
+  remote, or when the release tag is not on the commit the run built;
 - it pushes without `--force`, so `git` itself also refuses to replace a tag
   the remote already has; `--atomic` makes the push all or nothing;
 - a broken module version is fixed with a new release, never by re-tagging. A
   later release can mark it with a `retract` directive in the module's
   `go.mod`.
 
-Recommended repository setting: a tag ruleset on `v*`, `sdk/v*` and `proto/v*`
-that restricts updates and deletions. It must still allow the release
-workflow (`GITHUB_TOKEN`) to create tags.
+These are client-side safeguards. **Required repository setting**, the
+server-side enforcement: a tag ruleset on `refs/tags/v*`, `refs/tags/sdk/v*`
+and `refs/tags/proto/v*` with "Restrict updates" and "Restrict deletions", and
+an empty bypass list (no bypass for repository administrators either). Do not
+enable "Restrict creations" on these patterns: rulesets apply to
+`GITHUB_TOKEN`, so it would stop the release workflow from creating the module
+tags.
 
 ## Verifying a release
 
