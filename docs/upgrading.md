@@ -5,6 +5,7 @@ This guide covers upgrading a VirtRigaud installation from **v0.3.11** (2026-06-
 **breaking** or change operator-visible behavior. Read the "Breaking changes" table
 below before you upgrade, then follow "Required upgrade order". If you are on a v0.4.0
 release candidate, see [Upgrading from a v0.4.0 release candidate](#upgrading-from-a-v040-release-candidate).
+For v0.4.1, see [Upgrading from v0.4.0 to v0.4.1](#upgrading-from-v040-to-v041).
 
 Each change below links to the in-tree page that documents it in full — this guide
 is the index and the sequencing, not a duplicate of that detail.
@@ -14,6 +15,26 @@ is the index and the sequencing, not a duplicate of that detail.
 > naming) and **#336** (chart NetworkPolicy key) — both describe a broken
 > intermediate state that only matters if you deployed a `main` build from inside
 > that window.
+
+## Upgrading from v0.4.0 to v0.4.1
+
+The rest of this guide covers the upgrade from v0.3.11 to v0.4.0. On v0.4.0, also note:
+
+- **Deprecated: the `virtrigaud-provider-runtime` chart** (`charts/virtrigaud-provider-runtime/`).
+  It is removed in the next minor release. It was never published to the Helm repository or
+  released with the `virtrigaud` chart. It runs a provider `Deployment` outside a `Provider`
+  resource, which the manager never connects to (the manager talks only to the provider it runs for
+  a `Provider`, at `status.runtime.endpoint`), and it bypasses what the manager sets up for that
+  provider: the gRPC TLS/mTLS settings, the credential `Secret` mount, a dedicated ServiceAccount and
+  the hardened security context. If you installed it, create a `Provider` resource for each provider
+  instead, wait until it is `Ready`, then `helm uninstall` the chart's release. The chart's
+  [README](../charts/virtrigaud-provider-runtime/README.md) maps its values to `Provider` fields.
+- **Provider authors: the SDK and proto Go modules are published.** From v0.4.1 on, each release
+  tags `sdk/vX.Y.Z` and `proto/vX.Y.Z` next to `vX.Y.Z`, and `vrtg-provider init` from a release
+  writes a `go.mod` that requires them at its own version instead of `replace` directives to a
+  checkout. An existing project can drop its `replace` directives and require all three modules
+  (`github.com/projectbeskar/virtrigaud`, `.../sdk`, `.../proto`) at the same release. See
+  [`docs/go-modules.md`](go-modules.md).
 
 ## Breaking changes
 

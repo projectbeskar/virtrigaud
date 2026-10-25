@@ -238,23 +238,35 @@ go test ./internal/providers/proxmox/...
 
    # Update changelog and release notes
    vim CHANGELOG.md
+
+   # Point the in-repo requires of go.mod and sdk/go.mod at the release
+   # (every release candidate and the final release), and commit them
+   make set-module-versions VERSION=v0.4.1
    ```
 
    Do not edit `charts/virtrigaud/Chart.yaml` or the image tags in
    `charts/virtrigaud/values.yaml`: the release workflow sets the chart
    `version`, `appVersion` and the image tags from the tag.
 
-2. **Create release**:
+2. **Create release**, from the merged preparation commit:
    ```bash
-   git tag v0.4.0
-   git push origin v0.4.0
+   make check-module-versions VERSION=v0.4.1
+   git tag v0.4.1
+   git push origin v0.4.1
    ```
 
 3. **CI handles**:
+   - Checking the Go module versions at the tag (the release stops before
+     building anything if they do not match)
    - Building and pushing images
    - Creating GitHub release
    - Publishing Helm charts
    - Generating CLI binaries
+   - Tagging the SDK and proto Go modules (`sdk/v0.4.1`, `proto/v0.4.1`) on
+     the release commit, after the GitHub release
+
+   See [`docs/go-modules.md`](docs/go-modules.md) for the module versioning
+   rule, why the module tags are never moved, and how to verify them.
 
 ## Common Issues
 
