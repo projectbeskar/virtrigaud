@@ -140,6 +140,7 @@ func TestVrtgAgainstAPIServer(t *testing.T) {
 				} `json:"metadata"`
 			} `json:"items"`
 		}
+		assert.NotContains(t, out, "managedFields")
 		require.NoError(t, json.Unmarshal([]byte(out), &list), out)
 		assert.Equal(t, "infra.virtrigaud.io/v1beta1", list.APIVersion)
 		assert.Equal(t, "VirtualMachineList", list.Kind)

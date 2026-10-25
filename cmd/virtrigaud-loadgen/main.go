@@ -51,6 +51,10 @@ const (
 	operationTimeout = 30 * time.Second
 )
 
+// version is the release the binary was built from; the release workflow sets
+// it with -ldflags "-X main.version=...".
+var version = "dev"
+
 // options holds the values of the tool's flags.
 type options struct {
 	kubeconfig string
@@ -172,6 +176,7 @@ func newRootCmd() *cobra.Command {
 		Use:           "virtrigaud-loadgen",
 		Short:         "Load generation tool for virtrigaud",
 		Long:          "Generate synthetic load against virtrigaud to test performance and scalability",
+		Version:       version,
 		SilenceUsage:  true,
 		SilenceErrors: true,
 	}

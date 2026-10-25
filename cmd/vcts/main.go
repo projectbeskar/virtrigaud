@@ -35,6 +35,10 @@ import (
 // defaultSpecDir is the directory 'vcts validate' reads when none is given.
 const defaultSpecDir = "test/conformance/specs"
 
+// version is the release the binary was built from; the release workflow sets
+// it with -ldflags "-X main.version=...".
+var version = "dev"
+
 // errValidationFailed is returned by 'vcts validate' when a specification is
 // invalid, so the process exits non-zero.
 var errValidationFailed = errors.New("validation failed")
@@ -71,6 +75,7 @@ func newRootCmd() *cobra.Command {
 		Short: "Virtrigaud Conformance Test Suite",
 		Long: `VCTS (Virtrigaud Conformance Test Suite) runs standardized tests against
 virtrigaud providers to verify compliance with the provider contract.`,
+		Version:       version,
 		SilenceUsage:  true,
 		SilenceErrors: true,
 	}

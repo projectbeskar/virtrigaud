@@ -26,6 +26,7 @@ import (
 	"io"
 	"os"
 	"strings"
+	"text/tabwriter"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -55,6 +56,10 @@ const (
 	flagNamespace = "namespace"
 )
 
+// version is the release the binary was built from; the release workflow sets
+// it with -ldflags "-X main.version=...".
+var version = "dev"
+
 // errNotImplemented is returned by the subcommands that exist in the command
 // tree but have no implementation yet.
 var errNotImplemented = errors.New("not implemented in this release")
@@ -83,6 +88,7 @@ func newRootCmd() *cobra.Command {
 		Use:           "vrtg",
 		Short:         "CLI tool for virtrigaud",
 		Long:          "Command-line interface for managing virtrigaud resources",
+		Version:       version,
 		SilenceUsage:  true,
 		SilenceErrors: true,
 	}
@@ -307,8 +313,8 @@ func (o *options) listVMs(cmd *cobra.Command, _ []string) error {
 		return o.outputResource(out, c, vmList)
 	}
 
-	fmt.Fprintf(out, "%-20s %-20s %-15s %-15s %-15s %-20s %-10s\n",
-		"NAMESPACE", "NAME", "PROVIDER", "CLASS", "IMAGE", "IPS", "AGE")
+	table := newTable(out)
+	fmt.Fprintln(table, "NAMESPACE\tNAME\tPROVIDER\tCLASS\tIMAGE\tIPS\tAGE")
 	for i := range vmList.Items {
 		vm := &vmList.Items[i]
 		age := time.Since(vm.CreationTimestamp.Time).Truncate(time.Second)
@@ -316,12 +322,12 @@ func (o *options) listVMs(cmd *cobra.Command, _ []string) error {
 		if ips == "" {
 			ips = noneValue
 		}
-		fmt.Fprintf(out, "%-20s %-20s %-15s %-15s %-15s %-20s %-10s\n",
+		fmt.Fprintf(table, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
 			vm.Namespace, vm.Name, vm.Spec.ProviderRef.Name, vm.Spec.ClassRef.Name,
 			refName(vm.Spec.ImageRef), ips, age)
 	}
 
-	return nil
+	return flushTable(table)
 }
 
 func (o *options) describeVM(cmd *cobra.Command, args []string) error {
@@ -383,14 +389,15 @@ func (o *options) vmEvents(cmd *cobra.Command, args []string) error {
 	}
 
 	out := cmd.OutOrStdout()
-	fmt.Fprintf(out, "%-30s %-10s %-15s %-50s\n", "LAST SEEN", "TYPE", "REASON", "MESSAGE")
+	table := newTable(out)
+	fmt.Fprintln(table, "LAST SEEN\tTYPE\tREASON\tMESSAGE")
 	for _, event := range events.Items {
 		lastSeen := event.LastTimestamp.Format("2006-01-02 15:04:05")
-		fmt.Fprintf(out, "%-30s %-10s %-15s %-50s\n",
+		fmt.Fprintf(table, "%s\t%s\t%s\t%s\n",
 			lastSeen, event.Type, event.Reason, event.Message)
 	}
 
-	return nil
+	return flushTable(table)
 }
 
 func (o *options) vmConsoleURL(cmd *cobra.Command, args []string) error {
@@ -437,7 +444,8 @@ func (o *options) listProviders(cmd *cobra.Command, _ []string) error {
 		return o.outputResource(out, c, providerList)
 	}
 
-	fmt.Fprintf(out, "%-20s %-20s %-15s %-30s %-10s\n", "NAMESPACE", "NAME", "TYPE", "ENDPOINT", "AGE")
+	table := newTable(out)
+	fmt.Fprintln(table, "NAMESPACE\tNAME\tTYPE\tENDPOINT\tAGE")
 	for i := range providerList.Items {
 		provider := &providerList.Items[i]
 		age := time.Since(provider.CreationTimestamp.Time).Truncate(time.Second)
@@ -445,11 +453,11 @@ func (o *options) listProviders(cmd *cobra.Command, _ []string) error {
 		if endpoint == "" {
 			endpoint = noneValue
 		}
-		fmt.Fprintf(out, "%-20s %-20s %-15s %-30s %-10s\n",
+		fmt.Fprintf(table, "%s\t%s\t%s\t%s\t%s\n",
 			provider.Namespace, provider.Name, provider.Spec.Type, endpoint, age)
 	}
 
-	return nil
+	return flushTable(table)
 }
 
 func (o *options) providerStatus(cmd *cobra.Command, args []string) error {
@@ -486,6 +494,19 @@ func (o *options) providerStatus(cmd *cobra.Command, args []string) error {
 
 	fmt.Fprintf(out, "\nNote: Use kubectl describe for full provider details\n")
 
+	return nil
+}
+
+// newTable returns a writer that aligns tab-separated columns written to out.
+func newTable(out io.Writer) *tabwriter.Writer {
+	return tabwriter.NewWriter(out, 0, 0, 3, ' ', 0)
+}
+
+// flushTable writes the buffered table rows.
+func flushTable(table *tabwriter.Writer) error {
+	if err := table.Flush(); err != nil {
+		return fmt.Errorf("write table: %w", err)
+	}
 	return nil
 }
 
@@ -542,23 +563,32 @@ func (o *options) outputResource(out io.Writer, c client.Client, obj runtime.Obj
 }
 
 // setGVK fills in apiVersion and kind on obj and, for a list, on each item.
-// Typed reads leave them empty.
+// Typed reads leave them empty. It also drops metadata.managedFields, which
+// only adds noise to the output (kubectl hides it too).
 func setGVK(c client.Client, obj runtime.Object) error {
+	if err := prepareForOutput(c, obj); err != nil {
+		return err
+	}
+
+	if !meta.IsListType(obj) {
+		return nil
+	}
+	return meta.EachListItem(obj, func(item runtime.Object) error {
+		return prepareForOutput(c, item)
+	})
+}
+
+// prepareForOutput sets apiVersion and kind on one object or list and clears
+// its managedFields.
+func prepareForOutput(c client.Client, obj runtime.Object) error {
 	gvk, err := apiutil.GVKForObject(obj, c.Scheme())
 	if err != nil {
 		return fmt.Errorf("resolve kind of %T: %w", obj, err)
 	}
 	obj.GetObjectKind().SetGroupVersionKind(gvk)
 
-	if !meta.IsListType(obj) {
-		return nil
+	if accessor, err := meta.Accessor(obj); err == nil {
+		accessor.SetManagedFields(nil)
 	}
-	return meta.EachListItem(obj, func(item runtime.Object) error {
-		itemGVK, err := apiutil.GVKForObject(item, c.Scheme())
-		if err != nil {
-			return fmt.Errorf("resolve kind of %T: %w", item, err)
-		}
-		item.GetObjectKind().SetGroupVersionKind(itemGVK)
-		return nil
-	})
+	return nil
 }
