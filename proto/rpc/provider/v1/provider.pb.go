@@ -1721,7 +1721,16 @@ type CloneRequest struct {
 	// JSON-encoded specifications for customization
 	ClassJson     string `protobuf:"bytes,4,opt,name=class_json,json=classJson,proto3" json:"class_json,omitempty"`             // VMClass overrides
 	PlacementJson string `protobuf:"bytes,5,opt,name=placement_json,json=placementJson,proto3" json:"placement_json,omitempty"` // Placement hints
-	CustomizeJson string `protobuf:"bytes,6,opt,name=customize_json,json=customizeJson,proto3" json:"customize_json,omitempty"` // Customization spec
+	// customize_json is the JSON of the VMClone's spec.customization, in the
+	// shape of the v1beta1 VMCustomization type, but only an allow-listed
+	// subset of it: the fields providers apply (hostname, domain,
+	// userData.cloudInit.inline) or report as not applied. Fields that hold or
+	// commonly hold secret values and that no provider acts on
+	// (sysprep.productKey, sysprep.adminPassword.value,
+	// sysprep.joinDomain.password.value, sysprep.customCommands,
+	// certificates[].data, guestCommands[].command and .arguments,
+	// userData.ignition.inline) are never included. Empty for no customization.
+	CustomizeJson string `protobuf:"bytes,6,opt,name=customize_json,json=customizeJson,proto3" json:"customize_json,omitempty"`
 	// source_host_id is the host the source VM runs on for a clustered provider
 	// (Provider topology: cluster): the source VM's bound host
 	// (status.placement.host). It is the routing field for the clone. It is

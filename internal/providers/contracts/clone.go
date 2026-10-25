@@ -56,8 +56,12 @@ type CloneRequest struct {
 	// PlacementJSON is a JSON-encoded placement hint for the target VM, or
 	// empty to let the provider choose.
 	PlacementJSON string
-	// CustomizeJSON is a JSON-encoded customization spec (hostname, network,
-	// cloud-init, sysprep, ...), or empty for no customization.
+	// CustomizeJSON is the JSON of the VMClone's spec.customization, in the
+	// shape of the v1beta1 VMCustomization type, but only the allow-listed
+	// subset the manager sends (the fields providers apply or report as not
+	// applied); the fields that hold or commonly hold secret values and that
+	// no provider acts on are never included (see the proto's
+	// customize_json). Empty for no customization.
 	CustomizeJSON string
 }
 

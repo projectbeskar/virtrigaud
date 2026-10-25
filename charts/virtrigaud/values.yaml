@@ -466,12 +466,14 @@ networkPolicy:
 # rendered ValidatingWebhookConfiguration reject Provider writes under
 # failurePolicy=Fail. Enable this only once a cert source is configured.
 #
-# The ONLY admission webhook backed by manager Go code today is the validating
+# The admission webhooks backed by manager Go code are all validating: the
 # `vprovider.kb.io` webhook — the ADR-0007 D2 guard that rejects
 # spec.topology=cluster on provider types with a native cluster manager (only
-# libvirt is allow-listed). There are NO mutating or conversion webhooks backed by
-# Go in this repo, so this chart renders ONLY the validating configuration (plus
-# its Service and serving cert). For self-signed (the default) the chart keeps the
+# libvirt is allow-listed) —, the warning-only `vvmclone-customization.kb.io`
+# (failurePolicy always Ignore), and, only when manager.maxDiskSize is set, the
+# VirtualMachine/VMClass disk-size webhooks. There are NO mutating or conversion
+# webhooks backed by Go in this repo, so this chart renders ONLY the validating
+# configuration (plus its Service and serving cert). For self-signed (the default) the chart keeps the
 # generated caBundle coherent with the serving cert and persists it across upgrades.
 #
 # Reserved VirtRigaud keys (docs/admission-policy.md). A ValidatingAdmissionPolicy

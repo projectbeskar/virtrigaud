@@ -6,13 +6,15 @@
 #
 #   1. Default values: the manager gets no --max-disk-size flag, and with
 #      webhooks.enabled=true the ValidatingWebhookConfiguration holds only
-#      vprovider.kb.io (no admission dependency on VM / VMClass writes).
+#      vprovider.kb.io and the warning-only vvmclone-customization.kb.io (no
+#      admission dependency on VM / VMClass writes).
 #   2. manager.maxDiskSize=500Gi becomes --max-disk-size=500Gi; with webhooks
 #      off no webhook configuration is rendered.
 #   3. With webhooks on as well, the VirtualMachine and VMClass disk-size
 #      webhooks are rendered, each with the same caBundle as the serving
-#      Secret's ca.crt, and their name, path, rules and failurePolicy match
-#      config/webhook/manifests.yaml (generated from the Go markers).
+#      Secret's ca.crt, and their name, path, rules, failurePolicy and
+#      timeoutSeconds match config/webhook/manifests.yaml (generated from the
+#      Go markers).
 #   4. An invalid value fails the render, naming manager.maxDiskSize.
 #   5. `helm upgrade --reuse-values` from v0.3.11 (whose values.yaml has no
 #      such key) still renders, with no flag.
