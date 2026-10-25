@@ -7,7 +7,7 @@ cumulative since v0.3.11. Someone already on a release candidate follows "Upgrad
 v0.4.0 release candidate" under "Upgrade", which keeps, per candidate, the actions that are
 still needed. See docs/upgrading.md for the full upgrade guide these notes link to, and
 CHANGELOG.md for the complete, dated changelog.
-GitHub's limit for a release body is 125,000 characters; this file is about 143,000
+GitHub's limit for a release body is 125,000 characters; this file is about 144,000
 characters, so the published body is a trimmed version of it: everything below this comment
 except the "Fixes" subsection of "Highlights" (the preamble, "Breaking changes", the other
 "Highlights" subsections, "Known limitations", "Validation" and "Upgrade", about
@@ -258,7 +258,7 @@ needed.
   terminal, nothing changed but a repair of an interrupted ejection that may run first)
   when the snapshot stored a CD-ROM or read-only disk with media:** any disk-only snapshot
   of a VM with a cloud-init seed or another read-only disk that was taken while the VM
-  ran, and those taken before this release (by v0.3.11 or a v0.4.0 candidate before rc7)
+  ran, and those taken before this release (by an earlier release)
   of a VM with a seed. Take a new snapshot with the VM powered off.
 - **A snapshot of a powered-off libvirt VM briefly ejects its CD-ROMs and floppies from the
   VM's persistent definition** and inserts them again; the domain's metadata carries a
@@ -728,9 +728,9 @@ policy and grants → manager → providers), and rollback caveats in
   leftover file, unusable, because the VM no longer runs on it; libvirt kept its metadata,
   and every later delete of it failed while the VM ran (`disk image 'vda' for internal
   snapshot 'mem' is not the same as disk image currently used by VM`). Its `VMSnapshot`
-  kept its finalizer and was retried for ever (`Ready=False/ProviderError`). VirtRigaud's
-  overlay cleanup kept the leftover file, because the memory snapshot's metadata still
-  referenced it. Now:
+  kept its finalizer and was retried for ever (`Ready=False/ProviderError`). From v0.4.0-rc1 on, VirtRigaud's
+  overlay cleanup (v0.3.11 had none, so the file stayed either way) kept the leftover file,
+  because the memory snapshot's metadata still referenced it. Now:
   - *The delete is refused, and nothing changes,* while another snapshot of the VM is
     stored in a file the delete may merge away or remove. The provider checks both libvirt's
     snapshot metadata and the files' own headers (`qemu-img info -U -f qcow2
@@ -770,7 +770,7 @@ policy and grants → manager → providers), and rollback caveats in
   which a stock PVE has no `images` content type for, so the VM did not start. It now goes
   on the first of these that applies: a storage named for the VM in the request or the image
   (no effect yet for a `VirtualMachine`); the storage of the clone's first non-cdrom disk
-  (the step that usually decides; a passthrough device skips to the next); then
+  (the step that usually decides; a passthrough device is not storage-backed, so the next step applies); then
   `PROVIDER_DEFAULT_STORAGE` or `PVE_DEFAULT_STORAGE` on the Proxmox provider pod; `local`
   only when none applies, with a warning in the provider log. A template that has a
   cloud-init drive of its own keeps it when it is already on the chosen storage. The
@@ -847,7 +847,9 @@ policy and grants → manager → providers), and rollback caveats in
 ### Fixes
 
 - **libvirt snapshot delete, revert and disk checks** (details under
-  [Snapshots and revert](#snapshots-and-revert)):
+  [Snapshots and revert](#snapshots-and-revert)). The first item affects v0.3.11 too; the
+  others were defects of the v0.4.0 candidates only (v0.3.11 has no disk in-use check, no
+  revert and no routed snapshot create):
   - Deleting a libvirt disk-only snapshot orphaned a memory snapshot stored in its overlay
     without any sign, and the memory snapshot's `VMSnapshot` could then never be deleted
     while the VM ran.
@@ -1548,7 +1550,7 @@ says so. Each links to the page that documents it in full, where one exists.
   libvirt 9.9 or later.** A snapshot of a VM that is off, or taken without memory, is an
   external disk-only snapshot; older libvirt cannot revert one and the provider reports
   `RevertFailed`. A disk-only snapshot that stores a CD-ROM or read-only disk with media
-  (one taken while the VM ran, or before v0.4.0-rc7) is refused on revert, and so is one
+  (one taken while the VM ran, or by an earlier release) is refused on revert, and so is one
   whose stored definition cannot be read. A snapshot of a powered-off VM ejects the seed
   CD-ROM for its duration; if the provider or the host fails in that window the CD-ROM
   stays empty until VirtRigaud's next snapshot create, revert, start or reboot of that VM
@@ -1586,7 +1588,7 @@ says so. Each links to the page that documents it in full, where one exists.
   overlay file (V12).** The overlay of a disk-only snapshot is
   `<pool>/<domain>-disk.<snapshot name>`. When an earlier snapshot of that name left its
   overlay in the pool because the overlay could not be proven safe to remove (for example a
-  memory snapshot lost to the delete problem above on rc8 or earlier still referenced it),
+  memory snapshot orphaned by the delete problem above, on v0.3.11 or v0.4.0-rc8 or earlier, still referenced it),
   a new disk-only snapshot with the same name fails in libvirt (`external snapshot file for
   disk vda already exists`). On a clustered Provider the provider answers this with a
   generic error (`failed to create snapshot on host "<host>"`, `Unknown` with
@@ -1597,7 +1599,7 @@ says so. Each links to the page that documents it in full, where one exists.
   created" and the `VMSnapshot` ends `Failed`; that is from the code and was not run in the
   lab. **Workaround:** use a new snapshot name. Or, after you have verified that no domain
   definition and no snapshot references the file (`virsh dumpxml --inactive` of every domain
-  on the host, and `virsh snapshot-dumpxml` of every snapshot), remove the leftover file; a
+  on every host of the Provider that mounts the pool, and `virsh snapshot-dumpxml` of every snapshot), remove the leftover file; a
   `VMSnapshot` that is still being retried then completes on its next attempt (one already
   held `SnapshotOutcomeUnknown` is deleted and created again). A definite refusal is
   planned for a later release.
@@ -1612,7 +1614,7 @@ says so. Each links to the page that documents it in full, where one exists.
   -h libvirt-qemu:kvm`, `chmod 0640`). Without either, those operations are refused with
   "permission denied reading a disk image" (fail-closed: a VM delete, a snapshot delete
   and a clustered snapshot create are retried; a single-host snapshot create fails and a
-  revert is re-sent up to 5 times, see the next two limitations) (→
+  revert is re-sent up to 5 times, see the two limitations after the next) (→
   [`docs/libvirt-clones.md`](docs/libvirt-clones.md#unreadable-disk-images)).
 - **A libvirt guest on a host bridge needs the QEMU guest agent to show `status.ips`.**
   libvirt holds no DHCP lease for a bridged guest (the LAN's DHCP server answers); the
@@ -1676,7 +1678,7 @@ says so. Each links to the page that documents it in full, where one exists.
   (→ [ADR-0006](docs/adr/0006-storage-backend-agnostic-cross-hypervisor-migration.md)).
 - **Leftovers from earlier releases are not cleaned up automatically:** staged
   migration objects, landed migration disks and vSphere import-VM files of migrations
-  that ran under v0.3.11 or a v0.4.0 candidate before rc4 (including the `.hlog` history
+  that ran under an earlier release (including the `.hlog` history
   logs of vSphere imports), libvirt snapshot overlay
   files (`<domain>-disk.<snapshot>`), libvirt cloud-init seeds in `/tmp` (readable by
   other local users until you make them private, and seed directories of VMs deleted
@@ -1685,8 +1687,8 @@ says so. Each links to the page that documents it in full, where one exists.
 
 ## Validation
 
-v0.4.0 went through nine release candidates, and each was run in the lab on real
-hypervisors: Kubernetes 1.34, a vCenter, libvirt 10.0 (Ubuntu 24.04, AppArmor) as a single
+v0.4.0 went through nine release candidates (rc3 was never released), and every published
+candidate was run in the lab on real hypervisors: Kubernetes 1.34, a vCenter, libvirt 10.0 (Ubuntu 24.04, AppArmor) as a single
 host and as a two-host clustered Provider on a shared NFS pool, and a single Proxmox VE 9.2
 node (not a PVE cluster). Code that changed in a candidate was re-run on the candidate that
 changed it; the results below name that candidate in brackets, and an area that no later
@@ -1853,16 +1855,19 @@ use `v0.4.0-rc3` images: that tag was never released (its release run was stoppe
 image scan, CVE-2026-63209). A row applies if you are on that candidate or an earlier one:
 do every row that applies to you, oldest first. Where a row says **first** or **before**,
 do that before anything is rolled; then apply the CRDs, roll the manager and the providers
-in the usual order.
+in the usual order. If you are on rc8 or earlier, the libvirt providers
+(single-host and clustered) roll **before** the manager (the seed directory of the rc2 row
+still comes first), and "promptly after the manager" in the other rows then means "as part of
+that roll".
 
 | If you are on | What is still needed |
 |---|---|
 | rc1 | CRDs first (two optional status fields are new: `VMMigration` `status.storagePVCUID` and `status.storageInfo.importTarget.providerUID`; an old CRD prunes them), then the admission policy and any cross-namespace grants (exempt your restore tool in `admissionPolicy.reservedKeys.exemptUsernames` before the next restore), then the manager, then **all** providers promptly (three capability fields are new, so an older provider gets the conservative path: lost exports and imports are held, landed disks recorded as left behind). Let migrations in `Creating` or `Validating-Target` finish before the manager rolls (`TargetVMNotOwned`). The manager upgrade rolls each provider pod that mounts migration PVCs once, which interrupts an export or import running at that moment. Rolling a vSphere or Proxmox provider back brings back the wrong-disk resize; hold CPU and memory changes of VMs with `spec.disks` while an older image runs. A rolled-back manager can leave an adoption annotated `virtrigaud.io/adopted-id` without `status.id`: delete that `VirtualMachine` (no provider call is made) and let adoption take the VM again. |
-| rc2 or earlier | **First, on every libvirt host, create the seed directory.** Apply the CRDs (`VirtualMachine`, `VMSet` and `VMMigration` changed) before the manager. Roll the clustered libvirt provider before you run a migration into it (an older one is refused as a target with `ClusteredTargetUnsupported`). Every provider pod rolls (Go 1.26.10). Review who can create `VMClone`s, and `VMPlacementPolicy` `minDiskSpacePerHost` on clustered Providers. Seeds in `/tmp` and seed directories of VMs deleted together with a clone are not cleaned up ([Leftovers from earlier releases](docs/upgrading.md#leftovers-from-earlier-releases)). |
+| rc2 or earlier | **First, on every libvirt host, create the seed directory.** Apply the CRDs (`VirtualMachine`, `VMSet` and `VMMigration` changed, and `Host` in a description) before the manager. Roll the clustered libvirt provider before you run a migration into it (an older one is refused as a target with `ClusteredTargetUnsupported`). Every provider pod rolls (Go 1.26.10). Review who can create `VMClone`s, and `VMPlacementPolicy` `minDiskSpacePerHost` on clustered Providers. A migration that reached `Ready` with `LandedDiskCleanup` still `Unknown` is closed once on its next reconcile. Seeds in `/tmp` and seed directories of VMs deleted together with a clone are not cleaned up ([Leftovers from earlier releases](docs/upgrading.md#leftovers-from-earlier-releases)). |
 | rc4 or earlier | Grant the PVE token `VM.Config.Network`, `VM.Config.Cloudinit` and `SDN.Use` on the bridges your VMs use (skip for the root user or the `Administrator` role) **before** you roll the Proxmox provider, then roll the manager and the Proxmox provider together. Optionally set `PVE_DEFAULT_STORAGE` on Proxmox Providers whose clones can have no storage-backed disk. Review each `VMNetworkAttachment` a Proxmox VM uses, because the bridge and VLAN they name are now applied. |
 | rc5 or earlier | **Before the manager rolls,** remove `spec.snapshot.revertToRef` from every `VirtualMachine` and `VMSet` template you do not want reverted (list them with the query under [Breaking changes](#breaking-changes)). Apply the CRDs first: `VirtualMachine` gains `status.snapshotRevert`, `HostPool` gains printer columns, `VMSet` a description; a manager whose `VirtualMachine` CRD prunes `status.snapshotRevert` sends no revert (`SnapshotReverted=False/Unsupported`), and the readiness check does not verify the field. The manager's role gains `hostpools/status` (the chart and `config/rbac/role.yaml` carry it; a kustomize install must reapply the role). Roll the clustered libvirt provider promptly after the manager. |
 | rc6 or earlier | If you reverted a libvirt VM to a snapshot on rc6, **repair it first**: its CD-ROM is on a `cloud-init.<digits>` file in its seed directory and it does not start ([Repairing a VM broken by a v0.4.0-rc6 revert](docs/vm-snapshot-revert.md#repairing-a-vm-broken-by-a-v040-rc6-revert); do not delete its `VMSnapshot` before step 4 of the runbook). The VMs that carry a finished request are listed by `kubectl get virtualmachines.infra.virtrigaud.io -A -o jsonpath='{range .items[?(@.status.snapshotRevert.phase=="Succeeded")]}{.metadata.namespace}/{.metadata.name}{"\n"}{end}'`. Roll the libvirt providers (single-host and clustered), then take new snapshots, with the VM powered off, of the VMs you want to be able to revert, and delete the old ones: until then a revert to an old snapshot of a VM with a seed is refused with `RevertFailed` and changes nothing. |
-| rc7 or earlier | Apply the CRDs (only the description of `status.ips` changed since rc7). On every libvirt host whose provider SSH user cannot read libvirt's `0600` snapshot overlays, grant `VR_DISK_READ` over the pool directory ([Unreadable disk images](docs/libvirt-clones.md#unreadable-disk-images)) or repair the overlays by hand, then roll the manager and the libvirt providers. Check the grant with `sudo -l -U <ssh user> /usr/bin/qemu-img info -U -f qcow2 --output=json -- <file>`. A `VMSnapshot` that rc7 held in `SnapshotOutcomeUnknown` for this cause stays held until you release it with the `virtrigaud.io/operation-outcome` annotation. |
+| rc7 or earlier | Apply the CRDs (only the description of `status.ips` changed since rc7). On every libvirt host whose provider SSH user cannot read libvirt's `0600` snapshot overlays, grant `VR_DISK_READ` over the pool directory ([Unreadable disk images](docs/libvirt-clones.md#unreadable-disk-images)) or repair the overlays by hand, then roll the libvirt providers, then the manager. Check the grant with `sudo -l -U <ssh user> /usr/bin/qemu-img info -U -f qcow2 --output=json -- <file>`. A `VMSnapshot` that rc7 held in `SnapshotOutcomeUnknown` for this cause stays held until you release it with the `virtrigaud.io/operation-outcome` annotation. |
 | rc8 or earlier | No CRD change. Roll the libvirt providers (single-host and clustered) first, then the manager. Until a libvirt provider is rolled, do not delete a disk-only snapshot of a VM that has a memory snapshot. The new delete check reads more overlay files than rc8's checks did: where the provider's SSH user lacks `VR_DISK_READ` over the pool directory (see the rc7 row), deleting a disk-only snapshot is refused, retryably, until it is granted. Rolling a libvirt provider back to rc8 brings back the orphaned memory snapshot. |
 
 Rollback caveats for each of these steps are in

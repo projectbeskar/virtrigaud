@@ -417,8 +417,8 @@ against 10.0) does not refuse this delete: it refuses an internal snapshot that 
 disk-only snapshot's *parent*, but not one stored in the file the delete merges away. The
 memory snapshot is then **orphaned**: its data stays in the leftover overlay file, but the VM
 no longer runs on that file, so the snapshot cannot be used, and libvirt keeps its metadata,
-which still names the file. VirtRigaud's overlay cleanup ([What SnapshotDelete
-removes](#what-snapshotdelete-removes)) kept the leftover file, because the memory
+which still names the file. From v0.4.0-rc1 on, VirtRigaud's overlay cleanup ([What SnapshotDelete
+removes](#what-snapshotdelete-removes); v0.3.11 had none, so the file stayed either way) kept the leftover file, because the memory
 snapshot's metadata still referenced it. v0.3.11 and v0.4.0-rc8 and earlier sent that delete
 and reported success.
 
