@@ -45,6 +45,16 @@ conflicts with the per-section "Files touched" notes:
 | Logging backend | "the libvirt provider uses `slog` — check and match" | The host-key audit log uses `slog` (structured `provider`/`host`/`env_var`/`known_hosts` fields) on an injectable `VirshProvider.logger` (defaults to `slog.Default()`), so the WARN can be asserted via a captured handler in tests. The surrounding legacy `virsh.go`/`server.go` lines still use stdlib `log`; only the audit line was moved to `slog`, to keep the diff focused (no broad logging refactor — out of scope). |
 | Empty `known_hosts` | hard-fail on absent | hard-fail on absent **or empty** (`os.Stat` size == 0): an empty file is no trust material and would silently fall through to ssh's default behaviour otherwise. |
 
+> **Update (v0.4.0):** the table above describes the code as shipped on 2026-05-27,
+> when the libvirt provider ran `ssh`/`scp` subprocesses. [ADR-0008](./0008-libvirt-pure-go-driver-and-ssh-transport.md)
+> PR 3 replaced them with an in-process SSH client (`internal/providers/libvirt/sshclient.go`).
+> `sshHostKeyOptions()`, `sshConfigStanza()` and `applyURIHostKeyOptions()` no longer
+> exist in `internal/providers/libvirt`. `hostKeyPolicy.hostKeyCallback()` in
+> `sshhostkey.go` now applies the same policy to that client: the same `known_hosts`
+> file, the same `LIBVIRT_INSECURE_SKIP_HOST_KEY_VERIFICATION` escape hatch, the same
+> hard-fail (`verifyKnownHostsPresent`) and audit log (`logVerificationMode`). The
+> decisions in this ADR are unchanged.
+
 **Interaction with I1 (decision (e), as-shipped):** the hard-fail error and a code
 comment in `sshhostkey.go` (`verifyKnownHostsPresent`) both record that, post-#149,
 an operator hitting I1 with a stale/missing `known_hosts` will now see

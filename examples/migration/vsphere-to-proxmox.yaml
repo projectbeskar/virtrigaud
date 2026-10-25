@@ -3,9 +3,9 @@
 # vSphere → Proxmox is validated end-to-end over the S3/relay path. The disk is
 # staged through an S3-compatible object store and the provider pod is the S3
 # client, so bytes flow vCenter → pod → S3 → pod → PVE node and NEVER traverse a
-# CSI PVC. (The Proxmox provider is S3/relay-only — it does NOT advertise
-# PVC/NFS/`direct` backends; a `storage.type: pvc` migration with a Proxmox target
-# fails capability validation.)
+# CSI PVC. (The Proxmox provider advertises the s3 and nfs backends, not pvc, and
+# `direct` is not implemented; a `storage.type: pvc` migration with a Proxmox
+# target fails capability validation.)
 #
 # Data path: the vSphere SOURCE exports its native vmdk and streams it up to S3;
 # the Proxmox TARGET streams the object down to the PVE node over SSH, runs
@@ -78,7 +78,7 @@ spec:
       endpoint: http://s3.example.com:9000   # http:// ⇒ plaintext; omit for AWS
       region: us-east-1
       prefix: windows-server-2022/
-      usePathStyle: true            # true for rustfs/MinIO/Ceph RGW; false for AWS
+      usePathStyle: true            # true for MinIO/Ceph RGW; false for AWS
       credentialsSecretRef:
         name: s3-migration-credentials
   options:

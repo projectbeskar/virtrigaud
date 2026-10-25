@@ -32,7 +32,7 @@ different disks and seeds, and never block each other.
 | Primary disk | `<pool>/<namespace>.<name>-disk.qcow2` |
 | Migration landing disk | `<pool>/<namespace>.<name>-migrated.qcow2` |
 | Clone | `<target namespace>.<target name>`, disk `<…>-disk.qcow2` |
-| Cloud-init seed | `/tmp/virtrigaud-cloudinit-<namespace>.<name>.<random>/cloud-init.iso` |
+| Cloud-init seed | `<seed dir>/virtrigaud-cloudinit-<namespace>.<name>.<random>/cloud-init.iso` (see [Cloud-init seed directory](#cloud-init-seed-directory)) |
 | Staged domain XML | `/tmp/<namespace>.<name>-domain.xml.<random>` (removed after `virsh define`) |
 
 - **Length.** `<namespace>.<name>` is at most 200 bytes. A longer one (a

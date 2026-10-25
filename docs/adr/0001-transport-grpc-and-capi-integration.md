@@ -126,4 +126,4 @@ The gRPC layer is two levels below CAPI. **It is not in the CAPI provider's path
   - `proto/provider/v1/provider.proto`
   - `internal/transport/grpc/`
   - `sdk/provider/` (server, client, middleware, capabilities, errors)
-  - `internal/providers/{vsphere,libvirt,proxmox,mock}/server.go`
+  - `internal/providers/{vsphere,libvirt,proxmox}/server.go`, `internal/providers/mock/provider.go`

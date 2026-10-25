@@ -1,14 +1,16 @@
 # Reverting a VirtualMachine to a VMSnapshot (`spec.snapshot.revertToRef`)
 
 `spec.snapshot.revertToRef` on a `VirtualMachine` names a `VMSnapshot` to revert the
-VM to. Up to v0.4.0-rc5 the field was accepted and **ignored**: no controller sent the
-provider's `SnapshotRevert`, the VM stayed `Ready`, and no condition or event said that
-nothing happened. Since v0.4.0-rc6 the `VirtualMachine` controller acts on it,
-under the rules below.
+VM to. In v0.3.x and up to v0.4.0-rc5 the field was accepted and **ignored**: no
+controller sent the provider's `SnapshotRevert`, the VM stayed `Ready`, and no condition
+or event said that nothing happened. Since v0.4.0-rc6, and in v0.4.0, the
+`VirtualMachine` controller acts on it, under the rules below.
 
-> This flow is covered by the controller's unit and envtest tests, which drive a
-> scripted provider fake (not the mock provider binary, nor the gRPC transport). It has
-> not been validated on a real vSphere, libvirt or Proxmox host yet.
+> The controller's unit and envtest tests drive a scripted provider fake (not the mock
+> provider binary, nor the gRPC transport). The flow was also run in the lab on a real
+> vSphere, on Proxmox (an asynchronous PVE task) and on libvirt, single-host and
+> clustered; see "Snapshot revert" under "Validation" in the
+> [v0.4.0 release notes](release-notes/next.md#validation).
 
 ## How to revert
 
@@ -435,8 +437,8 @@ them.
   existing field changes meaning. **Upgrade the CRDs before the manager**: a manager
   whose CRD prunes `status.snapshotRevert` sends no revert (condition
   `SnapshotReverted=False/Unsupported`).
-- A `VirtualMachine` that already carries `spec.snapshot.revertToRef` (set before this
-  release, when it did nothing) is acted on by the first reconcile after the upgrade:
+- A `VirtualMachine` that already carries `spec.snapshot.revertToRef` (set before
+  v0.4.0-rc6, when it did nothing) is acted on by the first reconcile after the upgrade:
   reverted if it is off with `spec.powerState: Off` and the snapshot resolves, otherwise
   `Ready=False` with the reason. Remove the field from VMs you do not want reverted
   before you upgrade the manager.

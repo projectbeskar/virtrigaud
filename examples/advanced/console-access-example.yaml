@@ -21,9 +21,17 @@ spec:
     name: vsphere-credentials
   runtime:
     mode: Remote
-    image: "ghcr.io/projectbeskar/virtrigaud/provider-vsphere:v0.2.3"
+    image: "ghcr.io/projectbeskar/virtrigaud/provider-vsphere:v0.4.0"
     service:
       port: 9090
+      # A Provider with no tls block is not deployed (TLSConfigured=False, reason
+      # TLSBlockMissing). The Secret holds tls.crt, tls.key and ca.crt:
+      #   kubectl create secret generic vsphere-prod-tls --from-file=tls.crt --from-file=tls.key --from-file=ca.crt
+      # For a plaintext lab only, use `enabled: false` and drop secretRef.
+      tls:
+        enabled: true
+        secretRef:
+          name: vsphere-prod-tls
   defaults:
     datastore: "datastore1"
     cluster: "cluster1"
@@ -37,14 +45,19 @@ metadata:
   namespace: default
 spec:
   type: libvirt
-  endpoint: "qemu:///system"
+  endpoint: "qemu+ssh://virtrigaud@kvm-host.example.com/system"
   credentialSecretRef:
     name: libvirt-credentials
   runtime:
     mode: Remote
-    image: "ghcr.io/projectbeskar/virtrigaud/provider-libvirt:v0.2.3"
+    image: "ghcr.io/projectbeskar/virtrigaud/provider-libvirt:v0.4.0"
     service:
       port: 9090
+      # Secret with tls.crt, tls.key and ca.crt (see the TLS note on the first Provider).
+      tls:
+        enabled: true
+        secretRef:
+          name: libvirt-local-tls
   defaults:
     network: "default"
 
@@ -187,7 +200,7 @@ data:
     kubectl get vm vsphere-console-demo -o jsonpath='{.status.consoleURL}'
     
     # Output:
-    # https://vcenter.example.com/ui/app/vm;nav=h/urn:vmomi:VirtualMachine:vm-123:xxxxx/summary
+    # https://vcenter.example.com/ui/#?extensionId=vsphere.core.vm.summary&objectId=urn:vmomi:VirtualMachine:vm-123:<instance-uuid>
     ```
     
     ### Access Steps
@@ -336,7 +349,7 @@ data:
     # Should be "Running"
     
     # Check provider logs
-    kubectl logs deployment/virtrigaud-provider-vsphere | grep -i console
+    kubectl logs deployment/virtrigaud-provider-default-vsphere-prod | grep -i console
     ```
     
     ### Issue: "Not Authenticated" error

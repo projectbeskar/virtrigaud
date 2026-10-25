@@ -39,7 +39,7 @@ v0.4.0 went through nine release candidates (rc3 was tagged but not released) an
 validated in the lab on real vSphere, libvirt (single-host and clustered) and Proxmox VE;
 see [Validation](#validation). It ships the code of v0.4.0-rc9. **Several fixes are
 breaking or change default behavior.** Read the upgrade guide before upgrading: **[Upgrading
-from v0.3.11](docs/upgrading.md)**.
+from v0.3.11](../upgrading.md)**.
 
 The notes below are cumulative since v0.3.11. If you are already on a v0.4.0 release
 candidate, follow [Upgrading from a v0.4.0 release
@@ -48,30 +48,30 @@ needed.
 
 ## Breaking changes
 
-- **A `Provider`, `VMClass` or `VMImage` in another namespace can only be used if its new `spec.consumerNamespaceSelector` selects the referencing namespace** (unset = own namespace only, `{}` = all namespaces). Set it on shared objects **after applying the new CRDs and before rolling the manager** (the field does not exist until the CRDs are upgraded); otherwise VMs using them fail closed with `ConsumerNotAllowed`. The manager's readiness now also checks that the Provider, VMClass and VMImage CRDs have the field. → [Upgrade guide](docs/upgrading.md#breaking-changes)
+- **A `Provider`, `VMClass` or `VMImage` in another namespace can only be used if its new `spec.consumerNamespaceSelector` selects the referencing namespace** (unset = own namespace only, `{}` = all namespaces). Set it on shared objects **after applying the new CRDs and before rolling the manager** (the field does not exist until the CRDs are upgraded); otherwise VMs using them fail closed with `ConsumerNotAllowed`. The manager's readiness now also checks that the Provider, VMClass and VMImage CRDs have the field. → [Upgrade guide](../upgrading.md#breaking-changes)
 - **`VirtualMachine.spec.providerRef` is now immutable once a VM is bound.** The
   old "re-point to a missing Provider, then delete" un-adopt workaround no longer
   works — use the new `virtrigaud.io/orphan-on-delete: "true"` annotation instead.
-  → [Upgrade guide](docs/upgrading.md#breaking-changes)
+  → [Upgrade guide](../upgrading.md#breaking-changes)
 - **Cross-namespace `VMClone`/`VMMigration` targets now require a grant** on the
   target namespace (`infra.virtrigaud.io/allowed-source-namespaces`). Objects in
   flight during the upgrade need the annotation applied first.
-  → [Upgrade guide](docs/upgrading.md#breaking-changes)
+  → [Upgrade guide](../upgrading.md#breaking-changes)
 - **vSphere `Create`/`Clone` fail closed on VM ownership.** Requires the new
   vCenter privilege `VirtualMachine.Config.AdvancedConfig`; `vm-<digits>` names
   are refused; `VMImage.templateName` must name a real vSphere template.
-  → [Upgrade guide](docs/upgrading.md#breaking-changes)
+  → [Upgrade guide](../upgrading.md#breaking-changes)
 - **libvirt VMs created without `spec.userData` no longer get a default `ubuntu`
   user, SSH key, or passwordless sudo.** Anyone relying on that default login
   must supply their own `spec.userData`. Existing VMs still carry the old key
   in-guest until removed by hand.
-  → [Upgrade guide](docs/upgrading.md#breaking-changes)
+  → [Upgrade guide](../upgrading.md#breaking-changes)
 - **libvirt base images are now confined to allowed directories and always
   copied**, never attached in place. Set `VIRTRIGAUD_LIBVIRT_IMAGE_DIRS` if
   images live outside `/var/lib/libvirt/images`. VMs from an earlier release may
   share one disk file — check `virsh domblklist --details` before deleting a
   pre-upgrade VM.
-  → [Upgrade guide](docs/upgrading.md#breaking-changes)
+  → [Upgrade guide](../upgrading.md#breaking-changes)
 
 - **vSphere attaches an imported disk in place only when it is the VM's own
   verified migration disk, and migrations land per namespace.** A migration now
@@ -83,7 +83,7 @@ needed.
   migration landed before the upgrade whose target VM was not yet created must be
   run again.** The vCenter account needs `System.Read` on the root folder,
   propagated.
-  → [Upgrade guide](docs/upgrading.md#breaking-changes)
+  → [Upgrade guide](../upgrading.md#breaking-changes)
 
 - **Security (affects v0.3.11): Proxmox imports a migrated disk only from the
   VM's own verified migration stage.** With the migration SSH data plane
@@ -98,7 +98,7 @@ needed.
   migration staged before the upgrade whose target VM was not yet created must
   be run again. A migration into another namespace through a Proxmox target
   fails at `Validating` (`ProxmoxCrossNamespaceTarget`) before any export.
-  → [Upgrade guide](docs/upgrading.md#breaking-changes)
+  → [Upgrade guide](../upgrading.md#breaking-changes)
 
 - **libvirt linked clones are disabled.** A `VMClone` with
   `spec.options.type: LinkedClone` through a libvirt Provider fails with
@@ -106,7 +106,7 @@ needed.
   powering the source on corrupts the clone. Use `FullClone` (the default).
   Existing linked clones keep working, but their source cannot be deleted,
   reverted or snapshotted while the clones exist — keep it powered off.
-  → [Upgrade guide](docs/upgrading.md#breaking-changes)
+  → [Upgrade guide](../upgrading.md#breaking-changes)
 - **libvirt `Reconfigure` no longer reports success for changes it did not
   apply.** A change is applied live and persisted, persisted and reported as
   restart required (`Reconfiguring=True/RestartRequired`: power-cycle the VM),
@@ -117,18 +117,18 @@ needed.
   Providers, resizes are held until the libvirt provider reports
   `supportsHonestReconfigure` — roll the providers promptly after the
   manager.
-  → [Upgrade guide](docs/upgrading.md#breaking-changes),
-  [`docs/reconfigure-results.md`](docs/reconfigure-results.md)
+  → [Upgrade guide](../upgrading.md#breaking-changes),
+  [`docs/reconfigure-results.md`](../reconfigure-results.md)
 - **`powerOn` is honored: a clone or migrated VM stays powered off unless
   `powerOn: true`.** `VMClone` `spec.options.powerOn` and `VMMigration`
   `spec.target.powerOn` (default `false`) were never read, so every clone and
   migrated VM came up running. The produced VirtualMachine's `spec.powerState`
   is now `On` only for `powerOn: true`. A target with `powerOn: false` is never
   booted, on any provider.
-  → [Upgrade guide](docs/upgrading.md#breaking-changes)
+  → [Upgrade guide](../upgrading.md#breaking-changes)
 
 - **Deleting a `Provider` that is still in use now waits instead of orphaning
-  its VMs** ([ADR-0010](docs/adr/0010-provider-in-use-finalizer.md)). A new
+  its VMs** ([ADR-0010](../adr/0010-provider-in-use-finalizer.md)). A new
   finalizer, `provider.infra.virtrigaud.io/in-use`, keeps a `Provider` being
   deleted — and its runtime — while any `VirtualMachine` in any namespace (or a
   `VMSnapshot`, in-flight `VMClone` or `VMMigration`) still needs it, so they are
@@ -140,8 +140,8 @@ needed.
   namespace stays `Terminating` until an administrator acts. Delete VMs before
   their `Provider` or namespace; `virtrigaud.io/force-delete: "true"` on the
   `Provider` releases it at once (`Warning` event `ProviderForceDeleted`).
-  → [Upgrade guide](docs/upgrading.md#breaking-changes),
-  [`docs/vm-provider-binding.md`](docs/vm-provider-binding.md#deleting-a-provider)
+  → [Upgrade guide](../upgrading.md#breaking-changes),
+  [`docs/vm-provider-binding.md`](../vm-provider-binding.md#deleting-a-provider)
 
 - **A `VMMigration` acts only on the target `VirtualMachine` it
   created** (UID binding plus a claim, `status.targetVMUID` / `targetVMClaim`). A
@@ -150,8 +150,8 @@ needed.
   before, the migration took it as its own target. **A migration in `Creating` or
   `Validating-Target` while you upgrade fails closed with `TargetVMNotOwned`** (its
   target VM is left as it is); let migrations finish first.
-  → [The target VM must be the migration's own](docs/cross-namespace-targets.md#the-target-vm-must-be-the-migrations-own),
-  [Upgrade guide](docs/upgrading.md#breaking-changes)
+  → [The target VM must be the migration's own](../cross-namespace-targets.md#the-target-vm-must-be-the-migrations-own),
+  [Upgrade guide](../upgrading.md#breaking-changes)
 - **Only the manager may set the manager-owned `virtrigaud.io/*`
   annotations and the `virtrigaud.io/adopted` label on a `VirtualMachine`**, enforced
   by a new `ValidatingAdmissionPolicy` (Kubernetes 1.30+; chart value
@@ -160,8 +160,8 @@ needed.
   `exemptUsernames` / `exemptGroups`. Installing it needs create rights on
   `validatingadmissionpolicies` and `validatingadmissionpolicybindings`. It is a
   security control for migration, adoption and clone: do not disable it without a
-  replacement. → [`docs/admission-policy.md`](docs/admission-policy.md),
-  [Upgrade guide](docs/upgrading.md#breaking-changes)
+  replacement. → [`docs/admission-policy.md`](../admission-policy.md),
+  [Upgrade guide](../upgrading.md#breaking-changes)
 - **vSphere and Proxmox `Reconfigure` no longer resize the root disk.**
   Proxmox: a `spec.disks` size no longer grows `scsi0` and nothing replaces it in this
   release (grow the disk in PVE). vSphere: a `spec.disks` entry grows only the
@@ -169,9 +169,9 @@ needed.
   below the disk's now fails the `Reconfigure`, CPU and memory included. A change a
   running vSphere VM cannot take (no hot-add, a memory decrease, and others) shows
   `Reconfiguring=False/ResizePendingPowerOff` until the VM is powered off.
-  → [Which disk a size goes to](docs/reconfigure-results.md#which-disk-a-size-goes-to),
-  [vSphere: changes a running VM cannot take](docs/reconfigure-results.md#vsphere-changes-a-running-vm-cannot-take),
-  [Upgrade guide](docs/upgrading.md#breaking-changes)
+  → [Which disk a size goes to](../reconfigure-results.md#which-disk-a-size-goes-to),
+  [vSphere: changes a running VM cannot take](../reconfigure-results.md#vsphere-changes-a-running-vm-cannot-take),
+  [Upgrade guide](../upgrading.md#breaking-changes)
 - **A `SnapshotCreate`, `ExportDisk` or `ImportDisk` whose outcome is unknown
   holds the `VMMigration` or `VMSnapshot` for an operator** (`Ready=False`,
   `SnapshotOutcomeUnknown`, `ExportOutcomeUnknown` or `ImportOutcomeUnknown`) instead of
@@ -180,18 +180,18 @@ needed.
   annotation `virtrigaud.io/operation-outcome=not-performed@<attempt id>` after checking
   the provider. Alerting and automation that expected a timed-out call to fail must
   include these reasons. Roll the providers with the manager.
-  → [`docs/provider-call-outcomes.md`](docs/provider-call-outcomes.md)
+  → [`docs/provider-call-outcomes.md`](../provider-call-outcomes.md)
 - **Provider pods mount only the migration PVCs a live `VMMigration`
   references, and deleting a `VMMigration` deletes only the PVC it created.** If you
   relied on a migration's deletion to remove the PVC named in `spec.storage.pvc.name`, or
   on labelled PVCs being mounted without a migration, change that. The upgrade rolls
   provider pods once.
-  → [What the provider pods mount](examples/migration/README.md#pvc-staging-backend-legacy-what-the-provider-pods-mount),
-  [Upgrade guide](docs/upgrading.md#behavior-changes-that-are-visible-but-not-breaking)
+  → [What the provider pods mount](../../examples/migration/README.md#pvc-staging-backend-legacy-what-the-provider-pods-mount),
+  [Upgrade guide](../upgrading.md#behavior-changes-that-are-visible-but-not-breaking)
 - **A `pvc` migration fails if the staging PVC holds a symbolic link, a hard
   link or a special file at a staged path, or sits on a filesystem that reports a link
   count other than 1**; the libvirt pod-side import no longer accepts `file://` sources.
-  → [Staged-file hardening](examples/migration/README.md#staged-file-hardening-pvc-backend)
+  → [Staged-file hardening](../../examples/migration/README.md#staged-file-hardening-pvc-backend)
 - **libvirt cloud-init seeds are built in a dedicated directory that must
   exist on every libvirt host.** Create it (owned by the provider's SSH user, mode
   `0711`) **before rolling the libvirt providers**, as root on every single-host libvirt
@@ -207,8 +207,8 @@ needed.
   is `VIRTRIGAUD_LIBVIRT_SEED_DIR` (default `/var/lib/libvirt/virtrigaud-seeds`); keep it
   on a local filesystem, never NFS, and exclude it from backups or encrypt them: it holds
   every VM's user-data in plaintext.
-  → [`docs/libvirt-domain-ownership.md`](docs/libvirt-domain-ownership.md#cloud-init-seed-directory),
-  [Upgrade guide](docs/upgrading.md#breaking-changes)
+  → [`docs/libvirt-domain-ownership.md`](../libvirt-domain-ownership.md#cloud-init-seed-directory),
+  [Upgrade guide](../upgrading.md#breaking-changes)
 - **`spec.snapshot.revertToRef` now reverts the VM; it did nothing before.** The field
   was accepted and ignored. A `VirtualMachine` that carries it is acted on by the first
   reconcile of the new manager, and one that is powered off is reverted at once,
@@ -222,8 +222,8 @@ needed.
 
   The revert runs only while the VM is off and at most once per request; see
   [Snapshots and revert](#snapshots-and-revert).
-  → [Upgrade guide](docs/upgrading.md#breaking-changes),
-  [`docs/vm-snapshot-revert.md`](docs/vm-snapshot-revert.md)
+  → [Upgrade guide](../upgrading.md#breaking-changes),
+  [`docs/vm-snapshot-revert.md`](../vm-snapshot-revert.md)
 - **libvirt: grant the provider's SSH user `VR_DISK_READ` over the pool directory, where
   it cannot already read libvirt's `0600` snapshot and revert overlays.** The disk
   in-use check that guards a snapshot create, revert or delete, and a VM delete (on a
@@ -235,8 +235,8 @@ needed.
   a disk image". On an NFS pool, root reads only when the export does not squash root;
   such an export must be dedicated to the Provider's hosts. The sudoers rule needs sudo
   1.9.10 or later.
-  → [Unreadable disk images](docs/libvirt-clones.md#unreadable-disk-images),
-  [What the copies run as root](docs/libvirt-clones.md#what-the-copies-run-as-root)
+  → [Unreadable disk images](../libvirt-clones.md#unreadable-disk-images),
+  [What the copies run as root](../libvirt-clones.md#what-the-copies-run-as-root)
 
 **Behaviour changes to check.** No operator action beyond the rollout unless stated:
 
@@ -282,7 +282,7 @@ needed.
   `status.ips[0]`, or looked for such an entry, must change.
 - **A libvirt NAT guest without the guest agent shows its DHCP lease, and a guest
   interface that does not start with `e` is no longer dropped by name.** →
-  [`docs/vm-status-ips.md`](docs/vm-status-ips.md)
+  [`docs/vm-status-ips.md`](../vm-status-ips.md)
 - **A VM held by a clustered restore guard** (`RestorePending`, `OwnDomainOnAnotherHost`,
   `UniquenessCheckFailed`, `ProviderLacksListOwnerFilter`) **is `status.phase: Pending`,
   not `Failed`;** alerts that count `Failed` VMs no longer see them.
@@ -298,7 +298,7 @@ needed.
 - **A clustered `Delete`, `Power`, `Reconfigure` or `Create` whose host drops mid-call
   shows a retryable provider error, not `HostUnavailable`,** when a command that may
   change the host was sent; `HOST_UNAVAILABLE` is kept for "nothing was done".
-  → [`docs/provider-call-outcomes.md`](docs/provider-call-outcomes.md#clustered-libvirt-a-host-that-stops-answering)
+  → [`docs/provider-call-outcomes.md`](../provider-call-outcomes.md#clustered-libvirt-a-host-that-stops-answering)
 - **A VM with `spec.disks` on a libvirt or Proxmox Provider gets the condition
   `DisksApplied=False/NotSupportedByProvider` and a `Warning` event;** `Ready` is not
   affected.
@@ -322,12 +322,12 @@ needed.
 - **The manager sends only the network block that matches the target Provider's type,**
   which also changes which shared field a vSphere or libvirt VM reads when its attachment
   has several blocks.
-  → [Proxmox networks](docs/proxmox-networks.md),
-  [Upgrade guide](docs/upgrading.md#behavior-changes-that-are-visible-but-not-breaking)
+  → [Proxmox networks](../proxmox-networks.md),
+  [Upgrade guide](../upgrading.md#behavior-changes-that-are-visible-but-not-breaking)
 
 See the full breaking-change table, required upgrade order (CRDs → admission
 policy and grants → manager → providers), and rollback caveats in
-**[docs/upgrading.md](docs/upgrading.md)**.
+**[docs/upgrading.md](../upgrading.md)**.
 
 ## Highlights
 
@@ -354,8 +354,8 @@ policy and grants → manager → providers), and rollback caveats in
   `manager.providerTmpSizeLimit`. A cluster administrator can cap what the
   annotation may ask for with `manager.providerTmpSizeLimitMax`. The manager
   upgrade rolls every provider pod once.
-  → [Upgrade guide](docs/upgrading.md),
-  [chart README](charts/virtrigaud/README.md#tmp-size-limits)
+  → [Upgrade guide](../upgrading.md),
+  [chart README](../../charts/virtrigaud/README.md#tmp-size-limits)
 - **Opt-in administrator disk-size limit.** By default a tenant can ask for
   disks up to the CRD bound of 64Ti each and fill a shared datastore or pool.
   Set `manager.maxDiskSize` (the manager's `--max-disk-size`, e.g. `500Gi`) to
@@ -372,8 +372,8 @@ policy and grants → manager → providers), and rollback caveats in
   VirtualMachine and VMClass writes above the limit are also refused at
   admission. Nothing changes unless it is set; roll the provider images with
   the manager (`GetDiskInfo` now lists every disk's size).
-  → [Upgrade guide](docs/upgrading.md),
-  [chart README](charts/virtrigaud/README.md#disk-size-limit)
+  → [Upgrade guide](../upgrading.md),
+  [chart README](../../charts/virtrigaud/README.md#disk-size-limit)
 - Editing a waiting `VMClone`'s metadata (labels, annotations), or a
   `VMSnapshot` whose delete is held, no longer re-runs it at once. A tenant
   re-annotating one in a loop drove one provider call per edit (`Clone`, a
@@ -394,8 +394,8 @@ policy and grants → manager → providers), and rollback caveats in
   `Clone` clear every `virtrigaud.image.*` key the source carries, so a VM
   made from a template is never refused as one. Check for such `VirtualMachine`s, and for adopted
   duplicates of a VM managed under another Provider object, before upgrading
-  (→ [Upgrade guide](docs/upgrading.md),
-  [`docs/vm-ownership.md`](docs/vm-ownership.md#adoption-what-listvms-offers)).
+  (→ [Upgrade guide](../upgrading.md),
+  [`docs/vm-ownership.md`](../vm-ownership.md#adoption-what-listvms-offers)).
 - **Behaviour change:** adoption no longer adopts a VM whose owner stamp names
   no `VirtualMachine` in this cluster. That UID may belong to a live
   `VirtualMachine` of another VirtRigaud installation (or of this cluster
@@ -403,7 +403,7 @@ policy and grants → manager → providers), and rollback caveats in
   the Provider's adoption status. Re-adopting a VM detached with
   `orphan-on-delete` (it keeps the deleted `VirtualMachine`'s stamp) now needs
   `virtrigaud.io/adopt-stamped-vms: "true"` on the single-host Provider
-  (→ [`docs/vm-ownership.md`](docs/vm-ownership.md#owner-stamps-are-scoped-to-one-cluster)).
+  (→ [`docs/vm-ownership.md`](../vm-ownership.md#owner-stamps-are-scoped-to-one-cluster)).
 - Single-host libvirt adoption no longer takes a domain whose owner stamp
   cannot be read or names two owners: the single-host `ListVMs` reports
   `owner_stamp_state` as the clustered one does. Adoption also skips any VM a
@@ -432,7 +432,7 @@ policy and grants → manager → providers), and rollback caveats in
   Provider never lets a same-named Provider in another namespace skip its own
   prepare or create from the other's template, and a prepare task is only ever
   polled through the Provider that started it. Existing state is migrated on
-  first use (→ [`docs/image-preparation.md`](docs/image-preparation.md#prepare-state-is-per-provider)).
+  first use (→ [`docs/image-preparation.md`](../image-preparation.md#prepare-state-is-per-provider)).
 - libvirt: **deleting a running linked clone no longer deletes its source VM's
   disk.** Delete removes only the VM's own disk files inside the storage pool
   (and its own external-snapshot chain, never a symlink's target), and a source
@@ -447,7 +447,7 @@ policy and grants → manager → providers), and rollback caveats in
   directory and renamed into place (a symbolic link at a disk's name is
   refused), the s3 export's temporary copy is private and always removed, and a
   UEFI clone's varstore is never copied through a symlink
-  (→ [`docs/libvirt-clones.md`](docs/libvirt-clones.md)).
+  (→ [`docs/libvirt-clones.md`](../libvirt-clones.md)).
 - libvirt, clustered Providers: a `VMImage` whose host path is another VM's
   live disk on **any** host of the Provider is refused (it used to be checked
   on the landing host only), and fails closed while a host cannot be checked;
@@ -459,7 +459,7 @@ policy and grants → manager → providers), and rollback caveats in
   the default pool's, and any unused, non-reserved file in it is copyable by
   any tenant of the Provider. Clustered disk writes,
   domain defines and deletes of one domain name are serialized inside the
-  provider (→ [`docs/clustered-provider-inventory.md`](docs/clustered-provider-inventory.md#shared-storage-the-cluster-wide-disk-guard-a61)).
+  provider (→ [`docs/clustered-provider-inventory.md`](../clustered-provider-inventory.md#shared-storage-the-cluster-wide-disk-guard-a61)).
 - The manager's webhook and metrics servers pin an explicit TLS 1.2 floor.
 - Optional, opt-in `NetworkPolicy` templates for the manager and provider pods
   (`networkPolicy.enabled`, default off).
@@ -472,7 +472,7 @@ policy and grants → manager → providers), and rollback caveats in
   opened with no symbolic link followed (`openat2` with `RESOLVE_BENEATH |
   RESOLVE_NO_SYMLINKS`), so a link planted in the staging PVC can no longer make an
   import read the provider pod's credentials or an export write outside the PVC
-  (→ [PVC staging backend](examples/migration/README.md#pvc-staging-backend-legacy-what-the-provider-pods-mount)).
+  (→ [PVC staging backend](../../examples/migration/README.md#pvc-staging-backend-legacy-what-the-provider-pods-mount)).
 - A libvirt VM's cloud-init seed, which carries its user-data (passwords, keys, tokens),
   is no longer readable by every local user of the hypervisor host: it is built `0600` in
   a dedicated directory that the provider checks and refuses to use if it is not private
@@ -480,7 +480,7 @@ policy and grants → manager → providers), and rollback caveats in
   group or others, or below a directory that is not owned by root or the SSH user or that
   other users can write unless it is sticky). Seeds of existing VMs stay in `/tmp` and
   readable until you make them private
-  ([Leftovers from earlier releases](docs/upgrading.md#leftovers-from-earlier-releases)).
+  ([Leftovers from earlier releases](../upgrading.md#leftovers-from-earlier-releases)).
 - **Treat `create` on `VMClone` as read access to the source VM's data.** A clone's disk
   is a full copy of its source's, and on libvirt the `VMClone`'s inline user-data
   (`spec.customization.userData.cloudInit.inline`, at most 1 MiB) runs as root on its first
@@ -494,8 +494,8 @@ policy and grants → manager → providers), and rollback caveats in
   module of its user-data again (`runcmd`, `packages`, `users`, ...) and regenerates the
   SSH host keys. `/etc/machine-id` is **not** regenerated: seal the source if clones need
   their own. Existing clones keep the identity they booted with
-  (→ [VM ownership: a clone's host identity](docs/vm-ownership.md#a-clones-host-identity),
-  [libvirt clones](docs/libvirt-clones.md#a-clones-cloud-init-identity)).
+  (→ [VM ownership: a clone's host identity](../vm-ownership.md#a-clones-host-identity),
+  [libvirt clones](../libvirt-clones.md#a-clones-cloud-init-identity)).
 - Go 1.26.10 fixes GO-2026-6809 in `crypto/x509`, reachable through
   `x509.Certificate.Verify` (every TLS path); every image is rebuilt (#411).
 
@@ -532,7 +532,7 @@ policy and grants → manager → providers), and rollback caveats in
   clustered VM only if the Provider allows it. New administrator gauges:
   `virtrigaud_host_committed_cpu` and `virtrigaud_host_committed_memory_mib`.
   There is no per-tenant quota on a shared clustered Provider yet
-  (→ [`docs/clustered-provider-inventory.md`](docs/clustered-provider-inventory.md#committed-capacity)).
+  (→ [`docs/clustered-provider-inventory.md`](../clustered-provider-inventory.md#committed-capacity)).
 - Clustered disks on a shared pool are protected across hosts (ADR-0007
   A6.1). A create or clone that finds a file where the VM's disk goes writes
   it only when no domain on **any** host of the Provider uses it (every name
@@ -553,7 +553,7 @@ policy and grants → manager → providers), and rollback caveats in
   is moved. **Before deleting a `Host` to release held deletes, fence it**
   (power it off or revoke its access to the export); mount a shared pool only
   on the hosts of one clustered Provider, at the same path, with NFS locking
-  enabled (→ [`docs/clustered-provider-inventory.md`](docs/clustered-provider-inventory.md#shared-storage-the-cluster-wide-disk-guard-a61)).
+  enabled (→ [`docs/clustered-provider-inventory.md`](../clustered-provider-inventory.md#shared-storage-the-cluster-wide-disk-guard-a61)).
 - A restored or re-created clustered VirtualMachine is held **before** it is
   scheduled (ADR-0007 A6.2). The manager writes the restore marker
   `infra.virtrigaud.io/placement-uid` (the VM's own UID) on every clustered
@@ -574,7 +574,7 @@ policy and grants → manager → providers), and rollback caveats in
   runbook needs only a `virsh metadata` re-stamp and, for a VM restored
   without status, the marker set to its new UID — no status edit. Keep the
   marker out of manifests you commit
-  (→ [`docs/clustered-restore.md`](docs/clustered-restore.md)).
+  (→ [`docs/clustered-restore.md`](../clustered-restore.md)).
 - On a clustered Provider, shrinking a **running** VM waits until the VM is
   powered off (`Reconfiguring=False/ShrinkPendingPowerOff`): a live shrink
   only deflates the balloon, which the guest can take back. VirtRigaud never
@@ -608,15 +608,15 @@ policy and grants → manager → providers), and rollback caveats in
   `ClusteredTargetUnsupported`, before any side effect), the CRDs applied before the
   manager (`status.storageInfo.importTarget.host` is new, and `spec.importedDisk.diskID`
   may be empty while `migrationRef` is set), and on each host the `default` pool at
-  `/var/lib/libvirt/images` with room, an `ssh://` endpoint, `qemu-img`, `flock` and
+  `/var/lib/libvirt/images` with room, a `qemu+ssh://` endpoint, `qemu-img`, `flock` and
   `timeout`, and the seed directory. Run in the lab from single-host libvirt, vSphere and
   Proxmox sources and from a clustered libvirt source to Proxmox.
   **Behaviour change:** a libvirt Host's `allocatableStorageBytes` is now the `default`
   pool's free space only, measured fresh with `stat -f` on every Host sync (it summed
   every active pool from libvirt's cached `pool-info` before), which changes what a
   `VMPlacementPolicy` `minDiskSpacePerHost` compares against
-  (→ [`docs/clustered-provider-inventory.md`](docs/clustered-provider-inventory.md#migration-into-a-clustered-provider-addendum-b),
-  [`examples/vmmigration-into-clustered.yaml`](examples/vmmigration-into-clustered.yaml)).
+  (→ [`docs/clustered-provider-inventory.md`](../clustered-provider-inventory.md#migration-into-a-clustered-provider-addendum-b),
+  [`examples/vmmigration-into-clustered.yaml`](../../examples/vmmigration-into-clustered.yaml)).
 - **A clustered host that stops answering is reported by how far the call got.** Every
   routed call records what it ran on its host. If nothing ran, the answer is
   `HOST_UNAVAILABLE` ("nothing was done"); if only reads ran, "not performed"; if a
@@ -632,15 +632,15 @@ policy and grants → manager → providers), and rollback caveats in
   instead of going on to undefine a domain that may still be running. A delete held for an
   unreachable host shows `DeleteBlocked=True/HostUnreachable`, naming the VM's `Host`
   (`status.placement.host`, never an endpoint), and completes once the host answers
-  (→ [A host that stops answering](docs/provider-call-outcomes.md#clustered-libvirt-a-host-that-stops-answering),
-  [A delete held for an unreachable host](docs/provider-call-outcomes.md#a-delete-held-for-an-unreachable-host)).
+  (→ [A host that stops answering](../provider-call-outcomes.md#clustered-libvirt-a-host-that-stops-answering),
+  [A delete held for an unreachable host](../provider-call-outcomes.md#a-delete-held-for-an-unreachable-host)).
 - **`HostPool.status` is written.** A `HostPool` controller in the manager counts each
   pool's member `Host`s (same namespace, `spec.poolRef` naming the pool) into
   `totalHosts`, `readyHosts` and `schedulableHosts` and sets a `Ready` condition
   (`HostsAvailable`, or `NoMemberHosts` / `NoSchedulableHosts`); `kubectl get hostpools`
   shows `TOTAL`, `READY` and `SCHEDULABLE`. Before, every pool showed `status: null`. The
   manager's role gains `hostpools/status`
-  (→ [`HostPool.status`](docs/clustered-provider-inventory.md#hostpoolstatus)).
+  (→ [`HostPool.status`](../clustered-provider-inventory.md#hostpoolstatus)).
 
 ### Snapshots and revert
 
@@ -674,7 +674,7 @@ policy and grants → manager → providers), and rollback caveats in
     not verify; with an older `VirtualMachine` CRD the manager sends no revert
     (`SnapshotReverted=False/Unsupported`).
 
-  → [`docs/vm-snapshot-revert.md`](docs/vm-snapshot-revert.md)
+  → [`docs/vm-snapshot-revert.md`](../vm-snapshot-revert.md)
 - **libvirt: a snapshot of a powered-off VM can be reverted, and a revert no longer breaks
   the VM's cloud-init CD-ROM.** libvirt (9.9 and later) reverts an external (disk-only)
   snapshot by rebuilding the VM's disks from the domain definition the snapshot stored, and
@@ -691,7 +691,7 @@ policy and grants → manager → providers), and rollback caveats in
   other medium (an installer ISO you attached) is never inserted from the record. A memory
   snapshot (internal) is not affected. `SnapshotDelete` also removes the
   `<domain>-disk.<epoch>` overlay a revert makes
-  (→ [libvirt](docs/vm-snapshot-revert.md#libvirt)).
+  (→ [libvirt](../vm-snapshot-revert.md#libvirt)).
 - **libvirt: other VMs' disk checks no longer fail on a snapshot overlay.** After an offline
   snapshot or a revert, a shut-off domain's definition keeps its chain in nested
   `<backingStore>` elements, and the disk in-use check opened each of them a second time as
@@ -702,7 +702,7 @@ policy and grants → manager → providers), and rollback caveats in
   `VM_DISK_CHECK_FAILED`: fail-closed, retried for a VM delete, a snapshot delete and a
   clustered snapshot create, never counted by the circuit breaker) and points to the fix
   (the `VR_DISK_READ` grant above; → [Unreadable disk
-  images](docs/libvirt-clones.md#unreadable-disk-images)).
+  images](../libvirt-clones.md#unreadable-disk-images)).
 - **A clustered `VMSnapshot` create the provider did not perform is retried with a
   backoff, not held.** An answer such as `VM_DISK_CHECK_FAILED`, `HOST_UNAVAILABLE` or
   `VM_OPERATION_FAILED` "not performed" closes the attempt (the `SnapshotRequested` marker is
@@ -711,7 +711,7 @@ policy and grants → manager → providers), and rollback caveats in
   after 1 minute, doubling per consecutive such answer up to 10 minutes (per `VMSnapshot`,
   in the manager's memory). An answer that leaves the outcome unknown keeps the marker, the
   re-send count and the hold
-  (→ [`docs/provider-call-outcomes.md`](docs/provider-call-outcomes.md)).
+  (→ [`docs/provider-call-outcomes.md`](../provider-call-outcomes.md)).
 - **A revert refused for good no longer says "set it again to retry".** A revert the
   provider answers with `FailedPrecondition` (on libvirt: a snapshot taken while the VM ran
   or by an earlier release, which libvirt cannot revert safely) carries only the provider's
@@ -761,7 +761,7 @@ policy and grants → manager → providers), and rollback caveats in
 
   Single-host and clustered Providers behave the same; a clustered refusal also carries
   `VM_OPERATION_FAILED`. → [Deleting memory and disk-only snapshots of the same
-  VM](docs/libvirt-clones.md#deleting-memory-and-disk-only-snapshots-of-the-same-vm)
+  VM](../libvirt-clones.md#deleting-memory-and-disk-only-snapshots-of-the-same-vm)
 
 ### Proxmox
 
@@ -777,7 +777,7 @@ policy and grants → manager → providers), and rollback caveats in
   provider fails closed (it guesses no storage when the clone's config cannot be read), and a
   storage ID that is not valid is refused as `InvalidSpec`. Existing VMs keep a drive that is
   already on `local`; move it with `qm set <vmid> --ide2 <storage>:cloudinit`
-  (→ [`docs/proxmox-cloud-init-storage.md`](docs/proxmox-cloud-init-storage.md)).
+  (→ [`docs/proxmox-cloud-init-storage.md`](../proxmox-cloud-init-storage.md)).
 - **A Proxmox VM no longer stays in phase `Reconfiguring` after a power change.** The power
   operation returns an asynchronous task; the manager now settles the `Reconfiguring` marker
   (`Reconfiguring=False/ReconcileSuccess`) when the task ends, so the phase follows the power
@@ -785,7 +785,7 @@ policy and grants → manager → providers), and rollback caveats in
   marker as `PowerTaskFailed`, and is sent again after 5 seconds, then 10, doubling to 5
   minutes, per VM. A task-status query PVE rejects as a request ends the task; a transient
   failure (a transport error, a timeout, a 5xx, 401/403, 429) does not
-  (→ [`docs/vm-status-phase.md`](docs/vm-status-phase.md#a-power-change-that-returns-a-task)).
+  (→ [`docs/vm-status-phase.md`](../vm-status-phase.md#a-power-change-that-returns-a-task)).
 - **A Proxmox VM gets the bridge, VLAN tag, model and static IP its networks name.** The
   manager sends a VM's networks under the Go field names of the provider contract, which the
   Proxmox provider did not read, so every Proxmox VM got `virtio` on `vmbr0` with no static
@@ -797,14 +797,14 @@ policy and grants → manager → providers), and rollback caveats in
   take, more than 32 networks, an `ipAddress` without `prefix` and a `dns` entry that is not
   an IP address are refused as `InvalidSpec` before a VM is made. Existing VMs are not
   modified
-  (→ [`docs/proxmox-networks.md`](docs/proxmox-networks.md),
-  [`examples/proxmox-complete-example.yaml`](examples/proxmox-complete-example.yaml)).
+  (→ [`docs/proxmox-networks.md`](../proxmox-networks.md),
+  [`examples/proxmox-complete-example.yaml`](../../examples/proxmox-complete-example.yaml)).
 - **ADR-0014** records the accepted design for the rest of the migrated-guest network
   problem (carry each source NIC's MAC to the target and present the source's cloud-init
   instance-id, switchable with a planned `VMMigration` `spec.options.guestIdentity:
   Preserve|Fresh`, with a default-deny Provider policy for tenant-set MACs). Only the
   Proxmox network plumbing is implemented; see Known limitations
-  (→ [ADR-0014](docs/adr/0014-migrated-guest-network.md)).
+  (→ [ADR-0014](../adr/0014-migrated-guest-network.md)).
 
 ### Addresses, phase and conditions
 
@@ -827,7 +827,7 @@ policy and grants → manager → providers), and rollback caveats in
   wins. A guest with several NICs shows all their addresses, including a NIC's second
   address. A libvirt guest on a host bridge has no lease: its address shows only if the QEMU
   guest agent runs, or, as a last resort, if the host has an ARP entry for the guest's MAC
-  (→ [`docs/vm-status-ips.md`](docs/vm-status-ips.md)).
+  (→ [`docs/vm-status-ips.md`](../vm-status-ips.md)).
 - **`VirtualMachine` `status.phase` is set on every VM** (`kubectl get vm` showed an empty
   `PHASE` on most VMs). The manager derives it on every status write: `Pending`,
   `Provisioning`, `Running`, `Stopped`, `Reconfiguring`, `Deleting` or `Failed`. A
@@ -836,13 +836,13 @@ policy and grants → manager → providers), and rollback caveats in
   is held is `Deleting`; a VM held by a clustered restore guard is `Pending`. The first
   reconcile after the manager rolls fills in every existing VM. Automation that reads
   `status.phase` must expect every value
-  (→ [`docs/vm-status-phase.md`](docs/vm-status-phase.md#the-rule)).
+  (→ [`docs/vm-status-phase.md`](../vm-status-phase.md#the-rule)).
 - **`spec.disks` on libvirt and Proxmox is reported.** These providers attach no
   `spec.disks` (unchanged), but adding one used to change nothing visible: `Reconfiguring`
   even said "VM reconfigured successfully". A VM with `spec.disks` on such a Provider now
   gets `DisksApplied=False/NotSupportedByProvider` (removed when `spec.disks` is emptied)
   and one `Warning` event per generation; nothing is refused
-  (→ [`docs/reconfigure-results.md`](docs/reconfigure-results.md#which-disk-a-size-goes-to)).
+  (→ [`docs/reconfigure-results.md`](../reconfigure-results.md#which-disk-a-size-goes-to)).
 
 ### Fixes
 
@@ -926,7 +926,7 @@ policy and grants → manager → providers), and rollback caveats in
   `qemu-img` error, a missing source domain, a taken snapshot name) as "not performed" or a
   typed refusal, and keeps `Unknown` for what it cannot prove. Alert on migrations or
   snapshots stuck in a phase, and on the three `...OutcomeUnknown` reasons
-  (→ [`docs/provider-call-outcomes.md`](docs/provider-call-outcomes.md)).
+  (→ [`docs/provider-call-outcomes.md`](../provider-call-outcomes.md)).
 - **A failed or deleted migration left its landed disk on the target for good,** and every
   vSphere import left about 1.4 KB of import-VM files (`.vmx`, `.vmsd`, ...) in the landing
   folder. Before the import the migration records `LandedDiskCleanup=Unknown/LandedDiskMayExist`
@@ -940,7 +940,7 @@ policy and grants → manager → providers), and rollback caveats in
   deleting `VMMigration` (`LandedDiskCleanupPending`; `virtrigaud.io/force-delete=true`
   releases it); an older provider image, a gone Provider or a refused request records
   `LandedDiskLeftBehind` with one Warning. Disks left by earlier releases are not touched
-  (→ [ADR-0011 Addendum A](docs/adr/0011-migration-staging-cleanup.md#addendum-a--landed-disks-rc2)).
+  (→ [ADR-0011 Addendum A](../adr/0011-migration-staging-cleanup.md#addendum-a--landed-disks-rc2)).
 - **A Proxmox s3 stage could be published truncated** after a cancelled import: it is
   published only when exactly the object's size arrived.
 - **libvirt read a failed `snapshot-list` as the snapshot's absence;** it is now an error.
@@ -978,7 +978,7 @@ policy and grants → manager → providers), and rollback caveats in
   exit, including a clone that failed or was cancelled part-way. Files left by
   earlier exports are not removed: look for `virtrigaud-export-*` files in the
   VM folders of datastores used as migration sources and delete them.
-  → [Upgrade guide](docs/upgrading.md#leftover-virtrigaud-export--files-on-vsphere-datastores)
+  → [Upgrade guide](../upgrading.md#leftover-virtrigaud-export--files-on-vsphere-datastores)
 
 - **Deleting a VirtualMachine while its Provider cannot be reached no longer
   orphans the hypervisor VM.** When the manager had no client for the
@@ -996,7 +996,7 @@ policy and grants → manager → providers), and rollback caveats in
   Every `force-delete` that releases a VM without a confirmed provider delete
   now records a `Warning` event **`VMLeftOnHypervisor`** naming the VM and its
   provider id (never a host), so leftovers can be found
-  (→ [`docs/vm-provider-binding.md`](docs/vm-provider-binding.md#deleting-a-vm-while-its-provider-cannot-be-reached)).
+  (→ [`docs/vm-provider-binding.md`](../vm-provider-binding.md#deleting-a-vm-while-its-provider-cannot-be-reached)).
 - **On a clustered Provider, `force-delete` of a consumer VM needs the
   Provider's permission, like `orphan-on-delete`.** A VM in another namespace
   than its clustered Provider could be released with `force-delete` while its
@@ -1006,7 +1006,7 @@ policy and grants → manager → providers), and rollback caveats in
   is now ignored for such a VM (`ForceDeleteRefused=True/ForceDeleteNotAllowed`
   and a `Warning` event) and its delete keeps being retried as if it were not
   set. Same-namespace VMs and single-host Providers are unchanged
-  (→ [`docs/vm-provider-binding.md`](docs/vm-provider-binding.md#detaching-a-vm-without-deleting-it-virtrigaudioorphan-on-delete)).
+  (→ [`docs/vm-provider-binding.md`](../vm-provider-binding.md#detaching-a-vm-without-deleting-it-virtrigaudioorphan-on-delete)).
 - **A single-host VM no longer loses its provider id after a Create, and is
   never created twice or released while its Create's outcome is unknown.**
   Editing or deleting a VM while its Create ran made the status write that
@@ -1028,7 +1028,7 @@ policy and grants → manager → providers), and rollback caveats in
   `CreateOutcomeConfirmed` event), and its delete is held the same way
   (libvirt and Proxmox find and delete the VM by its owner stamp; libvirt
   releases it only when the provider confirms no such domain exists)
-  (→ [`docs/vm-provider-binding.md`](docs/vm-provider-binding.md#a-create-whose-outcome-is-unknown-createrequested)).
+  (→ [`docs/vm-provider-binding.md`](../vm-provider-binding.md#a-create-whose-outcome-is-unknown-createrequested)).
 - A Create refused with a non-retryable `FailedPrecondition` or
   `PermissionDenied` is held as `Ready=False/CreateRefused` (the event
   carries the provider's answer) and re-checked with a backoff instead of
@@ -1068,7 +1068,7 @@ policy and grants → manager → providers), and rollback caveats in
   are bounded and committed sums saturate; the disk is grown
   before any CPU/memory change; and a single-host per-VM failure no longer
   counts toward the Provider's circuit breaker
-  (→ [`docs/reconfigure-results.md`](docs/reconfigure-results.md)).
+  (→ [`docs/reconfigure-results.md`](../reconfigure-results.md)).
 - vSphere `Describe` no longer treats a transient vCenter error as "the VM is
   gone" (which used to trigger a spurious re-create).
 - vSphere `Create` no longer powers on every new VM. A VirtualMachine with
@@ -1083,7 +1083,7 @@ policy and grants → manager → providers), and rollback caveats in
   thick disk); a GPT guest sees a moved backup header, which `growpart` repairs.
   A failed grow or disk attach now fails the create (retried and completed)
   instead of being skipped silently
-  (→ [`docs/upgrading.md`](docs/upgrading.md)).
+  (→ [`docs/upgrading.md`](../upgrading.md)).
 - libvirt: hardware-accelerated `<domain type='kvm'>` is used again on hosts
   with a readable `/dev/kvm`, instead of falling back to software emulation.
 - Chart: `networkPolicy` (previously `security.networkPolicies`) is never
@@ -1095,7 +1095,7 @@ policy and grants → manager → providers), and rollback caveats in
   no longer marked `Ready` without a snapshot being taken. It stays pending and
   retries until the provider is reachable. Snapshots already affected are `Ready`
   with no `status.creationTime`; the
-  [upgrade guide](docs/upgrading.md#post-upgrade-verification-checklist) has a
+  [upgrade guide](../upgrading.md#post-upgrade-verification-checklist) has a
   query to list them.
 - libvirt clones (single-host and clustered): a full clone needs a
   **powered-off source**. A `VMClone` of a running libvirt VM used to fail on
@@ -1105,7 +1105,7 @@ policy and grants → manager → providers), and rollback caveats in
   active disk is libvirt's `0600` overlay) used to fail with "Permission
   denied". The copy now reads the source through `sudo -n` when the host
   allows it, with a regex-confined sudoers rule
-  (→ [`docs/libvirt-clones.md`](docs/libvirt-clones.md#what-the-copies-run-as-root)).
+  (→ [`docs/libvirt-clones.md`](../libvirt-clones.md#what-the-copies-run-as-root)).
   Root opens every disk in the format its domain definition names, never
   probed; a raw disk's chain is never walked. A copy is refused, not retried
   as the SSH user, when:
@@ -1120,7 +1120,7 @@ policy and grants → manager → providers), and rollback caveats in
   any `qemu-img info -U *` sudoers wildcard with the documented regex rule.
   A clustered VM is placed only on a `Host` labelled
   `net.virtrigaud.io/<network>: "true"` for each libvirt network it uses
-  (→ [`docs/clustered-provider-inventory.md`](docs/clustered-provider-inventory.md#first-vm-checklist)).
+  (→ [`docs/clustered-provider-inventory.md`](../clustered-provider-inventory.md#first-vm-checklist)).
 - A `VMClone` refused by its provider while it waits — for its source to be
   powered off, an unreachable host, a previous incarnation of its target — no
   longer calls the provider in a tight loop. Each refusal rewrote the clone's
@@ -1156,7 +1156,7 @@ policy and grants → manager → providers), and rollback caveats in
   Warning, never a "deleted".
   `virtrigaud.io/force-delete: "true"` on the `VMMigration` releases it anyway
   with a `SnapshotLeftOnHypervisor` Warning naming the snapshot
-  (→ [Upgrade guide](docs/upgrading.md#breaking-changes)).
+  (→ [Upgrade guide](../upgrading.md#breaking-changes)).
 - A `VMSnapshot` being deleted while its VM's `Provider` cannot be read or
   reached is held with `Ready=False/ProviderUnavailable` and the same backoff
   (it was retried every 30 s with no status), and `force-delete` now releases
@@ -1174,7 +1174,7 @@ policy and grants → manager → providers), and rollback caveats in
   `vmUID`, `boundProvider`): a VM re-created under the same name, or moved to
   another Provider, is never sent the snapshot's delete; the VMSnapshot is
   released with a `SnapshotLeftOnHypervisor` Warning
-  (→ [Upgrade guide](docs/upgrading.md#behavior-changes-that-are-visible-but-not-breaking)).
+  (→ [Upgrade guide](../upgrading.md#behavior-changes-that-are-visible-but-not-breaking)).
 - Proxmox snapshot deletes resolve the VM's actual node (an HA move no longer
   reads as "snapshot gone"); vSphere re-reads the VM before answering a
   snapshot `NotFound`.
@@ -1185,7 +1185,7 @@ policy and grants → manager → providers), and rollback caveats in
   the provider resolver's error (which can name the provider's TLS Secret,
   Service address and runtime phase) or a gRPC connection error; the cause is
   in the manager log. Other provider answers in them are sanitized
-  (→ [Upgrade guide](docs/upgrading.md#behavior-changes-that-are-visible-but-not-breaking)).
+  (→ [Upgrade guide](../upgrading.md#behavior-changes-that-are-visible-but-not-breaking)).
 - A `VMMigration` status write that hits a conflict is retried on the live
   object without sleeping in the reconcile.
 - A single-host `VMClone` whose `Clone` provably did nothing (the request
@@ -1196,13 +1196,13 @@ policy and grants → manager → providers), and rollback caveats in
   timeout) used to fail so that a retry could never make a second VM; it is now
   held and re-sent to a provider that stamps and re-binds
   (`supports_owner_rebind`), and still fails on any other
-  (→ [Clones: re-bind](docs/vm-ownership.md#clones-re-bind)).
+  (→ [Clones: re-bind](../vm-ownership.md#clones-re-bind)).
 - **A migration's `nfs` / `s3` staged disk is deleted.** The staged object (a
   full, unencrypted copy of the source disk) was never deleted. The manager now
   asks the migration's target `Provider` to delete it, through a new provider
   RPC, `DeleteStagedDisk`
-  (→ [ADR-0011](docs/adr/0011-migration-staging-cleanup.md),
-  → [Upgrade guide](docs/upgrading.md#breaking-changes)):
+  (→ [ADR-0011](../adr/0011-migration-staging-cleanup.md),
+  → [Upgrade guide](../upgrading.md#breaking-changes)):
   - **When.** After the migration succeeds, and when the `VMMigration` is
     deleted. With `cleanupPolicy: Always`, also when the migration fails for
     good. With the default `OnSuccess`, a failed migration's staged disk is
@@ -1267,7 +1267,7 @@ policy and grants → manager → providers), and rollback caveats in
     clone timeout or 5xx is no longer reported as an invalid spec.
 
   VMs created before this release stay unstamped and behave as before.
-  → [VM ownership: Proxmox](docs/vm-ownership.md#proxmox)
+  → [VM ownership: Proxmox](../vm-ownership.md#proxmox)
 - **A vSphere VM bound to a template or an image artifact is held when its
   delete or power change is refused.** The provider refuses both
   (`VM_IS_IMAGE_ARTIFACT`); the manager used to retry them every 15 s / 5 s.
@@ -1309,7 +1309,7 @@ policy and grants → manager → providers), and rollback caveats in
   `VMClone`s whose message says the source VM was refused, and for `Refusing the call` in
   the Proxmox provider log. The check needs both the new manager and the new Proxmox
   provider
-  (→ [Per-VM calls](docs/vm-ownership.md#per-vm-calls-describe-power-reconfigure-snapshots-disks-and-clone-sources)).
+  (→ [Per-VM calls](../vm-ownership.md#per-vm-calls-describe-power-reconfigure-snapshots-disks-and-clone-sources)).
 - **Single-host adoption stamps the adopted VM** with its new owner (`TransferOwner`, a
   compare-and-swap on the hypervisor: vSphere `config.changeVersion`, Proxmox config
   `digest`, libvirt domain UUID under a per-host lock; capability
@@ -1324,7 +1324,7 @@ policy and grants → manager → providers), and rollback caveats in
   status says so. VMs adopted by earlier releases are not backfilled. New privileges:
   vSphere `VirtualMachine.Config.AdvancedConfig` and Proxmox `VM.Config.Options` on the VMs
   adoption takes over
-  (→ [Adoption stamps the adopted VM](docs/vm-ownership.md#adoption-stamps-the-adopted-vm)).
+  (→ [Adoption stamps the adopted VM](../vm-ownership.md#adoption-stamps-the-adopted-vm)).
 - **Single-host `VMClone` targets are created first and stamped, and a re-sent `Clone`
   re-binds** instead of making a second clone (Proxmox) or failing and leaving the first
   clone untracked (vSphere, libvirt). The target `VirtualMachine` is created first,
@@ -1339,7 +1339,7 @@ policy and grants → manager → providers), and rollback caveats in
   `CloneOutcomeUnknown`, remove or adopt any VM stamped with its `status.targetUID`, then
   delete the `VMClone` and its target `VirtualMachine` (deleting the `VMClone` never
   touches the target). Clones made before are unstamped and are not re-bound
-  (→ [Clones: re-bind](docs/vm-ownership.md#clones-re-bind)).
+  (→ [Clones: re-bind](../vm-ownership.md#clones-re-bind)).
 - **Nothing is created through a Provider being deleted, even before the
   manager's cache sees the deletion.** The Provider is re-read from the API
   server right before every `Create`, `Clone` and `ImportDisk`; a deleting,
@@ -1388,7 +1388,7 @@ policy and grants → manager → providers), and rollback caveats in
   host (the host and the pool's path are in the provider log, never in a
   status). Mount shared storage
   **at** `/var/lib/libvirt/images` — see the host prerequisites in
-  [`docs/clustered-provider-inventory.md`](docs/clustered-provider-inventory.md#host-prerequisites).
+  [`docs/clustered-provider-inventory.md`](../clustered-provider-inventory.md#host-prerequisites).
 - **libvirt: deleting a snapshot removes its leftover overlay file.** libvirt
   10 commits an external snapshot into its base on delete but leaves the
   overlay `<domain>-disk.<snapshot>` in the pool; `SnapshotDelete` now removes
@@ -1417,7 +1417,7 @@ says so. Each links to the page that documents it in full, where one exists.
   includes administrator-sensitive gauges, so expose it only behind the chart's
   NetworkPolicy (`networkPolicy.enabled`, default off) or turn on
   `--metrics-secure=true` yourself
-  (→ [`docs/clustered-provider-inventory.md`](docs/clustered-provider-inventory.md#committed-capacity)).
+  (→ [`docs/clustered-provider-inventory.md`](../clustered-provider-inventory.md#committed-capacity)).
 - **Clustered libvirt providers are experimental.** `topology: cluster` is opt-in
   and may still change. Host-to-host migration is not implemented. Migration into a
   clustered provider is new and experimental: `s3` and `nfs` only, the target VM in the
@@ -1428,14 +1428,14 @@ says so. Each links to the page that documents it in full, where one exists.
   hosts mount one pool are not serialised with each other; and a waiting target's
   `spec.importedDisk` can be edited by whoever may edit the VM (a swap is detected, not
   prevented)
-  (→ [`docs/clustered-provider-inventory.md`](docs/clustered-provider-inventory.md#migration-into-a-clustered-provider-addendum-b)).
+  (→ [`docs/clustered-provider-inventory.md`](../clustered-provider-inventory.md#migration-into-a-clustered-provider-addendum-b)).
 - **A clustered libvirt host's free-space figure is up to one Host sync (60 seconds)
   old** (#417), so the disk-space filter that places a migration target can act on a
   figure that has changed since. If the filesystem behind an active pool is not
   mounted, the figure is that of the filesystem underneath, and a `stat` stuck on a
   dead hard-mounted NFS export cannot be killed and may accumulate until the mount
   recovers
-  (→ [`docs/clustered-provider-inventory.md`](docs/clustered-provider-inventory.md#what-listhosts-reports-per-host-libvirt)).
+  (→ [`docs/clustered-provider-inventory.md`](../clustered-provider-inventory.md#what-listhosts-reports-per-host-libvirt)).
 - **A migrated guest can boot without network, or with a new identity (R36).** The fix
   is designed, not built. A Linux cloud-image guest whose netplan matches its NIC by
   MAC address (Ubuntu cloud images do) can boot **without network** on a vSphere or
@@ -1443,13 +1443,13 @@ says so. Each links to the page that documents it in full, where one exists.
   libvirt target the network works only because the guest gets a new cloud-init
   identity, so its instance-id, hostname and SSH host keys change. The fix, which
   carries the source NICs' MACs to the target and presents the source's instance-id, is
-  accepted in [ADR-0014](docs/adr/0014-migrated-guest-network.md) and planned for a later release;
+  accepted in [ADR-0014](../adr/0014-migrated-guest-network.md) and planned for a later release;
   of its slices only the Proxmox network plumbing is in this release. Windows
   guests are outside the design beyond carrying the MAC. Until then: make the guest's
   netplan match its NIC by name or driver instead of `macaddress` before you migrate,
   or use a guest image that already does, and after a migrated guest comes up without
   network, fix its network configuration from the console
-  (→ [ADR-0014](docs/adr/0014-migrated-guest-network.md)).
+  (→ [ADR-0014](../adr/0014-migrated-guest-network.md)).
 - **Proxmox applies only two things from `spec.userData` (R35).** The provider does not
   pass the user-data to the guest: PVE builds the cloud-init drive from settings the
   provider sets. From the user-data it reads the `ssh_authorized_keys:` entries written
@@ -1465,15 +1465,15 @@ says so. Each links to the page that documents it in full, where one exists.
   before every provider until ADR-0014 slice 0b); the CRD allows only `vmbrN` bridges
   and IPv4 addresses; and `Describe` reports no NICs. A static IP takes effect only
   when the VM has a cloud-init drive
-  (→ [`docs/proxmox-networks.md`](docs/proxmox-networks.md)).
+  (→ [`docs/proxmox-networks.md`](../proxmox-networks.md)).
 - **Deleting a namespace that holds an in-use `Provider`.** Kubernetes deletes the
   provider's runtime with the namespace, and nothing can stop that. VMs whose
   deletes miss the pod's termination window are held (`ProviderUnavailable`) and
   the namespace stays `Terminating` until an administrator acts
   (`virtrigaud.io/force-delete: "true"` on the `Provider` or on each VM, which
   leaves the hypervisor VMs unmanaged). Delete the VMs before the namespace
-  (→ [ADR-0010](docs/adr/0010-provider-in-use-finalizer.md),
-  [`docs/vm-provider-binding.md`](docs/vm-provider-binding.md#deleting-a-namespace-that-contains-a-provider)).
+  (→ [ADR-0010](../adr/0010-provider-in-use-finalizer.md),
+  [`docs/vm-provider-binding.md`](../vm-provider-binding.md#deleting-a-namespace-that-contains-a-provider)).
 - **Proxmox: the legacy name rule can be claimed by whoever can create a VM.**
   An unstamped VM named like its `VirtualMachine` still passes the owner check (VMs
   created before owner stamps exist have no other proof), and the provider cannot tell
@@ -1483,55 +1483,55 @@ says so. Each links to the page that documents it in full, where one exists.
   `VirtualMachine` then reads, powers, resizes, snapshots and copies it as its own.
   A VM stamped for anyone else is refused. Grant `VM.Allocate` there as carefully as
   `VM.Config.Options`, and to no one but VirtRigaud's Provider tokens and your
-  administrators. [ADR-0012](docs/adr/0012-proxmox-legacy-unstamped-name-rule.md)
+  administrators. [ADR-0012](../adr/0012-proxmox-legacy-unstamped-name-rule.md)
   retires the rule: phase 1 is planned for v0.4.1 behind validation on a real PVE
   cluster, the rule is dropped by default in v0.5.0. Even then a stamp can be copied by
   someone who knows the `VirtualMachine`'s UID and holds `VM.Config.Options`; that risk is
-  accepted for v0.4.0 (→ [`docs/vm-ownership.md`](docs/vm-ownership.md#limits)).
+  accepted for v0.4.0 (→ [`docs/vm-ownership.md`](../vm-ownership.md#limits)).
 - **Proxmox: the owner check and the call are two requests.** A VMID freed and reused
   between them is not caught. Do not delete VirtRigaud-managed VMs outside VirtRigaud:
   delete the `VirtualMachine`, or detach it with `orphan-on-delete`
-  (→ [`docs/vm-ownership.md`](docs/vm-ownership.md#limits)).
+  (→ [`docs/vm-ownership.md`](../vm-ownership.md#limits)).
 - **The admission policy needs Kubernetes 1.30+.** On an older cluster nothing is
   installed, and anyone who can create or update `VirtualMachine`s in a namespace can
   forge the adoption markers (`virtrigaud.io/adopted`, `adopted-id`, `adopted-host`) and
   the `VMClone` marker (`clone-uid`). Restrict `create`/`update` on `virtualmachines` to
   trusted users there, or reserve the keys with Kyverno or Gatekeeper. (A `VMMigration`
   no longer depends on the markers.)
-  → [`docs/admission-policy.md`](docs/admission-policy.md)
+  → [`docs/admission-policy.md`](../admission-policy.md)
 - **A kustomize overlay that changes the namespace or name prefix must repeat the
   `replacements` block of `config/default`.** Otherwise the admission policy keeps
   exempting the old manager name and denies the manager's own writes.
-  → [`docs/admission-policy.md`](docs/admission-policy.md#configuration)
+  → [`docs/admission-policy.md`](../admission-policy.md#configuration)
 - **A leader-election overlap during a migration's target `Create` can still fail the
   migration.** If the new leader finds the target VM carrying a claim it cannot match
   (the old leader's), it re-checks, but if the claim never matches the migration fails
   `TargetVMNotOwned`. This fails closed; delete the target VM it created and re-create
-  the migration (→ [`docs/cross-namespace-targets.md`](docs/cross-namespace-targets.md#the-target-vm-must-be-the-migrations-own)).
+  the migration (→ [`docs/cross-namespace-targets.md`](../cross-namespace-targets.md#the-target-vm-must-be-the-migrations-own)).
 - **VMs adopted by v0.3.11 are not re-stamped, and clones made by it are
   unstamped.** Their deletes follow the unstamped rules. On Proxmox, a VM adopted earlier
   that still carries a previous owner's stamp is held `Ready=False/VMNotOwned` (and
   left behind on delete with `VMLeftOnHypervisor`) until you remove the stale
-  `virtrigaud.owner` line from its Notes (→ [`docs/vm-ownership.md`](docs/vm-ownership.md#vms-adopted-before-this-release)).
+  `virtrigaud.owner` line from its Notes (→ [`docs/vm-ownership.md`](../vm-ownership.md#vms-adopted-before-this-release)).
 - **libvirt: the `default` storage pool must be at `/var/lib/libvirt/images`.**
   Mount shared storage at that path, and keep `VIRTRIGAUD_LIBVIRT_IMAGE_DIRS`
   (the image catalog) apart from the pool. A pool at another path is refused with
   `InvalidSpec` and never modified
-  (→ [`docs/clustered-provider-inventory.md`](docs/clustered-provider-inventory.md#host-prerequisites)).
+  (→ [`docs/clustered-provider-inventory.md`](../clustered-provider-inventory.md#host-prerequisites)).
 - **The disk-size limit does not cover an oversized image.** It checks class and
   spec sizes and the real disk sizes of clone and migration sources, but not an
   image or template whose own disk is larger than the class
-  (→ [chart README](charts/virtrigaud/README.md#disk-size-limit)).
+  (→ [chart README](../../charts/virtrigaud/README.md#disk-size-limit)).
 - **vSphere: a CPU or memory change of a running VM needs hot-add.** Without it the
   change waits for a power-off and is shown as `Reconfiguring=False/ResizePendingPowerOff`
   instead of being retried against vCenter. The provider still reports online reconfigure
   as supported regardless of the VM
-  (→ [`docs/reconfigure-results.md`](docs/reconfigure-results.md#vsphere-changes-a-running-vm-cannot-take)).
+  (→ [`docs/reconfigure-results.md`](../reconfigure-results.md#vsphere-changes-a-running-vm-cannot-take)).
 - **A disk-size change alone does not trigger a `Reconfigure`.** The manager sends one
   when the effective CPU or memory changes, and the disk sizes travel with it. To apply a
   `spec.disks` size change, or a growth skipped earlier (for example while the disk had
   snapshots), change CPU or memory too
-  (→ [`docs/reconfigure-results.md`](docs/reconfigure-results.md#when-a-reconfigure-is-sent)).
+  (→ [`docs/reconfigure-results.md`](../reconfigure-results.md#when-a-reconfigure-is-sent)).
 - **`Reconfigure` resizes few disks.** No provider's `Reconfigure` grows the root disk
   from a `spec.disks` entry or adds a disk. vSphere grows only an additional disk that
   `Create` recorded under the entry's name, so the additional disks of VMs created by
@@ -1545,7 +1545,7 @@ says so. Each links to the page that documents it in full, where one exists.
   vSphere attaches `spec.disks` at create but ignores an entry added after the VM was
   created, with no condition and no event (the provider logs it at `INFO`); nothing
   refuses either case
-  (→ [`docs/reconfigure-results.md`](docs/reconfigure-results.md#which-disk-a-size-goes-to)).
+  (→ [`docs/reconfigure-results.md`](../reconfigure-results.md#which-disk-a-size-goes-to)).
 - **Snapshot revert on libvirt needs a snapshot taken with the VM powered off, and
   libvirt 9.9 or later.** A snapshot of a VM that is off, or taken without memory, is an
   external disk-only snapshot; older libvirt cannot revert one and the provider reports
@@ -1561,8 +1561,8 @@ says so. Each links to the page that documents it in full, where one exists.
   disk's overlays, `<domain>-disk.<snapshot>` and the `<domain>-disk.<epoch>` a revert
   makes, and not those of additional data disks, so check the pool
   (`<pool>/*-disk*` files that are not `.qcow2`) after a revert or a snapshot delete
-  (→ [`docs/vm-snapshot-revert.md`](docs/vm-snapshot-revert.md#libvirt),
-  [`docs/libvirt-clones.md`](docs/libvirt-clones.md#what-snapshotdelete-removes)).
+  (→ [`docs/vm-snapshot-revert.md`](../vm-snapshot-revert.md#libvirt),
+  [`docs/libvirt-clones.md`](../libvirt-clones.md#what-snapshotdelete-removes)).
   The libvirt revert was validated in the lab (single-host and clustered, libvirt 10.0,
   AppArmor, an NFS pool); see [Validation](#validation).
 - **libvirt: the check that a snapshot delete keeps the VM's other snapshots is not
@@ -1575,7 +1575,7 @@ says so. Each links to the page that documents it in full, where one exists.
   another of its snapshots. The check also covers only the files the delete may merge
   away or remove; a snapshot libvirt itself refuses to delete (an internal parent of an
   external snapshot) is libvirt's answer, not this check's
-  (→ [`docs/libvirt-clones.md`](docs/libvirt-clones.md#deleting-memory-and-disk-only-snapshots-of-the-same-vm)).
+  (→ [`docs/libvirt-clones.md`](../libvirt-clones.md#deleting-memory-and-disk-only-snapshots-of-the-same-vm)).
 - **libvirt: a memory snapshot orphaned by an earlier version is unusable, and the cleanup is
   limited to what can be proven.** A memory snapshot whose disk-only snapshot was deleted
   first (by v0.3.11 or by v0.4.0-rc8 or earlier) keeps its data in the leftover overlay
@@ -1583,7 +1583,7 @@ says so. Each links to the page that documents it in full, where one exists.
   to. This release deletes the snapshot's metadata when every file the snapshot recorded is
   gone and no current disk image lists it; otherwise it asks you to power the VM off and
   delete it again, and the manual cleanup in the doc applies
-  (→ [`docs/libvirt-clones.md`](docs/libvirt-clones.md#a-memory-snapshot-that-was-already-orphaned)).
+  (→ [`docs/libvirt-clones.md`](../libvirt-clones.md#a-memory-snapshot-that-was-already-orphaned)).
 - **libvirt: a new disk-only snapshot can collide with an earlier snapshot's leftover
   overlay file (V12).** The overlay of a disk-only snapshot is
   `<pool>/<domain>-disk.<snapshot name>`. When an earlier snapshot of that name left its
@@ -1615,19 +1615,19 @@ says so. Each links to the page that documents it in full, where one exists.
   "permission denied reading a disk image" (fail-closed: a VM delete, a snapshot delete
   and a clustered snapshot create are retried; a single-host snapshot create fails and a
   revert is re-sent up to 5 times, see the two limitations after the next) (→
-  [`docs/libvirt-clones.md`](docs/libvirt-clones.md#unreadable-disk-images)).
+  [`docs/libvirt-clones.md`](../libvirt-clones.md#unreadable-disk-images)).
 - **A libvirt guest on a host bridge needs the QEMU guest agent to show `status.ips`.**
   libvirt holds no DHCP lease for a bridged guest (the LAN's DHCP server answers); the
   host's ARP table is a last resort that depends on recent traffic, and a guest on a
   libvirt-managed network such as `default` shows its lease without the agent
-  (→ [`docs/vm-status-ips.md`](docs/vm-status-ips.md#libvirt)).
+  (→ [`docs/vm-status-ips.md`](../vm-status-ips.md#libvirt)).
 - **A revert the provider definitely did not perform is still counted as an unknown
   outcome.** An answer such as "not performed: could not verify that no other domain uses
   its disks" is retryable, so the revert is sent again (6 minutes after the last attempt,
   doubling up to 30 minutes) and, after 5 attempts, ends `Failed` with "the VM may or may
   not have been reverted" although nothing was changed. Check the VM, then remove
   `spec.snapshot.revertToRef` and set it again (→
-  [`docs/vm-snapshot-revert.md`](docs/vm-snapshot-revert.md#asynchronous-reverts-and-unknown-outcomes)).
+  [`docs/vm-snapshot-revert.md`](../vm-snapshot-revert.md#asynchronous-reverts-and-unknown-outcomes)).
 - **A single-host `VMSnapshot` create the provider did not perform fails instead of
   being retried.** On a single-host Provider the same "not performed" answer that a
   clustered Provider retries with a backoff (V8) ends the `VMSnapshot` in `Failed`
@@ -1640,7 +1640,7 @@ says so. Each links to the page that documents it in full, where one exists.
   except an export or import on a re-send-safe backend, which the manager sends again
   after 35 minutes. A failure write that is itself lost holds the object too, and
   deleting a held object does not look up the snapshot the lost call may have made
-  (→ [`docs/provider-call-outcomes.md`](docs/provider-call-outcomes.md#limitations)).
+  (→ [`docs/provider-call-outcomes.md`](../provider-call-outcomes.md#limitations)).
 - **Remote host commands can outlive a cancelled call, and Proxmox `nfs` is not re-send
   safe.** A command running on the hypervisor host keeps going after the call that
   started it is cancelled. The Proxmox `nfs` import copies to completion and publishes the
@@ -1648,18 +1648,18 @@ says so. Each links to the page that documents it in full, where one exists.
   held rather than re-sent (only `s3` is re-send safe on Proxmox).
   Single-host libvirt's flatten, `qemu-img convert` and `dd` run without `timeout(1)`, so
   an orphan can still be running after the 35-minute settle time
-  (→ [`docs/provider-call-outcomes.md`](docs/provider-call-outcomes.md#why-each-provider-answers-the-way-it-does)).
+  (→ [`docs/provider-call-outcomes.md`](../provider-call-outcomes.md#why-each-provider-answers-the-way-it-does)).
 - **A `pvc` migration on a filesystem that reports a link count other than 1 is
   refused**, as is any link or special file in the staging PVC. Use `s3` or `nfs`, or a
   filesystem that reports link counts
-  (→ [Staged-file hardening](examples/migration/README.md#staged-file-hardening-pvc-backend)).
+  (→ [Staged-file hardening](../../examples/migration/README.md#staged-file-hardening-pvc-backend)).
 - **Provider locks are per process: run one replica per Provider.** The landing,
   landed-disk delete and import serialisation live inside one provider process. vSphere
   runtimes are rendered with one replica already; do not set `spec.runtime.replicas`
   above 1 on libvirt or Proxmox Providers either. The landed-disk in-use checks see only
   the VMs of one vCenter or libvirt host, so do not share the landing datastore or the
   `default` pool directory with hypervisors the Provider does not manage
-  (→ [Upgrade guide](docs/upgrading.md#behavior-changes-that-are-visible-but-not-breaking)).
+  (→ [Upgrade guide](../upgrading.md#behavior-changes-that-are-visible-but-not-breaking)).
 - **Landed disks are not deleted in some cases.** A disk is kept with
   `cleanupPolicy: Never`, when the provider reports it in use, when the provider image
   predates this release, the Provider is gone, or a Proxmox Provider has no migration SSH
@@ -1669,13 +1669,13 @@ says so. Each links to the page that documents it in full, where one exists.
   It empties the staged file (a 0-byte file remains); Proxmox deletes it.
   Versioned or object-lock S3 buckets and NFS server snapshots keep the data:
   expire noncurrent versions on `vmmigrations/` and exclude the staging export
-  from snapshots (→ [ADR-0011](docs/adr/0011-migration-staging-cleanup.md)).
+  from snapshots (→ [ADR-0011](../adr/0011-migration-staging-cleanup.md)).
 - **`verifyChecksums` does not checksum NFS migrations.** On the `nfs` backend
   the disk is written by `qemu-img` over NFS, which computes no byte checksum, so
   no source or target checksum is recorded. Integrity rests on the target's
   `qemu-img check` of the converted image. Use `s3` when you need an end-to-end
   SHA-256 comparison
-  (→ [ADR-0006](docs/adr/0006-storage-backend-agnostic-cross-hypervisor-migration.md)).
+  (→ [ADR-0006](../adr/0006-storage-backend-agnostic-cross-hypervisor-migration.md)).
 - **Leftovers from earlier releases are not cleaned up automatically:** staged
   migration objects, landed migration disks and vSphere import-VM files of migrations
   that ran under an earlier release (including the `.hlog` history
@@ -1683,7 +1683,7 @@ says so. Each links to the page that documents it in full, where one exists.
   files (`<domain>-disk.<snapshot>`), libvirt cloud-init seeds in `/tmp` (readable by
   other local users until you make them private, and seed directories of VMs deleted
   together with a clone) and vSphere `virtrigaud-export-*` files. Find and remove them as described in
-  [docs/upgrading.md](docs/upgrading.md#leftovers-from-earlier-releases).
+  [docs/upgrading.md](../upgrading.md#leftovers-from-earlier-releases).
 
 ## Validation
 
@@ -1760,7 +1760,7 @@ a Secret).
   `kubectl get hostpools` showed `TOTAL`, `READY` and `SCHEDULABLE` as 2/2/2, dropped to 1
   while a host was unreachable, and went back within seconds. After `orphan-on-delete`, a
   re-created VM was held with `RestorePending` (phase `Pending`), and the [re-attach
-  runbook](docs/clustered-restore.md#re-attach-runbook) bound the running domain without a
+  runbook](../clustered-restore.md#re-attach-runbook) bound the running domain without a
   restart. Deleting a Provider that still had a VM showed `DeleteBlocked=True/ProviderInUse`,
   kept the runtime, and released after the VM was deleted. A `spec.disks` entry on a
   clustered libvirt VM showed `DisksApplied=False/NotSupportedByProvider` and one `Warning`
@@ -1822,7 +1822,7 @@ a Secret).
 
 ## Upgrade
 
-See **[docs/upgrading.md](docs/upgrading.md)** for the full breaking-change
+See **[docs/upgrading.md](../upgrading.md)** for the full breaking-change
 table, required upgrade order, new required privileges, and a post-upgrade
 verification checklist. The roll order is **CRDs, then the cross-namespace grants
 (`spec.consumerNamespaceSelector`) and the admission policy, then the manager, then
@@ -1832,7 +1832,7 @@ no provider image older than this release is ever sent a `Create` or `Clone` aga
 after an unknown outcome, a lost export or import is held for an operator instead of
 re-sent, and a failed migration's landed disk is recorded as left behind instead of
 deleted. The order was validated in the lab on the release candidates (see
-[Required upgrade order](docs/upgrading.md#required-upgrade-order)).
+[Required upgrade order](../upgrading.md#required-upgrade-order)).
 
 From v0.3.11, three things to do before the new manager and providers run, on top of that
 order:
@@ -1863,12 +1863,12 @@ that roll".
 | If you are on | What is still needed |
 |---|---|
 | rc1 | CRDs first (two optional status fields are new: `VMMigration` `status.storagePVCUID` and `status.storageInfo.importTarget.providerUID`; an old CRD prunes them), then the admission policy and any cross-namespace grants (exempt your restore tool in `admissionPolicy.reservedKeys.exemptUsernames` before the next restore), then the manager, then **all** providers promptly (three capability fields are new, so an older provider gets the conservative path: lost exports and imports are held, landed disks recorded as left behind). Let migrations in `Creating` or `Validating-Target` finish before the manager rolls (`TargetVMNotOwned`). The manager upgrade rolls each provider pod that mounts migration PVCs once, which interrupts an export or import running at that moment. Rolling a vSphere or Proxmox provider back brings back the wrong-disk resize; hold CPU and memory changes of VMs with `spec.disks` while an older image runs. A rolled-back manager can leave an adoption annotated `virtrigaud.io/adopted-id` without `status.id`: delete that `VirtualMachine` (no provider call is made) and let adoption take the VM again. |
-| rc2 or earlier | **First, on every libvirt host, create the seed directory.** Apply the CRDs (`VirtualMachine`, `VMSet` and `VMMigration` changed, and `Host` in a description) before the manager. Roll the clustered libvirt provider before you run a migration into it (an older one is refused as a target with `ClusteredTargetUnsupported`). Every provider pod rolls (Go 1.26.10). Review who can create `VMClone`s, and `VMPlacementPolicy` `minDiskSpacePerHost` on clustered Providers. A migration that reached `Ready` with `LandedDiskCleanup` still `Unknown` is closed once on its next reconcile. Seeds in `/tmp` and seed directories of VMs deleted together with a clone are not cleaned up ([Leftovers from earlier releases](docs/upgrading.md#leftovers-from-earlier-releases)). |
+| rc2 or earlier | **First, on every libvirt host, create the seed directory.** Apply the CRDs (`VirtualMachine`, `VMSet` and `VMMigration` changed, and `Host` in a description) before the manager. Roll the clustered libvirt provider before you run a migration into it (an older one is refused as a target with `ClusteredTargetUnsupported`). Every provider pod rolls (Go 1.26.10). Review who can create `VMClone`s, and `VMPlacementPolicy` `minDiskSpacePerHost` on clustered Providers. A migration that reached `Ready` with `LandedDiskCleanup` still `Unknown` is closed once on its next reconcile. Seeds in `/tmp` and seed directories of VMs deleted together with a clone are not cleaned up ([Leftovers from earlier releases](../upgrading.md#leftovers-from-earlier-releases)). |
 | rc4 or earlier | Grant the PVE token `VM.Config.Network`, `VM.Config.Cloudinit` and `SDN.Use` on the bridges your VMs use (skip for the root user or the `Administrator` role) **before** you roll the Proxmox provider, then roll the manager and the Proxmox provider together. Optionally set `PVE_DEFAULT_STORAGE` on Proxmox Providers whose clones can have no storage-backed disk. Review each `VMNetworkAttachment` a Proxmox VM uses, because the bridge and VLAN they name are now applied. |
 | rc5 or earlier | **Before the manager rolls,** remove `spec.snapshot.revertToRef` from every `VirtualMachine` and `VMSet` template you do not want reverted (list them with the query under [Breaking changes](#breaking-changes)). Apply the CRDs first: `VirtualMachine` gains `status.snapshotRevert`, `HostPool` gains printer columns, `VMSet` a description; a manager whose `VirtualMachine` CRD prunes `status.snapshotRevert` sends no revert (`SnapshotReverted=False/Unsupported`), and the readiness check does not verify the field. The manager's role gains `hostpools/status` (the chart and `config/rbac/role.yaml` carry it; a kustomize install must reapply the role). Roll the clustered libvirt provider promptly after the manager. |
-| rc6 or earlier | If you reverted a libvirt VM to a snapshot on rc6, **repair it first**: its CD-ROM is on a `cloud-init.<digits>` file in its seed directory and it does not start ([Repairing a VM broken by a v0.4.0-rc6 revert](docs/vm-snapshot-revert.md#repairing-a-vm-broken-by-a-v040-rc6-revert); do not delete its `VMSnapshot` before step 4 of the runbook). The VMs that carry a finished request are listed by `kubectl get virtualmachines.infra.virtrigaud.io -A -o jsonpath='{range .items[?(@.status.snapshotRevert.phase=="Succeeded")]}{.metadata.namespace}/{.metadata.name}{"\n"}{end}'`. Roll the libvirt providers (single-host and clustered), then take new snapshots, with the VM powered off, of the VMs you want to be able to revert, and delete the old ones: until then a revert to an old snapshot of a VM with a seed is refused with `RevertFailed` and changes nothing. |
-| rc7 or earlier | Apply the CRDs (only the description of `status.ips` changed since rc7). On every libvirt host whose provider SSH user cannot read libvirt's `0600` snapshot overlays, grant `VR_DISK_READ` over the pool directory ([Unreadable disk images](docs/libvirt-clones.md#unreadable-disk-images)) or repair the overlays by hand, then roll the libvirt providers, then the manager. Check the grant with `sudo -l -U <ssh user> /usr/bin/qemu-img info -U -f qcow2 --output=json -- <file>`. A `VMSnapshot` that rc7 held in `SnapshotOutcomeUnknown` for this cause stays held until you release it with the `virtrigaud.io/operation-outcome` annotation. |
+| rc6 or earlier | If you reverted a libvirt VM to a snapshot on rc6, **repair it first**: its CD-ROM is on a `cloud-init.<digits>` file in its seed directory and it does not start ([Repairing a VM broken by a v0.4.0-rc6 revert](../vm-snapshot-revert.md#repairing-a-vm-broken-by-a-v040-rc6-revert); do not delete its `VMSnapshot` before step 4 of the runbook). The VMs that carry a finished request are listed by `kubectl get virtualmachines.infra.virtrigaud.io -A -o jsonpath='{range .items[?(@.status.snapshotRevert.phase=="Succeeded")]}{.metadata.namespace}/{.metadata.name}{"\n"}{end}'`. Roll the libvirt providers (single-host and clustered), then take new snapshots, with the VM powered off, of the VMs you want to be able to revert, and delete the old ones: until then a revert to an old snapshot of a VM with a seed is refused with `RevertFailed` and changes nothing. |
+| rc7 or earlier | Apply the CRDs (only the description of `status.ips` changed since rc7). On every libvirt host whose provider SSH user cannot read libvirt's `0600` snapshot overlays, grant `VR_DISK_READ` over the pool directory ([Unreadable disk images](../libvirt-clones.md#unreadable-disk-images)) or repair the overlays by hand, then roll the libvirt providers, then the manager. Check the grant with `sudo -l -U <ssh user> /usr/bin/qemu-img info -U -f qcow2 --output=json -- <file>`. A `VMSnapshot` that rc7 held in `SnapshotOutcomeUnknown` for this cause stays held until you release it with the `virtrigaud.io/operation-outcome` annotation. |
 | rc8 or earlier | No CRD change. Roll the libvirt providers (single-host and clustered) first, then the manager. Until a libvirt provider is rolled, do not delete a disk-only snapshot of a VM that has a memory snapshot. The new delete check reads more overlay files than rc8's checks did: where the provider's SSH user lacks `VR_DISK_READ` over the pool directory (see the rc7 row), deleting a disk-only snapshot is refused, retryably, until it is granted. Rolling a libvirt provider back to rc8 brings back the orphaned memory snapshot. |
 
 Rollback caveats for each of these steps are in
-[Rollback caveats](docs/upgrading.md#rollback-caveats).
+[Rollback caveats](../upgrading.md#rollback-caveats).

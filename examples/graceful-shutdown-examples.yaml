@@ -1,3 +1,21 @@
+# Power-state examples: powerState OffGraceful vs Off.
+#
+# OffGraceful asks the guest OS to shut itself down; Off is a hard power-off.
+# What the providers do for OffGraceful (internal/providers/*; the manager sends
+# a fixed 60 s graceful timeout, internal/transport/grpc/client.go):
+#   - vSphere : shutdown through VMware Tools (open-vm-tools must run in the
+#               guest); a hard power-off if Tools is not running, the request
+#               fails, or the VM is still on after the 60 s.
+#   - Proxmox : PVE shutdown with a 60 s timeout and forceStop, so PVE powers the
+#               VM off hard when the guest has not stopped by then.
+#   - Libvirt : `virsh shutdown`; the domain is force-stopped only if that
+#               command itself fails.
+#
+# spec.lifecycle (preStop, postStart, gracefulShutdownTimeout) is accepted by the
+# API but nothing reads it: no hook runs and the 60 s above is not configurable.
+# Stop application services from inside the guest instead (for example a systemd
+# unit that runs on shutdown).
+
 # Cross-namespace references: the VirtualMachines below live in `default` and
 # reference a Provider, VMClass and VMImage in `virtrigaud-system`. Each of
 # those objects must share itself with `default` via
@@ -33,24 +51,6 @@ spec:
   networks:
     - name: default-network
   
-  # Configure graceful shutdown timeout
-  lifecycle:
-    gracefulShutdownTimeout: "90s"  # 90 seconds for graceful shutdown
-    
-    # Optional: Pre-stop hook to run before shutdown
-    preStop:
-      exec:
-        command:
-          - "/bin/bash"
-          - "-c"
-          - |
-            # Save any important data
-            sync
-            # Notify applications to shutdown gracefully
-            systemctl stop my-application || true
-            # Wait a moment for cleanup
-            sleep 5
-
 ---
 apiVersion: infra.virtrigaud.io/v1beta1
 kind: VirtualMachine

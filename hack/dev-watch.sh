@@ -90,7 +90,7 @@ trigger_reload() {
     log "🔄 Triggering hot reload..."
     
     # Run lint check first
-    if ! make lint-check >/dev/null 2>&1; then
+    if ! make lint >/dev/null 2>&1; then
         warn "Lint check failed, skipping reload"
         return 1
     fi

@@ -10,8 +10,14 @@
 #       kubernetes.io/metadata.name: default
 # See docs/cross-namespace-references.md.
 
-# Example: Testing disk size configuration across providers
-# This example demonstrates different disk sizes to verify the fix
+# Example: disk sizes across providers
+# A VM's root disk takes the size of its VMClass's spec.diskDefaults.size; extra
+# disks are listed in the VirtualMachine's spec.disks[].sizeGiB.
+#
+# A Provider's owner can cap every disk created or grown through it with the
+# annotation infra.virtrigaud.io/max-disk-size (for example "500Gi"); it can only
+# lower the manager-wide --max-disk-size ceiling (Helm: manager.maxDiskSize). A VM whose
+# disk is larger waits with Ready=False, reason DiskSizeExceedsLimit.
 
 # VMClass with 50GB disk
 apiVersion: infra.virtrigaud.io/v1beta1
@@ -30,7 +36,7 @@ spec:
   
   diskDefaults:
     type: thin
-    size: 50Gi  # 50GB disk (was being ignored before fix)
+    size: 50Gi  # 50GiB root disk
 
 ---
 # VMClass with 100GB disk
@@ -50,7 +56,7 @@ spec:
   
   diskDefaults:
     type: thick
-    size: 100Gi  # 100GB disk (was being ignored before fix)
+    size: 100Gi  # 100GB disk
 
 ---
 # VMClass with small 30GB disk
@@ -70,7 +76,7 @@ spec:
   
   diskDefaults:
     type: thin
-    size: 30Gi  # 30GB disk (was being ignored before fix)
+    size: 30Gi  # 30GB disk
 
 ---
 # Test VM with 50GB disk (vSphere)

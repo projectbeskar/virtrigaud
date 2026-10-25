@@ -1,5 +1,5 @@
 # Advanced VM Migration Example
-# Demonstrates available VMMigration configuration options for v0.3.6.
+# Demonstrates available VMMigration configuration options.
 #
 # NOTES:
 # - This example uses the legacy PVC-backed storage path (compat-only). The

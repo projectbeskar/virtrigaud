@@ -2,9 +2,12 @@
 # This example demonstrates all major features of the Proxmox provider
 #
 # ⚠️  IMPORTANT: Requires Active Proxmox VE Server
-# The Proxmox provider needs environment variables to connect to a real Proxmox VE server.
-# See charts/virtrigaud-provider-runtime/examples/values-proxmox.yaml for the provider
-# runtime settings, docs/proxmox-networks.md and docs/proxmox-cloud-init-storage.md.
+# The Proxmox provider reads the Secret named by credentialSecretRef (mounted at
+# /etc/virtrigaud/credentials) to reach the PVE API: token_id and token_secret,
+# or username and password. See docs/proxmox-networks.md and
+# docs/proxmox-cloud-init-storage.md, and
+# charts/virtrigaud-provider-runtime/examples/values-proxmox.yaml for the
+# provider runtime settings.
 #
 # NOTE on user-data: the Proxmox provider maps cloud-init user-data to PVE's own
 # cloud-init settings. It applies the user name (`ciuser`) and the SSH keys of an
@@ -24,12 +27,10 @@ stringData:
   # Use API token authentication (recommended)
   token_id: "virtrigaud@pve!vrtg-token"
   token_secret: "xxxxxxxx-xxxx-4xxx-xxxx-xxxxxxxxxxxx"
-  
-  # Optional: CA certificate for self-signed Proxmox VE
-  ca.crt: |
-    -----BEGIN CERTIFICATE-----
-    # Your Proxmox VE CA certificate here
-    -----END CERTIFICATE-----
+
+  # Only for VMMigration to or from this provider (its disk data plane runs on the
+  # PVE node over SSH): ssh_user, ssh_privatekey (or ssh_password) and known_hosts.
+  # See migration/vsphere-to-proxmox.yaml.
 
 ---
 # Provider configuration for Proxmox VE
@@ -43,11 +44,22 @@ spec:
   endpoint: https://pve.example.com:8006
   credentialSecretRef:
     name: proxmox-credentials
+  # PVE with a self-signed certificate: the provider reads no CA bundle, so
+  # certificate verification can only be turned off.
+  # insecureSkipVerify: true
   runtime:
     mode: Remote
-    image: "ghcr.io/projectbeskar/virtrigaud/provider-proxmox:v0.2.3"
+    image: "ghcr.io/projectbeskar/virtrigaud/provider-proxmox:v0.4.0"
     service:
       port: 9090
+      # A Provider with no tls block is not deployed (TLSConfigured=False, reason
+      # TLSBlockMissing). The Secret holds tls.crt, tls.key and ca.crt:
+      #   kubectl create secret generic proxmox-prod-tls --from-file=tls.crt --from-file=tls.key --from-file=ca.crt
+      # For a plaintext lab only, use `enabled: false` and drop secretRef.
+      tls:
+        enabled: true
+        secretRef:
+          name: proxmox-prod-tls
 
 ---
 # Small VM class for development workloads

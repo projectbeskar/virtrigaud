@@ -10,17 +10,13 @@ metadata:
 type: Opaque
 stringData:
   username: "virtrigaud"
-  password: "your-password-here"
-  # For TLS-enabled libvirt:
-  # client.key: |
-  #   -----BEGIN PRIVATE KEY-----
-  #   ...
-  # client.crt: |
-  #   -----BEGIN CERTIFICATE-----
-  #   ...
-  # ca.crt: |
-  #   -----BEGIN CERTIFICATE-----
-  #   ...
+  ssh-privatekey: |
+    -----BEGIN OPENSSH PRIVATE KEY-----
+    REDACTED
+    -----END OPENSSH PRIVATE KEY-----
+  # The host's public key in known_hosts format; required (no trust on first use, ADR-0004).
+  known_hosts: |
+    libvirt-host.example.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIREPLACE_WITH_HOST_KEY
 
 ---
 # TLS certificates for provider gRPC communication
@@ -52,14 +48,14 @@ metadata:
   namespace: default
 spec:
   type: libvirt
-  endpoint: qemu+tls://libvirt-host.example.com/system
+  endpoint: qemu+ssh://virtrigaud@libvirt-host.example.com/system
   credentialSecretRef:
     name: libvirt-creds
   
   # Remote runtime configuration
   runtime:
     mode: Remote
-    image: ghcr.io/projectbeskar/virtrigaud/provider-libvirt:v0.2.3
+    image: ghcr.io/projectbeskar/virtrigaud/provider-libvirt:v0.4.0
     replicas: 2
 
     service:

@@ -35,9 +35,8 @@ metadata:
   namespace: default
 spec:
   source:
-    # A VirtualMachine on a single-host libvirt Provider: the direction that
-    # was run in the lab. Other source providers have not been run into a
-    # clustered target.
+    # A VirtualMachine on a single-host libvirt Provider. vSphere and Proxmox
+    # sources have also been run into a clustered target, over s3 and nfs.
     vmRef:
       name: app-on-libvirt
     powerOffBeforeMigration: true

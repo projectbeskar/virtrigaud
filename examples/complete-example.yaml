@@ -35,9 +35,17 @@ spec:
     folder: virtrigaud-vms
   runtime:
     mode: Remote
-    image: "ghcr.io/projectbeskar/virtrigaud/provider-vsphere:v0.2.3"
+    image: "ghcr.io/projectbeskar/virtrigaud/provider-vsphere:v0.4.0"
     service:
       port: 9090
+      # A Provider with no tls block is not deployed (TLSConfigured=False, reason
+      # TLSBlockMissing). The Secret holds tls.crt, tls.key and ca.crt:
+      #   kubectl create secret generic vsphere-prod-tls --from-file=tls.crt --from-file=tls.key --from-file=ca.crt
+      # For a plaintext lab only, use `enabled: false` and drop secretRef.
+      tls:
+        enabled: true
+        secretRef:
+          name: vsphere-prod-tls
 
 ---
 # Define a VM class for resource allocation (v0.2.1+ features)
@@ -52,7 +60,7 @@ spec:
   firmware: UEFI
   diskDefaults:
     type: thin
-    size: "40Gi"  # v0.2.1: Disk size now properly respected across all providers
+    size: "40Gi"
   guestToolsPolicy: install
   extraConfig:
     # Time synchronization
@@ -113,21 +121,6 @@ spec:
       type: thin
   powerState: "On"
   
-  # v0.2.1: Enhanced lifecycle management
-  lifecycle:
-    gracefulShutdownTimeout: "90s"  # 90 seconds for graceful shutdown
-    preStop:
-      exec:
-        command:
-        - "/bin/bash"
-        - "-c"
-        - |
-          # Graceful shutdown sequence
-          echo "$(date): Starting graceful shutdown" >> /var/log/shutdown.log
-          systemctl stop apache2 || true
-          sync
-          echo "$(date): Graceful shutdown complete" >> /var/log/shutdown.log
-  
   userData:
     cloudInit:
       inline: |
@@ -169,9 +162,10 @@ spec:
     folder: demo-vms
 
 ---
-# v0.2.1 Usage Examples:
+# Usage examples:
 
-# 1. Graceful shutdown (uses preStop hook + VMware Tools):
+# 1. Graceful shutdown (VMware Tools shuts the guest down; the provider powers the
+#    VM off hard if Tools is not running or the guest is not off after 60 s):
 # kubectl patch virtualmachine demo-web-server --type='merge' -p='{"spec":{"powerState":"OffGraceful"}}'
 
 # 2. Regular hard shutdown:

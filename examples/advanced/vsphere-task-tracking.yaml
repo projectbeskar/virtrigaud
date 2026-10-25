@@ -22,9 +22,17 @@ spec:
     name: vsphere-credentials
   runtime:
     mode: Remote
-    image: "ghcr.io/projectbeskar/virtrigaud/provider-vsphere:v0.2.3"
+    image: "ghcr.io/projectbeskar/virtrigaud/provider-vsphere:v0.4.0"
     service:
       port: 9090
+      # A Provider with no tls block is not deployed (TLSConfigured=False, reason
+      # TLSBlockMissing). The Secret holds tls.crt, tls.key and ca.crt:
+      #   kubectl create secret generic vsphere-prod-tls --from-file=tls.crt --from-file=tls.key --from-file=ca.crt
+      # For a plaintext lab only, use `enabled: false` and drop secretRef.
+      tls:
+        enabled: true
+        secretRef:
+          name: vsphere-prod-tls
   defaults:
     datastore: "datastore1"
     cluster: "cluster1"
@@ -166,7 +174,7 @@ data:
 
     # Monitor provider logs for task tracking details
     echo "=== Provider Task Logs ==="
-    kubectl logs -f deployment/virtrigaud-provider-vsphere | grep -i task
+    kubectl logs -f deployment/virtrigaud-provider-default-vsphere-prod | grep -i task
 
     # Example output:
     # time="2024-01-15T10:30:00Z" level=info msg="Task created" taskID="task-123" operation="CreateVM"
@@ -255,7 +263,7 @@ data:
 
     ### 3. Provider Logs (Detailed)
     ```bash
-    kubectl logs -f deployment/virtrigaud-provider-vsphere
+    kubectl logs -f deployment/virtrigaud-provider-default-vsphere-prod
     ```
 
     ### 4. vCenter Task Console
@@ -383,7 +391,7 @@ spec:
 #    watch -n 2 'kubectl get vm'
 #
 # 3. View detailed task information:
-#    kubectl logs -f deployment/virtrigaud-provider-vsphere | grep -E "task|Task"
+#    kubectl logs -f deployment/virtrigaud-provider-default-vsphere-prod | grep -E "task|Task"
 #
 # 4. Check vCenter tasks:
 #    - Open vSphere web client

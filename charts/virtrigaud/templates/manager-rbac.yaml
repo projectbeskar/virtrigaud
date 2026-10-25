@@ -295,11 +295,13 @@ rules:
   - get
   - list
   - watch
-# Four CRDs, get only and only those objects: the manager checks at startup
-# and on every readiness probe that the installed VirtualMachine CRD has
-# status.boundProvider and the spec.providerRef immutability rule, and that the
-# Provider, VMClass and VMImage CRDs have spec.consumerNamespaceSelector
-# (readiness fails while one does not). Cluster scope only: a namespaced Role
+# Five CRDs (VirtualMachine, Provider, VMClass, VMImage, VMSnapshot), get only
+# and only those objects: the manager checks at startup and on every readiness
+# probe that the installed CRDs have the fields it relies on, for example
+# status.boundProvider and the spec.providerRef immutability rule on
+# VirtualMachine and spec.consumerNamespaceSelector on Provider, VMClass and
+# VMImage (readiness fails while one does not; the list is in
+# internal/controller/vmcrdfeatures.go). Cluster scope only: a namespaced Role
 # cannot grant a cluster-scoped resource, so with rbac.scope=namespace the check
 # reports "unknown" and does not affect readiness.
 - apiGroups:

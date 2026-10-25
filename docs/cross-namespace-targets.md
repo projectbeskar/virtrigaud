@@ -198,7 +198,7 @@ in a granted namespace other people can create `VirtualMachine`s too. One of
 them could create a VM under that name first and copy every field that looks
 like provenance onto it: the `virtrigaud.io/migration` annotation, and a
 `spec.importedDisk` that names the migration and its `status.importID`. Before
-this release, a migration took any VM with the target's name as its own. It
+v0.4.0, a migration took any VM with the target's name as its own. It
 then reported that VM's status as the migration's result, marked it
 `migration-completed`, and could delete the source after it.
 
@@ -302,7 +302,7 @@ objects.
   Provider.
 - The same-namespace behavior is unchanged, and so is every object that
   doesn't set these fields.
-- **A later release binds a migration to the target VM it created**
+- **v0.4.0 binds a migration to the target VM it created**
   ([above](#the-target-vm-must-be-the-migrations-own)), in every namespace. A
   migration that's in `Creating` or `Validating-Target` when the manager is
   upgraded created its target VM before that binding existed, so it has no
@@ -311,6 +311,6 @@ objects.
   upgrading. For a migration that fails this way, check the target VM, then
   delete the source yourself if you meant to (`deleteAfterMigration` doesn't
   run for a failed migration).
-- **A later release also requires the consumer grant** on the `Provider` and
+- **v0.4.0 also requires the consumer grant** on the `Provider` and
   `VMClass` a cross-namespace target references. See the upgrade notes in
   [`cross-namespace-references.md`](cross-namespace-references.md#upgrade-notes).

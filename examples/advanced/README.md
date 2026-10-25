@@ -1,59 +1,25 @@
 # Advanced VirtRigaud Examples
 
-This directory contains advanced examples demonstrating complex scenarios and v0.2.3+ features.
+This directory contains advanced examples: cloning, task tracking, console access, snapshots and reconfiguration.
 
 ## Overview
 
-These examples showcase production-ready patterns, advanced operations, and best practices for managing VMs at scale with VirtRigaud.
+Each file is a set of manifests with comments on what the controllers and providers do with them. Replace the placeholder names (providers, templates, networks, credentials) before applying.
 
-## v0.2.3+ Features
+## Examples
 
 ### vSphere Clone Operations
 **File**: [vsphere-clone-example.yaml](vsphere-clone-example.yaml)
 
-Comprehensive cloning examples demonstrating:
-- **Full Clones**: Independent VMs for production workloads
-- **Linked Clones**: Space-efficient copies for development/testing
-- **Automatic Snapshot Handling**: Seamless snapshot creation for linked clones
-- **Clone from VMs or Templates**: Flexible source options
-- **Rapid Provisioning**: Multiple parallel clones for test environments
-
-**Use Cases**:
-- Production workload deployment
-- Development environment provisioning
-- Test environment creation
-- VM backup and disaster recovery
-- Rapid scaling for temporary workloads
-
-**Key Features**:
-- Full clone: ~5-15 minutes, independent storage
-- Linked clone: ~1-3 minutes, shared storage with parent
-- Automatic snapshot management
-- Complete isolation or shared storage options
+Creating VMs from a vSphere template, and cloning an existing VM:
+- **VMs from a template image**: several `VirtualMachine`s whose `imageRef` names the same vSphere template; each is created by cloning that template.
+- **`VMClone`**: clones an existing `VirtualMachine` (`source.vmRef`) into a new one on the same provider. `FullClone` is the default; `LinkedClone` needs a provider that reports linked-clone support (vSphere does; libvirt refuses it in v0.4.0, see [../../docs/libvirt-clones.md](../../docs/libvirt-clones.md)).
+- A `VMClone` from a template or a `VMImage` is declared in the schema but not implemented; see [../vmclone-basic.yaml](../vmclone-basic.yaml) for the supported scope.
 
 ### vSphere Task Tracking
 **File**: [vsphere-task-tracking.yaml](vsphere-task-tracking.yaml)
 
-Real-time monitoring of long-running vSphere operations:
-- **Task Progress Monitoring**: Real-time progress percentages
-- **State Reporting**: Queued, running, success, error states
-- **Error Information**: Detailed error messages from vSphere
-- **vCenter Integration**: Direct correlation with vSphere task manager
-- **Parallel Operations**: Independent tracking for multiple VMs
-
-**Monitored Operations**:
-- VM creation and cloning
-- Resource reconfiguration
-- Snapshot operations
-- VM deletion
-- Disk expansion
-
-**Benefits**:
-- Visibility into operation progress
-- Debugging failed operations
-- Performance optimization insights
-- Capacity planning data
-- Integration with vCenter task console
+How the manager follows the long-running vSphere operations a provider starts (create, clone, reconfigure, snapshot, delete): the provider returns a task reference, and the manager polls the provider's `TaskStatus` RPC until the task ends. The file also holds example `kubectl` commands for watching a VM, its events and the provider log, and for finding the task in vCenter's task console.
 
 ### Console Access
 **File**: [console-access-example.yaml](console-access-example.yaml)
@@ -61,55 +27,33 @@ Real-time monitoring of long-running vSphere operations:
 Remote VM console access for both vSphere and Libvirt:
 
 **vSphere Web Console**:
-- Automatic URL generation
-- Browser-based access via vCenter
-- Full keyboard/mouse support
-- Copy/paste functionality
-- Multi-monitor support
-- Power controls integration
+- A vSphere web client URL in `status.consoleURL`; the console itself opens in the vCenter UI, with your vCenter login
 
 **Libvirt VNC Console**:
-- VNC URL generation
-- Multiple VNC client support (TigerVNC, RealVNC, noVNC)
-- SSH tunnel support for security
-- Web-based access via noVNC
-- Multiple simultaneous viewers
-
-**Use Cases**:
-- Initial VM setup before SSH
-- Boot troubleshooting
-- OS installation
-- GUI application access
-- Rescue and recovery operations
-- Training and demonstrations
-
-## Existing Advanced Examples
+- A `vnc://<libvirt host>:<port>` URL in `status.consoleURL` while the VM is on
+- Connecting with a VNC client, through an SSH tunnel or a noVNC proxy
 
 ### VM Reconfiguration and Snapshots
 **File**: [vm-reconfigure-and-snapshot.yaml](vm-reconfigure-and-snapshot.yaml)
 
 Demonstrates VM lifecycle management:
-- Resource reconfiguration
-- Snapshot creation before changes
-- Rollback capabilities
-- Placement policies
+- Resource reconfiguration, and what each provider does with it (see [../../docs/reconfigure-results.md](../../docs/reconfigure-results.md))
+- A snapshot before the change
+- A `VMClone` of the VM, a `VMSet`
+- A placement policy
 
 ### Snapshot Lifecycle
 **File**: [snapshot-lifecycle.yaml](snapshot-lifecycle.yaml)
 
-Complete snapshot management:
-- Snapshot creation with memory state
-- Retention policies
-- Scheduled snapshots
-- Snapshot deletion and cleanup
+Snapshot management:
+- `VMSnapshot` creation, with and without memory state
+- Retention policies (`maxAge`, `deleteOnVMDelete`)
+- Reverting a VM to a snapshot with `spec.snapshot.revertToRef` ([../../docs/vm-snapshot-revert.md](../../docs/vm-snapshot-revert.md))
 
 ### VM Reconfiguration Patch
 **File**: [vm-reconfigure-patch.yaml](vm-reconfigure-patch.yaml)
 
-Demonstrates dynamic reconfiguration:
-- Live resource updates
-- Kubectl patch operations
-- Zero-downtime changes (where supported)
+Demonstrates changing a VM's CPU, memory and disks with `kubectl patch`. Whether the change applies live or at the next power cycle depends on the provider ([../../docs/reconfigure-results.md](../../docs/reconfigure-results.md)).
 
 ## Getting Started
 
@@ -117,12 +61,14 @@ Demonstrates dynamic reconfiguration:
 
 1. **VirtRigaud Installed**:
    ```bash
-   helm install virtrigaud virtrigaud/virtrigaud -n virtrigaud-system
+   helm repo add virtrigaud https://projectbeskar.github.io/virtrigaud
+   helm install virtrigaud virtrigaud/virtrigaud --version 0.4.0 \
+     -n virtrigaud-system --create-namespace
    ```
 
 2. **Provider Configured**:
    - vSphere: vCenter credentials and access
-   - Libvirt: Libvirt daemon connection
+   - Libvirt: SSH access to the libvirt host (`qemu+ssh://`)
    - Proxmox: Proxmox VE API access
 
 3. **Base Resources**:
@@ -155,7 +101,7 @@ Demonstrates dynamic reconfiguration:
    kubectl get vm -w
    
    # Check provider logs
-   kubectl logs -f deployment/virtrigaud-provider-vsphere
+   kubectl logs -f deployment/virtrigaud-provider-<namespace>-<provider name>
    
    # View VM details
    kubectl describe vm <vm-name>
@@ -172,62 +118,29 @@ Demonstrates dynamic reconfiguration:
 
 ## Advanced Patterns
 
-### Batch Operations
-
-Deploy multiple VMs simultaneously:
-```bash
-# Deploy all examples
-kubectl apply -f advanced/
-
-# Monitor all VMs
-watch -n 2 'kubectl get vm'
-```
-
 ### Resource Management
 
-Update VM resources dynamically:
+Change a VM's size by patching `spec.resources` (the VMClass is the baseline):
 ```bash
-# Trigger reconfiguration
 kubectl patch vm <vm-name> --type='merge' \
-  -p='{"spec":{"vmClassRef":"larger-class"}}'
+  -p='{"spec":{"resources":{"cpu":4,"memoryMiB":8192}}}'
 ```
-
-### Automation Scripts
-
-Use provided scripts for common tasks:
-```bash
-# Console access automation
-kubectl create configmap console-scripts \
-  --from-file=console-access-example.yaml
-
-# Execute script
-kubectl exec <pod> -- bash /scripts/automation.sh <vm-name>
-```
+or switch to another class with `spec.classRef.name`. See [vm-reconfigure-patch.yaml](vm-reconfigure-patch.yaml).
 
 ## Best Practices
 
 ### 1. Resource Planning
-- Use linked clones for dev/test environments
+- Use linked clones for dev/test environments only where the provider supports them; a linked clone depends on its source's disk
 - Reserve full clones for production workloads
-- Monitor task durations for capacity planning
 
 ### 2. Security
 - Use SSH tunnels for VNC connections
 - Implement network policies
-- Rotate console access credentials
-- Enable audit logging
+- Keep credentials in Secrets, not in manifests
 
 ### 3. Operations
 - Monitor provider logs during complex operations
-- Use task tracking for troubleshooting
-- Implement proper cleanup procedures
-- Document custom configurations
-
-### 4. Performance
-- Distribute VMs across datastores
-- Use linked clones to reduce storage load
-- Monitor vCenter task queue depth
-- Implement rate limiting for bulk operations
+- Use the VM's events and conditions, and the provider log, for troubleshooting
 
 ## Troubleshooting
 
@@ -239,7 +152,7 @@ kubectl exec <pod> -- bash /scripts/automation.sh <vm-name>
 kubectl describe vmimage <image-name>
 
 # Verify storage capacity
-kubectl logs deployment/virtrigaud-provider-vsphere | grep -i storage
+kubectl logs deployment/virtrigaud-provider-<namespace>-<provider name> | grep -i storage
 
 # Check vCenter for detailed errors
 ```
@@ -250,16 +163,16 @@ kubectl logs deployment/virtrigaud-provider-vsphere | grep -i storage
 kubectl get vm <vm-name> -o jsonpath='{.status.phase}'
 
 # Check provider logs
-kubectl logs deployment/virtrigaud-provider-vsphere | grep -i console
+kubectl logs deployment/virtrigaud-provider-<namespace>-<provider name> | grep -i console
 
 # Restart provider if needed
-kubectl rollout restart deployment/virtrigaud-provider-vsphere
+kubectl rollout restart deployment/virtrigaud-provider-<namespace>-<provider name>
 ```
 
 #### Task Tracking Shows Errors
 ```bash
 # Get task details from provider logs
-kubectl logs deployment/virtrigaud-provider-vsphere | grep task-<id>
+kubectl logs deployment/virtrigaud-provider-<namespace>-<provider name> | grep task-<id>
 
 # Check vCenter task manager
 # Navigate to vCenter > Tasks & Events
@@ -268,41 +181,10 @@ kubectl logs deployment/virtrigaud-provider-vsphere | grep task-<id>
 kubectl get events --field-selector involvedObject.name=<vm-name>
 ```
 
-## Example Combinations
-
-### Complete Development Environment
-```bash
-# 1. Create base template VM
-kubectl apply -f vsphere-clone-example.yaml  # Base template
-
-# 2. Create multiple dev VMs via linked clones
-kubectl apply -f - <<EOF
-<linked-clone-definitions>
-EOF
-
-# 3. Access via console for initial setup
-kubectl get vm dev-vm-01 -o jsonpath='{.status.consoleURL}'
-
-# 4. Monitor all operations
-kubectl get vm -w
-```
-
-### Production Deployment Pipeline
-```bash
-# 1. Full clone from approved template
-# 2. Task tracking for provisioning
-# 3. Automated testing via console
-# 4. Snapshot before production deployment
-# 5. Deploy to production
-```
-
 ## Further Reading
 
 - [Main Examples README](../README.md)
-- [Provider Documentation](../../providers/)
-- [vSphere Provider Guide](../../providers/vsphere.md)
-- [Libvirt Provider Guide](../../providers/libvirt.md)
-- [Provider Capabilities Matrix](../../PROVIDERS_CAPABILITIES.md)
+- [Documentation index](../../docs/README.md)
 
 ## Contributing
 
@@ -315,5 +197,5 @@ Have an advanced example to share? Contributions welcome!
 
 ---
 
-**Note**: These examples use v0.2.3+ features. Ensure you're running the latest VirtRigaud version.
+**Note**: These examples target VirtRigaud v0.4.0.
 

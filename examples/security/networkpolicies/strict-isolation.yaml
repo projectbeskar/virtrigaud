@@ -1,3 +1,20 @@
+# Strict NetworkPolicies for the manager and provider pods, as plain manifests.
+#
+# The Helm chart can render equivalent policies (networkPolicy.enabled in
+# charts/virtrigaud/values.yaml, off by default); use these when you do not use
+# the chart or want to adapt them. They only take effect on a CNI that enforces
+# NetworkPolicy.
+#
+# Provider pods created by a Provider CR carry the labels
+#   app.kubernetes.io/name: virtrigaud-provider
+#   app.kubernetes.io/instance: <Provider name>
+#   app.kubernetes.io/component: provider
+# and listen for the manager's gRPC on spec.runtime.service.port (default 9443)
+# and for metrics on 8080. Set the provider port below to the port you use. The
+# provider pods need no Kubernetes API access. Egress depends on the
+# hypervisor: vSphere 443, libvirt and Proxmox node SSH 22, the Proxmox API 8006,
+# and for VMMigration staging NFS 2049 or the S3 endpoint's port. Narrow the open
+# `to: []` rules to your own CIDRs.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -48,7 +65,7 @@ spec:
   - to:
     - podSelector:
         matchLabels:
-          app.kubernetes.io/name: virtrigaud
+          app.kubernetes.io/name: virtrigaud-provider
           app.kubernetes.io/component: provider
     ports:
     - protocol: TCP
@@ -62,7 +79,7 @@ metadata:
 spec:
   podSelector:
     matchLabels:
-      app.kubernetes.io/name: virtrigaud
+      app.kubernetes.io/name: virtrigaud-provider
       app.kubernetes.io/component: provider
   policyTypes:
   - Ingress
@@ -103,13 +120,16 @@ spec:
       port: 443  # vSphere API
     - protocol: TCP
       port: 902  # vSphere console
-  # Allow access to hypervisors (Libvirt)
+  # Allow access to hypervisors (libvirt over SSH, Proxmox node SSH)
   - to: []
     ports:
     - protocol: TCP
-      port: 16509  # Libvirt TLS
+      port: 22
+  # Allow access to hypervisors (Proxmox API)
+  - to: []
+    ports:
     - protocol: TCP
-      port: 16514  # Libvirt TCP
+      port: 8006
   # Allow access to HTTP endpoints for image downloads
   - to: []
     ports:
@@ -117,6 +137,11 @@ spec:
       port: 80
     - protocol: TCP
       port: 443
+  # Allow NFS for VMMigration staging (storage.type: nfs); add your S3 endpoint's port for storage.type: s3
+  - to: []
+    ports:
+    - protocol: TCP
+      port: 2049
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy

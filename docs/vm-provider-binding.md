@@ -187,11 +187,21 @@ the CRDs after the manager.
 The manager therefore reads the installed `VirtualMachine` CRD at startup and
 on every readiness probe (results reused for one minute) and checks that its
 `v1beta1` schema has `status.boundProvider` and the `spec.providerRef` rule.
+On the same CRD it requires the rule that freezes `spec.classRef` and
+`spec.resources` while a clustered create is pending,
+`status.placement.pendingResources`, `status.placement.memoryCeilingMiB`, and
+the `Suspended` and `Unknown` values of `status.powerState`
+(see [`clustered-provider-inventory.md`](clustered-provider-inventory.md)).
 The same check reads the `Provider`, `VMClass` and `VMImage` CRDs and requires
 `spec.consumerNamespaceSelector` in each (the cross-namespace consumer grant,
 see [`cross-namespace-references.md`](cross-namespace-references.md)): with an
 older CRD no grant can be set, so every cross-namespace reference would be
-refused. It also reads the `VMSnapshot` CRD and requires `status.vmUID` and
+refused. The `Provider` CRD must also have
+`status.reportedCapabilities.supportsImageArtifactIdentity` and
+`supportsHonestReconfigure`, and the `VMImage` CRD
+`status.providerStatus[].providerUID`, `taskRef` and `sourceDigest` (an older
+CRD would prune them, so no prepared image would be trusted). It also reads the
+`VMSnapshot` CRD and requires `status.vmUID` and
 `status.boundProvider` (a snapshot's binding to its VM and Provider; an older
 CRD would prune them). A missing feature in any of the five CRDs is
 `missing`; an unreadable one is `unknown`:

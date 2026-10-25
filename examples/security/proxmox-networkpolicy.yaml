@@ -1,5 +1,9 @@
-# NetworkPolicy for Proxmox VE Provider
-# Restricts network access to only required endpoints
+# NetworkPolicy for a Proxmox VE Provider named `proxmox-prod` (see
+# ../proxmox-complete-example.yaml).
+# Restricts network access to only required endpoints. The pods of a Provider CR
+# carry app.kubernetes.io/name=virtrigaud-provider and
+# app.kubernetes.io/instance=<Provider name>; the gRPC port is
+# spec.runtime.service.port (default 9443), metrics are on 8080.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -8,25 +12,26 @@ metadata:
 spec:
   podSelector:
     matchLabels:
-      app: provider-proxmox
+      app.kubernetes.io/name: virtrigaud-provider
+      app.kubernetes.io/instance: proxmox-prod
   policyTypes:
   - Ingress
   - Egress
   
-  # Ingress: Allow connections from manager
+  # Ingress: Allow connections from the manager
   ingress:
   - from:
-    - namespaceSelector:
-        matchLabels:
-          name: virtrigaud-system
     - podSelector:
         matchLabels:
-          app: virtrigaud-manager
+          app.kubernetes.io/name: virtrigaud
+          app.kubernetes.io/component: manager
     ports:
     - protocol: TCP
-      port: 9443  # gRPC provider port
+      port: 9443  # gRPC provider port (spec.runtime.service.port)
+  # Metrics and health probes (8080); narrow `from` to your monitoring namespace
+  - ports:
     - protocol: TCP
-      port: 8080  # Health check port
+      port: 8080
 
   # Egress: Restrict to essential endpoints only
   egress:
@@ -50,16 +55,10 @@ spec:
     ports:
     - protocol: TCP
       port: 8006  # Proxmox VE API port
-
-  # Kubernetes API for health checks and metrics
-  - to:
-    - namespaceSelector: {}
-      podSelector:
-        matchLabels:
-          component: kube-apiserver
-    ports:
     - protocol: TCP
-      port: 443
+      port: 22    # SSH to the PVE node (only for VMMigration)
+
+  # The provider needs no Kubernetes API access, so there is no rule for it.
 
 ---
 # Additional NetworkPolicy for development with fake server
@@ -73,8 +72,8 @@ metadata:
 spec:
   podSelector:
     matchLabels:
-      app: provider-proxmox
-      environment: development
+      app.kubernetes.io/name: virtrigaud-provider
+      app.kubernetes.io/instance: proxmox-dev
   policyTypes:
   - Egress
   
@@ -101,7 +100,8 @@ metadata:
 spec:
   selector:
     matchLabels:
-      app: provider-proxmox
+      app.kubernetes.io/name: virtrigaud-provider
+      app.kubernetes.io/instance: proxmox-prod
   endpoints:
   - port: metrics
     path: /metrics

@@ -210,8 +210,8 @@ See [`../vmmigration-into-clustered.yaml`](../vmmigration-into-clustered.yaml).
   `/var/lib/libvirt/virtrigaud-seeds`.
 - **What it does not do:** the disk-space check is a filter, not a reservation;
   a host that fails after placement is waited for, not replaced; two Providers on
-  one pool are not serialised. A vSphere or Proxmox source into a clustered
-  target has not been run in the lab.
+  one pool are not serialised. Single-host libvirt, vSphere and Proxmox sources
+  were run into a clustered target over `s3` and `nfs`; the libvirt runs ended `Ready`.
 - **While it runs**, `kubectl get vmmigration <name> -o yaml` shows the
   `TargetPlaced` condition and `status.storageInfo.importTarget.host`, the host
   the disk was sent to.
@@ -329,4 +329,3 @@ See [`docs/provider-call-outcomes.md`](../../docs/provider-call-outcomes.md).
 
 - [VMMigration CRD source](../../api/infra.virtrigaud.io/v1beta1/vmmigration_types.go)
 - [Migration Guide](https://projectbeskar.github.io/virtrigaud/operations/vm-migration/)
-- Open issues: [#147 mTLS](https://github.com/projectbeskar/virtrigaud/issues/147), [#148 provider auth](https://github.com/projectbeskar/virtrigaud/issues/148), [#153 Libvirt Clone stub](https://github.com/projectbeskar/virtrigaud/issues/153), [#154 Libvirt ImagePrepare stub](https://github.com/projectbeskar/virtrigaud/issues/154)

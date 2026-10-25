@@ -9,7 +9,7 @@ spec:
   firmware: UEFI
   diskDefaults:
     type: thin
-    size: "40Gi"  # v0.2.1: Disk size now properly respected
+    size: "40Gi"
   guestToolsPolicy: install
   # v0.2.1: Provider-specific configuration via extraConfig
   extraConfig:

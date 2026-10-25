@@ -56,9 +56,17 @@ spec:
   # Remote runtime configuration
   runtime:
     mode: Remote
-    image: "ghcr.io/projectbeskar/virtrigaud/provider-vsphere:v0.2.3"
+    image: "ghcr.io/projectbeskar/virtrigaud/provider-vsphere:v0.4.0"
     service:
       port: 9090
+      # A Provider with no tls block is not deployed (TLSConfigured=False, reason
+      # TLSBlockMissing). The Secret holds tls.crt, tls.key and ca.crt:
+      #   kubectl create secret generic vsphere-provider-tls --from-file=tls.crt --from-file=tls.key --from-file=ca.crt
+      # For a plaintext lab only, use `enabled: false` and drop secretRef.
+      tls:
+        enabled: true
+        secretRef:
+          name: vsphere-provider-tls
 
 ---
 # VM Class for enterprise workloads (v0.2.1+ features)
@@ -73,7 +81,7 @@ spec:
   firmware: UEFI
   diskDefaults:
     type: thin
-    size: "100Gi"  # v0.2.1: Disk size now properly respected
+    size: "100Gi"
   guestToolsPolicy: install
   extraConfig:
     # vSphere performance tuning
@@ -149,22 +157,6 @@ spec:
   
   powerState: "On"
   
-  # v0.2.1: Enhanced lifecycle management
-  lifecycle:
-    gracefulShutdownTimeout: "120s"  # Allow 2 minutes for graceful shutdown
-    preStop:
-      exec:
-        command:
-        - "/bin/bash"
-        - "-c"
-        - |
-          # Graceful application shutdown
-          systemctl stop nginx
-          systemctl stop my-web-app
-          # Sync filesystems
-          sync
-          sleep 5
-  
   userData:
     cloudInit:
       inline: |
@@ -226,9 +218,11 @@ spec:
   - datacenter:dc1
 
 ---
-# Example: How to gracefully shutdown this VM (v0.2.1+)
+# Example: How to gracefully shutdown this VM
 # kubectl patch virtualmachine web-server-remote --type='merge' -p='{"spec":{"powerState":"OffGraceful"}}'
 # This will:
-# 1. Execute the preStop hook (stop nginx, stop my-web-app, sync)
-# 2. Attempt graceful shutdown using VMware Tools (120s timeout)
-# 3. Fall back to hard power off if graceful shutdown fails
+# 1. Ask the guest to shut down through VMware Tools (open-vm-tools, installed
+#    by the cloud-init above)
+# 2. Wait up to 60 s for the VM to power off
+# 3. Fall back to a hard power off if Tools is not running, the shutdown request
+#    fails, or the VM is still on after the 60 s

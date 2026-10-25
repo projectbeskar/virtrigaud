@@ -528,8 +528,11 @@ next re-check, R4 finds nothing and the VM is created as new.
   step 2, keeping the namespace and name; the create retry then binds it. On
   vSphere, the stamp is the VM's ExtraConfig key `virtrigaud.owner.uid`. No
   marker is involved.
-- **Proxmox** has no owner stamp, so a restore without status creates a second
-  VM. This is tracked with the parked Proxmox work. Restore Proxmox
+- **Proxmox** stamps its VMs, but a `Create` re-binds only a VM stamped with the
+  `VirtualMachine`'s own UID, and Proxmox names are not unique. A VM restored
+  without its status has a new UID, so its `Create` leaves the original (stamped
+  with the old UID) alone and makes a second VM
+  ([`vm-ownership.md`](vm-ownership.md#create-and-clone-re-bind)). Restore Proxmox
   VirtualMachines with their status.
 
 ## See also

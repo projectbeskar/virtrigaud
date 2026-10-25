@@ -1,7 +1,7 @@
 # Example values for vSphere provider
 image:
   repository: ghcr.io/projectbeskar/virtrigaud/provider-vsphere
-  tag: "v0.2.0"
+  tag: "v0.4.0"
 
 env:
   - name: LOG_LEVEL

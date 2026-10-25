@@ -225,7 +225,7 @@ the host never answered a command of the call. How the manager acts on each answ
 | The landing name is a symbolic link on the landing host | `FailedPrecondition` + `VM_OPERATION_FAILED` (a host-guard refusal, counted by `virtrigaud_provider_host_guard_refusals_total`). Nothing is written |
 | A host of the Provider cannot be scanned for that file | `Unavailable` + `HOST_UNAVAILABLE` or `VM_DISK_CHECK_FAILED` (fails closed; nothing done) |
 | The default pool is not at `/var/lib/libvirt/images` | `FailedPrecondition` + `HOST_STORAGE_MISCONFIGURED` + `VM_OPERATION_FAILED`, scoped to that host |
-| The host is not reached over `ssh://` | `FailedPrecondition` |
+| The host is not reached over `qemu+ssh://` | `FailedPrecondition` |
 | Any other failure while only reads ran on the landing host (the host answered at least one command, then a read failed or its connection dropped) | Not performed (`Unavailable` + `VM_OPERATION_FAILED`) |
 | Another import, delete or in-place create of the same landing name (through any host) runs in the provider for 2 minutes | Not performed (`Unavailable` + `VM_OPERATION_FAILED`) |
 | Less than one minute of the time budget is left when the write phase would start | Not performed (`Unavailable` + `VM_OPERATION_FAILED`) |
