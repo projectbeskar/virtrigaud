@@ -1796,8 +1796,8 @@ Wave 2 adds to this:
 
 ## About this release candidate / what to test
 
-v0.4.0 GA follows after a soak of this candidate (rc1, rc2, rc4, rc5, rc6 and rc7 came
-before it; rc3 was tagged but not released). Please try it on a non-production cluster and
+v0.4.0 GA follows after a soak of this candidate (rc1, rc2, rc4, rc5, rc6, rc7 and rc8
+came before it; rc3 was tagged but not released). Please try it on a non-production cluster and
 report what you find (GitHub issues; include the Provider type, the `kubectl describe` of
 the object involved and the provider log, never a Secret). The most useful things to
 exercise:
@@ -1850,6 +1850,25 @@ exercise:
   - a migration onto Proxmox: the VM lands on the bridge and VLAN its target names, and
     whether the migrated guest has network (see Known limitations, R36); tell us which
     guest image you used.
+- **New since rc8 (libvirt, single-host and clustered):**
+  - **a disk-only snapshot with a memory snapshot taken after it:** on a running VM, create
+    a `VMSnapshot` without memory (`includeMemory: false`, a disk-only snapshot), then one
+    with `includeMemory: true` (a memory snapshot), then delete the disk-only
+    `VMSnapshot`. The delete is refused with nothing changed: the `VMSnapshot` stays,
+    `Ready=False/DeleteBlocked` names the memory snapshot by its libvirt snapshot name
+    (`delete snapshot "<name>" first`), `virsh snapshot-list <domain>` still lists both,
+    and the overlay file is still in the pool;
+  - **the other order:** delete the memory snapshot first, then the disk-only one. Both
+    deletes succeed and both snapshots are gone from `virsh snapshot-list`;
+  - **a memory snapshot that rc8 or earlier already lost** (a VM whose disk-only snapshot
+    was deleted first, so the memory snapshot's metadata records a file that no longer
+    exists): deleting its `VMSnapshot` completes through the metadata-only cleanup, or is
+    refused with "power the VM off and delete it again" when the provider cannot prove the
+    data is gone. See [A memory snapshot whose data was already
+    lost](docs/libvirt-clones.md#a-memory-snapshot-whose-data-was-already-lost);
+  - **the manager's view of a refused delete:** the refused `VMSnapshot` shows the
+    provider's answer in `Ready=False/DeleteBlocked`, raises one `SnapshotDeleteFailed`
+    Warning event (not one per re-check) and is re-checked within 5 minutes.
 - **New since rc7 (libvirt, single-host and clustered, unless noted):**
   - **other VMs after an offline snapshot or a revert:** take a `VMSnapshot` of one VM with
     the VM powered off, revert that VM to it, then take a snapshot of, clone and delete
@@ -2147,15 +2166,46 @@ V10 (fixed in rc8, see [Changes since v0.4.0-rc7](#changes-since-v040-rc7)).
   over S3 landed on the bridge, and the guest was reachable with its data. Found, fixed in
   #438: V9 (`status.ips` listed loopback and link-local addresses) and V10 (NAT guests
   without the agent never showed an address).
-- **Not run on rc8 yet:** everything new in rc8 (the disk check over nested backing
-  stores and the "permission denied" answer, the snapshot-create backoff, the revert hint,
-  the `status.ips` filter and the NAT lease). It will be validated on this candidate.
+- **Not run in the rc7 validation:** everything new in rc8 (the disk check over nested
+  backing stores and the "permission denied" answer, the snapshot-create backoff, the
+  revert hint, the `status.ips` filter and the NAT lease). It was validated on rc8, below.
+
+**Validated in the lab since rc8**, on v0.4.0-rc8 (the released images): Kubernetes 1.34,
+libvirt 10.0 as a single host and as a two-host clustered Provider sharing an NFS pool,
+and a Proxmox VE node (for the `status.ips` check only). This run found V11 (fixed in rc9, see [Changes since
+v0.4.0-rc8](#changes-since-v040-rc8)).
+
+- **V7, the disk check (#437).** An offline snapshot and a revert of one VM left a fresh
+  `0600` root-owned revert overlay and a three-level nested backing store in its
+  definition. Another VM's live snapshot, its snapshot delete, a clustered full clone and
+  the clone VM's delete all succeeded (all were refused on rc7).
+- **V9 and V10, `status.ips` (#438).** NAT guests without the guest agent showed their
+  DHCP lease. Bridged guests with the agent showed only their lab-network address (no
+  loopback, no link-local). A bridged guest without the agent showed its address through
+  the host's ARP entry. Proxmox guests without the agent showed none, as documented.
+- **The libvirt snapshot revert again, on rc8** (clustered and single-host): the guest
+  file written after the snapshot was gone and the earlier one kept, the record stayed at
+  one attempt, and no stray file was left in the seed directory.
+- **The upgrade from rc7 to rc8.** The rollout check found two VMs still carrying a
+  completed `spec.snapshot.revertToRef` from earlier tests; they were cleared before the
+  manager rolled, as the upgrade order asks.
+- **V8 was not exercised:** no provider answered "not performed" during the run. It is
+  covered by unit tests only.
+- **Found, fixed in rc9:** V11. Deleting a disk-only snapshot whose overlay held a later
+  memory snapshot made libvirt merge the overlay away, and the memory snapshot's data was
+  lost silently. Its `VMSnapshot` then never completed its delete, because libvirt refused
+  to delete the stale snapshot ("... is not the same as disk image currently used by
+  VM"). Fixed in #440.
+- **Not run on rc9 yet:** everything new in rc9 (the refusal, the metadata-only cleanup
+  of a lost memory snapshot, the read that fails closed, and how the manager shows a
+  refused snapshot delete). It will be validated on this candidate.
 
 **Not run:** Proxmox adoption; a reused VMID and the ADR-0012 name rule (which needs a
 PVE cluster); a Proxmox `Reconfigure` (resize); the Proxmox import-stage delete of a
-failed migration; a PVE cluster of more than one node; everything new in rc8 (the last
-item of "Validated in the lab since rc7"); an SELinux libvirt host; and the paths named
-above that need a fault to trigger.
+failed migration; a PVE cluster of more than one node; everything new in rc9 (the last
+item of "Validated in the lab since rc8"); the V8 retry of a snapshot create the provider
+did not perform (unit tests only); an SELinux libvirt host; and the paths named above that
+need a fault to trigger.
 
 ## Breaking changes
 
