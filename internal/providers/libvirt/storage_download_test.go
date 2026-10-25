@@ -20,8 +20,8 @@ import (
 	"bytes"
 	"context"
 	"log"
-	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -44,8 +44,9 @@ var legacyURLSecrets = []string{"joe", "p4ssw0rd", "supersecret", "t0ken", "X-Am
 func captureStdLog(t *testing.T) *bytes.Buffer {
 	t.Helper()
 	var buf bytes.Buffer
+	prev := log.Writer()
 	log.SetOutput(&buf)
-	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+	t.Cleanup(func() { log.SetOutput(prev) })
 	return &buf
 }
 
@@ -77,7 +78,8 @@ func TestCreate_URLImageNeverOnCommandLine(t *testing.T) {
 	curlArgs := c.log("curl")
 	assert.True(t, strings.HasPrefix(curlArgs, "-q -K - --globoff "), "curl argv: %s", curlArgs)
 	assert.Contains(t, curlArgs, "--proto =http,https,ftp --proto-redir =http,https,ftp")
-	assert.Contains(t, curlArgs, "--connect-timeout 30 --max-time 1800 --max-filesize 274877906944")
+	assert.Contains(t, curlArgs, "--connect-timeout 30 --max-time 1800 --max-filesize "+
+		strconv.FormatInt(imageMaxDownloadBytes(), 10))
 	assert.Equal(t, "globoff\n"+`url = "`+secretImageURL+`"`+"\n", c.log("curlrc"), "the URL reaches curl on stdin only")
 	assert.Empty(t, c.log("wget"), "wget is never run")
 	for _, tool := range []string{"curl", "virsh", "qemu-img", "sudo", "genisoimage"} {
@@ -122,9 +124,10 @@ func TestCreate_URLImageDownloadFailureLeaksNothing(t *testing.T) {
 }
 
 // TestDownloadCloudImage_RefusesUnsafeURL: a URL curl's config syntax could
-// be broken out of (control characters, a quote is escaped) or that is not
-// http(s)/ftp is refused before anything runs on the host, without echoing
-// it.
+// be broken out of (a control character such as a newline; quotes and
+// backslashes are escaped instead, TestCurlURLConfig), with a space, or that
+// is not http(s)/ftp is refused before anything runs on the host, without
+// echoing it.
 func TestDownloadCloudImage_RefusesUnsafeURL(t *testing.T) {
 	h := newFakeHost(t)
 	sp := NewStorageProvider(h.host("h1"))
@@ -184,19 +187,64 @@ func TestCreate_EveryURLIsDownloadedOrRefused(t *testing.T) {
 	})
 }
 
-// TestDownloadMaxTime: curl's total time is the timeout, or the time left
-// until the call's deadline when that is shorter (closing the SSH session
-// does not stop a remote command), and at least one second.
+// TestDownloadMaxTime: curl's total time is the timeout, or, when the call's
+// deadline comes first, the time left until it less a reserve for the work
+// after the download (a tenth of the time left, at most a minute) — closing
+// the SSH session does not stop a remote command. With less than a second
+// left nothing may run.
 func TestDownloadMaxTime(t *testing.T) {
 	now := time.Now()
-	assert.Equal(t, 30*time.Minute, downloadMaxTime(context.Background(), 30*time.Minute, now))
+	limit, ok := downloadMaxTime(context.Background(), 30*time.Minute, now)
+	assert.True(t, ok)
+	assert.Equal(t, 30*time.Minute, limit)
 
+	for left, want := range map[time.Duration]time.Duration{
+		5 * time.Minute:  4*time.Minute + 30*time.Second, // the manager's 5-minute Create/ImagePrepare deadline
+		20 * time.Minute: 19 * time.Minute,               // at most a minute reserved
+		20 * time.Second: 18 * time.Second,               // a tenth reserved
+		0:                0,                              // nothing left: not run
+		time.Second:      0,                              // below the floor once reserved: not run
+		-time.Minute:     0,                              // already past: not run
+	} {
+		ctx, cancel := context.WithDeadline(context.Background(), now.Add(left))
+		limit, ok := downloadMaxTime(ctx, 30*time.Minute, now)
+		assert.Equal(t, want, limit, "deadline in %s", left)
+		assert.Equal(t, want != 0, ok, "deadline in %s", left)
+		cancel()
+	}
 	ctx, cancel := context.WithDeadline(context.Background(), now.Add(5*time.Minute))
 	defer cancel()
-	assert.Equal(t, 5*time.Minute, downloadMaxTime(ctx, 30*time.Minute, now))
-	assert.Equal(t, 2*time.Minute, downloadMaxTime(ctx, 2*time.Minute, now))
+	limit, ok = downloadMaxTime(ctx, 2*time.Minute, now)
+	assert.True(t, ok)
+	assert.Equal(t, 2*time.Minute, limit, "a shorter timeout stands")
+}
 
-	past, cancelPast := context.WithDeadline(context.Background(), now.Add(-time.Minute))
-	defer cancelPast()
-	assert.Equal(t, time.Second, downloadMaxTime(past, 30*time.Minute, now))
+// TestDownloadToHostFile_NoTimeLeftRunsNothing: a call whose deadline leaves
+// no time for the download runs nothing on the host and is retryable.
+func TestDownloadToHostFile_NoTimeLeftRunsNothing(t *testing.T) {
+	h := newFakeHost(t)
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(500*time.Millisecond))
+	defer cancel()
+	err := downloadToHostFile(ctx, h.host("h1"), createDownloadLogPrefix, secretImageURL, filepath.Join(t.TempDir(), "dl"), time.Hour)
+	require.Error(t, err)
+	assert.True(t, contracts.IsRetryable(err), "%v", err)
+	assertNoURLSecret(t, "the error", err.Error())
+	assert.Empty(t, h.log("curl"), "nothing ran")
+}
+
+// TestCreate_CurlMissingIsNamed: when curl is not installed on the libvirt
+// host (the shell's exit 127), the provider log says so; the error is the
+// generic retryable one and leaks nothing.
+func TestCreate_CurlMissingIsNamed(t *testing.T) {
+	c := newCreateHost(t)
+	logs := captureStdLog(t)
+	plantFile(t, filepath.Join(c.root, "download.fail"), "127\n")
+	req := c.createReq(ownerTeamA, "")
+	req.Image = contracts.VMImage{URL: secretImageURL}
+	_, err := c.p.Create(context.Background(), req)
+	require.Error(t, err)
+	assert.True(t, contracts.IsRetryable(err), "%v", err)
+	assert.Contains(t, logs.String(), "curl not found on the libvirt host")
+	assertNoURLSecret(t, "the error", err.Error())
+	assertNoURLSecret(t, "the provider log", logs.String())
 }

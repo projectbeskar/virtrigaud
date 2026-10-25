@@ -775,17 +775,34 @@ func (ip *imagePreparer) download(ctx context.Context, dir, rawURL string, timeo
 	return dl, nil
 }
 
-// minDownloadMaxTime is the shortest total time a download is given.
-const minDownloadMaxTime = time.Second
+const (
+	// minDownloadMaxTime is the shortest total time a download is given: a
+	// call with less left runs no download at all.
+	minDownloadMaxTime = time.Second
+	// downloadDeadlineReserve is the most of the call's remaining time a
+	// download leaves for the work after it (inspect, convert, resize,
+	// publish); at most a tenth of the remaining time is reserved.
+	downloadDeadlineReserve = time.Minute
+)
+
+// errNoTimeToDownload is the retryable error of a download whose call has too
+// little time left to run it.
+const errNoTimeToDownload = "the call's deadline leaves no time for the image download; it will be retried"
 
 // downloadMaxTime is a download's total time limit (curl --max-time): timeout,
-// or the time left until ctx's deadline at now when that is shorter, and never
-// less than minDownloadMaxTime.
-func downloadMaxTime(ctx context.Context, timeout time.Duration, now time.Time) time.Duration {
-	if deadline, ok := ctx.Deadline(); ok {
-		timeout = min(timeout, deadline.Sub(now))
+// or, when ctx's deadline comes first, the time left until it at now less a
+// reserve for the work after the download (a tenth of the time left, at most
+// downloadDeadlineReserve). ok is false when that is below
+// minDownloadMaxTime: the download must not run.
+func downloadMaxTime(ctx context.Context, timeout time.Duration, now time.Time) (limit time.Duration, ok bool) {
+	if deadline, has := ctx.Deadline(); has {
+		left := deadline.Sub(now)
+		timeout = min(timeout, left-min(downloadDeadlineReserve, left/10))
 	}
-	return max(timeout, minDownloadMaxTime)
+	if timeout < minDownloadMaxTime {
+		return 0, false
+	}
+	return timeout, true
 }
 
 // imagePrepareLogPrefix prefixes ImagePrepare's download log lines.
@@ -801,16 +818,23 @@ const imagePrepareLogPrefix = "ImagePrepare"
 // limited to http, https and ftp (redirects included), and bounded in connect
 // time, total time (downloadMaxTime: timeout, or less when ctx's deadline
 // comes first, so that curl never outlives the call — closing the SSH
-// session does not stop a remote command) and size (imageMaxDownloadBytes).
+// session does not stop a remote command — and the call has time left for
+// the work after the download; a call with too little time left runs nothing
+// and returns a retryable error) and size (imageMaxDownloadBytes).
 // A failure is
 // classifyDownloadFailure's requester-facing error, which never carries the
 // URL; logPrefix names the caller in the log lines, whose URL is redacted. The
 // caller removes dest on failure.
 func downloadToHostFile(ctx context.Context, h imageHost, logPrefix, rawURL, dest string, timeout time.Duration) error {
+	maxTime, ok := downloadMaxTime(ctx, timeout, time.Now())
+	if !ok {
+		log.Printf("WARN %s: download of %s not started: the call's deadline leaves no time for it", logPrefix, redactURL(rawURL))
+		return contracts.NewRetryableError(errNoTimeToDownload, nil)
+	}
 	res, err := h.runHostStdin(ctx, curlURLConfig(rawURL), "curl", "-q", "-K", "-", "--globoff", "-fsSL",
 		"--proto", curlAllowedProtocols, "--proto-redir", curlAllowedProtocols,
 		"--connect-timeout", curlConnectTimeoutSeconds,
-		"--max-time", strconv.FormatInt(int64(downloadMaxTime(ctx, timeout, time.Now())/time.Second), 10),
+		"--max-time", strconv.FormatInt(int64(maxTime/time.Second), 10),
 		"--max-filesize", strconv.FormatInt(imageMaxDownloadBytes(), 10),
 		"-w", "%{http_code}", "-o", dest)
 	if err != nil {
@@ -854,6 +878,9 @@ func parseCurlHTTPCode(stdout string) (code int, single bool) {
 // curl exit codes classifyDownloadFailure distinguishes.
 const (
 	curlExitHTTPError = 22
+	// shellExitCommandNotFound is the shell's exit status for a command it
+	// cannot find (curl not installed on the host).
+	shellExitCommandNotFound = 127
 )
 
 // permanentCurlExits are curl exit codes that retrying the same request cannot
@@ -934,6 +961,11 @@ const downloadRetryMessage = "the image download failed on the libvirt host and 
 func classifyDownloadFailure(logPrefix, rawURL string, res *VirshResult) error {
 	if res == nil || res.ExitCode < 0 {
 		log.Printf("WARN %s: download of %s: the libvirt host could not be reached", logPrefix, redactURL(rawURL))
+		return contracts.NewRetryableError(downloadRetryMessage, nil)
+	}
+	if res.ExitCode == shellExitCommandNotFound {
+		log.Printf("WARN %s: download of %s failed: curl not found on the libvirt host (install curl there)",
+			logPrefix, redactURL(rawURL))
 		return contracts.NewRetryableError(downloadRetryMessage, nil)
 	}
 	httpStatus, single := parseCurlHTTPCode(res.Stdout)
