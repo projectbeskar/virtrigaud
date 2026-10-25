@@ -540,4 +540,3 @@ func buildImportedDiskSetCommand(vmid int, importedVolume string) string {
 	}
 	return strings.Join(parts, " ")
 }
-

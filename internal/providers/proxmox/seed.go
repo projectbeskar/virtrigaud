@@ -22,7 +22,6 @@ import (
 	"context"
 	stderrors "errors"
 	"fmt"
-	"net/url"
 	"os/exec"
 	"regexp"
 	"sort"
@@ -71,10 +70,14 @@ import (
 // A seed is never combined with PVE's cloud-init settings: the provider sets
 // no ciuser, sshkeys, ipconfigN or nameserver for such a VM.
 //
-// Lifecycle. `qm destroy` frees a VM's disks and its cloud-init drive but
-// never a CD-ROM's volume, whoever owns it. Delete and every Create rollback
-// therefore first re-attach the VM's own seed volume as a plain drive
-// (releaseSeedDrives), which `qm destroy` then frees with the VM.
+// Lifecycle. The seed volume is VM-owned (vm-<vmid>-disk-N). `qm destroy`
+// frees the volumes a VM's config references as disks, unused disks or its
+// cloud-init drive, but skips CD-ROMs, so the seed is freed by the
+// destroy-unreferenced-disks=1 that Delete and every Create rollback pass
+// (pveapi DeleteVM): it frees every volume of the VMID on the enabled
+// storages. A clone's copy of its source's CD-ROM line references a volume
+// the clone does not own, which neither destroy touches (cloneSeed replaces
+// it).
 
 const (
 	// seedStageDir is the root-only directory on the PVE node the seed ISO is
@@ -557,33 +560,5 @@ func (p *Provider) attachSeed(ctx context.Context, node string, vmid int, storag
 		return fmt.Errorf("build and attach the cloud-init seed of VM %d: %w", vmid, err)
 	}
 	p.logger.Info("Attached the cloud-init seed", "vmid", vmid, "slot", slot, "volume", strings.TrimSpace(stdout))
-	return nil
-}
-
-// releaseSeedDrives prepares VM vmid on node, whose config is cfg, for `qm
-// destroy`, which frees a VM's disks but never a CD-ROM's volume: each seed
-// CD-ROM whose volume the VM owns is re-attached in its slot as a plain drive
-// (one config update), so the destroy frees it with the VM. Seeds the VM
-// only references (another VM's) are left alone. Nothing is done for a VM
-// without a seed of its own.
-func (p *Provider) releaseSeedDrives(ctx context.Context, node string, vmid int, cfg map[string]interface{}) error {
-	own, _ := seedSlots(cfg, vmid)
-	if len(own) == 0 {
-		return nil
-	}
-	values := url.Values{}
-	for _, slot := range own {
-		value, _ := cfg[slot].(string)
-		volume, _, _ := strings.Cut(strings.TrimSpace(value), ",")
-		values.Set(slot, volume)
-	}
-	p.logger.Info("Releasing the VM's cloud-init seed volume so the destroy removes it", "vmid", vmid, "slots", own)
-	task, err := p.client.ReconfigureVMRaw(ctx, node, vmid, values)
-	if err != nil {
-		return fmt.Errorf("release the cloud-init seed of VM %d: %w", vmid, err)
-	}
-	if err := p.client.WaitForTask(ctx, node, task); err != nil {
-		return fmt.Errorf("release the cloud-init seed of VM %d: %w", vmid, err)
-	}
 	return nil
 }

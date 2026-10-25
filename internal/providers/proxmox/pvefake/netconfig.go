@@ -238,3 +238,41 @@ func cloneNetworkMACs(config map[string]string, vmid int) {
 		config[m[0]] = strings.Join(parts, ",")
 	}
 }
+
+// SetAssignCreateMACs makes a create give every netN that names no MAC one
+// (CloneMAC's, for the new VMID), as PVE does; off by default, so a test can
+// read a NIC back as it was sent. Safe for concurrent use.
+func (s *Server) SetAssignCreateMACs(on bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.assignCreateMACs = on
+}
+
+// assignNetworkMACs gives each netN of config that names no MAC the MAC
+// CloneMAC draws for VM vmid, written as "<model>=<MAC>" as PVE writes it.
+func assignNetworkMACs(config map[string]string, vmid int) {
+	for key, value := range config {
+		m := netKeyPattern.FindStringSubmatch(key)
+		if m == nil {
+			continue
+		}
+		parts := strings.Split(value, ",")
+		hasMAC := false
+		for _, part := range parts {
+			name, _, hasVal := strings.Cut(strings.TrimSpace(part), "=")
+			if (nicModels[name] && hasVal) || name == "macaddr" {
+				hasMAC = true
+			}
+		}
+		if hasMAC {
+			continue
+		}
+		index, _ := strconv.Atoi(m[1])
+		for i, part := range parts {
+			if name := strings.TrimSpace(part); nicModels[name] {
+				parts[i] = name + "=" + CloneMAC(vmid, index)
+			}
+		}
+		config[key] = strings.Join(parts, ",")
+	}
+}

@@ -78,6 +78,13 @@ type Server struct {
 	nodeNames []string
 	// taskSeq numbers the UPIDs createTaskAs issues (guarded by mu).
 	taskSeq uint32
+	// volumes are the storage volumes the fake tracks ("<storage>:<volume>"
+	// -> owning VMID): those AttachSeedVolume imported (seed.go's
+	// `qm importdisk`), freed the way PVE frees them (volumes.go).
+	volumes map[string]int
+	// assignCreateMACs gives the NICs of a created VM MACs
+	// (SetAssignCreateMACs).
+	assignCreateMACs bool
 }
 
 // SetEmptyResourceNames makes /cluster/resources list a guest whose config
@@ -421,6 +428,7 @@ func NewServer() *Server {
 		failingTasks: make(map[string]bool),
 		hidden:       make(map[int]bool),
 		offline:      make(map[string]bool),
+		volumes:      make(map[string]int),
 	}
 
 	s.setupRoutes()
@@ -663,6 +671,9 @@ func (s *Server) handleCreateVM(w http.ResponseWriter, r *http.Request) {
 	}
 	for slot, storage := range cloudInitRequest(r.Form) {
 		config[slot] = s.cloudInitVolume(vmid, storage)
+	}
+	if s.assignCreateMACs {
+		assignNetworkMACs(config, vmid)
 	}
 	if len(config) > 0 {
 		final.Config = config
@@ -934,7 +945,8 @@ func (s *Server) handleDeleteVM(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Delete VM
+	// Delete VM, freeing the tracked volumes the destroy frees (volumes.go).
+	s.freeOnDestroy(vm.Config, vmid, r.URL.Query().Get("destroy-unreferenced-disks") == "1")
 	delete(s.vms, vmid)
 
 	// Create async task
@@ -1114,6 +1126,12 @@ func (s *Server) cloneConfig(source map[string]string, newID int, storage string
 		}
 		m := ownedVolumePrefix.FindStringSubmatch(volume)
 		if m == nil {
+			continue
+		}
+		// A CD-ROM other than a cloud-init drive is copied as it is, even
+		// when its volume is a VM's disk volume (a seed): qemu-server's clone
+		// copies CD-ROM lines without cloning their volume.
+		if strings.Contains(","+tail+",", ",media=cdrom,") && !strings.HasPrefix(ownedVolumePrefix.ReplaceAllString(volume, ""), "cloudinit") {
 			continue
 		}
 		if storage != "" && full {
@@ -1705,6 +1723,8 @@ func (s *Server) handleReconfigureVM(w http.ResponseWriter, r *http.Request) {
 		}
 		vm.Config[slot] = s.cloudInitVolume(vmid, storage)
 	}
+	// Other drive keys, and drives or unused disks the update deletes.
+	s.applyDriveUpdate(vm, r.Form, asked)
 
 	// The network keys (netN, ipconfigN, nameserver), so a test can read what
 	// the provider wrote.

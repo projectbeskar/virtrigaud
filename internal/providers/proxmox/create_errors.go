@@ -292,11 +292,6 @@ func (p *Provider) rollbackCreatedVM(ctx context.Context, node string, vmid int,
 	if vm.Status != pveStatusStopped {
 		return fmt.Errorf("VM %d is %s, not stopped", vmid, vm.Status)
 	}
-	// The VM's own cloud-init seed CD-ROM, which `qm destroy` would leave on
-	// the storage (seed.go).
-	if err := p.releaseSeedDrives(ctx, node, vmid, cfg); err != nil {
-		return err
-	}
 	task, err := p.client.DeleteVM(ctx, node, vmid, true)
 	if stderrors.Is(err, pveapi.ErrVMNotFound) {
 		return p.confirmNothingRemains(ctx, vmid, true)

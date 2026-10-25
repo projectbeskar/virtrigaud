@@ -583,21 +583,11 @@ func (p *Provider) Delete(ctx context.Context, req *providerv1.DeleteRequest) (*
 		}
 	}
 
-	// `qm destroy` never frees a CD-ROM's volume: the VM's own cloud-init
-	// seed (seed.go) is re-attached as a plain drive first, so the destroy
-	// removes it (a leaked seed would keep the user-data on the storage). A
-	// VM that is already gone has nothing to release; any other failure
-	// keeps the VM (retried).
-	if cfg, cfgErr := p.client.GetVMConfig(ctx, node, vmid); cfgErr == nil {
-		if err := p.releaseSeedDrives(ctx, node, vmid, cfg); err != nil {
-			return nil, errors.NewInternal("failed to release the VM's cloud-init seed before delete", err)
-		}
-	} else if !stderrors.Is(cfgErr, pveapi.ErrVMNotFound) {
-		return nil, errors.NewUnavailable("PVE VM config before delete", cfgErr)
-	}
-
 	// Destroy with purge=1 so the config, disk volumes, and any backup/replication
-	// references are reclaimed (a bare DELETE leaves disks behind). Wait for the
+	// references are reclaimed (a bare DELETE leaves disks behind), and with
+	// destroy-unreferenced-disks=1 (pveapi DeleteVM), which also frees the VM's
+	// cloud-init seed: `qm destroy` never frees a CD-ROM's volume by itself
+	// (seed.go). Wait for the
 	// destroy task so a successful Delete RPC means the VM is actually gone — the
 	// controller removes the finalizer on success, so returning success while the
 	// VM still exists would orphan it.
