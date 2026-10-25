@@ -49,12 +49,12 @@ import (
 // returns replace them as well (redactForLog).
 //
 // S3 credentials never reach a host command line: the s3 client runs in the
-// provider and streams through stdin, and ImagePrepare's download URL reaches
-// curl on stdin as well (image.go). The legacy create-from-URL path
-// (storage.go, DownloadCloudImage) still passes its URL to wget as an
-// argument: it is redacted in the log, but visible in the host's process
-// list. Only log text is redacted; the VirshError fields that classify a
-// failure (ExitCode, Stderr) keep the original text.
+// provider and streams through stdin, and an image download URL — of
+// ImagePrepare and of Create's legacy create-from-URL path (storage.go,
+// DownloadCloudImage) alike — reaches curl on stdin as well
+// (downloadToHostFile, image.go), so it is in neither the log nor the host's
+// process list. Only log text is redacted; the VirshError fields that classify
+// a failure (ExitCode, Stderr) keep the original text.
 
 // redactedURLFmt renders a redacted URL: its scheme only, without "://", so
 // that no redacted text reads as a location.

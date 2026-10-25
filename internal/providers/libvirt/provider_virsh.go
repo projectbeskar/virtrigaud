@@ -2220,7 +2220,7 @@ func (p *Provider) extractImageSpec(req contracts.CreateRequest) string {
 
 	// Priority 2: Use URL from VMImage (for remote images)
 	if req.Image.URL != "" {
-		log.Printf("INFO Using image URL from VMImage: %q", req.Image.URL)
+		log.Printf("INFO Using image URL from VMImage: %q", redactURL(req.Image.URL))
 		return req.Image.URL
 	}
 

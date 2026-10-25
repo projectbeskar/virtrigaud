@@ -757,12 +757,10 @@ func curlURLConfig(rawURL string) []byte {
 }
 
 // download fetches rawURL into a new private staging file in dir on the host
-// and returns its path; on failure nothing is left behind. The URL reaches
-// curl on stdin (-K -), never on the command line or in a file, so it is
-// neither logged nor visible in the host's process list nor left at rest;
-// -q keeps the SSH user's ~/.curlrc out. The transfer is a single one (URL
-// globbing off), limited to http, https and ftp (redirects included), and
-// bounded in connect time, total time (spec.prepare.timeout) and size.
+// and returns its path; on failure nothing is left behind. The download is
+// downloadToHostFile's: the URL never on a command line, one transfer, http,
+// https and ftp only, bounded in connect time, total time
+// (spec.prepare.timeout) and size.
 func (ip *imagePreparer) download(ctx context.Context, dir, rawURL string, timeout time.Duration) (string, error) {
 	dl, err := ip.stagingTemp(ctx, dir, downloadStagingSuffix)
 	if err != nil {
@@ -770,23 +768,44 @@ func (ip *imagePreparer) download(ctx context.Context, dir, rawURL string, timeo
 	}
 
 	log.Printf("INFO ImagePrepare: downloading %s to %s on the libvirt host", redactURL(rawURL), dl)
-	res, err := ip.host.runHostStdin(ctx, curlURLConfig(rawURL), "curl", "-q", "-K", "-", "--globoff", "-fsSL",
+	if err := downloadToHostFile(ctx, ip.host, imagePrepareLogPrefix, rawURL, dl, timeout); err != nil {
+		removeHostPath(ctx, ip.host, dl, false)
+		return "", err
+	}
+	return dl, nil
+}
+
+// imagePrepareLogPrefix prefixes ImagePrepare's download log lines.
+const imagePrepareLogPrefix = "ImagePrepare"
+
+// downloadToHostFile fetches rawURL (validated by validateImageSourceURL) into
+// the existing host file dest with curl on host h. It is the only way the
+// libvirt provider downloads an image (ImagePrepare and Create's legacy
+// create-from-URL path). The URL reaches curl on stdin (-K -), never on the
+// command line or in a file, so it is neither logged nor visible in the
+// host's process list (or its audit log) nor left at rest; -q keeps the SSH
+// user's ~/.curlrc out. The transfer is a single one (URL globbing off),
+// limited to http, https and ftp (redirects included), and bounded in connect
+// time, total time (timeout) and size (imageMaxDownloadBytes). A failure is
+// classifyDownloadFailure's requester-facing error, which never carries the
+// URL; logPrefix names the caller in the log lines, whose URL is redacted. The
+// caller removes dest on failure.
+func downloadToHostFile(ctx context.Context, h imageHost, logPrefix, rawURL, dest string, timeout time.Duration) error {
+	res, err := h.runHostStdin(ctx, curlURLConfig(rawURL), "curl", "-q", "-K", "-", "--globoff", "-fsSL",
 		"--proto", curlAllowedProtocols, "--proto-redir", curlAllowedProtocols,
 		"--connect-timeout", curlConnectTimeoutSeconds,
 		"--max-time", strconv.FormatInt(int64(timeout/time.Second), 10),
 		"--max-filesize", strconv.FormatInt(imageMaxDownloadBytes(), 10),
-		"-w", "%{http_code}", "-o", dl)
+		"-w", "%{http_code}", "-o", dest)
 	if err != nil {
-		removeHostPath(ctx, ip.host, dl, false)
-		return "", classifyDownloadFailure(rawURL, res)
+		return classifyDownloadFailure(logPrefix, rawURL, res)
 	}
 	if _, single := parseCurlHTTPCode(res.Stdout); !single {
-		removeHostPath(ctx, ip.host, dl, false)
-		log.Printf("WARN ImagePrepare: download of %s did not report exactly one transfer (write-out %q); refusing it",
-			redactURL(rawURL), res.Stdout)
-		return "", contracts.NewInvalidSpecError(errNotOneTransfer, nil)
+		log.Printf("WARN %s: download of %s did not report exactly one transfer (write-out %q); refusing it",
+			logPrefix, redactURL(rawURL), res.Stdout)
+		return contracts.NewInvalidSpecError(errNotOneTransfer, nil)
 	}
-	return dl, nil
+	return nil
 }
 
 // errNotOneTransfer is the requester-facing error of a URL that resolved to
@@ -894,15 +913,16 @@ const downloadRetryMessage = "the image download failed on the libvirt host and 
 // failed, HTTP 5xx, DNS/connect/timeout/transfer errors) — an
 // imageSourceFailure when the source caused it (isSourceFailure). The URL, the
 // exit code and the HTTP status never appear in the retryable error; the log
-// carries them, the URL redacted.
-func classifyDownloadFailure(rawURL string, res *VirshResult) error {
+// (its lines prefixed with logPrefix) carries them, the URL redacted, and
+// curl's error text with any URL in it redacted (redactCommandText).
+func classifyDownloadFailure(logPrefix, rawURL string, res *VirshResult) error {
 	if res == nil || res.ExitCode < 0 {
-		log.Printf("WARN ImagePrepare: download of %s: the libvirt host could not be reached", redactURL(rawURL))
+		log.Printf("WARN %s: download of %s: the libvirt host could not be reached", logPrefix, redactURL(rawURL))
 		return contracts.NewRetryableError(downloadRetryMessage, nil)
 	}
 	httpStatus, single := parseCurlHTTPCode(res.Stdout)
-	log.Printf("WARN ImagePrepare: download of %s failed on the libvirt host (curl exit %d, write-out %q): %s",
-		redactURL(rawURL), res.ExitCode, strings.TrimSpace(res.Stdout), strings.TrimSpace(res.Stderr))
+	log.Printf("WARN %s: download of %s failed on the libvirt host (curl exit %d, write-out %q): %s",
+		logPrefix, redactURL(rawURL), res.ExitCode, strings.TrimSpace(res.Stdout), redactCommandText(strings.TrimSpace(res.Stderr)))
 	if !single {
 		return contracts.NewInvalidSpecError(errNotOneTransfer, nil)
 	}

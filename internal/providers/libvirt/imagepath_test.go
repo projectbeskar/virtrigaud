@@ -381,17 +381,30 @@ printf '%s\n' "$*" >> "$FAKE_HOST_DIR/sudo.log"
 exit 0
 `
 
-// fakeDownloadScript stands in for curl (-fsSL URL -o DST) and wget (-O DST
-// URL): it writes a payload to DST and, when $FAKE_HOST_DIR/download.info.json
-// exists, installs it as DST's qemu-img info sidecar.
+// fakeDownloadScript stands in for curl (-K - ... -o DST, the config on stdin)
+// and wget (-O DST URL): it logs its argv (and the config it reads from stdin
+// to curlrc.log), then writes a payload to DST and, when
+// $FAKE_HOST_DIR/download.info.json exists, installs it as DST's qemu-img info
+// sidecar. With $FAKE_HOST_DIR/download.fail ("<exit code>") it fails instead,
+// echoing the config it read on stderr (as a curl error naming the URL
+// would).
 const fakeDownloadScript = `#!/bin/sh
 printf '%s\n' "$*" >> "$FAKE_HOST_DIR/$(basename "$0").log"
 dst=""
+cfg=""
 prev=""
 for a in "$@"; do
   if [ "$prev" = "-o" ] || [ "$prev" = "-O" ]; then dst="$a"; fi
+  if [ "$prev" = "-K" ]; then cfg="$a"; fi
   prev="$a"
 done
+conf=""
+if [ "$cfg" = "-" ]; then conf="$(cat)"; printf '%s\n' "$conf" >> "$FAKE_HOST_DIR/curlrc.log"; fi
+if [ -f "$FAKE_HOST_DIR/download.fail" ]; then
+  read -r rc < "$FAKE_HOST_DIR/download.fail"
+  echo "curl: ($rc) simulated failure: $conf" >&2
+  exit "$rc"
+fi
 printf 'payload\n' > "$dst"
 if [ -f "$FAKE_HOST_DIR/download.info.json" ]; then cp "$FAKE_HOST_DIR/download.info.json" "$dst.info.json"; fi
 `
@@ -1145,12 +1158,26 @@ func TestDownloadCloudImage_RejectsBackingFile(t *testing.T) {
 	assert.NotContains(t, h.log("qemu-img"), "convert")
 
 	// The download went to a per-download mktemp file, which is removed.
-	dl := strings.Fields(strings.TrimSpace(h.log("wget")))
-	require.GreaterOrEqual(t, len(dl), 2)
-	staged := dl[1] // wget -O <staged> <url>
+	staged := curlDestination(t, h.log("curl"))
 	assert.Equal(t, sp.stagingDir, filepath.Dir(staged))
 	assert.True(t, strings.HasPrefix(filepath.Base(staged), volume+"-temp.img."), "staged as %s", staged)
 	assert.Len(t, filepath.Base(staged), len(volume+"-temp.img.")+len(mktempTemplateSuffix))
 	_, statErr := os.Stat(staged)
 	assert.True(t, os.IsNotExist(statErr), "the rejected download is removed")
+}
+
+// curlDestination returns the -o destination of the one curl call in
+// curlLog (the fake's argv log).
+func curlDestination(t *testing.T, curlLog string) string {
+	t.Helper()
+	lines := strings.Split(strings.TrimSpace(curlLog), "\n")
+	require.Len(t, lines, 1, "exactly one download: %q", curlLog)
+	args := strings.Fields(lines[0])
+	for i, a := range args {
+		if a == "-o" && i+1 < len(args) {
+			return args[i+1]
+		}
+	}
+	require.Failf(t, "no -o in the curl call", "%q", lines[0])
+	return ""
 }

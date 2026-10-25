@@ -366,9 +366,7 @@ func TestCreate_URLImageStagesPerDownload(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "team-a.web", resp.ID)
 
-	dl := strings.Fields(strings.TrimSpace(c.log("wget")))
-	require.GreaterOrEqual(t, len(dl), 2)
-	staged := dl[1] // wget -O <staged> <url>
+	staged := curlDestination(t, c.log("curl"))
 	assert.Equal(t, c.staging, filepath.Dir(staged))
 	assert.True(t, strings.HasPrefix(filepath.Base(staged), "team-a.web-disk-temp.img."), "staged as %s", staged)
 	assert.NoFileExists(t, staged, "the download is removed after the convert")
