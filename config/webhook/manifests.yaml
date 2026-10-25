@@ -64,3 +64,24 @@ webhooks:
     resources:
     - vmclasses
   sideEffects: None
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: webhook-service
+      namespace: system
+      path: /validate-infra-virtrigaud-io-v1beta1-vmclone
+  failurePolicy: Ignore
+  name: vvmclone-customization.kb.io
+  rules:
+  - apiGroups:
+    - infra.virtrigaud.io
+    apiVersions:
+    - v1beta1
+    operations:
+    - CREATE
+    - UPDATE
+    resources:
+    - vmclones
+  sideEffects: None
+  timeoutSeconds: 5

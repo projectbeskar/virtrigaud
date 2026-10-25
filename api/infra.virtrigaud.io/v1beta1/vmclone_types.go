@@ -47,7 +47,11 @@ type VMCloneSpec struct {
 	// by some providers and only for a source VM that carries cloud-init data
 	// (a NoCloud seed on libvirt, cloud-init guestinfo keys on vSphere); see
 	// the field descriptions. Every other field of the block is accepted but
-	// not acted on in this release.
+	// not acted on in this release. The secret values among them
+	// (sysprep.productKey, sysprep.adminPassword.value,
+	// sysprep.joinDomain.password.value, certificates[].data) are never sent
+	// to the provider, but are stored in plaintext in the VMClone: do not put
+	// real credentials there.
 	// +optional
 	Customization *VMCustomization `json:"customization,omitempty"`
 
@@ -338,7 +342,12 @@ type ClonePerformanceOptions struct {
 // VMCustomization defines how the cloned machine is customized. Only
 // hostname, domain and userData.cloudInit.inline are acted on. Every other
 // field is accepted but not acted on in this release; the libvirt and
-// vSphere providers log the customization fields they do not apply.
+// vSphere providers log the customization fields they do not apply. The
+// manager sends the provider only the fields a provider reads or reports:
+// the secret values (sysprep.productKey, sysprep.adminPassword.value,
+// sysprep.joinDomain.password.value, certificates[].data), the commands
+// (sysprep.customCommands, guestCommands[].command and .arguments) and
+// userData.ignition.inline are never sent.
 type VMCustomization struct {
 	// Hostname sets the hostname of the cloned machine, through the clone's
 	// cloud-init identity. It is applied by libvirt (when the source boots
@@ -455,6 +464,10 @@ type SysprepCustomization struct {
 
 	// ProductKey specifies the Windows product key. Accepted but not acted on
 	// in this release.
+	// WARNING: a value set here is stored in plaintext in the VMClone (etcd,
+	// backups, anyone who can read the object). It is accepted but not acted
+	// on in this release and is not sent to the provider; do not put a real
+	// product key here.
 	// +optional
 	ProductKey string `json:"productKey,omitempty"`
 
@@ -481,7 +494,8 @@ type SysprepCustomization struct {
 	JoinDomain *DomainJoinSpec `json:"joinDomain,omitempty"`
 
 	// CustomCommands specifies custom commands to run during sysprep.
-	// Accepted but not acted on in this release.
+	// Accepted but not acted on in this release, and not sent to the
+	// provider.
 	// +optional
 	// +kubebuilder:validation:MaxItems=20
 	CustomCommands []string `json:"customCommands,omitempty"`
@@ -492,6 +506,10 @@ type SysprepCustomization struct {
 type PasswordSpec struct {
 	// Value is the plaintext password (not recommended for production).
 	// Accepted but not acted on in this release.
+	// WARNING: a value set here is stored in plaintext in the VMClone (etcd,
+	// backups, anyone who can read the object). It is accepted but not acted
+	// on in this release and is not sent to the provider; do not put a real
+	// password here.
 	// +optional
 	Value string `json:"value,omitempty"`
 
@@ -535,12 +553,12 @@ type DomainJoinSpec struct {
 // acted on in this release.
 type GuestCommand struct {
 	// Command is the command to execute. Accepted but not acted on in this
-	// release.
+	// release, and not sent to the provider.
 	// +kubebuilder:validation:MaxLength=1000
 	Command string `json:"command"`
 
 	// Arguments contains command arguments. Accepted but not acted on in this
-	// release.
+	// release, and not sent to the provider.
 	// +optional
 	// +kubebuilder:validation:MaxItems=20
 	Arguments []string `json:"arguments,omitempty"`
@@ -581,6 +599,10 @@ type CertificateSpec struct {
 
 	// Data contains the certificate data (PEM format). Accepted but not acted
 	// on in this release.
+	// WARNING: a value set here is stored in plaintext in the VMClone (etcd,
+	// backups, anyone who can read the object). It is accepted but not acted
+	// on in this release and is not sent to the provider; do not put a real
+	// certificate private key here.
 	// +optional
 	Data string `json:"data,omitempty"`
 

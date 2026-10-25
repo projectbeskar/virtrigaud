@@ -1303,19 +1303,6 @@ func (r *VMCloneReconciler) placementJSON(_ context.Context, clone *infrav1beta1
 	return string(data)
 }
 
-// customizeJSON best-effort marshals the spec.customization to JSON, or
-// returns "" when no customization is present or marshal fails.
-func (r *VMCloneReconciler) customizeJSON(_ context.Context, clone *infrav1beta1.VMClone) string {
-	if clone.Spec.Customization == nil {
-		return ""
-	}
-	data, err := json.Marshal(clone.Spec.Customization)
-	if err != nil {
-		return ""
-	}
-	return string(data)
-}
-
 // getProviderInstance resolves a Provider CR to a remote provider implementation.
 func (r *VMCloneReconciler) getProviderInstance(ctx context.Context, provider *infrav1beta1.Provider) (contracts.Provider, error) {
 	if r.RemoteResolver == nil {

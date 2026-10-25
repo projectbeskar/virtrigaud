@@ -560,6 +560,13 @@ func main() {
 			setupLog.Error(err, "unable to create webhook", "webhook", "VirtualMachine/VMClass disk size")
 			os.Exit(1)
 		}
+		// The VMClone customization webhook only warns (a secret value in
+		// spec.customization that is not acted on and is stored in
+		// plaintext); its configuration's failurePolicy is Ignore.
+		if err := infrav1beta1.SetupVMCloneWebhookWithManager(mgr); err != nil {
+			setupLog.Error(err, "unable to create webhook", "webhook", "VMClone customization")
+			os.Exit(1)
+		}
 	} else {
 		setupLog.Info("Webhooks disabled (no --webhook-cert-path set); skipping Provider validating webhook registration")
 	}

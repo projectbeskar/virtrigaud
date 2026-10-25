@@ -74,7 +74,11 @@ spec:
                   by some providers and only for a source VM that carries cloud-init data
                   (a NoCloud seed on libvirt, cloud-init guestinfo keys on vSphere); see
                   the field descriptions. Every other field of the block is accepted but
-                  not acted on in this release.
+                  not acted on in this release. The secret values among them
+                  (sysprep.productKey, sysprep.adminPassword.value,
+                  sysprep.joinDomain.password.value, certificates[].data) are never sent
+                  to the provider, but are stored in plaintext in the VMClone: do not put
+                  real credentials there.
                 properties:
                   certificates:
                     description: |-
@@ -89,6 +93,10 @@ spec:
                           description: |-
                             Data contains the certificate data (PEM format). Accepted but not acted
                             on in this release.
+                            WARNING: a value set here is stored in plaintext in the VMClone (etcd,
+                            backups, anyone who can read the object). It is accepted but not acted
+                            on in this release and is not sent to the provider; do not put a real
+                            certificate private key here.
                           type: string
                         name:
                           description: |-
@@ -150,7 +158,7 @@ spec:
                         arguments:
                           description: |-
                             Arguments contains command arguments. Accepted but not acted on in this
-                            release.
+                            release, and not sent to the provider.
                           items:
                             type: string
                           maxItems: 20
@@ -158,7 +166,7 @@ spec:
                         command:
                           description: |-
                             Command is the command to execute. Accepted but not acted on in this
-                            release.
+                            release, and not sent to the provider.
                           maxLength: 1000
                           type: string
                         runAsUser:
@@ -294,12 +302,17 @@ spec:
                             description: |-
                               Value is the plaintext password (not recommended for production).
                               Accepted but not acted on in this release.
+                              WARNING: a value set here is stored in plaintext in the VMClone (etcd,
+                              backups, anyone who can read the object). It is accepted but not acted
+                              on in this release and is not sent to the provider; do not put a real
+                              password here.
                             type: string
                         type: object
                       customCommands:
                         description: |-
                           CustomCommands specifies custom commands to run during sysprep.
-                          Accepted but not acted on in this release.
+                          Accepted but not acted on in this release, and not sent to the
+                          provider.
                         items:
                           type: string
                         maxItems: 20
@@ -355,6 +368,10 @@ spec:
                                 description: |-
                                   Value is the plaintext password (not recommended for production).
                                   Accepted but not acted on in this release.
+                                  WARNING: a value set here is stored in plaintext in the VMClone (etcd,
+                                  backups, anyone who can read the object). It is accepted but not acted
+                                  on in this release and is not sent to the provider; do not put a real
+                                  password here.
                                 type: string
                             type: object
                           username:
@@ -384,6 +401,10 @@ spec:
                         description: |-
                           ProductKey specifies the Windows product key. Accepted but not acted on
                           in this release.
+                          WARNING: a value set here is stored in plaintext in the VMClone (etcd,
+                          backups, anyone who can read the object). It is accepted but not acted
+                          on in this release and is not sent to the provider; do not put a real
+                          product key here.
                         type: string
                     type: object
                   tags:
