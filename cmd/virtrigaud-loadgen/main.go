@@ -219,7 +219,7 @@ func loadConfig(path string) (LoadGenConfig, error) {
 	if path == "" {
 		return cfg, nil
 	}
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(path) // #nosec G304 -- the config path is the --config flag named by the operator
 	if err != nil {
 		return LoadGenConfig{}, fmt.Errorf("read config %s: %w", path, err)
 	}
@@ -710,7 +710,7 @@ func (lg *LoadGenerator) saveResults(out io.Writer, results []Result, stats *Sta
 }
 
 func (lg *LoadGenerator) saveCSV(filename string, results []Result) {
-	file, err := os.Create(filename)
+	file, err := os.Create(filename) // #nosec G304 -- the file lives in the --output-dir named by the operator
 	if err != nil {
 		log.Printf("Failed to create CSV file: %v", err)
 		return
@@ -745,7 +745,7 @@ func (lg *LoadGenerator) saveCSV(filename string, results []Result) {
 }
 
 func (lg *LoadGenerator) saveSummary(filename string, stats *Statistics) {
-	file, err := os.Create(filename)
+	file, err := os.Create(filename) // #nosec G304 -- the file lives in the --output-dir named by the operator
 	if err != nil {
 		log.Printf("Failed to create summary file: %v", err)
 		return

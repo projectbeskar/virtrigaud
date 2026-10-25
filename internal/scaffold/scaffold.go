@@ -94,6 +94,7 @@ func (s *Scaffolder) createTemplateContext() map[string]interface{} {
 		"Remote":            s.config.Remote,
 		"IsVSphere":         s.config.ProviderType == "vsphere",
 		"IsLibvirt":         s.config.ProviderType == "libvirt",
+		"IsProxmox":         s.config.ProviderType == "proxmox",
 		"IsFirecracker":     s.config.ProviderType == "firecracker",
 		"IsQEMU":            s.config.ProviderType == "qemu",
 		"IsGeneric":         s.config.ProviderType == "generic",
@@ -130,7 +131,7 @@ func (s *Scaffolder) checkoutSettings() (replacePath, goVersion string) {
 // readGoDirective returns the go directive of the go.mod at path, or "" when
 // the file cannot be read or has none.
 func readGoDirective(path string) string {
-	f, err := os.Open(path) //nolint:gosec // path is the VirtRigaud checkout the caller named
+	f, err := os.Open(path) // #nosec G304 -- path is the VirtRigaud checkout the caller named on the command line
 	if err != nil {
 		return ""
 	}
@@ -162,7 +163,7 @@ func (s *Scaffolder) generateFile(relativePath, tmplContent string, ctx map[stri
 	targetPath := filepath.Join(s.config.TargetDir, pathBuf.String())
 
 	// Create directory if it doesn't exist
-	if err := os.MkdirAll(filepath.Dir(targetPath), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(targetPath), 0o755); err != nil { // #nosec G301 -- the scaffolded provider project is a source tree meant to be committed and built by other users and CI; the umask still applies
 		return fmt.Errorf("failed to create directory: %w", err)
 	}
 
@@ -179,7 +180,7 @@ func (s *Scaffolder) generateFile(relativePath, tmplContent string, ctx map[stri
 		return fmt.Errorf("failed to parse template: %w", err)
 	}
 
-	file, err := os.Create(targetPath)
+	file, err := os.Create(targetPath) // #nosec G304 -- targetPath is the output directory joined with a built-in template path; vrtg-provider init validates the provider name in it to lowercase alphanumerics and hyphens
 	if err != nil {
 		return fmt.Errorf("failed to create file: %w", err)
 	}
@@ -474,6 +475,9 @@ until you implement it in internal/provider/provider.go.
 {{if .IsLibvirt}}- ⬜ Libvirt API integration (to implement)
 - ⬜ KVM/QEMU virtualization (to implement)
 - ⬜ Storage pool management (to implement){{end}}
+{{if .IsProxmox}}- ⬜ Proxmox VE API integration (to implement)
+- ⬜ QEMU guest agent support (to implement)
+- ⬜ Storage and node selection (to implement){{end}}
 {{if .Remote}}- ✅ Remote runtime deployment
 - ✅ Kubernetes integration{{end}}
 
@@ -548,6 +552,22 @@ export LIBVIRT_URI=qemu:///system
 '''
 {{end}}
 
+{{if .IsProxmox}}
+### Proxmox VE Configuration
+
+Configure the Proxmox VE API endpoint and an API token via environment variables:
+
+'''bash
+export PVE_ENDPOINT='https://pve.example.com:8006'
+export PVE_TOKEN_ID='user@pve!token-name'
+export PVE_TOKEN_SECRET='<token secret>'
+'''
+
+An API token is preferred over a password. When the provider runs in a cluster,
+the credentials come from a Kubernetes Secret (see config/deployment.yaml, which
+is generated with --remote), never from the image.
+{{end}}
+
 ## Development
 
 ### Prerequisites
@@ -557,6 +577,7 @@ export LIBVIRT_URI=qemu:///system
 - kubectl (for Kubernetes deployment)
 {{if .IsVSphere}}- vSphere environment access{{end}}
 {{if .IsLibvirt}}- Libvirt/KVM environment{{end}}
+{{if .IsProxmox}}- Proxmox VE environment access{{end}}
 
 ### Project Structure
 
@@ -763,6 +784,21 @@ spec:
               key: password{{end}}
         {{if .IsLibvirt}}- name: LIBVIRT_URI
           value: "qemu:///system"{{end}}
+        {{if .IsProxmox}}- name: PVE_ENDPOINT
+          valueFrom:
+            secretKeyRef:
+              name: {{.ProviderName}}-credentials
+              key: endpoint
+        - name: PVE_TOKEN_ID
+          valueFrom:
+            secretKeyRef:
+              name: {{.ProviderName}}-credentials
+              key: token_id
+        - name: PVE_TOKEN_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: {{.ProviderName}}-credentials
+              key: token_secret{{end}}
         livenessProbe:
           httpGet:
             path: /health
@@ -858,6 +894,8 @@ func New() *Provider {
 		{{if eq .ProviderType "firecracker"}}Firecracker().
 		DiskTypes("raw").
 		NetworkTypes("tap").{{end}}
+		{{if eq .ProviderType "proxmox"}}DiskTypes("raw", "qcow2").
+		NetworkTypes("bridge", "vlan").{{end}}
 		{{if eq .ProviderType "qemu"}}QEMU().
 		Snapshots().
 		DiskTypes("qcow2", "raw", "vmdk").
@@ -999,6 +1037,15 @@ func GetProviderCapabilities() *capabilities.Manager {
 		DiskTypes("qcow2", "raw", "vmdk").
 		NetworkTypes("bridge", "nat", "ovs"){{end}}
 
+	{{if eq .ProviderType "proxmox"}}// Proxmox VE capabilities. Only the core profile and the disk and network
+	// types are declared: every operation is still unimplemented, so add the
+	// optional capabilities (Snapshots, LinkedClones, OnlineReconfigure, ...)
+	// as you implement the operations behind them. The provider advertises what
+	// New() in provider.go builds; keep the two in step.
+	builder = builder.
+		DiskTypes("raw", "qcow2").
+		NetworkTypes("bridge", "vlan"){{end}}
+
 	{{if eq .ProviderType "firecracker"}}// Firecracker-specific capabilities
 	builder = builder.
 		Firecracker().
@@ -1087,6 +1134,15 @@ func TestProvider_GetCapabilities(t *testing.T) {
 
 	{{if eq .ProviderType "libvirt"}}if !resp.SupportsSnapshots {
 		t.Error("Expected libvirt provider to support snapshots")
+	}{{end}}
+
+	{{if eq .ProviderType "proxmox"}}// Every operation is unimplemented in the scaffold, so no optional
+	// capability may be advertised yet. Remove the assertions for the ones you
+	// implement.
+	if resp.SupportsSnapshots || resp.SupportsMemorySnapshots || resp.SupportsLinkedClones ||
+		resp.SupportsReconfigureOnline || resp.SupportsDiskExpansionOnline || resp.SupportsImageImport ||
+		resp.SupportsDiskExport || resp.SupportsDiskImport {
+		t.Error("Expected the scaffold to advertise no optional capability until it is implemented")
 	}{{end}}
 
 	if len(resp.SupportedDiskTypes) == 0 {

@@ -112,6 +112,11 @@ operations:                       # relative weights, not percentages; at least 
   clone: 0
 ```
 
+`test/performance/proxmox-loadtest.yaml` is a ready configuration in this format for a Provider
+named `proxmox-perf` (edit the provider, class and image names for your cluster); a unit test loads
+every YAML file in `test/performance` with the tool's own loader. The tool has no scenarios or
+pass/fail thresholds: read `summary.md` and compare it with your own targets.
+
 An unknown key, an unparsable duration or an unusable value (no providers, all weights zero, ...) is
 an error and nothing is created. The keys `vmCount`, `rampUpTime`, `steadyState`, `rampDownTime`,
 the `*Interval` keys, `vmTemplate.annotations` and `vmTemplate.resources` are accepted but not used
@@ -133,7 +138,7 @@ in this release.
 `vrtg-provider` helps someone writing a provider outside this repository.
 
 ```
-vrtg-provider init <name> [--type generic|vsphere|libvirt|firecracker|qemu] [--remote] [--output <dir>] [--virtrigaud-path <checkout>] [--force]
+vrtg-provider init <name> [--type generic|vsphere|libvirt|proxmox|firecracker|qemu] [--remote] [--output <dir>] [--virtrigaud-path <checkout>] [--force]
 vrtg-provider generate [--proto-only] [--clean]    # run inside the project
 vrtg-provider verify [--skip-build] [--skip-tests] [--skip-conformance]
 vrtg-provider publish --image <repo> --repo <url> --maintainer <email> [--name <n>] [--tag <t>] [--catalog <file>] [--dry-run] [--skip-verify]
@@ -144,6 +149,15 @@ vrtg-provider version
 `main.go`, `internal/provider/` (a provider whose operations all return `Unimplemented`, its
 capabilities and a test), `go.mod`, `Makefile`, `Dockerfile`, `README.md`, a CI workflow and, with
 `--remote`, Kubernetes manifests. The generated Go files are `gofmt`-clean.
+
+`--type` (default `generic`) picks the platform the scaffold is written for: its README, the
+credentials its remote Deployment reads and the capabilities it declares. The `proxmox` type declares
+only the core profile and the `raw`/`qcow2` disk and `bridge`/`vlan` network types, and its test
+asserts that no optional capability (snapshots, linked clones, online reconfigure) is advertised; add
+each one as you implement the operation behind it. The `vsphere`, `libvirt` and `qemu` types still
+declare optional capabilities (snapshots, and for `vsphere` and `libvirt` also linked clones) although
+every operation of a fresh scaffold returns `Unimplemented`; the capabilities a scaffold advertises are
+the ones `New()` builds in `internal/provider/provider.go`, so review them before you deploy one.
 
 The SDK (`github.com/projectbeskar/virtrigaud/sdk`) and the protobuf bindings
 (`github.com/projectbeskar/virtrigaud/proto`) are separate Go modules that are **not published under

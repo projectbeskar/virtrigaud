@@ -216,6 +216,11 @@ ci: test lint proto-lint generate gen-crds vet ## Run all CI checks locally
 
 # Protocol buffer definitions
 PROTO_DIR = proto
+# What `make proto-breaking` compares the proto module with (a buf input; the
+# git path is relative to $(PROTO_DIR); run `git fetch origin` first so origin/main
+# is current). Override with e.g.
+# PROTO_BREAKING_AGAINST="../.git#tag=v0.4.0,subdir=proto".
+PROTO_BREAKING_AGAINST ?= ../.git\#ref=origin/main,subdir=proto
 
 .PHONY: proto
 proto: buf ## Generate gRPC stubs from protocol buffer definitions using buf
@@ -227,7 +232,7 @@ proto-lint: buf ## Lint protocol buffer definitions
 
 .PHONY: proto-breaking
 proto-breaking: buf ## Check for breaking changes in protocol buffer definitions
-	cd $(PROTO_DIR) && $(BUF) breaking --against '.git#branch=main'
+	cd $(PROTO_DIR) && $(BUF) breaking --against '$(PROTO_BREAKING_AGAINST)'
 
 .PHONY: build
 build: gen-crds generate fmt vet ## Build manager binary.
@@ -530,6 +535,10 @@ verify-max-disk-size-render: ## Render the chart's disk-size ceiling: the manage
 .PHONY: verify-admission-policy-render
 verify-admission-policy-render: ## Render the chart's reserved-keys ValidatingAdmissionPolicy: default on (1.30+), opt-out, exemptions, in sync with config/admission-policy, --reuse-values from v0.3.11
 	@./hack/verify-admission-policy-render.sh
+
+.PHONY: verify-golangci-lint-version
+verify-golangci-lint-version: ## Fail if the CI workflow, helper scripts or .pre-commit-config.yaml pin a different golangci-lint than GOLANGCI_LINT_VERSION
+	@./hack/verify-golangci-lint-version.sh
 
 .PHONY: verify-no-lab-names
 verify-no-lab-names: ## Fail if a tracked file names an internal lab host or address (fieldTesting/ excluded)

@@ -1,10 +1,14 @@
 # Dockerfile for VirtRigaud kubectl utility image
 # This image is used by Helm hooks to apply CRDs during installation/upgrade
-FROM alpine:3.20
+FROM alpine:3.24
 
 # Install kubectl from official Kubernetes release
-# Using v1.32.0 which is built with Go 1.23.12+ (fixes CVE-2024-34156, CVE-2025-47907)
-ARG KUBECTL_VERSION=1.32.0
+# v1.35.9 is the latest patch of a supported Kubernetes minor. The image only
+# runs `kubectl apply --server-side` for the chart's CRD hook (server-side apply
+# is stable since Kubernetes 1.22). Re-scan before every release: a
+# kubectl release bundles the Go toolchain and modules it was built with, so a
+# newer patch release is what picks up fixes in them.
+ARG KUBECTL_VERSION=1.35.9
 # TARGETARCH is auto-populated by BuildKit/buildx per target platform (amd64,
 # arm64) and matches the k8s release URL convention (linux/<arch>). Hardcoding
 # amd64 here made the arm64 image install an amd64 binary, which then failed the

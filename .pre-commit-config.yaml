@@ -14,11 +14,18 @@ repos:
   - id: check-merge-conflict
   - id: mixed-line-ending
 
+# Keep rev equal to GOLANGCI_LINT_VERSION in the Makefile (and the version in
+# the CI workflow): .golangci.yml is a golangci-lint v2 configuration, which
+# v1 cannot read. hack/verify-golangci-lint-version.sh enforces this.
+# The v2 hooks take no --exclude-dirs flag (exclusions live in .golangci.yml).
+# The golangci-lint hook reports only issues in code changed since HEAD and
+# applies fixes (--fix); use golangci-lint-full, or `make lint`, for what CI
+# checks.
 - repo: https://github.com/golangci/golangci-lint
-  rev: v1.59.1
+  rev: v2.12.2
   hooks:
+  - id: golangci-lint-config-verify
   - id: golangci-lint
-    args: ['--exclude-dirs=internal/providers/libvirt,cmd/provider-libvirt']
 
 - repo: https://github.com/tekwizely/pre-commit-golang
   rev: v1.0.0-rc.1

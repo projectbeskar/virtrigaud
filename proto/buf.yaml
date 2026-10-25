@@ -3,26 +3,15 @@ name: buf.build/projectbeskar/virtrigaud
 deps:
   - buf.build/googleapis/googleapis
 breaking:
+  # FILE is the strictest category: it also flags changes that are wire
+  # compatible but break generated code (a moved message, a renamed package).
+  # Nothing is excepted: the rules this file used to except (FIELD_NO_DELETE,
+  # FIELD_SAME_TYPE, RPC_NO_DELETE, ENUM_VALUE_NO_DELETE, ...) are the ones
+  # that catch a deleted or retyped field, a removed RPC and a removed enum
+  # value. Adding fields, enum values, messages and RPCs is never reported.
+  # The name FIELD_SAME_DEFAULT that was excepted here does not exist in buf v1.
   use:
     - FILE
-  except:
-    # Allow backwards-compatible changes
-    - FIELD_SAME_DEFAULT
-    - FIELD_SAME_JSON_NAME
-    - FIELD_SAME_JSTYPE
-    - FIELD_SAME_LABEL
-    - FIELD_SAME_NAME
-    - FIELD_SAME_ONEOF
-    - FIELD_SAME_TYPE
-    - FIELD_WIRE_COMPATIBLE_TYPE
-    - FIELD_WIRE_JSON_COMPATIBLE_TYPE
-    # Allow adding new optional fields
-    - FIELD_NO_DELETE
-    # Allow adding new enum values
-    - ENUM_VALUE_NO_DELETE
-    # Allow adding new methods to services
-    - SERVICE_NO_DELETE
-    - RPC_NO_DELETE
 lint:
   use:
     - STANDARD

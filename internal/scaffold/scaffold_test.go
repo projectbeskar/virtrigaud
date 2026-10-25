@@ -106,7 +106,7 @@ func TestReadGoDirective(t *testing.T) {
 }
 
 func TestGeneratedGoIsGofmtClean(t *testing.T) {
-	for _, providerType := range []string{"generic", "vsphere", "libvirt", "firecracker", "qemu"} {
+	for _, providerType := range []string{"generic", "vsphere", "libvirt", "proxmox", "firecracker", "qemu"} {
 		t.Run(providerType, func(t *testing.T) {
 			dir := generate(t, Config{ProviderName: "demo", ProviderType: providerType, Remote: true})
 			err := filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
@@ -124,4 +124,46 @@ func TestGeneratedGoIsGofmtClean(t *testing.T) {
 			require.NoError(t, err)
 		})
 	}
+}
+
+// TestProxmoxScaffoldAdvertisesNoOptionalCapability checks that a fresh
+// proxmox scaffold, whose every operation is unimplemented, declares only the
+// core profile and Proxmox's disk and network types.
+func TestProxmoxScaffoldAdvertisesNoOptionalCapability(t *testing.T) {
+	dir := generate(t, Config{ProviderName: "demo", ProviderType: "proxmox", Remote: true})
+
+	for _, file := range []string{"internal/provider/provider.go", "internal/provider/capabilities.go"} {
+		data, err := os.ReadFile(filepath.Join(dir, file))
+		require.NoError(t, err)
+		src := string(data)
+		for _, optional := range []string{".Snapshots()", ".MemorySnapshots()", ".LinkedClones()", ".OnlineReconfigure()", ".OnlineDiskExpansion()", ".ImageImport()", ".DiskExport(", ".DiskImport(", ".VSphere()", ".Libvirt()"} {
+			assert.NotContains(t, src, optional, file)
+		}
+	}
+
+	caps, err := os.ReadFile(filepath.Join(dir, "internal/provider/capabilities.go"))
+	require.NoError(t, err)
+	assert.Contains(t, string(caps), `DiskTypes("raw", "qcow2")`)
+	assert.Contains(t, string(caps), `NetworkTypes("bridge", "vlan")`)
+}
+
+// TestProxmoxScaffoldDocumentsConfiguration checks that the README and the
+// remote Deployment of a proxmox scaffold carry the Proxmox settings, and that
+// no secret value is written into either.
+func TestProxmoxScaffoldDocumentsConfiguration(t *testing.T) {
+	dir := generate(t, Config{ProviderName: "demo", ProviderType: "proxmox", Remote: true})
+
+	readme, err := os.ReadFile(filepath.Join(dir, "README.md"))
+	require.NoError(t, err)
+	assert.Contains(t, string(readme), "Proxmox VE API integration")
+	assert.Contains(t, string(readme), "PVE_TOKEN_SECRET")
+	assert.NotContains(t, string(readme), "vSphere")
+
+	deployment, err := os.ReadFile(filepath.Join(dir, "config/deployment.yaml"))
+	require.NoError(t, err)
+	for _, env := range []string{"PVE_ENDPOINT", "PVE_TOKEN_ID", "PVE_TOKEN_SECRET"} {
+		assert.Contains(t, string(deployment), "- name: "+env)
+	}
+	assert.Equal(t, 3, strings.Count(string(deployment), "secretKeyRef:"), "credentials come from a Secret")
+	assert.NotContains(t, string(deployment), "VSPHERE")
 }
