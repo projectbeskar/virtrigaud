@@ -25,14 +25,17 @@ import (
 	"log"
 	"math/rand"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v2"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -43,9 +46,14 @@ import (
 )
 
 const (
-	// loadgenLabelKey and loadgenLabelValue mark every VM the tool creates.
+	// loadgenLabelKey and loadgenLabelValue mark every object the tool
+	// creates (VirtualMachines, VMSnapshots, VMClones and clone targets).
 	loadgenLabelKey   = "generated-by"
 	loadgenLabelValue = "loadgen"
+
+	// loadgenRunLabelKey holds the run id: it tells one run's objects from
+	// another's.
+	loadgenRunLabelKey = "loadgen.virtrigaud.io/run"
 
 	// operationTimeout bounds one create, delete or list call, so an
 	// operation that is in flight when the run's duration ends can finish.
@@ -64,6 +72,11 @@ type options struct {
 	configFile string
 	dryRun     bool
 	verbose    bool
+
+	cleanup        bool
+	cleanupTimeout time.Duration
+	observe        bool
+	observeTimeout time.Duration
 }
 
 // LoadGenConfig defines the load generation configuration
@@ -124,10 +137,18 @@ type Result struct {
 	Provider  string
 	VMName    string
 	StartTime time.Time
-	Duration  time.Duration
-	Success   bool
-	Error     string
-	Phase     string // VM phase if applicable
+	// Duration is the time the API call took: from sending the request until
+	// the apiserver accepted (or refused) it.
+	Duration time.Duration
+	Success  bool
+	Error    string
+	Phase    string // what the operation asked for (power state, size, object name)
+	// Observed is, with --observe, the time from sending the request until
+	// the object's status reflected it; zero when not observed.
+	Observed time.Duration
+	// ObserveError says why the status was not seen to reflect the request
+	// (--observe only).
+	ObserveError string
 }
 
 // LoadGenerator generates load against virtrigaud
@@ -141,11 +162,22 @@ type LoadGenerator struct {
 	// runID makes VM names unique across runs in one namespace.
 	runID string
 
+	// observeCtx bounds --observe polling and the cleanup: the command's
+	// context, which an interrupt cancels but the run's duration does not.
+	observeCtx context.Context
+	// pollInterval is how often --observe and the cleanup read an object.
+	pollInterval time.Duration
+
 	mu        sync.Mutex
 	vmCounter int
-	// created holds the names of the VMs this run created and has not
-	// deleted. Only these are ever deleted, never other VMs in the namespace.
-	created []string
+	// vms holds the VMs this run created and has not deleted. Every
+	// operation acts on one of these, never on another VM in the namespace.
+	vms []*runVM
+	// snapshots and clones hold the VMSnapshots and VMClones this run
+	// created; cloneTargets the target VMs those clones were asked to create.
+	snapshots    []runObject
+	clones       []runObject
+	cloneTargets []string
 }
 
 // Statistics holds performance statistics
@@ -156,12 +188,25 @@ type Statistics struct {
 	OperationsByType   map[string]int
 	OperationsByResult map[string]int
 	DurationsByOp      map[string][]time.Duration
-	StartTime          time.Time
+	// ObservedByOp holds, per operation, the --observe times (request sent
+	// until the status reflected it) of the operations that were observed.
+	ObservedByOp map[string][]time.Duration
+	// ObserveFailures counts, per operation, the accepted requests whose
+	// effect --observe did not see.
+	ObserveFailures map[string]int
+	StartTime       time.Time
 	EndTime            time.Time
 }
 
 func main() {
-	if err := newRootCmd().Execute(); err != nil {
+	// The first SIGINT/SIGTERM ends the run early (and lets --cleanup run);
+	// a second one terminates the process at once.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	go func() {
+		<-ctx.Done()
+		stop()
+	}()
+	if err := newRootCmd().ExecuteContext(ctx); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
@@ -185,7 +230,7 @@ func newRootCmd() *cobra.Command {
 	rootCmd.PersistentFlags().StringVar(&opts.kubeconfig, "kubeconfig", "", "Path to kubeconfig file")
 	rootCmd.PersistentFlags().StringVarP(&opts.namespace, "namespace", "n", "default", "Kubernetes namespace")
 	rootCmd.PersistentFlags().StringVarP(&opts.outputDir, "output-dir", "o", "./loadgen-results", "Output directory for results")
-	rootCmd.PersistentFlags().BoolVar(&opts.dryRun, "dry-run", false, "Dry run mode (don't create resources)")
+	rootCmd.PersistentFlags().BoolVar(&opts.dryRun, "dry-run", false, "Dry run mode: no API calls at all (no kubeconfig needed)")
 	rootCmd.PersistentFlags().BoolVarP(&opts.verbose, "verbose", "v", false, "Verbose output")
 
 	runCmd := &cobra.Command{
@@ -195,12 +240,24 @@ func newRootCmd() *cobra.Command {
 
 Without --config the built-in defaults are used (5 minutes, 2 workers, VMs
 created against provider "test-provider"). --config reads a YAML file that
-overrides them; unknown keys are an error.`,
+overrides them; unknown keys are an error.
+
+Every operation but create and describe acts on a VirtualMachine this run
+created, never on another VM. The latency recorded per operation is the API
+call's: from sending the request until the apiserver accepted it. --observe
+also records the time until the object's status reflects the request.
+Objects the run created are left in place unless --cleanup is given.`,
 		Args: cobra.NoArgs,
 		RunE: opts.runLoadGen,
 	}
 
 	runCmd.Flags().StringVarP(&opts.configFile, "config", "c", "", "Load generation config file (YAML)")
+	runCmd.Flags().BoolVar(&opts.cleanup, "cleanup", false,
+		"At the end, delete every VMSnapshot, VMClone, clone target and VirtualMachine the run created and wait until they are gone")
+	runCmd.Flags().DurationVar(&opts.cleanupTimeout, "cleanup-timeout", defaultCleanupTimeout, "Time allowed for --cleanup")
+	runCmd.Flags().BoolVar(&opts.observe, "observe", false,
+		"After each accepted request, wait until the object's status reflects it and record that time too (a worker waits before its next operation)")
+	runCmd.Flags().DurationVar(&opts.observeTimeout, "observe-timeout", defaultObserveTimeout, "How long --observe waits per operation")
 
 	rootCmd.AddCommand(runCmd)
 
@@ -246,6 +303,12 @@ func (c *LoadGenConfig) validate() error {
 	if c.VMTemplate.ClassRef == "" || c.VMTemplate.ImageRef == "" {
 		return errors.New("vmTemplate.classRef and vmTemplate.imageRef are required")
 	}
+	if err := validRange("vmTemplate.resources.cpuRange", c.VMTemplate.Resources.CPURange, 1, 128); err != nil {
+		return err
+	}
+	if err := validRange("vmTemplate.resources.memoryRange", c.VMTemplate.Resources.MemoryRange, 128, 1048576); err != nil {
+		return err
+	}
 	weights := []float64{
 		c.Operations.Create, c.Operations.Delete, c.Operations.Power, c.Operations.Reconfigure,
 		c.Operations.Snapshot, c.Operations.Clone, c.Operations.Describe,
@@ -263,6 +326,21 @@ func (c *LoadGenConfig) validate() error {
 	return nil
 }
 
+// validRange checks an optional [min, max] range: empty, or two values with
+// lo <= min <= max <= hi (the VirtualMachine spec.resources bounds).
+func validRange(field string, r []int, lo, hi int) error {
+	if len(r) == 0 {
+		return nil
+	}
+	if len(r) != 2 {
+		return fmt.Errorf("%s must be [min, max]", field)
+	}
+	if r[0] > r[1] || r[0] < lo || r[1] > hi {
+		return fmt.Errorf("%s must be [min, max] with %d <= min <= max <= %d", field, lo, hi)
+	}
+	return nil
+}
+
 func (o *options) runLoadGen(cmd *cobra.Command, _ []string) error {
 	// Load configuration
 	lgConfig, err := loadConfig(o.configFile)
@@ -270,15 +348,23 @@ func (o *options) runLoadGen(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 
-	// Create Kubernetes client
-	cfg, err := cliclient.RESTConfig(o.kubeconfig)
-	if err != nil {
-		return fmt.Errorf("failed to get kubeconfig: %w", err)
-	}
+	// Create Kubernetes client. A dry run makes no API call, so it needs
+	// none.
+	var k8sClient client.Client
+	if !o.dryRun {
+		cfg, err := cliclient.RESTConfig(o.kubeconfig)
+		if err != nil {
+			return fmt.Errorf("failed to get kubeconfig: %w", err)
+		}
+		// No client-side rate limit: the recorded latencies must be the
+		// apiserver's, not time spent waiting for a local token bucket
+		// (client-go's default allows 5 requests per second).
+		cfg.QPS = -1
 
-	k8sClient, err := cliclient.NewClient(cfg)
-	if err != nil {
-		return fmt.Errorf("failed to create Kubernetes client: %w", err)
+		k8sClient, err = cliclient.NewClient(cfg)
+		if err != nil {
+			return fmt.Errorf("failed to create Kubernetes client: %w", err)
+		}
 	}
 
 	// Create output directory
@@ -286,19 +372,21 @@ func (o *options) runLoadGen(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("failed to create output directory: %w", err)
 	}
 
-	// Create load generator
-	generator := &LoadGenerator{
-		client:    k8sClient,
-		namespace: o.namespace,
-		config:    lgConfig,
-		results:   make(chan Result, 1000),
-		opts:      o,
-		runID:     strconv.FormatInt(time.Now().UnixNano(), 36),
-	}
-
 	parent := cmd.Context()
 	if parent == nil {
 		parent = context.Background()
+	}
+
+	// Create load generator
+	generator := &LoadGenerator{
+		client:       k8sClient,
+		namespace:    o.namespace,
+		config:       lgConfig,
+		results:      make(chan Result, 1000),
+		opts:         o,
+		runID:        strconv.FormatInt(time.Now().UnixNano(), 36),
+		observeCtx:   parent,
+		pollInterval: defaultPollInterval,
 	}
 	ctx, cancel := context.WithTimeout(parent, lgConfig.Duration)
 	defer cancel()
@@ -309,6 +397,7 @@ func (o *options) runLoadGen(cmd *cobra.Command, _ []string) error {
 	cliout.Printf(out, "Concurrency: %d\n", lgConfig.Concurrency)
 	cliout.Printf(out, "VM Count: %d\n", lgConfig.VMCount)
 	cliout.Printf(out, "Providers: %v\n", lgConfig.Providers)
+	cliout.Printf(out, "Run ID: %s (label %s=%s)\n", generator.runID, loadgenRunLabelKey, generator.runID)
 
 	// Start results collector
 	var wg sync.WaitGroup
@@ -332,7 +421,7 @@ func (o *options) runLoadGen(cmd *cobra.Command, _ []string) error {
 	cliout.Printf(out, "Load generation completed successfully\n")
 	cliout.Printf(out, "Results saved to: %s\n", o.outputDir)
 
-	return nil
+	return generator.finish(out)
 }
 
 func (lg *LoadGenerator) run(ctx context.Context) error {
@@ -394,7 +483,6 @@ func (lg *LoadGenerator) performCreate(ctx context.Context, provider string, wor
 	ctx, cancel := operationContext(ctx)
 	defer cancel()
 
-	startTime := time.Now()
 	vmName := lg.generateVMName(workerID)
 
 	vm := &infrav1beta1.VirtualMachine{
@@ -407,42 +495,51 @@ func (lg *LoadGenerator) performCreate(ctx context.Context, provider string, wor
 			ProviderRef: infrav1beta1.ObjectRef{Name: provider},
 			ClassRef:    infrav1beta1.ObjectRef{Name: lg.config.VMTemplate.ClassRef},
 			ImageRef:    &infrav1beta1.ObjectRef{Name: lg.config.VMTemplate.ImageRef},
-			PowerState:  "On",
+			PowerState:  infrav1beta1.PowerStateOn,
 		},
-	}
-
-	var err error
-	var success bool
-	var phase string
-
-	if !lg.opts.dryRun {
-		err = lg.client.Create(ctx, vm)
-		success = err == nil
-		if success {
-			phase = "Creating"
-		}
-	} else {
-		success = true
-		phase = "DryRun"
-	}
-	if success {
-		lg.recordCreated(vmName)
 	}
 
 	result := Result{
 		Operation: "create",
 		Provider:  provider,
 		VMName:    vmName,
-		StartTime: startTime,
-		Duration:  time.Since(startTime),
-		Success:   success,
-		Phase:     phase,
+		StartTime: time.Now(),
 	}
 
+	if lg.opts.dryRun {
+		result.Success = true
+		result.Phase = phaseDryRun
+		result.Duration = time.Since(result.StartTime)
+		lg.recordCreated(&runVM{name: vmName, provider: provider, power: infrav1beta1.PowerStateOn})
+		lg.results <- result
+		return
+	}
+
+	err := lg.client.Create(ctx, vm)
+	result.Duration = time.Since(result.StartTime)
+	result.Success = err == nil
 	if err != nil {
 		result.Error = err.Error()
+		lg.results <- result
+		return
 	}
+	result.Phase = "Creating"
+	// Created VMs are busy until observed, so no other operation acts on a
+	// VM whose create is still being measured.
+	created := &runVM{name: vmName, uid: vm.UID, provider: provider, power: infrav1beta1.PowerStateOn, busy: true}
+	lg.recordCreated(created)
+	defer lg.releaseVM(created)
 
+	lg.observe(&result, func(ctx context.Context) (bool, error) {
+		cur := &infrav1beta1.VirtualMachine{}
+		if err := lg.client.Get(ctx, client.ObjectKey{Namespace: lg.namespace, Name: vmName}, cur); err != nil {
+			return false, ignoreNotFound(err)
+		}
+		if cur.Status.Phase == infrav1beta1.VirtualMachinePhaseFailed {
+			return false, fmt.Errorf("VM failed: %s", cur.Status.Message)
+		}
+		return cur.Status.ID != "" && cur.Status.PowerState == infrav1beta1.ObservedPowerStateOn, nil
+	})
 	lg.results <- result
 }
 
@@ -450,89 +547,52 @@ func (lg *LoadGenerator) performDelete(ctx context.Context, provider string, _ i
 	ctx, cancel := operationContext(ctx)
 	defer cancel()
 
-	startTime := time.Now()
-
 	result := Result{
 		Operation: "delete",
 		Provider:  provider,
-		StartTime: startTime,
-		Success:   false,
+		StartTime: time.Now(),
 	}
 
 	// Delete only a VM this run created, never another VM in the namespace.
-	vmName, ok := lg.takeCreated()
+	vm, ok := lg.takeCreated()
 	if !ok {
-		result.Duration = time.Since(startTime)
-		result.Error = "No VMs created by this run to delete"
+		result.Duration = time.Since(result.StartTime)
+		result.Error = errNoRunVM.Error()
 		lg.results <- result
 		return
 	}
-	result.VMName = vmName
+	result.VMName = vm.name
+	result.Provider = vm.provider
 
-	if !lg.opts.dryRun {
-		vm := &infrav1beta1.VirtualMachine{
-			ObjectMeta: metav1.ObjectMeta{Name: vmName, Namespace: lg.namespace},
-		}
-		err := lg.client.Delete(ctx, vm)
-		result.Success = err == nil
-		if err != nil {
-			result.Error = err.Error()
-		}
-	} else {
+	if lg.opts.dryRun {
 		result.Success = true
-		result.Phase = "DryRun"
+		result.Phase = phaseDryRun
+		result.Duration = time.Since(result.StartTime)
+		lg.results <- result
+		return
 	}
 
-	result.Duration = time.Since(startTime)
-	lg.results <- result
-}
-
-func (lg *LoadGenerator) performPower(ctx context.Context, provider string, workerID int) {
-	// Implementation similar to delete but updates power state
-	result := Result{
-		Operation: "power",
-		Provider:  provider,
-		StartTime: time.Now(),
-		Success:   true, // Simplified for demo
-		Phase:     "PowerToggle",
+	obj := &infrav1beta1.VirtualMachine{
+		ObjectMeta: metav1.ObjectMeta{Name: vm.name, Namespace: lg.namespace},
 	}
+	// The UID precondition makes the delete reach only the VM this run
+	// created, never another VM later created under the same name.
+	err := lg.client.Delete(ctx, obj, client.Preconditions{UID: &vm.uid})
 	result.Duration = time.Since(result.StartTime)
-	lg.results <- result
-}
-
-func (lg *LoadGenerator) performReconfigure(ctx context.Context, provider string, workerID int) {
-	result := Result{
-		Operation: "reconfigure",
-		Provider:  provider,
-		StartTime: time.Now(),
-		Success:   true, // Simplified for demo
-		Phase:     "Reconfiguring",
+	result.Success = err == nil
+	if err != nil {
+		result.Error = err.Error()
+		lg.results <- result
+		return
 	}
-	result.Duration = time.Since(result.StartTime)
-	lg.results <- result
-}
-
-func (lg *LoadGenerator) performSnapshot(ctx context.Context, provider string, workerID int) {
-	result := Result{
-		Operation: "snapshot",
-		Provider:  provider,
-		StartTime: time.Now(),
-		Success:   true, // Simplified for demo
-		Phase:     "Snapshotting",
-	}
-	result.Duration = time.Since(result.StartTime)
-	lg.results <- result
-}
-
-func (lg *LoadGenerator) performClone(ctx context.Context, provider string, workerID int) {
-	result := Result{
-		Operation: "clone",
-		Provider:  provider,
-		StartTime: time.Now(),
-		Success:   true, // Simplified for demo
-		Phase:     "Cloning",
-	}
-	result.Duration = time.Since(result.StartTime)
+	lg.observe(&result, func(ctx context.Context) (bool, error) {
+		cur := &infrav1beta1.VirtualMachine{}
+		err := lg.client.Get(ctx, client.ObjectKey{Namespace: lg.namespace, Name: vm.name}, cur)
+		if apierrors.IsNotFound(err) {
+			return true, nil
+		}
+		return err == nil && cur.UID != vm.uid, nil
+	})
 	lg.results <- result
 }
 
@@ -542,22 +602,26 @@ func (lg *LoadGenerator) performDescribe(ctx context.Context, provider string, _
 
 	startTime := time.Now()
 
-	// List VMs as a describe operation
-	vmList := &infrav1beta1.VirtualMachineList{}
-	err := lg.client.List(ctx, vmList, client.InNamespace(lg.namespace))
-
 	result := Result{
 		Operation: "describe",
 		Provider:  provider,
 		StartTime: startTime,
-		Duration:  time.Since(startTime),
-		Success:   err == nil,
+		Success:   true,
 		Phase:     "Describing",
 	}
 
-	if err != nil {
-		result.Error = err.Error()
+	// List VMs as a describe operation; a dry run makes no API call.
+	if lg.opts.dryRun {
+		result.Phase = phaseDryRun
+	} else {
+		vmList := &infrav1beta1.VirtualMachineList{}
+		err := lg.client.List(ctx, vmList, client.InNamespace(lg.namespace))
+		result.Success = err == nil
+		if err != nil {
+			result.Error = err.Error()
+		}
 	}
+	result.Duration = time.Since(startTime)
 
 	lg.results <- result
 }
@@ -608,36 +672,38 @@ func (lg *LoadGenerator) generateVMName(workerID int) string {
 	return fmt.Sprintf("loadgen-vm-%s-%d-%d", lg.runID, workerID, lg.vmCounter)
 }
 
-// vmLabels returns the template labels plus the label that marks a VM as
-// created by this tool.
+// vmLabels returns the template labels plus the labels that mark an object
+// as created by this tool and by this run.
 func (lg *LoadGenerator) vmLabels() map[string]string {
-	labels := make(map[string]string, len(lg.config.VMTemplate.Labels)+1)
+	labels := make(map[string]string, len(lg.config.VMTemplate.Labels)+2)
 	for k, v := range lg.config.VMTemplate.Labels {
 		labels[k] = v
 	}
 	labels[loadgenLabelKey] = loadgenLabelValue
+	labels[loadgenRunLabelKey] = lg.runID
 	return labels
 }
 
 // recordCreated remembers a VM this run created.
-func (lg *LoadGenerator) recordCreated(name string) {
+func (lg *LoadGenerator) recordCreated(vm *runVM) {
 	lg.mu.Lock()
 	defer lg.mu.Unlock()
-	lg.created = append(lg.created, name)
+	lg.vms = append(lg.vms, vm)
 }
 
-// takeCreated removes and returns a random VM this run created. It reports
-// false when there is none.
-func (lg *LoadGenerator) takeCreated() (string, bool) {
+// takeCreated removes and returns a random VM this run created that no other
+// operation is using. It reports false when there is none.
+func (lg *LoadGenerator) takeCreated() (*runVM, bool) {
 	lg.mu.Lock()
 	defer lg.mu.Unlock()
-	if len(lg.created) == 0 {
-		return "", false
+	idle := lg.idleVMs()
+	if len(idle) == 0 {
+		return nil, false
 	}
-	i := rand.Intn(len(lg.created)) // #nosec G404 -- picks which created VM to delete next, not a secret
-	name := lg.created[i]
-	lg.created = append(lg.created[:i], lg.created[i+1:]...)
-	return name, true
+	i := idle[rand.Intn(len(idle))] // #nosec G404 -- picks which created VM to delete next, not a secret
+	vm := lg.vms[i]
+	lg.vms = append(lg.vms[:i], lg.vms[i+1:]...)
+	return vm, true
 }
 
 // operationContext returns a context for one API call that outlives the run's
@@ -652,6 +718,8 @@ func (lg *LoadGenerator) collectResults(out io.Writer) {
 		OperationsByType:   make(map[string]int),
 		OperationsByResult: make(map[string]int),
 		DurationsByOp:      make(map[string][]time.Duration),
+		ObservedByOp:       make(map[string][]time.Duration),
+		ObserveFailures:    make(map[string]int),
 		StartTime:          time.Now(),
 	}
 
@@ -693,6 +761,13 @@ func (lg *LoadGenerator) updateStatistics(stats *Statistics, result Result) {
 		stats.DurationsByOp[result.Operation] = []time.Duration{}
 	}
 	stats.DurationsByOp[result.Operation] = append(stats.DurationsByOp[result.Operation], result.Duration)
+
+	if result.Observed > 0 {
+		stats.ObservedByOp[result.Operation] = append(stats.ObservedByOp[result.Operation], result.Observed)
+	}
+	if result.ObserveError != "" {
+		stats.ObserveFailures[result.Operation]++
+	}
 }
 
 func (lg *LoadGenerator) saveResults(out io.Writer, results []Result, stats *Statistics) {
@@ -721,7 +796,8 @@ func (lg *LoadGenerator) saveCSV(filename string, results []Result) {
 	defer writer.Flush()
 
 	// Write header
-	if err := writer.Write([]string{"Operation", "Provider", "VMName", "StartTime", "Duration", "Success", "Error", "Phase"}); err != nil {
+	if err := writer.Write([]string{"Operation", "Provider", "VMName", "StartTime", "Duration", "Success", "Error", "Phase",
+		"ObservedDuration", "ObserveError"}); err != nil {
 		log.Printf("Failed to write CSV header: %v", err)
 		return
 	}
@@ -737,6 +813,8 @@ func (lg *LoadGenerator) saveCSV(filename string, results []Result) {
 			strconv.FormatBool(result.Success),
 			result.Error,
 			result.Phase,
+			observedString(result.Observed),
+			result.ObserveError,
 		}); err != nil {
 			log.Printf("Failed to write CSV row: %v", err)
 			return
@@ -774,9 +852,36 @@ func (lg *LoadGenerator) saveSummary(filename string, stats *Statistics) {
 	}
 
 	writeOrLog("\n## Performance Metrics\n\n")
+	writeOrLog("API call latency: from sending the request until the apiserver answered (accepted or refused).\n\n")
+	writePercentiles(writeOrLog, stats.DurationsByOp)
+
+	if lg.opts.observe {
+		writeOrLog("\n## Time Until Observed (--observe)\n\n")
+		writeOrLog("From sending the request until the object's status reflected it. Not observed within --observe-timeout:")
+		if len(stats.ObserveFailures) == 0 {
+			writeOrLog(" none.\n\n")
+		} else {
+			writeOrLog("\n\n")
+			for op, n := range stats.ObserveFailures {
+				writeOrLog("- %s: %d\n", op, n)
+			}
+			writeOrLog("\n")
+		}
+		writePercentiles(writeOrLog, stats.ObservedByOp)
+	}
+}
+
+// writePercentiles writes a table of p50/p95/p99/max per operation.
+func writePercentiles(writeOrLog func(string, ...interface{}), byOp map[string][]time.Duration) {
 	writeOrLog("| Operation | Count | P50 | P95 | P99 | Max |\n")
 	writeOrLog("|-----------|-------|-----|-----|-----|-----|\n")
-	for op, durations := range stats.DurationsByOp {
+	ops := make([]string, 0, len(byOp))
+	for op := range byOp {
+		ops = append(ops, op)
+	}
+	sort.Strings(ops)
+	for _, op := range ops {
+		durations := byOp[op]
 		if len(durations) == 0 {
 			continue
 		}
@@ -793,6 +898,15 @@ func (lg *LoadGenerator) saveSummary(filename string, stats *Statistics) {
 		writeOrLog("| %s | %d | %v | %v | %v | %v |\n",
 			op, len(durations), p50, p95, p99, max)
 	}
+}
+
+// observedString renders an --observe duration for the CSV ("" when not
+// observed).
+func observedString(d time.Duration) string {
+	if d == 0 {
+		return ""
+	}
+	return d.String()
 }
 
 // percent returns part as a percentage of total, or 0 when total is 0.
