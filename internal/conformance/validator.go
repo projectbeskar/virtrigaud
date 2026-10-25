@@ -48,8 +48,19 @@ const (
 // (wait, validate) but never create, change or delete one.
 const kindProvider = "Provider"
 
-// kindVirtualMachine is the VirtualMachine kind.
-const kindVirtualMachine = "VirtualMachine"
+// Kinds the runner treats specially.
+const (
+	// kindVirtualMachine is the VirtualMachine kind.
+	kindVirtualMachine = "VirtualMachine"
+	// kindVMSnapshot is the VMSnapshot kind.
+	kindVMSnapshot = "VMSnapshot"
+	// kindVMClone is the VMClone kind.
+	kindVMClone = "VMClone"
+)
+
+// maxTestNameLength is the longest test name: it becomes the value of the
+// vcts.virtrigaud.io/test label.
+const maxTestNameLength = 63
 
 // Validator validates conformance test specifications
 type Validator struct {
@@ -149,6 +160,9 @@ func (v *Validator) ValidateTest(test TestSpec) error {
 
 	if !v.namePattern.MatchString(test.Name) {
 		return fmt.Errorf("test name must match pattern %s", v.namePattern.String())
+	}
+	if len(test.Name) > maxTestNameLength {
+		return fmt.Errorf("test name must be at most %d characters (it is a label value)", maxTestNameLength)
 	}
 
 	// Validate description

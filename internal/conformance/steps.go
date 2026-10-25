@@ -31,13 +31,24 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	infrav1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
 )
 
 // sweepKinds are the kinds the cleanup lists by the run and test labels, in
 // this order, to find objects created on the test's behalf that the runner
 // did not create itself (a VMClone's target VirtualMachine). Kinds the test
 // created are swept too.
-var sweepKinds = []string{kindVirtualMachine, "VMSnapshot", "VMClone"}
+var sweepKinds = []string{kindVirtualMachine, kindVMSnapshot, kindVMClone}
+
+// cleanupDeleteTimeout bounds the delete call the cleanup still sends for an
+// object once its cleanup timeout is used up (it then does not wait).
+const cleanupDeleteTimeout = 30 * time.Second
+
+// conditionCloneRequested is the VMClone condition the operator records
+// before it sends a Clone to the provider (and removes once the outcome is
+// recorded): while it is present, a provider clone may be in flight.
+const conditionCloneRequested = "CloneRequested"
 
 // trackedObject is an object a test created.
 type trackedObject struct {
@@ -81,6 +92,15 @@ func (t *testRun) pollInterval() time.Duration {
 		return t.r.config.PollInterval
 	}
 	return DefaultPollInterval
+}
+
+// failedGrace returns how long an object's status.phase must stay Failed
+// before a wait gives up on it.
+func (t *testRun) failedGrace() time.Duration {
+	if t.r.config.FailedPhaseGrace > 0 {
+		return t.r.config.FailedPhaseGrace
+	}
+	return DefaultFailedPhaseGrace
 }
 
 // stepTimeout returns the timeout of step.
@@ -240,8 +260,12 @@ func (t *testRun) update(ctx context.Context, gvk schema.GroupVersionKind, name 
 		}
 		patch[k] = v
 	}
+	fields := len(patch)
+	// metadata.uid makes the apiserver refuse the patch unless it reaches the
+	// object just read (not another created since under the same name).
+	m := map[string]interface{}{"uid": string(obj.GetUID())}
+	patch["metadata"] = m
 	if meta, ok := resource["metadata"].(map[string]interface{}); ok {
-		m := map[string]interface{}{}
 		if labels, ok := meta["labels"].(map[string]interface{}); ok {
 			for _, reserved := range []string{LabelRun, LabelTest, LabelManagedBy} {
 				if _, set := labels[reserved]; set {
@@ -249,15 +273,14 @@ func (t *testRun) update(ctx context.Context, gvk schema.GroupVersionKind, name 
 				}
 			}
 			m["labels"] = labels
+			fields++
 		}
 		if annotations, ok := meta["annotations"]; ok {
 			m["annotations"] = annotations
-		}
-		if len(m) > 0 {
-			patch["metadata"] = m
+			fields++
 		}
 	}
-	if len(patch) == 0 {
+	if fields == 0 {
 		return errors.New("an update needs at least one field besides apiVersion, kind and metadata.name")
 	}
 	data, err := json.Marshal(patch)
@@ -324,14 +347,17 @@ func checkAll(obj *unstructured.Unstructured, validations []Validation) []string
 
 // waitFor polls the object of gvk named name until the condition cond (if
 // any) holds and every assertion passes, or until ctx ends. Waiting for any
-// condition but Failed stops at once, as a failure, when the object's
-// status.phase is Failed. An object that does not exist yet is waited for
+// condition but Failed or Deleted stops, as a failure, when the object's
+// status.phase has been Failed for the runner's failed-phase grace (some
+// Failed phases are retried by the operator, such as a create in backoff).
+// An object that does not exist yet is waited for
 // (it may be created by the operator, like a clone's target), except that
 // for Deleted its absence is the success.
 func (t *testRun) waitFor(ctx context.Context, gvk schema.GroupVersionKind, name, cond string,
 	validations []Validation) error {
 	start := time.Now()
 	last := "not read yet"
+	var failedSince time.Time
 	err := wait.PollUntilContextCancel(ctx, t.pollInterval(), true, func(ctx context.Context) (bool, error) {
 		obj, err := t.get(ctx, gvk, name)
 		if apierrors.IsNotFound(err) {
@@ -356,8 +382,15 @@ func (t *testRun) waitFor(ctx context.Context, gvk schema.GroupVersionKind, name
 			return false, nil
 		}
 		if cond != CondFailed {
-			if failed := failedPhase(obj); failed != "" {
-				return false, fmt.Errorf("%s/%s failed: %s", gvk.Kind, name, failed)
+			if failed := failedPhase(obj); failed == "" {
+				failedSince = time.Time{}
+			} else {
+				if failedSince.IsZero() {
+					failedSince = time.Now()
+				}
+				if time.Since(failedSince) >= t.failedGrace() {
+					return false, fmt.Errorf("%s/%s failed (for %v): %s", gvk.Kind, name, t.failedGrace(), failed)
+				}
 			}
 		}
 		var parts []string
@@ -408,7 +441,12 @@ func (t *testRun) trackedNames() []string {
 // the runner did not create (objects created on the test's behalf), then the
 // objects the test created, newest first. It runs to the end even when ctx
 // is cancelled (an interrupted run still cleans up), bounded by the cleanup
-// timeout.
+// timeout; an object reached after that timeout still gets its delete call.
+//
+// A VMClone whose provider clone may still be in flight is first waited for:
+// deleting it, its target or its source then could leave the cloned VM on
+// the hypervisor with nothing recording it. A clone that does not settle in
+// time is left in place with its source and target, and reported.
 func (t *testRun) cleanup(ctx context.Context) []StepResult {
 	timeout := t.r.config.CleanupTimeout
 	if timeout <= 0 {
@@ -426,20 +464,37 @@ func (t *testRun) cleanup(ctx context.Context) []StepResult {
 	tracked := append([]trackedObject{}, t.tracked...)
 	t.mu.Unlock()
 
-	// Objects created on the test's behalf, found by label.
+	// The kinds to sweep by label: the usual derived kinds, every kind the
+	// test creates (an object whose create response was lost is not
+	// tracked) and every kind it did create.
 	trackedUIDs := map[types.UID]bool{}
 	kinds := append([]string{}, sweepKinds...)
 	seenKind := map[string]bool{}
 	for _, k := range kinds {
 		seenKind[k] = true
 	}
-	for _, o := range tracked {
-		trackedUIDs[o.uid] = true
-		if !seenKind[o.gvk.Kind] {
-			seenKind[o.gvk.Kind] = true
-			kinds = append(kinds, o.gvk.Kind)
+	addKind := func(k string) {
+		if k != "" && !seenKind[k] {
+			seenKind[k] = true
+			kinds = append(kinds, k)
 		}
 	}
+	for _, steps := range [][]TestStep{t.test.Steps, t.test.Cleanup} {
+		for _, step := range steps {
+			if step.Type == StepCreate {
+				addKind(kindOf(step.Resource))
+			}
+		}
+	}
+	for _, o := range tracked {
+		trackedUIDs[o.uid] = true
+		addKind(o.gvk.Kind)
+	}
+
+	// Clones in flight: wait for them; leave the unsettled ones in place.
+	keep, cloneResults := t.settleClones(cctx)
+	results = append(results, cloneResults...)
+
 	var derived []trackedObject
 	for _, kind := range kinds {
 		found, res := t.listRunObjects(cctx, kind)
@@ -447,7 +502,7 @@ func (t *testRun) cleanup(ctx context.Context) []StepResult {
 			results = append(results, *res)
 		}
 		for _, o := range found {
-			if !trackedUIDs[o.uid] {
+			if !trackedUIDs[o.uid] && !keep[o.String()] {
 				derived = append(derived, o)
 			}
 		}
@@ -458,16 +513,87 @@ func (t *testRun) cleanup(ctx context.Context) []StepResult {
 
 	// Objects the test created, newest first.
 	for i := len(tracked) - 1; i >= 0; i-- {
+		if keep[tracked[i].String()] {
+			continue
+		}
 		results = append(results, t.deleteAndWait(cctx, tracked[i], "delete "+tracked[i].String()))
 	}
 	return results
+}
+
+// cloneSettled reports whether a VMClone (as read) has no provider clone in
+// flight: it is Ready or Failed, or it has not requested a clone yet.
+func cloneSettled(clone *unstructured.Unstructured) bool {
+	phase, _, _ := unstructured.NestedString(clone.Object, "status", "phase")
+	switch phase {
+	case string(infrav1beta1.ClonePhaseReady), string(infrav1beta1.ClonePhaseFailed):
+		return true
+	case "", string(infrav1beta1.ClonePhasePending):
+		conds, _, _ := unstructured.NestedSlice(clone.Object, "status", "conditions")
+		for _, c := range conds {
+			if m, ok := c.(map[string]interface{}); ok && m["type"] == conditionCloneRequested {
+				return false
+			}
+		}
+		return true
+	default:
+		return false
+	}
+}
+
+// settleClones waits, within ctx, until every VMClone labelled with this run
+// and test is settled (cloneSettled) or gone. It returns the objects to
+// leave in place — each unsettled clone, its source VM and its target VM, as
+// Kind/name — and a failed result for each such clone.
+func (t *testRun) settleClones(ctx context.Context) (map[string]bool, []StepResult) {
+	keep := map[string]bool{}
+	clones, res := t.listRunObjects(ctx, kindVMClone)
+	if res != nil {
+		return keep, []StepResult{*res}
+	}
+	gvk := infrav1beta1.GroupVersion.WithKind(kindVMClone)
+	var results []StepResult
+	for _, c := range clones {
+		start := time.Now()
+		var last *unstructured.Unstructured
+		err := wait.PollUntilContextCancel(ctx, t.pollInterval(), true, func(ctx context.Context) (bool, error) {
+			cur, err := t.get(ctx, gvk, c.name)
+			if apierrors.IsNotFound(err) {
+				last = nil
+				return true, nil
+			}
+			if err != nil {
+				return false, nil
+			}
+			last = cur
+			return cur.GetUID() != c.uid || cloneSettled(cur), nil
+		})
+		if err == nil {
+			continue
+		}
+		keep[c.String()] = true
+		if last != nil {
+			if src, _, _ := unstructured.NestedString(last.Object, "spec", "source", "vmRef", "name"); src != "" {
+				keep[kindVirtualMachine+"/"+src] = true
+			}
+			if dst, _, _ := unstructured.NestedString(last.Object, "spec", "target", "name"); dst != "" {
+				keep[kindVirtualMachine+"/"+dst] = true
+			}
+		}
+		results = append(results, StepResult{
+			Name: "wait for " + c.String() + " to settle", Status: StatusFailed, Duration: time.Since(start),
+			Error: fmt.Sprintf("%s still has a clone in flight when the cleanup timeout ended; it, its source and its target VM "+
+				"are left in place (deleting them could leave the cloned VM on the hypervisor unrecorded)", c),
+		})
+	}
+	return keep, results
 }
 
 // listRunObjects lists the objects of kind labelled with this run and test.
 // A list failure is returned as a failed cleanup result.
 func (t *testRun) listRunObjects(ctx context.Context, kind string) ([]trackedObject, *StepResult) {
 	list := &unstructured.UnstructuredList{}
-	list.SetGroupVersionKind(schema.GroupVersionKind{Group: "infra.virtrigaud.io", Version: "v1beta1", Kind: kind + "List"})
+	list.SetGroupVersionKind(infrav1beta1.GroupVersion.WithKind(kind + "List"))
 	err := t.r.config.KubeClient.List(ctx, list, client.InNamespace(t.r.config.Namespace),
 		client.MatchingLabels{LabelRun: t.r.config.RunID, LabelTest: t.test.Name})
 	if err != nil {
@@ -484,12 +610,28 @@ func (t *testRun) listRunObjects(ctx context.Context, kind string) ([]trackedObj
 }
 
 // deleteAndWait deletes o (only that incarnation: the delete carries its
-// UID as a precondition) and waits until it is gone.
+// UID as a precondition) and waits until it is gone. Once ctx has ended (the
+// cleanup timeout is used up) it still sends the delete, with a short
+// timeout of its own, but does not wait, and reports the step as failed.
 func (t *testRun) deleteAndWait(ctx context.Context, o trackedObject, stepName string) StepResult {
 	start := time.Now()
 	res := StepResult{Name: stepName, Status: StatusPassed}
 	u := t.newObject(o.gvk, o.name)
 	uid := o.uid
+	if ctx.Err() != nil {
+		dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cleanupDeleteTimeout)
+		defer cancel()
+		err := t.r.config.KubeClient.Delete(dctx, u, client.Preconditions{UID: &uid})
+		if err != nil && !apierrors.IsNotFound(err) && !apierrors.IsConflict(err) {
+			res.Status = StatusFailed
+			res.Error = fmt.Sprintf("delete %s after the cleanup timeout: %v", o, err)
+		} else if err == nil {
+			res.Status = StatusFailed
+			res.Error = fmt.Sprintf("cleanup timeout used up: delete of %s sent, not waited for", o)
+		}
+		res.Duration = time.Since(start)
+		return res
+	}
 	err := t.r.config.KubeClient.Delete(ctx, u, client.Preconditions{UID: &uid})
 	switch {
 	case apierrors.IsNotFound(err):

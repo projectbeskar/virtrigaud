@@ -48,6 +48,11 @@ var version = "dev"
 // invalid, so the process exits non-zero.
 var errValidationFailed = errors.New("validation failed")
 
+// defaultRunTimeout bounds a whole 'vcts run' by default. It is longer than
+// the shipped tests' own timeouts added up, so a slow but working provider
+// is not cut short.
+const defaultRunTimeout = 3 * time.Hour
+
 // errTestsFailed is returned by 'vcts run' when a conformance test fails.
 var errTestsFailed = errors.New("conformance tests failed")
 
@@ -123,7 +128,8 @@ The command exits non-zero when a test fails.`,
 	runCmd.Flags().StringVarP(&opts.provider, "provider", "p", "", "Provider name to test (required)")
 	runCmd.Flags().StringVarP(&opts.outputDir, "output-dir", "o", "./conformance-results", "Output directory for test results")
 	runCmd.Flags().StringSliceVar(&opts.skipTests, "skip", []string{}, "List of test names to skip")
-	runCmd.Flags().DurationVar(&opts.timeout, "timeout", 30*time.Minute, "Test timeout")
+	runCmd.Flags().DurationVar(&opts.timeout, "timeout", defaultRunTimeout,
+		"Time allowed for the whole run (tests still running then fail, tests not started count as failed; cleanup still runs)")
 	runCmd.Flags().IntVar(&opts.parallel, "parallel", 1, "Number of parallel test executions")
 	runCmd.Flags().StringArrayVar(&opts.set, "set", nil, "Set a specification variable, NAME=value (repeatable)")
 	runCmd.Flags().BoolVar(&opts.keep, "keep", false, "Leave the objects the tests created in place (no cleanup)")
@@ -249,6 +255,10 @@ func (o *options) runConformanceTests(cmd *cobra.Command, _ []string) error {
 
 	if results.Failed > 0 {
 		return errTestsFailed
+	}
+	if ctx.Err() != nil {
+		// Belt and braces: an interrupted or timed-out run never passes.
+		return fmt.Errorf("%w: the run ended early: %w", errTestsFailed, context.Cause(ctx))
 	}
 
 	return nil

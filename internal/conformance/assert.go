@@ -26,6 +26,7 @@ import (
 	"strings"
 
 	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/client-go/util/jsonpath"
 )
@@ -339,7 +340,7 @@ func statusConditionTrue(obj *unstructured.Unstructured, condType string) (bool,
 		reason, _ := m["reason"].(string)
 		message, _ := m["message"].(string)
 		desc := fmt.Sprintf("%s=%s reason=%q message=%q", condType, status, reason, message)
-		if status != "True" {
+		if status != string(metav1.ConditionTrue) {
 			return false, desc
 		}
 		if observed, ok := toNumber(m["observedGeneration"]); ok && observed > 0 &&

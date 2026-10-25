@@ -79,6 +79,10 @@ const (
 	DefaultCleanupTimeout = 10 * time.Minute
 	// DefaultPollInterval is how often a wait step reads the object.
 	DefaultPollInterval = 2 * time.Second
+	// DefaultFailedPhaseGrace is how long an object's status.phase must stay
+	// Failed before a wait step fails on it: the operator retries some
+	// Failed phases (a create in backoff, an unclassified power state).
+	DefaultFailedPhaseGrace = 30 * time.Second
 )
 
 // runIDLength is the number of characters of a generated run id.
@@ -122,6 +126,9 @@ type Config struct {
 	// PollInterval is how often a wait step reads its object
 	// (DefaultPollInterval when zero).
 	PollInterval time.Duration
+	// FailedPhaseGrace is how long status.phase must stay Failed before a
+	// wait fails on it (DefaultFailedPhaseGrace when zero).
+	FailedPhaseGrace time.Duration
 	// RunID is the run id (${RUN}); a random one is generated when empty.
 	RunID string
 	// Out receives progress output (nothing is printed when nil).
@@ -318,10 +325,12 @@ func (r *Runner) Run(ctx context.Context) (*Results, error) {
 		}
 		if ctx.Err() != nil {
 			// Interrupted or out of time: the remaining tests are not started.
+			// They count as failed: a partial run must not pass.
 			results.Tests[i] = TestResult{
-				Name: r.tests[i].Name, Status: StatusSkipped, Capabilities: capabilities,
-				SkipReason: fmt.Sprintf("not run: %v", context.Cause(ctx)),
+				Name: r.tests[i].Name, Status: StatusFailed, Capabilities: capabilities,
+				Error: fmt.Sprintf("not run: the run ended before this test started (%v)", context.Cause(ctx)),
 			}
+			r.printTestResult(results.Tests[i])
 			continue
 		}
 		wg.Add(1)

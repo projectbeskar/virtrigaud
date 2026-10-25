@@ -32,6 +32,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	infrav1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
 	"github.com/projectbeskar/virtrigaud/cmd/internal/envtestutil"
@@ -42,8 +43,16 @@ import (
 const envNamespace = "default"
 
 // stuckMarker in a VirtualMachine's name makes fakeProvider ignore it, so a
-// wait on it times out.
+// wait on it times out; in a VMClone's name it makes fakeProvider hold the
+// clone in phase Cloning (a provider clone in flight).
 const stuckMarker = "stuck"
+
+// pinnedMarker in a VirtualMachine's name makes fakeProvider give it a
+// finalizer, so deleting it never completes.
+const pinnedMarker = "pinned"
+
+// pinFinalizer is the finalizer fakeProvider puts on pinned VMs.
+const pinFinalizer = "test.virtrigaud.io/pin"
 
 // fakeProvider stands in for the manager and a Provider (envtest runs no
 // controller): it writes the status a healthy provider would produce for
@@ -139,6 +148,11 @@ func (f *fakeProvider) reconcileVM(ctx context.Context, vm *infrav1beta1.Virtual
 	if strings.Contains(vm.Name, stuckMarker) {
 		return
 	}
+	if strings.Contains(vm.Name, pinnedMarker) && !controllerutil.ContainsFinalizer(vm, pinFinalizer) {
+		controllerutil.AddFinalizer(vm, pinFinalizer)
+		_ = f.c.Update(ctx, vm)
+		return
+	}
 	power := infrav1beta1.ObservedPowerStateOn
 	phase := infrav1beta1.VirtualMachinePhaseRunning
 	if vm.Spec.PowerState == infrav1beta1.PowerStateOff || vm.Spec.PowerState == infrav1beta1.PowerStateOffGraceful {
@@ -166,6 +180,13 @@ func (f *fakeProvider) reconcileVM(ctx context.Context, vm *infrav1beta1.Virtual
 
 func (f *fakeProvider) reconcileClone(ctx context.Context, clone *infrav1beta1.VMClone) {
 	if clone.Status.Phase == infrav1beta1.ClonePhaseReady || clone.Spec.Source.VMRef == nil {
+		return
+	}
+	if strings.Contains(clone.Name, stuckMarker) {
+		if clone.Status.Phase != infrav1beta1.ClonePhaseCloning {
+			clone.Status.Phase = infrav1beta1.ClonePhaseCloning
+			_ = f.c.Status().Update(ctx, clone)
+		}
 		return
 	}
 	src := &infrav1beta1.VirtualMachine{}
@@ -294,6 +315,14 @@ func (e *runnerEnv) runObjects(t *testing.T, runID string) []string {
 		out = append(out, "VMClone/"+o.Name)
 	}
 	return out
+}
+
+// getRunVM reads the VirtualMachine named name.
+func getRunVM(t *testing.T, e *runnerEnv, name string) *infrav1beta1.VirtualMachine {
+	t.Helper()
+	vm := &infrav1beta1.VirtualMachine{}
+	require.NoError(t, e.env.Client.Get(context.Background(), types.NamespacedName{Namespace: envNamespace, Name: name}, vm))
+	return vm
 }
 
 // testResult returns the result of the test named name.
@@ -442,9 +471,10 @@ func TestRunnerAgainstAPIServer(t *testing.T) {
 		e.setReportedCapabilities(t, nil)
 	})
 
-	t.Run("an interrupted run still cleans up", func(t *testing.T) {
+	t.Run("an interrupted run still cleans up, and the tests it did not start fail", func(t *testing.T) {
 		spec := "- name: interrupted\n  description: d\n  steps:\n" + classStep + vmStep(stuckMarker) +
-			"    - name: wait-ready\n      type: wait\n" + vmRef(stuckMarker) + "      waitFor:\n        condition: Ready\n        timeout: 2m\n"
+			"    - name: wait-ready\n      type: wait\n" + vmRef(stuckMarker) + "      waitFor:\n        condition: Ready\n        timeout: 2m\n" +
+			"- name: never-started\n  description: d\n  steps:\n" + classStep
 		runCtx, cancel := context.WithCancel(ctx)
 		defer cancel()
 		r := e.newRunner(t, specDirWith(t, spec), nil)
@@ -466,7 +496,84 @@ func TestRunnerAgainstAPIServer(t *testing.T) {
 		assert.Equal(t, conformance.StatusFailed, tr.Status)
 		assert.Contains(t, tr.Error, "interrupted after")
 		assert.NotEmpty(t, tr.Cleanup)
+		notStarted := testResult(t, res, "never-started")
+		assert.Equal(t, conformance.StatusFailed, notStarted.Status, "a test the run never started must not pass or be skipped")
+		assert.Contains(t, notStarted.Error, "not run")
+		assert.Equal(t, 2, res.Failed)
 		assert.Empty(t, e.runObjects(t, runID), "an interrupted run left objects behind")
+	})
+
+	t.Run("an object stuck in deletion does not keep the cleanup from deleting the others", func(t *testing.T) {
+		spec := "- name: pinned\n  description: d\n  steps:\n" + classStep + vmStep(pinnedMarker) +
+			"    - name: wait-pinned\n      type: wait\n" + vmRef(pinnedMarker) +
+			"      validate:\n        - path: .metadata.finalizers\n          operator: contains\n          value: " + pinFinalizer + "\n"
+		r := e.newRunner(t, specDirWith(t, spec), func(c *conformance.Config) { c.CleanupTimeout = time.Second })
+		res, err := r.Run(ctx)
+		require.NoError(t, err)
+		tr := testResult(t, res, "pinned")
+		assert.Equal(t, conformance.StatusFailed, tr.Status)
+		assert.Contains(t, tr.Error, "cleanup delete VirtualMachine/vcts-"+res.RunID+"-pinned")
+		// The class, deleted after the VM, still got its delete call.
+		assert.Equal(t, []string{"VirtualMachine/vcts-" + res.RunID + "-pinned"}, e.runObjects(t, res.RunID))
+
+		vm := getRunVM(t, e, "vcts-"+res.RunID+"-pinned")
+		controllerutil.RemoveFinalizer(vm, pinFinalizer)
+		require.NoError(t, e.env.Client.Update(ctx, vm))
+	})
+
+	t.Run("a clone still in flight is left in place with its source and target", func(t *testing.T) {
+		spec := "- name: clone-in-flight\n  description: d\n  steps:\n" + classStep + vmStep("src") +
+			`    - name: create-clone
+      type: create
+      resource:
+        apiVersion: infra.virtrigaud.io/v1beta1
+        kind: VMClone
+        metadata:
+          name: vcts-${RUN}-` + stuckMarker + `-clone
+        spec:
+          source:
+            vmRef:
+              name: vcts-${RUN}-src
+          target:
+            name: vcts-${RUN}-dst
+    - name: wait-cloning
+      type: wait
+      resource:
+        apiVersion: infra.virtrigaud.io/v1beta1
+        kind: VMClone
+        metadata:
+          name: vcts-${RUN}-` + stuckMarker + `-clone
+      validate:
+        - path: .status.phase
+          value: Cloning
+`
+		r := e.newRunner(t, specDirWith(t, spec), func(c *conformance.Config) { c.CleanupTimeout = time.Second })
+		res, err := r.Run(ctx)
+		require.NoError(t, err)
+		tr := testResult(t, res, "clone-in-flight")
+		assert.Equal(t, conformance.StatusFailed, tr.Status)
+		assert.Contains(t, tr.Error, "still has a clone in flight")
+		assert.ElementsMatch(t, []string{
+			"VMClone/vcts-" + res.RunID + "-" + stuckMarker + "-clone",
+			"VirtualMachine/vcts-" + res.RunID + "-src",
+		}, e.runObjects(t, res.RunID), "the clone and its source must stay; the class is deleted")
+		require.NoError(t, e.env.Client.DeleteAllOf(ctx, &infrav1beta1.VMClone{}, client.InNamespace(envNamespace),
+			client.MatchingLabels{conformance.LabelRun: res.RunID}))
+		require.NoError(t, e.env.Client.DeleteAllOf(ctx, &infrav1beta1.VirtualMachine{}, client.InNamespace(envNamespace),
+			client.MatchingLabels{conformance.LabelRun: res.RunID}))
+	})
+
+	t.Run("an update cannot change the run labels", func(t *testing.T) {
+		spec := "- name: relabel\n  description: d\n  steps:\n" + classStep +
+			"    - name: relabel\n      type: update\n      resource:\n        apiVersion: infra.virtrigaud.io/v1beta1\n" +
+			"        kind: VMClass\n        metadata:\n          name: vcts-${RUN}-class\n          labels:\n" +
+			"            vcts.virtrigaud.io/run: other\n"
+		res, err := e.newRunner(t, specDirWith(t, spec), nil).Run(ctx)
+		require.NoError(t, err)
+		tr := testResult(t, res, "relabel")
+		assert.Equal(t, conformance.StatusFailed, tr.Status)
+		assert.Contains(t, tr.Error, "an update cannot change the label "+conformance.LabelRun)
+		assert.Empty(t, e.runObjects(t, res.RunID))
 	})
 
 	t.Run("objects created on the test's behalf are cleaned up by label", func(t *testing.T) {
