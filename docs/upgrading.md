@@ -32,8 +32,9 @@ providers**, and:
 - **The gRPC contract has no field, number or RPC change** (comments only), so providers of the
   two versions interoperate. Roll the libvirt providers promptly after the manager: a v0.4.1
   manager reads a v0.4.0 libvirt provider's answers as they are (a single-host failed revert as
-  a failure, a "not performed" snapshot create as before), and only a v0.4.1 provider classifies
-  them as described below.
+  a failure) and retries every "not performed" snapshot create, so until the provider is rolled a
+  single-host overlay collision (V12) or a refusal libvirt will never accept is retried every 10
+  minutes instead of failing; only a v0.4.1 provider answers them for good, as described below.
 
 If you are upgrading from v0.3.11 or from a v0.4.0 release candidate, do the steps of the
 sections below it as well, in the order the rest of this guide gives.
@@ -148,18 +149,23 @@ cloud-init drive and are not converted.**
 3. **In a PVE cluster, set `PVE_NODE_SELECTOR`** in the Provider's `spec.runtime.env` to the node
    of the API endpoint's host. The VM must be on the node SSH reaches (the node check compares it
    with `uname -n` there); an `endpoint` that is a load balancer in front of several nodes does not
-   work for VMs with user-data.
+   work for VMs with user-data. The selector applies to every new VM of the Provider, with or
+   without user-data: its templates (and clone sources) must be on that node, or a template
+   `Create` is refused (`template ... not found on node ...`).
 4. **Token privileges.** The seed itself is imported and attached by `root` over SSH. A VM made
    **without a template** with user-data is now created first and marked ready afterwards, so the
    token also needs `VM.Audit` and `VM.Config.Options` on it, as it already does for clones.
 
 **What happens without them.** A `Create` or `Clone` that needs a seed and cannot get one is
-refused **before anything is created** (`InvalidSpec`): the `VirtualMachine` shows
-`ValidationError` and is rechecked every 30 seconds, with a message that names what is missing
-(the SSH data plane, `ssh_password` or `ssh_privatekey`, `known_hosts`, `genisoimage`, or
-`PVE_NODE_SELECTOR`). The user-data is never dropped in silence any more. A VM that is refused
-needs no cleanup; add the missing keys and it is created on the next recheck (the provider reads the SSH keys when it
-starts, so roll or restart it after you change the Secret).
+refused **before anything is created** (`InvalidSpec`), with a message that names what is
+missing (the SSH data plane, `ssh_password` or `ssh_privatekey`, `known_hosts`, `genisoimage`, or
+`PVE_NODE_SELECTOR`). The user-data is never dropped in silence any more. A `VirtualMachine`
+shows `ValidationError` and is rechecked every 30 seconds; it needs no cleanup, and is created
+on a recheck once the keys are there. A `VMClone` ends `Failed` (`ProviderError`, "clone
+failed: ...") and is not retried: re-create it. The provider reads the SSH keys when it starts,
+so roll or restart it after you change the Secret. A node without `flock` is not refused: the
+seed script cannot take its lock, the VM is kept with an unknown outcome and every re-send
+repeats it, so check `flock` on the node first.
 
 **Security.** The Provider now holds a root SSH credential to the PVE node. Its changes to the
 node's config and storage are attributed to `root@pam`, outside the API token's permissions.
@@ -191,9 +197,11 @@ the VM's whole life; keep long-lived secrets out of it.
   made linked clones and no longer advertises them. Use `FullClone`.
 - **A clone gets the class's memory** (it kept the source's memory before, whatever the class
   said), so a clone's memory can differ from v0.4.0's for the same `VMClone`.
-- **A clone's boot order** names only its boot disk (the template's first boot disk, else its
-  `bootdisk`, else the first disk) and no longer the cloud-init slot. Prepare templates with
-  `qm set <vmid> --boot order=scsi0`.
+- **The boot order of a VM cloned from a template with user-data** names only its boot disk (the
+  template's first boot disk, else its `bootdisk`, else the first disk) and no longer the
+  cloud-init slot. A `VMClone` and a template `Create` without user-data keep the template's or
+  source's order. Prepare templates with `qm set <vmid> --boot order=<boot disk>` (for example
+  `scsi0`).
   → [Boot order](proxmox-cloud-init-storage.md#boot-order)
 - **A cloud-init drive left on `local` by v0.4.0** can be moved with
   `qm set <vmid> --ide2 <storage>:cloudinit` on the node.
@@ -223,7 +231,7 @@ These change what an operator sees; no action is required before the upgrade.
   refused as above, or taken if you removed the file first).
   → [`docs/libvirt-clones.md`](libvirt-clones.md#a-snapshot-name-whose-overlay-file-is-still-on-the-host)
 - **A `VMSnapshot` create the provider did not perform is retried on a single-host Provider too
-  (behaviour change).** v0.4.0 ended it `Failed` and you deleted it and created a new one; a
+  (behaviour change; the controller change applies to every provider type).** v0.4.0 ended it `Failed` and you deleted it and created a new one; a
   clustered Provider already retried it. Now the `VMSnapshot` shows `Ready=False/ProviderError`
   with the provider's answer in a `SnapshotCreateRetrying` event, and the create is sent again
   after 1 minute, doubling to 10 minutes, for as long as the object exists. This includes a
@@ -236,8 +244,9 @@ These change what an operator sees; no action is required before the upgrade.
   `VirtualMachine`'s `status.snapshotRevert` goes back to `Pending` with
   `SnapshotReverted=False/RevertNotPerformed` and a `SnapshotRevertNotPerformed` Warning event,
   and the revert is sent again as a new attempt after 1 minute, doubling to 10 minutes. These
-  answers never count toward the 5-attempt limit and no longer end `Failed` with "the VM may or
-  may not have been reverted". If you keep a script or alert on that message or on
+  answers do not count toward the 5-attempt limit and no longer end `Failed` with "the VM may or
+  may not have been reverted" (the exception is a "not performed" answer to the manager's own
+  re-send of an attempt whose outcome is unknown: it stays an unknown outcome and is counted). If you keep a script or alert on that message or on
   `status.snapshotRevert.attempts`, note that `attempts` counts since the last "not performed"
   answer. A revert that keeps being refused is sent again until you fix the cause or remove
   `spec.snapshot.revertToRef`.
@@ -247,8 +256,8 @@ These change what an operator sees; no action is required before the upgrade.
   a terminal failure, or "outcome unknown: retry". Single-host messages are constant texts
   that name no host path or command; the details are in the provider log. A single-host lost
   connection mid-revert is no longer reported as a terminal failure.
-- **A snapshot libvirt cannot take for this VM fails for good** (`InvalidArgument`) when libvirt
-  refuses it before executing because the VM's configuration does not support it; a busy domain
+- **On a single-host Provider, a snapshot libvirt cannot take for this VM fails for good**
+  (`InvalidArgument`) when libvirt refuses it before executing because the VM's configuration does not support it; a busy domain
   or one in the wrong state is still "not performed".
 - **Host-command logs are redacted (R28).** URLs (a staged disk's `nfs://` server, export and
   path, an S3 endpoint) are replaced by `<redacted <scheme> URL>` in the libvirt provider's log
@@ -315,7 +324,8 @@ its values to `Provider` fields.
 ### Verifying the upgrade
 
 - Proxmox, a VM with user-data created after the upgrade: `qm config <vmid>` shows a CD-ROM
-  (`ide2: <storage>:vm-<vmid>-disk-<N>,media=cdrom` unless the VM's drive was in another slot),
+  (`ide2: <storage>:vm-<vmid>-disk-<N>,media=cdrom`, on a directory storage
+  `<storage>:<vmid>/vm-<vmid>-disk-<N>.raw`, and another slot if the VM's drive was in one),
   and in the guest `cloud-init status --long` reports `done` with the `runcmd` and `write_files`
   of your user-data applied.
 - libvirt: create a `VMSnapshot` whose name matches an existing overlay (for a test VM) and check

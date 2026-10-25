@@ -14,7 +14,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 - `docs/upgrading.md`: "Upgrading from v0.4.0 to v0.4.1" is complete: the Proxmox SSH data plane for user-data (Secret keys, node checks, `PVE_NODE_SELECTOR`, token privileges, what happens without them, the clone, local-storage migration and linked-clone differences, rollback), the libvirt snapshot and revert answers (V12, single-host "not performed" retries, `RevertNotPerformed`, R28, R37), the stricter `vcts` and `virtrigaud-loadgen` validation, the published module tags, the deprecated runtime chart and how to verify; the older note about single-host snapshot creates and reverts points to it.
-- `docs/README.md`: index rows for `next.md` (v0.4.1) and `v0.4.0.md`.
+- `docs/README.md`: index rows for `next.md` (v0.4.1) and `v0.4.0.md`, and the `upgrading.md` row names the v0.4.0 to v0.4.1 guide.
+- `README.md`: the Provider Feature Matrix row "Linked Clones" shows libvirt as not supported (it has been disabled since v0.4.0: `SupportsLinkedClones=false`) and the "Clone RPC" row no longer says libvirt makes linked clones.
 - `docs/clustered-provider-inventory.md`, `docs/vm-snapshot-revert.md`, `docs/adr/0013-disk-resize-flow.md`: links to the v0.4.0 notes point at `release-notes/v0.4.0.md`.
 
 ### Why

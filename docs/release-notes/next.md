@@ -6,7 +6,7 @@ for each candidate; this file starts with rc1. The v0.4.0 notes are kept in v0.4
 docs/upgrading.md ("Upgrading from v0.4.0 to v0.4.1") for the upgrade guide these notes link to,
 and CHANGELOG.md for the complete, dated changelog.
 GitHub's limit for a release body is 125,000 characters; this file is far below it (about
-41,000 characters), so it is pasted whole.
+43,000 characters), so it is pasted whole.
 -->
 
 This is **v0.4.1**, a patch release of v0.4.0. It changes how a Proxmox VM gets its cloud-init
@@ -61,11 +61,13 @@ v0.4.0 release candidate](../upgrading.md#upgrading-from-a-v040-release-candidat
   ```
 
   The key is `root`'s on the PVE node that the Provider's `endpoint` names, and `genisoimage`
-  must be installed there (it is a dependency of `qemu-server`, so every PVE node has it).
-  Without the keys, a `Create` or `Clone` that needs a seed is **refused before anything is
-  created** (`InvalidSpec`, shown on the `VirtualMachine` as `ValidationError` and rechecked every
-  30 seconds, with a message that names what is missing); in v0.4.0 it created a VM that got
-  only a user name and the `ssh_authorized_keys` items. A VM **without** `spec.userData` needs
+  and `flock` must be installed there (both are on every stock PVE node: `genisoimage` is a
+  dependency of `qemu-server`). Without the keys, a `Create` or `Clone` that needs a seed is
+  **refused before anything is created** (`InvalidSpec`, with a message that names what is
+  missing). A `VirtualMachine` shows `ValidationError` and is rechecked every 30 seconds; a
+  `VMClone` ends `Failed` (`ProviderError`), so re-create it after you fix the Secret and roll
+  the provider. In v0.4.0 such a `Create` made a VM that got only a user name and the
+  `ssh_authorized_keys` items. A VM **without** `spec.userData` needs
   nothing new. Treat the Secret as root on the node: the seed's `qm importdisk` and `qm set` run
   as `root@pam` over SSH, outside the API token's permissions.
   → [Proxmox cloud-init](../proxmox-cloud-init-storage.md#prerequisites),
@@ -74,7 +76,9 @@ v0.4.0 release candidate](../upgrading.md#upgrading-from-a-v040-release-candidat
   attached on the node of the API endpoint's host, so set `PVE_NODE_SELECTOR` (in the
   Provider's `spec.runtime.env`) to that node. An `endpoint` that is a load balancer in front of
   several nodes does not work for VMs with user-data. A `Create` or `Clone` that would put the
-  VM on another node is refused.
+  VM on another node is refused. The selector applies to every new VM of the Provider, with or
+  without user-data: its templates (and clone sources) must be on that node, or a template
+  `Create` is refused (`template ... not found on node ...`).
 - **A Proxmox VM made without a template, with user-data, needs two more token privileges:**
   `VM.Audit` and `VM.Config.Options` on the VM. Such a VM is now created first and marked ready
   after its seed is attached (its config is read and its description written), as a clone
@@ -103,18 +107,22 @@ v0.4.0 release candidate](../upgrading.md#upgrading-from-a-v040-release-candidat
   `LinkedCloneUnsupported` before the provider is called. The provider never made linked clones
   (every clone was a full clone) and no longer advertises them; a vSphere `VMClone` is not
   affected.
-- **A single-host libvirt `VMSnapshot` create that the provider did not perform is retried.** The
+- **A `VMSnapshot` create that a single-host provider did not perform is retried** (libvirt's
+  answers are the common case; the controller change applies to every provider type, including a
+  request that never reached the provider). The
   `VMSnapshot` shows `Ready=False/ProviderError` and the create is sent again after 1 minute,
   doubling up to 10 minutes, for as long as the object exists. In v0.4.0 it ended `Failed` and
   you deleted it and created a new one; a clustered Provider already retried. A cause that does
   not go away (an unreadable disk image, a domain libvirt keeps refusing) is retried every
   10 minutes until you fix it or delete the `VMSnapshot`.
   → [Provider call outcomes](../provider-call-outcomes.md)
-- **A libvirt revert the provider did not perform is retried and never fails the request.** The
-  revert goes back to `Pending` with the new reason `RevertNotPerformed` and is sent again
+- **A revert the provider did not perform is retried and no longer ends the request `Failed`.**
+  The revert goes back to `Pending` with the new reason `RevertNotPerformed` and is sent again
   after 1 minute, doubling up to 10 minutes. In v0.4.0 it was re-sent as an unknown outcome and,
   after 5 attempts, ended `Failed` with "the VM may or may not have been reverted" although
-  nothing had changed. Remove `spec.snapshot.revertToRef` to give up.
+  nothing had changed. The one exception is a "not performed" answer to the manager's own
+  re-send of an attempt whose outcome is unknown: it proves nothing about that attempt and stays
+  an unknown outcome. Remove `spec.snapshot.revertToRef` to give up.
   → [Snapshot revert](../vm-snapshot-revert.md#asynchronous-reverts-and-unknown-outcomes)
 - **A libvirt snapshot whose name matches a leftover overlay file is refused.** The
   `VMSnapshot` ends `Failed`, nothing is created and the file is never removed. Use another
@@ -189,12 +197,14 @@ v0.4.0 release candidate](../upgrading.md#upgrading-from-a-v040-release-candidat
 - **A clone gets the class's memory.** The `VMClone` controller sends the class as a
   `VMClassSpec` (`cpu` and a `memory` quantity); the provider read only a `memoryMiB` field, so a
   clone got the class's CPU and kept its source's memory.
-- **A clone's boot order names only its boot disk (R38).** The provider set
+- **A VM cloned from a template with user-data boots from its boot disk only (R38).** The
+  provider set
   `boot: order=<disk>;<cloud-init slot>`, with `ide2` whatever slot the clone's drive was in and
   `scsi0` when the config showed no disk; PVE refuses a boot order that names a device the VM
   lacks, so such a `Create` failed and was rolled back. The order is now the template's own first
   boot disk (else its `bootdisk`, else the first disk), and the cloud-init drive is not in it.
-  Prepare templates with `qm set <vmid> --boot order=scsi0`.
+  A `VMClone` and a template `Create` without user-data keep the template's or source's order.
+  Prepare templates with `qm set <vmid> --boot order=<boot disk>` (for example `scsi0`).
 
 ### libvirt snapshots and reverts
 
@@ -447,7 +457,10 @@ against the code.
   snapshot that stores a CD-ROM or read-only disk with media is refused on revert, and so is one
   whose stored definition cannot be read. A snapshot of a powered-off VM ejects the seed CD-ROM for
   its duration; if the provider or the host fails in that window the CD-ROM stays empty until
-  VirtRigaud's next snapshot create, revert, start or reboot of that VM inserts the seed again.
+  VirtRigaud's next snapshot create, revert, start or reboot of that VM inserts the seed again,
+  and a VM someone starts by hand (`virsh start`) meanwhile boots without its seed. A medium
+  other than the VM's own cloud-init seed (an installer ISO you attached) that an interrupted
+  ejection left out is never inserted automatically: you insert it by hand.
   `SnapshotDelete` removes the primary disk's overlays and not those of additional data disks, so
   check the pool after a revert or a snapshot delete
   (→ [`docs/vm-snapshot-revert.md`](../vm-snapshot-revert.md#libvirt),
@@ -520,13 +533,15 @@ manager, then the providers**. The CRDs have no schema change, so applying them 
 point; the `virtrigaud` chart has no template, RBAC or values change, so `helm upgrade` only
 re-tags the images and runs the CRD hook with the new `kubectl` image. Roll the libvirt providers
 promptly after the manager: a v0.4.1 manager reads a v0.4.0 libvirt provider's answers as they
-are (a single-host failed revert as a failure), and only a v0.4.1 provider classifies them as
-described above.
+are (a single-host failed revert as a failure) and retries every "not performed" snapshot create,
+so until the provider is rolled a single-host overlay collision or a refusal libvirt will never
+accept is retried every 10 minutes instead of failing; only a v0.4.1 provider answers them for
+good.
 
 Before the Proxmox provider rolls, if any of its VMs carry `spec.userData` (or a `VMClone`
 gives inline user-data): add `ssh_user`, `ssh_privatekey` or `ssh_password`, and `known_hosts`
-to the Provider's Secret, check `genisoimage` on the node, and in a cluster set
-`PVE_NODE_SELECTOR`. Also:
+to the Provider's Secret, check `genisoimage` and `flock` on the node, and in a cluster set
+`PVE_NODE_SELECTOR` (and keep the templates on that node). Also:
 
 1. If you installed the `virtrigaud-provider-runtime` chart, create a `Provider` resource for each
    provider it runs, wait until it is `Ready`, then `helm uninstall` the chart's release.
