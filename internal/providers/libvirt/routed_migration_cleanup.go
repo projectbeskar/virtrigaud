@@ -341,7 +341,7 @@ func (p *Provider) deleteStagedDiskRouted(ctx context.Context, req *providerv1.D
 		// The cause names the staged object's nfs:// URL: logged redacted,
 		// never passed on (#415).
 		log.Printf("WARN DeleteStagedDisk on host %s: the host could not be reached: %v", host,
-			redactLocations(err, disk.NFSURL, disk.Key))
+			redactLocations(err, stagedDiskLocations(disk)...))
 		return unspecified, hostUnavailableStatus(contracts.NewHostUnavailableError(fmt.Sprintf(stagedDiskHostDownFmt, host), nil))
 	}
 	return unspecified, &migration.StagedDiskError{Code: codes.Unavailable, Msg: stagedDiskHostFailedMessage, Cause: err}

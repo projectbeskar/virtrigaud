@@ -292,7 +292,7 @@ func (v *VirshProvider) runOverSSHStdin(ctx context.Context, remoteCmd string, s
 	start := time.Now()
 	stdout := cappedBuffer{max: sshMaxStdoutBytes}
 	stderr := headTailBuffer{headMax: sshStderrHeadBytes, tailMax: sshStderrTailBytes}
-	log.Printf("DEBUG Executing over ssh: %s", remoteCmd)
+	log.Printf("DEBUG Executing over ssh: %s", redactCommandText(remoteCmd))
 
 	runErr := v.withSession(ctx, func(sess *ssh.Session) error {
 		sess.Stdout = &stdout
@@ -328,7 +328,7 @@ func (v *VirshProvider) runOverSSHStdin(ctx context.Context, remoteCmd string, s
 		runErr = fmt.Errorf("remote command stdout exceeded its bound of %d bytes", sshMaxStdoutBytes)
 	}
 	if stderr.truncated() {
-		log.Printf("WARN stderr of %q was %d bytes; kept its first %d and last %d", remoteCmd, stderr.Len(),
+		log.Printf("WARN stderr of %q was %d bytes; kept its first %d and last %d", redactCommandText(remoteCmd), stderr.Len(),
 			sshStderrHeadBytes, sshStderrTailBytes)
 	}
 
@@ -362,7 +362,7 @@ func (v *VirshProvider) runOverSSHStdin(ctx context.Context, remoteCmd string, s
 		logCommandFailure(ctx, remoteCmd, exitCode, duration, result.Stderr)
 		return result, &VirshError{Command: remoteCmd, ExitCode: exitCode, Stderr: result.Stderr, Stdout: result.Stdout, Cause: runErr}
 	}
-	log.Printf("DEBUG Command successful: %s (duration: %v)", remoteCmd, duration)
+	log.Printf("DEBUG Command successful: %s (duration: %v)", redactCommandText(remoteCmd), duration)
 	return result, nil
 }
 
@@ -545,7 +545,7 @@ func runSSHStdout(ctx context.Context, vp *VirshProvider, w io.Writer, remoteCmd
 
 	if runErr != nil {
 		if s := strings.TrimSpace(stderr.String()); s != "" {
-			return fmt.Errorf("%w (stderr: %s)", runErr, s)
+			return fmt.Errorf("%w (stderr: %s)", runErr, redactCommandText(s))
 		}
 		return runErr
 	}
@@ -570,7 +570,7 @@ func runSSHStdin(ctx context.Context, vp *VirshProvider, r io.Reader, remoteCmd 
 	defer release()
 
 	var stderr strings.Builder
-	log.Printf("DEBUG Executing SSH stdin stream: %s", remoteCmd)
+	log.Printf("DEBUG Executing SSH stdin stream: %s", redactCommandText(remoteCmd))
 
 	runErr := vp.withSession(ctx, func(sess *ssh.Session) error {
 		sess.Stdin = r
@@ -591,7 +591,7 @@ func runSSHStdin(ctx context.Context, vp *VirshProvider, r io.Reader, remoteCmd 
 
 	if runErr != nil {
 		if s := strings.TrimSpace(stderr.String()); s != "" {
-			return fmt.Errorf("%w (stderr: %s)", runErr, s)
+			return fmt.Errorf("%w (stderr: %s)", runErr, redactCommandText(s))
 		}
 		return runErr
 	}

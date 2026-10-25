@@ -1657,7 +1657,7 @@ func (s *Server) ImportDisk(ctx context.Context, req *providerv1.ImportDiskReque
 		return s.importDiskFromS3(ctx, req)
 	}
 
-	log.Printf("INFO Starting disk import from %s", req.SourceUrl)
+	log.Printf("INFO Starting disk import from %s", redactCommandText(req.SourceUrl))
 
 	// Obtain the per-host connection through the seam (ADR-0008 PR 2) instead of
 	// type-asserting the concrete *Provider.

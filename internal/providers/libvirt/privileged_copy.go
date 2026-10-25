@@ -264,7 +264,7 @@ func copyStderr(res *VirshResult) string {
 		return ""
 	}
 	if s := strings.TrimSpace(res.Stderr); s != "" {
-		return fmt.Sprintf(" (qemu-img stderr: %s)", s)
+		return fmt.Sprintf(" (qemu-img stderr: %s)", redactCommandText(s))
 	}
 	return ""
 }

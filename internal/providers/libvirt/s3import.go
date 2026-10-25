@@ -362,7 +362,7 @@ func qemuImgStderr(res *hostconn.Result) string {
 		return ""
 	}
 	if s := strings.TrimSpace(res.Stderr); s != "" {
-		return fmt.Sprintf(" (qemu-img stderr: %s)", s)
+		return fmt.Sprintf(" (qemu-img stderr: %s)", redactCommandText(s))
 	}
 	return ""
 }

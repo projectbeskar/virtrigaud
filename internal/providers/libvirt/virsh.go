@@ -198,9 +198,12 @@ type VirshError struct {
 	Cause error
 }
 
+// Error renders the failure with every URL in the command line and its output
+// redacted (redactCommandText, R28): the text reaches the provider log through
+// every caller that logs the error. The fields keep the original text.
 func (e *VirshError) Error() string {
 	return fmt.Sprintf("virsh command '%s' failed (exit code %d): stderr=%s, stdout=%s",
-		e.Command, e.ExitCode, e.Stderr, e.Stdout)
+		redactCommandText(e.Command), e.ExitCode, redactCommandText(e.Stderr), redactCommandText(e.Stdout))
 }
 
 // Unwrap returns the original error behind this VirshError, if any, so
@@ -826,7 +829,7 @@ func (v *VirshProvider) runLocalStdin(ctx context.Context, argv []string, stdin 
 	cmd.Stderr = &stderr
 
 	command := strings.Join(argv, " ")
-	log.Printf("DEBUG Executing: %s", command)
+	log.Printf("DEBUG Executing: %s", redactCommandText(command))
 
 	// A local process starts next: a pending write counts as sent
 	// (host_progress.go).
@@ -853,7 +856,7 @@ func (v *VirshProvider) runLocalStdin(ctx context.Context, argv []string, stdin 
 		}
 	}
 
-	log.Printf("DEBUG Command successful: %s (duration: %v)", command, duration)
+	log.Printf("DEBUG Command successful: %s (duration: %v)", redactCommandText(command), duration)
 	return result, nil
 }
 

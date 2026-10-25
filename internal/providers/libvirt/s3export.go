@@ -158,7 +158,7 @@ func exportFlattenToS3(ctx context.Context, conn libvirtConn, req *providerv1.Ex
 	exportID := fmt.Sprintf("export-libvirt-%s-%d", vmID, time.Now().Unix())
 
 	log.Printf("INFO Exporting disk from libvirt host to S3: backend=s3 vm=%s src=%s dest=%s",
-		vmID, srcPath, req.DestinationUrl)
+		vmID, srcPath, redactCommandText(req.DestinationUrl))
 
 	// --- FLATTEN (ADR D4) ---
 	hostTmp, cleanup, err := flattenForExport(ctx, hostConnRunner{conn: conn}, srcPath, srcFormat, vmID, guard)
@@ -294,7 +294,7 @@ func flattenForExport(ctx context.Context, h hostCommandRunner, srcPath, srcForm
 		}
 		stderr := ""
 		if res != nil && strings.TrimSpace(res.Stderr) != "" {
-			stderr = fmt.Sprintf(" (qemu-img stderr: %s)", strings.TrimSpace(res.Stderr))
+			stderr = fmt.Sprintf(" (qemu-img stderr: %s)", redactCommandText(strings.TrimSpace(res.Stderr)))
 		}
 		return "", nil, fmt.Errorf("host-side qemu-img flatten (qcow2→standalone qcow2) failed: %w%s", err, stderr)
 	}

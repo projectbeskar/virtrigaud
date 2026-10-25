@@ -28,6 +28,22 @@ import (
 	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
 )
 
+// minS3BucketNameLen is the shortest S3 bucket name (3 characters): a shorter
+// option value is not a bucket name and is never replaced in a log text.
+const minS3BucketNameLen = 3
+
+// stagedDiskLocations returns the texts that locate disk, for redactLocations
+// (R28): its nfs:// URL, its object key and, for s3, its bucket name. An
+// error from the S3 client names the bucket, and the key alone would leave it
+// in the log.
+func stagedDiskLocations(disk migration.StagedDisk) []string {
+	locations := []string{disk.NFSURL, disk.Key}
+	if bucket := strings.TrimSpace(disk.Options.Bucket); len(bucket) >= minS3BucketNameLen {
+		locations = append(locations, bucket)
+	}
+	return locations
+}
+
 // DeleteStagedDisk removes a VMMigration's staging object (ADR-0011). The
 // object is derived from the migration identity (migration.ResolveStagedDisk;
 // the request carries no location). s3 objects are removed from the provider
@@ -65,7 +81,7 @@ func (s *Server) DeleteStagedDisk(ctx context.Context, req *providerv1.DeleteSta
 		log.Printf("WARN Could not delete the staged disk of migration %s (backend %s): %s", migrationRef, disk.Backend,
 			status.Convert(err).Message())
 		log.Printf("DEBUG Staged disk delete failure cause for migration %s: %v", migrationRef,
-			redactLocations(err, disk.NFSURL, disk.Key))
+			redactLocations(err, stagedDiskLocations(disk)...))
 		return nil, err
 	}
 	log.Printf("INFO Removed the staged disk of migration %s (backend %s): %s", migrationRef, disk.Backend, outcome)

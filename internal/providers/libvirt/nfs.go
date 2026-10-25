@@ -99,7 +99,7 @@ func exportConvertToNFS(ctx context.Context, conn libvirtConn, req *providerv1.E
 	nfsURL := strings.TrimSpace(req.DestinationUrl)
 
 	log.Printf("INFO Exporting disk from libvirt host to NFS: backend=nfs vm=%s src=%s dest=%s",
-		req.VmId, srcPath, nfsURL)
+		req.VmId, srcPath, redactCommandText(nfsURL))
 
 	// Flatten + write straight to the NFS export. -U reads a possibly-running
 	// source (crash-consistent; a consistent copy still needs power-off/snapshot
@@ -133,7 +133,7 @@ func exportConvertToNFS(ctx context.Context, conn libvirtConn, req *providerv1.E
 		return nil, fmt.Errorf("host-side qemu-img convert to nfs failed: %w%s", err, copyStderr(res))
 	}
 
-	log.Printf("INFO Source disk written to NFS export: dest=%s", nfsURL)
+	log.Printf("INFO Source disk written to NFS export: dest=%s", redactCommandText(nfsURL))
 
 	return &providerv1.ExportDiskResponse{
 		ExportId: fmt.Sprintf("export-libvirt-nfs-%s-%d", req.VmId, time.Now().Unix()),
@@ -365,7 +365,7 @@ func (s *Server) importDiskFromNFSSteps(ctx context.Context, req *providerv1.Imp
 	}
 
 	log.Printf("INFO Importing disk from NFS to libvirt host: backend=nfs pool=%s volume=%s src=%s target=%s",
-		poolName, volumeName, nfsURL, targetPath)
+		poolName, volumeName, redactCommandText(nfsURL), targetPath)
 	return landNFSImport(ctx, importLanding{conn: conn, poolName: poolName, poolPath: poolPath,
 		volumeName: volumeName, targetPath: targetPath}, nfsURL, req)
 }
