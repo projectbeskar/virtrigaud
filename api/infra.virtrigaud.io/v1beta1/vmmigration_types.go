@@ -77,8 +77,9 @@ type MigrationSource struct {
 	// CreateSnapshot indicates whether to snapshot the source VM before
 	// exporting its disk (default true). A snapshot the migration took is deleted
 	// after the migration succeeds, after it fails for good, and when the
-	// VMMigration is deleted, unless options.cleanupPolicy is Never. When false the Snapshotting phase is
-	// skipped and the disk is exported without a snapshot.
+	// VMMigration is deleted, unless options.cleanupPolicy is Never. When false
+	// the Snapshotting phase is skipped and the disk is exported without a
+	// snapshot.
 	// +optional
 	// +kubebuilder:default=true
 	CreateSnapshot bool `json:"createSnapshot"`
@@ -195,8 +196,8 @@ type MigrationOptions struct {
 
 	// Compress asks the source provider to compress the exported disk. It is
 	// sent with the export request and a provider may ignore it: it has no
-	// effect on the libvirt s3 and nfs exports or on vSphere exports; Proxmox
-	// honours it for qcow2.
+	// effect on the libvirt s3 and nfs exports, on vSphere exports or on the
+	// Proxmox nfs export; the Proxmox s3 export honours it.
 	// +optional
 	// +kubebuilder:default=false
 	Compress bool `json:"compress,omitempty"`
@@ -643,17 +644,19 @@ const (
 // +kubebuilder:validation:Enum on that field; they exist as Go constants so the
 // controller never compares against bare string literals.
 const (
-	// CleanupPolicyAlways removes migration-created artifacts (the source
-	// snapshot, the staged disk and the landed disk) on every terminal outcome,
-	// including a migration that fails for good.
+	// CleanupPolicyAlways removes the migration's source snapshot and staged
+	// disk, and the disk a failed import landed on the target, also when the
+	// migration fails for good. The disk of a migration that reached Ready
+	// belongs to the target VM and is never removed.
 	CleanupPolicyAlways = "Always"
 	// CleanupPolicyOnSuccess removes the source snapshot and the staged disk when
 	// the migration completes, and the snapshot also when it fails for good; a
 	// migration that fails for good keeps its staged and landed disks until the
 	// VMMigration is deleted. This is the default.
 	CleanupPolicyOnSuccess = "OnSuccess"
-	// CleanupPolicyNever retains all migration-created artifacts; the user opts
-	// out of cleanup entirely.
+	// CleanupPolicyNever keeps the source snapshot, the staged disk and the
+	// landed disk; the user opts out of their cleanup. A PVC the migration
+	// created is still deleted with the VMMigration.
 	CleanupPolicyNever = "Never"
 )
 
@@ -713,8 +716,8 @@ type MigrationDiskInfo struct {
 	// the target provider's ImportDisk (e.g. "[datastore1] disk-id/disk-id.vmdk"
 	// for vSphere, "/var/lib/libvirt/images/disk-id.qcow2" for libvirt). It is
 	// the authoritative location the created target VirtualMachine attaches; the
-	// controller copies it into the target VirtualMachine's spec.importedDisk.path. Empty until the import
-	// completes.
+	// controller copies it into the target VirtualMachine's
+	// spec.importedDisk.path. Empty until the import completes.
 	// +optional
 	TargetPath string `json:"targetPath,omitempty"`
 

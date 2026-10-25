@@ -66,8 +66,8 @@ type VMClassSpec struct {
 	// libvirt sizes the root disk to it (20GiB when diskDefaults is unset; a
 	// disk grown from an image is never shrunk, and libvirt also grows the root
 	// disk to it on a later reconfigure) and vSphere grows the root disk to it
-	// after creation (it never shrinks a disk). type, iops and storageClass are accepted but not acted
-	// on in this release. Proxmox and mock ignore the block.
+	// after creation (it never shrinks a disk). type, iops and storageClass are
+	// accepted but not acted on in this release. Proxmox and mock ignore the block.
 	// +optional
 	DiskDefaults *DiskDefaults `json:"diskDefaults,omitempty"`
 

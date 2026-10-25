@@ -127,8 +127,8 @@ spec:
                     description: |-
                       Compress asks the source provider to compress the exported disk. It is
                       sent with the export request and a provider may ignore it: it has no
-                      effect on the libvirt s3 and nfs exports or on vSphere exports; Proxmox
-                      honours it for qcow2.
+                      effect on the libvirt s3 and nfs exports, on vSphere exports or on the
+                      Proxmox nfs export; the Proxmox s3 export honours it.
                     type: boolean
                   diskFormat:
                     description: |-
@@ -225,8 +225,9 @@ spec:
                       CreateSnapshot indicates whether to snapshot the source VM before
                       exporting its disk (default true). A snapshot the migration took is deleted
                       after the migration succeeds, after it fails for good, and when the
-                      VMMigration is deleted, unless options.cleanupPolicy is Never. When false the Snapshotting phase is
-                      skipped and the disk is exported without a snapshot.
+                      VMMigration is deleted, unless options.cleanupPolicy is Never. When false
+                      the Snapshotting phase is skipped and the disk is exported without a
+                      snapshot.
                     type: boolean
                   deleteAfterMigration:
                     default: false
@@ -849,8 +850,8 @@ spec:
                       the target provider's ImportDisk (e.g. "[datastore1] disk-id/disk-id.vmdk"
                       for vSphere, "/var/lib/libvirt/images/disk-id.qcow2" for libvirt). It is
                       the authoritative location the created target VirtualMachine attaches; the
-                      controller copies it into the target VirtualMachine's spec.importedDisk.path. Empty until the import
-                      completes.
+                      controller copies it into the target VirtualMachine's
+                      spec.importedDisk.path. Empty until the import completes.
                     type: string
                   targetSize:
                     anyOf:
