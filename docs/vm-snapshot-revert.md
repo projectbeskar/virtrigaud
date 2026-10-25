@@ -6,9 +6,11 @@ controller sent the provider's `SnapshotRevert`, the VM stayed `Ready`, and no c
 or event said that nothing happened. Since v0.4.0-rc6, and in v0.4.0, the
 `VirtualMachine` controller acts on it, under the rules below.
 
-> This flow is covered by the controller's unit and envtest tests, which drive a
-> scripted provider fake (not the mock provider binary, nor the gRPC transport). It has
-> not been validated on a real vSphere, libvirt or Proxmox host yet.
+> The controller's unit and envtest tests drive a scripted provider fake (not the mock
+> provider binary, nor the gRPC transport). The flow was also run in the lab on a real
+> vSphere, on Proxmox (an asynchronous PVE task) and on libvirt, single-host and
+> clustered; see "Snapshot revert" under "Validation" in the
+> [v0.4.0 release notes](release-notes/next.md#validation).
 
 ## How to revert
 

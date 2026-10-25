@@ -235,6 +235,7 @@ adopted Proxmox `VirtualMachine`'s UID with the stamp on its VM
 deleted with its `VirtualMachine` while its PVE name matches), or detach the
 `VirtualMachine` with `virtrigaud.io/orphan-on-delete: "true"`, delete it, and
 let adoption take the VM again with `adopt-stamped-vms` (it is then stamped).
+
 ## Clones: re-bind
 
 A `VMClone` gets the same guarantee as a `Create`: **a `Clone` sent again for

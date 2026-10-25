@@ -608,7 +608,7 @@ policy and grants → manager → providers), and rollback caveats in
   `ClusteredTargetUnsupported`, before any side effect), the CRDs applied before the
   manager (`status.storageInfo.importTarget.host` is new, and `spec.importedDisk.diskID`
   may be empty while `migrationRef` is set), and on each host the `default` pool at
-  `/var/lib/libvirt/images` with room, an `ssh://` endpoint, `qemu-img`, `flock` and
+  `/var/lib/libvirt/images` with room, a `qemu+ssh://` endpoint, `qemu-img`, `flock` and
   `timeout`, and the seed directory. Run in the lab from single-host libvirt, vSphere and
   Proxmox sources and from a clustered libvirt source to Proxmox.
   **Behaviour change:** a libvirt Host's `allocatableStorageBytes` is now the `default`

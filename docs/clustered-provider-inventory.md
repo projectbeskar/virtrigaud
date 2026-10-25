@@ -1,6 +1,6 @@
 # Clustered-provider inventory: `Host` and `HostPool`
 
-> **Status:** ADR-0007 P1, in progress. **Additive and v1beta1-safe.** Single-host
+> **Status:** ADR-0007 P1, shipped in v0.4.0 and experimental. **Additive and v1beta1-safe.** Single-host
 > providers and their VMs are unchanged (ADR-0007 D9). Shipped so far: the two
 > inventory CRDs (`Host`/`HostPool`), the `ListHosts`/`GetHostInfo` gRPC contract
 > (stubbed in every provider), the `Provider.spec.topology` discriminator, the
@@ -68,9 +68,11 @@ rationale, and phasing.
 | `spec.providerRef` | The clustered `Provider` that owns this pool. A **namespace-local** reference (`name` only): the pool must be in the Provider's namespace. |
 | `spec.strategy` | Default scheduling strategy: `Spread` (default) or `BinPack`. |
 | `spec.overcommit` | CPU/memory overcommit ratios (decimal strings, e.g. `"4.0"`). |
-| `spec.storagePools[]` | Named shared/local storage pools available in the pool. |
-| `spec.networks[]` | Named networks (bridge/VLAN/overlay) available in the pool. |
-| `spec.migration` | Default migration policy: `defaultLive` (default `true`), `defaultStorageMode` (`shared`\|`block_all`\|`block_inc`\|`stage_copy`, default `shared`), `requireTLS` (default `false`), and optional `bandwidthMbps` / `maxDowntimeMs` caps. The API records the policy; no controller acts on it in v0.4.0 (there is no live migration between the hosts of a pool). |
+| `spec.storagePools[]` | Named shared/local storage pools available in the pool. Descriptive: no controller reads it; placement uses the `Host.spec.labels`. |
+| `spec.networks[]` | Named networks (bridge/VLAN/overlay) available in the pool. Descriptive: no controller reads it; placement uses the `Host.spec.labels`. |
+| `spec.migration` | Default migration policy: `defaultLive` (default `true`), `defaultStorageMode` (`shared`\|`block_all`\|`block_inc`\|`stage_copy`, default `shared`), `requireTLS` (default `false`), and optional `bandwidthMbps` / `maxDowntimeMs` caps. The API records the policy; no controller reads it in v0.4.0 (there is no live migration between the hosts of a pool). |
+
+Only `spec.strategy` and `spec.overcommit` reach the scheduler (`internal/scheduler/score.go`, `evalcontext.go`).
 
 `status` aggregates member-host counts and readiness — see
 [`HostPool.status`](#hostpoolstatus) below.
@@ -867,7 +869,7 @@ constraint that must hold:
 
 | Filter | Rule |
 |--------|------|
-| Health + cordon | `status.health == Ready` **and** `spec.schedulable == true` (a drained or NotReady host is never a target). |
+| Health + cordon | `status.health == Ready` **and** `spec.schedulable == true` (a cordoned or NotReady host is never a target for a new VM). |
 | Capacity fit | the request fits in what is **free**: `allocatableCPU` / `allocatableMemoryMiB` times the pool's overcommit ratio, **minus** what the VMs bound to, pending on or assumed on the host already hold (see *Committed capacity* below). |
 | Hard host list | `VMPlacementPolicy.Hard.Hosts` allow-list / `Hard.ExcludedHosts` deny-list (a host id is its `Host` CR name). |
 | Hard node-selector | `Hard.NodeSelector` matched against `Host.spec.labels`. |
@@ -881,7 +883,7 @@ constraint that must hold:
 **Score** ranks the survivors and picks the best, deterministically:
 
 1. **Soft preferences** (the primary axis): `Soft.*` constraints, `PreferredFeatures`, and **preferred** host/VM (anti-)affinity apply as a bonus/penalty that ranks a preferred host above raw packing.
-2. **Strategy** (`HostPool.spec.strategy`): **Spread** favors the most free (uncommitted) capacity, then the fewest bound VMs; **BinPack** favors the tightest host that still fits.
+2. **Strategy** (`HostPool.spec.strategy`): **Spread** picks the host with the most free memory, then the most free CPU, then the fewest bound VMs; **BinPack** the reverse (least free memory, then least free CPU, then the most bound VMs), i.e. the tightest host that still fits.
 3. **Host id** ascending — the final tie-break, so the same inputs always yield the same host regardless of candidate order.
 
 ### Committed capacity
@@ -1094,12 +1096,15 @@ about a second later.
 
 ### Idempotent on re-run
 
-When the VM is already bound (its current `status.placement.host`) and that host
-still passes every filter, the scheduler **re-selects it without scoring** — a
-re-reconcile never churns a healthy placement, even if another host now scores
-better. The one exception is a **drained** host: a bound host that is now cordoned
-(`schedulable=false`) or `NotReady` fails the filter and the VM is re-placed
-elsewhere, which is exactly what an operator-initiated host drain needs.
+When the scheduler is handed a binding (a VM's current `status.placement.host`) and
+that host still passes every filter, it **re-selects it without scoring**, even if
+another host now scores better; a bound host that is cordoned (`schedulable=false`)
+or `NotReady` fails the filter. That is a property of the scheduler function. The
+VirtualMachine controller calls it only for a clustered VM that has no
+`pendingHost` yet, before its first `Create` (`resolveClusterPlacement`,
+`internal/controller/virtualmachine_controller.go`), so a VM that is already bound
+is **never moved**, whatever happens to its host. Cordoning a host stops new
+placements; it does not evacuate.
 
 ### How each `VMPlacementPolicy` construct maps (and what is deferred)
 
@@ -1110,6 +1115,7 @@ new API):
 
 - **Honored as hard filters:** `Hard.Hosts` / `Hard.ExcludedHosts` / `Hard.NodeSelector`; `ResourceConstraints.RequiredFeatures` and `Min*PerHost`; strict `HostAffinity` / `HostAntiAffinity`; required `VMAffinity` / `VMAntiAffinity`.
 - **Honored as soft scores:** `Soft.Hosts` / `ExcludedHosts` / `NodeSelector`; `ResourceConstraints.PreferredFeatures`; preferred `HostAffinity` / `HostAntiAffinity` and preferred `VMAffinity` / `VMAntiAffinity` (each term's `weight`).
+- **Ignored:** `VMPlacementPolicy.spec.priority` and `spec.weight` (no code reads them), and `VMPlacementPolicyStatus` (no controller writes it).
 - **Deferred (documented, not faked):** the vSphere/Proxmox external-orchestrator vocabulary carried in `placement_json` — `Hard.Clusters` / `Datastores` / `Folders` / `ResourcePools` / `Networks` / `Zones` / `Regions` / `Tolerations` and the cluster/datastore/zone/application (anti-)affinity rules (the flat P1 host model has no such topology; a rack/zone label goes through `NodeSelector`); `ResourceConstraints.Max*Utilization` (no live-utilization telemetry in `Host.status` yet); and all of `SecurityConstraints` (secure-boot / TPM / encryption / NUMA / isolation / trust are not reported by `Host.status` — label the hosts and use `NodeSelector`). VM affinity `TopologyKey` / `Namespaces` / `NamespaceSelector` are treated as host-level co-location; the caller supplies the already-placed VM set it wants considered. A rule's `scope` is treated as a HARD filter **only** when it is explicitly `strict`; any other value (including the empty default) is a soft preference, so a mis-set scope can never accidentally make every host infeasible.
 
 A malformed input the admin must fix — an unparseable overcommit ratio, a malformed
@@ -1287,7 +1293,7 @@ slice 4 runs `ListVMs` on every host and adds `TransferOwner` for adoption.
 | `SnapshotCreate`, `SnapshotDelete`, `SnapshotRevert` | **Routed** and **owner-checked** (slice 3), addressed by UUID like `Power`: a domain this VM does not own is `NotFound` and none of its snapshots is created, deleted or reverted. A snapshot id this provider could not have created (for example one starting with `-`, which virsh would read as an option) is `InvalidArgument` before any host is touched. Memory snapshots work as on a single host. As on a single host (#358), each refuses while another domain on the host depends on one of the VM's disks — a linked clone's overlay — (`FailedPrecondition`, `VM_DISK_IN_USE` + `VM_OPERATION_FAILED`, never naming the other domain), and is retried when that cannot be checked (`Unavailable`, `VM_DISK_CHECK_FAILED` + `VM_OPERATION_FAILED`) |
 | `Clone` (full clones only) | **Routed** to the source VM's bound host and **owner-checked** on the source (slice 3). A **linked** clone is `InvalidArgument` on a clustered provider in v0.4.0 (its overlay would depend on the source's disk for its whole life) and is not advertised. `target_host_id` must equal `source_host_id` (disks are host-local; no cross-host clone in v1), and an empty or different value is `InvalidArgument` — the provider never picks a landing host. The request must carry the target VirtualMachine's identity **with its uid**: the clone is stamped with it (never with the source's stamp). A domain of the clone's name that the target does not own is `AlreadyExists` and nothing is copied — with `VM_PREVIOUS_INCARNATION` when it is stamped for the target's namespace and name under another UID (A6.1); one it does own is an earlier attempt's clone and is reported as done (a retry is idempotent). A file already at the clone's disk or varstore path is overwritten only when no domain on any host of the Provider uses it (A6.1, [the cluster-wide disk guard](#shared-storage-the-cluster-wide-disk-guard-a61)). The clone gets **its own copy of the cloud-init seed ISO** in a per-clone seed directory, so deleting either VM never removes the other's seed. It is defined from the source's **persistent** definition (`dumpxml --inactive`), without the source disk's `<backingStore>` chain (the clone's disk is a standalone copy; only `/domain/devices/disk/backingStore` is removed, never another tool's `<metadata>`). **Single-disk sources only** for now: a source with more than one writable medium (`device='disk'`, `'lun'` or `'floppy'`, of any type) or a disk with an external data file (`<source><dataStore>`) is `InvalidArgument` before anything is copied, because only the primary disk is re-pointed at the clone's copy and any other would be shared by source and clone. Only read-only CD-ROM media (the seed among them) are not counted |
 | `GetDiskInfo` | **Routed** and **owner-checked** (slice 3): the disks are read from the checked domain's own definition, nothing is looked up by volume name, and an explicit disk path must be one of that domain's disks |
-| `ExportDisk` | **Routed** and **owner-checked** (slice 3) for the host-side backends only: `s3` (the host flattens the disk, the pod streams it to S3) and `nfs` (the host writes it to the export). The `pvc` export (and the empty legacy backend, which means `pvc`) reads the disk from the provider pod and is refused (`Unimplemented`), as on Proxmox. The export runs on the owner-checked domain's own disk; a host that is not reached over `ssh://` is refused naming the host id only, never its endpoint |
+| `ExportDisk` | **Routed** and **owner-checked** (slice 3) for the host-side backends only: `s3` (the host flattens the disk, the pod streams it to S3) and `nfs` (the host writes it to the export). The `pvc` export (and the empty legacy backend, which means `pvc`) reads the disk from the provider pod and is refused (`Unimplemented`), as on Proxmox. The export runs on the owner-checked domain's own disk; a host that is not reached over `qemu+ssh://` is refused naming the host id only, never its endpoint |
 | `TaskStatus` | **Routed** to the host encoded in the task reference (slice 3; see above) |
 | `ListVMs` | Runs on **every routable host** (slice 4; see [Listing and adoption](#listing-and-adoption-slice-4)): each `VMInfo` carries its `host_id`, and every host that could not be listed is named in `unreachable_host_ids` — never dropped, never a failed call. With an owner filter (`owner_namespace` / `owner_name`, A6.2) each host reports only that VirtualMachine's candidate domains and the answer is marked `owner_filter_applied` (the pre-schedule check, [R4](clustered-restore.md#the-pre-schedule-uniqueness-check-r4)); the provider advertises `supports_list_owner_filter` |
 | `TransferOwner` | **Routed** to `target_host_id` (slice 4): the owner re-stamp adoption uses — a serialized check-and-set with read-back (see below) |
@@ -2149,13 +2155,16 @@ one NFS pool, build `main-73e08e8`, 2026-10-22). **Run:**
   host recorded for it;
 - a host made unreachable after the target was placed: the migration waited
   (`TargetHostUnavailable`), did not re-place the target, and went on when the
-  host came back.
+  host came back;
+- later release-candidate runs: a vSphere source into the cluster over `s3` and
+  over `nfs`, and a Proxmox source into the cluster over `s3` and over `nfs`,
+  and a manager restart in the middle of an import (the migration was held as
+  `ImportOutcomeUnknown` and re-sent after 35 minutes; no duplicate disk was
+  left). See "Validation" in the [v0.4.0 release notes](release-notes/next.md#validation).
 
-**Not run:** a vSphere source into a clustered target, a Proxmox source into a
-clustered target, a host made unreachable after the disk landed, a manager
-restart in the middle of an import, an R4-held target (a previous incarnation
-on a host), and a retry after an import. Those paths are covered by unit and
-envtest tests only. The results are recorded on #414 and #416.
+**Not recorded as run:** a host made unreachable after the disk landed, an
+R4-held target (a previous incarnation on a host), and a retry after an import.
+Those paths are covered by unit and envtest tests only.
 
 The capability is `supports_routed_import` on the wire (`SupportsRoutedImport`
 in Go); this page and the other docs use the wire name.
@@ -2168,7 +2177,7 @@ in Go); this page and the other docs use the wire name.
 | `spec.storage.type` is `s3` or `nfs`, set explicitly | `pvc` is refused, and `pvc` is what an unset `spec.storage` means: the migration fails at `Validating` (`MigrationFailed`, message "storage backend "pvc" is not supported into a clustered provider ...") |
 | The target VM is in the VMMigration's own namespace (`spec.target.namespace` unset or equal to it) | The target VM proves its landed disk through a VMMigration in its own namespace. Another namespace fails at `Validating` with `ClusteredTargetUnsupported`. The **Provider** may be in another namespace (`providerRef.namespace`) if its `spec.consumerNamespaceSelector` selects the migration's namespace; otherwise the migration is refused as `ConsumerNotAllowed` ([cross-namespace references](cross-namespace-references.md)) |
 | Every host that may be chosen: the `default` pool exists, is active, and is at `/var/lib/libvirt/images`, with room for the staged object and the converted disk | The import never creates, starts or moves a pool. A host whose `default` pool is elsewhere is refused for the VM and excluded (`HOST_STORAGE_MISCONFIGURED`). A host whose `default` pool is missing, inactive or unmeasurable reports `allocatableStorageBytes` 0 and is never chosen for a migration target: create the pool on it first |
-| Every such host: an `ssh://` `Host` endpoint, `qemu-img` (with CVE-2024-4467 fixed), `flock` (util-linux) and `timeout` (coreutils), and the provider's staging directory writable by the SSH user | A host without them refuses the import before writing anything (`LandingHostRefused`, held for an administrator). See [Host prerequisites for a migration target](#host-prerequisites-for-a-migration-target) |
+| Every such host: a `qemu+ssh://` `Host` endpoint, `qemu-img` (with CVE-2024-4467 fixed), `flock` (util-linux) and `timeout` (coreutils), and the provider's staging directory writable by the SSH user | A host without them refuses the import before writing anything (`LandingHostRefused`, held for an administrator). See [Host prerequisites for a migration target](#host-prerequisites-for-a-migration-target) |
 | Every such host: the cloud-init seed directory `/var/lib/libvirt/virtrigaud-seeds` ([host prerequisites](#host-prerequisites)) | The import does not check it, but every create does (a clone checks it only when its source has a seed). On a host without it the target VM's create fails, retryably, with `refusing to stage cloud-init data`, **after** the disk has landed; the VM stays uncreated until the host is fixed |
 | The sudoers rules the host already needs for clones, exports and `qemu-img info -U` ([What the copies run as root](libvirt-clones.md#what-the-copies-run-as-root), with the `timeout` lines that a clustered Provider needs) | The routed import's own commands run as the SSH user, without `sudo`; these rules are the unchanged host prerequisites of the slice 5 amendment |
 | The target Provider runs one replica, and no other Provider mounts the same pool | The landing lock is per provider process. See [Residual: two Providers on one pool](#residual-two-providers-on-one-pool) |
@@ -2199,7 +2208,7 @@ by the cause going away; the last column says where an administrator must act.
 | Migration | `Importing=False/TargetHostUnavailable` | The landing host could not be reached, or another host the import must check could not be checked. Nothing was landed. The target is **never** moved off its host automatically | Restore the host. It is retried at 15 seconds, doubling to 5 minutes. If the host is gone for good, delete the VMMigration; if the target VM's own delete is then held (`DeleteBlocked`), set `virtrigaud.io/force-delete: "true"` on the target VirtualMachine (it was never created on that host) |
 | Migration | `Importing=False/ImportTargetPreviousIncarnation` | The landing host holds a domain of a previous incarnation of the target VM (or of this very VM) | An administrator re-attaches or removes that domain ([Backup and restore](clustered-restore.md)); retried with a backoff |
 | Migration | `Importing=False/LandingDiskInUse` | The landing file `<default pool>/<namespace>.<name>-migrated.qcow2` is used by a domain on a host of the Provider. The target is not re-placed: on a shared pool that cannot help | An administrator resolves it; retried with a backoff |
-| Migration | `Importing=False/LandingHostRefused` | The landing host refused before writing: its lock directory or the landing name is not as the provider requires, a host tool is missing, or the host is not `ssh://` | An administrator fixes the host (the cause is in the manager and provider logs); retried with a backoff |
+| Migration | `Importing=False/LandingHostRefused` | The landing host refused before writing: its lock directory or the landing name is not as the provider requires, a host tool is missing, or the host is not `qemu+ssh://` | An administrator fixes the host (the cause is in the manager and provider logs); retried with a backoff |
 | Migration | `Importing=False/ImportNotPerformed` | The host did not perform the import (another import of the disk was running, no room, a host command failed). Nothing was landed. Retried on the same host | If it lasts 5 minutes the attempt fails (reason `ImportNotPerformed`) into `spec.options.retryPolicy`; with none, the migration stays `Failed`. A retry deletes the unbound target and places a fresh one |
 | Migration | `Ready=False/ImportOutcomeUnknown` | The import's outcome is not known (the manager restarted, a deadline passed, the connection dropped). On a backend the provider lists as re-send safe (`s3` and `nfs` here) it is re-sent to the **recorded** host after 35 minutes, at most 3 times, then held for you. If the target's pending host changed since, it is held and not re-sent | Check the recorded host (`status.storageInfo.importTarget.host`) for `<default pool>/<namespace>.<name>-migrated.qcow2` and remove it if it is there. Then `kubectl annotate vmmigration <name> virtrigaud.io/operation-outcome=not-performed@<attempt id>` (the attempt id is the `lastTransitionTime` of the `ImportRequested` condition): the import is sent again, to the target's current pending host ([Provider calls whose outcome was lost](provider-call-outcomes.md)) |
 | Migration | `Ready=False/TargetHostMoved` | The target's pending host is not the host the disk was imported to, so the disk is not recorded on it | An administrator sets the target's `status.placement.pendingHost` back to `status.storageInfo.importTarget.host`, or deletes the VMMigration |
@@ -2330,7 +2339,7 @@ create.
 |---|---|
 | `AlreadyExists` + `VM_PREVIOUS_INCARNATION` (either kind) | Holds (`Importing=False/ImportTargetPreviousIncarnation`), re-sent with a backoff |
 | `FailedPrecondition` + `VM_DISK_IN_USE` (the landing file is used by a domain on a host) | Holds (`LandingDiskInUse`); never re-placed — on a shared pool that cannot help |
-| Any other `FailedPrecondition` (a symlink at the landing name, the guard, a missing host tool, a host not reached over `ssh://`) | Holds for an operator (`LandingHostRefused`) |
+| Any other `FailedPrecondition` (a symlink at the landing name, the guard, a missing host tool, a host not reached over `qemu+ssh://`) | Holds for an operator (`LandingHostRefused`) |
 | `Unavailable` + `HOST_UNAVAILABLE` or `VM_DISK_CHECK_FAILED` | Waits (`TargetHostUnavailable`); the target is never moved off its host automatically |
 | `Unavailable` + `VM_OPERATION_FAILED` (not performed) | Re-sent on the same host with a backoff (`ImportNotPerformed`). Each re-send downloads the disk again, so after 5 minutes of consecutive "not performed" answers (about five) the attempt fails (reason `ImportNotPerformed`) and `spec.options.retryPolicy` decides: a retry deletes the unbound target and places a fresh one |
 | No definite answer | The R6 rules: held, or re-sent after 35 minutes (the clustered provider reports `resend_safe_import_backends: [s3, nfs]`) — to the recorded host only |
@@ -2486,7 +2495,7 @@ In addition to [Host prerequisites](#host-prerequisites):
   `HOST_STORAGE_MISCONFIGURED` (scoped to that host: the manager may place the
   target on another one) and the create's constant text, prefixed with the
   host id. (A first create on the host creates the pool.)
-- **An `ssh://` Host endpoint**, `qemu-img`, `flock` (util-linux) and
+- **An `qemu+ssh://` Host endpoint**, `qemu-img`, `flock` (util-linux) and
   `timeout` (coreutils) on the host, as for a routed export. A host without
   `flock` or `timeout` refuses the import (`FailedPrecondition`) and never
   runs it unguarded.

@@ -5,6 +5,33 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-10-25 12:00] - v0.4.0 GA: examples, docs and scripts aligned with the code
+**Author:** @wrkode (William Rizzo)
+
+### Changed
+- `examples/**`: Provider image pins moved to `v0.4.0`; every Provider example now sets `spec.runtime.service.tls` (a Provider without it is not deployed); libvirt examples use `qemu+ssh://` endpoints and Secrets with `known_hosts`; Proxmox, vSphere and libvirt credential examples list only keys the providers read; migration, reconfigure, snapshot, console, hostpool and graceful-shutdown comments corrected; the clustered-migration examples no longer say vSphere and Proxmox sources were not run; `examples/README.md` and `examples/advanced/README.md` rewritten for v0.4.0.
+- `examples/security/*`: NetworkPolicies use the real provider pod labels and ports.
+- `docs/*.md`, `docs/adr/*`: "this/next release" wording replaced by explicit versions; clustered capability, placement, installed-CRD-check, restore and seed-directory statements corrected; `docs/clustered-provider-inventory.md` no longer says a bound VM is re-placed when its host is cordoned or `NotReady` (the scheduler runs only for a VM's first create), gives the Spread and BinPack tie-break order the scheduler uses, says that only `HostPool.spec.strategy` and `spec.overcommit` reach it and that `VMPlacementPolicy` `priority`, `weight` and status are not used, and lists the clustered-migration sources that were run; `docs/vm-snapshot-revert.md` points to the lab validation; `Host.spec.endpoint` is written `qemu+ssh://` throughout; docs and ADR indexes updated.
+- `docs/release-notes/next.md`: links are relative to `docs/release-notes/`, so they resolve in GitHub's file view.
+- `CONTRIBUTING.md`, `.github/copilot-instructions.md`, `ca-certs/README.md`, `internal/storage/README.md`: removed nonexistent make targets and paths; the storage README describes the pvc and s3 backends.
+- `Makefile`: `providers-version` lists the Proxmox and mock providers.
+- `hack/dev-watch.sh`, `hack/test-lint-locally.sh`, `hack/test-ci-locally.sh`, `hack/test-workflows-locally.sh`: use `make lint` and the Go and golangci-lint versions CI uses.
+- `charts/virtrigaud-provider-runtime/`: image pins moved to `v0.4.0`.
+- `charts/virtrigaud/templates/manager-rbac.yaml`: the comment above the CRD `get` rule says five CRDs (it listed five under "Four"); the rendered manifests are unchanged apart from that comment.
+
+### Removed
+- `examples/security/proxmox-rbac.yaml`: the provider pods run under a controller-created ServiceAccount and need no RBAC; the file also carried a PodSecurityPolicy.
+- `spec.lifecycle` blocks from examples: no controller reads `preStop`, `postStart` or `gracefulShutdownTimeout`.
+
+### Why
+The examples and docs described behaviour of v0.3.x or earlier (missing TLS block, plaintext and env-var provider setup, hooks that never run, a scheduler that moves bound VMs), which made the shipped examples fail or mislead. The code is the reference.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [ ] Config change only
+- [x] Documentation only
+
 ## [2026-10-25 08:00] - Release documentation for v0.4.0 (GA)
 **Author:** @wrkode (William Rizzo)
 
