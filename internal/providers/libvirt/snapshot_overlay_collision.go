@@ -38,13 +38,15 @@ import (
 // while a memory snapshot is stored in it (V11) — libvirt refuses the
 // snapshot before it changes anything (qemuSnapshotPrepareDiskExternal:
 // "unsupported configuration: external snapshot file for disk vda already
-// exists and is not a block device: <path>"; a file of size 0 is reused).
+// exists and is not a block device: <path>").
 // The answer used to be a generic error: the manager could not read it as
-// "nothing was done" and re-sent the create for ever (clustered) or answered
+// "nothing was done" and re-sent the create about once a minute until it held
+// the VMSnapshot for an operator (clustered), or the provider answered
 // "not created" with no hint (single host).
 //
 // The create now probes, before it runs, the overlay path of every disk the
-// snapshot would cover, and refuses a collision as a definite Conflict
+// snapshot would cover (a file that exists, is not empty and is not a block
+// device), and refuses a collision as a definite Conflict
 // (AlreadyExists on the wire, constant text, no host path): nothing was
 // created, and the same request can never succeed — the VMSnapshot fails, and
 // the operator uses another snapshot name or removes the leftover file once
@@ -62,9 +64,10 @@ const wireSnapshotOverlayExists = "snapshot create refused: an overlay file this
 	"Use another snapshot name"
 
 // overlayCollisionScript is the fixed `sh -c` script of the probe: for each
-// path argument (1-based) it prints its index when the path is what libvirt
-// refuses as an existing overlay — it exists, is not a block device and is
-// not empty (stat follows symbolic links, as libvirt's stat does).
+// path argument (1-based) it prints its index when the path exists, is not
+// empty and is not a block device (test follows symbolic links, as libvirt's
+// stat does). Anything the probe does not report and libvirt still refuses is
+// classified after the fact (overlayExistsRefusal).
 const overlayCollisionScript = `i=0; for f in "$@"; do i=$((i+1)); if [ -s "$f" ] && [ ! -b "$f" ]; then echo "$i"; fi; done`
 
 // snapshotDiskModesWithoutOverlay are the per-disk snapshot modes for which
