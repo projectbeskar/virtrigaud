@@ -769,6 +769,10 @@ jobs:
         run: |
           ./hack/verify-no-lab-names.sh
 
+      - name: Verify golangci-lint is pinned consistently
+        run: |
+          ./hack/verify-golangci-lint-version.sh
+
       - name: Verify CRD generation
         run: |
           echo "🔍 Verifying CRD generation..."
