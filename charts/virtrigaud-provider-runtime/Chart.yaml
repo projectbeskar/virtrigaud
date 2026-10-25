@@ -1,8 +1,12 @@
 apiVersion: v2
 name: virtrigaud-provider-runtime
-description: A Helm chart for running VirtRigaud provider services in Kubernetes
+description: >-
+  DEPRECATED, and removed in the next minor release. Runs a VirtRigaud provider
+  Deployment outside a Provider resource, which the VirtRigaud manager does not
+  use. Create a Provider resource instead; the manager runs the provider for it.
+deprecated: true
 type: application
-version: 0.1.1
+version: 0.1.2
 appVersion: "0.1.1"
 keywords:
   - virtrigaud
