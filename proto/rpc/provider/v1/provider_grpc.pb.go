@@ -48,7 +48,15 @@ const (
 //
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 //
-// Provider service definition
+// Provider service definition.
+//
+// Terms used in this file. A single-host provider is bound to one hypervisor
+// endpoint (Provider topology: single). A thin-client provider fronts a
+// hypervisor that places VMs itself (vSphere through vCenter, Proxmox through
+// its own cluster). A clustered provider fronts several bare hosts registered
+// as Host resources (Provider topology: cluster); the manager's scheduler
+// chooses the host and names it in target_host_id on each call. Only the
+// libvirt provider can run as a clustered provider.
 type ProviderClient interface {
 	// Validate provider configuration and connectivity
 	Validate(ctx context.Context, in *ValidateRequest, opts ...grpc.CallOption) (*ValidateResponse, error)
@@ -73,10 +81,13 @@ type ProviderClient interface {
 	// Clone operations
 	Clone(ctx context.Context, in *CloneRequest, opts ...grpc.CallOption) (*CloneResponse, error)
 	// Image preparation and import. Returns the prepared image's provider-specific
-	// location (id/path) so the manager can later create VMs from the prepared
+	// location (id/path) so the manager can create VMs from the prepared
 	// template instead of re-resolving the original source. ImagePrepareResponse
-	// is wire-compatible with the TaskResponse this previously returned (task at
-	// field 1), so the change is non-breaking (issue #154, PR-6 / #214).
+	// is wire-compatible with the TaskResponse this RPC returned before (task at
+	// field 1). Support differs by provider: libvirt, vSphere and the mock
+	// prepare an image from a URL; the Proxmox provider only verifies a
+	// reference to an existing template and refuses a URL import as an invalid
+	// spec; a clustered libvirt provider answers Unimplemented.
 	ImagePrepare(ctx context.Context, in *ImagePrepareRequest, opts ...grpc.CallOption) (*ImagePrepareResponse, error)
 	// Get provider capabilities
 	GetCapabilities(ctx context.Context, in *GetCapabilitiesRequest, opts ...grpc.CallOption) (*GetCapabilitiesResponse, error)
@@ -84,28 +95,27 @@ type ProviderClient interface {
 	ExportDisk(ctx context.Context, in *ExportDiskRequest, opts ...grpc.CallOption) (*ExportDiskResponse, error)
 	ImportDisk(ctx context.Context, in *ImportDiskRequest, opts ...grpc.CallOption) (*ImportDiskResponse, error)
 	GetDiskInfo(ctx context.Context, in *GetDiskInfoRequest, opts ...grpc.CallOption) (*GetDiskInfoResponse, error)
-	// Remove a VMMigration's nfs / s3 staging object (ADR-0011). Providers that
-	// cannot return Unimplemented and leave the backend out of
+	// Remove a VMMigration's nfs / s3 staging object. Providers that cannot
+	// return Unimplemented and leave the backend out of
 	// supported_staged_disk_delete_backends.
 	DeleteStagedDisk(ctx context.Context, in *DeleteStagedDiskRequest, opts ...grpc.CallOption) (*DeleteStagedDiskResponse, error)
 	// Remove the disk a VMMigration's ImportDisk landed for a target VM that
-	// does not use it (rc2 R7). Providers that cannot return Unimplemented and
-	// do not report supports_landed_disk_delete.
+	// does not use it. Providers that cannot return Unimplemented and do not
+	// report supports_landed_disk_delete.
 	DeleteLandedDisk(ctx context.Context, in *DeleteLandedDiskRequest, opts ...grpc.CallOption) (*DeleteLandedDiskResponse, error)
 	// List all VMs managed by this provider. A clustered provider lists every
 	// host it fronts, tags each VM with its host_id and names the hosts it could
-	// not list in unreachable_host_ids (ADR-0007 Addendum A, A3).
+	// not list in unreachable_host_ids.
 	ListVMs(ctx context.Context, in *ListVMsRequest, opts ...grpc.CallOption) (*ListVMsResponse, error)
-	// Hand a VM to a VirtualMachine by re-stamping its owner, compare-and-swap
-	// (ADR-0007 Addendum A, slice 4; single-host adoption). A clustered provider
-	// routes it to the VM's host and reports supports_routed_adoption; a
-	// single-host provider that stamps reports supports_owner_transfer.
-	// Providers that do neither return Unimplemented.
+	// Hand a VM to a VirtualMachine by re-stamping its owner, compare-and-swap.
+	// A clustered provider routes it to the VM's host and reports
+	// supports_routed_adoption; a single-host provider that stamps reports
+	// supports_owner_transfer. Providers that do neither return Unimplemented.
 	TransferOwner(ctx context.Context, in *TransferOwnerRequest, opts ...grpc.CallOption) (*TransferOwnerResponse, error)
-	// Host inventory (ADR-0007 P1). Clustered providers report the hosts they
-	// front so the operator can schedule across them; single-host and thin-client
-	// providers return codes.Unimplemented and advertise supports_clustering =
-	// false. GetHostInfo is the cheaper single-host refresh.
+	// Host inventory. Clustered providers report the hosts they front so the
+	// manager can schedule across them; single-host and thin-client providers
+	// return codes.Unimplemented and advertise supports_clustering = false.
+	// GetHostInfo is the cheaper single-host refresh.
 	ListHosts(ctx context.Context, in *ListHostsRequest, opts ...grpc.CallOption) (*ListHostsResponse, error)
 	GetHostInfo(ctx context.Context, in *GetHostInfoRequest, opts ...grpc.CallOption) (*HostInfo, error)
 }
@@ -352,7 +362,15 @@ func (c *providerClient) GetHostInfo(ctx context.Context, in *GetHostInfoRequest
 // All implementations must embed UnimplementedProviderServer
 // for forward compatibility.
 //
-// Provider service definition
+// Provider service definition.
+//
+// Terms used in this file. A single-host provider is bound to one hypervisor
+// endpoint (Provider topology: single). A thin-client provider fronts a
+// hypervisor that places VMs itself (vSphere through vCenter, Proxmox through
+// its own cluster). A clustered provider fronts several bare hosts registered
+// as Host resources (Provider topology: cluster); the manager's scheduler
+// chooses the host and names it in target_host_id on each call. Only the
+// libvirt provider can run as a clustered provider.
 type ProviderServer interface {
 	// Validate provider configuration and connectivity
 	Validate(context.Context, *ValidateRequest) (*ValidateResponse, error)
@@ -377,10 +395,13 @@ type ProviderServer interface {
 	// Clone operations
 	Clone(context.Context, *CloneRequest) (*CloneResponse, error)
 	// Image preparation and import. Returns the prepared image's provider-specific
-	// location (id/path) so the manager can later create VMs from the prepared
+	// location (id/path) so the manager can create VMs from the prepared
 	// template instead of re-resolving the original source. ImagePrepareResponse
-	// is wire-compatible with the TaskResponse this previously returned (task at
-	// field 1), so the change is non-breaking (issue #154, PR-6 / #214).
+	// is wire-compatible with the TaskResponse this RPC returned before (task at
+	// field 1). Support differs by provider: libvirt, vSphere and the mock
+	// prepare an image from a URL; the Proxmox provider only verifies a
+	// reference to an existing template and refuses a URL import as an invalid
+	// spec; a clustered libvirt provider answers Unimplemented.
 	ImagePrepare(context.Context, *ImagePrepareRequest) (*ImagePrepareResponse, error)
 	// Get provider capabilities
 	GetCapabilities(context.Context, *GetCapabilitiesRequest) (*GetCapabilitiesResponse, error)
@@ -388,28 +409,27 @@ type ProviderServer interface {
 	ExportDisk(context.Context, *ExportDiskRequest) (*ExportDiskResponse, error)
 	ImportDisk(context.Context, *ImportDiskRequest) (*ImportDiskResponse, error)
 	GetDiskInfo(context.Context, *GetDiskInfoRequest) (*GetDiskInfoResponse, error)
-	// Remove a VMMigration's nfs / s3 staging object (ADR-0011). Providers that
-	// cannot return Unimplemented and leave the backend out of
+	// Remove a VMMigration's nfs / s3 staging object. Providers that cannot
+	// return Unimplemented and leave the backend out of
 	// supported_staged_disk_delete_backends.
 	DeleteStagedDisk(context.Context, *DeleteStagedDiskRequest) (*DeleteStagedDiskResponse, error)
 	// Remove the disk a VMMigration's ImportDisk landed for a target VM that
-	// does not use it (rc2 R7). Providers that cannot return Unimplemented and
-	// do not report supports_landed_disk_delete.
+	// does not use it. Providers that cannot return Unimplemented and do not
+	// report supports_landed_disk_delete.
 	DeleteLandedDisk(context.Context, *DeleteLandedDiskRequest) (*DeleteLandedDiskResponse, error)
 	// List all VMs managed by this provider. A clustered provider lists every
 	// host it fronts, tags each VM with its host_id and names the hosts it could
-	// not list in unreachable_host_ids (ADR-0007 Addendum A, A3).
+	// not list in unreachable_host_ids.
 	ListVMs(context.Context, *ListVMsRequest) (*ListVMsResponse, error)
-	// Hand a VM to a VirtualMachine by re-stamping its owner, compare-and-swap
-	// (ADR-0007 Addendum A, slice 4; single-host adoption). A clustered provider
-	// routes it to the VM's host and reports supports_routed_adoption; a
-	// single-host provider that stamps reports supports_owner_transfer.
-	// Providers that do neither return Unimplemented.
+	// Hand a VM to a VirtualMachine by re-stamping its owner, compare-and-swap.
+	// A clustered provider routes it to the VM's host and reports
+	// supports_routed_adoption; a single-host provider that stamps reports
+	// supports_owner_transfer. Providers that do neither return Unimplemented.
 	TransferOwner(context.Context, *TransferOwnerRequest) (*TransferOwnerResponse, error)
-	// Host inventory (ADR-0007 P1). Clustered providers report the hosts they
-	// front so the operator can schedule across them; single-host and thin-client
-	// providers return codes.Unimplemented and advertise supports_clustering =
-	// false. GetHostInfo is the cheaper single-host refresh.
+	// Host inventory. Clustered providers report the hosts they front so the
+	// manager can schedule across them; single-host and thin-client providers
+	// return codes.Unimplemented and advertise supports_clustering = false.
+	// GetHostInfo is the cheaper single-host refresh.
 	ListHosts(context.Context, *ListHostsRequest) (*ListHostsResponse, error)
 	GetHostInfo(context.Context, *GetHostInfoRequest) (*HostInfo, error)
 	mustEmbedUnimplementedProviderServer()

@@ -41,9 +41,9 @@ import (
 // inventory/scheduling/migration, and firecracker/qemu are single-host provider
 // types — none may declare topology=cluster.
 //
-// EXTENSION POINT: when the "cloudhypervisor" ProviderType is added (ADR-0007 P4),
-// add ProviderTypeCloudHypervisor here — that is the single edit needed to widen
-// the allow-list; nothing else in this file hard-codes libvirt.
+// EXTENSION POINT: allowing another hypervisor type to use topology="cluster"
+// is a single edit here (add its ProviderType); nothing else in this file
+// hard-codes libvirt.
 var topologyClusterAllowedTypes = map[ProviderType]struct{}{
 	ProviderTypeLibvirt: {},
 }

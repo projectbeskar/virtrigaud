@@ -58,7 +58,9 @@ spec:
             description: VMMigrationSpec defines the desired state of VMMigration
             properties:
               metadata:
-                description: Metadata contains migration metadata
+                description: |-
+                  Metadata contains migration metadata. Descriptive only: no controller reads
+                  it.
                 properties:
                   createdBy:
                     description: CreatedBy identifies who or what created the migration
@@ -100,7 +102,21 @@ spec:
                 properties:
                   cleanupPolicy:
                     default: OnSuccess
-                    description: CleanupPolicy defines cleanup behavior
+                    description: |-
+                      CleanupPolicy decides when the artifacts the migration created are removed.
+                      The source snapshot the migration took is deleted when the migration
+                      reaches Ready, and when it fails for good, unless the policy is Never. The
+                      staged disk of an nfs or s3 migration is deleted, with OnSuccess (the
+                      default), when the migration reaches Ready and when the VMMigration is
+                      deleted; a migration that failed for good keeps it until the VMMigration
+                      is deleted. Always also deletes it when the migration fails for good. The
+                      disk a failed import landed on the target is deleted when the VMMigration
+                      is deleted (OnSuccess) or also when the migration fails for good (Always);
+                      the disk of a migration that reached Ready belongs to the target VM and is
+                      never deleted. Never keeps the snapshot, the staged disk and the landed
+                      disk. The PVC a pvc migration created is deleted with the VMMigration
+                      whatever the policy. A migration fails for good when it has no
+                      retryPolicy, or its retries are used up.
                     enum:
                     - Always
                     - OnSuccess
@@ -108,23 +124,35 @@ spec:
                     type: string
                   compress:
                     default: false
-                    description: Compress enables compression during transfer
+                    description: |-
+                      Compress asks the source provider to compress the exported disk. It is
+                      sent with the export request and a provider may ignore it: it has no
+                      effect on the libvirt s3 and nfs exports, on vSphere exports or on the
+                      Proxmox nfs export; the Proxmox s3 export honours it.
                     type: boolean
                   diskFormat:
-                    description: DiskFormat specifies the desired disk format for
-                      the target
+                    description: |-
+                      DiskFormat specifies the disk format requested for the export and, with the
+                      pvc storage backend, for the import (default qcow2). With the s3 and nfs
+                      backends the format of the staged object is not taken from this field: s3
+                      stages the source provider's native format (vmdk from vSphere, qcow2
+                      otherwise) and nfs stages qcow2; the target provider converts on import.
                     enum:
                     - qcow2
                     - vmdk
                     - raw
                     type: string
                   retryPolicy:
-                    description: RetryPolicy defines retry behavior for failed operations
+                    description: |-
+                      RetryPolicy defines retry behavior for a failed migration. Without it a
+                      failed migration is not retried. A retry restarts the migration from the
+                      Pending phase.
                     properties:
                       backoffMultiplier:
                         default: 2
-                        description: BackoffMultiplier is the multiplier for exponential
-                          backoff
+                        description: |-
+                          BackoffMultiplier is the multiplier applied to the delay between retries
+                          (default 2).
                         format: int32
                         maximum: 10
                         minimum: 1
@@ -132,42 +160,60 @@ spec:
                       maxRetries:
                         default: 3
                         description: MaxRetries is the maximum number of retry attempts
+                          (default 3).
                         format: int32
                         maximum: 10
                         minimum: 0
                         type: integer
                       retryDelay:
                         default: 5m
-                        description: RetryDelay is the delay between retry attempts
+                        description: |-
+                          RetryDelay is the delay before the first retry (default 5m). Each later
+                          retry waits retryDelay multiplied by backoffMultiplier once more, up to a
+                          maximum of 30 minutes.
                         type: string
                     type: object
                   timeout:
                     default: 4h
-                    description: Timeout defines the maximum time for the entire migration
+                    description: |-
+                      Timeout bounds how long the migration waits for the source snapshot task
+                      to finish (default 4h; 2h when options is unset). It is not applied to the
+                      other phases in this release: a disk export call has a fixed limit of one
+                      hour.
                     type: string
                   validationChecks:
-                    description: ValidationChecks defines validation checks to perform
+                    description: |-
+                      ValidationChecks defines validation checks to perform. Accepted but not
+                      acted on in this release: no check listed here runs.
                     properties:
                       checkBoot:
                         default: false
-                        description: CheckBoot verifies VM boots successfully
+                        description: CheckBoot verifies VM boots successfully. Accepted
+                          but not acted on in this release.
                         type: boolean
                       checkChecksum:
                         default: true
-                        description: CheckChecksum verifies checksums match
+                        description: CheckChecksum verifies checksums match. Accepted
+                          but not acted on in this release.
                         type: boolean
                       checkConnectivity:
                         default: false
-                        description: CheckConnectivity tests network connectivity
+                        description: CheckConnectivity tests network connectivity.
+                          Accepted but not acted on in this release.
                         type: boolean
                       checkDiskSize:
                         default: true
-                        description: CheckDiskSize verifies disk size matches
+                        description: CheckDiskSize verifies disk size matches. Accepted
+                          but not acted on in this release.
                         type: boolean
                     type: object
                   verifyChecksums:
                     default: true
-                    description: VerifyChecksums enables checksum verification
+                    description: |-
+                      VerifyChecksums asks the target provider to verify a pvc import against
+                      the checksum the source export reported (default true). Setting it to
+                      false only disables that pvc check: s3 imports always verify when the
+                      export reported a checksum, and nfs carries no checksum.
                     type: boolean
                 type: object
               source:
@@ -176,21 +222,30 @@ spec:
                   createSnapshot:
                     default: true
                     description: |-
-                      CreateSnapshot indicates whether to create a snapshot before migration.
-                      NOTE: no `omitempty` — a defaulted (+kubebuilder:default=true) non-pointer
-                      bool with omitempty silently flips an explicit `false` back to `true` on any
-                      controller round-trip (omitempty drops false, the apiserver re-defaults), so
-                      `createSnapshot: false` would be impossible to set (same footgun as #235).
+                      CreateSnapshot indicates whether to snapshot the source VM before
+                      exporting its disk (default true). A snapshot the migration took is deleted
+                      after the migration succeeds, after it fails for good, and when the
+                      VMMigration is deleted, unless options.cleanupPolicy is Never. When false
+                      the Snapshotting phase is skipped and the disk is exported without a
+                      snapshot.
                     type: boolean
                   deleteAfterMigration:
                     default: false
-                    description: DeleteAfterMigration deletes source VM after successful
-                      migration
+                    description: |-
+                      DeleteAfterMigration deletes the source VirtualMachine after the migration
+                      reaches Ready. Only the VirtualMachine the migration validated (recorded in
+                      status.sourceVMUID) is deleted, with a UID precondition: a VM re-created
+                      under the same name is kept.
                     type: boolean
                   powerOffBeforeMigration:
                     default: false
-                    description: PowerOffBeforeMigration ensures VM is powered off
-                      before migration
+                    description: |-
+                      PowerOffBeforeMigration sets the source VirtualMachine's spec.powerState to
+                      Off and waits, up to 10 minutes, until the provider reports it Off before
+                      the snapshot and export; the migration fails if it is not. A vSphere
+                      source should be powered off, since exporting a running vSphere VM fails
+                      (its disk is locked). The migration does not power the source on again;
+                      its spec.powerState stays Off.
                     type: boolean
                   providerRef:
                     description: |-
@@ -216,8 +271,12 @@ spec:
                     - name
                     type: object
                   snapshotRef:
-                    description: SnapshotRef references a specific snapshot to migrate
-                      from
+                    description: |-
+                      SnapshotRef names an existing snapshot to export from instead of taking a
+                      new one. The name is used as the provider's snapshot identifier (no
+                      VMSnapshot object is looked up), and the migration never deletes it. It
+                      is read only while createSnapshot is true; with createSnapshot false no
+                      snapshot is used and this field is ignored.
                     properties:
                       name:
                         description: Name of the referenced object
@@ -245,9 +304,8 @@ spec:
                 description: Storage defines storage backend configuration for transfer
                 properties:
                   nfs:
-                    description: |-
-                      NFS specifies NFS-based staging configuration. Surface-only in ADR-0006
-                      Slice 0 (no transfer logic yet).
+                    description: NFS specifies NFS-based staging configuration. Required
+                      when type is nfs.
                     properties:
                       export:
                         description: Export is the exported NFS path on the server
@@ -256,8 +314,8 @@ spec:
                         type: string
                       gid:
                         description: |-
-                          GID is the AUTH_SYS group ID presented to the NFS server (ADR-0006 C5).
-                          Unset = the data-plane process identity.
+                          GID is the AUTH_SYS group ID presented to the NFS server. 0 (root) is
+                          refused. Unset = the data-plane process identity.
                         format: int64
                         maximum: 4294967295
                         minimum: 0
@@ -269,21 +327,23 @@ spec:
                         type: string
                       readOnly:
                         default: false
-                        description: 'ReadOnly mounts the export read-only. No `omitempty`
-                          (defaulted bool footgun, PR #235).'
+                        description: |-
+                          ReadOnly mounts the export read-only. Accepted but not acted on in this
+                          release: it is not sent to the providers, and staging needs a writable
+                          export.
                         type: boolean
                       server:
                         description: |-
                           Server is the NFS server hostname or IP exporting the share. The host is
-                          gated by the controller's SSRF allowlist before it is dialed (ADR-0006 C3).
+                          checked by the controller before it is used, as for the S3 endpoint.
                         maxLength: 253
                         type: string
                       uid:
                         description: |-
-                          UID is the AUTH_SYS user ID presented to the NFS server (ADR-0006 C5). The
-                          export's squash policy is the real authorization boundary; this lets an
-                          operator align the client identity with the export. Unset = the data-plane
-                          process identity (the provider pod or SSH user).
+                          UID is the AUTH_SYS user ID presented to the NFS server. The export's
+                          squash policy is the real authorization boundary; this lets an operator
+                          align the client identity with the export. 0 (root) is refused. Unset =
+                          the data-plane process identity (the provider pod or SSH user).
                         format: int64
                         maximum: 4294967295
                         minimum: 0
@@ -305,12 +365,19 @@ spec:
                         type: string
                       mountPath:
                         default: /mnt/migration-storage
-                        description: MountPath within pods where PVC is mounted
+                        description: |-
+                          MountPath within pods where PVC is mounted. Accepted but not acted on in
+                          this release: provider pods always mount the PVC at
+                          /mnt/migration-storage/<pvc-name>.
                         type: string
                       name:
                         description: |-
-                          Name of an existing PVC to use for migration storage
-                          If not specified, a temporary PVC will be created
+                          Name of an existing PVC, in the VMMigration's namespace, to use for
+                          migration storage. The PVC must carry the label
+                          virtrigaud.io/component=migration-storage, which is how its owner agrees
+                          to its use; the controller refuses an unlabelled PVC. If not specified,
+                          the controller creates a labelled PVC for the migration and deletes it with
+                          the VMMigration (a PVC named here is left for its owner).
                         type: string
                       size:
                         description: |-
@@ -326,16 +393,17 @@ spec:
                     type: object
                   s3:
                     description: |-
-                      S3 specifies S3-compatible object-storage staging configuration.
-                      Surface-only in ADR-0006 Slice 0 (no transfer logic yet).
+                      S3 specifies S3-compatible object-storage staging configuration. Required
+                      when type is s3.
                     properties:
                       bucket:
                         description: Bucket is the S3 bucket for the transfer object.
                         type: string
                       credentialsSecretRef:
                         description: |-
-                          CredentialsSecretRef references a Secret holding the S3 credentials
-                          (access key / secret / optional session token). Credentials are NEVER inline.
+                          CredentialsSecretRef references a Secret, in the VMMigration's namespace,
+                          holding the S3 credentials under the keys accessKeyID and secretAccessKey
+                          and, optionally, sessionToken. Credentials are never given inline.
                         properties:
                           name:
                             description: Name of the referenced object
@@ -354,8 +422,10 @@ spec:
                       endpoint:
                         description: |-
                           Endpoint overrides the S3 endpoint (empty = AWS default; set for MinIO/Ceph RGW).
-                          The host is gated by the controller's SSRF allowlist before it is dialed
-                          (ADR-0006 C3). MaxLength bounds an apiserver-side payload.
+                          The host is checked by the controller before it is used: loopback,
+                          link-local (including the 169.254.169.254 cloud-metadata address),
+                          unspecified and multicast addresses are refused, and the operator can
+                          restrict the allowed hosts further.
                         maxLength: 263
                         type: string
                       prefix:
@@ -368,10 +438,8 @@ spec:
                         type: string
                       usePathStyle:
                         default: false
-                        description: |-
-                          UsePathStyle selects path-style addressing (needed by most non-AWS S3).
-                          No `omitempty`: defaulted bool footgun (see PR #235 / ProviderTLSSpec.Enabled) —
-                          omitempty drops an explicit false and the apiserver re-defaults it.
+                        description: UsePathStyle selects path-style addressing (needed
+                          by most non-AWS S3).
                         type: boolean
                     required:
                     - bucket
@@ -380,11 +448,13 @@ spec:
                   transferMode:
                     default: auto
                     description: |-
-                      TransferMode selects how disk bytes travel to/from the staging backend.
-                      "relay" routes bytes host→provider-pod→backend (today's pod-side path);
-                      "direct" routes bytes host→backend without a provider-pod hop; "auto"
-                      lets the controller pick based on what both providers advertise. Only
-                      "relay" is implemented today (ADR-0006 Slice 0).
+                      TransferMode selects how disk bytes travel to and from a pvc or s3
+                      staging backend. "relay" routes the bytes through the provider pod; "auto"
+                      (the default) resolves to "relay". "direct" (host to backend, without the
+                      provider pod) is not implemented: a migration that asks for it fails at
+                      the Validating phase. The nfs backend ignores this field: the data moves
+                      over NFS with qemu-img on the hypervisor host (libvirt, Proxmox) or in the
+                      provider pod (vSphere).
                     enum:
                     - auto
                     - relay
@@ -393,11 +463,16 @@ spec:
                   type:
                     default: pvc
                     description: |-
-                      Type specifies the storage backend type used to stage the transferred
-                      disk between the source and target providers. "pvc" is the only backend
-                      with transfer logic today; "nfs" and "s3" are surface-only scaffolding
-                      (ADR-0006 Slice 0) and are rejected at the Validating phase until the
-                      corresponding transfer slices land.
+                      Type specifies the storage backend used to stage the transferred disk
+                      between the source and target providers: "pvc" (a PersistentVolumeClaim
+                      the provider pods mount), "nfs" (an NFS export) or "s3" (an S3-compatible
+                      bucket). Both the source provider's status.reportedCapabilities
+                      supportedExportBackends and the target provider's supportedImportBackends
+                      must list the backend, or the migration fails at the Validating phase.
+                      The pvc backend is not supported when the source or the target Provider is
+                      clustered (topology: cluster); use nfs or s3 there. It also requires the
+                      VMMigration and both Providers to be in one namespace, because the PVC is
+                      mounted into both provider pods.
                     enum:
                     - pvc
                     - nfs
@@ -421,7 +496,10 @@ spec:
                     maxProperties: 50
                     type: object
                   classRef:
-                    description: ClassRef references the VM class for resource allocation
+                    description: |-
+                      ClassRef references the VMClass (in the VMMigration's namespace) of the
+                      target VirtualMachine. It becomes the target VM's spec.classRef. The
+                      target VirtualMachine requires a class, so set it.
                     properties:
                       name:
                         description: Name of the referenced object
@@ -432,13 +510,17 @@ spec:
                     - name
                     type: object
                   disks:
-                    description: Disks defines disk configuration overrides
+                    description: |-
+                      Disks defines disk configuration overrides. Accepted but not acted on in
+                      this release: the target VirtualMachine gets only the migrated disk.
                     items:
                       description: DiskSpec defines a disk configuration
                       properties:
                         expandPolicy:
                           default: Offline
-                          description: ExpandPolicy defines how the disk can be expanded
+                          description: |-
+                            ExpandPolicy defines how the disk can be expanded. Accepted but not acted on
+                            in this release: it is not sent to the provider.
                           enum:
                           - Online
                           - Offline
@@ -449,8 +531,10 @@ spec:
                           pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                           type: string
                         scsi:
-                          description: SCSI specifies SCSI controller configuration
-                            (vSphere only)
+                          description: |-
+                            SCSI specifies SCSI controller configuration (vSphere only). Accepted but not
+                            acted on in this release: the manager sends only the disk's name, sizeGiB
+                            and type to the provider.
                           properties:
                             controller:
                               description: |-
@@ -487,7 +571,9 @@ spec:
                           minimum: 1
                           type: integer
                         storageClass:
-                          description: StorageClass specifies the storage class (optional)
+                          description: |-
+                            StorageClass specifies the storage class (optional). Accepted but not acted
+                            on in this release: it is not sent to the provider.
                           type: string
                         type:
                           default: thin
@@ -506,8 +592,10 @@ spec:
                     maxItems: 20
                     type: array
                   imageRef:
-                    description: ImageRef references the VM image (usually not needed
-                      for migration)
+                    description: |-
+                      ImageRef references the VM image. Accepted but not acted on in this
+                      release: the target VM is created from the migrated disk, not from an
+                      image.
                     properties:
                       name:
                         description: Name of the referenced object
@@ -520,7 +608,10 @@ spec:
                   labels:
                     additionalProperties:
                       type: string
-                    description: Labels defines labels to apply to the target VM
+                    description: |-
+                      Labels defines labels to apply to the target VM. The label
+                      virtrigaud.io/adopted is reserved for the manager and is not copied (a
+                      Normal event, TargetLabelsDropped, names it); every other label is.
                     maxProperties: 50
                     type: object
                   name:
@@ -547,8 +638,9 @@ spec:
                     pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                     type: string
                   networks:
-                    description: Networks defines network configuration for target
-                      VM
+                    description: |-
+                      Networks defines network configuration for target VM. Copied to the target
+                      VirtualMachine's spec.networks.
                     items:
                       description: VMNetworkRef represents a reference to a network
                         attachment
@@ -565,7 +657,9 @@ spec:
                           pattern: ^((25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$
                           type: string
                         macAddress:
-                          description: MACAddress specifies a static MAC address (optional)
+                          description: |-
+                            MACAddress specifies a static MAC address (optional). Accepted but not acted
+                            on in this release: it is not sent to the provider.
                           pattern: ^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$
                           type: string
                         name:
@@ -605,8 +699,9 @@ spec:
                     maxItems: 10
                     type: array
                   placementRef:
-                    description: PlacementRef references placement policy for the
-                      target VM
+                    description: |-
+                      PlacementRef references the VMPlacementPolicy for the target VM. Copied to
+                      the target VirtualMachine's spec.placementRef.
                     properties:
                       name:
                         description: Name of the referenced object
@@ -618,8 +713,9 @@ spec:
                     type: object
                   powerOn:
                     default: false
-                    description: PowerOn indicates whether to power on the target
-                      VM after migration
+                    description: |-
+                      PowerOn indicates whether the target VM's desired power state is On (true)
+                      or Off (false, the default) once it is created.
                     type: boolean
                   providerRef:
                     description: ProviderRef references the target provider
@@ -711,10 +807,15 @@ spec:
                   type: object
                 type: array
               diskInfo:
-                description: DiskInfo contains information about the migrated disk
+                description: |-
+                  DiskInfo contains information about the migrated disk, recorded when the
+                  ExportDisk and ImportDisk calls return (which can be before an
+                  asynchronous task finishes).
                 properties:
                   checksum:
-                    description: Checksum is the SHA256 checksum of the disk
+                    description: |-
+                      Checksum is the SHA256 checksum of the disk. Not populated in this release;
+                      see sourceChecksum and targetChecksum.
                     type: string
                   sourceChecksum:
                     description: SourceChecksum is the SHA256 checksum of the source
@@ -749,22 +850,27 @@ spec:
                       the target provider's ImportDisk (e.g. "[datastore1] disk-id/disk-id.vmdk"
                       for vSphere, "/var/lib/libvirt/images/disk-id.qcow2" for libvirt). It is
                       the authoritative location the created target VirtualMachine attaches; the
-                      controller copies it into Spec.ImportedDisk.Path. Empty until the import
-                      completes (ADR-0006 Slice 2).
+                      controller copies it into the target VirtualMachine's
+                      spec.importedDisk.path. Empty until the import completes.
                     type: string
                   targetSize:
                     anyOf:
                     - type: integer
                     - type: string
-                    description: TargetSize is the target disk size in bytes
+                    description: |-
+                      TargetSize is the target disk size in bytes. Not populated in this
+                      release.
                     pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
                     x-kubernetes-int-or-string: true
                 type: object
               exportID:
-                description: ExportID is the export operation identifier
+                description: ExportID is the export operation identifier the source
+                  provider returned.
                 type: string
               importID:
-                description: ImportID is the import operation identifier
+                description: |-
+                  ImportID is the disk identifier the target provider returned for the
+                  imported disk.
                 type: string
               lastRetryTime:
                 description: LastRetryTime is when the migration was last retried
@@ -780,7 +886,13 @@ spec:
                 format: int64
                 type: integer
               phase:
-                description: Phase represents the current phase of the migration
+                description: |-
+                  Phase represents the current phase of the migration. A migration goes
+                  Pending, Validating, Snapshotting (when createSnapshot is true), Exporting,
+                  Importing, Creating, Validating-Target and Ready, or Failed. The
+                  Transferring and Converting phases exist in the enum but a migration does
+                  not enter them in this release: the disk is moved during Exporting and
+                  Importing, and the target provider converts the format on import.
                 enum:
                 - Pending
                 - Validating
@@ -795,7 +907,9 @@ spec:
                 - Failed
                 type: string
               progress:
-                description: Progress shows the migration operation progress
+                description: |-
+                  Progress shows the migration operation progress. Not populated in this
+                  release.
                 properties:
                   currentPhase:
                     description: CurrentPhase is the current phase being executed
@@ -864,17 +978,23 @@ spec:
                 format: date-time
                 type: string
               storageInfo:
-                description: StorageInfo contains information about intermediate storage
+                description: |-
+                  StorageInfo contains information about intermediate storage. The controller
+                  records cleanedUp, stagingLayout, stagingDigest and importTarget; url, size
+                  and uploadedAt are not populated in this release.
                 properties:
                   cleanedUp:
-                    description: CleanedUp indicates if intermediate storage was cleaned
-                      up
+                    description: |-
+                      CleanedUp is set once the post-migration cleanup (deleting the source
+                      snapshot and, when requested, the source VM) has run for a migration that
+                      reached Ready. It is also set, with nothing deleted, for a migration that
+                      reached Ready under an earlier release.
                     type: boolean
                   importTarget:
                     description: |-
                       ImportTarget is the VirtualMachine a migration's ImportDisk was sent
-                      for, recorded by the controller just before the import is sent (ADR-0011
-                      D1; every backend since rc2 R7). The staged-disk delete and the
+                      for, recorded by the controller just before the import is sent (for every
+                      storage backend). The staged-disk delete and the
                       landed-disk delete name only this VM, never the current spec.target
                       (which may have been edited since), so a target provider removes only
                       the copy it landed for that VM. Written by the controller only.
@@ -883,10 +1003,10 @@ spec:
                         description: |-
                           Host is the Host of a clustered target Provider the import was routed
                           to: the target VirtualMachine's pending host, recorded with ProviderUID
-                          before the import is sent (ADR-0007 Addendum B, B4). A re-sent import
+                          before the import is sent. A re-sent import
                           and the landed-disk and nfs staged-disk deletes go to this host only.
-                          Empty for a single-host or thin-client target. Written by the
-                          controller only.
+                          Empty unless the target Provider is clustered (topology: cluster). Written by
+                          the controller only.
                         maxLength: 253
                         type: string
                       name:
@@ -899,8 +1019,8 @@ spec:
                         type: string
                       providerUID:
                         description: |-
-                          ProviderUID is the UID of the target Provider the import was sent to
-                          (rc2 R7). The landed-disk delete is sent only to that Provider: after
+                          ProviderUID is the UID of the target Provider the import was sent to. The
+                          landed-disk delete is sent only to that Provider: after
                           spec.target.providerRef changed, or the Provider was replaced, the
                           landed disk is recorded as left behind instead. Empty for an import
                           recorded by an older manager.
@@ -914,7 +1034,9 @@ spec:
                     anyOf:
                     - type: integer
                     - type: string
-                    description: Size is the size of data in intermediate storage
+                    description: |-
+                      Size is the size of data in intermediate storage. Not populated in this
+                      release.
                     pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
                     x-kubernetes-int-or-string: true
                   stagingDigest:
@@ -922,7 +1044,7 @@ spec:
                       StagingDigest is a digest of where the last export staged the object —
                       the staging backend and its non-secret options, and the target Provider
                       (namespace, name, UID) that will delete it — recorded by the controller
-                      when the export is sent (ADR-0011 D5). The staged-disk delete is sent only
+                      when the export is sent. The staged-disk delete is sent only
                       while the migration's current spec still yields this digest: after
                       spec.storage or spec.target.providerRef changed, the object is recorded
                       as left behind instead of being looked for somewhere else. It carries no
@@ -932,9 +1054,9 @@ spec:
                   stagingLayout:
                     description: |-
                       StagingLayout is the naming layout of the migration's nfs / s3 staged
-                      object, recorded by the controller when the export is sent (ADR-0011
-                      D5). The import and the staged-disk delete use it, so a migration keeps
-                      the name it was exported under. "v2" (new migrations): nfs file
+                      object, recorded by the controller when the export is sent. The import
+                      and the staged-disk delete use it, so a migration keeps the name it was
+                      exported under. "v2" (new migrations): nfs file
                       "vmmigrations_<namespace>_<name>_<stage>.qcow2". "v1" or empty (exported
                       before v2): "vmmigrations-<namespace>-<name>-<stage>.qcow2". The s3 key is
                       the same in both. Written by the controller only.
@@ -943,11 +1065,13 @@ spec:
                     - v2
                     type: string
                   uploadedAt:
-                    description: UploadedAt is when the data was uploaded
+                    description: UploadedAt is when the data was uploaded. Not populated
+                      in this release.
                     format: date-time
                     type: string
                   url:
-                    description: URL is the intermediate storage URL
+                    description: URL is the intermediate storage URL. Not populated
+                      in this release.
                     type: string
                 type: object
               storagePVCName:
@@ -981,7 +1105,9 @@ spec:
                 description: TargetVMID is the provider-specific target VM identifier
                 type: string
               targetVMRef:
-                description: TargetVMRef references the created target VM
+                description: |-
+                  TargetVMRef references the created target VM. Not populated in this
+                  release; see targetVMUID and spec.target.name.
                 properties:
                   name:
                     description: Name of the referenced object
@@ -1008,7 +1134,9 @@ spec:
                 description: TaskRef is the current task reference for async operations
                 type: string
               validationResults:
-                description: ValidationResults contains results of validation checks
+                description: |-
+                  ValidationResults contains results of validation checks. Not populated in
+                  this release.
                 properties:
                   bootSuccess:
                     description: BootSuccess indicates if the target VM booted successfully

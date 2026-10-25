@@ -46,9 +46,10 @@
 #
 # Host.spec.endpoint is validated at admission: only
 #   qemu+ssh://[user@]host[:port]/system   (or /session)
-#   grpc://host:port                        (future host agent)
+#   grpc://host:port
 # is accepted (host = DNS name, IPv4, or [IPv6]); no query string, other path,
-# or percent-encoding.
+# or percent-encoding. The libvirt provider connects with qemu+ssh:// only; a
+# grpc:// endpoint passes validation but is never connected to, so use qemu+ssh://.
 ---
 apiVersion: infra.virtrigaud.io/v1beta1
 kind: HostPool

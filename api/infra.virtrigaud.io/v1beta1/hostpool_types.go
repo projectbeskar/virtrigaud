@@ -20,7 +20,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// Pool scheduling strategies (HostPoolSpec.Strategy, ADR-0007 D4).
+// Pool scheduling strategies (HostPoolSpec.Strategy).
 const (
 	// PoolStrategySpread spreads VMs across hosts to balance load. This is the
 	// default strategy.
@@ -30,9 +30,9 @@ const (
 	PoolStrategyBinPack = "BinPack"
 )
 
-// Intra-cluster migration storage modes (PoolMigrationPolicy.DefaultStorageMode,
-// ADR-0007 D5). Capabilities constrain which modes a given hypervisor honors; an
-// unsupported mode is rejected, never silently downgraded.
+// Intra-cluster migration storage modes (PoolMigrationPolicy.DefaultStorageMode).
+// The policy is recorded but not acted on in this release (see
+// PoolMigrationPolicy).
 const (
 	// MigrationStorageModeShared transfers RAM + device state only; both hosts
 	// see the same disk at the same path. This is the default and the clean case.
@@ -44,7 +44,7 @@ const (
 	// MigrationStorageModeBlockInc is libvirt incremental live block migration
 	// (--copy-storage-inc).
 	MigrationStorageModeBlockInc = "block_inc"
-	// MigrationStorageModeStageCopy reuses the ADR-0006 cold staging pipeline for
+	// MigrationStorageModeStageCopy is a cold copy through a staging location for
 	// tolerate-downtime local-disk moves (intra-cluster qcow2->qcow2, no format
 	// conversion).
 	MigrationStorageModeStageCopy = "stage_copy"
@@ -66,8 +66,9 @@ type OvercommitRatios struct {
 }
 
 // StoragePoolRef names a shared or local storage pool available in a HostPool.
-// Per-host visibility is asserted via Host.spec.labels (ADR-0007 D6). VirtRigaud
-// consumes pre-set-up storage; it does not deploy it.
+// Per-host visibility is asserted via Host.spec.labels. VirtRigaud consumes
+// pre-set-up storage; it does not deploy it. The list is descriptive in this
+// release: no controller reads it.
 type StoragePoolRef struct {
 	// Name is the storage pool name (e.g. a libvirt pool name or an NFS export
 	// identifier). A matching Host.spec.labels entry asserts per-host visibility.
@@ -77,7 +78,8 @@ type StoragePoolRef struct {
 }
 
 // PoolNetworkRef names a network (bridge / VLAN / overlay) available in a
-// HostPool. Per-host presence is asserted via Host.spec.labels (ADR-0007 D6).
+// HostPool. Per-host presence is asserted via Host.spec.labels. The list is
+// descriptive in this release: no controller reads it.
 type PoolNetworkRef struct {
 	// Name is the network name (e.g. the bridge name shared across the pool). A
 	// matching Host.spec.labels entry asserts per-host presence.
@@ -86,49 +88,52 @@ type PoolNetworkRef struct {
 	Name string `json:"name"`
 }
 
-// PoolMigrationPolicy is the default migration policy for VMs in a HostPool
-// (ADR-0007 D5). Individual migrations may override these defaults.
+// PoolMigrationPolicy is the default migration policy for VMs in a HostPool.
+// The API records it, but no controller reads it in this release: there is no
+// live migration between the hosts of a pool, so none of these fields has an
+// effect.
 type PoolMigrationPolicy struct {
+	// This is a defaulted bool and deliberately carries NO omitempty: with
+	// omitempty an explicit false would be dropped on marshal and the apiserver
+	// would re-apply the true default.
+
 	// DefaultLive requests live (RAM-transfer) migration by default. When false,
 	// migrations tolerate downtime and may fall back to stage_copy. Defaults
-	// true.
-	//
-	// This is a defaulted bool and deliberately carries NO omitempty (the
-	// defaulted-bool footgun, ADR-0006/PR#235): with omitempty an explicit false
-	// would be dropped on marshal and the apiserver would re-apply the true
-	// default.
+	// true. Accepted but not acted on in this release.
 	// +optional
 	// +kubebuilder:default=true
 	DefaultLive bool `json:"defaultLive"`
 
-	// DefaultStorageMode selects the intra-cluster data path (ADR-0007 D5).
-	// Defaults to shared.
+	// DefaultStorageMode selects the intra-cluster data path. Defaults to shared.
+	// Accepted but not acted on in this release.
 	// +optional
 	// +kubebuilder:default=shared
 	// +kubebuilder:validation:Enum=shared;block_all;block_inc;stage_copy
 	DefaultStorageMode string `json:"defaultStorageMode,omitempty"`
 
-	// RequireTLS forces QEMU-native --tls on the migration data path (required in
-	// regulated/banking deployments). Defaults false.
+	// RequireTLS would force QEMU-native --tls on the migration data path.
+	// Defaults false. Accepted but not acted on in this release.
 	// +optional
 	// +kubebuilder:default=false
 	RequireTLS bool `json:"requireTLS,omitempty"`
 
-	// BandwidthMbps optionally caps migration bandwidth in Mbps.
+	// BandwidthMbps optionally caps migration bandwidth in Mbps. Accepted but not
+	// acted on in this release.
 	// +optional
 	// +kubebuilder:validation:Minimum=1
 	BandwidthMbps *int32 `json:"bandwidthMbps,omitempty"`
 
 	// MaxDowntimeMs optionally caps the tolerated switchover downtime in
-	// milliseconds.
+	// milliseconds. Accepted but not acted on in this release.
 	// +optional
 	// +kubebuilder:validation:Minimum=1
 	MaxDowntimeMs *int32 `json:"maxDowntimeMs,omitempty"`
 }
 
 // HostPoolSpec is admin-authored cluster policy for a named group of Hosts under
-// one clustered Provider (ADR-0007 D3): scheduling strategy, overcommit,
-// storage/network references, and the default migration policy.
+// one clustered Provider: scheduling strategy, overcommit, storage/network
+// references, and the default migration policy. Only strategy and overcommit
+// affect placement in this release.
 //
 // Same-namespace model (security): a HostPool lives in its clustered Provider's
 // namespace, alongside that Provider's Hosts, so ProviderRef is a
@@ -138,29 +143,33 @@ type HostPoolSpec struct {
 	// the HostPool's own namespace (no cross-namespace pool injection).
 	ProviderRef LocalObjectReference `json:"providerRef"`
 
-	// Strategy is the default scheduling strategy for VMs placed in this pool.
+	// Strategy is the scheduling strategy for VMs placed in this pool: Spread
+	// balances VMs across the hosts, BinPack fills the fewest hosts first.
 	// Defaults to Spread.
 	// +optional
 	// +kubebuilder:default=Spread
 	// +kubebuilder:validation:Enum=Spread;BinPack
 	Strategy string `json:"strategy,omitempty"`
 
-	// Overcommit ratios applied when computing allocatable capacity.
+	// Overcommit ratios the scheduler applies to each host's CPU and memory when
+	// it checks whether a new VM fits.
 	// +optional
 	Overcommit *OvercommitRatios `json:"overcommit,omitempty"`
 
 	// StoragePools are the named shared/local storage pools available in this
-	// pool. Per-host visibility is asserted via Host.spec.labels (ADR-0007 D6).
-	// Consumed, not deployed, by VirtRigaud.
+	// pool. Per-host visibility is asserted via Host.spec.labels. Consumed, not
+	// deployed, by VirtRigaud. Descriptive: no controller reads this list.
 	// +optional
 	StoragePools []StoragePoolRef `json:"storagePools,omitempty"`
 
 	// Networks are the named networks (bridge/VLAN/overlay) available in this
-	// pool; per-host presence is asserted via Host.spec.labels (ADR-0007 D6).
+	// pool; per-host presence is asserted via Host.spec.labels. Descriptive: no
+	// controller reads this list.
 	// +optional
 	Networks []PoolNetworkRef `json:"networks,omitempty"`
 
-	// Migration is the default migration policy for VMs in this pool.
+	// Migration is the default migration policy for VMs in this pool. Accepted but
+	// not acted on in this release.
 	// +optional
 	Migration *PoolMigrationPolicy `json:"migration,omitempty"`
 }
@@ -172,11 +181,6 @@ type HostPoolSpec struct {
 //
 // A count of 0 (an empty pool, or no schedulable host) is written as 0 rather
 // than omitted, so it shows in the status and in the kubectl get columns.
-//
-// ADR-0007 specifies HostPool.status only in prose ("aggregates host counts +
-// readiness"). These fields are the smallest additive shape consistent with that
-// description and with the other kinds' status conventions (ObservedGeneration +
-// Conditions).
 type HostPoolStatus struct {
 	// TotalHosts is the number of Hosts whose spec.poolRef points at this pool.
 	// Only Hosts in the pool's own namespace are members (the same-namespace
@@ -216,9 +220,8 @@ type HostPoolStatus struct {
 //+kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 
 // HostPool is the Schema for the hostpools API: a named group of Hosts under one
-// clustered Provider, carrying cluster scheduling and migration policy (ADR-0007
-// P1 inventory foundation). It is additive and does not affect single-host
-// (spec.topology=single) providers (ADR-0007 D9).
+// clustered Provider, carrying cluster scheduling and migration policy. It does
+// not affect single-host (spec.topology=single) providers.
 type HostPool struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`

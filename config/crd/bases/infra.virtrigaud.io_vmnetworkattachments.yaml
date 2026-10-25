@@ -35,8 +35,12 @@ spec:
     name: v1beta1
     schema:
       openAPIV3Schema:
-        description: VMNetworkAttachment is the Schema for the vmnetworkattachments
-          API
+        description: |-
+          VMNetworkAttachment describes a network that VirtualMachines attach to
+          through spec.networks[].networkRef. The manager reads spec.network when it
+          creates a VM; no controller acts on the rest of the resource, and its
+          status is not populated, so the Ready, Connected VMs and Providers columns
+          are empty.
         properties:
           apiVersion:
             description: |-
@@ -56,56 +60,84 @@ spec:
           metadata:
             type: object
           spec:
-            description: VMNetworkAttachmentSpec defines the desired state of VMNetworkAttachment
+            description: |-
+              VMNetworkAttachmentSpec defines the desired state of VMNetworkAttachment. A
+              VirtualMachine uses an attachment through spec.networks[].networkRef, in
+              its own namespace. Only the spec.network block that matches the type of the
+              VM's Provider is read; ipAllocation, security, qos and metadata are
+              accepted but not acted on in this release.
             properties:
               ipAllocation:
-                description: IPAllocation defines IP address allocation settings
+                description: |-
+                  IPAllocation defines how IP addresses are assigned. Accepted but not acted
+                  on in this release. This applies to every field below it. Set a static IP,
+                  prefix, gateway and DNS servers on the entry of the VirtualMachine's
+                  spec.networks instead.
                 properties:
                   dhcpConfig:
-                    description: DHCPConfig contains DHCP configuration
+                    description: |-
+                      DHCPConfig contains DHCP configuration. Accepted but not acted on in this
+                      release.
                     properties:
                       clientID:
-                        description: ClientID specifies the DHCP client ID
+                        description: |-
+                          ClientID specifies the DHCP client ID. Accepted but not acted on in this
+                          release.
                         maxLength: 255
                         type: string
                       hostname:
-                        description: Hostname specifies the hostname to request
+                        description: |-
+                          Hostname specifies the hostname to request. Accepted but not acted on in
+                          this release.
                         maxLength: 255
                         type: string
                       options:
                         additionalProperties:
                           type: string
-                        description: Options contains DHCP options
+                        description: Options contains DHCP options. Accepted but not
+                          acted on in this release.
                         maxProperties: 20
                         type: object
                     type: object
                   dnsConfig:
-                    description: DNSConfig contains DNS configuration
+                    description: |-
+                      DNSConfig contains DNS configuration. Accepted but not acted on in this
+                      release.
                     properties:
                       options:
                         additionalProperties:
                           type: string
-                        description: Options contains DNS resolver options
+                        description: |-
+                          Options contains DNS resolver options. Accepted but not acted on in this
+                          release.
                         maxProperties: 10
                         type: object
                       searchDomains:
-                        description: SearchDomains contains DNS search domains
+                        description: |-
+                          SearchDomains contains DNS search domains. Accepted but not acted on in
+                          this release.
                         items:
                           type: string
                         maxItems: 10
                         type: array
                       servers:
-                        description: Servers contains DNS server addresses
+                        description: |-
+                          Servers contains DNS server addresses. Accepted but not acted on in this
+                          release.
                         items:
                           type: string
                         maxItems: 10
                         type: array
                     type: object
                   poolConfig:
-                    description: PoolConfig contains IP pool configuration
+                    description: |-
+                      PoolConfig contains IP pool configuration. Accepted but not acted on in
+                      this release.
                     properties:
                       poolRef:
-                        description: PoolRef references an IP pool resource
+                        description: |-
+                          PoolRef references an IP pool resource. Accepted but not acted on in this
+                          release.
                         properties:
                           name:
                             description: Name of the referenced object
@@ -116,40 +148,52 @@ spec:
                         - name
                         type: object
                       preferredIP:
-                        description: PreferredIP requests a preferred IP from the
-                          pool
+                        description: |-
+                          PreferredIP requests a preferred IP from the pool. Accepted but not acted
+                          on in this release.
                         pattern: ^((25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$
                         type: string
                     required:
                     - poolRef
                     type: object
                   staticConfig:
-                    description: StaticConfig contains static IP configuration
+                    description: |-
+                      StaticConfig contains static IP configuration. Accepted but not acted on
+                      in this release.
                     properties:
                       address:
-                        description: Address is the static IP address (CIDR notation)
+                        description: |-
+                          Address is the static IP address (CIDR notation). Accepted but not acted
+                          on in this release.
                         pattern: ^((25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)/([0-9]|[1-2][0-9]|3[0-2])$
                         type: string
                       gateway:
-                        description: Gateway is the default gateway
+                        description: Gateway is the default gateway. Accepted but
+                          not acted on in this release.
                         pattern: ^((25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$
                         type: string
                       routes:
-                        description: Routes contains static routes
+                        description: Routes contains static routes. Accepted but not
+                          acted on in this release.
                         items:
-                          description: StaticRoute defines a static route
+                          description: |-
+                            StaticRoute defines a static route. Accepted but not acted on in this
+                            release.
                           properties:
                             destination:
-                              description: Destination is the destination network
-                                (CIDR notation)
+                              description: |-
+                                Destination is the destination network (CIDR notation). Accepted but not
+                                acted on in this release.
                               pattern: ^((25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)/([0-9]|[1-2][0-9]|3[0-2])$
                               type: string
                             gateway:
-                              description: Gateway is the route gateway
+                              description: Gateway is the route gateway. Accepted
+                                but not acted on in this release.
                               pattern: ^((25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$
                               type: string
                             metric:
-                              description: Metric is the route metric
+                              description: Metric is the route metric. Accepted but
+                                not acted on in this release.
                               format: int32
                               maximum: 65535
                               minimum: 0
@@ -176,23 +220,33 @@ spec:
                       - Pool
                       - None
                     default: DHCP
-                    description: Type specifies the IP allocation type
+                    description: |-
+                      Type specifies the IP allocation type. Accepted but not acted on in this
+                      release.
                     type: string
                 type: object
               metadata:
-                description: Metadata contains network metadata and labels
+                description: |-
+                  Metadata contains a display name, description, environment and tags for
+                  the network. Accepted but not acted on in this release. This applies to
+                  every field below it; no controller reads them.
                 properties:
                   description:
-                    description: Description provides a description
+                    description: |-
+                      Description provides a description. Accepted but not acted on in this
+                      release.
                     maxLength: 1024
                     type: string
                   displayName:
-                    description: DisplayName is a human-readable name
+                    description: |-
+                      DisplayName is a human-readable name. Accepted but not acted on in this
+                      release.
                     maxLength: 255
                     type: string
                   environment:
-                    description: Environment specifies the environment (dev, staging,
-                      prod, qa, uat)
+                    description: |-
+                      Environment specifies the environment (dev, staging, prod, qa, uat).
+                      Accepted but not acted on in this release.
                     enum:
                     - dev
                     - staging
@@ -204,77 +258,106 @@ spec:
                   tags:
                     additionalProperties:
                       type: string
-                    description: Tags are key-value pairs for categorizing
+                    description: |-
+                      Tags are key-value pairs for categorizing. Accepted but not acted on in
+                      this release.
                     maxProperties: 50
                     type: object
                 type: object
               network:
-                description: Network defines the underlying network configuration
+                description: |-
+                  Network holds the per-hypervisor network settings. Only the block that
+                  matches the type of the VM's Provider (vsphere, libvirt or proxmox) is
+                  read; the other blocks are ignored.
                 properties:
                   libvirt:
-                    description: Libvirt contains Libvirt-specific network configuration
+                    description: |-
+                      Libvirt contains the settings used when the VM's Provider is a libvirt
+                      Provider. Only networkName, bridge.name and model are acted on.
                     properties:
                       bridge:
-                        description: Bridge specifies the bridge configuration
+                        description: |-
+                          Bridge attaches the NIC to a host bridge instead of a libvirt network.
+                          Only bridge.name is acted on. Set either bridge or networkName: when both
+                          are set, the libvirt provider uses the bridge.
                         properties:
                           delay:
-                            description: Delay is the STP forwarding delay
+                            description: |-
+                              Delay is the STP forwarding delay. Accepted but not acted on in this
+                              release.
                             format: int32
                             maximum: 30
                             minimum: 0
                             type: integer
                           name:
-                            description: Name is the bridge name
+                            description: Name is the name of the host bridge that
+                              the NIC attaches to.
                             maxLength: 15
                             pattern: ^[^<>&'"/\x00-\x1f]+$
                             type: string
                           stp:
                             default: false
-                            description: STP enables Spanning Tree Protocol
+                            description: |-
+                              STP enables Spanning Tree Protocol. Accepted but not acted on in this
+                              release.
                             type: boolean
                         required:
                         - name
                         type: object
                       driver:
-                        description: Driver specifies the network driver configuration
+                        description: |-
+                          Driver specifies the network driver configuration. Accepted but not acted
+                          on in this release. This applies to every field below it.
                         properties:
                           eventIDX:
-                            description: EventIDX enables event index
+                            description: EventIDX enables event index. Accepted but
+                              not acted on in this release.
                             type: boolean
                           ioEventFD:
-                            description: IOEventFD enables IO event file descriptor
+                            description: |-
+                              IOEventFD enables IO event file descriptor. Accepted but not acted on in
+                              this release.
                             type: boolean
                           name:
-                            description: Name is the driver name
+                            description: Name is the driver name. Accepted but not
+                              acted on in this release.
                             enum:
                             - kvm
                             - vfio
                             - uio
                             type: string
                           queues:
-                            description: Queues specifies the number of queues
+                            description: |-
+                              Queues specifies the number of queues. Accepted but not acted on in this
+                              release.
                             format: int32
                             maximum: 16
                             minimum: 1
                             type: integer
                           txMode:
-                            description: TxMode specifies the TX mode
+                            description: TxMode specifies the TX mode. Accepted but
+                              not acted on in this release.
                             enum:
                             - iothread
                             - timer
                             type: string
                         type: object
                       filterRef:
-                        description: FilterRef specifies network filter configuration
+                        description: |-
+                          FilterRef specifies network filter configuration. Accepted but not acted
+                          on in this release. This applies to every field below it.
                         properties:
                           filter:
-                            description: Filter is the filter name
+                            description: Filter is the filter name. Accepted but not
+                              acted on in this release.
                             maxLength: 255
                             type: string
                           parameters:
                             additionalProperties:
                               type: string
-                            description: Parameters contains filter parameters
+                            description: |-
+                              Parameters contains filter parameters. Accepted but not acted on in this
+                              release.
                             maxProperties: 20
                             type: object
                         required:
@@ -282,7 +365,9 @@ spec:
                         type: object
                       model:
                         default: virtio
-                        description: Model specifies the network device model
+                        description: |-
+                          Model is the NIC model of the libvirt interface. The libvirt provider uses
+                          virtio when it is empty.
                         enum:
                         - virtio
                         - e1000
@@ -292,36 +377,46 @@ spec:
                         - ne2k_pci
                         type: string
                       networkName:
-                        description: NetworkName specifies the Libvirt network name
+                        description: |-
+                          NetworkName is the name of the libvirt network (for example default) that
+                          the NIC attaches to. It is used only when bridge is not set: a bridge
+                          takes precedence.
                         maxLength: 255
                         pattern: ^[^<>&'"/\x00-\x1f]+$
                         type: string
                     type: object
                   mtu:
                     default: 1500
-                    description: MTU specifies the Maximum Transmission Unit
+                    description: |-
+                      MTU specifies the Maximum Transmission Unit. Accepted but not acted on in
+                      this release (nor is proxmox.mtu).
                     format: int32
                     maximum: 9000
                     minimum: 68
                     type: integer
                   proxmox:
-                    description: Proxmox contains Proxmox VE-specific network configuration
+                    description: |-
+                      Proxmox contains the settings used when the VM's Provider is a Proxmox VE
+                      Provider. Only bridge, model and vlanTag are acted on.
                     properties:
                       bridge:
                         description: |-
-                          Bridge specifies the Linux bridge
-                          Examples: "vmbr0", "vmbr1", "vmbr2"
+                          Bridge is the Linux bridge the NIC attaches to, for example vmbr0 or
+                          vmbr1. The CRD accepts names of the form vmbr<N> only, although the
+                          Proxmox provider accepts any Linux bridge name. When it is empty a new VM
+                          gets vmbr0 and a VM cloned from a template keeps the template's bridge.
                         maxLength: 15
                         pattern: ^vmbr[0-9]+$
                         type: string
                       firewall:
                         default: false
-                        description: Firewall enables the Proxmox firewall for this
-                          interface
+                        description: |-
+                          Firewall enables the Proxmox firewall for this interface. Accepted but not
+                          acted on in this release.
                         type: boolean
                       model:
                         default: virtio
-                        description: Model specifies the network card model
+                        description: Model is the NIC model. It defaults to virtio.
                         enum:
                         - virtio
                         - e1000
@@ -329,18 +424,24 @@ spec:
                         - vmxnet3
                         type: string
                       mtu:
-                        description: MTU specifies the Maximum Transmission Unit
+                        description: |-
+                          MTU specifies the Maximum Transmission Unit. Accepted but not acted on in
+                          this release.
                         format: int32
                         maximum: 65520
                         minimum: 68
                         type: integer
                       rateLimit:
-                        description: RateLimit specifies the bandwidth limit in MB/s
+                        description: |-
+                          RateLimit specifies the bandwidth limit in MB/s. Accepted but not acted on
+                          in this release.
                         format: int32
                         minimum: 1
                         type: integer
                       vlanTag:
-                        description: VLANTag specifies the VLAN tag
+                        description: |-
+                          VLANTag is the VLAN tag set on the NIC. When bridge is also set, the NIC
+                          gets exactly this tag, or none when it is empty.
                         format: int32
                         maximum: 4094
                         minimum: 1
@@ -361,36 +462,49 @@ spec:
                       - host-only
                       - external
                     default: bridged
-                    description: Type specifies the network type
+                    description: |-
+                      Type specifies the network type. Accepted but not acted on in this
+                      release. The network a VM joins is set by the provider block (portgroup,
+                      networkName or bridge).
                     type: string
                   vsphere:
-                    description: VSphere contains vSphere-specific network configuration
+                    description: |-
+                      VSphere contains the settings used when the VM's Provider is a vSphere
+                      Provider. Only portgroup is acted on.
                     properties:
                       adapterType:
                         default: vmxnet3
-                        description: AdapterType specifies the network adapter type
+                        description: |-
+                          AdapterType specifies the network adapter type. Accepted but not acted on
+                          in this release. The vSphere provider always creates a vmxnet3 adapter.
                         enum:
                         - vmxnet3
                         - e1000
                         - e1000e
                         type: string
                       distributedSwitch:
-                        description: DistributedSwitch specifies the distributed virtual
-                          switch
+                        description: |-
+                          DistributedSwitch specifies the distributed virtual switch. Accepted but
+                          not acted on in this release. This applies to every field below it.
                         properties:
                           name:
-                            description: Name is the name of the distributed switch
+                            description: |-
+                              Name is the name of the distributed switch. Accepted but not acted on in
+                              this release.
                             maxLength: 255
                             type: string
                           portgroupType:
-                            description: PortgroupType specifies the type of portgroup
+                            description: |-
+                              PortgroupType specifies the type of portgroup. Accepted but not acted on
+                              in this release.
                             enum:
                             - ephemeral
                             - distributed
                             type: string
                           uuid:
-                            description: UUID is the UUID of the distributed switch
-                              (optional)
+                            description: |-
+                              UUID is the UUID of the distributed switch (optional). Accepted but not
+                              acted on in this release.
                             type: string
                         required:
                         - name
@@ -398,78 +512,104 @@ spec:
                       pciSlotNumber:
                         description: |-
                           PCISlotNumber specifies the PCI slot number for the network adapter.
-                          This controls the predictable network interface naming in Linux (e.g., ens192).
-                          Common values: 192 for ens192, 224 for ens224, 256 for ens256.
-                          If not specified, vSphere assigns a slot automatically.
+                          Accepted but not acted on in this release. The manager forwards it to the
+                          provider, but the vSphere provider does not use it, so it does not control
+                          the guest's interface name.
                         format: int32
                         maximum: 1024
                         minimum: 32
                         type: integer
                       portgroup:
-                        description: Portgroup specifies the vSphere portgroup name
+                        description: |-
+                          Portgroup is the name of the vSphere network that the added vmxnet3
+                          adapter is attached to. The vSphere provider uses it for the first entry
+                          of the VM's spec.networks only.
                         maxLength: 255
                         type: string
                       security:
-                        description: Security defines portgroup security settings
+                        description: |-
+                          Security defines portgroup security settings. Accepted but not acted on in
+                          this release. This applies to every field below it.
                         properties:
                           allowForgedTransmits:
                             default: true
-                            description: AllowForgedTransmits allows forged transmits
+                            description: |-
+                              AllowForgedTransmits allows forged transmits. Accepted but not acted on in
+                              this release.
                             type: boolean
                           allowMACChanges:
                             default: true
-                            description: AllowMACChanges allows MAC address changes
+                            description: |-
+                              AllowMACChanges allows MAC address changes. Accepted but not acted on in
+                              this release.
                             type: boolean
                           allowPromiscuous:
                             default: false
-                            description: AllowPromiscuous allows promiscuous mode
+                            description: |-
+                              AllowPromiscuous allows promiscuous mode. Accepted but not acted on in
+                              this release.
                             type: boolean
                         type: object
                       trafficShaping:
-                        description: TrafficShaping defines traffic shaping settings
+                        description: |-
+                          TrafficShaping defines traffic shaping settings. Accepted but not acted on
+                          in this release. This applies to every field below it.
                         properties:
                           averageBandwidth:
-                            description: AverageBandwidth is the average bandwidth
-                              in bits per second
+                            description: |-
+                              AverageBandwidth is the average bandwidth in bits per second. Accepted but
+                              not acted on in this release.
                             format: int64
                             minimum: 1000
                             type: integer
                           burstSize:
-                            description: BurstSize is the burst size in bytes
+                            description: |-
+                              BurstSize is the burst size in bytes. Accepted but not acted on in this
+                              release.
                             format: int64
                             minimum: 1024
                             type: integer
                           enabled:
                             default: false
-                            description: Enabled indicates if traffic shaping is enabled
+                            description: |-
+                              Enabled indicates if traffic shaping is enabled. Accepted but not acted on
+                              in this release.
                             type: boolean
                           peakBandwidth:
-                            description: PeakBandwidth is the peak bandwidth in bits
-                              per second
+                            description: |-
+                              PeakBandwidth is the peak bandwidth in bits per second. Accepted but not
+                              acted on in this release.
                             format: int64
                             minimum: 1000
                             type: integer
                         type: object
                       vlan:
-                        description: VLAN specifies the VLAN configuration
+                        description: |-
+                          VLAN specifies the VLAN configuration. Accepted but not acted on in this
+                          release. This applies to every field below it: the manager forwards
+                          vlan.vlanID, but the vSphere provider does not use it, so the VLAN is the
+                          one the portgroup is configured with.
                         properties:
                           primaryVlanID:
-                            description: PrimaryVlanID specifies the primary VLAN
-                              ID for PVLAN
+                            description: |-
+                              PrimaryVlanID specifies the primary VLAN ID for PVLAN. Accepted but not
+                              acted on in this release.
                             format: int32
                             maximum: 4094
                             minimum: 1
                             type: integer
                           secondaryVlanID:
-                            description: SecondaryVlanID specifies the secondary VLAN
-                              ID for PVLAN
+                            description: |-
+                              SecondaryVlanID specifies the secondary VLAN ID for PVLAN. Accepted but
+                              not acted on in this release.
                             format: int32
                             maximum: 4094
                             minimum: 1
                             type: integer
                           trunkVlanIDs:
-                            description: TrunkVlanIDs specifies VLAN IDs for trunk
-                              type
+                            description: |-
+                              TrunkVlanIDs specifies VLAN IDs for trunk type. Accepted but not acted on
+                              in this release.
                             items:
                               format: int32
                               type: integer
@@ -477,7 +617,8 @@ spec:
                             type: array
                           type:
                             default: none
-                            description: Type specifies the VLAN type
+                            description: Type specifies the VLAN type. Accepted but
+                              not acted on in this release.
                             enum:
                             - none
                             - vlan
@@ -485,7 +626,10 @@ spec:
                             - trunk
                             type: string
                           vlanID:
-                            description: VlanID specifies the VLAN ID for VLAN type
+                            description: |-
+                              VlanID specifies the VLAN ID for VLAN type. Accepted but not acted on in
+                              this release. The manager forwards it, but the vSphere provider ignores
+                              it.
                             format: int32
                             maximum: 4094
                             minimum: 1
@@ -494,43 +638,60 @@ spec:
                     type: object
                 type: object
               qos:
-                description: QoS defines Quality of Service settings
+                description: |-
+                  QoS defines Quality of Service settings. Accepted but not acted on in this
+                  release. This applies to every field below it.
                 properties:
                   dscp:
-                    description: DSCP specifies DSCP marking
+                    description: DSCP specifies DSCP marking. Accepted but not acted
+                      on in this release.
                     format: int32
                     maximum: 63
                     minimum: 0
                     type: integer
                   egressLimit:
-                    description: EgressLimit limits outbound traffic in bits per second
+                    description: |-
+                      EgressLimit limits outbound traffic in bits per second. Accepted but not
+                      acted on in this release.
                     format: int64
                     minimum: 1000
                     type: integer
                   ingressLimit:
-                    description: IngressLimit limits inbound traffic in bits per second
+                    description: |-
+                      IngressLimit limits inbound traffic in bits per second. Accepted but not
+                      acted on in this release.
                     format: int64
                     minimum: 1000
                     type: integer
                   priority:
-                    description: Priority specifies traffic priority
+                    description: |-
+                      Priority specifies traffic priority. Accepted but not acted on in this
+                      release.
                     format: int32
                     maximum: 7
                     minimum: 0
                     type: integer
                 type: object
               security:
-                description: Security defines network security settings
+                description: |-
+                  Security defines network security settings. Accepted but not acted on in
+                  this release. This applies to every field below it.
                 properties:
                   encryption:
-                    description: Encryption contains network encryption settings
+                    description: |-
+                      Encryption contains network encryption settings. Accepted but not acted on
+                      in this release.
                     properties:
                       enabled:
                         default: false
-                        description: Enabled indicates if encryption is enabled
+                        description: |-
+                          Enabled indicates if encryption is enabled. Accepted but not acted on in
+                          this release.
                         type: boolean
                       keyRef:
-                        description: KeyRef references encryption keys
+                        description: |-
+                          KeyRef references encryption keys. Accepted but not acted on in this
+                          release.
                         properties:
                           name:
                             description: Name of the referenced object
@@ -541,7 +702,9 @@ spec:
                         - name
                         type: object
                       protocol:
-                        description: Protocol specifies the encryption protocol
+                        description: |-
+                          Protocol specifies the encryption protocol. Accepted but not acted on in
+                          this release.
                         enum:
                         - ipsec
                         - wireguard
@@ -549,12 +712,15 @@ spec:
                         type: string
                     type: object
                   firewall:
-                    description: Firewall contains firewall configuration
+                    description: |-
+                      Firewall contains firewall configuration. Accepted but not acted on in
+                      this release.
                     properties:
                       defaultPolicy:
                         default: ACCEPT
-                        description: DefaultPolicy specifies the default firewall
-                          policy
+                        description: |-
+                          DefaultPolicy specifies the default firewall policy. Accepted but not
+                          acted on in this release.
                         enum:
                         - ACCEPT
                         - DROP
@@ -562,47 +728,61 @@ spec:
                         type: string
                       enabled:
                         default: false
-                        description: Enabled indicates if firewall is enabled
+                        description: |-
+                          Enabled indicates if firewall is enabled. Accepted but not acted on in
+                          this release.
                         type: boolean
                       rules:
-                        description: Rules contains firewall rules
+                        description: Rules contains firewall rules. Accepted but not
+                          acted on in this release.
                         items:
-                          description: FirewallRule defines a firewall rule
+                          description: |-
+                            FirewallRule defines a firewall rule. Accepted but not acted on in this
+                            release.
                           properties:
                             action:
-                              description: Action specifies the rule action
+                              description: |-
+                                Action specifies the rule action. Accepted but not acted on in this
+                                release.
                               enum:
                               - ACCEPT
                               - DROP
                               - REJECT
                               type: string
                             destinationCIDR:
-                              description: DestinationCIDR specifies the destination
-                                CIDR
+                              description: |-
+                                DestinationCIDR specifies the destination CIDR. Accepted but not acted on
+                                in this release.
                               type: string
                             direction:
-                              description: Direction specifies the traffic direction
+                              description: |-
+                                Direction specifies the traffic direction. Accepted but not acted on in
+                                this release.
                               enum:
                               - in
                               - out
                               - inout
                               type: string
                             name:
-                              description: Name is the rule name
+                              description: Name is the rule name. Accepted but not
+                                acted on in this release.
                               maxLength: 255
                               type: string
                             ports:
-                              description: Ports specifies the port range
+                              description: Ports specifies the port range. Accepted
+                                but not acted on in this release.
                               properties:
                                 end:
-                                  description: End is the ending port (optional, defaults
-                                    to start)
+                                  description: |-
+                                    End is the ending port (optional, defaults to start). Accepted but not
+                                    acted on in this release.
                                   format: int32
                                   maximum: 65535
                                   minimum: 1
                                   type: integer
                                 start:
-                                  description: Start is the starting port
+                                  description: Start is the starting port. Accepted
+                                    but not acted on in this release.
                                   format: int32
                                   maximum: 65535
                                   minimum: 1
@@ -611,13 +791,17 @@ spec:
                               - start
                               type: object
                             priority:
-                              description: Priority specifies the rule priority
+                              description: |-
+                                Priority specifies the rule priority. Accepted but not acted on in this
+                                release.
                               format: int32
                               maximum: 1000
                               minimum: 1
                               type: integer
                             protocol:
-                              description: Protocol specifies the protocol
+                              description: |-
+                                Protocol specifies the protocol. Accepted but not acted on in this
+                                release.
                               enum:
                               - tcp
                               - udp
@@ -625,7 +809,9 @@ spec:
                               - all
                               type: string
                             sourceCIDR:
-                              description: SourceCIDR specifies the source CIDR
+                              description: |-
+                                SourceCIDR specifies the source CIDR. Accepted but not acted on in this
+                                release.
                               type: string
                           required:
                           - action
@@ -636,22 +822,30 @@ spec:
                         type: array
                     type: object
                   isolation:
-                    description: Isolation contains network isolation settings
+                    description: |-
+                      Isolation contains network isolation settings. Accepted but not acted on
+                      in this release.
                     properties:
                       allowedNetworks:
-                        description: AllowedNetworks contains allowed network CIDRs
+                        description: |-
+                          AllowedNetworks contains allowed network CIDRs. Accepted but not acted on
+                          in this release.
                         items:
                           type: string
                         maxItems: 50
                         type: array
                       deniedNetworks:
-                        description: DeniedNetworks contains denied network CIDRs
+                        description: |-
+                          DeniedNetworks contains denied network CIDRs. Accepted but not acted on in
+                          this release.
                         items:
                           type: string
                         maxItems: 50
                         type: array
                       mode:
-                        description: Mode specifies the isolation mode
+                        description: |-
+                          Mode specifies the isolation mode. Accepted but not acted on in this
+                          release.
                         enum:
                         - none
                         - strict
@@ -663,16 +857,22 @@ spec:
             - network
             type: object
           status:
-            description: VMNetworkAttachmentStatus defines the observed state of VMNetworkAttachment
+            description: |-
+              VMNetworkAttachmentStatus defines the observed state of
+              VMNetworkAttachment. Not populated in this release: the controller for this
+              resource only watches it and writes no status.
             properties:
               availableOn:
-                description: AvailableOn lists the providers where the network is
-                  available
+                description: |-
+                  AvailableOn lists the providers where the network is available. Not
+                  populated in this release.
                 items:
                   type: string
                 type: array
               conditions:
-                description: Conditions represent the latest available observations
+                description: |-
+                  Conditions represent the latest available observations. Not populated in
+                  this release.
                 items:
                   description: Condition contains details for one aspect of the current
                     state of this API Resource.
@@ -729,30 +929,42 @@ spec:
                   type: object
                 type: array
               connectedVMs:
-                description: ConnectedVMs is the number of VMs using this network
+                description: |-
+                  ConnectedVMs is the number of VMs using this network. Not populated in
+                  this release.
                 format: int32
                 type: integer
               ipAllocations:
-                description: IPAllocations contains current IP allocations
+                description: |-
+                  IPAllocations contains current IP allocations. Not populated in this
+                  release.
                 items:
-                  description: IPAllocation represents an IP allocation
+                  description: IPAllocation represents an IP allocation. Not populated
+                    in this release.
                   properties:
                     allocatedAt:
-                      description: AllocatedAt is when the IP was allocated
+                      description: AllocatedAt is when the IP was allocated. Not populated
+                        in this release.
                       format: date-time
                       type: string
                     ip:
-                      description: IP is the allocated IP address
+                      description: IP is the allocated IP address. Not populated in
+                        this release.
                       type: string
                     leaseExpiry:
-                      description: LeaseExpiry is when the IP lease expires (for DHCP)
+                      description: |-
+                        LeaseExpiry is when the IP lease expires (for DHCP). Not populated in this
+                        release.
                       format: date-time
                       type: string
                     mac:
-                      description: MAC is the allocated MAC address
+                      description: MAC is the allocated MAC address. Not populated
+                        in this release.
                       type: string
                     vm:
-                      description: VM is the VM name that has the IP allocated
+                      description: |-
+                        VM is the VM name that has the IP allocated. Not populated in this
+                        release.
                       type: string
                   required:
                   - ip
@@ -760,16 +972,19 @@ spec:
                   type: object
                 type: array
               message:
-                description: Message provides additional details about the current
-                  state
+                description: |-
+                  Message provides additional details about the current state. Not populated
+                  in this release.
                 type: string
               observedGeneration:
-                description: ObservedGeneration reflects the generation observed by
-                  the controller
+                description: |-
+                  ObservedGeneration reflects the generation observed by the controller. Not
+                  populated in this release.
                 format: int64
                 type: integer
               phase:
-                description: Phase represents the current phase
+                description: Phase represents the current phase. Not populated in
+                  this release.
                 enum:
                 - Pending
                 - Configuring
@@ -778,33 +993,47 @@ spec:
                 type: string
               providerStatus:
                 additionalProperties:
-                  description: ProviderNetworkStatus contains provider-specific network
-                    status
+                  description: |-
+                    ProviderNetworkStatus contains provider-specific network status. Not
+                    populated in this release.
                   properties:
                     available:
-                      description: Available indicates if the network is available
-                        on this provider
+                      description: |-
+                        Available indicates if the network is available on this provider. Not
+                        populated in this release.
                       type: boolean
                     id:
-                      description: ID is the provider-specific network identifier
+                      description: |-
+                        ID is the provider-specific network identifier. Not populated in this
+                        release.
                       type: string
                     lastUpdated:
-                      description: LastUpdated is when the status was last updated
+                      description: |-
+                        LastUpdated is when the status was last updated. Not populated in this
+                        release.
                       format: date-time
                       type: string
                     message:
-                      description: Message provides provider-specific status information
+                      description: |-
+                        Message provides provider-specific status information. Not populated in
+                        this release.
                       type: string
                     state:
-                      description: State is the provider-specific network state
+                      description: |-
+                        State is the provider-specific network state. Not populated in this
+                        release.
                       type: string
                   required:
                   - available
                   type: object
-                description: ProviderStatus contains provider-specific status information
+                description: |-
+                  ProviderStatus contains provider-specific status information. Not
+                  populated in this release.
                 type: object
               ready:
-                description: Ready indicates if the network is ready for use
+                description: |-
+                  Ready indicates if the network is ready for use. Not populated in this
+                  release.
                 type: boolean
             type: object
         type: object

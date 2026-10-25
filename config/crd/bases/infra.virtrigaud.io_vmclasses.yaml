@@ -35,7 +35,10 @@ spec:
     name: v1beta1
     schema:
       openAPIV3Schema:
-        description: VMClass is the Schema for the vmclasses API
+        description: |-
+          VMClass is a reusable hardware profile for VirtualMachines: vCPU count,
+          memory, firmware and optional disk, performance and security settings. A
+          VirtualMachine names it in spec.classRef.
         properties:
           apiVersion:
             description: |-
@@ -55,7 +58,13 @@ spec:
           metadata:
             type: object
           spec:
-            description: VMClassSpec defines the desired state of VMClass
+            description: |-
+              VMClassSpec defines the desired state of VMClass. A VMClass is a reusable
+              hardware profile that VirtualMachines name in spec.classRef. cpu and
+              memory are acted on by the vSphere, libvirt and Proxmox providers (the mock
+              provider ignores the class); the other fields are acted on only
+              by the providers named in their descriptions, and some are accepted but
+              not acted on in this release.
             properties:
               consumerNamespaceSelector:
                 description: |-
@@ -120,16 +129,27 @@ spec:
                 type: object
                 x-kubernetes-map-type: atomic
               cpu:
-                description: CPU specifies the number of virtual CPUs
+                description: |-
+                  CPU specifies the number of virtual CPUs. A VirtualMachine's
+                  spec.resources.cpu overrides it for that VirtualMachine. On a clustered
+                  Provider it is also the CPU the VirtualMachine takes from its host.
                 format: int32
                 maximum: 128
                 minimum: 1
                 type: integer
               diskDefaults:
-                description: DiskDefaults provides default disk settings
+                description: |-
+                  DiskDefaults provides default disk settings. Only size is acted on:
+                  libvirt sizes the root disk to it (20GiB when diskDefaults is unset; a
+                  disk grown from an image is never shrunk, and libvirt also grows the root
+                  disk to it on a later reconfigure) and vSphere grows the root disk to it
+                  after creation (it never shrinks a disk). type, iops and storageClass are
+                  accepted but not acted on in this release. Proxmox and mock ignore the block.
                 properties:
                   iops:
-                    description: IOPS specifies the default IOPS limit
+                    description: |-
+                      IOPS specifies the default IOPS limit. Accepted but not acted on in
+                      this release.
                     format: int32
                     maximum: 100000
                     minimum: 100
@@ -140,14 +160,18 @@ spec:
                     - type: string
                     default: 40Gi
                     description: |-
-                      Size specifies the default root disk size. It must be non-negative and
-                      below 1Pi: every value below 900Ti written in bytes, k/Ki, M/Mi, G/Gi or
-                      T/Ti is accepted, and nothing at or above 1Pi is. That is more than ten
-                      times the largest single virtual disk vSphere supports (62 TB), and keeps
-                      the GiB value the provider contract carries far inside its int32 range.
-                      The rules bound the number of integer digits per unit suffix with core
-                      CEL only (no quantity library, which Kubernetes < 1.29 lacks), so they are
-                      enforced on every supported Kubernetes version.
+                      Size specifies the default root disk size. libvirt sizes the root disk
+                      to it (a disk grown from an image is never shrunk) and vSphere grows the
+                      root disk to it after creation (it never shrinks a disk); Proxmox and mock
+                      ignore it. It must be
+                      non-negative and below 1Pi: every value below 900Ti written in bytes,
+                      k/Ki, M/Mi, G/Gi or T/Ti is accepted, and nothing at or above 1Pi is.
+                      That is more than ten times the largest single virtual disk vSphere
+                      supports (62 TB), and keeps the GiB value the provider contract carries
+                      far inside its int32 range. The rules bound the number of integer
+                      digits per unit suffix with core CEL only (no quantity library, which
+                      Kubernetes < 1.29 lacks), so they are enforced on every supported
+                      Kubernetes version.
                     pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
                     x-kubernetes-int-or-string: true
                     x-kubernetes-validations:
@@ -172,12 +196,16 @@ spec:
                         || !self.matches('^[+]?0*[1-9][0-9]')) && (!self.matches('[eE]-')
                         || !self.matches('^[+]?0*[1-9][0-9]{15}')))
                   storageClass:
-                    description: StorageClass specifies the default storage class
+                    description: |-
+                      StorageClass specifies the default storage class. Accepted but not
+                      acted on in this release.
                     maxLength: 253
                     type: string
                   type:
                     default: thin
-                    description: Type specifies the default disk type
+                    description: |-
+                      Type specifies the default disk type. Accepted but not acted on in this
+                      release.
                     enum:
                     - thin
                     - thick
@@ -190,7 +218,12 @@ spec:
               extraConfig:
                 additionalProperties:
                   type: string
-                description: ExtraConfig contains provider-specific extra configuration
+                description: |-
+                  ExtraConfig contains provider-specific extra configuration. Only the
+                  vSphere provider reads it, and only the key vsphere.hardwareVersion
+                  (the VM hardware version, for example 21). Any other key, and every key
+                  on libvirt, Proxmox and mock, is accepted but not acted on in this
+                  release.
                 maxProperties: 50
                 type: object
               firmware:
@@ -204,11 +237,20 @@ spec:
                   - UEFI
                   - EFI
                 default: BIOS
-                description: Firmware specifies the firmware type
+                description: |-
+                  Firmware specifies the firmware type: BIOS (the default) or UEFI. Only
+                  the vSphere provider reads it: UEFI selects EFI firmware and any other
+                  value selects BIOS, except that securityProfile.secureBoot or
+                  tpmEnabled force EFI firmware. The libvirt provider selects UEFI
+                  firmware only through securityProfile.secureBoot; Proxmox and mock
+                  ignore this field.
                 type: string
               guestToolsPolicy:
                 default: install
-                description: GuestToolsPolicy specifies guest tools installation policy
+                description: |-
+                  GuestToolsPolicy specifies guest tools installation policy. Accepted
+                  but not acted on in this release. The value is sent to the provider,
+                  but no provider acts on it.
                 enum:
                 - install
                 - skip
@@ -220,15 +262,16 @@ spec:
                 - type: integer
                 - type: string
                 description: |-
-                  Memory specifies memory allocation using Kubernetes resource quantities.
-                  It must be non-negative and below 100Ti: every value below 90Ti written
-                  in bytes, k/Ki, M/Mi, G/Gi or T/Ti is accepted, and nothing at or above
-                  100Ti is. That is more than three times the largest VM any supported
-                  hypervisor runs (24 TB on vSphere 8), and keeps the MiB value the provider
-                  contract carries far inside its int32 range. The rules bound the number
-                  of integer digits per unit suffix with core CEL only (no quantity
-                  library, which Kubernetes < 1.29 lacks), so they are enforced on every
-                  supported Kubernetes version.
+                  Memory specifies memory allocation using Kubernetes resource
+                  quantities. A VirtualMachine's spec.resources.memoryMiB overrides it
+                  for that VirtualMachine. It must be non-negative and below 100Ti: every
+                  value below 90Ti written in bytes, k/Ki, M/Mi, G/Gi or T/Ti is
+                  accepted, and nothing at or above 100Ti is. That is more than three
+                  times the largest VM any supported hypervisor runs (24 TB on vSphere
+                  8), and keeps the MiB value the provider contract carries far inside
+                  its int32 range. The rules bound the number of integer digits per unit
+                  suffix with core CEL only (no quantity library, which Kubernetes < 1.29
+                  lacks), so they are enforced on every supported Kubernetes version.
                 pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
                 x-kubernetes-int-or-string: true
                 x-kubernetes-validations:
@@ -249,15 +292,26 @@ spec:
                     || !self.matches('^[+]?0*[1-9][0-9]')) && (!self.matches('[eE]-')
                     || !self.matches('^[+]?0*[1-9][0-9]{14}')))
               performanceProfile:
-                description: PerformanceProfile defines performance-related settings
+                description: |-
+                  PerformanceProfile defines performance-related settings.
+                  nestedVirtualization, cpuHotAddEnabled and memoryHotAddEnabled are
+                  acted on by vSphere and libvirt, and virtualizationBasedSecurity by
+                  vSphere only; latencySensitivity and hyperThreadingPolicy are accepted
+                  but not acted on in this release. Proxmox and mock ignore the block.
                 properties:
                   cpuHotAddEnabled:
                     default: false
-                    description: CPUHotAddEnabled allows adding CPUs while VM is running
+                    description: |-
+                      CPUHotAddEnabled allows adding CPUs while the VM is running. libvirt
+                      provisions headroom for live vCPU growth; vSphere enables CPU hot-add,
+                      except when nestedVirtualization is also set (the combination is not
+                      supported there, and hot-add is skipped). Proxmox and mock ignore it.
                     type: boolean
                   hyperThreadingPolicy:
                     default: auto
-                    description: HyperThreadingPolicy controls hyperthreading usage
+                    description: |-
+                      HyperThreadingPolicy controls hyperthreading usage. Accepted but not
+                      acted on in this release.
                     enum:
                     - auto
                     - prefer
@@ -266,7 +320,9 @@ spec:
                     type: string
                   latencySensitivity:
                     default: normal
-                    description: LatencySensitivity configures latency sensitivity
+                    description: |-
+                      LatencySensitivity configures latency sensitivity. Accepted but not
+                      acted on in this release.
                     enum:
                     - low
                     - normal
@@ -274,38 +330,52 @@ spec:
                     type: string
                   memoryHotAddEnabled:
                     default: false
-                    description: MemoryHotAddEnabled allows adding memory while VM
-                      is running
+                    description: |-
+                      MemoryHotAddEnabled allows adding memory while the VM is running.
+                      libvirt provisions a memory ceiling above the initial memory for live
+                      growth; vSphere enables memory hot-add. On a clustered Provider the
+                      scheduler also reserves that headroom on the host. Proxmox and mock
+                      ignore it.
                     type: boolean
                   nestedVirtualization:
                     default: false
-                    description: NestedVirtualization enables nested virtualization
+                    description: |-
+                      NestedVirtualization enables nested virtualization. It is acted on by
+                      vSphere and libvirt; Proxmox and mock ignore it.
                     type: boolean
                   virtualizationBasedSecurity:
                     default: false
-                    description: VirtualizationBasedSecurity enables VBS features
+                    description: |-
+                      VirtualizationBasedSecurity enables VBS features. Only the vSphere
+                      provider acts on it; libvirt, Proxmox and mock ignore it.
                     type: boolean
                 type: object
               resourceLimits:
-                description: ResourceLimits defines resource limits and reservations
+                description: |-
+                  ResourceLimits defines resource limits and reservations. Accepted but
+                  not acted on in this release. The values are sent to the provider, but
+                  no provider applies them.
                 properties:
                   cpuLimit:
-                    description: CPULimit is the maximum CPU usage limit (in MHz or
-                      percentage)
+                    description: |-
+                      CPULimit is the maximum CPU usage limit (in MHz or percentage).
+                      Accepted but not acted on in this release.
                     format: int32
                     maximum: 100000
                     minimum: 100
                     type: integer
                   cpuReservation:
-                    description: CPUReservation is the guaranteed CPU allocation (in
-                      MHz)
+                    description: |-
+                      CPUReservation is the guaranteed CPU allocation (in MHz). Accepted but
+                      not acted on in this release.
                     format: int32
                     maximum: 100000
                     minimum: 0
                     type: integer
                   cpuShares:
-                    description: CPUShares defines the relative CPU priority (higher
-                      = more priority)
+                    description: |-
+                      CPUShares defines the relative CPU priority (higher = more priority).
+                      Accepted but not acted on in this release.
                     format: int32
                     maximum: 1000000
                     minimum: 1
@@ -314,29 +384,43 @@ spec:
                     anyOf:
                     - type: integer
                     - type: string
-                    description: MemoryLimit is the maximum memory usage limit
+                    description: |-
+                      MemoryLimit is the maximum memory usage limit. Accepted but not acted
+                      on in this release.
                     pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
                     x-kubernetes-int-or-string: true
                   memoryReservation:
                     anyOf:
                     - type: integer
                     - type: string
-                    description: MemoryReservation is the guaranteed memory allocation
+                    description: |-
+                      MemoryReservation is the guaranteed memory allocation. Accepted but not
+                      acted on in this release.
                     pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
                     x-kubernetes-int-or-string: true
                 type: object
               securityProfile:
-                description: SecurityProfile defines security-related settings
+                description: |-
+                  SecurityProfile defines security-related settings. secureBoot,
+                  tpmEnabled and vtdEnabled are acted on by vSphere and libvirt;
+                  tpmVersion and encryptionPolicy are accepted but not acted on in this
+                  release. Proxmox and mock ignore the block.
                 properties:
                   encryptionPolicy:
-                    description: EncryptionPolicy defines VM encryption settings
+                    description: |-
+                      EncryptionPolicy defines VM encryption settings. Accepted but not acted
+                      on in this release.
                     properties:
                       enabled:
                         default: false
-                        description: Enabled indicates if encryption should be used
+                        description: |-
+                          Enabled indicates if encryption should be used. Accepted but not acted
+                          on in this release.
                         type: boolean
                       keyProvider:
-                        description: KeyProvider specifies the encryption key provider
+                        description: |-
+                          KeyProvider specifies the encryption key provider. Accepted but not
+                          acted on in this release.
                         enum:
                         - standard
                         - hardware
@@ -344,27 +428,39 @@ spec:
                         type: string
                       requireEncryption:
                         default: false
-                        description: RequireEncryption mandates encryption (fails
-                          if not available)
+                        description: |-
+                          RequireEncryption mandates encryption (fails if not available).
+                          Accepted but not acted on in this release.
                         type: boolean
                     type: object
                   secureBoot:
                     default: false
-                    description: SecureBoot enables secure boot functionality
+                    description: |-
+                      SecureBoot enables secure boot. vSphere forces EFI firmware and enables
+                      secure boot; libvirt requests secure-boot OVMF firmware on a q35
+                      machine type. Proxmox and mock ignore it.
                     type: boolean
                   tpmEnabled:
                     default: false
-                    description: TPMEnabled enables TPM (Trusted Platform Module)
+                    description: |-
+                      TPMEnabled enables TPM (Trusted Platform Module). vSphere adds a
+                      virtual TPM and forces EFI firmware; libvirt adds an emulated TPM.
+                      Proxmox and mock ignore it.
                     type: boolean
                   tpmVersion:
-                    description: TPMVersion specifies the TPM version
+                    description: |-
+                      TPMVersion specifies the TPM version. Accepted but not acted on in this
+                      release. libvirt always emulates TPM 2.0, and vSphere adds its virtual
+                      TPM, whatever is set here.
                     enum:
                     - 1.2
                     - 2
                     type: string
                   vtdEnabled:
                     default: false
-                    description: VTDEnabled enables Intel VT-d or AMD-Vi
+                    description: |-
+                      VTDEnabled enables Intel VT-d or AMD-Vi. vSphere sets vvtd.enable;
+                      libvirt requests an emulated IOMMU. Proxmox and mock ignore it.
                     type: boolean
                 type: object
             required:
@@ -372,10 +468,14 @@ spec:
             - memory
             type: object
           status:
-            description: VMClassStatus defines the observed state of VMClass
+            description: |-
+              VMClassStatus defines the observed state of VMClass. Not populated in
+              this release. No controller writes the status of a VMClass.
             properties:
               conditions:
-                description: Conditions represent the latest available observations
+                description: |-
+                  Conditions represent the latest available observations. Not populated
+                  in this release.
                 items:
                   description: Condition contains details for one aspect of the current
                     state of this API Resource.
@@ -432,46 +532,58 @@ spec:
                   type: object
                 type: array
               observedGeneration:
-                description: ObservedGeneration reflects the generation observed by
-                  the controller
+                description: |-
+                  ObservedGeneration reflects the generation observed by the controller.
+                  Not populated in this release.
                 format: int64
                 type: integer
               supportedProviders:
-                description: SupportedProviders lists the providers that support this
-                  class
+                description: |-
+                  SupportedProviders lists the providers that support this class. Not
+                  populated in this release.
                 items:
                   type: string
                 type: array
               usedByVMs:
-                description: UsedByVMs is the number of VMs currently using this class
+                description: |-
+                  UsedByVMs is the number of VMs currently using this class. Not
+                  populated in this release.
                 format: int32
                 type: integer
               validationResults:
                 additionalProperties:
-                  description: ValidationResult represents a validation result for
-                    a provider
+                  description: |-
+                    ValidationResult represents a validation result for a provider. Not
+                    populated in this release.
                   properties:
                     lastValidated:
-                      description: LastValidated is when this validation was last
-                        performed
+                      description: |-
+                        LastValidated is when this validation was last performed. Not populated
+                        in this release.
                       format: date-time
                       type: string
                     message:
-                      description: Message provides details about the validation result
+                      description: |-
+                        Message provides details about the validation result. Not populated in
+                        this release.
                       type: string
                     valid:
-                      description: Valid indicates if the class is valid for the provider
+                      description: |-
+                        Valid indicates if the class is valid for the provider. Not populated
+                        in this release.
                       type: boolean
                     warnings:
-                      description: Warnings lists any validation warnings
+                      description: Warnings lists any validation warnings. Not populated
+                        in this release.
                       items:
                         type: string
                       type: array
                   required:
                   - valid
                   type: object
-                description: ValidationResults contains validation results for different
-                  providers
+                description: |-
+                  ValidationResults contains validation results for different providers.
+                  Not populated in this release.
                 type: object
             type: object
         type: object

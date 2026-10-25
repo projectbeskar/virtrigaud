@@ -54,9 +54,9 @@ spec:
 
           spec.classRef and spec.resources are locked while a clustered create is
           pending: status.placement.pendingHost set and status.id still empty in the
-          STORED object (ADR-0007 Addendum A, scheduler-accuracy amendment). The
-          scheduler admitted the VM at that size and every other schedule counts the
-          pending VM at it, so its owner must not grow it before the create lands.
+          STORED object. The scheduler admitted the VM at that size and every other
+          schedule counts the pending VM at it, so its owner must not grow it before
+          the create lands.
           Once the VM is created, its size is counted from status.currentResources and
           a resize-up is admitted against the host's capacity instead. A transition
           rule on the root, like the providerRef rule above; both are compared as
@@ -101,13 +101,19 @@ spec:
                 - name
                 type: object
               disks:
-                description: Disks specifies additional disks beyond the root disk
+                description: |-
+                  Disks specifies additional disks beyond the root disk. The vSphere provider
+                  attaches them at create. The libvirt and Proxmox providers attach none: a VM
+                  on such a Provider reports DisksApplied=False (reason
+                  NotSupportedByProvider), and the spec is not refused.
                 items:
                   description: DiskSpec defines a disk configuration
                   properties:
                     expandPolicy:
                       default: Offline
-                      description: ExpandPolicy defines how the disk can be expanded
+                      description: |-
+                        ExpandPolicy defines how the disk can be expanded. Accepted but not acted on
+                        in this release: it is not sent to the provider.
                       enum:
                       - Online
                       - Offline
@@ -118,8 +124,10 @@ spec:
                       pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
                       type: string
                     scsi:
-                      description: SCSI specifies SCSI controller configuration (vSphere
-                        only)
+                      description: |-
+                        SCSI specifies SCSI controller configuration (vSphere only). Accepted but not
+                        acted on in this release: the manager sends only the disk's name, sizeGiB
+                        and type to the provider.
                       properties:
                         controller:
                           description: |-
@@ -155,7 +163,9 @@ spec:
                       minimum: 1
                       type: integer
                     storageClass:
-                      description: StorageClass specifies the storage class (optional)
+                      description: |-
+                        StorageClass specifies the storage class (optional). Accepted but not acted
+                        on in this release: it is not sent to the provider.
                       type: string
                     type:
                       default: thin
@@ -202,7 +212,7 @@ spec:
                       DiskID is the provider-specific disk identifier.
                       For libvirt, this is typically the volume name. Empty only on a
                       migration's target VirtualMachine that waits for its import
-                      (MigrationRef set, ADR-0007 Addendum B).
+                      (MigrationRef set).
                     maxLength: 253
                     type: string
                   format:
@@ -258,16 +268,21 @@ spec:
                     names the VMMigration that imports the disk
                   rule: size(self.diskID) > 0 || has(self.migrationRef)
               lifecycle:
-                description: Lifecycle defines VM lifecycle configuration
+                description: |-
+                  Lifecycle defines VM lifecycle configuration. Accepted but not acted on in
+                  this release: no preStop or postStart handler runs and
+                  gracefulShutdownTimeout is not used.
                 properties:
                   gracefulShutdownTimeout:
                     default: 60s
-                    description: GracefulShutdownTimeout defines how long to wait
-                      for graceful shutdown
+                    description: |-
+                      GracefulShutdownTimeout defines how long to wait for graceful shutdown.
+                      Accepted but not acted on in this release.
                     type: string
                   postStart:
-                    description: PostStart defines actions to take after starting
-                      the VM
+                    description: |-
+                      PostStart defines actions to take after starting the VM. Accepted but not
+                      acted on in this release.
                     properties:
                       exec:
                         description: Exec specifies a command to execute
@@ -324,8 +339,9 @@ spec:
                         type: object
                     type: object
                   preStop:
-                    description: PreStop defines actions to take before stopping the
-                      VM
+                    description: |-
+                      PreStop defines actions to take before stopping the VM. Accepted but not
+                      acted on in this release.
                     properties:
                       exec:
                         description: Exec specifies a command to execute
@@ -423,7 +439,9 @@ spec:
                       pattern: ^((25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$
                       type: string
                     macAddress:
-                      description: MACAddress specifies a static MAC address (optional)
+                      description: |-
+                        MACAddress specifies a static MAC address (optional). Accepted but not acted
+                        on in this release: it is not sent to the provider.
                       pattern: ^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$
                       type: string
                     name:
@@ -463,7 +481,13 @@ spec:
                 maxItems: 10
                 type: array
               placement:
-                description: Placement provides hints for VM placement
+                description: |-
+                  Placement provides hints for VM placement. Cluster, datastore, storagePod
+                  and folder are sent to the provider with the create request and are used by
+                  the vSphere provider only; the libvirt and Proxmox providers do not use
+                  them when creating a VM. host and resourcePool are accepted but not acted
+                  on in this release. On a clustered Provider the scheduler chooses the host
+                  (see status.placement and spec.placementRef).
                 properties:
                   cluster:
                     description: Cluster specifies the target cluster
@@ -477,10 +501,13 @@ spec:
                     description: Folder specifies the target folder
                     type: string
                   host:
-                    description: Host specifies the target host
+                    description: Host specifies the target host. Accepted but not
+                      acted on in this release.
                     type: string
                   resourcePool:
-                    description: ResourcePool specifies the target resource pool
+                    description: |-
+                      ResourcePool specifies the target resource pool. Accepted but not acted on
+                      in this release.
                     type: string
                   storagePod:
                     description: |-
@@ -544,7 +571,9 @@ spec:
                     minimum: 1
                     type: integer
                   gpu:
-                    description: GPU specifies GPU configuration
+                    description: |-
+                      GPU specifies GPU configuration. Accepted but not acted on in this release:
+                      no GPU is requested from the provider.
                     properties:
                       count:
                         description: Count specifies the number of GPUs to assign
@@ -598,7 +627,9 @@ spec:
                     type: object
                 type: object
               tags:
-                description: Tags are applied to the VM for organization
+                description: |-
+                  Tags are sent to the provider with the create request. No provider applies
+                  them to the hypervisor VM in this release.
                 items:
                   type: string
                 maxItems: 50
@@ -626,7 +657,9 @@ spec:
                         type: object
                     type: object
                   ignition:
-                    description: Ignition contains Ignition configuration for CoreOS/RHEL
+                    description: |-
+                      Ignition contains Ignition configuration for CoreOS/RHEL. Accepted but not
+                      acted on in this release: only cloudInit is sent to the provider.
                     properties:
                       inline:
                         description: Inline contains inline Ignition data
@@ -757,7 +790,9 @@ spec:
                     minimum: 1
                     type: integer
                   gpu:
-                    description: GPU specifies GPU configuration
+                    description: |-
+                      GPU specifies GPU configuration. Accepted but not acted on in this release:
+                      no GPU is requested from the provider.
                     properties:
                       count:
                         description: Count specifies the number of GPUs to assign
@@ -840,17 +875,17 @@ spec:
                 type: string
               placement:
                 description: |-
-                  Placement records where a clustered ("brain-in-operator") provider's
-                  scheduler bound this VM (ADR-0007 P1, D3). It is the durable source of
-                  truth for which host runs the VM. It is written by the operator ONLY after
-                  the provider confirms the VM is on that host (create success / migration
-                  done) — never speculatively (honesty-first). Empty for VMs on single-host
-                  or thin-client providers, which have no operator-owned placement decision.
+                  Placement records where the scheduler of a clustered Provider
+                  (spec.topology=cluster) bound this VM. It is the durable record of which
+                  host runs the VM. The operator writes the host only after the provider
+                  confirms the VM is on it (create success), never speculatively. Empty for
+                  VMs on single-host Providers, which have no operator-owned placement
+                  decision.
                 properties:
                   excludedHosts:
                     description: |-
                       ExcludedHosts are Hosts (CR names) the scheduler must not choose for this
-                      VM (ADR-0007 Addendum A, A2 amendment). A Host is added when a Create on
+                      VM. A Host is added when a Create on
                       it was refused with a name conflict (ALREADY_EXISTS: a same-named domain
                       this VM does not own is there), which proves this VM has no domain on it
                       and that this attempt created nothing there (an earlier failed attempt
@@ -870,7 +905,7 @@ spec:
                   host:
                     description: |-
                       Host is the Host (CR name) this VM is bound to run on — the durable
-                      placement source of truth (D3). Written only after the provider confirms.
+                      placement record. Written only after the provider confirms.
                       Every per-VM provider call for the VM is routed to this host.
                     type: string
                   lastScheduledTime:
@@ -881,10 +916,9 @@ spec:
                   memoryCeilingMiB:
                     description: |-
                       MemoryCeilingMiB is the memory the VM's domain may reach on its host
-                      beyond its current allocation, recorded when its create was scheduled
-                      (ADR-0007 Addendum A, scheduler-accuracy amendment): the balloon maximum
-                      provisioned for a VMClass with memory hot-add (4× the initial memory), or
-                      0 when none was provisioned. A guest can deflate its balloon up to it, so
+                      beyond its current allocation, recorded when its create was scheduled: the
+                      balloon maximum provisioned for a VMClass with memory hot-add (4× the
+                      initial memory), or 0 when none was provisioned. A guest can deflate its balloon up to it, so
                       the clustered accounting counts the VM's memory at the larger of this and
                       its current size. It is kept when the VM is bound. Unset means unknown (a
                       VM scheduled by an older manager): the VMClass's hot-add setting is used
@@ -899,7 +933,7 @@ spec:
                   pendingHost:
                     description: |-
                       PendingHost is the Host (CR name) an in-flight, not yet confirmed Create is
-                      aimed at (ADR-0007 Addendum A, A2). The operator writes it, with Pool,
+                      aimed at. The operator writes it, with Pool,
                       through a resourceVersion-checked status update BEFORE calling Create, so
                       a retry after a lost write or a Create that ran past its deadline lands on
                       the SAME host instead of being scheduled onto another one (which could
@@ -911,8 +945,8 @@ spec:
                     type: string
                   pendingResources:
                     description: |-
-                      PendingResources is the size the scheduler admitted a pending Create at
-                      (ADR-0007 Addendum A, scheduler-accuracy amendment). The operator writes
+                      PendingResources is the size the scheduler admitted a pending Create at.
+                      The operator writes
                       it with PendingHost, in the same checked status update, and clears it when
                       the VM is bound or the pending host is released. While a create is
                       pending, the VM counts at this size against its host's capacity, and a
@@ -965,7 +999,9 @@ spec:
               provider:
                 additionalProperties:
                   type: string
-                description: Provider contains provider-specific details
+                description: |-
+                  Provider contains provider-specific details the provider reported when it
+                  last described the VM (and, for an adopted VM, when it was adopted).
                 type: object
                 x-kubernetes-preserve-unknown-fields: true
               reconfigureTaskRef:
@@ -1039,7 +1075,9 @@ spec:
                 - snapshotName
                 type: object
               snapshots:
-                description: Snapshots lists available snapshots for this VM
+                description: |-
+                  Snapshots lists available snapshots for this VM. Not populated in this
+                  release; list the VMSnapshot objects whose spec.vmRef names the VM instead.
                 items:
                   description: VMSnapshotInfo provides information about a VM snapshot
                   properties:
