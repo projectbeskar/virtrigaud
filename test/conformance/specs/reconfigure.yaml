@@ -1,0 +1,111 @@
+# VirtualMachine reconfigure conformance test.
+#
+# Needs --set IMAGE=<an existing VMImage the Provider can boot>. The VM is
+# created powered off, so the change is one every provider applies (a
+# powered-off reconfigure); resizing a running VM needs the
+# vm-reconfigure-online capability. See test/conformance/README.md.
+
+- name: vm-reconfigure-offline
+  description: Change a powered-off VirtualMachine's CPU and memory through spec.resources and wait until status.currentResources records the new size.
+  requiredCapabilities:
+    - vm-create
+    - vm-reconfigure
+    - vm-delete
+  timeout: 20m
+  labels:
+    category: reconfigure
+    priority: medium
+  steps:
+    - name: create-vmclass
+      type: create
+      resource:
+        apiVersion: infra.virtrigaud.io/v1beta1
+        kind: VMClass
+        metadata:
+          name: vcts-${RUN}-rc-class
+        spec:
+          cpu: 1
+          memory: 1Gi
+
+    - name: create-vm-powered-off
+      type: create
+      resource:
+        apiVersion: infra.virtrigaud.io/v1beta1
+        kind: VirtualMachine
+        metadata:
+          name: vcts-${RUN}-rc-vm
+        spec:
+          providerRef:
+            name: ${PROVIDER}
+          classRef:
+            name: vcts-${RUN}-rc-class
+          imageRef:
+            name: ${IMAGE}
+          powerState: "Off"
+
+    - name: wait-vm-ready-and-off
+      type: wait
+      timeout: 10m
+      resource:
+        apiVersion: infra.virtrigaud.io/v1beta1
+        kind: VirtualMachine
+        metadata:
+          name: vcts-${RUN}-rc-vm
+      waitFor:
+        condition: Ready
+      validate:
+        - path: .status.powerState
+          operator: eq
+          value: "Off"
+        - path: .status.currentResources.cpu
+          operator: eq
+          value: 1
+
+    - name: resize-vm
+      type: update
+      resource:
+        apiVersion: infra.virtrigaud.io/v1beta1
+        kind: VirtualMachine
+        metadata:
+          name: vcts-${RUN}-rc-vm
+        spec:
+          resources:
+            cpu: 2
+            memoryMiB: 2048
+      validate:
+        - path: .spec.resources.cpu
+          operator: eq
+          value: 2
+
+    - name: wait-resize-recorded
+      type: wait
+      timeout: 5m
+      resource:
+        apiVersion: infra.virtrigaud.io/v1beta1
+        kind: VirtualMachine
+        metadata:
+          name: vcts-${RUN}-rc-vm
+      waitFor:
+        condition: Ready
+      validate:
+        - path: .status.currentResources.cpu
+          operator: eq
+          value: 2
+        - path: .status.currentResources.memoryMiB
+          operator: eq
+          value: 2048
+
+    - name: validate-resize-applied
+      type: validate
+      resource:
+        apiVersion: infra.virtrigaud.io/v1beta1
+        kind: VirtualMachine
+        metadata:
+          name: vcts-${RUN}-rc-vm
+      validate:
+        - path: .status.conditions[?(@.type=="Reconfiguring")].status
+          operator: eq
+          value: "False"
+        - path: .status.powerState
+          operator: eq
+          value: "Off"

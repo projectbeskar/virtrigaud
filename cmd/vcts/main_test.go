@@ -55,7 +55,7 @@ const validSpec = `- name: vm-create-delete
         apiVersion: infra.virtrigaud.io/v1beta1
         kind: VMClass
         metadata:
-          name: test-class
+          name: vcts-${RUN}-class
 `
 
 // invalidSpec has an upper-case test name, which the validator rejects.
@@ -192,22 +192,28 @@ func TestRunAgainstAPIServer(t *testing.T) {
 		assert.NotContains(t, err.Error(), "no kind is registered")
 	})
 
-	t.Run("existing provider is read and the suite runs", func(t *testing.T) {
-		outDir := t.TempDir()
-		out, err := runVcts(t, "run", "--kubeconfig", env.KubeconfigPath, "-p", "conf-provider",
-			"-o", outDir)
-		// The shipped steps are not executable yet (the runner reports them as
-		// not implemented), so the run is reported as failed. What matters is
-		// that it got past reading the Provider.
-		require.ErrorIs(t, err, errTestsFailed)
-		assert.Contains(t, out, "Provider: conf-provider")
-		assert.Contains(t, out, "Total Tests: 2")
-		assert.FileExists(t, filepath.Join(outDir, "results.json"))
+	t.Run("existing provider is read; the shipped suite needs --set IMAGE", func(t *testing.T) {
+		_, err := runVcts(t, "run", "--kubeconfig", env.KubeconfigPath, "-p", "conf-provider",
+			"-o", t.TempDir())
+		// The run got past reading the Provider and stops before creating
+		// anything because the shipped specifications need ${IMAGE}.
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "pass --set IMAGE=<value>")
+	})
+
+	t.Run("--set rejects a built-in variable and a malformed entry", func(t *testing.T) {
+		_, err := runVcts(t, "run", "--kubeconfig", env.KubeconfigPath, "-p", "conf-provider", "--set", "RUN=x")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "cannot be overridden")
+		_, err = runVcts(t, "run", "--kubeconfig", env.KubeconfigPath, "-p", "conf-provider", "--set", "IMAGE")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "want NAME=value")
 	})
 
 	t.Run("list", func(t *testing.T) {
 		out, err := runVcts(t, "list")
 		require.NoError(t, err)
 		assert.Contains(t, out, "vm-create-delete")
+		assert.Contains(t, out, "Variables (--set): IMAGE")
 	})
 }

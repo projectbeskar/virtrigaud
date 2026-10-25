@@ -1,0 +1,147 @@
+# VMClone conformance test.
+#
+# Needs --set IMAGE=<an existing VMImage the Provider can boot>. The source VM
+# is powered off (some providers clone only a powered-off source) and the
+# clone is a full clone. The clone's target VirtualMachine is created by the
+# operator; it carries the run and test labels (spec.target.labels), so the
+# cleanup finds and deletes it. See test/conformance/README.md.
+
+- name: vm-clone-full
+  description: Full-clone a powered-off VirtualMachine with a VMClone, wait until the clone is Ready and its target VirtualMachine is bound to a provider VM, then delete the target.
+  requiredCapabilities:
+    - vm-create
+    - vm-clone
+    - vm-delete
+  timeout: 30m
+  labels:
+    category: clone
+    priority: medium
+  steps:
+    - name: create-vmclass
+      type: create
+      resource:
+        apiVersion: infra.virtrigaud.io/v1beta1
+        kind: VMClass
+        metadata:
+          name: vcts-${RUN}-cl-class
+        spec:
+          cpu: 1
+          memory: 1Gi
+
+    - name: create-source-vm-powered-off
+      type: create
+      resource:
+        apiVersion: infra.virtrigaud.io/v1beta1
+        kind: VirtualMachine
+        metadata:
+          name: vcts-${RUN}-cl-src
+        spec:
+          providerRef:
+            name: ${PROVIDER}
+          classRef:
+            name: vcts-${RUN}-cl-class
+          imageRef:
+            name: ${IMAGE}
+          powerState: "Off"
+
+    - name: wait-source-ready-and-off
+      type: wait
+      timeout: 10m
+      resource:
+        apiVersion: infra.virtrigaud.io/v1beta1
+        kind: VirtualMachine
+        metadata:
+          name: vcts-${RUN}-cl-src
+      waitFor:
+        condition: Ready
+      validate:
+        - path: .status.powerState
+          operator: eq
+          value: "Off"
+
+    - name: create-clone
+      type: create
+      resource:
+        apiVersion: infra.virtrigaud.io/v1beta1
+        kind: VMClone
+        metadata:
+          name: vcts-${RUN}-cl-clone
+        spec:
+          source:
+            vmRef:
+              name: vcts-${RUN}-cl-src
+          target:
+            name: vcts-${RUN}-cl-dst
+            labels:
+              vcts.virtrigaud.io/run: ${RUN}
+              vcts.virtrigaud.io/test: ${TEST}
+          options:
+            type: FullClone
+            powerOn: false
+
+    - name: wait-clone-ready
+      type: wait
+      timeout: 20m
+      resource:
+        apiVersion: infra.virtrigaud.io/v1beta1
+        kind: VMClone
+        metadata:
+          name: vcts-${RUN}-cl-clone
+      waitFor:
+        condition: Ready
+      validate:
+        - path: .status.phase
+          operator: eq
+          value: Ready
+        - path: .status.targetRef.name
+          operator: eq
+          value: vcts-${RUN}-cl-dst
+
+    - name: wait-target-provisioned
+      type: wait
+      timeout: 5m
+      resource:
+        apiVersion: infra.virtrigaud.io/v1beta1
+        kind: VirtualMachine
+        metadata:
+          name: vcts-${RUN}-cl-dst
+      waitFor:
+        condition: Provisioned
+      validate:
+        - path: .status.powerState
+          operator: eq
+          value: "Off"
+
+    - name: validate-target
+      type: validate
+      resource:
+        apiVersion: infra.virtrigaud.io/v1beta1
+        kind: VirtualMachine
+        metadata:
+          name: vcts-${RUN}-cl-dst
+      validate:
+        - path: .spec.providerRef.name
+          operator: eq
+          value: ${PROVIDER}
+        - path: .metadata.annotations.virtrigaud\.io/cloned-from
+          operator: eq
+          value: vcts-${RUN}-cl-src
+
+    - name: delete-target
+      type: delete
+      resource:
+        apiVersion: infra.virtrigaud.io/v1beta1
+        kind: VirtualMachine
+        metadata:
+          name: vcts-${RUN}-cl-dst
+
+    - name: wait-target-deleted
+      type: wait
+      timeout: 10m
+      resource:
+        apiVersion: infra.virtrigaud.io/v1beta1
+        kind: VirtualMachine
+        metadata:
+          name: vcts-${RUN}-cl-dst
+      waitFor:
+        condition: Deleted

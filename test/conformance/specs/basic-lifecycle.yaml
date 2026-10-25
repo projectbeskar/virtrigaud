@@ -1,196 +1,179 @@
+# VirtualMachine lifecycle conformance tests.
+#
+# Variables: ${RUN}, ${TEST}, ${PROVIDER} and ${NAMESPACE} are set by vcts;
+# ${IMAGE} must name an existing VMImage, in the run's namespace, that the
+# Provider under test can boot: vcts run --provider <name> --set IMAGE=<vmimage>.
+# See test/conformance/README.md for the format.
+
 - name: vm-create-delete
-  description: Test basic VM creation and deletion
+  description: Create a VirtualMachine, wait until the Provider reports it running and Ready, check its status, then delete it and wait until it is gone.
   requiredCapabilities:
     - vm-create
     - vm-delete
-  timeout: 10m
+  timeout: 20m
   labels:
     category: basic
     priority: high
   steps:
-    - name: create-provider
-      type: create
-      timeout: 30s
-      resource:
-        apiVersion: infra.virtrigaud.io/v1beta1
-        kind: Provider
-        metadata:
-          name: test-provider
-          namespace: default
-        spec:
-          type: test
-          endpoint: "test://localhost"
-          runtime:
-            mode: Remote
-            image: "virtrigaud/provider-mock:latest"
-            service:
-              port: 9090
-      validate:
-        - path: .status.phase
-          operator: eq
-          value: Ready
-
     - name: create-vmclass
       type: create
-      timeout: 30s
       resource:
         apiVersion: infra.virtrigaud.io/v1beta1
         kind: VMClass
         metadata:
-          name: test-class
-          namespace: default
+          name: vcts-${RUN}-cd-class
         spec:
-          cpu: 2
-          memoryMiB: 2048
-
-    - name: create-vmimage
-      type: create
-      timeout: 30s
-      resource:
-        apiVersion: infra.virtrigaud.io/v1beta1
-        kind: VMImage
-        metadata:
-          name: test-image
-          namespace: default
-        spec:
-          source:
-            http:
-              url: "http://example.com/test.ova"
+          cpu: 1
+          memory: 1Gi
 
     - name: create-vm
       type: create
-      timeout: 5m
       resource:
         apiVersion: infra.virtrigaud.io/v1beta1
         kind: VirtualMachine
         metadata:
-          name: test-vm
-          namespace: default
+          name: vcts-${RUN}-cd-vm
         spec:
           providerRef:
-            name: test-provider
+            name: ${PROVIDER}
           classRef:
-            name: test-class
+            name: vcts-${RUN}-cd-class
           imageRef:
-            name: test-image
+            name: ${IMAGE}
+          powerState: "On"
+      validate:
+        - path: .spec.powerState
+          operator: eq
+          value: "On"
 
-    - name: wait-vm-ready
+    - name: wait-vm-ready-and-on
       type: wait
-      timeout: 3m
+      timeout: 10m
+      resource:
+        apiVersion: infra.virtrigaud.io/v1beta1
+        kind: VirtualMachine
+        metadata:
+          name: vcts-${RUN}-cd-vm
       waitFor:
         condition: Ready
-        timeout: 3m
+      validate:
+        - path: .status.powerState
+          operator: eq
+          value: "On"
 
-    - name: validate-vm-running
+    - name: validate-vm-status
       type: validate
       resource:
         apiVersion: infra.virtrigaud.io/v1beta1
         kind: VirtualMachine
         metadata:
-          name: test-vm
-          namespace: default
+          name: vcts-${RUN}-cd-vm
       validate:
-        - path: .status.powerState
-          operator: eq
-          value: "On"
         - path: .status.id
           operator: exists
+        - path: .status.phase
+          operator: eq
+          value: Running
+        - path: .status.boundProvider.name
+          operator: eq
+          value: ${PROVIDER}
+        - path: .status.currentResources.cpu
+          operator: eq
+          value: 1
+        - path: .status.currentResources.memoryMiB
+          operator: eq
+          value: 1024
 
     - name: delete-vm
       type: delete
-      timeout: 3m
       resource:
         apiVersion: infra.virtrigaud.io/v1beta1
         kind: VirtualMachine
         metadata:
-          name: test-vm
-          namespace: default
+          name: vcts-${RUN}-cd-vm
 
     - name: wait-vm-deleted
       type: wait
-      timeout: 2m
+      timeout: 10m
+      resource:
+        apiVersion: infra.virtrigaud.io/v1beta1
+        kind: VirtualMachine
+        metadata:
+          name: vcts-${RUN}-cd-vm
       waitFor:
         condition: Deleted
-        timeout: 2m
-
-  cleanup:
-    - name: cleanup-vmimage
-      type: delete
-      resource:
-        apiVersion: infra.virtrigaud.io/v1beta1
-        kind: VMImage
-        metadata:
-          name: test-image
-          namespace: default
-
-    - name: cleanup-vmclass
-      type: delete
-      resource:
-        apiVersion: infra.virtrigaud.io/v1beta1
-        kind: VMClass
-        metadata:
-          name: test-class
-          namespace: default
-
-    - name: cleanup-provider
-      type: delete
-      resource:
-        apiVersion: infra.virtrigaud.io/v1beta1
-        kind: Provider
-        metadata:
-          name: test-provider
-          namespace: default
 
 - name: vm-power-cycle
-  description: Test VM power operations
+  description: Power a running VirtualMachine off and on again through spec.powerState and wait for the Provider to report each state.
   requiredCapabilities:
     - vm-create
     - vm-power
     - vm-delete
-  timeout: 8m
+  timeout: 20m
   labels:
     category: basic
     priority: medium
   steps:
+    - name: create-vmclass
+      type: create
+      resource:
+        apiVersion: infra.virtrigaud.io/v1beta1
+        kind: VMClass
+        metadata:
+          name: vcts-${RUN}-pc-class
+        spec:
+          cpu: 1
+          memory: 1Gi
+
     - name: create-vm
       type: create
-      timeout: 5m
       resource:
         apiVersion: infra.virtrigaud.io/v1beta1
         kind: VirtualMachine
         metadata:
-          name: test-power-vm
-          namespace: default
+          name: vcts-${RUN}-pc-vm
         spec:
           providerRef:
-            name: test-provider
+            name: ${PROVIDER}
           classRef:
-            name: test-class
+            name: vcts-${RUN}-pc-class
           imageRef:
-            name: test-image
+            name: ${IMAGE}
           powerState: "On"
 
     - name: wait-vm-running
       type: wait
-      timeout: 3m
-      waitFor:
-        condition: Running
-
-    - name: power-off-vm
-      type: update
-      timeout: 2m
+      timeout: 10m
       resource:
         apiVersion: infra.virtrigaud.io/v1beta1
         kind: VirtualMachine
         metadata:
-          name: test-power-vm
-          namespace: default
+          name: vcts-${RUN}-pc-vm
+      waitFor:
+        condition: Running
+      validate:
+        - path: .status.conditions[?(@.type=="Ready")].status
+          operator: eq
+          value: "True"
+
+    - name: power-off-vm
+      type: update
+      resource:
+        apiVersion: infra.virtrigaud.io/v1beta1
+        kind: VirtualMachine
+        metadata:
+          name: vcts-${RUN}-pc-vm
         spec:
           powerState: "Off"
 
     - name: wait-vm-stopped
       type: wait
-      timeout: 2m
+      timeout: 5m
+      resource:
+        apiVersion: infra.virtrigaud.io/v1beta1
+        kind: VirtualMachine
+        metadata:
+          name: vcts-${RUN}-pc-vm
       waitFor:
         condition: Stopped
 
@@ -200,37 +183,36 @@
         apiVersion: infra.virtrigaud.io/v1beta1
         kind: VirtualMachine
         metadata:
-          name: test-power-vm
-          namespace: default
+          name: vcts-${RUN}-pc-vm
       validate:
         - path: .status.powerState
           operator: eq
           value: "Off"
+        - path: .status.phase
+          operator: eq
+          value: Stopped
 
     - name: power-on-vm
       type: update
-      timeout: 2m
       resource:
         apiVersion: infra.virtrigaud.io/v1beta1
         kind: VirtualMachine
         metadata:
-          name: test-power-vm
-          namespace: default
+          name: vcts-${RUN}-pc-vm
         spec:
           powerState: "On"
 
     - name: wait-vm-running-again
       type: wait
-      timeout: 3m
-      waitFor:
-        condition: Running
-
-  cleanup:
-    - name: cleanup-test-vm
-      type: delete
+      timeout: 5m
       resource:
         apiVersion: infra.virtrigaud.io/v1beta1
         kind: VirtualMachine
         metadata:
-          name: test-power-vm
-          namespace: default
+          name: vcts-${RUN}-pc-vm
+      waitFor:
+        condition: Running
+      validate:
+        - path: .status.phase
+          operator: eq
+          value: Running

@@ -1,0 +1,118 @@
+# VMSnapshot conformance test.
+#
+# Needs --set IMAGE=<an existing VMImage the Provider can boot> and a Provider
+# that reports supportsSnapshots. The snapshot is taken of a powered-off VM,
+# without memory and without quiescing. See test/conformance/README.md.
+
+- name: vm-snapshot-create-delete
+  description: Take a VMSnapshot of a powered-off VirtualMachine, wait until it is Ready with a provider snapshot id, then delete it and wait until it is gone.
+  requiredCapabilities:
+    - vm-create
+    - vm-snapshot
+    - vm-delete
+  timeout: 25m
+  labels:
+    category: snapshot
+    priority: medium
+  steps:
+    - name: create-vmclass
+      type: create
+      resource:
+        apiVersion: infra.virtrigaud.io/v1beta1
+        kind: VMClass
+        metadata:
+          name: vcts-${RUN}-sn-class
+        spec:
+          cpu: 1
+          memory: 1Gi
+
+    - name: create-vm-powered-off
+      type: create
+      resource:
+        apiVersion: infra.virtrigaud.io/v1beta1
+        kind: VirtualMachine
+        metadata:
+          name: vcts-${RUN}-sn-vm
+        spec:
+          providerRef:
+            name: ${PROVIDER}
+          classRef:
+            name: vcts-${RUN}-sn-class
+          imageRef:
+            name: ${IMAGE}
+          powerState: "Off"
+
+    - name: wait-vm-ready-and-off
+      type: wait
+      timeout: 10m
+      resource:
+        apiVersion: infra.virtrigaud.io/v1beta1
+        kind: VirtualMachine
+        metadata:
+          name: vcts-${RUN}-sn-vm
+      waitFor:
+        condition: Ready
+      validate:
+        - path: .status.powerState
+          operator: eq
+          value: "Off"
+
+    - name: create-snapshot
+      type: create
+      resource:
+        apiVersion: infra.virtrigaud.io/v1beta1
+        kind: VMSnapshot
+        metadata:
+          name: vcts-${RUN}-sn-snap
+        spec:
+          vmRef:
+            name: vcts-${RUN}-sn-vm
+          snapshotConfig:
+            description: vcts conformance snapshot
+            includeMemory: false
+            quiesce: false
+
+    - name: wait-snapshot-ready
+      type: wait
+      timeout: 10m
+      resource:
+        apiVersion: infra.virtrigaud.io/v1beta1
+        kind: VMSnapshot
+        metadata:
+          name: vcts-${RUN}-sn-snap
+      waitFor:
+        condition: Ready
+      validate:
+        - path: .status.phase
+          operator: eq
+          value: Ready
+
+    - name: validate-snapshot-status
+      type: validate
+      resource:
+        apiVersion: infra.virtrigaud.io/v1beta1
+        kind: VMSnapshot
+        metadata:
+          name: vcts-${RUN}-sn-snap
+      validate:
+        - path: .status.snapshotID
+          operator: exists
+
+    - name: delete-snapshot
+      type: delete
+      resource:
+        apiVersion: infra.virtrigaud.io/v1beta1
+        kind: VMSnapshot
+        metadata:
+          name: vcts-${RUN}-sn-snap
+
+    - name: wait-snapshot-deleted
+      type: wait
+      timeout: 10m
+      resource:
+        apiVersion: infra.virtrigaud.io/v1beta1
+        kind: VMSnapshot
+        metadata:
+          name: vcts-${RUN}-sn-snap
+      waitFor:
+        condition: Deleted

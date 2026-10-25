@@ -96,6 +96,10 @@ func TestLoadConfig(t *testing.T) {
 			wantErr: "all be zero",
 		},
 		{name: "no providers", content: "providers: []\n", wantErr: "providers"},
+		{name: "cpu range of one value", content: "vmTemplate: {classRef: c, imageRef: i, resources: {cpuRange: [2]}}\n", wantErr: "cpuRange must be [min, max]"},
+		{name: "cpu range reversed", content: "vmTemplate: {classRef: c, imageRef: i, resources: {cpuRange: [4, 2]}}\n", wantErr: "cpuRange"},
+		{name: "cpu range out of bounds", content: "vmTemplate: {classRef: c, imageRef: i, resources: {cpuRange: [0, 2]}}\n", wantErr: "1 <= min"},
+		{name: "memory range too small", content: "vmTemplate: {classRef: c, imageRef: i, resources: {memoryRange: [64, 512]}}\n", wantErr: "memoryRange"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

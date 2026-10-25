@@ -8,7 +8,7 @@ local files), and nothing in the manager or in a provider image depends on them.
 |---------|----------------|
 | [`vrtg`](#vrtg) | Read VirtRigaud resources: list and describe `VirtualMachine`s, list `Provider`s |
 | [`vcts`](#vcts) | Validate conformance test specifications; run the conformance suite against a `Provider` |
-| [`virtrigaud-loadgen`](#virtrigaud-loadgen) | Create and delete `VirtualMachine`s at a steady rate and record how long the API calls take |
+| [`virtrigaud-loadgen`](#virtrigaud-loadgen) | Create, power, resize, snapshot, clone and delete `VirtualMachine`s at a steady rate and record how long the API calls (and, optionally, the provider) take |
 | [`vrtg-provider`](#vrtg-provider) | Scaffold, check and catalog a new out-of-tree provider |
 
 Each release publishes them as `<program>-<os>-<arch>` assets (`linux`, `darwin` and `windows`,
@@ -23,8 +23,11 @@ each for `amd64` and `arm64`; `.exe` on Windows). From a checkout, build one wit
 | `--kubeconfig` | none | Path of the kubeconfig to use. Without it the usual resolution applies: `KUBECONFIG`, the in-cluster configuration, then `~/.kube/config`. A path that cannot be loaded is an error; the tool does not fall back to another cluster. |
 | `-n`, `--namespace` | `default` | Namespace to read from or create in |
 
-The tools need the VirtRigaud CRDs installed in the cluster and permission to read (`vrtg`,
-`vcts`) or to create and delete (`virtrigaud-loadgen`) the resources they touch.
+The tools need the VirtRigaud CRDs installed in the cluster. `vrtg` only reads (get, list).
+`vcts run` and `virtrigaud-loadgen` need get, list, create, patch and delete on `VirtualMachine`s,
+`VMSnapshot`s and `VMClone`s in the namespace (`vcts run` also on `VMClass`es and whatever other
+VirtRigaud kinds a specification creates) and get on the `Provider` (`vcts run`); `vcts validate`
+and `vcts list` need no cluster, nor does `virtrigaud-loadgen --dry-run`.
 
 ## vrtg
 
@@ -62,30 +65,92 @@ non-zero with an error that names the alternative: `vrtg provider logs` (use `ku
 ## vcts
 
 ```
-vcts validate [spec-dir]              # default spec-dir: test/conformance/specs
-vcts list
-vcts run --provider <name> [--output-dir ./conformance-results] [--skip <test>,...] [--timeout 30m]
+vcts validate [spec-dir]                                     # default spec-dir: test/conformance/specs
+vcts list [--spec-dir <dir>]
+vcts run --provider <name> [-n <namespace>] --set IMAGE=<vmimage> [--set NAME=value ...]
+         [--spec-dir <dir>] [--output-dir ./conformance-results] [--skip <test>,...]
+         [--timeout 3h] [--parallel 1] [--keep] [--cleanup-timeout 10m] [-v]
 ```
 
 - **`vcts validate`** checks every `*.yaml` file in the directory and exits **non-zero** when a
   file cannot be parsed or holds an invalid test (a bad test name, a missing description or step,
-  an unknown step type, ...). It exits 0 only when every file is valid. The CI workflow uses it on
-  `test/conformance/specs`.
-- **`vcts list`** and **`vcts run`** read the specifications from `test/conformance/specs`
-  **relative to the current directory**, so run them from the root of a VirtRigaud checkout.
-- **`vcts run`** reads the named `Provider` from the namespace given by `-n`, selects the tests whose
-  required capabilities that provider type has (today only `vsphere` and `libvirt` Providers select
-  any test), and writes `results.json`, `junit.xml` and `report.md` to `--output-dir`. It exits
-  non-zero when a test fails.
+  an unknown step type, key, kind, capability or operator, a malformed path or variable, ...). It
+  exits 0 only when every file is valid. The CI workflow uses it on `test/conformance/specs`.
+- **`vcts list`** prints each test with its required capabilities and the variables it needs
+  from `--set`.
+- `--spec-dir` (default `test/conformance/specs`) is relative to the current directory, so run
+  `vcts` from the root of a VirtRigaud checkout or pass the path.
 
-> **Limitation in this release.** The runner does not execute the steps of a specification yet:
-> every `create`, `update`, `delete`, `wait` and `validate` step reports "not implemented", so
-> `vcts run` reports the selected tests as failed. Use `vcts validate` and `vcts list` today.
+### vcts run
+
+`vcts run` runs the tests against a `Provider` that is deployed and healthy in the namespace given
+by `-n`. Each test creates its objects in that namespace, waits for the operator and the provider to
+act on them, checks their status, then deletes everything it created. The specification format is
+described in [`test/conformance/README.md`](../test/conformance/README.md); the shipped tests are:
+
+| Test | Requires | What it checks |
+|------|----------|----------------|
+| `vm-create-delete` | `vm-create`, `vm-delete` | A VM becomes `Ready` and powered on, with `status.id`, phase `Running`, `status.boundProvider` and `status.currentResources`; deleting it removes it |
+| `vm-power-cycle` | `vm-create`, `vm-power`, `vm-delete` | `spec.powerState` Off then On is reflected in `status.powerState` and `status.phase` |
+| `vm-reconfigure-offline` | `vm-create`, `vm-reconfigure`, `vm-delete` | A powered-off VM's `spec.resources` change is recorded in `status.currentResources` |
+| `vm-snapshot-create-delete` | `vm-create`, `vm-snapshot`, `vm-delete` | A `VMSnapshot` of a powered-off VM becomes `Ready` with a `status.snapshotID`; deleting it removes it |
+| `vm-clone-full` | `vm-create`, `vm-clone`, `vm-delete` | A full `VMClone` of a powered-off VM becomes `Ready` and its target VM is bound to a provider VM |
+
+```
+vcts run --provider libvirt-lab -n vcts --set IMAGE=ubuntu-22 -v
+```
+
+- **Variables.** Specifications refer to `${RUN}` (the run id: six lower-case letters and digits),
+  `${TEST}`, `${PROVIDER}` and `${NAMESPACE}`, which `vcts` sets, and to variables you pass with
+  `--set NAME=value`. The shipped tests need `--set IMAGE=<name>`: an existing `VMImage` in the
+  namespace that the provider can boot. A test to run that refers to a variable you did not set
+  stops the run before anything is created.
+- **Names and labels.** Every object a test creates has `${RUN}` in its name, so runs never
+  collide, and carries the labels `vcts.virtrigaud.io/run=<run id>`,
+  `vcts.virtrigaud.io/test=<test>` and `app.kubernetes.io/managed-by=vcts`. The run id is printed
+  and recorded in the results.
+- **Only its own objects.** An `update` or `delete` step acts only on an object that carries the
+  run's label; anything else in the namespace is never changed or deleted. Specifications cannot
+  create, change or delete a `Provider`.
+- **Capabilities.** A test lists `requiredCapabilities`. `vm-create`, `vm-delete`, `vm-power`,
+  `vm-reconfigure` (a powered-off VM) and `vm-clone` (a full clone) are part of the provider
+  contract and always offered. The others come from the Provider's
+  `status.reportedCapabilities`: `vm-snapshot` (`supportsSnapshots`), `vm-snapshot-memory`
+  (`supportsMemorySnapshots`), `vm-reconfigure-online` (`supportsReconfigureOnline`),
+  `vm-clone-linked` (`supportsLinkedClones`), `image-import` (`supportsImageImport`),
+  `disk-export` (`supportsDiskExport`) and `disk-import` (`supportsDiskImport`). A test needing a
+  capability the Provider does not offer is reported as **skipped**, with the reason, not failed.
+  So is a test named with `--skip`.
+- **Timeouts.** `--timeout` (default 3h) bounds the whole run: a test still running when it ends
+  fails, and a test not started yet counts as **failed** ("not run"), so an interrupted or
+  timed-out run never exits 0. A test's `timeout` (default 15m) bounds its steps; a wait step's
+  `waitFor.timeout` or `timeout` (default 5m) bounds the wait; other steps default to 1m. Waiting
+  polls every 2 seconds. A wait (for anything but `Failed` or `Deleted`) fails when the object's
+  `status.phase` has stayed `Failed` for 30 seconds; the operator retries some failed phases, such
+  as a create in backoff.
+- **Cleanup.** After its steps, whether they passed or not, each test runs its `cleanup` steps,
+  then deletes the objects labelled with its run and test that it did not create itself (such as a
+  clone's target VM), then the objects it created, newest first, and waits until each is gone.
+  A `VMClone` whose provider clone may still be in flight is waited for first; one that does not
+  settle is left in place with its source and target VMs (deleting them could leave the cloned VM
+  on the hypervisor with nothing recording it) and the test fails. Cleanup also runs after
+  `--timeout` or an interrupt (Ctrl-C; a second Ctrl-C exits at once), bounded by
+  `--cleanup-timeout` per test; objects reached after that time still get their delete call, but
+  are not waited for. A cleanup that fails fails the test. `--keep` skips the
+  cleanup and lists what was left; remove it with
+  `kubectl delete virtualmachines,vmsnapshots,vmclones,vmclasses -n <namespace> -l vcts.virtrigaud.io/run=<run id>`.
+- **Results.** `results.json`, `junit.xml` (one test case per test, the step results in
+  `system-out`) and `report.md` (a summary, and each test's steps and cleanup) in `--output-dir`,
+  with passed, failed or skipped per test and per step. `-v` prints each step as it finishes.
+  `vcts run` exits **non-zero** when a test fails.
+- `--parallel N` runs up to N tests at once.
 
 ## virtrigaud-loadgen
 
 ```
-virtrigaud-loadgen run [--config loadtest.yaml] [-n <namespace>] [--output-dir ./loadgen-results] [--dry-run] [--verbose]
+virtrigaud-loadgen run [--config loadtest.yaml] [-n <namespace>] [--output-dir ./loadgen-results]
+                       [--observe] [--observe-timeout 5m] [--cleanup] [--cleanup-timeout 10m]
+                       [--dry-run] [--verbose]
 ```
 
 Each worker performs one randomly chosen operation per second for the configured duration. Without
@@ -96,20 +161,23 @@ overrides the defaults; durations are Go duration strings (`30s`, `5m`).
 ```yaml
 duration: 2m
 concurrency: 4
-providers: [libvirt-lab]          # a Provider in -n; one is chosen at random per operation
+providers: [libvirt-lab]          # a Provider in -n; one is chosen at random per create
 vmTemplate:
   classRef: small                 # an existing VMClass
   imageRef: ubuntu-22             # an existing VMImage
   labels:
     team: perf
+  resources:                      # optional; used by reconfigure only
+    cpuRange: [1, 4]              # vCPUs (1..128); default: alternate between 1 and 2
+    memoryRange: [1024, 4096]     # MiB (128..1048576); default: memory is not changed
 operations:                       # relative weights, not percentages; at least one must be above 0
-  create: 40
-  delete: 20
-  describe: 40
-  power: 0
-  reconfigure: 0
-  snapshot: 0
-  clone: 0
+  create: 30
+  delete: 10
+  describe: 20
+  power: 15
+  reconfigure: 10
+  snapshot: 10
+  clone: 5
 ```
 
 `test/performance/proxmox-loadtest.yaml` is a ready configuration in this format for a Provider
@@ -117,21 +185,65 @@ named `proxmox-perf` (edit the provider, class and image names for your cluster)
 every YAML file in `test/performance` with the tool's own loader. The tool has no scenarios or
 pass/fail thresholds: read `summary.md` and compare it with your own targets.
 
-An unknown key, an unparsable duration or an unusable value (no providers, all weights zero, ...) is
-an error and nothing is created. The keys `vmCount`, `rampUpTime`, `steadyState`, `rampDownTime`,
-the `*Interval` keys, `vmTemplate.annotations` and `vmTemplate.resources` are accepted but not used
-in this release.
+An unknown key, an unparsable duration or an unusable value (no providers, all weights zero, a range
+that is not `[min, max]` within the bounds, ...) is an error and nothing is created. The keys
+`vmCount`, `rampUpTime`, `steadyState`, `rampDownTime`, the `*Interval` keys and
+`vmTemplate.annotations` are accepted but not used in this release.
 
-- **What it does to the cluster.** `create` makes a `VirtualMachine` named
-  `loadgen-vm-<run>-<worker>-<n>` with the label `generated-by: loadgen` plus your template labels.
-  `delete` removes a random VM **that this run created**; it never touches other VMs in the
-  namespace. `describe` lists the VMs in the namespace. `power`, `reconfigure`, `snapshot` and
-  `clone` are **simulated**: they are recorded as successful without calling the API.
-- **Cleanup.** VMs still present when the run ends are left in place. Remove them with
-  `kubectl delete virtualmachine -n <namespace> -l generated-by=loadgen`.
-- **`--dry-run`** does everything except the API calls; no VM is created or deleted.
-- **Results.** `results.csv` (one row per operation) and `summary.md` (counts and p50/p95/p99/max
-  per operation) in `--output-dir`.
+**What each operation does.** Every operation but `create` and `describe` acts on a VM **this run
+created**, chosen at random among those no other operation is using; it never touches another VM in
+the namespace. Patches and deletes carry the VM's UID, so they never reach another object created
+later under the same name. With no such VM available the operation is recorded as failed
+(`no VM created by this run is available`) and nothing is called.
+
+| Operation | API call |
+|-----------|----------|
+| `create` | Creates a `VirtualMachine` `loadgen-vm-<run>-<worker>-<n>` (`spec.powerState: On`) from the template, with the labels `generated-by: loadgen` and `loadgen.virtrigaud.io/run: <run>` plus your template labels |
+| `delete` | Deletes a VM of the run (its `VMSnapshot`s follow it, see below) |
+| `describe` | Lists the `VirtualMachine`s in the namespace |
+| `power` | Patches `spec.powerState` of a VM of the run to `Off`, or back to `On` |
+| `reconfigure` | Patches `spec.resources.cpu` (and `spec.resources.memoryMiB` when `memoryRange` is set) of a VM of the run to a value from the range that differs from the one the run last set: the change the VirtualMachine controller sends to the provider as a Reconfigure |
+| `snapshot` | Creates a `VMSnapshot` `loadgen-snap-<run>-<n>` of a VM of the run with `retentionPolicy.deleteOnVMDelete: true`, so the snapshot is deleted when its VM is |
+| `clone` | Creates a `VMClone` `loadgen-clone-<run>-<n>` (full clone, target powered off) of a VM of the run, preferring one the run powered off (some providers, libvirt among them, hold a clone of a running source until it is powered off); its target VM, `loadgen-vm-<run>-clone-<n>`, is created by the operator with the run's labels |
+
+**What is measured.** `Duration` is the time of the API call alone: from sending the request until
+the apiserver answered (accepted or refused it). It does not include the provider's work. The
+client-side rate limit of the Kubernetes client is disabled, so the time is the apiserver's, not
+time spent queued in the tool. With **`--observe`**, after each accepted request the worker also
+polls the object (every second, up to `--observe-timeout`) until its status reflects the request,
+and records `ObservedDuration`, from sending the request until then:
+
+| Operation | Observed when |
+|-----------|---------------|
+| `create` | `status.id` is set and `status.powerState` is `On` |
+| `delete` | the VM is gone |
+| `power` | `status.powerState` equals the requested state |
+| `reconfigure` | `status.currentResources` holds the requested CPU (and memory), or the VM reports `Reconfiguring=True`, reason `RestartRequired`, for the patched generation (a change applied to the next boot only, such as a running VM's shrink, which `status.currentResources` does not show) |
+| `snapshot` | the `VMSnapshot`'s `status.phase` is `Ready` |
+| `clone` | the `VMClone`'s `status.phase` is `Ready` |
+
+A VM, snapshot or clone that reaches phase `Failed`, or one not observed in time, is recorded in
+`ObserveError` (the API call still counts as successful). A worker waits for the observation before
+its next operation, so `--observe` lowers the request rate. Observation goes on past the end of the
+run's duration for operations still in flight; an interrupt stops it.
+
+- **Cleanup.** By default everything the run created is **left in place**, and the command prints
+  how to remove it:
+  `kubectl delete vmsnapshots,vmclones,virtualmachines -n <namespace> -l loadgen.virtrigaud.io/run=<run>`.
+  With **`--cleanup`** the tool deletes, at the end (also after an interrupt), the run's
+  `VMSnapshot`s and waits until they are gone, then its `VMClone`s, the clone target VMs that carry
+  the run's label, its VMs and the VMs whose delete it issued during the run, and waits until they
+  are gone, up to `--cleanup-timeout`. A `VMClone` is only an operation record: deleting it leaves
+  its target VM, which is why the targets are deleted as well. A `VMClone` whose provider clone may
+  still be in flight is waited for first; one that does not settle in time is left in place with
+  its source and target VMs. The tool exits non-zero, naming what is left, when anything remains.
+- **`--dry-run`** makes no API call at all (it needs no kubeconfig): operations are recorded as
+  successful with phase `DryRun`, and nothing is observed or cleaned up.
+- **Results.** `results.csv` (one row per operation: `Operation`, `Provider`, `VMName`,
+  `StartTime`, `Duration`, `Success`, `Error`, `Phase` — what was requested — and, with
+  `--observe`, `ObservedDuration` and `ObserveError`) and `summary.md` (counts, and p50/p95/p99/max
+  of the API call latency and, with `--observe`, of the observed time, per operation) in
+  `--output-dir`.
 
 ## vrtg-provider
 
@@ -197,7 +309,7 @@ vrtg-provider verify
 - **`verify`** runs the project's `build` and `test` make targets (or `go build` and `go test`),
   and reports `gofmt`, `go vet` and, when installed, `golangci-lint` findings without failing. It
   does **not** run the conformance suite, which needs the provider deployed in a cluster: deploy it,
-  then run `vcts run --provider <name>`.
+  then run `vcts run --provider <name> --set IMAGE=<vmimage>`.
 - **`publish`** builds and tests the project, then adds or updates its entry in a catalog file
   (default: `providers/catalog.yaml`, found by walking up from the current directory). It records
   the conformance profile `core` as `skip` (not run) and never claims a pass. `--dry-run` prints the

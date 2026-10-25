@@ -22,7 +22,10 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/signal"
 	"path/filepath"
+	"strings"
+	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -33,8 +36,9 @@ import (
 	"github.com/projectbeskar/virtrigaud/internal/conformance"
 )
 
-// defaultSpecDir is the directory 'vcts validate' reads when none is given.
-const defaultSpecDir = "test/conformance/specs"
+// defaultSpecDir is the directory vcts reads the specifications from when
+// none is given.
+const defaultSpecDir = conformance.DefaultSpecDir
 
 // version is the release the binary was built from; the release workflow sets
 // it with -ldflags "-X main.version=...".
@@ -43,6 +47,11 @@ var version = "dev"
 // errValidationFailed is returned by 'vcts validate' when a specification is
 // invalid, so the process exits non-zero.
 var errValidationFailed = errors.New("validation failed")
+
+// defaultRunTimeout bounds a whole 'vcts run' by default. It is longer than
+// the shipped tests' own timeouts added up, so a slow but working provider
+// is not cut short.
+const defaultRunTimeout = 3 * time.Hour
 
 // errTestsFailed is returned by 'vcts run' when a conformance test fails.
 var errTestsFailed = errors.New("conformance tests failed")
@@ -57,10 +66,22 @@ type options struct {
 	timeout    time.Duration
 	parallel   int
 	verbose    bool
+
+	specDir        string
+	set            []string
+	keep           bool
+	cleanupTimeout time.Duration
 }
 
 func main() {
-	if err := newRootCmd().Execute(); err != nil {
+	// The first SIGINT/SIGTERM cancels the run, which then cleans up what it
+	// created; a second one terminates the process at once.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	go func() {
+		<-ctx.Done()
+		stop()
+	}()
+	if err := newRootCmd().ExecuteContext(ctx); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
@@ -88,16 +109,32 @@ virtrigaud providers to verify compliance with the provider contract.`,
 	runCmd := &cobra.Command{
 		Use:   "run",
 		Short: "Run conformance tests",
-		Long:  "Run conformance tests against a virtrigaud provider",
-		Args:  cobra.NoArgs,
-		RunE:  opts.runConformanceTests,
+		Long: `Run the conformance tests against a deployed virtrigaud Provider.
+
+Each test creates objects in --namespace (names carry the run id, labels
+` + conformance.LabelRun + ` and ` + conformance.LabelTest + `), waits for the operator and the
+Provider to act on them, checks their status, then deletes everything it
+created and waits until it is gone (unless --keep). A test that needs a
+capability the Provider does not offer is reported as skipped. Specifications
+refer to variables as ${NAME}: RUN, TEST, PROVIDER and NAMESPACE are set by vcts,
+others with --set NAME=value (the shipped specifications need --set IMAGE=<an
+existing VMImage the Provider can boot>).
+
+The command exits non-zero when a test fails.`,
+		Args: cobra.NoArgs,
+		RunE: opts.runConformanceTests,
 	}
 
 	runCmd.Flags().StringVarP(&opts.provider, "provider", "p", "", "Provider name to test (required)")
 	runCmd.Flags().StringVarP(&opts.outputDir, "output-dir", "o", "./conformance-results", "Output directory for test results")
 	runCmd.Flags().StringSliceVar(&opts.skipTests, "skip", []string{}, "List of test names to skip")
-	runCmd.Flags().DurationVar(&opts.timeout, "timeout", 30*time.Minute, "Test timeout")
+	runCmd.Flags().DurationVar(&opts.timeout, "timeout", defaultRunTimeout,
+		"Time allowed for the whole run (tests still running then fail, tests not started count as failed; cleanup still runs)")
 	runCmd.Flags().IntVar(&opts.parallel, "parallel", 1, "Number of parallel test executions")
+	runCmd.Flags().StringArrayVar(&opts.set, "set", nil, "Set a specification variable, NAME=value (repeatable)")
+	runCmd.Flags().BoolVar(&opts.keep, "keep", false, "Leave the objects the tests created in place (no cleanup)")
+	runCmd.Flags().DurationVar(&opts.cleanupTimeout, "cleanup-timeout", conformance.DefaultCleanupTimeout,
+		"Time allowed for each test's cleanup (also after a failure, --timeout or an interrupt)")
 	_ = runCmd.MarkFlagRequired("provider")
 
 	listCmd := &cobra.Command{
@@ -105,7 +142,10 @@ virtrigaud providers to verify compliance with the provider contract.`,
 		Short: "List available tests",
 		Long:  "List all available conformance tests",
 		Args:  cobra.NoArgs,
-		RunE:  listTests,
+		RunE:  opts.listTests,
+	}
+	for _, c := range []*cobra.Command{runCmd, listCmd} {
+		c.Flags().StringVar(&opts.specDir, "spec-dir", defaultSpecDir, "Directory of the test specifications (*.yaml)")
 	}
 
 	validateCmd := &cobra.Command{
@@ -124,7 +164,28 @@ command exits non-zero when a file cannot be read or holds an invalid test.`,
 	return rootCmd
 }
 
+// parseVars parses --set NAME=value entries.
+func parseVars(entries []string) (map[string]string, error) {
+	vars := make(map[string]string, len(entries))
+	for _, e := range entries {
+		name, value, ok := strings.Cut(e, "=")
+		if !ok || name == "" {
+			return nil, fmt.Errorf("--set %q: want NAME=value", e)
+		}
+		if conformance.IsBuiltinVar(name) {
+			return nil, fmt.Errorf("--set %s: %s is set by vcts and cannot be overridden", name, name)
+		}
+		vars[name] = value
+	}
+	return vars, nil
+}
+
 func (o *options) runConformanceTests(cmd *cobra.Command, _ []string) error {
+	vars, err := parseVars(o.set)
+	if err != nil {
+		return err
+	}
+
 	parent := cmd.Context()
 	if parent == nil {
 		parent = context.Background()
@@ -154,15 +215,21 @@ func (o *options) runConformanceTests(cmd *cobra.Command, _ []string) error {
 	}
 
 	// Create conformance runner
+	out := cmd.OutOrStdout()
 	runner := conformance.NewRunner(conformance.Config{
-		KubeClient: k8sClient,
-		Clientset:  clientset,
-		Namespace:  o.namespace,
-		Provider:   o.provider,
-		OutputDir:  o.outputDir,
-		SkipTests:  o.skipTests,
-		Parallel:   o.parallel,
-		Verbose:    o.verbose,
+		KubeClient:     k8sClient,
+		Clientset:      clientset,
+		Namespace:      o.namespace,
+		Provider:       o.provider,
+		OutputDir:      o.outputDir,
+		SkipTests:      o.skipTests,
+		Parallel:       o.parallel,
+		Verbose:        o.verbose,
+		SpecDir:        o.specDir,
+		Vars:           vars,
+		Keep:           o.keep,
+		CleanupTimeout: o.cleanupTimeout,
+		Out:            out,
 	})
 
 	// Run tests
@@ -172,25 +239,33 @@ func (o *options) runConformanceTests(cmd *cobra.Command, _ []string) error {
 	}
 
 	// Print summary
-	out := cmd.OutOrStdout()
 	cliout.Printf(out, "\nConformance Test Results:\n")
 	cliout.Printf(out, "Provider: %s\n", o.provider)
+	cliout.Printf(out, "Run ID: %s\n", results.RunID)
 	cliout.Printf(out, "Total Tests: %d\n", results.Total)
 	cliout.Printf(out, "Passed: %d\n", results.Passed)
 	cliout.Printf(out, "Failed: %d\n", results.Failed)
 	cliout.Printf(out, "Skipped: %d\n", results.Skipped)
 	cliout.Printf(out, "Duration: %v\n", results.Duration)
 	cliout.Printf(out, "\nResults saved to: %s\n", o.outputDir)
+	if o.keep {
+		cliout.Printf(out, "Objects kept (--keep); find them with: kubectl get virtualmachines,vmsnapshots,vmclones,vmclasses -n %s -l %s=%s\n",
+			o.namespace, conformance.LabelRun, results.RunID)
+	}
 
 	if results.Failed > 0 {
 		return errTestsFailed
+	}
+	if ctx.Err() != nil {
+		// Belt and braces: an interrupted or timed-out run never passes.
+		return fmt.Errorf("%w: the run ended early: %w", errTestsFailed, context.Cause(ctx))
 	}
 
 	return nil
 }
 
-func listTests(cmd *cobra.Command, _ []string) error {
-	runner := conformance.NewRunner(conformance.Config{})
+func (o *options) listTests(cmd *cobra.Command, _ []string) error {
+	runner := conformance.NewRunner(conformance.Config{SpecDir: o.specDir})
 	tests, err := runner.ListTests()
 	if err != nil {
 		return fmt.Errorf("failed to list tests: %w", err)
@@ -202,6 +277,15 @@ func listTests(cmd *cobra.Command, _ []string) error {
 		cliout.Printf(out, "  %s\n", test.Name)
 		cliout.Printf(out, "    Description: %s\n", test.Description)
 		cliout.Printf(out, "    Required Capabilities: %v\n", test.RequiredCapabilities)
+		var userVars []string
+		for _, name := range conformance.ReferencedVars(test) {
+			if !conformance.IsBuiltinVar(name) {
+				userVars = append(userVars, name)
+			}
+		}
+		if len(userVars) > 0 {
+			cliout.Printf(out, "    Variables (--set): %s\n", strings.Join(userVars, ", "))
+		}
 		cliout.Printf(out, "\n")
 	}
 

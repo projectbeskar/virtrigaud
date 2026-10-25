@@ -14,39 +14,132 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
+// Package conformance loads, validates and runs the VirtRigaud conformance
+// test specifications (test/conformance/specs) for the vcts command. A run
+// creates objects through the Kubernetes API in one namespace, waits for the
+// operator and the Provider under test to act on them, checks their status,
+// and deletes everything it created.
 package conformance
 
 import (
 	"context"
-	"encoding/json"
+	"crypto/rand"
+	"errors"
 	"fmt"
+	"io"
+	"math/big"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
+	"sync"
 	"time"
 
-	"gopkg.in/yaml.v2"
 	"k8s.io/client-go/kubernetes"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	infrav1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
 )
 
+// Test and step result statuses.
+const (
+	StatusPassed  = "passed"
+	StatusFailed  = "failed"
+	StatusSkipped = "skipped"
+)
+
+// DefaultSpecDir is where the specifications are read from when
+// Config.SpecDir is empty, relative to the working directory.
+const DefaultSpecDir = "test/conformance/specs"
+
+// Labels the runner puts on every object it creates. Cleanup finds objects
+// created on the run's behalf (a clone's target VM) by the run and test
+// labels.
+const (
+	// LabelRun holds the run id (${RUN}).
+	LabelRun = "vcts.virtrigaud.io/run"
+	// LabelTest holds the test name (${TEST}).
+	LabelTest = "vcts.virtrigaud.io/test"
+	// LabelManagedBy is the standard managed-by label; its value is
+	// managedByValue.
+	LabelManagedBy = "app.kubernetes.io/managed-by"
+	managedByValue = "vcts"
+)
+
+// Defaults for the timeouts a specification or Config leaves unset.
+const (
+	// DefaultTestTimeout bounds a test's steps when the test sets no timeout.
+	DefaultTestTimeout = 15 * time.Minute
+	// DefaultStepTimeout bounds a create, update, delete or validate step.
+	DefaultStepTimeout = time.Minute
+	// DefaultWaitTimeout bounds a wait step with neither waitFor.timeout nor
+	// a step timeout.
+	DefaultWaitTimeout = 5 * time.Minute
+	// DefaultCleanupTimeout bounds the cleanup of one test.
+	DefaultCleanupTimeout = 10 * time.Minute
+	// DefaultPollInterval is how often a wait step reads the object.
+	DefaultPollInterval = 2 * time.Second
+	// DefaultFailedPhaseGrace is how long an object's status.phase must stay
+	// Failed before a wait step fails on it: the operator retries some
+	// Failed phases (a create in backoff, an unclassified power state).
+	DefaultFailedPhaseGrace = 30 * time.Second
+)
+
+// runIDLength is the number of characters of a generated run id.
+const runIDLength = 6
+
+// runIDAlphabet is what a generated run id is made of: it is valid in object
+// names and label values.
+const runIDAlphabet = "abcdefghijklmnopqrstuvwxyz0123456789"
+
 // Config holds configuration for the conformance runner
 type Config struct {
+	// KubeClient reads and writes the objects. Its scheme must know the
+	// VirtRigaud types (cmd/internal/cliclient builds one).
 	KubeClient client.Client
-	Clientset  kubernetes.Interface
-	Namespace  string
-	Provider   string
-	OutputDir  string
-	SkipTests  []string
-	Parallel   int
-	Verbose    bool
+	// Clientset is kept for callers that set it; the runner does not use it.
+	Clientset kubernetes.Interface
+	// Namespace is where every object is created and read.
+	Namespace string
+	// Provider is the name of the Provider under test, in Namespace.
+	Provider string
+	// OutputDir receives results.json, junit.xml and report.md.
+	OutputDir string
+	// SkipTests names tests to report as skipped without running them.
+	SkipTests []string
+	// Parallel is how many tests run at once (at least 1).
+	Parallel int
+	// Verbose prints each step's result to Out as it finishes.
+	Verbose bool
+
+	// SpecDir is the directory of *.yaml specifications (DefaultSpecDir when
+	// empty).
+	SpecDir string
+	// Vars are the user variables (--set NAME=value) the specifications
+	// refer to as ${NAME}.
+	Vars map[string]string
+	// Keep leaves every object the run created in place (no cleanup).
+	Keep bool
+	// CleanupTimeout bounds the cleanup of one test (DefaultCleanupTimeout
+	// when zero).
+	CleanupTimeout time.Duration
+	// PollInterval is how often a wait step reads its object
+	// (DefaultPollInterval when zero).
+	PollInterval time.Duration
+	// FailedPhaseGrace is how long status.phase must stay Failed before a
+	// wait fails on it (DefaultFailedPhaseGrace when zero).
+	FailedPhaseGrace time.Duration
+	// RunID is the run id (${RUN}); a random one is generated when empty.
+	RunID string
+	// Out receives progress output (nothing is printed when nil).
+	Out io.Writer
 }
 
 // Runner executes conformance tests
 type Runner struct {
 	config Config
 	tests  []TestSpec
+	outMu  sync.Mutex
 }
 
 // TestSpec defines a conformance test
@@ -88,6 +181,8 @@ type WaitCondition struct {
 // Results holds test execution results
 type Results struct {
 	Provider  string        `json:"provider"`
+	Namespace string        `json:"namespace"`
+	RunID     string        `json:"runID"`
 	Total     int           `json:"total"`
 	Passed    int           `json:"passed"`
 	Failed    int           `json:"failed"`
@@ -99,12 +194,19 @@ type Results struct {
 
 // TestResult holds individual test results
 type TestResult struct {
-	Name         string        `json:"name"`
-	Status       string        `json:"status"` // passed, failed, skipped
-	Duration     time.Duration `json:"duration"`
-	Error        string        `json:"error,omitempty"`
-	Steps        []StepResult  `json:"steps"`
-	Capabilities []string      `json:"capabilities"`
+	Name     string        `json:"name"`
+	Status   string        `json:"status"` // passed, failed, skipped
+	Duration time.Duration `json:"duration"`
+	Error    string        `json:"error,omitempty"`
+	// SkipReason says why a skipped test was not run.
+	SkipReason string       `json:"skipReason,omitempty"`
+	Steps      []StepResult `json:"steps"`
+	// Cleanup holds the results of the specification's cleanup steps and of
+	// the automatic deletion of the objects the test created.
+	Cleanup []StepResult `json:"cleanup,omitempty"`
+	// Kept lists the objects left in place because of --keep.
+	Kept         []string `json:"kept,omitempty"`
+	Capabilities []string `json:"capabilities"`
 }
 
 // StepResult holds individual step results
@@ -122,13 +224,58 @@ func NewRunner(config Config) *Runner {
 	}
 }
 
-// Run executes all conformance tests
+// specDir returns the directory the specifications are read from.
+func (r *Runner) specDir() string {
+	if r.config.SpecDir != "" {
+		return r.config.SpecDir
+	}
+	return DefaultSpecDir
+}
+
+// RunID returns the run's id, generating it on first use.
+func (r *Runner) RunID() (string, error) {
+	if r.config.RunID != "" {
+		return r.config.RunID, nil
+	}
+	id, err := newRunID()
+	if err != nil {
+		return "", err
+	}
+	r.config.RunID = id
+	return id, nil
+}
+
+// newRunID returns a random run id of runIDLength characters.
+func newRunID() (string, error) {
+	b := make([]byte, runIDLength)
+	max := big.NewInt(int64(len(runIDAlphabet)))
+	for i := range b {
+		n, err := rand.Int(rand.Reader, max)
+		if err != nil {
+			return "", fmt.Errorf("generate run id: %w", err)
+		}
+		b[i] = runIDAlphabet[n.Int64()]
+	}
+	return string(b), nil
+}
+
+// Run executes all conformance tests. It returns an error, and runs nothing,
+// when the specifications are invalid, the Provider cannot be read, or a test
+// to run refers to a variable that is not set. A test that fails is reported
+// in the Results, not as an error.
 func (r *Runner) Run(ctx context.Context) (*Results, error) {
 	startTime := time.Now()
 
 	// Load test specifications
 	if err := r.loadTests(); err != nil {
 		return nil, fmt.Errorf("failed to load tests: %w", err)
+	}
+	if r.config.KubeClient == nil {
+		return nil, errors.New("no Kubernetes client configured")
+	}
+	runID, err := r.RunID()
+	if err != nil {
+		return nil, err
 	}
 
 	// Get provider capabilities
@@ -137,44 +284,75 @@ func (r *Runner) Run(ctx context.Context) (*Results, error) {
 		return nil, fmt.Errorf("failed to get provider capabilities: %w", err)
 	}
 
-	// Filter tests based on capabilities and skip list
-	filteredTests := r.filterTests(capabilities)
-
 	results := &Results{
 		Provider:  r.config.Provider,
-		Total:     len(filteredTests),
+		Namespace: r.config.Namespace,
+		RunID:     runID,
+		Total:     len(r.tests),
 		Timestamp: startTime,
-		Tests:     make([]TestResult, 0, len(filteredTests)),
+		Tests:     make([]TestResult, len(r.tests)),
 	}
 
-	// Execute tests
-	for _, test := range filteredTests {
-		if r.shouldSkipTest(test.Name) {
-			results.Skipped++
-			results.Tests = append(results.Tests, TestResult{
-				Name:   test.Name,
-				Status: "skipped",
-			})
+	// Decide which tests run; the others are reported as skipped.
+	var toRun []int
+	for i, test := range r.tests {
+		if reason := r.skipReason(test, capabilities); reason != "" {
+			results.Tests[i] = TestResult{
+				Name: test.Name, Status: StatusSkipped, SkipReason: reason, Capabilities: capabilities,
+			}
+			r.printf("SKIPPED %s: %s\n", test.Name, reason)
 			continue
 		}
-
-		result := r.runTest(ctx, test, capabilities)
-		results.Tests = append(results.Tests, result)
-
-		switch result.Status {
-		case "passed":
-			results.Passed++
-		case "failed":
-			results.Failed++
-		case "skipped":
-			results.Skipped++
-		}
-
-		if r.config.Verbose {
-			r.printTestResult(result)
-		}
+		toRun = append(toRun, i)
+	}
+	if err := r.checkVars(toRun); err != nil {
+		return nil, err
 	}
 
+	r.printf("Run %s: %d tests (%d to run) against Provider %s/%s\n",
+		runID, len(r.tests), len(toRun), r.config.Namespace, r.config.Provider)
+
+	parallel := r.config.Parallel
+	if parallel < 1 {
+		parallel = 1
+	}
+	sem := make(chan struct{}, parallel)
+	var wg sync.WaitGroup
+	for _, i := range toRun {
+		select {
+		case sem <- struct{}{}:
+		case <-ctx.Done():
+		}
+		if ctx.Err() != nil {
+			// Interrupted or out of time: the remaining tests are not started.
+			// They count as failed: a partial run must not pass.
+			results.Tests[i] = TestResult{
+				Name: r.tests[i].Name, Status: StatusFailed, Capabilities: capabilities,
+				Error: fmt.Sprintf("not run: the run ended before this test started (%v)", context.Cause(ctx)),
+			}
+			r.printTestResult(results.Tests[i])
+			continue
+		}
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			results.Tests[i] = r.runTest(ctx, r.tests[i], capabilities)
+			r.printTestResult(results.Tests[i])
+		}(i)
+	}
+	wg.Wait()
+
+	for _, result := range results.Tests {
+		switch result.Status {
+		case StatusPassed:
+			results.Passed++
+		case StatusFailed:
+			results.Failed++
+		case StatusSkipped:
+			results.Skipped++
+		}
+	}
 	results.Duration = time.Since(startTime)
 
 	// Save results
@@ -185,6 +363,46 @@ func (r *Runner) Run(ctx context.Context) (*Results, error) {
 	return results, nil
 }
 
+// skipReason returns why test is not run, or "" when it runs.
+func (r *Runner) skipReason(test TestSpec, capabilities []string) string {
+	if r.shouldSkipTest(test.Name) {
+		return "skipped by --skip"
+	}
+	if missing := missingCapabilities(test.RequiredCapabilities, capabilities); len(missing) > 0 {
+		return fmt.Sprintf("Provider %s does not offer %s", r.config.Provider, strings.Join(missing, ", "))
+	}
+	return ""
+}
+
+// checkVars returns an error naming every variable the tests at idx refer
+// to that is neither built in nor set.
+func (r *Runner) checkVars(idx []int) error {
+	missing := map[string][]string{}
+	for _, i := range idx {
+		for _, name := range ReferencedVars(r.tests[i]) {
+			if IsBuiltinVar(name) {
+				continue
+			}
+			if _, ok := r.config.Vars[name]; !ok {
+				missing[name] = append(missing[name], r.tests[i].Name)
+			}
+		}
+	}
+	if len(missing) == 0 {
+		return nil
+	}
+	names := make([]string, 0, len(missing))
+	for n := range missing {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	parts := make([]string, 0, len(names))
+	for _, n := range names {
+		parts = append(parts, fmt.Sprintf("${%s} (used by %s; pass --set %s=<value>)", n, strings.Join(missing[n], ", "), n))
+	}
+	return fmt.Errorf("variables not set: %s", strings.Join(parts, "; "))
+}
+
 // ListTests returns all available tests
 func (r *Runner) ListTests() ([]TestSpec, error) {
 	if err := r.loadTests(); err != nil {
@@ -193,35 +411,42 @@ func (r *Runner) ListTests() ([]TestSpec, error) {
 	return r.tests, nil
 }
 
-// loadTests loads test specifications from files
+// loadTests loads and validates the test specifications from the spec
+// directory. Test names must be unique across the files.
 func (r *Runner) loadTests() error {
-	specDir := "test/conformance/specs"
+	specDir := r.specDir()
 	specFiles, err := filepath.Glob(filepath.Join(specDir, "*.yaml"))
 	if err != nil {
 		return fmt.Errorf("failed to find test specs: %w", err)
 	}
+	if len(specFiles) == 0 {
+		return fmt.Errorf("no test specification files (*.yaml) in %s", specDir)
+	}
+	sort.Strings(specFiles)
 
+	validator := NewValidator()
 	r.tests = []TestSpec{}
+	seen := map[string]string{}
 	for _, specFile := range specFiles {
-		data, err := os.ReadFile(specFile)
+		tests, err := validator.ValidateFile(specFile)
 		if err != nil {
-			return fmt.Errorf("failed to read %s: %w", specFile, err)
+			return fmt.Errorf("invalid specification %s: %w", specFile, err)
 		}
-
-		var tests []TestSpec
-		if err := yaml.Unmarshal(data, &tests); err != nil {
-			return fmt.Errorf("failed to parse %s: %w", specFile, err)
+		for _, test := range tests {
+			if other, dup := seen[test.Name]; dup {
+				return fmt.Errorf("test %s is defined in both %s and %s", test.Name, other, specFile)
+			}
+			seen[test.Name] = specFile
 		}
-
 		r.tests = append(r.tests, tests...)
 	}
 
 	return nil
 }
 
-// getProviderCapabilities retrieves provider capabilities
+// getProviderCapabilities reads the Provider under test and returns the
+// capabilities it offers (see ProviderCapabilities).
 func (r *Runner) getProviderCapabilities(ctx context.Context) ([]string, error) {
-	// Get the provider resource
 	provider := &infrav1beta1.Provider{}
 	key := client.ObjectKey{
 		Namespace: r.config.Namespace,
@@ -231,44 +456,16 @@ func (r *Runner) getProviderCapabilities(ctx context.Context) ([]string, error) 
 	if err := r.config.KubeClient.Get(ctx, key, provider); err != nil {
 		return nil, fmt.Errorf("failed to get provider %s: %w", r.config.Provider, err)
 	}
-
-	// Extract capabilities from provider status
-	// This would be populated by the provider's GetCapabilities RPC
-	capabilities := []string{}
-	// For now, return basic capabilities based on provider type
-	if string(provider.Spec.Type) == "vsphere" {
-		capabilities = append(capabilities, "vm-create", "vm-delete", "vm-power", "vm-reconfigure", "vm-snapshot")
-	} else if string(provider.Spec.Type) == "libvirt" {
-		capabilities = append(capabilities, "vm-create", "vm-delete", "vm-power")
+	if !provider.Status.Healthy {
+		r.printf("Warning: Provider %s/%s does not report status.healthy=true; tests may time out\n",
+			r.config.Namespace, r.config.Provider)
+	}
+	if provider.Status.ReportedCapabilities == nil {
+		r.printf("Warning: Provider %s/%s has not reported its capabilities; only the core capabilities (%s) are assumed\n",
+			r.config.Namespace, r.config.Provider, strings.Join(coreCapabilities, ", "))
 	}
 
-	return capabilities, nil
-}
-
-// filterTests filters tests based on provider capabilities
-func (r *Runner) filterTests(capabilities []string) []TestSpec {
-	filtered := []TestSpec{}
-	capabilitySet := make(map[string]bool)
-	for _, cap := range capabilities {
-		capabilitySet[cap] = true
-	}
-
-	for _, test := range r.tests {
-		// Check if provider has required capabilities
-		hasAllCapabilities := true
-		for _, required := range test.RequiredCapabilities {
-			if !capabilitySet[required] {
-				hasAllCapabilities = false
-				break
-			}
-		}
-
-		if hasAllCapabilities {
-			filtered = append(filtered, test)
-		}
-	}
-
-	return filtered
+	return ProviderCapabilities(provider), nil
 }
 
 // shouldSkipTest checks if a test should be skipped
@@ -281,7 +478,17 @@ func (r *Runner) shouldSkipTest(testName string) bool {
 	return false
 }
 
-// runTest executes a single test
+// testTimeout returns the timeout of test's steps.
+func testTimeout(test TestSpec) time.Duration {
+	if d, err := time.ParseDuration(test.Timeout); err == nil && d > 0 {
+		return d
+	}
+	return DefaultTestTimeout
+}
+
+// runTest executes a single test: its steps, bounded by the test timeout,
+// then — whatever happened, unless Config.Keep is set — its cleanup, which
+// is not bounded by the test timeout nor stopped by ctx being cancelled.
 func (r *Runner) runTest(ctx context.Context, test TestSpec, capabilities []string) TestResult {
 	startTime := time.Now()
 
@@ -290,239 +497,104 @@ func (r *Runner) runTest(ctx context.Context, test TestSpec, capabilities []stri
 		Capabilities: capabilities,
 		Steps:        make([]StepResult, 0, len(test.Steps)),
 	}
+	tr := r.newTestRun(test)
 
-	// Parse test timeout
-	timeout := 5 * time.Minute
-	if test.Timeout != "" {
-		if d, err := time.ParseDuration(test.Timeout); err == nil {
-			timeout = d
-		}
-	}
-
-	testCtx, cancel := context.WithTimeout(ctx, timeout)
+	testCtx, cancel := context.WithTimeout(ctx, testTimeout(test))
 	defer cancel()
 
-	// Execute test steps
+	failedStep := ""
 	for _, step := range test.Steps {
-		stepResult := r.runStep(testCtx, step)
+		if failedStep != "" {
+			result.Steps = append(result.Steps, StepResult{
+				Name: step.Name, Status: StatusSkipped,
+				Error: fmt.Sprintf("not run: step %s failed", failedStep),
+			})
+			continue
+		}
+		stepResult := tr.runStep(testCtx, step, false)
 		result.Steps = append(result.Steps, stepResult)
+		r.printStep(test.Name, "", stepResult)
 
-		if stepResult.Status == "failed" && !step.Optional {
-			result.Status = "failed"
-			result.Error = stepResult.Error
-			break
+		if stepResult.Status == StatusFailed && !step.Optional {
+			result.Status = StatusFailed
+			result.Error = fmt.Sprintf("step %s: %s", step.Name, stepResult.Error)
+			failedStep = step.Name
 		}
 	}
 
 	// If all steps passed, mark test as passed
 	if result.Status == "" {
-		result.Status = "passed"
+		result.Status = StatusPassed
 	}
 
-	result.Duration = time.Since(startTime)
-
-	// Run cleanup steps
-	r.runCleanup(ctx, test.Cleanup)
-
-	return result
-}
-
-// runStep executes a single test step
-func (r *Runner) runStep(ctx context.Context, step TestStep) StepResult {
-	startTime := time.Now()
-
-	result := StepResult{
-		Name: step.Name,
-	}
-
-	// Parse step timeout
-	timeout := 30 * time.Second
-	if step.Timeout != "" {
-		if d, err := time.ParseDuration(step.Timeout); err == nil {
-			timeout = d
+	if r.config.Keep {
+		result.Kept = tr.trackedNames()
+	} else {
+		result.Cleanup = tr.cleanup(ctx)
+		for _, c := range result.Cleanup {
+			r.printStep(test.Name, "cleanup ", c)
+			if c.Status == StatusFailed {
+				if result.Status == StatusPassed {
+					result.Status = StatusFailed
+					result.Error = fmt.Sprintf("cleanup %s: %s", c.Name, c.Error)
+				}
+			}
 		}
 	}
 
-	stepCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-
-	// Execute step based on type
-	var err error
-	switch step.Type {
-	case "create":
-		err = r.createResource(stepCtx, step.Resource)
-	case "update":
-		err = r.updateResource(stepCtx, step.Resource)
-	case "delete":
-		err = r.deleteResource(stepCtx, step.Resource)
-	case "wait":
-		err = r.waitForCondition(stepCtx, step.WaitFor)
-	case "validate":
-		err = r.validateResource(stepCtx, step.Resource, step.Validate)
-	default:
-		err = fmt.Errorf("unknown step type: %s", step.Type)
-	}
-
-	if err != nil {
-		result.Status = "failed"
-		result.Error = err.Error()
-	} else {
-		result.Status = "passed"
-	}
-
 	result.Duration = time.Since(startTime)
 	return result
 }
 
-// runCleanup runs cleanup steps
-func (r *Runner) runCleanup(ctx context.Context, cleanup []TestStep) {
-	for _, step := range cleanup {
-		r.runStep(ctx, step)
+// printf writes progress output to Config.Out.
+func (r *Runner) printf(format string, args ...interface{}) {
+	if r.config.Out == nil {
+		return
 	}
+	r.outMu.Lock()
+	defer r.outMu.Unlock()
+	_, _ = fmt.Fprintf(r.config.Out, format, args...)
 }
 
-// createResource creates a Kubernetes resource
-func (r *Runner) createResource(ctx context.Context, resource map[string]interface{}) error {
-	// Convert to unstructured object and create via client
-	// This is a simplified implementation
-	return fmt.Errorf("createResource not implemented")
+// printStep prints a step result when Config.Verbose is set.
+func (r *Runner) printStep(test, prefix string, s StepResult) {
+	if !r.config.Verbose {
+		return
+	}
+	line := fmt.Sprintf("  [%s] %s%s: %s (%v)", test, prefix, s.Name, s.Status, s.Duration.Round(time.Millisecond))
+	if s.Error != "" {
+		line += ": " + s.Error
+	}
+	r.printf("%s\n", line)
 }
 
-// updateResource updates a Kubernetes resource
-func (r *Runner) updateResource(ctx context.Context, resource map[string]interface{}) error {
-	return fmt.Errorf("updateResource not implemented")
-}
-
-// deleteResource deletes a Kubernetes resource
-func (r *Runner) deleteResource(ctx context.Context, resource map[string]interface{}) error {
-	return fmt.Errorf("deleteResource not implemented")
-}
-
-// waitForCondition waits for a specific condition
-func (r *Runner) waitForCondition(ctx context.Context, condition *WaitCondition) error {
-	return fmt.Errorf("waitForCondition not implemented")
-}
-
-// validateResource validates a resource against criteria
-func (r *Runner) validateResource(ctx context.Context, resource map[string]interface{}, validations []Validation) error {
-	return fmt.Errorf("validateResource not implemented")
+// printTestResult prints a test result.
+func (r *Runner) printTestResult(result TestResult) {
+	line := fmt.Sprintf("%s %s (%v)", strings.ToUpper(result.Status), result.Name, result.Duration.Round(time.Millisecond))
+	if result.Error != "" {
+		line += ": " + result.Error
+	}
+	r.printf("%s\n", line)
 }
 
 // saveResults saves test results to files
 func (r *Runner) saveResults(results *Results) error {
-	// Save JSON results
-	jsonFile := filepath.Join(r.config.OutputDir, "results.json")
-	jsonData, err := json.MarshalIndent(results, "", "  ")
-	if err != nil {
-		return fmt.Errorf("failed to marshal JSON results: %w", err)
+	if r.config.OutputDir == "" {
+		return nil
 	}
-
-	if err := os.WriteFile(jsonFile, jsonData, 0o644); err != nil {
-		return fmt.Errorf("failed to write JSON results: %w", err)
+	files := map[string]func(*Results) ([]byte, error){
+		"results.json": jsonReport,
+		"junit.xml":    junitReport,
+		"report.md":    func(res *Results) ([]byte, error) { return []byte(markdownReport(res)), nil },
 	}
-
-	// Save JUnit XML results
-	junitFile := filepath.Join(r.config.OutputDir, "junit.xml")
-	junitData := r.generateJUnitXML(results)
-	if err := os.WriteFile(junitFile, []byte(junitData), 0o644); err != nil {
-		return fmt.Errorf("failed to write JUnit results: %w", err)
+	for name, render := range files {
+		data, err := render(results)
+		if err != nil {
+			return fmt.Errorf("render %s: %w", name, err)
+		}
+		if err := os.WriteFile(filepath.Join(r.config.OutputDir, name), data, 0o600); err != nil {
+			return fmt.Errorf("write %s: %w", name, err)
+		}
 	}
-
-	// Save Markdown report
-	markdownFile := filepath.Join(r.config.OutputDir, "report.md")
-	markdownData := r.generateMarkdownReport(results)
-	if err := os.WriteFile(markdownFile, []byte(markdownData), 0o644); err != nil {
-		return fmt.Errorf("failed to write Markdown report: %w", err)
-	}
-
 	return nil
-}
-
-// generateJUnitXML generates JUnit XML format results
-func (r *Runner) generateJUnitXML(results *Results) string {
-	xml := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
-<testsuite name="virtrigaud-conformance" tests="%d" failures="%d" skipped="%d" time="%.2f">
-`, results.Total, results.Failed, results.Skipped, results.Duration.Seconds())
-
-	for _, test := range results.Tests {
-		xml += fmt.Sprintf(`  <testcase name="%s" time="%.2f"`, test.Name, test.Duration.Seconds())
-
-		switch test.Status {
-		case "failed":
-			xml += fmt.Sprintf(`>
-    <failure message="%s">%s</failure>
-  </testcase>
-`, test.Error, test.Error)
-		case "skipped":
-			xml += `>
-    <skipped/>
-  </testcase>
-`
-		default:
-			xml += "/>\n"
-		}
-	}
-
-	xml += "</testsuite>\n"
-	return xml
-}
-
-// generateMarkdownReport generates a Markdown report
-func (r *Runner) generateMarkdownReport(results *Results) string {
-	report := fmt.Sprintf(`# Virtrigaud Conformance Test Report
-
-## Summary
-
-- **Provider**: %s
-- **Total Tests**: %d
-- **Passed**: %d
-- **Failed**: %d
-- **Skipped**: %d
-- **Duration**: %v
-- **Timestamp**: %s
-
-## Test Results
-
-| Test Name | Status | Duration | Error |
-|-----------|--------|----------|-------|
-`, results.Provider, results.Total, results.Passed, results.Failed, results.Skipped,
-		results.Duration, results.Timestamp.Format(time.RFC3339))
-
-	for _, test := range results.Tests {
-		status := test.Status
-		switch test.Status {
-		case "passed":
-			status = "✅ Passed"
-		case "failed":
-			status = "❌ Failed"
-		case "skipped":
-			status = "⏭️ Skipped"
-		}
-
-		error := test.Error
-		if error == "" {
-			error = "-"
-		}
-
-		report += fmt.Sprintf("| %s | %s | %v | %s |\n",
-			test.Name, status, test.Duration, error)
-	}
-
-	return report
-}
-
-// printTestResult prints a test result to stdout
-func (r *Runner) printTestResult(result TestResult) {
-	status := "✅"
-	switch result.Status {
-	case "failed":
-		status = "❌"
-	case "skipped":
-		status = "⏭️"
-	}
-
-	fmt.Printf("%s %s (%v)\n", status, result.Name, result.Duration)
-	if result.Error != "" {
-		fmt.Printf("   Error: %s\n", result.Error)
-	}
 }
