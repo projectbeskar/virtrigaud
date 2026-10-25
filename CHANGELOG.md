@@ -92,6 +92,34 @@ Findings from the v0.4.0 review: open code-scanning alerts, a scaffold missing t
 - [ ] Breaking change
 - [x] Requires cluster rollout (the kubectl image of the CRD upgrade hook)
 
+## [2026-10-25 12:38] - vcts run executes conformance tests; virtrigaud-loadgen performs real operations
+**Author:** @wrkode (William Rizzo)
+
+### Added
+- `internal/conformance/steps.go`, `internal/conformance/assert.go`, `internal/conformance/vars.go`, `internal/conformance/capabilities.go`, `internal/conformance/report.go`: the conformance runner executes `create`, `update` (JSON merge patch), `delete`, `wait` and `validate` steps through the controller-runtime client in the run's namespace. Created objects carry `${RUN}` (a random 6-character run id) in their names and the labels `vcts.virtrigaud.io/run`, `vcts.virtrigaud.io/test` and `app.kubernetes.io/managed-by: vcts`; `update` and `delete` act only on objects with the run's label, and no step may create, change or delete a `Provider`. A `wait` polls (ctx-bound, `wait.PollUntilContextCancel`) until its condition (`Ready`, `Available` — not older than `metadata.generation` — `Running`, `Stopped`, `Provisioned`, `Failed`, `Deleted`) and its `validate` entries hold, fails at once on `status.phase: Failed`, and reports what it last saw on a timeout. Assertions are kubectl JSONPath with `eq`, `ne`, `gt`, `lt`, `gte`, `lte`, `contains`, `matches`, `exists`. Variables `${RUN}`, `${TEST}`, `${PROVIDER}`, `${NAMESPACE}` and `--set NAME=value`. Capabilities: `vm-create`, `vm-delete`, `vm-power`, `vm-reconfigure`, `vm-clone` (core contract) plus the ones `Provider.status.reportedCapabilities` grants; a test needing one the Provider lacks is reported as skipped. After each test — also after a failure, `--timeout` or an interrupt — the cleanup runs the spec's cleanup steps, deletes the objects labelled with the run and test that it did not create (a clone's target VM), then everything it created, newest first, and waits until each is gone.
+- `cmd/vcts/main.go`: `vcts run` flags `--set NAME=value`, `--keep`, `--cleanup-timeout` and `--spec-dir` (also on `vcts list`, which now prints the variables a test needs); SIGINT/SIGTERM cancel the run and let the cleanup finish (a second signal exits at once). The run id is printed and recorded in the results.
+- `test/conformance/specs/reconfigure.yaml`, `test/conformance/specs/snapshot.yaml`, `test/conformance/specs/clone.yaml`: conformance tests `vm-reconfigure-offline`, `vm-snapshot-create-delete` and `vm-clone-full`.
+- `test/conformance/README.md`: the specification format (steps, wait conditions, assertions, variables, capabilities, cleanup).
+- `cmd/virtrigaud-loadgen/operations.go`, `cmd/virtrigaud-loadgen/cleanup.go`: `power` patches `spec.powerState` (On/Off), `reconfigure` patches `spec.resources.cpu` (from `vmTemplate.resources.cpuRange`, default alternating 1 and 2) and, with `memoryRange`, `spec.resources.memoryMiB`, `snapshot` creates a `VMSnapshot` with `retentionPolicy.deleteOnVMDelete: true`, `clone` creates a full `VMClone` whose target carries the run's labels — each on a VM this run created and no other operation is using; patches and deletes carry the VM's UID as a precondition. `--observe`/`--observe-timeout` also record the time until the object's status reflects the request (`ObservedDuration`, `ObserveError` CSV columns and a summary table). `--cleanup`/`--cleanup-timeout` delete, at the end, the run's VMSnapshots, then its VMClones, clone targets labelled with the run, and VMs, wait until they are gone, and exit non-zero naming anything left. Every object carries the label `loadgen.virtrigaud.io/run`.
+- `cmd/vcts/run_envtest_test.go`, `cmd/virtrigaud-loadgen/operations_test.go`, `internal/conformance/*_test.go`: envtest tests with a simulated provider for create→wait→validate→delete, a failing assertion, a timeout, capability skipping, cleanup after failure and interrupt, label-swept derived objects, never touching foreign objects, `--keep`, unset variables, the shipped specs and the exit code; each loadgen operation, `--observe`, `--cleanup`, never touching VMs the run did not create, and a dry run making no API call.
+
+### Changed
+- `test/conformance/specs/basic-lifecycle.yaml`: rewritten for the v0.4.0 API: no `Provider` creation (the suite tests `--provider`), a `VMClass` with `memory: 1Gi` (not `memoryMiB`), the `VMImage` from `--set IMAGE`, `${RUN}` names, and wait steps that name their object.
+- `internal/conformance/validator.go`: specifications are decoded strictly (an unknown key is an error); a step's resource must be an `infra.virtrigaud.io/v1beta1` kind, name its object without a namespace, and a created object's name must contain `${RUN}`; `wait` steps need a resource and a condition and/or `validate` entries; unknown capabilities, malformed paths, variables, regular expressions and duplicate test names are errors.
+- `internal/conformance/runner.go`: tests the Provider lacks a capability for are counted and reported as skipped with the reason (they were dropped from the results); the JUnit report is XML-escaped and carries skip reasons and step results; result files are written with mode 0600.
+- `cmd/virtrigaud-loadgen/main.go`: `--dry-run` makes no API call at all and needs no kubeconfig (`describe` listed VMs during a dry run); the client-side rate limit is disabled so recorded latencies are the apiserver's; `vmTemplate.resources` ranges are validated; without `--cleanup` the command prints how to remove what the run left.
+- `go.mod`: `gopkg.in/yaml.v3` (already in the module graph) is a direct dependency, for the strict specification decoder; `go mod tidy` also lists `k8s.io/utils`, already imported directly, as direct.
+- `docs/cli-tools.md`: `vcts run` and `virtrigaud-loadgen` documented as implemented: flags, the shipped tests, variables, capabilities, timeouts, cleanup, what each loadgen operation calls and exactly what is measured; the "not implemented" and "simulated" limitations are removed.
+
+### Why
+`vcts run` reported every step as "not implemented" and `virtrigaud-loadgen` recorded power, reconfigure, snapshot and clone as successful without calling the API, so neither tool could tell anything about a deployment. Both now act on the cluster, touch only what their run created, and clean up after themselves.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-10-25 12:21] - Proxmox: a cloned VM's boot order names only its boot disk (R38)
 **Author:** @wrkode (William Rizzo)
 
