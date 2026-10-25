@@ -264,10 +264,11 @@ These change what an operator sees; no action is required before the upgrade.
   may be rejected: unknown keys, a step resource that is not an `infra.virtrigaud.io/v1beta1`
   kind or names a namespace, a created object's name without `${RUN}`, a `wait` step without a
   resource and a condition or `validate` entries, unknown capabilities, malformed paths,
-  variables or regular expressions, duplicate test names and test names over 63 characters. Run
+  variables or regular expressions, duplicate test names, test names over 63 characters, and a step that creates,
+  updates or deletes a `Provider`. Run
   `vcts validate <dir>` on your specifications before you rely on them in CI.
   `vcts run` now executes the steps (it reported every step as "not implemented" before) and
-  creates real objects in the namespace you pass with `-n`: run it against a non-production
+  creates real objects in the namespace you pass with `-n` (`default` if omitted): run it against a non-production
   cluster. The default `--timeout` is 3 hours (was 30 minutes).
 - **`virtrigaud-loadgen` validates ranges and does real work.** A configuration whose
   `vmTemplate.resources` ranges are outside the `VirtualMachine` `spec.resources` bounds, accepted
@@ -307,7 +308,8 @@ its values to `Provider` fields.
   (fields that nothing acts on say so; the two `insecureSkipVerify` switches are described as
   separate). No field, number, RPC or option changed.
 - **`providers/catalog.yaml`** now lists `v0.4.0` tags and `skip` (not run) for every conformance
-  profile, instead of 0.1.x tags and passes nobody had run.
+  profile, instead of 0.1.x tags and passes nobody had run. It still lists the `clone` profile for
+  Proxmox, which no longer advertises linked clones.
 - **CI** checks proto compatibility with `buf breaking` on pull requests.
 
 ### Verifying the upgrade

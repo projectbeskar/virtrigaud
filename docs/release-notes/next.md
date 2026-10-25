@@ -6,7 +6,7 @@ for each candidate; this file starts with rc1. The v0.4.0 notes are kept in v0.4
 docs/upgrading.md ("Upgrading from v0.4.0 to v0.4.1") for the upgrade guide these notes link to,
 and CHANGELOG.md for the complete, dated changelog.
 GitHub's limit for a release body is 125,000 characters; this file is far below it (about
-35,000 characters), so it is pasted whole.
+41,000 characters), so it is pasted whole.
 -->
 
 This is **v0.4.1**, a patch release of v0.4.0. It changes how a Proxmox VM gets its cloud-init
@@ -127,12 +127,17 @@ v0.4.0 release candidate](../upgrading.md#upgrading-from-a-v040-release-candidat
   resource must be an `infra.virtrigaud.io/v1beta1` kind named without a namespace; a created
   object's name must contain `${RUN}`; `wait` steps need a resource and a condition or
   `validate` entries; unknown capabilities, malformed paths, variables or regular expressions,
-  duplicate test names and names over 63 characters are errors. A custom specification that
+  duplicate test names and names over 63 characters are errors, and so is a step that creates,
+  updates or deletes a `Provider`. A custom specification that
   `vcts validate` accepted in v0.4.0 can be rejected now.
 - **`virtrigaud-loadgen` validates the ranges of `vmTemplate.resources`.** A configuration whose
   ranges are outside the `VirtualMachine` `spec.resources` bounds was accepted in v0.4.0 because
   the ranges were not used; it is rejected now. The configuration keys are unchanged.
   `--dry-run` makes no API call and needs no kubeconfig.
+- **A `virtrigaud-loadgen` configuration with `power`, `reconfigure`, `snapshot` or `clone` weights
+  now does that work on the hypervisor** (on VMs the run created). In v0.4.0 those operations were
+  recorded as successful without any call. The snapshots and clones stay in place unless you pass
+  `--cleanup`.
   → [CLI tools](../cli-tools.md)
 
 ## Highlights
@@ -152,9 +157,10 @@ v0.4.0 release candidate](../upgrading.md#upgrading-from-a-v040-release-candidat
   causes; and a single-host export or import whose outcome is unknown answers with a constant
   text instead of the raw cause. The legacy create-from-URL path logs the image URL without
   user-info and query. Logs written by v0.4.0 keep what they contain: treat them as sensitive.
-- **The release workflow runs least-privilege where it runs repository code.** The `prepare`
-  job has only `contents: read`, the tag reaches its shell through an environment variable
-  instead of interpolation, and the module tags can only be created on the commit the run built.
+- **The release workflow's `prepare` job runs with `contents: read` only.** It is the job that
+  checks the tag and the module versions before anything is built. The tag reaches its shell
+  through an environment variable instead of interpolation, and the module tags can only be
+  created on the commit the run built.
 
 ### Proxmox
 
@@ -232,7 +238,7 @@ v0.4.0 release candidate](../upgrading.md#upgrading-from-a-v040-release-candidat
   API). `--observe` records the time until the object's status reflects the request, and
   `--cleanup` deletes what the run created and exits non-zero naming anything left.
   `test/performance/proxmox-loadtest.yaml` is rewritten in the tool's configuration format.
-  → [CLI tools](../cli-tools.md#vcts)
+  → [CLI tools](../cli-tools.md#virtrigaud-loadgen)
 - **`vrtg-provider init --type proxmox`** scaffolds a Proxmox provider: the core profile and the
   `raw`/`qcow2` disk and `bridge`/`vlan` network types, every operation still `Unimplemented`.
 - **The SDK and proto Go modules are published with each release.** A release tags
@@ -248,9 +254,10 @@ v0.4.0 release candidate](../upgrading.md#upgrading-from-a-v040-release-candidat
   against the pull request's target branch (the check could not run before: it used a rule buf
   v1 does not have and an `except` list that switched off the rules that report a deleted or
   retyped field, a removed RPC or a removed enum value).
-- **`providers/catalog.yaml` tells the truth.** Tags are `v0.4.0`, every conformance profile is
-  `skip` (not run) with no report URL or date, and the listed profiles match what each provider
-  advertises.
+- **`providers/catalog.yaml` no longer claims conformance results.** Every conformance profile
+  is `skip` (not run) with no report URL or date (the entries claimed passes and test dates
+  nobody had run), and the tags are `v0.4.0` instead of 0.1.x. It still lists the `clone` profile
+  for Proxmox, which no longer advertises linked clones, and names `v0.4.0` as the provider tag.
 - **The `kubectl` image of the CRD upgrade hook is updated** to kubectl 1.35.9 on Alpine 3.24 (was
   1.32.0 on 3.20), which cuts the HIGH and CRITICAL image-scan findings that have a fix from 37 to 6.
   The remaining six are Go standard library and module fixes that no published kubectl release
@@ -287,7 +294,7 @@ v0.4.0 release candidate](../upgrading.md#upgrading-from-a-v040-release-candidat
   mTLS settings, the credential Secret mount, the dedicated ServiceAccount and the hardened
   security context the manager sets up for a provider. Create a `Provider` resource instead; the
   chart's README maps its values to `Provider` fields.
-  → [Upgrade guide](../upgrading.md#upgrading-from-v040-to-v041)
+  → [Upgrade guide](../upgrading.md#deprecated-the-virtrigaud-provider-runtime-chart)
 - **The `virtrigaud` chart has no template, RBAC or values change.** `helm upgrade` re-tags
   the images and the CRD hook uses the new `kubectl` image.
 
@@ -335,7 +342,7 @@ against the code.
 - **Command-line tools:** the `vrtg snapshot`, `clone`, `diag`, `init`, `conformance` and
   `provider logs` subcommands are still not implemented and exit non-zero naming the
   alternative. The SDK and proto modules have no tag for v0.4.0 and earlier
-  (→ [CLI tools](../cli-tools.md)).
+  (→ [Go modules](../go-modules.md#before-v041)).
 - **The `virtrigaud-provider-runtime` chart is deprecated** and is removed in the next minor
   release; see above.
 
@@ -526,7 +533,8 @@ to the Provider's Secret, check `genisoimage` on the node, and in a cluster set
 2. If you write providers outside this repository, switch your `go.mod` to the published modules
    at the same release (`github.com/projectbeskar/virtrigaud`, `.../sdk`, `.../proto`).
 3. Check your custom `vcts` specifications with `vcts validate` and your `virtrigaud-loadgen`
-   configurations with `--dry-run`.
+   configurations with `--dry-run` (an invalid configuration fails at once; a valid one starts a
+   simulated run that you can stop with Ctrl-C).
 4. A `VMSnapshot` that v0.4.0 held in `SnapshotOutcomeUnknown` because of a leftover overlay file
    stays held: delete it and create one under another name, or confirm the attempt.
 

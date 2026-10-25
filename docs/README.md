@@ -7,7 +7,7 @@ This directory holds in-tree references that are most useful alongside the sourc
 
 | Path | Contents |
 |------|----------|
-| [`docs/upgrading.md`](upgrading.md) | Upgrade guide from v0.3.11: breaking changes, required upgrade order (CRDs → manager → providers), new required privileges/config, non-breaking-but-visible behavior changes, a post-upgrade verification checklist, and rollback caveats |
+| [`docs/upgrading.md`](upgrading.md) | Upgrade guides from v0.4.0 to v0.4.1 and from v0.3.11: breaking changes, required upgrade order (CRDs → manager → providers), new required privileges/config, non-breaking-but-visible behavior changes, a post-upgrade verification checklist, and rollback caveats |
 | [`docs/release-notes/next.md`](release-notes/next.md) | Release notes for the next release (v0.4.1, cumulative since v0.4.0): breaking changes, highlights, known limitations, validation and upgrade pointers, meant to be pasted into the GitHub release body |
 | [`docs/release-notes/v0.4.0.md`](release-notes/v0.4.0.md) | Archived release notes for v0.4.0 (the release that followed v0.3.11) |
 | [`docs/cli-tools.md`](cli-tools.md) | The command-line tools released with VirtRigaud: `vrtg` (list and describe `VirtualMachine`s and `Provider`s, `-o json\|yaml`), `vcts` (validate conformance specs, exit codes, the conformance runner), `virtrigaud-loadgen` (the `--config` file format, what each operation does to the cluster) and `vrtg-provider` (scaffold a provider outside this repository, how the generated project gets the SDK: the published modules of a release binary, or a checkout through `replace`, `generate`, `verify`, `publish`), with the commands that are not implemented yet |
