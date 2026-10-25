@@ -49,6 +49,12 @@ type seedNode struct {
 	seedExit int
 	// commands are the remote commands run, in order.
 	commands []string
+	// delegate, when set, answers the commands without input other than the
+	// pre-flight (e.g. an imported-disk create's node commands).
+	delegate func(ctx context.Context, cmd string) (string, string, error)
+	// afterSeed, when set, runs after a seed is attached (e.g. to make the
+	// next PVE call fail).
+	afterSeed func()
 	// seeds are the seeds attached, in order.
 	seeds []seedCapture
 }
@@ -87,12 +93,20 @@ func (n *seedNode) transport() *sshTransport {
 	}
 }
 
-func (n *seedNode) run(_ context.Context, cmd string) (string, string, error) {
+func (n *seedNode) run(ctx context.Context, cmd string) (string, string, error) {
 	n.mu.Lock()
-	defer n.mu.Unlock()
 	n.commands = append(n.commands, cmd)
-	if cmd == seedPreflightCommand && n.noGenisoimage {
-		return "", "", exitErr(n.t, seedExitNoGenisoimage)
+	delegate := n.delegate
+	missing := n.noGenisoimage
+	n.mu.Unlock()
+	if cmd == seedPreflightCommand {
+		if missing {
+			return "", "", exitErr(n.t, seedExitNoGenisoimage)
+		}
+		return "", "", nil
+	}
+	if delegate != nil {
+		return delegate(ctx, cmd)
 	}
 	return "", "", nil
 }
@@ -133,6 +147,9 @@ func (n *seedNode) runInput(_ context.Context, stdin []byte, cmd string) (string
 		return "", err.Error(), exitErr(n.t, 2)
 	}
 	n.seeds = append(n.seeds, seedCapture{vmid: vmid, storage: st[1], slot: sl[1], volume: volume, files: files})
+	if n.afterSeed != nil {
+		n.afterSeed()
+	}
 	return volume + "\n", "", nil
 }
 
