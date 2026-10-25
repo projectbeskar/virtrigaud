@@ -158,6 +158,71 @@ func TestInitWithoutCheckoutLeavesReplaceCommented(t *testing.T) {
 	assert.Contains(t, gomod, "// replace (")
 }
 
+// setVersion makes the binary report v, as -ldflags "-X main.version=v" does,
+// for the rest of the test.
+func setVersion(t *testing.T, v string) {
+	t.Helper()
+	old := version
+	version = v
+	t.Cleanup(func() { version = old })
+}
+
+func TestReleaseVersion(t *testing.T) {
+	for v, want := range map[string]string{
+		"":                  "",
+		"dev":               "",
+		"v0.4.0-3-gabc1234": "",
+		"v0.4.1":            "v0.4.1",
+		"v0.4.1-rc1":        "v0.4.1-rc1",
+	} {
+		setVersion(t, v)
+		assert.Equal(t, want, releaseVersion(), v)
+	}
+}
+
+// TestInitReleaseBuildPinsModules checks the go.mod a release build of
+// vrtg-provider writes: the published modules at its own version, with no
+// replace directives, also inside a checkout; --virtrigaud-path still
+// switches to replace directives.
+func TestInitReleaseBuildPinsModules(t *testing.T) {
+	setVersion(t, "v0.4.1-rc1")
+	readGoMod := func(t *testing.T, out, name string) string {
+		t.Helper()
+		data, err := os.ReadFile(filepath.Join(out, "providers", name, "go.mod"))
+		require.NoError(t, err)
+		return string(data)
+	}
+
+	t.Run("outside a checkout", func(t *testing.T) {
+		out := t.TempDir()
+		require.NoError(t, runProviderCLI(t, "init", "pinned", "-o", out))
+		gomod := readGoMod(t, out, "pinned")
+		assert.Contains(t, gomod, "github.com/projectbeskar/virtrigaud/sdk v0.4.1-rc1\n")
+		assert.Contains(t, gomod, "github.com/projectbeskar/virtrigaud/proto v0.4.1-rc1\n")
+		assert.NotContains(t, gomod, "replace")
+	})
+
+	t.Run("inside a checkout the checkout is not detected", func(t *testing.T) {
+		checkout := t.TempDir()
+		require.NoError(t, os.WriteFile(filepath.Join(checkout, "go.mod"), []byte(rootModuleLine+"\n\ngo 1.26\n"), 0o600))
+		require.NoError(t, runProviderCLI(t, "init", "pinned", "-o", checkout))
+		gomod := readGoMod(t, checkout, "pinned")
+		assert.Contains(t, gomod, "github.com/projectbeskar/virtrigaud/sdk v0.4.1-rc1\n")
+		assert.NotContains(t, gomod, "replace")
+	})
+
+	t.Run("--virtrigaud-path overrides the published modules", func(t *testing.T) {
+		checkout := t.TempDir()
+		require.NoError(t, os.WriteFile(filepath.Join(checkout, "go.mod"), []byte(rootModuleLine+"\n\ngo 1.26\n"), 0o600))
+		out := t.TempDir()
+		require.NoError(t, runProviderCLI(t, "init", "local", "-o", out, "--virtrigaud-path", checkout))
+		gomod := readGoMod(t, out, "local")
+		assert.Contains(t, gomod, "github.com/projectbeskar/virtrigaud/sdk v0.4.1-rc1\n")
+		assert.Contains(t, gomod, "\nreplace (")
+		assert.Contains(t, gomod, filepath.ToSlash(checkout)+"/sdk")
+	})
+}
+
 // TestInitProjectIsAcceptedBuildsAndRuns is the end-to-end check: a scaffolded
 // project passes the project check, compiles, and generate, verify and publish
 // run in it. Every provider type is built.

@@ -23,6 +23,8 @@ import (
 	"go/format"
 	"os"
 	"path/filepath"
+	"regexp"
+	"runtime"
 	"strings"
 	"text/template"
 )
@@ -30,6 +32,30 @@ import (
 // defaultGoVersion is the go directive written to a generated go.mod when no
 // VirtRigaud checkout is known to read it from.
 const defaultGoVersion = "1.26"
+
+// devModuleVersion is the version a generated go.mod requires the VirtRigaud
+// modules at when no release is known. No such tag exists: it resolves only
+// through replace directives.
+const devModuleVersion = "v0.0.0"
+
+// releaseVersionPattern matches a VirtRigaud release version, the tag the
+// release workflow publishes the sdk and proto modules under (sdk/<version>,
+// proto/<version>): vX.Y.Z, optionally -alphaN, -betaN or -rcN. Major 0 or 1
+// only, as the module paths have no /vN suffix. hack/module-versions.sh
+// applies the same rule.
+var releaseVersionPattern = regexp.MustCompile(
+	`^v(0|1)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-(alpha|beta|rc)\.?(0|[1-9][0-9]*))?$`)
+
+// goVersionPattern matches a Go release version without its "go" prefix.
+var goVersionPattern = regexp.MustCompile(`^1\.(0|[1-9][0-9]*)(\.(0|[1-9][0-9]*))?$`)
+
+// IsReleaseVersion reports whether version is a VirtRigaud release version,
+// whose sdk and proto modules are published as sdk/<version> and
+// proto/<version>. A development version such as "dev" or git describe
+// output ("v0.4.0-3-gabc1234") is not one.
+func IsReleaseVersion(version string) bool {
+	return releaseVersionPattern.MatchString(version)
+}
 
 // Config holds scaffolding configuration.
 type Config struct {
@@ -39,12 +65,22 @@ type Config struct {
 	Remote       bool
 	Force        bool
 
+	// ModuleVersion is the VirtRigaud release (see IsReleaseVersion) whose
+	// modules the generated go.mod requires. Each release publishes the SDK
+	// and proto modules under their own tags, so without a VirtrigaudPath the
+	// project builds from the published modules alone, and the go directive
+	// is the Go version this binary was built with (a release is built with
+	// the toolchain of the repository's go.mod). Empty, for a development
+	// build, requires placeholder versions that resolve only through replace
+	// directives.
+	ModuleVersion string
+
 	// VirtrigaudPath is the directory of a VirtRigaud checkout. When set, the
 	// generated go.mod gets replace directives that resolve the VirtRigaud,
 	// SDK and proto modules from it, and its go directive follows the
-	// checkout's. The SDK and proto modules are not published under their own
-	// version tags, so a generated project builds only with such a checkout.
-	// Empty leaves the replace directives out, commented, for the author to fill in.
+	// checkout's. This is for local development and overrides ModuleVersion
+	// as the source of the modules. Empty with no ModuleVersion leaves the
+	// replace directives out, commented, for the author to fill in.
 	VirtrigaudPath string
 }
 
@@ -82,10 +118,16 @@ func (s *Scaffolder) createTemplateContext() map[string]interface{} {
 	providerNameUpper := strings.ToUpper(strings.ReplaceAll(providerName, "-", "_"))
 	moduleName := fmt.Sprintf("provider-%s", providerName)
 	replacePath, goVersion := s.checkoutSettings()
+	moduleVersion := s.config.ModuleVersion
+	if moduleVersion == "" {
+		moduleVersion = devModuleVersion
+	}
 
 	return map[string]interface{}{
 		"GoVersion":         goVersion,
 		"VirtrigaudPath":    replacePath,
+		"ModuleVersion":     moduleVersion,
+		"Pinned":            replacePath == "" && s.config.ModuleVersion != "",
 		"ProviderName":      providerName,
 		"ProviderNameCamel": providerNameCamel,
 		"ProviderNameUpper": providerNameUpper,
@@ -107,6 +149,11 @@ func (s *Scaffolder) createTemplateContext() map[string]interface{} {
 func (s *Scaffolder) checkoutSettings() (replacePath, goVersion string) {
 	goVersion = defaultGoVersion
 	if s.config.VirtrigaudPath == "" {
+		if s.config.ModuleVersion != "" {
+			if v := toolchainGoVersion(); v != "" {
+				goVersion = v
+			}
+		}
 		return "", goVersion
 	}
 	checkout, err := filepath.Abs(s.config.VirtrigaudPath)
@@ -126,6 +173,17 @@ func (s *Scaffolder) checkoutSettings() (replacePath, goVersion string) {
 		}
 	}
 	return filepath.ToSlash(replacePath), goVersion
+}
+
+// toolchainGoVersion returns the Go version this binary was built with
+// ("1.26.10" for go1.26.10), or "" when it is not a Go release (a
+// development toolchain or one with experiments enabled).
+func toolchainGoVersion() string {
+	v := strings.TrimPrefix(runtime.Version(), "go")
+	if !goVersionPattern.MatchString(v) {
+		return ""
+	}
+	return v
 }
 
 // readGoDirective returns the go directive of the go.mod at path, or "" when
@@ -332,20 +390,23 @@ const goModTemplate = `module {{.ModuleName}}
 go {{.GoVersion}}
 
 require (
-	github.com/projectbeskar/virtrigaud v0.1.0
-	github.com/projectbeskar/virtrigaud/proto v0.1.0
-	github.com/projectbeskar/virtrigaud/sdk v0.1.0
+	github.com/projectbeskar/virtrigaud {{.ModuleVersion}}
+	github.com/projectbeskar/virtrigaud/proto {{.ModuleVersion}}
+	github.com/projectbeskar/virtrigaud/sdk {{.ModuleVersion}}
 )
-
-{{if .VirtrigaudPath}}// The SDK and proto modules are resolved from a local VirtRigaud checkout.
+{{if .VirtrigaudPath}}
+// The VirtRigaud modules are resolved from a local VirtRigaud checkout.
 replace (
 	github.com/projectbeskar/virtrigaud => {{.VirtrigaudPath}}
 	github.com/projectbeskar/virtrigaud/proto => {{.VirtrigaudPath}}/proto
 	github.com/projectbeskar/virtrigaud/sdk => {{.VirtrigaudPath}}/sdk
 )
-{{else}}// The SDK and proto modules are not published under their own version tags yet.
-// Point these at a local VirtRigaud checkout (adjust the path), then run
-// "go mod tidy":
+{{else if not .Pinned}}
+// A development build of vrtg-provider generated this file, so the versions
+// above are placeholders. Set all three to one VirtRigaud release (each
+// release publishes the sdk and proto modules under sdk/vX.Y.Z and
+// proto/vX.Y.Z), or resolve them from a local VirtRigaud checkout (adjust
+// the path), then run "go mod tidy":
 //
 // replace (
 // 	github.com/projectbeskar/virtrigaud => ../../
@@ -415,7 +476,10 @@ help:
 	@echo "  verify       - Run all checks"
 `
 
-const dockerfileTemplate = `# Build stage
+const dockerfileTemplate = `{{if .VirtrigaudPath}}# go.mod resolves the VirtRigaud modules from a local checkout (replace
+# directives), which this build context does not contain. Build from a context
+# that holds both, or require a VirtRigaud release in go.mod instead.
+{{end}}# Build stage
 FROM golang:{{.GoVersion}}-bookworm AS builder
 
 WORKDIR /workspace

@@ -1,0 +1,14 @@
+WARNING: the virtrigaud-provider-runtime chart is DEPRECATED and is removed in
+the next minor release of VirtRigaud.
+
+This release ({{ .Release.Name }}) runs a provider Deployment outside a Provider
+resource. The VirtRigaud manager does not use it: the manager only talks to the
+provider it runs for a Provider resource, with that resource's gRPC TLS/mTLS
+settings, its credential Secret mounted, a dedicated ServiceAccount and a
+hardened security context.
+
+Use a Provider resource instead and let the manager run the provider:
+  https://github.com/projectbeskar/virtrigaud/blob/main/docs/upgrading.md#upgrading-from-v040-to-v041
+
+Then remove this release:
+  helm uninstall {{ .Release.Name }} --namespace {{ .Release.Namespace }}

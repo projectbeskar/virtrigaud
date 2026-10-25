@@ -17,8 +17,8 @@ require (
 	github.com/minio/minio-go/v7 v7.1.0
 	github.com/onsi/ginkgo/v2 v2.22.0
 	github.com/onsi/gomega v1.36.1
-	github.com/projectbeskar/virtrigaud/proto v0.1.0
-	github.com/projectbeskar/virtrigaud/sdk v0.0.0-00010101000000-000000000000
+	github.com/projectbeskar/virtrigaud/proto v0.4.1-rc1
+	github.com/projectbeskar/virtrigaud/sdk v0.4.1-rc1
 	github.com/prometheus/client_golang v1.23.0
 	github.com/prometheus/client_model v0.6.2
 	github.com/spf13/cobra v1.8.1

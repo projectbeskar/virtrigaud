@@ -160,14 +160,25 @@ every operation of a fresh scaffold returns `Unimplemented`; the capabilities a 
 the ones `New()` builds in `internal/provider/provider.go`, so review them before you deploy one.
 
 The SDK (`github.com/projectbeskar/virtrigaud/sdk`) and the protobuf bindings
-(`github.com/projectbeskar/virtrigaud/proto`) are separate Go modules that are **not published under
-their own version tags**, so a generated project resolves them (and the repository module they
-import from) from a local VirtRigaud checkout through `replace` directives in its `go.mod`:
+(`github.com/projectbeskar/virtrigaud/proto`) are separate Go modules. From v0.4.1 on, every
+release publishes them under their own tags (`sdk/vX.Y.Z`, `proto/vX.Y.Z`; see
+[`docs/go-modules.md`](go-modules.md)). Where the generated `go.mod` gets them from depends on the
+`vrtg-provider` binary and its flags:
 
-- If the project is created inside a checkout, `init` finds it and writes the `replace` directives
-  with a relative path (for example `=> ../../sdk` for `<checkout>/providers/<name>`).
-- Otherwise pass `--virtrigaud-path <checkout>` (an absolute path is written), or edit the
-  commented `replace` block `init` leaves in `go.mod`.
+- **A release binary** (downloaded from a GitHub release; `vrtg-provider version` prints a version
+  such as `v0.4.1`) requires the VirtRigaud, SDK and proto modules at its own version, with no
+  `replace` directives, also when the project is created inside a checkout. The `go` directive is
+  the Go version the binary was built with, which for a release is the one the repository's
+  `go.mod` names.
+- **`--virtrigaud-path <checkout>`** overrides that, for local development: `go.mod` gets `replace`
+  directives that resolve the three modules from the checkout (an absolute path, or a relative one
+  when the project is inside the checkout), and the checkout's `go` directive.
+- **A development build** (built from a checkout without a release version, for example with
+  `go build ./cmd/vrtg-provider`) finds the checkout the project is created in and writes the
+  `replace` directives with a relative path (for example `=> ../../sdk` for
+  `<checkout>/providers/<name>`). Outside a checkout, `go.mod` requires placeholder versions
+  (`v0.0.0`) and leaves a commented `replace` block: set the three versions to a release, or fill in
+  the `replace` block, or pass `--virtrigaud-path`.
 
 Then, in the project directory:
 
@@ -196,6 +207,9 @@ vrtg-provider verify
 and a `go.mod` that requires a `github.com/projectbeskar/virtrigaud` module, which is what `init`
 creates.
 
-**Limitation.** The generated `Dockerfile` builds from the project directory alone, so it cannot
-see the checkout that the `replace` directives point at. Build the image from a context that
-contains both, or adjust the Dockerfile, until the modules are published.
+**Building the image.** The generated `Dockerfile` builds from the project directory alone
+(`go.mod` and `go.sum` first, then the source; run `go mod tidy` once so that `go.sum` exists). A
+project that requires a release of the modules builds that way. A project whose `go.mod` has
+`replace` directives to a checkout cannot: the checkout is not in the build context, and the
+generated `Dockerfile` says so in a comment. Build such an image from a context that contains
+both, or switch `go.mod` to a release before building.

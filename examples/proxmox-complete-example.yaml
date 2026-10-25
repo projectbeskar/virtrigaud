@@ -5,9 +5,9 @@
 # The Proxmox provider reads the Secret named by credentialSecretRef (mounted at
 # /etc/virtrigaud/credentials) to reach the PVE API: token_id and token_secret,
 # or username and password. See docs/proxmox-networks.md and
-# docs/proxmox-cloud-init-storage.md, and
-# charts/virtrigaud-provider-runtime/examples/values-proxmox.yaml for the
-# provider runtime settings.
+# docs/proxmox-cloud-init-storage.md. Provider settings read from the
+# environment (for example PVE_DEFAULT_STORAGE) go in the Provider's
+# spec.runtime.env.
 #
 # NOTE on user-data: the Proxmox provider maps cloud-init user-data to PVE's own
 # cloud-init settings. It applies the user name (`ciuser`) and the SSH keys of an

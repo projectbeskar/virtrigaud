@@ -12,8 +12,10 @@ name: Release
         required: true
         type: string
 
+# One run per release tag at a time: a tag push and a dispatch for the same
+# tag share the group.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.event.inputs.tag || github.ref_name }}
   cancel-in-progress: false
 
 env:
@@ -30,21 +32,87 @@ jobs:
   prepare:
     name: Prepare Release
     runs-on: ubuntu-latest
+    # This job runs repository code (hack/module-versions.sh); it needs to
+    # read the repository and nothing else.
+    permissions:
+      contents: read
     outputs:
       tag: ${{ steps.get-tag.outputs.tag }}
       version: ${{ steps.get-tag.outputs.version }}
+      sha: ${{ steps.release-commit.outputs.sha }}
     steps:
       - name: Get tag
         id: get-tag
+        # The tag reaches the shell through the environment, never through
+        # ${{ }} interpolation into the script.
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_TAG: ${{ github.event.inputs.tag }}
+          REF_NAME: ${{ github.ref_name }}
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            TAG="${{ github.event.inputs.tag }}"
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            TAG="$INPUT_TAG"
           else
-            TAG="${{ github.ref_name }}"
+            TAG="$REF_NAME"
           fi
+          # A tag name only: it starts with v and a digit, and no newline or
+          # other character could add a line to $GITHUB_OUTPUT or reach a
+          # later shell as anything but a name. The module check below
+          # narrows it to a release version.
+          case "$TAG" in
+            v[0-9]*) ;;
+            *)
+              echo "::error::invalid release tag"
+              exit 1
+              ;;
+          esac
+          case "$TAG" in
+            *[!A-Za-z0-9._-]*)
+              echo "::error::invalid release tag"
+              exit 1
+              ;;
+          esac
           VERSION=${TAG#v}
-          echo "tag=${TAG}" >> $GITHUB_OUTPUT
-          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout the release tag
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          ref: refs/tags/${{ steps.get-tag.outputs.tag }}
+          persist-credentials: false
+
+      # Every job of this run builds github.sha. On a tag push that is the
+      # tag's commit; a workflow_dispatch started from a branch would build
+      # the branch under the tag's name, and the Go module tags (which go on
+      # the tag's commit) would then not be the released code. Refuse that:
+      # dispatch the workflow from the tag ("Use workflow from: <tag>").
+      - name: Check the run builds the release tag's commit
+        id: release-commit
+        env:
+          TAG: ${{ steps.get-tag.outputs.tag }}
+        run: |
+          TAG_COMMIT=$(git rev-parse "refs/tags/${TAG}^{commit}")
+          RUN_COMMIT=$(git rev-parse -q --verify "${GITHUB_SHA}^{commit}" || true)
+          if [ "$TAG_COMMIT" != "$RUN_COMMIT" ]; then
+            echo "::error::tag ${TAG} is on ${TAG_COMMIT}, but this run builds ${GITHUB_SHA}; run the workflow from the tag (Use workflow from: ${TAG})"
+            exit 1
+          fi
+          echo "sha=${TAG_COMMIT}" >> "$GITHUB_OUTPUT"
+
+      # The sdk and proto Go modules are published by tagging sdk/<tag> and
+      # proto/<tag> on the release commit (job tag-go-modules). That is only
+      # consistent when go.mod and sdk/go.mod at the tag require the in-repo
+      # modules at <tag> and replace them with the working tree only
+      # (docs/go-modules.md), and when no sdk/<tag> or proto/<tag> exists on
+      # another commit. Check both before anything is built or published.
+      # This also rejects a tag that is not a release version (vX.Y.Z or
+      # vX.Y.Z-rcN). It only reads the public remote.
+      - name: Check the Go module versions and tags
+        env:
+          TAG: ${{ steps.get-tag.outputs.tag }}
+          SHA: ${{ steps.release-commit.outputs.sha }}
+        run: bash hack/module-versions.sh preflight "$TAG" --expect-commit "$SHA"
 
   # Stage 1: build each release component for each architecture on a NATIVE
   # runner and push BY DIGEST (not by tag). This mirrors the proven
@@ -705,9 +773,13 @@ jobs:
 
       - name: Generate changelog
         id: changelog
+        env:
+          TAG: ${{ needs.prepare.outputs.tag }}
         run: |
-          # Get the previous tag
-          PREV_TAG=$(git tag --sort=version:refname | grep -B1 ${{ needs.prepare.outputs.tag }} | head -1)
+          # Get the previous release tag: v* tags only (not the sdk/ and
+          # proto/ module tags), in semver order (an -rcN before its release),
+          # matching the whole tag name.
+          PREV_TAG=$(git -c versionsort.suffix=- tag -l 'v*' --sort=version:refname | grep -x -F -B1 "$TAG" | head -1)
           if [ -z "$PREV_TAG" ] || [ "$PREV_TAG" = "${{ needs.prepare.outputs.tag }}" ]; then
             PREV_TAG=$(git rev-list --max-parents=0 HEAD)
           fi
@@ -901,3 +973,45 @@ jobs:
             # Set upstream and push
             git push --set-upstream origin gh-pages
           fi
+
+  # Publish the sdk and proto Go modules of this release: tag sdk/<tag> and
+  # proto/<tag> on the commit of the release tag (docs/go-modules.md). Every
+  # release is tagged, release candidates included: a vrtg-provider built for
+  # an rc pins the rc's modules, and "go get ...@latest" never picks a
+  # prerelease once a release exists. It runs after the GitHub Release, so a
+  # failed release publishes no module tags.
+  #
+  # Safety: hack/module-versions.sh never moves, deletes or overwrites a tag.
+  # A module tag already on the release commit is kept (a re-run is a no-op);
+  # one on another commit fails the job. The push has no --force, so git
+  # itself also refuses to replace a remote tag. The tags are pushed with
+  # GITHUB_TOKEN, which starts no workflow run, and neither "sdk/..." nor
+  # "proto/..." matches this workflow's 'v*' tag trigger.
+  tag-go-modules:
+    name: Tag Go Modules
+    runs-on: ubuntu-latest
+    needs: [prepare, create-release]
+    if: github.repository == 'projectbeskar/virtrigaud'
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout the release tag
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          ref: refs/tags/${{ needs.prepare.outputs.tag }}
+
+      - name: Tag sdk/ and proto/ on the release commit
+        env:
+          TAG: ${{ needs.prepare.outputs.tag }}
+          # The commit every job of this run built (checked in prepare).
+          SHA: ${{ needs.prepare.outputs.sha }}
+        run: |
+          # The release tag itself, from the remote (a no-op when the checkout
+          # already created it; fails rather than replacing a different one).
+          git fetch --no-tags origin "refs/tags/${TAG}:refs/tags/${TAG}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # --expect-commit: if the release tag was moved since prepare, tag
+          # nothing rather than modules of a commit this run did not build.
+          bash hack/module-versions.sh tag "$TAG" --push --expect-commit "$SHA"
