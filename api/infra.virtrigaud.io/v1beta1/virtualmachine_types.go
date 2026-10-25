@@ -33,7 +33,7 @@ const (
 	VirtualMachineOrphanOnDeleteAnnotation = "virtrigaud.io/orphan-on-delete"
 
 	// VirtualMachinePlacementUIDAnnotation is the restore marker of a
-	// VirtualMachine on a clustered Provider (ADR-0007 A6, R1). The manager
+	// VirtualMachine on a clustered Provider. The manager
 	// sets it to the VirtualMachine's own UID before the VM's first placement
 	// record (status.placement.pendingHost) and when adoption binds it, and
 	// rewrites it to the VM's own UID after an owner-checked call on its bound
@@ -80,7 +80,10 @@ type VirtualMachineSpec struct {
 	// +kubebuilder:validation:MaxItems=10
 	Networks []VMNetworkRef `json:"networks,omitempty"`
 
-	// Disks specifies additional disks beyond the root disk
+	// Disks specifies additional disks beyond the root disk. The vSphere provider
+	// attaches them at create. The libvirt and Proxmox providers attach none: a VM
+	// on such a Provider reports DisksApplied=False (reason
+	// NotSupportedByProvider), and the spec is not refused.
 	// +optional
 	// +kubebuilder:validation:MaxItems=20
 	Disks []DiskSpec `json:"disks,omitempty"`
@@ -93,7 +96,12 @@ type VirtualMachineSpec struct {
 	// +optional
 	MetaData *MetaData `json:"metaData,omitempty"`
 
-	// Placement provides hints for VM placement
+	// Placement provides hints for VM placement. Cluster, datastore, storagePod
+	// and folder are sent to the provider with the create request and are used by
+	// the vSphere provider only; the libvirt and Proxmox providers do not use
+	// them when creating a VM. host and resourcePool are accepted but not acted
+	// on in this release. On a clustered Provider the scheduler chooses the host
+	// (see status.placement and spec.placementRef).
 	// +optional
 	Placement *Placement `json:"placement,omitempty"`
 
@@ -101,7 +109,8 @@ type VirtualMachineSpec struct {
 	// +optional
 	PowerState PowerState `json:"powerState,omitempty"`
 
-	// Tags are applied to the VM for organization
+	// Tags are sent to the provider with the create request. No provider applies
+	// them to the hypervisor VM in this release.
 	// +optional
 	// +kubebuilder:validation:MaxItems=50
 	Tags []string `json:"tags,omitempty"`
@@ -118,7 +127,9 @@ type VirtualMachineSpec struct {
 	// +optional
 	Snapshot *VMSnapshotOperation `json:"snapshot,omitempty"`
 
-	// Lifecycle defines VM lifecycle configuration
+	// Lifecycle defines VM lifecycle configuration. Accepted but not acted on in
+	// this release: no preStop or postStart handler runs and
+	// gracefulShutdownTimeout is not used.
 	// +optional
 	Lifecycle *VirtualMachineLifecycle `json:"lifecycle,omitempty"`
 }
@@ -158,17 +169,21 @@ const (
 	ObservedPowerStateUnknown ObservedPowerState = "Unknown"
 )
 
-// VirtualMachineLifecycle defines lifecycle configuration for a VM
+// VirtualMachineLifecycle defines lifecycle configuration for a VM. Accepted but
+// not acted on in this release.
 type VirtualMachineLifecycle struct {
-	// PreStop defines actions to take before stopping the VM
+	// PreStop defines actions to take before stopping the VM. Accepted but not
+	// acted on in this release.
 	// +optional
 	PreStop *LifecycleHandler `json:"preStop,omitempty"`
 
-	// PostStart defines actions to take after starting the VM
+	// PostStart defines actions to take after starting the VM. Accepted but not
+	// acted on in this release.
 	// +optional
 	PostStart *LifecycleHandler `json:"postStart,omitempty"`
 
-	// GracefulShutdownTimeout defines how long to wait for graceful shutdown
+	// GracefulShutdownTimeout defines how long to wait for graceful shutdown.
+	// Accepted but not acted on in this release.
 	// +optional
 	// +kubebuilder:default="60s"
 	GracefulShutdownTimeout *metav1.Duration `json:"gracefulShutdownTimeout,omitempty"`
@@ -245,12 +260,14 @@ type VirtualMachineResources struct {
 	// +kubebuilder:validation:Maximum=1048576
 	MemoryMiB *int64 `json:"memoryMiB,omitempty"`
 
-	// GPU specifies GPU configuration
+	// GPU specifies GPU configuration. Accepted but not acted on in this release:
+	// no GPU is requested from the provider.
 	// +optional
 	GPU *GPUConfig `json:"gpu,omitempty"`
 }
 
-// GPUConfig defines GPU configuration for a VM
+// GPUConfig defines GPU configuration for a VM. Accepted but not acted on in
+// this release.
 type GPUConfig struct {
 	// Count specifies the number of GPUs to assign
 	// +kubebuilder:validation:Minimum=1
@@ -397,7 +414,9 @@ type VirtualMachineStatus struct {
 	// +optional
 	LastTaskRef string `json:"lastTaskRef,omitempty"`
 
-	// Provider contains provider-specific details
+	// Provider contains provider-specific details the provider reported when the
+	// VM was adopted from the hypervisor. It is empty for VMs the operator
+	// created.
 	// +optional
 	// +kubebuilder:pruning:PreserveUnknownFields
 	Provider map[string]string `json:"provider,omitempty"`
@@ -414,7 +433,8 @@ type VirtualMachineStatus struct {
 	// +optional
 	CurrentResources *VirtualMachineResources `json:"currentResources,omitempty"`
 
-	// Snapshots lists available snapshots for this VM
+	// Snapshots lists available snapshots for this VM. Not populated in this
+	// release; list the VMSnapshot objects whose spec.vmRef names the VM instead.
 	// +optional
 	Snapshots []VMSnapshotInfo `json:"snapshots,omitempty"`
 
@@ -436,12 +456,12 @@ type VirtualMachineStatus struct {
 	// +optional
 	Message string `json:"message,omitempty"`
 
-	// Placement records where a clustered ("brain-in-operator") provider's
-	// scheduler bound this VM (ADR-0007 P1, D3). It is the durable source of
-	// truth for which host runs the VM. It is written by the operator ONLY after
-	// the provider confirms the VM is on that host (create success / migration
-	// done) — never speculatively (honesty-first). Empty for VMs on single-host
-	// or thin-client providers, which have no operator-owned placement decision.
+	// Placement records where the scheduler of a clustered Provider
+	// (spec.topology=cluster) bound this VM. It is the durable record of which
+	// host runs the VM. The operator writes the host only after the provider
+	// confirms the VM is on it (create success), never speculatively. Empty for
+	// VMs on single-host Providers, which have no operator-owned placement
+	// decision.
 	// +optional
 	Placement *PlacementStatus `json:"placement,omitempty"`
 
@@ -490,20 +510,20 @@ type BoundProviderRef struct {
 }
 
 // PlacementStatus is the operator scheduler's binding for a VM on a clustered
-// provider (ADR-0007 P1, D3/D4): the durable record of which HostPool host runs
-// the VM, plus the decision trace. Host is written only after the provider
-// confirms placement (create success / migration done), so it never claims a
-// host the provider has not accepted the VM on; PendingHost records, separately,
-// the host an unconfirmed Create is aimed at (ADR-0007 Addendum A, A2).
+// provider: the durable record of which HostPool host runs the VM, plus the
+// decision trace. Host is written only after the provider confirms placement
+// (create success), so it never claims a host the provider has not accepted the
+// VM on; PendingHost records, separately, the host an unconfirmed Create is
+// aimed at.
 type PlacementStatus struct {
 	// Host is the Host (CR name) this VM is bound to run on — the durable
-	// placement source of truth (D3). Written only after the provider confirms.
+	// placement record. Written only after the provider confirms.
 	// Every per-VM provider call for the VM is routed to this host.
 	// +optional
 	Host string `json:"host,omitempty"`
 
 	// PendingHost is the Host (CR name) an in-flight, not yet confirmed Create is
-	// aimed at (ADR-0007 Addendum A, A2). The operator writes it, with Pool,
+	// aimed at. The operator writes it, with Pool,
 	// through a resourceVersion-checked status update BEFORE calling Create, so
 	// a retry after a lost write or a Create that ran past its deadline lands on
 	// the SAME host instead of being scheduled onto another one (which could
@@ -516,7 +536,7 @@ type PlacementStatus struct {
 	PendingHost string `json:"pendingHost,omitempty"`
 
 	// ExcludedHosts are Hosts (CR names) the scheduler must not choose for this
-	// VM (ADR-0007 Addendum A, A2 amendment). A Host is added when a Create on
+	// VM. A Host is added when a Create on
 	// it was refused with a name conflict (ALREADY_EXISTS: a same-named domain
 	// this VM does not own is there), which proves this VM has no domain on it
 	// and that this attempt created nothing there (an earlier failed attempt
@@ -533,8 +553,8 @@ type PlacementStatus struct {
 	// +kubebuilder:validation:items:MaxLength=253
 	ExcludedHosts []string `json:"excludedHosts,omitempty"`
 
-	// PendingResources is the size the scheduler admitted a pending Create at
-	// (ADR-0007 Addendum A, scheduler-accuracy amendment). The operator writes
+	// PendingResources is the size the scheduler admitted a pending Create at.
+	// The operator writes
 	// it with PendingHost, in the same checked status update, and clears it when
 	// the VM is bound or the pending host is released. While a create is
 	// pending, the VM counts at this size against its host's capacity, and a
@@ -544,8 +564,8 @@ type PlacementStatus struct {
 	PendingResources *PlacementResources `json:"pendingResources,omitempty"`
 
 	// MemoryCeilingMiB is the memory the VM's domain may reach on its host
-	// beyond its current allocation, recorded when its create was scheduled
-	// (ADR-0007 Addendum A, scheduler-accuracy amendment): the balloon maximum
+	// beyond its current allocation, recorded when its create was scheduled: the
+	// balloon maximum
 	// provisioned for a VMClass with memory hot-add (4× the initial memory), or
 	// 0 when none was provisioned. A guest can deflate its balloon up to it, so
 	// the clustered accounting counts the VM's memory at the larger of this and
@@ -687,7 +707,8 @@ type VMNetworkRef struct {
 	// +optional
 	DNS string `json:"dns,omitempty"`
 
-	// MACAddress specifies a static MAC address (optional)
+	// MACAddress specifies a static MAC address (optional). Accepted but not acted
+	// on in this release: it is not sent to the provider.
 	// +optional
 	// +kubebuilder:validation:Pattern="^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$"
 	MACAddress string `json:"macAddress,omitempty"`
@@ -711,22 +732,27 @@ type DiskSpec struct {
 	// +kubebuilder:validation:Enum=thin;thick;eagerzeroedthick;ssd;hdd
 	Type string `json:"type,omitempty"`
 
-	// ExpandPolicy defines how the disk can be expanded
+	// ExpandPolicy defines how the disk can be expanded. Accepted but not acted on
+	// in this release: it is not sent to the provider.
 	// +optional
 	// +kubebuilder:default="Offline"
 	// +kubebuilder:validation:Enum=Online;Offline
 	ExpandPolicy string `json:"expandPolicy,omitempty"`
 
-	// StorageClass specifies the storage class (optional)
+	// StorageClass specifies the storage class (optional). Accepted but not acted
+	// on in this release: it is not sent to the provider.
 	// +optional
 	StorageClass string `json:"storageClass,omitempty"`
 
-	// SCSI specifies SCSI controller configuration (vSphere only)
+	// SCSI specifies SCSI controller configuration (vSphere only). Accepted but not
+	// acted on in this release: the manager sends only the disk's name, sizeGiB
+	// and type to the provider.
 	// +optional
 	SCSI *SCSIControllerSpec `json:"scsi,omitempty"`
 }
 
-// SCSIControllerSpec defines SCSI controller configuration for vSphere
+// SCSIControllerSpec defines SCSI controller configuration for vSphere.
+// Accepted but not acted on in this release.
 type SCSIControllerSpec struct {
 	// Controller specifies the SCSI controller bus number (0-3)
 	// If not specified, uses the first available controller
@@ -753,7 +779,7 @@ type SCSIControllerSpec struct {
 //
 // DiskID may be empty only while MigrationRef is set: the target
 // VirtualMachine a VMMigration into a clustered Provider creates BEFORE its
-// import (ADR-0007 Addendum B, B1/B7.1). Such a VM is placed but never
+// import. Such a VM is placed but never
 // created ("waiting for import") until the migration records the landed disk
 // in DiskID, Path and Format.
 // +kubebuilder:validation:XValidation:rule="size(self.diskID) > 0 || has(self.migrationRef)",message="importedDisk.diskID may be empty only while importedDisk.migrationRef names the VMMigration that imports the disk"
@@ -761,7 +787,7 @@ type ImportedDiskRef struct {
 	// DiskID is the provider-specific disk identifier.
 	// For libvirt, this is typically the volume name. Empty only on a
 	// migration's target VirtualMachine that waits for its import
-	// (MigrationRef set, ADR-0007 Addendum B).
+	// (MigrationRef set).
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:MaxLength=253
 	DiskID string `json:"diskID"`
@@ -800,7 +826,8 @@ type UserData struct {
 	// +optional
 	CloudInit *CloudInit `json:"cloudInit,omitempty"`
 
-	// Ignition contains Ignition configuration for CoreOS/RHEL
+	// Ignition contains Ignition configuration for CoreOS/RHEL. Accepted but not
+	// acted on in this release: only cloudInit is sent to the provider.
 	// +optional
 	Ignition *Ignition `json:"ignition,omitempty"`
 }
@@ -834,7 +861,8 @@ type CloudInitMetaData struct {
 	SecretRef *LocalObjectReference `json:"secretRef,omitempty"`
 }
 
-// Ignition defines Ignition configuration
+// Ignition defines Ignition configuration. Accepted but not acted on in this
+// release.
 type Ignition struct {
 	// Inline contains inline Ignition data
 	// +optional
@@ -845,13 +873,14 @@ type Ignition struct {
 	SecretRef *LocalObjectReference `json:"secretRef,omitempty"`
 }
 
-// Placement provides hints for VM placement
+// Placement provides hints for VM placement. See VirtualMachineSpec.Placement
+// for which fields are used.
 type Placement struct {
 	// Cluster specifies the target cluster
 	// +optional
 	Cluster string `json:"cluster,omitempty"`
 
-	// Host specifies the target host
+	// Host specifies the target host. Accepted but not acted on in this release.
 	// +optional
 	Host string `json:"host,omitempty"`
 
@@ -870,7 +899,8 @@ type Placement struct {
 	// +optional
 	Folder string `json:"folder,omitempty"`
 
-	// ResourcePool specifies the target resource pool
+	// ResourcePool specifies the target resource pool. Accepted but not acted on
+	// in this release.
 	// +optional
 	ResourcePool string `json:"resourcePool,omitempty"`
 }
@@ -949,9 +979,9 @@ const (
 //
 // spec.classRef and spec.resources are locked while a clustered create is
 // pending: status.placement.pendingHost set and status.id still empty in the
-// STORED object (ADR-0007 Addendum A, scheduler-accuracy amendment). The
-// scheduler admitted the VM at that size and every other schedule counts the
-// pending VM at it, so its owner must not grow it before the create lands.
+// STORED object. The scheduler admitted the VM at that size and every other
+// schedule counts the pending VM at it, so its owner must not grow it before
+// the create lands.
 // Once the VM is created, its size is counted from status.currentResources and
 // a resize-up is admitted against the host's capacity instead. A transition
 // rule on the root, like the providerRef rule above; both are compared as
