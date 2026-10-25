@@ -77,7 +77,7 @@ const snapshotCreateRetryingMessage = "Snapshot creation did not reach a definit
 	"the provider's answer is in the SnapshotCreateRetrying event"
 
 // snapshotCreateNotPerformedMessage is the status message and Ready condition
-// message of a routed snapshot create the provider answered it did not
+// message of a snapshot create (routed or single-host) the provider answered it did not
 // perform (routedCreateNotPerformed): the attempt is closed and the create is
 // sent again after a backoff. Constant, as snapshotCreateRetryingMessage.
 const snapshotCreateNotPerformedMessage = "The provider did not perform the snapshot creation (nothing was changed) and " +
@@ -115,7 +115,7 @@ type VMSnapshotReconciler struct {
 	// path without standing up a gRPC server.
 	providerInstanceFn func(ctx context.Context, provider *infrav1beta1.Provider) (contracts.Provider, error)
 
-	// notPerformedBackoff paces, per VMSnapshot UID, the re-sends of a routed
+	// notPerformedBackoff paces, per VMSnapshot UID, the re-sends of a
 	// SnapshotCreate the provider answered it did not perform
 	// (routedCreateNotPerformed): requestMarkerRecheckInterval, doubling for
 	// each consecutive such answer, up to snapshotNotPerformedRetryMax. Any
@@ -123,7 +123,7 @@ type VMSnapshotReconciler struct {
 	notPerformedBackoff unschedulableBackoff
 }
 
-// snapshotNotPerformedRetryMax caps the backoff of a routed SnapshotCreate
+// snapshotNotPerformedRetryMax caps the backoff of a SnapshotCreate
 // the provider keeps answering it did not perform (notPerformedBackoff).
 const snapshotNotPerformedRetryMax = 10 * time.Minute
 
@@ -314,7 +314,7 @@ func (r *VMSnapshotReconciler) createSnapshot(ctx context.Context, snapshot *inf
 		return res, err
 	}
 
-	// A routed create the provider answered it did not perform is sent again
+	// A create the provider answered it did not perform is sent again
 	// only once its backoff has passed (routedCreateNotPerformed), whatever
 	// event triggered this reconcile.
 	if wait := r.notPerformedBackoff.remaining(string(snapshot.UID), time.Now()); wait > 0 {
@@ -410,53 +410,39 @@ func (r *VMSnapshotReconciler) createSnapshot(ctx context.Context, snapshot *inf
 
 	// Call provider to create snapshot
 	resp, err := providerInstance.SnapshotCreate(ctx, req)
-	notPerformed := err != nil && req.VM.HostID != "" && routedCreateNotPerformed(err)
+	// A definite "nothing was done" (V8): routed, and — since v0.4.1 — on a
+	// single host too, whose create carries no request token but proves by
+	// this answer that it made nothing. A single-host answer to a re-send
+	// proves nothing about the earlier call (providerCallOutcomeKnownFor), so
+	// it keeps the hold below.
+	notPerformed := err != nil && routedCreateNotPerformed(err) &&
+		(req.VM.HostID != "" || providerCallOutcomeKnownFor(err, attempt))
 	if !notPerformed {
 		// Any other answer ends a run of "not performed" answers.
 		r.notPerformedBackoff.reset(string(snapshot.UID))
 	}
+	if notPerformed {
+		return r.retryNotPerformedSnapshotCreate(ctx, snapshot, err), nil
+	}
 	if err != nil && req.VM.HostID != "" && (contracts.IsRetryable(err) || !providerCallOutcomeKnownFor(err, attempt)) {
 		// A ROUTED (clustered) create without a definite outcome — its host
-		// unavailable, its host stopped answering after the snapshot command
-		// was sent (contracts.IsOutcomeUnknownRetry), its time budget run out
-		// while libvirtd may still be
-		// writing the snapshot, or another job on the VM still running — is
-		// retried, never failed: a failed VMSnapshot would leave a snapshot
-		// that completes afterwards untracked on the host. The provider's
-		// routed create is idempotent per request (request_token, the
-		// VMSnapshot's uid), so the retry finds that snapshot instead of making
-		// a second one. A disk-dependents check that could not run
-		// (VM_DISK_CHECK_FAILED, #358) is retried here too; a refusal because
-		// another VM depends on the disk (VM_DISK_IN_USE, a Conflict) fails the
-		// create, as on a single host. Single-host failures are unchanged.
-		message := snapshotCreateRetryingMessage
-		if notPerformed {
-			message = snapshotCreateNotPerformedMessage
-		}
+		// stopped answering after the snapshot command was sent
+		// (contracts.IsOutcomeUnknownRetry), its time budget run out while
+		// libvirtd may still be writing the snapshot, or another job on the
+		// VM still running — is retried, never failed: a failed VMSnapshot
+		// would leave a snapshot that completes afterwards untracked on the
+		// host. The provider's routed create is idempotent per request
+		// (request_token, the VMSnapshot's uid), so the retry finds that
+		// snapshot instead of making a second one. A refusal because another
+		// VM depends on the disk (VM_DISK_IN_USE, a Conflict) fails the
+		// create, as on a single host.
 		if c := meta.FindStatusCondition(snapshot.Status.Conditions, infrav1beta1.VMSnapshotConditionReady); c == nil ||
-			c.Message != message {
+			c.Message != snapshotCreateRetryingMessage {
 			r.Recorder.Event(snapshot, corev1.EventTypeWarning, snapshotReasonCreateRetrying,
 				"Snapshot creation will be retried: "+rpcFailureDetail(err))
 		}
-		if notPerformed {
-			// A definite "nothing was done" (V8): the attempt is closed —
-			// its marker removed, so the next send is a new attempt, never
-			// counted as a re-send of an unknown outcome toward the
-			// operator hold — and retried after an exponential backoff
-			// (requestMarkerRecheckInterval doubling up to
-			// snapshotNotPerformedRetryMax): a host whose check keeps failing
-			// is not scanned every minute for ever.
-			wait := r.notPerformedBackoff.nextWithin(string(snapshot.UID), time.Now(),
-				requestMarkerRecheckInterval, snapshotNotPerformedRetryMax)
-			logger.Info("The provider did not perform the snapshot creation; retrying after a backoff",
-				"error", err.Error(), "retryAfter", wait.String())
-			clearSnapshotRequest(snapshot)
-			res := r.retrySnapshotCreate(ctx, snapshot, message)
-			res.RequeueAfter = wait
-			return res, nil
-		}
 		logger.Info("Snapshot creation did not reach a definite outcome; retrying", "error", err.Error())
-		return r.retrySnapshotCreate(ctx, snapshot, message), nil
+		return r.retrySnapshotCreate(ctx, snapshot, snapshotCreateRetryingMessage), nil
 	}
 	if err != nil && !providerCallOutcomeKnownFor(err, attempt) {
 		// A single-host create without a definite outcome (a deadline, a
@@ -1406,10 +1392,37 @@ func (r *VMSnapshotReconciler) waitForVMBinding(ctx context.Context, snapshot *i
 	return ctrl.Result{RequeueAfter: 30 * time.Second}
 }
 
+// retryNotPerformedSnapshotCreate handles a SnapshotCreate the provider
+// answered it did not perform (V8, routedCreateNotPerformed; routed and
+// single-host): the attempt is closed — its marker removed, so the next send
+// is a new attempt, never counted as a re-send of an unknown outcome toward
+// the operator hold — and the create is sent again after an exponential
+// backoff (requestMarkerRecheckInterval doubling up to
+// snapshotNotPerformedRetryMax, per VMSnapshot UID): a host whose check keeps
+// failing is not asked every minute for ever. The provider's answer is in the
+// snapshotReasonCreateRetrying event when the status message changes.
+func (r *VMSnapshotReconciler) retryNotPerformedSnapshotCreate(ctx context.Context, snapshot *infrav1beta1.VMSnapshot, err error) ctrl.Result {
+	if c := meta.FindStatusCondition(snapshot.Status.Conditions, infrav1beta1.VMSnapshotConditionReady); c == nil ||
+		c.Message != snapshotCreateNotPerformedMessage {
+		r.Recorder.Event(snapshot, corev1.EventTypeWarning, snapshotReasonCreateRetrying,
+			"Snapshot creation will be retried: "+rpcFailureDetail(err))
+	}
+	wait := r.notPerformedBackoff.nextWithin(string(snapshot.UID), time.Now(),
+		requestMarkerRecheckInterval, snapshotNotPerformedRetryMax)
+	logging.FromContext(ctx).Info("The provider did not perform the snapshot creation; retrying after a backoff",
+		"error", err.Error(), "retryAfter", wait.String())
+	clearSnapshotRequest(snapshot)
+	res := r.retrySnapshotCreate(ctx, snapshot, snapshotCreateNotPerformedMessage)
+	res.RequeueAfter = wait
+	return res
+}
+
 // retrySnapshotCreate records that the snapshot create could not be issued
 // because the VM's Provider could not be read or resolved to a client
 // (Ready=False, reason ProviderError, with message) and requeues. The snapshot stays in the
 // initial phase, so the create is retried unchanged; no provider call was made.
+// The create paths above also use it for a create sent whose answer is
+// retried (snapshotCreateRetryingMessage, snapshotCreateNotPerformedMessage).
 func (r *VMSnapshotReconciler) retrySnapshotCreate(ctx context.Context, snapshot *infrav1beta1.VMSnapshot, message string) ctrl.Result {
 	snapshot.Status.Phase = ""
 	snapshot.Status.Message = message

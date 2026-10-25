@@ -206,14 +206,23 @@ func TestMigrationSnapshot_LibvirtDefiniteFailureFailsTheAttempt(t *testing.T) {
 }
 
 // TestVMSnapshot_LibvirtDefiniteFailureFailsTheAttempt: a single-host
-// VMSnapshot create.
+// VMSnapshot create. A definite "not performed" closes the attempt and is
+// sent again after a backoff (V8, single-host since v0.4.1); any other
+// definite answer fails it.
 func TestVMSnapshot_LibvirtDefiniteFailureFailsTheAttempt(t *testing.T) {
 	for name, tc := range definiteLibvirtAnswers(t, "snapshotCreate") {
 		t.Run(name, func(t *testing.T) {
 			r, rec, snap := markerSnapshotFixture(t, false, &statusWriteFaults{})
 			rec.createErr = tc.err
-			_, got := reconcileSnapshotOnce(t, r, snap)
+			res, got := reconcileSnapshotOnce(t, r, snap)
 			require.Len(t, rec.creates, 1)
+			if routedCreateNotPerformed(tc.err) {
+				assert.Empty(t, got.Status.Phase, "not failed: sent again after a backoff")
+				assert.False(t, snapshotRequested(got), "the attempt is closed")
+				assert.Equal(t, snapshotCreateNotPerformedMessage, got.Status.Message)
+				assert.Equal(t, requestMarkerRecheckInterval, res.RequeueAfter)
+				return
+			}
 			if tc.known {
 				assert.Equal(t, infrav1beta1.SnapshotPhaseFailed, got.Status.Phase, "the attempt failed instead of holding")
 				assert.False(t, snapshotRequested(got), "the failure replaced the marker")
@@ -297,8 +306,12 @@ func TestVMSnapshot_ConfirmedSendIsAFirstSendExceptContradictions(t *testing.T) 
 	assert.Equal(t, infrav1beta1.SnapshotPhaseFailed, got.Status.Phase, "a definite failure answering the confirmed send fails it")
 	assert.False(t, snapshotRequested(got))
 
+	// "Not performed" answering the confirmed send closes the attempt and is
+	// sent again after a backoff (V8, single-host since v0.4.1).
 	_, got = confirmedSnapshotSend(t, libvirtNotPerformed(t, "snapshotCreate"))
-	assert.Equal(t, infrav1beta1.SnapshotPhaseFailed, got.Status.Phase)
+	assert.Empty(t, got.Status.Phase)
+	assert.False(t, snapshotRequested(got))
+	assert.Equal(t, snapshotCreateNotPerformedMessage, got.Status.Message)
 
 	_, got = confirmedSnapshotSend(t, contracts.NewConflictError("snapshotCreate: a snapshot with this name already exists", nil))
 	assert.NotEqual(t, infrav1beta1.SnapshotPhaseFailed, got.Status.Phase, "the answer contradicts the confirmation: held again")

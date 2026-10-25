@@ -72,6 +72,16 @@ import (
 //     Describe has shown the VM still Off with spec.powerState still Off.
 //   - A definite failure is terminal (phase Failed): it is not retried until
 //     the field is removed and set again.
+//   - An answer that the provider did not perform the revert (nothing was
+//     changed: contracts.IsNothingDone and not an unknown outcome — the
+//     request never reached it, its host was unavailable, a check could not
+//     run, libvirt refused it before running it) is neither an unknown
+//     outcome nor a failure: the record goes back to Pending (reason
+//     RevertNotPerformed, the attempt time kept) and the revert is sent
+//     again, as a new attempt, after a backoff (snapshotRevertNotPerformedRetryBase
+//     doubling up to snapshotRevertNotPerformedRetryMax), under the same
+//     conditions as a first send. It never counts toward
+//     snapshotRevertMaxAttempts.
 
 // snapshotRevertRecheckInterval re-checks a requested revert that waits for
 // its VMSnapshot (missing, not Ready, not proven to be of this VM) or for a
@@ -108,6 +118,15 @@ const snapshotRevertResendMaxWait = 30 * time.Minute
 // request whose earlier outcomes were unknown; past it the revert is Failed.
 const snapshotRevertMaxAttempts = 5
 
+// snapshotRevertNotPerformedRetryBase is how long after a revert the provider
+// answered it did not perform it is sent again, doubling for each consecutive
+// such answer up to snapshotRevertNotPerformedRetryMax.
+const snapshotRevertNotPerformedRetryBase = time.Minute
+
+// snapshotRevertNotPerformedRetryMax caps snapshotRevertNotPerformedRetryBase's
+// doubling.
+const snapshotRevertNotPerformedRetryMax = 10 * time.Minute
+
 // Event reasons recorded on a VirtualMachine for a snapshot revert.
 const (
 	// eventReasonSnapshotRevertStarted is recorded (Normal) when a
@@ -119,6 +138,10 @@ const (
 	// eventReasonSnapshotRevertFailed is recorded (Warning) when the revert
 	// failed, or its outcome stayed unknown after every allowed attempt.
 	eventReasonSnapshotRevertFailed = "SnapshotRevertFailed"
+	// eventReasonSnapshotRevertNotPerformed is recorded (Warning) when the
+	// provider answered that it did not perform the revert, which is sent
+	// again after a backoff.
+	eventReasonSnapshotRevertNotPerformed = "SnapshotRevertNotPerformed"
 )
 
 // errReasonProviderSnapshotRevert is the metrics reason of a failed
@@ -169,6 +192,7 @@ var snapshotRevertReadyReasons = map[string]bool{
 	infravirtrigaudiov1beta1.SnapshotRevertReasonUnsupported:          true,
 	infravirtrigaudiov1beta1.SnapshotRevertReasonReverting:            true,
 	infravirtrigaudiov1beta1.SnapshotRevertReasonRevertFailed:         true,
+	infravirtrigaudiov1beta1.SnapshotRevertReasonNotPerformed:         true,
 }
 
 // applySnapshotRevertReadiness keeps Ready from claiming success while a
@@ -384,6 +408,15 @@ func (r *VirtualMachineReconciler) reconcileSnapshotRevert(
 		}
 		return r.pendSnapshotRevert(vm, want.Name, string(snap.UID), infravirtrigaudiov1beta1.SnapshotRevertReasonWaitingForPowerOff, msg)
 	}
+	// A revert the provider answered it did not perform is sent again only
+	// once its backoff has passed, whatever event triggered this reconcile.
+	if !resend && sameRequest && snapshotRevertNotPerformedPending(rec) {
+		if wait := r.snapshotRevertNotPerformedWait(vm, rec); wait > 0 {
+			setSnapshotRevertCondition(vm, infravirtrigaudiov1beta1.SnapshotRevertReasonNotPerformed, rec.Message)
+			r.updateStatus(ctx, vm)
+			return ctrl.Result{RequeueAfter: wait}, true, nil
+		}
+	}
 	if resend {
 		if rec.Attempts >= snapshotRevertMaxAttempts {
 			return r.failSnapshotRevert(ctx, vm, infravirtrigaudiov1beta1.SnapshotRevertReasonRevertFailed, fmt.Sprintf(
@@ -540,6 +573,10 @@ func (r *VirtualMachineReconciler) sendSnapshotRevert(
 		fmt.Sprintf("Reverting to VMSnapshot %s (attempt %d)", snap.Name, rec.Attempts))
 
 	taskRef, err := providerInstance.SnapshotRevert(ctx, ref, snap.Status.SnapshotID)
+	if err == nil || !snapshotRevertCallNotPerformed(err) {
+		// Any other answer ends a run of "not performed" answers.
+		r.revertNotPerformed.reset(snapshotRevertNotPerformedKey(vm, rec))
+	}
 	if err != nil {
 		return r.snapshotRevertCallFailed(ctx, vm, err)
 	}
@@ -554,12 +591,14 @@ func (r *VirtualMachineReconciler) sendSnapshotRevert(
 	return res, true, err
 }
 
-// snapshotRevertCallFailed records a failed SnapshotRevert call. A failure
-// whose outcome is not known — the provider not reached or not answering in
-// time, a retryable answer — keeps the record Reverting with no task: it is
-// sent again (reconcileSnapshotRevert) while the VM stays off. A definite
-// answer (a refusal, an unimplemented RPC, an error the provider reported) is
-// terminal.
+// snapshotRevertCallFailed records a failed SnapshotRevert call. The
+// provider's answer that it did not perform the revert
+// (snapshotRevertCallNotPerformed) is Pending again, sent after a backoff
+// (snapshotRevertNotPerformedAnswer). A failure whose outcome is not known —
+// the provider not answering in time, a retryable answer that proves
+// nothing — keeps the record Reverting with no task: it is sent again
+// (reconcileSnapshotRevert) while the VM stays off. A definite answer (a
+// refusal, an unimplemented RPC, an error the provider reported) is terminal.
 func (r *VirtualMachineReconciler) snapshotRevertCallFailed(ctx context.Context, vm *infravirtrigaudiov1beta1.VirtualMachine, err error) (ctrl.Result, bool, error) {
 	logger := log.FromContext(ctx)
 	rec := vm.Status.SnapshotRevert
@@ -569,6 +608,10 @@ func (r *VirtualMachineReconciler) snapshotRevertCallFailed(ctx context.Context,
 		logger.Error(err, "The provider does not implement SnapshotRevert")
 		return r.failSnapshotRevert(ctx, vm, infravirtrigaudiov1beta1.SnapshotRevertReasonUnsupported, fmt.Sprintf(
 			"the provider does not support reverting to a snapshot: %s", detail))
+	case snapshotRevertCallNotPerformed(err):
+		// Nothing was changed: neither an unknown outcome (it never counts
+		// toward snapshotRevertMaxAttempts) nor a failure.
+		return r.snapshotRevertNotPerformedAnswer(ctx, vm, err)
 	case contracts.IsRetryable(err) || isProviderTransportFailure(err) || contracts.IsOutcomeUnknownRetry(err) ||
 		contracts.IsHostConnectionLost(err):
 		// A clustered host that stopped answering after the revert command
@@ -586,6 +629,69 @@ func (r *VirtualMachineReconciler) snapshotRevertCallFailed(ctx context.Context,
 		return r.failSnapshotRevert(ctx, vm, infravirtrigaudiov1beta1.SnapshotRevertReasonRevertFailed, fmt.Sprintf(
 			"revert to VMSnapshot %s failed: %s%s", rec.SnapshotName, detail, snapshotRevertFailureHint(err)))
 	}
+}
+
+// snapshotRevertCallNotPerformed reports whether a failed SnapshotRevert is
+// the provider's definite answer that it did not perform the revert
+// (contracts.IsNothingDone — the request never reached it, its host was
+// unavailable, a check could not run, VM_OPERATION_FAILED "not performed" —
+// and not an unknown outcome, OUTCOME_UNKNOWN_RETRY).
+func snapshotRevertCallNotPerformed(err error) bool {
+	return contracts.IsNothingDone(err) && !contracts.IsOutcomeUnknownRetry(err)
+}
+
+// snapshotRevertNotPerformedKey is the revertNotPerformed backoff key of the
+// revert rec records for vm: the VM's and the VMSnapshot's UIDs.
+func snapshotRevertNotPerformedKey(vm *infravirtrigaudiov1beta1.VirtualMachine,
+	rec *infravirtrigaudiov1beta1.SnapshotRevertStatus) string {
+	return string(vm.UID) + "/" + rec.SnapshotUID
+}
+
+// snapshotRevertNotPerformedPending reports whether rec is a revert the
+// provider answered it did not perform (snapshotRevertNotPerformedAnswer):
+// Pending, with the attempt that was not performed on record. A request that
+// waits for anything else (pendSnapshotRevert) records no attempt.
+func snapshotRevertNotPerformedPending(rec *infravirtrigaudiov1beta1.SnapshotRevertStatus) bool {
+	return rec != nil && rec.Phase == infravirtrigaudiov1beta1.SnapshotRevertPhasePending &&
+		rec.Attempts > 0 && rec.AttemptTime != nil
+}
+
+// snapshotRevertNotPerformedWait is how long the not-performed revert rec
+// records for vm must still wait before it is sent again: what is left of the
+// in-memory backoff, and at least snapshotRevertNotPerformedRetryBase after
+// the recorded attempt (after a manager restart the backoff is gone).
+func (r *VirtualMachineReconciler) snapshotRevertNotPerformedWait(vm *infravirtrigaudiov1beta1.VirtualMachine,
+	rec *infravirtrigaudiov1beta1.SnapshotRevertStatus) time.Duration {
+	now := r.now()
+	wait := r.revertNotPerformed.remaining(snapshotRevertNotPerformedKey(vm, rec), now)
+	if floor := rec.AttemptTime.Add(snapshotRevertNotPerformedRetryBase).Sub(now); floor > wait {
+		wait = floor
+	}
+	return wait
+}
+
+// snapshotRevertNotPerformedAnswer records a revert the provider answered it
+// did not perform: the record goes back to Pending (reason
+// RevertNotPerformed) with the attempt and its time kept, and the revert is
+// sent again, as a new attempt, once the backoff has passed — only while the
+// VM stays powered off with spec.powerState Off, like a first send.
+func (r *VirtualMachineReconciler) snapshotRevertNotPerformedAnswer(ctx context.Context,
+	vm *infravirtrigaudiov1beta1.VirtualMachine, err error) (ctrl.Result, bool, error) {
+	rec := vm.Status.SnapshotRevert
+	wait := r.revertNotPerformed.nextWithin(snapshotRevertNotPerformedKey(vm, rec), r.now(),
+		snapshotRevertNotPerformedRetryBase, snapshotRevertNotPerformedRetryMax)
+	log.FromContext(ctx).Info("The provider did not perform the snapshot revert; it is sent again after a backoff",
+		"attempt", rec.Attempts, "retryAfter", wait.String(), "error", err.Error())
+	metrics.RecordError(errReasonProviderSnapshotRevert, metrics.ComponentManager)
+	rec.Phase = infravirtrigaudiov1beta1.SnapshotRevertPhasePending
+	rec.TaskRef = ""
+	rec.Message = fmt.Sprintf("the provider did not perform revert attempt %d to VMSnapshot %s (%s); nothing was "+
+		"changed. It is sent again in %s while the VM stays powered off", rec.Attempts, rec.SnapshotName,
+		providerFailureDetail(err), wait)
+	setSnapshotRevertCondition(vm, infravirtrigaudiov1beta1.SnapshotRevertReasonNotPerformed, rec.Message)
+	r.recordEvent(vm, corev1.EventTypeWarning, eventReasonSnapshotRevertNotPerformed, rec.Message)
+	r.persistSnapshotRevert(ctx, vm)
+	return ctrl.Result{RequeueAfter: wait}, true, nil
 }
 
 // snapshotRevertFailureHint ends the message of a revert the provider

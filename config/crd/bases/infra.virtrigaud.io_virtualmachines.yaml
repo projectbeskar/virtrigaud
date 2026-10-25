@@ -1023,9 +1023,10 @@ spec:
                     type: string
                   attempts:
                     description: |-
-                      Attempts counts the SnapshotRevert calls sent for this request: more
-                      than one only when an earlier call's outcome was not known (a lost
-                      answer, a deadline) and the call was sent again on the powered-off VM.
+                      Attempts counts the SnapshotRevert calls sent for this request since
+                      the provider last answered that it did not perform one: more than one
+                      only when an earlier call's outcome was not known (a lost answer, a
+                      deadline) and the call was sent again on the powered-off VM.
                     format: int32
                     minimum: 0
                     type: integer
