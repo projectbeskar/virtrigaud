@@ -6,7 +6,7 @@ for each candidate; this file starts with rc1. The v0.4.0 notes are kept in v0.4
 docs/upgrading.md ("Upgrading from v0.4.0 to v0.4.1") for the upgrade guide these notes link to,
 and CHANGELOG.md for the complete, dated changelog.
 GitHub's limit for a release body is 125,000 characters; this file is far below it (about
-43,000 characters), so it is pasted whole.
+48,000 characters), so it is pasted whole.
 -->
 
 This is **v0.4.1**, a patch release of v0.4.0. It changes how a Proxmox VM gets its cloud-init
@@ -27,6 +27,9 @@ Go modules, and corrects the published descriptions of the API and the gRPC cont
 - **Command-line tools:** `vcts run` runs the conformance tests, `virtrigaud-loadgen` performs
   real power, reconfigure, snapshot and clone operations, and `vrtg-provider init` can scaffold
   a Proxmox provider.
+- **Security:** a `VMClone`'s unused customization secrets are no longer sent to the provider
+  (rotate any real value you set), and libvirt create-from-URL downloads with `curl` with the
+  URL off the host's command line.
 - **Provider authors:** each release now tags the `sdk` and `proto` Go modules.
 - **Helm:** the `virtrigaud-provider-runtime` chart is deprecated and is removed in the next
   minor release.
@@ -83,28 +86,27 @@ v0.4.0 release candidate](../upgrading.md#upgrading-from-a-v040-release-candidat
   `VM.Audit` and `VM.Config.Options` on the VM. Such a VM is now created first and marked ready
   after its seed is attached (its config is read and its description written), as a clone
   already was.
-
 - **If you set a secret in a `VMClone`'s `spec.customization` on v0.4.0 or earlier, rotate it.**
   The values of `sysprep.productKey`, `sysprep.adminPassword.value`,
   `sysprep.joinDomain.password.value`, `sysprep.customCommands`, `certificates[].data`,
-  `guestCommands` and `userData.ignition.inline` were sent to the provider (and, without gRPC
+  `guestCommands[].command`/`.arguments` and `userData.ignition.inline` were sent to the provider (and, without gRPC
   TLS, over the network between the manager and the provider), and they stay in plaintext in the
-  object, in etcd backups, API-server audit logs, the `last-applied-configuration` annotation and
+  object, in etcd backups, API-server audit logs (at `Request` level or above), the `last-applied-configuration` annotation and
   your GitOps sources.
   → [Upgrade guide](../upgrading.md#security-fixes)
 - **libvirt hosts need `curl` for create-from-URL.** A create that carries an image URL instead
-  of a prepared image now downloads with `curl` on the libvirt host (as `ImagePrepare` already
+  of a prepared image (or names one of the provider's predefined templates) now downloads with `curl` on the libvirt host (as `ImagePrepare` already
   did); `wget` is no longer used. If `curl` is missing, the provider log says so.
 
 ### Behaviour changes
 
 - **A libvirt create-from-URL download is classified and time-limited.** An HTTP 4xx answer
-  (except 408, 425 and 429) and a permanent `curl` failure are reported as `InvalidArgument`:
+  (except 408, 425 and 429), a permanent `curl` failure, and a URL with a scheme other than
+  `http`, `https` or `ftp` are reported as `InvalidArgument`:
   the `VirtualMachine` shows `Ready=False/ValidationError` and is rechecked every 30 seconds,
-  instead of the generic provider error retried before. The download is cut off after about
-  4.5 minutes (the manager gives a `Create` 5 minutes, less a reserve for the conversion);
+  instead of the generic provider error retried before. The download is cut off after at most
+  about 4.5 minutes (the manager gives a `Create` 5 minutes, less a reserve for the conversion);
   in v0.4.0 the call failed after 5 minutes while `wget` kept running on the host.
-
 - **A new Proxmox VM with user-data on node-local storage cannot be moved to another node
   while its seed is attached.** `qm migrate` refuses a VM with a local CD-ROM image other than
   its own PVE cloud-init drive, online or offline, so HA and node evacuation cannot move it.
@@ -200,8 +202,7 @@ v0.4.0 release candidate](../upgrading.md#upgrading-from-a-v040-release-candidat
   except the libvirt connection URI and `pvc://` is now replaced by `<redacted <scheme> URL>`;
   the S3 bucket name and the NFS server, export and file name are replaced in a staged disk's
   causes; and a single-host export or import whose outcome is unknown answers with a constant
-  text instead of the raw cause. The legacy create-from-URL path logs the image URL without
-  user-info and query. Logs written by v0.4.0 keep what they contain: treat them as sensitive.
+  text instead of the raw cause. Logs written by v0.4.0 keep what they contain: treat them as sensitive.
 - **The release workflow's `prepare` job runs with `contents: read` only.** It is the job that
   checks the tag and the module versions before anything is built. The tag reaches its shell
   through an environment variable instead of interpolation, and the module tags can only be
@@ -330,7 +331,9 @@ v0.4.0 release candidate](../upgrading.md#upgrading-from-a-v040-release-candidat
 - **The proto has no field, number, RPC or option change.** The generated Go differs only in
   comments. The disk export and import contract comment is attached to `ExportDiskRequest`, and
   corrects the old statement that `transfer_mode` `auto` is chosen from the providers'
-  capabilities: the manager resolves it to `relay`, and no provider implements `direct`.
+  capabilities: the manager resolves it to `relay`, and no provider implements `direct`. The
+  `customize_json` comment now says it is an allow-listed subset of `spec.customization`:
+  third-party providers no longer receive the secret-capable customization fields.
 
 ### Helm chart
 
@@ -357,14 +360,13 @@ against the code.
 
 ### New or changed in v0.4.1
 
-- **`spec.prepare.timeout` above about 4.5 minutes has no effect on a libvirt `ImagePrepare`
-  download.** The manager gives the `ImagePrepare` call 5 minutes, and the download is now cut off
+- **A libvirt `ImagePrepare` download is cut off after about 4.5 minutes, whatever
+  `spec.prepare.timeout` says (the 30-minute default included).** The manager gives the `ImagePrepare` call 5 minutes, and the download is now cut off
   within that call (before, `curl` kept running on the host after the call had failed). Prepare
   large images from a source close to the libvirt host.
 - **The `VMClone` customization secret fields are only warned about.** The admission warning is
   advisory and appears only with webhooks enabled; to forbid these fields, add your own admission
   policy.
-
 - **Proxmox: a VM with user-data is tied to one node and its seed to its storage.** The VM must
   be on the node SSH reaches (the API endpoint's host); the seed is written once, at `Create`,
   so a later change to `spec.userData` does not rebuild it; NICs a template has but
@@ -577,8 +579,9 @@ log, never a Secret).
 See **[Upgrading from v0.4.0 to v0.4.1](../upgrading.md#upgrading-from-v040-to-v041)** in
 [docs/upgrading.md](../upgrading.md). The roll order is the one of v0.4.0: **CRDs, then the
 manager, then the providers**. The CRDs have no schema change, so applying them is safe at any
-point; the `virtrigaud` chart has no template, RBAC or values change, so `helm upgrade` only
-re-tags the images and runs the CRD hook with the new `kubectl` image. Roll the libvirt providers
+point; the `virtrigaud` chart has no RBAC or values change (its only template change is the
+warning-only `vvmclone-customization.kb.io` webhook entry, rendered with `webhooks.enabled=true`),
+so `helm upgrade` re-tags the images and runs the CRD hook with the new `kubectl` image. Roll the libvirt providers
 promptly after the manager: a v0.4.1 manager reads a v0.4.0 libvirt provider's answers as they
 are (a single-host failed revert as a failure) and retries every "not performed" snapshot create,
 so until the provider is rolled a single-host overlay collision or a refusal libvirt will never
@@ -599,9 +602,15 @@ to the Provider's Secret, check `genisoimage` and `flock` on the node, and in a 
    simulated run that you can stop with Ctrl-C).
 4. A `VMSnapshot` that v0.4.0 held in `SnapshotOutcomeUnknown` because of a leftover overlay file
    stays held: delete it and create one under another name, or confirm the attempt.
+5. If a `VMClone` set `sysprep.productKey`, `sysprep.adminPassword.value`,
+   `sysprep.joinDomain.password.value`, `sysprep.customCommands`, `certificates[].data`,
+   `guestCommands` or `userData.ignition.inline` on v0.4.0 or earlier, rotate those values
+   ([Security fixes](../upgrading.md#security-fixes)).
+6. Make sure `curl` is installed on every libvirt host that creates VMs from an image URL or a
+   predefined template.
 
 ## Full changelog
 
 The complete, dated list of changes is in [CHANGELOG.md](../../CHANGELOG.md). The pull requests
-since v0.4.0 are #445 to #451. Once the tag exists, the commits are at
+since v0.4.0 are #445 to #453. Once the tag exists, the commits are at
 <https://github.com/projectbeskar/virtrigaud/compare/v0.4.0...v0.4.1-rc1>.

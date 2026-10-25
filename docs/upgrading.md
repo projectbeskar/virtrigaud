@@ -46,7 +46,7 @@ sections below it as well, in the order the rest of this guide gives.
   `sysprep.productKey`, `sysprep.adminPassword.value`, `sysprep.joinDomain.password.value`,
   `sysprep.customCommands`, `certificates[].data`, `guestCommands[].command`/`.arguments` and
   `userData.ignition.inline`, which no provider acts on. From v0.4.1 the request carries only the
-  fields a provider applies or reports, and those are never sent. Nothing changes in what a
+  fields a provider applies or reports; the fields above are never sent. Nothing changes in what a
   clone gets: `hostname`, `domain` and (libvirt) `userData.cloudInit.inline` are sent and
   applied as before, and the libvirt and vSphere providers still log the other fields that are
   set as not applied (except a `sysprep` that holds only `productKey` or `customCommands`, and
@@ -78,12 +78,12 @@ sections below it as well, in the order the rest of this guide gives.
   ([`docs/image-preparation.md`](image-preparation.md#how-an-image-is-published)): `curl -q -K -`
   with the URL on **stdin**, exactly one transfer, `http`/`https`/`ftp` only (redirects
   included), a 30-second connect timeout and the `VIRTRIGAUD_LIBVIRT_IMAGE_MAX_DOWNLOAD_GIB`
-  size limit. Its total time is 30 minutes or the time left of the `Create` call, whichever is
-  shorter, less a tenth of that time (at most a minute) kept for the convert; the manager
-  gives a `Create` 5 minutes, so a download is cut off after about 4.5 minutes (`wget` had no
+  size limit. Its total time is 30 minutes or, when the `Create` call's deadline comes sooner,
+  the time left until it less a tenth of that time (at most a minute) kept for the convert; the
+  manager gives a `Create` 5 minutes, so a download is cut off after at most about 4.5 minutes (`wget` had no
   limit, but the call failed after 5 minutes anyway while `wget` ran on). The same cap now
-  applies to `ImagePrepare` downloads, whose `spec.prepare.timeout` above about 4.5 minutes
-  therefore has no effect. The provider log shows the URL without its user-info and query,
+  applies to `ImagePrepare` downloads, which are therefore cut off after about 4.5 minutes,
+  whatever `spec.prepare.timeout` says (the 30-minute default included). The provider log shows the URL without its user-info and query,
   and errors never contain it. Every image URL takes this path, whatever its scheme: an
   `ftp://` URL is now downloaded (before, it was looked up as a template name, which logged
   it and returned it in the error), and any other scheme is refused (`InvalidSpec`). A URL
@@ -331,6 +331,9 @@ its values to `Provider` fields.
 - libvirt: create a `VMSnapshot` whose name matches an existing overlay (for a test VM) and check
   it ends `Failed` with the "overlay file ... already exists" message and the file is untouched.
 - A `VMClone` with `LinkedClone` for a Proxmox Provider fails with `LinkedCloneUnsupported`.
+- With webhooks enabled, `kubectl apply` of a test `VMClone` with `sysprep.productKey` set prints
+  one admission warning naming the field, and once the clone starts the `VMClone` has one
+  `CustomizationSecretNotSent` event; neither shows the value.
 
 ## Breaking changes
 

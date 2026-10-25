@@ -491,7 +491,7 @@ helm upgrade --install virtrigaud oci://.../virtrigaud \
 With `webhooks.enabled=true` the chart renders (for the default `self-signed`
 source): a `kubernetes.io/tls` **Secret** (`virtrigaud-webhook-certs`), the webhook
 **Service** (`<release>-webhook`), and the **`ValidatingWebhookConfiguration`**
-(`vprovider.kb.io` only — there are no mutating or conversion webhooks). The
+(`vprovider.kb.io`, the warning-only `vvmclone-customization.kb.io`, and with `manager.maxDiskSize` set the two disk-size webhooks — there are no mutating or conversion webhooks). The
 manager Deployment gains the `--webhook-cert-path` flag, the cert volume mount, and
 the `9443` container port.
 
