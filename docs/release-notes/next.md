@@ -1406,6 +1406,30 @@ policy and grants → manager → providers), and rollback caveats in
   into vSphere (S3 or NFS) whose `ImportDisk` was the provider's first call
   after a restart failed with `datastore/StoragePod "<name>" not found`: the
   import looked up the datastore before selecting the datacenter.
+- **Command-line tools** (`vrtg`, `vcts`, `virtrigaud-loadgen`, `vrtg-provider`; see
+  [CLI tools](../cli-tools.md)). These are fixes to the tools only: the manager and provider
+  images are the ones of v0.4.0-rc9, unchanged.
+  - `vrtg` (every command except `vm events`), `vcts run` and `virtrigaud-loadgen` failed with
+    `no kind is registered for the type v1beta1...`; they now read and write VirtRigaud
+    resources. `--kubeconfig` is honoured (it was ignored), `vrtg` list commands honour `-n`,
+    `-o json` and `-o yaml` print the resources (they printed "not implemented"), a
+    `VirtualMachine` with no `spec.imageRef` no longer crashes `vrtg vm list`, and
+    `vrtg provider status` shows `status.healthy` instead of a fixed "Available". The
+    `vrtg` subcommands that have no implementation (`snapshot`, `clone`, `diag`, `init`,
+    `conformance`, `provider logs`) now exit non-zero and name what to use instead.
+  - `vcts validate` exits non-zero when a specification is invalid (it exited 0), so the CI
+    step that validates `test/conformance/specs` can fail.
+  - `virtrigaud-loadgen --config` is honoured (a strict YAML file; an unknown key is an error),
+    `delete` removes only VMs that run created (it picked any VM in the namespace), and a second
+    run in the same namespace no longer collides on VM names.
+  - `vrtg-provider generate`, `verify` and `publish` accept the projects `vrtg-provider init`
+    creates (they always failed with "not in a provider project directory"); the generated
+    project now builds (it imported the repository's `internal/` packages and unpublished module
+    versions). `init` resolves the SDK and proto modules from a VirtRigaud checkout
+    (`--virtrigaud-path`, or the checkout the project is created in). `verify` no longer
+    claims a conformance run and `publish` records conformance as not run instead of
+    hard-coded passes.
+  - Every tool reports its release with `--version`.
 
 ## Known limitations
 
@@ -1684,6 +1708,14 @@ says so. Each links to the page that documents it in full, where one exists.
   other local users until you make them private, and seed directories of VMs deleted
   together with a clone) and vSphere `virtrigaud-export-*` files. Find and remove them as described in
   [docs/upgrading.md](../upgrading.md#leftovers-from-earlier-releases).
+- **Command-line tools:** `vcts run` does not execute the steps of a conformance
+  specification yet (every step reports "not implemented", so the selected tests are
+  reported as failed; `vcts validate` and `vcts list` work), `virtrigaud-loadgen` only
+  simulates its `power`, `reconfigure`, `snapshot` and `clone` operations, and the
+  `vrtg snapshot`, `clone`, `diag`, `init`, `conformance` and `provider logs` subcommands
+  are not implemented. A project made by `vrtg-provider init` builds only against a
+  local VirtRigaud checkout, because the SDK and proto modules are not published under
+  their own version tags. See [CLI tools](../cli-tools.md).
 
 ## Validation
 
