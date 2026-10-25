@@ -413,38 +413,39 @@ func (p *Provider) configureClonedVM(ctx context.Context, req *providerv1.Create
 	}
 	p.logger.Info("Reconfiguring cloned VM with cloud-init", "vmid", vmConfig.VMID)
 
-	primaryDisk, _ := pveapi.PrimaryDiskFromConfig(cfg)
-	p.logger.Info("Detected primary boot disk", "vmid", vmConfig.VMID, "disk", primaryDisk)
-
 	// Build reconfiguration values for cloud-init. Sizing (cores/memory) is
 	// already applied above for every clone, so it is not repeated here.
+	//
+	// The cloud-init settings (user-data, SSH keys) reach the guest only
+	// through a cloud-init drive, so the clone gets one whenever user-data or
+	// SSH keys are set: on the request's storage, else the primary disk's, else the
+	// operator's (R33); then what the clone's own cloud-init drive, if the
+	// template had one, needs (cloudInitChange keeps the slot the drive is
+	// really in).
 	reconfigValues := url.Values{}
-	cloudInitSlot := cloudInitDefaultSlot
-	if len(req.UserData) > 0 {
-		// The request's storage, else the primary disk's, else the operator's
-		// (R33); then what the clone's own cloud-init drive, if the template
-		// had one, needs (cloudInitChange).
-		storage, err := p.diskfulCloudInitStorage(vmConfig.Storage, cfg, vmConfig.VMID)
-		if err != nil {
-			return err
-		}
-		slot, value, set := cloudInitChange(cfg, storage)
-		cloudInitSlot = slot
-		if set {
-			reconfigValues.Set(slot, value)
-		}
-		p.logger.Info("Cloud-init drive", "vmid", vmConfig.VMID, "storage", storage, "slot", slot, "set", set)
+	storage, err := p.diskfulCloudInitStorage(vmConfig.Storage, cfg, vmConfig.VMID)
+	if err != nil {
+		return err
 	}
+	slot, value, set := cloudInitChange(cfg, storage)
+	if set {
+		reconfigValues.Set(slot, value)
+	}
+	p.logger.Info("Cloud-init drive", "vmid", vmConfig.VMID, "storage", storage, "slot", slot, "set", set)
 	if vmConfig.SSHKeys != "" {
 		reconfigValues.Set("sshkeys", vmConfig.SSHKeys)
 	}
 	if vmConfig.CIUser != "" {
 		reconfigValues.Set("ciuser", vmConfig.CIUser)
 	}
-	// Set boot order: detected primary disk first, then cloud-init drive
-	bootOrder := fmt.Sprintf("order=%s;%s", primaryDisk, cloudInitSlot)
-	reconfigValues.Set("boot", bootOrder)
-	p.logger.Info("Setting boot order", "vmid", vmConfig.VMID, "boot", bootOrder)
+	// Boot from the boot disk only (cloneBootOrder); a clone whose config
+	// shows no disk keeps the boot order the template gave it.
+	if boot := cloneBootOrder(cfg); boot != "" {
+		reconfigValues.Set(pveConfigKeyBoot, boot)
+		p.logger.Info("Setting boot order", "vmid", vmConfig.VMID, "boot", boot)
+	} else {
+		p.logger.Info("The cloned VM's config shows no disk; its boot order is left as the template made it", "vmid", vmConfig.VMID)
+	}
 
 	taskID, err := p.client.ReconfigureVMRaw(ctx, node, vmConfig.VMID, reconfigValues)
 	if err != nil {
@@ -1702,7 +1703,7 @@ func (p *Provider) configDiskCapacities(config map[string]interface{}) []*provid
 			continue
 		}
 		parts := strings.Split(value, ",")
-		if slices.Contains(parts, "media=cdrom") || strings.Contains(parts[0], "cloudinit") {
+		if slices.Contains(parts, pveMediaCDROM) || strings.Contains(parts[0], "cloudinit") {
 			continue
 		}
 		c := &providerv1.DiskCapacity{DiskId: k, Path: parts[0]}

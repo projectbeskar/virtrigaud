@@ -113,7 +113,7 @@ spec:
 # Import the cloud image on the PVE node yourself, e.g.:
 #   qm create 9001 --name centos-stream-9 --memory 2048 --net0 virtio,bridge=vmbr0
 #   qm importdisk 9001 CentOS-Stream-GenericCloud-9-latest.x86_64.qcow2 local-lvm
-#   qm set 9001 --scsihw virtio-scsi-pci --scsi0 local-lvm:vm-9001-disk-0 --ide2 local-lvm:cloudinit
+#   qm set 9001 --scsihw virtio-scsi-pci --scsi0 local-lvm:vm-9001-disk-0 --ide2 local-lvm:cloudinit --boot order=scsi0
 #   qm template 9001
 apiVersion: infra.virtrigaud.io/v1beta1
 kind: VMImage

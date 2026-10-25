@@ -267,8 +267,10 @@ const proxmoxImportedDiskInterface = "scsi0"
 //     is the TARGET format written into the storage (qcow2 by default; PVE
 //     probes the stage's own format, whatever its file extension says).
 //  3. `qm set <vmid> --scsihw virtio-scsi-pci --scsi0 <storage>:<imported-volume>
-//     --boot order=scsi0 [--ide2 <storage>:cloudinit --ciuser/--sshkeys]` — wires
-//     the imported disk as the boot disk and attaches cloud-init when present.
+//     --boot order=scsi0` — wires the imported disk as the boot disk; then, when
+//     the request carries user-data, a PVE API config update attaches the
+//     cloud-init drive (ide2) with ciuser/sshkeys (buildImportedDiskCloudInitValues).
+//     The cloud-init drive is not in the boot order.
 //  4. Remove the node-side stage (best-effort).
 //
 // The shell carries the owner stamp from step 1 ("creating"), and "ready" once

@@ -28,6 +28,26 @@ Findings from the v0.4.0 review: open code-scanning alerts, a scaffold missing t
 ### Impact
 - [ ] Breaking change
 - [x] Requires cluster rollout (the kubectl image of the CRD upgrade hook)
+
+## [2026-10-25 12:21] - Proxmox: a cloned VM's boot order names only its boot disk (R38)
+**Author:** @wrkode (William Rizzo)
+
+### Fixed
+- `internal/providers/proxmox/server.go`, `internal/providers/proxmox/boot_order.go`: `configureClonedVM` set `boot: order=<primary disk>;<cloud-init slot>`, where the slot was always `ide2` for SSH keys without user-data (whatever slot the clone's drive was in, or with no drive), and the disk was `scsi0` when the clone's config showed none. PVE refuses a boot order that names a device the VM lacks (`invalid bootorder: device '<dev>' does not exist`), so such a Create failed and was rolled back. The order is now one disk only (`cloneBootOrder`/`cloneBootDisk`): the first disk in the boot order the clone inherited from its template, else the template's legacy `bootdisk`, else `pveapi.PrimaryDiskFromConfig` (the old order ignored the template's and could boot a clone from a data disk on an earlier bus). No boot order is set when the clone shows no disk (the template's is kept). The cloud-init drive is no longer in the boot order, as in PVE's Cloud-Init guide and the migration import path (`--boot order=scsi0`).
+- `internal/providers/proxmox/server.go`: SSH keys without user-data now get a cloud-init drive too (the clone's own, in the slot it is in, else a new one in `ide2`); without one the keys never reached the guest. `parseCreateRequest` only sets SSH keys from user-data today, so a Create does not reach this case yet.
+- `internal/providers/proxmox/cloudinit_storage.go`: `diskfulCloudInitStorage` checks a storage named for the VM as a PVE storage ID itself (as `disklessCloudInitStorage` does), not only through the caller.
+
+### Changed
+- `internal/providers/proxmox/pvefake/server.go`: the fake checks a config update's `boot` order like qemu-server (every device must exist in the config or the update, and not be deleted by it; an empty element is refused) and records it and `sshkeys`; a config key seeded empty is absent from GET `/config`, so a test can model a template without a disk.
+- `internal/providers/proxmox/pveapi/client.go`, `internal/providers/proxmox/s3import.go`, `internal/providers/proxmox/cloudinit_storage.go`: comments describe the boot order as it is now.
+- `docs/proxmox-cloud-init-storage.md`: new "Boot order" section; `examples/proxmox-complete-example.yaml`: the template preparation sets `--boot order=scsi0`.
+
+### Why
+A clone of a template without a disk on the scanned buses failed its Create on a real PVE, because the boot order named a device the VM did not have; the keys-only path (not reachable from Create yet) had the same defect. The cloud-init drive is a data source for cloud-init, not a boot device, and the template's own boot disk is the best evidence of which disk boots.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout
 - [ ] Config change only
 - [ ] Documentation only
 
