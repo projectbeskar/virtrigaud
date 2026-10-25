@@ -23,6 +23,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/projectbeskar/virtrigaud/internal/scaffold"
 	internalversion "github.com/projectbeskar/virtrigaud/internal/version"
 )
 
@@ -30,6 +31,16 @@ import (
 // it with -ldflags "-X main.version=...". When it is not set the build's
 // internal/version string is reported.
 var version string
+
+// releaseVersion returns the VirtRigaud release this binary was built from,
+// or "" for a development build (no version set, or one that is not a
+// release, such as git describe output).
+func releaseVersion() string {
+	if scaffold.IsReleaseVersion(version) {
+		return version
+	}
+	return ""
+}
 
 // versionString returns the version to report.
 func versionString() string {

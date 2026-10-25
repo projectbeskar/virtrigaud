@@ -17,9 +17,12 @@ limitations under the License.
 package scaffold
 
 import (
+	"encoding/json"
 	"go/format"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -54,15 +57,70 @@ func TestGenerateDoesNotImportInternalPackages(t *testing.T) {
 }
 
 func TestGoModTemplate(t *testing.T) {
-	t.Run("without a checkout the replace block is commented out", func(t *testing.T) {
+	t.Run("a development build without a checkout requires placeholders and comments the replace block", func(t *testing.T) {
 		dir := generate(t, Config{ProviderName: "demo", ProviderType: "generic"})
 		gomod, err := os.ReadFile(filepath.Join(dir, "go.mod"))
 		require.NoError(t, err)
 		assert.Contains(t, string(gomod), "module provider-demo")
-		assert.Contains(t, string(gomod), "github.com/projectbeskar/virtrigaud/sdk v0.1.0")
-		assert.Contains(t, string(gomod), "github.com/projectbeskar/virtrigaud/proto v0.1.0")
+		assert.Contains(t, string(gomod), "github.com/projectbeskar/virtrigaud/sdk "+devModuleVersion+"\n")
+		assert.Contains(t, string(gomod), "github.com/projectbeskar/virtrigaud/proto "+devModuleVersion+"\n")
 		assert.Contains(t, string(gomod), "go "+defaultGoVersion+"\n")
 		assert.NotContains(t, string(gomod), "\nreplace (")
+		assert.Contains(t, string(gomod), "// replace (")
+	})
+
+	t.Run("a release pins the published modules and has no replace directives", func(t *testing.T) {
+		dir := generate(t, Config{ProviderName: "demo", ProviderType: "generic", ModuleVersion: "v0.4.1-rc1"})
+		gomod, err := os.ReadFile(filepath.Join(dir, "go.mod"))
+		require.NoError(t, err)
+		for _, module := range []string{"", "/proto", "/sdk"} {
+			assert.Contains(t, string(gomod), "\tgithub.com/projectbeskar/virtrigaud"+module+" v0.4.1-rc1\n")
+		}
+		assert.NotContains(t, string(gomod), "replace")
+		assert.NotContains(t, string(gomod), devModuleVersion+"\n")
+		want := toolchainGoVersion()
+		if want == "" {
+			want = defaultGoVersion
+		}
+		assert.Contains(t, string(gomod), "go "+want+"\n")
+
+		// The go command reads it as three requires and nothing else.
+		cmd := exec.Command("go", "mod", "edit", "-json")
+		cmd.Dir = dir
+		out, err := cmd.Output()
+		require.NoError(t, err)
+		var parsed struct {
+			Require []struct{ Path, Version string }
+			Replace []json.RawMessage
+		}
+		require.NoError(t, json.Unmarshal(out, &parsed))
+		assert.Empty(t, parsed.Replace)
+		require.Len(t, parsed.Require, 3)
+		for _, r := range parsed.Require {
+			assert.Equal(t, "v0.4.1-rc1", r.Version, r.Path)
+		}
+
+		dockerfile, err := os.ReadFile(filepath.Join(dir, "Dockerfile"))
+		require.NoError(t, err)
+		assert.NotContains(t, string(dockerfile), "local checkout", "a pinned project builds from its own directory")
+	})
+
+	t.Run("a checkout overrides a release and keeps its version in the requires", func(t *testing.T) {
+		checkout := t.TempDir()
+		require.NoError(t, os.WriteFile(filepath.Join(checkout, "go.mod"),
+			[]byte("module github.com/projectbeskar/virtrigaud\n\ngo 1.99.1\n"), 0o600))
+		dir := generate(t, Config{
+			ProviderName: "demo", ProviderType: "generic", ModuleVersion: "v0.4.1", VirtrigaudPath: checkout,
+		})
+		gomod, err := os.ReadFile(filepath.Join(dir, "go.mod"))
+		require.NoError(t, err)
+		assert.Contains(t, string(gomod), "github.com/projectbeskar/virtrigaud/sdk v0.4.1\n")
+		assert.Contains(t, string(gomod), "\nreplace (")
+		assert.Contains(t, string(gomod), "go 1.99.1\n")
+
+		dockerfile, err := os.ReadFile(filepath.Join(dir, "Dockerfile"))
+		require.NoError(t, err)
+		assert.Contains(t, string(dockerfile), "local checkout")
 	})
 
 	t.Run("a checkout outside the project is replaced by absolute path and sets the go directive", func(t *testing.T) {
@@ -95,6 +153,38 @@ func TestReadmeCodeFences(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotContains(t, string(readme), "'''")
 	assert.Contains(t, string(readme), "```bash")
+}
+
+func TestIsReleaseVersion(t *testing.T) {
+	for version, want := range map[string]bool{
+		"v0.4.1":                  true,
+		"v0.4.1-rc1":              true,
+		"v0.4.1-rc.2":             true,
+		"v1.0.0-beta3":            true,
+		"v1.2.3-alpha1":           true,
+		"":                        false,
+		"dev":                     false,
+		"0.4.1":                   false,
+		"v0.4":                    false,
+		"v0.04.1":                 false,
+		"v2.0.0":                  false, // would need a /v2 module path
+		"v0.4.1+meta":             false,
+		"v0.4.1-rc01":             false,
+		"v0.4.0-3-gabc1234":       false, // git describe
+		"v0.4.0-3-gabc1234-dirty": false,
+		"v0.4.1-preview1":         false,
+	} {
+		assert.Equal(t, want, IsReleaseVersion(version), version)
+	}
+}
+
+func TestToolchainGoVersion(t *testing.T) {
+	v := toolchainGoVersion()
+	if v == "" {
+		t.Skipf("toolchain %s is not a Go release", runtime.Version())
+	}
+	assert.Equal(t, "go"+v, runtime.Version())
+	assert.Regexp(t, goVersionPattern, v)
 }
 
 func TestReadGoDirective(t *testing.T) {

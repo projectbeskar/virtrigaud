@@ -37,8 +37,14 @@ type initOptions struct {
 	force        bool
 
 	// virtrigaudPath is the VirtRigaud checkout the generated go.mod resolves
-	// the SDK and proto modules from; empty means detect it.
+	// the SDK and proto modules from; empty means none for a release build
+	// and detect it for a development build.
 	virtrigaudPath string
+
+	// releaseVersion is the VirtRigaud release this binary was built from,
+	// whose published modules the generated go.mod requires; empty for a
+	// development build.
+	releaseVersion string
 }
 
 // rootModuleLine is the module line of the VirtRigaud repository's go.mod.
@@ -46,7 +52,7 @@ const rootModuleLine = "module github.com/projectbeskar/virtrigaud"
 
 // newInitCommand creates the init command.
 func newInitCommand() *cobra.Command {
-	opts := &initOptions{}
+	opts := &initOptions{releaseVersion: releaseVersion()}
 
 	cmd := &cobra.Command{
 		Use:   "init <provider-name>",
@@ -74,7 +80,8 @@ Examples:
   # Create under a specific directory (the project goes in <dir>/providers/myprovider)
   vrtg-provider init myprovider --output ./work
 
-  # Resolve the SDK and proto modules from a VirtRigaud checkout elsewhere
+  # Resolve the SDK and proto modules from a local VirtRigaud checkout
+  # instead of the published modules of this release
   vrtg-provider init myprovider --virtrigaud-path ~/src/virtrigaud`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -88,7 +95,8 @@ Examples:
 	cmd.Flags().BoolVar(&opts.remote, "remote", false, "Generate remote runtime configuration")
 	cmd.Flags().BoolVar(&opts.force, "force", false, "Overwrite existing files")
 	cmd.Flags().StringVar(&opts.virtrigaudPath, "virtrigaud-path", "",
-		"VirtRigaud checkout to resolve the SDK and proto modules from (default: the checkout the project is created in, if any)")
+		"VirtRigaud checkout to resolve the SDK and proto modules from, through replace directives, for local development "+
+			"(default: a release build requires its own release of the published modules; a development build uses the checkout the project is created in, if any)")
 
 	return cmd
 }
@@ -119,12 +127,18 @@ func runInit(opts *initOptions) error {
 		}
 	}
 
-	// Find the VirtRigaud checkout the SDK and proto modules come from
+	// Where the SDK and proto modules come from: a release build requires the
+	// modules its own release published; --virtrigaud-path overrides that
+	// with a local checkout; a development build looks for the checkout the
+	// project is created in.
 	checkout := opts.virtrigaudPath
-	if checkout == "" {
+	switch {
+	case checkout != "":
+		if !isCheckout(checkout) {
+			return fmt.Errorf("--virtrigaud-path %s is not a VirtRigaud checkout (no go.mod with %q)", checkout, rootModuleLine)
+		}
+	case opts.releaseVersion == "":
 		checkout = findCheckout(targetDir)
-	} else if !isCheckout(checkout) {
-		return fmt.Errorf("--virtrigaud-path %s is not a VirtRigaud checkout (no go.mod with %q)", checkout, rootModuleLine)
 	}
 
 	// Create scaffolder
@@ -134,6 +148,7 @@ func runInit(opts *initOptions) error {
 		TargetDir:      targetDir,
 		Remote:         opts.remote,
 		Force:          opts.force,
+		ModuleVersion:  opts.releaseVersion,
 		VirtrigaudPath: checkout,
 	})
 
@@ -146,9 +161,14 @@ func runInit(opts *initOptions) error {
 	fmt.Printf("📁 Project created in: %s\n", targetDir)
 	fmt.Printf("\nNext steps:\n")
 	fmt.Printf("  cd %s\n", targetDir)
-	if checkout == "" {
-		fmt.Printf("  # go.mod needs replace directives for the VirtRigaud modules (see the comment in it),\n")
-		fmt.Printf("  # or re-run init with --virtrigaud-path <checkout>\n")
+	switch {
+	case checkout != "":
+		fmt.Printf("  # go.mod resolves the VirtRigaud modules from %s\n", checkout)
+	case opts.releaseVersion != "":
+		fmt.Printf("  # go.mod requires the VirtRigaud %s modules\n", opts.releaseVersion)
+	default:
+		fmt.Printf("  # go.mod needs a VirtRigaud release or replace directives for the VirtRigaud modules\n")
+		fmt.Printf("  # (see the comment in it), or re-run init with --virtrigaud-path <checkout>\n")
 	}
 	fmt.Printf("  go mod tidy\n")
 	fmt.Printf("  make build\n")
