@@ -33,7 +33,8 @@ that applies wins:
    `local-lvm:vm-101-disk-0,size=32G`. The provider takes the first drive that
    is not a cdrom, scanning virtio0-15, then scsi0-15, sata0-15, ide0-15. That is
    the first such drive, not necessarily the boot disk: a data disk on an earlier
-   bus wins (`PrimaryDiskFromConfig`, whose disk also starts the boot order). A
+   bus wins (`PrimaryDiskFromConfig`, whose disk is also the boot order, see
+   [Boot order](#boot-order)). A
    storage that holds the VM's disk holds its cloud-init drive.
 3. **The provider's default storage**: the environment variable
    `PROVIDER_DEFAULT_STORAGE`, else `PVE_DEFAULT_STORAGE`, on the Proxmox provider
@@ -82,9 +83,29 @@ by a full clone), `.qcow2` (made by a config update that replaces the drive) or
 `.vmdk`. A volume that only has "cloudinit" in its name, such as an ISO, is not a
 cloud-init drive.
 
-The template's drive can be in any `ide`, `sata` or `scsi` slot; the boot order
-(`order=<primary disk>;<that slot>`) follows it. A re-sent Create that finds its
-half-made VM runs the same step again and changes nothing.
+The template's drive can be in any `ide`, `sata` or `scsi` slot; the provider
+uses it where it is. A re-sent Create that finds its half-made VM runs the same
+step again and changes nothing.
+
+### Boot order
+
+In the same config update the provider sets the clone's boot order to its
+primary disk only: `boot: order=<primary disk>` (e.g. `order=scsi0`). The
+cloud-init drive is not in it: cloud-init in the guest reads the drive as a
+data source, and nothing boots from it. PVE's Cloud-Init guide does the same
+(`qm set <vmid> --boot order=scsi0` after adding the drive, so the firmware does
+not probe the CD-ROM), and so does a VM created from a migration's imported
+disk. When the clone's config shows no disk at all, the provider sets no boot
+order and the clone keeps the template's. PVE refuses a boot order that names a
+device the VM does not have (`invalid bootorder: device '<dev>' does not
+exist`), so the provider only ever names the disk it found. A clone without
+user-data gets no boot order from the provider (only its sizing and networks
+are set) and keeps the template's.
+
+In v0.4.0 and earlier the order also named the cloud-init drive's slot
+(`order=<primary disk>;<slot>`), and named `scsi0` when the clone's config
+showed no disk; PVE refused that update, so such a Create failed and was
+rolled back.
 
 ### Checks
 

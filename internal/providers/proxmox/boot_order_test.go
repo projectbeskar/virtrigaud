@@ -29,10 +29,10 @@ import (
 	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
 )
 
-// These tests pin R38: a cloned VM's boot order named the cloud-init slot
-// ide2 whatever slot the clone's drive was really in (or with no drive at
-// all, for SSH keys without user-data), and "scsi0" when the clone had no
-// disk. PVE refuses a boot order that names a device the VM lacks ("invalid
+// These tests pin R38: a cloned VM's boot order was "<primary disk>;<slot>".
+// With SSH keys and no user-data the slot was always ide2, whatever slot the
+// clone's drive was really in, or with no drive at all; and the disk was
+// "scsi0" when the clone had none. PVE refuses a boot order that names a device the VM lacks ("invalid
 // bootorder: device '<dev>' does not exist"), which pvefake now checks, so
 // such a clone failed and was rolled back. The order is now the primary disk
 // only, as PVE's Cloud-Init guide and the migration import path do.
