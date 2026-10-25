@@ -5,6 +5,32 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-10-25 12:40] - CLI and build-tooling hygiene
+**Author:** @wrkode (William Rizzo)
+
+### Added
+- `internal/scaffold/scaffold.go`, `cmd/vrtg-provider/init.go`: `vrtg-provider init --type proxmox`. The scaffold declares only the core profile and the `raw`/`qcow2` disk and `bridge`/`vlan` network types (every operation still returns `Unimplemented`, so no optional capability is advertised), a README section and, with `--remote`, a Deployment that reads `PVE_ENDPOINT`, `PVE_TOKEN_ID` and `PVE_TOKEN_SECRET` from a Secret.
+- `cmd/vrtg-provider/catalog_test.go`: checks `providers/catalog.yaml` parses with the structure `publish` writes, names release tags, and claims no conformance result without a report and a date.
+- `hack/verify-golangci-lint-version.sh`, `Makefile` (`verify-golangci-lint-version`), CI workflow: fails when the CI workflow, the helper scripts or `.pre-commit-config.yaml` pin a different golangci-lint than the Makefile, or `.golangci.yml` is not a v2 configuration.
+- CI workflow: job `Proto Breaking Changes` runs `buf breaking` against the pull request's target branch.
+
+### Changed
+- `cmd/vrtg-provider/*.go`, `cmd/virtrigaud-loadgen/main.go`, `internal/scaffold/scaffold.go`: the gosec findings in the command-line tools (G301, G306, G304, G204) are annotated with `#nosec` and the specific reason; the scaffolded project directory and `providers/catalog.yaml` keep mode 0755/0644 on purpose (source files meant to be committed and built by others; the umask still applies). The `//nolint:gosec` comments, which gosec itself does not read, became `#nosec` annotations.
+- `.pre-commit-config.yaml`: golangci-lint is pinned to v2.12.2 (the Makefile and CI version) instead of v1.59.1, which could not read `.golangci.yml`; the `--exclude-dirs` flag, which v2 does not have, is dropped and the config-verify hook is added.
+- `providers/catalog.yaml`: tags are `v0.4.0` (were 0.1.x), every conformance profile is `skip` (not run) with no report URL or date (the entries claimed passes and 2025 test dates), the listed profiles match what each provider advertises (Proxmox does not list `image-prepare`, libvirt does not list `clone`), and the mock provider, whose image the release does not publish, says so.
+- `test/performance/proxmox-loadtest.yaml`: rewritten in the `virtrigaud-loadgen` configuration format (it was a ConfigMap and Job around a format the tool never read, with an image and a fake server that are not published); `cmd/virtrigaud-loadgen/performance_configs_test.go` loads every file in `test/performance` with the tool's own loader.
+- `build/Dockerfile.kubectl`: kubectl 1.35.9 (was 1.32.0) on alpine 3.24 (was 3.20); Trivy HIGH/CRITICAL findings with a fix, 37 to 6 (the remaining six are Go standard library and module fixes that no published kubectl release has picked up yet).
+- `proto/buf.yaml`, `Makefile` (`proto-breaking`): `buf breaking` could not run (`FIELD_SAME_DEFAULT` is not a rule in buf v1). The rule is removed together with the `except` list, which switched off the rules that report a deleted or retyped field, a removed RPC or a removed enum value (a synthetic break of all three was reported as clean). The target compared against `.git` relative to `proto/`, which does not exist; it now defaults to `../.git#ref=origin/main,subdir=proto` (`PROTO_BREAKING_AGAINST`).
+
+### Why
+Findings from the v0.4.0 review: open code-scanning alerts, a scaffold missing the Proxmox provider VirtRigaud ships, tooling pins that did not match the CI, a catalog that claimed conformance results nobody had run, a load-test file the tool could not read, a kubectl image with known vulnerabilities, and a breaking-change check for the gRPC contract that could not run and, with its config, could not have caught a break.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout (the kubectl image of the CRD upgrade hook)
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-10-25 12:30] - Command-line tools fixed for v0.4.0 (GA)
 **Author:** @wrkode (William Rizzo)
 
