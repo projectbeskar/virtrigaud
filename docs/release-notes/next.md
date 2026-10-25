@@ -2363,6 +2363,31 @@ need a fault to trigger.
   make them private. → [Changes since v0.4.0-rc2](#libvirt-cloud-init-seeds-are-private-and-live-in-a-dedicated-directory-414-breaking),
   [Upgrade guide](docs/upgrading.md#breaking-changes)
 
+**New since rc8: nothing is breaking in the API and no CRD schema changed.** Behaviour
+changes to check (no operator action beyond the rollout):
+
+- **A libvirt snapshot delete that would lose another snapshot is refused.** Deleting a
+  disk-only snapshot while a memory snapshot of the same VM is stored in its overlay (or
+  in another file the delete would merge away or remove) answers a definite
+  `FailedPrecondition` naming the snapshot to delete first, and changes nothing. Before,
+  the delete went through and destroyed the memory snapshot. Delete the memory snapshot
+  first (#440; V11).
+- **A libvirt snapshot delete whose snapshot definition cannot be read is refused
+  (fail closed), retryably.** Before, it was deleted without the overlay cleanup. A check
+  that cannot be completed is a retried `ProviderError`, not `DeleteBlocked` (#440).
+- **A refused `VMSnapshot` delete shows `Ready=False/DeleteBlocked` with the provider's
+  answer** (sanitised, first 256 bytes), for every provider's `FailedPrecondition` other
+  than a disk another VM depends on: the libvirt refusals above, and also vSphere's
+  refusal to delete a snapshot of a template or image artifact and a Proxmox VM whose
+  owner stamp cannot be read. Before, these were `ProviderError` with a constant message
+  and the answer only in the event. A re-check is paced by the failed-delete backoff (15
+  seconds up to 5 minutes). Automation that matched the old message or reason must match
+  `DeleteBlocked` (#440).
+
+→ [Changes since v0.4.0-rc8](#changes-since-v040-rc8),
+[Deleting memory and disk-only snapshots of the same
+VM](docs/libvirt-clones.md#deleting-memory-and-disk-only-snapshots-of-the-same-vm)
+
 **New since rc7: nothing is breaking in the API and no CRD schema changed.** Behaviour
 changes to check, and one operator action:
 
@@ -2712,6 +2737,11 @@ policy and grants → manager → providers), and rollback caveats in
   [`docs/clustered-provider-inventory.md`](docs/clustered-provider-inventory.md#migration-into-a-clustered-provider-addendum-b)).
 
 ### Fixes
+
+- **New since rc8** (→ [Changes since v0.4.0-rc8](#changes-since-v040-rc8)):
+  - **Deleting a libvirt disk-only snapshot destroyed a memory snapshot stored in its
+    overlay** without any sign, and the memory snapshot's `VMSnapshot` could then never be
+    deleted while the VM ran (#440; V11).
 
 - **New since rc7** (→ [Changes since v0.4.0-rc7](#changes-since-v040-rc7)):
   - **After an offline snapshot or a revert on libvirt, the snapshot, revert and delete
@@ -3363,6 +3393,23 @@ says so. Each links to the page that documents it in full, where one exists.
   [`docs/libvirt-clones.md`](docs/libvirt-clones.md#what-snapshotdelete-removes)).
   The libvirt revert was validated in the lab on rc7 (single-host and clustered, libvirt
   10.0, AppArmor, an NFS pool); on rc6 it failed (V6).
+- **libvirt: the check that a snapshot delete keeps the VM's other snapshots is not
+  atomic with the delete.** `SnapshotDelete` reads the VM's snapshots and the files'
+  headers, then sends `virsh snapshot-delete`, with no lock between the two and nothing
+  that serialises it against a `SnapshotCreate` of the same VM
+  (`internal/providers/libvirt/server.go`, `snapshot_delete_guard.go`). A memory snapshot
+  created for the same VM while the delete of an earlier disk-only snapshot is running
+  is not seen and could still be lost. Do not create a snapshot of a VM while you delete
+  another of its snapshots. The check also covers only the files the delete may merge
+  away or remove; a snapshot libvirt itself refuses to delete (an internal parent of an
+  external snapshot) is libvirt's answer, not this check's
+  (→ [`docs/libvirt-clones.md`](docs/libvirt-clones.md#deleting-memory-and-disk-only-snapshots-of-the-same-vm)).
+- **libvirt: a lost memory snapshot's data cannot be recovered, and the cleanup is
+  limited to what can be proven.** A memory snapshot that rc8 or earlier lost (its
+  disk-only snapshot was deleted first) keeps only metadata. rc9 deletes that metadata
+  when every file the snapshot recorded is gone and no current disk image lists it;
+  otherwise it asks you to power the VM off and delete it again, and the manual cleanup
+  in the doc applies (→ [`docs/libvirt-clones.md`](docs/libvirt-clones.md#a-memory-snapshot-whose-data-was-already-lost)).
 - **libvirt: snapshot and revert overlays are `0600`, and the disk check needs to read
   them.** libvirt creates `<domain>-disk.<snapshot>` and `<domain>-disk.<epoch>` mode
   `0600`, owned by root while the VM is off, and VirtRigaud does not change them. A
@@ -3445,6 +3492,11 @@ says so. Each links to the page that documents it in full, where one exists.
   [docs/upgrading.md](docs/upgrading.md#leftovers-from-earlier-releases).
 
 ## Upgrade
+
+Since rc8: **no CRD changed**, and no RBAC, chart or proto change. Roll the libvirt
+providers (single-host and clustered) first, then the manager; until a libvirt provider is
+rolled, do not delete a disk-only snapshot of a VM that has a memory snapshot. See
+[Upgrade order for rc9](#upgrade-order-for-rc9).
 
 Since rc7: **no CRD schema changed** (only the description of `status.ips`). On libvirt
 hosts where the provider's SSH user cannot read libvirt's `0600` overlays, grant it
