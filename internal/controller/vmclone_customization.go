@@ -50,13 +50,14 @@ import (
 // fails until it is classified).
 
 // customizationNotSentReason is the reason of the Warning event of a VMClone
-// whose spec.customization holds a secret value that is not acted on.
+// whose spec.customization sets a field that may hold a secret value and is
+// not acted on (VMCustomization.UnusedSecretFields).
 const customizationNotSentReason = "CustomizationSecretNotSent"
 
 // customizationNotSentMessageFmt is that event's message: the field paths
 // (never their values).
 const customizationNotSentMessageFmt = "%s: accepted but not acted on in this release and not sent to the provider; " +
-	"it is stored in plaintext in the VMClone — do not put a real password, product key or certificate key here"
+	"it is stored in plaintext in the VMClone — do not put a real password, key or other credential here"
 
 // providerCustomization returns the part of c a Clone request carries (see the
 // file comment). It never returns a value that shares memory with c.
@@ -132,9 +133,10 @@ func passwordReference(p *infrav1beta1.PasswordSpec) *infrav1beta1.PasswordSpec 
 
 // customizeJSON returns the CustomizeJSON of a Clone request for clone: the
 // allow-listed customization (providerCustomization), or "" when the clone
-// has none or it cannot be marshalled. When spec.customization holds a secret
-// value that is not acted on (VMCustomization.UnusedSecretFields), it records a
-// Warning event naming the fields — never their values.
+// has none or it cannot be marshalled. When spec.customization sets a field
+// that may hold a secret value and is not acted on
+// (VMCustomization.UnusedSecretFields), it records a Warning event naming the
+// fields — never their values.
 func (r *VMCloneReconciler) customizeJSON(_ context.Context, clone *infrav1beta1.VMClone) string {
 	if clone.Spec.Customization == nil {
 		return ""

@@ -775,6 +775,19 @@ func (ip *imagePreparer) download(ctx context.Context, dir, rawURL string, timeo
 	return dl, nil
 }
 
+// minDownloadMaxTime is the shortest total time a download is given.
+const minDownloadMaxTime = time.Second
+
+// downloadMaxTime is a download's total time limit (curl --max-time): timeout,
+// or the time left until ctx's deadline at now when that is shorter, and never
+// less than minDownloadMaxTime.
+func downloadMaxTime(ctx context.Context, timeout time.Duration, now time.Time) time.Duration {
+	if deadline, ok := ctx.Deadline(); ok {
+		timeout = min(timeout, deadline.Sub(now))
+	}
+	return max(timeout, minDownloadMaxTime)
+}
+
 // imagePrepareLogPrefix prefixes ImagePrepare's download log lines.
 const imagePrepareLogPrefix = "ImagePrepare"
 
@@ -786,7 +799,10 @@ const imagePrepareLogPrefix = "ImagePrepare"
 // host's process list (or its audit log) nor left at rest; -q keeps the SSH
 // user's ~/.curlrc out. The transfer is a single one (URL globbing off),
 // limited to http, https and ftp (redirects included), and bounded in connect
-// time, total time (timeout) and size (imageMaxDownloadBytes). A failure is
+// time, total time (downloadMaxTime: timeout, or less when ctx's deadline
+// comes first, so that curl never outlives the call — closing the SSH
+// session does not stop a remote command) and size (imageMaxDownloadBytes).
+// A failure is
 // classifyDownloadFailure's requester-facing error, which never carries the
 // URL; logPrefix names the caller in the log lines, whose URL is redacted. The
 // caller removes dest on failure.
@@ -794,7 +810,7 @@ func downloadToHostFile(ctx context.Context, h imageHost, logPrefix, rawURL, des
 	res, err := h.runHostStdin(ctx, curlURLConfig(rawURL), "curl", "-q", "-K", "-", "--globoff", "-fsSL",
 		"--proto", curlAllowedProtocols, "--proto-redir", curlAllowedProtocols,
 		"--connect-timeout", curlConnectTimeoutSeconds,
-		"--max-time", strconv.FormatInt(int64(timeout/time.Second), 10),
+		"--max-time", strconv.FormatInt(int64(downloadMaxTime(ctx, timeout, time.Now())/time.Second), 10),
 		"--max-filesize", strconv.FormatInt(imageMaxDownloadBytes(), 10),
 		"-w", "%{http_code}", "-o", dest)
 	if err != nil {

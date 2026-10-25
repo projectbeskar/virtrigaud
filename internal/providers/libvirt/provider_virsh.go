@@ -332,8 +332,12 @@ func (p *Provider) createVMWithCloudInit(ctx context.Context, vp *VirshProvider,
 		var volume *StorageVolume
 		var err error
 
-		// Determine how to handle the image based on its type
-		if req.Image.Path == "" && (strings.HasPrefix(imageSpec, "http://") || strings.HasPrefix(imageSpec, "https://")) {
+		// Determine how to handle the image based on its type. Anything
+		// shaped like a URL is downloaded: DownloadCloudImage refuses a
+		// scheme other than http, https or ftp (InvalidSpec, without echoing
+		// the URL), so no URL ever reaches the template lookup, which would
+		// log it and echo it in its error.
+		if req.Image.Path == "" && strings.Contains(imageSpec, "://") {
 			// Handle URL - download the image
 			log.Printf("INFO Downloading cloud image from URL: %s", redactURL(imageSpec))
 			if err = ensureDiskVolumeFree(ctx, vp, storageProvider, domainName, diskVolumeName, g); err == nil {
@@ -347,7 +351,7 @@ func (p *Provider) createVMWithCloudInit(ctx context.Context, vp *VirshProvider,
 			volume, err = p.createDiskFromHostImage(ctx, vp, storageProvider, req, domainName, imageSpec, diskVolumeName, diskSizeGB, g)
 		} else {
 			// Handle template name - look up in predefined templates
-			log.Printf("INFO Creating disk from predefined template: %s", imageSpec)
+			log.Printf("INFO Creating disk from predefined template: %s", redactImageSpec(imageSpec))
 			if err = ensureDiskVolumeFree(ctx, vp, storageProvider, domainName, diskVolumeName, g); err == nil {
 				volume, err = storageProvider.CreateVolumeFromTemplate(ctx, imageSpec, diskVolumeName, defaultStoragePool, diskSizeGB)
 			}

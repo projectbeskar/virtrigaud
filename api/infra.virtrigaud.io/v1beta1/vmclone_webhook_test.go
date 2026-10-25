@@ -31,14 +31,20 @@ func cloneWithSecrets() *VMClone {
 	return &VMClone{Spec: VMCloneSpec{Customization: &VMCustomization{
 		Hostname: "web-01",
 		Sysprep: &SysprepCustomization{
-			ProductKey:    "PRODUCT-KEY-XXXXX",
-			AdminPassword: &PasswordSpec{Value: "ADMIN-PW-s3cr3t", SecretRef: &LocalObjectReference{Name: "admin"}},
-			JoinDomain:    &DomainJoinSpec{Domain: "corp.example.com", Username: "joiner", Password: PasswordSpec{Value: "JOIN-PW-s3cr3t"}},
+			ProductKey:     "PRODUCT-KEY-XXXXX",
+			AdminPassword:  &PasswordSpec{Value: "ADMIN-PW-s3cr3t", SecretRef: &LocalObjectReference{Name: "admin"}},
+			JoinDomain:     &DomainJoinSpec{Domain: "corp.example.com", Username: "joiner", Password: PasswordSpec{Value: "JOIN-PW-s3cr3t"}},
+			CustomCommands: []string{"net user Administrator CMD-PW-s3cr3t"},
 		},
 		Certificates: []CertificateSpec{
 			{Name: "by-ref", SecretRef: &LocalObjectReference{Name: "ca"}},
 			{Name: "inline", Data: "-----BEGIN PRIVATE KEY-----CERTKEY"},
 		},
+		GuestCommands: []GuestCommand{
+			{Command: "/usr/bin/enroll --token GUEST-TOKEN", Arguments: []string{"GUEST-ARG"}},
+			{Command: "/bin/true"},
+		},
+		UserData: &UserData{Ignition: &Ignition{Inline: `{"passwd":"IGN-s3cr3t"}`}},
 	}}}
 }
 
@@ -47,7 +53,12 @@ func TestVMCustomization_UnusedSecretFields(t *testing.T) {
 		"spec.customization.sysprep.productKey",
 		"spec.customization.sysprep.adminPassword.value",
 		"spec.customization.sysprep.joinDomain.password.value",
+		"spec.customization.sysprep.customCommands",
 		"spec.customization.certificates[1].data",
+		"spec.customization.guestCommands[0].command",
+		"spec.customization.guestCommands[0].arguments",
+		"spec.customization.guestCommands[1].command",
+		"spec.customization.userData.ignition.inline",
 	}, cloneWithSecrets().Spec.Customization.UnusedSecretFields())
 
 	// Secret references, and no customization at all, are not warned about.
@@ -72,17 +83,18 @@ func TestVMCloneCustomizationValidator_WarnsNeverRefuses(t *testing.T) {
 
 	warnings, err := v.ValidateCreate(ctx, cloneWithSecrets())
 	require.NoError(t, err)
-	require.Len(t, warnings, 4)
+	require.Len(t, warnings, 9)
 	assert.Equal(t, "spec.customization.sysprep.adminPassword.value: accepted but not acted on in this release; "+
-		"it is stored in plaintext in the object — do not put a real password, product key or certificate key here", warnings[1])
+		"it is stored in plaintext in the object — do not put a real password, key or other credential here", warnings[1])
 	all := strings.Join(warnings, "\n")
-	for _, secret := range []string{"PRODUCT-KEY-XXXXX", "ADMIN-PW-s3cr3t", "JOIN-PW-s3cr3t", "CERTKEY"} {
+	for _, secret := range []string{"PRODUCT-KEY-XXXXX", "ADMIN-PW-s3cr3t", "JOIN-PW-s3cr3t", "CERTKEY",
+		"CMD-PW-s3cr3t", "GUEST-TOKEN", "GUEST-ARG", "IGN-s3cr3t"} {
 		assert.NotContains(t, all, secret)
 	}
 
 	warnings, err = v.ValidateUpdate(ctx, &VMClone{}, cloneWithSecrets())
 	require.NoError(t, err)
-	assert.Len(t, warnings, 4)
+	assert.Len(t, warnings, 9)
 
 	warnings, err = v.ValidateCreate(ctx, &VMClone{})
 	require.NoError(t, err)

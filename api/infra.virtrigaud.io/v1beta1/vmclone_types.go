@@ -47,11 +47,13 @@ type VMCloneSpec struct {
 	// by some providers and only for a source VM that carries cloud-init data
 	// (a NoCloud seed on libvirt, cloud-init guestinfo keys on vSphere); see
 	// the field descriptions. Every other field of the block is accepted but
-	// not acted on in this release. The secret values among them
-	// (sysprep.productKey, sysprep.adminPassword.value,
-	// sysprep.joinDomain.password.value, certificates[].data) are never sent
-	// to the provider, but are stored in plaintext in the VMClone: do not put
-	// real credentials there.
+	// not acted on in this release. The fields among them that hold, or
+	// commonly hold, secret values (sysprep.productKey,
+	// sysprep.adminPassword.value, sysprep.joinDomain.password.value,
+	// sysprep.customCommands, certificates[].data, guestCommands[].command
+	// and .arguments, userData.ignition.inline) are never sent to the
+	// provider, but are stored in plaintext in the VMClone: do not put real
+	// credentials there.
 	// +optional
 	Customization *VMCustomization `json:"customization,omitempty"`
 
@@ -495,7 +497,8 @@ type SysprepCustomization struct {
 
 	// CustomCommands specifies custom commands to run during sysprep.
 	// Accepted but not acted on in this release, and not sent to the
-	// provider.
+	// provider. They are stored in plaintext in the VMClone: do not put a
+	// credential in them.
 	// +optional
 	// +kubebuilder:validation:MaxItems=20
 	CustomCommands []string `json:"customCommands,omitempty"`
@@ -553,12 +556,14 @@ type DomainJoinSpec struct {
 // acted on in this release.
 type GuestCommand struct {
 	// Command is the command to execute. Accepted but not acted on in this
-	// release, and not sent to the provider.
+	// release, and not sent to the provider. It is stored in plaintext in the
+	// VMClone: do not put a credential in it.
 	// +kubebuilder:validation:MaxLength=1000
 	Command string `json:"command"`
 
 	// Arguments contains command arguments. Accepted but not acted on in this
-	// release, and not sent to the provider.
+	// release, and not sent to the provider. They are stored in plaintext in
+	// the VMClone: do not put a credential in them.
 	// +optional
 	// +kubebuilder:validation:MaxItems=20
 	Arguments []string `json:"arguments,omitempty"`

@@ -90,7 +90,8 @@ What a new instance does **not** change:
   `userData.ignition.inline` stay in the `VMClone`. They are still **stored in
   plaintext** in the object, so do not put real credentials there; the
   manager's `Warning` event `CustomizationSecretNotSent` and, with webhooks
-  enabled, an admission warning name such fields (never their values).
+  enabled, an admission warning name each of these fields that is set (never
+  its value).
 - **User-data that pins the identity.** Some `#cloud-config` keys in the
   clone's user-data (the source's, or the customization's) undo the new
   instance, and the provider logs a `WARN` naming them (never their values):

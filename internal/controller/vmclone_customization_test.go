@@ -191,7 +191,9 @@ func TestVMClone_CustomizeJSONCarriesNoUnusedSecret(t *testing.T) {
 	assertNoCustomizationSecret(t, "events", all)
 	assert.Contains(t, all, "Warning "+customizationNotSentReason+" spec.customization.sysprep.productKey, "+
 		"spec.customization.sysprep.adminPassword.value, spec.customization.sysprep.joinDomain.password.value, "+
-		"spec.customization.certificates[0].data: accepted but not acted on")
+		"spec.customization.sysprep.customCommands, spec.customization.certificates[0].data, "+
+		"spec.customization.guestCommands[0].command, spec.customization.guestCommands[0].arguments, "+
+		"spec.customization.userData.ignition.inline: accepted but not acted on")
 
 	require.NotEmpty(t, logs.String(), "the logger captured the reconcile")
 	assertNoCustomizationSecret(t, "the manager log", logs.String())

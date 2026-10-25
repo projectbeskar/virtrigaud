@@ -24,6 +24,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -142,4 +143,60 @@ func TestDownloadCloudImage_RefusesUnsafeURL(t *testing.T) {
 		assert.NotContains(t, err.Error(), "t0ken")
 	}
 	assert.Empty(t, h.log("curl"), "nothing is downloaded")
+}
+
+// TestCreate_EveryURLIsDownloadedOrRefused: an image URL of any scheme takes
+// the download path, never the predefined-template lookup (which would log the
+// value and echo it in its error): an ftp URL (the CRD admits ftp) or an
+// upper-case scheme is downloaded through curl on stdin; a scheme curl must
+// not fetch is refused as InvalidSpec without running anything or echoing it.
+func TestCreate_EveryURLIsDownloadedOrRefused(t *testing.T) {
+	for _, u := range []string{
+		"ftp://joe:p4ssw0rd@images.example.com/ubuntu.qcow2?token=t0ken",
+		"HTTPS://joe:p4ssw0rd@images.example.com/ubuntu.qcow2?X-Amz-Signature=supersecret",
+	} {
+		t.Run(u[:5], func(t *testing.T) {
+			c := newCreateHost(t)
+			logs := captureStdLog(t)
+			req := c.createReq(ownerTeamA, "")
+			req.Image = contracts.VMImage{URL: u}
+			_, err := c.p.Create(context.Background(), req)
+			require.NoError(t, err)
+			assert.Equal(t, "globoff\n"+`url = "`+u+`"`+"\n", c.log("curlrc"))
+			assertNoURLSecret(t, "the curl command line", c.log("curl"))
+			assertNoURLSecret(t, "the provider log", logs.String())
+		})
+	}
+	t.Run("file", func(t *testing.T) {
+		c := newCreateHost(t)
+		logs := captureStdLog(t)
+		req := c.createReq(ownerTeamA, "")
+		req.Image = contracts.VMImage{URL: "file:///etc/shadow?token=t0ken"}
+		_, err := c.p.Create(context.Background(), req)
+		require.Error(t, err)
+		var pe *contracts.ProviderError
+		require.ErrorAs(t, err, &pe)
+		assert.Equal(t, contracts.ErrorTypeInvalidSpec, pe.Type)
+		assert.NotContains(t, err.Error(), "shadow")
+		assert.NotContains(t, logs.String(), "t0ken")
+		assert.NotContains(t, logs.String(), "predefined template")
+		assert.Empty(t, c.log("curl"), "nothing is downloaded")
+	})
+}
+
+// TestDownloadMaxTime: curl's total time is the timeout, or the time left
+// until the call's deadline when that is shorter (closing the SSH session
+// does not stop a remote command), and at least one second.
+func TestDownloadMaxTime(t *testing.T) {
+	now := time.Now()
+	assert.Equal(t, 30*time.Minute, downloadMaxTime(context.Background(), 30*time.Minute, now))
+
+	ctx, cancel := context.WithDeadline(context.Background(), now.Add(5*time.Minute))
+	defer cancel()
+	assert.Equal(t, 5*time.Minute, downloadMaxTime(ctx, 30*time.Minute, now))
+	assert.Equal(t, 2*time.Minute, downloadMaxTime(ctx, 2*time.Minute, now))
+
+	past, cancelPast := context.WithDeadline(context.Background(), now.Add(-time.Minute))
+	defer cancelPast()
+	assert.Equal(t, time.Second, downloadMaxTime(past, 30*time.Minute, now))
 }

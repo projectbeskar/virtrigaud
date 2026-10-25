@@ -27,8 +27,8 @@ import (
 )
 
 // The VMClone customization webhook never refuses anything: it returns an
-// admission warning for each field of spec.customization that holds a secret
-// value this release does not act on (VMCustomization.UnusedSecretFields).
+// admission warning for each field of spec.customization that may hold a
+// secret value this release does not act on (VMCustomization.UnusedSecretFields).
 // Such a value is stored in plaintext in the VMClone, and the manager does not
 // send it to the provider. Because it only warns, its failurePolicy is Ignore
 // (a manager that cannot be reached delays a VMClone write by at most the
@@ -41,7 +41,7 @@ import (
 // spec.customization that holds a secret value this release does not act on:
 // the field's path.
 const unusedSecretFieldWarningFmt = "%s: accepted but not acted on in this release; it is stored in plaintext in " +
-	"the object — do not put a real password, product key or certificate key here"
+	"the object — do not put a real password, key or other credential here"
 
 // VMCloneCustomizationValidator warns, never refuses, when a VMClone's
 // spec.customization holds a secret value this release does not act on.
@@ -99,11 +99,13 @@ func customizationWarnings(clone *VMClone) admission.Warnings {
 }
 
 // UnusedSecretFields returns the paths (from "spec.customization") of the
-// fields of c that hold a secret value this release does not act on:
-// sysprep.productKey, sysprep.adminPassword.value,
-// sysprep.joinDomain.password.value and certificates[i].data, when set. Such a
-// value is stored in plaintext in the object; the manager never sends it to a
-// provider. It returns paths only, never values; nil for a nil c.
+// fields of c, when set, that hold — or commonly hold — a secret value this
+// release does not act on: sysprep.productKey, sysprep.adminPassword.value,
+// sysprep.joinDomain.password.value, sysprep.customCommands,
+// certificates[i].data, guestCommands[i].command and .arguments, and
+// userData.ignition.inline. Such a value is stored in plaintext in the object;
+// the manager never sends it to a provider. It returns paths only, never
+// values; nil for a nil c.
 func (c *VMCustomization) UnusedSecretFields() []string {
 	if c == nil {
 		return nil
@@ -120,11 +122,25 @@ func (c *VMCustomization) UnusedSecretFields() []string {
 		if s.JoinDomain != nil && s.JoinDomain.Password.Value != "" {
 			out = append(out, prefix+"sysprep.joinDomain.password.value")
 		}
+		if len(s.CustomCommands) > 0 {
+			out = append(out, prefix+"sysprep.customCommands")
+		}
 	}
 	for i, cert := range c.Certificates {
 		if cert.Data != "" {
 			out = append(out, fmt.Sprintf("%scertificates[%d].data", prefix, i))
 		}
+	}
+	for i, cmd := range c.GuestCommands {
+		if cmd.Command != "" {
+			out = append(out, fmt.Sprintf("%sguestCommands[%d].command", prefix, i))
+		}
+		if len(cmd.Arguments) > 0 {
+			out = append(out, fmt.Sprintf("%sguestCommands[%d].arguments", prefix, i))
+		}
+	}
+	if c.UserData != nil && c.UserData.Ignition != nil && c.UserData.Ignition.Inline != "" {
+		out = append(out, prefix+"userData.ignition.inline")
 	}
 	return out
 }
