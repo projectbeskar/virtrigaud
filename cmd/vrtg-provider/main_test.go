@@ -249,3 +249,34 @@ func TestGenerateBadgeURL(t *testing.T) {
 		})
 	}
 }
+
+// TestCleanRemovesOnlyGeneratedBindings checks that generate --clean removes
+// the *.pb.go files under internal/rpc, keeps every other file, and does not
+// follow a symbolic link out of internal/rpc.
+func TestCleanRemovesOnlyGeneratedBindings(t *testing.T) {
+	project := t.TempDir()
+	outside := t.TempDir()
+	rpc := filepath.Join(project, filepath.FromSlash(generatedRPCDir))
+	require.NoError(t, os.MkdirAll(filepath.Join(rpc, "v1"), 0o750))
+
+	write := func(path string) {
+		require.NoError(t, os.WriteFile(path, []byte("package x\n"), 0o600))
+	}
+	generated := filepath.Join(rpc, "v1", "provider.pb.go")
+	kept := filepath.Join(rpc, "v1", "doc.go")
+	outsideBinding := filepath.Join(outside, "other.pb.go")
+	write(generated)
+	write(kept)
+	write(outsideBinding)
+	require.NoError(t, os.Symlink(outside, filepath.Join(rpc, "linked")))
+	linkedBinding := filepath.Join(rpc, "v1", "linked.pb.go")
+	require.NoError(t, os.Symlink(outsideBinding, linkedBinding))
+
+	t.Chdir(project)
+	require.NoError(t, cleanGeneratedFiles())
+
+	assert.NoFileExists(t, generated)
+	assert.FileExists(t, kept)
+	assert.NoFileExists(t, linkedBinding, "the link itself is removed")
+	assert.FileExists(t, outsideBinding, "clean must not follow a symbolic link out of "+generatedRPCDir)
+}

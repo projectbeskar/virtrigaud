@@ -26,6 +26,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `internal/scaffold/scaffold.go`: the scaffold did not compile: it imported the repository's `internal/version` package (not importable from another module), an unused `fmt`, and required a `github.com/projectbeskar/virtrigaud` v0.1.0 that has no `sdk` or `proto` packages. The generated `go.mod` now requires the sdk and proto modules and resolves them from a checkout; the version is a `main.version` set with `-ldflags`; the server stops on SIGINT/SIGTERM; the Go files are `gofmt`-clean; the README no longer claims flags and features the scaffold does not have and renders its code fences.
 - `cmd/vrtg-provider/verify.go`, `cmd/vrtg-provider/publish.go`: `verify` ran `vcts version` and `vcts run --profile`, which do not exist, and then printed "Conformance profile verified"; it now runs the build, checks and unit tests, falls back to `go build`/`go test` only when the Makefile has no such target (it also fell back when `make build` failed), and says that conformance was not run. `publish` wrote hard-coded passing conformance results to the catalog; it now builds and tests the project and records conformance as `skip` (not run) with a "not run" badge.
 
+### Security
+- `cmd/vrtg-provider/generate.go`: `generate --clean` walks and removes the generated `*.pb.go` files through an `os.Root` opened on `internal/rpc`, so a symbolic link in the tree cannot make it remove a file outside that directory.
+- `cmd/vcts/main.go`, `cmd/virtrigaud-loadgen/main.go`: the report output directory is created with mode 0750 (was 0755).
+- `cmd/virtrigaud-loadgen/main.go`: the non-cryptographic random choices (next operation, provider, which created VM to delete) are marked as such for gosec.
+- `cmd/vrtg-provider/main_test.go`: a test that `generate --clean` removes only the generated bindings and does not follow a symbolic link out of `internal/rpc`.
+
 ### Why
 The command-line tools shipped in v0.4.0 release candidates could not do what they document: they failed on every VirtRigaud resource, `vcts validate` could not fail CI, and `vrtg-provider` rejected and could not build its own scaffold. v0.4.0 GA must ship the operator code that v0.4.0-rc9 validated, so this changes only `cmd/vrtg`, `cmd/vcts`, `cmd/virtrigaud-loadgen`, `cmd/vrtg-provider`, `cmd/internal` and `internal/scaffold`. `go list -deps` shows that no operator binary (`cmd/manager`, `cmd/provider-*`) depends on a changed package, so the manager and provider images are unchanged.
 

@@ -143,16 +143,25 @@ func cleanGeneratedFiles() error {
 		return nil
 	}
 
-	return filepath.WalkDir(generatedRPCDir, func(path string, d fs.DirEntry, err error) error {
+	// Walk and remove through an os.Root so a symbolic link in the tree
+	// cannot make the removal reach outside generatedRPCDir.
+	root, err := os.OpenRoot(generatedRPCDir)
+	if err != nil {
+		return fmt.Errorf("open %s: %w", generatedRPCDir, err)
+	}
+	defer func() { _ = root.Close() }()
+
+	return fs.WalkDir(root.FS(), ".", func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
 		if d.IsDir() || !strings.HasSuffix(d.Name(), ".pb.go") {
 			return nil
 		}
-		fmt.Printf("🗑️  Removing %s\n", path)
-		if err := os.Remove(path); err != nil {
-			return fmt.Errorf("remove %s: %w", path, err)
+		name := filepath.Join(generatedRPCDir, filepath.FromSlash(path))
+		fmt.Printf("🗑️  Removing %s\n", name)
+		if err := root.Remove(path); err != nil {
+			return fmt.Errorf("remove %s: %w", name, err)
 		}
 		return nil
 	})

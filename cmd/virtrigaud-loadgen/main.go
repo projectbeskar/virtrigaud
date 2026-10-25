@@ -282,7 +282,7 @@ func (o *options) runLoadGen(cmd *cobra.Command, _ []string) error {
 	}
 
 	// Create output directory
-	if err := os.MkdirAll(o.outputDir, 0o755); err != nil {
+	if err := os.MkdirAll(o.outputDir, 0o750); err != nil {
 		return fmt.Errorf("failed to create output directory: %w", err)
 	}
 
@@ -581,7 +581,7 @@ func (lg *LoadGenerator) selectRandomOperation() string {
 		totalWeight += w
 	}
 
-	r := rand.Float64() * totalWeight
+	r := rand.Float64() * totalWeight // #nosec G404 -- picks the next simulated operation, not a secret
 	cumulative := 0.0
 
 	for i, weight := range weights {
@@ -598,7 +598,7 @@ func (lg *LoadGenerator) selectRandomProvider() string {
 	if len(lg.config.Providers) == 0 {
 		return "default-provider"
 	}
-	return lg.config.Providers[rand.Intn(len(lg.config.Providers))]
+	return lg.config.Providers[rand.Intn(len(lg.config.Providers))] // #nosec G404 -- spreads load across providers, not a secret
 }
 
 func (lg *LoadGenerator) generateVMName(workerID int) string {
@@ -634,7 +634,7 @@ func (lg *LoadGenerator) takeCreated() (string, bool) {
 	if len(lg.created) == 0 {
 		return "", false
 	}
-	i := rand.Intn(len(lg.created))
+	i := rand.Intn(len(lg.created)) // #nosec G404 -- picks which created VM to delete next, not a secret
 	name := lg.created[i]
 	lg.created = append(lg.created[:i], lg.created[i+1:]...)
 	return name, true

@@ -149,7 +149,7 @@ func (o *options) runConformanceTests(cmd *cobra.Command, _ []string) error {
 	}
 
 	// Create output directory
-	if err := os.MkdirAll(o.outputDir, 0o755); err != nil {
+	if err := os.MkdirAll(o.outputDir, 0o750); err != nil {
 		return fmt.Errorf("failed to create output directory: %w", err)
 	}
 
