@@ -19,29 +19,38 @@ package v1beta1
 import (
 	"context"
 	"fmt"
+	"strings"
 
+	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 )
 
-// The VMClone customization webhook never refuses anything: it returns an
-// admission warning for each field of spec.customization that may hold a
-// secret value this release does not act on (VMCustomization.UnusedSecretFields).
-// Such a value is stored in plaintext in the VMClone, and the manager does not
-// send it to the provider. Because it only warns, its failurePolicy is Ignore
+// The VMClone customization webhook never refuses anything: it returns one
+// admission warning naming the fields of spec.customization that may hold a
+// secret value this release does not act on (VMCustomization.UnusedSecretFields)
+// on a create, and on an update that changes spec.customization (not on the
+// manager's own finalizer and metadata writes, nor once the VMClone is being
+// deleted). Such a value is stored in plaintext in the VMClone, and the
+// manager does not send it to the provider. Because it only warns, its failurePolicy is Ignore
 // (a manager that cannot be reached delays a VMClone write by at most the
 // timeout, never refuses it). The manager serves it whenever webhooks are on;
 // the chart renders its configuration with the other validating webhooks.
 
 // +kubebuilder:webhook:path=/validate-infra-virtrigaud-io-v1beta1-vmclone,mutating=false,failurePolicy=ignore,timeoutSeconds=5,sideEffects=None,groups=infra.virtrigaud.io,resources=vmclones,verbs=create;update,versions=v1beta1,name=vvmclone-customization.kb.io,admissionReviewVersions=v1
 
-// unusedSecretFieldWarningFmt is the admission warning of one field of
-// spec.customization that holds a secret value this release does not act on:
-// the field's path.
-const unusedSecretFieldWarningFmt = "%s: accepted but not acted on in this release; it is stored in plaintext in " +
+// unusedSecretFieldsWarningFmt is the admission warning of the fields of
+// spec.customization that may hold a secret value this release does not act
+// on: their paths (customizationWarnings).
+const unusedSecretFieldsWarningFmt = "%s: accepted but not acted on in this release; stored in plaintext in " +
 	"the object — do not put a real password, key or other credential here"
+
+// maxWarnedPaths is the most field paths the warning names; the rest are
+// counted ("+N more"), so the warning stays well within the API server's
+// warning size budget.
+const maxWarnedPaths = 8
 
 // VMCloneCustomizationValidator warns, never refuses, when a VMClone's
 // spec.customization holds a secret value this release does not act on.
@@ -63,8 +72,8 @@ func SetupVMCloneWebhookWithManager(mgr ctrl.Manager) error {
 	return nil
 }
 
-// ValidateCreate admits the VMClone, with a warning for each unused secret
-// field of its spec.customization.
+// ValidateCreate admits the VMClone, with a warning naming the unused secret
+// fields of its spec.customization.
 func (v *VMCloneCustomizationValidator) ValidateCreate(_ context.Context, obj runtime.Object) (admission.Warnings, error) {
 	clone, ok := obj.(*VMClone)
 	if !ok {
@@ -73,12 +82,22 @@ func (v *VMCloneCustomizationValidator) ValidateCreate(_ context.Context, obj ru
 	return customizationWarnings(clone), nil
 }
 
-// ValidateUpdate admits the update, with a warning for each unused secret
-// field of the new object's spec.customization.
-func (v *VMCloneCustomizationValidator) ValidateUpdate(_ context.Context, _, newObj runtime.Object) (admission.Warnings, error) {
+// ValidateUpdate admits the update, with a warning naming the unused secret
+// fields of the new object's spec.customization when the update changes
+// spec.customization. An update that leaves it as it was (the manager's
+// finalizer and metadata writes) and an update of a VMClone being deleted get
+// no warning.
+func (v *VMCloneCustomizationValidator) ValidateUpdate(_ context.Context, oldObj, newObj runtime.Object) (admission.Warnings, error) {
 	clone, ok := newObj.(*VMClone)
 	if !ok {
 		return nil, fmt.Errorf("expected a VMClone object but got %T", newObj)
+	}
+	old, ok := oldObj.(*VMClone)
+	if !ok {
+		return nil, fmt.Errorf("expected a VMClone object but got %T", oldObj)
+	}
+	if clone.DeletionTimestamp != nil || equality.Semantic.DeepEqual(old.Spec.Customization, clone.Spec.Customization) {
+		return nil, nil
 	}
 	return customizationWarnings(clone), nil
 }
@@ -88,14 +107,19 @@ func (v *VMCloneCustomizationValidator) ValidateDelete(_ context.Context, _ runt
 	return nil, nil
 }
 
-// customizationWarnings returns one warning per unused secret field of clone's
-// spec.customization (none when it has none).
+// customizationWarnings returns one warning naming the unused secret fields of
+// clone's spec.customization — at most maxWarnedPaths of them, the rest
+// counted — or none when it has none.
 func customizationWarnings(clone *VMClone) admission.Warnings {
-	var out admission.Warnings
-	for _, f := range clone.Spec.Customization.UnusedSecretFields() {
-		out = append(out, fmt.Sprintf(unusedSecretFieldWarningFmt, f))
+	fields := clone.Spec.Customization.UnusedSecretFields()
+	if len(fields) == 0 {
+		return nil
 	}
-	return out
+	named := strings.Join(fields[:min(len(fields), maxWarnedPaths)], ", ")
+	if extra := len(fields) - maxWarnedPaths; extra > 0 {
+		named += fmt.Sprintf(" (+%d more)", extra)
+	}
+	return admission.Warnings{fmt.Sprintf(unusedSecretFieldsWarningFmt, named)}
 }
 
 // UnusedSecretFields returns the paths (from "spec.customization") of the

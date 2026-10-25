@@ -21,6 +21,7 @@ import (
 	"context"
 	"encoding/json"
 	"reflect"
+	"regexp"
 	"sort"
 	"strings"
 	"testing"
@@ -291,9 +292,65 @@ func TestProviderCustomization_EveryFieldClassified(t *testing.T) {
 		assert.Equal(t, classified, fields, "%s: classify every field in customizationFieldClasses and providerCustomization", typ)
 	}
 
+	// fullCustomization sets every classified field, so the walk below
+	// checks every one of them; and its stripped fields are exactly those the
+	// admission warning and the event name.
+	var stripped []string
+	assertFullySet(t, "spec.customization", reflect.ValueOf(*fullCustomization()), &stripped)
+	var warned []string
+	for _, f := range fullCustomization().UnusedSecretFields() {
+		warned = append(warned, indexRE.ReplaceAllString(f, "[]"))
+	}
+	sort.Strings(stripped)
+	sort.Strings(warned)
+	assert.Equal(t, stripped, warned, "the stripped fields are the ones UnusedSecretFields names")
+
 	in := reflect.ValueOf(*fullCustomization())
 	out := reflect.ValueOf(*providerCustomization(fullCustomization()))
 	compareClassified(t, "spec.customization", in, out)
+}
+
+// indexRE matches a list index in a field path.
+var indexRE = regexp.MustCompile(`\[[0-9]+\]`)
+
+// assertFullySet fails when a classified field of v (a customization type) is
+// zero, or a list of it is empty, and collects the JSON paths of its
+// "stripped" fields ("[]" for a list entry) into stripped.
+func assertFullySet(t *testing.T, path string, v reflect.Value, stripped *[]string) {
+	t.Helper()
+	switch v.Kind() {
+	case reflect.Pointer:
+		if !v.IsNil() {
+			assertFullySet(t, path, v.Elem(), stripped)
+		}
+		return
+	case reflect.Slice:
+		if v.Type().Elem().Kind() == reflect.Struct {
+			for i := 0; i < v.Len(); i++ {
+				assertFullySet(t, path+"[]", v.Index(i), stripped)
+			}
+		}
+		return
+	case reflect.Struct:
+		classes, ok := customizationFieldClasses[v.Type()]
+		if !ok {
+			return
+		}
+		for i := 0; i < v.NumField(); i++ {
+			f := v.Type().Field(i)
+			name, _, _ := strings.Cut(f.Tag.Get("json"), ",")
+			fv := v.Field(i)
+			assert.False(t, fv.IsZero(), "%s.%s: set it in fullCustomization so its class is checked", path, name)
+			if fv.Kind() == reflect.Slice {
+				assert.Positive(t, fv.Len(), "%s.%s: give it an entry in fullCustomization", path, name)
+			}
+			if classes[f.Name] == "stripped" {
+				*stripped = append(*stripped, path+"."+name)
+				continue
+			}
+			assertFullySet(t, path+"."+name, fv, stripped)
+		}
+	}
 }
 
 // compareClassified walks in (a fully set value) and out (its

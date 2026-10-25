@@ -16,15 +16,23 @@ limitations under the License.
 
 package logging
 
-import "net/url"
+import (
+	"net/url"
+	"strings"
+)
 
 // RedactURL renders raw for a log line: its scheme, host and path only. The
 // user-info, query and fragment are dropped (they may carry credentials or a
-// presigned token); "?…" marks a dropped query. "" stays "", and text that
-// does not parse as a URL is not echoed.
+// presigned token); "?…" marks a dropped query. "" stays "". A value
+// without "://", or one url.Parse refuses, is replaced by a marker and never
+// echoed: it is not a URL this can take apart, and it may still carry a
+// credential.
 func RedactURL(raw string) string {
 	if raw == "" {
 		return ""
+	}
+	if !strings.Contains(raw, "://") {
+		return "<not a URL>"
 	}
 	u, err := url.Parse(raw)
 	if err != nil {

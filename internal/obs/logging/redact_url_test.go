@@ -29,6 +29,8 @@ func TestRedactURL(t *testing.T) {
 		"https://images.example.com/b.qcow2":                                        "https://images.example.com/b.qcow2",
 		"http://images.example.com/b.qcow2?":                                        "http://images.example.com/b.qcow2?…",
 		"https://images.example.com/%zz?token=t":                                    "<unparseable URL>",
+		"ubuntu-22.04":                                                              "<not a URL>",
+		"joe:p4ss@images.example.com/b.qcow2":                                       "<not a URL>",
 	} {
 		assert.Equal(t, want, RedactURL(raw), raw)
 	}

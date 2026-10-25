@@ -2532,7 +2532,7 @@ func (r *VirtualMachineReconciler) buildCreateRequest(
 	vmImage *infravirtrigaudiov1beta1.VMImage,
 	networks []*infravirtrigaudiov1beta1.VMNetworkAttachment,
 ) (contracts.CreateRequest, error) {
-	log := ctrl.Log.WithName("buildCreateRequest")
+	log := ctrl.LoggerFrom(ctx).WithName("buildCreateRequest")
 
 	// Check if using imported disk or template
 	usingImportedDisk := vm.Spec.ImportedDisk != nil
