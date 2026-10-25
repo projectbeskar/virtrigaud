@@ -50,7 +50,7 @@ loopback and link-local addresses (V9); and a libvirt guest on the NAT network w
 guest agent never showed its address (V10). rc9 adds an eighth, on top of rc8: one fix found
 by validating rc8 on real libvirt 10.0 hosts. Deleting a libvirt disk-only snapshot
 destroyed a memory snapshot stored in its overlay, and that memory snapshot's `VMSnapshot`
-could then never be deleted (V11). **Several fixes are breaking or change default
+could then never be deleted while the VM ran (V11). **Several fixes are breaking or change default
 behavior.** Read the upgrade guide before upgrading: **[Upgrading from
 v0.3.11](docs/upgrading.md)**.
 
@@ -106,14 +106,14 @@ Now:
   that deleting snapshot "live" would merge away, and would be lost`. **Delete the memory
   snapshot first, then the disk-only snapshot.** Deleting a memory snapshot is never
   refused by this check. A check that cannot be completed refuses the delete too,
-  retryably (`VM_DISK_CHECK_FAILED`), and so does a snapshot whose definition cannot be
-  read: before, the delete was sent anyway and only its overlay cleanup was skipped.
+  retryably (`VM_DISK_CHECK_FAILED`, or the host-unreachable answer when the host cannot
+  be reached), and so does a snapshot whose definition cannot be read: before, the delete was sent anyway and only its overlay cleanup was skipped.
 - **A memory snapshot that rc8 or earlier already lost** has only its metadata deleted
   (`virsh snapshot-delete <domain> <snapshot> --metadata`) when libvirt refuses its
   delete with the error above and the provider proves the data is gone: every file it
   was taken on no longer exists, and no image in the VM's current disk chains lists it.
   Otherwise the answer is `delete refused, nothing changed: power the VM off and delete
-  it again; ...`. A manual cleanup for a VM still on rc8, or a `VMSnapshot` already
+  it again; ...` (or a retryable check failure when the proof could not be read). A manual cleanup for a VM still on rc8, or a `VMSnapshot` already
   removed with force-delete, is documented.
 - **The manager shows the refusal.** The `VMSnapshot` keeps its finalizer, gets
   `Ready=False/DeleteBlocked` with the provider's answer (sanitised, first 256 bytes)
@@ -141,13 +141,15 @@ templates, `config/rbac`, `api/` and the proto did not change either: the code c
 are in `internal/providers/libvirt` and `internal/controller`). From rc8:
 
 1. **CRDs.** Nothing to apply for this release.
-2. **No new operator action.** The check reads each file it might merge away with the
-   same root `qemu-img info` as the disk in-use check, so it relies on the
-   `VR_DISK_READ` grant of [Upgrade order for rc8](#upgrade-order-for-rc8) (step 2 there;
-   see [Unreadable disk images](docs/libvirt-clones.md#unreadable-disk-images)). Where
-   the SSH user cannot read an overlay, deleting a disk-only snapshot is refused, retryably
-   (`VM_DISK_CHECK_FAILED`; "permission denied reading a disk image" when `qemu-img` says
-   so), and goes through once the grant is in place.
+2. **No new grant, but check the one from rc8.** The check reads each file it might
+   merge away with the same root `qemu-img info` as the disk in-use check, so it relies on
+   the `VR_DISK_READ` grant of [Upgrade order for rc8](#upgrade-order-for-rc8) (step 2
+   there; see [Unreadable disk images](docs/libvirt-clones.md#unreadable-disk-images)).
+   It opens files the rc8 checks did not need to (the overlays a child snapshot or a
+   revert recorded), so a host that worked on rc8 without the grant can now see the
+   refusal. Where the SSH user cannot read an overlay, deleting a disk-only snapshot is
+   refused, retryably (`VM_DISK_CHECK_FAILED`; "permission denied reading a disk image"
+   when `qemu-img` says so), and goes through once the grant is in place.
 3. **The libvirt providers** (every libvirt Provider, single-host and clustered). They
    carry the refusal, the metadata-only cleanup of a memory snapshot whose data is gone
    and the read that fails closed. Roll them first: until a provider is rolled, a delete
@@ -1797,10 +1799,10 @@ Wave 2 adds to this:
 ## About this release candidate / what to test
 
 v0.4.0 GA follows after a soak of this candidate (rc1, rc2, rc4, rc5, rc6, rc7 and rc8
-came before it; rc3 was tagged but not released). Please try it on a non-production cluster and
-report what you find (GitHub issues; include the Provider type, the `kubectl describe` of
-the object involved and the provider log, never a Secret). The most useful things to
-exercise:
+came before it; rc3 was tagged but not released). Please try it on a non-production
+cluster and report what you find (GitHub issues; include the Provider type, the
+`kubectl describe` of the object involved and the provider log, never a Secret). The most
+useful things to exercise:
 
 - **Upgrading from v0.3.11**, following [docs/upgrading.md](docs/upgrading.md): the
   CRDs, then the manager, then the providers, with the grants and vCenter
@@ -2168,12 +2170,13 @@ V10 (fixed in rc8, see [Changes since v0.4.0-rc7](#changes-since-v040-rc7)).
   without the agent never showed an address).
 - **Not run in the rc7 validation:** everything new in rc8 (the disk check over nested
   backing stores and the "permission denied" answer, the snapshot-create backoff, the
-  revert hint, the `status.ips` filter and the NAT lease). It was validated on rc8, below.
+  revert hint, the `status.ips` filter and the NAT lease). Most of it was validated on rc8,
+  below; the V8 backoff was not exercised.
 
 **Validated in the lab since rc8**, on v0.4.0-rc8 (the released images): Kubernetes 1.34,
 libvirt 10.0 as a single host and as a two-host clustered Provider sharing an NFS pool,
-and a Proxmox VE node (for the `status.ips` check only). This run found V11 (fixed in rc9, see [Changes since
-v0.4.0-rc8](#changes-since-v040-rc8)).
+and a Proxmox VE node (for the `status.ips` check only). This run found V11 (fixed in
+rc9, see [Changes since v0.4.0-rc8](#changes-since-v040-rc8)).
 
 - **V7, the disk check (#437).** An offline snapshot and a revert of one VM left a fresh
   `0600` root-owned revert overlay and a three-level nested backing store in its
@@ -2188,13 +2191,13 @@ v0.4.0-rc8](#changes-since-v040-rc8)).
   one attempt, and no stray file was left in the seed directory.
 - **The upgrade from rc7 to rc8.** The rollout check found two VMs still carrying a
   completed `spec.snapshot.revertToRef` from earlier tests; they were cleared before the
-  manager rolled, as the upgrade order asks.
+  manager rolled, as the rc6 upgrade order asks.
 - **V8 was not exercised:** no provider answered "not performed" during the run. It is
   covered by unit tests only.
 - **Found, fixed in rc9:** V11. Deleting a disk-only snapshot whose overlay held a later
   memory snapshot made libvirt merge the overlay away, and the memory snapshot's data was
-  lost silently. Its `VMSnapshot` then never completed its delete, because libvirt refused
-  to delete the stale snapshot ("... is not the same as disk image currently used by
+  lost silently. Its `VMSnapshot` then never completed its delete while the VM ran, because
+  libvirt refused to delete the stale snapshot ("... is not the same as disk image currently used by
   VM"). Fixed in #440.
 - **Not run on rc9 yet:** everything new in rc9 (the refusal, the metadata-only cleanup
   of a lost memory snapshot, the read that fails closed, and how the manager shows a
