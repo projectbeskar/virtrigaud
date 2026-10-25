@@ -24,9 +24,10 @@
 # The replace directives in go.mod and sdk/go.mod only apply inside this
 # repository; a consumer ignores them and resolves every require from the
 # tags. So at a release commit every require of an in-repo module must name
-# the release version itself: the three tags then point at the same commit and
-# a consumer gets the code the release was built and tested from. See
-# docs/go-modules.md.
+# the release version itself, and the replace directives must resolve the
+# in-repo modules from the working tree only: the three tags then point at the
+# same commit and a consumer gets the code the release was built from. See
+# docs/go-modules.md. internal/scaffold/moduleversions_test.go tests this script.
 #
 # Usage:
 #   hack/module-versions.sh validate <version>
@@ -36,15 +37,24 @@
 #       Rewrite the in-repo requires of go.mod and sdk/go.mod to <version>
 #       (release preparation, before the release tag is pushed).
 #   hack/module-versions.sh check <version> [<commit>]
-#       Fail unless every in-repo require in the three go.mod files of the
-#       working tree (or of <commit>) names <version>.
-#   hack/module-versions.sh tag <version> [--push] [<module>...]
+#       Fail unless the three go.mod files of the working tree (or of
+#       <commit>) require the in-repo modules at <version> and replace them
+#       with the working tree only.
+#   hack/module-versions.sh consistent
+#       Fail unless the go.mod files of the working tree pass "check" for one
+#       release version; print that version.
+#   hack/module-versions.sh preflight <version> [--expect-commit <sha>]
+#       Read-only release check: "check" against the commit of the existing
+#       tag <version> (which must be <sha> when given), and fail when $REMOTE
+#       already has a module tag for <version> on another commit.
+#   hack/module-versions.sh tag <version> [--push] [--expect-commit <sha>] [sdk] [proto]
 #       Create annotated tags <module>/<version> (default: sdk proto) on the
-#       commit of the existing tag <version>, after "check" passes for it.
-#       An existing module tag on the same commit is kept; one on another
-#       commit is an error: tags are never moved, deleted or overwritten.
-#       --push pushes the new tags to $REMOTE (default origin) without
-#       --force, after checking the remote has none on another commit.
+#       commit of the existing tag <version> (which must be <sha> when given),
+#       after "check" passes for it. An existing module tag on the same commit
+#       is kept; one on another commit is an error: tags are never moved,
+#       deleted or overwritten. --push pushes the new tags to $REMOTE (default
+#       origin) without --force, after checking the remote has none on another
+#       commit.
 
 set -euo pipefail
 
@@ -55,6 +65,8 @@ readonly REMOTE="${REMOTE:-origin}"
 
 # A release version: what the release workflow tags. Major 0 or 1 only: a
 # major version of 2 or more needs a /vN suffix on every module path.
+# internal/scaffold.releaseVersionPattern is the same expression (a test
+# keeps them equal).
 readonly RELEASE_VERSION_RE='^v(0|1)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-(alpha|beta|rc)\.?(0|[1-9][0-9]*))?$'
 
 die() {
@@ -88,39 +100,63 @@ go_mod_content() {
     fi
 }
 
-# in_repo_requires prints "<module> <version>" for every require of an in-repo
-# module in the go.mod text on stdin, in both the single-line and the block
-# form. Replace directives are not requires and are skipped.
-in_repo_requires() {
-    awk -v root="$ROOT_MODULE" '
-        /^[[:space:]]*\/\// { next }
-        /^require[[:space:]]*\(/ { inblock = 1; next }
-        inblock && /^[[:space:]]*\)/ { inblock = 0; next }
+# go_mod_directives <directive> prints, for every <directive> ("require" or
+# "replace") of an in-repo module in the go.mod text on stdin, in both the
+# single-line and the block form: "<module> <version>" for a require and
+# "<module> <target>" for a replace. Comments are skipped, and so are the
+# lines of other blocks (exclude, retract, tool, godebug): outside a require
+# or replace block only a line starting with require or replace counts.
+go_mod_directives() {
+    awk -v root="$ROOT_MODULE" -v want="$1" '
+        function inrepo(m) { return m == root || m == root "/sdk" || m == root "/proto" }
         {
             line = $0
             sub(/\/\/.*/, "", line)
             n = split(line, f, /[[:space:]]+/)
-            # Drop the empty field split() makes of leading blanks.
+            # Drop the empty fields split() makes of leading blanks.
             j = 0
             for (i = 1; i <= n; i++) if (f[i] != "") g[++j] = f[i]
-            if (inblock && j >= 2) { mod = g[1]; ver = g[2] }
-            else if (!inblock && j >= 3 && g[1] == "require") { mod = g[2]; ver = g[3] }
-            else next
-            if (mod == root || mod == root "/sdk" || mod == root "/proto") print mod, ver
+            if (j == 0) next
+            if (block != "") {
+                if (g[1] == ")") { block = ""; next }
+                start = 1
+                kind = block
+            } else if ((g[1] == "require" || g[1] == "replace") && j >= 2 && g[2] == "(") {
+                block = g[1]; next
+            } else if (g[1] == "require(" || g[1] == "replace(") {
+                block = substr(g[1], 1, 7); next
+            } else if ((g[1] == "require" || g[1] == "replace") && j >= 3) {
+                start = 2
+                kind = g[1]
+            } else {
+                next
+            }
+            if (kind != want || !inrepo(g[start])) next
+            if (kind == "require") { print g[start], g[start + 1]; next }
+            # replace: old [version] => new [version]
+            for (k = start + 1; k <= j; k++) if (g[k] == "=>") { print g[start], g[k + 1]; break }
         }
     '
 }
 
-cmd_check() {
-    local version="$1" commit="${2:-}"
-    validate_version "$version"
-    local where="the working tree"
-    [[ -n "$commit" ]] && where="commit ${commit}"
+# expected_replaces <go.mod path> prints the replace directives the go.mod at
+# path must have for the in-repo modules: the working tree, nothing else.
+expected_replaces() {
+    case "$1" in
+    go.mod) printf '%s\n' "${PROTO_MODULE} ./proto" "${SDK_MODULE} ./sdk" ;;
+    sdk/go.mod) printf '%s\n' "${ROOT_MODULE} .." "${PROTO_MODULE} ../proto" ;;
+    proto/go.mod) ;;
+    esac
+}
 
-    local failed=0 path mod ver
+# check_go_mods <version> [<commit>] reports every way the three go.mod files
+# break the lockstep rule for <version> on stderr; it returns 1 when any does.
+check_go_mods() {
+    local version="$1" commit="${2:-}"
+    local failed=0 path mod ver content requires replaces
     for path in go.mod sdk/go.mod proto/go.mod; do
-        local content
-        content="$(go_mod_content "$path" "$commit")" || die "cannot read ${path} of ${where}"
+        content="$(go_mod_content "$path" "$commit")" || die "cannot read ${path}"
+        requires="$(printf '%s\n' "$content" | go_mod_directives require)"
         while read -r mod ver; do
             [[ -z "$mod" ]] && continue
             if [[ "$path" == "proto/go.mod" ]]; then
@@ -130,17 +166,39 @@ cmd_check() {
                 echo "module-versions: ${path} requires ${mod} ${ver}, want ${version}" >&2
                 failed=1
             fi
-        done < <(printf '%s\n' "$content" | in_repo_requires)
+        done <<<"$requires"
+        if [[ "$path" == "sdk/go.mod" && "$requires" != *"${PROTO_MODULE} "* ]]; then
+            echo "module-versions: sdk/go.mod does not require ${PROTO_MODULE}" >&2
+            failed=1
+        fi
+        # Replace targets, a trailing slash dropped, compared as sorted sets.
+        replaces="$(printf '%s\n' "$content" | go_mod_directives replace | sed 's#/$##' | sort)"
+        if [[ "$replaces" != "$(expected_replaces "$path" | sort)" ]]; then
+            echo "module-versions: ${path} replaces the VirtRigaud modules with [${replaces//$'\n'/; }], want [$(expected_replaces "$path" | sort | tr '\n' ';' | sed 's/;$//; s/;/; /g')]" >&2
+            failed=1
+        fi
     done
-    # The sdk must require proto: the published sdk module imports it.
-    if ! go_mod_content sdk/go.mod "$commit" | in_repo_requires | grep -q "^${PROTO_MODULE} "; then
-        echo "module-versions: sdk/go.mod does not require ${PROTO_MODULE}" >&2
-        failed=1
-    fi
-    if [[ "$failed" -ne 0 ]]; then
+    return "$failed"
+}
+
+cmd_check() {
+    local version="$1" commit="${2:-}"
+    validate_version "$version"
+    local where="the working tree"
+    [[ -n "$commit" ]] && where="commit ${commit}"
+    if ! check_go_mods "$version" "$commit"; then
         die "the go.mod files of ${where} are not consistent with ${version}; run: hack/module-versions.sh set ${version} (see docs/go-modules.md)"
     fi
     echo "module-versions: the go.mod files of ${where} require the VirtRigaud modules at ${version}"
+}
+
+cmd_consistent() {
+    local version
+    version="$(go_mod_content sdk/go.mod | go_mod_directives require | awk -v m="$PROTO_MODULE" '$1 == m { print $2 }')"
+    [[ -n "$version" ]] || die "sdk/go.mod does not require ${PROTO_MODULE}"
+    validate_version "$version"
+    check_go_mods "$version" || die "the go.mod files do not require the VirtRigaud modules at one release version"
+    echo "$version"
 }
 
 cmd_set() {
@@ -177,11 +235,41 @@ remote_tag_commit() {
     fi
 }
 
-cmd_tag() {
-    local version="" push=0 modules=()
+# release_commit <version> <expected sha> prints the commit of the release tag
+# <version>, after checking it is <expected sha> when that is given.
+release_commit() {
+    local version="$1" expect="$2" commit
+    commit="$(tag_commit "$version")"
+    [[ -n "$commit" ]] || die "tag ${version} does not exist; the module tags go on the commit of the release tag"
+    if [[ -n "$expect" && "$commit" != "$expect" ]]; then
+        die "tag ${version} is on ${commit}, but this run builds ${expect}; refusing to tag modules of another commit"
+    fi
+    echo "$commit"
+}
+
+# tag_message <module> <version> <commit> prints the annotation of a module
+# tag: the release commit and, in GitHub Actions, the run that created it.
+tag_message() {
+    local module="$1" version="$2" commit="$3"
+    printf '%s module %s\n\nRelease commit: %s\n' "$module" "$version" "$commit"
+    if [[ -n "${GITHUB_RUN_ID:-}" ]]; then
+        printf 'Created by: %s/%s/actions/runs/%s (actor %s)\n' \
+            "${GITHUB_SERVER_URL:-https://github.com}" "${GITHUB_REPOSITORY:-}" "$GITHUB_RUN_ID" "${GITHUB_ACTOR:-}"
+    fi
+}
+
+# parse_tag_args sets version, push, expect and modules from the arguments of
+# "preflight" and "tag".
+parse_tag_args() {
+    version="" push=0 expect="" modules=()
     while [[ $# -gt 0 ]]; do
         case "$1" in
         --push) push=1 ;;
+        --expect-commit)
+            [[ $# -ge 2 ]] || die "--expect-commit needs a commit"
+            expect="$2"
+            shift
+            ;;
         sdk | proto) modules+=("$1") ;;
         -*) die "unknown flag $1" ;;
         *)
@@ -194,10 +282,28 @@ cmd_tag() {
     [[ -n "$version" ]] || usage
     validate_version "$version"
     [[ ${#modules[@]} -gt 0 ]] || modules=(sdk proto)
+}
 
+cmd_preflight() {
+    local version push expect modules
+    parse_tag_args "$@"
+    local commit module existing
+    commit="$(release_commit "$version" "$expect")"
+    cmd_check "$version" "$commit"
+    for module in "${modules[@]}"; do
+        existing="$(remote_tag_commit "${module}/${version}")"
+        if [[ -n "$existing" && "$existing" != "$commit" ]]; then
+            die "${REMOTE} already has ${module}/${version} on ${existing}, not on ${commit}; tags are never moved"
+        fi
+    done
+    echo "module-versions: ${REMOTE} has no ${modules[*]} tag for ${version} on another commit"
+}
+
+cmd_tag() {
+    local version push expect modules
+    parse_tag_args "$@"
     local commit
-    commit="$(tag_commit "$version")"
-    [[ -n "$commit" ]] || die "tag ${version} does not exist; the module tags go on the commit of the release tag"
+    commit="$(release_commit "$version" "$expect")"
     cmd_check "$version" "$commit"
 
     local to_push=() module tag existing
@@ -218,7 +324,7 @@ cmd_tag() {
             die "tag ${tag} already exists on ${existing}, not on ${commit}; tags are never moved"
         fi
         if [[ -z "$existing" ]]; then
-            git tag -a "$tag" -m "${module} module ${version}" "$commit"
+            git tag -a "$tag" -m "$(tag_message "$module" "$version" "$commit")" "$commit"
             echo "module-versions: tagged ${tag} on ${commit}"
         else
             echo "module-versions: ${tag} already on ${commit}"
@@ -235,13 +341,27 @@ cmd_tag() {
 }
 
 main() {
-    [[ $# -ge 2 ]] || usage
+    [[ $# -ge 1 ]] || usage
     local command="$1"
     shift
     case "$command" in
-    validate) validate_version "$1" ;;
-    set) cmd_set "$1" ;;
-    check) cmd_check "$@" ;;
+    validate)
+        [[ $# -eq 1 ]] || usage
+        validate_version "$1"
+        ;;
+    set)
+        [[ $# -eq 1 ]] || usage
+        cmd_set "$1"
+        ;;
+    check)
+        [[ $# -ge 1 && $# -le 2 ]] || usage
+        cmd_check "$@"
+        ;;
+    consistent)
+        [[ $# -eq 0 ]] || usage
+        cmd_consistent
+        ;;
+    preflight) cmd_preflight "$@" ;;
     tag) cmd_tag "$@" ;;
     *) usage ;;
     esac
