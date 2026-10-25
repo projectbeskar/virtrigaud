@@ -127,7 +127,8 @@ experimental clustered libvirt Provider; see the
 
 **Treat `create` on `VMClone` as read access to the source VM's data.** A
 clone is a full copy of its source's disk and boots cloud-init user-data as
-root. On libvirt that user-data can be the `VMClone`'s own
+root. On libvirt, and on Proxmox for a source created with user-data, that
+user-data can be the `VMClone`'s own
 (`spec.customization.userData.cloudInit.inline`). See
 [VM ownership: a clone's host identity](docs/vm-ownership.md#a-clones-host-identity).
 
@@ -160,7 +161,7 @@ Per the [canonical capabilities matrix](https://projectbeskar.github.io/virtriga
 | **Snapshots** | ✅ | ✅ | ✅ | Point-in-time captures |
 | **Memory Snapshots** | ✅ | ✅ | ✅ | RAM-inclusive checkpoints for a **running** VM. vSphere: `CreateSnapshot(memory=true)`. Libvirt: `snapshot-create-as` without `--disk-only`; a stopped VM is honestly downgraded to disk-only with a WARN ([#202]). |
 | **Cloning (full)** | ✅ | ✅ | ✅ | Libvirt: full copy of resolved disk path (qemu-img convert / vol-clone), same-provider ([#153]) |
-| **Linked Clones** | ✅ | ✅ | ✅ | Libvirt: qcow2 overlay (backing-file COW), same-provider ([#153]). UEFI/secure-boot nvram re-point is a deferred follow-up (#208). |
+| **Linked Clones** | ✅ | ✅ | ❌ | Proxmox: every clone is a full clone; a `LinkedClone` VMClone is refused (`LinkedCloneUnsupported`). Libvirt: qcow2 overlay (backing-file COW), same-provider ([#153]). UEFI/secure-boot nvram re-point is a deferred follow-up (#208). |
 | **Clone RPC** | ✅ | ✅ | ✅ | Libvirt Clone implemented: linked (qcow2 overlay) + full copy, `source.vmRef`, same-provider ([#153]) |
 | **ImagePrepare RPC** | ✅ | ✅ | ✅ | Libvirt: import/convert image into a storage pool ([#154]) |
 | **Task Tracking** | ✅ | N/A | ✅ | Async operation monitoring |

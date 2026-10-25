@@ -384,7 +384,7 @@ provider handles it as follows:
 |---|---|---|
 | libvirt (single-host and clustered) | A new instance-id (`virtrigaud-<target uid>`) and the target's hostname | The clone gets its own NoCloud seed ISO; see [libvirt clones: a clone's cloud-init identity](libvirt-clones.md#a-clones-cloud-init-identity) |
 | vSphere | A new instance-id (`virtrigaud-<target uid>`) and the target's hostname | The clone's `guestinfo.metadata` (and a `#cloud-config` `guestinfo.userdata`'s `hostname:`/`fqdn:`) are rewritten in the `CloneVM_Task`; see [vSphere: Clones](#clones) |
-| Proxmox | A new instance-id and the target's name as hostname | PVE regenerates the cloud-init drive from the clone's own config; the provider changes nothing; see [Proxmox: clones' cloud-init identity](#clones-cloud-init-identity) |
+| Proxmox | A new instance-id and the target's name as hostname | A source with a NoCloud seed (created with user-data): the clone gets its own seed (`virtrigaud-<target uid>`). A source without one: PVE regenerates the cloud-init drive from the clone's own config. See [Proxmox: clones' cloud-init identity](#clones-cloud-init-identity) |
 
 On the new instance cloud-init regenerates the SSH host keys (`ssh_deletekeys`
 defaults to `true`) and **re-runs every per-instance module** of the user-data
@@ -392,7 +392,8 @@ defaults to `true`) and **re-runs every per-instance module** of the user-data
 `/etc/machine-id`: a clone of a VM whose machine-id is set keeps it on every
 provider, unless the source was sealed (machine-id emptied, e.g. with
 `cloud-init clean --machine-id`) before it was cloned. Static network
-configuration in the source's cloud-init data is carried to the clone as is.
+configuration in the source's cloud-init data is carried to the clone as is
+(except on a Proxmox clone of a VM with a seed, whose seed gets DHCP on every NIC).
 Clones of VMs that do not use cloud-init are unaffected, and clones made
 before this release keep the identity they booted with. Some keys in the
 user-data undo the new identity: `ssh_keys`, `ssh_deletekeys: false`,
@@ -402,12 +403,14 @@ vSphere providers log a `WARN` naming such keys, never their values (see
 
 **Security: `create` on `VMClone` is read access to the source VM's data.**
 A clone is a full copy of its source's disk, and it boots cloud-init user-data
-as **root**. On libvirt that user-data is the `VMClone`'s
+as **root**. On libvirt, and on Proxmox for a source created with user-data,
+that user-data is the `VMClone`'s
 `spec.customization.userData.cloudInit.inline` when it is set, so whoever can
 create a `VMClone` of a VM can run any command as root on a copy of that VM's
-disk and read everything on it. On every provider, a clone of a cloud-init VM
-also receives and re-runs the source's own user-data, which may carry
-secrets. Treat `create` on `vmclones` in a namespace as read access to every
+disk and read everything on it. On libvirt and vSphere, a clone of a
+cloud-init VM also receives and re-runs the source's own user-data, which may
+carry secrets; a Proxmox clone gets its source's PVE cloud-init settings, or,
+for a source with a seed, the `VMClone`'s user-data or an empty one. Treat `create` on `vmclones` in a namespace as read access to every
 VM's data in that namespace, and grant it accordingly (cross-namespace clone
 targets also need [a grant](cross-namespace-targets.md)).
 
@@ -905,8 +908,8 @@ trust boundary above.
 
 **Reserved.** The provider replaces every description line that mentions
 `virtrigaud.owner`. No spec field reaches the description: the Proxmox
-provider doesn't apply `CreateRequest.tags`, and cloud-init data goes to
-`ciuser`/`sshkeys`/`ipconfigN`. An owner whose UID, namespace or name falls
+provider doesn't apply `CreateRequest.tags`, and cloud-init data goes to the
+VM's NoCloud seed (or, without user-data, to `ipconfigN`). An owner whose UID, namespace or name falls
 outside the charset above is refused with `InvalidSpec` before any PVE call.
 Kubernetes UIDs and names always fit it.
 
@@ -999,9 +1002,17 @@ one.
 
 ### Clones' cloud-init identity
 
-The Proxmox provider does not rewrite a clone's cloud-init data
-([A clone's host identity](#a-clones-host-identity)), because PVE regenerates
-it. The clone is named `target_name`, and PVE's clone gives every `netN` a new
+A VM created with user-data has a NoCloud seed CD-ROM
+([`docs/proxmox-cloud-init-storage.md`](proxmox-cloud-init-storage.md)), which
+PVE's clone would share by reference. Its clone gets a seed of its own, with
+`instance-id` `virtrigaud-<target uid>`, the target's hostname, the VMClone's
+customization user-data (else an empty `#cloud-config`; the source's user-data
+is not carried) and DHCP on its own MACs. It is a new cloud-init instance, and
+its SSH host keys are regenerated.
+
+For a source without a seed, the Proxmox provider does not rewrite a clone's
+cloud-init data ([A clone's host identity](#a-clones-host-identity)), because
+PVE regenerates it. The clone is named `target_name`, and PVE's clone gives every `netN` a new
 MAC address. PVE rebuilds the cloud-init drive from the VM's own config each
 time the VM starts. The user-data PVE generates sets `hostname:` to the VM's
 name. Without a `cicustom` meta-data snippet (the provider never sets one), the
