@@ -52,7 +52,7 @@ func (r *VirtualMachineReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 **Where to Define Constants:**
 - Package-level constants: At the top of the file for file-specific use
 - Shared constants: In a dedicated package (e.g., `pkg/constants/constants.go`) for cross-package use
-- API constants: In `api/v1beta1/constants.go` for CRD-related constants
+- API constants: In `api/infra.virtrigaud.io/v1beta1/` for CRD-related constants
 - Group related constants together with documentation
 
 **Verification:**
@@ -99,9 +99,9 @@ git commit -m "Add new field to VirtualMachine spec"
 2. Regenerate code and CRDs:
    - `make generate` - Generate Go code
    - `make gen-crds` - Generate CRDs for config directory
-3. **CRITICAL**: Update examples in `/docs/examples/` to match new schema
-4. **CRITICAL**: Update documentation in `/docs/` that references the CRDs
-5. Validate all examples: `kubectl apply --dry-run=client -f docs/examples/`
+3. **CRITICAL**: Update examples in `examples/` to match new schema
+4. **CRITICAL**: Update documentation in `docs/` that references the CRDs
+5. Validate all examples: `kubectl apply --dry-run=client -f examples/`
 6. Run `make fmt lint test` to ensure code quality
 7. Deploy with `make install`
 
@@ -125,8 +125,8 @@ The following CI checks ensure CRDs stay synchronized:
 3. **Automatic PR comments** - Bot comments with fix instructions if verification fails
 
 ⚠️ **IMPORTANT**: Examples and documentation MUST stay in sync with CRD schemas. After ANY CRD change, you MUST update:
-- `/docs/examples/*.yaml` - Ensure all examples can be applied successfully
-- `/docs/` - Update any documentation that references the CRD fields
+- `examples/*.yaml` - Ensure all examples can be applied successfully
+- `docs/` - Update any documentation that references the CRD fields
 - Quickstart guide - Verify all YAML snippets are valid
 
 ---
@@ -149,7 +149,7 @@ This codebase operates in a **regulated banking environment**. All changes must 
 
 ### Mandatory: Documentation Updates for Code Changes
 
-**CRITICAL: After ANY code change in the `internal/`, `api/`, `pkg/`, or `cmd/` directories, you MUST update all relevant documentation.**
+**CRITICAL: After ANY code change in the `internal/`, `api/`, `proto/`, `sdk/`, `charts/` or `cmd/` directories, you MUST update all relevant documentation.**
 
 This is a **mandatory step** that must be completed before considering any task complete. Documentation must always reflect the current state of the code.
 
@@ -170,15 +170,15 @@ When adding, removing, or changing any feature in the Go source code:
      - Quickstart guides with examples of the changed code
      - Configuration references for new/changed options
      - Troubleshooting guides if behavior changed
-   - **`docs/examples/`** - Update YAML examples to reflect changes
+   - **`examples/`** - Update YAML examples to reflect changes
    - **Architecture diagrams** - Update if structure/flow changed
-   - **API documentation** - Regenerate if CRDs changed (`make manifests`)
+   - **API documentation** - Regenerate if CRDs changed (`make gen-crds`)
    - **README.md** - Update if getting started steps or features changed
 
 3. **Verify Documentation Accuracy**:
    - Read through updated docs as if you're a new user
    - Ensure all code examples compile and run
-   - Verify all YAML examples validate: `kubectl apply --dry-run=client -f docs/examples/`
+   - Verify all YAML examples validate: `kubectl apply --dry-run=client -f examples/`
    - Check that diagrams match current architecture
    - Confirm API docs reflect current CRD schemas
 
@@ -197,25 +197,25 @@ When adding, removing, or changing any feature in the Go source code:
 - Update troubleshooting guides for new error conditions
 - Add examples showing the new functionality
 
-**For CRD Changes** (`api/v1beta1/`):
-- Run `make generate manifests` to regenerate CRD YAMLs and DeepCopy
-- Update ALL examples in `/docs/examples/` that use the changed CRD
+**For CRD Changes** (`api/infra.virtrigaud.io/v1beta1/`):
+- Run `make generate gen-crds gen-helm-crds` to regenerate DeepCopy and the CRD YAMLs
+- Update ALL examples in `examples/` that use the changed CRD
 - Update quickstart guides with new field examples
 - Update configuration reference documentation
 
-**For Provider Changes** (`internal/provider/`):
-- Update provider-specific documentation in `/docs/providers/`
+**For Provider Changes** (`internal/providers/`):
+- Update provider-specific documentation in `docs/` (for example `docs/libvirt-clones.md`, `docs/proxmox-networks.md`)
 - Update architecture documentation explaining the change
 - Add code examples for new provider capabilities
 - Update troubleshooting guides for new behaviors
 
-**For gRPC/Remote Provider Changes** (`pkg/grpc/`):
+**For gRPC/Remote Provider Changes** (`internal/transport/grpc/`, `internal/providers/`, `proto/`):
 - Update remote provider documentation
 - Document protocol changes
 - Update deployment examples
 
 **For New Features**:
-- Add feature documentation to `/docs/`
+- Add feature documentation to `docs/`
 - Update feature list in README.md
 - Add usage examples
 - Create architecture diagrams showing how the feature works
@@ -297,7 +297,7 @@ func (r *VirtualMachineReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 
 ### Architecture Decision Records (ADRs)
 
-For significant design decisions, create `/docs/adr/NNNN-title.md`:
+For significant design decisions, create `docs/adr/NNNN-title.md`:
 
 ```markdown
 # ADR-NNNN: Title
@@ -366,7 +366,7 @@ make generate manifests
 
 3. **End-user documentation is updated**:
    - Update relevant files in `docs/` directory
-   - Update examples in `docs/examples/` directory
+   - Update examples in `examples/` directory
    - Ensure `CHANGELOG.md` reflects the changes
    - Verify example YAML files validate successfully
 
@@ -412,9 +412,9 @@ make generate manifests
 - If you add code but cannot write a test, document WHY in the code comments
 
 **Example:**
-If you modify `internal/controller/virtualmachine/reconciler.go`:
-1. Update/add tests in `internal/controller/virtualmachine/reconciler_test.go`
-2. Run `go test -v ./internal/controller/virtualmachine/...` to verify
+If you modify `internal/controller/virtualmachine_controller.go`:
+1. Update/add tests in `internal/controller/virtualmachine_controller_test.go`
+2. Run `go test -v ./internal/controller/...` to verify
 3. Ensure ALL tests pass before moving on
 
 ### Go Style Guidelines
@@ -460,7 +460,7 @@ Before adding a new dependency:
 
 ### CRD Development - Go Types as Source of Truth
 
-**CRITICAL: Go types in `api/v1beta1/` are the source of truth.**
+**CRITICAL: Go types in `api/infra.virtrigaud.io/v1beta1/` are the source of truth.**
 
 CRD YAML files in `/config/crd/bases/` are **AUTO-GENERATED** from the Go types using controller-gen. This ensures:
 - Type safety enforced at compile time
@@ -470,7 +470,7 @@ CRD YAML files in `/config/crd/bases/` are **AUTO-GENERATED** from the Go types 
 
 #### Workflow for CRD Changes:
 
-1. **Edit the Go types** in `api/v1beta1/*_types.go`
+1. **Edit the Go types** in `api/infra.virtrigaud.io/v1beta1/*_types.go`
 2. **Add kubebuilder markers** for validation and printing:
    ```go
    // +kubebuilder:validation:Required
@@ -482,7 +482,7 @@ CRD YAML files in `/config/crd/bases/` are **AUTO-GENERATED** from the Go types 
    ```
 4. **Verify generated YAMLs** look correct
 5. **Update `CHANGELOG.md`** documenting the CRD change
-6. **Update examples** in `/docs/examples/`
+6. **Update examples** in `examples/`
 7. **Deploy updated CRDs**:
    ```bash
    make install
@@ -490,7 +490,7 @@ CRD YAML files in `/config/crd/bases/` are **AUTO-GENERATED** from the Go types 
 
 #### Adding New CRDs:
 
-1. Create the new type file in `api/v1beta1/`:
+1. Create the new type file in `api/infra.virtrigaud.io/v1beta1/`:
    ```go
    // +kubebuilder:object:root=true
    // +kubebuilder:subresource:status
@@ -508,7 +508,7 @@ CRD YAML files in `/config/crd/bases/` are **AUTO-GENERATED** from the Go types 
    }
    ```
 
-2. Add to `api/v1beta1/groupversion_info.go` scheme registration
+2. Add to `api/infra.virtrigaud.io/v1beta1/groupversion_info.go` scheme registration
 
 3. Regenerate:
    ```bash
@@ -521,12 +521,12 @@ Add this to your CI pipeline to ensure CRDs stay in sync:
 
 ```bash
 # Generate manifests
-make generate manifests
+make generate gen-crds
 
 # Check if any files changed
 if ! git diff --quiet config/crd/bases/; then
-  echo "ERROR: CRD YAML files are out of sync with api/v1beta1/"
-  echo "Run: make generate manifests"
+  echo "ERROR: CRD YAML files are out of sync with api/infra.virtrigaud.io/v1beta1/"
+  echo "Run: make generate gen-crds"
   exit 1
 fi
 ```
@@ -559,25 +559,31 @@ meta.SetStatusCondition(&vm.Status.Conditions, metav1.Condition{
 
 ### Provider Interface Pattern
 
-VirtRigaud uses a provider interface for hypervisor abstraction:
+VirtRigaud uses a provider interface for hypervisor abstraction. The manager talks to
+each provider through `contracts.Provider`
+([`internal/providers/contracts/provider.go`](../internal/providers/contracts/provider.go)),
+implemented over gRPC by `internal/transport/grpc`; each provider binary serves the
+gRPC contract in `proto/provider/v1/provider.proto`:
 
 ```go
-// Provider defines the interface for hypervisor operations
+// Abridged; see contracts.Provider for the full interface.
 type Provider interface {
-    CreateVM(ctx context.Context, spec *VMSpec) (*VMStatus, error)
-    DeleteVM(ctx context.Context, vmID string) error
-    GetVM(ctx context.Context, vmID string) (*VMStatus, error)
-    UpdateVM(ctx context.Context, vmID string, spec *VMSpec) (*VMStatus, error)
-    PowerOn(ctx context.Context, vmID string) error
-    PowerOff(ctx context.Context, vmID string) error
+    Validate(ctx context.Context) error
+    Create(ctx context.Context, req CreateRequest) (CreateResponse, error)
+    Delete(ctx context.Context, vm VMRef) (taskRef string, err error)
+    Power(ctx context.Context, vm VMRef, op PowerOp) (taskRef string, err error)
+    Reconfigure(ctx context.Context, vm VMRef, desired CreateRequest) (ReconfigureResult, error)
+    Describe(ctx context.Context, vm VMRef) (DescribeResponse, error)
+    TaskStatus(ctx context.Context, taskRef string) (TaskStatus, error)
+    SnapshotCreate(ctx context.Context, req SnapshotCreateRequest) (SnapshotCreateResponse, error)
+    // ...snapshot delete/revert, clone, disk export/import, image prepare
 }
 ```
 
-When adding new providers:
-1. Implement the `Provider` interface
-2. Add provider-specific configuration to the `Provider` CRD
-3. Register in the provider factory
-4. Document in `/docs/providers/`
+When adding new providers, use the `add-provider` workflow: a `cmd/provider-<name>/` binary, an
+`internal/providers/<name>/` package implementing the gRPC server, and capabilities that say
+what it really supports. A new RPC must be implemented, or return `Unimplemented` and be
+declared in the capabilities, in every provider. Document the provider in `docs/`.
 
 ---
 
@@ -614,11 +620,11 @@ When modifying Helm chart or deployment manifests:
 Tests are placed in `*_test.go` files alongside the source code:
 
 ```go
-// internal/controller/virtualmachine/reconciler.go
-package virtualmachine
+// internal/controller/virtualmachine_controller.go
+package controller
 
-// internal/controller/virtualmachine/reconciler_test.go
-package virtualmachine
+// internal/controller/virtualmachine_controller_test.go
+package controller
 
 import (
     "testing"
@@ -756,7 +762,7 @@ make test
 go test -v -race ./...
 
 # Run tests for a specific package
-go test -v ./internal/controller/virtualmachine/...
+go test -v ./internal/controller/...
 
 # Run tests with coverage
 go test -coverprofile=coverage.out ./...
@@ -774,67 +780,47 @@ make test-e2e
 
 ```
 api/
-└── v1beta1/                          # CRD type definitions
+└── infra.virtrigaud.io/v1beta1/      # CRD type definitions (source of truth)
     ├── groupversion_info.go          # Scheme registration
     ├── virtualmachine_types.go       # VirtualMachine CRD
-    ├── virtualmachine_types_test.go  # VirtualMachine tests
     ├── vmclass_types.go              # VMClass CRD
     ├── vmimage_types.go              # VMImage CRD
+    ├── vmnetworkattachment_types.go  # VMNetworkAttachment CRD
     ├── provider_types.go             # Provider CRD
+    ├── vmsnapshot_types.go           # VMSnapshot CRD
+    ├── vmclone_types.go              # VMClone CRD
     ├── vmmigration_types.go          # VMMigration CRD
     ├── vmset_types.go                # VMSet CRD
     ├── vmplacementpolicy_types.go    # VMPlacementPolicy CRD
+    ├── host_types.go, hostpool_types.go  # Host and HostPool CRDs (clustered libvirt)
     └── zz_generated.deepcopy.go      # Auto-generated DeepCopy
 cmd/
-├── manager/
-│   └── main.go                       # Manager entry point
-├── provider-vsphere/
-│   └── main.go                       # vSphere provider binary
-├── provider-libvirt/
-│   └── main.go                       # Libvirt provider binary
-└── provider-proxmox/
-    └── main.go                       # Proxmox provider binary
+├── manager/                          # Manager entry point
+├── provider-vsphere/                 # vSphere provider binary
+├── provider-libvirt/                 # Libvirt provider binary
+├── provider-proxmox/                 # Proxmox provider binary
+├── provider-mock/                    # Mock provider binary
+└── vrtg/, vrtg-provider/, vcts/, ... # CLIs
 internal/
-├── controller/                       # Reconciliation logic
-│   ├── virtualmachine/
-│   │   ├── reconciler.go
-│   │   └── reconciler_test.go
-│   ├── vmset/
-│   │   ├── reconciler.go
-│   │   └── reconciler_test.go
-│   ├── vmmigration/
-│   │   ├── reconciler.go
-│   │   └── reconciler_test.go
-│   └── provider/
-│       ├── reconciler.go
-│       └── reconciler_test.go
-└── provider/                         # Provider implementations
-    ├── interface.go                  # Provider interface
-    ├── vsphere/
-    │   ├── provider.go
-    │   └── provider_test.go
-    ├── libvirt/
-    │   ├── provider.go
-    │   └── provider_test.go
-    └── proxmox/
-        ├── provider.go
-        └── provider_test.go
-pkg/
-├── grpc/                             # gRPC client/server
-│   ├── server.go
-│   ├── client.go
-│   └── proto/
-└── util/                             # Shared utilities
+├── controller/                       # Reconcilers (one flat package; *_controller.go + *_test.go)
+├── providers/                        # gRPC server implementations
+│   ├── vsphere/, libvirt/, proxmox/, mock/
+│   └── contracts/                    # Provider interface and capability types
+├── transport/grpc/                   # Manager-side gRPC client
+├── scheduler/                        # Clustered placement
+└── obs/, resilience/, storage/, k8s/, runtime/, scaffold/, util/  # Cross-cutting
+proto/                                # Separate Go module: provider.proto + generated code
+sdk/                                  # Separate Go module: SDK for external provider authors
+charts/virtrigaud/                    # Helm chart (CRDs generated into crds/, gitignored)
 config/
-├── crd/bases/                        # Generated CRD YAMLs
+├── crd/bases/                        # Generated CRD YAMLs (checked in)
 ├── manager/                          # Manager deployment
 ├── rbac/                             # RBAC definitions
 └── samples/                          # Sample CRs
+examples/                             # User-facing example YAMLs (dry-run by `make test`)
 docs/
-├── examples/                         # Example YAMLs
-├── providers/                        # Provider-specific docs
 ├── adr/                              # Architecture Decision Records
-└── getting-started/                  # Quickstart guides
+└── release-notes/                    # Release notes
 ```
 
 **Test File Pattern:**
@@ -893,7 +879,7 @@ make fmt
 kubectl apply --dry-run=server -f config/crd/bases/
 
 # Validate example manifests
-for file in docs/examples/*.yaml; do
+for file in examples/*.yaml; do
   echo "Checking $file"
   kubectl apply --dry-run=client -f "$file"
 done
@@ -925,30 +911,30 @@ Before committing:
   - [ ] **Documentation updated** for code changes (REQUIRED - see Documentation Requirements section):
     - [ ] GoDoc comments on ALL exported items (functions, types, constants)
     - [ ] Function documentation matches actual behavior (parameters, returns, errors)
-    - [ ] `/docs/` updated for user-facing changes
+    - [ ] `docs/` updated for user-facing changes
     - [ ] Architecture diagrams updated if structure changed
     - [ ] Examples added for new features
     - [ ] Troubleshooting docs updated for new error conditions
-- [ ] **If `api/v1beta1/*_types.go` was modified**:
-  - [ ] Run `make generate manifests` to regenerate CRDs and DeepCopy
-  - [ ] **Update `/docs/examples/*.yaml` to match new schema** (CRITICAL)
-  - [ ] **Update `/docs/` documentation** that references the CRDs (CRITICAL)
-  - [ ] Run `kubectl apply --dry-run=client -f docs/examples/` to verify all examples (REQUIRED)
+- [ ] **If `api/infra.virtrigaud.io/v1beta1/*_types.go` was modified**:
+  - [ ] Run `make generate gen-crds gen-helm-crds` to regenerate DeepCopy and the CRDs
+  - [ ] **Update `examples/*.yaml` to match new schema** (CRITICAL)
+  - [ ] **Update `docs/` documentation** that references the CRDs (CRITICAL)
+  - [ ] Run `kubectl apply --dry-run=client -f examples/` to verify all examples (REQUIRED)
   - [ ] Run `make fmt lint test` to ensure everything passes
 - [ ] **If `internal/controller/` was modified**:
-  - [ ] Update reconciliation flow diagrams in `/docs/`
+  - [ ] Update reconciliation flow diagrams in `docs/`
   - [ ] Document new behaviors in user guides
   - [ ] Update troubleshooting guides for new error conditions
   - [ ] Add examples showing the new functionality
   - [ ] Verify all examples still work with the changes
-- [ ] **If `internal/provider/` was modified**:
-  - [ ] Update provider documentation in `/docs/providers/`
+- [ ] **If `internal/providers/` was modified**:
+  - [ ] Update provider documentation in `docs/`
   - [ ] Test against actual hypervisor (if possible)
   - [ ] Document any new configuration options
 - [ ] **Documentation verification** (CRITICAL):
   - [ ] `CHANGELOG.md` updated with detailed change description
   - [ ] All affected documentation pages reviewed and updated
-  - [ ] All YAML examples validate: `kubectl apply --dry-run=client -f docs/examples/`
+  - [ ] All YAML examples validate: `kubectl apply --dry-run=client -f examples/`
   - [ ] Code examples in docs compile and run
   - [ ] Architecture diagrams match current implementation
   - [ ] API documentation reflects current CRD schemas
@@ -983,21 +969,20 @@ Before committing:
 - Uses govmomi for vCenter API interaction
 - Supports async task tracking via TaskStatus RPC
 - Cloud-init via guestinfo properties
-- Documentation: `/docs/providers/vsphere.md`
+- Documentation: `docs/vm-ownership.md` (owner stamp, required vCenter privilege)
 
 ### Libvirt Provider
-- Uses libvirt-go for KVM/QEMU management
+- Runs `virsh` and `qemu-img` on the host over an in-process SSH client (`qemu+ssh://`); host keys are verified against `known_hosts` (ADR-0004)
 - Cloud-init via nocloud ISO
-- VNC console support
-- Documentation: `/docs/providers/libvirt.md`
+- VNC console URL
+- Documentation: `docs/libvirt-domain-ownership.md`, `docs/libvirt-clones.md`, `docs/clustered-provider-inventory.md`
 
 ### Proxmox Provider
-- Uses REST API for Proxmox VE
-- Supports hot-plug reconfiguration
-- QEMU guest agent integration
-- Documentation: `/docs/providers/proxmox.md`
+- Uses the REST API for Proxmox VE, plus SSH to the node for migration disk transfers
+- Applies only the user name and SSH keys of cloud-init user-data
+- Documentation: `docs/proxmox-networks.md`, `docs/proxmox-cloud-init-storage.md`
 
-See `/docs/providers/` for detailed provider documentation.
+See `docs/README.md` for the documentation index.
 
 ---
 
@@ -1034,7 +1019,7 @@ VirtRigaud uses a Remote Provider architecture for scalability:
 - **Maintainability**: Update providers without manager downtime
 
 When modifying gRPC communication:
-1. Update protobuf definitions in `pkg/grpc/proto/`
-2. Regenerate Go code: `make generate-proto`
+1. Update protobuf definitions in `proto/provider/v1/provider.proto`
+2. Regenerate Go code: `make proto`
 3. Update both client and server implementations
 4. Test thoroughly with integration tests

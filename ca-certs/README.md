@@ -20,12 +20,12 @@ If neither is true, leave this directory as-is — the upstream public CA bundle
    ```
 2. Rebuild the manager image:
    ```bash
-   make docker-build VERSION=v0.3.6 GIT_SHA=$(git rev-parse HEAD)
+   make docker-build VERSION=v0.4.0 GIT_SHA=$(git rev-parse HEAD)
    # or directly:
    docker build -f build/Dockerfile.manager \
-       --build-arg VERSION=v0.3.6 \
+       --build-arg VERSION=v0.4.0 \
        --build-arg GIT_SHA=$(git rev-parse HEAD) \
-       -t my-registry/virtrigaud-manager:v0.3.6 .
+       -t my-registry/virtrigaud-manager:v0.4.0 .
    ```
 3. `update-ca-certificates` runs as part of the build stage and rebuilds `/etc/ssl/certs/ca-certificates.crt` so all subsequent `go mod download` calls inside the same build trust the certs you provided.
 
@@ -43,6 +43,6 @@ If your **runtime** environment also needs custom CAs (for example, the manager 
 
 ## Related
 
-- ADR-0002 (build-path consolidation) — `fieldTesting/ADR-0002-build-path-consolidation.md`
+- ADR-0002 (build-path consolidation) — [`docs/adr/0002-build-path-consolidation.md`](../docs/adr/0002-build-path-consolidation.md)
 - H1 PR-2 — issue #116, the change that introduced this directory
 - H1 umbrella — issue #92

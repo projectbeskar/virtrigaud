@@ -176,6 +176,8 @@ providers-version: ## Print versions for manager and all providers
 	@echo "Manager: $(VERSION)"
 	@echo "Provider libvirt: $(VERSION)"
 	@echo "Provider vSphere: $(VERSION)"
+	@echo "Provider Proxmox: $(VERSION)"
+	@echo "Provider mock: $(VERSION)"
 	@echo "Git SHA: $(GIT_SHA)"
 
 # TODO(user): To use a different vendor for e2e tests, modify the setup under 'tests/e2e'.

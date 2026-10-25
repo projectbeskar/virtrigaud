@@ -392,7 +392,7 @@ existing single-host provider byte-for-byte unchanged.
 ## CRD / API changes (additive, v1beta1-safe)
 
 Go types in `api/infra.virtrigaud.io/v1beta1/` are the source of truth; all of
-this regenerates via `make update-crds` — never hand-edit `config/crd/bases/` or
+this regenerates via `make gen-crds gen-helm-crds` — never hand-edit `config/crd/bases/` or
 `charts/virtrigaud/crds/`.
 
 > **Amendment (2026-09-24, security fix, pre-release):** the sketches below show
@@ -3217,7 +3217,7 @@ honest.
   `vmhostmigration_types.go` (the live-migration trigger kind, D5); additive fields
   on `provider_types.go` (`Topology`, `ReportedCapabilities` clustering flags,
   `cloudhypervisor` enum value) and `virtualmachine_types.go`
-  (`status.placement`). Regenerate + `sync-helm-crds`; update examples + docs.
+  (`status.placement`). Regenerate (`make gen-crds gen-helm-crds`); update examples + docs.
 - `proto-update`: `ListHosts` / `GetHostInfo` / `MigrateVM` + `HostInfo` /
   `MigrateVMRequest` + `target_host_id` on Create/Clone + `GetCapabilities`
   clustering flags; regenerate; stub `Unimplemented` in **all** providers

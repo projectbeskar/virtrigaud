@@ -6,7 +6,7 @@ Thank you for your interest in contributing to VirtRigaud! This document provide
 
 ### Prerequisites
 
-- Go 1.23+
+- Go 1.26 (see `go.mod`)
 - Docker
 - Kubernetes cluster (kind, k3s, or remote)
 - kubectl
@@ -19,10 +19,11 @@ Thank you for your interest in contributing to VirtRigaud! This document provide
 git clone https://github.com/projectbeskar/virtrigaud.git
 cd virtrigaud
 
-# Install development dependencies
-make dev-setup
+# Build once; the Makefile downloads its own tools (controller-gen, golangci-lint,
+# buf, setup-envtest) into ./bin on first use
+make build
 
-# Install pre-commit hooks (optional but recommended)
+# Install pre-commit hooks (optional)
 pip install pre-commit
 pre-commit install
 ```
@@ -38,9 +39,9 @@ When modifying API types:
 # Edit API types
 vim api/infra.virtrigaud.io/v1beta1/virtualmachine_types.go
 
-# Generate code and CRDs
+# Generate DeepCopy code and CRDs
 make generate
-make gen-crds
+make gen-crds gen-helm-crds
 ```
 
 #### Code Changes
@@ -95,17 +96,17 @@ CI. **Upgrading CRDs on an existing release** requires a fresh chart release, or
 ### 3. Testing
 
 ```bash
-# Unit tests
+# Unit tests (downloads the envtest binaries on first run; writes cover.out)
 make test
 
-# Integration tests (requires cluster)
+# Integration tests under test/integration/ (no cluster needed)
 make test-integration
 
-# End-to-end tests
+# End-to-end tests (needs a running kind cluster)
 make test-e2e
 
-# Test specific provider
-make test-provider-vsphere
+# One provider's tests
+go test ./internal/providers/vsphere/...
 ```
 
 ### 4. Local Development
@@ -118,7 +119,7 @@ make dev-deploy
 make dev-watch
 
 # Clean up
-make dev-clean
+make dev-cleanup
 ```
 
 ## Contribution Guidelines
@@ -203,25 +204,27 @@ make test
 # Run tests for specific package
 go test ./internal/controller/...
 
-# Run with coverage
-make test-coverage
+# Coverage: make test writes cover.out
+go tool cover -func=cover.out
 ```
 
 ### Integration Tests
 
 ```bash
-# Requires running Kubernetes cluster
-export KUBECONFIG=~/.kube/config
+# test/integration/ needs no cluster
 make test-integration
+
+# End-to-end tests need a kind cluster and your KUBECONFIG pointing at it
+make test-e2e
 ```
 
 ### Provider Tests
 
 ```bash
-# Test specific provider (requires infrastructure)
-make test-provider-vsphere
-make test-provider-libvirt
-make test-provider-proxmox
+# Unit tests of one provider (no hypervisor needed)
+go test ./internal/providers/vsphere/...
+go test ./internal/providers/libvirt/...
+go test ./internal/providers/proxmox/...
 ```
 
 ## Release Process
@@ -233,17 +236,18 @@ make test-provider-proxmox
    # Generate CRDs for config directory (will be in release artifacts)
    make gen-crds
 
-   # Update version in charts
-   vim charts/virtrigaud/Chart.yaml
-
-   # Update changelog
+   # Update changelog and release notes
    vim CHANGELOG.md
    ```
 
+   Do not edit `charts/virtrigaud/Chart.yaml` or the image tags in
+   `charts/virtrigaud/values.yaml`: the release workflow sets the chart
+   `version`, `appVersion` and the image tags from the tag.
+
 2. **Create release**:
    ```bash
-   git tag v0.2.1
-   git push origin v0.2.1
+   git tag v0.4.0
+   git push origin v0.4.0
    ```
 
 3. **CI handles**:
@@ -271,20 +275,18 @@ Note: CRDs in `charts/virtrigaud/crds/` are generated during packaging and shoul
 ### Test Failures
 
 ```bash
-# Clean and retry
-make clean
-make test
-
-# For libvirt-related failures
-export SKIP_LIBVIRT_TESTS=true
-make test
+# Run one package, verbosely
+go test -v ./internal/controller/...
 ```
+
+`make test` downloads the envtest binaries into `bin/k8s/`; delete that
+directory to fetch them again.
 
 ### Development Environment
 
 ```bash
 # Reset development environment
-make dev-clean
+make dev-cleanup
 make dev-deploy
 
 # Check logs

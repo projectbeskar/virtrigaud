@@ -21,8 +21,8 @@ log_warning() { echo -e "${YELLOW}⚠️  $1${NC}"; }
 log_error() { echo -e "${RED}❌ $1${NC}"; }
 
 # Configuration matching the ci.yml lint job
-GO_VERSION="1.23"
-GOLANGCI_LINT_VERSION="v1.64.8"
+GO_VERSION="1.26"
+GOLANGCI_LINT_VERSION="v2.12.2"
 
 cd "$PROJECT_ROOT"
 
@@ -79,14 +79,14 @@ fi
 # Step 5: Run the actual lint check (matching the GitHub workflow)
 log_info "🔍 Running comprehensive linting..."
 
-# Try make lint-check first, but fall back to direct golangci-lint if environment issues
-if make lint-check 2>/dev/null; then
+# Try make lint first, but fall back to direct golangci-lint if environment issues
+if make lint 2>/dev/null; then
     log_success "✅ All lint checks passed - zero issues found!"
     echo
     log_success "🎉 Local lint testing completed successfully!"
     log_info "Your code should pass the GitHub Actions lint workflow"
 else
-    log_warning "make lint-check failed, trying direct golangci-lint..."
+    log_warning "make lint failed, trying direct golangci-lint..."
     
     # Fall back to direct golangci-lint with no-config and essential linters
     # Exclude problematic packages due to Go environment issues

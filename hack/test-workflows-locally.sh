@@ -163,8 +163,8 @@ create_env_file() {
         log_info "Creating .env.local file..."
         cat > "$env_file" << EOF
 # Local environment variables for act
-GO_VERSION=1.23
-GOLANGCI_LINT_VERSION=v1.64.8
+GO_VERSION=1.26
+GOLANGCI_LINT_VERSION=v2.12.2
 REGISTRY=localhost:5000
 IMAGE_NAME_PREFIX=virtrigaud
 

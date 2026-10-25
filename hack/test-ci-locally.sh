@@ -21,7 +21,7 @@ log_warning() { echo -e "${YELLOW}⚠️  $1${NC}"; }
 log_error() { echo -e "${RED}❌ $1${NC}"; }
 
 # Configuration matching the GitHub workflow
-GO_VERSION="1.23"
+GO_VERSION="1.26"
 
 cd "$PROJECT_ROOT"
 
