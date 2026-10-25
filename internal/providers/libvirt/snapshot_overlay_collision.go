@@ -72,7 +72,7 @@ const overlayCollisionScript = `i=0; for f in "$@"; do i=$((i+1)); if [ -s "$f" 
 
 // snapshotDiskModesWithoutOverlay are the per-disk snapshot modes for which
 // libvirt makes no external overlay.
-var snapshotDiskModesWithoutOverlay = map[string]bool{"no": true, "internal": true, "manual": true}
+var snapshotDiskModesWithoutOverlay = map[string]bool{"no": true, snapshotInternalMode: true, "manual": true}
 
 // externalOverlayPath returns the overlay libvirt names for a disk whose
 // current source is source in a disk-only snapshot named snapshot: the source
@@ -155,11 +155,16 @@ func isOverlayExistsRefusal(err error) bool {
 
 // overlayExistsRefusal answers libvirt's own refusal of a snapshot create
 // whose overlay file already exists (isOverlayExistsRefusal) with the
-// overlay-collision Conflict, when it is proven: virsh ended on its own with
-// an exit status, did not lose libvirtd, and no snapshot of the name exists
-// on domain afterwards. It returns nil otherwise (the caller keeps its own
-// answer).
+// overlay-collision Conflict, when it is proven: the failure is the create
+// command's own (stageCommand: not one whose removable media could not be put
+// back afterwards, which snapshotCreateWith leaves untagged), virsh ended on
+// its own with an exit status, did not lose libvirtd, and no snapshot of the
+// name exists on domain afterwards. It returns nil otherwise (the caller keeps
+// its own answer).
 func overlayExistsRefusal(ctx context.Context, conn libvirtConn, domain, snapshot string, err error) error {
+	if stage, _, ok := stageOf(err); !ok || stage != stageCommand {
+		return nil
+	}
 	if !isOverlayExistsRefusal(err) || !hostCommandEnded(ctx, err) || virshConnectionLost(err) {
 		return nil
 	}

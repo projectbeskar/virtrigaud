@@ -1143,7 +1143,7 @@ func snapshotRevertOn(ctx context.Context, conn libvirtConn, domain, snapshotID 
 
 	result, err := conn.Virsh(ctx, buildSnapshotRevertArgs(domain, snapshotID, domainState)...)
 	if err != nil {
-		return nil, atStageDetail(stageCommand, snapshotID, plan.sources, fmt.Errorf("failed to revert to snapshot: %w", err))
+		return nil, atStageDetail(stageCommand, revertSubject(plan), plan.sources, fmt.Errorf("failed to revert to snapshot: %w", err))
 	}
 
 	log.Printf("INFO Successfully reverted to snapshot: %s\nOutput: %s", snapshotID, result.Stdout)

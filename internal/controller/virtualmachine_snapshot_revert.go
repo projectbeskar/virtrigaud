@@ -81,7 +81,9 @@ import (
 //     again, as a new attempt, after a backoff (snapshotRevertNotPerformedRetryBase
 //     doubling up to snapshotRevertNotPerformedRetryMax), under the same
 //     conditions as a first send. It never counts toward
-//     snapshotRevertMaxAttempts.
+//     snapshotRevertMaxAttempts. Such an answer to the manager's own re-send
+//     of an attempt whose outcome is unknown proves nothing about that
+//     attempt: the outcome stays unknown.
 
 // snapshotRevertRecheckInterval re-checks a requested revert that waits for
 // its VMSnapshot (missing, not Ready, not proven to be of this VM) or for a
@@ -573,12 +575,12 @@ func (r *VirtualMachineReconciler) sendSnapshotRevert(
 		fmt.Sprintf("Reverting to VMSnapshot %s (attempt %d)", snap.Name, rec.Attempts))
 
 	taskRef, err := providerInstance.SnapshotRevert(ctx, ref, snap.Status.SnapshotID)
-	if err == nil || !snapshotRevertCallNotPerformed(err) {
+	if err == nil || resend || !snapshotRevertCallNotPerformed(err) {
 		// Any other answer ends a run of "not performed" answers.
 		r.revertNotPerformed.reset(snapshotRevertNotPerformedKey(vm, rec))
 	}
 	if err != nil {
-		return r.snapshotRevertCallFailed(ctx, vm, err)
+		return r.snapshotRevertCallFailed(ctx, vm, err, resend)
 	}
 	if taskRef != "" {
 		rec.TaskRef = taskRef
@@ -594,12 +596,17 @@ func (r *VirtualMachineReconciler) sendSnapshotRevert(
 // snapshotRevertCallFailed records a failed SnapshotRevert call. The
 // provider's answer that it did not perform the revert
 // (snapshotRevertCallNotPerformed) is Pending again, sent after a backoff
-// (snapshotRevertNotPerformedAnswer). A failure whose outcome is not known —
+// (snapshotRevertNotPerformedAnswer) — unless the call was the manager's own
+// re-send (resend) of an attempt whose outcome is unknown: the answer then
+// proves only that this call did nothing, not that the earlier one did, so
+// the outcome stays unknown (Reverting, counted toward
+// snapshotRevertMaxAttempts). A failure whose outcome is not known —
 // the provider not answering in time, a retryable answer that proves
 // nothing — keeps the record Reverting with no task: it is sent again
 // (reconcileSnapshotRevert) while the VM stays off. A definite answer (a
 // refusal, an unimplemented RPC, an error the provider reported) is terminal.
-func (r *VirtualMachineReconciler) snapshotRevertCallFailed(ctx context.Context, vm *infravirtrigaudiov1beta1.VirtualMachine, err error) (ctrl.Result, bool, error) {
+func (r *VirtualMachineReconciler) snapshotRevertCallFailed(ctx context.Context, vm *infravirtrigaudiov1beta1.VirtualMachine,
+	err error, resend bool) (ctrl.Result, bool, error) {
 	logger := log.FromContext(ctx)
 	rec := vm.Status.SnapshotRevert
 	detail := providerFailureDetail(err)
@@ -608,7 +615,7 @@ func (r *VirtualMachineReconciler) snapshotRevertCallFailed(ctx context.Context,
 		logger.Error(err, "The provider does not implement SnapshotRevert")
 		return r.failSnapshotRevert(ctx, vm, infravirtrigaudiov1beta1.SnapshotRevertReasonUnsupported, fmt.Sprintf(
 			"the provider does not support reverting to a snapshot: %s", detail))
-	case snapshotRevertCallNotPerformed(err):
+	case !resend && snapshotRevertCallNotPerformed(err):
 		// Nothing was changed: neither an unknown outcome (it never counts
 		// toward snapshotRevertMaxAttempts) nor a failure.
 		return r.snapshotRevertNotPerformedAnswer(ctx, vm, err)

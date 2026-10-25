@@ -326,7 +326,7 @@ func (p *Provider) deleteStagedDiskRouted(ctx context.Context, req *providerv1.D
 			}
 			return res.Stdout, res.Stderr, err
 		}
-		o, err := migration.EmptyNFSStagedDisk(bctx, run, disk.NFSURL)
+		o, err := migration.EmptyNFSStagedDisk(withNFSLogRedactions(bctx, disk.NFSURL), run, disk.NFSURL)
 		outcome = o
 		return err
 	})

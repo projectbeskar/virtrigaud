@@ -51,8 +51,10 @@ import (
 //     refusal before it executes anything, and the domain's disk sources, read
 //     again, are as before: a busy domain or one in the wrong state is "not
 //     performed"; a revert libvirt does not support for this VM
-//     (snapshotConfigRefusalMarkers) is a terminal FailedPrecondition. A
-//     snapshot libvirt does not find is NotFound.
+//     (snapshotConfigRefusalMarkers) is a terminal FailedPrecondition. For an
+//     internal snapshot (reverted in place, disk by disk, its sources never
+//     changing) only the job lock is such proof; any other refusal is a
+//     failure. A snapshot libvirt does not find is NotFound.
 //   - the revert command ended on its own with any other error: libvirt
 //     reported a failure while it reverted, and the disks may have been
 //     changed — a terminal failure (codes.Unknown with VM_OPERATION_FAILED).
@@ -87,6 +89,21 @@ const (
 // revertSnapshotNotFoundMarker is libvirt's error class for a snapshot it
 // does not find (VIR_ERR_NO_DOMAIN_SNAPSHOT), lower case.
 const revertSnapshotNotFoundMarker = "domain snapshot not found"
+
+// Subjects of the revert command's stage (stageError.subject): whether the
+// snapshot reverted to is internal (revertPlan.internal).
+const (
+	revertSubjectExternal = "external"
+	revertSubjectInternal = snapshotInternalMode
+)
+
+// revertSubject is the stage subject of a revert to plan's snapshot.
+func revertSubject(plan *revertPlan) string {
+	if plan.internal {
+		return revertSubjectInternal
+	}
+	return revertSubjectExternal
+}
 
 // revertOutcome is what a failed SnapshotRevert proves (see the file comment).
 type revertOutcome int
@@ -138,6 +155,7 @@ func classifyRevertFailure(ctx context.Context, conn libvirtConn, domain string,
 		}
 		return revertNotPerformed
 	case stageCommand:
+		_, subject, _ := stageOf(err)
 		if !hostCommandEnded(ctx, err) || virshConnectionLost(err) {
 			return revertUnknown
 		}
@@ -148,6 +166,13 @@ func classifyRevertFailure(ctx context.Context, conn libvirtConn, domain string,
 			return revertSnapshotNotFound
 		}
 		if !firstErrorLineHasAny(err, snapshotRefusalMarkers...) && !snapshotRefusedForConfig(err) {
+			return revertFailed
+		}
+		// An internal snapshot is reverted in place, disk by disk (its disk
+		// sources never change): only the job lock — refused before libvirt
+		// starts the job at all — proves nothing was reverted. Any other
+		// refusal may have come after an earlier disk was reverted.
+		if subject == revertSubjectInternal && !firstErrorLineHasAny(err, libvirtJobBusyMarker) {
 			return revertFailed
 		}
 		// A refusal text: proven only when the domain's disks are still the

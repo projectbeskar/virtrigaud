@@ -405,6 +405,10 @@ type revertPlan struct {
 	// (diskSourcesKey): a refused revert is proven to have changed nothing
 	// only while they are unchanged (classifyRevertFailure).
 	sources string
+	// internal reports that the snapshot is an internal one (its memory or a
+	// disk recorded 'internal'): libvirt reverts such disks in place, one at
+	// a time, so unchanged disk sources prove nothing (classifyRevertFailure).
+	internal bool
 }
 
 // prepareSnapshotRevert runs, before a revert of domain to snapshotID on h's
@@ -438,7 +442,21 @@ func prepareSnapshotRevert(ctx context.Context, h hostCommandRunner, domain, sna
 		return nil, &snapshotRevertUnsafeError{snapshot: snapshotID, disks: unsafe}
 	}
 	return &revertPlan{before: doc.readOnlyDiskSources(), recorded: snap.recordedReadOnlySources(), media: doc.ejectableMedia(),
-		sources: doc.diskSourcesKey()}, nil
+		sources: doc.diskSourcesKey(), internal: snap.isInternal()}, nil
+}
+
+// isInternal reports whether the snapshot is internal: its memory, or any of
+// its disks, is recorded snapshot='internal'.
+func (s *snapshotDiskModes) isInternal() bool {
+	if s.Memory != nil && strings.TrimSpace(s.Memory.Snapshot) == snapshotInternalMode {
+		return true
+	}
+	for _, d := range s.Disks {
+		if strings.TrimSpace(d.Snapshot) == snapshotInternalMode {
+			return true
+		}
+	}
+	return false
 }
 
 // finishSnapshotRevert runs after a successful revert of domain to

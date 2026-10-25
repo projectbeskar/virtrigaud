@@ -201,7 +201,10 @@ snapshot creation (nothing was changed) and it will be retried; ..."), the provi
 answer is in the `SnapshotCreateRetrying` event, and the create is sent again after 1
 minute, doubling to 10 minutes (in the manager's memory). This includes a request that
 never reached the provider and an unreachable host. An answer to the manager's own re-send
-still proves nothing and keeps the hold. The source snapshot of a single-host
+still proves nothing and keeps the hold. A cause that does not go away (libvirt refusing a
+domain in the wrong state for good, an image that stays unreadable) is retried every 10
+minutes for as long as the `VMSnapshot` exists, with the same condition and the
+`SnapshotCreateRetrying` event: fix the cause or delete the `VMSnapshot`. The source snapshot of a single-host
 `VMMigration` is unchanged: "not performed" fails the attempt, and the retry policy
 decides.
 

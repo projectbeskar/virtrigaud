@@ -26,6 +26,8 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	"github.com/projectbeskar/virtrigaud/internal/storage/migration"
 )
@@ -115,5 +117,67 @@ func TestStagedDiskLocations(t *testing.T) {
 	assert.Equal(t, "PutObject "+stagedLocationMarker+"/"+stagedLocationMarker+": AccessDenied", err.Error())
 
 	short := migration.StagedDisk{Key: "k1", Options: migration.StorageOptions{Bucket: "ab"}}
-	assert.Equal(t, []string{"", "k1"}, stagedDiskLocations(short))
+	assert.Equal(t, []string{"k1"}, stagedDiskLocations(short))
+}
+
+// TestRedactCommandText_Edges: a URL right after a non-blank character, and a
+// URL glued to a kept libvirt URI, are redacted too.
+func TestRedactCommandText_Edges(t *testing.T) {
+	assert.Equal(t, "x_<redacted nfs URL>", redactCommandText("x_nfs://srv/exp/f"))
+	assert.Equal(t, "1<redacted nfs URL>", redactCommandText("1nfs://srv/exp/f"))
+	assert.Equal(t, "virsh -c qemu:///system,<redacted nfs URL>", redactCommandText("virsh -c qemu:///system,nfs://srv/exp/f"))
+	assert.Equal(t, "pvc://mig/x?y=<redacted nfs URL>", redactCommandText("pvc://mig/x?y=nfs://srv/exp/f"))
+}
+
+// libnfsLookupFailure is how libnfs (through qemu-img) names a staged object
+// it cannot open: without the scheme.
+const libnfsLookupFailure = "qemu-img: Could not open: Failed to mount nfs share : mount/mnt call failed with " +
+	"\"RPC error: Mount failed with error MNT3ERR_ACCES(13)\" for nfs.example.com:/exports/migrations/ns1/mig-a; " +
+	"NFS: Lookup of /exports/migrations/ns1/mig-a/disk.qcow2 failed"
+
+// TestNFSLogRedactions: a context marked with a staged object's nfs URL
+// redacts its server, export and path in the transport's log lines and in the
+// errors its commands return, also where libnfs names them without a scheme.
+func TestNFSLogRedactions(t *testing.T) {
+	var buf bytes.Buffer
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+
+	ctx := withNFSLogRedactions(context.Background(), r28StagedURL)
+	logCommandFailure(ctx, "qemu-img convert -f qcow2 -O qcow2 "+r28StagedURL+" /pool/x", 1, time.Millisecond, libnfsLookupFailure)
+	ve := &VirshError{Command: "qemu-img convert " + r28StagedURL, ExitCode: 1, Stderr: libnfsLookupFailure,
+		redactions: logRedactionsOf(ctx)}
+	for _, text := range []string{buf.String(), ve.Error(), redactForLog(ctx, libnfsLookupFailure)} {
+		for _, leak := range []string{"nfs.example.com", "/exports/migrations", "mig-a", "disk.qcow2"} {
+			assert.NotContains(t, text, leak)
+		}
+		assert.Contains(t, text, stagedLocationMarker)
+	}
+	assert.Contains(t, ve.Stderr, "nfs.example.com", "the field keeps the text the classifiers read")
+	assert.Empty(t, logRedactionsOf(context.Background()))
+	assert.Equal(t, "plain text", redactForLog(context.Background(), "plain text"))
+	short := withLogRedactions(context.Background(), "/", "ab", "  ")
+	assert.Empty(t, logRedactionsOf(short), "texts too short to redact safely are ignored")
+}
+
+// TestUnknownOutcomeIsConstant: an export or import whose outcome is unknown
+// stays an untyped answer, with a constant text: the cause (an S3 client
+// error naming the bucket, key and endpoint) never reaches the wire.
+func TestUnknownOutcomeIsConstant(t *testing.T) {
+	cause := errors.New(`S3 upload failed: s3://tenant-bucket/ns1/mig-a/export.qcow2: Put "https://s3.example.com/tenant-bucket/x?uploadId=1": EOF`)
+	err := unknownOutcome(wireExportFailed, cause)
+	assert.Equal(t, codes.Unknown, status.Code(err))
+	assert.Nil(t, definiteStatusError(err), "not a definite answer: the manager keeps its marker")
+	for _, leak := range []string{"tenant-bucket", "s3.example.com", "uploadId"} {
+		assert.NotContains(t, err.Error(), leak)
+	}
+	assert.NotContains(t, singleHostExportFailure(context.Background(), cause).Error(), "tenant-bucket", "untagged export failure")
+	assert.NotContains(t, redactLocations(cause, "ns1/mig-a/export.qcow2").Error(), "s3.example.com", "the endpoint URL")
+}
+
+// TestRedactImageSpec: an image URL loses its user-info and query; a path or
+// name is kept.
+func TestRedactImageSpec(t *testing.T) {
+	assert.Equal(t, "https://images.example.com/u.img?…", redactImageSpec("https://user:pw@images.example.com/u.img?X-Amz-Signature=abc"))
+	assert.Equal(t, "/var/lib/libvirt/images/base.qcow2", redactImageSpec("/var/lib/libvirt/images/base.qcow2"))
 }

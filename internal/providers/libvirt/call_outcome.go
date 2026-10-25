@@ -202,14 +202,14 @@ func (e *notPerformedError) GRPCStatus() *status.Status {
 // manager reads as "the provider did not perform the operation", with the
 // constant text wire.
 func notPerformed(wire string, cause error) error {
-	log.Printf("ERROR libvirt call outcome known (not performed): %s: %v", wire, cause)
+	log.Printf("ERROR libvirt call outcome known (not performed): %s: %s", wire, redactCause(cause))
 	return &notPerformedError{wire: wire, cause: cause}
 }
 
 // refusal logs cause and returns a typed refusal with the constant text wire:
 // the provider refused the call before doing anything.
 func refusal(code codes.Code, wire string, cause error) error {
-	log.Printf("ERROR libvirt call refused (%s): %s: %v", code, wire, cause)
+	log.Printf("ERROR libvirt call refused (%s): %s: %s", code, wire, redactCause(cause))
 	return status.Error(code, wire)
 }
 
@@ -263,7 +263,7 @@ func definiteStatusError(err error) error {
 		return nil
 	}
 	if pe.Cause != nil {
-		log.Printf("ERROR libvirt call refused (%s): %s: %v", code, pe.Message, pe.Cause)
+		log.Printf("ERROR libvirt call refused (%s): %s: %s", code, pe.Message, redactCause(pe.Cause))
 	}
 	return status.Error(code, pe.Message)
 }
@@ -451,8 +451,31 @@ func endedFailure(ctx context.Context, wire string, err error) error {
 	if hostCommandEnded(ctx, err) {
 		return notPerformed(wire, err)
 	}
-	log.Printf("WARN libvirt call outcome unknown: %s: %v", wire, err)
-	return err
+	return unknownOutcome(wire, err)
+}
+
+// wireOutcomeUnknownSuffix ends the text of an answer whose outcome is unknown
+// (unknownOutcome).
+const wireOutcomeUnknownSuffix = "; its outcome is unknown: the host command may still run or may have completed " +
+	"(details are in the provider log)"
+
+// unknownOutcome logs err (redacted) and returns the untyped codes.Unknown
+// answer of a call whose outcome the provider cannot prove, with the constant
+// text wire and wireOutcomeUnknownSuffix: the manager keeps its marker, as for
+// any untyped answer, and the cause — which can name a staged object's bucket,
+// key or endpoint (R28) — never crosses the wire.
+func unknownOutcome(wire string, err error) error {
+	log.Printf("WARN libvirt call outcome unknown: %s: %s", wire, redactCause(err))
+	return status.Error(codes.Unknown, wire+wireOutcomeUnknownSuffix)
+}
+
+// redactCause renders err for the provider log with every URL but the libvirt
+// connection URI and pvc:// redacted (redactCommandText, R28).
+func redactCause(err error) string {
+	if err == nil {
+		return "<nil>"
+	}
+	return redactCommandText(err.Error())
 }
 
 // errTrackingReader is r that remembers whether the S3 client read it to its

@@ -327,7 +327,7 @@ func (p *Provider) createVMWithCloudInit(ctx context.Context, vp *VirshProvider,
 
 	// Check if VMImage is specified in the request
 	if imageSpec := p.extractImageSpec(req); imageSpec != "" {
-		log.Printf("INFO Creating disk from image: %q", imageSpec)
+		log.Printf("INFO Creating disk from image: %q", redactImageSpec(imageSpec))
 
 		var volume *StorageVolume
 		var err error
@@ -335,7 +335,7 @@ func (p *Provider) createVMWithCloudInit(ctx context.Context, vp *VirshProvider,
 		// Determine how to handle the image based on its type
 		if req.Image.Path == "" && (strings.HasPrefix(imageSpec, "http://") || strings.HasPrefix(imageSpec, "https://")) {
 			// Handle URL - download the image
-			log.Printf("INFO Downloading cloud image from URL: %s", imageSpec)
+			log.Printf("INFO Downloading cloud image from URL: %s", redactURL(imageSpec))
 			if err = ensureDiskVolumeFree(ctx, vp, storageProvider, domainName, diskVolumeName, g); err == nil {
 				volume, err = storageProvider.DownloadCloudImage(ctx, imageSpec, diskVolumeName, defaultStoragePool, diskSizeGB)
 			}

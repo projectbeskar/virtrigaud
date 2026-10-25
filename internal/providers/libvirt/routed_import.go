@@ -321,7 +321,8 @@ func (p *Provider) importDiskRouted(ctx context.Context, req *providerv1.ImportD
 		return err
 	})
 	if err != nil {
-		return nil, classifyRoutedImportFailure(string(r.host), ctx, bctx, prog, err, req.GetSourceUrl(), r.nfsURL)
+		return nil, classifyRoutedImportFailure(string(r.host), ctx, bctx, prog, err,
+			append(nfsURLLocations(r.nfsURL), req.GetSourceUrl())...)
 	}
 	log.Printf("INFO Routed disk import landed %s on host %s for %s/%s", resp.GetPath(), r.host, r.owner.Namespace, r.owner.Name)
 	return resp, nil
@@ -444,14 +445,16 @@ func (e *redactedCause) Unwrap() error { return e.err }
 // stagedLocationMarker replaces a staged object's location in a logged text.
 const stagedLocationMarker = "<staged object>"
 
-// redactLocations returns err with every non-empty location in its text
-// replaced by stagedLocationMarker, for the provider log: a staged object's
-// nfs:// URL or s3:// key names the tenant's staging export or bucket.
+// redactLocations returns err with every URL in its text redacted
+// (redactCommandText: an S3 client error can carry the endpoint URL) and every
+// non-empty location replaced by stagedLocationMarker, for the provider log: a
+// staged object's nfs:// URL or s3:// key names the tenant's staging export or
+// bucket.
 func redactLocations(err error, locations ...string) error {
 	if err == nil {
 		return nil
 	}
-	return &redactedCause{text: redactText(err.Error(), locations...), err: err}
+	return &redactedCause{text: redactText(redactCommandText(err.Error()), locations...), err: err}
 }
 
 // redactText is redactLocations on a text.

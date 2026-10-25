@@ -369,7 +369,7 @@ func (s *StorageProvider) DownloadCloudImage(ctx context.Context, imageURL, volu
 
 	result, err := s.virshProvider.runVirshCommand(ctx, "!", "wget", "-O", tempImage, imageURL)
 	if err != nil {
-		return nil, fmt.Errorf("failed to download image: %w, output: %s", err, result.Stderr)
+		return nil, fmt.Errorf("failed to download image: %w, output: %s", err, redactCommandText(result.Stderr))
 	}
 
 	// SECURITY: the downloaded file is untrusted. Refuse it if its header
@@ -399,14 +399,14 @@ func (s *StorageProvider) DownloadCloudImage(ctx context.Context, imageURL, volu
 		result, err = runHost(ctx, s.virshProvider, withUmask(vmDiskUmask,
 			"qemu-img", "convert", "-f", srcFormat, "-O", "qcow2", tempImage, newDisk)...)
 		if err != nil {
-			return nil, fmt.Errorf("failed to convert image: %w, output: %s", err, result.Stderr)
+			return nil, fmt.Errorf("failed to convert image: %w, output: %s", err, redactCommandText(result.Stderr))
 		}
 
 		// Then resize it
 		sizeSpec := fmt.Sprintf("%dG", sizeGB)
 		result, err = s.virshProvider.runVirshCommand(ctx, "!", "qemu-img", "resize", newDisk, sizeSpec)
 		if err != nil {
-			return nil, fmt.Errorf("failed to resize image: %w, output: %s", err, result.Stderr)
+			return nil, fmt.Errorf("failed to resize image: %w, output: %s", err, redactCommandText(result.Stderr))
 		}
 	} else {
 		// Just convert to target location (created with vmDiskMode)
@@ -414,7 +414,7 @@ func (s *StorageProvider) DownloadCloudImage(ctx context.Context, imageURL, volu
 		result, err = runHost(ctx, s.virshProvider, withUmask(vmDiskUmask,
 			"qemu-img", "convert", "-f", srcFormat, "-O", "qcow2", tempImage, newDisk)...)
 		if err != nil {
-			return nil, fmt.Errorf("failed to convert image: %w, output: %s", err, result.Stderr)
+			return nil, fmt.Errorf("failed to convert image: %w, output: %s", err, redactCommandText(result.Stderr))
 		}
 	}
 	if err := wd.publish(ctx, filepath.Base(targetPath), targetPath); err != nil {
@@ -542,7 +542,7 @@ func (s *StorageProvider) DeleteVolume(ctx context.Context, poolName, volumeName
 
 	result, err := s.virshProvider.runVirshCommand(ctx, "vol-delete", volumeName, "--pool", poolName)
 	if err != nil {
-		return fmt.Errorf("failed to delete volume: %w, output: %s", err, result.Stderr)
+		return fmt.Errorf("failed to delete volume: %w, output: %s", err, redactCommandText(result.Stderr))
 	}
 
 	log.Printf("INFO Successfully deleted storage volume: %s", volumeName)
@@ -555,7 +555,7 @@ func (s *StorageProvider) CloneVolume(ctx context.Context, poolName, sourceVolum
 
 	result, err := s.virshProvider.runVirshCommand(ctx, "vol-clone", sourceVolume, targetVolume, "--pool", poolName)
 	if err != nil {
-		return nil, fmt.Errorf("failed to clone volume: %w, output: %s", err, result.Stderr)
+		return nil, fmt.Errorf("failed to clone volume: %w, output: %s", err, redactCommandText(result.Stderr))
 	}
 
 	// Get cloned volume information
@@ -575,7 +575,7 @@ func (s *StorageProvider) ResizeVolume(ctx context.Context, poolName, volumeName
 	newSize := fmt.Sprintf("%dG", newSizeGB)
 	result, err := s.virshProvider.runVirshCommand(ctx, "vol-resize", volumeName, newSize, "--pool", poolName)
 	if err != nil {
-		return fmt.Errorf("failed to resize volume: %w, output: %s", err, result.Stderr)
+		return fmt.Errorf("failed to resize volume: %w, output: %s", err, redactCommandText(result.Stderr))
 	}
 
 	log.Printf("INFO Successfully resized volume: %s", volumeName)

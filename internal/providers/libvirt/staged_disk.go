@@ -33,11 +33,12 @@ import (
 const minS3BucketNameLen = 3
 
 // stagedDiskLocations returns the texts that locate disk, for redactLocations
-// (R28): its nfs:// URL, its object key and, for s3, its bucket name. An
+// (R28): its nfs:// URL and the texts in it (nfsURLLocations), its object
+// key and, for s3, its bucket name. An
 // error from the S3 client names the bucket, and the key alone would leave it
 // in the log.
 func stagedDiskLocations(disk migration.StagedDisk) []string {
-	locations := []string{disk.NFSURL, disk.Key}
+	locations := append(nfsURLLocations(disk.NFSURL), disk.Key)
 	if bucket := strings.TrimSpace(disk.Options.Bucket); len(bucket) >= minS3BucketNameLen {
 		locations = append(locations, bucket)
 	}
@@ -104,6 +105,7 @@ func (s *Server) emptyNFSStagedDisk(ctx context.Context, disk migration.StagedDi
 		return unspecified, &migration.StagedDiskError{Code: codes.Unimplemented,
 			Msg: "DeleteStagedDisk: an nfs staged object is reached by the host's qemu-img, which needs an ssh:// libvirt transport"}
 	}
+	ctx = withNFSLogRedactions(ctx, disk.NFSURL)
 	run := func(ctx context.Context, args ...string) (string, string, error) {
 		res, err := conn.RunHost(ctx, append([]string{"qemu-img"}, args...)...)
 		if res == nil {

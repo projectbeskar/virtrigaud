@@ -117,11 +117,15 @@ func (s *Server) exportDiskToS3(ctx context.Context, req *providerv1.ExportDiskR
 //     (and writing), and a retry would start a second one.
 //
 // An untagged failure — the upload's result was lost, or the S3 service may
-// have completed it — is returned unchanged: unknown.
+// have completed it — is unknown: an untyped answer with a constant text
+// (unknownOutcome; the cause can name the bucket, key and endpoint).
 func singleHostExportFailure(ctx context.Context, err error) error {
 	stage, _, ok := stageOf(err)
 	if !ok {
-		return err
+		if typed := definiteStatusError(err); typed != nil {
+			return typed
+		}
+		return unknownOutcome(wireExportFailed, err)
 	}
 	switch stage {
 	case stageInvalid:
@@ -131,7 +135,7 @@ func singleHostExportFailure(ctx context.Context, err error) error {
 	case stageCommand:
 		return endedFailure(ctx, wireExportFailed, err)
 	}
-	return err
+	return unknownOutcome(wireExportFailed, err)
 }
 
 // exportFlattenToS3 is the S3 export core, run on conn — the single host's

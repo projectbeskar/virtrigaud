@@ -51,7 +51,7 @@ func failuresExpected(ctx context.Context) bool {
 // redacted (redactCommandText, R28): a staged disk's nfs:// URL never reaches
 // the log.
 func logCommandFailure(ctx context.Context, command string, exitCode int, duration time.Duration, stderr string) {
-	command, stderr = redactCommandText(command), redactCommandText(stderr)
+	command, stderr = redactForLog(ctx, command), redactForLog(ctx, stderr)
 	if failuresExpected(ctx) {
 		log.Printf("DEBUG Probe command failed (expected; ignored by its caller): %s (exit code: %d, duration: %v): %s",
 			command, exitCode, duration, stderr)

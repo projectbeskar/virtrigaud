@@ -181,3 +181,37 @@ func TestSnapshotRevert_OutcomeUnknownRetryIsStillUnknown(t *testing.T) {
 	assert.Equal(t, infravirtrigaudiov1beta1.SnapshotRevertPhaseReverting, got.Status.SnapshotRevert.Phase)
 	requireRevertCondition(t, got, metav1.ConditionFalse, infravirtrigaudiov1beta1.SnapshotRevertReasonReverting)
 }
+
+// TestSnapshotRevert_NotPerformedAnsweringAResendStaysUnknown: "not performed"
+// answering the manager's own re-send of an attempt whose outcome is unknown
+// proves only that the re-send did nothing. The outcome stays unknown: the
+// record stays Reverting, the attempts keep counting, and a VM seen running
+// before the next send ends the request Failed instead of waiting for a
+// power-off.
+func TestSnapshotRevert_NotPerformedAnsweringAResendStaysUnknown(t *testing.T) {
+	r, prov, _, now := revertFixture(t, infravirtrigaudiov1beta1.PowerStateOff, contracts.PowerStateOff, nil,
+		revertSnapshotOf(revertSnapName, revertSnapUID))
+	prov.revertAnswers = []revertAnswer{
+		{err: contracts.NewRetryableError("snapshotRevert: context deadline exceeded",
+			status.Error(codes.DeadlineExceeded, "context deadline exceeded"))},
+		{err: revertNotPerformedErr()},
+	}
+	got := reconcileStored(t, r)
+	require.Len(t, prov.reverts, 1)
+	require.Equal(t, infravirtrigaudiov1beta1.SnapshotRevertPhaseReverting, got.Status.SnapshotRevert.Phase)
+
+	*now = now.Add(snapshotRevertResendMaxWait)
+	got = reconcileStored(t, r)
+	require.Len(t, prov.reverts, 2, "the re-send")
+	assert.Equal(t, infravirtrigaudiov1beta1.SnapshotRevertPhaseReverting, got.Status.SnapshotRevert.Phase,
+		"the earlier attempt's outcome is still unknown")
+	assert.Equal(t, int32(2), got.Status.SnapshotRevert.Attempts, "the attempts keep counting")
+	requireRevertCondition(t, got, metav1.ConditionFalse, infravirtrigaudiov1beta1.SnapshotRevertReasonReverting)
+
+	prov.describe.PowerState = string(contracts.PowerStateOn)
+	*now = now.Add(snapshotRevertResendMaxWait)
+	got = reconcileStored(t, r)
+	assert.Len(t, prov.reverts, 2, "never sent again once the VM may have run")
+	assert.Equal(t, infravirtrigaudiov1beta1.SnapshotRevertPhaseFailed, got.Status.SnapshotRevert.Phase)
+	assert.Contains(t, got.Status.SnapshotRevert.Message, "may or may not have been reverted")
+}

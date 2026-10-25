@@ -167,7 +167,10 @@ unrecorded, and the outcome is then treated as unknown (below).
   support. Otherwise the record waits with that reason instead (for example
   `WaitingForPowerOff`). These answers never count toward the 5-attempt limit below,
   and they never end the request with "the VM may or may not have been reverted". Up to
-  v0.4.0 they were re-sent as unknown outcomes.
+  v0.4.0 they were re-sent as unknown outcomes. The exception is a "not performed"
+  answer to the manager's own re-send of an attempt whose outcome is unknown: it proves
+  only that the re-send did nothing, not the earlier attempt, so the outcome stays
+  unknown (below).
 - **An unknown outcome.** A call that fails without a definite answer leaves the
   record `Reverting` with no task. That is a provider that did not answer in time, a
   retryable answer that does not prove that nothing was done (for example the
@@ -366,7 +369,10 @@ clustered). The provider answers by what it can prove:
 - libvirt refused the revert before it ran it, and the VM's disk sources, read again,
   are unchanged. When the VM was busy or not in a state it can be reverted in, the
   answer is "not performed" (`snapshot revert not performed: libvirt refused the revert
-  before running it ...`). A revert that libvirt does not support for this VM (an error
+  before running it ...`). For an internal (memory) snapshot, which libvirt reverts in
+  place, one disk at a time, without changing the disk sources, only the busy answer
+  (`cannot acquire state change lock`) proves that; any other error is a failure
+  (below). A revert that libvirt does not support for this VM (an error
   of class `unsupported configuration`, `Operation not supported`, `argument
   unsupported` or `invalid argument`) is refused for good: `FailedPrecondition`,
   `RevertFailed` with no retry hint (`snapshot revert refused: libvirt does not support
