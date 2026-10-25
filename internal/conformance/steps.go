@@ -365,7 +365,11 @@ func (t *testRun) waitFor(ctx context.Context, gvk schema.GroupVersionKind, name
 			return cond == CondDeleted, nil
 		}
 		if err != nil {
-			if ctx.Err() == nil { // keep what was last seen when the read failed because time ran out
+			// Keep what was last seen when the read failed because time ran
+			// out: the context is done, or its deadline is too close for the
+			// read (client-go's rate limiter then refuses to wait, with an
+			// error that does not wrap context.DeadlineExceeded).
+			if !timeRunningOut(ctx, t.pollInterval()) {
 				last = fmt.Sprintf("read failed: %v", err)
 			}
 			return false, nil // transient API errors are retried until the timeout
@@ -660,4 +664,14 @@ func (t *testRun) deleteAndWait(ctx context.Context, o trackedObject, stepName s
 	}
 	res.Duration = time.Since(start)
 	return res
+}
+
+// timeRunningOut reports whether ctx is done or its deadline is less than
+// interval away, so a failed read at this point says nothing about the object.
+func timeRunningOut(ctx context.Context, interval time.Duration) bool {
+	if ctx.Err() != nil {
+		return true
+	}
+	deadline, ok := ctx.Deadline()
+	return ok && time.Until(deadline) < interval
 }

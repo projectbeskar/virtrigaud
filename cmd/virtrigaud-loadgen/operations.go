@@ -189,6 +189,12 @@ func (lg *LoadGenerator) observe(result *Result, done func(ctx context.Context) 
 	var lastErr error
 	err := wait.PollUntilContextTimeout(parent, interval, timeout, true, func(ctx context.Context) (bool, error) {
 		ok, err := done(ctx)
+		if err != nil && timeRunningOut(ctx, interval) {
+			// The read failed because the observation's time ran out (the
+			// client-side rate limiter refuses a wait that would pass the
+			// deadline): report the timeout, not this error.
+			return false, nil
+		}
 		if err != nil && (apierrors.IsNotFound(err) || isTransient(err)) {
 			lastErr = err
 			return false, nil
@@ -535,4 +541,14 @@ func (lg *LoadGenerator) performClone(ctx context.Context, provider string, _ in
 		return cur.Status.Phase == infrav1beta1.ClonePhaseReady, nil
 	})
 	lg.results <- result
+}
+
+// timeRunningOut reports whether ctx is done or its deadline is less than
+// interval away, so a failed read at this point says nothing about the object.
+func timeRunningOut(ctx context.Context, interval time.Duration) bool {
+	if ctx.Err() != nil {
+		return true
+	}
+	deadline, ok := ctx.Deadline()
+	return ok && time.Until(deadline) < interval
 }
