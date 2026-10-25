@@ -5,6 +5,37 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-10-25 13:48] - Proxmox: full cloud-init user-data through a NoCloud seed (R35); no linked clones; clone memory sizing
+**Author:** @wrkode (William Rizzo)
+
+### Added
+- `internal/providers/proxmox/seed.go`, `internal/providers/proxmox/seed_create.go`: a Create with user-data gets a NoCloud seed volume. The provider sends the user-data (byte for byte), a meta-data it renders (`instance-id` `virtrigaud-<owner UID>`, else `virtrigaud-pve-<VMID>`; `local-hostname` the VM name; the other keys of `spec.metaData` kept) and a version-2 network-config it renders from `spec.networks` (one entry per NIC, matched by the MAC PVE gave it and named `eth<N>`; DHCP or address, default route and DNS) as a tar archive on the stdin of one SSH session to the PVE node. A node script builds the ISO with `genisoimage` in a fresh directory under the root-only `/var/lib/virtrigaud/seed-stage`, imports it into the VM's storage with `qm importdisk --format raw` (a VM-owned `vm-<vmid>-disk-N`), attaches it with `qm set --<slot> <volume>,media=cdrom`, and removes the directory on every exit (and an imported but unattached volume). The seed takes the slot of the VM's PVE cloud-init drive (replacing it) and none of `ciuser`, `sshkeys`, `ipconfigN` or `nameserver` is set beside it; it is not in the boot order. Template clones, VMs made without a template (now awaited, and stamped ready after the seed) and migration imports with user-data all use it. Missing SSH data plane, SSH credentials, `known_hosts` or `genisoimage` on the node refuse the Create before anything is created (`InvalidSpec`, the message names what is missing, never a host or a value); user-data or meta-data over 1 MiB, or meta-data that is not a YAML mapping, too. A seed build whose SSH session broke, or that finds a `qm importdisk` of the VM still running, keeps the VM (outcome unknown); any other failure rolls it back. A re-sent Create never attaches a second seed.
+- `internal/providers/proxmox/seed_create.go`, `internal/providers/proxmox/server.go`: a VMClone of a VM with a seed (PVE's clone copies the source's CD-ROM line, so the clone would reference the source's seed volume) gets a seed of its own in that slot: `instance-id` from the target VirtualMachine's UID, the customization hostname/domain or the target's name, the customization's inline user-data or an empty `#cloud-config` (the source's user-data is not carried), DHCP on its own MACs. Its prerequisites are checked before anything is cloned; a re-sent Clone attaches no second seed.
+- `internal/providers/proxmox/ssh.go`: `runSSHInput` runs a node command with a small input on its stdin.
+- `internal/providers/proxmox/pvefake/volumes.go`, `pvefake/server.go`, `pvefake/netconfig.go`: the fake tracks seed volumes and frees them as qemu-server's destroy does (never a CD-ROM's volume, unless `destroy-unreferenced-disks=1`), stores drive keys and `delete`s of a config update, copies a non-cloud-init CD-ROM line verbatim on clone, and can give created NICs MACs (`SetAssignCreateMACs`).
+- Tests: `seed_test.go`, `seed_node_test.go` (a fake node behind the SSH data plane), `seed_script_test.go` (the node script in a real `sh`/`bash` with stub `qm`/`genisoimage`/`pgrep`), `clone_class_sizing_test.go`.
+
+### Changed
+- `internal/providers/proxmox/server.go`: the line scan of user-data (`ciuser` from the first `name:`, every `ssh_authorized_keys:` block merged into one key list; everything else dropped) is removed; nothing reads the user-data any more.
+- `internal/providers/proxmox/capabilities.go`, `internal/providers/proxmox/server.go`: linked clones are no longer advertised. Every Create from a template already was a full clone (`full=1`; the `fullClone: false` of a `VMImageSpec` was never sent by the manager and is now only logged), and a VMClone source is a VM, which PVE clones linked only when it is a template. The VMClone controller now refuses a `LinkedClone` for Proxmox before calling the provider (`LinkedCloneUnsupported`), and `Clone` refuses `linked` (`InvalidSpec`).
+- `internal/providers/proxmox/networks.go`: `applyCloneNetworks` takes an IP mode (static only, all, none for a seed).
+- `internal/providers/proxmox/s3import.go`: an imported-disk VM with user-data gets a seed after its boot disk; `buildImportedDiskCloudInitValues` is removed.
+- `docs/proxmox-cloud-init-storage.md` (rewritten: the seed, its prerequisites, rendering, lifecycle, limits and storage), `docs/proxmox-networks.md`, `docs/vm-ownership.md`, `docs/cross-namespace-targets.md`, `docs/README.md`, `README.md` (Proxmox linked clones ❌), `examples/README.md`, `examples/proxmox-complete-example.yaml` (SSH keys in the Secret; `ufw allow OpenSSH` and `ufw --force enable`; `htop` after EPEL; `spec.disks` is not attached by the Proxmox provider).
+
+### Fixed
+- `internal/providers/proxmox/server.go`: `parseClassSizing` (Clone) read only a `contracts.VMClass` `MemoryMiB`, but the VMClone controller sends a v1beta1 `VMClassSpec` (`cpu`, `memory` quantity): a clone got the class's CPU and kept its source's memory. Both encodings are read now.
+
+### Why
+Proxmox silently applied only a user name and a merged key list out of a VM's user-data, so `runcmd`, `write_files`, `packages`, a second user's keys and every other key never reached the guest, while libvirt and vSphere pass the whole document. Linked clones were advertised but never made. A clone's class memory was ignored.
+
+### Impact
+- [x] Breaking change
+- [x] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
+A Proxmox Provider whose VMs carry `spec.userData` now needs the SSH data plane (`ssh_user`, `ssh_privatekey` or `ssh_password`, `known_hosts` in its Secret; the VM created on the API endpoint's node); without it such a Create is refused (`InvalidSpec`) instead of creating a VM without most of its user-data. VMs created before keep their PVE cloud-init drive. A Proxmox `LinkedClone` VMClone is refused instead of failing at PVE.
+
 ## [2026-10-25 13:11] - libvirt snapshot outcomes: definite V12 refusal, classified reverts, "not performed" retried; redacted host-command log (V12, R28, R37)
 **Author:** @wrkode (William Rizzo)
 
