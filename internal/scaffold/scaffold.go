@@ -31,11 +31,6 @@ import (
 // VirtRigaud checkout is known to read it from.
 const defaultGoVersion = "1.26"
 
-// rootModulePath is the module path of the VirtRigaud repository. The SDK
-// and proto bindings a provider imports are the nested modules rootModulePath
-// + "/sdk" and rootModulePath + "/proto".
-const rootModulePath = "github.com/projectbeskar/virtrigaud"
-
 // Config holds scaffolding configuration.
 type Config struct {
 	ProviderName string

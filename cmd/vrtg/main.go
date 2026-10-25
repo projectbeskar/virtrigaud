@@ -41,6 +41,7 @@ import (
 
 	infrav1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
 	"github.com/projectbeskar/virtrigaud/cmd/internal/cliclient"
+	"github.com/projectbeskar/virtrigaud/cmd/internal/cliout"
 )
 
 const (
@@ -314,7 +315,7 @@ func (o *options) listVMs(cmd *cobra.Command, _ []string) error {
 	}
 
 	table := newTable(out)
-	fmt.Fprintln(table, "NAMESPACE\tNAME\tPROVIDER\tCLASS\tIMAGE\tIPS\tAGE")
+	cliout.Println(table, "NAMESPACE\tNAME\tPROVIDER\tCLASS\tIMAGE\tIPS\tAGE")
 	for i := range vmList.Items {
 		vm := &vmList.Items[i]
 		age := time.Since(vm.CreationTimestamp.Time).Truncate(time.Second)
@@ -322,7 +323,7 @@ func (o *options) listVMs(cmd *cobra.Command, _ []string) error {
 		if ips == "" {
 			ips = noneValue
 		}
-		fmt.Fprintf(table, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+		cliout.Printf(table, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
 			vm.Namespace, vm.Name, vm.Spec.ProviderRef.Name, vm.Spec.ClassRef.Name,
 			refName(vm.Spec.ImageRef), ips, age)
 	}
@@ -350,22 +351,22 @@ func (o *options) describeVM(cmd *cobra.Command, args []string) error {
 		return o.outputResource(out, c, vm)
 	}
 
-	fmt.Fprintf(out, "Name: %s\n", vm.Name)
-	fmt.Fprintf(out, "Namespace: %s\n", vm.Namespace)
-	fmt.Fprintf(out, "Provider: %s\n", vm.Spec.ProviderRef.Name)
-	fmt.Fprintf(out, "Class: %s\n", vm.Spec.ClassRef.Name)
-	fmt.Fprintf(out, "Image: %s\n", refName(vm.Spec.ImageRef))
-	fmt.Fprintf(out, "Power State: %s\n", vm.Spec.PowerState)
-	fmt.Fprintf(out, "VM ID: %s\n", vm.Status.ID)
-	fmt.Fprintf(out, "Current Power State: %s\n", vm.Status.PowerState)
-	fmt.Fprintf(out, "IPs: %s\n", strings.Join(vm.Status.IPs, ", "))
-	fmt.Fprintf(out, "Console URL: %s\n", vm.Status.ConsoleURL)
-	fmt.Fprintf(out, "Created: %s\n", vm.CreationTimestamp.Format(time.RFC3339))
+	cliout.Printf(out, "Name: %s\n", vm.Name)
+	cliout.Printf(out, "Namespace: %s\n", vm.Namespace)
+	cliout.Printf(out, "Provider: %s\n", vm.Spec.ProviderRef.Name)
+	cliout.Printf(out, "Class: %s\n", vm.Spec.ClassRef.Name)
+	cliout.Printf(out, "Image: %s\n", refName(vm.Spec.ImageRef))
+	cliout.Printf(out, "Power State: %s\n", vm.Spec.PowerState)
+	cliout.Printf(out, "VM ID: %s\n", vm.Status.ID)
+	cliout.Printf(out, "Current Power State: %s\n", vm.Status.PowerState)
+	cliout.Printf(out, "IPs: %s\n", strings.Join(vm.Status.IPs, ", "))
+	cliout.Printf(out, "Console URL: %s\n", vm.Status.ConsoleURL)
+	cliout.Printf(out, "Created: %s\n", vm.CreationTimestamp.Format(time.RFC3339))
 
 	if len(vm.Status.Conditions) > 0 {
-		fmt.Fprintf(out, "\nConditions:\n")
+		cliout.Printf(out, "\nConditions:\n")
 		for _, condition := range vm.Status.Conditions {
-			fmt.Fprintf(out, "  %s: %s (%s)\n", condition.Type, condition.Status, condition.Reason)
+			cliout.Printf(out, "  %s: %s (%s)\n", condition.Type, condition.Status, condition.Reason)
 		}
 	}
 
@@ -390,10 +391,10 @@ func (o *options) vmEvents(cmd *cobra.Command, args []string) error {
 
 	out := cmd.OutOrStdout()
 	table := newTable(out)
-	fmt.Fprintln(table, "LAST SEEN\tTYPE\tREASON\tMESSAGE")
+	cliout.Println(table, "LAST SEEN\tTYPE\tREASON\tMESSAGE")
 	for _, event := range events.Items {
 		lastSeen := event.LastTimestamp.Format("2006-01-02 15:04:05")
-		fmt.Fprintf(table, "%s\t%s\t%s\t%s\n",
+		cliout.Printf(table, "%s\t%s\t%s\t%s\n",
 			lastSeen, event.Type, event.Reason, event.Message)
 	}
 
@@ -417,9 +418,9 @@ func (o *options) vmConsoleURL(cmd *cobra.Command, args []string) error {
 
 	out := cmd.OutOrStdout()
 	if vm.Status.ConsoleURL == "" {
-		fmt.Fprintf(out, "No console URL available for VM %s\n", args[0])
+		cliout.Printf(out, "No console URL available for VM %s\n", args[0])
 	} else {
-		fmt.Fprintf(out, "%s\n", vm.Status.ConsoleURL)
+		cliout.Printf(out, "%s\n", vm.Status.ConsoleURL)
 	}
 
 	return nil
@@ -445,7 +446,7 @@ func (o *options) listProviders(cmd *cobra.Command, _ []string) error {
 	}
 
 	table := newTable(out)
-	fmt.Fprintln(table, "NAMESPACE\tNAME\tTYPE\tENDPOINT\tAGE")
+	cliout.Println(table, "NAMESPACE\tNAME\tTYPE\tENDPOINT\tAGE")
 	for i := range providerList.Items {
 		provider := &providerList.Items[i]
 		age := time.Since(provider.CreationTimestamp.Time).Truncate(time.Second)
@@ -453,7 +454,7 @@ func (o *options) listProviders(cmd *cobra.Command, _ []string) error {
 		if endpoint == "" {
 			endpoint = noneValue
 		}
-		fmt.Fprintf(table, "%s\t%s\t%s\t%s\t%s\n",
+		cliout.Printf(table, "%s\t%s\t%s\t%s\t%s\n",
 			provider.Namespace, provider.Name, provider.Spec.Type, endpoint, age)
 	}
 
@@ -480,19 +481,19 @@ func (o *options) providerStatus(cmd *cobra.Command, args []string) error {
 		return o.outputResource(out, c, provider)
 	}
 
-	fmt.Fprintf(out, "Provider: %s\n", provider.Name)
-	fmt.Fprintf(out, "Type: %s\n", provider.Spec.Type)
-	fmt.Fprintf(out, "Endpoint: %s\n", provider.Spec.Endpoint)
-	fmt.Fprintf(out, "Healthy: %t\n", provider.Status.Healthy)
+	cliout.Printf(out, "Provider: %s\n", provider.Name)
+	cliout.Printf(out, "Type: %s\n", provider.Spec.Type)
+	cliout.Printf(out, "Endpoint: %s\n", provider.Spec.Endpoint)
+	cliout.Printf(out, "Healthy: %t\n", provider.Status.Healthy)
 
 	if len(provider.Status.Conditions) > 0 {
-		fmt.Fprintf(out, "\nConditions:\n")
+		cliout.Printf(out, "\nConditions:\n")
 		for _, condition := range provider.Status.Conditions {
-			fmt.Fprintf(out, "  %s: %s (%s)\n", condition.Type, condition.Status, condition.Reason)
+			cliout.Printf(out, "  %s: %s (%s)\n", condition.Type, condition.Status, condition.Reason)
 		}
 	}
 
-	fmt.Fprintf(out, "\nNote: Use kubectl describe for full provider details\n")
+	cliout.Printf(out, "\nNote: Use kubectl describe for full provider details\n")
 
 	return nil
 }

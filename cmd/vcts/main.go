@@ -29,6 +29,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 
 	"github.com/projectbeskar/virtrigaud/cmd/internal/cliclient"
+	"github.com/projectbeskar/virtrigaud/cmd/internal/cliout"
 	"github.com/projectbeskar/virtrigaud/internal/conformance"
 )
 
@@ -172,14 +173,14 @@ func (o *options) runConformanceTests(cmd *cobra.Command, _ []string) error {
 
 	// Print summary
 	out := cmd.OutOrStdout()
-	fmt.Fprintf(out, "\nConformance Test Results:\n")
-	fmt.Fprintf(out, "Provider: %s\n", o.provider)
-	fmt.Fprintf(out, "Total Tests: %d\n", results.Total)
-	fmt.Fprintf(out, "Passed: %d\n", results.Passed)
-	fmt.Fprintf(out, "Failed: %d\n", results.Failed)
-	fmt.Fprintf(out, "Skipped: %d\n", results.Skipped)
-	fmt.Fprintf(out, "Duration: %v\n", results.Duration)
-	fmt.Fprintf(out, "\nResults saved to: %s\n", o.outputDir)
+	cliout.Printf(out, "\nConformance Test Results:\n")
+	cliout.Printf(out, "Provider: %s\n", o.provider)
+	cliout.Printf(out, "Total Tests: %d\n", results.Total)
+	cliout.Printf(out, "Passed: %d\n", results.Passed)
+	cliout.Printf(out, "Failed: %d\n", results.Failed)
+	cliout.Printf(out, "Skipped: %d\n", results.Skipped)
+	cliout.Printf(out, "Duration: %v\n", results.Duration)
+	cliout.Printf(out, "\nResults saved to: %s\n", o.outputDir)
 
 	if results.Failed > 0 {
 		return errTestsFailed
@@ -196,12 +197,12 @@ func listTests(cmd *cobra.Command, _ []string) error {
 	}
 
 	out := cmd.OutOrStdout()
-	fmt.Fprintf(out, "Available Conformance Tests:\n\n")
+	cliout.Printf(out, "Available Conformance Tests:\n\n")
 	for _, test := range tests {
-		fmt.Fprintf(out, "  %s\n", test.Name)
-		fmt.Fprintf(out, "    Description: %s\n", test.Description)
-		fmt.Fprintf(out, "    Required Capabilities: %v\n", test.RequiredCapabilities)
-		fmt.Fprintf(out, "\n")
+		cliout.Printf(out, "  %s\n", test.Name)
+		cliout.Printf(out, "    Description: %s\n", test.Description)
+		cliout.Printf(out, "    Required Capabilities: %v\n", test.RequiredCapabilities)
+		cliout.Printf(out, "\n")
 	}
 
 	return nil
@@ -230,11 +231,11 @@ func validateTests(cmd *cobra.Command, args []string) error {
 	invalidFiles := 0
 
 	for _, specFile := range specFiles {
-		fmt.Fprintf(out, "Validating %s...\n", specFile)
+		cliout.Printf(out, "Validating %s...\n", specFile)
 
 		tests, err := validator.ValidateFile(specFile)
 		if err != nil {
-			fmt.Fprintf(out, "  ERROR: %v\n", err)
+			cliout.Printf(out, "  ERROR: %v\n", err)
 			invalidFiles++
 			continue
 		}
@@ -242,19 +243,19 @@ func validateTests(cmd *cobra.Command, args []string) error {
 		totalTests += len(tests)
 
 		for _, test := range tests {
-			fmt.Fprintf(out, "  ✓ %s\n", test.Name)
+			cliout.Printf(out, "  ✓ %s\n", test.Name)
 		}
 	}
 
-	fmt.Fprintf(out, "\nValidation Results:\n")
-	fmt.Fprintf(out, "Files: %d\n", len(specFiles))
-	fmt.Fprintf(out, "Valid Tests: %d\n", totalTests)
-	fmt.Fprintf(out, "Invalid Files: %d\n", invalidFiles)
+	cliout.Printf(out, "\nValidation Results:\n")
+	cliout.Printf(out, "Files: %d\n", len(specFiles))
+	cliout.Printf(out, "Valid Tests: %d\n", totalTests)
+	cliout.Printf(out, "Invalid Files: %d\n", invalidFiles)
 
 	if invalidFiles > 0 {
 		return fmt.Errorf("%w: %d of %d specification files are invalid", errValidationFailed, invalidFiles, len(specFiles))
 	}
 
-	fmt.Fprintf(out, "All tests are valid!\n")
+	cliout.Printf(out, "All tests are valid!\n")
 	return nil
 }

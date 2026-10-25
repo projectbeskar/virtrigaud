@@ -38,6 +38,7 @@ import (
 
 	infrav1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
 	"github.com/projectbeskar/virtrigaud/cmd/internal/cliclient"
+	"github.com/projectbeskar/virtrigaud/cmd/internal/cliout"
 	"github.com/projectbeskar/virtrigaud/internal/util/closer"
 )
 
@@ -303,11 +304,11 @@ func (o *options) runLoadGen(cmd *cobra.Command, _ []string) error {
 	defer cancel()
 
 	out := cmd.OutOrStdout()
-	fmt.Fprintf(out, "Starting load generation...\n")
-	fmt.Fprintf(out, "Duration: %v\n", lgConfig.Duration)
-	fmt.Fprintf(out, "Concurrency: %d\n", lgConfig.Concurrency)
-	fmt.Fprintf(out, "VM Count: %d\n", lgConfig.VMCount)
-	fmt.Fprintf(out, "Providers: %v\n", lgConfig.Providers)
+	cliout.Printf(out, "Starting load generation...\n")
+	cliout.Printf(out, "Duration: %v\n", lgConfig.Duration)
+	cliout.Printf(out, "Concurrency: %d\n", lgConfig.Concurrency)
+	cliout.Printf(out, "VM Count: %d\n", lgConfig.VMCount)
+	cliout.Printf(out, "Providers: %v\n", lgConfig.Providers)
 
 	// Start results collector
 	var wg sync.WaitGroup
@@ -328,8 +329,8 @@ func (o *options) runLoadGen(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("load generation failed: %w", err)
 	}
 
-	fmt.Fprintf(out, "Load generation completed successfully\n")
-	fmt.Fprintf(out, "Results saved to: %s\n", o.outputDir)
+	cliout.Printf(out, "Load generation completed successfully\n")
+	cliout.Printf(out, "Results saved to: %s\n", o.outputDir)
 
 	return nil
 }
@@ -665,7 +666,7 @@ func (lg *LoadGenerator) collectResults(out io.Writer) {
 			if !result.Success {
 				status = "❌"
 			}
-			fmt.Fprintf(out, "%s %s/%s: %v\n", status, result.Operation, result.Provider, result.Duration)
+			cliout.Printf(out, "%s %s/%s: %v\n", status, result.Operation, result.Provider, result.Duration)
 		}
 	}
 
@@ -703,9 +704,9 @@ func (lg *LoadGenerator) saveResults(out io.Writer, results []Result, stats *Sta
 	summaryFile := filepath.Join(lg.opts.outputDir, "summary.md")
 	lg.saveSummary(summaryFile, stats)
 
-	fmt.Fprintf(out, "Results saved:\n")
-	fmt.Fprintf(out, "  CSV: %s\n", csvFile)
-	fmt.Fprintf(out, "  Summary: %s\n", summaryFile)
+	cliout.Printf(out, "Results saved:\n")
+	cliout.Printf(out, "  CSV: %s\n", csvFile)
+	cliout.Printf(out, "  Summary: %s\n", summaryFile)
 }
 
 func (lg *LoadGenerator) saveCSV(filename string, results []Result) {
