@@ -57,7 +57,9 @@ import (
 // and for V6 (SnapshotCreate reads the domain and excludes its read-only
 // CD-ROM with --diskspec sda,snapshot=no; SnapshotRevert reads the snapshot
 // and the domain before the revert and the domain after it,
-// snapshot_readonly_disks.go) — with
+// snapshot_readonly_disks.go), and for V12 (a disk-only SnapshotCreate probes
+// the overlay files it would create, one `sh -c` before the ejection,
+// snapshot_overlay_collision.go) — with
 // VIRTRIGAUD_UPDATE_CALLSEQ_GOLDEN=1; the slice 3 branch
 // reproduces it byte for byte. A change to any of them — which would restart
 // the ADR-0008 D5 soak window — fails here.
@@ -211,6 +213,9 @@ sh)
     if [ -f "$d/missing-seed-root" ]; then echo ` + seedRootMissingMarker + `
     elif [ -f "$d/listable-seed-root" ]; then printf 'self ` + scdSSHUID + `\nleaf 755 ` + scdSSHUID + ` %s\nanc 755 0 /\n' "$4"
     else printf 'self ` + scdSSHUID + `\nleaf 711 ` + scdSSHUID + ` %s\nanc 755 0 /\n' "$4"; fi ;;
+  ` + scdOverlayCollisionPattern + `)
+    if [ -f "$d/fail-overlay-probe" ]; then echo "sh: probe failed" >&2; exit 2; fi
+    if [ -f "$d/overlay-exists" ]; then cat "$d/overlay-exists"; fi ;;
   esac ;;
 sudo)
   if [ "$1" = "-n" ]; then
@@ -239,6 +244,10 @@ var (
 	// SSH user's 0711 directory, unless local/missing-seed-root or
 	// local/listable-seed-root scripts otherwise.
 	scdSeedRootPattern = shellQuote(seedRootScript)
+	// scdOverlayCollisionPattern matches overlayCollisionScript (V12): it
+	// prints local/overlay-exists (the colliding indexes), nothing by
+	// default, and fails when local/fail-overlay-probe exists.
+	scdOverlayCollisionPattern = shellQuote(overlayCollisionScript)
 )
 
 // scdSSHUID and scdSSHGID are the SSH user's uid and gid the fake id prints.

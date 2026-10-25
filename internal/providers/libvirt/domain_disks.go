@@ -98,6 +98,9 @@ type domainDiskElem struct {
 	} `xml:"target"`
 	// ReadOnly is the element's own <readonly/> marker.
 	ReadOnly *struct{} `xml:"readonly"`
+	// Snapshot is the element's own snapshot='...' default mode ("" when
+	// unset): no, internal, external or manual.
+	Snapshot string `xml:"snapshot,attr"`
 }
 
 // diskSourceFormats returns the format (domainDiskElem.format) of every

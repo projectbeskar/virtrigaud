@@ -290,6 +290,8 @@ func TestClustered_Snapshots_RoutedOwnerCheckedByUUID(t *testing.T) {
 			"host-b virsh domstate "+uuid),
 			snapshotDependentsGuard...),
 			"host-b virsh dumpxml "+uuid,
+			// V12: the overlay the snapshot would create must not exist yet.
+			"local sh -c "+overlayCollisionScript+" sh /var/lib/libvirt/images/vrgold-web-disk.pre",
 			"host-b virsh metadata --domain "+uuid+" --uri "+mediaMarkerURI+" --key virtrigaud --set <ejected><media target='sda' source='"+
 				scdSeedISO+"' driver='raw'/></ejected> --config",
 			"host-b virsh change-media "+uuid+" sda --eject --config",

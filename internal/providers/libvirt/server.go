@@ -498,6 +498,14 @@ func (s *Server) SnapshotCreate(ctx context.Context, req *providerv1.SnapshotCre
 				}
 				r, err := snapshotCreateOn(bctx, c, d.handle, withSnapshotRequestToken(req), roots)
 				if err != nil {
+					// libvirt's own refusal of an overlay file that already
+					// exists, when the probe before the create could not see
+					// it (V12): a definite Conflict.
+					if name := req.GetNameHint(); name != "" {
+						if refusal := overlayExistsRefusal(bctx, c, d.handle, sanitizeSnapshotName(name), err); refusal != nil {
+							return refusal
+						}
+					}
 					return err
 				}
 				if r.Task != nil {
@@ -706,6 +714,15 @@ func snapshotCreateWith(ctx context.Context, conn libvirtConn, domain string, re
 			snapshotName, domain, excluded)
 	}
 
+	// A disk-only snapshot whose overlay file is already on the host (left by
+	// an earlier snapshot of the same name) is refused before anything
+	// changes, as a definite Conflict (V12, snapshot_overlay_collision.go).
+	if diskOnly {
+		if err := refuseSnapshotOverlayCollision(ctx, h, domain, snapshotName, doc); err != nil {
+			return nil, atStage(stageBefore, fmt.Errorf("failed to create snapshot: %w", err))
+		}
+	}
+
 	// Build the virsh snapshot-create-as arguments. A memory-inclusive (full
 	// system) snapshot omits --disk-only and is only possible for a RUNNING
 	// domain (there is no RAM state to capture otherwise); any other case is a
@@ -824,6 +841,14 @@ func singleHostSnapshotFailure(ctx context.Context, conn libvirtConn, domain str
 			log.Printf("WARN libvirt snapshot create outcome unknown: the domain's disk sources are not readable or changed "+
 				"(read error: %v) after: %v", blkErr, err)
 			return err
+		}
+		// libvirt's refusal of an overlay file that already exists (V12; the
+		// probe before the create could not see it): the same request can
+		// never succeed, a definite Conflict rather than "not created".
+		if isOverlayExistsRefusal(err) {
+			log.Printf("ERROR libvirt refused snapshot %s of domain %s: an overlay file it would create already exists: %v",
+				subject, domain, err)
+			return status.Error(codes.AlreadyExists, wireSnapshotOverlayExists)
 		}
 		return notPerformed(wireSnapshotNotCreated, err)
 	}
