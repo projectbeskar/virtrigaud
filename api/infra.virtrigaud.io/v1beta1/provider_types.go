@@ -30,23 +30,24 @@ const (
 	ProviderTypeVSphere ProviderType = "vsphere"
 	// ProviderTypeLibvirt indicates a libvirt provider
 	ProviderTypeLibvirt ProviderType = "libvirt"
-	// ProviderTypeFirecracker indicates a Firecracker provider
+	// ProviderTypeFirecracker names a Firecracker provider. The schema accepts
+	// it, but VirtRigaud ships no Firecracker provider implementation.
 	ProviderTypeFirecracker ProviderType = "firecracker"
-	// ProviderTypeQEMU indicates a QEMU provider
+	// ProviderTypeQEMU names a QEMU provider. The schema accepts it, but
+	// VirtRigaud ships no QEMU provider implementation.
 	ProviderTypeQEMU ProviderType = "qemu"
 	// ProviderTypeProxmox indicates a Proxmox VE provider
 	ProviderTypeProxmox ProviderType = "proxmox"
 )
 
-// Provider deployment topologies (ProviderSpec.Topology, ADR-0007 D9). A string
-// enum, not a bool, so a future third topology mode is a purely additive enum
-// value (settled 2026-09-21).
+// Provider deployment topologies (ProviderSpec.Topology). A string enum rather
+// than a bool, so that further modes can be added as enum values.
 const (
 	// ProviderTopologySingle is one gRPC process bound to one host — today's
 	// behavior, byte-for-byte unchanged. It is the default.
 	ProviderTopologySingle = "single"
 	// ProviderTopologyCluster fronts N bare hosts registered as Host CRs under a
-	// HostPool; the operator owns inventory/placement/migration (ADR-0007 D1/D3).
+	// HostPool; the operator owns inventory and placement.
 	ProviderTopologyCluster = "cluster"
 )
 
@@ -57,13 +58,12 @@ const (
 // virtrigaud.io/orphan-on-delete, or released with virtrigaud.io/force-delete
 // without a confirmed provider delete. Without it, only VMs in the Provider's
 // own namespace may be orphaned or force-deleted on a clustered Provider: such
-// a VM keeps running on its host but leaves the committed-capacity accounting
-// (ADR-0007 Addendum A, scheduler-accuracy amendment), so a consumer could
-// otherwise occupy capacity nobody sees. Single-host Providers ignore it.
+// a VM keeps running on its host but leaves the scheduler's committed-capacity
+// accounting, so a consumer could otherwise occupy capacity nobody sees. Single-host Providers ignore it.
 const ProviderAllowConsumerOrphanOnDeleteAnnotation = "infra.virtrigaud.io/allow-consumer-orphan-on-delete"
 
 // ProviderInUseFinalizer is the finalizer the Provider controller keeps on
-// every Provider (ADR-0010). A Provider being deleted is held while any
+// every Provider. A Provider being deleted is held while any
 // VirtualMachine (in any namespace), VMSnapshot, VMClone or VMMigration still
 // needs it, with its runtime kept up so they can still be deleted through it.
 // It is removed once nothing needs the Provider, or at once when the Provider
@@ -119,11 +119,26 @@ type ProviderTLSSpec struct {
 	// +kubebuilder:default=true
 	Enabled bool `json:"enabled"`
 
-	// SecretRef references a secret containing tls.crt, tls.key, and ca.crt
+	// SecretRef references a Secret in the Provider's namespace containing
+	// tls.crt, tls.key and ca.crt. The manager presents tls.crt/tls.key as its
+	// client certificate and verifies the provider's server certificate against
+	// ca.crt; the provider pod mounts the same Secret.
 	// +optional
 	SecretRef *corev1.LocalObjectReference `json:"secretRef,omitempty"`
 
-	// InsecureSkipVerify disables TLS certificate verification
+	// InsecureSkipVerify makes the manager skip verification of the provider's
+	// gRPC server certificate when it connects to the provider pod (the manager
+	// still presents its client certificate). It is read only by the manager,
+	// when it builds its TLS client config for this Provider from SecretRef
+	// (internal/runtime/remote/resolver.go), and only while tls.enabled is true.
+	// It does not change anything on the provider pod and has no effect on the
+	// connection from the provider to the hypervisor; that is the separate
+	// spec.insecureSkipVerify. Defaults to false.
+	//
+	// This is an insecure escape hatch for first bootstrap and labs: with it the
+	// manager cannot tell the real provider from an impostor, which defeats the
+	// server-authentication half of mutual TLS. The manager logs a warning on
+	// every reconcile while it is true.
 	// +optional
 	// +kubebuilder:default=false
 	InsecureSkipVerify bool `json:"insecureSkipVerify,omitempty"`
@@ -147,7 +162,9 @@ type ProviderRuntimeSpec struct {
 	// +kubebuilder:validation:Enum=Always;Never;IfNotPresent
 	ImagePullPolicy corev1.PullPolicy `json:"imagePullPolicy,omitempty"`
 
-	// ImagePullSecrets are references to secrets for pulling images
+	// ImagePullSecrets are references to secrets for pulling images. Accepted but
+	// not acted on in this release: the manager does not add them to the provider
+	// pod.
 	// +optional
 	// +kubebuilder:validation:MaxItems=10
 	ImagePullSecrets []corev1.LocalObjectReference `json:"imagePullSecrets,omitempty"`
@@ -205,11 +222,15 @@ type ProviderRuntimeSpec struct {
 	// +kubebuilder:validation:MaxItems=50
 	Env []corev1.EnvVar `json:"env,omitempty"`
 
-	// LivenessProbe defines the liveness probe for provider pods
+	// LivenessProbe defines the liveness probe for provider pods. Accepted but not
+	// acted on in this release: the manager always uses its built-in probe (HTTP
+	// GET /healthz on port 8080).
 	// +optional
 	LivenessProbe *corev1.Probe `json:"livenessProbe,omitempty"`
 
-	// ReadinessProbe defines the readiness probe for provider pods
+	// ReadinessProbe defines the readiness probe for provider pods. Accepted but
+	// not acted on in this release: the manager always uses its built-in probe
+	// (HTTP GET /healthz on port 8080).
 	// +optional
 	ReadinessProbe *corev1.Probe `json:"readinessProbe,omitempty"`
 }
@@ -236,11 +257,13 @@ type ProviderRuntimeStatus struct {
 	// +optional
 	Message string `json:"message,omitempty"`
 
-	// ReadyReplicas is the number of ready provider replicas
+	// ReadyReplicas is the number of ready provider replicas. Not populated in
+	// this release; see the provider Deployment's status instead.
 	// +optional
 	ReadyReplicas int32 `json:"readyReplicas,omitempty"`
 
-	// AvailableReplicas is the number of available provider replicas
+	// AvailableReplicas is the number of available provider replicas. Not
+	// populated in this release; see the provider Deployment's status instead.
 	// +optional
 	AvailableReplicas int32 `json:"availableReplicas,omitempty"`
 }
@@ -274,23 +297,18 @@ type ProviderSpec struct {
 	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="spec.type is immutable; create a new Provider to change it"
 	Type ProviderType `json:"type"`
 
-	// Topology selects the provider's deployment topology (ADR-0007 D9). It is a
-	// string enum, not a bool, so a future third topology mode is a purely
-	// additive enum value (settled 2026-09-21):
-	//   - "single" (default): one gRPC process bound to one host. This is today's
-	//     behavior and stays byte-for-byte unchanged — no scheduler, no host
-	//     inventory, no projected host Secret.
+	// Topology selects the provider's deployment topology:
+	//   - "single" (default): one gRPC process bound to one host. There is no
+	//     scheduler, no host inventory and no projected host Secret.
 	//   - "cluster": the provider fronts N bare hosts registered as Host CRs under
-	//     a HostPool. The operator owns inventory/placement/migration and renders
-	//     the pool's Host CRs into a versioned-schema Secret mounted into the
-	//     provider pod (ADR-0007 D1/D3); the provider reads that mounted file,
-	//     never the Kubernetes API (the #297 no-API-access invariant).
-	// Only meaningful for hypervisors with no native cluster manager (libvirt
-	// first); a validating webhook (a later ADR-0007 P1 PR) rejects "cluster" on
-	// type: vsphere|proxmox (ADR-0007 D2). Defaulting "" to "single" keeps every
-	// existing single-host Provider byte-for-byte unchanged.
+	//     a HostPool. The operator owns inventory and placement, and renders the
+	//     pool's Host CRs into a Secret mounted into the provider pod; the
+	//     provider reads that mounted file, never the Kubernetes API.
+	// Only meaningful for hypervisors with no native cluster manager: the
+	// validating webhook accepts "cluster" for type libvirt only and rejects it
+	// for the other types. An empty value is defaulted to "single".
 	//
-	// Topology is IMMUTABLE once set (ADR-0007 Addendum A): VMs record where they
+	// Topology is IMMUTABLE once set: VMs record where they
 	// run (status.placement) under one topology, and every per-VM call is routed
 	// and owner-checked by it, so flipping it would send a placed VM's calls down
 	// the wrong path. To change it, create a new Provider. The apiserver compares
@@ -302,36 +320,63 @@ type ProviderSpec struct {
 	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="spec.topology is immutable; create a new Provider to change it"
 	Topology string `json:"topology,omitempty"`
 
-	// Endpoint is the provider endpoint URI
-	// Supports multiple protocols: HTTP(S), TCP, gRPC for general providers
-	// and LibVirt-specific schemes: qemu://, qemu+ssh://, qemu+tcp://, qemu+tls://
+	// Endpoint is the URI of the hypervisor the provider manages: for vSphere the
+	// vCenter SDK URL (https://vcenter.example.com/sdk), for Proxmox the API URL
+	// (https://pve.example.com:8006), for libvirt a connection URI (qemu://,
+	// qemu+ssh://, qemu+tcp:// or qemu+tls://). The schema also accepts
+	// http(s)://, tcp:// and grpc:// URIs. The manager passes it to the provider
+	// pod as PROVIDER_ENDPOINT. For a clustered libvirt Provider (topology:
+	// cluster) the hosts are given by Host.spec.endpoint instead.
 	// +kubebuilder:validation:Pattern="^((https?://[a-zA-Z0-9.-]+(:[0-9]+)?(/.*)?|(tcp|grpc)://[a-zA-Z0-9.-]+:[0-9]+(/.*)?)|qemu(\\+ssh|\\+tcp|\\+tls)?://([a-zA-Z0-9@.-]+(:[0-9]+)?)?(/.*))$"
 	Endpoint string `json:"endpoint"`
 
-	// CredentialSecretRef references the Secret containing credentials
+	// CredentialSecretRef references the Secret containing the credentials the
+	// provider uses to reach the hypervisor. The manager mounts it into the
+	// provider pod; the provider reads it from the mounted files.
 	CredentialSecretRef ObjectRef `json:"credentialSecretRef"`
 
-	// InsecureSkipVerify disables TLS verification (deprecated, use runtime.service.tls.insecureSkipVerify)
+	// InsecureSkipVerify makes the provider pod skip verification of the TLS
+	// certificate of the hypervisor management endpoint (vCenter for vSphere, the
+	// Proxmox VE API for Proxmox). The manager passes it to the provider pod as
+	// the TLS_INSECURE_SKIP_VERIFY environment variable
+	// (internal/controller/provider_controller.go), and only the vSphere and
+	// Proxmox providers read it; the libvirt provider ignores it (for libvirt SSH
+	// hosts see the LIBVIRT_INSECURE_SKIP_HOST_KEY_VERIFICATION environment
+	// variable). Defaults to false.
+	//
+	// It is not the same setting as spec.runtime.service.tls.insecureSkipVerify,
+	// which controls the manager's verification of the provider's own gRPC server
+	// certificate; setting one does not affect the other. It is an insecure
+	// escape hatch: with it set, a network attacker can impersonate the
+	// hypervisor endpoint and capture the credentials the provider sends to it.
 	// +optional
 	// +kubebuilder:default=false
 	InsecureSkipVerify bool `json:"insecureSkipVerify,omitempty"`
 
-	// Defaults provides default placement settings
+	// Defaults provides default placement settings. Only the vSphere provider
+	// uses them, and only datastore, storagePod, cluster and folder are passed to
+	// it (as PROVIDER_DEFAULT_* environment variables); resourcePool and network
+	// are accepted but not acted on in this release. libvirt and Proxmox ignore
+	// this block.
 	// +optional
 	Defaults *ProviderDefaults `json:"defaults,omitempty"`
 
-	// RateLimit configures API rate limiting
+	// RateLimit configures API rate limiting. Accepted but not acted on in this
+	// release.
 	// +optional
 	RateLimit *RateLimit `json:"rateLimit,omitempty"`
 
 	// Runtime defines how the provider is executed (required)
 	Runtime *ProviderRuntimeSpec `json:"runtime"`
 
-	// HealthCheck defines health checking configuration
+	// HealthCheck defines health checking configuration. Accepted but not acted
+	// on in this release: status.healthy is true while the provider Deployment
+	// has a ready replica, whatever these settings say.
 	// +optional
 	HealthCheck *ProviderHealthCheck `json:"healthCheck,omitempty"`
 
-	// ConnectionPooling defines connection pooling settings
+	// ConnectionPooling defines connection pooling settings. Accepted but not
+	// acted on in this release.
 	// +optional
 	ConnectionPooling *ConnectionPooling `json:"connectionPooling,omitempty"`
 
@@ -356,7 +401,8 @@ type ProviderSpec struct {
 	ConsumerNamespaceSelector *metav1.LabelSelector `json:"consumerNamespaceSelector,omitempty"`
 }
 
-// ProviderHealthCheck defines health checking configuration
+// ProviderHealthCheck defines health checking configuration. Accepted but not
+// acted on in this release.
 type ProviderHealthCheck struct {
 	// Enabled indicates whether health checking is enabled.
 	//
@@ -392,7 +438,8 @@ type ProviderHealthCheck struct {
 	SuccessThreshold int32 `json:"successThreshold,omitempty"`
 }
 
-// ConnectionPooling defines connection pooling settings
+// ConnectionPooling defines connection pooling settings. Accepted but not acted
+// on in this release.
 type ConnectionPooling struct {
 	// MaxConnections is the maximum number of connections to maintain
 	// +optional
@@ -420,11 +467,13 @@ type ConnectionPooling struct {
 
 // ProviderStatus defines the observed state of Provider
 type ProviderStatus struct {
-	// Healthy indicates if the provider is healthy
+	// Healthy is true while the provider Deployment has at least one ready
+	// replica (the ProviderAvailable condition is True).
 	// +optional
 	Healthy bool `json:"healthy,omitempty"`
 
-	// LastHealthCheck records the last health check time
+	// LastHealthCheck is the time of the last reconcile that found the provider
+	// healthy.
 	// +optional
 	LastHealthCheck *metav1.Time `json:"lastHealthCheck,omitempty"`
 
@@ -440,27 +489,30 @@ type ProviderStatus struct {
 	// +optional
 	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
 
-	// Capabilities lists the provider's supported capabilities
+	// Capabilities lists the provider's supported capabilities. Not populated in
+	// this release; see reportedCapabilities.
 	// +optional
 	Capabilities []ProviderCapability `json:"capabilities,omitempty"`
 
 	// ReportedCapabilities is the provider's self-reported capability set,
-	// fetched from the provider GetCapabilities RPC (issue #176). It reflects
-	// what the running provider advertises and is consumed by the manager to
-	// surface features and (when capability enforcement is enabled) to gate
-	// capability-dependent operations.
+	// fetched from the provider GetCapabilities RPC. It reflects what the running
+	// provider advertises and is consumed by the manager to surface features and
+	// (when capability enforcement is enabled) to gate capability-dependent
+	// operations.
 	// +optional
 	ReportedCapabilities *ReportedCapabilities `json:"reportedCapabilities,omitempty"`
 
-	// Version reports the provider version
+	// Version reports the provider version. Not populated in this release.
 	// +optional
 	Version string `json:"version,omitempty"`
 
-	// ConnectedVMs is the number of VMs currently managed by this provider
+	// ConnectedVMs is the number of VirtualMachines, in any namespace, whose
+	// spec.providerRef names this Provider.
 	// +optional
 	ConnectedVMs int32 `json:"connectedVMs,omitempty"`
 
-	// ResourceUsage provides resource usage statistics
+	// ResourceUsage provides resource usage statistics. Not populated in this
+	// release.
 	// +optional
 	ResourceUsage *ProviderResourceUsage `json:"resourceUsage,omitempty"`
 
@@ -470,8 +522,8 @@ type ProviderStatus struct {
 }
 
 // ReportedCapabilities mirrors the provider.v1 GetCapabilitiesResponse — the
-// capability set a provider advertises at runtime via the GetCapabilities RPC
-// (issue #176). All fields are optional and default to the zero value when a
+// capability set a provider advertises at runtime via the GetCapabilities RPC.
+// All fields are optional and default to the zero value when a
 // provider does not advertise them.
 type ReportedCapabilities struct {
 	// SupportsReconfigureOnline reports online CPU/memory reconfigure support.
@@ -515,23 +567,22 @@ type ReportedCapabilities struct {
 	SupportsExportCompression bool `json:"supportsExportCompression,omitempty"`
 	// SupportedExportBackends lists the storage backends the provider can export
 	// disks to (e.g. "pvc", "nfs", "s3"). Empty/absent means pvc-only, the
-	// pre-ADR-0006 default (ADR-0006 Slice 0).
+	// behavior of a provider that predates the other backends.
 	// +optional
 	SupportedExportBackends []string `json:"supportedExportBackends,omitempty"`
 	// SupportedImportBackends lists the storage backends the provider can import
-	// disks from (e.g. "pvc", "nfs", "s3"). Empty/absent means pvc-only
-	// (ADR-0006 Slice 0).
+	// disks from (e.g. "pvc", "nfs", "s3"). Empty/absent means pvc-only.
 	// +optional
 	SupportedImportBackends []string `json:"supportedImportBackends,omitempty"`
 	// SupportedTransferModes lists the disk-transfer modes the provider supports
 	// (e.g. "relay", "direct"). Empty/absent means relay-only, the pod-side path
-	// that predates ADR-0006 (ADR-0006 Slice 0).
+	// through the provider pod.
 	// +optional
 	SupportedTransferModes []string `json:"supportedTransferModes,omitempty"`
 	// SupportsImageArtifactIdentity reports that the provider's image prepare
 	// names, stamps and verifies each prepared-image artifact by the VMImage's
-	// UID and source digest, and never reuses an artifact by bare name
-	// (ADR-0009). Import-style images are not prepared through a provider that
+	// UID and source digest, and never reuses an artifact by bare name.
+	// Import-style images are not prepared through a provider that
 	// supports image import but does not report this: VM creates wait until
 	// the provider is upgraded.
 	// +optional
@@ -691,7 +742,8 @@ type ProviderDefaults struct {
 	Network string `json:"network,omitempty"`
 }
 
-// RateLimit configures API rate limiting
+// RateLimit configures API rate limiting. Accepted but not acted on in this
+// release.
 type RateLimit struct {
 	// QPS specifies queries per second
 	// +optional
