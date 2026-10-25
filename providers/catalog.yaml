@@ -1,19 +1,30 @@
 # VirtRigaud Provider Catalog
 # This file lists all verified and community providers for VirtRigaud
+#
+# Reading this file:
+# - `tag` is the VirtRigaud release the in-tree provider ships in.
+# - `capabilities` lists the capability profiles (core, snapshot, clone,
+#   image-prepare, advanced) whose GetCapabilities flags the provider
+#   advertises (sdk/provider/capabilities). It is a statement about the
+#   provider, not about a test run.
+# - `conformance` records "skip" (not run) for every profile and carries no
+#   report or date: the conformance suite (`vcts run`) is not run against these
+#   providers by CI, which only validates the specs (`vcts validate`). A profile
+#   is only recorded as "pass" once a conformance run backs it.
 
 metadata:
   version: "v1"
-  lastUpdated: "2025-08-26T14:30:00Z"
+  lastUpdated: "2026-10-25T12:01:00Z"
   description: "Official catalog of VirtRigaud providers"
 
 providers:
   # Official mock provider for testing and development
   - name: mock
     displayName: "Mock Provider"
-    description: "A mock provider for testing and demonstrations"
+    description: "A mock provider for testing and demonstrations. The release workflow does not publish an image for it: build it from cmd/provider-mock/Dockerfile."
     repo: "https://github.com/projectbeskar/virtrigaud"
-    image: "ghcr.io/projectbeskar/virtrigaud/provider-mock"
-    tag: "0.1.1"
+    image: ""
+    tag: ""
     capabilities:
       - core
       - snapshot
@@ -22,14 +33,14 @@ providers:
       - advanced
     conformance:
       profiles:
-        core: pass
-        snapshot: pass
-        clone: pass
-        image-prepare: pass
-        advanced: pass
-      report_url: "https://github.com/projectbeskar/virtrigaud/actions/workflows/provider-sdk.yml"
-      badge_url: "https://img.shields.io/badge/conformance-pass-green"
-      last_tested: "2025-08-26T14:30:00Z"
+        core: skip
+        snapshot: skip
+        clone: skip
+        image-prepare: skip
+        advanced: skip
+      report_url: ""
+      badge_url: "https://img.shields.io/badge/conformance-not%20run-lightgrey"
+      last_tested: ""
     maintainer: "virtrigaud@projectbeskar.com"
     license: "Apache-2.0"
     maturity: "stable"
@@ -37,29 +48,29 @@ providers:
       - testing
       - development
       - demo
-    documentation: "https://projectbeskar.github.io/virtrigaud/providers/mock/"
-    
+    documentation: "https://github.com/projectbeskar/virtrigaud/tree/main/internal/providers/mock"
+
   # Official Proxmox VE provider
   - name: proxmox
     displayName: "Proxmox VE Provider"
-    description: "Proxmox Virtual Environment provider for VirtRigaud"
+    description: "Proxmox Virtual Environment provider for VirtRigaud. ImagePrepare refuses import-style (source.http) images, so the image-prepare profile is not listed."
     repo: "https://github.com/projectbeskar/virtrigaud"
     image: "ghcr.io/projectbeskar/virtrigaud/provider-proxmox"
-    tag: "0.1.0"
+    tag: "v0.4.0"
     capabilities:
       - core
       - snapshot
       - clone
-      - image-prepare
+      - advanced
     conformance:
       profiles:
-        core: pass
-        snapshot: pass
-        clone: pass
-        image-prepare: pending
-      report_url: "https://github.com/projectbeskar/virtrigaud/actions/workflows/provider-sdk.yml"
-      badge_url: "https://img.shields.io/badge/conformance-pass-green"
-      last_tested: "2025-01-27T00:00:00Z"
+        core: skip
+        snapshot: skip
+        clone: skip
+        advanced: skip
+      report_url: ""
+      badge_url: "https://img.shields.io/badge/conformance-not%20run-lightgrey"
+      last_tested: ""
     maintainer: "virtrigaud@projectbeskar.com"
     license: "Apache-2.0"
     maturity: "beta"
@@ -69,29 +80,30 @@ providers:
       - kvm
       - containers
     documentation: "https://projectbeskar.github.io/virtrigaud/providers/proxmox/"
-    
+
   # Official vSphere provider
   - name: vsphere
     displayName: "vSphere Provider"
     description: "VMware vSphere provider for VirtRigaud"
     repo: "https://github.com/projectbeskar/virtrigaud"
     image: "ghcr.io/projectbeskar/virtrigaud/provider-vsphere"
-    tag: "0.1.1"
+    tag: "v0.4.0"
     capabilities:
       - core
       - snapshot
       - clone
+      - image-prepare
       - advanced
     conformance:
       profiles:
-        core: pass
-        snapshot: pass
-        clone: pass
+        core: skip
+        snapshot: skip
+        clone: skip
         image-prepare: skip
-        advanced: pass
-      report_url: "https://github.com/projectbeskar/virtrigaud/actions/workflows/ci.yml"
-      badge_url: "https://img.shields.io/badge/conformance-pass-green"
-      last_tested: "2025-08-26T14:30:00Z"
+        advanced: skip
+      report_url: ""
+      badge_url: "https://img.shields.io/badge/conformance-not%20run-lightgrey"
+      last_tested: ""
     maintainer: "virtrigaud@projectbeskar.com"
     license: "Apache-2.0"
     maturity: "beta"
@@ -100,28 +112,28 @@ providers:
       - vsphere
       - enterprise
     documentation: "https://projectbeskar.github.io/virtrigaud/providers/vsphere/"
-    
-  # Official libvirt provider  
+
+  # Official libvirt provider
   - name: libvirt
     displayName: "Libvirt Provider"
-    description: "Libvirt/KVM provider for VirtRigaud"
+    description: "Libvirt/KVM provider for VirtRigaud. Clone makes full copies; linked clones are not supported, so the clone profile is not listed."
     repo: "https://github.com/projectbeskar/virtrigaud"
     image: "ghcr.io/projectbeskar/virtrigaud/provider-libvirt"
-    tag: "0.1.1"
+    tag: "v0.4.0"
     capabilities:
       - core
       - snapshot
-      - clone
+      - image-prepare
+      - advanced
     conformance:
       profiles:
-        core: pass
-        snapshot: pass
-        clone: pass
+        core: skip
+        snapshot: skip
         image-prepare: skip
-        advanced: partial
-      report_url: "https://github.com/projectbeskar/virtrigaud/actions/workflows/ci.yml"
-      badge_url: "https://img.shields.io/badge/conformance-partial-yellow"
-      last_tested: "2025-08-26T14:30:00Z"
+        advanced: skip
+      report_url: ""
+      badge_url: "https://img.shields.io/badge/conformance-not%20run-lightgrey"
+      last_tested: ""
     maintainer: "virtrigaud@projectbeskar.com"
     license: "Apache-2.0"
     maturity: "beta"
@@ -157,11 +169,11 @@ schema:
       image:
         required: true
         type: string
-        description: "Container image repository"
+        description: "Container image repository (empty when the release does not publish an image)"
       tag:
         required: true
         type: string
-        description: "Container image tag"
+        description: "Container image tag (empty when the release does not publish an image)"
       capabilities:
         required: true
         type: array
@@ -171,7 +183,7 @@ schema:
       conformance:
         required: true
         type: object
-        description: "Conformance test results"
+        description: "Conformance test results; a profile is \"pass\" only when a conformance run backs it, \"skip\" means not run"
       maintainer:
         required: true
         type: string
