@@ -7,7 +7,7 @@ All examples use `apiVersion: infra.virtrigaud.io/v1beta1` and the 12 CRDs of Vi
 - **A Provider needs a TLS decision.** The manager talks to provider pods over TLS by default. A `Provider` with no `spec.runtime.service.tls` block is not deployed (`TLSConfigured=False`, reason `TLSBlockMissing`). The Provider examples set `tls.enabled: true` with a `secretRef` to a Secret holding `tls.crt`, `tls.key` and `ca.crt`; create it first, or set `enabled: false` for a plaintext lab.
 - **libvirt connects over SSH.** Use a `qemu+ssh://` endpoint. The credentials Secret needs `username`, `ssh-privatekey` (or `password`) and `known_hosts`; the provider does not trust a host key on first use. See [secrets/libvirt-creds.yaml](secrets/libvirt-creds.yaml).
 - **libvirt linked clones are refused** in v0.4.0; use `FullClone` ([docs/libvirt-clones.md](../docs/libvirt-clones.md)).
-- **Proxmox** reads its credentials from files in the Provider's Secret (`token_id` and `token_secret`, or `username` and `password`); it does not use `envFrom: secretRef`. It does not import images from a URL (`source.http`): use an existing template. Of the user-data, it applies only the user name and the SSH keys ([docs/proxmox-cloud-init-storage.md](../docs/proxmox-cloud-init-storage.md)).
+- **Proxmox** reads its credentials from files in the Provider's Secret (`token_id` and `token_secret`, or `username` and `password`); it does not use `envFrom: secretRef`. It does not import images from a URL (`source.http`): use an existing template. Of the user-data, it applies only the user name and the SSH keys (see the header of [proxmox-complete-example.yaml](proxmox-complete-example.yaml)).
 - **`spec.lifecycle`** (`preStop`, `postStart`, `gracefulShutdownTimeout`) is accepted by the API, but no controller runs it. For a graceful shutdown use `spec.powerState: OffGraceful` ([graceful-shutdown-examples.yaml](graceful-shutdown-examples.yaml)).
 - **Migration** is validated over S3 and NFS staging between vSphere, libvirt and Proxmox in any direction. `storage.type: pvc` is a legacy path that does not work for Proxmox. Migration into a clustered libvirt Provider is experimental. See [migration/README.md](migration/README.md).
 - **Clustered libvirt** (`topology: cluster`) is experimental in v0.4.0 ([docs/clustered-provider-inventory.md](../docs/clustered-provider-inventory.md)).
@@ -138,7 +138,7 @@ examples/
 ├── advanced/                    # Snapshots, consoles, cloning, task tracking
 ├── migration/                   # Cross-provider migration examples
 ├── secrets/                     # Per-provider Secret templates
-└── security/                    # NetworkPolicy, RBAC, ExternalSecrets
+└── security/                    # NetworkPolicy, Secret, ExternalSecrets
 ```
 
 ## Validation

@@ -41,9 +41,9 @@
 > **Addendum B** adds migration into a clustered provider — see
 > [Migration into a clustered provider](#migration-into-a-clustered-provider-addendum-b).
 > `topology: cluster` is **experimental** in v0.4.0: ADR-0007 slice 5 ran a
-> single-`Host` lab validation only (multi-host placement, the unreachable-host
-> path and snapshot revert have not been run on a real multi-host pool). Not
-> implemented: host→host migration (P2).
+> single-`Host` lab validation, and the v0.4.0 release-candidate runs on a
+> two-host pool are described in the release notes. Not implemented:
+> host→host migration (P2).
 
 VirtRigaud is adding a new *class* of provider — a **clustered / orchestrator**
 provider — that makes VirtRigaud itself the cluster manager for hypervisors that
@@ -2522,8 +2522,8 @@ In addition to [Host prerequisites](#host-prerequisites):
   disk lands on its host; [Migration into a clustered provider](#migration-into-a-clustered-provider-addendum-b)).
   The `vprovider.kb.io` validating webhook enforces the topology×type rule at
   admission (ADR-0007 D2). ADR-0007 slice 5 validated a clustered VM on a single
-  `Host` only; until a multi-host run covers multi-host placement, the
-  unreachable-host path and snapshot revert, do not run workloads you cannot
+  `Host`, and the v0.4.0 release-candidate runs used a two-host pool (see the
+  release notes). The mode is experimental: do not run workloads you cannot
   afford to lose on `topology: cluster`.
 - **No rescheduling or migration yet.** Moving an *already-created* VM is not wired:
   neither rescheduling a bound VM to a different host, nor host→host `Migrate` /

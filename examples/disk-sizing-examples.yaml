@@ -16,7 +16,7 @@
 #
 # A Provider's owner can cap every disk created or grown through it with the
 # annotation infra.virtrigaud.io/max-disk-size (for example "500Gi"); it can only
-# lower the manager-wide --max-disk-size ceiling (Helm: maxDiskSize). A VM whose
+# lower the manager-wide --max-disk-size ceiling (Helm: manager.maxDiskSize). A VM whose
 # disk is larger waits with Ready=False, reason DiskSizeExceedsLimit.
 
 # VMClass with 50GB disk

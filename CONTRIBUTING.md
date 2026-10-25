@@ -19,8 +19,8 @@ Thank you for your interest in contributing to VirtRigaud! This document provide
 git clone https://github.com/projectbeskar/virtrigaud.git
 cd virtrigaud
 
-# Build once; the Makefile downloads its own tools (controller-gen, golangci-lint,
-# buf, setup-envtest) into ./bin on first use
+# Build once; the Makefile downloads the tools it needs (controller-gen,
+# golangci-lint, buf, setup-envtest) into ./bin, each by the target that uses it
 make build
 
 # Install pre-commit hooks (optional)
