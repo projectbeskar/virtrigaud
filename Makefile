@@ -268,48 +268,41 @@ run: gen-crds generate fmt vet ## Run a controller from your host.
 
 ##@ Module Release
 
-.PHONY: release-proto
-release-proto: proto-lint ## Release proto module with tags and buf push
-	@echo "Releasing proto module..."
-	@cd proto && \
-	if [ -z "$(VERSION)" ]; then \
-		echo "Error: VERSION is required. Usage: make release-proto VERSION=v0.1.0"; \
+# The release workflow tags sdk/<version> and proto/<version> on the commit of
+# the release tag <version>; these targets run the same steps in a local
+# checkout (hack/module-versions.sh). VERSION must be given on the command line
+# or in the environment -- the git-describe default above is not a release --
+# and must be a release version (vX.Y.Z or vX.Y.Z-rcN). The tag targets only
+# create local tags; push them yourself. See docs/go-modules.md.
+MODULE_VERSIONS := hack/module-versions.sh
+
+.PHONY: require-release-version
+require-release-version:
+	@if [ "$(origin VERSION)" = "file" ]; then \
+		echo "Error: VERSION is required, e.g. make $(MAKECMDGOALS) VERSION=v0.4.1"; \
 		exit 1; \
-	fi && \
-	git tag proto/$(VERSION) && \
-	echo "Tagged proto module with proto/$(VERSION)" && \
-	if command -v buf >/dev/null 2>&1; then \
-		echo "Pushing to buf registry..."; \
-		buf push || echo "buf push failed or not configured"; \
-	else \
-		echo "buf not found, skipping buf push"; \
 	fi
+	@$(MODULE_VERSIONS) validate "$(VERSION)"
+
+.PHONY: set-module-versions
+set-module-versions: require-release-version ## Point the in-repo requires of go.mod and sdk/go.mod at VERSION (release preparation)
+	$(MODULE_VERSIONS) set "$(VERSION)"
+
+.PHONY: check-module-versions
+check-module-versions: require-release-version ## Check go.mod, sdk/go.mod and proto/go.mod are consistent with VERSION
+	$(MODULE_VERSIONS) check "$(VERSION)"
+
+.PHONY: release-proto
+release-proto: require-release-version ## Tag proto/VERSION locally on the commit of the release tag VERSION
+	$(MODULE_VERSIONS) tag "$(VERSION)" proto
 
 .PHONY: release-sdk
-release-sdk: ## Release SDK module with tags and generate docs
-	@echo "Releasing SDK module..."
-	@cd sdk && \
-	if [ -z "$(VERSION)" ]; then \
-		echo "Error: VERSION is required. Usage: make release-sdk VERSION=v0.1.0"; \
-		exit 1; \
-	fi && \
-	go mod tidy && \
-	git tag sdk/$(VERSION) && \
-	echo "Tagged SDK module with sdk/$(VERSION)" && \
-	mkdir -p ../docs/sdk && \
-	echo "# Provider SDK $(VERSION)" > ../docs/sdk/README.md && \
-	echo "" >> ../docs/sdk/README.md && \
-	echo "Install the SDK:" >> ../docs/sdk/README.md && \
-	echo "" >> ../docs/sdk/README.md && \
-	echo '```bash' >> ../docs/sdk/README.md && \
-	echo "go get github.com/projectbeskar/virtrigaud/sdk/provider@$(VERSION)" >> ../docs/sdk/README.md && \
-	echo '```' >> ../docs/sdk/README.md && \
-	echo "" >> ../docs/sdk/README.md && \
-	echo "## Packages" >> ../docs/sdk/README.md && \
-	echo "" >> ../docs/sdk/README.md && \
-	for pkg in $$(find provider -name "*.go" -exec dirname {} \; | sort -u); do \
-		echo "- [$$pkg](./$$pkg/)" >> ../docs/sdk/README.md; \
-	done
+release-sdk: require-release-version ## Tag sdk/VERSION locally on the commit of the release tag VERSION
+	$(MODULE_VERSIONS) tag "$(VERSION)" sdk
+
+.PHONY: release-go-modules
+release-go-modules: require-release-version ## Tag sdk/VERSION and proto/VERSION locally on the commit of the release tag VERSION
+	$(MODULE_VERSIONS) tag "$(VERSION)"
 
 ##@ Build
 
