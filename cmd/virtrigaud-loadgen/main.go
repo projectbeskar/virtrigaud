@@ -195,7 +195,7 @@ type Statistics struct {
 	// effect --observe did not see.
 	ObserveFailures map[string]int
 	StartTime       time.Time
-	EndTime            time.Time
+	EndTime         time.Time
 }
 
 func main() {
