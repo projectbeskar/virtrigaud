@@ -792,7 +792,11 @@ func snapshotCreateWith(ctx context.Context, conn libvirtConn, domain string, re
 //     own with an exit status, libvirt's error is one of its refusals before
 //     it executes anything (snapshotRefusalMarkers), AND the domain's snapshot
 //     names and disk sources, read again, are as before the create; a domain
-//     that vanished is NotFound. A dropped connection, a signal, an expired
+//     that vanished is NotFound. Such a refusal of an overlay file that
+//     already exists is the V12 Conflict (AlreadyExists), and one of a
+//     snapshot the VM's configuration does not support
+//     (snapshotConfigRefusalMarkers) is InvalidArgument: the same request
+//     cannot succeed. A dropped connection, a signal, an expired
 //     request, virsh reporting that it lost libvirtd, any other error text (it
 //     may have come after the snapshot took effect: libvirt saves its metadata
 //     last), a snapshot that exists, changed disk sources, or a read that
@@ -849,6 +853,13 @@ func singleHostSnapshotFailure(ctx context.Context, conn libvirtConn, domain str
 			log.Printf("ERROR libvirt refused snapshot %s of domain %s: an overlay file it would create already exists: %v",
 				subject, domain, err)
 			return status.Error(codes.AlreadyExists, wireSnapshotOverlayExists)
+		}
+		// A snapshot libvirt does not support for this VM's configuration
+		// (snapshotConfigRefusalMarkers) fails for good: sending it again
+		// cannot help. A busy domain, or one in the wrong state, is "not
+		// created", and the manager may send it again.
+		if snapshotRefusedForConfig(err) {
+			return refusal(codes.InvalidArgument, wireSnapshotRefusedForConfig, err)
 		}
 		return notPerformed(wireSnapshotNotCreated, err)
 	}

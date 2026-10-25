@@ -153,6 +153,9 @@ const (
 		"before the snapshot was taken (details are in the provider log)"
 	wireSnapshotNotCreated = "snapshot create failed: libvirt refused the snapshot and it was not created " +
 		"(details are in the provider log)"
+	wireSnapshotRefusedForConfig = "snapshot create refused: libvirt does not support this snapshot for the VM's " +
+		"configuration (for example a memory snapshot of a VM with UEFI firmware or a raw disk); nothing was created " +
+		"(details are in the provider log)"
 	wireSnapshotExists = "a snapshot with this name already exists on the libvirt domain; nothing was created"
 	wireDomainNotFound = "the libvirt domain was not found on the host"
 	wireExportRefused  = "disk export not performed: the request was refused before anything was exported " +
@@ -356,15 +359,56 @@ func virshConnectionLost(err error) bool {
 var snapshotRefusalMarkers = []string{
 	"cannot acquire state change lock",
 	"requested operation is not valid",
-	"unsupported configuration",
 	"already exists",
+}
+
+// snapshotConfigRefusalMarkers are the texts (lower case) of libvirt's
+// refusals, before it executes anything, of a snapshot this VM's
+// configuration does not support — libvirt's error classes
+// VIR_ERR_CONFIG_UNSUPPORTED, VIR_ERR_OPERATION_UNSUPPORTED,
+// VIR_ERR_ARGUMENT_UNSUPPORTED and VIR_ERR_INVALID_ARG, which its snapshot
+// code raises while it validates and prepares the snapshot (a memory snapshot
+// of a VM with pflash firmware or of a raw disk, a disk that must use another
+// snapshot mode). Sending the same request again cannot succeed, unlike a busy
+// domain or one in the wrong state (snapshotRefusalMarkers).
+var snapshotConfigRefusalMarkers = []string{
+	"unsupported configuration",
+	"operation not supported",
+	"argument unsupported",
+	"invalid argument",
 }
 
 // snapshotRefusedBeforeExecution reports whether err is a virsh command whose
 // first "error:" line - libvirt's own error; the lines after it are context,
-// and a later one can name another failure - is one of snapshotRefusalMarkers,
-// or says the domain does not exist.
+// and a later one can name another failure - is one of snapshotRefusalMarkers
+// or snapshotConfigRefusalMarkers, or says the domain does not exist.
 func snapshotRefusedBeforeExecution(err error) bool {
+	return firstErrorLineHasAny(err, "failed to get domain", "domain not found") ||
+		firstErrorLineHasAny(err, snapshotRefusalMarkers...) || snapshotRefusedForConfig(err)
+}
+
+// snapshotRefusedForConfig reports whether err is a virsh command whose first
+// "error:" line STARTS with one of snapshotConfigRefusalMarkers — libvirt's
+// error class, "error: <class>: <message>" — so that a QEMU failure whose
+// message merely quotes such a text ("internal error: unable to execute QEMU
+// command ...: Operation not supported by device") is not read as one.
+func snapshotRefusedForConfig(err error) bool {
+	var ve *VirshError
+	if !stderrors.As(err, &ve) {
+		return false
+	}
+	line := strings.TrimSpace(strings.TrimPrefix(firstErrorLine(ve.Stderr), "error:"))
+	for _, m := range snapshotConfigRefusalMarkers {
+		if strings.HasPrefix(line, m+":") {
+			return true
+		}
+	}
+	return false
+}
+
+// firstErrorLineHasAny reports whether err is a virsh command whose first
+// "error:" line contains any of markers (lower case).
+func firstErrorLineHasAny(err error, markers ...string) bool {
 	var ve *VirshError
 	if !stderrors.As(err, &ve) {
 		return false
@@ -373,7 +417,7 @@ func snapshotRefusedBeforeExecution(err error) bool {
 	if line == "" {
 		return false
 	}
-	for _, m := range append([]string{"failed to get domain", "domain not found"}, snapshotRefusalMarkers...) {
+	for _, m := range markers {
 		if strings.Contains(line, m) {
 			return true
 		}
