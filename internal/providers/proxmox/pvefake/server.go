@@ -1536,7 +1536,18 @@ func (s *Server) handleGetVMConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Build fake config that mirrors PVE format
+	config := configView(vm, vmid)
+	config["digest"] = configDigest(vm)
+
+	s.writeResponse(w, config)
+}
+
+// configView is the config GET /config answers for VM vmid, without its
+// digest: the fake's defaults, the VM's networks, and the raw keys a test
+// seeded or an update wrote. A key whose value is empty is absent (PVE has no
+// empty config values), so a test can remove a default (e.g. the boot disk
+// scsi0) by seeding it empty. The caller holds s.mu.
+func configView(vm *VM, vmid int) map[string]interface{} {
 	config := map[string]interface{}{
 		"cores":  vm.CPUs,
 		"memory": vm.Memory / (1024 * 1024), // Convert to MB
@@ -1576,9 +1587,12 @@ func (s *Server) handleGetVMConfig(w http.ResponseWriter, r *http.Request) {
 	if vm.Lock != "" {
 		config["lock"] = vm.Lock
 	}
-	config["digest"] = configDigest(vm)
-
-	s.writeResponse(w, config)
+	for k, v := range config {
+		if str, ok := v.(string); ok && str == "" {
+			delete(config, k)
+		}
+	}
+	return config
 }
 
 // modifiedConfigMessage is PVE's answer to a config update whose digest is
@@ -1642,6 +1656,13 @@ func (s *Server) handleReconfigureVM(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	boot, setBoot := r.PostForm["boot"]
+	if setBoot {
+		if err := checkBootOrder(r.PostForm.Get("boot"), configView(vm, vmid), r.PostForm); err != nil {
+			s.writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+	}
 
 	// Update VM configuration
 	if cores := r.FormValue("cores"); cores != "" {
@@ -1684,6 +1705,13 @@ func (s *Server) handleReconfigureVM(w http.ResponseWriter, r *http.Request) {
 		vm.Config[key] = value
 	}
 
+	if setBoot {
+		if vm.Config == nil {
+			vm.Config = map[string]string{}
+		}
+		vm.Config["boot"] = boot[0]
+	}
+
 	if _, ok := r.Form["description"]; ok {
 		vm.Description = r.FormValue("description")
 	}
@@ -1697,6 +1725,36 @@ func (s *Server) handleReconfigureVM(w http.ResponseWriter, r *http.Request) {
 	taskID := s.createTask(node, "qmconfig", vmidStr)
 
 	s.writeResponse(w, taskID)
+}
+
+// checkBootOrder checks the boot option of a config update the way
+// qemu-server's update API does: every device in its order list must be in the
+// VM's config (current) or in the update itself (form), and not be deleted by
+// the update; PVE answers "invalid bootorder: device '<dev>' does not exist'"
+// (sic) otherwise. The fake is stricter than PVE in one way: an empty element
+// ("order=;ide2"), which PVE's list split drops, is refused, so a test catches
+// a provider that builds one.
+func checkBootOrder(boot string, current map[string]interface{}, form url.Values) error {
+	deleted := map[string]bool{}
+	for _, key := range strings.Split(form.Get("delete"), ",") {
+		deleted[strings.TrimSpace(key)] = true
+	}
+	for _, part := range strings.Split(boot, ",") {
+		order, ok := strings.CutPrefix(strings.TrimSpace(part), "order=")
+		if !ok {
+			continue
+		}
+		for _, dev := range strings.Split(order, ";") {
+			if dev == "" {
+				return fmt.Errorf("pvefake: empty device in boot order %q", boot)
+			}
+			_, inConfig := current[dev]
+			if (!inConfig && form.Get(dev) == "") || deleted[dev] {
+				return fmt.Errorf("invalid bootorder: device '%s' does not exist'", dev)
+			}
+		}
+	}
+	return nil
 }
 
 // handleResizeDisk handles disk resizing
