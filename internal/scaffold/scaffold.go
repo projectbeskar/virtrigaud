@@ -130,7 +130,7 @@ func (s *Scaffolder) checkoutSettings() (replacePath, goVersion string) {
 // readGoDirective returns the go directive of the go.mod at path, or "" when
 // the file cannot be read or has none.
 func readGoDirective(path string) string {
-	f, err := os.Open(path) //nolint:gosec // path is the VirtRigaud checkout the caller named
+	f, err := os.Open(path) // #nosec G304 -- path is the VirtRigaud checkout the caller named on the command line
 	if err != nil {
 		return ""
 	}
@@ -162,7 +162,7 @@ func (s *Scaffolder) generateFile(relativePath, tmplContent string, ctx map[stri
 	targetPath := filepath.Join(s.config.TargetDir, pathBuf.String())
 
 	// Create directory if it doesn't exist
-	if err := os.MkdirAll(filepath.Dir(targetPath), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(targetPath), 0o755); err != nil { // #nosec G301 -- the scaffolded provider project is a source tree meant to be committed and built by other users and CI; the umask still applies
 		return fmt.Errorf("failed to create directory: %w", err)
 	}
 
@@ -179,7 +179,7 @@ func (s *Scaffolder) generateFile(relativePath, tmplContent string, ctx map[stri
 		return fmt.Errorf("failed to parse template: %w", err)
 	}
 
-	file, err := os.Create(targetPath)
+	file, err := os.Create(targetPath) // #nosec G304 -- targetPath is the output directory joined with a built-in template path; the provider name in it is validated to lowercase alphanumerics and hyphens
 	if err != nil {
 		return fmt.Errorf("failed to create file: %w", err)
 	}

@@ -247,7 +247,7 @@ func runBufGenerate() error {
 
 // runCommand runs a command and returns any error.
 func runCommand(name string, args ...string) error {
-	cmd := exec.Command(name, args...)
+	cmd := exec.Command(name, args...) // #nosec G204 -- every caller passes a fixed go, make or golangci-lint argv; make targets come from a built-in list
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	return cmd.Run()

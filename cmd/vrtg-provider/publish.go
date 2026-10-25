@@ -339,7 +339,7 @@ func updateCatalog(catalogPath string, entry CatalogProvider) error {
 	// Read existing catalog
 	var catalog ProviderCatalog
 
-	if data, err := os.ReadFile(catalogPath); err == nil {
+	if data, err := os.ReadFile(catalogPath); err == nil { // #nosec G304 -- the catalog path is the --catalog flag or the repository catalog found from the working directory
 		if err := yaml.Unmarshal(data, &catalog); err != nil {
 			return fmt.Errorf("failed to parse catalog: %w", err)
 		}
@@ -376,7 +376,7 @@ func updateCatalog(catalogPath string, entry CatalogProvider) error {
 		return fmt.Errorf("failed to marshal catalog: %w", err)
 	}
 
-	if err := os.WriteFile(catalogPath, data, 0o644); err != nil {
+	if err := os.WriteFile(catalogPath, data, 0o644); err != nil { // #nosec G306 -- providers/catalog.yaml is a world-readable source file committed to the repository (public metadata, no secrets); the umask still applies
 		return fmt.Errorf("failed to write catalog: %w", err)
 	}
 

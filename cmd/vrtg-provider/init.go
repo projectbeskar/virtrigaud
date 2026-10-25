@@ -105,7 +105,7 @@ func runInit(opts *initOptions) error {
 
 	// Create target directory
 	targetDir := filepath.Join(opts.outputDir, "providers", opts.providerName)
-	if err := os.MkdirAll(targetDir, 0o755); err != nil {
+	if err := os.MkdirAll(targetDir, 0o755); err != nil { // #nosec G301 -- the scaffolded provider project is a source tree meant to be committed and built by other users and CI; the umask still applies
 		return fmt.Errorf("failed to create directory %s: %w", targetDir, err)
 	}
 
@@ -176,7 +176,7 @@ func findCheckout(dir string) string {
 
 // isCheckout reports whether dir holds the VirtRigaud repository's go.mod.
 func isCheckout(dir string) bool {
-	f, err := os.Open(filepath.Join(dir, "go.mod")) //nolint:gosec // dir is a path the user named or a parent of the output directory
+	f, err := os.Open(filepath.Join(dir, "go.mod")) // #nosec G304 -- dir is a path the user named or a parent of the output directory
 	if err != nil {
 		return false
 	}
