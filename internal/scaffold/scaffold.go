@@ -20,6 +20,7 @@ package scaffold
 import (
 	"bufio"
 	"fmt"
+	"go/format"
 	"os"
 	"path/filepath"
 	"strings"
@@ -193,13 +194,22 @@ func (s *Scaffolder) generateFile(relativePath, tmplContent string, ctx map[stri
 	if err := tmpl.Execute(&rendered, ctx); err != nil {
 		return fmt.Errorf("failed to execute template: %w", err)
 	}
-	content := rendered.String()
-	if strings.HasSuffix(relativePath, ".md") {
+	content := []byte(rendered.String())
+	switch {
+	case strings.HasSuffix(relativePath, ".md"):
 		// Markdown templates cannot hold backticks inside a Go raw string;
 		// they use three single quotes for a code fence.
-		content = strings.ReplaceAll(content, "'''", "```")
+		content = []byte(strings.ReplaceAll(string(content), "'''", "```"))
+	case strings.HasSuffix(relativePath, ".go"):
+		// The templates leave alignment and blank lines to depend on the
+		// provider type; gofmt makes the output what the author's checks expect.
+		formatted, err := format.Source(content)
+		if err != nil {
+			return fmt.Errorf("failed to format %s: %w", relativePath, err)
+		}
+		content = formatted
 	}
-	if _, err := file.WriteString(content); err != nil {
+	if _, err := file.Write(content); err != nil {
 		return fmt.Errorf("failed to write file: %w", err)
 	}
 

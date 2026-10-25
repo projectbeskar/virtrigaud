@@ -17,6 +17,7 @@ limitations under the License.
 package scaffold
 
 import (
+	"go/format"
 	"os"
 	"path/filepath"
 	"strings"
@@ -102,4 +103,25 @@ func TestReadGoDirective(t *testing.T) {
 	require.NoError(t, os.WriteFile(path, []byte("module m\n\ngo 1.24.2\n\nrequire x v1\n"), 0o600))
 	assert.Equal(t, "1.24.2", readGoDirective(path))
 	assert.Empty(t, readGoDirective(filepath.Join(dir, "absent")))
+}
+
+func TestGeneratedGoIsGofmtClean(t *testing.T) {
+	for _, providerType := range []string{"generic", "vsphere", "libvirt", "firecracker", "qemu"} {
+		t.Run(providerType, func(t *testing.T) {
+			dir := generate(t, Config{ProviderName: "demo", ProviderType: providerType, Remote: true})
+			err := filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
+				require.NoError(t, err)
+				if d.IsDir() || !strings.HasSuffix(path, ".go") {
+					return nil
+				}
+				data, readErr := os.ReadFile(path)
+				require.NoError(t, readErr)
+				formatted, fmtErr := format.Source(data)
+				require.NoError(t, fmtErr, path)
+				assert.Equal(t, string(formatted), string(data), "%s is not gofmt-clean", path)
+				return nil
+			})
+			require.NoError(t, err)
+		})
+	}
 }
