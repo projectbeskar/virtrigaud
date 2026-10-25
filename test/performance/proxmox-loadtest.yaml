@@ -1,234 +1,49 @@
-# Performance test configuration for Proxmox VE Provider
-# Uses virtrigaud-loadgen to generate load and measure performance
+# Load-test configuration for a Proxmox VE Provider, in the format
+# virtrigaud-loadgen reads (see docs/cli-tools.md, "virtrigaud-loadgen").
+#
+# Run it from a workstation with a kubeconfig for the cluster that runs
+# VirtRigaud, against a Provider that already exists in the namespace:
+#
+#   virtrigaud-loadgen run --config test/performance/proxmox-loadtest.yaml \
+#     -n <namespace> --output-dir ./loadgen-results
+#
+# Adjust `providers`, `vmTemplate.classRef` and `vmTemplate.imageRef` to a
+# Provider, VMClass and VMImage in that namespace. Add --dry-run first to check
+# the file and the plan without creating anything.
+#
+# Each worker performs one randomly chosen operation per second for `duration`,
+# so the request rate is about `concurrency` per second. The tool writes
+# results.csv and summary.md (counts, failures and latency percentiles per
+# operation) and applies no pass/fail thresholds: compare summary.md with your
+# own targets. docs/cli-tools.md says which operations the tool performs
+# against the cluster and which it only records.
+#
+# Every VM it creates carries the label generated-by=loadgen and is left in
+# place when the run ends. Remove them with:
+#
+#   kubectl delete virtualmachine -n <namespace> -l generated-by=loadgen
 
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: proxmox-loadtest-config
-  namespace: virtrigaud-system
-data:
-  loadtest.yaml: |
-    # VirtRigaud Load Test Configuration
-    provider:
-      name: proxmox-perf
-      type: proxmox
-      endpoint: http://fake-pve-server:8006
-      credentials:
-        token_id: test@pve!token
-        token_secret: fake-secret
-        insecure: true
-    
-    scenarios:
-      # Scenario 1: VM Creation Load Test
-      - name: vm-creation-burst
-        description: "Create 50 VMs with concurrency 10"
-        type: create
-        concurrency: 10
-        operations: 50
-        template:
-          metadata:
-            generateName: "perf-test-vm-"
-          spec:
-            providerRef:
-              name: proxmox-perf
-            classRef:
-              name: small
-            imageRef:
-              name: ubuntu-22-template
-            powerState: "On"
-            networks:
-              - name: lan
-        timeout: 300s
-        
-      # Scenario 2: Power Operations
-      - name: power-operations
-        description: "Power cycle existing VMs"
-        type: power
-        concurrency: 5
-        cycles: 20
-        vm_selector:
-          labels:
-            test-type: performance
-        operations:
-          - stop
-          - start
-        delay_between_ops: 5s
-        timeout: 180s
-        
-      # Scenario 3: Describe Storm
-      - name: describe-storm
-        description: "Rapid VM status queries"
-        type: describe
-        concurrency: 20
-        operations: 200
-        vm_selector:
-          labels:
-            test-type: performance
-        timeout: 60s
-        
-      # Scenario 4: Reconfiguration Load
-      - name: reconfigure-load
-        description: "Reconfigure VM resources"
-        type: reconfigure
-        concurrency: 5
-        operations: 25
-        vm_selector:
-          labels:
-            test-type: performance
-        reconfig_templates:
-          - cpus: 4
-            memory: "8Gi"
-          - cpus: 2
-            memory: "4Gi"
-        timeout: 240s
-        
-      # Scenario 5: Snapshot Operations
-      - name: snapshot-ops
-        description: "Create and manage snapshots"
-        type: snapshot
-        concurrency: 3
-        operations: 15
-        vm_selector:
-          labels:
-            test-type: performance
-        snapshot_operations:
-          - create
-          - revert
-          - delete
-        timeout: 300s
-    
-    # Performance thresholds (fail test if exceeded)
-    thresholds:
-      create_vm_p95: 60s      # 95th percentile VM creation
-      create_vm_p50: 30s      # 50th percentile VM creation
-      power_op_p95: 15s       # 95th percentile power operation
-      power_op_p50: 5s        # 50th percentile power operation
-      describe_p95: 2s        # 95th percentile describe
-      describe_p50: 500ms     # 50th percentile describe
-      reconfigure_p95: 45s    # 95th percentile reconfigure
-      reconfigure_p50: 20s    # 50th percentile reconfigure
-      snapshot_p95: 90s       # 95th percentile snapshot
-      snapshot_p50: 45s       # 50th percentile snapshot
-      error_rate: 5%          # Maximum error rate
-    
-    # Output configuration
-    output:
-      format: ["json", "csv", "markdown"]
-      files:
-        json: "/results/performance-results.json"
-        csv: "/results/performance-results.csv"
-        markdown: "/results/performance-summary.md"
-      metrics:
-        - latency_percentiles
-        - throughput
-        - error_rates
-        - resource_utilization
+duration: 5m
+concurrency: 10
 
----
-# Job to run the performance test
-apiVersion: batch/v1
-kind: Job
-metadata:
-  name: proxmox-performance-test
-  namespace: virtrigaud-system
-spec:
-  template:
-    spec:
-      restartPolicy: Never
-      containers:
-      - name: loadgen
-        image: ghcr.io/projectbeskar/virtrigaud/virtrigaud-loadgen:latest
-        command: ["virtrigaud-loadgen"]
-        args: 
-          - "run"
-          - "--config=/config/loadtest.yaml"
-          - "--output-dir=/results"
-          - "--verbose"
-        volumeMounts:
-        - name: config
-          mountPath: /config
-        - name: results
-          mountPath: /results
-        env:
-        - name: KUBERNETES_NAMESPACE
-          value: virtrigaud-system
-        resources:
-          requests:
-            cpu: 200m
-            memory: 256Mi
-          limits:
-            cpu: 1000m
-            memory: 1Gi
-      volumes:
-      - name: config
-        configMap:
-          name: proxmox-loadtest-config
-      - name: results
-        emptyDir: {}
+# A Provider (type proxmox) in the namespace given by -n.
+providers:
+  - proxmox-perf
 
----
-# Service for fake PVE server (for testing)
-apiVersion: v1
-kind: Service
-metadata:
-  name: fake-pve-server
-  namespace: virtrigaud-system
-spec:
-  selector:
-    app: fake-pve-server
-  ports:
-  - port: 8006
-    targetPort: 8006
-    name: api
-
----
-# Deployment of fake PVE server for performance testing
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: fake-pve-server
-  namespace: virtrigaud-system
+vmTemplate:
+  classRef: small
+  imageRef: ubuntu-22-template
   labels:
-    app: fake-pve-server
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: fake-pve-server
-  template:
-    metadata:
-      labels:
-        app: fake-pve-server
-    spec:
-      containers:
-      - name: fake-pve
-        image: ghcr.io/projectbeskar/virtrigaud/provider-proxmox:latest
-        command: ["go", "run", "./internal/providers/proxmox/pvefake"]
-        args: ["--port", "8006", "--slow-mode", "false"]
-        ports:
-        - containerPort: 8006
-          name: api
-        env:
-        - name: FAKE_PVE_TASK_DELAY
-          value: "500ms"  # Faster for performance testing
-        - name: FAKE_PVE_FAILURE_MODE
-          value: "none"   # No simulated failures
-        resources:
-          requests:
-            cpu: 100m
-            memory: 128Mi
-          limits:
-            cpu: 500m
-            memory: 256Mi
-        readinessProbe:
-          httpGet:
-            path: /health
-            port: 8006
-          initialDelaySeconds: 5
-          periodSeconds: 5
-        livenessProbe:
-          httpGet:
-            path: /health
-            port: 8006
-          initialDelaySeconds: 15
-          periodSeconds: 10
+    test-type: performance
+
+# Relative weights, not percentages: a creation-heavy mix with describe,
+# power, reconfigure and snapshot traffic, like the original five scenarios
+# (create burst, power cycle, describe storm, reconfigure, snapshot).
+operations:
+  create: 30
+  delete: 5
+  describe: 30
+  power: 15
+  reconfigure: 10
+  snapshot: 10
+  clone: 0

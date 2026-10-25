@@ -112,6 +112,11 @@ operations:                       # relative weights, not percentages; at least 
   clone: 0
 ```
 
+`test/performance/proxmox-loadtest.yaml` is a ready configuration in this format for a Provider
+named `proxmox-perf` (edit the provider, class and image names for your cluster); a unit test loads
+every YAML file in `test/performance` with the tool's own loader. The tool has no scenarios or
+pass/fail thresholds: read `summary.md` and compare it with your own targets.
+
 An unknown key, an unparsable duration or an unusable value (no providers, all weights zero, ...) is
 an error and nothing is created. The keys `vmCount`, `rampUpTime`, `steadyState`, `rampDownTime`,
 the `*Interval` keys, `vmTemplate.annotations` and `vmTemplate.resources` are accepted but not used
