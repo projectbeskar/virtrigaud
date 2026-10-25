@@ -401,6 +401,10 @@ type revertPlan struct {
 	// media are the domain's removable media before the revert, to insert
 	// again into the drives the revert leaves empty.
 	media []removableMedium
+	// sources are all the domain's disk sources before the revert
+	// (diskSourcesKey): a refused revert is proven to have changed nothing
+	// only while they are unchanged (classifyRevertFailure).
+	sources string
 }
 
 // prepareSnapshotRevert runs, before a revert of domain to snapshotID on h's
@@ -433,7 +437,8 @@ func prepareSnapshotRevert(ctx context.Context, h hostCommandRunner, domain, sna
 			domain, snapshotID, unsafe)
 		return nil, &snapshotRevertUnsafeError{snapshot: snapshotID, disks: unsafe}
 	}
-	return &revertPlan{before: doc.readOnlyDiskSources(), recorded: snap.recordedReadOnlySources(), media: doc.ejectableMedia()}, nil
+	return &revertPlan{before: doc.readOnlyDiskSources(), recorded: snap.recordedReadOnlySources(), media: doc.ejectableMedia(),
+		sources: doc.diskSourcesKey()}, nil
 }
 
 // finishSnapshotRevert runs after a successful revert of domain to

@@ -1057,8 +1057,12 @@ func (s *Server) SnapshotRevert(ctx context.Context, req *providerv1.SnapshotRev
 		err := s.provider.withOwnedDomain(ctx, snapshotVMRef(req.GetVmId(), req.GetTargetHostId(), req.GetOwner()), "snapshot revert",
 			func(ctx context.Context, c libvirtConn, d domainTarget) error {
 				r, err := snapshotRevertOn(ctx, c, d.handle, req.SnapshotId, seedRootsOf(s.provider))
+				if err != nil {
+					// Answered by what it proves (snapshot_revert_outcome.go).
+					return routedRevertFailure(ctx, c, d.handle, err)
+				}
 				resp = routedTaskResponse(c.HostID(), r)
-				return err
+				return nil
 			})
 		if err != nil {
 			return nil, routedRPCError("revert to snapshot", err)
@@ -1069,13 +1073,19 @@ func (s *Server) SnapshotRevert(ctx context.Context, req *providerv1.SnapshotRev
 
 	// Obtain the per-host connection through the seam (ADR-0008 PR 2).
 	if s.provider == nil {
-		return nil, fmt.Errorf("libvirt provider not initialized")
+		return nil, nothingDone(wireProviderNotInitialized, fmt.Errorf("libvirt provider not initialized"))
 	}
 	conn, err := s.provider.conn(ctx)
 	if err != nil {
-		return nil, err
+		return nil, nothingDone(wireRevertNotPerformed, err)
 	}
-	return snapshotRevertOn(ctx, conn, req.VmId, req.SnapshotId, seedRootsOf(s.provider))
+	// A failure is answered with the outcome the provider can prove
+	// (snapshot_revert_outcome.go).
+	resp, err := snapshotRevertOn(ctx, conn, req.VmId, req.SnapshotId, seedRootsOf(s.provider))
+	if err != nil {
+		return nil, singleHostRevertFailure(ctx, conn, req.VmId, err)
+	}
+	return resp, nil
 }
 
 // snapshotRevertOn is the SnapshotRevert core, run on connection conn against
@@ -1088,20 +1098,23 @@ func snapshotRevertOn(ctx context.Context, conn libvirtConn, domain, snapshotID 
 	if err := checkSnapshotIDArgument(snapshotID); err != nil {
 		return nil, err
 	}
-	// Check if snapshot exists
+	// Every failure up to the revert command changed nothing that outlives
+	// the call (stageBefore); the revert command is stageCommand (its detail:
+	// the domain's disk sources before it). The single-host and routed RPCs
+	// answer them by what they prove (snapshot_revert_outcome.go).
 	exists, err := conn.snapshotExists(ctx, domain, snapshotID)
 	if err != nil {
-		return nil, fmt.Errorf("failed to check snapshot existence: %w", err)
+		return nil, atStage(stageBefore, fmt.Errorf("failed to check snapshot existence: %w", err))
 	}
 
 	if !exists {
-		return nil, fmt.Errorf("snapshot %s does not exist", snapshotID)
+		return nil, contracts.NewNotFoundError(fmt.Sprintf("snapshot %s does not exist", snapshotID), nil)
 	}
 
 	// Get current domain state
 	domainState, err := conn.getDomainState(ctx, domain)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get domain state: %w", err)
+		return nil, atStage(stageBefore, fmt.Errorf("failed to get domain state: %w", err))
 	}
 
 	log.Printf("INFO Domain %s current state: %s", domain, domainState)
@@ -1109,23 +1122,28 @@ func snapshotRevertOn(ctx context.Context, conn libvirtConn, domain, snapshotID 
 	// A revert rewrites the disk another domain may use as its backing file
 	// (disk_dependents.go).
 	if err := refuseIfDiskHasDependents(ctx, hostConnRunner{conn: conn}, domain, guardOpSnapshotRevert); err != nil {
-		return nil, fmt.Errorf("failed to revert to snapshot: %w", err)
+		return nil, atStage(stageBefore, fmt.Errorf("failed to revert to snapshot: %w", err))
 	}
 
 	// A snapshot whose stored definition has the domain's read-only seed
 	// CD-ROM with its medium (taken while the VM ran, or by v0.4.0-rc6 or
 	// earlier) is refused before anything changes: libvirt would rewrite the
 	// CD-ROM to an overlay the VM cannot open (snapshot_readonly_disks.go).
-	// An interrupted ejection is repaired first.
+	// An interrupted ejection is repaired first; a repair that could not put
+	// the media back (errMediaNotRestored) is not tagged: its outcome is
+	// unknown.
 	h := hostConnRunner{conn: conn}
 	plan, err := prepareSnapshotRevert(ctx, h, domain, snapshotID, seedRoots)
 	if err != nil {
-		return nil, err
+		if stderrors.Is(err, errMediaNotRestored) {
+			return nil, err
+		}
+		return nil, atStage(stageBefore, err)
 	}
 
 	result, err := conn.Virsh(ctx, buildSnapshotRevertArgs(domain, snapshotID, domainState)...)
 	if err != nil {
-		return nil, fmt.Errorf("failed to revert to snapshot: %w", err)
+		return nil, atStageDetail(stageCommand, snapshotID, plan.sources, fmt.Errorf("failed to revert to snapshot: %w", err))
 	}
 
 	log.Printf("INFO Successfully reverted to snapshot: %s\nOutput: %s", snapshotID, result.Stdout)

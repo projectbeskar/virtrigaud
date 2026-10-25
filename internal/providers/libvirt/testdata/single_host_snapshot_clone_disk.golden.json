@@ -904,7 +904,7 @@
       "single virsh snapshot-list vrgold-web --name"
     ],
     "resp": "null",
-    "err": "snapshot s9 does not exist"
+    "err": "rpc error: code = NotFound desc = snapshot s9 does not exist"
   },
   "snapshot-revert-domstate-fails": {
     "calls": [
@@ -912,7 +912,7 @@
       "single virsh domstate vrgold-web"
     ],
     "resp": "null",
-    "err": "failed to get domain state: failed to get domain state: virsh command 'virsh -c qemu:///single domstate vrgold-web' failed (exit code 1): stderr=error: scripted failure of domstate\n, stdout="
+    "err": "snapshot revert not performed: a check or command on the libvirt host failed before the revert ran; nothing was changed (details are in the provider log)"
   },
   "snapshot-revert-fails": {
     "calls": [
@@ -925,14 +925,14 @@
       "single virsh snapshot-revert vrgold-web s1 --force"
     ],
     "resp": "null",
-    "err": "failed to revert to snapshot: virsh command 'virsh -c qemu:///single snapshot-revert vrgold-web s1 --force' failed (exit code 1): stderr=error: scripted failure of snapshot-revert\n, stdout="
+    "err": "rpc error: code = Unknown desc = snapshot revert failed: libvirt reported an error while reverting; the VM's disks may have been changed (details are in the provider log)"
   },
   "snapshot-revert-list-fails": {
     "calls": [
       "single virsh snapshot-list vrgold-web --name"
     ],
     "resp": "null",
-    "err": "failed to check snapshot existence: failed to list snapshots: virsh command 'virsh -c qemu:///single snapshot-list vrgold-web --name' failed (exit code 1): stderr=error: scripted failure of snapshot-list\n, stdout="
+    "err": "snapshot revert not performed: a check or command on the libvirt host failed before the revert ran; nothing was changed (details are in the provider log)"
   },
   "snapshot-revert-running": {
     "calls": [

@@ -59,7 +59,9 @@ import (
 // and the domain before the revert and the domain after it,
 // snapshot_readonly_disks.go), and for V12 (a disk-only SnapshotCreate probes
 // the overlay files it would create, one `sh -c` before the ejection,
-// snapshot_overlay_collision.go) — with
+// snapshot_overlay_collision.go), and for the classified SnapshotRevert
+// failures (snapshot_revert_outcome.go: its error answers changed, not its
+// commands) — with
 // VIRTRIGAUD_UPDATE_CALLSEQ_GOLDEN=1; the slice 3 branch
 // reproduces it byte for byte. A change to any of them — which would restart
 // the ADR-0008 D5 soak window — fails here.

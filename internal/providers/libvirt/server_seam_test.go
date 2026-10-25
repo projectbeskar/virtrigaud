@@ -27,6 +27,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc/codes"
 
 	golibvirt "github.com/digitalocean/go-libvirt"
 
@@ -362,7 +363,10 @@ func TestServer_SingleHostSnapshotIDIsChecked(t *testing.T) {
 		assert.True(t, contracts.IsInvalidSpec(err), "%q: %v", id, err)
 		_, err = s.SnapshotRevert(context.Background(), &providerv1.SnapshotRevertRequest{VmId: "vm-1", SnapshotId: id})
 		require.Error(t, err, "%q", id)
-		assert.True(t, contracts.IsInvalidSpec(err), "%q: %v", id, err)
+		// The single-host revert answers its typed refusals on the wire
+		// (snapshot_revert_outcome.go): InvalidArgument, which the manager
+		// maps to InvalidSpec.
+		assertRefusalStatus(t, err, codes.InvalidArgument)
 		assert.Empty(t, fc.virshCalls, "%q: nothing reaches the host", id)
 	}
 	_, err := (&Provider{virshProvider: NewVirshProvider(&ProviderConfig{})}).SnapshotDelete(context.Background(),
