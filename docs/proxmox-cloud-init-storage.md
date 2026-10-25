@@ -96,7 +96,8 @@ this order:
 1. the first disk (a `virtio`, `scsi`, `sata` or `ide` drive the config has,
    not a CD-ROM) in the `order=` list the clone inherited from the template;
 2. the legacy `bootdisk` the template names, when it is such a disk;
-3. the primary disk of step 2 above (the first disk of the bus scan).
+3. the primary disk (`PrimaryDiskFromConfig`, the first disk of the bus scan;
+   step 2 of [How the storage is chosen](#how-the-storage-is-chosen)).
 
 When the clone's config shows no disk at all, the provider sets no boot order
 and the clone keeps the template's. PVE refuses a boot order that names a

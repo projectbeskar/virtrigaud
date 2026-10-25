@@ -64,7 +64,8 @@ func cloneBootOrder(cfg map[string]interface{}) string {
 
 // cloneBootDisk returns the config key of the disk a clone boots from: the
 // first attached disk (isAttachedDisk) in the boot order the clone inherited
-// from its template, else the legacy bootdisk when it is one, else
+// from its template, else — whenever that order names no such disk, or there
+// is none — the legacy bootdisk when it is one, else
 // pveapi.PrimaryDiskFromConfig (the first disk scanning virtio, scsi, sata,
 // ide), or "" when cfg has no disk. Following the template's own order first
 // keeps a template whose boot disk is not the first disk of that scan (a data
