@@ -93,13 +93,13 @@ type PoolNetworkRef struct {
 // live migration between the hosts of a pool, so none of these fields has an
 // effect.
 type PoolMigrationPolicy struct {
-	// DefaultLive requests live (RAM-transfer) migration by default. When false,
-	// migrations tolerate downtime and may fall back to stage_copy. Defaults
-	// true. Accepted but not acted on in this release.
-	//
 	// This is a defaulted bool and deliberately carries NO omitempty: with
 	// omitempty an explicit false would be dropped on marshal and the apiserver
 	// would re-apply the true default.
+
+	// DefaultLive requests live (RAM-transfer) migration by default. When false,
+	// migrations tolerate downtime and may fall back to stage_copy. Defaults
+	// true. Accepted but not acted on in this release.
 	// +optional
 	// +kubebuilder:default=true
 	DefaultLive bool `json:"defaultLive"`

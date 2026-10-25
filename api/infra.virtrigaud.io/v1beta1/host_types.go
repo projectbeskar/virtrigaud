@@ -122,14 +122,14 @@ type HostSpec struct {
 	// +optional
 	Labels map[string]string `json:"labels,omitempty"`
 
-	// Schedulable, when false, cordons the host: no new VM is placed on it, and
-	// VMs already on it stay where they are (VirtRigaud does not move or
-	// evacuate them). Defaults true.
-	//
 	// This is a defaulted bool and deliberately carries NO omitempty: with
 	// omitempty an explicit false would be dropped on marshal, the apiserver
 	// would re-apply the true default, and the field would silently flip
-	// false->true (the defaulted-bool pitfall).
+	// false->true.
+
+	// Schedulable, when false, cordons the host: no new VM is placed on it, and
+	// VMs already on it stay where they are (VirtRigaud does not move or
+	// evacuate them). Defaults true.
 	// +optional
 	// +kubebuilder:default=true
 	Schedulable bool `json:"schedulable"`

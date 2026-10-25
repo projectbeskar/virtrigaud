@@ -43,7 +43,8 @@ type VMMigrationSpec struct {
 	// +optional
 	Storage *MigrationStorage `json:"storage,omitempty"`
 
-	// Metadata contains migration metadata
+	// Metadata contains migration metadata. Descriptive only: no controller reads
+	// it.
 	// +optional
 	Metadata *MigrationMetadata `json:"metadata,omitempty"`
 }
@@ -62,25 +63,39 @@ type MigrationSource struct {
 	// +optional
 	ProviderRef *ObjectRef `json:"providerRef,omitempty"`
 
-	// SnapshotRef references a specific snapshot to migrate from
+	// SnapshotRef names an existing snapshot to export from instead of taking a
+	// new one. The name is used as the provider's snapshot identifier (no
+	// VMSnapshot object is looked up), and the migration never deletes it. It
+	// is read only while createSnapshot is true; with createSnapshot false no
+	// snapshot is used and this field is ignored.
 	// +optional
 	SnapshotRef *LocalObjectReference `json:"snapshotRef,omitempty"`
 
-	// CreateSnapshot indicates whether to create a snapshot before migration.
-	// NOTE: no `omitempty` — a defaulted (+kubebuilder:default=true) non-pointer
-	// bool with omitempty silently flips an explicit `false` back to `true` on any
-	// controller round-trip (omitempty drops false, the apiserver re-defaults), so
-	// `createSnapshot: false` would be impossible to set (same footgun as #235).
+	// No `omitempty` on the Go field below: a defaulted bool with omitempty would
+	// have an explicit false dropped on write and re-defaulted to true.
+
+	// CreateSnapshot indicates whether to snapshot the source VM before
+	// exporting its disk (default true). A snapshot the migration took is deleted
+	// after the migration succeeds, and after it fails for good, unless
+	// options.cleanupPolicy is Never. When false the Snapshotting phase is
+	// skipped and the disk is exported without a snapshot.
 	// +optional
 	// +kubebuilder:default=true
 	CreateSnapshot bool `json:"createSnapshot"`
 
-	// PowerOffBeforeMigration ensures VM is powered off before migration
+	// PowerOffBeforeMigration sets the source VirtualMachine's spec.powerState to
+	// Off and waits until it reports Off before the snapshot and export. A
+	// vSphere source must be powered off (a running VM's disk is locked and
+	// cannot be exported). The migration does not power the source on again; its
+	// spec.powerState stays Off.
 	// +optional
 	// +kubebuilder:default=false
 	PowerOffBeforeMigration bool `json:"powerOffBeforeMigration,omitempty"`
 
-	// DeleteAfterMigration deletes source VM after successful migration
+	// DeleteAfterMigration deletes the source VirtualMachine after the migration
+	// reaches Ready. Only the VirtualMachine the migration validated (recorded in
+	// status.sourceVMUID) is deleted, with a UID precondition: a VM re-created
+	// under the same name is kept.
 	// +optional
 	// +kubebuilder:default=false
 	DeleteAfterMigration bool `json:"deleteAfterMigration,omitempty"`
@@ -114,34 +129,44 @@ type MigrationTarget struct {
 	// ProviderRef references the target provider
 	ProviderRef ObjectRef `json:"providerRef"`
 
-	// ClassRef references the VM class for resource allocation
+	// ClassRef references the VMClass (in the VMMigration's namespace) of the
+	// target VirtualMachine. It becomes the target VM's spec.classRef. The
+	// target VirtualMachine requires a class, so set it.
 	// +optional
 	ClassRef *LocalObjectReference `json:"classRef,omitempty"`
 
-	// ImageRef references the VM image (usually not needed for migration)
+	// ImageRef references the VM image. Accepted but not acted on in this
+	// release: the target VM is created from the migrated disk, not from an
+	// image.
 	// +optional
 	ImageRef *LocalObjectReference `json:"imageRef,omitempty"`
 
-	// Networks defines network configuration for target VM
+	// Networks defines network configuration for target VM. Copied to the target
+	// VirtualMachine's spec.networks.
 	// +optional
 	// +kubebuilder:validation:MaxItems=10
 	Networks []VMNetworkRef `json:"networks,omitempty"`
 
-	// Disks defines disk configuration overrides
+	// Disks defines disk configuration overrides. Accepted but not acted on in
+	// this release: the target VirtualMachine gets only the migrated disk.
 	// +optional
 	// +kubebuilder:validation:MaxItems=20
 	Disks []DiskSpec `json:"disks,omitempty"`
 
-	// PlacementRef references placement policy for the target VM
+	// PlacementRef references the VMPlacementPolicy for the target VM. Copied to
+	// the target VirtualMachine's spec.placementRef.
 	// +optional
 	PlacementRef *LocalObjectReference `json:"placementRef,omitempty"`
 
-	// PowerOn indicates whether to power on the target VM after migration
+	// PowerOn indicates whether the target VM's desired power state is On (true)
+	// or Off (false, the default) once it is created.
 	// +optional
 	// +kubebuilder:default=false
 	PowerOn bool `json:"powerOn,omitempty"`
 
-	// Labels defines labels to apply to the target VM
+	// Labels defines labels to apply to the target VM. The label
+	// virtrigaud.io/adopted is reserved for the manager and is not copied (a
+	// Normal event, TargetLabelsDropped, names it); every other label is.
 	// +optional
 	// +kubebuilder:validation:MaxProperties=50
 	Labels map[string]string `json:"labels,omitempty"`
@@ -158,56 +183,81 @@ type MigrationTarget struct {
 
 // MigrationOptions defines migration options
 type MigrationOptions struct {
-	// DiskFormat specifies the desired disk format for the target
+	// DiskFormat specifies the disk format requested for the export and, with the
+	// pvc storage backend, for the import (default qcow2). With the s3 and nfs
+	// backends the format of the staged object is not taken from this field: s3
+	// stages the source provider's native format (vmdk from vSphere, qcow2
+	// otherwise) and nfs stages qcow2; the target provider converts on import.
 	// +optional
 	// +kubebuilder:validation:Enum=qcow2;vmdk;raw
 	DiskFormat string `json:"diskFormat,omitempty"`
 
-	// Compress enables compression during transfer
+	// Compress asks the source provider to compress the exported disk. It is
+	// sent with the export request; whether the provider honours it is reported
+	// in its status.reportedCapabilities.supportsExportCompression.
 	// +optional
 	// +kubebuilder:default=false
 	Compress bool `json:"compress,omitempty"`
 
-	// VerifyChecksums enables checksum verification
+	// VerifyChecksums asks the target provider to verify the imported disk
+	// against the checksum the source export reported (default true).
 	// +optional
 	// +kubebuilder:default=true
 	VerifyChecksums bool `json:"verifyChecksums,omitempty"`
 
-	// Timeout defines the maximum time for the entire migration
+	// Timeout bounds how long the migration waits for the source snapshot task
+	// to finish (default 4h; 2h when options is unset). It is not applied to the
+	// other phases in this release: a disk export call has a fixed limit of one
+	// hour.
 	// +optional
 	// +kubebuilder:default="4h"
 	Timeout *metav1.Duration `json:"timeout,omitempty"`
 
-	// RetryPolicy defines retry behavior for failed operations
+	// RetryPolicy defines retry behavior for a failed migration. Without it a
+	// failed migration is not retried. A retry restarts the migration from the
+	// Pending phase.
 	// +optional
 	RetryPolicy *MigrationRetryPolicy `json:"retryPolicy,omitempty"`
 
-	// CleanupPolicy defines cleanup behavior
+	// CleanupPolicy decides when the artifacts the migration created are removed.
+	// The source snapshot the migration took is deleted when the migration
+	// reaches Ready, and when it fails for good, unless the policy is Never. The
+	// staged disk of an nfs or s3 migration (a pvc migration's PVC is deleted
+	// with the VMMigration) is deleted, with OnSuccess (the default), when the
+	// migration reaches Ready and when the VMMigration is deleted; a migration
+	// that failed for good keeps it until the VMMigration is deleted. Always
+	// also deletes it when the migration fails for good. Never keeps the staged
+	// disk and the snapshot in every case. A migration fails for good when it
+	// has no retryPolicy, or its retries are used up.
 	// +optional
 	// +kubebuilder:default="OnSuccess"
 	// +kubebuilder:validation:Enum=Always;OnSuccess;Never
 	CleanupPolicy string `json:"cleanupPolicy,omitempty"`
 
-	// ValidationChecks defines validation checks to perform
+	// ValidationChecks defines validation checks to perform. Accepted but not
+	// acted on in this release: no check listed here runs.
 	// +optional
 	ValidationChecks *ValidationChecks `json:"validationChecks,omitempty"`
 }
 
-// MigrationRetryPolicy defines retry behavior for failed operations
+// MigrationRetryPolicy defines retry behavior for a failed migration.
 type MigrationRetryPolicy struct {
-	// MaxRetries is the maximum number of retry attempts
+	// MaxRetries is the maximum number of retry attempts (default 3).
 	// +optional
 	// +kubebuilder:default=3
 	// +kubebuilder:validation:Minimum=0
 	// +kubebuilder:validation:Maximum=10
 	MaxRetries *int32 `json:"maxRetries,omitempty"`
 
-	// RetryDelay is the delay between retry attempts
+	// RetryDelay is the delay before the first retry (default 5m). Each later
+	// retry waits retryDelay multiplied by backoffMultiplier once more, up to a
+	// maximum of 30 minutes.
 	// +optional
 	// +kubebuilder:default="5m"
 	RetryDelay *metav1.Duration `json:"retryDelay,omitempty"`
 
-	// BackoffMultiplier is the multiplier for exponential backoff
+	// BackoffMultiplier is the multiplier applied to the delay between retries
+	// (default 2).
 	// +optional
 	// +kubebuilder:default=2
 	// +kubebuilder:validation:Minimum=1
@@ -215,24 +265,25 @@ type MigrationRetryPolicy struct {
 	BackoffMultiplier *int32 `json:"backoffMultiplier,omitempty"`
 }
 
-// ValidationChecks defines validation checks to perform
+// ValidationChecks defines validation checks to perform. Accepted but not acted
+// on in this release.
 type ValidationChecks struct {
-	// CheckDiskSize verifies disk size matches
+	// CheckDiskSize verifies disk size matches. Accepted but not acted on in this release.
 	// +optional
 	// +kubebuilder:default=true
 	CheckDiskSize bool `json:"checkDiskSize,omitempty"`
 
-	// CheckChecksum verifies checksums match
+	// CheckChecksum verifies checksums match. Accepted but not acted on in this release.
 	// +optional
 	// +kubebuilder:default=true
 	CheckChecksum bool `json:"checkChecksum,omitempty"`
 
-	// CheckBoot verifies VM boots successfully
+	// CheckBoot verifies VM boots successfully. Accepted but not acted on in this release.
 	// +optional
 	// +kubebuilder:default=false
 	CheckBoot bool `json:"checkBoot,omitempty"`
 
-	// CheckConnectivity tests network connectivity
+	// CheckConnectivity tests network connectivity. Accepted but not acted on in this release.
 	// +optional
 	// +kubebuilder:default=false
 	CheckConnectivity bool `json:"checkConnectivity,omitempty"`
@@ -240,20 +291,25 @@ type ValidationChecks struct {
 
 // MigrationStorage defines storage backend configuration
 type MigrationStorage struct {
-	// Type specifies the storage backend type used to stage the transferred
-	// disk between the source and target providers. "pvc" is the only backend
-	// with transfer logic today; "nfs" and "s3" are surface-only scaffolding
-	// (ADR-0006 Slice 0) and are rejected at the Validating phase until the
-	// corresponding transfer slices land.
+	// Type specifies the storage backend used to stage the transferred disk
+	// between the source and target providers: "pvc" (a PersistentVolumeClaim
+	// the provider pods mount), "nfs" (an NFS export) or "s3" (an S3-compatible
+	// bucket). Both the source provider's status.reportedCapabilities
+	// supportedExportBackends and the target provider's supportedImportBackends
+	// must list the backend, or the migration fails at the Validating phase.
+	// The pvc backend is not supported when the source or the target Provider is
+	// clustered (topology: cluster); use nfs or s3 there.
 	// +kubebuilder:validation:Enum=pvc;nfs;s3
 	// +kubebuilder:default=pvc
 	Type string `json:"type"`
 
-	// TransferMode selects how disk bytes travel to/from the staging backend.
-	// "relay" routes bytes host→provider-pod→backend (today's pod-side path);
-	// "direct" routes bytes host→backend without a provider-pod hop; "auto"
-	// lets the controller pick based on what both providers advertise. Only
-	// "relay" is implemented today (ADR-0006 Slice 0).
+	// TransferMode selects how disk bytes travel to and from a pvc or s3
+	// staging backend. "relay" routes the bytes through the provider pod; "auto"
+	// (the default) resolves to "relay". "direct" (host to backend, without the
+	// provider pod) is not implemented: a migration that asks for it fails at
+	// the Validating phase. The nfs backend ignores this field: the data moves
+	// over NFS with qemu-img on the hypervisor host (libvirt, Proxmox) or in the
+	// provider pod (vSphere).
 	// +optional
 	// +kubebuilder:validation:Enum=auto;relay;direct
 	// +kubebuilder:default=auto
@@ -263,25 +319,25 @@ type MigrationStorage struct {
 	// +optional
 	PVC *PVCStorageConfig `json:"pvc,omitempty"`
 
-	// NFS specifies NFS-based staging configuration. Surface-only in ADR-0006
-	// Slice 0 (no transfer logic yet).
+	// NFS specifies NFS-based staging configuration. Required when type is nfs.
 	// +optional
 	NFS *NFSStorageConfig `json:"nfs,omitempty"`
 
-	// S3 specifies S3-compatible object-storage staging configuration.
-	// Surface-only in ADR-0006 Slice 0 (no transfer logic yet).
+	// S3 specifies S3-compatible object-storage staging configuration. Required
+	// when type is s3.
 	// +optional
 	S3 *S3StorageConfig `json:"s3,omitempty"`
 }
 
 // S3StorageConfig defines S3-compatible object-storage configuration used to
-// stage a migration's transferred disk. Surface-only in ADR-0006 Slice 0.
+// stage a migration's transferred disk.
 type S3StorageConfig struct {
 	// Bucket is the S3 bucket for the transfer object.
 	Bucket string `json:"bucket"`
 	// Endpoint overrides the S3 endpoint (empty = AWS default; set for MinIO/Ceph RGW).
-	// The host is gated by the controller's SSRF allowlist before it is dialed
-	// (ADR-0006 C3). MaxLength bounds an apiserver-side payload.
+	// The host is checked by the controller before it is used: loopback,
+	// link-local and cloud-metadata addresses are refused, and the operator can
+	// restrict the allowed hosts further.
 	// +optional
 	// +kubebuilder:validation:MaxLength=263
 	Endpoint string `json:"endpoint,omitempty"`
@@ -291,22 +347,21 @@ type S3StorageConfig struct {
 	// Prefix is the key prefix for this migration's objects.
 	// +optional
 	Prefix string `json:"prefix,omitempty"`
-	// CredentialsSecretRef references a Secret holding the S3 credentials
-	// (access key / secret / optional session token). Credentials are NEVER inline.
+	// CredentialsSecretRef references a Secret, in the VMMigration's namespace,
+	// holding the S3 credentials under the keys accessKeyID and secretAccessKey
+	// and, optionally, sessionToken. Credentials are never given inline.
 	CredentialsSecretRef ObjectRef `json:"credentialsSecretRef"`
 	// UsePathStyle selects path-style addressing (needed by most non-AWS S3).
-	// No `omitempty`: defaulted bool footgun (see PR #235 / ProviderTLSSpec.Enabled) —
-	// omitempty drops an explicit false and the apiserver re-defaults it.
 	// +optional
 	// +kubebuilder:default=false
 	UsePathStyle bool `json:"usePathStyle"`
 }
 
 // NFSStorageConfig defines NFS-based staging configuration used to stage a
-// migration's transferred disk. Surface-only in ADR-0006 Slice 0.
+// migration's transferred disk.
 type NFSStorageConfig struct {
 	// Server is the NFS server hostname or IP exporting the share. The host is
-	// gated by the controller's SSRF allowlist before it is dialed (ADR-0006 C3).
+	// checked by the controller before it is used, as for the S3 endpoint.
 	// +kubebuilder:validation:MaxLength=253
 	Server string `json:"server"`
 	// Export is the exported NFS path on the server (e.g. "/exports/migrations").
@@ -316,20 +371,22 @@ type NFSStorageConfig struct {
 	// +optional
 	// +kubebuilder:validation:MaxLength=4096
 	Path string `json:"path,omitempty"`
-	// ReadOnly mounts the export read-only. No `omitempty` (defaulted bool footgun, PR #235).
+	// ReadOnly mounts the export read-only. Accepted but not acted on in this
+	// release: it is not sent to the providers, and staging needs a writable
+	// export.
 	// +optional
 	// +kubebuilder:default=false
 	ReadOnly bool `json:"readOnly"`
-	// UID is the AUTH_SYS user ID presented to the NFS server (ADR-0006 C5). The
-	// export's squash policy is the real authorization boundary; this lets an
-	// operator align the client identity with the export. Unset = the data-plane
-	// process identity (the provider pod or SSH user).
+	// UID is the AUTH_SYS user ID presented to the NFS server. The export's
+	// squash policy is the real authorization boundary; this lets an operator
+	// align the client identity with the export. 0 (root) is refused. Unset =
+	// the data-plane process identity (the provider pod or SSH user).
 	// +optional
 	// +kubebuilder:validation:Minimum=0
 	// +kubebuilder:validation:Maximum=4294967295
 	UID *int64 `json:"uid,omitempty"`
-	// GID is the AUTH_SYS group ID presented to the NFS server (ADR-0006 C5).
-	// Unset = the data-plane process identity.
+	// GID is the AUTH_SYS group ID presented to the NFS server. 0 (root) is
+	// refused. Unset = the data-plane process identity.
 	// +optional
 	// +kubebuilder:validation:Minimum=0
 	// +kubebuilder:validation:Maximum=4294967295
@@ -338,8 +395,9 @@ type NFSStorageConfig struct {
 
 // PVCStorageConfig defines PVC storage configuration
 type PVCStorageConfig struct {
-	// Name of an existing PVC to use for migration storage
-	// If not specified, a temporary PVC will be created
+	// Name of an existing PVC, in the VMMigration's namespace, to use for
+	// migration storage. If not specified, the controller creates a PVC for the
+	// migration and deletes it with the VMMigration.
 	// +optional
 	Name string `json:"name,omitempty"`
 
@@ -360,13 +418,16 @@ type PVCStorageConfig struct {
 	// +kubebuilder:default=ReadWriteMany
 	AccessMode string `json:"accessMode,omitempty"`
 
-	// MountPath within pods where PVC is mounted
+	// MountPath within pods where PVC is mounted. Accepted but not acted on in
+	// this release: provider pods always mount the PVC at
+	// /mnt/migration-storage/<pvc-name>.
 	// +optional
 	// +kubebuilder:default="/mnt/migration-storage"
 	MountPath string `json:"mountPath,omitempty"`
 }
 
-// MigrationMetadata contains migration metadata
+// MigrationMetadata contains migration metadata. Descriptive only: no controller
+// reads it.
 type MigrationMetadata struct {
 	// Purpose describes the purpose of the migration
 	// +optional
@@ -396,7 +457,12 @@ type MigrationMetadata struct {
 
 // VMMigrationStatus defines the observed state of VMMigration
 type VMMigrationStatus struct {
-	// Phase represents the current phase of the migration
+	// Phase represents the current phase of the migration. A migration goes
+	// Pending, Validating, Snapshotting (when createSnapshot is true), Exporting,
+	// Importing, Creating, Validating-Target and Ready, or Failed. The
+	// Transferring and Converting phases exist in the enum but a migration does
+	// not enter them in this release: the disk is moved during Exporting and
+	// Importing, and the target provider converts the format on import.
 	// +optional
 	Phase MigrationPhase `json:"phase,omitempty"`
 
@@ -404,7 +470,8 @@ type VMMigrationStatus struct {
 	// +optional
 	Message string `json:"message,omitempty"`
 
-	// TargetVMRef references the created target VM
+	// TargetVMRef references the created target VM. Not populated in this
+	// release; see targetVMUID and spec.target.name.
 	// +optional
 	TargetVMRef *LocalObjectReference `json:"targetVMRef,omitempty"`
 
@@ -425,11 +492,12 @@ type VMMigrationStatus struct {
 	// +kubebuilder:validation:MaxLength=128
 	SourceVMUID string `json:"sourceVMUID,omitempty"`
 
-	// ExportID is the export operation identifier
+	// ExportID is the export operation identifier the source provider returned.
 	// +optional
 	ExportID string `json:"exportID,omitempty"`
 
-	// ImportID is the import operation identifier
+	// ImportID is the disk identifier the target provider returned for the
+	// imported disk.
 	// +optional
 	ImportID string `json:"importID,omitempty"`
 
@@ -474,15 +542,19 @@ type VMMigrationStatus struct {
 	// +optional
 	CompletionTime *metav1.Time `json:"completionTime,omitempty"`
 
-	// Progress shows the migration operation progress
+	// Progress shows the migration operation progress. Not populated in this
+	// release.
 	// +optional
 	Progress *MigrationProgress `json:"progress,omitempty"`
 
-	// DiskInfo contains information about the migrated disk
+	// DiskInfo contains information about the migrated disk, recorded as the
+	// export and import complete.
 	// +optional
 	DiskInfo *MigrationDiskInfo `json:"diskInfo,omitempty"`
 
-	// StorageInfo contains information about intermediate storage
+	// StorageInfo contains information about intermediate storage. The controller
+	// records cleanedUp, stagingLayout, stagingDigest and importTarget; url, size
+	// and uploadedAt are not populated in this release.
 	// +optional
 	StorageInfo *MigrationStorageInfo `json:"storageInfo,omitempty"`
 
@@ -517,7 +589,8 @@ type VMMigrationStatus struct {
 	// +optional
 	LastRetryTime *metav1.Time `json:"lastRetryTime,omitempty"`
 
-	// ValidationResults contains results of validation checks
+	// ValidationResults contains results of validation checks. Not populated in
+	// this release.
 	// +optional
 	ValidationResults *ValidationResults `json:"validationResults,omitempty"`
 }
@@ -566,7 +639,8 @@ const (
 	CleanupPolicyNever = "Never"
 )
 
-// MigrationProgress shows the migration operation progress
+// MigrationProgress shows the migration operation progress. Not populated in
+// this release.
 type MigrationProgress struct {
 	// CurrentPhase is the current phase being executed
 	CurrentPhase MigrationPhase `json:"currentPhase,omitempty"`
@@ -622,15 +696,17 @@ type MigrationDiskInfo struct {
 	// for vSphere, "/var/lib/libvirt/images/disk-id.qcow2" for libvirt). It is
 	// the authoritative location the created target VirtualMachine attaches; the
 	// controller copies it into Spec.ImportedDisk.Path. Empty until the import
-	// completes (ADR-0006 Slice 2).
+	// completes.
 	// +optional
 	TargetPath string `json:"targetPath,omitempty"`
 
-	// TargetSize is the target disk size in bytes
+	// TargetSize is the target disk size in bytes. Not populated in this
+	// release.
 	// +optional
 	TargetSize *resource.Quantity `json:"targetSize,omitempty"`
 
-	// Checksum is the SHA256 checksum of the disk
+	// Checksum is the SHA256 checksum of the disk. Not populated in this release;
+	// see sourceChecksum and targetChecksum.
 	// +optional
 	Checksum string `json:"checksum,omitempty"`
 
@@ -645,26 +721,29 @@ type MigrationDiskInfo struct {
 
 // MigrationStorageInfo contains information about intermediate storage
 type MigrationStorageInfo struct {
-	// URL is the intermediate storage URL
+	// URL is the intermediate storage URL. Not populated in this release.
 	// +optional
 	URL string `json:"url,omitempty"`
 
-	// Size is the size of data in intermediate storage
+	// Size is the size of data in intermediate storage. Not populated in this
+	// release.
 	// +optional
 	Size *resource.Quantity `json:"size,omitempty"`
 
-	// UploadedAt is when the data was uploaded
+	// UploadedAt is when the data was uploaded. Not populated in this release.
 	// +optional
 	UploadedAt *metav1.Time `json:"uploadedAt,omitempty"`
 
-	// CleanedUp indicates if intermediate storage was cleaned up
+	// CleanedUp is set once the post-migration cleanup (deleting the source
+	// snapshot and, when requested, the source VM) has run for a migration that
+	// reached Ready.
 	// +optional
 	CleanedUp bool `json:"cleanedUp,omitempty"`
 
 	// StagingLayout is the naming layout of the migration's nfs / s3 staged
-	// object, recorded by the controller when the export is sent (ADR-0011
-	// D5). The import and the staged-disk delete use it, so a migration keeps
-	// the name it was exported under. "v2" (new migrations): nfs file
+	// object, recorded by the controller when the export is sent. The import
+	// and the staged-disk delete use it, so a migration keeps the name it was
+	// exported under. "v2" (new migrations): nfs file
 	// "vmmigrations_<namespace>_<name>_<stage>.qcow2". "v1" or empty (exported
 	// before v2): "vmmigrations-<namespace>-<name>-<stage>.qcow2". The s3 key is
 	// the same in both. Written by the controller only.
@@ -675,7 +754,7 @@ type MigrationStorageInfo struct {
 	// StagingDigest is a digest of where the last export staged the object —
 	// the staging backend and its non-secret options, and the target Provider
 	// (namespace, name, UID) that will delete it — recorded by the controller
-	// when the export is sent (ADR-0011 D5). The staged-disk delete is sent only
+	// when the export is sent. The staged-disk delete is sent only
 	// while the migration's current spec still yields this digest: after
 	// spec.storage or spec.target.providerRef changed, the object is recorded
 	// as left behind instead of being looked for somewhere else. It carries no
@@ -685,8 +764,8 @@ type MigrationStorageInfo struct {
 	StagingDigest string `json:"stagingDigest,omitempty"`
 
 	// ImportTarget is the VirtualMachine a migration's ImportDisk was sent
-	// for, recorded by the controller just before the import is sent (ADR-0011
-	// D1; every backend since rc2 R7). The staged-disk delete and the
+	// for, recorded by the controller just before the import is sent (for every
+	// storage backend). The staged-disk delete and the
 	// landed-disk delete name only this VM, never the current spec.target
 	// (which may have been edited since), so a target provider removes only
 	// the copy it landed for that VM. Written by the controller only.
@@ -705,8 +784,8 @@ type MigrationImportTarget struct {
 	// +kubebuilder:validation:MaxLength=253
 	Name string `json:"name"`
 
-	// ProviderUID is the UID of the target Provider the import was sent to
-	// (rc2 R7). The landed-disk delete is sent only to that Provider: after
+	// ProviderUID is the UID of the target Provider the import was sent to. The
+	// landed-disk delete is sent only to that Provider: after
 	// spec.target.providerRef changed, or the Provider was replaced, the
 	// landed disk is recorded as left behind instead. Empty for an import
 	// recorded by an older manager.
@@ -716,16 +795,17 @@ type MigrationImportTarget struct {
 
 	// Host is the Host of a clustered target Provider the import was routed
 	// to: the target VirtualMachine's pending host, recorded with ProviderUID
-	// before the import is sent (ADR-0007 Addendum B, B4). A re-sent import
+	// before the import is sent. A re-sent import
 	// and the landed-disk and nfs staged-disk deletes go to this host only.
-	// Empty for a single-host or thin-client target. Written by the
+	// Empty for a single-host target. Written by the
 	// controller only.
 	// +optional
 	// +kubebuilder:validation:MaxLength=253
 	Host string `json:"host,omitempty"`
 }
 
-// ValidationResults contains results of validation checks
+// ValidationResults contains results of validation checks. Not populated in this
+// release.
 type ValidationResults struct {
 	// DiskSizeMatch indicates if disk sizes match
 	// +optional

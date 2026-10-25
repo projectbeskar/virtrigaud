@@ -100,21 +100,28 @@ type ProviderServiceSpec struct {
 	// +kubebuilder:validation:Maximum=65535
 	Port int32 `json:"port,omitempty"`
 
-	// TLS defines TLS configuration for the service
+	// TLS defines TLS configuration for the service. Leaving it unset is not an
+	// implicit plaintext choice: a Provider without a tls block is not deployed
+	// (condition TLSConfigured=False, reason TLSBlockMissing). Set tls.enabled to
+	// false to opt out of TLS explicitly.
 	// +optional
 	TLS *ProviderTLSSpec `json:"tls,omitempty"`
 }
 
 // ProviderTLSSpec defines TLS configuration for provider communication
 type ProviderTLSSpec struct {
-	// Enabled determines if TLS is enabled for provider communication.
-	//
-	// Defaults to true. Deliberately NOT `omitempty`: this field has a default
-	// of true, so omitempty drops an explicit `false` when the object is
-	// re-serialized (e.g. by a controller Update), letting the apiserver
-	// re-apply the default and silently flip tls.enabled false→true — which
-	// then trips the TLS posture gate (enabled=true + no secretRef → runtime
-	// Failed). Always serializing it keeps an explicit plaintext opt-out durable.
+	// Deliberately NOT `omitempty`: this field has a default of true, so
+	// omitempty drops an explicit `false` when the object is re-serialized (e.g.
+	// by a controller Update), letting the apiserver re-apply the default and
+	// silently flip tls.enabled false to true. Always serializing it keeps an
+	// explicit plaintext opt-out durable.
+
+	// Enabled determines if TLS is enabled for the connection between the
+	// manager and the provider pod. Defaults to true. With true, secretRef is
+	// required: a Provider with tls.enabled=true and no secretRef is not
+	// deployed (condition TLSConfigured=False, reason SecretRefMissing). Setting
+	// it to false is an explicit opt-out that runs the provider gRPC server
+	// without TLS, recorded as TLSConfigured=False, reason ExplicitlyDisabled.
 	// +optional
 	// +kubebuilder:default=true
 	Enabled bool `json:"enabled"`
@@ -404,11 +411,12 @@ type ProviderSpec struct {
 // ProviderHealthCheck defines health checking configuration. Accepted but not
 // acted on in this release.
 type ProviderHealthCheck struct {
-	// Enabled indicates whether health checking is enabled.
-	//
-	// Defaults to true. Deliberately NOT `omitempty` — a defaulted bool with
-	// omitempty has its explicit `false` dropped and re-defaulted to true on
-	// the next write (see ProviderTLSSpec.Enabled for the full rationale).
+	// Deliberately NOT `omitempty`: a defaulted bool with omitempty has its
+	// explicit `false` dropped and re-defaulted to true on the next write (see
+	// ProviderTLSSpec.Enabled).
+
+	// Enabled indicates whether health checking is enabled. Defaults to true.
+	// Accepted but not acted on in this release.
 	// +optional
 	// +kubebuilder:default=true
 	Enabled bool `json:"enabled"`
