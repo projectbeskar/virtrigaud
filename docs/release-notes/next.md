@@ -1581,7 +1581,7 @@ says so. Each links to the page that documents it in full, where one exists.
   to. This release deletes the snapshot's metadata when every file the snapshot recorded is
   gone and no current disk image lists it; otherwise it asks you to power the VM off and
   delete it again, and the manual cleanup in the doc applies
-  (→ [`docs/libvirt-clones.md`](docs/libvirt-clones.md#a-memory-snapshot-whose-data-was-already-lost)).
+  (→ [`docs/libvirt-clones.md`](docs/libvirt-clones.md#a-memory-snapshot-that-was-already-orphaned)).
 - **libvirt: a new disk-only snapshot can collide with an earlier snapshot's leftover
   overlay file (V12).** The overlay of a disk-only snapshot is
   `<pool>/<domain>-disk.<snapshot name>`. When an earlier snapshot of that name left its

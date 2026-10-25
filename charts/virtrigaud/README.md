@@ -64,7 +64,7 @@ helm install virtrigaud charts/virtrigaud \
 ## Upgrading
 
 > **Upgrading from v0.3.11?** Read
-> [`docs/upgrading.md`](../../docs/upgrading.md) first. That release window
+> [`docs/upgrading.md`](../../docs/upgrading.md) first. The move to v0.4.0
 > includes several breaking security fixes (vSphere/libvirt VM-ownership
 > checks, a new required vCenter privilege, libvirt default cloud-init no
 > longer provisioning credentials, cross-namespace clone/migration targets
@@ -471,7 +471,7 @@ spec:
   source:
     repoURL: https://projectbeskar.github.io/virtrigaud
     chart: virtrigaud
-    targetRevision: 0.2.2
+    targetRevision: 0.4.0
     helm:
       values: |
         crdUpgrade:
@@ -504,7 +504,7 @@ spec:
       sourceRef:
         kind: HelmRepository
         name: virtrigaud
-      version: 0.2.2
+      version: 0.4.0
   values:
     crdUpgrade:
       enabled: true  # CRDs will upgrade automatically
