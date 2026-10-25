@@ -16,7 +16,7 @@
 > and advertises `supports_clustering = true`, the operator-side
 > **inventory-sync controller** that *calls* those RPCs to populate `Host.status`,
 > the **pure filter+score placement scheduler** (`internal/scheduler`) that
-> chooses a host from that inventory, and — **new in this slice** — the
+> chooses a host from that inventory, and the
 > **VirtualMachine-controller wiring** that *calls* that scheduler on the clustered
 > create path: it binds a VM to a `HostPool` host, sends the choice as
 > `target_host_id`, and records `status.placement` **after** the provider confirms
@@ -827,7 +827,7 @@ separately, under their own reviews:
   provider's VM is created, sends the chosen host as `target_host_id`, and writes
   `VirtualMachine.status.placement` **after** `Create` confirms (see *Placement
   binding* below). Still out of scope here: **rescheduling** an already-created VM
-  and **`Migrate` / `VMHostMigration`**, which land in later PRs.
+  and **`Migrate` / `VMHostMigration`**, which are not implemented.
 - **Admission webhook — shipped.** The `vprovider.kb.io` validating webhook
   (ADR-0007 D2) now rejects `spec.topology: cluster` at admission on every type
   except the allow-listed `libvirt` (see *The `topology` discriminator* above,
@@ -2158,7 +2158,7 @@ one NFS pool, build `main-73e08e8`, 2026-10-22). **Run:**
   host came back;
 - later release-candidate runs: a vSphere source into the cluster over `s3` and
   over `nfs`, and a Proxmox source into the cluster over `s3` and over `nfs`,
-  and a manager restart in the middle of an import (the migration was held as
+  and a manager restart in the middle of an import (two migrations were held as
   `ImportOutcomeUnknown` and re-sent after 35 minutes; no duplicate disk was
   left). See "Validation" in the [v0.4.0 release notes](release-notes/next.md#validation).
 
@@ -2495,7 +2495,7 @@ In addition to [Host prerequisites](#host-prerequisites):
   `HOST_STORAGE_MISCONFIGURED` (scoped to that host: the manager may place the
   target on another one) and the create's constant text, prefixed with the
   host id. (A first create on the host creates the pool.)
-- **An `qemu+ssh://` Host endpoint**, `qemu-img`, `flock` (util-linux) and
+- **A `qemu+ssh://` Host endpoint**, `qemu-img`, `flock` (util-linux) and
   `timeout` (coreutils) on the host, as for a routed export. A host without
   `flock` or `timeout` refuses the import (`FailedPrecondition`) and never
   runs it unguarded.
@@ -2515,8 +2515,9 @@ In addition to [Host prerequisites](#host-prerequisites):
 
 ## What "clustered" does not mean (yet)
 
-- **No automatic HA / failover.** v1 detects and surfaces host-down and supports
-  operator-initiated evacuation, but does **not** auto-restart VMs elsewhere.
+- **No automatic HA / failover.** v1 detects and surfaces host-down; cordoning a host
+  stops new placements, but there is no automated evacuation and VMs are **not**
+  restarted elsewhere.
   Without fencing/STONITH that would risk split-brain disk corruption; automatic
   HA is a deferred future ADR (ADR-0007 D8/P5).
 - **Experimental.** A clustered VM can be scheduled, created, described,

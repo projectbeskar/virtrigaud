@@ -211,7 +211,7 @@ See [`../vmmigration-into-clustered.yaml`](../vmmigration-into-clustered.yaml).
 - **What it does not do:** the disk-space check is a filter, not a reservation;
   a host that fails after placement is waited for, not replaced; two Providers on
   one pool are not serialised. Single-host libvirt, vSphere and Proxmox sources
-  were run into a clustered target over `s3` and `nfs`, each to `Ready`.
+  were run into a clustered target over `s3` and `nfs`; the libvirt runs ended `Ready`.
 - **While it runs**, `kubectl get vmmigration <name> -o yaml` shows the
   `TargetPlaced` condition and `status.storageInfo.importTarget.host`, the host
   the disk was sent to.
