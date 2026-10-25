@@ -320,7 +320,7 @@ spec:
 # Troubleshooting:
 #
 # If a VM or VMClone fails:
-# 1. Check provider logs: kubectl logs deployment/virtrigaud-provider-vsphere
+# 1. Check provider logs: kubectl logs deployment/virtrigaud-provider-default-vsphere-prod
 # 2. Verify the source template/VM exists: Check vCenter
 # 3. Ensure sufficient storage: Check datastore capacity
 # 4. For VMClone: kubectl describe vmclone <name> for Phase/Message

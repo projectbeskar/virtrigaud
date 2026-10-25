@@ -329,4 +329,3 @@ See [`docs/provider-call-outcomes.md`](../../docs/provider-call-outcomes.md).
 
 - [VMMigration CRD source](../../api/infra.virtrigaud.io/v1beta1/vmmigration_types.go)
 - [Migration Guide](https://projectbeskar.github.io/virtrigaud/operations/vm-migration/)
-- Open issues: [#147 mTLS](https://github.com/projectbeskar/virtrigaud/issues/147), [#148 provider auth](https://github.com/projectbeskar/virtrigaud/issues/148), [#153 Libvirt Clone stub](https://github.com/projectbeskar/virtrigaud/issues/153), [#154 Libvirt ImagePrepare stub](https://github.com/projectbeskar/virtrigaud/issues/154)

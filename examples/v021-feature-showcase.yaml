@@ -106,7 +106,7 @@ spec:
   memory: "4Gi"
   firmware: UEFI
   
-  # v0.2.1: Various disk sizes to test the fix
+  # Various disk sizes
   diskDefaults:
     type: thin
     size: "50Gi"  # Demonstrates fixed disk sizing

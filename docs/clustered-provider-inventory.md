@@ -70,7 +70,7 @@ rationale, and phasing.
 | `spec.overcommit` | CPU/memory overcommit ratios (decimal strings, e.g. `"4.0"`). |
 | `spec.storagePools[]` | Named shared/local storage pools available in the pool. |
 | `spec.networks[]` | Named networks (bridge/VLAN/overlay) available in the pool. |
-| `spec.migration` | Default migration policy: `defaultLive` (default `true`), `defaultStorageMode` (`shared`\|`block_all`\|`block_inc`\|`stage_copy`, default `shared`), `requireTLS` (default `false`), and optional `bandwidthMbps` / `maxDowntimeMs` caps. |
+| `spec.migration` | Default migration policy: `defaultLive` (default `true`), `defaultStorageMode` (`shared`\|`block_all`\|`block_inc`\|`stage_copy`, default `shared`), `requireTLS` (default `false`), and optional `bandwidthMbps` / `maxDowntimeMs` caps. The API records the policy; no controller acts on it in v0.4.0 (there is no live migration between the hosts of a pool). |
 
 `status` aggregates member-host counts and readiness — see
 [`HostPool.status`](#hostpoolstatus) below.

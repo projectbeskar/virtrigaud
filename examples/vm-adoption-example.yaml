@@ -6,7 +6,7 @@
 # credentialSecretRef, and runtime — NOT nested provider-specific blocks.
 #
 # The old spec fields (remote: true, vsphere.server, libvirt.uri,
-# proxmox.server, credentials.secretRef) do NOT exist in v0.3.6.
+# proxmox.server, credentials.secretRef) do NOT exist.
 
 ---
 # Example 1: vSphere Provider with VM Adoption enabled

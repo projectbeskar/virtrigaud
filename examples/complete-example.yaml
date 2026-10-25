@@ -60,7 +60,7 @@ spec:
   firmware: UEFI
   diskDefaults:
     type: thin
-    size: "40Gi"  # v0.2.1: Disk size now properly respected across all providers
+    size: "40Gi"
   guestToolsPolicy: install
   extraConfig:
     # Time synchronization

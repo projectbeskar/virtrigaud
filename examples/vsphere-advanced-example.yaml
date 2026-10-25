@@ -81,7 +81,7 @@ spec:
   firmware: UEFI
   diskDefaults:
     type: thin
-    size: "100Gi"  # v0.2.1: Disk size now properly respected
+    size: "100Gi"
   guestToolsPolicy: install
   extraConfig:
     # vSphere performance tuning

@@ -200,7 +200,7 @@ data:
     kubectl get vm vsphere-console-demo -o jsonpath='{.status.consoleURL}'
     
     # Output:
-    # https://vcenter.example.com/ui/app/vm;nav=h/urn:vmomi:VirtualMachine:vm-123:xxxxx/summary
+    # https://vcenter.example.com/ui/#?extensionId=vsphere.core.vm.summary&objectId=urn:vmomi:VirtualMachine:vm-123:<instance-uuid>
     ```
     
     ### Access Steps
@@ -349,7 +349,7 @@ data:
     # Should be "Running"
     
     # Check provider logs
-    kubectl logs deployment/virtrigaud-provider-vsphere | grep -i console
+    kubectl logs deployment/virtrigaud-provider-default-vsphere-prod | grep -i console
     ```
     
     ### Issue: "Not Authenticated" error

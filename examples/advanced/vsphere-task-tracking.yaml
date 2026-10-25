@@ -174,7 +174,7 @@ data:
 
     # Monitor provider logs for task tracking details
     echo "=== Provider Task Logs ==="
-    kubectl logs -f deployment/virtrigaud-provider-vsphere | grep -i task
+    kubectl logs -f deployment/virtrigaud-provider-default-vsphere-prod | grep -i task
 
     # Example output:
     # time="2024-01-15T10:30:00Z" level=info msg="Task created" taskID="task-123" operation="CreateVM"
@@ -263,7 +263,7 @@ data:
 
     ### 3. Provider Logs (Detailed)
     ```bash
-    kubectl logs -f deployment/virtrigaud-provider-vsphere
+    kubectl logs -f deployment/virtrigaud-provider-default-vsphere-prod
     ```
 
     ### 4. vCenter Task Console
@@ -391,7 +391,7 @@ spec:
 #    watch -n 2 'kubectl get vm'
 #
 # 3. View detailed task information:
-#    kubectl logs -f deployment/virtrigaud-provider-vsphere | grep -E "task|Task"
+#    kubectl logs -f deployment/virtrigaud-provider-default-vsphere-prod | grep -E "task|Task"
 #
 # 4. Check vCenter tasks:
 #    - Open vSphere web client
