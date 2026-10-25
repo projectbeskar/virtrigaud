@@ -154,7 +154,8 @@ func (p *Provider) disklessCloudInitStorage(explicit string) (string, error) {
 //     slot it is in (PVE removes the old volume);
 //   - no drive: it is set in cloudInitDefaultSlot.
 //
-// slot is the device the drive is on afterwards (for the boot order).
+// slot is the device the drive is on afterwards (it is logged; the boot order
+// does not name it, see cloneBootOrder).
 func cloudInitChange(cfg map[string]interface{}, storage string) (slot, value string, set bool) {
 	existingSlot, existingValue, found := pveapi.CloudInitDrive(cfg)
 	if !found {

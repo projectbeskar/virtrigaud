@@ -416,9 +416,9 @@ func (p *Provider) configureClonedVM(ctx context.Context, req *providerv1.Create
 	// Build reconfiguration values for cloud-init. Sizing (cores/memory) is
 	// already applied above for every clone, so it is not repeated here.
 	//
-	// Every cloud-init setting (user-data, SSH keys, user) reaches the guest
-	// only through a cloud-init drive, so the clone gets one whenever any of
-	// them is set: on the request's storage, else the primary disk's, else the
+	// The cloud-init settings (user-data, SSH keys) reach the guest only
+	// through a cloud-init drive, so the clone gets one whenever user-data or
+	// SSH keys are set: on the request's storage, else the primary disk's, else the
 	// operator's (R33); then what the clone's own cloud-init drive, if the
 	// template had one, needs (cloudInitChange keeps the slot the drive is
 	// really in).
@@ -438,7 +438,7 @@ func (p *Provider) configureClonedVM(ctx context.Context, req *providerv1.Create
 	if vmConfig.CIUser != "" {
 		reconfigValues.Set("ciuser", vmConfig.CIUser)
 	}
-	// Boot from the primary disk only (cloneBootOrder); a clone whose config
+	// Boot from the boot disk only (cloneBootOrder); a clone whose config
 	// shows no disk keeps the boot order the template gave it.
 	if boot := cloneBootOrder(cfg); boot != "" {
 		reconfigValues.Set(pveConfigKeyBoot, boot)
@@ -1703,7 +1703,7 @@ func (p *Provider) configDiskCapacities(config map[string]interface{}) []*provid
 			continue
 		}
 		parts := strings.Split(value, ",")
-		if slices.Contains(parts, "media=cdrom") || strings.Contains(parts[0], "cloudinit") {
+		if slices.Contains(parts, pveMediaCDROM) || strings.Contains(parts[0], "cloudinit") {
 			continue
 		}
 		c := &providerv1.DiskCapacity{DiskId: k, Path: parts[0]}

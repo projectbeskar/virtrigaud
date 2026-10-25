@@ -1595,6 +1595,16 @@ func configView(vm *VM, vmid int) map[string]interface{} {
 	return config
 }
 
+const (
+	// configKeyBoot is the VM config key of the boot options
+	// ("order=<device>[;<device>...]").
+	configKeyBoot = "boot"
+	// configKeySSHKeys is the VM config key of the cloud-init SSH keys.
+	configKeySSHKeys = "sshkeys"
+	// bootOrderPrefix starts the order list of a boot value.
+	bootOrderPrefix = "order="
+)
+
 // modifiedConfigMessage is PVE's answer to a config update whose digest is
 // not the config's current one.
 const modifiedConfigMessage = "detected modified configuration - file changed by other user? Try again."
@@ -1656,9 +1666,9 @@ func (s *Server) handleReconfigureVM(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	boot, setBoot := r.PostForm["boot"]
+	_, setBoot := r.Form[configKeyBoot]
 	if setBoot {
-		if err := checkBootOrder(r.PostForm.Get("boot"), configView(vm, vmid), r.PostForm); err != nil {
+		if err := checkBootOrder(r.Form.Get(configKeyBoot), configView(vm, vmid), r.Form); err != nil {
 			s.writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
@@ -1705,11 +1715,15 @@ func (s *Server) handleReconfigureVM(w http.ResponseWriter, r *http.Request) {
 		vm.Config[key] = value
 	}
 
-	if setBoot {
+	// The boot order and the SSH keys, as written, so a test can read them.
+	for _, key := range []string{configKeyBoot, configKeySSHKeys} {
+		if _, ok := r.Form[key]; !ok {
+			continue
+		}
 		if vm.Config == nil {
 			vm.Config = map[string]string{}
 		}
-		vm.Config["boot"] = boot[0]
+		vm.Config[key] = r.Form.Get(key)
 	}
 
 	if _, ok := r.Form["description"]; ok {
@@ -1740,7 +1754,7 @@ func checkBootOrder(boot string, current map[string]interface{}, form url.Values
 		deleted[strings.TrimSpace(key)] = true
 	}
 	for _, part := range strings.Split(boot, ",") {
-		order, ok := strings.CutPrefix(strings.TrimSpace(part), "order=")
+		order, ok := strings.CutPrefix(strings.TrimSpace(part), bootOrderPrefix)
 		if !ok {
 			continue
 		}
