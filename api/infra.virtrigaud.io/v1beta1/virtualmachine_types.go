@@ -414,9 +414,8 @@ type VirtualMachineStatus struct {
 	// +optional
 	LastTaskRef string `json:"lastTaskRef,omitempty"`
 
-	// Provider contains provider-specific details the provider reported when the
-	// VM was adopted from the hypervisor. It is empty for VMs the operator
-	// created.
+	// Provider contains provider-specific details the provider reported when it
+	// last described the VM (and, for an adopted VM, when it was adopted).
 	// +optional
 	// +kubebuilder:pruning:PreserveUnknownFields
 	Provider map[string]string `json:"provider,omitempty"`
@@ -565,9 +564,8 @@ type PlacementStatus struct {
 
 	// MemoryCeilingMiB is the memory the VM's domain may reach on its host
 	// beyond its current allocation, recorded when its create was scheduled: the
-	// balloon maximum
-	// provisioned for a VMClass with memory hot-add (4× the initial memory), or
-	// 0 when none was provisioned. A guest can deflate its balloon up to it, so
+	// balloon maximum provisioned for a VMClass with memory hot-add (4× the
+	// initial memory), or 0 when none was provisioned. A guest can deflate its balloon up to it, so
 	// the clustered accounting counts the VM's memory at the larger of this and
 	// its current size. It is kept when the VM is bound. Unset means unknown (a
 	// VM scheduled by an older manager): the VMClass's hot-add setting is used

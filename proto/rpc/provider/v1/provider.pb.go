@@ -445,12 +445,14 @@ type CreateRequest struct {
 	// Additive and backward-compatible.
 	TargetHostId string `protobuf:"bytes,10,opt,name=target_host_id,json=targetHostId,proto3" json:"target_host_id,omitempty"`
 	// owner identifies the Kubernetes VirtualMachine this create is performed
-	// for (uid, namespace and name). The libvirt, vSphere, Proxmox and mock
-	// providers stamp the owner on the VM they create. When a VM of the
-	// requested name already exists, the create is an idempotent success only if
-	// that VM carries this owner's uid; otherwise the provider fails with
-	// ALREADY_EXISTS instead of binding to another tenant's VM. A provider that
-	// does not stamp ignores it. An unset owner (a manager that predates the
+	// for (uid, namespace and name). The libvirt, vSphere and Proxmox providers
+	// stamp the owner on the VM they create. When a VM of the requested name
+	// already exists, libvirt and vSphere treat the create as an idempotent
+	// success only if that VM carries this owner's uid, and otherwise fail with
+	// ALREADY_EXISTS instead of binding to another tenant's VM. Proxmox leaves a
+	// same-named VM that carries another stamp or none alone and creates a new
+	// VM beside it, and refuses only when it cannot tell which VM is this
+	// owner's. A provider that does not stamp ignores the field. An unset owner (a manager that predates the
 	// field) never authorizes binding to an existing VM. The manager sets it on
 	// every create from the VirtualMachine's uid, namespace and name. Additive
 	// and backward-compatible.
@@ -993,9 +995,10 @@ type TaskResponse struct {
 	// contract. Of the built-in providers only libvirt sets it. For a VM on a
 	// clustered Provider the manager treats a successful Reconfigure without it
 	// as not honest: it counts the VM at the larger of its recorded and
-	// requested size and holds further resizes
-	// (Reconfiguring=False, reason ProviderLacksHonestReconfigure). Set only on
-	// Reconfigure responses. Additive and backward-compatible.
+	// requested size and sends the Reconfigure again until the marker is set.
+	// (A provider that does not report supports_honest_reconfigure is not asked
+	// to resize at all: Reconfiguring=False, reason
+	// ProviderLacksHonestReconfigure.) Set only on Reconfigure responses. Additive and backward-compatible.
 	HonestResult bool `protobuf:"varint,3,opt,name=honest_result,json=honestResult,proto3" json:"honest_result,omitempty"`
 }
 
@@ -1392,7 +1395,8 @@ type SnapshotCreateRequest struct {
 	// backward-compatible.
 	Owner *ObjectIdentity `protobuf:"bytes,6,opt,name=owner,proto3" json:"owner,omitempty"`
 	// request_token identifies the request object this snapshot is created for
-	// (the VMSnapshot's uid), so a retry of the same request can find the
+	// (the VMSnapshot's uid; for a snapshot a VMMigration takes, the VMMigration's
+	// uid with a retry suffix), so a retry of the same request can find the
 	// snapshot an earlier attempt made instead of making a second one, and a
 	// snapshot of the same name left by another request (an earlier VMSnapshot
 	// of that name) is never taken for it. Providers that do not retry
@@ -2232,10 +2236,13 @@ func (x *PreparedArtifact) GetReused() bool {
 //
 // transfer_mode selects who touches the bytes:
 //   - "relay":  host -> provider pod -> backend (the provider pod stages the
-//     bytes through a mounted PVC or streams them to S3).
+//     bytes through a mounted PVC or streams them to S3). The nfs
+//     backend ignores transfer_mode: libvirt and Proxmox run
+//     qemu-img against the nfs:// URL on the hypervisor host, and
+//     vSphere in the provider pod.
 //   - "direct": host -> backend, with no provider-pod hop. No built-in
-//     provider implements it; a provider rejects a mode it does not
-//     support with InvalidArgument.
+//     provider implements it; with the pvc and s3 backends a provider
+//     rejects a mode it does not support with InvalidArgument.
 //   - "auto":   the manager resolves it to "relay" before it sends the
 //     request.
 //
@@ -2486,8 +2493,8 @@ type ImportDiskRequest struct {
 	TransferMode       string            `protobuf:"bytes,9,opt,name=transfer_mode,json=transferMode,proto3" json:"transfer_mode,omitempty"`                                                                   // Transfer mode: "relay" (the manager resolves "auto" to "relay")
 	StorageOptionsJson string            `protobuf:"bytes,10,opt,name=storage_options_json,json=storageOptionsJson,proto3" json:"storage_options_json,omitempty"`                                              // JSON-encoded, non-secret backend options (s3: bucket, endpoint, region, prefix, usePathStyle; nfs: server, export, path, uid, gid); empty for pvc
 	// target_vm names the Kubernetes VirtualMachine the disk is imported for (a
-	// VMMigration's target): its namespace, name and uid. A single-host or
-	// thin-client provider ignores the uid, which is empty because the
+	// VMMigration's target): its namespace, name and uid. A provider that is not
+	// clustered ignores the uid, which is empty because the
 	// VirtualMachine does not exist yet. A clustered provider requires uid (a
 	// canonical UUID): the migration creates its target VirtualMachine first,
 	// and the uid classifies a domain of the same name already on the landing
@@ -2496,8 +2503,9 @@ type ImportDiskRequest struct {
 	// derives the landing name from it with the same rule its Create uses
 	// (libvirt: "<namespace>.<name>-migrated"), so the provider owns the naming
 	// rule. The landing path is returned in path, which the manager hands back
-	// to the VM unchanged. Other providers ignore it, and an unset value keeps
-	// the target_name naming. Additive and backward-compatible.
+	// to the VM unchanged. vSphere and Proxmox require it and refuse an import without
+	// it (InvalidSpec); libvirt falls back to the target_name naming when it is
+	// unset. Additive and backward-compatible.
 	TargetVm *ObjectIdentity `protobuf:"bytes,11,opt,name=target_vm,json=targetVm,proto3" json:"target_vm,omitempty"`
 	// max_virtual_size_bytes is the disk-size limit of the target Provider for
 	// this import (the manager's --max-disk-size, lowered by the Provider's
@@ -3809,8 +3817,7 @@ type GetCapabilitiesResponse struct {
 	SupportsRoutedAdoption bool `protobuf:"varint,21,opt,name=supports_routed_adoption,json=supportsRoutedAdoption,proto3" json:"supports_routed_adoption,omitempty"`
 	// supports_list_owner_filter reports that ListVMs honours the owner filter
 	// (ListVMsRequest.owner_namespace / owner_name): it returns only the VMs of
-	// that VirtualMachine (the ones the provider would name for it, or whose
-	// owner stamp records its namespace and name) and marks the answer with
+	// that VirtualMachine (the ones the provider would name for it) and marks the answer with
 	// ListVMsResponse.owner_filter_applied. The manager runs its pre-schedule
 	// uniqueness check only through a clustered provider that reports it, and
 	// holds a clustered VM's first placement otherwise. False on single-host and

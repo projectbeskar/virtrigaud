@@ -144,8 +144,8 @@ type VSphereImageSource struct {
 
 	// OVAURL is the URL of an OVA file to import as a vSphere template. The
 	// vSphere provider downloads it and imports it when the first VM that uses the
-	// image is created; the template is named after the VMImage's namespace, name
-	// and UID and is reused by later VMs. The scheme must be http or https, and a
+	// image is created; the template is named after the VMImage's namespace, name,
+	// UID and source and is reused by later VMs. The scheme must be http or https, and a
 	// bare .ovf is refused when the image is prepared (publish an .ova). The
 	// provider refuses addresses such as loopback and link-local ones. Keep
 	// credentials out of the URL: it is part of the VMImage, which other
@@ -600,7 +600,6 @@ type ImagePrepare struct {
 	// the VMImage is marked Failed or Pending. It applies only to a source that
 	// must be imported (a vSphere ovaURL, a libvirt url); an image that names
 	// something already on the hypervisor is used as written whatever this says.
-	// See docs/image-preparation.md.
 	// +optional
 	// +kubebuilder:default="Import"
 	OnMissing ImageMissingAction `json:"onMissing,omitempty"`
@@ -616,7 +615,8 @@ type ImagePrepare struct {
 	// provider uses it as the time limit of the download. The manager and the
 	// vSphere and libvirt providers also use twice this value, with a floor of
 	// two hours, as the time after which a prepare started by another request
-	// that has not finished is treated as abandoned (stalled).
+	// that has not finished is treated as abandoned (stalled). The libvirt and
+	// vSphere providers cap the value at 7 days.
 	// +optional
 	// +kubebuilder:default="30m"
 	Timeout *metav1.Duration `json:"timeout,omitempty"`
@@ -774,7 +774,9 @@ type ImageOptimization struct {
 // importProgress are not populated in this release.
 type VMImageStatus struct {
 	// Ready is true once the image is prepared on at least one Provider (see
-	// providerStatus for the state on each).
+	// providerStatus for the state on each). It can turn false again while a
+	// VirtualMachine on another Provider is held by prepare.onMissing Fail or
+	// Wait.
 	// +optional
 	Ready bool `json:"ready,omitempty"`
 

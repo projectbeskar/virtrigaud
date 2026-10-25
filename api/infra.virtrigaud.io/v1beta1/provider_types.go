@@ -136,16 +136,16 @@ type ProviderTLSSpec struct {
 	// InsecureSkipVerify makes the manager skip verification of the provider's
 	// gRPC server certificate when it connects to the provider pod (the manager
 	// still presents its client certificate). It is read only by the manager,
-	// when it builds its TLS client config for this Provider from SecretRef
-	// (internal/runtime/remote/resolver.go), and only while tls.enabled is true.
+	// when it builds its TLS client config for this Provider from SecretRef, and
+	// only while tls.enabled is true.
 	// It does not change anything on the provider pod and has no effect on the
 	// connection from the provider to the hypervisor; that is the separate
 	// spec.insecureSkipVerify. Defaults to false.
 	//
 	// This is an insecure escape hatch for first bootstrap and labs: with it the
 	// manager cannot tell the real provider from an impostor, which defeats the
-	// server-authentication half of mutual TLS. The manager logs a warning on
-	// every reconcile while it is true.
+	// server-authentication half of mutual TLS. The manager logs a warning each
+	// time it opens a new connection to the provider while this is true.
 	// +optional
 	// +kubebuilder:default=false
 	InsecureSkipVerify bool `json:"insecureSkipVerify,omitempty"`
@@ -345,8 +345,7 @@ type ProviderSpec struct {
 	// InsecureSkipVerify makes the provider pod skip verification of the TLS
 	// certificate of the hypervisor management endpoint (vCenter for vSphere, the
 	// Proxmox VE API for Proxmox). The manager passes it to the provider pod as
-	// the TLS_INSECURE_SKIP_VERIFY environment variable
-	// (internal/controller/provider_controller.go), and only the vSphere and
+	// the TLS_INSECURE_SKIP_VERIFY environment variable, and only the vSphere and
 	// Proxmox providers read it; the libvirt provider ignores it (for libvirt SSH
 	// hosts see the LIBVIRT_INSECURE_SKIP_HOST_KEY_VERIFICATION environment
 	// variable). Defaults to false.
@@ -377,8 +376,8 @@ type ProviderSpec struct {
 	Runtime *ProviderRuntimeSpec `json:"runtime"`
 
 	// HealthCheck defines health checking configuration. Accepted but not acted
-	// on in this release: status.healthy is true while the provider Deployment
-	// has a ready replica, whatever these settings say.
+	// on in this release: status.healthy follows the readiness of the provider
+	// Deployment, whatever these settings say.
 	// +optional
 	HealthCheck *ProviderHealthCheck `json:"healthCheck,omitempty"`
 
@@ -475,8 +474,8 @@ type ConnectionPooling struct {
 
 // ProviderStatus defines the observed state of Provider
 type ProviderStatus struct {
-	// Healthy is true while the provider Deployment has at least one ready
-	// replica (the ProviderAvailable condition is True).
+	// Healthy is true once the provider Deployment has reported a ready replica
+	// (the ProviderAvailable condition is True).
 	// +optional
 	Healthy bool `json:"healthy,omitempty"`
 

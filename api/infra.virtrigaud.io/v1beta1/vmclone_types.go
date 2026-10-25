@@ -163,8 +163,8 @@ type CloneOptions struct {
 	// Type specifies the clone type. FullClone (the default) copies the
 	// disks. LinkedClone makes a copy-on-write clone that keeps depending on
 	// the source's disk; it is sent only to a Provider that reports
-	// linked-clone support, which today is vSphere, and on libvirt, Proxmox
-	// and mock the VMClone fails with reason LinkedCloneUnsupported.
+	// linked-clone support (vSphere and Proxmox; the mock provider accepts it
+	// too). On libvirt the VMClone fails with reason LinkedCloneUnsupported.
 	// InstantClone is accepted but not acted on in this release: a full clone
 	// is made. status.actualCloneType reports what was made.
 	// +optional
@@ -199,9 +199,12 @@ type CloneOptions struct {
 	Timeout *metav1.Duration `json:"timeout,omitempty"`
 
 	// RetryPolicy defines retry behavior for failed clones. Accepted but not
-	// acted on in this release. The controller retries a clone only when the
-	// provider reports that it did nothing, with a built-in backoff (15
-	// seconds doubling to 5 minutes); any other failure is terminal.
+	// acted on in this release. The controller re-sends a Clone with a built-in
+	// backoff (15 seconds doubling to 5 minutes) when the provider reports that
+	// it did nothing, or when the outcome is unknown and the provider recognises
+	// a clone it already made. It waits, without failing, for a running source
+	// or a blocked host. A definite refusal fails the clone, and Failed is
+	// terminal.
 	// +optional
 	RetryPolicy *CloneRetryPolicy `json:"retryPolicy,omitempty"`
 
@@ -227,7 +230,8 @@ const (
 	// disks.
 	CloneTypeFullClone CloneType = "FullClone"
 	// CloneTypeLinkedClone creates a copy-on-write clone that depends on the
-	// source's disk. Only the vSphere provider supports it.
+	// source's disk. The vSphere and Proxmox providers support it; libvirt does
+	// not.
 	CloneTypeLinkedClone CloneType = "LinkedClone"
 	// CloneTypeInstantClone is accepted but not acted on in this release: a
 	// full clone is made.
@@ -336,8 +340,8 @@ type ClonePerformanceOptions struct {
 type VMCustomization struct {
 	// Hostname sets the hostname of the cloned machine, through the clone's
 	// cloud-init identity. It is applied by libvirt (when the source boots
-	// from a NoCloud seed) and vSphere (when the source carries cloud-init
-	// guestinfo keys); Proxmox and mock do not apply it. When unset, the
+	// from a NoCloud seed) and vSphere (when the source carries a cloud-init
+	// local-hostname guestinfo key or a hostname in its guestinfo user-data); Proxmox and mock do not apply it. When unset, the
 	// hostname is the target VirtualMachine's name.
 	// +optional
 	// +kubebuilder:validation:MaxLength=255
@@ -673,7 +677,8 @@ type VMCloneStatus struct {
 	// +optional
 	TaskRef string `json:"taskRef,omitempty"`
 
-	// StartTime is when the provider accepted the Clone call.
+	// StartTime is when the Clone call, which the provider then accepted, was
+	// sent.
 	// +optional
 	StartTime *metav1.Time `json:"startTime,omitempty"`
 

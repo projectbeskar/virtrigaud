@@ -76,18 +76,19 @@ type MigrationSource struct {
 
 	// CreateSnapshot indicates whether to snapshot the source VM before
 	// exporting its disk (default true). A snapshot the migration took is deleted
-	// after the migration succeeds, and after it fails for good, unless
-	// options.cleanupPolicy is Never. When false the Snapshotting phase is
+	// after the migration succeeds, after it fails for good, and when the
+	// VMMigration is deleted, unless options.cleanupPolicy is Never. When false the Snapshotting phase is
 	// skipped and the disk is exported without a snapshot.
 	// +optional
 	// +kubebuilder:default=true
 	CreateSnapshot bool `json:"createSnapshot"`
 
 	// PowerOffBeforeMigration sets the source VirtualMachine's spec.powerState to
-	// Off and waits until it reports Off before the snapshot and export. A
-	// vSphere source must be powered off (a running VM's disk is locked and
-	// cannot be exported). The migration does not power the source on again; its
-	// spec.powerState stays Off.
+	// Off and waits, up to 10 minutes, until the provider reports it Off before
+	// the snapshot and export; the migration fails if it is not. A vSphere
+	// source should be powered off, since exporting a running vSphere VM fails
+	// (its disk is locked). The migration does not power the source on again;
+	// its spec.powerState stays Off.
 	// +optional
 	// +kubebuilder:default=false
 	PowerOffBeforeMigration bool `json:"powerOffBeforeMigration,omitempty"`
@@ -193,14 +194,17 @@ type MigrationOptions struct {
 	DiskFormat string `json:"diskFormat,omitempty"`
 
 	// Compress asks the source provider to compress the exported disk. It is
-	// sent with the export request; whether the provider honours it is reported
-	// in its status.reportedCapabilities.supportsExportCompression.
+	// sent with the export request and a provider may ignore it: it has no
+	// effect on the libvirt s3 and nfs exports or on vSphere exports; Proxmox
+	// honours it for qcow2.
 	// +optional
 	// +kubebuilder:default=false
 	Compress bool `json:"compress,omitempty"`
 
-	// VerifyChecksums asks the target provider to verify the imported disk
-	// against the checksum the source export reported (default true).
+	// VerifyChecksums asks the target provider to verify a pvc import against
+	// the checksum the source export reported (default true). Setting it to
+	// false only disables that pvc check: s3 imports always verify when the
+	// export reported a checksum, and nfs carries no checksum.
 	// +optional
 	// +kubebuilder:default=true
 	VerifyChecksums bool `json:"verifyChecksums,omitempty"`
@@ -222,13 +226,17 @@ type MigrationOptions struct {
 	// CleanupPolicy decides when the artifacts the migration created are removed.
 	// The source snapshot the migration took is deleted when the migration
 	// reaches Ready, and when it fails for good, unless the policy is Never. The
-	// staged disk of an nfs or s3 migration (a pvc migration's PVC is deleted
-	// with the VMMigration) is deleted, with OnSuccess (the default), when the
-	// migration reaches Ready and when the VMMigration is deleted; a migration
-	// that failed for good keeps it until the VMMigration is deleted. Always
-	// also deletes it when the migration fails for good. Never keeps the staged
-	// disk and the snapshot in every case. A migration fails for good when it
-	// has no retryPolicy, or its retries are used up.
+	// staged disk of an nfs or s3 migration is deleted, with OnSuccess (the
+	// default), when the migration reaches Ready and when the VMMigration is
+	// deleted; a migration that failed for good keeps it until the VMMigration
+	// is deleted. Always also deletes it when the migration fails for good. The
+	// disk a failed import landed on the target is deleted when the VMMigration
+	// is deleted (OnSuccess) or also when the migration fails for good (Always);
+	// the disk of a migration that reached Ready belongs to the target VM and is
+	// never deleted. Never keeps the snapshot, the staged disk and the landed
+	// disk. The PVC a pvc migration created is deleted with the VMMigration
+	// whatever the policy. A migration fails for good when it has no
+	// retryPolicy, or its retries are used up.
 	// +optional
 	// +kubebuilder:default="OnSuccess"
 	// +kubebuilder:validation:Enum=Always;OnSuccess;Never
@@ -298,7 +306,9 @@ type MigrationStorage struct {
 	// supportedExportBackends and the target provider's supportedImportBackends
 	// must list the backend, or the migration fails at the Validating phase.
 	// The pvc backend is not supported when the source or the target Provider is
-	// clustered (topology: cluster); use nfs or s3 there.
+	// clustered (topology: cluster); use nfs or s3 there. It also requires the
+	// VMMigration and both Providers to be in one namespace, because the PVC is
+	// mounted into both provider pods.
 	// +kubebuilder:validation:Enum=pvc;nfs;s3
 	// +kubebuilder:default=pvc
 	Type string `json:"type"`
@@ -336,7 +346,8 @@ type S3StorageConfig struct {
 	Bucket string `json:"bucket"`
 	// Endpoint overrides the S3 endpoint (empty = AWS default; set for MinIO/Ceph RGW).
 	// The host is checked by the controller before it is used: loopback,
-	// link-local and cloud-metadata addresses are refused, and the operator can
+	// link-local (including the 169.254.169.254 cloud-metadata address),
+	// unspecified and multicast addresses are refused, and the operator can
 	// restrict the allowed hosts further.
 	// +optional
 	// +kubebuilder:validation:MaxLength=263
@@ -396,8 +407,11 @@ type NFSStorageConfig struct {
 // PVCStorageConfig defines PVC storage configuration
 type PVCStorageConfig struct {
 	// Name of an existing PVC, in the VMMigration's namespace, to use for
-	// migration storage. If not specified, the controller creates a PVC for the
-	// migration and deletes it with the VMMigration.
+	// migration storage. The PVC must carry the label
+	// virtrigaud.io/component=migration-storage, which is how its owner agrees
+	// to its use; the controller refuses an unlabelled PVC. If not specified,
+	// the controller creates a labelled PVC for the migration and deletes it with
+	// the VMMigration (a PVC named here is left for its owner).
 	// +optional
 	Name string `json:"name,omitempty"`
 
@@ -547,8 +561,9 @@ type VMMigrationStatus struct {
 	// +optional
 	Progress *MigrationProgress `json:"progress,omitempty"`
 
-	// DiskInfo contains information about the migrated disk, recorded as the
-	// export and import complete.
+	// DiskInfo contains information about the migrated disk, recorded when the
+	// ExportDisk and ImportDisk calls return (which can be before an
+	// asynchronous task finishes).
 	// +optional
 	DiskInfo *MigrationDiskInfo `json:"diskInfo,omitempty"`
 
@@ -626,13 +641,16 @@ const (
 
 // Cleanup policy values for MigrationOptions.CleanupPolicy. These mirror the
 // +kubebuilder:validation:Enum on that field; they exist as Go constants so the
-// controller never compares against bare string literals (CLAUDE.md rule).
+// controller never compares against bare string literals.
 const (
-	// CleanupPolicyAlways removes migration-created artifacts regardless of the
-	// migration's terminal outcome.
+	// CleanupPolicyAlways removes migration-created artifacts (the source
+	// snapshot, the staged disk and the landed disk) on every terminal outcome,
+	// including a migration that fails for good.
 	CleanupPolicyAlways = "Always"
-	// CleanupPolicyOnSuccess removes migration-created artifacts only when the
-	// migration completes successfully. This is the default.
+	// CleanupPolicyOnSuccess removes the source snapshot and the staged disk when
+	// the migration completes, and the snapshot also when it fails for good; a
+	// migration that fails for good keeps its staged and landed disks until the
+	// VMMigration is deleted. This is the default.
 	CleanupPolicyOnSuccess = "OnSuccess"
 	// CleanupPolicyNever retains all migration-created artifacts; the user opts
 	// out of cleanup entirely.
@@ -695,7 +713,7 @@ type MigrationDiskInfo struct {
 	// the target provider's ImportDisk (e.g. "[datastore1] disk-id/disk-id.vmdk"
 	// for vSphere, "/var/lib/libvirt/images/disk-id.qcow2" for libvirt). It is
 	// the authoritative location the created target VirtualMachine attaches; the
-	// controller copies it into Spec.ImportedDisk.Path. Empty until the import
+	// controller copies it into the target VirtualMachine's spec.importedDisk.path. Empty until the import
 	// completes.
 	// +optional
 	TargetPath string `json:"targetPath,omitempty"`
@@ -736,7 +754,8 @@ type MigrationStorageInfo struct {
 
 	// CleanedUp is set once the post-migration cleanup (deleting the source
 	// snapshot and, when requested, the source VM) has run for a migration that
-	// reached Ready.
+	// reached Ready. It is also set, with nothing deleted, for a migration that
+	// reached Ready under an earlier release.
 	// +optional
 	CleanedUp bool `json:"cleanedUp,omitempty"`
 
@@ -797,8 +816,8 @@ type MigrationImportTarget struct {
 	// to: the target VirtualMachine's pending host, recorded with ProviderUID
 	// before the import is sent. A re-sent import
 	// and the landed-disk and nfs staged-disk deletes go to this host only.
-	// Empty for a single-host target. Written by the
-	// controller only.
+	// Empty unless the target Provider is clustered (topology: cluster). Written by
+	// the controller only.
 	// +optional
 	// +kubebuilder:validation:MaxLength=253
 	Host string `json:"host,omitempty"`

@@ -197,12 +197,12 @@ spec:
                 type: string
               template:
                 description: |-
-                  Template is the object that describes the VM that will be created.
+                  Template describes the VMs the set is meant to run.
                   Accepted but not acted on in this release.
                 properties:
                   metadata:
-                    description: ObjectMeta is metadata for VMs created from this
-                      template
+                    description: ObjectMeta is the metadata of the VMs the template
+                      describes
                     type: object
                   spec:
                     description: Spec is the VM specification. Accepted but not acted

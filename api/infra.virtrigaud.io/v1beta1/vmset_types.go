@@ -38,7 +38,7 @@ type VMSetSpec struct {
 	// Accepted but not acted on in this release.
 	Selector *metav1.LabelSelector `json:"selector"`
 
-	// Template is the object that describes the VM that will be created.
+	// Template describes the VMs the set is meant to run.
 	// Accepted but not acted on in this release.
 	Template VMSetTemplate `json:"template"`
 
@@ -89,7 +89,7 @@ type VMSetSpec struct {
 // VMSetTemplate defines the template for VMs in a VMSet. Accepted but not
 // acted on in this release.
 type VMSetTemplate struct {
-	// ObjectMeta is metadata for VMs created from this template
+	// ObjectMeta is the metadata of the VMs the template describes
 	// +optional
 	metav1.ObjectMeta `json:"metadata,omitempty"`
 

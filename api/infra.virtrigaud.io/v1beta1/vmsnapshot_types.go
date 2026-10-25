@@ -85,12 +85,13 @@ type SnapshotConfig struct {
 	Description string `json:"description,omitempty"`
 
 	// IncludeMemory indicates whether to include the VM's memory state in the
-	// snapshot. vSphere captures it only for a powered-on VM; libvirt takes a
-	// memory snapshot of a running domain and falls back to a disk-only snapshot
-	// when the domain is not running; Proxmox saves the VM state. When the manager
-	// runs with --enforce-provider-capabilities and the Provider does not report
-	// memory snapshots, the VMSnapshot goes Failed with reason
-	// UnsupportedByProvider and no provider call is made.
+	// snapshot. libvirt takes a memory snapshot of a running domain and falls back
+	// to a disk-only snapshot when the domain is not running; Proxmox saves the
+	// VM state; vSphere asks for the memory state whatever the power state and
+	// may refuse it for a powered-off VM. When the manager runs with
+	// --enforce-provider-capabilities and the Provider reports that it does not
+	// support memory snapshots, the VMSnapshot goes Failed with reason
+	// UnsupportedByProvider and no snapshot is attempted.
 	// +optional
 	// +kubebuilder:default=false
 	IncludeMemory bool `json:"includeMemory,omitempty"`
@@ -537,8 +538,7 @@ const (
 // VMSnapshot takes one snapshot of a VirtualMachine, through the VM's Provider,
 // and records the result. Deleting the VMSnapshot deletes the provider
 // snapshot. The VM must be in the VMSnapshot's namespace. To revert a VM to a
-// snapshot, set spec.snapshot.revertToRef on the VirtualMachine (see
-// docs/vm-snapshot-revert.md).
+// snapshot, set spec.snapshot.revertToRef on the VirtualMachine.
 // +kubebuilder:storageversion
 type VMSnapshot struct {
 	metav1.TypeMeta   `json:",inline"`

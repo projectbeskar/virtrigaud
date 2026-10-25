@@ -521,9 +521,9 @@ spec:
                         type: integer
                       portgroup:
                         description: |-
-                          Portgroup is the name of the vSphere network (a standard or distributed
-                          portgroup) that the VM's network adapter is attached to. The vSphere
-                          provider uses it for the first entry of the VM's spec.networks only.
+                          Portgroup is the name of the vSphere network that the added vmxnet3
+                          adapter is attached to. The vSphere provider uses it for the first entry
+                          of the VM's spec.networks only.
                         maxLength: 255
                         type: string
                       security:

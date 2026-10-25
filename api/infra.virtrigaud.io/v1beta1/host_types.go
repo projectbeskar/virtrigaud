@@ -115,10 +115,12 @@ type HostSpec struct {
 	// visibility, zone/rack, e.g. {"storage.virtrigaud.io/pool-nfs01":"true",
 	// "net.virtrigaud.io/br-vlan100":"true","topology.virtrigaud.io/rack":"r7"}.
 	// The scheduler treats them as hard constraints: a host is a candidate for a
-	// VM only if it carries net.virtrigaud.io/<network>="true" for every network
-	// the VM attaches to, and the labels a VMPlacementPolicy nodeSelector
-	// requires. storage.virtrigaud.io/pool-<name> labels are accepted but a VM
-	// create is not yet checked against them.
+	// VM only if it carries net.virtrigaud.io/<network>="true" for every
+	// network the VM's VMNetworkAttachments name (<network> is the attachment's
+	// libvirt networkName, or its bridge name when networkName is empty), and
+	// the labels the VM's VMPlacementPolicy hard nodeSelector requires.
+	// storage.virtrigaud.io/pool-<name> labels are accepted, but a VM create is
+	// not checked against them.
 	// +optional
 	Labels map[string]string `json:"labels,omitempty"`
 

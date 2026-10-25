@@ -23,7 +23,8 @@ import (
 
 // VMClassSpec defines the desired state of VMClass. A VMClass is a reusable
 // hardware profile that VirtualMachines name in spec.classRef. cpu and
-// memory are acted on by every provider; the other fields are acted on only
+// memory are acted on by the vSphere, libvirt and Proxmox providers (the mock
+// provider ignores the class); the other fields are acted on only
 // by the providers named in their descriptions, and some are accepted but
 // not acted on in this release.
 type VMClassSpec struct {
@@ -62,9 +63,10 @@ type VMClassSpec struct {
 	Firmware FirmwareType `json:"firmware,omitempty"`
 
 	// DiskDefaults provides default disk settings. Only size is acted on:
-	// libvirt creates the root disk at that size (20GiB when diskDefaults is
-	// unset) and vSphere grows the root disk to it after creation (it never
-	// shrinks a disk). type, iops and storageClass are accepted but not acted
+	// libvirt sizes the root disk to it (20GiB when diskDefaults is unset; a
+	// disk grown from an image is never shrunk, and libvirt also grows the root
+	// disk to it on a later reconfigure) and vSphere grows the root disk to it
+	// after creation (it never shrinks a disk). type, iops and storageClass are accepted but not acted
 	// on in this release. Proxmox and mock ignore the block.
 	// +optional
 	DiskDefaults *DiskDefaults `json:"diskDefaults,omitempty"`
@@ -136,9 +138,9 @@ const (
 	FirmwareTypeBIOS FirmwareType = "BIOS"
 	// FirmwareTypeUEFI indicates UEFI firmware
 	FirmwareTypeUEFI FirmwareType = "UEFI"
-	// FirmwareTypeEFI is accepted by the schema as an alias for UEFI, but the
-	// vSphere provider recognises only UEFI: there, EFI selects BIOS firmware
-	// (unless secure boot or a TPM forces EFI).
+	// FirmwareTypeEFI is accepted by the schema, but the vSphere provider
+	// recognises only UEFI: there, EFI selects BIOS firmware (unless secure boot
+	// or a TPM forces EFI).
 	FirmwareTypeEFI FirmwareType = "EFI"
 )
 
@@ -244,8 +246,8 @@ type PerformanceProfile struct {
 // VMClassSpec.SecurityProfile for which fields are acted on.
 type SecurityProfile struct {
 	// SecureBoot enables secure boot. vSphere forces EFI firmware and enables
-	// secure boot; libvirt boots the VM from secure-boot OVMF firmware on a
-	// q35 machine type. Proxmox and mock ignore it.
+	// secure boot; libvirt requests secure-boot OVMF firmware on a q35
+	// machine type. Proxmox and mock ignore it.
 	// +optional
 	// +kubebuilder:default=false
 	SecureBoot bool `json:"secureBoot,omitempty"`
@@ -265,7 +267,7 @@ type SecurityProfile struct {
 	TPMVersion string `json:"tpmVersion,omitempty"`
 
 	// VTDEnabled enables Intel VT-d or AMD-Vi. vSphere sets vvtd.enable;
-	// libvirt adds an emulated IOMMU. Proxmox and mock ignore it.
+	// libvirt requests an emulated IOMMU. Proxmox and mock ignore it.
 	// +optional
 	// +kubebuilder:default=false
 	VTDEnabled bool `json:"vtdEnabled,omitempty"`
@@ -306,9 +308,10 @@ type DiskDefaults struct {
 	// +kubebuilder:default="thin"
 	Type DiskType `json:"type,omitempty"`
 
-	// Size specifies the default root disk size. libvirt creates the root
-	// disk at this size and vSphere grows the root disk to it after creation
-	// (it never shrinks a disk); Proxmox and mock ignore it. It must be
+	// Size specifies the default root disk size. libvirt sizes the root disk
+	// to it (a disk grown from an image is never shrunk) and vSphere grows the
+	// root disk to it after creation (it never shrinks a disk); Proxmox and mock
+	// ignore it. It must be
 	// non-negative and below 1Pi: every value below 900Ti written in bytes,
 	// k/Ki, M/Mi, G/Gi or T/Ti is accepted, and nothing at or above 1Pi is.
 	// That is more than ten times the largest single virtual disk vSphere

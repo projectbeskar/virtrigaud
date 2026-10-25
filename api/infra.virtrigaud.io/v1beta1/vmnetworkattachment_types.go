@@ -109,14 +109,14 @@ const (
 )
 
 // VSphereNetworkConfig defines vSphere-specific network settings. Only
-// portgroup is acted on: the vSphere provider attaches the VM's first network
-// (the first entry of spec.networks) to the network of that name with a
-// vmxnet3 adapter. The other fields are accepted but not acted on in this
+// portgroup is acted on: for the first entry of the VM's spec.networks the
+// vSphere provider adds a vmxnet3 adapter on the network of that name; the
+// template's own adapters are left unchanged. The other fields are accepted but not acted on in this
 // release.
 type VSphereNetworkConfig struct {
-	// Portgroup is the name of the vSphere network (a standard or distributed
-	// portgroup) that the VM's network adapter is attached to. The vSphere
-	// provider uses it for the first entry of the VM's spec.networks only.
+	// Portgroup is the name of the vSphere network that the added vmxnet3
+	// adapter is attached to. The vSphere provider uses it for the first entry
+	// of the VM's spec.networks only.
 	// +optional
 	// +kubebuilder:validation:MaxLength=255
 	Portgroup string `json:"portgroup,omitempty"`
@@ -272,7 +272,7 @@ type TrafficShapingConfig struct {
 // networkName, bridge.name and model are acted on; driver, filterRef,
 // bridge.stp and bridge.delay are accepted but not acted on in this release.
 // On a clustered Provider (spec.topology: cluster) the scheduler also
-// requires a Host that carries the label net.virtrigaud.io/<name> set to
+// requires a Host whose spec.labels carry net.virtrigaud.io/<name> set to
 // "true", where <name> is networkName, or bridge.name when networkName is
 // empty.
 type LibvirtNetworkConfig struct {
@@ -877,7 +877,7 @@ type VMNetworkAttachmentList struct {
 }
 
 // ProxmoxNetworkConfig defines Proxmox VE-specific network settings. bridge,
-// model and vlanTag are acted on (see docs/proxmox-networks.md); firewall,
+// model and vlanTag are acted on; firewall,
 // rateLimit and mtu are accepted but not acted on in this release.
 type ProxmoxNetworkConfig struct {
 	// Bridge is the Linux bridge the NIC attaches to, for example vmbr0 or
