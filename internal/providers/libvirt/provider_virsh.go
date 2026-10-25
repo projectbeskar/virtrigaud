@@ -891,13 +891,18 @@ func (p *Provider) deleteExistingDomainChecked(ctx context.Context, vp *VirshPro
 
 	if len(plan.disks) > 0 {
 		log.Printf("INFO Deleting %d disk(s) for VM %s", len(plan.disks), id)
+		removed := 0
 		for _, diskPath := range plan.disks {
 			if err := deleteDiskFile(ctx, vp, diskPath); err != nil {
 				log.Printf("WARN Failed to delete disk %s: %v", diskPath, err)
 				// Continue with other deletions
 			} else {
+				removed++
 				log.Printf("INFO Successfully deleted disk: %s", diskPath)
 			}
+		}
+		if removed > 0 {
+			refreshPoolAfterDelete(ctx, vp)
 		}
 	}
 
@@ -1301,6 +1306,30 @@ func domainDisksOf(ctx context.Context, vp *VirshProvider, domainName string) (*
 		return nil, fmt.Errorf("failed to dump domain XML: %w", err)
 	}
 	return parseDomainDisks(result.Stdout)
+}
+
+// refreshPoolAfterDelete refreshes the provider's default storage pool on vp's
+// host after a VM delete removed disk files (R37): the files are removed with
+// rm, not `virsh vol-delete`, and libvirt keeps listing them as volumes
+// (`virsh vol-list default`) until the pool is refreshed. Best-effort: a
+// refresh only re-reads the pool directory, and a host without the default
+// pool, or a refresh that fails, changes nothing for the delete; the failure
+// is logged at DEBUG (withExpectedFailures) and as one WARN line.
+func refreshPoolAfterDelete(ctx context.Context, vp *VirshProvider) {
+	if _, err := vp.runVirshCommand(withExpectedFailures(ctx), "pool-refresh", defaultStoragePool); err != nil {
+		log.Printf("WARN pool-refresh of the %q pool after a VM delete failed (harmless: its volume list may show the "+
+			"removed disks until the next refresh): exit code %d", defaultStoragePool, virshExitCode(err))
+	}
+}
+
+// virshExitCode returns the exit code of a failed virsh or host command, or -1
+// when err is not one.
+func virshExitCode(err error) int {
+	var ve *VirshError
+	if errors.As(err, &ve) {
+		return ve.ExitCode
+	}
+	return -1
 }
 
 // deleteDiskFile deletes a disk file from vp's libvirt host. diskPath is a
