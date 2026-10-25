@@ -99,7 +99,7 @@ func lookup(obj map[string]interface{}, path string) ([]interface{}, error) {
 			if !rv.IsValid() {
 				continue
 			}
-			if (rv.Kind() == reflect.Interface || rv.Kind() == reflect.Map || rv.Kind() == reflect.Slice || rv.Kind() == reflect.Ptr) && rv.IsNil() {
+			if (rv.Kind() == reflect.Interface || rv.Kind() == reflect.Map || rv.Kind() == reflect.Slice || rv.Kind() == reflect.Pointer) && rv.IsNil() {
 				continue
 			}
 			vals = append(vals, rv.Interface())

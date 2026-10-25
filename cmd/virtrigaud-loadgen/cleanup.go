@@ -163,7 +163,10 @@ func (lg *LoadGenerator) deleteAndWait(ctx context.Context, items []cleanupItem)
 	_ = wait.PollUntilContextCancel(ctx, interval, true, func(ctx context.Context) (bool, error) {
 		var still []cleanupItem
 		for _, item := range pending {
-			cur := item.obj.DeepCopyObject().(client.Object)
+			cur, ok := item.obj.DeepCopyObject().(client.Object)
+			if !ok {
+				continue
+			}
 			err := lg.client.Get(ctx, client.ObjectKeyFromObject(item.obj), cur)
 			if apierrors.IsNotFound(err) || (err == nil && cur.GetUID() != item.uid) {
 				continue
