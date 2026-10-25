@@ -5,6 +5,30 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-10-25 08:00] - Release documentation for v0.4.0 (GA)
+**Author:** @wrkode (William Rizzo)
+
+### Changed
+- `docs/release-notes/next.md`: retitled for v0.4.0 (GA), which ships the code of v0.4.0-rc9. The release-candidate material is folded in: every "Changes since v0.4.0-rcN" section and "About this release candidate" are gone; their user-visible content now lives in "Breaking changes" (one list of actions and one of behaviour changes, no "New since rcN" groups), "Highlights" (new subsections "Snapshots and revert", "Proxmox" and "Addresses, phase and conditions"; the clustered section gains the migration-into-a-clustered-Provider requirements, the host-loss answers and `HostPool.status`; "Security" gains the seed directory and the `VMClone` identity and read-access notes), "Fixes" (one flat list), "Known limitations" and "Upgrade". A new "Validation" section consolidates the lab runs of all nine candidates and lists what was not validated, including the rc9 run (a disk-only snapshot, then a memory snapshot, then the refused and the accepted delete order). "Upgrade" gets one subsection, "Upgrading from a v0.4.0 release candidate", with what each candidate still needs (the per-rc "Upgrade order" sections are gone). The header comment says the file is over GitHub's 125,000-character limit and the published body drops "Fixes".
+- `docs/upgrading.md`: opens for v0.3.11 to v0.4.0 and loses the rc wording in the breaking-change and behaviour-change rows (rc1 and rc2 now read v0.3.11 or "this release"); the three per-rc roll-order bullets are one bullet; new section "Upgrading from a v0.4.0 release candidate" with the per-candidate table.
+- `README.md`, `charts/virtrigaud/README.md`: version references go to v0.4.0 (header, `helm install` and `helm upgrade --version`, provider image tags, the Argo CD and Flux examples of the chart README, "Since v0.3.11" no longer says "not yet released"); the `virtrigaud_queue_depth` deprecation no longer says it is removed in v0.4.0, because it is still exposed.
+- `docs/libvirt-clones.md`, `docs/vm-snapshot-revert.md`: wording correction for the memory-snapshot delete (see Why).
+
+### Added
+- `docs/release-notes/next.md` (Known limitations): V12. On libvirt, a new disk-only snapshot whose name matches an earlier snapshot's leftover overlay file (`<pool>/<domain>-disk.<name>`) fails in libvirt with "external snapshot file for disk vda already exists"; a clustered provider answers it with a generic error, so the `VMSnapshot` never gets a phase and the create is re-sent about once a minute. Workaround: a new snapshot name, or remove the leftover file after verifying that nothing references it. A definite refusal is planned for a later release.
+
+### Fixed
+- Documentation correction for V11 (the old entries above are history and are not rewritten): on libvirt 10.0, deleting an external snapshot block-commits its overlay into the base but does not delete the overlay file. On v0.3.11 and v0.4.0-rc8 or earlier a memory snapshot stored in that overlay was therefore orphaned (its data stayed in the leftover file, unusable) rather than destroyed, and VirtRigaud's overlay cleanup kept the file because the memory snapshot's metadata still referenced it; when nothing references the merged overlay the cleanup removes it. The wording in the release notes, `docs/libvirt-clones.md` (the section "A memory snapshot that was already orphaned" replaces "...whose data was already lost"), `docs/vm-snapshot-revert.md` and `docs/upgrading.md` now says orphaned and unusable. The provider's refusal text still says "would be lost"; no code changed.
+
+### Why
+v0.4.0 GA ships the code of v0.4.0-rc9, so this is the documentation the release needs: notes that read cold for someone coming from v0.3.11 instead of as a candidate-by-candidate history, one place for the actions a release-candidate user still has to take, version references that point at the release, and the lab's V11 correction and V12 finding.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [ ] Config change only
+- [x] Documentation only
+
 ## [2026-10-25 00:01] - Release notes for v0.4.0-rc9
 **Author:** @wrkode (William Rizzo)
 
