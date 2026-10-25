@@ -21,7 +21,7 @@ The manager reconciles Kubernetes custom resources; each hypervisor runs as a se
 ## Features
 
 - **Multi-Hypervisor Support**: vSphere, Libvirt/KVM, and Proxmox VE simultaneously
-- **Cross-Provider VM Migration**: Storage-backend-agnostic disk migration between any two hypervisors — **S3** and **NFS** staging backends, validated across vSphere ⇄ Libvirt/KVM ⇄ Proxmox VE in **both directions** (ADR-0006). The disk is staged through object storage or an NFS export and moved with `qemu-img`; it never traverses a CSI PVC (PVC is compat-only). NFS uses qemu-img's native libnfs transport (kernel-mount on Proxmox). (v0.3.11)
+- **VM Cloning (VMClone)**: Full clones on vSphere, Proxmox and Libvirt, linked clones on vSphere only (libvirt linked clones are disabled in this release; Proxmox makes full clones only), MVP — `source.vmRef`, same-provider
 - **VM Cloning (VMClone)**: Full and linked clones, MVP — `source.vmRef`, same-provider (vSphere/Proxmox/Libvirt; libvirt: qcow2 overlay for linked, full copy for full)
 - **VMSet CRD defined; controller not yet active**: Multi-VM replica set is defined but the controller is a stub that reports `Ready=False / ControllerNotImplemented`; rolling updates and replica management are roadmap
 - **VMPlacementPolicy (reference-only)**: Placement rules (affinity, anti-affinity, resource constraints) expressed as a policy object referenced by `VirtualMachine.spec.placementRef`; no standalone enforcement controller; only the scheduler of a clustered Provider (`topology: cluster`) reads it

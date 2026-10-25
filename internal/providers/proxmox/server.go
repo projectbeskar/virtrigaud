@@ -32,6 +32,8 @@ import (
 	"strings"
 	"time"
 
+	"k8s.io/apimachinery/pkg/api/resource"
+
 	v1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
 	"github.com/projectbeskar/virtrigaud/internal/diskutil"
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
@@ -41,7 +43,6 @@ import (
 	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
 	"github.com/projectbeskar/virtrigaud/sdk/provider/capabilities"
 	"github.com/projectbeskar/virtrigaud/sdk/provider/errors"
-	"k8s.io/apimachinery/pkg/api/resource"
 )
 
 // Provider implements the Proxmox VE provider
@@ -278,7 +279,7 @@ func (p *Provider) Create(ctx context.Context, req *providerv1.CreateRequest) (*
 	// A Create with user-data builds a NoCloud seed on the PVE node
 	// (seed.go): the node must be able to, before anything is made.
 	if len(req.UserData) > 0 {
-		if err := p.seedPreflight(ctx); err != nil {
+		if err := p.seedPreflight(ctx, node); err != nil {
 			return nil, err
 		}
 	}
@@ -331,7 +332,7 @@ func (p *Provider) Create(ctx context.Context, req *providerv1.CreateRequest) (*
 	}
 	// The clone inherits the template's description: keep it, minus any owner
 	// stamp, and add this VM's own.
-	base, sourceHas, _, err := p.inheritedDescription(ctx, node, templateID)
+	base, sourceHas, templateCfg, err := p.inheritedDescription(ctx, node, templateID)
 	if stderrors.Is(err, pveapi.ErrVMNotFound) {
 		return nil, errors.NewInvalidSpec("template %d not found on node %s", templateID, node)
 	}
@@ -363,6 +364,14 @@ func (p *Provider) Create(ctx context.Context, req *providerv1.CreateRequest) (*
 	}
 	if err := p.configureClonedVM(ctx, req, vmConfig, node); err != nil {
 		return nil, p.failSeedOrStep(ctx, node, vmConfig.VMID, req.Name, stamp, "configuring the cloned VM failed", err)
+	}
+	// A template converted from a VM with a seed gives its clones a CD-ROM
+	// that references the template's seed; a clone without user-data must not
+	// boot with it (seed_create.go detachForeignSeeds).
+	if len(req.UserData) == 0 && sourceHasSeed(templateCfg, templateID) {
+		if err := p.detachForeignSeeds(ctx, node, vmConfig.VMID); err != nil {
+			return nil, p.failAfterSubmit(ctx, node, vmConfig.VMID, req.Name, stamp, true, "detaching the template's cloud-init seed failed", err)
+		}
 	}
 	if stamp != nil {
 		ready := stamp.withPhase(ownerStampPhaseReady)
@@ -529,12 +538,17 @@ func (p *Provider) rebindCreate(ctx context.Context, req *providerv1.CreateReque
 		finishing := *vmConfig
 		finishing.VMID = vm.vmid
 		if err := p.configureClonedVM(ctx, req, &finishing, vm.node); err != nil {
-			return nil, false, p.outcomeUnknown(fmt.Sprintf("finishing Proxmox VM %d failed", vm.vmid), err)
+			return nil, false, p.outcomeUnknown(fmt.Sprintf(finishingVMFailedMessage, vm.vmid), err)
+		}
+		if len(req.UserData) == 0 {
+			if err := p.detachForeignSeeds(ctx, vm.node, vm.vmid); err != nil {
+				return nil, false, p.outcomeUnknown(fmt.Sprintf(finishingVMFailedMessage, vm.vmid), err)
+			}
 		}
 	case len(req.UserData) > 0:
 		// A new VM with user-data: its seed (attached only if it has none).
 		if err := p.finishDisklessSeed(ctx, req, vmConfig, vm.node, vm.vmid); err != nil {
-			return nil, false, p.outcomeUnknown(fmt.Sprintf("finishing Proxmox VM %d failed", vm.vmid), err)
+			return nil, false, p.outcomeUnknown(fmt.Sprintf(finishingVMFailedMessage, vm.vmid), err)
 		}
 	}
 	ready := vm.stamp.withPhase(ownerStampPhaseReady)
@@ -1166,7 +1180,8 @@ func (p *Provider) applyVMClassSizing(ctx context.Context, node string, vmid, cp
 // A source created with user-data has a NoCloud seed CD-ROM instead (R35,
 // seed.go), which PVE's clone copies by reference. The clone gets a seed of
 // its own with its own identity (cloneSeed); the source's seed is never
-// shared, and its user-data is not carried.
+// shared, and its user-data is not carried. A VMClone's inline user-data
+// (spec.customization) also gives the clone a seed, whatever its source.
 //
 // Every clone is a full clone: linked clones are refused (req.Linked).
 func (p *Provider) Clone(ctx context.Context, req *providerv1.CloneRequest) (*providerv1.CloneResponse, error) {
@@ -1239,21 +1254,12 @@ func (p *Provider) Clone(ctx context.Context, req *providerv1.CloneRequest) (*pr
 	// clone request is issued to the source node; PVE's `target` parameter places
 	// the result on another node, so the post-clone sizing must use that node.
 	targetNode := sourceNode
-	if req.PlacementJson != "" {
-		var placement struct {
-			Host      string `json:"Host"`
-			Datastore string `json:"Datastore"`
-		}
-		if err := json.Unmarshal([]byte(req.PlacementJson), &placement); err == nil {
-			if placement.Host != "" {
-				config.Custom["target"] = placement.Host
-				targetNode = placement.Host
-			}
-			if placement.Datastore != "" {
-				config.Storage = placement.Datastore
-			}
-		}
+	host, datastore := clonePlacement(req)
+	if host != "" {
+		config.Custom["target"] = host
+		targetNode = host
 	}
+	config.Storage = datastore
 
 	// The clone inherits the source's description: keep it, minus the source's
 	// owner stamp, plus the clone's own (none without a target UID).
@@ -1267,15 +1273,12 @@ func (p *Provider) Clone(ctx context.Context, req *providerv1.CloneRequest) (*pr
 	if err != nil {
 		return nil, p.vmCreateNotPerformed(fmt.Sprintf("cannot read clone source %d; nothing was cloned (will retry)", sourceVMID), err)
 	}
-	// A source with a cloud-init seed: the clone gets a seed of its own,
-	// which needs the SSH data plane (checked before anything is cloned).
-	if err := p.checkCloneSeedRequest(req, sourceCfg, sourceVMID); err != nil {
+	// A source with a cloud-init seed, or a VMClone with inline user-data:
+	// the clone gets a seed of its own, which needs the SSH data plane
+	// (checked before anything is cloned).
+	needSeed, err := p.checkCloneSeedRequest(ctx, req, sourceCfg, sourceVMID, targetNode)
+	if err != nil {
 		return nil, err
-	}
-	if sourceHasSeed(sourceCfg, sourceVMID) {
-		if err := p.seedPreflight(ctx); err != nil {
-			return nil, err
-		}
 	}
 	p.warnIfTruncated(targetVMID, base, stamp)
 	if desc := cloneRequestDescription(base, sourceHas, stamp); desc != "" {
@@ -1308,8 +1311,10 @@ func (p *Provider) Clone(ctx context.Context, req *providerv1.CloneRequest) (*pr
 	}
 	// PVE's clone references its source's seed CD-ROM: the clone gets its own
 	// (seed_create.go cloneSeed).
-	if err := p.cloneSeed(ctx, req, targetNode, targetVMID, config.Storage); err != nil {
-		return nil, p.failSeedOrStep(ctx, targetNode, targetVMID, req.TargetName, stamp, "giving the clone its cloud-init seed failed", err)
+	if needSeed {
+		if err := p.cloneSeed(ctx, req, targetNode, targetVMID, config.Storage); err != nil {
+			return nil, p.failSeedOrStep(ctx, targetNode, targetVMID, req.TargetName, stamp, "giving the clone its cloud-init seed failed", err)
+		}
 	}
 	if stamp != nil {
 		ready := stamp.withPhase(ownerStampPhaseReady)
@@ -1342,10 +1347,11 @@ func (p *Provider) rebindClone(ctx context.Context, req *providerv1.CloneRequest
 	}
 	cpus, memMiB := parseClassSizing(req.ClassJson)
 	if err := p.applyVMClassSizing(ctx, vm.node, vm.vmid, cpus, memMiB); err != nil {
-		return nil, p.outcomeUnknown(fmt.Sprintf("finishing clone %d failed", vm.vmid), err)
+		return nil, p.outcomeUnknown(fmt.Sprintf(finishingCloneFailedMessage, vm.vmid), err)
 	}
-	if err := p.cloneSeed(ctx, req, vm.node, vm.vmid, ""); err != nil {
-		return nil, p.outcomeUnknown(fmt.Sprintf("finishing clone %d failed", vm.vmid), err)
+	_, datastore := clonePlacement(req)
+	if err := p.cloneSeed(ctx, req, vm.node, vm.vmid, datastore); err != nil {
+		return nil, p.outcomeUnknown(fmt.Sprintf(finishingCloneFailedMessage, vm.vmid), err)
 	}
 	ready := vm.stamp.withPhase(ownerStampPhaseReady)
 	if err := p.writeOwnerStamp(ctx, vm.node, vm.vmid, vm.description, &ready); err != nil {

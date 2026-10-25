@@ -44,6 +44,9 @@ type seedNode struct {
 	// noGenisoimage makes the pre-flight (and the seed script) answer that
 	// genisoimage is missing.
 	noGenisoimage bool
+	// nodeName is the PVE node name the pre-flight reports ("pve" when
+	// empty; reported as an FQDN, as `uname -n` may).
+	nodeName string
 	// seedExit, when not 0, is the exit status the seed script fails with
 	// (nothing is attached).
 	seedExit int
@@ -103,7 +106,11 @@ func (n *seedNode) run(ctx context.Context, cmd string) (string, string, error) 
 		if missing {
 			return "", "", exitErr(n.t, seedExitNoGenisoimage)
 		}
-		return "", "", nil
+		name := n.nodeName
+		if name == "" {
+			name = "pve"
+		}
+		return name + ".example.com\n", "", nil
 	}
 	if delegate != nil {
 		return delegate(ctx, cmd)

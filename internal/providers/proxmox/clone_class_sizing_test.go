@@ -41,7 +41,8 @@ func TestParseClassSizing(t *testing.T) {
 		memMiB int64
 	}{
 		{name: "VMClassSpec", json: `{"cpu":4,"memory":"8Gi"}`, cpus: 4, memMiB: 8192},
-		{name: "VMClassSpec decimal quantity", json: `{"cpu":2,"memory":"2048Mi"}`, cpus: 2, memMiB: 2048},
+		{name: "VMClassSpec in Mi", json: `{"cpu":2,"memory":"2048Mi"}`, cpus: 2, memMiB: 2048},
+		{name: "VMClassSpec decimal quantity (truncated to MiB)", json: `{"cpu":2,"memory":"2G"}`, cpus: 2, memMiB: 1907},
 		{name: "contracts.VMClass", json: `{"CPU":4,"MemoryMiB":4096}`, cpus: 4, memMiB: 4096},
 		{name: "cpu only", json: `{"cpu":3}`, cpus: 3, memMiB: 0},
 		{name: "empty", json: ``},

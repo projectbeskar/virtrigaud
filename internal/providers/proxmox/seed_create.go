@@ -18,10 +18,14 @@ package proxmox
 
 import (
 	"context"
+	"encoding/json"
 	stderrors "errors"
 	"fmt"
 	"net/url"
 	"strings"
+
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	"github.com/projectbeskar/virtrigaud/internal/providers/cloneidentity"
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
@@ -36,13 +40,32 @@ import (
 // full clones only.
 const linkedCloneUnsupportedMessage = "the Proxmox provider does not support linked clones; use a full clone"
 
+// finishingVMFailedMessage and finishingCloneFailedMessage (with the VMID)
+// answer a re-sent Create or Clone that could not finish the VM an earlier
+// attempt made.
+const (
+	finishingVMFailedMessage    = "finishing Proxmox VM %d failed"
+	finishingCloneFailedMessage = "finishing clone %d failed"
+)
+
 // failSeedOrStep answers a Create whose step what failed (cause) after the VM
 // vmid was made: a seed build whose outcome is unknown leaves the VM in place
 // (outcomeUnknown; a re-sent Create finishes it), anything else removes it
-// (failAfterSubmit).
+// (failAfterSubmit). A definite refusal (InvalidSpec: no free slot,
+// genisoimage missing, the VM on another node than the SSH data plane's) is
+// answered as such once the VM is removed, so the manager does not make and
+// remove a VM again at every retry.
 func (p *Provider) failSeedOrStep(ctx context.Context, node string, vmid int, name string, stamp *ownerStamp, what string, cause error) error {
 	if isSeedInFlight(cause) {
 		return p.outcomeUnknown(fmt.Sprintf("%s: the cloud-init seed of VM %d may still be being built on the node", what, vmid), cause)
+	}
+	if status.Code(cause) == codes.InvalidArgument {
+		if rbErr := p.rollbackCreatedVM(ctx, node, vmid, name, stamp, true); rbErr != nil {
+			p.logger.Error("A failed create left a VM that could not be removed", "vmid", vmid, "node", node,
+				"name", name, "step", what, "error", cause, "rollback_error", rbErr)
+			return p.outcomeUnknown(fmt.Sprintf("%s; VM %d could not be removed", what, vmid), cause)
+		}
+		return cause
 	}
 	return p.failAfterSubmit(ctx, node, vmid, name, stamp, true, what, cause)
 }
@@ -132,6 +155,10 @@ func (p *Provider) createDisklessWithSeed(ctx context.Context, req *providerv1.C
 	}
 	shell := *vmConfig
 	shell.IPConfigs = nil
+	shell.Custom = make(map[string]string, len(vmConfig.Custom)+1)
+	for k, v := range vmConfig.Custom {
+		shell.Custom[k] = v
+	}
 	if stamp != nil {
 		shell.Custom[pveConfigKeyDescription] = composeDescription("", stamp)
 	}
@@ -174,6 +201,31 @@ func (p *Provider) finishDisklessSeed(ctx context.Context, req *providerv1.Creat
 	})
 }
 
+// detachForeignSeeds removes from VM vmid's config every seed CD-ROM that
+// references another VM's seed volume: a clone, made without user-data, of a
+// template that was converted from a VM with a seed. Left in place, the clone
+// would boot with the template's user-data and instance-id. Removing a CD-ROM
+// frees nothing (the volume is the template's).
+func (p *Provider) detachForeignSeeds(ctx context.Context, node string, vmid int) error {
+	cfg, err := p.client.GetVMConfig(ctx, node, vmid)
+	if err != nil {
+		return fmt.Errorf("read the config of cloned VM %d: %w", vmid, err)
+	}
+	_, foreign := seedSlots(cfg, vmid)
+	if len(foreign) == 0 {
+		return nil
+	}
+	p.logger.Warn("The template has a cloud-init seed; detaching it from the clone, which has no user-data", "vmid", vmid, "slots", foreign)
+	task, err := p.client.ReconfigureVMRaw(ctx, node, vmid, url.Values{pveConfigKeyDelete: {strings.Join(foreign, ",")}})
+	if err != nil {
+		return fmt.Errorf("detach the template's cloud-init seed from cloned VM %d: %w", vmid, err)
+	}
+	if err := p.client.WaitForTask(ctx, node, task); err != nil {
+		return fmt.Errorf("detach the template's cloud-init seed from cloned VM %d: %w", vmid, err)
+	}
+	return nil
+}
+
 // sourceHasSeed reports whether a clone source's config cfg has a seed
 // CD-ROM (its own, or one it references).
 func sourceHasSeed(cfg map[string]interface{}, vmid int) bool {
@@ -181,33 +233,71 @@ func sourceHasSeed(cfg map[string]interface{}, vmid int) bool {
 	return len(own)+len(foreign) > 0
 }
 
-// checkCloneSeedRequest checks, before anything is cloned, what the seed of a
-// clone of a source with a seed needs: the SSH data plane (and its
-// credentials and known_hosts) and a readable customization. A source
-// without a seed needs nothing; its clone keeps PVE's cloud-init handling
-// (R26), and customization user-data is not applied to it (logged).
-func (p *Provider) checkCloneSeedRequest(req *providerv1.CloneRequest, sourceCfg map[string]interface{}, sourceVMID int) error {
-	if !sourceHasSeed(sourceCfg, sourceVMID) {
-		if cust, err := cloneidentity.ParseCustomization(req.CustomizeJson); err == nil && (cust.InlineUserData != "" || cust.SecretUserData) {
-			p.logger.Warn("The clone source has no cloud-init seed; the clone's customization user-data is not applied "+
-				"(the Proxmox provider gives a clone a seed only when its source has one)", "source_vmid", sourceVMID)
-		}
-		return nil
-	}
+// cloneNeedsSeed reports whether a clone made by req of a VM (vmid) whose
+// config is cfg gets a seed of its own: when the config shows a seed CD-ROM
+// (PVE copies its line by reference), or when the VMClone gives inline
+// user-data, which reaches the guest only through a seed. A customization
+// that is not valid JSON, or inline user-data over 1 MiB, is an InvalidSpec
+// error.
+func cloneNeedsSeed(req *providerv1.CloneRequest, cfg map[string]interface{}, vmid int) (bool, cloneidentity.Customization, error) {
 	cust, err := cloneidentity.ParseCustomization(req.CustomizeJson)
 	if err != nil {
-		return errors.NewInvalidSpec("%s", seedCustomizeInvalidMessage)
+		return false, cust, errors.NewInvalidSpec("%s", seedCustomizeInvalidMessage)
 	}
 	if len(cust.InlineUserData) > maxSeedFileBytes {
-		return errors.NewInvalidSpec("%s", seedUserDataTooLargeMessage)
+		return false, cust, errors.NewInvalidSpec("%s", seedUserDataTooLargeMessage)
 	}
-	return p.checkSeedPrerequisites()
+	return sourceHasSeed(cfg, vmid) || cust.InlineUserData != "", cust, nil
+}
+
+// checkCloneSeedRequest reports, before anything is cloned, whether the clone
+// gets a seed (cloneNeedsSeed), and checks what that seed needs: the SSH data
+// plane, its credentials and known_hosts, genisoimage on the node, and the
+// clone's node (targetNode) being the node the SSH data plane reaches
+// (seedPreflight). A clone that needs no seed needs nothing: it keeps PVE's
+// cloud-init handling (R26).
+func (p *Provider) checkCloneSeedRequest(ctx context.Context, req *providerv1.CloneRequest, sourceCfg map[string]interface{},
+	sourceVMID int, targetNode string) (bool, error) {
+	need, cust, err := cloneNeedsSeed(req, sourceCfg, sourceVMID)
+	if err != nil {
+		return false, err
+	}
+	if !need {
+		if cust.SecretUserData {
+			p.logger.Warn("The clone's user-data is given by a Secret reference, which the provider cannot resolve; "+
+				"it is not applied", "source_vmid", sourceVMID)
+		}
+		return false, nil
+	}
+	if err := p.checkSeedPrerequisites(); err != nil {
+		return false, err
+	}
+	return true, p.seedPreflight(ctx, targetNode)
+}
+
+// clonePlacement reads a Clone's placement override (PlacementJson): the node
+// the clone lands on and the storage it is cloned to ("" when unset or
+// unreadable).
+func clonePlacement(req *providerv1.CloneRequest) (host, datastore string) {
+	if req.PlacementJson == "" {
+		return "", ""
+	}
+	var placement struct {
+		Host      string `json:"Host"`
+		Datastore string `json:"Datastore"`
+	}
+	if err := json.Unmarshal([]byte(req.PlacementJson), &placement); err != nil {
+		return "", ""
+	}
+	return placement.Host, placement.Datastore
 }
 
 // cloneSeed gives the clone vmid on node (made by req) a seed of its own when
-// its config shows a seed CD-ROM — PVE's clone copies its source's CD-ROM
-// line, so it references the SOURCE's seed volume: identity and lifecycle
-// would be shared. The new seed replaces that reference in its slot. Its
+// it needs one (cloneNeedsSeed): its config shows a seed CD-ROM — PVE's
+// clone copies its source's CD-ROM line, so it references the SOURCE's seed
+// volume: identity and lifecycle would be shared — or the VMClone gives
+// inline user-data. The new seed replaces that reference, or the clone's PVE
+// cloud-init drive, in its slot. Its
 // identity is the clone's (cloneidentity: instance-id from the target
 // VirtualMachine's UID, local-hostname from the customization hostname and
 // domain, else the target's name); its user-data is the VMClone's
@@ -221,12 +311,12 @@ func (p *Provider) cloneSeed(ctx context.Context, req *providerv1.CloneRequest, 
 	if err != nil {
 		return fmt.Errorf("read the config of clone %d: %w", vmid, err)
 	}
-	if !sourceHasSeed(cfg, vmid) {
-		return nil
+	need, cust, err := cloneNeedsSeed(req, cfg, vmid)
+	if err != nil || !need {
+		return err
 	}
-	cust, err := cloneidentity.ParseCustomization(req.CustomizeJson)
-	if err != nil {
-		return errors.NewInvalidSpec("%s", seedCustomizeInvalidMessage)
+	if err := p.checkSeedPrerequisites(); err != nil {
+		return err
 	}
 	if len(cust.Unapplied) > 0 {
 		p.logger.Warn("The Proxmox provider does not apply these clone customization fields", "vmid", vmid,

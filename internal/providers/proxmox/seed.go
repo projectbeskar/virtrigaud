@@ -53,7 +53,8 @@ import (
 //
 //   - The three files travel as a tar archive on the session's stdin, never on
 //     a command line, never in a log. They are extracted into a fresh mktemp
-//     directory (0700) inside seedStageDir, a directory only root can enter,
+//     directory (0700) inside seedStageDir (on /run, a tmpfs), a directory
+//     only root can enter, under a per-VM lock,
 //     and the ISO is made there with genisoimage (a qemu-server dependency).
 //   - `qm importdisk <vmid> <iso> <storage> --format raw` copies it into the
 //     VM's own storage as a VM-owned volume (vm-<vmid>-disk-N; never named
@@ -64,7 +65,8 @@ import (
 //     makes PVE free the drive's volume: two cidata sources would be undefined
 //     behaviour. The seed is not in the boot order.
 //   - The temporary directory is removed on every exit, and a volume that was
-//     imported but could not be attached is deleted again (`qm set --delete
+//     imported and identified as the seed but could not be attached is
+//     deleted again (`qm set --delete
 //     unusedN` frees it).
 //
 // A seed is never combined with PVE's cloud-init settings: the provider sets
@@ -81,8 +83,9 @@ import (
 
 const (
 	// seedStageDir is the root-only directory on the PVE node the seed ISO is
-	// built in (each build in its own mktemp directory, removed on exit).
-	seedStageDir = "/var/lib/virtrigaud/seed-stage"
+	// built in (each build in its own mktemp directory, removed on exit). It is
+	// on /run, a tmpfs, so a build a crash interrupted does not outlive a reboot.
+	seedStageDir = "/run/virtrigaud/seed-stage"
 
 	// seedWorkTemplate is the mktemp template of one build's directory.
 	seedWorkTemplate = ".seed-XXXXXXXXXX"
@@ -101,13 +104,24 @@ const (
 	seedFileMetaData      = "meta-data"
 	seedFileNetworkConfig = "network-config"
 
-	// seedExitNoGenisoimage, seedExitImportBusy and seedExitImportUnclear
+	// seedExitNoGenisoimage, seedExitImportBusy, seedExitImportUnclear and
+	// seedExitNotOnNode
 	// are the exit codes of the seed scripts: genisoimage is missing on the
 	// node; a `qm importdisk` of the VM is still running (an interrupted
-	// earlier attempt); the import's volume could not be told apart.
+	// earlier attempt); the import's volume could not be told apart; the
+	// VM is not on the node the SSH data plane reaches.
 	seedExitNoGenisoimage = 20
 	seedExitImportBusy    = 21
 	seedExitImportUnclear = 22
+	seedExitNotOnNode     = 23
+	// seedExitQMConfig, seedExitQMImport and seedExitQMSet are the exit codes
+	// of the seed script when `qm config`, `qm importdisk` or `qm set` fails.
+	// qm (Perl) can die with any status, 255 included, which ssh also uses
+	// for a broken connection: each qm call has its own code instead, so a
+	// failed qm call is a definite failure, never "the session broke".
+	seedExitQMConfig = 24
+	seedExitQMImport = 25
+	seedExitQMSet    = 26
 
 	// seedEmptyUserData is a clone's seed user-data when its VMClone gives
 	// none: an empty cloud-config document (NoCloud requires a user-data
@@ -133,6 +147,9 @@ const (
 		"(see the provider log); nothing was created"
 	seedNoGenisoimageMessage = "the Proxmox provider applies cloud-init user-data through a NoCloud seed it builds on " +
 		"the PVE node, and genisoimage is not installed there (install the genisoimage package); nothing was created"
+	seedNotOnNodeMessage = "the Proxmox provider builds a VM's cloud-init seed on the PVE node its SSH data plane " +
+		"reaches (the API endpoint's host), and the VM is on another node: point PVE_NODE_SELECTOR (or the " +
+		"clone's placement host) at that node"
 	seedUserDataTooLargeMessage = "the cloud-init user-data is larger than 1 MiB"
 	seedMetaDataTooLargeMessage = "the cloud-init meta-data is larger than 1 MiB"
 	seedMetaDataInvalidMessage  = "the cloud-init meta-data is not a YAML mapping"
@@ -309,21 +326,31 @@ func (p *Provider) checkSeedPrerequisites() error {
 }
 
 // seedPreflightCommand exits seedExitNoGenisoimage when genisoimage is not
-// installed on the node.
-var seedPreflightCommand = fmt.Sprintf("command -v genisoimage >/dev/null 2>&1 || exit %d", seedExitNoGenisoimage)
+// installed on the node, and prints the node's name otherwise.
+var seedPreflightCommand = fmt.Sprintf("command -v genisoimage >/dev/null 2>&1 || exit %d; uname -n", seedExitNoGenisoimage)
 
 // seedPreflight checks over SSH, before anything is created, that the node
-// can build a seed (genisoimage is installed). A missing genisoimage is a
-// definite InvalidSpec error; an SSH failure is CREATE_NOT_PERFORMED.
-func (p *Provider) seedPreflight(ctx context.Context) error {
-	_, _, err := p.ssh.runSSH(ctx, seedPreflightCommand)
-	if err == nil {
-		return nil
+// the SSH data plane reaches can build the seed of a VM that will be on
+// node: genisoimage is installed, and it is that node (PVE names a node by
+// its host name without the domain). A missing genisoimage or another node
+// is a definite InvalidSpec error; an SSH failure is CREATE_NOT_PERFORMED.
+func (p *Provider) seedPreflight(ctx context.Context, node string) error {
+	if p.ssh == nil {
+		return errors.NewInvalidSpec("%s", seedNoSSHMessage)
 	}
-	if sshExitCode(err) == seedExitNoGenisoimage {
-		return errors.NewInvalidSpec("%s", seedNoGenisoimageMessage)
+	stdout, _, err := p.ssh.runSSH(ctx, seedPreflightCommand)
+	if err != nil {
+		if sshExitCode(err) == seedExitNoGenisoimage {
+			return errors.NewInvalidSpec("%s", seedNoGenisoimageMessage)
+		}
+		return p.createNotPerformed("cannot reach the PVE node over SSH to build the cloud-init seed; nothing was created (will retry)", err)
 	}
-	return p.createNotPerformed("cannot reach the PVE node over SSH to build the cloud-init seed; nothing was created (will retry)", err)
+	name, _, _ := strings.Cut(strings.TrimSpace(stdout), ".")
+	if node != "" && name != node {
+		p.logger.Error("The SSH data plane reaches another PVE node than the VM's", "ssh_node", name, "vm_node", node)
+		return errors.NewInvalidSpec("%s", seedNotOnNodeMessage)
+	}
+	return nil
 }
 
 // sshExitCode is the exit status of a remote command err reports, or -1.
@@ -476,40 +503,76 @@ func seedArchive(content seedContent) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-// seedUnusedKeys is the shell fragment that prints the unusedN keys of VM
-// "$VMID"'s config, one per line.
-const seedUnusedKeys = `qm config "$VMID" | sed -n 's/^\(unused[0-9][0-9]*\):.*/\1/p'`
+// seedUnusedKeys is the shell fragment that prints the unusedN keys of the
+// config in "$C", one per line.
+const seedUnusedKeys = `printf '%s\n' "$C" | sed -n 's/^\(unused[0-9][0-9]*\):.*/\1/p'`
+
+// seedLockName is the name, in the stage directory, of the lock a seed build
+// of VM vmid holds for its whole run.
+func seedLockName(vmid int) string {
+	return ".lock-" + strconv.Itoa(vmid)
+}
+
+// seedLockPath is the node path of VM vmid's seed build lock.
+func seedLockPath(vmid int) string {
+	return seedStageDir + "/" + seedLockName(vmid)
+}
+
+// pveQemuConfDir is where the PVE node keeps the configs of its own VMs
+// (/etc/pve/qemu-server is the local node's directory).
+const pveQemuConfDir = "/etc/pve/qemu-server"
 
 // buildSeedScript is the node-side script that builds a seed from the tar
-// archive on its stdin and attaches it to VM vmid in slot, on storage. dir is
-// a parameter only so the tests can run it against a local directory;
-// production passes seedStageDir. Every value is a fixed token, a number or
-// shell-quoted; the seed's content is never in it. In order:
+// archive on its stdin and attaches it to VM vmid in slot, on storage.
+// stageDir and confDir are parameters only so the tests can run it against
+// local directories; production passes seedStageDir and pveQemuConfDir.
+// Every value is a fixed token, a number or shell-quoted; the seed's content
+// is never in it. In order:
 //
-//  1. genisoimage must be installed (else exit seedExitNoGenisoimage), and no
-//     `qm importdisk` of the VM may be running (else exit
-//     seedExitImportBusy). The pattern is written so that it does not match
-//     this script's own command line.
-//  2. dir is (re)created 0700, checked to be no symbolic link, owned by the
-//     running user and mode 700; build directories a killed script left
-//     behind for more than seedStaleMinutes are removed; a fresh build
-//     directory "$W" is made in it.
-//  3. On every exit "$W" is removed, and a volume imported but not attached
-//     is deleted from the VM (which frees it).
+//  1. The VM's config must be on this node (else exit seedExitNotOnNode: the
+//     SSH data plane reaches another node than the VM's), and genisoimage
+//     must be installed (else exit seedExitNoGenisoimage).
+//  2. stageDir, refused when it is a symbolic link, is (re)created 0700 and
+//     checked to be owned by the running user, mode 700. The script then
+//     holds the VM's lock (flock on stageDir/.lock-<vmid>) until it exits:
+//     another seed build of the VM still running (an interrupted earlier
+//     attempt), or a `qm importdisk` of the VM, exits seedExitImportBusy (the
+//     pgrep pattern is written so that it does not match this script's own
+//     command line). Build directories a killed script left behind for more
+//     than seedStaleMinutes are removed; a fresh build directory "$W" is made.
+//     seedStageDir is on /run, a tmpfs: nothing of a build outlives a reboot.
+//  3. On every exit "$W" is removed, and a seed volume imported and
+//     identified but not attached is deleted from the VM (which frees it).
 //  4. The archive is extracted into "$W/cidata" (no owner, no modes from
 //     it), and genisoimage builds "$W/seed.iso" (volume ID cidata, Joliet and
 //     Rock Ridge names, as libvirt's seed).
-//  5. `qm importdisk ... --format raw`; the one unusedN key it added is the
-//     seed (any other count exits seedExitImportUnclear).
-//  6. `qm set --<slot> <volume>,media=cdrom`; the volume is printed.
-func buildSeedScript(dir string, vmid int, storage, slot string) string {
-	qd := proxmoxShellQuote(dir)
+//  5. `qm importdisk ... --format raw`. The seed is the one unusedN key the
+//     import added (read from complete `qm config` outputs, a failed read
+//     failing the script), and its volume must be VM vmid's disk volume on
+//     storage. Anything else exits seedExitImportUnclear without deleting
+//     anything: a volume left unused is freed with the VM.
+//  6. `qm set --<slot> <volume>,media=cdrom` (and `--delete alsoDelete`, a
+//     PVE cloud-init drive in another slot); the volume is printed.
+//
+// Each qm call that fails exits with its own code (seedExitQMConfig,
+// seedExitQMImport, seedExitQMSet).
+func buildSeedScript(stageDir, confDir string, vmid int, storage, slot, alsoDelete string) string {
+	qd := proxmoxShellQuote(stageDir)
+	qs := proxmoxShellQuote(storage)
+	deleteDrive := ""
+	if alsoDelete != "" {
+		deleteDrive = " --delete " + alsoDelete
+	}
 	return "set -e; umask 077; VMID=" + strconv.Itoa(vmid) + "; " +
+		"[ -f " + proxmoxShellQuote(confDir) + `/"$VMID.conf" ] || ` +
+		fmt.Sprintf("{ echo 'the VM is not on this node' >&2; exit %d; }; ", seedExitNotOnNode) +
 		fmt.Sprintf("command -v genisoimage >/dev/null 2>&1 || { echo 'genisoimage is not installed' >&2; exit %d; }; ", seedExitNoGenisoimage) +
+		"[ ! -L " + qd + " ] || exit 1; install -d -m 0700 " + qd + "; " +
+		"[ ! -L " + qd + " ] && [ \"$(stat -c '%u %a' -- " + qd + ")\" = \"$(id -u) 700\" ] || exit 1; " +
+		"exec 9>" + proxmoxShellQuote(stageDir+"/"+seedLockName(vmid)) + "; " +
+		fmt.Sprintf("flock -n 9 || { echo 'a seed build of the VM is still running' >&2; exit %d; }; ", seedExitImportBusy) +
 		"if pgrep -f -- " + proxmoxShellQuote(importdiskRunningPattern(vmid)) + " >/dev/null 2>&1; then " +
 		fmt.Sprintf("echo 'a qm importdisk of the VM is still running' >&2; exit %d; fi; ", seedExitImportBusy) +
-		"install -d -m 0700 " + qd + "; " +
-		"[ ! -L " + qd + " ] && [ \"$(stat -c '%u %a' -- " + qd + ")\" = \"$(id -u) 700\" ] || exit 1; " +
 		"find " + qd + " -mindepth 1 -maxdepth 1 -name '.seed-*' -mmin +" + strconv.Itoa(seedStaleMinutes) +
 		" -exec rm -rf -- {} + 2>/dev/null || true; " +
 		"W=$(mktemp -d -p " + qd + " " + seedWorkTemplate + "); U=''; OK=''; " +
@@ -518,15 +581,18 @@ func buildSeedScript(dir string, vmid int, storage, slot string) string {
 		`mkdir -- "$W/cidata"; ` +
 		`tar -x -f - -C "$W/cidata" --no-same-owner --no-same-permissions; ` +
 		`genisoimage -quiet -output "$W/seed.iso" -volid cidata -joliet -rock -input-charset utf-8 "$W/cidata"; ` +
-		"B=$(" + seedUnusedKeys + "); " +
-		`qm importdisk "$VMID" "$W/seed.iso" ` + proxmoxShellQuote(storage) + " --format raw >/dev/null; " +
+		fmt.Sprintf(`C=$(qm config "$VMID") || exit %d; B=$(`, seedExitQMConfig) + seedUnusedKeys + "); " +
+		`qm importdisk "$VMID" "$W/seed.iso" ` + qs + fmt.Sprintf(" --format raw >/dev/null || exit %d; ", seedExitQMImport) +
+		fmt.Sprintf(`C=$(qm config "$VMID") || exit %d; N=''; `, seedExitQMConfig) +
 		"for K in $(" + seedUnusedKeys + "); do " +
-		`case " $(echo $B) " in *" $K "*) ;; *) if [ -n "$U" ]; then ` +
-		fmt.Sprintf("echo 'qm importdisk added more than one volume' >&2; exit %d; fi; U=$K;; esac; done; ", seedExitImportUnclear) +
-		fmt.Sprintf(`[ -n "$U" ] || { echo 'qm importdisk added no volume' >&2; exit %d; }; `, seedExitImportUnclear) +
-		`V=$(qm config "$VMID" | sed -n "s/^$U: //p"); ` +
-		fmt.Sprintf(`[ -n "$V" ] || exit %d; `, seedExitImportUnclear) +
-		`qm set "$VMID" --` + slot + ` "$V,media=cdrom" >/dev/null; OK=1; echo "$V"`
+		`case " $(echo $B) " in *" $K "*) ;; *) if [ -n "$N" ]; then ` +
+		fmt.Sprintf("echo 'qm importdisk added more than one volume' >&2; exit %d; fi; N=$K;; esac; done; ", seedExitImportUnclear) +
+		fmt.Sprintf(`[ -n "$N" ] || { echo 'qm importdisk added no volume' >&2; exit %d; }; `, seedExitImportUnclear) +
+		`V=$(printf '%s\n' "$C" | sed -n "s/^$N: //p"); ` +
+		`case "$V" in ` + qs + `:vm-"$VMID"-disk-[0-9]*|` + qs + `:"$VMID"/vm-"$VMID"-disk-[0-9]*) ;; ` +
+		fmt.Sprintf("*) echo 'qm importdisk added an unexpected volume' >&2; exit %d;; esac; ", seedExitImportUnclear) +
+		`U=$N; qm set "$VMID" --` + slot + ` "$V,media=cdrom"` + deleteDrive +
+		fmt.Sprintf(" >/dev/null || exit %d; ", seedExitQMSet) + `OK=1; echo "$V"`
 }
 
 // attachSeed builds the seed content on the PVE node and attaches it to VM
@@ -539,6 +605,9 @@ func (p *Provider) attachSeed(ctx context.Context, node string, vmid int, storag
 		p.logger.Info("The VM already has its cloud-init seed", "vmid", vmid, "slot", own[0])
 		return nil
 	}
+	if p.ssh == nil {
+		return errors.NewInvalidSpec("%s", seedNoSSHMessage)
+	}
 	if err := checkRequestStorage(storage); err != nil {
 		return err
 	}
@@ -546,16 +615,31 @@ func (p *Provider) attachSeed(ctx context.Context, node string, vmid int, storag
 	if !ok {
 		return errors.NewInvalidSpec("%s", seedNoSlotMessage)
 	}
+	// A PVE cloud-init drive in another slot (the seed took a foreign seed's)
+	// goes too: two cidata sources would be undefined behaviour.
+	alsoDelete := ""
+	if ciSlot, _, hasDrive := pveapi.CloudInitDrive(cfg); hasDrive && ciSlot != slot {
+		alsoDelete = ciSlot
+	}
 	archive, err := seedArchive(content)
 	if err != nil {
 		return err
 	}
-	p.logger.Info("Building the cloud-init seed on the PVE node", "vmid", vmid, "node", node, "storage", storage, "slot", slot,
-		"user_data_bytes", len(content.userData), "network_config", content.networkConfig != nil)
-	stdout, _, err := p.ssh.runSSHInput(ctx, archive, buildSeedScript(seedStageDir, vmid, storage, slot))
+	// The audit line of every seed build: what is changed on which VM, never
+	// the content.
+	p.logger.Info("Building the cloud-init seed on the PVE node over SSH", "vmid", vmid, "node", node, "storage", storage, "slot", slot,
+		"replaces_drive", alsoDelete, "user_data_bytes", len(content.userData), "network_config", content.networkConfig != nil)
+	stdout, _, err := p.ssh.runSSHInput(ctx, archive, buildSeedScript(seedStageDir, pveQemuConfDir, vmid, storage, slot, alsoDelete))
 	if err != nil {
 		if sshMayHaveRun(ctx, err) || sshExitCode(err) == seedExitImportBusy {
 			return &seedInFlightError{cause: err}
+		}
+		p.logCause("building the cloud-init seed failed", err)
+		switch sshExitCode(err) {
+		case seedExitNoGenisoimage:
+			return errors.NewInvalidSpec("%s", seedNoGenisoimageMessage)
+		case seedExitNotOnNode:
+			return errors.NewInvalidSpec("%s", seedNotOnNodeMessage)
 		}
 		return fmt.Errorf("build and attach the cloud-init seed of VM %d: %w", vmid, err)
 	}

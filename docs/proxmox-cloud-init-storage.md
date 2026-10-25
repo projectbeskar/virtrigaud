@@ -107,6 +107,14 @@ what is missing. The user-data is never dropped in silence:
 | No SSH credentials | `ssh_password` or `ssh_privatekey` |
 | Host-key verification on and no `known_hosts` | `known_hosts` (details, with the host, in the provider log) |
 | `genisoimage` not installed on the node | the `genisoimage` package |
+| The VM would be on another node than the one SSH reaches | `PVE_NODE_SELECTOR` (or the clone's placement host) |
+
+The node check compares the node the VM is created on (or a clone's placement
+host) with `uname -n` of the node SSH reaches (without its domain, as PVE names
+nodes); the seed script checks it again (the VM's config must be in the node's
+own `/etc/pve/qemu-server`). The same refusals found only after the VM was made
+(e.g. no free CD-ROM slot) remove the VM and are answered as `InvalidSpec` too,
+so the manager does not make and remove a VM at every retry.
 
 What the node and the configuration need:
 
@@ -118,13 +126,36 @@ What the node and the configuration need:
   the root-only build directory).
 - **The SSH host is the API endpoint's host.** The seed is built and attached
   on that node, so the VM must be created there: in a cluster, point
-  `PVE_NODE_SELECTOR` at that node (as for migration imports).
+  `PVE_NODE_SELECTOR` at that node (as for migration imports). An endpoint that
+  is a load balancer in front of several nodes does not work for VMs with
+  user-data.
 - **`genisoimage`** on the node. It is a dependency of `qemu-server`, so every
   PVE node has it; the provider checks it before creating the VM.
+- **`flock`** (util-linux) on the node, present on every PVE node.
 - **A storage with the `images` content type** for the seed, chosen as
   [below](#how-the-storage-is-chosen).
-- **No new PVE token privileges**: the seed is imported and attached by `root`
-  over SSH. The token still needs what the VM itself needs.
+- **PVE token privileges.** The seed is imported and attached by `root` over
+  SSH, not by the token. A VM made **without a template** with user-data is now
+  created first and stamped "ready" afterwards (its config is read and its
+  description written), so the token needs `VM.Audit` and `VM.Config.Options`
+  on it, as it already does for clones.
+
+### Security posture
+
+Before this release, VM lifecycle needed only the PVE API token; SSH was used
+only by migrations. A Proxmox Provider whose VMs carry user-data now holds a
+**root SSH credential** to the PVE node. The seed's `qm importdisk` and `qm set`
+run as `root@pam` over SSH: PVE attributes those config and storage changes to
+root, not to the provider's token, and its permission checks do not apply to
+them. The provider logs one line for every seed build (VM, node, storage, slot,
+the size of the user-data, never its content). Treat the provider pod's
+credentials Secret as root on the node: restrict who can read it, and prefer an
+SSH key that only the provider uses.
+
+The user-data is stored in plaintext in the seed volume, on the VM's storage,
+for the VM's whole life (any principal who can read that storage, and root in
+the guest, can read it), as in PVE's own cloud-init drive and libvirt's seed.
+Keep long-lived secrets out of user-data; fetch them at first boot instead.
 
 ## How the seed is built
 
@@ -132,56 +163,81 @@ One SSH session per seed, its input on the session's standard input:
 
 1. The three files travel as a tar archive on stdin: never on a command line,
    never in a log, never in an event or a status.
-2. On the node, `/var/lib/virtrigaud/seed-stage` is (re)created `0700` and
-   checked to be a real directory owned by root; the files are extracted into
-   a fresh `mktemp -d` directory inside it (no owner or mode taken from the
-   archive), and `genisoimage -volid cidata -joliet -rock` builds the ISO there.
+2. On the node, `/run/virtrigaud/seed-stage` (on `/run`, a tmpfs) is refused
+   when it is a symbolic link, (re)created `0700`, and checked to be owned by
+   the SSH user (root). The script holds the VM's lock
+   (`/run/virtrigaud/seed-stage/.lock-<vmid>`, `flock`) for its whole run: a
+   seed build of the same VM still running (an interrupted earlier attempt), or
+   a running `qm importdisk` of the VM, makes it stop without changing anything.
+   The files are extracted into a fresh `mktemp -d` directory there (no owner
+   or mode taken from the archive), and `genisoimage -volid cidata -joliet
+   -rock` builds the ISO.
 3. `qm importdisk <vmid> <iso> <storage> --format raw` copies it into the VM's
    storage as `vm-<vmid>-disk-N` (`<vmid>/vm-<vmid>-disk-N.raw` on a directory
    storage). It is never named `vm-<vmid>-cloudinit`, which PVE rebuilds.
    `--format raw` keeps a file storage from turning the ISO into qcow2, which
-   the guest could not read.
-4. `qm set <vmid> --<slot> <volume>,media=cdrom` attaches it.
-5. On every exit the build directory is removed; a volume imported but not
-   attached is deleted from the VM again (`qm set --delete unusedN`, which frees
-   it). A build directory a killed session left behind is removed by the next
-   build after an hour.
+   the guest could not read. The seed is the one `unusedN` entry the import
+   added, and its volume must be the VM's own disk volume on that storage;
+   anything else stops the script without deleting anything (a volume left
+   unused is freed with the VM).
+4. `qm set <vmid> --<slot> <volume>,media=cdrom` attaches it (and deletes a PVE
+   cloud-init drive in another slot).
+5. On every exit the build directory is removed; the identified seed volume,
+   imported but not attached, is deleted from the VM again (`qm set --delete
+   unusedN`, which frees it). A build directory a killed session left behind is
+   removed by the next build after an hour, and by a reboot.
 
-The script refuses to run while a `qm importdisk` of the same VM is still
-running (an interrupted earlier attempt).
+Each `qm` call that fails stops the script with an exit status of its own, so a
+failed `qm` call is a definite failure (the VM is removed), never mistaken for a
+broken SSH session.
 
 ## Lifecycle
 
 - **Delete** removes the seed with the VM. `qm destroy` frees a VM's disks,
   unused disks and PVE cloud-init drive, but skips CD-ROMs; the provider's
   destroy passes `destroy-unreferenced-disks=1`, which frees every volume of the
-  VMID, the seed included.
+  VMID, the seed included (and an unused seed volume an interrupted build left).
 - **A failed Create** removes the VM it made (seed included). When the seed's
-  SSH session broke, or found a `qm importdisk` of the VM still running, the
-  build may still be going on: the VM is kept and the answer is an unknown
-  outcome; the re-sent `Create` finishes it.
+  SSH session broke, or another build or `qm importdisk` of the VM was still
+  running, the build may still be going on: the VM is kept and the answer is an
+  unknown outcome; the re-sent `Create` finishes it. A VM created from a
+  migration's imported disk is removed and built again from the staged disk
+  instead, once no build or `qm importdisk` of it runs.
 - **A re-sent Create** (the manager's retry after an unknown outcome) never
   attaches a second seed: a VM that already has a seed of its own is left as it
   is.
 - **VMClone.** PVE's clone copies its source's CD-ROM lines as they are, so a
   clone would point at its **source's** seed volume (same identity, and a volume
   it does not own). The provider gives such a clone a seed of its own in that
-  slot, made like a `Create`'s:
+  slot, and so it does for any clone whose VMClone gives inline user-data
+  (replacing the clone's PVE cloud-init drive, if it has one), made like a
+  `Create`'s:
   - `instance-id` `virtrigaud-<UID of the target VirtualMachine>`;
   - `local-hostname` the customization's `hostname` (with its `domain`), else
     the target VirtualMachine's name;
   - user-data: the VMClone's `spec.customization.userData.cloudInit.inline`,
-    else an empty `#cloud-config`. The source's user-data is **not** carried:
-    the clone's disk already holds what it applied (users, keys, files,
-    packages). User-data given by a Secret reference cannot be resolved by the
-    provider and is not applied (logged);
+    else an empty `#cloud-config`. The source's user-data is **not** carried
+    (unlike libvirt and vSphere): the clone's disk already holds what it
+    applied (users and their keys, files, packages). User-data given by a
+    Secret reference cannot be resolved by the provider and is not applied
+    (logged);
   - network-config: DHCP on every NIC, matched by the clone's own MACs.
 
-  The clone's first boot is therefore a new cloud-init instance (new SSH host
-  keys, its own hostname). A clone that needs a seed is refused before anything
-  is cloned when the provider cannot build one (the prerequisites above). A
-  clone of a VM **without** a seed is unchanged: PVE regenerates its own
-  cloud-init drive, and a customization user-data is not applied (logged).
+  The clone's first boot is therefore a new cloud-init instance: new SSH host
+  keys, its own hostname, and cloud-init's per-instance modules run again
+  **with the distribution's defaults** where the user-data is empty. On most
+  cloud images that means `disable_root: true` (root's `authorized_keys` is
+  rewritten to refuse logins), `ssh_pwauth` back to the image default, and the
+  distribution's default user created. A source that relied on its own
+  settings for these should give the VMClone inline user-data that sets them.
+  A clone that needs a seed is refused before anything is cloned when the
+  provider cannot build one (the prerequisites above). A clone of a VM
+  **without** a seed and without inline user-data is unchanged: PVE regenerates
+  its own cloud-init drive.
+- **A template made from a VM with a seed.** Its clones would reference the
+  template's seed volume. A `Create` with user-data replaces it with the VM's
+  own seed; a `Create` without user-data detaches it (the VM gets no
+  cloud-init source from the template). The template's volume is never freed.
 - **Migration import.** A `VirtualMachine` created from a migration's imported
   disk that carries user-data gets a seed on the storage the disk was imported
   to, after the disk is attached. One without user-data gets no cloud-init
@@ -190,19 +246,24 @@ running (an interrupted earlier attempt).
 ## Known limitations
 
 - The VM must be on the node the SSH data plane reaches (the API endpoint's
-  host).
+  host); a Create or Clone that would put it elsewhere is refused.
+- **A seed on node-local storage blocks moving the VM to another node.**
+  qemu-server refuses to migrate a VM with a local CD-ROM image other than its
+  own `vm-<vmid>-cloudinit` drive, online or offline, so HA and node evacuation
+  cannot move such a VM (a VM with PVE's cloud-init drive could be moved
+  offline). Put the VM (and so its seed) on a shared storage with `images`, or
+  detach and free the seed before moving it (below). Without its seed, a guest
+  whose cloud-init then finds no datasource may fall back to `DataSourceNone`:
+  a new instance with regenerated host keys and fallback DHCP networking.
 - The seed is written once, at `Create`: a later change to `spec.userData` does
   not rebuild it.
-- To drop the seed after the first boot by hand, do not just remove the CD-ROM
-  (`qm set <vmid> --delete ide2` can leave the volume on the storage, unreferenced,
-  until the VM is destroyed). Detach it and free it: `pvesm free <volume>`.
-- A seed on a node-local storage is a local CD-ROM: PVE may refuse to migrate
-  such a VM between nodes. Use a shared storage, or detach and free the seed
-  first.
-- Do not convert a VM with a seed into a PVE template: its clones would
-  reference the template's seed volume. A `Create` with user-data from such a
-  template replaces it with the VM's own seed; a `Create` without user-data
-  does not.
+- To drop the seed by hand, do not just remove the CD-ROM (`qm set <vmid>
+  --delete ide2` leaves the volume on the storage, unreferenced, until the VM
+  is destroyed). Detach it and free it: `pvesm free <volume>`.
+- NICs a template has but the request does not name get no entry in the
+  seed's network-config, so cloud-init does not configure them (a template's
+  own `ipconfigN` is not used): name every NIC that needs an address in
+  `spec.networks`.
 
 ## How the storage is chosen
 
@@ -264,8 +325,9 @@ clone's config references (it is replaced), to the slot of the VM's PVE
 cloud-init drive (it is replaced; PVE recognises one by its volume name
 `vm-<vmid>-cloudinit`, on a file storage `<vmid>/vm-<vmid>-cloudinit.raw`,
 `.qcow2` or `.vmdk`), else to the first free slot of `ide2`, `ide0`, `ide1`,
-`ide3`, `sata0` to `sata5`. When none is free the Create fails and the VM it
-made is removed.
+`ide3`, `sata0` to `sata5` (a PVE cloud-init drive in another slot than the
+seed's is deleted). When none is free the VM is removed and the Create is
+refused (`InvalidSpec`).
 
 ### PVE's own cloud-init drive (SSH keys without user-data)
 
@@ -332,7 +394,15 @@ storage already holds the VM's disk image.
 - A Proxmox `Provider` whose VMs carry user-data now needs the SSH data plane
   (the [prerequisites](#prerequisites)). Without it, such a `Create` is refused
   (`InvalidSpec`) instead of creating a VM with only the user name and keys.
-  VMs without user-data need nothing new.
+  Before rolling the provider: add `ssh_user`, `ssh_privatekey` (or
+  `ssh_password`) and `known_hosts` to the Provider's Secret, and in a cluster
+  set `PVE_NODE_SELECTOR` to the API endpoint's node. VMs without user-data
+  need nothing new. Read the [security posture](#security-posture) first.
+- New VMs with user-data on node-local storage can no longer be moved to
+  another node while their seed is attached
+  ([Known limitations](#known-limitations)).
+- A Proxmox `VMClone` with `spec.options.type: LinkedClone` is now refused
+  (`LinkedCloneUnsupported`): the provider never made linked clones.
 - VMs created before keep their PVE cloud-init drive and settings; the provider
   does not convert them. A cloud-init drive left on `local` by v0.4.0 can be
   moved with `qm set <vmid> --ide2 <storage>:cloudinit` on the node.

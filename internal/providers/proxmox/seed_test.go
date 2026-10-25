@@ -246,6 +246,18 @@ func TestSeed_NoUserDataPathUnchanged(t *testing.T) {
 	assert.Empty(t, node.allCommands())
 	assert.Empty(t, vm.Config["ide2"])
 	assert.Empty(t, srv.Volumes())
+	// The changes the Create makes are the clone (carrying the owner stamp), the
+	// VMClass sizing and the ready stamp, as before R35.
+	var changes []string
+	for _, r := range srv.MutatingRequests() {
+		changes = append(changes, r.Method+" "+r.Path)
+	}
+	id := strconv.Itoa(vm.VMID)
+	assert.Equal(t, []string{
+		"POST /api2/json/nodes/pve/qemu/" + strconv.Itoa(seededTemplateID) + "/clone",
+		"PUT /api2/json/nodes/pve/qemu/" + id + "/config",
+		"PUT /api2/json/nodes/pve/qemu/" + id + "/config",
+	}, changes)
 }
 
 // TestSeed_MissingPrerequisitesAreDefinite: user-data the provider cannot
@@ -298,7 +310,9 @@ func TestSeed_FailedBuildRollsBack(t *testing.T) {
 		"import unclear":            {seedExitImportUnclear, false, classNothingRemainsVM},
 		"ssh broke":                 {sshExitConnectionFailed, true, classOutcomeUnknown},
 		"importdisk still running":  {seedExitImportBusy, true, classOutcomeUnknown},
-		"genisoimage gone mid-flow": {seedExitNoGenisoimage, false, classNothingRemainsVM},
+		"genisoimage gone mid-flow": {seedExitNoGenisoimage, false, classInvalidSpec},
+		"VM on another node":        {seedExitNotOnNode, false, classInvalidSpec},
+		"qm importdisk failed":      {seedExitQMImport, false, classNothingRemainsVM},
 	} {
 		t.Run(name, func(t *testing.T) {
 			p, srv, node, logs := seedTestProvider(t)
@@ -501,17 +515,113 @@ func TestSeed_CloneGetsItsOwnSeed(t *testing.T) {
 	}
 }
 
-// TestSeed_CloneWithoutSourceSeedUnchanged: a clone of a VM without a seed
-// runs nothing on the node (R26: PVE regenerates its own drive).
-func TestSeed_CloneWithoutSourceSeedUnchanged(t *testing.T) {
+// TestSeed_CloneWithoutSourceSeed: a clone of a VM without a seed runs
+// nothing on the node and reads nothing more (R26: PVE regenerates its own
+// drive), unless the VMClone gives inline user-data: that reaches the guest
+// through a seed of the clone's own, which replaces the PVE cloud-init drive
+// the clone has.
+func TestSeed_CloneWithoutSourceSeed(t *testing.T) {
+	t.Run("no customization user-data", func(t *testing.T) {
+		p, srv, node, _ := seedTestProvider(t)
+		req := stampedCloneReq(seededCloneSource(srv))
+		req.SourceOwner = ownerProto(otherOwner())
+		_, err := p.Clone(context.Background(), req)
+		require.NoError(t, err)
+		assert.Empty(t, node.allCommands())
+	})
+
+	t.Run("customization user-data", func(t *testing.T) {
+		p, srv, node, _ := seedTestProvider(t)
+		srv.PutVM(pvefake.VM{VMID: 300, Name: "web", Status: "stopped", Node: "pve", CPUs: 1,
+			Config:      map[string]string{"scsi0": "tank-ssd:vm-300-disk-0", "ide2": "tank-ssd:vm-300-cloudinit,media=cdrom", "net0": "virtio=BC:24:11:00:03:00,bridge=vmbr0"},
+			Description: (&ownerStamp{owner: otherOwner(), phase: ownerStampPhaseReady}).line()})
+		req := stampedCloneReq("300")
+		req.SourceOwner = ownerProto(otherOwner())
+		req.CustomizeJson = `{"userData":{"cloudInit":{"inline":"#cloud-config\nruncmd: [true]\n"}}}`
+		resp, err := p.Clone(context.Background(), req)
+		require.NoError(t, err)
+		clone := vmByID(t, srv, resp.TargetVmId)
+		seeds := node.seedsOf(clone.VMID)
+		require.Len(t, seeds, 1)
+		assert.Equal(t, "#cloud-config\nruncmd: [true]\n", string(seeds[0].files[seedFileUserData]))
+		assertSeed(t, clone.Config["ide2"], "tank-ssd")
+		_, _, hasDrive := pveapi.CloudInitDrive(configOf(t, p, clone.VMID))
+		assert.False(t, hasDrive, "the seed replaced the clone's PVE cloud-init drive")
+	})
+}
+
+// TestSeed_NodeMismatchIsDefinite: the SSH data plane reaching another node
+// than the VM's is refused before anything is created or cloned.
+func TestSeed_NodeMismatchIsDefinite(t *testing.T) {
 	p, srv, node, _ := seedTestProvider(t)
-	src := seededCloneSource(srv)
-	req := stampedCloneReq(src)
+	node.nodeName = "pve2"
+	_, err := p.Create(context.Background(), seedCreateReq())
+	assert.Equal(t, classInvalidSpec, classOf(t, err))
+	assert.Equal(t, seedNotOnNodeMessage, status.Convert(err).Message())
+	assert.Empty(t, srv.MutatingRequests())
+}
+
+// TestSeed_TemplateWithASeedIsNotShared: a template converted from a VM with
+// a seed gives its clones a CD-ROM that references the template's seed. A
+// Create without user-data detaches it (the clone must not boot with the
+// template's user-data and instance-id); one with user-data replaces it with
+// the VM's own seed. The template's volume is never freed.
+func TestSeed_TemplateWithASeedIsNotShared(t *testing.T) {
+	setup := func(t *testing.T) (*Provider, *pvefake.Server, *seedNode) {
+		p, srv, node, _ := seedTestProvider(t)
+		tmpl, ok := srv.GetVM(seededTemplateID)
+		require.True(t, ok)
+		tmpl.Config["ide2"] = "tank-ssd:vm-9000-disk-1,media=cdrom"
+		srv.PutVM(tmpl)
+		return p, srv, node
+	}
+	t.Run("without user-data", func(t *testing.T) {
+		p, srv, node := setup(t)
+		resp, err := p.Create(context.Background(), createReq(testOwner(), templateImageJSON))
+		require.NoError(t, err)
+		vm := vmByID(t, srv, resp.Id)
+		assert.Empty(t, vm.Config["ide2"], "the template's seed is detached")
+		assert.Empty(t, node.allCommands())
+		tmpl, _ := srv.GetVM(seededTemplateID)
+		assert.Equal(t, "tank-ssd:vm-9000-disk-1,media=cdrom", tmpl.Config["ide2"])
+	})
+	t.Run("with user-data", func(t *testing.T) {
+		p, srv, node := setup(t)
+		resp, err := p.Create(context.Background(), seedCreateReq())
+		require.NoError(t, err)
+		vm := vmByID(t, srv, resp.Id)
+		owner, ok := seedDrive(vm.Config["ide2"])
+		require.True(t, ok)
+		assert.Equal(t, vm.VMID, owner, "the VM's own seed")
+		assert.Len(t, node.seedsOf(vm.VMID), 1)
+	})
+}
+
+// TestSeed_InterruptedCloneGetsItsOwnSeed: a Clone interrupted before its
+// seed was built ("creating", still referencing its source's seed) gets its
+// own seed when it is re-sent; one interrupted after gets no second one.
+func TestSeed_InterruptedCloneGetsItsOwnSeed(t *testing.T) {
+	p, srv, node, _ := seedTestProvider(t)
+	srcID := seededSource(t, p)
+	src := vmByID(t, srv, srcID)
+	const halfCloned = 4970
+	srv.PutVM(pvefake.VM{VMID: halfCloned, Name: cloneTargetName, Node: "pve", Status: "stopped",
+		Config:      map[string]string{"scsi0": "tank-ssd:vm-4970-disk-0", "ide2": src.Config["ide2"], "net0": "virtio=BC:24:11:00:49:70,bridge=vmbr0"},
+		Description: (&ownerStamp{owner: cloneTargetOwnerID(), phase: ownerStampPhaseCreating}).line()})
+	req := stampedCloneReq(srcID)
 	req.SourceOwner = ownerProto(otherOwner())
-	req.CustomizeJson = `{"userData":{"cloudInit":{"inline":"#cloud-config\n"}}}`
-	_, err := p.Clone(context.Background(), req)
+	resp, err := p.Clone(context.Background(), req)
 	require.NoError(t, err)
-	assert.Empty(t, node.allCommands())
+	assert.Equal(t, strconv.Itoa(halfCloned), resp.TargetVmId)
+	owner, ok := seedDrive(vmByID(t, srv, resp.TargetVmId).Config["ide2"])
+	require.True(t, ok)
+	assert.Equal(t, halfCloned, owner)
+	assert.Equal(t, src.Config["ide2"], vmByID(t, srv, srcID).Config["ide2"], "the source's seed is untouched")
+
+	srv.SetDescription(halfCloned, (&ownerStamp{owner: cloneTargetOwnerID(), phase: ownerStampPhaseCreating}).line())
+	_, err = p.Clone(context.Background(), req)
+	require.NoError(t, err)
+	assert.Len(t, node.seedsOf(halfCloned), 1, "no second seed")
 }
 
 // TestSeed_CloneOfSeededSourceNeedsSSH: a clone that would need its own seed
@@ -640,7 +750,7 @@ func allSlotsTaken() map[string]interface{} {
 // content, quotes the storage, and its importdisk pattern cannot match its
 // own command line.
 func TestBuildSeedScript_NoContentNoUnquotedValues(t *testing.T) {
-	script := buildSeedScript(seedStageDir, 4242, "tank-ssd", "ide2")
+	script := buildSeedScript(seedStageDir, pveQemuConfDir, 4242, "tank-ssd", "ide2", "")
 	assert.Contains(t, script, "VMID=4242;")
 	assert.Contains(t, script, `"$W/seed.iso" 'tank-ssd' --format raw`)
 	assert.Contains(t, script, `qm set "$VMID" --ide2 "$V,media=cdrom"`)

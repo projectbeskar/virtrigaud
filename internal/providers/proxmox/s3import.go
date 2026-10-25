@@ -410,11 +410,9 @@ func (p *Provider) createFromImportedDisk(
 		err := p.applyCreateSeed(ctx, req, node, vmConfig.VMID, ipConfigs, cfg, func(map[string]interface{}) (string, error) {
 			return storageName, nil
 		})
-		if isSeedInFlight(err) {
-			return nil, p.outcomeUnknown(fmt.Sprintf("attaching the cloud-init seed of imported-disk VM %d: the seed may still be being built on the node", vmConfig.VMID), err)
-		}
 		if err != nil {
-			return nil, fail(fmt.Sprintf("attaching the cloud-init seed of imported-disk VM %d failed", vmConfig.VMID), err)
+			return nil, p.failSeedOrStep(ctx, node, vmConfig.VMID, req.Name, stamp,
+				fmt.Sprintf("attaching the cloud-init seed of imported-disk VM %d failed", vmConfig.VMID), err)
 		}
 	}
 
