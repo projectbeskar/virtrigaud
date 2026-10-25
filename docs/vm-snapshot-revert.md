@@ -259,10 +259,11 @@ running VM is an internal one. libvirt reverts external snapshots from 9.9 on; a
 libvirt refuses, and the provider's error is reported as `RevertFailed`.
 
 A memory snapshot taken after a disk-only one is stored inside the disk-only snapshot's
-overlay. Delete the memory snapshot first: since v0.4.0-rc9 the provider refuses to
-delete the disk-only snapshot while it would destroy the memory snapshot. It deletes the
-leftover metadata of a memory snapshot that v0.4.0-rc8 or earlier already lost this way
-when it can prove the data is gone
+overlay. Delete the memory snapshot first: from v0.4.0 the provider refuses to
+delete the disk-only snapshot while that would orphan the memory snapshot (its data would
+stay in the leftover overlay file, unusable, because the VM no longer runs on it). It
+deletes the leftover metadata of a memory snapshot that v0.3.11 or v0.4.0-rc8 or earlier
+already orphaned this way when it can prove the data is gone
 ([Deleting memory and disk-only snapshots of the same VM](libvirt-clones.md#deleting-memory-and-disk-only-snapshots-of-the-same-vm)).
 
 libvirt reverts an external snapshot by rebuilding the VM's disks from the domain

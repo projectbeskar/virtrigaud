@@ -412,14 +412,17 @@ each disk is using at that moment. A VM that already has a disk-only snapshot ru
 that snapshot's overlay (`<domain>-disk.<snapshot name>`), so a memory snapshot taken
 after it is stored **inside that overlay**. Deleting the disk-only snapshot makes libvirt
 commit the overlay into its base and move the VM off it. In the lab where this was found
-(libvirt 10, a running VM), libvirt also removed the overlay file, and the memory
-snapshot's data went with it. libvirt (checked against 10.0) does not refuse this
-delete: it refuses an internal snapshot that is the disk-only snapshot's *parent*, but
-not one stored in the file the delete merges away, and it keeps the memory snapshot's
-metadata, which still names the removed file. v0.4.0-rc8 and earlier sent that delete
+(libvirt 10.0, a running VM), libvirt did not delete the overlay file. libvirt (checked
+against 10.0) does not refuse this delete: it refuses an internal snapshot that is the
+disk-only snapshot's *parent*, but not one stored in the file the delete merges away. The
+memory snapshot is then **orphaned**: its data stays in the leftover overlay file, but the VM
+no longer runs on that file, so the snapshot cannot be used, and libvirt keeps its metadata,
+which still names the file. From v0.4.0-rc1 on, VirtRigaud's overlay cleanup ([What SnapshotDelete
+removes](#what-snapshotdelete-removes); v0.3.11 had none, so the file stayed either way) kept the leftover file, because the memory
+snapshot's metadata still referenced it. v0.3.11 and v0.4.0-rc8 and earlier sent that delete
 and reported success.
 
-**The delete is refused before anything changes.** Since v0.4.0-rc9, `SnapshotDelete`
+**The delete is refused before anything changes.** From v0.4.0, `SnapshotDelete`
 of a disk-only snapshot is refused while another snapshot of the VM is stored in a file
 the delete may merge away or remove. For each of the snapshot's disks these files are
 the snapshot's overlay (and, after a revert to it, the revert's overlay), the disk file
@@ -436,7 +439,8 @@ is stored in such a file when either:
 The `VMSnapshot` keeps its finalizer and stays `Deleting`, with
 `Ready=False/DeleteBlocked` and a `SnapshotDeleteFailed` Warning event. The message
 carries the provider's answer, which names the snapshots to delete first by name, for
-example:
+example (the provider's text says the snapshot "would be lost"; what happens is that it
+would be orphaned and unusable, as described above):
 
 ```text
 Provider refused to delete the snapshot: snapshotDelete failed: failed to delete snapshot: delete refused, nothing changed: delete snapshot "mem" first; it is stored in a disk file that deleting snapshot "live" would merge away, and would be lost. The VMSnapshot is kept and the delete is re-checked with a backoff of up to 5m0s; ...
@@ -465,18 +469,22 @@ disk image": see [Unreadable disk images](#unreadable-disk-images).
 `virtrigaud.io/force-delete=true` on the `VMSnapshot` still removes it. Nothing is
 deleted on the host; the snapshot stays on the hypervisor.
 
-#### A memory snapshot whose data was already lost
+When nothing references the merged overlay any more (the memory snapshot was deleted
+first), the overlay cleanup removes the leftover file, and no snapshot or overlay file is
+left.
 
-On a VM where v0.4.0-rc8 or earlier deleted the disk-only snapshot first, the memory
-snapshot's metadata remains and records a file that no longer exists. While the VM
-runs, libvirt refuses to delete the snapshot (`disk image 'vda' for internal snapshot
-'mem' is not the same as disk image currently used by VM`), and its `VMSnapshot` stayed
-`Deleting`.
+#### A memory snapshot that was already orphaned
 
-Since v0.4.0-rc9, when libvirt refuses a delete with that error, the provider deletes
+On a VM where v0.3.11 or v0.4.0-rc8 or earlier deleted the disk-only snapshot first, the
+memory snapshot is orphaned: libvirt keeps its metadata, which records the leftover overlay,
+and the VM no longer runs on that file. While the VM runs, libvirt refuses to delete the
+snapshot (`disk image 'vda' for internal snapshot 'mem' is not the same as disk image
+currently used by VM`), and its `VMSnapshot` stayed `Deleting`.
+
+From v0.4.0, when libvirt refuses a delete with that error, the provider deletes
 only the snapshot's metadata (`virsh snapshot-delete <domain> <snapshot> --metadata`,
-which touches no disk file), but only when it can prove that the data is gone. Both of
-these must hold:
+which touches no disk file), but only when it can prove that the data is gone (for
+example because someone removed the leftover overlay). Both of these must hold:
 
 - every file the snapshot recorded for its internal disks no longer exists (`qemu-img`
   answers "No such file or directory"); and
@@ -492,8 +500,8 @@ delete refused, nothing changed: power the VM off and delete it again; libvirt c
 With the VM powered off, libvirt deletes an internal snapshot from the files it
 recorded (`qemu-img snapshot -d`), without comparing them with the VM's current disk.
 
-**Manual cleanup.** If a VM is still on v0.4.0-rc8 or earlier, or its `VMSnapshot` was
-already removed with force-delete, clear the leftover metadata by hand. You need the
+**Manual cleanup.** If a VM is still on v0.3.11 or v0.4.0-rc8 or earlier, or its
+`VMSnapshot` was already removed with force-delete, clear the leftover metadata by hand. You need the
 provider's SSH user (or root) on the VM's host. Set the connection as in the
 [re-attach runbook](clustered-restore.md#re-attach-runbook). Delete only the metadata,
 and only after you have checked that the data is gone:
@@ -514,8 +522,8 @@ and only after you have checked that the data is gone:
    # qemu-img: Could not open '<recorded file>': ... No such file or directory
    ```
 
-   If it lists the snapshot, stop here: the data is still there. Power the VM off and
-   delete the `VMSnapshot` again.
+   If it lists the snapshot, stop here: the data is still there, in a file the VM no longer
+   uses. Power the VM off and delete the `VMSnapshot` again.
 
 3. Check that none of the VM's current disk images lists the snapshot. The output must
    not show `<snapshot>` under any image's "Snapshot list":
