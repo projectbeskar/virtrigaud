@@ -20,21 +20,21 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// HostInUseFinalizer is the finalizer the Host controller keeps on every Host
-// (ADR-0007 Addendum A, A1). It is removed only once no VirtualMachine of the
+// HostInUseFinalizer is the finalizer the Host controller keeps on every Host.
+// It is removed only once no VirtualMachine of the
 // Host's Provider names the Host in status.placement.host or
 // status.placement.pendingHost, so a Host that per-VM calls (and VM finalizer
 // cleanup) still route to cannot vanish from the provider's inventory.
 const HostInUseFinalizer = "host.infra.virtrigaud.io/in-use"
 
 // HostHealth is the live health of a Host, observed by the operator's inventory
-// sync from the clustered provider (ListHosts/GetHostInfo, ADR-0007 D1/D3).
+// sync from the clustered provider (the ListHosts and GetHostInfo calls).
 // +kubebuilder:validation:Enum=Ready;NotReady;Unknown
 type HostHealth string
 
 const (
-	// HostHealthReady indicates the host's hypervisor is reachable and runnable
-	// (libvirtd reachable / agent reachable + CH runnable).
+	// HostHealthReady indicates the host is reachable and the provider could
+	// read its inventory (for libvirt, a virsh nodeinfo over SSH succeeded).
 	HostHealthReady HostHealth = "Ready"
 	// HostHealthNotReady indicates the host was probed but is not currently
 	// usable for placement or migration.
@@ -55,7 +55,7 @@ const (
 //
 //	qemu+ssh://[user@]host[:port]/system
 //	qemu+ssh://[user@]host[:port]/session
-//	grpc://host:port                      (future cloud-hypervisor host agent)
+//	grpc://host:port                      (passes validation; not connectable, see HostSpec.Endpoint)
 //
 // where user is [A-Za-z0-9._-]+ and host is a DNS name, an IPv4 address, or a
 // bracketed IPv6 address. Query strings, fragments, percent-encoding, and any
@@ -65,7 +65,7 @@ const (
 const HostEndpointPattern = `^(qemu\+ssh://([A-Za-z0-9._-]+@)?([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*|\[[0-9A-Fa-f:.]+\])(:[0-9]{1,5})?/(system|session)|grpc://([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*|\[[0-9A-Fa-f:.]+\]):[0-9]{1,5})$`
 
 // HostSpec is admin-authored desired inventory: one bare hypervisor host that a
-// clustered Provider (spec.topology=cluster, ADR-0007) executes on. The admin
+// clustered Provider (spec.topology=cluster) executes on. The admin
 // declares which hosts exist; the provider reports what they can do right now
 // (see HostStatus).
 //
@@ -83,14 +83,21 @@ type HostSpec struct {
 	ProviderRef LocalObjectReference `json:"providerRef"`
 
 	// PoolRef is the HostPool this host belongs to. Membership is declared by the
-	// host itself (Host.spec.poolRef -> HostPool), per ADR-0007 D3.
+	// host itself (Host.spec.poolRef names the HostPool), not by the pool.
 	PoolRef LocalObjectReference `json:"poolRef"`
 
 	// Endpoint is the host connection URI. Only these shapes are accepted:
-	// qemu+ssh://[user@]host[:port]/system, qemu+ssh://[user@]host[:port]/session
-	// (libvirt), and grpc://host:port (a future cloud-hypervisor host agent). The
-	// host is a DNS name, an IPv4 address, or a bracketed IPv6 address. No query
-	// string, fragment, percent-encoding, or other path is allowed.
+	// qemu+ssh://[user@]host[:port]/system, qemu+ssh://[user@]host[:port]/session,
+	// and grpc://host:port. The host is a DNS name, an IPv4 address, or a
+	// bracketed IPv6 address. No query string, fragment, percent-encoding, or
+	// other path is allowed.
+	//
+	// The only clustered provider type today is libvirt, and it connects to a
+	// host over SSH with the qemu+ssh:// form only (the user, port and
+	// system|session instance come from the URI; the SSH key and known_hosts
+	// come from the credentials Secret). A grpc://host:port value passes
+	// validation but the libvirt provider refuses to connect to it, so the host
+	// cannot become Ready and is never used for placement; use qemu+ssh://.
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=512
 	// +kubebuilder:validation:Pattern=`^(qemu\+ssh://([A-Za-z0-9._-]+@)?([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*|\[[0-9A-Fa-f:.]+\])(:[0-9]{1,5})?/(system|session)|grpc://([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*|\[[0-9A-Fa-f:.]+\]):[0-9]{1,5})$`
@@ -105,30 +112,36 @@ type HostSpec struct {
 	CredentialSecretRef *LocalObjectReference `json:"credentialSecretRef,omitempty"`
 
 	// Labels are placement facts: storage-pool visibility, network/bridge
-	// visibility, zone/rack. They are consumed as hard scheduling constraints
-	// (ADR-0007 D6), e.g. {"storage.virtrigaud.io/pool-nfs01":"true",
+	// visibility, zone/rack, e.g. {"storage.virtrigaud.io/pool-nfs01":"true",
 	// "net.virtrigaud.io/br-vlan100":"true","topology.virtrigaud.io/rack":"r7"}.
+	// The scheduler treats them as hard constraints: a host is a candidate for a
+	// VM only if it carries net.virtrigaud.io/<network>="true" for every network
+	// the VM attaches to, and the labels a VMPlacementPolicy nodeSelector
+	// requires. storage.virtrigaud.io/pool-<name> labels are accepted but a VM
+	// create is not yet checked against them.
 	// +optional
 	Labels map[string]string `json:"labels,omitempty"`
 
-	// Schedulable, when false, cordons the host: no new placement, existing VMs
-	// stay. Set true->false to drain-then-evacuate (ADR-0007 D8). Defaults true.
+	// Schedulable, when false, cordons the host: no new VM is placed on it, and
+	// VMs already on it stay where they are (VirtRigaud does not move or
+	// evacuate them). Defaults true.
 	//
 	// This is a defaulted bool and deliberately carries NO omitempty: with
 	// omitempty an explicit false would be dropped on marshal, the apiserver
 	// would re-apply the true default, and the field would silently flip
-	// false->true (the defaulted-bool footgun, ADR-0006/PR#235).
+	// false->true (the defaulted-bool pitfall).
 	// +optional
 	// +kubebuilder:default=true
 	Schedulable bool `json:"schedulable"`
 }
 
-// HostStatus is operator-synced observed state from ListHosts/GetHostInfo. It
-// carries capacity and health only, never connection secrets (ADR-0007
-// Security).
+// HostStatus is operator-synced observed state from the provider's ListHosts and
+// GetHostInfo calls. It carries capacity and health only, never connection
+// secrets.
 type HostStatus struct {
-	// Health is the live host health (libvirtd reachable / agent reachable + CH
-	// runnable).
+	// Health is the live host health as last observed by the inventory sync
+	// (for libvirt, whether a virsh nodeinfo over SSH succeeded). Only Ready
+	// hosts are placement candidates.
 	// +optional
 	Health HostHealth `json:"health,omitempty"`
 
@@ -148,29 +161,29 @@ type HostStatus struct {
 	// +optional
 	AllocatableStorageBytes *int64 `json:"allocatableStorageBytes,omitempty"`
 
-	// CPUModel is the host CPU baseline model, driving the migration
-	// CPU-compatibility pre-check (virsh cpu-baseline / cpu-compare).
+	// CPUModel is the host CPU baseline model as the provider reports it.
+	// Informational: no controller reads it.
 	// +optional
 	CPUModel string `json:"cpuModel,omitempty"`
 
-	// CPUFeatures are the host CPU features, driving the migration
-	// CPU-compatibility pre-check.
+	// CPUFeatures are the host CPU features as the provider reports them. The
+	// scheduler matches a VMPlacementPolicy's required CPU features against them.
 	// +optional
 	CPUFeatures []string `json:"cpuFeatures,omitempty"`
 
-	// MachineTypes are the machine types the host supports, gating the
-	// machine-type match required for live migration.
+	// MachineTypes are the machine types the host supports, as the provider
+	// reports them.
 	// +optional
 	MachineTypes []string `json:"machineTypes,omitempty"`
 
-	// EmulatorVersion is the host emulator version, gating the emulator match
-	// required for live migration.
+	// EmulatorVersion is the host emulator version as the provider reports it.
+	// Informational: no controller reads it.
 	// +optional
 	EmulatorVersion string `json:"emulatorVersion,omitempty"`
 
-	// BoundVMs is the count of VMs the operator has bound to this host. It is
-	// derived from VirtualMachine status, not from the provider — the operator
-	// owns the binding (ADR-0007 D1).
+	// BoundVMs is reserved for the count of VMs bound to this host. It is not
+	// populated in this release and stays 0 (omitted); count the VirtualMachines
+	// whose status.placement.host names this Host instead.
 	// +optional
 	BoundVMs int32 `json:"boundVMs,omitempty"`
 
@@ -197,9 +210,8 @@ type HostStatus struct {
 //+kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 
 // Host is the Schema for the hosts API: one bare hypervisor host registered into
-// a clustered Provider's HostPool (ADR-0007 P1 inventory foundation). It is
-// additive and does not affect single-host (spec.topology=single) providers
-// (ADR-0007 D9).
+// a clustered Provider's HostPool. It does not affect single-host
+// (spec.topology=single) providers.
 type Host struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
