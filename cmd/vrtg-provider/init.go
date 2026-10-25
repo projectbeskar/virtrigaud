@@ -62,6 +62,9 @@ This command creates a complete provider project structure including:
 - Deployment manifests for Kubernetes
 
 Examples:
+  # Create a new Proxmox VE provider
+  vrtg-provider init myprovider --type proxmox
+
   # Create a new vSphere-like provider
   vrtg-provider init myprovider --type vsphere
 
@@ -81,7 +84,7 @@ Examples:
 	}
 
 	cmd.Flags().StringVarP(&opts.outputDir, "output", "o", ".", "Output directory for the provider project")
-	cmd.Flags().StringVarP(&opts.providerType, "type", "t", "generic", "Provider type (vsphere, libvirt, firecracker, qemu, generic)")
+	cmd.Flags().StringVarP(&opts.providerType, "type", "t", "generic", "Provider type (vsphere, libvirt, proxmox, firecracker, qemu, generic)")
 	cmd.Flags().BoolVar(&opts.remote, "remote", false, "Generate remote runtime configuration")
 	cmd.Flags().BoolVar(&opts.force, "force", false, "Overwrite existing files")
 	cmd.Flags().StringVar(&opts.virtrigaudPath, "virtrigaud-path", "",
@@ -98,7 +101,7 @@ func runInit(opts *initOptions) error {
 	}
 
 	// Validate provider type
-	validTypes := []string{"vsphere", "libvirt", "firecracker", "qemu", "generic"}
+	validTypes := []string{"vsphere", "libvirt", "proxmox", "firecracker", "qemu", "generic"}
 	if !contains(validTypes, opts.providerType) {
 		return fmt.Errorf("invalid provider type %q: must be one of %v", opts.providerType, validTypes)
 	}

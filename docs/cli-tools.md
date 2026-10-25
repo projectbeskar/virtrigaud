@@ -133,7 +133,7 @@ in this release.
 `vrtg-provider` helps someone writing a provider outside this repository.
 
 ```
-vrtg-provider init <name> [--type generic|vsphere|libvirt|firecracker|qemu] [--remote] [--output <dir>] [--virtrigaud-path <checkout>] [--force]
+vrtg-provider init <name> [--type generic|vsphere|libvirt|proxmox|firecracker|qemu] [--remote] [--output <dir>] [--virtrigaud-path <checkout>] [--force]
 vrtg-provider generate [--proto-only] [--clean]    # run inside the project
 vrtg-provider verify [--skip-build] [--skip-tests] [--skip-conformance]
 vrtg-provider publish --image <repo> --repo <url> --maintainer <email> [--name <n>] [--tag <t>] [--catalog <file>] [--dry-run] [--skip-verify]
@@ -144,6 +144,15 @@ vrtg-provider version
 `main.go`, `internal/provider/` (a provider whose operations all return `Unimplemented`, its
 capabilities and a test), `go.mod`, `Makefile`, `Dockerfile`, `README.md`, a CI workflow and, with
 `--remote`, Kubernetes manifests. The generated Go files are `gofmt`-clean.
+
+`--type` (default `generic`) picks the platform the scaffold is written for: its README, the
+credentials its remote Deployment reads and the capabilities it declares. The `proxmox` type declares
+only the core profile and the `raw`/`qcow2` disk and `bridge`/`vlan` network types, and its test
+asserts that no optional capability (snapshots, linked clones, online reconfigure) is advertised; add
+each one as you implement the operation behind it. The other types still declare optional
+capabilities (for example snapshots for `vsphere`, `libvirt` and `qemu`) although every operation of
+a fresh scaffold returns `Unimplemented`; review `internal/provider/capabilities.go` before you
+deploy one.
 
 The SDK (`github.com/projectbeskar/virtrigaud/sdk`) and the protobuf bindings
 (`github.com/projectbeskar/virtrigaud/proto`) are separate Go modules that are **not published under

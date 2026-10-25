@@ -165,7 +165,7 @@ func TestInitProjectIsAcceptedBuildsAndRuns(t *testing.T) {
 	checkout := repoCheckout(t)
 	useLocalModuleCache(t)
 
-	for _, providerType := range []string{"generic", "libvirt", "vsphere", "firecracker", "qemu"} {
+	for _, providerType := range []string{"generic", "libvirt", "vsphere", "proxmox", "firecracker", "qemu"} {
 		t.Run(providerType, func(t *testing.T) {
 			out := t.TempDir()
 			name := "demo-" + providerType
