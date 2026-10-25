@@ -94,9 +94,12 @@ func (p *Provider) defaultStorage() (string, error) {
 //  4. cloudInitLastResortStorage, only when the config shows no storage-backed
 //     disk (a warning is logged).
 //
-// explicit is checked by checkRequestStorage before the clone. An invalid
-// default storage is an InvalidSpec error.
+// explicit is checked by checkRequestStorage before the clone, and again here
+// (it ends up in a config value). An invalid storage is an InvalidSpec error.
 func (p *Provider) diskfulCloudInitStorage(explicit string, cfg map[string]interface{}, vmid int) (string, error) {
+	if err := checkRequestStorage(explicit); err != nil {
+		return "", err
+	}
 	if explicit != "" {
 		return explicit, nil
 	}
