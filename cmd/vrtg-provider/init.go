@@ -17,6 +17,7 @@ limitations under the License.
 package main
 
 import (
+	"bufio"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -34,7 +35,14 @@ type initOptions struct {
 	providerType string
 	remote       bool
 	force        bool
+
+	// virtrigaudPath is the VirtRigaud checkout the generated go.mod resolves
+	// the SDK and proto modules from; empty means detect it.
+	virtrigaudPath string
 }
+
+// rootModuleLine is the module line of the VirtRigaud repository's go.mod.
+const rootModuleLine = "module github.com/projectbeskar/virtrigaud"
 
 // newInitCommand creates the init command.
 func newInitCommand() *cobra.Command {
@@ -60,8 +68,11 @@ Examples:
   # Create with remote runtime configuration
   vrtg-provider init myprovider --remote
 
-  # Create in a specific directory
-  vrtg-provider init myprovider --output ./providers/`,
+  # Create under a specific directory (the project goes in <dir>/providers/myprovider)
+  vrtg-provider init myprovider --output ./work
+
+  # Resolve the SDK and proto modules from a VirtRigaud checkout elsewhere
+  vrtg-provider init myprovider --virtrigaud-path ~/src/virtrigaud`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			opts.providerName = args[0]
@@ -73,6 +84,8 @@ Examples:
 	cmd.Flags().StringVarP(&opts.providerType, "type", "t", "generic", "Provider type (vsphere, libvirt, firecracker, qemu, generic)")
 	cmd.Flags().BoolVar(&opts.remote, "remote", false, "Generate remote runtime configuration")
 	cmd.Flags().BoolVar(&opts.force, "force", false, "Overwrite existing files")
+	cmd.Flags().StringVar(&opts.virtrigaudPath, "virtrigaud-path", "",
+		"VirtRigaud checkout to resolve the SDK and proto modules from (default: the checkout the project is created in, if any)")
 
 	return cmd
 }
@@ -103,13 +116,22 @@ func runInit(opts *initOptions) error {
 		}
 	}
 
+	// Find the VirtRigaud checkout the SDK and proto modules come from
+	checkout := opts.virtrigaudPath
+	if checkout == "" {
+		checkout = findCheckout(targetDir)
+	} else if !isCheckout(checkout) {
+		return fmt.Errorf("--virtrigaud-path %s is not a VirtRigaud checkout (no go.mod with %q)", checkout, rootModuleLine)
+	}
+
 	// Create scaffolder
 	scaffolder := scaffold.New(scaffold.Config{
-		ProviderName: opts.providerName,
-		ProviderType: opts.providerType,
-		TargetDir:    targetDir,
-		Remote:       opts.remote,
-		Force:        opts.force,
+		ProviderName:   opts.providerName,
+		ProviderType:   opts.providerType,
+		TargetDir:      targetDir,
+		Remote:         opts.remote,
+		Force:          opts.force,
+		VirtrigaudPath: checkout,
 	})
 
 	// Generate project structure
@@ -121,11 +143,52 @@ func runInit(opts *initOptions) error {
 	fmt.Printf("📁 Project created in: %s\n", targetDir)
 	fmt.Printf("\nNext steps:\n")
 	fmt.Printf("  cd %s\n", targetDir)
+	if checkout == "" {
+		fmt.Printf("  # go.mod needs replace directives for the VirtRigaud modules (see the comment in it),\n")
+		fmt.Printf("  # or re-run init with --virtrigaud-path <checkout>\n")
+	}
+	fmt.Printf("  go mod tidy\n")
 	fmt.Printf("  make build\n")
 	fmt.Printf("  make test\n")
 	fmt.Printf("  vrtg-provider verify\n")
 
 	return nil
+}
+
+// findCheckout returns the VirtRigaud checkout that contains dir, or "" when
+// dir is not inside one.
+func findCheckout(dir string) string {
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return ""
+	}
+	for {
+		if isCheckout(abs) {
+			return abs
+		}
+		parent := filepath.Dir(abs)
+		if parent == abs {
+			return ""
+		}
+		abs = parent
+	}
+}
+
+// isCheckout reports whether dir holds the VirtRigaud repository's go.mod.
+func isCheckout(dir string) bool {
+	f, err := os.Open(filepath.Join(dir, "go.mod")) //nolint:gosec // dir is a path the user named or a parent of the output directory
+	if err != nil {
+		return false
+	}
+	defer f.Close() //nolint:errcheck // read-only file
+
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		if strings.TrimSpace(scanner.Text()) == rootModuleLine {
+			return true
+		}
+	}
+	return false
 }
 
 // isValidProviderName checks if the provider name is valid.

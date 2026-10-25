@@ -14,43 +14,91 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
+// Package main provides vrtg, the command-line tool for inspecting VirtRigaud
+// resources in a cluster.
 package main
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"strings"
+	"text/tabwriter"
 	"time"
 
 	"github.com/spf13/cobra"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/client/config"
+	"sigs.k8s.io/controller-runtime/pkg/client/apiutil"
+	"sigs.k8s.io/yaml"
 
 	infrav1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
+	"github.com/projectbeskar/virtrigaud/cmd/internal/cliclient"
+	"github.com/projectbeskar/virtrigaud/cmd/internal/cliout"
 )
 
-var (
+const (
+	// outputTable, outputJSON and outputYAML are the values of --output.
+	outputTable = "table"
+	outputJSON  = "json"
+	outputYAML  = "yaml"
+
+	// noneValue is printed in a table cell with nothing to show.
+	noneValue = "<none>"
+
+	// flagNamespace is the name of the --namespace flag.
+	flagNamespace = "namespace"
+)
+
+// version is the release the binary was built from; the release workflow sets
+// it with -ldflags "-X main.version=...".
+var version = "dev"
+
+// errNotImplemented is returned by the subcommands that exist in the command
+// tree but have no implementation yet.
+var errNotImplemented = errors.New("not implemented in this release")
+
+// options holds the values of vrtg's persistent flags.
+type options struct {
 	kubeconfig string
 	namespace  string
 	output     string
 	timeout    time.Duration
-)
+}
 
 func main() {
+	if err := newRootCmd().Execute(); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+// newRootCmd builds the vrtg command tree. Every call returns an independent
+// tree with its own flag values, so it can be run repeatedly in one process.
+func newRootCmd() *cobra.Command {
+	opts := &options{}
+
 	rootCmd := &cobra.Command{
-		Use:   "vrtg",
-		Short: "CLI tool for virtrigaud",
-		Long:  "Command-line interface for managing virtrigaud resources",
+		Use:           "vrtg",
+		Short:         "CLI tool for virtrigaud",
+		Long:          "Command-line interface for managing virtrigaud resources",
+		Version:       version,
+		SilenceUsage:  true,
+		SilenceErrors: true,
 	}
 
-	rootCmd.PersistentFlags().StringVar(&kubeconfig, "kubeconfig", "", "Path to kubeconfig file")
-	rootCmd.PersistentFlags().StringVarP(&namespace, "namespace", "n", "default", "Kubernetes namespace")
-	rootCmd.PersistentFlags().StringVarP(&output, "output", "o", "table", "Output format (table|json|yaml)")
-	rootCmd.PersistentFlags().DurationVar(&timeout, "timeout", 30*time.Second, "Request timeout")
+	rootCmd.PersistentFlags().StringVar(&opts.kubeconfig, "kubeconfig", "", "Path to kubeconfig file")
+	rootCmd.PersistentFlags().StringVarP(&opts.namespace, flagNamespace, "n", "default",
+		"Kubernetes namespace (list commands show every namespace unless this is set)")
+	rootCmd.PersistentFlags().StringVarP(&opts.output, "output", "o", outputTable, "Output format (table|json|yaml)")
+	rootCmd.PersistentFlags().DurationVar(&opts.timeout, "timeout", 30*time.Second, "Request timeout")
 
 	// VM commands
 	vmCmd := &cobra.Command{
@@ -63,25 +111,26 @@ func main() {
 		&cobra.Command{
 			Use:   "list",
 			Short: "List virtual machines",
-			RunE:  listVMs,
+			Args:  cobra.NoArgs,
+			RunE:  opts.listVMs,
 		},
 		&cobra.Command{
 			Use:   "describe <name>",
 			Short: "Describe a virtual machine",
 			Args:  cobra.ExactArgs(1),
-			RunE:  describeVM,
+			RunE:  opts.describeVM,
 		},
 		&cobra.Command{
 			Use:   "events <name>",
 			Short: "Show events for a virtual machine",
 			Args:  cobra.ExactArgs(1),
-			RunE:  vmEvents,
+			RunE:  opts.vmEvents,
 		},
 		&cobra.Command{
 			Use:   "console-url <name>",
 			Short: "Get console URL for a virtual machine",
 			Args:  cobra.ExactArgs(1),
-			RunE:  vmConsoleURL,
+			RunE:  opts.vmConsoleURL,
 		},
 	)
 
@@ -96,19 +145,20 @@ func main() {
 		&cobra.Command{
 			Use:   "list",
 			Short: "List providers",
-			RunE:  listProviders,
+			Args:  cobra.NoArgs,
+			RunE:  opts.listProviders,
 		},
 		&cobra.Command{
 			Use:   "status <name>",
 			Short: "Show provider status",
 			Args:  cobra.ExactArgs(1),
-			RunE:  providerStatus,
+			RunE:  opts.providerStatus,
 		},
 		&cobra.Command{
 			Use:   "logs <name>",
-			Short: "Show provider logs",
+			Short: "Show provider logs (not implemented - use kubectl logs)",
 			Args:  cobra.ExactArgs(1),
-			RunE:  providerLogs,
+			RunE:  notImplemented("provider logs", "kubectl logs"),
 		},
 	)
 
@@ -116,27 +166,27 @@ func main() {
 	snapshotCmd := &cobra.Command{
 		Use:     "snapshot",
 		Aliases: []string{"snap", "snapshots"},
-		Short:   "Manage VM snapshots",
+		Short:   "Manage VM snapshots (not implemented - use VMSnapshot resources)",
 	}
 
 	snapshotCmd.AddCommand(
 		&cobra.Command{
 			Use:   "create <vm-name> <snapshot-name>",
-			Short: "Create a VM snapshot",
+			Short: "Create a VM snapshot (not implemented)",
 			Args:  cobra.ExactArgs(2),
-			RunE:  createSnapshot,
+			RunE:  notImplemented("snapshot create", "a VMSnapshot resource"),
 		},
 		&cobra.Command{
 			Use:   "list [vm-name]",
-			Short: "List snapshots",
+			Short: "List snapshots (not implemented)",
 			Args:  cobra.MaximumNArgs(1),
-			RunE:  listSnapshots,
+			RunE:  notImplemented("snapshot list", "kubectl get vmsnapshots"),
 		},
 		&cobra.Command{
 			Use:   "revert <vm-name> <snapshot-name>",
-			Short: "Revert VM to snapshot",
+			Short: "Revert VM to snapshot (not implemented)",
 			Args:  cobra.ExactArgs(2),
-			RunE:  revertSnapshot,
+			RunE:  notImplemented("snapshot revert", "spec.snapshot.revertToRef on the VirtualMachine"),
 		},
 	)
 
@@ -144,20 +194,21 @@ func main() {
 	cloneCmd := &cobra.Command{
 		Use:     "clone",
 		Aliases: []string{"clones"},
-		Short:   "Manage VM clones",
+		Short:   "Manage VM clones (not implemented - use VMClone resources)",
 	}
 
 	cloneCmd.AddCommand(
 		&cobra.Command{
 			Use:   "run <source-vm> <target-vm>",
-			Short: "Clone a virtual machine",
+			Short: "Clone a virtual machine (not implemented)",
 			Args:  cobra.ExactArgs(2),
-			RunE:  runClone,
+			RunE:  notImplemented("clone run", "a VMClone resource"),
 		},
 		&cobra.Command{
 			Use:   "list",
-			Short: "List clone operations",
-			RunE:  listClones,
+			Short: "List clone operations (not implemented)",
+			Args:  cobra.NoArgs,
+			RunE:  notImplemented("clone list", "kubectl get vmclones"),
 		},
 	)
 
@@ -165,15 +216,15 @@ func main() {
 	conformanceCmd := &cobra.Command{
 		Use:     "conformance",
 		Aliases: []string{"conf"},
-		Short:   "Run conformance tests",
+		Short:   "Run conformance tests (not implemented - use vcts)",
 	}
 
 	conformanceCmd.AddCommand(
 		&cobra.Command{
 			Use:   "run <provider>",
-			Short: "Run conformance tests against a provider",
+			Short: "Run conformance tests against a provider (not implemented)",
 			Args:  cobra.ExactArgs(1),
-			RunE:  runConformance,
+			RunE:  notImplemented("conformance run", "vcts run"),
 		},
 	)
 
@@ -181,286 +232,364 @@ func main() {
 	diagCmd := &cobra.Command{
 		Use:     "diag",
 		Aliases: []string{"diagnostics"},
-		Short:   "Diagnostic tools",
+		Short:   "Diagnostic tools (not implemented)",
 	}
 
 	diagCmd.AddCommand(
 		&cobra.Command{
 			Use:   "bundle",
-			Short: "Create diagnostic bundle",
-			RunE:  createDiagBundle,
+			Short: "Create diagnostic bundle (not implemented)",
+			Args:  cobra.NoArgs,
+			RunE:  notImplemented("diag bundle", "kubectl describe and kubectl logs"),
 		},
 	)
 
 	// Installation commands
 	initCmd := &cobra.Command{
 		Use:   "init",
-		Short: "Initialize virtrigaud",
-		Long:  "Install virtrigaud CRDs and components",
-		RunE:  initVirtrigaud,
+		Short: "Initialize virtrigaud (not implemented - use the Helm chart)",
+		Long:  "Install virtrigaud CRDs and components (not implemented - use the Helm chart)",
+		Args:  cobra.NoArgs,
+		RunE:  notImplemented("init", "the Helm chart"),
 	}
 
 	rootCmd.AddCommand(vmCmd, providerCmd, snapshotCmd, cloneCmd, conformanceCmd, diagCmd, initCmd)
 
-	if err := rootCmd.Execute(); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
+	return rootCmd
+}
+
+// notImplemented returns a RunE for a subcommand that has no implementation
+// yet. It fails (non-zero exit) rather than printing a notice and exiting 0,
+// and points at what to use instead.
+func notImplemented(name, instead string) func(*cobra.Command, []string) error {
+	return func(_ *cobra.Command, _ []string) error {
+		return fmt.Errorf("vrtg %s: %w (use %s instead)", name, errNotImplemented, instead)
 	}
 }
 
-func listVMs(cmd *cobra.Command, args []string) error {
-	client, err := getClient()
+// newContext returns a context bounded by --timeout.
+func (o *options) newContext(cmd *cobra.Command) (context.Context, context.CancelFunc) {
+	parent := cmd.Context()
+	if parent == nil {
+		parent = context.Background()
+	}
+	return context.WithTimeout(parent, o.timeout)
+}
+
+// listNamespace returns the namespace a list command is restricted to. It is
+// empty (every namespace) unless --namespace was given explicitly.
+func (o *options) listNamespace(cmd *cobra.Command) string {
+	if cmd.Flags().Changed(flagNamespace) {
+		return o.namespace
+	}
+	return metav1.NamespaceAll
+}
+
+// refName returns the name an optional object reference points at, or the
+// none placeholder when the reference is unset.
+func refName(ref *infrav1beta1.ObjectRef) string {
+	if ref == nil || ref.Name == "" {
+		return noneValue
+	}
+	return ref.Name
+}
+
+func (o *options) listVMs(cmd *cobra.Command, _ []string) error {
+	c, err := o.getClient()
 	if err != nil {
 		return err
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	ctx, cancel := o.newContext(cmd)
 	defer cancel()
 
+	ns := o.listNamespace(cmd)
 	vmList := &infrav1beta1.VirtualMachineList{}
-	err = client.List(ctx, vmList)
-	if err != nil {
+	if err := c.List(ctx, vmList, client.InNamespace(ns)); err != nil {
 		return fmt.Errorf("failed to list VMs: %w", err)
 	}
 
-	if output == "table" {
-		fmt.Printf("%-20s %-15s %-15s %-15s %-20s %-10s\n",
-			"NAME", "PROVIDER", "CLASS", "IMAGE", "IPS", "AGE")
-		for _, vm := range vmList.Items {
-			age := time.Since(vm.CreationTimestamp.Time).Truncate(time.Second)
-			ips := strings.Join(vm.Status.IPs, ",")
-			if ips == "" {
-				ips = "<none>"
-			}
-			fmt.Printf("%-20s %-15s %-15s %-15s %-20s %-10s\n",
-				vm.Name, vm.Spec.ProviderRef.Name, vm.Spec.ClassRef.Name,
-				vm.Spec.ImageRef.Name, ips, age)
-		}
-	} else {
-		return outputResource(vmList)
+	out := cmd.OutOrStdout()
+	if o.output != outputTable {
+		return o.outputResource(out, c, vmList)
 	}
 
-	return nil
+	table := newTable(out)
+	cliout.Println(table, "NAMESPACE\tNAME\tPROVIDER\tCLASS\tIMAGE\tIPS\tAGE")
+	for i := range vmList.Items {
+		vm := &vmList.Items[i]
+		age := time.Since(vm.CreationTimestamp.Time).Truncate(time.Second)
+		ips := strings.Join(vm.Status.IPs, ",")
+		if ips == "" {
+			ips = noneValue
+		}
+		cliout.Printf(table, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+			vm.Namespace, vm.Name, vm.Spec.ProviderRef.Name, vm.Spec.ClassRef.Name,
+			refName(vm.Spec.ImageRef), ips, age)
+	}
+
+	return flushTable(table)
 }
 
-func describeVM(cmd *cobra.Command, args []string) error {
-	client, err := getClient()
+func (o *options) describeVM(cmd *cobra.Command, args []string) error {
+	c, err := o.getClient()
 	if err != nil {
 		return err
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	ctx, cancel := o.newContext(cmd)
 	defer cancel()
 
 	vm := &infrav1beta1.VirtualMachine{}
-	key := types.NamespacedName{Namespace: namespace, Name: args[0]}
-	err = client.Get(ctx, key, vm)
-	if err != nil {
-		return fmt.Errorf("failed to get VM: %w", err)
+	key := types.NamespacedName{Namespace: o.namespace, Name: args[0]}
+	if err := c.Get(ctx, key, vm); err != nil {
+		return fmt.Errorf("failed to get VM %s: %w", key, err)
 	}
 
-	if output == "table" {
-		fmt.Printf("Name: %s\n", vm.Name)
-		fmt.Printf("Namespace: %s\n", vm.Namespace)
-		fmt.Printf("Provider: %s\n", vm.Spec.ProviderRef.Name)
-		fmt.Printf("Class: %s\n", vm.Spec.ClassRef.Name)
-		fmt.Printf("Image: %s\n", vm.Spec.ImageRef.Name)
-		fmt.Printf("Power State: %s\n", vm.Spec.PowerState)
-		fmt.Printf("VM ID: %s\n", vm.Status.ID)
-		fmt.Printf("Current Power State: %s\n", vm.Status.PowerState)
-		fmt.Printf("IPs: %s\n", strings.Join(vm.Status.IPs, ", "))
-		fmt.Printf("Console URL: %s\n", vm.Status.ConsoleURL)
-		fmt.Printf("Created: %s\n", vm.CreationTimestamp.Format(time.RFC3339))
+	out := cmd.OutOrStdout()
+	if o.output != outputTable {
+		return o.outputResource(out, c, vm)
+	}
 
-		if len(vm.Status.Conditions) > 0 {
-			fmt.Printf("\nConditions:\n")
-			for _, condition := range vm.Status.Conditions {
-				fmt.Printf("  %s: %s (%s)\n", condition.Type, condition.Status, condition.Reason)
-			}
+	cliout.Printf(out, "Name: %s\n", vm.Name)
+	cliout.Printf(out, "Namespace: %s\n", vm.Namespace)
+	cliout.Printf(out, "Provider: %s\n", vm.Spec.ProviderRef.Name)
+	cliout.Printf(out, "Class: %s\n", vm.Spec.ClassRef.Name)
+	cliout.Printf(out, "Image: %s\n", refName(vm.Spec.ImageRef))
+	cliout.Printf(out, "Power State: %s\n", vm.Spec.PowerState)
+	cliout.Printf(out, "VM ID: %s\n", vm.Status.ID)
+	cliout.Printf(out, "Current Power State: %s\n", vm.Status.PowerState)
+	cliout.Printf(out, "IPs: %s\n", strings.Join(vm.Status.IPs, ", "))
+	cliout.Printf(out, "Console URL: %s\n", vm.Status.ConsoleURL)
+	cliout.Printf(out, "Created: %s\n", vm.CreationTimestamp.Format(time.RFC3339))
+
+	if len(vm.Status.Conditions) > 0 {
+		cliout.Printf(out, "\nConditions:\n")
+		for _, condition := range vm.Status.Conditions {
+			cliout.Printf(out, "  %s: %s (%s)\n", condition.Type, condition.Status, condition.Reason)
 		}
-	} else {
-		return outputResource(vm)
 	}
 
 	return nil
 }
 
-func vmEvents(cmd *cobra.Command, args []string) error {
-	clientset, err := getClientset()
+func (o *options) vmEvents(cmd *cobra.Command, args []string) error {
+	clientset, err := o.getClientset()
 	if err != nil {
 		return err
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	ctx, cancel := o.newContext(cmd)
 	defer cancel()
 
-	events, err := clientset.CoreV1().Events(namespace).List(ctx, metav1.ListOptions{
+	events, err := clientset.CoreV1().Events(o.namespace).List(ctx, metav1.ListOptions{
 		FieldSelector: fmt.Sprintf("involvedObject.name=%s,involvedObject.kind=VirtualMachine", args[0]),
 	})
 	if err != nil {
 		return fmt.Errorf("failed to get events: %w", err)
 	}
 
-	fmt.Printf("%-30s %-10s %-15s %-50s\n", "LAST SEEN", "TYPE", "REASON", "MESSAGE")
+	out := cmd.OutOrStdout()
+	table := newTable(out)
+	cliout.Println(table, "LAST SEEN\tTYPE\tREASON\tMESSAGE")
 	for _, event := range events.Items {
 		lastSeen := event.LastTimestamp.Format("2006-01-02 15:04:05")
-		fmt.Printf("%-30s %-10s %-15s %-50s\n",
+		cliout.Printf(table, "%s\t%s\t%s\t%s\n",
 			lastSeen, event.Type, event.Reason, event.Message)
 	}
 
-	return nil
+	return flushTable(table)
 }
 
-func vmConsoleURL(cmd *cobra.Command, args []string) error {
-	client, err := getClient()
+func (o *options) vmConsoleURL(cmd *cobra.Command, args []string) error {
+	c, err := o.getClient()
 	if err != nil {
 		return err
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	ctx, cancel := o.newContext(cmd)
 	defer cancel()
 
 	vm := &infrav1beta1.VirtualMachine{}
-	key := types.NamespacedName{Namespace: namespace, Name: args[0]}
-	err = client.Get(ctx, key, vm)
-	if err != nil {
-		return fmt.Errorf("failed to get VM: %w", err)
+	key := types.NamespacedName{Namespace: o.namespace, Name: args[0]}
+	if err := c.Get(ctx, key, vm); err != nil {
+		return fmt.Errorf("failed to get VM %s: %w", key, err)
 	}
 
+	out := cmd.OutOrStdout()
 	if vm.Status.ConsoleURL == "" {
-		fmt.Printf("No console URL available for VM %s\n", args[0])
+		cliout.Printf(out, "No console URL available for VM %s\n", args[0])
 	} else {
-		fmt.Printf("%s\n", vm.Status.ConsoleURL)
+		cliout.Printf(out, "%s\n", vm.Status.ConsoleURL)
 	}
 
 	return nil
 }
 
-func listProviders(cmd *cobra.Command, args []string) error {
-	client, err := getClient()
+func (o *options) listProviders(cmd *cobra.Command, _ []string) error {
+	c, err := o.getClient()
 	if err != nil {
 		return err
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	ctx, cancel := o.newContext(cmd)
 	defer cancel()
 
 	providerList := &infrav1beta1.ProviderList{}
-	err = client.List(ctx, providerList)
-	if err != nil {
+	if err := c.List(ctx, providerList, client.InNamespace(o.listNamespace(cmd))); err != nil {
 		return fmt.Errorf("failed to list providers: %w", err)
 	}
 
-	if output == "table" {
-		fmt.Printf("%-20s %-15s %-15s %-10s\n", "NAME", "TYPE", "ENDPOINT", "AGE")
-		for _, provider := range providerList.Items {
-			age := time.Since(provider.CreationTimestamp.Time).Truncate(time.Second)
-			fmt.Printf("%-20s %-15s %-15s %-10s\n",
-				provider.Name, provider.Spec.Type, provider.Spec.Endpoint, age)
-		}
-	} else {
-		return outputResource(providerList)
+	out := cmd.OutOrStdout()
+	if o.output != outputTable {
+		return o.outputResource(out, c, providerList)
 	}
 
-	return nil
+	table := newTable(out)
+	cliout.Println(table, "NAMESPACE\tNAME\tTYPE\tENDPOINT\tAGE")
+	for i := range providerList.Items {
+		provider := &providerList.Items[i]
+		age := time.Since(provider.CreationTimestamp.Time).Truncate(time.Second)
+		endpoint := provider.Spec.Endpoint
+		if endpoint == "" {
+			endpoint = noneValue
+		}
+		cliout.Printf(table, "%s\t%s\t%s\t%s\t%s\n",
+			provider.Namespace, provider.Name, provider.Spec.Type, endpoint, age)
+	}
+
+	return flushTable(table)
 }
 
-func providerStatus(cmd *cobra.Command, args []string) error {
-	client, err := getClient()
+func (o *options) providerStatus(cmd *cobra.Command, args []string) error {
+	c, err := o.getClient()
 	if err != nil {
 		return err
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	ctx, cancel := o.newContext(cmd)
 	defer cancel()
 
 	provider := &infrav1beta1.Provider{}
-	key := types.NamespacedName{Namespace: namespace, Name: args[0]}
-	err = client.Get(ctx, key, provider)
-	if err != nil {
-		return fmt.Errorf("failed to get provider: %w", err)
+	key := types.NamespacedName{Namespace: o.namespace, Name: args[0]}
+	if err := c.Get(ctx, key, provider); err != nil {
+		return fmt.Errorf("failed to get provider %s: %w", key, err)
 	}
 
-	fmt.Printf("Provider: %s\n", provider.Name)
-	fmt.Printf("Type: %s\n", provider.Spec.Type)
-	fmt.Printf("Endpoint: %s\n", provider.Spec.Endpoint)
-	fmt.Printf("Status: Available\n")
+	out := cmd.OutOrStdout()
+	if o.output != outputTable {
+		return o.outputResource(out, c, provider)
+	}
+
+	cliout.Printf(out, "Provider: %s\n", provider.Name)
+	cliout.Printf(out, "Type: %s\n", provider.Spec.Type)
+	cliout.Printf(out, "Endpoint: %s\n", provider.Spec.Endpoint)
+	cliout.Printf(out, "Healthy: %t\n", provider.Status.Healthy)
 
 	if len(provider.Status.Conditions) > 0 {
-		fmt.Printf("\nConditions:\n")
+		cliout.Printf(out, "\nConditions:\n")
 		for _, condition := range provider.Status.Conditions {
-			fmt.Printf("  %s: %s (%s)\n", condition.Type, condition.Status, condition.Reason)
+			cliout.Printf(out, "  %s: %s (%s)\n", condition.Type, condition.Status, condition.Reason)
 		}
 	}
 
-	fmt.Printf("\nNote: Use kubectl describe for full provider details\n")
+	cliout.Printf(out, "\nNote: Use kubectl describe for full provider details\n")
 
 	return nil
 }
 
-func providerLogs(cmd *cobra.Command, args []string) error {
-	fmt.Printf("Provider logs for %s (not implemented - use kubectl logs)\n", args[0])
+// newTable returns a writer that aligns tab-separated columns written to out.
+func newTable(out io.Writer) *tabwriter.Writer {
+	return tabwriter.NewWriter(out, 0, 0, 3, ' ', 0)
+}
+
+// flushTable writes the buffered table rows.
+func flushTable(table *tabwriter.Writer) error {
+	if err := table.Flush(); err != nil {
+		return fmt.Errorf("write table: %w", err)
+	}
 	return nil
 }
 
-func createSnapshot(cmd *cobra.Command, args []string) error {
-	fmt.Printf("Creating snapshot %s for VM %s (not implemented)\n", args[1], args[0])
-	return nil
-}
-
-func listSnapshots(cmd *cobra.Command, args []string) error {
-	fmt.Printf("Listing snapshots (not implemented)\n")
-	return nil
-}
-
-func revertSnapshot(cmd *cobra.Command, args []string) error {
-	fmt.Printf("Reverting VM %s to snapshot %s (not implemented)\n", args[0], args[1])
-	return nil
-}
-
-func runClone(cmd *cobra.Command, args []string) error {
-	fmt.Printf("Cloning VM %s to %s (not implemented)\n", args[0], args[1])
-	return nil
-}
-
-func listClones(cmd *cobra.Command, args []string) error {
-	fmt.Printf("Listing clone operations (not implemented)\n")
-	return nil
-}
-
-func runConformance(cmd *cobra.Command, args []string) error {
-	fmt.Printf("Running conformance tests against provider %s (not implemented)\n", args[0])
-	return nil
-}
-
-func createDiagBundle(cmd *cobra.Command, args []string) error {
-	fmt.Printf("Creating diagnostic bundle (not implemented)\n")
-	return nil
-}
-
-func initVirtrigaud(cmd *cobra.Command, args []string) error {
-	fmt.Printf("Initializing virtrigaud (not implemented)\n")
-	return nil
-}
-
-func getClient() (client.Client, error) {
-	cfg, err := config.GetConfig()
+// getClient returns a client that knows the VirtRigaud API types.
+func (o *options) getClient() (client.Client, error) {
+	cfg, err := cliclient.RESTConfig(o.kubeconfig)
 	if err != nil {
 		return nil, err
 	}
-	return client.New(cfg, client.Options{})
+	return cliclient.NewClient(cfg)
 }
 
-func getClientset() (kubernetes.Interface, error) {
-	cfg, err := config.GetConfig()
+// getClientset returns a typed client-go clientset.
+func (o *options) getClientset() (kubernetes.Interface, error) {
+	cfg, err := cliclient.RESTConfig(o.kubeconfig)
 	if err != nil {
 		return nil, err
 	}
-	return kubernetes.NewForConfig(cfg)
+	clientset, err := kubernetes.NewForConfig(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("create Kubernetes clientset: %w", err)
+	}
+	return clientset, nil
 }
 
-func outputResource(obj interface{}) error {
-	// Implementation for JSON/YAML output would go here
-	fmt.Printf("JSON/YAML output not implemented\n")
+// outputResource writes obj, a typed VirtRigaud object or list, to out in the
+// --output format (json or yaml), with apiVersion and kind filled in.
+func (o *options) outputResource(out io.Writer, c client.Client, obj runtime.Object) error {
+	if err := setGVK(c, obj); err != nil {
+		return err
+	}
+
+	var data []byte
+	var err error
+	switch o.output {
+	case outputJSON:
+		data, err = json.MarshalIndent(obj, "", "  ")
+		if err == nil {
+			data = append(data, '\n')
+		}
+	case outputYAML:
+		data, err = yaml.Marshal(obj)
+	default:
+		return fmt.Errorf("unsupported output format %q (use table, json or yaml)", o.output)
+	}
+	if err != nil {
+		return fmt.Errorf("encode %s output: %w", o.output, err)
+	}
+
+	if _, err := out.Write(data); err != nil {
+		return fmt.Errorf("write %s output: %w", o.output, err)
+	}
+	return nil
+}
+
+// setGVK fills in apiVersion and kind on obj and, for a list, on each item.
+// Typed reads leave them empty. It also drops metadata.managedFields, which
+// only adds noise to the output (kubectl hides it too).
+func setGVK(c client.Client, obj runtime.Object) error {
+	if err := prepareForOutput(c, obj); err != nil {
+		return err
+	}
+
+	if !meta.IsListType(obj) {
+		return nil
+	}
+	return meta.EachListItem(obj, func(item runtime.Object) error {
+		return prepareForOutput(c, item)
+	})
+}
+
+// prepareForOutput sets apiVersion and kind on one object or list and clears
+// its managedFields.
+func prepareForOutput(c client.Client, obj runtime.Object) error {
+	gvk, err := apiutil.GVKForObject(obj, c.Scheme())
+	if err != nil {
+		return fmt.Errorf("resolve kind of %T: %w", obj, err)
+	}
+	obj.GetObjectKind().SetGroupVersionKind(gvk)
+
+	if accessor, err := meta.Accessor(obj); err == nil {
+		accessor.SetManagedFields(nil)
+	}
 	return nil
 }

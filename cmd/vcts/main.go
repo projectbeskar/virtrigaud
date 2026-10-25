@@ -14,10 +14,12 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
+// Package main provides vcts, the VirtRigaud Conformance Test Suite CLI.
 package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -25,13 +27,28 @@ import (
 
 	"github.com/spf13/cobra"
 	"k8s.io/client-go/kubernetes"
-	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/client/config"
 
+	"github.com/projectbeskar/virtrigaud/cmd/internal/cliclient"
+	"github.com/projectbeskar/virtrigaud/cmd/internal/cliout"
 	"github.com/projectbeskar/virtrigaud/internal/conformance"
 )
 
-var (
+// defaultSpecDir is the directory 'vcts validate' reads when none is given.
+const defaultSpecDir = "test/conformance/specs"
+
+// version is the release the binary was built from; the release workflow sets
+// it with -ldflags "-X main.version=...".
+var version = "dev"
+
+// errValidationFailed is returned by 'vcts validate' when a specification is
+// invalid, so the process exits non-zero.
+var errValidationFailed = errors.New("validation failed")
+
+// errTestsFailed is returned by 'vcts run' when a conformance test fails.
+var errTestsFailed = errors.New("conformance tests failed")
+
+// options holds the values of vcts's flags.
+type options struct {
 	kubeconfig string
 	namespace  string
 	provider   string
@@ -40,67 +57,88 @@ var (
 	timeout    time.Duration
 	parallel   int
 	verbose    bool
-)
+}
 
 func main() {
+	if err := newRootCmd().Execute(); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+// newRootCmd builds the vcts command tree. Every call returns an independent
+// tree with its own flag values, so it can be run repeatedly in one process.
+func newRootCmd() *cobra.Command {
+	opts := &options{}
+
 	rootCmd := &cobra.Command{
 		Use:   "vcts",
 		Short: "Virtrigaud Conformance Test Suite",
-		Long: `VCTS (Virtrigaud Conformance Test Suite) runs standardized tests against 
+		Long: `VCTS (Virtrigaud Conformance Test Suite) runs standardized tests against
 virtrigaud providers to verify compliance with the provider contract.`,
+		Version:       version,
+		SilenceUsage:  true,
+		SilenceErrors: true,
 	}
 
-	rootCmd.PersistentFlags().StringVar(&kubeconfig, "kubeconfig", "", "Path to kubeconfig file")
-	rootCmd.PersistentFlags().StringVarP(&namespace, "namespace", "n", "default", "Kubernetes namespace")
-	rootCmd.PersistentFlags().BoolVarP(&verbose, "verbose", "v", false, "Verbose output")
+	rootCmd.PersistentFlags().StringVar(&opts.kubeconfig, "kubeconfig", "", "Path to kubeconfig file")
+	rootCmd.PersistentFlags().StringVarP(&opts.namespace, "namespace", "n", "default", "Kubernetes namespace")
+	rootCmd.PersistentFlags().BoolVarP(&opts.verbose, "verbose", "v", false, "Verbose output")
 
 	runCmd := &cobra.Command{
 		Use:   "run",
 		Short: "Run conformance tests",
 		Long:  "Run conformance tests against a virtrigaud provider",
-		RunE:  runConformanceTests,
+		Args:  cobra.NoArgs,
+		RunE:  opts.runConformanceTests,
 	}
 
-	runCmd.Flags().StringVarP(&provider, "provider", "p", "", "Provider name to test (required)")
-	runCmd.Flags().StringVarP(&outputDir, "output-dir", "o", "./conformance-results", "Output directory for test results")
-	runCmd.Flags().StringSliceVar(&skipTests, "skip", []string{}, "List of test names to skip")
-	runCmd.Flags().DurationVar(&timeout, "timeout", 30*time.Minute, "Test timeout")
-	runCmd.Flags().IntVar(&parallel, "parallel", 1, "Number of parallel test executions")
+	runCmd.Flags().StringVarP(&opts.provider, "provider", "p", "", "Provider name to test (required)")
+	runCmd.Flags().StringVarP(&opts.outputDir, "output-dir", "o", "./conformance-results", "Output directory for test results")
+	runCmd.Flags().StringSliceVar(&opts.skipTests, "skip", []string{}, "List of test names to skip")
+	runCmd.Flags().DurationVar(&opts.timeout, "timeout", 30*time.Minute, "Test timeout")
+	runCmd.Flags().IntVar(&opts.parallel, "parallel", 1, "Number of parallel test executions")
 	_ = runCmd.MarkFlagRequired("provider")
 
 	listCmd := &cobra.Command{
 		Use:   "list",
 		Short: "List available tests",
 		Long:  "List all available conformance tests",
+		Args:  cobra.NoArgs,
 		RunE:  listTests,
 	}
 
 	validateCmd := &cobra.Command{
-		Use:   "validate",
+		Use:   "validate [spec-dir]",
 		Short: "Validate test specifications",
-		Long:  "Validate conformance test specifications for correctness",
-		RunE:  validateTests,
+		Long: `Validate conformance test specifications for correctness.
+
+Every *.yaml file in spec-dir (default ` + defaultSpecDir + `) is validated. The
+command exits non-zero when a file cannot be read or holds an invalid test.`,
+		Args: cobra.MaximumNArgs(1),
+		RunE: validateTests,
 	}
 
 	rootCmd.AddCommand(runCmd, listCmd, validateCmd)
 
-	if err := rootCmd.Execute(); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
-	}
+	return rootCmd
 }
 
-func runConformanceTests(cmd *cobra.Command, args []string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+func (o *options) runConformanceTests(cmd *cobra.Command, _ []string) error {
+	parent := cmd.Context()
+	if parent == nil {
+		parent = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(parent, o.timeout)
 	defer cancel()
 
 	// Create Kubernetes clients
-	cfg, err := config.GetConfig()
+	cfg, err := cliclient.RESTConfig(o.kubeconfig)
 	if err != nil {
 		return fmt.Errorf("failed to get kubeconfig: %w", err)
 	}
 
-	k8sClient, err := client.New(cfg, client.Options{})
+	k8sClient, err := cliclient.NewClient(cfg)
 	if err != nil {
 		return fmt.Errorf("failed to create Kubernetes client: %w", err)
 	}
@@ -111,7 +149,7 @@ func runConformanceTests(cmd *cobra.Command, args []string) error {
 	}
 
 	// Create output directory
-	if err := os.MkdirAll(outputDir, 0o755); err != nil {
+	if err := os.MkdirAll(o.outputDir, 0o750); err != nil {
 		return fmt.Errorf("failed to create output directory: %w", err)
 	}
 
@@ -119,12 +157,12 @@ func runConformanceTests(cmd *cobra.Command, args []string) error {
 	runner := conformance.NewRunner(conformance.Config{
 		KubeClient: k8sClient,
 		Clientset:  clientset,
-		Namespace:  namespace,
-		Provider:   provider,
-		OutputDir:  outputDir,
-		SkipTests:  skipTests,
-		Parallel:   parallel,
-		Verbose:    verbose,
+		Namespace:  o.namespace,
+		Provider:   o.provider,
+		OutputDir:  o.outputDir,
+		SkipTests:  o.skipTests,
+		Parallel:   o.parallel,
+		Verbose:    o.verbose,
 	})
 
 	// Run tests
@@ -134,42 +172,44 @@ func runConformanceTests(cmd *cobra.Command, args []string) error {
 	}
 
 	// Print summary
-	fmt.Printf("\nConformance Test Results:\n")
-	fmt.Printf("Provider: %s\n", provider)
-	fmt.Printf("Total Tests: %d\n", results.Total)
-	fmt.Printf("Passed: %d\n", results.Passed)
-	fmt.Printf("Failed: %d\n", results.Failed)
-	fmt.Printf("Skipped: %d\n", results.Skipped)
-	fmt.Printf("Duration: %v\n", results.Duration)
-	fmt.Printf("\nResults saved to: %s\n", outputDir)
+	out := cmd.OutOrStdout()
+	cliout.Printf(out, "\nConformance Test Results:\n")
+	cliout.Printf(out, "Provider: %s\n", o.provider)
+	cliout.Printf(out, "Total Tests: %d\n", results.Total)
+	cliout.Printf(out, "Passed: %d\n", results.Passed)
+	cliout.Printf(out, "Failed: %d\n", results.Failed)
+	cliout.Printf(out, "Skipped: %d\n", results.Skipped)
+	cliout.Printf(out, "Duration: %v\n", results.Duration)
+	cliout.Printf(out, "\nResults saved to: %s\n", o.outputDir)
 
 	if results.Failed > 0 {
-		return fmt.Errorf("conformance tests failed")
+		return errTestsFailed
 	}
 
 	return nil
 }
 
-func listTests(cmd *cobra.Command, args []string) error {
+func listTests(cmd *cobra.Command, _ []string) error {
 	runner := conformance.NewRunner(conformance.Config{})
 	tests, err := runner.ListTests()
 	if err != nil {
 		return fmt.Errorf("failed to list tests: %w", err)
 	}
 
-	fmt.Printf("Available Conformance Tests:\n\n")
+	out := cmd.OutOrStdout()
+	cliout.Printf(out, "Available Conformance Tests:\n\n")
 	for _, test := range tests {
-		fmt.Printf("  %s\n", test.Name)
-		fmt.Printf("    Description: %s\n", test.Description)
-		fmt.Printf("    Required Capabilities: %v\n", test.RequiredCapabilities)
-		fmt.Printf("\n")
+		cliout.Printf(out, "  %s\n", test.Name)
+		cliout.Printf(out, "    Description: %s\n", test.Description)
+		cliout.Printf(out, "    Required Capabilities: %v\n", test.RequiredCapabilities)
+		cliout.Printf(out, "\n")
 	}
 
 	return nil
 }
 
 func validateTests(cmd *cobra.Command, args []string) error {
-	specDir := "test/conformance/specs"
+	specDir := defaultSpecDir
 	if len(args) > 0 {
 		specDir = args[0]
 	}
@@ -184,37 +224,38 @@ func validateTests(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("no test specification files found in %s", specDir)
 	}
 
+	out := cmd.OutOrStdout()
 	validator := conformance.NewValidator()
 
 	totalTests := 0
-	validTests := 0
+	invalidFiles := 0
 
 	for _, specFile := range specFiles {
-		fmt.Printf("Validating %s...\n", specFile)
+		cliout.Printf(out, "Validating %s...\n", specFile)
 
 		tests, err := validator.ValidateFile(specFile)
 		if err != nil {
-			fmt.Printf("  ERROR: %v\n", err)
+			cliout.Printf(out, "  ERROR: %v\n", err)
+			invalidFiles++
 			continue
 		}
 
 		totalTests += len(tests)
-		validTests += len(tests)
 
 		for _, test := range tests {
-			fmt.Printf("  ✓ %s\n", test.Name)
+			cliout.Printf(out, "  ✓ %s\n", test.Name)
 		}
 	}
 
-	fmt.Printf("\nValidation Results:\n")
-	fmt.Printf("Total Tests: %d\n", totalTests)
-	fmt.Printf("Valid Tests: %d\n", validTests)
-	fmt.Printf("Invalid Tests: %d\n", totalTests-validTests)
+	cliout.Printf(out, "\nValidation Results:\n")
+	cliout.Printf(out, "Files: %d\n", len(specFiles))
+	cliout.Printf(out, "Valid Tests: %d\n", totalTests)
+	cliout.Printf(out, "Invalid Files: %d\n", invalidFiles)
 
-	if validTests != totalTests {
-		return fmt.Errorf("validation failed")
+	if invalidFiles > 0 {
+		return fmt.Errorf("%w: %d of %d specification files are invalid", errValidationFailed, invalidFiles, len(specFiles))
 	}
 
-	fmt.Printf("All tests are valid!\n")
+	cliout.Printf(out, "All tests are valid!\n")
 	return nil
 }

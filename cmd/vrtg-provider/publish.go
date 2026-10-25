@@ -90,13 +90,14 @@ func newPublishCommand() *cobra.Command {
 		Long: `Publish a provider to the VirtRigaud provider catalog.
 
 This command performs the following steps:
-1. Runs verification (VCTS conformance tests)
+1. Runs verification (build and unit tests; conformance is recorded as not run)
 2. Generates provider badge and artifacts
 3. Creates or updates catalog entry
 4. Optionally opens a pull request to the main catalog
 
 The command must be run from within a provider project directory.`,
-		RunE: func(cmd *cobra.Command, args []string) error {
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
 			return runPublish(opts)
 		},
 	}
@@ -207,72 +208,62 @@ func runPublish(opts *publishOptions) error {
 	return nil
 }
 
-// runVerificationForPublish runs VCTS and returns conformance results.
+// runVerificationForPublish builds the provider and runs its unit tests, then
+// returns the conformance results to record. VCTS needs the provider deployed
+// in a cluster, which this command cannot arrange, so no conformance profile
+// is claimed as passed: the core profile is recorded as "skip" (not run).
 func runVerificationForPublish() (ConformanceResults, error) {
-	// This would run VCTS conformance tests and parse results
-	// For now, return mock results
-	profiles := map[string]string{
-		"core":          "pass",
-		"snapshot":      "pass",
-		"clone":         "pass",
-		"image-prepare": "skip",
-		"advanced":      "pass",
+	fmt.Println("📦 Building provider...")
+	if err := verifyBuild(); err != nil {
+		return ConformanceResults{}, fmt.Errorf("build verification failed: %w", err)
 	}
+
+	fmt.Println("🧪 Running unit tests...")
+	if err := verifyUnitTests(); err != nil {
+		return ConformanceResults{}, fmt.Errorf("unit tests failed: %w", err)
+	}
+
+	fmt.Println("ℹ️  Conformance was not run (it needs a deployed provider: vcts run --provider <name>); " +
+		"the catalog entry records it as not run")
+	profiles := map[string]string{"core": "skip"}
 
 	return ConformanceResults{
 		Profiles:   profiles,
-		ReportURL:  "https://github.com/example/provider/actions",
 		BadgeURL:   generateBadgeURL(profiles),
 		LastTested: time.Now().Format(time.RFC3339),
 	}, nil
 }
 
 // generateProviderBadge creates a badge for the provider.
-func generateProviderBadge(providerName string, results ConformanceResults) (string, error) {
-	// Count passed profiles
-	passed := 0
-	total := len(results.Profiles)
-
-	for _, status := range results.Profiles {
-		if status == "pass" {
-			passed++
-		}
-	}
-
-	var color string
-	var status string
-
-	if passed == total {
-		color = "green"
-		status = "pass"
-	} else if passed > total/2 {
-		color = "yellow"
-		status = "partial"
-	} else {
-		color = "red"
-		status = "fail"
-	}
-
-	badgeURL := fmt.Sprintf("https://img.shields.io/badge/conformance-%s-%%23%s", status, color)
-	return badgeURL, nil
+func generateProviderBadge(_ string, results ConformanceResults) (string, error) {
+	return generateBadgeURL(results.Profiles), nil
 }
 
-// generateBadgeURL generates a badge URL based on conformance results.
+// generateBadgeURL generates a badge URL based on conformance results. Profiles
+// that were not run ("skip") do not count for or against the provider; when no
+// profile ran, the badge says so.
 func generateBadgeURL(profiles map[string]string) string {
 	passed := 0
-	total := len(profiles)
+	ran := 0
 
 	for _, status := range profiles {
+		if status == "skip" {
+			continue
+		}
+		ran++
 		if status == "pass" {
 			passed++
 		}
 	}
 
-	if passed == total {
+	switch {
+	case ran == 0:
+		return "https://img.shields.io/badge/conformance-not%20run-lightgrey"
+	case passed == ran:
 		return "https://img.shields.io/badge/conformance-pass-green"
-	} else if passed > total/2 {
+	case passed > ran/2:
 		return "https://img.shields.io/badge/conformance-partial-yellow"
-	} else {
+	default:
 		return "https://img.shields.io/badge/conformance-fail-red"
 	}
 }

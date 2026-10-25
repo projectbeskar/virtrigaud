@@ -19,7 +19,9 @@ package main
 import (
 	"context"
 	"encoding/csv"
+	"errors"
 	"fmt"
+	"io"
 	"log"
 	"math/rand"
 	"os"
@@ -30,22 +32,39 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"gopkg.in/yaml.v2"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/client/config"
 
 	infrav1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
+	"github.com/projectbeskar/virtrigaud/cmd/internal/cliclient"
+	"github.com/projectbeskar/virtrigaud/cmd/internal/cliout"
 	"github.com/projectbeskar/virtrigaud/internal/util/closer"
 )
 
-var (
+const (
+	// loadgenLabelKey and loadgenLabelValue mark every VM the tool creates.
+	loadgenLabelKey   = "generated-by"
+	loadgenLabelValue = "loadgen"
+
+	// operationTimeout bounds one create, delete or list call, so an
+	// operation that is in flight when the run's duration ends can finish.
+	operationTimeout = 30 * time.Second
+)
+
+// version is the release the binary was built from; the release workflow sets
+// it with -ldflags "-X main.version=...".
+var version = "dev"
+
+// options holds the values of the tool's flags.
+type options struct {
 	kubeconfig string
 	namespace  string
 	outputDir  string
 	configFile string
 	dryRun     bool
 	verbose    bool
-)
+}
 
 // LoadGenConfig defines the load generation configuration
 type LoadGenConfig struct {
@@ -113,12 +132,20 @@ type Result struct {
 
 // LoadGenerator generates load against virtrigaud
 type LoadGenerator struct {
-	client      client.Client
-	namespace   string
-	config      LoadGenConfig
-	results     chan Result
-	vmCounter   int
-	vmCounterMu sync.Mutex
+	client    client.Client
+	namespace string
+	config    LoadGenConfig
+	results   chan Result
+	opts      *options
+
+	// runID makes VM names unique across runs in one namespace.
+	runID string
+
+	mu        sync.Mutex
+	vmCounter int
+	// created holds the names of the VMs this run created and has not
+	// deleted. Only these are ever deleted, never other VMs in the namespace.
+	created []string
 }
 
 // Statistics holds performance statistics
@@ -134,82 +161,161 @@ type Statistics struct {
 }
 
 func main() {
-	rootCmd := &cobra.Command{
-		Use:   "virtrigaud-loadgen",
-		Short: "Load generation tool for virtrigaud",
-		Long:  "Generate synthetic load against virtrigaud to test performance and scalability",
-	}
-
-	rootCmd.PersistentFlags().StringVar(&kubeconfig, "kubeconfig", "", "Path to kubeconfig file")
-	rootCmd.PersistentFlags().StringVarP(&namespace, "namespace", "n", "default", "Kubernetes namespace")
-	rootCmd.PersistentFlags().StringVarP(&outputDir, "output-dir", "o", "./loadgen-results", "Output directory for results")
-	rootCmd.PersistentFlags().BoolVar(&dryRun, "dry-run", false, "Dry run mode (don't create resources)")
-	rootCmd.PersistentFlags().BoolVarP(&verbose, "verbose", "v", false, "Verbose output")
-
-	runCmd := &cobra.Command{
-		Use:   "run",
-		Short: "Run load generation",
-		Long:  "Run load generation against virtrigaud",
-		RunE:  runLoadGen,
-	}
-
-	runCmd.Flags().StringVarP(&configFile, "config", "c", "", "Load generation config file")
-
-	rootCmd.AddCommand(runCmd)
-
-	if err := rootCmd.Execute(); err != nil {
+	if err := newRootCmd().Execute(); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
 }
 
-func runLoadGen(cmd *cobra.Command, args []string) error {
+// newRootCmd builds the virtrigaud-loadgen command tree. Every call returns an
+// independent tree with its own flag values, so it can be run repeatedly in
+// one process.
+func newRootCmd() *cobra.Command {
+	opts := &options{}
+
+	rootCmd := &cobra.Command{
+		Use:           "virtrigaud-loadgen",
+		Short:         "Load generation tool for virtrigaud",
+		Long:          "Generate synthetic load against virtrigaud to test performance and scalability",
+		Version:       version,
+		SilenceUsage:  true,
+		SilenceErrors: true,
+	}
+
+	rootCmd.PersistentFlags().StringVar(&opts.kubeconfig, "kubeconfig", "", "Path to kubeconfig file")
+	rootCmd.PersistentFlags().StringVarP(&opts.namespace, "namespace", "n", "default", "Kubernetes namespace")
+	rootCmd.PersistentFlags().StringVarP(&opts.outputDir, "output-dir", "o", "./loadgen-results", "Output directory for results")
+	rootCmd.PersistentFlags().BoolVar(&opts.dryRun, "dry-run", false, "Dry run mode (don't create resources)")
+	rootCmd.PersistentFlags().BoolVarP(&opts.verbose, "verbose", "v", false, "Verbose output")
+
+	runCmd := &cobra.Command{
+		Use:   "run",
+		Short: "Run load generation",
+		Long: `Run load generation against virtrigaud.
+
+Without --config the built-in defaults are used (5 minutes, 2 workers, VMs
+created against provider "test-provider"). --config reads a YAML file that
+overrides them; unknown keys are an error.`,
+		Args: cobra.NoArgs,
+		RunE: opts.runLoadGen,
+	}
+
+	runCmd.Flags().StringVarP(&opts.configFile, "config", "c", "", "Load generation config file (YAML)")
+
+	rootCmd.AddCommand(runCmd)
+
+	return rootCmd
+}
+
+// loadConfig returns the built-in defaults overridden by the YAML file at
+// path. Durations are written as Go duration strings ("30s", "5m"). A key the
+// tool does not know is an error, so a misspelt or foreign config is not
+// silently ignored.
+//
+// It returns an error when the file cannot be read or parsed, or when the
+// resulting configuration is not usable.
+func loadConfig(path string) (LoadGenConfig, error) {
+	cfg := getDefaultConfig()
+	if path == "" {
+		return cfg, nil
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return LoadGenConfig{}, fmt.Errorf("read config %s: %w", path, err)
+	}
+	if err := yaml.UnmarshalStrict(data, &cfg); err != nil {
+		return LoadGenConfig{}, fmt.Errorf("parse config %s: %w", path, err)
+	}
+	if err := cfg.validate(); err != nil {
+		return LoadGenConfig{}, fmt.Errorf("invalid config %s: %w", path, err)
+	}
+	return cfg, nil
+}
+
+// validate checks that the configuration can drive a run.
+func (c *LoadGenConfig) validate() error {
+	if c.Duration <= 0 {
+		return errors.New("duration must be positive")
+	}
+	if c.Concurrency < 1 {
+		return errors.New("concurrency must be at least 1")
+	}
+	if len(c.Providers) == 0 {
+		return errors.New("providers must name at least one provider")
+	}
+	if c.VMTemplate.ClassRef == "" || c.VMTemplate.ImageRef == "" {
+		return errors.New("vmTemplate.classRef and vmTemplate.imageRef are required")
+	}
+	weights := []float64{
+		c.Operations.Create, c.Operations.Delete, c.Operations.Power, c.Operations.Reconfigure,
+		c.Operations.Snapshot, c.Operations.Clone, c.Operations.Describe,
+	}
+	total := 0.0
+	for _, w := range weights {
+		if w < 0 {
+			return errors.New("operations weights must not be negative")
+		}
+		total += w
+	}
+	if total <= 0 {
+		return errors.New("operations weights must not all be zero")
+	}
+	return nil
+}
+
+func (o *options) runLoadGen(cmd *cobra.Command, _ []string) error {
 	// Load configuration
-	loadConfig := getDefaultConfig()
-	if configFile != "" {
-		// Load from file (implementation omitted for brevity)
-		fmt.Printf("Loading config from %s (not implemented)\n", configFile)
+	lgConfig, err := loadConfig(o.configFile)
+	if err != nil {
+		return err
 	}
 
 	// Create Kubernetes client
-	cfg, err := config.GetConfig()
+	cfg, err := cliclient.RESTConfig(o.kubeconfig)
 	if err != nil {
 		return fmt.Errorf("failed to get kubeconfig: %w", err)
 	}
 
-	k8sClient, err := client.New(cfg, client.Options{})
+	k8sClient, err := cliclient.NewClient(cfg)
 	if err != nil {
 		return fmt.Errorf("failed to create Kubernetes client: %w", err)
 	}
 
 	// Create output directory
-	if err := os.MkdirAll(outputDir, 0o755); err != nil {
+	if err := os.MkdirAll(o.outputDir, 0o750); err != nil {
 		return fmt.Errorf("failed to create output directory: %w", err)
 	}
 
 	// Create load generator
 	generator := &LoadGenerator{
 		client:    k8sClient,
-		namespace: namespace,
-		config:    loadConfig,
+		namespace: o.namespace,
+		config:    lgConfig,
 		results:   make(chan Result, 1000),
+		opts:      o,
+		runID:     strconv.FormatInt(time.Now().UnixNano(), 36),
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), loadConfig.Duration)
+	parent := cmd.Context()
+	if parent == nil {
+		parent = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(parent, lgConfig.Duration)
 	defer cancel()
 
-	fmt.Printf("Starting load generation...\n")
-	fmt.Printf("Duration: %v\n", loadConfig.Duration)
-	fmt.Printf("Concurrency: %d\n", loadConfig.Concurrency)
-	fmt.Printf("VM Count: %d\n", loadConfig.VMCount)
-	fmt.Printf("Providers: %v\n", loadConfig.Providers)
+	out := cmd.OutOrStdout()
+	cliout.Printf(out, "Starting load generation...\n")
+	cliout.Printf(out, "Duration: %v\n", lgConfig.Duration)
+	cliout.Printf(out, "Concurrency: %d\n", lgConfig.Concurrency)
+	cliout.Printf(out, "VM Count: %d\n", lgConfig.VMCount)
+	cliout.Printf(out, "Providers: %v\n", lgConfig.Providers)
 
 	// Start results collector
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		generator.collectResults(ctx)
+		generator.collectResults(out)
 	}()
 
 	// Run load generation
@@ -223,8 +329,8 @@ func runLoadGen(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("load generation failed: %w", err)
 	}
 
-	fmt.Printf("Load generation completed successfully\n")
-	fmt.Printf("Results saved to: %s\n", outputDir)
+	cliout.Printf(out, "Load generation completed successfully\n")
+	cliout.Printf(out, "Results saved to: %s\n", o.outputDir)
 
 	return nil
 }
@@ -285,6 +391,9 @@ func (lg *LoadGenerator) performRandomOperation(ctx context.Context, workerID in
 }
 
 func (lg *LoadGenerator) performCreate(ctx context.Context, provider string, workerID int) {
+	ctx, cancel := operationContext(ctx)
+	defer cancel()
+
 	startTime := time.Now()
 	vmName := lg.generateVMName(workerID)
 
@@ -292,7 +401,7 @@ func (lg *LoadGenerator) performCreate(ctx context.Context, provider string, wor
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      vmName,
 			Namespace: lg.namespace,
-			Labels:    lg.config.VMTemplate.Labels,
+			Labels:    lg.vmLabels(),
 		},
 		Spec: infrav1beta1.VirtualMachineSpec{
 			ProviderRef: infrav1beta1.ObjectRef{Name: provider},
@@ -306,7 +415,7 @@ func (lg *LoadGenerator) performCreate(ctx context.Context, provider string, wor
 	var success bool
 	var phase string
 
-	if !dryRun {
+	if !lg.opts.dryRun {
 		err = lg.client.Create(ctx, vm)
 		success = err == nil
 		if success {
@@ -315,6 +424,9 @@ func (lg *LoadGenerator) performCreate(ctx context.Context, provider string, wor
 	} else {
 		success = true
 		phase = "DryRun"
+	}
+	if success {
+		lg.recordCreated(vmName)
 	}
 
 	result := Result{
@@ -334,33 +446,34 @@ func (lg *LoadGenerator) performCreate(ctx context.Context, provider string, wor
 	lg.results <- result
 }
 
-func (lg *LoadGenerator) performDelete(ctx context.Context, provider string, workerID int) {
-	startTime := time.Now()
+func (lg *LoadGenerator) performDelete(ctx context.Context, provider string, _ int) {
+	ctx, cancel := operationContext(ctx)
+	defer cancel()
 
-	// Find an existing VM to delete
-	vmList := &infrav1beta1.VirtualMachineList{}
-	err := lg.client.List(ctx, vmList, client.InNamespace(lg.namespace))
+	startTime := time.Now()
 
 	result := Result{
 		Operation: "delete",
 		Provider:  provider,
 		StartTime: startTime,
-		Duration:  time.Since(startTime),
 		Success:   false,
 	}
 
-	if err != nil || len(vmList.Items) == 0 {
-		result.Error = "No VMs found to delete"
+	// Delete only a VM this run created, never another VM in the namespace.
+	vmName, ok := lg.takeCreated()
+	if !ok {
+		result.Duration = time.Since(startTime)
+		result.Error = "No VMs created by this run to delete"
 		lg.results <- result
 		return
 	}
+	result.VMName = vmName
 
-	// Select a random VM
-	vm := &vmList.Items[rand.Intn(len(vmList.Items))]
-	result.VMName = vm.Name
-
-	if !dryRun {
-		err = lg.client.Delete(ctx, vm)
+	if !lg.opts.dryRun {
+		vm := &infrav1beta1.VirtualMachine{
+			ObjectMeta: metav1.ObjectMeta{Name: vmName, Namespace: lg.namespace},
+		}
+		err := lg.client.Delete(ctx, vm)
 		result.Success = err == nil
 		if err != nil {
 			result.Error = err.Error()
@@ -423,7 +536,10 @@ func (lg *LoadGenerator) performClone(ctx context.Context, provider string, work
 	lg.results <- result
 }
 
-func (lg *LoadGenerator) performDescribe(ctx context.Context, provider string, workerID int) {
+func (lg *LoadGenerator) performDescribe(ctx context.Context, provider string, _ int) {
+	ctx, cancel := operationContext(ctx)
+	defer cancel()
+
 	startTime := time.Now()
 
 	// List VMs as a describe operation
@@ -465,7 +581,7 @@ func (lg *LoadGenerator) selectRandomOperation() string {
 		totalWeight += w
 	}
 
-	r := rand.Float64() * totalWeight
+	r := rand.Float64() * totalWeight // #nosec G404 -- picks the next simulated operation, not a secret
 	cumulative := 0.0
 
 	for i, weight := range weights {
@@ -482,17 +598,56 @@ func (lg *LoadGenerator) selectRandomProvider() string {
 	if len(lg.config.Providers) == 0 {
 		return "default-provider"
 	}
-	return lg.config.Providers[rand.Intn(len(lg.config.Providers))]
+	return lg.config.Providers[rand.Intn(len(lg.config.Providers))] // #nosec G404 -- spreads load across providers, not a secret
 }
 
 func (lg *LoadGenerator) generateVMName(workerID int) string {
-	lg.vmCounterMu.Lock()
-	defer lg.vmCounterMu.Unlock()
+	lg.mu.Lock()
+	defer lg.mu.Unlock()
 	lg.vmCounter++
-	return fmt.Sprintf("loadgen-vm-%d-%d", workerID, lg.vmCounter)
+	return fmt.Sprintf("loadgen-vm-%s-%d-%d", lg.runID, workerID, lg.vmCounter)
 }
 
-func (lg *LoadGenerator) collectResults(ctx context.Context) {
+// vmLabels returns the template labels plus the label that marks a VM as
+// created by this tool.
+func (lg *LoadGenerator) vmLabels() map[string]string {
+	labels := make(map[string]string, len(lg.config.VMTemplate.Labels)+1)
+	for k, v := range lg.config.VMTemplate.Labels {
+		labels[k] = v
+	}
+	labels[loadgenLabelKey] = loadgenLabelValue
+	return labels
+}
+
+// recordCreated remembers a VM this run created.
+func (lg *LoadGenerator) recordCreated(name string) {
+	lg.mu.Lock()
+	defer lg.mu.Unlock()
+	lg.created = append(lg.created, name)
+}
+
+// takeCreated removes and returns a random VM this run created. It reports
+// false when there is none.
+func (lg *LoadGenerator) takeCreated() (string, bool) {
+	lg.mu.Lock()
+	defer lg.mu.Unlock()
+	if len(lg.created) == 0 {
+		return "", false
+	}
+	i := rand.Intn(len(lg.created)) // #nosec G404 -- picks which created VM to delete next, not a secret
+	name := lg.created[i]
+	lg.created = append(lg.created[:i], lg.created[i+1:]...)
+	return name, true
+}
+
+// operationContext returns a context for one API call that outlives the run's
+// duration by up to operationTimeout, so an operation in flight when the run
+// ends is not reported as failed.
+func operationContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(ctx), operationTimeout)
+}
+
+func (lg *LoadGenerator) collectResults(out io.Writer) {
 	stats := &Statistics{
 		OperationsByType:   make(map[string]int),
 		OperationsByResult: make(map[string]int),
@@ -506,19 +661,19 @@ func (lg *LoadGenerator) collectResults(ctx context.Context) {
 		results = append(results, result)
 		lg.updateStatistics(stats, result)
 
-		if verbose {
+		if lg.opts.verbose {
 			status := "✅"
 			if !result.Success {
 				status = "❌"
 			}
-			fmt.Printf("%s %s/%s: %v\n", status, result.Operation, result.Provider, result.Duration)
+			cliout.Printf(out, "%s %s/%s: %v\n", status, result.Operation, result.Provider, result.Duration)
 		}
 	}
 
 	stats.EndTime = time.Now()
 
 	// Save results
-	lg.saveResults(results, stats)
+	lg.saveResults(out, results, stats)
 }
 
 func (lg *LoadGenerator) updateStatistics(stats *Statistics, result Result) {
@@ -540,18 +695,18 @@ func (lg *LoadGenerator) updateStatistics(stats *Statistics, result Result) {
 	stats.DurationsByOp[result.Operation] = append(stats.DurationsByOp[result.Operation], result.Duration)
 }
 
-func (lg *LoadGenerator) saveResults(results []Result, stats *Statistics) {
+func (lg *LoadGenerator) saveResults(out io.Writer, results []Result, stats *Statistics) {
 	// Save CSV results
-	csvFile := filepath.Join(outputDir, "results.csv")
+	csvFile := filepath.Join(lg.opts.outputDir, "results.csv")
 	lg.saveCSV(csvFile, results)
 
 	// Save summary
-	summaryFile := filepath.Join(outputDir, "summary.md")
+	summaryFile := filepath.Join(lg.opts.outputDir, "summary.md")
 	lg.saveSummary(summaryFile, stats)
 
-	fmt.Printf("Results saved:\n")
-	fmt.Printf("  CSV: %s\n", csvFile)
-	fmt.Printf("  Summary: %s\n", summaryFile)
+	cliout.Printf(out, "Results saved:\n")
+	cliout.Printf(out, "  CSV: %s\n", csvFile)
+	cliout.Printf(out, "  Summary: %s\n", summaryFile)
 }
 
 func (lg *LoadGenerator) saveCSV(filename string, results []Result) {
@@ -608,20 +763,19 @@ func (lg *LoadGenerator) saveSummary(filename string, stats *Statistics) {
 	writeOrLog("## Overview\n\n")
 	writeOrLog("- **Duration**: %v\n", stats.EndTime.Sub(stats.StartTime))
 	writeOrLog("- **Total Operations**: %d\n", stats.TotalOperations)
-	writeOrLog("- **Successful**: %d (%.1f%%)\n", stats.SuccessfulOps, float64(stats.SuccessfulOps)/float64(stats.TotalOperations)*100)
-	writeOrLog("- **Failed**: %d (%.1f%%)\n", stats.FailedOps, float64(stats.FailedOps)/float64(stats.TotalOperations)*100)
+	writeOrLog("- **Successful**: %d (%.1f%%)\n", stats.SuccessfulOps, percent(stats.SuccessfulOps, stats.TotalOperations))
+	writeOrLog("- **Failed**: %d (%.1f%%)\n", stats.FailedOps, percent(stats.FailedOps, stats.TotalOperations))
 
 	writeOrLog("\n## Operations by Type\n\n")
 	writeOrLog("| Operation | Count | Percentage |\n")
 	writeOrLog("|-----------|-------|------------|\n")
 	for op, count := range stats.OperationsByType {
-		percentage := float64(count) / float64(stats.TotalOperations) * 100
-		writeOrLog("| %s | %d | %.1f%% |\n", op, count, percentage)
+		writeOrLog("| %s | %d | %.1f%% |\n", op, count, percent(count, stats.TotalOperations))
 	}
 
 	writeOrLog("\n## Performance Metrics\n\n")
 	writeOrLog("| Operation | Count | P50 | P95 | P99 | Max |\n")
-	writeOrLog("|-----------|-------|-----|-----|-----|\n")
+	writeOrLog("|-----------|-------|-----|-----|-----|-----|\n")
 	for op, durations := range stats.DurationsByOp {
 		if len(durations) == 0 {
 			continue
@@ -641,6 +795,14 @@ func (lg *LoadGenerator) saveSummary(filename string, stats *Statistics) {
 	}
 }
 
+// percent returns part as a percentage of total, or 0 when total is 0.
+func percent(part, total int) float64 {
+	if total == 0 {
+		return 0
+	}
+	return float64(part) / float64(total) * 100
+}
+
 func getDefaultConfig() LoadGenConfig {
 	return LoadGenConfig{
 		Duration:    5 * time.Minute,
@@ -651,7 +813,7 @@ func getDefaultConfig() LoadGenConfig {
 			ClassRef: "test-class",
 			ImageRef: "test-image",
 			Labels: map[string]string{
-				"generated-by": "loadgen",
+				loadgenLabelKey: loadgenLabelValue,
 			},
 		},
 		Operations: OperationMix{

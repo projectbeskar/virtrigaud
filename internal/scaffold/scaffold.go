@@ -18,12 +18,18 @@ limitations under the License.
 package scaffold
 
 import (
+	"bufio"
 	"fmt"
+	"go/format"
 	"os"
 	"path/filepath"
 	"strings"
 	"text/template"
 )
+
+// defaultGoVersion is the go directive written to a generated go.mod when no
+// VirtRigaud checkout is known to read it from.
+const defaultGoVersion = "1.26"
 
 // Config holds scaffolding configuration.
 type Config struct {
@@ -32,6 +38,14 @@ type Config struct {
 	TargetDir    string
 	Remote       bool
 	Force        bool
+
+	// VirtrigaudPath is the directory of a VirtRigaud checkout. When set, the
+	// generated go.mod gets replace directives that resolve the VirtRigaud,
+	// SDK and proto modules from it, and its go directive follows the
+	// checkout's. The SDK and proto modules are not published under their own
+	// version tags, so a generated project builds only with such a checkout.
+	// Empty leaves the replace directives out, commented, for the author to fill in.
+	VirtrigaudPath string
 }
 
 // Scaffolder generates provider project structure.
@@ -67,8 +81,11 @@ func (s *Scaffolder) createTemplateContext() map[string]interface{} {
 	providerNameCamel := toCamelCase(providerName)
 	providerNameUpper := strings.ToUpper(strings.ReplaceAll(providerName, "-", "_"))
 	moduleName := fmt.Sprintf("provider-%s", providerName)
+	replacePath, goVersion := s.checkoutSettings()
 
 	return map[string]interface{}{
+		"GoVersion":         goVersion,
+		"VirtrigaudPath":    replacePath,
 		"ProviderName":      providerName,
 		"ProviderNameCamel": providerNameCamel,
 		"ProviderNameUpper": providerNameUpper,
@@ -81,6 +98,52 @@ func (s *Scaffolder) createTemplateContext() map[string]interface{} {
 		"IsQEMU":            s.config.ProviderType == "qemu",
 		"IsGeneric":         s.config.ProviderType == "generic",
 	}
+}
+
+// checkoutSettings returns the path the generated go.mod replaces the
+// VirtRigaud modules with (relative to the project when possible, in slash
+// form; empty without a checkout) and the go directive to write.
+func (s *Scaffolder) checkoutSettings() (replacePath, goVersion string) {
+	goVersion = defaultGoVersion
+	if s.config.VirtrigaudPath == "" {
+		return "", goVersion
+	}
+	checkout, err := filepath.Abs(s.config.VirtrigaudPath)
+	if err != nil {
+		checkout = s.config.VirtrigaudPath
+	}
+	if v := readGoDirective(filepath.Join(checkout, "go.mod")); v != "" {
+		goVersion = v
+	}
+	// A project inside the checkout gets a relative path, so the project
+	// stays valid when the checkout moves; anywhere else gets an absolute one.
+	replacePath = checkout
+	if target, err := filepath.Abs(s.config.TargetDir); err == nil &&
+		strings.HasPrefix(target, checkout+string(filepath.Separator)) {
+		if rel, err := filepath.Rel(target, checkout); err == nil {
+			replacePath = rel
+		}
+	}
+	return filepath.ToSlash(replacePath), goVersion
+}
+
+// readGoDirective returns the go directive of the go.mod at path, or "" when
+// the file cannot be read or has none.
+func readGoDirective(path string) string {
+	f, err := os.Open(path) //nolint:gosec // path is the VirtRigaud checkout the caller named
+	if err != nil {
+		return ""
+	}
+	defer f.Close() //nolint:errcheck // read-only file
+
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		fields := strings.Fields(scanner.Text())
+		if len(fields) == 2 && fields[0] == "go" {
+			return fields[1]
+		}
+	}
+	return ""
 }
 
 // generateFile generates a single file from a template.
@@ -122,8 +185,27 @@ func (s *Scaffolder) generateFile(relativePath, tmplContent string, ctx map[stri
 	}
 	defer file.Close() //nolint:errcheck // File close in defer is not critical
 
-	if err := tmpl.Execute(file, ctx); err != nil {
+	var rendered strings.Builder
+	if err := tmpl.Execute(&rendered, ctx); err != nil {
 		return fmt.Errorf("failed to execute template: %w", err)
+	}
+	content := []byte(rendered.String())
+	switch {
+	case strings.HasSuffix(relativePath, ".md"):
+		// Markdown templates cannot hold backticks inside a Go raw string;
+		// they use three single quotes for a code fence.
+		content = []byte(strings.ReplaceAll(string(content), "'''", "```"))
+	case strings.HasSuffix(relativePath, ".go"):
+		// The templates leave alignment and blank lines to depend on the
+		// provider type; gofmt makes the output what the author's checks expect.
+		formatted, err := format.Source(content)
+		if err != nil {
+			return fmt.Errorf("failed to format %s: %w", relativePath, err)
+		}
+		content = formatted
+	}
+	if _, err := file.Write(content); err != nil {
+		return fmt.Errorf("failed to write file: %w", err)
 	}
 
 	return nil
@@ -179,19 +261,27 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"os"
+	"os/signal"
+	"syscall"
 
-	"github.com/projectbeskar/virtrigaud/sdk/provider/server"
 	"github.com/projectbeskar/virtrigaud/sdk/provider/middleware"
-	"github.com/projectbeskar/virtrigaud/internal/version"
+	"github.com/projectbeskar/virtrigaud/sdk/provider/server"
 	"{{.ModuleName}}/internal/provider"
+)
+
+// version and gitSHA are set at build time with -ldflags (see the Makefile).
+var (
+	version = "dev"
+	gitSHA  = "unknown"
 )
 
 func main() {
 	// Handle --version flag
 	if len(os.Args) > 1 && os.Args[1] == "--version" {
-		println("{{.ProviderName}}-provider", version.String())
+		fmt.Println("{{.ProviderName}}-provider", version, gitSHA)
 		os.Exit(0)
 	}
 
@@ -226,8 +316,11 @@ func main() {
 	srv.RegisterProvider(providerImpl)
 
 	// Start server
-	logger.Info("Starting {{.ProviderNameCamel}} provider server", "version", version.String())
-	if err := srv.Serve(context.Background()); err != nil {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	logger.Info("Starting {{.ProviderNameCamel}} provider server", "version", version)
+	if err := srv.Serve(ctx); err != nil {
 		logger.Error("Server failed", "error", err)
 		os.Exit(1)
 	}
@@ -235,21 +328,37 @@ func main() {
 
 const goModTemplate = `module {{.ModuleName}}
 
-go 1.23
+go {{.GoVersion}}
 
 require (
 	github.com/projectbeskar/virtrigaud v0.1.0
+	github.com/projectbeskar/virtrigaud/proto v0.1.0
+	github.com/projectbeskar/virtrigaud/sdk v0.1.0
 )
 
-// For local development, uncomment and adjust path:
-// replace github.com/projectbeskar/virtrigaud => ../../
-`
+{{if .VirtrigaudPath}}// The SDK and proto modules are resolved from a local VirtRigaud checkout.
+replace (
+	github.com/projectbeskar/virtrigaud => {{.VirtrigaudPath}}
+	github.com/projectbeskar/virtrigaud/proto => {{.VirtrigaudPath}}/proto
+	github.com/projectbeskar/virtrigaud/sdk => {{.VirtrigaudPath}}/sdk
+)
+{{else}}// The SDK and proto modules are not published under their own version tags yet.
+// Point these at a local VirtRigaud checkout (adjust the path), then run
+// "go mod tidy":
+//
+// replace (
+// 	github.com/projectbeskar/virtrigaud => ../../
+// 	github.com/projectbeskar/virtrigaud/proto => ../../proto
+// 	github.com/projectbeskar/virtrigaud/sdk => ../../sdk
+// )
+// or generate the project with "vrtg-provider init --virtrigaud-path <checkout>".
+{{end}}`
 
 const makefileTemplate = `# Makefile for {{.ProviderNameCamel}} Provider
 
-VERSION ?= $(shell git describe --tags --always --dirty)
-GIT_SHA ?= $(shell git rev-parse HEAD)
-LDFLAGS := -X github.com/projectbeskar/virtrigaud/internal/version.Version=$(VERSION) -X github.com/projectbeskar/virtrigaud/internal/version.GitSHA=$(GIT_SHA)
+VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+GIT_SHA ?= $(shell git rev-parse HEAD 2>/dev/null || echo unknown)
+LDFLAGS := -X main.version=$(VERSION) -X main.gitSHA=$(GIT_SHA)
 
 .PHONY: all
 all: build
@@ -284,8 +393,8 @@ clean:
 
 .PHONY: deps
 deps:
-	go mod download
 	go mod tidy
+	go mod download
 
 .PHONY: verify
 verify: fmt vet lint test
@@ -306,7 +415,7 @@ help:
 `
 
 const dockerfileTemplate = `# Build stage
-FROM golang:1.25-bookworm AS builder
+FROM golang:{{.GoVersion}}-bookworm AS builder
 
 WORKDIR /workspace
 
@@ -326,7 +435,7 @@ ARG TARGETARCH
 ARG VERSION=dev
 ARG GIT_SHA=unknown
 RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build \
-    -ldflags "-X github.com/projectbeskar/virtrigaud/internal/version.Version=${VERSION} -X github.com/projectbeskar/virtrigaud/internal/version.GitSHA=${GIT_SHA}" \
+    -ldflags "-X main.version=${VERSION} -X main.gitSHA=${GIT_SHA}" \
     -a -o provider-{{.ProviderName}} .
 
 # Runtime stage
@@ -353,14 +462,18 @@ This provider implements the VirtRigaud provider interface to manage virtual mac
 
 ## Features
 
-- ✅ VM lifecycle management (create, delete, power operations)
-- ✅ VM description and status monitoring
-{{if .IsVSphere}}- ✅ vSphere API integration
-- ✅ Distributed virtual switches support
-- ✅ Resource pool management{{end}}
-{{if .IsLibvirt}}- ✅ Libvirt API integration
-- ✅ KVM/QEMU virtualization
-- ✅ Storage pool management{{end}}
+The scaffold serves the provider gRPC contract and reports its capabilities.
+Every VM operation (Create, Delete, Power, Describe, ...) returns Unimplemented
+until you implement it in internal/provider/provider.go.
+
+- ✅ gRPC server with health checks, logging and panic recovery (SDK)
+- ✅ Capability reporting for the {{.ProviderType}} profile
+{{if .IsVSphere}}- ⬜ vSphere API integration (to implement)
+- ⬜ Distributed virtual switches support (to implement)
+- ⬜ Resource pool management (to implement){{end}}
+{{if .IsLibvirt}}- ⬜ Libvirt API integration (to implement)
+- ⬜ KVM/QEMU virtualization (to implement)
+- ⬜ Storage pool management (to implement){{end}}
 {{if .Remote}}- ✅ Remote runtime deployment
 - ✅ Kubernetes integration{{end}}
 
@@ -369,6 +482,7 @@ This provider implements the VirtRigaud provider interface to manage virtual mac
 ### Building
 
 '''bash
+go mod tidy   # first time only: resolves the VirtRigaud modules and writes go.sum
 make build
 '''
 
@@ -382,7 +496,7 @@ make verify
 ### Running Locally
 
 '''bash
-./bin/provider-{{.ProviderName}} --port 9443
+./bin/provider-{{.ProviderName}}
 '''
 
 ### Docker
@@ -404,12 +518,13 @@ kubectl apply -f config/
 
 ## Configuration
 
-The provider accepts the following configuration:
+The server is configured in main.go through server.Config (see the SDK in the
+VirtRigaud repository, sdk/provider/server). The scaffold uses the defaults:
 
-| Parameter | Description | Default |
-|-----------|-------------|---------|
-| --port | gRPC server port | 9443 |
-| --health-port | Health check port | 8080 |
+| Setting | Description | Default |
+|---------|-------------|---------|
+| Port | gRPC server port | 9443 |
+| HealthPort | Health check port | 8080 |
 
 {{if .IsVSphere}}
 ### vSphere Configuration
@@ -437,7 +552,7 @@ export LIBVIRT_URI=qemu:///system
 
 ### Prerequisites
 
-- Go 1.23+
+- Go {{.GoVersion}} or later
 - Docker
 - kubectl (for Kubernetes deployment)
 {{if .IsVSphere}}- vSphere environment access{{end}}
@@ -527,7 +642,7 @@ on:
     branches: [ main, develop ]
 
 {{ "env:" }}
-  GO_VERSION: '1.23'
+  GO_VERSION: '{{.GoVersion}}'
 
 jobs:
   test:
@@ -712,11 +827,10 @@ package provider
 
 import (
 	"context"
-	"fmt"
 
 	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
-	"github.com/projectbeskar/virtrigaud/sdk/provider/errors"
 	"github.com/projectbeskar/virtrigaud/sdk/provider/capabilities"
+	"github.com/projectbeskar/virtrigaud/sdk/provider/errors"
 )
 
 // Provider implements the {{.ProviderNameCamel}} provider.
