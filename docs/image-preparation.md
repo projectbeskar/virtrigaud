@@ -752,7 +752,9 @@ host's clock.
    `VIRTRIGAUD_LIBVIRT_IMAGE_MAX_DOWNLOAD_GIB` GiB (provider pod environment, default `256`;
    curl enforces it on the announced size, and recent curl versions also stop a transfer
    that grows past it). Its checksum is verified when `checksum` is set, and its header must
-   not reference other files.
+   not reference other files. A create that carries an image URL instead of a prepared
+   image (the legacy create-from-URL path) downloads the same way, with the default 30m time
+   limit.
 3. The converted image is **finalized read-only**: `chmod 0444`, `restorecon` (only when
    `selinuxenabled` reports SELinux on; through non-interactive `sudo -n`, best-effort),
    `sync`. It is **not** chowned — it stays owned by the provider's SSH user, which is what

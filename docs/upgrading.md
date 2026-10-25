@@ -20,6 +20,40 @@ is the index and the sequencing, not a duplicate of that detail.
 
 The rest of this guide covers the upgrade from v0.3.11 to v0.4.0. On v0.4.0, also note:
 
+- **Security: a `VMClone`'s unused customization secrets are no longer sent to the provider.**
+  Before, the manager sent all of `spec.customization` in the `Clone` request, including
+  `sysprep.productKey`, `sysprep.adminPassword.value`, `sysprep.joinDomain.password.value` and
+  `certificates[].data`, which no provider acts on. From v0.4.1 the request carries only the
+  fields a provider applies or reports: those values, `sysprep.customCommands`,
+  `guestCommands[].command`/`.arguments` and `userData.ignition.inline` are never sent. Nothing
+  changes in what a clone gets: `hostname`, `domain` and (libvirt)
+  `userData.cloudInit.inline` are sent and applied as before, and the libvirt and vSphere
+  providers still log the other fields that are set as not applied (except a `sysprep` that
+  holds only `productKey` or `customCommands`, and an `ignition` that holds only `inline`,
+  which the provider no longer sees). **These values are still stored in plaintext in the `VMClone`**
+  (etcd, backups, anyone who can read the object) — the v1beta1 API keeps the fields — so do
+  not put a real password, product key or certificate key in them. When one is set, the
+  manager records a `Warning` event (reason `CustomizationSecretNotSent`) that names the
+  fields, never their values. With `webhooks.enabled=true` the chart also renders a new
+  validating webhook, `vvmclone-customization.kb.io`, which only returns an admission
+  **warning** per such field (`kubectl` prints it); it never refuses a write, and its
+  `failurePolicy` is always `Ignore` (timeout 5s), whatever `webhooks.validating.failurePolicy`
+  says, so `VMClone` writes gain no admission dependency. Kustomize users who enable
+  `config/webhook` get the same entry from `config/webhook/manifests.yaml`.
+- **Security: libvirt create-from-URL no longer puts the image URL on the host's command line.**
+  When a create carries an image URL instead of a prepared image (the legacy create-from-URL
+  path), the libvirt provider ran `wget <URL>` on the libvirt host, so the URL's user-info or
+  presigned query string was visible in the host's process list and audit log, and the
+  provider logged it in full. The download now goes the way an `ImagePrepare` download does
+  ([`docs/image-preparation.md`](image-preparation.md#how-an-image-is-published)): `curl -q -K -`
+  with the URL on **stdin**, exactly one transfer, `http`/`https`/`ftp` only, a 30-second connect
+  timeout, a 30-minute total time limit and the `VIRTRIGAUD_LIBVIRT_IMAGE_MAX_DOWNLOAD_GIB`
+  size limit; the provider log shows the URL without its user-info and query, and errors
+  never contain it. **The libvirt host needs `curl`** for this path (as for `ImagePrepare`;
+  `wget` is no longer used). A URL with spaces or control characters is refused
+  (`InvalidSpec`) before anything runs. The manager's debug log (`V(1)`) of a create request
+  also shows the image URL redacted now.
+
 - **Deprecated: the `virtrigaud-provider-runtime` chart** (`charts/virtrigaud-provider-runtime/`).
   It is removed in the next minor release. It was never published to the Helm repository or
   released with the `virtrigaud` chart. It runs a provider `Deployment` outside a `Provider`

@@ -5,6 +5,29 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-10-25 19:47] - VMClone customization secrets never sent to providers; libvirt create-from-URL keeps the URL off the host command line
+**Author:** @wrkode (William Rizzo)
+
+### Security
+- `internal/controller/vmclone_customization.go` (new), `vmclone_controller.go`: the `Clone` request's `CustomizeJSON` is now an allow-list built field by field from `spec.customization` (`providerCustomization`), not the whole object. `sysprep.productKey`, `sysprep.adminPassword.value`, `sysprep.joinDomain.password.value`, `certificates[].data`, `sysprep.customCommands`, `guestCommands[].command`/`.arguments` and `userData.ignition.inline` are never sent: no provider reads them (libvirt and vSphere read only `hostname`, `domain`, `userData.cloudInit.inline`, and the other keys' presence through `cloneidentity.ParseCustomization`; Proxmox and mock read nothing), and they may hold credentials. The applied fields and the non-secret parts of the others are sent as before, so the providers apply and report the same customization. A test fails when a field is added to a customization type without being classified. When one of the four secret values is set, the manager records a `Warning` event (`CustomizationSecretNotSent`) naming the fields, never their values.
+- `api/infra.virtrigaud.io/v1beta1/vmclone_webhook.go` (new), `cmd/manager/main.go`, `config/webhook/manifests.yaml`, `charts/virtrigaud/templates/webhooks.yaml`, `charts/virtrigaud/values.yaml`, `hack/verify-max-disk-size-render.sh`: a warning-only VMClone validating webhook (`vvmclone-customization.kb.io`, `failurePolicy: Ignore`, `timeoutSeconds: 5`) returns one admission warning per secret value set in `spec.customization` ("accepted but not acted on in this release; it is stored in plaintext in the object …"). It never refuses a write. The chart renders it with the other validating webhooks when `webhooks.enabled=true`. The render check now also compares `timeoutSeconds` with the generated configuration.
+- `api/infra.virtrigaud.io/v1beta1/vmclone_types.go`, `config/crd/bases/infra.virtrigaud.io_vmclones.yaml`: the field descriptions say these values are stored in plaintext, not acted on and not sent to the provider. No field is removed or renamed.
+- `internal/providers/libvirt/storage.go`, `image.go`, `provider_virsh.go`, `command_log_redact.go`: Create's legacy create-from-URL path (`DownloadCloudImage`) ran `wget -O <tmp> <URL>` on the libvirt host, so the URL's user-info or presigned query was visible in the host's process list and audit log, and two log lines printed it in full. The path now validates the URL like `ImagePrepare` and downloads through the shared `downloadToHostFile` (`curl -q -K -` with the URL on stdin, one transfer, `http`/`https`/`ftp` only, 30s connect timeout, 30m total, `VIRTRIGAUD_LIBVIRT_IMAGE_MAX_DOWNLOAD_GIB` size limit). Its log lines redact the URL. Errors never carry it. curl's error text is logged with any URL redacted, for `ImagePrepare` too.
+- `internal/obs/logging/redact_url.go` (new), `internal/controller/virtualmachine_controller.go`: the manager's `V(1)` create-request log printed a libvirt `VMImage`'s source URL as written. It is now redacted (`logging.RedactURL`: scheme, host and path only).
+
+### Changed
+- `internal/providers/libvirt/sshclient.go`: a comment no longer implies the provider runs `wget`.
+- `docs/upgrading.md`, `docs/libvirt-clones.md`, `docs/libvirt-domain-ownership.md`, `docs/image-preparation.md`: v0.4.1 upgrade notes and the behaviour above.
+
+### Why
+VirtRigaud is deployed in regulated environments. Secrets must not cross the manager→provider wire when nothing uses them. A presigned image URL must not appear in a hypervisor host's process list, audit log or the provider and manager logs.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-10-25 14:13] - Proxmox: full cloud-init user-data through a NoCloud seed (R35); no linked clones; clone memory sizing
 **Author:** @wrkode (William Rizzo)
 

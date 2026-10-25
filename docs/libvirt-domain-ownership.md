@@ -188,6 +188,10 @@ the seed ISO). Each create gets its own:
 - A URL image is downloaded to a per-download `mktemp` file in the same staging
   directory (`<domain>-disk-temp.img.<random>`), which is removed after the
   convert, so nothing can swap it between the header check and the convert.
+  The download is `curl` reading the URL on stdin, as for `ImagePrepare`
+  ([image preparation](image-preparation.md#how-an-image-is-published)): the
+  URL, which may carry user-info or a presigned token, is never on the host's
+  command line, in its process list or in the provider log.
 - The staged domain XML is removed after `virsh define`, whether it succeeds or
   not. The seed directory is removed if the create fails and the domain is known
   not to exist. When `virsh define` reports an error, the provider checks
