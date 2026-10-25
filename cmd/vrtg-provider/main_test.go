@@ -49,23 +49,33 @@ func repoCheckout(t *testing.T) string {
 	return checkout
 }
 
-// goCmd returns a go command run in dir that resolves modules from the local
-// module cache only, so it works without network access.
-func goCmd(t *testing.T, dir string, args ...string) *exec.Cmd {
+// useLocalModuleCache makes every go command the test starts (directly or
+// through generate and verify) resolve modules from the local module cache
+// only, so the result does not depend on network access.
+//
+// The cache holds what the main module needed to build: the packages a
+// generated project imports are built by the main module too. That is why the
+// tests do not run "go mod tidy" in the project: tidy also loads the tests of
+// every dependency, whose modules the main module never downloads, so it
+// fails on a cache that is complete for building. "-mod=mod" lets the first
+// build add the requirements it needs to go.mod and go.sum instead.
+func useLocalModuleCache(t *testing.T) {
 	t.Helper()
 	out, err := exec.Command("go", "env", "GOMODCACHE").Output()
 	require.NoError(t, err)
 	download := filepath.Join(strings.TrimSpace(string(out)), "cache", "download")
-	if _, err := os.Stat(download); err != nil {
-		t.Skipf("module cache %s not available: %v", download, err)
-	}
+	_, err = os.Stat(download)
+	require.NoError(t, err, "the module cache must exist: the main module has just been built")
+
+	t.Setenv("GOPROXY", "file://"+filepath.ToSlash(download))
+	t.Setenv("GONOSUMDB", "*")
+	t.Setenv("GOFLAGS", "-mod=mod")
+}
+
+// goCmd returns a go command run in dir.
+func goCmd(dir string, args ...string) *exec.Cmd {
 	cmd := exec.Command("go", args...)
 	cmd.Dir = dir
-	cmd.Env = append(os.Environ(),
-		"GOPROXY=file://"+filepath.ToSlash(download),
-		"GONOSUMDB=*",
-		"GOFLAGS=",
-	)
 	return cmd
 }
 
@@ -153,6 +163,7 @@ func TestInitWithoutCheckoutLeavesReplaceCommented(t *testing.T) {
 // run in it. Every provider type is built.
 func TestInitProjectIsAcceptedBuildsAndRuns(t *testing.T) {
 	checkout := repoCheckout(t)
+	useLocalModuleCache(t)
 
 	for _, providerType := range []string{"generic", "libvirt", "vsphere", "firecracker", "qemu"} {
 		t.Run(providerType, func(t *testing.T) {
@@ -171,11 +182,12 @@ func TestInitProjectIsAcceptedBuildsAndRuns(t *testing.T) {
 			require.NoError(t, err)
 			assert.NotContains(t, string(readme), "'''", "README code fences must be rendered")
 
-			// The documented first steps: go mod tidy, then build and test.
-			run(t, goCmd(t, project, "mod", "tidy"))
-			run(t, goCmd(t, project, "build", "./..."))
-			run(t, goCmd(t, project, "vet", "./..."))
-			run(t, goCmd(t, project, "test", "./..."))
+			// Build, vet and test the generated project. (The documented first
+			// step for an author, go mod tidy, needs the network; see
+			// useLocalModuleCache.)
+			run(t, goCmd(project, "build", "./..."))
+			run(t, goCmd(project, "vet", "./..."))
+			run(t, goCmd(project, "test", "./..."))
 
 			// vrtg-provider accepts the project it created.
 			t.Chdir(project)
