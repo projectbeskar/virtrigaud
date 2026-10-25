@@ -178,6 +178,9 @@ type LoadGenerator struct {
 	snapshots    []runObject
 	clones       []runObject
 	cloneTargets []string
+	// deleting holds the VMs whose delete the apiserver accepted during the
+	// run; --cleanup waits until they are gone.
+	deleting []runObject
 }
 
 // Statistics holds performance statistics
@@ -418,7 +421,11 @@ func (o *options) runLoadGen(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("load generation failed: %w", err)
 	}
 
-	cliout.Printf(out, "Load generation completed successfully\n")
+	if parent.Err() != nil {
+		cliout.Printf(out, "Load generation interrupted before the end of its duration\n")
+	} else {
+		cliout.Printf(out, "Load generation completed successfully\n")
+	}
 	cliout.Printf(out, "Results saved to: %s\n", o.outputDir)
 
 	return generator.finish(out)
@@ -462,19 +469,19 @@ func (lg *LoadGenerator) performRandomOperation(ctx context.Context, workerID in
 	provider := lg.selectRandomProvider()
 
 	switch op {
-	case "create":
+	case opCreate:
 		lg.performCreate(ctx, provider, workerID)
-	case "delete":
+	case opDelete:
 		lg.performDelete(ctx, provider, workerID)
-	case "power":
+	case opPower:
 		lg.performPower(ctx, provider, workerID)
-	case "reconfigure":
+	case opReconfigure:
 		lg.performReconfigure(ctx, provider, workerID)
-	case "snapshot":
+	case opSnapshot:
 		lg.performSnapshot(ctx, provider, workerID)
-	case "clone":
+	case opClone:
 		lg.performClone(ctx, provider, workerID)
-	case "describe":
+	case opDescribe:
 		lg.performDescribe(ctx, provider, workerID)
 	}
 }
@@ -500,7 +507,7 @@ func (lg *LoadGenerator) performCreate(ctx context.Context, provider string, wor
 	}
 
 	result := Result{
-		Operation: "create",
+		Operation: opCreate,
 		Provider:  provider,
 		VMName:    vmName,
 		StartTime: time.Now(),
@@ -548,7 +555,7 @@ func (lg *LoadGenerator) performDelete(ctx context.Context, provider string, _ i
 	defer cancel()
 
 	result := Result{
-		Operation: "delete",
+		Operation: opDelete,
 		Provider:  provider,
 		StartTime: time.Now(),
 	}
@@ -582,9 +589,16 @@ func (lg *LoadGenerator) performDelete(ctx context.Context, provider string, _ i
 	result.Success = err == nil
 	if err != nil {
 		result.Error = err.Error()
+		if !apierrors.IsNotFound(err) && !apierrors.IsConflict(err) {
+			// Still this run's VM: keep it for later operations and --cleanup.
+			lg.recordCreated(vm)
+		}
 		lg.results <- result
 		return
 	}
+	lg.mu.Lock()
+	lg.deleting = append(lg.deleting, runObject{name: vm.name, uid: vm.uid})
+	lg.mu.Unlock()
 	lg.observe(&result, func(ctx context.Context) (bool, error) {
 		cur := &infrav1beta1.VirtualMachine{}
 		err := lg.client.Get(ctx, client.ObjectKey{Namespace: lg.namespace, Name: vm.name}, cur)
@@ -603,7 +617,7 @@ func (lg *LoadGenerator) performDescribe(ctx context.Context, provider string, _
 	startTime := time.Now()
 
 	result := Result{
-		Operation: "describe",
+		Operation: opDescribe,
 		Provider:  provider,
 		StartTime: startTime,
 		Success:   true,
@@ -628,7 +642,7 @@ func (lg *LoadGenerator) performDescribe(ctx context.Context, provider string, _
 
 func (lg *LoadGenerator) selectRandomOperation() string {
 	// Weighted random selection based on operation mix
-	operations := []string{"create", "delete", "power", "reconfigure", "snapshot", "clone", "describe"}
+	operations := []string{opCreate, opDelete, opPower, opReconfigure, opSnapshot, opClone, opDescribe}
 	weights := []float64{
 		lg.config.Operations.Create,
 		lg.config.Operations.Delete,
@@ -655,7 +669,7 @@ func (lg *LoadGenerator) selectRandomOperation() string {
 		}
 	}
 
-	return "describe" // fallback
+	return opDescribe // fallback
 }
 
 func (lg *LoadGenerator) selectRandomProvider() string {

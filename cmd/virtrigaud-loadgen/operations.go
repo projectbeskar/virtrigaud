@@ -25,6 +25,7 @@ import (
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/wait"
@@ -36,6 +37,22 @@ import (
 const (
 	// phaseDryRun is the Phase of every operation of a dry run.
 	phaseDryRun = "DryRun"
+
+	// Operation names: the keys of the config's operations weights and the
+	// Operation column of the results.
+	opCreate      = "create"
+	opDelete      = "delete"
+	opPower       = "power"
+	opReconfigure = "reconfigure"
+	opSnapshot    = "snapshot"
+	opClone       = "clone"
+	opDescribe    = "describe"
+
+	// conditionReconfiguring and reasonRestartRequired are the VM condition
+	// and reason the operator reports for a resize applied to the next boot
+	// only.
+	conditionReconfiguring = "Reconfiguring"
+	reasonRestartRequired  = "RestartRequired"
 
 	// defaultObserveTimeout is how long --observe waits for one operation's
 	// effect by default.
@@ -73,10 +90,13 @@ type runVM struct {
 	memoryMiB int64
 }
 
-// runObject is a VMSnapshot or VMClone this run created.
+// runObject is a VMSnapshot, VMClone or VirtualMachine this run created.
 type runObject struct {
 	name string
 	uid  types.UID
+	// source and target are, for a VMClone, the names of its source VM and
+	// of the target VM it asks for.
+	source, target string
 }
 
 // idleVMs returns the indexes of the VMs no operation is using. lg.mu must
@@ -94,11 +114,28 @@ func (lg *LoadGenerator) idleVMs() []int {
 // acquireVM marks a random idle VM this run created as busy and returns it.
 // It reports false when there is none.
 func (lg *LoadGenerator) acquireVM() (*runVM, bool) {
+	return lg.acquireVMPreferring(nil)
+}
+
+// acquireVMPreferring is acquireVM, choosing among the idle VMs for which
+// prefer reports true when there are any.
+func (lg *LoadGenerator) acquireVMPreferring(prefer func(*runVM) bool) (*runVM, bool) {
 	lg.mu.Lock()
 	defer lg.mu.Unlock()
 	idle := lg.idleVMs()
 	if len(idle) == 0 {
 		return nil, false
+	}
+	if prefer != nil {
+		var preferred []int
+		for _, i := range idle {
+			if prefer(lg.vms[i]) {
+				preferred = append(preferred, i)
+			}
+		}
+		if len(preferred) > 0 {
+			idle = preferred
+		}
 	}
 	vm := lg.vms[idle[rand.Intn(len(idle))]] // #nosec G404 -- picks which created VM to act on, not a secret
 	vm.busy = true
@@ -215,21 +252,23 @@ func (lg *LoadGenerator) getVM(ctx context.Context, vm *runVM) (*infrav1beta1.Vi
 
 // patchVM applies fields to vm (a merge patch with its UID as a
 // precondition) and records the result's Duration and outcome. It reports
-// whether the apiserver accepted the patch.
-func (lg *LoadGenerator) patchVM(ctx context.Context, vm *runVM, fields map[string]interface{}, result *Result) bool {
+// whether the apiserver accepted the patch, and the VM's metadata.generation
+// after it.
+func (lg *LoadGenerator) patchVM(ctx context.Context, vm *runVM, fields map[string]interface{}, result *Result) (bool, int64) {
 	patch, err := mergePatch(vm.uid, fields)
 	if err != nil {
 		result.Error = err.Error()
-		return false
+		return false, 0
 	}
+	obj := lg.vmObject(vm)
 	result.StartTime = time.Now()
-	err = lg.client.Patch(ctx, lg.vmObject(vm), patch)
+	err = lg.client.Patch(ctx, obj, patch)
 	result.Duration = time.Since(result.StartTime)
 	result.Success = err == nil
 	if err != nil {
 		result.Error = err.Error()
 	}
-	return result.Success
+	return result.Success, obj.Generation
 }
 
 // performPower toggles spec.powerState (On <-> Off) of a VM this run
@@ -238,7 +277,7 @@ func (lg *LoadGenerator) performPower(ctx context.Context, provider string, _ in
 	ctx, cancel := operationContext(ctx)
 	defer cancel()
 
-	result := Result{Operation: "power", Provider: provider, StartTime: time.Now()}
+	result := Result{Operation: opPower, Provider: provider, StartTime: time.Now()}
 	vm, ok := lg.acquireVM()
 	if !ok {
 		result.Error = errNoRunVM.Error()
@@ -262,7 +301,7 @@ func (lg *LoadGenerator) performPower(ctx context.Context, provider string, _ in
 		return
 	}
 
-	if lg.patchVM(ctx, vm, map[string]interface{}{"spec": map[string]interface{}{"powerState": desired}}, &result) {
+	if ok, _ := lg.patchVM(ctx, vm, map[string]interface{}{"spec": map[string]interface{}{"powerState": desired}}, &result); ok {
 		vm.power = desired
 		lg.observe(&result, func(ctx context.Context) (bool, error) {
 			cur, err := lg.getVM(ctx, vm)
@@ -302,12 +341,15 @@ func pickInRange(r []int, defMin, defMax int, current int64) int64 {
 // set, spec.resources.memoryMiB of a VM this run created, each to a value
 // different from the one this run last set: the change the VirtualMachine
 // controller sends to the provider as a Reconfigure. --observe waits until
-// status.currentResources records it.
+// status.currentResources records it, or until the operator reports the
+// change as applied to the next boot only (Reconfiguring=True, reason
+// RestartRequired, for this generation): a running VM's shrink, for one,
+// never shows in status.currentResources, which records the larger size.
 func (lg *LoadGenerator) performReconfigure(ctx context.Context, provider string, _ int) {
 	ctx, cancel := operationContext(ctx)
 	defer cancel()
 
-	result := Result{Operation: "reconfigure", Provider: provider, StartTime: time.Now()}
+	result := Result{Operation: opReconfigure, Provider: provider, StartTime: time.Now()}
 	vm, ok := lg.acquireVM()
 	if !ok {
 		result.Error = errNoRunVM.Error()
@@ -338,7 +380,7 @@ func (lg *LoadGenerator) performReconfigure(ctx context.Context, provider string
 		return
 	}
 
-	if lg.patchVM(ctx, vm, map[string]interface{}{"spec": map[string]interface{}{"resources": resources}}, &result) {
+	if ok, generation := lg.patchVM(ctx, vm, map[string]interface{}{"spec": map[string]interface{}{"resources": resources}}, &result); ok {
 		vm.cpu = cpu
 		if memoryMiB > 0 {
 			vm.memoryMiB = memoryMiB
@@ -347,6 +389,10 @@ func (lg *LoadGenerator) performReconfigure(ctx context.Context, provider string
 			cur, err := lg.getVM(ctx, vm)
 			if err != nil {
 				return false, err
+			}
+			if c := meta.FindStatusCondition(cur.Status.Conditions, conditionReconfiguring); c != nil &&
+				c.Status == metav1.ConditionTrue && c.Reason == reasonRestartRequired && c.ObservedGeneration >= generation {
+				return true, nil
 			}
 			cr := cur.Status.CurrentResources
 			if cr == nil || cr.CPU == nil || *cr.CPU != cpu {
@@ -365,7 +411,7 @@ func (lg *LoadGenerator) performSnapshot(ctx context.Context, provider string, _
 	ctx, cancel := operationContext(ctx)
 	defer cancel()
 
-	result := Result{Operation: "snapshot", Provider: provider, StartTime: time.Now()}
+	result := Result{Operation: opSnapshot, Provider: provider, StartTime: time.Now()}
 	vm, ok := lg.acquireVM()
 	if !ok {
 		result.Error = errNoRunVM.Error()
@@ -422,14 +468,16 @@ func (lg *LoadGenerator) performSnapshot(ctx context.Context, provider string, _
 }
 
 // performClone creates a VMClone (full clone, target powered off) of a VM
-// this run created. The target VM it asks for carries the run's labels.
-// --observe waits until the clone's status.phase is Ready.
+// this run created, preferring one this run last powered off (some providers
+// clone only a powered-off source and hold the clone until it is). The
+// target VM it asks for carries the run's labels. --observe waits until the
+// clone's status.phase is Ready.
 func (lg *LoadGenerator) performClone(ctx context.Context, provider string, _ int) {
 	ctx, cancel := operationContext(ctx)
 	defer cancel()
 
-	result := Result{Operation: "clone", Provider: provider, StartTime: time.Now()}
-	vm, ok := lg.acquireVM()
+	result := Result{Operation: opClone, Provider: provider, StartTime: time.Now()}
+	vm, ok := lg.acquireVMPreferring(func(v *runVM) bool { return v.power == infrav1beta1.PowerStateOff })
 	if !ok {
 		result.Error = errNoRunVM.Error()
 		lg.results <- result
@@ -472,7 +520,7 @@ func (lg *LoadGenerator) performClone(ctx context.Context, provider string, _ in
 		return
 	}
 	lg.mu.Lock()
-	lg.clones = append(lg.clones, runObject{name: clone.Name, uid: clone.UID})
+	lg.clones = append(lg.clones, runObject{name: clone.Name, uid: clone.UID, source: vm.name, target: clone.Spec.Target.Name})
 	lg.cloneTargets = append(lg.cloneTargets, clone.Spec.Target.Name)
 	lg.mu.Unlock()
 

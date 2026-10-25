@@ -18,6 +18,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -30,6 +31,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -380,6 +382,87 @@ func TestOperationsAgainstAPIServer(t *testing.T) {
 		require.Len(t, vms.Items, 1)
 		assert.Equal(t, "theirs", vms.Items[0].Name)
 	})
+
+	t.Run("cleanup leaves a clone in flight, its source and its target, and reports them", func(t *testing.T) {
+		ns := createNamespace(t, env.Client, "lg-inflight")
+		lg := newGenerator(t, env.Client, ns, &options{cleanup: true})
+		created := createVM(t, lg)
+		createVM(t, lg)
+		// Make the clone pick the first VM: only it is powered off.
+		lg.vms[0].power = infrav1beta1.PowerStateOff
+		lg.performClone(ctx, "lab-provider", 0)
+		res := <-lg.results
+		require.True(t, res.Success, res.Error)
+		assert.Equal(t, created.VMName, res.VMName, "clone prefers a powered-off source")
+
+		clone := &infrav1beta1.VMClone{}
+		require.NoError(t, env.Client.Get(ctx, types.NamespacedName{Namespace: ns, Name: lg.clones[0].name}, clone))
+		clone.Status.Phase = infrav1beta1.ClonePhaseCloning
+		require.NoError(t, env.Client.Status().Update(ctx, clone))
+
+		cctx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
+		defer cancel()
+		left := lg.cleanup(cctx)
+		assert.Contains(t, left, "VMClone/"+clone.Name+" (clone in flight)")
+		assert.Contains(t, left, "VirtualMachine/"+created.VMName+" (source of a clone in flight)")
+		assert.Contains(t, left, "VirtualMachine/"+clone.Spec.Target.Name+" (target of a clone in flight)")
+		// The clone and its source are still there; the other VM is gone.
+		require.NoError(t, env.Client.Get(ctx, client.ObjectKeyFromObject(clone), &infrav1beta1.VMClone{}))
+		getVM(t, env.Client, ns, created.VMName)
+		vms := &infrav1beta1.VirtualMachineList{}
+		require.NoError(t, env.Client.List(ctx, vms, client.InNamespace(ns)))
+		assert.Len(t, vms.Items, 1)
+	})
+
+	t.Run("--observe counts a resize applied to the next boot as reflected", func(t *testing.T) {
+		ns := createNamespace(t, env.Client, "lg-restart")
+		lg := newGenerator(t, env.Client, ns, &options{})
+		created := createVM(t, lg)
+		vm := getVM(t, env.Client, ns, created.VMName)
+		meta.SetStatusCondition(&vm.Status.Conditions, metav1.Condition{
+			Type: conditionReconfiguring, Status: metav1.ConditionTrue, Reason: reasonRestartRequired, Message: "next boot",
+			ObservedGeneration: 1000, LastTransitionTime: metav1.Now(),
+		})
+		require.NoError(t, env.Client.Status().Update(ctx, vm))
+
+		lg.opts.observe, lg.opts.observeTimeout = true, 5*time.Second
+		lg.performReconfigure(ctx, "lab-provider", 0)
+		res := <-lg.results
+		require.True(t, res.Success, res.Error)
+		assert.Positive(t, res.Observed, res.ObserveError)
+	})
+}
+
+// TestFailuresKeepTrackOfRunObjects checks that a failed delete keeps the VM
+// for --cleanup and that a clone target that cannot be read is reported.
+func TestFailuresKeepTrackOfRunObjects(t *testing.T) {
+	scheme, err := cliclient.NewScheme()
+	require.NoError(t, err)
+	c := interceptor.NewClient(fake.NewClientBuilder().WithScheme(scheme).Build(), interceptor.Funcs{
+		Delete: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
+			return apierrors.NewInternalError(errors.New("apiserver unavailable"))
+		},
+		Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+			if key.Name == "unreadable" {
+				return apierrors.NewInternalError(errors.New("apiserver unavailable"))
+			}
+			return c.Get(ctx, key, obj, opts...)
+		},
+	})
+	lg := newGenerator(t, c, "default", &options{})
+	createVM(t, lg)
+	lg.performDelete(context.Background(), "lab-provider", 0)
+	res := <-lg.results
+	assert.False(t, res.Success)
+	assert.Len(t, lg.vms, 1, "a VM whose delete failed must stay tracked")
+	assert.Empty(t, lg.deleting)
+
+	lg.cloneTargets = []string{"unreadable"}
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	left := lg.cleanup(ctx)
+	assert.Contains(t, strings.Join(left, "\n"), "VirtualMachine/unreadable (could not be read")
+	assert.Contains(t, left, "VirtualMachine/"+lg.vms[0].name)
 }
 
 // TestDryRunMakesNoAPICalls runs every operation, the describe included, in

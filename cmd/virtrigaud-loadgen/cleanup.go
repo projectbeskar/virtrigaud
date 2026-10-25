@@ -23,8 +23,10 @@ import (
 	"io"
 	"sort"
 	"strings"
+	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -32,6 +34,15 @@ import (
 	infrav1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
 	"github.com/projectbeskar/virtrigaud/cmd/internal/cliout"
 )
+
+// conditionCloneRequested is the VMClone condition the operator records
+// before it sends a Clone to the provider (and removes once the outcome is
+// recorded): while it is present, a provider clone may be in flight.
+const conditionCloneRequested = "CloneRequested"
+
+// cleanupDeleteTimeout bounds the delete calls --cleanup still sends once
+// its timeout is used up.
+const cleanupDeleteTimeout = 30 * time.Second
 
 // errCleanupIncomplete is returned when --cleanup could not delete
 // everything the run created in time.
@@ -92,61 +103,147 @@ func (lg *LoadGenerator) finish(out io.Writer) error {
 // cleanup deletes what the run created and waits until it is gone: first its
 // VMSnapshots (so each is deleted through its provider while its VM still
 // exists), then its VMClones, the clone targets that carry this run's label,
-// and its VMs. Every delete carries the object's UID as a precondition, so
-// only the object this run created (or, for a clone target, the one this run
-// labelled) is deleted. It returns the objects still present.
+// its VMs, and the VMs whose delete it issued during the run. Every delete
+// carries the object's UID as a precondition, so only the object this run
+// created (or, for a clone target, the one this run labelled) is deleted.
+//
+// A VMClone whose provider clone may still be in flight is waited for first:
+// deleting it, its target or its source then could leave the cloned VM on the
+// hypervisor with nothing recording it. A clone that does not settle in time
+// is left in place with its source and target, and reported.
+//
+// It returns the objects still present (or left in place).
 func (lg *LoadGenerator) cleanup(ctx context.Context) []string {
 	lg.mu.Lock()
-	var snaps, rest []cleanupItem
-	for _, s := range lg.snapshots {
-		snaps = append(snaps, cleanupItem{obj: &infrav1beta1.VMSnapshot{}, uid: s.uid})
-		snaps[len(snaps)-1].obj.SetName(s.name)
-	}
-	for _, c := range lg.clones {
-		rest = append(rest, cleanupItem{obj: &infrav1beta1.VMClone{}, uid: c.uid})
-		rest[len(rest)-1].obj.SetName(c.name)
-	}
+	snapshots := append([]runObject{}, lg.snapshots...)
+	clones := append([]runObject{}, lg.clones...)
 	targets := append([]string{}, lg.cloneTargets...)
+	vms := make([]runObject, 0, len(lg.vms)+len(lg.deleting))
 	for _, vm := range lg.vms {
-		rest = append(rest, cleanupItem{obj: &infrav1beta1.VirtualMachine{}, uid: vm.uid})
-		rest[len(rest)-1].obj.SetName(vm.name)
+		vms = append(vms, runObject{name: vm.name, uid: vm.uid})
 	}
+	vms = append(vms, lg.deleting...)
 	lg.mu.Unlock()
 
+	var left []string
+	keepVM := map[string]bool{}
+	var settled []runObject
+	for _, c := range clones {
+		if lg.cloneSettled(ctx, c) {
+			settled = append(settled, c)
+			continue
+		}
+		left = append(left, "VMClone/"+c.name+" (clone in flight)")
+		keepVM[c.source], keepVM[c.target] = true, true
+	}
+
+	var snaps, rest []cleanupItem
+	for _, s := range snapshots {
+		snaps = append(snaps, newCleanupItem(&infrav1beta1.VMSnapshot{}, s))
+	}
+	for _, c := range settled {
+		rest = append(rest, newCleanupItem(&infrav1beta1.VMClone{}, c))
+	}
 	for _, name := range targets {
-		if item, ok := lg.ownedCloneTarget(ctx, name); ok {
+		if keepVM[name] {
+			left = append(left, "VirtualMachine/"+name+" (target of a clone in flight)")
+			continue
+		}
+		item, found, err := lg.ownedCloneTarget(ctx, name)
+		switch {
+		case err != nil:
+			left = append(left, fmt.Sprintf("VirtualMachine/%s (could not be read: %v)", name, err))
+		case found:
 			rest = append(rest, item)
 		}
 	}
+	for _, vm := range vms {
+		if keepVM[vm.name] {
+			left = append(left, "VirtualMachine/"+vm.name+" (source of a clone in flight)")
+			continue
+		}
+		rest = append(rest, newCleanupItem(&infrav1beta1.VirtualMachine{}, vm))
+	}
 
-	left := lg.deleteAndWait(ctx, snaps)
+	left = append(left, lg.deleteAndWait(ctx, snaps)...)
 	left = append(left, lg.deleteAndWait(ctx, rest)...)
 	sort.Strings(left)
 	return left
 }
 
-// ownedCloneTarget returns the clone target VM named name when it carries
-// this run's label; a VM under that name without it is not this run's.
-func (lg *LoadGenerator) ownedCloneTarget(ctx context.Context, name string) (cleanupItem, bool) {
+// newCleanupItem returns a cleanup item for o, read and deleted through obj.
+func newCleanupItem(obj client.Object, o runObject) cleanupItem {
+	obj.SetName(o.name)
+	return cleanupItem{obj: obj, uid: o.uid}
+}
+
+// cloneSettled waits, within ctx, until the VMClone c has no provider clone
+// in flight — it is Ready or Failed, it has not requested a clone yet, or it
+// is gone — and reports whether that happened.
+func (lg *LoadGenerator) cloneSettled(ctx context.Context, c runObject) bool {
+	interval := lg.pollInterval
+	if interval <= 0 {
+		interval = defaultPollInterval
+	}
+	err := wait.PollUntilContextCancel(ctx, interval, true, func(ctx context.Context) (bool, error) {
+		cur := &infrav1beta1.VMClone{}
+		err := lg.client.Get(ctx, client.ObjectKey{Namespace: lg.namespace, Name: c.name}, cur)
+		if apierrors.IsNotFound(err) {
+			return true, nil
+		}
+		if err != nil {
+			return false, nil
+		}
+		if cur.UID != c.uid {
+			return true, nil
+		}
+		switch cur.Status.Phase {
+		case infrav1beta1.ClonePhaseReady, infrav1beta1.ClonePhaseFailed:
+			return true, nil
+		case "", infrav1beta1.ClonePhasePending:
+			return meta.FindStatusCondition(cur.Status.Conditions, conditionCloneRequested) == nil, nil
+		default:
+			return false, nil
+		}
+	})
+	return err == nil
+}
+
+// ownedCloneTarget reads the clone target VM named name. It reports found
+// when the VM exists and carries this run's label (a VM under that name
+// without it is not this run's), and an error when it cannot be read.
+func (lg *LoadGenerator) ownedCloneTarget(ctx context.Context, name string) (cleanupItem, bool, error) {
 	vm := &infrav1beta1.VirtualMachine{}
 	if err := lg.client.Get(ctx, client.ObjectKey{Namespace: lg.namespace, Name: name}, vm); err != nil {
-		return cleanupItem{}, false
+		if apierrors.IsNotFound(err) {
+			return cleanupItem{}, false, nil
+		}
+		return cleanupItem{}, false, err
 	}
 	if vm.Labels[loadgenRunLabelKey] != lg.runID {
-		return cleanupItem{}, false
+		return cleanupItem{}, false, nil
 	}
-	return cleanupItem{obj: vm, uid: vm.UID}, true
+	return cleanupItem{obj: vm, uid: vm.UID}, true, nil
 }
 
 // deleteAndWait deletes items and waits until each is gone (or replaced by
 // another object under its name). It returns the items still present when
-// ctx ends.
+// ctx ends (after ctx has ended it still sends the deletes, and reports every
+// item it sent one for).
 func (lg *LoadGenerator) deleteAndWait(ctx context.Context, items []cleanupItem) []string {
+	// Once the cleanup timeout is used up, the deletes are still sent, each
+	// with a short timeout of its own, but not waited for.
+	callCtx := ctx
+	if ctx.Err() != nil {
+		var cancel context.CancelFunc
+		callCtx, cancel = context.WithTimeout(context.WithoutCancel(ctx), cleanupDeleteTimeout)
+		defer cancel()
+	}
 	var pending []cleanupItem
 	for _, item := range items {
 		item.obj.SetNamespace(lg.namespace)
 		uid := item.uid
-		err := lg.client.Delete(ctx, item.obj, client.Preconditions{UID: &uid})
+		err := lg.client.Delete(callCtx, item.obj, client.Preconditions{UID: &uid})
 		if err != nil && !apierrors.IsNotFound(err) && !apierrors.IsConflict(err) {
 			pending = append(pending, item) // retried below by waiting; reported if still present
 			continue
