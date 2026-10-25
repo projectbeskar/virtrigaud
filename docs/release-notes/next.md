@@ -1,23 +1,23 @@
 <!--
-Draft release notes for VirtRigaud v0.4.0-rc8, the eighth release candidate for
+Draft release notes for VirtRigaud v0.4.0-rc9, the ninth release candidate for
 v0.4.0 (GA follows after a soak). v0.4.0-rc3 was tagged, but its release run was
 stopped by the image scan (CVE-2026-63209) and no rc3 release was published. rc1,
-rc2, rc4, rc5, rc6 and rc7 were published from earlier versions of this file; rc1
+rc2, rc4, rc5, rc6, rc7 and rc8 were published from earlier versions of this file; rc1
 followed v0.3.11. Paste everything below this comment into the GitHub pre-release. The
 notes are cumulative since v0.3.11: a user going from v0.3.11 needs all of them, while
-"Changes since v0.4.0-rc7" is the short list for someone already on rc7, "Changes
-since v0.4.0-rc6" the one for someone on rc6, "Changes since v0.4.0-rc5" the one for
-someone on rc5, "Changes since v0.4.0-rc4" the one for someone on rc4, "Changes since
-v0.4.0-rc2" the one for someone on rc2 and "Changes since v0.4.0-rc1" the one for
-someone on rc1. See docs/upgrading.md for the full upgrade guide these notes link to,
-and CHANGELOG.md for the complete, dated changelog. The published release body is a
-trimmed version of this file (GitHub's limit is 125,000 characters): the preamble, the
-newest "Changes since" section, "About this release candidate", "Breaking changes",
-"Known limitations" and "Upgrade". For the GA release, drop the rc sections and
-re-title.
+"Changes since v0.4.0-rc8" is the short list for someone already on rc8, "Changes since
+v0.4.0-rc7" the one for someone on rc7, "Changes since v0.4.0-rc6" the one for someone
+on rc6, "Changes since v0.4.0-rc5" the one for someone on rc5, "Changes since
+v0.4.0-rc4" the one for someone on rc4, "Changes since v0.4.0-rc2" the one for someone
+on rc2 and "Changes since v0.4.0-rc1" the one for someone on rc1. See docs/upgrading.md
+for the full upgrade guide these notes link to, and CHANGELOG.md for the complete,
+dated changelog. The published release body is a trimmed version of this file (GitHub's
+limit is 125,000 characters): the preamble, the newest "Changes since" section, "About
+this release candidate", "Breaking changes", "Known limitations" and "Upgrade". For the
+GA release, drop the rc sections and re-title.
 -->
 
-This is **v0.4.0-rc8, a release candidate** (GA follows after a soak). It is a
+This is **v0.4.0-rc9, a release candidate** (GA follows after a soak). It is a
 security-hardening release: a full codebase security review found and fixed several
 cross-tenant and privilege-escalation issues in the vSphere and libvirt providers,
 cross-namespace clone/migration targets, and VM provider binding. rc2 added two waves of
@@ -47,32 +47,41 @@ VM's snapshot, revert and delete (on a clustered Provider also create and clone)
 same host was refused (V7); a snapshot create the provider had not performed ended in an
 operator hold (V8); a revert refused for good told you to retry it; `status.ips` listed
 loopback and link-local addresses (V9); and a libvirt guest on the NAT network without the
-guest agent never showed its address (V10). **Several fixes are breaking or change default
+guest agent never showed its address (V10). rc9 adds an eighth, on top of rc8: one fix found
+by validating rc8 on real libvirt 10.0 hosts. Deleting a libvirt disk-only snapshot
+destroyed a memory snapshot stored in its overlay, and that memory snapshot's `VMSnapshot`
+could then never be deleted while the VM ran (V11). **Several fixes are breaking or change default
 behavior.** Read the upgrade guide before upgrading: **[Upgrading from
 v0.3.11](docs/upgrading.md)**.
 
-The notes below are cumulative since v0.3.11. If you are already on v0.4.0-rc7, read
-"Changes since v0.4.0-rc7" first; on v0.4.0-rc6, read it and then "Changes since
-v0.4.0-rc6"; on v0.4.0-rc5, also "Changes since v0.4.0-rc5"; on v0.4.0-rc4, also "Changes
-since v0.4.0-rc4"; on v0.4.0-rc2, also "Changes since v0.4.0-rc2"; on v0.4.0-rc1, also
-"Changes since v0.4.0-rc1".
+The notes below are cumulative since v0.3.11. If you are already on v0.4.0-rc8, read
+"Changes since v0.4.0-rc8" first; on v0.4.0-rc7, read it and then "Changes since
+v0.4.0-rc7"; on v0.4.0-rc6, also "Changes since v0.4.0-rc6"; on v0.4.0-rc5, also "Changes
+since v0.4.0-rc5"; on v0.4.0-rc4, also "Changes since v0.4.0-rc4"; on v0.4.0-rc2, also
+"Changes since v0.4.0-rc2"; on v0.4.0-rc1, also "Changes since v0.4.0-rc1".
 
 ## Changes since v0.4.0-rc8
 
-One fix, found by validating rc8 on a real libvirt 10.0 host (Ubuntu 24.04): deleting a
-disk-only snapshot silently destroyed a memory snapshot stored in its overlay, and the
-memory snapshot's `VMSnapshot` then stayed `Deleting` for ever (V11). **Nothing is
-breaking in the API, and no CRD schema, RBAC, chart or proto changed.** Behaviour
-change: such a delete is now refused until the memory snapshot is deleted first. Roll
-the libvirt providers (the refusal and the cleanup) and the manager (how a refused
-snapshot delete is shown).
+One pull request, #440. It fixes what validating rc8 on real libvirt 10.0 hosts (Ubuntu
+24.04, AppArmor; a shared NFS pool used by a single-host and a clustered Provider) found
+(see [About this release candidate](#about-this-release-candidate--what-to-test),
+"Validated in the lab since rc8"): deleting a disk-only snapshot of a running VM silently
+destroyed a memory snapshot stored in its overlay, and the memory snapshot's `VMSnapshot`
+could then never be deleted while the VM ran (V11). **Nothing is breaking in the API, and
+no CRD schema, RBAC, chart or proto changed** (see [Upgrade order for
+rc9](#upgrade-order-for-rc9)). Behaviour changes to know about: such a delete is refused
+until the memory snapshot is deleted first; a libvirt snapshot delete whose snapshot
+definition cannot be read is refused instead of being sent without its overlay cleanup;
+and a snapshot delete a provider refuses for good now shows the provider's answer on the
+`VMSnapshot`. **No operator action is needed beyond the rollout.** Roll the libvirt
+providers (the refusal and the cleanup) and the manager (how a refused snapshot delete is
+shown).
 
-| What changed | Breaking |
-|---|---|
-| libvirt: `SnapshotDelete` of a disk-only snapshot is refused, before anything changes, while another snapshot of the VM is stored in a file the delete would merge away or remove; an orphaned memory snapshot's metadata is deleted when its data is provably gone (V11) | No. Behaviour change: delete memory snapshots before the disk-only snapshot they were taken on |
-| Manager: a snapshot delete the provider refuses with `FailedPrecondition` (other than a disk another VM depends on) shows the provider's answer in `Ready=False/DeleteBlocked` and is re-checked with a backoff of up to 5 minutes | No. Behaviour change: such a refusal was `ProviderError` with a constant message; the answer was only in the event |
+| PR | What changed | Breaking |
+|---|---|---|
+| #440 (V11) | libvirt: `SnapshotDelete` of a disk-only snapshot is refused, before anything changes, while another snapshot of the VM is stored in a file the delete would merge away or remove; a check that cannot be completed refuses retryably; an orphaned memory snapshot's metadata is deleted when its data is provably gone. Manager: a snapshot delete the provider refuses with `FailedPrecondition` (other than a disk another VM depends on) shows the provider's answer in `Ready=False/DeleteBlocked` and is re-checked with a backoff of up to 5 minutes | No. Behaviour change: delete memory snapshots before the disk-only snapshot they were taken on; a refused delete was `ProviderError` with a constant message, the answer only in the event |
 
-### libvirt: deleting a disk-only snapshot no longer destroys a memory snapshot (V11)
+### libvirt: deleting a disk-only snapshot no longer destroys a memory snapshot (#440; V11)
 
 A `VMSnapshot` with `includeMemory: true` of a running VM is an internal libvirt
 snapshot, stored inside the qcow2 file the VM's disk is using. When the VM already has a
@@ -82,8 +91,9 @@ in the lab, libvirt also removed the overlay file. libvirt does not check for an
 internal snapshot stored in that file, so the memory snapshot's data was lost while
 success was reported. libvirt kept its metadata, and every later delete of it failed
 while the VM ran (`disk image 'vda' for internal snapshot 'mem' is not the same as disk
-image currently used by VM`). The `VMSnapshot` stayed `Deleting`; `virtrigaud.io/force-delete`
-was the only way out.
+image currently used by VM`). Its `VMSnapshot` kept its finalizer and was retried for ever
+(`Ready=False/ProviderError`); `virtrigaud.io/force-delete` or a manual cleanup of the
+leftover metadata was the only way out.
 
 Now:
 
@@ -94,29 +104,79 @@ Now:
   `FailedPrecondition` that names the snapshots to delete first, for example `delete
   refused, nothing changed: delete snapshot "mem" first; it is stored in a disk file
   that deleting snapshot "live" would merge away, and would be lost`. **Delete the memory
-  snapshot first, then the disk-only snapshot.** A check that cannot be completed
-  refuses the delete too, retryably (`VM_DISK_CHECK_FAILED`).
+  snapshot first, then the disk-only snapshot.** Deleting a memory snapshot is never
+  refused by this check. A check that cannot be completed refuses the delete too,
+  retryably (`VM_DISK_CHECK_FAILED`, or the host-unreachable answer when the host cannot
+  be reached), and so does a snapshot whose definition cannot be read: before, the delete was sent anyway and only its overlay cleanup was skipped.
 - **A memory snapshot that rc8 or earlier already lost** has only its metadata deleted
   (`virsh snapshot-delete <domain> <snapshot> --metadata`) when libvirt refuses its
   delete with the error above and the provider proves the data is gone: every file it
   was taken on no longer exists, and no image in the VM's current disk chains lists it.
   Otherwise the answer is `delete refused, nothing changed: power the VM off and delete
-  it again; ...`. A manual cleanup for a VM still on rc8, or a `VMSnapshot` already
+  it again; ...` (or a retryable check failure when the proof could not be read). A manual cleanup for a VM still on rc8, or a `VMSnapshot` already
   removed with force-delete, is documented.
 - **The manager shows the refusal.** The `VMSnapshot` keeps its finalizer, gets
   `Ready=False/DeleteBlocked` with the provider's answer (sanitised, first 256 bytes)
   and a `SnapshotDeleteFailed` Warning event, and is re-checked with a backoff from
   15 seconds up to 5 minutes. A re-check of the same refusal writes nothing.
   `virtrigaud.io/force-delete=true` still removes it, leaving the snapshot on the
-  hypervisor.
+  hypervisor. This is the manager's rule for any provider's definite refusal of a
+  snapshot delete, not only libvirt's: vSphere's refusal to delete a snapshot of a
+  template or image artifact and a Proxmox VM whose owner stamp cannot be read now show
+  the same way. A refusal about a disk another VM depends on (`VM_DISK_IN_USE`) keeps
+  its own handling, and a failure that is not a definite refusal (a host or provider
+  error, a check that could not run) stays `ProviderError` with the answer only in the
+  event.
 
 Single-host and clustered Providers behave the same; on a clustered Provider the
 refusal also carries `VM_OPERATION_FAILED`. See [Deleting memory and disk-only snapshots
 of the same VM](docs/libvirt-clones.md#deleting-memory-and-disk-only-snapshots-of-the-same-vm).
 
-**Upgrade order.** No CRD, RBAC or chart change. Roll the libvirt providers first: they
-stop the data loss. An rc8 manager shows a refused delete as before (`ProviderError`, the
-answer only in the event) and still retries it. Then roll the manager.
+### Upgrade order for rc9
+
+**No CRD schema changed since rc8** (checked: the diff between the commit of rc8's
+release notes, #439, and this release is empty under `config/crd/bases`; the chart's CRDs
+under `charts/virtrigaud/crds` are generated from the same Go types, and the chart
+templates, `config/rbac`, `api/` and the proto did not change either: the code changes
+are in `internal/providers/libvirt` and `internal/controller`). From rc8:
+
+1. **CRDs.** Nothing to apply for this release.
+2. **No new grant, but check the one from rc8.** The check reads each file it might
+   merge away with the same root `qemu-img info` as the disk in-use check, so it relies on
+   the `VR_DISK_READ` grant of [Upgrade order for rc8](#upgrade-order-for-rc8) (step 2
+   there; see [Unreadable disk images](docs/libvirt-clones.md#unreadable-disk-images)).
+   It opens files the rc8 checks did not need to (the overlays a child snapshot or a
+   revert recorded), so a host that worked on rc8 without the grant can now see the
+   refusal. Where the SSH user cannot read an overlay, deleting a disk-only snapshot is
+   refused, retryably (`VM_DISK_CHECK_FAILED`; "permission denied reading a disk image"
+   when `qemu-img` says so), and goes through once the grant is in place.
+3. **The libvirt providers** (every libvirt Provider, single-host and clustered). They
+   carry the refusal, the metadata-only cleanup of a memory snapshot whose data is gone
+   and the read that fails closed. Roll them first: until a provider is rolled, a delete
+   of a disk-only snapshot still destroys a memory snapshot stored in its overlay, so do
+   not delete such a snapshot, whatever manager you run. An rc9 provider behind an rc8
+   manager is safe: the refusal applies, and the manager retries the delete and shows it
+   as `ProviderError` with a constant message (the answer is only in the
+   `SnapshotDeleteFailed` event). The vSphere, Proxmox and mock providers have no change.
+4. **The manager.** It carries how a refused snapshot delete is shown
+   (`Ready=False/DeleteBlocked` with the provider's answer, a backoff of up to 5
+   minutes). It rolls with the chart as usual. An rc9 manager behind rc8 libvirt
+   providers works with the rc8 behaviour: no refusal, so the data loss above.
+
+From rc7, apply [Upgrade order for rc8](#upgrade-order-for-rc8) first (its one operator
+action is the `VR_DISK_READ` grant); from rc6, [Upgrade order for
+rc7](#upgrade-order-for-rc7) before that; from rc5, [Upgrade order for
+rc6](#upgrade-order-for-rc6); from rc4, [Upgrade order for rc5](#upgrade-order-for-rc5);
+from rc2, rc4's order ([Upgrade order for this
+release](#upgrade-order-for-this-release): the seed directory on every libvirt host
+first); from rc1, also [Upgrade order for rc2](#upgrade-order-for-rc2).
+
+**Rollback.** Rolling a libvirt provider back to rc8 brings back the data loss: a
+`VMSnapshot` held `DeleteBlocked` by an rc9 provider is then retried against the old
+provider, which sends the delete. Rolling the manager back to rc8 shows a refused
+snapshot delete as `ProviderError` again. rc9 writes no new record or file format, so
+nothing needs converting; a memory snapshot's metadata that rc9 deleted is not restored.
+→ [Rollback caveats](docs/upgrading.md#rollback-caveats)
 
 ## Changes since v0.4.0-rc7
 
@@ -1738,11 +1798,11 @@ Wave 2 adds to this:
 
 ## About this release candidate / what to test
 
-v0.4.0 GA follows after a soak of this candidate (rc1, rc2, rc4, rc5, rc6 and rc7 came
-before it; rc3 was tagged but not released). Please try it on a non-production cluster and
-report what you find (GitHub issues; include the Provider type, the `kubectl describe` of
-the object involved and the provider log, never a Secret). The most useful things to
-exercise:
+v0.4.0 GA follows after a soak of this candidate (rc1, rc2, rc4, rc5, rc6, rc7 and rc8
+came before it; rc3 was tagged but not released). Please try it on a non-production
+cluster and report what you find (GitHub issues; include the Provider type, the
+`kubectl describe` of the object involved and the provider log, never a Secret). The most
+useful things to exercise:
 
 - **Upgrading from v0.3.11**, following [docs/upgrading.md](docs/upgrading.md): the
   CRDs, then the manager, then the providers, with the grants and vCenter
@@ -1792,6 +1852,25 @@ exercise:
   - a migration onto Proxmox: the VM lands on the bridge and VLAN its target names, and
     whether the migrated guest has network (see Known limitations, R36); tell us which
     guest image you used.
+- **New since rc8 (libvirt, single-host and clustered):**
+  - **a disk-only snapshot with a memory snapshot taken after it:** on a running VM, create
+    a `VMSnapshot` without memory (`includeMemory: false`, a disk-only snapshot), then one
+    with `includeMemory: true` (a memory snapshot), then delete the disk-only
+    `VMSnapshot`. The delete is refused with nothing changed: the `VMSnapshot` stays,
+    `Ready=False/DeleteBlocked` names the memory snapshot by its libvirt snapshot name
+    (`delete snapshot "<name>" first`), `virsh snapshot-list <domain>` still lists both,
+    and the overlay file is still in the pool;
+  - **the other order:** delete the memory snapshot first, then the disk-only one. Both
+    deletes succeed and both snapshots are gone from `virsh snapshot-list`;
+  - **a memory snapshot that rc8 or earlier already lost** (a VM whose disk-only snapshot
+    was deleted first, so the memory snapshot's metadata records a file that no longer
+    exists): deleting its `VMSnapshot` completes through the metadata-only cleanup, or is
+    refused with "power the VM off and delete it again" when the provider cannot prove the
+    data is gone. See [A memory snapshot whose data was already
+    lost](docs/libvirt-clones.md#a-memory-snapshot-whose-data-was-already-lost);
+  - **the manager's view of a refused delete:** the refused `VMSnapshot` shows the
+    provider's answer in `Ready=False/DeleteBlocked`, raises one `SnapshotDeleteFailed`
+    Warning event (not one per re-check) and is re-checked within 5 minutes.
 - **New since rc7 (libvirt, single-host and clustered, unless noted):**
   - **other VMs after an offline snapshot or a revert:** take a `VMSnapshot` of one VM with
     the VM powered off, revert that VM to it, then take a snapshot of, clone and delete
@@ -2089,15 +2168,47 @@ V10 (fixed in rc8, see [Changes since v0.4.0-rc7](#changes-since-v040-rc7)).
   over S3 landed on the bridge, and the guest was reachable with its data. Found, fixed in
   #438: V9 (`status.ips` listed loopback and link-local addresses) and V10 (NAT guests
   without the agent never showed an address).
-- **Not run on rc8 yet:** everything new in rc8 (the disk check over nested backing
-  stores and the "permission denied" answer, the snapshot-create backoff, the revert hint,
-  the `status.ips` filter and the NAT lease). It will be validated on this candidate.
+- **Not run in the rc7 validation:** everything new in rc8 (the disk check over nested
+  backing stores and the "permission denied" answer, the snapshot-create backoff, the
+  revert hint, the `status.ips` filter and the NAT lease). Most of it was validated on rc8,
+  below; the V8 backoff was not exercised.
+
+**Validated in the lab since rc8**, on v0.4.0-rc8 (the released images): Kubernetes 1.34,
+libvirt 10.0 as a single host and as a two-host clustered Provider sharing an NFS pool,
+and a Proxmox VE node (for the `status.ips` check only). This run found V11 (fixed in
+rc9, see [Changes since v0.4.0-rc8](#changes-since-v040-rc8)).
+
+- **V7, the disk check (#437).** An offline snapshot and a revert of one VM left a fresh
+  `0600` root-owned revert overlay and a three-level nested backing store in its
+  definition. Another VM's live snapshot, its snapshot delete, a clustered full clone and
+  the clone VM's delete all succeeded (all were refused on rc7).
+- **V9 and V10, `status.ips` (#438).** NAT guests without the guest agent showed their
+  DHCP lease. Bridged guests with the agent showed only their lab-network address (no
+  loopback, no link-local). A bridged guest without the agent showed its address through
+  the host's ARP entry. Proxmox guests without the agent showed none, as documented.
+- **The libvirt snapshot revert again, on rc8** (clustered and single-host): the guest
+  file written after the snapshot was gone and the earlier one kept, the record stayed at
+  one attempt, and no stray file was left in the seed directory.
+- **The upgrade from rc7 to rc8.** The rollout check found two VMs still carrying a
+  completed `spec.snapshot.revertToRef` from earlier tests; they were cleared before the
+  manager rolled, as the rc6 upgrade order asks.
+- **V8 was not exercised:** no provider answered "not performed" during the run. It is
+  covered by unit tests only.
+- **Found, fixed in rc9:** V11. Deleting a disk-only snapshot whose overlay held a later
+  memory snapshot made libvirt merge the overlay away, and the memory snapshot's data was
+  lost silently. Its `VMSnapshot` then never completed its delete while the VM ran, because
+  libvirt refused to delete the stale snapshot ("... is not the same as disk image currently used by
+  VM"). Fixed in #440.
+- **Not run on rc9 yet:** everything new in rc9 (the refusal, the metadata-only cleanup
+  of a lost memory snapshot, the read that fails closed, and how the manager shows a
+  refused snapshot delete). It will be validated on this candidate.
 
 **Not run:** Proxmox adoption; a reused VMID and the ADR-0012 name rule (which needs a
 PVE cluster); a Proxmox `Reconfigure` (resize); the Proxmox import-stage delete of a
-failed migration; a PVE cluster of more than one node; everything new in rc8 (the last
-item of "Validated in the lab since rc7"); an SELinux libvirt host; and the paths named
-above that need a fault to trigger.
+failed migration; a PVE cluster of more than one node; everything new in rc9 (the last
+item of "Validated in the lab since rc8"); the V8 retry of a snapshot create the provider
+did not perform (unit tests only); an SELinux libvirt host; and the paths named above that
+need a fault to trigger.
 
 ## Breaking changes
 
@@ -2254,6 +2365,31 @@ above that need a fault to trigger.
   `refusing to stage cloud-init data`. Seeds of existing VMs stay in `/tmp` until you
   make them private. → [Changes since v0.4.0-rc2](#libvirt-cloud-init-seeds-are-private-and-live-in-a-dedicated-directory-414-breaking),
   [Upgrade guide](docs/upgrading.md#breaking-changes)
+
+**New since rc8: nothing is breaking in the API and no CRD schema changed.** Behaviour
+changes to check (no operator action beyond the rollout):
+
+- **A libvirt snapshot delete that would lose another snapshot is refused.** Deleting a
+  disk-only snapshot while a memory snapshot of the same VM is stored in its overlay (or
+  in another file the delete would merge away or remove) answers a definite
+  `FailedPrecondition` naming the snapshot to delete first, and changes nothing. Before,
+  the delete went through and destroyed the memory snapshot. Delete the memory snapshot
+  first (#440; V11).
+- **A libvirt snapshot delete whose snapshot definition cannot be read is refused
+  (fail closed), retryably.** Before, it was deleted without the overlay cleanup. A check
+  that cannot be completed is a retried `ProviderError`, not `DeleteBlocked` (#440).
+- **A refused `VMSnapshot` delete shows `Ready=False/DeleteBlocked` with the provider's
+  answer** (sanitised, first 256 bytes), for every provider's `FailedPrecondition` other
+  than a disk another VM depends on: the libvirt refusals above, and also vSphere's
+  refusal to delete a snapshot of a template or image artifact and a Proxmox VM whose
+  owner stamp cannot be read. Before, these were `ProviderError` with a constant message
+  and the answer only in the event. A re-check is paced by the failed-delete backoff (15
+  seconds up to 5 minutes). Automation that matched the old message or reason must match
+  `DeleteBlocked` (#440).
+
+→ [Changes since v0.4.0-rc8](#changes-since-v040-rc8),
+[Deleting memory and disk-only snapshots of the same
+VM](docs/libvirt-clones.md#deleting-memory-and-disk-only-snapshots-of-the-same-vm)
 
 **New since rc7: nothing is breaking in the API and no CRD schema changed.** Behaviour
 changes to check, and one operator action:
@@ -2604,6 +2740,11 @@ policy and grants → manager → providers), and rollback caveats in
   [`docs/clustered-provider-inventory.md`](docs/clustered-provider-inventory.md#migration-into-a-clustered-provider-addendum-b)).
 
 ### Fixes
+
+- **New since rc8** (→ [Changes since v0.4.0-rc8](#changes-since-v040-rc8)):
+  - **Deleting a libvirt disk-only snapshot destroyed a memory snapshot stored in its
+    overlay** without any sign, and the memory snapshot's `VMSnapshot` could then never be
+    deleted while the VM ran (#440; V11).
 
 - **New since rc7** (→ [Changes since v0.4.0-rc7](#changes-since-v040-rc7)):
   - **After an offline snapshot or a revert on libvirt, the snapshot, revert and delete
@@ -3255,6 +3396,23 @@ says so. Each links to the page that documents it in full, where one exists.
   [`docs/libvirt-clones.md`](docs/libvirt-clones.md#what-snapshotdelete-removes)).
   The libvirt revert was validated in the lab on rc7 (single-host and clustered, libvirt
   10.0, AppArmor, an NFS pool); on rc6 it failed (V6).
+- **libvirt: the check that a snapshot delete keeps the VM's other snapshots is not
+  atomic with the delete.** `SnapshotDelete` reads the VM's snapshots and the files'
+  headers, then sends `virsh snapshot-delete`, with no lock between the two and nothing
+  that serialises it against a `SnapshotCreate` of the same VM
+  (`internal/providers/libvirt/server.go`, `snapshot_delete_guard.go`). A memory snapshot
+  created for the same VM while the delete of an earlier disk-only snapshot is running
+  is not seen and could still be lost. Do not create a snapshot of a VM while you delete
+  another of its snapshots. The check also covers only the files the delete may merge
+  away or remove; a snapshot libvirt itself refuses to delete (an internal parent of an
+  external snapshot) is libvirt's answer, not this check's
+  (→ [`docs/libvirt-clones.md`](docs/libvirt-clones.md#deleting-memory-and-disk-only-snapshots-of-the-same-vm)).
+- **libvirt: a lost memory snapshot's data cannot be recovered, and the cleanup is
+  limited to what can be proven.** A memory snapshot that rc8 or earlier lost (its
+  disk-only snapshot was deleted first) keeps only metadata. rc9 deletes that metadata
+  when every file the snapshot recorded is gone and no current disk image lists it;
+  otherwise it asks you to power the VM off and delete it again, and the manual cleanup
+  in the doc applies (→ [`docs/libvirt-clones.md`](docs/libvirt-clones.md#a-memory-snapshot-whose-data-was-already-lost)).
 - **libvirt: snapshot and revert overlays are `0600`, and the disk check needs to read
   them.** libvirt creates `<domain>-disk.<snapshot>` and `<domain>-disk.<epoch>` mode
   `0600`, owned by root while the VM is off, and VirtRigaud does not change them. A
@@ -3337,6 +3495,11 @@ says so. Each links to the page that documents it in full, where one exists.
   [docs/upgrading.md](docs/upgrading.md#leftovers-from-earlier-releases).
 
 ## Upgrade
+
+Since rc8: **no CRD changed**, and no RBAC, chart or proto change. Roll the libvirt
+providers (single-host and clustered) first, then the manager; until a libvirt provider is
+rolled, do not delete a disk-only snapshot of a VM that has a memory snapshot. See
+[Upgrade order for rc9](#upgrade-order-for-rc9).
 
 Since rc7: **no CRD schema changed** (only the description of `status.ips`). On libvirt
 hosts where the provider's SSH user cannot read libvirt's `0600` overlays, grant it

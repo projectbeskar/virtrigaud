@@ -5,6 +5,23 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-10-25 00:01] - Release notes for v0.4.0-rc9
+**Author:** @wrkode (William Rizzo)
+
+### Changed
+- `docs/release-notes/next.md`: retitled for v0.4.0-rc9 (header comment, opening paragraph, "About this release candidate": rc1, rc2, rc4, rc5, rc6, rc7 and rc8 came before; rc3 was tagged but not released). "Changes since v0.4.0-rc8" gets an intro, a table with the one PR (#440; V11) and the PR number in the heading, and a new "Upgrade order for rc9": no CRD schema change since rc8 (checked on `config/crd/bases`; the chart templates, `config/rbac`, `api/` and the proto did not change), no operator action beyond the rollout (the check relies on rc8's `VR_DISK_READ` grant), the libvirt providers first (the refusal, the metadata-only cleanup, the read that fails closed), then the manager (how a refused snapshot delete is shown), what an older provider or manager means in each direction, and the rollback.
+- `docs/release-notes/next.md`: "About this release candidate" gains a "New since rc8" test list (a disk-only snapshot with a memory snapshot taken after it is refused and nothing changes; the other order succeeds; a memory snapshot that rc8 or earlier already lost; the manager's view of a refused delete) and "Validated in the lab since rc8" (v0.4.0-rc8 on Kubernetes 1.34, libvirt 10.0 single-host and a two-host clustered Provider on an NFS pool: V7, V9/V10, the libvirt revert, the rc7 to rc8 rollout check; V8 not exercised; V11 found). The "Not run" list names everything new in rc9 and the V8 retry. "Breaking changes" (nothing breaking, three behaviour changes), "Fixes", "Known limitations" (the V11 check and the delete are not atomic; the cleanup of a lost memory snapshot is limited to what can be proven) and "Upgrade" carry the rc9 items.
+- `docs/upgrading.md`: no change; the behaviour-change row and the provider-order bullet for rc9 came with #440 and match the notes.
+
+### Why
+Validating v0.4.0-rc8 on real libvirt 10.0 hosts found V11, fixed on main (#440). People who test rc9 need the upgrade order, what a refused snapshot delete looks like and how to delete a disk-only snapshot safely, and what was and was not validated.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [ ] Config change only
+- [x] Documentation only
+
 ## [2026-10-24 23:30] - libvirt: deleting a disk-only snapshot no longer destroys a memory snapshot stored in its overlay (V11)
 **Author:** @wrkode (William Rizzo)
 
