@@ -1,0 +1,69 @@
+{
+  "run": "b10x1793022401",
+  "submitted": 10,
+  "reached": {
+    "bound": 10,
+    "created": 10,
+    "deletereq": 10,
+    "gone": 10,
+    "pending": 10,
+    "ready": 10,
+    "reconciled": 10
+  },
+  "latencyMs": {
+    "bound": {
+      "max": 2011,
+      "p50": 1627,
+      "p90": 2011,
+      "p99": 2011
+    },
+    "created": {
+      "max": 11,
+      "p50": 10,
+      "p90": 11,
+      "p99": 11
+    },
+    "deletereq": {
+      "max": 5028,
+      "p50": 5027,
+      "p90": 5028,
+      "p99": 5028
+    },
+    "gone": {
+      "max": 173,
+      "p50": 98,
+      "p90": 173,
+      "p99": 173
+    },
+    "pending": {
+      "max": 1780,
+      "p50": 1362,
+      "p90": 1780,
+      "p99": 1780
+    },
+    "ready": {
+      "max": 2023,
+      "p50": 1660,
+      "p90": 2023,
+      "p99": 2023
+    },
+    "reconciled": {
+      "max": 25,
+      "p50": 25,
+      "p90": 25,
+      "p99": 25
+    }
+  },
+  "throughputPerSec": {
+    "bound": 4.970497440957037,
+    "created": 876.3750324258763,
+    "deletereq": 1.9885787328733797,
+    "gone": 1.9226583843798735,
+    "pending": 5.61465952926955,
+    "ready": 4.941815670143063,
+    "reconciled": 383.80761719949396
+  },
+  "stuckByPlacedReason": {},
+  "createErrors": 0,
+  "wallSeconds": 10.03309901
+}

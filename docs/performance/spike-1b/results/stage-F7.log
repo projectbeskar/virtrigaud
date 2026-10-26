@@ -1,0 +1,26 @@
+== config AF7
+Error: UPGRADE FAILED: pre-upgrade hooks failed: 1 error occurred:
+	* job virtrigaud-crd-upgrade-3 failed: BackoffLimitExceeded
+
+
+config AF7 active
+queue drained after 30 s (depth 0)
+burst 100 done: "ready": 100
+  "violations": {},
+  "informational": {},
+  "examples": null
+}
+config AF7 done
+== config AF5
+Error: UPGRADE FAILED: pre-upgrade hooks failed: 1 error occurred:
+	* job virtrigaud-crd-upgrade-4 failed: BackoffLimitExceeded
+
+
+config AF5 active
+queue drained after 21 s (depth 0)
+burst 100 done: "ready": 100
+  "violations": {},
+  "informational": {},
+  "examples": null
+}
+config AF5 done

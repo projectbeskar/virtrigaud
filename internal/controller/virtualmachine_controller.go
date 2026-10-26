@@ -198,6 +198,12 @@ const eventReasonDeleteBlocked = k8s.ReasonDeleteBlocked
 // image-prepare failure that may be transient (host unreachable, task error).
 const providerErrorRetryInterval = 5 * time.Second
 
+// createdDescribeFallback is the requeue after a successful clustered Create.
+// The status write recording its id normally starts the first Describe at
+// once (createRecorded); this requeue covers that write failing, so the VM is
+// still re-checked at the historical cadence.
+const createdDescribeFallback = 5 * time.Second
+
 // providerFailureOutcome classifies a provider Create / image-prepare error into
 // the VM condition reason and requeue cadence: a non-retryable InvalidSpec
 // rejection (e.g. a libvirt image path outside the allowed image directories)
@@ -1898,7 +1904,7 @@ func (r *VirtualMachineReconciler) createVMOn(
 		return r.recordCreatedVM(ctx, vm)
 	}
 	r.updateStatus(ctx, vm)
-	return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+	return ctrl.Result{RequeueAfter: createdDescribeFallback}, nil
 }
 
 // handleRejectedCreate handles a provider Create that failed with a
@@ -3325,6 +3331,10 @@ func vmUpdateNeedsReconcile(oldVM, newVM *infravirtrigaudiov1beta1.VirtualMachin
 		if awaitingMigrationImport(newVM) && pendingHost(oldVM) != "" && pendingHost(newVM) == "" {
 			return true
 		}
+		// A create just recorded is described at once (createRecorded).
+		if createRecorded(oldVM, newVM) {
+			return true
+		}
 		// An operator resolving a create held for an unknown outcome.
 		return oldVM.Annotations[createOutcomeAnnotation] != newVM.Annotations[createOutcomeAnnotation]
 	}
@@ -3332,6 +3342,18 @@ func vmUpdateNeedsReconcile(oldVM, newVM *infravirtrigaudiov1beta1.VirtualMachin
 		return true // the deletion was just requested
 	}
 	return !maps.Equal(oldVM.Annotations, newVM.Annotations) || !slices.Equal(oldVM.Finalizers, newVM.Finalizers)
+}
+
+// createRecorded reports whether an update records a VM's provider id for the
+// first time: the status write that ends a successful Create (clustered or
+// single-host), or the id the clone and adoption controllers set. A Create
+// answers only the id (and a task), so the VM's power state, IPs and Ready
+// come from the Describe of the next reconcile; reconciling this update starts
+// it at once instead of after createdDescribeFallback. The event is delivered
+// once the cache holds the id, so that reconcile describes the VM and never
+// takes the create path again; it writes no new id, so it starts no loop.
+func createRecorded(oldVM, newVM *infravirtrigaudiov1beta1.VirtualMachine) bool {
+	return oldVM.Status.ID == "" && newVM.Status.ID != ""
 }
 
 // SetupWithManager sets up the controller with the Manager. Besides its own

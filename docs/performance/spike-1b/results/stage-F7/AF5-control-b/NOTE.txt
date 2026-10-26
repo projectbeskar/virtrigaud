@@ -1,0 +1,1 @@
+manager image spike1b.local/manager:f1f5 (helm upgrade to the F7 values failed in its CRD pre-upgrade hook; the restart kept f1f5). F1-F5 control run.

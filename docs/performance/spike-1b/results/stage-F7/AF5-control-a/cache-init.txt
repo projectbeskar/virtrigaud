@@ -1,0 +1,2 @@
+config AF7 pod virtrigaud-manager-6bb869ccb4-b4k74
+started 2026-10-26T13:20:54Z

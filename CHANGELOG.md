@@ -5,6 +5,29 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-10-26 13:12] - F7: describe a newly created VM at once instead of after a fixed 5 s
+**Author:** @wrkode (William Rizzo)
+
+### Changed
+- `internal/controller/virtualmachine_controller.go`: the VirtualMachine update filter now passes the status write that first records a VM's provider id (`createRecorded`: a successful Create, or the id the clone and adoption controllers set), so the VM's first Describe, which sets its power state, IPs and Ready, runs at once. The 5 s requeue after a successful clustered Create stays as the fallback for a failed status write (`createdDescribeFallback`). Steady-state polling, error retries, the create marker, pendingHost and unknown-outcome handling are unchanged.
+
+### Added
+- `internal/controller/virtualmachine_create_readiness_test.go`: the filter passes only a first id; a recorded create is described at once and never created again; not-ready-yet, failed Describe and uncertain Create keep their existing requeues and wake nothing.
+- `docs/performance/f7-post-create-readiness.md`: root cause, change and measured effect, with the redundant fallback Describe recorded as a possible follow-up.
+- `docs/performance/spike-1b/results/stage-F7/`: the burst results (without per-snapshot metrics) and which manager image each run used, including the corrected first attempt whose Helm upgrade never switched the image.
+
+### Changed (tests)
+- `internal/controller/virtualmachine_clustered_a61_delete_test.go`: the status-only example in `TestVMUpdateNeedsReconcile` changes `status.phase` instead of `status.id`, which now passes the filter.
+
+### Why
+A Create answers only the VM's id, and the status write recording it was filtered out as status-only, so every new VM waited a fixed 5 s before the Describe that makes it Ready (Spike 1B F7). At 10,000 VMs and 1,000 hosts a 10-VM burst now reaches Ready at p50 1.3 s instead of 6.3 s; a 100-VM burst's median is unchanged at 20.5 s (its VMs queue behind serialized placement decisions) and its p99 falls from 24.1–24.7 s to 22.9 s.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout (manager image)
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-10-26 11:28] - F5: per-host index for Host committed capacity and the in-use check
 **Author:** @wrkode (William Rizzo)
 

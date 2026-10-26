@@ -1,0 +1,12 @@
+== steady (108 s)
+  reconciles/s {"host": 16.41, "provider": 0.04, "virtualmachine": 92.59}
+  api total/s 17.2 writes/s 17.1 ratelimit wait mean/p99 0.005283615538337005 / 0.046362122448979595
+  rpcs/s {"Describe": 92.59, "GetHostInfo": 16.41, "GetCapabilities": 0.04}
+  cpu cores 0.12018514814814815 throttled 0.12202380952380952 ws 168 MiB  queue depth max 70.0
+  etcd VM updates/s 0.0 vs manager status PUT/s 0.0
+== burst_100 (30 s)
+  reconciles/s {"host": 12.97, "provider": 0.13, "virtualmachine": 11.1}
+  api total/s 38.2 writes/s 34.6 ratelimit wait mean/p99 0.12630087206134938 / 0.796402263414634
+  rpcs/s {"GetHostInfo": 13.0, "Create": 3.33, "Describe": 3.33, "GetCapabilities": 3.33, "ListVMs": 3.2, "Delete": 2.93}
+  cpu cores 0.30723759999999983 throttled 0.5050167224080268 ws 227 MiB  queue depth max 90.0
+  etcd VM updates/s 21.0 vs manager status PUT/s 10.0
