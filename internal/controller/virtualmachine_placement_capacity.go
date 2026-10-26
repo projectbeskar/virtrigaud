@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	stderrors "errors"
 	"fmt"
 	"math/rand/v2"
 	"slices"
@@ -26,11 +27,13 @@ import (
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	infravirtrigaudiov1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
 	"github.com/projectbeskar/virtrigaud/internal/k8s"
+	"github.com/projectbeskar/virtrigaud/internal/obs/metrics"
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
 	"github.com/projectbeskar/virtrigaud/internal/scheduler"
 	"github.com/projectbeskar/virtrigaud/internal/scheduler/assume"
@@ -47,11 +50,13 @@ const (
 	// pendingHostWriteTimeout bounds the checked status update that records
 	// status.placement.pendingHost before Create (A2).
 	pendingHostWriteTimeout = time.Minute
-	// placementAssumeTTL is how long an assumption lives at most: twice the
-	// bound of the pendingHost write it covers, so it outlasts that write and
-	// the informer catching up with it. It is a safety net only; on every
-	// normal path the assumption ends earlier (the record appears in the
-	// cache, or the write fails and the assumption is forgotten).
+	// placementAssumeTTL is how long an assumption lives at most while no
+	// pendingHost write was sent for it (a reconcile that stopped between
+	// choosing and writing): nothing can land, so it is dropped. Once its write
+	// was sent it ends only on evidence — the record in the cache, a definitive
+	// rejection, or an authoritative read (assume.Cache) — and passing this TTL
+	// only reports it as stale (reportStalePlacement). Twice the bound of the
+	// pendingHost write.
 	placementAssumeTTL = 2 * pendingHostWriteTimeout
 	// resizeAssumeTTL is how long an admitted resize's assumption lives at
 	// most (review N4): the Reconfigure call it covers may run for its full
@@ -80,7 +85,16 @@ const (
 	// path (made after the assume lock is released), so a slow API server
 	// cannot hold a worker indefinitely.
 	placementStatusWriteTimeout = 30 * time.Second
+	// placementWriteRecheckInterval is the requeue of a VM whose earlier
+	// pendingHost write is not yet reflected in the informer cache: it is not
+	// placed again until that write is resolved (resolveUnsettledPlacement).
+	placementWriteRecheckInterval = 2 * time.Second
 )
+
+// errPlacementUnresolved reports that the VM still has a placement whose
+// checked pendingHost write is not resolved: it is not scheduled again (and
+// its reservation not replaced) until that write is resolved.
+var errPlacementUnresolved = stderrors.New("an earlier placement of this VM is not resolved yet")
 
 // placementLockBusyRetry is the jittered requeue of a reconcile that could not
 // get its Provider's assume lock within placementLockWait.
@@ -152,21 +166,30 @@ func (r *VirtualMachineReconciler) scheduleAndAssume(
 	vm *infravirtrigaudiov1beta1.VirtualMachine,
 	req *scheduler.Request,
 ) (scheduler.Result, error) {
-	if err := r.placementRequest(ctx, assumptions, providerKey, provider, vm, req); err != nil {
+	selfPresent, err := r.placementRequest(ctx, assumptions, providerKey, provider, vm, req)
+	if err != nil {
 		return scheduler.Result{}, &placementInfraError{err: err}
+	}
+	// A VM whose earlier pick has a write that is not resolved is not placed
+	// again: that write may have recorded its host durably.
+	if assumptions.Unresolved(req.VMUID) {
+		return scheduler.Result{}, errPlacementUnresolved
 	}
 	result, err := scheduler.Schedule(*req)
 	if err != nil {
 		return result, err
 	}
-	assumptions.Assume(providerKey, assume.Assumption{
+	if _, ok := assumptions.Assume(providerKey, assume.Assumption{
 		UID:       vmSchedulingUID(vm),
 		Namespace: vm.Namespace,
 		Name:      vm.Name,
 		HostID:    result.HostID,
 		Labels:    vm.Labels, // Assume keeps its own copy
 		Resources: req.Resources,
-	})
+		Observed:  selfPresent,
+	}); !ok {
+		return scheduler.Result{}, errPlacementUnresolved
+	}
 	return result, nil
 }
 
@@ -176,8 +199,20 @@ func (r *VirtualMachineReconciler) placementAssumptions() *assume.Cache {
 	if c := r.placements.Load(); c != nil {
 		return c
 	}
-	r.placements.CompareAndSwap(nil, assume.New(placementAssumeTTL, r.now))
+	c := assume.New(placementAssumeTTL, r.now)
+	c.SetStaleHook(reportStalePlacement)
+	r.placements.CompareAndSwap(nil, c)
 	return r.placements.Load()
+}
+
+// reportStalePlacement is the assume cache's stale hook: an assumption whose
+// TTL passed while its pendingHost write is unresolved keeps counting (its
+// write may have landed), and is logged and counted for investigation: the
+// informer cache is not showing a write long after it was sent.
+func reportStalePlacement(provider string, a assume.Assumption, age time.Duration) {
+	ctrl.Log.WithName("placement").Info("A placement assumption outlived its TTL with its pendingHost write unresolved; it keeps counting",
+		"provider", provider, "vm", a.Namespace+"/"+a.Name, "uid", a.UID, "host", a.HostID, "age", age.String())
+	metrics.RecordError(errReasonPlacementAssumptionStale, metrics.ComponentManager)
 }
 
 // forgetPlacement drops vm's assumption and backoff record, if any. It never
@@ -187,6 +222,7 @@ func (r *VirtualMachineReconciler) forgetPlacement(vm *infravirtrigaudiov1beta1.
 	if c := r.placements.Load(); c != nil {
 		c.Forget(uid)
 	}
+	r.placementWrites.Delete(uid)
 	r.unschedulable.reset(uid)
 }
 
@@ -416,6 +452,18 @@ func (s committedSnapshot) settled(a assume.Assumption) bool {
 	return slices.Contains(rec.hosts, a.HostID)
 }
 
+// observe is settled as an assume.Observation: whether this snapshot has the
+// assumption's VM, and whether its record supersedes the assumption. A VM the
+// snapshot does not have settles the assumption only when an earlier snapshot
+// showed it (assume.Cache.Observe): a VM created a moment ago may not be in
+// the cache yet.
+func (s committedSnapshot) observe(a assume.Assumption) assume.Observation {
+	if _, present := s.recorded[a.UID]; !present {
+		return assume.Observation{}
+	}
+	return assume.Observation{Present: true, Settled: s.settled(a)}
+}
+
 // committedPlacementsFrom lists, through reader (the informer cache), every
 // VirtualMachine, in every namespace, whose placement belongs to provider
 // (placementProviderKey) and returns the resources each holds on the hosts its
@@ -586,27 +634,28 @@ func (r *VirtualMachineReconciler) placementRequest(
 	provider types.NamespacedName,
 	vm *infravirtrigaudiov1beta1.VirtualMachine,
 	req *scheduler.Request,
-) error {
-	placed, err := r.placedWithAssumptions(ctx, cache, providerKey, provider, vm)
+) (selfPresent bool, err error) {
+	placed, selfPresent, err := r.placedWithAssumptions(ctx, cache, providerKey, provider, vm)
 	if err != nil {
-		return err
+		return false, err
 	}
 	req.PlacedVMs = placed
 	req.VMUID = vmSchedulingUID(vm)
-	return nil
+	return selfPresent, nil
 }
 
 // placedWithAssumptions returns what is committed on provider's hosts, as seen
 // from vm: the placements in the informer snapshot plus the live assumptions
 // (create and resize), after settling those the snapshot supersedes
-// (committedSnapshot.settled). Call it with provider's assume lock held.
+// (committedSnapshot.observe). selfPresent reports that the snapshot has vm.
+// Call it with provider's assume lock held.
 func (r *VirtualMachineReconciler) placedWithAssumptions(
 	ctx context.Context,
 	cache *assume.Cache,
 	providerKey string,
 	provider types.NamespacedName,
 	vm *infravirtrigaudiov1beta1.VirtualMachine,
-) ([]scheduler.PlacedVM, error) {
+) (placed []scheduler.PlacedVM, selfPresent bool, err error) {
 	return placedWithAssumptionsFrom(ctx, r.Client, cache, providerKey, provider, vm)
 }
 
@@ -620,13 +669,14 @@ func placedWithAssumptionsFrom(
 	providerKey string,
 	provider types.NamespacedName,
 	vm *infravirtrigaudiov1beta1.VirtualMachine,
-) ([]scheduler.PlacedVM, error) {
+) (placed []scheduler.PlacedVM, selfPresent bool, err error) {
 	snap, err := committedPlacementsFrom(ctx, reader, provider, vm)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
-	placed := snap.placed
-	for _, a := range cache.List(providerKey, snap.settled) {
+	_, selfPresent = snap.recorded[vmSchedulingUID(vm)]
+	placed = snap.placed
+	for _, a := range cache.Observe(providerKey, snap.observe) {
 		placed = append(placed, scheduler.PlacedVM{
 			Name:         a.Name,
 			UID:          a.UID,
@@ -636,7 +686,7 @@ func placedWithAssumptionsFrom(
 			CapacityOnly: a.Namespace != vm.Namespace,
 		})
 	}
-	return placed, nil
+	return placed, selfPresent, nil
 }
 
 // hasRecordedSize reports whether vm's status.currentResources records both

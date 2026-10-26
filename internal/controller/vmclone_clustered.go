@@ -449,7 +449,7 @@ func (r *VMCloneReconciler) ensureCloneTarget(
 // A pendingHost already naming host is reused as is; one naming another host
 // is never overwritten (the clone fails with TargetConflict). A write the API
 // server refused releases the clone's capacity assumption; after an ambiguous
-// failure it keeps counting until the record shows or its TTL passes.
+// failure it keeps counting until the record shows or a later write lands.
 func (r *VMCloneReconciler) recordClonePendingHost(
 	ctx context.Context,
 	clone *infrav1beta1.VMClone,
@@ -488,11 +488,27 @@ func (r *VMCloneReconciler) recordClonePendingHost(
 	recordClonePendingSize(pl, adm)
 	setPlacedCondition(target, metav1.ConditionFalse, k8s.ReasonCreatePending,
 		fmt.Sprintf("clone pending on host %s (the source VM's host)", host))
+	// Sent only while the assumption reserving it is still this pick; from
+	// here on that assumption counts until the write is resolved.
+	assumptions := r.placementAssumptions()
+	uid := vmSchedulingUID(target)
+	if !assumptions.BeginWrite(uid, adm.assumeToken) {
+		logging.FromContext(ctx).Info("The clone's placement assumption changed before its pendingHost write; requeueing without cloning", "host", host)
+		return ctrl.Result{RequeueAfter: placementWriteRecheckInterval}, false, nil
+	}
+	precondition := target.ResourceVersion
 	writeCtx, cancel := context.WithTimeout(ctx, pendingHostWriteTimeout)
 	defer cancel()
 	if err := r.Status().Update(writeCtx, target); err != nil {
+		// Released only when this write provably did not land and no earlier
+		// one of the same pick may (assume.Cache.WriteRejected). After an
+		// ambiguous failure the next pass re-admits the same host, which
+		// continues this assumption, and writes again: a write that lands, or
+		// the cache showing the record, resolves it.
 		if pendingHostWriteRejected(err) {
-			r.forgetClonePlacement(target)
+			assumptions.WriteRejected(uid, adm.assumeToken)
+		} else {
+			assumptions.WriteAmbiguous(uid, adm.assumeToken, precondition)
 		}
 		if apierrors.IsConflict(err) {
 			logging.FromContext(ctx).Info("Target pending-host write lost a resourceVersion race; requeueing without cloning", "host", host)
@@ -500,6 +516,7 @@ func (r *VMCloneReconciler) recordClonePendingHost(
 		}
 		return ctrl.Result{}, false, fmt.Errorf("record pending host %s for clone target %s/%s: %w", host, target.Namespace, target.Name, err)
 	}
+	assumptions.WriteStored(uid, adm.assumeToken)
 	return ctrl.Result{}, true, nil
 }
 

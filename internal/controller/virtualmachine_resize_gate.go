@@ -290,7 +290,7 @@ func (r *VirtualMachineReconciler) checkResizeUnderLock(
 	defer unlock()
 	lockCtx, cancel := lockBoundContext(ctx)
 	defer cancel()
-	placed, err := r.placedWithAssumptions(lockCtx, assumptions, providerKey, provider, vm)
+	placed, selfPresent, err := r.placedWithAssumptions(lockCtx, assumptions, providerKey, provider, vm)
 	if err != nil {
 		return true, &placementInfraError{err: err}
 	}
@@ -298,10 +298,14 @@ func (r *VirtualMachineReconciler) checkResizeUnderLock(
 	if err := scheduler.CheckResize(resize); err != nil {
 		return true, err
 	}
-	assumptions.AssumeFor(providerKey, assume.Assumption{
+	if _, ok := assumptions.AssumeFor(providerKey, assume.Assumption{
 		UID: resize.VMUID, Namespace: vm.Namespace, Name: vm.Name, HostID: resize.Host.Name,
-		Labels: vm.Labels, Resources: resize.Desired, Resize: true,
-	}, resizeAssumeTTL)
+		Labels: vm.Labels, Resources: resize.Desired, Resize: true, Observed: selfPresent,
+	}, resizeAssumeTTL); !ok {
+		// The VM's create pick is still unresolved (assume.Cache.Assume): retry
+		// once it is, as for a busy lock.
+		return false, nil
+	}
 	return true, nil
 }
 

@@ -144,7 +144,7 @@ func TestSchedBenchPartitionsIsolated(t *testing.T) {
 		}
 	}
 	probe := w.scenarioVM(pb, "b-probe", schedbench.MediumRequest)
-	placed, err := placedWithAssumptionsFrom(ctx, w.r.Client, w.cache, pb.key, pb.provider, probe)
+	placed, _, err := placedWithAssumptionsFrom(ctx, w.r.Client, w.cache, pb.key, pb.provider, probe)
 	if err != nil {
 		t.Fatal(err)
 	}

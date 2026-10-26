@@ -35,6 +35,7 @@ import (
 	"github.com/projectbeskar/virtrigaud/internal/k8s"
 	"github.com/projectbeskar/virtrigaud/internal/obs/metrics"
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
+	"github.com/projectbeskar/virtrigaud/internal/scheduler/assume"
 )
 
 // This file holds the VirtualMachine controller's clustered-provider lifecycle
@@ -102,18 +103,32 @@ func (r *VirtualMachineReconciler) recordPendingHost(
 		fmt.Sprintf("create pending on host %s (pool %s)", p.hostID, p.poolName))
 
 	applyDerivedPhase(vm)
-	// Bounded, so the assumption covering this write (placementAssumeTTL, twice
-	// this bound) always outlives it.
+	// The write is sent only while the assumption reserving it is still this
+	// pick; from here on that assumption counts until the write is resolved.
+	assumptions := r.placementAssumptions()
+	uid := vmSchedulingUID(vm)
+	if !assumptions.BeginWrite(uid, p.assumeToken) {
+		log.FromContext(ctx).Info("The placement assumption changed before its pendingHost write; requeueing without writing it",
+			"host", p.hostID)
+		return ctrl.Result{RequeueAfter: placementWriteRecheckInterval}, false, nil
+	}
+	precondition := vm.ResourceVersion
 	writeCtx, cancel := context.WithTimeout(ctx, pendingHostWriteTimeout)
 	defer cancel()
 	if err := r.Status().Update(writeCtx, vm); err != nil {
 		// Release the scheduler's assumption only when the write provably did
-		// not land (review L6). After an ambiguous failure — a timeout, a 5xx,
-		// a broken connection — the pendingHost may be stored after all, so
-		// the assumption keeps counting until the informer shows the record
-		// (which settles it) or its TTL passes.
+		// not land (review L6) and no earlier write of this pick may still
+		// land. After an ambiguous failure — a timeout, a 5xx, a broken
+		// connection — the pendingHost may be stored after all: the
+		// assumption keeps counting, whatever its TTL, until the informer
+		// shows the record or resolveUnsettledPlacement resolves the write.
 		if pendingHostWriteRejected(err) {
-			r.placementAssumptions().Forget(vmSchedulingUID(vm))
+			if assumptions.WriteRejected(uid, p.assumeToken) {
+				r.placementWrites.Delete(uid)
+			}
+		} else {
+			assumptions.WriteAmbiguous(uid, p.assumeToken, precondition)
+			r.placementWrites.Store(uid, placementWrite{token: p.assumeToken, placement: *p})
 		}
 		if apierrors.IsConflict(err) {
 			log.FromContext(ctx).Info("Pending-host write lost a resourceVersion race; requeueing without creating (scheduler choice not re-applied)",
@@ -123,7 +138,87 @@ func (r *VirtualMachineReconciler) recordPendingHost(
 		metrics.RecordError(errReasonPlacement, metrics.ComponentManager)
 		return ctrl.Result{}, false, fmt.Errorf("record pending host %s for VirtualMachine %s/%s: %w", p.hostID, vm.Namespace, vm.Name, err)
 	}
+	assumptions.WriteStored(uid, p.assumeToken)
+	r.placementWrites.Delete(uid)
 	return ctrl.Result{}, true, nil
+}
+
+// placementWrite is a pendingHost write that failed ambiguously: the
+// placement it records and the assumption reserving it (token).
+type placementWrite struct {
+	token     uint64
+	placement clusterPlacement
+}
+
+// resolveUnsettledPlacement runs before a clustered VM whose informer-cache
+// copy records no pendingHost is placed. A VM still holding an assumption whose
+// pendingHost write was sent (assume.Cache.Unresolved) is not placed again: that
+// write may have recorded its host durably, so a second placement could leave
+// it reserved nowhere while the first host is owed (G2). The VM is read from
+// the API server (not the cache, which may lag); held is true when the
+// reconcile must return res, err:
+//
+//   - the stored VM's placement names the assumed host: the write landed and
+//     the cache has not shown it yet; requeue until it does;
+//   - its resourceVersion equals an ambiguous write's precondition: that write
+//     may still land, so the same write is sent again with the same
+//     precondition (at most one of them lands);
+//   - otherwise no write of the pick holds the host any more — it never landed
+//     and no longer can, or it landed and the record was released since (a
+//     migration releases its target's pending host, ADR-0007 Addendum B): the
+//     assumption is released and the VM is placed as usual (held false). A VM
+//     gone (or replaced) releases it too.
+//
+// The API read happens outside the Provider's lock and only on this recovery
+// path, never in an ordinary placement.
+func (r *VirtualMachineReconciler) resolveUnsettledPlacement(
+	ctx context.Context,
+	vm *infravirtrigaudiov1beta1.VirtualMachine,
+	providerCR *infravirtrigaudiov1beta1.Provider,
+) (ctrl.Result, bool, error) {
+	assumptions := r.placementAssumptions()
+	uid := vmSchedulingUID(vm)
+	a, token, ok := assumptions.Lookup(uid)
+	if !ok || a.Write == assume.WriteNotSent {
+		return ctrl.Result{}, false, nil
+	}
+	logger := log.FromContext(ctx).WithValues("host", a.HostID)
+	live, gone, err := r.readLiveVM(ctx, vm)
+	if err != nil {
+		return ctrl.Result{}, true, err
+	}
+	if gone {
+		assumptions.ForgetIf(uid, token)
+		r.placementWrites.Delete(uid)
+		return ctrl.Result{}, true, nil
+	}
+	if slices.Contains(placementHosts(live), a.HostID) {
+		assumptions.WriteStored(uid, token)
+		r.placementWrites.Delete(uid)
+		logger.V(1).Info("The pendingHost write was stored; waiting for the informer cache to show it")
+		return ctrl.Result{RequeueAfter: placementWriteRecheckInterval}, true, nil
+	}
+	if !assumptions.Pending(uid, token, live.ResourceVersion) {
+		if assumptions.ForgetIf(uid, token) {
+			r.placementWrites.Delete(uid)
+		}
+		logger.Info("No pendingHost write of the earlier placement holds the host any more; placing the VM again")
+		return ctrl.Result{}, false, nil
+	}
+	v, found := r.placementWrites.Load(uid)
+	w, typed := v.(placementWrite)
+	if !found || !typed || w.token != token {
+		// Unreachable: an ambiguous write always stores its placement. Keep
+		// the reservation and let the cache settle it.
+		logger.Info("No record of the ambiguous pendingHost write to send again; keeping its reservation")
+		return ctrl.Result{RequeueAfter: placementWriteRecheckInterval}, true, nil
+	}
+	logger.Info("Sending the ambiguous pendingHost write again with the same precondition")
+	res, recorded, err := r.recordPendingHost(ctx, live, providerCR, &w.placement)
+	if !recorded {
+		return res, true, err
+	}
+	return ctrl.Result{RequeueAfter: placementWriteRecheckInterval}, true, nil
 }
 
 // pendingHostWriteRejected reports whether a failed status write was refused

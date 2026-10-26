@@ -5,6 +5,30 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-10-26 18:53] - Placement reservations end on evidence, never on a timer alone
+**Author:** @wrkode (William Rizzo)
+
+### Fixed
+- `internal/scheduler/assume/assume.go`: an assumption records what is known of the checked write that records its pick (not sent, in flight, stored) and a token per pick. Once a write was sent it ends only when the informer snapshot shows the record, the write is rejected outright with no earlier write of the pick still able to land, or the controller resolves it from an authoritative read; past its TTL it keeps counting and is reported as stale. An unresolved pick is never replaced by a pick of another host. A VM missing from the snapshot settles an assumption only once a snapshot has shown that VM.
+- `internal/controller/virtualmachine_clustered.go`: `recordPendingHost` records the write's outcome on its assumption; `resolveUnsettledPlacement` runs before a VM whose cached copy shows no pendingHost is placed again: a stored write waits for the cache, an ambiguous one is resolved from the API server (landed; may still land, so the same write is sent again with the same precondition; can no longer land, so it is released). No Create is sent until the pending host is confirmed, and no second placement is made.
+- `internal/controller/virtualmachine_placement_capacity.go`: scheduling refuses a VM with an unresolved pick (`errPlacementUnresolved`); assumptions are settled through `committedSnapshot.observe`; stale assumptions are logged and counted (`virtrigaud_errors_total{reason="placement-assumption-stale",component="manager"}`).
+- `internal/controller/virtualmachine_controller.go`, `virtualmachine_clustered_restore.go`, `virtualmachine_resize_gate.go`, `vmclone_capacity.go`, `vmclone_clustered.go`: the pendingHost writes of a scheduled create, a re-attach, an own-domain move and a clustered clone are sent only while their assumption is still the pick, and record their outcome the same way; a clone target created in the same pass is no longer released as "gone" before the informer cache shows it.
+
+### Added
+- `internal/scheduler/assume/assume_write_test.go`, `internal/controller/virtualmachine_placement_assumption_safety_test.go`: TTL with a lagging cache (G1); an ambiguous write that landed, did not land, or was superseded (G2); unobserved VMs; token isolation; an expired pick dropped by another decision is never written.
+
+### Changed
+- `docs/adr/0007-clustered-orchestrator-provider.md`: A5 *assumption lifetime* amendment: write states, pick tokens, settlement on positive evidence, ambiguous-write recovery from an authoritative read, TTL only for picks never written; resize durability (G3) and leader transition recorded as unresolved.
+
+### Why
+The design review of the placement ledger found that the existing protocol could lose a reservation: an assumption expired after two minutes even if its pendingHost write had landed and the informer had not shown it (G1), and a pendingHost write that timed out after landing could be followed by a second placement of the same VM that replaced, then released, the reservation of the first host (G2). A clone target created moments earlier could also be released as missing. Each allowed a competing VM to overbook a host.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout (manager image)
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-10-26 13:12] - F7: describe a newly created VM at once instead of after a fixed 5 s
 **Author:** @wrkode (William Rizzo)
 

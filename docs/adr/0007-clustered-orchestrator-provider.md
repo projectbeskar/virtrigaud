@@ -1286,12 +1286,87 @@ follows; A2's `pendingHost` is its prerequisite.
 >   host (the A2 amendment), or the VM is deleted. The controller forgets it.
 >   After an ambiguous failure (a timeout, a 5xx, a broken connection) the
 >   write may have landed, so the assumption stays until the record shows up
->   or the TTL passes.
+>   ~~or the TTL passes~~ or the write is resolved (*assumption lifetime*
+>   amendment below).
 > - its TTL passes: for a create, twice the one-minute bound of the
 >   `pendingHost` write; for an admitted resize, the 5-minute deadline of the
 >   `Reconfigure` call plus the 30 s bound of the status write that records
 >   it, so it cannot lapse while the call it admitted still runs. The TTL is
->   only a safety net for a reconcile that died in between.
+>   only a safety net for a reconcile that died in between. *(Amended
+>   2026-10-26: a create's TTL ends only a pick whose write was never sent;
+>   see below.)*
+>
+> *(Amended 2026-10-26, assumption lifetime.)* Two defects broke the rules
+> above under informer lag. **G1:** an expired assumption was dropped even
+> when its `pendingHost` write had landed and the cache did not show it yet,
+> so the host could be given away twice. **G2:** a retry after an ambiguous
+> write could pick another host and replace the assumption, leaving the host
+> the first write recorded counted nowhere. **G4:** a clone target created and
+> admitted in the same pass was not in the informer cache yet, and
+> "absent from the snapshot" was read as "deleted". The lock, the cache and
+> every rule above are otherwise unchanged.
+>
+> - **Write state.** Each create, clone or re-attach assumption carries one of
+>   `WriteNotSent` (picked; no `pendingHost` write sent), `WriteInFlight` (sent,
+>   outcome unknown or ambiguous) and `WriteStored` (the API server stored it).
+>   A resize assumption sends no placement write and stays `WriteNotSent`.
+> - **Identity.** Each pick gets a token. A write is sent only after
+>   `BeginWrite(uid, token)` succeeds, under the cache's mutex, for the
+>   assumption that is still that pick; every outcome (stored, ambiguous,
+>   rejected) and every release is applied to that token only, so a stale
+>   reconcile cannot end a newer pick. While a VM's write is unresolved, a
+>   pick of the same host and Provider continues it (same token, larger size)
+>   and a pick of another host or Provider is refused: the VM is not placed
+>   again.
+> - **Settlement needs positive evidence**: the snapshot shows the record on
+>   the assumed host; the snapshot no longer has a VM that a snapshot taken
+>   since the pick did show (a VM not yet seen, such as a fresh clone target,
+>   is not taken as gone); the API server refused every write of the pick
+>   outright; the authoritative resolution below; or a deliberate release
+>   (deletion, host exclusion, a re-attach whose cached record names the host).
+> - **TTL.** Passing the TTL drops only a `WriteNotSent` pick: it cannot land,
+>   because once dropped its token no longer passes `BeginWrite`. A pick whose
+>   write was sent may hold its host durably, so it is kept and reported once
+>   (log and `virtrigaud_errors_total{reason="placement-assumption-stale"}`).
+>   That over-reserves, which is safe; dropping it could overbook.
+> - **Ambiguous `pendingHost` writes.** The pick and the write's
+>   resourceVersion precondition are kept, and no `Create` is sent. Before the
+>   VM is placed again, it is read from the API server (`APIReader`), outside
+>   the Provider's lock: if the stored VM names the assumed host, the write
+>   landed and the VM waits for the cache; if its resourceVersion **equals** a
+>   precondition of the pick, the same write is sent again with the same
+>   precondition (at most one lands); otherwise no write of the pick can land
+>   or still holds the host, and the assumption is released. resourceVersions
+>   are compared for equality only, and only against an authoritative read,
+>   never ordered and never against the lagging cache. A rejection of a later
+>   write does not release a pick whose earlier write was ambiguous or stored.
+> - **Cost.** The authoritative read happens only on this recovery path (and
+>   when another controller released a stored `pendingHost`, such as a
+>   migration's target, Addendum B). An ordinary successful decision makes no
+>   additional API call.
+>
+> **Not resolved by this amendment:**
+>
+> - **Resize durability (G3).** A resize assumption is in-memory and
+>   TTL-bound (5 min 30 s from admission; refreshed by each re-admission and by
+>   each successful poll of a running reconfigure task), and nothing durable
+>   records the admitted size before `Reconfigure` is called. The size applied
+>   on the host can therefore be counted nowhere: after a manager restart or
+>   leader change between the call and the `status.currentResources` write,
+>   or while an asynchronous task runs; and without a restart when the
+>   recording status write fails and the next attempt waits on the
+>   reconfigure backoff (up to 5 min) past the TTL, or a task's status polls
+>   keep failing (the error path does not refresh the TTL) for longer than it.
+>   A follow-up must record the admitted size durably before the call (as a
+>   create does with `pendingResources`), or count a VM with an unrecorded
+>   reconfigure at the larger of its current and desired sizes.
+> - **Leader transition.** The paragraph below holds for writes the old
+>   leader saw complete. A `pendingHost` write the old leader sent but whose
+>   answer it never saw can still be stored after the new leader's informer
+>   has synced; until the new leader's cache shows it, the host can be
+>   overbooked. Bounding this (for example, admitting no clustered placement
+>   for the write timeout after acquiring the lease) is not implemented.
+>   Write records and assumptions remain in-process and are lost on restart.
 >
 > **Resizes are admitted too** (a decision of this review round). A
 > `Reconfigure` that grows the CPU or memory of a VM on a clustered Provider is

@@ -74,6 +74,10 @@ const (
 	errReasonProviderDelete   = "provider-delete"
 	errReasonImagePrepare     = "image-prepare"
 	errReasonPlacement        = "placement"
+	// errReasonPlacementAssumptionStale counts placement assumptions whose TTL
+	// passed while their pendingHost write was unresolved: they keep counting,
+	// and the informer cache lagging that long is worth investigating.
+	errReasonPlacementAssumptionStale = "placement-assumption-stale"
 	// errReasonProviderCreateRejected counts provider Create calls refused with
 	// a NON-retryable error (Conflict / InvalidSpec) — notably a libvirt domain
 	// name already taken by a domain this VirtualMachine does not own. A rising
@@ -133,6 +137,10 @@ type clusterPlacement struct {
 	// memoryCeilingMiB is the balloon ceiling the Create provisions (0: none),
 	// recorded as status.placement.memoryCeilingMiB.
 	memoryCeilingMiB int64
+	// assumeToken is the token of the assumption that reserves this placement
+	// (assume.Cache); the pendingHost write is sent only while it is still the
+	// VM's assumption.
+	assumeToken uint64
 }
 
 // Clustered-VM lifecycle cadences (ADR-0007 Addendum A). Each is deliberately
@@ -286,6 +294,11 @@ type VirtualMachineReconciler struct {
 	// never has one. In-process state is correct: only the elected leader
 	// runs this reconciler.
 	placements atomic.Pointer[assume.Cache]
+	// placementWrites holds, per VM UID, the placement of a pendingHost write
+	// that failed ambiguously, so it can be sent again unchanged (with the same
+	// precondition) instead of placing the VM anew
+	// (resolveUnsettledPlacement). In-process state, like placements.
+	placementWrites sync.Map
 	// unschedulable paces the re-scheduling of clustered VMs no host can take.
 	unschedulable unschedulableBackoff
 	// reconfigureRetry paces re-sending a failed Reconfigure, per VM: from
@@ -1727,6 +1740,11 @@ func (r *VirtualMachineReconciler) createVMOn(
 	if clustered {
 		host := pendingHost(vm)
 		if host == "" {
+			// An earlier pick whose pendingHost write the cache does not show
+			// yet is resolved first; the VM is never placed twice (G2).
+			if res, held, rerr := r.resolveUnsettledPlacement(ctx, vm, providerCR); held {
+				return res, rerr
+			}
 			// ADR-0007 A6, R1: the restore marker names this VM's own UID
 			// before its first pendingHost write, so a backup or an exported
 			// manifest of it carries the UID it entered placement under.
@@ -2155,6 +2173,10 @@ func (r *VirtualMachineReconciler) resolveClusterPlacement(
 		logger.V(1).Info("Provider's placement lock is busy; requeueing", "provider", providerKey)
 		return nil, ctrl.Result{RequeueAfter: placementLockBusyRetry()}, nil
 	}
+	if stderrors.Is(err, errPlacementUnresolved) {
+		logger.Info("An earlier placement of this VM is not resolved yet; not placing it again", "provider", providerKey)
+		return nil, ctrl.Result{RequeueAfter: placementWriteRecheckInterval}, nil
+	}
 	var infraErr *placementInfraError
 	if stderrors.As(err, &infraErr) {
 		return nil, ctrl.Result{}, infraErr.err
@@ -2212,11 +2234,18 @@ func (r *VirtualMachineReconciler) resolveClusterPlacement(
 		return nil, ctrl.Result{RequeueAfter: placementConfigRetryInterval}, nil
 	}
 
+	// The pick's assumption, revalidated after the lock was released: its
+	// pendingHost write is sent only while it is still this VM's assumption.
+	token, ok := r.placementAssumptions().TokenFor(vmSchedulingUID(vm), result.HostID)
+	if !ok {
+		logger.Info("The placement assumption was settled or replaced before its pendingHost write; requeueing without writing it", "host", result.HostID)
+		return nil, ctrl.Result{RequeueAfter: placementWriteRecheckInterval}, nil
+	}
 	r.unschedulable.reset(vmSchedulingUID(vm))
 	logger.Info("Scheduled VM onto clustered host",
 		"vm", vm.Name, "pool", pool.Name, "host", result.HostID, "reason", result.Reason)
 	return &clusterPlacement{hostID: result.HostID, poolName: pool.Name, reason: result.Reason,
-		resources: effective, memoryCeilingMiB: ceiling}, ctrl.Result{}, nil
+		resources: effective, memoryCeilingMiB: ceiling, assumeToken: token}, ctrl.Result{}, nil
 }
 
 // requiredNetworksForScheduling derives the ADR-0007 D6 network-visibility

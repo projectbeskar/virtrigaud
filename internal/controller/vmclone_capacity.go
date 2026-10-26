@@ -186,6 +186,10 @@ type clonePlacementAdmission struct {
 	// not counted against the host) and is read from the clone's VMClass on
 	// every attempt.
 	cpuHotAdd bool
+	// assumeToken is the token of the assumption reserving the clone on its
+	// host when it was admitted in this pass; 0 when it was admitted by an
+	// earlier attempt (recorded) and no pendingHost write follows.
+	assumeToken uint64
 }
 
 // admissionFor is the admission of shape: its size, and the balloon ceiling
@@ -328,7 +332,16 @@ func (r *VMCloneReconciler) admitClusteredClone(
 
 	var tooBig *scheduler.ResizeDoesNotFitError
 	switch {
+	case stderrors.Is(checkErr, errPlacementUnresolved):
+		logger.Info("An earlier placement of the clone target is not resolved yet; requeueing", "host", host)
+		return clonePlacementAdmission{}, ctrl.Result{RequeueAfter: placementWriteRecheckInterval}, false, nil
 	case checkErr == nil:
+		// The pick's assumption, revalidated after the lock was released.
+		token, ok := assumptions.TokenFor(uid, host)
+		if !ok {
+			return clonePlacementAdmission{}, ctrl.Result{RequeueAfter: placementWriteRecheckInterval}, false, nil
+		}
+		adm.assumeToken = token
 		r.unschedulable.reset(uid)
 		logger.Info("Admitted the clone against its source host's free capacity", "host", host,
 			"cpu", want.CPU, "memoryMiB", want.MemoryMiB)
@@ -376,7 +389,7 @@ func (r *VMCloneReconciler) checkCloneFitUnderLock(
 	defer unlock()
 	lockCtx, cancel := lockBoundContext(ctx)
 	defer cancel()
-	placed, err := placedWithAssumptionsFrom(lockCtx, r.Client, assumptions, providerKey, provider, target)
+	placed, selfPresent, err := placedWithAssumptionsFrom(lockCtx, r.Client, assumptions, providerKey, provider, target)
 	if err != nil {
 		return nil, true, err
 	}
@@ -385,10 +398,17 @@ func (r *VMCloneReconciler) checkCloneFitUnderLock(
 		Host: *h, Pool: pool, VMUID: uid, Desired: want, PlacedVMs: placed,
 	})
 	if checkErr == nil {
-		assumptions.Assume(providerKey, assume.Assumption{
+		// A target created in this pass may not be in the snapshot yet
+		// (selfPresent false): its absence then does not settle the
+		// assumption (assume.Cache.Observe). An earlier pick of the same
+		// host whose pendingHost write is unresolved is continued, not
+		// replaced.
+		if _, ok := assumptions.Assume(providerKey, assume.Assumption{
 			UID: uid, Namespace: target.Namespace, Name: target.Name, HostID: host,
-			Labels: target.Labels, Resources: want,
-		})
+			Labels: target.Labels, Resources: want, Observed: selfPresent,
+		}); !ok {
+			checkErr = errPlacementUnresolved
+		}
 	}
 	return checkErr, true, nil
 }
