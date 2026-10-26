@@ -482,6 +482,18 @@ func (lg *LoadGenerator) performClone(ctx context.Context, provider string, _ in
 	ctx, cancel := operationContext(ctx)
 	defer cancel()
 
+	// A clone adds a target VM: skip it when the run has vmCount VMs alive.
+	if !lg.reserveSlot(ctx) {
+		lg.results <- lg.skippedResult(opClone, provider)
+		return
+	}
+	reserved := true
+	defer func() {
+		if reserved {
+			lg.releaseSlot()
+		}
+	}()
+
 	result := Result{Operation: opClone, Provider: provider, StartTime: time.Now()}
 	vm, ok := lg.acquireVMPreferring(func(v *runVM) bool { return v.power == infrav1beta1.PowerStateOff })
 	if !ok {
@@ -512,6 +524,8 @@ func (lg *LoadGenerator) performClone(ctx context.Context, provider string, _ in
 	if lg.opts.dryRun {
 		result.Success = true
 		result.Phase = phaseDryRun
+		lg.commitClone(runObject{name: clone.Name, source: vm.name, target: clone.Spec.Target.Name})
+		reserved = false
 		lg.results <- result
 		return
 	}
@@ -525,10 +539,8 @@ func (lg *LoadGenerator) performClone(ctx context.Context, provider string, _ in
 		lg.results <- result
 		return
 	}
-	lg.mu.Lock()
-	lg.clones = append(lg.clones, runObject{name: clone.Name, uid: clone.UID, source: vm.name, target: clone.Spec.Target.Name})
-	lg.cloneTargets = append(lg.cloneTargets, clone.Spec.Target.Name)
-	lg.mu.Unlock()
+	lg.commitClone(runObject{name: clone.Name, uid: clone.UID, source: vm.name, target: clone.Spec.Target.Name})
+	reserved = false
 
 	lg.observe(&result, func(ctx context.Context) (bool, error) {
 		cur := &infrav1beta1.VMClone{}
