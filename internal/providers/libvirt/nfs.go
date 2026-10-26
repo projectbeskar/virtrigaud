@@ -119,7 +119,7 @@ func exportConvertToNFS(ctx context.Context, conn libvirtConn, req *providerv1.E
 		args:      []string{"convert", "-U", "-f", srcFormat, "-O", "qcow2", srcPath, nfsURL},
 	}
 	if rootURL, err := nfsURLForRoot(ctx, h, nfsURL); err != nil {
-		log.Printf("WARN Exporting %s to NFS as the provider's SSH user, not as root: %v", srcPath, err)
+		log.Printf("WARN Exporting %s to NFS as the provider's SSH user, not as root: %s", srcPath, redactForLog(ctx, err.Error()))
 	} else {
 		convert.privArgs = []string{"convert", "-U", "-f", srcFormat, "-O", "qcow2", srcPath, rootURL}
 	}
