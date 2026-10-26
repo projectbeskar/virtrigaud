@@ -6,7 +6,7 @@ for each candidate; this file now covers rc1 and rc2. The v0.4.0 notes are kept 
 docs/upgrading.md ("Upgrading from v0.4.0 to v0.4.1") for the upgrade guide these notes link to,
 and CHANGELOG.md for the complete, dated changelog.
 GitHub's limit for a release body is 125,000 characters; this file is far below it (about
-76,000 characters), so it is pasted whole.
+77,000 characters), so it is pasted whole.
 -->
 
 This is **v0.4.1**, a patch release of v0.4.0. It changes how a Proxmox VM gets its cloud-init
@@ -118,7 +118,10 @@ v0.4.0 release candidate](../upgrading.md#upgrading-from-a-v040-release-candidat
   boot with OVMF (without Secure Boot) on the q35 machine type, so their image must boot with UEFI
   and their libvirt host needs an OVMF package (`ovmf`, `edk2-ovmf`, ...) that installs firmware
   descriptors in `/usr/share/qemu/firmware/`. On a host that reports no UEFI firmware the create is
-  refused (`Ready=False/ValidationError`) where v0.4.0 made a BIOS VM. Existing domains are not
+  refused (`Ready=False/ValidationError`) where v0.4.0 made a BIOS VM. On a clustered Provider every
+  host that can receive such a VM needs the package: the scheduler does not consider firmware, and a
+  VM placed on a host without it is refused and is re-checked on that host (it keeps its pending
+  host). Existing domains are not
   redefined. To keep BIOS VMs set `firmware: BIOS` or leave it unset. List the affected VMClasses with
   `kubectl get vmclass -A -o jsonpath='{range .items[?(@.spec.firmware=="UEFI")]}{.metadata.namespace}/{.metadata.name}{"\n"}{end}'`.
   → [libvirt firmware](../libvirt-firmware.md),
@@ -144,7 +147,8 @@ v0.4.0 release candidate](../upgrading.md#upgrading-from-a-v040-release-candidat
   10 minutes, and nothing is sent to the provider while it waits. The refusals `NotFound`,
   `NotSupported` (gRPC `Unimplemented`) and a typed `Unauthorized` or `QuotaExceeded` (single-host
   and clustered), which were sent again every 5 seconds, follow the same backoff and keep reason
-  `ProviderError`. An edit of the `VirtualMachine`'s spec or of the spec of its `VMClass`,
+  `ProviderError` (the typed ones come only from the manager's own code: from a remote provider only
+  `NotFound` and `Unimplemented` are paced). An edit of the `VirtualMachine`'s spec or of the spec of its `VMClass`,
   `VMImage` or `Provider` sends the create again within seconds and starts the backoff again; a
   `Secret`, a `VMNetworkAttachment` or a fix on the host is picked up at the next re-check, at most
   10 minutes later. The message names the next re-check: `Provider rejected VM create
@@ -154,7 +158,8 @@ v0.4.0 release candidate](../upgrading.md#upgrading-from-a-v040-release-candidat
   matches the old text needs the new one. An `ImagePrepare` whose source the provider refuses is
   paced the same way (a `VMImage` `spec.source` or `Provider` spec edit retries at once). Unchanged:
   a `Conflict` (2 minutes), an untyped `FailedPrecondition` or `PermissionDenied`
-  (`CreateRefused`), and every failure that may pass or whose outcome is unknown (5 seconds).
+  (`CreateRefused`), and every failure that may pass or whose outcome is unknown (5 seconds or their own
+  backoff).
   → [Upgrade guide](../upgrading.md#a-refused-vm-create-is-retried-with-a-backoff),
   [Provider call outcomes](../provider-call-outcomes.md)
 - **A libvirt definition that libvirt refuses is a validation error and leaves no disk (rc2).** A
@@ -251,7 +256,7 @@ v0.4.0 release candidate](../upgrading.md#upgrading-from-a-v040-release-candidat
   (a new last `Skipped` column in `results.csv`, a count in `summary.md`). No operation starts
   after the configured `duration` (an operation or `--observe` wait in flight finishes first), and
   an interrupted run exits non-zero after its cleanup. **Size `vmCount` to your datastore: a run
-  can need `vmCount` times the disk size.**
+  can need `vmCount` times the disk size, plus snapshots, which `vmCount` does not limit.**
   → [CLI tools](../cli-tools.md)
 - **The SDK's request log has new attributes (rc2).** `gRPC request completed` and `gRPC stream
   completed` (`sdk/provider/middleware`, used by every provider built on the SDK) log `code` and
@@ -377,7 +382,9 @@ v0.4.0 release candidate](../upgrading.md#upgrading-from-a-v040-release-candidat
   `qemu-xhci`, video is VGA). The firmware is no longer a hard-coded path: the domain asks libvirt for
   `<os firmware='efi'>` and libvirt selects an OVMF build from the host's firmware descriptors, one
   with Secure Boot keys enrolled for `secureBoot`, so Secure Boot is enforced from the first boot.
-  A new VM never starts from a variable store that an earlier domain of the same name left.
+  On a libvirt that selects the firmware at define (such as 10.0), a new VM never starts from a
+  variable store that an earlier domain of the same name left, and a store that is a symbolic link
+  or another domain's refuses the create (`Conflict`).
 - **`firmware: UEFI` is honoured** (see [Actions required](#actions-required)). `BIOS`, `EFI` and an
   unset value keep BIOS, as on vSphere.
 - **`securityProfile.vtdEnabled` works** (an emulated Intel IOMMU with interrupt remapping on q35;
@@ -606,6 +613,12 @@ against the code.
   uses it. The `CreateOutcomeUnknown` hold of such a VM is released after 10 minutes, or at once by
   the annotation its message names
   (→ [`docs/libvirt-firmware.md`](../libvirt-firmware.md#when-libvirt-refuses-the-definition)).
+- **libvirt: a create from a `source.libvirt.path` image goes through the disk check too.** The rc1
+  validation saw a single-host create from such an image refused, and retried, with "could not
+  verify the image on the libvirt host (transient host error; details are in the provider log)"
+  where a snapshot gets the "permission denied reading a disk image" text; the provider log names
+  the image. Fix it as for the snapshots
+  (→ [`docs/libvirt-clones.md`](../libvirt-clones.md#unreadable-disk-images)).
 - **libvirt: the pool refresh of a VM delete covers the host that ran it.** On a clustered Provider
   whose hosts share the `default` pool directory, another host's `virsh vol-list default` keeps
   listing the deleted files until that host's pool is refreshed (the files are gone; run
@@ -613,9 +626,10 @@ against the code.
 - **Proxmox: a `VMClone` and its target deleted while the clone runs leave the cloned VM on PVE.**
   The manager keeps it on purpose (it logs that the cloned VM is not bound), and neither `vcts` nor
   `virtrigaud-loadgen` can see such a VM, so their cleanup reports success. Do not delete a
-  `VMClone` or its target while it is still cloning (→ [`docs/proxmox-cloud-init-storage.md`](../proxmox-cloud-init-storage.md)).
+  `VMClone` or its target while it is still cloning
+  (→ [`docs/proxmox-cloud-init-storage.md`](../proxmox-cloud-init-storage.md#lifecycle)).
 - **`virtrigaud-loadgen` can fill a datastore.** `create` and `clone` make real VMs: a run can
-  need `vmCount` times the disk size. `vmCount` is the cap, not a reservation, and deleting a
+  need `vmCount` times the disk size, plus snapshots, which `vmCount` does not limit. `vmCount` is the cap, not a reservation, and deleting a
   `VMClone` or its target while the provider is cloning can leave a hypervisor VM the tool cannot
   see (→ [CLI tools](../cli-tools.md#virtrigaud-loadgen)).
 - **A provider image re-pulled under the same tag is noticed within 10 minutes.** The capability
@@ -785,13 +799,14 @@ changes were also tested with unit and envtest tests and with simulators: the Pr
 against a fake PVE API that models qemu-server's boot order and a stub node shell (the node script
 also in a real `sh` and `bash` with stub `qm`, `genisoimage` and `pgrep`), the libvirt snapshot,
 revert, platform and refusal answers with scripted host commands (every libvirt platform variant
-was also defined and started on a libvirt 10.0 / QEMU 8.2 host with OVMF), and `vcts run` and
+was also defined and started paused, without a guest boot, on a libvirt 10.0 / QEMU 8.2 host with
+OVMF), and `vcts run` and
 `virtrigaud-loadgen` against the API server of an envtest cluster with a simulated provider. The
 v0.4.0 validation is in the [v0.4.0 notes](v0.4.0.md#validation).
 
 ### rc1 lab validation
 
-The environment was a single-node Proxmox VE 9 cluster, a clustered libvirt Provider with two
+The environment was a single Proxmox VE 9 node (no cluster), a clustered libvirt Provider with two
 hosts and a single-host libvirt Provider (libvirt 10), with the manager and the providers on
 v0.4.1-rc1 and the release binaries of `vcts` and `virtrigaud-loadgen`.
 
@@ -803,7 +818,7 @@ v0.4.1-rc1 and the release binaries of `vcts` and `virtrigaud-loadgen`.
 | Proxmox seed blocks `qm migrate` | | Not run: the lab was a single node. |
 | libvirt snapshots (single-host and clustered) | An existing overlay file (V12), also one the SSH user could not see; a revert and a snapshot create made "not performed" by an unreadable disk image; a memory snapshot of a UEFI VM | Passed: one request, `Failed` with the documented message, the file untouched; the revert and the create were retried at 1, 2 and 4 minutes, never `Failed`, and succeeded once the permission was fixed; the memory snapshot was refused for good. A UEFI domain was built by hand because the provider could not make one (fixed in rc2). |
 | libvirt revert with a stopped libvirtd (clustered) | The VM's own host stopped, then another host | Partial: the revert waited and then succeeded, and the answer for a host lost mid-revert was never produced this way. |
-| libvirt create-from-URL | A clustered Provider with user-info and a query string in the URL | Passed: only `curl` ran, no URL, query or user-info in the host's process list or in any log. The single-host case was not run (the lab's image directories sent it through `ImagePrepare`), and `auditd` was not installed. |
+| libvirt create-from-URL | A clustered Provider with user-info and a query string in the URL | Passed: only `curl` ran, no URL, query or user-info in the host's process list or in any log. The single-host case was not run (that Provider imports images, so the URL went through `ImagePrepare`, not the create-from-URL path), and `auditd` was not installed. |
 | libvirt pool refresh (R37) | A single-host VM delete | Passed. |
 | `VMClone` secrets | The admission warning, the event and a search of every log and status for the values | Passed: one warning and one event naming the fields, no value anywhere. |
 | R28 log redaction | Failing NFS and S3 migrations from a single-host and a clustered source | Single-host passed. The clustered Provider, the manager's start lines and the staged-disk cleanup showed staging locations (fixed in rc2). |
@@ -817,14 +832,16 @@ Bugs found, and the pull request that fixes each in rc2:
 | The NoCloud seed's slot was in the boot order of every Proxmox VM that has one (`order=scsi0;ide2`). | #455 |
 | `Provider.status.reportedCapabilities` kept the previous image's answer after a provider roll (a rolled Proxmox Provider still reported linked clones), and `healthy` stayed `true` without a ready pod. | #456 |
 | The provider's startup log listed linked clones among the Proxmox capabilities. | #455 |
+| The `status.healthy` of a `Provider` stayed `true` without a ready pod (found in review of the finding above). | #456 |
 | A Proxmox clone without user-data made `cloud-init status` report degraded; the docs did not say a clone's source users can lose their sudo rule or that a `VMClone` and its target deleted mid-clone leave the VM on PVE. | #455 |
 | Two creates that got the same VMID were answered "outcome unknown" for the loser. | #455 |
 | The seed's lock file stayed on the node after its VM was deleted. | #455 |
 | A clustered libvirt export logged an S3 bucket and key; a failed staged-disk cleanup logged the NFS server, export and `uid`/`gid` (through the SDK's request log); the manager's `Starting disk export` line named the staging destination. | #457 |
 | A clustered libvirt export that NFS or S3 refused was held as `ExportOutcomeUnknown` for 35 minutes, where a single-host Provider fails it at once. | #457 |
-| A libvirt VMClass with `securityProfile.secureBoot: true` could not define its domain; the retry re-copied the disk every 30 seconds, the delete was held as `CreateOutcomeUnknown` and the attempt's disk stayed on the pool. Review of the same XML found `firmware: UEFI` ignored and VT-d, nested virtualization and multi-NIC VMs broken. | #458 |
-| Refused creates were re-sent every 30 seconds (every 5 seconds for some answers); a Provider without `status.runtime` made every VM reconcile panic until the Provider controller caught up. | #459 |
-| `virtrigaud-loadgen` did not cap the number of VMs it kept alive, started operations after its duration and exited 0 after an interrupt. | #454 |
+| A libvirt VMClass with `securityProfile.secureBoot: true` could not define its domain; the retry re-copied the disk every 30 seconds, the delete was held as `CreateOutcomeUnknown` and the attempt's disk stayed on the pool. Review of the same XML found `firmware: UEFI` ignored and VT-d, nested virtualization and multi-NIC VMs broken (found in review). | #458 |
+| Refused creates were re-sent every 30 seconds (every 5 seconds for some answers); a Provider without `status.runtime` made every VM reconcile panic until the Provider controller caught up (found in review). | #459 |
+| `virtrigaud-loadgen` did not cap the number of VMs it kept alive (a run filled the Proxmox node's thin pool), started operations after its duration and exited 0 after an interrupt. | #454 |
+| A delete refreshed the pool only on the host that ran it, so another host of a clustered Provider kept listing the deleted volumes; a single-host create from a libvirt path image that the disk check cannot read is retried with a "transient host error" text. | Not fixed: documented as limitations (below). |
 
 ### rc2 lab validation
 
@@ -856,7 +873,7 @@ hypervisors. The run will re-check the rc1 failures and the rc2 changes:
   staging server, export path, `uid`/`gid`, bucket, key and endpoint finds nothing; successful NFS
   and S3 migrations from a clustered source still complete.
 - `virtrigaud-loadgen`: a run with `vmCount: 3` and `--cleanup` never has more than 3 VMs alive and
-  skips the rest; a `--duration 2m --observe` run starts no operation after the deadline; an
+  skips the rest; a run with `duration: 2m` and `--observe` starts no operation after the deadline; an
   interrupted run with `--cleanup` prints `Cleanup complete` and exits non-zero.
 
 Please try the release on a non-production cluster first and report what you find (GitHub
@@ -888,7 +905,8 @@ to the Provider's Secret, check `genisoimage` and `flock` on the node, and in a 
    at the same release (`github.com/projectbeskar/virtrigaud`, `.../sdk`, `.../proto`).
 3. Check your custom `vcts` specifications with `vcts validate` and your `virtrigaud-loadgen`
    configurations with `--dry-run` (an invalid configuration fails at once; a valid one starts a
-   simulated run that you can stop with Ctrl-C).
+   simulated run that you can stop with Ctrl-C, which exits non-zero by design). Set `vmCount` in
+   each configuration (it caps the run at 10 VMs when omitted).
 4. A `VMSnapshot` that v0.4.0 held in `SnapshotOutcomeUnknown` because of a leftover overlay file
    stays held: delete it and create one under another name, or confirm the attempt.
 5. If a `VMClone` set `sysprep.productKey`, `sysprep.adminPassword.value`,
@@ -898,8 +916,8 @@ to the Provider's Secret, check `genisoimage` and `flock` on the node, and in a 
 6. Make sure `curl` is installed on every libvirt host that creates VMs from an image URL or a
    predefined template.
 7. Before you roll a libvirt provider, list the VMClasses with `firmware: UEFI` and decide for each
-   (they now make UEFI VMs; see [Actions required](#actions-required)). A host that will create
-   UEFI or secure boot VMs needs an OVMF package.
+   (they now make UEFI VMs; see [Actions required](#actions-required)). Every host that can receive
+   a UEFI or secure boot VM needs an OVMF package.
 8. If you run v0.4.1-rc1, read
    [If you run v0.4.1-rc1](../upgrading.md#if-you-run-v041-rc1): VMs rc1 made keep what rc1 gave
    them.

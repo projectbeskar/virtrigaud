@@ -440,8 +440,9 @@ redefined. See [`docs/libvirt-firmware.md`](libvirt-firmware.md).
   index='0' must be model='pcie-root' for this machine type"). The create was retried about
   every 30 seconds, and each retry copied the image again. The domain now uses the q35 device
   layout. libvirt selects a Secure Boot OVMF build whose variable-store template has keys
-  enrolled (no hard-coded firmware path), and Secure Boot is enforced from the first boot. A new
-  VM never starts from a variable store an earlier domain of the same name left. **The host
+  enrolled (no hard-coded firmware path), and Secure Boot is enforced from the first boot. On a libvirt that selects the
+  firmware at define (such as 10.0), a new VM never starts from a variable store an earlier domain
+  of the same name left. **The host
   needs an OVMF package** (`ovmf`, `edk2-ovmf`, ...) that installs firmware descriptors in
   `/usr/share/qemu/firmware/`. Which keys are trusted depends on that package; see
   [the trust model](libvirt-firmware.md#secure-boot-trust-model).
@@ -501,7 +502,8 @@ No action is required; this changes how often a refused create is sent again.
   5 minutes), a "not performed" answer, and every failure whose outcome is unknown or that may
   pass (a transport error, an unavailable host, a timeout), which are still retried every
   5 seconds or on their own backoff. A typed `Unauthorized` or `QuotaExceeded` is produced only
-  in the manager's own code: from a remote provider, `PermissionDenied` keeps `CreateRefused`,
+  in the manager's own code (so from a remote provider only `NotFound` and `Unimplemented` are
+  paced): from a remote provider, `PermissionDenied` keeps `CreateRefused`,
   and `Unauthenticated` and `ResourceExhausted` are untyped and still retried every 5 seconds.
 - **What retries at once.** A change to the `VirtualMachine`'s spec, or to the spec of its
   `VMClass`, `VMImage` or `Provider` (the manager now watches those three for a VM whose create
@@ -557,7 +559,15 @@ No action is required; this changes how often a refused create is sent again.
 The roll order is the same (CRDs, manager, providers; the rc2 CRDs differ from rc1's only in
 `description` texts). rc2 changes the manager, the libvirt, Proxmox and vSphere providers and the
 SDK's log; **roll the manager first, then every provider**, because a v0.4.1-rc1 provider does
-not carry the fixes below. What differs for what rc1 already made:
+not carry the fixes below. The sections of this guide that are new since rc1, and worth a read even if rc1 runs well:
+[Provider status after a provider roll](#provider-status-after-a-provider-roll),
+[libvirt: firmware, secure boot and platform features](#libvirt-firmware-secure-boot-and-platform-features),
+[A refused VM create is retried with a backoff](#a-refused-vm-create-is-retried-with-a-backoff)
+(new condition messages that an alert may match),
+[libvirt: clustered disk export answers](#libvirt-clustered-disk-export-answers),
+[Staging locations are no longer logged](#staging-locations-are-no-longer-logged-r28) and
+[the SDK's request log](#provider-authors-the-sdk-and-proto-go-modules-are-published). What differs
+for what rc1 already made:
 
 - **Proxmox VMs rc1 made keep their boot order.** The fix runs when a seed is attached, so only
   a VM made by rc2 (or a request that rc2 re-sends for a VM rc1 left interrupted) gets it; no
@@ -567,9 +577,10 @@ not carry the fixes below. What differs for what rc1 already made:
   not boot). To clean one, set the order without the slot on the node, for example
   `qm set <vmid> --boot order=scsi0`; this update attaches nothing, so PVE appends nothing.
   Find the VMs with `qm list` and `qm config <vmid> | grep -E '^boot:'`.
-- **Clones rc1 made without user-data keep their seed.** The bare `#cloud-config` line is written
-  once, at the clone, so `cloud-init status` in such a guest keeps reporting `degraded done`
-  (exit 2) until the VM is re-made; it configures nothing and is otherwise harmless.
+- **Clones rc1 made, of a VM that has a seed, without inline user-data keep their seed.** The bare
+  `#cloud-config` line is written once, at the clone, so `cloud-init status` in such a guest can
+  keep reporting `degraded done` (exit 2) until the VM is re-made; it configures nothing and is
+  otherwise harmless.
 - **Seed lock files rc1 left stay on the node.** `/run/virtrigaud/seed-stage/.lock-<vmid>` of a VM
   that no longer exists is an empty file on a tmpfs: remove it, or reboot the node. rc2 removes the
   file when it deletes a VM that has a seed, not those of VMs that were already gone.
@@ -580,8 +591,11 @@ not carry the fixes below. What differs for what rc1 already made:
   first. A secure boot VM that rc1 could not define was retried every 30 seconds and keeps its
   create marker; the next re-send (to an rc2 provider, or one the backoff sends) can define it. Its
   delete can be held as `CreateOutcomeUnknown` for up to 10 minutes, or until you set the
-  annotation its message names, and a disk copy an rc1 attempt left on the pool
-  (`<domain>-disk.qcow2`) stays until you remove it after checking that no domain uses it
+  annotation its message names. A disk copy an rc1 attempt left on the pool
+  (`<domain>-disk.qcow2`) is overwritten by the VM's next attempt when no domain uses it (and
+  removed again if libvirt refuses that attempt); if you delete the VM first, or the host has no
+  UEFI firmware (that refusal comes before the copy), it stays until you remove it after checking
+  that no domain uses it
   ([When libvirt refuses the definition](libvirt-firmware.md#when-libvirt-refuses-the-definition)).
 - **A `VirtualMachine` rc1 refused is sent again once, then backs off.** Its condition message
   (`re-checking every 30s`) names no next re-check, so the manager sends the create once after
@@ -590,10 +604,12 @@ not carry the fixes below. What differs for what rc1 already made:
   reads every `Provider`'s capabilities again; a Proxmox Provider that showed
   `supportsLinkedClones: true` after rc1's roll shows the running provider's answer once the new
   manager has read it.
-- **Logs written by rc1 keep the staging locations they contain** (the clustered export's S3 bucket
-  and key, the staged-disk cleanup's `nfs://` URL, the manager's `Starting disk export` lines):
-  treat them as sensitive, as the [R28 note](#staging-locations-are-no-longer-logged-r28) says
-  for v0.4.0's.
+- **Logs, and the status, conditions and events of `VMMigration`s, written by rc1 keep the staging
+  locations rc2 redacts** (the clustered export's S3 bucket and key, the staged-disk cleanup's
+  `nfs://` URL, the vSphere and Proxmox export and import lines and errors, the manager's
+  `Starting disk export` and `Starting disk import` lines, and the provider answer an rc1
+  `VMMigration` failure quotes): treat them as sensitive, as the
+  [R28 note](#staging-locations-are-no-longer-logged-r28) says for v0.4.0's.
 - **A clustered libvirt `VMMigration` that rc1 held as `ExportOutcomeUnknown`** is re-sent after
   35 minutes as before; the new answers apply to exports started by an rc2 provider.
 - **`virtrigaud-loadgen` configurations are accepted as before**, but `vmCount` (default 10) now
@@ -618,15 +634,15 @@ not carry the fixes below. What differs for what rc1 already made:
   shows the new image's capabilities within about a minute (for a Proxmox provider,
   `supportsLinkedClones` is absent or `false`), and `.status.lastHealthCheck` is less than 10
   minutes old.
-- Proxmox, a VM with user-data created after the upgrade: `qm config <vmid> | grep '^boot:'` lists
-  no CD-ROM slot (for example `boot: order=scsi0`, not `order=scsi0;ide2`), and a clone made
-  without user-data reports `cloud-init status` `done` (exit 0).
+- Proxmox, a VM with user-data created after the upgrade: `qm config <vmid> | grep '^boot:'` does
+  not list the seed's slot (for example `boot: order=scsi0`, not `order=scsi0;ide2`), and a clone,
+  without inline user-data, of a VM that has a seed reports `cloud-init status` `done` (exit 0).
 - libvirt, a VM of a VMClass with `firmware: UEFI`: `virsh dumpxml <domain>` shows
-  `<os firmware='efi'>` with the `<loader>` and `<nvram>` paths libvirt filled in; the loader of a
-  VM of a secure boot VMClass has `secure='yes'`.
+  `<os firmware='efi'>` with the `<loader>` and `<nvram>` paths libvirt filled in.
 - A `VirtualMachine` whose create is refused (for example a VMClass libvirt cannot define on the
-  host) shows a condition message that names the next re-check (`re-checking in ..., at ...`) and
-  is not sent again before it.
+  host) shows a condition message that names the next re-check and is not sent again before it:
+  `kubectl get virtualmachine <name> -n <namespace> -o jsonpath='{.status.conditions[?(@.type=="Ready")].message}'`
+  prints `... (non-retryable; re-checking in 4m0s, at <time>, or at once when ...)`.
 - With webhooks enabled, `kubectl apply` of a test `VMClone` with `sysprep.productKey` set prints
   one admission warning naming the field, and once the clone starts the `VMClone` has one
   `CustomizationSecretNotSent` event; neither shows the value.

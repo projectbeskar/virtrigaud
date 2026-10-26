@@ -129,6 +129,11 @@ the first interface now has a fixed slot (`0x03`). libvirt assigns free slots to
 | Nested virtualization | nesting enabled in the host's KVM module: `cat /sys/module/kvm_intel/parameters/nested` (or `kvm_amd`) prints `Y` or `1` |
 | VT-d (emulated IOMMU) | nothing beyond QEMU with q35. The IOMMU is emulated by QEMU and does not depend on the host's own IOMMU |
 
+On a clustered Provider every host that can receive a UEFI or secure boot VM needs these: the
+scheduler does not consider firmware. A VM placed on a host without OVMF is refused
+(`ValidationError`) and is re-checked on that host (it keeps its pending host); install the package
+there, or delete the VM.
+
 To check a host:
 
 ```sh
