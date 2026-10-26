@@ -30,6 +30,7 @@ import (
 
 	"golang.org/x/sync/singleflight"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -2982,13 +2983,37 @@ func overrideImageWithPreparedLocation(
 // it carries (derivePhase), so the phase is the same whichever path wrote it,
 // and Ready never True while a requested snapshot revert is pending, in flight
 // or failed (applySnapshotRevertReadiness).
+//
+// The write is skipped when it would change nothing (statusUnchanged): a
+// steady-state reconcile of a healthy VM recomputes the same status every
+// poll.
 func (r *VirtualMachineReconciler) updateStatus(ctx context.Context, vm *infravirtrigaudiov1beta1.VirtualMachine) {
 	boundSnapshotRevertMessage(vm)
 	applySnapshotRevertReadiness(vm)
 	applyDerivedPhase(vm)
+	if r.statusUnchanged(ctx, vm) {
+		return
+	}
 	if err := r.Status().Update(ctx, vm); err != nil {
 		log.FromContext(ctx).Error(err, "Failed to update VirtualMachine status")
 	}
+}
+
+// statusUnchanged reports whether writing vm's status would be a no-op: the
+// cached object is at the very resourceVersion vm carries and its status is
+// semantically equal to vm's. At that version the API server holds exactly
+// the cached status, so the Update would store nothing. Any doubt — a cache
+// miss or read error, a cache that is behind or ahead of vm — answers false
+// and the write is made as before (including its conflict on a stale vm).
+func (r *VirtualMachineReconciler) statusUnchanged(ctx context.Context, vm *infravirtrigaudiov1beta1.VirtualMachine) bool {
+	if vm.ResourceVersion == "" {
+		return false
+	}
+	current := &infravirtrigaudiov1beta1.VirtualMachine{}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(vm), current); err != nil {
+		return false
+	}
+	return current.ResourceVersion == vm.ResourceVersion && equality.Semantic.DeepEqual(current.Status, vm.Status)
 }
 
 // needsReconfigure reports whether vm needs a Reconfigure call: whether its
@@ -3172,6 +3197,11 @@ func (r *VirtualMachineReconciler) updateCurrentResources(vm *infravirtrigaudiov
 	vm.Status.CurrentResources.MemoryMiB = &memoryMiB
 }
 
+// getRequeueInterval is how long a provisioned VM waits before its next
+// poll, by the power state its provider reports. Providers report the
+// canonical contracts power states (On, Off, Suspended, Unknown), read here
+// through observedPowerState like everywhere else; anything it does not
+// recognise polls fast.
 func (r *VirtualMachineReconciler) getRequeueInterval(vm *infravirtrigaudiov1beta1.VirtualMachine, desc contracts.DescribeResponse) time.Duration {
 	// Polling intervals for various states
 	const (
@@ -3181,20 +3211,18 @@ func (r *VirtualMachineReconciler) getRequeueInterval(vm *infravirtrigaudiov1bet
 		slowPoll     = 5 * time.Minute  // For stable powered-off VMs
 	)
 
-	// Check if VM has no IP addresses yet (waiting for DHCP/network or VMware Tools)
-	if desc.PowerState == "poweredOn" && len(desc.IPs) == 0 {
-		return waitingForIP // Poll less frequently while waiting for IP
-	}
-
-	// Check VM power state for different polling frequencies
-	switch desc.PowerState {
-	case "poweredOn":
+	switch observedPowerState(desc.PowerState) {
+	case infravirtrigaudiov1beta1.ObservedPowerStateOn:
+		if len(desc.IPs) == 0 {
+			// Running but no address yet (DHCP, guest agent): keep polling fast.
+			return waitingForIP
+		}
 		// VM is running and has IP - normal monitoring frequency
 		return normalPoll
-	case "poweredOff":
+	case infravirtrigaudiov1beta1.ObservedPowerStateOff:
 		// VM is off - slower polling
 		return slowPoll
-	case "suspended":
+	case infravirtrigaudiov1beta1.ObservedPowerStateSuspended:
 		// VM is suspended - normal polling
 		return normalPoll
 	default:

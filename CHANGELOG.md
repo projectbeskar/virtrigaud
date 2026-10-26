@@ -5,6 +5,30 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-10-26 08:13] - Fix VirtualMachine steady-state polling and skip unchanged status writes
+**Author:** @wrkode (William Rizzo)
+
+### Fixed
+- `internal/controller/virtualmachine_controller.go`: `getRequeueInterval` reads the provider's power state through `observedPowerState` (the canonical `On`/`Off`/`Suspended`/`Unknown` providers report). It compared vSphere's `poweredOn`/`poweredOff`, which no provider returns, so every running VM was polled every 10 s instead of every 2 minutes (powered off: 5 minutes). A running VM without an address, an unknown or empty state, and anything unrecognised still poll every 10 s.
+- `internal/controller/virtualmachine_controller.go`: `updateStatus` skips the status write when it would store nothing: the cached VirtualMachine is at the same resourceVersion the reconcile holds and its status is semantically equal. Any cache miss, version difference or change writes as before; checked writes (`pendingHost`, create markers, records) are not affected.
+
+### Changed
+- `internal/controller/virtualmachine_controller_test.go`, `internal/controller/virtualmachine_status_ips_test.go`: polling tests use the canonical power states and cover empty, unknown and the old vSphere strings.
+
+### Added
+- `internal/controller/virtualmachine_status_write_test.go`: an unchanged status makes no API write; IP, condition, `pendingHost` and `observedGeneration` changes are written; a stale copy still attempts its write and its conflict is not applied.
+
+### Why
+Spike 1B (`docs/performance/spike-1b-control-plane-baseline.md`, F1/F2) measured both: the 10 s poll plus an unconditional status PUT per reconcile saturated the manager's default 20 QPS client budget at 1,000 VMs, delaying creates by minutes and starving new VMs at 10,000.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout (manager image)
+- [ ] Config change only
+- [ ] Documentation only
+
+Behaviour change: a running VM's `status` (power state, IPs, Ready) is refreshed every 2 minutes and a powered-off VM's every 5 minutes, as documented; spec changes still reconcile immediately.
+
 ## [2026-10-26 03:30] - Spike 1B: end-to-end control-plane scalability baseline (harness and report)
 **Author:** @wrkode (William Rizzo)
 
