@@ -46,7 +46,6 @@ import (
 	"github.com/projectbeskar/virtrigaud/internal/k8s"
 	"github.com/projectbeskar/virtrigaud/internal/obs/metrics"
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
-	"github.com/projectbeskar/virtrigaud/internal/runtime/remote"
 	storagemigration "github.com/projectbeskar/virtrigaud/internal/storage/migration"
 	"github.com/projectbeskar/virtrigaud/internal/util"
 )
@@ -153,13 +152,23 @@ type ProviderReconciler struct {
 	// Provider. Optional: nil uses the client.
 	APIReader client.Reader
 
-	// RemoteResolver resolves a Provider CR to a transport-level
-	// contracts.Provider (the gRPC client) so the reconciler can query the
-	// running provider — currently used to best-effort fetch capabilities
-	// for Status.ReportedCapabilities (issue #176). May be nil in tests
-	// that do not exercise capability reporting; reconcileReportedCapabilities
-	// is nil-safe and treats a nil resolver as "capabilities unavailable".
-	RemoteResolver *remote.Resolver
+	// CapabilityReader reads the running provider's capabilities for
+	// Status.ReportedCapabilities (issue #176), over a connection opened for
+	// each read (remote.Resolver in the manager). May be nil in tests that do
+	// not exercise capability reporting; reconcileReportedCapabilities is
+	// nil-safe and treats a nil reader as "capabilities unavailable". When
+	// they are read: refreshReportedCapabilities.
+	CapabilityReader ProviderCapabilityReader
+
+	// capabilityReads records, per Provider (namespace/name), the
+	// *capabilityReadState of the last capability read.
+	capabilityReads sync.Map
+
+	// capabilityRefreshInterval and capabilitySettleDelay override
+	// defaultCapabilityRefreshInterval and the settle delay derived from the
+	// pods' termination grace period (tests). Zero: the defaults.
+	capabilityRefreshInterval time.Duration
+	capabilitySettleDelay     time.Duration
 
 	// TmpSizeLimit is the manager-wide sizeLimit of the writable /tmp emptyDir
 	// of the provider pods (the manager's --provider-tmp-size-limit): a value
@@ -239,6 +248,7 @@ func (r *ProviderReconciler) Reconcile(ctx context.Context, req ctrl.Request) (r
 	if err := r.Get(ctx, req.NamespacedName, &provider); err != nil {
 		if apierrors.IsNotFound(err) {
 			logger.Info("Provider not found, may have been deleted")
+			r.forgetCapabilityReads(req.NamespacedName)
 			return ctrl.Result{}, nil
 		}
 		logger.Error(err, "Failed to get Provider")
@@ -268,7 +278,7 @@ func (r *ProviderReconciler) Reconcile(ctx context.Context, req ctrl.Request) (r
 	base := provider.Status.DeepCopy()
 
 	// Reconcile the runtime and derive the runtime status fields.
-	result, err := r.reconcileRuntimeStatus(ctx, &provider)
+	result, deployment, err := r.reconcileRuntimeStatus(ctx, &provider)
 
 	// A healthy live Provider records when it was last seen healthy.
 	if provider.Status.Healthy {
@@ -278,12 +288,16 @@ func (r *ProviderReconciler) Reconcile(ctx context.Context, req ctrl.Request) (r
 
 	// Best-effort: once the provider is available and its runtime is
 	// Running, query and surface the provider's self-reported capabilities
-	// (issue #176). This must never fail the reconcile or flip Healthy —
-	// see reconcileReportedCapabilities.
+	// (issue #176) — after a rollout of its runtime is complete, and again
+	// when they may have changed (refreshReportedCapabilities). This must
+	// never fail the reconcile or flip Healthy — see
+	// reconcileReportedCapabilities.
 	if provider.Status.Healthy &&
 		provider.Status.Runtime != nil &&
 		provider.Status.Runtime.Phase == infravirtrigaudiov1beta1.ProviderRuntimePhaseRunning {
-		r.reconcileReportedCapabilities(ctx, &provider)
+		if after := r.refreshReportedCapabilities(ctx, &provider, deployment); err == nil {
+			result = requeueNoLaterThan(result, after)
+		}
 	}
 
 	if updateErr := r.writeProviderStatus(ctx, base, &provider); updateErr != nil {
@@ -311,8 +325,9 @@ func (r *ProviderReconciler) Reconcile(ctx context.Context, req ctrl.Request) (r
 // runtime-derived status fields: status.runtime, the runtime conditions,
 // ConnectedVMs and Healthy. It writes no Provider status; the caller does. It
 // is shared by a live Provider and a Provider held by the in-use finalizer,
-// whose runtime must stay up (ADR-0010 D3).
-func (r *ProviderReconciler) reconcileRuntimeStatus(ctx context.Context, provider *infravirtrigaudiov1beta1.Provider) (ctrl.Result, error) {
+// whose runtime must stay up (ADR-0010 D3). It returns the runtime Deployment
+// as last written or read (nil when it was not reached).
+func (r *ProviderReconciler) reconcileRuntimeStatus(ctx context.Context, provider *infravirtrigaudiov1beta1.Provider) (ctrl.Result, *appsv1.Deployment, error) {
 	logger := log.FromContext(ctx)
 
 	// Initialize runtime status if needed
@@ -326,14 +341,14 @@ func (r *ProviderReconciler) reconcileRuntimeStatus(ctx context.Context, provide
 		err := fmt.Errorf("runtime configuration is required")
 		k8s.SetCondition(&provider.Status.Conditions, "ProviderRuntimeReady", metav1.ConditionFalse, "MissingRuntime", err.Error(), provider.Generation)
 		metrics.RecordError(errReasonRuntimeSpecInvalid, metrics.ComponentManager)
-		return ctrl.Result{}, err
+		return ctrl.Result{}, nil, err
 	}
 
 	// Set runtime mode (always Remote)
 	provider.Status.Runtime.Mode = infravirtrigaudiov1beta1.RuntimeModeRemote
 
 	// Handle remote runtime reconciliation
-	result, err := r.reconcileRemoteRuntime(ctx, provider)
+	result, deployment, err := r.reconcileRemoteRuntime(ctx, provider)
 
 	// Count connected VMs
 	connectedVMs, countErr := r.countConnectedVMs(ctx, provider)
@@ -348,7 +363,7 @@ func (r *ProviderReconciler) reconcileRuntimeStatus(ctx context.Context, provide
 	providerAvailable := k8s.GetCondition(provider.Status.Conditions, "ProviderAvailable")
 	provider.Status.Healthy = providerAvailable != nil && providerAvailable.Status == metav1.ConditionTrue
 
-	return result, err
+	return result, deployment, err
 }
 
 // reconcileReportedCapabilities best-effort fetches the provider's
@@ -358,66 +373,44 @@ func (r *ProviderReconciler) reconcileRuntimeStatus(ctx context.Context, provide
 //
 // This is strictly informational and MUST NOT affect reconcile outcome or
 // the Healthy/Available status:
-//   - A nil RemoteResolver, a resolve failure, a resolved provider that
-//     does not implement contracts.CapabilityReporter, or a failing
-//     GetCapabilities RPC all log at V(1)/info and set the Condition to
-//     False with reason CapabilitiesUnavailable. The previously-recorded
-//     ReportedCapabilities (if any) are left untouched so a transient blip
-//     does not erase a known-good snapshot.
+//   - A nil CapabilityReader or a failed read (the runtime not Running, the
+//     TLS material not loadable, the GetCapabilities RPC failing) logs at
+//     V(1)/info and sets the Condition to False with reason
+//     CapabilitiesUnavailable. The previously-recorded ReportedCapabilities
+//     (if any) are left untouched so a transient blip does not erase a
+//     known-good snapshot.
 //   - On success the Condition is True (reason CapabilitiesFetched) and
 //     ReportedCapabilities is overwritten with the fresh snapshot.
-func (r *ProviderReconciler) reconcileReportedCapabilities(ctx context.Context, provider *infravirtrigaudiov1beta1.Provider) {
+//
+// It reports whether the capabilities were read.
+func (r *ProviderReconciler) reconcileReportedCapabilities(ctx context.Context, provider *infravirtrigaudiov1beta1.Provider) bool {
 	logger := log.FromContext(ctx)
 
-	if r.RemoteResolver == nil {
-		logger.V(1).Info("Skipping capability report: no remote resolver configured",
+	if r.CapabilityReader == nil {
+		logger.V(1).Info("Skipping capability report: no capability reader configured",
 			"provider", provider.Name, "namespace", provider.Namespace)
 		k8s.SetCondition(&provider.Status.Conditions,
 			providerConditionCapabilitiesReported, metav1.ConditionFalse,
-			providerReasonCapabilitiesUnavailable, "No remote resolver configured", provider.Generation)
-		return
+			providerReasonCapabilitiesUnavailable, "No capability reader configured", provider.Generation)
+		return false
 	}
 
-	providerInstance, err := r.RemoteResolver.GetProvider(ctx, provider)
+	caps, err := r.CapabilityReader.ReadCapabilities(ctx, provider)
 	if err != nil {
-		logger.V(1).Info("Skipping capability report: failed to resolve provider",
+		logger.V(1).Info("Skipping capability report: reading the capabilities failed",
 			"provider", provider.Name, "namespace", provider.Namespace, "error", err.Error())
 		k8s.SetCondition(&provider.Status.Conditions,
 			providerConditionCapabilitiesReported, metav1.ConditionFalse,
 			providerReasonCapabilitiesUnavailable,
-			fmt.Sprintf("Failed to resolve provider: %v", err), provider.Generation)
-		return
-	}
-
-	reporter, ok := providerInstance.(contracts.CapabilityReporter)
-	if !ok {
-		// Fail open: a provider transport that does not implement the
-		// optional CapabilityReporter is not an error, just an absence of
-		// data. Never block on it.
-		logger.V(1).Info("Skipping capability report: provider does not implement CapabilityReporter",
-			"provider", provider.Name, "namespace", provider.Namespace)
-		k8s.SetCondition(&provider.Status.Conditions,
-			providerConditionCapabilitiesReported, metav1.ConditionFalse,
-			providerReasonCapabilitiesUnavailable,
-			"Provider does not report capabilities", provider.Generation)
-		return
-	}
-
-	caps, err := reporter.GetCapabilities(ctx)
-	if err != nil {
-		logger.V(1).Info("Skipping capability report: GetCapabilities RPC failed",
-			"provider", provider.Name, "namespace", provider.Namespace, "error", err.Error())
-		k8s.SetCondition(&provider.Status.Conditions,
-			providerConditionCapabilitiesReported, metav1.ConditionFalse,
-			providerReasonCapabilitiesUnavailable,
-			fmt.Sprintf("GetCapabilities RPC failed: %v", err), provider.Generation)
-		return
+			fmt.Sprintf("GetCapabilities failed: %v", err), provider.Generation)
+		return false
 	}
 
 	provider.Status.ReportedCapabilities = capabilitiesToReported(caps)
 	k8s.SetCondition(&provider.Status.Conditions,
 		providerConditionCapabilitiesReported, metav1.ConditionTrue,
 		providerReasonCapabilitiesFetched, "Provider capabilities reported", provider.Generation)
+	return true
 }
 
 // capabilitiesToReported maps the transport-agnostic contracts.Capabilities
@@ -451,8 +444,10 @@ func capabilitiesToReported(caps contracts.Capabilities) *infravirtrigaudiov1bet
 	}
 }
 
-// reconcileRemoteRuntime manages remote provider deployments and services
-func (r *ProviderReconciler) reconcileRemoteRuntime(ctx context.Context, provider *infravirtrigaudiov1beta1.Provider) (ctrl.Result, error) {
+// reconcileRemoteRuntime manages remote provider deployments and services. It
+// returns the runtime Deployment as written or read (nil when it was not
+// reached).
+func (r *ProviderReconciler) reconcileRemoteRuntime(ctx context.Context, provider *infravirtrigaudiov1beta1.Provider) (ctrl.Result, *appsv1.Deployment, error) {
 	logger := log.FromContext(ctx)
 
 	// Validate remote runtime configuration
@@ -461,7 +456,7 @@ func (r *ProviderReconciler) reconcileRemoteRuntime(ctx context.Context, provide
 		provider.Status.Runtime.Phase = infravirtrigaudiov1beta1.ProviderRuntimePhaseFailed
 		provider.Status.Runtime.Message = err.Error()
 		metrics.RecordError(errReasonRuntimeSpecInvalid, metrics.ComponentManager)
-		return ctrl.Result{RequeueAfter: time.Minute}, err
+		return ctrl.Result{RequeueAfter: time.Minute}, nil, err
 	}
 
 	// Enforce the v0.3.7 TLS posture before provisioning anything.
@@ -478,7 +473,7 @@ func (r *ProviderReconciler) reconcileRemoteRuntime(ctx context.Context, provide
 		// Requeue on the same cadence as other config errors. Once the
 		// operator edits the CR the Watch fires regardless, so the
 		// requeue is just a belt-and-braces backstop.
-		return ctrl.Result{RequeueAfter: time.Minute}, nil
+		return ctrl.Result{RequeueAfter: time.Minute}, nil, nil
 	}
 
 	// Generate names for deployment, service, and service account
@@ -494,7 +489,7 @@ func (r *ProviderReconciler) reconcileRemoteRuntime(ctx context.Context, provide
 		provider.Status.Runtime.Phase = infravirtrigaudiov1beta1.ProviderRuntimePhaseFailed
 		provider.Status.Runtime.Message = err.Error()
 		metrics.RecordError(errReasonServiceReconcile, metrics.ComponentManager)
-		return ctrl.Result{RequeueAfter: time.Minute}, err
+		return ctrl.Result{RequeueAfter: time.Minute}, nil, err
 	}
 
 	// Reconcile the dedicated, least-privilege ServiceAccount before the
@@ -506,7 +501,7 @@ func (r *ProviderReconciler) reconcileRemoteRuntime(ctx context.Context, provide
 		provider.Status.Runtime.Phase = infravirtrigaudiov1beta1.ProviderRuntimePhaseFailed
 		provider.Status.Runtime.Message = err.Error()
 		metrics.RecordError(errReasonServiceAccountReconcile, metrics.ComponentManager)
-		return ctrl.Result{RequeueAfter: time.Minute}, err
+		return ctrl.Result{RequeueAfter: time.Minute}, nil, err
 	}
 
 	// Render the clustered host-inventory Secret (ADR-0007 D3) BEFORE the
@@ -519,13 +514,14 @@ func (r *ProviderReconciler) reconcileRemoteRuntime(ctx context.Context, provide
 		provider.Status.Runtime.Phase = infravirtrigaudiov1beta1.ProviderRuntimePhaseFailed
 		provider.Status.Runtime.Message = err.Error()
 		metrics.RecordError(errReasonHostInventoryReconcile, metrics.ComponentManager)
-		return ctrl.Result{RequeueAfter: time.Minute}, err
+		return ctrl.Result{RequeueAfter: time.Minute}, nil, err
 	}
 
 	// Reconcile Deployment
 	deployment, err := r.reconcileDeployment(ctx, provider, deploymentName)
 	if stderrors.Is(err, errMigrationStorageDiscovery) {
-		return r.migrationStorageDiscoveryFailed(ctx, provider, deploymentName, err)
+		result, err := r.migrationStorageDiscoveryFailed(ctx, provider, deploymentName, err)
+		return result, nil, err
 	}
 	if err != nil {
 		logger.Error(err, "Failed to reconcile deployment")
@@ -533,7 +529,7 @@ func (r *ProviderReconciler) reconcileRemoteRuntime(ctx context.Context, provide
 		provider.Status.Runtime.Phase = infravirtrigaudiov1beta1.ProviderRuntimePhaseFailed
 		provider.Status.Runtime.Message = err.Error()
 		metrics.RecordError(errReasonDeploymentReconcile, metrics.ComponentManager)
-		return ctrl.Result{RequeueAfter: time.Minute}, err
+		return ctrl.Result{RequeueAfter: time.Minute}, nil, err
 	}
 
 	// Update runtime status
@@ -559,11 +555,15 @@ func (r *ProviderReconciler) reconcileRemoteRuntime(ctx context.Context, provide
 
 		k8s.SetCondition(&provider.Status.Conditions, "ProviderRuntimeReady", metav1.ConditionFalse, "DeploymentNotReady", "Deployment pods are not ready yet", provider.Generation)
 
+		// No ready pod serves the provider: it is not available, whatever it
+		// was before (status.healthy follows).
+		k8s.SetCondition(&provider.Status.Conditions, "ProviderAvailable", metav1.ConditionFalse, "DeploymentNotReady", "No ready provider pod", provider.Generation)
+
 		// Requeue to check readiness again
-		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, deployment, nil
 	}
 
-	return ctrl.Result{}, nil
+	return ctrl.Result{}, deployment, nil
 }
 
 // providerTLSEnabled returns true iff the operator has explicitly

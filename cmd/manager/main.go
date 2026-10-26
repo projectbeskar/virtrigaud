@@ -398,13 +398,13 @@ func main() {
 		os.Exit(1)
 	}
 	if err = (&controller.ProviderReconciler{
-		Client:          mgr.GetClient(),
-		Scheme:          mgr.GetScheme(),
-		APIReader:       mgr.GetAPIReader(),
-		RemoteResolver:  remoteResolver,
-		TmpSizeLimit:    providerTmpSizeLimit,
-		TmpSizeLimitMax: providerTmpSizeLimitMax,
-		Recorder:        mgr.GetEventRecorderFor("provider-controller"),
+		Client:           mgr.GetClient(),
+		Scheme:           mgr.GetScheme(),
+		APIReader:        mgr.GetAPIReader(),
+		CapabilityReader: remoteResolver,
+		TmpSizeLimit:     providerTmpSizeLimit,
+		TmpSizeLimitMax:  providerTmpSizeLimitMax,
+		Recorder:         mgr.GetEventRecorderFor("provider-controller"),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Provider")
 		os.Exit(1)
