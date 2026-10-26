@@ -227,6 +227,16 @@ func providerErrorMessage(err error) string {
 	return err.Error()
 }
 
+// providerRuntimeState returns provider's runtime phase and endpoint, for the
+// log; both are empty while the Provider controller has not recorded a
+// status.runtime yet (a new Provider), which must not panic the VM reconcile.
+func providerRuntimeState(provider *infravirtrigaudiov1beta1.Provider) (phase, endpoint string) {
+	if provider == nil || provider.Status.Runtime == nil {
+		return "", ""
+	}
+	return string(provider.Status.Runtime.Phase), provider.Status.Runtime.Endpoint
+}
+
 // hasForceDeleteAnnotation reports whether the VM carries the force-delete
 // escape-hatch annotation set to "true".
 func hasForceDeleteAnnotation(vm *infravirtrigaudiov1beta1.VirtualMachine) bool {
@@ -561,14 +571,15 @@ func (r *VirtualMachineReconciler) reconcileVM(ctx context.Context, vm *infravir
 	}
 
 	// Get provider instance (remote or in-process)
-	logger.V(1).Info("Getting provider instance", "provider", provider.Name, "runtime_phase", provider.Status.Runtime.Phase, "endpoint", provider.Status.Runtime.Endpoint)
+	runtimePhase, runtimeEndpoint := providerRuntimeState(provider)
+	logger.V(1).Info("Getting provider instance", "provider", provider.Name, "runtime_phase", runtimePhase, "endpoint", runtimeEndpoint)
 	providerInstance, err := r.getProviderInstance(ctx, provider)
 	if err != nil {
 		// The resolver's error names the TLS Secret, the provider Service's
 		// address and the runtime phase: it goes to the manager log only, and
 		// the VM (readable by a consumer of a Provider in another namespace)
 		// gets a constant message (ADR-0007 A6, threat 5).
-		logger.Error(err, "Failed to get provider instance - will retry in 5s", "provider", provider.Name, "runtime_phase", provider.Status.Runtime.Phase)
+		logger.Error(err, "Failed to get provider instance - will retry in 5s", "provider", provider.Name, "runtime_phase", runtimePhase)
 		k8s.SetReadyCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonProviderError, providerResolveFailedMessage, vm.Generation)
 		metrics.RecordError(errReasonProviderResolve, metrics.ComponentManager)
 		r.updateStatus(ctx, vm)
