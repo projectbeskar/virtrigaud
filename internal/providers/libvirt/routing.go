@@ -467,7 +467,11 @@ func hostOpRPCError(op string, ho *hostOpError, err error) error {
 // itself followed by the provider's own requester-facing account of it when it
 // wrote one (requesterFacingMessage) — and the error is logged.
 func hostOpRPCErrorFor(kind hostOpKind, op string, ho *hostOpError, err error) error {
-	log.Printf("WARN %s on host %s failed: %v", op, ho.host, err)
+	// Every URL but the libvirt connection URI is redacted (R28): a staged
+	// object's s3:// or nfs:// location, an S3 endpoint. A caller that knows
+	// the call's staged locations redacts them from err first
+	// (routedExportFailure).
+	log.Printf("WARN %s on host %s failed: %s", op, ho.host, redactCause(err))
 	if isHostTransportFailure(err) {
 		stage := ho.progress.stage()
 		// The dependency guard runs before anything is changed and says so
@@ -594,8 +598,22 @@ func routedIdempotentRPCError(op string, err error) error {
 	return routedRPCErrorFor(hostOpWriteRetry, op, err)
 }
 
-// routedRPCErrorFor is routedRPCError for an RPC of kind.
+// routedRPCErrorFor is routedRPCError for an RPC of kind: the categorized
+// answers first (routedTypedStatus), then a failure on the leased host or of
+// the provider (routedHostFailureStatus).
 func routedRPCErrorFor(kind hostOpKind, op string, err error) error {
+	if st := routedTypedStatus(op, err); st != nil {
+		return st
+	}
+	return routedHostFailureStatus(kind, op, err)
+}
+
+// routedTypedStatus returns the categorized answer of err from a routed call
+// (see routedRPCError: the cluster-wide guards, the disk guards, the typed
+// refusals, a routedOpError, a host that could not be leased, a typed
+// ProviderError), or nil when err is none of them: a failure on the leased
+// host or of the provider itself (routedHostFailureStatus).
+func routedTypedStatus(op string, err error) error {
 	if st := clusterGuardStatus(err); st != nil {
 		return st.Err()
 	}
@@ -668,12 +686,22 @@ func routedRPCErrorFor(kind hostOpKind, op string, err error) error {
 			return status.Error(codes.AlreadyExists, pe.Message)
 		}
 	}
+	return nil
+}
+
+// routedHostFailureStatus is the answer of a routed call's failure that is
+// not categorized (routedTypedStatus): one that arose on the leased host
+// (hostOpError) is answered by hostOpRPCErrorFor, a provider-level
+// Unavailable is a plain Unavailable (which the manager's breaker counts),
+// anything else a plain "failed to <op>".
+func routedHostFailureStatus(kind hostOpKind, op string, err error) error {
 	var ho *hostOpError
 	if stderrors.As(err, &ho) {
 		return hostOpRPCErrorFor(kind, op, ho, err)
 	}
 	log.Printf("WARN %s failed: %s", op, redactCause(err))
-	if pe != nil && pe.Type == contracts.ErrorTypeUnavailable {
+	var pe *contracts.ProviderError
+	if stderrors.As(err, &pe) && pe.Type == contracts.ErrorTypeUnavailable {
 		return status.Error(codes.Unavailable, pe.Message)
 	}
 	return status.Errorf(codes.Unknown, "failed to %s", op)

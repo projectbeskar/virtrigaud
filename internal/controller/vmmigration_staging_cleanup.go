@@ -389,7 +389,7 @@ func (r *VMMigrationReconciler) reconcileStagingCleanup(ctx context.Context, m *
 		logging.FromContext(ctx).Info("Migration staged disk removed", "outcome", string(outcome))
 		return 0, r.setStagingCleanupDone(ctx, m, reason, msg, corev1.EventTypeNormal)
 	case stderrors.As(err, &left):
-		logStagedDiskLeftBehind(ctx, left)
+		logStagedDiskLeftBehind(ctx, m, left)
 		return 0, r.setStagingCleanupDone(ctx, m, migrationReasonStagedDiskLeftBehind,
 			left.message+migrationStagedDiskLeftBehindSuffix, corev1.EventTypeWarning)
 	default:
@@ -513,7 +513,7 @@ func (r *VMMigrationReconciler) releaseStagedDiskForDeletion(ctx context.Context
 		}
 		return false, ctrl.Result{}, nil
 	case stderrors.As(err, &left):
-		logStagedDiskLeftBehind(ctx, left)
+		logStagedDiskLeftBehind(ctx, m, left)
 		if werr := r.setStagingCleanupDone(ctx, m, migrationReasonStagedDiskLeftBehind,
 			left.message+migrationStagedDiskLeftBehindSuffix, corev1.EventTypeWarning); werr != nil {
 			return true, ctrl.Result{}, werr
@@ -589,19 +589,19 @@ func (r *VMMigrationReconciler) recordStagedDiskForceLeft(ctx context.Context, m
 	logger.Info("Staged disk not deleted but force-delete annotation is set; removing finalizer, the staged disk is left behind",
 		"annotation", forceDeleteAnnotation)
 	if cause != nil {
-		logger.V(1).Info("Staged disk force-delete cause", "error", cause.Error())
+		logger.V(1).Info("Staged disk force-delete cause", "error", redactMigrationStagingText(m, cause.Error()))
 	}
 	return r.setStagingCleanupDone(ctx, m, migrationReasonStagedDiskLeftBehind, msg, corev1.EventTypeWarning)
 }
 
 // logStagedDiskLeftBehind logs a left-behind staged disk: the constant reason
 // at Info, the cause (which can name a host, a path or a provider answer) at
-// V(1) only.
-func logStagedDiskLeftBehind(ctx context.Context, left *stagedDiskLeftBehindError) {
+// V(1) only, redacted of m's staging locations (R28).
+func logStagedDiskLeftBehind(ctx context.Context, m *infrav1beta1.VMMigration, left *stagedDiskLeftBehindError) {
 	logger := logging.FromContext(ctx)
 	logger.Info("Migration staged disk left behind", "reason", left.message)
 	if left.cause != nil {
-		logger.V(1).Info("Migration staged disk left behind: cause", "error", left.cause.Error())
+		logger.V(1).Info("Migration staged disk left behind: cause", "error", redactMigrationStagingText(m, left.cause.Error()))
 	}
 }
 

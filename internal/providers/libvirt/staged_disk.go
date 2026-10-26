@@ -28,21 +28,12 @@ import (
 	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
 )
 
-// minS3BucketNameLen is the shortest S3 bucket name (3 characters): a shorter
-// option value is not a bucket name and is never replaced in a log text.
-const minS3BucketNameLen = 3
-
 // stagedDiskLocations returns the texts that locate disk, for redactLocations
-// (R28): its nfs:// URL and the texts in it (nfsURLLocations), its object
-// key and, for s3, its bucket name. An
-// error from the S3 client names the bucket, and the key alone would leave it
-// in the log.
+// (R28): its nfs:// URL and the texts in it, its object key and, for s3, its
+// bucket name and endpoint (migration.StagedDiskLocations). An error from the
+// S3 client names the bucket, and the key alone would leave it in the log.
 func stagedDiskLocations(disk migration.StagedDisk) []string {
-	locations := append(nfsURLLocations(disk.NFSURL), disk.Key)
-	if bucket := strings.TrimSpace(disk.Options.Bucket); len(bucket) >= minS3BucketNameLen {
-		locations = append(locations, bucket)
-	}
-	return locations
+	return migration.StagedDiskLocations(disk)
 }
 
 // DeleteStagedDisk removes a VMMigration's staging object (ADR-0011). The

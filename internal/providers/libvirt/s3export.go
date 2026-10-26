@@ -93,7 +93,8 @@ func (s *Server) exportDiskToS3(ctx context.Context, req *providerv1.ExportDiskR
 	}
 	resp, err := exportFlattenToS3(ctx, conn, req, req.VmId, srcPath, srcFormat, nil)
 	if err != nil {
-		return nil, singleHostExportFailure(ctx, err)
+		// The bucket, key and endpoint never reach the log (R28).
+		return nil, singleHostExportFailure(ctx, redactLocations(err, exportStagedLocations(req)...))
 	}
 	return resp, nil
 }

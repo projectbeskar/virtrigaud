@@ -264,13 +264,56 @@ These change what an operator sees; no action is required before the upgrade.
 - **On a single-host Provider, a snapshot libvirt cannot take for this VM fails for good**
   (`InvalidArgument`) when libvirt refuses it before executing because the VM's configuration does not support it; a busy domain
   or one in the wrong state is still "not performed".
-- **Host-command logs are redacted (R28).** URLs (a staged disk's `nfs://` server, export and
-  path, an S3 endpoint) are replaced by `<redacted <scheme> URL>` in the libvirt provider's log
-  and errors, except the libvirt connection URI and `pvc://`. If you collected libvirt provider
-  logs from v0.4.0 for support or audit, they still hold the URLs; treat them as sensitive.
+- **Host-command logs are redacted (R28).** See
+  [Staging locations are no longer logged](#staging-locations-are-no-longer-logged-r28).
 - **A VM delete refreshes the `default` pool (R37)** so `virsh vol-list default` stops listing the
   deleted disk files (best effort; a VM whose disks are in another pool leaves that pool stale
   until its next refresh).
+
+### libvirt: clustered disk export answers
+
+- **A clustered `ExportDisk` failure the provider can prove is definite.** In v0.4.0 a clustered
+  (routed) export answered every failure on its host as an unknown outcome, so a `VMMigration`
+  whose NFS export the server refused (`MNT3ERR_ACCES`) or whose S3 upload the service refused
+  (`SignatureDoesNotMatch`, `AccessDenied`) was held with `Ready=False/ExportOutcomeUnknown` and
+  re-sent only after 35 minutes. It now answers the failures a single-host Provider proves the
+  same way: an unusable S3 configuration is `InvalidArgument`; an upload the service refused or
+  failed before the flattened disk was read to its end, and an NFS `qemu-img convert` that ended
+  with an exit status of its own, are "not performed". The `VMMigration` fails at once (and its
+  retry policy applies). A flatten or convert whose connection dropped, that was killed or
+  stopped by its time budget, a host that stopped answering after the export started, and an
+  upload whose completing call may have taken effect stay unknown, as before.
+  → [`docs/provider-call-outcomes.md`](provider-call-outcomes.md#clustered-libvirt-definite-export-failures)
+
+### Staging locations are no longer logged (R28)
+
+A migration's staging location — an `nfs://` URL with its server, export, path and `uid`/`gid`,
+an S3 bucket, object key and endpoint — names the tenant's storage. In v0.4.1 it no longer
+appears in the provider or manager logs, nor in a provider's errors:
+
+- **libvirt (single-host and clustered):** host-command log lines and errors replace every URL by
+  `<redacted <scheme> URL>`, except the libvirt connection URI and `pvc://`, and the staged
+  object's server, export, path, file name, bucket, key and endpoint by `<staged object>`. This
+  covers the routed (clustered) export, import and staged-disk cleanup too.
+- **Every provider:** the S3 client's errors name no bucket, key or endpoint, and the causes of a
+  `DeleteStagedDisk` failure (`qemu-img` output, the S3 error) are redacted the same way. The
+  vSphere and Proxmox providers' export and import log lines show the staging URL as
+  `<scheme>://<redacted>`, and the errors their `ExportDisk` and `ImportDisk` answer (which can
+  quote `qemu-img`, `mount` or S3 client output) are redacted the same way, keeping their gRPC
+  code. The
+  SDK's `gRPC request completed` line logs the `code` and the status message the manager
+  receives, no longer the provider's internal error text (which could carry such a cause). For
+  an SDK `ProviderError` the status message still includes its cause: a provider built on the
+  SDK must not put a location in either.
+- **The manager** logs the staging URL of `Starting disk export` and `Starting disk import` as
+  `<scheme>://<redacted>`, and replaces the `VMMigration`'s staging bucket, key prefix, endpoint,
+  NFS server, export and path, and every URL, in the provider answer that a migration failure's
+  status message, `Failed` and `Ready` conditions and Warning event quote, and in its export,
+  import and staged-disk cleanup log lines. The cause stays readable (for example `MNT3ERR_ACCES` or `SignatureDoesNotMatch`).
+
+If you collected provider or manager logs from v0.4.0 for support or audit, they still hold these
+locations; treat them as sensitive. A log query or alert that matched a staging URL, bucket or
+server in these lines needs the new form.
 
 ### Command-line tools
 

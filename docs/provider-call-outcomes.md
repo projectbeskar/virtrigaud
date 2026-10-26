@@ -228,6 +228,29 @@ Three things the table does not show:
   directory is made, the import ensures the `default` pool exists and is active. That is
   idempotent and leaves no disk, so a failure after it is still "nothing landed".
 
+## Clustered libvirt: definite export failures
+
+From v0.4.1 a clustered (routed) `ExportDisk` answers the failures of the `ExportDisk` `s3` and
+`nfs` rows above as a single host does: the same constant texts, `InvalidArgument` for an
+unusable S3 configuration, and "not performed" (`Unavailable` with `VM_OPERATION_FAILED`) for an
+upload the S3 service refused or failed before the flattened disk was read to its end (a
+`SignatureDoesNotMatch` or `AccessDenied` refusal, a 5xx, an unreachable service) and for a
+`qemu-img convert` that ended with an exit status of its own (an NFS server that refused the
+mount, `MNT3ERR_ACCES`). The `VMMigration` fails at once instead of being held with
+`ExportOutcomeUnknown` and re-sent after 35 minutes. Before v0.4.1 the routed export answered
+all of them as an unknown outcome ("failed to export disk on host ...").
+
+The routed guards keep their own answers first: a flatten or convert that `timeout(1)` stopped,
+that was killed, or that outran the routed budget is unknown; the same export still running on
+the host is "retry". A host that stops answering is answered by how far the call got
+([below](#clustered-libvirt-a-host-that-stops-answering)), never as a definite failure, and the
+unknown cases of the rows above (a command whose session dropped, an upload whose completing
+call may have taken effect) stay unknown.
+
+No log line or answer of the export names the staged object's location (the NFS server, export,
+path and `uid`/`gid`, the S3 bucket, key and endpoint: R28,
+[upgrading](upgrading.md#staging-locations-are-no-longer-logged-r28)).
+
 ## Clustered libvirt: the routed import
 
 A clustered libvirt provider routes `ImportDisk` to the target VM's pending host
@@ -394,7 +417,7 @@ Each routed RPC applies the rule, with these differences:
 |---|---|---|
 | `Describe`, `GetDiskInfo`, `TaskStatus` | Always `HOST_UNAVAILABLE`. These calls only read, so a lost connection cannot leave anything half done. | `Describe`: `Ready=False/HostUnavailable`, re-checked. |
 | `ListVMs` | Unchanged: the host is named in `unreachable_host_ids`; the call does not fail. | |
-| `ExportDisk` (`s3`, `nfs`) | The table above. A flatten or convert that is sent and whose session drops, that `timeout(1)` stops (124), that is killed (137), or that runs past the routed budget is unknown: the `ExportRequested` marker is kept, and the export is re-sent only as described [above](#what-happens-to-a-call-whose-outcome-is-unknown). | |
+| `ExportDisk` (`s3`, `nfs`) | The table above. A flatten or convert that is sent and whose session drops, that `timeout(1)` stops (124), that is killed (137), or that runs past the routed budget is unknown: the `ExportRequested` marker is kept, and the export is re-sent only as described [above](#what-happens-to-a-call-whose-outcome-is-unknown). A failure the host answered (a command that ended with an exit status of its own, an upload the S3 service refused before the disk was read to its end) is definite from v0.4.1, as on a single host ([Clustered libvirt: definite export failures](#clustered-libvirt-definite-export-failures)). | |
 | `SnapshotCreate` | Before the `snapshot-create-as` is sent: `HOST_UNAVAILABLE` or not performed. After: the **retry form** ("its outcome is unknown and it may still complete on the host: retry"), not `Unknown`, **when the request names its snapshot and carries a request token** (the manager always sends both). The routed create is then idempotent: the retry finds the snapshot by name and token, or is refused by libvirt's job lock while the job runs. A request without both (a direct caller) gets `Unknown`, for its time-budget answer too, because its retry could take a second snapshot. | The retry form: retried, never failed, outcome unknown; the `VMSnapshot` or `VMMigration` marker rules above apply (the marker is kept). `HOST_UNAVAILABLE` or not performed, for a `VMSnapshot`: the attempt is closed (the marker is removed) and the create is sent again as a new attempt, after 1 minute, doubling for each consecutive such answer up to 10 minutes; never failed, never held. |
 | `Clone` | Before the copy is sent, only reads: `HOST_UNAVAILABLE` or not performed. Any command not on the read list sent earlier (the `isoinfo` read of the source's seed, the varstore check, the copy's private write directory) already gives the retry form. After the copy is sent: the retry form, not `Unknown`: the clone is stamped with its target, so the retry finds a clone that completed, or is told that the earlier copy still runs (`flock`). An `Unknown` would fail the `VMClone` and remove its target. | Retried on the same host with the backoff (`CloneRetrying`). |
 | `Power` | The table above. `on`, `off` and `shutdown` can be repeated: a second attempt finds the domain already in the state asked for. `reboot` cannot: an unknown `reboot` that is retried may reboot the VM twice. | A provider error, retried every 30 s (`HOST_CONNECTION_LOST`). |

@@ -651,7 +651,7 @@ func (r *VMMigrationReconciler) handleValidatingPhase(ctx context.Context, migra
 		if err != nil {
 			logger.Error(err, "Failed to power off source VM before migration")
 			return r.transitionToFailed(ctx, migration,
-				"Failed to power off source VM before migration: "+migrationFailureDetail(err))
+				"Failed to power off source VM before migration: "+migrationStagingDetail(migration, err))
 		}
 		if !done {
 			return res, nil
@@ -741,7 +741,7 @@ func (r *VMMigrationReconciler) handleSnapshottingPhase(ctx context.Context, mig
 	providerInstance, err := r.getProviderInstance(ctx, sourceProvider)
 	if err != nil {
 		logger.Error(err, "Failed to get source provider instance")
-		return r.transitionToFailed(ctx, migration, "Failed to get provider instance: "+migrationFailureDetail(err))
+		return r.transitionToFailed(ctx, migration, "Failed to get provider instance: "+migrationStagingDetail(migration, err))
 	}
 
 	// A snapshot is already recorded. It is used only once it is known to be
@@ -830,7 +830,7 @@ func (r *VMMigrationReconciler) handleSnapshottingPhase(ctx context.Context, mig
 	}
 	if err != nil {
 		logger.Error(err, "Failed to create migration snapshot")
-		return r.transitionToFailed(ctx, migration, "Failed to create snapshot: "+migrationFailureDetail(err))
+		return r.transitionToFailed(ctx, migration, "Failed to create snapshot: "+migrationStagingDetail(migration, err))
 	}
 
 	// Record the snapshot (vmmigration_status_write.go): on a conflict it is
@@ -919,7 +919,7 @@ func (r *VMMigrationReconciler) handleExportingPhase(ctx context.Context, migrat
 	providerInstance, err := r.getProviderInstance(ctx, sourceProvider)
 	if err != nil {
 		logger.Error(err, "Failed to get source provider instance")
-		return r.transitionToFailed(ctx, migration, "Failed to get provider instance: "+migrationFailureDetail(err))
+		return r.transitionToFailed(ctx, migration, "Failed to get provider instance: "+migrationStagingDetail(migration, err))
 	}
 
 	// Check if export is already in progress or already completed.
@@ -944,7 +944,7 @@ func (r *VMMigrationReconciler) handleExportingPhase(ctx context.Context, migrat
 		if migration.Status.TaskRef != "" {
 			done, err := providerInstance.IsTaskComplete(ctx, migration.Status.TaskRef)
 			if err != nil {
-				logger.Error(err, "Failed to check export task status")
+				logger.Error(redactMigrationStagingError(migration, err), "Failed to check export task status")
 				return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 			}
 
@@ -956,12 +956,12 @@ func (r *VMMigrationReconciler) handleExportingPhase(ctx context.Context, migrat
 			// Task complete, check status
 			taskStatus, err := providerInstance.TaskStatus(ctx, migration.Status.TaskRef)
 			if err != nil {
-				logger.Error(err, "Failed to get export task status")
-				return r.transitionToFailed(ctx, migration, "Failed to get export task status: "+migrationFailureDetail(err))
+				logger.Error(redactMigrationStagingError(migration, err), "Failed to get export task status")
+				return r.transitionToFailed(ctx, migration, "Failed to get export task status: "+migrationStagingDetail(migration, err))
 			}
 
 			if taskStatus.Error != "" {
-				logger.Info("Export task failed", "task_id", migration.Status.TaskRef, "error", taskStatus.Error)
+				logger.Info("Export task failed", "task_id", migration.Status.TaskRef, "error", redactMigrationStagingText(migration, taskStatus.Error))
 				return r.transitionToFailed(ctx, migration, "Export failed: "+migrationTaskFailedDetail)
 			}
 
@@ -1086,7 +1086,7 @@ func (r *VMMigrationReconciler) handleExportingPhase(ctx context.Context, migrat
 		return r.transitionToFailed(ctx, migration, migrationSourceNotOwnedMessage)
 	}
 	if err != nil {
-		logger.Error(err, "Failed to check the exported disk's size")
+		logger.Error(redactMigrationStagingError(migration, err), "Failed to check the exported disk's size")
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
 	if sizeRefusal != nil {
@@ -1114,7 +1114,9 @@ func (r *VMMigrationReconciler) handleExportingPhase(ctx context.Context, migrat
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
 
-	logger.Info("Starting disk export", "vm_id", sourceVM.Status.ID, "destination", destinationURL)
+	// The staging URL names the tenant's storage (bucket and key, NFS server,
+	// export, path and uid/gid): only its scheme is logged (R28).
+	logger.Info("Starting disk export", "vm_id", sourceVM.Status.ID, "destination", logging.RedactLocation(destinationURL))
 	exportResp, err := providerInstance.ExportDisk(exportCtx, exportReq)
 	if err != nil {
 		// The export RPC failed; release the in-memory guard so a future
@@ -1130,13 +1132,13 @@ func (r *VMMigrationReconciler) handleExportingPhase(ctx context.Context, migrat
 		// A definite answer — nothing was done, or a refusal: the failure is
 		// the outcome.
 		clearMigrationRequest(migration, longOpExport)
-		logger.Error(err, "Failed to start disk export")
+		logger.Error(redactMigrationStagingError(migration, err), "Failed to start disk export")
 		if isOwnerRefusal(err) {
 			// Refused before any disk was read: a constant message, never
 			// the provider's answer (copy_source_owner_refusal.go).
 			return r.transitionToFailed(ctx, migration, migrationSourceNotOwnedMessage)
 		}
-		return r.transitionToFailed(ctx, migration, "Failed to start disk export: "+migrationFailureDetail(err))
+		return r.transitionToFailed(ctx, migration, "Failed to start disk export: "+migrationStagingDetail(migration, err))
 	}
 
 	// Record the export's result (vmmigration_status_write.go): on a conflict
@@ -1305,7 +1307,7 @@ func (r *VMMigrationReconciler) handleImportingPhase(ctx context.Context, migrat
 	providerInstance, err := r.getProviderInstance(ctx, targetProvider)
 	if err != nil {
 		logger.Error(err, "Failed to get target provider instance")
-		return r.transitionToFailed(ctx, migration, "Failed to get target provider instance: "+migrationFailureDetail(err))
+		return r.transitionToFailed(ctx, migration, "Failed to get target provider instance: "+migrationStagingDetail(migration, err))
 	}
 
 	// Check if import is already in progress or already completed.
@@ -1324,7 +1326,7 @@ func (r *VMMigrationReconciler) handleImportingPhase(ctx context.Context, migrat
 		if migration.Status.TaskRef != "" {
 			done, err := providerInstance.IsTaskComplete(ctx, migration.Status.TaskRef)
 			if err != nil {
-				logger.Error(err, "Failed to check import task status")
+				logger.Error(redactMigrationStagingError(migration, err), "Failed to check import task status")
 				return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 			}
 
@@ -1336,12 +1338,12 @@ func (r *VMMigrationReconciler) handleImportingPhase(ctx context.Context, migrat
 			// Task complete, check status
 			taskStatus, err := providerInstance.TaskStatus(ctx, migration.Status.TaskRef)
 			if err != nil {
-				logger.Error(err, "Failed to get import task status")
-				return r.transitionToFailed(ctx, migration, "Failed to get import task status: "+migrationFailureDetail(err))
+				logger.Error(redactMigrationStagingError(migration, err), "Failed to get import task status")
+				return r.transitionToFailed(ctx, migration, "Failed to get import task status: "+migrationStagingDetail(migration, err))
 			}
 
 			if taskStatus.Error != "" {
-				logger.Info("Import task failed", "task_id", migration.Status.TaskRef, "error", taskStatus.Error)
+				logger.Info("Import task failed", "task_id", migration.Status.TaskRef, "error", redactMigrationStagingText(migration, taskStatus.Error))
 				return r.transitionToFailed(ctx, migration, "Import failed: "+migrationTaskFailedDetail)
 			}
 
@@ -1549,7 +1551,8 @@ func (r *VMMigrationReconciler) handleImportingPhase(ctx context.Context, migrat
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
 
-	logger.Info("Starting disk import", "source", sourceURL, "target_name", importReq.TargetName)
+	// Only the staging URL's scheme is logged (R28).
+	logger.Info("Starting disk import", "source", logging.RedactLocation(sourceURL), "target_name", importReq.TargetName)
 	importResp, err := providerInstance.ImportDisk(ctx, importReq)
 	if err != nil {
 		// Release the in-memory guard so a future reconcile can re-attempt the
@@ -1577,7 +1580,8 @@ func (r *VMMigrationReconciler) handleImportingPhase(ctx context.Context, migrat
 		// limit (or one whose size it could not read): nothing was landed.
 		// Held, not failed.
 		if refusal := providerImportRefusal(err, importReq.MaxVirtualSizeBytes); refusal != nil {
-			logger.Info("The target provider refused the import for its disk-size limit", "error", err.Error())
+			logger.Info("The target provider refused the import for its disk-size limit",
+				"error", redactMigrationStagingText(migration, err.Error()))
 			// The hold writes nothing when it is unchanged: the refusal
 			// (nothing landed) is recorded by removing the marker first.
 			if werr := r.updateStatus(ctx, migration); werr != nil {
@@ -1599,8 +1603,8 @@ func (r *VMMigrationReconciler) handleImportingPhase(ctx context.Context, migrat
 				return res, rerr
 			}
 		}
-		logger.Error(err, "Failed to start disk import")
-		return r.transitionToFailed(ctx, migration, "Failed to start disk import: "+migrationFailureDetail(err))
+		logger.Error(redactMigrationStagingError(migration, err), "Failed to start disk import")
+		return r.transitionToFailed(ctx, migration, "Failed to start disk import: "+migrationStagingDetail(migration, err))
 	}
 
 	// The import went through: a later unverifiable refusal starts its

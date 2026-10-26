@@ -45,6 +45,7 @@ import (
 	"github.com/vmware/govmomi/vim25/types"
 
 	"github.com/projectbeskar/virtrigaud/internal/diskutil"
+	"github.com/projectbeskar/virtrigaud/internal/obs/logging"
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
 	"github.com/projectbeskar/virtrigaud/internal/storage"
 	"github.com/projectbeskar/virtrigaud/internal/storage/migration"
@@ -3702,7 +3703,35 @@ func (p *Provider) extractSnapshotNames(snapshotTree []types.VirtualMachineSnaps
 	return names
 }
 
-// ExportDisk implements the ProviderServer interface. It exports a virtual disk from
+// ExportDisk exports a VM disk to the migration's staging storage
+// (exportDiskStaged). Its error is redacted of the staging location — the
+// URL, the bucket, key and endpoint, the nfs server, export and path — before
+// it crosses the wire and reaches the SDK's request log (R28,
+// migration.RedactStagingError): host command output and storage client
+// errors quote them.
+func (p *Provider) ExportDisk(ctx context.Context, req *providerv1.ExportDiskRequest) (*providerv1.ExportDiskResponse, error) {
+	resp, err := p.exportDiskStaged(ctx, req)
+	if err != nil {
+		return nil, migration.RedactStagingError(err,
+			migration.StagingLocations(req.GetDestinationUrl(), req.GetStorageOptionsJson())...)
+	}
+	return resp, nil
+}
+
+// ImportDisk imports a disk from the migration's staging storage
+// (importDiskStaged). Its error is redacted of the staging location before it
+// crosses the wire and reaches the SDK's request log (R28,
+// migration.RedactStagingError).
+func (p *Provider) ImportDisk(ctx context.Context, req *providerv1.ImportDiskRequest) (*providerv1.ImportDiskResponse, error) {
+	resp, err := p.importDiskStaged(ctx, req)
+	if err != nil {
+		return nil, migration.RedactStagingError(err,
+			migration.StagingLocations(req.GetSourceUrl(), req.GetStorageOptionsJson())...)
+	}
+	return resp, nil
+}
+
+// exportDiskStaged is ExportDisk before its error is redacted. It exports a virtual disk from
 // vSphere storage and writes the result to the PVC-backed storage URL specified in
 // req.DestinationUrl (format: "pvc://<pvc-name>/<file-path>").
 //
@@ -3738,7 +3767,7 @@ func (p *Provider) extractSnapshotNames(snapshotTree []types.VirtualMachineSnaps
 //     deleteExportClone.
 //
 // The operation runs synchronously; Task in the response is nil.
-func (p *Provider) ExportDisk(ctx context.Context, req *providerv1.ExportDiskRequest) (*providerv1.ExportDiskResponse, error) {
+func (p *Provider) exportDiskStaged(ctx context.Context, req *providerv1.ExportDiskRequest) (*providerv1.ExportDiskResponse, error) {
 	// ADR-0006: vSphere is a SOURCE for the S3 relay export (Slice 1) and the NFS
 	// qemu-img export (Slice 4). Accept pvc, s3, and nfs; reject unknown honestly.
 	// The s3/pvc paths are relay-only — an explicit "direct" fails loudly (never a
@@ -3760,7 +3789,7 @@ func (p *Provider) ExportDisk(ctx context.Context, req *providerv1.ExportDiskReq
 	}
 
 	// Never log the credentials map (secret material); log only the backend.
-	p.logger.Info("Exporting disk", "vm_id", req.VmId, "destination", req.DestinationUrl, "backend", req.BackendType)
+	p.logger.Info("Exporting disk", "vm_id", req.VmId, "destination", logging.RedactLocation(req.DestinationUrl), "backend", req.BackendType)
 
 	// Get disk information first
 	diskInfo, err := p.GetDiskInfo(ctx, &providerv1.GetDiskInfoRequest{
@@ -4022,11 +4051,11 @@ func (p *Provider) ExportDisk(ctx context.Context, req *providerv1.ExportDiskReq
 	// storage-client upload. Returns early; the s3/pvc upload below is skipped.
 	if useNFS {
 		nfsURL := strings.TrimSpace(req.DestinationUrl)
-		p.logger.Info("Writing disk to NFS export", "destination", nfsURL, "local_vmdk", uploadPath)
+		p.logger.Info("Writing disk to NFS export", "destination", logging.RedactLocation(nfsURL), "local_vmdk", uploadPath)
 		if err := p.exportLocalVMDKToNFS(ctx, uploadPath, nfsURL); err != nil {
 			return nil, errors.NewInternal("failed to write disk to nfs export", err)
 		}
-		p.logger.Info("Disk export to NFS completed", "export_id", exportID, "destination", nfsURL)
+		p.logger.Info("Disk export to NFS completed", "export_id", exportID, "destination", logging.RedactLocation(nfsURL))
 		return &providerv1.ExportDiskResponse{
 			ExportId: exportID,
 			Task:     nil, // synchronous
@@ -4037,7 +4066,7 @@ func (p *Provider) ExportDisk(ctx context.Context, req *providerv1.ExportDiskReq
 	}
 
 	// Upload to destination storage
-	p.logger.Info("Uploading disk to storage", "destination", req.DestinationUrl)
+	p.logger.Info("Uploading disk to storage", "destination", logging.RedactLocation(req.DestinationUrl))
 
 	// Re-open file for reading
 	uploadFile, err := os.Open(uploadPath)
@@ -4084,7 +4113,7 @@ func (p *Provider) ExportDisk(ctx context.Context, req *providerv1.ExportDiskReq
 	return response, nil
 }
 
-// ImportDisk implements the ProviderServer interface. It downloads a virtual disk from
+// importDiskStaged is ImportDisk before its error is redacted. It downloads a virtual disk from
 // PVC-backed storage (req.SourceUrl, format: "pvc://<pvc-name>/<file-path>") and
 // uploads it to a vSphere datastore so that it can be attached to a VM via Create.
 //
@@ -4102,7 +4131,7 @@ func (p *Provider) ExportDisk(ctx context.Context, req *providerv1.ExportDiskReq
 // The ImportDiskResponse.Path contains the fully-qualified datastore VMDK path to be
 // passed as VMImage.Path in a subsequent Create request. The operation runs
 // synchronously; Task in the response is nil.
-func (p *Provider) ImportDisk(ctx context.Context, req *providerv1.ImportDiskRequest) (*providerv1.ImportDiskResponse, error) {
+func (p *Provider) importDiskStaged(ctx context.Context, req *providerv1.ImportDiskRequest) (*providerv1.ImportDiskResponse, error) {
 	// ADR-0006: vSphere is a TARGET for the S3 relay import (Slice 2, the reverse of
 	// Slice 1's vSphere→S3→libvirt) and the NFS qemu-img import (Slice 4). Accept
 	// pvc, s3, and nfs; reject unknown honestly instead of falling through to pvc.
@@ -4128,7 +4157,7 @@ func (p *Provider) ImportDisk(ctx context.Context, req *providerv1.ImportDiskReq
 		return nil, errors.NewUnavailable("vSphere client not configured", nil)
 	}
 
-	p.logger.Info("Importing disk", "source", req.SourceUrl, "storage", req.StorageHint)
+	p.logger.Info("Importing disk", "source", logging.RedactLocation(req.SourceUrl), "storage", req.StorageHint)
 
 	// Determine target datastore
 	datastore := p.config.DefaultDatastore
@@ -4195,7 +4224,7 @@ func (p *Provider) ImportDisk(ctx context.Context, req *providerv1.ImportDiskReq
 	}()
 
 	// Download from storage
-	p.logger.Info("Downloading disk from storage", "source", req.SourceUrl)
+	p.logger.Info("Downloading disk from storage", "source", logging.RedactLocation(req.SourceUrl))
 
 	file, err := os.Create(tempFile)
 	if err != nil {

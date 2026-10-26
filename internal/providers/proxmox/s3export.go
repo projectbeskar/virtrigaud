@@ -23,6 +23,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/projectbeskar/virtrigaud/internal/obs/logging"
 	"github.com/projectbeskar/virtrigaud/internal/storage"
 	"github.com/projectbeskar/virtrigaud/internal/storage/migration"
 	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
@@ -120,7 +121,7 @@ func (p *Provider) exportDiskToS3(ctx context.Context, req *providerv1.ExportDis
 	// Never log credentials — only the backend, volid, paths.
 	p.logger.Info("Exporting disk from Proxmox node to S3",
 		"backend", req.BackendType, "vm", req.VmId, "volid", volid, "src_path", srcPath,
-		"host_tmp", hostTmp, "destination", req.DestinationUrl, "compress", req.Compress)
+		"host_tmp", hostTmp, "destination", logging.RedactLocation(req.DestinationUrl), "compress", req.Compress)
 
 	// --- FLATTEN (ADR D4) on the node ---
 	flattenCmd := buildExportFlattenCommand(srcFormat, srcPath, hostTmp, req.Compress)

@@ -35,3 +35,16 @@ func TestRedactURL(t *testing.T) {
 		assert.Equal(t, want, RedactURL(raw), raw)
 	}
 }
+
+func TestRedactLocation(t *testing.T) {
+	for raw, want := range map[string]string{
+		"": "",
+		"nfs://nfs.example.com/exports/m/vmmigrations_ns_m_export.qcow2?gid=1000&uid=1000": "nfs://<redacted>",
+		"s3://tenant-bucket/vmmigrations/ns/m/export.vmdk":                                 "s3://<redacted>",
+		" PVC://claim/m/export.qcow2 ":                                                     "pvc://<redacted>",
+		"tenant-bucket/key":                                                                "<redacted>",
+		"user@example.com/x://y":                                                           "<redacted>",
+	} {
+		assert.Equal(t, want, RedactLocation(raw), raw)
+	}
+}

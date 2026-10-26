@@ -24,6 +24,7 @@ import (
 	"log"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -457,12 +458,21 @@ func redactLocations(err error, locations ...string) error {
 	return &redactedCause{text: redactText(redactCommandText(err.Error()), locations...), err: err}
 }
 
-// redactText is redactLocations on a text.
+// redactText is redactLocations on a text. The longest locations are
+// replaced first, so a bucket name inside the endpoint's host name does not
+// leave the rest of the host behind, and texts shorter than
+// storage.MinRedactedLocationLen (an export root's "/") are ignored: they
+// would mangle the whole text.
 func redactText(text string, locations ...string) string {
+	ls := make([]string, 0, len(locations))
 	for _, l := range locations {
-		if l = strings.TrimSpace(l); l != "" {
-			text = strings.ReplaceAll(text, l, stagedLocationMarker)
+		if l = strings.TrimSpace(l); len(l) >= storage.MinRedactedLocationLen && !slices.Contains(ls, l) {
+			ls = append(ls, l)
 		}
+	}
+	slices.SortStableFunc(ls, func(a, b string) int { return len(b) - len(a) })
+	for _, l := range ls {
+		text = strings.ReplaceAll(text, l, stagedLocationMarker)
 	}
 	return text
 }

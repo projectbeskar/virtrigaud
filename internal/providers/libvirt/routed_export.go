@@ -65,11 +65,14 @@ func (p *Provider) checkHostDiskTransport(c libvirtConn) error {
 // happens before any host is leased. Then, on the leased connection of
 // req.TargetHostId: the owner check, the transport check, the disk resolved
 // from the checked domain's definition (diskInfoOn), and the shared s3 / nfs
-// core. Errors are mapped by routedRPCError: a domain this VM does not own is
-// NotFound; a failure on the host is VM_OPERATION_FAILED, or, for a host that
-// stopped answering, HOST_UNAVAILABLE before any command ran, "not performed"
-// while only reads ran and an unknown outcome once the export started (R25),
-// neither of which counts toward the manager's circuit breaker.
+// core. Errors are answered by routedExportFailure: a domain this VM does not
+// own is NotFound; a failure of the shared core that the single-host export
+// proves definite is answered the same way (not performed, or a refusal); a
+// host that stopped answering is HOST_UNAVAILABLE before any command ran, "not
+// performed" while only reads ran and an unknown outcome once the export
+// started (R25); any other failure on the host is VM_OPERATION_FAILED with an
+// unknown outcome. None counts toward the manager's circuit breaker, and no
+// log line or answer names the staged object's location (R28).
 func (p *Provider) exportDiskRouted(ctx context.Context, req *providerv1.ExportDiskRequest) (*providerv1.ExportDiskResponse, error) {
 	// Only the host-side transports: the pvc backend (and the legacy empty
 	// backend, which means pvc) reads the disk from the pod.
@@ -87,6 +90,9 @@ func (p *Provider) exportDiskRouted(ctx context.Context, req *providerv1.ExportD
 		return nil, status.Error(codes.InvalidArgument, "nfs export destination must be an nfs:// URL")
 	}
 
+	// The staged object's locations are redacted from every logged cause
+	// (R28).
+	locations := exportStagedLocations(req)
 	vm := contracts.VMRef{ID: req.VmId, HostID: req.TargetHostId, Owner: ownerFromProto(req.GetOwner())}
 	// The export is long: it runs under the routed budget, and its qemu-img
 	// under flock + timeout (routed_budget.go).
@@ -94,6 +100,9 @@ func (p *Provider) exportDiskRouted(ctx context.Context, req *providerv1.ExportD
 	defer cancel()
 	var resp *providerv1.ExportDiskResponse
 	err := p.withOwnedDomain(bctx, vm, "disk export", func(bctx context.Context, c libvirtConn, d domainTarget) error {
+		if p.routedDiskConnFn != nil {
+			c = p.routedDiskConnFn(c)
+		}
 		if err := p.checkHostDiskTransport(c); err != nil {
 			return err
 		}
@@ -130,8 +139,83 @@ func (p *Provider) exportDiskRouted(ctx context.Context, req *providerv1.ExportD
 		return err
 	})
 	if err != nil {
-		return nil, routedRPCError("export disk",
-			classifyRoutedFailure("export disk", strings.TrimSpace(req.GetTargetHostId()), ctx, bctx, err))
+		return nil, routedExportFailure(strings.TrimSpace(req.GetTargetHostId()), ctx, bctx, err, locations...)
 	}
 	return resp, nil
+}
+
+// routedExportOp names the routed export in its answers and log lines.
+const routedExportOp = "export disk"
+
+// routedExportFailure answers a failed routed export on host. parent is the
+// call's context, budget the routed budget; locations are the staged object's
+// (exportStagedLocations), replaced in every logged cause (R28: the S3
+// client's error names the bucket, key and endpoint, qemu-img's the nfs
+// server, export, path and uid/gid).
+//
+// The routed guards' answers come first (classifyRoutedFailure: the budget ran
+// out or timeout(1) stopped the command — unknown; the same export still runs
+// — retry; the lock directory refused; a host tool missing), then every
+// categorized answer (routedTypedStatus: the owner check's NotFound, a refused
+// source chain, a host that could not be leased). A failure of the shared s3 /
+// nfs core is then answered as the single-host export answers it
+// (singleHostExportFailure), because the core proves the same facts on a
+// clustered host:
+//
+//   - stageInvalid (the request's s3 configuration is unusable): InvalidArgument.
+//   - stageBefore (nothing was published: a check, a step in the export's
+//     private directory, or an S3 upload the service refused or failed before
+//     the client read the source to its end, so it never sent the completing
+//     call — SignatureDoesNotMatch, AccessDenied): "not performed".
+//   - stageCommand (the nfs export's in-place convert, the s3 export's
+//     flatten) that ended on its own with an exit status while the call was
+//     alive (hostCommandEnded) — an nfs mount the server refused
+//     (MNT3ERR_ACCES), a qemu-img error: "failed, nothing exported", which
+//     the manager reads as "not performed" as well.
+//
+// A host that stopped answering (isHostTransportFailure) is never read that
+// way: it is answered by how far the call got on the host (R25,
+// hostOpRPCErrorFor) — unknown once a command that may change the host was
+// sent. So is a stageCommand whose command did not end on its own (its
+// session dropped, it was killed, the call was cancelled): it may still be
+// writing, and its outcome stays unknown, as is any failure the core did not
+// tag (the S3 upload's completing call may have taken effect).
+func routedExportFailure(host string, parent, budget context.Context, err error, locations ...string) error {
+	err = classifyRoutedFailure(routedExportOp, host, parent, budget, err)
+	cause := redactLocations(err, locations...)
+	if st := routedTypedStatus(routedExportOp, cause); st != nil {
+		return st
+	}
+	if definite := routedExportDefiniteFailure(budget, err, cause); definite != nil {
+		return definite
+	}
+	return routedHostFailureStatus(hostOpWrite, routedExportOp, cause)
+}
+
+// routedExportDefiniteFailure is the single-host classification of a failure
+// of the shared export core that routedExportFailure accepts (see there), or
+// nil. err is the failure, cause its redacted form (logged).
+func routedExportDefiniteFailure(ctx context.Context, err, cause error) error {
+	stage, _, tagged := stageOf(err)
+	if !tagged || isHostTransportFailure(err) {
+		return nil
+	}
+	switch stage {
+	case stageInvalid:
+		return refusal(codes.InvalidArgument, wireExportRefused, cause)
+	case stageBefore:
+		return nothingDone(wireExportNotPerformed, cause)
+	case stageCommand:
+		if hostCommandEnded(ctx, err) {
+			return notPerformed(wireExportFailed, cause)
+		}
+	}
+	return nil
+}
+
+// exportStagedLocations returns the texts that locate req's staged object, for
+// redactLocations (R28): its staging URL and the texts in it, and the
+// non-secret storage options (migration.StagingLocations).
+func exportStagedLocations(req *providerv1.ExportDiskRequest) []string {
+	return migration.StagingLocations(req.GetDestinationUrl(), req.GetStorageOptionsJson())
 }

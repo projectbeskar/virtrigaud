@@ -106,7 +106,8 @@ const (
 // and a dead-<subcommand> or dead-<tool>-<subcommand> file makes that call die
 // without an exit status (the host dropped the connection), as "dead" does for
 // every call of a host; exit-qemu-img-<subcommand> holds the exit status of
-// that qemu-img call (124 and 137: timeout(1)'s) —
+// that qemu-img call (124 and 137: timeout(1)'s), and stderr-qemu-img-<subcommand>
+// makes it print that file's content on stderr and exit 1 (a libnfs error) —
 // while any other sudo only logs; every other host tool (mv included: it
 // never moves a real file) only logs. sh answers the chain-image and
 // directory checks root copies make (chainMemberScript, diskDirModeScript) as
@@ -198,6 +199,7 @@ isoinfo)
        esac ;;
   esac ;;
 qemu-img)
+  if [ -f "$d/stderr-qemu-img-$1" ]; then cat "$d/stderr-qemu-img-$1" >&2; exit 1; fi
   if [ -f "$d/exit-qemu-img-$1" ]; then exit "$(cat "$d/exit-qemu-img-$1")"; fi
   fail qemu-img
   if [ "$1" = info ]; then printf '{"virtual-size": 10737418240, "actual-size": 1073741824, "format": "qcow2"}\n'; fi ;;

@@ -36,6 +36,7 @@ import (
 
 	v1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
 	"github.com/projectbeskar/virtrigaud/internal/diskutil"
+	"github.com/projectbeskar/virtrigaud/internal/obs/logging"
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
 	"github.com/projectbeskar/virtrigaud/internal/providers/proxmox/pveapi"
 	"github.com/projectbeskar/virtrigaud/internal/storage"
@@ -1795,8 +1796,36 @@ func exportNeedsConversion(sourceFormat, targetFormat string, compress bool) boo
 	return compress && targetFormat == "qcow2"
 }
 
-// ExportDisk exports a VM disk for migration
+// ExportDisk exports a VM disk to the migration's staging storage
+// (exportDiskStaged). Its error is redacted of the staging location — the
+// URL, the bucket, key and endpoint, the nfs server, export and path — before
+// it crosses the wire and reaches the SDK's request log (R28,
+// migration.RedactStagingError): host command output and storage client
+// errors quote them.
 func (p *Provider) ExportDisk(ctx context.Context, req *providerv1.ExportDiskRequest) (*providerv1.ExportDiskResponse, error) {
+	resp, err := p.exportDiskStaged(ctx, req)
+	if err != nil {
+		return nil, migration.RedactStagingError(err,
+			migration.StagingLocations(req.GetDestinationUrl(), req.GetStorageOptionsJson())...)
+	}
+	return resp, nil
+}
+
+// ImportDisk imports a disk from the migration's staging storage
+// (importDiskStaged). Its error is redacted of the staging location before it
+// crosses the wire and reaches the SDK's request log (R28,
+// migration.RedactStagingError).
+func (p *Provider) ImportDisk(ctx context.Context, req *providerv1.ImportDiskRequest) (*providerv1.ImportDiskResponse, error) {
+	resp, err := p.importDiskStaged(ctx, req)
+	if err != nil {
+		return nil, migration.RedactStagingError(err,
+			migration.StagingLocations(req.GetSourceUrl(), req.GetStorageOptionsJson())...)
+	}
+	return resp, nil
+}
+
+// exportDiskStaged exports a VM disk for migration (ExportDisk before its error is redacted).
+func (p *Provider) exportDiskStaged(ctx context.Context, req *providerv1.ExportDiskRequest) (*providerv1.ExportDiskResponse, error) {
 	// ADR-0006: Proxmox disks live on the PVE node, so the pod-mounted pvc path can
 	// never work; accept only the S3 relay and the NFS qemu-img paths (both run
 	// node-side) and reject pvc/unknown backends honestly (Slice 4).
@@ -1834,7 +1863,7 @@ func (p *Provider) ExportDisk(ctx context.Context, req *providerv1.ExportDiskReq
 		return nil, errors.NewUnavailable("PVE client not configured", nil)
 	}
 
-	p.logger.Info("Exporting disk", "vm_id", req.VmId, "destination", req.DestinationUrl)
+	p.logger.Info("Exporting disk", "vm_id", req.VmId, "destination", logging.RedactLocation(req.DestinationUrl))
 
 	// Parse VM reference
 	vmid, node, err := p.parseVMReference(req.VmId)
@@ -1987,7 +2016,7 @@ func (p *Provider) ExportDisk(ctx context.Context, req *providerv1.ExportDiskReq
 	}
 
 	// Upload to destination storage
-	p.logger.Info("Uploading disk to storage", "destination", req.DestinationUrl)
+	p.logger.Info("Uploading disk to storage", "destination", logging.RedactLocation(req.DestinationUrl))
 
 	// Re-open file for reading
 	uploadFile, err := os.Open(uploadPath)
@@ -2034,8 +2063,8 @@ func (p *Provider) ExportDisk(ctx context.Context, req *providerv1.ExportDiskReq
 	return response, nil
 }
 
-// ImportDisk imports a disk from an external source
-func (p *Provider) ImportDisk(ctx context.Context, req *providerv1.ImportDiskRequest) (*providerv1.ImportDiskResponse, error) {
+// importDiskStaged imports a disk from an external source (ImportDisk before its error is redacted).
+func (p *Provider) importDiskStaged(ctx context.Context, req *providerv1.ImportDiskRequest) (*providerv1.ImportDiskResponse, error) {
 	// ADR-0006: Proxmox disks live on the PVE node, so the pod-mounted pvc path can
 	// never work; accept only the S3 relay and the NFS qemu-img paths (both run
 	// node-side) and reject pvc/unknown backends honestly (Slice 4).
@@ -2079,7 +2108,7 @@ func (p *Provider) ImportDisk(ctx context.Context, req *providerv1.ImportDiskReq
 		return nil, errors.NewUnavailable("PVE client not configured", nil)
 	}
 
-	p.logger.Info("Importing disk", "source", req.SourceUrl, "storage", req.StorageHint)
+	p.logger.Info("Importing disk", "source", logging.RedactLocation(req.SourceUrl), "storage", req.StorageHint)
 
 	// Find appropriate node
 	node, err := p.client.FindNode(ctx)
@@ -2152,7 +2181,7 @@ func (p *Provider) ImportDisk(ctx context.Context, req *providerv1.ImportDiskReq
 	}()
 
 	// Download from storage
-	p.logger.Info("Downloading disk from storage", "source", req.SourceUrl)
+	p.logger.Info("Downloading disk from storage", "source", logging.RedactLocation(req.SourceUrl))
 
 	file, err := os.Create(tempFile)
 	if err != nil {
