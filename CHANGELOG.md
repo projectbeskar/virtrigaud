@@ -5,6 +5,33 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-10-26 22:46] - Durable resize reservations for clustered VMs (G3)
+**Author:** @wrkode (William Rizzo)
+
+### Added
+- `api/infra.virtrigaud.io/v1beta1/virtualmachine_types.go`: `status.placement.resizeReservation` (`PlacementResources`, optional): the footprint a clustered resize-up was admitted at; regenerated deepcopy and `config/crd/bases` (chart CRDs via `make gen-helm-crds`).
+- `internal/scheduler/assume/assume.go`: `Narrow` lowers a pick's resources once the applied size is recorded.
+- `internal/controller/vmcrdfeatures.go`: readiness requires `status.placement.resizeReservation` in the installed CRD.
+- `internal/controller/virtualmachine_resize_reservation_test.go`, `resize_reservation_envtest_test.go`: write-ahead order, restart before and after the provider call, async task with failed checks and restart, failed and restart-pending results, ambiguous/rejected/pruned writes, mixed grow/shrink with memory ceiling, spec changes while unresolved, persistence through the real CRD schema.
+
+### Fixed
+- `internal/controller/virtualmachine_resize_gate.go`: an admitted clustered resize-up is assumed with a token, written to `resizeReservation` with a checked status write, and sent to the provider only when the API server's answer carries the reservation (fails closed on an older CRD); the reservation is never lowered while set and is released only once the outcome is established (`settleResizeReservation`).
+- `internal/controller/virtualmachine_placement_capacity.go`: `admittedFootprint` counts a VM at the larger of its recorded footprint and its reservation, for scheduling, admission and the committed-capacity gauges alike.
+- `internal/controller/virtualmachine_controller.go`: `writeStatus` returns the status write's error; the steady-state pass settles the reservation.
+
+### Changed
+- `docs/adr/0007-clustered-orchestrator-provider.md`: A5 *durable resize reservation* amendment (field, write-ahead, accounting, settlement, recovery, limits).
+- `docs/clustered-provider-inventory.md`, `docs/reconfigure-results.md`, `docs/vm-provider-binding.md`, `docs/upgrading.md`: the reservation, its lifecycle, CRD-first upgrade and rollback caveat.
+
+### Why
+A clustered resize-up was reserved only in memory and recorded after the provider applied it, so a manager restart, a leader change, a delayed task or an expired assumption could leave the larger size counted nowhere and let another VM overbook the host (G3).
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout (CRD before manager)
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-10-26 18:53] - Placement reservations end on evidence, never on a timer alone
 **Author:** @wrkode (William Rizzo)
 

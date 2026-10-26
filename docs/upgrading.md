@@ -15,6 +15,25 @@ is the index and the sequencing, not a duplicate of that detail.
 > intermediate state that only matters if you deployed a `main` build from inside
 > that window.
 
+## Upgrading from v0.4.0: durable resize reservation
+
+The release after v0.4.0 adds `status.placement.resizeReservation` to the
+`VirtualMachine` CRD (ADR-0007 A5, *durable resize reservation*; see
+[`clustered-provider-inventory.md`](clustered-provider-inventory.md#durable-resize-reservation)).
+It matters only for `topology: cluster` Providers.
+
+- **Install the new CRDs before the new manager.** On an older CRD the
+  manager fails readiness (it reports `status.placement.resizeReservation`
+  missing), whatever the Providers' topology, and because the API server
+  prunes the field, every clustered resize-up is held with
+  `Reconfiguring=False/PlacementError` instead of being sent unreserved.
+- **Rolling the manager back loses outstanding reservations.** An older
+  manager rewrites the whole status without the field, so a resize in flight
+  (a reconfigure task, a change pending a restart, or a failed attempt) counts
+  only at its recorded size again. Roll back when no clustered VM shows
+  `status.placement.resizeReservation`, or check those hosts' committed gauges
+  afterwards.
+
 ## Breaking changes
 
 | Change | Who is affected | Action required |
@@ -282,7 +301,8 @@ the following once after upgrading, and delete only what no `VMMigration` in fli
      and on every readiness probe. If the `VirtualMachine` CRD is missing
      `status.boundProvider` or the `spec.providerRef` immutability rule (#341), or
      (for clustered Providers, ADR-0007) the pending-size rule,
-     `status.placement.pendingResources` or `status.placement.memoryCeilingMiB`, or
+     `status.placement.pendingResources`, `status.placement.memoryCeilingMiB` or
+     `status.placement.resizeReservation`, or
      the `Suspended`/`Unknown` values of `status.powerState`, if the `Provider` CRD
      lacks `status.reportedCapabilities.supportsHonestReconfigure`, if
      the other three lack `spec.consumerNamespaceSelector`, or if the `VMImage` CRD

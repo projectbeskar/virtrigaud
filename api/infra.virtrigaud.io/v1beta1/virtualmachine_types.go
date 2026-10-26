@@ -560,6 +560,19 @@ type PlacementStatus struct {
 	// +kubebuilder:validation:Maximum=104857600
 	MemoryCeilingMiB *int64 `json:"memoryCeilingMiB,omitempty"`
 
+	// ResizeReservation is the footprint (vCPUs, and memory including any
+	// memory ceiling) a clustered resize of this VM was admitted at (ADR-0007
+	// Addendum A, A5 durable resize reservation). The operator writes it
+	// through a resourceVersion-checked status update BEFORE it sends the
+	// Reconfigure, and the clustered accounting counts the VM at the larger of
+	// it and its applied size, per resource, for as long as it is set. It is
+	// never lowered while set, and it is cleared only once the VM's provider
+	// has confirmed the applied size and that size is recorded in
+	// currentResources and memoryCeilingMiB. Unset on single-host Providers
+	// and when no resize is outstanding.
+	// +optional
+	ResizeReservation *PlacementResources `json:"resizeReservation,omitempty"`
+
 	// Pool is the HostPool the VM was scheduled into.
 	// +optional
 	Pool string `json:"pool,omitempty"`
@@ -575,7 +588,7 @@ type PlacementStatus struct {
 }
 
 // PlacementResources is a CPU/memory size recorded by the clustered scheduler
-// (status.placement.pendingResources).
+// (status.placement.pendingResources and status.placement.resizeReservation).
 type PlacementResources struct {
 	// CPU is the number of vCPUs (at most the VMClass maximum, 128).
 	// +kubebuilder:validation:Minimum=0

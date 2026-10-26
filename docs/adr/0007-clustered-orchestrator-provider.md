@@ -1359,7 +1359,8 @@ follows; A2's `pendingHost` is its prerequisite.
 >   keep failing (the error path does not refresh the TTL) for longer than it.
 >   A follow-up must record the admitted size durably before the call (as a
 >   create does with `pendingResources`), or count a VM with an unrecorded
->   reconfigure at the larger of its current and desired sizes.
+>   reconfigure at the larger of its current and desired sizes. *(Resolved
+>   by the durable resize reservation amendment below.)*
 > - **Leader transition.** The paragraph below holds for writes the old
 >   leader saw complete. A `pendingHost` write the old leader sent but whose
 >   answer it never saw can still be stored after the new leader's informer
@@ -1367,6 +1368,64 @@ follows; A2's `pendingHost` is its prerequisite.
 >   overbooked. Bounding this (for example, admitting no clustered placement
 >   for the write timeout after acquiring the lease) is not implemented.
 >   Write records and assumptions remain in-process and are lost on restart.
+>
+> *(Amended 2026-10-26, durable resize reservation (G3).)* An admitted
+> resize-up is now recorded durably before its `Reconfigure` is sent, with the
+> assumption protocol above; no second accounting mechanism is added.
+>
+> - **Field.** `status.placement.resizeReservation` (`PlacementResources`,
+>   additive and optional): the footprint the resize was admitted at, memory
+>   including the memory ceiling. `pendingResources`, `memoryCeilingMiB` and
+>   `currentResources` keep their meaning.
+> - **Write-ahead.** Under the Provider's lock the controller reserves, per
+>   resource, the maximum of the VM's held footprint (its recorded size with
+>   ceiling, and any reservation still set) and its requested footprint, and
+>   assumes it (`Resize`, with a token; an earlier unresolved admission of the
+>   VM is continued at the larger of both). After the lock it sends the
+>   reservation as a resourceVersion-checked status update (`BeginWrite`
+>   first). The `Reconfigure` is sent only when the write was stored **and**
+>   the API server's answer carries the reservation: a CRD older than the
+>   field prunes it, and the resize then fails closed
+>   (`Reconfiguring=False/PlacementError`, no provider call). A rejected write
+>   releases the admission; an ambiguous one keeps it counting and sends
+>   nothing, and the next admission re-sends the write (it only raises the
+>   field, so a duplicate is harmless) until the cache shows the reservation.
+> - **Accounting.** `admittedFootprint` — used alike by scheduling, resize and
+>   clone admission and the committed-capacity gauges — counts a VM at the
+>   per-resource maximum of its recorded footprint and its reservation; a
+>   resize assumption settles once the snapshot's record covers it.
+> - **Settlement.** A request within the reservation is sent under it without
+>   a new admission; the reservation is never lowered while set. It is cleared
+>   only in a reconcile where the VM needs no reconfigure, none is due or
+>   waiting on its backoff, no task is outstanding, no change is pending a
+>   restart, the last `Reconfigure` neither failed nor lacked the honest
+>   marker, and `Describe` reported the VM's vCPUs and memory maximum (which
+>   raise the recorded CPU and ceiling first), in one checked status write
+>   with that record. Only once that write is stored is the VM's resize
+>   assumption narrowed to the recorded footprint. Failed, partial,
+>   restart-pending and asynchronous outcomes keep the reservation.
+> - **Recovery.** After a restart or leader change the reservation still
+>   counts. A VM whose reservation covers its request has its `Reconfigure`
+>   sent again under it. That relies on the clustered `Reconfigure` being
+>   idempotent for a given target size: the libvirt provider's is synchronous
+>   and declarative (it sets the domain to the requested size); re-sending is
+>   accepted for it only. **Requirement for future asynchronous clustered
+>   providers (Cloud Hypervisor included):** a crash after a task started but
+>   before `reconfigureTaskRef` was stored leaves only the reservation behind,
+>   so such a provider must give each Reconfigure a recoverable operation
+>   identity (the manager can find the operation already running or finished
+>   for a VM and target) and accept a repeated request idempotently — answer
+>   with that existing operation instead of starting another. Converging on the
+>   same final configuration is not enough if a repeat can start an
+>   independent operation. This is not implemented; no such provider exists
+>   yet, and one must meet it before it is admitted for clustered resizes.
+>
+> **Still not resolved:** the leader-transition window for writes the old
+> leader never saw answered (above) is unchanged — a reservation write it sent
+> can land late, which only over-reserves, but its in-flight `pendingHost`
+> writes keep the exposure described above. A manager rolled back to a version
+> without the field rewrites status without it and so drops outstanding
+> reservations; the CRD must be installed before the manager.
 >
 > **Resizes are admitted too** (a decision of this review round). A
 > `Reconfigure` that grows the CPU or memory of a VM on a clustered Provider is
@@ -1379,7 +1438,9 @@ follows; A2's `pendingHost` is its prerequisite.
 > same backoff. A host that is not registered, or whose HostPool is missing or
 > belongs to another Provider, fails closed. An admitted resize is assumed at
 > its new size until `status.currentResources` records it (the
-> assumption is kept alive while a reconfigure task runs), and the scheduler
+> assumption is kept alive while a reconfigure task runs; since the durable
+> resize reservation amendment above, recorded first in
+> `status.placement.resizeReservation`), and the scheduler
 > counts each VM once per host at the larger of its listed sizes, so a
 > concurrent create or resize sees it before it is applied.
 >

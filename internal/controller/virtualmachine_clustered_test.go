@@ -62,10 +62,15 @@ type routingProvider struct {
 	reconfigureResult   contracts.ReconfigureResult
 	reconfigureUnmarked bool
 	reconfigureErr      error
+	// onReconfigure, when set, runs as Reconfigure is called.
+	onReconfigure func()
 }
 
 func (p *routingProvider) Reconfigure(_ context.Context, vm contracts.VMRef, _ contracts.CreateRequest) (contracts.ReconfigureResult, error) {
 	p.reconfigureRefs = append(p.reconfigureRefs, vm)
+	if p.onReconfigure != nil {
+		p.onReconfigure()
+	}
 	res := p.reconfigureResult
 	// A current provider marks every answer honest; reconfigureUnmarked plays
 	// an older provider image (review L1).

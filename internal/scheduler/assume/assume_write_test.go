@@ -22,6 +22,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/projectbeskar/virtrigaud/internal/scheduler"
 )
 
 // These tests pin the write lifecycle of an assumption: it ends on evidence
@@ -186,4 +188,17 @@ func TestBeginWrite_AnExpiredPickDroppedByADecisionIsNeverWritten(t *testing.T) 
 	require.True(t, c.BeginWrite("kept", kept), "expired but not yet dropped: every decision so far counted it")
 	assert.Equal(t, []string{"kept"}, uids(c.Observe("p1", present)), "so from now on it counts until resolved")
 	assert.False(t, c.BeginWrite("dropped", dropped), "the decision dropped the other one: its write is refused")
+}
+
+func TestNarrow_LowersOnlyItsOwnPick(t *testing.T) {
+	c := New(time.Minute, newClock().now)
+	big := assumption("vm", "h1")
+	big.Resources = scheduler.ResourceRequest{CPU: 8, MemoryMiB: 16384}
+	tok, _ := c.Assume("p1", big)
+	c.Narrow("vm", tok+1, scheduler.ResourceRequest{CPU: 1, MemoryMiB: 1})
+	a, _, _ := c.Lookup("vm")
+	assert.Equal(t, int32(8), a.Resources.CPU, "another pick's token changes nothing")
+	c.Narrow("vm", tok, scheduler.ResourceRequest{CPU: 4, MemoryMiB: 32768})
+	a, _, _ = c.Lookup("vm")
+	assert.Equal(t, scheduler.ResourceRequest{CPU: 4, MemoryMiB: 16384}, a.Resources, "lowered per resource, never raised")
 }

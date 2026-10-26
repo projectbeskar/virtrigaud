@@ -646,8 +646,9 @@ func (r *VirtualMachineReconciler) reconcileVM(ctx context.Context, vm *infravir
 
 		if !done {
 			logger.Info("Reconfigure task still in progress", "taskRef", vm.Status.ReconfigureTaskRef)
-			// An admitted clustered resize stays assumed until the task ends
-			// and status.currentResources records the new size.
+			// An admitted clustered resize stays reserved
+			// (status.placement.resizeReservation) until the task ends and
+			// its outcome is established; its assumption is refreshed too.
 			if c := r.placements.Load(); c != nil {
 				c.Touch(vmSchedulingUID(vm))
 			}
@@ -977,6 +978,12 @@ func (r *VirtualMachineReconciler) reconcileVM(ctx context.Context, vm *infravir
 	// the limit again (lowered, or the limit raised): nothing would be
 	// withheld any more (clearDiskSizeWithinLimitWhenFits).
 	clearDiskSizeWithinLimitWhenFits(vm, r.MaxDiskSize, provider, vmClass)
+	// A clustered resize whose outcome the provider has now established
+	// releases its durable reservation (settleResizeReservation); not while
+	// a reconfigure is due or waiting on its backoff.
+	if ref.Routed() && !needsRC && !recheckDue && recheckIn == 0 {
+		r.settleResizeReservation(ctx, vm, vmClass, desc)
+	}
 
 	r.updateStatus(ctx, vm)
 
@@ -3024,15 +3031,21 @@ func overrideImageWithPreparedLocation(
 // steady-state reconcile of a healthy VM recomputes the same status every
 // poll.
 func (r *VirtualMachineReconciler) updateStatus(ctx context.Context, vm *infravirtrigaudiov1beta1.VirtualMachine) {
+	if err := r.writeStatus(ctx, vm); err != nil {
+		log.FromContext(ctx).Error(err, "Failed to update VirtualMachine status")
+	}
+}
+
+// writeStatus is updateStatus returning the write's error, for a caller that
+// acts only once the status is stored.
+func (r *VirtualMachineReconciler) writeStatus(ctx context.Context, vm *infravirtrigaudiov1beta1.VirtualMachine) error {
 	boundSnapshotRevertMessage(vm)
 	applySnapshotRevertReadiness(vm)
 	applyDerivedPhase(vm)
 	if r.statusUnchanged(ctx, vm) {
-		return
+		return nil
 	}
-	if err := r.Status().Update(ctx, vm); err != nil {
-		log.FromContext(ctx).Error(err, "Failed to update VirtualMachine status")
-	}
+	return r.Status().Update(ctx, vm)
 }
 
 // statusUnchanged reports whether writing vm's status would be a no-op: the

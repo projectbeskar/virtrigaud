@@ -422,6 +422,19 @@ func (c *Cache) SettleVisible(uid string, hosts []string) {
 	}
 }
 
+// Narrow lowers the resources of the pick token to r, per resource (it never
+// raises them). The caller has established — from its provider's report,
+// recorded durably — that the VM holds no more than r on its host; the
+// assumption keeps covering r until a snapshot shows that record.
+func (c *Cache) Narrow(uid string, token uint64, r scheduler.ResourceRequest) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if e, found := c.entries[uid]; found && e.token == token {
+		e.Resources.CPU = min(e.Resources.CPU, r.CPU)
+		e.Resources.MemoryMiB = min(e.Resources.MemoryMiB, r.MemoryMiB)
+	}
+}
+
 // ForgetIf drops the VM's assumption if it is still the pick token.
 func (c *Cache) ForgetIf(uid string, token uint64) bool {
 	c.mu.Lock()

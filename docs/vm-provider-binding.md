@@ -189,7 +189,8 @@ on every readiness probe (results reused for one minute) and checks that its
 `v1beta1` schema has `status.boundProvider` and the `spec.providerRef` rule.
 On the same CRD it requires the rule that freezes `spec.classRef` and
 `spec.resources` while a clustered create is pending,
-`status.placement.pendingResources`, `status.placement.memoryCeilingMiB`, and
+`status.placement.pendingResources`, `status.placement.memoryCeilingMiB`,
+`status.placement.resizeReservation`, and
 the `Suspended` and `Unknown` values of `status.powerState`
 (see [`clustered-provider-inventory.md`](clustered-provider-inventory.md)).
 The same check reads the `Provider`, `VMClass` and `VMImage` CRDs and requires

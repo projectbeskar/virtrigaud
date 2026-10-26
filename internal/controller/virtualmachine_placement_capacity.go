@@ -58,11 +58,12 @@ const (
 	// only reports it as stale (reportStalePlacement). Twice the bound of the
 	// pendingHost write.
 	placementAssumeTTL = 2 * pendingHostWriteTimeout
-	// resizeAssumeTTL is how long an admitted resize's assumption lives at
-	// most (review N4): the Reconfigure call it covers may run for its full
-	// deadline, and the status write recording the new size comes after it.
-	// Like placementAssumeTTL it is a safety net; the assumption normally ends
-	// when status.currentResources records the new size.
+	// resizeAssumeTTL is how long an admitted resize's assumption lives
+	// before its reservation write is sent (review N4). Once that write was
+	// sent the assumption ends only on evidence, like a create's
+	// (placementAssumeTTL): the informer cache showing the durable
+	// status.placement.resizeReservation (or a record covering it), a
+	// definitive rejection, or the release of the reservation.
 	resizeAssumeTTL = contracts.ReconfigureCallTimeout + placementStatusWriteTimeout
 	// placementUnschedulableMaxRetryInterval caps the backoff of a VM that no
 	// host can take. It starts at placementUnschedulableRetryInterval and
@@ -336,7 +337,10 @@ func pendingCreate(vm *infravirtrigaudiov1beta1.VirtualMachine) bool {
 //   - otherwise, for a VM whose create is pending, pendingFootprint — frozen
 //     by the CRD while it is pending;
 //   - otherwise (a bound VM with nothing recorded, e.g. bound before
-//     currentResources existed), its VMClass size.
+//     currentResources existed), its VMClass size;
+//   - and, per resource, at least status.placement.resizeReservation while
+//     it is set: a clustered resize admitted at that footprint may already be
+//     applied on the host before its size is recorded (resizeReservationOf).
 //
 // spec.resources and spec.classRef of a created VM are ignored: its owner can
 // change them at any time, and a clustered resize-up is admitted against
@@ -357,7 +361,31 @@ func admittedFootprint(vm *infravirtrigaudiov1beta1.VirtualMachine, class *infra
 			base.MemoryMiB = *cur.MemoryMiB
 		}
 	}
-	return withMemoryCeiling(withMinimum(base), memoryCeilingOf(vm, class))
+	return withResizeReservation(withMemoryCeiling(withMinimum(base), memoryCeilingOf(vm, class)), vm)
+}
+
+// resizeReservationOf returns vm's durable resize reservation
+// (status.placement.resizeReservation), ok == false when none is set.
+func resizeReservationOf(vm *infravirtrigaudiov1beta1.VirtualMachine) (scheduler.ResourceRequest, bool) {
+	pl := vm.Status.Placement
+	if pl == nil || pl.ResizeReservation == nil {
+		return scheduler.ResourceRequest{}, false
+	}
+	return scheduler.ResourceRequest{CPU: pl.ResizeReservation.CPU, MemoryMiB: pl.ResizeReservation.MemoryMiB}, true
+}
+
+// withResizeReservation raises r, per resource, to vm's durable resize
+// reservation, if any.
+func withResizeReservation(r scheduler.ResourceRequest, vm *infravirtrigaudiov1beta1.VirtualMachine) scheduler.ResourceRequest {
+	if res, ok := resizeReservationOf(vm); ok {
+		return maxFootprint(r, res)
+	}
+	return r
+}
+
+// maxFootprint is the per-resource maximum of a and b.
+func maxFootprint(a, b scheduler.ResourceRequest) scheduler.ResourceRequest {
+	return scheduler.ResourceRequest{CPU: max(a.CPU, b.CPU), MemoryMiB: max(a.MemoryMiB, b.MemoryMiB)}
 }
 
 // memoryHotAdd reports whether class enables memory hot-add.
@@ -513,8 +541,10 @@ func committedPlacementsFrom(
 			return committedSnapshot{}, err
 		}
 		// The size it counts at settles an admitted resize of it once
-		// status.currentResources records the new size.
-		snap.recorded[uid] = recordedVM{hosts: hosts, size: res, hasSize: hasRecordedSize(other)}
+		// status.currentResources records the new size, or once its durable
+		// resize reservation (counted in res) covers it.
+		_, reserved := resizeReservationOf(other)
+		snap.recorded[uid] = recordedVM{hosts: hosts, size: res, hasSize: hasRecordedSize(other) || reserved}
 		for _, h := range hosts {
 			snap.placed = append(snap.placed, scheduler.PlacedVM{
 				Name:         other.Name,

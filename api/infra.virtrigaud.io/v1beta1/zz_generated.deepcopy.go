@@ -2614,6 +2614,11 @@ func (in *PlacementStatus) DeepCopyInto(out *PlacementStatus) {
 		*out = new(int64)
 		**out = **in
 	}
+	if in.ResizeReservation != nil {
+		in, out := &in.ResizeReservation, &out.ResizeReservation
+		*out = new(PlacementResources)
+		**out = **in
+	}
 	if in.LastScheduledTime != nil {
 		in, out := &in.LastScheduledTime, &out.LastScheduledTime
 		*out = (*in).DeepCopy()

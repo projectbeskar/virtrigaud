@@ -982,8 +982,10 @@ free = allocatable × overcommit ratio − committed
 controller checks, under the same per-Provider lock, that the growth fits in
 its host's free capacity, not counting the VM's own current size. A memory
 grow that stays within a hot-add VM's ceiling is already counted and is not
-checked. If it fits, the resize is sent and counted at its new size straight
-away. If it does not,
+checked. If it fits, the admitted size is first recorded in
+`status.placement.resizeReservation` (a checked status write, see
+[Durable resize reservation](#durable-resize-reservation)), then the resize is
+sent; the VM counts at the reservation from then on. If it does not,
 nothing is sent, the VM keeps running at its current size, and it gets
 `Reconfiguring=False` with reason `InsufficientHostCapacity`, for example:
 
@@ -997,6 +999,39 @@ that grow are checked. The host's health and cordon do not matter, because a
 resize does not move the VM. A VM whose host is not registered as a `Host`, or
 whose `HostPool` is missing or belongs to another Provider, cannot be resized
 up. Single-host Providers are not affected.
+
+#### Durable resize reservation
+
+An admitted resize-up is recorded **before** the `Reconfigure` is sent, so a
+manager restart or leader change can never leave a size the provider applied
+counted nowhere:
+
+1. Under the per-Provider lock the controller computes the footprint to
+   reserve: per resource, the larger of what the VM holds (its recorded size
+   with its memory ceiling, and any reservation still outstanding) and what it
+   asks for. A change that grows one resource and shrinks the other keeps the
+   shrinking one at its held size.
+2. It writes that footprint to `status.placement.resizeReservation` with a
+   resourceVersion-checked status update. The `Reconfigure` is sent only when
+   the write was stored **and** the API server's answer still carries the
+   field. A CRD older than the field prunes it; the resize is then not sent and
+   the VM gets `Reconfiguring=False/PlacementError` naming the field.
+3. While the field is set the VM counts at the larger of it and its recorded
+   size, per resource, in placement decisions and in the committed-capacity
+   gauges. A later request within the reservation goes on under it; one that
+   grows beyond it is admitted for that growth only. The reservation is never
+   lowered while set.
+4. It is cleared only in a later reconcile in which nothing about the VM's size
+   is unresolved: no reconfigure needed or due, no reconfigure task, no change
+   pending a restart, the last `Reconfigure` neither failed nor came back
+   without the honest-result marker, and `Describe` reported the VM's vCPUs and
+   memory maximum (which raise the recorded size first). A failed, partial,
+   restart-pending or asynchronous resize keeps it.
+
+After a restart, a VM whose reservation covers its requested size has its
+`Reconfigure` sent (again) under it without a new admission: the libvirt
+provider's `Reconfigure` is synchronous and sets the domain to the requested
+size, so a repeat of a call that already ran changes nothing.
 
 **Shrinking a running VM waits for it to be powered off.** A shrink is never
 refused, but on a clustered Provider it is applied only while the VM is off. A
@@ -1076,10 +1111,12 @@ recorded (an in-process *assume* cache). Then it schedules, records its own
 pick and releases the lock before it writes `pendingHost`. Two VMs never book
 the same capacity, and two VMs with mutual hard anti-affinity never land on the
 same host. A picked placement stops being tracked once the cache shows its
-`pendingHost` or `host`, and at the latest after 2 minutes (an admitted resize:
-once `status.currentResources` records it, at the latest after 5.5 minutes,
-the longest a `Reconfigure` call and its status write may take). The manager runs
-under leader election, so one in-process cache is authoritative.
+`pendingHost` or `host` (an admitted resize: once it shows its
+`resizeReservation`, or a recorded size covering it). A pick whose write was
+never sent is dropped after 2 minutes (a resize's after 5.5 minutes); one whose
+write was sent is kept until evidence settles it, however long that takes, and
+is reported as stale. The manager runs under leader election, so one
+in-process cache is authoritative.
 
 **When nothing fits**, the VM gets `Placed=False` and `Provisioning=False`, both
 with reason `Unschedulable`, and a message such as:
