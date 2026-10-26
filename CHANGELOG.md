@@ -9,9 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 **Author:** @wrkode (William Rizzo)
 
 ### Fixed
-- `cmd/virtrigaud-loadgen/main.go`: a worker no longer starts an operation once the run's duration has ended. When a long `--observe` returned after the deadline, the ticker's tick and the end of the context were both ready and `select` picked either at random; the operation then ran with a context that outlives the run. The worker now checks the context after the tick (`waitTick`) and `performRandomOperation` refuses to start anything on a done context. An operation, or `--observe` wait, already in flight still finishes, so a run lasts the duration plus at most that wait (and the cleanup).
+- `cmd/virtrigaud-loadgen/main.go`: a worker no longer starts an operation once the run's duration has ended. When a long `--observe` returned after the deadline, the ticker's tick and the end of the context were both ready and `select` picked either at random; the operation then ran with a context that outlives the run. The worker now checks the context after the tick (`waitTick`) and `performRandomOperation` refuses to start anything on a done context. An operation, or `--observe` wait, already in flight still finishes, so a run lasts the duration plus at most the longest operation or wait still in flight (an operation call is bounded at 30 seconds, an `--observe` wait by `--observe-timeout`), plus the cleanup.
 - `cmd/virtrigaud-loadgen/main.go`: an interrupted run (SIGINT/SIGTERM) now exits non-zero (`load generation interrupted`), after saving its results and running `--cleanup`, like an interrupted `vcts run`; a cleanup that left objects behind is reported in the same error.
-- `cmd/virtrigaud-loadgen/main.go`: `vmCount`, accepted but ignored until now (a run kept creating full clones and filled a Proxmox thin pool), is enforced: it is the most VMs the run has alive at once (the VMs it created, the target VMs of the clones it requested, and the VMs whose delete it sent that are not yet gone). A create or clone beyond it is skipped without an API call and recorded as skipped (`Skipped` result, not a failure, outside the totals and latencies). `vmCount` below 1 is rejected; the default stays 10, so a configuration that omits it is now capped at 10. A delete that fails or is still being processed no longer drops the VM from the tracking while the call is in flight.
+- `cmd/virtrigaud-loadgen/main.go`: `vmCount`, accepted but ignored until now (a run kept creating full clones and filled a Proxmox thin pool), is enforced: it is the most VMs the run has alive at once (the VMs it created, the target VMs of the clones it requested, and the VMs whose delete it sent that are not yet gone). A create or clone beyond it is skipped (no create or clone call; at the cap the tool reads, at most once per second, the VMs it deleted to see which are gone) and recorded as skipped (`Skipped` result, not a failure, outside the totals and latencies). `vmCount` below 1 is rejected; the default stays 10, so a configuration that omits it is now capped at 10 VMs (a run that relied on creating more now skips the rest). A clone target stops counting as pending when its `VMClone` is Ready (it then becomes a VM of the run that `delete` can remove) or Failed/gone, so a mix with clones does not exhaust the cap for good. `delete` no longer takes the source of a `VMClone` that has not ended. A delete that fails or is still being processed no longer drops the VM from the tracking while the call is in flight.
 
 ### Added
 - `cmd/virtrigaud-loadgen/vmcap.go`: the slot accounting behind `vmCount` (reserve before the API call, commit or give back after it, forget deleted VMs when the cap is reached).
@@ -29,8 +29,10 @@ The v0.4.1-rc1 lab run showed a 2-minute run lasting 11 minutes and issuing oper
 ### Impact
 - [ ] Breaking change
 - [ ] Requires cluster rollout
-- [x] Config change only
+- [ ] Config change only
 - [ ] Documentation only
+
+Behaviour change of a CLI tool only (nothing in the manager or the providers): existing loadgen configurations keep working, but a run is now capped at `vmCount` VMs (10 by default) and `results.csv` has one more column.
 
 ## [2026-10-25 20:09] - Release notes for v0.4.1-rc1; v0.4.0 notes archived
 **Author:** @wrkode (William Rizzo)

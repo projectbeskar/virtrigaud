@@ -31,6 +31,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
@@ -106,10 +108,10 @@ func TestRunIssuesNothingAfterTheDeadline(t *testing.T) {
 	lg.config.Operations = OperationMix{Create: 1}
 	lg.tickInterval = 10 * time.Millisecond
 	lg.opts.observe = true
-	lg.opts.observeTimeout = 500 * time.Millisecond // the fake client never sets the status: the observation times out
+	lg.opts.observeTimeout = 1500 * time.Millisecond // the fake client never sets the status: the observation times out
 	lg.pollInterval = 20 * time.Millisecond
 
-	const duration = 100 * time.Millisecond
+	const duration = 400 * time.Millisecond
 	start := time.Now()
 	deadline := start.Add(duration)
 	ctx, cancel := context.WithDeadline(context.Background(), deadline)
@@ -126,7 +128,7 @@ func TestRunIssuesNothingAfterTheDeadline(t *testing.T) {
 		assert.NotEmpty(t, res.ObserveError, "the in-flight observation ran to its end")
 	}
 	assert.Equal(t, 1, n)
-	assert.GreaterOrEqual(t, elapsed, 400*time.Millisecond, "the in-flight observation finished")
+	assert.GreaterOrEqual(t, elapsed, 1200*time.Millisecond, "the in-flight observation finished")
 	assert.Less(t, elapsed, 5*time.Second)
 }
 
@@ -268,6 +270,7 @@ func TestVMCapCountsVMsBeingDeleted(t *testing.T) {
 	vm.Finalizers = nil
 	require.NoError(t, env.Client.Update(ctx, vm))
 
+	lg.lastForget = time.Time{} // the reads of the VMs being deleted are paced; ask for a new one
 	lg.performCreate(ctx, "lab-provider", 0)
 	res = <-lg.results
 	assert.True(t, res.Success, "the VM is gone: %s", res.Error)
@@ -405,4 +408,124 @@ func TestUnusedSettings(t *testing.T) {
 		writeConfig(t, "duration: 1s\nrampUpTime: 30s\n"), "--output-dir", t.TempDir())
 	require.NoError(t, err, out)
 	assert.Contains(t, out, "Warning: accepted but not used by this release: rampUpTime")
+}
+
+// TestSettleClones checks, against a real apiserver, how a clone's target
+// counts against vmCount and when the run may delete the clone's source.
+func TestSettleClones(t *testing.T) {
+	env := envtestutil.Start(t)
+	ctx := context.Background()
+
+	// cloneOnce creates a VM and clones it; it returns the generator, the
+	// source VM and the VMClone.
+	cloneOnce := func(t *testing.T, name string) (*LoadGenerator, string, *infrav1beta1.VMClone) {
+		t.Helper()
+		ns := createNamespace(t, env.Client, name)
+		lg := newGenerator(t, env.Client, ns, &options{})
+		lg.config.VMCount = 2
+		source := createVM(t, lg)
+		lg.performClone(ctx, "lab-provider", 0)
+		res := <-lg.results
+		require.True(t, res.Success, res.Error)
+		clone := &infrav1beta1.VMClone{}
+		require.NoError(t, env.Client.Get(ctx, types.NamespacedName{Namespace: ns, Name: lg.clones[0].name}, clone))
+		return lg, source.VMName, clone
+	}
+
+	t.Run("the source of a clone in flight is not deleted; a Ready clone's target becomes a VM of the run", func(t *testing.T) {
+		lg, source, clone := cloneOnce(t, "lg-settle-ready")
+		lg.performCreate(ctx, "lab-provider", 0)
+		assert.True(t, (<-lg.results).Skipped, "VM + clone target = vmCount")
+
+		lg.performDelete(ctx, "lab-provider", 0)
+		res := <-lg.results
+		assert.False(t, res.Success)
+		assert.Equal(t, errNoRunVM.Error(), res.Error, "the only VM is the source of a clone that has not ended")
+		getVM(t, env.Client, lg.namespace, source)
+
+		clone.Status.Phase = infrav1beta1.ClonePhaseReady
+		require.NoError(t, env.Client.Status().Update(ctx, clone))
+		require.NoError(t, env.Client.Create(ctx, &infrav1beta1.VirtualMachine{
+			ObjectMeta: metav1.ObjectMeta{Name: clone.Spec.Target.Name, Namespace: lg.namespace, Labels: clone.Spec.Target.Labels},
+			Spec: infrav1beta1.VirtualMachineSpec{
+				ProviderRef: infrav1beta1.ObjectRef{Name: "lab-provider"}, ClassRef: infrav1beta1.ObjectRef{Name: "small"},
+				PowerState: infrav1beta1.PowerStateOff,
+			},
+		}))
+
+		lg.settleClones(ctx)
+		require.Len(t, lg.vms, 2, "the clone target is one of the run's VMs now")
+		assert.Equal(t, clone.Spec.Target.Name, lg.vms[1].name)
+		assert.Equal(t, infrav1beta1.PowerStateOff, lg.vms[1].power)
+		lg.mu.Lock()
+		alive := lg.aliveLocked()
+		lg.mu.Unlock()
+		assert.Equal(t, 2, alive, "settling a clone does not change how many VMs are alive")
+
+		// Deleting now frees a slot, whichever VM is chosen.
+		lg.performDelete(ctx, "lab-provider", 0)
+		res = <-lg.results
+		require.True(t, res.Success, res.Error)
+		lg.lastForget = time.Time{} // the reads of the VMs being deleted are paced; ask for a new one
+		lg.performCreate(ctx, "lab-provider", 0)
+		res = <-lg.results
+		assert.True(t, res.Success, "the delete freed a slot: %s", res.Error)
+	})
+
+	t.Run("a Failed clone frees its target's slot", func(t *testing.T) {
+		lg, _, clone := cloneOnce(t, "lg-settle-failed")
+		lg.performCreate(ctx, "lab-provider", 0)
+		require.True(t, (<-lg.results).Skipped)
+
+		clone.Status.Phase = infrav1beta1.ClonePhaseFailed
+		require.NoError(t, env.Client.Status().Update(ctx, clone))
+		lg.settleClones(ctx)
+		assert.Len(t, lg.vms, 1)
+		lg.performCreate(ctx, "lab-provider", 0)
+		res := <-lg.results
+		assert.True(t, res.Success, "the failed clone made no VM: %s", res.Error)
+	})
+
+	t.Run("cleanup deletes a settled clone target once", func(t *testing.T) {
+		lg, _, clone := cloneOnce(t, "lg-settle-cleanup")
+		clone.Status.Phase = infrav1beta1.ClonePhaseReady
+		require.NoError(t, env.Client.Status().Update(ctx, clone))
+		require.NoError(t, env.Client.Create(ctx, &infrav1beta1.VirtualMachine{
+			ObjectMeta: metav1.ObjectMeta{Name: clone.Spec.Target.Name, Namespace: lg.namespace, Labels: clone.Spec.Target.Labels},
+			Spec: infrav1beta1.VirtualMachineSpec{
+				ProviderRef: infrav1beta1.ObjectRef{Name: "lab-provider"}, ClassRef: infrav1beta1.ObjectRef{Name: "small"},
+			},
+		}))
+		lg.settleClones(ctx)
+		cctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+		defer cancel()
+		assert.Empty(t, lg.cleanup(cctx))
+		vms := &infrav1beta1.VirtualMachineList{}
+		require.NoError(t, env.Client.List(ctx, vms, client.InNamespace(lg.namespace)))
+		assert.Empty(t, vms.Items)
+	})
+}
+
+// TestForgetDeletedIsPaced checks that workers meeting the cap read the VMs
+// being deleted at most once per poll interval.
+func TestForgetDeletedIsPaced(t *testing.T) {
+	scheme, err := cliclient.NewScheme()
+	require.NoError(t, err)
+	var gets atomic.Int32
+	c := interceptor.NewClient(fake.NewClientBuilder().WithScheme(scheme).Build(), interceptor.Funcs{
+		Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+			gets.Add(1)
+			return c.Get(ctx, key, obj, opts...)
+		},
+	})
+	lg := newGenerator(t, c, "default", &options{})
+	lg.config.VMCount = 1
+	lg.pollInterval = time.Hour
+	lg.deleting = []runObject{{name: "pending-delete"}}
+	for i := 0; i < 5; i++ {
+		lg.performCreate(context.Background(), "lab-provider", 0)
+		res := <-lg.results
+		assert.Equal(t, i > 0, res.Skipped, "the first create finds the deleted VM gone; the rest meet the cap")
+	}
+	assert.LessOrEqual(t, gets.Load(), int32(1), "one read of the VM being deleted, however many creates met the cap")
 }

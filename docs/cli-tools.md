@@ -206,18 +206,25 @@ file sets one of them.
 **`vmCount`: the cap on VMs.** It is the most VMs the run has alive at once: the VMs it created and
 has not deleted, the target VMs of the clones it requested, and the VMs whose delete it sent that
 are not yet gone (they still hold their storage). A `create` or `clone` that would go beyond it is
-**skipped**: no API call is made, and the operation is recorded as skipped (not as a failure, and
-not in the totals of operations performed, success rates or latencies). Deleting VMs frees room
-again. A clone target counts until the run ends, even if its clone fails or someone deletes the
-target, so a run with failing clones may skip clones earlier than the VMs on the hypervisor would
-require. VMs that are not the run's, and snapshots, do not count. A run with `create` weighted
-above `delete` therefore reaches `vmCount` quickly and then mostly skips creates; raise the
-`delete` weight if you want churn at a steady VM count.
+**skipped**: no create or clone call is made (when the cap is reached the tool reads, at most once
+per second, the VMs it deleted to see which are gone), and the operation is recorded as skipped
+(not as a failure, and not in the totals of operations performed, success rates or latencies).
+VMs that are not the run's, and snapshots, do not count.
+
+A clone's target counts from the moment the `VMClone` is accepted. When the `VMClone` is `Ready`,
+its target becomes one of the run's VMs: `power`, `reconfigure`, `snapshot`, `clone` and `delete`
+can act on it, so `delete` frees its slot. A clone that fails or disappears frees its slot. The
+tool notices this when a `delete` runs, so a mix without `delete` keeps every clone target counted.
+Deleting frees room again; a run with `create` weighted above `delete` therefore reaches `vmCount`
+quickly and then mostly skips creates, and you raise the `delete` weight if you want churn at a
+steady VM count.
 
 **What each operation does.** Every operation but `create` and `describe` acts on a VM **this run
 created**, chosen at random among those no other operation is using; it never touches another VM in
 the namespace. Patches and deletes carry the VM's UID, so they never reach another object created
-later under the same name. With no such VM available the operation is recorded as failed
+later under the same name. `delete` never takes the source of a `VMClone` that has not ended
+(`Ready` or `Failed`): deleting it while the provider copies its disk could leave a VM on the
+hypervisor that nothing records. With no such VM available the operation is recorded as failed
 (`no VM created by this run is available`) and nothing is called.
 
 | Operation | API call |
@@ -275,10 +282,11 @@ run's duration for operations still in flight; an interrupt stops it.
   the hypervisor for VMs you did not expect afterwards.
 - **Exit status.** `0` when the run reached the end of its duration and, with `--cleanup`, the
   cleanup completed. **Non-zero** when the run was interrupted (`SIGINT` or `SIGTERM`), like an
-  interrupted `vcts run`: the results are saved and the `--cleanup` runs first, and the output says
-  `Cleanup complete` when it left nothing behind, so a script can tell an interrupted run from a
-  finished one by the status alone. Non-zero also when the cleanup left objects behind or the
-  configuration was unusable.
+  interrupted `vcts run`: the results are saved and the `--cleanup` runs first (the output says
+  `Cleanup complete` when it left nothing behind). A script can therefore tell an interrupted run
+  from a finished one by the status alone. Non-zero also when the cleanup left objects behind or
+  the configuration was unusable. A signal that arrives while the cleanup is running does not stop
+  it (send a second one to terminate the process at once), and does not change the status.
 - **`--dry-run`** makes no API call at all (it needs no kubeconfig): operations are recorded as
   successful with phase `DryRun`, and nothing is observed or cleaned up.
 - **Results.** `results.csv` (one row per operation: `Operation`, `Provider`, `VMName`,

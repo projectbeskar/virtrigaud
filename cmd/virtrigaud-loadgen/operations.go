@@ -95,8 +95,12 @@ type runObject struct {
 	name string
 	uid  types.UID
 	// source and target are, for a VMClone, the names of its source VM and
-	// of the target VM it asks for.
-	source, target string
+	// of the target VM it asks for; provider is the source's Provider.
+	source, target, provider string
+	// resolved is set, for a VMClone, once it is known to have ended (Ready
+	// or Failed) or to be gone: its target then counts as a VM of the run
+	// (it is tracked in lg.vms) or not at all, and its source may be deleted.
+	resolved bool
 }
 
 // idleVMs returns the indexes of the VMs no operation is using. lg.mu must
@@ -105,6 +109,26 @@ func (lg *LoadGenerator) idleVMs() []int {
 	var idle []int
 	for i, vm := range lg.vms {
 		if !vm.busy {
+			idle = append(idle, i)
+		}
+	}
+	return idle
+}
+
+// unclonedLocked returns the indexes of the idle VMs that are not the source
+// of a VMClone that may still be in flight: deleting such a VM could leave
+// the cloned VM on the hypervisor with nothing recording it. lg.mu must be
+// held.
+func (lg *LoadGenerator) unclonedLocked() []int {
+	sources := map[string]bool{}
+	for _, c := range lg.clones {
+		if !c.resolved {
+			sources[c.source] = true
+		}
+	}
+	var idle []int
+	for _, i := range lg.idleVMs() {
+		if !sources[lg.vms[i].name] {
 			idle = append(idle, i)
 		}
 	}
@@ -484,7 +508,7 @@ func (lg *LoadGenerator) performClone(ctx context.Context, provider string, _ in
 
 	// A clone adds a target VM: skip it when the run has vmCount VMs alive.
 	if !lg.reserveSlot(ctx) {
-		lg.results <- lg.skippedResult(opClone, provider)
+		lg.results <- skippedResult(opClone, provider)
 		return
 	}
 	reserved := true
@@ -524,7 +548,9 @@ func (lg *LoadGenerator) performClone(ctx context.Context, provider string, _ in
 	if lg.opts.dryRun {
 		result.Success = true
 		result.Phase = phaseDryRun
-		lg.commitClone(runObject{name: clone.Name, source: vm.name, target: clone.Spec.Target.Name})
+		// A dry run has no clone to wait for: the target is a VM of the run at once.
+		lg.commitClone(runObject{name: clone.Name, source: vm.name, target: clone.Spec.Target.Name, provider: vm.provider, resolved: true},
+			&runVM{name: clone.Spec.Target.Name, provider: vm.provider, power: infrav1beta1.PowerStateOff})
 		reserved = false
 		lg.results <- result
 		return
@@ -539,7 +565,7 @@ func (lg *LoadGenerator) performClone(ctx context.Context, provider string, _ in
 		lg.results <- result
 		return
 	}
-	lg.commitClone(runObject{name: clone.Name, uid: clone.UID, source: vm.name, target: clone.Spec.Target.Name})
+	lg.commitClone(runObject{name: clone.Name, uid: clone.UID, source: vm.name, target: clone.Spec.Target.Name, provider: vm.provider}, nil)
 	reserved = false
 
 	lg.observe(&result, func(ctx context.Context) (bool, error) {

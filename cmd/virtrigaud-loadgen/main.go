@@ -97,8 +97,10 @@ type LoadGenConfig struct {
 	VMTemplate VMTemplate `yaml:"vmTemplate"`
 	Providers  []string   `yaml:"providers"`
 	// VMCount is the most VMs the run has alive at once: the VMs it created
-	// plus the targets of the clones it requested. A create or clone that
-	// would go beyond it is skipped.
+	// and has not deleted, the targets of the clones it requested (until the
+	// clone has ended, and the target then counts as one of the run's VMs),
+	// and the VMs whose delete it sent that are not yet gone. A create or
+	// clone that would go beyond it is skipped.
 	VMCount int `yaml:"vmCount"`
 
 	// Operation mix
@@ -179,7 +181,7 @@ type Result struct {
 	Error    string
 	// Skipped is set when the run did not perform the operation because it
 	// already has vmCount VMs alive; a skipped operation is neither a success
-	// nor a failure and made no API call.
+	// nor a failure and made no create or clone call.
 	Skipped bool
 	Phase   string // what the operation asked for (power state, size, object name)
 	// Observed is, with --observe, the time from sending the request until
@@ -216,6 +218,9 @@ type LoadGenerator struct {
 	// reserved counts the VM slots reserved by a create or clone whose API
 	// call is in flight; they count against vmCount.
 	reserved int
+	// lastForget is when the VMs being deleted were last read to see which
+	// are gone (at most once per pollInterval).
+	lastForget time.Time
 	// vms holds the VMs this run created and has not deleted (a VM whose
 	// delete is being sent stays here, busy, until the apiserver answers).
 	// Every operation acts on one of these, never on another VM in the
@@ -482,7 +487,7 @@ func (o *options) runLoadGen(cmd *cobra.Command, _ []string) error {
 
 	interrupted := parent.Err() != nil
 	if interrupted {
-		cliout.Printf(out, "Load generation interrupted before the end of its duration\n")
+		cliout.Printf(out, "Load generation interrupted\n")
 	} else {
 		cliout.Printf(out, "Load generation completed successfully\n")
 	}
@@ -585,7 +590,7 @@ func (lg *LoadGenerator) performCreate(ctx context.Context, provider string, wor
 
 	// A create adds a VM: skip it when the run has vmCount VMs alive.
 	if !lg.reserveSlot(ctx) {
-		lg.results <- lg.skippedResult(opCreate, provider)
+		lg.results <- skippedResult(opCreate, provider)
 		return
 	}
 	reserved := true
@@ -670,6 +675,7 @@ func (lg *LoadGenerator) performDelete(ctx context.Context, provider string, _ i
 	// Delete only a VM this run created, never another VM in the namespace.
 	// The VM stays tracked (busy) until the apiserver answers, so it counts
 	// against vmCount meanwhile.
+	lg.settleClones(ctx)
 	vm, ok := lg.takeCreated()
 	if !ok {
 		result.Duration = time.Since(result.StartTime)
@@ -809,12 +815,13 @@ func (lg *LoadGenerator) vmLabels() map[string]string {
 }
 
 // takeCreated marks a random VM this run created that no other operation is
-// using as busy and returns it, to be deleted. It stays in lg.vms until
+// using, and that is not the source of a clone that may be in flight, as busy
+// and returns it, to be deleted. It stays in lg.vms until
 // removeVM or markDeleting. It reports false when there is none.
 func (lg *LoadGenerator) takeCreated() (*runVM, bool) {
 	lg.mu.Lock()
 	defer lg.mu.Unlock()
-	idle := lg.idleVMs()
+	idle := lg.unclonedLocked()
 	if len(idle) == 0 {
 		return nil, false
 	}

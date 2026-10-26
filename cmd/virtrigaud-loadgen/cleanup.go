@@ -124,6 +124,11 @@ func (lg *LoadGenerator) cleanup(ctx context.Context) []string {
 	}
 	vms = append(vms, lg.deleting...)
 	lg.mu.Unlock()
+	// A clone target the run took over (see settleClones) is among its VMs.
+	tracked := make(map[string]bool, len(vms))
+	for _, vm := range vms {
+		tracked[vm.name] = true
+	}
 
 	var left []string
 	keepVM := map[string]bool{}
@@ -145,6 +150,9 @@ func (lg *LoadGenerator) cleanup(ctx context.Context) []string {
 		rest = append(rest, newCleanupItem(&infrav1beta1.VMClone{}, c))
 	}
 	for _, name := range targets {
+		if tracked[name] {
+			continue
+		}
 		if keepVM[name] {
 			left = append(left, "VirtualMachine/"+name+" (target of a clone in flight)")
 			continue
