@@ -23,7 +23,9 @@ import (
 	"fmt"
 	"net/http"
 	"os/exec"
+	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -416,6 +418,45 @@ func (p *Provider) failAfterSubmit(ctx context.Context, node string, vmid int, n
 	}
 	p.logger.Warn("A create failed; the VM it made was removed", "vmid", vmid, "node", node, "name", name, "step", what, "error", cause)
 	return p.vmCreateNotPerformed(fmt.Sprintf("%s; the VM it made (%d) was removed, nothing remains (will retry)", what, vmid), cause)
+}
+
+// pveConfigLockTimeout matches the end of a failed task's error (pveapi
+// WaitForTask: "... with exit code: <exitstatus>") when the task died because
+// it could not take a VM's config lock in time: PVE::Tools::lock_file_full's
+// "can't lock file '/var/lock/qemu-server/lock-<vmid>.conf' - got timeout".
+// Submatch 1 is the VMID.
+var pveConfigLockTimeout = regexp.MustCompile(`exit code: can't lock file '/var/lock/qemu-server/lock-(\d+)\.conf' - got timeout$`)
+
+// cloneTaskLockedOut reports whether err, the failed wait for the clone task
+// that makes VM target from VM source, says that the task ended because it
+// could not lock source's or target's config. qemu-server's clone worker
+// takes those locks first (the source's, then the target's, each with a
+// one-second timeout) and runs the clone only once it holds both; every
+// failure after that is reported as "clone failed: ...", and the error of a
+// lock it could not take ends the worker before anything is made. Such a task
+// made nothing. The target's lock is held by another task when another
+// Create or Clone is making a VM with the same VMID (two requests that got
+// the same /cluster/nextid answer), so the VM at that VMID, if any, is never
+// this request's and must not be touched.
+func cloneTaskLockedOut(err error, source, target int) bool {
+	if !stderrors.Is(err, pveapi.ErrTaskFailed) {
+		return false
+	}
+	m := pveConfigLockTimeout.FindStringSubmatch(err.Error())
+	if m == nil {
+		return false
+	}
+	id, convErr := strconv.Atoi(m[1])
+	return convErr == nil && (id == source || id == target)
+}
+
+// cloneLockedOut is the answer of a Create or Clone whose clone task could
+// not lock its source's or target's config (cloneTaskLockedOut): nothing was
+// cloned, and a retry gets a new VMID.
+func (p *Provider) cloneLockedOut(target int, cause error) error {
+	return p.vmCreateNotPerformed(fmt.Sprintf("the PVE clone task for VM %d could not lock the configuration of the clone "+
+		"or of its source (another task holds it, e.g. a concurrent create given the same VMID); nothing was cloned "+
+		"(will retry with a new VMID)", target), cause)
 }
 
 // failAfterTask answers a failed wait for the task that makes VM vmid: a

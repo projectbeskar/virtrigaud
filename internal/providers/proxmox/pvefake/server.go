@@ -56,9 +56,9 @@ type Server struct {
 
 	// faults are the injected request faults (InjectFault), in order.
 	faults []*Fault
-	// failingTasks are the task types whose tasks finish with a failure
-	// (FailTasks).
-	failingTasks map[string]bool
+	// failingTasks are the task types whose tasks finish with a failure,
+	// and the exit status they finish with (FailTasks, FailTasksWith).
+	failingTasks map[string]string
 	// hidden are the VMIDs /cluster/resources leaves out
 	// (HideFromResources).
 	hidden map[int]bool
@@ -158,9 +158,17 @@ func (s *Server) InjectFault(f Fault) {
 // finish with exit status "ERROR". A failed qmclone or qmcreate task removes
 // the VM it was making, as PVE does. Safe for concurrent use.
 func (s *Server) FailTasks(taskType string) {
+	s.FailTasksWith(taskType, "ERROR")
+}
+
+// FailTasksWith is FailTasks with the exit status the tasks finish with
+// (PVE's task status "exitstatus": the error the task died with, e.g. "can't
+// lock file '/var/lock/qemu-server/lock-105.conf' - got timeout"). Safe for
+// concurrent use.
+func (s *Server) FailTasksWith(taskType, exitStatus string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.failingTasks[taskType] = true
+	s.failingTasks[taskType] = exitStatus
 }
 
 // HideFromResources leaves VM vmid out of /cluster/resources, as PVE
@@ -425,7 +433,7 @@ func NewServer() *Server {
 		snapshots:    make(map[string][]*Snapshot),
 		logger:       slog.Default(),
 		config:       config,
-		failingTasks: make(map[string]bool),
+		failingTasks: make(map[string]string),
 		hidden:       make(map[int]bool),
 		offline:      make(map[string]bool),
 		volumes:      make(map[string]int),
@@ -734,9 +742,10 @@ func (s *Server) finishTask(task *Task) {
 	}
 	task.Status = "stopped"
 	task.ExitCode = "OK"
-	ok := !s.failingTasks[task.Type]
+	exitStatus, failing := s.failingTasks[task.Type]
+	ok := !failing
 	if !ok {
-		task.ExitCode = "ERROR"
+		task.ExitCode = exitStatus
 	}
 	if task.finalize != nil {
 		task.finalize(ok)

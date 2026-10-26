@@ -356,6 +356,11 @@ func (p *Provider) Create(ctx context.Context, req *providerv1.CreateRequest) (*
 		if stderrors.Is(err, pveapi.ErrTaskFailed) {
 			p.untrackTask(stamp, vmConfig.VMID)
 		}
+		// A task that could not lock the template's or the VMID's config made
+		// nothing; the VM at the VMID, if any, is another request's.
+		if cloneTaskLockedOut(err, templateID, vmConfig.VMID) {
+			return nil, p.cloneLockedOut(vmConfig.VMID, err)
+		}
 		return nil, p.failAfterTask(ctx, node, vmConfig.VMID, req.Name, stamp, "the template clone task failed", err)
 	}
 	p.untrackTask(stamp, vmConfig.VMID)
@@ -1297,6 +1302,11 @@ func (p *Provider) Clone(ctx context.Context, req *providerv1.CloneRequest) (*pr
 	if werr := p.client.WaitForTask(ctx, sourceNode, cloneTask); werr != nil {
 		if stderrors.Is(werr, pveapi.ErrTaskFailed) {
 			p.untrackTask(stamp, targetVMID)
+		}
+		// A task that could not lock the source's or the VMID's config made
+		// nothing; the VM at the VMID, if any, is another request's.
+		if cloneTaskLockedOut(werr, sourceVMID, targetVMID) {
+			return nil, p.cloneLockedOut(targetVMID, werr)
 		}
 		return nil, p.failAfterTask(ctx, targetNode, targetVMID, req.TargetName, stamp, "the clone task failed", werr)
 	}
