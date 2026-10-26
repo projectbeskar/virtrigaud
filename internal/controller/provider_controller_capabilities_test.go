@@ -130,3 +130,7 @@ func TestCapabilitiesToReported(t *testing.T) {
 	assert.True(t, capabilitiesToReported(contracts.Capabilities{SupportsHonestReconfigure: true}).SupportsHonestReconfigure)
 	assert.False(t, got.SupportsHonestReconfigure, "not reported, not surfaced")
 }
+
+// The manager wires a remote.Resolver as the Provider controller's
+// CapabilityReader (cmd/manager).
+var _ ProviderCapabilityReader = (*remote.Resolver)(nil)
