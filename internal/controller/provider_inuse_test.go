@@ -96,7 +96,7 @@ func newInUseReconciler(t *testing.T, objs ...client.Object) (*ProviderReconcile
 		WithScheme(sch).
 		WithObjects(objs...).
 		WithStatusSubresource(&infravirtrigaudiov1beta1.Provider{}).
-		WithIndex(&infravirtrigaudiov1beta1.VirtualMachine{}, placementProviderIndex, placementProviderIndexValue).
+		WithIndex(&infravirtrigaudiov1beta1.VirtualMachine{}, placementProviderIndex, placementProviderIndexValue).WithIndex(&infravirtrigaudiov1beta1.VirtualMachine{}, placementHostIndex, placementHostIndexValue).
 		WithIndex(&infravirtrigaudiov1beta1.VMSnapshot{}, providerInUseIndex, providerInUseIndexValues).
 		WithIndex(&infravirtrigaudiov1beta1.VMClone{}, providerInUseIndex, providerInUseIndexValues).
 		WithIndex(&infravirtrigaudiov1beta1.VMMigration{}, providerInUseIndex, providerInUseIndexValues).
@@ -451,7 +451,7 @@ func TestProviderInUse_NamespaceReadForbiddenStillHolds(t *testing.T) {
 		WithScheme(sch).
 		WithObjects(inUseProvider(), inUseVM("default", "web", "", inUseProviderName)).
 		WithStatusSubresource(&infravirtrigaudiov1beta1.Provider{}).
-		WithIndex(&infravirtrigaudiov1beta1.VirtualMachine{}, placementProviderIndex, placementProviderIndexValue).
+		WithIndex(&infravirtrigaudiov1beta1.VirtualMachine{}, placementProviderIndex, placementProviderIndexValue).WithIndex(&infravirtrigaudiov1beta1.VirtualMachine{}, placementHostIndex, placementHostIndexValue).
 		WithIndex(&infravirtrigaudiov1beta1.VMSnapshot{}, providerInUseIndex, providerInUseIndexValues).
 		WithIndex(&infravirtrigaudiov1beta1.VMClone{}, providerInUseIndex, providerInUseIndexValues).
 		WithIndex(&infravirtrigaudiov1beta1.VMMigration{}, providerInUseIndex, providerInUseIndexValues).

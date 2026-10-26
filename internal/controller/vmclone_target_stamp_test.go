@@ -317,7 +317,7 @@ func TestVMClone_SingleHost_NoCloneWithoutTheRequestRecord(t *testing.T) {
 	}
 	fc := fake.NewClientBuilder().WithScheme(s).WithObjects(prov, src, clone).
 		WithStatusSubresource(&infrav1beta1.VMClone{}, &infrav1beta1.VirtualMachine{}).
-		WithIndex(&infrav1beta1.VirtualMachine{}, placementProviderIndex, placementProviderIndexValue).
+		WithIndex(&infrav1beta1.VirtualMachine{}, placementProviderIndex, placementProviderIndexValue).WithIndex(&infrav1beta1.VirtualMachine{}, placementHostIndex, placementHostIndexValue).
 		WithInterceptorFuncs(funcs).Build()
 	r := &VMCloneReconciler{Client: fc, Scheme: s, RemoteResolver: &okResolver{provider: cp}, Recorder: record.NewFakeRecorder(20)}
 

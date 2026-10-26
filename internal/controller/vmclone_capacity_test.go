@@ -265,7 +265,7 @@ func newCloneLaggingClient(t *testing.T, s *runtime.Scheme, objs ...client.Objec
 			copies = append(copies, c)
 		}
 		return fake.NewClientBuilder().WithScheme(s).WithObjects(copies...).
-			WithIndex(&infrav1beta1.VirtualMachine{}, placementProviderIndex, placementProviderIndexValue).
+			WithIndex(&infrav1beta1.VirtualMachine{}, placementProviderIndex, placementProviderIndexValue).WithIndex(&infrav1beta1.VirtualMachine{}, placementHostIndex, placementHostIndexValue).
 			WithStatusSubresource(&infrav1beta1.VirtualMachine{}, &infrav1beta1.VMClone{}).Build()
 	}
 	return &laggingClient{Client: build(), scheme: s, reader: build()}
@@ -293,7 +293,7 @@ func catchUpWithClones(t *testing.T, c *laggingClient) {
 		objs = append(objs, &clones.Items[i])
 	}
 	fresh := fake.NewClientBuilder().WithScheme(c.scheme).WithObjects(objs...).
-		WithIndex(&infrav1beta1.VirtualMachine{}, placementProviderIndex, placementProviderIndexValue).
+		WithIndex(&infrav1beta1.VirtualMachine{}, placementProviderIndex, placementProviderIndexValue).WithIndex(&infrav1beta1.VirtualMachine{}, placementHostIndex, placementHostIndexValue).
 		WithStatusSubresource(&infrav1beta1.VirtualMachine{}, &infrav1beta1.VMClone{}).Build()
 	c.mu.Lock()
 	c.reader = fresh

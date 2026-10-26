@@ -75,6 +75,8 @@ func newInformerStore() *informerStore {
 		vms: toolscache.NewIndexer(toolscache.MetaNamespaceKeyFunc, toolscache.Indexers{
 			toolscache.NamespaceIndex:                 toolscache.MetaNamespaceIndexFunc,
 			fieldIndexPrefix + placementProviderIndex: fieldIndexFunc(placementProviderIndexValue),
+			fieldIndexPrefix + placementHostIndex:     fieldIndexFunc(placementHostIndexValue),
+			fieldIndexPrefix + specProviderIndex:      fieldIndexFunc(specProviderIndexValue),
 		}),
 		classes: toolscache.NewIndexer(toolscache.MetaNamespaceKeyFunc, toolscache.Indexers{
 			toolscache.NamespaceIndex: toolscache.MetaNamespaceIndexFunc,

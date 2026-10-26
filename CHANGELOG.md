@@ -5,6 +5,27 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-10-26 11:28] - F5: per-host index for Host committed capacity and the in-use check
+**Author:** @wrkode (William Rizzo)
+
+### Changed
+- `internal/controller/placement_host_index.go`: new `virtrigaud.io/placement-host` VirtualMachine field index, one value per host the VM holds a placement on (`placementHosts`: bound host and pending host, once each), qualified by its placement Provider (`<namespace>/<provider>|<host>`); a VM whose VirtualMachine finalizer is gone while it is deleted has none.
+- `internal/controller/virtualmachine_placement_capacity.go`: `committedOnHost` (the Host committed-capacity gauges) reads that host's VMs through the index instead of every VM of the Provider; the per-VM accounting (`placementProviderKey`, `placementHosts`, `sizeForAccounting`) is unchanged.
+- `internal/controller/host_controller.go`: `vmsUsingHost` (the Host in-use finalizer) reads through the index; the Host controller registers it.
+
+### Added
+- `internal/controller/placement_host_index_test.go`: indexed vs Provider-wide results for pending, bound, dual and same-host placements, recorded, pending, legacy (VMClass), hot-add and ungranted sizing, deletion with and without the finalizer, a re-bound VM, two Providers with identical Host names, and after resizes, promotion, release, re-scheduling and deletion.
+- `internal/controller/accounting_bench_test.go`: old and new per-heartbeat read benchmarks.
+
+### Why
+Spike 1B (F5): every Host heartbeat scanned every VM of its Provider to publish two gauges, about 35% of the manager's CPU at 100,000 VMs. Per heartbeat at 1,000 hosts / 100,000 VMs the read falls from 116 ms to 46 µs (benchmark, one Provider).
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout (manager image)
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-10-26 11:28] - F4: count a Provider's VMs through an index and ignore Host status writes
 **Author:** @wrkode (William Rizzo)
 

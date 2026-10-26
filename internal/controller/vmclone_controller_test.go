@@ -175,7 +175,7 @@ func newCloneReconciler(s *runtime.Scheme, resolver ProviderResolver, objs ...cl
 			&infrav1beta1.VMClone{},
 			&infrav1beta1.VirtualMachine{},
 		).
-		WithIndex(&infrav1beta1.VirtualMachine{}, placementProviderIndex, placementProviderIndexValue).
+		WithIndex(&infrav1beta1.VirtualMachine{}, placementProviderIndex, placementProviderIndexValue).WithIndex(&infrav1beta1.VirtualMachine{}, placementHostIndex, placementHostIndexValue).
 		WithInterceptorFuncs(assignUIDOnCreate).
 		Build()
 	return &VMCloneReconciler{

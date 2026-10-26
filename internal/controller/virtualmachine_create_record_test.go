@@ -68,7 +68,7 @@ func createRecordFixture(t *testing.T, providerType infravirtrigaudiov1beta1.Pro
 	fc := fake.NewClientBuilder().
 		WithScheme(s).
 		WithObjects(prov, class, vm).
-		WithIndex(&infravirtrigaudiov1beta1.VirtualMachine{}, placementProviderIndex, placementProviderIndexValue).
+		WithIndex(&infravirtrigaudiov1beta1.VirtualMachine{}, placementProviderIndex, placementProviderIndexValue).WithIndex(&infravirtrigaudiov1beta1.VirtualMachine{}, placementHostIndex, placementHostIndexValue).
 		WithStatusSubresource(&infravirtrigaudiov1beta1.VirtualMachine{}).
 		WithInterceptorFuncs(interceptor.Funcs{
 			SubResourcePatch: func(ctx context.Context, c client.Client, sub string, obj client.Object, patch client.Patch, opts ...client.SubResourcePatchOption) error {

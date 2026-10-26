@@ -544,14 +544,15 @@ func classForSizing(
 
 // committedOnHost sums the footprint of every VirtualMachine whose placement
 // belongs to provider and names host (bound or pending; being deleted
-// included) — the same accounting the scheduler uses, for one host.
+// included) — the same accounting the scheduler uses, for one host. It reads
+// only that host's VMs, through placementHostIndex.
 func committedOnHost(
 	ctx context.Context,
 	reader client.Reader,
 	provider types.NamespacedName,
 	host string,
 ) (cpu, memMiB int64, err error) {
-	vms, err := listProviderVMs(ctx, reader, provider)
+	vms, err := listHostPlacementVMs(ctx, reader, provider, host)
 	if err != nil {
 		return 0, 0, err
 	}

@@ -78,7 +78,7 @@ func TestSchedBenchSeamMatchesFakeClient(t *testing.T) {
 		objs = append(objs, f.Classes[i].DeepCopy())
 	}
 	fc := fake.NewClientBuilder().WithScheme(coverageTestScheme(t)).WithObjects(objs...).
-		WithIndex(&infravirtrigaudiov1beta1.VirtualMachine{}, placementProviderIndex, placementProviderIndexValue).Build()
+		WithIndex(&infravirtrigaudiov1beta1.VirtualMachine{}, placementProviderIndex, placementProviderIndexValue).WithIndex(&infravirtrigaudiov1beta1.VirtualMachine{}, placementHostIndex, placementHostIndexValue).Build()
 
 	p := w.providers[0].provider
 	viaSeam, err := committedPlacementsFrom(ctx, w.r.Client, p, vm)

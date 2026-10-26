@@ -209,7 +209,7 @@ func clusteredAdoptionReconcilerWith(t *testing.T, prov contracts.Provider,
 	var n int
 	var mu sync.Mutex
 	c := fake.NewClientBuilder().WithScheme(s).WithObjects(objs...).
-		WithIndex(&infravirtrigaudiov1beta1.VirtualMachine{}, placementProviderIndex, placementProviderIndexValue).
+		WithIndex(&infravirtrigaudiov1beta1.VirtualMachine{}, placementProviderIndex, placementProviderIndexValue).WithIndex(&infravirtrigaudiov1beta1.VirtualMachine{}, placementHostIndex, placementHostIndexValue).
 		WithStatusSubresource(&infravirtrigaudiov1beta1.VirtualMachine{}, &infravirtrigaudiov1beta1.Provider{}).
 		WithInterceptorFuncs(interceptor.Funcs{
 			Create: func(ctx context.Context, cl client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
