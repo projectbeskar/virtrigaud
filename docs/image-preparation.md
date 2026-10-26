@@ -636,7 +636,8 @@ and remove the old file by hand.
 > disk); create a `VMImage` under a new name to prepare a fresh copy.
 
 A rejected path is a non-retryable `InvalidArgument`: the VM gets
-`Provisioning=False` with reason `ValidationError` (rechecked every 30 seconds rather than
+`Provisioning=False` with reason `ValidationError` (rechecked after 30 seconds, doubling to
+10 minutes, or at once when the VM, its `VMClass`, `VMImage` or `Provider` changes, rather than
 retried every 5 seconds), and an image rejected during preparation gets
 `status.providerStatus["<namespace>/<name>"].message` plus, while it is not Ready on any provider,
 `phase: Failed` and a `Ready=False` condition with reason `InvalidSource`. Messages never
@@ -795,7 +796,10 @@ able to create files in the pool directory, as before.
 
 A prepare runs synchronously. The provider reports failures that retrying cannot fix as
 `InvalidSpec` (gRPC `InvalidArgument`): the manager records them on the `VMImage`
-(`InvalidSource`) and holds instead of retrying every few seconds.
+(`InvalidSource`) and holds instead of retrying every few seconds. The prepare is sent again
+after 30 seconds, doubling to 10 minutes (v0.4.1; before, on every 30-second re-check of each
+VM using the image), or at once when the `VMImage`'s `spec.source` changes. The wait is kept in
+the manager's memory: after a manager restart the first re-check sends the prepare again.
 
 | Permanent (`InvalidSpec`) | Retried |
 |---|---|

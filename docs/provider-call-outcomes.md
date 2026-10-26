@@ -208,6 +208,19 @@ minutes for as long as the `VMSnapshot` exists, with the same condition and the
 `VMMigration` is unchanged: "not performed" fails the attempt, and the retry policy
 decides.
 
+**A `VirtualMachine` create the provider refuses is sent again with a backoff (v0.4.1).** A
+`Create` answered `InvalidArgument` (`InvalidSpec`) is definite: the marker is cleared and the
+VM shows `Ready=False` and `Provisioning=False` with reason `ValidationError` and the provider's
+detail. It is sent again after 30 seconds, doubling to 10 minutes, and nothing is sent to the
+provider meanwhile (a libvirt `Create` copies the base image before libvirt refuses the
+definition, so each re-send copied the image again). The condition message names the next
+re-check (`re-checking in 4m0s, at <time>`). An edit of the VM's spec or of the spec of its
+`VMClass`, `VMImage` or `Provider` sends it again within seconds and starts the backoff again,
+as does a refusal with another message. The backoff is kept in the manager's memory and
+recovered from the condition after a manager restart. An answer to the manager's own re-send
+(the marker kept, above) is recorded on `Ready` only and is paced the same way. See
+[A refused VM create is retried with a backoff](upgrading.md#a-refused-vm-create-is-retried-with-a-backoff).
+
 **`SnapshotRevert`** carries no marker, but the libvirt provider answers it the same way
 from v0.4.1 (single-host and clustered): "not performed" before the revert ran, a terminal
 answer when libvirt refused or failed it, and "outcome unknown: retry" when it may have
