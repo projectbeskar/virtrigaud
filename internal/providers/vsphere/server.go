@@ -45,6 +45,7 @@ import (
 	"github.com/vmware/govmomi/vim25/types"
 
 	"github.com/projectbeskar/virtrigaud/internal/diskutil"
+	"github.com/projectbeskar/virtrigaud/internal/obs/logging"
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
 	"github.com/projectbeskar/virtrigaud/internal/storage"
 	"github.com/projectbeskar/virtrigaud/internal/storage/migration"
@@ -3760,7 +3761,7 @@ func (p *Provider) ExportDisk(ctx context.Context, req *providerv1.ExportDiskReq
 	}
 
 	// Never log the credentials map (secret material); log only the backend.
-	p.logger.Info("Exporting disk", "vm_id", req.VmId, "destination", req.DestinationUrl, "backend", req.BackendType)
+	p.logger.Info("Exporting disk", "vm_id", req.VmId, "destination", logging.RedactLocation(req.DestinationUrl), "backend", req.BackendType)
 
 	// Get disk information first
 	diskInfo, err := p.GetDiskInfo(ctx, &providerv1.GetDiskInfoRequest{
@@ -4022,11 +4023,11 @@ func (p *Provider) ExportDisk(ctx context.Context, req *providerv1.ExportDiskReq
 	// storage-client upload. Returns early; the s3/pvc upload below is skipped.
 	if useNFS {
 		nfsURL := strings.TrimSpace(req.DestinationUrl)
-		p.logger.Info("Writing disk to NFS export", "destination", nfsURL, "local_vmdk", uploadPath)
+		p.logger.Info("Writing disk to NFS export", "destination", logging.RedactLocation(nfsURL), "local_vmdk", uploadPath)
 		if err := p.exportLocalVMDKToNFS(ctx, uploadPath, nfsURL); err != nil {
 			return nil, errors.NewInternal("failed to write disk to nfs export", err)
 		}
-		p.logger.Info("Disk export to NFS completed", "export_id", exportID, "destination", nfsURL)
+		p.logger.Info("Disk export to NFS completed", "export_id", exportID, "destination", logging.RedactLocation(nfsURL))
 		return &providerv1.ExportDiskResponse{
 			ExportId: exportID,
 			Task:     nil, // synchronous
@@ -4037,7 +4038,7 @@ func (p *Provider) ExportDisk(ctx context.Context, req *providerv1.ExportDiskReq
 	}
 
 	// Upload to destination storage
-	p.logger.Info("Uploading disk to storage", "destination", req.DestinationUrl)
+	p.logger.Info("Uploading disk to storage", "destination", logging.RedactLocation(req.DestinationUrl))
 
 	// Re-open file for reading
 	uploadFile, err := os.Open(uploadPath)
@@ -4128,7 +4129,7 @@ func (p *Provider) ImportDisk(ctx context.Context, req *providerv1.ImportDiskReq
 		return nil, errors.NewUnavailable("vSphere client not configured", nil)
 	}
 
-	p.logger.Info("Importing disk", "source", req.SourceUrl, "storage", req.StorageHint)
+	p.logger.Info("Importing disk", "source", logging.RedactLocation(req.SourceUrl), "storage", req.StorageHint)
 
 	// Determine target datastore
 	datastore := p.config.DefaultDatastore
@@ -4195,7 +4196,7 @@ func (p *Provider) ImportDisk(ctx context.Context, req *providerv1.ImportDiskReq
 	}()
 
 	// Download from storage
-	p.logger.Info("Downloading disk from storage", "source", req.SourceUrl)
+	p.logger.Info("Downloading disk from storage", "source", logging.RedactLocation(req.SourceUrl))
 
 	file, err := os.Create(tempFile)
 	if err != nil {

@@ -36,6 +36,7 @@ import (
 
 	v1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
 	"github.com/projectbeskar/virtrigaud/internal/diskutil"
+	"github.com/projectbeskar/virtrigaud/internal/obs/logging"
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
 	"github.com/projectbeskar/virtrigaud/internal/providers/proxmox/pveapi"
 	"github.com/projectbeskar/virtrigaud/internal/storage"
@@ -1834,7 +1835,7 @@ func (p *Provider) ExportDisk(ctx context.Context, req *providerv1.ExportDiskReq
 		return nil, errors.NewUnavailable("PVE client not configured", nil)
 	}
 
-	p.logger.Info("Exporting disk", "vm_id", req.VmId, "destination", req.DestinationUrl)
+	p.logger.Info("Exporting disk", "vm_id", req.VmId, "destination", logging.RedactLocation(req.DestinationUrl))
 
 	// Parse VM reference
 	vmid, node, err := p.parseVMReference(req.VmId)
@@ -1987,7 +1988,7 @@ func (p *Provider) ExportDisk(ctx context.Context, req *providerv1.ExportDiskReq
 	}
 
 	// Upload to destination storage
-	p.logger.Info("Uploading disk to storage", "destination", req.DestinationUrl)
+	p.logger.Info("Uploading disk to storage", "destination", logging.RedactLocation(req.DestinationUrl))
 
 	// Re-open file for reading
 	uploadFile, err := os.Open(uploadPath)
@@ -2079,7 +2080,7 @@ func (p *Provider) ImportDisk(ctx context.Context, req *providerv1.ImportDiskReq
 		return nil, errors.NewUnavailable("PVE client not configured", nil)
 	}
 
-	p.logger.Info("Importing disk", "source", req.SourceUrl, "storage", req.StorageHint)
+	p.logger.Info("Importing disk", "source", logging.RedactLocation(req.SourceUrl), "storage", req.StorageHint)
 
 	// Find appropriate node
 	node, err := p.client.FindNode(ctx)
@@ -2152,7 +2153,7 @@ func (p *Provider) ImportDisk(ctx context.Context, req *providerv1.ImportDiskReq
 	}()
 
 	// Download from storage
-	p.logger.Info("Downloading disk from storage", "source", req.SourceUrl)
+	p.logger.Info("Downloading disk from storage", "source", logging.RedactLocation(req.SourceUrl))
 
 	file, err := os.Create(tempFile)
 	if err != nil {

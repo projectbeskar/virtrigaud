@@ -35,6 +35,7 @@ import (
 	"github.com/vmware/govmomi/vmdk"
 
 	"github.com/projectbeskar/virtrigaud/internal/diskutil"
+	"github.com/projectbeskar/virtrigaud/internal/obs/logging"
 	"github.com/projectbeskar/virtrigaud/internal/storage"
 	"github.com/projectbeskar/virtrigaud/internal/storage/migration"
 	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
@@ -117,7 +118,7 @@ func (p *Provider) importDiskFromS3(ctx context.Context, req *providerv1.ImportD
 
 	// Never log the credentials map (secret material); log only the backend.
 	p.logger.Info("Importing disk from S3 (streamOptimized + NFC lease vmdk.Import)",
-		"id", id, "source", req.SourceUrl, "src_format", srcFormat, "backend", req.BackendType, "storage_hint", req.StorageHint)
+		"id", id, "source", logging.RedactLocation(req.SourceUrl), "src_format", srcFormat, "backend", req.BackendType, "storage_hint", req.StorageHint)
 
 	// --- 1. DOWNLOAD (ADR D5) ---
 	// Build the S3 client (the pod is the S3 client). Options come from

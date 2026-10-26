@@ -29,6 +29,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
+	"github.com/projectbeskar/virtrigaud/internal/obs/logging"
 	"github.com/projectbeskar/virtrigaud/internal/providers/proxmox/pveapi"
 	"github.com/projectbeskar/virtrigaud/internal/storage"
 	"github.com/projectbeskar/virtrigaud/internal/storage/migration"
@@ -108,7 +109,7 @@ func (p *Provider) importDiskFromS3(ctx context.Context, req *providerv1.ImportD
 
 	// Never log credentials — only the backend, paths, format.
 	p.logger.Info("Importing disk from S3 to Proxmox node (stage for qm importdisk at Create)",
-		"backend", req.BackendType, "id", id, "source", req.SourceUrl,
+		"backend", req.BackendType, "id", id, "source", logging.RedactLocation(req.SourceUrl),
 		"src_format", srcFormat, "stage_path", stagePath, "storage_hint", req.StorageHint)
 
 	// --- STAGE (ADR D5) ---

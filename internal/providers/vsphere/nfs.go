@@ -26,6 +26,7 @@ import (
 	"github.com/vmware/govmomi/vmdk"
 
 	"github.com/projectbeskar/virtrigaud/internal/diskutil"
+	"github.com/projectbeskar/virtrigaud/internal/obs/logging"
 	"github.com/projectbeskar/virtrigaud/internal/storage/migration"
 	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
 	"github.com/projectbeskar/virtrigaud/sdk/provider/errors"
@@ -107,7 +108,7 @@ func (p *Provider) importDiskFromNFS(ctx context.Context, req *providerv1.Import
 	}
 
 	p.logger.Info("Importing disk from NFS (qemu-img nfs:// -> streamOptimized vmdk + NFC lease)",
-		"id", id, "source", nfsURL, "backend", req.BackendType, "storage_hint", req.StorageHint)
+		"id", id, "source", logging.RedactLocation(nfsURL), "backend", req.BackendType, "storage_hint", req.StorageHint)
 
 	// --- 1. COPY, CHECK, CONVERT: nfs:// qcow2 -> local copy -> streamOptimized vmdk ---
 	// SECURITY: the staged object comes from an NFS server the tenant controls.

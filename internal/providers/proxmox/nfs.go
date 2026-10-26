@@ -30,6 +30,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
+	"github.com/projectbeskar/virtrigaud/internal/obs/logging"
 	"github.com/projectbeskar/virtrigaud/internal/storage"
 	"github.com/projectbeskar/virtrigaud/internal/storage/migration"
 	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
@@ -308,7 +309,7 @@ func (p *Provider) exportDiskToNFS(ctx context.Context, req *providerv1.ExportDi
 	// Never log credentials — only the backend, volid, paths.
 	p.logger.Info("Exporting disk from Proxmox node to NFS (kernel mount)",
 		"backend", req.BackendType, "vm", req.VmId, "volid", volid, "src_path", srcPath,
-		"destination", nfsURL)
+		"destination", logging.RedactLocation(nfsURL))
 
 	// Two-stage: flatten the root-owned source to a local temp as root (-U reads a
 	// possibly-running source), then copy the temp onto the mounted export as the
@@ -321,7 +322,7 @@ func (p *Provider) exportDiskToNFS(ctx context.Context, req *providerv1.ExportDi
 			fmt.Sprintf("node-side nfs-mount qemu-img export failed (stderr: %s)", strings.TrimSpace(stderr)), err)
 	}
 
-	p.logger.Info("Source disk written to NFS export", "destination", nfsURL)
+	p.logger.Info("Source disk written to NFS export", "destination", logging.RedactLocation(nfsURL))
 
 	return &providerv1.ExportDiskResponse{
 		ExportId: fmt.Sprintf("export-proxmox-nfs-%s-%d", sanitizeProxmoxName(req.VmId), time.Now().Unix()),
@@ -366,7 +367,7 @@ func (p *Provider) importDiskFromNFS(ctx context.Context, req *providerv1.Import
 	}
 
 	p.logger.Info("Importing disk from NFS to Proxmox node (kernel mount; stage for qm importdisk at Create)",
-		"id", id, "source", nfsURL, "stage_path", stagePath, "storage_hint", req.StorageHint)
+		"id", id, "source", logging.RedactLocation(nfsURL), "stage_path", stagePath, "storage_hint", req.StorageHint)
 
 	// SECURITY: the staged object comes from an NFS server the tenant controls.
 	// It is copied byte for byte, ONCE, into a root-owned temp in the root-only
