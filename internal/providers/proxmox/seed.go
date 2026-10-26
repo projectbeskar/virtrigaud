@@ -22,6 +22,7 @@ import (
 	"context"
 	stderrors "errors"
 	"fmt"
+	"net/url"
 	"os/exec"
 	"regexp"
 	"sort"
@@ -63,7 +64,9 @@ import (
 //   - `qm set <vmid> --<slot> <volume>,media=cdrom` attaches it. When the VM
 //     has a PVE cloud-init drive, the seed takes that drive's slot, which
 //     makes PVE free the drive's volume: two cidata sources would be undefined
-//     behaviour. The seed is not in the boot order.
+//     behaviour. The seed is not in the boot order: qemu-server appends the
+//     new CD-ROM to it, and a config update of its own takes it out again
+//     (keepSeedOutOfBootOrder).
 //   - The temporary directory is removed on every exit, and a volume that was
 //     imported and identified as the seed but could not be attached is
 //     deleted again (`qm set --delete
@@ -597,13 +600,15 @@ func buildSeedScript(stageDir, confDir string, vmid int, storage, slot, alsoDele
 
 // attachSeed builds the seed content on the PVE node and attaches it to VM
 // vmid on node, on storage, unless the VM already has a seed of its own (a
-// re-sent Create or Clone that finds its VM interrupted: nothing is done, so
-// a VM never gets a second seed). cfg is the VM's current config. The
-// returned error is a seedInFlightError when the build's outcome is unknown.
+// re-sent Create or Clone that finds its VM interrupted: nothing is built, so
+// a VM never gets a second seed). Either way the seed is then taken out of
+// the VM's boot order (keepSeedOutOfBootOrder), so a re-sent request also
+// finishes that step. cfg is the VM's current config. The returned error is a
+// seedInFlightError when the build's outcome is unknown.
 func (p *Provider) attachSeed(ctx context.Context, node string, vmid int, storage string, cfg map[string]interface{}, content seedContent) error {
 	if own, _ := seedSlots(cfg, vmid); len(own) > 0 {
 		p.logger.Info("The VM already has its cloud-init seed", "vmid", vmid, "slot", own[0])
-		return nil
+		return p.keepSeedOutOfBootOrder(ctx, node, vmid)
 	}
 	if p.ssh == nil {
 		return errors.NewInvalidSpec("%s", seedNoSSHMessage)
@@ -644,5 +649,34 @@ func (p *Provider) attachSeed(ctx context.Context, node string, vmid int, storag
 		return fmt.Errorf("build and attach the cloud-init seed of VM %d: %w", vmid, err)
 	}
 	p.logger.Info("Attached the cloud-init seed", "vmid", vmid, "slot", slot, "volume", strings.TrimSpace(stdout))
+	return p.keepSeedOutOfBootOrder(ctx, node, vmid)
+}
+
+// keepSeedOutOfBootOrder takes VM vmid's seed CD-ROM out of its boot order.
+// The `qm set` that attaches the seed appends it to a non-empty order list
+// (qemu-server marks every new CD-ROM bootable), so the order is set again,
+// in a config update of its own, after the seed is attached
+// (seedFreeBootOrder): an update that set the order and attached the CD-ROM
+// together would leave either order, because qemu-server applies an update's
+// parameters in no defined sequence. The seed is not bootable (no El Torito
+// image); cloud-init finds it by its label.
+func (p *Provider) keepSeedOutOfBootOrder(ctx context.Context, node string, vmid int) error {
+	cfg, err := p.client.GetVMConfig(ctx, node, vmid)
+	if err != nil {
+		return fmt.Errorf("read the config of VM %d to take its cloud-init seed out of the boot order: %w", vmid, err)
+	}
+	own, _ := seedSlots(cfg, vmid)
+	boot, changed := seedFreeBootOrder(cfg, own)
+	if !changed {
+		return nil
+	}
+	p.logger.Info("Taking the cloud-init seed out of the boot order", "vmid", vmid, "slots", own, "boot", boot)
+	task, err := p.client.ReconfigureVMRaw(ctx, node, vmid, url.Values{pveConfigKeyBoot: {boot}})
+	if err != nil {
+		return fmt.Errorf("take the cloud-init seed of VM %d out of the boot order: %w", vmid, err)
+	}
+	if err := p.client.WaitForTask(ctx, node, task); err != nil {
+		return fmt.Errorf("take the cloud-init seed of VM %d out of the boot order: %w", vmid, err)
+	}
 	return nil
 }

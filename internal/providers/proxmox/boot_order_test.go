@@ -208,8 +208,10 @@ func TestCloneBootOrder_UserData(t *testing.T) {
 
 	t.Run("no primary disk: the template's boot order is kept", func(t *testing.T) {
 		// "scsi0": "" removes the fake's default disk: the template has none.
+		// The seed qemu-server appends to the order is taken out again.
 		provider, srv := ciProviderWith(t, "vmstore", map[string]string{
 			"scsi0":          "",
+			"net0":           "virtio=AA:BB:CC:00:00:09,bridge=vmbr0",
 			pveConfigKeyBoot: bootTemplateBootOrder,
 		})
 		vm := createCIVM(t, provider, srv, ciRequest(`{"TemplateName": "100"}`))

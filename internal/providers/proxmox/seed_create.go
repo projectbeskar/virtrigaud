@@ -100,9 +100,11 @@ func (p *Provider) applyCreateSeed(ctx context.Context, req *providerv1.CreateRe
 // configureCloneSeed gives a VM cloned from a template for the Create req its
 // seed: it reads the clone's config again (the NICs' MACs after
 // applyCloneNetworks), sets the boot order to the boot disk only
-// (cloneBootOrder: the seed CD-ROM is not in it), and attaches the seed on the
-// storage a cloud-init drive would use (diskfulCloudInitStorage). The seed
-// replaces a PVE cloud-init drive the template gave the clone.
+// (cloneBootOrder), and attaches the seed on the storage a cloud-init drive
+// would use (diskfulCloudInitStorage). qemu-server appends the seed's slot to
+// that order when the seed is attached; attachSeed takes it out again, so the
+// clone's final order is the boot disk alone. The seed replaces a PVE
+// cloud-init drive the template gave the clone.
 func (p *Provider) configureCloneSeed(ctx context.Context, req *providerv1.CreateRequest, vmConfig *pveapi.VMConfig, node string) error {
 	vmid := vmConfig.VMID
 	cfg, err := p.client.GetVMConfig(ctx, node, vmid)

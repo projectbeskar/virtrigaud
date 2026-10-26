@@ -675,6 +675,13 @@ func (s *Server) handleCreateVM(w http.ResponseWriter, r *http.Request) {
 	if s.assignCreateMACs {
 		assignNetworkMACs(config, vmid)
 	}
+	// Like create_vm, the boot order asked for, else the default boot
+	// devices (bootorder.go).
+	if boot := r.FormValue(configKeyBoot); boot != "" {
+		config[configKeyBoot] = boot
+	} else if boot := defaultBootOrder(config); boot != "" {
+		config[configKeyBoot] = boot
+	}
 	if len(config) > 0 {
 		final.Config = config
 	}
@@ -1691,6 +1698,13 @@ func (s *Server) handleReconfigureVM(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if err := checkBootWithCDROM(r.Form); err != nil {
+		s.writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	// The order list as it was before the update (PVE appends the update's
+	// new CD-ROMs to it, bootorder.go).
+	bootBefore := bootOrderList(vm.Config[configKeyBoot])
 
 	// Update VM configuration
 	if cores := r.FormValue("cores"); cores != "" {
@@ -1725,6 +1739,9 @@ func (s *Server) handleReconfigureVM(w http.ResponseWriter, r *http.Request) {
 	}
 	// Other drive keys, and drives or unused disks the update deletes.
 	s.applyDriveUpdate(vm, r.Form, asked)
+	for _, slot := range newCDROMs(r.Form) {
+		bootBefore = appendCDROMToBootOrder(vm.Config, bootBefore, slot, r.Form.Get(slot))
+	}
 
 	// The network keys (netN, ipconfigN, nameserver), so a test can read what
 	// the provider wrote.
