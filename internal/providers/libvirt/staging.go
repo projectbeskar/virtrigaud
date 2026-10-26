@@ -161,7 +161,11 @@ func removeHostPathWithin(ctx context.Context, h hostCommandRunner, path string,
 // (the single host, or the leased target host in clustered mode): the XML is
 // written to a per-call staging file (mode 0600, created exclusively by
 // mktemp; see the file comment), `virsh define` reads it, and the file is
-// removed whatever the outcome.
+// removed whatever the outcome. A failed define is checked (verifyDefined):
+// one that in fact succeeded is a success, one whose outcome cannot be
+// established is errDefineOutcomeUnknown, and one that libvirt refused
+// because of the definition itself, with the domain verified absent, is a
+// *defineRefusedError.
 func (p *Provider) defineDomainFromXML(ctx context.Context, vp *VirshProvider, domainName, domainXML string) error {
 	path, err := makeHostTemp(ctx, vp,
 		filepath.Join(p.stagingDir(), domainName+domainXMLStagingInfix+mktempTemplateSuffix), false)
@@ -193,6 +197,9 @@ func (p *Provider) defineDomainFromXML(ctx context.Context, vp *VirshProvider, d
 				"create generated; treating the define as successful", domainName, err)
 			return nil
 		case defineAbsent:
+			if detail, ok := libvirtDefinitionRefusal(stderr); ok {
+				return &defineRefusedError{detail: detail, err: defineErr}
+			}
 			return defineErr
 		default:
 			return fmt.Errorf("%w: %w", errDefineOutcomeUnknown, defineErr)
@@ -201,6 +208,80 @@ func (p *Provider) defineDomainFromXML(ctx context.Context, vp *VirshProvider, d
 	log.Printf("INFO Successfully defined domain: %s", domainName)
 	return nil
 }
+
+// libvirtDefinitionRefusalMarkers are the libvirt error texts with which
+// `virsh define` refuses a definition itself — the same definition is refused
+// again on every retry, until the request or the host changes:
+//
+//   - "XML error:" (VIR_ERR_XML_ERROR), e.g. "The PCI controller with
+//     index='0' must be model='pcie-root' for this machine type";
+//   - "unsupported configuration:" (VIR_ERR_CONFIG_UNSUPPORTED), e.g.
+//     "unexpected feature 'iommu'", "IDE controllers are unsupported for this
+//     QEMU binary or machine type";
+//   - the firmware auto-selection failures of libvirt (9.x and later: "Unable
+//     to find 'efi' firmware that is compatible with the current
+//     configuration"; earlier: "Unable to find any firmware to satisfy
+//     'efi'"): no installed OVMF build matches what the VM asks for, e.g. no
+//     OVMF package on the host.
+var libvirtDefinitionRefusalMarkers = []string{
+	"XML error:",
+	"unsupported configuration:",
+	"Unable to find 'efi' firmware",
+	"Unable to find any firmware to satisfy",
+}
+
+// maxDefineRefusalDetail bounds the libvirt message a refusal carries.
+const maxDefineRefusalDetail = 400
+
+// libvirtDefinitionRefusal reports whether stderr of a failed `virsh define`
+// is libvirt refusing the definition itself (libvirtDefinitionRefusalMarkers),
+// and returns libvirt's message: the "error: ..." lines, without virsh's own
+// "Failed to define domain from <staging file>" line, on one bounded line. The
+// message describes the domain XML this provider generated from the request;
+// it carries no user-data (that is in the cloud-init seed, not the XML).
+func libvirtDefinitionRefusal(stderr string) (string, bool) {
+	refused := false
+	for _, m := range libvirtDefinitionRefusalMarkers {
+		if strings.Contains(stderr, m) {
+			refused = true
+			break
+		}
+	}
+	if !refused {
+		return "", false
+	}
+	var parts []string
+	for _, line := range strings.Split(stderr, "\n") {
+		line = strings.TrimSpace(line)
+		line = strings.TrimSpace(strings.TrimPrefix(line, "error:"))
+		if line == "" || strings.HasPrefix(line, "Failed to define domain") {
+			continue
+		}
+		parts = append(parts, line)
+	}
+	detail := strings.Join(parts, "; ")
+	if len(detail) > maxDefineRefusalDetail {
+		detail = detail[:maxDefineRefusalDetail] + "..."
+	}
+	return detail, true
+}
+
+// defineRefusedError is a `virsh define` that libvirt refused because of the
+// definition itself (libvirtDefinitionRefusal), with the domain verified
+// absent afterwards (verifyDefined: defineAbsent): nothing was defined, and
+// the same request is refused again until it or the host changes.
+type defineRefusedError struct {
+	// detail is libvirt's message (libvirtDefinitionRefusal).
+	detail string
+	// err is the define failure.
+	err error
+}
+
+// Error returns the define failure.
+func (e *defineRefusedError) Error() string { return e.err.Error() }
+
+// Unwrap returns the define failure.
+func (e *defineRefusedError) Unwrap() error { return e.err }
 
 // errDefineOutcomeUnknown marks a failed `virsh define` whose outcome could
 // not be established afterwards (verifyDefined): the domain may or may not

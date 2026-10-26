@@ -321,6 +321,21 @@ func (p *Provider) createVMWithCloudInit(ctx context.Context, vp *VirshProvider,
 	diskVolumeName := vmDiskVolumeName(domainName)
 	var diskPath string
 
+	// The VM's own disk this attempt writes is removed again when the attempt
+	// fails while the domain is known not to be defined
+	// (removeFailedCreateDisk), so a failed create — a definition libvirt
+	// refused included — leaves no disk on the pool after its VM is deleted.
+	// It is kept once the domain is defined, and when the define's outcome
+	// could not be established (the domain may reference it). A migration
+	// disk attached in place is never the VM's own disk name, so it is never
+	// removed here.
+	keepDisk := false
+	defer func() {
+		if !keepDisk && diskPath != "" {
+			p.removeFailedCreateDisk(ctx, vp, storageProvider, domainName, diskPath, g)
+		}
+	}()
+
 	// Get disk size from VMClass (default to 20GB if not specified)
 	diskSizeGB := p.extractDiskSize(req)
 	log.Printf("INFO Using disk size: %dGB", diskSizeGB)
@@ -463,9 +478,23 @@ func (p *Provider) createVMWithCloudInit(ctx context.Context, vp *VirshProvider,
 	// Stage the definition and define the domain in libvirt.
 	if err := p.defineDomainFromXML(ctx, vp, domainName, domainXML); err != nil {
 		keepSeed = errors.Is(err, errDefineOutcomeUnknown)
+		keepDisk = keepSeed
+		// libvirt refused the definition itself (the domain is verified
+		// absent): a definite refusal, answered InvalidSpec — the VM shows
+		// ValidationError, and the attempt is known to have made nothing —
+		// rather than a retryable failure that copies the disk again on
+		// every retry.
+		var refused *defineRefusedError
+		if errors.As(err, &refused) {
+			return "", contracts.NewInvalidSpecError(fmt.Sprintf(
+				"libvirt refused the definition of domain %q, so nothing was created (check the VMClass firmware, "+
+					"securityProfile and performanceProfile settings against the host's libvirt, QEMU and OVMF "+
+					"firmware): %s", domainName, refused.detail), err)
+		}
 		return "", err
 	}
 	keepSeed = true
+	keepDisk = true
 
 	// Earlier attempts of this create (a define whose outcome was unknown, a
 	// create cancelled before its cleanup ran) may have left seed directories
@@ -478,6 +507,46 @@ func (p *Provider) createVMWithCloudInit(ctx context.Context, vp *VirshProvider,
 
 	log.Printf("INFO Successfully created VM with storage and cloud-init: %s (libvirt domain %s)", req.Name, domainName)
 	return domainName, nil
+}
+
+// removeFailedCreateDisk removes diskPath, the disk a failed create attempt
+// of domainName wrote, from vp's host: only when it is the VM's own disk —
+// <default pool directory>/<domain>-disk or <domain>-disk.qcow2, never a
+// migration disk attached in place or any other file — and only when no
+// domain uses it (ensureDiskFree: on a clustered provider, on no host of the
+// Provider, and no previous incarnation of the VM holds it). The caller has
+// established that the attempt's domain was not defined. It runs detached
+// from the request's cancellation and bounded (routedCleanupTimeout), and is
+// best-effort: a file that cannot be checked or removed is left in place and
+// logged (a later create of the VM replaces it, as a leftover of an earlier
+// attempt).
+func (p *Provider) removeFailedCreateDisk(ctx context.Context, vp *VirshProvider, sp *StorageProvider, domainName, diskPath string, g *clusterDiskGuard) {
+	cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), routedCleanupTimeout)
+	defer cancel()
+
+	pool, err := sp.GetPoolInfo(cctx, defaultStoragePool)
+	if err != nil || pool.Path == "" {
+		log.Printf("WARN Not removing the disk %s of the failed create of libvirt domain %s: the storage pool "+
+			"directory is unknown (%v)", diskPath, domainName, err)
+		return
+	}
+	vol := vmDiskVolumeName(domainName)
+	base := filepath.Base(diskPath)
+	if filepath.Dir(filepath.Clean(diskPath)) != filepath.Clean(pool.Path) || (base != vol && base != vol+qcow2Ext) {
+		log.Printf("INFO Not removing %s after the failed create of libvirt domain %s: it is not the VM's own disk "+
+			"in the storage pool", diskPath, domainName)
+		return
+	}
+	if err := g.ensureDiskFree(cctx, vp, domainDiskSubject(domainName), pool.Path, diskPath); err != nil {
+		log.Printf("WARN Not removing the disk %s of the failed create of libvirt domain %s: %v", diskPath, domainName, err)
+		return
+	}
+	if err := deleteDiskFile(cctx, vp, diskPath); err != nil {
+		log.Printf("WARN Could not remove the disk %s of the failed create of libvirt domain %s: %v", diskPath, domainName, err)
+		return
+	}
+	log.Printf("INFO Removed the disk %s of the failed create of libvirt domain %s (the domain was not defined)", diskPath, domainName)
+	refreshPoolAfterDelete(cctx, vp)
 }
 
 // ensureDiskVolumeFree applies ensureDiskTargetFree to the VM's own disk file,

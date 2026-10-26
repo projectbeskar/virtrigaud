@@ -41,7 +41,8 @@ import (
 // `list --all` reports the defined domains, `define <file>` records the
 // domain (by name and by UUID) the way libvirt would, refusing a name that is
 // already defined, and `undefine` forgets it again. A file named fail-define
-// in the host directory makes define fail. `vol-create <pool> <file>` records
+// in the host directory makes define fail (with the file's content as stderr
+// when it is not empty). `vol-create <pool> <file>` records
 // the volume definition it reads in vol-create.xml and, as libvirt's dir pool
 // does, creates the volume's file <pool directory>/<name> — WITHOUT an
 // extension; it refuses a name whose file already exists. `vol-path <name>
@@ -76,6 +77,7 @@ case "$1" in
     if [ -f "$d/dom-$2.xml" ]; then exec cat "$d/dom-$2.xml"; fi
     echo "error: failed to get domain '$2'" >&2; exit 1 ;;
   define)
+    if [ -s "$d/fail-define" ]; then cat "$d/fail-define" >&2; exit 1; fi
     if [ -f "$d/fail-define" ]; then echo "error: scripted define failure" >&2; exit 1; fi
     name=$(sed -n 's:.*<name>\(.*\)</name>.*:\1:p' "$2" | head -n 1)
     uuid=$(sed -n 's:.*<uuid>\(.*\)</uuid>.*:\1:p' "$2" | head -n 1)
