@@ -57,6 +57,9 @@ type Server struct {
 	reported map[string]int64
 	requests []Request
 	failCode int
+	// failS3Code, when set, is the S3 error code failCode is answered with
+	// (default: the code's usual one, failureCodeName).
+	failS3Code string
 	// parts holds the parts of the multipart uploads in flight, by key.
 	parts map[string]map[int][]byte
 	// loseComplete makes the next completing call of a multipart upload take
@@ -173,9 +176,16 @@ func (s *Server) Requests() []Request {
 
 // FailWith makes every following request answer HTTP code (0 stops failing).
 func (s *Server) FailWith(code int) {
+	s.FailWithCode(code, "")
+}
+
+// FailWithCode makes every following request answer HTTP code with the S3
+// error code s3Code ("SignatureDoesNotMatch"; "" is the HTTP code's usual
+// one). A code of 0 stops failing.
+func (s *Server) FailWithCode(code int, s3Code string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.failCode = code
+	s.failCode, s.failS3Code = code, s3Code
 }
 
 // serve handles one request.
@@ -185,11 +195,14 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 
 	s.mu.Lock()
 	s.requests = append(s.requests, Request{Method: r.Method, Bucket: bucket, Key: key, Query: r.URL.RawQuery})
-	failCode := s.failCode
+	failCode, failS3Code := s.failCode, s.failS3Code
 	s.mu.Unlock()
 
 	if failCode != 0 {
-		writeError(w, failCode, failureCodeName(failCode))
+		if failS3Code == "" {
+			failS3Code = failureCodeName(failCode)
+		}
+		writeError(w, failCode, failS3Code)
 		return
 	}
 	if bucket != s.bucket {
