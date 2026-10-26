@@ -1,0 +1,84 @@
+Creating cluster "virtrigaud-spike1b" ...
+ • Ensuring node image (kindest/node:v1.34.0) 🖼  ...
+ ✓ Ensuring node image (kindest/node:v1.34.0) 🖼
+ • Preparing nodes 📦 📦   ...
+ ✓ Preparing nodes 📦 📦 
+ • Writing configuration 📜  ...
+ ✓ Writing configuration 📜
+ • Starting control-plane 🕹️  ...
+ ✓ Starting control-plane 🕹️
+ • Installing CNI 🔌  ...
+ ✓ Installing CNI 🔌
+ • Installing StorageClass 💾  ...
+ ✓ Installing StorageClass 💾
+ • Joining worker nodes 🚜  ...
+ ✓ Joining worker nodes 🚜
+Set kubectl context to "kind-virtrigaud-spike1b"
+You can now use your cluster with:
+
+kubectl cluster-info --context kind-virtrigaud-spike1b
+
+Have a question, bug, or feature request? Let us know! https://kind.sigs.k8s.io/#community 🙂
+Image: "spike1b.local/manager:exp" with ID "sha256:8f838c56368c839e14c9115e1a688fd0a6b4cf90cce9640196996f5404537e96" not yet present on node "virtrigaud-spike1b-control-plane", loading...
+Image: "spike1b.local/manager:exp" with ID "sha256:8f838c56368c839e14c9115e1a688fd0a6b4cf90cce9640196996f5404537e96" not yet present on node "virtrigaud-spike1b-worker", loading...
+Image: "spike1b.local/fakeprovider:dev" with ID "sha256:f5a50a7e6feacc5b122b20a3f63ab439a1eb24a84dd8df485ca9749e9ce26dde" not yet present on node "virtrigaud-spike1b-control-plane", loading...
+Image: "spike1b.local/fakeprovider:dev" with ID "sha256:f5a50a7e6feacc5b122b20a3f63ab439a1eb24a84dd8df485ca9749e9ce26dde" not yet present on node "virtrigaud-spike1b-worker", loading...
+Warning: unrecognized format "int32"
+Warning: unrecognized format "int64"
+W1025 23:14:18.508298 3388719 warnings.go:70] unrecognized format "int32"
+W1025 23:14:18.508352 3388719 warnings.go:70] unrecognized format "int64"
+W1025 23:14:18.528110 3388719 warnings.go:70] unrecognized format "int64"
+W1025 23:14:18.528170 3388719 warnings.go:70] unrecognized format "int32"
+W1025 23:14:18.586623 3388719 warnings.go:70] unrecognized format "int32"
+W1025 23:14:18.586730 3388719 warnings.go:70] unrecognized format "int64"
+W1025 23:14:18.622482 3388719 warnings.go:70] unrecognized format "int32"
+W1025 23:14:18.622546 3388719 warnings.go:70] unrecognized format "int64"
+W1025 23:14:18.654656 3388719 warnings.go:70] unrecognized format "int32"
+W1025 23:14:18.654709 3388719 warnings.go:70] unrecognized format "int64"
+W1025 23:14:18.694267 3388719 warnings.go:70] unrecognized format "int32"
+W1025 23:14:18.694326 3388719 warnings.go:70] unrecognized format "int64"
+W1025 23:14:18.715871 3388719 warnings.go:70] unrecognized format "int64"
+W1025 23:14:18.715901 3388719 warnings.go:70] unrecognized format "int32"
+W1025 23:14:18.748525 3388719 warnings.go:70] unrecognized format "int32"
+W1025 23:14:18.748575 3388719 warnings.go:70] unrecognized format "int64"
+W1025 23:14:18.780757 3388719 warnings.go:70] unrecognized format "int32"
+W1025 23:14:18.780809 3388719 warnings.go:70] unrecognized format "int64"
+W1025 23:14:18.822341 3388719 warnings.go:70] unrecognized format "int64"
+W1025 23:14:18.822374 3388719 warnings.go:70] unrecognized format "int32"
+W1025 23:14:18.864104 3388719 warnings.go:70] unrecognized format "int32"
+W1025 23:14:18.864157 3388719 warnings.go:70] unrecognized format "int64"
+W1025 23:14:18.888214 3388719 warnings.go:70] unrecognized format "int32"
+W1025 23:14:18.888252 3388719 warnings.go:70] unrecognized format "int64"
+cluster up, manager on config A
+setup done: 1 provider(s), 1000 hosts, 10000 seeded VMs, host 72 vCPU / 262144 MiB
+populating 10000 VMs for fake-p0
+  8950/10000 (895/s)
+populate done in 11s
+populate: 12 s
+setup+populate: 45 s
+== stage C config A
+Error from server (NotFound): pods "virtrigaud-manager-6c784b694-gs6wq" not found
+config A active
+  "violations": {
+    "api_committed_over_capacity": 100,
+    "executed_over_capacity": 100
+  },
+  "examples": [
+    "api_committed_over_capacity: p0-host-0939: 80 vCPU / 327680 MiB",
+    "api_committed_over_capacity: p0-host-0719: 80 vCPU / 327680 MiB",
+    "api_committed_over_capacity: p0-host-0109: 80 vCPU / 327680 MiB",
+    "api_committed_over_capacity: p0-host-0609: 80 vCPU / 327680 MiB",
+stage C config A done
+== stage C config D
+config D active
+burst 1000 done: "ready": 1000
+  "violations": {
+    "api_committed_over_capacity": 100,
+    "executed_over_capacity": 100
+  },
+  "examples": [
+    "api_committed_over_capacity: p0-host-0809: 80 vCPU / 327680 MiB",
+    "api_committed_over_capacity: p0-host-0829: 80 vCPU / 327680 MiB",
+    "api_committed_over_capacity: p0-host-0039: 80 vCPU / 327680 MiB",
+    "api_committed_over_capacity: p0-host-0159: 80 vCPU / 327680 MiB",
+stage C config D done

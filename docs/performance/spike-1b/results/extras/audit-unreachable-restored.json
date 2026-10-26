@@ -1,0 +1,11 @@
+{
+  "time": "2026-10-26T02:21:10.128303817Z",
+  "vms": 1200,
+  "executions": 1200,
+  "bound": 1200,
+  "pendingWithoutID": 0,
+  "pendingWithExecution": 0,
+  "violations": {},
+  "informational": {},
+  "examples": null
+}

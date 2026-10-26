@@ -1,0 +1,101 @@
+b1000x1792955376: 1000 creates submitted in 256ms
+  t=   5s created=1000 reconciled=466 pending=16 bound=16 ready=0 gone=0
+  t=  10s created=1000 reconciled=924 pending=26 bound=26 ready=0 gone=0
+  t=  15s created=1000 reconciled=1000 pending=117 bound=115 ready=0 gone=0
+  t=  20s created=1000 reconciled=1000 pending=155 bound=153 ready=0 gone=0
+  t=  25s created=1000 reconciled=1000 pending=193 bound=191 ready=14 gone=0
+  t=  30s created=1000 reconciled=1000 pending=277 bound=273 ready=65 gone=0
+  t=  35s created=1000 reconciled=1000 pending=364 bound=361 ready=162 gone=0
+  t=  40s created=1000 reconciled=1000 pending=408 bound=406 ready=194 gone=0
+  t=  45s created=1000 reconciled=1000 pending=448 bound=446 ready=265 gone=0
+  t=  50s created=1000 reconciled=1000 pending=510 bound=505 ready=369 gone=0
+  t=  55s created=1000 reconciled=1000 pending=554 bound=550 ready=407 gone=0
+  t=  60s created=1000 reconciled=1000 pending=599 bound=596 ready=444 gone=0
+  t=  65s created=1000 reconciled=1000 pending=641 bound=639 ready=495 gone=0
+  t=  70s created=1000 reconciled=1000 pending=689 bound=686 ready=541 gone=0
+  t=  75s created=1000 reconciled=1000 pending=734 bound=732 ready=582 gone=0
+  t=  80s created=1000 reconciled=1000 pending=777 bound=774 ready=620 gone=0
+  t=  85s created=1000 reconciled=1000 pending=817 bound=815 ready=654 gone=0
+  t=  90s created=1000 reconciled=1000 pending=864 bound=860 ready=698 gone=0
+  t=  95s created=1000 reconciled=1000 pending=913 bound=910 ready=742 gone=0
+  t= 100s created=1000 reconciled=1000 pending=957 bound=956 ready=780 gone=0
+  t= 105s created=1000 reconciled=1000 pending=1000 bound=1000 ready=819 gone=0
+  t= 110s created=1000 reconciled=1000 pending=1000 bound=1000 ready=881 gone=0
+  t= 115s created=1000 reconciled=1000 pending=1000 bound=1000 ready=931 gone=0
+  t= 120s created=1000 reconciled=1000 pending=1000 bound=1000 ready=986 gone=0
+  t= 125s created=1000 reconciled=1000 pending=1000 bound=1000 ready=1000 gone=0
+  t=   5s created=1000 reconciled=1000 pending=1000 bound=1000 ready=1000 gone=136
+  t=  10s created=1000 reconciled=1000 pending=1000 bound=1000 ready=1000 gone=303
+  t=  15s created=1000 reconciled=1000 pending=1000 bound=1000 ready=1000 gone=488
+  t=  20s created=1000 reconciled=1000 pending=1000 bound=1000 ready=1000 gone=739
+  t=  25s created=1000 reconciled=1000 pending=1000 bound=1000 ready=1000 gone=984
+  t=  30s created=1000 reconciled=1000 pending=1000 bound=1000 ready=1000 gone=1000
+{
+  "run": "b1000x1792955376",
+  "submitted": 1000,
+  "reached": {
+    "bound": 1000,
+    "created": 1000,
+    "deletereq": 1000,
+    "gone": 1000,
+    "pending": 1000,
+    "ready": 1000,
+    "reconciled": 1000
+  },
+  "latencyMs": {
+    "bound": {
+      "max": 104700,
+      "p50": 49544,
+      "p90": 93906,
+      "p99": 103896
+    },
+    "created": {
+      "max": 34,
+      "p50": 10,
+      "p90": 21,
+      "p99": 33
+    },
+    "deletereq": {
+      "max": 125401,
+      "p50": 125337,
+      "p90": 125386,
+      "p99": 125399
+    },
+    "gone": {
+      "max": 25466,
+      "p50": 15561,
+      "p90": 23365,
+      "p99": 25135
+    },
+    "pending": {
+      "max": 104419,
+      "p50": 49322,
+      "p90": 93638,
+      "p99": 103588
+    },
+    "ready": {
+      "max": 121057,
+      "p50": 65621,
+      "p90": 111629,
+      "p99": 120374
+    },
+    "reconciled": {
+      "max": 10786,
+      "p50": 5490,
+      "p90": 9776,
+      "p99": 10701
+    }
+  },
+  "throughputPerSec": {
+    "bound": 9.528427593033786,
+    "created": 3899.651454612499,
+    "deletereq": 7.9589372372914475,
+    "gone": 6.617649090879733,
+    "pending": 9.554041892029984,
+    "ready": 8.243630627932598,
+    "reconciled": 90.61727036326239
+  },
+  "stuckByPlacedReason": {},
+  "createErrors": 0,
+  "wallSeconds": 155.649338185
+}

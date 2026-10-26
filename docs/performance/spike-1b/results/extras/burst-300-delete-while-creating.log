@@ -1,0 +1,43 @@
+dwc1792980570: 300 creates submitted in 116ms
+  t=   8s created=300 reconciled=0 pending=0 bound=0 ready=0 gone=300
+{
+  "run": "dwc1792980570",
+  "submitted": 300,
+  "reached": {
+    "bound": 0,
+    "created": 300,
+    "deletereq": 300,
+    "gone": 300,
+    "pending": 0,
+    "ready": 0,
+    "reconciled": 0
+  },
+  "latencyMs": {
+    "created": {
+      "max": 35,
+      "p50": 13,
+      "p90": 32,
+      "p99": 34
+    },
+    "deletereq": {
+      "max": 3060,
+      "p50": 3046,
+      "p90": 3058,
+      "p99": 3060
+    },
+    "gone": {
+      "max": 16,
+      "p50": 3,
+      "p90": 7,
+      "p99": 16
+    }
+  },
+  "throughputPerSec": {
+    "created": 2589.552039693897,
+    "deletereq": 95.62993403541186,
+    "gone": 95.50958131394162
+  },
+  "stuckByPlacedReason": {},
+  "createErrors": 0,
+  "wallSeconds": 8.141729285
+}

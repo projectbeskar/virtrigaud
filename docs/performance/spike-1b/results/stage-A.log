@@ -1,0 +1,91 @@
+Creating cluster "virtrigaud-spike1b" ...
+ • Ensuring node image (kindest/node:v1.34.0) 🖼  ...
+ ✓ Ensuring node image (kindest/node:v1.34.0) 🖼
+ • Preparing nodes 📦 📦   ...
+ ✓ Preparing nodes 📦 📦 
+ • Writing configuration 📜  ...
+ ✓ Writing configuration 📜
+ • Starting control-plane 🕹️  ...
+ ✓ Starting control-plane 🕹️
+ • Installing CNI 🔌  ...
+ ✓ Installing CNI 🔌
+ • Installing StorageClass 💾  ...
+ ✓ Installing StorageClass 💾
+ • Joining worker nodes 🚜  ...
+ ✓ Joining worker nodes 🚜
+Set kubectl context to "kind-virtrigaud-spike1b"
+You can now use your cluster with:
+
+kubectl cluster-info --context kind-virtrigaud-spike1b
+
+Thanks for using kind! 😊
+Image: "spike1b.local/manager:exp" with ID "sha256:8f838c56368c839e14c9115e1a688fd0a6b4cf90cce9640196996f5404537e96" not yet present on node "virtrigaud-spike1b-control-plane", loading...
+Image: "spike1b.local/manager:exp" with ID "sha256:8f838c56368c839e14c9115e1a688fd0a6b4cf90cce9640196996f5404537e96" not yet present on node "virtrigaud-spike1b-worker", loading...
+Image: "spike1b.local/fakeprovider:dev" with ID "sha256:f5a50a7e6feacc5b122b20a3f63ab439a1eb24a84dd8df485ca9749e9ce26dde" not yet present on node "virtrigaud-spike1b-control-plane", loading...
+Image: "spike1b.local/fakeprovider:dev" with ID "sha256:f5a50a7e6feacc5b122b20a3f63ab439a1eb24a84dd8df485ca9749e9ce26dde" not yet present on node "virtrigaud-spike1b-worker", loading...
+Warning: unrecognized format "int32"
+Warning: unrecognized format "int64"
+W1025 18:29:05.973809 1366473 warnings.go:70] unrecognized format "int32"
+W1025 18:29:05.973871 1366473 warnings.go:70] unrecognized format "int64"
+W1025 18:29:05.995581 1366473 warnings.go:70] unrecognized format "int64"
+W1025 18:29:05.995631 1366473 warnings.go:70] unrecognized format "int32"
+W1025 18:29:06.057278 1366473 warnings.go:70] unrecognized format "int64"
+W1025 18:29:06.057359 1366473 warnings.go:70] unrecognized format "int32"
+W1025 18:29:06.087935 1366473 warnings.go:70] unrecognized format "int32"
+W1025 18:29:06.088003 1366473 warnings.go:70] unrecognized format "int64"
+W1025 18:29:06.117987 1366473 warnings.go:70] unrecognized format "int32"
+W1025 18:29:06.118030 1366473 warnings.go:70] unrecognized format "int64"
+W1025 18:29:06.152440 1366473 warnings.go:70] unrecognized format "int32"
+W1025 18:29:06.152530 1366473 warnings.go:70] unrecognized format "int64"
+W1025 18:29:06.182783 1366473 warnings.go:70] unrecognized format "int32"
+W1025 18:29:06.182826 1366473 warnings.go:70] unrecognized format "int64"
+W1025 18:29:06.213308 1366473 warnings.go:70] unrecognized format "int32"
+W1025 18:29:06.213367 1366473 warnings.go:70] unrecognized format "int64"
+W1025 18:29:06.244898 1366473 warnings.go:70] unrecognized format "int32"
+W1025 18:29:06.244983 1366473 warnings.go:70] unrecognized format "int64"
+W1025 18:29:06.291947 1366473 warnings.go:70] unrecognized format "int32"
+W1025 18:29:06.291993 1366473 warnings.go:70] unrecognized format "int64"
+W1025 18:29:06.316640 1366473 warnings.go:70] unrecognized format "int32"
+W1025 18:29:06.316677 1366473 warnings.go:70] unrecognized format "int64"
+W1025 18:29:06.335916 1366473 warnings.go:70] unrecognized format "int32"
+W1025 18:29:06.335957 1366473 warnings.go:70] unrecognized format "int64"
+cluster up, manager on config A
+setup done: 1 provider(s), 100 hosts, 1000 seeded VMs, host 180 vCPU / 425984 MiB
+populating 1000 VMs for fake-p0
+populate done in 1s
+populate: 1 s
+setup+populate: 35 s
+== stage A config A
+Error from server (NotFound): pods "virtrigaud-manager-6c784b694-gxfd4" not found
+config A active
+burst 100 done: "ready": 100
+burst 1000 done: "ready": 1000
+  "violations": {},
+  "examples": null
+}
+stage A config A done
+== stage A config B
+Error from server (NotFound): pods "virtrigaud-manager-74cd87c694-wz7vm" not found
+config B active
+burst 100 done: "ready": 100
+burst 1000 done: "ready": 1000
+  "violations": {},
+  "examples": null
+}
+stage A config B done
+== stage A config C
+config C active
+burst 100 done: "ready": 100
+burst 1000 done: "ready": 1000
+  "violations": {},
+  "examples": null
+}
+stage A config C done
+== stage A config D
+config D active
+burst 100 done: "ready": 100
+burst 1000 done: "ready": 1000
+  "violations": {},
+  "examples": null
+}
+stage A config D done

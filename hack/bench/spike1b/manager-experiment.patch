@@ -1,0 +1,279 @@
+diff --git a/build/Dockerfile.manager b/build/Dockerfile.manager
+index 55228a6..3a57d72 100644
+--- a/build/Dockerfile.manager
++++ b/build/Dockerfile.manager
+@@ -71,7 +71,7 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -a \
+     -ldflags="-s -w \
+       -X 'github.com/projectbeskar/virtrigaud/internal/version.Version=${VERSION}' \
+       -X 'github.com/projectbeskar/virtrigaud/internal/version.GitSHA=${GIT_SHA}'" \
+-    -o manager cmd/manager/main.go
++    -o manager ./cmd/manager
+ 
+ # Use distroless as minimal base image to package the manager binary
+ # Refer to https://github.com/GoogleContainerTools/distroless for more details
+diff --git a/cmd/manager/main.go b/cmd/manager/main.go
+index f52e1bb..1c13a8f 100644
+--- a/cmd/manager/main.go
++++ b/cmd/manager/main.go
+@@ -334,12 +334,14 @@ func main() {
+ 	restConfig := ctrl.GetConfigOrDie()
+ 	restConfig.QPS = 20   // Max 20 queries per second to API server
+ 	restConfig.Burst = 40 // Allow bursts up to 40 requests
++	pprofAddr := applySpike1BExperiment(restConfig)
+ 
+ 	mgr, err := ctrl.NewManager(restConfig, ctrl.Options{
+ 		Scheme:                 scheme,
+ 		Metrics:                metricsServerOptions,
+ 		WebhookServer:          webhookServer,
+ 		HealthProbeBindAddress: probeAddr,
++		PprofBindAddress:       pprofAddr,
+ 		LeaderElection:         enableLeaderElection,
+ 		LeaderElectionID:       "8da97394.virtrigaud.io",
+ 		// LeaderElectionReleaseOnCancel defines if the leader should step down voluntarily
+diff --git a/cmd/manager/spike1b_experiment.go b/cmd/manager/spike1b_experiment.go
+new file mode 100644
+index 0000000..1ae6d2c
+--- /dev/null
++++ b/cmd/manager/spike1b_experiment.go
+@@ -0,0 +1,159 @@
++/*
++Copyright 2026.
++
++Licensed under the Apache License, Version 2.0 (the "License");
++you may not use this file except in compliance with the License.
++You may obtain a copy of the License at
++
++    http://www.apache.org/licenses/LICENSE-2.0
++
++Unless required by applicable law or agreed to in writing, software
++distributed under the License is distributed on an "AS IS" BASIS,
++WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++See the License for the specific language governing permissions and
++limitations under the License.
++*/
++
++package main
++
++// SPIKE 1B EXPERIMENT BUILD ONLY. This file exists only in the image built by
++// hack/bench/spike1b (hack/bench/spike1b/manager-experiment.patch); it is not
++// part of the repository's manager. See
++// docs/performance/spike-1b-control-plane-baseline.md.
++
++import (
++	"context"
++	"net/http"
++	"net/url"
++	"os"
++	"strconv"
++	"strings"
++	"time"
++
++	"github.com/prometheus/client_golang/prometheus"
++	"k8s.io/client-go/rest"
++	clientmetrics "k8s.io/client-go/tools/metrics"
++	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
++)
++
++// Experiment environment variables.
++const (
++	envExperimentQPS   = "VIRTRIGAUD_EXPERIMENT_CLIENT_QPS"
++	envExperimentBurst = "VIRTRIGAUD_EXPERIMENT_CLIENT_BURST"
++	envExperimentPprof = "VIRTRIGAUD_EXPERIMENT_PPROF_ADDR"
++)
++
++var (
++	experimentAPIRequests = prometheus.NewCounterVec(prometheus.CounterOpts{
++		Name: "spike_manager_api_requests_total",
++		Help: "Kubernetes API requests sent by the manager, by verb, resource and subresource (Spike 1B experiment).",
++	}, []string{"verb", "resource", "subresource", "code"})
++	experimentAPILatency = prometheus.NewHistogramVec(prometheus.HistogramOpts{
++		Name:    "spike_manager_api_request_duration_seconds",
++		Help:    "Kubernetes API request round trip, after the client rate limiter (Spike 1B experiment).",
++		Buckets: prometheus.ExponentialBuckets(0.0005, 2, 18),
++	}, []string{"verb", "resource"})
++	experimentRateLimiterWait = prometheus.NewHistogramVec(prometheus.HistogramOpts{
++		Name:    "spike_manager_client_rate_limiter_wait_seconds",
++		Help:    "Time requests waited in client-go's rate limiter (Spike 1B experiment).",
++		Buckets: prometheus.ExponentialBuckets(0.0001, 2, 22),
++	}, []string{"verb"})
++)
++
++// rateLimiterAdapter feeds client-go's rate-limiter latency hook.
++type rateLimiterAdapter struct{}
++
++// Observe implements clientmetrics.LatencyMetric.
++func (rateLimiterAdapter) Observe(_ context.Context, verb string, _ url.URL, latency time.Duration) {
++	experimentRateLimiterWait.WithLabelValues(verb).Observe(latency.Seconds())
++}
++
++// countingTransport counts every API request by verb, resource and subresource.
++type countingTransport struct{ next http.RoundTripper }
++
++// RoundTrip implements http.RoundTripper.
++func (t countingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
++	resource, sub := resourceOf(req.URL.Path)
++	verb := req.Method
++	if req.Method == http.MethodGet {
++		switch {
++		case req.URL.Query().Get("watch") == "true":
++			verb = "WATCH"
++		case isCollection(req.URL.Path):
++			verb = "LIST"
++		}
++	}
++	start := time.Now()
++	resp, err := t.next.RoundTrip(req)
++	code := "error"
++	if resp != nil {
++		code = strconv.Itoa(resp.StatusCode)
++	}
++	experimentAPIRequests.WithLabelValues(verb, resource, sub, code).Inc()
++	if verb != "WATCH" {
++		experimentAPILatency.WithLabelValues(verb, resource).Observe(time.Since(start).Seconds())
++	}
++	return resp, err
++}
++
++// segments splits an API path after /api/v1 or /apis/<group>/<version>.
++func segments(path string) []string {
++	parts := strings.Split(strings.Trim(path, "/"), "/")
++	switch {
++	case len(parts) >= 2 && parts[0] == "api":
++		return parts[2:]
++	case len(parts) >= 3 && parts[0] == "apis":
++		return parts[3:]
++	}
++	return nil
++}
++
++// resourceOf returns the resource and subresource an API path names.
++func resourceOf(path string) (string, string) {
++	s := segments(path)
++	if len(s) >= 2 && s[0] == "namespaces" {
++		s = s[2:]
++		if len(s) == 0 {
++			return "namespaces", ""
++		}
++	}
++	switch len(s) {
++	case 0:
++		return "other", ""
++	case 1, 2:
++		return s[0], ""
++	default:
++		return s[0], s[2]
++	}
++}
++
++// isCollection reports whether path names a collection (a LIST on GET).
++func isCollection(path string) bool {
++	s := segments(path)
++	if len(s) >= 2 && s[0] == "namespaces" {
++		s = s[2:]
++		if len(s) == 0 {
++			return false
++		}
++	}
++	return len(s) == 1
++}
++
++// applySpike1BExperiment applies the experiment's client settings and
++// instrumentation to restConfig and returns the pprof address ("" = off).
++// Without the experiment variables the client keeps the production
++// QPS/burst (set by the caller before this call).
++func applySpike1BExperiment(restConfig *rest.Config) string {
++	if v, err := strconv.ParseFloat(os.Getenv(envExperimentQPS), 32); err == nil && v > 0 {
++		restConfig.QPS = float32(v)
++	}
++	if v, err := strconv.Atoi(os.Getenv(envExperimentBurst)); err == nil && v > 0 {
++		restConfig.Burst = v
++	}
++	ctrlmetrics.Registry.MustRegister(experimentAPIRequests, experimentAPILatency, experimentRateLimiterWait)
++	clientmetrics.RateLimiterLatency = rateLimiterAdapter{}
++	restConfig.Wrap(func(rt http.RoundTripper) http.RoundTripper { return countingTransport{next: rt} })
++	setupLog.Info("SPIKE 1B EXPERIMENT BUILD", "qps", restConfig.QPS, "burst", restConfig.Burst,
++		"pprof", os.Getenv(envExperimentPprof))
++	return os.Getenv(envExperimentPprof)
++}
+diff --git a/internal/controller/spike1b_metrics.go b/internal/controller/spike1b_metrics.go
+new file mode 100644
+index 0000000..d5cecc5
+--- /dev/null
++++ b/internal/controller/spike1b_metrics.go
+@@ -0,0 +1,43 @@
++/*
++Copyright 2026.
++
++Licensed under the Apache License, Version 2.0 (the "License");
++you may not use this file except in compliance with the License.
++You may obtain a copy of the License at
++
++    http://www.apache.org/licenses/LICENSE-2.0
++
++Unless required by applicable law or agreed to in writing, software
++distributed under the License is distributed on an "AS IS" BASIS,
++WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++See the License for the specific language governing permissions and
++limitations under the License.
++*/
++
++package controller
++
++// SPIKE 1B EXPERIMENT BUILD ONLY (hack/bench/spike1b/manager-experiment.patch).
++// Placement-lock instrumentation; see
++// docs/performance/spike-1b-control-plane-baseline.md.
++
++import (
++	"github.com/prometheus/client_golang/prometheus"
++	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
++)
++
++var (
++	spikePlacementLockWait = prometheus.NewHistogramVec(prometheus.HistogramOpts{
++		Name:    "spike_placement_lock_wait_seconds",
++		Help:    "Wait for a Provider's assume lock (acquired or not).",
++		Buckets: prometheus.ExponentialBuckets(0.00001, 2, 24),
++	}, []string{"provider", "acquired"})
++	spikePlacementLockHold = prometheus.NewHistogramVec(prometheus.HistogramOpts{
++		Name:    "spike_placement_lock_hold_seconds",
++		Help:    "Time a placement held a Provider's assume lock (scan, Schedule, Assume).",
++		Buckets: prometheus.ExponentialBuckets(0.00001, 2, 24),
++	}, []string{"provider", "outcome"})
++)
++
++func init() {
++	ctrlmetrics.Registry.MustRegister(spikePlacementLockWait, spikePlacementLockHold)
++}
+diff --git a/internal/controller/virtualmachine_placement_capacity.go b/internal/controller/virtualmachine_placement_capacity.go
+index 8260d42..40a5ce4 100644
+--- a/internal/controller/virtualmachine_placement_capacity.go
++++ b/internal/controller/virtualmachine_placement_capacity.go
+@@ -21,6 +21,7 @@ import (
+ 	"fmt"
+ 	"math/rand/v2"
+ 	"slices"
++	"strconv"
+ 	"sync"
+ 	"time"
+ 
+@@ -119,10 +120,20 @@ func (r *VirtualMachineReconciler) scheduleUnderLock(
+ 	vm *infravirtrigaudiov1beta1.VirtualMachine,
+ 	req *scheduler.Request,
+ ) (result scheduler.Result, locked bool, err error) {
++	waitStart := time.Now()
+ 	unlock, locked := assumptions.LockWithin(ctx, providerKey, placementLockWait)
++	spikePlacementLockWait.WithLabelValues(providerKey, strconv.FormatBool(locked)).Observe(time.Since(waitStart).Seconds())
+ 	if !locked {
+ 		return scheduler.Result{}, false, nil
+ 	}
++	holdStart := time.Now()
++	defer func() {
++		outcome := "placed"
++		if err != nil {
++			outcome = "error"
++		}
++		spikePlacementLockHold.WithLabelValues(providerKey, outcome).Observe(time.Since(holdStart).Seconds())
++	}()
+ 	defer unlock()
+ 	lockCtx, cancel := lockBoundContext(ctx)
+ 	defer cancel()

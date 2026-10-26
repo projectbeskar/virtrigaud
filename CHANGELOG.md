@@ -5,6 +5,27 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-10-26 03:30] - Spike 1B: end-to-end control-plane scalability baseline (harness and report)
+**Author:** @wrkode (William Rizzo)
+
+### Added
+- `test/spike1b/fakeprovider/`: test-only clustered provider served by the real provider SDK server; simulated per-host agents with owner identity, `target_host_id` routing, bounded per-host concurrency, configurable latency and fault injection, and an execution-state endpoint for auditing. Not a supported provider.
+- `test/spike1b/driver/`: load driver (setup, seeding, bursts, churn, Host heartbeat sampling) and the invariant auditor that compares placement status with the fake agents' executions.
+- `test/spike1b/workload/`: the deterministic workload model shared by the driver and the fake provider.
+- `hack/bench/spike1b/`: kind configuration, manager configurations A-D, the experiment-only manager instrumentation patch (applied to an exported copy at image build time, never to the tree), image build, stage / extras / follow-up / cache-initialisation runners, metrics collector, analysis and table scripts.
+- `docs/performance/spike-1b-control-plane-baseline.md`, `docs/performance/spike-1b/results/`: the report, lifecycle summaries and per-VM timelines, per-window analyses, audits, profiles and tables. The raw Prometheus snapshots (`results/**/metrics/`) are kept out of the repository.
+
+### Why
+Spike 1A measured the scheduler alone. This spike ran the real manager against a real API server to find which limit a manager hits first: client QPS from 1,000 VMs (a 10 s poll defect), then CPU and memory from full scans per event at 10,000-100,000 VMs, with the scheduler a minor contributor.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
+Test tooling and documentation only; no production code changed.
+
 ## [2026-10-25 15:10] - Spike 1A: scheduler performance and contention baseline (benchmarks and report)
 **Author:** @wrkode (William Rizzo)
 

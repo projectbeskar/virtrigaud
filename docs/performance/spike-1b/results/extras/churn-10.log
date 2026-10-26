@@ -1,0 +1,119 @@
+  t=   5s submitted=49 created=49 ready=0 deleteReq=0 gone=0
+  t=  10s submitted=100 created=99 ready=0 deleteReq=0 gone=0
+  t=  15s submitted=150 created=149 ready=27 deleteReq=22 gone=3
+  t=  20s submitted=200 created=199 ready=55 deleteReq=49 gone=25
+  t=  25s submitted=250 created=249 ready=77 deleteReq=74 gone=49
+  t=  30s submitted=300 created=299 ready=99 deleteReq=94 gone=69
+  t=  35s submitted=350 created=349 ready=126 deleteReq=120 gone=86
+  t=  40s submitted=400 created=399 ready=158 deleteReq=151 gone=110
+  t=  45s submitted=450 created=449 ready=187 deleteReq=183 gone=133
+  t=  50s submitted=500 created=499 ready=219 deleteReq=213 gone=159
+  t=  55s submitted=550 created=549 ready=254 deleteReq=247 gone=187
+  t=  60s submitted=600 created=599 ready=290 deleteReq=282 gone=213
+  t=  65s submitted=650 created=649 ready=325 deleteReq=320 gone=247
+  t=  70s submitted=700 created=699 ready=360 deleteReq=353 gone=281
+  t=  75s submitted=750 created=749 ready=398 deleteReq=390 gone=313
+  t=  80s submitted=800 created=799 ready=434 deleteReq=427 gone=347
+  t=  85s submitted=850 created=849 ready=472 deleteReq=465 gone=376
+  t=  90s submitted=900 created=899 ready=512 deleteReq=505 gone=411
+  t=  95s submitted=950 created=949 ready=549 deleteReq=542 gone=450
+  t= 100s submitted=1000 created=999 ready=590 deleteReq=581 gone=481
+  t= 105s submitted=1050 created=1049 ready=629 deleteReq=621 gone=519
+  t= 110s submitted=1100 created=1099 ready=669 deleteReq=662 gone=558
+  t= 115s submitted=1150 created=1149 ready=710 deleteReq=702 gone=591
+  t= 120s submitted=1200 created=1199 ready=753 deleteReq=746 gone=629
+  t= 125s submitted=1250 created=1249 ready=794 deleteReq=785 gone=669
+  t= 130s submitted=1300 created=1299 ready=835 deleteReq=827 gone=710
+  t= 135s submitted=1350 created=1349 ready=877 deleteReq=869 gone=746
+  t= 140s submitted=1400 created=1399 ready=920 deleteReq=910 gone=785
+  t= 145s submitted=1450 created=1449 ready=963 deleteReq=953 gone=827
+  t= 150s submitted=1500 created=1499 ready=1004 deleteReq=998 gone=869
+  t= 155s submitted=1550 created=1549 ready=1049 deleteReq=1039 gone=910
+  t= 160s submitted=1600 created=1599 ready=1091 deleteReq=1082 gone=946
+  t= 165s submitted=1650 created=1649 ready=1136 deleteReq=1126 gone=989
+  t= 170s submitted=1700 created=1699 ready=1180 deleteReq=1171 gone=1030
+  t= 175s submitted=1750 created=1749 ready=1220 deleteReq=1213 gone=1074
+  t= 180s submitted=1800 created=1799 ready=1267 deleteReq=1258 gone=1118
+c10x1792979471: load stopped after 1800 submits; following the backlog
+  t= 185s submitted=1800 created=1800 ready=1311 deleteReq=1302 gone=1157
+  t= 190s submitted=1800 created=1800 ready=1357 deleteReq=1349 gone=1197
+  t= 195s submitted=1800 created=1800 ready=1400 deleteReq=1391 gone=1240
+  t= 200s submitted=1800 created=1800 ready=1450 deleteReq=1440 gone=1285
+  t= 205s submitted=1800 created=1800 ready=1498 deleteReq=1488 gone=1337
+  t= 210s submitted=1800 created=1800 ready=1549 deleteReq=1538 gone=1382
+  t= 215s submitted=1800 created=1800 ready=1603 deleteReq=1592 gone=1440
+  t= 220s submitted=1800 created=1800 ready=1680 deleteReq=1666 gone=1514
+  t= 225s submitted=1800 created=1800 ready=1750 deleteReq=1740 gone=1591
+  t= 230s submitted=1800 created=1800 ready=1800 deleteReq=1800 gone=1680
+  t= 235s submitted=1800 created=1800 ready=1800 deleteReq=1800 gone=1779
+  t= 240s submitted=1800 created=1800 ready=1800 deleteReq=1800 gone=1800
+  t= 240s submitted=1800 created=1800 ready=1800 deleteReq=1800 gone=1800
+{
+  "run": "c10x1792979471",
+  "submitted": 1800,
+  "reached": {
+    "bound": 1800,
+    "created": 1800,
+    "deletereq": 1800,
+    "gone": 1800,
+    "pending": 1800,
+    "ready": 1800,
+    "reconciled": 1800
+  },
+  "latencyMs": {
+    "bound": {
+      "max": 34517,
+      "p50": 27632,
+      "p90": 33915,
+      "p99": 34373
+    },
+    "created": {
+      "max": 26,
+      "p50": 5,
+      "p90": 8,
+      "p99": 15
+    },
+    "deletereq": {
+      "max": 56115,
+      "p50": 48112,
+      "p90": 55212,
+      "p99": 56006
+    },
+    "gone": {
+      "max": 17497,
+      "p50": 13968,
+      "p90": 16939,
+      "p99": 17366
+    },
+    "pending": {
+      "max": 34225,
+      "p50": 27355,
+      "p90": 33654,
+      "p99": 34108
+    },
+    "ready": {
+      "max": 55440,
+      "p50": 47674,
+      "p90": 54908,
+      "p99": 55248
+    },
+    "reconciled": {
+      "max": 17385,
+      "p50": 13246,
+      "p90": 16646,
+      "p99": 17223
+    }
+  },
+  "throughputPerSec": {
+    "bound": 8.420687370013122,
+    "created": 9.999465233099093,
+    "deletereq": 7.859779807604276,
+    "gone": 7.609983119995467,
+    "pending": 8.432296033997138,
+    "ready": 7.881541129833753,
+    "reconciled": 9.128894915381792
+  },
+  "stuckByPlacedReason": {},
+  "createErrors": 0,
+  "wallSeconds": 240.001342455
+}

@@ -1,0 +1,26 @@
+# Spike 1B configuration A: CPU limit 500m, memory limit 512Mi, client QPS 20 / burst 40.
+# Requests are the chart defaults; only the limits and the experiment-only
+# client-budget variables differ between configurations A-D.
+global:
+  imageRegistry: spike1b.local
+manager:
+  image:
+    repository: manager
+    tag: exp
+    pullPolicy: Never
+  resources:
+    limits:
+      cpu: 500m
+      memory: 512Mi
+    requests:
+      cpu: 100m
+      memory: 128Mi
+  nodeSelector:
+    spike1b/role: workload
+  env:
+  - name: VIRTRIGAUD_EXPERIMENT_CLIENT_QPS
+    value: "20"
+  - name: VIRTRIGAUD_EXPERIMENT_CLIENT_BURST
+    value: "40"
+  - name: VIRTRIGAUD_EXPERIMENT_PPROF_ADDR
+    value: "127.0.0.1:6060"

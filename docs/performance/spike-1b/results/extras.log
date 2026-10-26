@@ -1,0 +1,108 @@
+Creating cluster "virtrigaud-spike1b" ...
+ • Ensuring node image (kindest/node:v1.34.0) 🖼  ...
+ ✓ Ensuring node image (kindest/node:v1.34.0) 🖼
+ • Preparing nodes 📦 📦   ...
+ ✓ Preparing nodes 📦 📦 
+ • Writing configuration 📜  ...
+ ✓ Writing configuration 📜
+ • Starting control-plane 🕹️  ...
+ ✓ Starting control-plane 🕹️
+ • Installing CNI 🔌  ...
+ ✓ Installing CNI 🔌
+ • Installing StorageClass 💾  ...
+ ✓ Installing StorageClass 💾
+ • Joining worker nodes 🚜  ...
+ ✓ Joining worker nodes 🚜
+Set kubectl context to "kind-virtrigaud-spike1b"
+You can now use your cluster with:
+
+kubectl cluster-info --context kind-virtrigaud-spike1b
+
+Not sure what to do next? 😅  Check out https://kind.sigs.k8s.io/docs/user/quick-start/
+Image: "spike1b.local/manager:exp" with ID "sha256:8f838c56368c839e14c9115e1a688fd0a6b4cf90cce9640196996f5404537e96" not yet present on node "virtrigaud-spike1b-control-plane", loading...
+Image: "spike1b.local/manager:exp" with ID "sha256:8f838c56368c839e14c9115e1a688fd0a6b4cf90cce9640196996f5404537e96" not yet present on node "virtrigaud-spike1b-worker", loading...
+Image: "spike1b.local/fakeprovider:dev" with ID "sha256:5c459dc54ce654e915886fe121e4334ac62c3adb9e9f3bf359868b94d5b3657e" not yet present on node "virtrigaud-spike1b-control-plane", loading...
+Image: "spike1b.local/fakeprovider:dev" with ID "sha256:5c459dc54ce654e915886fe121e4334ac62c3adb9e9f3bf359868b94d5b3657e" not yet present on node "virtrigaud-spike1b-worker", loading...
+Warning: unrecognized format "int32"
+Warning: unrecognized format "int64"
+W1026 01:36:20.946548  719746 warnings.go:70] unrecognized format "int32"
+W1026 01:36:20.946575  719746 warnings.go:70] unrecognized format "int64"
+W1026 01:36:20.956412  719746 warnings.go:70] unrecognized format "int64"
+W1026 01:36:20.956438  719746 warnings.go:70] unrecognized format "int32"
+W1026 01:36:20.987651  719746 warnings.go:70] unrecognized format "int32"
+W1026 01:36:20.987688  719746 warnings.go:70] unrecognized format "int64"
+W1026 01:36:21.011516  719746 warnings.go:70] unrecognized format "int32"
+W1026 01:36:21.011567  719746 warnings.go:70] unrecognized format "int64"
+W1026 01:36:21.035537  719746 warnings.go:70] unrecognized format "int64"
+W1026 01:36:21.035580  719746 warnings.go:70] unrecognized format "int32"
+W1026 01:36:21.053218  719746 warnings.go:70] unrecognized format "int32"
+W1026 01:36:21.053250  719746 warnings.go:70] unrecognized format "int64"
+W1026 01:36:21.069451  719746 warnings.go:70] unrecognized format "int32"
+W1026 01:36:21.069478  719746 warnings.go:70] unrecognized format "int64"
+W1026 01:36:21.088168  719746 warnings.go:70] unrecognized format "int64"
+W1026 01:36:21.088218  719746 warnings.go:70] unrecognized format "int32"
+W1026 01:36:21.113782  719746 warnings.go:70] unrecognized format "int32"
+W1026 01:36:21.113839  719746 warnings.go:70] unrecognized format "int64"
+W1026 01:36:21.167964  719746 warnings.go:70] unrecognized format "int64"
+W1026 01:36:21.168014  719746 warnings.go:70] unrecognized format "int32"
+W1026 01:36:21.199442  719746 warnings.go:70] unrecognized format "int32"
+W1026 01:36:21.199477  719746 warnings.go:70] unrecognized format "int64"
+W1026 01:36:21.224140  719746 warnings.go:70] unrecognized format "int32"
+W1026 01:36:21.224187  719746 warnings.go:70] unrecognized format "int64"
+cluster up, manager on config A
+setup done: 1 provider(s), 100 hosts, 1000 seeded VMs, host 180 vCPU / 425984 MiB
+populating 1000 VMs for fake-p0
+populate done in 4s
+populate: 4 s
+Error from server (NotFound): pods "virtrigaud-manager-6c784b694-fxn6b" not found
+config D active
+churn 2 done
+  "violations": {},
+  "informational": {},
+  "examples": null
+}
+churn 5 done
+  "violations": {},
+  "informational": {},
+  "examples": null
+}
+churn 10 done
+  "violations": {},
+  "informational": {},
+  "examples": null
+}
+churn 20 done
+  "violations": {},
+  "informational": {},
+  "examples": null
+}
+burst 500 done: "ready": 500
+burst 500 done: "ready": 500
+  "violations": {},
+  "informational": {},
+  "examples": null
+}
+burst 300 done: "ready": 300
+  "violations": {},
+  "informational": {},
+  "examples": null
+}
+  "violations": {},
+  "informational": {},
+  "examples": null
+}
+burst 200 done: "ready": 196
+  "violations": {},
+  "informational": {},
+  "examples": null
+}
+  "violations": {},
+  "informational": {},
+  "examples": null
+}
+cleanup b200x1792980609: done
+  "violations": {},
+  "informational": {},
+  "examples": null
+}
+extras done

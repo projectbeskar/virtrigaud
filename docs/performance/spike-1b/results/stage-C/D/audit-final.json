@@ -1,0 +1,34 @@
+{
+  "time": "2026-10-25T23:51:55.395794903Z",
+  "vms": 10000,
+  "executions": 10000,
+  "bound": 10000,
+  "pendingWithoutID": 0,
+  "pendingWithExecution": 0,
+  "violations": {
+    "api_committed_over_capacity": 100,
+    "executed_over_capacity": 100
+  },
+  "examples": [
+    "api_committed_over_capacity: p0-host-0809: 80 vCPU / 327680 MiB",
+    "api_committed_over_capacity: p0-host-0829: 80 vCPU / 327680 MiB",
+    "api_committed_over_capacity: p0-host-0039: 80 vCPU / 327680 MiB",
+    "api_committed_over_capacity: p0-host-0159: 80 vCPU / 327680 MiB",
+    "api_committed_over_capacity: p0-host-0549: 80 vCPU / 327680 MiB",
+    "api_committed_over_capacity: p0-host-0449: 80 vCPU / 327680 MiB",
+    "api_committed_over_capacity: p0-host-0979: 80 vCPU / 327680 MiB",
+    "api_committed_over_capacity: p0-host-0719: 80 vCPU / 327680 MiB",
+    "api_committed_over_capacity: p0-host-0459: 80 vCPU / 327680 MiB",
+    "api_committed_over_capacity: p0-host-0749: 80 vCPU / 327680 MiB",
+    "api_committed_over_capacity: p0-host-0769: 80 vCPU / 327680 MiB",
+    "api_committed_over_capacity: p0-host-0089: 80 vCPU / 327680 MiB",
+    "api_committed_over_capacity: p0-host-0919: 80 vCPU / 327680 MiB",
+    "api_committed_over_capacity: p0-host-0009: 80 vCPU / 327680 MiB",
+    "api_committed_over_capacity: p0-host-0399: 80 vCPU / 327680 MiB",
+    "api_committed_over_capacity: p0-host-0029: 80 vCPU / 327680 MiB",
+    "api_committed_over_capacity: p0-host-0219: 80 vCPU / 327680 MiB",
+    "api_committed_over_capacity: p0-host-0499: 80 vCPU / 327680 MiB",
+    "api_committed_over_capacity: p0-host-0889: 80 vCPU / 327680 MiB",
+    "api_committed_over_capacity: p0-host-0839: 80 vCPU / 327680 MiB"
+  ]
+}

@@ -1,0 +1,1 @@
+config A pod virtrigaud-manager-6c784b694-gs6wq
