@@ -250,9 +250,10 @@ type PerformanceProfile struct {
 // VMClassSpec.SecurityProfile for which fields are acted on.
 type SecurityProfile struct {
 	// SecureBoot enables secure boot. vSphere forces EFI firmware and enables
-	// secure boot; libvirt has libvirt select a Secure Boot OVMF build with the
-	// default keys enrolled, with SMM, on the q35 machine type (the host needs
-	// an OVMF package; docs/libvirt-firmware.md). Proxmox and mock ignore it.
+	// secure boot; libvirt has libvirt select a Secure Boot OVMF build whose
+	// variable-store template has keys enrolled, with SMM, on the q35 machine
+	// type (the host needs an OVMF package; docs/libvirt-firmware.md). Proxmox
+	// and mock ignore it.
 	// +optional
 	// +kubebuilder:default=false
 	SecureBoot bool `json:"secureBoot,omitempty"`
@@ -273,7 +274,8 @@ type SecurityProfile struct {
 
 	// VTDEnabled enables Intel VT-d or AMD-Vi. vSphere sets vvtd.enable;
 	// libvirt adds an emulated Intel IOMMU with interrupt remapping, which
-	// needs the q35 machine type. Proxmox and mock ignore it.
+	// needs the q35 machine type (the virtio devices do not go through it).
+	// Proxmox and mock ignore it.
 	// +optional
 	// +kubebuilder:default=false
 	VTDEnabled bool `json:"vtdEnabled,omitempty"`

@@ -416,13 +416,19 @@ redefined. See [`docs/libvirt-firmware.md`](libvirt-firmware.md).
   a q35 domain with the i440fx device layout, and libvirt refused it ("The PCI controller with
   index='0' must be model='pcie-root' for this machine type"). The create was retried about
   every 30 seconds, and each retry copied the image again. The domain now uses the q35 device
-  layout. libvirt selects a Secure Boot OVMF build with the default keys enrolled (no
-  hard-coded firmware path), and Secure Boot is enforced from the first boot. **The host needs
-  an OVMF package** (`ovmf`, `edk2-ovmf`, ...) that installs firmware descriptors in
-  `/usr/share/qemu/firmware/`.
-- **`firmware: UEFI` is honoured** (it was ignored). New VMs of such a VMClass boot with UEFI,
-  without Secure Boot, on q35. Their image must boot with UEFI. Set `firmware: BIOS`, or leave
-  `firmware` unset, to keep BIOS VMs. `EFI` still selects BIOS, as on vSphere.
+  layout. libvirt selects a Secure Boot OVMF build whose variable-store template has keys
+  enrolled (no hard-coded firmware path), and Secure Boot is enforced from the first boot. A new
+  VM never starts from a variable store an earlier domain of the same name left. **The host
+  needs an OVMF package** (`ovmf`, `edk2-ovmf`, ...) that installs firmware descriptors in
+  `/usr/share/qemu/firmware/`. Which keys are trusted depends on that package; see
+  [the trust model](libvirt-firmware.md#secure-boot-trust-model).
+- **Behaviour change: `firmware: UEFI` is honoured** (it was ignored). New VMs of such a VMClass
+  boot with UEFI, without Secure Boot, on q35. Their image must boot with UEFI, and their host
+  needs an OVMF package. On a host without one, the create is refused (`ValidationError`) where
+  v0.4.0 created a BIOS VM. Set `firmware: BIOS`, or leave `firmware` unset, to keep BIOS VMs.
+  `EFI` still selects BIOS, as on vSphere. Before the upgrade, list the VMClasses this affects
+  and decide for each:
+  `kubectl get vmclass -A -o jsonpath='{range .items[?(@.spec.firmware=="UEFI")]}{.metadata.namespace}/{.metadata.name}{"\n"}{end}'`.
 - **`securityProfile.vtdEnabled` works.** The domain now has a q35 machine and an emulated Intel
   IOMMU device. In v0.4.0 libvirt refused the domain ("unexpected feature 'iommu'").
 - **`performanceProfile.nestedVirtualization` works.** The VM gets the host CPU
@@ -432,10 +438,12 @@ redefined. See [`docs/libvirt-firmware.md`](libvirt-firmware.md).
 - **A definition libvirt refuses is a validation error.** The `VirtualMachine` gets
   `Ready=False` and `Provisioning=False` with reason `ValidationError`, re-checked every 30
   seconds, instead of a retried provider error. The disk the attempt copied is removed, and
-  deleting the VM is not held as `CreateOutcomeUnknown`. A failed create whose domain is known
-  not to be defined also removes its disk.
-- **Delete removes a UEFI VM's variable store** (`virsh undefine --nvram`). Without it, libvirt
-  refuses to undefine a UEFI domain.
+  deleting the VM is not held as `CreateOutcomeUnknown`. A host that reports no matching UEFI
+  firmware is refused before the image is copied. Other refusals still copy the image on each
+  re-check and then remove it. A failed create whose domain is known not to be defined also
+  removes its disk.
+- **Delete removes a UEFI VM's own variable store** (`virsh undefine --nvram`). Without it,
+  libvirt refuses to undefine a UEFI domain. A store that is not named after the domain is kept.
 
 A VM that v0.4.0 left retrying a refused create keeps its create marker after the upgrade; see
 [`docs/libvirt-firmware.md`](libvirt-firmware.md#when-libvirt-refuses-the-definition).

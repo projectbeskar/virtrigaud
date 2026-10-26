@@ -370,7 +370,12 @@ removes only:
   starts). A clone has its own seed directory, named after the clone's domain,
   so deleting a source never touches its clones' seeds; only a **single-host
   clone made by an earlier release** still points its CD-ROM at its source's
-  seed ISO, which is then kept until the last domain referencing it is deleted.
+  seed ISO, which is then kept until the last domain referencing it is deleted;
+- for a UEFI domain, its **own UEFI variable store**, which libvirt removes
+  with the definition (`virsh undefine --nvram`). The store must be named after
+  the domain (`<nvram dir>/<domain>_VARS.fd`, as libvirt names it and as a
+  clone's copy is named). A store at any other path is kept
+  (`--keep-nvram`) and logged. See [libvirt-firmware.md](libvirt-firmware.md).
 
 It never removes any other backing file, cdrom or floppy media, or any file
 outside those directories: such a file is left in place and logged by the

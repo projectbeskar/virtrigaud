@@ -49,15 +49,16 @@ import (
 // (ovmf), Fedora/RHEL (edk2-ovmf) and others:
 //
 //   - secure boot: a Secure Boot capable build whose variable-store template
-//     has the default (Microsoft) keys enrolled, so Secure Boot is enforced
-//     from the first boot (a template without enrolled keys boots in setup
-//     mode, where Secure Boot is not enforced). SMM is turned on, which a
-//     Secure Boot OVMF build requires;
+//     has keys enrolled (which keys is the OVMF package's choice), so Secure
+//     Boot is enforced from the first boot (a template without enrolled keys
+//     boots in setup mode, where Secure Boot is not enforced). SMM is turned
+//     on, which a Secure Boot OVMF build requires;
 //   - UEFI without secure boot: a build that does not implement Secure Boot.
 //
-// libvirt creates the domain's own variable store from the template
-// (/var/lib/libvirt/qemu/nvram/<domain>_VARS.fd); Delete removes it with the
-// domain (undefine --nvram).
+// libvirt creates the domain's own variable store from the template at the
+// first start (/var/lib/libvirt/qemu/nvram/<domain>_VARS.fd), never over a
+// file an earlier domain left (ensureFreshUEFIVarstore); Delete removes it
+// with the domain (undefineNVRAMFor).
 
 const (
 	// machineTypeQ35 is the libvirt alias of the newest q35 machine type of
