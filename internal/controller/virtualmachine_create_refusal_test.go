@@ -59,7 +59,7 @@ func TestCreateRefusalDelay_GrowsAndCaps(t *testing.T) {
 func TestCreateRefusalMessage_RoundTrip(t *testing.T) {
 	next := time.Date(2026, 10, 26, 10, 4, 30, 0, time.UTC)
 	detail := `create: libvirt rejected the domain definition: unsupported configuration: x (y): z`
-	msg := createRefusalMessage(4*time.Minute, next, detail)
+	msg := createRefusalMessage(createRefusalHeadRejected, 4*time.Minute, next, detail)
 	assert.True(t, strings.HasPrefix(msg, "Provider rejected VM create (non-retryable; re-checking in 4m0s, at 2026-10-26T10:04:30Z"), msg)
 	assert.True(t, strings.HasSuffix(msg, detail), msg)
 

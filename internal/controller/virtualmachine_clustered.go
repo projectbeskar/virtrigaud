@@ -292,6 +292,12 @@ func (r *VirtualMachineReconciler) handleClusteredCreateError(
 	if res, held := r.holdCreateBackoff(ctx, vm, err, createAttempt{}); held {
 		return res, nil
 	}
+	// A definite NotFound, NotSupported, Unauthorized or QuotaExceeded
+	// refusal is re-sent on the create-refusal backoff, not every 5 s
+	// (createRefusalPaced).
+	if createRefusalPaced(err) {
+		return r.paceRefusedCreate(ctx, vm, inputs, err, false), nil
+	}
 	logger.Error(err, "Failed to create VM", "host", host)
 	reason, requeueAfter := providerFailureOutcome(err)
 	k8s.SetProvisioningCondition(&vm.Status.Conditions, metav1.ConditionFalse, reason,

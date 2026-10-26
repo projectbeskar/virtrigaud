@@ -1885,6 +1885,12 @@ func (r *VirtualMachineReconciler) createVMOn(
 		if res, held := r.holdCreateBackoff(ctx, vm, err, attempt); held {
 			return res, nil
 		}
+		// A definite NotFound, NotSupported, Unauthorized or QuotaExceeded
+		// refusal is re-sent on the create-refusal backoff, not every 5 s
+		// (createRefusalPaced).
+		if createRefusalPaced(err) {
+			return r.paceRefusedCreate(ctx, vm, inputs, err, !createOutcomeKnown(err, attempt)), nil
+		}
 		logger.Error(err, "Failed to create VM")
 		reason, requeueAfter := providerFailureOutcome(err)
 		if !createOutcomeKnown(err, attempt) {
@@ -1988,7 +1994,7 @@ func (r *VirtualMachineReconciler) handleRejectedCreate(
 		var next time.Time
 		reason = k8s.ReasonValidationError
 		retryAfter, next = r.recordCreateRefusal(vm, inputs, detail)
-		msg = createRefusalMessage(retryAfter, next, detail)
+		msg = createRefusalMessage(createRefusalHeadRejected, retryAfter, next, detail)
 	default:
 		return ctrl.Result{}, false
 	}

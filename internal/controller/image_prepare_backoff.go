@@ -17,11 +17,16 @@ limitations under the License.
 package controller
 
 import (
+	stderrors "errors"
 	"strconv"
 	"sync"
 	"time"
 
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+
 	infravirtrigaudiov1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
+	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
 )
 
 // imagePrepareBackoffPolicy is how long image preparation waits before it
@@ -99,6 +104,26 @@ func imagePrepareBackoffKey(vmImage *infravirtrigaudiov1beta1.VMImage, provider 
 // its runtime environment — ends the wait as a changed spec.source does.
 func sourceRejectedBackoffKey(backoffKey string, provider *infravirtrigaudiov1beta1.Provider) string {
 	return backoffKey + "|generation=" + strconv.FormatInt(provider.Generation, 10)
+}
+
+// imagePrepareRefused reports whether an ImagePrepare failure is a definite
+// refusal other than InvalidSpec, Conflict and InProgress (which have their
+// own handling): NotFound, NotSupported (gRPC Unimplemented), a typed
+// Unauthorized or QuotaExceeded, or an untyped PermissionDenied. Retrying
+// does not change it until the source, the Provider or the host is fixed.
+func imagePrepareRefused(err error) bool {
+	if err == nil || contracts.IsInvalidSpec(err) || contracts.IsConflict(err) || contracts.IsInProgress(err) {
+		return false
+	}
+	if contracts.IsNotFound(err) || contracts.IsNotSupported(err) {
+		return true
+	}
+	var pe *contracts.ProviderError
+	if stderrors.As(err, &pe) {
+		return pe.Type == contracts.ErrorTypeUnauthorized || pe.Type == contracts.ErrorTypeQuotaExceeded
+	}
+	st, ok := status.FromError(err)
+	return ok && st.Code() == codes.PermissionDenied
 }
 
 // retryAfterError is err, the failure of a call that must not be retried

@@ -705,6 +705,20 @@ func (r *VirtualMachineReconciler) issueImagePrepare(
 				err:   fmt.Errorf("prepare image %s on provider %s: %w", vmImage.Name, key, perr),
 				after: notBefore.Sub(now),
 			}
+		case imagePrepareRefused(perr):
+			// Another definite refusal (NotFound, NotSupported, PermissionDenied,
+			// Unauthorized, QuotaExceeded): paced the same way, so it is not
+			// sent again every few seconds per VM; the VMImage's status is
+			// left as before.
+			now := r.now()
+			msg := fmt.Sprintf("image prepare refused by provider %q: %s", key, sanitizeProviderDetail(perr))
+			_, notBefore := r.prepareBackoff.fail(backoffSourceRejected,
+				sourceRejectedBackoffKey(imagePrepareBackoffKey(vmImage, provider, req.SourceDigest), provider),
+				"", msg, sourceRejectedBackoff, now)
+			return false, &retryAfterError{
+				err:   fmt.Errorf("prepare image %s on provider %s: %w", vmImage.Name, key, perr),
+				after: notBefore.Sub(now),
+			}
 		}
 		return false, fmt.Errorf("prepare image %s on provider %s: %w", vmImage.Name, key, perr)
 	}

@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	stderrors "errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -39,13 +40,17 @@ import (
 
 	infravirtrigaudiov1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
 	"github.com/projectbeskar/virtrigaud/internal/k8s"
+	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
 )
 
-// A VirtualMachine Create the provider refuses as an invalid specification
-// (InvalidSpec, gRPC InvalidArgument) is sent again on a backoff, not on a
-// fixed cadence (v0.4.1): a libvirt Create copies the VM's base image before
-// the definition is refused, so a refusal re-sent every 30 seconds copied
-// gigabytes every 30 seconds for as long as the VM existed.
+// A VirtualMachine Create the provider definitely refuses — as an invalid
+// specification (InvalidSpec, gRPC InvalidArgument), or with a NotFound,
+// NotSupported (Unimplemented), Unauthorized or QuotaExceeded answer
+// (createRefusalPaced) — is sent again on a backoff, not on a fixed cadence
+// (v0.4.1): a libvirt Create copies the VM's base image before the definition
+// is refused, so a refusal re-sent every 30 seconds copied gigabytes every 30
+// seconds for as long as the VM existed, and the other refusals were re-sent
+// every 5 seconds.
 //
 // The re-check waits createRefusalRetryBase after the first refusal, twice as
 // long after each consecutive one with the same answer, at most
@@ -60,9 +65,10 @@ import (
 // watch already passes.
 //
 // The run is kept in memory, per VM (createRefusalBackoff). After a manager
-// restart it is recovered from the VM's Ready condition, whose message names
-// the wait and the time of the next re-check (createRefusalMessage): a VM
-// whose condition is for its current generation waits until that time, and
+// restart it is recovered from the VM's Ready or Provisioning condition,
+// whose message names the wait and the time of the next re-check
+// (createRefusalMessage): a VM whose condition is for its current generation
+// waits until that time, and
 // its next refusal continues the run. A change to the Provider, VMClass,
 // VMImage or networks made while no manager ran is therefore picked up at
 // that re-check, at most createRefusalRetryMax later.
@@ -79,19 +85,26 @@ const (
 
 // The Ready / Provisioning message of a refused Create. It is parsed back
 // after a manager restart (parseCreateRefusalMessage), so its parts are
-// constants: createRefusalMessagePrefix, the wait, createRefusalMessageAt,
-// the time of the next re-check (RFC 3339, UTC), createRefusalMessageTail,
-// then the provider's sanitized detail.
+// constants: a head (createRefusalHeadRejected for an InvalidSpec answer,
+// createRefusalHeadFailed for the other refusals createRefusalPaced selects,
+// as their messages began before), createRefusalMessageWait, the wait,
+// createRefusalMessageAt, the time of the next re-check (RFC 3339, UTC),
+// createRefusalMessageTail, then the provider's sanitized detail.
 const (
-	createRefusalMessagePrefix = "Provider rejected VM create (non-retryable; re-checking in "
-	createRefusalMessageAt     = ", at "
-	createRefusalMessageTail   = ", or at once when the VirtualMachine, its VMClass, VMImage or Provider changes): "
+	createRefusalHeadRejected = "Provider rejected VM create"
+	createRefusalHeadFailed   = "Failed to create VM"
+	createRefusalMessageWait  = " (non-retryable; re-checking in "
+	createRefusalMessageAt    = ", at "
+	createRefusalMessageTail  = ", or at once when the VirtualMachine, its VMClass, VMImage or Provider changes): "
 )
 
-// createRefusalMessage renders the condition message of a Create refused with
-// detail, re-checked after wait, at next.
-func createRefusalMessage(wait time.Duration, next time.Time, detail string) string {
-	return createRefusalMessagePrefix + wait.String() + createRefusalMessageAt +
+// createRefusalHeads are the heads parseCreateRefusalMessage accepts.
+var createRefusalHeads = []string{createRefusalHeadRejected, createRefusalHeadFailed}
+
+// createRefusalMessage renders the condition message, starting with head, of
+// a Create refused with detail, re-checked after wait, at next.
+func createRefusalMessage(head string, wait time.Duration, next time.Time, detail string) string {
+	return head + createRefusalMessageWait + wait.String() + createRefusalMessageAt +
 		next.UTC().Format(time.RFC3339) + createRefusalMessageTail + detail
 }
 
@@ -99,7 +112,13 @@ func createRefusalMessage(wait time.Duration, next time.Time, detail string) str
 // and the provider's detail from a createRefusalMessage; ok is false for any
 // other text.
 func parseCreateRefusalMessage(msg string) (wait time.Duration, next time.Time, detail string, ok bool) {
-	rest, found := strings.CutPrefix(msg, createRefusalMessagePrefix)
+	var rest string
+	found := false
+	for _, head := range createRefusalHeads {
+		if rest, found = strings.CutPrefix(msg, head+createRefusalMessageWait); found {
+			break
+		}
+	}
 	if !found {
 		return 0, time.Time{}, "", false
 	}
@@ -120,6 +139,60 @@ func parseCreateRefusalMessage(msg string) (wait time.Duration, next time.Time, 
 		return 0, time.Time{}, "", false
 	}
 	return wait, next, detail, true
+}
+
+// createRefusalPaced reports whether a failed Create is a definite refusal
+// that is re-sent on createRefusalBackoff besides InvalidSpec
+// (handleRejectedCreate): NotFound, NotSupported (gRPC Unimplemented), or a
+// typed Unauthorized or QuotaExceeded. Excluded, and handled as before: a
+// Conflict (its fixed re-check), the answers holdCreateBackoff paces (an
+// untyped FailedPrecondition or PermissionDenied, VM_DISK_CHECK_FAILED,
+// VM_OPERATION_FAILED), and a CREATE_NOT_PERFORMED answer, which says
+// nothing was made and asks for a retry.
+func createRefusalPaced(err error) bool {
+	if err == nil || contracts.IsConflict(err) || contracts.IsInvalidSpec(err) || createNeedsBackoff(err) ||
+		contracts.IsCreateNotPerformed(err) {
+		return false
+	}
+	if contracts.IsNotFound(err) || contracts.IsNotSupported(err) {
+		return true
+	}
+	var pe *contracts.ProviderError
+	return stderrors.As(err, &pe) &&
+		(pe.Type == contracts.ErrorTypeUnauthorized || pe.Type == contracts.ErrorTypeQuotaExceeded)
+}
+
+// paceRefusedCreate records a Create refused with an answer createRefusalPaced
+// selects and returns its requeue: the condition the answer was always
+// recorded on — Provisioning, replacing the create marker, when the outcome is
+// known; Ready only, keeping the marker, when keepMarker (an answer to a
+// re-send, createOutcomeKnown) — with reason ProviderError as before, and a
+// message that now names the next re-check (createRefusalMessage); the Create
+// is sent again on createRefusalBackoff for inputs.
+func (r *VirtualMachineReconciler) paceRefusedCreate(
+	ctx context.Context,
+	vm *infravirtrigaudiov1beta1.VirtualMachine,
+	inputs string,
+	err error,
+	keepMarker bool,
+) ctrl.Result {
+	detail := providerFailureDetail(err)
+	wait, next := r.recordCreateRefusal(vm, inputs, detail)
+	log.FromContext(ctx).Error(err, "Failed to create VM: the provider refused it; re-checking after a backoff",
+		"retryAfter", wait.String())
+	condType := k8s.ConditionProvisioning
+	if keepMarker {
+		condType = k8s.ConditionReady
+	}
+	meta.SetStatusCondition(&vm.Status.Conditions, metav1.Condition{
+		Type:               condType,
+		Status:             metav1.ConditionFalse,
+		Reason:             k8s.ReasonProviderError,
+		Message:            createRefusalMessage(createRefusalHeadFailed, wait, next, detail),
+		ObservedGeneration: vm.Generation,
+	})
+	r.updateStatus(ctx, vm)
+	return ctrl.Result{RequeueAfter: wait}
 }
 
 // createRefusalDelay is the wait after refusals consecutive refusals (at
@@ -302,11 +375,7 @@ func (r *VirtualMachineReconciler) recoverCreateRefusal(vm *infravirtrigaudiov1b
 	if r.createRefusals.known(vm.UID) {
 		return
 	}
-	ready := meta.FindStatusCondition(vm.Status.Conditions, k8s.ConditionReady)
-	if ready == nil || ready.Reason != k8s.ReasonValidationError || ready.ObservedGeneration != vm.Generation {
-		return
-	}
-	wait, next, detail, ok := parseCreateRefusalMessage(ready.Message)
+	wait, next, detail, ok := persistedCreateRefusal(vm)
 	if !ok {
 		return
 	}
@@ -314,6 +383,25 @@ func (r *VirtualMachineReconciler) recoverCreateRefusal(vm *infravirtrigaudiov1b
 		next = limit
 	}
 	r.createRefusals.seed(vm.UID, inputs, detail, createRefusalsFor(wait), next, now)
+}
+
+// persistedCreateRefusal returns the create refusal vm's status records for
+// its current generation: the createRefusalMessage on its Ready or
+// Provisioning condition (False) whose next re-check is the latest (a
+// refusal recorded on Provisioning only can be newer than one Ready still
+// shows). ok is false when neither records one.
+func persistedCreateRefusal(vm *infravirtrigaudiov1beta1.VirtualMachine) (wait time.Duration, next time.Time, detail string, ok bool) {
+	for _, t := range []string{k8s.ConditionReady, k8s.ConditionProvisioning} {
+		c := meta.FindStatusCondition(vm.Status.Conditions, t)
+		if c == nil || c.Status != metav1.ConditionFalse || c.ObservedGeneration != vm.Generation {
+			continue
+		}
+		w, n, d, parsed := parseCreateRefusalMessage(c.Message)
+		if parsed && (!ok || n.After(next)) {
+			wait, next, detail, ok = w, n, d, true
+		}
+	}
+	return wait, next, detail, ok
 }
 
 // holdRefusedCreate holds the Create of vm while the wait after its last
@@ -351,7 +439,9 @@ const createRefusalRefIndex = "virtrigaud.io/create-refusal-ref"
 // refused or held on something a Provider, VMClass or VMImage spec change may
 // resolve: Ready or Provisioning records ValidationError (a provider's
 // InvalidSpec answer, or a VMClass value the create request could not be
-// built from), or Ready records WaitingForDependencies (among others an image
+// built from), either records a paced refusal (a createRefusalMessage, such
+// as a NotFound or NotSupported answer, reason ProviderError), or Ready
+// records WaitingForDependencies (among others an image
 // prepare held after the provider rejected the image source, which a new
 // spec.source ends at once).
 func createRefused(vm *infravirtrigaudiov1beta1.VirtualMachine) bool {
@@ -359,7 +449,14 @@ func createRefused(vm *infravirtrigaudiov1beta1.VirtualMachine) bool {
 		return false
 	}
 	for _, t := range []string{k8s.ConditionReady, k8s.ConditionProvisioning} {
-		if c := meta.FindStatusCondition(vm.Status.Conditions, t); c != nil && c.Reason == k8s.ReasonValidationError {
+		c := meta.FindStatusCondition(vm.Status.Conditions, t)
+		if c == nil {
+			continue
+		}
+		if c.Reason == k8s.ReasonValidationError {
+			return true
+		}
+		if _, _, _, paced := parseCreateRefusalMessage(c.Message); paced && c.Status == metav1.ConditionFalse {
 			return true
 		}
 	}
