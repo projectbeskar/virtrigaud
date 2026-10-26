@@ -120,7 +120,8 @@ func TestMigrationExport_StagingLocationNeverLogged(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			objs := nfsStagedExport()
-			m := objs[len(objs)-1].(*infrav1beta1.VMMigration)
+			m, ok := objs[len(objs)-1].(*infrav1beta1.VMMigration)
+			require.True(t, ok)
 			c := fake.NewClientBuilder().WithScheme(capGatingScheme(t)).WithObjects(objs...).
 				WithStatusSubresource(&infrav1beta1.VMMigration{}).Build()
 			r := migrationReconcilerOn(c, &leakyExportProvider{err: answer})

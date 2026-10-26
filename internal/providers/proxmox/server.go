@@ -1796,8 +1796,36 @@ func exportNeedsConversion(sourceFormat, targetFormat string, compress bool) boo
 	return compress && targetFormat == "qcow2"
 }
 
-// ExportDisk exports a VM disk for migration
+// ExportDisk exports a VM disk to the migration's staging storage
+// (exportDiskStaged). Its error is redacted of the staging location — the
+// URL, the bucket, key and endpoint, the nfs server, export and path — before
+// it crosses the wire and reaches the SDK's request log (R28,
+// migration.RedactStagingError): host command output and storage client
+// errors quote them.
 func (p *Provider) ExportDisk(ctx context.Context, req *providerv1.ExportDiskRequest) (*providerv1.ExportDiskResponse, error) {
+	resp, err := p.exportDiskStaged(ctx, req)
+	if err != nil {
+		return nil, migration.RedactStagingError(err,
+			migration.StagingLocations(req.GetDestinationUrl(), req.GetStorageOptionsJson())...)
+	}
+	return resp, nil
+}
+
+// ImportDisk imports a disk from the migration's staging storage
+// (importDiskStaged). Its error is redacted of the staging location before it
+// crosses the wire and reaches the SDK's request log (R28,
+// migration.RedactStagingError).
+func (p *Provider) ImportDisk(ctx context.Context, req *providerv1.ImportDiskRequest) (*providerv1.ImportDiskResponse, error) {
+	resp, err := p.importDiskStaged(ctx, req)
+	if err != nil {
+		return nil, migration.RedactStagingError(err,
+			migration.StagingLocations(req.GetSourceUrl(), req.GetStorageOptionsJson())...)
+	}
+	return resp, nil
+}
+
+// exportDiskStaged exports a VM disk for migration (ExportDisk before its error is redacted).
+func (p *Provider) exportDiskStaged(ctx context.Context, req *providerv1.ExportDiskRequest) (*providerv1.ExportDiskResponse, error) {
 	// ADR-0006: Proxmox disks live on the PVE node, so the pod-mounted pvc path can
 	// never work; accept only the S3 relay and the NFS qemu-img paths (both run
 	// node-side) and reject pvc/unknown backends honestly (Slice 4).
@@ -2035,8 +2063,8 @@ func (p *Provider) ExportDisk(ctx context.Context, req *providerv1.ExportDiskReq
 	return response, nil
 }
 
-// ImportDisk imports a disk from an external source
-func (p *Provider) ImportDisk(ctx context.Context, req *providerv1.ImportDiskRequest) (*providerv1.ImportDiskResponse, error) {
+// importDiskStaged imports a disk from an external source (ImportDisk before its error is redacted).
+func (p *Provider) importDiskStaged(ctx context.Context, req *providerv1.ImportDiskRequest) (*providerv1.ImportDiskResponse, error) {
 	// ADR-0006: Proxmox disks live on the PVE node, so the pod-mounted pvc path can
 	// never work; accept only the S3 relay and the NFS qemu-img paths (both run
 	// node-side) and reject pvc/unknown backends honestly (Slice 4).

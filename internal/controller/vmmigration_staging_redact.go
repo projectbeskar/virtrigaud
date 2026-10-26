@@ -27,7 +27,8 @@ import (
 // server, export and path — and the staged object's URL (which also carries
 // an nfs object's uid/gid) name the tenant's storage, and belong in no
 // manager log line, status message, condition or event (R28). The providers
-// redact them from what they answer and log; the manager logs the staging URL
+// redact them from what they answer and log (the vSphere and Proxmox
+// ExportDisk and ImportDisk at their RPC boundary); the manager logs the staging URL
 // it sends as its scheme only (logging.RedactLocation), and redacts every
 // provider answer it writes into the VMMigration's failure (the status
 // message, the Failed and Ready conditions, the Warning event) or logs while
@@ -35,8 +36,8 @@ import (
 // is not trusted to be clean.
 
 // migrationStagingLocations returns the texts that locate m's staging
-// storage, for storage.RedactLocations: the S3 bucket and endpoint (and the
-// endpoint's host), the NFS server, export and path. Texts shorter than
+// storage, for storage.RedactLocations: the S3 bucket, key prefix and
+// endpoint (and the endpoint's host), the NFS server, export and path. Texts shorter than
 // storage.MinRedactedLocationLen are not redacted.
 func migrationStagingLocations(m *infrav1beta1.VMMigration) []string {
 	if m == nil || m.Spec.Storage == nil {
@@ -44,7 +45,7 @@ func migrationStagingLocations(m *infrav1beta1.VMMigration) []string {
 	}
 	var out []string
 	if s3 := m.Spec.Storage.S3; s3 != nil {
-		out = append(out, s3.Bucket)
+		out = append(out, s3.Bucket, strings.Trim(s3.Prefix, "/"))
 		out = append(out, storage.S3EndpointLocations(s3.Endpoint)...)
 	}
 	if nfs := m.Spec.Storage.NFS; nfs != nil {

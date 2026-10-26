@@ -101,7 +101,8 @@ func NewS3Storage(config StorageConfig) (*S3Storage, error) {
 		return nil, &StorageError{
 			Type:    ErrorTypeInvalidConfig,
 			Message: "failed to create S3 client",
-			Cause:   err,
+			// The client's error can quote the endpoint (R28).
+			Cause: RedactError(err, append(S3EndpointLocations(s3cfg.Endpoint), s3cfg.Bucket)...),
 		}
 	}
 

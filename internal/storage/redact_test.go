@@ -42,6 +42,8 @@ func TestRedactLocations(t *testing.T) {
 	assert.Contains(t, got, storage.StagedLocationMarker)
 	assert.Contains(t, got, "qemu-img: Could not open", "the rest of the text is kept")
 	assert.Equal(t, "a/b ab", storage.RedactLocations("a/b ab", "/", "ab"), "texts too short to redact safely are ignored")
+	assert.Equal(t, `Put "<redacted https URL>": EOF`,
+		storage.RedactLocations(`Put "https://[fd00::1]:9000/tenant-bucket/key?uploads": EOF`), "an IPv6 host is part of the URL")
 
 	cause := &net.OpError{Op: "dial", Net: "tcp", Err: errors.New("connection refused")}
 	err := storage.RedactError(errors.Join(errors.New("tenant-bucket"), cause), "tenant-bucket")

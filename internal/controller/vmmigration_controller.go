@@ -961,7 +961,7 @@ func (r *VMMigrationReconciler) handleExportingPhase(ctx context.Context, migrat
 			}
 
 			if taskStatus.Error != "" {
-				logger.Info("Export task failed", "task_id", migration.Status.TaskRef, "error", taskStatus.Error)
+				logger.Info("Export task failed", "task_id", migration.Status.TaskRef, "error", redactMigrationStagingText(migration, taskStatus.Error))
 				return r.transitionToFailed(ctx, migration, "Export failed: "+migrationTaskFailedDetail)
 			}
 
@@ -1343,7 +1343,7 @@ func (r *VMMigrationReconciler) handleImportingPhase(ctx context.Context, migrat
 			}
 
 			if taskStatus.Error != "" {
-				logger.Info("Import task failed", "task_id", migration.Status.TaskRef, "error", taskStatus.Error)
+				logger.Info("Import task failed", "task_id", migration.Status.TaskRef, "error", redactMigrationStagingText(migration, taskStatus.Error))
 				return r.transitionToFailed(ctx, migration, "Import failed: "+migrationTaskFailedDetail)
 			}
 
@@ -1580,7 +1580,8 @@ func (r *VMMigrationReconciler) handleImportingPhase(ctx context.Context, migrat
 		// limit (or one whose size it could not read): nothing was landed.
 		// Held, not failed.
 		if refusal := providerImportRefusal(err, importReq.MaxVirtualSizeBytes); refusal != nil {
-			logger.Info("The target provider refused the import for its disk-size limit", "error", err.Error())
+			logger.Info("The target provider refused the import for its disk-size limit",
+				"error", redactMigrationStagingText(migration, err.Error()))
 			// The hold writes nothing when it is unchanged: the refusal
 			// (nothing landed) is recorded by removing the marker first.
 			if werr := r.updateStatus(ctx, migration); werr != nil {

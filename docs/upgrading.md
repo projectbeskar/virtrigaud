@@ -298,12 +298,16 @@ appears in the provider or manager logs, nor in a provider's errors:
 - **Every provider:** the S3 client's errors name no bucket, key or endpoint, and the causes of a
   `DeleteStagedDisk` failure (`qemu-img` output, the S3 error) are redacted the same way. The
   vSphere and Proxmox providers' export and import log lines show the staging URL as
-  `<scheme>://<redacted>`. The
+  `<scheme>://<redacted>`, and the errors their `ExportDisk` and `ImportDisk` answer (which can
+  quote `qemu-img`, `mount` or S3 client output) are redacted the same way, keeping their gRPC
+  code. The
   SDK's `gRPC request completed` line logs the `code` and the status message the manager
-  receives, no longer the provider's internal error text (which could carry such a cause).
+  receives, no longer the provider's internal error text (which could carry such a cause). For
+  an SDK `ProviderError` the status message still includes its cause: a provider built on the
+  SDK must not put a location in either.
 - **The manager** logs the staging URL of `Starting disk export` and `Starting disk import` as
-  `<scheme>://<redacted>`, and replaces the `VMMigration`'s staging bucket, endpoint, NFS
-  server, export and path, and every URL, in a migration failure's status message, `Failed` and
+  `<scheme>://<redacted>`, and replaces the `VMMigration`'s staging bucket, key prefix, endpoint,
+  NFS server, export and path, and every URL, in a migration failure's status message, `Failed` and
   `Ready` conditions and Warning event, and in its export, import and staged-disk cleanup log
   lines. The cause stays readable (for example `MNT3ERR_ACCES` or `SignatureDoesNotMatch`).
 

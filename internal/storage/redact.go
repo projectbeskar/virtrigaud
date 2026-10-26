@@ -45,9 +45,9 @@ const redactedURLFormat = "<redacted %s URL>"
 // appears in. It is the shortest S3 bucket name.
 const MinRedactedLocationLen = 3
 
-// textURLRE matches a URL in free text: a scheme, "://", and everything up to
-// the next blank, quote or closing bracket.
-var textURLRE = regexp.MustCompile(`([A-Za-z][A-Za-z0-9+.-]*)://[^\s'"<>()\[\]]*`)
+// textURLRE matches a URL in free text: a scheme, "://", an optional
+// bracketed IPv6 host, and everything up to the next blank, quote or bracket.
+var textURLRE = regexp.MustCompile(`([A-Za-z][A-Za-z0-9+.-]*)://(\[[0-9A-Fa-f:.%]+\])?[^\s'"<>()\[\]]*`)
 
 // RedactLocations returns text with every URL in it replaced by
 // "<redacted <scheme> URL>", then every one of locations (the longest first;

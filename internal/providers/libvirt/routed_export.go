@@ -214,24 +214,8 @@ func routedExportDefiniteFailure(ctx context.Context, err, cause error) error {
 }
 
 // exportStagedLocations returns the texts that locate req's staged object, for
-// redactLocations (R28): for nfs, its nfs:// URL and the texts in it
-// (nfsURLLocations); for s3, its s3:// URL, its object key, its bucket and
-// its endpoint (migration.StagedDiskLocations).
+// redactLocations (R28): its staging URL and the texts in it, and the
+// non-secret storage options (migration.StagingLocations).
 func exportStagedLocations(req *providerv1.ExportDiskRequest) []string {
-	dest := strings.TrimSpace(req.GetDestinationUrl())
-	if req.GetBackendType() == migration.BackendNFS {
-		return nfsURLLocations(dest)
-	}
-	// An unparsable options document has no bucket or endpoint to redact; the
-	// core refuses it (stageInvalid).
-	opts, _ := migration.ParseStorageOptions(req.GetStorageOptionsJson())
-	disk := migration.StagedDisk{Backend: migration.BackendS3, Options: opts}
-	if rest, ok := strings.CutPrefix(dest, "s3://"); ok {
-		if bucket, key, found := strings.Cut(rest, "/"); found && bucket == strings.TrimSpace(opts.Bucket) {
-			disk.Key = key
-		} else {
-			disk.Key = rest
-		}
-	}
-	return append([]string{dest}, stagedDiskLocations(disk)...)
+	return migration.StagingLocations(req.GetDestinationUrl(), req.GetStorageOptionsJson())
 }
