@@ -5,6 +5,28 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-10-26 23:21] - A provider's answer is no longer lost to a status-write conflict; CreateBackoff says what is known
+**Author:** @wrkode (William Rizzo)
+
+### Fixed
+- `internal/controller/virtualmachine_create_answer.go` (new), `internal/controller/virtualmachine_controller.go`, `internal/controller/virtualmachine_clustered.go`, `internal/controller/virtualmachine_create_backoff.go`, `internal/controller/virtualmachine_create_refusal.go`, `internal/controller/virtualmachine_create_marker.go`: the status write that records a provider's answer to a failed `VirtualMachine` `Create` (a refusal, `CREATE_NOT_PERFORMED`, a failure on the host, an outcome that stays unknown) was a plain update under the `resourceVersion` the reconcile read, so an edit of the VM made while the provider ran the `Create` made it fail with a Conflict and the answer was lost. The `CreateRequested` marker stayed, and a delete that followed was held as `CreateOutcomeUnknown` for an operator although the provider had answered that nothing was made (v0.4.1-rc2 lab, B2: a Proxmox clone task that ended on a configuration lock timeout, under `virtrigaud-loadgen`). `writeCreateAnswer` now re-reads the VM after a Conflict and writes the answer's conditions (`Ready`, `Provisioning`, `Placed`) over the stored status, only while the VM still waits for that answer: no `status.id`, the marker of the attempt the `Create` was sent under (single host), the pending host it was sent to (clustered). Anything newer is never overwritten; the conditions keep the `observedGeneration` of the spec the `Create` was built from, and `status.observedGeneration` keeps its stored value. `handleRejectedCreate` and `paceRefusedCreate` take the `createAttempt` instead of a `keepMarker` flag (same decision, `createOutcomeKnown`).
+- `internal/controller/vmclone_target_stamp.go`: a first single-host `Clone` attempt's answer that proves nothing was made (and drops `CloneRequested`) is written again over the stored `VMClone` when its write conflicted, while the `VMClone` still carries that same `CloneRequested` condition (`recordCloneAnswer`). Lost, the next answer was taken for one to a re-send: a first attempt's name `Conflict` repeated was held as `CloneOutcomeUnknown` for ever.
+- `internal/controller/vmsnapshot_controller.go`, `internal/controller/vmsnapshot_request_marker.go`: a `SnapshotCreate`'s outcome (the snapshot made, a definite failure, "not performed") is written again over the stored `VMSnapshot` when its write conflicted, while it records no snapshot id and still carries the same `SnapshotRequested` marker (`recordSnapshotAnswer`). Lost, a single-host `VMSnapshot` was held as `SnapshotOutcomeUnknown` for an operator, even with the snapshot made.
+
+### Changed
+- `internal/controller/virtualmachine_create_backoff.go`: the `CreateBackoff` message no longer names a cause the provider may not have had ("it could not verify that no other VM uses its disk, or the operation failed on its host", misleading for a Proxmox VMID race or lock timeout; O1). A `CREATE_NOT_PERFORMED` answer reads "The provider answered that it did not perform the last Create sent for this VM, so that request made nothing, and that it can be retried. ..." (`createNotPerformedBackoffMessage`); any other reads "The provider could not complete this VM's Create: the operation failed on the provider's host, or a check it needs could not run there. ...". The `CreateBackoff` `Warning` event now carries the provider's answer (`rpcFailureDetail`), as the `CreateRefused` event does. The reason, the backoff and the phase are unchanged.
+- `internal/controller/virtualmachine_create_answer_test.go`, `internal/controller/vmclone_answer_conflict_test.go`, `internal/controller/vmsnapshot_answer_conflict_test.go` (new), `internal/controller/virtualmachine_create_refusal_paced_test.go`, `internal/controller/virtualmachine_rejected_create_message_test.go`: an edit during the provider call (the conflict) for every answer path of a single-host `Create` (B2 with the delete that follows), a first `Clone` attempt and a `SnapshotCreate`; the guard that never overwrites an id, another attempt's marker or another pending host; the `CreateBackoff` texts and event.
+- `docs/provider-call-outcomes.md`: new section "An answer is not lost to an edit made during the call" (what is written again, while what is stored, what was already covered, what is still lost); the marker bullet and the "A lost failure write is held" limitation (now: a restart, a non-conflict failure, a `VMMigration`'s failed attempt). `docs/upgrading.md` (v0.4.1): the change, the action for a VM an rc2 manager already holds, the new `CreateBackoff` texts. `docs/vm-provider-binding.md`, `docs/vm-ownership.md`: the marker is replaced also after an edit during the call. `docs/vm-status-phase.md`: the `Failed` row names a create retried with a backoff, as rule 3 already did.
+
+### Why
+A definite answer from the provider must never be lost to a write conflict: losing it turns "nothing was made" into "outcome unknown", which holds a delete (or a snapshot, or a clone) for an operator for no reason. The rc2 lab hit it under `virtrigaud-loadgen`, which edits VMs while they are created.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-10-26 23:17] - Proxmox: a VMID-race refusal while the winner's VM is still being made is "not performed"
 **Author:** @wrkode (William Rizzo)
 

@@ -544,6 +544,37 @@ No action is required; this changes how often a refused create is sent again.
   30 seconds, and is now also re-checked at once when its `VMClass` changes. A refused
   `Reconfigure` keeps its backoff (5 seconds doubling to 5 minutes).
 
+### A provider's answer is no longer lost to an edit made during the call
+
+No action is required for new calls; a VM an rc2 manager already holds needs the action below.
+
+- **What changed.** A `VirtualMachine` `Create`, a single-host `VMClone` `Clone` or a
+  `VMSnapshot` `SnapshotCreate` can take minutes. If the object was edited meanwhile (a label, an
+  annotation, a spec change, another tool's update), the status write of the provider's answer
+  conflicted and the answer was lost. A `VirtualMachine` whose `Create` the provider answered it
+  did not perform (for example a Proxmox clone task that ended on a configuration lock timeout)
+  kept its `CreateRequested` marker, and deleting it right after was held as
+  `CreateOutcomeUnknown` for an operator, with nothing on the hypervisor. A `VMSnapshot` whose
+  snapshot was made could be held as `SnapshotOutcomeUnknown`, and a first `Clone` attempt's
+  refusal could be held as `CloneOutcomeUnknown`. The manager now writes the answer again over
+  the object as stored, as long as it still waits for that answer: see
+  [An answer is not lost to an edit made during the call](provider-call-outcomes.md#an-answer-is-not-lost-to-an-edit-made-during-the-call).
+- **A VM an rc2 manager already holds stays held.** The lost answer is not in its status. If a
+  `VirtualMachine` is held as `CreateOutcomeUnknown` and the hypervisor has no VM stamped with
+  its UID, annotate it `virtrigaud.io/create-outcome=not-created@<attempt id>` as its message says
+  ([A Create whose outcome is unknown](vm-provider-binding.md#a-create-whose-outcome-is-unknown-createrequested)).
+- **New `CreateBackoff` messages.** A `Create` the provider did not perform
+  (`CREATE_NOT_PERFORMED`) now reads `The provider answered that it did not perform the last Create
+  sent for this VM, so that request made nothing, and that it can be retried. It is retried with a
+  backoff of up to 5m0s; ...`. Any other `CreateBackoff` (`VM_OPERATION_FAILED`,
+  `VM_DISK_CHECK_FAILED`) reads `The provider could not complete this VM's Create: the operation
+  failed on the provider's host, or a check it needs could not run there. ...`. Both used to read
+  `... it could not verify that no other VM uses its disk, or the operation failed on its host
+  ...`, which named a cause the provider may not have had. The reason, the backoff and the phase
+  (`Failed` while it waits, see [`vm-status-phase.md`](vm-status-phase.md)) are unchanged. The
+  `CreateBackoff` `Warning` event now ends with `Provider answer: <the provider's answer>`
+  (sanitized, as in the `VMClone` events), as the `CreateRefused` event does. An alert that matches the old text must be updated.
+
 ### Other changes
 
 - **API and proto comments.** The descriptions in the CRDs and `provider.proto` are corrected

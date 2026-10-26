@@ -19,7 +19,7 @@ as the provider reports it.
 | `Stopped` | Created, and the provider reports it `Off`. |
 | `Reconfiguring` | A resize is in flight: `Reconfiguring=True` (other than `RestartRequired`) or `status.reconfigureTaskRef` is set. A resize applied to the persistent definition only (`RestartRequired`) leaves the phase to the power state. Also while an asynchronous power task runs (see [A power change that returns a task](#a-power-change-that-returns-a-task)). |
 | `Deleting` | The VM has a deletion timestamp, including while the delete is held (`Ready`/`DeleteBlocked` say why). |
-| `Failed` | A hold that needs an operator (other than a restore guard's), a create that was refused, or a power state the provider cannot classify. See below. |
+| `Failed` | A hold that needs an operator (other than a restore guard's), a create that was refused or is retried with a backoff (`CreateBackoff`, also when the provider did not perform it), or a power state the provider cannot classify. See below. |
 
 ## The rule
 
