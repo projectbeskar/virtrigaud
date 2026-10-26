@@ -238,12 +238,13 @@ spec:
                   - EFI
                 default: BIOS
                 description: |-
-                  Firmware specifies the firmware type: BIOS (the default) or UEFI. Only
-                  the vSphere provider reads it: UEFI selects EFI firmware and any other
-                  value selects BIOS, except that securityProfile.secureBoot or
-                  tpmEnabled force EFI firmware. The libvirt provider selects UEFI
-                  firmware only through securityProfile.secureBoot; Proxmox and mock
-                  ignore this field.
+                  Firmware specifies the firmware type: BIOS (the default) or UEFI. The
+                  vSphere and libvirt providers read it: UEFI selects EFI firmware and any
+                  other value (EFI included) selects BIOS, except that
+                  securityProfile.secureBoot (and, on vSphere, tpmEnabled) force EFI
+                  firmware. On libvirt, UEFI is OVMF without Secure Boot on the q35
+                  machine type, chosen by libvirt from the host's installed firmware
+                  (docs/libvirt-firmware.md). Proxmox and mock ignore this field.
                 type: string
               guestToolsPolicy:
                 default: install
@@ -341,7 +342,10 @@ spec:
                     default: false
                     description: |-
                       NestedVirtualization enables nested virtualization. It is acted on by
-                      vSphere and libvirt; Proxmox and mock ignore it.
+                      vSphere and libvirt; on libvirt the host CPU is passed through
+                      (host-passthrough), and the guest sees VT-x or AMD-V only when the
+                      host's kvm_intel or kvm_amd module has nesting enabled. Proxmox and mock
+                      ignore it.
                     type: boolean
                   virtualizationBasedSecurity:
                     default: false
@@ -437,8 +441,10 @@ spec:
                     default: false
                     description: |-
                       SecureBoot enables secure boot. vSphere forces EFI firmware and enables
-                      secure boot; libvirt requests secure-boot OVMF firmware on a q35
-                      machine type. Proxmox and mock ignore it.
+                      secure boot; libvirt has libvirt select a Secure Boot OVMF build whose
+                      variable-store template has keys enrolled, with SMM, on the q35 machine
+                      type (the host needs an OVMF package; docs/libvirt-firmware.md). Proxmox
+                      and mock ignore it.
                     type: boolean
                   tpmEnabled:
                     default: false
@@ -460,7 +466,9 @@ spec:
                     default: false
                     description: |-
                       VTDEnabled enables Intel VT-d or AMD-Vi. vSphere sets vvtd.enable;
-                      libvirt requests an emulated IOMMU. Proxmox and mock ignore it.
+                      libvirt adds an emulated Intel IOMMU with interrupt remapping, which
+                      needs the q35 machine type (the virtio devices do not go through it).
+                      Proxmox and mock ignore it.
                     type: boolean
                 type: object
             required:

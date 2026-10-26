@@ -996,11 +996,32 @@ func (v *VirshProvider) destroyDomain(ctx context.Context, domainName string) er
 	return nil
 }
 
-// undefineDomain removes a domain definition
-func (v *VirshProvider) undefineDomain(ctx context.Context, domainName string) error {
+// undefineNVRAM is how `virsh undefine` treats a domain's UEFI variable store
+// (undefineNVRAMFor).
+type undefineNVRAM string
+
+const (
+	// undefineNoNVRAM: the domain has no variable store (BIOS); plain undefine.
+	undefineNoNVRAM undefineNVRAM = ""
+	// undefineRemoveNVRAM removes the domain's own variable store with it.
+	undefineRemoveNVRAM undefineNVRAM = "--nvram"
+	// undefineKeepNVRAM leaves the variable store file in place (one the
+	// domain does not own, by its name).
+	undefineKeepNVRAM undefineNVRAM = "--keep-nvram"
+)
+
+// undefineDomain removes a domain definition. nvram says what happens to its
+// UEFI variable store (undefineNVRAMFor): libvirt refuses to undefine a
+// domain whose variable store exists unless one of --nvram / --keep-nvram is
+// given ("cannot undefine domain with nvram").
+func (v *VirshProvider) undefineDomain(ctx context.Context, domainName string, nvram undefineNVRAM) error {
 	log.Printf("INFO Undefining domain: %s", domainName)
 
-	_, err := v.runVirshCommand(ctx, "undefine", domainName)
+	args := []string{"undefine", domainName}
+	if nvram != undefineNoNVRAM {
+		args = append(args, string(nvram))
+	}
+	_, err := v.runVirshCommand(ctx, args...)
 	if err != nil {
 		return fmt.Errorf("failed to undefine domain %s: %w", domainName, err)
 	}

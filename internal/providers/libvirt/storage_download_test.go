@@ -34,10 +34,12 @@ import (
 
 // secretImageURL is an image URL with user-info and a presigned query: none of
 // legacyURLSecrets may reach a host command line, the log or an error.
-const secretImageURL = "https://joe:p4ssw0rd@images.example.com/ubuntu.qcow2?X-Amz-Signature=supersecret&token=t0ken"
+const secretImageURL = "https://joe.user:p4ssw0rd@images.example.com/ubuntu.qcow2?X-Amz-Signature=supersecret&token=t0ken.v1"
 
-// legacyURLSecrets are the parts of secretImageURL that must not leak.
-var legacyURLSecrets = []string{"joe", "p4ssw0rd", "supersecret", "t0ken", "X-Amz-Signature"}
+// legacyURLSecrets are the parts of secretImageURL that must not leak. The
+// short ones carry a "." so a random mktemp suffix (letters and digits only)
+// on a command line can never contain them.
+var legacyURLSecrets = []string{"joe.user", "p4ssw0rd", "supersecret", "t0ken.v1", "X-Amz-Signature"}
 
 // captureStdLog sends the standard logger (the provider's log) to a buffer
 // for the rest of the test.
@@ -134,7 +136,7 @@ func TestDownloadCloudImage_RefusesUnsafeURL(t *testing.T) {
 	sp.stagingDir = t.TempDir()
 	for _, bad := range []string{
 		"https://images.example.com/a.qcow2\noutput = /etc/passwd",
-		"https://images.example.com/a b.qcow2?token=t0ken",
+		"https://images.example.com/a b.qcow2?token=t0ken.v1",
 		"file:///etc/shadow",
 	} {
 		_, err := sp.DownloadCloudImage(context.Background(), bad, "vol-disk", "default", 10)
@@ -143,7 +145,7 @@ func TestDownloadCloudImage_RefusesUnsafeURL(t *testing.T) {
 		require.ErrorAs(t, err, &pe)
 		assert.Equal(t, contracts.ErrorTypeInvalidSpec, pe.Type)
 		assert.NotContains(t, err.Error(), "images.example.com")
-		assert.NotContains(t, err.Error(), "t0ken")
+		assert.NotContains(t, err.Error(), "t0ken.v1")
 	}
 	assert.Empty(t, h.log("curl"), "nothing is downloaded")
 }
@@ -155,8 +157,8 @@ func TestDownloadCloudImage_RefusesUnsafeURL(t *testing.T) {
 // not fetch is refused as InvalidSpec without running anything or echoing it.
 func TestCreate_EveryURLIsDownloadedOrRefused(t *testing.T) {
 	for _, u := range []string{
-		"ftp://joe:p4ssw0rd@images.example.com/ubuntu.qcow2?token=t0ken",
-		"HTTPS://joe:p4ssw0rd@images.example.com/ubuntu.qcow2?X-Amz-Signature=supersecret",
+		"ftp://joe.user:p4ssw0rd@images.example.com/ubuntu.qcow2?token=t0ken.v1",
+		"HTTPS://joe.user:p4ssw0rd@images.example.com/ubuntu.qcow2?X-Amz-Signature=supersecret",
 	} {
 		t.Run(u[:5], func(t *testing.T) {
 			c := newCreateHost(t)
@@ -174,14 +176,14 @@ func TestCreate_EveryURLIsDownloadedOrRefused(t *testing.T) {
 		c := newCreateHost(t)
 		logs := captureStdLog(t)
 		req := c.createReq(ownerTeamA, "")
-		req.Image = contracts.VMImage{URL: "file:///etc/shadow?token=t0ken"}
+		req.Image = contracts.VMImage{URL: "file:///etc/shadow?token=t0ken.v1"}
 		_, err := c.p.Create(context.Background(), req)
 		require.Error(t, err)
 		var pe *contracts.ProviderError
 		require.ErrorAs(t, err, &pe)
 		assert.Equal(t, contracts.ErrorTypeInvalidSpec, pe.Type)
 		assert.NotContains(t, err.Error(), "shadow")
-		assert.NotContains(t, logs.String(), "t0ken")
+		assert.NotContains(t, logs.String(), "t0ken.v1")
 		assert.NotContains(t, logs.String(), "predefined template")
 		assert.Empty(t, c.log("curl"), "nothing is downloaded")
 	})

@@ -41,7 +41,11 @@ import (
 // `list --all` reports the defined domains, `define <file>` records the
 // domain (by name and by UUID) the way libvirt would, refusing a name that is
 // already defined, and `undefine` forgets it again. A file named fail-define
-// in the host directory makes define fail. `vol-create <pool> <file>` records
+// in the host directory makes define fail (with the file's content as stderr
+// when it is not empty). With a file nvram-dir, define fills in the UEFI
+// variable store path of an <os firmware='efi'> domain as libvirt 10 does
+// (<nvram-dir content>/<name>_VARS.fd). `domcapabilities` prints the file
+// domcaps (nothing without it). `vol-create <pool> <file>` records
 // the volume definition it reads in vol-create.xml and, as libvirt's dir pool
 // does, creates the volume's file <pool directory>/<name> — WITHOUT an
 // extension; it refuses a name whose file already exists. `vol-path <name>
@@ -76,12 +80,16 @@ case "$1" in
     if [ -f "$d/dom-$2.xml" ]; then exec cat "$d/dom-$2.xml"; fi
     echo "error: failed to get domain '$2'" >&2; exit 1 ;;
   define)
+    if [ -s "$d/fail-define" ]; then cat "$d/fail-define" >&2; exit 1; fi
     if [ -f "$d/fail-define" ]; then echo "error: scripted define failure" >&2; exit 1; fi
     name=$(sed -n 's:.*<name>\(.*\)</name>.*:\1:p' "$2" | head -n 1)
     uuid=$(sed -n 's:.*<uuid>\(.*\)</uuid>.*:\1:p' "$2" | head -n 1)
     if [ -f "$d/dom-$name.xml" ]; then echo "error: domain '$name' already exists" >&2; exit 1; fi
     cp "$2" "$d/dom-$name.xml"
-    cp "$2" "$d/dom-$uuid.xml"
+    if [ -f "$d/nvram-dir" ]; then
+      sed -i "s:<os firmware='efi'>:<os firmware='efi'><nvram template='/fw/VARS.fd'>$(cat "$d/nvram-dir")/${name}_VARS.fd</nvram>:" "$d/dom-$name.xml"
+    fi
+    cp "$d/dom-$name.xml" "$d/dom-$uuid.xml"
     echo "$name" >> "$d/names"
     echo "$uuid" >> "$d/uuids"
     cp "$2" "$d/defined-from"
@@ -107,6 +115,7 @@ case "$1" in
     if [ -f "$d/snapxml-$3" ]; then exec cat "$d/snapxml-$3"; fi
     printf "<domainsnapshot><name>%s</name><disks><disk name='vda' snapshot='external' type='file'><source file='%s/%s-disk.%s'/></disk></disks><domain><devices/></domain></domainsnapshot>\n" "$3" "$(cat "$d/pooldir")" "$2" "$3" ;;
   metadata|change-media) exit 0 ;;
+  domcapabilities) if [ -f "$d/domcaps" ]; then exec cat "$d/domcaps"; fi; exit 0 ;;
   domstate)
     if [ -f "$d/state-$2" ]; then exec cat "$d/state-$2"; fi
     if [ -f "$d/dom-$2.xml" ]; then echo "shut off"; exit 0; fi
