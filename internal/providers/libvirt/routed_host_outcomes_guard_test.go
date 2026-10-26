@@ -86,6 +86,6 @@ func TestRoutedHostOutcomes_DeleteDestroyDrops(t *testing.T) {
 		fx, p := clusteredOpsFixture(t)
 		fx.script("host-b", "fail-destroy", "")
 		require.NoError(t, del(p))
-		assert.Contains(t, fx.calls(), "host-b undefine "+routingDomainUUID)
+		assert.Contains(t, fx.calls(), "host-b undefine "+routingDomainUUID+" --nvram")
 	})
 }

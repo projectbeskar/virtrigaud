@@ -93,8 +93,11 @@ func TestGenerateNetworkInterfacesXML_Golden_UserNetwork(t *testing.T) {
 }
 
 // TestGenerateNetworkInterfacesXML_Golden_MultiNIC pins a three-NIC mix
-// (bridge, managed network, user) verifying PCI slot increments and the
-// blank-line separator between interfaces.
+// (bridge, managed network, user): only the first interface has the fixed
+// i440fx PCI slot 0x03; the others have no address, so libvirt assigns them
+// free slots (slot 3+index collided with the sound card at 0x04 and USB at
+// 0x05, and libvirt refused the domain: "Attempted double use of PCI
+// Address").
 func TestGenerateNetworkInterfacesXML_Golden_MultiNIC(t *testing.T) {
 	p := &Provider{}
 	got := p.generateNetworkInterfacesXML([]contracts.NetworkAttachment{
@@ -111,11 +114,9 @@ func TestGenerateNetworkInterfacesXML_Golden_MultiNIC(t *testing.T) {
       <mac address='52:54:00:12:34:56'/>
       <source network='mgmt-net'/>
       <model type='virtio'/>
-      <address type='pci' domain='0x0000' bus='0x00' slot='0x04' function='0x0'/>
     </interface>
     <interface type='user'>
       <model type='virtio'/>
-      <address type='pci' domain='0x0000' bus='0x00' slot='0x05' function='0x0'/>
     </interface>`
 	assert.Equal(t, want, got)
 }

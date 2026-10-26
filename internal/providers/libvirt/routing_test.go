@@ -456,7 +456,7 @@ func TestClustered_Delete_OwnerChecked(t *testing.T) {
 					"host-a list --all --uuid",
 					"host-b list --all --uuid",
 					"host-a destroy " + routingDomainUUID,
-					"host-a undefine " + routingDomainUUID,
+					"host-a undefine " + routingDomainUUID + " --nvram",
 					"local sudo rm -f -- " + routingDiskPath,
 					// R37: the default pool forgets the removed disk.
 					"host-a pool-refresh default",
@@ -693,7 +693,7 @@ func TestSingleHost_DescribeAndDelete_UnchangedOnVirshProvider(t *testing.T) {
 				"single pool-dumpxml default",
 				"single list --all --uuid",
 				"single destroy web",
-				"single undefine web",
+				"single undefine web --nvram",
 				"local sudo rm -f -- " + routingDiskPath,
 				// R37: the default pool forgets the removed disk.
 				"single pool-refresh default",

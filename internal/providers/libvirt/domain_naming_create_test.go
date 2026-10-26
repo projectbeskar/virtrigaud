@@ -657,7 +657,7 @@ func TestClustered_Delete_PendingCreateFindsNamespacedDomain(t *testing.T) {
 		calls := fx.calls()
 		assert.Contains(t, calls, "host-a dumpxml team-a.web")
 		assert.Contains(t, calls, "host-a destroy "+routingDomainUUID, "torn down by the checked UUID")
-		assert.Contains(t, calls, "host-a undefine "+routingDomainUUID)
+		assert.Contains(t, calls, "host-a undefine "+routingDomainUUID+" --nvram")
 	})
 
 	t.Run("another UID's namespaced domain is untouched", func(t *testing.T) {

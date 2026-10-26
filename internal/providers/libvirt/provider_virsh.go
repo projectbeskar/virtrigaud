@@ -2285,6 +2285,9 @@ runcmd:
 // are escaped anyway
 // (issue #260 defense in depth) rather than trusting the path-construction
 // call chain to never change.
+//
+// This is the i440fx layout (fixed PCI slot, IDE CD-ROM); a q35 domain uses
+// buildQ35DiskDevicesXML.
 func buildDiskDevicesXML(diskPath, cloudInitISOPath string) string {
 	diskDevicesXML := fmt.Sprintf(`    <disk type='file' device='disk'>
       <driver name='qemu' type='qcow2'/>
@@ -2308,6 +2311,29 @@ func buildDiskDevicesXML(diskPath, cloudInitISOPath string) string {
 	return diskDevicesXML
 }
 
+// buildQ35DiskDevicesXML is buildDiskDevicesXML for a q35 domain
+// (domainPlatform): q35 has no IDE controller, so the cloud-init CD-ROM is on
+// the machine's built-in SATA (AHCI) controller, and no PCI address is given —
+// libvirt places the disk on a pcie-root-port it adds. cloud-init finds the
+// NoCloud seed by its volume label (cidata), whatever the bus.
+func buildQ35DiskDevicesXML(diskPath, cloudInitISOPath string) string {
+	diskDevicesXML := fmt.Sprintf(`    <disk type='file' device='disk'>
+      <driver name='qemu' type='qcow2'/>
+      <source file='%s'/>
+      <target dev='vda' bus='virtio'/>
+    </disk>`, xmlEscape(diskPath))
+	if cloudInitISOPath != "" {
+		diskDevicesXML += fmt.Sprintf(`
+    <disk type='file' device='cdrom'>
+      <driver name='qemu' type='raw'/>
+      <source file='%s'/>
+      <target dev='sda' bus='sata'/>
+      <readonly/>
+    </disk>`, xmlEscape(cloudInitISOPath))
+	}
+	return diskDevicesXML
+}
+
 // generateNetworkInterfacesXML creates network interface XML from network
 // attachments.
 //
@@ -2315,14 +2341,38 @@ func buildDiskDevicesXML(diskPath, cloudInitISOPath string) string {
 // (VMNetworkAttachment / VirtualMachine spec fields) and, at the time of
 // issue #260, were not all pattern-validated against XML metacharacters at
 // admission time — so every one is passed through xmlEscape before
-// interpolation. pciSlot is computed from the loop index (numeric, safe);
+// interpolation. The PCI address is a constant (firstNICPCIAddressXML);
 // model falls back to the "virtio" constant when net.Model is empty.
+//
+// This is the i440fx layout: the first interface sits at the historical PCI
+// slot 0x03; every further one gets no address, so libvirt assigns it a free
+// slot (slots 0x04 to 0x08 hold the sound card, USB, virtio-serial, the disk
+// and the balloon, so the slot 3+index that earlier releases gave a second
+// interface collided with them and libvirt refused the domain: "Attempted
+// double use of PCI Address"). A q35 domain uses
+// generateNetworkInterfacesXMLFor(networks, false).
 func (p *Provider) generateNetworkInterfacesXML(networks []contracts.NetworkAttachment) string {
+	return p.generateNetworkInterfacesXMLFor(networks, true)
+}
+
+// firstNICPCIAddressXML is the PCI address of an i440fx domain's first
+// network interface.
+const firstNICPCIAddressXML = `
+      <address type='pci' domain='0x0000' bus='0x00' slot='0x03' function='0x0'/>`
+
+// generateNetworkInterfacesXMLFor renders the network interfaces; with
+// i440fxSlot the first one carries the i440fx PCI address
+// (generateNetworkInterfacesXML), otherwise no interface carries one (q35:
+// libvirt assigns every address).
+func (p *Provider) generateNetworkInterfacesXMLFor(networks []contracts.NetworkAttachment, i440fxSlot bool) string {
 	if len(networks) == 0 {
 		// Default to user network if no networks specified
+		addr := ""
+		if i440fxSlot {
+			addr = firstNICPCIAddressXML
+		}
 		return `    <interface type='user'>
-      <model type='virtio'/>
-      <address type='pci' domain='0x0000' bus='0x00' slot='0x03' function='0x0'/>
+      <model type='virtio'/>` + addr + `
     </interface>`
 	}
 
@@ -2334,8 +2384,12 @@ func (p *Provider) generateNetworkInterfacesXML(networks []contracts.NetworkAtta
 			model = xmlEscape(net.Model)
 		}
 
-		// Determine PCI slot (start at 0x03, increment for each interface)
-		pciSlot := fmt.Sprintf("0x%02x", 3+idx)
+		// Only the first interface of an i440fx domain has a fixed PCI
+		// address; libvirt assigns the others a free slot.
+		addrXML := ""
+		if i440fxSlot && idx == 0 {
+			addrXML = firstNICPCIAddressXML
+		}
 
 		// Generate MAC address if specified
 		macXML := ""
@@ -2350,22 +2404,19 @@ func (p *Provider) generateNetworkInterfacesXML(networks []contracts.NetworkAtta
 			// Bridge network
 			interfaceXML = fmt.Sprintf(`    <interface type='bridge'>%s
       <source bridge='%s'/>
-      <model type='%s'/>
-      <address type='pci' domain='0x0000' bus='0x00' slot='%s' function='0x0'/>
-    </interface>`, macXML, xmlEscape(net.Bridge), model, pciSlot)
+      <model type='%s'/>%s
+    </interface>`, macXML, xmlEscape(net.Bridge), model, addrXML)
 		} else if net.NetworkName != "" {
 			// Libvirt managed network
 			interfaceXML = fmt.Sprintf(`    <interface type='network'>%s
       <source network='%s'/>
-      <model type='%s'/>
-      <address type='pci' domain='0x0000' bus='0x00' slot='%s' function='0x0'/>
-    </interface>`, macXML, xmlEscape(net.NetworkName), model, pciSlot)
+      <model type='%s'/>%s
+    </interface>`, macXML, xmlEscape(net.NetworkName), model, addrXML)
 		} else {
 			// Default to user network (NAT)
 			interfaceXML = fmt.Sprintf(`    <interface type='user'>%s
-      <model type='%s'/>
-      <address type='pci' domain='0x0000' bus='0x00' slot='%s' function='0x0'/>
-    </interface>`, macXML, model, pciSlot)
+      <model type='%s'/>%s
+    </interface>`, macXML, model, addrXML)
 		}
 
 		if idx > 0 {
@@ -2394,12 +2445,11 @@ func (p *Provider) generateDomainXMLWithStorage(ctx context.Context, vp *VirshPr
 		memoryMB = int64(req.Class.MemoryMiB)
 	}
 
-	// Extract performance and security features
+	// Extract the performance features and the virtual platform (machine type,
+	// firmware, IOMMU: domainPlatformFor).
 	var nestedVirtualization bool
 	var cpuHotAddEnabled bool
 	var memoryHotAddEnabled bool
-	var vtdEnabled bool
-	var secureBoot bool
 	var tpmEnabled bool
 
 	if req.Class.PerformanceProfile != nil {
@@ -2414,10 +2464,9 @@ func (p *Provider) generateDomainXMLWithStorage(ctx context.Context, vp *VirshPr
 	}
 
 	if req.Class.SecurityProfile != nil {
-		vtdEnabled = req.Class.SecurityProfile.VTDEnabled
-		secureBoot = req.Class.SecurityProfile.SecureBoot
 		tpmEnabled = req.Class.SecurityProfile.TPMEnabled
 	}
+	platform := domainPlatformFor(req.Class)
 
 	// A fresh, unpredictable RFC 4122 v4 UUID (crypto/rand) for the domain. This
 	// does not by itself make concurrent same-named creates safe; see
@@ -2432,50 +2481,10 @@ func (p *Provider) generateDomainXMLWithStorage(ctx context.Context, vp *VirshPr
 	// request carries no owner UID.
 	ownerMetadataXML := renderOwnerMetadataXML(req.Owner)
 
-	// Build disk devices XML. diskPath/cloudInitISOPath are provider-computed
-	// host file paths (pool directory + a name derived from domainName), but are
-	// escaped anyway (see buildDiskDevicesXML) as defense in depth.
-	devicesDiskXML := buildDiskDevicesXML(diskPath, cloudInitISOPath)
-
-	// Build features XML based on configuration
-	featuresXML := `    <acpi/>
-    <apic/>`
-
-	if secureBoot {
-		featuresXML += `
-    <smm state='on'>
-      <tseg unit='MiB'>16</tseg>
-    </smm>`
-	}
-
-	if vtdEnabled {
-		featuresXML += `
-    <iommu model='intel'/>` // or 'amd' for AMD systems
-	}
-
-	// Build CPU configuration with nested virtualization support
-	cpuXML := `<cpu mode='host-model' check='partial'>`
-	if nestedVirtualization {
-		cpuXML += `
-    <feature policy='require' name='vmx'/> <!-- Intel VT-x -->
-    <feature policy='require' name='svm'/> <!-- AMD-V -->`
-	}
-	cpuXML += `</cpu>`
-
-	// Build OS configuration with secure boot if needed
-	osXML := `    <type arch='x86_64' machine='pc'>hvm</type>
-    <boot dev='hd'/>
-    <boot dev='cdrom'/>`
-
-	if secureBoot {
-		osXML = `    <type arch='x86_64' machine='q35'>hvm</type>
-    <loader readonly='yes' type='pflash' secure='yes'>/usr/share/OVMF/OVMF_CODE_4M.secboot.fd</loader>
-    <nvram template='/usr/share/OVMF/OVMF_VARS_4M.fd'/>
-    <boot dev='hd'/>
-    <boot dev='cdrom'/>`
-	}
-
-	// Build devices XML with TPM if needed.
+	// Build the <devices> content. diskPath/cloudInitISOPath are
+	// provider-computed host file paths (pool directory + a name derived from
+	// domainName), but are escaped anyway (see buildDiskDevicesXML) as defense
+	// in depth.
 	//
 	// Intentionally omit <emulator>: libvirt's qemu driver fills in the host's
 	// default emulator for the domain's (arch, machine, type) during define-time
@@ -2483,17 +2492,21 @@ func (p *Provider) generateDomainXMLWithStorage(ctx context.Context, vp *VirshPr
 	// binary lives elsewhere (e.g. RHEL/CentOS at /usr/libexec/qemu-kvm). The
 	// provider talks to a possibly-remote libvirtd over SSH, so letting the
 	// remote daemon resolve its own emulator is both simpler and more correct.
-	devicesXML := devicesDiskXML
-
-	if tpmEnabled {
-		devicesXML += `
-    <tpm model='tpm-tis'>
-      <backend type='emulator' version='2.0'/>
-    </tpm>`
+	var devicesXML string
+	if platform.q35 {
+		devicesXML = buildQ35DiskDevicesXML(diskPath, cloudInitISOPath) + "\n" +
+			platform.q35DevicesTailXML(p.generateNetworkInterfacesXMLFor(req.Networks, false), tpmEnabled)
+	} else {
+		// The historical i440fx layout, byte-identical to earlier releases
+		// (the TPM, when asked for, follows the disks).
+		devicesXML = buildDiskDevicesXML(diskPath, cloudInitISOPath)
+		if tpmEnabled {
+			devicesXML += "\n" + tpmDeviceXML
+		}
+		devicesXML += "\n" + fmt.Sprintf(i440fxDevicesTailFormat, p.generateNetworkInterfacesXML(req.Networks))
 	}
 
-	// Generate network interfaces based on request
-	networkInterfacesXML := p.generateNetworkInterfacesXML(req.Networks)
+	osStartTag, osXML := platform.osXML()
 
 	// Build the CPU/memory elements, provisioning hotplug headroom when the
 	// VMClass opts into CPU/MemoryHotAddEnabled (#203). When hot-add is off the
@@ -2513,7 +2526,7 @@ func (p *Provider) generateDomainXMLWithStorage(ctx context.Context, vp *VirshPr
 %s  %s
   %s
   %s
-  <os>
+  %s
 %s
   </os>
   <features>
@@ -2530,7 +2543,33 @@ func (p *Provider) generateDomainXMLWithStorage(ctx context.Context, vp *VirshPr
   <on_crash>destroy</on_crash>
 %s  <devices>
 %s
-    <controller type='usb' index='0' model='ich9-ehci1'>
+  </devices>
+</domain>`,
+		domainType,
+		// domainName is derived from DNS-1123 names (or, for an older
+		// manager, the bare VM name), which carry no XML-safety guarantee of
+		// their own — escape it into the <name> element as defense in depth
+		// (issue #260).
+		xmlEscape(domainName),
+		uuid,
+		ownerMetadataXML, // "" or a full "  <metadata>...</metadata>\n" block; values escaped
+		cpuMem.Memory,
+		cpuMem.CurrentMemory,
+		cpuMem.VCPU,
+		osStartTag,
+		osXML,
+		platform.featuresXML(),
+		cpuXML(nestedVirtualization),
+		p.domainPMXML(),
+		devicesXML)
+
+	return domainXML, nil
+}
+
+// i440fxDevicesTailFormat is the historical i440fx device layout that follows
+// the disks (and TPM) in <devices>, with every device at a fixed PCI slot;
+// the network interfaces (generateNetworkInterfacesXML) are its one %s.
+const i440fxDevicesTailFormat = `    <controller type='usb' index='0' model='ich9-ehci1'>
       <address type='pci' domain='0x0000' bus='0x00' slot='0x05' function='0x7'/>
     </controller>
     <controller type='usb' index='0' model='ich9-uhci1'>
@@ -2582,29 +2621,7 @@ func (p *Provider) generateDomainXMLWithStorage(ctx context.Context, vp *VirshPr
     </video>
     <memballoon model='virtio'>
       <address type='pci' domain='0x0000' bus='0x00' slot='0x08' function='0x0'/>
-    </memballoon>
-  </devices>
-</domain>`,
-		domainType,
-		// domainName is derived from DNS-1123 names (or, for an older
-		// manager, the bare VM name), which carry no XML-safety guarantee of
-		// their own — escape it into the <name> element as defense in depth
-		// (issue #260).
-		xmlEscape(domainName),
-		uuid,
-		ownerMetadataXML, // "" or a full "  <metadata>...</metadata>\n" block; values escaped
-		cpuMem.Memory,
-		cpuMem.CurrentMemory,
-		cpuMem.VCPU,
-		osXML,
-		featuresXML,
-		cpuXML,
-		p.domainPMXML(),
-		devicesXML,
-		networkInterfacesXML)
-
-	return domainXML, nil
-}
+    </memballoon>`
 
 // clusteredDomainPMXML disables guest-initiated suspend to RAM and to disk. A
 // guest suspended to RAM (pmsuspended) is still an active domain that wakes on

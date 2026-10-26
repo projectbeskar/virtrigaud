@@ -996,11 +996,16 @@ func (v *VirshProvider) destroyDomain(ctx context.Context, domainName string) er
 	return nil
 }
 
-// undefineDomain removes a domain definition
+// undefineDomain removes a domain definition, together with the domain's own
+// UEFI variable store when it has one (--nvram): libvirt refuses to undefine
+// a UEFI domain otherwise ("cannot undefine domain with nvram"), and the
+// varstore belongs to the domain alone (libvirt made it from the firmware's
+// template for this domain; a clone gets its own copy). The flag is ignored
+// for a domain without one.
 func (v *VirshProvider) undefineDomain(ctx context.Context, domainName string) error {
 	log.Printf("INFO Undefining domain: %s", domainName)
 
-	_, err := v.runVirshCommand(ctx, "undefine", domainName)
+	_, err := v.runVirshCommand(ctx, "undefine", domainName, "--nvram")
 	if err != nil {
 		return fmt.Errorf("failed to undefine domain %s: %w", domainName, err)
 	}
