@@ -5,6 +5,36 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-10-26 01:27] - libvirt: secure boot, UEFI, VT-d, nested virtualization and multi-NIC domains are valid; a refused definition is a validation error and leaves no disk
+**Author:** @wrkode (William Rizzo)
+
+### Fixed
+- `internal/providers/libvirt/domain_platform.go` (new), `provider_virsh.go`: a VMClass with `securityProfile.secureBoot: true` produced a q35 domain with the i440fx device layout (`pci-root`, IDE CD-ROM, fixed PCI slots), which libvirt 10 refuses ("The PCI controller with index='0' must be model='pcie-root' for this machine type"). UEFI and VT-d domains now use the q35 machine type with their own device layout: libvirt assigns every PCI address, the cloud-init CD-ROM is on SATA, USB is `qemu-xhci`, video is VGA. The firmware is no longer a hard-coded Debian path: `<os firmware='efi'>` with `<firmware><feature>` filters lets libvirt select it from the host's OVMF descriptors. Secure boot asks for `secure-boot` and `enrolled-keys` (Secure Boot is enforced from the first boot; the old template `OVMF_VARS_4M.fd` has no keys enrolled), with `<loader secure='yes'/>` and `<smm state='on'/>`. The default i440fx domain is byte-identical to v0.4.0 (golden test).
+- `internal/providers/libvirt/domain_platform.go`, `provider_virsh.go`: `VMClass.firmware: UEFI` is honoured (case-insensitive; it was ignored). It selects OVMF without Secure Boot on q35. `BIOS`, `EFI` and unset keep BIOS, as on vSphere.
+- `internal/providers/libvirt/domain_platform.go`, `provider_virsh.go`: `securityProfile.vtdEnabled` put `<iommu>` under `<features>`, which libvirt refuses ("unexpected feature 'iommu'"). It is now an `<iommu model='intel'>` device with `intremap='on'`, plus `<ioapic driver='qemu'/>`, on q35.
+- `internal/providers/libvirt/domain_platform.go`, `provider_virsh.go`: `performanceProfile.nestedVirtualization` required both `vmx` and `svm`, which no host CPU has, so the domain never started. It now uses `<cpu mode='host-passthrough' check='none'/>`.
+- `internal/providers/libvirt/provider_virsh.go`: on i440fx, a second network interface got PCI slot `0x04`, the sound card's slot, and libvirt refused the domain ("Attempted double use of PCI Address"). Only the first interface keeps its fixed slot `0x03`; libvirt assigns the others.
+- `internal/providers/libvirt/staging.go`, `provider_virsh.go`: a `virsh define` that libvirt refuses because of the definition itself ("XML error:", "unsupported configuration:", or no OVMF build matching the request), with the domain verified absent, is now `InvalidSpec` (`InvalidArgument`; the VM is `Ready=False/ValidationError`, and the manager knows that the attempt made nothing) on single-host and clustered Providers. It was a retryable error, re-sent about every 30 seconds with a fresh 1.8 GB copy each time, and the delete was then held as `CreateOutcomeUnknown`. The message carries libvirt's reason and stays within the 256 bytes the manager shows.
+- `internal/providers/libvirt/provider_virsh.go`: a failed create whose domain is known not to be defined (a refused or failed define with the domain absent, or a failure before the define) removes the disk it wrote (`<domain>-disk.qcow2`, or `<domain>-disk` for a blank disk). The provider first checks that no domain uses the disk, on any host of a clustered Provider. The disk is never removed when the define's outcome is unknown, and a migration disk attached in place is never removed.
+- `internal/providers/libvirt/virsh.go`: Delete undefines with `--nvram`, so a UEFI domain can be undefined and its own variable store is removed with it.
+
+### Added
+- `internal/providers/libvirt/domain_platform_test.go`, `testdata/domain_i440fx_default.golden.xml`, `testdata/domain_q35_secureboot.golden.xml`, `create_define_refusal_test.go`: golden and structural tests for every platform variant, `virt-xml-validate` (libvirt's schema) when installed, the refusal classification, and the disk cleanup on single-host and clustered creates (imported disk kept, outcome-unknown keeps the disk).
+- `docs/libvirt-firmware.md`: what each VMClass setting produces, firmware selection, the q35 layout, host prerequisites (OVMF package, libvirt 7.2+, swtpm, KVM nesting) and checks, guest requirements, the refusal behaviour and known limitations (no memory snapshots of UEFI VMs on libvirt 10.0).
+
+### Changed
+- `api/infra.virtrigaud.io/v1beta1/vmclass_types.go`, `config/crd/bases/infra.virtrigaud.io_vmclasses.yaml`: the `firmware`, `secureBoot`, `vtdEnabled`, `nestedVirtualization` and `FirmwareTypeEFI` descriptions say what libvirt does. Descriptions only; no schema change.
+- `docs/upgrading.md`: "libvirt: firmware, secure boot and platform features" in the v0.4.0 to v0.4.1 guide, and a verification step. `docs/README.md`: an index row.
+
+### Why
+v0.4.1-rc1 lab finding: a secure-boot VMClass could not define its domain on libvirt 10. The retryable answer re-copied the disk every 30 seconds, held the delete as `CreateOutcomeUnknown`, and left the attempt's disk on the pool. Reviewing the same XML showed that `firmware: UEFI`, VT-d, nested virtualization and multi-NIC VMs were broken too. Every variant was defined and started on libvirt 10.0 with QEMU 8.2 and OVMF.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-10-26 01:20] - Proxmox: the seed stays out of the boot order; clone user-data without a warning; seed lock files removed; clone lock timeouts are definite
 **Author:** @wrkode (William Rizzo)
 

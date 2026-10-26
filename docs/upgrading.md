@@ -407,6 +407,39 @@ The `virtrigaud_manager_reconcile_total{kind="Provider"}` reconciles of a health
 now counted as `outcome="requeue"` (each schedules the next capability read) rather than
 `"success"`; dashboards that chart the outcome change shape, alerts on `outcome="error"` do not.
 
+### libvirt: firmware, secure boot and platform features
+
+These apply to VMs created after the libvirt provider is rolled. Existing domains are not
+redefined. See [`docs/libvirt-firmware.md`](libvirt-firmware.md).
+
+- **Secure boot works.** In v0.4.0, a VMClass with `securityProfile.secureBoot: true` produced
+  a q35 domain with the i440fx device layout, and libvirt refused it ("The PCI controller with
+  index='0' must be model='pcie-root' for this machine type"). The create was retried about
+  every 30 seconds, and each retry copied the image again. The domain now uses the q35 device
+  layout. libvirt selects a Secure Boot OVMF build with the default keys enrolled (no
+  hard-coded firmware path), and Secure Boot is enforced from the first boot. **The host needs
+  an OVMF package** (`ovmf`, `edk2-ovmf`, ...) that installs firmware descriptors in
+  `/usr/share/qemu/firmware/`.
+- **`firmware: UEFI` is honoured** (it was ignored). New VMs of such a VMClass boot with UEFI,
+  without Secure Boot, on q35. Their image must boot with UEFI. Set `firmware: BIOS`, or leave
+  `firmware` unset, to keep BIOS VMs. `EFI` still selects BIOS, as on vSphere.
+- **`securityProfile.vtdEnabled` works.** The domain now has a q35 machine and an emulated Intel
+  IOMMU device. In v0.4.0 libvirt refused the domain ("unexpected feature 'iommu'").
+- **`performanceProfile.nestedVirtualization` works.** The VM gets the host CPU
+  (`host-passthrough`). In v0.4.0 it required both `vmx` and `svm`, so it never started.
+- **VMs with more than one network interface can be created.** In v0.4.0 the second interface
+  collided with the sound card's PCI slot, and libvirt refused the domain.
+- **A definition libvirt refuses is a validation error.** The `VirtualMachine` gets
+  `Ready=False` and `Provisioning=False` with reason `ValidationError`, re-checked every 30
+  seconds, instead of a retried provider error. The disk the attempt copied is removed, and
+  deleting the VM is not held as `CreateOutcomeUnknown`. A failed create whose domain is known
+  not to be defined also removes its disk.
+- **Delete removes a UEFI VM's variable store** (`virsh undefine --nvram`). Without it, libvirt
+  refuses to undefine a UEFI domain.
+
+A VM that v0.4.0 left retrying a refused create keeps its create marker after the upgrade; see
+[`docs/libvirt-firmware.md`](libvirt-firmware.md#when-libvirt-refuses-the-definition).
+
 ### Other changes
 
 - **API and proto comments.** The descriptions in the CRDs and `provider.proto` are corrected
@@ -426,6 +459,9 @@ now counted as `outcome="requeue"` (each schedules the next capability read) rat
   of your user-data applied.
 - libvirt: create a `VMSnapshot` whose name matches an existing overlay (for a test VM) and check
   it ends `Failed` with the "overlay file ... already exists" message and the file is untouched.
+- libvirt, a VM of a VMClass with `securityProfile.secureBoot: true`: `virsh dumpxml <domain>`
+  shows `<os firmware='efi'>` with a `<loader secure='yes' ...>` path that libvirt filled in, and
+  in the guest `mokutil --sb-state` prints `SecureBoot enabled`.
 - A `VMClone` with `LinkedClone` for a Proxmox Provider fails with `LinkedCloneUnsupported`.
 - After each provider roll, once `kubectl -n <namespace> rollout status
   deployment/virtrigaud-provider-<namespace>-<provider name>` reports the rollout complete,
