@@ -297,6 +297,8 @@ appears in the provider or manager logs, nor in a provider's errors:
   covers the routed (clustered) export, import and staged-disk cleanup too.
 - **Every provider:** the S3 client's errors name no bucket, key or endpoint, and the causes of a
   `DeleteStagedDisk` failure (`qemu-img` output, the S3 error) are redacted the same way. The
+  vSphere and Proxmox providers' export and import log lines show the staging URL as
+  `<scheme>://<redacted>`. The
   SDK's `gRPC request completed` line logs the `code` and the status message the manager
   receives, no longer the provider's internal error text (which could carry such a cause).
 - **The manager** logs the staging URL of `Starting disk export` and `Starting disk import` as
