@@ -22,10 +22,13 @@ import (
 	"sync"
 	"time"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	infrav1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
 	"github.com/projectbeskar/virtrigaud/internal/k8s"
@@ -285,14 +288,36 @@ func (r *VMCloneReconciler) markCloneRequested(ctx context.Context, clone *infra
 //     outcome and is sent again (holdCloneOutcomeUnknown);
 //   - anything else fails the clone, as before: a provider that does not
 //     re-bind could make a second VM.
+//
+// An answer that drops the CloneRequested record must not be lost to a
+// status write that conflicts with an edit of the VMClone made while the
+// provider ran the Clone: the record would survive, and the next answer would
+// be taken for one to a re-send (a first attempt's Conflict held as an
+// unknown outcome for ever, a deleted target failing the clone as one that
+// may hold a clone). recordCloneAnswer re-applies it.
 func (r *VMCloneReconciler) handleSingleHostCloneError(ctx context.Context, clone *infrav1beta1.VMClone, err error,
 	rebinds, resend bool) ctrl.Result {
-	logger := logging.FromContext(ctx)
 	nothingMade := contracts.IsVMSourceRunning(err) || singleHostCloneRetryable(err) || contracts.IsCreateNotPerformed(err) ||
 		contracts.IsConflict(err) || createDefinitelyRefused(err) || isOwnerRefusal(err)
+	var requested *metav1.Condition
 	if !resend && nothingMade {
+		if c := meta.FindStatusCondition(clone.Status.Conditions, cloneConditionRequested); c != nil {
+			requested = c.DeepCopy()
+		}
 		clearCloneRequested(clone)
 	}
+	res := r.decideSingleHostCloneError(ctx, clone, err, rebinds, resend)
+	if requested != nil {
+		r.recordCloneAnswer(ctx, clone, requested)
+	}
+	return res
+}
+
+// decideSingleHostCloneError is handleSingleHostCloneError's decision; each
+// branch writes clone's status as it records the answer.
+func (r *VMCloneReconciler) decideSingleHostCloneError(ctx context.Context, clone *infrav1beta1.VMClone, err error,
+	rebinds, resend bool) ctrl.Result {
+	logger := logging.FromContext(ctx)
 	switch {
 	case contracts.IsVMSourceRunning(err):
 		// A libvirt full clone requires a powered-off source: the clone waits
@@ -328,6 +353,46 @@ func (r *VMCloneReconciler) handleSingleHostCloneError(ctx context.Context, clon
 	detail := rpcFailureDetail(err)
 	r.Recorder.Event(clone, "Warning", infrav1beta1.VMCloneReasonProviderError, "Clone failed: "+detail)
 	return r.markFailed(ctx, clone, infrav1beta1.VMCloneReasonProviderError, "clone failed: "+detail)
+}
+
+// recordCloneAnswer makes sure the answer to a first single-host Clone
+// attempt that dropped the CloneRequested record (requested, as it was before
+// the answer) is on record. The branch that decided the answer wrote clone's
+// status under the resourceVersion it read; an edit of the VMClone made while
+// the provider ran the Clone makes that write fail with a Conflict. So the
+// VMClone is read live and, while it is the same object and still carries
+// that very record — no answer of this attempt landed, and nothing newer did
+// — clone's status is written over it (retry.RetryOnConflict). Only this
+// controller writes a VMClone's status and a VMClone is never reconciled
+// concurrently (persistCloneStatus), so the stored status is the one this
+// reconcile read and replacing it loses nothing. Any failure is logged: the
+// record then stands, and the next answer is read as one to a re-send.
+func (r *VMCloneReconciler) recordCloneAnswer(ctx context.Context, clone *infrav1beta1.VMClone, requested *metav1.Condition) {
+	logger := logging.FromContext(ctx)
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		live := &infrav1beta1.VMClone{}
+		if err := r.liveReader().Get(ctx, client.ObjectKeyFromObject(clone), live); err != nil {
+			if apierrors.IsNotFound(err) {
+				return nil
+			}
+			return fmt.Errorf("read VMClone %s/%s: %w", clone.Namespace, clone.Name, err)
+		}
+		stored := meta.FindStatusCondition(live.Status.Conditions, cloneConditionRequested)
+		if live.UID != clone.UID || stored == nil || stored.Status != requested.Status ||
+			!stored.LastTransitionTime.Equal(&requested.LastTransitionTime) {
+			return nil // recorded already, or something newer is
+		}
+		logger.Info("Recording the Clone's answer on the VMClone as stored (its first write conflicted)")
+		live.Status = *clone.Status.DeepCopy()
+		if err := r.Status().Update(ctx, live); err != nil {
+			return err
+		}
+		clone.ResourceVersion = live.ResourceVersion
+		return nil
+	})
+	if err != nil {
+		logger.Error(err, "Failed to record the provider's answer to the Clone")
+	}
 }
 
 // holdCloneOutcomeUnknown keeps a single-host clone whose Clone's outcome is
