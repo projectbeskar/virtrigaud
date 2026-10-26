@@ -168,7 +168,9 @@ func TestRefreshReportedCapabilities_Policy(t *testing.T) {
 
 	// The settle delay has passed: the confirming read.
 	v, _ := r.capabilityReads.Load(key)
-	v.(*capabilityReadState).readAt = time.Now().Add(-time.Minute)
+	st, ok := v.(*capabilityReadState)
+	require.True(t, ok)
+	st.readAt = time.Now().Add(-time.Minute)
 	reader.answer(contracts.Capabilities{SupportsLinkedClones: false})
 	assert.Equal(t, 10*time.Minute, r.refreshReportedCapabilities(ctx, p, rolledOut(2, 1)))
 	assert.Equal(t, int32(2), reader.reads.Load())
@@ -191,7 +193,7 @@ func TestRefreshReportedCapabilities_Policy(t *testing.T) {
 		"the revision is still unread: retried")
 
 	r.forgetCapabilityReads(types.NamespacedName{Namespace: "ns", Name: "p"})
-	_, ok := r.capabilityReads.Load(key)
+	_, ok = r.capabilityReads.Load(key)
 	assert.False(t, ok)
 }
 
