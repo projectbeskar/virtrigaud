@@ -25,7 +25,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	ctrlconfig "sigs.k8s.io/controller-runtime/pkg/config"
@@ -60,6 +59,10 @@ func (p *rejectingImageProvider) PrepareImage(context.Context, contracts.ImagePr
 	return contracts.ImagePrepareResponse{}, contracts.NewInvalidSpecError("image prepare: checksum mismatch", nil)
 }
 
+// The managers below run without an event recorder: they also reconcile the
+// VMs other specs left on the envtest apiserver, and a FakeRecorder that
+// nobody drains blocks every worker once its buffer is full, stalling the
+// controller under test.
 var _ = Describe("A VM create the provider refuses (envtest)", func() {
 	ctx := context.Background()
 
@@ -81,7 +84,7 @@ var _ = Describe("A VM create the provider refuses (envtest)", func() {
 		prov := &rejectingImageProvider{}
 		resolver := &atomicResolver{provider: prov, namespace: ns.Name}
 		Expect((&VirtualMachineReconciler{
-			Client: mgr.GetClient(), Scheme: mgr.GetScheme(), RemoteResolver: resolver, Recorder: record.NewFakeRecorder(100),
+			Client: mgr.GetClient(), Scheme: mgr.GetScheme(), RemoteResolver: resolver,
 		}).SetupWithManager(mgr)).To(Succeed())
 		mgrDone := make(chan struct{})
 		go func() {
@@ -153,7 +156,7 @@ var _ = Describe("A VM create the provider refuses (envtest)", func() {
 		prov := &refusingVMProvider{}
 		resolver := &atomicResolver{provider: prov, namespace: ns.Name}
 		Expect((&VirtualMachineReconciler{
-			Client: mgr.GetClient(), Scheme: mgr.GetScheme(), RemoteResolver: resolver, Recorder: record.NewFakeRecorder(100),
+			Client: mgr.GetClient(), Scheme: mgr.GetScheme(), RemoteResolver: resolver,
 		}).SetupWithManager(mgr)).To(Succeed())
 		mgrDone := make(chan struct{})
 		go func() {
