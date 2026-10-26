@@ -31,6 +31,36 @@ Lab findings on v0.4.1-rc1 (PVE 9.2): the seed CD-ROM was in the boot order, a c
 - [ ] Config change only
 - [ ] Documentation only
 
+## [2026-10-26 01:17] - Staging locations redacted from every routed, provider and manager log; clustered export failures answered definitely
+**Author:** @wrkode (William Rizzo)
+
+### Fixed
+- `internal/providers/libvirt/routed_export.go`, `routing.go`: a clustered (routed) `ExportDisk` now answers the failures of the shared s3/nfs core that the single-host export proves definite the same way (`routedExportFailure`): an unusable S3 configuration is `InvalidArgument`; an S3 upload the service refused or failed before the flattened disk was read to its end (`SignatureDoesNotMatch`, `AccessDenied`, a 5xx, an unreachable service) is "not performed"; an NFS `qemu-img convert` that ended with an exit status of its own (an export that refused the mount, `MNT3ERR_ACCES`) is "failed, nothing exported". It used to answer all of them `Unknown`, so the `VMMigration` was held with `ExportOutcomeUnknown` and re-sent after 35 minutes. The routed guards keep their answers (budget ran out, `timeout(1)` 124/137, the same export still running, the lock directory refused, a missing tool), a host that stopped answering is still answered by how far the call got (R25), and a command that did not end on its own (session dropped, killed, signalled, the call cancelled) and an upload whose completing call may have taken effect stay unknown. `routedRPCErrorFor` is split into `routedTypedStatus` and `routedHostFailureStatus` (behaviour unchanged for every other routed RPC).
+
+### Security
+- `internal/providers/libvirt/routed_export.go`, `routing.go`, `s3export.go`, `nfs.go`, `routed_migration_cleanup.go`, `staged_disk.go`, `command_log_redact.go`, `provider.go`: R28 now covers the clustered paths. Every logged cause of a routed export is redacted of the staged object's locations (`exportStagedLocations`: the nfs URL and its server, export, path, file name and `uid`/`gid`; the s3 URL, key, bucket and endpoint); `hostOpRPCErrorFor` redacts every URL but the libvirt connection URI in all routed `WARN ... on host ... failed` lines (it logged the raw error); the routed nfs `DeleteStagedDisk`'s host-failure cause and the single-host s3 export's cause are redacted the same way; the nfs export's "not as root" warning is redacted. `nfsURLLocations` and `stagedDiskLocations` delegate to the migration package. The routed export honours `routedDiskConnFn` (tests only) so its host stream can be scripted.
+- `internal/storage/redact.go` (new), `internal/storage/s3.go`: `S3Storage` errors no longer carry `s3://<bucket>/<key>`, the minio-go cause (which quotes the request URL and dials the endpoint by name) is redacted with its error chain kept (`storage.RedactError`), an invalid endpoint and a key-less URL are not echoed. This applies to every provider's S3 export, import and delete. New `storage.RedactLocations`, `RedactError`, `S3EndpointLocations`, `StagedLocationMarker`, `MinRedactedLocationLen`.
+- `internal/storage/migration/staging.go`, `nfs.go`: `EmptyNFSStagedDisk` and `DeleteS3StagedDisk` redact the causes they keep for the provider log (`qemu-img` stderr with the nfs URL, server and export; the S3 error) — the libvirt provider's `gRPC request completed` ERROR line showed `nfs://<server>/<export>/...?gid=&uid=` for a failed staged-disk cleanup. New `migration.NFSURLLocations`, `StagedDiskLocations`. `NFSURL` no longer echoes an invalid export path. The gRPC status of a `DeleteStagedDisk` failure is unchanged (it never carried the cause).
+- `internal/providers/proxmox/staged_disk.go`: the node-side NFS staged-disk delete's causes (mount and `rm` stderr) are redacted the same way.
+- `sdk/provider/middleware/middleware.go`: the `gRPC request completed` / `gRPC stream completed` lines log the `code` and the status message the caller receives (`wireCode`, `wireError`), no longer the handler error's own text, which can carry a cause the provider keeps off the wire.
+- `internal/obs/logging/redact_url.go`: new `logging.RedactLocation` (`<scheme>://<redacted>`).
+- `internal/controller/vmmigration_staging_redact.go` (new), `vmmigration_controller.go`, `vmmigration_request_marker.go`, `vmmigration_clustered_target.go`, `vmmigration_staging_cleanup.go`: the manager's `Starting disk export` / `Starting disk import` lines log the staging URL as its scheme only (they logged the NFS server, export, path and `uid`/`gid`, or the bucket and key). Every migration failure (`transitionToFailedWithReason`: status message, `Failed`/`Ready` conditions, Warning event, log) and the export, import, task-status, unknown-outcome, routed-import-refusal and staged-disk-cleanup log lines are redacted of the `VMMigration`'s S3 bucket and endpoint, NFS server, export and path and of every URL, whatever provider answered.
+
+### Added
+- `internal/providers/libvirt/routed_export_outcome_test.go` (new): routed nfs `MNT3ERR_ACCES` and s3 `SignatureDoesNotMatch`/`AccessDenied`/5xx are "not performed"; a dropped, killed or signalled convert, a dropped flatten and a lost completing call stay unknown; an unusable s3 configuration is `InvalidArgument`; no log line or wire text names the server, export, file, `uid=`/`gid=`, bucket, key or endpoint. `internal/storage/redact_test.go`, `internal/storage/migration/staging_test.go`, `sdk/provider/middleware/logging_test.go`, `internal/obs/logging/redact_url_test.go`, `internal/controller/vmmigration_staging_redact_test.go` (new tests). `internal/storage/s3fake`: `FailWithCode` answers with a chosen S3 error code. The libvirt shell fake's `qemu-img` prints `local/stderr-qemu-img-<subcommand>` and exits 1.
+
+### Changed
+- `docs/provider-call-outcomes.md`: new section "Clustered libvirt: definite export failures"; the routed `ExportDisk` row says which failures are definite. `docs/upgrading.md`: new "libvirt: clustered disk export answers" and "Staging locations are no longer logged (R28)" sections (the former R28 bullet points to it).
+
+### Why
+The v0.4.1-rc1 lab showed the clustered provider logging an S3 bucket and key on a failed routed export, the libvirt provider's request log and the manager's `Starting disk export` line naming the NFS server, export and `uid`/`gid`, and a clustered export refused by NFS or S3 held for 35 minutes as an unknown outcome although the single-host provider answers the same failure definitely.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-10-26 01:06] - Provider capabilities re-read after a provider roll; ProviderAvailable follows the ready replicas
 **Author:** @wrkode (William Rizzo)
 
