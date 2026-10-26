@@ -479,7 +479,9 @@ No action is required; this changes how often a refused create is sent again.
   `FailedPrecondition` or `PermissionDenied` (`CreateRefused`, 15 seconds doubling to
   5 minutes), a "not performed" answer, and every failure whose outcome is unknown or that may
   pass (a transport error, an unavailable host, a timeout), which are still retried every
-  5 seconds or on their own backoff.
+  5 seconds or on their own backoff. A typed `Unauthorized` or `QuotaExceeded` is produced only
+  in the manager's own code: from a remote provider, `PermissionDenied` keeps `CreateRefused`,
+  and `Unauthenticated` and `ResourceExhausted` are untyped and still retried every 5 seconds.
 - **What retries at once.** A change to the `VirtualMachine`'s spec, or to the spec of its
   `VMClass`, `VMImage` or `Provider` (the manager now watches those three for a VM whose create
   was refused), sends the create again within seconds and starts the backoff again from
@@ -505,7 +507,11 @@ No action is required; this changes how often a refused create is sent again.
   is in memory only: after a manager restart the first re-check sends the prepare again. An
   `ImagePrepare` refused with `NotFound`, `Unimplemented`, `PermissionDenied`, `Unauthorized` or
   `QuotaExceeded`, which was re-sent every 5 seconds by each VM using the image, is paced by the
-  same backoff; the `VMImage`'s status is not changed for these.
+  same backoff; the `VMImage`'s status is not changed for these, and the VM shows
+  `Ready=False/ProviderError` ("Image prepare failed: ..."). A fix made outside VirtRigaud (a
+  storage pool or template created on the host, a permission granted) is picked up at the next
+  re-check, at most 10 minutes later; a change to the `VMImage`'s `spec.source` or the
+  `Provider`'s spec ends the wait at once.
 - **No more panic for a new Provider.** Reconciling a VM whose `Provider` had no
   `status.runtime` yet (the Provider controller had not reconciled it) dereferenced a nil
   pointer in a log line and panicked (recovered, and retried with rate limiting). It now

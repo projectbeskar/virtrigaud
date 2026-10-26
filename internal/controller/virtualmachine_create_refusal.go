@@ -356,18 +356,18 @@ func (b *createRefusalBackoff) forget(uid types.UID) {
 	delete(b.entries, uid)
 }
 
-// recordCreateRefusal records that the provider refused vm's Create as an
-// invalid specification with detail, for inputs, and returns the wait before
-// it is sent again.
+// recordCreateRefusal records that the provider definitely refused vm's Create
+// (an InvalidSpec answer, or one createRefusalPaced selects) with detail, for
+// inputs, and returns the wait before it is sent again and when it ends.
 func (r *VirtualMachineReconciler) recordCreateRefusal(vm *infravirtrigaudiov1beta1.VirtualMachine, inputs, detail string) (time.Duration, time.Time) {
 	now := r.now()
 	wait := r.createRefusals.refused(vm.UID, inputs, detail, now)
 	return wait, now.Add(wait)
 }
 
-// recoverCreateRefusal seeds vm's run from its Ready condition when no run is
-// in memory (after a manager restart): a create refusal recorded for the VM's
-// current generation by createRefusalMessage. A time of the next re-check
+// recoverCreateRefusal seeds vm's run from its status when no run is in
+// memory (after a manager restart): the create refusal persistedCreateRefusal
+// finds for the VM's current generation. A time of the next re-check
 // further away than createRefusalRetryMax (a clock that moved) is brought
 // back to that bound; one already past is seeded too, so the Create is sent
 // at once and the run goes on from the wait the message names.
@@ -385,23 +385,47 @@ func (r *VirtualMachineReconciler) recoverCreateRefusal(vm *infravirtrigaudiov1b
 	r.createRefusals.seed(vm.UID, inputs, detail, createRefusalsFor(wait), next, now)
 }
 
-// persistedCreateRefusal returns the create refusal vm's status records for
-// its current generation: the createRefusalMessage on its Ready or
-// Provisioning condition (False) whose next re-check is the latest (a
-// refusal recorded on Provisioning only can be newer than one Ready still
-// shows). ok is false when neither records one.
+// persistedCreateRefusal returns the create refusal vm's status records as
+// the answer to its latest Create, for its current generation (a
+// createRefusalMessage); ok is false when that answer was something else.
+//
+// A False Provisioning condition of the current generation holds the latest
+// answer: every single-host send first replaces it with the create marker,
+// and an answer whose outcome is known replaces the marker. It decides alone,
+// so an older refusal Ready still shows is never read back over a newer
+// answer (another refusal, or a CREATE_NOT_PERFORMED that asks for a retry).
+// Ready is read only while Provisioning is the create marker (an answer to a
+// re-send is recorded on Ready only); while something else is in progress
+// (an image prepare) or Provisioning records nothing of this generation,
+// nothing is recovered.
+// A clustered VM_OPERATION_FAILED, recorded on Ready only, can leave an older
+// refusal on Provisioning: it is read back, a hold bounded by
+// createRefusalRetryMax.
 func persistedCreateRefusal(vm *infravirtrigaudiov1beta1.VirtualMachine) (wait time.Duration, next time.Time, detail string, ok bool) {
-	for _, t := range []string{k8s.ConditionReady, k8s.ConditionProvisioning} {
+	current := func(t string) *metav1.Condition {
 		c := meta.FindStatusCondition(vm.Status.Conditions, t)
-		if c == nil || c.Status != metav1.ConditionFalse || c.ObservedGeneration != vm.Generation {
-			continue
+		if c == nil || c.ObservedGeneration != vm.Generation {
+			return nil
 		}
-		w, n, d, parsed := parseCreateRefusalMessage(c.Message)
-		if parsed && (!ok || n.After(next)) {
-			wait, next, detail, ok = w, n, d, true
-		}
+		return c
 	}
-	return wait, next, detail, ok
+	prov := current(k8s.ConditionProvisioning)
+	if prov == nil {
+		return 0, time.Time{}, "", false
+	}
+	if prov.Status == metav1.ConditionFalse {
+		return parseCreateRefusalMessage(prov.Message)
+	}
+	if prov.Reason != k8s.ReasonCreateRequested {
+		// Something else is in progress (an image prepare, a task): any
+		// refusal Ready still shows is older than it.
+		return 0, time.Time{}, "", false
+	}
+	ready := current(k8s.ConditionReady)
+	if ready == nil || ready.Status != metav1.ConditionFalse {
+		return 0, time.Time{}, "", false
+	}
+	return parseCreateRefusalMessage(ready.Message)
 }
 
 // holdRefusedCreate holds the Create of vm while the wait after its last

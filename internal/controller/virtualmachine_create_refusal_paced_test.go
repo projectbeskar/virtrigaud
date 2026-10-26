@@ -30,7 +30,6 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	infravirtrigaudiov1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
 	"github.com/projectbeskar/virtrigaud/internal/k8s"
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
 )
@@ -216,6 +215,7 @@ func TestEnsureImageOnProvider_DefiniteRefusalIsPaced(t *testing.T) {
 				return err
 			}
 
+			before := reloadImage(t, r, img.Name).Status
 			first := ensure()
 			require.Equal(t, 1, inst.prepareCalls)
 			assert.False(t, errors.Is(first, errImagePrepareHold))
@@ -232,12 +232,9 @@ func TestEnsureImageOnProvider_DefiniteRefusalIsPaced(t *testing.T) {
 			require.Error(t, ensure())
 			assert.Equal(t, 2, inst.prepareCalls)
 
-			// The VMImage is not marked InvalidSource for these.
-			got := reloadImage(t, r, img.Name)
-			cond := meta.FindStatusCondition(got.Status.Conditions, infravirtrigaudiov1beta1.VMImageConditionReady)
-			if cond != nil {
-				assert.NotEqual(t, imageReasonInvalidSource, cond.Reason)
-			}
+			// The VMImage's status is left as it was for these (no
+			// InvalidSource).
+			assert.Equal(t, before, reloadImage(t, r, img.Name).Status)
 		})
 	}
 }
