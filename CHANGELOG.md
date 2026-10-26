@@ -5,6 +5,33 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-10-26 00:58] - virtrigaud-loadgen: no operations after the duration, vmCount caps the VMs, interrupted runs exit non-zero
+**Author:** @wrkode (William Rizzo)
+
+### Fixed
+- `cmd/virtrigaud-loadgen/main.go`: a worker no longer starts an operation once the run's duration has ended. When a long `--observe` returned after the deadline, the ticker's tick and the end of the context were both ready and `select` picked either at random; the operation then ran with a context that outlives the run. The worker now checks the context after the tick (`waitTick`) and `performRandomOperation` refuses to start anything on a done context. An operation, or `--observe` wait, already in flight still finishes, so a run lasts the duration plus at most that wait (and the cleanup).
+- `cmd/virtrigaud-loadgen/main.go`: an interrupted run (SIGINT/SIGTERM) now exits non-zero (`load generation interrupted`), after saving its results and running `--cleanup`, like an interrupted `vcts run`; a cleanup that left objects behind is reported in the same error.
+- `cmd/virtrigaud-loadgen/main.go`: `vmCount`, accepted but ignored until now (a run kept creating full clones and filled a Proxmox thin pool), is enforced: it is the most VMs the run has alive at once (the VMs it created, the target VMs of the clones it requested, and the VMs whose delete it sent that are not yet gone). A create or clone beyond it is skipped without an API call and recorded as skipped (`Skipped` result, not a failure, outside the totals and latencies). `vmCount` below 1 is rejected; the default stays 10, so a configuration that omits it is now capped at 10. A delete that fails or is still being processed no longer drops the VM from the tracking while the call is in flight.
+
+### Added
+- `cmd/virtrigaud-loadgen/vmcap.go`: the slot accounting behind `vmCount` (reserve before the API call, commit or give back after it, forget deleted VMs when the cap is reached).
+- `cmd/virtrigaud-loadgen/main.go`: a `Skipped` column at the end of `results.csv`, the skipped count in `summary.md`, a `Max VMs alive (vmCount)` line in the start banner, and a warning naming the accepted-but-unused settings (`rampUpTime`, `steadyState`, `rampDownTime`, the `*Interval` keys, `vmTemplate.annotations`) a file sets.
+- `cmd/virtrigaud-loadgen/vmcap_test.go`: tests for the tick race (deterministic), for no operation starting after the deadline with a long `--observe`, for the cap (creates, clone targets, failed creates, concurrent workers, a VM still being deleted, an end-to-end run against envtest with `--cleanup`), for the exit status after an interrupt (with and without a cluster), for `vmCount` validation and for the unused-setting warning.
+
+### Changed
+- `docs/cli-tools.md`: a storage-sizing caution at the top of the loadgen section (worst case `vmCount` x disk size), `vmCount` documented with what counts and what is skipped, how long a run takes, the exit status, the `Skipped` column, and the note that deleting a `VMClone` or its target while the provider clones can leave a hypervisor VM the tool cannot see (the cleanup waits for clones to settle).
+- `docs/upgrading.md`: the loadgen item of the v0.4.0 to v0.4.1 guide mentions the enforced `vmCount`, the `Skipped` column, the end of operations at the duration and the exit status.
+- `test/performance/proxmox-loadtest.yaml`: `vmCount: 5`, a storage warning, `--cleanup` in the example command, and a higher `delete` weight so the run churns at the cap.
+
+### Why
+The v0.4.1-rc1 lab run showed a 2-minute run lasting 11 minutes and issuing operations after its end, a run without a VM cap filling a Proxmox storage pool, and an interrupted run reporting success.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [x] Config change only
+- [ ] Documentation only
+
 ## [2026-10-25 20:09] - Release notes for v0.4.1-rc1; v0.4.0 notes archived
 **Author:** @wrkode (William Rizzo)
 
