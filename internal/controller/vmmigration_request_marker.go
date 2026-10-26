@@ -396,7 +396,8 @@ func (r *VMMigrationReconciler) resolveMigrationRequest(ctx context.Context, mig
 // reconcile.
 func (r *VMMigrationReconciler) afterUnknownMigrationCall(ctx context.Context, migration *infrav1beta1.VMMigration,
 	op migrationLongOp, cause error) (ctrl.Result, error) {
-	logging.FromContext(ctx).Error(cause, "The provider call failed without a definite outcome; keeping its marker",
+	logging.FromContext(ctx).Error(redactMigrationStagingError(migration, cause),
+		"The provider call failed without a definite outcome; keeping its marker",
 		"call", migrationRequests[op].call)
 	held, res, err := r.resolveMigrationRequest(ctx, migration, op)
 	if held {

@@ -650,20 +650,20 @@ func (r *VMMigrationReconciler) handleRoutedImportRefusal(ctx context.Context, m
 	logger := logging.FromContext(ctx)
 	switch routedRefusalAction(cause) {
 	case routedActionWaitHost:
-		logger.Info("Routed import not performed: a host could not be reached or checked; waiting", "host", host, "error", cause.Error())
+		logger.Info("Routed import not performed: a host could not be reached or checked; waiting", "host", host, "error", redactMigrationStagingText(migration, cause.Error()))
 		res, err := r.holdRoutedImport(ctx, migration, migrationReasonTargetHostUnavailable, targetHostUnavailableMessage)
 		return res, true, err
 	case routedActionHoldPreviousIncarnation:
-		logger.Info("Routed import refused: a previous incarnation of the target is on the landing host", "host", host, "error", cause.Error())
+		logger.Info("Routed import refused: a previous incarnation of the target is on the landing host", "host", host, "error", redactMigrationStagingText(migration, cause.Error()))
 		res, err := r.holdRoutedImport(ctx, migration, migrationReasonImportTargetPreviousIncarnation, importTargetPreviousIncarnationMessage)
 		return res, true, err
 	case routedActionHoldDiskInUse:
-		logger.Info("Routed import refused: the landing disk is in use on a host of the provider", "host", host, "error", cause.Error())
+		logger.Info("Routed import refused: the landing disk is in use on a host of the provider", "host", host, "error", redactMigrationStagingText(migration, cause.Error()))
 		res, err := r.holdRoutedImport(ctx, migration, migrationReasonLandingDiskInUse, landingDiskInUseMessage)
 		return res, true, err
 	case routedActionRelease:
 		logger.Info("Routed import refused: a foreign domain with the target's name is on the landing host; releasing it",
-			"host", host, "error", cause.Error())
+			"host", host, "error", redactMigrationStagingText(migration, cause.Error()))
 		res, err := r.releaseTargetPendingHost(ctx, migration, host, targetPlacedNameConflictFmt, targetHostReleasedMessage)
 		return res, true, err
 	case routedActionNotPerformed:
@@ -687,7 +687,7 @@ func (r *VMMigrationReconciler) handleRoutedImportRefusal(ctx context.Context, m
 			res, err := r.transitionToFailedWithReason(ctx, migration, migrationReasonImportNotPerformed, importNotPerformedFailedMessage)
 			return res, true, err
 		}
-		logger.Info("Routed import not performed on the landing host; retrying with a backoff", "host", host, "error", cause.Error())
+		logger.Info("Routed import not performed on the landing host; retrying with a backoff", "host", host, "error", redactMigrationStagingText(migration, cause.Error()))
 		res, err := r.holdRoutedImport(ctx, migration, migrationReasonImportNotPerformed, importNotPerformedMessage)
 		return res, true, err
 	}
@@ -839,10 +839,10 @@ func (r *VMMigrationReconciler) handleRoutedImportPrecondition(ctx context.Conte
 	host string, cause error) (ctrl.Result, error) {
 	logger := logging.FromContext(ctx)
 	if contracts.IsHostStorageMisconfigured(cause) {
-		logger.Info("Routed import refused: the landing host's storage is misconfigured; releasing it", "host", host, "error", cause.Error())
+		logger.Info("Routed import refused: the landing host's storage is misconfigured; releasing it", "host", host, "error", redactMigrationStagingText(migration, cause.Error()))
 		return r.releaseTargetPendingHost(ctx, migration, host, targetPlacedStorageMisconfiguredFmt, targetHostStorageReleasedMessage)
 	}
-	logger.Info("Routed import refused by the landing host before anything was written", "host", host, "error", cause.Error())
+	logger.Info("Routed import refused by the landing host before anything was written", "host", host, "error", redactMigrationStagingText(migration, cause.Error()))
 	return r.holdRoutedImport(ctx, migration, migrationReasonLandingHostRefused, landingHostRefusedMessage)
 }
 

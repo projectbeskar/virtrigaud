@@ -44,3 +44,24 @@ func RedactURL(raw string) string {
 	}
 	return out
 }
+
+// redactedLocation is what RedactLocation renders in place of a location.
+const redactedLocation = "<redacted>"
+
+// RedactLocation renders a migration staging location (an nfs://, s3:// or
+// pvc:// URL) for a log line: its scheme only, "nfs://<redacted>". Unlike
+// RedactURL it keeps neither host nor path: an NFS server and export path, an
+// S3 bucket and key, and the uid/gid query of an nfs URL name the tenant's
+// staging storage (R28). "" stays ""; a value without a scheme is
+// "<redacted>".
+func RedactLocation(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	scheme, _, ok := strings.Cut(raw, "://")
+	if !ok || scheme == "" || strings.ContainsAny(scheme, " /?#@") {
+		return redactedLocation
+	}
+	return strings.ToLower(scheme) + "://" + redactedLocation
+}
