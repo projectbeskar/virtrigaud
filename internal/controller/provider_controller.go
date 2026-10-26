@@ -292,15 +292,25 @@ func (r *ProviderReconciler) Reconcile(ctx context.Context, req ctrl.Request) (r
 	// when they may have changed (refreshReportedCapabilities). This must
 	// never fail the reconcile or flip Healthy — see
 	// reconcileReportedCapabilities.
+	var capabilityRead *capabilityReadState
 	if provider.Status.Healthy &&
 		provider.Status.Runtime != nil &&
 		provider.Status.Runtime.Phase == infravirtrigaudiov1beta1.ProviderRuntimePhaseRunning {
-		if after := r.refreshReportedCapabilities(ctx, &provider, deployment); err == nil {
+		var after time.Duration
+		after, capabilityRead = r.refreshReportedCapabilities(ctx, &provider, deployment)
+		if err == nil {
 			result = requeueNoLaterThan(result, after)
 		}
 	}
 
-	if updateErr := r.writeProviderStatus(ctx, base, &provider); updateErr != nil {
+	updateErr := r.writeProviderStatus(ctx, base, &provider)
+	if updateErr == nil {
+		// The capabilities read above are on the Provider now: record the
+		// read. A read whose status write failed is not recorded, so the
+		// next reconcile reads them again.
+		r.commitCapabilityRead(&provider, capabilityRead)
+	}
+	if updateErr != nil {
 		// This reconcile's read was behind a newer write of its own fields:
 		// nothing was written and it runs again shortly from the live state
 		// (not an error).

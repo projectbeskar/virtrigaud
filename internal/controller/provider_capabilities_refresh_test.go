@@ -150,19 +150,26 @@ func TestRefreshReportedCapabilities_Policy(t *testing.T) {
 		capabilityRefreshInterval: 10 * time.Minute}
 	p := &infravirtrigaudiov1beta1.Provider{ObjectMeta: metav1.ObjectMeta{Name: "p", Namespace: "ns", UID: "u1"}}
 	key := types.NamespacedName{Namespace: "ns", Name: "p"}.String()
+	// The read is recorded as Reconcile records it after a successful status
+	// write.
+	refreshAndCommit := func(dep *appsv1.Deployment) time.Duration {
+		after, read := r.refreshReportedCapabilities(ctx, p, dep)
+		r.commitCapabilityRead(p, read)
+		return after
+	}
 
 	midRollout := rolledOut(2, 1)
 	midRollout.Status.Replicas = 2
-	assert.Zero(t, r.refreshReportedCapabilities(ctx, p, midRollout))
+	assert.Zero(t, refreshAndCommit(midRollout))
 	assert.Zero(t, reader.reads.Load(), "no read while a superseded pod can answer")
 	assert.Nil(t, p.Status.ReportedCapabilities)
 
-	assert.Equal(t, 45*time.Second, r.refreshReportedCapabilities(ctx, p, rolledOut(2, 1)))
+	assert.Equal(t, 45*time.Second, refreshAndCommit(rolledOut(2, 1)))
 	assert.Equal(t, int32(1), reader.reads.Load())
 	require.NotNil(t, p.Status.ReportedCapabilities)
 	assert.True(t, p.Status.ReportedCapabilities.SupportsLinkedClones)
 
-	wait := r.refreshReportedCapabilities(ctx, p, rolledOut(2, 1))
+	wait := refreshAndCommit(rolledOut(2, 1))
 	assert.Equal(t, int32(1), reader.reads.Load(), "no read before the settle delay")
 	assert.Greater(t, wait, 40*time.Second)
 
@@ -172,24 +179,24 @@ func TestRefreshReportedCapabilities_Policy(t *testing.T) {
 	require.True(t, ok)
 	st.readAt = time.Now().Add(-time.Minute)
 	reader.answer(contracts.Capabilities{SupportsLinkedClones: false})
-	assert.Equal(t, 10*time.Minute, r.refreshReportedCapabilities(ctx, p, rolledOut(2, 1)))
+	assert.Equal(t, 10*time.Minute, refreshAndCommit(rolledOut(2, 1)))
 	assert.Equal(t, int32(2), reader.reads.Load())
 	assert.False(t, p.Status.ReportedCapabilities.SupportsLinkedClones, "the confirming read wins")
 
-	r.refreshReportedCapabilities(ctx, p, rolledOut(2, 1))
+	refreshAndCommit(rolledOut(2, 1))
 	assert.Equal(t, int32(2), reader.reads.Load(), "settled: no read until the refresh interval")
 
 	// A new revision (a new image): read at once.
-	assert.Equal(t, 45*time.Second, r.refreshReportedCapabilities(ctx, p, rolledOut(3, 1)))
+	assert.Equal(t, 45*time.Second, refreshAndCommit(rolledOut(3, 1)))
 	assert.Equal(t, int32(3), reader.reads.Load())
 
 	// A failed read keeps the recorded capabilities and is retried.
 	failure := errors.New("unavailable")
 	reader.err.Store(&failure)
-	assert.Equal(t, capabilityRetryInterval, r.refreshReportedCapabilities(ctx, p, rolledOut(4, 1)))
+	assert.Equal(t, capabilityRetryInterval, refreshAndCommit(rolledOut(4, 1)))
 	assert.Equal(t, int32(4), reader.reads.Load())
 	require.NotNil(t, p.Status.ReportedCapabilities)
-	assert.Equal(t, capabilityRetryInterval, r.refreshReportedCapabilities(ctx, p, rolledOut(4, 1)),
+	assert.Equal(t, capabilityRetryInterval, refreshAndCommit(rolledOut(4, 1)),
 		"the revision is still unread: retried")
 
 	r.forgetCapabilityReads(types.NamespacedName{Namespace: "ns", Name: "p"})

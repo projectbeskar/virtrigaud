@@ -167,22 +167,24 @@ func capabilityReadDue(st *capabilityReadState, uid types.UID, rev string, now t
 }
 
 // refreshReportedCapabilities reads the Provider's capabilities into its
-// status when a read is due (see the policy above) and returns when the
-// Provider should be reconciled again for the next one (0: no capability
+// status when a read is due (see the policy above). It returns when the
+// Provider should be reconciled again for the next read (0: no capability
 // requeue; a rollout in progress is re-driven by its Deployment's status
-// events). It never fails the reconcile; a failed read keeps what the status
-// holds (reconcileReportedCapabilities). The caller calls it only for a
-// healthy Provider whose runtime is Running.
+// events) and, when it read them, the read to record once the status holding
+// them is written (commitCapabilityRead): a read whose status write fails is
+// not recorded, so the next reconcile reads again. It never fails the
+// reconcile; a failed read keeps what the status holds
+// (reconcileReportedCapabilities). The caller calls it only for a healthy
+// Provider whose runtime is Running.
 func (r *ProviderReconciler) refreshReportedCapabilities(ctx context.Context, provider *infravirtrigaudiov1beta1.Provider,
-	dep *appsv1.Deployment) time.Duration {
+	dep *appsv1.Deployment) (time.Duration, *capabilityReadState) {
 	if !deploymentRolloutComplete(dep) {
 		log.FromContext(ctx).V(1).Info("Provider runtime rollout not complete; not reading its capabilities yet",
 			"provider", provider.Name, "namespace", provider.Namespace)
-		return 0
+		return 0, nil
 	}
-	key := types.NamespacedName{Namespace: provider.Namespace, Name: provider.Name}.String()
 	var st *capabilityReadState
-	if v, ok := r.capabilityReads.Load(key); ok {
+	if v, ok := r.capabilityReads.Load(capabilityReadKey(provider)); ok {
 		st, _ = v.(*capabilityReadState)
 	}
 	rev := runtimeRevision(dep)
@@ -191,10 +193,10 @@ func (r *ProviderReconciler) refreshReportedCapabilities(ctx context.Context, pr
 	now := time.Now()
 	due, wait := capabilityReadDue(st, provider.UID, rev, now, settle, refresh)
 	if !due {
-		return wait
+		return wait, nil
 	}
 	if !r.reconcileReportedCapabilities(ctx, provider) {
-		return capabilityRetryInterval
+		return capabilityRetryInterval, nil
 	}
 	next := &capabilityReadState{
 		uid:      provider.UID,
@@ -205,11 +207,24 @@ func (r *ProviderReconciler) refreshReportedCapabilities(ctx context.Context, pr
 		// a revision is not.
 		settled: st != nil && st.uid == provider.UID && st.revision == rev,
 	}
-	r.capabilityReads.Store(key, next)
 	if !next.settled {
-		return settle
+		return settle, next
 	}
-	return refresh
+	return refresh, next
+}
+
+// capabilityReadKey is the capabilityReads key of a Provider.
+func capabilityReadKey(provider *infravirtrigaudiov1beta1.Provider) string {
+	return types.NamespacedName{Namespace: provider.Namespace, Name: provider.Name}.String()
+}
+
+// commitCapabilityRead records read (from refreshReportedCapabilities) once
+// the Provider status holding its capabilities is written. A nil read records
+// nothing.
+func (r *ProviderReconciler) commitCapabilityRead(provider *infravirtrigaudiov1beta1.Provider, read *capabilityReadState) {
+	if read != nil {
+		r.capabilityReads.Store(capabilityReadKey(provider), read)
+	}
 }
 
 // forgetCapabilityReads drops what was recorded for a Provider that is gone.
