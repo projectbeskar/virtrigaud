@@ -5,7 +5,7 @@
 # VirtRigaud, against a Provider that already exists in the namespace:
 #
 #   virtrigaud-loadgen run --config test/performance/proxmox-loadtest.yaml \
-#     -n <namespace> --output-dir ./loadgen-results
+#     -n <namespace> --output-dir ./loadgen-results --cleanup
 #
 # Adjust `providers`, `vmTemplate.classRef` and `vmTemplate.imageRef` to a
 # Provider, VMClass and VMImage in that namespace. Add --dry-run first to check
@@ -18,13 +18,25 @@
 # own targets. docs/cli-tools.md says which operations the tool performs
 # against the cluster and which it only records.
 #
-# Every VM it creates carries the label generated-by=loadgen and is left in
-# place when the run ends. Remove them with:
+# STORAGE: every VM the run creates is a real VM on the Proxmox node and can
+# occupy the whole size of its disk. `vmCount` below is the most VMs the run
+# keeps alive at once; the worst case is vmCount x the disk size of the image
+# template (snapshots come on top). Set it so that fits in the storage the
+# Provider uses, with room to spare. Creates and clones beyond it are skipped
+# (recorded as skipped in results.csv, not as failures).
+#
+# Every VM it creates carries the label generated-by=loadgen. With --cleanup
+# they are deleted when the run ends; without it they are left in place, and
+# you remove them with:
 #
 #   kubectl delete virtualmachine -n <namespace> -l generated-by=loadgen
 
 duration: 5m
 concurrency: 10
+
+# The most VMs alive at once (the VMs created plus the targets of clones).
+# 5 is a small, conservative number: size it to your storage, see above.
+vmCount: 5
 
 # A Provider (type proxmox) in the namespace given by -n.
 providers:
@@ -41,7 +53,7 @@ vmTemplate:
 # (create burst, power cycle, describe storm, reconfigure, snapshot).
 operations:
   create: 30
-  delete: 5
+  delete: 15
   describe: 30
   power: 15
   reconfigure: 10

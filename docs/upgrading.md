@@ -285,6 +285,12 @@ These change what an operator sees; no action is required before the upgrade.
   `clone` now act on VMs the run created. `--dry-run` makes no API call and needs no kubeconfig.
   Without `--cleanup` the command prints how to remove what the run left.
   `test/performance/proxmox-loadtest.yaml` is rewritten in the tool's configuration format.
+  `vmCount` is now enforced: it is the most VMs a run keeps alive at once (default 10; below 1 is
+  rejected), and creates and clones beyond it are skipped and recorded as skipped (a new last
+  `Skipped` column in `results.csv`). Size it to your datastore: it was accepted but ignored
+  before, so a run could fill the storage. No operation starts after the configured `duration`
+  (an `--observe` still in flight finishes first), and an interrupted run, after its cleanup,
+  exits non-zero.
   → [`docs/cli-tools.md`](cli-tools.md)
 - **`vrtg-provider init --type proxmox`** is new.
 

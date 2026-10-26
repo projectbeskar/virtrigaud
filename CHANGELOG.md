@@ -5,6 +5,37 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-10-26 00:58] - virtrigaud-loadgen: no operations after the duration, vmCount caps the VMs, interrupted runs exit non-zero
+**Author:** @wrkode (William Rizzo)
+
+### Fixed
+- `cmd/virtrigaud-loadgen/main.go`: a worker no longer starts an operation once the run's duration has ended. When a long `--observe` returned after the deadline, the ticker's tick and the end of the context were both ready and `select` picked either at random; the operation then ran with a context that outlives the run. The worker now checks the context after the tick (`waitTick`) and `performRandomOperation` refuses to start anything on a done context. An operation, or `--observe` wait, already in flight still finishes, so a run lasts the duration plus at most the longest operation or wait still in flight (an operation call is bounded at 30 seconds, an `--observe` wait by `--observe-timeout`), plus the cleanup.
+- `cmd/virtrigaud-loadgen/main.go`: an interrupted run (SIGINT/SIGTERM) now exits non-zero (`load generation interrupted`), after saving its results and running `--cleanup`, like an interrupted `vcts run`; a cleanup that left objects behind is reported in the same error.
+- `cmd/virtrigaud-loadgen/main.go`: `vmCount`, accepted but ignored until now (a run kept creating full clones and filled a Proxmox thin pool), is enforced: it is the most VMs the run has alive at once (the VMs it created, the target VMs of the clones it requested, and the VMs whose delete it sent that are not yet gone). A create or clone beyond it is skipped (no create or clone call; at the cap the tool reads, at most once per second, the VMs it deleted to see which are gone) and recorded as skipped (`Skipped` result, not a failure, outside the totals and latencies). `vmCount` below 1 is rejected; the default stays 10, so a configuration that omits it is now capped at 10 VMs (a run that relied on creating more now skips the rest). A clone target stops counting as pending when its `VMClone` is Ready and the target carries the run's label (it then becomes a VM of the run that `delete` can remove); when the clone is Failed or gone, or the target is being deleted, the slot stays taken while the target VM exists (the operator removes it later or keeps it) and the target is cleaned up by `--cleanup`. A mix with clones therefore does not exhaust the cap for good. `delete` reads the pending clones at most once per second and before its latency clock starts. `delete` no longer takes the source of a `VMClone` that has not ended (not Ready, Failed or gone). A delete that fails or is still being processed no longer drops the VM from the tracking while the call is in flight.
+
+### Added
+- `cmd/virtrigaud-loadgen/vmcap.go`: the slot accounting behind `vmCount` (reserve before the API call, commit or give back after it, forget deleted VMs when the cap is reached, settle the clones that ended; both kinds of read are paced to one round per poll interval).
+- `cmd/virtrigaud-loadgen/main.go`: a `Skipped` column at the end of `results.csv`, the skipped count in `summary.md`, a `Max VMs alive (vmCount)` line in the start banner, and a warning naming the accepted-but-unused settings (`rampUpTime`, `steadyState`, `rampDownTime`, the `*Interval` keys, `vmTemplate.annotations`) a file sets.
+- `cmd/virtrigaud-loadgen/vmcap_test.go`: tests for the tick race (deterministic), for no operation starting after the deadline with a long `--observe`, for the cap (creates, clone targets, failed creates, concurrent workers, a VM still being deleted, `TestSettleClones` (a Ready, Failed, deleting or unlabelled target, and a target deleted once by `--cleanup`), `TestForgetDeletedIsPaced`, `TestDeleteLatencyExcludesCloneSettling`, `TestCleanupDeletesObjectsItNeverRecorded`, an end-to-end run against envtest with `--cleanup`), for the exit status after an interrupt (with and without a cluster), for `vmCount` validation and for the unused-setting warning.
+- `cmd/virtrigaud-loadgen/vmcap.go`, `cmd/virtrigaud-loadgen/cleanup.go`: `--cleanup` never deletes the target VirtualMachine of a failed VMClone that the operator keeps on purpose (TargetCleanup condition with reason TargetKept, `status.targetVMID` set, or a CloneRequested condition: deleting it could leave the cloned VM on the hypervisor unrecorded). Such a target keeps counting against `vmCount` while it exists, is reported as `kept by the operator (target of a failed clone): <name> — inspect and delete it yourself` (the cleanup then exits non-zero), and, without `--cleanup`, is listed in the "Left in place" output with a warning that the printed `kubectl delete` command would remove it. Tests: the three signals, a clone the run never settled, and the slot freed once the VM is gone.
+- `cmd/virtrigaud-loadgen/cleanup.go`: `--cleanup` also deletes the VMSnapshots, VMClones and VirtualMachines that carry the run's label but were never recorded (a create whose answer was lost after the apiserver stored the object), with UID preconditions; the "Left in place" line no longer counts the target VMs of clones that had not ended as VMs.
+
+### Changed
+- `docs/cli-tools.md`: a storage-sizing caution at the top of the loadgen section (worst case `vmCount` x disk size), `vmCount` documented with what counts and what is skipped, how long a run takes, the exit status, the `Skipped` column, and the note that deleting a `VMClone` or its target while the provider clones can leave a hypervisor VM the tool cannot see (the cleanup waits for clones to settle).
+- `docs/upgrading.md`: the loadgen item of the v0.4.0 to v0.4.1 guide mentions the enforced `vmCount`, the `Skipped` column, the end of operations at the duration and the exit status.
+- `test/performance/proxmox-loadtest.yaml`: `vmCount: 5`, a storage warning, `--cleanup` in the example command, and a higher `delete` weight so the run churns at the cap.
+
+### Why
+The v0.4.1-rc1 lab run showed a 2-minute run lasting 11 minutes and issuing operations after its end, a run without a VM cap filling a Proxmox storage pool, and an interrupted run reporting success.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
+Behaviour change of a CLI tool only (nothing in the manager or the providers): existing loadgen configurations keep working, but a run is now capped at `vmCount` VMs (10 by default) and `results.csv` has one more column.
+
 ## [2026-10-25 20:09] - Release notes for v0.4.1-rc1; v0.4.0 notes archived
 **Author:** @wrkode (William Rizzo)
 

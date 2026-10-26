@@ -29,6 +29,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -59,6 +60,10 @@ const (
 	// operation that is in flight when the run's duration ends can finish.
 	operationTimeout = 30 * time.Second
 )
+
+// errInterrupted is returned by an interrupted run (SIGINT or SIGTERM), after
+// its results are saved and its --cleanup ran.
+var errInterrupted = errors.New("load generation interrupted")
 
 // version is the release the binary was built from; the release workflow sets
 // it with -ldflags "-X main.version=...".
@@ -91,7 +96,12 @@ type LoadGenConfig struct {
 	// VM configuration
 	VMTemplate VMTemplate `yaml:"vmTemplate"`
 	Providers  []string   `yaml:"providers"`
-	VMCount    int        `yaml:"vmCount"`
+	// VMCount is the most VMs the run has alive at once: the VMs it created
+	// and has not deleted, the targets of the clones it requested (until the
+	// clone has ended, and the target then counts as one of the run's VMs),
+	// and the VMs whose delete it sent that are not yet gone. A create or
+	// clone that would go beyond it is skipped.
+	VMCount int `yaml:"vmCount"`
 
 	// Operation mix
 	Operations OperationMix `yaml:"operations"`
@@ -103,6 +113,33 @@ type LoadGenConfig struct {
 	SnapshotInterval time.Duration `yaml:"snapshotInterval"`
 	CloneInterval    time.Duration `yaml:"cloneInterval"`
 	DescribeInterval time.Duration `yaml:"describeInterval"`
+}
+
+// unusedSettings returns the names of the settings c sets that this release
+// accepts but does not use: the ramp phases, the per-operation intervals and
+// the VM template annotations.
+func (c *LoadGenConfig) unusedSettings() []string {
+	var names []string
+	for _, s := range []struct {
+		name string
+		set  bool
+	}{
+		{"rampUpTime", c.RampUpTime != 0},
+		{"steadyState", c.SteadyState != 0},
+		{"rampDownTime", c.RampDownTime != 0},
+		{"createInterval", c.CreateInterval != 0},
+		{"powerInterval", c.PowerInterval != 0},
+		{"reconfigInterval", c.ReconfigInterval != 0},
+		{"snapshotInterval", c.SnapshotInterval != 0},
+		{"cloneInterval", c.CloneInterval != 0},
+		{"describeInterval", c.DescribeInterval != 0},
+		{"vmTemplate.annotations", len(c.VMTemplate.Annotations) > 0},
+	} {
+		if s.set {
+			names = append(names, s.name)
+		}
+	}
+	return names
 }
 
 // VMTemplate defines the VM template for load testing
@@ -142,7 +179,11 @@ type Result struct {
 	Duration time.Duration
 	Success  bool
 	Error    string
-	Phase    string // what the operation asked for (power state, size, object name)
+	// Skipped is set when the run did not perform the operation because it
+	// already has vmCount VMs alive; a skipped operation is neither a success
+	// nor a failure and made no create or clone call.
+	Skipped bool
+	Phase   string // what the operation asked for (power state, size, object name)
 	// Observed is, with --observe, the time from sending the request until
 	// the object's status reflected it; zero when not observed.
 	Observed time.Duration
@@ -168,10 +209,25 @@ type LoadGenerator struct {
 	// pollInterval is how often --observe and the cleanup read an object.
 	pollInterval time.Duration
 
+	// tickInterval is how often a worker starts an operation (one second
+	// unless a test sets it).
+	tickInterval time.Duration
+
 	mu        sync.Mutex
 	vmCounter int
-	// vms holds the VMs this run created and has not deleted. Every
-	// operation acts on one of these, never on another VM in the namespace.
+	// reserved counts the VM slots reserved by a create or clone whose API
+	// call is in flight; they count against vmCount.
+	reserved int
+	// lastForget is when the VMs being deleted were last read to see which
+	// are gone (at most once per pollInterval).
+	lastForget time.Time
+	// lastSettle is when the pending VMClones were last read (at most once
+	// per pollInterval).
+	lastSettle time.Time
+	// vms holds the VMs this run created and has not deleted (a VM whose
+	// delete is being sent stays here, busy, until the apiserver answers).
+	// Every operation acts on one of these, never on another VM in the
+	// namespace.
 	vms []*runVM
 	// snapshots and clones hold the VMSnapshots and VMClones this run
 	// created; cloneTargets the target VMs those clones were asked to create.
@@ -179,15 +235,25 @@ type LoadGenerator struct {
 	clones       []runObject
 	cloneTargets []string
 	// deleting holds the VMs whose delete the apiserver accepted during the
-	// run; --cleanup waits until they are gone.
+	// run, and the target VMs of failed clones that still exist; --cleanup
+	// deletes them and waits until they are gone.
 	deleting []runObject
+	// kept holds the target VMs of failed clones that the operator keeps on
+	// purpose (see targetKeptByOperator): they count against vmCount while
+	// they exist, and --cleanup reports them instead of deleting them.
+	kept []runObject
 }
 
 // Statistics holds performance statistics
 type Statistics struct {
+	// TotalOperations, SuccessfulOps and FailedOps count the operations the
+	// run performed; SkippedOps counts, apart from them, the creates and
+	// clones skipped because vmCount VMs were alive.
 	TotalOperations    int
 	SuccessfulOps      int
 	FailedOps          int
+	SkippedOps         int
+	SkippedByType      map[string]int
 	OperationsByType   map[string]int
 	OperationsByResult map[string]int
 	DurationsByOp      map[string][]time.Duration
@@ -303,6 +369,9 @@ func (c *LoadGenConfig) validate() error {
 	if len(c.Providers) == 0 {
 		return errors.New("providers must name at least one provider")
 	}
+	if c.VMCount < 1 {
+		return errors.New("vmCount must be at least 1: it is the most VMs the run keeps alive at once")
+	}
 	if c.VMTemplate.ClassRef == "" || c.VMTemplate.ImageRef == "" {
 		return errors.New("vmTemplate.classRef and vmTemplate.imageRef are required")
 	}
@@ -398,9 +467,12 @@ func (o *options) runLoadGen(cmd *cobra.Command, _ []string) error {
 	cliout.Printf(out, "Starting load generation...\n")
 	cliout.Printf(out, "Duration: %v\n", lgConfig.Duration)
 	cliout.Printf(out, "Concurrency: %d\n", lgConfig.Concurrency)
-	cliout.Printf(out, "VM Count: %d\n", lgConfig.VMCount)
+	cliout.Printf(out, "Max VMs alive (vmCount): %d\n", lgConfig.VMCount)
 	cliout.Printf(out, "Providers: %v\n", lgConfig.Providers)
 	cliout.Printf(out, "Run ID: %s (label %s=%s)\n", generator.runID, loadgenRunLabelKey, generator.runID)
+	if unused := lgConfig.unusedSettings(); len(unused) > 0 {
+		cliout.Printf(out, "Warning: accepted but not used by this release: %s\n", strings.Join(unused, ", "))
+	}
 
 	// Start results collector
 	var wg sync.WaitGroup
@@ -421,14 +493,25 @@ func (o *options) runLoadGen(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("load generation failed: %w", err)
 	}
 
-	if parent.Err() != nil {
-		cliout.Printf(out, "Load generation interrupted before the end of its duration\n")
+	interrupted := parent.Err() != nil
+	if interrupted {
+		cliout.Printf(out, "Load generation interrupted\n")
 	} else {
 		cliout.Printf(out, "Load generation completed successfully\n")
 	}
 	cliout.Printf(out, "Results saved to: %s\n", o.outputDir)
 
-	return generator.finish(out)
+	// The cleanup runs after an interrupt too; the command still exits
+	// non-zero, like an interrupted vcts run.
+	cleanupErr := generator.finish(out)
+	switch {
+	case interrupted && cleanupErr != nil:
+		return fmt.Errorf("%w: %w", errInterrupted, cleanupErr)
+	case interrupted:
+		return errInterrupted
+	default:
+		return cleanupErr
+	}
 }
 
 func (lg *LoadGenerator) run(ctx context.Context) error {
@@ -449,21 +532,44 @@ func (lg *LoadGenerator) run(ctx context.Context) error {
 	return nil
 }
 
+// worker starts one operation per tick until ctx (the run's duration, or an
+// interrupt) is done. An operation that is in flight when ctx ends, with its
+// --observe, runs to its end; no operation starts after that.
 func (lg *LoadGenerator) worker(ctx context.Context, workerID int) {
-	ticker := time.NewTicker(time.Second) // Base interval
+	interval := lg.tickInterval
+	if interval <= 0 {
+		interval = time.Second
+	}
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			lg.performRandomOperation(ctx, workerID)
-		}
+	for waitTick(ctx, ticker.C) {
+		lg.performRandomOperation(ctx, workerID)
+	}
+}
+
+// waitTick blocks until the next tick and reports whether to start an
+// operation: false once ctx is done. A tick that is ready together with ctx's
+// end (the worker was busy past the end of the duration, for one) never starts
+// an operation: select picks among ready cases at random, so ctx is checked
+// again after it.
+func waitTick(ctx context.Context, tick <-chan time.Time) bool {
+	if ctx.Err() != nil {
+		return false
+	}
+	select {
+	case <-ctx.Done():
+		return false
+	case <-tick:
+		return ctx.Err() == nil
 	}
 }
 
 func (lg *LoadGenerator) performRandomOperation(ctx context.Context, workerID int) {
+	if ctx.Err() != nil {
+		// The run is over: start nothing.
+		return
+	}
 	// Randomly select an operation based on the operation mix
 	op := lg.selectRandomOperation()
 	provider := lg.selectRandomProvider()
@@ -489,6 +595,18 @@ func (lg *LoadGenerator) performRandomOperation(ctx context.Context, workerID in
 func (lg *LoadGenerator) performCreate(ctx context.Context, provider string, workerID int) {
 	ctx, cancel := operationContext(ctx)
 	defer cancel()
+
+	// A create adds a VM: skip it when the run has vmCount VMs alive.
+	if !lg.reserveSlot(ctx) {
+		lg.results <- skippedResult(opCreate, provider)
+		return
+	}
+	reserved := true
+	defer func() {
+		if reserved {
+			lg.releaseSlot()
+		}
+	}()
 
 	vmName := lg.generateVMName(workerID)
 
@@ -517,7 +635,8 @@ func (lg *LoadGenerator) performCreate(ctx context.Context, provider string, wor
 		result.Success = true
 		result.Phase = phaseDryRun
 		result.Duration = time.Since(result.StartTime)
-		lg.recordCreated(&runVM{name: vmName, provider: provider, power: infrav1beta1.PowerStateOn})
+		lg.commitCreate(&runVM{name: vmName, provider: provider, power: infrav1beta1.PowerStateOn})
+		reserved = false
 		lg.results <- result
 		return
 	}
@@ -534,7 +653,8 @@ func (lg *LoadGenerator) performCreate(ctx context.Context, provider string, wor
 	// Created VMs are busy until observed, so no other operation acts on a
 	// VM whose create is still being measured.
 	created := &runVM{name: vmName, uid: vm.UID, provider: provider, power: infrav1beta1.PowerStateOn, busy: true}
-	lg.recordCreated(created)
+	lg.commitCreate(created)
+	reserved = false
 	defer lg.releaseVM(created)
 
 	lg.observe(&result, func(ctx context.Context) (bool, error) {
@@ -551,6 +671,15 @@ func (lg *LoadGenerator) performCreate(ctx context.Context, provider string, wor
 }
 
 func (lg *LoadGenerator) performDelete(ctx context.Context, provider string, _ int) {
+	// Read the clones that may have ended before the clock starts, with a
+	// timeout of their own: the recorded Duration is the delete call's alone.
+	if lg.dueToSettle() {
+		settleCtx, cancelSettle := operationContext(ctx)
+		lg.settleClones(settleCtx)
+		cancelSettle()
+		lg.markSettled()
+	}
+
 	ctx, cancel := operationContext(ctx)
 	defer cancel()
 
@@ -561,6 +690,8 @@ func (lg *LoadGenerator) performDelete(ctx context.Context, provider string, _ i
 	}
 
 	// Delete only a VM this run created, never another VM in the namespace.
+	// The VM stays tracked (busy) until the apiserver answers, so it counts
+	// against vmCount meanwhile.
 	vm, ok := lg.takeCreated()
 	if !ok {
 		result.Duration = time.Since(result.StartTime)
@@ -575,6 +706,7 @@ func (lg *LoadGenerator) performDelete(ctx context.Context, provider string, _ i
 		result.Success = true
 		result.Phase = phaseDryRun
 		result.Duration = time.Since(result.StartTime)
+		lg.removeVM(vm)
 		lg.results <- result
 		return
 	}
@@ -589,16 +721,16 @@ func (lg *LoadGenerator) performDelete(ctx context.Context, provider string, _ i
 	result.Success = err == nil
 	if err != nil {
 		result.Error = err.Error()
-		if !apierrors.IsNotFound(err) && !apierrors.IsConflict(err) {
+		if apierrors.IsNotFound(err) || apierrors.IsConflict(err) {
+			lg.removeVM(vm)
+		} else {
 			// Still this run's VM: keep it for later operations and --cleanup.
-			lg.recordCreated(vm)
+			lg.releaseVM(vm)
 		}
 		lg.results <- result
 		return
 	}
-	lg.mu.Lock()
-	lg.deleting = append(lg.deleting, runObject{name: vm.name, uid: vm.uid})
-	lg.mu.Unlock()
+	lg.markDeleting(vm)
 	lg.observe(&result, func(ctx context.Context) (bool, error) {
 		cur := &infrav1beta1.VirtualMachine{}
 		err := lg.client.Get(ctx, client.ObjectKey{Namespace: lg.namespace, Name: vm.name}, cur)
@@ -698,26 +830,47 @@ func (lg *LoadGenerator) vmLabels() map[string]string {
 	return labels
 }
 
-// recordCreated remembers a VM this run created.
-func (lg *LoadGenerator) recordCreated(vm *runVM) {
-	lg.mu.Lock()
-	defer lg.mu.Unlock()
-	lg.vms = append(lg.vms, vm)
-}
-
-// takeCreated removes and returns a random VM this run created that no other
-// operation is using. It reports false when there is none.
+// takeCreated marks a random VM this run created that no other operation is
+// using, and that is not the source of a clone that may be in flight, as busy
+// and returns it, to be deleted. It stays in lg.vms until
+// removeVM or markDeleting. It reports false when there is none.
 func (lg *LoadGenerator) takeCreated() (*runVM, bool) {
 	lg.mu.Lock()
 	defer lg.mu.Unlock()
-	idle := lg.idleVMs()
+	idle := lg.unclonedLocked()
 	if len(idle) == 0 {
 		return nil, false
 	}
-	i := idle[rand.Intn(len(idle))] // #nosec G404 -- picks which created VM to delete next, not a secret
-	vm := lg.vms[i]
-	lg.vms = append(lg.vms[:i], lg.vms[i+1:]...)
+	vm := lg.vms[idle[rand.Intn(len(idle))]] // #nosec G404 -- picks which created VM to delete next, not a secret
+	vm.busy = true
 	return vm, true
+}
+
+// removeVM stops tracking vm, which is gone (or no longer this run's).
+func (lg *LoadGenerator) removeVM(vm *runVM) {
+	lg.mu.Lock()
+	defer lg.mu.Unlock()
+	lg.dropVMLocked(vm)
+}
+
+// markDeleting moves vm, whose delete the apiserver accepted, from the VMs
+// the run has to the VMs being deleted: --cleanup waits for them to be gone,
+// and they count against vmCount until they are.
+func (lg *LoadGenerator) markDeleting(vm *runVM) {
+	lg.mu.Lock()
+	defer lg.mu.Unlock()
+	lg.dropVMLocked(vm)
+	lg.deleting = append(lg.deleting, runObject{name: vm.name, uid: vm.uid})
+}
+
+// dropVMLocked removes vm from lg.vms. lg.mu must be held.
+func (lg *LoadGenerator) dropVMLocked(vm *runVM) {
+	for i, v := range lg.vms {
+		if v == vm {
+			lg.vms = append(lg.vms[:i], lg.vms[i+1:]...)
+			return
+		}
+	}
 }
 
 // operationContext returns a context for one API call that outlives the run's
@@ -734,6 +887,7 @@ func (lg *LoadGenerator) collectResults(out io.Writer) {
 		DurationsByOp:      make(map[string][]time.Duration),
 		ObservedByOp:       make(map[string][]time.Duration),
 		ObserveFailures:    make(map[string]int),
+		SkippedByType:      make(map[string]int),
 		StartTime:          time.Now(),
 	}
 
@@ -745,7 +899,10 @@ func (lg *LoadGenerator) collectResults(out io.Writer) {
 
 		if lg.opts.verbose {
 			status := "✅"
-			if !result.Success {
+			switch {
+			case result.Skipped:
+				status = "⏭"
+			case !result.Success:
 				status = "❌"
 			}
 			cliout.Printf(out, "%s %s/%s: %v\n", status, result.Operation, result.Provider, result.Duration)
@@ -759,6 +916,11 @@ func (lg *LoadGenerator) collectResults(out io.Writer) {
 }
 
 func (lg *LoadGenerator) updateStatistics(stats *Statistics, result Result) {
+	if result.Skipped {
+		stats.SkippedOps++
+		stats.SkippedByType[result.Operation]++
+		return
+	}
 	stats.TotalOperations++
 
 	if result.Success {
@@ -811,7 +973,7 @@ func (lg *LoadGenerator) saveCSV(filename string, results []Result) {
 
 	// Write header
 	if err := writer.Write([]string{"Operation", "Provider", "VMName", "StartTime", "Duration", "Success", "Error", "Phase",
-		"ObservedDuration", "ObserveError"}); err != nil {
+		"ObservedDuration", "ObserveError", "Skipped"}); err != nil {
 		log.Printf("Failed to write CSV header: %v", err)
 		return
 	}
@@ -829,6 +991,7 @@ func (lg *LoadGenerator) saveCSV(filename string, results []Result) {
 			result.Phase,
 			observedString(result.Observed),
 			result.ObserveError,
+			strconv.FormatBool(result.Skipped),
 		}); err != nil {
 			log.Printf("Failed to write CSV row: %v", err)
 			return
@@ -857,6 +1020,8 @@ func (lg *LoadGenerator) saveSummary(filename string, stats *Statistics) {
 	writeOrLog("- **Total Operations**: %d\n", stats.TotalOperations)
 	writeOrLog("- **Successful**: %d (%.1f%%)\n", stats.SuccessfulOps, percent(stats.SuccessfulOps, stats.TotalOperations))
 	writeOrLog("- **Failed**: %d (%.1f%%)\n", stats.FailedOps, percent(stats.FailedOps, stats.TotalOperations))
+	writeOrLog("- **Skipped** (vmCount = %d VMs alive reached; not counted above): %d%s\n",
+		lg.config.VMCount, stats.SkippedOps, formatCounts(stats.SkippedByType))
 
 	writeOrLog("\n## Operations by Type\n\n")
 	writeOrLog("| Operation | Count | Percentage |\n")
@@ -883,6 +1048,24 @@ func (lg *LoadGenerator) saveSummary(filename string, stats *Statistics) {
 		}
 		writePercentiles(writeOrLog, stats.ObservedByOp)
 	}
+}
+
+// formatCounts renders per-operation counts as " (create 3, clone 1)", or ""
+// when there are none.
+func formatCounts(byOp map[string]int) string {
+	if len(byOp) == 0 {
+		return ""
+	}
+	ops := make([]string, 0, len(byOp))
+	for op := range byOp {
+		ops = append(ops, op)
+	}
+	sort.Strings(ops)
+	parts := make([]string, 0, len(ops))
+	for _, op := range ops {
+		parts = append(parts, fmt.Sprintf("%s %d", op, byOp[op]))
+	}
+	return " (" + strings.Join(parts, ", ") + ")"
 }
 
 // writePercentiles writes a table of p50/p95/p99/max per operation.

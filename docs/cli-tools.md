@@ -154,14 +154,25 @@ virtrigaud-loadgen run [--config loadtest.yaml] [-n <namespace>] [--output-dir .
 ```
 
 Each worker performs one randomly chosen operation per second for the configured duration. Without
-`--config` the built-in defaults apply: 5 minutes, 2 workers, VMs created against a provider named
-`test-provider` with class `test-class` and image `test-image`. `--config` reads a YAML file that
-overrides the defaults; durations are Go duration strings (`30s`, `5m`).
+`--config` the built-in defaults apply: 5 minutes, 2 workers, at most 10 VMs alive at once, VMs
+created against a provider named `test-provider` with class `test-class` and image `test-image`.
+`--config` reads a YAML file that overrides the defaults; durations are Go duration strings (`30s`,
+`5m`).
+
+> **Size the run's storage before you start it.** `create` and `clone` make real VMs on the
+> hypervisor, and on providers that copy disks (a Proxmox full clone, a libvirt volume copy) each
+> one can occupy the whole size of its disk. A run without a cap fills the datastore (an earlier
+> release, which accepted `vmCount` but ignored it, filled a small Proxmox thin pool to 100%). The
+> run therefore keeps at most **`vmCount`** VMs alive at once (default 10), and the worst case is
+> **`vmCount` x the disk size of the image or source VM**, plus snapshots, which `vmCount` does not
+> limit. Pick `vmCount` so that figure fits in the datastore with room to spare, and run with
+> `--cleanup` so the VMs do not outlive the run.
 
 ```yaml
 duration: 2m
 concurrency: 4
 providers: [libvirt-lab]          # a Provider in -n; one is chosen at random per create
+vmCount: 6                        # the most VMs the run has alive at once (default 10, at least 1)
 vmTemplate:
   classRef: small                 # an existing VMClass
   imageRef: ubuntu-22             # an existing VMImage
@@ -185,15 +196,40 @@ named `proxmox-perf` (edit the provider, class and image names for your cluster)
 every YAML file in `test/performance` with the tool's own loader. The tool has no scenarios or
 pass/fail thresholds: read `summary.md` and compare it with your own targets.
 
-An unknown key, an unparsable duration or an unusable value (no providers, all weights zero, a range
-that is not `[min, max]` within the bounds, ...) is an error and nothing is created. The keys
-`vmCount`, `rampUpTime`, `steadyState`, `rampDownTime`, the `*Interval` keys and
-`vmTemplate.annotations` are accepted but not used in this release.
+An unknown key, an unparsable duration or an unusable value (no providers, all weights zero,
+`vmCount` below 1, a range that is not `[min, max]` within the bounds, ...) is an error and nothing
+is created. The keys `rampUpTime`, `steadyState`, `rampDownTime`, the `*Interval` keys and
+`vmTemplate.annotations` are accepted but not used in this release (the run starts all workers at
+once, runs for `duration` and uses `operations` for the mix); the command prints a warning when a
+file sets one of them.
+
+**`vmCount`: the cap on VMs.** It is the most VMs the run has alive at once: the VMs it created and
+has not deleted, the target VMs of the clones it requested, and the VMs whose delete it sent that
+are not yet gone (they still hold their storage). A `create` or `clone` that would go beyond it is
+**skipped**: no create or clone call is made (when the cap is reached the tool reads, at most once
+per second, the VMs it deleted to see which are gone), and the operation is recorded as skipped
+(not as a failure, and not in the totals of operations performed, success rates or latencies).
+VMs that are not the run's, and snapshots, do not count.
+
+A clone's target counts from the moment the `VMClone` is accepted. When the `VMClone` is `Ready`
+and its target VM exists and carries the run's label, the target becomes one of the run's VMs:
+`power`, `reconfigure`, `snapshot`, `clone` and `delete` can act on it, so `delete` frees its slot.
+When the `VMClone` fails or disappears, or its target is being deleted, the slot stays taken for as
+long as the target VM exists (the operator removes the target of a failed clone only later, and
+keeps it in some cases, for example when it was bound); it is freed when the VM is gone, at once when there is none. A `Ready`
+clone whose target does not carry the run's label frees its slot. The tool looks at the clones
+when a `delete` runs (at most once per second, before the delete is timed), so a mix without
+`delete` keeps every clone target counted.
+Deleting frees room again; a run with `create` weighted above `delete` therefore reaches `vmCount`
+quickly and then mostly skips creates, and you raise the `delete` weight if you want churn at a
+steady VM count.
 
 **What each operation does.** Every operation but `create` and `describe` acts on a VM **this run
 created**, chosen at random among those no other operation is using; it never touches another VM in
 the namespace. Patches and deletes carry the VM's UID, so they never reach another object created
-later under the same name. With no such VM available the operation is recorded as failed
+later under the same name. `delete` never takes the source of a `VMClone` that has not ended
+(is not `Ready`, `Failed` or gone): deleting it while the provider copies its disk could leave a VM on the
+hypervisor that nothing records. With no such VM available the operation is recorded as failed
 (`no VM created by this run is available`) and nothing is called.
 
 | Operation | API call |
@@ -205,6 +241,11 @@ later under the same name. With no such VM available the operation is recorded a
 | `reconfigure` | Patches `spec.resources.cpu` (and `spec.resources.memoryMiB` when `memoryRange` is set) of a VM of the run to a value from the range that differs from the one the run last set: the change the VirtualMachine controller sends to the provider as a Reconfigure |
 | `snapshot` | Creates a `VMSnapshot` `loadgen-snap-<run>-<n>` of a VM of the run with `retentionPolicy.deleteOnVMDelete: true`, so the snapshot is deleted when its VM is |
 | `clone` | Creates a `VMClone` `loadgen-clone-<run>-<n>` (full clone, target powered off) of a VM of the run, preferring one the run powered off (some providers, libvirt among them, hold a clone of a running source until it is powered off); its target VM, `loadgen-vm-<run>-clone-<n>`, is created by the operator with the run's labels |
+
+**How long a run takes.** The workers start no operation once `duration` has passed. An operation
+that is already in flight at that moment finishes, and so does its `--observe` wait (up to
+`--observe-timeout`, 5 minutes by default), so a run lasts `duration` plus at most the longest
+operation or observation still in flight, plus the `--cleanup`. An interrupt stops the wait.
 
 **What is measured.** `Duration` is the time of the API call alone: from sending the request until
 the apiserver answered (accepted or refused it). It does not include the provider's work. The
@@ -233,17 +274,42 @@ run's duration for operations still in flight; an interrupt stops it.
   With **`--cleanup`** the tool deletes, at the end (also after an interrupt), the run's
   `VMSnapshot`s and waits until they are gone, then its `VMClone`s, the clone target VMs that carry
   the run's label, its VMs and the VMs whose delete it issued during the run, and waits until they
-  are gone, up to `--cleanup-timeout`. A `VMClone` is only an operation record: deleting it leaves
+  are gone, up to `--cleanup-timeout`. It also deletes any object carrying the run's label
+  (`loadgen.virtrigaud.io/run`) that the tool did not record, which happens when a create's answer
+  was lost after the apiserver stored the object. It does **not** delete the target VM of a failed
+  `VMClone` that the operator keeps on purpose (the `VMClone` has a `TargetCleanup` condition with
+  reason `TargetKept`, or `status.targetVMID` set, or a `CloneRequested` condition): removing that
+  `VirtualMachine` could leave the cloned VM on the hypervisor with nothing recording it. Such a VM
+  counts against `vmCount` while it exists and is reported as `kept by the operator (target of a
+  failed clone): <name> — inspect and delete it yourself`; the cleanup then exits non-zero, and
+  without `--cleanup` the "Left in place" output lists it and warns that the `kubectl delete`
+  command it prints would remove it too. A `VMClone` is only an operation record: deleting it leaves
   its target VM, which is why the targets are deleted as well. A `VMClone` whose provider clone may
   still be in flight is waited for first; one that does not settle in time is left in place with
   its source and target VMs. The tool exits non-zero, naming what is left, when anything remains.
+  The cleanup waits for clones to settle because deleting a `VMClone`, its target or its source
+  while the provider is still copying the disk can leave a VM on the hypervisor that no
+  `VirtualMachine` records, and the tool cannot see it. Deleting the target VM of a clone in
+  flight makes the `VMClone` fail with a message naming the cloned VM left on the provider;
+  deleting the `VMClone` itself only drops it (the manager logs `Deleting VMClone`). If you
+  delete the objects of a run yourself, with `kubectl`, while clones are still in progress, check
+  the hypervisor for VMs you did not expect afterwards.
+- **Exit status.** `0` when the run reached the end of its duration and, with `--cleanup`, the
+  cleanup completed. **Non-zero** when the run was interrupted (`SIGINT` or `SIGTERM`), like an
+  interrupted `vcts run`: the results are saved and the `--cleanup` runs first (the output says
+  `Cleanup complete` when it left nothing behind). A script can therefore tell an interrupted run
+  from a finished one by the status alone. Non-zero also when the cleanup left objects behind or
+  the configuration was unusable. A signal that arrives while the cleanup is running does not stop
+  it (send a second one to terminate the process at once), and does not change the status.
 - **`--dry-run`** makes no API call at all (it needs no kubeconfig): operations are recorded as
   successful with phase `DryRun`, and nothing is observed or cleaned up.
 - **Results.** `results.csv` (one row per operation: `Operation`, `Provider`, `VMName`,
   `StartTime`, `Duration`, `Success`, `Error`, `Phase` — what was requested — and, with
-  `--observe`, `ObservedDuration` and `ObserveError`) and `summary.md` (counts, and p50/p95/p99/max
-  of the API call latency and, with `--observe`, of the observed time, per operation) in
-  `--output-dir`.
+  `--observe`, `ObservedDuration` and `ObserveError`, then `Skipped`: `true` for a create or clone
+  skipped because of `vmCount`, which is also `Success=false` with no `Error`) and `summary.md`
+  (counts, the number of skipped operations, and p50/p95/p99/max of the API call latency and, with
+  `--observe`, of the observed time, per operation) in `--output-dir`. Earlier releases wrote the
+  CSV without the `Skipped` column.
 
 ## vrtg-provider
 
