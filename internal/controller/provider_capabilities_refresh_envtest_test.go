@@ -59,13 +59,18 @@ var (
 )
 
 // serviceCapabilityReader models a capability read through the provider's
-// Service, from the runtime Deployment as the apiserver holds it: while the
-// rollout is not complete the answer comes from the old runtime (the pod a
-// connection could still reach) and is counted as a mid-rollout read; once it
-// is complete, from the runtime of the Deployment's current image.
+// Service, from the runtime Deployment as the apiserver holds it. While a pod
+// of the old ReplicaSet is still running beside the new one (judged here from
+// the Deployment status directly, not with the controller's gate) the answer
+// comes from the old runtime and is counted as a mid-rollout read. Once the
+// rollout is complete, the first read is answered by the old runtime when
+// terminatingOldPod is set (a still-terminating old pod the Service routed the
+// new connection to, as in the lab finding), every other read by the runtime
+// of the Deployment's current image.
 type serviceCapabilityReader struct {
-	reads           atomic.Int32
-	midRolloutReads atomic.Int32
+	reads             atomic.Int32
+	midRolloutReads   atomic.Int32
+	terminatingOldPod atomic.Bool
 }
 
 func (s *serviceCapabilityReader) ReadCapabilities(ctx context.Context, p *infravirtrigaudiov1beta1.Provider) (contracts.Capabilities, error) {
@@ -74,8 +79,11 @@ func (s *serviceCapabilityReader) ReadCapabilities(ctx context.Context, p *infra
 	if err := k8sClient.Get(ctx, capsEnvDeploymentKey(p.Namespace, p.Name), dep); err != nil {
 		return contracts.Capabilities{}, err
 	}
-	if !deploymentRolloutComplete(dep) {
+	if dep.Status.ObservedGeneration < dep.Generation || dep.Status.Replicas > dep.Status.UpdatedReplicas {
 		s.midRolloutReads.Add(1)
+		return capsEnvOld, nil
+	}
+	if s.terminatingOldPod.CompareAndSwap(true, false) {
 		return capsEnvOld, nil
 	}
 	if dep.Spec.Template.Spec.Containers[0].Image == capsEnvNewImage {
@@ -206,8 +214,9 @@ var _ = Describe("Provider capability refresh after a runtime roll (envtest)", f
 			g.Expect(p.Status.ReportedCapabilities.SupportsLinkedClones).To(BeTrue())
 		}, "2s", "100ms").Should(Succeed())
 
-		By("the rollout completes: the new runtime's capabilities are recorded")
+		By("the rollout completes while the old pod still terminates: the confirming read records the new runtime's capabilities")
 		readsBefore := reader.reads.Load()
+		reader.terminatingOldPod.Store(true)
 		setDeploymentStatus(ns, capsEnvNewImage, rolloutComplete)
 		var refreshed *infravirtrigaudiov1beta1.Provider
 		Eventually(func(g Gomega) {
@@ -216,6 +225,9 @@ var _ = Describe("Provider capability refresh after a runtime roll (envtest)", f
 			g.Expect(refreshed.Status.ReportedCapabilities.SupportsLinkedClones).To(BeFalse())
 			g.Expect(refreshed.Status.ReportedCapabilities.SupportsHonestReconfigure).To(BeTrue())
 		}, "20s", "100ms").Should(Succeed())
+		Expect(reader.terminatingOldPod.Load()).To(BeFalse(), "the first read was answered by the terminating old pod")
+		Expect(reader.reads.Load()).To(BeNumerically(">=", readsBefore+2),
+			"the new capabilities come from the confirming read, after the settle delay")
 		Expect(reader.midRolloutReads.Load()).To(BeZero())
 		cond := meta.FindStatusCondition(refreshed.Status.Conditions, providerConditionCapabilitiesReported)
 		Expect(cond).NotTo(BeNil())
@@ -226,14 +238,21 @@ var _ = Describe("Provider capability refresh after a runtime roll (envtest)", f
 		Expect(providerAdvertisesImageImport(refreshed)).To(BeFalse())
 		Expect(providerAdvertisesHonestReconfigure(refreshed)).To(BeTrue())
 
-		By("the confirming read follows the settle delay; then no further read and at most one trailing status write (no hot loop)")
-		Eventually(reader.reads.Load, "10s", "100ms").Should(Equal(readsBefore + 2))
-		versions := map[string]bool{}
+		By("then no further read and no further status write (no hot loop)")
+		// Wait until the Provider has stopped changing (the confirming read's
+		// write and a possible trailing lastHealthCheck write have landed).
+		prevRV := ""
+		Eventually(func(g Gomega) bool {
+			rv := getCapsEnvProvider(g, ns).ResourceVersion
+			stable := rv == prevRV
+			prevRV = rv
+			return stable
+		}, "15s", "1s").Should(BeTrue())
+		reads := reader.reads.Load()
 		Consistently(func(g Gomega) {
-			g.Expect(reader.reads.Load()).To(Equal(readsBefore+2), "settled: the next read is the hourly one")
-			versions[getCapsEnvProvider(g, ns).ResourceVersion] = true
+			g.Expect(reader.reads.Load()).To(Equal(reads), "settled: the next read is the hourly one")
+			g.Expect(getCapsEnvProvider(g, ns).ResourceVersion).To(Equal(prevRV))
 		}, "3s", "100ms").Should(Succeed())
-		Expect(len(versions)).To(BeNumerically("<=", 2), "the Provider is not rewritten in a loop")
 	})
 
 	It("sets ProviderAvailable=False and healthy=false when the runtime has no ready pod, and True again when it has", func() {
