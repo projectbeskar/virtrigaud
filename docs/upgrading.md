@@ -332,13 +332,15 @@ artifact identity, clustered resizes, snapshot reverts, migration backends) then
 image's capabilities. The manager now:
 
 - reads the capabilities only once the provider Deployment's rollout is complete (the new spec
-  observed, every replica updated and available, no replica of the old ReplicaSet left), over a
-  connection opened for the read, which the Service routes to a current pod;
+  observed, no replica of the old ReplicaSet left, at least one current replica available; a
+  current replica that stays unavailable does not stop the read), over a connection opened for
+  the read, which the Service routes to a current pod;
 - reads them again when the Deployment changes (a new image, or any other change to its spec),
   once more 45 seconds after the rollout completed (the pods' 30-second termination grace period
   plus 15 seconds, so an old pod that was still terminating has exited), every 10 minutes while
-  the `Provider` is healthy, and one minute after a failed read (`CapabilitiesReported=False`,
-  reason `CapabilitiesUnavailable`; the recorded capabilities are kept).
+  the `Provider` is healthy, and one minute after a failed read, not sooner
+  (`CapabilitiesReported=False`, reason `CapabilitiesUnavailable`; the recorded capabilities are
+  kept). A read gives up after 10 seconds.
 
 Expect `reportedCapabilities` to show the new image's answer within about a minute of the
 rollout completing. A provider image re-pulled under the same tag (no Deployment change) is
@@ -348,12 +350,19 @@ pods never become available), the capabilities of the old pods, which still serv
 
 `status.healthy` and the `ProviderAvailable` condition now follow the Deployment: with no ready
 pod, `ProviderAvailable` is `False` (reason `DeploymentNotReady`) and `healthy` is `false`; in
-v0.4.0 they stayed `True` once set. A `VMMigration` waits in validation, and `VMAdoption` waits,
+v0.4.0 they stayed `True` once set. A reconcile that fails before it reaches the Deployment (for
+example a TLS-posture refusal) leaves them as last observed. A `VMMigration` waits in validation, and `VMAdoption` waits,
 until the provider is available again, as they did for a `Provider` that had never been ready. A
 vSphere or clustered `Provider` (one replica, `Recreate` strategy) is briefly not available during
 each of its rollouts.
 
-The VMClone linked-clone check does not read this status: it asks the provider at clone time.
+The VMClone linked-clone check does not read this status: it asks the running provider at clone
+time, over the manager's shared connection, which can still reach an old pod while that pod
+terminates after a roll (up to its 30-second grace period).
+
+The `virtrigaud_manager_reconcile_total{kind="Provider"}` reconciles of a healthy `Provider` are
+now counted as `outcome="requeue"` (each schedules the next capability read) rather than
+`"success"`; dashboards that chart the outcome change shape, alerts on `outcome="error"` do not.
 
 ### Other changes
 
