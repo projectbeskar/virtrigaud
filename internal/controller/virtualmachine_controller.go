@@ -1828,6 +1828,9 @@ func (r *VirtualMachineReconciler) createVMOn(
 			return res, nil
 		}
 		r.recordConfirmedCreate(vm, attempt)
+		// The provider's answer is recorded only while the VM still waits
+		// for it under this marker (writeCreateAnswer).
+		attempt.sentMarkerID = markerAttemptID(vm)
 	}
 
 	// The VM now records its use of the Provider (its create marker, or its
@@ -1877,7 +1880,9 @@ func (r *VirtualMachineReconciler) createVMOn(
 		// Status.ID) and cannot touch the colliding hypervisor VM.
 		// A Conflict answering a re-send leaves the outcome unknown: the
 		// marker stays (createOutcomeKnown).
-		if res, handled := r.handleRejectedCreate(ctx, vm, inputs, err, !createOutcomeKnown(err, attempt)); handled {
+		// Every answer below is recorded with writeCreateAnswer, so an edit
+		// of the VM made while the provider ran the Create does not lose it.
+		if res, handled := r.handleRejectedCreate(ctx, vm, inputs, err, attempt); handled {
 			return res, nil
 		}
 		// A retryable VM_DISK_CHECK_FAILED / VM_OPERATION_FAILED is retried
@@ -1889,7 +1894,7 @@ func (r *VirtualMachineReconciler) createVMOn(
 		// refusal is re-sent on the create-refusal backoff, not every 5 s
 		// (createRefusalPaced).
 		if createRefusalPaced(err) {
-			return r.paceRefusedCreate(ctx, vm, inputs, err, !createOutcomeKnown(err, attempt)), nil
+			return r.paceRefusedCreate(ctx, vm, inputs, err, attempt), nil
 		}
 		logger.Error(err, "Failed to create VM")
 		reason, requeueAfter := providerFailureOutcome(err)
@@ -1899,12 +1904,12 @@ func (r *VirtualMachineReconciler) createVMOn(
 			// Ready says why the VM is not created yet.
 			k8s.SetReadyCondition(&vm.Status.Conditions, metav1.ConditionFalse, reason,
 				"Failed to create VM: "+providerFailureDetail(err), vm.Generation)
-			r.updateStatus(ctx, vm)
+			r.writeCreateAnswer(ctx, vm, attempt)
 			return ctrl.Result{RequeueAfter: requeueAfter}, nil
 		}
 		k8s.SetProvisioningCondition(&vm.Status.Conditions, metav1.ConditionFalse, reason,
 			"Failed to create VM: "+providerFailureDetail(err), vm.Generation)
-		r.updateStatus(ctx, vm)
+		r.writeCreateAnswer(ctx, vm, attempt)
 		return ctrl.Result{RequeueAfter: requeueAfter}, nil
 	}
 
@@ -1967,16 +1972,18 @@ func (r *VirtualMachineReconciler) createVMOn(
 // empty. Any other error returns handled=false and keeps the existing
 // transient-retry path.
 //
-// keepMarker records the answer on Ready only, keeping the create marker: the
-// answer to a re-send, which leaves the earlier attempt's outcome unknown
-// (createOutcomeKnown).
+// attempt is the Create the answer is for. An answer whose outcome is not
+// known (createOutcomeKnown: the answer to a re-send, which leaves the earlier
+// attempt's outcome unknown) is recorded on Ready only, keeping the create
+// marker. The status is written with writeCreateAnswer.
 func (r *VirtualMachineReconciler) handleRejectedCreate(
 	ctx context.Context,
 	vm *infravirtrigaudiov1beta1.VirtualMachine,
 	inputs string,
 	err error,
-	keepMarker bool,
+	attempt createAttempt,
 ) (ctrl.Result, bool) {
+	keepMarker := !createOutcomeKnown(err, attempt)
 	// Surface the provider's categorized message, not err.Error() (which also
 	// embeds the raw gRPC status chain), made safe for status: URL userinfo
 	// removed, one line, bounded (sanitizeProviderDetail).
@@ -2016,7 +2023,7 @@ func (r *VirtualMachineReconciler) handleRejectedCreate(
 			ObservedGeneration: vm.Generation,
 		})
 	}
-	r.updateStatus(ctx, vm)
+	r.writeCreateAnswer(ctx, vm, attempt)
 	return ctrl.Result{RequeueAfter: retryAfter}, true
 }
 

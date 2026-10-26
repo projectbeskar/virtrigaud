@@ -149,7 +149,7 @@ func TestPaceRefusedCreate_KeepMarkerRecordsReadyOnly(t *testing.T) {
 	r := newTestReconciler(coverageTestScheme(t), nil, vm)
 	r.clock = func() time.Time { return time.Date(2026, 10, 26, 9, 0, 0, 0, time.UTC) }
 
-	res := r.paceRefusedCreate(context.Background(), vm, "in", contracts.NewNotFoundError("create: gone", nil), true)
+	res := r.paceRefusedCreate(context.Background(), vm, "in", contracts.NewNotFoundError("create: gone", nil), createAttempt{resend: true})
 	assert.Equal(t, 30*time.Second, res.RequeueAfter)
 	prov := meta.FindStatusCondition(vm.Status.Conditions, k8s.ConditionProvisioning)
 	require.NotNil(t, prov)

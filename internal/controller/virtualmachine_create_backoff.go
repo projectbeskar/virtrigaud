@@ -45,12 +45,26 @@ import (
 // Such a Create is now retried with the blocked-VM backoff (15 s doubling to
 // 5 min), counted from when Ready became False/CreateBackoff.
 
-// createBackoffMessage is the Ready (and, for a Create the provider did not
-// perform, Provisioning) message of a Create retried with a backoff. It is
-// constant; the provider's answer is in the manager log.
-var createBackoffMessage = fmt.Sprintf("The provider could not complete this VM's Create: it could not verify that no other VM "+
-	"uses its disk, or the operation failed on its host. It is retried with a backoff of up to %s; the manager log has "+
-	"the provider's answer", blockedRetryMax)
+// createBackoffMessage is the Ready message of a Create retried with a
+// backoff whose answer does not say that nothing was made: a
+// VM_DISK_CHECK_FAILED, or a VM_OPERATION_FAILED without CREATE_NOT_PERFORMED.
+// It says only what every such answer means, whatever the provider; the
+// provider's answer is in the CreateBackoff event and the manager log.
+var createBackoffMessage = fmt.Sprintf("The provider could not complete this VM's Create: the operation failed on the "+
+	"provider's host, or a check it needs could not run there. It is retried with a backoff of up to %s; the %s event "+
+	"and the manager log have the provider's answer", blockedRetryMax, k8s.ReasonCreateBackoff)
+
+// createNotPerformedBackoffMessage is the Ready (and, when the outcome is
+// known, Provisioning) message of a Create retried with a backoff that the
+// provider answered it did not perform (CREATE_NOT_PERFORMED with
+// VM_OPERATION_FAILED): another operation held something it needed (a lock, a
+// VMID another Create took first), or a read it needed failed. It says only
+// that, whatever the provider and the cause; the provider's answer is in the
+// CreateBackoff event and the manager log. Answering a re-send it says
+// nothing about what the earlier attempt made (the create marker is kept).
+var createNotPerformedBackoffMessage = fmt.Sprintf("The provider answered that it did not perform the last Create sent "+
+	"for this VM, so that request made nothing, and that it can be retried. It is retried with a backoff of up to %s; "+
+	"the %s event and the manager log have the provider's answer", blockedRetryMax, k8s.ReasonCreateBackoff)
 
 // createRefusedMessage is the Ready and Provisioning message of a Create the
 // provider refused with a non-retryable FailedPrecondition or
@@ -115,17 +129,20 @@ func hasVMOperationFailed(err error) bool {
 	return false
 }
 
-// holdCreateBackoff handles a failed Create that createNeedsBackoff selects
-// and reports whether it did: Ready=False/CreateBackoff with the constant
-// createBackoffMessage — or CreateRefused with createRefusedMessage for a
-// refusal (createRefusedByProvider) — and the same Provisioning, replacing
-// the create marker, only when the provider made nothing and this is not a
-// re-send (createOutcomeKnown: a refusal of a first Create; a
-// VM_DISK_CHECK_FAILED or VM_OPERATION_FAILED Create, and any failure of a
-// re-send, keeps the marker, its outcome unknown); a Warning event when the hold begins (for a
-// refusal it carries the provider's sanitized answer), the status written
-// only when it changes, and the next retry on blockedRetryBackoff from when
-// Ready took the reason.
+// holdCreateBackoff handles a failed Create of attempt that createNeedsBackoff
+// selects and reports whether it did: Ready=False/CreateBackoff with the
+// constant createNotPerformedBackoffMessage for an answer that the Create was
+// not performed (CREATE_NOT_PERFORMED) or createBackoffMessage otherwise — or
+// CreateRefused with createRefusedMessage for a refusal
+// (createRefusedByProvider) — and the same Provisioning, replacing the create
+// marker, only when the provider made nothing and this is not a re-send
+// (createOutcomeKnown: a refusal or a CREATE_NOT_PERFORMED answer of a first
+// Create; a VM_DISK_CHECK_FAILED or VM_OPERATION_FAILED Create, and any
+// failure of a re-send, keeps the marker, its outcome unknown); a Warning
+// event when the hold begins, carrying the provider's answer (made safe by
+// rpcFailureDetail; for a refusal by sanitizeProviderDetail), the status
+// written with writeCreateAnswer only when it changes, and the next retry on
+// blockedRetryBackoff from when Ready took the reason.
 func (r *VirtualMachineReconciler) holdCreateBackoff(
 	ctx context.Context,
 	vm *infravirtrigaudiov1beta1.VirtualMachine,
@@ -136,8 +153,11 @@ func (r *VirtualMachineReconciler) holdCreateBackoff(
 		return ctrl.Result{}, false
 	}
 	reason, msg := k8s.ReasonCreateBackoff, createBackoffMessage
-	if createRefusedByProvider(err) {
+	switch {
+	case createRefusedByProvider(err):
 		reason, msg = k8s.ReasonCreateRefused, createRefusedMessage
+	case contracts.IsCreateNotPerformed(err):
+		msg = createNotPerformedBackoffMessage
 	}
 	persisted := vm.Status.DeepCopy()
 	prev := meta.FindStatusCondition(vm.Status.Conditions, k8s.ConditionReady)
@@ -166,15 +186,18 @@ func (r *VirtualMachineReconciler) holdCreateBackoff(
 		"retryAfter", retry.String(), "error", err.Error())
 	metrics.RecordError(errReasonCreateBackoff, metrics.ComponentManager)
 	if statusDiffers(persisted, vm) {
-		r.updateStatus(ctx, vm)
+		r.writeCreateAnswer(ctx, vm, attempt)
 	}
 	if transition {
-		event := msg
+		// The provider's own answer says what happened (a refusal: what to
+		// fix); once per hold. A refusal is sanitized; any other answer may
+		// be a transport failure, whose text names the provider's address
+		// (rpcFailureDetail).
+		detail := rpcFailureDetail(err)
 		if reason == k8s.ReasonCreateRefused {
-			// The provider's own answer says what to fix; sanitized, once.
-			event = msg + ". Provider answer: " + sanitizeProviderDetail(err)
+			detail = sanitizeProviderDetail(err)
 		}
-		r.recordEvent(vm, corev1.EventTypeWarning, reason, event)
+		r.recordEvent(vm, corev1.EventTypeWarning, reason, msg+". Provider answer: "+detail)
 	}
 	return ctrl.Result{RequeueAfter: retry}, true
 }

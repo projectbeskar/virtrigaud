@@ -300,6 +300,12 @@ type createAttempt struct {
 	// confirmed is set when an operator's createOutcomeAnnotation confirmed
 	// that attempt markerID made no VM.
 	confirmed bool
+	// sentMarkerID is the attempt id of the create marker the single-host
+	// Create was sent under (requestCreate wrote it); "" for a clustered one.
+	sentMarkerID string
+	// sentHost is the pending host a clustered Create was sent to; "" for a
+	// single-host one.
+	sentHost string
 }
 
 // createOutcomeConfirmed reports whether vm's createOutcomeAnnotation
