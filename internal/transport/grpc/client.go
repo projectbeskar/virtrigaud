@@ -31,6 +31,7 @@ import (
 	"google.golang.org/genproto/googleapis/rpc/errdetails"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/connectivity"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
@@ -495,6 +496,18 @@ func (c *Client) trackTaskDone(taskID string) {
 // Close closes the gRPC connection
 func (c *Client) Close() error {
 	return c.conn.Close()
+}
+
+// ConnectionUsable reports whether the client's gRPC connection can still
+// carry calls: false once it has been closed (Shutdown) or while it is failing
+// to connect (TransientFailure). Idle, Connecting and Ready are usable — gRPC
+// reconnects an idle connection on the next call. It makes no RPC.
+func (c *Client) ConnectionUsable() bool {
+	switch c.conn.GetState() {
+	case connectivity.Shutdown, connectivity.TransientFailure:
+		return false
+	}
+	return true
 }
 
 // Validate implements contracts.Provider

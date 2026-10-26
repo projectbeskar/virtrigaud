@@ -5,6 +5,28 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-10-26 08:47] - Validate a provider connection once, not on every reconcile
+**Author:** @wrkode (William Rizzo)
+
+### Changed
+- `internal/runtime/remote/resolver.go`: `GetProvider` reuses a cached provider client without a `Validate` RPC while it is still valid for the same configuration (Provider UID, spec generation, type, runtime endpoint and, with TLS, the TLS Secret's resourceVersion), its gRPC connection is usable and the Provider's circuit breaker is closed. A configuration change, a closed or failing connection, or an open or half-open breaker validates again; a new client is always validated, a failed validation is never cached, and resolutions of one Provider are serialised per Provider: concurrent callers share one dial and one `Validate`, a caller holding an older generation of the Provider never replaces (or closes) a client validated for a newer one, and a replaced client is always closed.
+- `internal/transport/grpc/client.go`: `ConnectionUsable` reports whether the client's connection is closed or failing to connect (no RPC).
+- `internal/controller/virtualmachine_controller.go`: comment updated to the resolver's validation behaviour.
+
+### Added
+- `internal/runtime/remote/resolver_validation_test.go`: reuse without re-validation, one validation for concurrent first use, re-validation on spec / endpoint / UID change and TLS Secret rotation, fail-closed validation and recovery, open-breaker re-validation, closed-connection replacement, a stale generation never replacing a newer validated client, and concurrent old/new configurations converging on the newest with every replaced client closed.
+
+### Why
+Spike 1B (F3) measured one `Validate` RPC per VM reconcile on top of each `Describe`, doubling provider RPCs; on libvirt a `Validate` is a real call to the host (#288). The cache was keyed only by Provider name, so this per-call `Validate` was also the only thing that noticed a changed endpoint, TLS Secret or a re-created Provider; those changes are now detected directly.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout (manager image)
+- [ ] Config change only
+- [ ] Documentation only
+
+Behaviour change: a provider whose backend fails while its gRPC connection stays healthy is no longer refused at `GetProvider` on the next reconcile; its calls fail instead, and once its circuit breaker opens, resolution validates again and refuses it as before.
+
 ## [2026-10-26 08:13] - Fix VirtualMachine steady-state polling and skip unchanged status writes
 **Author:** @wrkode (William Rizzo)
 

@@ -558,9 +558,10 @@ func (r *VirtualMachineReconciler) reconcileVM(ctx context.Context, vm *infravir
 	}
 	logger.V(1).Info("Provider instance obtained successfully", "provider", provider.Name)
 
-	// Provider liveness is already verified by getProviderInstance →
-	// Resolver.GetProvider (it validates the cached/new client before returning).
-	// Re-validating here doubled the real virsh-over-ssh Validate calls on every
+	// Provider validation is the Resolver's job: GetProvider validates each new
+	// connection, and validates again whenever the Provider's configuration
+	// changes, its connection fails or its circuit breaker opens; a healthy
+	// cached client is reused without a Validate RPC. Re-validating here doubled the real virsh-over-ssh Validate calls on every
 	// reconcile, which — under 10-way concurrency post-adoption — became a fork
 	// storm on the libvirt host (#288). The image-prepare / create RPCs below are
 	// themselves the liveness test: a dead provider fails them and the reconcile
