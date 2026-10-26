@@ -191,16 +191,21 @@ func (p *Provider) classifySubmitError(ctx context.Context, op string, vmid int,
 //
 //   - A complete VM is another's when it does not carry stamp's owner.
 //   - A temporary config still being cloned or created (beingMade) has no
-//     name and no description yet, so no stamp to read. It is another's when
-//     no create or clone task of this provider's PVE user that could be this
-//     owner's runs on its node: every such task there is the recorded task of
-//     another owner (unrecordedMakeTask). That is how two requests that got
-//     the same VMID from /cluster/nextid end for the one whose request PVE
-//     refused while the other's clone or create was still running. An earlier
-//     attempt for this owner whose answer was lost, or that a provider before
-//     a restart started, runs a task the provider has no record of, and keeps
-//     the outcome unknown. The config is read again after the tasks are
-//     listed: a VM whose task ended in between is judged by its stamp.
+//     name and no description yet, so no stamp to read. It is another's only
+//     when the task that makes it is known: a task this provider recorded
+//     for another owner as making vmid runs on its node, and every other
+//     create or clone task of this provider's PVE user there is the recorded
+//     task of another owner too (no task runs there that could be this
+//     owner's). That is how two requests that got the same VMID from
+//     /cluster/nextid end for the one whose request PVE refused while the
+//     other's clone or create was still running. A temporary config without
+//     such a task proves nothing: qemu-server's create writes its
+//     `lock: create` config before it starts its task, so the config can be
+//     an earlier attempt of this owner whose answer was lost and whose task
+//     is not listed yet. An earlier attempt whose task runs unrecorded (a
+//     lost answer, a provider restart) keeps the outcome unknown too. The
+//     config is read again after the tasks are listed: a VM whose task ended
+//     in between is judged by its stamp.
 //
 // A VMID that turns out free, or a config or task list that cannot be read,
 // proves nothing (false).
@@ -214,13 +219,24 @@ func (p *Provider) vmidTakenByAnother(ctx context.Context, vmid int, stamp *owne
 		if stamp != nil {
 			uid = stamp.owner.UID
 		}
-		if p.unrecordedMakeTask(ctx, node, uid) {
+		tasks, ok := p.ownMakeTasks(ctx, node)
+		if !ok || p.inflight.anyUnrecorded(tasks, uid) {
 			return false
 		}
-		if cfg, err = p.client.GetVMConfig(ctx, node, vmid); err != nil {
+		maker := p.inflight.makerRecordedFor(vmid, uid, tasks)
+		if maker == "" {
+			return false
+		}
+		var nowNode string
+		if nowNode, cfg, err = p.vmNodeConfigAnywhere(ctx, vmid); err != nil {
 			return false
 		}
 		if beingMade(cfg) {
+			if nowNode != node {
+				return false
+			}
+			p.logger.Info("The VMID of a refused create or clone is being made by another owner's task",
+				"vmid", vmid, "node", node, "task", maker)
 			return true
 		}
 	}

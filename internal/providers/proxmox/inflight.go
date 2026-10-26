@@ -167,11 +167,14 @@ func (t *inflightTracker) tracks(vmid int, upid string) bool {
 // than uid (any owner when uid is ""): a task the provider started for that
 // owner.
 func (t *inflightTracker) taskRecordedFor(upid, uid string) bool {
+	if upid == "" {
+		return false
+	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.pruneLocked()
 	for owner, task := range t.byOwner {
-		if upid != "" && task.upid == upid && owner != uid {
+		if task.upid == upid && owner != uid {
 			return true
 		}
 	}
@@ -378,15 +381,54 @@ func (p *Provider) unattributedInflight(ctx context.Context, node string, vmid i
 // provider restart), or for owner uid itself. Any failure to tell (the
 // node's tasks cannot be listed, the PVE user is not known) answers true.
 func (p *Provider) unrecordedMakeTask(ctx context.Context, node, uid string) bool {
+	tasks, ok := p.ownMakeTasks(ctx, node)
+	return !ok || p.inflight.anyUnrecorded(tasks, uid)
+}
+
+// ownMakeTasks lists the clone and create tasks of this provider's PVE user
+// that run on node; ok is false when they cannot be listed or the PVE user
+// is not known.
+func (p *Provider) ownMakeTasks(ctx context.Context, node string) (tasks []pveapi.ActiveTask, ok bool) {
 	me := p.client.Identity()
-	tasks, err := p.client.ListActiveTasks(ctx, node)
+	all, err := p.client.ListActiveTasks(ctx, node)
 	if err != nil || me == "" {
-		return true
+		return nil, false
 	}
-	for _, t := range tasks {
-		if (t.Type == pveTaskTypeClone || t.Type == pveTaskTypeCreate) && t.User == me && !p.inflight.taskRecordedFor(t.UPID, uid) {
+	for _, t := range all {
+		if (t.Type == pveTaskTypeClone || t.Type == pveTaskTypeCreate) && t.User == me {
+			tasks = append(tasks, t)
+		}
+	}
+	return tasks, true
+}
+
+// anyUnrecorded reports whether one of tasks is not the recorded task of an
+// owner other than uid (of any owner when uid is "").
+func (t *inflightTracker) anyUnrecorded(tasks []pveapi.ActiveTask, uid string) bool {
+	for _, task := range tasks {
+		if !t.taskRecordedFor(task.UPID, uid) {
 			return true
 		}
 	}
 	return false
+}
+
+// makerRecordedFor returns the UPID of a task the provider recorded, for an
+// owner other than uid, as making VM vmid, when that task is one of running;
+// "" when there is none.
+func (t *inflightTracker) makerRecordedFor(vmid int, uid string, running []pveapi.ActiveTask) string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.pruneLocked()
+	for owner, task := range t.byOwner {
+		if owner == uid || task.vmid != vmid || task.upid == "" {
+			continue
+		}
+		for _, r := range running {
+			if r.UPID == task.upid {
+				return task.upid
+			}
+		}
+	}
+	return ""
 }

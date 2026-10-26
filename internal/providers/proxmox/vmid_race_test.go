@@ -23,6 +23,7 @@ import (
 	"strconv"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -36,10 +37,11 @@ import (
 // request arrived, and PVE refused that request synchronously ("unable to
 // create VM <vmid>: config file already exists", HTTP 500, no task). The
 // winner's VM is then a temporary config (locked, no name, no description),
-// whose owner cannot be read from it. The refusal is "not performed" when no
-// clone or create task of this provider's PVE user that could be the loser's
-// own runs on the node (the winner's task is recorded for the winner's owner),
-// and stays unknown when the VM may be this owner's.
+// whose owner cannot be read from it. The refusal is "not performed" when the
+// winner's running task is recorded by this provider, for the winner's owner,
+// as making that VMID, and no other clone or create task of this provider's
+// PVE user that could be the loser's own runs on the node; it stays unknown
+// when the VM may be this owner's.
 
 // raceProvider returns a provider whose task waits give up after 50ms, on a
 // fake whose tasks run until CompleteTasks, with a recording SSH node (for
@@ -181,6 +183,21 @@ func TestVMIDRace_SyncRefusalWhileWinnerIsBeingMade(t *testing.T) {
 			assert.NotEqual(t, strconv.Itoa(target()), id, "a new VMID")
 		})
 	}
+}
+
+// TestVMIDRace_WinnersRecordExpired: a winner whose in-flight record expired
+// while its clone still runs is no longer a known maker of the VMID: the
+// refusal stays unknown.
+func TestVMIDRace_WinnersRecordExpired(t *testing.T) {
+	p, srv := raceProvider(t)
+	winnerTakesVMID(t, srv, "/clone", "newid", func(t *testing.T) {
+		winnerClones(p)(t)
+		p.inflight.mu.Lock()
+		p.inflight.now = func() time.Time { return time.Now().Add(time.Hour) }
+		p.inflight.mu.Unlock()
+	})
+	_, err := p.Create(context.Background(), createReq(testOwner(), templateImageJSON))
+	assert.Equal(t, classOutcomeUnknown, classOf(t, err))
 }
 
 // TestVMIDRace_SyncRefusalStaysUnknownWhenTheVMMayBeThisOwners: the VM at the

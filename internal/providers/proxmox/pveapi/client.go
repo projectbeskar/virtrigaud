@@ -973,10 +973,15 @@ type ActiveTask struct {
 	User string `json:"user"`
 }
 
+// activeTasksLimit is the limit ListActiveTasks asks for. PVE lists at most
+// `limit` tasks, 50 by default, also for source=active: a busy node could
+// otherwise leave out one of the caller's own tasks.
+const activeTasksLimit = 100000
+
 // ListActiveTasks lists the tasks still running on node that the caller may
-// see (its own, at least).
+// see (its own, at least), up to activeTasksLimit of them.
 func (c *Client) ListActiveTasks(ctx context.Context, node string) ([]ActiveTask, error) {
-	resp, err := c.request(ctx, "GET", fmt.Sprintf("/api2/json/nodes/%s/tasks?source=active", node), nil)
+	resp, err := c.request(ctx, "GET", fmt.Sprintf("/api2/json/nodes/%s/tasks?source=active&limit=%d", node, activeTasksLimit), nil)
 	if err != nil {
 		return nil, fmt.Errorf("list active tasks of node %s: %w", node, err)
 	}
