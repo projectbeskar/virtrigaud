@@ -594,6 +594,29 @@ of the `endpoint` URI (`qemu+ssh://user@host/system`); **password** auth is not
 inlined either (the clustered model standardizes on key-based SSH with
 `known_hosts` verification, ADR-0004).
 
+### When the Secret is re-rendered
+
+The render runs on every reconcile of the clustered Provider. What starts one,
+and so how quickly a change reaches the provider pod:
+
+| Change | Re-rendered |
+|---|---|
+| A `Host` is created or deleted, or its `spec` (endpoint, `credentialSecretRef`, labels, `providerRef`, `poolRef`), labels, annotations or deletion state changes | At once (the Provider controller watches Hosts) |
+| A `HostPool` of the Provider changes, or the `Provider` itself | At once |
+| The **content of a credential Secret** (`ssh-privatekey`, `known_hosts`) — rotated, or created/fixed for a Host that was withheld | **On the next periodic reconcile**: credential Secrets are not watched; a clustered Provider is requeued every 60 s (nominal) and picks the change up then |
+| A `Host`'s status only (the inventory heartbeat, capacity, health) | Nothing: a status-only change does not reconcile the Provider at all (status is not part of the inventory) |
+
+The credential row is eventually consistent. The 60 s is the nominal requeue
+interval of a healthy clustered Provider, not a propagation deadline: until the
+next reconcile the provider pod keeps the previous key (and a withheld host
+stays withheld), and the end-to-end delay also depends on the Provider
+controller's queue and any error backoff, and on the kubelet's Secret volume
+sync (its sync period and cache, often around a minute), which delivers the
+rewritten file to the provider pod that then hot-reloads it. To start the
+re-render at once, touch the `Host` — set or change any annotation, for example
+`kubectl annotate host <name> -n <namespace> rotated-at="$(date +%s)" --overwrite`;
+the kubelet's sync delay still applies after that.
+
 See [`examples/provider-libvirt-clustered.yaml`](../examples/provider-libvirt-clustered.yaml)
 for a `topology: cluster` Provider that pairs with the `hostpool-clustered.yaml`
 inventory.
@@ -640,7 +663,9 @@ the same way, but surfaced with a separate Warning event
 
 None of these ever carry a credential value — only host ids and coarse reasons.
 This is deliberately **fail-safe, never fail-open**: an unresolvable host is
-withheld until its credentials are fixed (which re-triggers a re-render), rather
+withheld until its credentials are fixed (picked up on the clustered Provider's
+next periodic reconcile, nominally every 60 s, not by a Secret watch; see
+[When the Secret is re-rendered](#when-the-secret-is-re-rendered)), rather
 than shipped in a broken state. `known_hosts` is intentionally **not** required at
 render time — the provider keeps enforcing its ADR-0004 host-key policy (hard-fail
 unless the audit-flagged insecure escape hatch is set) at connect time, so that

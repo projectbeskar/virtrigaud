@@ -5,6 +5,29 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-10-26 11:28] - F4: count a Provider's VMs through an index and ignore Host status writes
+**Author:** @wrkode (William Rizzo)
+
+### Changed
+- `internal/controller/provider_vm_index.go`: new `virtrigaud.io/spec-provider` VirtualMachine field index (the Provider `spec.providerRef` names, an empty namespace being the VM's own) and `hostInventoryChanged`, the Provider controller's Host watch filter.
+- `internal/controller/provider_controller.go`: `countConnectedVMs` (`Provider.status.connectedVMs`) counts through the index — the same `spec.providerRef` semantics, bound or not — instead of listing and deep-copying every VirtualMachine in the cluster. A Host event enqueues its Provider only on create, delete, or a change of the Host's spec (compared directly, not only through generation), labels, annotations, UID or deletion timestamp: the Provider reconcile reads no Host status, so the Host controller's status writes (heartbeat, capacity, health, conditions) no longer re-run it. Those heartbeats were the only thing re-running a healthy clustered Provider, so a clustered Provider now requeues itself every 60 s (`clusteredProviderResync`, the Host heartbeat interval): a fixed Host credential Secret is still rendered on the next periodic reconcile (nominally within a minute) and `connectedVMs` stays current, at one reconcile per Provider per minute instead of one per Host heartbeat. Single-topology Providers are unchanged.
+
+### Added
+- `internal/controller/provider_vm_index_test.go`: the indexed count equals the previous cluster-wide count (own-namespace and cross-namespace references, bound, unbound, deleting, re-pointed VMs), the Host watch filter's enqueue table, and the clustered Provider resync.
+- `internal/controller/provider_resync_envtest_test.go`: against a real apiserver, an unchanged clustered Provider reconcile does not roll the provider Deployment or rewrite the host-inventory Secret, Service or ServiceAccount; a shorter requeue keeps priority over the resync.
+- `docs/clustered-provider-inventory.md`: when the host-inventory Secret is re-rendered; that a credential Secret change alone is picked up on the next periodic reconcile (nominally 60 s, eventually consistent, not an end-to-end deadline), with how to start one at once; and that Host status-only changes do not reconcile the Provider.
+
+### Why
+Spike 1B (F4): every Host heartbeat re-ran its Provider's reconcile, which deep-copied every VirtualMachine in the cluster to count one Provider's: about 36% of the manager's CPU at 100,000 VMs. The count now reads only the Provider's VMs without deep copies (245 ms -> 77 ms per call at 100,000 VMs on one Provider, benchmark) and runs at the Provider's own cadence instead of on every heartbeat.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout (manager image)
+- [ ] Config change only
+- [ ] Documentation only
+
+A clustered Provider is reconciled at least every 60 s and on Provider, Host spec, HostPool and VM-use events, no longer on every Host heartbeat.
+
 ## [2026-10-26 08:47] - Validate a provider connection once, not on every reconcile
 **Author:** @wrkode (William Rizzo)
 
