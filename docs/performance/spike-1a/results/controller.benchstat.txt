@@ -1,0 +1,304 @@
+goos: linux
+goarch: amd64
+pkg: github.com/projectbeskar/virtrigaud/internal/controller
+cpu: Intel(R) Core(TM) i9-10900X CPU @ 3.70GHz
+                                                │ docs/performance/spike-1a/results/controller.txt │
+                                                │                      sec/op                      │
+PlacementScan/h10_v1k/base-20                                                         1.542m ± ∞ ¹
+PlacementScan/h100_v1k/base-20                                                        1.434m ± ∞ ¹
+PlacementScan/h100_v10k/base-20                                                       17.44m ± ∞ ¹
+PlacementScan/h100_v100k/base-20                                                      192.6m ± ∞ ¹
+PlacementScan/h500_v10k/base-20                                                       17.71m ± ∞ ¹
+PlacementScan/h500_v100k/base-20                                                      201.5m ± ∞ ¹
+PlacementScan/h1000_v10k/base-20                                                      17.60m ± ∞ ¹
+PlacementScan/h1000_v100k/base-20                                                     191.2m ± ∞ ¹
+PlacementDecision/h10_v1k/base-20                                                     1.908m ± ∞ ¹
+PlacementDecision/h100_v1k/base-20                                                    2.195m ± ∞ ¹
+PlacementDecision/h100_v10k/base-20                                                   21.19m ± ∞ ¹
+PlacementDecision/h100_v100k/base-20                                                  239.0m ± ∞ ¹
+PlacementDecision/h500_v10k/base-20                                                   21.19m ± ∞ ¹
+PlacementDecision/h500_v100k/base-20                                                  235.0m ± ∞ ¹
+PlacementDecision/h1000_v10k/base-20                                                  21.02m ± ∞ ¹
+PlacementDecision/h1000_v100k/base-20                                                 236.1m ± ∞ ¹
+PlacementDecision/h100_v10k/util-low-20                                               21.29m ± ∞ ¹
+PlacementDecision/h100_v10k/util-high-20                                              20.97m ± ∞ ¹
+PlacementDecision/h100_v10k/hetero-20                                                 21.78m ± ∞ ¹
+PlacementDecision/h100_v10k/binpack-20                                                21.15m ± ∞ ¹
+PlacementDecision/h100_v10k/req-small-20                                              20.86m ± ∞ ¹
+PlacementDecision/h100_v10k/req-large-20                                              21.64m ± ∞ ¹
+PlacementDecision/h100_v10k/unschedulable-20                                          21.10m ± ∞ ¹
+PlacementDecision/h100_v10k/constrained-20                                            20.84m ± ∞ ¹
+PlacementDecision/h100_v10k/affinity-20                                               36.13m ± ∞ ¹
+PlacementDecision/h1000_v100k/util-low-20                                             234.2m ± ∞ ¹
+PlacementDecision/h1000_v100k/util-high-20                                            239.7m ± ∞ ¹
+PlacementDecision/h1000_v100k/hetero-20                                               237.8m ± ∞ ¹
+PlacementDecision/h1000_v100k/binpack-20                                              235.9m ± ∞ ¹
+PlacementDecision/h1000_v100k/req-small-20                                            236.8m ± ∞ ¹
+PlacementDecision/h1000_v100k/req-large-20                                            237.4m ± ∞ ¹
+PlacementDecision/h1000_v100k/unschedulable-20                                        236.3m ± ∞ ¹
+PlacementDecision/h1000_v100k/constrained-20                                          250.6m ± ∞ ¹
+PlacementDecision/h1000_v100k/affinity-20                                             364.9m ± ∞ ¹
+PlacementBreakdown/h10_v1k/base-20                                                    2.066m ± ∞ ¹
+PlacementBreakdown/h100_v1k/base-20                                                   2.145m ± ∞ ¹
+PlacementBreakdown/h100_v10k/base-20                                                  21.42m ± ∞ ¹
+PlacementBreakdown/h100_v100k/base-20                                                 242.8m ± ∞ ¹
+PlacementBreakdown/h500_v10k/base-20                                                  20.96m ± ∞ ¹
+PlacementBreakdown/h500_v100k/base-20                                                 247.7m ± ∞ ¹
+PlacementBreakdown/h1000_v10k/base-20                                                 21.70m ± ∞ ¹
+PlacementBreakdown/h1000_v100k/base-20                                                241.4m ± ∞ ¹
+PlacementBreakdown/h100_v10k/util-low-20                                              21.62m ± ∞ ¹
+PlacementBreakdown/h100_v10k/util-high-20                                             20.93m ± ∞ ¹
+PlacementBreakdown/h100_v10k/hetero-20                                                20.56m ± ∞ ¹
+PlacementBreakdown/h100_v10k/binpack-20                                               21.19m ± ∞ ¹
+PlacementBreakdown/h100_v10k/req-small-20                                             21.92m ± ∞ ¹
+PlacementBreakdown/h100_v10k/req-large-20                                             21.50m ± ∞ ¹
+PlacementBreakdown/h100_v10k/unschedulable-20                                         21.31m ± ∞ ¹
+PlacementBreakdown/h100_v10k/constrained-20                                           22.03m ± ∞ ¹
+PlacementBreakdown/h100_v10k/affinity-20                                              37.67m ± ∞ ¹
+PlacementBreakdown/h1000_v100k/util-low-20                                            244.9m ± ∞ ¹
+PlacementBreakdown/h1000_v100k/util-high-20                                           250.2m ± ∞ ¹
+PlacementBreakdown/h1000_v100k/hetero-20                                              237.3m ± ∞ ¹
+PlacementBreakdown/h1000_v100k/binpack-20                                             252.3m ± ∞ ¹
+PlacementBreakdown/h1000_v100k/req-small-20                                           257.6m ± ∞ ¹
+PlacementBreakdown/h1000_v100k/req-large-20                                           250.6m ± ∞ ¹
+PlacementBreakdown/h1000_v100k/unschedulable-20                                       242.3m ± ∞ ¹
+PlacementBreakdown/h1000_v100k/constrained-20                                         235.4m ± ∞ ¹
+PlacementBreakdown/h1000_v100k/affinity-20                                            366.1m ± ∞ ¹
+geomean                                                                               50.37m
+¹ need >= 6 samples for confidence interval at level 0.95
+
+                                  │ docs/performance/spike-1a/results/controller.txt │
+                                  │                  store-heap-MiB                  │
+PlacementScan/h10_v1k/base-20                                            4.597 ± ∞ ¹
+PlacementScan/h100_v1k/base-20                                           4.755 ± ∞ ¹
+PlacementScan/h100_v10k/base-20                                          18.16 ± ∞ ¹
+PlacementScan/h100_v100k/base-20                                         154.6 ± ∞ ¹
+PlacementScan/h500_v10k/base-20                                          18.87 ± ∞ ¹
+PlacementScan/h500_v100k/base-20                                         156.0 ± ∞ ¹
+PlacementScan/h1000_v10k/base-20                                         19.80 ± ∞ ¹
+PlacementScan/h1000_v100k/base-20                                        157.3 ± ∞ ¹
+geomean                                                                  29.43
+¹ need >= 6 samples for confidence interval at level 0.95
+
+                                                │ docs/performance/spike-1a/results/controller.txt │
+                                                │                       B/op                       │
+PlacementScan/h10_v1k/base-20                                                        1.224Mi ± ∞ ¹
+PlacementScan/h100_v1k/base-20                                                       1.216Mi ± ∞ ¹
+PlacementScan/h100_v10k/base-20                                                      13.22Mi ± ∞ ¹
+PlacementScan/h100_v100k/base-20                                                     133.4Mi ± ∞ ¹
+PlacementScan/h500_v10k/base-20                                                      13.23Mi ± ∞ ¹
+PlacementScan/h500_v100k/base-20                                                     133.4Mi ± ∞ ¹
+PlacementScan/h1000_v10k/base-20                                                     13.22Mi ± ∞ ¹
+PlacementScan/h1000_v100k/base-20                                                    133.4Mi ± ∞ ¹
+PlacementDecision/h10_v1k/base-20                                                    1.574Mi ± ∞ ¹
+PlacementDecision/h100_v1k/base-20                                                   1.576Mi ± ∞ ¹
+PlacementDecision/h100_v10k/base-20                                                  16.16Mi ± ∞ ¹
+PlacementDecision/h100_v100k/base-20                                                 158.5Mi ± ∞ ¹
+PlacementDecision/h500_v10k/base-20                                                  16.19Mi ± ∞ ¹
+PlacementDecision/h500_v100k/base-20                                                 158.4Mi ± ∞ ¹
+PlacementDecision/h1000_v10k/base-20                                                 16.24Mi ± ∞ ¹
+PlacementDecision/h1000_v100k/base-20                                                158.4Mi ± ∞ ¹
+PlacementDecision/h100_v10k/util-low-20                                              16.16Mi ± ∞ ¹
+PlacementDecision/h100_v10k/util-high-20                                             16.16Mi ± ∞ ¹
+PlacementDecision/h100_v10k/hetero-20                                                16.16Mi ± ∞ ¹
+PlacementDecision/h100_v10k/binpack-20                                               16.16Mi ± ∞ ¹
+PlacementDecision/h100_v10k/req-small-20                                             16.16Mi ± ∞ ¹
+PlacementDecision/h100_v10k/req-large-20                                             16.16Mi ± ∞ ¹
+PlacementDecision/h100_v10k/unschedulable-20                                         16.17Mi ± ∞ ¹
+PlacementDecision/h100_v10k/constrained-20                                           16.15Mi ± ∞ ¹
+PlacementDecision/h100_v10k/affinity-20                                              21.55Mi ± ∞ ¹
+PlacementDecision/h1000_v100k/util-low-20                                            158.4Mi ± ∞ ¹
+PlacementDecision/h1000_v100k/util-high-20                                           158.4Mi ± ∞ ¹
+PlacementDecision/h1000_v100k/hetero-20                                              158.4Mi ± ∞ ¹
+PlacementDecision/h1000_v100k/binpack-20                                             158.4Mi ± ∞ ¹
+PlacementDecision/h1000_v100k/req-small-20                                           158.4Mi ± ∞ ¹
+PlacementDecision/h1000_v100k/req-large-20                                           158.4Mi ± ∞ ¹
+PlacementDecision/h1000_v100k/unschedulable-20                                       158.5Mi ± ∞ ¹
+PlacementDecision/h1000_v100k/constrained-20                                         158.4Mi ± ∞ ¹
+PlacementDecision/h1000_v100k/affinity-20                                            213.2Mi ± ∞ ¹
+PlacementBreakdown/h10_v1k/base-20                                                   1.573Mi ± ∞ ¹
+PlacementBreakdown/h100_v1k/base-20                                                  1.575Mi ± ∞ ¹
+PlacementBreakdown/h100_v10k/base-20                                                 16.16Mi ± ∞ ¹
+PlacementBreakdown/h100_v100k/base-20                                                158.5Mi ± ∞ ¹
+PlacementBreakdown/h500_v10k/base-20                                                 16.19Mi ± ∞ ¹
+PlacementBreakdown/h500_v100k/base-20                                                158.4Mi ± ∞ ¹
+PlacementBreakdown/h1000_v10k/base-20                                                16.24Mi ± ∞ ¹
+PlacementBreakdown/h1000_v100k/base-20                                               158.4Mi ± ∞ ¹
+PlacementBreakdown/h100_v10k/util-low-20                                             16.16Mi ± ∞ ¹
+PlacementBreakdown/h100_v10k/util-high-20                                            16.16Mi ± ∞ ¹
+PlacementBreakdown/h100_v10k/hetero-20                                               16.16Mi ± ∞ ¹
+PlacementBreakdown/h100_v10k/binpack-20                                              16.16Mi ± ∞ ¹
+PlacementBreakdown/h100_v10k/req-small-20                                            16.16Mi ± ∞ ¹
+PlacementBreakdown/h100_v10k/req-large-20                                            16.16Mi ± ∞ ¹
+PlacementBreakdown/h100_v10k/unschedulable-20                                        16.17Mi ± ∞ ¹
+PlacementBreakdown/h100_v10k/constrained-20                                          16.15Mi ± ∞ ¹
+PlacementBreakdown/h100_v10k/affinity-20                                             21.55Mi ± ∞ ¹
+PlacementBreakdown/h1000_v100k/util-low-20                                           158.4Mi ± ∞ ¹
+PlacementBreakdown/h1000_v100k/util-high-20                                          158.4Mi ± ∞ ¹
+PlacementBreakdown/h1000_v100k/hetero-20                                             158.4Mi ± ∞ ¹
+PlacementBreakdown/h1000_v100k/binpack-20                                            158.4Mi ± ∞ ¹
+PlacementBreakdown/h1000_v100k/req-small-20                                          158.4Mi ± ∞ ¹
+PlacementBreakdown/h1000_v100k/req-large-20                                          158.4Mi ± ∞ ¹
+PlacementBreakdown/h1000_v100k/unschedulable-20                                      158.5Mi ± ∞ ¹
+PlacementBreakdown/h1000_v100k/constrained-20                                        158.4Mi ± ∞ ¹
+PlacementBreakdown/h1000_v100k/affinity-20                                           213.0Mi ± ∞ ¹
+geomean                                                                              35.50Mi
+¹ need >= 6 samples for confidence interval at level 0.95
+
+                                                │ docs/performance/spike-1a/results/controller.txt │
+                                                │                    allocs/op                     │
+PlacementScan/h10_v1k/base-20                                                         1.123k ± ∞ ¹
+PlacementScan/h100_v1k/base-20                                                        1.099k ± ∞ ¹
+PlacementScan/h100_v10k/base-20                                                       10.49k ± ∞ ¹
+PlacementScan/h100_v100k/base-20                                                      101.2k ± ∞ ¹
+PlacementScan/h500_v10k/base-20                                                       10.50k ± ∞ ¹
+PlacementScan/h500_v100k/base-20                                                      101.2k ± ∞ ¹
+PlacementScan/h1000_v10k/base-20                                                      10.47k ± ∞ ¹
+PlacementScan/h1000_v100k/base-20                                                     101.2k ± ∞ ¹
+PlacementDecision/h10_v1k/base-20                                                     1.186k ± ∞ ¹
+PlacementDecision/h100_v1k/base-20                                                    1.264k ± ∞ ¹
+PlacementDecision/h100_v10k/base-20                                                   10.89k ± ∞ ¹
+PlacementDecision/h100_v100k/base-20                                                  102.6k ± ∞ ¹
+PlacementDecision/h500_v10k/base-20                                                   11.32k ± ∞ ¹
+PlacementDecision/h500_v100k/base-20                                                  104.0k ± ∞ ¹
+PlacementDecision/h1000_v10k/base-20                                                  11.83k ± ∞ ¹
+PlacementDecision/h1000_v100k/base-20                                                 104.8k ± ∞ ¹
+PlacementDecision/h100_v10k/util-low-20                                               10.89k ± ∞ ¹
+PlacementDecision/h100_v10k/util-high-20                                              10.89k ± ∞ ¹
+PlacementDecision/h100_v10k/hetero-20                                                 10.89k ± ∞ ¹
+PlacementDecision/h100_v10k/binpack-20                                                10.89k ± ∞ ¹
+PlacementDecision/h100_v10k/req-small-20                                              10.89k ± ∞ ¹
+PlacementDecision/h100_v10k/req-large-20                                              10.89k ± ∞ ¹
+PlacementDecision/h100_v10k/unschedulable-20                                          11.39k ± ∞ ¹
+PlacementDecision/h100_v10k/constrained-20                                            10.81k ± ∞ ¹
+PlacementDecision/h100_v10k/affinity-20                                               98.24k ± ∞ ¹
+PlacementDecision/h1000_v100k/util-low-20                                             104.8k ± ∞ ¹
+PlacementDecision/h1000_v100k/util-high-20                                            104.8k ± ∞ ¹
+PlacementDecision/h1000_v100k/hetero-20                                               104.7k ± ∞ ¹
+PlacementDecision/h1000_v100k/binpack-20                                              104.8k ± ∞ ¹
+PlacementDecision/h1000_v100k/req-small-20                                            104.8k ± ∞ ¹
+PlacementDecision/h1000_v100k/req-large-20                                            104.8k ± ∞ ¹
+PlacementDecision/h1000_v100k/unschedulable-20                                        109.8k ± ∞ ¹
+PlacementDecision/h1000_v100k/constrained-20                                          104.0k ± ∞ ¹
+PlacementDecision/h1000_v100k/affinity-20                                             987.6k ± ∞ ¹
+PlacementBreakdown/h10_v1k/base-20                                                    1.177k ± ∞ ¹
+PlacementBreakdown/h100_v1k/base-20                                                   1.255k ± ∞ ¹
+PlacementBreakdown/h100_v10k/base-20                                                  10.88k ± ∞ ¹
+PlacementBreakdown/h100_v100k/base-20                                                 102.6k ± ∞ ¹
+PlacementBreakdown/h500_v10k/base-20                                                  11.31k ± ∞ ¹
+PlacementBreakdown/h500_v100k/base-20                                                 104.0k ± ∞ ¹
+PlacementBreakdown/h1000_v10k/base-20                                                 11.82k ± ∞ ¹
+PlacementBreakdown/h1000_v100k/base-20                                                104.8k ± ∞ ¹
+PlacementBreakdown/h100_v10k/util-low-20                                              10.88k ± ∞ ¹
+PlacementBreakdown/h100_v10k/util-high-20                                             10.88k ± ∞ ¹
+PlacementBreakdown/h100_v10k/hetero-20                                                10.88k ± ∞ ¹
+PlacementBreakdown/h100_v10k/binpack-20                                               10.88k ± ∞ ¹
+PlacementBreakdown/h100_v10k/req-small-20                                             10.88k ± ∞ ¹
+PlacementBreakdown/h100_v10k/req-large-20                                             10.88k ± ∞ ¹
+PlacementBreakdown/h100_v10k/unschedulable-20                                         11.38k ± ∞ ¹
+PlacementBreakdown/h100_v10k/constrained-20                                           10.80k ± ∞ ¹
+PlacementBreakdown/h100_v10k/affinity-20                                              98.27k ± ∞ ¹
+PlacementBreakdown/h1000_v100k/util-low-20                                            104.8k ± ∞ ¹
+PlacementBreakdown/h1000_v100k/util-high-20                                           104.8k ± ∞ ¹
+PlacementBreakdown/h1000_v100k/hetero-20                                              104.7k ± ∞ ¹
+PlacementBreakdown/h1000_v100k/binpack-20                                             104.8k ± ∞ ¹
+PlacementBreakdown/h1000_v100k/req-small-20                                           104.8k ± ∞ ¹
+PlacementBreakdown/h1000_v100k/req-large-20                                           104.8k ± ∞ ¹
+PlacementBreakdown/h1000_v100k/unschedulable-20                                       109.8k ± ∞ ¹
+PlacementBreakdown/h1000_v100k/constrained-20                                         104.0k ± ∞ ¹
+PlacementBreakdown/h1000_v100k/affinity-20                                            983.7k ± ∞ ¹
+geomean                                                                               28.07k
+¹ need >= 6 samples for confidence interval at level 0.95
+
+                                                │ docs/performance/spike-1a/results/controller.txt │
+                                                │                      scan-%                      │
+PlacementBreakdown/h10_v1k/base-20                                                     79.54 ± ∞ ¹
+PlacementBreakdown/h100_v1k/base-20                                                    77.15 ± ∞ ¹
+PlacementBreakdown/h100_v10k/base-20                                                   80.72 ± ∞ ¹
+PlacementBreakdown/h100_v100k/base-20                                                  78.80 ± ∞ ¹
+PlacementBreakdown/h500_v10k/base-20                                                   79.84 ± ∞ ¹
+PlacementBreakdown/h500_v100k/base-20                                                  80.13 ± ∞ ¹
+PlacementBreakdown/h1000_v10k/base-20                                                  83.48 ± ∞ ¹
+PlacementBreakdown/h1000_v100k/base-20                                                 77.10 ± ∞ ¹
+PlacementBreakdown/h100_v10k/util-low-20                                               79.42 ± ∞ ¹
+PlacementBreakdown/h100_v10k/util-high-20                                              80.08 ± ∞ ¹
+PlacementBreakdown/h100_v10k/hetero-20                                                 81.31 ± ∞ ¹
+PlacementBreakdown/h100_v10k/binpack-20                                                80.17 ± ∞ ¹
+PlacementBreakdown/h100_v10k/req-small-20                                              79.41 ± ∞ ¹
+PlacementBreakdown/h100_v10k/req-large-20                                              79.60 ± ∞ ¹
+PlacementBreakdown/h100_v10k/unschedulable-20                                          79.40 ± ∞ ¹
+PlacementBreakdown/h100_v10k/constrained-20                                            80.61 ± ∞ ¹
+PlacementBreakdown/h100_v10k/affinity-20                                               39.26 ± ∞ ¹
+PlacementBreakdown/h1000_v100k/util-low-20                                             77.78 ± ∞ ¹
+PlacementBreakdown/h1000_v100k/util-high-20                                            79.80 ± ∞ ¹
+PlacementBreakdown/h1000_v100k/hetero-20                                               78.14 ± ∞ ¹
+PlacementBreakdown/h1000_v100k/binpack-20                                              76.09 ± ∞ ¹
+PlacementBreakdown/h1000_v100k/req-small-20                                            77.75 ± ∞ ¹
+PlacementBreakdown/h1000_v100k/req-large-20                                            77.44 ± ∞ ¹
+PlacementBreakdown/h1000_v100k/unschedulable-20                                        79.68 ± ∞ ¹
+PlacementBreakdown/h1000_v100k/constrained-20                                          77.37 ± ∞ ¹
+PlacementBreakdown/h1000_v100k/affinity-20                                             52.82 ± ∞ ¹
+geomean                                                                                75.89
+¹ need >= 6 samples for confidence interval at level 0.95
+
+                                                │ docs/performance/spike-1a/results/controller.txt │
+                                                │                   scan-sec/op                    │
+PlacementBreakdown/h10_v1k/base-20                                                    1.641m ± ∞ ¹
+PlacementBreakdown/h100_v1k/base-20                                                   1.655m ± ∞ ¹
+PlacementBreakdown/h100_v10k/base-20                                                  17.29m ± ∞ ¹
+PlacementBreakdown/h100_v100k/base-20                                                 191.4m ± ∞ ¹
+PlacementBreakdown/h500_v10k/base-20                                                  16.71m ± ∞ ¹
+PlacementBreakdown/h500_v100k/base-20                                                 194.2m ± ∞ ¹
+PlacementBreakdown/h1000_v10k/base-20                                                 17.90m ± ∞ ¹
+PlacementBreakdown/h1000_v100k/base-20                                                187.0m ± ∞ ¹
+PlacementBreakdown/h100_v10k/util-low-20                                              17.13m ± ∞ ¹
+PlacementBreakdown/h100_v10k/util-high-20                                             16.75m ± ∞ ¹
+PlacementBreakdown/h100_v10k/hetero-20                                                16.65m ± ∞ ¹
+PlacementBreakdown/h100_v10k/binpack-20                                               17.19m ± ∞ ¹
+PlacementBreakdown/h100_v10k/req-small-20                                             17.36m ± ∞ ¹
+PlacementBreakdown/h100_v10k/req-large-20                                             17.13m ± ∞ ¹
+PlacementBreakdown/h100_v10k/unschedulable-20                                         16.87m ± ∞ ¹
+PlacementBreakdown/h100_v10k/constrained-20                                           17.81m ± ∞ ¹
+PlacementBreakdown/h100_v10k/affinity-20                                              14.70m ± ∞ ¹
+PlacementBreakdown/h1000_v100k/util-low-20                                            190.2m ± ∞ ¹
+PlacementBreakdown/h1000_v100k/util-high-20                                           199.7m ± ∞ ¹
+PlacementBreakdown/h1000_v100k/hetero-20                                              185.5m ± ∞ ¹
+PlacementBreakdown/h1000_v100k/binpack-20                                             192.0m ± ∞ ¹
+PlacementBreakdown/h1000_v100k/req-small-20                                           192.5m ± ∞ ¹
+PlacementBreakdown/h1000_v100k/req-large-20                                           196.7m ± ∞ ¹
+PlacementBreakdown/h1000_v100k/unschedulable-20                                       192.2m ± ∞ ¹
+PlacementBreakdown/h1000_v100k/constrained-20                                         182.1m ± ∞ ¹
+PlacementBreakdown/h1000_v100k/affinity-20                                            192.6m ± ∞ ¹
+geomean                                                                               43.35m
+¹ need >= 6 samples for confidence interval at level 0.95
+
+                                                │ docs/performance/spike-1a/results/controller.txt │
+                                                │                 schedule-sec/op                  │
+PlacementBreakdown/h10_v1k/base-20                                                    424.9µ ± ∞ ¹
+PlacementBreakdown/h100_v1k/base-20                                                   490.0µ ± ∞ ¹
+PlacementBreakdown/h100_v10k/base-20                                                  4.129m ± ∞ ¹
+PlacementBreakdown/h100_v100k/base-20                                                 51.48m ± ∞ ¹
+PlacementBreakdown/h500_v10k/base-20                                                  4.190m ± ∞ ¹
+PlacementBreakdown/h500_v100k/base-20                                                 51.10m ± ∞ ¹
+PlacementBreakdown/h1000_v10k/base-20                                                 3.604m ± ∞ ¹
+PlacementBreakdown/h1000_v100k/base-20                                                56.22m ± ∞ ¹
+PlacementBreakdown/h100_v10k/util-low-20                                              4.396m ± ∞ ¹
+PlacementBreakdown/h100_v10k/util-high-20                                             4.172m ± ∞ ¹
+PlacementBreakdown/h100_v10k/hetero-20                                                4.037m ± ∞ ¹
+PlacementBreakdown/h100_v10k/binpack-20                                               4.176m ± ∞ ¹
+PlacementBreakdown/h100_v10k/req-small-20                                             4.562m ± ∞ ¹
+PlacementBreakdown/h100_v10k/req-large-20                                             4.287m ± ∞ ¹
+PlacementBreakdown/h100_v10k/unschedulable-20                                         4.410m ± ∞ ¹
+PlacementBreakdown/h100_v10k/constrained-20                                           4.412m ± ∞ ¹
+PlacementBreakdown/h100_v10k/affinity-20                                              22.73m ± ∞ ¹
+PlacementBreakdown/h1000_v100k/util-low-20                                            55.38m ± ∞ ¹
+PlacementBreakdown/h1000_v100k/util-high-20                                           50.25m ± ∞ ¹
+PlacementBreakdown/h1000_v100k/hetero-20                                              52.21m ± ∞ ¹
+PlacementBreakdown/h1000_v100k/binpack-20                                             56.08m ± ∞ ¹
+PlacementBreakdown/h1000_v100k/req-small-20                                           57.45m ± ∞ ¹
+PlacementBreakdown/h1000_v100k/req-large-20                                           54.65m ± ∞ ¹
+PlacementBreakdown/h1000_v100k/unschedulable-20                                       51.92m ± ∞ ¹
+PlacementBreakdown/h1000_v100k/constrained-20                                         53.25m ± ∞ ¹
+PlacementBreakdown/h1000_v100k/affinity-20                                            176.3m ± ∞ ¹
+geomean                                                                               12.82m
+¹ need >= 6 samples for confidence interval at level 0.95

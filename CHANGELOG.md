@@ -5,6 +5,29 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-10-25 15:10] - Spike 1A: scheduler performance and contention baseline (benchmarks and report)
+**Author:** @wrkode (William Rizzo)
+
+### Added
+- `internal/scheduler/schedbench/`: deterministic, test-only fixtures (Hosts, HostPool, VMClasses, placed VirtualMachines) and the scenario matrix for the scheduler benchmarks; no binary imports it.
+- `internal/scheduler/schedule_bench_test.go`, `internal/scheduler/export_bench_test.go`: `Schedule` and its index / filter / score phases benchmarked through a test-only seam.
+- `internal/controller/placement_bench_test.go`, `placement_bench_seam_test.go`: the real `scheduleUnderLock` / `committedPlacementsFrom` / assume-cache path benchmarked over client-go's informer store, plus a contention harness (1-16 workers, 1-8 Providers).
+- `internal/controller/placement_bench_correctness_test.go`: the harness never overbooks a host, keeps Provider partitions isolated, makes no decision without the lock, and reads what the fake client reads.
+- `internal/controller/placement_bench_envtest_test.go` (build tag `schedbench_envtest`): seam fidelity against a real informer cache.
+- `hack/bench/spike1a.sh`: runs the benchmarks, profiles and summaries.
+- `docs/performance/spike-1a-scheduler-baseline.md`, `docs/performance/spike-1a/results/`: the report and its benchmark output, benchstat summaries and profiles.
+
+### Why
+Before choosing a scheduling architecture for a large clustered Cloud Hypervisor provider, the existing scheduler needed a measured baseline: a placement decision costs O(VMs) (about 236 ms at 100,000 VMs) and is dominated by rebuilding committed placements, not by filtering or scoring.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
+Tests and benchmarks only; no production code changed. The correctness tests run in `make test` (about 12 s with `-race`).
+
 ## [2026-10-25 12:30] - Command-line tools fixed for v0.4.0 (GA)
 **Author:** @wrkode (William Rizzo)
 

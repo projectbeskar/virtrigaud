@@ -1,0 +1,24 @@
+File: controller-c.test
+Build ID: 302f14bf985fbc5be1442bb1a25cd8e738b9ef8e
+Type: delay
+Time: 2026-10-25 14:49:42 UTC
+Showing nodes accounting for 1893.44s, 100% of 1893.44s total
+Dropped 11 nodes (cum <= 9.47s)
+      flat  flat%   sum%        cum   cum%
+  1389.28s 73.37% 73.37%   1389.28s 73.37%  runtime.selectgo
+   409.69s 21.64% 95.01%    409.69s 21.64%  runtime.chanrecv1
+    94.46s  4.99%   100%     94.46s  4.99%  sync.(*WaitGroup).Wait
+         0     0%   100%    204.83s 10.82%  github.com/projectbeskar/virtrigaud/internal/controller.BenchmarkPlacementContention
+         0     0%   100%     94.46s  4.99%  github.com/projectbeskar/virtrigaud/internal/controller.BenchmarkPlacementContention.func1
+         0     0%   100%     94.46s  4.99%  github.com/projectbeskar/virtrigaud/internal/controller.runContention
+         0     0%   100%   1389.28s 73.37%  github.com/projectbeskar/virtrigaud/internal/controller.runContention.func1
+         0     0%   100%   1389.28s 73.37%  github.com/projectbeskar/virtrigaud/internal/scheduler/assume.(*Cache).LockWithin
+         0     0%   100%    204.86s 10.82%  main.main
+         0     0%   100%    204.86s 10.82%  runtime.main
+         0     0%   100%    409.67s 21.64%  testing.(*B).Run
+         0     0%   100%    409.67s 21.64%  testing.(*B).run1
+         0     0%   100%    299.30s 15.81%  testing.(*B).run1.func1
+         0     0%   100%    504.13s 26.63%  testing.(*B).runN
+         0     0%   100%    204.86s 10.82%  testing.(*M).Run
+         0     0%   100%    204.84s 10.82%  testing.runBenchmarks
+         0     0%   100%    204.84s 10.82%  testing.runBenchmarks.func1
