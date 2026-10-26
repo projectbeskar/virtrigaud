@@ -20,6 +20,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -44,6 +45,9 @@ type S3Storage struct {
 	client *minio.Client
 	bucket string
 	secure bool
+	// endpoint is the endpoint as configured (empty: AWS's default). It is
+	// kept only to redact it from error texts (redactCause).
+	endpoint string
 }
 
 // NewS3Storage creates an S3 storage backend from config. Credentials come from
@@ -101,7 +105,7 @@ func NewS3Storage(config StorageConfig) (*S3Storage, error) {
 		}
 	}
 
-	return &S3Storage{client: client, bucket: s3cfg.Bucket, secure: secure}, nil
+	return &S3Storage{client: client, bucket: s3cfg.Bucket, secure: secure, endpoint: s3cfg.Endpoint}, nil
 }
 
 // parseS3Endpoint splits an endpoint URL into the host:port minio expects and a
@@ -116,9 +120,11 @@ func parseS3Endpoint(endpoint string) (host string, secure bool, err error) {
 		// Bare host[:port] — default to TLS.
 		return endpoint, true, nil
 	}
-	u, perr := url.Parse(endpoint)
-	if perr != nil {
-		return "", false, fmt.Errorf("invalid s3 endpoint %q: %w", endpoint, perr)
+	u, err := url.Parse(endpoint)
+	if err != nil {
+		// Neither the endpoint nor the parser's error (which quotes it) is
+		// echoed: it names the tenant's storage (R28).
+		return "", false, errors.New("invalid s3 endpoint: not a URL")
 	}
 	switch u.Scheme {
 	case "http":
@@ -128,6 +134,15 @@ func parseS3Endpoint(endpoint string) (host string, secure bool, err error) {
 	default:
 		return "", false, fmt.Errorf("unsupported s3 endpoint scheme %q (use http or https)", u.Scheme)
 	}
+}
+
+// redactCause returns err with the URLs in its text, the bucket, the object
+// key and the endpoint redacted (RedactError): a minio-go error quotes the
+// request URL and dials the endpoint's host by name. Its chain is err's. The
+// error messages of S3Storage name neither the bucket nor the key (R28): they
+// locate the tenant's staging storage.
+func (s *S3Storage) redactCause(err error, key string) error {
+	return RedactError(err, append(S3EndpointLocations(s.endpoint), s.bucket, key)...)
 }
 
 // parseS3Key extracts the object key from an "s3://bucket/key" URL or a bare
@@ -143,7 +158,7 @@ func (s *S3Storage) parseS3Key(rawURL string) (string, error) {
 	parts := strings.SplitN(raw, "/", 2)
 	if parts[0] == s.bucket {
 		if len(parts) < 2 || parts[1] == "" {
-			return "", &StorageError{Type: ErrorTypeInvalidConfig, Message: "s3 URL has no object key: " + rawURL}
+			return "", &StorageError{Type: ErrorTypeInvalidConfig, Message: "s3 URL has no object key"}
 		}
 		return parts[1], nil
 	}
@@ -183,8 +198,8 @@ func (s *S3Storage) UploadStream(ctx context.Context, req StreamUploadRequest) (
 	if err != nil {
 		return UploadResponse{}, &StorageError{
 			Type:    ErrorTypeOperationFailed,
-			Message: fmt.Sprintf("S3 upload failed: s3://%s/%s", s.bucket, key),
-			Cause:   err,
+			Message: "S3 upload failed",
+			Cause:   s.redactCause(err, key),
 		}
 	}
 
@@ -212,8 +227,8 @@ func (s *S3Storage) DownloadStream(ctx context.Context, req StreamDownloadReques
 	if err != nil {
 		return DownloadResponse{}, &StorageError{
 			Type:    ErrorTypeOperationFailed,
-			Message: fmt.Sprintf("S3 GetObject failed: s3://%s/%s", s.bucket, key),
-			Cause:   err,
+			Message: "S3 GetObject failed",
+			Cause:   s.redactCause(err, key),
 		}
 	}
 	defer func() { _ = obj.Close() }()
@@ -225,8 +240,8 @@ func (s *S3Storage) DownloadStream(ctx context.Context, req StreamDownloadReques
 	if err != nil {
 		return DownloadResponse{}, &StorageError{
 			Type:    ErrorTypeNetworkError,
-			Message: fmt.Sprintf("S3 download failed: s3://%s/%s", s.bucket, key),
-			Cause:   err,
+			Message: "S3 download failed",
+			Cause:   s.redactCause(err, key),
 		}
 	}
 
@@ -299,8 +314,8 @@ func (s *S3Storage) Delete(ctx context.Context, rawURL string) error {
 	if err := s.client.RemoveObject(ctx, s.bucket, key, minio.RemoveObjectOptions{}); err != nil {
 		return &StorageError{
 			Type:    ErrorTypeOperationFailed,
-			Message: fmt.Sprintf("S3 delete failed: s3://%s/%s", s.bucket, key),
-			Cause:   err,
+			Message: "S3 delete failed",
+			Cause:   s.redactCause(err, key),
 		}
 	}
 	return nil
@@ -319,10 +334,10 @@ func (s *S3Storage) RemoveObjectIfExists(ctx context.Context, key string) (bool,
 		if minio.ToErrorResponse(err).StatusCode == http.StatusNotFound {
 			return false, nil
 		}
-		return false, &StorageError{Type: ErrorTypeOperationFailed, Message: "S3 stat of the object to delete failed", Cause: err}
+		return false, &StorageError{Type: ErrorTypeOperationFailed, Message: "S3 stat of the object to delete failed", Cause: s.redactCause(err, key)}
 	}
 	if err := s.client.RemoveObject(ctx, s.bucket, key, minio.RemoveObjectOptions{}); err != nil {
-		return false, &StorageError{Type: ErrorTypeOperationFailed, Message: "S3 delete failed", Cause: err}
+		return false, &StorageError{Type: ErrorTypeOperationFailed, Message: "S3 delete failed", Cause: s.redactCause(err, key)}
 	}
 	return true, nil
 }
@@ -337,8 +352,8 @@ func (s *S3Storage) GetMetadata(ctx context.Context, rawURL string) (FileMetadat
 	if err != nil {
 		return FileMetadata{}, &StorageError{
 			Type:    ErrorTypeNotFound,
-			Message: fmt.Sprintf("S3 stat failed: s3://%s/%s", s.bucket, key),
-			Cause:   err,
+			Message: "S3 stat failed",
+			Cause:   s.redactCause(err, key),
 		}
 	}
 	return FileMetadata{
