@@ -208,6 +208,31 @@ minutes for as long as the `VMSnapshot` exists, with the same condition and the
 `VMMigration` is unchanged: "not performed" fails the attempt, and the retry policy
 decides.
 
+**A `VirtualMachine` create the provider refuses is sent again with a backoff (v0.4.1).** A
+`Create` answered `InvalidArgument` (`InvalidSpec`) is definite: the marker is cleared and the
+VM shows `Ready=False` and `Provisioning=False` with reason `ValidationError` and the provider's
+detail. It is sent again after 30 seconds, doubling to 10 minutes, and nothing is sent to the
+provider meanwhile (a libvirt `Create` copies the base image before libvirt refuses the
+definition, so each re-send copied the image again). The condition message names the next
+re-check (`re-checking in 4m0s, at <time>`). An edit of the VM's spec or of the spec of its
+`VMClass`, `VMImage` or `Provider` sends it again within seconds and starts the backoff again,
+as does a refusal with another message. The backoff is kept in the manager's memory and
+recovered from the condition after a manager restart. An answer to the manager's own re-send
+(the marker kept, above) is recorded on `Ready` only and is paced the same way. The other
+definite refusals a `Create` can get - `NotFound`, `Unimplemented` (`NotSupported`), and a typed
+`Unauthorized` or `QuotaExceeded` - were re-sent every 5 seconds and follow the same backoff
+now, on a single host and on a clustered Provider; they keep their reason (`ProviderError`)
+and their condition (`Provisioning`, or `Ready` for an answer to a re-send), and their message
+reads `Failed to create VM (non-retryable; re-checking in ...): <detail>`. A `Conflict`
+(`AlreadyExists`) keeps its 2-minute re-check, an untyped `FailedPrecondition` or
+`PermissionDenied` keeps the `CreateRefused` backoff (15 seconds doubling to 5 minutes), and a
+"not performed" answer and every failure whose outcome is unknown keep their cadence. (A typed
+`Unauthorized` or `QuotaExceeded` comes only from the manager's own code; a remote provider's
+`Unauthenticated` or `ResourceExhausted` is untyped and keeps the 5-second cadence.) After a
+manager restart the wait is read back from the condition that holds the answer to the latest
+`Create`: `Provisioning` when it is False, `Ready` while `Provisioning` is the create marker. See
+[A refused VM create is retried with a backoff](upgrading.md#a-refused-vm-create-is-retried-with-a-backoff).
+
 **`SnapshotRevert`** carries no marker, but the libvirt provider answers it the same way
 from v0.4.1 (single-host and clustered): "not performed" before the revert ran, a terminal
 answer when libvirt refused or failed it, and "outcome unknown: retry" when it may have

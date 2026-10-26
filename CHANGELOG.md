@@ -5,6 +5,53 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-10-26 06:27] - Every definite create refusal is paced; no panic for a Provider without status.runtime
+**Author:** @wrkode (William Rizzo)
+
+### Fixed
+- `internal/controller/virtualmachine_controller.go`: reconciling a VM whose `Provider` has no `status.runtime` yet (not reconciled by the Provider controller) dereferenced the nil pointer in a log line and panicked (recovered, rate-limited retry). The log values now come from `providerRuntimeState`; the VM gets the usual "cannot reach this VirtualMachine's Provider" condition. The Provider controller initialises the field before its own dereferences and the remote resolver checks it; no other unguarded dereference in `internal/` or `cmd/`.
+
+### Changed
+- `internal/controller/virtualmachine_create_refusal.go`, `internal/controller/virtualmachine_controller.go`, `internal/controller/virtualmachine_clustered.go`: a `Create` answered `NotFound`, `NotSupported` (gRPC `Unimplemented`), or a typed `Unauthorized` or `QuotaExceeded` (single-host and clustered) was re-sent every 5 s; it now follows the create-refusal backoff (30 s doubling to 10 min; started again by a spec change of the VM, its VMClass, VMImage or Provider, which are watched, of its networks, picked up at the next re-check, or by a refusal with another message), keeping its reason (`ProviderError`) and condition (`Provisioning`, or `Ready` for an answer to a re-send). Its message was `Failed to create VM: <detail>` and is now `Failed to create VM (non-retryable; re-checking in <wait>, at <time>, or at once when the VirtualMachine, its VMClass, VMImage or Provider changes): <detail>`; it is recovered after a restart from the condition holding the answer to the latest Create (`Provisioning` when it is False, `Ready` while `Provisioning` is the create marker), so an older refusal on `Ready` is never read back, and such a VM is in the `virtrigaud.io/create-refusal-ref` index. Unchanged: `Conflict`, the untyped `FailedPrecondition`/`PermissionDenied` `CreateRefused` backoff, `VM_DISK_CHECK_FAILED`/`VM_OPERATION_FAILED`, `CREATE_NOT_PERFORMED`, and every retryable or unknown outcome. Typed `Unauthorized`/`QuotaExceeded` come only from in-process code: over gRPC, `PermissionDenied` keeps `CreateRefused` and `Unauthenticated`/`ResourceExhausted` stay untyped on the 5 s cadence.
+- `internal/controller/image_prepare_backoff.go`, `internal/controller/virtualmachine_image_prepare.go`: an `ImagePrepare` refused with `NotFound`, `NotSupported`, an untyped `PermissionDenied`, or a typed `Unauthorized` or `QuotaExceeded` (was re-sent every 5 s by each VM using the image) is paced by the `source-rejected` backoff; the VMImage status is not changed for these.
+- `docs/upgrading.md`, `docs/provider-call-outcomes.md`: the paced refusals and the panic fix.
+- `docs/libvirt-firmware.md`, `docs/upgrading.md`: a libvirt definition refusal (from the secure boot / UEFI change) is re-checked with the create-refusal backoff, not every 30 seconds; the message example shows the next re-check.
+
+### Added
+- `internal/controller/virtualmachine_provider_runtime_test.go`: a reconcile against a Provider without `status.runtime` does not panic (resolver failing and succeeding).
+- `internal/controller/virtualmachine_create_refusal_paced_test.go`: which answers are paced and which are not; each paced answer backs off with its reason and condition kept and retries at once on a spec change; restart recovery from `Provisioning`; an answer to a re-send records `Ready` only; the clustered path; the index; transient failures keep 5 s; image prepare refusals are paced and leave the VMImage status alone.
+
+### Why
+A refusal that cannot change until something is edited was re-sent every 5 seconds forever; if a provider returns one after work on the host (a libvirt create copies the base image first), each re-send repeats that work. A Provider created a moment before its VMs made every VM reconcile panic until the Provider controller caught up.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
+## [2026-10-26 03:00] - A refused VM create is retried with a backoff, and at once when its VMClass, VMImage, Provider or spec changes
+**Author:** @wrkode (William Rizzo)
+
+### Changed
+- `internal/controller/virtualmachine_create_refusal.go` (new), `internal/controller/virtualmachine_controller.go`, `internal/controller/virtualmachine_clustered.go`: a `Create` the provider refuses as an invalid specification (`InvalidSpec`, `Ready=False`/`Provisioning=False` reason `ValidationError`) is no longer sent again every 30 seconds. It is sent again after 30 s, doubling to 10 min; nothing is sent to the provider while the wait runs (no image prepare, placement or `Create`, also when another event reconciles the VM). The wait is per VM, in the manager's memory, and recovered after a manager restart from the `Ready` message (a re-check that passed while no manager ran is sent at once and the backoff goes on), which now names the wait and the time of the next re-check (`Provider rejected VM create (non-retryable; re-checking in 4m0s, at <RFC 3339 time>, or at once when the VirtualMachine, its VMClass, VMImage or Provider changes): <detail>`, was `re-checking every 30s`). A change of the VM's generation, of the UID or generation of its `Provider`, `VMClass`, `VMImage` or network attachments, or a refusal with another message starts the backoff again from 30 s (an ended run is kept, so the old message is not read back as a wait). The controller now watches spec changes (generation) of `Provider`, `VMClass` and `VMImage` and re-drives, through a new cache index (`virtrigaud.io/create-refusal-ref`) of VMs with no `status.id` and a `ValidationError` on `Ready` or `Provisioning` (or `Ready=False/WaitingForDependencies`), only the VMs that reference the changed object, so an edit retries within seconds (also for a VM refused before any provider call, which keeps its 30 s re-check). A `Conflict` keeps its fixed 2-minute re-check and message.
+- `internal/controller/image_prepare_backoff.go`, `internal/controller/virtualmachine_image_prepare.go`: an `ImagePrepare` whose source the provider refuses (`InvalidSpec`, `VMImage` `InvalidSource`) is paced by a new `source-rejected` backoff kind (30 s doubling to 10 min, per VMImage, Provider (UID and generation) and `spec.source` digest, in memory; the VM is requeued when the wait ends). Before, the held entry records no source digest, so nothing held it and the prepare was sent again on every 30-second re-check of each VM using the image; the libvirt provider prepares synchronously and can download the whole image before refusing it (checksum mismatch, unreadable or unsupported image).
+- `docs/upgrading.md`: new v0.4.1 section "A refused VM create is retried with a backoff"; the libvirt create-from-URL and Proxmox seed notes no longer say "re-checked every 30 seconds".
+- `docs/provider-call-outcomes.md`, `docs/image-preparation.md`: the backoff of a refused create and of a refused image source.
+
+### Added
+- `internal/controller/virtualmachine_create_refusal_test.go`: the waits grow and cap; nothing is sent while a wait runs; a VM, VMClass or Provider spec change and a new refusal message start again at once; restart recovery (and a v0.4.0 message sent once); a created VM forgets its run; a reset is not undone by the old condition when the reconcile stops before the Create; a restart past the re-check continues the run; a `Conflict` is unchanged; the index and map function select only refused VMs; the spec-change predicate; a refused image source is not prepared again until its wait ends or `spec.source` or the Provider spec changes, and carries its wait for the VM requeue.
+- `internal/controller/virtualmachine_create_refusal_envtest_test.go`: with a running manager, a refused create is sent once and retried within seconds of a `VMClass`, `VMImage`, `Provider` or VM spec edit, and not on a `Provider` status update; a rejected image source is prepared once, held, and prepared again within seconds of a `spec.source` edit.
+
+### Why
+For libvirt each re-send of a refused create copied the base image (gigabytes) and removed it again, every 30 seconds for as long as the VM existed; a refused image source could be downloaded again just as often. The answer can only change when something it depends on changes, so the re-checks back off and the changes that can fix it retry at once.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-10-26 01:27] - libvirt: secure boot, UEFI, VT-d, nested virtualization and multi-NIC domains are valid; a refused definition is a validation error and leaves no disk
 **Author:** @wrkode (William Rizzo)
 

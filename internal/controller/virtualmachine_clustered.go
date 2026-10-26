@@ -226,11 +226,12 @@ func promotePendingHost(vm *infravirtrigaudiov1beta1.VirtualMachine, host string
 //     (D8, report-only).
 //   - Anything else — including a provider-level Unavailable — sets
 //     Placed=False/CreatePending and then takes the unchanged rejected /
-//     transient create handling.
+//     transient create handling; inputs are the request's
+//     createRefusalInputs, for the backoff of an InvalidSpec refusal.
 func (r *VirtualMachineReconciler) handleClusteredCreateError(
 	ctx context.Context,
 	vm *infravirtrigaudiov1beta1.VirtualMachine,
-	host string,
+	host, inputs string,
 	err error,
 ) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
@@ -283,13 +284,19 @@ func (r *VirtualMachineReconciler) handleClusteredCreateError(
 
 	setPlacedCondition(vm, metav1.ConditionFalse, k8s.ReasonCreatePending,
 		fmt.Sprintf("create on host %s is not confirmed: %s", host, msg))
-	if res, handled := r.handleRejectedCreate(ctx, vm, err, false); handled {
+	if res, handled := r.handleRejectedCreate(ctx, vm, inputs, err, false); handled {
 		return res, nil
 	}
 	// A retryable VM_OPERATION_FAILED on the pending host is retried with a
 	// backoff, not every few seconds (holdCreateBackoff).
 	if res, held := r.holdCreateBackoff(ctx, vm, err, createAttempt{}); held {
 		return res, nil
+	}
+	// A definite NotFound, NotSupported, Unauthorized or QuotaExceeded
+	// refusal is re-sent on the create-refusal backoff, not every 5 s
+	// (createRefusalPaced).
+	if createRefusalPaced(err) {
+		return r.paceRefusedCreate(ctx, vm, inputs, err, false), nil
 	}
 	logger.Error(err, "Failed to create VM", "host", host)
 	reason, requeueAfter := providerFailureOutcome(err)

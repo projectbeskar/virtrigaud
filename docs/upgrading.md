@@ -91,7 +91,9 @@ sections below it as well, in the order the rest of this guide gives.
   classified now:** an HTTP 4xx answer (except 408, 425 and 429) and the permanent curl
   failures listed in [Which failures are retried](image-preparation.md#which-failures-are-retried)
   are reported as `InvalidArgument` — the `VirtualMachine` gets `Ready=False` with reason
-  `ValidationError` and is re-checked every 30 seconds — instead of the generic provider
+  `ValidationError` and is re-checked with a backoff (30 seconds doubling to 10 minutes, see
+  [A refused VM create is retried with a backoff](#a-refused-vm-create-is-retried-with-a-backoff))
+  — instead of the generic provider
   error retried before. **The libvirt host needs `curl`** for this path (as for
   `ImagePrepare`; `wget` is no longer used); if it is missing, the provider log says so. The
   manager's debug log (`V(1)`) of a create request also shows the image URL redacted now.
@@ -160,8 +162,10 @@ cloud-init drive and are not converted.**
 refused **before anything is created** (`InvalidSpec`), with a message that names what is
 missing (the SSH data plane, `ssh_password` or `ssh_privatekey`, `known_hosts`, `genisoimage`, or
 `PVE_NODE_SELECTOR`). The user-data is never dropped in silence any more. A `VirtualMachine`
-shows `ValidationError` and is rechecked every 30 seconds; it needs no cleanup, and is created
-on a recheck once the keys are there. A `VMClone` ends `Failed` (`ProviderError`, "clone
+shows `ValidationError` and is rechecked with a backoff (30 seconds doubling to 10 minutes, see
+[A refused VM create is retried with a backoff](#a-refused-vm-create-is-retried-with-a-backoff));
+it needs no cleanup, and is created on a recheck once the keys are there (a changed `Secret`
+is not a change of the `Provider`'s spec, so that recheck can be up to 10 minutes later). A `VMClone` ends `Failed` (`ProviderError`, "clone
 failed: ...") and is not retried: re-create it. The provider reads the SSH keys when it starts,
 so roll or restart it after you change the Secret. A node without `flock` is not refused: the
 seed script cannot take its lock, the VM is kept with an unknown outcome and every re-send
@@ -436,8 +440,10 @@ redefined. See [`docs/libvirt-firmware.md`](libvirt-firmware.md).
 - **VMs with more than one network interface can be created.** In v0.4.0 the second interface
   collided with the sound card's PCI slot, and libvirt refused the domain.
 - **A definition libvirt refuses is a validation error.** The `VirtualMachine` gets
-  `Ready=False` and `Provisioning=False` with reason `ValidationError`, re-checked every 30
-  seconds, instead of a retried provider error. The disk the attempt copied is removed, and
+  `Ready=False` and `Provisioning=False` with reason `ValidationError`, re-checked with a
+  backoff (30 seconds doubling to 10 minutes, see
+  [A refused VM create is retried with a backoff](#a-refused-vm-create-is-retried-with-a-backoff)),
+  instead of a retried provider error. The disk the attempt copied is removed, and
   deleting the VM is not held as `CreateOutcomeUnknown`. A host that reports no matching UEFI
   firmware is refused before the image is copied. Other refusals still copy the image on each
   re-check and then remove it. A failed create whose domain is known not to be defined also
@@ -447,6 +453,75 @@ redefined. See [`docs/libvirt-firmware.md`](libvirt-firmware.md).
 
 A VM that v0.4.0 left retrying a refused create keeps its create marker after the upgrade; see
 [`docs/libvirt-firmware.md`](libvirt-firmware.md#when-libvirt-refuses-the-definition).
+
+### A refused VM create is retried with a backoff
+
+No action is required; this changes how often a refused create is sent again.
+
+- **What changed.** When a provider refuses a `VirtualMachine`'s `Create` as an invalid
+  specification (`InvalidSpec`, gRPC `InvalidArgument`: `Ready=False` and `Provisioning=False`
+  with reason `ValidationError`), the manager no longer sends it again every 30 seconds. It waits
+  30 seconds after the first refusal, then 1, 2, 4 and 8 minutes, then every 10 minutes. Nothing
+  is sent to the provider while it waits: no image prepare, no placement and no `Create`. A
+  libvirt `Create` copies the base image before libvirt refuses the definition (and removes the
+  copy), so a refusal that never goes away used to copy the image every 30 seconds.
+- **The condition message names the next re-check.** It was `Provider rejected VM create
+  (non-retryable; re-checking every 30s): <detail>` and is now `Provider rejected VM create
+  (non-retryable; re-checking in 4m0s, at 2026-10-26T10:04:30Z, or at once when the
+  VirtualMachine, its VMClass, VMImage or Provider changes): <detail>`. The reason, the
+  provider's detail, the events and the metric are unchanged. A `Conflict` (`ProviderConflict`)
+  keeps its fixed 2-minute re-check and its message.
+- **The other definite refusals are paced the same way.** A `Create` answered `NotFound`,
+  `Unimplemented` (`NotSupported`), or a typed `Unauthorized` or `QuotaExceeded` (single-host and
+  clustered Providers) was re-sent every 5 seconds; it now follows the same backoff and the same
+  resets. Its reason stays `ProviderError` on the same condition (`Provisioning`, or `Ready`
+  for an answer to a re-send); its message was `Failed to create VM: <detail>` and is now
+  `Failed to create VM (non-retryable; re-checking in <wait>, at <time>, or at once when the
+  VirtualMachine, its VMClass, VMImage or Provider changes): <detail>`. Unchanged: an untyped
+  `FailedPrecondition` or `PermissionDenied` (`CreateRefused`, 15 seconds doubling to
+  5 minutes), a "not performed" answer, and every failure whose outcome is unknown or that may
+  pass (a transport error, an unavailable host, a timeout), which are still retried every
+  5 seconds or on their own backoff. A typed `Unauthorized` or `QuotaExceeded` is produced only
+  in the manager's own code: from a remote provider, `PermissionDenied` keeps `CreateRefused`,
+  and `Unauthenticated` and `ResourceExhausted` are untyped and still retried every 5 seconds.
+- **What retries at once.** A change to the `VirtualMachine`'s spec, or to the spec of its
+  `VMClass`, `VMImage` or `Provider` (the manager now watches those three for a VM whose create
+  was refused), sends the create again within seconds and starts the backoff again from
+  30 seconds. A refusal with a different message also starts it again from 30 seconds. A change that is not a spec change
+  of these objects (a `Secret` the provider reads or the VM's user-data `Secret`, a provider
+  restart, a fix on the host, a `VMNetworkAttachment` edit) is picked up at the next re-check,
+  at most 10 minutes later.
+  Status-only updates and label or annotation changes do not count.
+- **Manager restarts.** The backoff is kept in the manager's memory and recovered after a
+  restart from the `Ready` or `Provisioning` message, so a restart does not send the create again early (one
+  whose re-check passed while no manager ran is sent at once, and the backoff goes on from
+  where it was). A change to the `VMClass`, `VMImage`, `Provider` or networks made while no
+  manager ran is picked up at that re-check. A VM refused by a v0.4.0 manager (whose message
+  has no next re-check) is sent once after the upgrade and then backs off.
+- **A refused image source is paced the same way.** An `ImagePrepare` whose source the provider
+  refuses (the `VMImage` gets `InvalidSource`) is sent again after 30 seconds, doubling to
+  10 minutes, or at once when the `VMImage`'s `spec.source` or the `Provider`'s spec changes. Before, it
+  was sent again on every 30-second re-check of each VM that uses the image, and the libvirt
+  provider can download the whole image before refusing it (a checksum mismatch, an image
+  `qemu-img` cannot read, an unsupported format). The VM keeps `Ready=False/ValidationError`
+  ("Image prepare failed: ...") and is re-checked when the wait ends; a VM reconciled during the
+  wait shows `Ready=False/WaitingForDependencies` with "... prepared again in <wait>". This wait
+  is in memory only: after a manager restart the first re-check sends the prepare again. An
+  `ImagePrepare` refused with `NotFound`, `Unimplemented`, `PermissionDenied`, `Unauthorized` or
+  `QuotaExceeded`, which was re-sent every 5 seconds by each VM using the image, is paced by the
+  same backoff; the `VMImage`'s status is not changed for these, and the VM shows
+  `Ready=False/ProviderError` ("Image prepare failed: ..."). A fix made outside VirtRigaud (a
+  storage pool or template created on the host, a permission granted) is picked up at the next
+  re-check, at most 10 minutes later; a change to the `VMImage`'s `spec.source` or the
+  `Provider`'s spec ends the wait at once.
+- **No more panic for a new Provider.** Reconciling a VM whose `Provider` had no
+  `status.runtime` yet (the Provider controller had not reconciled it) dereferenced a nil
+  pointer in a log line and panicked (recovered, and retried with rate limiting). It now
+  reports the provider as unreachable, as it does for a runtime that is not ready.
+- **Unchanged.** A VM refused before any provider call (a `VMClass` value or a
+  `spec.resources` override out of range, `ValidationError`) is still re-checked every
+  30 seconds, and is now also re-checked at once when its `VMClass` changes. A refused
+  `Reconfigure` keeps its backoff (5 seconds doubling to 5 minutes).
 
 ### Other changes
 

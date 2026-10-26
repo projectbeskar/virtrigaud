@@ -95,10 +95,14 @@ const (
 // collision resolved out-of-band is picked up without a manual nudge.
 const vmCreateConflictRetryInterval = 2 * time.Minute
 
-// vmCreateInvalidSpecRetryInterval is the requeue cadence after the provider
-// rejected Create as InvalidSpec. A spec edit re-triggers reconcile on its own;
-// the moderate cadence avoids a tight loop while staying tolerant of providers
-// that classify some transient failures as InvalidSpec.
+// vmCreateInvalidSpecRetryInterval is the re-check cadence of a VM refused as
+// an invalid specification before any provider call (a VMClass value or a
+// spec.resources override out of range), and the first wait after the
+// provider refused a Create as InvalidSpec; a refused Create is then re-sent
+// on a backoff (createRefusalRetryBase, virtualmachine_create_refusal.go). A
+// spec edit re-triggers reconcile on its own; the moderate cadence avoids a
+// tight loop while staying tolerant of providers that classify some transient
+// failures as InvalidSpec.
 const vmCreateInvalidSpecRetryInterval = 30 * time.Second
 
 // Placement requeue cadences for the clustered-provider create path (ADR-0007 P1,
@@ -223,6 +227,16 @@ func providerErrorMessage(err error) string {
 	return err.Error()
 }
 
+// providerRuntimeState returns provider's runtime phase and endpoint, for the
+// log; both are empty while the Provider controller has not recorded a
+// status.runtime yet (a new Provider), which must not panic the VM reconcile.
+func providerRuntimeState(provider *infravirtrigaudiov1beta1.Provider) (phase, endpoint string) {
+	if provider == nil || provider.Status.Runtime == nil {
+		return "", ""
+	}
+	return string(provider.Status.Runtime.Phase), provider.Status.Runtime.Endpoint
+}
+
 // hasForceDeleteAnnotation reports whether the VM carries the force-delete
 // escape-hatch annotation set to "true".
 func hasForceDeleteAnnotation(vm *infravirtrigaudiov1beta1.VirtualMachine) bool {
@@ -297,6 +311,12 @@ type VirtualMachineReconciler struct {
 	// it. In memory: after a manager restart the persisted attempt time keeps
 	// at least the base wait.
 	revertNotPerformed unschedulableBackoff
+	// createRefusals paces re-sending a Create the provider refused as an
+	// invalid specification, per VM: from createRefusalRetryBase doubling to
+	// createRefusalRetryMax, started again when anything the answer depends on
+	// changes (virtualmachine_create_refusal.go). A created VM, or its
+	// deletion, forgets it.
+	createRefusals createRefusalBackoff
 	// powerTasks maps a VM UID to the task its last power operation returned,
 	// so a power task that ended in failure is recognised even when the
 	// "Adjusting power state" marker is not on the VM (a real reconfigure's
@@ -466,6 +486,7 @@ func (r *VirtualMachineReconciler) reconcileVM(ctx context.Context, vm *infravir
 	// A recorded id supersedes any in-memory record of an unsaved create.
 	if vm.Status.ID != "" {
 		r.forgetUnsavedCreate(vm.UID)
+		r.createRefusals.forget(vm.UID)
 	}
 
 	// A bound VM whose spec.providerRef no longer names the Provider it is
@@ -550,14 +571,15 @@ func (r *VirtualMachineReconciler) reconcileVM(ctx context.Context, vm *infravir
 	}
 
 	// Get provider instance (remote or in-process)
-	logger.V(1).Info("Getting provider instance", "provider", provider.Name, "runtime_phase", provider.Status.Runtime.Phase, "endpoint", provider.Status.Runtime.Endpoint)
+	runtimePhase, runtimeEndpoint := providerRuntimeState(provider)
+	logger.V(1).Info("Getting provider instance", "provider", provider.Name, "runtime_phase", runtimePhase, "endpoint", runtimeEndpoint)
 	providerInstance, err := r.getProviderInstance(ctx, provider)
 	if err != nil {
 		// The resolver's error names the TLS Secret, the provider Service's
 		// address and the runtime phase: it goes to the manager log only, and
 		// the VM (readable by a consumer of a Provider in another namespace)
 		// gets a constant message (ADR-0007 A6, threat 5).
-		logger.Error(err, "Failed to get provider instance - will retry in 5s", "provider", provider.Name, "runtime_phase", provider.Status.Runtime.Phase)
+		logger.Error(err, "Failed to get provider instance - will retry in 5s", "provider", provider.Name, "runtime_phase", runtimePhase)
 		k8s.SetReadyCondition(&vm.Status.Conditions, metav1.ConditionFalse, k8s.ReasonProviderError, providerResolveFailedMessage, vm.Generation)
 		metrics.RecordError(errReasonProviderResolve, metrics.ComponentManager)
 		r.updateStatus(ctx, vm)
@@ -703,6 +725,13 @@ func (r *VirtualMachineReconciler) reconcileVM(ctx context.Context, vm *infravir
 		// Create is not sent — nor an image prepare or a placement before it
 		// (disk_size_limit.go).
 		if res, held := r.refuseCreateOverDiskSizeLimit(ctx, vm, persisted, provider, vmClass); held {
+			return res, nil
+		}
+		// A Create the provider refused as invalid is sent again only after
+		// its backoff, or at once when anything the answer depends on
+		// changed (holdRefusedCreate) — nor is an image prepare or a
+		// placement made for it meanwhile.
+		if res, held := r.holdRefusedCreate(ctx, vm, persisted, deps); held {
 			return res, nil
 		}
 		if attempt.resend {
@@ -981,6 +1010,8 @@ func (r *VirtualMachineReconciler) reconcileVM(ctx context.Context, vm *infravir
 // handleDeletion handles VM deletion
 func (r *VirtualMachineReconciler) handleDeletion(ctx context.Context, vm *infravirtrigaudiov1beta1.VirtualMachine) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
+	// A VM being deleted is never created: its create-refusal backoff is over.
+	r.createRefusals.forget(vm.UID)
 
 	if !k8s.HasFinalizer(vm, infravirtrigaudiov1beta1.VirtualMachineFinalizer) {
 		return ctrl.Result{}, nil
@@ -1810,6 +1841,9 @@ func (r *VirtualMachineReconciler) createVMOn(
 
 	// Create VM
 	resp, err := provider.Create(ctx, req)
+	// What the answer depends on, for the backoff of a refusal
+	// (handleRejectedCreate).
+	inputs := createRefusalInputs(vm, providerCR, vmClass, vmImage, networks)
 	if err != nil && clustered {
 		// A migration target whose disk was imported to its pending host is
 		// pinned there (ADR-0007 Addendum B, B1.2): no slice-2 exclusion and no
@@ -1832,7 +1866,7 @@ func (r *VirtualMachineReconciler) createVMOn(
 				return res, merr
 			}
 		}
-		return r.handleClusteredCreateError(ctx, vm, req.TargetHostID, err)
+		return r.handleClusteredCreateError(ctx, vm, req.TargetHostID, inputs, err)
 	}
 	if err != nil {
 		// Honesty-first (ADR-0007 D3): Create failed, so we do NOT write
@@ -1843,13 +1877,19 @@ func (r *VirtualMachineReconciler) createVMOn(
 		// Status.ID) and cannot touch the colliding hypervisor VM.
 		// A Conflict answering a re-send leaves the outcome unknown: the
 		// marker stays (createOutcomeKnown).
-		if res, handled := r.handleRejectedCreate(ctx, vm, err, !createOutcomeKnown(err, attempt)); handled {
+		if res, handled := r.handleRejectedCreate(ctx, vm, inputs, err, !createOutcomeKnown(err, attempt)); handled {
 			return res, nil
 		}
 		// A retryable VM_DISK_CHECK_FAILED / VM_OPERATION_FAILED is retried
 		// with a backoff, not every few seconds (holdCreateBackoff).
 		if res, held := r.holdCreateBackoff(ctx, vm, err, attempt); held {
 			return res, nil
+		}
+		// A definite NotFound, NotSupported, Unauthorized or QuotaExceeded
+		// refusal is re-sent on the create-refusal backoff, not every 5 s
+		// (createRefusalPaced).
+		if createRefusalPaced(err) {
+			return r.paceRefusedCreate(ctx, vm, inputs, err, !createOutcomeKnown(err, attempt)), nil
 		}
 		logger.Error(err, "Failed to create VM")
 		reason, requeueAfter := providerFailureOutcome(err)
@@ -1919,11 +1959,13 @@ func (r *VirtualMachineReconciler) createVMOn(
 //
 // Both set Ready=False and Provisioning=False with a specific reason and the
 // provider's (non-secret) message, stamped with ObservedGeneration, and requeue
-// on a slower cadence than the 5s transient-error path
-// (vmCreateConflictRetryInterval / vmCreateInvalidSpecRetryInterval), so an
-// unresolvable create does not hot-loop against the provider.
-// Status.ID is left empty. Any other error returns handled=false and keeps the
-// existing transient-retry path.
+// on a slower cadence than the 5s transient-error path, so an unresolvable
+// create does not hot-loop against the provider: a Conflict every
+// vmCreateConflictRetryInterval, an InvalidSpec on the backoff of
+// createRefusalBackoff for inputs (the request's createRefusalInputs), whose
+// next re-check the message names (createRefusalMessage). Status.ID is left
+// empty. Any other error returns handled=false and keeps the existing
+// transient-retry path.
 //
 // keepMarker records the answer on Ready only, keeping the create marker: the
 // answer to a re-send, which leaves the earlier attempt's outcome unknown
@@ -1931,26 +1973,31 @@ func (r *VirtualMachineReconciler) createVMOn(
 func (r *VirtualMachineReconciler) handleRejectedCreate(
 	ctx context.Context,
 	vm *infravirtrigaudiov1beta1.VirtualMachine,
+	inputs string,
 	err error,
 	keepMarker bool,
 ) (ctrl.Result, bool) {
+	// Surface the provider's categorized message, not err.Error() (which also
+	// embeds the raw gRPC status chain), made safe for status: URL userinfo
+	// removed, one line, bounded (sanitizeProviderDetail).
+	detail := sanitizeProviderDetail(err)
 	var (
 		reason     string
 		retryAfter time.Duration
+		msg        string
 	)
 	switch {
 	case contracts.IsConflict(err):
 		reason, retryAfter = k8s.ReasonProviderConflict, vmCreateConflictRetryInterval
+		msg = fmt.Sprintf("Provider rejected VM create (non-retryable; re-checking every %s): %s", retryAfter, detail)
 	case contracts.IsInvalidSpec(err):
-		reason, retryAfter = k8s.ReasonValidationError, vmCreateInvalidSpecRetryInterval
+		var next time.Time
+		reason = k8s.ReasonValidationError
+		retryAfter, next = r.recordCreateRefusal(vm, inputs, detail)
+		msg = createRefusalMessage(createRefusalHeadRejected, retryAfter, next, detail)
 	default:
 		return ctrl.Result{}, false
 	}
-
-	// Surface the provider's categorized message, not err.Error() (which also
-	// embeds the raw gRPC status chain), made safe for status: URL userinfo
-	// removed, one line, bounded (sanitizeProviderDetail).
-	msg := fmt.Sprintf("Provider rejected VM create (non-retryable; re-checking every %s): %s", retryAfter, sanitizeProviderDetail(err))
 
 	log.FromContext(ctx).Info("Provider rejected VM create with a non-retryable error; not binding and backing off",
 		"reason", reason, "retryAfter", retryAfter.String(), "error", err.Error())
@@ -3317,7 +3364,9 @@ func vmUpdateNeedsReconcile(oldVM, newVM *infravirtrigaudiov1beta1.VirtualMachin
 // VirtualMachines it watches Namespace label changes and the
 // spec.consumerNamespaceSelector of Providers, VMClasses and VMImages, so a
 // cross-namespace grant (or revocation) takes effect without waiting for the
-// slow recheck.
+// slow recheck, and any spec change of a Provider, VMClass or VMImage a VM
+// whose create was refused references, so that create is retried at once
+// (withCreateRefusalWatches).
 func (r *VirtualMachineReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	if err := indexConsumerGrants(mgr, &infravirtrigaudiov1beta1.VirtualMachine{}, vmConsumerGrantIndexValues); err != nil {
 		return err
@@ -3325,8 +3374,12 @@ func (r *VirtualMachineReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	if err := indexPlacementProvider(mgr); err != nil {
 		return err
 	}
+	if err := indexCreateRefusals(mgr); err != nil {
+		return err
+	}
 	b := ctrl.NewControllerManagedBy(mgr).
 		For(&infravirtrigaudiov1beta1.VirtualMachine{})
+	b = r.withCreateRefusalWatches(b)
 	return withConsumerGrantWatches(b, r.vmsForGrantChange).
 		WithEventFilter(predicate.Funcs{
 			UpdateFunc: func(e event.UpdateEvent) bool {

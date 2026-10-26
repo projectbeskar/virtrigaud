@@ -17,10 +17,16 @@ limitations under the License.
 package controller
 
 import (
+	stderrors "errors"
+	"strconv"
 	"sync"
 	"time"
 
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+
 	infravirtrigaudiov1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
+	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
 )
 
 // imagePrepareBackoffPolicy is how long image preparation waits before it
@@ -56,6 +62,13 @@ var (
 	// reports artifact identity but does not echo it must not be called on
 	// every reconcile of every VM.
 	notConfirmedBackoff = imagePrepareBackoffPolicy{Base: 30 * time.Second, Max: 5 * time.Minute}
+	// sourceRejectedBackoff paces the prepare sent again after the provider
+	// refused the image source as an invalid specification (v0.4.1): the
+	// libvirt provider prepares synchronously and may download the whole
+	// image before refusing it (a checksum mismatch, an unsupported format),
+	// so a source that is refused for good must not be downloaded again on
+	// every VM re-check. The same pacing as a refused VM create.
+	sourceRejectedBackoff = imagePrepareBackoffPolicy{Base: createRefusalRetryBase, Max: createRefusalRetryMax}
 )
 
 // imagePrepareBackoffForget is how long after its wait ended a failure record
@@ -69,7 +82,14 @@ const (
 	backoffImportFailed = "import-failed"
 	// backoffNotConfirmed: an answer did not confirm the requested identity.
 	backoffNotConfirmed = "not-confirmed"
+	// backoffSourceRejected: the provider refused the image source as an
+	// invalid specification.
+	backoffSourceRejected = "source-rejected"
 )
+
+// imagePrepareBackoffKinds lists every kind of failure imagePrepareBackoff
+// tracks.
+var imagePrepareBackoffKinds = []string{backoffImportFailed, backoffNotConfirmed, backoffSourceRejected}
 
 // imagePrepareBackoffKey identifies what a failure is about: one VMImage
 // object, one Provider object and one spec.source (its digest). A changed
@@ -77,6 +97,47 @@ const (
 func imagePrepareBackoffKey(vmImage *infravirtrigaudiov1beta1.VMImage, provider *infravirtrigaudiov1beta1.Provider, digest string) string {
 	return string(vmImage.UID) + "|" + imageProviderKey(provider) + "|" + string(provider.UID) + "|" + digest
 }
+
+// sourceRejectedBackoffKey is the key of a backoffSourceRejected failure:
+// backoffKey (imagePrepareBackoffKey) and the Provider's generation, so a
+// change of the Provider's spec — such as the allowed image directories in
+// its runtime environment — ends the wait as a changed spec.source does.
+func sourceRejectedBackoffKey(backoffKey string, provider *infravirtrigaudiov1beta1.Provider) string {
+	return backoffKey + "|generation=" + strconv.FormatInt(provider.Generation, 10)
+}
+
+// imagePrepareRefused reports whether an ImagePrepare failure is a definite
+// refusal other than InvalidSpec, Conflict and InProgress (which have their
+// own handling): NotFound, NotSupported (gRPC Unimplemented), a typed
+// Unauthorized or QuotaExceeded, or an untyped PermissionDenied. Retrying
+// does not change it until the source, the Provider or the host is fixed.
+func imagePrepareRefused(err error) bool {
+	if err == nil || contracts.IsInvalidSpec(err) || contracts.IsConflict(err) || contracts.IsInProgress(err) {
+		return false
+	}
+	if contracts.IsNotFound(err) || contracts.IsNotSupported(err) {
+		return true
+	}
+	var pe *contracts.ProviderError
+	if stderrors.As(err, &pe) {
+		return pe.Type == contracts.ErrorTypeUnauthorized || pe.Type == contracts.ErrorTypeQuotaExceeded
+	}
+	st, ok := status.FromError(err)
+	return ok && st.Code() == codes.PermissionDenied
+}
+
+// retryAfterError is err, the failure of a call that must not be retried
+// before after has passed (a rejected image source, sourceRejectedBackoff).
+type retryAfterError struct {
+	err   error
+	after time.Duration
+}
+
+// Error returns the wrapped error's text.
+func (e *retryAfterError) Error() string { return e.err.Error() }
+
+// Unwrap returns the wrapped error, so its classification is kept.
+func (e *retryAfterError) Unwrap() error { return e.err }
 
 // imagePrepareBackoffEntry is the failure record of one kind for one key.
 type imagePrepareBackoffEntry struct {
@@ -139,7 +200,7 @@ func (b *imagePrepareBackoff) wait(key string, now time.Time) (time.Duration, st
 	defer b.mu.Unlock()
 	var longest time.Duration
 	msg := ""
-	for _, kind := range []string{backoffImportFailed, backoffNotConfirmed} {
+	for _, kind := range imagePrepareBackoffKinds {
 		e, ok := b.entries[kind+"|"+key]
 		if !ok {
 			continue
@@ -155,7 +216,7 @@ func (b *imagePrepareBackoff) wait(key string, now time.Time) (time.Duration, st
 // is given).
 func (b *imagePrepareBackoff) clear(key string, kinds ...string) {
 	if len(kinds) == 0 {
-		kinds = []string{backoffImportFailed, backoffNotConfirmed}
+		kinds = imagePrepareBackoffKinds
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()

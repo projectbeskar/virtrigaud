@@ -35,7 +35,7 @@ func TestHandleRejectedCreate_MessageIsSanitized(t *testing.T) {
 	vm := creatableVM("default")
 	r := newTestReconciler(coverageTestScheme(t), nil, vm)
 	err := contracts.NewConflictError("create: domain \"web\" exists\nowned by https://user:secret@host/x "+strings.Repeat("y", 600), nil)
-	_, handled := r.handleRejectedCreate(context.Background(), vm, err, false)
+	_, handled := r.handleRejectedCreate(context.Background(), vm, "", err, false)
 	require.True(t, handled)
 	c := meta.FindStatusCondition(vm.Status.Conditions, k8s.ConditionReady)
 	require.NotNil(t, c)
