@@ -98,7 +98,7 @@ ethernets:
 The seed is built over the provider's **SSH data plane** to the PVE node (the
 one migrations use). A `Create` with user-data that the provider cannot honour
 is refused **before anything is created**, as `InvalidSpec` (`ValidationError`
-on the `VirtualMachine`, rechecked every 30 seconds), with a message that names
+on the `VirtualMachine`, rechecked with a backoff of 30 seconds doubling to 10 minutes), with a message that names
 what is missing. The user-data is never dropped in silence:
 
 | Missing | Message names |

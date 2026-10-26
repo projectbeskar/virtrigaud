@@ -57,8 +57,9 @@ other VM is untouched. The `VirtualMachine` shows:
 - A message that names only the requested VM. It never says which namespace or
   `VirtualMachine` owns the other VM, and it never gives an inventory path. The
   provider log records those details for operators.
-- A re-check every **2 minutes**, or every **30 seconds** for a rejected name,
-  instead of the 5-second transient retry.
+- A re-check every **2 minutes**, or, for a rejected name, a backoff of 30 seconds
+  doubling to 10 minutes (or at once when the `VirtualMachine`, its `VMClass`, `VMImage` or
+  `Provider` changes), instead of the 5-second transient retry.
 - The manager metric `virtrigaud_errors_total{reason="provider-create-rejected"}`.
 
 To resolve a refused create, do one of the following:
