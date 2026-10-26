@@ -86,7 +86,7 @@ func (s *Server) AttachSeedVolume(vmid int, storage, slot string) (string, error
 	if vm.Config == nil {
 		vm.Config = map[string]string{}
 	}
-	value := volid + ",media=cdrom"
+	value := volid + "," + mediaCDROM
 	vm.Config[slot] = value
 	// `qm set` is qemu-server's config update: it appends a new CD-ROM to the
 	// boot order (bootorder.go).

@@ -111,8 +111,8 @@ func isAttachedDisk(cfg map[string]interface{}, key string) bool {
 // from the value cfg has. qemu-server appends a CD-ROM that a config update
 // (`qm set`) attaches to a non-empty order list ("append new CD drives to
 // bootorder to mark them bootable"), so attaching a seed puts its slot there;
-// a slot already in the list (e.g. a template's install-ISO slot, now the
-// seed's) stays there. The other devices the config has keep their order (one
+// a slot the list already named (e.g. a template's install-ISO slot, now the
+// seed's) qemu-server leaves where it is. Both are dropped here. The other devices the config has keep their order (one
 // it lacks is left out: PVE refuses an order that names it). When nothing else
 // would be left, the order names the VM's boot disk, else its first NIC
 // (bootFallbackDevice); a VM with neither keeps its order. A config without an

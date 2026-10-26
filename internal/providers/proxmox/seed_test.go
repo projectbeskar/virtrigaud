@@ -346,8 +346,10 @@ func TestSeed_DeleteFreesTheSeed(t *testing.T) {
 
 	t.Run("rollback after the seed is attached", func(t *testing.T) {
 		p, srv, node, _ := seedTestProvider(t)
-		// Marking the VM ready (a config update) fails after the seed is attached.
+		// Marking the VM ready (a config update) fails after the seed is
+		// attached; the boot order update before it goes through.
 		node.afterSeed = func() {
+			srv.InjectFault(pvefake.Fault{Method: http.MethodPut, PathContains: "/config", PassThrough: true, Times: 1})
 			srv.InjectFault(pvefake.Fault{Method: http.MethodPut, PathContains: "/config", Status: http.StatusInternalServerError, Body: "boom"})
 		}
 		_, err := p.Create(context.Background(), seedCreateReq())

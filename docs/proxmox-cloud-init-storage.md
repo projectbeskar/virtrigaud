@@ -203,11 +203,14 @@ broken SSH session.
   unused disks and PVE cloud-init drive, but skips CD-ROMs; the provider's
   destroy passes `destroy-unreferenced-disks=1`, which frees every volume of the
   VMID, the seed included (and an unused seed volume an interrupted build left).
-  Once the VM is gone, the provider also removes the VM's seed build lock file
-  (`/run/virtrigaud/seed-stage/.lock-<vmid>`, an empty file on a tmpfs) over
-  SSH, and so does a failed Create that removed its VM. This is best effort: it
-  never fails the Delete, it leaves a lock a running build holds alone, and a
-  file it could not remove is gone at the next reboot.
+  Once a VM whose config showed its own seed is gone, the provider also
+  removes the VM's seed build lock file (`/run/virtrigaud/seed-stage/.lock-<vmid>`,
+  an empty file on a tmpfs) over SSH; a VM without a seed opens no SSH
+  session. A failed Create that removed its VM removes the file too, seed or
+  not (its build may have failed before attaching). This is best effort, at
+  most 10 seconds (less when the call has less time left): it never fails the
+  call, it leaves a lock a running build holds alone, and a file it could not
+  remove (or one of a VM destroyed by hand) is gone at the next reboot.
 - **A failed Create** removes the VM it made (seed included). When the seed's
   SSH session broke, or another build or `qm importdisk` of the VM was still
   running, the build may still be going on: the VM is kept and the answer is an
@@ -267,6 +270,9 @@ broken SSH session.
                   - ssh-ed25519 AAAA... ops@example.com
   ```
 
+  The `sudo` rule above is only an illustration: grant the narrowest rule
+  your policy allows.
+
   A clone that needs a seed is refused before anything is cloned when the
   provider cannot build one (the prerequisites above). A clone of a VM
   **without** a seed and without inline user-data is unchanged: PVE regenerates
@@ -275,11 +281,14 @@ broken SSH session.
   `VirtualMachine` are deleted while the provider is still cloning, the clone
   PVE finishes is bound to nothing and is **left on PVE on purpose**: the
   manager never removes a VM it can no longer attribute to a
-  `VirtualMachine`. The manager logs "... is not bound to a new one and is
-  left on the provider: adopt or remove it", naming the clone's VMID. Find the
-  VM by the target name and the owner stamp in its notes, then adopt it or
-  destroy it (`qm destroy <vmid> --purge 1 --destroy-unreferenced-disks 1`,
-  which also frees its seed). `vcts` and `virtrigaud-loadgen` work only with Kubernetes
+  `VirtualMachine`. When the reconcile that sent the `Clone` sees it finish
+  after the target was deleted, the manager logs "... is not bound to a new
+  one and is left on the provider: adopt or remove it", naming the clone's
+  VMID; otherwise (for example after a manager restart) nothing records the
+  clone's VMID. Find the VM by the target name and the owner stamp in its
+  notes, then adopt it or destroy it (`qm destroy <vmid> --purge 1
+  --destroy-unreferenced-disks 1`, which also frees its seed; its seed build
+  lock file on `/run` stays until the next reboot). `vcts` and `virtrigaud-loadgen` work only with Kubernetes
   objects: they wait for a `VMClone` whose clone may still be in flight and
   leave an unsettled one in place, but they cannot see a cloned VM that no
   Kubernetes object records any more.
@@ -431,9 +440,15 @@ template's `ide2`, once its install ISO, now its cloud-init drive) is taken
 out too. A device the config does not have is left out of the new order (PVE
 refuses an order that names one). An order that would be left empty names the
 boot disk, else the first NIC. A config with no `order=` list (no `boot` value,
-or a legacy one such as `cdn`) is left as it is; PVE appends nothing to it.
-A re-sent request that finds its VM with the seed attached but still in the
-order finishes the step.
+or a legacy one such as `cdn`) is left as it is; PVE appends nothing to it,
+but its legacy order includes every CD-ROM, the seed too (which is not
+bootable). The update carries the config's digest, so a concurrent change of
+the config is never overwritten (the provider reads the config and tries once
+more). If the update still fails, a request with an owner keeps the VM, which
+is complete but for its boot order, and answers with an unknown outcome; the
+re-sent request finds the VM with the seed attached but still in the order and
+finishes the step. (A request without an owner, which cannot find its VM
+again, removes it.)
 
 In v0.4.1-rc1 the order was set before the seed was attached, so PVE appended
 the seed's slot to it (`order=scsi0;ide2`, `order=net0;ide2`). The guest still

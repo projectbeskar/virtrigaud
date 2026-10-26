@@ -121,7 +121,7 @@ func main() {
 	srv.RegisterProvider(providerImpl)
 
 	// Log startup information with the capabilities the provider advertises
-	// (derived from them, never a hand-kept list).
+	// (CapabilitySummary keeps only the flags it really advertises).
 	capabilityNames, diskTypes, networkTypes := proxmox.CapabilitySummary()
 	logger.Info("Starting Proxmox VE provider server",
 		"version", version.String(),

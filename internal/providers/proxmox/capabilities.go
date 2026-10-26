@@ -58,9 +58,10 @@ var summarizedCapabilities = []capabilities.Capability{
 
 // CapabilitySummary returns, for the provider's startup log, the capability
 // flags GetProviderCapabilities advertises (SDK flag names such as
-// "snapshots"), and the disk and network types GetCapabilities reports. It is
-// derived from the capabilities the provider really advertises, so the log
-// never names one it does not (in rc1 it still listed linked clones).
+// "snapshots"), and the disk and network types GetCapabilities reports. It
+// names a flag of summarizedCapabilities only when the provider advertises it,
+// so the log never names one it does not (in rc1 it still listed linked
+// clones); a flag missing from summarizedCapabilities is left out of the log.
 func CapabilitySummary() (names, diskTypes, networkTypes []string) {
 	m := GetProviderCapabilities()
 	for _, c := range summarizedCapabilities {

@@ -662,47 +662,53 @@ const (
 //     one owner is FailedPrecondition + OWNER_STAMP_UNREADABLE.
 //
 // A VM the config read cannot find on this node is left to the delete itself,
-// which confirms cluster-wide whether it is gone.
-func (p *Provider) checkDelete(ctx context.Context, node string, vmid int, owner contracts.ObjectIdentity) error {
+// which confirms cluster-wide whether it is gone. seeded reports whether the
+// config shows a cloud-init seed of the VM's own (seed.go): its seed build
+// lock file is removed after the destroy (removeSeedLock).
+func (p *Provider) checkDelete(ctx context.Context, node string, vmid int, owner contracts.ObjectIdentity) (seeded bool, err error) {
 	cfg, err := p.client.GetVMConfig(ctx, node, vmid)
+	if err == nil {
+		own, _ := seedSlots(cfg, vmid)
+		seeded = len(own) > 0
+	}
 	if stderrors.Is(err, pveapi.ErrVMNotFound) {
-		return nil // not on this node: the delete confirms cluster-wide that it is gone
+		return false, nil // not on this node: the delete confirms cluster-wide that it is gone
 	}
 	if err != nil {
 		p.logger.Error("Reading the VM configuration before a delete failed; not deleting", "vmid", vmid, "node", node, "error", err)
-		return errors.NewUnavailable(fmt.Sprintf("cannot read the configuration of Proxmox VM %d; not deleting it (will retry)", vmid), nil)
+		return false, errors.NewUnavailable(fmt.Sprintf("cannot read the configuration of Proxmox VM %d; not deleting it (will retry)", vmid), nil)
 	}
 	logArgs := []any{"vmid", vmid, "node", node, "requester_uid", owner.UID, "requester_namespace", owner.Namespace, "requester_name", owner.Name}
 	if configIsTemplate(cfg) {
 		p.logger.Warn("Refusing to delete: the VMID names a template, never a VirtualMachine's VM", logArgs...)
-		return statusWithReasons(codes.FailedPrecondition, deleteTemplateMessage, contracts.VMIsImageArtifactReason)
+		return false, statusWithReasons(codes.FailedPrecondition, deleteTemplateMessage, contracts.VMIsImageArtifactReason)
 	}
 	if owner.IsZero() {
-		return nil
+		return seeded, nil
 	}
 	read := readOwnerStamp(configString(cfg, pveConfigKeyDescription))
 	switch {
 	case read.state != "":
 		p.logger.Warn("Refusing to delete: the VM's owner stamp cannot be relied on",
 			append(logArgs, "owner_stamp_state", read.state, "problem", read.problem)...)
-		return statusWithReasons(codes.FailedPrecondition, deleteStampUnreadableMessage, contracts.OwnerStampUnreadableReason)
+		return false, statusWithReasons(codes.FailedPrecondition, deleteStampUnreadableMessage, contracts.OwnerStampUnreadableReason)
 	case read.stamp == nil && !unstampedNamedLikeOwner(configString(cfg, pveConfigKeyName), vmid, owner):
 		// An unstamped VM is this VirtualMachine's only if it has the name
 		// Create (or adoption) gave it: another name means the VMID was
 		// reused by an unrelated VM.
 		p.logger.Warn("Refusing to delete: the VM is unstamped and not named like this VirtualMachine (its VMID was reused?)",
 			append(logArgs, "vm_name", configString(cfg, pveConfigKeyName))...)
-		return statusWithReasons(codes.NotFound, deleteNotOwnedMessage, contracts.VMNotOwnedReason)
+		return false, statusWithReasons(codes.NotFound, deleteNotOwnedMessage, contracts.VMNotOwnedReason)
 	case read.stamp == nil:
 		p.logger.Info("The VM carries no owner stamp (created before owner stamps, adopted, or cloned without a target UID) "+
 			"and is named like this VirtualMachine; deleting it as before", logArgs...)
-		return nil
+		return seeded, nil
 	case read.stamp.owner.UID != owner.UID:
 		p.logger.Warn("Refusing to delete: the VM is stamped with another owner (its VMID was reused, or the requester was re-created)",
 			append(logArgs, "owner_uid", read.stamp.owner.UID, "owner_namespace", read.stamp.owner.Namespace, "owner_name", read.stamp.owner.Name)...)
-		return statusWithReasons(codes.NotFound, deleteNotOwnedMessage, contracts.VMNotOwnedReason)
+		return false, statusWithReasons(codes.NotFound, deleteNotOwnedMessage, contracts.VMNotOwnedReason)
 	}
-	return nil
+	return seeded, nil
 }
 
 // unstampedNamedLikeOwner reports whether an unstamped VM whose PVE name is

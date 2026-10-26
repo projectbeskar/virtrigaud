@@ -111,6 +111,16 @@ func TestClone_LockTimeoutIsNotPerformed(t *testing.T) {
 		})
 	}
 
+	t.Run("target config already exists", func(t *testing.T) {
+		p, srv := newStampTestProvider(t)
+		target := raceWinner(t, srv, func(target int) string { return targetExistsStatus(target) })
+		_, err := p.Create(context.Background(), createReq(testOwner(), templateImageJSON))
+		assert.Equal(t, classNothingRemainsVM, classOf(t, err))
+		winner, ok := srv.GetVM(target())
+		require.True(t, ok, "the winner's VM is not touched")
+		assert.Equal(t, "winner", winner.Name)
+	})
+
 	t.Run("another VM's lock is not definite", func(t *testing.T) {
 		p, srv := newStampTestProvider(t)
 		raceWinner(t, srv, func(int) string { return lockTimeoutStatus(42) })
@@ -132,4 +142,13 @@ func TestCloneTaskLockedOut(t *testing.T) {
 	assert.False(t, cloneTaskLockedOut(fmt.Errorf("task timeout: %s", lockTimeoutStatus(200001)), 9000, 200001),
 		"a task whose end is unknown")
 	assert.False(t, cloneTaskLockedOut(failed("ERROR"), 9000, 200001))
+	assert.True(t, cloneTaskLockedOut(failed(targetExistsStatus(200001)), 9000, 200001))
+	assert.False(t, cloneTaskLockedOut(failed(targetExistsStatus(9000)), 9000, 200001), "only the target's config")
+	assert.False(t, cloneTaskLockedOut(failed("clone failed: "+targetExistsStatus(200001)), 9000, 200001))
+}
+
+// targetExistsStatus is the exit status of a qemu-server clone task whose
+// target VM vmid's config already existed.
+func targetExistsStatus(vmid int) string {
+	return fmt.Sprintf("unable to create VM %d: config file already exists", vmid)
 }

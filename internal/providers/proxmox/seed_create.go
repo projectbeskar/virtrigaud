@@ -49,8 +49,9 @@ const (
 )
 
 // failSeedOrStep answers a Create whose step what failed (cause) after the VM
-// vmid was made: a seed build whose outcome is unknown leaves the VM in place
-// (outcomeUnknown; a re-sent Create finishes it), anything else removes it
+// vmid was made: a seed build whose outcome is unknown, or (with an owner
+// stamp) a seed still in the boot order (bootOrderPendingError), leaves the VM
+// in place (outcomeUnknown; a re-sent Create finishes it), anything else removes it
 // (failAfterSubmit). A definite refusal (InvalidSpec: no free slot,
 // genisoimage missing, the VM on another node than the SSH data plane's) is
 // answered as such once the VM is removed, so the manager does not make and
@@ -58,6 +59,12 @@ const (
 func (p *Provider) failSeedOrStep(ctx context.Context, node string, vmid int, name string, stamp *ownerStamp, what string, cause error) error {
 	if isSeedInFlight(cause) {
 		return p.outcomeUnknown(fmt.Sprintf("%s: the cloud-init seed of VM %d may still be being built on the node", what, vmid), cause)
+	}
+	// The VM is complete but for its boot order: kept for the re-sent
+	// request to finish (it finds its VM by the owner stamp, which a request
+	// without an owner has not: that VM is removed as below).
+	if isBootOrderPending(cause) && stamp != nil {
+		return p.outcomeUnknown(fmt.Sprintf("%s: the cloud-init seed of VM %d is still in its boot order", what, vmid), cause)
 	}
 	if status.Code(cause) == codes.InvalidArgument {
 		if rbErr := p.rollbackCreatedVM(ctx, node, vmid, name, stamp, true); rbErr != nil {

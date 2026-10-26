@@ -204,8 +204,9 @@ the VM's whole life; keep long-lived secrets out of it.
   one) ends with the seed out of its boot order; a `VMClone` keeps its source's order otherwise.
   A `VMClone` and a template `Create` without user-data keep the template's or source's order.
   Prepare templates with `qm set <vmid> --boot order=<boot disk>` (for example `scsi0`). VMs
-  made by v0.4.1-rc1 can have the seed's slot at the end of their order (`order=scsi0;ide2`):
-  harmless, as the seed is not bootable; remove it with `qm set <vmid> --boot order=scsi0`.
+  made by v0.4.1-rc1 can have the seed's slot at the end of their order (`order=scsi0;ide2`,
+  `order=net0;ide2`): harmless, as the seed is not bootable; set the order without the seed's
+  slot to remove it (for example `order=scsi0;ide2` → `qm set <vmid> --boot order=scsi0`).
   → [Boot order](proxmox-cloud-init-storage.md#boot-order)
 - **A cloud-init drive left on `local` by v0.4.0** can be moved with
   `qm set <vmid> --ide2 <storage>:cloudinit` on the node.

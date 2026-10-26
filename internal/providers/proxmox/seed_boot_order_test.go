@@ -18,6 +18,7 @@ package proxmox
 
 import (
 	"context"
+	"net/http"
 	"regexp"
 	"strconv"
 	"strings"
@@ -175,6 +176,73 @@ func TestSeed_BootOrderNeverHasTheSeed(t *testing.T) {
 	})
 }
 
+// TestSeed_BootOrderUpdateFailureKeepsTheVM: a boot order update that keeps
+// failing after the seed is attached leaves the otherwise complete VM in
+// place (outcome unknown, still "creating"), and the re-sent Create finishes
+// the order without a second seed. A request without an owner, which cannot
+// find its VM again, removes it.
+func TestSeed_BootOrderUpdateFailureKeepsTheVM(t *testing.T) {
+	t.Run("with an owner", func(t *testing.T) {
+		p, srv, node, _ := seedTestProvider(t)
+		node.afterSeed = func() {
+			srv.InjectFault(pvefake.Fault{Method: http.MethodPut, PathContains: "/config", Status: http.StatusInternalServerError,
+				Body: `{"data":null}`, Times: bootOrderAttempts})
+		}
+		_, err := p.Create(context.Background(), seedCreateReq())
+		assert.Equal(t, classOutcomeUnknown, classOf(t, err))
+		vms := srv.VMsNamed(testOwnerName)
+		require.Len(t, vms, 1, "the VM is kept")
+		assert.Equal(t, ownerStampPhaseCreating, stampOf(t, vms[0]).phase)
+		assert.Contains(t, bootOrderDevices(vms[0]), "ide2", "the update failed")
+
+		node.afterSeed = nil
+		resp, err := p.Create(context.Background(), seedCreateReq())
+		require.NoError(t, err)
+		vm := vmByID(t, srv, resp.Id)
+		assert.Equal(t, vms[0].VMID, vm.VMID)
+		assert.Equal(t, "order=scsi0", vm.Config[pveConfigKeyBoot])
+		assert.Len(t, node.seedsOf(vm.VMID), 1, "no second seed")
+		assert.Equal(t, ownerStampPhaseReady, stampOf(t, vm).phase)
+	})
+
+	t.Run("a concurrent change is retried, not overwritten", func(t *testing.T) {
+		p, srv, node, _ := seedTestProvider(t)
+		// Another writer changes the config between the read and the update
+		// once: the digest no longer matches and the update is computed again.
+		changed := false
+		node.afterSeed = func() {
+			srv.InjectFault(pvefake.Fault{Method: http.MethodPut, PathContains: "/config", PassThrough: true, Times: 1,
+				Then: func(*http.Request) {
+					if changed {
+						return
+					}
+					changed = true
+					for _, vm := range srv.VMsNamed(testOwnerName) {
+						srv.SetDescription(vm.VMID, vm.Description+"\nnote")
+					}
+				}})
+		}
+		resp, err := p.Create(context.Background(), seedCreateReq())
+		require.NoError(t, err)
+		vm := vmByID(t, srv, resp.Id)
+		assert.Equal(t, "order=scsi0", vm.Config[pveConfigKeyBoot])
+		assert.True(t, changed)
+	})
+
+	t.Run("without an owner", func(t *testing.T) {
+		p, srv, node, _ := seedTestProvider(t)
+		node.afterSeed = func() {
+			srv.InjectFault(pvefake.Fault{Method: http.MethodPut, PathContains: "/config", Status: http.StatusInternalServerError,
+				Body: `{"data":null}`, Times: bootOrderAttempts})
+		}
+		req := seedCreateReq()
+		req.Owner = nil
+		_, err := p.Create(context.Background(), req)
+		assert.Equal(t, classNothingRemainsVM, classOf(t, err))
+		assert.Empty(t, srv.VMsNamed(testOwnerName), "the VM is removed")
+	})
+}
+
 // TestSeedFreeBootOrder: the seed slots leave the order list; the other
 // devices the config has keep their order; an order left empty names the
 // boot disk, else the first NIC; a config without an order list is left as
@@ -252,4 +320,31 @@ func TestDelete_RemovesTheSeedLock(t *testing.T) {
 	require.NoError(t, err, "a failed lock removal never fails the Delete")
 	_, exists := srv.GetVM(vmid)
 	assert.False(t, exists)
+
+	// A VM without a seed opens no SSH session.
+	node.delegate = nil
+	before := len(node.allCommands())
+	resp, err = p.Create(context.Background(), createReq(testOwner(), templateImageJSON))
+	require.NoError(t, err)
+	_, err = p.Delete(context.Background(), &providerv1.DeleteRequest{Id: resp.Id, Owner: ownerProto(testOwner())})
+	require.NoError(t, err)
+	assert.Len(t, node.allCommands(), before, "no SSH command for a VM without a seed")
+}
+
+// TestRollback_RemovesTheSeedLock: a failed Create whose VM is removed runs
+// the lock removal for its VMID (its seed build may have run without
+// attaching the seed).
+func TestRollback_RemovesTheSeedLock(t *testing.T) {
+	p, srv, node, _ := seedTestProvider(t)
+	node.seedExit = seedExitQMSet
+	_, err := p.Create(context.Background(), seedCreateReq())
+	require.Error(t, err)
+	assert.Empty(t, srv.VMsNamed(testOwnerName), "the VM is removed")
+	found := false
+	for _, cmd := range node.allCommands() {
+		if strings.Contains(cmd, seedLockName(200001)) && strings.Contains(cmd, "rm -f --") {
+			found = true
+		}
+	}
+	assert.True(t, found, "the lock removal ran: %v", node.allCommands())
 }

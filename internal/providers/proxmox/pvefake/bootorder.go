@@ -57,6 +57,9 @@ var bootDriveScan = func() []string {
 	return out
 }()
 
+// mediaCDROM is the drive option of a CD-ROM.
+const mediaCDROM = "media=cdrom"
+
 // maxNets is qemu-server's $MAX_NETS.
 const maxNets = 32
 
@@ -64,7 +67,7 @@ const maxNets = 32
 func isCDROMValue(value string) bool {
 	_, opts, _ := strings.Cut(value, ",")
 	for _, o := range strings.Split(opts, ",") {
-		if strings.TrimSpace(o) == "media=cdrom" {
+		if strings.TrimSpace(o) == mediaCDROM {
 			return true
 		}
 	}

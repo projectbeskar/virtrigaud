@@ -577,7 +577,8 @@ func (p *Provider) Delete(ctx context.Context, req *providerv1.DeleteRequest) (*
 	// A template is never destroyed; a request that names its owner destroys
 	// the VM only when the VM is not stamped with another owner (its VMID
 	// reused) and its stamp can be read (checkDelete).
-	if err := p.checkDelete(ctx, node, vmid, deleteOwner(req)); err != nil {
+	seeded, err := p.checkDelete(ctx, node, vmid, deleteOwner(req))
+	if err != nil {
 		return nil, err
 	}
 
@@ -623,7 +624,6 @@ func (p *Provider) Delete(ctx context.Context, req *providerv1.DeleteRequest) (*
 		case !gone:
 			return nil, errors.NewUnavailable(fmt.Sprintf("Proxmox VM %d is not on node %s but exists elsewhere in the cluster; not deleting", vmid, node), nil)
 		}
-		p.removeSeedLock(ctx, vmid)
 		return &providerv1.TaskResponse{}, nil
 	}
 	if err != nil {
@@ -635,8 +635,11 @@ func (p *Provider) Delete(ctx context.Context, req *providerv1.DeleteRequest) (*
 		}
 	}
 
-	// The VM is gone: its seed build lock file goes too (best effort; seed.go).
-	p.removeSeedLock(ctx, vmid)
+	// The VM is gone: the seed build lock file of a VM that had a seed goes
+	// too (best effort; seed.go). A VM without one never opens an SSH session.
+	if seeded {
+		p.removeSeedLock(ctx, vmid)
+	}
 	return &providerv1.TaskResponse{}, nil
 }
 
