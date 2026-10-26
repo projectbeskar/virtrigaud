@@ -513,6 +513,13 @@ func TestSettleClones(t *testing.T) {
 		target.Finalizers = []string{"loadgen.virtrigaud.io/test"}
 		require.NoError(t, env.Client.Update(ctx, target))
 		require.NoError(t, env.Client.Delete(ctx, target))
+		t.Cleanup(func() {
+			held := &infrav1beta1.VirtualMachine{}
+			if env.Client.Get(ctx, client.ObjectKeyFromObject(target), held) == nil {
+				held.Finalizers = nil
+				_ = env.Client.Update(ctx, held)
+			}
+		})
 		clone.Status.Phase = infrav1beta1.ClonePhaseReady
 		require.NoError(t, env.Client.Status().Update(ctx, clone))
 		lg.settleClones(ctx)
@@ -585,9 +592,26 @@ type hookClient struct {
 	mu            sync.Mutex
 	deletedByName map[string]int
 	slowGets      atomic.Int32
+	// onGet, when set, runs on every Get.
+	onGet func()
+	// afterVMList, when set, runs once after the first VirtualMachine list.
+	afterVMList func()
+}
+
+func (h *hookClient) List(ctx context.Context, list client.ObjectList, opts ...client.ListOption) error {
+	err := h.Client.List(ctx, list, opts...)
+	if _, isVMs := list.(*infrav1beta1.VirtualMachineList); isVMs && h.afterVMList != nil {
+		hook := h.afterVMList
+		h.afterVMList = nil
+		hook()
+	}
+	return err
 }
 
 func (h *hookClient) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+	if h.onGet != nil {
+		h.onGet()
+	}
 	if h.getDelay > 0 {
 		h.slowGets.Add(1)
 		select {
@@ -632,7 +656,7 @@ func TestDeleteLatencyExcludesCloneSettling(t *testing.T) {
 	hc := &hookClient{Client: env.Client}
 	lg := newGenerator(t, hc, ns, &options{})
 	createVM(t, lg)
-	hc.getDelay = 100 * time.Millisecond
+	hc.getDelay = 300 * time.Millisecond
 	// Three pending clones that are gone: each costs two slow reads to settle.
 	for _, n := range []string{"a", "b", "c"} {
 		lg.clones = append(lg.clones, runObject{name: "ghost-" + n, uid: "x", source: "elsewhere", target: "ghost-vm-" + n})
@@ -643,17 +667,39 @@ func TestDeleteLatencyExcludesCloneSettling(t *testing.T) {
 	total := time.Since(start)
 	res := <-lg.results
 	require.True(t, res.Success, res.Error)
-	assert.GreaterOrEqual(t, total, 500*time.Millisecond, "the clones were read")
-	assert.Less(t, res.Duration, 250*time.Millisecond, "the delete's Duration is the delete call's, not the reads'")
+	assert.GreaterOrEqual(t, total, 1500*time.Millisecond, "the clones were read")
+	assert.Less(t, res.Duration, time.Second, "the delete's Duration is the delete call's, not the reads'")
 	assert.Positive(t, hc.slowGets.Load())
 
-	// Within the poll interval the clones are not read again.
+	// A clone that stays pending (an existing VMClone with no phase and no
+	// CloneRequested condition is settled, so make it in flight).
+	createVM(t, lg)
+	hc.getDelay = 0
+	pending := &infrav1beta1.VMClone{
+		ObjectMeta: metav1.ObjectMeta{Name: "pending-clone", Namespace: ns},
+		Spec: infrav1beta1.VMCloneSpec{
+			Source: infrav1beta1.CloneSource{VMRef: &infrav1beta1.LocalObjectReference{Name: "elsewhere"}},
+			Target: infrav1beta1.VMCloneTarget{Name: "pending-target"},
+		},
+	}
+	require.NoError(t, env.Client.Create(ctx, pending))
+	pending.Status.Phase = infrav1beta1.ClonePhaseCloning
+	require.NoError(t, env.Client.Status().Update(ctx, pending))
+	lg.clones = []runObject{{name: pending.Name, uid: pending.UID, source: "elsewhere", target: "pending-target"}}
+
+	// Within the poll interval the clones are not read again; after it they are.
+	var gets atomic.Int32
+	lg.client = &hookClient{Client: env.Client, onGet: func() { gets.Add(1) }}
 	lg.pollInterval = time.Hour
-	lg.lastSettle = time.Now()
-	before := hc.slowGets.Load()
+	lg.markSettled()
 	lg.performDelete(ctx, "lab-provider", 0)
 	<-lg.results
-	assert.Equal(t, before, hc.slowGets.Load())
+	assert.Zero(t, gets.Load(), "paced: no read")
+	lg.lastSettle = time.Time{}
+	createVM(t, lg)
+	lg.performDelete(ctx, "lab-provider", 0)
+	<-lg.results
+	assert.Positive(t, gets.Load(), "due: the pending clone is read")
 }
 
 // TestCleanupDeletesObjectsItNeverRecorded checks that the cleanup also
@@ -680,9 +726,19 @@ func TestCleanupDeletesObjectsItNeverRecorded(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "orphan-clone", Namespace: ns, Labels: labels},
 		Spec: infrav1beta1.VMCloneSpec{
 			Source: infrav1beta1.CloneSource{VMRef: &infrav1beta1.LocalObjectReference{Name: "gone"}},
-			Target: infrav1beta1.VMCloneTarget{Name: "orphan-target", Labels: labels},
+			Target: infrav1beta1.VMCloneTarget{Name: "late-target", Labels: labels},
 		},
 	}))
+	// The clone's target appears after the cleanup listed the VMs, like the
+	// target of a clone that was still running.
+	hc.afterVMList = func() {
+		require.NoError(t, env.Client.Create(ctx, &infrav1beta1.VirtualMachine{
+			ObjectMeta: metav1.ObjectMeta{Name: "late-target", Namespace: ns, Labels: labels},
+			Spec: infrav1beta1.VirtualMachineSpec{
+				ProviderRef: infrav1beta1.ObjectRef{Name: "lab-provider"}, ClassRef: infrav1beta1.ObjectRef{Name: "small"},
+			},
+		}))
+	}
 	other := map[string]string{loadgenRunLabelKey: "another-run", loadgenLabelKey: loadgenLabelValue}
 	require.NoError(t, env.Client.Create(ctx, &infrav1beta1.VirtualMachine{
 		ObjectMeta: metav1.ObjectMeta{Name: "other-run-vm", Namespace: ns, Labels: other},
@@ -719,11 +775,12 @@ func TestForgetDeletedIsPaced(t *testing.T) {
 		},
 	})
 	ctx := context.Background()
-	require.NoError(t, c.Create(ctx, &infrav1beta1.VirtualMachine{ObjectMeta: metav1.ObjectMeta{Name: "pending-delete", Namespace: "default"}}))
+	pendingVM := &infrav1beta1.VirtualMachine{ObjectMeta: metav1.ObjectMeta{Name: "pending-delete", Namespace: "default"}}
+	require.NoError(t, c.Create(ctx, pendingVM))
 	lg := newGenerator(t, c, "default", &options{})
 	lg.config.VMCount = 1
 	lg.pollInterval = time.Hour
-	lg.deleting = []runObject{{name: "pending-delete"}} // still there: it keeps counting
+	lg.deleting = []runObject{{name: pendingVM.Name, uid: pendingVM.UID}} // still there: it keeps counting
 
 	for i := 0; i < 5; i++ {
 		assert.False(t, lg.reserveSlot(ctx), "the VM being deleted holds the only slot")

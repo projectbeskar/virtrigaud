@@ -33,8 +33,8 @@ const phaseSkipped = "Skipped: vmCount reached"
 // aliveLocked returns the number of VMs the run has alive, which is what
 // vmCount caps: the VMs it created and has not deleted (a clone's target
 // joins them once its clone has ended, see settleClones), the VMs whose delete
-// was sent but is not confirmed complete, the targets of the clones that have
-// not ended, and the slots reserved for a create or clone whose API call is in
+// was sent but is not confirmed complete, the target VMs of failed clones that
+// still exist, the targets of the clones that have not ended, and the slots reserved for a create or clone whose API call is in
 // flight. lg.mu must be held.
 func (lg *LoadGenerator) aliveLocked() int {
 	pending := 0
@@ -193,6 +193,14 @@ func (lg *LoadGenerator) resolveClone(name string, target *runVM, held *runObjec
 			return
 		}
 	}
+}
+
+// markSettled records that a round of reading the pending VMClones ended, so
+// the next one starts a poll interval after it, not after the start of this one.
+func (lg *LoadGenerator) markSettled() {
+	lg.mu.Lock()
+	defer lg.mu.Unlock()
+	lg.lastSettle = time.Now()
 }
 
 // dueToSettle reports whether the pending VMClones should be read again, and

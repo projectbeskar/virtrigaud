@@ -65,6 +65,7 @@ func (c cleanupItem) String() string {
 func (lg *LoadGenerator) finish(out io.Writer) error {
 	lg.mu.Lock()
 	nVMs, nSnaps, nClones := len(lg.vms), len(lg.snapshots), len(lg.clones)
+	nHeld := len(lg.deleting)
 	nPendingTargets := 0
 	for _, c := range lg.clones {
 		if !c.resolved {
@@ -79,7 +80,7 @@ func (lg *LoadGenerator) finish(out io.Writer) error {
 	if !lg.opts.cleanup {
 		if nVMs+nSnaps+nClones > 0 {
 			cliout.Printf(out, "Left in place: %d VMs, %d VMSnapshots, %d VMClones%s. Remove them with:\n", nVMs, nSnaps, nClones,
-				pendingTargetsNote(nPendingTargets))
+				pendingTargetsNote(nPendingTargets, nHeld))
 			cliout.Printf(out, "  kubectl delete vmsnapshots,vmclones,virtualmachines -n %s -l %s=%s\n", lg.namespace, loadgenRunLabelKey, lg.runID)
 		}
 		return nil
@@ -107,13 +108,22 @@ func (lg *LoadGenerator) finish(out io.Writer) error {
 	return nil
 }
 
-// pendingTargetsNote renders, for the "Left in place" line, the target VMs of
-// the clones that had not ended: they are not among the counted VMs.
-func pendingTargetsNote(n int) string {
-	if n == 0 {
+// pendingTargetsNote renders, for the "Left in place" line, the VMs that are
+// not among the counted ones: the target VMs of the clones that had not ended
+// (pending) and the VMs being deleted or kept from a failed clone (held, which
+// may be gone by now).
+func pendingTargetsNote(pending, held int) string {
+	var parts []string
+	if pending > 0 {
+		parts = append(parts, fmt.Sprintf("the target VMs of %d clones that had not ended", pending))
+	}
+	if held > 0 {
+		parts = append(parts, fmt.Sprintf("up to %d VMs being deleted or kept from failed clones", held))
+	}
+	if len(parts) == 0 {
 		return ""
 	}
-	return fmt.Sprintf(" (and the target VMs of %d clones that had not ended, not counted in the VMs)", n)
+	return " (not counted in the VMs: " + strings.Join(parts, " and ") + ")"
 }
 
 // cleanup deletes what the run created and waits until it is gone: first its
@@ -154,6 +164,11 @@ func (lg *LoadGenerator) cleanup(ctx context.Context) []string {
 	snapshots = append(snapshots, extraSnaps...)
 	clones = append(clones, extraClones...)
 	vms = append(vms, extraVMs...)
+	// The target of an unrecorded clone is looked for too: it may appear
+	// while the clone is waited for.
+	for _, c := range extraClones {
+		targets = append(targets, c.target)
+	}
 
 	// A clone target the run took over (see settleClones) is among its VMs.
 	tracked := make(map[string]bool, len(vms))
@@ -162,6 +177,7 @@ func (lg *LoadGenerator) cleanup(ctx context.Context) []string {
 	}
 
 	keepVM := map[string]bool{}
+	keepAsTarget := map[string]bool{}
 	var settled []runObject
 	for _, c := range clones {
 		if lg.cloneSettled(ctx, c) {
@@ -170,6 +186,7 @@ func (lg *LoadGenerator) cleanup(ctx context.Context) []string {
 		}
 		left = append(left, "VMClone/"+c.name+" (clone in flight)")
 		keepVM[c.source], keepVM[c.target] = true, true
+		keepAsTarget[c.target] = true
 	}
 
 	var snaps, rest []cleanupItem
@@ -197,7 +214,11 @@ func (lg *LoadGenerator) cleanup(ctx context.Context) []string {
 	}
 	for _, vm := range vms {
 		if keepVM[vm.name] {
-			left = append(left, "VirtualMachine/"+vm.name+" (source of a clone in flight)")
+			role := "source"
+			if keepAsTarget[vm.name] {
+				role = "target"
+			}
+			left = append(left, "VirtualMachine/"+vm.name+" ("+role+" of a clone in flight)")
 			continue
 		}
 		rest = append(rest, newCleanupItem(&infrav1beta1.VirtualMachine{}, vm))

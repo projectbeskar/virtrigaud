@@ -235,7 +235,8 @@ type LoadGenerator struct {
 	clones       []runObject
 	cloneTargets []string
 	// deleting holds the VMs whose delete the apiserver accepted during the
-	// run; --cleanup waits until they are gone.
+	// run, and the target VMs of failed clones that still exist; --cleanup
+	// deletes them and waits until they are gone.
 	deleting []runObject
 }
 
@@ -666,14 +667,17 @@ func (lg *LoadGenerator) performCreate(ctx context.Context, provider string, wor
 }
 
 func (lg *LoadGenerator) performDelete(ctx context.Context, provider string, _ int) {
+	// Read the clones that may have ended before the clock starts, with a
+	// timeout of their own: the recorded Duration is the delete call's alone.
+	if lg.dueToSettle() {
+		settleCtx, cancelSettle := operationContext(ctx)
+		lg.settleClones(settleCtx)
+		cancelSettle()
+		lg.markSettled()
+	}
+
 	ctx, cancel := operationContext(ctx)
 	defer cancel()
-
-	// Read the clones that may have ended before the clock starts: the
-	// recorded Duration is the delete call's alone.
-	if lg.dueToSettle() {
-		lg.settleClones(ctx)
-	}
 
 	result := Result{
 		Operation: opDelete,

@@ -99,7 +99,8 @@ type runObject struct {
 	source, target, provider string
 	// resolved is set, for a VMClone, once it is known to have ended (Ready
 	// or Failed) or to be gone: its target then counts as a VM of the run
-	// (it is tracked in lg.vms) or not at all, and its source may be deleted.
+	// (tracked in lg.vms), is held in lg.deleting while it still exists but
+	// is not usable, or counts no more, and the source may be deleted.
 	resolved bool
 }
 

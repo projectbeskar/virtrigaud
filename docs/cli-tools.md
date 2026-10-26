@@ -216,7 +216,7 @@ and its target VM exists and carries the run's label, the target becomes one of 
 `power`, `reconfigure`, `snapshot`, `clone` and `delete` can act on it, so `delete` frees its slot.
 When the `VMClone` fails or disappears, or its target is being deleted, the slot stays taken for as
 long as the target VM exists (the operator removes the target of a failed clone only later, and
-keeps one that was bound); it is freed when the VM is gone, at once when there is none. A `Ready`
+keeps it in some cases, for example when it was bound); it is freed when the VM is gone, at once when there is none. A `Ready`
 clone whose target does not carry the run's label frees its slot. The tool looks at the clones
 when a `delete` runs (at most once per second, before the delete is timed), so a mix without
 `delete` keeps every clone target counted.
