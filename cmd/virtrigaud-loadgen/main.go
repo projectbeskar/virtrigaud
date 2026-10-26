@@ -221,6 +221,9 @@ type LoadGenerator struct {
 	// lastForget is when the VMs being deleted were last read to see which
 	// are gone (at most once per pollInterval).
 	lastForget time.Time
+	// lastSettle is when the pending VMClones were last read (at most once
+	// per pollInterval).
+	lastSettle time.Time
 	// vms holds the VMs this run created and has not deleted (a VM whose
 	// delete is being sent stays here, busy, until the apiserver answers).
 	// Every operation acts on one of these, never on another VM in the
@@ -666,6 +669,12 @@ func (lg *LoadGenerator) performDelete(ctx context.Context, provider string, _ i
 	ctx, cancel := operationContext(ctx)
 	defer cancel()
 
+	// Read the clones that may have ended before the clock starts: the
+	// recorded Duration is the delete call's alone.
+	if lg.dueToSettle() {
+		lg.settleClones(ctx)
+	}
+
 	result := Result{
 		Operation: opDelete,
 		Provider:  provider,
@@ -675,7 +684,6 @@ func (lg *LoadGenerator) performDelete(ctx context.Context, provider string, _ i
 	// Delete only a VM this run created, never another VM in the namespace.
 	// The VM stays tracked (busy) until the apiserver answers, so it counts
 	// against vmCount meanwhile.
-	lg.settleClones(ctx)
 	vm, ok := lg.takeCreated()
 	if !ok {
 		result.Duration = time.Since(result.StartTime)

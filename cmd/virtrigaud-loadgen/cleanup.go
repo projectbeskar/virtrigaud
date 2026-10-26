@@ -65,6 +65,12 @@ func (c cleanupItem) String() string {
 func (lg *LoadGenerator) finish(out io.Writer) error {
 	lg.mu.Lock()
 	nVMs, nSnaps, nClones := len(lg.vms), len(lg.snapshots), len(lg.clones)
+	nPendingTargets := 0
+	for _, c := range lg.clones {
+		if !c.resolved {
+			nPendingTargets++
+		}
+	}
 	lg.mu.Unlock()
 
 	if lg.opts.dryRun {
@@ -72,7 +78,8 @@ func (lg *LoadGenerator) finish(out io.Writer) error {
 	}
 	if !lg.opts.cleanup {
 		if nVMs+nSnaps+nClones > 0 {
-			cliout.Printf(out, "Left in place: %d VMs, %d VMSnapshots, %d VMClones (and their target VMs). Remove them with:\n", nVMs, nSnaps, nClones)
+			cliout.Printf(out, "Left in place: %d VMs, %d VMSnapshots, %d VMClones%s. Remove them with:\n", nVMs, nSnaps, nClones,
+				pendingTargetsNote(nPendingTargets))
 			cliout.Printf(out, "  kubectl delete vmsnapshots,vmclones,virtualmachines -n %s -l %s=%s\n", lg.namespace, loadgenRunLabelKey, lg.runID)
 		}
 		return nil
@@ -100,6 +107,15 @@ func (lg *LoadGenerator) finish(out io.Writer) error {
 	return nil
 }
 
+// pendingTargetsNote renders, for the "Left in place" line, the target VMs of
+// the clones that had not ended: they are not among the counted VMs.
+func pendingTargetsNote(n int) string {
+	if n == 0 {
+		return ""
+	}
+	return fmt.Sprintf(" (and the target VMs of %d clones that had not ended, not counted in the VMs)", n)
+}
+
 // cleanup deletes what the run created and waits until it is gone: first its
 // VMSnapshots (so each is deleted through its provider while its VM still
 // exists), then its VMClones, the clone targets that carry this run's label,
@@ -111,6 +127,10 @@ func (lg *LoadGenerator) finish(out io.Writer) error {
 // deleting it, its target or its source then could leave the cloned VM on the
 // hypervisor with nothing recording it. A clone that does not settle in time
 // is left in place with its source and target, and reported.
+//
+// Objects that carry the run's label but were never recorded (a create whose
+// answer was lost after the apiserver stored the object) are cleaned up the
+// same way.
 //
 // It returns the objects still present (or left in place).
 func (lg *LoadGenerator) cleanup(ctx context.Context) []string {
@@ -124,13 +144,23 @@ func (lg *LoadGenerator) cleanup(ctx context.Context) []string {
 	}
 	vms = append(vms, lg.deleting...)
 	lg.mu.Unlock()
+
+	// Objects carrying the run's label that the run did not record: a create
+	// whose answer was lost (a timeout, a dropped connection) after the
+	// apiserver stored the object. They are cleaned up like the others.
+	var left []string
+	extraSnaps, extraClones, extraVMs, listErrs := lg.untrackedObjects(ctx, snapshots, clones, targets, vms)
+	left = append(left, listErrs...)
+	snapshots = append(snapshots, extraSnaps...)
+	clones = append(clones, extraClones...)
+	vms = append(vms, extraVMs...)
+
 	// A clone target the run took over (see settleClones) is among its VMs.
 	tracked := make(map[string]bool, len(vms))
 	for _, vm := range vms {
 		tracked[vm.name] = true
 	}
 
-	var left []string
 	keepVM := map[string]bool{}
 	var settled []runObject
 	for _, c := range clones {
@@ -177,6 +207,60 @@ func (lg *LoadGenerator) cleanup(ctx context.Context) []string {
 	left = append(left, lg.deleteAndWait(ctx, rest)...)
 	sort.Strings(left)
 	return left
+}
+
+// untrackedObjects lists the VMSnapshots, VMClones and VirtualMachines that
+// carry this run's label and are not among the ones the run recorded
+// (snapshots, clones, clone target names and vms), with their UIDs. A list
+// that fails is returned as an entry for the "still present" report: the
+// cleanup cannot say it left nothing behind.
+func (lg *LoadGenerator) untrackedObjects(ctx context.Context, snapshots, clones []runObject, targets []string, vms []runObject) (
+	snaps, cls, vmList []runObject, failures []string) {
+	known := func(objs []runObject, extra ...string) map[string]bool {
+		m := make(map[string]bool, len(objs)+len(extra))
+		for _, o := range objs {
+			m[o.name] = true
+		}
+		for _, n := range extra {
+			m[n] = true
+		}
+		return m
+	}
+	knownSnaps, knownClones, knownVMs := known(snapshots), known(clones), known(vms, targets...)
+	opts := []client.ListOption{client.InNamespace(lg.namespace), client.MatchingLabels{loadgenRunLabelKey: lg.runID}}
+
+	snapList := &infrav1beta1.VMSnapshotList{}
+	if err := lg.client.List(ctx, snapList, opts...); err != nil {
+		failures = append(failures, fmt.Sprintf("VMSnapshots (could not be listed: %v)", err))
+	}
+	for _, o := range snapList.Items {
+		if !knownSnaps[o.Name] {
+			snaps = append(snaps, runObject{name: o.Name, uid: o.UID})
+		}
+	}
+	cloneList := &infrav1beta1.VMCloneList{}
+	if err := lg.client.List(ctx, cloneList, opts...); err != nil {
+		failures = append(failures, fmt.Sprintf("VMClones (could not be listed: %v)", err))
+	}
+	for _, o := range cloneList.Items {
+		if !knownClones[o.Name] {
+			c := runObject{name: o.Name, uid: o.UID, target: o.Spec.Target.Name}
+			if o.Spec.Source.VMRef != nil {
+				c.source = o.Spec.Source.VMRef.Name
+			}
+			cls = append(cls, c)
+		}
+	}
+	vmObjs := &infrav1beta1.VirtualMachineList{}
+	if err := lg.client.List(ctx, vmObjs, opts...); err != nil {
+		failures = append(failures, fmt.Sprintf("VirtualMachines (could not be listed: %v)", err))
+	}
+	for _, o := range vmObjs.Items {
+		if !knownVMs[o.Name] {
+			vmList = append(vmList, runObject{name: o.Name, uid: o.UID})
+		}
+	}
+	return snaps, cls, vmList, failures
 }
 
 // newCleanupItem returns a cleanup item for o, read and deleted through obj.

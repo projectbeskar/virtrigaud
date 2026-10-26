@@ -119,11 +119,16 @@ func (lg *LoadGenerator) commitClone(clone runObject, target *runVM) {
 }
 
 // settleClones reads the VMClones the run requested that are not known to have
-// ended. A Ready one makes its target VM (when it exists and carries the run's
-// label) a VM of the run, so every operation, delete included, can act on it
-// and free its slot; a Failed or vanished one frees the slot its target
-// held. A clone still in flight, or one that cannot be read, stays as it is.
-// Until a clone has ended, its source is not deleted by the run.
+// ended, and the target VMs of those that have. A Ready clone whose target
+// exists and carries the run's label makes that VM one of the run's VMs, so
+// every operation, delete included, can act on it and free its slot. A Failed
+// or vanished clone, or a Ready one whose target is being deleted, does not
+// free the slot while its target VM is still there: the operator removes the
+// target of a failed clone later, and keeps a bound one. The target is then
+// tracked as a VM being deleted, which counts until it is gone and which
+// --cleanup deletes. A clone still in flight, or one (or a target) that cannot
+// be read, stays as it is. Until a clone has ended, its source is not deleted
+// by the run.
 func (lg *LoadGenerator) settleClones(ctx context.Context) {
 	if lg.opts.dryRun {
 		return
@@ -140,34 +145,40 @@ func (lg *LoadGenerator) settleClones(ctx context.Context) {
 	for _, c := range pending {
 		cur := &infrav1beta1.VMClone{}
 		err := lg.client.Get(ctx, client.ObjectKey{Namespace: lg.namespace, Name: c.name}, cur)
+		var ready bool
 		switch {
 		case apierrors.IsNotFound(err) || (err == nil && cur.UID != c.uid):
-			lg.resolveClone(c.name, nil)
 		case err != nil:
 			continue
 		case cur.Status.Phase == infrav1beta1.ClonePhaseFailed:
-			lg.resolveClone(c.name, nil)
 		case cur.Status.Phase == infrav1beta1.ClonePhaseReady:
-			item, found, readErr := lg.ownedCloneTarget(ctx, c.target)
-			switch {
-			case readErr != nil:
-				continue
-			case !found:
-				lg.resolveClone(c.name, nil)
-			default:
-				target := &runVM{name: c.target, uid: item.uid, provider: c.provider, power: infrav1beta1.PowerStateOff}
-				if vm, ok := item.obj.(*infrav1beta1.VirtualMachine); ok && vm.Spec.PowerState != "" {
-					target.power = vm.Spec.PowerState
-				}
-				lg.resolveClone(c.name, target)
+			ready = true
+		default:
+			continue
+		}
+
+		item, found, readErr := lg.ownedCloneTarget(ctx, c.target)
+		switch {
+		case readErr != nil:
+			continue
+		case !found:
+			lg.resolveClone(c.name, nil, nil)
+		case ready && item.obj.GetDeletionTimestamp() == nil:
+			target := &runVM{name: c.target, uid: item.uid, provider: c.provider, power: infrav1beta1.PowerStateOff}
+			if vm, ok := item.obj.(*infrav1beta1.VirtualMachine); ok && vm.Spec.PowerState != "" {
+				target.power = vm.Spec.PowerState
 			}
+			lg.resolveClone(c.name, target, nil)
+		default:
+			lg.resolveClone(c.name, nil, &runObject{name: c.target, uid: item.uid})
 		}
 	}
 }
 
-// resolveClone marks the VMClone name as ended and, when target is not nil,
-// tracks it as one of the run's VMs.
-func (lg *LoadGenerator) resolveClone(name string, target *runVM) {
+// resolveClone marks the VMClone name as ended. A non-nil target is tracked as
+// one of the run's VMs; a non-nil held is a target VM that still exists but is
+// not usable, tracked as a VM being deleted.
+func (lg *LoadGenerator) resolveClone(name string, target *runVM, held *runObject) {
 	lg.mu.Lock()
 	defer lg.mu.Unlock()
 	for i := range lg.clones {
@@ -176,9 +187,29 @@ func (lg *LoadGenerator) resolveClone(name string, target *runVM) {
 			if target != nil {
 				lg.vms = append(lg.vms, target)
 			}
+			if held != nil {
+				lg.deleting = append(lg.deleting, *held)
+			}
 			return
 		}
 	}
+}
+
+// dueToSettle reports whether the pending VMClones should be read again, and
+// records that they are: delete operations read them at most once per
+// pollInterval, outside the latency they record.
+func (lg *LoadGenerator) dueToSettle() bool {
+	interval := lg.pollInterval
+	if interval <= 0 {
+		interval = defaultPollInterval
+	}
+	lg.mu.Lock()
+	defer lg.mu.Unlock()
+	if !lg.lastSettle.IsZero() && time.Since(lg.lastSettle) < interval {
+		return false
+	}
+	lg.lastSettle = time.Now()
+	return true
 }
 
 // forgetDeleted drops from lg.deleting the VMs that are gone (or replaced by

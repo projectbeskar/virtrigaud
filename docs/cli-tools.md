@@ -211,10 +211,15 @@ per second, the VMs it deleted to see which are gone), and the operation is reco
 (not as a failure, and not in the totals of operations performed, success rates or latencies).
 VMs that are not the run's, and snapshots, do not count.
 
-A clone's target counts from the moment the `VMClone` is accepted. When the `VMClone` is `Ready`,
-its target becomes one of the run's VMs: `power`, `reconfigure`, `snapshot`, `clone` and `delete`
-can act on it, so `delete` frees its slot. A clone that fails or disappears frees its slot. The
-tool notices this when a `delete` runs, so a mix without `delete` keeps every clone target counted.
+A clone's target counts from the moment the `VMClone` is accepted. When the `VMClone` is `Ready`
+and its target VM exists and carries the run's label, the target becomes one of the run's VMs:
+`power`, `reconfigure`, `snapshot`, `clone` and `delete` can act on it, so `delete` frees its slot.
+When the `VMClone` fails or disappears, or its target is being deleted, the slot stays taken for as
+long as the target VM exists (the operator removes the target of a failed clone only later, and
+keeps one that was bound); it is freed when the VM is gone, at once when there is none. A `Ready`
+clone whose target does not carry the run's label frees its slot. The tool looks at the clones
+when a `delete` runs (at most once per second, before the delete is timed), so a mix without
+`delete` keeps every clone target counted.
 Deleting frees room again; a run with `create` weighted above `delete` therefore reaches `vmCount`
 quickly and then mostly skips creates, and you raise the `delete` weight if you want churn at a
 steady VM count.
@@ -223,7 +228,7 @@ steady VM count.
 created**, chosen at random among those no other operation is using; it never touches another VM in
 the namespace. Patches and deletes carry the VM's UID, so they never reach another object created
 later under the same name. `delete` never takes the source of a `VMClone` that has not ended
-(`Ready` or `Failed`): deleting it while the provider copies its disk could leave a VM on the
+(is not `Ready`, `Failed` or gone): deleting it while the provider copies its disk could leave a VM on the
 hypervisor that nothing records. With no such VM available the operation is recorded as failed
 (`no VM created by this run is available`) and nothing is called.
 
@@ -269,7 +274,9 @@ run's duration for operations still in flight; an interrupt stops it.
   With **`--cleanup`** the tool deletes, at the end (also after an interrupt), the run's
   `VMSnapshot`s and waits until they are gone, then its `VMClone`s, the clone target VMs that carry
   the run's label, its VMs and the VMs whose delete it issued during the run, and waits until they
-  are gone, up to `--cleanup-timeout`. A `VMClone` is only an operation record: deleting it leaves
+  are gone, up to `--cleanup-timeout`. It also deletes any object carrying the run's label
+  (`loadgen.virtrigaud.io/run`) that the tool did not record, which happens when a create's answer
+  was lost after the apiserver stored the object. A `VMClone` is only an operation record: deleting it leaves
   its target VM, which is why the targets are deleted as well. A `VMClone` whose provider clone may
   still be in flight is waited for first; one that does not settle in time is left in place with
   its source and target VMs. The tool exits non-zero, naming what is left, when anything remains.
