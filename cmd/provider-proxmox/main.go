@@ -120,17 +120,16 @@ func main() {
 	providerImpl := proxmox.New()
 	srv.RegisterProvider(providerImpl)
 
-	// Log startup information with capabilities
+	// Log startup information with the capabilities the provider advertises
+	// (derived from them, never a hand-kept list).
+	capabilityNames, diskTypes, networkTypes := proxmox.CapabilitySummary()
 	logger.Info("Starting Proxmox VE provider server",
 		"version", version.String(),
 		"log_level", getLogLevel().String(),
 		"log_format", logFormat,
-		"capabilities", []string{
-			"core", "snapshots", "memory-snapshots", "linked-clones",
-			"online-reconfigure", "online-disk-expansion", "image-import",
-		},
-		"supported_disk_types", []string{"raw", "qcow2"},
-		"supported_network_types", []string{"bridge", "vlan"},
+		"capabilities", capabilityNames,
+		"supported_disk_types", diskTypes,
+		"supported_network_types", networkTypes,
 	)
 
 	// Start server
