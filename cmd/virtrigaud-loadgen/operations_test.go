@@ -64,6 +64,15 @@ operations:
   describe: 5
 `
 
+// setTickInterval sets how often the workers of the runs the test starts
+// through the command begin an operation, for the rest of the test.
+func setTickInterval(t *testing.T, d time.Duration) {
+	t.Helper()
+	prev := defaultTickInterval
+	defaultTickInterval = d
+	t.Cleanup(func() { defaultTickInterval = prev })
+}
+
 // runSeq numbers the run ids of the generators the tests build.
 var runSeq atomic.Int32
 
@@ -305,6 +314,11 @@ func TestOperationsAgainstAPIServer(t *testing.T) {
 	})
 
 	t.Run("a full run never touches VMs it did not create, and --cleanup removes what it created", func(t *testing.T) {
+		// At the default one operation per second per worker, the run drew
+		// about ten operations, and none was a create about 3% of the time
+		// (0.7^10), which left nothing to check. At 100ms it draws about
+		// a hundred.
+		setTickInterval(t, 100*time.Millisecond)
 		ns := createNamespace(t, env.Client, "lg-mix")
 		bystander := &infrav1beta1.VirtualMachine{
 			ObjectMeta: metav1.ObjectMeta{Name: "bystander", Namespace: ns, Labels: map[string]string{loadgenLabelKey: loadgenLabelValue}},

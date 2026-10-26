@@ -5,6 +5,21 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-10-26 12:33] - virtrigaud-loadgen test: the full-run test always draws a create
+**Author:** @wrkode (William Rizzo)
+
+### Fixed
+- `cmd/virtrigaud-loadgen/operations_test.go`, `cmd/virtrigaud-loadgen/main.go`: `TestOperationsAgainstAPIServer` ("a full run never touches VMs it did not create") failed about 3% of the time. At one operation per second per worker, its 4-second run drew about ten operations at random, and when none was a create (0.7^10) the check for a created VM failed. The worker's default interval is now the package variable `defaultTickInterval` (still one second), and the test sets it to 100 ms for that run, so it draws about a hundred operations. The command's behaviour is unchanged.
+
+### Why
+The flake failed main CI after the v0.4.1-rc2 notes merged (a docs-only change).
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-10-26 11:25] - Release notes for v0.4.1-rc2; rc1 upgrade notes; module versions at v0.4.1-rc2
 **Author:** @wrkode (William Rizzo)
 

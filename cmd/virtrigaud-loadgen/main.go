@@ -209,8 +209,8 @@ type LoadGenerator struct {
 	// pollInterval is how often --observe and the cleanup read an object.
 	pollInterval time.Duration
 
-	// tickInterval is how often a worker starts an operation (one second
-	// unless a test sets it).
+	// tickInterval is how often a worker starts an operation
+	// (defaultTickInterval unless a test sets it).
 	tickInterval time.Duration
 
 	mu        sync.Mutex
@@ -532,13 +532,18 @@ func (lg *LoadGenerator) run(ctx context.Context) error {
 	return nil
 }
 
+// defaultTickInterval is how often each worker starts an operation. Tests of
+// the command shorten it so that a run of a few seconds draws enough
+// operations.
+var defaultTickInterval = time.Second
+
 // worker starts one operation per tick until ctx (the run's duration, or an
 // interrupt) is done. An operation that is in flight when ctx ends, with its
 // --observe, runs to its end; no operation starts after that.
 func (lg *LoadGenerator) worker(ctx context.Context, workerID int) {
 	interval := lg.tickInterval
 	if interval <= 0 {
-		interval = time.Second
+		interval = defaultTickInterval
 	}
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
