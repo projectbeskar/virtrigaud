@@ -312,6 +312,14 @@ func (p *Provider) createVMWithCloudInit(ctx context.Context, vp *VirshProvider,
 		return "", fmt.Errorf("failed to prepare cloud-init: %w", err)
 	}
 
+	// A UEFI create on a host that reports no matching firmware is refused
+	// before the image is copied (uefiFirmwarePreflight).
+	if platform := domainPlatformFor(req.Class); platform.uefi {
+		if err := uefiFirmwarePreflight(ctx, vp, platform, p.detectDomainType(ctx, vp)); err != nil {
+			return "", err
+		}
+	}
+
 	// Ensure default storage pool exists and is active
 	if err := storageProvider.EnsureDefaultStoragePool(ctx); err != nil {
 		return "", fmt.Errorf("failed to ensure storage pool: %w", err)
@@ -489,10 +497,27 @@ func (p *Provider) createVMWithCloudInit(ctx context.Context, vp *VirshProvider,
 			// Short, with libvirt's reason first: the manager shows at most
 			// 256 bytes of it in the VM's status (docs/libvirt-firmware.md
 			// says what to check).
-			return "", contracts.NewInvalidSpecError(
-				"libvirt refused the domain definition (nothing was created): "+refused.detail, err)
+			return "", contracts.NewInvalidSpecError(defineRefusedPrefix+refused.detail, err)
 		}
 		return "", err
+	}
+
+	// A new UEFI domain never starts from a variable store an earlier domain
+	// of the same name left (ensureFreshUEFIVarstore). When that cannot be
+	// ensured, the new domain is undefined again — keeping the file, which is
+	// not its own — and the create fails, as a define failure would.
+	if domainPlatformFor(req.Class).uefi {
+		if err := ensureFreshUEFIVarstore(ctx, vp, domainName); err != nil {
+			if uerr := vp.undefineDomain(context.WithoutCancel(ctx), domainName, undefineKeepNVRAM); uerr != nil {
+				// The domain stays, and references the seed and the disk.
+				log.Printf("ERROR libvirt domain %s was defined but its UEFI variable store could not be ensured "+
+					"fresh (%v), and undefining it failed: %v", domainName, err, uerr)
+				keepSeed, keepDisk = true, true
+				return "", contracts.NewRetryableError("undo the definition of a domain whose UEFI variable store "+
+					"could not be ensured fresh", uerr)
+			}
+			return "", err
+		}
 	}
 	keepSeed = true
 	keepDisk = true
@@ -958,7 +983,7 @@ func (p *Provider) deleteExistingDomainChecked(ctx context.Context, vp *VirshPro
 	}
 
 	// Remove the domain definition, then its planned files explicitly.
-	if err := vp.undefineDomain(ctx, id); err != nil {
+	if err := vp.undefineDomain(ctx, id, plan.nvram); err != nil {
 		return "", contracts.NewRetryableError("failed to undefine domain", err)
 	}
 	p.linkedDeps.drop(plan.uuid)
@@ -1009,6 +1034,9 @@ type domainDeletionPlan struct {
 	// uuid is the domain's UUID (its linked-clone dependents count is dropped
 	// once it is undefined).
 	uuid string
+	// nvram is what the undefine does with the domain's UEFI variable store
+	// (undefineNVRAMFor).
+	nvram undefineNVRAM
 	// name is the domain's name, for the refusals.
 	name string
 	// disks are the canonical host paths of the domain's own disk files that
@@ -1066,7 +1094,8 @@ func (p *Provider) planDomainDeletion(ctx context.Context, vp *VirshProvider, id
 	if doc.Name == "" {
 		doc.Name = id
 	}
-	plan := domainDeletionPlan{uuid: doc.UUID, name: doc.Name, seedDir: doc.cloudInitSeedDir(p.seedRoots()...)}
+	plan := domainDeletionPlan{uuid: doc.UUID, name: doc.Name, seedDir: doc.cloudInitSeedDir(p.seedRoots()...),
+		nvram: undefineNVRAMFor(doc.Name, res.Stdout)}
 
 	var deletable []string
 	// origin maps each deletable (canonical) disk to the path its definition

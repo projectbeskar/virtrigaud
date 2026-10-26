@@ -18,10 +18,12 @@ package libvirt
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -61,9 +63,21 @@ func TestLibvirtDefinitionRefusal(t *testing.T) {
 		})
 	}
 
-	long, ok := libvirtDefinitionRefusal("error: XML error: " + strings.Repeat("x", 2*maxDefineRefusalDetail))
+	long, ok := libvirtDefinitionRefusal("error: XML error: " + strings.Repeat("é", 1024))
 	require.True(t, ok)
-	assert.LessOrEqual(t, len(long), maxDefineRefusalDetail+len("..."), "the detail is bounded")
+	assert.LessOrEqual(t, len(defineRefusedPrefix+long), maxRefusalMessage, "prefix and detail fit the status")
+	assert.True(t, utf8.ValidString(long), "the cut never splits a character")
+
+	// Only virsh's error lines are read: an SSH banner or host-key warning on
+	// stderr never reaches the status, and never makes a refusal.
+	banner := "Warning: Permanently added 'kvm-1.example.com' (ED25519) to the list of known hosts.\n" +
+		"Authorized use only. XML error: not from libvirt\n"
+	_, ok = libvirtDefinitionRefusal(banner + "error: scripted define failure\n")
+	assert.False(t, ok, "a marker outside virsh's error lines is not a refusal")
+	detail, ok := libvirtDefinitionRefusal(banner + libvirtPCIRootRefusal)
+	require.True(t, ok)
+	assert.NotContains(t, detail, "example.com")
+	assert.NotContains(t, detail, "Authorized")
 }
 
 // scriptDefineFailure makes `virsh define` on host fail with stderr.
@@ -118,7 +132,6 @@ func TestCreate_FailedAttemptDiskRemovedOnlyWhenDomainAbsent(t *testing.T) {
 		c := newCreateHost(t)
 		base := c.file(c.images, "ubuntu.qcow2")
 		c.scriptDefineFailure("h1", "")
-		require.NoError(t, os.WriteFile(filepath.Join(c.root, "h1", "fail-define"), nil, 0o600))
 
 		_, err := c.p.Create(ctx, c.createReq(ownerTeamA, base))
 		require.Error(t, err)
@@ -207,4 +220,130 @@ func TestCreate_Clustered_DefineRefusedIsInvalidSpecAndRemovesDisk(t *testing.T)
 		}
 	}
 	assert.True(t, scannedB, "the other host is checked before the disk is removed")
+}
+
+// domCaps is a `virsh domcapabilities` answer whose <os> lists firmware and
+// the loader's secure values.
+func domCaps(firmware, secure []string) string {
+	vals := func(vs []string) string {
+		var b strings.Builder
+		for _, v := range vs {
+			b.WriteString("<value>" + v + "</value>")
+		}
+		return b.String()
+	}
+	return "<domainCapabilities><os supported='yes'><enum name='firmware'>" + vals(firmware) +
+		"</enum><loader supported='yes'><enum name='secure'>" + vals(secure) + "</enum></loader></os></domainCapabilities>"
+}
+
+// TestCreate_UEFIPreflightRefusesBeforeCopying: a host that reports no
+// matching UEFI firmware is refused (InvalidSpec) before the image is copied
+// or anything is defined; a host that reports it, or cannot tell, goes on to
+// the define.
+func TestCreate_UEFIPreflightRefusesBeforeCopying(t *testing.T) {
+	ctx := context.Background()
+	for _, tc := range []struct {
+		desc, caps string
+		secureBoot bool
+		want       string // "" = created
+	}{
+		{"no efi firmware", domCaps(nil, nil), false, errNoUEFIFirmware},
+		{"no secure boot firmware", domCaps([]string{"efi"}, []string{"no"}), true, errNoSecureBootFirmware},
+		{"efi without secure boot is enough for firmware UEFI", domCaps([]string{"efi"}, []string{"no"}), false, ""},
+		{"secure boot firmware", domCaps([]string{"efi"}, []string{"yes", "no"}), true, ""},
+		{"host cannot tell", "", true, ""},
+	} {
+		t.Run(tc.desc, func(t *testing.T) {
+			c := newCreateHost(t)
+			if tc.caps != "" {
+				require.NoError(t, os.WriteFile(filepath.Join(c.root, "h1", "domcaps"), []byte(tc.caps), 0o600))
+			}
+			req := c.createReq(ownerTeamA, c.file(c.images, "ubuntu.qcow2"))
+			req.Class.Firmware = "UEFI"
+			req.Class.SecurityProfile = &contracts.SecurityProfile{SecureBoot: tc.secureBoot}
+
+			_, err := c.p.Create(ctx, req)
+			if tc.want == "" {
+				require.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			assert.True(t, contracts.IsInvalidSpec(err), "%v", err)
+			assert.Contains(t, err.Error(), tc.want)
+			assert.Empty(t, c.log("qemu-img"), "nothing is copied")
+			assert.NotContains(t, c.log("virsh"), "\tdefine ")
+			assert.NoFileExists(t, filepath.Join(c.images, "team-a.web-disk.qcow2"))
+		})
+	}
+}
+
+// TestCreate_FailureBeforeDefineRemovesDisk: a create that fails after the
+// disk was copied but before the define (here: the cloud-init seed cannot be
+// built) removes the disk.
+func TestCreate_FailureBeforeDefineRemovesDisk(t *testing.T) {
+	c := newCreateHost(t)
+	require.NoError(t, os.WriteFile(filepath.Join(c.root, "fail-genisoimage"), nil, 0o600))
+	_, err := c.p.Create(context.Background(), c.createReq(ownerTeamA, c.file(c.images, "ubuntu.qcow2")))
+	require.Error(t, err)
+	assert.Equal(t, []string{filepath.Join(c.images, "team-a.web-disk.qcow2")}, c.removals())
+	assert.NotContains(t, c.log("virsh"), "\tdefine ")
+}
+
+// TestRemoveFailedCreateDisk_OnlyTheVMsOwnUnusedDisk pins what the cleanup
+// of a failed create never removes.
+func TestRemoveFailedCreateDisk_OnlyTheVMsOwnUnusedDisk(t *testing.T) {
+	ctx := context.Background()
+	const domain = "team-a.web"
+
+	t.Run("its own unused disk is removed", func(t *testing.T) {
+		c := newCreateHost(t)
+		disk := c.file(c.images, domain+"-disk.qcow2")
+		c.p.removeFailedCreateDisk(ctx, c.vp, NewStorageProvider(c.vp), domain, disk, nil)
+		assert.Equal(t, []string{disk}, c.removals())
+	})
+
+	t.Run("outside the pool, another name, a symlink: kept", func(t *testing.T) {
+		c := newCreateHost(t)
+		outside := c.file(c.outside, domain+"-disk.qcow2")
+		other := c.file(c.images, "team-b.web-disk.qcow2")
+		link := filepath.Join(c.images, domain+"-disk.qcow2")
+		require.NoError(t, os.Symlink(outside, link))
+		for _, p := range []string{outside, other, link, filepath.Join(c.images, domain+"-migrated.qcow2")} {
+			c.p.removeFailedCreateDisk(ctx, c.vp, NewStorageProvider(c.vp), domain, p, nil)
+		}
+		assert.Empty(t, c.removals())
+	})
+
+	t.Run("used by another domain: kept", func(t *testing.T) {
+		c := newCreateHost(t)
+		disk := c.file(c.images, domain+"-disk.qcow2")
+		c.define("h1", "legacy", "99999999-2222-4333-8444-555555555555",
+			depDomainXML("legacy", "99999999-2222-4333-8444-555555555555", disk, ""))
+		require.NoError(t, os.WriteFile(filepath.Join(c.root, "h1", "names"), []byte("legacy\n"), 0o600))
+		c.p.removeFailedCreateDisk(ctx, c.vp, NewStorageProvider(c.vp), domain, disk, nil)
+		assert.Empty(t, c.removals())
+		assert.FileExists(t, disk)
+	})
+
+	for _, hostBFails := range []bool{false, true} {
+		t.Run(fmt.Sprintf("clustered, host-b check fails=%v", hostBFails), func(t *testing.T) {
+			c := newCreateHost(t)
+			c.host("host-a")
+			c.host("host-b")
+			p, _, _ := routedCluster(t)
+			p.imageDirs = []string{c.images}
+			disk := c.file(c.images, domain+"-disk.qcow2")
+			if hostBFails {
+				require.NoError(t, os.WriteFile(filepath.Join(c.root, "host-b", "fail-list-uuid"), nil, 0o600))
+			}
+			vp := localHostVP("host-a")
+			g := p.newClusterDiskGuard("host-a", ownerTeamA, domain, "", guardOpCreate)
+			p.removeFailedCreateDisk(ctx, vp, NewStorageProvider(vp), domain, disk, g)
+			if hostBFails {
+				assert.Empty(t, c.removals(), "fail closed: a host that cannot be checked keeps the disk")
+			} else {
+				assert.Equal(t, []string{disk}, c.removals(), "every host checked: removed")
+			}
+		})
+	}
 }

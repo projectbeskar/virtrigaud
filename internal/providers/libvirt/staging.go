@@ -24,6 +24,7 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
 )
@@ -230,19 +231,44 @@ var libvirtDefinitionRefusalMarkers = []string{
 	"Unable to find any firmware to satisfy",
 }
 
-// maxDefineRefusalDetail bounds the libvirt message a refusal carries.
-const maxDefineRefusalDetail = 400
+// defineRefusedPrefix starts the InvalidSpec message of a definition libvirt
+// refused; libvirt's reason (libvirtDefinitionRefusal) follows it.
+const defineRefusedPrefix = "libvirt refused the domain definition (the domain was not defined): "
+
+// maxRefusalMessage is how much of a provider's message the manager shows in
+// a VirtualMachine's status (the controller's maxProviderDetailBytes).
+const maxRefusalMessage = 256
+
+// maxDefineRefusalDetail bounds libvirt's reason so that defineRefusedPrefix,
+// the reason and a "..." fit in maxRefusalMessage.
+const maxDefineRefusalDetail = maxRefusalMessage - len(defineRefusedPrefix) - len("...")
 
 // libvirtDefinitionRefusal reports whether stderr of a failed `virsh define`
 // is libvirt refusing the definition itself (libvirtDefinitionRefusalMarkers),
-// and returns libvirt's message: the "error: ..." lines, without virsh's own
-// "Failed to define domain from <staging file>" line, on one bounded line. The
-// message describes the domain XML this provider generated from the request;
-// it carries no user-data (that is in the cloud-init seed, not the XML).
+// and returns libvirt's message on one bounded line. Only virsh's own
+// "error: ..." lines are read — never other text on stderr, such as an SSH
+// banner or host-key warning, which could name the host — and virsh's
+// "Failed to define domain from <staging file>" line is dropped. The message
+// describes the domain XML this provider generated from the request; it
+// carries no user-data (that is in the cloud-init seed, not the XML).
 func libvirtDefinitionRefusal(stderr string) (string, bool) {
+	var parts []string
+	for _, line := range strings.Split(stderr, "\n") {
+		line = strings.TrimSpace(line)
+		msg, ok := strings.CutPrefix(line, "error:")
+		if !ok {
+			continue
+		}
+		msg = strings.TrimSpace(msg)
+		if msg == "" || strings.HasPrefix(msg, "Failed to define domain") {
+			continue
+		}
+		parts = append(parts, msg)
+	}
+	detail := strings.Join(parts, "; ")
 	refused := false
 	for _, m := range libvirtDefinitionRefusalMarkers {
-		if strings.Contains(stderr, m) {
+		if strings.Contains(detail, m) {
 			refused = true
 			break
 		}
@@ -250,18 +276,12 @@ func libvirtDefinitionRefusal(stderr string) (string, bool) {
 	if !refused {
 		return "", false
 	}
-	var parts []string
-	for _, line := range strings.Split(stderr, "\n") {
-		line = strings.TrimSpace(line)
-		line = strings.TrimSpace(strings.TrimPrefix(line, "error:"))
-		if line == "" || strings.HasPrefix(line, "Failed to define domain") {
-			continue
-		}
-		parts = append(parts, line)
-	}
-	detail := strings.Join(parts, "; ")
 	if len(detail) > maxDefineRefusalDetail {
-		detail = detail[:maxDefineRefusalDetail] + "..."
+		cut := maxDefineRefusalDetail
+		for cut > 0 && !utf8.RuneStart(detail[cut]) {
+			cut--
+		}
+		detail = detail[:cut] + "..."
 	}
 	return detail, true
 }

@@ -17,7 +17,13 @@ limitations under the License.
 package libvirt
 
 import (
+	"context"
+	"fmt"
+	"log"
+	"path/filepath"
 	"strings"
+
+	"libvirt.org/go/libvirtxml"
 
 	"github.com/projectbeskar/virtrigaud/internal/providers/contracts"
 )
@@ -212,3 +218,203 @@ func (pl domainPlatform) q35DevicesTailXML(interfacesXML string, tpm bool) strin
 const tpmDeviceXML = `    <tpm model='tpm-tis'>
       <backend type='emulator' version='2.0'/>
     </tpm>`
+
+// errNoUEFIFirmware and errNoSecureBootFirmware are the refusals of
+// uefiFirmwarePreflight, for the requesting VM's status.
+const (
+	errNoUEFIFirmware = "the libvirt host offers no UEFI firmware for the q35 machine type (install an OVMF " +
+		"package, such as ovmf or edk2-ovmf); nothing was created"
+	errNoSecureBootFirmware = "the libvirt host offers no Secure Boot capable UEFI firmware for the q35 machine type " +
+		"(install an OVMF package with Secure Boot builds); nothing was created"
+)
+
+// uefiFirmwarePreflight refuses a UEFI create (pl.uefi) BEFORE any disk is
+// written when the host behind vp positively reports that it has no firmware
+// for it: `virsh domcapabilities` for the q35 machine lists no "efi" value in
+// its firmware enum, or — for secure boot — no "yes" in the loader's secure
+// enum (an InvalidSpec, as libvirt's own refusal at define would be, without
+// copying the image first on every re-check). A host that cannot be asked, or
+// whose answer does not have the enum (an older libvirt), is not refused here:
+// the define decides. Firmware with enrolled keys is not visible in these
+// enums; a host without it is refused by the define.
+func uefiFirmwarePreflight(ctx context.Context, vp *VirshProvider, pl domainPlatform, domainType string) error {
+	if !pl.uefi {
+		return nil
+	}
+	res, err := vp.runVirshCommand(withExpectedFailures(ctx), "domcapabilities",
+		"--machine", machineTypeQ35, "--arch", "x86_64", "--virttype", domainType)
+	if err != nil {
+		log.Printf("INFO Could not read the host's domain capabilities before a UEFI create (the define decides): %v", err)
+		return nil
+	}
+	caps := &libvirtxml.DomainCaps{}
+	if err := caps.Unmarshal(res.Stdout); err != nil || caps.OS == nil || caps.OS.Supported == "no" {
+		return nil
+	}
+	if values, ok := domainCapsEnum(caps.OS.Enums, "firmware"); ok && !containsString(values, "efi") {
+		return contracts.NewInvalidSpecError(errNoUEFIFirmware, nil)
+	}
+	if pl.secureBoot && caps.OS.Loader != nil {
+		if values, ok := domainCapsEnum(caps.OS.Loader.Enums, "secure"); ok && !containsString(values, "yes") {
+			return contracts.NewInvalidSpecError(errNoSecureBootFirmware, nil)
+		}
+	}
+	return nil
+}
+
+// domainCapsEnum returns the values of the enum name in enums, and whether
+// the enum is there at all.
+func domainCapsEnum(enums []libvirtxml.DomainCapsEnum, name string) ([]string, bool) {
+	for _, e := range enums {
+		if e.Name == name {
+			return e.Values, true
+		}
+	}
+	return nil, false
+}
+
+// uefiVarstoreSuffix is the file name suffix of a domain's own UEFI variable
+// store: libvirt names it <domain>_VARS.fd, and a clone's copy is named after
+// the clone (rewriteNVRAMPath).
+const uefiVarstoreSuffix = "_VARS.fd"
+
+// undefineNVRAMFor decides what the undefine of domainName (definition
+// domainXML) does with its UEFI variable store:
+//
+//   - no variable store (no <nvram> and no <os firmware='efi'>): plain
+//     undefine, as for every BIOS domain;
+//   - the domain's own store — <dir>/<domainName>_VARS.fd, or one libvirt has
+//     not named yet — is removed with it (--nvram);
+//   - any other path (an adopted or hand-made domain naming a custom or shared
+//     file) is kept (--keep-nvram) and logged: it is not provably the
+//     domain's own.
+//
+// A definition that cannot be parsed gets a plain undefine: libvirt then
+// refuses a domain whose store exists, which fails the delete (retried)
+// rather than remove a file that may not be the domain's.
+func undefineNVRAMFor(domainName, domainXML string) undefineNVRAM {
+	d, err := parseDomainLibvirtxml(domainXML)
+	if err != nil || d.OS == nil {
+		return undefineNoNVRAM
+	}
+	if d.OS.NVRam == nil && d.OS.Firmware != "efi" {
+		return undefineNoNVRAM
+	}
+	path := ""
+	if d.OS.NVRam != nil {
+		path = strings.TrimSpace(d.OS.NVRam.NVRam)
+	}
+	if path == "" || filepath.Base(path) == domainName+uefiVarstoreSuffix {
+		return undefineRemoveNVRAM
+	}
+	log.Printf("WARN Keeping the UEFI variable store %s of libvirt domain %s: it is not named after the domain, so it "+
+		"may not be its own", path, domainName)
+	return undefineKeepNVRAM
+}
+
+// ensureFreshUEFIVarstore runs once a NEW UEFI domain domainName is defined on
+// the host behind vp, before it is ever started. libvirt creates the domain's
+// variable store from the firmware's template at the first start, but only
+// when no file is at the store's path; a file already there — left by an
+// earlier domain of the same name (`undefine --keep-nvram`, a host restore,
+// a domain made outside VirtRigaud) — would be used as it is, and with it that
+// domain's Secure Boot state (setup mode, other keys). So:
+//
+//   - the firmware libvirt selected (loader, template, store path) is logged
+//     for audit;
+//   - nothing at the store's path: nothing to do (libvirt creates it fresh);
+//   - a regular file no other domain names as its store: removed, so the
+//     first start creates the store from the template;
+//   - a symbolic link, or a file another domain names as its store: refused
+//     (Conflict); nothing is removed.
+//
+// libvirt releases that select the firmware only at start have no store path
+// in the new definition yet: nothing can be checked then, and a file already
+// at the path is used as it is (docs/libvirt-firmware.md).
+//
+// A refusal or a failed check is returned; the caller undefines the new
+// domain, keeping the file, which is not its own.
+func ensureFreshUEFIVarstore(ctx context.Context, vp *VirshProvider, domainName string) error {
+	res, err := vp.runVirshCommand(ctx, "dumpxml", domainName, "--inactive")
+	if err != nil {
+		return contracts.NewRetryableError("read the new domain's definition to check its UEFI variable store", err)
+	}
+	d, err := parseDomainLibvirtxml(res.Stdout)
+	if err != nil {
+		return contracts.NewRetryableError("read the new domain's definition to check its UEFI variable store", err)
+	}
+	var loader, secure, template, store string
+	if d.OS != nil && d.OS.Loader != nil {
+		loader, secure = strings.TrimSpace(d.OS.Loader.Path), d.OS.Loader.Secure
+	}
+	if d.OS != nil && d.OS.NVRam != nil {
+		template, store = d.OS.NVRam.Template, strings.TrimSpace(d.OS.NVRam.NVRam)
+	}
+	if store == "" {
+		log.Printf("INFO libvirt domain %s: its UEFI firmware is selected when the domain starts (this libvirt does "+
+			"not select it at define); its variable store cannot be checked now", domainName)
+		return nil
+	}
+	log.Printf("INFO libvirt domain %s: UEFI firmware selected by libvirt: loader=%s secure=%s nvram-template=%s nvram=%s",
+		domainName, loader, secure, template, store)
+
+	kind, err := runHost(ctx, vp, "sh", "-c", targetKindScript, "sh", store)
+	if err != nil {
+		return contracts.NewRetryableError("check the new domain's UEFI variable store path on the host", err)
+	}
+	switch strings.TrimSpace(kind.Stdout) {
+	case "":
+		return nil
+	case targetKindSymlink:
+		log.Printf("WARN Refusing libvirt domain %s: its UEFI variable store path %s is a symbolic link", domainName, store)
+		return contracts.NewConflictError(fmt.Sprintf(
+			"the UEFI variable store path of libvirt domain %q is a symbolic link on the host; it is never used "+
+				"(details are in the provider log)", domainName), nil)
+	}
+	used, err := nvramUsedByOtherDomain(ctx, vp, domainName, store)
+	if err != nil {
+		return contracts.NewRetryableError("check whether another domain uses the new domain's UEFI variable store path", err)
+	}
+	if used {
+		log.Printf("WARN Refusing libvirt domain %s: its UEFI variable store path %s is another domain's", domainName, store)
+		return contracts.NewConflictError(fmt.Sprintf(
+			"the UEFI variable store path of libvirt domain %q is used by another domain on the host; it is never "+
+				"shared (details are in the provider log)", domainName), nil)
+	}
+	log.Printf("WARN Removing the UEFI variable store %s that an earlier domain named %s left: the new domain starts "+
+		"from the firmware's template, never from an inherited store", store, domainName)
+	if _, err := runHost(ctx, vp, "sudo", "rm", "-f", "--", store); err != nil {
+		return contracts.NewRetryableError("remove a UEFI variable store an earlier domain of the same name left", err)
+	}
+	return nil
+}
+
+// nvramUsedByOtherDomain reports whether a domain on the host behind vp other
+// than domainName names path as its UEFI variable store.
+func nvramUsedByOtherDomain(ctx context.Context, vp *VirshProvider, domainName, path string) (bool, error) {
+	domains, err := vp.listDomains(ctx)
+	if err != nil {
+		return false, err
+	}
+	want := filepath.Clean(path)
+	for _, dom := range domains {
+		if dom.Name == domainName {
+			continue
+		}
+		res, err := vp.runVirshCommand(ctx, "dumpxml", dom.Name)
+		if err != nil {
+			if virshNoDomain(err) {
+				continue // undefined meanwhile
+			}
+			return false, fmt.Errorf("read the definition of domain %s: %w", dom.Name, err)
+		}
+		d, err := parseDomainLibvirtxml(res.Stdout)
+		if err != nil {
+			return false, fmt.Errorf("parse the definition of domain %s: %w", dom.Name, err)
+		}
+		if d.OS != nil && d.OS.NVRam != nil && filepath.Clean(strings.TrimSpace(d.OS.NVRam.NVRam)) == want {
+			return true, nil
+		}
+	}
+	return false, nil
+}
