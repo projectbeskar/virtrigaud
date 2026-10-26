@@ -218,7 +218,15 @@ re-check (`re-checking in 4m0s, at <time>`). An edit of the VM's spec or of the 
 `VMClass`, `VMImage` or `Provider` sends it again within seconds and starts the backoff again,
 as does a refusal with another message. The backoff is kept in the manager's memory and
 recovered from the condition after a manager restart. An answer to the manager's own re-send
-(the marker kept, above) is recorded on `Ready` only and is paced the same way. See
+(the marker kept, above) is recorded on `Ready` only and is paced the same way. The other
+definite refusals a `Create` can get - `NotFound`, `Unimplemented` (`NotSupported`), and a typed
+`Unauthorized` or `QuotaExceeded` - were re-sent every 5 seconds and follow the same backoff
+now, on a single host and on a clustered Provider; they keep their reason (`ProviderError`)
+and their condition (`Provisioning`, or `Ready` for an answer to a re-send), and their message
+reads `Failed to create VM (non-retryable; re-checking in ...): <detail>`. A `Conflict`
+(`AlreadyExists`) keeps its 2-minute re-check, an untyped `FailedPrecondition` or
+`PermissionDenied` keeps the `CreateRefused` backoff (15 seconds doubling to 5 minutes), and a
+"not performed" answer and every failure whose outcome is unknown keep their cadence. See
 [A refused VM create is retried with a backoff](upgrading.md#a-refused-vm-create-is-retried-with-a-backoff).
 
 **`SnapshotRevert`** carries no marker, but the libvirt provider answers it the same way

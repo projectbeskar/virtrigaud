@@ -469,6 +469,17 @@ No action is required; this changes how often a refused create is sent again.
   VirtualMachine, its VMClass, VMImage or Provider changes): <detail>`. The reason, the
   provider's detail, the events and the metric are unchanged. A `Conflict` (`ProviderConflict`)
   keeps its fixed 2-minute re-check and its message.
+- **The other definite refusals are paced the same way.** A `Create` answered `NotFound`,
+  `Unimplemented` (`NotSupported`), or a typed `Unauthorized` or `QuotaExceeded` (single-host and
+  clustered Providers) was re-sent every 5 seconds; it now follows the same backoff and the same
+  resets. Its reason stays `ProviderError` on the same condition (`Provisioning`, or `Ready`
+  for an answer to a re-send); its message was `Failed to create VM: <detail>` and is now
+  `Failed to create VM (non-retryable; re-checking in <wait>, at <time>, or at once when the
+  VirtualMachine, its VMClass, VMImage or Provider changes): <detail>`. Unchanged: an untyped
+  `FailedPrecondition` or `PermissionDenied` (`CreateRefused`, 15 seconds doubling to
+  5 minutes), a "not performed" answer, and every failure whose outcome is unknown or that may
+  pass (a transport error, an unavailable host, a timeout), which are still retried every
+  5 seconds or on their own backoff.
 - **What retries at once.** A change to the `VirtualMachine`'s spec, or to the spec of its
   `VMClass`, `VMImage` or `Provider` (the manager now watches those three for a VM whose create
   was refused), sends the create again within seconds and starts the backoff again from
@@ -478,7 +489,7 @@ No action is required; this changes how often a refused create is sent again.
   at most 10 minutes later.
   Status-only updates and label or annotation changes do not count.
 - **Manager restarts.** The backoff is kept in the manager's memory and recovered after a
-  restart from the `Ready` message, so a restart does not send the create again early (one
+  restart from the `Ready` or `Provisioning` message, so a restart does not send the create again early (one
   whose re-check passed while no manager ran is sent at once, and the backoff goes on from
   where it was). A change to the `VMClass`, `VMImage`, `Provider` or networks made while no
   manager ran is picked up at that re-check. A VM refused by a v0.4.0 manager (whose message
@@ -491,7 +502,14 @@ No action is required; this changes how often a refused create is sent again.
   `qemu-img` cannot read, an unsupported format). The VM keeps `Ready=False/ValidationError`
   ("Image prepare failed: ...") and is re-checked when the wait ends; a VM reconciled during the
   wait shows `Ready=False/WaitingForDependencies` with "... prepared again in <wait>". This wait
-  is in memory only: after a manager restart the first re-check sends the prepare again.
+  is in memory only: after a manager restart the first re-check sends the prepare again. An
+  `ImagePrepare` refused with `NotFound`, `Unimplemented`, `PermissionDenied`, `Unauthorized` or
+  `QuotaExceeded`, which was re-sent every 5 seconds by each VM using the image, is paced by the
+  same backoff; the `VMImage`'s status is not changed for these.
+- **No more panic for a new Provider.** Reconciling a VM whose `Provider` had no
+  `status.runtime` yet (the Provider controller had not reconciled it) dereferenced a nil
+  pointer in a log line and panicked (recovered, and retried with rate limiting). It now
+  reports the provider as unreachable, as it does for a runtime that is not ready.
 - **Unchanged.** A VM refused before any provider call (a `VMClass` value or a
   `spec.resources` override out of range, `ValidationError`) is still re-checked every
   30 seconds, and is now also re-checked at once when its `VMClass` changes. A refused

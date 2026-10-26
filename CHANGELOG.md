@@ -5,6 +5,30 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-10-26 06:27] - Every definite create refusal is paced; no panic for a Provider without status.runtime
+**Author:** @wrkode (William Rizzo)
+
+### Fixed
+- `internal/controller/virtualmachine_controller.go`: reconciling a VM whose `Provider` has no `status.runtime` yet (not reconciled by the Provider controller) dereferenced the nil pointer in a log line and panicked (recovered, rate-limited retry). The log values now come from `providerRuntimeState`; the VM gets the usual "cannot reach this VirtualMachine's Provider" condition. The Provider controller initialises the field before its own dereferences and the remote resolver checks it; no other unguarded dereference in `internal/` or `cmd/`.
+
+### Changed
+- `internal/controller/virtualmachine_create_refusal.go`, `internal/controller/virtualmachine_controller.go`, `internal/controller/virtualmachine_clustered.go`: a `Create` answered `NotFound`, `NotSupported` (gRPC `Unimplemented`), or a typed `Unauthorized` or `QuotaExceeded` (single-host and clustered) was re-sent every 5 s; it now follows the create-refusal backoff (30 s doubling to 10 min, reset by a spec change of the VM, its VMClass, VMImage, Provider or networks, or another answer), keeping its reason (`ProviderError`) and condition (`Provisioning`, or `Ready` for an answer to a re-send). Its message was `Failed to create VM: <detail>` and is now `Failed to create VM (non-retryable; re-checking in <wait>, at <time>, or at once when the VirtualMachine, its VMClass, VMImage or Provider changes): <detail>`; it is recovered after a restart from `Ready` or `Provisioning` (the latest next re-check), and such a VM is in the `virtrigaud.io/create-refusal-ref` index. Unchanged: `Conflict`, the untyped `FailedPrecondition`/`PermissionDenied` `CreateRefused` backoff, `VM_DISK_CHECK_FAILED`/`VM_OPERATION_FAILED`, `CREATE_NOT_PERFORMED`, and every retryable or unknown outcome.
+- `internal/controller/image_prepare_backoff.go`, `internal/controller/virtualmachine_image_prepare.go`: an `ImagePrepare` refused with `NotFound`, `NotSupported`, an untyped `PermissionDenied`, or a typed `Unauthorized` or `QuotaExceeded` (was re-sent every 5 s by each VM using the image) is paced by the `source-rejected` backoff; the VMImage status is not changed for these.
+- `docs/upgrading.md`, `docs/provider-call-outcomes.md`: the paced refusals and the panic fix.
+
+### Added
+- `internal/controller/virtualmachine_provider_runtime_test.go`: a reconcile against a Provider without `status.runtime` does not panic (resolver failing and succeeding).
+- `internal/controller/virtualmachine_create_refusal_paced_test.go`: which answers are paced and which are not; each paced answer backs off with its reason and condition kept and retries at once on a spec change; restart recovery from `Provisioning`; an answer to a re-send records `Ready` only; the clustered path; the index; transient failures keep 5 s; image prepare refusals are paced and leave the VMImage status alone.
+
+### Why
+A refusal that cannot change until something is edited was re-sent every 5 seconds forever; if a provider returns one after work on the host (a libvirt create copies the base image first), each re-send repeats that work. A Provider created a moment before its VMs made every VM reconcile panic until the Provider controller caught up.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-10-26 03:00] - A refused VM create is retried with a backoff, and at once when its VMClass, VMImage, Provider or spec changes
 **Author:** @wrkode (William Rizzo)
 
