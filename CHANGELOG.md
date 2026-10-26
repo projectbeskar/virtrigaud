@@ -31,6 +31,30 @@ Lab findings on v0.4.1-rc1 (PVE 9.2): the seed CD-ROM was in the boot order, a c
 - [ ] Config change only
 - [ ] Documentation only
 
+## [2026-10-26 01:06] - Provider capabilities re-read after a provider roll; ProviderAvailable follows the ready replicas
+**Author:** @wrkode (William Rizzo)
+
+### Fixed
+- `internal/controller/provider_capabilities_refresh.go` (new), `internal/controller/provider_controller.go`: `Provider.status.reportedCapabilities` kept the previous image's answer after a roll of `spec.runtime.image` (v0.4.1-rc1 lab finding B2): the manager read the capabilities over the cached client, whose connection a terminating pod of the old ReplicaSet could still answer, and nothing reconciled the healthy `Provider` again once that pod had exited. The capabilities are now read only when the runtime Deployment's rollout is complete (`observedGeneration` current, every replica updated and available, none of an older ReplicaSet left), over a connection opened for the read; again when the runtime revision (Deployment UID and generation) changes; once more after the pods' termination grace period plus 15 s (45 s), so a pod that was still terminating cannot have answered; every 10 minutes while the `Provider` is healthy; and one minute after a failed read (the recorded capabilities are kept). What was read for which revision is kept in the manager's memory; a manager that starts reads every `Provider` again. The reconciler's `RemoteResolver` field is replaced by `CapabilityReader` (`ProviderCapabilityReader`).
+- `internal/controller/provider_controller.go`: a `Provider` whose Deployment has no ready replica is now `ProviderAvailable=False` (reason `DeploymentNotReady`) and `status.healthy=false`; both stayed `True` once set. `VMMigration` validation and `VMAdoption` wait for the provider again, as for a `Provider` never ready.
+
+### Added
+- `internal/transport/grpc/client.go`: `ReadCapabilities` asks a provider for its capabilities over a connection opened for that call and closed after it, without a circuit breaker and without resetting the per-provider task gauge; `NewClient` and it share `dialProvider`. `internal/runtime/remote/resolver.go`: `Resolver.ReadCapabilities` uses it with the `Provider`'s TLS material and leaves the client cache untouched.
+- Tests: `internal/controller/provider_capabilities_refresh_test.go` (rollout completeness, read policy, settle delay, requeue), `internal/controller/provider_capabilities_refresh_envtest_test.go` (an image change re-reads the capabilities from the new runtime only after the rollout completes, never mid-rollout, with no hot loop, and the status-reading gates see the new value; `ProviderAvailable`/`healthy` follow the ready replicas), `internal/transport/grpc/read_capabilities_test.go`, `internal/runtime/remote/read_capabilities_test.go`.
+
+### Changed
+- `api/infra.virtrigaud.io/v1beta1/provider_types.go`, `config/crd/bases/infra.virtrigaud.io_providers.yaml`: the descriptions of `status.healthy` and `status.reportedCapabilities` say when they change. No schema change.
+- `docs/upgrading.md`: "Provider status after a provider roll" in the v0.4.0 to v0.4.1 guide, and a verification step.
+
+### Why
+Gates that read `reportedCapabilities` (image import and artifact identity, clustered resizes, snapshot reverts, migration backends) acted on a capability set the running provider no longer advertised, until something else re-drove the `Provider`; and `healthy` reported a provider without a ready pod as healthy.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-10-26 00:58] - virtrigaud-loadgen: no operations after the duration, vmCount caps the VMs, interrupted runs exit non-zero
 **Author:** @wrkode (William Rizzo)
 
