@@ -30,10 +30,10 @@ import (
 // redact them from what they answer and log (the vSphere and Proxmox
 // ExportDisk and ImportDisk at their RPC boundary); the manager logs the staging URL
 // it sends as its scheme only (logging.RedactLocation), and redacts every
-// provider answer it writes into the VMMigration's failure (the status
-// message, the Failed and Ready conditions, the Warning event) or logs while
-// it exports or imports the disk, whatever the provider: a provider's answer
-// is not trusted to be clean.
+// provider answer it writes into a VMMigration failure (migrationStagingDetail:
+// the status message, the Failed and Ready conditions, the Warning event and
+// the failure's log line) or logs while it exports or imports the disk,
+// whatever the provider: a provider's answer is not trusted to be clean.
 
 // migrationStagingLocations returns the texts that locate m's staging
 // storage, for storage.RedactLocations: the S3 bucket, key prefix and
@@ -59,6 +59,15 @@ func migrationStagingLocations(m *infrav1beta1.VMMigration) []string {
 // replaced (storage.RedactLocations).
 func redactMigrationStagingText(m *infrav1beta1.VMMigration, text string) string {
 	return storage.RedactLocations(text, migrationStagingLocations(m)...)
+}
+
+// migrationStagingDetail is migrationFailureDetail(err) — a provider's answer
+// for a VMMigration failure's status message, conditions and event — redacted
+// of m's staging locations and of every URL (redactMigrationStagingText). Only
+// the provider-derived part is redacted, so the controller's own text is never
+// altered by a location that happens to be a common word.
+func migrationStagingDetail(m *infrav1beta1.VMMigration, err error) string {
+	return redactMigrationStagingText(m, migrationFailureDetail(err))
 }
 
 // redactMigrationStagingError is redactMigrationStagingText on err's text,

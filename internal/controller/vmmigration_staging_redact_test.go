@@ -145,6 +145,9 @@ func TestMigrationExport_StagingLocationNeverLogged(t *testing.T) {
 					assert.NotContains(t, text, l)
 				}
 			}
+			if !contracts.IsInvalidSpec(answer) && !contracts.IsHostUnavailable(answer) {
+				assert.True(t, migrationRequested(got, longOpExport), "an unknown outcome keeps the marker")
+			}
 			if contracts.IsInvalidSpec(answer) {
 				assert.Equal(t, infrav1beta1.MigrationPhaseFailed, got.Status.Phase)
 				assert.Contains(t, got.Status.Message, "MNT3ERR_ACCES", "the provider's answer is kept, redacted")

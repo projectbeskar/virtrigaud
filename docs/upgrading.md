@@ -307,9 +307,9 @@ appears in the provider or manager logs, nor in a provider's errors:
   SDK must not put a location in either.
 - **The manager** logs the staging URL of `Starting disk export` and `Starting disk import` as
   `<scheme>://<redacted>`, and replaces the `VMMigration`'s staging bucket, key prefix, endpoint,
-  NFS server, export and path, and every URL, in a migration failure's status message, `Failed` and
-  `Ready` conditions and Warning event, and in its export, import and staged-disk cleanup log
-  lines. The cause stays readable (for example `MNT3ERR_ACCES` or `SignatureDoesNotMatch`).
+  NFS server, export and path, and every URL, in the provider answer that a migration failure's
+  status message, `Failed` and `Ready` conditions and Warning event quote, and in its export,
+  import and staged-disk cleanup log lines. The cause stays readable (for example `MNT3ERR_ACCES` or `SignatureDoesNotMatch`).
 
 If you collected provider or manager logs from v0.4.0 for support or audit, they still hold these
 locations; treat them as sensitive. A log query or alert that matched a staging URL, bucket or

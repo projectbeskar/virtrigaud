@@ -284,7 +284,7 @@ func (r *VMMigrationReconciler) discardUnconfirmedSnapshot(ctx context.Context, 
 		if err := r.deleteSourceSnapshot(ctx, migration); err != nil {
 			logger.Error(err, "Could not remove the unconfirmed source snapshot", "snapshot_id", snapshotID)
 			return r.transitionToFailed(ctx, migration,
-				"Could not remove an earlier source snapshot that was never confirmed complete: "+migrationFailureDetail(err))
+				"Could not remove an earlier source snapshot that was never confirmed complete: "+migrationStagingDetail(migration, err))
 		}
 		r.Recorder.Event(migration, corev1.EventTypeNormal, migrationReasonSnapshotDiscarded,
 			fmt.Sprintf("Removed source snapshot %q, which was never confirmed complete; a new one is taken", snapshotID))

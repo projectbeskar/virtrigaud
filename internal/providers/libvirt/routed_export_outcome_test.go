@@ -145,7 +145,9 @@ func TestRoutedExport_NFSMountRefusedIsNotPerformed(t *testing.T) {
 // and its log names no location either.
 func TestRoutedExport_NFSUnknownOutcomesStayUnknown(t *testing.T) {
 	for name, local := range map[string]map[string]string{
-		"the convert's session drops":    {"dead-qemu-img-convert": ""},
+		"the convert's session drops": {"dead-qemu-img-convert": ""},
+		// 137 is also timeout(1)'s kill status: classifyRoutedFailure answers
+		// it "stopped" before hostCommandEnded is asked.
 		"the convert is killed (137)":    {"exit-qemu-img-convert": "137"},
 		"the convert is signalled (143)": {"exit-qemu-img-convert": "143"},
 	} {
@@ -214,6 +216,17 @@ func TestRoutedExport_S3UnknownOutcomesStayUnknown(t *testing.T) {
 		assert.True(t, contracts.HasErrorInfoReason(err, contracts.VMOperationFailedReason), "%v", err)
 		assert.Equal(t, []string{r2S3Key}, fx.s3.Keys(), "the object was published although the call failed")
 		assertNoStagedLocation(t, logs.String(), err, r2S3Bucket, r2S3Key, strings.TrimPrefix(fx.s3.Endpoint(), "http://"))
+	})
+	t.Run("the host connection is lost after the flatten (a stageBefore failure): R25, never definite", func(t *testing.T) {
+		fx := newRoutedS3Export(t)
+		fx.p.routedDiskConnFn = func(c libvirtConn) libvirtConn {
+			return &streamScriptedConn{libvirtConn: c, stream: func(context.Context, ...string) (io.ReadCloser, error) {
+				return nil, &VirshError{Command: "cat", ExitCode: -1, Stderr: "ssh: connection lost"}
+			}}
+		}
+		_, err := NewServer(fx.p).ExportDisk(context.Background(), fx.request(t))
+		assert.Equal(t, outcomeUnknown, hostOutcomeOf(t, err), "the flatten was sent: the outcome is unknown (R25)")
+		assert.Nil(t, definiteStatusError(err), "never a definite answer: %v", err)
 	})
 	t.Run("the flatten's session drops", func(t *testing.T) {
 		fx := newRoutedS3Export(t)
