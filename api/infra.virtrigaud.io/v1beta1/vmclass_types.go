@@ -51,12 +51,13 @@ type VMClassSpec struct {
 	// +kubebuilder:validation:XValidation:rule="type(self) == int || ((!self.matches('[eE][+]?0*[0-9]$') || !self.matches('^[+]?0*[1-9][0-9]{5}')) && (!self.matches('[eE][+]?0*1[0-3]$') || !self.matches('^[+]?0*[1-9][0-9]')) && (!self.matches('[eE]-') || !self.matches('^[+]?0*[1-9][0-9]{14}')))",message="memory must be a non-negative quantity below 100Ti"
 	Memory resource.Quantity `json:"memory"`
 
-	// Firmware specifies the firmware type: BIOS (the default) or UEFI. Only
-	// the vSphere provider reads it: UEFI selects EFI firmware and any other
-	// value selects BIOS, except that securityProfile.secureBoot or
-	// tpmEnabled force EFI firmware. The libvirt provider selects UEFI
-	// firmware only through securityProfile.secureBoot; Proxmox and mock
-	// ignore this field.
+	// Firmware specifies the firmware type: BIOS (the default) or UEFI. The
+	// vSphere and libvirt providers read it: UEFI selects EFI firmware and any
+	// other value (EFI included) selects BIOS, except that
+	// securityProfile.secureBoot (and, on vSphere, tpmEnabled) force EFI
+	// firmware. On libvirt, UEFI is OVMF without Secure Boot on the q35
+	// machine type, chosen by libvirt from the host's installed firmware
+	// (docs/libvirt-firmware.md). Proxmox and mock ignore this field.
 	// +optional
 	// +kubebuilder:default="BIOS"
 	// +kubebuilder:validation:Enum=BIOS;UEFI;EFI
@@ -138,9 +139,9 @@ const (
 	FirmwareTypeBIOS FirmwareType = "BIOS"
 	// FirmwareTypeUEFI indicates UEFI firmware
 	FirmwareTypeUEFI FirmwareType = "UEFI"
-	// FirmwareTypeEFI is accepted by the schema, but the vSphere provider
-	// recognises only UEFI: there, EFI selects BIOS firmware (unless secure boot
-	// or a TPM forces EFI).
+	// FirmwareTypeEFI is accepted by the schema, but the vSphere and libvirt
+	// providers recognise only UEFI: there, EFI selects BIOS firmware (unless
+	// secure boot — or, on vSphere, a TPM — forces EFI).
 	FirmwareTypeEFI FirmwareType = "EFI"
 )
 
@@ -229,7 +230,10 @@ type PerformanceProfile struct {
 	VirtualizationBasedSecurity bool `json:"virtualizationBasedSecurity,omitempty"`
 
 	// NestedVirtualization enables nested virtualization. It is acted on by
-	// vSphere and libvirt; Proxmox and mock ignore it.
+	// vSphere and libvirt; on libvirt the host CPU is passed through
+	// (host-passthrough), and the guest sees VT-x or AMD-V only when the
+	// host's kvm_intel or kvm_amd module has nesting enabled. Proxmox and mock
+	// ignore it.
 	// +optional
 	// +kubebuilder:default=false
 	NestedVirtualization bool `json:"nestedVirtualization,omitempty"`
@@ -246,8 +250,9 @@ type PerformanceProfile struct {
 // VMClassSpec.SecurityProfile for which fields are acted on.
 type SecurityProfile struct {
 	// SecureBoot enables secure boot. vSphere forces EFI firmware and enables
-	// secure boot; libvirt requests secure-boot OVMF firmware on a q35
-	// machine type. Proxmox and mock ignore it.
+	// secure boot; libvirt has libvirt select a Secure Boot OVMF build with the
+	// default keys enrolled, with SMM, on the q35 machine type (the host needs
+	// an OVMF package; docs/libvirt-firmware.md). Proxmox and mock ignore it.
 	// +optional
 	// +kubebuilder:default=false
 	SecureBoot bool `json:"secureBoot,omitempty"`
@@ -267,7 +272,8 @@ type SecurityProfile struct {
 	TPMVersion string `json:"tpmVersion,omitempty"`
 
 	// VTDEnabled enables Intel VT-d or AMD-Vi. vSphere sets vvtd.enable;
-	// libvirt requests an emulated IOMMU. Proxmox and mock ignore it.
+	// libvirt adds an emulated Intel IOMMU with interrupt remapping, which
+	// needs the q35 machine type. Proxmox and mock ignore it.
 	// +optional
 	// +kubebuilder:default=false
 	VTDEnabled bool `json:"vtdEnabled,omitempty"`
