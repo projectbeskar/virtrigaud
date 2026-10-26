@@ -184,12 +184,13 @@ the VM's whole life; keep long-lived secrets out of it.
 - **A clone does not carry its source's user-data.** A clone of a VM that has a seed, and any
   `VMClone` that gives inline user-data, gets a seed of its own: `instance-id`
   `virtrigaud-<UID of the target VirtualMachine>`, its own hostname, the `VMClone`'s inline
-  user-data (else an empty `#cloud-config`) and DHCP on its own MACs. libvirt and vSphere clones
+  user-data (else a `#cloud-config` that configures nothing) and DHCP on its own MACs. libvirt and vSphere clones
   re-run the source's user-data; a Proxmox clone does not, because its disk already holds what
   the user-data applied. Its first boot is a new cloud-init instance: new SSH host keys, and
   per-instance modules run again with the distribution's defaults where the user-data is empty
   (on most cloud images `disable_root: true`, `ssh_pwauth` back to the image default, and the
-  default user created). Give the `VMClone` inline user-data that sets what the clone must keep.
+  default user created; the source's users may be left without their sudo rule). Give the
+  `VMClone` inline user-data that sets what the clone must keep (users, keys, sudo rules).
   A clone of a VM without a seed and without inline user-data is unchanged.
   → [Lifecycle](proxmox-cloud-init-storage.md#lifecycle)
 - **Linked clones.** A `VMClone` with `spec.options.type: LinkedClone` for a Proxmox Provider is
@@ -199,9 +200,12 @@ the VM's whole life; keep long-lived secrets out of it.
   said), so a clone's memory can differ from v0.4.0's for the same `VMClone`.
 - **The boot order of a VM cloned from a template with user-data** names only its boot disk (the
   template's first boot disk, else its `bootdisk`, else the first disk) and no longer the
-  cloud-init slot. A `VMClone` and a template `Create` without user-data keep the template's or
-  source's order. Prepare templates with `qm set <vmid> --boot order=<boot disk>` (for example
-  `scsi0`).
+  cloud-init slot. Every VM that gets a seed (any `Create` with user-data, a `VMClone` that gets
+  one) ends with the seed out of its boot order; a `VMClone` keeps its source's order otherwise.
+  A `VMClone` and a template `Create` without user-data keep the template's or source's order.
+  Prepare templates with `qm set <vmid> --boot order=<boot disk>` (for example `scsi0`). VMs
+  made by v0.4.1-rc1 can have the seed's slot at the end of their order (`order=scsi0;ide2`):
+  harmless, as the seed is not bootable; remove it with `qm set <vmid> --boot order=scsi0`.
   → [Boot order](proxmox-cloud-init-storage.md#boot-order)
 - **A cloud-init drive left on `local` by v0.4.0** can be moved with
   `qm set <vmid> --ide2 <storage>:cloudinit` on the node.
