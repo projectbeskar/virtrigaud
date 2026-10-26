@@ -443,13 +443,13 @@ func TestEnsureImageOnProvider_RejectedSourceBacksOff(t *testing.T) {
 	assert.True(t, errors.Is(ensure(), errImagePrepareHold), "the second wait is a minute")
 	assert.Equal(t, 2, inst.prepareCalls)
 	now = now.Add(time.Second)
-	ensure()
+	assert.True(t, contracts.IsInvalidSpec(ensure()), "sent again when the wait is over")
 	assert.Equal(t, 3, inst.prepareCalls)
 
 	// A corrected spec.source is a new digest: prepared at once.
 	fixed := reloadImage(t, r, img.Name)
 	fixed.Spec.Source.Libvirt.URL = "https://images.example.com/noble.qcow2"
 	require.NoError(t, r.Update(context.Background(), fixed))
-	ensure()
+	assert.True(t, contracts.IsInvalidSpec(ensure()), "a new source is sent at once")
 	assert.Equal(t, 4, inst.prepareCalls)
 }
