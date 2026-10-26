@@ -322,6 +322,48 @@ a dedicated ServiceAccount and the hardened security context. If you installed i
 the chart's release. The chart's [README](../charts/virtrigaud-provider-runtime/README.md) maps
 its values to `Provider` fields.
 
+### Provider status after a provider roll
+
+In v0.4.0, `Provider.status.reportedCapabilities` could keep what the previous provider image
+reported after a roll of `spec.runtime.image`: the manager read the capabilities over its cached
+connection, which a pod of the old ReplicaSet could still answer while it terminated, and nothing
+reconciled the `Provider` again once that pod had exited. The gates that read this status (image import and
+artifact identity, clustered resizes, snapshot reverts, migration backends) then acted on the old
+image's capabilities. The manager now:
+
+- reads the capabilities only once the provider Deployment's rollout is complete (the new spec
+  observed, no replica of the old ReplicaSet left, at least one current replica available; a
+  current replica that stays unavailable does not stop the read), over a connection opened for
+  the read, which the Service routes to a current pod;
+- reads them again when the Deployment changes (a new image, or any other change to its spec),
+  once more 45 seconds after the rollout completed (the pods' 30-second termination grace period
+  plus 15 seconds, so an old pod that was still terminating has exited), every 10 minutes while
+  the `Provider` is healthy, and one minute after a failed read, not sooner
+  (`CapabilitiesReported=False`, reason `CapabilitiesUnavailable`; the recorded capabilities are
+  kept). A read gives up after 10 seconds.
+
+Expect `reportedCapabilities` to show the new image's answer within about a minute of the
+rollout completing. A provider image re-pulled under the same tag (no Deployment change) is
+caught by the 10-minute read. `status.lastHealthCheck` is now refreshed at least every 10 minutes
+while the `Provider` is healthy and its runtime is rolled out. While a rollout is stuck (the new
+pods never become available), the capabilities of the old pods, which still serve, are kept.
+
+`status.healthy` and the `ProviderAvailable` condition now follow the Deployment: with no ready
+pod, `ProviderAvailable` is `False` (reason `DeploymentNotReady`) and `healthy` is `false`; in
+v0.4.0 they stayed `True` once set. A reconcile that fails before it reaches the Deployment (for
+example a TLS-posture refusal) leaves them as last observed. A `VMMigration` waits in validation, and `VMAdoption` waits,
+until the provider is available again, as they did for a `Provider` that had never been ready. A
+vSphere or clustered `Provider` (one replica, `Recreate` strategy) is briefly not available during
+each of its rollouts.
+
+The VMClone linked-clone check does not read this status: it asks the running provider at clone
+time, over the manager's shared connection, which can still reach an old pod while that pod
+terminates after a roll (up to its 30-second grace period).
+
+The `virtrigaud_manager_reconcile_total{kind="Provider"}` reconciles of a healthy `Provider` are
+now counted as `outcome="requeue"` (each schedules the next capability read) rather than
+`"success"`; dashboards that chart the outcome change shape, alerts on `outcome="error"` do not.
+
 ### Other changes
 
 - **API and proto comments.** The descriptions in the CRDs and `provider.proto` are corrected
@@ -342,6 +384,12 @@ its values to `Provider` fields.
 - libvirt: create a `VMSnapshot` whose name matches an existing overlay (for a test VM) and check
   it ends `Failed` with the "overlay file ... already exists" message and the file is untouched.
 - A `VMClone` with `LinkedClone` for a Proxmox Provider fails with `LinkedCloneUnsupported`.
+- After each provider roll, once `kubectl -n <namespace> rollout status
+  deployment/virtrigaud-provider-<namespace>-<provider name>` reports the rollout complete,
+  `kubectl -n <namespace> get provider <provider name> -o jsonpath='{.status.reportedCapabilities}'`
+  shows the new image's capabilities within about a minute (for a Proxmox provider,
+  `supportsLinkedClones` is absent or `false`), and `.status.lastHealthCheck` is less than 10
+  minutes old.
 - With webhooks enabled, `kubectl apply` of a test `VMClone` with `sysprep.productKey` set prints
   one admission warning naming the field, and once the clone starts the `VMClone` has one
   `CustomizationSecretNotSent` event; neither shows the value.

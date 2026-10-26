@@ -713,7 +713,7 @@ func (r *VMAdoptionReconciler) getProviderInstance(ctx context.Context, provider
 // isProviderReady checks if provider is ready for adoption
 func (r *VMAdoptionReconciler) isProviderReady(provider *infravirtrigaudiov1beta1.Provider) bool {
 	// Check ProviderAvailable condition
-	providerAvailable := k8s.GetCondition(provider.Status.Conditions, "ProviderAvailable")
+	providerAvailable := k8s.GetCondition(provider.Status.Conditions, providerConditionAvailable)
 	return providerAvailable != nil && providerAvailable.Status == metav1.ConditionTrue
 }
 

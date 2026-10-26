@@ -110,23 +110,9 @@ func NewClient(ctx context.Context, endpoint string, providerType string, provid
 	// Connection timeout is handled by grpc.NewClient internally
 	_ = ctx // Context available for future timeout implementation
 
-	var opts []grpc.DialOption
-
-	if tlsConfig != nil {
-		creds, err := buildTLSCredentials(tlsConfig)
-		if err != nil {
-			return nil, fmt.Errorf("failed to build TLS credentials: %w", err)
-		}
-		opts = append(opts, grpc.WithTransportCredentials(creds))
-	} else {
-		opts = append(opts, grpc.WithTransportCredentials(insecure.NewCredentials()))
-	}
-
-	opts = append(opts, providerCallDialOptions(providerType, cb)...)
-
-	conn, err := grpc.NewClient(endpoint, opts...)
+	conn, err := dialProvider(endpoint, providerType, cb, tlsConfig)
 	if err != nil {
-		return nil, fmt.Errorf("failed to connect to provider at %s: %w", endpoint, err)
+		return nil, err
 	}
 
 	client := providerv1.NewProviderClient(conn)
@@ -148,6 +134,53 @@ func NewClient(ctx context.Context, endpoint string, providerType string, provid
 		tasks:         taskMetrics,
 		inflightTasks: make(map[string]struct{}),
 	}, nil
+}
+
+// dialProvider creates the gRPC connection to the provider at endpoint with
+// the transport credentials of tlsConfig (plaintext when nil) and the shared
+// call options (providerCallDialOptions). The connection is lazy: it connects
+// on its first RPC.
+func dialProvider(endpoint, providerType string, cb *resilience.CircuitBreaker, tlsConfig *TLSConfig) (*grpc.ClientConn, error) {
+	var opts []grpc.DialOption
+	if tlsConfig != nil {
+		creds, err := buildTLSCredentials(tlsConfig)
+		if err != nil {
+			return nil, fmt.Errorf("failed to build TLS credentials: %w", err)
+		}
+		opts = append(opts, grpc.WithTransportCredentials(creds))
+	} else {
+		opts = append(opts, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	}
+	opts = append(opts, providerCallDialOptions(providerType, cb)...)
+
+	conn, err := grpc.NewClient(endpoint, opts...)
+	if err != nil {
+		return nil, fmt.Errorf("failed to connect to provider at %s: %w", endpoint, err)
+	}
+	return conn, nil
+}
+
+// ReadCapabilities asks the provider at endpoint for its capabilities
+// (GetCapabilities) over a connection opened for this one call and closed
+// after it. A provider Client keeps its connection for its whole life, and a
+// connection made through a Service stays with the pod it reached: after a
+// provider rollout it can still be answered by a pod of the superseded
+// ReplicaSet until that pod exits. A new connection is routed by the Service
+// to a current, ready endpoint, so the Provider controller reads the
+// capabilities it records on Provider status this way.
+//
+// It has no circuit breaker (a failed read is the caller's to retry and must
+// not open the breaker that guards the Provider's other RPCs) and records no
+// per-VM-operation or task metrics; the provider RPC metrics are recorded as
+// for any RPC.
+func ReadCapabilities(ctx context.Context, endpoint, providerType string, tlsConfig *TLSConfig) (contracts.Capabilities, error) {
+	conn, err := dialProvider(endpoint, providerType, nil, tlsConfig)
+	if err != nil {
+		return contracts.Capabilities{}, err
+	}
+	defer conn.Close() //nolint:errcheck // closing a one-call connection; nothing to recover
+	c := &Client{conn: conn, client: providerv1.NewProviderClient(conn)}
+	return c.GetCapabilities(ctx)
 }
 
 // providerCallDialOptions are the dial options every provider client is built

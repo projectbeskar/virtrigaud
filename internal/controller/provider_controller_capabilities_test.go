@@ -34,7 +34,7 @@ import (
 // panic, must set CapabilitiesReported=False with the Unavailable reason, and
 // must leave ReportedCapabilities untouched (nil here).
 func TestReconcileReportedCapabilities_NilResolver(t *testing.T) {
-	r := &ProviderReconciler{} // RemoteResolver is nil
+	r := &ProviderReconciler{} // CapabilityReader is nil
 	provider := &infravirtrigaudiov1beta1.Provider{
 		ObjectMeta: metav1.ObjectMeta{Name: "p", Namespace: "default"},
 	}
@@ -50,18 +50,18 @@ func TestReconcileReportedCapabilities_NilResolver(t *testing.T) {
 }
 
 // TestReconcileReportedCapabilities_ResolveFails verifies that when the
-// resolver cannot produce a provider client (here: the Provider has no
-// runtime endpoint, so GetProvider errors), the reconciler treats it as
+// resolver cannot read the capabilities (here: the Provider has no runtime
+// endpoint, so ReadCapabilities errors), the reconciler treats it as
 // best-effort: condition False/Unavailable, no panic, no fabricated
 // capabilities, and (critically) it does not return or surface an error that
 // would fail the reconcile.
 func TestReconcileReportedCapabilities_ResolveFails(t *testing.T) {
 	// A resolver backed by a nil k8s client and nil breaker registry. The
-	// Provider below has no runtime status, so getRemoteProvider short-
+	// Provider below has no runtime status, so ReadCapabilities short-
 	// circuits with "runtime is not ready" before any k8s call — exercising
 	// the resolve-failure branch deterministically and offline.
 	r := &ProviderReconciler{
-		RemoteResolver: remote.NewResolver(nil, nil),
+		CapabilityReader: remote.NewResolver(nil, nil),
 	}
 	provider := &infravirtrigaudiov1beta1.Provider{
 		ObjectMeta: metav1.ObjectMeta{Name: "p", Namespace: "default"},
@@ -130,3 +130,7 @@ func TestCapabilitiesToReported(t *testing.T) {
 	assert.True(t, capabilitiesToReported(contracts.Capabilities{SupportsHonestReconfigure: true}).SupportsHonestReconfigure)
 	assert.False(t, got.SupportsHonestReconfigure, "not reported, not surfaced")
 }
+
+// The manager wires a remote.Resolver as the Provider controller's
+// CapabilityReader (cmd/manager).
+var _ ProviderCapabilityReader = (*remote.Resolver)(nil)

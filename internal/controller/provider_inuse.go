@@ -592,7 +592,7 @@ func (r *ProviderReconciler) holdInUseProvider(ctx context.Context, provider *in
 	var runtimeErr error
 	if keepable {
 		reason = reasonProviderInUse
-		result, runtimeErr = r.reconcileRuntimeStatus(ctx, provider)
+		result, _, runtimeErr = r.reconcileRuntimeStatus(ctx, provider)
 	}
 
 	msg := providerInUseMessage(reason, foreground, usage)
