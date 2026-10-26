@@ -181,7 +181,7 @@ type Result struct {
 	// already has vmCount VMs alive; a skipped operation is neither a success
 	// nor a failure and made no API call.
 	Skipped bool
-	Phase    string // what the operation asked for (power state, size, object name)
+	Phase   string // what the operation asked for (power state, size, object name)
 	// Observed is, with --observe, the time from sending the request until
 	// the object's status reflected it; zero when not observed.
 	Observed time.Duration
