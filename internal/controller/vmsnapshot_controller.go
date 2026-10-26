@@ -398,6 +398,9 @@ func (r *VMSnapshotReconciler) createSnapshot(ctx context.Context, snapshot *inf
 	if res, sent := r.markSnapshotRequested(ctx, snapshot); !sent {
 		return res, nil
 	}
+	// The marker as written: an answer that replaces it is re-applied over
+	// it after a status-write conflict (recordSnapshotAnswer).
+	requested := requestMarker(snapshot.Status.Conditions, snapshotConditionRequested).DeepCopy()
 
 	// The create is issued now: only from here on is the snapshot Creating.
 	// The phase is persisted below together with the RPC's outcome (a task to
@@ -422,7 +425,9 @@ func (r *VMSnapshotReconciler) createSnapshot(ctx context.Context, snapshot *inf
 		r.notPerformedBackoff.reset(string(snapshot.UID))
 	}
 	if notPerformed {
-		return r.retryNotPerformedSnapshotCreate(ctx, snapshot, err), nil
+		res := r.retryNotPerformedSnapshotCreate(ctx, snapshot, err)
+		r.recordSnapshotAnswer(ctx, snapshot, requested)
+		return res, nil
 	}
 	if err != nil && req.VM.HostID != "" && (contracts.IsRetryable(err) || !providerCallOutcomeKnownFor(err, attempt)) {
 		// A ROUTED (clustered) create without a definite outcome — its host
@@ -470,8 +475,11 @@ func (r *VMSnapshotReconciler) createSnapshot(ctx context.Context, snapshot *inf
 			metav1.ConditionFalse, infrav1beta1.VMSnapshotReasonProviderError,
 			"Snapshot creation failed: "+detail, snapshot.Generation)
 		r.Recorder.Event(snapshot, "Warning", "SnapshotFailed", "Failed to create snapshot: "+detail)
-		// Status update errors are intentionally ignored to avoid blocking reconciliation
-		_ = r.updateStatus(ctx, snapshot)
+		// A write lost to a conflict is re-applied; any other failure is
+		// logged (the marker then stands).
+		if err := r.updateStatus(ctx, snapshot); err != nil {
+			r.recordSnapshotAnswer(ctx, snapshot, requested)
+		}
 		return ctrl.Result{RequeueAfter: snapshotFailedRecheckInterval}, nil
 	}
 
@@ -502,7 +510,10 @@ func (r *VMSnapshotReconciler) createSnapshot(ctx context.Context, snapshot *inf
 		logger.Info("Snapshot created successfully", "snapshot_id", resp.SnapshotId)
 	}
 
-	if err := r.updateStatus(ctx, snapshot); err != nil {
+	// The snapshot is made: its record must not be lost to a write that
+	// conflicts with an edit of the VMSnapshot made during the create (the
+	// marker would hold it as an unknown outcome).
+	if err := r.updateStatus(ctx, snapshot); err != nil && !r.recordSnapshotAnswer(ctx, snapshot, requested) {
 		return ctrl.Result{}, err
 	}
 
