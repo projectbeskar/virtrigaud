@@ -17,9 +17,65 @@ limitations under the License.
 package proxmox
 
 import (
+	"context"
+
 	"github.com/projectbeskar/virtrigaud/internal/storage/migration"
+	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
 	"github.com/projectbeskar/virtrigaud/sdk/provider/capabilities"
 )
+
+// summarizedCapabilities are the SDK capability flags the startup log names
+// when the provider advertises them, in the order it names them.
+var summarizedCapabilities = []capabilities.Capability{
+	capabilities.CapabilityValidate,
+	capabilities.CapabilityCreate,
+	capabilities.CapabilityDelete,
+	capabilities.CapabilityPower,
+	capabilities.CapabilityDescribe,
+	capabilities.CapabilityGetCapabilities,
+	capabilities.CapabilityReconfigure,
+	capabilities.CapabilityReconfigureOnline,
+	capabilities.CapabilityDiskExpansionOnline,
+	capabilities.CapabilitySnapshots,
+	capabilities.CapabilityMemorySnapshots,
+	capabilities.CapabilityLinkedClones,
+	capabilities.CapabilityImageImport,
+	capabilities.CapabilityImageArtifactIdentity,
+	capabilities.CapabilityDiskExport,
+	capabilities.CapabilityDiskImport,
+	capabilities.CapabilityExportCompression,
+	capabilities.CapabilityImportSizeLimit,
+	capabilities.CapabilityTaskStatus,
+	capabilities.CapabilityHonestReconfigure,
+	capabilities.CapabilityOwnerTransfer,
+	capabilities.CapabilityOwnerRebind,
+	capabilities.CapabilityLandedDiskDelete,
+	capabilities.CapabilityClustering,
+	capabilities.CapabilityRoutedAdoption,
+	capabilities.CapabilityListOwnerFilter,
+	capabilities.CapabilityRoutedImport,
+}
+
+// CapabilitySummary returns, for the provider's startup log, the capability
+// flags GetProviderCapabilities advertises (SDK flag names such as
+// "snapshots"), and the disk and network types GetCapabilities reports. It
+// names a flag of summarizedCapabilities only when the provider advertises it,
+// so the log never names one it does not (in rc1 it still listed linked
+// clones); a flag missing from summarizedCapabilities is left out of the log.
+func CapabilitySummary() (names, diskTypes, networkTypes []string) {
+	m := GetProviderCapabilities()
+	for _, c := range summarizedCapabilities {
+		if m.HasCapability(c) {
+			names = append(names, string(c))
+		}
+	}
+	// GetCapabilities of a Manager never fails.
+	resp, err := m.GetCapabilities(context.Background(), &providerv1.GetCapabilitiesRequest{})
+	if err != nil || resp == nil {
+		return names, nil, nil
+	}
+	return names, resp.GetSupportedDiskTypes(), resp.GetSupportedNetworkTypes()
+}
 
 // GetProviderCapabilities returns the capabilities for the Proxmox provider
 func GetProviderCapabilities() *capabilities.Manager {

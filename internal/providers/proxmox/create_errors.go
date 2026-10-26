@@ -23,7 +23,9 @@ import (
 	"fmt"
 	"net/http"
 	"os/exec"
+	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -293,16 +295,22 @@ func (p *Provider) rollbackCreatedVM(ctx context.Context, node string, vmid int,
 		return fmt.Errorf("VM %d is %s, not stopped", vmid, vm.Status)
 	}
 	task, err := p.client.DeleteVM(ctx, node, vmid, true)
-	if stderrors.Is(err, pveapi.ErrVMNotFound) {
-		return p.confirmNothingRemains(ctx, vmid, true)
-	}
-	if err != nil {
+	if err != nil && !stderrors.Is(err, pveapi.ErrVMNotFound) {
 		return fmt.Errorf("destroy VM %d: %w", vmid, err)
 	}
-	if err := p.client.WaitForTask(ctx, node, task); err != nil {
-		return fmt.Errorf("destroy VM %d: %w", vmid, err)
+	if err == nil {
+		if err := p.client.WaitForTask(ctx, node, task); err != nil {
+			return fmt.Errorf("destroy VM %d: %w", vmid, err)
+		}
 	}
-	return p.confirmNothingRemains(ctx, vmid, true)
+	if err := p.confirmNothingRemains(ctx, vmid, true); err != nil {
+		return err
+	}
+	// The VM is gone: its seed build lock file goes too (best effort;
+	// seed.go). A failed create may have run a seed build that never
+	// attached its seed, so this does not depend on the config.
+	p.removeSeedLock(ctx, vmid)
+	return nil
 }
 
 // sshExitConnectionFailed is the exit status ssh reports when the connection
@@ -411,6 +419,55 @@ func (p *Provider) failAfterSubmit(ctx context.Context, node string, vmid int, n
 	}
 	p.logger.Warn("A create failed; the VM it made was removed", "vmid", vmid, "node", node, "name", name, "step", what, "error", cause)
 	return p.vmCreateNotPerformed(fmt.Sprintf("%s; the VM it made (%d) was removed, nothing remains (will retry)", what, vmid), cause)
+}
+
+// pveConfigLockTimeout matches the end of a failed task's error (pveapi
+// WaitForTask: "... with exit code: <exitstatus>") when the task died because
+// it could not take a VM's config lock in time: PVE::Tools::lock_file_full's
+// "can't lock file '/var/lock/qemu-server/lock-<vmid>.conf' - got timeout".
+// Submatch 1 is the VMID.
+var pveConfigLockTimeout = regexp.MustCompile(`exit code: can't lock file '/var/lock/qemu-server/lock-(\d+)\.conf' - got timeout$`)
+
+// pveCloneTargetExists matches the end of a failed clone task's error when
+// the worker, holding both locks, found the target's config already there
+// (clone_vm's check before it writes its temporary config): "unable to create
+// VM <vmid>: config file already exists". Submatch 1 is the VMID.
+var pveCloneTargetExists = regexp.MustCompile(`exit code: unable to create VM (\d+): config file already exists$`)
+
+// cloneTaskLockedOut reports whether err, the failed wait for the clone task
+// that makes VM target from VM source, says that the task ended before it made
+// anything: it could not lock source's or target's config, or, once it held
+// both, target's config already existed. qemu-server's clone worker takes
+// those locks first (the source's, then the target's, each with a one-second
+// timeout), checks that the target's config does not exist, and only then
+// writes the target's temporary config and clones; every failure after that
+// is reported as "clone failed: ...". Both cases are how two requests that got
+// the same /cluster/nextid answer end for the one that lost (the other's clone
+// holds the target's lock, or has just made its config): the VM at that VMID,
+// if any, is never this request's and must not be touched.
+func cloneTaskLockedOut(err error, source, target int) bool {
+	if !stderrors.Is(err, pveapi.ErrTaskFailed) {
+		return false
+	}
+	text := err.Error()
+	if m := pveConfigLockTimeout.FindStringSubmatch(text); m != nil {
+		id, convErr := strconv.Atoi(m[1])
+		return convErr == nil && (id == source || id == target)
+	}
+	if m := pveCloneTargetExists.FindStringSubmatch(text); m != nil {
+		id, convErr := strconv.Atoi(m[1])
+		return convErr == nil && id == target
+	}
+	return false
+}
+
+// cloneLockedOut is the answer of a Create or Clone whose clone task ended
+// before it made anything (cloneTaskLockedOut): nothing was cloned, and a
+// retry gets a new VMID.
+func (p *Provider) cloneLockedOut(target int, cause error) error {
+	return p.vmCreateNotPerformed(fmt.Sprintf("the PVE clone task for VM %d ended before it cloned anything: the clone's "+
+		"or its source's configuration was locked by another task, or the VMID was taken (e.g. by a concurrent create "+
+		"given the same VMID); nothing was cloned (will retry with a new VMID)", target), cause)
 }
 
 // failAfterTask answers a failed wait for the task that makes VM vmid: a

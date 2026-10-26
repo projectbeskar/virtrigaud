@@ -22,6 +22,7 @@ import (
 	"context"
 	stderrors "errors"
 	"fmt"
+	"net/url"
 	"os/exec"
 	"regexp"
 	"sort"
@@ -63,7 +64,9 @@ import (
 //   - `qm set <vmid> --<slot> <volume>,media=cdrom` attaches it. When the VM
 //     has a PVE cloud-init drive, the seed takes that drive's slot, which
 //     makes PVE free the drive's volume: two cidata sources would be undefined
-//     behaviour. The seed is not in the boot order.
+//     behaviour. The seed is not in the boot order: qemu-server appends the
+//     new CD-ROM to it, and a config update of its own takes it out again
+//     (keepSeedOutOfBootOrder).
 //   - The temporary directory is removed on every exit, and a volume that was
 //     imported and identified as the seed but could not be attached is
 //     deleted again (`qm set --delete
@@ -124,9 +127,12 @@ const (
 	seedExitQMSet    = 26
 
 	// seedEmptyUserData is a clone's seed user-data when its VMClone gives
-	// none: an empty cloud-config document (NoCloud requires a user-data
-	// file).
-	seedEmptyUserData = "#cloud-config\n"
+	// none (NoCloud requires a user-data file): a cloud-config whose body is
+	// an empty mapping, which configures nothing. A body with no YAML document
+	// at all (just the "#cloud-config" line) is "empty cloud config" to
+	// cloud-init: it logs a warning for it, and `cloud-init status` then
+	// reports "degraded done" (exit 2) instead of "done" (rc1 finding O1).
+	seedEmptyUserData = "#cloud-config\n# No user-data was given for this clone.\n{}\n"
 
 	// seedFallbackIDFormat names a VM in its instance-id when the request
 	// carries no owner UID (cloneidentity.InstanceID's fallback).
@@ -518,6 +524,59 @@ func seedLockPath(vmid int) string {
 	return seedStageDir + "/" + seedLockName(vmid)
 }
 
+// seedLockCleanupTimeout bounds removeSeedLock's SSH session; it is shorter
+// still when the call it runs in has less time left (less
+// seedLockCleanupMargin), so the cleanup never makes that call miss its
+// deadline.
+const (
+	seedLockCleanupTimeout = 10 * time.Second
+	seedLockCleanupMargin  = 2 * time.Second
+)
+
+// seedLockRemoveScript is the node-side script that removes VM vmid's seed
+// build lock file from stageDir (a 0-byte file on a tmpfs that outlives the
+// build) once the VM is gone. It removes the file only while it holds the
+// lock on it and the file it locked is still the one at the path, so it never
+// removes a lock a build holds, and a build that opened the file before it was
+// removed finds, once it gets the lock, that its file is no longer the one at
+// the path and stops as busy (buildSeedScript): two builds can never each
+// hold a lock on a different file. A missing file, a symbolic link or a held
+// lock is left alone and the script exits 0. stageDir is a parameter only so
+// the tests can run it against a local directory; production passes
+// seedStageDir.
+func seedLockRemoveScript(stageDir string, vmid int) string {
+	qd := proxmoxShellQuote(stageDir)
+	ql := proxmoxShellQuote(stageDir + "/" + seedLockName(vmid))
+	return "[ ! -L " + qd + " ] && [ -f " + ql + " ] && [ ! -L " + ql + " ] || exit 0; " +
+		"exec 9<" + ql + "; flock -n 9 || exit 0; [ /dev/fd/9 -ef " + ql + " ] || exit 0; rm -f -- " + ql
+}
+
+// removeSeedLock removes, best effort, VM vmid's seed build lock file from
+// the node the SSH data plane reaches (where every seed is built), once the
+// VM is destroyed. A failure is logged, never returned: the file is empty, on
+// a tmpfs, and harmless. Without SSH credentials nothing is done.
+func (p *Provider) removeSeedLock(ctx context.Context, vmid int) {
+	if p.ssh == nil || (!p.ssh.usePassword() && !p.ssh.useKey()) {
+		return
+	}
+	timeout := seedLockCleanupTimeout
+	if deadline, ok := ctx.Deadline(); ok {
+		if left := time.Until(deadline) - seedLockCleanupMargin; left < timeout {
+			timeout = left
+		}
+	}
+	if timeout <= 0 {
+		p.logger.Info("No time left to remove the VM's cloud-init seed build lock file on the node (an empty file on /run, removed at reboot)", "vmid", vmid)
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), timeout)
+	defer cancel()
+	if _, _, err := p.ssh.runSSH(ctx, seedLockRemoveScript(seedStageDir, vmid)); err != nil {
+		p.logger.Warn("Could not remove the VM's cloud-init seed build lock file on the node (an empty file on /run, removed at reboot)",
+			"vmid", vmid, "error", err)
+	}
+}
+
 // pveQemuConfDir is where the PVE node keeps the configs of its own VMs
 // (/etc/pve/qemu-server is the local node's directory).
 const pveQemuConfDir = "/etc/pve/qemu-server"
@@ -534,11 +593,16 @@ const pveQemuConfDir = "/etc/pve/qemu-server"
 //     must be installed (else exit seedExitNoGenisoimage).
 //  2. stageDir, refused when it is a symbolic link, is (re)created 0700 and
 //     checked to be owned by the running user, mode 700. The script then
-//     holds the VM's lock (flock on stageDir/.lock-<vmid>) until it exits:
-//     another seed build of the VM still running (an interrupted earlier
-//     attempt), or a `qm importdisk` of the VM, exits seedExitImportBusy (the
-//     pgrep pattern is written so that it does not match this script's own
-//     command line). Build directories a killed script left behind for more
+//     holds the VM's lock (flock on stageDir/.lock-<vmid>, opened for append:
+//     never truncated) until it exits: another seed build of the VM still
+//     running (an interrupted earlier attempt), a lock file removed between
+//     its open and its flock (seedLockRemoveScript; the lock it holds would
+//     then be on a file no other build opens), or a `qm importdisk` of the
+//     VM, exits seedExitImportBusy (the pgrep pattern is written so that it
+//     does not match this script's own command line). The check of the
+//     locked file uses /dev/fd/9 (bash's test handles it itself; elsewhere
+//     it is the kernel's /proc/self/fd link); a node without it fails closed:
+//     every build exits busy. Build directories a killed script left behind for more
 //     than seedStaleMinutes are removed; a fresh build directory "$W" is made.
 //     seedStageDir is on /run, a tmpfs: nothing of a build outlives a reboot.
 //  3. On every exit "$W" is removed, and a seed volume imported and
@@ -558,6 +622,7 @@ const pveQemuConfDir = "/etc/pve/qemu-server"
 // seedExitQMImport, seedExitQMSet).
 func buildSeedScript(stageDir, confDir string, vmid int, storage, slot, alsoDelete string) string {
 	qd := proxmoxShellQuote(stageDir)
+	ql := proxmoxShellQuote(stageDir + "/" + seedLockName(vmid))
 	qs := proxmoxShellQuote(storage)
 	deleteDrive := ""
 	if alsoDelete != "" {
@@ -569,8 +634,10 @@ func buildSeedScript(stageDir, confDir string, vmid int, storage, slot, alsoDele
 		fmt.Sprintf("command -v genisoimage >/dev/null 2>&1 || { echo 'genisoimage is not installed' >&2; exit %d; }; ", seedExitNoGenisoimage) +
 		"[ ! -L " + qd + " ] || exit 1; install -d -m 0700 " + qd + "; " +
 		"[ ! -L " + qd + " ] && [ \"$(stat -c '%u %a' -- " + qd + ")\" = \"$(id -u) 700\" ] || exit 1; " +
-		"exec 9>" + proxmoxShellQuote(stageDir+"/"+seedLockName(vmid)) + "; " +
+		"exec 9>>" + ql + "; " +
 		fmt.Sprintf("flock -n 9 || { echo 'a seed build of the VM is still running' >&2; exit %d; }; ", seedExitImportBusy) +
+		"[ /dev/fd/9 -ef " + ql + " ] || " +
+		fmt.Sprintf("{ echo 'the seed build lock was removed meanwhile' >&2; exit %d; }; ", seedExitImportBusy) +
 		"if pgrep -f -- " + proxmoxShellQuote(importdiskRunningPattern(vmid)) + " >/dev/null 2>&1; then " +
 		fmt.Sprintf("echo 'a qm importdisk of the VM is still running' >&2; exit %d; fi; ", seedExitImportBusy) +
 		"find " + qd + " -mindepth 1 -maxdepth 1 -name '.seed-*' -mmin +" + strconv.Itoa(seedStaleMinutes) +
@@ -597,13 +664,15 @@ func buildSeedScript(stageDir, confDir string, vmid int, storage, slot, alsoDele
 
 // attachSeed builds the seed content on the PVE node and attaches it to VM
 // vmid on node, on storage, unless the VM already has a seed of its own (a
-// re-sent Create or Clone that finds its VM interrupted: nothing is done, so
-// a VM never gets a second seed). cfg is the VM's current config. The
-// returned error is a seedInFlightError when the build's outcome is unknown.
+// re-sent Create or Clone that finds its VM interrupted: nothing is built, so
+// a VM never gets a second seed). Either way the seed is then taken out of
+// the VM's boot order (keepSeedOutOfBootOrder), so a re-sent request also
+// finishes that step. cfg is the VM's current config. The returned error is a
+// seedInFlightError when the build's outcome is unknown.
 func (p *Provider) attachSeed(ctx context.Context, node string, vmid int, storage string, cfg map[string]interface{}, content seedContent) error {
 	if own, _ := seedSlots(cfg, vmid); len(own) > 0 {
 		p.logger.Info("The VM already has its cloud-init seed", "vmid", vmid, "slot", own[0])
-		return nil
+		return p.keepSeedOutOfBootOrder(ctx, node, vmid)
 	}
 	if p.ssh == nil {
 		return errors.NewInvalidSpec("%s", seedNoSSHMessage)
@@ -644,5 +713,90 @@ func (p *Provider) attachSeed(ctx context.Context, node string, vmid int, storag
 		return fmt.Errorf("build and attach the cloud-init seed of VM %d: %w", vmid, err)
 	}
 	p.logger.Info("Attached the cloud-init seed", "vmid", vmid, "slot", slot, "volume", strings.TrimSpace(stdout))
-	return nil
+	return p.keepSeedOutOfBootOrder(ctx, node, vmid)
+}
+
+// keepSeedOutOfBootOrder takes VM vmid's seed CD-ROM out of its boot order.
+// The `qm set` that attaches the seed appends it to a non-empty order list
+// (qemu-server marks every new CD-ROM bootable), so the order is set again,
+// in a config update of its own, after the seed is attached
+// (seedFreeBootOrder): an update that set the order and attached the CD-ROM
+// together would leave either order, because qemu-server applies an update's
+// parameters in no defined sequence. The update carries the digest of the
+// config it was computed from, so a concurrent change of the config is never
+// overwritten; the config is read and the update tried once more then. The
+// seed is not bootable (no El Torito image); cloud-init finds it by its
+// label. A failure is a bootOrderPendingError: the VM is complete but for its
+// boot order.
+func (p *Provider) keepSeedOutOfBootOrder(ctx context.Context, node string, vmid int) error {
+	var err error
+	for attempt := 0; attempt < bootOrderAttempts; attempt++ {
+		var done bool
+		done, err = p.setSeedFreeBootOrder(ctx, node, vmid)
+		if done {
+			return nil
+		}
+		if ctx.Err() != nil {
+			break
+		}
+	}
+	return &bootOrderPendingError{vmid: vmid, cause: err}
+}
+
+// bootOrderAttempts is how many times keepSeedOutOfBootOrder reads the
+// config and updates the boot order.
+const bootOrderAttempts = 2
+
+// bootOrderUpdateFailedFormat (with the VMID and the cause) is the error of a
+// boot order update that failed.
+const bootOrderUpdateFailedFormat = "take the cloud-init seed of VM %d out of the boot order: %w"
+
+// setSeedFreeBootOrder reads VM vmid's config and, when its boot order names
+// its seed, writes the order without it (compare-and-swap on the config
+// digest). It reports whether the order is now free of the seed.
+func (p *Provider) setSeedFreeBootOrder(ctx context.Context, node string, vmid int) (bool, error) {
+	cfg, err := p.client.GetVMConfig(ctx, node, vmid)
+	if err != nil {
+		return false, fmt.Errorf("read the config of VM %d to take its cloud-init seed out of the boot order: %w", vmid, err)
+	}
+	own, _ := seedSlots(cfg, vmid)
+	boot, changed := seedFreeBootOrder(cfg, own)
+	if !changed {
+		return true, nil
+	}
+	p.logger.Info("Taking the cloud-init seed out of the boot order", "vmid", vmid, "slots", own, "boot", boot)
+	values := url.Values{pveConfigKeyBoot: {boot}}
+	if digest := configString(cfg, pveConfigKeyDigest); digest != "" {
+		values.Set(pveConfigKeyDigest, digest)
+	}
+	task, err := p.client.ReconfigureVMRaw(ctx, node, vmid, values)
+	if err != nil {
+		return false, fmt.Errorf(bootOrderUpdateFailedFormat, vmid, err)
+	}
+	if err := p.client.WaitForTask(ctx, node, task); err != nil {
+		return false, fmt.Errorf(bootOrderUpdateFailedFormat, vmid, err)
+	}
+	return true, nil
+}
+
+// bootOrderPendingError is a VM whose seed is attached but whose boot order
+// could not be set without it. The VM is complete otherwise and its seed is
+// not bootable: a request with an owner keeps it (outcome unknown,
+// failSeedOrStep), and the re-sent request finishes the order (attachSeed's
+// already-has-seed path) instead of the VM being destroyed.
+type bootOrderPendingError struct {
+	vmid  int
+	cause error
+}
+
+func (e *bootOrderPendingError) Error() string {
+	return fmt.Sprintf("the cloud-init seed of VM %d is attached but still in its boot order: %v", e.vmid, e.cause)
+}
+
+func (e *bootOrderPendingError) Unwrap() error { return e.cause }
+
+// isBootOrderPending reports whether err is (or wraps) a bootOrderPendingError.
+func isBootOrderPending(err error) bool {
+	var pending *bootOrderPendingError
+	return stderrors.As(err, &pending)
 }

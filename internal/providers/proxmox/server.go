@@ -356,6 +356,11 @@ func (p *Provider) Create(ctx context.Context, req *providerv1.CreateRequest) (*
 		if stderrors.Is(err, pveapi.ErrTaskFailed) {
 			p.untrackTask(stamp, vmConfig.VMID)
 		}
+		// A task that could not lock the template's or the VMID's config made
+		// nothing; the VM at the VMID, if any, is another request's.
+		if cloneTaskLockedOut(err, templateID, vmConfig.VMID) {
+			return nil, p.cloneLockedOut(vmConfig.VMID, err)
+		}
 		return nil, p.failAfterTask(ctx, node, vmConfig.VMID, req.Name, stamp, "the template clone task failed", err)
 	}
 	p.untrackTask(stamp, vmConfig.VMID)
@@ -572,7 +577,8 @@ func (p *Provider) Delete(ctx context.Context, req *providerv1.DeleteRequest) (*
 	// A template is never destroyed; a request that names its owner destroys
 	// the VM only when the VM is not stamped with another owner (its VMID
 	// reused) and its stamp can be read (checkDelete).
-	if err := p.checkDelete(ctx, node, vmid, deleteOwner(req)); err != nil {
+	seeded, err := p.checkDelete(ctx, node, vmid, deleteOwner(req))
+	if err != nil {
 		return nil, err
 	}
 
@@ -629,6 +635,11 @@ func (p *Provider) Delete(ctx context.Context, req *providerv1.DeleteRequest) (*
 		}
 	}
 
+	// The VM is gone: the seed build lock file of a VM that had a seed goes
+	// too (best effort; seed.go). A VM without one never opens an SSH session.
+	if seeded {
+		p.removeSeedLock(ctx, vmid)
+	}
 	return &providerv1.TaskResponse{}, nil
 }
 
@@ -1294,6 +1305,11 @@ func (p *Provider) Clone(ctx context.Context, req *providerv1.CloneRequest) (*pr
 	if werr := p.client.WaitForTask(ctx, sourceNode, cloneTask); werr != nil {
 		if stderrors.Is(werr, pveapi.ErrTaskFailed) {
 			p.untrackTask(stamp, targetVMID)
+		}
+		// A task that could not lock the source's or the VMID's config made
+		// nothing; the VM at the VMID, if any, is another request's.
+		if cloneTaskLockedOut(werr, sourceVMID, targetVMID) {
+			return nil, p.cloneLockedOut(targetVMID, werr)
 		}
 		return nil, p.failAfterTask(ctx, targetNode, targetVMID, req.TargetName, stamp, "the clone task failed", werr)
 	}

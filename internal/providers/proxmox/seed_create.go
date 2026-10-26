@@ -49,8 +49,9 @@ const (
 )
 
 // failSeedOrStep answers a Create whose step what failed (cause) after the VM
-// vmid was made: a seed build whose outcome is unknown leaves the VM in place
-// (outcomeUnknown; a re-sent Create finishes it), anything else removes it
+// vmid was made: a seed build whose outcome is unknown, or (with an owner
+// stamp) a seed still in the boot order (bootOrderPendingError), leaves the VM
+// in place (outcomeUnknown; a re-sent Create finishes it), anything else removes it
 // (failAfterSubmit). A definite refusal (InvalidSpec: no free slot,
 // genisoimage missing, the VM on another node than the SSH data plane's) is
 // answered as such once the VM is removed, so the manager does not make and
@@ -58,6 +59,12 @@ const (
 func (p *Provider) failSeedOrStep(ctx context.Context, node string, vmid int, name string, stamp *ownerStamp, what string, cause error) error {
 	if isSeedInFlight(cause) {
 		return p.outcomeUnknown(fmt.Sprintf("%s: the cloud-init seed of VM %d may still be being built on the node", what, vmid), cause)
+	}
+	// The VM is complete but for its boot order: kept for the re-sent
+	// request to finish (it finds its VM by the owner stamp, which a request
+	// without an owner has not: that VM is removed as below).
+	if isBootOrderPending(cause) && stamp != nil {
+		return p.outcomeUnknown(fmt.Sprintf("%s: the cloud-init seed of VM %d is still in its boot order", what, vmid), cause)
 	}
 	if status.Code(cause) == codes.InvalidArgument {
 		if rbErr := p.rollbackCreatedVM(ctx, node, vmid, name, stamp, true); rbErr != nil {
@@ -100,9 +107,11 @@ func (p *Provider) applyCreateSeed(ctx context.Context, req *providerv1.CreateRe
 // configureCloneSeed gives a VM cloned from a template for the Create req its
 // seed: it reads the clone's config again (the NICs' MACs after
 // applyCloneNetworks), sets the boot order to the boot disk only
-// (cloneBootOrder: the seed CD-ROM is not in it), and attaches the seed on the
-// storage a cloud-init drive would use (diskfulCloudInitStorage). The seed
-// replaces a PVE cloud-init drive the template gave the clone.
+// (cloneBootOrder), and attaches the seed on the storage a cloud-init drive
+// would use (diskfulCloudInitStorage). qemu-server appends the seed's slot to
+// that order when the seed is attached; attachSeed takes it out again, so the
+// clone's final order is the boot disk alone. The seed replaces a PVE
+// cloud-init drive the template gave the clone.
 func (p *Provider) configureCloneSeed(ctx context.Context, req *providerv1.CreateRequest, vmConfig *pveapi.VMConfig, node string) error {
 	vmid := vmConfig.VMID
 	cfg, err := p.client.GetVMConfig(ctx, node, vmid)
@@ -301,7 +310,8 @@ func clonePlacement(req *providerv1.CloneRequest) (host, datastore string) {
 // identity is the clone's (cloneidentity: instance-id from the target
 // VirtualMachine's UID, local-hostname from the customization hostname and
 // domain, else the target's name); its user-data is the VMClone's
-// customization user-data, else an empty #cloud-config (the source's is not
+// customization user-data, else a #cloud-config that configures nothing
+// (seedEmptyUserData; the source's is not
 // carried: the clone's disk already holds what it applied); its
 // network-config is DHCP on every NIC, matched by the clone's own MACs. A
 // clone that already has a seed of its own (a re-sent Clone) is left as it
@@ -326,7 +336,7 @@ func (p *Provider) cloneSeed(ctx context.Context, req *providerv1.CloneRequest, 
 	if userData == "" {
 		if cust.SecretUserData {
 			p.logger.Warn("The clone's user-data is given by a Secret reference, which the provider cannot resolve; "+
-				"the clone's seed has an empty user-data", "vmid", vmid)
+				"the clone's seed has a user-data that configures nothing", "vmid", vmid)
 		}
 		userData = seedEmptyUserData
 	}

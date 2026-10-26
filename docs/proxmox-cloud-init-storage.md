@@ -169,6 +169,10 @@ One SSH session per seed, its input on the session's standard input:
    (`/run/virtrigaud/seed-stage/.lock-<vmid>`, `flock`) for its whole run: a
    seed build of the same VM still running (an interrupted earlier attempt), or
    a running `qm importdisk` of the VM, makes it stop without changing anything.
+   Once it holds the lock it checks that the file it locked is still the one at
+   that path (the lock file of a destroyed VM is removed, see
+   [Lifecycle](#lifecycle)); if not, it stops the same way and the request is
+   retried.
    The files are extracted into a fresh `mktemp -d` directory there (no owner
    or mode taken from the archive), and `genisoimage -volid cidata -joliet
    -rock` builds the ISO.
@@ -181,7 +185,9 @@ One SSH session per seed, its input on the session's standard input:
    anything else stops the script without deleting anything (a volume left
    unused is freed with the VM).
 4. `qm set <vmid> --<slot> <volume>,media=cdrom` attaches it (and deletes a PVE
-   cloud-init drive in another slot).
+   cloud-init drive in another slot). PVE appends a newly attached CD-ROM to the
+   VM's boot order; the provider then takes the seed out of it again in a config
+   update of its own (see [Boot order](#boot-order)).
 5. On every exit the build directory is removed; the identified seed volume,
    imported but not attached, is deleted from the VM again (`qm set --delete
    unusedN`, which frees it). A build directory a killed session left behind is
@@ -197,6 +203,14 @@ broken SSH session.
   unused disks and PVE cloud-init drive, but skips CD-ROMs; the provider's
   destroy passes `destroy-unreferenced-disks=1`, which frees every volume of the
   VMID, the seed included (and an unused seed volume an interrupted build left).
+  Once a VM whose config showed its own seed is gone, the provider also
+  removes the VM's seed build lock file (`/run/virtrigaud/seed-stage/.lock-<vmid>`,
+  an empty file on a tmpfs) over SSH; a VM without a seed opens no SSH
+  session. A failed Create that removed its VM removes the file too, seed or
+  not (its build may have failed before attaching). This is best effort, at
+  most 10 seconds (less when the call has less time left): it never fails the
+  call, it leaves a lock a running build holds alone, and a file it could not
+  remove (or one of a VM destroyed by hand) is gone at the next reboot.
 - **A failed Create** removes the VM it made (seed included). When the seed's
   SSH session broke, or another build or `qm importdisk` of the VM was still
   running, the build may still be going on: the VM is kept and the answer is an
@@ -216,11 +230,14 @@ broken SSH session.
   - `local-hostname` the customization's `hostname` (with its `domain`), else
     the target VirtualMachine's name;
   - user-data: the VMClone's `spec.customization.userData.cloudInit.inline`,
-    else an empty `#cloud-config`. The source's user-data is **not** carried
-    (unlike libvirt and vSphere): the clone's disk already holds what it
-    applied (users and their keys, files, packages). User-data given by a
-    Secret reference cannot be resolved by the provider and is not applied
-    (logged);
+    else a `#cloud-config` whose body is an empty mapping (`{}`), which
+    configures nothing. (In v0.4.1-rc1 it was a bare `#cloud-config` line,
+    which cloud-init reports as "empty cloud config": a warning, so
+    `cloud-init status` ended "degraded done" with exit code 2.) The source's
+    user-data is **not** carried (unlike libvirt and vSphere): the clone's disk
+    already holds what it applied (users and their keys, files, packages).
+    User-data given by a Secret reference cannot be resolved by the provider
+    and is not applied (logged);
   - network-config: DHCP on every NIC, matched by the clone's own MACs.
 
   The clone's first boot is therefore a new cloud-init instance: new SSH host
@@ -228,12 +245,53 @@ broken SSH session.
   **with the distribution's defaults** where the user-data is empty. On most
   cloud images that means `disable_root: true` (root's `authorized_keys` is
   rewritten to refuse logins), `ssh_pwauth` back to the image default, and the
-  distribution's default user created. A source that relied on its own
-  settings for these should give the VMClone inline user-data that sets them.
+  distribution's default user created. Do not rely on what the source's
+  user-data set up carrying over to the clone: the clone's cloud-init applies
+  only the clone's user-data. In testing, a clone made without inline
+  user-data ended up with a sudo rule (`/etc/sudoers.d/90-cloud-init-users`)
+  for the distribution's default user only, and the users the source's
+  user-data had made had **no sudo rule**. A source that relied on its own
+  settings for these should give the VMClone inline user-data that sets them
+  again (users, their keys and sudo rules), for example:
+
+  ```yaml
+  spec:
+    customization:
+      userData:
+        cloudInit:
+          inline: |
+            #cloud-config
+            users:
+              - default
+              - name: ops
+                sudo: ALL=(ALL) NOPASSWD:ALL
+                shell: /bin/bash
+                ssh_authorized_keys:
+                  - ssh-ed25519 AAAA... ops@example.com
+  ```
+
+  The `sudo` rule above is only an illustration: grant the narrowest rule
+  your policy allows.
+
   A clone that needs a seed is refused before anything is cloned when the
   provider cannot build one (the prerequisites above). A clone of a VM
   **without** a seed and without inline user-data is unchanged: PVE regenerates
   its own cloud-init drive.
+- **A VMClone deleted while the clone runs.** If a `VMClone` and its target
+  `VirtualMachine` are deleted while the provider is still cloning, the clone
+  PVE finishes is bound to nothing and is **left on PVE on purpose**: the
+  manager never removes a VM it can no longer attribute to a
+  `VirtualMachine`. When the reconcile that sent the `Clone` sees it finish
+  after the target was deleted, the manager logs "... is not bound to a new
+  one and is left on the provider: adopt or remove it", naming the clone's
+  VMID; otherwise (for example after a manager restart) nothing records the
+  clone's VMID. Find the VM by the target name and the owner stamp in its
+  notes, then adopt it or destroy it (`qm destroy <vmid> --purge 1
+  --destroy-unreferenced-disks 1`, which also frees its seed; its seed build
+  lock file on `/run` stays until the next reboot). `vcts` and `virtrigaud-loadgen` work only with Kubernetes
+  objects: they wait for a `VMClone` whose clone may still be in flight and
+  leave an unsettled one in place, but they cannot see a cloned VM that no
+  Kubernetes object records any more.
 - **A template made from a VM with a seed.** Its clones would reference the
   template's seed volume. A `Create` with user-data replaces it with the VM's
   own seed; a `Create` without user-data detaches it (the VM gets no
@@ -356,9 +414,47 @@ exist`), so the provider only names a disk the config has.
 
 The seed is not in the order: cloud-init in the guest finds it by its
 filesystem label (`cidata`) and reads it as a data source; nothing boots from
-it. PVE's Cloud-Init guide does the same for its own drive (`qm set <vmid>
---boot order=scsi0`), and so does a VM created from a migration's imported
-disk. Network boot (`net0`) is not kept either.
+it (the image has no boot record). PVE's Cloud-Init guide does the same for its
+own drive (`qm set <vmid> --boot order=scsi0`), and so does a VM created from a
+migration's imported disk. Network boot (`net0`) is not kept either.
+
+PVE appends a CD-ROM that a config update attaches to the VM's boot order when
+the order is a non-empty `order=` list that does not name the slot yet ("append
+new CD drives to bootorder to mark them bootable"; a PVE cloud-init drive is
+exempt). The seed is attached by such an update (`qm set`), so after attaching
+it the provider sets the order again, in a config update of its own, with the
+seed's slot taken out. It does not set the order in the same update that
+attaches the seed: PVE applies an update's parameters in no defined sequence,
+so the result would depend on it. Every VM that gets a seed ends with the seed
+out of its order:
+
+| How the VM is made | Final boot order |
+|--------------------|------------------|
+| `Create` from a template, with user-data | `order=<boot disk>` (above) |
+| `Create` without a template, with user-data | PVE's default for the new VM without the seed: `order=net0` for a VM without a disk |
+| `Create` from a migration's imported disk, with user-data | `order=scsi0` |
+| `VMClone` that gets a seed (a seeded source, or inline user-data) | the source's order, without the seed's slot |
+
+A slot the order already named before the seed took it (for example a
+template's `ide2`, once its install ISO, now its cloud-init drive) is taken
+out too. A device the config does not have is left out of the new order (PVE
+refuses an order that names one). An order that would be left empty names the
+boot disk, else the first NIC. A config with no `order=` list (no `boot` value,
+or a legacy one such as `cdn`) is left as it is; PVE appends nothing to it,
+but its legacy order includes every CD-ROM, the seed too (which is not
+bootable). The update carries the config's digest, so a concurrent change of
+the config is never overwritten (the provider reads the config and tries once
+more). If the update still fails, a request with an owner keeps the VM, which
+is complete but for its boot order, and answers with an unknown outcome; the
+re-sent request finds the VM with the seed attached but still in the order and
+finishes the step. (A request without an owner, which cannot find its VM
+again, removes it.)
+
+In v0.4.1-rc1 the order was set before the seed was attached, so PVE appended
+the seed's slot to it (`order=scsi0;ide2`, `order=net0;ide2`). The guest still
+booted from its disk (or tried the network first, then the seed, which is not
+bootable). To clean up such a VM, set its order without the slot, for example
+`qm set <vmid> --boot order=scsi0`.
 
 A clone without user-data gets no boot order from the provider (only its sizing
 and networks are set) and keeps the template's.

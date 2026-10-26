@@ -346,8 +346,10 @@ func TestSeed_DeleteFreesTheSeed(t *testing.T) {
 
 	t.Run("rollback after the seed is attached", func(t *testing.T) {
 		p, srv, node, _ := seedTestProvider(t)
-		// Marking the VM ready (a config update) fails after the seed is attached.
+		// Marking the VM ready (a config update) fails after the seed is
+		// attached; the boot order update before it goes through.
 		node.afterSeed = func() {
+			srv.InjectFault(pvefake.Fault{Method: http.MethodPut, PathContains: "/config", PassThrough: true, Times: 1})
 			srv.InjectFault(pvefake.Fault{Method: http.MethodPut, PathContains: "/config", Status: http.StatusInternalServerError, Body: "boom"})
 		}
 		_, err := p.Create(context.Background(), seedCreateReq())
@@ -454,7 +456,8 @@ func seededSource(t *testing.T, p *Provider) string {
 // TestSeed_CloneGetsItsOwnSeed: PVE's clone copies its source's seed CD-ROM
 // line. The clone gets a seed of its own in that slot, with a new
 // instance-id (the target VirtualMachine's UID), the target's hostname, the
-// VMClone's customization user-data or an empty cloud-config (never the
+// VMClone's customization user-data or a cloud-config that configures
+// nothing (never the
 // source's user-data), DHCP on its own MACs; the source's seed is untouched,
 // a re-sent Clone attaches no second seed, and deleting the clone keeps the
 // source's seed.

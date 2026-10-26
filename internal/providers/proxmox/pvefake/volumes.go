@@ -47,7 +47,9 @@ var diskIndexPattern = regexp.MustCompile(`vm-(\d+)-disk-(\d+)`)
 // node: it imports a seed into storage as VM vmid's next disk volume
 // (vm-<vmid>-disk-N; <vmid>/vm-<vmid>-disk-N.raw on a directory storage,
 // SetDirStorages), tracks it, and attaches it in slot as a CD-ROM (replacing
-// whatever was there, as `qm set` does). It returns the volume.
+// whatever was there, as `qm set` does, which also appends the slot to a
+// boot order list that does not name it, bootorder.go). It returns the
+// volume.
 func (s *Server) AttachSeedVolume(vmid int, storage, slot string) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -84,7 +86,11 @@ func (s *Server) AttachSeedVolume(vmid int, storage, slot string) (string, error
 	if vm.Config == nil {
 		vm.Config = map[string]string{}
 	}
-	vm.Config[slot] = volid + ",media=cdrom"
+	value := volid + "," + mediaCDROM
+	vm.Config[slot] = value
+	// `qm set` is qemu-server's config update: it appends a new CD-ROM to the
+	// boot order (bootorder.go).
+	appendCDROMToBootOrder(vm.Config, bootOrderList(vm.Config[configKeyBoot]), slot, value)
 	return volid, nil
 }
 
@@ -152,6 +158,7 @@ func (s *Server) applyDriveUpdate(vm *VM, form url.Values, asked map[string]stri
 		}
 		if vm.Config != nil {
 			vm.Config[key] = ""
+			removeFromBootOrder(vm.Config, key)
 		}
 	}
 }
