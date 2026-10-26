@@ -106,15 +106,46 @@ func (r *Resolver) GetProvider(ctx context.Context, provider *infravirtrigaudiov
 	return r.getRemoteProvider(ctx, provider)
 }
 
+// runtimeEndpoint returns the gRPC endpoint of the Provider's runtime, or an
+// error when the runtime is not Running or has no endpoint yet.
+func runtimeEndpoint(provider *infravirtrigaudiov1beta1.Provider) (string, error) {
+	if provider.Status.Runtime == nil || provider.Status.Runtime.Endpoint == "" {
+		return "", fmt.Errorf("remote provider runtime is not ready: no endpoint available")
+	}
+	if provider.Status.Runtime.Phase != infravirtrigaudiov1beta1.ProviderRuntimePhaseRunning {
+		return "", fmt.Errorf("remote provider runtime is not ready: phase=%s", provider.Status.Runtime.Phase)
+	}
+	return provider.Status.Runtime.Endpoint, nil
+}
+
+// ReadCapabilities reads the capabilities of the Provider's runtime over a
+// connection opened for this read and closed after it
+// (grpcClient.ReadCapabilities). It neither uses nor replaces the cached
+// client GetProvider returns: that client's connection may still be held by a
+// pod of a superseded rollout, and closing it would cut the RPCs other
+// controllers have in flight on it. The Provider controller records what it
+// returns on Provider status.reportedCapabilities.
+func (r *Resolver) ReadCapabilities(ctx context.Context, provider *infravirtrigaudiov1beta1.Provider) (contracts.Capabilities, error) {
+	endpoint, err := runtimeEndpoint(provider)
+	if err != nil {
+		return contracts.Capabilities{}, err
+	}
+	tlsConfig, err := r.buildTLSConfig(ctx, provider)
+	if err != nil {
+		return contracts.Capabilities{}, fmt.Errorf("failed to build TLS config: %w", err)
+	}
+	caps, err := grpcClient.ReadCapabilities(ctx, endpoint, string(provider.Spec.Type), tlsConfig)
+	if err != nil {
+		return contracts.Capabilities{}, fmt.Errorf("read capabilities of Provider %s/%s: %w", provider.Namespace, provider.Name, err)
+	}
+	return caps, nil
+}
+
 // getRemoteProvider creates or reuses a gRPC client for remote providers
 func (r *Resolver) getRemoteProvider(ctx context.Context, provider *infravirtrigaudiov1beta1.Provider) (contracts.Provider, error) {
 	// Check if provider runtime is ready
-	if provider.Status.Runtime == nil || provider.Status.Runtime.Endpoint == "" {
-		return nil, fmt.Errorf("remote provider runtime is not ready: no endpoint available")
-	}
-
-	if provider.Status.Runtime.Phase != "Running" {
-		return nil, fmt.Errorf("remote provider runtime is not ready: phase=%s", provider.Status.Runtime.Phase)
+	if _, err := runtimeEndpoint(provider); err != nil {
+		return nil, err
 	}
 
 	// Create cache key
