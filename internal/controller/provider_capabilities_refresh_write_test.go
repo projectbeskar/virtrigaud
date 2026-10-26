@@ -61,8 +61,10 @@ func TestReconcile_CapabilityReadRecordedOnlyWithItsStatusWrite(t *testing.T) {
 	reader := &countingCapabilityReader{}
 	reader.answer(contracts.Capabilities{SupportsSnapshots: true, SupportsHonestReconfigure: true})
 	r := &ProviderReconciler{Client: cli, Scheme: sch, Recorder: record.NewFakeRecorder(64), CapabilityReader: reader}
+	var lastResult ctrl.Result
 	reconcile := func() error {
-		_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: inUseProviderKey})
+		var err error
+		lastResult, err = r.Reconcile(ctx, ctrl.Request{NamespacedName: inUseProviderKey})
 		return err
 	}
 	readKey := capabilityReadKey(inUseProvider())
@@ -98,8 +100,30 @@ func TestReconcile_CapabilityReadRecordedOnlyWithItsStatusWrite(t *testing.T) {
 	assert.True(t, got.SupportsHonestReconfigure)
 	_, recorded = r.capabilityReads.Load(readKey)
 	assert.True(t, recorded)
+	settle := defaultPodTerminationGracePeriod + capabilitySettleMargin
+	assert.Equal(t, settle, lastResult.RequeueAfter, "the confirming read is scheduled")
 
-	// Recorded: a further reconcile within the settle delay reads nothing.
+	// Recorded: a further reconcile within the settle delay reads nothing and
+	// keeps the confirming read scheduled.
 	require.NoError(t, reconcile())
 	assert.Equal(t, int32(2), reader.reads.Load())
+	assert.Positive(t, lastResult.RequeueAfter)
+	assert.LessOrEqual(t, lastResult.RequeueAfter, settle)
+}
+
+// TestReconcile_ForgetsCapabilityReadsOfAGoneProvider pins that a reconcile of
+// a Provider that no longer exists drops what was recorded for it.
+func TestReconcile_ForgetsCapabilityReadsOfAGoneProvider(t *testing.T) {
+	sch := newProviderSAScheme(t)
+	r := &ProviderReconciler{Client: fake.NewClientBuilder().WithScheme(sch).Build(), Scheme: sch}
+	gone := types.NamespacedName{Namespace: "default", Name: "gone"}
+	r.capabilityReads.Store(gone.String(), &capabilityReadState{uid: "u"})
+	r.capabilityReadFailures.Store(gone.String(), &capabilityReadFailure{uid: "u"})
+
+	_, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: gone})
+	require.NoError(t, err)
+	_, ok := r.capabilityReads.Load(gone.String())
+	assert.False(t, ok)
+	_, ok = r.capabilityReadFailures.Load(gone.String())
+	assert.False(t, ok)
 }

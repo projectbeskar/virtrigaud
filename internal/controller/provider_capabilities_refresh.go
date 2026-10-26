@@ -33,9 +33,10 @@ import (
 // When the Provider controller (re-)reads a provider's capabilities into
 // status.reportedCapabilities (v0.4.1-rc1 lab finding B2).
 //
-// A capability read is only taken once the runtime Deployment's rollout is
-// complete (deploymentRolloutComplete): mid-rollout, any connection can reach
-// a pod of the superseded ReplicaSet. It is taken over a connection of its own
+// A capability read is only taken once no pod of a superseded ReplicaSet is
+// left running beside the current ones (deploymentRolloutComplete):
+// mid-rollout, any connection can reach a pod of the superseded ReplicaSet. It
+// is taken over a connection of its own
 // (ProviderCapabilityReader), never the cached client of the other
 // controllers, whose connection stays with the pod it first reached. It is
 // taken again:
@@ -50,7 +51,8 @@ import (
 //   - every capabilityRefreshInterval while the Provider is healthy, which
 //     also catches a change no Deployment spec change shows (a mutable image
 //     tag pulled again by a restarted pod);
-//   - after a failed read, capabilityRetryInterval later.
+//   - after a failed read, capabilityRetryInterval later — not sooner, whatever
+//     else re-drives the Provider (capabilityReadFailures).
 //
 // What was read, and for which revision, is kept in memory (per manager
 // process): a manager that starts reads every Provider again, which is also
@@ -62,6 +64,11 @@ const (
 
 	// capabilityRetryInterval is when a failed capability read is retried.
 	capabilityRetryInterval = time.Minute
+
+	// capabilityReadTimeout bounds one capability read (it is retried
+	// anyway), so an unreachable runtime does not hold a reconcile worker for
+	// the transport's whole GetCapabilities timeout.
+	capabilityReadTimeout = 10 * time.Second
 
 	// capabilitySettleMargin is added to the pod termination grace period to
 	// get the delay of the confirming read after a rollout.
@@ -94,25 +101,33 @@ type capabilityReadState struct {
 	settled bool
 }
 
-// deploymentRolloutComplete reports whether the Deployment's rollout is
-// complete, by the rule `kubectl rollout status` applies: the controller has
-// observed the latest spec, every desired replica is updated, no replica of an
-// older ReplicaSet is left, and every updated replica is available. Only then
-// are all the pods the Service routes a new connection to of the current
-// revision.
+// capabilityReadFailure is the last failed capability read of a Provider: no
+// read of the same Provider and runtime revision is attempted again before
+// capabilityRetryInterval has passed.
+type capabilityReadFailure struct {
+	uid      types.UID
+	revision string
+	at       time.Time
+}
+
+// deploymentRolloutComplete reports whether every pod the Service can route a
+// new connection to is of the Deployment's current revision: the controller
+// has observed the latest spec, no (non-terminating) replica of an older
+// ReplicaSet is left (status.replicas counts the replicas of every
+// ReplicaSet, status.updatedReplicas those of the current one), and at least
+// one current replica is available. Pods still terminating are not counted;
+// the confirming read after the settle delay covers them. Unlike `kubectl
+// rollout status` it does not wait for every desired replica: a Provider with
+// one of its replicas unavailable (unschedulable, crash-looping) is still read
+// from the current ones that serve.
 func deploymentRolloutComplete(dep *appsv1.Deployment) bool {
 	if dep == nil || dep.Generation == 0 || dep.Status.ObservedGeneration < dep.Generation {
 		return false
 	}
-	desired := int32(1)
-	if dep.Spec.Replicas != nil {
-		desired = *dep.Spec.Replicas
-	}
 	s := dep.Status
-	return desired > 0 &&
-		s.UpdatedReplicas >= desired &&
+	return s.UpdatedReplicas > 0 &&
 		s.Replicas <= s.UpdatedReplicas &&
-		s.AvailableReplicas >= s.UpdatedReplicas
+		s.AvailableReplicas > 0
 }
 
 // runtimeRevision identifies the revision of a Provider's runtime: the
@@ -195,7 +210,16 @@ func (r *ProviderReconciler) refreshReportedCapabilities(ctx context.Context, pr
 	if !due {
 		return wait, nil
 	}
+	key := capabilityReadKey(provider)
+	if v, ok := r.capabilityReadFailures.Load(key); ok {
+		if f, _ := v.(*capabilityReadFailure); f != nil && f.uid == provider.UID && f.revision == rev {
+			if since := now.Sub(f.at); since < capabilityRetryInterval {
+				return capabilityRetryInterval - since, nil
+			}
+		}
+	}
 	if !r.reconcileReportedCapabilities(ctx, provider) {
+		r.capabilityReadFailures.Store(key, &capabilityReadFailure{uid: provider.UID, revision: rev, at: now})
 		return capabilityRetryInterval, nil
 	}
 	next := &capabilityReadState{
@@ -223,13 +247,16 @@ func capabilityReadKey(provider *infravirtrigaudiov1beta1.Provider) string {
 // nothing.
 func (r *ProviderReconciler) commitCapabilityRead(provider *infravirtrigaudiov1beta1.Provider, read *capabilityReadState) {
 	if read != nil {
-		r.capabilityReads.Store(capabilityReadKey(provider), read)
+		key := capabilityReadKey(provider)
+		r.capabilityReads.Store(key, read)
+		r.capabilityReadFailures.Delete(key)
 	}
 }
 
 // forgetCapabilityReads drops what was recorded for a Provider that is gone.
 func (r *ProviderReconciler) forgetCapabilityReads(key types.NamespacedName) {
 	r.capabilityReads.Delete(key.String())
+	r.capabilityReadFailures.Delete(key.String())
 }
 
 // requeueNoLaterThan returns result with RequeueAfter at most after (after > 0).

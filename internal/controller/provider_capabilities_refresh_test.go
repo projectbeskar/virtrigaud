@@ -97,6 +97,17 @@ func TestDeploymentRolloutComplete(t *testing.T) {
 	defaulted := rolledOut(2, 1)
 	defaulted.Spec.Replicas = nil
 	assert.True(t, deploymentRolloutComplete(defaulted), "nil replicas means 1")
+
+	degraded := rolledOut(2, 2)
+	degraded.Status.ReadyReplicas, degraded.Status.AvailableReplicas = 1, 1
+	assert.True(t, deploymentRolloutComplete(degraded),
+		"one of two current replicas unavailable: the other, current, is read")
+
+	partlyCreated := rolledOut(2, 2)
+	partlyCreated.Status.Replicas, partlyCreated.Status.UpdatedReplicas = 1, 1
+	partlyCreated.Status.ReadyReplicas, partlyCreated.Status.AvailableReplicas = 1, 1
+	assert.True(t, deploymentRolloutComplete(partlyCreated),
+		"only current replicas exist (one not created yet)")
 }
 
 func TestCapabilityReadDue(t *testing.T) {
@@ -190,14 +201,28 @@ func TestRefreshReportedCapabilities_Policy(t *testing.T) {
 	assert.Equal(t, 45*time.Second, refreshAndCommit(rolledOut(3, 1)))
 	assert.Equal(t, int32(3), reader.reads.Load())
 
-	// A failed read keeps the recorded capabilities and is retried.
+	// A failed read keeps the recorded capabilities and is retried after
+	// capabilityRetryInterval, not at the next reconcile.
 	failure := errors.New("unavailable")
 	reader.err.Store(&failure)
 	assert.Equal(t, capabilityRetryInterval, refreshAndCommit(rolledOut(4, 1)))
 	assert.Equal(t, int32(4), reader.reads.Load())
 	require.NotNil(t, p.Status.ReportedCapabilities)
-	assert.Equal(t, capabilityRetryInterval, refreshAndCommit(rolledOut(4, 1)),
-		"the revision is still unread: retried")
+	wait = refreshAndCommit(rolledOut(4, 1))
+	assert.Equal(t, int32(4), reader.reads.Load(), "no read again before the retry interval")
+	assert.Positive(t, wait)
+	assert.LessOrEqual(t, wait, capabilityRetryInterval)
+
+	// The retry interval has passed: read again; a success clears the failure.
+	fv, _ := r.capabilityReadFailures.Load(key)
+	f, ok := fv.(*capabilityReadFailure)
+	require.True(t, ok)
+	f.at = time.Now().Add(-capabilityRetryInterval)
+	reader.err.Store(nil)
+	assert.Equal(t, 45*time.Second, refreshAndCommit(rolledOut(4, 1)))
+	assert.Equal(t, int32(5), reader.reads.Load())
+	_, ok = r.capabilityReadFailures.Load(key)
+	assert.False(t, ok, "a recorded read clears the failure")
 
 	r.forgetCapabilityReads(types.NamespacedName{Namespace: "ns", Name: "p"})
 	_, ok = r.capabilityReads.Load(key)

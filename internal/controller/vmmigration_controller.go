@@ -3006,7 +3006,7 @@ func (r *VMMigrationReconciler) isProviderReady(provider *infrav1beta1.Provider)
 	// Check if provider has the ProviderAvailable condition set to True
 	// The Provider CRD uses "ProviderAvailable" and "ProviderRuntimeReady" conditions
 	for _, condition := range provider.Status.Conditions {
-		if condition.Type == "ProviderAvailable" && condition.Status == metav1.ConditionTrue {
+		if condition.Type == providerConditionAvailable && condition.Status == metav1.ConditionTrue {
 			return true
 		}
 	}

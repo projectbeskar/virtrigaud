@@ -124,20 +124,32 @@ const providerTLSVolumeName = "provider-tls"
 // Capability-reporting Condition vocabulary surfaced on
 // Provider.Status.Conditions (issue #176). The reconciler best-effort
 // queries the provider's GetCapabilities RPC once the provider runtime is
-// Running and surfaces the outcome here. This is purely informational: a
-// failure to report capabilities never flips Healthy or fails the
-// reconcile (see reconcileReportedCapabilities).
+// Running and no pod of a superseded rollout is left, and again when they may
+// have changed (refreshReportedCapabilities), and surfaces the outcome here.
+// The condition is set by each read, so its observedGeneration is the
+// Provider generation of the last read. This is purely informational: a
+// failure to report capabilities never flips Healthy or fails the reconcile
+// (see reconcileReportedCapabilities).
 //
 // Reasons:
 //   - CapabilitiesFetched — capabilities were fetched and recorded on
 //     Status.ReportedCapabilities.
-//   - CapabilitiesUnavailable — the provider could not be resolved, the
-//     resolved provider does not implement CapabilityReporter, or the
-//     GetCapabilities RPC failed. Best-effort; non-fatal.
+//   - CapabilitiesUnavailable — no capability reader is configured, or the
+//     read failed (runtime not Running, TLS material not loadable, the
+//     GetCapabilities RPC failed). Best-effort; non-fatal.
 const (
 	providerConditionCapabilitiesReported = "CapabilitiesReported"
 	providerReasonCapabilitiesFetched     = "CapabilitiesFetched"
 	providerReasonCapabilitiesUnavailable = "CapabilitiesUnavailable"
+)
+
+// providerConditionAvailable is the Provider condition that is True while the
+// runtime Deployment has a ready replica (status.healthy follows it);
+// providerReasonDeploymentNotReady is its reason (and ProviderRuntimeReady's)
+// when it has none.
+const (
+	providerConditionAvailable       = "ProviderAvailable"
+	providerReasonDeploymentNotReady = "DeploymentNotReady"
 )
 
 // ProviderReconciler reconciles a Provider object
@@ -161,8 +173,12 @@ type ProviderReconciler struct {
 	CapabilityReader ProviderCapabilityReader
 
 	// capabilityReads records, per Provider (namespace/name), the
-	// *capabilityReadState of the last capability read.
+	// *capabilityReadState of the last capability read written to its status.
 	capabilityReads sync.Map
+
+	// capabilityReadFailures records, per Provider (namespace/name), the
+	// *capabilityReadFailure of its last failed capability read.
+	capabilityReadFailures sync.Map
 
 	// capabilityRefreshInterval and capabilitySettleDelay override
 	// defaultCapabilityRefreshInterval and the settle delay derived from the
@@ -303,14 +319,12 @@ func (r *ProviderReconciler) Reconcile(ctx context.Context, req ctrl.Request) (r
 		}
 	}
 
-	updateErr := r.writeProviderStatus(ctx, base, &provider)
-	if updateErr == nil {
+	if updateErr := r.writeProviderStatus(ctx, base, &provider); updateErr == nil {
 		// The capabilities read above are on the Provider now: record the
 		// read. A read whose status write failed is not recorded, so the
 		// next reconcile reads them again.
 		r.commitCapabilityRead(&provider, capabilityRead)
-	}
-	if updateErr != nil {
+	} else {
 		// This reconcile's read was behind a newer write of its own fields:
 		// nothing was written and it runs again shortly from the live state
 		// (not an error).
@@ -323,7 +337,9 @@ func (r *ProviderReconciler) Reconcile(ctx context.Context, req ctrl.Request) (r
 		}
 		logger.Error(updateErr, "Failed to update Provider status")
 		if err == nil {
-			err = updateErr
+			// Retried with the error's backoff; a result beside an error is
+			// ignored by controller-runtime.
+			return ctrl.Result{}, updateErr
 		}
 	}
 
@@ -370,7 +386,7 @@ func (r *ProviderReconciler) reconcileRuntimeStatus(ctx context.Context, provide
 	}
 
 	// Set healthy status based on ProviderAvailable condition
-	providerAvailable := k8s.GetCondition(provider.Status.Conditions, "ProviderAvailable")
+	providerAvailable := k8s.GetCondition(provider.Status.Conditions, providerConditionAvailable)
 	provider.Status.Healthy = providerAvailable != nil && providerAvailable.Status == metav1.ConditionTrue
 
 	return result, deployment, err
@@ -405,7 +421,9 @@ func (r *ProviderReconciler) reconcileReportedCapabilities(ctx context.Context, 
 		return false
 	}
 
-	caps, err := r.CapabilityReader.ReadCapabilities(ctx, provider)
+	readCtx, cancel := context.WithTimeout(ctx, capabilityReadTimeout)
+	defer cancel()
+	caps, err := r.CapabilityReader.ReadCapabilities(readCtx, provider)
 	if err != nil {
 		logger.V(1).Info("Skipping capability report: reading the capabilities failed",
 			"provider", provider.Name, "namespace", provider.Namespace, "error", err.Error())
@@ -558,16 +576,16 @@ func (r *ProviderReconciler) reconcileRemoteRuntime(ctx context.Context, provide
 
 		k8s.SetCondition(&provider.Status.Conditions, "ProviderRuntimeReady", metav1.ConditionTrue, "DeploymentReady", fmt.Sprintf("Deployment has %d ready replicas", deployment.Status.ReadyReplicas), provider.Generation)
 
-		k8s.SetCondition(&provider.Status.Conditions, "ProviderAvailable", metav1.ConditionTrue, "RemoteAvailable", "Remote provider is available", provider.Generation)
+		k8s.SetCondition(&provider.Status.Conditions, providerConditionAvailable, metav1.ConditionTrue, "RemoteAvailable", "Remote provider is available", provider.Generation)
 	} else {
 		provider.Status.Runtime.Phase = infravirtrigaudiov1beta1.ProviderRuntimePhasePending
 		provider.Status.Runtime.Message = "Waiting for deployment to be ready"
 
-		k8s.SetCondition(&provider.Status.Conditions, "ProviderRuntimeReady", metav1.ConditionFalse, "DeploymentNotReady", "Deployment pods are not ready yet", provider.Generation)
+		k8s.SetCondition(&provider.Status.Conditions, "ProviderRuntimeReady", metav1.ConditionFalse, providerReasonDeploymentNotReady, "Deployment pods are not ready yet", provider.Generation)
 
 		// No ready pod serves the provider: it is not available, whatever it
 		// was before (status.healthy follows).
-		k8s.SetCondition(&provider.Status.Conditions, "ProviderAvailable", metav1.ConditionFalse, "DeploymentNotReady", "No ready provider pod", provider.Generation)
+		k8s.SetCondition(&provider.Status.Conditions, providerConditionAvailable, metav1.ConditionFalse, providerReasonDeploymentNotReady, "No ready provider pod", provider.Generation)
 
 		// Requeue to check readiness again
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, deployment, nil

@@ -475,7 +475,9 @@ type ConnectionPooling struct {
 // ProviderStatus defines the observed state of Provider
 type ProviderStatus struct {
 	// Healthy is true while the provider Deployment reports a ready replica
-	// (the ProviderAvailable condition is True); false when it has none.
+	// (the ProviderAvailable condition is True) and false when it reports
+	// none, as last observed from the Deployment: a reconcile that fails
+	// before it reaches the Deployment leaves it as it was.
 	// +optional
 	Healthy bool `json:"healthy,omitempty"`
 
@@ -507,7 +509,7 @@ type ProviderStatus struct {
 	// (when capability enforcement is enabled) to gate capability-dependent
 	// operations. It is read once a rollout of the provider runtime is complete,
 	// again after the old pods' termination grace period, and every 10 minutes
-	// while the provider is healthy.
+	// while the provider is healthy and no pod of an older rollout is left.
 	// +optional
 	ReportedCapabilities *ReportedCapabilities `json:"reportedCapabilities,omitempty"`
 
