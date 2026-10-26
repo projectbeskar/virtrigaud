@@ -18,9 +18,12 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	infrav1beta1 "github.com/projectbeskar/virtrigaud/api/infra.virtrigaud.io/v1beta1"
@@ -34,7 +37,7 @@ const phaseSkipped = "Skipped: vmCount reached"
 // vmCount caps: the VMs it created and has not deleted (a clone's target
 // joins them once its clone has ended, see settleClones), the VMs whose delete
 // was sent but is not confirmed complete, the target VMs of failed clones that
-// still exist, the targets of the clones that have not ended, and the slots reserved for a create or clone whose API call is in
+// still exist (including the ones the operator keeps), the targets of the clones that have not ended, and the slots reserved for a create or clone whose API call is in
 // flight. lg.mu must be held.
 func (lg *LoadGenerator) aliveLocked() int {
 	pending := 0
@@ -43,7 +46,7 @@ func (lg *LoadGenerator) aliveLocked() int {
 			pending++
 		}
 	}
-	return len(lg.vms) + len(lg.deleting) + pending + lg.reserved
+	return len(lg.vms) + len(lg.deleting) + len(lg.kept) + pending + lg.reserved
 }
 
 // reserveSlot reserves room for one more VM (the new VM of a create, the
@@ -145,12 +148,13 @@ func (lg *LoadGenerator) settleClones(ctx context.Context) {
 	for _, c := range pending {
 		cur := &infrav1beta1.VMClone{}
 		err := lg.client.Get(ctx, client.ObjectKey{Namespace: lg.namespace, Name: c.name}, cur)
-		var ready bool
+		var ready, keptTarget bool
 		switch {
 		case apierrors.IsNotFound(err) || (err == nil && cur.UID != c.uid):
 		case err != nil:
 			continue
 		case cur.Status.Phase == infrav1beta1.ClonePhaseFailed:
+			keptTarget = targetKeptByOperator(cur)
 		case cur.Status.Phase == infrav1beta1.ClonePhaseReady:
 			ready = true
 		default:
@@ -162,23 +166,28 @@ func (lg *LoadGenerator) settleClones(ctx context.Context) {
 		case readErr != nil:
 			continue
 		case !found:
-			lg.resolveClone(c.name, nil, nil)
+			lg.resolveClone(c.name, nil, nil, nil)
 		case ready && item.obj.GetDeletionTimestamp() == nil:
 			target := &runVM{name: c.target, uid: item.uid, provider: c.provider, power: infrav1beta1.PowerStateOff}
 			if vm, ok := item.obj.(*infrav1beta1.VirtualMachine); ok && vm.Spec.PowerState != "" {
 				target.power = vm.Spec.PowerState
 			}
-			lg.resolveClone(c.name, target, nil)
+			lg.resolveClone(c.name, target, nil, nil)
+		case keptTarget:
+			// The operator keeps this target on purpose: the run never deletes it.
+			lg.resolveClone(c.name, nil, nil, &runObject{name: c.target, uid: item.uid})
 		default:
-			lg.resolveClone(c.name, nil, &runObject{name: c.target, uid: item.uid})
+			lg.resolveClone(c.name, nil, &runObject{name: c.target, uid: item.uid}, nil)
 		}
 	}
 }
 
 // resolveClone marks the VMClone name as ended. A non-nil target is tracked as
 // one of the run's VMs; a non-nil held is a target VM that still exists but is
-// not usable, tracked as a VM being deleted.
-func (lg *LoadGenerator) resolveClone(name string, target *runVM, held *runObject) {
+// not usable, tracked as a VM being deleted; a non-nil kept is the target
+// of a failed clone that the operator keeps (see targetKeptByOperator), which
+// the run counts but never deletes.
+func (lg *LoadGenerator) resolveClone(name string, target *runVM, held, kept *runObject) {
 	lg.mu.Lock()
 	defer lg.mu.Unlock()
 	for i := range lg.clones {
@@ -189,6 +198,9 @@ func (lg *LoadGenerator) resolveClone(name string, target *runVM, held *runObjec
 			}
 			if held != nil {
 				lg.deleting = append(lg.deleting, *held)
+			}
+			if kept != nil {
+				lg.kept = append(lg.kept, *kept)
 			}
 			return
 		}
@@ -228,7 +240,7 @@ func (lg *LoadGenerator) forgetDeleted(ctx context.Context) {
 		return
 	}
 	lg.mu.Lock()
-	pending := append([]runObject{}, lg.deleting...)
+	pending := append(append([]runObject{}, lg.deleting...), lg.kept...)
 	lg.mu.Unlock()
 	if len(pending) == 0 {
 		return
@@ -248,13 +260,42 @@ func (lg *LoadGenerator) forgetDeleted(ctx context.Context) {
 
 	lg.mu.Lock()
 	defer lg.mu.Unlock()
-	kept := lg.deleting[:0]
-	for _, d := range lg.deleting {
-		if !gone[d.name] {
-			kept = append(kept, d)
+	lg.deleting = withoutGone(lg.deleting, gone)
+	lg.kept = withoutGone(lg.kept, gone)
+}
+
+// withoutGone returns objs without the ones named in gone.
+func withoutGone(objs []runObject, gone map[string]bool) []runObject {
+	remaining := objs[:0]
+	for _, o := range objs {
+		if !gone[o.name] {
+			remaining = append(remaining, o)
 		}
 	}
-	lg.deleting = kept
+	return remaining
+}
+
+// targetKeptByOperator reports whether the VMClone clone, which has failed,
+// belongs to a target VirtualMachine that the operator keeps on purpose, so
+// the run must not delete it: deleting the target could leave the cloned VM on
+// the hypervisor with nothing recording it. The signals are those of the
+// operator's removeFailedCloneTarget: a TargetCleanup condition recording
+// TargetKept, a cloned VM the provider reported (status.targetVMID), or a Clone
+// request of unknown outcome (the CloneRequested condition).
+func targetKeptByOperator(clone *infrav1beta1.VMClone) bool {
+	if clone.Status.Phase != infrav1beta1.ClonePhaseFailed {
+		return false
+	}
+	if c := meta.FindStatusCondition(clone.Status.Conditions, conditionTargetCleanup); c != nil &&
+		c.Status == metav1.ConditionFalse && c.Reason == reasonTargetKept {
+		return true
+	}
+	return clone.Status.TargetVMID != "" || meta.FindStatusCondition(clone.Status.Conditions, conditionCloneRequested) != nil
+}
+
+// keptMessage is how the run reports a target VM the operator keeps.
+func keptMessage(name string) string {
+	return fmt.Sprintf("kept by the operator (target of a failed clone): %s \u2014 inspect and delete it yourself", name)
 }
 
 // skippedResult returns the result of an operation of the given kind that was

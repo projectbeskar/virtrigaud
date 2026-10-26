@@ -238,6 +238,10 @@ type LoadGenerator struct {
 	// run, and the target VMs of failed clones that still exist; --cleanup
 	// deletes them and waits until they are gone.
 	deleting []runObject
+	// kept holds the target VMs of failed clones that the operator keeps on
+	// purpose (see targetKeptByOperator): they count against vmCount while
+	// they exist, and --cleanup reports them instead of deleting them.
+	kept []runObject
 }
 
 // Statistics holds performance statistics

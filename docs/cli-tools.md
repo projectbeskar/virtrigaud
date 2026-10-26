@@ -276,7 +276,14 @@ run's duration for operations still in flight; an interrupt stops it.
   the run's label, its VMs and the VMs whose delete it issued during the run, and waits until they
   are gone, up to `--cleanup-timeout`. It also deletes any object carrying the run's label
   (`loadgen.virtrigaud.io/run`) that the tool did not record, which happens when a create's answer
-  was lost after the apiserver stored the object. A `VMClone` is only an operation record: deleting it leaves
+  was lost after the apiserver stored the object. It does **not** delete the target VM of a failed
+  `VMClone` that the operator keeps on purpose (the `VMClone` has a `TargetCleanup` condition with
+  reason `TargetKept`, or `status.targetVMID` set, or a `CloneRequested` condition): removing that
+  `VirtualMachine` could leave the cloned VM on the hypervisor with nothing recording it. Such a VM
+  counts against `vmCount` while it exists and is reported as `kept by the operator (target of a
+  failed clone): <name> — inspect and delete it yourself`; the cleanup then exits non-zero, and
+  without `--cleanup` the "Left in place" output lists it and warns that the `kubectl delete`
+  command it prints would remove it too. A `VMClone` is only an operation record: deleting it leaves
   its target VM, which is why the targets are deleted as well. A `VMClone` whose provider clone may
   still be in flight is waited for first; one that does not settle in time is left in place with
   its source and target VMs. The tool exits non-zero, naming what is left, when anything remains.

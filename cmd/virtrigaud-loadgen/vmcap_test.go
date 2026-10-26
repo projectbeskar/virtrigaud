@@ -31,6 +31,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -545,6 +546,83 @@ func TestSettleClones(t *testing.T) {
 		assert.Empty(t, lg.deleting)
 		lg.performCreate(ctx, "lab-provider", 0)
 		assert.True(t, (<-lg.results).Success, "a VM the run did not label is not the run's")
+	})
+
+	failedWith := func(t *testing.T, clone *infrav1beta1.VMClone, mutate func(*infrav1beta1.VMClone)) {
+		t.Helper()
+		clone.Status.Phase = infrav1beta1.ClonePhaseFailed
+		mutate(clone)
+		require.NoError(t, env.Client.Status().Update(ctx, clone))
+	}
+	keptCases := []struct {
+		name   string
+		mutate func(*infrav1beta1.VMClone)
+	}{
+		{"the provider reported a cloned VM", func(c *infrav1beta1.VMClone) { c.Status.TargetVMID = "100" }},
+		{"a Clone of unknown outcome is on record", func(c *infrav1beta1.VMClone) {
+			meta.SetStatusCondition(&c.Status.Conditions, metav1.Condition{
+				Type: conditionCloneRequested, Status: metav1.ConditionTrue, Reason: "Requested", LastTransitionTime: metav1.Now()})
+		}},
+		{"the operator recorded TargetKept", func(c *infrav1beta1.VMClone) {
+			meta.SetStatusCondition(&c.Status.Conditions, metav1.Condition{
+				Type: conditionTargetCleanup, Status: metav1.ConditionFalse, Reason: reasonTargetKept, LastTransitionTime: metav1.Now()})
+		}},
+	}
+	for i, kc := range keptCases {
+		t.Run("the target the operator keeps is counted, never deleted, and reported: "+kc.name, func(t *testing.T) {
+			lg, _, clone := cloneOnce(t, "lg-kept-"+string(rune('a'+i)))
+			target := createTargetVM(t, env.Client, lg.namespace, clone, infrav1beta1.PowerStateOff)
+			failedWith(t, clone, kc.mutate)
+
+			lg.settleClones(ctx)
+			require.Len(t, lg.kept, 1)
+			assert.Equal(t, target.Name, lg.kept[0].name)
+			assert.Empty(t, lg.deleting, "the run does not delete it")
+			lg.performCreate(ctx, "lab-provider", 0)
+			assert.True(t, (<-lg.results).Skipped, "it still occupies a slot")
+
+			// Without --cleanup it is listed, with a warning about the kubectl command.
+			var out strings.Builder
+			require.NoError(t, lg.finish(&out))
+			assert.Contains(t, out.String(), keptMessage(target.Name))
+
+			lg.opts.cleanup, lg.opts.cleanupTimeout = true, 20*time.Second
+			out.Reset()
+			err := lg.finish(&out)
+			require.ErrorIs(t, err, errCleanupIncomplete)
+			assert.Contains(t, out.String(), keptMessage(target.Name))
+			getVM(t, env.Client, lg.namespace, target.Name) // still there
+			vms := listVMs(t, env.Client, lg.namespace)
+			assert.Len(t, vms, 1, "the source VM went, the kept target stayed")
+			assert.Equal(t, target.Name, vms[0].Name)
+			clones := &infrav1beta1.VMCloneList{}
+			require.NoError(t, env.Client.List(ctx, clones, client.InNamespace(lg.namespace)))
+			assert.Empty(t, clones.Items, "the VMClone itself is removed")
+		})
+	}
+
+	t.Run("cleanup keeps the target of a failed clone it never settled", func(t *testing.T) {
+		lg, _, clone := cloneOnce(t, "lg-kept-unsettled")
+		target := createTargetVM(t, env.Client, lg.namespace, clone, infrav1beta1.PowerStateOff)
+		failedWith(t, clone, func(c *infrav1beta1.VMClone) { c.Status.TargetVMID = "100" })
+		cctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+		defer cancel()
+		left := lg.cleanup(cctx)
+		assert.Equal(t, []string{keptMessage(target.Name)}, left)
+		getVM(t, env.Client, lg.namespace, target.Name)
+	})
+
+	t.Run("a kept target stops counting when it is gone", func(t *testing.T) {
+		lg, _, clone := cloneOnce(t, "lg-kept-gone")
+		target := createTargetVM(t, env.Client, lg.namespace, clone, infrav1beta1.PowerStateOff)
+		failedWith(t, clone, func(c *infrav1beta1.VMClone) { c.Status.TargetVMID = "100" })
+		lg.settleClones(ctx)
+		require.Len(t, lg.kept, 1)
+		require.NoError(t, env.Client.Delete(ctx, target))
+		lg.lastForget = time.Time{}
+		lg.performCreate(ctx, "lab-provider", 0)
+		assert.True(t, (<-lg.results).Success)
+		assert.Empty(t, lg.kept)
 	})
 
 	t.Run("cleanup deletes a settled clone target once", func(t *testing.T) {

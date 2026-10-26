@@ -40,6 +40,14 @@ import (
 // recorded): while it is present, a provider clone may be in flight.
 const conditionCloneRequested = "CloneRequested"
 
+// conditionTargetCleanup and reasonTargetKept are the VMClone condition, and
+// its reason, in which the operator records that it keeps the target VM of a
+// failed clone.
+const (
+	conditionTargetCleanup = "TargetCleanup"
+	reasonTargetKept       = "TargetKept"
+)
+
 // cleanupDeleteTimeout bounds the delete calls --cleanup still sends once
 // its timeout is used up.
 const cleanupDeleteTimeout = 30 * time.Second
@@ -66,6 +74,10 @@ func (lg *LoadGenerator) finish(out io.Writer) error {
 	lg.mu.Lock()
 	nVMs, nSnaps, nClones := len(lg.vms), len(lg.snapshots), len(lg.clones)
 	nHeld := len(lg.deleting)
+	keptNames := make([]string, 0, len(lg.kept))
+	for _, k := range lg.kept {
+		keptNames = append(keptNames, k.name)
+	}
 	nPendingTargets := 0
 	for _, c := range lg.clones {
 		if !c.resolved {
@@ -82,6 +94,12 @@ func (lg *LoadGenerator) finish(out io.Writer) error {
 			cliout.Printf(out, "Left in place: %d VMs, %d VMSnapshots, %d VMClones%s. Remove them with:\n", nVMs, nSnaps, nClones,
 				pendingTargetsNote(nPendingTargets, nHeld))
 			cliout.Printf(out, "  kubectl delete vmsnapshots,vmclones,virtualmachines -n %s -l %s=%s\n", lg.namespace, loadgenRunLabelKey, lg.runID)
+		}
+		if len(keptNames) > 0 {
+			cliout.Printf(out, "That command also deletes these VMs, which --cleanup would not; check each on the hypervisor first:\n")
+			for _, name := range keptNames {
+				cliout.Printf(out, "  %s\n", keptMessage(name))
+			}
 		}
 		return nil
 	}
@@ -153,6 +171,11 @@ func (lg *LoadGenerator) cleanup(ctx context.Context) []string {
 		vms = append(vms, runObject{name: vm.name, uid: vm.uid})
 	}
 	vms = append(vms, lg.deleting...)
+	keptTargets := map[string]bool{}
+	for _, k := range lg.kept {
+		keptTargets[k.name] = true
+		targets = append(targets, k.name)
+	}
 	lg.mu.Unlock()
 
 	// Objects carrying the run's label that the run did not record: a create
@@ -180,8 +203,11 @@ func (lg *LoadGenerator) cleanup(ctx context.Context) []string {
 	keepAsTarget := map[string]bool{}
 	var settled []runObject
 	for _, c := range clones {
-		if lg.cloneSettled(ctx, c) {
+		if cur, ok := lg.cloneSettled(ctx, c); ok {
 			settled = append(settled, c)
+			if cur != nil && targetKeptByOperator(cur) {
+				keptTargets[c.target] = true
+			}
 			continue
 		}
 		left = append(left, "VMClone/"+c.name+" (clone in flight)")
@@ -208,11 +234,16 @@ func (lg *LoadGenerator) cleanup(ctx context.Context) []string {
 		switch {
 		case err != nil:
 			left = append(left, fmt.Sprintf("VirtualMachine/%s (could not be read: %v)", name, err))
+		case found && keptTargets[name]:
+			left = append(left, keptMessage(name))
 		case found:
 			rest = append(rest, item)
 		}
 	}
 	for _, vm := range vms {
+		if keptTargets[vm.name] {
+			continue // reported above, with the targets
+		}
 		if keepVM[vm.name] {
 			role := "source"
 			if keepAsTarget[vm.name] {
@@ -292,12 +323,14 @@ func newCleanupItem(obj client.Object, o runObject) cleanupItem {
 
 // cloneSettled waits, within ctx, until the VMClone c has no provider clone
 // in flight — it is Ready or Failed, it has not requested a clone yet, or it
-// is gone — and reports whether that happened.
-func (lg *LoadGenerator) cloneSettled(ctx context.Context, c runObject) bool {
+// is gone — and reports whether that happened. It also returns the VMClone as
+// last read (nil when it is gone or was never read).
+func (lg *LoadGenerator) cloneSettled(ctx context.Context, c runObject) (*infrav1beta1.VMClone, bool) {
 	interval := lg.pollInterval
 	if interval <= 0 {
 		interval = defaultPollInterval
 	}
+	var last *infrav1beta1.VMClone
 	err := wait.PollUntilContextCancel(ctx, interval, true, func(ctx context.Context) (bool, error) {
 		cur := &infrav1beta1.VMClone{}
 		err := lg.client.Get(ctx, client.ObjectKey{Namespace: lg.namespace, Name: c.name}, cur)
@@ -310,6 +343,7 @@ func (lg *LoadGenerator) cloneSettled(ctx context.Context, c runObject) bool {
 		if cur.UID != c.uid {
 			return true, nil
 		}
+		last = cur
 		switch cur.Status.Phase {
 		case infrav1beta1.ClonePhaseReady, infrav1beta1.ClonePhaseFailed:
 			return true, nil
@@ -319,7 +353,7 @@ func (lg *LoadGenerator) cloneSettled(ctx context.Context, c runObject) bool {
 			return false, nil
 		}
 	})
-	return err == nil
+	return last, err == nil
 }
 
 // ownedCloneTarget reads the clone target VM named name. It reports found
