@@ -302,7 +302,12 @@ func (p *Provider) rollbackCreatedVM(ctx context.Context, node string, vmid int,
 	if err := p.client.WaitForTask(ctx, node, task); err != nil {
 		return fmt.Errorf("destroy VM %d: %w", vmid, err)
 	}
-	return p.confirmNothingRemains(ctx, vmid, true)
+	if err := p.confirmNothingRemains(ctx, vmid, true); err != nil {
+		return err
+	}
+	// The VM is gone: its seed build lock file goes too (best effort; seed.go).
+	p.removeSeedLock(ctx, vmid)
+	return nil
 }
 
 // sshExitConnectionFailed is the exit status ssh reports when the connection

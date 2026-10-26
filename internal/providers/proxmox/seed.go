@@ -524,6 +524,43 @@ func seedLockPath(vmid int) string {
 	return seedStageDir + "/" + seedLockName(vmid)
 }
 
+// seedLockCleanupTimeout bounds removeSeedLock's SSH session.
+const seedLockCleanupTimeout = 30 * time.Second
+
+// seedLockRemoveScript is the node-side script that removes VM vmid's seed
+// build lock file from stageDir (a 0-byte file on a tmpfs that outlives the
+// build) once the VM is gone. It removes the file only while it holds the
+// lock on it and the file it locked is still the one at the path, so it never
+// removes a lock a build holds, and a build that opened the file before it was
+// removed finds, once it gets the lock, that its file is no longer the one at
+// the path and stops as busy (buildSeedScript): two builds can never each
+// hold a lock on a different file. A missing file, a symbolic link or a held
+// lock is left alone and the script exits 0. stageDir is a parameter only so
+// the tests can run it against a local directory; production passes
+// seedStageDir.
+func seedLockRemoveScript(stageDir string, vmid int) string {
+	qd := proxmoxShellQuote(stageDir)
+	ql := proxmoxShellQuote(stageDir + "/" + seedLockName(vmid))
+	return "[ ! -L " + qd + " ] && [ -f " + ql + " ] && [ ! -L " + ql + " ] || exit 0; " +
+		"exec 9<" + ql + "; flock -n 9 || exit 0; [ /dev/fd/9 -ef " + ql + " ] || exit 0; rm -f -- " + ql
+}
+
+// removeSeedLock removes, best effort, VM vmid's seed build lock file from
+// the node the SSH data plane reaches (where every seed is built), once the
+// VM is destroyed. A failure is logged, never returned: the file is empty, on
+// a tmpfs, and harmless. Without SSH credentials nothing is done.
+func (p *Provider) removeSeedLock(ctx context.Context, vmid int) {
+	if p.ssh == nil || (!p.ssh.usePassword() && !p.ssh.useKey()) {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), seedLockCleanupTimeout)
+	defer cancel()
+	if _, _, err := p.ssh.runSSH(ctx, seedLockRemoveScript(seedStageDir, vmid)); err != nil {
+		p.logger.Warn("Could not remove the VM's cloud-init seed build lock file on the node (an empty file on /run, removed at reboot)",
+			"vmid", vmid, "error", err)
+	}
+}
+
 // pveQemuConfDir is where the PVE node keeps the configs of its own VMs
 // (/etc/pve/qemu-server is the local node's directory).
 const pveQemuConfDir = "/etc/pve/qemu-server"
@@ -542,7 +579,10 @@ const pveQemuConfDir = "/etc/pve/qemu-server"
 //     checked to be owned by the running user, mode 700. The script then
 //     holds the VM's lock (flock on stageDir/.lock-<vmid>) until it exits:
 //     another seed build of the VM still running (an interrupted earlier
-//     attempt), or a `qm importdisk` of the VM, exits seedExitImportBusy (the
+//     attempt), a lock file removed between its open and its flock
+//     (seedLockRemoveScript; the lock it holds would then be on a file no
+//     other build opens), or a `qm importdisk` of the VM, exits
+//     seedExitImportBusy (the
 //     pgrep pattern is written so that it does not match this script's own
 //     command line). Build directories a killed script left behind for more
 //     than seedStaleMinutes are removed; a fresh build directory "$W" is made.
@@ -577,6 +617,8 @@ func buildSeedScript(stageDir, confDir string, vmid int, storage, slot, alsoDele
 		"[ ! -L " + qd + " ] && [ \"$(stat -c '%u %a' -- " + qd + ")\" = \"$(id -u) 700\" ] || exit 1; " +
 		"exec 9>" + proxmoxShellQuote(stageDir+"/"+seedLockName(vmid)) + "; " +
 		fmt.Sprintf("flock -n 9 || { echo 'a seed build of the VM is still running' >&2; exit %d; }; ", seedExitImportBusy) +
+		"[ /dev/fd/9 -ef " + proxmoxShellQuote(stageDir+"/"+seedLockName(vmid)) + " ] || " +
+		fmt.Sprintf("{ echo 'the seed build lock was removed meanwhile' >&2; exit %d; }; ", seedExitImportBusy) +
 		"if pgrep -f -- " + proxmoxShellQuote(importdiskRunningPattern(vmid)) + " >/dev/null 2>&1; then " +
 		fmt.Sprintf("echo 'a qm importdisk of the VM is still running' >&2; exit %d; fi; ", seedExitImportBusy) +
 		"find " + qd + " -mindepth 1 -maxdepth 1 -name '.seed-*' -mmin +" + strconv.Itoa(seedStaleMinutes) +

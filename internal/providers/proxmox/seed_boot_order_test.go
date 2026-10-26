@@ -28,6 +28,7 @@ import (
 	"sigs.k8s.io/yaml"
 
 	"github.com/projectbeskar/virtrigaud/internal/providers/proxmox/pvefake"
+	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
 )
 
 // These tests pin rc1 finding B1: qemu-server appends the CD-ROM a `qm set`
@@ -227,4 +228,28 @@ func TestSeedEmptyUserData_IsNotAnEmptyCloudConfig(t *testing.T) {
 	var empty interface{}
 	require.NoError(t, yaml.Unmarshal([]byte("#cloud-config\n"), &empty))
 	assert.Nil(t, empty, "the rc1 value was an empty document")
+}
+
+// TestDelete_RemovesTheSeedLock pins rc1 finding O5 on the provider side: a
+// Delete that destroyed the VM runs the lock removal for its VMID on the
+// node; a removal that fails does not fail the Delete.
+func TestDelete_RemovesTheSeedLock(t *testing.T) {
+	p, srv, node, _ := seedTestProvider(t)
+	resp, err := p.Create(context.Background(), seedCreateReq())
+	require.NoError(t, err)
+	vmid := vmByID(t, srv, resp.Id).VMID
+	_, err = p.Delete(context.Background(), &providerv1.DeleteRequest{Id: resp.Id, Owner: ownerProto(testOwner())})
+	require.NoError(t, err)
+	assert.Contains(t, node.allCommands(), seedLockRemoveScript(seedStageDir, vmid))
+
+	resp, err = p.Create(context.Background(), seedCreateReq())
+	require.NoError(t, err)
+	vmid = vmByID(t, srv, resp.Id).VMID
+	node.delegate = func(context.Context, string) (string, string, error) {
+		return "", "", exitErr(t, sshExitConnectionFailed)
+	}
+	_, err = p.Delete(context.Background(), &providerv1.DeleteRequest{Id: resp.Id, Owner: ownerProto(testOwner())})
+	require.NoError(t, err, "a failed lock removal never fails the Delete")
+	_, exists := srv.GetVM(vmid)
+	assert.False(t, exists)
 }

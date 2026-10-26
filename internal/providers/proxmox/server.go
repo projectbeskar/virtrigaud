@@ -618,6 +618,7 @@ func (p *Provider) Delete(ctx context.Context, req *providerv1.DeleteRequest) (*
 		case !gone:
 			return nil, errors.NewUnavailable(fmt.Sprintf("Proxmox VM %d is not on node %s but exists elsewhere in the cluster; not deleting", vmid, node), nil)
 		}
+		p.removeSeedLock(ctx, vmid)
 		return &providerv1.TaskResponse{}, nil
 	}
 	if err != nil {
@@ -629,6 +630,8 @@ func (p *Provider) Delete(ctx context.Context, req *providerv1.DeleteRequest) (*
 		}
 	}
 
+	// The VM is gone: its seed build lock file goes too (best effort; seed.go).
+	p.removeSeedLock(ctx, vmid)
 	return &providerv1.TaskResponse{}, nil
 }
 
