@@ -830,7 +830,7 @@ Bugs found, and the pull request that fixes each in rc2:
 | Finding | Fixed in |
 |---|---|
 | The NoCloud seed's slot was in the boot order of every Proxmox VM that has one (`order=scsi0;ide2`). | #455 |
-| `Provider.status.reportedCapabilities` kept the previous image's answer after a provider roll (a rolled Proxmox Provider still reported linked clones), and `healthy` stayed `true` without a ready pod. | #456 |
+| `Provider.status.reportedCapabilities` kept the previous image's answer after a provider roll (a rolled Proxmox Provider still reported linked clones). | #456 |
 | The provider's startup log listed linked clones among the Proxmox capabilities. | #455 |
 | The `status.healthy` of a `Provider` stayed `true` without a ready pod (found in review of the finding above). | #456 |
 | A Proxmox clone without user-data made `cloud-init status` report degraded; the docs did not say a clone's source users can lose their sudo rule or that a `VMClone` and its target deleted mid-clone leave the VM on PVE. | #455 |
@@ -840,7 +840,7 @@ Bugs found, and the pull request that fixes each in rc2:
 | A clustered libvirt export that NFS or S3 refused was held as `ExportOutcomeUnknown` for 35 minutes, where a single-host Provider fails it at once. | #457 |
 | A libvirt VMClass with `securityProfile.secureBoot: true` could not define its domain; the retry re-copied the disk every 30 seconds, the delete was held as `CreateOutcomeUnknown` and the attempt's disk stayed on the pool. Review of the same XML found `firmware: UEFI` ignored and VT-d, nested virtualization and multi-NIC VMs broken (found in review). | #458 |
 | Refused creates were re-sent every 30 seconds (every 5 seconds for some answers); a Provider without `status.runtime` made every VM reconcile panic until the Provider controller caught up (found in review). | #459 |
-| `virtrigaud-loadgen` did not cap the number of VMs it kept alive (a run filled the Proxmox node's thin pool), started operations after its duration and exited 0 after an interrupt. | #454 |
+| `virtrigaud-loadgen` did not cap the number of VMs it kept alive, started operations after its duration and exited 0 after an interrupt. | #454 |
 | A delete refreshed the pool only on the host that ran it, so another host of a clustered Provider kept listing the deleted volumes; a single-host create from a libvirt path image that the disk check cannot read is retried with a "transient host error" text. | Not fixed: documented as limitations (below). |
 
 ### rc2 lab validation
@@ -852,7 +852,7 @@ hypervisors. The run will re-check the rc1 failures and the rc2 changes:
   imported-disk `Create` and a `VMClone` with a seed; `cloud-init status` exits 0 on a clone without
   user-data; no `.lock-<vmid>` after a delete; a concurrent-create VMID race answered "not
   performed" and retried; the startup log's capabilities; a clone of a fully booted seeded source
-  and its sudo rules; the seed's effect on `qm migrate` in a cluster (not run in rc1).
+  and its sudo rules; the seed's effect on `qm migrate` (needs a multi-node Proxmox cluster; not run in rc1).
 - libvirt, single-host and clustered: a secure boot VMClass and a `firmware: UEFI` VMClass boot
   (`mokutil --sb-state` enabled and disabled), a VT-d, a nested virtualization and a two-NIC VM
   start, Delete removes the variable store and the disk; with the enrolled firmware masked on a
