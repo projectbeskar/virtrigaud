@@ -553,6 +553,20 @@ No action is required; this changes how often a refused create is sent again.
   profile, instead of 0.1.x tags and passes nobody had run. It still lists the `clone` profile for
   Proxmox, which no longer advertises linked clones.
 - **CI** checks proto compatibility with `buf breaking` on pull requests.
+- **Proxmox: creates that race for a VMID are "not performed".** Two `Create`s or `Clone`s that get
+  the same VMID from `/cluster/nextid` at the same time (concurrent creates on one Provider) end
+  with one of them refused by PVE: its clone task cannot lock the source's or the VMID's config,
+  or finds the VMID's config there, or PVE refuses its request outright because the other's VM is already being made. In v0.4.0
+  both were answered with an unknown outcome, so a `VirtualMachine` deleted before its `Create`
+  was sent again was held (`CreateOutcomeUnknown`) until you confirmed that nothing was created.
+  The provider now answers "not performed" (`CREATE_NOT_PERFORMED`) for the first form, and for
+  the second whenever it can prove that the VM at that VMID is not this `VirtualMachine`'s (it
+  stays unknown, for example, while another request of the same Provider still waits for PVE's
+  answer); the `Create` is then sent again and gets a new VMID
+  ([`Create` and `Clone` error classes](vm-ownership.md#create-and-clone-error-classes)).
+  v0.4.1-rc2 answered only the first form this way. A `VirtualMachine` already held for this
+  reason stays held after the roll: check PVE for a VM stamped with its UID, then record its id
+  or set the `virtrigaud.io/create-outcome` annotation that its message names, as before.
 
 ### If you run v0.4.1-rc1
 
