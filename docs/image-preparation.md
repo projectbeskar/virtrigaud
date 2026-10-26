@@ -798,7 +798,8 @@ A prepare runs synchronously. The provider reports failures that retrying cannot
 `InvalidSpec` (gRPC `InvalidArgument`): the manager records them on the `VMImage`
 (`InvalidSource`) and holds instead of retrying every few seconds. The prepare is sent again
 after 30 seconds, doubling to 10 minutes (v0.4.1; before, on every 30-second re-check of each
-VM using the image), or at once when the `VMImage`'s `spec.source` changes. The wait is kept in
+VM using the image), or at once when the `VMImage`'s `spec.source` or the `Provider`'s spec
+changes (for example its allowed image directories). The wait is kept in
 the manager's memory: after a manager restart the first re-check sends the prepare again.
 
 | Permanent (`InvalidSpec`) | Retried |

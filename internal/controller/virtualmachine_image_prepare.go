@@ -690,14 +690,20 @@ func (r *VirtualMachineReconciler) issueImagePrepare(
 			// ADR-0009 whose reported capability is stale — the empty target
 			// name. Record that on the VMImage so its owner sees WHY, not just
 			// the VM. The prepare is sent again only after a backoff
-			// (sourceRejectedBackoff), or at once for a changed spec.source (a
-			// new backoff key).
+			// (sourceRejectedBackoff), or at once for a changed spec.source or
+			// Provider spec (a new backoff key); the VM is requeued for it.
+			now := r.now()
 			msg := imageSourceRejectedMessage(provider, perr)
-			r.prepareBackoff.fail(backoffSourceRejected, imagePrepareBackoffKey(vmImage, provider, req.SourceDigest),
-				"", msg, sourceRejectedBackoff, r.now())
+			_, notBefore := r.prepareBackoff.fail(backoffSourceRejected,
+				sourceRejectedBackoffKey(imagePrepareBackoffKey(vmImage, provider, req.SourceDigest), provider),
+				"", msg, sourceRejectedBackoff, now)
 			if werr := r.markImageSourceRejected(ctx, vmImage, provider, perr); werr != nil {
 				logger.Error(werr, "Failed to record rejected image source on VMImage",
 					"provider", key, "image", vmImage.Name)
+			}
+			return false, &retryAfterError{
+				err:   fmt.Errorf("prepare image %s on provider %s: %w", vmImage.Name, key, perr),
+				after: notBefore.Sub(now),
 			}
 		}
 		return false, fmt.Errorf("prepare image %s on provider %s: %w", vmImage.Name, key, perr)
@@ -773,6 +779,7 @@ func (r *VirtualMachineReconciler) issueImagePrepare(
 		return false, werr
 	}
 	r.prepareBackoff.clear(backoffKey)
+	r.prepareBackoff.clear(sourceRejectedBackoffKey(backoffKey, provider))
 	return !applied, nil
 }
 
@@ -862,6 +869,9 @@ func (r *VirtualMachineReconciler) imagePrepareBackoffHold(
 ) error {
 	now := r.now()
 	remaining, msg := r.prepareBackoff.wait(backoffKey, now)
+	if d, m := r.prepareBackoff.wait(sourceRejectedBackoffKey(backoffKey, provider), now); d > remaining {
+		remaining, msg = d, m
+	}
 	if found && imageEntryRecordedThrough(entry, provider) && !entry.Available && entry.TaskRef == "" &&
 		imageEntryForSource(entry, digest) && entry.LastUpdated != nil {
 		if d := entry.LastUpdated.Add(importFailedBackoff.Base).Sub(now); d > remaining {
@@ -1133,6 +1143,12 @@ func (r *VirtualMachineReconciler) prepareImageForCreate(
 		return true, ctrl.Result{RequeueAfter: imageHoldRequeueAfter(perr)}, nil
 	default:
 		reason, requeueAfter := providerFailureOutcome(perr)
+		// A rejected image source is re-checked when its backoff ends, not
+		// sooner (issueImagePrepare).
+		var ra *retryAfterError
+		if errors.As(perr, &ra) && ra.after > requeueAfter {
+			requeueAfter = ra.after
+		}
 		logger.Error(perr, "Failed to ensure image on provider - will retry",
 			"image", vmImage.Name, "provider", provider.Name, "retryIn", requeueAfter)
 		k8s.SetReadyCondition(&vm.Status.Conditions, metav1.ConditionFalse, reason,

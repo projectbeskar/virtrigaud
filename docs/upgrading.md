@@ -473,21 +473,25 @@ No action is required; this changes how often a refused create is sent again.
   `VMClass`, `VMImage` or `Provider` (the manager now watches those three for a VM whose create
   was refused), sends the create again within seconds and starts the backoff again from
   30 seconds. A refusal with a different message also starts it again from 30 seconds. A change that is not a spec change
-  of these objects (a `Secret` the provider reads, a provider restart, a fix on the host, a
-  `VMNetworkAttachment` edit) is picked up at the next re-check, at most 10 minutes later.
+  of these objects (a `Secret` the provider reads or the VM's user-data `Secret`, a provider
+  restart, a fix on the host, a `VMNetworkAttachment` edit) is picked up at the next re-check,
+  at most 10 minutes later.
   Status-only updates and label or annotation changes do not count.
 - **Manager restarts.** The backoff is kept in the manager's memory and recovered after a
-  restart from the `Ready` message, so a restart does not send the create again early. A VM
-  refused by a v0.4.0 manager (whose message has no next re-check) is sent once after the
-  upgrade and then backs off.
+  restart from the `Ready` message, so a restart does not send the create again early (one
+  whose re-check passed while no manager ran is sent at once, and the backoff goes on from
+  where it was). A change to the `VMClass`, `VMImage`, `Provider` or networks made while no
+  manager ran is picked up at that re-check. A VM refused by a v0.4.0 manager (whose message
+  has no next re-check) is sent once after the upgrade and then backs off.
 - **A refused image source is paced the same way.** An `ImagePrepare` whose source the provider
   refuses (the `VMImage` gets `InvalidSource`) is sent again after 30 seconds, doubling to
-  10 minutes, or at once when the `VMImage`'s `spec.source` changes. Before, it was sent again
-  on every 30-second re-check of each VM that uses the image, and the libvirt provider can
-  download the whole image before refusing it (a checksum mismatch, an image `qemu-img` cannot
-  read, an unsupported format). While it waits, the VM shows `Ready=False/WaitingForDependencies`
-  with "... prepared again in <wait>". This wait is in memory only: after a manager restart the
-  first re-check sends the prepare again.
+  10 minutes, or at once when the `VMImage`'s `spec.source` or the `Provider`'s spec changes. Before, it
+  was sent again on every 30-second re-check of each VM that uses the image, and the libvirt
+  provider can download the whole image before refusing it (a checksum mismatch, an image
+  `qemu-img` cannot read, an unsupported format). The VM keeps `Ready=False/ValidationError`
+  ("Image prepare failed: ...") and is re-checked when the wait ends; a VM reconciled during the
+  wait shows `Ready=False/WaitingForDependencies` with "... prepared again in <wait>". This wait
+  is in memory only: after a manager restart the first re-check sends the prepare again.
 - **Unchanged.** A VM refused before any provider call (a `VMClass` value or a
   `spec.resources` override out of range, `ValidationError`) is still re-checked every
   30 seconds, and is now also re-checked at once when its `VMClass` changes. A refused

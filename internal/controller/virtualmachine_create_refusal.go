@@ -26,6 +26,7 @@ import (
 
 	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
@@ -228,17 +229,22 @@ func (b *createRefusalBackoff) refused(uid types.UID, inputs, detail string, now
 }
 
 // wait returns how much of the VM uid's wait is left at now for inputs; 0
-// when the Create may be sent. A run recorded for other inputs is dropped:
-// something the answer depends on changed, so the Create is sent at once.
+// when the Create may be sent. A run recorded for other inputs ends:
+// something the answer depends on changed, so the Create is sent at once. The
+// ended run is kept, with no refusals and no wait, so the condition (which
+// still names the old wait until the next answer) is not read back as a run
+// by recoverCreateRefusal should this reconcile stop before the Create; the
+// next refusal starts again from createRefusalRetryBase.
 func (b *createRefusalBackoff) wait(uid types.UID, inputs string, now time.Time) time.Duration {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	b.prune(now)
 	e, ok := b.entries[uid]
 	if !ok {
 		return 0
 	}
 	if e.inputs != inputs {
-		delete(b.entries, uid)
+		b.entries[uid] = &createRefusalEntry{inputs: inputs, detail: e.detail, until: now}
 		return 0
 	}
 	if !now.Before(e.until) {
@@ -290,7 +296,8 @@ func (r *VirtualMachineReconciler) recordCreateRefusal(vm *infravirtrigaudiov1be
 // in memory (after a manager restart): a create refusal recorded for the VM's
 // current generation by createRefusalMessage. A time of the next re-check
 // further away than createRefusalRetryMax (a clock that moved) is brought
-// back to that bound.
+// back to that bound; one already past is seeded too, so the Create is sent
+// at once and the run goes on from the wait the message names.
 func (r *VirtualMachineReconciler) recoverCreateRefusal(vm *infravirtrigaudiov1beta1.VirtualMachine, inputs string, now time.Time) {
 	if r.createRefusals.known(vm.UID) {
 		return
@@ -300,7 +307,7 @@ func (r *VirtualMachineReconciler) recoverCreateRefusal(vm *infravirtrigaudiov1b
 		return
 	}
 	wait, next, detail, ok := parseCreateRefusalMessage(ready.Message)
-	if !ok || !now.Before(next) {
+	if !ok {
 		return
 	}
 	if limit := now.Add(createRefusalRetryMax); next.After(limit) {
@@ -336,14 +343,17 @@ func (r *VirtualMachineReconciler) holdRefusedCreate(
 }
 
 // createRefusalRefIndex is the cache field index of a VirtualMachine whose
-// create is refused as invalid (createRefusalIndexValues), by every Provider,
-// VMClass and VMImage it references (consumerRefIndexValue).
+// create is refused or held (createRefused), by every Provider, VMClass and
+// VMImage it references (consumerRefIndexValue).
 const createRefusalRefIndex = "virtrigaud.io/create-refusal-ref"
 
-// createRefused reports whether vm has no provider VM and its Ready or
-// Provisioning condition records a refusal of its create as invalid
-// (ValidationError): a provider's InvalidSpec answer, or a VMClass value the
-// create request could not be built from.
+// createRefused reports whether vm has no provider VM and its create is
+// refused or held on something a Provider, VMClass or VMImage spec change may
+// resolve: Ready or Provisioning records ValidationError (a provider's
+// InvalidSpec answer, or a VMClass value the create request could not be
+// built from), or Ready records WaitingForDependencies (among others an image
+// prepare held after the provider rejected the image source, which a new
+// spec.source ends at once).
 func createRefused(vm *infravirtrigaudiov1beta1.VirtualMachine) bool {
 	if vm.Status.ID != "" {
 		return false
@@ -353,7 +363,8 @@ func createRefused(vm *infravirtrigaudiov1beta1.VirtualMachine) bool {
 			return true
 		}
 	}
-	return false
+	ready := meta.FindStatusCondition(vm.Status.Conditions, k8s.ConditionReady)
+	return ready != nil && ready.Status == metav1.ConditionFalse && ready.Reason == k8s.ReasonWaitingForDependencies
 }
 
 // createRefusalIndexValues is the createRefusalRefIndex extractor: a VM whose

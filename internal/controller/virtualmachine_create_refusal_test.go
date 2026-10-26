@@ -337,7 +337,9 @@ func TestCreateRefusalBackoff_PrunesAndDropsOtherInputs(t *testing.T) {
 	assert.Equal(t, 30*time.Second, b.refused("a", "in-1", "d", now))
 	assert.Equal(t, 30*time.Second, b.wait("a", "in-1", now))
 	assert.Zero(t, b.wait("a", "in-2", now), "other inputs end the wait")
-	assert.False(t, b.known("a"), "and drop the run")
+	assert.True(t, b.known("a"), "the ended run is kept, so the condition is not read back as a run")
+	assert.Zero(t, b.wait("a", "in-2", now), "and holds nothing")
+	assert.Equal(t, 30*time.Second, b.refused("a", "in-2", "d", now), "the next refusal starts again from the base")
 
 	b.refused("old", "in", "d", now)
 	later := now.Add(createRefusalRetryBase + createRefusalForget + time.Second)
@@ -365,10 +367,59 @@ func TestCreateRefusalIndexValues(t *testing.T) {
 	bound.Status.ID = "vm-1"
 	assert.Empty(t, createRefusalIndexValues(bound), "a created VM is not indexed")
 
+	held := refused.DeepCopy()
+	held.Status.Conditions[0].Reason = k8s.ReasonWaitingForDependencies
+	assert.Len(t, createRefusalIndexValues(held), 3, "a create held on its dependencies (a rejected image source) counts too")
+
 	other := refused.DeepCopy()
 	other.Status.Conditions[0].Reason = k8s.ReasonProviderError
-	assert.Empty(t, createRefusalIndexValues(other), "only a refusal is indexed")
+	assert.Empty(t, createRefusalIndexValues(other), "only a refusal or a hold is indexed")
 	assert.Empty(t, createRefusalIndexValues(&infravirtrigaudiov1beta1.Provider{}))
+}
+
+// TestHoldRefusedCreate_ResetIsNotUndoneByTheCondition (review finding 1): a
+// reconcile released by a dependency change that stops before the Create (an
+// image re-prepare in flight, a placement hold, a failed marker write) must
+// not let the next reconcile read the old wait back from the condition.
+func TestHoldRefusedCreate_ResetIsNotUndoneByTheCondition(t *testing.T) {
+	h := newRefusalHarness(t, invalidDefinition())
+	h.reconcile(nil)
+	h.now = h.now.Add(30 * time.Second)
+	h.reconcile(nil)
+	require.Equal(t, 2, h.creates())
+
+	class := &infravirtrigaudiov1beta1.VMClass{}
+	require.NoError(t, h.r.Get(context.Background(), types.NamespacedName{Namespace: h.key.Namespace, Name: "test-class"}, class))
+	class.Generation++
+	require.NoError(t, h.r.Update(context.Background(), class))
+
+	h.now = h.now.Add(5 * time.Second)
+	for i := range 2 {
+		vm := h.vm()
+		deps, err := h.r.getDependencies(context.Background(), vm)
+		require.NoError(t, err)
+		_, held := h.r.holdRefusedCreate(context.Background(), vm, vm.Status.DeepCopy(), deps)
+		assert.False(t, held, "reconcile %d after the VMClass edit is not held", i+1)
+	}
+}
+
+func TestReconcileVM_RefusedCreate_RestartPastTheRecheckContinuesTheRun(t *testing.T) {
+	h := newRefusalHarness(t, invalidDefinition())
+	h.reconcile(nil)
+	h.now = h.now.Add(30 * time.Second)
+	h.reconcile(nil)
+	h.now = h.now.Add(time.Minute)
+	res := h.reconcile(nil)
+	require.Equal(t, 2*time.Minute, res.RequeueAfter)
+
+	// The manager was down past the re-check: sent at once, and the run goes
+	// on (4 min), not from 30 s.
+	h.r = &VirtualMachineReconciler{Client: h.r.Client, Scheme: h.r.Scheme, RemoteResolver: h.r.RemoteResolver,
+		clock: func() time.Time { return h.now }}
+	h.now = h.now.Add(time.Hour)
+	res = h.reconcile(nil)
+	assert.Equal(t, 4, h.creates())
+	assert.Equal(t, 4*time.Minute, res.RequeueAfter)
 }
 
 func TestVMsForCreateRefusalChange(t *testing.T) {
@@ -437,8 +488,12 @@ func TestEnsureImageOnProvider_RejectedSourceBacksOff(t *testing.T) {
 	assert.Equal(t, 1, inst.prepareCalls)
 
 	now = now.Add(30 * time.Second)
-	assert.True(t, contracts.IsInvalidSpec(ensure()))
+	second := ensure()
+	assert.True(t, contracts.IsInvalidSpec(second))
 	assert.Equal(t, 2, inst.prepareCalls)
+	var ra *retryAfterError
+	require.True(t, errors.As(second, &ra), "the refusal carries its wait")
+	assert.Equal(t, time.Minute, ra.after, "so the VM is requeued when it ends, not at the fixed 30 s")
 	now = now.Add(59 * time.Second)
 	assert.True(t, errors.Is(ensure(), errImagePrepareHold), "the second wait is a minute")
 	assert.Equal(t, 2, inst.prepareCalls)
@@ -452,4 +507,11 @@ func TestEnsureImageOnProvider_RejectedSourceBacksOff(t *testing.T) {
 	require.NoError(t, r.Update(context.Background(), fixed))
 	assert.True(t, contracts.IsInvalidSpec(ensure()), "a new source is sent at once")
 	assert.Equal(t, 4, inst.prepareCalls)
+	assert.True(t, errors.Is(ensure(), errImagePrepareHold))
+	assert.Equal(t, 4, inst.prepareCalls)
+
+	// A Provider spec change (its allowed image directories, say) too.
+	provider.Generation++
+	assert.True(t, contracts.IsInvalidSpec(ensure()), "a Provider spec change is sent at once")
+	assert.Equal(t, 5, inst.prepareCalls)
 }

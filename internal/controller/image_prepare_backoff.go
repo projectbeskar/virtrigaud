@@ -17,6 +17,7 @@ limitations under the License.
 package controller
 
 import (
+	"strconv"
 	"sync"
 	"time"
 
@@ -91,6 +92,27 @@ var imagePrepareBackoffKinds = []string{backoffImportFailed, backoffNotConfirmed
 func imagePrepareBackoffKey(vmImage *infravirtrigaudiov1beta1.VMImage, provider *infravirtrigaudiov1beta1.Provider, digest string) string {
 	return string(vmImage.UID) + "|" + imageProviderKey(provider) + "|" + string(provider.UID) + "|" + digest
 }
+
+// sourceRejectedBackoffKey is the key of a backoffSourceRejected failure:
+// backoffKey (imagePrepareBackoffKey) and the Provider's generation, so a
+// change of the Provider's spec — such as the allowed image directories in
+// its runtime environment — ends the wait as a changed spec.source does.
+func sourceRejectedBackoffKey(backoffKey string, provider *infravirtrigaudiov1beta1.Provider) string {
+	return backoffKey + "|generation=" + strconv.FormatInt(provider.Generation, 10)
+}
+
+// retryAfterError is err, the failure of a call that must not be retried
+// before after has passed (a rejected image source, sourceRejectedBackoff).
+type retryAfterError struct {
+	err   error
+	after time.Duration
+}
+
+// Error returns the wrapped error's text.
+func (e *retryAfterError) Error() string { return e.err.Error() }
+
+// Unwrap returns the wrapped error, so its classification is kept.
+func (e *retryAfterError) Unwrap() error { return e.err }
 
 // imagePrepareBackoffEntry is the failure record of one kind for one key.
 type imagePrepareBackoffEntry struct {

@@ -48,8 +48,92 @@ func (p *refusingVMProvider) Create(context.Context, contracts.CreateRequest) (c
 	return contracts.CreateResponse{}, contracts.NewInvalidSpecError("create: libvirt rejected the domain definition", nil)
 }
 
+// rejectingImageProvider refuses every image prepare as an invalid source and
+// counts them; safe for a running controller.
+type rejectingImageProvider struct {
+	stubProvider
+	prepares atomic.Int32
+}
+
+func (p *rejectingImageProvider) PrepareImage(context.Context, contracts.ImagePrepareRequest) (contracts.ImagePrepareResponse, error) {
+	p.prepares.Add(1)
+	return contracts.ImagePrepareResponse{}, contracts.NewInvalidSpecError("image prepare: checksum mismatch", nil)
+}
+
 var _ = Describe("A VM create the provider refuses (envtest)", func() {
 	ctx := context.Background()
+
+	It("does not prepare a rejected image source again in a loop, and prepares a corrected one at once", func() {
+		mgrCtx, stop := context.WithCancel(ctx)
+		DeferCleanup(stop)
+
+		ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{GenerateName: "refusal-img-"}}
+		Expect(k8sClient.Create(ctx, ns)).To(Succeed())
+		DeferCleanup(func() { _ = k8sClient.Delete(ctx, ns) })
+
+		mgr, err := ctrl.NewManager(cfg, ctrl.Options{
+			Scheme:                 k8sClient.Scheme(),
+			Metrics:                metricsserver.Options{BindAddress: "0"},
+			HealthProbeBindAddress: "0",
+			Controller:             ctrlconfig.Controller{SkipNameValidation: &skipNameValidation},
+		})
+		Expect(err).NotTo(HaveOccurred())
+		prov := &rejectingImageProvider{}
+		resolver := &atomicResolver{provider: prov, namespace: ns.Name}
+		Expect((&VirtualMachineReconciler{
+			Client: mgr.GetClient(), Scheme: mgr.GetScheme(), RemoteResolver: resolver, Recorder: record.NewFakeRecorder(100),
+		}).SetupWithManager(mgr)).To(Succeed())
+		mgrDone := make(chan struct{})
+		go func() {
+			defer GinkgoRecover()
+			defer close(mgrDone)
+			Expect(mgr.Start(mgrCtx)).To(Succeed())
+		}()
+		DeferCleanup(func() { stop(); <-mgrDone })
+
+		provider := envtestProvider(ns.Name, "libvirt", nil)
+		Expect(k8sClient.Create(ctx, provider)).To(Succeed())
+		provider.Status.Runtime = &infravirtrigaudiov1beta1.ProviderRuntimeStatus{Phase: "Running", Endpoint: "provider:9443"}
+		provider.Status.ReportedCapabilities = &infravirtrigaudiov1beta1.ReportedCapabilities{
+			SupportsImageImport: true, SupportsImageArtifactIdentity: true,
+		}
+		Expect(k8sClient.Status().Update(ctx, provider)).To(Succeed())
+		Expect(k8sClient.Create(ctx, envtestClass(ns.Name, "small", nil))).To(Succeed())
+		image := &infravirtrigaudiov1beta1.VMImage{
+			ObjectMeta: metav1.ObjectMeta{Name: "jammy", Namespace: ns.Name},
+			Spec: infravirtrigaudiov1beta1.VMImageSpec{
+				Source: infravirtrigaudiov1beta1.ImageSource{
+					Libvirt: &infravirtrigaudiov1beta1.LibvirtImageSource{
+						URL: "https://images.example.com/jammy.qcow2", Format: infravirtrigaudiov1beta1.ImageFormatQCOW2,
+					},
+				},
+			},
+		}
+		Expect(k8sClient.Create(ctx, image)).To(Succeed())
+		vm := &infravirtrigaudiov1beta1.VirtualMachine{
+			ObjectMeta: metav1.ObjectMeta{Name: "web", Namespace: ns.Name},
+			Spec: infravirtrigaudiov1beta1.VirtualMachineSpec{
+				ProviderRef: infravirtrigaudiov1beta1.ObjectRef{Name: provider.Name},
+				ClassRef:    infravirtrigaudiov1beta1.ObjectRef{Name: "small"},
+				ImageRef:    &infravirtrigaudiov1beta1.ObjectRef{Name: image.Name},
+			},
+		}
+		Expect(k8sClient.Create(ctx, vm)).To(Succeed())
+		prepares := func() int32 { return prov.prepares.Load() }
+
+		By("rejecting the source once, then holding instead of preparing it again")
+		Eventually(prepares, "20s", "100ms").Should(BeNumerically("==", 1))
+		Consistently(prepares, "3s", "100ms").Should(BeNumerically("==", 1))
+
+		By("a corrected spec.source is prepared at once")
+		Eventually(func(g Gomega) {
+			g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(image), image)).To(Succeed())
+			image.Spec.Source.Libvirt.URL = "https://images.example.com/noble.qcow2"
+			g.Expect(k8sClient.Update(ctx, image)).To(Succeed())
+		}, "10s", "100ms").Should(Succeed())
+		Eventually(prepares, "10s", "100ms").Should(BeNumerically("==", 2))
+		Consistently(prepares, "2s", "100ms").Should(BeNumerically("==", 2))
+	})
 
 	It("is not re-sent in a loop, and is retried at once when the VMClass, VMImage, Provider or VM spec changes", func() {
 		mgrCtx, stop := context.WithCancel(ctx)
