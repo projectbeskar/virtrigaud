@@ -190,9 +190,13 @@ func (r *VirtualMachineReconciler) holdCreateBackoff(
 	}
 	if transition {
 		// The provider's own answer says what happened (a refusal: what to
-		// fix); once per hold. A refusal is sanitized; any other answer may
-		// be a transport failure, whose text names the provider's address
-		// (rpcFailureDetail).
+		// fix); once per hold. Every answer selected here is the provider's
+		// (it carries a provider ErrorInfo, or is a FailedPrecondition or
+		// PermissionDenied), whose wire text the providers keep to the
+		// requester's own objects (ADR-0009 D11), as for the VMClone and
+		// VMSnapshot events. rpcFailureDetail is defence in depth: a gRPC
+		// transport failure's text, which names the provider's address,
+		// would be replaced.
 		detail := rpcFailureDetail(err)
 		if reason == k8s.ReasonCreateRefused {
 			detail = sanitizeProviderDetail(err)

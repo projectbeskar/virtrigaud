@@ -54,6 +54,17 @@ func notPerformedCreate(t *testing.T) error {
 	return contracts.MarkCreateNotPerformed(contracts.NewRetryableError(st.Message(), st.Err()))
 }
 
+// providerWideNotPerformedCreate is a Create a provider answered it did not
+// perform for a reason not scoped to the VM: gRPC Unavailable with
+// CREATE_NOT_PERFORMED alone (the Proxmox provider's createNotPerformed).
+func providerWideNotPerformedCreate(t *testing.T) error {
+	t.Helper()
+	st, err := status.New(codes.Unavailable, "create: no free VMID could be allocated; nothing was created (will retry)").WithDetails(
+		&errdetails.ErrorInfo{Reason: contracts.CreateNotPerformedReason, Domain: contracts.ErrorInfoDomain})
+	require.NoError(t, err)
+	return contracts.MarkCreateNotPerformed(contracts.NewRetryableError(st.Message(), st.Err()))
+}
+
 // editDuringCreate makes the provider stub label the stored VM (moving its
 // resourceVersion on, as a tenant or a tool would) and then answer err.
 func editDuringCreate(t *testing.T, r *VirtualMachineReconciler, rp *routingProvider, err error) {
@@ -144,6 +155,13 @@ func TestCreateVM_DefiniteAnswersSurviveAnEditDuringCreate(t *testing.T) {
 			readyReason: "", provisioning: k8s.ReasonProviderError},
 		"outcome unknown (VM_OPERATION_FAILED)": {err: operationFailedCreate,
 			markerKept: true, readyReason: k8s.ReasonCreateBackoff, provisioning: k8s.ReasonCreateRequested},
+		// The generic path: a provider-wide CREATE_NOT_PERFORMED (no
+		// VM_OPERATION_FAILED: e.g. no VMID could be allocated) replaces the
+		// marker; a transport failure keeps it.
+		"provider-wide not performed": {err: providerWideNotPerformedCreate,
+			readyReason: "", provisioning: k8s.ReasonProviderError},
+		"transport failure (outcome unknown)": {err: func(*testing.T) error { return transportFailure("create") },
+			markerKept: true, readyReason: k8s.ReasonProviderError, provisioning: k8s.ReasonCreateRequested},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -166,6 +184,70 @@ func TestCreateVM_DefiniteAnswersSurviveAnEditDuringCreate(t *testing.T) {
 				require.NotNil(t, ready)
 				assert.Equal(t, tc.readyReason, ready.Reason)
 			}
+		})
+	}
+}
+
+// TestCreateVM_ProviderWideNotPerformedSaysTheProviderAnswered (review): a
+// provider-wide CREATE_NOT_PERFORMED is the provider's answer, not a
+// transport failure, so its detail is shown.
+func TestCreateVM_ProviderWideNotPerformedSaysTheProviderAnswered(t *testing.T) {
+	ctx := context.Background()
+	r, rp, _ := createRecordFixture(t, infravirtrigaudiov1beta1.ProviderTypeProxmox, nil)
+	createErr := providerWideNotPerformedCreate(t)
+	rp.onCreate = func(contracts.CreateRequest) (contracts.CreateResponse, error) {
+		return contracts.CreateResponse{}, createErr
+	}
+	vm, _ := storedVM(t, r)
+	_, err := r.reconcileVM(ctx, vm)
+	require.NoError(t, err)
+	got, _ := storedVM(t, r)
+	prov := meta.FindStatusCondition(got.Status.Conditions, k8s.ConditionProvisioning)
+	require.NotNil(t, prov)
+	assert.Contains(t, prov.Message, "no free VMID could be allocated")
+	assert.NotContains(t, prov.Message, providerNotReachedDetail)
+}
+
+// TestCreateVM_Clustered_AnswerSurvivesAnEditDuringCreate: a clustered
+// Create's answer (Placed, Provisioning, Ready) is recorded although the VM
+// was edited while the provider ran it, and the pending host is kept.
+func TestCreateVM_Clustered_AnswerSurvivesAnEditDuringCreate(t *testing.T) {
+	cases := map[string]struct {
+		err          func(t *testing.T) error
+		placed       string
+		provisioning string
+	}{
+		"host unavailable": {err: func(*testing.T) error {
+			return contracts.NewHostUnavailableError("create: connect to target host \"host-alpha\"", nil)
+		}, placed: k8s.ReasonHostUnavailable, provisioning: k8s.ReasonProviderError},
+		"not performed (backoff)": {err: notPerformedCreate,
+			placed: k8s.ReasonCreatePending, provisioning: k8s.ReasonCreateBackoff},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			vm := clusterVM("vm-edit", clusteredNS, "prov-cluster")
+			createErr := tc.err(t)
+			var r *VirtualMachineReconciler
+			prov := &routingProvider{onCreate: func(contracts.CreateRequest) (contracts.CreateResponse, error) {
+				live := getVM(t, r, "vm-edit")
+				live.Labels = map[string]string{"loadgen": "touched"}
+				require.NoError(t, r.Update(ctx, live))
+				return contracts.CreateResponse{}, createErr
+			}}
+			r = clusteredFixture(t, prov, vm)
+
+			_, err := r.createVM(ctx, getVM(t, r, "vm-edit"), prov, clusteredProviderCR("prov-cluster", clusteredNS),
+				smallVMClass(clusteredNS), minimalVMImage(clusteredNS), nil)
+			require.NoError(t, err)
+			require.Len(t, prov.createReqs, 1)
+			after := getVM(t, r, "vm-edit")
+			assert.Equal(t, "touched", after.Labels["loadgen"], "the edit is kept")
+			require.NotNil(t, after.Status.Placement)
+			assert.Equal(t, "host-alpha", after.Status.Placement.PendingHost, "the pending host is kept")
+			require.NotNil(t, placedCondition(after))
+			assert.Equal(t, tc.placed, placedCondition(after).Reason, "the answer is recorded although the VM was edited")
+			assert.Equal(t, tc.provisioning, provisioningReason(after))
 		})
 	}
 }
@@ -300,4 +382,48 @@ func TestHoldCreateBackoff_MessageSaysWhatIsKnown(t *testing.T) {
 			assert.Contains(t, events[0], tc.keep, "the provider's detail is kept")
 		})
 	}
+}
+
+// TestDeleteVM_StaleCacheMarkerIsNotHeld (review): a delete reconciled from a
+// cache that still shows the create marker, while the stored VirtualMachine
+// already records the provider's answer (writeCreateAnswer, the VM deleted
+// while its Create ran), is neither held as CreateOutcomeUnknown nor
+// announced as such: it is re-checked from the next read, which releases it.
+func TestDeleteVM_StaleCacheMarkerIsNotHeld(t *testing.T) {
+	ctx := context.Background()
+	r, rp, rec := createRecordFixture(t, infravirtrigaudiov1beta1.ProviderTypeProxmox, nil)
+	stored, _ := storedVM(t, r)
+	setCreateRequested(stored, r.now())
+	require.NoError(t, r.Status().Update(ctx, stored))
+	stale, _ := storedVM(t, r)
+
+	// The answer lands on the stored object, then the VM is deleted.
+	stored, _ = storedVM(t, r)
+	k8s.SetProvisioningCondition(&stored.Status.Conditions, metav1.ConditionFalse, k8s.ReasonCreateBackoff,
+		createNotPerformedBackoffMessage, stored.Generation)
+	require.NoError(t, r.Status().Update(ctx, stored))
+	require.NoError(t, r.Delete(ctx, stored))
+	deleting, _ := storedVM(t, r)
+	require.False(t, deleting.DeletionTimestamp.IsZero())
+
+	// A reconcile from the stale cache: the marker, the deletion, phase
+	// Deleting already shown.
+	stale.DeletionTimestamp = deleting.DeletionTimestamp
+	stale.Status.Phase = infravirtrigaudiov1beta1.VirtualMachinePhaseDeleting
+	require.True(t, createRequested(stale))
+	res, err := r.handleDeletion(ctx, stale)
+	require.NoError(t, err)
+	assert.Equal(t, deletingPhaseConflictRetry, res.RequeueAfter, "re-checked from a fresh read")
+	_, exists := storedVM(t, r)
+	assert.True(t, exists)
+	for _, e := range drainEvents(rec) {
+		assert.NotContains(t, e, k8s.ReasonCreateOutcomeUnknown, "no spurious hold is announced")
+	}
+
+	fresh, _ := storedVM(t, r)
+	_, err = r.handleDeletion(ctx, fresh)
+	require.NoError(t, err)
+	_, exists = storedVM(t, r)
+	assert.False(t, exists, "released once the read shows the answer")
+	assert.Empty(t, rp.deleteRefs)
 }

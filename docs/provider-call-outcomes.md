@@ -269,9 +269,11 @@ Already covered before v0.4.1: a `VirtualMachine`'s created id (`status.id`, a s
 without a `resourceVersion` precondition), a `SnapshotRevert`'s answer, the result of a
 `VMMigration`'s `SnapshotCreate`, `ExportDisk` or `ImportDisk` while the migration is still in
 the phase that sent it, a `VMClone`'s accepted clone, and an image prepare's answer on the
-`VMImage`. A clustered `VMClone`'s answer recorded on its target, and a clustered `Create`
-whose host was excluded after a name conflict, are not written again: the next reconcile sends
-the call again to the same host and gets the same answer.
+`VMImage`. A clustered `VMClone`'s answer recorded on its target, a clustered `Create` whose
+host was excluded after a name conflict, and the clustered restore and own-domain holds
+(`RestorePending`, `OwnDomainOnAnotherHost`, an imported disk pinned to its host) are not written
+again: the pending host stays, so the next reconcile sends the call again to the same host and
+gets the same answer.
 
 What is still lost: an answer whose write fails for another reason (the API server
 unavailable) or is cut short by a manager restart. The marker then stands, as for a lost

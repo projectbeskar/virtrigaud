@@ -569,6 +569,18 @@ func (r *VirtualMachineReconciler) resolveCreateMarkerForDelete(
 		}
 	}
 
+	// The cache may not show the answer to the Create yet (a delete
+	// requested while it ran: writeCreateAnswer recorded it on the stored
+	// object): nothing is held, released or announced for a marker the
+	// stored VirtualMachine no longer carries.
+	if live, gone, lerr := r.readLiveVM(ctx, vm); lerr != nil || gone ||
+		live.Status.ID != "" || markerAttemptID(live) != markerAttemptID(vm) {
+		if lerr != nil {
+			logger.Info("Cannot read the VirtualMachine before holding its delete; re-checking", "error", lerr.Error())
+		}
+		return ctrl.Result{RequeueAfter: deletingPhaseConflictRetry}, false, nil
+	}
+
 	if force {
 		res, err := r.releaseLeavingHypervisorVM(ctx, vm, vmLeftCreateOutcomeUnknown)
 		return res, false, err

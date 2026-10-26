@@ -574,6 +574,10 @@ No action is required for new calls; a VM an rc2 manager already holds needs the
   (`Failed` while it waits, see [`vm-status-phase.md`](vm-status-phase.md)) are unchanged. The
   `CreateBackoff` `Warning` event now ends with `Provider answer: <the provider's answer>`
   (sanitized, as in the `VMClone` events), as the `CreateRefused` event does. An alert that matches the old text must be updated.
+- **A `Create` the provider did not perform for a reason not tied to the VM** (`CREATE_NOT_PERFORMED`
+  alone, for example no free Proxmox VMID) shows the provider's answer in `Provisioning`
+  (`Failed to create VM: <answer>`) instead of "the provider could not be reached or did not answer
+  in time".
 
 ### Other changes
 
