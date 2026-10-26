@@ -411,3 +411,64 @@ func TestStagedCopyLimitAndCheck(t *testing.T) {
 	assert.Equal(t, int64(1), StagedCopyDDCount(1))
 	assert.Equal(t, int64(2), StagedCopyDDCount(1<<20), "limit+1 bytes need a second MiB block")
 }
+
+// TestStagedDiskCauses_NameNoLocation (R28): the cause a staged-disk delete
+// keeps for the provider's log — which every provider logs, and which the SDK
+// request log used to print whole — names neither the nfs server, export,
+// path or uid/gid, nor the bucket, key or endpoint. The classification text
+// (MNT3ERR_ACCES, the S3 code) is kept.
+func TestStagedDiskCauses_NameNoLocation(t *testing.T) {
+	ctx := context.Background()
+	const url = "nfs://nfs.example.com/exports/mig/vmmigrations_team-a_web_export.qcow2?gid=1000&uid=1000"
+	nfsLeaks := []string{"nfs.example.com", "/exports/mig", "vmmigrations_team-a_web_export.qcow2", "uid=", "gid="}
+
+	t.Run("nfs: the export refuses the mount", func(t *testing.T) {
+		q := &scriptedQemuImg{infoErr: errors.New("exit status 1"),
+			infoErrOut: `qemu-img: Could not open '` + url + `': Failed to mount nfs share: mount/mnt call failed with ` +
+				`"RPC error: Mount failed with error MNT3ERR_ACCES(13) Permission denied(13)" (nfs.example.com:/exports/mig)`}
+		_, err := EmptyNFSStagedDisk(ctx, q.run, url)
+		require.Error(t, err)
+		for _, l := range nfsLeaks {
+			assert.NotContains(t, err.Error(), l)
+		}
+		assert.Contains(t, err.Error(), "MNT3ERR_ACCES")
+		var se *StagedDiskError
+		require.ErrorAs(t, err, &se)
+		assert.ErrorContains(t, errors.Unwrap(se.Cause), "nfs.example.com", "the original error stays in the chain")
+	})
+	t.Run("nfs: the truncation fails", func(t *testing.T) {
+		q := &scriptedQemuImg{infoOut: `{"virtual-size": 1}`, createErr: errors.New("exit status 1")}
+		q2 := func(c context.Context, args ...string) (string, string, error) {
+			out, _, err := q.run(c, args...)
+			return out, "qemu-img: " + url + ": Permission denied", err
+		}
+		_, err := EmptyNFSStagedDisk(ctx, q2, url)
+		require.Error(t, err)
+		for _, l := range nfsLeaks {
+			assert.NotContains(t, err.Error(), l)
+		}
+	})
+	t.Run("s3: the service fails the delete", func(t *testing.T) {
+		srv := s3fake.New(fakeBucket)
+		defer srv.Close()
+		srv.Put("p/vmmigrations/team-a/web/export.vmdk", []byte("disk"))
+		srv.FailWith(http.StatusForbidden)
+		_, err := DeleteS3StagedDisk(ctx, s3Disk(t, srv), fakeCreds)
+		require.Error(t, err)
+		for _, l := range []string{fakeBucket, "vmmigrations/team-a/web", strings.TrimPrefix(srv.Endpoint(), "http://")} {
+			assert.NotContains(t, err.Error(), l)
+		}
+	})
+}
+
+func TestStagedDiskLocations(t *testing.T) {
+	disk := StagedDisk{Backend: BackendS3, Key: "p/vmmigrations/team-a/web/export.vmdk",
+		Options: StorageOptions{Bucket: "tenant-bucket", Endpoint: "https://s3.example.com:9000"}}
+	assert.Equal(t, []string{"p/vmmigrations/team-a/web/export.vmdk", "tenant-bucket", "https://s3.example.com:9000",
+		"s3.example.com:9000", "s3.example.com"}, StagedDiskLocations(disk))
+	assert.Equal(t, []string{"k1"}, StagedDiskLocations(StagedDisk{Key: "k1", Options: StorageOptions{Bucket: "ab"}}),
+		"a value too short to be a bucket name is not used")
+	assert.Equal(t, []string{"nfs://h.example/e/f.qcow2?uid=1", "/e/f.qcow2", "/e", "f.qcow2", "h.example"},
+		NFSURLLocations(" nfs://h.example/e/f.qcow2?uid=1 "))
+	assert.Nil(t, NFSURLLocations(""))
+}

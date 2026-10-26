@@ -19,11 +19,11 @@ package libvirt
 import (
 	"context"
 	"fmt"
-	"net/url"
-	"path"
 	"regexp"
 	"slices"
 	"strings"
+
+	"github.com/projectbeskar/virtrigaud/internal/storage/migration"
 )
 
 // Redaction of host command lines in the provider log (R28).
@@ -136,18 +136,10 @@ func logRedactionsOf(ctx context.Context) []string {
 
 // nfsURLLocations returns the texts that locate a staged nfs object, for
 // withLogRedactions and redactLocations: the URL itself, its path, the
-// directory and file name in it, and its server. libnfs names them without
-// the scheme.
+// directory and file name in it, and its server
+// (migration.NFSURLLocations). libnfs names them without the scheme.
 func nfsURLLocations(raw string) []string {
-	raw = strings.TrimSpace(raw)
-	if raw == "" {
-		return nil
-	}
-	u, err := url.Parse(raw)
-	if err != nil {
-		return []string{raw}
-	}
-	return []string{raw, u.Path, path.Dir(u.Path), path.Base(u.Path), u.Hostname()}
+	return migration.NFSURLLocations(raw)
 }
 
 // withNFSLogRedactions is withLogRedactions with the locations of the staged

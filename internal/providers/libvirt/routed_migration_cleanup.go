@@ -344,5 +344,8 @@ func (p *Provider) deleteStagedDiskRouted(ctx context.Context, req *providerv1.D
 			redactLocations(err, stagedDiskLocations(disk)...))
 		return unspecified, hostUnavailableStatus(contracts.NewHostUnavailableError(fmt.Sprintf(stagedDiskHostDownFmt, host), nil))
 	}
-	return unspecified, &migration.StagedDiskError{Code: codes.Unavailable, Msg: stagedDiskHostFailedMessage, Cause: err}
+	// The cause can quote the host command's output, which names the staged
+	// object: it is redacted (R28), as every StagedDiskError cause is.
+	return unspecified, &migration.StagedDiskError{Code: codes.Unavailable, Msg: stagedDiskHostFailedMessage,
+		Cause: redactLocations(err, stagedDiskLocations(disk)...)}
 }

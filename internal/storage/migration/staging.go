@@ -20,6 +20,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/url"
+	"path"
 	"strings"
 
 	"google.golang.org/grpc/codes"
@@ -202,6 +204,36 @@ func nfsOptionsProblem(err error) string {
 	return "refused"
 }
 
+// NFSURLLocations returns the texts that locate the staged nfs object raw (an
+// nfs:// URL), for storage.RedactLocations (R28): the URL itself, its path,
+// the directory and file name in it, and its server. libnfs, through
+// qemu-img, names them without the scheme. An empty raw has none.
+func NFSURLLocations(raw string) []string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return []string{raw}
+	}
+	return []string{raw, u.Path, path.Dir(u.Path), path.Base(u.Path), u.Hostname()}
+}
+
+// StagedDiskLocations returns the texts that locate disk, for
+// storage.RedactLocations (R28): its nfs:// URL and the texts in it
+// (NFSURLLocations), its object key and, for s3, its bucket name (an S3
+// client error names the bucket, and the key alone would leave it) and its
+// endpoint. A bucket name shorter than storage.MinRedactedLocationLen is not
+// a bucket name and is left out.
+func StagedDiskLocations(disk StagedDisk) []string {
+	locations := append(NFSURLLocations(disk.NFSURL), disk.Key)
+	if bucket := strings.TrimSpace(disk.Options.Bucket); len(bucket) >= storage.MinRedactedLocationLen {
+		locations = append(locations, bucket)
+	}
+	return append(locations, storage.S3EndpointLocations(disk.Options.Endpoint)...)
+}
+
 // StagedDiskError is a failed staged-object delete. GRPCStatus — what the
 // manager receives — carries Code and Msg only, which name no bucket, key,
 // path or endpoint. Error() appends Cause, which can name them, for the
@@ -216,7 +248,8 @@ type StagedDiskError struct {
 	Cause error
 }
 
-// Error returns Msg and, when set, Cause.
+// Error returns Msg and, when set, Cause. The causes this package builds are
+// redacted of the staged object's locations (storage.RedactError).
 func (e *StagedDiskError) Error() string {
 	if e.Cause == nil {
 		return e.Msg
@@ -235,21 +268,24 @@ func (e *StagedDiskError) GRPCStatus() *status.Status { return status.New(e.Code
 // provider, ADR-0006 D2). An object (or bucket) that does not exist is
 // STAGED_DISK_DELETE_OUTCOME_NOT_FOUND. Credentials are never logged.
 func DeleteS3StagedDisk(ctx context.Context, disk StagedDisk, creds map[string]string) (providerv1.StagedDiskDeleteOutcome, error) {
+	// Every cause is redacted of the object's locations (R28): the providers
+	// log it, and the SDK's request log prints the whole error.
+	locations := StagedDiskLocations(disk)
 	cfg, err := S3StorageConfigFromRequest(disk.OptionsJSON, creds)
 	if err != nil {
 		return providerv1.StagedDiskDeleteOutcome_STAGED_DISK_DELETE_OUTCOME_UNSPECIFIED,
-			&StagedDiskError{Code: codes.InvalidArgument, Msg: "DeleteStagedDisk: s3 configuration or credentials are incomplete", Cause: err}
+			&StagedDiskError{Code: codes.InvalidArgument, Msg: "DeleteStagedDisk: s3 configuration or credentials are incomplete", Cause: storage.RedactError(err, locations...)}
 	}
 	s3, err := storage.NewS3Storage(cfg)
 	if err != nil {
 		return providerv1.StagedDiskDeleteOutcome_STAGED_DISK_DELETE_OUTCOME_UNSPECIFIED,
-			&StagedDiskError{Code: codes.InvalidArgument, Msg: "DeleteStagedDisk: s3 client configuration is not usable", Cause: err}
+			&StagedDiskError{Code: codes.InvalidArgument, Msg: "DeleteStagedDisk: s3 client configuration is not usable", Cause: storage.RedactError(err, locations...)}
 	}
 	defer func() { _ = s3.Close() }()
 	existed, err := s3.RemoveObjectIfExists(ctx, disk.Key)
 	if err != nil {
 		return providerv1.StagedDiskDeleteOutcome_STAGED_DISK_DELETE_OUTCOME_UNSPECIFIED,
-			&StagedDiskError{Code: codes.Unavailable, Msg: "DeleteStagedDisk: the s3 delete of the staged object failed; the cause is in the provider log", Cause: err}
+			&StagedDiskError{Code: codes.Unavailable, Msg: "DeleteStagedDisk: the s3 delete of the staged object failed; the cause is in the provider log", Cause: storage.RedactError(err, locations...)}
 	}
 	if !existed {
 		return providerv1.StagedDiskDeleteOutcome_STAGED_DISK_DELETE_OUTCOME_NOT_FOUND, nil
@@ -304,6 +340,11 @@ type qemuImgInfo struct {
 // instead. It never reaches a file of the host or pod: libnfs resolves links
 // within the NFS namespace. Give each tenant its own export (ADR-0006 C6).
 func EmptyNFSStagedDisk(ctx context.Context, run QemuImgRunner, nfsURL string) (providerv1.StagedDiskDeleteOutcome, error) {
+	// qemu-img's stderr names the object's URL — its server, export, path and
+	// uid/gid — and libnfs names the server and export without the scheme:
+	// every cause is redacted of them (R28). The providers log the cause, and
+	// the SDK's request log prints the whole error.
+	locations := NFSURLLocations(nfsURL)
 	stdout, stderr, err := run(ctx, "info", "--output=json", "-f", "raw", nfsURL)
 	if err != nil {
 		if nfsObjectMissing(stderr) {
@@ -312,7 +353,7 @@ func EmptyNFSStagedDisk(ctx context.Context, run QemuImgRunner, nfsURL string) (
 		return providerv1.StagedDiskDeleteOutcome_STAGED_DISK_DELETE_OUTCOME_UNSPECIFIED, &StagedDiskError{
 			Code:  codes.Unavailable,
 			Msg:   "DeleteStagedDisk: qemu-img could not read the staged object over nfs; the cause is in the provider log",
-			Cause: fmt.Errorf("qemu-img info: %w (stderr: %s)", err, strings.TrimSpace(stderr)),
+			Cause: storage.RedactError(fmt.Errorf("qemu-img info: %w (stderr: %s)", err, strings.TrimSpace(stderr)), locations...),
 		}
 	}
 	var info qemuImgInfo
@@ -330,7 +371,7 @@ func EmptyNFSStagedDisk(ctx context.Context, run QemuImgRunner, nfsURL string) (
 		return providerv1.StagedDiskDeleteOutcome_STAGED_DISK_DELETE_OUTCOME_UNSPECIFIED, &StagedDiskError{
 			Code:  codes.Unavailable,
 			Msg:   "DeleteStagedDisk: qemu-img could not empty the staged object over nfs; the cause is in the provider log",
-			Cause: fmt.Errorf("qemu-img create: %w (stderr: %s)", err, strings.TrimSpace(stderr)),
+			Cause: storage.RedactError(fmt.Errorf("qemu-img create: %w (stderr: %s)", err, strings.TrimSpace(stderr)), locations...),
 		}
 	}
 	return providerv1.StagedDiskDeleteOutcome_STAGED_DISK_DELETE_OUTCOME_EMPTIED, nil

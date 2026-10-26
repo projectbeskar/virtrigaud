@@ -509,7 +509,8 @@ func loggingUnaryInterceptor(config *LoggingConfig) grpc.UnaryServerInterceptor 
 		logger.Log(ctx, level, "gRPC request completed",
 			"method", info.FullMethod,
 			"duration", duration,
-			"error", err,
+			"code", wireCode(err),
+			"error", wireError(err),
 			"response", getPayloadLog(resp, config.LogPayloads),
 		)
 
@@ -540,11 +541,32 @@ func loggingStreamInterceptor(config *LoggingConfig) grpc.StreamServerIntercepto
 		logger.Log(ss.Context(), level, "gRPC stream completed",
 			"method", info.FullMethod,
 			"duration", duration,
-			"error", err,
+			"code", wireCode(err),
+			"error", wireError(err),
 		)
 
 		return err
 	}
+}
+
+// wireError returns what the caller of an RPC receives for err — its gRPC
+// status message — or nil for a call that succeeded. The request log prints
+// that, never err's own text: a provider error can keep a cause for the
+// provider's own log out of its status (its GRPCStatus message is shorter than
+// its Error()), and such a cause can quote what belongs in no request log line
+// (a storage location, a host command's output). A provider logs those causes
+// itself, redacted.
+func wireError(err error) any {
+	if err == nil {
+		return nil
+	}
+	return status.Convert(err).Message()
+}
+
+// wireCode returns the gRPC code the caller of an RPC receives for err ("OK"
+// for a call that succeeded).
+func wireCode(err error) string {
+	return status.Code(err).String()
 }
 
 // getPayloadLog returns a loggable representation of the payload.

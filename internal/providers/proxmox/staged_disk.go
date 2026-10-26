@@ -25,6 +25,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
+	"github.com/projectbeskar/virtrigaud/internal/storage"
 	"github.com/projectbeskar/virtrigaud/internal/storage/migration"
 	providerv1 "github.com/projectbeskar/virtrigaud/proto/rpc/provider/v1"
 )
@@ -137,17 +138,22 @@ func (p *Provider) deleteNFSStagedDisk(ctx context.Context, disk migration.Stage
 		return unspecified, &migration.StagedDiskError{Code: codes.Unavailable,
 			Msg: "DeleteStagedDisk: the migration SSH data plane is not configured (set PROVIDER_ENDPOINT and SSH credentials)"}
 	}
+	// The node's mount and its stderr name the export's server and path: every
+	// cause is redacted of the object's locations (R28). The provider logs the
+	// cause at debug.
+	locations := migration.StagedDiskLocations(disk)
 	rel, err := nfsInMountRel(disk.NFSURL, disk.Options.Export)
 	if err != nil {
 		return unspecified, &migration.StagedDiskError{Code: codes.InvalidArgument,
-			Msg: "DeleteStagedDisk: the staged nfs object is not a safe path within the export", Cause: err}
+			Msg:   "DeleteStagedDisk: the staged nfs object is not a safe path within the export",
+			Cause: storage.RedactError(err, locations...)}
 	}
 	stdout, stderr, err := p.ssh.runSSH(ctx, buildNFSStagedDeleteScript(disk.Options.Server, disk.Options.Export, rel,
 		disk.Options.UID, disk.Options.GID))
 	if err != nil {
 		return unspecified, &migration.StagedDiskError{Code: codes.Unavailable,
 			Msg:   "DeleteStagedDisk: the node-side nfs delete failed; the cause is in the provider log",
-			Cause: fmt.Errorf("%w (stderr: %s)", err, strings.TrimSpace(stderr))}
+			Cause: storage.RedactError(fmt.Errorf("%w (stderr: %s)", err, strings.TrimSpace(stderr)), locations...)}
 	}
 	switch {
 	case strings.Contains(stdout, nfsStagedDeletedMarker):
@@ -157,7 +163,7 @@ func (p *Provider) deleteNFSStagedDisk(ctx context.Context, disk migration.Stage
 	default:
 		return unspecified, &migration.StagedDiskError{Code: codes.Internal,
 			Msg:   "DeleteStagedDisk: the node-side nfs delete printed no result",
-			Cause: errors.New(strings.TrimSpace(stdout))}
+			Cause: storage.RedactError(errors.New(strings.TrimSpace(stdout)), locations...)}
 	}
 }
 

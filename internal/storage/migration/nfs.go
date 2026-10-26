@@ -78,7 +78,8 @@ func NFSURL(opts StorageOptions, key string) (string, error) {
 
 	export := strings.TrimSpace(opts.Export)
 	if export == "" || !strings.HasPrefix(export, "/") {
-		return "", fmt.Errorf("nfs export must be an absolute path, got %q", export)
+		// The value is not echoed: it locates the tenant's storage (R28).
+		return "", fmt.Errorf("nfs export must be an absolute path")
 	}
 	for _, seg := range []struct {
 		name, val string
