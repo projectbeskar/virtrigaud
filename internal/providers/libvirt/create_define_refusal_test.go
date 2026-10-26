@@ -91,6 +91,9 @@ func TestCreate_DefineRefusedIsInvalidSpecAndRemovesDisk(t *testing.T) {
 	assert.NotErrorIs(t, err, errDefineOutcomeUnknown)
 	assert.Contains(t, err.Error(), "must be model='pcie-root'", "the status names libvirt's reason")
 	assert.NotContains(t, err.Error(), "secret-of-team-a", "no user-data in the refusal")
+	var pe *contracts.ProviderError
+	require.ErrorAs(t, err, &pe)
+	assert.LessOrEqual(t, len(pe.Message), 256, "the manager shows at most 256 bytes; libvirt's reason must fit: %q", pe.Message)
 	st, _ := status.FromError(createRPCError(err))
 	assert.Equal(t, codes.InvalidArgument, st.Code())
 

@@ -486,10 +486,11 @@ func (p *Provider) createVMWithCloudInit(ctx context.Context, vp *VirshProvider,
 		// every retry.
 		var refused *defineRefusedError
 		if errors.As(err, &refused) {
-			return "", contracts.NewInvalidSpecError(fmt.Sprintf(
-				"libvirt refused the definition of domain %q, so nothing was created (check the VMClass firmware, "+
-					"securityProfile and performanceProfile settings against the host's libvirt, QEMU and OVMF "+
-					"firmware): %s", domainName, refused.detail), err)
+			// Short, with libvirt's reason first: the manager shows at most
+			// 256 bytes of it in the VM's status (docs/libvirt-firmware.md
+			// says what to check).
+			return "", contracts.NewInvalidSpecError(
+				"libvirt refused the domain definition (nothing was created): "+refused.detail, err)
 		}
 		return "", err
 	}
