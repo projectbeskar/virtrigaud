@@ -37,7 +37,17 @@ providers**, and:
   minutes instead of failing; only a v0.4.1 provider answers them for good, as described below.
 
 If you are upgrading from v0.3.11 or from a v0.4.0 release candidate, do the steps of the
-sections below it as well, in the order the rest of this guide gives.
+sections below it as well, in the order the rest of this guide gives. If you run a v0.4.1
+release candidate, read [If you run v0.4.1-rc1](#if-you-run-v041-rc1).
+
+The upgrade needs these actions, each described below: **before you roll the Proxmox provider**,
+SSH credentials for every Provider whose VMs carry user-data
+([Proxmox: user-data needs the SSH data plane](#proxmox-user-data-needs-the-ssh-data-plane));
+**before you roll a libvirt provider**, a check of every VMClass with `firmware: UEFI`
+([libvirt: firmware, secure boot and platform features](#libvirt-firmware-secure-boot-and-platform-features));
+`curl` on libvirt hosts that create VMs from an image URL; and the rotation of any secret a
+`VMClone` set in `spec.customization` ([Security fixes](#security-fixes)). Everything else is a
+change in what you see.
 
 ### Security fixes
 
@@ -208,9 +218,8 @@ the VM's whole life; keep long-lived secrets out of it.
   one) ends with the seed out of its boot order; a `VMClone` keeps its source's order otherwise.
   A `VMClone` and a template `Create` without user-data keep the template's or source's order.
   Prepare templates with `qm set <vmid> --boot order=<boot disk>` (for example `scsi0`). VMs
-  made by v0.4.1-rc1 can have the seed's slot at the end of their order (`order=scsi0;ide2`,
-  `order=net0;ide2`): harmless, as the seed is not bootable; set the order without the seed's
-  slot to remove it (for example `order=scsi0;ide2` → `qm set <vmid> --boot order=scsi0`).
+  made by v0.4.1-rc1 can have the seed's slot at the end of their order: see
+  [If you run v0.4.1-rc1](#if-you-run-v041-rc1).
   → [Boot order](proxmox-cloud-init-storage.md#boot-order)
 - **A cloud-init drive left on `local` by v0.4.0** can be moved with
   `qm set <vmid> --ide2 <storage>:cloudinit` on the node.
@@ -271,8 +280,10 @@ These change what an operator sees; no action is required before the upgrade.
 - **Host-command logs are redacted (R28).** See
   [Staging locations are no longer logged](#staging-locations-are-no-longer-logged-r28).
 - **A VM delete refreshes the `default` pool (R37)** so `virsh vol-list default` stops listing the
-  deleted disk files (best effort; a VM whose disks are in another pool leaves that pool stale
-  until its next refresh).
+  deleted disk files (best effort; it refreshes the pool on the host that ran the delete, so a
+  VM whose disks are in another pool leaves that pool stale until its next refresh, and so does
+  another host of a clustered Provider that shares the pool directory: run `virsh pool-refresh
+  default` there).
 
 ### libvirt: clustered disk export answers
 
@@ -357,6 +368,14 @@ tags. `go install github.com/projectbeskar/virtrigaud/cmd/<tool>@vX.Y.Z` does no
 `go.mod` has `replace` directives, which `go install <package>@<version>` refuses): download the
 CLI binaries from the GitHub release. See [`docs/go-modules.md`](go-modules.md).
 
+**The SDK's request log changed (rc2).** `sdk/provider/middleware` logs `gRPC request completed`
+and `gRPC stream completed` with a `code` attribute (the gRPC code the caller receives) and an
+`error` attribute that is the status message the caller receives as a string (or nil), where it
+logged the handler's `error` value, whose text can carry a cause the provider keeps off the wire
+(a staging location). A `slog` handler, log query or alert of a provider built on the SDK that
+keyed on the error value or on its full text must use the new attributes. An SDK `ProviderError`'s
+status message still includes its cause: a provider must not put a location in either.
+
 ### Deprecated: the `virtrigaud-provider-runtime` chart
 
 `charts/virtrigaud-provider-runtime/` is removed in the next minor release. It was never
@@ -421,8 +440,9 @@ redefined. See [`docs/libvirt-firmware.md`](libvirt-firmware.md).
   index='0' must be model='pcie-root' for this machine type"). The create was retried about
   every 30 seconds, and each retry copied the image again. The domain now uses the q35 device
   layout. libvirt selects a Secure Boot OVMF build whose variable-store template has keys
-  enrolled (no hard-coded firmware path), and Secure Boot is enforced from the first boot. A new
-  VM never starts from a variable store an earlier domain of the same name left. **The host
+  enrolled (no hard-coded firmware path), and Secure Boot is enforced from the first boot. On a libvirt that selects the
+  firmware at define (such as 10.0), a new VM never starts from a variable store an earlier domain
+  of the same name left. **The host
   needs an OVMF package** (`ovmf`, `edk2-ovmf`, ...) that installs firmware descriptors in
   `/usr/share/qemu/firmware/`. Which keys are trusted depends on that package; see
   [the trust model](libvirt-firmware.md#secure-boot-trust-model).
@@ -482,7 +502,8 @@ No action is required; this changes how often a refused create is sent again.
   5 minutes), a "not performed" answer, and every failure whose outcome is unknown or that may
   pass (a transport error, an unavailable host, a timeout), which are still retried every
   5 seconds or on their own backoff. A typed `Unauthorized` or `QuotaExceeded` is produced only
-  in the manager's own code: from a remote provider, `PermissionDenied` keeps `CreateRefused`,
+  in the manager's own code (so from a remote provider only `NotFound` and `Unimplemented` are
+  paced): from a remote provider, `PermissionDenied` keeps `CreateRefused`,
   and `Unauthenticated` and `ResourceExhausted` are untyped and still retried every 5 seconds.
 - **What retries at once.** A change to the `VirtualMachine`'s spec, or to the spec of its
   `VMClass`, `VMImage` or `Provider` (the manager now watches those three for a VM whose create
@@ -533,6 +554,67 @@ No action is required; this changes how often a refused create is sent again.
   Proxmox, which no longer advertises linked clones.
 - **CI** checks proto compatibility with `buf breaking` on pull requests.
 
+### If you run v0.4.1-rc1
+
+The roll order is the same (CRDs, manager, providers; the rc2 CRDs differ from rc1's only in
+`description` texts). rc2 changes the manager, the libvirt, Proxmox and vSphere providers and the
+SDK's log; **roll the manager first, then every provider**, because a v0.4.1-rc1 provider does
+not carry the fixes below. The sections of this guide that are new since rc1, and worth a read even if rc1 runs well:
+[Provider status after a provider roll](#provider-status-after-a-provider-roll),
+[libvirt: firmware, secure boot and platform features](#libvirt-firmware-secure-boot-and-platform-features),
+[A refused VM create is retried with a backoff](#a-refused-vm-create-is-retried-with-a-backoff)
+(new condition messages that an alert may match),
+[libvirt: clustered disk export answers](#libvirt-clustered-disk-export-answers),
+[Staging locations are no longer logged](#staging-locations-are-no-longer-logged-r28) and
+[the SDK's request log](#provider-authors-the-sdk-and-proto-go-modules-are-published). What differs
+for what rc1 already made:
+
+- **Proxmox VMs rc1 made keep their boot order.** The fix runs when a seed is attached, so only
+  a VM made by rc2 (or a request that rc2 re-sends for a VM rc1 left interrupted) gets it; no
+  existing VM is touched. A VM with user-data that rc1 made can end with the seed's slot in its
+  boot order (`order=scsi0;ide2`, `order=net0;ide2`). It is harmless: the seed is an ISO with no
+  boot record, so the guest boots its disk (or tries the network first, then the seed, which does
+  not boot). To clean one, set the order without the slot on the node, for example
+  `qm set <vmid> --boot order=scsi0`; this update attaches nothing, so PVE appends nothing.
+  Find the VMs with `qm list` and `qm config <vmid> | grep -E '^boot:'`.
+- **Clones rc1 made, of a VM that has a seed, without inline user-data keep their seed.** The bare
+  `#cloud-config` line is written once, at the clone, so `cloud-init status` in such a guest can
+  keep reporting `degraded done` (exit 2) until the VM is re-made; it configures nothing and is
+  otherwise harmless.
+- **Seed lock files rc1 left stay on the node.** `/run/virtrigaud/seed-stage/.lock-<vmid>` of a VM
+  that no longer exists is an empty file on a tmpfs: remove it, or reboot the node. rc2 removes the
+  file when it deletes a VM that has a seed, not those of VMs that were already gone.
+- **libvirt domains rc1 made keep their definitions**, which are not redefined (a domain of a
+  VMClass with `firmware: UEFI` is still BIOS, as it was under rc1). A VM of such a VMClass that you
+  re-create gets UEFI, so do the check in
+  [libvirt: firmware, secure boot and platform features](#libvirt-firmware-secure-boot-and-platform-features)
+  first. A secure boot VM that rc1 could not define was retried every 30 seconds and keeps its
+  create marker; the next re-send (to an rc2 provider, or one the backoff sends) can define it. Its
+  delete can be held as `CreateOutcomeUnknown` for up to 10 minutes, or until you set the
+  annotation its message names. A disk copy an rc1 attempt left on the pool
+  (`<domain>-disk.qcow2`) is overwritten by the VM's next attempt when no domain uses it (and
+  removed again if libvirt refuses that attempt); if you delete the VM first, or the host has no
+  UEFI firmware (that refusal comes before the copy), it stays until you remove it after checking
+  that no domain uses it
+  ([When libvirt refuses the definition](libvirt-firmware.md#when-libvirt-refuses-the-definition)).
+- **A `VirtualMachine` rc1 refused is sent again once, then backs off.** Its condition message
+  (`re-checking every 30s`) names no next re-check, so the manager sends the create once after
+  the roll and the backoff starts from there, as for a VM refused by v0.4.0.
+- **A `Provider`'s stale `reportedCapabilities` is corrected by the roll.** A manager that starts
+  reads every `Provider`'s capabilities again; a Proxmox Provider that showed
+  `supportsLinkedClones: true` after rc1's roll shows the running provider's answer once the new
+  manager has read it.
+- **Logs, and the status, conditions and events of `VMMigration`s, written by rc1 keep the staging
+  locations rc2 redacts** (the clustered export's S3 bucket and key, the staged-disk cleanup's
+  `nfs://` URL, the vSphere and Proxmox export and import lines and errors, the manager's
+  `Starting disk export` and `Starting disk import` lines, and the provider answer an rc1
+  `VMMigration` failure quotes): treat them as sensitive, as the
+  [R28 note](#staging-locations-are-no-longer-logged-r28) says for v0.4.0's.
+- **A clustered libvirt `VMMigration` that rc1 held as `ExportOutcomeUnknown`** is re-sent after
+  35 minutes as before; the new answers apply to exports started by an rc2 provider.
+- **`virtrigaud-loadgen` configurations are accepted as before**, but `vmCount` (default 10) now
+  caps the run; see [Command-line tools](#command-line-tools).
+
 ### Verifying the upgrade
 
 - Proxmox, a VM with user-data created after the upgrade: `qm config <vmid>` shows a CD-ROM
@@ -552,6 +634,15 @@ No action is required; this changes how often a refused create is sent again.
   shows the new image's capabilities within about a minute (for a Proxmox provider,
   `supportsLinkedClones` is absent or `false`), and `.status.lastHealthCheck` is less than 10
   minutes old.
+- Proxmox, a VM with user-data created after the upgrade: `qm config <vmid> | grep '^boot:'` does
+  not list the seed's slot (for example `boot: order=scsi0`, not `order=scsi0;ide2`), and a clone,
+  without inline user-data, of a VM that has a seed reports `cloud-init status` `done` (exit 0).
+- libvirt, a VM of a VMClass with `firmware: UEFI`: `virsh dumpxml <domain>` shows
+  `<os firmware='efi'>` with the `<loader>` and `<nvram>` paths libvirt filled in.
+- A `VirtualMachine` whose create is refused (for example a VMClass libvirt cannot define on the
+  host) shows a condition message that names the next re-check and is not sent again before it:
+  `kubectl get virtualmachine <name> -n <namespace> -o jsonpath='{.status.conditions[?(@.type=="Ready")].message}'`
+  prints `... (non-retryable; re-checking in 4m0s, at <time>, or at once when ...)`.
 - With webhooks enabled, `kubectl apply` of a test `VMClone` with `sysprep.productKey` set prints
   one admission warning naming the field, and once the clone starts the `VMClone` has one
   `CustomizationSecretNotSent` event; neither shows the value.

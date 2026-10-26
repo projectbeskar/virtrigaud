@@ -5,6 +5,27 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-10-26 11:25] - Release notes for v0.4.1-rc2; rc1 upgrade notes; module versions at v0.4.1-rc2
+**Author:** @wrkode (William Rizzo)
+
+### Changed
+- `go.mod`, `sdk/go.mod`: the in-repo requires name `v0.4.1-rc2` (`make set-module-versions VERSION=v0.4.1-rc2`; the `replace` directives still resolve them from the working tree). `docs/go-modules.md` and the test fixtures keep `v0.4.1-rc1` as examples of a version string.
+- `docs/release-notes/next.md`: the cumulative v0.4.1 notes now cover rc2: the intro, an `Actions required` item for `firmware: UEFI` on libvirt, `Behaviour changes` for the refused-create backoff and its new messages, a libvirt definition refusal that is a validation error, `ProviderAvailable=False`/`healthy=false` without a ready pod, the `Provider` reconcile metric outcome, the capabilities re-read, the enforced `vmCount` of `virtrigaud-loadgen` and the SDK request log attributes; Highlights for the Proxmox seed and boot order, the libvirt platform, the controller and Provider status, the clustered libvirt export answers, the redaction of staging locations and `virtrigaud-loadgen`; new Known limitations; the "every 30 seconds" re-check of a refused create corrected to the backoff; the rc1 lab validation results with the pull request that fixed each finding, and the list of what the rc2 lab validation re-checks (to be filled).
+- `docs/upgrading.md`: an upgrade summary at the top of the v0.4.0 to v0.4.1 guide, a new "If you run v0.4.1-rc1" section (what rc2 does and does not change for what rc1 already made), the SDK request log change, the pool refresh of a VM delete on the host that ran it, and verification steps for the boot order, UEFI and the backoff message.
+- `docs/libvirt-firmware.md`, `docs/libvirt-clones.md`: on a clustered Provider every host that can receive a UEFI VM needs an OVMF package (the scheduler does not consider firmware); a single-host create from a `source.libvirt.path` image goes through the unreadable-disk-image check.
+- `docs/vm-ownership.md`, `docs/libvirt-domain-ownership.md`, `docs/proxmox-cloud-init-storage.md`: a refused create (a rejected name, an ambiguous name, a missing SSH credential) is rechecked with the backoff, no longer "every 30 seconds".
+
+### Why
+v0.4.1-rc2 carries the fixes for the rc1 lab validation (#454 to #459). Its notes must say what changed for the people who run rc1, what a user has to check before the roll (`firmware: UEFI`), and which claims have been run on real hypervisors and which have not.
+
+### Impact
+- [ ] Breaking change
+- [ ] Requires cluster rollout
+- [ ] Config change only
+- [x] Documentation only
+
+The `go.mod` change points the in-repo requires at the rc2 tags that the release workflow creates.
+
 ## [2026-10-26 06:27] - Every definite create refusal is paced; no panic for a Provider without status.runtime
 **Author:** @wrkode (William Rizzo)
 

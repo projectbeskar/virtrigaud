@@ -999,7 +999,10 @@ snapshot create of libvirt domain "<namespace>.<name>" not performed: permission
 ```
 
 (`on a host of this Provider` when the cluster-wide check failed on another
-host.) It is `Unavailable` with the `VM_DISK_CHECK_FAILED` reason, which the
+host.) A single-host create from a `source.libvirt.path` image goes through the same
+check; the rc1 validation saw it retried with the generic "could not verify the image on the
+libvirt host (transient host error; details are in the provider log)" instead of the text above.
+The provider log names the image, and the fix below applies. It is `Unavailable` with the `VM_DISK_CHECK_FAILED` reason, which the
 manager never counts toward the Provider's circuit breaker and handles as
 for any check that could not run ([How the dependency is found](#how-the-dependency-is-found)):
 a VM delete is retried, and a `VMSnapshot` shows
