@@ -127,9 +127,12 @@ const (
 	seedExitQMSet    = 26
 
 	// seedEmptyUserData is a clone's seed user-data when its VMClone gives
-	// none: an empty cloud-config document (NoCloud requires a user-data
-	// file).
-	seedEmptyUserData = "#cloud-config\n"
+	// none (NoCloud requires a user-data file): a cloud-config whose body is
+	// an empty mapping, which configures nothing. A body with no YAML document
+	// at all (just the "#cloud-config" line) is "empty cloud config" to
+	// cloud-init: it logs a warning for it, and `cloud-init status` then
+	// reports "degraded done" (exit 2) instead of "done" (rc1 finding O1).
+	seedEmptyUserData = "#cloud-config\n# No user-data was given for this clone.\n{}\n"
 
 	// seedFallbackIDFormat names a VM in its instance-id when the request
 	// carries no owner UID (cloneidentity.InstanceID's fallback).

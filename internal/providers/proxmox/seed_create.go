@@ -303,7 +303,8 @@ func clonePlacement(req *providerv1.CloneRequest) (host, datastore string) {
 // identity is the clone's (cloneidentity: instance-id from the target
 // VirtualMachine's UID, local-hostname from the customization hostname and
 // domain, else the target's name); its user-data is the VMClone's
-// customization user-data, else an empty #cloud-config (the source's is not
+// customization user-data, else a #cloud-config that configures nothing
+// (seedEmptyUserData; the source's is not
 // carried: the clone's disk already holds what it applied); its
 // network-config is DHCP on every NIC, matched by the clone's own MACs. A
 // clone that already has a seed of its own (a re-sent Clone) is left as it
@@ -328,7 +329,7 @@ func (p *Provider) cloneSeed(ctx context.Context, req *providerv1.CloneRequest, 
 	if userData == "" {
 		if cust.SecretUserData {
 			p.logger.Warn("The clone's user-data is given by a Secret reference, which the provider cannot resolve; "+
-				"the clone's seed has an empty user-data", "vmid", vmid)
+				"the clone's seed has a user-data that configures nothing", "vmid", vmid)
 		}
 		userData = seedEmptyUserData
 	}

@@ -454,7 +454,8 @@ func seededSource(t *testing.T, p *Provider) string {
 // TestSeed_CloneGetsItsOwnSeed: PVE's clone copies its source's seed CD-ROM
 // line. The clone gets a seed of its own in that slot, with a new
 // instance-id (the target VirtualMachine's UID), the target's hostname, the
-// VMClone's customization user-data or an empty cloud-config (never the
+// VMClone's customization user-data or a cloud-config that configures
+// nothing (never the
 // source's user-data), DHCP on its own MACs; the source's seed is untouched,
 // a re-sent Clone attaches no second seed, and deleting the clone keeps the
 // source's seed.

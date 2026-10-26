@@ -25,6 +25,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"sigs.k8s.io/yaml"
 
 	"github.com/projectbeskar/virtrigaud/internal/providers/proxmox/pvefake"
 )
@@ -207,4 +208,23 @@ func TestSeedFreeBootOrder(t *testing.T) {
 			assert.Equal(t, tc.want, got)
 		})
 	}
+}
+
+// TestSeedEmptyUserData_IsNotAnEmptyCloudConfig pins rc1 finding O1: the
+// user-data of a clone's seed without VMClone user-data is a #cloud-config
+// whose YAML body is a mapping. cloud-init loads the body with
+// yaml.safe_load and reports "empty cloud config" (a WARNING, `cloud-init
+// status` exit 2) when that yields no document; an empty mapping is a
+// document that configures nothing.
+func TestSeedEmptyUserData_IsNotAnEmptyCloudConfig(t *testing.T) {
+	require.True(t, strings.HasPrefix(seedEmptyUserData, "#cloud-config\n"), "cloud-init recognises the part by its first line")
+	var body interface{}
+	require.NoError(t, yaml.Unmarshal([]byte(seedEmptyUserData), &body))
+	mapping, ok := body.(map[string]interface{})
+	require.True(t, ok, "the body is a YAML mapping, not an empty document: %#v", body)
+	assert.Empty(t, mapping, "it configures nothing")
+
+	var empty interface{}
+	require.NoError(t, yaml.Unmarshal([]byte("#cloud-config\n"), &empty))
+	assert.Nil(t, empty, "the rc1 value was an empty document")
 }
