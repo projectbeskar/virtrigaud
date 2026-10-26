@@ -153,11 +153,15 @@ func (p *Provider) outcomeUnknown(msg string, cause error) error {
 // Only an answer that certainly comes from PVE (a PVE JSON body) and that PVE
 // gives before acting means nothing was done: HTTP 400 (parameter
 // verification, InvalidSpec) and 401/403 (PermissionDenied). An HTTP 5xx
-// saying the VMID "already exists" means the VMID was taken since
-// /cluster/nextid — unless the VM at that VMID carries this request's stamp,
-// or is a temporary config still being cloned/created, or cannot be read:
-// then the outcome is unknown. Any other answer, or a transport failure,
-// leaves the outcome unknown: PVE may have started the task.
+// saying the VMID "already exists" is PVE's refusal before it acted: the
+// create and clone handlers check that the VMID's config does not exist
+// before they write anything or start a task, and the answer of a request
+// that started a task is the task's UPID, never an error. So this request
+// made nothing; the VMID was taken since /cluster/nextid. It is answered
+// "not performed" when the VM at that VMID is certainly not this owner's
+// (vmidTakenByAnother), and the outcome is unknown otherwise. Any other
+// answer, or a transport failure, leaves the outcome unknown: PVE may have
+// started the task.
 func (p *Provider) classifySubmitError(ctx context.Context, op string, vmid int, stamp *ownerStamp, err error) error {
 	var apiErr *pveapi.APIError
 	if !stderrors.As(err, &apiErr) || !isPVEJSONBody(apiErr.Body) {
@@ -179,15 +183,46 @@ func (p *Provider) classifySubmitError(ctx context.Context, op string, vmid int,
 	return p.outcomeUnknown(fmt.Sprintf("the PVE %s request failed", op), err)
 }
 
-// vmidTakenByAnother reports whether the VM at vmid is certainly not one this
-// request made: its config, read on whichever node of the cluster has it
-// (vmConfigAnywhere), does not carry stamp's owner and is not a temporary
-// config still being cloned or created. A VMID that turns out free, or a
-// config that cannot be read, proves nothing (false).
+// vmidTakenByAnother reports whether the VM at vmid, which PVE's refusal of
+// this request says exists, is certainly not one an earlier Create or Clone
+// for stamp's owner made or is making (this request itself made nothing, see
+// classifySubmitError). Its config is read on whichever node of the cluster
+// has it (vmNodeConfigAnywhere):
+//
+//   - A complete VM is another's when it does not carry stamp's owner.
+//   - A temporary config still being cloned or created (beingMade) has no
+//     name and no description yet, so no stamp to read. It is another's when
+//     no create or clone task of this provider's PVE user that could be this
+//     owner's runs on its node: every such task there is the recorded task of
+//     another owner (unrecordedMakeTask). That is how two requests that got
+//     the same VMID from /cluster/nextid end for the one whose request PVE
+//     refused while the other's clone or create was still running. An earlier
+//     attempt for this owner whose answer was lost, or that a provider before
+//     a restart started, runs a task the provider has no record of, and keeps
+//     the outcome unknown. The config is read again after the tasks are
+//     listed: a VM whose task ended in between is judged by its stamp.
+//
+// A VMID that turns out free, or a config or task list that cannot be read,
+// proves nothing (false).
 func (p *Provider) vmidTakenByAnother(ctx context.Context, vmid int, stamp *ownerStamp) bool {
-	cfg, err := p.vmConfigAnywhere(ctx, vmid)
-	if err != nil || beingMade(cfg) {
+	node, cfg, err := p.vmNodeConfigAnywhere(ctx, vmid)
+	if err != nil {
 		return false
+	}
+	if beingMade(cfg) {
+		uid := ""
+		if stamp != nil {
+			uid = stamp.owner.UID
+		}
+		if p.unrecordedMakeTask(ctx, node, uid) {
+			return false
+		}
+		if cfg, err = p.client.GetVMConfig(ctx, node, vmid); err != nil {
+			return false
+		}
+		if beingMade(cfg) {
+			return true
+		}
 	}
 	read := readOwnerStamp(configString(cfg, pveConfigKeyDescription))
 	if stamp != nil && read.state == "" && read.stamp != nil && read.stamp.owner.UID == stamp.owner.UID {

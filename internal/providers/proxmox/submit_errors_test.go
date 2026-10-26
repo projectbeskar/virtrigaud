@@ -39,31 +39,52 @@ func putVMAtNewID(t *testing.T, srv *pvefake.Server, vm pvefake.VM) func(r *http
 	}
 }
 
-// TestSubmitErrors_AlreadyExists (L3): "already exists" from the clone call
-// means nothing was created only when the VM at that VMID is certainly
-// another's.
+// TestSubmitErrors_AlreadyExists (L3, B1): "already exists" from the clone
+// call is PVE's refusal before it acted, so this request made nothing. It is
+// answered "not performed" only when the VM at that VMID is certainly not
+// this owner's: a complete VM without this owner's stamp, or a VM still being
+// made while no clone or create task of this provider's PVE user that could
+// be this owner's runs on its node.
 func TestSubmitErrors_AlreadyExists(t *testing.T) {
 	const body = "unable to create VM: config file already exists"
+	beingMade := func(node, lock string) pvefake.VM {
+		return pvefake.VM{Node: node, Status: "stopped", Lock: lock}
+	}
 	cases := []struct {
 		name string
 		vm   pvefake.VM
-		want errorClass
+		// taskUser, when set, runs a clone task of that PVE user on the VM's
+		// node that the provider has no record of.
+		taskUser string
+		want     errorClass
 	}{
-		{"another VM took the VMID", pvefake.VM{Name: "other", Node: "pve", Status: "running", Description: "notes"}, classNothingRemainsVM},
-		{"another VM took the VMID on another node", pvefake.VM{Name: "other", Node: "pve2", Status: "running"}, classNothingRemainsVM},
+		{"another VM took the VMID", pvefake.VM{Name: "other", Node: "pve", Status: "running", Description: "notes"}, "", classNothingRemainsVM},
+		{"another VM took the VMID on another node", pvefake.VM{Name: "other", Node: "pve2", Status: "running"}, "", classNothingRemainsVM},
 		{"the VM carries this request's stamp", pvefake.VM{Name: testOwnerName, Node: "pve", Status: "stopped",
-			Description: testStamp(testOwnerUID, ownerStampPhaseCreating).line()}, classOutcomeUnknown},
-		{"a clone still being made", pvefake.VM{Node: "pve", Status: "stopped", Lock: "clone"}, classOutcomeUnknown},
+			Description: testStamp(testOwnerUID, ownerStampPhaseCreating).line()}, "", classOutcomeUnknown},
+		// B1: a VM still being made carries no stamp; the node's tasks decide.
+		{"a clone still being made, no task of this PVE user", beingMade("pve", "clone"), "", classNothingRemainsVM},
+		{"a create still being made, no task of this PVE user", beingMade("pve", "create"), "", classNothingRemainsVM},
+		{"a clone still being made by another PVE user", beingMade("pve", "clone"), "admin@pam", classNothingRemainsVM},
+		{"a clone still being made, an unrecorded task of this PVE user", beingMade("pve", "clone"), testTokenID, classOutcomeUnknown},
 		// L-d: the stamp is read wherever the VM lives.
 		{"this request's stamp, on another node", pvefake.VM{Name: testOwnerName, Node: "pve2", Status: "stopped",
-			Description: testStamp(testOwnerUID, ownerStampPhaseCreating).line()}, classOutcomeUnknown},
-		{"a clone still being made, on another node", pvefake.VM{Node: "pve2", Status: "stopped", Lock: "clone"}, classOutcomeUnknown},
+			Description: testStamp(testOwnerUID, ownerStampPhaseCreating).line()}, "", classOutcomeUnknown},
+		{"a clone still being made, on another node", beingMade("pve2", "clone"), "", classNothingRemainsVM},
+		{"a clone still being made on another node, an unrecorded task of this PVE user there",
+			beingMade("pve2", "clone"), testTokenID, classOutcomeUnknown},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			p, srv := newStampTestProvider(t)
+			put := putVMAtNewID(t, srv, tc.vm)
 			srv.InjectFault(pvefake.Fault{Method: http.MethodPost, PathContains: "/clone", Status: http.StatusInternalServerError,
-				Body: body, Times: 1, Then: putVMAtNewID(t, srv, tc.vm)})
+				Body: body, Times: 1, Then: func(r *http.Request) {
+					put(r)
+					if tc.taskUser != "" {
+						srv.StartTask(tc.vm.Node, "qmclone", strconv.Itoa(seededTemplateID), tc.taskUser)
+					}
+				}})
 			_, err := p.Create(context.Background(), createReq(testOwner(), templateImageJSON))
 			assert.Equal(t, tc.want, classOf(t, err), "error: %v", err)
 		})
