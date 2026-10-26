@@ -689,7 +689,12 @@ func (r *VirtualMachineReconciler) issueImagePrepare(
 			// outside its allowed image directories), or — a provider older than
 			// ADR-0009 whose reported capability is stale — the empty target
 			// name. Record that on the VMImage so its owner sees WHY, not just
-			// the VM; the caller backs off.
+			// the VM. The prepare is sent again only after a backoff
+			// (sourceRejectedBackoff), or at once for a changed spec.source (a
+			// new backoff key).
+			msg := imageSourceRejectedMessage(provider, perr)
+			r.prepareBackoff.fail(backoffSourceRejected, imagePrepareBackoffKey(vmImage, provider, req.SourceDigest),
+				"", msg, sourceRejectedBackoff, r.now())
 			if werr := r.markImageSourceRejected(ctx, vmImage, provider, perr); werr != nil {
 				logger.Error(werr, "Failed to record rejected image source on VMImage",
 					"provider", key, "image", vmImage.Name)
@@ -1489,10 +1494,15 @@ func (r *VirtualMachineReconciler) markImageSourceRejected(
 	provider *infravirtrigaudiov1beta1.Provider,
 	cause error,
 ) error {
-	key := imageProviderKey(provider)
-	msg := fmt.Sprintf("image source rejected by provider %q: %s", key, sanitizeProviderDetail(cause))
-	_, err := r.markImageEntryHeld(ctx, vmImage, provider, imageReasonInvalidSource, infravirtrigaudiov1beta1.ImagePhaseFailed, msg)
+	_, err := r.markImageEntryHeld(ctx, vmImage, provider, imageReasonInvalidSource, infravirtrigaudiov1beta1.ImagePhaseFailed,
+		imageSourceRejectedMessage(provider, cause))
 	return err
+}
+
+// imageSourceRejectedMessage says that provider rejected the image source
+// (cause, sanitized).
+func imageSourceRejectedMessage(provider *infravirtrigaudiov1beta1.Provider, cause error) string {
+	return fmt.Sprintf("image source rejected by provider %q: %s", imageProviderKey(provider), sanitizeProviderDetail(cause))
 }
 
 // markImageEntryHeld records that no VM can be created from provider's entry

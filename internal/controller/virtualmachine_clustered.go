@@ -226,11 +226,12 @@ func promotePendingHost(vm *infravirtrigaudiov1beta1.VirtualMachine, host string
 //     (D8, report-only).
 //   - Anything else — including a provider-level Unavailable — sets
 //     Placed=False/CreatePending and then takes the unchanged rejected /
-//     transient create handling.
+//     transient create handling; inputs are the request's
+//     createRefusalInputs, for the backoff of an InvalidSpec refusal.
 func (r *VirtualMachineReconciler) handleClusteredCreateError(
 	ctx context.Context,
 	vm *infravirtrigaudiov1beta1.VirtualMachine,
-	host string,
+	host, inputs string,
 	err error,
 ) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
@@ -283,7 +284,7 @@ func (r *VirtualMachineReconciler) handleClusteredCreateError(
 
 	setPlacedCondition(vm, metav1.ConditionFalse, k8s.ReasonCreatePending,
 		fmt.Sprintf("create on host %s is not confirmed: %s", host, msg))
-	if res, handled := r.handleRejectedCreate(ctx, vm, err, false); handled {
+	if res, handled := r.handleRejectedCreate(ctx, vm, inputs, err, false); handled {
 		return res, nil
 	}
 	// A retryable VM_OPERATION_FAILED on the pending host is retried with a

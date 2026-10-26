@@ -56,6 +56,13 @@ var (
 	// reports artifact identity but does not echo it must not be called on
 	// every reconcile of every VM.
 	notConfirmedBackoff = imagePrepareBackoffPolicy{Base: 30 * time.Second, Max: 5 * time.Minute}
+	// sourceRejectedBackoff paces the prepare sent again after the provider
+	// refused the image source as an invalid specification (v0.4.1): the
+	// libvirt provider prepares synchronously and may download the whole
+	// image before refusing it (a checksum mismatch, an unsupported format),
+	// so a source that is refused for good must not be downloaded again on
+	// every VM re-check. The same pacing as a refused VM create.
+	sourceRejectedBackoff = imagePrepareBackoffPolicy{Base: createRefusalRetryBase, Max: createRefusalRetryMax}
 )
 
 // imagePrepareBackoffForget is how long after its wait ended a failure record
@@ -69,7 +76,14 @@ const (
 	backoffImportFailed = "import-failed"
 	// backoffNotConfirmed: an answer did not confirm the requested identity.
 	backoffNotConfirmed = "not-confirmed"
+	// backoffSourceRejected: the provider refused the image source as an
+	// invalid specification.
+	backoffSourceRejected = "source-rejected"
 )
+
+// imagePrepareBackoffKinds lists every kind of failure imagePrepareBackoff
+// tracks.
+var imagePrepareBackoffKinds = []string{backoffImportFailed, backoffNotConfirmed, backoffSourceRejected}
 
 // imagePrepareBackoffKey identifies what a failure is about: one VMImage
 // object, one Provider object and one spec.source (its digest). A changed
@@ -139,7 +153,7 @@ func (b *imagePrepareBackoff) wait(key string, now time.Time) (time.Duration, st
 	defer b.mu.Unlock()
 	var longest time.Duration
 	msg := ""
-	for _, kind := range []string{backoffImportFailed, backoffNotConfirmed} {
+	for _, kind := range imagePrepareBackoffKinds {
 		e, ok := b.entries[kind+"|"+key]
 		if !ok {
 			continue
@@ -155,7 +169,7 @@ func (b *imagePrepareBackoff) wait(key string, now time.Time) (time.Duration, st
 // is given).
 func (b *imagePrepareBackoff) clear(key string, kinds ...string) {
 	if len(kinds) == 0 {
-		kinds = []string{backoffImportFailed, backoffNotConfirmed}
+		kinds = imagePrepareBackoffKinds
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
