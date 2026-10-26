@@ -440,8 +440,10 @@ redefined. See [`docs/libvirt-firmware.md`](libvirt-firmware.md).
 - **VMs with more than one network interface can be created.** In v0.4.0 the second interface
   collided with the sound card's PCI slot, and libvirt refused the domain.
 - **A definition libvirt refuses is a validation error.** The `VirtualMachine` gets
-  `Ready=False` and `Provisioning=False` with reason `ValidationError`, re-checked every 30
-  seconds, instead of a retried provider error. The disk the attempt copied is removed, and
+  `Ready=False` and `Provisioning=False` with reason `ValidationError`, re-checked with a
+  backoff (30 seconds doubling to 10 minutes, see
+  [A refused VM create is retried with a backoff](#a-refused-vm-create-is-retried-with-a-backoff)),
+  instead of a retried provider error. The disk the attempt copied is removed, and
   deleting the VM is not held as `CreateOutcomeUnknown`. A host that reports no matching UEFI
   firmware is refused before the image is copied. Other refusals still copy the image on each
   re-check and then remove it. A failed create whose domain is known not to be defined also

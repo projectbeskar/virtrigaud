@@ -188,7 +188,8 @@ provider has checked that the domain does not exist, the create is a definite re
 - The provider answers `InvalidArgument` (`InvalidSpec`). It does not answer a retryable
   failure. On single-host and clustered Providers alike, the `VirtualMachine` gets
   `Ready=False` and `Provisioning=False` with reason `ValidationError`. The message is
-  "Provider rejected VM create (non-retryable; re-checking every 30s): libvirt refused the
+  "Provider rejected VM create (non-retryable; re-checking in <wait>, at <time>, or at once
+  when the VirtualMachine, its VMClass, VMImage or Provider changes): libvirt refused the
   domain definition (the domain was not defined): <libvirt's reason>". libvirt's reason is
   shortened so that the provider's message fits the 256 bytes the manager shows.
 - The disk that the attempt wrote (`<domain>-disk.qcow2`, or `<domain>-disk` for a blank disk) is
@@ -198,7 +199,10 @@ provider has checked that the domain does not exist, the create is a definite re
 - The manager knows that the attempt made nothing. Deleting the `VirtualMachine` is therefore
   not held as `CreateOutcomeUnknown`, and no `virtrigaud.io/create-outcome` annotation is
   needed.
-- The manager sends the create again every 30 seconds while the `VirtualMachine` exists. When
+- The manager sends the create again after 30 seconds, then 1, 2, 4 and 8 minutes, then every
+  10 minutes while the `VirtualMachine` exists, and at once when the `VirtualMachine`, its
+  `VMClass`, `VMImage` or `Provider` changes (see
+  [A refused VM create is retried with a backoff](upgrading.md#a-refused-vm-create-is-retried-with-a-backoff)). When
   the host reports that it has no matching UEFI firmware, each attempt is refused before the
   copy (see [How the firmware is chosen](#how-the-firmware-is-chosen)). Any other refusal comes
   from the define, so each attempt copies the image, is refused, and removes the copy again.
