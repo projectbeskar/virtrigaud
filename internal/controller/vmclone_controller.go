@@ -37,6 +37,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	utilnet "k8s.io/apimachinery/pkg/util/net"
 	"k8s.io/apimachinery/pkg/util/wait"
+	toolscache "k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/retry"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -127,6 +128,10 @@ type VMCloneReconciler struct {
 	// unschedulable paces the re-checks of clustered clones that do not fit
 	// on their source's host.
 	unschedulable unschedulableBackoff
+	// placementIndex is the VirtualMachine informer's indexer, read directly
+	// by the clone admission's placement scan (placementReader); nil reads it
+	// through Client.
+	placementIndex toolscache.Indexer
 	// cloneAttempts paces the attempts of held single-host clones
 	// (vmclone_target_stamp.go).
 	cloneAttempts cloneAttemptPacer
@@ -1673,6 +1678,7 @@ func (r *VMCloneReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	if err := indexPlacementProvider(mgr); err != nil {
 		return err
 	}
+	r.placementIndex = placementVMIndexer(mgr)
 	b := ctrl.NewControllerManagedBy(mgr).
 		For(&infrav1beta1.VMClone{}, builder.WithPredicates(predicate.GenerationChangedPredicate{})).
 		Watches(&corev1.Namespace{},

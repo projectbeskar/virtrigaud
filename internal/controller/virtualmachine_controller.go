@@ -38,6 +38,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/wait"
+	toolscache "k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -299,6 +300,9 @@ type VirtualMachineReconciler struct {
 	// precondition) instead of placing the VM anew
 	// (resolveUnsettledPlacement). In-process state, like placements.
 	placementWrites sync.Map
+	// placementIndex is the VirtualMachine informer's indexer, read directly
+	// by placement scans (placementReader); nil reads them through Client.
+	placementIndex toolscache.Indexer
 	// unschedulable paces the re-scheduling of clustered VMs no host can take.
 	unschedulable unschedulableBackoff
 	// reconfigureRetry paces re-sending a failed Reconfigure, per VM: from
@@ -3416,6 +3420,7 @@ func (r *VirtualMachineReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	if err := indexPlacementProvider(mgr); err != nil {
 		return err
 	}
+	r.placementIndex = placementVMIndexer(mgr)
 	b := ctrl.NewControllerManagedBy(mgr).
 		For(&infravirtrigaudiov1beta1.VirtualMachine{})
 	return withConsumerGrantWatches(b, r.vmsForGrantChange).

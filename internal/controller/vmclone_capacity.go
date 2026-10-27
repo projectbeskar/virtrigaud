@@ -394,13 +394,13 @@ func (r *VMCloneReconciler) checkCloneFitUnderLock(
 	defer unlock()
 	lockCtx, cancel := lockBoundContext(ctx)
 	defer cancel()
-	placed, selfPresent, err := placedWithAssumptionsFrom(lockCtx, r.Client, assumptions, providerKey, provider, target)
+	view, selfPresent, err := placedWithAssumptionsFrom(lockCtx, r.placementReader(), assumptions, providerKey, provider, target, false)
 	if err != nil {
 		return nil, true, err
 	}
 	uid := vmSchedulingUID(target)
 	checkErr = scheduler.CheckResize(scheduler.ResizeRequest{
-		Host: *h, Pool: pool, VMUID: uid, Desired: want, PlacedVMs: placed,
+		Host: *h, Pool: pool, VMUID: uid, Desired: want, PlacedVMs: view.placed, Committed: view.byHost,
 	})
 	if checkErr == nil {
 		// A target created in this pass may not be in the snapshot yet
@@ -507,7 +507,7 @@ func (r *VMCloneReconciler) holdInheritedClone(
 ) (ctrl.Result, bool, error) {
 	adm := pendingAdmissionOf(target, providerKeyOf(provider), assume.AdmissionClone, string(clone.UID))
 	want := recorded.footprint(target, host)
-	verdict, checkErr, err := checkInheritedAdmission(ctx, r.Client, r.placementAssumptions(), provider, target, adm,
+	verdict, checkErr, err := checkInheritedAdmission(ctx, r.placementReader(), r.placementAssumptions(), provider, target, adm,
 		scheduler.ResourceRequest{}, want)
 	switch {
 	case err != nil:

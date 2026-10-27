@@ -5,6 +5,31 @@ All notable changes to VirtRigaud will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2026-10-27 01:43] - C′: allocation-efficient scheduler snapshots
+**Author:** @wrkode (William Rizzo)
+
+### Changed
+- `internal/controller/virtualmachine_placement_capacity.go`: the committed-placement snapshot walks the Provider's VMs once and sums them per host; a VM is listed individually only when an assumption of it must be merged or a VM-affinity policy must match its labels; assumptions settle from the same snapshot (recorded only for assumed UIDs and the scheduled VM); hosts read without allocating.
+- `internal/controller/placement_index.go`: placement scans read the VirtualMachine informer's placement-provider index directly (`indexedReader`), without the list controller-runtime builds (`apimeta.SetList`), falling back to the List when the cache does not expose the indexer, and confirming an empty direct read through the List (a missing index is an error, never zero committed capacity).
+- `internal/scheduler`: `Request.Committed` / `ResizeRequest.Committed` (per-host sums added to `PlacedVMs`), `HostCommitted`, `NeedsPlacedVMLabels`; summed VMs in the affinity scope are refused when a policy matches labels.
+- `internal/scheduler/assume/assume.go`: `UIDs` and `Observation.Unknown`.
+- `internal/controller/virtualmachine_controller.go`, `vmclone_controller.go`, `vmclone_capacity.go`, `virtualmachine_resize_gate.go`, `placement_inherited_admission.go`: the VM, clone, resize and C1 paths use the snapshot through the direct index.
+
+### Added
+- `internal/controller/placement_reference_test.go`, `placement_snapshot_equivalence_test.go`: the previous accounting as an oracle, and equivalence of per-host sums, decisions, no-fits, resize/clone/C1 verdicts and settlement on every schedbench variant.
+- `internal/controller/placement_index_envtest_test.go`: the direct index read matches a List through a real manager cache.
+- `internal/controller/placement_index_fallback_test.go`: missing index, renamed index key, no indexer, and a bytes-per-VM guard against a regression to the List path.
+- `docs/performance/c-prime-snapshot-accounting.md`, `docs/performance/c-prime/results/summary.txt`: design, controller-runtime dependency, before/after.
+
+### Why
+The O(V) committed-placement scan under the Provider's lock copied every VirtualMachine struct and built several V-sized structures per decision (Spike 1A: 77–83 % of a decision, about half the CPU in GC). At 10,000 VMs a decision now takes 7.9 ms instead of 18.4 ms and allocates 435 KB instead of 16.9 MB; lock hold p50 fell from 20.4 ms to 7.7 ms, with identical decisions.
+
+### Impact
+- [ ] Breaking change
+- [x] Requires cluster rollout (manager image)
+- [ ] Config change only
+- [ ] Documentation only
+
 ## [2026-10-27 00:47] - Revalidate admissions inherited from an earlier manager leader (C1)
 **Author:** @wrkode (William Rizzo)
 

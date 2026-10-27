@@ -137,6 +137,10 @@ type Observation struct {
 	// assumption (it names the assumed host; for a resize, the VM left the host
 	// or its recorded size reached the admitted one). Only read when Present.
 	Settled bool
+	// Unknown reports that the snapshot cannot tell (the caller did not look
+	// the VM up): the assumption is kept and counted, and nothing about it is
+	// recorded — neither presence nor absence.
+	Unknown bool
 }
 
 // entry is an Assumption with its Provider, TTL, expiry and write record.
@@ -532,6 +536,26 @@ func (c *Cache) Forget(uid string) {
 	delete(c.entries, uid)
 }
 
+// UIDs returns the VM UIDs of provider's assumptions, expired ones included.
+// Assumptions of provider are made only under its lock (Assume), so a caller
+// holding it gets every UID a later Observe can return; only removals can
+// happen meanwhile.
+func (c *Cache) UIDs(provider string) map[string]struct{} {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	var out map[string]struct{}
+	for uid, e := range c.entries {
+		if e.provider != provider {
+			continue
+		}
+		if out == nil {
+			out = map[string]struct{}{}
+		}
+		out[uid] = struct{}{}
+	}
+	return out
+}
+
 // List is Observe with a callback that only reports whether an assumption is
 // settled (every VM taken as present). nil settles nothing.
 func (c *Cache) List(provider string, settled func(Assumption) bool) []Assumption {
@@ -582,6 +606,10 @@ func (c *Cache) Observe(provider string, observe func(Assumption) Observation) [
 		}
 		if observe != nil {
 			o := observe(e.Assumption)
+			if o.Unknown {
+				out = append(out, e.Assumption)
+				continue
+			}
 			if o.Present {
 				e.observed = true
 				if o.Settled {

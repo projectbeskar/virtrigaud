@@ -251,17 +251,28 @@ func holdsPlacement(vm *infravirtrigaudiov1beta1.VirtualMachine) bool {
 // binding and its pending host, the same host listed once. It is empty for a
 // VM that no longer holds a placement (holdsPlacement).
 func placementHosts(vm *infravirtrigaudiov1beta1.VirtualMachine) []string {
-	if !holdsPlacement(vm) {
+	hosts, n := placementHostPair(vm)
+	if n == 0 {
 		return nil
 	}
-	var hosts []string
+	return slices.Clone(hosts[:n])
+}
+
+// placementHostPair is placementHosts without an allocation: the hosts in
+// hosts[:n], the bound host first.
+func placementHostPair(vm *infravirtrigaudiov1beta1.VirtualMachine) (hosts [2]string, n int) {
+	if !holdsPlacement(vm) {
+		return hosts, 0
+	}
 	if h := boundHost(vm); h != "" {
-		hosts = append(hosts, h)
+		hosts[n] = h
+		n++
 	}
-	if h := pendingHost(vm); h != "" && !slices.Contains(hosts, h) {
-		hosts = append(hosts, h)
+	if h := pendingHost(vm); h != "" && (n == 0 || hosts[0] != h) {
+		hosts[n] = h
+		n++
 	}
-	return hosts
+	return hosts, n
 }
 
 // The smallest footprint any VM is counted at: the minimums spec.resources
@@ -441,15 +452,26 @@ func withMemoryCeiling(r scheduler.ResourceRequest, ceiling int64) scheduler.Res
 }
 
 // committedSnapshot is what one informer snapshot says about a clustered
-// Provider's VirtualMachines.
+// Provider's VirtualMachines (the scheduled one excluded from what counts).
+// Each VM is either listed (placed) or summed per host (byHost), never both:
+// it is listed when an assumption of it may have to be merged with its record
+// (assumed) or when its labels must be matched (detail, in the affinity
+// scope), and summed otherwise. Scheduling UIDs are Kubernetes UIDs, unique
+// per object, and placementHosts names each host once, so summing needs no
+// de-duplication.
 type committedSnapshot struct {
-	// placed are the VMs holding resources on the Provider's hosts, one entry
-	// per (VM, host), the scheduled VM excluded.
+	// placed are the listed VMs, one entry per (VM, host).
 	placed []scheduler.PlacedVM
-	// recorded maps the scheduling UID of every VirtualMachine of the Provider
-	// (the scheduled one included) to what its durable record says; it settles
-	// assumptions (settled).
+	// byHost is what the summed VMs commit, per host
+	// (scheduler.Request.Committed).
+	byHost map[string]scheduler.HostCommitted
+	// recorded maps the scheduling UID of each VM of the Provider that had an
+	// assumption when the snapshot was taken (assumed), and of the scheduled
+	// VM, to what its durable record says; it settles assumptions (settled).
 	recorded map[string]recordedVM
+	// assumed are the UIDs looked up for recorded; an assumption of any other
+	// UID is left as it is (observe).
+	assumed map[string]struct{}
 }
 
 // recordedVM is what a VM's durable record says, as far as assumptions care.
@@ -487,43 +509,56 @@ func (s committedSnapshot) settled(a assume.Assumption) bool {
 // showed it (assume.Cache.Observe): a VM created a moment ago may not be in
 // the cache yet.
 func (s committedSnapshot) observe(a assume.Assumption) assume.Observation {
+	if _, looked := s.assumed[a.UID]; !looked {
+		// Not looked up (an assumption made after the snapshot, which the
+		// Provider's lock rules out): keep it, record nothing about it.
+		return assume.Observation{Unknown: true}
+	}
 	if _, present := s.recorded[a.UID]; !present {
 		return assume.Observation{}
 	}
 	return assume.Observation{Present: true, Settled: s.settled(a)}
 }
 
-// committedPlacementsFrom lists, through reader (the informer cache), every
+// committedPlacementsFrom walks, through reader (the informer cache), every
 // VirtualMachine, in every namespace, whose placement belongs to provider
-// (placementProviderKey) and returns the resources each holds on the hosts its
-// record names: a bound VM on its host, a VM with a create in flight on its
-// pending host. A VM being deleted still counts until its finalizer is gone,
-// because its domain and disks are still on the host. VMs in another namespace
-// than self count toward capacity only: they are outside self's affinity scope
-// (CapacityOnly), and nothing about them but their resources reaches the
-// scheduler's no-fit message. The VirtualMachine controller schedules and
-// admits resizes with it, and the VMClone controller admits clustered clones.
+// (placementProviderKey) and accounts the resources each holds on the hosts
+// its record names: a bound VM on its host, a VM with a create in flight on
+// its pending host. A VM being deleted still counts until its finalizer is
+// gone, because its domain and disks are still on the host. VMs in another
+// namespace than self count toward capacity only: they are outside self's
+// affinity scope (CapacityOnly), and nothing about them but their resources
+// reaches the scheduler's no-fit message. The VirtualMachine controller
+// schedules and admits resizes with it, and the VMClone controller admits
+// clustered clones.
 //
 // Each VM counts at its admittedFootprint. Its VMClass is read (from the
 // cache) only when that needs it, and only when the VM's namespace may use it
-// (the consumer grant, as everywhere else).
+// (the consumer grant, as everywhere else). assumed are the UIDs of the
+// Provider's assumptions (assume.Cache.UIDs, read under its lock): those VMs
+// are listed and recorded, so their assumptions merge with and settle on their
+// records; detail lists every VM in self's affinity scope too (the policy
+// matches VM labels, scheduler.NeedsPlacedVMLabels). Everything else is summed
+// per host. The objects read are the cache's own: they are only read, and
+// nothing of them but strings and label maps outlives the call in the result.
 func committedPlacementsFrom(
 	ctx context.Context,
 	reader client.Reader,
 	provider types.NamespacedName,
 	self *infravirtrigaudiov1beta1.VirtualMachine,
+	assumed map[string]struct{},
+	detail bool,
 ) (committedSnapshot, error) {
 	// Only this Provider's VMs, through the field index; read-only (shared
 	// with the cache).
-	vms, err := listProviderVMs(ctx, reader, provider)
+	vms, err := providerVMsFrom(ctx, reader, provider)
 	if err != nil {
 		return committedSnapshot{}, err
 	}
-	snap := committedSnapshot{recorded: map[string]recordedVM{}}
+	snap := committedSnapshot{recorded: map[string]recordedVM{}, assumed: assumed}
 	selfUID := vmSchedulingUID(self)
 	classes := classMemo{}
-	for i := range vms {
-		other := &vms[i]
+	for _, other := range vms {
 		// The key is re-checked (defense in depth: a VM counts against a
 		// Provider only when its key is that Provider). A VM being deleted
 		// whose finalizer is gone holds nothing any more; leaving it out of
@@ -532,29 +567,44 @@ func committedPlacementsFrom(
 			continue
 		}
 		uid := vmSchedulingUID(other)
-		hosts := placementHosts(other)
-		if len(hosts) == 0 || uid == selfUID {
-			snap.recorded[uid] = recordedVM{hosts: hosts}
+		_, isAssumed := assumed[uid]
+		hosts, n := placementHostPair(other)
+		if n == 0 || uid == selfUID {
+			if isAssumed || uid == selfUID {
+				snap.recorded[uid] = recordedVM{hosts: placementHosts(other)}
+			}
 			continue
 		}
 		res, err := sizeForAccounting(ctx, reader, other, classes)
 		if err != nil {
 			return committedSnapshot{}, err
 		}
-		// The size it counts at settles an admitted resize of it once
-		// status.currentResources records the new size, or once its durable
-		// resize reservation (counted in res) covers it.
-		_, reserved := resizeReservationOf(other)
-		snap.recorded[uid] = recordedVM{hosts: hosts, size: res, hasSize: hasRecordedSize(other) || reserved}
-		for _, h := range hosts {
-			snap.placed = append(snap.placed, scheduler.PlacedVM{
-				Name:         other.Name,
-				UID:          uid,
-				HostID:       h,
-				Labels:       other.Labels,
-				Resources:    res,
-				CapacityOnly: other.Namespace != self.Namespace,
-			})
+		scoped := other.Namespace == self.Namespace
+		if isAssumed {
+			// The size it counts at settles an admitted resize of it once
+			// status.currentResources records the new size, or once its
+			// durable resize reservation (counted in res) covers it.
+			_, reserved := resizeReservationOf(other)
+			snap.recorded[uid] = recordedVM{hosts: placementHosts(other), size: res, hasSize: hasRecordedSize(other) || reserved}
+		}
+		if isAssumed || (detail && scoped) {
+			for _, h := range hosts[:n] {
+				snap.placed = append(snap.placed, scheduler.PlacedVM{
+					Name:         other.Name,
+					UID:          uid,
+					HostID:       h,
+					Labels:       other.Labels,
+					Resources:    res,
+					CapacityOnly: !scoped,
+				})
+			}
+			continue
+		}
+		if snap.byHost == nil {
+			snap.byHost = map[string]scheduler.HostCommitted{}
+		}
+		for _, h := range hosts[:n] {
+			snap.byHost[h] = snap.byHost[h].Add(res, scoped)
 		}
 	}
 	return snap, nil
@@ -666,33 +716,46 @@ func (r *VirtualMachineReconciler) placementRequest(
 	vm *infravirtrigaudiov1beta1.VirtualMachine,
 	req *scheduler.Request,
 ) (selfPresent bool, err error) {
-	placed, selfPresent, err := r.placedWithAssumptions(ctx, cache, providerKey, provider, vm)
+	view, selfPresent, err := placedWithAssumptionsFrom(ctx, r.placementReader(), cache, providerKey, provider, vm,
+		scheduler.NeedsPlacedVMLabels(req.Policy))
 	if err != nil {
 		return false, err
 	}
-	req.PlacedVMs = placed
+	req.PlacedVMs = view.placed
+	req.Committed = view.byHost
 	req.VMUID = vmSchedulingUID(vm)
 	return selfPresent, nil
 }
 
-// placedWithAssumptions returns what is committed on provider's hosts, as seen
-// from vm: the placements in the informer snapshot plus the live assumptions
-// (create and resize), after settling those the snapshot supersedes
-// (committedSnapshot.observe). selfPresent reports that the snapshot has vm.
-// Call it with provider's assume lock held.
+// placedWithAssumptions is placedWithAssumptionsFrom through the reconciler's
+// placement reader, for a check that matches no VM labels.
 func (r *VirtualMachineReconciler) placedWithAssumptions(
 	ctx context.Context,
 	cache *assume.Cache,
 	providerKey string,
 	provider types.NamespacedName,
 	vm *infravirtrigaudiov1beta1.VirtualMachine,
-) (placed []scheduler.PlacedVM, selfPresent bool, err error) {
-	return placedWithAssumptionsFrom(ctx, r.Client, cache, providerKey, provider, vm)
+) (view committedView, selfPresent bool, err error) {
+	return placedWithAssumptionsFrom(ctx, r.placementReader(), cache, providerKey, provider, vm, false)
 }
 
-// placedWithAssumptionsFrom is placedWithAssumptions read through reader
-// (the informer cache); the VMClone controller admits a clustered clone with
-// it, under the same lock and against the same assumptions.
+// committedView is what is committed on a Provider's hosts, as seen from one
+// VM: listed entries (scheduler.Request.PlacedVMs) and per-host sums
+// (scheduler.Request.Committed).
+type committedView struct {
+	placed []scheduler.PlacedVM
+	byHost map[string]scheduler.HostCommitted
+}
+
+// placedWithAssumptionsFrom returns what is committed on provider's hosts, as
+// seen from vm: the placements in one informer snapshot plus the live
+// assumptions (create and resize), after settling those the same snapshot
+// supersedes (committedSnapshot.observe). detail lists every VM in vm's
+// affinity scope (scheduler.NeedsPlacedVMLabels). selfPresent reports that the
+// snapshot has vm. Call it with provider's assume lock held: the VirtualMachine
+// controller schedules and admits resizes with it, the VMClone controller
+// admits clustered clones, and inherited admissions are revalidated with it,
+// all under the same lock and against the same assumptions.
 func placedWithAssumptionsFrom(
 	ctx context.Context,
 	reader client.Reader,
@@ -700,15 +763,16 @@ func placedWithAssumptionsFrom(
 	providerKey string,
 	provider types.NamespacedName,
 	vm *infravirtrigaudiov1beta1.VirtualMachine,
-) (placed []scheduler.PlacedVM, selfPresent bool, err error) {
-	snap, err := committedPlacementsFrom(ctx, reader, provider, vm)
+	detail bool,
+) (view committedView, selfPresent bool, err error) {
+	snap, err := committedPlacementsFrom(ctx, reader, provider, vm, cache.UIDs(providerKey), detail)
 	if err != nil {
-		return nil, false, err
+		return committedView{}, false, err
 	}
 	_, selfPresent = snap.recorded[vmSchedulingUID(vm)]
-	placed = snap.placed
+	view = committedView{placed: snap.placed, byHost: snap.byHost}
 	for _, a := range cache.Observe(providerKey, snap.observe) {
-		placed = append(placed, scheduler.PlacedVM{
+		view.placed = append(view.placed, scheduler.PlacedVM{
 			Name:         a.Name,
 			UID:          a.UID,
 			HostID:       a.HostID,
@@ -717,7 +781,7 @@ func placedWithAssumptionsFrom(
 			CapacityOnly: a.Namespace != vm.Namespace,
 		})
 	}
-	return placed, selfPresent, nil
+	return view, selfPresent, nil
 }
 
 // hasRecordedSize reports whether vm's status.currentResources records both

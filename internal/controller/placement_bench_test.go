@@ -169,7 +169,7 @@ func BenchmarkPlacementScan(b *testing.B) {
 			b.ReportAllocs()
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
-				if _, err := committedPlacementsFrom(ctx, w.r.Client, p.provider, vm); err != nil {
+				if _, err := committedPlacementsFrom(ctx, w.r.Client, p.provider, vm, nil, false); err != nil {
 					b.Fatal(err)
 				}
 			}
@@ -226,11 +226,12 @@ func BenchmarkPlacementBreakdown(b *testing.B) {
 			for i := 0; i < b.N; i++ {
 				req := base
 				t0 := time.Now()
-				placed, _, err := placedWithAssumptionsFrom(ctx, w.r.Client, w.cache, p.key, p.provider, vm)
+				view, _, err := placedWithAssumptionsFrom(ctx, w.r.Client, w.cache, p.key, p.provider, vm,
+					scheduler.NeedsPlacedVMLabels(req.Policy))
 				if err != nil {
 					b.Fatal(err)
 				}
-				req.PlacedVMs = placed
+				req.PlacedVMs, req.Committed = view.placed, view.byHost
 				req.VMUID = vmSchedulingUID(vm)
 				t1 := time.Now()
 				_, err = scheduler.Schedule(req)
@@ -424,7 +425,7 @@ func verifyNoOverbook(tb testing.TB, w *benchWorld) {
 			}
 		}
 		probe := p.fixture.NewVM("settle-probe", schedbench.SelfNamespace, schedbench.MediumRequest, selfApp)
-		if _, _, err := placedWithAssumptionsFrom(ctx, w.r.Client, w.cache, p.key, p.provider, probe); err != nil {
+		if _, _, err := placedWithAssumptionsFrom(ctx, w.r.Client, w.cache, p.key, p.provider, probe, false); err != nil {
 			tb.Fatalf("placedWithAssumptionsFrom: %v", err)
 		}
 	}

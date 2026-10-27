@@ -26,6 +26,7 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	toolscache "k8s.io/client-go/tools/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -224,4 +225,10 @@ func (c *storeClient) List(_ context.Context, list client.ObjectList, opts ...cl
 		runtimeObjs = append(runtimeObjs, obj)
 	}
 	return apimeta.SetList(list, runtimeObjs)
+}
+
+// providerVMs makes storeClient an indexed reader (providerVMIndex), reading
+// the placement-provider index as indexedReader reads a real informer's.
+func (c *storeClient) providerVMs(provider types.NamespacedName) ([]*infravirtrigaudiov1beta1.VirtualMachine, error) {
+	return indexedReader{vms: c.store.vms}.providerVMs(provider)
 }

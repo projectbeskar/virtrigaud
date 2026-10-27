@@ -126,15 +126,15 @@ func BenchmarkEnvtestScan(b *testing.B) {
 	// cache holds every placement.
 	deadline := time.Now().Add(5 * time.Minute)
 	for {
-		snap, err := committedPlacementsFrom(ctx, reader, key, self)
+		snap, err := committedPlacementsFrom(ctx, reader, key, self, nil, false)
 		if err != nil {
 			b.Fatal(err)
 		}
-		if len(snap.placed) == vms {
+		if len(snap.placed)+summedVMs(snap.byHost) == vms {
 			break
 		}
 		if time.Now().After(deadline) {
-			b.Fatalf("cache holds %d of %d placements after 5 minutes", len(snap.placed), vms)
+			b.Fatalf("cache holds %d of %d placements after 5 minutes", len(snap.placed)+summedVMs(snap.byHost), vms)
 		}
 		time.Sleep(time.Second)
 	}
@@ -163,17 +163,17 @@ func BenchmarkEnvtestScan(b *testing.B) {
 		reader client.Reader
 	}{{"real-cache", reader}, {"seam", sc}} {
 		b.Run(fmt.Sprintf("v%d/%s", vms, rc.name), func(b *testing.B) {
-			snap, err := committedPlacementsFrom(ctx, rc.reader, key, self)
+			snap, err := committedPlacementsFrom(ctx, rc.reader, key, self, nil, false)
 			if err != nil {
 				b.Fatal(err)
 			}
-			if len(snap.placed) != vms {
-				b.Fatalf("%s: %d placements, want %d", rc.name, len(snap.placed), vms)
+			if len(snap.placed)+summedVMs(snap.byHost) != vms {
+				b.Fatalf("%s: %d placements, want %d", rc.name, len(snap.placed)+summedVMs(snap.byHost), vms)
 			}
 			b.ReportAllocs()
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
-				if _, err := committedPlacementsFrom(ctx, rc.reader, key, self); err != nil {
+				if _, err := committedPlacementsFrom(ctx, rc.reader, key, self, nil, false); err != nil {
 					b.Fatal(err)
 				}
 			}

@@ -129,7 +129,7 @@ func (r *VirtualMachineReconciler) admitClusteredResize(
 	if adm, ok := resizeAdmissionOf(vm, providerKeyOf(providerCR)); ok {
 		reservedFP := maxFootprint(currentFP, adm.Resources)
 		if scheduler.Grows(currentFP, desiredFP) && scheduler.Grows(currentFP, reservedFP) {
-			verdict, checkErr, err := checkInheritedAdmission(ctx, r.Client, r.placementAssumptions(), providerCR, vm, adm,
+			verdict, checkErr, err := checkInheritedAdmission(ctx, r.placementReader(), r.placementAssumptions(), providerCR, vm, adm,
 				currentFP, reservedFP)
 			switch {
 			case err != nil:
@@ -343,11 +343,11 @@ func (r *VirtualMachineReconciler) checkResizeUnderLock(
 	defer unlock()
 	lockCtx, cancel := lockBoundContext(ctx)
 	defer cancel()
-	placed, selfPresent, err := r.placedWithAssumptions(lockCtx, assumptions, providerKey, provider, vm)
+	view, selfPresent, err := r.placedWithAssumptions(lockCtx, assumptions, providerKey, provider, vm)
 	if err != nil {
 		return true, resizeAdmission{}, &placementInfraError{err: err}
 	}
-	resize.PlacedVMs = placed
+	resize.PlacedVMs, resize.Committed = view.placed, view.byHost
 	if err := scheduler.CheckResize(resize); err != nil {
 		return true, resizeAdmission{}, err
 	}

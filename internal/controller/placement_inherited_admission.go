@@ -117,12 +117,13 @@ func revalidateUnderLock(
 	defer unlock()
 	lockCtx, cancel := lockBoundContext(ctx)
 	defer cancel()
-	placed, _, err := placedWithAssumptionsFrom(lockCtx, reader, assumptions, providerKey, provider, vm)
+	view, _, err := placedWithAssumptionsFrom(lockCtx, reader, assumptions, providerKey, provider, vm, false)
 	if err != nil {
 		return nil, true, err
 	}
 	return scheduler.CheckResize(scheduler.ResizeRequest{
-		Host: *h, Pool: pool, VMUID: vmSchedulingUID(vm), Current: current, Desired: desired, PlacedVMs: placed,
+		Host: *h, Pool: pool, VMUID: vmSchedulingUID(vm), Current: current, Desired: desired,
+		PlacedVMs: view.placed, Committed: view.byHost,
 	}), true, nil
 }
 
@@ -248,7 +249,7 @@ func (r *VirtualMachineReconciler) holdInheritedCreate(
 	}
 	adm := pendingAdmissionOf(vm, providerKeyOf(providerCR), assume.AdmissionCreate, "")
 	want := admittedFootprint(vm, vmClass)
-	verdict, checkErr, err := checkInheritedAdmission(ctx, r.Client, r.placementAssumptions(), providerCR, vm, adm,
+	verdict, checkErr, err := checkInheritedAdmission(ctx, r.placementReader(), r.placementAssumptions(), providerCR, vm, adm,
 		scheduler.ResourceRequest{}, want)
 	switch {
 	case err != nil:

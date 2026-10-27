@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"maps"
 	"slices"
 	"testing"
 	"time"
@@ -81,19 +82,31 @@ func TestSchedBenchSeamMatchesFakeClient(t *testing.T) {
 		WithIndex(&infravirtrigaudiov1beta1.VirtualMachine{}, placementProviderIndex, placementProviderIndexValue).WithIndex(&infravirtrigaudiov1beta1.VirtualMachine{}, placementHostIndex, placementHostIndexValue).Build()
 
 	p := w.providers[0].provider
-	viaSeam, err := committedPlacementsFrom(ctx, w.r.Client, p, vm)
+	// The seam reads the index directly (indexedReader); the fake client
+	// lists. Both must account the same.
+	viaSeam, err := committedPlacementsFrom(ctx, w.r.Client, p, vm, nil, true)
 	if err != nil {
 		t.Fatal(err)
 	}
-	viaFake, err := committedPlacementsFrom(ctx, fc, p, vm)
+	viaFake, err := committedPlacementsFrom(ctx, fc, p, vm, nil, true)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got, want := placedKeys(viaSeam.placed), placedKeys(viaFake.placed); !slices.Equal(got, want) {
 		t.Fatalf("seam and fake client disagree: %d vs %d placements", len(got), len(want))
 	}
-	if len(viaSeam.placed) != len(f.VMs) {
-		t.Fatalf("expected every fixture VM placed once, got %d of %d", len(viaSeam.placed), len(f.VMs))
+	if !maps.Equal(viaSeam.byHost, viaFake.byHost) {
+		t.Fatal("seam and fake client disagree on the per-host sums")
+	}
+	if got := len(viaSeam.placed) + summedVMs(viaSeam.byHost); got != len(f.VMs) {
+		t.Fatalf("expected every fixture VM accounted once, got %d of %d", got, len(f.VMs))
+	}
+	ref, err := refCommittedPlacements(ctx, fc, p, vm)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ref.placed) != len(f.VMs) {
+		t.Fatalf("reference: %d of %d", len(ref.placed), len(f.VMs))
 	}
 }
 
@@ -144,9 +157,15 @@ func TestSchedBenchPartitionsIsolated(t *testing.T) {
 		}
 	}
 	probe := w.scenarioVM(pb, "b-probe", schedbench.MediumRequest)
-	placed, _, err := placedWithAssumptionsFrom(ctx, w.r.Client, w.cache, pb.key, pb.provider, probe)
+	view, _, err := placedWithAssumptionsFrom(ctx, w.r.Client, w.cache, pb.key, pb.provider, probe, true)
 	if err != nil {
 		t.Fatal(err)
+	}
+	placed := view.placed
+	for host := range view.byHost {
+		if !slices.ContainsFunc(b.Hosts, func(h infravirtrigaudiov1beta1.Host) bool { return h.Name == host }) {
+			t.Fatalf("provider B sums VMs on host %s that is not B's", host)
+		}
 	}
 	bHosts := map[string]bool{}
 	for i := range b.Hosts {
@@ -164,8 +183,8 @@ func TestSchedBenchPartitionsIsolated(t *testing.T) {
 			t.Fatalf("provider B sees a placement on host %s that is not B's", p.HostID)
 		}
 	}
-	if len(placed) != len(b.VMs) {
-		t.Fatalf("provider B: %d placements, want %d", len(placed), len(b.VMs))
+	if got := len(placed) + summedVMs(view.byHost); got != len(b.VMs) {
+		t.Fatalf("provider B: %d placements, want %d", got, len(b.VMs))
 	}
 	req := pb.fixture.Request(schedbench.MediumRequest)
 	if _, locked, err := w.r.scheduleUnderLock(ctx, w.cache, pb.key, pb.provider, probe, &req); !locked || err != nil {
@@ -196,4 +215,13 @@ func TestSchedBenchLockBusyMakesNoDecision(t *testing.T) {
 	if n := w.cache.Len(); n != 0 {
 		t.Fatalf("%d assumptions recorded without the lock", n)
 	}
+}
+
+// summedVMs is how many VMs a snapshot summed per host.
+func summedVMs(byHost map[string]scheduler.HostCommitted) int {
+	n := 0
+	for _, c := range byHost {
+		n += c.VMs
+	}
+	return n
 }
